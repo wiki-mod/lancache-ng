@@ -2341,7 +2341,7 @@ jobs:
             timeout --kill-after=30 --signal=KILL 300 \
             bash scripts/tracked/check-naming-consistency.sh
 
-      - name: Check workflow service lists stay in sync (issue #822)
+      - name: Check workflow service lists stay in sync
         # What: Checks this file's own 4 hardcoded `services=(...)`/`full_setup_services=(...)` copies, plus gc-pr-staging-images.yml, backfill-stack-latest.yml, and scripts/untracked/ensure-pr-staging-images.sh; runs in the build-tools container because it needs GNU grep -P, same as the naming-consistency guard above.
         # Why: Guards against a service silently dropping out of manifest merge, channel promotion, release, PR-staging-tag garbage collection, or latest-channel backfill when a new one is added to the build matrix but one of these hardcoded copies is missed.
         # From: Issue #1095 | PR #1532
@@ -2356,10 +2356,10 @@ jobs:
             timeout --kill-after=30 --signal=KILL 300 \
             bash scripts/tracked/check-workflow-service-lists.sh
 
-      - name: Check VEX document stays in sync (.trivyignore.yaml -> vex.openvex.json)
-        # What: Fails closed if the committed OpenVEX document (vex.openvex.json) drifts from .trivyignore.yaml; runs in the build-tools container because scripts/tracked/check-vex-drift.sh needs jq, same as the naming/service-list guards above.
-        # Why: OSPS-VM-04.02 requires vex.openvex.json to be regenerated from .trivyignore.yaml whenever the accepted-vulnerability list changes, so a PR editing .trivyignore.yaml without regenerating it cannot ship a stale supply-chain artifact.
-        # From: Issue #1095 | PR #1532
+      - name: Check VEX generator produces valid OpenVEX JSON (.trivyignore.yaml -> generate-vex.sh)
+        # What: Runs scripts/untracked/generate-vex.sh against .trivyignore.yaml and asserts valid, non-empty OpenVEX JSON output; runs in the build-tools container because scripts/tracked/check-vex-drift.sh needs jq, same as the naming/service-list guards above.
+        # Why: vex.openvex.json is no longer committed to current_dev -- it is regenerated post-merge onto the CI-Automation/vex branch by .github/workflows/vex-regenerate.yml, and freshly again at release time, so there is no second committed copy left to drift-compare. What can still break here is the generator itself: a malformed .trivyignore.yaml or a generator bug should fail in the PR that introduced it, not first surface post-merge or during a release. Runs unconditionally as part of this job (validate-compose is an unconditional gate for every PR), which already covers "runs when .trivyignore.yaml or generate-vex.sh changes."
+        # From: Issue #1095 (F-22) | PR #1620 (superseded drift-comparison version)
         run: |
           set -euo pipefail
 
@@ -2638,13 +2638,9 @@ jobs:
           # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
-          # Calls scripts/lib/validation-image-tag.sh's own functions instead of reimplementing
-          # the same channel/pr-staging-available/tag decisions inline a second time (issue #822
-          # pattern audit, 2026-07-17: that file's own header used to document this job as
-          # "deliberately left untouched... keep the two in sync by hand", exactly the
-          # no-guard-against-drift shape #822 exists to catch). This job already sources other
-          # scripts/lib/*.sh files below (ghcr-retry.sh, staging-image-freshness.sh), so this is
-          # not a new pattern for it.
+          # What: Calls scripts/lib/validation-image-tag.sh's own functions for the channel/pr-staging-available/tag decisions.
+          # Why: Keeps exactly one implementation of this decision logic.
+          # From: Issue #1095 | PR #1619
           # shellcheck source=scripts/lib/validation-image-tag.sh
           source "$GITHUB_WORKSPACE/scripts/lib/validation-image-tag.sh"
 
@@ -2668,12 +2664,9 @@ jobs:
           fi
 
           if [[ "$pr_staging_available" == "true" ]]; then
-            # #1254/#1255: any untouched service is backfilled from this PR's
-            # own base commit's per-commit sha-* image in the next step
-            # ("Ensure PR staging tags exist for full-setup services"), not
-            # from base_channel_tag -- that variable is computed above only
-            # for the pr_staging_available == false branch's whole-suite
-            # fallback below, and is otherwise unused by this step.
+            # What: Any untouched service is backfilled from this PR's own base-commit per-commit image, not from base_channel_tag.
+            # Why: base_channel_tag is only computed for the pr_staging_available == false fallback branch.
+            # From: Issue #1095 | PR #1619
             echo "Validating against this PR's own staging tag '$tag' (built commit $BUILD_SHA, PR head $PR_HEAD_SHA; untouched services are backfilled from this PR's own base commit's per-commit image, see the next step)."
           else
             if [[ "$EVENT_NAME" == "pull_request" ]]; then
@@ -2705,12 +2698,9 @@ jobs:
         if: steps.channel.outputs.pr-staging-available == 'true'
         env:
           PR_TAG: ${{ steps.channel.outputs.tag }}
-          # #808/#1254/#1255: this PR's own base commit. Needed both to prove the back-fill
-          # source image was actually built from it (or later) before backfilling an untouched
-          # service, AND (since #1254/#1255) to derive that source image's own tag directly
-          # (sha-<short of this>) -- no separate BASE_CHANNEL_TAG input is used anymore. Always
-          # present here: this step only runs when pr-staging-available is true, which requires
-          # a pull_request event.
+          # What: This PR's own base commit, used to verify and derive the back-fill source's tag.
+          # Why: This step only runs when pr-staging-available is true.
+          # From: Issue #1095 | PR #1619
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow }}
           PROXY_TOUCHED: ${{ needs['detect-changes'].outputs.proxy }}
@@ -2748,13 +2738,9 @@ jobs:
 
           : "${BASE_SHA:?BASE_SHA (github.event.pull_request.base.sha) is required}"
 
-          # Calls vit_service_should_have_staging_tag directly instead of
-          # reimplementing the same "workflow/CI-contract change forces
-          # every service except build-tools to be treated as touched"
-          # override inline a second time (issue #822 pattern audit,
-          # 2026-07-17) -- see this step's earlier "Determine validation
-          # image channel"-sourced functions for the matching fix to the
-          # other two decisions this job used to duplicate.
+          # What: Calls vit_service_should_have_staging_tag directly instead of reimplementing its override.
+          # Why: Keeps this decision alongside this step's other shared-function calls.
+          # From: Issue #1095 | PR #1619
           service_should_have_staging_tag() {
             vit_service_should_have_staging_tag "$1" "$2" "$WORKFLOW_CHANGED"
           }
@@ -2813,19 +2799,9 @@ jobs:
               exit 1
             fi
 
-            # #808: never back-fill without first proving the source image was actually built
-            # from base.sha or later -- see scripts/lib/staging-image-freshness.sh for the
-            # mechanism, and scripts/lib/staging-ancestor-fallback.sh for the full resolution
-            # sequence (exact-BASE_SHA wait, then the ancestor fallback when that wait genuinely
-            # cannot succeed) this step now shares with scripts/untracked/ensure-pr-staging-images.sh
-            # instead of carrying an independent copy of the same logic. 900/1200 (BASE_SHA's own
-            # wait), 300/600 (ancestor-candidate checks) and the "50" search depth intentionally
-            # match that script's own BASE_FRESHNESS_POLL_*/ANCESTOR_FRESHNESS_POLL_*/
-            # STAGING_ANCESTOR_SEARCH_DEPTH defaults exactly (1200s: maintainer-directed
-            # reduction from the previous 5400s, 2026-08-02) -- see
-            # saf_resolve_untouched_backfill_source's own header for why these are separate
-            # budgets, not one shared pair, and keep them in sync by hand if those defaults ever
-            # change, same as the rest of this step's touched-vs-untouched logic already must be.
+            # What: Never back-fills without first proving the source image was actually built from base.sha or later.
+            # Why: Shares this resolution sequence with scripts/untracked/ensure-pr-staging-images.sh.
+            # From: Issue #1095 | PR #1619
             if ! resolved_source="$(saf_resolve_untouched_backfill_source "$REPOSITORY" "$service" "${classify_key_map[$service]}" "$BASE_SHA" \
               900 1200 \
               300 600 \
@@ -2946,11 +2922,9 @@ jobs:
       - name: Wait for the stack to stabilize and check container health
         uses: ./.github/actions/wait-validation-stack-health
 
-      # Unlike the failure-only log dump above, this always runs -- #626's
-      # whole point is that a *green* run here must be verifiable as having
-      # actually tested this commit's own code (not stale base-branch
-      # content), and that's only checkable if the logs are visible
-      # regardless of outcome.
+      # What: Always dumps logs here, unlike the failure-only dump above.
+      # Why: A green run must be verifiable as having actually tested this commit's own code.
+      # From: Issue #1095 | PR #1619
       - name: Show full-setup service logs
         if: always()
         working-directory: deploy/full-setup
@@ -3518,19 +3492,9 @@ jobs:
               echo "DNS coverage: ${dns_coverage}%"
               echo "UI coverage: ${ui_coverage}%"
 
-              # Per-crate thresholds, not a shared minimum: the two crates real coverage differs by
-              # an order of magnitude (measured on CI: ui about 38.6%, nats-subscriber about 0%).
-              # nats-subscriber unit tests cover its pure conversion logic
-              # (dns_record_to_zone_update); its async subscribe/forward loop needs a live
-              # NATS/PowerDNS harness and is exercised by the full-setup integration jobs, not unit
-              # coverage. A single shared minimum threshold would either block real ui coverage
-              # from ever mattering (if set low enough for nats-subscriber to pass) or permanently
-              # fail nats-subscriber (if set for ui level). Each crate threshold is raised
-              # independently as that crate gains real unit tests. STATUS (2026-07-23):
-              # dns_threshold stays 0 because the floor has not been raised since issue #504 (first
-              # flagged this) was closed -- its pure-logic unit tests landed via PR #515 -- not
-              # because an open gap is still tracked. Raise it once nats-subscriber gains
-              # unit-testable coverage beyond the model.
+              # What: Per-crate coverage thresholds (ui_threshold/dns_threshold), not a shared minimum.
+              # Why: The nats-subscriber async loop is covered by full-setup integration, not unit tests.
+              # From: Issue #1095 | PR #1619
               ui_threshold=35
               dns_threshold=0
 
@@ -3551,9 +3515,9 @@ jobs:
                 exit 1
               fi
 
-              # Badge generation reuses this same containerized jq instead of
-              # assuming a host-installed jq, matching why the coverage
-              # extraction above already runs in here (issue #566).
+              # What: Badge generation reuses this same containerized jq instead of assuming a host-installed jq.
+              # Why: Matches why the coverage extraction above already runs in here.
+              # From: Issue #1095 | PR #1619
               ui_coverage_display="$(printf "%.2f" "$ui_coverage")"
               dns_coverage_display="$(printf "%.2f" "$dns_coverage")"
               badge_message="ui ${ui_coverage_display}% / dns ${dns_coverage_display}%"
@@ -3652,14 +3616,9 @@ jobs:
           : "${BADGE_BRANCH:?BADGE_BRANCH is required}"
           : "${BADGE_FILE:?BADGE_FILE is required}"
 
-          # Debounce/coalesce, same reasoning and mechanism as promote's own branch-tip check
-          # (#777, see that job's comment): the per-ref badge concurrency group above only
-          # serializes the ORDER two same-branch publishes execute in, it does not guarantee the
-          # newer commit's coverage wins. A slow, older run's rust_coverage can still finish and
-          # reach this step after a faster, newer run for the same branch already published --
-          # without this check it would silently fast-forward the badge file back to stale
-          # coverage. Re-resolve the branch's current tip directly from the remote and skip as a
-          # no-op if a newer commit has already landed.
+          # What: Debounce/coalesce -- skips as a no-op if a newer commit already landed on this branch.
+          # Why: A queued older run must not overwrite the badge with stale coverage.
+          # From: Issue #1095 | PR #1619
           current_tip="$(git ls-remote origin "$GITHUB_REF" | cut -f1)"
           if [[ -z "$current_tip" ]]; then
             echo "::error::Could not resolve the current tip of ${GITHUB_REF} via git ls-remote; refusing to publish the coverage badge blind."
@@ -4393,6 +4352,8 @@ jobs:
           REUSE_NTP: ${{ needs['determine-push-reuse-scope'].outputs.reuse_ntp }}
           REUSE_UI: ${{ needs['determine-push-reuse-scope'].outputs.reuse_ui }}
           REUSE_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.reuse_build_tools }}
+          REUSE_SYSLOG: ${{ needs['determine-push-reuse-scope'].outputs.reuse_syslog }}
+          REUSE_UTILITIES: ${{ needs['determine-push-reuse-scope'].outputs.reuse_utilities }}
         run: |
           set -euo pipefail
 
@@ -4409,6 +4370,8 @@ jobs:
             ntp) reuse="$REUSE_NTP" ;;
             ui) reuse="$REUSE_UI" ;;
             build-tools) reuse="$REUSE_BUILD_TOOLS" ;;
+            syslog) reuse="$REUSE_SYSLOG" ;;
+            utilities) reuse="$REUSE_UTILITIES" ;;
             *) reuse="false" ;;
           esac
 
@@ -4464,6 +4427,8 @@ jobs:
           DIGEST_NTP: ${{ needs['determine-push-reuse-scope'].outputs.digest_ntp }}
           DIGEST_UI: ${{ needs['determine-push-reuse-scope'].outputs.digest_ui }}
           DIGEST_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.digest_build_tools }}
+          DIGEST_SYSLOG: ${{ needs['determine-push-reuse-scope'].outputs.digest_syslog }}
+          DIGEST_UTILITIES: ${{ needs['determine-push-reuse-scope'].outputs.digest_utilities }}
         run: |
           set -euo pipefail
 
@@ -4483,6 +4448,8 @@ jobs:
             ntp) digest="$DIGEST_NTP" ;;
             ui) digest="$DIGEST_UI" ;;
             build-tools) digest="$DIGEST_BUILD_TOOLS" ;;
+            syslog) digest="$DIGEST_SYSLOG" ;;
+            utilities) digest="$DIGEST_UTILITIES" ;;
             *) digest="" ;;
           esac
 
@@ -4562,6 +4529,12 @@ jobs:
       reuse_dhcp_proxy: ${{ steps.decide.outputs.reuse_dhcp_proxy }}
       reuse_ntp: ${{ steps.decide.outputs.reuse_ntp }}
       reuse_build_tools: ${{ steps.decide.outputs.reuse_build_tools }}
+      # What: syslog/utilities reuse-decision outputs, alongside the other 8 allowlisted services.
+      # Why: Same three-part verification (revision label + ancestry + content diff) as every other
+      #   allowlisted service; no new logic, only these two additional outputs.
+      # From: Issue #1095
+      reuse_syslog: ${{ steps.decide.outputs.reuse_syslog }}
+      reuse_utilities: ${{ steps.decide.outputs.reuse_utilities }}
       # What: The exact immutable manifest-list digest this job pinned and verified reuse safety against, for every service with reuse=true (empty when reuse=false); every downstream consumer (container-scan, build, build-arm64) reads this instead of re-resolving the mutable channel tag again.
       # Why: Independently re-resolving the tag a second/third/fourth time is a digest TOCTOU race -- a channel refresh between this job's verification and a later job's re-resolution could scan/retag a different image than the one proven safe; verifying against this exact pinned digest instead of the mutable tag makes the verified and exported bytes provably identical.
       # From: Issue #1095 | PR #1532, PR #1378
@@ -4573,6 +4546,8 @@ jobs:
       digest_dhcp_proxy: ${{ steps.decide.outputs.digest_dhcp_proxy }}
       digest_ntp: ${{ steps.decide.outputs.digest_ntp }}
       digest_build_tools: ${{ steps.decide.outputs.digest_build_tools }}
+      digest_syslog: ${{ steps.decide.outputs.digest_syslog }}
+      digest_utilities: ${{ steps.decide.outputs.digest_utilities }}
     steps:
       # fetch-depth: 0 (not the default shallow depth-1 clone) so
       # sif_is_ancestor_or_equal below can prove real git ancestry between a
@@ -4612,6 +4587,8 @@ jobs:
           DHCP_PROXY_CHANGED: ${{ needs['detect-changes'].outputs.dhcp_proxy }}
           NTP_CHANGED: ${{ needs['detect-changes'].outputs.ntp }}
           BUILD_TOOLS_CHANGED: ${{ needs['detect-changes'].outputs.build_tools }}
+          SYSLOG_CHANGED: ${{ needs['detect-changes'].outputs.syslog }}
+          UTILITIES_CHANGED: ${{ needs['detect-changes'].outputs.utilities }}
           # What: Needed both for push_reuse_decide's own sif_image_revision call and this step's own digest-pinning read below.
           # Why: sif_image_revision is now ghcr_retry-wrapped (see scripts/lib/staging-image-freshness.sh).
           # From: Issue #1095 | PR #1532
@@ -4642,10 +4619,12 @@ jobs:
           channel="$(resolve_build_tools_channel "$REF_NAME")"
           echo "::notice::Resolved channel '$channel' for ref '$REF_NAME'."
 
-          # What: All 8 first-party product/tooling services (including build-tools) go through the identical decide_one() call below, with no per-service branching.
-          # Why: Each service gets the same three-part verification scripts/lib/push-reuse.sh's header documents in full; sharing this allowlist keeps exactly one implementation of the check in the codebase instead of build-tools carrying its own separate, drifting copy.
-          # From: Issue #1095 | PR #1532
-          allowlist=(proxy dns ui watchdog dhcp dhcp-proxy ntp build-tools)
+          # What: All 10 first-party services (including build-tools, syslog, utilities) share the identical decide_one() call below, with no per-service branching.
+          # Why: One implementation of the three-part verification (see scripts/lib/push-reuse.sh) for every
+          #   allowlisted service, instead of a second, drifting copy; classify-image-impact.sh already carries
+          #   the syslog/utilities classify keys this allowlist entry consumes.
+          # From: Issue #1095
+          allowlist=(proxy dns ui watchdog dhcp dhcp-proxy ntp build-tools syslog utilities)
 
           is_allowlisted() {
             case " ${allowlist[*]} " in
@@ -4714,6 +4693,8 @@ jobs:
             printf 'reuse_dhcp_proxy=%s\n' "$(decide_one dhcp_proxy dhcp-proxy "$DHCP_PROXY_CHANGED")"
             printf 'reuse_ntp=%s\n' "$(decide_one ntp ntp "$NTP_CHANGED")"
             printf 'reuse_build_tools=%s\n' "$(decide_one build_tools build-tools "$BUILD_TOOLS_CHANGED")"
+            printf 'reuse_syslog=%s\n' "$(decide_one syslog syslog "$SYSLOG_CHANGED")"
+            printf 'reuse_utilities=%s\n' "$(decide_one utilities utilities "$UTILITIES_CHANGED")"
           } >> "$GITHUB_OUTPUT"
 
   # What: computes build/build-arm64's shared should-build admission once,
@@ -4950,6 +4931,8 @@ jobs:
           REUSE_NTP: ${{ needs['determine-push-reuse-scope'].outputs.reuse_ntp }}
           REUSE_UI: ${{ needs['determine-push-reuse-scope'].outputs.reuse_ui }}
           REUSE_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.reuse_build_tools }}
+          REUSE_SYSLOG: ${{ needs['determine-push-reuse-scope'].outputs.reuse_syslog }}
+          REUSE_UTILITIES: ${{ needs['determine-push-reuse-scope'].outputs.reuse_utilities }}
         run: |
           set -euo pipefail
 
@@ -4979,7 +4962,7 @@ jobs:
               should_build=true
             fi
           elif [ "$REUSE_JOB_RESULT" = "success" ]; then
-            # What: determine-push-reuse-scope's real verification (channel image revision label + git ancestry + content diff) applies only to the currently allowlisted services (build-tools included); every other service, syslog included, is a plain pass-through to `*) reuse="false"`.
+            # What: determine-push-reuse-scope's real verification (channel image revision label + git ancestry + content diff) applies to all 10 currently allowlisted services (build-tools, syslog, utilities included); a service outside the allowlist would be a plain pass-through to `*) reuse="false"`.
             # Why: Widening this allowlist is a separate, maintainer-gated decision; a not-yet-allowlisted service always gets a real rebuild, never a silent retag.
             # From: Issue #1095 | PR #1532
             case "$MATRIX_SERVICE" in
@@ -4991,6 +4974,8 @@ jobs:
               ntp) reuse="$REUSE_NTP" ;;
               ui) reuse="$REUSE_UI" ;;
               build-tools) reuse="$REUSE_BUILD_TOOLS" ;;
+              syslog) reuse="$REUSE_SYSLOG" ;;
+              utilities) reuse="$REUSE_UTILITIES" ;;
               *) reuse="false" ;;
             esac
             if [ "$reuse" = "true" ]; then
@@ -5039,16 +5024,9 @@ jobs:
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
-        # Pull requests now also log in: this same-repo-only project (no fork PRs, confirmed
-        # in #626) pushes a PR-scoped staging tag below so "validate full-setup image" can
-        # test the PR's own commits instead of stale base-branch state. The fork check is a
-        # fail-safe in case that assumption ever stops holding -- a fork PR's GITHUB_TOKEN is
-        # read-only anyway, so login would fail loudly rather than silently. Dependabot PRs
-        # get the same read-only-token treatment as fork PRs (GitHub docs: Dependabot Actions
-        # runs never get a write-scoped GITHUB_TOKEN) -- excluded explicitly so this step
-        # (and the push below) is skipped cleanly instead of attempting a login/push GitHub
-        # would reject with a 403. Also widened for a Step 4 push-reuse-only path, same
-        # reasoning as "Set up Docker Buildx" immediately above.
+        # What: Also logs in on pull_request events, for the PR-scoped staging tag push below.
+        # Why: Fork/Dependabot PRs get a read-only GITHUB_TOKEN, so login there is safe by construction.
+        # From: Issue #1095 | PR #1619
         if: >-
           ${{
             (
@@ -5087,6 +5065,8 @@ jobs:
           DIGEST_NTP: ${{ needs['determine-push-reuse-scope'].outputs.digest_ntp }}
           DIGEST_UI: ${{ needs['determine-push-reuse-scope'].outputs.digest_ui }}
           DIGEST_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.digest_build_tools }}
+          DIGEST_SYSLOG: ${{ needs['determine-push-reuse-scope'].outputs.digest_syslog }}
+          DIGEST_UTILITIES: ${{ needs['determine-push-reuse-scope'].outputs.digest_utilities }}
         run: |
           set -euo pipefail
 
@@ -5114,6 +5094,8 @@ jobs:
             ntp) pinned_digest="$DIGEST_NTP" ;;
             ui) pinned_digest="$DIGEST_UI" ;;
             build-tools) pinned_digest="$DIGEST_BUILD_TOOLS" ;;
+            syslog) pinned_digest="$DIGEST_SYSLOG" ;;
+            utilities) pinned_digest="$DIGEST_UTILITIES" ;;
             *) pinned_digest="" ;;
           esac
           if [ -z "$pinned_digest" ]; then
@@ -5276,13 +5258,9 @@ jobs:
 
           echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
 
-      # Issue #1147: tools/build-tools/Dockerfile's apt-get-install/apt-get-upgrade RUN
-      # step is fed from this job's persistent local Buildx cache with no wall-clock
-      # expiry, so a Debian security fix published after that layer was first cached
-      # (confirmed for real: bind9-libs/bind9-dnsutils/bind9-host stayed vulnerable for
-      # weeks after the fix shipped to trixie-security) never gets picked up. A value that
-      # changes once per ISO week, passed as build-tools's APT_CACHE_BUST build-arg below,
-      # forces that one layer to re-run weekly without busting it on every push.
+      # What: Computes an ISO-week cache-bust value for build-tools's APT_CACHE_BUST build-arg below.
+      # Why: This job's Buildx cache has no wall-clock expiry.
+      # From: Issue #1095 | PR #1619
       - name: Compute apt cache-bust value
         if: steps.should-build.outputs.should-build == 'true'
         id: apt-cache-bust
@@ -5432,14 +5410,9 @@ jobs:
           platform: linux/amd64
 
       - name: Build and push
-        # #822 ("Pattern D"): ghcr.io push-token issuance intermittently fails with "403
-        # Forbidden"/"denied: denied"/"401 Unauthorized" for the slowest (Rust) builds in
-        # this matrix; a manual `gh run rerun` (fresh login, some time elapsed) has fixed
-        # every occurrence so far. This composite action is the shared retry+re-login policy
-        # every GHCR-writing step in the project now uses (see
-        # .github/actions/ghcr-build-push-retry and scripts/lib/ghcr-retry.sh for why a
-        # `uses:` step needs its own wrapper instead of sourcing the shared shell function
-        # directly).
+        # What: Uses the shared retry+re-login composite action (.github/actions/ghcr-build-push-retry).
+        # Why: ghcr.io push-token issuance intermittently fails for the slowest builds in this matrix.
+        # From: Issue #1095 | PR #1619
         id: build
         if: steps.should-build.outputs.should-build == 'true'
         timeout-minutes: 60
@@ -5464,17 +5437,9 @@ jobs:
             org.opencontainers.image.description=${{ matrix.description }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
-          # No `annotations:` input here (issue #620). A genuinely single-platform push with
-          # provenance disabled has no index for buildx to attach an index-level description
-          # annotation to -- `docker buildx build --annotation index:...` on a real
-          # single-platform push errors outright, confirmed live against this project's own
-          # images. Forcing OCI mediatypes here is still required groundwork:
-          # `docker buildx imagetools create` downstream (in merge-manifests) silently drops
-          # --annotation with no error at all when combining Docker-format sources, since
-          # Docker's manifest list schema has no annotations field -- also confirmed live.
-          # merge-manifests is the first point where a genuine multi-platform index exists, so
-          # that's where the description annotation is actually attached; channel/stack
-          # promotions downstream carbon-copy that annotation forward untouched.
+          # What: No `annotations:` input on this single-platform push.
+          # Why: A single-platform push has no index for `--annotation` to attach to.
+          # From: Issue #1095 | PR #1619
           outputs: type=image,oci-mediatypes=true
           platforms: linux/amd64
           provenance: false
@@ -5600,7 +5565,7 @@ jobs:
           touch -- "$stamp"
 
       - name: Scan pushed service digest with Trivy
-        # What: Step 3 -- scans the exact pushed digest before provenance/channel promotion, generalized from build-tools-only to all 8 services.
+        # What: Step 3 -- scans the exact pushed digest before provenance/channel promotion, generalized from build-tools-only to every service.
         # Why: This is now the ONLY vulnerability scan for a changed service on a trusted ref; container-scan's own throwaway rebuild-and-scan (a different, never-published image/digest) was removed, since it never verified the artifact actually published.
         # From: Issue #1095 | PR #1532
         if: >-
@@ -5614,8 +5579,9 @@ jobs:
               )
             )
           }}
-        # 50 min (was 20): the wrapped trivy-scan-retry (issue #1535) can run up to 4 scan
-        # attempts, so the bound must cover the worst case.
+        # What: 50-minute timeout for this Trivy scan step.
+        # Why: The wrapped trivy-scan-retry action can attempt up to 4 scans.
+        # From: Issue #1095 | PR #1619
         timeout-minutes: 50
         uses: ./.github/actions/trivy-scan-exact-digest
         with:
@@ -5760,6 +5726,8 @@ jobs:
           REUSE_NTP: ${{ needs['determine-push-reuse-scope'].outputs.reuse_ntp }}
           REUSE_UI: ${{ needs['determine-push-reuse-scope'].outputs.reuse_ui }}
           REUSE_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.reuse_build_tools }}
+          REUSE_SYSLOG: ${{ needs['determine-push-reuse-scope'].outputs.reuse_syslog }}
+          REUSE_UTILITIES: ${{ needs['determine-push-reuse-scope'].outputs.reuse_utilities }}
         run: |
           set -euo pipefail
 
@@ -5801,6 +5769,8 @@ jobs:
               ntp) reuse="$REUSE_NTP" ;;
               ui) reuse="$REUSE_UI" ;;
               build-tools) reuse="$REUSE_BUILD_TOOLS" ;;
+              syslog) reuse="$REUSE_SYSLOG" ;;
+              utilities) reuse="$REUSE_UTILITIES" ;;
               *) reuse="false" ;;
             esac
             if [ "$reuse" = "true" ]; then
@@ -5893,6 +5863,8 @@ jobs:
           DIGEST_NTP: ${{ needs['determine-push-reuse-scope'].outputs.digest_ntp }}
           DIGEST_UI: ${{ needs['determine-push-reuse-scope'].outputs.digest_ui }}
           DIGEST_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.digest_build_tools }}
+          DIGEST_SYSLOG: ${{ needs['determine-push-reuse-scope'].outputs.digest_syslog }}
+          DIGEST_UTILITIES: ${{ needs['determine-push-reuse-scope'].outputs.digest_utilities }}
         run: |
           set -euo pipefail
 
@@ -5920,6 +5892,8 @@ jobs:
             ntp) pinned_digest="$DIGEST_NTP" ;;
             ui) pinned_digest="$DIGEST_UI" ;;
             build-tools) pinned_digest="$DIGEST_BUILD_TOOLS" ;;
+            syslog) pinned_digest="$DIGEST_SYSLOG" ;;
+            utilities) pinned_digest="$DIGEST_UTILITIES" ;;
             *) pinned_digest="" ;;
           esac
           if [ -z "$pinned_digest" ]; then
@@ -6046,12 +6020,9 @@ jobs:
 
           echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
 
-      # Issue #1147: same reasoning as build's own identically-named step -- this job's
-      # `type=gha` cache also has no wall-clock expiry, so this arm64 leg needs the same
-      # periodic bust as the amd64 leg. Computed independently here since the two jobs run
-      # on separate runners with no shared state; both derive the same ISO-week string from
-      # wall-clock time alone, so amd64 and arm64 bust in lockstep without passing a value
-      # between jobs.
+      # What: Computes build-arm64's own independent ISO-week cache-bust value, mirroring build's identical step.
+      # Why: This job runs on a separate runner with no shared state.
+      # From: Issue #1095 | PR #1619
       - name: Compute apt cache-bust value
         if: steps.should-build.outputs.should-build == 'true'
         id: apt-cache-bust
@@ -6066,8 +6037,9 @@ jobs:
         # (type=gha) instead of the self-hosted local Buildx cache, since this runner is
         # ephemeral and has no persistent /var/tmp to reuse across runs.
         #
-        # #822: same shared GHCR retry+re-login policy as build's own equivalent step -- see
-        # .github/actions/ghcr-build-push-retry.
+        # What: Same shared retry+re-login composite action (.github/actions/ghcr-build-push-retry) as build's own equivalent step.
+        # Why: One shared GHCR retry+re-login policy, not a second copy for this arm64 leg.
+        # From: Issue #1095 | PR #1619
         id: build
         if: steps.should-build.outputs.should-build == 'true'
         timeout-minutes: 90
@@ -6089,9 +6061,9 @@ jobs:
             org.opencontainers.image.description=${{ matrix.description }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
-          # See build's equivalent step for why there is no `annotations:`
-          # input here and why `outputs: type=image,oci-mediatypes=true` is
-          # still required groundwork for issue #620.
+          # What: No `annotations:` input on this single-platform push, mirroring build's equivalent step.
+          # Why: A single-platform push has no index for `--annotation` to attach to.
+          # From: Issue #1095 | PR #1619
           outputs: type=image,oci-mediatypes=true
           platforms: linux/arm64
           provenance: false
@@ -6133,8 +6105,9 @@ jobs:
               )
             )
           }}
-        # 50 min (was 20): the wrapped trivy-scan-retry (issue #1535) can run up to 4 scan
-        # attempts, so the bound must cover the worst case.
+        # What: 50-minute timeout for this Trivy scan step.
+        # Why: The wrapped trivy-scan-retry action can attempt up to 4 scans.
+        # From: Issue #1095 | PR #1619
         timeout-minutes: 50
         uses: ./.github/actions/trivy-scan-exact-digest
         with:
@@ -6187,7 +6160,7 @@ jobs:
     # already uses to move channel tags -- so no image is rebuilt here, only a manifest
     # list assembled from two already-pushed digests.
     #
-    # Also runs on pull_request events now (see #626): a same-repo PR pushes its own
+    # Also runs on pull_request events now: a same-repo PR pushes its own
     # pr-<N>-sha-<full>-{amd64,arm64} legs in build/build-arm64, and this job merges
     # those into the real pr-<N>-sha-<full> tag that full-setup-validate consumes to
     # test the PR's own commits. The existing sha-<commit> merge below stays gated to
@@ -6268,8 +6241,8 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           # What: Reads the shared CI_BUILD_SERVICES scalar rather than a hand-duplicated services=(...) literal.
-          # Why: scripts/tracked/check-workflow-service-lists.sh only guards copies it knows about; a scalar shared by every promotion/GC/release loop removes the duplication class entirely (#822).
-          # From: PR #1523
+          # Why: check-workflow-service-lists.sh only guards copies it knows about.
+          # From: Issue #1095 | PR #1619
           read -ra services <<< "$CI_BUILD_SERVICES"
           # What: reads the single declared, lowercased GHCR owner/repo.
           # Why: github.repository is not guaranteed lowercase; GHCR requires it.
@@ -6302,10 +6275,9 @@ jobs:
           # of this same helper) is a local copy per job over introducing a new composite
           # action just for one function. Same quote-stripping as those.
           #
-          # Wrapped in ghcr_retry (#822): this reads the digest of a manifest this same step
-          # just created a few lines below, so a transient GHCR 401/read failure here is a real
-          # retry candidate, not an "expected absent" probe -- unlike the amd64/arm64 existence
-          # checks further down, which intentionally stay unwrapped (see their own comment).
+          # What: Wrapped in ghcr_retry -- reads the digest of a manifest this same step just created.
+          # Why: A transient GHCR read failure here is a real retry candidate, not an expected-absent probe.
+          # From: Issue #1095 | PR #1619
           digest_for_image() {
             local image=$1
             local digest
@@ -6523,7 +6495,7 @@ jobs:
         run: |
           docker buildx rm "${{ steps.buildx.outputs.name }}" || true
 
-      # What: One explicit attest step per service (actions/attest cannot run inside the bash loops above), gated only on its own digest output being non-empty, routed through ghcr-attest-with-cache rather than ghcr-attest-retry directly; includes syslog, which previously had no attest step here.
+      # What: One explicit attest step per service (actions/attest cannot run inside the bash loops above), gated only on its own digest output being non-empty, routed through ghcr-attest-with-cache rather than ghcr-attest-retry directly.
       # Why: The "Create ..." step above already skips (via `continue`, not a step failure) any service with no per-arch inputs for this event, leaving that service's *_digest output unset -- nothing else needs checking; "Create multi-platform manifests" runs unconditionally every push for every service with valid inputs, and `docker buildx imagetools create` is deterministic for identical inputs, so an unchanged service would otherwise get the exact same merged digest recreated and re-attested on every push, wasting attestation calls the same way an unchanged service's rebuild would waste compute.
       # From: Issue #1095 | PR #1532
       - name: Attest proxy merged manifest provenance
@@ -6814,12 +6786,9 @@ jobs:
           declare -A previous_refs=()
           promoted_targets=()
 
-          # Wrapped in ghcr_retry (#822): unlike merge-manifests' amd64/arm64 existence probes,
-          # absence is never the expected outcome for any caller of this helper in this job --
-          # the "previous digest before overwrite" callers below already tolerate absence via
-          # `|| true` regardless of whether that absence is real (first-ever promotion) or a
-          # transient read failure, and a retry only improves the odds of capturing the real
-          # previous digest that rollback_promotions needs.
+          # What: Wrapped in ghcr_retry -- unlike merge-manifests' existence probes, absence is never expected here.
+          # Why: rollback_promotions needs the real previous digest, not a false "never existed" read.
+          # From: Issue #1095 | PR #1619
           digest_for_image() {
             local image=$1
             local digest
@@ -6856,17 +6825,9 @@ jobs:
           }
           trap rollback_promotions EXIT
 
-          # Debounce/coalesce (#777): mutable channel tags (latest/nightly) are branch-driven,
-          # and giving promote its own concurrency group above only stops it competing for the
-          # SAME slot as the rest of this workflow -- it does not stop several of these runs
-          # from queuing up back-to-back across a burst of merges, each pointing at a
-          # moment-in-time commit a later one will immediately supersede. Before actually
-          # moving any tag, re-resolve the ref's current tip directly from the remote and bail
-          # out as a no-op if a newer commit already landed: that later commit's own promote
-          # run will move the tag correctly, so this run briefly setting dev/nightly to an
-          # already-stale commit would only add churn. This only applies to branch refs -- a
-          # release/rc tag push targets one fixed, immutable ref, so vX.Y.Z/latest promotion is
-          # never skipped by this check.
+          # What: Debounce/coalesce -- skips the tag move if the ref's remote tip moved past this commit.
+          # Why: A queued older run must not move a mutable channel tag onto a superseded commit.
+          # From: Issue #1095 | PR #1619
           if [[ "$GITHUB_REF" == refs/heads/* ]]; then
             current_tip="$(git ls-remote origin "$GITHUB_REF" | cut -f1)"
             if [[ -z "$current_tip" ]]; then
@@ -6947,15 +6908,9 @@ jobs:
           GHCR_RETRY_USERNAME="$GHCR_RETRY_USERNAME" GHCR_RETRY_PASSWORD="$GHCR_RETRY_PASSWORD" \
             bash scripts/untracked/require-image-platforms.sh "$stack_pointer_image" "$REQUIRED_PLATFORMS"
 
-          # Neither loop below passes --annotation. $source_image already carries the
-          # org.opencontainers.image.description index annotation from merge-manifests above
-          # (and $stack_pointer_image from its own build a few lines up), and a plain
-          # --prefer-index=false carbon copy of an already-annotated OCI index preserves that
-          # annotation AND produces a byte-identical digest to the source -- confirmed live
-          # while fixing issue #620. Adding --annotation again here would only risk
-          # re-serializing the manifest with a different digest, which would break the release
-          # job's invariant that a channel/release tag resolves to the exact same digest as its
-          # source sha-* tag.
+          # What: Neither loop below passes --annotation.
+          # Why: Passing it again would re-serialize the manifest with a different digest.
+          # From: Issue #1095 | PR #1619
           for service in "${services[@]}"; do
             source_image="ghcr.io/${REPOSITORY}/${service}@${candidate_digests[$service]}"
             for channel_tag in "${channel_tags[@]}"; do
@@ -7313,7 +7268,17 @@ jobs:
             printf '%s\n' "$image_notes_end"
           } > "$notes_file"
 
-          docker run --rm \
+          # What: -i attaches host stdin to the container -- required because this script
+          # is fed to the container via the bash -s <<'UPDATE_RELEASE' heredoc below.
+          # Why: without -i, `docker run` never connects container stdin at all, so the
+          # containerized `bash -s` reads immediate EOF and exits 0 having executed
+          # nothing: a silent no-op (no release created/updated), not a visible failure.
+          # Pre-existing gap (this invocation predates this PR), found while this PR was
+          # already touching the adjacent "Attach OpenVEX document to the release" step
+          # a few lines below, which had the identical shape -- fixed here in the same
+          # pass rather than left as a walked-past defect (AG-WF-013/AG-WF-027).
+          # From: Issue #1095 (F-22)
+          docker run --rm -i \
             -e GITHUB_TOKEN \
             -e REPOSITORY \
             -e TAG_NAME \
@@ -7418,11 +7383,18 @@ jobs:
           docker buildx rm "${{ steps.buildx.outputs.name }}" || true
 
       - name: Attach OpenVEX document to the release
-        # OSPS-VM-04.02: publish the portable OpenVEX document (vex.openvex.json, kept in
-        # sync with .trivyignore.yaml by the validate-compose drift guard) as a release
-        # asset, so downstream consumers get this project's accepted-vulnerability
-        # dispositions in a standard, tool-parseable format alongside the release. Idempotent:
-        # an existing same-named asset is deleted before re-upload. curl/jq run in the
+        # OSPS-VM-04.02: publish the portable OpenVEX document (vex.openvex.json) as a
+        # release asset. Regenerated fresh here from THIS TAG's own checked-out
+        # .trivyignore.yaml via scripts/untracked/generate-vex.sh, rather than read from
+        # the checkout (vex.openvex.json is no longer committed to current_dev at all)
+        # or copied from the CI-Automation/vex branch's current tip
+        # (that branch is refreshed asynchronously by .github/workflows/vex-regenerate.yml
+        # on a plain `push` to current_dev and could legitimately still be catching up
+        # when a release tag is cut moments later -- reading it here would risk shipping a
+        # stale VEX for a real, if narrow, race). Regenerating directly from the tag's
+        # own .trivyignore.yaml is race-free by construction: whatever that file says at
+        # this exact tag is what ships, unconditionally. Idempotent: an existing
+        # same-named asset is deleted before re-upload. bash/jq/curl run in the
         # tag-scoped build-tools image (guaranteed built for a release tag per AG-CI-010),
         # same as the release-notes step above, rather than assuming host tooling
         # (AG-CI-001).
@@ -7440,17 +7412,36 @@ jobs:
           # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
-          if [ ! -s vex.openvex.json ]; then
-            echo "::error::vex.openvex.json is missing from the checkout." >&2
+          if [ ! -s .trivyignore.yaml ]; then
+            echo "::error::.trivyignore.yaml is missing from the ${TAG_NAME} checkout; cannot generate the release VEX document." >&2
             exit 1
           fi
 
           build_tools_image="ghcr.io/${REPOSITORY}/build-tools:${TAG_NAME}"
+
+          # Generate against this tag's own .trivyignore.yaml first, outside the upload
+          # container, so a generator failure is reported clearly before any release-asset
+          # API calls happen.
           docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "$build_tools_image" \
+            timeout --kill-after=30 --signal=KILL 300 \
+            bash scripts/untracked/generate-vex.sh > vex.openvex.json.release
+          if [ ! -s vex.openvex.json.release ]; then
+            echo "::error::scripts/untracked/generate-vex.sh produced empty output for ${TAG_NAME}'s .trivyignore.yaml." >&2
+            exit 1
+          fi
+
+          # -i required: see the identical note on "Create or update GitHub release for
+          # built images" above -- this is the same stdin-heredoc shape (bash -s
+          # <<'UPLOAD_VEX'), and without -i the upload would silently no-op.
+          docker run --rm -i \
             -e GITHUB_TOKEN \
             -e REPOSITORY \
             -e TAG_NAME \
-            -v "$PWD/vex.openvex.json:/tmp/vex.openvex.json:ro" \
+            -v "$PWD/vex.openvex.json.release:/tmp/vex.openvex.json:ro" \
             "$build_tools_image" \
             timeout --kill-after=30 --signal=KILL 600 \
             bash -s <<'UPLOAD_VEX'
@@ -7483,33 +7474,19 @@ jobs:
           UPLOAD_VEX
 
   release-sbom:
-    # OSPS-QA-02.02: every released first-party image must ship with an SBOM. Scoped to
-    # release tags (the same gate as `release`) because the requirement is about
-    # *released* assets; generating SBOMs on every push would only redo the per-digest
-    # work container-scan already does, with no release-evidence gain. Reuses Trivy
-    # (already this project's pinned, vetted image scanner, AG-KD-003) to emit a
-    # CycloneDX SBOM per released image digest, then attaches each as a <service>.cdx.json
-    # GitHub release asset. That delivery path mirrors how provenance evidence rides
-    # alongside the release and needs only contents:write. A GHCR OCI-referrer SBOM
-    # attestation (actions/attest-sbom) is a possible future complement, deliberately not
-    # added here to keep a single, fully release-asset-based publication path.
+    # What: Generates a CycloneDX SBOM per released image digest and attaches it as a GitHub release asset (OSPS-QA-02.02).
+    # Why: Scoped to release tags only, since a push-time SBOM would just redo container-scan's per-digest work.
+    # From: Issue #1095 | PR #1619
     name: publish SBOM for ${{ matrix.service }}
     needs: release
     if: "!cancelled() && needs.release.result == 'success' && startsWith(github.ref, 'refs/tags/v')"
-    # Container image scanning is memory-heavy, so it takes the heavy tier the
-    # same way container-scan does (AG-CI-002).
+    # What: Runs on the heavy self-hosted tier (AG-CI-002).
+    # Why: Container image scanning is memory-heavy.
+    # From: Issue #1095 | PR #1619
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    # NO REAL RUN DATA: same gap as `release` above -- this job only runs on a tag push,
-    # and none has completed in recorded history. Anchored instead to container-scan's
-    # per-service class of real data (24s-7min per service for a full image build + Trivy
-    # scan; this job only pulls an already-built digest and re-runs Trivy for the
-    # CycloneDX SBOM output, so it is never slower than that per-service work). Was 45
-    # minutes ("real headroom over container-scan's own per-service worst case") before
-    # issue #1535's trivy-scan-retry wrapper: the Trivy step below can now retry up to 4
-    # times (worst case ~42 min: 4 x its own 10m timeout + 3 x 30s backoff) instead of
-    # failing on the first attempt, so 45 minutes no longer leaves real headroom over the
-    # step's own new worst case once checkout/digest-resolution/buildx overhead is added.
-    # Flagged explicitly as an estimate, not a measurement, same as before.
+    # What: 65-minute timeout estimate for this job.
+    # Why: Covers the wrapped Trivy scan-retry's worst-case attempts plus checkout/buildx overhead.
+    # From: Issue #1095 | PR #1619
     timeout-minutes: 65
     permissions:
       contents: write
@@ -7517,9 +7494,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # What: The Trivy-scanned first-party image set (container-scan's matrix), including syslog and utilities so every released image gets a CycloneDX SBOM; `stack` is intentionally excluded since it is a busybox channel-pointer image, not vuln-scanned either.
-        # Why: This separate matrix copy previously lagged container-scan's own list on syslog/utilities.
-        # From: Issue #1428 | PR #1433, Issue #1556 | PR #1574
+        # What: The Trivy-scanned first-party image set (container-scan's matrix), excluding `stack` (an unscanned channel-pointer image).
+        # Why: A hand-kept copy of container-scan's own list risks drifting if not kept in sync by hand.
+        # From: Issue #1095 | PR #1619
         service: [proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, syslog, ui, build-tools, utilities]
     steps:
       - name: Checkout
@@ -7626,7 +7603,12 @@ jobs:
           fi
 
           build_tools_image="ghcr.io/${REPOSITORY}/build-tools:${TAG_NAME}"
-          docker run --rm \
+          # -i required: same stdin-heredoc shape and gap as the release job's
+          # "Create or update GitHub release for built images" / "Attach OpenVEX
+          # document to the release" steps. Without -i, docker run never attaches
+          # container stdin, so this bash -s heredoc would read immediate EOF and
+          # silently upload nothing while still exiting 0.
+          docker run --rm -i \
             -e GITHUB_TOKEN \
             -e REPOSITORY \
             -e TAG_NAME \

@@ -13,7 +13,7 @@ FROM golang:latest AS actionlint-builder
 
 ARG ACTIONLINT_VERSION=1.7.12
 ARG DOCKER_CLI_VERSION=29.7.2
-ARG DOCKER_COMPOSE_VERSION=5.4.0
+ARG DOCKER_COMPOSE_VERSION=5.5.0
 ARG DOCKER_BUILDX_VERSION=0.36.1
 # What: pins buildx's vendored containerd/containerd/v2 dependency at or
 # above buildx's own upstream go.mod floor.
@@ -25,12 +25,10 @@ ARG DOCKER_BUILDX_VERSION=0.36.1
 ARG DOCKER_BUILDX_CONTAINERD_VERSION=2.3.4
 # What: pins buildx/compose/cli's vendored google.golang.org/grpc dependency
 # at or above their own go.mod/vendor.mod floor.
-# Why: this override exists because these tools' releases have repeatedly
-# lagged a fixed grpc-go CVE before catching up on their own (AGENTS.md
-# AG-KD-003); all three now floor at v1.82.1 themselves, so 1.83.0 -- the
-# current upstream release -- keeps this override current.
-# From: Issue #1570 | PR #1571
-ARG GRPC_GO_VERSION=1.83.0
+# Why: these tools' releases repeatedly lag a fixed grpc-go CVE before
+# catching up (AG-KD-003); all three floor at v1.82.1, so 1.83.1 keeps this current.
+# From: Issue #1570 | PR #1571 | Issue #1598
+ARG GRPC_GO_VERSION=1.83.1
 # What: pins buildx/compose/cli's vendored golang.org/x/text dependency at
 # or above their own go.mod/vendor.mod floor (actionlint has no x/text
 # dependency, so it needs no override).
@@ -39,14 +37,27 @@ ARG GRPC_GO_VERSION=1.83.0
 # 0.41.0 -- the current upstream release -- keeps this override current.
 # From: Issue #1570 | PR #1571
 ARG GOLANG_X_TEXT_VERSION=0.41.0
+# What: pins buildx's vendored github.com/moby/go-archive dependency (Docker
+# CLI/compose already floor at v0.3.3, no override needed there).
+# Why: same lagged-CVE pattern as the overrides above (AG-KD-003); buildx
+# v0.36.1 floors at the CVE-2026-17106-affected v0.2.1.
+# From: Issue #1598
+ARG MOBY_GO_ARCHIVE_VERSION=0.3.3
+# What: pins buildx/compose/cli's vendored golang.org/x/mod dependency.
+# Why: same lagged-CVE pattern as the overrides above (AG-KD-003); all three
+# floor at v0.38.0 (CVE-2026-56864/56865), so 0.40.0 -- the fix version --
+# keeps this override current.
+# From: Issue #1598
+ARG GOLANG_X_MOD_VERSION=0.40.0
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # What: builds actionlint/Docker CLI/docker-compose/buildx from source, with
-# grpc-go/containerd/x-text vendor bumps applied via go.mod/vendor.mod swaps.
+# grpc-go/containerd/x-text/go-archive/x-mod vendor bumps applied via
+# go.mod/vendor.mod swaps.
 # Why: gets a current Go stdlib without waiting on upstream; each tool's own
 # module quirks (vendor.mod-only, exclude directives) rule out `go install`.
-# From: Issue #1570 | PR #1571
+# From: Issue #1570 | PR #1571 | Issue #1598
 RUN set -euo pipefail; \
     GOBIN=/out go install "github.com/rhysd/actionlint/cmd/actionlint@v${ACTIONLINT_VERSION}"; \
     /out/actionlint --version; \
@@ -56,6 +67,8 @@ RUN set -euo pipefail; \
       && go get "github.com/containerd/containerd/v2@v${DOCKER_BUILDX_CONTAINERD_VERSION}" \
       && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
       && go get "golang.org/x/text@v${GOLANG_X_TEXT_VERSION}" \
+      && go get "github.com/moby/go-archive@v${MOBY_GO_ARCHIVE_VERSION}" \
+      && go get "golang.org/x/mod@v${GOLANG_X_MOD_VERSION}" \
       && go mod vendor \
       && go build -ldflags "-X github.com/docker/buildx/version.Version=v${DOCKER_BUILDX_VERSION}" -o /out/docker-buildx ./cmd/buildx ); \
     rm -rf "$buildx_src"; \
@@ -67,6 +80,7 @@ RUN set -euo pipefail; \
       && ln -s vendor.mod go.mod && ln -s vendor.sum go.sum \
       && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
       && go get "golang.org/x/text@v${GOLANG_X_TEXT_VERSION}" \
+      && go get "golang.org/x/mod@v${GOLANG_X_MOD_VERSION}" \
       && go mod vendor \
       && rm go.mod go.sum \
       && VERSION="${DOCKER_CLI_VERSION}" sh ./scripts/build/binary ); \
@@ -78,6 +92,7 @@ RUN set -euo pipefail; \
     ( cd "$compose_src" \
       && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
       && go get "golang.org/x/text@v${GOLANG_X_TEXT_VERSION}" \
+      && go get "golang.org/x/mod@v${GOLANG_X_MOD_VERSION}" \
       && go build -ldflags "-X github.com/docker/compose/v5/internal.Version=${DOCKER_COMPOSE_VERSION}" -o /out/docker-compose ./cmd ); \
     rm -rf "$compose_src"; \
     /out/docker-compose version
@@ -101,9 +116,9 @@ ARG CARGO_AUDIT_SHA256_ARM64=c6603814ddaa45e51263dafd31c0ac98808f688d26f7395804f
 # unchanged checksum next to a bumped version number would silently break
 # the build's own verification step.
 # From: Issue #1570 | PR #1571
-ARG CARGO_TARPAULIN_VERSION=0.37.1
-ARG CARGO_TARPAULIN_SHA256_AMD64=897731f07696af16ff725f90e718ac3fce4c5c3ca513945e4bc035ad2b7a89e0
-ARG CARGO_TARPAULIN_SHA256_ARM64=3571a002bfc15c08e667523d7c97680f7e8281480029ee0cf739a0e8fef12343
+ARG CARGO_TARPAULIN_VERSION=0.37.2
+ARG CARGO_TARPAULIN_SHA256_AMD64=8e47625d26c3c265886faf1ef8cfa3ccaf071abc87bf4854ef8e239f5ffeabd8
+ARG CARGO_TARPAULIN_SHA256_ARM64=c8cc929a259871cfe4e3cda6e31975abe33b9b0a6078b76cbd466b6494c72792
 ARG DISTCC_PUMP_PACKAGE_VERSION=3.4+really3.4-12
 ARG SHELLSPEC_VERSION=0.28.1
 ARG SHELLSPEC_SHA256=350d3de04ba61505c54eda31a3c2ee912700f1758b1a80a284bc08fd8b6c5992
