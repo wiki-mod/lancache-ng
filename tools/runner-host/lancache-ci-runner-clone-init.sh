@@ -664,36 +664,61 @@ cmd_full_reset_clean() {
         fi
     done
 
-    local jd
-    while IFS= read -r jd; do
-        [[ -n "$jd" ]] || continue
-        echo "Removing stale journal dir: $jd"
-        sudo -n rm -rf -- "$jd"
-    done < <(sudo -n find /var/log/journal -mindepth 1 -maxdepth 1 -type d ! -name "$(cat /etc/machine-id 2>/dev/null)" 2>/dev/null)
-
+    # hd: an unowned /home dir only proves no CURRENT passwd entry has that
+    # name -- it does NOT prove the directory is clone residue rather than,
+    # e.g., a deliberately kept backup of a since-deleted account, or a
+    # mounted data volume with no matching passwd entry at all. Report-only,
+    # same reasoning already applied below to authorized_keys and apt/dpkg
+    # history: this script must never guess "no current owner" means "safe
+    # to delete" for something as broad as an entire home directory tree.
     local hd
     while IFS= read -r hd; do
         [[ -n "$hd" ]] || continue
         local uname
         uname="$(basename "$hd")"
         if ! getent passwd "$uname" >/dev/null 2>&1; then
-            echo "Removing orphaned home directory: $hd"
-            sudo -n rm -rf -- "$hd"
+            echo "REPORT ONLY, not removed: orphaned home directory $hd (no current passwd entry named '$uname' -- review by hand before deleting; could be a kept backup or a mounted data volume, not necessarily clone residue)"
         fi
     done < <(sudo -n find /home -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
 
+    # Exact allowlist of confirmed one-off template-authoring artifacts
+    # (see this mode's own header/full-reset-check's report section above),
+    # not the broad `-iname '*prepare*template*'` glob full-reset-check uses
+    # for detection: a legitimate regular file that happens to
+    # case-insensitively match that pattern (e.g. a maintainer's own
+    # `prepare-template-backup.sh`) would otherwise be deleted here despite
+    # having no established clone provenance.
+    local -a known_template_scripts=(prepare-proxmox-template.sh)
     local ts
-    while IFS= read -r ts; do
-        [[ -n "$ts" ]] || continue
-        echo "Removing template-authoring script: $ts"
-        sudo -n rm -f -- "$ts"
-    done < <(sudo -n find /root -maxdepth 1 -type f -iname '*prepare*template*' 2>/dev/null)
+    for ts in "${known_template_scripts[@]}"; do
+        if sudo -n test -f "/root/$ts" 2>/dev/null; then
+            echo "Removing template-authoring script: /root/$ts"
+            sudo -n rm -f -- "/root/$ts"
+        fi
+    done
 
     echo "--- /etc/hosts self-reference for current hostname ---"
     ensure_hosts_self_reference fix
 
+    # hostid/machine-id regeneration MUST run before the journal-dir sweep
+    # below, not after: dedupe_host_identity both writes a NEW machine-id
+    # and restarts systemd-journald, which creates a fresh
+    # /var/log/journal/<new-id> directory. Running the identity regen AFTER
+    # the journal sweep (as this used to) meant the directory the sweep had
+    # just kept (matching the OLD machine-id, current at sweep time)
+    # immediately became the next stale directory the moment the ID
+    # changed -- so full-reset-check would report a fresh "stale journal
+    # dir" finding right after every single full-reset-clean run, and
+    # repeated clean runs could never converge to zero findings.
     echo "--- hostid / machine-id ---"
     dedupe_host_identity
+
+    local jd
+    while IFS= read -r jd; do
+        [[ -n "$jd" ]] || continue
+        echo "Removing stale journal dir: $jd"
+        sudo -n rm -rf -- "$jd"
+    done < <(sudo -n find /var/log/journal -mindepth 1 -maxdepth 1 -type d ! -name "$(cat /etc/machine-id 2>/dev/null)" 2>/dev/null)
 
     echo
     echo "full-reset-clean complete. NOT touched (report-only, see full-reset-check):"
