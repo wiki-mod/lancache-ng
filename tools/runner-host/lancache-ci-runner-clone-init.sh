@@ -1113,6 +1113,15 @@ cmd_sccache_check() {
     echo
     echo "--- sccache runtime config ---"
     echo "  supplied per job through SCCACHE_CONF; no scheduler token is stored on the host"
+    # What: Flag a stale, pre-fix credential file if one is still present.
+    # Why: A host not yet re-fetched can still carry the old world-readable
+    # config; surface it (mode only, never content) rather than ignore it.
+    # From: #1624
+    for stale in "/opt/${RUNNER_USER}/.config/sccache/config" "/opt/${RUNNER_USER}/sccache-dist/client.conf"; do
+        if sudo -n test -f "$stale" 2>/dev/null; then
+            echo "  STALE: $stale still present ($(sudo -n stat -c '%a %U:%G' "$stale" 2>/dev/null)) -- re-run sccache-fetch to remove it."
+        fi
+    done
     if sudo -n test -d /opt/sccache/dist-client 2>/dev/null; then
         echo "  /opt/sccache/dist-client: present"
     else
@@ -1155,6 +1164,14 @@ cmd_sccache_fetch() {
     sudo mkdir -p /opt/sccache/dist-client
     sudo chown "$RUNNER_USER:$RUNNER_USER" /opt/sccache /opt/sccache/dist-client
     sudo chmod 2775 /opt/sccache /opt/sccache/dist-client
+    # What: Remove any stale, world-readable host-copied credential files.
+    # Why: The previous sccache-fetch installed a Redis/dist-auth config
+    # here at mode 0644; runtime config now comes only from per-job
+    # SCCACHE_CONF, so a leftover file is dead, world-readable state with
+    # no further reader (see sccache-check's stale-file report below).
+    # From: #1624
+    sudo rm -f "/opt/${RUNNER_USER}/.config/sccache/config" "/opt/${RUNNER_USER}/sccache-dist/client.conf"
+    sudo rmdir --ignore-fail-on-non-empty "/opt/${RUNNER_USER}/.config/sccache" "/opt/${RUNNER_USER}/sccache-dist" 2>/dev/null || true
     echo "Installed sccache client tooling. Verifying:"
     HOME="/opt/${RUNNER_USER}" sudo -u "$RUNNER_USER" /usr/local/bin/sccache --version
     echo "Run 'sccache-check' to confirm the full picture."
