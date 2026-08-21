@@ -7,8 +7,8 @@
 #   for ANY length N (literal or variable) -- not merely an inconsistent
 #   literal length.
 # Why: short-SHA truncation is banned outright, not just required to stay
-#   consistent (maintainer decision: "Kurzformat ist verboten. Das war noch
-#   nie von mir genehmigt."); a blind local slice re-introduces the exact
+#   consistent (maintainer decision: "short format is forbidden, that was
+#   never approved by me"); a blind local slice re-introduces the exact
 #   collision-unsafe truncation dmeta_short_sha() used to perform.
 # From: Issue #1095 (G2)
 set -euo pipefail
@@ -29,17 +29,15 @@ is_self_reference() {
     esac
 }
 
-# What: matches a ${VAR::N}/${VAR:0:N} slice (any position) where VAR's name
-#   contains "sha" case-insensitively, for a literal numeric length OR a
-#   variable-name length (e.g. ${full_sha:0:length}).
-# Why: any slice on a sha-named variable is now banned outright -- a
-#   variable-length slice (dmeta_short_sha()'s own former shape) is exactly
-#   as much a truncation as a literal one, so it must match too; git rev-
-#   parse --short is a real object-database lookup, not this syntax, so it
-#   is unaffected by this pattern (see saf_resolve_sha_image_ref's own
-#   header in scripts/lib/staging-ancestor-fallback.sh).
-# From: Issue #1095 (G2)
-SHORT_SHA_SLICE_PATTERN='\$\{([A-Za-z_][A-Za-z0-9_]*)?[Ss][Hh][Aa][A-Za-z0-9_]*[[:space:]]*(:[[:space:]]*:[[:space:]]*[A-Za-z0-9_]+|:[[:space:]]*0[[:space:]]*:[[:space:]]*[A-Za-z0-9_]+)\}'
+# What: matches a ${VAR::N}/${VAR:0:N} slice on a sha/commit/candidate/revision-named VAR.
+# Why: a slice on any known SHA-holding-variable naming convention actually
+#   used in this codebase is banned, not only ones literally named "sha" --
+#   this codebase's own commit/candidate/revision-named variables hold full
+#   SHAs too (confirmed live in scripts/lib/staging-ancestor-fallback.sh);
+#   this is a maintained allowlist of known conventions, not a semantic
+#   check, and may need extension if a new naming convention appears.
+# From: Issue #1095 (G2) | PR #1611
+SHORT_SHA_SLICE_PATTERN='\$\{([A-Za-z_][A-Za-z0-9_]*)?([Ss][Hh][Aa]|[Cc][Oo][Mm][Mm][Ii][Tt]|[Cc][Aa][Nn][Dd][Ii][Dd][Aa][Tt][Ee]|[Rr][Ee][Vv][Ii][Ss][Ii][Oo][Nn])[A-Za-z0-9_]*[[:space:]]*(:[[:space:]]*:[[:space:]]*[A-Za-z0-9_]+|:[[:space:]]*0[[:space:]]*:[[:space:]]*[A-Za-z0-9_]+)\}'
 
 
 # What: enumerates target files via command substitution, not a

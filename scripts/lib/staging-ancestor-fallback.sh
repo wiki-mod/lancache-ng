@@ -894,39 +894,30 @@ saf_base_commit_has_confirmed_run() {
 
 # saf_legacy_sha_image_ref <repository> <service> <commit> <git_dir>
 #
-# Probes <commit>'s legacy 7-char short-SHA GHCR tag for <service> (one of
-# the ~37k already-published tags pre-dating this project's full-SHA
-# cutover) and echoes that tag's own reference on a hit; returns non-zero,
-# no output, on a miss. Never derives the short form locally: uses
-# `git rev-parse --short=7` (a real git object-database lookup, never a
-# `${VAR:0:7}` bash slice) to get the exact bytes GHCR already has -- this
-# is deliberately NOT the same operation scripts/untracked/check-deny-short-sha.sh's
-# guard forbids, since the guard targets locally re-deriving a truncation,
-# not asking git for the name of an object that already exists. If
-# `git rev-parse --short=7` ever returns MORE than 7 hex characters (a real
-# local ambiguity), the resulting guess deliberately will not match
-# whatever blindly-truncated tag GHCR actually has -- refusing to reuse an
-# ambiguous prefix is the correct, safe outcome here, not a bug (this exact
-# blind-truncation collision risk is the reason dmeta_short_sha() was
-# removed).
-#
-# Split out of saf_resolve_sha_image_ref so a caller that has already paid
-# for its own full-SHA probe(s) (e.g. saf_find_built_ancestor's own
-# short/extended freshness waits) can try the legacy form directly, once,
-# at its own give-up point, without saf_resolve_sha_image_ref's own
-# leading full-SHA probe repeating a check that caller already ran.
-# From: Issue #1095 (G2)
+# What: probes <commit>'s legacy 7-char short-SHA GHCR tag for <service>,
+#   echoing its own reference on a hit only if the tag's own
+#   org.opencontainers.image.revision label exactly matches <commit>;
+#   non-zero, no output, on a miss OR a mismatch.
+# Why: uses `git rev-parse --short=7` (a real object-database lookup) to
+#   get GHCR's exact stored bytes, never a local ${VAR:0:7} slice -- exempt
+#   from check-deny-short-sha.sh's guard for that reason, not an oversight.
+#   The 7-char tag name itself does not uniquely encode the full commit, so
+#   a readable label alone is not proof it is THIS commit's build -- a short
+#   SHA collision (accidental or a retagged/overwritten legacy tag) would
+#   otherwise be accepted silently.
+# From: Issue #1095 (G2) | PR #1611
 saf_legacy_sha_image_ref() {
   local repository="${1:?saf_legacy_sha_image_ref: repository is required}"
   local service="${2:?saf_legacy_sha_image_ref: service is required}"
   local commit="${3:?saf_legacy_sha_image_ref: commit is required}"
   local git_dir="${4:?saf_legacy_sha_image_ref: git_dir is required}"
 
-  local legacy_short legacy_image
+  local legacy_short legacy_image legacy_revision
   legacy_short="$(git -C "$git_dir" rev-parse --short=7 "$commit" 2>/dev/null)" || return 1
   [[ "$legacy_short" =~ ^[0-9a-f]{7}$ ]] || return 1
   legacy_image="ghcr.io/${repository}/${service}:sha-${legacy_short}"
-  sif_image_revision "$legacy_image" >/dev/null 2>&1 || return 1
+  legacy_revision="$(sif_image_revision "$legacy_image" 2>/dev/null)" || return 1
+  [[ "$legacy_revision" == "$commit" ]] || return 1
   printf '%s\n' "$legacy_image"
   return 0
 }
@@ -1371,7 +1362,21 @@ saf_find_built_ancestor() {
         printf '%s\n' "$candidate"
         return 0
       fi
-      echo "::notice::Ancestor candidate $candidate has a confirmed build-push.yml run, but $service ($classify_key) was not touched by it, and a single non-polling probe against its per-commit tag found nothing yet -- either that run never completed (aborted or genuinely never retagged this service) or its retag simply hasn't landed yet. Skipping the full network wait and continuing to the next candidate, which still carries its own full untouched-diff proof." >&2
+      # What: tries $candidate's own legacy short-SHA tag once, non-polling,
+      #   before giving up on this fast path -- the same single-probe
+      #   fallback the run-bearing waits below already get.
+      # Why: without this, an untouched pre-cutover candidate whose only
+      #   real tag is the legacy short-SHA form was skipped even though its
+      #   image genuinely exists, because this branch's full-SHA probe
+      #   above is a one-shot miss and previously fell straight to
+      #   `continue` without ever trying the legacy form.
+      # From: Issue #1095 (G2) | PR #1611
+      local legacy_image
+      if legacy_image="$(saf_legacy_sha_image_ref "$repository" "$service" "$candidate" "$git_dir")"; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+      echo "::notice::Ancestor candidate $candidate has a confirmed build-push.yml run, but $service ($classify_key) was not touched by it, and a single non-polling probe against its per-commit tag (both full-SHA and legacy short-SHA forms) found nothing yet -- either that run never completed (aborted or genuinely never retagged this service) or its retag simply hasn't landed yet. Skipping the full network wait and continuing to the next candidate, which still carries its own full untouched-diff proof." >&2
       continue
     fi
 

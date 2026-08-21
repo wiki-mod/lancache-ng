@@ -125,6 +125,28 @@ EOF
     [[ "$output" == *"example.sh:2"* ]] || fail "did not name the offending line: $output"
 }
 
+@test "fails on a commit/candidate/revision-named slice, not only sha-named ones" {
+    # What: proves the guard's naming allowlist covers this codebase's own
+    #   commit/candidate/revision-named SHA-holding variables, not just names
+    #   containing "sha" itself.
+    # Why: scripts/lib/staging-ancestor-fallback.sh names full-SHA locals
+    #   "commit"/"candidate"/"revision"; a sha-only allowlist would have let
+    #   a slice on any of those reintroduce short-SHA truncation undetected.
+    # From: Issue #1095 (G2) | PR #1611
+    cat > "$fixture_root/scripts/lib/example.sh" <<'EOF'
+#!/usr/bin/env bash
+short="${commit:0:7}"
+short2="${candidate::7}"
+short3="${revision:0:8}"
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"example.sh:2"* ]] || fail "did not catch the commit-named slice: $output"
+    [[ "$output" == *"example.sh:3"* ]] || fail "did not catch the candidate-named slice: $output"
+    [[ "$output" == *"example.sh:4"* ]] || fail "did not catch the revision-named slice: $output"
+}
+
 @test "fails on a digit before sha in the variable name, e.g. commit1_sha" {
     # What: proves a prefix containing a digit (commit1_sha) is still caught,
     #   even though a naive [A-Za-z_]* prefix class would reject it.
