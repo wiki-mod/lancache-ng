@@ -92,6 +92,43 @@ own_primary_ipv4() {
     ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1
 }
 
+# Checks whether /etc/hosts lets this host resolve its OWN current hostname
+# (issue #1622 follow-up, 2026-08-21). Confirmed real on hosts .80 and .84:
+# each had a self-reference line whose TEXT was stale clone residue -- .80's
+# pointed at a completely different IP/hostname (the template's own
+# pre-clone identity), .84's had the right IP but the wrong tier name
+# ("gh-lancache-light-30-84" in /etc/hosts while `hostname` correctly says
+# "gh-lancache-heavy-30-84", i.e. /etc/hosts was never updated when this
+# host's tier was assigned/changed). Either way `sudo` (and anything else
+# resolving its own hostname) fails with "unable to resolve host" on every
+# invocation. Unlike hostname_mismatch_report below, this IS safe to
+# auto-fix: it never guesses what the hostname SHOULD be, only makes
+# /etc/hosts consistent with whatever `hostname` ALREADY, currently says --
+# no judgment call involved. Prints what it found/fixed; `$2` controls mode
+# ("check" = report only, "fix" = also write).
+ensure_hosts_self_reference() {
+    local mode="${1:-check}"
+    local my_hostname my_ip
+    my_hostname="$(hostname)"
+    my_ip="$(own_primary_ipv4)"
+    if sudo -n grep -qE "\\b${my_hostname}\\b" /etc/hosts 2>/dev/null; then
+        echo "  OK: /etc/hosts already resolves current hostname '${my_hostname}'."
+        return 0
+    fi
+    echo "  STALE: /etc/hosts has no line resolving current hostname '${my_hostname}'."
+    if [[ "$mode" != "fix" ]]; then
+        echo "    -> will be corrected by full-reset-clean."
+        return 0
+    fi
+    if [[ -n "$my_ip" ]] && sudo -n grep -qE "^${my_ip//./\\.}[[:space:]]" /etc/hosts 2>/dev/null; then
+        sudo -n sed -i "s/^${my_ip//./\\.}[[:space:]].*/127.0.1.1\\t${my_hostname}/" /etc/hosts
+        echo "    Fixed: replaced the stale self-reference line for this host's own IP ($my_ip)."
+    else
+        printf '127.0.1.1\t%s\n' "$my_hostname" | sudo -n tee -a /etc/hosts >/dev/null
+        echo "    Fixed: appended a new 127.0.1.1 entry (no existing line for this host's own IP found)."
+    fi
+}
+
 # Detects a leftover CLONE hostname (issue #1622 follow-up, 2026-08-21):
 # confirmed real on host .80, which reports itself as "gh-lancache-heavy-
 # 30-85" via `hostname` while its actual IP is 192.168.1.80 -- the OS
@@ -411,6 +448,9 @@ cmd_full_reset_check() {
     echo "--- Hostname vs. primary IPv4 (report only -- see 'set-hostname' mode to fix) ---"
     hostname_mismatch_report
     echo
+    echo "--- /etc/hosts self-reference for current hostname ---"
+    ensure_hosts_self_reference check
+    echo
     echo "No files were changed (full-reset-check mode)."
 }
 
@@ -506,6 +546,9 @@ cmd_full_reset_clean() {
         echo "Removing template-authoring script: $ts"
         sudo -n rm -f -- "$ts"
     done < <(sudo -n find /root -maxdepth 1 -type f -iname '*prepare*template*' 2>/dev/null)
+
+    echo "--- /etc/hosts self-reference for current hostname ---"
+    ensure_hosts_self_reference fix
 
     echo
     echo "full-reset-clean complete. NOT touched (report-only, see full-reset-check):"
