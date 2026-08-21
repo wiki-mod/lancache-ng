@@ -21,7 +21,7 @@
 # the two originals are kept untouched rather than merged in place).
 #
 # On a pull_request event this validates the PR's OWN commits by reusing the
-# #626/#627 pr-<N>-sha-<full> staging-tag mechanism (see
+# pr-<N>-sha-<full> staging-tag mechanism (see
 # scripts/untracked/ensure-pr-staging-images.sh) -- it does NOT reinvent a second
 # tagging scheme. workflow_dispatch is preserved as a manual trigger for
 # ad-hoc runs against a specific published channel tag.

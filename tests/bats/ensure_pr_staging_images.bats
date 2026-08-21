@@ -4,7 +4,7 @@
 #
 # Docker-free coverage for scripts/untracked/ensure-pr-staging-images.sh (#715) -- the
 # fail-closed staging guard + untouched-service back-fill that reuses the
-# #626/#627 pr-<N>-sha-<full> mechanism. The registry probe and the
+# pr-<N>-sha-<full> mechanism. The registry probe and the
 # imagetools back-fill are stubbed via STAGING_IMAGE_EXISTS_CMD /
 # STAGING_BACKFILL_CMD so the touched-vs-untouched decision and the
 # fail-closed behaviour are exercised without a real daemon or registry. This
@@ -143,9 +143,9 @@ STUB
     base_sha="$(git -C "$git_dir" rev-parse HEAD)"
     # #1254/#1255: the back-fill source image is now tagged sha-<this>, not a
     # channel tag. base_sha_short is a same-value alias kept for every
-    # existing assertion below that already reads it (issue #1095 G2: the
-    # real resolver's primary probe now targets the full commit SHA, never a
-    # locally-derived short form -- see
+    # existing assertion below that already reads it (the real resolver's
+    # primary probe now targets the full commit SHA, never a locally-derived
+    # short form -- see
     # scripts/lib/staging-ancestor-fallback.sh's saf_resolve_sha_image_ref).
     base_sha_short="${base_sha}"
     revision_stub="$BATS_TEST_TMPDIR/revision.sh"

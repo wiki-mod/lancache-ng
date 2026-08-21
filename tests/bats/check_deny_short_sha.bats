@@ -8,10 +8,10 @@
 # Why: a check that only ever runs against an already-green tree never
 #   proves its fail-closed path is reachable (AG-VAL-024); the guard was
 #   repurposed from "enforce one consistent truncation length" to "deny any
-#   slice outright" (maintainer decision, issue #1095: short SHAs are
-#   banned, not merely required to stay consistent), so its own coverage
-#   must prove the new full-SHA world produces zero false positives, not
-#   only that the old hardcode shape is still caught.
+#   slice outright" (maintainer decision: short SHAs are banned, not merely
+#   required to stay consistent), so its own coverage must prove the new
+#   full-SHA world produces zero false positives, not only that the old
+#   hardcode shape is still caught.
 # From: Issue #1095 (G2)
 
 setup() {

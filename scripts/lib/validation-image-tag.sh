@@ -23,9 +23,9 @@
 # was about not disrupting #715's separate, larger full-setup-validate.yml
 # absorption work in progress at the time, not a permanent ban on ever
 # deduplicating this specific helper logic -- see #822 for the narrower
-# follow-up that made this the single implementation. The whole point of
-# #715 is to REUSE that exact pr-<N>-sha-<full> mechanism, never invent a
-# second, divergent one.
+# follow-up that made this the single implementation. The whole point is to
+# REUSE that exact pr-<N>-sha-<full> mechanism, never invent a second,
+# divergent one.
 #
 # Map a base ref (the PR's target branch, or a push's own ref) to the release
 # channel it publishes to. Mirrors build-push.yml's promote/validate mapping

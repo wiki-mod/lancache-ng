@@ -4,7 +4,7 @@
 #
 # Makes the PR-scoped staging images the full-setup deep validation suite
 # needs actually present before the sims run, on a pull_request event. This
-# is where the deep gate REUSES the #626/#627 pr-<N>-sha-<full> mechanism
+# is where the deep gate REUSES the pr-<N>-sha-<full> mechanism
 # rather than inventing its own:
 #
 #   1. For every full-setup service this PR TOUCHED (or every service but
