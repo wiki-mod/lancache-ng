@@ -46,10 +46,9 @@ FROM ${BUILD_TOOLS_IMAGE} AS builder
 # and fail.
 #
 # What: the wrapper also understands ccache's CCACHE_PREFIX convention
-# (invoked as `distcc <real-compiler-path> <args>`, real compiler is $1),
-# alongside the existing $0-basename masquerade convention.
+#   (invoked as `distcc <real-compiler-path> <args>`), alongside $0-basename.
 # Why: without this, $0=="distcc" fell through to a hardcoded "cc" default
-# and re-passed $1 as a stray positional argument, corrupting the compile.
+#   and re-passed $1 as a stray positional argument, corrupting the compile.
 # From: Issue #1533 | Refs #887
 RUN set -eu; \
     for tool in cargo rustc rustup rustfmt clippy-driver sccache distcc distcc-pump python3 pkg-config; do \
@@ -93,7 +92,8 @@ RUN set -eu; \
       '    ;;' \
       '  *)' \
       '    if [ "$#" -ge 1 ] && [ -x "${1:-}" ]; then' \
-      '      case "$1" in' \
+      '      resolved_arg1="$(readlink -f "$1" 2>/dev/null || printf "%s" "$1")"' \
+      '      case "$resolved_arg1" in' \
       '        "$wrapper_self"|"$wrapper_dir"/*)' \
       '          echo "[ERROR] lancache-distcc-wrapper: refusing to dispatch $1 back to itself (real-compiler resolution must happen before the distcc masquerade PATH is active)." >&2' \
       '          exit 1' \
@@ -298,7 +298,16 @@ cat > /usr/local/lib/lancache-ui-build-accel.sh <<'LANCACHE_UI_HELPERS_EOF'
         export CC="ccache $real_cc" GCC="ccache $real_gcc" CXX="ccache $real_cxx" GXX="ccache $real_gxx"; \
         ccache_enabled=1; \
         printf '%s\n' 'int main(void) { return 0; }' > "$ccache_probe_dir/ccache-probe.c"; \
-        if ! (cd "$ccache_probe_dir" && $CC -c ccache-probe.c -o ccache-probe.o) >"$ccache_probe_dir/ccache-probe.log" 2>&1; then \
+        # What: probes into a fresh, throwaway CCACHE_DIR under
+        #   $ccache_probe_dir, not the real (shared, cross-RUN-persistent)
+        #   /tmp/ccache-ui.
+        # Why: the real-source RUN's probe would otherwise inherit stats/
+        #   content from the pre-cache RUN's own build, so a stale write/hit
+        #   could pass this check without this probe reaching Redis at all.
+        # From: Codex review on PR #1612
+        ccache_probe_cache_dir="$ccache_probe_dir/probe-cache"; \
+        mkdir -p "$ccache_probe_cache_dir"; \
+        if ! (cd "$ccache_probe_dir" && CCACHE_DIR="$ccache_probe_cache_dir" $CC -c ccache-probe.c -o ccache-probe.o) >"$ccache_probe_dir/ccache-probe.log" 2>&1; then \
           cat "$ccache_probe_dir/ccache-probe.log" >&2; \
           disable_ccache; \
           rm -rf "$ccache_probe_dir"; \
@@ -306,7 +315,7 @@ cat > /usr/local/lib/lancache-ui-build-accel.sh <<'LANCACHE_UI_HELPERS_EOF'
           return 0; \
         fi; \
         ccache_probe_stats="$ccache_probe_dir/ccache-probe-stats.log"; \
-        ccache --print-stats > "$ccache_probe_stats"; \
+        CCACHE_DIR="$ccache_probe_cache_dir" ccache --print-stats > "$ccache_probe_stats"; \
         if grep -qE '^remote_storage_error[[:space:]]+[1-9]' "$ccache_probe_stats" \
           || ! grep -qE '^remote_storage_(write|hit)[[:space:]]+[1-9]' "$ccache_probe_stats"; then \
           cat "$ccache_probe_stats" >&2; \

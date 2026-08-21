@@ -2,14 +2,11 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Exercises services/ui/Dockerfile's lancache-distcc-wrapper generated script
-# directly, extracted verbatim from the Dockerfile's own printf block (never
-# hand-duplicated -- a second copy would drift from the real generated script
-# exactly the way AG-CODE-011 warns against), against real compiler/distcc
-# stubs. Proves both dispatch conventions the wrapper must understand: the
-# original $0-basename masquerade shape, and ccache's newer $1-as-path
-# CCACHE_PREFIX shape -- including the exact corrupted-argv regression this
-# reported (a duplicated compiler path) no longer occurring.
+# What: exercises services/ui/Dockerfile's lancache-distcc-wrapper script
+#   (extracted verbatim from its printf block) against real compiler stubs.
+# Why: proves both dispatch shapes work, including the corrupted-argv
+#   regression this file exists to catch.
+# From: Issue #1533 | Refs #887
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
