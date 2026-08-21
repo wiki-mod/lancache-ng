@@ -47,6 +47,29 @@ live in the repo, PR-reviewable and consistent across all hosts).
   states this explicitly, including the exact value for the host it just
   ran on.
 
+  **`purge-pve-check`/`purge-pve` (issue #1622, 2026-08-21):** every host
+  in the `.80`-and-up fleet's template carries a complete, running Proxmox
+  VE 9.2 management stack inside the guest itself (pveproxy, pve-cluster/
+  pmxcfs, pve-ha-manager including its watchdog-mux, pve-firewall,
+  proxmox-firewall, corosync, spiceproxy, qmeventd, pve-lxc-syscalld,
+  pve-qemu-kvm, …) — almost certainly because the template disk was cloned
+  from an actual Proxmox host. Measured on host `.81`: ~1.8-1.9 GB RSS held
+  permanently by these processes alone, a significant fraction of a light
+  host's 3.8 GB. `purge-pve-check` is a read-only inventory (installed
+  packages, active services, `/etc/pve` dependents, current RSS held, a
+  simulated purge preview); `purge-pve` (gated on `CONFIRM_PURGE_PVE=yes`)
+  stops the services and purges the packages. **Permanently, deliberately
+  excludes** `proxmox-kernel-*`/`proxmox-default-kernel`/`pve-firmware`/
+  `pve-edk2-firmware*` — this fleet has no regular Debian kernel installed
+  at all, only the Proxmox-branded ones, so purging those would leave a
+  host unbootable; `purge-pve` re-simulates and fails closed if a
+  kernel/firmware package would ever be touched. Before running against a
+  host whose runner service is live, check GitHub's busy status and stop
+  that service first; a real reboot test afterward is strongly
+  recommended (verified end-to-end across the full `.80`-`.88` fleet,
+  issue #1622: every host came back on the identical `uname -r`, with
+  docker/networking/the runner service all working).
+
 ## Deploy (to **every** runner host — 229, 240, 241, 243, …)
 
 > A prior host-local-only copy ran on just a subset of hosts, which is why one
