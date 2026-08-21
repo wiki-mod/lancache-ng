@@ -43,8 +43,7 @@ ARG GOLANG_X_TEXT_VERSION=0.41.0
 # v0.36.1 floors at the CVE-2026-17106-affected v0.2.1.
 # From: Issue #1598
 ARG MOBY_GO_ARCHIVE_VERSION=0.3.3
-# What: pins buildx/compose/cli's vendored golang.org/x/mod dependency at or
-# above their own go.mod/vendor.mod floor.
+# What: pins buildx/compose/cli's vendored golang.org/x/mod dependency.
 # Why: same lagged-CVE pattern as the overrides above (AG-KD-003); all three
 # floor at v0.38.0 (CVE-2026-56864/56865), so 0.40.0 -- the fix version --
 # keeps this override current.
@@ -58,7 +57,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # go.mod/vendor.mod swaps.
 # Why: gets a current Go stdlib without waiting on upstream; each tool's own
 # module quirks (vendor.mod-only, exclude directives) rule out `go install`.
-# From: Issue #1570 | PR #1571
+# From: Issue #1570 | PR #1571 | Issue #1598
 RUN set -euo pipefail; \
     GOBIN=/out go install "github.com/rhysd/actionlint/cmd/actionlint@v${ACTIONLINT_VERSION}"; \
     /out/actionlint --version; \
