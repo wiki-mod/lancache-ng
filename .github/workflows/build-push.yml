@@ -2569,13 +2569,19 @@ jobs:
     name: validate full-setup image
     # Wait for merge-manifests so PR validation consumes this PR staging manifest, not stale base-channel content.
     # Trusted non-PR validation likewise waits for the exact merged sha-* candidate before promotion.
-    needs: [detect-changes, merge-manifests, compute-validation-network, validate-compose]
+    needs: [detect-changes, merge-manifests, compute-validation-network, validate-compose, push-supersession-check]
+    # What: also requires push-supersession-check's `superseded` to be false.
+    # Why: merge-manifests reports plain `success` even when it skipped every
+    #   service for a superseded push (see its own comment); relying on that
+    #   `result` alone would pull real images built for a stale commit --
+    #   this must check supersession itself, not just the upstream result.
+    # From: Issue #1095
     if: >-
       ${{
         always() &&
         (
           (github.event_name == 'pull_request' && needs['merge-manifests'].result == 'success') ||
-          (github.event_name != 'pull_request' && needs['merge-manifests'].result == 'success')
+          (github.event_name != 'pull_request' && needs['merge-manifests'].result == 'success' && needs['push-supersession-check'].outputs.superseded != 'true')
         ) &&
         (
           github.event_name != 'pull_request' ||
@@ -6169,7 +6175,7 @@ jobs:
     # PR would just loop through seven harmless "no linux/amd64 image" skips for no
     # reason.
     name: merge multi-platform manifests
-    needs: [build, build-arm64]
+    needs: [build, build-arm64, push-supersession-check]
     # What: runs whenever build/build-arm64 ran at all, not only on full success.
     # Why: needs.<job>.result is 'failure' if ANY single matrix entry fails;
     #   the per-service loop below already skips services with no published
@@ -6224,7 +6230,13 @@ jobs:
 
       - name: Create multi-platform manifests
         id: create-trusted-manifests
-        if: github.event_name != 'pull_request'
+        # What: also skips when push-supersession-check reports this push superseded.
+        # Why: a superseded push forces should-build to false for every service
+        #   (see build/build-arm64's own should-build step), so every per-service
+        #   probe below would miss and the stack-pointer step after it would hard-fail
+        #   on a legitimately empty digest set instead of cleanly no-opping.
+        # From: Issue #1095
+        if: "github.event_name != 'pull_request' && needs['push-supersession-check'].outputs.superseded != 'true'"
         env:
           COMMIT_SHA: ${{ github.sha }}
           REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
