@@ -221,9 +221,21 @@ Use `required` for trusted self-hosted LAN runners where Redis is expected to
 be reachable. Use `optional` or `off` when moving jobs to runners that do not
 have access to the Redis cache.
 
-When `SCCACHE_REDIS_MODE=required`, the runner must have `sccache` available in
-`PATH`. Install it from source and keep the installed binary on the runner
-service account's `PATH`.
+When `SCCACHE_REDIS_MODE=required`, the runner must have the project's
+Redis/dist-client-enabled `sccache` binary available in `PATH`. Provision
+heavy runner hosts with the repository's
+`tools/runner-host/lancache-ci-runner-clone-init.sh` workflow: stage the
+known-working `sccache` and `sccache-dist` binaries (only the binaries, never
+client configuration) from an existing heavy host, run
+`sccache-fetch <staging-dir>`, and confirm the installation with
+`sccache-check`. Do not use Debian's `sccache` package or compile a separate
+copy on each host; the CI client needs the project's `redis,dist-client`
+feature set, and the versioned runner-host procedure keeps that tooling
+consistent across the fleet. Do not copy client configuration (Redis/dist
+scheduler URL, dist-auth token) between hosts — the `configure-rust-sccache`
+composite action creates that runtime configuration from GitHub Secrets for
+each individual job and publishes its temporary path through `SCCACHE_CONF`,
+so no scheduler credential is ever stored on the host itself.
 
 ## CodeQL
 

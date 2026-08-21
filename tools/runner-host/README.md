@@ -14,6 +14,179 @@ live in the repo, PR-reviewable and consistent across all hosts).
   runs in the first place, and (unlike the cleanup script) requires a full
   `dockerd` restart to take effect, which is why it is never wired into a
   timer and is only ever run by hand, one host at a time.
+- `lancache-ci-runner-clone-init.sh` — one-time bootstrap for a newly
+  provisioned or disk-cloned runner host, up to (but never including) actual
+  GitHub registration (issue #1622). See its own header for the full
+  background and its `--help` for the `check`/`clean`/`host-prep`/
+  `runner-fetch` modes. In short: a host in this fleet added by cloning an
+  existing host's disk carries that source host's own `.runner`/
+  `.credentials`/`.credentials_rsaparams` (private key material for an
+  identity already registered elsewhere) and multi-GB leftover imaging
+  archives under `/opt` — confirmed real on `.81` during that issue's
+  investigation. `check` detects this (and baseline sudoers/docker-group/
+  hooks/timer state) read-only; `clean` removes only what `check` already
+  flagged as foreign, gated on `CONFIRM_CLEAN=yes`; `host-prep` installs the
+  sudoers NOPASSWD drop-in, docker group membership, the
+  `/opt/lancache-ci-hooks/{pre,post}-job-cleanup.sh` pair (host-local, not
+  repo-tracked, same as they already are on every existing runner host), and
+  this directory's own cleanup timer; `runner-fetch` downloads, verifies
+  (against the GitHub Releases API asset digest), and extracts a specific
+  actions-runner release directly into a target instance directory. Actual
+  `config.sh` registration, `svc.sh install`, and starting the resulting
+  systemd service remain deliberate, separate, human-run steps — this script
+  never performs any of them, and never touches `/etc/docker/daemon.json`
+  (see the `lancache-ci-docker-daemon-config.sh` rollout above for that,
+  including this fleet's LAN-proxy block).
+
+  **Runner naming (maintainer decision, issue #1622, 2026-08-21):** for
+  hosts in the `.80`-and-up fleet, `config.sh --name` must be the host's
+  exact hostname (e.g. `gh-lancache-heavy-30-84` on that host) — never the
+  pre-existing `229`/`240`/`241`/`243` fleet's letter-prefix scheme
+  (`a-lancache-runner-240-1` etc.), which is specific to those older hosts
+  and must not be copied onto a new one. `runner-fetch`'s own final output
+  states this explicitly, including the exact value for the host it just
+  ran on.
+
+  **`purge-pve-check`/`purge-pve` (issue #1622, 2026-08-21):** every host
+  in the `.80`-and-up fleet's template carries a complete, running Proxmox
+  VE 9.2 management stack inside the guest itself (pveproxy, pve-cluster/
+  pmxcfs, pve-ha-manager including its watchdog-mux, pve-firewall,
+  proxmox-firewall, corosync, spiceproxy, qmeventd, pve-lxc-syscalld,
+  pve-qemu-kvm, …) — almost certainly because the template disk was cloned
+  from an actual Proxmox host. Measured on host `.81`: ~1.8-1.9 GB RSS held
+  permanently by these processes alone, a significant fraction of a light
+  host's 3.8 GB. `purge-pve-check` is a read-only inventory (installed
+  packages, active services, `/etc/pve` dependents, current RSS held, a
+  simulated purge preview); `purge-pve` (gated on `CONFIRM_PURGE_PVE=yes`)
+  stops the services and purges the packages. **Permanently, deliberately
+  excludes** `proxmox-kernel-*`/`proxmox-default-kernel`/`pve-firmware`/
+  `pve-edk2-firmware*` — this fleet has no regular Debian kernel installed
+  at all, only the Proxmox-branded ones, so purging those would leave a
+  host unbootable; `purge-pve` re-simulates and fails closed if a
+  kernel/firmware package would ever be touched. Before running against a
+  host whose runner service is live, check GitHub's busy status and stop
+  that service first; a real reboot test afterward is strongly
+  recommended (verified end-to-end on host `.81` only, issue #1622: it came
+  back on the identical `uname -r`, with docker/networking/the runner
+  service all working -- this is not yet confirmed across the rest of the
+  `.80`-and-up fleet, run `purge-pve` and its own reboot test per host
+  before treating any other host as proven).
+
+  **`sccache-check`/`sccache-fetch` (issue #1619/#1622, 2026-08-21):**
+  `.github/actions/configure-rust-sccache` — used by every trusted Rust CI
+  job routed to `lancache-heavy` (confirmed nowhere on `lancache-light`) —
+  fails a real job outright with "sccache is required on the runner when
+  Redis-backed sccache or sccache-dist is configured" if the `sccache`
+  binary isn't on the runner's PATH. New heavy hosts never got this
+  installed as part of host-prep. **Not `apt install sccache`** (Debian's
+  packaged version has no Redis support) **and not rebuilt from source on
+  each new host** — this project's sccache needs
+  `--features redis,dist-client` (see `tools/build-tools/Dockerfile`'s own
+  `cargo install sccache --no-default-features --features redis,dist-
+  client`), and every existing heavy host's client-side sccache tooling
+  was itself originally installed by copying the built binaries
+  host-to-host at identical paths, not by rebuilding — confirmed
+  directly on `lancache-240`. `sccache-check` (read-only) reports whether
+  the tooling is present and executes the binary as the configured runner
+  account; the scheduler URL and auth token are supplied only by
+  each CI job's secret-backed `SCCACHE_CONF`. `sccache-fetch <dir>` installs
+  the `sccache` and `sccache-dist` binaries already staged at `<dir>` on the
+  host (copy them from a known-working heavy host such as `lancache-240`
+  first — this mode does not build or download anything itself).
+  `host-prep` reminds about this on any host whose hostname
+  contains "heavy", since it cannot do the host-to-host copy unattended.
+  Deliberately client-role only — `sccache-dist-server.service` (accepting
+  distributed builds from other clients) needs a fresh, server-specific
+  auth token issued by whoever administers the scheduler, so its config is
+  never safely copyable between hosts, the same reason the client's own
+  scheduler/auth configuration is no longer host-copied either (see above);
+  standing up a new dist-server remains a separate, additional capacity
+  decision.
+
+### Full per-host rollout procedure (new or disk-cloned host)
+
+The exact ordered sequence `lancache-ci-runner-clone-init.sh`'s own header
+promises "the full per-host rollout procedure" for. Run each step from the
+host itself (`bash lancache-ci-runner-clone-init.sh <mode> ...`), not via
+`./lancache-ci-runner-clone-init.sh` (see the script's own usage comment).
+
+```sh
+# 1. Read-only survey: clone-artifact findings, docker/sudoers/group state.
+bash lancache-ci-runner-clone-init.sh check
+
+# 2. If check found foreign runner identities/archives, remove ONLY those
+#    (re-verified immediately before each removal):
+CONFIRM_CLEAN=yes bash lancache-ci-runner-clone-init.sh clean
+
+# 3. Broader de-clone sweep: shell history, known_hosts, foreign
+#    authorized_keys, stale journal/machine-id dirs, orphaned /home dirs,
+#    template-authoring scripts, apt/dpkg history mentions. Read-only first:
+bash lancache-ci-runner-clone-init.sh full-reset-check
+CONFIRM_FULL_RESET=yes bash lancache-ci-runner-clone-init.sh full-reset-clean
+
+# 4. If full-reset-check flagged a mismatched/leftover clone hostname,
+#    apply the maintainer-confirmed correct one (see "Runner naming" above
+#    for this fleet's naming convention):
+sudo bash lancache-ci-runner-clone-init.sh set-hostname <correct-hostname>
+
+# 5. If this is a Proxmox-templated VM (the `.80`-and-up fleet), remove the
+#    accidentally-included nested PVE management stack -- read-only survey
+#    first, see the dedicated section above for the destructive step and
+#    its kernel/firmware exclusions:
+bash lancache-ci-runner-clone-init.sh purge-pve-check
+CONFIRM_PURGE_PVE=yes bash lancache-ci-runner-clone-init.sh purge-pve
+
+# 6. Idempotent host setup: sudoers NOPASSWD drop-in, docker group, /opt
+#    ownership convergence, the pre/post-job cleanup hooks, and this
+#    directory's own cleanup timer. NOT non-disruptive -- runs a full
+#    apt-get dist-upgrade/full-upgrade; only run during a maintenance
+#    window (see the mode's own --help description):
+bash lancache-ci-runner-clone-init.sh host-prep
+
+# 7. Heavy-tier hosts only: verify/install the sccache client tooling (see
+#    the dedicated sccache-check/sccache-fetch section above):
+bash lancache-ci-runner-clone-init.sh sccache-check
+
+# 8. If this host needs the LAN proxy other hosts use (host-prep never
+#    touches /etc/docker/daemon.json), add a "proxies" block by hand and
+#    restart dockerd -- e.g.:
+#      { "proxies": { "http-proxy": "http://<lan-proxy-host>:3128",
+#                      "https-proxy": "http://<lan-proxy-host>:3128",
+#                      "no-proxy": "localhost,127.0.0.1" } }
+#    Confirm which hosts actually need this with the maintainer; most of
+#    this fleet does not.
+
+# 9. Download, checksum-verify, and extract the actions-runner release,
+#    writing its pre/post-job hook wiring (does not register or start it):
+bash lancache-ci-runner-clone-init.sh runner-fetch /opt/actions-runner-1
+
+# 10. Register with GitHub -- a short-lived registration token, human-run,
+#     never done by this script (see the script's own header):
+cd /opt/actions-runner-1
+./config.sh --url <repo-url> --token <registration-token> --name <exact-hostname> --labels <labels>
+
+# 11. REQUIRED immediately after config.sh, before svc.sh install: the
+#     Actions Runner's own config.sh truncates .env (via its bundled
+#     env.sh) before writing its own variables, silently wiping the hook
+#     wiring step 9 wrote. Without this, the runner never calls the
+#     pre/post-job cleanup hooks:
+cd /opt/actions-runner-1
+bash /path/to/lancache-ci-runner-clone-init.sh runner-hook-env /opt/actions-runner-1
+
+sudo ./svc.sh install
+# hold off on 'sudo ./svc.sh start' until the go-ahead to accept real jobs
+```
+
+Steps 2, 4-5, and 7-8 are conditional (skip a step whose survey found
+nothing to do); steps 1, 6, 9, 10, and 11 apply to every new or disk-cloned
+host. **Step 3 is NOT conditional on its own survey despite being read-only
+first, unlike the others above** -- `full-reset-check` cannot itself detect
+a duplicated `/etc/hostid`/`/etc/machine-id` (that requires comparing
+against every other host in the fleet, which this script has no way to do
+from inside a single host), so an empty survey result does not mean this
+step is safe to skip on an actual disk clone; always run
+`full-reset-clean` on a disk-cloned host regardless of what
+`full-reset-check` reports.
 
 ## Deploy (to **every** runner host — 229, 240, 241, 243, …)
 
