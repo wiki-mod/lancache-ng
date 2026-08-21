@@ -39,7 +39,7 @@ val() {
         GITHUB_OUTPUT="$out" run bash "$script"
     [ "$status" -eq 0 ]
     [ "$(val pr_staging_available)" = "true" ]
-    [ "$(val image_tag)" = "pr-715-sha-abcdef0" ]
+    [ "$(val image_tag)" = "pr-715-sha-abcdef0123456" ]
     # #825/#1141: master publishes latest, not nightly (current_dev does).
     [ "$(val base_channel_tag)" = "latest" ]
     [ "$(val proxy)" = "true" ]

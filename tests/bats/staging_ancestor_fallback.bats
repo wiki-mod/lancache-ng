@@ -900,8 +900,11 @@ STUB
     export STAGING_BASE_BUILD_RUN_EXISTS_CMD="$run_exists_stub"
 }
 
-# Freshness stub: only images matching the given commit's own short-sha
-# suffix resolve; keyed via STAGING_IMAGE_REVISION_CMD.
+# Freshness stub: only images matching the given commit's own full-SHA
+# suffix resolve (the canonical, post-cutover tag format saf_resolve_sha_image_ref's
+# primary probe targets); keyed via STAGING_IMAGE_REVISION_CMD. See the
+# dedicated legacy-short-tag-only test below for the fallback path's own
+# coverage.
 install_revision_stub_for() {
     local sha="$1"
     revision_stub="$BATS_TEST_TMPDIR/revision_$sha.sh"
@@ -909,7 +912,7 @@ install_revision_stub_for() {
 #!/usr/bin/env bash
 image="\$1"
 suffix="\${image##*:sha-}"
-if [ "\$suffix" = "${sha:0:7}" ]; then
+if [ "\$suffix" = "${sha}" ]; then
     echo "$sha"
 else
     exit 1
@@ -1017,8 +1020,8 @@ STUB
 image="\$1"
 suffix="\${image##*:sha-}"
 case "\$suffix" in
-    "${t1_sha:0:7}") echo "$t1_sha" ;;
-    "${f1_sha:0:7}") echo "$f1_sha" ;;
+    "${t1_sha}") echo "$t1_sha" ;;
+    "${f1_sha}") echo "$f1_sha" ;;
     *) exit 1 ;;
 esac
 STUB
@@ -1779,7 +1782,7 @@ STUB
 image="\$1"
 suffix="\${image##*:sha-}"
 case "\$suffix" in
-    "${built_sha:0:7}") echo "$built_sha" ;;
+    "${built_sha}") echo "$built_sha" ;;
     *) exit 1 ;;
 esac
 STUB
@@ -1841,7 +1844,7 @@ STUB
 image="\$1"
 suffix="\${image##*:sha-}"
 case "\$suffix" in
-    "${built_sha:0:7}") echo "$built_sha" ;;
+    "${built_sha}") echo "$built_sha" ;;
     *) exit 1 ;;
 esac
 STUB
@@ -1925,11 +1928,11 @@ STUB
 image="\$1"
 suffix="\${image##*:sha-}"
 case "\$suffix" in
-    "${untouched_sha:0:7}")
+    "${untouched_sha}")
         echo "x" >> "$probe_count_file"
         exit 1
         ;;
-    "${built_sha:0:7}") echo "$built_sha" ;;
+    "${built_sha}") echo "$built_sha" ;;
     *) exit 1 ;;
 esac
 STUB
@@ -1975,7 +1978,7 @@ STUB
 image="\$1"
 suffix="\${image##*:sha-}"
 case "\$suffix" in
-    "${ancestor2_sha:0:7}") echo "$ancestor2_sha" ;;
+    "${ancestor2_sha}") echo "$ancestor2_sha" ;;
     *) exit 1 ;;
 esac
 STUB
@@ -1991,51 +1994,71 @@ STUB
     run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "proxy" "$base_sha" 3 3 3 3 3 3 1 50 "$git_dir"
     end_epoch="$(date +%s)"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"sha-${ancestor2_sha:0:7}" ]]
+    [[ "$output" == *"sha-${ancestor2_sha}" ]]
     # The fast path (reordering) means this must resolve in well under the
     # 3s ceiling above -- proves the long wait was genuinely skipped, not
     # merely fast because the test stubs are instant.
     [ "$((end_epoch - start_epoch))" -lt 2 ]
 }
 
-@test "saf_find_built_ancestor: a malformed DOCKER_METADATA_SHORT_SHA_LENGTH fails closed at the ancestor candidate's own site, not silently truncating its tag (AG-VAL-030)" {
-    # What: calls saf_find_built_ancestor directly (not via
-    #   saf_resolve_untouched_backfill_source), so the assertion below can
-    #   only be satisfied by this function's own error message.
-    # Why: this file has no top-level set -e; an unchecked failure here
-    #   would silently truncate the tag instead of erroring.
-    # From: Issue #1095 (G2) | PR #1503
+@test "saf_resolve_sha_image_ref: resolves to the canonical full-SHA tag when it already exists" {
+    # What: proves the primary probe (the post-cutover, canonical tag) is
+    #   used directly when the registry already has it -- no legacy probe.
+    # From: Issue #1095 (G2)
     setup_linear_fixture
-    install_run_exists_stub
-    printf '%s\tany\n' "$ancestor2_sha" >> "$runs_file"
-    cat > "$run_exists_stub" <<STUB
-#!/usr/bin/env bash
-case "\$1" in
-    "$base_sha") exit 1 ;;
-    "$older_sha") exit 1 ;;
-    "$ancestor2_sha") exit 0 ;;
-    *) exit 1 ;;
-esac
-STUB
-    chmod +x "$run_exists_stub"
-
-    export DOCKER_METADATA_SHORT_SHA_LENGTH="seven"
-    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" "proxy" 10 3 3 1 0 0 "$git_dir"
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"Could not derive the short SHA for ancestor candidate"* ]]
+    install_revision_stub_for "$base_sha"
+    run saf_resolve_sha_image_ref "wiki-mod/lancache-ng" "proxy" "$base_sha" "$git_dir"
+    [ "$status" -eq 0 ]
+    [ "$output" = "ghcr.io/wiki-mod/lancache-ng/proxy:sha-${base_sha}" ]
 }
 
-@test "saf_resolve_untouched_backfill_source: a malformed DOCKER_METADATA_SHORT_SHA_LENGTH fails closed at its own base_sha_short site (AG-VAL-030)" {
-    # What: proves this function's own base_sha_short site fails closed,
-    #   via an error message distinct from the ancestor-candidate test above.
-    # Why: base_sha_short is computed before any network check, so no
-    #   run_exists_stub setup is needed here.
-    # From: Issue #1095 (G2) | PR #1503
+@test "saf_resolve_sha_image_ref: falls back to the legacy 7-char tag when only that format exists (transition-window coverage)" {
+    # What: proves the maintainer-mandated legacy-tag fallback actually
+    #   resolves, for a commit whose only published tag is the pre-cutover
+    #   7-char short form -- exactly the ~37k already-published GHCR tags
+    #   this transition window must keep working against.
+    # Why: without this, the previous advisor-flagged gap (a probe miss on
+    #   every already-published legacy tag) would ship silently untested.
+    # From: Issue #1095 (G2)
     setup_linear_fixture
-    export DOCKER_METADATA_SHORT_SHA_LENGTH="seven"
-    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "proxy" "$base_sha" 3 3 3 3 3 3 1 50 "$git_dir"
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"Could not derive the short SHA for base_sha"* ]]
+    legacy_short="$(git -C "$git_dir" rev-parse --short=7 "$base_sha")"
+    revision_stub="$BATS_TEST_TMPDIR/revision_legacy.sh"
+    cat > "$revision_stub" <<STUB
+#!/usr/bin/env bash
+image="\$1"
+suffix="\${image##*:sha-}"
+if [ "\$suffix" = "$legacy_short" ]; then
+    echo "$base_sha"
+else
+    exit 1
+fi
+STUB
+    chmod +x "$revision_stub"
+    export STAGING_IMAGE_REVISION_CMD="$revision_stub"
+
+    run saf_resolve_sha_image_ref "wiki-mod/lancache-ng" "proxy" "$base_sha" "$git_dir"
+    [ "$status" -eq 0 ]
+    [ "$output" = "ghcr.io/wiki-mod/lancache-ng/proxy:sha-${legacy_short}" ]
+}
+
+@test "saf_resolve_sha_image_ref: defaults to the canonical full-SHA tag when neither format exists yet" {
+    # What: proves the not-yet-published case still targets the canonical
+    #   full-SHA reference (the format any future build actually produces),
+    #   never the legacy form, so a caller's own real freshness poll waits
+    #   on the right tag rather than one that can never appear.
+    # From: Issue #1095 (G2)
+    setup_linear_fixture
+    revision_stub="$BATS_TEST_TMPDIR/revision_none.sh"
+    cat > "$revision_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+    chmod +x "$revision_stub"
+    export STAGING_IMAGE_REVISION_CMD="$revision_stub"
+
+    run saf_resolve_sha_image_ref "wiki-mod/lancache-ng" "proxy" "$base_sha" "$git_dir"
+    [ "$status" -eq 0 ]
+    [ "$output" = "ghcr.io/wiki-mod/lancache-ng/proxy:sha-${base_sha}" ]
 }
 
 @test "saf_resolve_untouched_backfill_source: fast path also fires for a real, non-doc commit that only touches a DIFFERENT service" {
@@ -2080,7 +2103,7 @@ STUB
 image="\$1"
 suffix="\${image##*:sha-}"
 case "\$suffix" in
-    "${ancestor2_sha:0:7}") echo "$ancestor2_sha" ;;
+    "${ancestor2_sha}") echo "$ancestor2_sha" ;;
     *) exit 1 ;;
 esac
 STUB
@@ -2094,7 +2117,7 @@ STUB
     run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "proxy" "$ui_only_sha" 3 3 3 3 3 3 1 50 "$git_dir"
     end_epoch="$(date +%s)"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"sha-${ancestor2_sha:0:7}" ]]
+    [[ "$output" == *"sha-${ancestor2_sha}" ]]
     [ "$((end_epoch - start_epoch))" -lt 2 ]
 }
 
@@ -2156,7 +2179,7 @@ STUB
 
     run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "proxy" "$base_sha" 300 600 300 600 300 600 15 50 "$git_dir"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"sha-${base_sha:0:7}" ]]
+    [[ "$output" == *"sha-${base_sha}" ]]
     [[ "$output" != *"ancestor"* ]]
 }
 
@@ -2204,7 +2227,7 @@ STUB
 
     run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "proxy" "$real_change_sha" 10 10 2 2 2 2 1 50 "$git_dir"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"sha-${real_change_sha:0:7}" ]]
+    [[ "$output" == *"sha-${real_change_sha}" ]]
 }
 
 @test "saf_resolve_untouched_backfill_source: ancestor_extended_freshness_* is independent of base_freshness_* -- a generous base budget never leaks into the ancestor's extended retry" {
@@ -2259,7 +2282,7 @@ image="\$1"
 suffix="\${image##*:sha-}"
 now="\$(date +%s)"
 elapsed=\$((now - $start_epoch))
-if [ "\$suffix" = "${older_sha:0:7}" ] && (( elapsed >= 3 )); then
+if [ "\$suffix" = "${older_sha}" ] && (( elapsed >= 3 )); then
     echo "$older_sha"
 else
     exit 1

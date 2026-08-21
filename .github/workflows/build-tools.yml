@@ -34,11 +34,6 @@ concurrency:
 
 env:
   BUILD_TOOLS_IMAGE: ghcr.io/${{ github.repository }}/build-tools
-  # What: declares the same short-SHA length as build-push.yml's own env.
-  # Why: Actions has no mechanism to share an env value across workflow
-  #   files, so both copies must be kept equal by hand.
-  # From: Issue #1095 (G2) | PR #1503
-  DOCKER_METADATA_SHORT_SHA_LENGTH: "7"
   # What: local scan-image tags are suffixed by run_id-run_attempt.
   # Why: the self-hosted amd64 runner is reused across overlapping/retried
   #   runs; a fixed tag could let one run's cleanup delete or overwrite an
@@ -175,17 +170,14 @@ jobs:
         with:
           images: ${{ env.BUILD_TOOLS_IMAGE }}
           tags: |
-            type=sha,prefix=sha-,format=short,suffix=-standalone-amd64
+            type=sha,prefix=sha-,format=long,suffix=-standalone-amd64
 
       - name: Compute immutable pushed source tag
         id: source-tag
         if: github.event_name != 'pull_request'
         run: |
           set -euo pipefail
-          # shellcheck source=scripts/lib/docker-metadata.sh
-          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
-          short_sha="$(dmeta_short_sha "$GITHUB_SHA")"
-          printf 'image=%s:sha-%s-standalone-amd64\n' "$BUILD_TOOLS_IMAGE" "$short_sha" >> "$GITHUB_OUTPUT"
+          printf 'image=%s:sha-%s-standalone-amd64\n' "$BUILD_TOOLS_IMAGE" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Resolve build-tools base image digests
         id: build-tools-base-digests
@@ -433,17 +425,14 @@ jobs:
         with:
           images: ${{ env.BUILD_TOOLS_IMAGE }}
           tags: |
-            type=sha,prefix=sha-,format=short,suffix=-standalone-arm64
+            type=sha,prefix=sha-,format=long,suffix=-standalone-arm64
 
       - name: Compute immutable pushed source tag
         id: source-tag
         if: github.event_name != 'pull_request'
         run: |
           set -euo pipefail
-          # shellcheck source=scripts/lib/docker-metadata.sh
-          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
-          short_sha="$(dmeta_short_sha "$GITHUB_SHA")"
-          printf 'image=%s:sha-%s-standalone-arm64\n' "$BUILD_TOOLS_IMAGE" "$short_sha" >> "$GITHUB_OUTPUT"
+          printf 'image=%s:sha-%s-standalone-arm64\n' "$BUILD_TOOLS_IMAGE" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Resolve build-tools base image digests
         id: build-tools-base-digests
@@ -643,17 +632,14 @@ jobs:
         run: |
           set -euo pipefail
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
-          # shellcheck source=scripts/lib/docker-metadata.sh
-          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
           # What: merges the exact child job digests, not a re-resolved tag.
-          # Why: a mutable :sha-<short>-standalone-{amd64,arm64} tag could
+          # Why: a mutable :sha-<commit>-standalone-{amd64,arm64} tag could
           #   move between the child jobs finishing and this step running.
           # From: Issue #1522 | PR #1523
           [[ "$AMD64_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid amd64 digest '$AMD64_DIGEST'."; exit 1; }
           [[ "$ARM64_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid arm64 digest '$ARM64_DIGEST'."; exit 1; }
 
-          short_sha="$(dmeta_short_sha "$GITHUB_SHA")"
-          source_tag="${BUILD_TOOLS_IMAGE}:sha-${short_sha}"
+          source_tag="${BUILD_TOOLS_IMAGE}:sha-${GITHUB_SHA}"
           amd64_ref="${BUILD_TOOLS_IMAGE}@${AMD64_DIGEST}"
           arm64_ref="${BUILD_TOOLS_IMAGE}@${ARM64_DIGEST}"
 
