@@ -295,6 +295,35 @@ dedupe_host_identity() {
     echo "  machine-id: ${old_machine_id} -> ${new_machine_id}"
 }
 
+# What: Regenerate this host's own SSH host keys (server identity) and
+#   restart sshd so it serves the new keys immediately.
+# Why: A full disk clone (see the full-reset section's own header) also
+#   copies /etc/ssh/ssh_host_* -- the SOURCE host's private server
+#   identity. Two hosts presenting the same host key are cryptographically
+#   indistinguishable to any SSH client, and compromise of one key
+#   compromises both. Safe to always regenerate unconditionally, same
+#   "cheap, safe, no judgment call" reasoning dedupe_host_identity already
+#   documents for hostid/machine-id -- nothing on a freshly-provisioned
+#   clone depends on the OLD host key persisting.
+# From: #1624 (PRRT_kwDOS--bIM6bC3vO, PRRT_kwDOS--bIM6bGRml)
+regenerate_ssh_host_keys() {
+    echo "  Removing existing SSH host keys and regenerating..."
+    sudo -n rm -f /etc/ssh/ssh_host_*
+    if ! sudo -n ssh-keygen -A >/dev/null 2>&1; then
+        echo "  WARNING: 'ssh-keygen -A' failed to regenerate host keys -- sshd may refuse to start until this is fixed by hand." >&2
+        return 1
+    fi
+    sudo -n systemctl restart ssh 2>/dev/null || sudo -n systemctl restart sshd 2>/dev/null ||
+        echo "  WARNING: could not restart the SSH daemon (tried both 'ssh' and 'sshd' unit names) -- it may still be serving the OLD host keys from memory until restarted by hand." >&2
+    echo "  New host key fingerprints:"
+    local pub
+    for pub in /etc/ssh/ssh_host_*.pub; do
+        [[ -e "$pub" ]] || continue
+        sudo -n ssh-keygen -lf "$pub" 2>/dev/null | sed 's/^/    /'
+    done
+    return 0
+}
+
 # Detects a leftover CLONE hostname (issue #1622 follow-up, 2026-08-21):
 # confirmed real on host .80, which reports itself as "gh-lancache-heavy-
 # 30-85" via `hostname` while its actual IP is 192.168.1.80 -- the OS
@@ -732,7 +761,20 @@ cmd_full_reset_check() {
     fi
     local my_token
     my_token="$(own_host_token)"
-    echo "Host: $(hostname)   own_host_token=$my_token"
+    if [[ -z "$my_token" ]]; then
+        # What: Explicit diagnostic when own_host_token is empty.
+        # Why: own_host_token's own `|| true` (see its header) stops this
+        #   from aborting the script under set -e, but a bare
+        #   "own_host_token=" with no explanation left the operator to
+        #   guess why every host-identity comparison below may be
+        #   unreliable. This is the same finding as the credentials/jq
+        #   fail-closed hardening in is_foreign_runner_dir: an unusable
+        #   token must be surfaced, never silently treated as a non-event.
+        # From: #1624 (PRRT_kwDOS--bIM6bC3vc)
+        echo "Host: $(hostname)   own_host_token=<none> (could not derive a numeric token from 'hostname' -- host-identity comparisons below may be unreliable)"
+    else
+        echo "Host: $(hostname)   own_host_token=$my_token"
+    fi
     echo
     echo "--- Shell history (informational size only; content not printed) ---"
     for f in /root/.bash_history "/home/${RUNNER_USER}/.bash_history" "/opt/${RUNNER_USER}/.bash_history" /root/.lesshst; do
@@ -748,57 +790,183 @@ cmd_full_reset_check() {
         fi
     done
     echo
-    echo "--- root authorized_keys: entries naming a DIFFERENT fleet host (report only, never auto-removed) ---"
+    # What: Report private SSH client key files under root's and
+    #   RUNNER_USER's candidate home directories.
+    # Why: A full disk clone also copies any outbound SSH client identity
+    #   the source host ever used (e.g. /root/.ssh/id_ed25519) -- a real
+    #   credential that authenticates AS the source host to other systems.
+    #   This section previously only examined known_hosts (a cache of who
+    #   this host has connected to, not an access grant); a repo-wide
+    #   search found no other private-client-key handling anywhere in this
+    #   script. Report-only, same reasoning as authorized_keys below: this
+    #   script cannot know whether a given key is clone residue or an
+    #   intentionally-provisioned credential meant to be shared, so
+    #   rotating/removing it is a human decision.
+    # From: #1624 (PRRT_kwDOS--bIM6bDOtu)
+    echo "--- Private SSH client keys (report only -- rotate/remove by hand) ---"
+    local ck_found=0
+    local ck_dir
+    for ck_dir in /root/.ssh "/home/${RUNNER_USER}/.ssh" "/opt/${RUNNER_USER}/.ssh"; do
+        sudo -n test -d "$ck_dir" 2>/dev/null || continue
+        local ck_output ck_status=0
+        ck_output="$(sudo -n find "$ck_dir" -maxdepth 1 -type f -name 'id_*' ! -name '*.pub' 2>&1)" || ck_status=$?
+        if [[ "$ck_status" -ne 0 && -n "$ck_output" ]]; then
+            echo "  WARNING: search of $ck_dir exited with status $ck_status: $ck_output" >&2
+        fi
+        local ck
+        while IFS= read -r ck; do
+            [[ -n "$ck" ]] || continue
+            ck_found=1
+            echo "  $ck -- private client key copied by the disk clone; authenticates as the SOURCE host to other systems."
+        done <<<"$ck_output"
+    done
+    [[ "$ck_found" -eq 1 ]] || echo "  (none found)"
+    echo
+    # What: Report entries in BOTH root's and RUNNER_USER's authorized_keys
+    #   naming a different fleet host, and check both candidate RUNNER_USER
+    #   home paths this script already uses elsewhere (history/known_hosts
+    #   above already cover both /home/ and /opt/).
+    # Why: The source host may grant inbound SSH directly to RUNNER_USER,
+    #   not only root; this section previously only ever read
+    #   /root/.ssh/authorized_keys, so a foreign key reachable via
+    #   RUNNER_USER's own account went completely unreported. A repo-wide
+    #   search for "authorized_keys" found no other checker.
+    # From: #1624 (PRRT_kwDOS--bIM6bC3vQ, PRRT_kwDOS--bIM6bFGd_)
+    echo "--- authorized_keys: entries naming a DIFFERENT fleet host (report only, never auto-removed) ---"
     local ak_found=0
-    if sudo -n test -f /root/.ssh/authorized_keys 2>/dev/null; then
+    local ak_path
+    for ak_path in /root/.ssh/authorized_keys "/home/${RUNNER_USER}/.ssh/authorized_keys" "/opt/${RUNNER_USER}/.ssh/authorized_keys"; do
+        sudo -n test -f "$ak_path" 2>/dev/null || continue
+        local ak_output ak_status=0
+        ak_output="$(sudo -n cat "$ak_path" 2>&1)" || ak_status=$?
+        if [[ "$ak_status" -ne 0 ]]; then
+            echo "  WARNING: could not read $ak_path (status $ak_status) -- authorized_keys check for this path is incomplete, not confirmed clean." >&2
+            continue
+        fi
+        local line
         while IFS= read -r line; do
             [[ -n "$line" ]] || continue
             if is_foreign_authorized_keys_line "$line"; then
                 ak_found=1
-                echo "  FOREIGN: $line"
+                echo "  FOREIGN ($ak_path): $line"
             fi
-        done < <(sudo -n cat /root/.ssh/authorized_keys 2>/dev/null)
-    fi
+        done <<<"$ak_output"
+    done
     [[ "$ak_found" -eq 1 ]] || echo "  (none found)"
     echo
-    echo "--- Stale journal machine-id directories (current: $(cat /etc/machine-id 2>/dev/null)) ---"
-    local jd found_jd=0
-    while IFS= read -r jd; do
-        [[ -n "$jd" ]] || continue
-        found_jd=1
-        echo "  STALE: $jd -- will be removed by full-reset-clean"
-    done < <(sudo -n find /var/log/journal -mindepth 1 -maxdepth 1 -type d ! -name "$(cat /etc/machine-id 2>/dev/null)" 2>/dev/null)
-    [[ "$found_jd" -eq 1 ]] || echo "  (none found)"
+    # What: Validate /etc/machine-id before using it to exclude "current"
+    #   journal directories from the stale-directory report.
+    # Why: An empty or unreadable machine-id would make the exclusion
+    #   pattern `! -name ""`, which matches EVERY directory under
+    #   /var/log/journal, including this host's own current one --
+    #   confirmed as a real risk by review. Report-only side of the same
+    #   validation full-reset-clean now applies before it ever deletes
+    #   anything (see cmd_full_reset_clean).
+    # From: #1624 (PRRT_kwDOS--bIM6bC3v0)
+    local current_machine_id
+    current_machine_id="$(cat /etc/machine-id 2>/dev/null || true)"
+    echo "--- Stale journal machine-id directories (current: ${current_machine_id:-UNKNOWN}) ---"
+    if [[ -z "$current_machine_id" ]]; then
+        echo "  ERROR: could not read a valid /etc/machine-id -- skipping this check rather than risk reporting every journal directory (including this host's own current one) as stale." >&2
+    else
+        # What: Capture the search's full output and exit status into a
+        #   variable BEFORE looping over it, per this repo's own documented
+        #   AG-VAL-032 pattern, instead of piping a live producer straight
+        #   into the loop via process substitution.
+        # Why: The previous `< <(sudo -n find ... 2>/dev/null)` shape
+        #   discarded the search's own exit status entirely -- if `sudo -n`
+        #   itself failed (a sudoers rule not covering this exact path) or
+        #   `find` hit a real I/O error, the loop still ran to completion
+        #   over empty output and reported "(none found)", identical to a
+        #   genuinely clean host. This affected every search in this
+        #   function (authorized_keys, journal, home, template-scripts,
+        #   apt/dpkg history) -- fixed uniformly here.
+        # From: #1624 (PRRT_kwDOS--bIM6bC3vX)
+        local jd_output jd_status=0
+        jd_output="$(sudo -n find /var/log/journal -mindepth 1 -maxdepth 1 -type d ! -name "$current_machine_id" 2>&1)" || jd_status=$?
+        if [[ "$jd_status" -ne 0 && -n "$jd_output" ]]; then
+            echo "  WARNING: journal directory search exited with status $jd_status: $jd_output" >&2
+        fi
+        local jd found_jd=0
+        while IFS= read -r jd; do
+            [[ -n "$jd" ]] || continue
+            found_jd=1
+            echo "  STALE: $jd -- will be removed by full-reset-clean"
+        done <<<"$jd_output"
+        [[ "$found_jd" -eq 1 ]] || echo "  (none found)"
+    fi
     echo
     echo "--- Orphaned /home directories (no matching /etc/passwd entry) ---"
+    local hd_output hd_status=0
+    hd_output="$(sudo -n find /home -mindepth 1 -maxdepth 1 -type d 2>&1)" || hd_status=$?
+    if [[ "$hd_status" -ne 0 && -n "$hd_output" ]]; then
+        echo "  WARNING: /home search exited with status $hd_status: $hd_output" >&2
+    fi
     local hd found_hd=0
     while IFS= read -r hd; do
         [[ -n "$hd" ]] || continue
         local uname
         uname="$(basename "$hd")"
         if ! getent passwd "$uname" >/dev/null 2>&1; then
-            found_hd=1
-            echo "  ORPHANED: $hd (no /etc/passwd entry for '$uname') -- will be removed by full-reset-clean"
+            # What: Skip a mountpoint even when it has no matching passwd entry.
+            # Why: A mounted local/remote filesystem under /home with no NSS
+            #   user of the same name is not an orphaned clone home -- it is
+            #   someone else's mounted data. full-reset-clean's own removal
+            #   loop shares this same check (see PRRT_kwDOS--bIM6bC3vS).
+            # From: #1624 (PRRT_kwDOS--bIM6bC3vS)
+            if mountpoint -q "$hd" 2>/dev/null; then
+                found_hd=1
+                echo "  MOUNTPOINT (skipped, not a clone artifact): $hd -- has no /etc/passwd entry for '$uname' but is a separate mounted filesystem; full-reset-clean will not remove it."
+            else
+                found_hd=1
+                echo "  ORPHANED: $hd (no /etc/passwd entry for '$uname') -- will be removed by full-reset-clean"
+            fi
         fi
-    done < <(sudo -n find /home -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
+    done <<<"$hd_output"
     [[ "$found_hd" -eq 1 ]] || echo "  (none found)"
     echo
     echo "--- Template-authoring scripts under /root ---"
+    local ts_output ts_status=0
+    ts_output="$(sudo -n find /root -maxdepth 1 -type f -iname '*prepare*template*' 2>&1)" || ts_status=$?
+    if [[ "$ts_status" -ne 0 && -n "$ts_output" ]]; then
+        echo "  WARNING: /root template-script search exited with status $ts_status: $ts_output" >&2
+    fi
     local ts found_ts=0
     while IFS= read -r ts; do
         [[ -n "$ts" ]] || continue
         found_ts=1
         echo "  $ts -- will be removed by full-reset-clean"
-    done < <(sudo -n find /root -maxdepth 1 -type f -iname '*prepare*template*' 2>/dev/null)
+    done <<<"$ts_output"
     [[ "$found_ts" -eq 1 ]] || echo "  (none found)"
     echo
+    # What: Search apt/dpkg history (including rotated .gz files) for this
+    #   fleet's own naming schemes, generically, then filter to entries
+    #   whose extracted host-number differs from this host's own.
+    # Why: The previous pattern hardcoded four specific LAN host
+    #   numbers/IPs (240/241/229/243) directly into this repository
+    #   (AG-SEC-007) and stopped detecting a clone from any OTHER source
+    #   host; plain `grep` also cannot see into rotated
+    #   `history.log.N.gz`/`dpkg.log.N.gz` files (confirmed: `zgrep` finds
+    #   a match `grep` misses against an identical gzip-compressed file),
+    #   so clone evidence surviving only in an older rotation was silently
+    #   missed. Uses extract_fleet_host_number (shared with
+    #   is_foreign_runner_dir/is_foreign_authorized_keys_line) so all three
+    #   call sites recognize the same naming schemes the same way, and
+    #   never hardcodes a specific host number or IP.
+    # From: #1624 (PRRT_kwDOS--bIM6bC3v4, PRRT_kwDOS--bIM6bC3v_)
     echo "--- apt/dpkg history mentioning other fleet hosts (report only -- a real audit trail, never rewritten) ---"
+    local al_output al_status=0
+    al_output="$(sudo -n zgrep -EHo '(gh-lancache-[a-z]+-[A-Za-z0-9]+-[0-9]+|[a-z]-lancache-runner-[0-9]+)' /var/log/apt/history.log* /var/log/dpkg.log* 2>&1)" || al_status=$?
     local al found_al=0
     while IFS= read -r al; do
         [[ -n "$al" ]] || continue
-        found_al=1
-        echo "  $al"
-    done < <(sudo -n grep -lE '(lancache-(240|241|229|243)|192\.168\.1\.(240|241|229|243))' /var/log/apt/history.log* /var/log/dpkg.log* 2>/dev/null)
+        local al_number
+        al_number="$(extract_fleet_host_number "$al")"
+        if [[ -n "$al_number" && "$al_number" != "$my_token" ]]; then
+            found_al=1
+            echo "  $al"
+        fi
+    done <<<"$al_output"
     [[ "$found_al" -eq 1 ]] || echo "  (none found)"
     echo
     echo "--- Hostname vs. primary IPv4 (report only -- see 'set-hostname' mode to fix) ---"
@@ -807,10 +975,13 @@ cmd_full_reset_check() {
     echo "--- /etc/hosts self-reference for current hostname ---"
     ensure_hosts_self_reference check
     echo
+    echo "--- SSH host keys (server identity) ---"
+    echo "  full-reset-clean unconditionally regenerates /etc/ssh/ssh_host_* and restarts sshd -- a real disk clone also copies the source host's private server identity, and two hosts sharing one host key are cryptographically indistinguishable to any SSH client."
+    echo
     echo "--- hostid / machine-id (cannot detect duplicates locally -- see script header) ---"
     echo "  hostid: $(hostid)"
-    echo "  machine-id: $(cat /etc/machine-id 2>/dev/null || echo '?')"
-    echo "  -> full-reset-clean unconditionally regenerates both (cheap, safe, always unique)."
+    echo "  machine-id: ${current_machine_id:-?}"
+    echo "  -> full-reset-clean unconditionally regenerates both (cheap, safe, always unique) BEFORE the journal-directory sweep above, so the just-superseded machine-id's own journal directory is cleaned up too, not left behind indefinitely."
     echo
     echo "No files were changed (full-reset-check mode)."
 }
@@ -823,16 +994,17 @@ cmd_full_reset_check() {
 # /etc/hostname, live `hostname`, and /etc/hosts' 127.0.1.1 entry (the
 # Debian convention this fleet's hosts already follow), then reports what
 # changed so the operator can confirm it against their own inventory.
-cmd_set_hostname() {
-    local new_hostname="${1:?Usage: set-hostname <new-hostname>}"
-    local old_hostname
-    old_hostname="$(hostname)"
-    if [[ "$new_hostname" == "$old_hostname" ]]; then
-        echo "Hostname is already '$old_hostname' -- nothing to do."
-        return 0
-    fi
-    echo "Renaming host: '$old_hostname' -> '$new_hostname'"
-    sudo hostnamectl set-hostname "$new_hostname"
+# What: Ensure /etc/hosts carries a correct 127.0.1.1 self-reference for
+#   $new_hostname, replacing any stale line that referenced $old_hostname.
+# Why: Factored out of cmd_set_hostname so both the normal rename path and
+#   the "name already matches" retry path (see cmd_set_hostname below) run
+#   the identical repair -- a real retry with the same target name must be
+#   able to finish this step even when a PRIOR invocation's hostnamectl
+#   already succeeded but this part failed (full/read-only filesystem,
+#   etc.), which the previous code could never reach a second time.
+# From: #1624 (PRRT_kwDOS--bIM6bDOtp, PRRT_kwDOS--bIM6bH8qB)
+repair_hosts_self_reference_for_rename() {
+    local old_hostname="$1" new_hostname="$2"
     if sudo test -f /etc/hosts && sudo grep -q "127.0.1.1" /etc/hosts 2>/dev/null; then
         sudo sed -i "s/^127\.0\.1\.1[[:space:]].*/127.0.1.1\t${new_hostname}/" /etc/hosts
         echo "Updated /etc/hosts' 127.0.1.1 entry."
@@ -855,6 +1027,33 @@ cmd_set_hostname() {
             echo "No existing self-reference line found -- appended a new 127.0.1.1 entry."
         fi
     fi
+}
+
+cmd_set_hostname() {
+    local new_hostname="${1:?Usage: set-hostname <new-hostname>}"
+    local old_hostname
+    old_hostname="$(hostname)"
+    if [[ "$new_hostname" == "$old_hostname" ]]; then
+        # What: Still repair /etc/hosts even when hostnamectl has nothing
+        #   left to do.
+        # Why: A natural retry with the same target name (e.g. after a
+        #   prior invocation's hostnamectl succeeded but the /etc/hosts
+        #   edit failed -- a full or read-only filesystem, for example)
+        #   used to return here immediately, before ever inspecting or
+        #   repairing /etc/hosts, so the run could never converge a
+        #   partially-applied rename. Only the hostnamectl step is
+        #   skippable when the name already matches; the hosts-file repair
+        #   must still run every time.
+        # From: #1624 (PRRT_kwDOS--bIM6bDOtp, PRRT_kwDOS--bIM6bH8qB)
+        echo "Hostname is already '$old_hostname' -- 'hostnamectl set-hostname' has nothing to do, but still checking/repairing /etc/hosts in case an earlier attempt applied the name without finishing this step."
+        repair_hosts_self_reference_for_rename "$old_hostname" "$new_hostname"
+        echo
+        echo "Done. Current hostname: $(hostname)"
+        return 0
+    fi
+    echo "Renaming host: '$old_hostname' -> '$new_hostname'"
+    sudo hostnamectl set-hostname "$new_hostname"
+    repair_hosts_self_reference_for_rename "$old_hostname" "$new_hostname"
     echo
     echo "Done. Current hostname: $(hostname)"
     echo "This does NOT reboot or restart any service -- some already-running"
@@ -868,13 +1067,39 @@ cmd_full_reset_clean() {
         echo "Run 'full-reset-check' first and review its findings." >&2
         return 1
     fi
+    # What: Prove non-interactive root access before acting, same guard
+    #   cmd_full_reset_check already has.
+    # Why: This function's own truncate/rm/regenerate calls below are just
+    #   as capable of silently no-op'ing on a denied `sudo -n` as
+    #   full-reset-check's read-only survey was before that guard was
+    #   added -- the same fail-open shape, on the destructive side.
+    # From: #1624 (PRRT_kwDOS--bIM6bHO9C -- extended from full-reset-check
+    #   to full-reset-clean, same failure class)
+    if ! sudo -n true 2>/dev/null; then
+        echo "ERROR: full-reset-clean requires non-interactive sudo access to act on protected paths." >&2
+        return 1
+    fi
 
+    # What: Truncate each history file on disk, and warn about a shell
+    #   session's own in-memory history surviving the truncation.
+    # Why: If this command is run from an interactive root shell, THIS
+    #   process (a child of that shell) can only truncate the FILE --
+    #   the parent interactive shell's own already-loaded in-memory
+    #   history is untouched and, depending on `histappend`/`shopt -s
+    #   histappend` and how that shell eventually exits, can be written
+    #   back to the same file on logout, making the clone's command
+    #   history reappear after having appeared removed. This cannot be
+    #   fixed from a child process -- a child cannot clear a parent
+    #   shell's memory -- so the correct fix is telling the operator, not
+    #   silently claiming the history is gone.
+    # From: #1624 (PRRT_kwDOS--bIM6bC3vf)
     for f in /root/.bash_history "/home/${RUNNER_USER}/.bash_history" "/opt/${RUNNER_USER}/.bash_history" /root/.lesshst; do
         if sudo -n test -f "$f" 2>/dev/null; then
             sudo -n truncate -s0 "$f"
             echo "Truncated $f"
         fi
     done
+    echo "NOTE: if this command was run from an interactive login shell (yours or root's), that shell's own in-memory history was NOT cleared by the truncation above and may be written back to the same file(s) on logout. Run 'history -c' in every such open shell, or reconnect via a fresh non-interactive invocation (e.g. 'ssh host sudo bash lancache-ci-runner-clone-init.sh full-reset-clean'), before relying on the history file(s) staying empty."
 
     for f in /root/.ssh/known_hosts "/home/${RUNNER_USER}/.ssh/known_hosts" "/opt/${RUNNER_USER}/.ssh/known_hosts"; do
         if sudo -n test -f "$f" 2>/dev/null; then
@@ -883,22 +1108,91 @@ cmd_full_reset_clean() {
         fi
     done
 
+    # What: Regenerate hostid/machine-id BEFORE the journal-directory sweep
+    #   below, and validate the resulting machine-id before using it.
+    # Why: The previous order excluded the CURRENT (still-cloned)
+    #   machine-id's journal directory from removal, then only regenerated
+    #   the id afterward in dedupe_host_identity -- so the excluded
+    #   directory was already stale again the instant this function
+    #   returned, and never actually cleaned up on any later run either
+    #   (each run would newly exclude whatever the previous run's id had
+    #   become). Regenerating FIRST means the sweep below always excludes
+    #   only the id this host is about to actually use, and removes every
+    #   OTHER directory -- including the one just superseded -- so the
+    #   host converges to a single current journal directory. An empty
+    #   post-regeneration machine-id (dedupe_host_identity failing
+    #   silently, e.g. sudo -n rejected for one of its own sub-commands)
+    #   must not fall through to the `! -name ""`-matches-everything trap
+    #   that would otherwise delete this host's own just-created journal
+    #   directory too (see PRRT_kwDOS--bIM6bC3v0). Independently confirmed
+    #   by the parallel batch-3 review pass as the same root cause
+    #   (non-convergence across repeat runs) -- one merged fix here.
+    # From: #1624 (PRRT_kwDOS--bIM6bC3v0, PRRT_kwDOS--bIM6bDjcU, PRRT_kwDOS--bIM6bD2UI)
+    echo "--- hostid / machine-id ---"
+    dedupe_host_identity
+
+    echo
+    echo "--- SSH host keys (server identity) ---"
+    regenerate_ssh_host_keys
+
+    local current_machine_id
+    current_machine_id="$(cat /etc/machine-id 2>/dev/null || true)"
+    if [[ -z "$current_machine_id" ]]; then
+        echo "ERROR: /etc/machine-id is empty or unreadable immediately after regeneration -- skipping the journal-directory sweep rather than risk deleting this host's own current journal data." >&2
+    else
+        # What: Capture the search's full output and exit status into a
+        #   variable BEFORE looping over it, per this repo's own documented
+        #   AG-VAL-032 pattern (same fix applied to every search/deletion
+        #   loop in this function and in full-reset-check).
+        # Why: See full-reset-check's own comment on this same pattern --
+        #   a process-substitution loop over a live producer discards the
+        #   producer's own exit status, letting a real search failure
+        #   (permission denied, I/O error) present as "nothing to remove"
+        #   instead of a surfaced error.
+        # From: #1624 (PRRT_kwDOS--bIM6bC3vX)
+        local jd_output jd_status=0
+        jd_output="$(sudo -n find /var/log/journal -mindepth 1 -maxdepth 1 -type d ! -name "$current_machine_id" 2>&1)" || jd_status=$?
+        if [[ "$jd_status" -ne 0 && -n "$jd_output" ]]; then
+            echo "WARNING: journal directory search exited with status $jd_status: $jd_output" >&2
+        fi
+        local jd
+        while IFS= read -r jd; do
+            [[ -n "$jd" ]] || continue
+            echo "Removing stale journal dir: $jd"
+            sudo -n rm -rf -- "$jd"
+        done <<<"$jd_output"
+    fi
+
     # hd: an unowned /home dir only proves no CURRENT passwd entry has that
     # name -- it does NOT prove the directory is clone residue rather than,
     # e.g., a deliberately kept backup of a since-deleted account, or a
-    # mounted data volume with no matching passwd entry at all. Report-only,
-    # same reasoning already applied below to authorized_keys and apt/dpkg
-    # history: this script must never guess "no current owner" means "safe
-    # to delete" for something as broad as an entire home directory tree.
+    # mounted data volume with no matching passwd entry at all. Report-only
+    # (batch-3 finding), same reasoning already applied below to
+    # authorized_keys and apt/dpkg history: this script must never guess
+    # "no current owner" means "safe to delete" for something as broad as
+    # an entire home directory tree. Also captures the search's own exit
+    # status first (AG-VAL-032) and separately distinguishes a mounted
+    # filesystem (someone else's mounted data, not clone residue) from a
+    # genuinely orphaned directory in the report.
+    # From: #1624 (PRRT_kwDOS--bIM6bC3vX, PRRT_kwDOS--bIM6bC3vS)
+    local hd_output hd_status=0
+    hd_output="$(sudo -n find /home -mindepth 1 -maxdepth 1 -type d 2>&1)" || hd_status=$?
+    if [[ "$hd_status" -ne 0 && -n "$hd_output" ]]; then
+        echo "WARNING: /home search exited with status $hd_status: $hd_output" >&2
+    fi
     local hd
     while IFS= read -r hd; do
         [[ -n "$hd" ]] || continue
         local uname
         uname="$(basename "$hd")"
         if ! getent passwd "$uname" >/dev/null 2>&1; then
-            echo "REPORT ONLY, not removed: orphaned home directory $hd (no current passwd entry named '$uname' -- review by hand before deleting; could be a kept backup or a mounted data volume, not necessarily clone residue)"
+            if mountpoint -q "$hd" 2>/dev/null; then
+                echo "REPORT ONLY, not removed: $hd is a separate mounted filesystem with no /etc/passwd entry named '$uname' -- not clone residue, leave it mounted."
+            else
+                echo "REPORT ONLY, not removed: orphaned home directory $hd (no current passwd entry named '$uname' -- review by hand before deleting; could be a kept backup, not necessarily clone residue)"
+            fi
         fi
-    done < <(sudo -n find /home -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
+    done <<<"$hd_output"
 
     # Exact allowlist of confirmed one-off template-authoring artifacts
     # (see this mode's own header/full-reset-check's report section above),
@@ -906,7 +1200,7 @@ cmd_full_reset_clean() {
     # for detection: a legitimate regular file that happens to
     # case-insensitively match that pattern (e.g. a maintainer's own
     # `prepare-template-backup.sh`) would otherwise be deleted here despite
-    # having no established clone provenance.
+    # having no established clone provenance. (batch-3 finding)
     local -a known_template_scripts=(prepare-proxmox-template.sh)
     local ts
     for ts in "${known_template_scripts[@]}"; do
@@ -919,29 +1213,11 @@ cmd_full_reset_clean() {
     echo "--- /etc/hosts self-reference for current hostname ---"
     ensure_hosts_self_reference fix
 
-    # hostid/machine-id regeneration MUST run before the journal-dir sweep
-    # below, not after: dedupe_host_identity both writes a NEW machine-id
-    # and restarts systemd-journald, which creates a fresh
-    # /var/log/journal/<new-id> directory. Running the identity regen AFTER
-    # the journal sweep (as this used to) meant the directory the sweep had
-    # just kept (matching the OLD machine-id, current at sweep time)
-    # immediately became the next stale directory the moment the ID
-    # changed -- so full-reset-check would report a fresh "stale journal
-    # dir" finding right after every single full-reset-clean run, and
-    # repeated clean runs could never converge to zero findings.
-    echo "--- hostid / machine-id ---"
-    dedupe_host_identity
-
-    local jd
-    while IFS= read -r jd; do
-        [[ -n "$jd" ]] || continue
-        echo "Removing stale journal dir: $jd"
-        sudo -n rm -rf -- "$jd"
-    done < <(sudo -n find /var/log/journal -mindepth 1 -maxdepth 1 -type d ! -name "$(cat /etc/machine-id 2>/dev/null)" 2>/dev/null)
-
     echo
     echo "full-reset-clean complete. NOT touched (report-only, see full-reset-check):"
-    echo "  - /root/.ssh/authorized_keys (review any FOREIGN entries by hand)"
+    echo "  - orphaned /home directories (review by hand -- could be a kept backup, not necessarily clone residue)"
+    echo "  - /root/.ssh/authorized_keys and RUNNER_USER's own authorized_keys (review any FOREIGN entries by hand)"
+    echo "  - private SSH client keys (id_*) under root's/RUNNER_USER's .ssh (rotate/remove by hand)"
     echo "  - apt/dpkg history log content (a real audit trail, never rewritten)"
     echo "Re-run 'full-reset-check' to confirm."
 }
