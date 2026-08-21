@@ -1310,7 +1310,7 @@ fn write_ui_settings_file(target: &Path, values: &[(&str, String)]) -> Result<()
 // new mode requires (reconcile_dhcp_mode_start).
 //
 // Ordering here is deliberate and has three guards against the ways this can
-// go wrong (#671, #1486):
+// go wrong (#671):
 //   1. Before any Docker call at all, check_settings_dir_writable catches
 //      the common failure mode (full/read-only ui-data volume, bad
 //      permissions) up front, so no container is touched for a save that
@@ -1319,7 +1319,7 @@ fn write_ui_settings_file(target: &Path, values: &[(&str, String)]) -> Result<()
 //      dnsmasq sub-mode switch (ProxyDHCP <-> Relay) must not restart
 //      dhcp-proxy before the new DHCP_MODE is actually on disk, or the
 //      freshly-started container rereads its OLD sub-mode from the
-//      still-unwritten settings file (issue #1486) -- see
+//      still-unwritten settings file -- see
 //      reconcile_dhcp_mode_stop/reconcile_dhcp_mode_start's own comments.
 //   3. If persist_ui_settings fails, the stop phase has already run but
 //      nothing has started under the new mode yet, and the settings file is

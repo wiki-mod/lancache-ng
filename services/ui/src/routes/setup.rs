@@ -3,7 +3,7 @@
 //! SPDX-License-Identifier: AGPL-3.0-or-later
 //! First-run setup wizard displaying network configuration details, the
 //! ongoing release-channel / scheduled-update settings control (#819), and
-//! the Admin UI's own self-restart control (#1486).
+//! the Admin UI's own self-restart control.
 //!
 //! Unlike DHCP mode (routes/dhcp.rs), the release-channel/auto-update save
 //! never touches Docker at all: both settings are consumed entirely on the
@@ -171,7 +171,7 @@ pub struct RestartUiServiceForm {
 // browser cannot follow a normal redirect here, since the process serving it
 // is about to disappear. Poll /health (this service's own unauthenticated
 // liveness probe, see main.rs) until it responds, then navigate to /setup --
-// the same bounded-handoff shape the maintainer decided on for issue #1486.
+// the same bounded-handoff shape the maintainer decided on for this feature.
 // The first poll attempt is deliberately delayed so the operator sees this
 // page for a moment rather than an instant flash if the still-running old
 // process happens to answer /health before the restart below has landed.
@@ -233,13 +233,13 @@ pub async fn restart_ui_service(
     let restart_state = state.clone();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(750)).await;
-        if let Err(err) = docker_client::restart_service(
+        let restart_result = docker_client::restart_service(
             &restart_state.docker,
             "ui",
             &restart_state.config.container_suffix,
         )
-        .await
-        {
+        .await;
+        if let Err(err) = restart_result {
             tracing::error!(
                 error = %err,
                 "operator-requested Admin UI self-restart failed"

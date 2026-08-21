@@ -169,7 +169,7 @@ fn validate_ntp_upstream_servers(raw: &str) -> Result<String, String> {
 // unchanged, so an operator's own per-subnet customization (set while
 // auto-populate was off) is never touched by an unrelated settings save.
 //
-// Ordering (issue #1486): if the container is already running (staying
+// Ordering: if the container is already running (staying
 // enabled), it is stopped BEFORE persist and started again AFTER persist
 // succeeds -- entrypoint.sh only reads NTP_UPSTREAM_SERVERS from the
 // persisted settings file at container start, so restarting before the new
@@ -213,12 +213,9 @@ pub async fn update_ntp_settings(
         //   stopped and unrecovered, not just that the save failed.
         // From: Codex review on PR #1610
         if was_enabled
-            && let Err(rollback_err) = docker_client::start_service(
-                &state.docker,
-                "ntp",
-                &state.config.container_suffix,
-            )
-            .await
+            && let Err(rollback_err) =
+                docker_client::start_service(&state.docker, "ntp", &state.config.container_suffix)
+                    .await
         {
             return Err(NtpError::config_error(format!(
                 "Failed to persist NTP settings ({persist_err}), and restarting NTP after \
@@ -253,7 +250,7 @@ pub async fn update_ntp_settings(
 // Why: called BEFORE persist so an already-enabled config change (e.g. a new
 // upstream server list) forces a real stop -- entrypoint.sh only reads
 // NTP_UPSTREAM_SERVERS at container start, so leaving an already-running
-// container untouched (the pre-#1486 behavior) silently kept serving the
+// container untouched (the pre-fix behavior) silently kept serving the
 // OLD config. A disabled->enabled transition needs no stop here (nothing is
 // running yet); a same-mode disabled resubmit is a harmless idempotent
 // stop_service_if_present no-op.

@@ -66,8 +66,8 @@ setup() {
 
 # What: the settings file's value unconditionally overwrites an
 # already-set env var of the same name, not just fills in an unset one.
-# Why: issue #1486's same-container ProxyDHCP<->Relay restart fix depends
-# on this -- deploy/prod/docker-compose.yml passes a real DHCP_MODE env
+# Why: the same-container ProxyDHCP<->Relay restart fix depends on this --
+# deploy/prod/docker-compose.yml passes a real DHCP_MODE env
 # var into this container (`DHCP_MODE=${DHCP_MODE:-disabled}`), so if the
 # settings-file assignment below were conditional on "unset", a freshly
 # persisted DHCP_MODE would never actually take effect on restart.

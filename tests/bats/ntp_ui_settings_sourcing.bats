@@ -65,8 +65,8 @@ setup() {
 
 # What: the settings file's value unconditionally overwrites an
 # already-set env var of the same name, not just fills in an unset one.
-# Why: issue #1486's enabled-to-enabled NTP upstream-server restart fix
-# depends on this -- config/prod/ntp.env sets a real default
+# Why: the enabled-to-enabled NTP upstream-server restart fix depends on
+# this -- config/prod/ntp.env sets a real default
 # NTP_UPSTREAM_SERVERS env var, so if the settings-file assignment below
 # were conditional on "unset", a freshly persisted upstream-server list
 # would never actually take effect on restart.
