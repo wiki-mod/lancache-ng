@@ -43,11 +43,18 @@ ARG GOLANG_X_TEXT_VERSION=0.41.0
 # v0.36.1 floors at the CVE-2026-17106-affected v0.2.1.
 # From: Issue #1598
 ARG MOBY_GO_ARCHIVE_VERSION=0.3.3
+# What: pins buildx/compose/cli's vendored golang.org/x/mod dependency at or
+# above their own go.mod/vendor.mod floor.
+# Why: same lagged-CVE pattern as the overrides above (AG-KD-003); all three
+# floor at v0.38.0 (CVE-2026-56864/56865), so 0.40.0 -- the fix version --
+# keeps this override current.
+# From: Issue #1598
+ARG GOLANG_X_MOD_VERSION=0.40.0
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # What: builds actionlint/Docker CLI/docker-compose/buildx from source, with
-# grpc-go/containerd/x-text/go-archive vendor bumps applied via
+# grpc-go/containerd/x-text/go-archive/x-mod vendor bumps applied via
 # go.mod/vendor.mod swaps.
 # Why: gets a current Go stdlib without waiting on upstream; each tool's own
 # module quirks (vendor.mod-only, exclude directives) rule out `go install`.
@@ -62,6 +69,7 @@ RUN set -euo pipefail; \
       && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
       && go get "golang.org/x/text@v${GOLANG_X_TEXT_VERSION}" \
       && go get "github.com/moby/go-archive@v${MOBY_GO_ARCHIVE_VERSION}" \
+      && go get "golang.org/x/mod@v${GOLANG_X_MOD_VERSION}" \
       && go mod vendor \
       && go build -ldflags "-X github.com/docker/buildx/version.Version=v${DOCKER_BUILDX_VERSION}" -o /out/docker-buildx ./cmd/buildx ); \
     rm -rf "$buildx_src"; \
@@ -73,6 +81,7 @@ RUN set -euo pipefail; \
       && ln -s vendor.mod go.mod && ln -s vendor.sum go.sum \
       && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
       && go get "golang.org/x/text@v${GOLANG_X_TEXT_VERSION}" \
+      && go get "golang.org/x/mod@v${GOLANG_X_MOD_VERSION}" \
       && go mod vendor \
       && rm go.mod go.sum \
       && VERSION="${DOCKER_CLI_VERSION}" sh ./scripts/build/binary ); \
@@ -84,6 +93,7 @@ RUN set -euo pipefail; \
     ( cd "$compose_src" \
       && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
       && go get "golang.org/x/text@v${GOLANG_X_TEXT_VERSION}" \
+      && go get "golang.org/x/mod@v${GOLANG_X_MOD_VERSION}" \
       && go build -ldflags "-X github.com/docker/compose/v5/internal.Version=${DOCKER_COMPOSE_VERSION}" -o /out/docker-compose ./cmd ); \
     rm -rf "$compose_src"; \
     /out/docker-compose version
