@@ -198,10 +198,18 @@ const RESTART_UI_PAGE: &str = r##"<!DOCTYPE html>
   <p>Diese Seite leitet automatisch weiter, sobald die Admin-UI wieder erreichbar ist.</p>
 </div>
 <script>
+// What: only treats a 200 as recovery once a prior poll has already
+//   observed the instance down (non-ok or unreachable).
+// Why: a 200 alone does not prove the restart happened -- the old process
+//   may still answer /health if the restart was rejected or hasn't stopped it.
+// From: Codex review on PR #1610
+var sawDown = false;
 function pollHealth() {
   fetch('/health', { cache: 'no-store' }).then(function (res) {
-    if (res.ok) { window.location.href = '/setup'; } else { setTimeout(pollHealth, 1000); }
-  }).catch(function () { setTimeout(pollHealth, 1000); });
+    if (res.ok && sawDown) { window.location.href = '/setup'; return; }
+    sawDown = sawDown || !res.ok;
+    setTimeout(pollHealth, 1000);
+  }).catch(function () { sawDown = true; setTimeout(pollHealth, 1000); });
 }
 setTimeout(pollHealth, 1500);
 </script>
@@ -209,15 +217,10 @@ setTimeout(pollHealth, 1500);
 </html>
 "##;
 
-// What: validates the request, hands the browser this bounded-handoff page,
-// then restarts the `ui` container from a detached background task.
-// Why: the process serving this very request is about to be killed and
-// restarted by Docker -- the container restart must not run in-line with
-// this request, or the response could never be sent at all. Spawning it
-// means the response is queued for delivery before the restart is
-// requested; the fixed delay below is a best-effort head start for that
-// delivery, not a guarantee -- RESTART_UI_PAGE's /health poll on the
-// browser side is what actually makes this safe end-to-end.
+// What: validates the request, hands back the bounded-handoff page, then
+//   restarts `ui` from a detached background task.
+// Why: this process is about to be killed by its own restart, so the restart
+//   must run out-of-line, or the response could never be sent at all.
 // From: Issue #1486
 pub async fn restart_ui_service(
     State(state): State<Arc<AppState>>,

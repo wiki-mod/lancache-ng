@@ -206,16 +206,25 @@ pub async fn update_ntp_settings(
     );
 
     if let Err(persist_err) = persist_result {
-        // The settings file's temp-file-then-rename write never completed
-        // (see write_ui_settings_file), so it still holds the OLD (correct,
-        // still-current) settings. If the stop above actually stopped a
-        // running container, best-effort restart it now so the running
-        // service matches what is actually persisted, rather than leaving
-        // NTP down after a save that did not take effect.
-        if was_enabled {
-            let _ =
-                docker_client::start_service(&state.docker, "ntp", &state.config.container_suffix)
-                    .await;
+        // What: if the rollback restart below also fails, combine both
+        //   errors instead of only reporting the persist failure.
+        // Why: mirrors dhcp.rs's persist-then-rollback pattern -- silently
+        //   discarding a rollback failure would hide that NTP is now
+        //   stopped and unrecovered, not just that the save failed.
+        // From: Codex review on PR #1610
+        if was_enabled
+            && let Err(rollback_err) = docker_client::start_service(
+                &state.docker,
+                "ntp",
+                &state.config.container_suffix,
+            )
+            .await
+        {
+            return Err(NtpError::config_error(format!(
+                "Failed to persist NTP settings ({persist_err}), and restarting NTP after \
+                 that failure also failed ({rollback_err}). NTP is now stopped and needs \
+                 manual recovery.",
+            )));
         }
         return Err(NtpError::config_error(persist_err.to_string()));
     }

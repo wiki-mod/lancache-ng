@@ -529,7 +529,9 @@ pub async fn rotate_token(
 pub async fn reload_nats_conf(
     state: &AppState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    update_nats_conf(state).await?;
+    if !update_nats_conf(state).await? {
+        return Ok(());
+    }
     docker_client::restart_service(
         &state.docker,
         &state.config.nats_service,
@@ -543,9 +545,14 @@ pub async fn reload_nats_conf(
     .map_err(|e| format!("Failed to restart NATS service: {e:#}").into())
 }
 
+// What: returns whether the fragment actually changed on disk.
+// Why: every UI startup calls reload_nats_conf, including after a UI
+//   self-restart -- restarting NATS unconditionally on an unchanged
+//   fragment would drop live client connections for nothing.
+// From: Codex review on PR #1610
 pub async fn update_nats_conf(
     state: &AppState,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     // Keep the full credential preflight even though the fragment itself only
     // references usernames: the responder connects with the callout password
     // and the DNS roles connect with theirs, so a missing credential is still
@@ -563,7 +570,21 @@ pub async fn update_nats_conf(
         &state.nats_callout_xkey_public_key,
     );
 
-    write_nats_conf_atomically(&state.config.nats_auth_callout_path, &fragment)
+    if !nats_conf_fragment_changed(&state.config.nats_auth_callout_path, &fragment) {
+        return Ok(false);
+    }
+
+    write_nats_conf_atomically(&state.config.nats_auth_callout_path, &fragment)?;
+    Ok(true)
+}
+
+// What: true only when `rendered` differs from what is currently on disk at
+//   `path` (a missing/unreadable file counts as "differs").
+// Why: pulled out as its own pure function so the skip-vs-write decision is
+//   directly unit-testable, same rationale as render_nats_auth_callout below.
+// From: Codex review on PR #1610
+fn nats_conf_fragment_changed(path: &str, rendered: &str) -> bool {
+    fs::read_to_string(path).ok().as_deref() != Some(rendered)
 }
 
 // Pulled out of update_nats_conf as a pure, I/O-free function (#640, follow-
@@ -863,6 +884,31 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
             .count();
         assert_eq!(leftovers, 0, "no .tmp-* file may survive either write");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn nats_conf_fragment_changed_is_false_only_when_content_matches_what_is_on_disk() {
+        let dir = temp_dir("nats-conf-fragment-changed");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("auth_callout.conf");
+        let path_str = path.to_str().unwrap();
+
+        assert!(
+            nats_conf_fragment_changed(path_str, "fragment-v1"),
+            "a missing file must count as changed"
+        );
+
+        write_nats_conf_atomically(path_str, "fragment-v1").unwrap();
+        assert!(
+            !nats_conf_fragment_changed(path_str, "fragment-v1"),
+            "identical on-disk content must not count as changed"
+        );
+        assert!(
+            nats_conf_fragment_changed(path_str, "fragment-v2"),
+            "different content must count as changed"
+        );
+
         fs::remove_dir_all(dir).unwrap();
     }
 }
