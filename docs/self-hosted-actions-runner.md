@@ -221,9 +221,12 @@ Use `required` for trusted self-hosted LAN runners where Redis is expected to
 be reachable. Use `optional` or `off` when moving jobs to runners that do not
 have access to the Redis cache.
 
-When `SCCACHE_REDIS_MODE=required`, the runner must have `sccache` available in
-`PATH`. Install it from source and keep the installed binary on the runner
-service account's `PATH`.
+When `SCCACHE_REDIS_MODE=required`, the runner must have the project's
+Redis/dist-client-enabled `sccache` binary available in `PATH`. Provision the
+validated binaries with `tools/runner-host/lancache-ci-runner-clone-init.sh
+sccache-fetch`; do not copy client configuration between hosts. The composite
+action creates the runtime configuration from GitHub Secrets for each job and
+publishes its temporary path through `SCCACHE_CONF`.
 
 ## CodeQL
 
