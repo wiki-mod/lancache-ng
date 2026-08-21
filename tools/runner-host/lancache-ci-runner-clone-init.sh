@@ -953,20 +953,38 @@ HOOKEOF
 # network state" collisions this project has hit.
 #
 # Only removes lancache-ng-validation_* networks that currently have ZERO
-# attached containers. A network with active containers is left alone
-# unconditionally -- this host runs multiple runner processes sharing one
-# Docker daemon, so a network could belong to a job still in progress on a
-# sibling runner process right now, and this hook must never touch that.
+# attached containers AND are older than a grace window. A network with
+# active containers is left alone unconditionally -- this host runs
+# multiple runner processes sharing one Docker daemon, so a network could
+# belong to a job still in progress on a sibling runner process right now,
+# and this hook must never touch that. The age check exists because "zero
+# attached containers" alone does not prove a network is orphaned: a
+# sibling job's `docker compose up` can create its network moments before
+# attaching its first container, and this hook running in exactly that
+# window would otherwise see 0 containers on an active job's own network
+# and delete it out from under it. A network old enough to clear the grace
+# window and still show 0 containers has had ample time for its own job's
+# first container to attach, so it is genuinely orphaned.
 set -euo pipefail
+
+VALIDATION_NETWORK_MIN_AGE_SECONDS="${VALIDATION_NETWORK_MIN_AGE_SECONDS:-120}"
 
 for net in $(docker network ls --filter name=lancache-ng-validation --format '{{.Name}}'); do
     containers=$(docker network inspect "$net" --format '{{len .Containers}}' 2>/dev/null || echo "0")
-    if [ "$containers" -eq 0 ]; then
-        echo "[cleanup-hook] removing orphaned validation network: $net (0 attached containers)"
-        docker network rm "$net" || echo "[cleanup-hook] WARNING: failed to remove $net, leaving in place"
-    else
+    if [ "$containers" -ne 0 ]; then
         echo "[cleanup-hook] leaving $net alone, $containers active container(s) attached"
+        continue
     fi
+    created=$(docker network inspect "$net" --format '{{.Created}}' 2>/dev/null || echo "")
+    created_epoch=$(date -d "$created" +%s 2>/dev/null || echo "0")
+    now_epoch=$(date +%s)
+    age=$(( now_epoch - created_epoch ))
+    if [ "$created_epoch" -eq 0 ] || [ "$age" -lt "$VALIDATION_NETWORK_MIN_AGE_SECONDS" ]; then
+        echo "[cleanup-hook] leaving $net alone, 0 attached containers but created only ${age}s ago (younger than the ${VALIDATION_NETWORK_MIN_AGE_SECONDS}s grace window) -- may belong to a sibling job that has not attached its first container yet"
+        continue
+    fi
+    echo "[cleanup-hook] removing orphaned validation network: $net (0 attached containers, created ${age}s ago)"
+    docker network rm "$net" || echo "[cleanup-hook] WARNING: failed to remove $net, leaving in place"
 done
 
 # Reset ownership of THIS job's own workspace back to the runner's own user.
