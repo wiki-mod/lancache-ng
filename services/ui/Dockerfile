@@ -275,6 +275,12 @@ cat > /usr/local/lib/lancache-ui-build-accel.sh <<'LANCACHE_UI_HELPERS_EOF'
       rm -f /tmp/ccache-toolchain-id /tmp/ccache-remote-toolchain-id; \
       export CC=cc GCC=gcc CXX=c++ GXX=g++; \
     }; \
+    # What: the cache key below only reflects whichever single farm host
+    #   answered this build's own probe, not every DISTCC_POTENTIAL_HOSTS entry.
+    # Why: a heterogeneous farm could mix cache entries across compilers;
+    #   verified 2026-08-21 (real SSH, 6 old+new fleet hosts) all run
+    #   identical Debian trixie/GCC 14.2.0-19, so this gap is not live today.
+    # From: Codex review on PR #1612
     configure_ccache() { \
       if [ "${distcc_enabled:-0}" = "1" ] && [ -s /run/secrets/ccache_redis_url ]; then \
         if [ ! -s /tmp/ccache-remote-toolchain-id ]; then \
