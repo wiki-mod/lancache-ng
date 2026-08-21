@@ -894,17 +894,11 @@ saf_base_commit_has_confirmed_run() {
 
 # saf_legacy_sha_image_ref <repository> <service> <commit> <git_dir>
 #
-# What: probes <commit>'s legacy 7-char short-SHA GHCR tag for <service>,
-#   echoing its own reference on a hit only if the tag's own
-#   org.opencontainers.image.revision label exactly matches <commit>;
-#   non-zero, no output, on a miss OR a mismatch.
-# Why: uses `git rev-parse --short=7` (a real object-database lookup) to
-#   get GHCR's exact stored bytes, never a local ${VAR:0:7} slice -- exempt
-#   from check-deny-short-sha.sh's guard for that reason, not an oversight.
-#   The 7-char tag name itself does not uniquely encode the full commit, so
-#   a readable label alone is not proof it is THIS commit's build -- a short
-#   SHA collision (accidental or a retagged/overwritten legacy tag) would
-#   otherwise be accepted silently.
+# What: probes <commit>'s legacy 7-char short-SHA tag for <service>, echoing
+#   it only if the tag's own revision label matches <commit>.
+# Why: `git rev-parse --short=7` (a real lookup, not a ${VAR:0:7} slice) is
+#   exempt from check-deny-short-sha.sh's guard; the revision check stops a
+#   short-SHA collision or overwritten tag from being accepted on label alone.
 # From: Issue #1095 (G2) | PR #1611
 saf_legacy_sha_image_ref() {
   local repository="${1:?saf_legacy_sha_image_ref: repository is required}"
@@ -1362,14 +1356,11 @@ saf_find_built_ancestor() {
         printf '%s\n' "$candidate"
         return 0
       fi
-      # What: tries $candidate's own legacy short-SHA tag once, non-polling,
-      #   before giving up on this fast path -- the same single-probe
-      #   fallback the run-bearing waits below already get.
+      # What: tries $candidate's own legacy short-SHA tag once before this
+      #   fast path gives up, matching the run-bearing waits below.
       # Why: without this, an untouched pre-cutover candidate whose only
-      #   real tag is the legacy short-SHA form was skipped even though its
-      #   image genuinely exists, because this branch's full-SHA probe
-      #   above is a one-shot miss and previously fell straight to
-      #   `continue` without ever trying the legacy form.
+      #   real tag is the legacy form was skipped past on a one-shot
+      #   full-SHA miss that never reached the legacy probe.
       # From: Issue #1095 (G2) | PR #1611
       local legacy_image
       if legacy_image="$(saf_legacy_sha_image_ref "$repository" "$service" "$candidate" "$git_dir")"; then
