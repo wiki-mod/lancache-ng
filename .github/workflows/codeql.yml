@@ -143,11 +143,11 @@ jobs:
 
           # Same base/before resolution build-push.yml's detect-changes job
           # uses (#536's merge-base fix so an unrelated already-merged base
-          # change isn't misattributed to this branch; #1095's push
-          # before-SHA fallback for an all-zeros/force-pushed/unreachable
-          # base) -- mirrored inline rather than imported, since GitHub
-          # Actions has no cross-workflow step/job reuse for plain
-          # (non-reusable) workflows.
+          # change isn't misattributed to this branch; a push before-SHA
+          # fallback for an all-zeros/force-pushed/unreachable base) --
+          # mirrored inline rather than imported, since GitHub Actions has
+          # no cross-workflow step/job reuse for plain (non-reusable)
+          # workflows.
           changed_files="$(mktemp)"
           force_all=false
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
