@@ -792,9 +792,15 @@ cmd_purge_pve_check() {
     echo "--- Current RSS held by pve-related processes ---"
     local rss_mb
     # `ps aux` (not pgrep) is needed here for its RSS column ($6); pgrep
-    # alone cannot report memory usage.
-    # shellcheck disable=SC2009
-    rss_mb="$(ps aux 2>/dev/null | grep -E 'pve|pmxcfs|corosync|spiceproxy|qmeventd' | grep -v grep | awk '{sum+=$6} END {if (sum) print sum/1024; else print 0}')"
+    # alone cannot report memory usage. Filtering happens entirely inside
+    # this one awk (not a `grep -E ... | grep -v grep` pipeline feeding it):
+    # under `set -euo pipefail`, a host with currently zero matching
+    # processes made the first grep exit 1, which pipefail propagated as
+    # this whole assignment's exit status even though awk's own END block
+    # still correctly printed 0 -- silently killing purge-pve-check via
+    # `set -e` on exactly the "already clean" host state this mode exists
+    # to report on.
+    rss_mb="$(ps aux 2>/dev/null | awk '$0 !~ /awk/ && /pve|pmxcfs|corosync|spiceproxy|qmeventd/ {sum+=$6} END {if (sum) print sum/1024; else print 0}')"
     echo "  ${rss_mb:-0} MB"
     echo
     echo "--- Simulated purge (no kernel/firmware package must appear below) ---"
@@ -834,24 +840,67 @@ cmd_purge_pve() {
     echo "Overriding pve-apt-hook's proxmox-ve removal guard (deliberate, confirmed"
     echo "real on .81 -- apt otherwise refuses to remove the proxmox-ve meta-package)."
     sudo -n touch /please-remove-proxmox-ve
+    # Cleanup trap, not a one-off removal at the end of this function: if
+    # `apt-get purge`/`autoremove` below aborts under `set -e` (a dpkg
+    # error, a full filesystem, ...), execution never reaches an
+    # end-of-function removal line, and this marker -- which overrides
+    # pve-apt-hook's own removal guard -- would stay in place permanently,
+    # silently disabling that guard's protection for any LATER, unrelated
+    # package operation on this host too. An EXIT trap fires on every path
+    # out of this function, including one `set -e` triggers.
+    trap 'sudo -n rm -f /please-remove-proxmox-ve' EXIT
 
     echo "Purging..."
     # shellcheck disable=SC2046
     sudo -n DEBIAN_FRONTEND=noninteractive apt-get purge -y $(purge_pve_package_list) 2>&1
 
-    echo "Running apt autoremove (kernel/firmware packages are still manually"
-    echo "installed / depended-on and will not be swept by this)..."
+    # Validate the autoremove target list before running it for real: the
+    # earlier five-name kernel/firmware guard only labels an already-decided
+    # match, it never limits what THIS transaction can actually remove -- a
+    # package that is merely mismarked "automatically installed" (e.g. a
+    # runner tool this host still needs) could otherwise be swept away
+    # silently. Simulate first and refuse if anything outside the expected
+    # PVE-dependency namespace, or any kernel/firmware package, would be
+    # removed.
+    echo "Validating apt autoremove's target list before running it for real..."
+    local autoremove_sim
+    autoremove_sim="$(sudo -n DEBIAN_FRONTEND=noninteractive apt-get autoremove --simulate 2>&1)"
+    local autoremove_unexpected
+    autoremove_unexpected="$(grep -E '^Remv ' <<<"$autoremove_sim" | grep -viE 'pve-|proxmox-|libpve-|libproxmox-|pmxcfs|corosync|spice' || true)"
+    if [[ -n "$autoremove_unexpected" ]] || grep -qiE 'proxmox-kernel|proxmox-default-kernel|proxmox-kernel-helper|pve-firmware|pve-edk2-firmware' <<<"$autoremove_sim"; then
+        echo "ERROR: apt autoremove's simulated target list includes package(s) outside the expected PVE-dependency set (or a kernel/firmware package) -- refusing to run it automatically. Review and run 'apt-get autoremove' by hand if these removals are genuinely intended:" >&2
+        echo "$autoremove_sim" >&2
+        return 1
+    fi
+    echo "Running apt autoremove (validated above as PVE-only; kernel/firmware packages"
+    echo "are still manually installed / depended-on and will not be swept by this)..."
     sudo -n DEBIAN_FRONTEND=noninteractive apt-get autoremove -y 2>&1
 
     echo
     echo "--- Verification ---"
     echo "Remaining pve-*/proxmox-*/corosync/pmxcfs packages (should be kernel/firmware only):"
-    dpkg -l 2>/dev/null | grep -iE '^ii.*(pve-|proxmox-|pmxcfs|corosync)' || echo "  (none)"
+    local remaining_pkgs
+    remaining_pkgs="$(dpkg -l 2>/dev/null | grep -iE '^ii.*(pve-|proxmox-|pmxcfs|corosync)' || true)"
+    echo "${remaining_pkgs:-  (none)}"
+    local remaining_unexpected_pkgs
+    remaining_unexpected_pkgs="$(grep -viE 'proxmox-kernel|proxmox-default-kernel|proxmox-kernel-helper|pve-firmware|pve-edk2-firmware' <<<"$remaining_pkgs" || true)"
+
     echo "Remaining pve-related processes (should be none):"
     # Listing full command lines for a human to read is the point here, not
     # just matching PIDs (pgrep -l truncates).
     # shellcheck disable=SC2009
-    ps aux 2>/dev/null | grep -E 'pve|pmxcfs|corosync|spiceproxy|qmeventd' | grep -v grep || echo "  (none)"
+    local remaining_procs
+    remaining_procs="$(ps aux 2>/dev/null | grep -E 'pve|pmxcfs|corosync|spiceproxy|qmeventd' | grep -v grep || true)"
+    echo "${remaining_procs:-  (none)}"
+
+    # Fail hard on any real remnant instead of only echoing it: a caller
+    # (human or automation) reading only this mode's exit status must not
+    # see 0 when the announced cleanup did not actually finish.
+    if [[ -n "$remaining_unexpected_pkgs" ]] || [[ -n "$remaining_procs" ]]; then
+        echo "ERROR: purge-pve did not fully remove the PVE stack -- a non-kernel/firmware package and/or process still remains (see above). This is NOT a clean purge." >&2
+        return 1
+    fi
+
     echo
     echo "purge-pve complete. Recommended next steps, not automated by this mode:"
     echo "  - verify docker/network/the runner service still work"
