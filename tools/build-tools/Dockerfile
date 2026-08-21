@@ -13,7 +13,7 @@ FROM golang:latest AS actionlint-builder
 
 ARG ACTIONLINT_VERSION=1.7.12
 ARG DOCKER_CLI_VERSION=29.7.2
-ARG DOCKER_COMPOSE_VERSION=5.4.0
+ARG DOCKER_COMPOSE_VERSION=5.5.0
 ARG DOCKER_BUILDX_VERSION=0.36.1
 # What: pins buildx's vendored containerd/containerd/v2 dependency at or
 # above buildx's own upstream go.mod floor.
