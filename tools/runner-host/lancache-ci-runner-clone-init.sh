@@ -265,10 +265,19 @@ is_foreign_authorized_keys_line() {
     local my_token
     my_token="$(own_host_token)"
     [[ -n "$my_token" ]] || return 1
-    # Look for a "gh-lancache-<word>-<digits>" or "lancache-runner-<digits>"
-    # style host-identity token in the comment field, and flag it only if
-    # the digits segment differs from this host's own.
-    if [[ "$line" =~ (gh-lancache-[a-z]+-[0-9]+-([0-9]+)|lancache-runner-([0-9]+)) ]]; then
+    # Look for this fleet's own "gh-lancache-<tier>-<group>-<hostnum>" or
+    # "<letter>-lancache-runner-<hostnum>" host-identity naming scheme in the
+    # comment field, and flag it only if the TRAILING digit run differs from
+    # this host's own token. The middle "group" segment is deliberately
+    # matched loosely ([A-Za-z0-9]+, not [0-9]+) -- confirmed real on host
+    # .81 (2026-08-21): the template's own leftover root authorized_keys
+    # comment was "root@gh-lancache-light-A-80", where "A" is a letter, not
+    # a number, so an earlier digits-only version of this pattern silently
+    # failed to match it. Deliberately anchored to these specific fleet
+    # naming prefixes (not "any trailing digits in any comment") so an
+    # unrelated key comment containing a date or other number (e.g.
+    # "discord-bridge-teamspeak-2026-04-01") is never misflagged.
+    if [[ "$line" =~ (gh-lancache-[a-z]+-[A-Za-z0-9]+-([0-9]+)|[a-z]-lancache-runner-([0-9]+)) ]]; then
         local found="${BASH_REMATCH[2]:-${BASH_REMATCH[3]}}"
         [[ -n "$found" && "$found" != "$my_token" ]] && return 0
     fi
