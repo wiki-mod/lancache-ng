@@ -696,9 +696,12 @@ cmd_clean_archive() {
 #     ever has journal data under its own current machine-id; a leftover
 #     directory under the template's pre-reset machine-id is pure clone
 #     residue, confirmed real on host .81, 2026-08-21);
-#   - remove any /home/<user> directory with no corresponding entry in
-#     /etc/passwd (an orphaned home directory cannot belong to this host --
-#     confirmed real on host .81: /home/tom with no "tom" account at all);
+#   - REPORT ONLY (not removed) any /home/<user> directory with no
+#     corresponding entry in /etc/passwd (an orphaned home directory cannot
+#     belong to this host -- confirmed real on host .81: /home/tom with no
+#     "tom" account at all) -- a mounted filesystem or a kept backup can
+#     look identical to clone residue from inside this survey alone, so
+#     this is left for a human to review and remove by hand;
 #   - remove known one-off template-authoring scripts such as
 #     prepare-proxmox-template.sh from /root -- tooling for turning a VM
 #     INTO a template, actively dangerous if ever run again against an
@@ -1392,9 +1395,16 @@ cmd_purge_pve() {
     echo "Remaining pve-related processes (should be none):"
     # Listing full command lines for a human to read is the point here, not
     # just matching PIDs (pgrep -l truncates).
+    # What: Exclude this script's own process (PID $$) from the match.
+    # Why: Every real invocation's own command line contains the literal
+    # argument "purge-pve", which the 'pve' pattern below matches -- `grep
+    # -v grep` only filters the grep command itself, not this script's own
+    # process, so remaining_procs was never actually empty after a genuinely
+    # successful purge and this mode could never converge.
+    # From: #1624
     local remaining_procs
     # shellcheck disable=SC2009
-    remaining_procs="$(ps aux 2>/dev/null | grep -E 'pve|pmxcfs|corosync|spiceproxy|qmeventd' | grep -v grep || true)"
+    remaining_procs="$(ps aux 2>/dev/null | grep -E 'pve|pmxcfs|corosync|spiceproxy|qmeventd' | grep -v grep | awk -v self="$$" '$2 != self' || true)"
     echo "${remaining_procs:-  (none)}"
 
     # Fail hard on any real remnant instead of only echoing it: a caller
@@ -1831,16 +1841,32 @@ cmd_runner_hook_env() {
     local instance_dir="${1:?Usage: runner-hook-env <instance-dir>}"
     [[ -d "$instance_dir" ]] || { echo "ERROR: '$instance_dir' is not a directory." >&2; return 1; }
     [[ -f "$instance_dir/.env" ]] || { echo "ERROR: '$instance_dir/.env' does not exist yet -- run this AFTER config.sh, not before." >&2; return 1; }
-    if grep -q '^ACTIONS_RUNNER_HOOK_JOB_STARTED=' "$instance_dir/.env" 2>/dev/null \
-        && grep -q '^ACTIONS_RUNNER_HOOK_JOB_COMPLETED=' "$instance_dir/.env" 2>/dev/null; then
-        echo "$instance_dir/.env already has hook wiring, leaving as-is (re-run after a fresh config.sh if the hooks changed)."
+    # What: Compare the existing hook lines' VALUES, not just their presence.
+    # Why: A cloned or stale .env can already carry both variable names with
+    # a wrong/outdated hook path -- checking only that the names exist
+    # reported "already wired" while jobs kept calling the wrong script.
+    # From: #1624
+    local expected_started="ACTIONS_RUNNER_HOOK_JOB_STARTED=${RUNNER_HOOKS_DIR}/pre-job-cleanup.sh"
+    local expected_completed="ACTIONS_RUNNER_HOOK_JOB_COMPLETED=${RUNNER_HOOKS_DIR}/post-job-cleanup.sh"
+    local current_started current_completed
+    current_started="$(grep '^ACTIONS_RUNNER_HOOK_JOB_STARTED=' "$instance_dir/.env" 2>/dev/null || true)"
+    current_completed="$(grep '^ACTIONS_RUNNER_HOOK_JOB_COMPLETED=' "$instance_dir/.env" 2>/dev/null || true)"
+    if [[ "$current_started" == "$expected_started" && "$current_completed" == "$expected_completed" ]]; then
+        echo "$instance_dir/.env already has correct hook wiring, leaving as-is."
         return 0
     fi
+    # Remove any existing (name-matching but value-mismatched) lines before
+    # appending the correct ones, so a stale entry never coexists with the
+    # fresh one and gets read by config.sh's own last-line-wins parsing.
+    if [[ -n "$current_started" || -n "$current_completed" ]]; then
+        sudo sed -i '/^ACTIONS_RUNNER_HOOK_JOB_STARTED=/d; /^ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/d' "$instance_dir/.env"
+        echo "Removed stale hook wiring from $instance_dir/.env (was: ${current_started:-<absent>} / ${current_completed:-<absent>})."
+    fi
     {
-        echo "ACTIONS_RUNNER_HOOK_JOB_STARTED=${RUNNER_HOOKS_DIR}/pre-job-cleanup.sh"
-        echo "ACTIONS_RUNNER_HOOK_JOB_COMPLETED=${RUNNER_HOOKS_DIR}/post-job-cleanup.sh"
+        echo "$expected_started"
+        echo "$expected_completed"
     } | sudo tee -a "$instance_dir/.env" >/dev/null
-    echo "Appended hook wiring to $instance_dir/.env."
+    echo "Appended correct hook wiring to $instance_dir/.env."
 }
 
 # --- sccache-check: verify the sccache client tooling heavy hosts need ----

@@ -164,12 +164,29 @@ bash lancache-ci-runner-clone-init.sh runner-fetch /opt/actions-runner-1
 #     never done by this script (see the script's own header):
 cd /opt/actions-runner-1
 ./config.sh --url <repo-url> --token <registration-token> --name <exact-hostname> --labels <labels>
+
+# 11. REQUIRED immediately after config.sh, before svc.sh install: the
+#     Actions Runner's own config.sh truncates .env (via its bundled
+#     env.sh) before writing its own variables, silently wiping the hook
+#     wiring step 9 wrote. Without this, the runner never calls the
+#     pre/post-job cleanup hooks:
+cd /opt/actions-runner-1
+bash /path/to/lancache-ci-runner-clone-init.sh runner-hook-env /opt/actions-runner-1
+
 sudo ./svc.sh install
 # hold off on 'sudo ./svc.sh start' until the go-ahead to accept real jobs
 ```
 
-Steps 2-5 and 7-8 are conditional (skip a step whose survey found nothing to
-do); steps 1, 6, 9, and 10 apply to every new or disk-cloned host.
+Steps 2, 4-5, and 7-8 are conditional (skip a step whose survey found
+nothing to do); steps 1, 6, 9, 10, and 11 apply to every new or disk-cloned
+host. **Step 3 is NOT conditional on its own survey despite being read-only
+first, unlike the others above** -- `full-reset-check` cannot itself detect
+a duplicated `/etc/hostid`/`/etc/machine-id` (that requires comparing
+against every other host in the fleet, which this script has no way to do
+from inside a single host), so an empty survey result does not mean this
+step is safe to skip on an actual disk clone; always run
+`full-reset-clean` on a disk-cloned host regardless of what
+`full-reset-check` reports.
 
 ## Deploy (to **every** runner host — 229, 240, 241, 243, …)
 

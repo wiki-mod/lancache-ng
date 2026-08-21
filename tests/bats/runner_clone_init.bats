@@ -80,9 +80,9 @@ write_runner_json() {
 }
 
 # --- is_foreign_runner_dir(): tri-state return (0=foreign, 1=own/unregistered,
-#     2=unresolved) -- rewritten by PR #1624's own review pass (batch-2) to
-#     fail CLOSED (foreign, or unresolved) instead of open (NOT foreign)
-#     whenever this host cannot actually prove a directory is its own. Every
+#     2=unresolved) -- fails CLOSED (foreign, or unresolved) instead of open
+#     (NOT foreign) whenever this host cannot actually prove a directory is
+#     its own. Every
 #     scenario below now also controls own_ip_token via stub_ip, not just
 #     own_host_token via stub_hostname, since is_foreign_runner_dir
 #     cross-checks BOTH (own_ip_token is live network config a disk clone
@@ -332,4 +332,44 @@ write_runner_json() {
     run own_primary_ipv4
     [ "$status" -eq 0 ]
     [ -z "$output" ]
+}
+
+# --- own_primary_ipv4() under the REAL production shell options -----------
+#
+# What: exercises `my_ip="$(own_primary_ipv4)"` (the exact call form every
+#   real caller uses) in a fresh subprocess with `set -euo pipefail`
+#   actually active, instead of this suite's own setup() (which
+#   deliberately neutralizes those options right after sourcing so an
+#   unrelated helper elsewhere can't abort the whole bats run).
+# Why: the tests above call `run own_primary_ipv4` directly under bats'
+#   own neutralized options, which proves the function's internal logic
+#   but not that the SAME call form survives under the options its real
+#   callers actually use -- exactly the gap Rule-Ref: AG-VAL-030 requires
+#   closing for a set -e/pipefail-dependent construct. The host .80
+#   incident this function's own header documents was specifically a
+#   `set -e` abort in a CALLER's assignment, not a failure inside
+#   own_primary_ipv4 itself in isolation.
+# From: #1624
+@test "own_primary_ipv4 (real production options): my_ip=\"\$(own_primary_ipv4)\" does not abort under set -euo pipefail, even with a src-less route line" {
+    run bash -c '
+        set -euo pipefail
+        source "'"$target_script"'"
+        ip() { printf "%s\n" "1.1.1.1 via 192.168.1.2 dev vmbr0 proto kernel onlink"; }
+        my_ip="$(own_primary_ipv4)"
+        echo "status=0 my_ip=[$my_ip]"
+    '
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"status=0 my_ip=[]"* ]]
+}
+
+@test "own_primary_ipv4 (real production options): my_ip=\"\$(own_primary_ipv4)\" extracts src under set -euo pipefail" {
+    run bash -c '
+        set -euo pipefail
+        source "'"$target_script"'"
+        ip() { printf "%s\n" "1.1.1.1 via 192.168.1.2 dev vmbr0 src 192.168.1.84 uid 1000"; }
+        my_ip="$(own_primary_ipv4)"
+        echo "status=0 my_ip=[$my_ip]"
+    '
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"status=0 my_ip=[192.168.1.84]"* ]]
 }
