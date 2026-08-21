@@ -2,13 +2,13 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Docker-free, git-free unit coverage for scripts/untracked/classify-image-impact.sh
-# (#819). Feeds canned changed-file lists (via CHANGED_FILES) and asserts the
+# Unit coverage for scripts/untracked/classify-image-impact.sh (#819). Most
+# cases feed canned changed-file lists (via CHANGED_FILES) and assert the
 # per-path booleans this script inherited verbatim from build-push.yml's
-# detect-changes job, plus the additive IMAGE_IMPACT verdict the promote job's
-# version-bump logic consumes. The per-path booleans are covered so the
-# extraction stays byte-for-byte equivalent to the inline job it replaced; the
-# IMAGE_IMPACT cases pin the "does this diff warrant a patch (Z) bump?" boundary.
+# detect-changes job, plus the additive IMAGE_IMPACT verdict the promote
+# job's version-bump logic consumes. The workflow_diff_is_comment_only
+# section (G14) instead builds a small real git repo, since that function
+# diffs the touched build-workflow paths against actual git history.
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -314,4 +314,147 @@ val() {
     run bash "$script" --all-changed
     [ "$status" -eq 0 ]
     [ "$(val codeql_rust)" = "true" ]
+}
+
+# --- workflow_diff_is_comment_only: content-aware workflow signal (G14, PR #1609 review) ---
+#
+# Needs real base/head refs to diff the touched build-workflow path with, so
+# each case builds a tiny disposable repo instead of using run_classify's
+# CHANGED_FILES path. Covers both Codex findings on the original #1609
+# implementation: a leading '#' inside a YAML block-scalar body is real data,
+# not a parsed comment (P1), and a binary or mode-only change carries no +/-
+# content line to inspect at all (P2) -- both must fail closed, not default
+# to "no violation found".
+
+setup_g14_repo() {
+    repo_dir="$BATS_TEST_TMPDIR/g14-repo"
+    mkdir -p "$repo_dir/.github/workflows" "$repo_dir/.github/actions/some-action"
+    git init -q "$repo_dir"
+    git -C "$repo_dir" config user.email test@example.com
+    git -C "$repo_dir" config user.name test
+    # The script resolves merge-base/diff against its own process cwd (it has
+    # no --git-dir override), so every G14 case must run from inside the
+    # disposable repo, not bats' own working directory.
+    cd "$repo_dir"
+}
+
+commit_workflow_file() {
+    # $1 = file content (heredoc-fed), $2 = commit message.
+    cat > "$repo_dir/.github/workflows/build-push.yml"
+    git -C "$repo_dir" add -A
+    git -C "$repo_dir" commit -q -m "$1"
+    git -C "$repo_dir" rev-parse HEAD
+}
+
+@test "G14: a changed '#' line inside a run: heredoc body is NOT comment-only" {
+    setup_g14_repo
+    base_sha="$(commit_workflow_file base <<'YAML'
+jobs:
+  build:
+    steps:
+      - run: |
+          cat <<'EOF' > file.txt
+          # marker-v1
+          EOF
+YAML
+)"
+    head_sha="$(commit_workflow_file head <<'YAML'
+jobs:
+  build:
+    steps:
+      - run: |
+          cat <<'EOF' > file.txt
+          # marker-v2
+          EOF
+YAML
+)"
+    run bash "$script" "$base_sha" "$head_sha"
+    [ "$status" -eq 0 ]
+    [ "$(val workflow)" = "true" ]
+}
+
+@test "G14: a genuine top-level comment-only change IS comment-only" {
+    setup_g14_repo
+    base_sha="$(commit_workflow_file base <<'YAML'
+jobs:
+  build:
+    # a comment line v1
+    steps:
+      - run: echo hi
+YAML
+)"
+    head_sha="$(commit_workflow_file head <<'YAML'
+jobs:
+  build:
+    # a comment line v2, still just a comment
+    steps:
+      - run: echo hi
+YAML
+)"
+    run bash "$script" "$base_sha" "$head_sha"
+    [ "$status" -eq 0 ]
+    [ "$(val workflow)" = "false" ]
+}
+
+@test "G14: a blank-line-only change IS comment-only" {
+    setup_g14_repo
+    base_sha="$(commit_workflow_file base <<'YAML'
+jobs:
+  build:
+    steps:
+      - run: echo hi
+YAML
+)"
+    head_sha="$(commit_workflow_file head <<'YAML'
+jobs:
+  build:
+
+    steps:
+      - run: echo hi
+YAML
+)"
+    run bash "$script" "$base_sha" "$head_sha"
+    [ "$status" -eq 0 ]
+    [ "$(val workflow)" = "false" ]
+}
+
+@test "G14: a binary change under .github/actions/ is NOT comment-only" {
+    setup_g14_repo
+    printf '\x00\x01binary-v1' > "$repo_dir/.github/actions/some-action/blob.bin"
+    git -C "$repo_dir" add -A && git -C "$repo_dir" commit -q -m base
+    base_sha="$(git -C "$repo_dir" rev-parse HEAD)"
+    printf '\x00\x01binary-v2-different' > "$repo_dir/.github/actions/some-action/blob.bin"
+    git -C "$repo_dir" add -A && git -C "$repo_dir" commit -q -m head
+    head_sha="$(git -C "$repo_dir" rev-parse HEAD)"
+    run bash "$script" "$base_sha" "$head_sha"
+    [ "$status" -eq 0 ]
+    [ "$(val workflow)" = "true" ]
+}
+
+@test "G14: a mode-only change under .github/actions/ is NOT comment-only" {
+    setup_g14_repo
+    printf 'name: test\n' > "$repo_dir/.github/actions/some-action/action.yml"
+    git -C "$repo_dir" add -A && git -C "$repo_dir" commit -q -m base
+    base_sha="$(git -C "$repo_dir" rev-parse HEAD)"
+    # update-index --chmod is used instead of a filesystem chmod so this case
+    # is exercised the same way on every runner OS, not only ones with real
+    # POSIX executable bits.
+    git -C "$repo_dir" update-index --chmod=+x .github/actions/some-action/action.yml
+    git -C "$repo_dir" commit -q -m head
+    head_sha="$(git -C "$repo_dir" rev-parse HEAD)"
+    run bash "$script" "$base_sha" "$head_sha"
+    [ "$status" -eq 0 ]
+    [ "$(val workflow)" = "true" ]
+}
+
+@test "G14: an added (not modified) build-workflow file is NOT comment-only" {
+    setup_g14_repo
+    git -C "$repo_dir" commit -q --allow-empty -m base
+    base_sha="$(git -C "$repo_dir" rev-parse HEAD)"
+    printf 'name: new\n' > "$repo_dir/.github/actions/some-action/action.yml"
+    git -C "$repo_dir" add -A && git -C "$repo_dir" commit -q -m head
+    head_sha="$(git -C "$repo_dir" rev-parse HEAD)"
+    run bash "$script" "$base_sha" "$head_sha"
+    [ "$status" -eq 0 ]
+    [ "$(val workflow)" = "true" ]
 }
