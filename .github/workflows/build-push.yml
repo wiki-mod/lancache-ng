@@ -3494,7 +3494,7 @@ jobs:
               echo "UI coverage: ${ui_coverage}%"
 
               # What: Per-crate coverage thresholds (ui_threshold/dns_threshold), not a shared minimum.
-              # Why: nats-subscriber's async loop is covered by full-setup integration, not unit tests.
+              # Why: The nats-subscriber async loop is covered by full-setup integration, not unit tests.
               # From: Issue #1095 | PR #1619
               ui_threshold=35
               dns_threshold=0
