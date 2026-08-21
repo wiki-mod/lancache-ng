@@ -335,7 +335,7 @@ setup_g14_repo() {
     # The script resolves merge-base/diff against its own process cwd (it has
     # no --git-dir override), so every G14 case must run from inside the
     # disposable repo, not bats' own working directory.
-    cd "$repo_dir"
+    cd "$repo_dir" || return 1
 }
 
 commit_workflow_file() {
