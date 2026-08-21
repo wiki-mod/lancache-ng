@@ -6169,7 +6169,13 @@ jobs:
     # reason.
     name: merge multi-platform manifests
     needs: [build, build-arm64]
-    if: "!cancelled() && needs.build.result == 'success' && needs['build-arm64'].result == 'success'"
+    # What: runs whenever build/build-arm64 ran at all, not only on full success.
+    # Why: needs.<job>.result is 'failure' if ANY single matrix entry fails;
+    #   the per-service loop below already skips services with no published
+    #   image, so requiring full success blocked every OTHER service's real
+    #   manifest merge over one unrelated service's failure.
+    # From: Issue #1095
+    if: "!cancelled() && needs.build.result != 'cancelled' && needs['build-arm64'].result != 'cancelled'"
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     # Real runs: 17s-4.1min (per this job's own comment, it only assembles a
     # manifest list from two already-pushed digests -- no image rebuild).
@@ -6305,7 +6311,7 @@ jobs:
             # to protect real registry-write operations below, not this expected-failure control
             # flow.
             if ! docker buildx imagetools inspect "$amd64_image" >/dev/null 2>&1; then
-              echo "::notice::Skipping $service: no linux/amd64 image was published for this commit (likely unchanged on a pull request)."
+              echo "::notice::Skipping $service: no linux/amd64 image was published for this commit -- either unchanged (build/build-arm64 correctly skipped it) or that service's own build job failed; check the build/build-arm64 job for $service to tell which."
               continue
             fi
             if ! docker buildx imagetools inspect "$arm64_image" >/dev/null 2>&1; then
