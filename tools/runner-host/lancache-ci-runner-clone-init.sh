@@ -1,5 +1,6 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # CI runner host bootstrap: prepare a freshly provisioned (or disk-cloned)
 # self-hosted runner host for GitHub Actions registration, WITHOUT ever
@@ -171,13 +172,11 @@ ensure_hosts_self_reference() {
         echo "    -> will be corrected by full-reset-clean."
         return 0
     fi
-    if [[ -n "$my_ip" ]] && sudo -n grep -qE "^${my_ip//./\\.}[[:space:]]" /etc/hosts 2>/dev/null; then
-        sudo -n sed -i "s/^${my_ip//./\\.}[[:space:]].*/127.0.1.1\\t${my_hostname}/" /etc/hosts
-        echo "    Fixed: replaced the stale self-reference line for this host's own IP ($my_ip)."
-    else
-        printf '127.0.1.1\t%s\n' "$my_hostname" | sudo -n tee -a /etc/hosts >/dev/null
-        echo "    Fixed: appended a new 127.0.1.1 entry (no existing line for this host's own IP found)."
-    fi
+    # What: Add a dedicated self-reference instead of rewriting an address line.
+    # Why: Address lines can carry unrelated local aliases that must survive provisioning.
+    # From: #1624
+    printf '127.0.1.1\t%s\n' "$my_hostname" | sudo -n tee -a /etc/hosts >/dev/null
+    echo "    Fixed: appended a 127.0.1.1 entry without changing aliases on ${my_ip:-other addresses}."
 }
 
 # Regenerates /etc/hostid and /etc/machine-id unconditionally (issue #1622
@@ -469,6 +468,13 @@ is_foreign_authorized_keys_line() {
 }
 
 cmd_full_reset_check() {
+    # What: Prove non-interactive root access before the privileged survey.
+    # Why: A denied read must not be reported as an absent clone artifact.
+    # From: #1624
+    if ! sudo -n true 2>/dev/null; then
+        echo "ERROR: full-reset-check requires non-interactive sudo access to inspect protected paths." >&2
+        return 1
+    fi
     local my_token
     my_token="$(own_host_token)"
     echo "Host: $(hostname)   own_host_token=$my_token"
@@ -673,7 +679,7 @@ cmd_full_reset_clean() {
 # these processes alone held ~1.8-1.9 GB RSS permanently resident, a
 # significant fraction of a light host's 3.8 GB nominal RAM, and a
 # concrete contributor to that host's own OOM-kill of a real CI job the
-# same day (see PR #1624 history / issue #1622 for the incident details).
+# same day.
 #
 # CRITICAL: `proxmox-kernel-*`/`proxmox-default-kernel`/`pve-firmware`/
 # `pve-edk2-firmware*` are DELIBERATELY EXCLUDED and must stay excluded --
@@ -906,31 +912,19 @@ HOOKEOF
 enable_backports() {
     local list_file="/etc/apt/sources.list.d/backports.list"
     local pref_file="/etc/apt/preferences.d/backports"
-    if sudo -n test -f "$list_file" 2>/dev/null && sudo -n test -f "$pref_file" 2>/dev/null; then
-        echo "$list_file / $pref_file already present, leaving as-is."
-    else
-        echo "deb http://deb.debian.org/debian trixie-backports main" | sudo -n tee "$list_file" >/dev/null
-        printf 'Package: *\nPin: release a=stable-backports\nPin-Priority: 500\n' | sudo -n tee "$pref_file" >/dev/null
-        echo "Installed $list_file and $pref_file (Pin-Priority 500, a=stable-backports)."
+    local expected_list="deb http://deb.debian.org/debian trixie-backports main"
+    local expected_pref=$'Package: *\nPin: release a=stable-backports\nPin-Priority: 500'
+    if [[ "$(sudo -n cat "$list_file" 2>/dev/null || :)" != "$expected_list" ]]; then
+        printf '%s\n' "$expected_list" | sudo -n tee "$list_file" >/dev/null
     fi
-    # `|| true`: confirmed real (issue #1619/#1622 follow-up, 2026-08-21,
-    # hosts .89/.92/.93) -- `apt-get update` returns non-zero the moment
-    # ANY configured repo's index fails to fetch (observed repeatedly: a
-    # pre-existing, unrelated download.docker.com mirror-sync hiccup
-    # through this LAN's caching proxy, nothing to do with backports).
-    # apt itself already handles this gracefully -- it falls back to
-    # cached/old index data for the failed repo and still updates every
-    # other repo's index fine, which is exactly why the subsequent
-    # dist-upgrade/full-upgrade calls below still work correctly even
-    # after this. But under this script's `set -o pipefail`, that non-zero
-    # exit code propagating through `| tail -10` would abort the ENTIRE
-    # function right here (same failure class already fixed once in
-    # own_primary_ipv4/own_host_token) -- silently skipping dist-upgrade,
-    # full-upgrade, and every host-prep step that runs after
-    # enable_backports (apt-listchanges purge, the lancache-ci-cleanup
-    # timer install), with no error ever shown. Confirmed this actually
-    # happened on .89/.92/.93's first host-prep run before this fix.
-    sudo -n apt-get update 2>&1 | tail -10 || echo "WARNING: apt-get update reported a failure (see above) -- continuing anyway, since apt itself already falls back to cached index data for any repo that failed and the repos this script actually cares about (backports, the base Debian archive) are not the ones observed failing." >&2
+    if [[ "$(sudo -n cat "$pref_file" 2>/dev/null || :)" != "$expected_pref" ]]; then
+        printf '%s\n' "$expected_pref" | sudo -n tee "$pref_file" >/dev/null
+    fi
+    echo "Validated $list_file and $pref_file (Pin-Priority 500, a=stable-backports)."
+    # What: Require every configured package index to refresh before upgrading.
+    # Why: Upgrading from stale required indices cannot establish the promised host state.
+    # From: #1624
+    sudo -n apt-get update 2>&1 | tail -10
     sudo -n env DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y 2>&1 | tail -15
     sudo -n env DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y 2>&1 | tail -10
 }
@@ -952,6 +946,13 @@ purge_apt_listchanges() {
 }
 
 cmd_host_prep() {
+    # What: Validate all identities and source assets before the first host mutation.
+    # Why: A failed prerequisite must not leave a partial sudoers or service installation.
+    # From: #1624
+    getent passwd "$RUNNER_USER" >/dev/null || { echo "ERROR: runner user '$RUNNER_USER' does not exist." >&2; return 1; }
+    for asset in lancache-ci-cleanup.sh lancache-ci-cleanup.service lancache-ci-cleanup.timer; do
+        [[ -f "$SCRIPT_DIR/$asset" ]] || { echo "ERROR: required cleanup asset missing: $SCRIPT_DIR/$asset" >&2; return 1; }
+    done
     local sudoers_file="/etc/sudoers.d/${RUNNER_USER}-nopasswd"
     if sudo -n test -f "$sudoers_file" 2>/dev/null; then
         echo "$sudoers_file already present, leaving as-is."
@@ -970,8 +971,8 @@ cmd_host_prep() {
     fi
 
     install_ci_hooks
-    enable_backports
     purge_apt_listchanges
+    enable_backports
 
     if [[ -f "$SCRIPT_DIR/lancache-ci-cleanup.sh" ]]; then
         sudo install -m 0755 "$SCRIPT_DIR/lancache-ci-cleanup.sh" /usr/local/sbin/lancache-ci-cleanup.sh
@@ -1000,10 +1001,11 @@ cmd_host_prep() {
     if [[ "$(hostname)" == *heavy* ]]; then
         echo
         echo "This looks like a HEAVY-tier host. Run 'sccache-check' next -- if it"
-        echo "reports missing tooling, stage sccache/sccache-dist/config/client.conf"
-        echo "from a known-working heavy host (e.g. lancache-240) via scp, then run"
-        echo "'sccache-fetch <staged-dir>'. See README.md and this script's own"
-        echo "sccache-check/-fetch header comments for the full background."
+        echo "reports missing tooling, stage only the sccache/sccache-dist binaries"
+        echo "(never client config -- that comes from per-job GitHub Secrets, not a"
+        echo "host file) from a known-working heavy host (e.g. lancache-240) via scp,"
+        echo "then run 'sccache-fetch <staged-dir>'. See README.md and this script's"
+        echo "own sccache-check/-fetch header comments for the full background."
     fi
 }
 
@@ -1109,14 +1111,8 @@ cmd_sccache_check() {
         fi
     done
     echo
-    echo "--- sccache client config ---"
-    for f in /opt/codex/.config/sccache/config /opt/codex/sccache-dist/client.conf; do
-        if sudo -n test -f "$f" 2>/dev/null; then
-            echo "  $f: present"
-        else
-            echo "  $f: MISSING"
-        fi
-    done
+    echo "--- sccache runtime config ---"
+    echo "  supplied per job through SCCACHE_CONF; no scheduler token is stored on the host"
     if sudo -n test -d /opt/sccache/dist-client 2>/dev/null; then
         echo "  /opt/sccache/dist-client: present"
     else
@@ -1125,8 +1121,7 @@ cmd_sccache_check() {
     echo
     echo "--- Live check (requires the config above; reaches the real scheduler) ---"
     if [[ -x /usr/local/bin/sccache ]]; then
-        HOME="/opt/${RUNNER_USER}" /usr/local/bin/sccache --version 2>&1
-        HOME="/opt/${RUNNER_USER}" /usr/local/bin/sccache --dist-status 2>&1
+        sudo -u "$RUNNER_USER" HOME="/opt/${RUNNER_USER}" /usr/local/bin/sccache --version 2>&1
     else
         echo "  (skipped -- sccache binary missing)"
     fi
@@ -1137,30 +1132,31 @@ cmd_sccache_check() {
 # Installs the sccache client tooling from files already staged on THIS
 # host at the given source directory (see the script header above for why
 # this is a copy, not a build). The orchestrating machine is expected to
-# have already `scp`'d sccache, sccache-dist, config, and client.conf from
-# a known-working heavy host (e.g. lancache-240) into that directory --
+# have already staged only sccache and sccache-dist from a known-working
+# heavy host into that directory; secret-backed runtime configuration is
+# created by the configure-rust-sccache action for each individual job --
 # this mode only does the LOCAL install step (permissions, ownership,
 # directory layout), matching the exact paths confirmed on lancache-240.
 cmd_sccache_fetch() {
     local src_dir="${1:?Usage: sccache-fetch <source-dir-with-staged-files>}"
-    for f in sccache sccache-dist config client.conf; do
+    for f in sccache sccache-dist; do
         if [[ ! -f "$src_dir/$f" ]]; then
             echo "ERROR: $src_dir/$f not found -- stage it first (scp from a known-working heavy host)." >&2
             return 1
         fi
     done
+    # What: Execute staged clients before replacing known-good host binaries.
+    # Why: Corrupt or wrong-architecture artifacts must leave installed tools untouched.
+    # From: #1624
+    sudo -u "$RUNNER_USER" HOME="/opt/${RUNNER_USER}" "$src_dir/sccache" --version >/dev/null
+    "$src_dir/sccache-dist" --help >/dev/null
     sudo install -o "$RUNNER_USER" -g "$RUNNER_USER" -m 0755 "$src_dir/sccache" /usr/local/bin/sccache
     sudo install -o root -g root -m 0755 "$src_dir/sccache-dist" /usr/local/bin/sccache-dist
-    mkdir -p "/opt/${RUNNER_USER}/.config/sccache"
-    install -m 0644 "$src_dir/config" "/opt/${RUNNER_USER}/.config/sccache/config"
-    sudo mkdir -p "/opt/${RUNNER_USER}/sccache-dist"
-    sudo install -o "$RUNNER_USER" -g "$RUNNER_USER" -m 0640 "$src_dir/client.conf" "/opt/${RUNNER_USER}/sccache-dist/client.conf"
     sudo mkdir -p /opt/sccache/dist-client
     sudo chown "$RUNNER_USER:$RUNNER_USER" /opt/sccache /opt/sccache/dist-client
     sudo chmod 2775 /opt/sccache /opt/sccache/dist-client
     echo "Installed sccache client tooling. Verifying:"
     HOME="/opt/${RUNNER_USER}" sudo -u "$RUNNER_USER" /usr/local/bin/sccache --version
-    HOME="/opt/${RUNNER_USER}" sudo -u "$RUNNER_USER" /usr/local/bin/sccache --dist-status
     echo "Run 'sccache-check' to confirm the full picture."
 }
 
@@ -1218,13 +1214,11 @@ Modes:
                                 end-to-end on host .81, issue #1622).
   sccache-check                 Read-only: reports whether the sccache
                                  client tooling (heavy hosts only -- see
-                                 script header) is installed, and if so
-                                 live-verifies it against the real
-                                 scheduler via --dist-status. Writes
-                                 nothing.
-  sccache-fetch <dir>            Installs sccache/sccache-dist and their
-                                 client configs from files already staged
-                                 at <dir> on this host (scp them from a
+                                 script header) is installed and executable
+                                 as the configured runner account. Writes
+                                 nothing and uses no scheduler credential.
+  sccache-fetch <dir>            Validates and installs sccache/sccache-dist
+                                 binaries already staged at <dir> (copy from a
                                  known-working heavy host such as
                                  lancache-240 first -- this mode does not
                                  build or download anything itself, see

@@ -82,21 +82,24 @@ live in the repo, PR-reviewable and consistent across all hosts).
   `--features redis,dist-client` (see `tools/build-tools/Dockerfile`'s own
   `cargo install sccache --no-default-features --features redis,dist-
   client`), and every existing heavy host's client-side sccache tooling
-  was itself originally installed by copying the built binaries + client
-  configs host-to-host at identical paths, not by rebuilding — confirmed
+  was itself originally installed by copying the built binaries
+  host-to-host at identical paths, not by rebuilding — confirmed
   directly on `lancache-240`. `sccache-check` (read-only) reports whether
-  the tooling is present and, if so, live-verifies it against the real
-  scheduler via `--dist-status`; `sccache-fetch <dir>` installs from files
-  already staged at `<dir>` on the host (`scp` `sccache`, `sccache-dist`,
-  `config`, and `client.conf` from a known-working heavy host such as
-  `lancache-240` first — this mode does not build or download anything
-  itself). `host-prep` reminds about this on any host whose hostname
+  the tooling is present and executes the binary as the configured runner
+  account; the scheduler URL and auth token are supplied only by
+  each CI job's secret-backed `SCCACHE_CONF`. `sccache-fetch <dir>` installs
+  the `sccache` and `sccache-dist` binaries already staged at `<dir>` on the
+  host (copy them from a known-working heavy host such as `lancache-240`
+  first — this mode does not build or download anything itself).
+  `host-prep` reminds about this on any host whose hostname
   contains "heavy", since it cannot do the host-to-host copy unattended.
   Deliberately client-role only — `sccache-dist-server.service` (accepting
   distributed builds from other clients) needs a fresh, server-specific
   auth token issued by whoever administers the scheduler, so its config is
-  never safely copyable between hosts the way the client config is; that
-  remains a separate, additional capacity decision.
+  never safely copyable between hosts, the same reason the client's own
+  scheduler/auth configuration is no longer host-copied either (see above);
+  standing up a new dist-server remains a separate, additional capacity
+  decision.
 
 ## Deploy (to **every** runner host — 229, 240, 241, 243, …)
 
