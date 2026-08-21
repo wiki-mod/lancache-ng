@@ -240,7 +240,7 @@ pub async fn restart_ui_service(
         )
         .await;
         if let Err(err) = restart_result {
-            tracing::error!("operator-requested Admin UI self-restart failed: {err:#}");
+            tracing::error!("operator-requested Admin UI self-restart failed: {:#}", err);
         }
     });
 
