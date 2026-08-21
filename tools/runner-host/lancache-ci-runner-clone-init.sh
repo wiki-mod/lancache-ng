@@ -368,7 +368,12 @@ cmd_check() {
     else
         echo "  /etc/sudoers.d/${RUNNER_USER}-nopasswd: MISSING"
     fi
-    if id -nG "$RUNNER_USER" 2>/dev/null | grep -qw docker; then
+    # Same exact-field match as cmd_host_prep's own docker-group check
+    # (Codex review, PR #1624) -- `grep -w docker` also matches an
+    # unrelated group like `docker-build` since a hyphen satisfies its
+    # word-boundary requirement on both sides.
+    local check_runner_groups=" $(id -nG "$RUNNER_USER" 2>/dev/null) "
+    if [[ "$check_runner_groups" == *" docker "* ]]; then
         echo "  $RUNNER_USER in docker group: yes"
     else
         echo "  $RUNNER_USER in docker group: MISSING"
@@ -1179,50 +1184,123 @@ cmd_host_prep() {
     fi
 }
 
+# Minimal local retry+backoff wrapper for cmd_runner_fetch's two network
+# calls (GitHub Releases API + tarball download). AG-CI-013 requires flaky
+# network downloads to use the project's documented retry-wrapper pattern
+# (scripts/lib/ghcr-retry.sh) rather than a bespoke ad hoc retry -- this
+# script cannot source that file directly: only tools/runner-host/ itself
+# is ever copied to a runner host (see this file's own host-prep warning),
+# so scripts/lib/ is never present there. This mirrors ghcr_retry()'s own
+# policy shape instead -- same attempt-count/backoff defaults, output
+# passed through untouched, and the command tested in `if` condition
+# position so a failing attempt does not itself trip the caller's
+# `set -e` -- just without the docker-login-specific relogin step a plain
+# curl GET has no use for.
+RUNNER_FETCH_RETRY_MAX_ATTEMPTS="${RUNNER_FETCH_RETRY_MAX_ATTEMPTS:-4}"
+RUNNER_FETCH_RETRY_BACKOFF_SECONDS="${RUNNER_FETCH_RETRY_BACKOFF_SECONDS:-30}"
+runner_fetch_retry() {
+    local attempt=1
+    local status=0
+    while (( attempt <= RUNNER_FETCH_RETRY_MAX_ATTEMPTS )); do
+        if "$@"; then
+            return 0
+        else
+            status=$?
+        fi
+        if (( attempt >= RUNNER_FETCH_RETRY_MAX_ATTEMPTS )); then
+            echo "ERROR: '$*' failed after ${RUNNER_FETCH_RETRY_MAX_ATTEMPTS} attempts (exit ${status})." >&2
+            return "$status"
+        fi
+        echo "WARNING: '$*' failed (attempt ${attempt}/${RUNNER_FETCH_RETRY_MAX_ATTEMPTS}, exit ${status}); retrying in ${RUNNER_FETCH_RETRY_BACKOFF_SECONDS}s..." >&2
+        sleep "$RUNNER_FETCH_RETRY_BACKOFF_SECONDS"
+        attempt=$((attempt + 1))
+    done
+    return "$status"
+}
+
 cmd_runner_fetch() {
     local instance_dir="${1:?Usage: runner-fetch <instance-dir> [version]}"
     local version="${2:-2.336.0}"
     local tarball="actions-runner-linux-x64-${version}.tar.gz"
     local url="https://github.com/actions/runner/releases/download/v${version}/${tarball}"
+
+    # Validate the target directory BEFORE any network call or mutation:
+    # `mkdir -p`/`tar -C` accept an unrestricted path, and the final
+    # `chown -R` walks and re-owns everything already under it. A typo'd
+    # <dir> such as `/opt` or `/` (or an already-registered runner
+    # instance) would otherwise let this mode extract into and recursively
+    # re-own an unrelated, possibly host-critical directory tree. Requires
+    # the canonical target to live directly under RUNNER_OPT_ROOT and to be
+    # either new or already-empty.
+    local canon_dir parent_dir
+    canon_dir="$(readlink -f -- "$instance_dir" 2>/dev/null || true)"
+    if [[ -z "$canon_dir" ]]; then
+        parent_dir="$(readlink -f -- "$(dirname -- "$instance_dir")" 2>/dev/null || true)"
+        if [[ -z "$parent_dir" ]]; then
+            echo "ERROR: cannot resolve a canonical path for '$instance_dir' (its parent directory does not exist)." >&2
+            return 1
+        fi
+        canon_dir="$parent_dir/$(basename -- "$instance_dir")"
+    fi
+    case "$canon_dir" in
+        "$RUNNER_OPT_ROOT"/*) ;;
+        *)
+            echo "ERROR: refusing to install into '$canon_dir' -- runner-fetch only accepts a new instance directory directly under RUNNER_OPT_ROOT ($RUNNER_OPT_ROOT), to prevent a typo (e.g. '/opt' or '/') from triggering extraction and a recursive chown over unrelated host state." >&2
+            return 1
+            ;;
+    esac
+    if [[ -e "$canon_dir" ]] && { [[ ! -d "$canon_dir" ]] || [[ -n "$(find "$canon_dir" -mindepth 1 -maxdepth 1 2>/dev/null)" ]]; }; then
+        echo "ERROR: '$canon_dir' already exists and is not an empty directory -- refusing to extract over an existing (and possibly already-registered) runner instance." >&2
+        return 1
+    fi
+    instance_dir="$canon_dir"
+
     local tmp_tarball
     tmp_tarball="$(mktemp -t "${tarball}.XXXXXX")"
+    # EXIT trap, not only the explicit `rm -f` calls below: if any command
+    # after this point aborts under `set -e` (checksum mismatch aside,
+    # which already cleans up explicitly, but also sha256sum/tar/chown
+    # failing), execution never reaches an explicit cleanup line and this
+    # uniquely-named temp file is left under /tmp forever -- every retried
+    # provisioning attempt would then leave one more behind.
+    trap 'rm -f "$tmp_tarball"' EXIT
 
     echo "Fetching expected checksum for v${version} from the GitHub Releases API..."
     local expected_digest
-    expected_digest="$(curl -fsSL "https://api.github.com/repos/actions/runner/releases/tags/v${version}" \
+    expected_digest="$(runner_fetch_retry curl -fsSL "https://api.github.com/repos/actions/runner/releases/tags/v${version}" \
         | jq -r --arg name "$tarball" '.assets[] | select(.name == $name) | .digest' 2>/dev/null || true)"
     expected_digest="${expected_digest#sha256:}"
     if [[ -z "$expected_digest" ]]; then
         echo "ERROR: could not fetch an expected sha256 digest for $tarball from the GitHub API -- refusing to install unverified. Check the version string or network access." >&2
-        rm -f "$tmp_tarball"
         return 1
     fi
 
     echo "Downloading $url ..."
-    curl -fsSL -o "$tmp_tarball" "$url"
+    runner_fetch_retry curl -fsSL -o "$tmp_tarball" "$url"
     local actual_digest
     actual_digest="$(sha256sum "$tmp_tarball" | awk '{print $1}')"
     if [[ "$actual_digest" != "$expected_digest" ]]; then
         echo "ERROR: checksum mismatch for $tarball -- expected $expected_digest, got $actual_digest. Refusing to extract." >&2
-        rm -f "$tmp_tarball"
         return 1
     fi
     echo "Checksum verified: $actual_digest"
 
     sudo mkdir -p "$instance_dir"
     sudo tar xzf "$tmp_tarball" -C "$instance_dir"
-    sudo chown -R "$RUNNER_USER:$RUNNER_USER" "$instance_dir"
-    rm -f "$tmp_tarball"
+    sudo chown -R "$RUNNER_USER:$(runner_group)" "$instance_dir"
 
-    # Hook wiring -- must exist before the runner service is ever started,
-    # or the pre/post-job-cleanup hooks are silently absent on the very
-    # first job this instance picks up.
+    # Hook wiring -- written here so it is already present the first time
+    # `config.sh` is run, but NOT the only place it is written: `config.sh`
+    # itself loads the Actions Runner's own env.sh, which truncates .env
+    # (`echo >.env`) before writing config.sh's own variable list, wiping
+    # out anything written here. See the `runner-hook-env` mode below,
+    # which must be run AFTER config.sh to make the wiring actually stick.
     cat <<ENVEOF | sudo tee "$instance_dir/.env" >/dev/null
 LANG=C
 ACTIONS_RUNNER_HOOK_JOB_STARTED=${RUNNER_HOOKS_DIR}/pre-job-cleanup.sh
 ACTIONS_RUNNER_HOOK_JOB_COMPLETED=${RUNNER_HOOKS_DIR}/post-job-cleanup.sh
 ENVEOF
-    sudo chown "$RUNNER_USER:$RUNNER_USER" "$instance_dir/.env"
+    sudo chown "$RUNNER_USER:$(runner_group)" "$instance_dir/.env"
 
     echo
     echo "Extracted actions-runner v${version} into $instance_dir and wrote its .env"
@@ -1233,8 +1311,36 @@ ENVEOF
     echo "'$(hostname)' on this host -- NOT the old fleet's letter-prefix scheme"
     echo "(a-lancache-runner-240-1 etc., which only applies to the pre-existing"
     echo "229/240/241/243 hosts and must never be copied onto a new host)."
+    echo "IMPORTANT: config.sh's own env.sh truncates .env before writing its own"
+    echo "variables, which wipes the hook wiring just written above -- run"
+    echo "'runner-hook-env $instance_dir' AFTER config.sh (and before starting the"
+    echo "service) to restore it."
     echo "Then 'sudo ./svc.sh install' and hold off on 'sudo ./svc.sh start' until"
     echo "the go-ahead to accept real jobs is confirmed."
+}
+
+# Writes/re-verifies an already-registered runner instance's
+# ACTIONS_RUNNER_HOOK_JOB_* .env wiring. A standalone mode, not only logic
+# inside runner-fetch, because the Actions Runner's own config.sh loads
+# env.sh, which truncates .env (`echo >.env`) before writing config.sh's
+# own variable list -- so hook wiring written by runner-fetch BEFORE
+# config.sh runs is silently wiped the moment registration happens. Must
+# be run AFTER config.sh. Idempotent: safe to run again on an
+# already-wired instance.
+cmd_runner_hook_env() {
+    local instance_dir="${1:?Usage: runner-hook-env <instance-dir>}"
+    [[ -d "$instance_dir" ]] || { echo "ERROR: '$instance_dir' is not a directory." >&2; return 1; }
+    [[ -f "$instance_dir/.env" ]] || { echo "ERROR: '$instance_dir/.env' does not exist yet -- run this AFTER config.sh, not before." >&2; return 1; }
+    if grep -q '^ACTIONS_RUNNER_HOOK_JOB_STARTED=' "$instance_dir/.env" 2>/dev/null \
+        && grep -q '^ACTIONS_RUNNER_HOOK_JOB_COMPLETED=' "$instance_dir/.env" 2>/dev/null; then
+        echo "$instance_dir/.env already has hook wiring, leaving as-is (re-run after a fresh config.sh if the hooks changed)."
+        return 0
+    fi
+    {
+        echo "ACTIONS_RUNNER_HOOK_JOB_STARTED=${RUNNER_HOOKS_DIR}/pre-job-cleanup.sh"
+        echo "ACTIONS_RUNNER_HOOK_JOB_COMPLETED=${RUNNER_HOOKS_DIR}/post-job-cleanup.sh"
+    } | sudo tee -a "$instance_dir/.env" >/dev/null
+    echo "Appended hook wiring to $instance_dir/.env."
 }
 
 # --- sccache-check: verify the sccache client tooling heavy hosts need ----
@@ -1329,10 +1435,16 @@ cmd_sccache_fetch() {
     # From: #1624
     sudo -u "$RUNNER_USER" HOME="/opt/${RUNNER_USER}" "$src_dir/sccache" --version >/dev/null
     "$src_dir/sccache-dist" --help >/dev/null
-    sudo install -o "$RUNNER_USER" -g "$RUNNER_USER" -m 0755 "$src_dir/sccache" /usr/local/bin/sccache
-    sudo install -o root -g root -m 0755 "$src_dir/sccache-dist" /usr/local/bin/sccache-dist
+    # Both binaries root-owned, group $(runner_group) for consistency with
+    # every other /opt-adjacent path this script manages (maintainer
+    # decision, 2026-08-21) -- mode 0755 gives owner-only write, so a CI job
+    # running as RUNNER_USER cannot overwrite this persistent PATH binary
+    # and inject code into every later job on this host, the way owning it
+    # as RUNNER_USER itself would have allowed.
+    sudo install -o root -g "$(runner_group)" -m 0755 "$src_dir/sccache" /usr/local/bin/sccache
+    sudo install -o root -g "$(runner_group)" -m 0755 "$src_dir/sccache-dist" /usr/local/bin/sccache-dist
     sudo mkdir -p /opt/sccache/dist-client
-    sudo chown "$RUNNER_USER:$RUNNER_USER" /opt/sccache /opt/sccache/dist-client
+    sudo chown "$RUNNER_USER:$(runner_group)" /opt/sccache /opt/sccache/dist-client
     sudo chmod 2775 /opt/sccache /opt/sccache/dist-client
     # What: Remove any stale, world-readable host-copied credential files.
     # Why: The previous sccache-fetch installed a Redis/dist-auth config
@@ -1360,8 +1472,15 @@ Modes:
                                 daemon.json or runner registration.
   runner-fetch <dir> [version] Download+verify+extract a runner release
                                 directly into <dir> (default version 2.336.0)
-                                and write its .env hook wiring. Does not
-                                register or start anything.
+                                and write its .env hook wiring. <dir> must be
+                                a new or empty directory directly under
+                                RUNNER_OPT_ROOT. Does not register or start
+                                anything.
+  runner-hook-env <dir>         Re-writes the ACTIONS_RUNNER_HOOK_JOB_* .env
+                                 wiring for an already-registered instance.
+                                 Run this AFTER config.sh -- config.sh's own
+                                 env.sh truncates .env, wiping out whatever
+                                 runner-fetch wrote before registration.
   full-reset-check             Read-only broader de-clone survey (shell
                                 history, known_hosts, foreign authorized_keys
                                 entries, stale journal machine-id dirs,
@@ -1426,6 +1545,7 @@ main() {
         clean) cmd_clean ;;
         host-prep) cmd_host_prep ;;
         runner-fetch) cmd_runner_fetch "$@" ;;
+        runner-hook-env) cmd_runner_hook_env "$@" ;;
         full-reset-check) cmd_full_reset_check ;;
         full-reset-clean) cmd_full_reset_clean ;;
         set-hostname) cmd_set_hostname "$@" ;;
