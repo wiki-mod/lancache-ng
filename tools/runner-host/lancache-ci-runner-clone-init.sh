@@ -88,8 +88,21 @@ own_host_token() {
 
 # Returns this host's primary IPv4 address (the one carrying its default
 # route), or empty if it cannot be determined.
+#
+# Bug fixed 2026-08-21 (confirmed real on host .88): the previous
+# implementation took the first "scope global" address `ip addr` happened to
+# list, which is interface-enumeration-order-dependent and NOT guaranteed to
+# be the host's real LAN address -- Docker's own `docker0` bridge
+# (172.17.0.1/16) is also "scope global", and on .88 it was listed before
+# the real `vmbr0` interface, so this function returned 172.17.0.1 and
+# hostname_mismatch_report below raised a false "MISMATCH" (comparing the
+# hostname's trailing digit token against docker0's own fixed last octet,
+# 1, instead of this host's actual last IP octet). Fixed to instead read
+# the source address of the default route (`ip route show default`'s own
+# `src` field) -- the interface actually used for outbound traffic, which
+# is unambiguous regardless of how many other interfaces/bridges exist.
 own_primary_ipv4() {
-    ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1
+    ip -4 route show default 2>/dev/null | grep -oE 'src [0-9.]+' | head -n1 | awk '{print $2}'
 }
 
 # Checks whether /etc/hosts lets this host resolve its OWN current hostname
