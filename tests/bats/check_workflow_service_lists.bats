@@ -22,8 +22,8 @@
 # invoke the script with a matrix-source fixture PLUS additional fixture
 # files, mirroring the script's own `[primary] [extra]...` argument shape.
 #
-# gc_fixture is named gc-pr-staging-images.sh, not .yml (#1095, 2026-08-06):
-# it used to model the array as it looked embedded in
+# gc_fixture is named gc-pr-staging-images.sh, not .yml: it used to model
+# the array as it looked embedded in
 # .github/workflows/gc-pr-staging-images.yml's own `run:` block, before that
 # logic moved into scripts/untracked/gc-pr-staging-images.sh as a real, standalone
 # script. check_services_arrays() in the script under test keys
@@ -199,9 +199,8 @@ EOF
 # on the real files: scripts/untracked/gc-pr-staging-images.sh equals the canonical
 # set, declared at column 0 like ensure-pr-staging-images.sh below (it is a
 # plain shell script, not indented inside a YAML `run:` block -- unlike
-# before #1095, 2026-08-06, when this array still lived embedded in
-# .github/workflows/gc-pr-staging-images.yml's own `run:` block and this
-# fixture was indented to match); backfill-stack-latest.yml deliberately
+# before this array moved out of .github/workflows/gc-pr-staging-images.yml's
+# own `run:` block, when this fixture was indented to match); backfill-stack-latest.yml deliberately
 # excludes build-tools (a documented subset, matching its own "intentionally
 # excludes build-tools" comment) and stays YAML-embedded/indented, since that
 # real file's array genuinely is still inline in a `run:` block;
@@ -543,10 +542,9 @@ write_supersession_fixture() {
 }
 
 # What: proves the check applies once a file defines all five required jobs.
-# Why: this is the exact PR #1628 root cause -- a required job's needs: list
-#   silently missing push-supersession-check -- and it must be caught even
-#   though the same check must stay a no-op against the narrower fixtures
-#   every other test above uses (see the no-op test below).
+# Why: a required job's needs: list silently missing push-supersession-check
+#   must be caught, even though the same check must stay a no-op against the
+#   narrower fixtures every other test above uses.
 # From: Issue #1095 | PR #1628
 @test "supersession wiring: fails when merge-manifests is missing push-supersession-check from needs" {
     write_supersession_fixture merge-manifests > "$fixture"

@@ -433,9 +433,8 @@ check_hosted_fallback_matrix() {
 #   image-publishing jobs in $1 is missing push-supersession-check from its
 #   own needs: list.
 # Why: referencing needs['push-supersession-check'] without declaring it in
-#   needs: is not a syntax error, just a silent empty string -- PR #1628's
-#   own root cause (merge-manifests/full-setup-validate) was exactly this,
-#   found only by manual tracing, not by any prior check.
+#   needs: is not a syntax error, just a silent empty string that no prior
+#   check caught.
 # From: Issue #1095 | PR #1628
 check_push_supersession_wiring() {
     local file="$1" job block needs_section
