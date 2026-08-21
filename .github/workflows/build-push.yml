@@ -2639,9 +2639,9 @@ jobs:
           # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
-          # What: Calls scripts/lib/validation-image-tag.sh's own functions for the channel/pr-staging-available/tag decisions, instead of reimplementing them inline.
-          # Why: Keeps exactly one implementation of this decision logic; this job already sources other scripts/lib/*.sh files below (ghcr-retry.sh, staging-image-freshness.sh) the same way.
-          # From: Issue #822
+          # What: Calls scripts/lib/validation-image-tag.sh's own functions for the channel/pr-staging-available/tag decisions.
+          # Why: Keeps exactly one implementation of this decision logic.
+          # From: Issue #1095 | PR #1619
           # shellcheck source=scripts/lib/validation-image-tag.sh
           source "$GITHUB_WORKSPACE/scripts/lib/validation-image-tag.sh"
 
@@ -2665,9 +2665,9 @@ jobs:
           fi
 
           if [[ "$pr_staging_available" == "true" ]]; then
-            # What: Any untouched service is backfilled from this PR's own base-commit per-commit image in the next step ("Ensure PR staging tags exist for full-setup services"), not from base_channel_tag.
-            # Why: base_channel_tag is computed above only for the pr_staging_available == false branch's whole-suite fallback below, and is otherwise unused here.
-            # From: Issue #1254 | Issue #1255
+            # What: Any untouched service is backfilled from this PR's own base-commit per-commit image, not from base_channel_tag.
+            # Why: base_channel_tag is only computed for the pr_staging_available == false fallback branch.
+            # From: Issue #1095 | PR #1619
             echo "Validating against this PR's own staging tag '$tag' (built commit $BUILD_SHA, PR head $PR_HEAD_SHA; untouched services are backfilled from this PR's own base commit's per-commit image, see the next step)."
           else
             if [[ "$EVENT_NAME" == "pull_request" ]]; then
@@ -2699,9 +2699,9 @@ jobs:
         if: steps.channel.outputs.pr-staging-available == 'true'
         env:
           PR_TAG: ${{ steps.channel.outputs.tag }}
-          # What: This PR's own base commit; used both to verify the back-fill source was actually built from it (or later), and to derive that source image's own tag.
-          # Why: Always present here -- this step only runs when pr-staging-available is true, which requires a pull_request event.
-          # From: Issue #808 | Issue #1254 | Issue #1255
+          # What: This PR's own base commit, used to verify and derive the back-fill source's tag.
+          # Why: This step only runs when pr-staging-available is true.
+          # From: Issue #1095 | PR #1619
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow }}
           PROXY_TOUCHED: ${{ needs['detect-changes'].outputs.proxy }}
@@ -2739,9 +2739,9 @@ jobs:
 
           : "${BASE_SHA:?BASE_SHA (github.event.pull_request.base.sha) is required}"
 
-          # What: Calls vit_service_should_have_staging_tag directly instead of reimplementing the same "workflow/CI-contract change forces every service except build-tools to be treated as touched" override inline a second time.
-          # Why: Keeps this decision alongside this step's other "Determine validation image channel"-sourced functions, one implementation instead of a second copy.
-          # From: Issue #822
+          # What: Calls vit_service_should_have_staging_tag directly instead of reimplementing its override.
+          # Why: Keeps this decision alongside this step's other shared-function calls.
+          # From: Issue #1095 | PR #1619
           service_should_have_staging_tag() {
             vit_service_should_have_staging_tag "$1" "$2" "$WORKFLOW_CHANGED"
           }
@@ -2800,9 +2800,9 @@ jobs:
               exit 1
             fi
 
-            # What: Never back-fills without first proving the source image was actually built from base.sha or later, via saf_resolve_untouched_backfill_source.
-            # Why: Shares scripts/lib/staging-image-freshness.sh's/staging-ancestor-fallback.sh's resolution sequence with scripts/untracked/ensure-pr-staging-images.sh instead of an independent copy; the poll/search-depth arguments below intentionally match that script's own defaults -- keep them in sync by hand if those ever change.
-            # From: Issue #808
+            # What: Never back-fills without first proving the source image was actually built from base.sha or later.
+            # Why: Shares this resolution sequence with scripts/untracked/ensure-pr-staging-images.sh.
+            # From: Issue #1095 | PR #1619
             if ! resolved_source="$(saf_resolve_untouched_backfill_source "$REPOSITORY" "$service" "${classify_key_map[$service]}" "$BASE_SHA" \
               900 1200 \
               300 600 \
@@ -2924,10 +2924,8 @@ jobs:
         uses: ./.github/actions/wait-validation-stack-health
 
       # What: Always dumps logs here, unlike the failure-only dump above.
-      # Why: A green run must be verifiable as having actually tested this commit's own
-      #   code (not stale base-branch content), only checkable if logs are visible
-      #   regardless of outcome.
-      # From: Issue #626
+      # Why: A green run must be verifiable as having actually tested this commit's own code.
+      # From: Issue #1095 | PR #1619
       - name: Show full-setup service logs
         if: always()
         working-directory: deploy/full-setup
@@ -3496,8 +3494,8 @@ jobs:
               echo "UI coverage: ${ui_coverage}%"
 
               # What: Per-crate coverage thresholds (ui_threshold/dns_threshold), not a shared minimum.
-              # Why: The nats-subscriber async subscribe/forward loop needs a live NATS/PowerDNS harness and is covered by full-setup integration, not unit coverage, so a shared threshold would either block real ui coverage or permanently fail nats-subscriber; dns_threshold stays 0 until nats-subscriber gains unit-testable coverage beyond its current pure-logic tests.
-              # From: Issue #504 | PR #515
+              # Why: nats-subscriber's async loop is covered by full-setup integration, not unit tests.
+              # From: Issue #1095 | PR #1619
               ui_threshold=35
               dns_threshold=0
 
@@ -3520,7 +3518,7 @@ jobs:
 
               # What: Badge generation reuses this same containerized jq instead of assuming a host-installed jq.
               # Why: Matches why the coverage extraction above already runs in here.
-              # From: Issue #566
+              # From: Issue #1095 | PR #1619
               ui_coverage_display="$(printf "%.2f" "$ui_coverage")"
               dns_coverage_display="$(printf "%.2f" "$dns_coverage")"
               badge_message="ui ${ui_coverage_display}% / dns ${dns_coverage_display}%"
@@ -3619,9 +3617,9 @@ jobs:
           : "${BADGE_BRANCH:?BADGE_BRANCH is required}"
           : "${BADGE_FILE:?BADGE_FILE is required}"
 
-          # What: Debounce/coalesce -- re-resolves the branch's current tip directly from the remote and skips as a no-op if a newer commit has already landed.
-          # Why: Same reasoning/mechanism as promote's own branch-tip check: the per-ref badge concurrency group only serializes execution ORDER, not which commit's coverage wins; a slow, older run could otherwise fast-forward the badge file back to stale coverage after a faster, newer run for the same branch already published.
-          # From: Issue #777
+          # What: Debounce/coalesce -- skips as a no-op if a newer commit already landed on this branch.
+          # Why: A queued older run must not overwrite the badge with stale coverage.
+          # From: Issue #1095 | PR #1619
           current_tip="$(git ls-remote origin "$GITHUB_REF" | cut -f1)"
           if [[ -z "$current_tip" ]]; then
             echo "::error::Could not resolve the current tip of ${GITHUB_REF} via git ls-remote; refusing to publish the coverage badge blind."
@@ -5027,9 +5025,9 @@ jobs:
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
-        # What: Pull requests now also log in, pushing a PR-scoped staging tag below so "validate full-setup image" can test the PR's own commits instead of stale base-branch state; also widened for a Step 4 push-reuse-only path, same reasoning as "Set up Docker Buildx" immediately above.
-        # Why: This is a same-repo-only project (no fork PRs); the fork/Dependabot actor checks are a fail-safe in case that assumption ever stops holding -- their GITHUB_TOKEN is read-only anyway, so login/push would otherwise fail loudly with a 403 rather than being skipped cleanly.
-        # From: Issue #626
+        # What: Also logs in on pull_request events, for the PR-scoped staging tag push below.
+        # Why: Fork/Dependabot PRs get a read-only GITHUB_TOKEN, so login there is safe by construction.
+        # From: Issue #1095 | PR #1619
         if: >-
           ${{
             (
@@ -5262,8 +5260,8 @@ jobs:
           echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
 
       # What: Computes an ISO-week cache-bust value for build-tools's APT_CACHE_BUST build-arg below.
-      # Why: tools/build-tools/Dockerfile's apt-get-install/apt-get-upgrade RUN step is fed from this job's persistent local Buildx cache with no wall-clock expiry; a Debian security fix published after that layer was cached would otherwise never get picked up until the cache naturally evicts.
-      # From: Issue #1147
+      # Why: This job's Buildx cache has no wall-clock expiry.
+      # From: Issue #1095 | PR #1619
       - name: Compute apt cache-bust value
         if: steps.should-build.outputs.should-build == 'true'
         id: apt-cache-bust
@@ -5413,9 +5411,9 @@ jobs:
           platform: linux/amd64
 
       - name: Build and push
-        # What: Uses the shared retry+re-login composite action (.github/actions/ghcr-build-push-retry) for this build/push step.
-        # Why: ghcr.io push-token issuance intermittently fails (403/401/denied) for the slowest builds in this matrix; this is the shared retry+re-login policy every GHCR-writing `uses:` step in the project now uses, since a `uses:` step needs its own wrapper instead of sourcing the shared shell function (scripts/lib/ghcr-retry.sh) directly.
-        # From: Issue #822
+        # What: Uses the shared retry+re-login composite action (.github/actions/ghcr-build-push-retry).
+        # Why: ghcr.io push-token issuance intermittently fails for the slowest builds in this matrix.
+        # From: Issue #1095 | PR #1619
         id: build
         if: steps.should-build.outputs.should-build == 'true'
         timeout-minutes: 60
@@ -5440,9 +5438,9 @@ jobs:
             org.opencontainers.image.description=${{ matrix.description }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
-          # What: No `annotations:` input on this single-platform push; the description annotation is attached later, in merge-manifests, and channel/stack promotions copy it forward untouched from there.
-          # Why: A single-platform push has no index for `--annotation index:...` to attach to (errors outright), and `imagetools create` downstream silently drops `--annotation` when combining Docker-format sources (no annotations field in that manifest-list schema); `oci-mediatypes=true` here is required groundwork since merge-manifests is where a real multi-platform index first exists.
-          # From: Issue #620
+          # What: No `annotations:` input on this single-platform push.
+          # Why: A single-platform push has no index for `--annotation` to attach to.
+          # From: Issue #1095 | PR #1619
           outputs: type=image,oci-mediatypes=true
           platforms: linux/amd64
           provenance: false
@@ -5582,8 +5580,9 @@ jobs:
               )
             )
           }}
-        # 50 min (was 20): the wrapped trivy-scan-retry (issue #1535) can run up to 4 scan
-        # attempts, so the bound must cover the worst case.
+        # What: 50-minute timeout for this Trivy scan step.
+        # Why: The wrapped trivy-scan-retry action can attempt up to 4 scans.
+        # From: Issue #1095 | PR #1619
         timeout-minutes: 50
         uses: ./.github/actions/trivy-scan-exact-digest
         with:
@@ -6023,8 +6022,8 @@ jobs:
           echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
 
       # What: Computes build-arm64's own independent ISO-week cache-bust value, mirroring build's identical step.
-      # Why: This job's `type=gha` cache also has no wall-clock expiry and runs on a separate runner with no shared state; deriving the same ISO-week string from wall-clock time alone keeps amd64/arm64 in lockstep without passing a value between jobs.
-      # From: Issue #1147
+      # Why: This job runs on a separate runner with no shared state.
+      # From: Issue #1095 | PR #1619
       - name: Compute apt cache-bust value
         if: steps.should-build.outputs.should-build == 'true'
         id: apt-cache-bust
@@ -6041,7 +6040,7 @@ jobs:
         #
         # What: Same shared retry+re-login composite action (.github/actions/ghcr-build-push-retry) as build's own equivalent step.
         # Why: One shared GHCR retry+re-login policy, not a second copy for this arm64 leg.
-        # From: Issue #822
+        # From: Issue #1095 | PR #1619
         id: build
         if: steps.should-build.outputs.should-build == 'true'
         timeout-minutes: 90
@@ -6063,9 +6062,9 @@ jobs:
             org.opencontainers.image.description=${{ matrix.description }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
-          # What: Mirrors build's equivalent step -- no `annotations:` input, `oci-mediatypes=true` groundwork.
-          # Why: See build's own comment on this exact step for the full reasoning.
-          # From: Issue #620
+          # What: No `annotations:` input on this single-platform push, mirroring build's equivalent step.
+          # Why: A single-platform push has no index for `--annotation` to attach to.
+          # From: Issue #1095 | PR #1619
           outputs: type=image,oci-mediatypes=true
           platforms: linux/arm64
           provenance: false
@@ -6107,8 +6106,9 @@ jobs:
               )
             )
           }}
-        # 50 min (was 20): the wrapped trivy-scan-retry (issue #1535) can run up to 4 scan
-        # attempts, so the bound must cover the worst case.
+        # What: 50-minute timeout for this Trivy scan step.
+        # Why: The wrapped trivy-scan-retry action can attempt up to 4 scans.
+        # From: Issue #1095 | PR #1619
         timeout-minutes: 50
         uses: ./.github/actions/trivy-scan-exact-digest
         with:
@@ -6242,8 +6242,8 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           # What: Reads the shared CI_BUILD_SERVICES scalar rather than a hand-duplicated services=(...) literal.
-          # Why: scripts/tracked/check-workflow-service-lists.sh only guards copies it knows about; a scalar shared by every promotion/GC/release loop removes the duplication class entirely.
-          # From: Issue #822 | PR #1523
+          # Why: check-workflow-service-lists.sh only guards copies it knows about.
+          # From: Issue #1095 | PR #1619
           read -ra services <<< "$CI_BUILD_SERVICES"
           # What: reads the single declared, lowercased GHCR owner/repo.
           # Why: github.repository is not guaranteed lowercase; GHCR requires it.
@@ -6276,9 +6276,9 @@ jobs:
           # of this same helper) is a local copy per job over introducing a new composite
           # action just for one function. Same quote-stripping as those.
           #
-          # What: Wrapped in ghcr_retry -- reads the digest of a manifest this same step just created a few lines below.
-          # Why: A transient GHCR 401/read failure here is a real retry candidate, not an "expected absent" probe -- unlike the amd64/arm64 existence checks further down, which intentionally stay unwrapped (see their own comment).
-          # From: Issue #822
+          # What: Wrapped in ghcr_retry -- reads the digest of a manifest this same step just created.
+          # Why: A transient GHCR read failure here is a real retry candidate, not an expected-absent probe.
+          # From: Issue #1095 | PR #1619
           digest_for_image() {
             local image=$1
             local digest
@@ -6787,9 +6787,9 @@ jobs:
           declare -A previous_refs=()
           promoted_targets=()
 
-          # What: Wrapped in ghcr_retry -- unlike merge-manifests' amd64/arm64 existence probes, absence is never the expected outcome for any caller of this helper in this job.
-          # Why: The "previous digest before overwrite" callers below already tolerate absence via `|| true` regardless of whether it is real (first-ever promotion) or a transient read failure; a retry only improves the odds of capturing the real previous digest that rollback_promotions needs.
-          # From: Issue #822
+          # What: Wrapped in ghcr_retry -- unlike merge-manifests' existence probes, absence is never expected here.
+          # Why: rollback_promotions needs the real previous digest, not a false "never existed" read.
+          # From: Issue #1095 | PR #1619
           digest_for_image() {
             local image=$1
             local digest
@@ -6826,9 +6826,9 @@ jobs:
           }
           trap rollback_promotions EXIT
 
-          # What: Debounce/coalesce -- before moving any tag, re-resolves the ref's current tip directly from the remote and bails out as a no-op if a newer commit already landed; only applies to branch refs, since a release/rc tag push targets one fixed, immutable ref.
-          # Why: promote's own concurrency group above only stops it competing for the SAME slot as the rest of this workflow, not several runs queuing back-to-back across a burst of merges, each pointing at a moment-in-time commit a later one will immediately supersede; that later commit's own promote run will move the tag correctly, so this run briefly setting dev/nightly to an already-stale commit would only add churn.
-          # From: Issue #777
+          # What: Debounce/coalesce -- skips the tag move if the ref's remote tip moved past this commit.
+          # Why: A queued older run must not move a mutable channel tag onto a superseded commit.
+          # From: Issue #1095 | PR #1619
           if [[ "$GITHUB_REF" == refs/heads/* ]]; then
             current_tip="$(git ls-remote origin "$GITHUB_REF" | cut -f1)"
             if [[ -z "$current_tip" ]]; then
@@ -6909,9 +6909,9 @@ jobs:
           GHCR_RETRY_USERNAME="$GHCR_RETRY_USERNAME" GHCR_RETRY_PASSWORD="$GHCR_RETRY_PASSWORD" \
             bash scripts/untracked/require-image-platforms.sh "$stack_pointer_image" "$REQUIRED_PLATFORMS"
 
-          # What: Neither loop below passes --annotation; $source_image/$stack_pointer_image already carry it from their own upstream builds.
-          # Why: A plain --prefer-index=false copy of an already-annotated OCI index preserves that annotation and produces a byte-identical digest; passing --annotation again would risk re-serializing the manifest with a different digest, breaking release's invariant that a channel/release tag resolves to the same digest as its source sha-* tag.
-          # From: Issue #620
+          # What: Neither loop below passes --annotation.
+          # Why: Passing it again would re-serialize the manifest with a different digest.
+          # From: Issue #1095 | PR #1619
           for service in "${services[@]}"; do
             source_image="ghcr.io/${REPOSITORY}/${service}@${candidate_digests[$service]}"
             for channel_tag in "${channel_tags[@]}"; do
@@ -7475,33 +7475,19 @@ jobs:
           UPLOAD_VEX
 
   release-sbom:
-    # OSPS-QA-02.02: every released first-party image must ship with an SBOM. Scoped to
-    # release tags (the same gate as `release`) because the requirement is about
-    # *released* assets; generating SBOMs on every push would only redo the per-digest
-    # work container-scan already does, with no release-evidence gain. Reuses Trivy
-    # (already this project's pinned, vetted image scanner, AG-KD-003) to emit a
-    # CycloneDX SBOM per released image digest, then attaches each as a <service>.cdx.json
-    # GitHub release asset. That delivery path mirrors how provenance evidence rides
-    # alongside the release and needs only contents:write. A GHCR OCI-referrer SBOM
-    # attestation (actions/attest-sbom) is a possible future complement, deliberately not
-    # added here to keep a single, fully release-asset-based publication path.
+    # What: Generates a CycloneDX SBOM per released image digest and attaches it as a GitHub release asset (OSPS-QA-02.02).
+    # Why: Scoped to release tags only, since a push-time SBOM would just redo container-scan's per-digest work.
+    # From: Issue #1095 | PR #1619
     name: publish SBOM for ${{ matrix.service }}
     needs: release
     if: "!cancelled() && needs.release.result == 'success' && startsWith(github.ref, 'refs/tags/v')"
-    # Container image scanning is memory-heavy, so it takes the heavy tier the
-    # same way container-scan does (AG-CI-002).
+    # What: Runs on the heavy self-hosted tier (AG-CI-002).
+    # Why: Container image scanning is memory-heavy.
+    # From: Issue #1095 | PR #1619
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    # NO REAL RUN DATA: same gap as `release` above -- this job only runs on a tag push,
-    # and none has completed in recorded history. Anchored instead to container-scan's
-    # per-service class of real data (24s-7min per service for a full image build + Trivy
-    # scan; this job only pulls an already-built digest and re-runs Trivy for the
-    # CycloneDX SBOM output, so it is never slower than that per-service work). Was 45
-    # minutes ("real headroom over container-scan's own per-service worst case") before
-    # issue #1535's trivy-scan-retry wrapper: the Trivy step below can now retry up to 4
-    # times (worst case ~42 min: 4 x its own 10m timeout + 3 x 30s backoff) instead of
-    # failing on the first attempt, so 45 minutes no longer leaves real headroom over the
-    # step's own new worst case once checkout/digest-resolution/buildx overhead is added.
-    # Flagged explicitly as an estimate, not a measurement, same as before.
+    # What: 65-minute timeout estimate for this job.
+    # Why: Covers the wrapped Trivy scan-retry's worst-case attempts plus checkout/buildx overhead.
+    # From: Issue #1095 | PR #1619
     timeout-minutes: 65
     permissions:
       contents: write
@@ -7509,9 +7495,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # What: The Trivy-scanned first-party image set (container-scan's matrix), including syslog and utilities so every released image gets a CycloneDX SBOM; `stack` is intentionally excluded since it is a busybox channel-pointer image, not vuln-scanned either.
-        # Why: A hand-kept copy of container-scan's own list risks drifting from it if not kept in sync by hand.
-        # From: Issue #1428 | PR #1433, Issue #1556 | PR #1574
+        # What: The Trivy-scanned first-party image set (container-scan's matrix), excluding `stack` (an unscanned channel-pointer image).
+        # Why: A hand-kept copy of container-scan's own list risks drifting if not kept in sync by hand.
+        # From: Issue #1095 | PR #1619
         service: [proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, syslog, ui, build-tools, utilities]
     steps:
       - name: Checkout
