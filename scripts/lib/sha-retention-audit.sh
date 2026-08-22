@@ -504,6 +504,18 @@ sra_budget_decision() {
 # Why: keeps the schema itself directly unit-testable without a live
 # sqlite3 invocation (its shape can be grepped/asserted on by bats).
 # From: Issue #1585.
+#
+# What: history_fingerprint records the exact managed-ref-set state a cached
+# resolution was computed against.
+# Why: two real callers already classify against different ref sets today
+# (the standalone audit uses origin/current_dev only; the destructive GC's
+# internal re-audit uses current_dev+master+release/*+v[0-9]* by default via
+# gc_resolve_retention_history_refs), and both share this same cache file --
+# without this column a rank/outside-managed-history resolution cached by one
+# caller's narrower ref set would be silently reused by the other caller's
+# wider one (or by the same caller after a later ref-set change), which can
+# flip a real protect/would-delete decision. See sra_history_refs_fingerprint.
+# From: Issue #1095.
 sra_cache_schema_sql() {
   cat <<'SQL'
 CREATE TABLE IF NOT EXISTS version_cache (
@@ -512,10 +524,32 @@ CREATE TABLE IF NOT EXISTS version_cache (
   digest TEXT NOT NULL,
   tags TEXT NOT NULL,
   resolution TEXT NOT NULL,
+  history_fingerprint TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   PRIMARY KEY (package, version_id)
 );
 SQL
+}
+
+# What: builds a stable fingerprint for one run's exact managed-history ref
+# set, as "ref@resolved-commit;ref2@resolved-commit2;...".
+# Why: a cache-read comparison against this value turns any ref-set drift
+# (a different caller's ref list, or the same ref list resolving to a
+# different commit since the cache was written) into an ordinary, safe cache
+# miss -- never a silently stale resolution. Order-sensitive by design: the
+# caller is expected to pass its own ref list in a stable order so the same
+# effective ref set always fingerprints identically run-to-run.
+# From: Issue #1095.
+sra_history_refs_fingerprint() {
+  local repo_root="${1:?sra_history_refs_fingerprint: repo root is required}"
+  shift
+  local ref resolved fingerprint=""
+  (( $# > 0 )) || return 1
+  for ref in "$@"; do
+    resolved="$(git -C "$repo_root" rev-parse --verify --quiet "${ref}^{commit}")" || return 1
+    fingerprint+="${fingerprint:+;}${ref}@${resolved}"
+  done
+  printf '%s\n' "$fingerprint"
 }
 
 # What: creates the cache database (idempotent) at the given path.
@@ -551,7 +585,7 @@ sra_cache_read_package() {
   command -v sqlite3 >/dev/null 2>&1 || return 1
   [[ -f "$db_path" ]] || return 1
   sqlite3 -separator "$(printf '\t')" "$db_path" \
-    "SELECT version_id, digest, tags, resolution FROM version_cache WHERE package = '$(sra_sql_quote "$package")';"
+    "SELECT version_id, digest, tags, resolution, history_fingerprint FROM version_cache WHERE package = '$(sra_sql_quote "$package")';"
 }
 
 # What: bulk-writes one package's updated cache rows in a single transaction.
@@ -563,6 +597,7 @@ sra_cache_write_package() {
   local db_path="${1:?sra_cache_write_package: db path is required}"
   local package="${2:?sra_cache_write_package: package is required}"
   local rows_file="${3:?sra_cache_write_package: rows file is required}"
+  local history_fingerprint="${4:?sra_cache_write_package: history fingerprint is required}"
   local now version_id digest tags resolution sql_file
   command -v sqlite3 >/dev/null 2>&1 || return 1
   [[ -f "$rows_file" ]] || return 1
@@ -573,8 +608,8 @@ sra_cache_write_package() {
     printf 'BEGIN TRANSACTION;\n'
     while IFS=$'\t' read -r version_id digest tags resolution; do
       [[ "$version_id" =~ ^[0-9]+$ ]] || continue
-      printf "INSERT OR REPLACE INTO version_cache (package, version_id, digest, tags, resolution, updated_at) VALUES ('%s', %s, '%s', '%s', '%s', '%s');\n" \
-        "$(sra_sql_quote "$package")" "$version_id" "$(sra_sql_quote "$digest")" "$(sra_sql_quote "$tags")" "$(sra_sql_quote "$resolution")" "$now"
+      printf "INSERT OR REPLACE INTO version_cache (package, version_id, digest, tags, resolution, history_fingerprint, updated_at) VALUES ('%s', %s, '%s', '%s', '%s', '%s', '%s');\n" \
+        "$(sra_sql_quote "$package")" "$version_id" "$(sra_sql_quote "$digest")" "$(sra_sql_quote "$tags")" "$(sra_sql_quote "$resolution")" "$(sra_sql_quote "$history_fingerprint")" "$now"
     done <"$rows_file"
     printf 'COMMIT;\n'
   } >"$sql_file"

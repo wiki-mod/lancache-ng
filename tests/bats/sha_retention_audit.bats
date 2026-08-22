@@ -711,6 +711,7 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" == *"CREATE TABLE IF NOT EXISTS version_cache"* ]]
   [[ "$output" == *"PRIMARY KEY (package, version_id)"* ]]
+  [[ "$output" == *"history_fingerprint TEXT NOT NULL"* ]]
 }
 
 # What: doubles an embedded single quote, SQL's own escape for that literal.
@@ -738,7 +739,7 @@ EOF
 
   run sra_cache_init "$db_path"
   [ "$status" -eq 0 ]
-  run sra_cache_write_package "$db_path" "proxy" "$rows_file"
+  run sra_cache_write_package "$db_path" "proxy" "$rows_file" "origin/current_dev@$(printf 'c%.0s' {1..40})"
   [ "$status" -eq 0 ]
   run sra_cache_read_package "$db_path" "proxy"
   [ "$status" -eq 0 ]
@@ -746,6 +747,25 @@ EOF
   [[ "$output" == *"$digest"* ]]
   [[ "$output" == *"sha-abc1234"* ]]
   [[ "$output" == *"rank:7"* ]]
+  [[ "$output" == *"origin/current_dev@$(printf 'c%.0s' {1..40})"* ]]
+}
+
+# What: a cache write with no history fingerprint argument fails closed.
+# Why: history_fingerprint is a required, not optional, column (Issue
+# #1095) -- a caller that forgets it must get a loud failure (falling back
+# to full classification for that package), never a silently written row
+# with an empty/garbage fingerprint that would then spuriously match nothing
+# (a permanent, silent full miss) or, worse, spuriously match everything.
+# From: Issue #1095.
+@test "cache write fails closed without a history fingerprint argument" {
+  command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not available on this host"
+  db_path="$tmp_dir/cache.db"
+  rows_file="$tmp_dir/rows.tsv"
+  printf '42\tsha256:%s\tsha-abc1234\trank:7\n' "$(printf 'a%.0s' {1..64})" >"$rows_file"
+  run sra_cache_init "$db_path"
+  [ "$status" -eq 0 ]
+  run sra_cache_write_package "$db_path" "proxy" "$rows_file"
+  [ "$status" -ne 0 ]
 }
 
 # What: a fresh, never-initialized database path is a clean read miss.
@@ -771,11 +791,11 @@ EOF
   [ "$status" -eq 0 ]
 
   printf '42\tsha256:%s\told-tag\trank:9\n' "$(printf 'a%.0s' {1..64})" >"$rows_file"
-  run sra_cache_write_package "$db_path" "proxy" "$rows_file"
+  run sra_cache_write_package "$db_path" "proxy" "$rows_file" "origin/current_dev@$(printf 'c%.0s' {1..40})"
   [ "$status" -eq 0 ]
 
   printf '42\tsha256:%s\tnew-tag\trank:3\n' "$(printf 'b%.0s' {1..64})" >"$rows_file"
-  run sra_cache_write_package "$db_path" "proxy" "$rows_file"
+  run sra_cache_write_package "$db_path" "proxy" "$rows_file" "origin/current_dev@$(printf 'd%.0s' {1..40})"
   [ "$status" -eq 0 ]
 
   run sra_cache_read_package "$db_path" "proxy"
@@ -783,6 +803,84 @@ EOF
   [ "$(wc -l <<<"$output")" -eq 1 ]
   [[ "$output" == *"new-tag"* ]]
   [[ "$output" != *"old-tag"* ]]
+  [[ "$output" == *"origin/current_dev@$(printf 'd%.0s' {1..40})"* ]]
+  [[ "$output" != *"origin/current_dev@$(printf 'c%.0s' {1..40})"* ]]
+}
+
+# What: the fingerprint encodes each ref together with the exact commit it
+# currently resolves to, and differs when the ref set changes.
+# Why: this is the mechanism that makes the v1.2 classification cache safe
+# to share across two real callers with different managed-history ref sets
+# (Issue #1095) -- it must actually change when the ref set does, not just
+# exist as a hook nobody wired up.
+# From: Issue #1095.
+@test "history refs fingerprint changes when the ref set changes" {
+  git_dir="$tmp_dir/repo"
+  git init -q "$git_dir"
+  git -C "$git_dir" config user.name Test
+  git -C "$git_dir" config user.email test@example.invalid
+  printf 'one\n' >"$git_dir/file"
+  git -C "$git_dir" add file
+  git -C "$git_dir" commit -q -m one
+  git -C "$git_dir" update-ref refs/remotes/origin/current_dev HEAD
+  printf 'two\n' >>"$git_dir/file"
+  git -C "$git_dir" commit -q -am two
+  git -C "$git_dir" update-ref refs/remotes/origin/master HEAD
+
+  run sra_history_refs_fingerprint "$git_dir" origin/current_dev
+  [ "$status" -eq 0 ]
+  narrow_fingerprint="$output"
+
+  run sra_history_refs_fingerprint "$git_dir" origin/current_dev origin/master
+  [ "$status" -eq 0 ]
+  wide_fingerprint="$output"
+
+  [ "$narrow_fingerprint" != "$wide_fingerprint" ]
+  [[ "$narrow_fingerprint" == *"origin/current_dev@"* ]]
+  [[ "$wide_fingerprint" == *"origin/current_dev@"* ]]
+  [[ "$wide_fingerprint" == *"origin/master@"* ]]
+
+  # What: the same ref set, recomputed, is byte-identical -- stable across
+  # repeated same-input runs, not just "usually similar."
+  # From: Issue #1095.
+  run sra_history_refs_fingerprint "$git_dir" origin/current_dev
+  [ "$status" -eq 0 ]
+  [ "$output" = "$narrow_fingerprint" ]
+}
+
+# What: an unresolvable ref, or an empty ref list, fails closed.
+# Why: a caller must never silently proceed with an empty/partial
+# fingerprint that would make every cache row look like a match (or make
+# every row look like a permanent miss); either way, mirrors the fail-closed
+# style already used by sra_budget_decision/sra_resolve_commit_prefix.
+# From: Issue #1095.
+@test "history refs fingerprint fails closed on an unknown ref or an empty ref list" {
+  git_dir="$tmp_dir/repo"
+  git init -q "$git_dir"
+  git -C "$git_dir" config user.name Test
+  git -C "$git_dir" config user.email test@example.invalid
+  printf 'one\n' >"$git_dir/file"
+  git -C "$git_dir" add file
+  git -C "$git_dir" commit -q -m one
+
+  run sra_history_refs_fingerprint "$git_dir" origin/does-not-exist
+  [ "$status" -ne 0 ]
+
+  run sra_history_refs_fingerprint "$git_dir"
+  [ "$status" -ne 0 ]
+}
+
+# What: the classification cache read in gc-sha-retention-audit.sh compares
+# history_fingerprint, not just digest/tags, before trusting a cached row.
+# Why: a structural regression check (same style as the rollback_anchors
+# ordering test below) -- catches a future edit that reintroduces the fixed
+# gap by dropping this comparison, without needing a live sqlite3 run.
+# From: Issue #1095.
+@test "gc-sha-retention-audit.sh gates a cached resolution on history_fingerprint too" {
+  run grep -F 'cache_history_fingerprint' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh"
+  [ "$status" -eq 0 ]
+  run grep -F '"$cache_history_fingerprint" != "$history_fingerprint"' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh"
+  [ "$status" -eq 0 ]
 }
 
 # What: rollback anchors must precede tag/history classification for every class.

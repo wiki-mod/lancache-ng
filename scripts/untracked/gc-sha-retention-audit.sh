@@ -40,17 +40,27 @@ audit_concurrency="${SRA_CONCURRENCY:-2}"
 # Why: opt-in via an unset-by-default env var keeps this strictly additive:
 # no caller that does not set SRA_CACHE_DB is affected by this feature at
 # all, and any cache failure (missing sqlite3, unreadable/corrupt db, a
-# cache miss) falls back to full classification rather than erroring. KNOWN
-# LIMITATION: a cached ordinary-root git-history rank is only reused when
-# digest+tags are byte-identical to the cached row, but the rank NUMBER
-# itself was computed against whichever history_refs (current_dev/master/
-# release branches) were live on the run that cached it -- if the managed
-# ref set changes (a release branch is added/retired) between that run and
-# a later cache hit, the reused rank reflects the old ref set. Not yet
-# guarded against; a real multi-run CI verification (this PR's own open
-# item) should confirm whether this drift is observable in practice before
-# relying on it across a ref-set change. A second, separate concurrency
-# caveat: sra_cache_write_package's plain `sqlite3 "$db_path"` connection
+# cache miss) falls back to full classification rather than erroring.
+# FIXED (previously a known limitation, Issue #1095): a cached ordinary-root
+# git-history rank/resolution is now only reused when digest+tags AND
+# history_fingerprint (see sra_history_refs_fingerprint) are all
+# byte-identical to the cached row. Confirmed real, not just theoretical:
+# this repo's own two real callers already classify against different ref
+# sets -- this workflow passes SRA_HISTORY_REF=origin/current_dev only,
+# while gc-pr-staging-images.sh's internal re-audit (gc_build_service_
+# retention_plan) passes SRA_HISTORY_REFS computed by
+# gc_resolve_retention_history_refs (current_dev+master+release/*+v[0-9]* by
+# default) -- and both share the same rotating-key cache file. Reproduced
+# empirically against this repo's real history: commit 02d744f0bf49882e
+# 4f15ca5df82524debc5877dd is rank 3 on origin/master's first-parent chain
+# and is not reachable from origin/current_dev at all (`git merge-base
+# --is-ancestor` confirms). A digest+tags-identical version built from that
+# commit would have been cached "outside-managed-history" (would-delete) by
+# this workflow's narrower ref set, then wrongly reused as-is by the GC
+# job's wider ref set, which would otherwise classify the same commit as
+# managed. history_fingerprint comparison turns that into a safe cache miss
+# instead. A second, separate concurrency caveat: sra_cache_write_package's
+# plain `sqlite3 "$db_path"` connection
 # sets no PRAGMA busy_timeout, so two workers from the same batch writing
 # to the same cache_db at the same moment can hit SQLITE_BUSY; that failure
 # is already handled as a soft ::warning:: (falls back to full
@@ -247,6 +257,20 @@ for history_ref in "${history_refs[@]}"; do
   done <"$history_file"
 done
 
+# What: fingerprints this run's exact managed-history ref set for the v1.2
+# classification cache.
+# Why: gates every cache read below (see audit_package) on top of the
+# existing digest+tags check -- see SRA_CACHE_DB's own comment above for why
+# this is required, not optional, once a cache is shared across callers with
+# different ref sets.
+# From: Issue #1095.
+if history_fingerprint="$(sra_history_refs_fingerprint "$repo_root" "${history_refs[@]}")"; then
+  :
+else
+  echo "::error::Cannot compute a history-refs fingerprint for the managed ref set." >&2
+  exit 1
+fi
+
 # What: audits one package -- fetches, classifies, prints AUDIT/SUMMARY lines.
 # Why: the single per-package entry point; everything else in this file only
 # sets up its inputs (manifest, history, credentials) or loops over it.
@@ -275,10 +299,10 @@ audit_package() {
   cache_rows_out="$package_dir/cache-rows-out.tsv"
   : >"$cache_rows_out"
   if [[ -n "$cache_db" ]]; then
-    local cache_version_id cache_digest cache_tags cache_resolution
-    while IFS=$'\t' read -r cache_version_id cache_digest cache_tags cache_resolution; do
+    local cache_version_id cache_digest cache_tags cache_resolution cache_history_fingerprint
+    while IFS=$'\t' read -r cache_version_id cache_digest cache_tags cache_resolution cache_history_fingerprint; do
       [[ "$cache_version_id" =~ ^[0-9]+$ ]] || continue
-      cache_hits["$cache_version_id"]="${cache_digest}"$'\t'"${cache_tags}"$'\t'"${cache_resolution}"
+      cache_hits["$cache_version_id"]="${cache_digest}"$'\t'"${cache_tags}"$'\t'"${cache_resolution}"$'\t'"${cache_history_fingerprint}"
     done < <(sra_cache_read_package "$cache_db" "$package" 2>/dev/null || true)
   fi
 
@@ -369,7 +393,7 @@ audit_package() {
   local encoded_tags encoded_tag tag kind prefix full_commit rank min_rank
   local root_resolution_failed reason other_tags managed_root_count unmanaged_root_count
   local sort_key
-  local cache_resolution cache_digest cache_tags
+  local cache_resolution cache_digest cache_tags cache_history_fingerprint
   local missing_build_date_count=0
   local direct_would_delete_count=0
   declare -A seen_id_digest=()
@@ -505,13 +529,16 @@ audit_package() {
     # Why: v1.2 point 4 -- the loop below is the actual expensive
     # part this cache exists for (one `git rev-parse`/`merge-base` subprocess
     # pair per root tag, every run); a hit requires an EXACT digest+tags
-    # match, so any real change (retag, new digest) always falls through to
-    # full recomputation below rather than trusting a stale cached rank.
-    # From: Issue #1585.
+    # match AND an exact history_fingerprint match, so any real change
+    # (retag, new digest, or a different/moved managed-history ref set --
+    # confirmed a real cross-caller case, not just a theoretical future one,
+    # see SRA_CACHE_DB's own comment above) always falls through to full
+    # recomputation below rather than trusting a stale cached rank.
+    # From: Issue #1585 | Issue #1095.
     cache_resolution=""
     if [[ -n "${cache_hits[$id]:-}" ]]; then
-      IFS=$'\t' read -r cache_digest cache_tags cache_resolution <<<"${cache_hits[$id]}"
-      if [[ "$cache_digest" != "$digest" || "$cache_tags" != "$tags" ]]; then
+      IFS=$'\t' read -r cache_digest cache_tags cache_resolution cache_history_fingerprint <<<"${cache_hits[$id]}"
+      if [[ "$cache_digest" != "$digest" || "$cache_tags" != "$tags" || "$cache_history_fingerprint" != "$history_fingerprint" ]]; then
         cache_resolution=""
       fi
     fi
@@ -625,7 +652,7 @@ audit_package() {
   # to call unconditionally in either case.
   # From: Issue #1585.
   if [[ -n "$cache_db" && -s "$cache_rows_out" ]]; then
-    if sra_cache_init "$cache_db" && sra_cache_write_package "$cache_db" "$package" "$cache_rows_out"; then
+    if sra_cache_init "$cache_db" && sra_cache_write_package "$cache_db" "$package" "$cache_rows_out" "$history_fingerprint"; then
       :
     else
       echo "::warning::Could not persist the v1.2 classification cache for ${repository_name}/${package}; the next run will fully reclassify it instead of using an incremental cache." >&2
