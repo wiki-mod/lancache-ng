@@ -7708,6 +7708,25 @@ jobs:
           fi
           echo "image-ref=ghcr.io/${REPOSITORY}/${SERVICE}@${digest}" >> "$GITHUB_OUTPUT"
 
+          # What: also resolves the utilities image's digest, for consumers only.
+          # Why: their SBOM step below merges in utilities' own components,
+          # since curl/findutils/gettext-envsubst/lsof/ripgrep are COPY'd from
+          # it rather than apk-installed here (issue #1613 review).
+          # From: Issue #1613
+          case "$SERVICE" in
+            proxy|dhcp|dhcp-proxy|dns|ntp|ui)
+              utilities_image="ghcr.io/${REPOSITORY}/utilities:${TAG_NAME}"
+              utilities_digest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$utilities_image" --format '{{json .Manifest.Digest}}')"
+              utilities_digest="${utilities_digest%\"}"
+              utilities_digest="${utilities_digest#\"}"
+              if [[ -z "$utilities_digest" || "$utilities_digest" == "null" ]]; then
+                echo "::error::Could not resolve digest for $utilities_image." >&2
+                exit 1
+              fi
+              echo "utilities-image-ref=ghcr.io/${REPOSITORY}/utilities@${utilities_digest}" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
       # "Resolve released image digest" above is the only step in this job
       # that uses the builder set up above -- the Trivy scan and release
       # upload steps below don't touch buildx.
@@ -7739,6 +7758,53 @@ jobs:
           hide-progress: true
           cache: "false"
           timeout: 10m
+
+      - name: Generate utilities image SBOM for component merge
+        # Consumer-only (issue #1613): scans the same released utilities
+        # digest resolved above so its components can be merged below.
+        if: contains(fromJSON('["proxy", "dhcp", "dhcp-proxy", "dns", "ntp", "ui"]'), matrix.service)
+        timeout-minutes: 50
+        uses: ./.github/actions/trivy-scan-retry
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+          scan-type: image
+          image-ref: ${{ steps.digest.outputs.utilities-image-ref }}
+          format: cyclonedx
+          output: utilities-for-merge.cdx.json
+          hide-progress: true
+          cache: "false"
+          timeout: 10m
+
+      - name: Merge utilities components into this service's SBOM
+        # What: appends utilities-for-merge.cdx.json's components into this
+        # service's own SBOM, deduped by bom-ref/purl/name.
+        # Why: curl/findutils/gettext-envsubst/lsof/ripgrep are COPY'd from
+        # utilities, not apk-installed here, so this image's own apk-db scan
+        # can no longer see them on its own (issue #1613 review).
+        # From: Issue #1613
+        if: contains(fromJSON('["proxy", "dhcp", "dhcp-proxy", "dns", "ntp", "ui"]'), matrix.service)
+        env:
+          SERVICE: ${{ matrix.service }}
+        run: |
+          set -euo pipefail
+          command -v jq >/dev/null 2>&1 || {
+            echo "::error::jq is required on this runner to merge the utilities SBOM." >&2
+            exit 1
+          }
+          asset="${SERVICE}.cdx.json"
+          [ -s "$asset" ] || { echo "::error::Missing $asset before SBOM merge." >&2; exit 1; }
+          [ -s utilities-for-merge.cdx.json ] || { echo "::error::Missing utilities-for-merge.cdx.json before SBOM merge." >&2; exit 1; }
+          jq -s '
+            .[0] as $svc | .[1] as $utilities |
+            $svc | .components = (
+              (($svc.components // []) + ($utilities.components // []))
+              | unique_by(.["bom-ref"] // .purl // .name)
+            )
+          ' "$asset" utilities-for-merge.cdx.json > "${asset}.merged"
+          mv "${asset}.merged" "$asset"
 
       - name: Attach SBOM to the release
         # Idempotent same-named-asset replace, curl/jq in the tag-scoped
