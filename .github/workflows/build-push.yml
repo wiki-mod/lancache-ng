@@ -5574,6 +5574,7 @@ jobs:
         # What: Step 3 -- scans the exact pushed digest before provenance/channel promotion, generalized from build-tools-only to every service.
         # Why: This is now the ONLY vulnerability scan for a changed service on a trusted ref; container-scan's own throwaway rebuild-and-scan (a different, never-published image/digest) was removed, since it never verified the artifact actually published.
         # From: Issue #1095 | PR #1532
+        id: trivy-scan-pushed
         if: >-
           ${{
             steps.build.outcome == 'success' &&
@@ -5599,6 +5600,34 @@ jobs:
           cache-dir: ${{ steps.trivy-cache.outputs.dir }}
           cleanup-cache: ${{ steps.trivy-cache.outputs.ephemeral == 'true' && 'true' || 'false' }}
 
+      - name: Delete GHCR package version pushed by a failed scan
+        # What: deletes the just-pushed digest from GHCR when its own Trivy scan above fails.
+        # Why: the scan targets the digest already pushed by "Build and push" -- a scan failure otherwise leaves a never-vetted image reachable in GHCR indefinitely.
+        # From: Issue #1095 | Issue #626 | PR #1443
+        if: ${{ always() && steps.build.outcome == 'success' && steps.trivy-scan-pushed.outcome == 'failure' }}
+        env:
+          GH_TOKEN: ${{ secrets.GHCR_PACKAGE_DELETE_PAT }}
+          SERVICE: ${{ matrix.service }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # shellcheck source=scripts/lib/ghcr-retry.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          : "${GH_TOKEN:?GHCR_PACKAGE_DELETE_PAT secret is required to delete a scan-failed package version -- see issue #626. Without it, this scan-failed image cannot be removed automatically and needs immediate manual deletion in GHCR.}"
+          org="wiki-mod"
+          package="lancache-ng%2F${SERVICE}"
+          fetch_versions() { gh api --paginate "orgs/${org}/packages/container/${package}/versions" > "$versions_file"; }
+          versions_file="$(mktemp)"
+          trap 'rm -f "$versions_file"' EXIT
+          ghcr_retry ghcr.io "" "" -- fetch_versions
+          version_id="$(jq -r --arg digest "$DIGEST" '[.[] | select(.name == $digest)][0].id // empty' "$versions_file")"
+          if [ -z "$version_id" ]; then
+            echo "::error::Trivy scan failed for the just-pushed lancache-ng/${SERVICE}@${DIGEST}, but no matching GHCR package version was found to delete. Manual verification in GHCR is required."
+            exit 1
+          fi
+          echo "::notice::Trivy scan failed for lancache-ng/${SERVICE}@${DIGEST} (GHCR package version ${version_id}) -- deleting it immediately (issue #1095 G8): a scan-failed image must never remain reachable."
+          ghcr_retry ghcr.io "" "" -- gh api -X DELETE "orgs/${org}/packages/container/${package}/versions/${version_id}"
+          echo "::notice::Deleted GHCR package version ${version_id} (lancache-ng/${SERVICE}@${DIGEST}) after its Trivy scan failed."
 
       - name: Smoke-test exact build-tools candidate
         if: >-
@@ -6100,6 +6129,7 @@ jobs:
         # CI 1.1: this scan consumes the immutable digest emitted by the one
         # candidate build. Same-repo PR candidates are scanned too; fork and
         # Dependabot PRs remain read-only and therefore have no pushed digest.
+        id: trivy-scan-pushed
         if: >-
           ${{
             steps.build.outcome == 'success' &&
@@ -6124,6 +6154,35 @@ jobs:
           image-ref: ghcr.io/${{ github.repository }}/${{ matrix.service }}@${{ steps.build.outputs.digest }}
           cache-dir: ${{ runner.temp }}/trivy-${{ matrix.service }}-arm64-${{ github.run_id }}-${{ github.run_attempt }}
           cleanup-cache: "true"
+
+      - name: Delete GHCR package version pushed by a failed scan
+        # What: same cleanup as build's own equivalent step, for this job's linux/arm64 leg.
+        # Why: scan targets an already-pushed digest -- a failure otherwise leaves it reachable in GHCR indefinitely.
+        # From: Issue #1095 | Issue #626 | PR #1443
+        if: ${{ always() && steps.build.outcome == 'success' && steps.trivy-scan-pushed.outcome == 'failure' }}
+        env:
+          GH_TOKEN: ${{ secrets.GHCR_PACKAGE_DELETE_PAT }}
+          SERVICE: ${{ matrix.service }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # shellcheck source=scripts/lib/ghcr-retry.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          : "${GH_TOKEN:?GHCR_PACKAGE_DELETE_PAT secret is required to delete a scan-failed package version -- see issue #626. Without it, this scan-failed image cannot be removed automatically and needs immediate manual deletion in GHCR.}"
+          org="wiki-mod"
+          package="lancache-ng%2F${SERVICE}"
+          fetch_versions() { gh api --paginate "orgs/${org}/packages/container/${package}/versions" > "$versions_file"; }
+          versions_file="$(mktemp)"
+          trap 'rm -f "$versions_file"' EXIT
+          ghcr_retry ghcr.io "" "" -- fetch_versions
+          version_id="$(jq -r --arg digest "$DIGEST" '[.[] | select(.name == $digest)][0].id // empty' "$versions_file")"
+          if [ -z "$version_id" ]; then
+            echo "::error::Trivy scan failed for the just-pushed lancache-ng/${SERVICE}@${DIGEST}, but no matching GHCR package version was found to delete. Manual verification in GHCR is required."
+            exit 1
+          fi
+          echo "::notice::Trivy scan failed for lancache-ng/${SERVICE}@${DIGEST} (GHCR package version ${version_id}) -- deleting it immediately (issue #1095 G8): a scan-failed image must never remain reachable."
+          ghcr_retry ghcr.io "" "" -- gh api -X DELETE "orgs/${org}/packages/container/${package}/versions/${version_id}"
+          echo "::notice::Deleted GHCR package version ${version_id} (lancache-ng/${SERVICE}@${DIGEST}) after its Trivy scan failed."
 
 
       - name: Smoke-test exact build-tools candidate
