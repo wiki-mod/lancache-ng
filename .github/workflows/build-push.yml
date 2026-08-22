@@ -175,7 +175,7 @@ jobs:
           exit 0
   # What: start-of-job supersession check for build/build-arm64/container-scan.
   # Why: must never skip -- implicit success() would treat a skip as pass.
-  # From: PR #1334, Issue #532
+  # From: Issue #532 | PR #1334
   push-supersession-check:
     name: check for a newer push already superseding this one
     runs-on: [self-hosted, linux, lancache, lancache-light]
@@ -2926,8 +2926,9 @@ jobs:
     permissions:
       contents: read
       packages: write
-      # What: actions: read, required by the REST call scripts/lib/staging-ancestor-fallback.sh's ancestor-fallback recovery path makes to this workflow's own past-runs endpoint.
-      # Why: That call uses plain `curl` + `GH_TOKEN`, never the `gh` CLI (AG-CI-001: not assumed present on a bare lancache-light runner), but the REST endpoint still requires this scope either way.
+      # What: actions: read, for the ancestor-fallback recovery's REST call.
+      # Why: staging-ancestor-fallback.sh uses plain curl, not gh CLI
+      # (AG-CI-001), but the REST endpoint still needs this scope.
       # From: Issue #1095 | PR #1532
       actions: read
     # What: VALIDATION_SUBNET/GATEWAY/*_IP, COMPOSE_PROJECT_NAME, and VALIDATION_UI_PORT are deliberately NOT set as fixed job-level env; they come from a host-local flock reservation (scripts/lib/reserve-validation-subnet.sh) and retry-on-collision loop instead, matching full-setup-validate.yml's own step.
@@ -2995,8 +2996,8 @@ jobs:
           # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
-          # What: Calls scripts/lib/validation-image-tag.sh's own functions for the channel/pr-staging-available/tag decisions.
-          # Why: Keeps exactly one implementation of this decision logic.
+          # What: calls validation-image-tag.sh's channel/tag/available funcs.
+          # Why: keeps exactly one implementation of this decision logic.
           # From: Issue #1095 | PR #1619
           # shellcheck source=scripts/lib/validation-image-tag.sh
           source "$GITHUB_WORKSPACE/scripts/lib/validation-image-tag.sh"
@@ -4415,7 +4416,7 @@ jobs:
   watchdog_test-hosted:
     # What: Does not gate on detect-changes/validate-compose (both self-hosted-only), and covers only watchdog.sh's shell-script check -- it does NOT run `cargo test` for the Rust crate.
     # Why: A needs: dependency on a self-hosted-only job would sit queued forever if self-hosted runners are genuinely unavailable, the exact scenario this fallback exists for, so the cheap bash -n/executable-bit check runs unconditionally instead, matching file-headers-hosted/line-endings-hosted/shellcheck-hosted; real Rust compilation depends on the shared build-tools image and sccache/distcc acceleration, which have no safe hosted equivalent yet, the same reason dns/ui never got a hosted fallback for their rust-quality/test/cargo-audit jobs -- a green run here is NOT proof the watchdog crate compiles or its tests pass.
-    # From: Issue #1095 | PR #1532, docs/ci-github-hosted-fallback-decision.md
+    # From: Issue #1095 | PR #1532
     name: test (watchdog) (GitHub-hosted fallback)
     runs-on: ubuntu-latest
     # Real runs: 3-5s. Same 15-minute floor as detect-changes above.
@@ -5345,7 +5346,7 @@ jobs:
       reuse_utilities: ${{ steps.decide.outputs.reuse_utilities }}
       # What: The exact immutable manifest-list digest this job pinned and verified reuse safety against, for every service with reuse=true (empty when reuse=false); every downstream consumer (container-scan, build, build-arm64) reads this instead of re-resolving the mutable channel tag again.
       # Why: Independently re-resolving the tag a second/third/fourth time is a digest TOCTOU race -- a channel refresh between this job's verification and a later job's re-resolution could scan/retag a different image than the one proven safe; verifying against this exact pinned digest instead of the mutable tag makes the verified and exported bytes provably identical.
-      # From: Issue #1095 | PR #1532, PR #1378
+      # From: Issue #1095 | PR #1532
       digest_proxy: ${{ steps.decide.outputs.digest_proxy }}
       digest_dns: ${{ steps.decide.outputs.digest_dns }}
       digest_ui: ${{ steps.decide.outputs.digest_ui }}
@@ -5916,7 +5917,7 @@ jobs:
 
       # What: Retags an already-verified, unchanged service's image for this commit (no rebuild/recompile), resolving the linux/amd64 child digest from determine-push-reuse-scope's own pinned, already-verified manifest-list digest rather than re-resolving the mutable channel tag; also requires push-supersession-check's `superseded != 'true'`.
       # Why: Reading an immutable digest reference (instead of a mutable tag) closes a digest time-of-check-to-time-of-use race, since it cannot observe different content regardless of timing; the supersession guard is needed because the earlier "Determine whether this service needs building" step forces should-build to false for every service on a superseded push even when determine-push-reuse-scope never pinned a digest for this one, which would otherwise hard-fail on the empty-digest check below (container-scan's matching retag step carries the identical guard) -- no separate Trivy scan runs here either, since container-scan's own reuse-scan step reads this exact same determine-push-reuse-scope decision, so the two can never disagree and no service goes unscanned.
-      # From: Issue #1095 | PR #1532, PR #1378
+      # From: Issue #1095 | PR #1532
       - name: Retag unchanged service image for this commit (linux/amd64, no rebuild)
         if: github.event_name == 'push' && steps.should-build.outputs.should-build == 'false' && needs['push-supersession-check'].outputs.superseded != 'true'
         env:
@@ -8264,7 +8265,7 @@ jobs:
           TAG_NAME: ${{ github.ref_name }}
           # What: syslog and utilities are listed explicitly in this space-separated SERVICES scalar, not a services=(...) bash array scripts/tracked/check-workflow-service-lists.sh's regex-based guard can see.
           # Why: Missing either would silently drop that service from this release job's platform-coverage verification with no CI signal; utilities is tagged vX.Y.Z by promote's own services=(...) array on every real release exactly like build-tools, so it needs the same coverage check.
-          # From: Issue #1428 | PR #1433, Issue #1556 | PR #1574
+          # From: Issue #1428 | PR #1433 | Issue #1556 | PR #1574
           SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities stack
           REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
