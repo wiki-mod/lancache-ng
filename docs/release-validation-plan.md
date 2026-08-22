@@ -1499,6 +1499,64 @@ omitted):**
   #1501's `#issuecomment-5292505929` records the open maintainer decision on
   whether to build the dedicated lookup.
 
+- **Recorded exception (2026-08-22, issue #1095 G15, PR #1640, Rule-Ref:
+  AG-VAL-029): `full-setup-deep-validate.yml`'s new pre-checkout resync guard
+  has no durable bats regression case yet, only a one-time manual scratch-repo
+  verification.**
+  - **Scope**: the "Resync workspace to its own HEAD before checkout
+    (self-hosted reuse hardening)" step added ahead of all 5 self-hosted
+    `actions/checkout` sites in `full-setup-deep-validate.yml`, fixing the
+    real F19/PR #1640 CI failure (a prior job's tracked file surviving into
+    this PR's own checkout because `git checkout --force` refused to remove
+    it against a stale inherited HEAD).
+  - **Reason**: `gc-pr-staging-images.yml` has an analogous inline
+    sparse-checkout/skip-worktree restore step, and that one *is* covered by
+    a durable bats case (`tests/bats/gc_pr_staging_images.bats`, the
+    "regresses the workflow's sparse-checkout-restore step via a throwaway
+    local `git init` repo" block). No existing bats file owns
+    `full-setup-deep-validate.yml`'s inline checkout-step shell bodies the
+    same way — `detect_full_setup_changes.bats`,
+    `full_setup_client_simulation_domain.bats`, `plan_deep_validation.bats`,
+    and `check_validation_subnet_wrapper_coverage.bats` each own a specific
+    `scripts/*.sh` file or a cross-workflow wrapper-usage guard, not this
+    step's own shell body. Per AG-CODE-013, a new file is a standing DISACK
+    absent either an existing owner to extend or an explicit maintainer ACK;
+    neither applies here, and the maintainer/coordinator was not asked for
+    that ACK within this dispatch's scope, so the compliant route is this
+    recorded exception rather than a new bats file created out of convenience.
+  - **Tracking**: PR #1640; issue #1095 G15. Real commits: `2a576888`/
+    `17803775` (initial guard), `f0cb604d` (added `::notice::` logging),
+    `821bee98` (hoisted an embedded `$(...)` substitution per AG-VAL-029's
+    own already-recorded embedded-call-shape entry above), `fd607602`
+    (gated the whole guard body on `git rev-parse --verify -q HEAD`
+    succeeding first, after real execution — not reasoning — found an
+    exit-128 crash on an unborn-HEAD `.git` directory).
+  - **Validation**: manual only. The guard's exact shell body was run against
+    3 real scratch git repositories during this PR's development: (1) a
+    valid HEAD with one file carrying the skip-worktree bit — exits 0,
+    restores the file; (2) a `.git` directory with no commit yet (unborn
+    HEAD) — exited 128 (`fatal: invalid reference: HEAD`) before the
+    `fd607602` gating fix, exits 0 as a clean no-op after it; (3) no `.git`
+    directory at all — exits 0 as a clean no-op via the `else` branch. These
+    scratch repositories were not preserved and this sequence is not wired
+    into any bats file, so re-verifying the guard after a future edit
+    requires manually re-deriving and re-running these 3 cases until a bats
+    file adopts ownership. Separately: case (1)'s own skip-worktree counter
+    (`${#remaining_skip_worktree[@]}`) was observed to always report 0 in
+    practice, because `git sparse-checkout disable` already clears the `S`
+    bit before `git ls-files -v` runs — so that specific `::notice::` count
+    is not meaningful evidence of anything and must not be read as proof no
+    skip-worktree bits were present; the inherited-HEAD `::notice::` line is
+    the guard's only currently-meaningful log signal.
+  - **Non-Expansion**: this exception covers only these 3 verified scenarios
+    for this specific guard as it exists after `fd607602`. It does not
+    exempt any other new inline workflow shell step from bats coverage, and
+    a future edit to this guard's shell body invalidates this entry's
+    validation claim (Rule-Ref: AG-WF-011) until the 3 cases are re-run
+    against the new body, ideally by finally giving this class of guard a
+    real bats home instead of repeating this manual cycle a third time
+    (Rule-Ref: AG-WF-025).
+
 ---
 
 ## Appendix — Reusable Scripts/Commands Index
