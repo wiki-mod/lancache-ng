@@ -5455,7 +5455,8 @@ jobs:
       # What: produces the ccache_redis_url secret for dns and utilities.
       # Why: dns/utilities each mount it under a distinct BuildKit secret id
       #   from sccache's own sccache_redis_url, reusing the same repository
-      #   secret rather than a second GitHub secret.
+      #   secret rather than a second GitHub secret; honors the existing
+      #   SCCACHE_REDIS_MODE kill switch (AG-CI-004).
       # From: Issue #1095 (G15 | #1556)
       - name: Prepare ccache Redis endpoint (dns + utilities C-dependency cache)
         if: >-
@@ -5468,9 +5469,12 @@ jobs:
         id: ccache-redis-secret
         env:
           SCCACHE_REDIS_URL: ${{ secrets.SCCACHE_REDIS_URL }}
+          SCCACHE_REDIS_MODE: ${{ vars.SCCACHE_REDIS_MODE }}
         run: |
           set -euo pipefail
-          if [ -n "$SCCACHE_REDIS_URL" ]; then
+          if [ "${SCCACHE_REDIS_MODE:-}" = "off" ]; then
+            echo "::notice::SCCACHE_REDIS_MODE=off; ${{ matrix.service }}'s ccache layer stays disabled."
+          elif [ -n "$SCCACHE_REDIS_URL" ]; then
             umask 077
             redis_file="${{ runner.temp }}/ccache-redis-url-${{ matrix.service }}"
             printf '%s' "$SCCACHE_REDIS_URL" > "$redis_file"
@@ -5515,6 +5519,37 @@ jobs:
           build-network: ${{ env.RUST_ACCELERATION_NETWORK }}
           platform: linux/amd64
 
+      # What: merges sccache-secret and ccache-redis-secret into one list.
+      # Why: a block-scalar interpolation of both step outputs would add
+      #   blank lines to every service where one or both are empty; this
+      #   reproduces the prior single-source input byte-for-byte instead.
+      # From: Issue #1095 (G15)
+      - name: Combine sccache/ccache secret files
+        id: combined-secret-files
+        env:
+          SCCACHE_FILES: ${{ steps.sccache-secret.outputs.secret-files }}
+          CCACHE_FILES: ${{ steps['ccache-redis-secret'].outputs['secret-files'] }}
+        run: |
+          set -euo pipefail
+          combined=""
+          if [ -n "$SCCACHE_FILES" ]; then
+            combined="$SCCACHE_FILES"
+          fi
+          if [ -n "$CCACHE_FILES" ]; then
+            if [ -n "$combined" ]; then
+              combined="$combined"$'\n'"$CCACHE_FILES"
+            else
+              combined="$CCACHE_FILES"
+            fi
+          fi
+          {
+            echo "secret-files<<SECRET_FILES"
+            if [ -n "$combined" ]; then
+              printf '%s\n' "$combined"
+            fi
+            echo "SECRET_FILES"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and push
         # What: uses the shared ghcr-build-push-retry composite action.
         # Why: ghcr.io push-token issuance intermittently fails for the
@@ -5530,13 +5565,7 @@ jobs:
           builder: ${{ steps.buildx.outputs.name }}
           context: ${{ matrix.context }}
           build-contexts: ${{ matrix.build_contexts }}
-          # What: concatenates both secret-files producers' output.
-          # Why: at most one of sccache-secret/ccache-redis-secret is
-          #   non-empty per service; a blank joining line is harmless.
-          # From: Issue #1095 (G15)
-          secret-files: |
-            ${{ steps.sccache-secret.outputs.secret-files }}
-            ${{ steps['ccache-redis-secret'].outputs['secret-files'] }}
+          secret-files: ${{ steps['combined-secret-files'].outputs['secret-files'] }}
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
