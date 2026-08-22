@@ -7801,7 +7801,7 @@ jobs:
             .[0] as $svc | .[1] as $utilities |
             $svc | .components = (
               (($svc.components // []) + ($utilities.components // []))
-              | unique_by(.["bom-ref"] // .purl // .name)
+              | unique_by(.["bom-ref"] // .purl // (.name + "@" + (.version // "")))
             )
           ' "$asset" utilities-for-merge.cdx.json > "${asset}.merged"
           mv "${asset}.merged" "$asset"
