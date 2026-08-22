@@ -161,6 +161,62 @@ runs:
               fi
             }
 
+            # What: like scan_log(), but first strips distcc's own per-host
+            # "nonblocking connect to <host>:<port> failed" diagnostic --
+            # and only when more than one host was configured.
+            # Why: DISTCC_FALLBACK=0 (set below) means a total dispatch
+            # failure already fails the `cc` invocation itself, landing in
+            # the plain-cc-fallback branch instead of ever reaching this
+            # function -- so reaching here with a successful compile
+            # (host_count > 1) plus this exact diagnostic means one host
+            # was down and another from the list picked up the job, not a
+            # silent degradation scan_log() exists to catch. Confirmed live
+            # (2026-08-21, job 96873255522, PR #1610): "distcc preflight
+            # failed; using plain cc fallback." never appeared in that
+            # job's log, i.e. `cc -c` itself returned 0, yet the job was
+            # still killed by scan_log() matching only this one line. A
+            # single-host list (host_count <= 1) still goes through the
+            # original strict scan_log() unchanged -- there is no second
+            # host to have picked up the job in that case.
+            # From: Issue #1633
+            scan_distcc_compile_log() {
+              local log_file="$1"
+              local host_count="$2"
+              # What: anchored start-to-end (^...$), not just a prefix match.
+              # Why: classifies each already-suspicious LINE as either fully
+              # this one benign shape or not, rather than deleting a whole
+              # line on a prefix match -- if a real diagnostic ever shared a
+              # line with this one (unflushed/interleaved stdio), the
+              # combined line would not fully match this anchored pattern
+              # and still trips the fail-closed branch below, instead of
+              # silently vanishing along with the benign prefix.
+              # From: Issue #1633
+              local benign_pattern='^distcc\[[0-9]+\] (ERROR|WARNING): nonblocking connect to [0-9]{1,3}(\.[0-9]{1,3}){3}:[0-9]+ failed: [A-Za-z0-9 ,.()'\''-]+$'
+
+              if [ "$host_count" -le 1 ]; then
+                scan_log "$log_file"
+                return
+              fi
+
+              local suspicious_lines
+              suspicious_lines="$(grep -Eai "(^|[^[:alpha:]])(warning|warn|error|failed|failure|panic)([^[:alpha:]]|$)" "$log_file" || true)"
+              if [ -z "$suspicious_lines" ]; then
+                return
+              fi
+
+              local non_benign_lines
+              non_benign_lines="$(printf '%s\n' "$suspicious_lines" | grep -Ev "$benign_pattern" || true)"
+              if [ -n "$non_benign_lines" ]; then
+                printf '%s\n' "$non_benign_lines" >&2
+                echo "[ERROR] Rust acceleration preflight emitted a forbidden diagnostic." >&2
+                exit 1
+              fi
+
+              local tolerated_count
+              tolerated_count="$(printf '%s\n' "$suspicious_lines" | grep -c . || true)"
+              echo "[INFO] Tolerated $tolerated_count distcc per-host connectivity diagnostic(s) ($host_count hosts configured; every suspicious line fully matched the known benign shape, so the compile succeeded via a live host anyway)."
+            }
+
             # What: runs a command, capturing its output to log_file, then feeds it through scan_log.
             # Why: every acceleration command run below needs the same fail-closed exit/log/scan
             # behavior; this avoids repeating it at each call site.
@@ -418,8 +474,19 @@ runs:
               if [ "$distcc_enabled" = "1" ]; then
                 export DISTCC_HOSTS="$final_distcc_hosts"
                 distcc_log="$preflight_dir/distcc.log"
+                # What: word-splits the space-separated final_distcc_hosts
+                # to count configured hosts, deliberately unquoted. A bare
+                # assignment, not `if ! x=$(...)` (this file's usual guard
+                # for a substitution that can fail under `set -e`): `set --`
+                # and `echo` cannot themselves fail, unlike the gh/jq/curl
+                # calls that convention exists for.
+                # Why: scan_distcc_compile_log() only tolerates a per-host
+                # connectivity diagnostic when real redundancy existed.
+                # From: Issue #1633
+                # shellcheck disable=SC2086
+                final_distcc_host_count=$(set -- $final_distcc_hosts; echo "$#")
                 if cc -c "$preflight_dir/distcc-probe.c" -o "$preflight_dir/distcc.o" >"$distcc_log" 2>&1; then
-                  scan_log "$distcc_log"
+                  scan_distcc_compile_log "$distcc_log" "$final_distcc_host_count"
                   echo "[INFO] distcc preflight completed."
                 else
                   cat "$distcc_log" >&2
