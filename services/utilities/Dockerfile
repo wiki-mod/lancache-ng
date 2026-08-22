@@ -8,6 +8,20 @@
 
 FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS curl-builder
 
+# What: explicit proxy build-args, no default value set.
+# Why: this project's build fleet sits behind an HTTP(S) proxy; declaring
+# these here (rather than relying on BuildKit's undeclared implicit
+# proxy-arg injection) makes the build cache key account for a proxy
+# value change, and gives callers a documented way to pass a local-network
+# NO_PROXY exception instead of routing every request through the proxy.
+# From: Issue #1637
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
+
 # What: pinned curl release, checksum-verified before extraction.
 # Why: matches this project's established checksum-verified download
 # pattern for third-party sources.
@@ -46,9 +60,15 @@ RUN rm -f /usr/lib/libssl.so /usr/lib/libcrypto.so /usr/lib/libz.so
 WORKDIR /tmp/curl-${CURL_VERSION}
 
 # What: configures and builds a fully static, feature-reduced curl binary.
+#   Proxy support (HTTP CONNECT tunneling) is deliberately kept enabled --
+#   see Issue #1637: this project's build fleet requires it, unlike every
+#   other protocol/feature disabled below. Proxy support is a core libcurl
+#   capability, not a separate library dependency, so keeping it enabled
+#   does not reintroduce any of the libssh/libssh2/libpsl dependencies
+#   deliberately excluded elsewhere in this same static build.
 # Why: matches this project's real curl usage only; a fully static binary
 # is what makes it portable across glibc/musl consumers.
-# From: Issue #1556
+# From: Issue #1556 | Issue #1637
 RUN set -euo pipefail; \
     ./configure \
       --disable-shared --enable-static \
@@ -57,7 +77,6 @@ RUN set -euo pipefail; \
       --disable-pop3 --disable-imap --disable-smtp --disable-smb \
       --disable-gopher --disable-mqtt \
       --disable-scp --disable-sftp --without-libssh2 --without-libssh \
-      --disable-proxy \
       --disable-ntlm --disable-kerberos-auth --disable-negotiate-auth \
       --disable-aws \
       --disable-manual --disable-libcurl-option \
