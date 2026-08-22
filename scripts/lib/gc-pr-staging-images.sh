@@ -321,4 +321,3 @@ gcps_package_presence_once() {
   echo "::notice::GitHub package presence probe attempt failed for $endpoint: $output" >&2
   return 1
 }
-

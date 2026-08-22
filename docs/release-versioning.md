@@ -204,7 +204,7 @@ coherent stack.
 - **After:** since `nightly` is no longer continuously fresh, that channel
   tag is no longer a reliable "at or after PR base" source. The backfill
   instead sources directly from the PR base commit's own durable
-  `sha-<base_sha_short>` per-commit image -- exactly the right commit by
+  `sha-<base_sha>` per-commit image -- exactly the right commit by
   construction, since every non-PR push already publishes a fresh
   per-commit tag for every service (see `build-push.yml`'s "Ensure PR
   staging tags exist for full-setup services" step and
