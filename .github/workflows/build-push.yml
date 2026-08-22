@@ -2530,18 +2530,21 @@ jobs:
     # Wait for merge-manifests so PR validation consumes this PR staging manifest, not stale base-channel content.
     # Trusted non-PR validation likewise waits for the exact merged sha-* candidate before promotion.
     needs: [detect-changes, merge-manifests, compute-validation-network, validate-compose, push-supersession-check]
-    # What: also requires push-supersession-check's `superseded` to be false.
-    # Why: merge-manifests reports plain `success` even when it skipped every
-    #   service for a superseded push (see its own comment); relying on that
-    #   `result` alone would pull real images built for a stale commit --
-    #   this must check supersession itself, not just the upstream result.
-    # From: Issue #1095
+    # What: runs whenever merge-manifests wasn't itself cancelled, not only on its full success.
+    # Why: BUILD/ASSEMBLE/VERIFY/PROMOTE/CONSUME pipeline (maintainer decision, issue #1095):
+    #   this job IS verify, and must actually run and name the missing service(s) itself
+    #   (see "Pin full-setup service identities to immutable digests" below) rather than
+    #   being silently skipped -- one unrelated service's merge failure previously hid every
+    #   other service's real validation result behind a grey "skipped" job. promote's own
+    #   all-or-nothing gate is deliberately untouched by this change (see promote's header).
+    # From: Issue #1095 | PR #1642 | PR #1643
     if: >-
       ${{
         always() &&
+        needs['merge-manifests'].result != 'cancelled' &&
         (
-          (github.event_name == 'pull_request' && needs['merge-manifests'].result == 'success') ||
-          (github.event_name != 'pull_request' && needs['merge-manifests'].result == 'success' && needs['push-supersession-check'].outputs.superseded != 'true')
+          github.event_name == 'pull_request' ||
+          needs['push-supersession-check'].outputs.superseded != 'true'
         ) &&
         (
           github.event_name != 'pull_request' ||
@@ -2816,6 +2819,12 @@ jobs:
           # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
+          # What: collects every missing service before failing, instead of exit-1ing on the first.
+          # Why: this IS the pipeline's VERIFY completeness check (issue #1095 maintainer
+          #   decision) -- a single consolidated error naming every gap is the "clear error
+          #   message" that check requires, not just the first one found.
+          # From: Issue #1095 | PR #1642 | PR #1643
+          declare -a missing_services=()
           resolve_digest() {
             local service=$1 supplied=$2 image digest
             if [[ "$supplied" =~ ^sha256:[0-9a-fA-F]{64}$ ]]; then
@@ -2824,16 +2833,32 @@ jobs:
             fi
             image="ghcr.io/${REPOSITORY}/${service}:${IMAGE_TAG}"
             echo "::notice::No producer digest was exported for $service; resolving $image once and pinning the result for this validation run." >&2
-            digest="$(resolve_manifest_digest "$image" "${GHCR_RETRY_USERNAME:-}" "${GHCR_RETRY_PASSWORD:-}")" \
-              || { echo "::error::Could not resolve immutable digest for $image." >&2; exit 1; }
+            if ! digest="$(resolve_manifest_digest "$image" "${GHCR_RETRY_USERNAME:-}" "${GHCR_RETRY_PASSWORD:-}")"; then
+              echo "::error::Could not resolve immutable digest for $image -- $service is missing from this run's candidate set." >&2
+              missing_services+=("$service")
+              return 1
+            fi
             printf '%s\n' "$digest"
           }
 
-          proxy_digest="$(resolve_digest proxy "${PROXY_DIGEST:-}")"
-          dns_digest="$(resolve_digest dns "${DNS_DIGEST:-}")"
-          watchdog_digest="$(resolve_digest watchdog "${WATCHDOG_DIGEST:-}")"
-          ui_digest="$(resolve_digest ui "${UI_DIGEST:-}")"
-          build_tools_digest="$(resolve_digest build-tools "${BUILD_TOOLS_DIGEST:-}")"
+          proxy_digest="$(resolve_digest proxy "${PROXY_DIGEST:-}")" || true
+          dns_digest="$(resolve_digest dns "${DNS_DIGEST:-}")" || true
+          watchdog_digest="$(resolve_digest watchdog "${WATCHDOG_DIGEST:-}")" || true
+          ui_digest="$(resolve_digest ui "${UI_DIGEST:-}")" || true
+          build_tools_digest="$(resolve_digest build-tools "${BUILD_TOOLS_DIGEST:-}")" || true
+
+          # What: fails VERIFY here, before rendering a compose override from partial digests.
+          # Why: an incomplete candidate set must be a named, explicit VERIFY failure (issue
+          #   #1095), not a cryptic downstream compose-pull error; the leftover per-service
+          #   images this run DID publish are not specially deleted here -- they are ordinary
+          #   sha-* history, already in scope of gc-pr-staging-images.yml's existing 3-hourly
+          #   sweep (PR #1594), same as any other tag once it falls outside that policy's
+          #   retention window.
+          # From: Issue #1095 | PR #1642 | PR #1643
+          if [ "${#missing_services[@]}" -gt 0 ]; then
+            echo "::error::This run's candidate set is incomplete: ${#missing_services[@]} service(s) missing a resolvable image (${missing_services[*]}). VERIFY cannot validate an incomplete stack -- see each service's own ::error:: above. The images this run DID publish are not deleted by this step: they are ordinary sha-* history, already covered by gc-pr-staging-images.yml's existing 3-hourly retention sweep (no dedicated fast-path exists or was added here) -- push a new commit to retry the whole candidate set instead of waiting on that sweep."
+            exit 1
+          fi
 
           override_file=".ci-exact-digests.yml"
           mkdir -p "$(dirname "deploy/full-setup/${override_file}")"
