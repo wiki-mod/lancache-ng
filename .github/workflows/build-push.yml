@@ -6444,15 +6444,9 @@ jobs:
           REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-          # What: delete-scoped PAT for the orphaned-tag cleanup below, same secret the
-          #   Trivy scan-failure deletion (above, "Delete GHCR package version pushed by
-          #   a failed scan") and gc-pr-staging-images.yml already use.
-          # Why: GITHUB_TOKEN cannot delete a GHCR package version at all -- this job's
-          #   own `packages: write` permission (see job header) never covered deletion,
-          #   only push/read. Wiring this in is a maintainer-approved test (2026-08-22,
-          #   issue #1095) of whether real deletion, done in this same run right after
-          #   detection, keeps this job's runtime acceptable -- see the PR body for the
-          #   measured timing.
+          # What: delete-scoped PAT for the orphaned-tag cleanup below.
+          # Why: GITHUB_TOKEN cannot delete a GHCR package version; same PAT the Trivy
+          #   scan-failure deletion above and gc-pr-staging-images.yml already use.
           # From: Issue #1095 | PR #1642
           GH_TOKEN: ${{ secrets.GHCR_PACKAGE_DELETE_PAT }}
           DESCRIPTION_PROXY: *ci-description-proxy
@@ -6532,31 +6526,16 @@ jobs:
             printf '%s\n' "$digest"
           }
 
-          # What: deletes exactly this run's own orphaned single-platform tag
-          #   (lancache-ng/<service>:sha-<COMMIT_SHA>-<arch>) right after it is detected
-          #   below, via GHCR_PACKAGE_DELETE_PAT (a classic PAT with delete:packages,
-          #   never the ambient GITHUB_TOKEN, which cannot delete package versions at
-          #   all). Looks the version up by matching $tag against
-          #   .metadata.container.tags[] (same field gc-pr-staging-images.sh already
-          #   keys its own tag-scoped deletions on), never by digest -- an orphan has no
-          #   merged digest to match against.
-          # Why: an orphan detected by the loop below can never become part of a
-          #   multi-platform manifest (see that loop's own ::error::) and would
-          #   otherwise sit in GHCR forever; deleting it in the same run that found it
-          #   needs no separate GC pass. Scoped to this run's exact commit SHA and arch
-          #   suffix only -- never a registry-wide sweep -- so a legitimately
-          #   single-arch-only service or an older commit's tag can never match. A
-          #   failure here is reported loudly but must not abort the per-service loop
-          #   (Rule-Ref: AG-WF-011, same class of problem PR #1642 already fixed for
-          #   the orphan-detection case): the caller wraps this call so `set -e` cannot
-          #   let one service's cleanup failure hide every other service's real merge
-          #   result.
+          # What: deletes GHCR's copy of one orphaned single-platform tag (issue #1095).
+          # Why: an orphan (loop below) can never join a multi-platform manifest and would
+          #   sit in GHCR forever; scoped to this run's exact tag, and refuses to delete
+          #   when the matched version carries any other tag (a shared-digest version).
           # From: Issue #1095 | PR #1642
           delete_orphaned_tag() {
             local service=$1 tag=$2
             local org="wiki-mod"
             local package="lancache-ng%2F${service}"
-            local versions_file version_id
+            local versions_file version_json version_id tag_count other_tags
 
             : "${GH_TOKEN:?GHCR_PACKAGE_DELETE_PAT secret is required to delete an orphaned single-platform tag -- see issue #1095. Without it, this stray tag cannot be removed automatically and needs manual deletion in GHCR.}"
 
@@ -6568,10 +6547,23 @@ jobs:
               return 1
             fi
 
-            version_id="$(jq -r --arg tag "$tag" '[.[] | select((.metadata.container.tags // []) | index($tag))][0].id // empty' "$versions_file")"
+            version_json="$(jq -c --arg tag "$tag" '[.[] | select((.metadata.container.tags // []) | index($tag))][0] // empty' "$versions_file")"
             rm -f "$versions_file"
-            if [ -z "$version_id" ]; then
+            if [ -z "$version_json" ]; then
               echo "::error::No GHCR package version found carrying orphaned tag lancache-ng/${service}:${tag}; it may already be gone."
+              return 1
+            fi
+
+            # What: refuses to delete a version whose digest is shared by another tag.
+            # Why: `gh api -X DELETE .../versions/<id>` deletes the whole manifest version,
+            #   not just $tag -- an arm64 build byte-identical to an older commit's, or a
+            #   digest a promoted channel tag already references, would be destroyed too.
+            # From: Issue #1095 | PR #1642
+            version_id="$(jq -r '.id' <<<"$version_json")"
+            tag_count="$(jq -r '(.metadata.container.tags // []) | length' <<<"$version_json")"
+            if [ "$tag_count" -ne 1 ]; then
+              other_tags="$(jq -r '(.metadata.container.tags // []) | join(", ")' <<<"$version_json")"
+              echo "::error::GHCR package version ${version_id} for lancache-ng/${service} carries ${tag_count} tag(s) (${other_tags}), not only the orphaned ${tag} -- refusing to delete a version another tag or manifest may still reference. Manual verification is required."
               return 1
             fi
 
@@ -6599,12 +6591,8 @@ jobs:
               if docker buildx imagetools inspect "$arm64_image" >/dev/null 2>&1; then
                 echo "::error::$service: linux/arm64 image $arm64_image was published for this commit but linux/amd64 was not -- the two architectures' build jobs diverged (one succeeded, the other failed or was skipped independently). $arm64_image is now a permanent orphan: it can never be merged into $target_image. Check the build (amd64) job for $service on this commit to find out why it did not publish, then push a new commit so both architectures retry together -- this run will not retry it for you."
                 orphaned_services["$service"]="$arm64_image"
-                # What: attempts real deletion of the just-detected orphan immediately.
-                # Why: `||: true` (not a bare unguarded call) so a delete failure is
-                #   loud (delete_orphaned_tag already emits its own ::error::) but never
-                #   trips this step's `set -e` and aborts the loop before the remaining
-                #   services are even checked -- the same failure-isolation this rule
-                #   already requires for orphan detection itself applies to its cleanup.
+                # What: attempts real deletion; `|| true` isolates a delete failure.
+                # Why: must not trip `set -e` and abort remaining services (AG-WF-011).
                 # From: Issue #1095 | PR #1642
                 delete_orphaned_tag "$service" "${source_tag}-arm64" || true
               else
