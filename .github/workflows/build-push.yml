@@ -3085,8 +3085,8 @@ jobs:
         if: steps.channel.outputs.pr-staging-available == 'true'
         env:
           PR_TAG: ${{ steps.channel.outputs.tag }}
-          # What: This PR's own base commit, used to verify and derive the back-fill source's tag.
-          # Why: This step only runs when pr-staging-available is true.
+          # What: this PR's own base commit, for the back-fill source tag.
+          # Why: only runs when pr-staging-available is true.
           # From: Issue #1095 | PR #1619
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow }}
@@ -3125,8 +3125,8 @@ jobs:
 
           : "${BASE_SHA:?BASE_SHA (github.event.pull_request.base.sha) is required}"
 
-          # What: Calls vit_service_should_have_staging_tag directly instead of reimplementing its override.
-          # Why: Keeps this decision alongside this step's other shared-function calls.
+          # What: calls vit_service_should_have_staging_tag directly.
+          # Why: keeps this decision alongside the other shared-function calls.
           # From: Issue #1095 | PR #1619
           service_should_have_staging_tag() {
             vit_service_should_have_staging_tag "$1" "$2" "$WORKFLOW_CHANGED"
@@ -3186,8 +3186,10 @@ jobs:
               exit 1
             fi
 
-            # What: Never back-fills without first proving the source image was actually built from base.sha or later.
-            # Why: Shares this resolution sequence with scripts/untracked/ensure-pr-staging-images.sh.
+            # What: never back-fills without proving the source was built
+            # from base.sha or later.
+            # Why: shares this resolution sequence with
+            # ensure-pr-staging-images.sh.
             # From: Issue #1095 | PR #1619
             if ! resolved_source="$(saf_resolve_untouched_backfill_source "$REPOSITORY" "$service" "${classify_key_map[$service]}" "$BASE_SHA" \
               900 1200 \
@@ -3309,8 +3311,8 @@ jobs:
       - name: Wait for the stack to stabilize and check container health
         uses: ./.github/actions/wait-validation-stack-health
 
-      # What: Always dumps logs here, unlike the failure-only dump above.
-      # Why: A green run must be verifiable as having actually tested this commit's own code.
+      # What: always dumps logs, unlike the failure-only dump above.
+      # Why: a green run must be verifiable as having tested this code.
       # From: Issue #1095 | PR #1619
       - name: Show full-setup service logs
         if: always()
@@ -3836,8 +3838,9 @@ jobs:
     # cargo-with-sccache-fallback path, so shares its cold-compile risk).
     # Real warm-cache runs: 40-51s.
     timeout-minutes: 45
-    # What: Job-level concurrency, cancel-in-progress: true -- mirrors dns_test's own group above for the same reason.
-    # Why: Same scarce lancache-heavy pool and same cancellation-tolerant consumers as dns_test.
+    # What: job-level concurrency, cancel-in-progress: true -- mirrors
+    # dns_test's own group above.
+    # Why: same scarce lancache-heavy pool, same tolerant consumers.
     # From: PR #926
     concurrency:
       group: >-
@@ -4071,8 +4074,9 @@ jobs:
               echo "DNS coverage: ${dns_coverage}%"
               echo "UI coverage: ${ui_coverage}%"
 
-              # What: Per-crate coverage thresholds (ui_threshold/dns_threshold), not a shared minimum.
-              # Why: The nats-subscriber async loop is covered by full-setup integration, not unit tests.
+              # What: per-crate thresholds (ui/dns), not a shared minimum.
+              # Why: the nats-subscriber async loop is covered by
+              # full-setup integration, not unit tests.
               # From: Issue #1095 | PR #1619
               ui_threshold=35
               dns_threshold=0
@@ -4094,8 +4098,8 @@ jobs:
                 exit 1
               fi
 
-              # What: Badge generation reuses this same containerized jq instead of assuming a host-installed jq.
-              # Why: Matches why the coverage extraction above already runs in here.
+              # What: badge generation reuses this containerized jq.
+              # Why: matches why coverage extraction above runs in here too.
               # From: Issue #1095 | PR #1619
               ui_coverage_display="$(printf "%.2f" "$ui_coverage")"
               dns_coverage_display="$(printf "%.2f" "$dns_coverage")"
@@ -4227,8 +4231,8 @@ jobs:
           : "${BADGE_BRANCH:?BADGE_BRANCH is required}"
           : "${BADGE_FILE:?BADGE_FILE is required}"
 
-          # What: Debounce/coalesce -- skips as a no-op if a newer commit already landed on this branch.
-          # Why: A queued older run must not overwrite the badge with stale coverage.
+          # What: debounce -- skips as a no-op if a newer commit landed.
+          # Why: a queued older run must not overwrite with stale coverage.
           # From: Issue #1095 | PR #1619
           current_tip="$(git ls-remote origin "$GITHUB_REF" | cut -f1)"
           if [[ -z "$current_tip" ]]; then
@@ -4332,11 +4336,13 @@ jobs:
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     # What: 45-minute timeout, same value as dns_test/ui_test above.
-    # Why: Compiles via the same cargo-with-sccache-fallback path, so shares their cold-compile risk.
+    # Why: compiles via the same cargo-with-sccache-fallback path, sharing
+    # their cold-compile risk.
     # From: Issue #1095 | PR #1532
     timeout-minutes: 45
-    # What: Job-level concurrency mirroring dns_test/ui_test's own group.
-    # Why: Now that this job does real compile work on the scarce lancache-heavy pool, a superseded commit's run should be reclaimed the same way those two already are.
+    # What: job-level concurrency mirroring dns_test/ui_test's own group.
+    # Why: real compile work on the scarce lancache-heavy pool now, so a
+    # superseded run should be reclaimed like those two already are.
     # From: Issue #1095 | PR #1532
     concurrency:
       group: >-
@@ -4465,8 +4471,9 @@ jobs:
     # the crate, so it does not share dns_test's cold-compile risk. 20
     # minutes covers a slow advisory-database fetch with real headroom.
     timeout-minutes: 20
-    # What: Job-level concurrency, cancel-in-progress: true -- same pattern/reasoning as dns_test above.
-    # Why: No consumer besides ci_scope_policy, whose push-branch check tolerates a cancelled result.
+    # What: job-level concurrency, cancel-in-progress: true -- same
+    # pattern as dns_test above.
+    # Why: no consumer besides ci_scope_policy, which tolerates cancelled.
     # From: PR #926
     concurrency:
       group: >-
@@ -4566,8 +4573,9 @@ jobs:
     # Same reasoning and value as dns_cargo_audit above (prebuilt cargo-audit
     # binary, no crate compilation). Real runs: 10-18s.
     timeout-minutes: 20
-    # What: Job-level concurrency, cancel-in-progress: true -- same pattern/reasoning as dns_cargo_audit above.
-    # Why: No consumer besides ci_scope_policy, whose push-branch check tolerates a cancelled result.
+    # What: job-level concurrency, cancel-in-progress: true -- same
+    # pattern as dns_cargo_audit above.
+    # Why: no consumer besides ci_scope_policy, which tolerates cancelled.
     # From: PR #926
     concurrency:
       group: >-
@@ -4639,8 +4647,10 @@ jobs:
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   watchdog_cargo_audit:
-    # What: Watchdog dependency audit mirrors the DNS/UI audits and stays parallel to avoid serializing independent Rust checks.
-    # Why: Added alongside watchdog_rust_quality/watchdog_test now that services/watchdog/Cargo.toml exists.
+    # What: watchdog dependency audit mirrors the DNS/UI audits, staying
+    # parallel to avoid serializing independent Rust checks.
+    # Why: added alongside watchdog_rust_quality/watchdog_test now that
+    # services/watchdog/Cargo.toml exists.
     # From: PR #1355
     #
     # Also skipped on a metadata-only pull_request event -- see
@@ -4668,8 +4678,9 @@ jobs:
     # Same reasoning and value as dns_cargo_audit/ui_cargo_audit above
     # (prebuilt cargo-audit binary, no crate compilation).
     timeout-minutes: 20
-    # What: Job-level concurrency, cancel-in-progress: true -- mirrors dns_cargo_audit/ui_cargo_audit's own pattern.
-    # Why: No consumer besides ci_scope_policy, whose push-branch check tolerates a cancelled result.
+    # What: job-level concurrency, cancel-in-progress: true -- mirrors
+    # dns_cargo_audit/ui_cargo_audit's own pattern.
+    # Why: no consumer besides ci_scope_policy, which tolerates cancelled.
     # From: PR #1355
     concurrency:
       group: >-
@@ -4758,8 +4769,9 @@ jobs:
       - watchdog_cargo_audit
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # What: Timeout floor of 15 minutes, well above the real 7-14s runtime (only reads upstream `needs` results and runs a policy script -- no compilation or Docker work).
-    # Why: Matches the same floor detect-changes uses, so lightweight policy jobs share one consistent minimum.
+    # What: 15-minute timeout floor, well above the real 7-14s runtime
+    # (only reads upstream `needs` results, runs a policy script).
+    # Why: matches detect-changes' own floor for lightweight policy jobs.
     # From: Issue #1095 | PR #1532
     timeout-minutes: 15
     # What: cancel-in-progress is scoped to pull_request only; push/tag events never cancel this job.
@@ -5012,10 +5024,11 @@ jobs:
         (needs['determine-push-reuse-scope'].result == 'success' || needs['determine-push-reuse-scope'].result == 'skipped')
       }}
     needs: [validate-compose, push-supersession-check, determine-push-reuse-scope]
-    # What: Job-level concurrency, keyed per matrix row (service + platform) and per ref; cancel-in-progress
-    # is pull_request-only.
-    # Why: On push, `build` requires this job's success, so cancelling it would starve the channel; on a PR
-    # it's safe since this job never builds locally (G8 fix) and only ever reads a remote image.
+    # What: job-level concurrency, keyed per matrix row (service +
+    # platform) and per ref; cancel-in-progress is pull_request-only.
+    # Why: on push, `build` requires this job's success, so cancelling it
+    # would starve the channel; on a PR it's safe since this job never
+    # builds locally (G8 fix) and only ever reads a remote image.
     # From: PR #888
     concurrency:
       group: >-
@@ -5025,15 +5038,16 @@ jobs:
           format('{0}-container-scan-{1}-{2}-{3}', github.workflow, matrix.service, matrix.platform_tag, github.ref)
         }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-    # What: Runner selector kept aligned with build/build-arm64's own per-arch split, though this job no
-    # longer builds anything (G8 fix).
-    # Why: The surviving "should-scan == false" branch's registry pull + Trivy scan still benefits from the
-    # same split; one shared convention beats a second, independently-tuned selector.
+    # What: runner selector kept aligned with build/build-arm64's own
+    # per-arch split, though this job builds nothing anymore (G8 fix).
+    # Why: the surviving pull+scan path still benefits from the same
+    # split; one shared convention beats a second, independent selector.
     # From: PR #1482
     runs-on: ${{ fromJSON(matrix.runner) }}
-    # What: 60-minute timeout; a changed service finishes in seconds (cheap reuse check only), an unchanged
-    # one pulls + Trivy-scans at the usual cost.
-    # Why: Headroom for a cold layer cache or vuln-DB refresh not reflected in the warm-cache samples above.
+    # What: 60-minute timeout; a changed service finishes in seconds
+    # (cheap reuse check only), an unchanged one pulls + scans as usual.
+    # Why: headroom for a cold layer cache or vuln-DB refresh, not
+    # reflected in the warm-cache samples above.
     # From: PR #1482
     timeout-minutes: 60
     env:
@@ -5042,9 +5056,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # What: `context`/`build_contexts`/`description`/`platform` dropped from this matrix; only
-          # `service`/`platform_tag`/`runner` are still read below.
-          # Why: This job no longer builds anything (G8 fix), so those build-only keys have no consumer left.
+          # What: context/build_contexts/description/platform dropped;
+          # only service/platform_tag/runner are still read below.
+          # Why: this job builds nothing anymore (G8 fix), so those
+          # build-only keys have no consumer left.
           # From: PR #1482
           - service: proxy
             platform_tag: amd64
@@ -5160,9 +5175,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          # What: Mirrors build/build-arm64's own "Determine whether this service needs building" case mapping.
-          # Why: Single source for which reuse_* output belongs to which matrix.service, not a second copy
-          # that could drift out of sync with it.
+          # What: mirrors build/build-arm64's own "needs building" case map.
+          # Why: single source for which reuse_* output belongs to which
+          # matrix.service, not a second copy that could drift.
           # From: PR #1344
           case "$MATRIX_SERVICE" in
             proxy) reuse="$REUSE_PROXY" ;;
@@ -5187,8 +5202,8 @@ jobs:
           fi
           echo "should-scan=$should_scan" >> "$GITHUB_OUTPUT"
 
-      # What: A changed service does nothing further in this job (G8 fix): no local build, no local scan.
-      # Why: build/build-arm64's own "Scan pushed service digest with Trivy" step is the sole scan for that case.
+      # What: a changed service does nothing further here (G8 fix).
+      # Why: build/build-arm64's own Trivy-scan step is the sole scan.
       # From: PR #1482
 
       - name: Self-heal Trivy's own default cache directory ownership
@@ -5203,24 +5218,24 @@ jobs:
             find "$trivy_home_cache" -type d -exec chmod g+s {} +
           fi
 
-      # What: Companion to "Determine per-service publish scan reuse" above; when a service is unchanged
-      # this run, scans the same digest build/build-arm64's own retag step used, read-only, no registry write.
-      # Why: No local image was built to scan, but skipping the scan entirely would defeat catching a newly
-      # disclosed CVE in the already-published channel image.
+      # What: companion to "Determine per-service publish scan reuse"
+      # above; scans the same digest build/build-arm64's retag step used.
+      # Why: no local image was built, but skipping the scan entirely
+      # would miss a newly disclosed CVE in the published channel image.
       # From: PR #1344
       - name: Resolve channel image for unchanged-scan retag
         id: channel-image
-        # What: Also gated on push-supersession-check's `superseded` output.
-        # Why: A push already superseded before this job started has no reason to pay for a Trivy scan
-        # either -- the newer push that supersedes it runs this same step for real.
+        # What: also gated on push-supersession-check's `superseded` output.
+        # Why: a push already superseded before this job started has no
+        # reason to pay for a Trivy scan either.
         # From: PR #1334
         if: steps.push-scan-changes.outputs.should-scan == 'false' && needs['push-supersession-check'].outputs.superseded != 'true'
         env:
           MATRIX_SERVICE: ${{ matrix.service }}
-          # What: Consumes determine-push-reuse-scope's own already-pinned, already-verified digest instead
-          # of independently re-resolving the mutable channel tag a second time here.
-          # Why: Closes a digest TOCTOU race (a channel refresh between that job's verification and this
-          # job's own re-resolution could scan a different image than what build/build-arm64 retag).
+          # What: consumes determine-push-reuse-scope's own pinned digest
+          # instead of re-resolving the mutable channel tag here again.
+          # Why: closes a digest TOCTOU race between that job's
+          # verification and this job's own re-resolution.
           # From: PR #1499
           DIGEST_PROXY: ${{ needs['determine-push-reuse-scope'].outputs.digest_proxy }}
           DIGEST_DNS: ${{ needs['determine-push-reuse-scope'].outputs.digest_dns }}
@@ -5265,18 +5280,19 @@ jobs:
           echo "image=$image" >> "$GITHUB_OUTPUT"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      # What: UTC-day bucket for the scan-result cache below (G11), computed here rather than inside the
-      # composite action.
-      # Why: Bounds how long an unchanged digest can skip a real Trivy re-scan, and keeps the freshness
-      # policy a plain, reviewable line in this workflow rather than hidden inside a reusable action.
+      # What: UTC-day bucket for the scan-result cache below (G11),
+      # computed here rather than inside the composite action.
+      # Why: bounds how long an unchanged digest can skip a real Trivy
+      # re-scan, as a plain, reviewable line rather than hidden in an action.
       # From: PR #1467
       - name: Compute scan-result cache freshness bucket
         if: steps.push-scan-changes.outputs.should-scan == 'false' && needs['push-supersession-check'].outputs.superseded != 'true'
         id: scan-cache-bucket
         run: echo "value=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
 
-      # What: image-ref is a multi-platform ref; Trivy/Docker resolve it to the runner's own native platform.
-      # Why: G11 fix skips the scan below entirely when this exact digest already scanned clean today.
+      # What: image-ref is multi-platform; Trivy/Docker resolve it to
+      # the runner's own native platform.
+      # Why: G11 skips the scan below when this digest scanned clean today.
       # From: PR #1467
       - name: Scan channel image with Trivy (no rebuild)
         if: steps.push-scan-changes.outputs.should-scan == 'false' && needs['push-supersession-check'].outputs.superseded != 'true'
@@ -5290,8 +5306,10 @@ jobs:
           registry-password: ${{ secrets.GITHUB_TOKEN }}
           dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
           dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-          # What: vuln-db-cache-dir intentionally omitted; trivy-action falls back to its own default (~/.cache/trivy).
-          # Why: "Self-heal Trivy's own default cache directory ownership" above already keeps that default writable, so this job no longer needs its own managed cache dir.
+          # What: vuln-db-cache-dir omitted; trivy-action falls back to
+          # its own default (~/.cache/trivy).
+          # Why: "Self-heal Trivy's own cache dir ownership" above already
+          # keeps that default writable.
           # From: Issue #1095 | PR #1532
 
       - name: Release per-workspace checkout lock (self-hosted reuse hardening)
@@ -5340,9 +5358,10 @@ jobs:
       reuse_dhcp_proxy: ${{ steps.decide.outputs.reuse_dhcp_proxy }}
       reuse_ntp: ${{ steps.decide.outputs.reuse_ntp }}
       reuse_build_tools: ${{ steps.decide.outputs.reuse_build_tools }}
-      # What: syslog/utilities reuse-decision outputs, alongside the other 8 allowlisted services.
-      # Why: Same three-part verification (revision label + ancestry + content diff) as every other
-      #   allowlisted service; no new logic, only these two additional outputs.
+      # What: syslog/utilities reuse-decision outputs, alongside the
+      # other 8 allowlisted services.
+      # Why: same three-part verification as every other allowlisted
+      # service; no new logic, only these two additional outputs.
       # From: Issue #1095
       reuse_syslog: ${{ steps.decide.outputs.reuse_syslog }}
       reuse_utilities: ${{ steps.decide.outputs.reuse_utilities }}
@@ -5400,8 +5419,10 @@ jobs:
           BUILD_TOOLS_CHANGED: ${{ needs['detect-changes'].outputs.build_tools }}
           SYSLOG_CHANGED: ${{ needs['detect-changes'].outputs.syslog }}
           UTILITIES_CHANGED: ${{ needs['detect-changes'].outputs.utilities }}
-          # What: Needed both for push_reuse_decide's own sif_image_revision call and this step's own digest-pinning read below.
-          # Why: sif_image_revision is now ghcr_retry-wrapped (see scripts/lib/staging-image-freshness.sh).
+          # What: needed for push_reuse_decide's sif_image_revision call
+          # and this step's own digest-pinning read below.
+          # Why: sif_image_revision is now ghcr_retry-wrapped (see
+          # staging-image-freshness.sh).
           # From: Issue #1095 | PR #1532
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
@@ -5421,8 +5442,9 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/staging-image-freshness.sh"
           # shellcheck source=scripts/lib/push-reuse.sh
           source "$GITHUB_WORKSPACE/scripts/lib/push-reuse.sh"
-          # What: resolve_build_tools_channel (master -> latest, everything else -> nightly) is reused as-is despite its build-tools-specific name; the mapping itself has nothing build-tools-specific in it.
-          # Why: Avoids duplicating the same ref-to-channel mapping a second time, keeping single-source CI logic instead of a silent second copy.
+          # What: resolve_build_tools_channel is reused as-is despite its
+          # build-tools-specific name; the mapping itself is generic.
+          # Why: avoids duplicating the same ref-to-channel mapping twice.
           # From: Issue #1095 | PR #1532
           # shellcheck source=scripts/lib/build-tools-channel.sh
           source "$GITHUB_WORKSPACE/scripts/lib/build-tools-channel.sh"
@@ -5430,10 +5452,10 @@ jobs:
           channel="$(resolve_build_tools_channel "$REF_NAME")"
           echo "::notice::Resolved channel '$channel' for ref '$REF_NAME'."
 
-          # What: All 10 first-party services (including build-tools, syslog, utilities) share the identical decide_one() call below, with no per-service branching.
-          # Why: One implementation of the three-part verification (see scripts/lib/push-reuse.sh) for every
-          #   allowlisted service, instead of a second, drifting copy; classify-image-impact.sh already carries
-          #   the syslog/utilities classify keys this allowlist entry consumes.
+          # What: all 10 first-party services share the identical
+          # decide_one() call below, with no per-service branching.
+          # Why: one implementation of the three-part verification for
+          # every allowlisted service, instead of a drifting copy.
           # From: Issue #1095
           allowlist=(proxy dns ui watchdog dhcp dhcp-proxy ntp build-tools syslog utilities)
 
@@ -5563,7 +5585,8 @@ jobs:
           admitted=true
 
           # What: Step 1 -- gates required regardless of event type.
-          # Why: shellcheck/validate-compose/ci_scope_policy must pass before any build/scan work proceeds, on every trigger.
+          # Why: shellcheck/validate-compose/ci_scope_policy must pass
+          # before any build/scan work, on every trigger.
           # From: Issue #1095 (G7) | PR #1503
           is_success "$SHELLCHECK_RESULT" || admitted=false
           is_success "$VALIDATE_COMPOSE_RESULT" || admitted=false
@@ -5624,8 +5647,10 @@ jobs:
       - line-endings
       - push-supersession-check
     if: always() && needs['determine-build-admission'].result == 'success' && needs['determine-build-admission'].outputs.admitted == 'true'
-    # What: Selects the runner per matrix service via `${{ fromJSON(matrix.runner) }}`, mirroring container-scan's own pattern.
-    # Why: An AG-CI-002 measured exception; see this job's matrix comment above for which services route to light vs heavy and why.
+    # What: selects the runner per matrix service via fromJSON, mirroring
+    # container-scan's own pattern.
+    # Why: an AG-CI-002 measured exception; see this job's matrix comment
+    # for which services route to light vs heavy and why.
     # From: Issue #1095 | PR #1532
     runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 150
@@ -5762,8 +5787,9 @@ jobs:
           MATRIX_SERVICE: ${{ matrix.service }}
           DETECT_CHANGES_RESULT: ${{ needs['detect-changes'].result }}
           SUPERSEDED: ${{ needs['push-supersession-check'].outputs.superseded }}
-          # What: Step 4's determine-push-reuse-scope only fires on `push` to a branch ref, so its `result` is legitimately 'skipped' on pull_request/schedule/workflow_dispatch.
-          # Why: Checked explicitly below (fail-safe to a real build) rather than assumed success.
+          # What: determine-push-reuse-scope only fires on `push` to a
+          # branch ref; its `result` is legitimately 'skipped' otherwise.
+          # Why: checked explicitly below (fail-safe to a real build).
           # From: Issue #1095 | PR #1532
           REUSE_JOB_RESULT: ${{ needs['determine-push-reuse-scope'].result }}
           REUSE_PROXY: ${{ needs['determine-push-reuse-scope'].outputs.reuse_proxy }}
@@ -5895,8 +5921,10 @@ jobs:
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
-        # What: Also logs in on pull_request events, for the PR-scoped staging tag push below.
-        # Why: Fork/Dependabot PRs get a read-only GITHUB_TOKEN, so login there is safe by construction.
+        # What: also logs in on pull_request events, for the PR-scoped
+        # staging tag push below.
+        # Why: fork/Dependabot PRs get a read-only GITHUB_TOKEN, so login
+        # there is safe by construction.
         # From: Issue #1095 | PR #1619
         if: >-
           ${{
@@ -6127,8 +6155,9 @@ jobs:
 
           echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
 
-      # What: Computes an ISO-week cache-bust value for build-tools's APT_CACHE_BUST build-arg below.
-      # Why: This job's Buildx cache has no wall-clock expiry.
+      # What: an ISO-week cache-bust value for build-tools's
+      # APT_CACHE_BUST build-arg below.
+      # Why: this job's Buildx cache has no wall-clock expiry.
       # From: Issue #1095 | PR #1619
       - name: Compute apt cache-bust value
         if: steps.should-build.outputs.should-build == 'true'
@@ -6299,8 +6328,9 @@ jobs:
           platform: linux/amd64
 
       - name: Build and push
-        # What: Uses the shared retry+re-login composite action (.github/actions/ghcr-build-push-retry).
-        # Why: ghcr.io push-token issuance intermittently fails for the slowest builds in this matrix.
+        # What: uses the shared ghcr-build-push-retry composite action.
+        # Why: ghcr.io push-token issuance intermittently fails for the
+        # slowest builds in this matrix.
         # From: Issue #1095 | PR #1619
         id: build
         if: steps.should-build.outputs.should-build == 'true'
@@ -6326,8 +6356,8 @@ jobs:
             org.opencontainers.image.description=${{ matrix.description }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
-          # What: No `annotations:` input on this single-platform push.
-          # Why: A single-platform push has no index for `--annotation` to attach to.
+          # What: no `annotations:` input on this single-platform push.
+          # Why: no index exists here for `--annotation` to attach to.
           # From: Issue #1095 | PR #1619
           outputs: type=image,oci-mediatypes=true
           platforms: linux/amd64
@@ -6484,8 +6514,9 @@ jobs:
           cleanup-cache: ${{ steps.trivy-cache.outputs.ephemeral == 'true' && 'true' || 'false' }}
 
       - name: Delete GHCR package version pushed by a failed scan
-        # What: deletes the just-pushed digest from GHCR when its own Trivy scan above fails.
-        # Why: the scan targets the digest already pushed by "Build and push" -- a scan failure otherwise leaves a never-vetted image reachable in GHCR indefinitely.
+        # What: deletes the just-pushed digest when its own Trivy scan fails.
+        # Why: the scan targets the digest "Build and push" already
+        # pushed -- otherwise a never-vetted image stays reachable in GHCR.
         # From: Issue #1095 | Issue #626 | PR #1443
         if: ${{ always() && steps.build.outcome == 'success' && steps.trivy-scan-pushed.outcome == 'failure' }}
         env:
@@ -6704,8 +6735,8 @@ jobs:
             fi
           fi
 
-          # What: Mirrors build's own copy of this check exactly.
-          # Why: See build's own comment above for the full push-supersession reasoning.
+          # What: mirrors build's own copy of this check exactly.
+          # Why: see build's own comment for the full supersession reasoning.
           # From: Issue #1095 | PR #1532
           if [ "$GITHUB_EVENT_NAME" != "pull_request" ] && [ "$SUPERSEDED" = "true" ]; then
             echo "::notice::A newer push to $GITHUB_REF has already superseded this run; skipping $MATRIX_SERVICE's build so only the run already targeting the current tip does the heavy work."
@@ -6771,8 +6802,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # What: Mirrors build's own "Retag unchanged service image" step exactly, just for the linux/arm64 leg -- see that step's comment for the full rationale.
-      # Why: Both legs run independently in parallel jobs but resolve the SAME pinned digest determine-push-reuse-scope exported, so they always agree on which source content to retag.
+      # What: mirrors build's "Retag unchanged service image" step, for
+      # the arm64 leg -- see that step's comment for the full rationale.
+      # Why: both legs resolve the same pinned digest
+      # determine-push-reuse-scope exported, so they always agree.
       # From: Issue #1095 | PR #1532
       - name: Retag unchanged service image for this commit (linux/arm64, no rebuild)
         if: github.event_name == 'push' && steps.should-build.outputs.should-build == 'false' && needs['push-supersession-check'].outputs.superseded != 'true'
@@ -6944,8 +6977,9 @@ jobs:
 
           echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
 
-      # What: Computes build-arm64's own independent ISO-week cache-bust value, mirroring build's identical step.
-      # Why: This job runs on a separate runner with no shared state.
+      # What: build-arm64's own ISO-week cache-bust value, mirroring
+      # build's identical step.
+      # Why: this job runs on a separate runner with no shared state.
       # From: Issue #1095 | PR #1619
       - name: Compute apt cache-bust value
         if: steps.should-build.outputs.should-build == 'true'
@@ -6961,8 +6995,8 @@ jobs:
         # (type=gha) instead of the self-hosted local Buildx cache, since this runner is
         # ephemeral and has no persistent /var/tmp to reuse across runs.
         #
-        # What: Same shared retry+re-login composite action (.github/actions/ghcr-build-push-retry) as build's own equivalent step.
-        # Why: One shared GHCR retry+re-login policy, not a second copy for this arm64 leg.
+        # What: same shared ghcr-build-push-retry action as build's step.
+        # Why: one shared GHCR retry+re-login policy, not a second copy.
         # From: Issue #1095 | PR #1619
         id: build
         if: steps.should-build.outputs.should-build == 'true'
@@ -6985,8 +7019,8 @@ jobs:
             org.opencontainers.image.description=${{ matrix.description }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
-          # What: No `annotations:` input on this single-platform push, mirroring build's equivalent step.
-          # Why: A single-platform push has no index for `--annotation` to attach to.
+          # What: no `annotations:` input here, mirroring build's step.
+          # Why: no index exists here for `--annotation` to attach to.
           # From: Issue #1095 | PR #1619
           outputs: type=image,oci-mediatypes=true
           platforms: linux/arm64
@@ -7045,8 +7079,9 @@ jobs:
           cleanup-cache: "true"
 
       - name: Delete GHCR package version pushed by a failed scan
-        # What: same cleanup as build's own equivalent step, for this job's linux/arm64 leg.
-        # Why: scan targets an already-pushed digest -- a failure otherwise leaves it reachable in GHCR indefinitely.
+        # What: same cleanup as build's own step, for this job's arm64 leg.
+        # Why: scan targets an already-pushed digest -- a failure would
+        # otherwise leave it reachable in GHCR indefinitely.
         # From: Issue #1095 | Issue #626 | PR #1443
         if: ${{ always() && steps.build.outcome == 'success' && steps.trivy-scan-pushed.outcome == 'failure' }}
         env:
@@ -7123,11 +7158,11 @@ jobs:
     # reason.
     name: merge multi-platform manifests
     needs: [build, build-arm64, push-supersession-check]
-    # What: runs whenever build/build-arm64 ran at all, not only on full success.
-    # Why: needs.<job>.result is 'failure' if ANY single matrix entry fails;
-    #   the per-service loop below already skips services with no published
-    #   image, so requiring full success blocked every OTHER service's real
-    #   manifest merge over one unrelated service's failure.
+    # What: runs whenever build/build-arm64 ran at all, not just on
+    # full success.
+    # Why: needs.<job>.result is 'failure' if ANY matrix entry fails; the
+    # per-service loop below already skips unpublished services, so full
+    # success would block every other service over one unrelated failure.
     # From: Issue #1095
     if: "!cancelled() && needs.build.result != 'cancelled' && needs['build-arm64'].result != 'cancelled'"
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
@@ -7228,11 +7263,10 @@ jobs:
 
       - name: Create multi-platform manifests
         id: create-trusted-manifests
-        # What: also skips when push-supersession-check reports this push superseded.
-        # Why: a superseded push forces should-build to false for every service
-        #   (see build/build-arm64's own should-build step), so every per-service
-        #   probe below would miss and the stack-pointer step after it would hard-fail
-        #   on a legitimately empty digest set instead of cleanly no-opping.
+        # What: also skips when push-supersession-check reports superseded.
+        # Why: a superseded push forces should-build to false for every
+        # service, so every per-service probe below would miss and the
+        # stack-pointer step would hard-fail on an empty digest set.
         # From: Issue #1095
         if: "github.event_name != 'pull_request' && needs['push-supersession-check'].outputs.superseded != 'true'"
         env:
@@ -7257,8 +7291,9 @@ jobs:
           # shellcheck source=scripts/lib/docker-metadata.sh
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
-          # What: Reads the shared CI_BUILD_SERVICES scalar rather than a hand-duplicated services=(...) literal.
-          # Why: check-workflow-service-lists.sh only guards copies it knows about.
+          # What: reads the shared CI_BUILD_SERVICES scalar, not a
+          # hand-duplicated services=(...) literal.
+          # Why: check-workflow-service-lists.sh only guards known copies.
           # From: Issue #1095 | PR #1619
           read -ra services <<< "$CI_BUILD_SERVICES"
           # What: reads the single declared, lowercased GHCR owner/repo.
@@ -7291,8 +7326,10 @@ jobs:
           # of this same helper) is a local copy per job over introducing a new composite
           # action just for one function. Same quote-stripping as those.
           #
-          # What: Wrapped in ghcr_retry -- reads the digest of a manifest this same step just created.
-          # Why: A transient GHCR read failure here is a real retry candidate, not an expected-absent probe.
+          # What: wrapped in ghcr_retry -- reads the digest of a manifest
+          # this same step just created.
+          # Why: a transient GHCR read failure here is a real retry
+          # candidate, not an expected-absent probe.
           # From: Issue #1095 | PR #1619
           digest_for_image() {
             local image=$1
@@ -7702,8 +7739,11 @@ jobs:
     # Why: A prior job-level concurrency group let a newer pending promote run silently cancel an older, still-queued one before its first step ran (GitHub only holds one pending request per group, and a queued job has no self-protection), which became practically reachable once parallel tag pushes/dispatches could all reach this point together; a job-level group also cannot protect a job from the enclosing workflow run's own cancellation (only the top-level group's run_id-suffixed push/tag key does that, per GitHub's documented cancel-in-progress:true behavior), and the lock stays global rather than per-ref specifically to avoid racing backfill-stack-latest.yml's own tag move for a different ref; a host-local lock would not work either, since the lancache-heavy pool spans several physical hosts.
     # From: Issue #1095 | PR #1532
     permissions:
-      # What: contents: write, needed by the promote-lock mechanism above to push/delete a dedicated non-branch/non-tag ref (refs/promote-lock/global) for its compare-and-swap acquire/release.
-      # Why: This does not grant any ability to write to master/v0.2.0/tags -- branch protection rulesets only match refs/heads/*, and this lock ref lives outside both refs/heads/* and refs/tags/*.
+      # What: contents: write, for the promote-lock's compare-and-swap
+      # push/delete of refs/promote-lock/global (a non-branch/non-tag ref).
+      # Why: grants no write to master/tags -- branch protection only
+      # matches refs/heads/*, and this ref lives outside refs/heads/*
+      # and refs/tags/* both.
       # From: Issue #1095 | PR #1532
       contents: write
       packages: write
@@ -7712,7 +7752,8 @@ jobs:
       artifact-metadata: write
     steps:
       # What: fetch-depth: 0 for a full-history checkout.
-      # Why: The version-bump step below needs `git describe --tags` and classify-image-impact.sh's merge-base diff, neither of which works with a default shallow checkout.
+      # Why: the version-bump step needs `git describe --tags` and
+      # classify-image-impact.sh's merge-base diff, neither shallow-safe.
       # From: Issue #1095 | PR #1532
       - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
         env:
@@ -7859,8 +7900,9 @@ jobs:
           declare -A previous_refs=()
           promoted_targets=()
 
-          # What: Wrapped in ghcr_retry -- unlike merge-manifests' existence probes, absence is never expected here.
-          # Why: rollback_promotions needs the real previous digest, not a false "never existed" read.
+          # What: wrapped in ghcr_retry -- absence is never expected here,
+          # unlike merge-manifests' existence probes.
+          # Why: rollback_promotions needs the real previous digest.
           # From: Issue #1095 | PR #1619
           digest_for_image() {
             local image=$1
@@ -7898,8 +7940,10 @@ jobs:
           }
           trap rollback_promotions EXIT
 
-          # What: Debounce/coalesce -- skips the tag move if the ref's remote tip moved past this commit.
-          # Why: A queued older run must not move a mutable channel tag onto a superseded commit.
+          # What: debounce -- skips the move if the ref's remote tip
+          # moved past this commit.
+          # Why: a queued older run must not move a channel tag onto a
+          # superseded commit.
           # From: Issue #1095 | PR #1619
           if [[ "$GITHUB_REF" == refs/heads/* ]]; then
             current_tip="$(git ls-remote origin "$GITHUB_REF" | cut -f1)"
@@ -7981,8 +8025,8 @@ jobs:
           GHCR_RETRY_USERNAME="$GHCR_RETRY_USERNAME" GHCR_RETRY_PASSWORD="$GHCR_RETRY_PASSWORD" \
             bash scripts/untracked/require-image-platforms.sh "$stack_pointer_image" "$REQUIRED_PLATFORMS"
 
-          # What: Neither loop below passes --annotation.
-          # Why: Passing it again would re-serialize the manifest with a different digest.
+          # What: neither loop below passes --annotation.
+          # Why: passing it again would re-serialize with a new digest.
           # From: Issue #1095 | PR #1619
           for service in "${services[@]}"; do
             source_image="ghcr.io/${REPOSITORY}/${service}@${candidate_digests[$service]}"
@@ -8101,8 +8145,9 @@ jobs:
             exit 0
           fi
 
-          # What: Skips tag creation if this exact tag already exists on origin.
-          # Why: A re-run, or an earlier attempt that pushed the tag but failed a later step, must not fail or push a duplicate -- another run already covered this commit's release.
+          # What: skips tag creation if this exact tag already exists.
+          # Why: a re-run, or an earlier attempt that pushed the tag but
+          # failed later, must not fail or push a duplicate.
           # From: Issue #1095 | PR #1532
           if [[ -n "$(git ls-remote --tags origin "refs/tags/${next_tag}" 2>/dev/null)" ]]; then
             echo "::notice::${next_tag} already exists on origin; nothing to do."
@@ -8126,8 +8171,9 @@ jobs:
             git push "$push_url" "refs/tags/${next_tag}"
           echo "::notice::Cut ${next_tag} from ${COMMIT_SHA}. The tag-triggered run of this workflow will move 'latest' and publish the GitHub release."
 
-      # What: Same digest-bound cache as merge-manifests' per-service attest steps.
-      # Why: A push where every service was unchanged reproduces the identical stack-pointer digest, which would otherwise be re-attested for no reason every time.
+      # What: same digest-bound cache as merge-manifests' attest steps.
+      # Why: an all-unchanged push reproduces the identical stack-pointer
+      # digest, which would otherwise be re-attested for no reason.
       # From: Issue #1095 | PR #1532
       - name: Release the cross-workflow promote lock
         if: always()
@@ -8399,15 +8445,11 @@ jobs:
             printf '%s\n' "$image_notes_end"
           } > "$notes_file"
 
-          # What: -i attaches host stdin to the container -- required because this script
-          # is fed to the container via the bash -s <<'UPDATE_RELEASE' heredoc below.
-          # Why: without -i, `docker run` never connects container stdin at all, so the
-          # containerized `bash -s` reads immediate EOF and exits 0 having executed
-          # nothing: a silent no-op (no release created/updated), not a visible failure.
-          # Pre-existing gap (this invocation predates this PR), found while this PR was
-          # already touching the adjacent "Attach OpenVEX document to the release" step
-          # a few lines below, which had the identical shape -- fixed here in the same
-          # pass rather than left as a walked-past defect (AG-WF-013/AG-WF-027).
+          # What: -i attaches host stdin (script is fed via the bash -s
+          # <<'UPDATE_RELEASE' heredoc below).
+          # Why: without -i, `docker run` never connects container stdin;
+          # the containerized `bash -s` gets immediate EOF and exits 0
+          # having done nothing -- a silent no-op, not a visible failure.
           # From: Issue #1095 (F-22)
           docker run --rm -i \
             -e GITHUB_TOKEN \
@@ -8613,8 +8655,9 @@ jobs:
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   release-sbom:
-    # What: Generates a CycloneDX SBOM per released image digest and attaches it as a GitHub release asset (OSPS-QA-02.02).
-    # Why: Scoped to release tags only, since a push-time SBOM would just redo container-scan's per-digest work.
+    # What: generates a CycloneDX SBOM per released digest, attached as
+    # a GitHub release asset (OSPS-QA-02.02).
+    # Why: release-tags only; a push-time SBOM would redo container-scan.
     # From: Issue #1095 | PR #1619
     name: publish SBOM for ${{ matrix.service }}
     needs: release
@@ -8624,7 +8667,7 @@ jobs:
     # From: Issue #1095 | PR #1619
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     # What: 65-minute timeout estimate for this job.
-    # Why: Covers the wrapped Trivy scan-retry's worst-case attempts plus checkout/buildx overhead.
+    # Why: covers the Trivy scan-retry's worst case plus checkout/buildx.
     # From: Issue #1095 | PR #1619
     timeout-minutes: 65
     permissions:
@@ -8633,8 +8676,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # What: The Trivy-scanned first-party image set (container-scan's matrix), excluding `stack` (an unscanned channel-pointer image).
-        # Why: A hand-kept copy of container-scan's own list risks drifting if not kept in sync by hand.
+        # What: container-scan's own Trivy-scanned set, minus `stack`
+        # (an unscanned channel-pointer image).
+        # Why: a hand-kept copy risks drifting out of sync.
         # From: Issue #1095 | PR #1619
         service: [proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, syslog, ui, build-tools, utilities]
     steps:
