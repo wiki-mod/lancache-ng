@@ -110,6 +110,39 @@ jobs:
       release_contract: ${{ steps.filter.outputs.release_contract }}
       scripts: ${{ steps.filter.outputs.scripts }}
     steps:
+      # What: mkdir-atomic per-workspace lock; a completed/stale holder (Actions
+      # API best-effort, else >3h age) is reclaimed only under $RUNNER_WORKSPACE.
+      # Why: proactively serializes self-hosted workspace reuse across jobs/PRs.
+      # From: Issue #1095
+      - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          for i in 1 2 3 4 5 6; do
+            mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
+            read -r h t <"$d/m" 2>/dev/null || true
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
+            a=$(( $(date +%s) - ${t:-0} ))
+            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+          done
+          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+      # What: force-resyncs to HEAD, clearing sparse-checkout/skip-worktree state.
+      # Why: root-caused -- a leftover sparse-checkout cone (e.g. gc-pr-staging-
+      # images.yml's collector checkout) surviving a crashed job on a reused
+      # runner makes files outside it silently vanish, no checkout error -- this
+      # run's missing-file symptom on 4 hosts. Ported from PR #1640 (G15).
+      # From: Issue #1095 | PR #1640
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          [ -d .git ] || exit 0
+          git sparse-checkout disable 2>/dev/null; rm -f .git/info/sparse-checkout
+          git config --local --unset-all core.sparseCheckout 2>/dev/null
+          mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
+          [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
+          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -152,12 +185,46 @@ jobs:
   # Why: `cancel-in-progress` on an already-running job starves the channel; an implicit-success() check that
   # treats a skipped dependency as passing was the root cause this job exists to prevent, so this must never be skippable itself.
   # From: PR #1334, Issue #532
+      # What/Why: releases this job's own lock (if still owned) always, so a
+      # clean/failed/cancelled job never leaves a stale lock behind.
+      # From: Issue #1095
+      - name: Release per-workspace checkout lock (self-hosted reuse hardening)
+        if: always()
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          m="$(cat "$d/m" 2>/dev/null)"
+          [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
+          exit 0
   push-supersession-check:
     name: check for a newer push already superseding this one
     runs-on: [self-hosted, linux, lancache, lancache-light]
     outputs:
       superseded: ${{ steps.check.outputs.superseded }}
     steps:
+      - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          for i in 1 2 3 4 5 6; do
+            mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
+            read -r h t <"$d/m" 2>/dev/null || true
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
+            a=$(( $(date +%s) - ${t:-0} ))
+            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+          done
+          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          [ -d .git ] || exit 0
+          git sparse-checkout disable 2>/dev/null; rm -f .git/info/sparse-checkout
+          git config --local --unset-all core.sparseCheckout 2>/dev/null
+          mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
+          [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
+          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Check whether this push is already superseded
@@ -195,6 +262,14 @@ jobs:
 
           echo "superseded=$superseded" >> "$GITHUB_OUTPUT"
 
+      - name: Release per-workspace checkout lock (self-hosted reuse hardening)
+        if: always()
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          m="$(cat "$d/m" 2>/dev/null)"
+          [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
+          exit 0
   file-headers:
     # What: Repository-wide file-purpose-header gate (AG-HDR-001); 15-minute timeout, real runs 8-10s.
     # Why: Runs before the expensive Rust/image work so a missing/malformed header is caught cheaply.
@@ -215,6 +290,29 @@ jobs:
         }}
       cancel-in-progress: true
     steps:
+      - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          for i in 1 2 3 4 5 6; do
+            mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
+            read -r h t <"$d/m" 2>/dev/null || true
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
+            a=$(( $(date +%s) - ${t:-0} ))
+            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+          done
+          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          [ -d .git ] || exit 0
+          git sparse-checkout disable 2>/dev/null; rm -f .git/info/sparse-checkout
+          git config --local --unset-all core.sparseCheckout 2>/dev/null
+          mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
+          [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
+          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Select immutable build-tools image
         run: |
@@ -252,6 +350,14 @@ jobs:
             timeout --kill-after=30 --signal=KILL 300 bash -c \
               'cp -a /source /tmp/work && cd /tmp/work && bash scripts/tracked/check-pr-diff-file-headers.sh'
 
+      - name: Release per-workspace checkout lock (self-hosted reuse hardening)
+        if: always()
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          m="$(cat "$d/m" 2>/dev/null)"
+          [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
+          exit 0
   compose-healthchecks:
     # What: Cheap hygiene gate: scans docker-compose files for healthcheck configuration.
     # Why: Plain bash/grep script with no Docker/build-tools dependency, so it runs on the light tier.
@@ -268,12 +374,43 @@ jobs:
         }}
       cancel-in-progress: true
     steps:
+      - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          for i in 1 2 3 4 5 6; do
+            mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
+            read -r h t <"$d/m" 2>/dev/null || true
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
+            a=$(( $(date +%s) - ${t:-0} ))
+            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+          done
+          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          [ -d .git ] || exit 0
+          git sparse-checkout disable 2>/dev/null; rm -f .git/info/sparse-checkout
+          git config --local --unset-all core.sparseCheckout 2>/dev/null
+          mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
+          [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
+          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # What: Composite action shared with compose-healthchecks-hosted below.
       # Why: The two jobs used to carry the identical step twice.
       # From: Issue #1095
       - uses: ./.github/actions/compose-healthchecks-check
 
+      - name: Release per-workspace checkout lock (self-hosted reuse hardening)
+        if: always()
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          m="$(cat "$d/m" 2>/dev/null)"
+          [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
+          exit 0
   pr-template-check:
     name: PR template validation
     if: github.event_name == 'pull_request'
@@ -286,6 +423,29 @@ jobs:
       contents: read
       pull-requests: read
     steps:
+      - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          for i in 1 2 3 4 5 6; do
+            mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
+            read -r h t <"$d/m" 2>/dev/null || true
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
+            a=$(( $(date +%s) - ${t:-0} ))
+            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+          done
+          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          [ -d .git ] || exit 0
+          git sparse-checkout disable 2>/dev/null; rm -f .git/info/sparse-checkout
+          git config --local --unset-all core.sparseCheckout 2>/dev/null
+          mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
+          [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
+          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Validate PR template completeness
         env:
@@ -310,6 +470,14 @@ jobs:
           echo "::notice::gh pr view succeeded. Body byte count: $(wc -c < /tmp/pr-body-live.txt). stderr: $(cat /tmp/pr-body-live.stderr)"
           bash scripts/tracked/validate-pr-template.sh /tmp/pr-body-live.txt
 
+      - name: Release per-workspace checkout lock (self-hosted reuse hardening)
+        if: always()
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          m="$(cat "$d/m" 2>/dev/null)"
+          [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
+          exit 0
   pr-template-check-hosted:
     # What: GitHub-hosted fallback for pr-template-check; LAN-independent, but its validation step still
     # fetches the PR body live via `gh pr view` (needs GH_TOKEN, pull-requests:read).
@@ -367,6 +535,29 @@ jobs:
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
+      - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          for i in 1 2 3 4 5 6; do
+            mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
+            read -r h t <"$d/m" 2>/dev/null || true
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
+            a=$(( $(date +%s) - ${t:-0} ))
+            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+          done
+          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          [ -d .git ] || exit 0
+          git sparse-checkout disable 2>/dev/null; rm -f .git/info/sparse-checkout
+          git config --local --unset-all core.sparseCheckout 2>/dev/null
+          mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
+          [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
+          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Auto-assign Dependabot PR milestone
         # What: Auto-assigns milestone #11 (LanCache-NG Roadmap) to Dependabot PRs via PROJECT_AUTOMATION_PAT;
@@ -412,6 +603,14 @@ jobs:
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
           project-automation-pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
 
+      - name: Release per-workspace checkout lock (self-hosted reuse hardening)
+        if: always()
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          m="$(cat "$d/m" 2>/dev/null)"
+          [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
+          exit 0
   pr-tracking-metadata-check-hosted:
     name: PR tracking metadata (labels/milestone/project) (GitHub-hosted fallback)
     if: github.event_name == 'pull_request'
@@ -501,6 +700,29 @@ jobs:
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
+      - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          for i in 1 2 3 4 5 6; do
+            mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
+            read -r h t <"$d/m" 2>/dev/null || true
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
+            a=$(( $(date +%s) - ${t:-0} ))
+            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+          done
+          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          [ -d .git ] || exit 0
+          git sparse-checkout disable 2>/dev/null; rm -f .git/info/sparse-checkout
+          git config --local --unset-all core.sparseCheckout 2>/dev/null
+          mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
+          [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
+          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # What: Step content extracted into a composite action, shared with pr-title-convention-check-hosted.
@@ -511,6 +733,14 @@ jobs:
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
           pr-title-lint-mode: ${{ vars.PR_TITLE_LINT_MODE }}
 
+      - name: Release per-workspace checkout lock (self-hosted reuse hardening)
+        if: always()
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          m="$(cat "$d/m" 2>/dev/null)"
+          [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
+          exit 0
   pr-title-convention-check-hosted:
     name: PR title Conventional-Commit lint (GitHub-hosted fallback)
     if: github.event_name == 'pull_request'
@@ -657,6 +887,29 @@ jobs:
       contents: read
       pull-requests: read
     steps:
+      - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          for i in 1 2 3 4 5 6; do
+            mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
+            read -r h t <"$d/m" 2>/dev/null || true
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
+            a=$(( $(date +%s) - ${t:-0} ))
+            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+          done
+          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          [ -d .git ] || exit 0
+          git sparse-checkout disable 2>/dev/null; rm -f .git/info/sparse-checkout
+          git config --local --unset-all core.sparseCheckout 2>/dev/null
+          mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
+          [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
+          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Check tracked files use Unix (LF) line endings
         run: |
@@ -759,6 +1012,14 @@ jobs:
             bash scripts/tracked/check-changelog-direct-edit.sh --changed-files-file "/work/$(basename "$changelog_guard_changed_files")" \
           || true
 
+      - name: Release per-workspace checkout lock (self-hosted reuse hardening)
+        if: always()
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          m="$(cat "$d/m" 2>/dev/null)"
+          [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
+          exit 0
   line-endings-hosted:
     name: line endings (GitHub-hosted fallback)
     runs-on: ubuntu-latest
@@ -796,6 +1057,29 @@ jobs:
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
+      - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          for i in 1 2 3 4 5 6; do
+            mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
+            read -r h t <"$d/m" 2>/dev/null || true
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
+            a=$(( $(date +%s) - ${t:-0} ))
+            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+          done
+          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          [ -d .git ] || exit 0
+          git sparse-checkout disable 2>/dev/null; rm -f .git/info/sparse-checkout
+          git config --local --unset-all core.sparseCheckout 2>/dev/null
+          mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
+          [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
+          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Check for banned-language source files (AG-REL-001)
         run: |
@@ -808,6 +1092,14 @@ jobs:
             timeout --kill-after=30 --signal=KILL 300 \
             bash -lc 'set -euo pipefail; bash scripts/tracked/check-language-policy.sh'
 
+      - name: Release per-workspace checkout lock (self-hosted reuse hardening)
+        if: always()
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          m="$(cat "$d/m" 2>/dev/null)"
+          [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
+          exit 0
   language-policy-hosted:
     name: language policy (GitHub-hosted fallback)
     runs-on: ubuntu-latest
@@ -876,6 +1168,29 @@ jobs:
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
+      - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          for i in 1 2 3 4 5 6; do
+            mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
+            read -r h t <"$d/m" 2>/dev/null || true
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
+            a=$(( $(date +%s) - ${t:-0} ))
+            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+          done
+          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          [ -d .git ] || exit 0
+          git sparse-checkout disable 2>/dev/null; rm -f .git/info/sparse-checkout
+          git config --local --unset-all core.sparseCheckout 2>/dev/null
+          mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
+          [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
+          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # What: Step content (ShellCheck/ActionLint plus 7 standing text/YAML guards) extracted into a composite action; job-level scheduling (needs/if/concurrency/permissions, the docs-only skip above) and this step's own timeout-minutes stay here since a composite-action step cannot carry either.
@@ -886,6 +1201,14 @@ jobs:
         with:
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
 
+      - name: Release per-workspace checkout lock (self-hosted reuse hardening)
+        if: always()
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          m="$(cat "$d/m" 2>/dev/null)"
+          [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
+          exit 0
   shellcheck-hosted:
     name: shellcheck (GitHub-hosted fallback)
     runs-on: ubuntu-latest
@@ -952,6 +1275,29 @@ jobs:
     outputs:
       build_tools_image: ${{ steps.select-compose-validation-image.outputs.build_tools_image }}
     steps:
+      - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          for i in 1 2 3 4 5 6; do
+            mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
+            read -r h t <"$d/m" 2>/dev/null || true
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
+            a=$(( $(date +%s) - ${t:-0} ))
+            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+          done
+          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          [ -d .git ] || exit 0
+          git sparse-checkout disable 2>/dev/null; rm -f .git/info/sparse-checkout
+          git config --local --unset-all core.sparseCheckout 2>/dev/null
+          mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
+          [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
+          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Docker Buildx for manifest inspection
@@ -2542,6 +2888,14 @@ jobs:
 
   # Derive a per-run validation subnet candidate; actual collision-safe reservation still happens in the stack-start helper.
   # This job stays unconditional because full-setup validation also runs on push.
+      - name: Release per-workspace checkout lock (self-hosted reuse hardening)
+        if: always()
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          m="$(cat "$d/m" 2>/dev/null)"
+          [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
+          exit 0
   compute-validation-network:
     name: derive per-run validation subnet
     runs-on: [self-hosted, linux, lancache, lancache-light]
@@ -2561,11 +2915,42 @@ jobs:
       project_name: ${{ steps.derive.outputs.project_name }}
       ui_port: ${{ steps.derive.outputs.ui_port }}
     steps:
+      - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          for i in 1 2 3 4 5 6; do
+            mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
+            read -r h t <"$d/m" 2>/dev/null || true
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
+            a=$(( $(date +%s) - ${t:-0} ))
+            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+          done
+          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          [ -d .git ] || exit 0
+          git sparse-checkout disable 2>/dev/null; rm -f .git/info/sparse-checkout
+          git config --local --unset-all core.sparseCheckout 2>/dev/null
+          mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
+          [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
+          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Derive validation network
         id: derive
         uses: ./.github/actions/derive-validation-network
 
+      - name: Release per-workspace checkout lock (self-hosted reuse hardening)
+        if: always()
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          m="$(cat "$d/m" 2>/dev/null)"
+          [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
+          exit 0
   full-setup-validate:
     name: validate full-setup image
     # Wait for merge-manifests so PR validation consumes this PR staging manifest, not stale base-channel content.
@@ -2612,6 +2997,29 @@ jobs:
       # What: fetch-depth: 0 instead of the default shallow depth-1 clone.
       # Why: The "Ensure PR staging tags exist for full-setup services" step below needs real git ancestry (`git merge-base --is-ancestor`) between this PR's base.sha and a base-channel image's build-commit label, the same requirement detect-changes' own fetch-depth: 0 checkout has for its merge-base diff.
       # From: Issue #1095 | PR #1532
+      - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          for i in 1 2 3 4 5 6; do
+            mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
+            read -r h t <"$d/m" 2>/dev/null || true
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
+            a=$(( $(date +%s) - ${t:-0} ))
+            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+          done
+          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          [ -d .git ] || exit 0
+          git sparse-checkout disable 2>/dev/null; rm -f .git/info/sparse-checkout
+          git config --local --unset-all core.sparseCheckout 2>/dev/null
+          mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
+          [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
+          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -2996,6 +3404,14 @@ jobs:
         if: always()
         run: rm -f deploy/full-setup/.ci-exact-digests.yml
 
+      - name: Release per-workspace checkout lock (self-hosted reuse hardening)
+        if: always()
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          m="$(cat "$d/m" 2>/dev/null)"
+          [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
+          exit 0
   dns_rust_quality:
     # DNS Rust quality is scoped by detect-changes for PR speed, but workflow changes
     # still force it because the CI contract itself may have changed.
@@ -3030,6 +3446,29 @@ jobs:
     # covers the clippy step's 35-minute budget plus this job's other steps.
     timeout-minutes: 45
     steps:
+      - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          for i in 1 2 3 4 5 6; do
+            mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
+            read -r h t <"$d/m" 2>/dev/null || true
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
+            a=$(( $(date +%s) - ${t:-0} ))
+            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+          done
+          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          [ -d .git ] || exit 0
+          git sparse-checkout disable 2>/dev/null; rm -f .git/info/sparse-checkout
+          git config --local --unset-all core.sparseCheckout 2>/dev/null
+          mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
+          [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
+          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Isolate Rust toolchain paths
         run: |
@@ -3072,6 +3511,14 @@ jobs:
         with:
           command: cargo clippy --locked --all-targets --manifest-path services/dns/nats-subscriber/Cargo.toml -- -D warnings
 
+      - name: Release per-workspace checkout lock (self-hosted reuse hardening)
+        if: always()
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          m="$(cat "$d/m" 2>/dev/null)"
+          [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
+          exit 0
   ui_rust_quality:
     # UI Rust quality mirrors the DNS job but stays independent so both crates
     # can run in parallel on suitable runners.
@@ -3099,6 +3546,29 @@ jobs:
     # job-level bound must exceed it. Real warm-cache runs: 50s-3.3min.
     timeout-minutes: 45
     steps:
+      - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          for i in 1 2 3 4 5 6; do
+            mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
+            read -r h t <"$d/m" 2>/dev/null || true
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
+            a=$(( $(date +%s) - ${t:-0} ))
+            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+          done
+          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          [ -d .git ] || exit 0
+          git sparse-checkout disable 2>/dev/null; rm -f .git/info/sparse-checkout
+          git config --local --unset-all core.sparseCheckout 2>/dev/null
+          mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
+          [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
+          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Isolate Rust toolchain paths
         run: |
@@ -3141,6 +3611,14 @@ jobs:
         with:
           command: cargo clippy --locked --all-targets --manifest-path services/ui/Cargo.toml -- -D warnings
 
+      - name: Release per-workspace checkout lock (self-hosted reuse hardening)
+        if: always()
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          m="$(cat "$d/m" 2>/dev/null)"
+          [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
+          exit 0
   watchdog_rust_quality:
     # What: Watchdog Rust quality mirrors dns_rust_quality/ui_rust_quality exactly, now that services/watchdog/Cargo.toml exists alongside the crate's pre-existing shell runtime.
     # Why: Covers only the Rust crate; the shell-script syntax/executable-bit check stays in watchdog_test below since it validates a different artifact (watchdog.sh, still the production entrypoint -- the Rust crate is a scaffold not yet wired into the Dockerfile ENTRYPOINT).
@@ -3169,6 +3647,29 @@ jobs:
     # job-level bound must exceed it.
     timeout-minutes: 45
     steps:
+      - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          for i in 1 2 3 4 5 6; do
+            mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
+            read -r h t <"$d/m" 2>/dev/null || true
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
+            a=$(( $(date +%s) - ${t:-0} ))
+            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+          done
+          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          [ -d .git ] || exit 0
+          git sparse-checkout disable 2>/dev/null; rm -f .git/info/sparse-checkout
+          git config --local --unset-all core.sparseCheckout 2>/dev/null
+          mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
+          [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
+          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Isolate Rust toolchain paths
         run: |
@@ -3211,6 +3712,14 @@ jobs:
         with:
           command: cargo clippy --locked --all-targets --manifest-path services/watchdog/Cargo.toml -- -D warnings
 
+      - name: Release per-workspace checkout lock (self-hosted reuse hardening)
+        if: always()
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          m="$(cat "$d/m" 2>/dev/null)"
+          [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
+          exit 0
   dns_test:
     # DNS unit tests are separate from quality checks so failures identify
     # whether the regression is lint/format level or behavioral.
@@ -3258,6 +3767,29 @@ jobs:
         }}
       cancel-in-progress: true
     steps:
+      - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          for i in 1 2 3 4 5 6; do
+            mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
+            read -r h t <"$d/m" 2>/dev/null || true
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
+            a=$(( $(date +%s) - ${t:-0} ))
+            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+          done
+          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          [ -d .git ] || exit 0
+          git sparse-checkout disable 2>/dev/null; rm -f .git/info/sparse-checkout
+          git config --local --unset-all core.sparseCheckout 2>/dev/null
+          mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
+          [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
+          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Isolate Rust toolchain paths
         run: |
@@ -3290,6 +3822,14 @@ jobs:
         with:
           command: cargo test --locked --manifest-path services/dns/nats-subscriber/Cargo.toml
 
+      - name: Release per-workspace checkout lock (self-hosted reuse hardening)
+        if: always()
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          m="$(cat "$d/m" 2>/dev/null)"
+          [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
+          exit 0
   ui_test:
     # UI tests run only when the UI or workflow contract changes. This keeps
     # docs/setup-only PRs from paying for unrelated Rust test work.
@@ -3333,6 +3873,29 @@ jobs:
         }}
       cancel-in-progress: true
     steps:
+      - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          for i in 1 2 3 4 5 6; do
+            mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
+            read -r h t <"$d/m" 2>/dev/null || true
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
+            a=$(( $(date +%s) - ${t:-0} ))
+            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+          done
+          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          [ -d .git ] || exit 0
+          git sparse-checkout disable 2>/dev/null; rm -f .git/info/sparse-checkout
+          git config --local --unset-all core.sparseCheckout 2>/dev/null
+          mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
+          [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
+          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Isolate Rust toolchain paths
         run: |
@@ -3365,6 +3928,14 @@ jobs:
         with:
           command: cargo test --locked --manifest-path services/ui/Cargo.toml
 
+      - name: Release per-workspace checkout lock (self-hosted reuse hardening)
+        if: always()
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          m="$(cat "$d/m" 2>/dev/null)"
+          [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
+          exit 0
   rust_coverage:
     # What: Also skips on a metadata-only pull_request event, same as dns_rust_quality above; watchdog is deliberately NOT included in this job's `needs:`/tarpaulin invocation even though it has its own rust-quality/test/cargo-audit jobs.
     # Why: This required branch-protection check ("coverage (Rust)") already tolerates a clean `skipped` result for any PR whose path scoping finds no relevant Rust change, so a metadata-only skip is one more equally clean source, not a new failure mode; coverage here uses a per-crate PASS/FAIL threshold that would need a deliberately-chosen number for the watchdog crate, a separate decision this job does not make on its own -- watchdog's 38 unit tests already run and gate merges via watchdog_test, just without a tracked coverage percentage yet.
@@ -3409,6 +3980,29 @@ jobs:
         }}
       cancel-in-progress: true
     steps:
+      - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          for i in 1 2 3 4 5 6; do
+            mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
+            read -r h t <"$d/m" 2>/dev/null || true
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
+            a=$(( $(date +%s) - ${t:-0} ))
+            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+          done
+          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          [ -d .git ] || exit 0
+          git sparse-checkout disable 2>/dev/null; rm -f .git/info/sparse-checkout
+          git config --local --unset-all core.sparseCheckout 2>/dev/null
+          mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
+          [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
+          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # This job resolves its own build-tools image rather than reusing validate-compose's
       # exported build_tools_image output. That output is deliberately locked to the
@@ -3573,6 +4167,14 @@ jobs:
           path: coverage-badge/rust.json
           retention-days: 1
 
+      - name: Release per-workspace checkout lock (self-hosted reuse hardening)
+        if: always()
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          m="$(cat "$d/m" 2>/dev/null)"
+          [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
+          exit 0
   publish_coverage_badge:
     # Split out of rust_coverage (see the comment on its "Upload coverage badge data"
     # step) so the contents:write token this job needs is never present during the
@@ -3599,6 +4201,29 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          for i in 1 2 3 4 5 6; do
+            mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
+            read -r h t <"$d/m" 2>/dev/null || true
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
+            a=$(( $(date +%s) - ${t:-0} ))
+            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+          done
+          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          [ -d .git ] || exit 0
+          git sparse-checkout disable 2>/dev/null; rm -f .git/info/sparse-checkout
+          git config --local --unset-all core.sparseCheckout 2>/dev/null
+          mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
+          [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
+          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Download coverage badge data
@@ -3695,6 +4320,14 @@ jobs:
             attempt=$((attempt + 1))
           done
 
+      - name: Release per-workspace checkout lock (self-hosted reuse hardening)
+        if: always()
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          m="$(cat "$d/m" 2>/dev/null)"
+          [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
+          exit 0
   watchdog_test:
     # What: Covers two artifacts in one job: watchdog.sh's shell-script syntax/executable-bit gate (still the production entrypoint), plus a real `cargo test` run for the Rust crate now living alongside it in services/watchdog/.
     # Why: Mirrors dns_test/ui_test's shape (gated on its own rust_quality job, lancache-heavy tier, same metadata-only-event and content-change scoping) instead of the cheap lancache-light tier the shell-only version used before the crate existed, since the compile cost is now real -- ci_scope_policy's own tolerance for this job moves accordingly (require_success_or_intentional_skip() to require_success_or_intentional_cancellation() on push, matching dns_test/ui_test once they gained their own cancel-on-push groups).
@@ -3736,6 +4369,29 @@ jobs:
         }}
       cancel-in-progress: true
     steps:
+      - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          for i in 1 2 3 4 5 6; do
+            mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
+            read -r h t <"$d/m" 2>/dev/null || true
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
+            a=$(( $(date +%s) - ${t:-0} ))
+            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+          done
+          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          [ -d .git ] || exit 0
+          git sparse-checkout disable 2>/dev/null; rm -f .git/info/sparse-checkout
+          git config --local --unset-all core.sparseCheckout 2>/dev/null
+          mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
+          [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
+          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: test (watchdog shell script)
         run: |
@@ -3772,6 +4428,14 @@ jobs:
         with:
           command: cargo test --locked --manifest-path services/watchdog/Cargo.toml
 
+      - name: Release per-workspace checkout lock (self-hosted reuse hardening)
+        if: always()
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          m="$(cat "$d/m" 2>/dev/null)"
+          [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
+          exit 0
   watchdog_test-hosted:
     # What: Does not gate on detect-changes/validate-compose (both self-hosted-only), and covers only watchdog.sh's shell-script check -- it does NOT run `cargo test` for the Rust crate.
     # Why: A needs: dependency on a self-hosted-only job would sit queued forever if self-hosted runners are genuinely unavailable, the exact scenario this fallback exists for, so the cheap bash -n/executable-bit check runs unconditionally instead, matching file-headers-hosted/line-endings-hosted/shellcheck-hosted; real Rust compilation depends on the shared build-tools image and sccache/distcc acceleration, which have no safe hosted equivalent yet, the same reason dns/ui never got a hosted fallback for their rust-quality/test/cargo-audit jobs -- a green run here is NOT proof the watchdog crate compiles or its tests pass.
@@ -3836,6 +4500,29 @@ jobs:
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
+      - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          for i in 1 2 3 4 5 6; do
+            mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
+            read -r h t <"$d/m" 2>/dev/null || true
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
+            a=$(( $(date +%s) - ${t:-0} ))
+            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+          done
+          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          [ -d .git ] || exit 0
+          git sparse-checkout disable 2>/dev/null; rm -f .git/info/sparse-checkout
+          git config --local --unset-all core.sparseCheckout 2>/dev/null
+          mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
+          [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
+          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Audit Rust dependencies (dns/nats-subscriber)
         run: |
@@ -3862,6 +4549,14 @@ jobs:
                 exit 1
               fi'
 
+      - name: Release per-workspace checkout lock (self-hosted reuse hardening)
+        if: always()
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          m="$(cat "$d/m" 2>/dev/null)"
+          [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
+          exit 0
   ui_cargo_audit:
     # UI dependency audit mirrors the DNS audit and stays parallel to avoid
     # serializing independent Rust checks.
@@ -3905,6 +4600,29 @@ jobs:
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
+      - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          for i in 1 2 3 4 5 6; do
+            mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
+            read -r h t <"$d/m" 2>/dev/null || true
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
+            a=$(( $(date +%s) - ${t:-0} ))
+            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+          done
+          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          [ -d .git ] || exit 0
+          git sparse-checkout disable 2>/dev/null; rm -f .git/info/sparse-checkout
+          git config --local --unset-all core.sparseCheckout 2>/dev/null
+          mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
+          [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
+          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Audit Rust dependencies (ui)
         run: |
@@ -3931,6 +4649,14 @@ jobs:
                 exit 1
               fi'
 
+      - name: Release per-workspace checkout lock (self-hosted reuse hardening)
+        if: always()
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          m="$(cat "$d/m" 2>/dev/null)"
+          [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
+          exit 0
   watchdog_cargo_audit:
     # What: Watchdog dependency audit mirrors the DNS/UI audits and stays parallel to avoid serializing independent Rust checks.
     # Why: Added alongside watchdog_rust_quality/watchdog_test now that services/watchdog/Cargo.toml exists.
@@ -3975,6 +4701,29 @@ jobs:
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
+      - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          for i in 1 2 3 4 5 6; do
+            mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
+            read -r h t <"$d/m" 2>/dev/null || true
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
+            a=$(( $(date +%s) - ${t:-0} ))
+            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+          done
+          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          [ -d .git ] || exit 0
+          git sparse-checkout disable 2>/dev/null; rm -f .git/info/sparse-checkout
+          git config --local --unset-all core.sparseCheckout 2>/dev/null
+          mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
+          [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
+          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Audit Rust dependencies (watchdog)
         run: |
@@ -4001,6 +4750,14 @@ jobs:
                 exit 1
               fi'
 
+      - name: Release per-workspace checkout lock (self-hosted reuse hardening)
+        if: always()
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          m="$(cat "$d/m" 2>/dev/null)"
+          [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
+          exit 0
   ci_scope_policy:
     # What: Verifies every check actually required for the PR's touched files ran, tolerating that individual jobs may legitimately report `skipped`/`cancelled` instead of `success` depending on trigger type; has its own cancel-in-progress group like build/container-scan/build-arm64, but nothing depends on its result via `needs:` except build/build-arm64's soft `if:` gate.
     # Why: pull_request runs are already serialized by the top-level concurrency group (cancel-in-progress: false), so that branch of the reconciliation script below stays strict (require_success()); push/tag events instead use a run_id-suffixed top-level key that never collides, so several off-publish-path jobs (rust_coverage, shellcheck, file-headers, line-endings, dns_test/ui_test/watchdog_test, dns/ui/watchdog_cargo_audit) carry their own per-job cancel-on-push groups plus detect-changes-driven path-scoped `if:` gates, both of which can legitimately yield `skipped`/`cancelled` on push with no real failure -- require_success_or_intentional_cancellation()/require_success_or_intentional_skip() below encode exactly which outcomes are safe per job. validate-compose is pull_request-only for cancellation (a hard publish-path gate), so it always completes on push and cannot cascade a `skipped` result into its downstream jobs there; rust_coverage and dns_rust_quality/ui_rust_quality/watchdog_rust_quality depend only on detect-changes (never runs on push) or run unconditionally, so they stay on strict require_success() with no tolerance needed.
@@ -4038,6 +4795,29 @@ jobs:
       # What: Checks out the repo before the grep-based Buildx-step guard below reads this workflow file.
       # Why: Without its own checkout, this job's file read fell back to whatever another job left in the shared self-hosted `_work` workspace, which under real concurrent load could hold an unrelated run's checkout (or nothing), producing a false pass/fail against the wrong commit.
       # From: Issue #1095 | PR #1532
+      - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          for i in 1 2 3 4 5 6; do
+            mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
+            read -r h t <"$d/m" 2>/dev/null || true
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
+            a=$(( $(date +%s) - ${t:-0} ))
+            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+          done
+          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          [ -d .git ] || exit 0
+          git sparse-checkout disable 2>/dev/null; rm -f .git/info/sparse-checkout
+          git config --local --unset-all core.sparseCheckout 2>/dev/null
+          mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
+          [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
+          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Enforce scoped CI gates
         env:
@@ -4226,6 +5006,14 @@ jobs:
             echo "::notice::Runtime/deploy/release contract files changed; validate-compose remains the lightweight project-wide guard."
           fi
 
+      - name: Release per-workspace checkout lock (self-hosted reuse hardening)
+        if: always()
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          m="$(cat "$d/m" 2>/dev/null)"
+          [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
+          exit 0
   container-scan:
     # What: Never runs on pull_request (PRs get their own Trivy scan via build's step); on push/tag scans
     # either a changed service's just-pushed digest or an unchanged service's already-published channel image.
@@ -4346,6 +5134,31 @@ jobs:
             platform_tag: arm64
             runner: '"ubuntu-24.04-arm"'
     steps:
+      - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
+        if: contains(matrix.runner, 'self-hosted')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          for i in 1 2 3 4 5 6; do
+            mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
+            read -r h t <"$d/m" 2>/dev/null || true
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
+            a=$(( $(date +%s) - ${t:-0} ))
+            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+          done
+          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        if: contains(matrix.runner, 'self-hosted')
+        run: |
+          set -uo pipefail
+          [ -d .git ] || exit 0
+          git sparse-checkout disable 2>/dev/null; rm -f .git/info/sparse-checkout
+          git config --local --unset-all core.sparseCheckout 2>/dev/null
+          mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
+          [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
+          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Determine per-service publish scan reuse
@@ -4503,6 +5316,14 @@ jobs:
           # Why: "Self-heal Trivy's own default cache directory ownership" above already keeps that default writable, so this job no longer needs its own managed cache dir.
           # From: Issue #1095 | PR #1532
 
+      - name: Release per-workspace checkout lock (self-hosted reuse hardening)
+        if: always() && contains(matrix.runner, 'self-hosted')
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          m="$(cat "$d/m" 2>/dev/null)"
+          [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
+          exit 0
   determine-push-reuse-scope:
     # What: Decides once per push (not once per build/build-arm64/per-arch matrix row) whether each allowlisted product service can safely retag its already-published channel image instead of paying for a real rebuild+rescan; build/build-arm64 just read this job's plain true/false output.
     # Why: The verification (ancestry check plus a real content diff via scripts/untracked/classify-image-impact.sh from the channel image's own build commit) needs full git history, which build/build-arm64's own shallow checkouts don't have -- running it once here, in the one job in this push path with full history, lets both jobs agree without either needing its own deep checkout or duplicated per-arch logic; see scripts/lib/push-reuse.sh's own header comment for why a channel image (not the immediately-preceding push's predecessor commit) is the reuse source, and why ancestry alone without the content diff is not sufficient evidence of "safe to reuse."
@@ -4930,6 +5751,29 @@ jobs:
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
 
     steps:
+      - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          for i in 1 2 3 4 5 6; do
+            mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
+            read -r h t <"$d/m" 2>/dev/null || true
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
+            a=$(( $(date +%s) - ${t:-0} ))
+            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+          done
+          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          [ -d .git ] || exit 0
+          git sparse-checkout disable 2>/dev/null; rm -f .git/info/sparse-checkout
+          git config --local --unset-all core.sparseCheckout 2>/dev/null
+          mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
+          [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
+          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -5723,6 +6567,14 @@ jobs:
           subject-name: ghcr.io/${{ github.repository }}/${{ matrix.service }}
           subject-digest: ${{ steps.build.outputs.digest }}
 
+      - name: Release per-workspace checkout lock (self-hosted reuse hardening)
+        if: always()
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          m="$(cat "$d/m" 2>/dev/null)"
+          [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
+          exit 0
   build-arm64:
     # What: Native linux/arm64 leg of build's publish contract, on a GitHub-hosted arm64 runner instead of QEMU on the self-hosted amd64 pool; also skips on a metadata-only pull_request event, see `build`'s identical comment above.
     # Why: The hosted runner is outside the self-hosted LAN and cannot reach Redis-backed sccache/sccache-dist/distcc (see docs/self-hosted-actions-runner.md); merge-manifests below combines this job's arm64 tag with build's amd64 tag into the real sha-<commit> multi-platform tag -- this job never writes that tag directly.
@@ -6306,6 +7158,29 @@ jobs:
       build_tools_digest: ${{ steps.create-trusted-manifests.outputs.build_tools_digest || steps.create-pr-staging-manifests.outputs.build_tools_digest }}
       stack_digest: ${{ steps.create-trusted-manifests.outputs.stack_digest }}
     steps:
+      - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          for i in 1 2 3 4 5 6; do
+            mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
+            read -r h t <"$d/m" 2>/dev/null || true
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
+            a=$(( $(date +%s) - ${t:-0} ))
+            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+          done
+          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          [ -d .git ] || exit 0
+          git sparse-checkout disable 2>/dev/null; rm -f .git/info/sparse-checkout
+          git config --local --unset-all core.sparseCheckout 2>/dev/null
+          mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
+          [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
+          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -6776,6 +7651,14 @@ jobs:
           subject-name: ghcr.io/${{ github.repository }}/syslog
           subject-digest: ${{ steps.create-pr-staging-manifests.outputs.syslog_digest }}
 
+      - name: Release per-workspace checkout lock (self-hosted reuse hardening)
+        if: always()
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          m="$(cat "$d/m" 2>/dev/null)"
+          [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
+          exit 0
   promote:
     # What: Promotion runs as a separate job from image build, gated by an explicit `!cancelled() && needs.X.result == 'success'` condition instead of a bare `github.event_name != 'pull_request'`.
     # Why: A bare condition gets GitHub's implicit `&& success()` appended, which walks the whole transitive needs graph including PR-only jobs (detect-changes/file-headers/pr-template-check) that always skip on push -- success() treats a skipped dependency as failed, so promote silently never ran on push even though build succeeded (confirmed live); !cancelled() avoids that skipped-as-failure trap while still stopping the job on a real maintainer cancellation, unlike always().
@@ -6802,6 +7685,29 @@ jobs:
       # What: fetch-depth: 0 for a full-history checkout.
       # Why: The version-bump step below needs `git describe --tags` and classify-image-impact.sh's merge-base diff, neither of which works with a default shallow checkout.
       # From: Issue #1095 | PR #1532
+      - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          for i in 1 2 3 4 5 6; do
+            mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
+            read -r h t <"$d/m" 2>/dev/null || true
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
+            a=$(( $(date +%s) - ${t:-0} ))
+            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+          done
+          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          [ -d .git ] || exit 0
+          git sparse-checkout disable 2>/dev/null; rm -f .git/info/sparse-checkout
+          git config --local --unset-all core.sparseCheckout 2>/dev/null
+          mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
+          [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
+          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -7188,6 +8094,14 @@ jobs:
           # release is best-effort cleanup, not a correctness-critical step.
           promote_lock_release origin "$holder_note" || true
 
+      - name: Release per-workspace checkout lock (self-hosted reuse hardening)
+        if: always()
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          m="$(cat "$d/m" 2>/dev/null)"
+          [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
+          exit 0
   release:
     # Release source archives must match the same commit that produced the images. This
     # keeps source, image tags, and attestations traceable together.
@@ -7227,6 +8141,29 @@ jobs:
       contents: write
       packages: read
     steps:
+      - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          for i in 1 2 3 4 5 6; do
+            mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
+            read -r h t <"$d/m" 2>/dev/null || true
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
+            a=$(( $(date +%s) - ${t:-0} ))
+            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+          done
+          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          [ -d .git ] || exit 0
+          git sparse-checkout disable 2>/dev/null; rm -f .git/info/sparse-checkout
+          git config --local --unset-all core.sparseCheckout 2>/dev/null
+          mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
+          [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
+          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -7584,6 +8521,14 @@ jobs:
           echo "Uploaded $asset_name to release $TAG_NAME."
           UPLOAD_VEX
 
+      - name: Release per-workspace checkout lock (self-hosted reuse hardening)
+        if: always()
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          m="$(cat "$d/m" 2>/dev/null)"
+          [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
+          exit 0
   release-sbom:
     # What: Generates a CycloneDX SBOM per released image digest and attaches it as a GitHub release asset (OSPS-QA-02.02).
     # Why: Scoped to release tags only, since a push-time SBOM would just redo container-scan's per-digest work.
@@ -7610,6 +8555,29 @@ jobs:
         # From: Issue #1095 | PR #1619
         service: [proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, syslog, ui, build-tools, utilities]
     steps:
+      - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          for i in 1 2 3 4 5 6; do
+            mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
+            read -r h t <"$d/m" 2>/dev/null || true
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
+            a=$(( $(date +%s) - ${t:-0} ))
+            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+          done
+          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          [ -d .git ] || exit 0
+          git sparse-checkout disable 2>/dev/null; rm -f .git/info/sparse-checkout
+          git config --local --unset-all core.sparseCheckout 2>/dev/null
+          mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
+          [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
+          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -7754,3 +8722,12 @@ jobs:
             "$uploads/releases/$release_id/assets?name=$ASSET_NAME" >/dev/null
           echo "Uploaded $ASSET_NAME to release $TAG_NAME."
           UPLOAD_SBOM
+
+      - name: Release per-workspace checkout lock (self-hosted reuse hardening)
+        if: always()
+        run: |
+          set -uo pipefail
+          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          m="$(cat "$d/m" 2>/dev/null)"
+          [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
+          exit 0
