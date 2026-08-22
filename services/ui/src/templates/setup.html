@@ -240,6 +240,28 @@ sudo trust anchor --store ca.crt</pre>
     </div>
   </div>
 
+  <!-- ── Admin-UI neu starten (#1486) ──────────────────────────────────────── -->
+  <div class="card space-y-4">
+    <div>
+      <h2 class="font-semibold text-slate-200">Admin-UI neu starten</h2>
+      <p class="text-xs text-slate-400 mt-1">
+        Startet nur den Admin-UI-Container selbst neu — kein anderer Dienst ist betroffen.
+        Diese Seite wird danach kurz nicht erreichbar sein und automatisch weiterleiten, sobald
+        die Admin-UI wieder antwortet. Ist die Admin-UI bereits nicht mehr erreichbar, hilft
+        dieser Schalter nicht — er benötigt eine funktionierende Verbindung, um den Neustart
+        überhaupt anzustoßen.
+      </p>
+    </div>
+    <form method="post" action="/setup/restart-ui"
+          onsubmit="return confirm('Admin-UI wirklich neu starten? Die Seite ist danach kurz nicht erreichbar.')">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit"
+              class="bg-amber-600 hover:bg-amber-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
+        Admin-UI neu starten
+      </button>
+    </form>
+  </div>
+
 </div>
 {% endblock %}
 

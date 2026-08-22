@@ -115,6 +115,13 @@ pub fn container_name_for_service(service_name: &str, suffix: &str) -> Result<St
         "dhcp-probe" | "lancache-dhcp-probe" => "lancache-dhcp-probe",
         "nats" | "lancache-nats" => "lancache-nats",
         "ntp" | "lancache-ntp" => "lancache-ntp",
+        // Issue #1486: restart-only (never start/stop, see
+        // docker-socket-proxy.sh's safe_ui_restart) so this container can
+        // never be left in a stopped/disabled state via the Admin UI.
+        // watchdog/syslog are deliberately absent from this match on
+        // purpose (fall through to the error below) -- see this issue's own
+        // "must stay un-disableable" requirement.
+        "ui" | "lancache-ui" => "lancache-ui",
         _ => anyhow::bail!(
             "Docker service '{}' is not in the lancache-ng socket-proxy allowlist",
             service_name
@@ -201,5 +208,32 @@ mod tests {
     #[test]
     fn container_name_for_service_rejects_unknown_service_regardless_of_suffix() {
         assert!(container_name_for_service("bogus", "-e2e-q88wjq").is_err());
+    }
+
+    // Positive lifecycle case (issue #1486): "ui" must resolve so
+    // routes/setup.rs's restart handler can call restart_service(docker,
+    // "ui", ...) -- this is the one new capability this issue adds here.
+    #[test]
+    fn container_name_for_service_resolves_ui() {
+        assert_eq!(container_name_for_service("ui", "").unwrap(), "lancache-ui");
+        assert_eq!(
+            container_name_for_service("lancache-ui", "").unwrap(),
+            "lancache-ui"
+        );
+    }
+
+    // Negative permission case (issue #1486): watchdog and syslog must never
+    // resolve to a controllable container name here, so no Admin UI code
+    // path can ever call start/stop/restart_service against either one --
+    // they fall through to the same unknown-service error as any bogus
+    // input. This is a deliberate absence, not an oversight (see this
+    // match's own comment above), so a regression that accidentally adds
+    // either one back must fail this test.
+    #[test]
+    fn container_name_for_service_rejects_watchdog_and_syslog() {
+        assert!(container_name_for_service("watchdog", "").is_err());
+        assert!(container_name_for_service("lancache-watchdog", "").is_err());
+        assert!(container_name_for_service("syslog", "").is_err());
+        assert!(container_name_for_service("lancache-syslog", "").is_err());
     }
 }

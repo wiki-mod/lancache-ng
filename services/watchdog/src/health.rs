@@ -144,10 +144,13 @@ impl HealthReading {
 
     /// Collapses a reading into the simple "is this alert-only service okay
     /// right now" boolean [`AlertCounter`] needs (issue #842: `ui`, `dhcp`,
-    /// `dhcp-proxy`, `netdata`, `syslog` -- plus `ntp`, issue #1296 -- all
-    /// monitored for dashboard visibility only, never auto-restarted; see
-    /// `main.rs`'s own alert-only loop for why none of these go through
-    /// [`FailureCounter`]/[`Action::Restart`] at all). `Healthy` and
+    /// `dhcp-proxy`, `syslog` -- plus `ntp`, issue #1296 -- all monitored for
+    /// dashboard visibility only, never auto-restarted; see `main.rs`'s own
+    /// alert-only loop for why none of these go through
+    /// [`FailureCounter`]/[`Action::Restart`] at all). `netdata` moved OFF
+    /// this alert-only list (issue #842's 2026-08-07 restart-capability
+    /// decision) -- it is real restart-capable now via [`FailureCounter`]
+    /// directly, so it never reaches this function. `Healthy` and
     /// `Starting` are both "not currently a problem", matching how
     /// [`FailureCounter::record`] already treats `Starting` as inert rather
     /// than alarm-worthy. `None` (no Docker `HEALTHCHECK` configured, but
@@ -155,12 +158,11 @@ impl HealthReading {
     /// confirmed against every one of these services' actual compose
     /// definitions before writing this (`ui`'s `/health` curl probe,
     /// `dhcp`'s Kea control-API check, `dhcp-proxy`'s `dnsmasq --test`,
-    /// `netdata`'s REST-API curl probe, `syslog`'s dual-process
-    /// fluent-bit+syslog-ng healthcheck, `ntp`'s `chronyc tracking` probe
-    /// added by issue #1296) already have a real `healthcheck:` block, so
-    /// `None` is not actually reachable for any of them in practice -- but
-    /// treating it as "okay" rather than "alarm" is still the right
-    /// default if that ever changes (a missing healthcheck is a
+    /// `syslog`'s dual-process fluent-bit+syslog-ng healthcheck, `ntp`'s
+    /// `chronyc tracking` probe added by issue #1296) already have a real
+    /// `healthcheck:` block, so `None` is not actually reachable for any of
+    /// them in practice -- but treating it as "okay" rather than "alarm" is
+    /// still the right default if that ever changes (a missing healthcheck is a
     /// documentation/compose gap to fix, not something this alert-only
     /// probe should misrepresent as a live service outage). `Unreachable`
     /// (container doesn't exist, or docker-socket-proxy rejected/couldn't
@@ -438,8 +440,10 @@ mod tests {
     }
 
     #[test]
-    // Pins is_alert_ok()'s exact classification for issue #842's six
-    // alert-only services: Healthy/Starting/None are "not a problem" (the
+    // Pins is_alert_ok()'s exact classification for issue #842's
+    // remaining alert-only services (ui/dhcp/dhcp-proxy/syslog/ntp --
+    // netdata moved to real restart-capability, see this file's own
+    // is_alert_ok() doc comment): Healthy/Starting/None are "not a problem" (the
     // same three states FailureCounter already treats as either healthy or
     // inert), while Unhealthy/Unreachable/Other are alarm-worthy.
     fn is_alert_ok_matches_documented_classification() {

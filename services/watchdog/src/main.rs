@@ -22,6 +22,18 @@ use lancache_watchdog::status::{self, DiskInfo, ServiceHealth, WatchdogStatus};
 /// at startup because deployment gates and the coordinated container suffix do
 /// not change during the lifetime of this process.
 ///
+/// `netdata` is deliberately NOT in this set (issue #842's 2026-08-07
+/// restart-capability decision): it is real restart-capable now, wired
+/// directly into `monitored`/`failure_counters` in `main()` below, with its
+/// own dedicated `safe_netdata_restart` docker-socket-proxy allowlist grant.
+/// `ui`/`dhcp`/`dhcp-proxy`/`syslog`/`ntp` stay alert-only here -- `ui` is
+/// tracked separately (PR #1610, Refs #1486), `dhcp`/`dhcp-proxy`/`ntp`
+/// deliberately keep their own start/stop-only Admin-UI-driven lifecycle
+/// (Kea/dnsmasq known-good-config rollback semantics a blind watchdog
+/// restart could race), and `syslog`/`watchdog` itself must never be
+/// user-disableable (#1486's cross-reference on #842) -- see this crate's
+/// own PR body for the full per-service reasoning.
+///
 /// Central logging runs fluent-bit and syslog-ng in one `services/syslog/`
 /// container named by `CONTAINER_SYSLOG`. Its own dual-process healthcheck
 /// proves both processes are alive, while this layer consumes the resulting
@@ -32,18 +44,14 @@ fn resolve_alert_only_targets(
     ntp_enabled: bool,
     container_suffix: &str,
 ) -> Vec<String> {
-    // ui/netdata are never profile-gated in any deploy/*/docker-compose.yml
-    // profile, unlike dhcp/dhcp-proxy/syslog/ntp, so both are always
-    // monitored.
+    // ui is never profile-gated in any deploy/*/docker-compose.yml profile,
+    // unlike dhcp/dhcp-proxy/syslog/ntp, so it is always monitored here.
     //
     // Every deployment container_name uses the same coordinated suffix in
     // isolated CI stacks. Alert-only names must therefore apply that suffix
     // too; otherwise get_health() would query a container name that was never
     // started and report a permanent false "unreachable" state.
-    let mut targets = vec![
-        format!("{}{container_suffix}", config::CONTAINER_UI),
-        format!("{}{container_suffix}", config::CONTAINER_NETDATA),
-    ];
+    let mut targets = vec![format!("{}{container_suffix}", config::CONTAINER_UI)];
     if let Some(dhcp_container) = config::dhcp_alert_container(dhcp_mode) {
         targets.push(format!("{dhcp_container}{container_suffix}"));
     }
@@ -280,6 +288,18 @@ async fn main() {
         restart_after: settings.restart_after,
         grace_period: None,
     });
+    // netdata (issue #842, 2026-08-07 restart-capability decision): real
+    // restart-capable, not alert-only -- unlike ui/dhcp/dhcp-proxy/syslog/
+    // ntp (see resolve_alert_only_targets()'s own doc comment for why those
+    // stay alert-only). No conflicting rollback-safety concern exists for
+    // netdata anywhere in issue #842's history, unlike dhcp/dhcp-proxy.
+    // netdata is never profile-gated, so it is unconditionally monitored
+    // here, matching resolve_alert_only_targets()'s own ui handling.
+    monitored.push(MonitoredService {
+        container_name: format!("{}{}", config::CONTAINER_NETDATA, settings.container_suffix),
+        restart_after: settings.restart_after,
+        grace_period: None,
+    });
 
     let mut failure_counters: HashMap<String, FailureCounter> = monitored
         .iter()
@@ -451,14 +471,13 @@ mod tests {
     use super::*;
 
     #[test]
-    // With every optional profile disabled, only the two always-on services
-    // belong in the alert-only set.
-    fn no_optional_services_enabled_monitors_only_ui_and_netdata() {
+    // With every optional profile disabled, only the one always-on
+    // alert-only service (ui) belongs in this set -- netdata moved to the
+    // restart-capable `monitored` list in main() (issue #842, 2026-08-07
+    // decision) and is no longer resolved here at all.
+    fn no_optional_services_enabled_monitors_only_ui() {
         let targets = resolve_alert_only_targets("disabled", false, false, "");
-        assert_eq!(
-            targets,
-            vec!["lancache-ui".to_string(), "lancache-netdata".to_string()]
-        );
+        assert_eq!(targets, vec!["lancache-ui".to_string()]);
     }
 
     #[test]
@@ -482,10 +501,25 @@ mod tests {
     fn all_optional_services_enabled_together() {
         let targets = resolve_alert_only_targets("kea", true, true, "");
         assert!(targets.contains(&"lancache-ui".to_string()));
-        assert!(targets.contains(&"lancache-netdata".to_string()));
         assert!(targets.contains(&"lancache-dhcp".to_string()));
         assert!(targets.contains(&"lancache-syslog".to_string()));
         assert!(targets.contains(&"lancache-ntp".to_string()));
+        // netdata is restart-capable now (main()'s own `monitored` list),
+        // never resolved by this alert-only function -- see this file's own
+        // resolve_alert_only_targets_never_includes_netdata() below for a
+        // dedicated negative assertion.
+    }
+
+    #[test]
+    // netdata must never reappear in the alert-only set -- it is
+    // restart-capable now (issue #842, 2026-08-07 decision), wired directly
+    // into main()'s own `monitored`/`failure_counters`, not through this
+    // function at all. A regression here would double-monitor netdata
+    // (once via AlertCounter, once via FailureCounter) with two independent,
+    // disagreeing counters writing the same status.json key.
+    fn resolve_alert_only_targets_never_includes_netdata() {
+        let targets = resolve_alert_only_targets("kea", true, true, "");
+        assert!(!targets.iter().any(|t| t.starts_with("lancache-netdata")));
     }
 
     #[test]
@@ -497,7 +531,6 @@ mod tests {
             targets,
             vec![
                 "lancache-ui-ci1".to_string(),
-                "lancache-netdata-ci1".to_string(),
                 "lancache-dhcp-ci1".to_string(),
                 "lancache-syslog-ci1".to_string(),
                 "lancache-ntp-ci1".to_string(),
@@ -509,9 +542,6 @@ mod tests {
     // An empty coordinated suffix is deliberately a no-op for every target.
     fn resolve_alert_only_targets_is_unchanged_with_no_suffix() {
         let targets = resolve_alert_only_targets("disabled", false, false, "");
-        assert_eq!(
-            targets,
-            vec!["lancache-ui".to_string(), "lancache-netdata".to_string()]
-        );
+        assert_eq!(targets, vec!["lancache-ui".to_string()]);
     }
 }

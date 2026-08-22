@@ -188,9 +188,11 @@ services:
   watchdog:
     image: "${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}"
     volumes:
-      # What: read-only mount -- watchdog.sh only reads this tree now.
+      # What: read-only mount -- the watchdog binary only reads this tree now.
       # Why: the destructive purge moved to the `retention` service below;
-      # see deploy/prod/docker-compose.yml's identical mount.
+      # see deploy/prod/docker-compose.yml's identical mount. This service
+      # has no entrypoint/command override, so it picks up the image's own
+      # default ENTRYPOINT (the compiled binary) directly.
       # From: Issue #842 | PR #1360
       - proxy-cache:/var/cache/lancache:ro
       # What: shared with `ui` below (read-only).

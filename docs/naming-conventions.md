@@ -141,7 +141,11 @@ the Docker socket proxy currently allowlists:
    name that remains), to `safe_container_inspect`/
    `lancache_container` (inspect-only, for watchdog's Rust rewrite's
    alert-only monitoring -- see `docs/architecture-ng.md`'s "Auto-restart"
-   section for the full list and reasoning). `docker-socket-proxy` and
+   section for the full list and reasoning). **Corrected 2026-08-19 (issue
+   #1486): `ui` is no longer inspect-only.** It additionally gained its own
+   narrow `safe_ui_restart` grant (restart-only, never start/stop) for the
+   Admin UI's own operator-initiated self-restart control -- `netdata` and
+   `syslog` remain inspect-only exactly as before. `docker-socket-proxy` and
    `watchdog` remain the only two of this original four still deliberately
    absent from the allowlist (a service never needs Docker-API access to
    itself). Before this section's original change, none of the four had a

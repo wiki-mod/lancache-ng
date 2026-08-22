@@ -1318,6 +1318,8 @@ jobs:
           grep -Fq 'acl safe_service_restart' "$socket_proxy_script" \
             && grep -Fq 'acl safe_dhcp_action' "$socket_proxy_script" \
             && grep -Fq 'acl safe_probe_action' "$socket_proxy_script" \
+            && grep -Fq 'acl safe_netdata_restart' "$socket_proxy_script" \
+            && grep -Fq 'lancache-netdata/restart' "$socket_proxy_script" \
             && grep -Fq 'acl lancache_container' "$socket_proxy_script" \
             && grep -Fq 'lancache-dns-standard|lancache-dns-ssl' "$socket_proxy_script" \
             && grep -Fq 'lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-nats)/restart' "$socket_proxy_script" \
@@ -4287,7 +4289,11 @@ jobs:
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
           - service: watchdog
             platform_tag: amd64
-            runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
+            # Moved to heavy alongside build/build-arm64's own watchdog
+            # entry (the Rust rewrite's real compile/link step) -- this
+            # job's own comment above says its runner selector stays
+            # aligned with those two.
+            runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
           - service: dhcp
             platform_tag: amd64
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
@@ -4847,8 +4853,8 @@ jobs:
       fail-fast: false
       matrix:
         include: &normal-build-services
-          # What: Runner tiers below (AG-CI-002 measured exception, maintainer decision 2026-08-06): proxy/dhcp-proxy/watchdog/dhcp/syslog/ntp have no real compile/link step in their Dockerfiles and measured well below dns/ui/build-tools in a real full-rebuild run; dns/ui (Rust) and build-tools (Go+Rust) stay heavy.
-          # Why: watchdog is scoped to its CURRENT Dockerfile only -- issue #842's planned Rust rewrite must trigger a fresh re-evaluation, not a grandfathered stay on light. This is the single canonical definition; build-arm64's own matrix below reuses it via the &normal-build-services/*normal-build-services YAML anchor instead of a hand-kept duplicate that could drift.
+          # What: Runner tiers below (AG-CI-002 measured exception, maintainer decision 2026-08-06): proxy/dhcp-proxy/dhcp/syslog/ntp have no real compile/link step in their Dockerfiles and measured well below dns/ui/build-tools in a real full-rebuild run; dns/ui (Rust) and build-tools (Go+Rust) stay heavy.
+          # Why: this exception is scoped to a service's CURRENT Dockerfile content only, re-evaluated whenever that changes -- watchdog moved off this light-tier group (its Rust rewrite's real compile/link step, see its own `rust: true`/`lancache-heavy` entry below) exactly as this exception's own text already anticipated, not a grandfathered stay on light. This is the single canonical definition; build-arm64's own matrix below reuses it via the &normal-build-services/*normal-build-services YAML anchor instead of a hand-kept duplicate that could drift.
           # From: Issue #1095 | PR #1523
 
           - service: proxy
@@ -4867,7 +4873,15 @@ jobs:
             context: services/watchdog
             build_contexts: ""
             description: &ci-description-watchdog "lancache-ng watchdog helper for runtime health checks and recovery hooks."
-            runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
+            # Re-evaluation triggered (the Rust rewrite is now
+            # wired into this Dockerfile's own builder stage): watchdog no
+            # longer qualifies for the AG-CI-002 light-tier exception the
+            # comment above documents -- it now has a real musl cargo
+            # build/link step (sccache/distcc/ccache-accelerated, same as
+            # dns/ui), so it moves to lancache-heavy alongside them, per
+            # this exception's own explicit non-grandfathering text.
+            rust: true
+            runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
           - service: dhcp
             context: services/dhcp
             build_contexts: ""
@@ -5344,6 +5358,25 @@ jobs:
             printf '%s' "$SCCACHE_REDIS_URL" > "$redis_file"
             secret_files+=("sccache_redis_url=$redis_file")
             echo "redis-file=$redis_file" >> "$GITHUB_OUTPUT"
+            # What: also mounts the same Redis URL under a second BuildKit
+            # secret id, `ccache_redis_url`.
+            # Why: AG-CI-022's opt-in ccache-over-distcc layer (services/dns's
+            # nats-subscriber builder, and now services/watchdog's builder)
+            # deliberately reuses this same SCCACHE_REDIS_URL-sourced secret
+            # rather than a second GitHub repository secret (see either
+            # Dockerfile's own configure_ccache() comment) -- this was
+            # documented as the intended design in both Dockerfiles but never
+            # actually wired here, so `[ -s /run/secrets/ccache_redis_url ]`
+            # was always false and every Rust image build silently fell back
+            # to plain distcc (safe, but not the real acceleration AG-CI-022
+            # describes). A distinct file (not reusing $redis_file's path
+            # under a second secret_files entry) matches BuildKit's own
+            # one-path-per-secret-id mount contract.
+            # From: Issue #842 | Issue #887 (AG-CI-022 origin)
+            ccache_redis_file="${{ runner.temp }}/ccache-redis-url"
+            printf '%s' "$SCCACHE_REDIS_URL" > "$ccache_redis_file"
+            secret_files+=("ccache_redis_url=$ccache_redis_file")
+            echo "ccache-redis-file=$ccache_redis_file" >> "$GITHUB_OUTPUT"
           fi
 
           # This job only ever builds linux/amd64 (see build-arm64 for the
@@ -5411,6 +5444,7 @@ jobs:
           redis-file: ${{ steps.sccache-secret.outputs.redis-file }}
           dist-config-file: ${{ steps.sccache-secret.outputs.dist-config-file }}
           distcc-hosts-file: ${{ steps.sccache-secret.outputs.distcc-hosts-file }}
+          ccache-redis-file: ${{ steps.sccache-secret.outputs.ccache-redis-file }}
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
           build-network: ${{ env.RUST_ACCELERATION_NETWORK }}
           platform: linux/amd64
