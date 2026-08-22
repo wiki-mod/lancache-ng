@@ -2,9 +2,8 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: single CI/CD pipeline -- path detection, Rust/shell lint+test, compose validation, image build/scan/push, promote, and release.
-# Why: enforces the single-artifact rule: each candidate is built once, its digest retained, and every later
-#   stage consumes that exact digest instead of re-resolving a mutable tag.
+# What: single CI/CD pipeline: lint, test, validate, build, scan, promote.
+# Why: enforces single-artifact: built once, digest reused everywhere.
 # From: PR #1523
 
 name: Build & Push
@@ -18,18 +17,15 @@ on:
         options: [none, nightly]
         default: none
   schedule:
-    # What: Daily 01:00 UTC stable-channel refresh of `latest` on master (nightly has its own separate schedule).
-    # Why: GitHub evaluates `schedule:` only from the default branch, so `nightly-refresh.yml`'s own cron copy
-    # stays inert until it is merged to master.
+    # What: daily 01:00 UTC refresh of `latest` on master (nightly is separate).
+    # Why: GitHub only evaluates schedule: from the default branch.
     # From: PR #1056
     - cron: "0 1 * * *"
   push:
     branches: [master, current_dev, "v[0-9]*"]
     tags: ["v*"]
-    # What: Push-only paths-ignore (`pull_request` below intentionally has none); `!CHANGELOG.md` stays
-    # un-ignored for check-changelog-direct-edit.sh.
-    # Why: A trigger-level paths-ignore on `pull_request` would silently block required checks forever, but
-    # suppressing an all-docs push run is safe since nothing waits on it to merge.
+    # What: push-only paths-ignore; CHANGELOG.md stays un-ignored.
+    # Why: a pull_request paths-ignore would silently block required checks.
     # From: PR #1334
     paths-ignore:
       - "**/*.md"
@@ -37,34 +33,29 @@ on:
       - "!CHANGELOG.md"
   pull_request:
     branches: [master, current_dev, "v[0-9]*"]
-    # What: Adds metadata-change triggers (labeled/unlabeled/milestoned/demilestoned/ready_for_review) to opened/synchronize/reopened.
-    # Why: Every downstream job filtering on event `action` (build/build-arm64, the Rust quality/test/audit jobs,
-    #   rust_coverage) must stay in sync with this list, or a metadata-only event silently skips a required check.
+    # What: adds metadata-change triggers to opened/synchronize/reopened.
+    # Why: downstream jobs filtering on event action must stay in sync.
     # From: Issue #1095 | PR #1532
     types: [opened, synchronize, reopened, labeled, unlabeled, milestoned, demilestoned, ready_for_review]
 
 permissions:
   contents: read
-  # What: Declares workflow-level default permissions; a job-level `permissions:` block replaces (not merely
-  # narrows) this default for that job.
-  # Why: This floor is a safety net for a future job that omits its own permissions block, not something the
-  # current jobs depend on -- they already declare their own scopes.
+  # What: declares workflow-level default permissions (job-level replaces this).
+  # Why: safety net for a future job that omits its own permissions block.
   # From: PR #905
   pull-requests: read
 
 concurrency:
-  # What: Push/tag use a run_id-scoped key (never collides); PR uses a per-ref key; cancel-in-progress is
-  # false at this workflow level.
-  # Why: PR-level cancellation broke `detect-changes` mid-run when a label/milestone event retriggered it, so
-  # `build` reclaims a superseded PR run via its own safe per-job cancellation group instead.
+  # What: push/tag use a run_id key; PR uses a per-ref key, no cancel.
+  # Why: PR cancellation once broke detect-changes mid-run on a relabel event.
   # From: PR #892
   group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.ref) || format('{0}-publish-{1}', github.workflow, github.run_id) }}
   cancel-in-progress: false
 
 env:
   CARGO_BUILD_JOBS: ${{ vars.CARGO_BUILD_JOBS }}
-  # What: one runtime service list for manifest assembly, promotion, and release loops.
-  # Why: scripts/check-workflow-service-lists.sh fails CI if this drifts from the build matrix.
+  # What: one runtime service list for manifest, promotion, and release loops.
+  # Why: check-workflow-service-lists.sh fails CI on any matrix drift.
   # From: PR #1523
   CI_BUILD_SERVICES: "proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities"
   RELEASE_PLATFORMS: linux/amd64,linux/arm64
@@ -75,16 +66,14 @@ defaults:
     shell: bash
 
 jobs:
-  # What: Classifies changed paths for PR/push event scoping of the six Rust test/audit jobs and
-  # `build`/`build-arm64`'s PR-time image scoping.
-  # Why: A PR/push diff degrades gracefully to `--all-changed` on a missing base, so the six Rust jobs' own
-  # `if:` fails safe to running whenever this job did not produce a successful classification.
+  # What: classifies changed paths for the six Rust jobs' PR/push scoping.
+  # Why: a missing base degrades to --all-changed; jobs fail safe to running.
   # From: PR #397
   detect-changes:
     name: detect changed paths
     if: github.event_name == 'pull_request' || github.event_name == 'push'
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # What: 15-minute timeout, the same floor every cheap self-hosted script job in this file uses.
+    # What: 15-min timeout, same floor every cheap self-hosted job uses.
     # Why: Real runs complete in 6-17s; the floor is a round, generous bound (not scaled from that number) so
     # a future hang still fails fast and bounded.
     # From: PR #1218
@@ -119,13 +108,13 @@ jobs:
         run: |
           set -uo pipefail
           d="${RUNNER_WORKSPACE}/.ckt.lock"
-          for i in 1 2 3 4 5 6; do
+          for _ in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
             s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
-            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
           echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       # What: force-resyncs to HEAD, clearing sparse-checkout/skip-worktree.
@@ -154,18 +143,15 @@ jobs:
 
           : "${GITHUB_SHA:?GitHub checkout SHA is required}"
 
-          # What: Classification logic lives in scripts/untracked/classify-image-impact.sh (shared with `promote`'s
-          # own version-bump logic); it writes "Changed files:" to stderr and key=value booleans to stdout.
-          # Why: A merge-base diff needs the full history `fetch-depth: 0` above provides.
+          # What: classification lives in classify-image-impact.sh.
+          # Why: a merge-base diff needs the fetch-depth: 0 history above.
           # From: PR #1129
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
             : "${BASE_SHA:?pull request base SHA is required}"
             bash scripts/untracked/classify-image-impact.sh "$BASE_SHA" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
           else
-            # What: Push (branch/tag) diffs exactly the commits this push introduced (`before`..`sha`);
-            # falls back to `--all-changed` when `before` is unusable.
-            # Why: An undeterminable diff base must run the full classification rather than silently
-            # under-scope, mirroring build-tools.yml's own before-diff fallback.
+            # What: push diffs the commits this push introduced (before..sha).
+            # Why: falls back to --all-changed on an unusable before.
             # From: PR #1129
             if [ -z "$BEFORE_SHA" ] \
               || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ] \
@@ -177,11 +163,6 @@ jobs:
             fi
           fi
 
-  # What: Start-of-job supersession check for build/build-arm64/container-scan via git ls-remote; carries
-  # no `if:`/`needs:` of its own, so its output can never resolve to skipped, only success/failure/cancelled.
-  # Why: `cancel-in-progress` on an already-running job starves the channel; an implicit-success() check that
-  # treats a skipped dependency as passing was the root cause this job exists to prevent, so this must never be skippable itself.
-  # From: PR #1334, Issue #532
       # What: releases this job's own lock (if still owned), always.
       # Why: a failed/cancelled job must never leave a stale lock.
       # From: Issue #1095
@@ -193,6 +174,9 @@ jobs:
           m="$(cat "$d/m" 2>/dev/null || true)"
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
+  # What: start-of-job supersession check for build/build-arm64/container-scan.
+  # Why: must never be skippable -- implicit success() would treat a skip as pass.
+  # From: PR #1334, Issue #532
   push-supersession-check:
     name: check for a newer push already superseding this one
     runs-on: [self-hosted, linux, lancache, lancache-light]
@@ -205,13 +189,13 @@ jobs:
         run: |
           set -uo pipefail
           d="${RUNNER_WORKSPACE}/.ckt.lock"
-          for i in 1 2 3 4 5 6; do
+          for _ in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
             s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
-            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
           echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
@@ -236,16 +220,14 @@ jobs:
 
           superseded=false
 
-          # What: Only meaningful for a push to a mutable branch ref; a tag ref (immutable, pushed once) and
-          # every non-push event fall through to the `superseded=false` default below.
-          # Why: Those other cases have no "a newer push already landed" concept, so `false` is always the
-          # correct, safe answer for them.
+          # What: only meaningful for a push to a mutable branch ref.
+          # Why: other events have no supersession concept; false is safe.
           # From: PR #1334
           if [ "$CHECK_EVENT_NAME" = "push" ]; then
             case "$CHECK_GITHUB_REF" in
               refs/heads/*)
-                # What: An unresolvable `git ls-remote` here fails OPEN (treats the push as not superseded), unlike `promote`'s own copy of this check, which fails closed.
-                # Why: Wrongly reporting `superseded=true` would skip the only job that ever builds this commit's image with no retry path; `promote` failing closed only delays one channel move.
+                # What: git ls-remote here fails OPEN, unlike promote's copy.
+                # Why: wrongly reporting superseded=true skips the only build.
                 # From: PR #1334
                 current_tip="$(git ls-remote origin "$CHECK_GITHUB_REF" | cut -f1 || true)"
                 if [ -z "$current_tip" ]; then
@@ -269,15 +251,14 @@ jobs:
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   file-headers:
-    # What: Repository-wide file-purpose-header gate (AG-HDR-001); 15-minute timeout, real runs 8-10s.
-    # Why: Runs before the expensive Rust/image work so a missing/malformed header is caught cheaply.
+    # What: repo-wide file-purpose-header gate (AG-HDR-001); 15-min timeout.
+    # Why: runs before the expensive Rust/image work; cheap to catch here.
     # From: PR #432
     name: file purpose headers
     runs-on: [self-hosted, linux, lancache, lancache-light]
     timeout-minutes: 15
-    # What: Job-level concurrency with cancel-in-progress: true; reclaims a superseded run.
-    # Why: Safe to cancel here since no hard-failing script consumes the result before build/build-arm64's
-    # own `if:` gate, which cleanly skips on a cancelled result.
+    # What: job-level concurrency; cancel-in-progress true reclaims a run.
+    # Why: safe to cancel; build/build-arm64 cleanly skip a cancelled result.
     # From: PR #915
     concurrency:
       group: >-
@@ -294,13 +275,13 @@ jobs:
         run: |
           set -uo pipefail
           d="${RUNNER_WORKSPACE}/.ckt.lock"
-          for i in 1 2 3 4 5 6; do
+          for _ in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
             s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
-            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
           echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
@@ -317,9 +298,7 @@ jobs:
         run: |
           set -euo pipefail
           # What: assigns the resolved image to a local before printf.
-          # Why: printf's own exit status stays 0 even if a command
-          #   substitution inside its argument fails, so `set -e` cannot
-          #   catch a failure embedded there.
+          # Why: printf succeeds even if a failing substitution feeds its arg.
           # From: PR #1503
           build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
           printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
@@ -327,10 +306,8 @@ jobs:
         with:
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
       - name: Check SPDX header on this PR's changed files (AG-HDR-008)
-        # What: Diff-scoped SPDX header check (AG-HDR-008) on this PR's changed files only, run inside the
-        # pinned build-tools image.
-        # Why: The repo-wide check above is already a hard gate; this step exists for PR-specific error
-        # attribution and to keep a self-hosted runner's stale host tooling from diverging from the toolchain.
+        # What: diff-scoped SPDX header check (AG-HDR-008) on PR-changed files.
+        # Why: repo-wide check is a hard gate; this is PR-specific attribution.
         # From: Issue #1510 | PR #1511
         if: github.event_name == 'pull_request'
         env:
@@ -358,8 +335,8 @@ jobs:
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   compose-healthchecks:
-    # What: Cheap hygiene gate: scans docker-compose files for healthcheck configuration.
-    # Why: Plain bash/grep script with no Docker/build-tools dependency, so it runs on the light tier.
+    # What: cheap hygiene gate: scans compose files for healthcheck config.
+    # Why: plain bash/grep, no Docker dependency; runs on the light tier.
     # From: PR #1249
     name: compose healthchecks
     runs-on: [self-hosted, linux, lancache, lancache-light]
@@ -379,13 +356,13 @@ jobs:
         run: |
           set -uo pipefail
           d="${RUNNER_WORKSPACE}/.ckt.lock"
-          for i in 1 2 3 4 5 6; do
+          for _ in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
             s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
-            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
           echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
@@ -415,8 +392,8 @@ jobs:
     name: PR template validation
     if: github.event_name == 'pull_request'
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # What: 15-minute timeout, the same floor detect-changes above uses; real runs are 8-12s.
-    # Why: A round, generous bound so a future hang still fails fast rather than a tight, scaled value.
+    # What: 15-min timeout, same floor as detect-changes; runs 8-12s.
+    # Why: generous bound so a future hang still fails fast, not scaled.
     # From: PR #1218
     timeout-minutes: 15
     permissions:
@@ -429,13 +406,13 @@ jobs:
         run: |
           set -uo pipefail
           d="${RUNNER_WORKSPACE}/.ckt.lock"
-          for i in 1 2 3 4 5 6; do
+          for _ in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
             s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
-            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
           echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
@@ -454,14 +431,13 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_DRAFT: ${{ github.event.pull_request.draft }}
           # What: PR author, used for the dependabot[bot] exemption.
-          # Why: validate-pr-template.sh skips template-section checks for Dependabot's own auto-PRs.
+          # Why: validate-pr-template.sh skips checks for Dependabot auto-PRs.
           # From: PR #903
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
-          # What: Fetch PR body live via `gh pr view` (not the webhook payload, which can lag); the stderr
-          # capture and byte-count notice below are TEMPORARY diagnostics.
-          # Why: To be removed once the 2026-07-16 empty-body-with-no-gh-error incident is fully root-caused.
+          # What: fetches PR body live via gh pr view, not the webhook payload.
+          # Why: temporary diagnostic for the 2026-07-16 empty-body incident.
           # From: PR #903
           gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body -q .body > /tmp/pr-body-live.txt 2> /tmp/pr-body-live.stderr || {
             echo "::error::gh pr view failed, exit code $?"
@@ -480,15 +456,13 @@ jobs:
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   pr-template-check-hosted:
-    # What: GitHub-hosted fallback for pr-template-check; LAN-independent, but its validation step still
-    # fetches the PR body live via `gh pr view` (needs GH_TOKEN, pull-requests:read).
-    # Why: LAN-independence is unrelated to the live API call, so don't strip that access assuming this job
-    # reads only the webhook snapshot.
+    # What: hosted fallback for pr-template-check; still fetches PR body live.
+    # Why: LAN-independence is unrelated to the live API call; keep both.
     # From: docs/ci-github-hosted-fallback-decision.md
     name: PR template validation (GitHub-hosted fallback)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    # What: 15-minute timeout, same floor as the self-hosted equivalent above; real runs are 5-7s.
+    # What: 15-min timeout, same floor as self-hosted twin; runs 5-7s.
     # Why: A round, generous bound so a future hang still fails fast.
     # From: PR #1218
     timeout-minutes: 15
@@ -501,15 +475,15 @@ jobs:
         run: |
           echo "::notice::Running PR template validation on GitHub-hosted runner as fallback for non-LAN-dependent linting."
       - name: Validate PR template completeness
-        # What: Same live `gh pr view` fetch as the primary pr-template-check job's identical step.
-        # Why: See that job's own comment for why a live fetch is used instead of the webhook payload.
+        # What: same live gh pr view fetch as pr-template-check.
+        # Why: see that job's comment for why a live fetch is used.
         # From: PR #903
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_DRAFT: ${{ github.event.pull_request.draft }}
           # What: PR author, used for the dependabot[bot] exemption.
-          # Why: validate-pr-template.sh skips template-section checks for Dependabot's own auto-PRs.
+          # Why: validate-pr-template.sh skips checks for Dependabot auto-PRs.
           # From: PR #903
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
@@ -526,8 +500,8 @@ jobs:
     if: github.event_name == 'pull_request'
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # What: 15-minute timeout, same floor as detect-changes above; real runs are 8-12s.
-    # Why: A round, generous bound so a future hang still fails fast rather than a tight, scaled value.
+    # What: 15-min timeout, same floor as detect-changes; runs 8-12s.
+    # Why: generous bound so a future hang still fails fast, not scaled.
     # From: PR #1218
     timeout-minutes: 15
     permissions:
@@ -542,13 +516,13 @@ jobs:
         run: |
           set -uo pipefail
           d="${RUNNER_WORKSPACE}/.ckt.lock"
-          for i in 1 2 3 4 5 6; do
+          for _ in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
             s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
-            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
           echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
@@ -617,7 +591,7 @@ jobs:
     name: PR tracking metadata (labels/milestone/project) (GitHub-hosted fallback)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    # What: 15-minute timeout; real runs are up to ~1 min, slower than the self-hosted twin.
+    # What: 15-min timeout; runs up to ~1min, slower than self-hosted twin.
     # Why: This job cannot reuse validate-compose's already-selected build-tools image.
     # From: PR #1218
     timeout-minutes: 15
@@ -636,9 +610,7 @@ jobs:
         run: |
           set -euo pipefail
           # What: assigns the resolved image to a local before printf.
-          # Why: printf's own exit status stays 0 even if a command
-          #   substitution inside its argument fails, so `set -e` cannot
-          #   catch a failure embedded there.
+          # Why: printf succeeds even if a failing substitution feeds its arg.
           # From: PR #1503
           build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
           printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
@@ -692,8 +664,8 @@ jobs:
     if: github.event_name == 'pull_request'
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # What: 15-minute timeout, same floor as detect-changes above; real runs are 7-10s.
-    # Why: A round, generous bound so a future hang still fails fast rather than a tight, scaled value.
+    # What: 15-min timeout, same floor as detect-changes; runs 7-10s.
+    # Why: generous bound so a future hang still fails fast, not scaled.
     # From: PR #1218
     timeout-minutes: 15
     permissions:
@@ -708,13 +680,13 @@ jobs:
         run: |
           set -uo pipefail
           d="${RUNNER_WORKSPACE}/.ckt.lock"
-          for i in 1 2 3 4 5 6; do
+          for _ in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
             s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
-            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
           echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
@@ -748,7 +720,7 @@ jobs:
     name: PR title Conventional-Commit lint (GitHub-hosted fallback)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    # What: 15-minute timeout; real runs are up to ~50s (build-tools image resolution on ubuntu-latest).
+    # What: 15-min timeout; runs up to ~50s (image resolution, ubuntu-latest).
     # Why: A round, generous bound so a future hang still fails fast.
     # From: PR #1218
     timeout-minutes: 15
@@ -767,9 +739,7 @@ jobs:
         run: |
           set -euo pipefail
           # What: assigns the resolved image to a local before printf.
-          # Why: printf's own exit status stays 0 even if a command
-          #   substitution inside its argument fails, so `set -e` cannot
-          #   catch a failure embedded there.
+          # Why: printf succeeds even if a failing substitution feeds its arg.
           # From: PR #1503
           build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
           printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
@@ -789,7 +759,7 @@ jobs:
   file-headers-hosted:
     name: file purpose headers (GitHub-hosted fallback)
     runs-on: ubuntu-latest
-    # What: 15-minute timeout, same floor as detect-changes above; real runs are 5-8s.
+    # What: 15-min timeout, same floor as detect-changes; runs 5-8s.
     # Why: A round, generous bound so a future hang still fails fast.
     # From: PR #1218
     timeout-minutes: 15
@@ -799,9 +769,7 @@ jobs:
         run: |
           set -euo pipefail
           # What: assigns the resolved image to a local before printf.
-          # Why: printf's own exit status stays 0 even if a command
-          #   substitution inside its argument fails, so `set -e` cannot
-          #   catch a failure embedded there.
+          # Why: printf succeeds even if a failing substitution feeds its arg.
           # From: PR #1503
           build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
           printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
@@ -840,8 +808,7 @@ jobs:
   compose-healthchecks-hosted:
     name: compose healthchecks (GitHub-hosted fallback)
     runs-on: ubuntu-latest
-    # What: 15-minute timeout, same floor as detect-changes above; real runs are the same order of
-    # magnitude as file-headers-hosted.
+    # What: 15-min timeout, same order as file-headers-hosted.
     # Why: A round, generous bound so a future hang still fails fast.
     # From: PR #1218
     timeout-minutes: 15
@@ -896,13 +863,13 @@ jobs:
         run: |
           set -uo pipefail
           d="${RUNNER_WORKSPACE}/.ckt.lock"
-          for i in 1 2 3 4 5 6; do
+          for _ in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
             s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
-            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
           echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
@@ -1046,7 +1013,7 @@ jobs:
     name: language policy
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # What: 15-minute timeout, same floor as detect-changes above; real runs are a few seconds.
+    # What: 15-min timeout, same floor as detect-changes; runs a few seconds.
     # Why: A round, generous bound so a future hang still fails fast.
     # From: PR #1218
     timeout-minutes: 15
@@ -1067,13 +1034,13 @@ jobs:
         run: |
           set -uo pipefail
           d="${RUNNER_WORKSPACE}/.ckt.lock"
-          for i in 1 2 3 4 5 6; do
+          for _ in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
             s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
-            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
           echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
@@ -1123,14 +1090,12 @@ jobs:
   # ci_scope_policy-hosted fallback would just queue indefinitely on those same self-hosted-only dependencies.
   # From: docs/ci-github-hosted-fallback-decision.md
   shellcheck:
-    # What: ShellCheck/ActionLint run inside the same build-tools image validate-compose selected.
-    # Why: Keeps linting independent from whatever happens to be installed on the runner host.
+    # What: lints inside the same build-tools image validate-compose selected.
+    # Why: keeps linting independent of whatever the runner host has installed.
     # From: PR #1383
     #
-    # What: DO NOT RENAME this job's key (it has no `name:`, so `shellcheck` IS the required-status-check
-    # context string current_dev's branch protection names literally).
-    # Why: Renaming it would silently create a new, never-satisfied required check with the old name still
-    # expected forever, reproducing the same bug class again.
+    # What: DO NOT RENAME this key (no name:, shellcheck IS the required check).
+    # Why: a rename creates a silently-unsatisfied new required check.
     # From: Issue #1245
     needs: [validate-compose, detect-changes]
     # What: Self-skips on a pull_request whose entire diff is docs-only; stays unconditional on push.
@@ -1179,13 +1144,13 @@ jobs:
         run: |
           set -uo pipefail
           d="${RUNNER_WORKSPACE}/.ckt.lock"
-          for i in 1 2 3 4 5 6; do
+          for _ in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
             s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
-            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
           echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
@@ -1234,9 +1199,7 @@ jobs:
         run: |
           set -euo pipefail
           # What: assigns the resolved image to a local before printf.
-          # Why: printf's own exit status stays 0 even if a command
-          #   substitution inside its argument fails, so `set -e` cannot
-          #   catch a failure embedded there.
+          # Why: printf succeeds even if a failing substitution feeds its arg.
           # From: PR #1503
           build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
           printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
@@ -1287,13 +1250,13 @@ jobs:
         run: |
           set -uo pipefail
           d="${RUNNER_WORKSPACE}/.ckt.lock"
-          for i in 1 2 3 4 5 6; do
+          for _ in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
             s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
-            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
           echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
@@ -2045,7 +2008,8 @@ jobs:
             || { echo "::error::Release notes must run after channel promotion."; exit 1; }
 
           # What: Only prerelease is protected here, not draft.
-          # Why: prerelease/stable is a real maintainer policy call PATCH must never silently flip, but a draft has no legitimate "leave it hidden forever" case once this job runs, so forcing draft:false there is required and must not trip this guard.
+          # Why: prerelease/stable is a maintainer policy call; draft:false is
+          # always safe to force and must not trip this guard.
           # From: Issue #1095 | PR #1532
           if awk '
             /if \[ "\$status" = "200" \]/ { in_patch=1 }
@@ -2893,8 +2857,6 @@ jobs:
               ;;
           esac
 
-  # Derive a per-run validation subnet candidate; actual collision-safe reservation still happens in the stack-start helper.
-  # This job stays unconditional because full-setup validation also runs on push.
       - name: Release per-workspace checkout lock (self-hosted reuse hardening)
         if: always()
         run: |
@@ -2903,6 +2865,8 @@ jobs:
           m="$(cat "$d/m" 2>/dev/null || true)"
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
+  # What: derives a per-run validation subnet candidate (unconditional job).
+  # Why: full-setup validation also runs on push, not just pull_request.
   compute-validation-network:
     name: derive per-run validation subnet
     runs-on: [self-hosted, linux, lancache, lancache-light]
@@ -2928,13 +2892,13 @@ jobs:
         run: |
           set -uo pipefail
           d="${RUNNER_WORKSPACE}/.ckt.lock"
-          for i in 1 2 3 4 5 6; do
+          for _ in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
             s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
-            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
           echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
@@ -3011,13 +2975,13 @@ jobs:
         run: |
           set -uo pipefail
           d="${RUNNER_WORKSPACE}/.ckt.lock"
-          for i in 1 2 3 4 5 6; do
+          for _ in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
             s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
-            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
           echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
@@ -3059,7 +3023,7 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           # What: reads the single declared, lowercased GHCR owner/repo.
-          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # Why: github.repository may be mixed-case; GHCR needs lowercase.
           # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
@@ -3148,7 +3112,7 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           # What: reads the single declared, lowercased GHCR owner/repo.
-          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # Why: github.repository may be mixed-case; GHCR needs lowercase.
           # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
@@ -3260,7 +3224,7 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           # What: reads the single declared, lowercased GHCR owner/repo.
-          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # Why: github.repository may be mixed-case; GHCR needs lowercase.
           # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
@@ -3368,7 +3332,7 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           # What: builds the image ref from the single declared GHCR owner/repo.
-          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # Why: github.repository may be mixed-case; GHCR needs lowercase.
           # From: Issue #1095 (G1) | PR #1503
           FULL_SETUP_CLIENT_TOOLS_IMAGE="ghcr.io/$(dmeta_ghcr_repo)/build-tools:${CHANNEL_TAG}"
           export FULL_SETUP_CLIENT_TOOLS_IMAGE
@@ -3461,13 +3425,13 @@ jobs:
         run: |
           set -uo pipefail
           d="${RUNNER_WORKSPACE}/.ckt.lock"
-          for i in 1 2 3 4 5 6; do
+          for _ in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
             s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
-            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
           echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
@@ -3562,13 +3526,13 @@ jobs:
         run: |
           set -uo pipefail
           d="${RUNNER_WORKSPACE}/.ckt.lock"
-          for i in 1 2 3 4 5 6; do
+          for _ in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
             s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
-            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
           echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
@@ -3664,13 +3628,13 @@ jobs:
         run: |
           set -uo pipefail
           d="${RUNNER_WORKSPACE}/.ckt.lock"
-          for i in 1 2 3 4 5 6; do
+          for _ in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
             s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
-            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
           echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
@@ -3785,13 +3749,13 @@ jobs:
         run: |
           set -uo pipefail
           d="${RUNNER_WORKSPACE}/.ckt.lock"
-          for i in 1 2 3 4 5 6; do
+          for _ in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
             s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
-            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
           echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
@@ -3851,8 +3815,8 @@ jobs:
     # dns_rust_quality's comment above for the full reasoning.
     name: test (ui)
     needs: [validate-compose, ui_rust_quality, detect-changes]
-    # What: Path-scoped on BOTH pull_request and push, identical to dns_test's own if: above.
-    # Why: Same detect-changes/AG-WF-004 known-good-result reuse and ci_scope_policy tolerance as dns_test.
+    # What: path-scoped same as dns_test; identical if: condition.
+    # Why: reuses dns_test's known-good-result/AG-WF-004 tolerance.
     # From: Issue #1095 | PR #1532
     if: >-
       ${{
@@ -3892,13 +3856,13 @@ jobs:
         run: |
           set -uo pipefail
           d="${RUNNER_WORKSPACE}/.ckt.lock"
-          for i in 1 2 3 4 5 6; do
+          for _ in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
             s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
-            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
           echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
@@ -4000,13 +3964,13 @@ jobs:
         run: |
           set -uo pipefail
           d="${RUNNER_WORKSPACE}/.ckt.lock"
-          for i in 1 2 3 4 5 6; do
+          for _ in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
             s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
-            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
           echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
@@ -4222,13 +4186,13 @@ jobs:
         run: |
           set -uo pipefail
           d="${RUNNER_WORKSPACE}/.ckt.lock"
-          for i in 1 2 3 4 5 6; do
+          for _ in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
             s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
-            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
           echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
@@ -4391,13 +4355,13 @@ jobs:
         run: |
           set -uo pipefail
           d="${RUNNER_WORKSPACE}/.ckt.lock"
-          for i in 1 2 3 4 5 6; do
+          for _ in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
             s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
-            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
           echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
@@ -4480,8 +4444,8 @@ jobs:
     # unchanged, so a prior run's audit result already stands).
     name: cargo-audit (dns/nats-subscriber)
     needs: [validate-compose, detect-changes]
-    # What: Path-scoped on BOTH pull_request and push, identical to dns_test's own if: above.
-    # Why: Same detect-changes/AG-WF-004 known-good-result reuse and ci_scope_policy tolerance as dns_test.
+    # What: path-scoped same as dns_test; identical if: condition.
+    # Why: reuses dns_test's known-good-result/AG-WF-004 tolerance.
     # From: Issue #1095 | PR #1532
     if: >-
       ${{
@@ -4523,13 +4487,13 @@ jobs:
         run: |
           set -uo pipefail
           d="${RUNNER_WORKSPACE}/.ckt.lock"
-          for i in 1 2 3 4 5 6; do
+          for _ in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
             s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
-            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
           echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
@@ -4583,8 +4547,8 @@ jobs:
     # dns_rust_quality's comment above for the full reasoning.
     name: cargo-audit (ui)
     needs: [validate-compose, detect-changes]
-    # What: Path-scoped on BOTH pull_request and push, identical to dns_test's own if: above.
-    # Why: Same detect-changes/AG-WF-004 known-good-result reuse and ci_scope_policy tolerance as dns_test.
+    # What: path-scoped same as dns_test; identical if: condition.
+    # Why: reuses dns_test's known-good-result/AG-WF-004 tolerance.
     # From: Issue #1095 | PR #1532
     if: >-
       ${{
@@ -4624,13 +4588,13 @@ jobs:
         run: |
           set -uo pipefail
           d="${RUNNER_WORKSPACE}/.ckt.lock"
-          for i in 1 2 3 4 5 6; do
+          for _ in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
             s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
-            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
           echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
@@ -4685,8 +4649,8 @@ jobs:
     # dns_rust_quality's comment above for the full reasoning.
     name: cargo-audit (watchdog)
     needs: [validate-compose, detect-changes]
-    # What: Path-scoped on BOTH pull_request and push, identical to dns_test's own if: above.
-    # Why: Same detect-changes/AG-WF-004 known-good-result reuse and ci_scope_policy tolerance as dns_test.
+    # What: path-scoped same as dns_test; identical if: condition.
+    # Why: reuses dns_test's known-good-result/AG-WF-004 tolerance.
     # From: Issue #1095 | PR #1532
     if: >-
       ${{
@@ -4726,13 +4690,13 @@ jobs:
         run: |
           set -uo pipefail
           d="${RUNNER_WORKSPACE}/.ckt.lock"
-          for i in 1 2 3 4 5 6; do
+          for _ in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
             s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
-            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
           echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
@@ -4821,13 +4785,13 @@ jobs:
         run: |
           set -uo pipefail
           d="${RUNNER_WORKSPACE}/.ckt.lock"
-          for i in 1 2 3 4 5 6; do
+          for _ in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
             s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
-            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
           echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
@@ -5036,17 +5000,11 @@ jobs:
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   container-scan:
-    # What: Never runs on pull_request (PRs get their own Trivy scan via build's step); on push/tag scans
-    # either a changed service's just-pushed digest or an unchanged service's already-published channel image.
-    # Why: An earlier throwaway rebuild-then-scan stamped a fresh `created` timestamp so its digest never
-    # matched what was actually pushed; removed once build/build-arm64's own pushed-digest scan covered it.
-    # From: PR #1339
-    #
-    # What: Requires validate-compose/push-supersession-check to show plain `success`, but tolerates
-    # determine-push-reuse-scope showing `success` or `skipped`.
-    # Why: determine-push-reuse-scope only runs on a branch push, so GitHub's implicit success() would
-    # otherwise treat its legitimate skip on other events as a failure, silently skipping this job too.
-    # From: Issue #532
+    # What: skips on pull_request; needs validate-compose/push-super-
+    # session success, tolerates determine-push-reuse-scope skipped.
+    # Why: build's own scan covers PRs; that skip is legit off-push,
+    # not a failure -- also avoids a stale rebuild-then-scan digest.
+    # From: Issue #532 | PR #1339
     if: >-
       ${{
         always() &&
@@ -5162,13 +5120,13 @@ jobs:
         run: |
           set -uo pipefail
           d="${RUNNER_WORKSPACE}/.ckt.lock"
-          for i in 1 2 3 4 5 6; do
+          for _ in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
             s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
-            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
           echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
@@ -5283,7 +5241,7 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           # What: reads the single declared, lowercased GHCR owner/repo.
-          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # Why: github.repository may be mixed-case; GHCR needs lowercase.
           # From: Issue #1095 (G1) | PR #1503
           repository="$(dmeta_ghcr_repo)"
           case "$MATRIX_SERVICE" in
@@ -5455,7 +5413,7 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           # What: reads the single declared, lowercased GHCR owner/repo.
-          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # Why: github.repository may be mixed-case; GHCR needs lowercase.
           # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
@@ -5779,13 +5737,13 @@ jobs:
         run: |
           set -uo pipefail
           d="${RUNNER_WORKSPACE}/.ckt.lock"
-          for i in 1 2 3 4 5 6; do
+          for _ in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
             s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
-            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
           echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
@@ -5963,7 +5921,7 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           # What: reads the single declared, lowercased GHCR owner/repo.
-          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # Why: github.repository may be mixed-case; GHCR needs lowercase.
           # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
@@ -5992,8 +5950,7 @@ jobs:
           pinned_ref="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}@${pinned_digest}"
 
           # What: uses the full commit SHA directly, no local truncation.
-          # Why: short-SHA tags are banned outright -- a blind local slice risked
-          #   an unbounded collision as this project's commit volume grew.
+          # Why: short-SHA tags are banned; a local slice risks collisions.
           # From: Issue #1095 (G2) | PR #1503
           target="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}:sha-${COMMIT_SHA}-amd64"
 
@@ -6045,13 +6002,12 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           # What: uses the full commit SHA directly, no local truncation.
-          # Why: short-SHA tags are banned outright -- a blind local slice risked
-          #   an unbounded collision as this project's commit volume grew.
+          # Why: short-SHA tags are banned; a local slice risks collisions.
           # From: Issue #1095 (G2) | PR #1503
           tag="pr-${PR_NUMBER}-sha-${BUILD_SHA}-amd64"
           echo "::notice::This PR's linux/amd64 staging tag for $MATRIX_SERVICE is $tag."
           # What: reads the single declared, lowercased GHCR owner/repo.
-          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # Why: github.repository may be mixed-case; GHCR needs lowercase.
           # From: Issue #1095 (G1) | PR #1503
           repository="$(dmeta_ghcr_repo)"
           {
@@ -6818,7 +6774,7 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           # What: reads the single declared, lowercased GHCR owner/repo.
-          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # Why: github.repository may be mixed-case; GHCR needs lowercase.
           # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
@@ -6847,8 +6803,7 @@ jobs:
           pinned_ref="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}@${pinned_digest}"
 
           # What: uses the full commit SHA directly, no local truncation.
-          # Why: short-SHA tags are banned outright -- a blind local slice risked
-          #   an unbounded collision as this project's commit volume grew.
+          # Why: short-SHA tags are banned; a local slice risks collisions.
           # From: Issue #1095 (G2) | PR #1503
           target="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}:sha-${COMMIT_SHA}-arm64"
 
@@ -6897,13 +6852,12 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           # What: uses the full commit SHA directly, no local truncation.
-          # Why: short-SHA tags are banned outright -- a blind local slice risked
-          #   an unbounded collision as this project's commit volume grew.
+          # Why: short-SHA tags are banned; a local slice risks collisions.
           # From: Issue #1095 (G2) | PR #1503
           tag="pr-${PR_NUMBER}-sha-${BUILD_SHA}-arm64"
           echo "::notice::This PR's linux/arm64 staging tag for $MATRIX_SERVICE is $tag."
           # What: reads the single declared, lowercased GHCR owner/repo.
-          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # Why: github.repository may be mixed-case; GHCR needs lowercase.
           # From: Issue #1095 (G1) | PR #1503
           repository="$(dmeta_ghcr_repo)"
           {
@@ -7187,13 +7141,13 @@ jobs:
         run: |
           set -uo pipefail
           d="${RUNNER_WORKSPACE}/.ckt.lock"
-          for i in 1 2 3 4 5 6; do
+          for _ in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
             s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
-            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
           echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
@@ -7255,13 +7209,12 @@ jobs:
           # From: Issue #1095 | PR #1619
           read -ra services <<< "$CI_BUILD_SERVICES"
           # What: reads the single declared, lowercased GHCR owner/repo.
-          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # Why: github.repository may be mixed-case; GHCR needs lowercase.
           # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
           # What: uses the full commit SHA directly, no local truncation.
-          # Why: short-SHA tags are banned outright -- a blind local slice risked
-          #   an unbounded collision as this project's commit volume grew.
+          # Why: short-SHA tags are banned; a local slice risks collisions.
           # From: Issue #1095 (G2) | PR #1503
           source_tag="sha-${COMMIT_SHA}"
           declare -A merged_digests=()
@@ -7422,13 +7375,12 @@ jobs:
 
           read -ra services <<< "$CI_BUILD_SERVICES"
           # What: reads the single declared, lowercased GHCR owner/repo.
-          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # Why: github.repository may be mixed-case; GHCR needs lowercase.
           # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
           # What: uses the full commit SHA directly, no local truncation.
-          # Why: short-SHA tags are banned outright -- a blind local slice risked
-          #   an unbounded collision as this project's commit volume grew.
+          # Why: short-SHA tags are banned; a local slice risks collisions.
           # From: Issue #1095 (G2) | PR #1503
           source_tag="pr-${PR_NUMBER}-sha-${BUILD_SHA}"
 
@@ -7715,13 +7667,13 @@ jobs:
         run: |
           set -uo pipefail
           d="${RUNNER_WORKSPACE}/.ckt.lock"
-          for i in 1 2 3 4 5 6; do
+          for _ in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
             s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
-            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
           echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
@@ -7803,13 +7755,12 @@ jobs:
 
           read -ra services <<< "$CI_BUILD_SERVICES"
           # What: reads the single declared, lowercased GHCR owner/repo.
-          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # Why: github.repository may be mixed-case; GHCR needs lowercase.
           # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
           # What: uses the full commit SHA directly, no local truncation.
-          # Why: short-SHA tags are banned outright -- a blind local slice risked
-          #   an unbounded collision as this project's commit volume grew.
+          # Why: short-SHA tags are banned; a local slice risks collisions.
           # From: Issue #1095 (G2) | PR #1503
           source_tag="sha-${COMMIT_SHA}"
           stack_pointer_image="ghcr.io/${REPOSITORY}/stack@${STACK_DIGEST}"
@@ -8017,7 +7968,7 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           # What: reads the single declared, lowercased GHCR owner/repo.
-          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # Why: github.repository may be mixed-case; GHCR needs lowercase.
           # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
@@ -8172,13 +8123,13 @@ jobs:
         run: |
           set -uo pipefail
           d="${RUNNER_WORKSPACE}/.ckt.lock"
-          for i in 1 2 3 4 5 6; do
+          for _ in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
             s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
-            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
           echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
@@ -8221,7 +8172,7 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           # What: reads the single declared, lowercased GHCR owner/repo.
-          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # Why: github.repository may be mixed-case; GHCR needs lowercase.
           # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
@@ -8258,13 +8209,12 @@ jobs:
 
           read -ra services <<< "$CI_BUILD_SERVICES"
           # What: reads the single declared, lowercased GHCR owner/repo.
-          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # Why: github.repository may be mixed-case; GHCR needs lowercase.
           # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
           # What: uses the full commit SHA directly, no local truncation.
-          # Why: short-SHA tags are banned outright -- a blind local slice risked
-          #   an unbounded collision as this project's commit volume grew.
+          # Why: short-SHA tags are banned; a local slice risks collisions.
           # From: Issue #1095 (G2) | PR #1503
           source_tag="sha-${COMMIT_SHA}"
           expected_prerelease=false
@@ -8482,7 +8432,7 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           # What: reads the single declared, lowercased GHCR owner/repo.
-          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # Why: github.repository may be mixed-case; GHCR needs lowercase.
           # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
@@ -8587,13 +8537,13 @@ jobs:
         run: |
           set -uo pipefail
           d="${RUNNER_WORKSPACE}/.ckt.lock"
-          for i in 1 2 3 4 5 6; do
+          for _ in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
             s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
-            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
           echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
@@ -8632,7 +8582,7 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           # What: reads the single declared, lowercased GHCR owner/repo.
-          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # Why: github.repository may be mixed-case; GHCR needs lowercase.
           # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
@@ -8698,7 +8648,7 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           # What: reads the single declared, lowercased GHCR owner/repo.
-          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # Why: github.repository may be mixed-case; GHCR needs lowercase.
           # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
