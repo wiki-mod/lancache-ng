@@ -706,10 +706,10 @@ EOF
 # Why: a pure string check -- catches an accidental column rename/drop
 # without needing a live sqlite3 invocation.
 # From: Issue #1585.
-@test "cache schema declares the version_cache table with its primary key" {
+@test "cache schema declares the version_cache_v2 table with its primary key" {
   run sra_cache_schema_sql
   [ "$status" -eq 0 ]
-  [[ "$output" == *"CREATE TABLE IF NOT EXISTS version_cache"* ]]
+  [[ "$output" == *"CREATE TABLE IF NOT EXISTS version_cache_v2"* ]]
   [[ "$output" == *"PRIMARY KEY (package, version_id, history_fingerprint)"* ]]
   [[ "$output" == *"history_fingerprint TEXT NOT NULL"* ]]
 }
@@ -748,6 +748,29 @@ EOF
   [[ "$output" == *"$digest"* ]]
   [[ "$output" == *"sha-abc1234"* ]]
   [[ "$output" == *"rank:7"* ]]
+}
+
+# What: an inherited old-schema (pre-Issue-#1095) cache db does not break a
+# new-schema write.
+# Why: a restored actions/cache blob can predate the version_cache_v2
+# rename; CREATE TABLE IF NOT EXISTS must not be fooled by an old table of
+# the same old name, and a real deployment must self-heal, not warn forever.
+# From: Issue #1095.
+@test "cache write self-heals against an inherited old-schema database" {
+  command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not available on this host"
+  db_path="$tmp_dir/cache.db"
+  rows_file="$tmp_dir/rows.tsv"
+  sqlite3 "$db_path" "CREATE TABLE IF NOT EXISTS version_cache (package TEXT NOT NULL, version_id INTEGER NOT NULL, digest TEXT NOT NULL, tags TEXT NOT NULL, resolution TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (package, version_id));"
+
+  fingerprint="origin/current_dev@$(printf 'c%.0s' {1..40})"
+  printf '42\tsha256:%s\tsha-abc1234\trank:7\n' "$(printf 'a%.0s' {1..64})" >"$rows_file"
+  run sra_cache_init "$db_path"
+  [ "$status" -eq 0 ]
+  run sra_cache_write_package "$db_path" "proxy" "$rows_file" "$fingerprint"
+  [ "$status" -eq 0 ]
+  run sra_cache_read_package "$db_path" "proxy" "$fingerprint"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"sha-abc1234"* ]]
 }
 
 # What: a cache write with no history fingerprint argument fails closed.

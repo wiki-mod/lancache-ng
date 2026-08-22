@@ -511,9 +511,15 @@ sra_budget_decision() {
 # share this cache file; keying by fingerprint keeps each caller's rows
 # independent instead of one INSERT OR REPLACE evicting the other's.
 # From: Issue #1095.
+#
+# What: table renamed version_cache -> version_cache_v2 for this change.
+# Why: real cache blobs already exist under the old schema (no
+# history_fingerprint column); CREATE TABLE IF NOT EXISTS is a no-op
+# against them, so reusing the old name would silently break every write.
+# From: Issue #1095.
 sra_cache_schema_sql() {
   cat <<'SQL'
-CREATE TABLE IF NOT EXISTS version_cache (
+CREATE TABLE IF NOT EXISTS version_cache_v2 (
   package TEXT NOT NULL,
   version_id INTEGER NOT NULL,
   digest TEXT NOT NULL,
@@ -577,7 +583,7 @@ sra_cache_read_package() {
   command -v sqlite3 >/dev/null 2>&1 || return 1
   [[ -f "$db_path" ]] || return 1
   sqlite3 -separator "$(printf '\t')" "$db_path" \
-    "SELECT version_id, digest, tags, resolution FROM version_cache WHERE package = '$(sra_sql_quote "$package")' AND history_fingerprint = '$(sra_sql_quote "$history_fingerprint")';"
+    "SELECT version_id, digest, tags, resolution FROM version_cache_v2 WHERE package = '$(sra_sql_quote "$package")' AND history_fingerprint = '$(sra_sql_quote "$history_fingerprint")';"
 }
 
 # What: bulk-writes one package's updated cache rows in a single transaction.
@@ -600,7 +606,7 @@ sra_cache_write_package() {
     printf 'BEGIN TRANSACTION;\n'
     while IFS=$'\t' read -r version_id digest tags resolution; do
       [[ "$version_id" =~ ^[0-9]+$ ]] || continue
-      printf "INSERT OR REPLACE INTO version_cache (package, version_id, digest, tags, resolution, history_fingerprint, updated_at) VALUES ('%s', %s, '%s', '%s', '%s', '%s', '%s');\n" \
+      printf "INSERT OR REPLACE INTO version_cache_v2 (package, version_id, digest, tags, resolution, history_fingerprint, updated_at) VALUES ('%s', %s, '%s', '%s', '%s', '%s', '%s');\n" \
         "$(sra_sql_quote "$package")" "$version_id" "$(sra_sql_quote "$digest")" "$(sra_sql_quote "$tags")" "$(sra_sql_quote "$resolution")" "$(sra_sql_quote "$history_fingerprint")" "$now"
     done <"$rows_file"
     printf 'COMMIT;\n'
