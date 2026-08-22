@@ -587,7 +587,7 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     # What: 15-min timeout; runs up to ~1min, slower than self-hosted twin.
-    # Why: This job cannot reuse validate-compose's already-selected build-tools image.
+    # Why: cannot reuse validate-compose's already-selected image.
     # From: PR #1218
     timeout-minutes: 15
     permissions:
@@ -764,17 +764,15 @@ jobs:
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running file-headers check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      # What: Same composite action as the self-hosted job, so runner fallback cannot silently weaken
-      # repository-hygiene coverage.
-      # Why: The action metadata is the single source of truth for its checks, avoiding a count that
-      # can drift here.
+      # What: same composite action as the self-hosted job.
+      # Why: the action metadata is the single source of truth for its checks.
       # From: PR #1467
       - uses: ./.github/actions/file-headers-check
         with:
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
       - name: Check SPDX header on this PR's changed files (AG-HDR-008)
-        # What: Mirrors the self-hosted file-headers job's own step above exactly.
-        # Why: Kept in parity so a fallback run enforces the identical PR-diff header check.
+        # What: mirrors the self-hosted file-headers job's step exactly.
+        # Why: keeps parity: same PR-diff header check either way.
         # From: Issue #1510 | PR #1511
         if: github.event_name == 'pull_request'
         env:
@@ -805,27 +803,24 @@ jobs:
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running compose-healthchecks check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      # What: Same composite action as the self-hosted compose-healthchecks job above.
-      # Why: Keeps the hosted fallback in parity with its self-hosted twin's check.
+      # What: same composite action as compose-healthchecks.
+      # Why: keeps the hosted fallback in parity with its twin.
       # From: PR #1249
       - uses: ./.github/actions/compose-healthchecks-check
 
   line-endings:
-    # What: Checks Unix line-endings; also runs governance guardrails and the CHANGELOG.md direct-edit
-    # warning, relocated here so they run on every PR regardless of diff scope.
-    # Why: DO NOT RENAME -- `name: line endings` is the required-status-check string in branch protection;
-    # renaming it silently creates a new, never-satisfied check while the old name stays expected forever.
+    # What: DO NOT RENAME -- line endings IS the required-check string.
+    # Why: a rename creates a silently-unsatisfied new required check.
     # From: PR #602
     name: line endings
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # What: Timeout increased from 15 to 25 minutes to budget for the relocated governance/changelog steps.
-    # Why: Live `gh pr view` calls plus git fetches add overhead beyond the 7-11s line-ending-only time.
+    # What: 25-min timeout, up from 15, for the relocated governance steps.
+    # Why: live gh pr view calls add overhead beyond line-ending-only time.
     # From: PR #1325
     timeout-minutes: 25
-    # What: Job-level concurrency with cancel-in-progress: pull_request-only.
-    # Why: On push this job is a hard gate on the channel publish path, so cancelling it would starve the
-    # channel; on a PR, a cancelled result cleanly skips the downstream build jobs instead.
+    # What: job-level concurrency, cancel-in-progress: pull_request-only.
+    # Why: on push this is a hard gate; cancelling would starve the channel.
     # From: PR #915
     concurrency:
       group: >-
@@ -837,9 +832,8 @@ jobs:
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
-    # What: Declares pull-requests:read for governance guardrails (PR title/body fetch via gh pr view).
-    # Why: contents:read is restated too, since job-level permissions replace rather than extend the
-    # workflow-level defaults.
+    # What: declares pull-requests:read for governance guardrails.
+    # Why: job-level permissions replace, not extend, the workflow default.
     # From: PR #1325
     permissions:
       contents: read
@@ -881,16 +875,15 @@ jobs:
             timeout --kill-after=30 --signal=KILL 300 \
             bash -lc 'set -euo pipefail; bash scripts/tracked/check-line-endings.sh'
 
-      # What: Governance guardrails step relocated from shellcheck.
-      # Why: shellcheck gained a docs-only self-skip, but this check must run on every PR regardless.
+      # What: governance guardrails step relocated from shellcheck.
+      # Why: shellcheck self-skips docs-only PRs; this must always run.
       # From: PR #1325
       - name: Run governance guardrails
         if: github.event_name == 'pull_request'
         env:
           GOVERNANCE_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           GOVERNANCE_BASE_REF: ${{ github.event.pull_request.base.ref }}
-          # What: no step-level GITHUB_REPOSITORY entry (the docker run flag
-          #   below still forwards it into the container).
+          # What: no step-level GITHUB_REPOSITORY (docker run forwards it).
           # Why: GITHUB_REPOSITORY is already a default Actions env var.
           # From: Issue #1095 (G1) | PR #1503
           GH_TOKEN: ${{ github.token }}
@@ -902,25 +895,22 @@ jobs:
           trap 'rm -f "$changed_files"' EXIT
           git fetch --no-tags --depth=1 origin \
             "+refs/heads/${GOVERNANCE_BASE_REF}:refs/remotes/origin/${GOVERNANCE_BASE_REF}"
-          # What: Fetches GOVERNANCE_BASE_SHA (a webhook snapshot) by exact SHA, not just the branch-tip
-          # fetch above; the two-dot diff below stays shallow-safe since base.sha is a direct parent.
-          # Why: On a long-lived PR whose base has advanced past that snapshot, the branch-tip fetch alone
-          # would leave `git cat-file -e` below hard-crashing instead of scanning the PR's real diff.
+          # What: fetches GOVERNANCE_BASE_SHA by exact SHA, not just branch-tip.
+          # Why: a long-lived PR's base may have advanced past the snapshot.
           # From: PR #1325
           git fetch --no-tags --depth=1 origin "$GOVERNANCE_BASE_SHA"
           git cat-file -e "${GOVERNANCE_BASE_SHA}^{commit}"
           git cat-file -e "${GITHUB_SHA}^{commit}"
           git diff --name-only --diff-filter=ACMRTUXB "$GOVERNANCE_BASE_SHA" "$GITHUB_SHA" > "$changed_files"
 
-          # What: Fetches PR title/body live via `gh pr view`, same pattern as pr-template-check's own fetch.
-          # Why: `github.event.pull_request.title/.body` is a webhook snapshot; a plain `gh run rerun`
-          # replays it, so an edited title/body would fail identically even once actually fixed.
+          # What: fetches PR title/body live, same pattern as pr-template-check.
+          # Why: the webhook snapshot is stale; a rerun would replay the old text.
           # From: PR #903
           governance_pr_title="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json title -q .title)"
           governance_pr_body="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body -q .body)"
 
-          # What: PR title/body passed as `-e KEY=VALUE` docker arguments below.
-          # Why: Never interpolated into a run: string, so PR-controlled content can never execute as shell code.
+          # What: PR title/body passed as -e KEY=VALUE docker arguments.
+          # Why: never interpolated into a run: string; never runs as shell.
           # From: PR #1325
           docker run --rm \
             --user "$(id -u):$(id -g)" \
@@ -933,10 +923,8 @@ jobs:
             timeout --kill-after=30 --signal=KILL 300 \
             bash scripts/tracked/check-governance-guards.sh --changed-files-file "/work/$(basename "$changed_files")"
 
-      # What: Warn-only guard flagging a PR that edits CHANGELOG.md directly (normally written only by an
-      # automated release-publish bot commit, see CONTRIBUTING.md).
-      # Why: This step can NEVER fail the job -- the script always exits 0, and the `|| true` below is a
-      # documented AG-VAL-004 fallback for a docker infra error only, not a hidden failure.
+      # What: warn-only guard for a PR editing CHANGELOG.md directly.
+      # Why: never fails the job; the script always exits 0 (AG-VAL-004).
       # From: PR #1325
       - name: Warn on direct CHANGELOG.md edits outside a release PR
         if: github.event_name == 'pull_request'
@@ -993,10 +981,8 @@ jobs:
         run: bash scripts/tracked/check-line-endings.sh
 
   language-policy:
-    # What: Enforces AG-REL-001 by asserting the ABSENCE of banned-language source files, not scanning
-    # code IN a banned language the way CodeQL's per-language analysis does.
-    # Why: After the Rust rewrite left zero Python files, CodeQL's separate Python "default setup"
-    # analysis fails every run with "could not process any code" -- a check that can never pass again.
+    # What: asserts the absence of banned-language files (AG-REL-001).
+    # Why: CodeQL's Python analysis always fails now (zero Python files left).
     # From: Issue #1158
     name: language policy
     needs: validate-compose
@@ -1072,10 +1058,8 @@ jobs:
       - name: Check for banned-language source files (AG-REL-001)
         run: bash scripts/tracked/check-language-policy.sh
 
-  # What: GitHub-hosted fallbacks are limited to cheap lint jobs (file-headers, compose-healthchecks,
-  # line-endings, language-policy, shellcheck, the pr-* checks, and watchdog_test).
-  # Why: Rust builds/scans need build-tools/sccache/distcc/credentials with no safe hosted equivalent; a
-  # ci_scope_policy-hosted fallback would just queue indefinitely on those same self-hosted-only dependencies.
+  # What: hosted fallbacks are limited to cheap lint jobs only.
+  # Why: Rust builds/scans need self-hosted-only build-tools/sccache/distcc.
   # From: docs/ci-github-hosted-fallback-decision.md
   shellcheck:
     # What: lints inside the same build-tools image validate-compose selected.
@@ -1086,9 +1070,8 @@ jobs:
     # Why: a rename creates a silently-unsatisfied new required check.
     # From: Issue #1245
     needs: [validate-compose, detect-changes]
-    # What: Self-skips on a pull_request whose entire diff is docs-only; stays unconditional on push.
-    # Why: build/build-arm64 hard-require this job's success with no path tolerance, so this is the one
-    # gate stopping the heavy pipeline on a trivial doc PR; the 2 always-needed steps moved to line-endings.
+    # What: self-skips on a docs-only pull_request; unconditional on push.
+    # Why: the only gate stopping the heavy pipeline on a trivial doc PR.
     # From: PR #1325
     if: >-
       ${{
@@ -1100,14 +1083,12 @@ jobs:
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # What: 25-minute job timeout; real full-job runs are 30-85s.
-    # Why: Must exceed the "Run ShellCheck and ActionLint" step's own 15-minute timeout below -- a tighter
-    # job-level bound would fail the job before that step's own allowance ever runs out.
+    # What: 25-min job timeout; real full-job runs are 30-85s.
+    # Why: must exceed the shellcheck/actionlint step's own 15-min timeout.
     # From: PR #1218
     timeout-minutes: 25
-    # What: Job-level concurrency, cancel-in-progress is pull_request-only.
-    # Why: build/build-arm64 require this job's success unconditionally, so on push a cancelled run would
-    # starve the channel; on a PR a cancelled result cleanly skips them, so cancelling just reclaims a slot.
+    # What: job-level concurrency, cancel-in-progress is pull_request-only.
+    # Why: on push a cancel would starve the channel; on a PR it's a free slot.
     # From: PR #891
     concurrency:
       group: >-
@@ -1117,9 +1098,8 @@ jobs:
           format('{0}-shellcheck-{1}', github.workflow, github.ref)
         }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-    # What: contents:read restated (job-level permissions replace, not extend, the workflow default);
-    # pull-requests:read dropped.
-    # Why: The only step that needed it (governance guardrails' live `gh pr view`) moved to line-endings.
+    # What: contents:read restated; pull-requests:read dropped.
+    # Why: the only step needing it moved to line-endings.
     # From: Issue #1245
     permissions:
       contents: read
@@ -1152,8 +1132,8 @@ jobs:
           git checkout --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # What: Step content (ShellCheck/ActionLint plus 7 standing text/YAML guards) extracted into a composite action; job-level scheduling (needs/if/concurrency/permissions, the docs-only skip above) and this step's own timeout-minutes stay here since a composite-action step cannot carry either.
-      # Why: This job and shellcheck-hosted below used to carry the identical steps twice; the per-step timeout-minutes restores the finer-grained backstop the original inline step had, in the one place it can actually work.
+      # What: shellcheck/actionlint + 7 guards extracted into a composite action.
+      # Why: avoids carrying the identical steps twice (shellcheck-hosted).
       # From: Issue #1095 | PR #1532
       - uses: ./.github/actions/shellcheck-and-standing-guards
         timeout-minutes: 15
@@ -1178,9 +1158,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Select build-tools image
-        # What: Always resolves through the digest-pinned, smoke-tested selector, never a bare :latest tag.
-        # Why: This job exists so linting still runs when self-hosted runners are down; it must not trade
-        # the self-hosted job's verified image for an unpinned one.
+        # What: always resolves through the pinned, smoke-tested selector.
+        # Why: must not trade the verified image for an unpinned :latest.
         # From: docs/ci-github-hosted-fallback-decision.md
         env:
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
@@ -1195,10 +1174,8 @@ jobs:
         run: |
           echo "::notice::Running ShellCheck and ActionLint on GitHub-hosted runner as fallback for non-LAN-dependent linting."
 
-      # What: Same composite action as the self-hosted shellcheck job; has no needs:/concurrency/permissions
-      # of its own.
-      # Why: Must still run when self-hosted runners (and validate-compose) are unavailable, so
-      # BUILD_TOOLS_IMAGE comes from "Select build-tools image" above instead of a needs-output.
+      # What: same composite action as shellcheck; no needs:/concurrency here.
+      # Why: must run even when self-hosted/validate-compose are unavailable.
       # From: docs/ci-github-hosted-fallback-decision.md
       - uses: ./.github/actions/shellcheck-and-standing-guards
         timeout-minutes: 15
@@ -1206,20 +1183,16 @@ jobs:
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
 
   validate-compose:
-    # What: Lightweight project-wide gate; validates compose/setup contracts and exports one smoke-tested
-    # build-tools image reference for all downstream jobs.
-    # Why: So later jobs do not independently select mutable tags.
+    # What: validates compose/setup, exports one build-tools image ref.
+    # Why: so later jobs do not independently select mutable tags.
     # From: PR #19
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # What: 30-minute timeout, above the other light script jobs' 15-minute floor; real runs finish in 20-72s.
-    # Why: The resolution step can fall back to a local Docker build of the (large) build-tools image, not
-    # represented in the fast-path timing, if the published one fails its smoke test.
+    # What: 30-min timeout, above the 15-min light-job floor; runs 20-72s.
+    # Why: can fall back to a local build-tools Docker build if smoke fails.
     # From: PR #1218
     timeout-minutes: 30
-    # What: Job-level concurrency; cancel-in-progress is pull_request-only, never on push/tag.
-    # Why: This job is an unconditional success gate for build/build-arm64, so on push it is the sharpest
-    # gate on the channel publish path and must survive to completion; on a PR every consumer cleanly skips
-    # a cancelled result, so reclaiming a superseded run is pure benefit.
+    # What: job-level concurrency; cancel-in-progress pull_request-only.
+    # Why: on push this must survive to completion; on a PR, cancel is free.
     # From: PR #926
     concurrency:
       group: >-
@@ -1266,17 +1239,16 @@ jobs:
         id: select-compose-validation-image
         env:
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
-          # What: Authenticates GHCR pull via github.actor + GITHUB_TOKEN.
-          # Why: An anonymous pull hits a much lower GHCR rate limit and fails closed under real concurrent load; every other GHCR-pulling job already authenticates this way.
+          # What: authenticates the GHCR pull via github.actor + GITHUB_TOKEN.
+          # Why: an anonymous pull hits a much lower rate limit under load.
           # From: PR #1237
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
-          # What: Resolves the required published image FIRST, before any local-build fallback.
-          # Why: If it's unavailable or fails smoke checks, this exits before the permissive selector below
-          # ever builds the (large) local fallback image, so there's nothing left to clean up.
+          # What: resolves the required published image before any fallback.
+          # Why: exits before the local fallback build, so nothing to clean up.
           # From: PR #365
           downstream_build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
 
@@ -1289,17 +1261,16 @@ jobs:
               ;;
           esac
 
-          # What: Reuses the already smoke-tested published digest for this job and downstream jobs.
-          # Why: This job runs on the light tier, so it must not trigger the selector's trusted-ref
-          # fallback Docker build.
+          # What: reuses the already smoke-tested published digest.
+          # Why: this light-tier job must not trigger a local fallback build.
           # From: PR #575
           validation_build_tools_image="$downstream_build_tools_image"
 
           printf 'BUILD_TOOLS_IMAGE=%s\n' "$validation_build_tools_image" >> "$GITHUB_ENV"
           printf 'build_tools_image=%s\n' "$downstream_build_tools_image" >> "$GITHUB_OUTPUT"
 
-      # What: Removes the buildx builder right after the select step, its only consumer in this job.
-      # Why: The fallback path (if ever taken) uses plain docker build, not buildx, so nothing later in this job needs the builder kept alive until the job's own end-of-job cleanup.
+      # What: removes the buildx builder right after its only consumer step.
+      # Why: the fallback path uses plain docker build, not buildx.
       # From: PR #1241
       - name: Remove buildx builder
         if: always()
@@ -1346,10 +1317,8 @@ jobs:
             exit 1
           fi
 
-          # What: Validates the state-root migration contract: one LANCACHE_STATE_DIR plus optional legacy
-          # per-service override keys, preserved only for real legacy/custom paths.
-          # Why: A bare /srv/lancache directory alone must never count as active legacy state, which is why
-          # legacy_state_root_or_default() below only selects the legacy root when known child state exists.
+          # What: validates the LANCACHE_STATE_DIR + legacy override contract.
+          # Why: a bare /srv/lancache dir alone must never count as legacy state.
           # From: PR #447
           for key in PDNS_STANDARD_DIR PDNS_SSL_DIR PDNS_FILTER_STATE_DIR NATS_DATA_DIR NATS_CONF_DIR; do
             grep -F "set_optional_env_path_override_if_needed ${key}" setup.sh >/dev/null \
@@ -1372,8 +1341,8 @@ jobs:
             || { echo "::error::setup.sh deploy/prod updates must default runtime state to /opt/lancache-ng, not the checkout."; exit 1; }
           grep -F 'install_dir=$(realpath -m "$install_dir")' setup.sh >/dev/null \
             || { echo "::error::setup.sh update must normalize install_dir before cd so deploy/prod backups are path-stable."; exit 1; }
-          # What: Snapshot repo-root inputs reached via ../../ and remap on restore.
-          # Why: Manual deploy/prod rollback must preserve arbitrary install paths.
+          # What: snapshots repo-root inputs reached via ../../, remaps on restore.
+          # Why: manual deploy/prod rollback must preserve arbitrary paths.
           # From: PR #447
           grep -F 'deploy_prod_repo_input_paths()' setup.sh >/dev/null \
             || { echo "::error::deploy/prod backups must snapshot repo-root runtime inputs reached via ../../ paths."; exit 1; }
@@ -1420,8 +1389,8 @@ jobs:
 
       - name: Validate compose files
         env:
-          # What: CACHE_DIR_STANDARD/CACHE_DIR_SSL omitted (no compose file reads them).
-          # Why: SSL/STANDARD_CACHE_MAX_GB stay for deploys without setup.sh update yet.
+          # What: CACHE_DIR_STANDARD/CACHE_DIR_SSL omitted; no compose file reads them.
+          # Why: MAX_GB vars stay for deploys not yet run through setup.sh update.
           # From: PR #446
           CACHE_INACTIVE: 365d
           CACHE_MAX_SIZE: 10g
@@ -1510,12 +1479,8 @@ jobs:
               return 1
             fi
 
-            # here-string, not `printf ... | grep -q`: AG-VAL-032 -- grep -q
-            # can exit as soon as it matches while the producer is still
-            # writing, and under this heredoc's own `set -euo pipefail`
-            # (above) that can surface as the producer's SIGPIPE (141)
-            # instead of grep's successful match, silently skipping this
-            # branch and missing a real docker-compose warning.
+            # What: here-string, not printf | grep -q (AG-VAL-032).
+            # Why: grep -q's early exit can SIGPIPE the producer under set -e.
             if grep -Eqi '(^|[[:space:]])(warn|warning|level=warning)' <<<"$output"; then
               printf 'docker compose emitted warnings; treating warnings as errors:\n%s\n' "$output"
               return 1
@@ -1531,8 +1496,8 @@ jobs:
           validate_compose -f deploy/secondary/docker-compose.yml
           validate_compose --env-file deploy/quickstart/.env -f deploy/quickstart/docker-compose.yml --profile ssl
 
-          # What: Profile-less renders skip inactive profiles; DHCP/logging need explicit activation.
-          # Why: Compose omits services behind inactive profiles, skipping their validation.
+          # What: profile-less renders skip inactive profiles (DHCP/logging).
+          # Why: Compose omits inactive-profile services from validation.
           # From: PR #343
           for compose_file in \
             deploy/prod/docker-compose.yml \
@@ -1614,9 +1579,8 @@ jobs:
             echo "::error::Broad CONTAINERS=1/POST=1 exposes generic Docker container APIs; use the explicit HAProxy allowlist instead."
             exit 1
           fi
-          # What: Validates the single real HAProxy allowlist script (scripts/untracked/docker-socket-proxy.sh).
-          # Why: The allowlist used to also be duplicated into a dead, unreferenced per-Compose-file anchor;
-          # that duplicate is removed, so only the real script is checked now.
+          # What: validates the single real docker-socket-proxy.sh allowlist.
+          # Why: a dead duplicate anchor copy was removed; only the real one remains.
           # From: PR #635
           socket_proxy_script="scripts/untracked/docker-socket-proxy.sh"
           grep -Fq 'acl safe_service_restart' "$socket_proxy_script" \
@@ -1641,17 +1605,16 @@ jobs:
             }
 
           for compose_file in deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml; do
-            # What: Anchored on the full "scripts/untracked/docker-socket-proxy.sh" source prefix, not just the mount-target suffix.
-            # Why: A target-only match is satisfied equally by a stale source path missing a required subdirectory prefix, since only the bind-mount's right-hand side ever differs; Docker silently creates an empty directory at a nonexistent bind-mount source, so a stale path fails at runtime ("is a directory") instead of at review time.
+            # What: anchored on the full source-path prefix, not just the mount target.
+            # Why: Docker silently creates an empty dir for a stale bind-mount source.
             # From: Issue #1095 | PR #1532
             grep -Fq 'scripts/untracked/docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro' "$compose_file" \
               || {
                 echo "::error file=${compose_file}::docker-socket-proxy service must mount the one real scripts/untracked/docker-socket-proxy.sh, not an inline, divergent, or stale pre-move copy."
                 exit 1
               }
-            # What: Matches only the real top-level YAML key/anchor syntax, not any occurrence of the string.
-            # Why: The explanatory comment above legitimately mentions this name as prose; a substring
-            # match would misfire on that prose every run.
+            # What: matches only the real YAML key/anchor syntax, not any occurrence.
+            # Why: the comment above mentions this name in prose; substring would misfire.
             # From: PR #635
             grep -Eq '^x-docker-socket-proxy-command:' "$compose_file" \
               && {
@@ -1763,14 +1726,13 @@ jobs:
             ' "$compose_file"
           }
 
-          # What: Runs the env_file-contract check only for prod dhcp-proxy; quickstart uses its own .env directly.
-          # Why: Compose interpolation does not read env_file values, so explicit environment entries in prod
-          # would silently erase setup-managed proxy DHCP settings.
+          # What: runs the env_file-contract check for prod dhcp-proxy only.
+          # Why: explicit environment entries would silently erase DHCP settings.
           # From: PR #472
           validate_dhcp_proxy_env_file_contract deploy/prod/docker-compose.yml ../../config/prod/dhcp-proxy.env
 
-          # What: Guards the dnsmasq relay/proxy optional-option surface across env-file -> entrypoint -> template.
-          # Why: Prevents any layer from silently dropping these keys.
+          # What: guards the dnsmasq optional-option surface end to end.
+          # Why: prevents any layer from silently dropping these keys.
           # From: PR #643
           dhcp_proxy_optional_keys=(
             DHCP_PROXY_INTERFACE
@@ -1792,10 +1754,8 @@ jobs:
           grep -F 'DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS:-}' deploy/quickstart/docker-compose.yml >/dev/null \
             || { echo "::error::deploy/quickstart/docker-compose.yml's dhcp-proxy service must pass through DHCP_PROXY_CUSTOM_OPTIONS like the other optional dnsmasq relay/proxy keys."; exit 1; }
 
-          # What: Guards the PXE boot-pointer opt-in surface, same shape as the optional-option guard above,
-          # including explicit Compose passthrough (not just env-file presence).
-          # Why: A quickstart Compose allowlist that stops short of a new key leaves a feature unreachable
-          # even when set in .env; checking passthrough catches that regression class mechanically.
+          # What: guards the PXE boot-pointer opt-in surface, incl. Compose passthrough.
+          # Why: a missing Compose allowlist entry leaves a feature unreachable.
           # From: PR #765
           dhcp_proxy_pxe_keys=(
             DHCP_PROXY_PXE_BOOT_SERVER
@@ -1995,9 +1955,8 @@ jobs:
           grep -F 'needs: promote' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Release notes must run after channel promotion."; exit 1; }
 
-          # What: Only prerelease is protected here, not draft.
-          # Why: prerelease/stable is a maintainer policy call; draft:false is
-          # always safe to force and must not trip this guard.
+          # What: only prerelease is protected here, not draft.
+          # Why: draft:false is always safe to force; must not trip this guard.
           # From: Issue #1095 | PR #1532
           if awk '
             /if \[ "\$status" = "200" \]/ { in_patch=1 }
