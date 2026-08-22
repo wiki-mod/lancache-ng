@@ -2,11 +2,11 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: exercises services/ui/Dockerfile's lancache-distcc-wrapper script
-#   (extracted verbatim from its printf block) against real compiler stubs.
-# Why: proves both dispatch shapes work, including the corrupted-argv
-#   regression this file exists to catch.
-# From: Issue #1533 | Refs #887
+# What: exercises services/ui/Dockerfile's distcc wrapper masquerade and CCACHE_PREFIX=distcc dispatch shapes.
+# Why: a distcc-wrapping compiler call must reach the real compiler
+#   exactly once under both shapes; CCACHE_PREFIX=distcc's $1-as-path
+#   convention is the same contract AG-CI-022 requires for services/dns.
+# From: Issue #1533 | PR #1612
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -30,13 +30,11 @@ fail() {
     return 1
 }
 
-# What: extracts the lancache-distcc-wrapper script verbatim from the
-# Dockerfile's own printf block, rewriting its hardcoded /usr/local paths to
-# this test's fixture directory so it can run unprivileged and isolated.
-# Why: a hand-duplicated copy of the wrapper logic would silently drift from
-# the real generated script; extracting the real content is the only way
-# this test proves what the Dockerfile actually ships (AG-CODE-011).
-# From: Issue #1533
+# What: extracts the lancache-distcc-wrapper script verbatim into an isolated fixture directory.
+# Why: a hand-duplicated copy would silently drift from the real generated
+#   script; extracting the real content is the only way this test proves
+#   what the Dockerfile actually ships (AG-CODE-011).
+# From: Issue #1533 | PR #1612
 extract_wrapper_script() {
     local end_line start_line
     end_line="$(grep -nF '> /usr/local/bin/lancache-distcc-wrapper; \' "$dockerfile" | head -1 | cut -d: -f1)"
