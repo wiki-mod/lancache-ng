@@ -174,7 +174,7 @@ jobs:
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   # What: start-of-job supersession check for build/build-arm64/container-scan.
-  # Why: must never be skippable -- implicit success() would treat a skip as pass.
+  # Why: must never skip -- implicit success() would treat a skip as pass.
   # From: PR #1334, Issue #532
   push-supersession-check:
     name: check for a newer push already superseding this one
@@ -904,7 +904,7 @@ jobs:
           git diff --name-only --diff-filter=ACMRTUXB "$GOVERNANCE_BASE_SHA" "$GITHUB_SHA" > "$changed_files"
 
           # What: fetches PR title/body live, same pattern as pr-template-check.
-          # Why: the webhook snapshot is stale; a rerun would replay the old text.
+          # Why: the webhook snapshot is stale; a rerun replays the old text.
           # From: PR #903
           governance_pr_title="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json title -q .title)"
           governance_pr_body="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body -q .body)"
@@ -1132,7 +1132,7 @@ jobs:
           git checkout --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # What: shellcheck/actionlint + 7 guards extracted into a composite action.
+      # What: shellcheck/actionlint + 7 guards, in a composite action.
       # Why: avoids carrying the identical steps twice (shellcheck-hosted).
       # From: Issue #1095 | PR #1532
       - uses: ./.github/actions/shellcheck-and-standing-guards
@@ -1318,7 +1318,7 @@ jobs:
           fi
 
           # What: validates the LANCACHE_STATE_DIR + legacy override contract.
-          # Why: a bare /srv/lancache dir alone must never count as legacy state.
+          # Why: a bare /srv/lancache dir must never count as legacy state.
           # From: PR #447
           for key in PDNS_STANDARD_DIR PDNS_SSL_DIR PDNS_FILTER_STATE_DIR NATS_DATA_DIR NATS_CONF_DIR; do
             grep -F "set_optional_env_path_override_if_needed ${key}" setup.sh >/dev/null \
@@ -1341,7 +1341,7 @@ jobs:
             || { echo "::error::setup.sh deploy/prod updates must default runtime state to /opt/lancache-ng, not the checkout."; exit 1; }
           grep -F 'install_dir=$(realpath -m "$install_dir")' setup.sh >/dev/null \
             || { echo "::error::setup.sh update must normalize install_dir before cd so deploy/prod backups are path-stable."; exit 1; }
-          # What: snapshots repo-root inputs reached via ../../, remaps on restore.
+          # What: snapshots repo-root inputs via ../../, remaps on restore.
           # Why: manual deploy/prod rollback must preserve arbitrary paths.
           # From: PR #447
           grep -F 'deploy_prod_repo_input_paths()' setup.sh >/dev/null \
@@ -1389,8 +1389,8 @@ jobs:
 
       - name: Validate compose files
         env:
-          # What: CACHE_DIR_STANDARD/CACHE_DIR_SSL omitted; no compose file reads them.
-          # Why: MAX_GB vars stay for deploys not yet run through setup.sh update.
+          # What: CACHE_DIR_STANDARD/SSL omitted; no compose file reads them.
+          # Why: MAX_GB vars stay for deploys not yet run through setup.sh.
           # From: PR #446
           CACHE_INACTIVE: 365d
           CACHE_MAX_SIZE: 10g
@@ -1580,7 +1580,7 @@ jobs:
             exit 1
           fi
           # What: validates the single real docker-socket-proxy.sh allowlist.
-          # Why: a dead duplicate anchor copy was removed; only the real one remains.
+          # Why: a dead duplicate anchor copy was removed already.
           # From: PR #635
           socket_proxy_script="scripts/untracked/docker-socket-proxy.sh"
           grep -Fq 'acl safe_service_restart' "$socket_proxy_script" \
@@ -1605,16 +1605,16 @@ jobs:
             }
 
           for compose_file in deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml; do
-            # What: anchored on the full source-path prefix, not just the mount target.
-            # Why: Docker silently creates an empty dir for a stale bind-mount source.
+            # What: anchored on the full source path, not just the mount target.
+            # Why: Docker creates an empty dir for a stale bind-mount source.
             # From: Issue #1095 | PR #1532
             grep -Fq 'scripts/untracked/docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro' "$compose_file" \
               || {
                 echo "::error file=${compose_file}::docker-socket-proxy service must mount the one real scripts/untracked/docker-socket-proxy.sh, not an inline, divergent, or stale pre-move copy."
                 exit 1
               }
-            # What: matches only the real YAML key/anchor syntax, not any occurrence.
-            # Why: the comment above mentions this name in prose; substring would misfire.
+            # What: matches only the real YAML key/anchor, not any occurrence.
+            # Why: a comment above mentions this name in prose already.
             # From: PR #635
             grep -Eq '^x-docker-socket-proxy-command:' "$compose_file" \
               && {
@@ -1727,7 +1727,7 @@ jobs:
           }
 
           # What: runs the env_file-contract check for prod dhcp-proxy only.
-          # Why: explicit environment entries would silently erase DHCP settings.
+          # Why: explicit env entries would silently erase DHCP settings.
           # From: PR #472
           validate_dhcp_proxy_env_file_contract deploy/prod/docker-compose.yml ../../config/prod/dhcp-proxy.env
 
@@ -1754,7 +1754,7 @@ jobs:
           grep -F 'DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS:-}' deploy/quickstart/docker-compose.yml >/dev/null \
             || { echo "::error::deploy/quickstart/docker-compose.yml's dhcp-proxy service must pass through DHCP_PROXY_CUSTOM_OPTIONS like the other optional dnsmasq relay/proxy keys."; exit 1; }
 
-          # What: guards the PXE boot-pointer opt-in surface, incl. Compose passthrough.
+          # What: guards the PXE opt-in surface, incl. Compose passthrough.
           # Why: a missing Compose allowlist entry leaves a feature unreachable.
           # From: PR #765
           dhcp_proxy_pxe_keys=(
@@ -2176,9 +2176,8 @@ jobs:
             timeout --kill-after=30 --signal=KILL 300 bash -s <<'VALIDATE_COMPOSE_RUST_PREFLIGHT_BUILDTOOLS'
           set -euo pipefail
 
-          # What: No check remains for container-scan's old local scan-build networking entitlement.
-          # Why: container-scan no longer runs a local `docker buildx build` for a changed service, so a
-          #   self-matching `grep -F` check here would be meaningless.
+          # What: no check for container-scan's old local-build networking.
+          # Why: container-scan no longer builds locally; check was meaningless.
           # From: Issue #1095 | PR #1532
           grep -F -- '--crate-type lib' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F -- '--emit=link,dep-info' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
@@ -2197,13 +2196,13 @@ jobs:
             && { echo "::error::The exported build-tools job output must not be hardcoded without validating that exact pullable image."; exit 1; }
           grep -F 'BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Downstream build-tools job output must validate the exact pullable GHCR image before exporting it."; exit 1; }
-          # What: A positive check (grep for the correct pattern), not a "must NOT contain the old pattern" negative check.
-          # Why: The old negative form quoted the forbidden pattern as its own grep -F argument, so the check's own source line was a byte-for-byte match of the thing it claimed to detect as absent -- it would have failed unconditionally, forever, regardless of the real code below.
+          # What: a positive grep, not a negative "must not contain X" check.
+          # Why: the old form quoted X as its own arg, self-matching always.
           # From: Issue #1095 | PR #1532
           grep -F 'validation_build_tools_image="$downstream_build_tools_image"' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::validate-compose runs on the light tier and must reuse the already-resolved downstream_build_tools_image instead of building a local fallback."; exit 1; }
-          # What: published_image_reference() delegates to the shared resolve_manifest_digest() helper in scripts/lib/ghcr-retry.sh instead of calling `docker buildx imagetools inspect` inline; this check verifies both ends of that delegation.
-          # Why: Deduplicated against scripts/render-full-setup-digest-override.sh's now-removed identical copy (AG-CODE-013).
+          # What: verifies published_image_reference() uses the shared helper.
+          # Why: dedups a now-removed identical copy (AG-CODE-013).
           # From: PR #1523
           grep -F 'published_image_reference()' scripts/untracked/select-build-tools-image.sh >/dev/null \
             && grep -F 'resolve_manifest_digest "$image"' scripts/untracked/select-build-tools-image.sh >/dev/null \
@@ -2234,8 +2233,8 @@ jobs:
             || { echo "::error::Shellcheck must depend on validate-compose so it uses the validated build-tools image."; exit 1; }
           grep -F 'runs-on: [self-hosted, linux, lancache, lancache-heavy]' .github/workflows/build-tools.yml >/dev/null \
             || { echo "::error::The build-tools workflow's amd64 leg must run on the heavy runner tier."; exit 1; }
-          # What: arm64 builds natively on a GitHub-hosted runner, same as build-push.yml's own build-arm64, instead of QEMU on the self-hosted pool; must not regress back to an emulated arm64 leg.
-          # Why: Emulating the docker-compose source build added for CVE-2026-39822 fails reproducibly under QEMU with a Go compiler "bufio: buffer full" error.
+          # What: arm64 builds natively (like build-arm64), never QEMU-emulated.
+          # Why: the CVE-2026-39822 build fails under QEMU (Go bufio error).
           # From: Issue #1095 | PR #1532
           grep -F 'runs-on: ubuntu-24.04-arm' .github/workflows/build-tools.yml >/dev/null \
             || { echo "::error::The build-tools workflow's arm64 leg must run natively on ubuntu-24.04-arm, not QEMU."; exit 1; }
@@ -2243,8 +2242,8 @@ jobs:
             && { echo "::error::The build-tools workflow must not reintroduce QEMU emulation for its arm64 leg."; exit 1; }
           awk '
             /name: Build and push amd64 build-tools image/ { in_publish = 1; found = 0; next }
-            # What: Anchored on an actual step declaration ("- name: ..."), not a bare /name: / substring match.
-            # Why: A with: input ending in name (for example a username input on the ghcr-build-push-retry composite action) also contains the literal substring "name: " and would otherwise be misread as the next steps boundary, ending the scan before it reaches "pull: true" below. NOTE: no apostrophes anywhere in this comment block -- it sits inside a bash single-quoted awk script, and a single quote here would close that string early and hand the rest of the line to bash as literal commands.
+            # What: anchored on a real step declaration, not a bare name: match.
+            # Why: a with: input ending in name would misread as the next step.
             # From: Issue #1095 | PR #1532
             in_publish && /^[[:space:]]*- name: / { exit found ? 0 : 1 }
             in_publish && /pull: true/ { found = 1 }
@@ -2253,9 +2252,8 @@ jobs:
             || { echo "::error::The build-tools amd64 publish step must pull fresh mutable bases before publishing."; exit 1; }
           awk '
             /name: Build and push arm64 build-tools image/ { in_publish = 1; found = 0; next }
-            # Same anchoring rule as the identical guard above ("- name: ...", not a bare
-            # /name: / match) -- see that comment for the full reasoning. NOTE: no apostrophes
-            # here either, for the same single-quoted-awk-script reason.
+            # Same anchoring as the identical guard above; no apostrophes here
+            # either (single-quoted awk script).
             in_publish && /^[[:space:]]*- name: / { exit found ? 0 : 1 }
             in_publish && /pull: true/ { found = 1 }
             END { if (in_publish) exit found ? 0 : 1; exit 1 }
@@ -2264,8 +2262,8 @@ jobs:
           grep -F 'image-ref:' .github/workflows/build-tools.yml | grep -F 'BUILD_TOOLS_IMAGE' | grep -F 'steps.build.outputs.digest' >/dev/null \
             && grep -F 'image-ref:' .github/workflows/build-push.yml | grep -F 'github.repository' | grep -F 'matrix.service' | grep -F 'steps.build.outputs.digest' >/dev/null \
             || { echo "::error::Build-tools publish paths must scan the exact pushed digest before attestation/promotion."; exit 1; }
-          # What: Guards that the ghcr-build-push-retry wrapper itself stays wired into build/build-arm64's "Build and push" step, not the now-removed digest-fallback text.
-          # Why: That step runs through .github/actions/ghcr-build-push-retry instead of a bare docker/build-push-action plus an inline "retry-build" sibling step, so steps.build.outputs.digest already resolves to whichever internal attempt succeeded -- there is no separate retry-build step id left to reference.
+          # What: guards ghcr-build-push-retry stays wired into Build and push.
+          # Why: that step already resolves steps.build.outputs.digest itself.
           # From: Issue #1095 | PR #1532
           grep -F 'uses: ./.github/actions/ghcr-build-push-retry' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::build/build-arm64 must publish through the shared ghcr-build-push-retry composite action so GHCR pushes retry on transient 401s (#822)."; exit 1; }
@@ -2295,13 +2293,13 @@ jobs:
             timeout --kill-after=30 --signal=KILL 300 bash -s <<'VALIDATE_COMPOSE_PROMOTE_TAGS_DOCKERFILES'
           set -euo pipefail
 
-          # What: Extracts build-tools.yml's real "Promote mutable tags" script and runs it under real and adversarial ref names, including "v0.2.0".
-          # Why: This repo has a branch literally named "v0.2.0"; without the "-tc" suffix, pushing it would publish build-tools:v0.2.0, the same tag a real vX.Y.Z release uses. Running the real script, not retyped logic, catches a bypass added anywhere in it too.
+          # What: extracts and runs the real Promote mutable tags script.
+          # Why: a branch named v0.2.0 would collide with a real release tag.
           # From: Issue #1095 | PR #1532
           grep -F 'branch_tag="${sanitized_ref}-tc"' .github/workflows/build-tools.yml >/dev/null \
             || { echo "::error::build-tools.yml's branch-tag promotion must suffix every derived tag with '-tc' so a branch named like a release tag (e.g. v0.2.0) can never collide with a real vX.Y.Z stable-release tag on the same GHCR package."; exit 1; }
-          # What: Anchored on the plain substring "sanitized_ref=" (no regex metacharacters), not a fuller literal match.
-          # Why: This awk script must behave identically on CI's mawk and on gawk used for local testing, and mid-pattern "$" escaping is exactly where those implementations are known to diverge in ERE mode.
+          # What: anchored on the substring sanitized_ref=, not a full match.
+          # Why: mawk (CI) and gawk (local) diverge on mid-pattern $ escaping.
           # From: Issue #1095 | PR #1532
           promote_tags_script="$(awk '
             /name: Promote mutable tags/ { in_step = 1 }
@@ -2313,12 +2311,8 @@ jobs:
             echo "::error::Could not extract build-tools.yml's \"Promote mutable tags\" derivation logic -- its step name or tag-derivation lines may have moved; update the extraction markers in build-push.yml's guard alongside them."
             exit 1
           fi
-          # Write the extracted lines to a real script file rather than a
-          # bash -c string: the extracted text already contains its own
-          # quotes and a multi-line comment, and re-quoting that safely as a
-          # single -c argument would need error-prone escaping. A file
-          # avoids that entirely and lets bash run the exact extracted text
-          # unmodified, with a trailing line that prints the result.
+          # What: writes the extracted lines to a real script file, not -c.
+          # Why: the text has its own quotes; re-quoting for -c is error-prone.
           guard_script="$(mktemp)"
           trap 'rm -f "$guard_script"' EXIT
           {
@@ -2535,15 +2529,15 @@ jobs:
           bash scripts/untracked/validate-stack-images.sh
           VALIDATE_COMPOSE_IMAGE_CHANNEL_RESOLUTION
 
-      # What: Deliberately its own step, not appended to "Validate compose files" above; do not merge back without re-confirming actionlint still completes.
-      # Why: That step's embedded script is already large enough that actionlint's shellcheck integration deadlocks on it -- the exact same awk guards pass instantly in a small isolated script but reliably hang actionlint once embedded in the oversized one, and the unmodified pre-existing script does not hang, confirming a genuine size/threshold interaction in actionlint's own subprocess handling rather than a defect in this shell code.
+      # What: its own step; do not merge into Validate compose files above.
+      # Why: actionlint's shellcheck integration deadlocks on the merged size.
       # From: Issue #1095 | PR #1532
       - name: Validate channel/branch-model mapping (#825/#1141)
         run: |
           set -euo pipefail
 
-          # What: Checks the branch-model decision (master -> latest, archived vY.X.Z branches -> no live channel), scoped to each branch's own if/elif arm rather than a flat grep -F for the channel_tags line alone.
-          # Why: A flat grep would pass even if a regression kept both literal strings in the file but tied them to the wrong branch; current_dev's own mapping is superseded by the guard below, which carries the current invariant.
+          # What: checks the branch-model decision per branch, not a flat grep.
+          # Why: a flat grep could pass with strings tied to the wrong branch.
           # From: Issue #1095 | PR #1532
           if ! awk '
             /if \[\[ "\$GITHUB_REF" = "refs\/heads\/master" \]\]; then/ { in_branch=1; next }
@@ -2554,8 +2548,8 @@ jobs:
             echo "::error::Master promotion must publish the latest channel."
             exit 1
           fi
-          # What: Fails if a current_dev push regresses back to auto-publishing the nightly channel -- the mirror image of the guard above, which instead fails if the mapping is missing.
-          # Why: nightly is now a real once-daily scheduled/dispatch-only, green-gated channel (see the promote job's own "Branch-to-channel mapping" comment), so a plain current_dev push must not move it anymore.
+          # What: fails if current_dev push auto-publishes nightly again.
+          # Why: nightly is now scheduled/dispatch-only, not push-driven.
           # From: Issue #1095 | PR #1532
           if awk '
             /elif \[\[ "\$GITHUB_REF" = "refs\/heads\/current_dev" \]\]; then/ { in_branch=1; next }
@@ -2566,15 +2560,15 @@ jobs:
             echo "::error::current_dev push must no longer auto-publish the nightly channel (#1254/#1255 -- nightly is promoted only via the scheduled/manual channel-input dispatch path, see nightly-refresh.yml)."
             exit 1
           fi
-          # What: Checks that nightly-refresh.yml exists.
-          # Why: Without it, removing the current_dev auto-publish above would leave nightly never refreshed at all -- a silent full outage of the pre-1.0 default channel, not merely slower staleness.
+          # What: checks that nightly-refresh.yml exists.
+          # Why: without it, nightly would never refresh at all (silent outage).
           # From: Issue #1095 | PR #1532
           if [[ ! -f .github/workflows/nightly-refresh.yml ]]; then
             echo "::error::nightly-refresh.yml is missing; nightly would never be promoted once current_dev pushes stop auto-publishing it (#1254/#1255)."
             exit 1
           fi
-          # What: Explicit if/! instead of a chained `A && B && C || D`.
-          # Why: shellcheck SC2015 flags that chained shape as not real if-then-else, since D can also run when an earlier `&&` term fails to execute for an unrelated reason, not just when the check's condition is false -- a real, if narrow, correctness footgun AG-VAL-001 ("warnings are errors") does not carve out an exception for.
+          # What: explicit if/! instead of a chained A && B && C || D.
+          # Why: shellcheck SC2015 flags that shape as not real if-then-else.
           # From: Issue #1095 | PR #1532
           if ! { grep -F 'build-push.yml' .github/workflows/nightly-refresh.yml >/dev/null \
               && grep -F 'current_dev' .github/workflows/nightly-refresh.yml >/dev/null \
@@ -2582,8 +2576,8 @@ jobs:
             echo "::error::nightly-refresh.yml must dispatch build-push.yml against current_dev with channel=nightly (#1254/#1255)."
             exit 1
           fi
-          # What: Scoped to the promote job's own channel_tags=() ... 0-tags-check block, not a flat file-wide grep -F.
-          # Why: A flat search for this exact literal would also match this guard's own source line a few lines above, making the check tautologically fail on every run regardless of the real promote logic.
+          # What: scoped to promote's channel_tags=() block, not a flat grep.
+          # Why: a flat search would match this guard's own source line too.
           # From: Issue #1095 | PR #1532
           if ! awk '
             /^ *channel_tags=\(\)$/ { in_scope=1; next }
@@ -2608,8 +2602,8 @@ jobs:
             bash scripts/tracked/check-naming-consistency.sh
 
       - name: Check workflow service lists stay in sync
-        # What: Checks this file's own 4 hardcoded `services=(...)`/`full_setup_services=(...)` copies, plus gc-pr-staging-images.yml, backfill-stack-latest.yml, and scripts/untracked/ensure-pr-staging-images.sh; runs in the build-tools container because it needs GNU grep -P, same as the naming-consistency guard above.
-        # Why: Guards against a service silently dropping out of manifest merge, channel promotion, release, PR-staging-tag garbage collection, or latest-channel backfill when a new one is added to the build matrix but one of these hardcoded copies is missed.
+        # What: checks this file's 4 hardcoded services=() copies plus 3 others.
+        # Why: a new matrix service missed in one copy silently drops out.
         # From: Issue #1095 | PR #1532
         run: |
           set -euo pipefail
@@ -2623,9 +2617,9 @@ jobs:
             bash scripts/tracked/check-workflow-service-lists.sh
 
       - name: Check VEX generator produces valid OpenVEX JSON (.trivyignore.yaml -> generate-vex.sh)
-        # What: Runs scripts/untracked/generate-vex.sh against .trivyignore.yaml and asserts valid, non-empty OpenVEX JSON output; runs in the build-tools container because scripts/tracked/check-vex-drift.sh needs jq, same as the naming/service-list guards above.
-        # Why: vex.openvex.json is no longer committed to current_dev -- it is regenerated post-merge onto the CI-Automation/vex branch by .github/workflows/vex-regenerate.yml, and freshly again at release time, so there is no second committed copy left to drift-compare. What can still break here is the generator itself: a malformed .trivyignore.yaml or a generator bug should fail in the PR that introduced it, not first surface post-merge or during a release. Runs unconditionally as part of this job (validate-compose is an unconditional gate for every PR), which already covers "runs when .trivyignore.yaml or generate-vex.sh changes."
-        # From: Issue #1095 (F-22) | PR #1620 (superseded drift-comparison version)
+        # What: runs generate-vex.sh, asserts valid non-empty OpenVEX output.
+        # Why: catches a generator/input bug here, not post-merge or at release.
+        # From: Issue #1095 (F-22) | PR #1620
         run: |
           set -euo pipefail
 
@@ -2638,8 +2632,8 @@ jobs:
             bash scripts/tracked/check-vex-drift.sh
 
       - name: Check netdata's vendored curl pin against issue #1304's tracked CVEs (PR #1352 tracking mechanism)
-        # What: Reads netdata's own upstream build recipe for the pinned NETDATA_VERSION and fails if the vendored curl is still inside the affected range for 7 tracked CVE IDs; needs real network access to fetch that recipe, unlike the other checks in this job.
-        # Why: services/netdata/Dockerfile installs netdata's official static musl build, which statically links its own vendored curl -- not a distro package Trivy's os-pkg scanner can see -- so this is the maintainer-approved tracking mechanism keeping that now-invisible risk from silently falling off radar.
+        # What: checks netdata's vendored curl against 7 tracked CVE IDs.
+        # Why: Trivy's os-pkg scan cannot see netdata's static-linked curl.
         # From: Issue #1095 | PR #1532
         run: |
           set -euo pipefail
@@ -2665,8 +2659,8 @@ jobs:
             bash scripts/tracked/check-idempotence-test-coverage.sh
 
       - name: Check bats path-filter coverage (build-tools.yml vs. real bats dependencies, issue #879)
-        # What: Checks that every repo file a tests/bats/*.bats suite sources/reads is also listed in build-tools.yml's on.push.paths/on.pull_request.paths; runs in the build-tools container for the same real bash/grep/awk/sed semantics the other check-*.sh guards above require.
-        # Why: Without this, a PR adding or extending a bats suite to depend on a new file, without adding that path to the trigger filters, leaves regression coverage that exists on paper but silently never runs for the exact changes most likely to need it.
+        # What: checks every bats-sourced file is in build-tools.yml's paths.
+        # Why: a missing path leaves coverage that exists on paper, never runs.
         # From: Issue #1095 | PR #1532
         run: |
           set -euo pipefail
@@ -2680,8 +2674,8 @@ jobs:
             bash scripts/tracked/check-bats-path-filter-coverage.sh
 
       - name: Check setup.sh/simulation-script prompt drift (issue #1176)
-        # What: scripts/tracked/check-setup-prompt-drift.sh fails closed whenever an unconditional wizard prompt in setup.sh's interactive install wizard is missing a matching expect_prompt answer in scripts/untracked/simulations/setup-cli-simulation.sh or scripts/untracked/simulations/syslog-forwarding-simulation.sh, or a simulation script's pattern no longer matches any real prompt.
-        # Why: These two expect-driven simulation scripts hand-encode setup.sh's prompt sequence by convention with nothing checking they stay in sync; an unconditional prompt added without updating either script silently hangs both until timeout instead of failing with a clear cause.
+        # What: check-setup-prompt-drift.sh fails on a missing expect_prompt.
+        # Why: an out-of-sync prompt hangs both simulations until timeout.
         # From: Issue #1095 | PR #1532
         run: |
           set -euo pipefail
@@ -2695,8 +2689,8 @@ jobs:
             bash scripts/tracked/check-setup-prompt-drift.sh
 
       - name: Check proxy cache env/doc drift (docs/architecture-ng.md, bug-hunt #849/#1068 item 11)
-        # What: scripts/untracked/check-proxy-cache-env-doc-drift.sh fails closed whenever a documented CACHE_* default in docs/architecture-ng.md's nginx cache-configuration table disagrees with config/prod/proxy.env's real value.
-        # Why: That table hand-duplicates each CACHE_* variable's default as a literal string with nothing checking it against the real shipped default, so drift is silent and can persist indefinitely (AG-VAL-029).
+        # What: fails when the CACHE_* docs table disagrees with proxy.env.
+        # Why: the table hand-duplicates defaults; drift is otherwise silent.
         # From: Issue #1095 | PR #1532
         run: |
           set -euo pipefail
@@ -2710,8 +2704,8 @@ jobs:
             bash scripts/untracked/check-proxy-cache-env-doc-drift.sh
 
       - name: Check logging matrix (docs/architecture-ng.md, issue #633)
-        # What: Reuses the "Validate compose files" step's exact dummy env values, kept as its own separate `env:` block rather than merged into that step.
-        # Why: check-logging-matrix.sh shells out to `docker compose ... config --services` per Compose file, which needs every required variable set to something so interpolation does not fail before the service list can be read; keeping a separate block leaves this a separately attributable, independently rerunnable CI check.
+        # What: reuses Validate compose files' dummy env, in its own env: block.
+        # Why: docker compose config needs every var set; kept separately.
         # From: Issue #1095 | PR #1532
         env:
           CACHE_INACTIVE: 365d
