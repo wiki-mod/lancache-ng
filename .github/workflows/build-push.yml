@@ -74,8 +74,7 @@ jobs:
     if: github.event_name == 'pull_request' || github.event_name == 'push'
     runs-on: [self-hosted, linux, lancache, lancache-light]
     # What: 15-min timeout, same floor every cheap self-hosted job uses.
-    # Why: Real runs complete in 6-17s; the floor is a round, generous bound (not scaled from that number) so
-    # a future hang still fails fast and bounded.
+    # Why: real runs are 6-17s; generous bound so a hang still fails fast.
     # From: PR #1218
     timeout-minutes: 15
     outputs:
@@ -492,9 +491,8 @@ jobs:
           bash scripts/tracked/validate-pr-template.sh /tmp/pr-body-live.txt
 
   pr-tracking-metadata-check:
-    # What: Enforces AG-GH-008 (labels + milestone required); project-board placement is enforced too only
-    # with a read:project token (PROJECT_AUTOMATION_PAT), else warns instead of failing.
-    # Why: check-pr-tracking-metadata.sh requires python3/curl, so it runs in the build-tools image per AG-VAL-016.
+    # What: enforces AG-GH-008 (labels + milestone required).
+    # Why: check-pr-tracking-metadata.sh needs python3/curl (AG-VAL-016).
     # From: PR #767
     name: PR tracking metadata (labels/milestone/project)
     if: github.event_name == 'pull_request'
@@ -536,18 +534,16 @@ jobs:
           git checkout --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Auto-assign Dependabot PR milestone
-        # What: Auto-assigns milestone #11 (LanCache-NG Roadmap) to Dependabot PRs via PROJECT_AUTOMATION_PAT;
-        # must run before the composite action below fetches current labels/milestone.
-        # Why: Running before that fetch avoids the fetch step observing an empty milestone on a fresh
-        # Dependabot PR and failing before this step's own assignment takes effect; idempotent (AG-OP-006/009).
+        # What: assigns milestone #11 to Dependabot via PROJECT_AUTOMATION_PAT.
+        # Why: must run before the action below fetches labels/milestone.
         # From: PR #1279
         if: github.event.pull_request.user.login == 'dependabot[bot]'
         env:
           GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
-          # What: Milestone #11 = "LanCache-NG Roadmap" catch-all for non-version-tied PRs/issues.
-          # Why: If this milestone is ever renumbered or renamed, this value and comment must be updated together.
+          # What: milestone #11 = LanCache-NG Roadmap catch-all.
+          # Why: if renumbered/renamed, this value must be updated too.
           # From: PR #1279
           DEPENDABOT_MILESTONE_NUMBER: 11
         run: |
@@ -561,9 +557,8 @@ jobs:
             echo "Milestone already set (#$current_milestone) -- leaving it as-is."
             exit 0
           fi
-          # What: Uses `if !` to keep set -e active; an API failure degrades to a warning, not an abort.
-          # Why: AG-VAL-004 exempts an `if` test from errexit; the authoritative gate is the milestone check
-          # inside check-pr-tracking-metadata.sh a few steps below, not this best-effort assignment.
+          # What: uses if ! to keep set -e active on an API failure.
+          # Why: the authoritative gate is the milestone check below.
           # From: PR #1279
           if ! gh api -X PATCH "repos/$REPO/issues/$PR_NUMBER" -F milestone="$DEPENDABOT_MILESTONE_NUMBER"; then
             echo "::warning::Failed to auto-assign milestone #$DEPENDABOT_MILESTONE_NUMBER to PR #$PR_NUMBER via the GitHub API."
@@ -571,8 +566,8 @@ jobs:
           fi
           echo "Assigned milestone #$DEPENDABOT_MILESTONE_NUMBER (LanCache-NG Roadmap) to PR #$PR_NUMBER."
 
-      # What: Fetch and validate steps extracted to composite action pr-tracking-metadata-fetch-and-validate.
-      # Why: "Auto-assign" stays a separate step here since its warning-path text differs between jobs.
+      # What: fetch/validate moved into a composite action.
+      # Why: auto-assign stays separate; its warning text differs per job.
       # From: PR #1467
       - uses: ./.github/actions/pr-tracking-metadata-fetch-and-validate
         with:
@@ -601,9 +596,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Select build-tools image
-        # What: Fallback resolves build-tools image independently, without depending on validate-compose.
-        # Why: A needs: dependency on that job would defeat the fallback's purpose when self-hosted runners
-        # are unavailable.
+        # What: fallback resolves build-tools image independently.
+        # Why: a needs: on validate-compose would defeat the fallback.
         # From: docs/ci-github-hosted-fallback-decision.md
         env:
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
@@ -618,10 +612,8 @@ jobs:
         run: |
           echo "::notice::Running PR tracking metadata check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
       - name: Auto-assign Dependabot PR milestone
-        # What: Auto-assigns milestone #11 (LanCache-NG Roadmap) to Dependabot PRs, mirroring
-        #   pr-tracking-metadata-check's identical step.
-        # Why: Dependabot cannot set its own milestone; PROJECT_AUTOMATION_PAT reaches this job on a same-repo
-        #   Dependabot PR and must run before the composite action below fetches current labels/milestone.
+        # What: assigns milestone #11 to Dependabot, mirrors the check job.
+        # Why: Dependabot cannot set its own milestone; the PAT can.
         # From: Issue #1095 | PR #1532
         if: github.event.pull_request.user.login == 'dependabot[bot]'
         env:
@@ -646,9 +638,8 @@ jobs:
           fi
           echo "Assigned milestone #$DEPENDABOT_MILESTONE_NUMBER (LanCache-NG Roadmap) to PR #$PR_NUMBER."
 
-      # What: Same composite action as the self-hosted pr-tracking-metadata-check job above.
-      # Why: This fallback job has no `needs:` of its own, so BUILD_TOOLS_IMAGE comes from "Select
-      # build-tools image" above instead of a shared job needs-output.
+      # What: same composite action as pr-tracking-metadata-check.
+      # Why: no needs: here; image comes from Select build-tools image.
       # From: PR #1467
       - uses: ./.github/actions/pr-tracking-metadata-fetch-and-validate
         with:
@@ -656,9 +647,8 @@ jobs:
           project-automation-pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
 
   pr-title-convention-check:
-    # What: Enforces AG-GH-018: a PR title must follow this repo's Conventional-Commit taxonomy.
-    # Why: This repo merges (not squashes) pull requests, so the PR title, not any commit message, is the
-    # unit a future release-please automation would read to compute the next vX.Y.Z bump.
+    # What: enforces AG-GH-018, Conventional-Commit PR title taxonomy.
+    # Why: this repo merges (not squashes); PR titles drive release-please.
     # From: PR #1114
     name: PR title Conventional-Commit lint
     if: github.event_name == 'pull_request'
@@ -700,8 +690,8 @@ jobs:
           git checkout --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # What: Step content extracted into a composite action, shared with pr-title-convention-check-hosted.
-      # Why: Job-level scheduling (needs/if/permissions) stays here since a composite action cannot express it.
+      # What: extracted into a composite action, shared with the hosted twin.
+      # Why: job-level scheduling (needs/if/permissions) cannot live there.
       # From: PR #1467
       - uses: ./.github/actions/pr-title-convention-check
         with:
@@ -730,9 +720,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Select build-tools image
-        # What: Fallback resolves its own image rather than depending on validate-compose's output.
-        # Why: This job exists specifically for when self-hosted runners (and validate-compose, which
-        # depends on them) are unavailable, so a needs: dependency on that job would defeat its purpose.
+        # What: fallback resolves its own image, not validate-compose's output.
+        # Why: exists for when self-hosted runners are down; no needs: on them.
         # From: docs/ci-github-hosted-fallback-decision.md
         env:
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
@@ -747,9 +736,8 @@ jobs:
         run: |
           echo "::notice::Running PR title convention check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
 
-      # What: Same composite action as the self-hosted pr-title-convention-check job above.
-      # Why: This fallback job has no `needs:` of its own, so BUILD_TOOLS_IMAGE comes from "Select
-      # build-tools image" above instead of a shared job needs-output.
+      # What: same composite action as pr-title-convention-check.
+      # Why: no needs: here; image comes from Select build-tools image.
       # From: PR #1467
       - uses: ./.github/actions/pr-title-convention-check
         with:
