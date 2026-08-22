@@ -140,6 +140,21 @@ fi
 # From: Issue #1095 | PR #1586
 declare -A retention_rollback_anchor_found=()
 
+# What: discovers every digest a live Dockerfile FROM line currently builds from.
+# Why: extends rollback_anchors protection to build dependencies (issue #1613
+#   review: utilities' digest had none once it left the nightly window);
+#   re-derived every run so a removed FROM line drops protection with it.
+# From: Issue #1613
+declare -A live_dockerfile_from_digests=()
+while IFS= read -r live_dockerfile_path; do
+  [[ -n "$live_dockerfile_path" ]] || continue
+  live_dockerfile_content="$(cat "$repo_root/$live_dockerfile_path")"
+  while IFS= read -r live_dockerfile_from_digest; do
+    [[ -n "$live_dockerfile_from_digest" ]] || continue
+    live_dockerfile_from_digests["$live_dockerfile_from_digest"]=1
+  done < <(sra_dockerfile_from_digests "$live_dockerfile_content")
+done < <(git -C "$repo_root" ls-files -- '*Dockerfile*')
+
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/lancache-ng-sha-retention-audit.XXXXXX")"
 # What: removes work_dir on exit, guarded by an own-prefix path check.
 # Why: the guard keeps this rm -rf from ever touching anything but this
@@ -423,6 +438,14 @@ audit_package() {
     if sra_digest_is_rollback_anchor "$digest" "${!retention_rollback_anchor_digests[@]}"; then
       printf '%s\n' "$digest" >>"$anchor_result_file"
       sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "protected" "protect" "explicit-rollback-anchor"
+      continue
+    fi
+    # What: reuses the rollback-anchor membership check against live FROM digests.
+    # Why: extends, not duplicates, the existing protection mechanism; no
+    #   "observed" post-check applies since a live digest must already exist.
+    # From: Issue #1613
+    if sra_digest_is_rollback_anchor "$digest" "${!live_dockerfile_from_digests[@]}"; then
+      sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "protected" "protect" "live-dockerfile-from-reference"
       continue
     fi
 

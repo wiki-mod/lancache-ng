@@ -635,3 +635,17 @@ sra_cache_write_package() {
   fi
 }
 
+
+# What: extracts every referenced digest from one Dockerfile's FROM lines.
+# Why: pure text parsing (no filesystem globbing) keeps this unit-testable;
+# case-insensitive and an optional --flag group (e.g. --platform=...) cover
+# grammar variants a prior Dockerfile-matching heuristic here missed at
+# first (Rule-Ref: AG-VAL-036, PR #1506).
+# From: Issue #1613
+sra_dockerfile_from_digests() {
+  local dockerfile_content="${1?sra_dockerfile_from_digests: dockerfile content argument is required}"
+  local from_lines
+  from_lines="$(grep -ioE '^[[:space:]]*from([[:space:]]+--[^[:space:]]+)*[[:space:]]+[^[:space:]]+@sha256:[0-9a-f]{64}' <<<"$dockerfile_content")" || true
+  [[ -n "$from_lines" ]] || return 0
+  grep -oiE 'sha256:[0-9a-f]{64}' <<<"$from_lines"
+}
