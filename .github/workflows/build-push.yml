@@ -6481,7 +6481,7 @@ jobs:
           #   fails, one succeeds) with no relation to concurrency. The prior code logged
           #   an ordinary ::notice:: for that case and `exit 1`'d the whole loop on the
           #   other-direction case, both silently orphaning the surviving per-arch tag.
-          # From: Issue #1095
+          # From: Issue #1095 | PR #1642
           declare -A orphaned_services=()
 
           declare -A service_descriptions=(
@@ -6539,7 +6539,7 @@ jobs:
                 echo "::error::$service: linux/arm64 image $arm64_image was published for this commit but linux/amd64 was not -- the two architectures' build jobs diverged (one succeeded, the other failed or was skipped independently). $arm64_image is now a permanent orphan: it can never be merged into $target_image. Check the build (amd64) job for $service on this commit to find out why it did not publish, then push a new commit so both architectures retry together -- this run will not retry it for you."
                 orphaned_services["$service"]="$arm64_image"
               else
-                echo "::notice::Skipping $service: no linux/amd64 or linux/arm64 image was published for this commit (unchanged on this push, or intentionally not built)."
+                echo "::notice::Skipping $service: no linux/amd64 or linux/arm64 image was published for this commit -- unchanged/not built on this push, or both architectures' builds independently failed; check the build and build-arm64 jobs for $service to tell which."
               fi
               continue
             fi
@@ -6577,7 +6577,7 @@ jobs:
           #   lines. Does not delete: this job's ambient GITHUB_TOKEN lacks the delete-scoped
           #   PAT GHCR requires (see gc-sha-retention-audit.yml, PR #1594) -- wiring one in
           #   here is a maintainer decision, not made silently by this fix.
-          # From: Issue #1095
+          # From: Issue #1095 | PR #1642
           if [ "${#orphaned_services[@]}" -gt 0 ]; then
             echo "::error::${#orphaned_services[@]} service(s) ended this run with an orphaned single-platform tag for $source_tag that can never become part of a multi-platform manifest: ${!orphaned_services[*]}. See each service's own ::error:: above for its exact stray tag; the stack pointer step below will also fail because of this."
           fi
