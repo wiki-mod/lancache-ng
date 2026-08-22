@@ -57,17 +57,11 @@ RUN rm -f /usr/lib/libssl.so /usr/lib/libcrypto.so /usr/lib/libz.so
 
 WORKDIR /tmp/curl-${CURL_VERSION}
 
-# What: configures and builds a fully static, feature-reduced curl binary,
-# wrapping the C compiler in ccache (Redis remote storage when a secret is
-# mounted) to cache this stage's compile across image rebuilds.
-# Why: matches this project's real curl usage only; a fully static binary
-# is what makes it portable across glibc/musl consumers. Reuses the same
-# repository secret services/dns/Dockerfile's AG-CI-022 ccache-over-distcc
-# layer uses (a distinct secret mount id, not a second GitHub secret) --
-# unlike dns, this stage has no distcc at all, so only CCACHE_REMOTE_STORAGE
-# and CCACHE_COMPILERCHECK=content apply; fails closed to a plain gcc
-# compile per AG-CI-009 when no secret is mounted.
-# From: Issue #1095 (G15/#1556)
+# What: builds curl, wrapping the C compiler in ccache when a secret is mounted.
+# Why: reuses the same repository secret dns's AG-CI-022 ccache-over-distcc
+#   layer uses, under a distinct mount id; fails closed to plain gcc
+#   per AG-CI-009 otherwise.
+# From: Issue #1095 (G15 | #1556)
 RUN --mount=type=secret,id=ccache_redis_url \
     set -euo pipefail; \
     cc_wrapper=gcc; \

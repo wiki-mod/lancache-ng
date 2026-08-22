@@ -91,8 +91,7 @@ jobs:
       build_tools: ${{ steps.filter.outputs.build_tools }}
       # What: true when a full-setup-validate-only action changed.
       # Why: full-setup-validate's own gate below ORs this in alongside
-      #   deploy/workflow, since G15 narrowed workflow away from these
-      #   actions (they have no build-image consumer at all).
+      #   deploy/workflow, since these actions have no build-image consumer.
       # From: Issue #1095 (G15)
       validation_infra: ${{ steps.filter.outputs.validation_infra }}
       workflow: ${{ steps.filter.outputs.workflow }}
@@ -123,12 +122,9 @@ jobs:
           # What: classification lives in classify-image-impact.sh.
           # Why: a merge-base diff needs the fetch-depth: 0 history above.
           # From: PR #1129
-          # What: manual fail-safe override -- forces every service to rebuild
-          #   regardless of what actually changed, without a code change.
-          # Why: flipping a repository variable in GitHub settings is faster
-          #   than reverting/patching this script mid-incident if a future
-          #   classification gap is found; matches the existing
-          #   ALLOW_INSECURE_UI-style plain boolean repo variable convention.
+          # What: manual, code-change-free fail-safe repository variable.
+          # Why: flipping a GitHub Variable is faster than a script patch
+          #   mid-incident; matches the ALLOW_INSECURE_UI boolean convention.
           # From: Issue #1095 (G15)
           if [ "${FORCE_FULL_IMAGE_REBUILD:-false}" = "true" ]; then
             echo "::notice::FORCE_FULL_IMAGE_REBUILD repository variable is true; classifying all paths as changed."
@@ -5456,19 +5452,10 @@ jobs:
             echo "SECRET_FILES"
           } >> "$GITHUB_OUTPUT"
 
-      # What: produces the ccache_redis_url secret file services/dns/Dockerfile's
-      #   AG-CI-022 ccache-over-distcc layer and services/utilities/Dockerfile's
-      #   curl-builder stage both mount, independently of matrix.rust (utilities
-      #   is not a Rust builder).
-      # Why: reuses the same repository secret as sccache's own Redis endpoint
-      #   under a distinct BuildKit secret id -- dns/utilities each hard-code
-      #   their own expected mount id in their own Dockerfile, so the value
-      #   must be offered under both ids rather than only sccache_redis_url.
-      #   This closes a real, previously-unwired gap: dns's own
-      #   configure_ccache() has never received this secret in a real build
-      #   before this change (grep of this file shows ccache_redis_url was
-      #   never produced anywhere), so its ccache layer has always fallen
-      #   closed to plain distcc in production.
+      # What: produces the ccache_redis_url secret for dns and utilities.
+      # Why: dns/utilities each mount it under a distinct BuildKit secret id
+      #   from sccache's own sccache_redis_url, reusing the same repository
+      #   secret rather than a second GitHub secret.
       # From: Issue #1095 (G15 | #1556)
       - name: Prepare ccache Redis endpoint (dns + utilities C-dependency cache)
         if: >-
@@ -5519,11 +5506,9 @@ jobs:
           redis-file: ${{ steps.sccache-secret.outputs.redis-file }}
           dist-config-file: ${{ steps.sccache-secret.outputs.dist-config-file }}
           distcc-hosts-file: ${{ steps.sccache-secret.outputs.distcc-hosts-file }}
-          # What: only wired for dns -- ui's Dockerfile does not implement
-          #   AG-CI-022's ccache-over-distcc layer (see that rule's own note),
-          #   so probing it there would validate a mechanism ui never uses.
+          # What: only wired for dns -- ui does not use this ccache layer.
           # Why: reuses ccache-redis-secret's own output instead of a second
-          #   Redis-endpoint read, matching the real build step below.
+          #   Redis-endpoint read.
           # From: Issue #1095 (G15)
           ccache-redis-file: ${{ matrix.service == 'dns' && steps['ccache-redis-secret'].outputs['redis-file'] || '' }}
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
@@ -5545,13 +5530,9 @@ jobs:
           builder: ${{ steps.buildx.outputs.name }}
           context: ${{ matrix.context }}
           build-contexts: ${{ matrix.build_contexts }}
-          # What: concatenates sccache-secret's own dns/ui secret-files with
-          #   ccache-redis-secret's dns/utilities-only ccache_redis_url line.
-          # Why: at most one of the two is non-empty for any given matrix
-          #   service, so a blank joining line is the only possible overlap;
-          #   docker/build-push-action's secret-files parsing already
-          #   tolerates blank lines the same way this file's other optional
-          #   multi-line inputs (e.g. build-args below) do.
+          # What: concatenates both secret-files producers' output.
+          # Why: at most one of sccache-secret/ccache-redis-secret is
+          #   non-empty per service; a blank joining line is harmless.
           # From: Issue #1095 (G15)
           secret-files: |
             ${{ steps.sccache-secret.outputs.secret-files }}

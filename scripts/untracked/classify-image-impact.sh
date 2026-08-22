@@ -101,14 +101,9 @@ touches_action() {
     touches_prefix ".github/actions/$1/"
 }
 
-# What: the subset of known .github/actions/ directories whose change must
-#   keep forcing workflow=true (a full rebuild of all 10 services), because
-#   they are consumed unconditionally by the shared build/merge-manifests/
-#   promote pipeline (or run rarely enough that narrowing is not worth it).
-# Why: PR #1634 proved a change to one narrowly-scoped action (an even
-#   narrower case than these) forced all 10 services to rebuild; this array
-#   is the audited, evidence-based list of actions where that blast radius
-#   is actually correct, not incidental.
+# What: actions whose change must still force workflow=true for every service.
+# Why: consumed unconditionally by the shared build/merge-manifests/promote
+#   pipeline, or too infrequent to be worth narrowing further.
 # From: Issue #1095 (G15)
 globally_triggering_actions=(
     ghcr-build-push-retry
@@ -120,11 +115,9 @@ globally_triggering_actions=(
     trivy-scan-retry
 )
 
-# What: every .github/actions/ directory this script currently knows how to
-#   categorize, global or narrow.
-# Why: touches_unmapped_action() below needs this to recognize a brand-new,
-#   not-yet-categorized action directory and fail closed for it, rather than
-#   silently treating an unknown action as narrow-safe.
+# What: every .github/actions/ directory this script currently categorizes.
+# Why: touches_unmapped_action() fails closed for anything not listed here,
+#   so a brand-new action defaults to a full rebuild until categorized.
 # From: Issue #1095 (G15)
 known_actions=(
     "${globally_triggering_actions[@]}"
@@ -159,11 +152,8 @@ touches_global_action() {
     return 1
 }
 
-# What: true when a changed .github/actions/<name>/ path's <name> is not in
-#   known_actions.
-# Why: fail-closed per Step 4's discipline -- a brand-new action directory
-#   has no established consumer yet, so its blast radius is unknown until a
-#   maintainer explicitly categorizes it above; under-triggering a stale
+# What: true when a changed .github/actions/<name>/ path is not in known_actions.
+# Why: fails closed for an uncategorized action; an under-triggered stale
 #   image is worse than an unnecessary rebuild.
 # From: Issue #1095 (G15)
 touches_unmapped_action() {
@@ -260,15 +250,9 @@ workflow_diff_is_comment_only() {
 }
 
 touches_build_workflow() {
-    # What: workflow-wide impact for build-push.yml/build-tools.yml itself, a
-    #   genuinely-global action, or an unmapped action -- unless
-    #   workflow_diff_is_comment_only proves the touched content is
-    #   comment/blank-only outside any block scalar.
-    # Why: G15 narrows this from "any .github/actions/* touch" (PR #1634's
-    #   root cause: one narrowly-scoped action forced all 10 services to
-    #   rebuild) to only the paths actually consumed globally; a
-    #   dns/ui/watchdog/build-tools/full-setup-only action instead sets its
-    #   own narrower output below, and an unmapped action still fails closed.
+    # What: workflow-wide impact for global build-workflow paths only.
+    # Why: narrows the prior blanket .github/actions/* rule to only paths
+    #   consumed globally; per-service actions set their own output instead.
     # From: Issue #1095 (G14 | G15) | PR #1609 review
     local touched=false
     if touches_exact ".github/workflows/build-push.yml" \
@@ -283,16 +267,10 @@ touches_build_workflow() {
 }
 
 touches_codeql_rust() {
-    # What: CodeQL's Rust database contains these three Rust crates. It also
-    #   depends on the shared build workflow/actions and on its own
-    #   workflow/config, so a change to any of those inputs must rerun the
-    #   Rust extraction even when no Rust source file changed.
-    # Why: codeql.yml's own Rust extraction job uses configure-rust-sccache
-    #   and cargo-with-sccache-fallback directly (not just as a build-time
-    #   optimization) -- G15's narrowing of touches_build_workflow() away
-    #   from these two actions must not silently stop CodeQL from re-running
-    #   when they change, since codeql.yml has a real, independent dependency
-    #   on them that touches_prefix "services/ui/" etc. above cannot see.
+    # What: true for any path CodeQL's Rust extraction actually depends on.
+    # Why: codeql.yml's own Rust job uses configure-rust-sccache and
+    #   cargo-with-sccache-fallback directly, so the narrower
+    #   touches_build_workflow() above must not silently drop them here.
     # From: Issue #1095 (G15)
     touches_prefix "services/dns/nats-subscriber/" \
         || touches_prefix "services/ui/" \
@@ -353,14 +331,9 @@ output_bool() {
     fi
 }
 
-# What: dns_rust/dns_image/ui/watchdog also true when a relocated-from-G15
-#   action they actually consume changed, even though workflow itself no
-#   longer does for that action (see touches_build_workflow's own comment).
-# Why: rust-acceleration-preflight builds dns/ui in the `build` job
-#   (matrix.rust); configure-rust-sccache/cargo-with-sccache-fallback are
-#   used by dns/ui/watchdog's own quality/test/cargo-audit jobs -- narrowing
-#   workflow must not silently stop re-running those jobs for a real change
-#   to the action they depend on.
+# What: per-service extension for each action relocated off "workflow".
+# Why: rust-acceleration-preflight builds dns/ui; configure-rust-sccache and
+#   cargo-with-sccache-fallback run dns/ui/watchdog's quality/test/audit jobs.
 # From: Issue #1095 (G15)
 touches_dns_rust() {
     touches_prefix "services/dns/nats-subscriber/" \
@@ -424,11 +397,9 @@ touches_build_tools() {
 }
 output_bool "build_tools" touches_build_tools
 
-# What: true when a full-setup-validate-only action (network derivation,
-#   subnet reservation, or stack health wait) changed.
-# Why: these actions have no build-image consumer at all -- narrowing
-#   workflow away from them must not silently stop re-running the
-#   full-setup-validate job that actually exercises them.
+# What: true when a full-setup-validate-only action changed.
+# Why: these actions have no build-image consumer -- narrowing workflow away
+#   from them must not stop full-setup-validate from re-running for them.
 # From: Issue #1095 (G15)
 touches_validation_infra() {
     touches_action "derive-validation-network" \
