@@ -520,11 +520,126 @@ write_script() {
     [[ "$output" == *"scripts/fetch.sh:8"* ]]
 }
 
-@test "the real repository passes this guard repo-wide (scripts/**, tools/**, setup.sh)" {
+# write_workflow <relative-path> <line>...
+# Writes a fixture .github/workflows/**-style YAML file with the given lines
+# verbatim, then commits it -- this check's own scan (`git ls-files` over
+# .github/workflows/*.yml(.yaml) and .github/actions/**/*.yml(.yaml)) only
+# sees tracked files, mirroring write_script's own rationale above.
+write_workflow() {
+    local rel="$1"
+    shift
+    mkdir -p "$(dirname "$fixture/$rel")"
+    {
+        local line
+        for line in "$@"; do
+            printf '%s\n' "$line"
+        done
+    } > "$fixture/$rel"
+    fixture_add
+}
+
+@test "fails on a docker run feeding a stdin heredoc without -i (third check)" {
+    # Minimal reproduction of the real v0.3.0 incident shape: build-push.yml's
+    # release job reported success while its heredoc silently ran nothing.
+    write_workflow ".github/workflows/release.yml" \
+        'jobs:' \
+        '  release:' \
+        '    steps:' \
+        '      - run: |' \
+        '          docker run --rm \' \
+        '            -e GITHUB_TOKEN \' \
+        '            "$IMAGE" \' \
+        '            bash -s <<'"'"'MARKER'"'"'' \
+        '          echo hi' \
+        '          MARKER'
+    run bash "$script" "$fixture"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"missing -i"* ]]
+    [[ "$output" == *".github/workflows/release.yml:"* ]]
+}
+
+@test "passes on a docker run feeding a stdin heredoc with -i (third check)" {
+    write_workflow ".github/workflows/release.yml" \
+        'jobs:' \
+        '  release:' \
+        '    steps:' \
+        '      - run: |' \
+        '          docker run --rm -i \' \
+        '            -e GITHUB_TOKEN \' \
+        '            "$IMAGE" \' \
+        '            bash -s <<'"'"'MARKER'"'"'' \
+        '          echo hi' \
+        '          MARKER'
+    run bash "$script" "$fixture"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+}
+
+@test "does not flag a docker run with no stdin heredoc at all (third check)" {
+    write_workflow ".github/workflows/build.yml" \
+        'jobs:' \
+        '  build:' \
+        '    steps:' \
+        '      - run: docker run --rm "$IMAGE" cargo build'
+    run bash "$script" "$fixture"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+}
+
+@test "skips a comment line quoting the missing-i pattern as documentation (third check)" {
+    # Real false positive found by actually running an earlier version of
+    # this check against vex-regenerate.yml: its own explanatory comment
+    # (quoting "bash -s <<'MARKER'" verbatim) was misread as a real
+    # invocation. This fixture reproduces that shape directly.
+    write_workflow ".github/workflows/vex-regenerate.yml" \
+        'jobs:' \
+        '  regenerate-vex:' \
+        '    steps:' \
+        '      - run: |' \
+        '          # stdin via the bash -s <<'"'"'MARKER'"'"' heredoc below. Without -i, docker' \
+        '          # run never attaches container stdin.' \
+        '          docker run --rm -i \' \
+        '            "$IMAGE" \' \
+        '            bash -s <<'"'"'MARKER'"'"'' \
+        '          echo hi' \
+        '          MARKER'
+    run bash "$script" "$fixture"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+}
+
+@test "anchors on the LAST of two docker run invocations in the lookback window, not the first (third check)" {
+    # Real repo shape (the VEX/SBOM upload steps): a plain generate call
+    # with -i, then a separate heredoc-fed upload call ~10 lines later
+    # missing -i. Anchoring on the FIRST docker run in the window would
+    # silently pass this real violation because the earlier invocation
+    # happens to carry -i.
+    write_workflow ".github/workflows/release.yml" \
+        'jobs:' \
+        '  release:' \
+        '    steps:' \
+        '      - run: |' \
+        '          docker run --rm -i \' \
+        '            "$IMAGE" \' \
+        '            bash generate.sh' \
+        '' \
+        '          docker run --rm \' \
+        '            -e GITHUB_TOKEN \' \
+        '            "$IMAGE" \' \
+        '            bash -s <<'"'"'MARKER'"'"'' \
+        '          echo hi' \
+        '          MARKER'
+    run bash "$script" "$fixture"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"missing -i"* ]]
+}
+
+@test "the real repository passes this guard repo-wide (scripts/**, tools/**, setup.sh, .github/workflows/**, .github/actions/**)" {
     # Defense-in-depth self-check: every file the real, repo-wide scan_files
-    # discovers today must actually satisfy this guard, so a future edit
-    # that reintroduces the incident pattern anywhere in scope is caught by
-    # this suite too, not only by the CI guard step.
+    # and yaml_scan_files discover today must actually satisfy this guard,
+    # so a future edit that reintroduces any of the three incident patterns
+    # anywhere in scope is caught by this suite too, not only by the CI
+    # guard step.
     run bash "$script" "$repo_root"
     [ "$status" -eq 0 ]
     [[ "$output" == *"OK"* ]]
