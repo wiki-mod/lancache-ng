@@ -6476,25 +6476,12 @@ jobs:
           # From: Issue #1095 (G2) | PR #1503
           source_tag="sha-${COMMIT_SHA}"
           declare -A merged_digests=()
-          # What: Tracks every service that ends this run with a permanent single-platform
-          # tag (sha-<commit>-amd64 or sha-<commit>-arm64) already pushed to the registry
-          # but no matching counterpart, so it can never be merged into the real
-          # sha-<commit> multi-platform tag.
-          # Why: Issue #1095 root-cause finding (2026-08-22): a service's amd64 and arm64
-          # builds are two independent jobs that can genuinely diverge (one succeeds, the
-          # other has a real build failure) with no relationship to workflow-level
-          # concurrency/cancellation. Before this, the amd64-missing branch below only
-          # logged a ::notice:: indistinguishable from the normal "unchanged, nothing built
-          # either side" case, and the arm64-missing branch `exit 1`'d immediately, aborting
-          # this loop before any later service in "${services[@]}" was even attempted. Both
-          # silently left the surviving per-arch tag as a permanent orphan (confirmed live:
-          # ghcr.io/wiki-mod/lancache-ng/watchdog:sha-6cd94705877f153b561a9174b3d2531a5f6f14ab-arm64
-          # exists with no -amd64 sibling and no merged sha-6cd94705... tag -- see
-          # run 32575663639, "build (watchdog...)" job conclusion=failure, "build-arm64
-          # (watchdog...)" conclusion=success, same push). This array turns that silent,
-          # ambiguous state into a loud, named, per-tag ::error:: below, and lets every
-          # other unaffected service still get merged in the same run instead of the whole
-          # step aborting on the first orphan it finds.
+          # What: Tracks each service left with an orphaned single-platform tag this run.
+          # Why: amd64/arm64 builds are independent jobs that can genuinely diverge (one
+          #   fails, one succeeds) with no relation to concurrency. The prior code logged
+          #   an ordinary ::notice:: for that case and `exit 1`'d the whole loop on the
+          #   other-direction case, both silently orphaning the surviving per-arch tag.
+          # From: Issue #1095
           declare -A orphaned_services=()
 
           declare -A service_descriptions=(
@@ -6585,21 +6572,12 @@ jobs:
             printf '%s_digest=%s\n' "${service//-/_}" "$merged_digest" >> "$GITHUB_OUTPUT"
           done
 
-          # What: Consolidated, greppable summary of every orphaned single-platform tag
-          # this run found, named individually rather than left to the per-service
-          # ::error:: annotations above scrolling out of view.
-          # Why: Issue #1095 -- the maintainer's stated complaint was that nothing in the
-          # pipeline "erkennt oder meldet" (detects or reports) this state; the per-service
-          # errors above already satisfy that, this just makes the run's job summary/log
-          # tail carry the full list in one place too. Deliberately does NOT delete the
-          # orphaned tag(s): this job only holds the ambient GITHUB_TOKEN (packages:
-          # write), which GHCR does not accept for container package-version deletion --
-          # that requires the separate delete-scoped PAT already wired into the
-          # gc-sha-retention-audit.yml/gc-pr-staging-images.yml GC workflows (issue #1095,
-          # PR #1594). Deletion here would mean handing this already-heavily-audited,
-          # multi-thousand-line publish path a delete-scoped credential it does not
-          # otherwise need -- a deliberate scope decision left to the maintainer rather
-          # than made silently in this fix.
+          # What: Prints one consolidated ::error:: naming every orphan this run found.
+          # Why: Carries the full list in the run's log tail, not just scattered per-service
+          #   lines. Does not delete: this job's ambient GITHUB_TOKEN lacks the delete-scoped
+          #   PAT GHCR requires (see gc-sha-retention-audit.yml, PR #1594) -- wiring one in
+          #   here is a maintainer decision, not made silently by this fix.
+          # From: Issue #1095
           if [ "${#orphaned_services[@]}" -gt 0 ]; then
             echo "::error::${#orphaned_services[@]} service(s) ended this run with an orphaned single-platform tag for $source_tag that can never become part of a multi-platform manifest: ${!orphaned_services[*]}. See each service's own ::error:: above for its exact stray tag; the stack pointer step below will also fail because of this."
           fi
