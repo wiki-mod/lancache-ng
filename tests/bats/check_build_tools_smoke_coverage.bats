@@ -23,6 +23,11 @@ setup() {
     mkdir -p "$fixture/tools/build-tools" "$fixture/scripts/untracked"
 }
 
+fail() {
+    echo "$1" >&2
+    return 1
+}
+
 # write_dockerfile <tool>...
 # Writes a fixture build-tools Dockerfile whose final required_tools=() array
 # is exactly the given tools, and which verifies docker buildx/compose.
@@ -144,7 +149,7 @@ write_smoke() {
     [[ "$output" == *"OK"* ]]
 }
 
-# --- services/utilities/verify-version-banner.sh (issue #1613) -------------
+# --- services/utilities/verify-version-banner.sh ---------------------------
 #
 # What: coverage for the shared copied-tool version-banner smoke check that
 # services/utilities/Dockerfile ships and five consumer Dockerfiles invoke,
@@ -174,8 +179,8 @@ write_smoke() {
 
 @test "verify-version-banner.sh ignores the checked tool's own exit code (the lsof -v convention)" {
     # What: a fixture 'tool' that prints the banner but exits non-zero.
-    # Why: reproduces lsof's own unreliable -v exit-code contract (PR #1613,
-    #   commit b832d0dc) -- the banner text alone must decide pass/fail.
+    # Why: reproduces lsof's own unreliable -v exit-code contract (commit
+    #   b832d0dc) -- the banner text alone must decide pass/fail.
     fixture_bin="$BATS_TEST_TMPDIR/fake-lsof"
     {
         printf '#!/bin/sh\n'
@@ -208,9 +213,4 @@ write_smoke() {
         ! grep -qF 'lsof_out="$(lsof -v 2>&1)"' "$consumer_dockerfile" \
             || fail "services/$f/Dockerfile still has the old inline lsof banner check"
     done
-}
-
-fail() {
-    echo "$1" >&2
-    return 1
 }

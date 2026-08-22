@@ -141,9 +141,9 @@ fi
 declare -A retention_rollback_anchor_found=()
 
 # What: discovers every digest a live Dockerfile FROM line currently builds from.
-# Why: extends rollback_anchors protection to build dependencies (issue #1613
-#   review: utilities' digest had none once it left the nightly window);
-#   re-derived every run so a removed FROM line drops protection with it.
+# Why: extends rollback_anchors protection to build dependencies (utilities'
+#   digest had none once it left the nightly window); re-derived every run
+#   so a removed FROM line drops protection with it.
 # From: Issue #1613
 declare -A live_dockerfile_from_digests=()
 while IFS= read -r live_dockerfile_path; do

@@ -122,7 +122,7 @@ RUN set -euo pipefail; \
 
 # What: ships the shared copied-tool version-banner smoke check.
 # Why: dedupes the byte-identical lsof-banner check five consumer Dockerfiles
-# each carried inline (issue #1613 review).
+# each carried inline.
 # From: Issue #1613
 COPY verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
 

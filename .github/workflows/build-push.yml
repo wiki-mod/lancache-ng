@@ -7711,7 +7711,7 @@ jobs:
           # What: also resolves the utilities image's digest, for consumers only.
           # Why: their SBOM step below merges in utilities' own components,
           # since curl/findutils/gettext-envsubst/lsof/ripgrep are COPY'd from
-          # it rather than apk-installed here (issue #1613 review).
+          # it rather than apk-installed here.
           # From: Issue #1613
           case "$SERVICE" in
             proxy|dhcp|dhcp-proxy|dns|ntp|ui)
@@ -7760,8 +7760,8 @@ jobs:
           timeout: 10m
 
       - name: Generate utilities image SBOM for component merge
-        # Consumer-only (issue #1613): scans the same released utilities
-        # digest resolved above so its components can be merged below.
+        # Consumer-only: scans the same released utilities digest resolved
+        # above so its components can be merged below.
         if: contains(fromJSON('["proxy", "dhcp", "dhcp-proxy", "dns", "ntp", "ui"]'), matrix.service)
         timeout-minutes: 50
         uses: ./.github/actions/trivy-scan-retry
@@ -7783,7 +7783,7 @@ jobs:
         # service's own SBOM, deduped by bom-ref/purl/name.
         # Why: curl/findutils/gettext-envsubst/lsof/ripgrep are COPY'd from
         # utilities, not apk-installed here, so this image's own apk-db scan
-        # can no longer see them on its own (issue #1613 review).
+        # can no longer see them on its own.
         # From: Issue #1613
         if: contains(fromJSON('["proxy", "dhcp", "dhcp-proxy", "dns", "ntp", "ui"]'), matrix.service)
         env:

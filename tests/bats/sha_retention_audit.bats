@@ -968,13 +968,12 @@ EOF
 # Why: metadata stack roots now use the same bounded history policy instead
 # of an unconditional class exemption, but rollback remains absolute.
 # From: Issue #1095 | PR #1586
-# What: rollback anchor checks (now two call sites, Rule-Ref: Issue #1613's
-# live-Dockerfile-digest reuse of the same helper) must all precede tag/
-# history classification.
-# Why: since #1613 reuses sra_digest_is_rollback_anchor for both the
-# maintainer-curated anchors and the newly-discovered live FROM digests,
-# a single-match assumption here no longer holds -- every call site found
-# must independently precede facts_line, not just exactly one of them.
+# What: rollback anchor checks (now two call sites, live-Dockerfile-digest
+# reuse of the same helper) must all precede tag/history classification.
+# Why: reusing sra_digest_is_rollback_anchor for both the maintainer-curated
+# anchors and the newly-discovered live FROM digests means a single-match
+# assumption here no longer holds -- every call site found must
+# independently precede facts_line, not just exactly one of them.
 # From: Issue #1613
 @test "gc-sha-retention-audit.sh checks rollback_anchors before tag/history classification" {
   facts_line="$(grep -n 'sra_version_tag_facts "\$version_json"' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh" | cut -d: -f1)"
@@ -1065,7 +1064,7 @@ EOF
   [ "$status" -eq 1 ]
 }
 
-# --- Live Dockerfile FROM-digest protection (issue #1613 review) -----------
+# --- Live Dockerfile FROM-digest protection ---------------------------
 #
 # What: extends rollback_anchors so a digest six migrated service Dockerfiles
 # actively build FROM is protected too, without a maintainer-curated entry.
