@@ -112,6 +112,8 @@ jobs:
     steps:
       # What: mkdir-atomic per-workspace lock; a completed/stale holder (Actions
       # API best-effort, else >3h age) is reclaimed only under $RUNNER_WORKSPACE.
+      # Still busy after 6 tries: warns and proceeds unlocked, advisory not a hard
+      # gate -- a leaked lock must never hard-fail every job on that runner for 3h.
       # Why: proactively serializes self-hosted workspace reuse across jobs/PRs.
       # From: Issue #1095
       - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
@@ -119,15 +121,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
           for i in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
-            a=$(( $(date +%s) - ${t:-0} ))
-            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
+            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
           done
-          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+          echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       # What: force-resyncs to HEAD, clearing sparse-checkout/skip-worktree state.
       # Why: root-caused -- a leftover sparse-checkout cone (e.g. gc-pr-staging-
       # images.yml's collector checkout) surviving a crashed job on a reused
@@ -142,7 +144,7 @@ jobs:
           git config --local --unset-all core.sparseCheckout 2>/dev/null
           mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
           [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
-          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
+          git checkout --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -192,8 +194,8 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
-          m="$(cat "$d/m" 2>/dev/null)"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
+          m="$(cat "$d/m" 2>/dev/null || true)"
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   push-supersession-check:
@@ -207,15 +209,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
           for i in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
-            a=$(( $(date +%s) - ${t:-0} ))
-            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
+            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
           done
-          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+          echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -uo pipefail
@@ -224,7 +226,7 @@ jobs:
           git config --local --unset-all core.sparseCheckout 2>/dev/null
           mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
           [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
-          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
+          git checkout --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Check whether this push is already superseded
@@ -266,8 +268,8 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
-          m="$(cat "$d/m" 2>/dev/null)"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
+          m="$(cat "$d/m" 2>/dev/null || true)"
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   file-headers:
@@ -295,15 +297,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
           for i in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
-            a=$(( $(date +%s) - ${t:-0} ))
-            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
+            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
           done
-          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+          echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -uo pipefail
@@ -312,7 +314,7 @@ jobs:
           git config --local --unset-all core.sparseCheckout 2>/dev/null
           mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
           [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
-          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
+          git checkout --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Select immutable build-tools image
         run: |
@@ -354,8 +356,8 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
-          m="$(cat "$d/m" 2>/dev/null)"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
+          m="$(cat "$d/m" 2>/dev/null || true)"
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   compose-healthchecks:
@@ -379,15 +381,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
           for i in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
-            a=$(( $(date +%s) - ${t:-0} ))
-            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
+            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
           done
-          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+          echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -uo pipefail
@@ -396,7 +398,7 @@ jobs:
           git config --local --unset-all core.sparseCheckout 2>/dev/null
           mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
           [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
-          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
+          git checkout --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # What: Composite action shared with compose-healthchecks-hosted below.
       # Why: The two jobs used to carry the identical step twice.
@@ -407,8 +409,8 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
-          m="$(cat "$d/m" 2>/dev/null)"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
+          m="$(cat "$d/m" 2>/dev/null || true)"
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   pr-template-check:
@@ -428,15 +430,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
           for i in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
-            a=$(( $(date +%s) - ${t:-0} ))
-            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
+            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
           done
-          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+          echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -uo pipefail
@@ -445,7 +447,7 @@ jobs:
           git config --local --unset-all core.sparseCheckout 2>/dev/null
           mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
           [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
-          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
+          git checkout --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Validate PR template completeness
         env:
@@ -474,8 +476,8 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
-          m="$(cat "$d/m" 2>/dev/null)"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
+          m="$(cat "$d/m" 2>/dev/null || true)"
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   pr-template-check-hosted:
@@ -540,15 +542,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
           for i in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
-            a=$(( $(date +%s) - ${t:-0} ))
-            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
+            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
           done
-          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+          echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -uo pipefail
@@ -557,7 +559,7 @@ jobs:
           git config --local --unset-all core.sparseCheckout 2>/dev/null
           mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
           [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
-          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
+          git checkout --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Auto-assign Dependabot PR milestone
         # What: Auto-assigns milestone #11 (LanCache-NG Roadmap) to Dependabot PRs via PROJECT_AUTOMATION_PAT;
@@ -607,8 +609,8 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
-          m="$(cat "$d/m" 2>/dev/null)"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
+          m="$(cat "$d/m" 2>/dev/null || true)"
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   pr-tracking-metadata-check-hosted:
@@ -705,15 +707,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
           for i in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
-            a=$(( $(date +%s) - ${t:-0} ))
-            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
+            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
           done
-          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+          echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -uo pipefail
@@ -722,7 +724,7 @@ jobs:
           git config --local --unset-all core.sparseCheckout 2>/dev/null
           mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
           [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
-          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
+          git checkout --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # What: Step content extracted into a composite action, shared with pr-title-convention-check-hosted.
@@ -737,8 +739,8 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
-          m="$(cat "$d/m" 2>/dev/null)"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
+          m="$(cat "$d/m" 2>/dev/null || true)"
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   pr-title-convention-check-hosted:
@@ -892,15 +894,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
           for i in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
-            a=$(( $(date +%s) - ${t:-0} ))
-            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
+            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
           done
-          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+          echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -uo pipefail
@@ -909,7 +911,7 @@ jobs:
           git config --local --unset-all core.sparseCheckout 2>/dev/null
           mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
           [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
-          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
+          git checkout --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Check tracked files use Unix (LF) line endings
         run: |
@@ -1016,8 +1018,8 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
-          m="$(cat "$d/m" 2>/dev/null)"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
+          m="$(cat "$d/m" 2>/dev/null || true)"
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   line-endings-hosted:
@@ -1062,15 +1064,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
           for i in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
-            a=$(( $(date +%s) - ${t:-0} ))
-            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
+            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
           done
-          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+          echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -uo pipefail
@@ -1079,7 +1081,7 @@ jobs:
           git config --local --unset-all core.sparseCheckout 2>/dev/null
           mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
           [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
-          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
+          git checkout --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Check for banned-language source files (AG-REL-001)
         run: |
@@ -1096,8 +1098,8 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
-          m="$(cat "$d/m" 2>/dev/null)"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
+          m="$(cat "$d/m" 2>/dev/null || true)"
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   language-policy-hosted:
@@ -1173,15 +1175,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
           for i in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
-            a=$(( $(date +%s) - ${t:-0} ))
-            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
+            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
           done
-          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+          echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -uo pipefail
@@ -1190,7 +1192,7 @@ jobs:
           git config --local --unset-all core.sparseCheckout 2>/dev/null
           mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
           [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
-          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
+          git checkout --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # What: Step content (ShellCheck/ActionLint plus 7 standing text/YAML guards) extracted into a composite action; job-level scheduling (needs/if/concurrency/permissions, the docs-only skip above) and this step's own timeout-minutes stay here since a composite-action step cannot carry either.
@@ -1205,8 +1207,8 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
-          m="$(cat "$d/m" 2>/dev/null)"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
+          m="$(cat "$d/m" 2>/dev/null || true)"
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   shellcheck-hosted:
@@ -1280,15 +1282,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
           for i in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
-            a=$(( $(date +%s) - ${t:-0} ))
-            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
+            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
           done
-          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+          echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -uo pipefail
@@ -1297,7 +1299,7 @@ jobs:
           git config --local --unset-all core.sparseCheckout 2>/dev/null
           mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
           [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
-          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
+          git checkout --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Docker Buildx for manifest inspection
@@ -2892,8 +2894,8 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
-          m="$(cat "$d/m" 2>/dev/null)"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
+          m="$(cat "$d/m" 2>/dev/null || true)"
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   compute-validation-network:
@@ -2920,15 +2922,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
           for i in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
-            a=$(( $(date +%s) - ${t:-0} ))
-            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
+            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
           done
-          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+          echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -uo pipefail
@@ -2937,7 +2939,7 @@ jobs:
           git config --local --unset-all core.sparseCheckout 2>/dev/null
           mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
           [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
-          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
+          git checkout --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Derive validation network
         id: derive
@@ -2947,8 +2949,8 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
-          m="$(cat "$d/m" 2>/dev/null)"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
+          m="$(cat "$d/m" 2>/dev/null || true)"
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   full-setup-validate:
@@ -3002,15 +3004,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
           for i in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
-            a=$(( $(date +%s) - ${t:-0} ))
-            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
+            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
           done
-          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+          echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -uo pipefail
@@ -3019,7 +3021,7 @@ jobs:
           git config --local --unset-all core.sparseCheckout 2>/dev/null
           mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
           [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
-          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
+          git checkout --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -3408,8 +3410,8 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
-          m="$(cat "$d/m" 2>/dev/null)"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
+          m="$(cat "$d/m" 2>/dev/null || true)"
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   dns_rust_quality:
@@ -3451,15 +3453,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
           for i in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
-            a=$(( $(date +%s) - ${t:-0} ))
-            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
+            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
           done
-          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+          echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -uo pipefail
@@ -3468,7 +3470,7 @@ jobs:
           git config --local --unset-all core.sparseCheckout 2>/dev/null
           mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
           [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
-          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
+          git checkout --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Isolate Rust toolchain paths
         run: |
@@ -3515,8 +3517,8 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
-          m="$(cat "$d/m" 2>/dev/null)"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
+          m="$(cat "$d/m" 2>/dev/null || true)"
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   ui_rust_quality:
@@ -3551,15 +3553,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
           for i in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
-            a=$(( $(date +%s) - ${t:-0} ))
-            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
+            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
           done
-          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+          echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -uo pipefail
@@ -3568,7 +3570,7 @@ jobs:
           git config --local --unset-all core.sparseCheckout 2>/dev/null
           mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
           [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
-          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
+          git checkout --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Isolate Rust toolchain paths
         run: |
@@ -3615,8 +3617,8 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
-          m="$(cat "$d/m" 2>/dev/null)"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
+          m="$(cat "$d/m" 2>/dev/null || true)"
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   watchdog_rust_quality:
@@ -3652,15 +3654,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
           for i in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
-            a=$(( $(date +%s) - ${t:-0} ))
-            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
+            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
           done
-          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+          echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -uo pipefail
@@ -3669,7 +3671,7 @@ jobs:
           git config --local --unset-all core.sparseCheckout 2>/dev/null
           mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
           [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
-          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
+          git checkout --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Isolate Rust toolchain paths
         run: |
@@ -3716,8 +3718,8 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
-          m="$(cat "$d/m" 2>/dev/null)"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
+          m="$(cat "$d/m" 2>/dev/null || true)"
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   dns_test:
@@ -3772,15 +3774,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
           for i in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
-            a=$(( $(date +%s) - ${t:-0} ))
-            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
+            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
           done
-          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+          echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -uo pipefail
@@ -3789,7 +3791,7 @@ jobs:
           git config --local --unset-all core.sparseCheckout 2>/dev/null
           mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
           [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
-          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
+          git checkout --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Isolate Rust toolchain paths
         run: |
@@ -3826,8 +3828,8 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
-          m="$(cat "$d/m" 2>/dev/null)"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
+          m="$(cat "$d/m" 2>/dev/null || true)"
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   ui_test:
@@ -3878,15 +3880,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
           for i in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
-            a=$(( $(date +%s) - ${t:-0} ))
-            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
+            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
           done
-          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+          echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -uo pipefail
@@ -3895,7 +3897,7 @@ jobs:
           git config --local --unset-all core.sparseCheckout 2>/dev/null
           mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
           [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
-          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
+          git checkout --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Isolate Rust toolchain paths
         run: |
@@ -3932,8 +3934,8 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
-          m="$(cat "$d/m" 2>/dev/null)"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
+          m="$(cat "$d/m" 2>/dev/null || true)"
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   rust_coverage:
@@ -3985,15 +3987,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
           for i in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
-            a=$(( $(date +%s) - ${t:-0} ))
-            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
+            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
           done
-          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+          echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -uo pipefail
@@ -4002,7 +4004,7 @@ jobs:
           git config --local --unset-all core.sparseCheckout 2>/dev/null
           mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
           [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
-          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
+          git checkout --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # This job resolves its own build-tools image rather than reusing validate-compose's
       # exported build_tools_image output. That output is deliberately locked to the
@@ -4171,8 +4173,8 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
-          m="$(cat "$d/m" 2>/dev/null)"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
+          m="$(cat "$d/m" 2>/dev/null || true)"
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   publish_coverage_badge:
@@ -4206,15 +4208,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
           for i in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
-            a=$(( $(date +%s) - ${t:-0} ))
-            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
+            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
           done
-          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+          echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -uo pipefail
@@ -4223,7 +4225,7 @@ jobs:
           git config --local --unset-all core.sparseCheckout 2>/dev/null
           mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
           [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
-          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
+          git checkout --force HEAD -- . || echo "::warning::resync failed"
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Download coverage badge data
@@ -4324,8 +4326,8 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
-          m="$(cat "$d/m" 2>/dev/null)"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
+          m="$(cat "$d/m" 2>/dev/null || true)"
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   watchdog_test:
@@ -4374,15 +4376,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
           for i in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
-            a=$(( $(date +%s) - ${t:-0} ))
-            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
+            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
           done
-          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+          echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -uo pipefail
@@ -4391,7 +4393,7 @@ jobs:
           git config --local --unset-all core.sparseCheckout 2>/dev/null
           mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
           [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
-          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
+          git checkout --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: test (watchdog shell script)
         run: |
@@ -4432,8 +4434,8 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
-          m="$(cat "$d/m" 2>/dev/null)"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
+          m="$(cat "$d/m" 2>/dev/null || true)"
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   watchdog_test-hosted:
@@ -4505,15 +4507,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
           for i in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
-            a=$(( $(date +%s) - ${t:-0} ))
-            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
+            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
           done
-          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+          echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -uo pipefail
@@ -4522,7 +4524,7 @@ jobs:
           git config --local --unset-all core.sparseCheckout 2>/dev/null
           mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
           [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
-          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
+          git checkout --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Audit Rust dependencies (dns/nats-subscriber)
         run: |
@@ -4553,8 +4555,8 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
-          m="$(cat "$d/m" 2>/dev/null)"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
+          m="$(cat "$d/m" 2>/dev/null || true)"
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   ui_cargo_audit:
@@ -4605,15 +4607,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
           for i in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
-            a=$(( $(date +%s) - ${t:-0} ))
-            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
+            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
           done
-          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+          echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -uo pipefail
@@ -4622,7 +4624,7 @@ jobs:
           git config --local --unset-all core.sparseCheckout 2>/dev/null
           mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
           [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
-          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
+          git checkout --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Audit Rust dependencies (ui)
         run: |
@@ -4653,8 +4655,8 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
-          m="$(cat "$d/m" 2>/dev/null)"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
+          m="$(cat "$d/m" 2>/dev/null || true)"
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   watchdog_cargo_audit:
@@ -4706,15 +4708,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
           for i in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
-            a=$(( $(date +%s) - ${t:-0} ))
-            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
+            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
           done
-          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+          echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -uo pipefail
@@ -4723,7 +4725,7 @@ jobs:
           git config --local --unset-all core.sparseCheckout 2>/dev/null
           mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
           [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
-          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
+          git checkout --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Audit Rust dependencies (watchdog)
         run: |
@@ -4754,8 +4756,8 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
-          m="$(cat "$d/m" 2>/dev/null)"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
+          m="$(cat "$d/m" 2>/dev/null || true)"
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   ci_scope_policy:
@@ -4800,15 +4802,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
           for i in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
-            a=$(( $(date +%s) - ${t:-0} ))
-            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
+            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
           done
-          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+          echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -uo pipefail
@@ -4817,7 +4819,7 @@ jobs:
           git config --local --unset-all core.sparseCheckout 2>/dev/null
           mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
           [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
-          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
+          git checkout --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Enforce scoped CI gates
         env:
@@ -5010,8 +5012,8 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
-          m="$(cat "$d/m" 2>/dev/null)"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
+          m="$(cat "$d/m" 2>/dev/null || true)"
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   container-scan:
@@ -5140,15 +5142,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
           for i in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
-            a=$(( $(date +%s) - ${t:-0} ))
-            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
+            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
           done
-          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+          echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         if: contains(matrix.runner, 'self-hosted')
         run: |
@@ -5158,7 +5160,7 @@ jobs:
           git config --local --unset-all core.sparseCheckout 2>/dev/null
           mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
           [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
-          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
+          git checkout --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Determine per-service publish scan reuse
@@ -5320,8 +5322,8 @@ jobs:
         if: always() && contains(matrix.runner, 'self-hosted')
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
-          m="$(cat "$d/m" 2>/dev/null)"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
+          m="$(cat "$d/m" 2>/dev/null || true)"
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   determine-push-reuse-scope:
@@ -5756,15 +5758,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
           for i in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
-            a=$(( $(date +%s) - ${t:-0} ))
-            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
+            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
           done
-          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+          echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -uo pipefail
@@ -5773,7 +5775,7 @@ jobs:
           git config --local --unset-all core.sparseCheckout 2>/dev/null
           mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
           [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
-          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
+          git checkout --force HEAD -- . || echo "::warning::resync failed"
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -6571,8 +6573,8 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
-          m="$(cat "$d/m" 2>/dev/null)"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
+          m="$(cat "$d/m" 2>/dev/null || true)"
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   build-arm64:
@@ -7163,15 +7165,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
           for i in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
-            a=$(( $(date +%s) - ${t:-0} ))
-            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
+            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
           done
-          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+          echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -uo pipefail
@@ -7180,7 +7182,7 @@ jobs:
           git config --local --unset-all core.sparseCheckout 2>/dev/null
           mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
           [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
-          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
+          git checkout --force HEAD -- . || echo "::warning::resync failed"
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -7655,8 +7657,8 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
-          m="$(cat "$d/m" 2>/dev/null)"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
+          m="$(cat "$d/m" 2>/dev/null || true)"
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   promote:
@@ -7690,15 +7692,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
           for i in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
-            a=$(( $(date +%s) - ${t:-0} ))
-            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
+            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
           done
-          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+          echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -uo pipefail
@@ -7707,7 +7709,7 @@ jobs:
           git config --local --unset-all core.sparseCheckout 2>/dev/null
           mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
           [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
-          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
+          git checkout --force HEAD -- . || echo "::warning::resync failed"
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -8098,8 +8100,8 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
-          m="$(cat "$d/m" 2>/dev/null)"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
+          m="$(cat "$d/m" 2>/dev/null || true)"
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   release:
@@ -8146,15 +8148,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
           for i in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
-            a=$(( $(date +%s) - ${t:-0} ))
-            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
+            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
           done
-          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+          echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -uo pipefail
@@ -8163,7 +8165,7 @@ jobs:
           git config --local --unset-all core.sparseCheckout 2>/dev/null
           mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
           [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
-          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
+          git checkout --force HEAD -- . || echo "::warning::resync failed"
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -8525,8 +8527,8 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
-          m="$(cat "$d/m" 2>/dev/null)"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
+          m="$(cat "$d/m" 2>/dev/null || true)"
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
   release-sbom:
@@ -8560,15 +8562,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
           for i in 1 2 3 4 5 6; do
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null)
-            a=$(( $(date +%s) - ${t:-0} ))
-            { [ "$s" = completed ] || { [ -z "$s" ] && [ "$a" -gt 10800 ]; }; } && [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
+            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
+            { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
           done
-          echo "::error::lock timeout, held by run ${h:-?} status ${s:-?}"; exit 1
+          echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -uo pipefail
@@ -8577,7 +8579,7 @@ jobs:
           git config --local --unset-all core.sparseCheckout 2>/dev/null
           mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
           [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
-          git checkout --progress --force HEAD -- . || echo "::warning::resync failed"
+          git checkout --force HEAD -- . || echo "::warning::resync failed"
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -8727,7 +8729,7 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          d="${RUNNER_WORKSPACE}/.ci-checkout.lock"
-          m="$(cat "$d/m" 2>/dev/null)"
+          d="${RUNNER_WORKSPACE}/.ckt.lock"
+          m="$(cat "$d/m" 2>/dev/null || true)"
           [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
           exit 0
