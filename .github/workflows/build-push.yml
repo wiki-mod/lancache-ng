@@ -6774,6 +6774,19 @@ jobs:
             printf '%s\n' "$digest"
           }
 
+          # What: tracks each service whose amd64/arm64 PR-staging tags diverged this run.
+          # Why: the loop below now `continue`s past a divergence instead of `exit 1`ing
+          #   immediately (same fix as the trusted-ref step, PR #1642) so every OTHER
+          #   service still gets processed -- but unlike that step, this loop has no
+          #   later stack-pointer check to re-assert completeness, so without this array
+          #   the step would exit 0 (job success) despite a real divergence, letting
+          #   full-setup-validate's base-channel fallback silently validate STALE content
+          #   for a service this PR actually touched -- exactly what the "Refusing to
+          #   fall back to the PR base commit's content for a touched service" guard in
+          #   "Ensure PR staging tags exist for full-setup services" exists to prevent.
+          # From: Issue #1095 | PR #1642 | PR #1643
+          declare -a diverged_services=()
+
           for service in "${services[@]}"; do
             amd64_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}-amd64"
             arm64_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}-arm64"
@@ -6789,9 +6802,11 @@ jobs:
               # What: `continue`, not `exit 1` -- same failure class PR #1642 fixed for the
               #   trusted-ref step above (found while working full-setup-validate's gate).
               # Why: aborting the whole loop here silently dropped every service iterated
-              #   after this one from this step's outputs too, with no error naming them.
+              #   after this one from this step's outputs too, with no error naming them;
+              #   the post-loop check below still fails the step overall (see above).
               # From: Issue #1095 | PR #1642 | PR #1643
-              echo "::error::$service has a linux/amd64 PR staging image but no linux/arm64 one ($arm64_image); build and build-arm64 disagreed on whether this service needed building. Skipping only $service; other services in this PR's candidate set are still processed below."
+              echo "::error::$service has a linux/amd64 PR staging image but no linux/arm64 one ($arm64_image); build and build-arm64 disagreed on whether this service needed building. Continuing to process other services below, but this step still fails overall."
+              diverged_services+=("$service")
               continue
             fi
 
@@ -6814,6 +6829,16 @@ jobs:
             merged_digest="$(digest_for_image "$target_image")"
             printf '%s_digest=%s\n' "${service//-/_}" "$merged_digest" >> "$GITHUB_OUTPUT"
           done
+
+          # What: the backstop `diverged_services` above exists to enforce -- fails the
+          #   step now that every service has been processed.
+          # Why: without this, the step would exit 0 despite a real divergence (see the
+          #   array's own comment above for the exact guard this would otherwise defeat).
+          # From: Issue #1095 | PR #1642 | PR #1643
+          if [ "${#diverged_services[@]}" -gt 0 ]; then
+            echo "::error::${#diverged_services[@]} service(s) had a linux/amd64 PR staging image but no linux/arm64 one this run (${diverged_services[*]}). See each service's own ::error:: above; this step fails so merge-manifests reports failure and full-setup-validate cannot silently fall back to stale base-channel content for a touched service."
+            exit 1
+          fi
 
       # "Set up Docker Buildx" above runs unconditionally (unlike the two
       # mutually-exclusive "Create ..." steps that consume it), so this
