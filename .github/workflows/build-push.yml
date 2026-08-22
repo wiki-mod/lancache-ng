@@ -2932,11 +2932,11 @@ jobs:
       # From: Issue #1095 | PR #1532
       actions: read
     # What: VALIDATION_SUBNET/etc. come from a flock reservation, not env:.
-    # Why: full reasoning on Issue #1095 (concurrent-run race).
+    # Why: full reasoning on the linked issue (concurrent-run race).
     # From: Issue #1095 | PR #1532
     steps:
       # What: fetch-depth: 0 instead of the default shallow clone.
-      # Why: needed for a merge-base diff below; see Issue #1095.
+      # Why: needed for a merge-base diff below; see the linked issue.
       # From: Issue #1095 | PR #1532
       - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
         env:
@@ -2967,7 +2967,7 @@ jobs:
           fetch-depth: 0
 
       # What: resolves the image channel to validate against.
-      # Why: full channel/fallback reasoning on Issue #1095.
+      # Why: full channel/fallback reasoning on the linked issue.
       # From: Issue #1095 | PR #1532
       - name: Determine validation image channel
         id: channel
@@ -3036,7 +3036,7 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       # What: backfills an untouched service from the base channel image.
-      # Why: full reasoning on Issue #1095 (LANCACHE_IMAGE_TAG contract).
+      # Why: full reasoning on the linked issue (LANCACHE_IMAGE_TAG contract).
       # From: Issue #1095 | PR #1532
 
       # What: force-removes buildx_buildkit_* containers older than 3h.
@@ -3203,7 +3203,8 @@ jobs:
           done
 
       # What: renders the full-setup compose override from OCI digests.
-      # Why: consolidated under AG-CODE-013; see Issue #1095.
+      # Why: consolidated from render-full-setup-digest-override.sh
+      # (AG-CODE-013), this workflow's only caller.
       # From: PR #1523
       - name: Pin full-setup service identities to immutable digests
         id: pin-full-setup-digests
@@ -3298,7 +3299,7 @@ jobs:
             docker compose -f docker-compose.yml -f "${FULL_SETUP_COMPOSE_OVERRIDE:?FULL_SETUP_COMPOSE_OVERRIDE is required}" config >/dev/null
 
       # What: reserves the validation subnet via a host-local flock.
-      # Why: closes a check-then-create race; see Issue #1095.
+      # Why: closes a check-then-create race; see the linked issue.
       # From: Issue #1095 | PR #1532
       - name: Reserve a validation subnet and start the stack (locked, retries on collision)
         uses: ./.github/actions/reserve-validation-subnet-stack
@@ -3706,7 +3707,7 @@ jobs:
     name: test (dns/nats-subscriber)
     needs: [validate-compose, dns_rust_quality, detect-changes]
     # What: path-scoped on both pull_request and push events.
-    # Why: full canonical reasoning on Issue #1095.
+    # Why: full canonical reasoning on the linked issue.
     # From: Issue #1095 | PR #1532
     if: >-
       ${{
@@ -3917,7 +3918,7 @@ jobs:
           exit 0
   rust_coverage:
     # What: also skips on a metadata-only pull_request event.
-    # Why: full reasoning (coverage tolerance) on Issue #1095.
+    # Why: full reasoning (coverage tolerance) on the linked issue.
     # From: Issue #1095 | PR #1532
     name: coverage (Rust)
     needs: [validate-compose, dns_test, ui_test, detect-changes]
@@ -4174,7 +4175,7 @@ jobs:
     # Real runs: 10-12s. Same 15-minute floor as detect-changes above.
     timeout-minutes: 15
     # What: job-level concurrency, keyed per source ref.
-    # Why: full queueing/racing reasoning on Issue #1095.
+    # Why: full queueing/racing reasoning on the linked issue.
     # From: Issue #1095 | PR #1532
     concurrency:
       group: ${{ github.workflow }}-badge-${{ github.ref }}
@@ -4312,12 +4313,12 @@ jobs:
           exit 0
   watchdog_test:
     # What: covers watchdog.sh's syntax gate plus a real cargo test.
-    # Why: full reasoning (tier/tolerance change) on Issue #1095.
+    # Why: full reasoning (tier/tolerance change) on the linked issue.
     # From: Issue #1095 | PR #1532
     name: test (watchdog)
     needs: [validate-compose, watchdog_rust_quality, detect-changes]
     # What: path-scoped like dns_test/ui_test.
-    # Why: full reasoning on Issue #1095.
+    # Why: full reasoning on the linked issue.
     # From: Issue #1095 | PR #1532
     if: >-
       ${{
@@ -4423,7 +4424,7 @@ jobs:
           exit 0
   watchdog_test-hosted:
     # What: GitHub-hosted fallback for the shell-script check only.
-    # Why: full reasoning (no hosted Rust equivalent) on Issue #1095.
+    # Why: full reasoning (no hosted Rust equivalent) on the linked issue.
     # From: Issue #1095 | PR #1532
     name: test (watchdog) (GitHub-hosted fallback)
     runs-on: ubuntu-latest
@@ -4753,7 +4754,7 @@ jobs:
           exit 0
   ci_scope_policy:
     # What: verifies every check required for the PR's files ran.
-    # Why: full tolerance-matrix reasoning on Issue #1095.
+    # Why: full tolerance-matrix reasoning on the linked issue.
     # From: Issue #1095 | PR #1532
     name: CI scope policy
     needs:
@@ -4775,7 +4776,7 @@ jobs:
     # From: Issue #1095 | PR #1532
     timeout-minutes: 15
     # What: cancel-in-progress is scoped to pull_request only.
-    # Why: full reasoning on Issue #1095.
+    # Why: full reasoning on the linked issue.
     # From: Issue #1095 | PR #1532
     concurrency:
       group: >-
@@ -4787,7 +4788,7 @@ jobs:
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     steps:
       # What: checks out the repo before the Buildx-step guard below.
-      # Why: full reasoning (workspace reuse) on Issue #1095.
+      # Why: full reasoning (workspace reuse) on the linked issue.
       # From: Issue #1095 | PR #1532
       - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
         env:
@@ -4843,7 +4844,7 @@ jobs:
           set -euo pipefail
 
           # What: greps for the literal step name via a [S] character class.
-          # Why: avoids self-matching; full reasoning on Issue #1095.
+          # Why: avoids self-matching; full reasoning on the linked issue.
           # From: Issue #1095 | PR #1532
           grep -n -- "- name: [S]et up Docker Buildx for manifest inspection" .github/workflows/build-push.yml >/dev/null || {
             echo "::error::validate-compose must set up Buildx before resolving digest-qualified build-tools images."
@@ -4883,7 +4884,7 @@ jobs:
           }
 
           # What: tolerates success/skipped/cancelled for test/audit jobs.
-          # Why: full per-job tolerance reasoning on Issue #1095.
+          # Why: full per-job tolerance reasoning on the linked issue.
           # From: Issue #1095 | PR #1532
           require_success_or_intentional_cancellation() {
             local name="$1" value="$2"
@@ -4929,7 +4930,7 @@ jobs:
           done
 
           # What: treats labeled/unlabeled/etc. as non-content PR actions.
-          # Why: full reasoning on Issue #1095.
+          # Why: full reasoning on the linked issue.
           # From: Issue #1095 | PR #1532
           content_event=true
           case "$EVENT_ACTION" in
@@ -4958,7 +4959,7 @@ jobs:
             fi
           fi
           # What: watchdog_required follows the same content_event gate.
-          # Why: full reasoning on Issue #1095.
+          # Why: full reasoning on the linked issue.
           # From: Issue #1095 | PR #1532
 
           if [ "$dns_rust_required" = "true" ]; then
@@ -5156,7 +5157,7 @@ jobs:
 
       - name: Determine per-service publish scan reuse
         # What: reads determine-push-reuse-scope's reuse_<service> output.
-        # Why: full reasoning (shared decision) on Issue #1095.
+        # Why: full reasoning (shared decision) on the linked issue.
         # From: Issue #1095 | PR #1532
         id: push-scan-changes
         env:
@@ -5208,7 +5209,7 @@ jobs:
 
       - name: Self-heal Trivy's own default cache directory ownership
         # What: chowns/setgids ~/.cache/trivy if it exists.
-        # Why: self-heals a root-owned cache dir; see Issue #1095.
+        # Why: a prior root-run process can leave the cache dir root-owned.
         # From: PR #1405
         run: |
           set -euo pipefail
@@ -5322,7 +5323,7 @@ jobs:
           exit 0
   determine-push-reuse-scope:
     # What: decides once per push whether a service can safely retag.
-    # Why: full reasoning on Issue #1095.
+    # Why: full reasoning on the linked issue.
     # From: Issue #1095 | PR #1532
     name: determine push reuse scope (Step 4)
     needs: detect-changes
@@ -5366,7 +5367,7 @@ jobs:
       reuse_syslog: ${{ steps.decide.outputs.reuse_syslog }}
       reuse_utilities: ${{ steps.decide.outputs.reuse_utilities }}
       # What: the pinned digest reuse=true services verified against.
-      # Why: closes a digest TOCTOU race; see Issue #1095.
+      # Why: closes a digest TOCTOU race; see the linked issue.
       # From: Issue #1095 | PR #1532
       digest_proxy: ${{ steps.decide.outputs.digest_proxy }}
       digest_dns: ${{ steps.decide.outputs.digest_dns }}
@@ -5468,7 +5469,7 @@ jobs:
 
           # decide_one <classify_key> <matrix_service> <before_sha_changed>
           # What: before_sha_changed is detect-changes' before..sha verdict.
-          # Why: full reasoning on Issue #1095.
+          # Why: full reasoning on the linked issue.
           # From: Issue #1095 | PR #1532
           decide_one() {
             local classify_key="$1" matrix_service="$2" before_sha_changed="$3"
@@ -5629,7 +5630,7 @@ jobs:
 
   build:
     # What: the only job that publishes service sha-* images.
-    # Why: full reasoning on Issue #1095.
+    # Why: full reasoning on the linked issue.
     # From: Issue #1095 | PR #1499 | PR #1503 | PR #1532
     needs:
       - determine-build-admission
@@ -5655,7 +5656,7 @@ jobs:
     runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 150
     # What: job-level concurrency, keyed per matrix service and ref.
-    # Why: full cancellation reasoning on Issue #1095.
+    # Why: full cancellation reasoning on the linked issue.
     # From: Issue #1095 | PR #1532
     concurrency:
       group: >-
@@ -5678,7 +5679,7 @@ jobs:
       matrix:
         include: &normal-build-services
           # What: runner tiers below (AG-CI-002 measured exception).
-          # Why: full per-service reasoning on Issue #1095.
+          # Why: full per-service reasoning on the linked issue.
           # From: Issue #1095 | PR #1523
 
           - service: proxy
@@ -5832,7 +5833,7 @@ jobs:
             fi
           elif [ "$REUSE_JOB_RESULT" = "success" ]; then
             # What: determine-push-reuse-scope's check covers all 10 services.
-            # Why: full reasoning on Issue #1095.
+            # Why: full reasoning on the linked issue.
             # From: Issue #1095 | PR #1532
             case "$MATRIX_SERVICE" in
               proxy) reuse="$REUSE_PROXY" ;;
@@ -5853,7 +5854,7 @@ jobs:
           fi
 
           # What: a newer commit may have superseded this one already.
-          # Why: full reasoning on Issue #1095.
+          # Why: full reasoning on the linked issue.
           # From: Issue #1095 | PR #1532
           if [ "$GITHUB_EVENT_NAME" != "pull_request" ] && [ "$SUPERSEDED" = "true" ]; then
             echo "::notice::A newer push to $GITHUB_REF has already superseded this run; skipping $MATRIX_SERVICE's build so only the run already targeting the current tip does the heavy work."
@@ -5947,7 +5948,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # What: retags an already-verified, unchanged service's image.
-      # Why: full digest-race reasoning on Issue #1095.
+      # Why: full digest-race reasoning on the linked issue.
       # From: Issue #1095 | PR #1532
       - name: Retag unchanged service image for this commit (linux/amd64, no rebuild)
         if: github.event_name == 'push' && steps.should-build.outputs.should-build == 'false' && needs['push-supersession-check'].outputs.superseded != 'true'
@@ -6418,7 +6419,7 @@ jobs:
 
       - name: Prepare pushed service Trivy cache
         # What: same shared-cache-directory race as container-scan's step.
-        # Why: full reasoning on Issue #1095.
+        # Why: full reasoning on the linked issue.
         # From: Issue #1095 | PR #1532
         id: trivy-cache
         if: >-
@@ -6485,7 +6486,7 @@ jobs:
 
       - name: Scan pushed service digest with Trivy
         # What: Step 3 -- scans the exact pushed digest before promotion.
-        # Why: now the only scan for a changed service; see Issue #1095.
+        # Why: now the only scan for a changed service; see the linked issue.
         # From: Issue #1095 | PR #1532
         id: trivy-scan-pushed
         if: >-
@@ -6613,7 +6614,8 @@ jobs:
           exit 0
   build-arm64:
     # What: native linux/arm64 leg of build's publish contract.
-    # Why: full reasoning (no hosted sccache) on Issue #1095.
+    # Why: hosted runners can't reach the self-hosted LAN's
+    # Redis-backed sccache/sccache-dist/distcc.
     # From: Issue #592
     #
     # What: `needs:` mirrors `build`'s own superset, for the same reason.
@@ -6715,7 +6717,7 @@ jobs:
             fi
           elif [ "$REUSE_JOB_RESULT" = "success" ]; then
             # What: mirrors build's own (amd64) identical Step 4 branch.
-            # Why: full reasoning on Issue #1095.
+            # Why: full reasoning on the linked issue.
             # From: Issue #1095 | PR #1532
             case "$MATRIX_SERVICE" in
               proxy) reuse="$REUSE_PROXY" ;;
@@ -7548,7 +7550,7 @@ jobs:
           docker buildx rm "${{ steps.buildx.outputs.name }}" || true
 
       # What: one explicit attest step per service, digest-gated.
-      # Why: full reasoning on Issue #1095.
+      # Why: full reasoning on the linked issue.
       # From: Issue #1095 | PR #1532
       - name: Attest proxy merged manifest provenance
         if: steps.create-trusted-manifests.outputs.proxy_digest != ''
@@ -7727,7 +7729,7 @@ jobs:
           exit 0
   promote:
     # What: promotion is gated by an explicit !cancelled() condition.
-    # Why: avoids the implicit-success() skip trap; see Issue #1095.
+    # Why: avoids the implicit-success() skip trap; see the linked issue.
     # From: Issue #1095 | PR #1532
     name: promote stack image channels
     needs: [merge-manifests, full-setup-validate]
@@ -7736,7 +7738,7 @@ jobs:
     # 45 minutes covers the cross-workflow promote-lock retry budget plus normal registry work.
     timeout-minutes: 45
     # What: real mutual exclusion comes from the cross-workflow lock.
-    # Why: full reasoning on Issue #1095.
+    # Why: full reasoning on the linked issue.
     # From: Issue #1095 | PR #1532
     permissions:
       # What: contents: write, for the promote-lock's compare-and-swap
@@ -7785,7 +7787,7 @@ jobs:
           fetch-depth: 0
 
       # What: acquires cross-host mutual exclusion before any image work.
-      # Why: fails closed under set -euo pipefail; see Issue #1095.
+      # Why: fails closed under set -euo pipefail; see the linked issue.
       # From: Issue #1095 | PR #1532
       - name: Acquire the cross-workflow promote lock
         env:
@@ -7958,7 +7960,7 @@ jobs:
           fi
 
           # What: maps the triggering ref to its channel tag(s).
-          # Why: full channel-cadence reasoning on Issue #1095.
+          # Why: full channel-cadence reasoning on the linked issue.
           # From: Issue #1095 | PR #1532
           if [[ "$GITHUB_REF" = "refs/heads/master" ]]; then
             channel_tags+=(latest)
@@ -8156,11 +8158,11 @@ jobs:
 
           git tag -a "$next_tag" "$COMMIT_SHA" -m "Automated patch release ${next_tag}"
           # What: pushes the release tag via a Basic-Auth header, not the URL.
-          # Why: avoids anti-recursion + secret-leak issues; see Issue #1095.
+          # Why: avoids anti-recursion + a secret leak; see linked issue.
           # From: Issue #1095 | PR #1532
           push_url="https://github.com/${REPOSITORY}.git"
           # What: resets checkout's persisted Authorization header first.
-          # Why: avoids a duplicate-header push rejection; see Issue #1095.
+          # Why: avoids a duplicate-header push rejection; see the linked issue.
           # From: Issue #1095 | PR #1532
           git config --local --unset-all "http.https://github.com/.extraheader" 2>/dev/null || true
           GIT_CONFIG_COUNT=2 \
@@ -8313,7 +8315,8 @@ jobs:
         env:
           TAG_NAME: ${{ github.ref_name }}
           # What: syslog/utilities are explicit in this SERVICES scalar.
-          # Why: the regex-based guard can't see a bash array; see Issue #1095.
+          # Why: check-workflow-service-lists.sh's regex guard can only
+          # see a space-separated scalar here, not a bash array.
           # From: Issue #1428 | PR #1433 | Issue #1556 | PR #1574
           SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities stack
           REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
