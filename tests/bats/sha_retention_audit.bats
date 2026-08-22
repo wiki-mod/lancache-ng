@@ -712,6 +712,7 @@ EOF
   [[ "$output" == *"CREATE TABLE IF NOT EXISTS version_cache_v2"* ]]
   [[ "$output" == *"PRIMARY KEY (package, version_id, history_fingerprint)"* ]]
   [[ "$output" == *"history_fingerprint TEXT NOT NULL"* ]]
+  [[ "$output" == *"history_ref_names TEXT NOT NULL"* ]]
 }
 
 # What: doubles an embedded single quote, SQL's own escape for that literal.
@@ -855,6 +856,45 @@ EOF
   run sra_cache_read_package "$db_path" "proxy" "$wide_fp"
   [ "$status" -eq 0 ]
   [[ "$output" == *"rank:3"* ]]
+}
+
+# What: a same-ref-name-set generation is pruned when its exact fingerprint
+# changes (tip advance), but a different caller's generation is untouched.
+# Why: without pruning, every tip advance adds a permanent new generation
+# instead of replacing the prior one from the same caller -- unbounded
+# growth (Issue #1095); pruning must not cross ref-name-set boundaries.
+# From: Issue #1095.
+@test "cache write prunes a superseded same-caller generation but not a different caller's" {
+  command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not available on this host"
+  db_path="$tmp_dir/cache.db"
+  rows_file="$tmp_dir/rows.tsv"
+  old_fp="origin/current_dev@$(printf 'c%.0s' {1..40})"
+  new_fp="origin/current_dev@$(printf 'e%.0s' {1..40})"
+  other_caller_fp="origin/current_dev@$(printf 'c%.0s' {1..40});origin/master@$(printf 'd%.0s' {1..40})"
+  run sra_cache_init "$db_path"
+  [ "$status" -eq 0 ]
+
+  printf '42\tsha256:%s\told-tag\trank:9\n' "$(printf 'a%.0s' {1..64})" >"$rows_file"
+  run sra_cache_write_package "$db_path" "proxy" "$rows_file" "$old_fp"
+  [ "$status" -eq 0 ]
+  run sra_cache_write_package "$db_path" "proxy" "$rows_file" "$other_caller_fp"
+  [ "$status" -eq 0 ]
+
+  printf '42\tsha256:%s\tnew-tag\trank:3\n' "$(printf 'b%.0s' {1..64})" >"$rows_file"
+  run sra_cache_write_package "$db_path" "proxy" "$rows_file" "$new_fp"
+  [ "$status" -eq 0 ]
+
+  run sra_cache_read_package "$db_path" "proxy" "$old_fp"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+
+  run sra_cache_read_package "$db_path" "proxy" "$new_fp"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"new-tag"* ]]
+
+  run sra_cache_read_package "$db_path" "proxy" "$other_caller_fp"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"old-tag"* ]]
 }
 
 # What: the fingerprint differs when the managed ref set changes.

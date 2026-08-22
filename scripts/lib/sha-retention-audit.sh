@@ -526,6 +526,7 @@ CREATE TABLE IF NOT EXISTS version_cache_v2 (
   tags TEXT NOT NULL,
   resolution TEXT NOT NULL,
   history_fingerprint TEXT NOT NULL,
+  history_ref_names TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   PRIMARY KEY (package, version_id, history_fingerprint)
 );
@@ -596,9 +597,17 @@ sra_cache_write_package() {
   local package="${2:?sra_cache_write_package: package is required}"
   local rows_file="${3:?sra_cache_write_package: rows file is required}"
   local history_fingerprint="${4:?sra_cache_write_package: history fingerprint is required}"
-  local now version_id digest tags resolution sql_file
+  local now version_id digest tags resolution sql_file history_ref_names fp_entry
+  local -a fp_entries
   command -v sqlite3 >/dev/null 2>&1 || return 1
   [[ -f "$rows_file" ]] || return 1
+
+  history_ref_names=""
+  IFS=';' read -ra fp_entries <<<"$history_fingerprint"
+  for fp_entry in "${fp_entries[@]}"; do
+    [[ -n "$fp_entry" ]] || continue
+    history_ref_names+="${history_ref_names:+;}${fp_entry%%@*}"
+  done
 
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   sql_file="$(mktemp)"
@@ -606,9 +615,16 @@ sra_cache_write_package() {
     printf 'BEGIN TRANSACTION;\n'
     while IFS=$'\t' read -r version_id digest tags resolution; do
       [[ "$version_id" =~ ^[0-9]+$ ]] || continue
-      printf "INSERT OR REPLACE INTO version_cache_v2 (package, version_id, digest, tags, resolution, history_fingerprint, updated_at) VALUES ('%s', %s, '%s', '%s', '%s', '%s', '%s');\n" \
-        "$(sra_sql_quote "$package")" "$version_id" "$(sra_sql_quote "$digest")" "$(sra_sql_quote "$tags")" "$(sra_sql_quote "$resolution")" "$(sra_sql_quote "$history_fingerprint")" "$now"
+      printf "INSERT OR REPLACE INTO version_cache_v2 (package, version_id, digest, tags, resolution, history_fingerprint, history_ref_names, updated_at) VALUES ('%s', %s, '%s', '%s', '%s', '%s', '%s', '%s');\n" \
+        "$(sra_sql_quote "$package")" "$version_id" "$(sra_sql_quote "$digest")" "$(sra_sql_quote "$tags")" "$(sra_sql_quote "$resolution")" "$(sra_sql_quote "$history_fingerprint")" "$(sra_sql_quote "$history_ref_names")" "$now"
     done <"$rows_file"
+    # What: prunes a superseded generation for the same caller identity.
+    # Why: a tip-advance changes history_fingerprint on every write, and the
+    # composite key keeps old and new generations from evicting each other
+    # (Issue #1095) -- without this, obsolete rows accumulate unbounded.
+    # From: Issue #1095.
+    printf "DELETE FROM version_cache_v2 WHERE package = '%s' AND history_ref_names = '%s' AND history_fingerprint != '%s';\n" \
+      "$(sra_sql_quote "$package")" "$(sra_sql_quote "$history_ref_names")" "$(sra_sql_quote "$history_fingerprint")"
     printf 'COMMIT;\n'
   } >"$sql_file"
   if sqlite3 "$db_path" <"$sql_file"; then
