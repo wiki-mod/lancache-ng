@@ -129,8 +129,8 @@ jobs:
           done
           echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
       # What: force-resyncs to HEAD, clearing sparse-checkout/skip-worktree.
-      # Why: root-caused this run's missing-file symptom (PR #1640 origin).
-      # From: Issue #1095 | PR #1640
+      # Why: root-caused this run's missing-file symptom on 4 hosts.
+      # From: Issue #1095
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -uo pipefail
