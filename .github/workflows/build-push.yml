@@ -2833,8 +2833,12 @@ jobs:
             fi
             image="ghcr.io/${REPOSITORY}/${service}:${IMAGE_TAG}"
             echo "::notice::No producer digest was exported for $service; resolving $image once and pinning the result for this validation run." >&2
+            # What: resolve_manifest_digest is already ghcr_retry-wrapped.
+            # Why: by the time it fails, retries are exhausted, so this could be a genuinely
+            #   missing image OR GHCR not answering -- do not assert "missing" as fact.
+            # From: Issue #1095 | PR #1642 | PR #1643
             if ! digest="$(resolve_manifest_digest "$image" "${GHCR_RETRY_USERNAME:-}" "${GHCR_RETRY_PASSWORD:-}")"; then
-              echo "::error::Could not resolve immutable digest for $image -- $service is missing from this run's candidate set." >&2
+              echo "::error::Could not resolve an immutable digest for $image after retries -- either $service is missing from this run's candidate set, or GHCR did not answer." >&2
               missing_services+=("$service")
               return 1
             fi
@@ -2856,7 +2860,7 @@ jobs:
           #   retention window.
           # From: Issue #1095 | PR #1642 | PR #1643
           if [ "${#missing_services[@]}" -gt 0 ]; then
-            echo "::error::This run's candidate set is incomplete: ${#missing_services[@]} service(s) missing a resolvable image (${missing_services[*]}). VERIFY cannot validate an incomplete stack -- see each service's own ::error:: above. The images this run DID publish are not deleted by this step: they are ordinary sha-* history, already covered by gc-pr-staging-images.yml's existing 3-hourly retention sweep (no dedicated fast-path exists or was added here) -- push a new commit to retry the whole candidate set instead of waiting on that sweep."
+            echo "::error::This run could not resolve a candidate image for ${#missing_services[@]} service(s) (${missing_services[*]}) -- see each service's own ::error:: above for whether that is a missing image or a GHCR read failure after retries. VERIFY cannot validate an incomplete stack. The images this run DID publish are not deleted by this step: they are ordinary sha-* history, already covered by gc-pr-staging-images.yml's existing 3-hourly retention sweep (no dedicated fast-path exists or was added here) -- push a new commit to retry the whole candidate set instead of waiting on that sweep."
             exit 1
           fi
 
@@ -6782,8 +6786,13 @@ jobs:
               continue
             fi
             if ! docker buildx imagetools inspect "$arm64_image" >/dev/null 2>&1; then
-              echo "::error::$service has a linux/amd64 PR staging image but no linux/arm64 one ($arm64_image); build and build-arm64 disagreed on whether this service needed building."
-              exit 1
+              # What: `continue`, not `exit 1` -- same failure class PR #1642 fixed for the
+              #   trusted-ref step above (found while working full-setup-validate's gate).
+              # Why: aborting the whole loop here silently dropped every service iterated
+              #   after this one from this step's outputs too, with no error naming them.
+              # From: Issue #1095 | PR #1642 | PR #1643
+              echo "::error::$service has a linux/amd64 PR staging image but no linux/arm64 one ($arm64_image); build and build-arm64 disagreed on whether this service needed building. Skipping only $service; other services in this PR's candidate set are still processed below."
+              continue
             fi
 
             amd64_digest="$(digest_for_image "$amd64_image")"
