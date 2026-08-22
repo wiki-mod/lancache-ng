@@ -1231,6 +1231,33 @@ jobs:
           git checkout --force HEAD -- . || echo "::warning::resync failed"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # What: force-removes buildx_buildkit_* containers older than 3h.
+      # Why: a crashed job also skips its removal step below (same
+      # failure class as this PR's workspace-resync fix); 3h clears the
+      # file's longest self-hosted job timeout (150m) with real margin.
+      # From: Issue #1095
+      - name: Clean up stale Buildx builder containers (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          now=$(date +%s)
+          ids=$(docker ps -a --filter "name=^/buildx_buildkit_" --format '{{.ID}}' 2>/dev/null || true)
+          for cid in $ids; do
+            cname=$(docker inspect -f '{{.Name}}' "$cid" 2>/dev/null || true)
+            case "$cname" in
+              /buildx_buildkit_*) ;;
+              *) continue ;;
+            esac
+            created=$(docker inspect -f '{{.Created}}' "$cid" 2>/dev/null || true)
+            [ -n "$created" ] || continue
+            created_epoch=$(date -d "$created" +%s 2>/dev/null || true)
+            [ -n "$created_epoch" ] || continue
+            age=$(( now - created_epoch ))
+            if [ "$age" -gt 10800 ]; then
+              echo "::warning::removing stale buildx builder $cname (age ${age}s)"
+              docker rm -f "$cid" || true
+            fi
+          done
+
       - name: Set up Docker Buildx for manifest inspection
         id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -3009,6 +3036,33 @@ jobs:
       # What: Backfills any service detect-changes says this PR did NOT touch with a cheap registry-side copy (`docker buildx imagetools create`) from the base-ref channel image, at the PR's staging tag; gated on pr-staging-available, not a bare pull_request check.
       # Why: deploy/full-setup/docker-compose.yml uses one LANCACHE_IMAGE_TAG for every service, but build/build-arm64 only push a PR staging tag for services this PR actually changed, so an untouched service has no image there yet -- the base-ref channel image is the correct thing to validate for it anyway. A Dependabot/fork PR has no staging tag for any service (steps.channel.outputs.tag already equals base_channel_tag), so there is nothing to back-fill, and logging in/pushing with that PR's read-only GITHUB_TOKEN would fail instead of skipping cleanly.
       # From: Issue #1095 | PR #1532
+      # What: force-removes buildx_buildkit_* containers older than 3h.
+      # Why: a crashed job also skips its removal step below (same
+      # failure class as this PR's workspace-resync fix); 3h clears the
+      # file's longest self-hosted job timeout (150m) with real margin.
+      # From: Issue #1095
+      - name: Clean up stale Buildx builder containers (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          now=$(date +%s)
+          ids=$(docker ps -a --filter "name=^/buildx_buildkit_" --format '{{.ID}}' 2>/dev/null || true)
+          for cid in $ids; do
+            cname=$(docker inspect -f '{{.Name}}' "$cid" 2>/dev/null || true)
+            case "$cname" in
+              /buildx_buildkit_*) ;;
+              *) continue ;;
+            esac
+            created=$(docker inspect -f '{{.Created}}' "$cid" 2>/dev/null || true)
+            [ -n "$created" ] || continue
+            created_epoch=$(date -d "$created" +%s 2>/dev/null || true)
+            [ -n "$created_epoch" ] || continue
+            age=$(( now - created_epoch ))
+            if [ "$age" -gt 10800 ]; then
+              echo "::warning::removing stale buildx builder $cname (age ${age}s)"
+              docker rm -f "$cid" || true
+            fi
+          done
+
       - name: Set up Docker Buildx
         if: steps.channel.outputs.pr-staging-available == 'true'
         id: buildx
@@ -5800,6 +5854,33 @@ jobs:
       # build/push would, even though it never invokes `docker buildx
       # build`. Mirrors issue #1290's identical widening for build-tools's
       # own retag-only path.
+      # What: force-removes buildx_buildkit_* containers older than 3h.
+      # Why: a crashed job also skips its removal step below (same
+      # failure class as this PR's workspace-resync fix); 3h clears the
+      # file's longest self-hosted job timeout (150m) with real margin.
+      # From: Issue #1095
+      - name: Clean up stale Buildx builder containers (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          now=$(date +%s)
+          ids=$(docker ps -a --filter "name=^/buildx_buildkit_" --format '{{.ID}}' 2>/dev/null || true)
+          for cid in $ids; do
+            cname=$(docker inspect -f '{{.Name}}' "$cid" 2>/dev/null || true)
+            case "$cname" in
+              /buildx_buildkit_*) ;;
+              *) continue ;;
+            esac
+            created=$(docker inspect -f '{{.Created}}' "$cid" 2>/dev/null || true)
+            [ -n "$created" ] || continue
+            created_epoch=$(date -d "$created" +%s 2>/dev/null || true)
+            [ -n "$created_epoch" ] || continue
+            age=$(( now - created_epoch ))
+            if [ "$age" -gt 10800 ]; then
+              echo "::warning::removing stale buildx builder $cname (age ${age}s)"
+              docker rm -f "$cid" || true
+            fi
+          done
+
       - name: Set up Docker Buildx
         if: >-
           ${{
@@ -7103,6 +7184,33 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # What: force-removes buildx_buildkit_* containers older than 3h.
+      # Why: a crashed job also skips its removal step below (same
+      # failure class as this PR's workspace-resync fix); 3h clears the
+      # file's longest self-hosted job timeout (150m) with real margin.
+      # From: Issue #1095
+      - name: Clean up stale Buildx builder containers (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          now=$(date +%s)
+          ids=$(docker ps -a --filter "name=^/buildx_buildkit_" --format '{{.ID}}' 2>/dev/null || true)
+          for cid in $ids; do
+            cname=$(docker inspect -f '{{.Name}}' "$cid" 2>/dev/null || true)
+            case "$cname" in
+              /buildx_buildkit_*) ;;
+              *) continue ;;
+            esac
+            created=$(docker inspect -f '{{.Created}}' "$cid" 2>/dev/null || true)
+            [ -n "$created" ] || continue
+            created_epoch=$(date -d "$created" +%s 2>/dev/null || true)
+            [ -n "$created_epoch" ] || continue
+            age=$(( now - created_epoch ))
+            if [ "$age" -gt 10800 ]; then
+              echo "::warning::removing stale buildx builder $cname (age ${age}s)"
+              docker rm -f "$cid" || true
+            fi
+          done
+
       - name: Set up Docker Buildx
         id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -7656,6 +7764,33 @@ jobs:
           # takeover of a run still legitimately working.
           promote_lock_acquire_with_retry origin "$holder_note" 40 15 900
 
+      # What: force-removes buildx_buildkit_* containers older than 3h.
+      # Why: a crashed job also skips its removal step below (same
+      # failure class as this PR's workspace-resync fix); 3h clears the
+      # file's longest self-hosted job timeout (150m) with real margin.
+      # From: Issue #1095
+      - name: Clean up stale Buildx builder containers (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          now=$(date +%s)
+          ids=$(docker ps -a --filter "name=^/buildx_buildkit_" --format '{{.ID}}' 2>/dev/null || true)
+          for cid in $ids; do
+            cname=$(docker inspect -f '{{.Name}}' "$cid" 2>/dev/null || true)
+            case "$cname" in
+              /buildx_buildkit_*) ;;
+              *) continue ;;
+            esac
+            created=$(docker inspect -f '{{.Created}}' "$cid" 2>/dev/null || true)
+            [ -n "$created" ] || continue
+            created_epoch=$(date -d "$created" +%s 2>/dev/null || true)
+            [ -n "$created_epoch" ] || continue
+            age=$(( now - created_epoch ))
+            if [ "$age" -gt 10800 ]; then
+              echo "::warning::removing stale buildx builder $cname (age ${age}s)"
+              docker rm -f "$cid" || true
+            fi
+          done
+
       - name: Set up Docker Buildx
         id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -8085,6 +8220,33 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # What: force-removes buildx_buildkit_* containers older than 3h.
+      # Why: a crashed job also skips its removal step below (same
+      # failure class as this PR's workspace-resync fix); 3h clears the
+      # file's longest self-hosted job timeout (150m) with real margin.
+      # From: Issue #1095
+      - name: Clean up stale Buildx builder containers (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          now=$(date +%s)
+          ids=$(docker ps -a --filter "name=^/buildx_buildkit_" --format '{{.ID}}' 2>/dev/null || true)
+          for cid in $ids; do
+            cname=$(docker inspect -f '{{.Name}}' "$cid" 2>/dev/null || true)
+            case "$cname" in
+              /buildx_buildkit_*) ;;
+              *) continue ;;
+            esac
+            created=$(docker inspect -f '{{.Created}}' "$cid" 2>/dev/null || true)
+            [ -n "$created" ] || continue
+            created_epoch=$(date -d "$created" +%s 2>/dev/null || true)
+            [ -n "$created_epoch" ] || continue
+            age=$(( now - created_epoch ))
+            if [ "$age" -gt 10800 ]; then
+              echo "::warning::removing stale buildx builder $cname (age ${age}s)"
+              docker rm -f "$cid" || true
+            fi
+          done
+
       - name: Set up Docker Buildx
         id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -8498,6 +8660,33 @@ jobs:
           git checkout --force HEAD -- . || echo "::warning::resync failed"
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # What: force-removes buildx_buildkit_* containers older than 3h.
+      # Why: a crashed job also skips its removal step below (same
+      # failure class as this PR's workspace-resync fix); 3h clears the
+      # file's longest self-hosted job timeout (150m) with real margin.
+      # From: Issue #1095
+      - name: Clean up stale Buildx builder containers (self-hosted reuse hardening)
+        run: |
+          set -uo pipefail
+          now=$(date +%s)
+          ids=$(docker ps -a --filter "name=^/buildx_buildkit_" --format '{{.ID}}' 2>/dev/null || true)
+          for cid in $ids; do
+            cname=$(docker inspect -f '{{.Name}}' "$cid" 2>/dev/null || true)
+            case "$cname" in
+              /buildx_buildkit_*) ;;
+              *) continue ;;
+            esac
+            created=$(docker inspect -f '{{.Created}}' "$cid" 2>/dev/null || true)
+            [ -n "$created" ] || continue
+            created_epoch=$(date -d "$created" +%s 2>/dev/null || true)
+            [ -n "$created_epoch" ] || continue
+            age=$(( now - created_epoch ))
+            if [ "$age" -gt 10800 ]; then
+              echo "::warning::removing stale buildx builder $cname (age ${age}s)"
+              docker rm -f "$cid" || true
+            fi
+          done
 
       - name: Set up Docker Buildx
         id: buildx
