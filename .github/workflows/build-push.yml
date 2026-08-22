@@ -6476,6 +6476,26 @@ jobs:
           # From: Issue #1095 (G2) | PR #1503
           source_tag="sha-${COMMIT_SHA}"
           declare -A merged_digests=()
+          # What: Tracks every service that ends this run with a permanent single-platform
+          # tag (sha-<commit>-amd64 or sha-<commit>-arm64) already pushed to the registry
+          # but no matching counterpart, so it can never be merged into the real
+          # sha-<commit> multi-platform tag.
+          # Why: Issue #1095 root-cause finding (2026-08-22): a service's amd64 and arm64
+          # builds are two independent jobs that can genuinely diverge (one succeeds, the
+          # other has a real build failure) with no relationship to workflow-level
+          # concurrency/cancellation. Before this, the amd64-missing branch below only
+          # logged a ::notice:: indistinguishable from the normal "unchanged, nothing built
+          # either side" case, and the arm64-missing branch `exit 1`'d immediately, aborting
+          # this loop before any later service in "${services[@]}" was even attempted. Both
+          # silently left the surviving per-arch tag as a permanent orphan (confirmed live:
+          # ghcr.io/wiki-mod/lancache-ng/watchdog:sha-6cd94705877f153b561a9174b3d2531a5f6f14ab-arm64
+          # exists with no -amd64 sibling and no merged sha-6cd94705... tag -- see
+          # run 32575663639, "build (watchdog...)" job conclusion=failure, "build-arm64
+          # (watchdog...)" conclusion=success, same push). This array turns that silent,
+          # ambiguous state into a loud, named, per-tag ::error:: below, and lets every
+          # other unaffected service still get merged in the same run instead of the whole
+          # step aborting on the first orphan it finds.
+          declare -A orphaned_services=()
 
           declare -A service_descriptions=(
             [proxy]="nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic."
@@ -6528,12 +6548,18 @@ jobs:
             # to protect real registry-write operations below, not this expected-failure control
             # flow.
             if ! docker buildx imagetools inspect "$amd64_image" >/dev/null 2>&1; then
-              echo "::notice::Skipping $service: no linux/amd64 image was published for this commit -- either unchanged (build/build-arm64 correctly skipped it) or that service's own build job failed; check the build/build-arm64 job for $service to tell which."
+              if docker buildx imagetools inspect "$arm64_image" >/dev/null 2>&1; then
+                echo "::error::$service: linux/arm64 image $arm64_image was published for this commit but linux/amd64 was not -- the two architectures' build jobs diverged (one succeeded, the other failed or was skipped independently). $arm64_image is now a permanent orphan: it can never be merged into $target_image. Check the build (amd64) job for $service on this commit to find out why it did not publish, then push a new commit so both architectures retry together -- this run will not retry it for you."
+                orphaned_services["$service"]="$arm64_image"
+              else
+                echo "::notice::Skipping $service: no linux/amd64 or linux/arm64 image was published for this commit (unchanged on this push, or intentionally not built)."
+              fi
               continue
             fi
             if ! docker buildx imagetools inspect "$arm64_image" >/dev/null 2>&1; then
-              echo "::error::$service has a linux/amd64 image but no linux/arm64 image ($arm64_image); refusing to publish a single-platform tag under the multi-platform contract."
-              exit 1
+              echo "::error::$service: linux/amd64 image $amd64_image was published for this commit but linux/arm64 was not -- the two architectures' build jobs diverged (one succeeded, the other failed or was skipped independently). $amd64_image is now a permanent orphan: it can never be merged into $target_image. Check the build-arm64 job for $service on this commit to find out why it did not publish, then push a new commit so both architectures retry together -- this run will not retry it for you."
+              orphaned_services["$service"]="$amd64_image"
+              continue
             fi
 
             amd64_digest="$(digest_for_image "$amd64_image")"
@@ -6559,6 +6585,24 @@ jobs:
             printf '%s_digest=%s\n' "${service//-/_}" "$merged_digest" >> "$GITHUB_OUTPUT"
           done
 
+          # What: Consolidated, greppable summary of every orphaned single-platform tag
+          # this run found, named individually rather than left to the per-service
+          # ::error:: annotations above scrolling out of view.
+          # Why: Issue #1095 -- the maintainer's stated complaint was that nothing in the
+          # pipeline "erkennt oder meldet" (detects or reports) this state; the per-service
+          # errors above already satisfy that, this just makes the run's job summary/log
+          # tail carry the full list in one place too. Deliberately does NOT delete the
+          # orphaned tag(s): this job only holds the ambient GITHUB_TOKEN (packages:
+          # write), which GHCR does not accept for container package-version deletion --
+          # that requires the separate delete-scoped PAT already wired into the
+          # gc-sha-retention-audit.yml/gc-pr-staging-images.yml GC workflows (issue #1095,
+          # PR #1594). Deletion here would mean handing this already-heavily-audited,
+          # multi-thousand-line publish path a delete-scoped credential it does not
+          # otherwise need -- a deliberate scope decision left to the maintainer rather
+          # than made silently in this fix.
+          if [ "${#orphaned_services[@]}" -gt 0 ]; then
+            echo "::error::${#orphaned_services[@]} service(s) ended this run with an orphaned single-platform tag for $source_tag that can never become part of a multi-platform manifest: ${!orphaned_services[*]}. See each service's own ::error:: above for its exact stray tag; the stack pointer step below will also fail because of this."
+          fi
 
           # Build the immutable stack pointer before any public channel is moved.
           # All service digests must already be present so the pointer can only
