@@ -111,7 +111,7 @@ jobs:
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            s=$(gh api "repos/${GITHUB_REPOSITORY,,}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
             if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
@@ -192,7 +192,7 @@ jobs:
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            s=$(gh api "repos/${GITHUB_REPOSITORY,,}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
             if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
@@ -278,7 +278,7 @@ jobs:
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            s=$(gh api "repos/${GITHUB_REPOSITORY,,}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
             if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
@@ -359,7 +359,7 @@ jobs:
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            s=$(gh api "repos/${GITHUB_REPOSITORY,,}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
             if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
@@ -409,7 +409,7 @@ jobs:
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            s=$(gh api "repos/${GITHUB_REPOSITORY,,}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
             if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
@@ -518,7 +518,7 @@ jobs:
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            s=$(gh api "repos/${GITHUB_REPOSITORY,,}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
             if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
@@ -674,7 +674,7 @@ jobs:
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            s=$(gh api "repos/${GITHUB_REPOSITORY,,}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
             if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
@@ -849,7 +849,7 @@ jobs:
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            s=$(gh api "repos/${GITHUB_REPOSITORY,,}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
             if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
@@ -1012,7 +1012,7 @@ jobs:
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            s=$(gh api "repos/${GITHUB_REPOSITORY,,}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
             if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
@@ -1116,7 +1116,7 @@ jobs:
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            s=$(gh api "repos/${GITHUB_REPOSITORY,,}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
             if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
@@ -1215,7 +1215,7 @@ jobs:
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            s=$(gh api "repos/${GITHUB_REPOSITORY,,}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
             if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
@@ -2843,7 +2843,7 @@ jobs:
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            s=$(gh api "repos/${GITHUB_REPOSITORY,,}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
             if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
@@ -2926,7 +2926,7 @@ jobs:
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            s=$(gh api "repos/${GITHUB_REPOSITORY,,}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
             if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
@@ -3376,7 +3376,7 @@ jobs:
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            s=$(gh api "repos/${GITHUB_REPOSITORY,,}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
             if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
@@ -3477,7 +3477,7 @@ jobs:
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            s=$(gh api "repos/${GITHUB_REPOSITORY,,}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
             if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
@@ -3579,7 +3579,7 @@ jobs:
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            s=$(gh api "repos/${GITHUB_REPOSITORY,,}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
             if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
@@ -3700,7 +3700,7 @@ jobs:
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            s=$(gh api "repos/${GITHUB_REPOSITORY,,}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
             if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
@@ -3807,7 +3807,7 @@ jobs:
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            s=$(gh api "repos/${GITHUB_REPOSITORY,,}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
             if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
@@ -3915,7 +3915,7 @@ jobs:
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            s=$(gh api "repos/${GITHUB_REPOSITORY,,}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
             if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
@@ -4137,7 +4137,7 @@ jobs:
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            s=$(gh api "repos/${GITHUB_REPOSITORY,,}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
             if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
@@ -4306,7 +4306,7 @@ jobs:
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            s=$(gh api "repos/${GITHUB_REPOSITORY,,}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
             if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
@@ -4438,7 +4438,7 @@ jobs:
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            s=$(gh api "repos/${GITHUB_REPOSITORY,,}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
             if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
@@ -4539,7 +4539,7 @@ jobs:
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            s=$(gh api "repos/${GITHUB_REPOSITORY,,}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
             if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
@@ -4641,7 +4641,7 @@ jobs:
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            s=$(gh api "repos/${GITHUB_REPOSITORY,,}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
             if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
@@ -4736,7 +4736,7 @@ jobs:
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            s=$(gh api "repos/${GITHUB_REPOSITORY,,}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
             if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
@@ -5071,7 +5071,7 @@ jobs:
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            s=$(gh api "repos/${GITHUB_REPOSITORY,,}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
             if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
@@ -5688,7 +5688,7 @@ jobs:
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            s=$(gh api "repos/${GITHUB_REPOSITORY,,}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
             if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
@@ -7092,7 +7092,7 @@ jobs:
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            s=$(gh api "repos/${GITHUB_REPOSITORY,,}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
             if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
@@ -7618,7 +7618,7 @@ jobs:
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            s=$(gh api "repos/${GITHUB_REPOSITORY,,}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
             if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
@@ -8074,7 +8074,7 @@ jobs:
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            s=$(gh api "repos/${GITHUB_REPOSITORY,,}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
             if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
@@ -8488,7 +8488,7 @@ jobs:
             mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
             h=; t=
             read -r h t <"$d/m" 2>/dev/null || true
-            s=$(gh api "repos/${{ github.repository }}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+            s=$(gh api "repos/${GITHUB_REPOSITORY,,}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
             a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
             if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
           done
