@@ -148,8 +148,8 @@ jobs:
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -euo pipefail
-          if [ -d .git ]; then
-            inherited_head="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+          if [ -d .git ] && git rev-parse --verify -q HEAD >/dev/null 2>&1; then
+            inherited_head="$(git rev-parse HEAD)"
             echo "::notice::pre-checkout resync: inherited HEAD is $inherited_head"
             git sparse-checkout disable || true
             rm -f .git/info/sparse-checkout
@@ -161,7 +161,7 @@ jobs:
             fi
             git checkout --progress --force HEAD -- .
           else
-            echo "::notice::pre-checkout resync: no .git present yet, guard is a no-op on this fresh workspace"
+            echo "::notice::pre-checkout resync: no valid checked-out HEAD found (fresh or mid-clone workspace), guard is a no-op"
           fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -242,8 +242,8 @@ jobs:
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -euo pipefail
-          if [ -d .git ]; then
-            inherited_head="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+          if [ -d .git ] && git rev-parse --verify -q HEAD >/dev/null 2>&1; then
+            inherited_head="$(git rev-parse HEAD)"
             echo "::notice::pre-checkout resync: inherited HEAD is $inherited_head"
             git sparse-checkout disable || true
             rm -f .git/info/sparse-checkout
@@ -255,7 +255,7 @@ jobs:
             fi
             git checkout --progress --force HEAD -- .
           else
-            echo "::notice::pre-checkout resync: no .git present yet, guard is a no-op on this fresh workspace"
+            echo "::notice::pre-checkout resync: no valid checked-out HEAD found (fresh or mid-clone workspace), guard is a no-op"
           fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -470,8 +470,8 @@ jobs:
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -euo pipefail
-          if [ -d .git ]; then
-            inherited_head="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+          if [ -d .git ] && git rev-parse --verify -q HEAD >/dev/null 2>&1; then
+            inherited_head="$(git rev-parse HEAD)"
             echo "::notice::pre-checkout resync: inherited HEAD is $inherited_head"
             git sparse-checkout disable || true
             rm -f .git/info/sparse-checkout
@@ -483,7 +483,7 @@ jobs:
             fi
             git checkout --progress --force HEAD -- .
           else
-            echo "::notice::pre-checkout resync: no .git present yet, guard is a no-op on this fresh workspace"
+            echo "::notice::pre-checkout resync: no valid checked-out HEAD found (fresh or mid-clone workspace), guard is a no-op"
           fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -575,8 +575,8 @@ jobs:
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -euo pipefail
-          if [ -d .git ]; then
-            inherited_head="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+          if [ -d .git ] && git rev-parse --verify -q HEAD >/dev/null 2>&1; then
+            inherited_head="$(git rev-parse HEAD)"
             echo "::notice::pre-checkout resync: inherited HEAD is $inherited_head"
             git sparse-checkout disable || true
             rm -f .git/info/sparse-checkout
@@ -588,7 +588,7 @@ jobs:
             fi
             git checkout --progress --force HEAD -- .
           else
-            echo "::notice::pre-checkout resync: no .git present yet, guard is a no-op on this fresh workspace"
+            echo "::notice::pre-checkout resync: no valid checked-out HEAD found (fresh or mid-clone workspace), guard is a no-op"
           fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -669,8 +669,8 @@ jobs:
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -euo pipefail
-          if [ -d .git ]; then
-            inherited_head="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+          if [ -d .git ] && git rev-parse --verify -q HEAD >/dev/null 2>&1; then
+            inherited_head="$(git rev-parse HEAD)"
             echo "::notice::pre-checkout resync: inherited HEAD is $inherited_head"
             git sparse-checkout disable || true
             rm -f .git/info/sparse-checkout
@@ -682,7 +682,7 @@ jobs:
             fi
             git checkout --progress --force HEAD -- .
           else
-            echo "::notice::pre-checkout resync: no .git present yet, guard is a no-op on this fresh workspace"
+            echo "::notice::pre-checkout resync: no valid checked-out HEAD found (fresh or mid-clone workspace), guard is a no-op"
           fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
