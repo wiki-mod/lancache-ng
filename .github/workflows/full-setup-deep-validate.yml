@@ -149,14 +149,18 @@ jobs:
         run: |
           set -euo pipefail
           if [ -d .git ]; then
-            git sparse-checkout disable 2>/dev/null || true
+            echo "::notice::pre-checkout resync: inherited HEAD is $(git rev-parse HEAD)"
+            git sparse-checkout disable || true
             rm -f .git/info/sparse-checkout
             ls_files_before="$(git ls-files -v)"
             mapfile -t remaining_skip_worktree < <(printf '%s\n' "$ls_files_before" | awk '/^S /{print substr($0,3)}')
+            echo "::notice::pre-checkout resync: ${#remaining_skip_worktree[@]} skip-worktree path(s) found"
             if [ "${#remaining_skip_worktree[@]}" -gt 0 ]; then
               git update-index --no-skip-worktree -- "${remaining_skip_worktree[@]}"
             fi
             git checkout --progress --force HEAD -- .
+          else
+            echo "::notice::pre-checkout resync: no .git present yet, guard is a no-op on this fresh workspace"
           fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -238,14 +242,18 @@ jobs:
         run: |
           set -euo pipefail
           if [ -d .git ]; then
-            git sparse-checkout disable 2>/dev/null || true
+            echo "::notice::pre-checkout resync: inherited HEAD is $(git rev-parse HEAD)"
+            git sparse-checkout disable || true
             rm -f .git/info/sparse-checkout
             ls_files_before="$(git ls-files -v)"
             mapfile -t remaining_skip_worktree < <(printf '%s\n' "$ls_files_before" | awk '/^S /{print substr($0,3)}')
+            echo "::notice::pre-checkout resync: ${#remaining_skip_worktree[@]} skip-worktree path(s) found"
             if [ "${#remaining_skip_worktree[@]}" -gt 0 ]; then
               git update-index --no-skip-worktree -- "${remaining_skip_worktree[@]}"
             fi
             git checkout --progress --force HEAD -- .
+          else
+            echo "::notice::pre-checkout resync: no .git present yet, guard is a no-op on this fresh workspace"
           fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -461,14 +469,18 @@ jobs:
         run: |
           set -euo pipefail
           if [ -d .git ]; then
-            git sparse-checkout disable 2>/dev/null || true
+            echo "::notice::pre-checkout resync: inherited HEAD is $(git rev-parse HEAD)"
+            git sparse-checkout disable || true
             rm -f .git/info/sparse-checkout
             ls_files_before="$(git ls-files -v)"
             mapfile -t remaining_skip_worktree < <(printf '%s\n' "$ls_files_before" | awk '/^S /{print substr($0,3)}')
+            echo "::notice::pre-checkout resync: ${#remaining_skip_worktree[@]} skip-worktree path(s) found"
             if [ "${#remaining_skip_worktree[@]}" -gt 0 ]; then
               git update-index --no-skip-worktree -- "${remaining_skip_worktree[@]}"
             fi
             git checkout --progress --force HEAD -- .
+          else
+            echo "::notice::pre-checkout resync: no .git present yet, guard is a no-op on this fresh workspace"
           fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -561,14 +573,18 @@ jobs:
         run: |
           set -euo pipefail
           if [ -d .git ]; then
-            git sparse-checkout disable 2>/dev/null || true
+            echo "::notice::pre-checkout resync: inherited HEAD is $(git rev-parse HEAD)"
+            git sparse-checkout disable || true
             rm -f .git/info/sparse-checkout
             ls_files_before="$(git ls-files -v)"
             mapfile -t remaining_skip_worktree < <(printf '%s\n' "$ls_files_before" | awk '/^S /{print substr($0,3)}')
+            echo "::notice::pre-checkout resync: ${#remaining_skip_worktree[@]} skip-worktree path(s) found"
             if [ "${#remaining_skip_worktree[@]}" -gt 0 ]; then
               git update-index --no-skip-worktree -- "${remaining_skip_worktree[@]}"
             fi
             git checkout --progress --force HEAD -- .
+          else
+            echo "::notice::pre-checkout resync: no .git present yet, guard is a no-op on this fresh workspace"
           fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -650,14 +666,18 @@ jobs:
         run: |
           set -euo pipefail
           if [ -d .git ]; then
-            git sparse-checkout disable 2>/dev/null || true
+            echo "::notice::pre-checkout resync: inherited HEAD is $(git rev-parse HEAD)"
+            git sparse-checkout disable || true
             rm -f .git/info/sparse-checkout
             ls_files_before="$(git ls-files -v)"
             mapfile -t remaining_skip_worktree < <(printf '%s\n' "$ls_files_before" | awk '/^S /{print substr($0,3)}')
+            echo "::notice::pre-checkout resync: ${#remaining_skip_worktree[@]} skip-worktree path(s) found"
             if [ "${#remaining_skip_worktree[@]}" -gt 0 ]; then
               git update-index --no-skip-worktree -- "${remaining_skip_worktree[@]}"
             fi
             git checkout --progress --force HEAD -- .
+          else
+            echo "::notice::pre-checkout resync: no .git present yet, guard is a no-op on this fresh workspace"
           fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
