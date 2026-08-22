@@ -110,11 +110,8 @@ jobs:
       release_contract: ${{ steps.filter.outputs.release_contract }}
       scripts: ${{ steps.filter.outputs.scripts }}
     steps:
-      # What: mkdir-atomic per-workspace lock; a completed/stale holder (Actions
-      # API best-effort, else >3h age) is reclaimed only under $RUNNER_WORKSPACE.
-      # Still busy after 6 tries: warns and proceeds unlocked, advisory not a hard
-      # gate -- a leaked lock must never hard-fail every job on that runner for 3h.
-      # Why: proactively serializes self-hosted workspace reuse across jobs/PRs.
+      # What: mkdir-atomic per-workspace checkout lock, run-ID stamped.
+      # Why: serializes self-hosted workspace reuse; stale holders reclaimed.
       # From: Issue #1095
       - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
         env:
@@ -131,11 +128,8 @@ jobs:
             { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && rm -rf "$d" || sleep 10
           done
           echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
-      # What: force-resyncs to HEAD, clearing sparse-checkout/skip-worktree state.
-      # Why: root-caused -- a leftover sparse-checkout cone (e.g. gc-pr-staging-
-      # images.yml's collector checkout) surviving a crashed job on a reused
-      # runner makes files outside it silently vanish, no checkout error -- this
-      # run's missing-file symptom on 4 hosts. Ported from PR #1640 (G15).
+      # What: force-resyncs to HEAD, clearing sparse-checkout/skip-worktree.
+      # Why: root-caused this run's missing-file symptom (PR #1640 origin).
       # From: Issue #1095 | PR #1640
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
@@ -188,8 +182,8 @@ jobs:
   # Why: `cancel-in-progress` on an already-running job starves the channel; an implicit-success() check that
   # treats a skipped dependency as passing was the root cause this job exists to prevent, so this must never be skippable itself.
   # From: PR #1334, Issue #532
-      # What/Why: releases this job's own lock (if still owned) always, so a
-      # clean/failed/cancelled job never leaves a stale lock behind.
+      # What: releases this job's own lock (if still owned), always.
+      # Why: a failed/cancelled job must never leave a stale lock.
       # From: Issue #1095
       - name: Release per-workspace checkout lock (self-hosted reuse hardening)
         if: always()
