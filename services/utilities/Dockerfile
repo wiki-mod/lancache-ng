@@ -60,9 +60,9 @@ RUN rm -f /usr/lib/libssl.so /usr/lib/libcrypto.so /usr/lib/libz.so
 WORKDIR /tmp/curl-${CURL_VERSION}
 
 # What: configures and builds a fully static, feature-reduced curl binary.
-#   Proxy support (HTTP CONNECT tunneling) is deliberately kept enabled --
-#   see Issue #1637: this project's build fleet requires it, unlike every
-#   other protocol/feature disabled below. Proxy support is a core libcurl
+#   Proxy support (HTTP CONNECT tunneling) is deliberately kept enabled,
+#   since this project's build fleet requires it, unlike every other
+#   protocol/feature disabled below. Proxy support is a core libcurl
 #   capability, not a separate library dependency, so keeping it enabled
 #   does not reintroduce any of the libssh/libssh2/libpsl dependencies
 #   deliberately excluded elsewhere in this same static build.
