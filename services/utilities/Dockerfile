@@ -8,6 +8,17 @@
 
 FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS curl-builder
 
+# What: explicit proxy build-args, no default value set.
+# Why: this project's build fleet sits behind an HTTP(S) proxy; lets a
+#   caller pass a local-network NO_PROXY exception.
+# From: Issue #1637
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
+
 # What: pinned curl release, checksum-verified before extraction.
 # Why: matches this project's established checksum-verified download
 # pattern for third-party sources.
@@ -45,10 +56,10 @@ RUN rm -f /usr/lib/libssl.so /usr/lib/libcrypto.so /usr/lib/libz.so
 
 WORKDIR /tmp/curl-${CURL_VERSION}
 
-# What: configures and builds a fully static, feature-reduced curl binary.
-# Why: matches this project's real curl usage only; a fully static binary
-# is what makes it portable across glibc/musl consumers.
-# From: Issue #1556
+# What: builds a fully static curl binary with proxy support enabled.
+# Why: matches this project's real curl usage (incl. the build fleet's
+#   own HTTP(S) proxy); static build stays portable across glibc/musl.
+# From: Issue #1556 | Issue #1637
 RUN set -euo pipefail; \
     ./configure \
       --disable-shared --enable-static \
@@ -57,7 +68,6 @@ RUN set -euo pipefail; \
       --disable-pop3 --disable-imap --disable-smtp --disable-smb \
       --disable-gopher --disable-mqtt \
       --disable-scp --disable-sftp --without-libssh2 --without-libssh \
-      --disable-proxy \
       --disable-ntlm --disable-kerberos-auth --disable-negotiate-auth \
       --disable-aws \
       --disable-manual --disable-libcurl-option \
