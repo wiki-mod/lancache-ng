@@ -168,6 +168,13 @@ fn validate_ntp_upstream_servers(raw: &str) -> Result<String, String> {
 // changes whether auto-populate is active -- never on a save that leaves it
 // unchanged, so an operator's own per-subnet customization (set while
 // auto-populate was off) is never touched by an unrelated settings save.
+//
+// Ordering: if the container is already running (staying
+// enabled), it is stopped BEFORE persist and started again AFTER persist
+// succeeds -- entrypoint.sh only reads NTP_UPSTREAM_SERVERS from the
+// persisted settings file at container start, so restarting before the new
+// value is on disk would just reapply the stale one. See
+// reconcile_ntp_container_stop/reconcile_ntp_container_start's own comments.
 pub async fn update_ntp_settings(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -180,24 +187,50 @@ pub async fn update_ntp_settings(
     let ntp_upstream_servers = validate_ntp_upstream_servers(&form.ntp_upstream_servers)
         .map_err(|message| NtpError::new(StatusCode::BAD_REQUEST, message))?;
 
-    // Captured before reconcile_ntp_container/persist below so the
+    // Captured before reconcile_ntp_container_stop/persist below so the
     // auto-populate transition (see this handler's own doc comment) is
     // computed against the state this save is actually changing FROM, not
     // whatever the settings file already holds by the time the reconcile
-    // call below runs.
-    let was_auto_populating =
-        state.config.effective_ntp_enabled() && state.config.effective_ntp_auto_dhcp();
+    // calls below run.
+    let was_enabled = state.config.effective_ntp_enabled();
+    let was_auto_populating = was_enabled && state.config.effective_ntp_auto_dhcp();
     let will_auto_populate = ntp_enabled && ntp_auto_dhcp;
 
-    reconcile_ntp_container(&state, ntp_enabled).await?;
+    reconcile_ntp_container_stop(&state, ntp_enabled, was_enabled).await?;
 
-    crate::routes::dhcp::persist_ntp_settings(
+    let persist_result = crate::routes::dhcp::persist_ntp_settings(
         &state,
         ntp_enabled,
         &ntp_upstream_servers,
         ntp_auto_dhcp,
-    )
-    .map_err(|err| NtpError::config_error(err.to_string()))?;
+    );
+
+    if let Err(persist_err) = persist_result {
+        // What: if the rollback restart below also fails, combine both
+        //   errors instead of only reporting the persist failure.
+        // Why: mirrors dhcp.rs's persist-then-rollback pattern -- silently
+        //   discarding a rollback failure would hide that NTP is now
+        //   stopped and unrecovered, not just that the save failed.
+        // From: Codex review on PR #1610
+        if was_enabled
+            && let Err(rollback_err) =
+                docker_client::start_service(&state.docker, "ntp", &state.config.container_suffix)
+                    .await
+        {
+            return Err(NtpError::config_error(format!(
+                "Failed to persist NTP settings ({persist_err}), and restarting NTP after \
+                 that failure also failed ({rollback_err}). NTP is now stopped and needs \
+                 manual recovery.",
+            )));
+        }
+        return Err(NtpError::config_error(persist_err.to_string()));
+    }
+
+    // Persist succeeded, so the settings file now holds the new
+    // ntp_upstream_servers -- start the container now (if it should be
+    // running) so a fresh entrypoint.sh run reads them, whether this is a
+    // disabled->enabled transition or an already-enabled config change.
+    reconcile_ntp_container_start(&state, ntp_enabled).await?;
 
     if will_auto_populate {
         crate::routes::dhcp::apply_ntp_lan_ip_to_all_subnets(&state)
@@ -212,19 +245,22 @@ pub async fn update_ntp_settings(
     Ok(Redirect::to("/ntp"))
 }
 
-// Starts/stops the predeclared `ntp` Compose service to match the enable/
-// disable toggle, mirroring routes/dhcp.rs's reconcile_dhcp_mode. A missing
-// container (the `ntp` Compose profile was never activated, e.g. a fresh
-// install that left LanCache-NG-NTP disabled at setup.sh time) surfaces as a
-// visible operator error rather than silently diverging from the persisted
-// toggle state -- same tradeoff reconcile_dhcp_mode already accepts for
-// `dhcp`/`dhcp-proxy`.
-async fn reconcile_ntp_container(state: &AppState, ntp_enabled: bool) -> Result<(), NtpError> {
-    if ntp_enabled {
-        docker_client::start_service(&state.docker, "ntp", &state.config.container_suffix)
-            .await
-            .map_err(|err| NtpError::config_error(err.to_string()))?;
-    } else {
+// What: stops the predeclared `ntp` Compose service whenever the save
+// targets disabled OR the container is already running and staying enabled.
+// Why: called BEFORE persist so an already-enabled config change (e.g. a new
+// upstream server list) forces a real stop -- entrypoint.sh only reads
+// NTP_UPSTREAM_SERVERS at container start, so leaving an already-running
+// container untouched (the pre-fix behavior) silently kept serving the
+// OLD config. A disabled->enabled transition needs no stop here (nothing is
+// running yet); a same-mode disabled resubmit is a harmless idempotent
+// stop_service_if_present no-op.
+// From: Issue #1486
+async fn reconcile_ntp_container_stop(
+    state: &AppState,
+    ntp_enabled: bool,
+    was_enabled: bool,
+) -> Result<(), NtpError> {
+    if !ntp_enabled || was_enabled {
         docker_client::stop_service_if_present(
             &state.docker,
             "ntp",
@@ -232,6 +268,28 @@ async fn reconcile_ntp_container(state: &AppState, ntp_enabled: bool) -> Result<
         )
         .await
         .map_err(|err| NtpError::config_error(err.to_string()))?;
+    }
+    Ok(())
+}
+
+// What: starts the predeclared `ntp` Compose service when the just-persisted
+// state should be enabled.
+// Why: called AFTER persist so this fresh start (following the stop half
+// above) rereads the just-written settings file, mirroring
+// routes/dhcp.rs's reconcile_dhcp_mode_start split. A missing container (the
+// `ntp` Compose profile was never activated, e.g. a fresh install that left
+// LanCache-NG-NTP disabled at setup.sh time) surfaces as a visible operator
+// error rather than silently diverging from the persisted toggle state --
+// same tradeoff routes/dhcp.rs already accepts for `dhcp`/`dhcp-proxy`.
+// From: Issue #1486
+async fn reconcile_ntp_container_start(
+    state: &AppState,
+    ntp_enabled: bool,
+) -> Result<(), NtpError> {
+    if ntp_enabled {
+        docker_client::start_service(&state.docker, "ntp", &state.config.container_suffix)
+            .await
+            .map_err(|err| NtpError::config_error(err.to_string()))?;
     }
     Ok(())
 }

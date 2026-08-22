@@ -1,5 +1,20 @@
 # Capability inventory: `services/watchdog`
 
+> **ARCHIVED / HISTORICAL AS OF ISSUE #842's ENTRYPOINT SWAP**: everything
+> below audits `watchdog.sh`, the bash implementation that was this
+> service's production `ENTRYPOINT` when this document was written. As of
+> #842's Rust rewrite going live, the compiled `services/watchdog` Rust
+> crate (`src/config.rs`/`src/docker_client.rs`/`src/health.rs`/
+> `src/status.rs`/`src/main.rs`, each with their own unit-test coverage) is
+> the real production entrypoint instead. `watchdog.sh` itself remains in
+> the repository (bats coverage unchanged, still passing) as a historical
+> reference and manual-rollback source, but is no longer copied into the
+> production image or executed. This document is kept for its real
+> historical/parity-verification value -- it does not describe current
+> production behavior. See #842's own closing PR body for the function-level
+> parity mapping (bash function -> Rust module) used to verify the rewrite
+> covers everything documented here before the swap.
+
 Part of the project-wide capability inventory (#843). Audited file:
 `services/watchdog/watchdog.sh` on `origin/v0.2.0` (450 lines), plus its
 Dockerfile, env configs, compose wiring, and test coverage. This is a

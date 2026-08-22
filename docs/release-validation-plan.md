@@ -450,6 +450,19 @@ use a real Linux host, e.g. over SSH to a self-hosted runner, per
 - Confirm the three modes are genuinely mutually exclusive at the config-render level
   (`DHCP_MODE` selects exactly one rendered `dnsmasq`/Kea config) — inspect the
   rendered config inside the running container, not just the env var.
+- **Same-container dnsmasq sub-mode switch (added 2026-08-19, issue #1486):** with
+  `dhcp-proxy` already running under ProxyDHCP, switch to Relay via the Admin UI's
+  `/dhcp/mode` form (or the reverse direction) and confirm via `docker inspect
+  lancache-dhcp-proxy --format '{{.State.StartedAt}}'` (or `docker logs`'s own
+  entrypoint banner) that the container genuinely restarted, then confirm the
+  rendered dnsmasq config inside the container reflects the NEW sub-mode, not the
+  one it was running before the save. Before `routes/dhcp.rs`'s
+  `reconcile_dhcp_mode_stop`/`reconcile_dhcp_mode_start` split, this transition
+  silently kept serving the OLD sub-mode forever (`start_service` on an
+  already-running container is a no-op) — this scenario exists specifically to catch
+  a regression of that exact bug. **Not yet run as part of this pass** (tracked as a
+  live-stack follow-up): this document only records the reusable check and names it,
+  per this section's own "Coverage Assessment" discipline.
 
 ### 4. Cache hit/miss — HTTP and HTTPS
 
@@ -512,6 +525,23 @@ propagation path end-to-end via a real `dig`, both for creation and removal.
   live-transition proof, driven by an actual container stop/start, is the standard.
 - Cache-resize control (new): see Part A's entry — the `nginx -T` rendered-config
   proof, not a `200 OK`.
+- **Admin UI self-restart (added 2026-08-19, issue #1486):** from `/setup`, submit
+  the "Admin-UI neu starten" form and confirm three things against the real running
+  stack, not just a `200`/`303` from the handler: (1) `docker inspect lancache-ui
+  --format '{{.State.StartedAt}}'` shows a genuinely later timestamp afterward: (2)
+  the served `restart_ui_service` acknowledgement page's own `/health` poll actually
+  observes the container go briefly unreachable and then recover, ending on `/setup`
+  in the browser -- not just that the container restarts server-side while the poll
+  loop was never exercised; (3) `docker-socket-proxy`'s allowlist genuinely denies
+  the same `restart` call for `lancache-syslog`/`lancache-watchdog` (a negative
+  control -- confirm a raw `curl -X POST` through the proxy against either name
+  returns HAProxy's deny, not the Docker API's own 404/409). **Not yet run as part
+  of this pass** (tracked as a live-stack follow-up): `scripts/tracked/check-naming-consistency.sh`'s
+  new watchdog/syslog lifecycle-grant guard (see its own "watchdog/syslog must never
+  gain a lifecycle-action grant" section) is real, executed, mechanical proof for
+  item (3) above at the config-generation level; a live HAProxy-level negative
+  control against a real running `docker-socket-proxy` container is the remaining
+  Part B gap this bullet names.
 
 ### 7. Watchdog — auto-restart coverage
 
@@ -648,6 +678,20 @@ a CI proof does not, by itself, satisfy a Part B stack-validation claim.
   document only records that the reusable proof exists and names it, per this
   section's own "Coverage Assessment" discipline of being honest about what remains
   open.
+- **Enabled-to-enabled upstream-server config change (added 2026-08-19, issue
+  #1486):** with LanCache-NG-NTP already enabled and running, submit `/ntp/settings`
+  with a changed `ntp_upstream_servers` list while leaving `ntp_enabled` checked.
+  Confirm via `docker inspect lancache-ntp --format '{{.State.StartedAt}}'` that the
+  container genuinely restarted, and confirm `chronyc sources` (or the container's
+  own startup log line, "Starting LanCache-NG-NTP (chronyd) with upstream servers:
+  ...") now lists the NEW servers, not the ones configured before the save. Before
+  `routes/ntp.rs`'s `reconcile_ntp_container_stop`/`reconcile_ntp_container_start`
+  split, an already-running `ntp` container was never restarted on a settings save
+  (`start_service` on an already-running container is a no-op) — this scenario
+  exists specifically to catch a regression of that exact bug. **Not yet run as part
+  of this pass** (tracked as a live-stack follow-up): this document only records the
+  reusable check and names it, per this section's own "Coverage Assessment"
+  discipline.
 
 ### 11. `setup.sh update` (self-update) — live scenario (added 2026-08-05, issue #1391)
 
