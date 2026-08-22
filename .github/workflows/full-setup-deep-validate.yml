@@ -149,7 +149,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ -d .git ]; then
-            echo "::notice::pre-checkout resync: inherited HEAD is $(git rev-parse HEAD)"
+            inherited_head="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+            echo "::notice::pre-checkout resync: inherited HEAD is $inherited_head"
             git sparse-checkout disable || true
             rm -f .git/info/sparse-checkout
             ls_files_before="$(git ls-files -v)"
@@ -242,7 +243,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ -d .git ]; then
-            echo "::notice::pre-checkout resync: inherited HEAD is $(git rev-parse HEAD)"
+            inherited_head="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+            echo "::notice::pre-checkout resync: inherited HEAD is $inherited_head"
             git sparse-checkout disable || true
             rm -f .git/info/sparse-checkout
             ls_files_before="$(git ls-files -v)"
@@ -469,7 +471,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ -d .git ]; then
-            echo "::notice::pre-checkout resync: inherited HEAD is $(git rev-parse HEAD)"
+            inherited_head="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+            echo "::notice::pre-checkout resync: inherited HEAD is $inherited_head"
             git sparse-checkout disable || true
             rm -f .git/info/sparse-checkout
             ls_files_before="$(git ls-files -v)"
@@ -573,7 +576,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ -d .git ]; then
-            echo "::notice::pre-checkout resync: inherited HEAD is $(git rev-parse HEAD)"
+            inherited_head="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+            echo "::notice::pre-checkout resync: inherited HEAD is $inherited_head"
             git sparse-checkout disable || true
             rm -f .git/info/sparse-checkout
             ls_files_before="$(git ls-files -v)"
@@ -666,7 +670,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ -d .git ]; then
-            echo "::notice::pre-checkout resync: inherited HEAD is $(git rev-parse HEAD)"
+            inherited_head="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+            echo "::notice::pre-checkout resync: inherited HEAD is $inherited_head"
             git sparse-checkout disable || true
             rm -f .git/info/sparse-checkout
             ls_files_before="$(git ls-files -v)"
