@@ -505,16 +505,11 @@ sra_budget_decision() {
 # sqlite3 invocation (its shape can be grepped/asserted on by bats).
 # From: Issue #1585.
 #
-# What: history_fingerprint records the exact managed-ref-set state a cached
-# resolution was computed against.
-# Why: two real callers already classify against different ref sets today
-# (the standalone audit uses origin/current_dev only; the destructive GC's
-# internal re-audit uses current_dev+master+release/*+v[0-9]* by default via
-# gc_resolve_retention_history_refs), and both share this same cache file --
-# without this column a rank/outside-managed-history resolution cached by one
-# caller's narrower ref set would be silently reused by the other caller's
-# wider one (or by the same caller after a later ref-set change), which can
-# flip a real protect/would-delete decision. See sra_history_refs_fingerprint.
+# What: history_fingerprint identifies the managed-ref-set a row was cached
+# under and is part of the primary key, not just a stored column.
+# Why: two different real callers classify against different ref sets and
+# share this cache file; keying by fingerprint keeps each caller's rows
+# independent instead of one INSERT OR REPLACE evicting the other's.
 # From: Issue #1095.
 sra_cache_schema_sql() {
   cat <<'SQL'
@@ -526,19 +521,15 @@ CREATE TABLE IF NOT EXISTS version_cache (
   resolution TEXT NOT NULL,
   history_fingerprint TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  PRIMARY KEY (package, version_id)
+  PRIMARY KEY (package, version_id, history_fingerprint)
 );
 SQL
 }
 
-# What: builds a stable fingerprint for one run's exact managed-history ref
-# set, as "ref@resolved-commit;ref2@resolved-commit2;...".
-# Why: a cache-read comparison against this value turns any ref-set drift
-# (a different caller's ref list, or the same ref list resolving to a
-# different commit since the cache was written) into an ordinary, safe cache
-# miss -- never a silently stale resolution. Order-sensitive by design: the
-# caller is expected to pass its own ref list in a stable order so the same
-# effective ref set always fingerprints identically run-to-run.
+# What: builds a "ref@resolved-commit;..." fingerprint for one run's ref set.
+# Why: ref-set drift (different caller, or a ref moving) must become a safe
+# cache miss, never a silently stale resolution; caller must pass a stable
+# ref order so the same ref set always fingerprints identically.
 # From: Issue #1095.
 sra_history_refs_fingerprint() {
   local repo_root="${1:?sra_history_refs_fingerprint: repo root is required}"
@@ -574,18 +565,19 @@ sra_sql_quote() {
   printf '%s' "${value//\'/\'\'}"
 }
 
-# What: bulk-reads every cached row for one package as TSV.
-# Why: one sqlite3 invocation per package, not per version -- a per-version
-# subprocess call would add cost of its own kind and defeat the point of
-# caching the per-version git/jq subprocess cost in the first place.
-# From: Issue #1585.
+# What: bulk-reads one package's cached rows for one history_fingerprint.
+# Why: one sqlite3 call per package, not per version; filtering by
+# fingerprint server-side means a caller only ever sees its own ref-set's
+# rows, never a different caller's stale one for the same version.
+# From: Issue #1585 | Issue #1095.
 sra_cache_read_package() {
   local db_path="${1:?sra_cache_read_package: db path is required}"
   local package="${2:?sra_cache_read_package: package is required}"
+  local history_fingerprint="${3:?sra_cache_read_package: history fingerprint is required}"
   command -v sqlite3 >/dev/null 2>&1 || return 1
   [[ -f "$db_path" ]] || return 1
   sqlite3 -separator "$(printf '\t')" "$db_path" \
-    "SELECT version_id, digest, tags, resolution, history_fingerprint FROM version_cache WHERE package = '$(sra_sql_quote "$package")';"
+    "SELECT version_id, digest, tags, resolution FROM version_cache WHERE package = '$(sra_sql_quote "$package")' AND history_fingerprint = '$(sra_sql_quote "$history_fingerprint")';"
 }
 
 # What: bulk-writes one package's updated cache rows in a single transaction.

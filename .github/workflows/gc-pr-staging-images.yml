@@ -194,8 +194,9 @@ jobs:
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
       # What: exports the runner.temp classification-cache dir via GITHUB_ENV.
-      # Why: shares the same cache the SHA Retention Audit workflow writes,
-      #   so this job's internal re-classification is not a cold, uncached run.
+      # Why: reuses this job's own prior classification-cache writes; cross-
+      #   sharing with the audit workflow is narrower than the matching key
+      #   names suggest (GH Actions cache ref-scoping -- see PR/Issue).
       # From: Issue #1095 (G17/#1585).
       - name: Prepare incremental classification cache directory
         if: steps.creds.outputs.have-pat == 'true' && steps.script-check.outputs.scripts-present == 'true'
@@ -208,8 +209,8 @@ jobs:
 
       # What: restores the SQLite classification cache, same rotating-key +
       #   prefix-fallback pattern as gc-sha-retention-audit.yml's own cache.
-      # Why: the shared restore-keys prefix lets this job pick up whatever
-      #   the standalone audit (or a prior GC run) already classified.
+      # Why: picks up whatever a prior run on the same ref-scope classified
+      #   -- in practice usually a prior run of this same job.
       # From: Issue #1095 (G17/#1585).
       - name: Restore SHA retention classification cache
         if: steps.creds.outputs.have-pat == 'true' && steps.script-check.outputs.scripts-present == 'true'

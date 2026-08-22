@@ -710,7 +710,7 @@ EOF
   run sra_cache_schema_sql
   [ "$status" -eq 0 ]
   [[ "$output" == *"CREATE TABLE IF NOT EXISTS version_cache"* ]]
-  [[ "$output" == *"PRIMARY KEY (package, version_id)"* ]]
+  [[ "$output" == *"PRIMARY KEY (package, version_id, history_fingerprint)"* ]]
   [[ "$output" == *"history_fingerprint TEXT NOT NULL"* ]]
 }
 
@@ -737,25 +737,22 @@ EOF
   digest="sha256:$(printf 'a%.0s' {1..64})"
   printf '42\t%s\tsha-abc1234\trank:7\n' "$digest" >"$rows_file"
 
+  fingerprint="origin/current_dev@$(printf 'c%.0s' {1..40})"
   run sra_cache_init "$db_path"
   [ "$status" -eq 0 ]
-  run sra_cache_write_package "$db_path" "proxy" "$rows_file" "origin/current_dev@$(printf 'c%.0s' {1..40})"
+  run sra_cache_write_package "$db_path" "proxy" "$rows_file" "$fingerprint"
   [ "$status" -eq 0 ]
-  run sra_cache_read_package "$db_path" "proxy"
+  run sra_cache_read_package "$db_path" "proxy" "$fingerprint"
   [ "$status" -eq 0 ]
   [[ "$output" == *"42"* ]]
   [[ "$output" == *"$digest"* ]]
   [[ "$output" == *"sha-abc1234"* ]]
   [[ "$output" == *"rank:7"* ]]
-  [[ "$output" == *"origin/current_dev@$(printf 'c%.0s' {1..40})"* ]]
 }
 
 # What: a cache write with no history fingerprint argument fails closed.
-# Why: history_fingerprint is a required, not optional, column (Issue
-# #1095) -- a caller that forgets it must get a loud failure (falling back
-# to full classification for that package), never a silently written row
-# with an empty/garbage fingerprint that would then spuriously match nothing
-# (a permanent, silent full miss) or, worse, spuriously match everything.
+# Why: history_fingerprint is a required column, not optional -- a caller
+# that forgets it must get a loud failure, never a silently written row.
 # From: Issue #1095.
 @test "cache write fails closed without a history fingerprint argument" {
   command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not available on this host"
@@ -775,44 +772,71 @@ EOF
 # From: Issue #1585.
 @test "cache read on a nonexistent database fails closed without erroring the caller" {
   command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not available on this host"
-  run sra_cache_read_package "$tmp_dir/does-not-exist.db" "proxy"
+  run sra_cache_read_package "$tmp_dir/does-not-exist.db" "proxy" "origin/current_dev@$(printf 'c%.0s' {1..40})"
   [ "$status" -ne 0 ]
 }
 
-# What: re-writing the same (package, version_id) replaces, not duplicates.
-# Why: INSERT OR REPLACE is load-bearing -- a version reclassified after a
-# retag must overwrite its stale row, never accumulate a second one.
-# From: Issue #1585.
-@test "cache write replaces an existing row for the same package and version id" {
+# What: re-writing the same (package, version_id, fingerprint) replaces.
+# Why: INSERT OR REPLACE is load-bearing -- a version reclassified again
+# under the same ref set must overwrite its stale row, not duplicate it.
+# From: Issue #1585 | Issue #1095.
+@test "cache write replaces an existing row for the same package, version id, and fingerprint" {
   command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not available on this host"
   db_path="$tmp_dir/cache.db"
   rows_file="$tmp_dir/rows.tsv"
+  fingerprint="origin/current_dev@$(printf 'c%.0s' {1..40})"
   run sra_cache_init "$db_path"
   [ "$status" -eq 0 ]
 
   printf '42\tsha256:%s\told-tag\trank:9\n' "$(printf 'a%.0s' {1..64})" >"$rows_file"
-  run sra_cache_write_package "$db_path" "proxy" "$rows_file" "origin/current_dev@$(printf 'c%.0s' {1..40})"
+  run sra_cache_write_package "$db_path" "proxy" "$rows_file" "$fingerprint"
   [ "$status" -eq 0 ]
 
   printf '42\tsha256:%s\tnew-tag\trank:3\n' "$(printf 'b%.0s' {1..64})" >"$rows_file"
-  run sra_cache_write_package "$db_path" "proxy" "$rows_file" "origin/current_dev@$(printf 'd%.0s' {1..40})"
+  run sra_cache_write_package "$db_path" "proxy" "$rows_file" "$fingerprint"
   [ "$status" -eq 0 ]
 
-  run sra_cache_read_package "$db_path" "proxy"
+  run sra_cache_read_package "$db_path" "proxy" "$fingerprint"
   [ "$status" -eq 0 ]
   [ "$(wc -l <<<"$output")" -eq 1 ]
   [[ "$output" == *"new-tag"* ]]
   [[ "$output" != *"old-tag"* ]]
-  [[ "$output" == *"origin/current_dev@$(printf 'd%.0s' {1..40})"* ]]
-  [[ "$output" != *"origin/current_dev@$(printf 'c%.0s' {1..40})"* ]]
 }
 
-# What: the fingerprint encodes each ref together with the exact commit it
-# currently resolves to, and differs when the ref set changes.
-# Why: this is the mechanism that makes the v1.2 classification cache safe
-# to share across two real callers with different managed-history ref sets
-# (Issue #1095) -- it must actually change when the ref set does, not just
-# exist as a hook nobody wired up.
+# What: two callers with different fingerprints keep independent rows.
+# Why: this is the property that makes cross-caller sharing safe instead of
+# each caller's write evicting the other's (Issue #1095) -- a read for one
+# fingerprint must never see the other's row for the same version id.
+# From: Issue #1095.
+@test "cache rows for different history fingerprints coexist and do not evict each other" {
+  command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not available on this host"
+  db_path="$tmp_dir/cache.db"
+  rows_file="$tmp_dir/rows.tsv"
+  narrow_fp="origin/current_dev@$(printf 'c%.0s' {1..40})"
+  wide_fp="origin/current_dev@$(printf 'c%.0s' {1..40});origin/master@$(printf 'd%.0s' {1..40})"
+  run sra_cache_init "$db_path"
+  [ "$status" -eq 0 ]
+
+  printf '42\tsha256:%s\tsha-abc1234\toutside-managed-history\n' "$(printf 'a%.0s' {1..64})" >"$rows_file"
+  run sra_cache_write_package "$db_path" "proxy" "$rows_file" "$narrow_fp"
+  [ "$status" -eq 0 ]
+
+  printf '42\tsha256:%s\tsha-abc1234\trank:3\n' "$(printf 'a%.0s' {1..64})" >"$rows_file"
+  run sra_cache_write_package "$db_path" "proxy" "$rows_file" "$wide_fp"
+  [ "$status" -eq 0 ]
+
+  run sra_cache_read_package "$db_path" "proxy" "$narrow_fp"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"outside-managed-history"* ]]
+
+  run sra_cache_read_package "$db_path" "proxy" "$wide_fp"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"rank:3"* ]]
+}
+
+# What: the fingerprint differs when the managed ref set changes.
+# Why: this is the mechanism the v1.2 cache's ref-set safety depends on
+# (Issue #1095) -- it must actually change, not just exist unused.
 # From: Issue #1095.
 @test "history refs fingerprint changes when the ref set changes" {
   git_dir="$tmp_dir/repo"
@@ -840,8 +864,8 @@ EOF
   [[ "$wide_fingerprint" == *"origin/current_dev@"* ]]
   [[ "$wide_fingerprint" == *"origin/master@"* ]]
 
-  # What: the same ref set, recomputed, is byte-identical -- stable across
-  # repeated same-input runs, not just "usually similar."
+  # What: the same ref set, recomputed, is byte-identical.
+  # Why: stable across repeated same-input runs, not just "usually similar."
   # From: Issue #1095.
   run sra_history_refs_fingerprint "$git_dir" origin/current_dev
   [ "$status" -eq 0 ]
@@ -849,10 +873,8 @@ EOF
 }
 
 # What: an unresolvable ref, or an empty ref list, fails closed.
-# Why: a caller must never silently proceed with an empty/partial
-# fingerprint that would make every cache row look like a match (or make
-# every row look like a permanent miss); either way, mirrors the fail-closed
-# style already used by sra_budget_decision/sra_resolve_commit_prefix.
+# Why: mirrors the fail-closed style already used by sra_budget_decision --
+# never silently proceed with an empty/partial fingerprint.
 # From: Issue #1095.
 @test "history refs fingerprint fails closed on an unknown ref or an empty ref list" {
   git_dir="$tmp_dir/repo"
@@ -870,16 +892,13 @@ EOF
   [ "$status" -ne 0 ]
 }
 
-# What: the classification cache read in gc-sha-retention-audit.sh compares
-# history_fingerprint, not just digest/tags, before trusting a cached row.
-# Why: a structural regression check (same style as the rollback_anchors
-# ordering test below) -- catches a future edit that reintroduces the fixed
-# gap by dropping this comparison, without needing a live sqlite3 run.
+# What: the classification cache read passes history_fingerprint, not just
+# package, before trusting any cached row.
+# Why: a structural regression check -- catches a future edit that
+# reintroduces the fixed gap by dropping this argument.
 # From: Issue #1095.
-@test "gc-sha-retention-audit.sh gates a cached resolution on history_fingerprint too" {
-  run grep -F 'cache_history_fingerprint' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh"
-  [ "$status" -eq 0 ]
-  run grep -F '"$cache_history_fingerprint" != "$history_fingerprint"' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh"
+@test "gc-sha-retention-audit.sh passes the history fingerprint into the cache read" {
+  run grep -F 'sra_cache_read_package "$cache_db" "$package" "$history_fingerprint"' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh"
   [ "$status" -eq 0 ]
 }
 
