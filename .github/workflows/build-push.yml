@@ -5456,6 +5456,43 @@ jobs:
             echo "SECRET_FILES"
           } >> "$GITHUB_OUTPUT"
 
+      # What: produces the ccache_redis_url secret file services/dns/Dockerfile's
+      #   AG-CI-022 ccache-over-distcc layer and services/utilities/Dockerfile's
+      #   curl-builder stage both mount, independently of matrix.rust (utilities
+      #   is not a Rust builder).
+      # Why: reuses the same repository secret as sccache's own Redis endpoint
+      #   under a distinct BuildKit secret id -- dns/utilities each hard-code
+      #   their own expected mount id in their own Dockerfile, so the value
+      #   must be offered under both ids rather than only sccache_redis_url.
+      #   This closes a real, previously-unwired gap: dns's own
+      #   configure_ccache() has never received this secret in a real build
+      #   before this change (grep of this file shows ccache_redis_url was
+      #   never produced anywhere), so its ccache layer has always fallen
+      #   closed to plain distcc in production.
+      # From: Issue #1095 (G15 | #1556)
+      - name: Prepare ccache Redis endpoint (dns + utilities C-dependency cache)
+        if: >-
+          ${{
+            steps.should-build.outputs.should-build == 'true' &&
+            (matrix.service == 'dns' || matrix.service == 'utilities') &&
+            github.actor != 'dependabot[bot]' &&
+            github.event_name != 'pull_request'
+          }}
+        id: ccache-redis-secret
+        env:
+          SCCACHE_REDIS_URL: ${{ secrets.SCCACHE_REDIS_URL }}
+        run: |
+          set -euo pipefail
+          if [ -n "$SCCACHE_REDIS_URL" ]; then
+            umask 077
+            redis_file="${{ runner.temp }}/ccache-redis-url-${{ matrix.service }}"
+            printf '%s' "$SCCACHE_REDIS_URL" > "$redis_file"
+            echo "redis-file=$redis_file" >> "$GITHUB_OUTPUT"
+            echo "secret-files=ccache_redis_url=$redis_file" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No SCCACHE_REDIS_URL configured; ${{ matrix.service }}'s ccache layer stays disabled (fails closed to a plain compile)."
+          fi
+
       - name: Select Rust acceleration network
         if: matrix.rust == true
         env:
@@ -5482,7 +5519,13 @@ jobs:
           redis-file: ${{ steps.sccache-secret.outputs.redis-file }}
           dist-config-file: ${{ steps.sccache-secret.outputs.dist-config-file }}
           distcc-hosts-file: ${{ steps.sccache-secret.outputs.distcc-hosts-file }}
-          ccache-redis-file: ${{ steps.sccache-secret.outputs.ccache-redis-file }}
+          # What: only wired for dns -- ui's Dockerfile does not implement
+          #   AG-CI-022's ccache-over-distcc layer (see that rule's own note),
+          #   so probing it there would validate a mechanism ui never uses.
+          # Why: reuses ccache-redis-secret's own output instead of a second
+          #   Redis-endpoint read, matching the real build step below.
+          # From: Issue #1095 (G15)
+          ccache-redis-file: ${{ matrix.service == 'dns' && steps['ccache-redis-secret'].outputs['redis-file'] || '' }}
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
           build-network: ${{ env.RUST_ACCELERATION_NETWORK }}
           platform: linux/amd64
@@ -5502,7 +5545,17 @@ jobs:
           builder: ${{ steps.buildx.outputs.name }}
           context: ${{ matrix.context }}
           build-contexts: ${{ matrix.build_contexts }}
-          secret-files: ${{ steps.sccache-secret.outputs.secret-files }}
+          # What: concatenates sccache-secret's own dns/ui secret-files with
+          #   ccache-redis-secret's dns/utilities-only ccache_redis_url line.
+          # Why: at most one of the two is non-empty for any given matrix
+          #   service, so a blank joining line is the only possible overlap;
+          #   docker/build-push-action's secret-files parsing already
+          #   tolerates blank lines the same way this file's other optional
+          #   multi-line inputs (e.g. build-args below) do.
+          # From: Issue #1095 (G15)
+          secret-files: |
+            ${{ steps.sccache-secret.outputs.secret-files }}
+            ${{ steps['ccache-redis-secret'].outputs['secret-files'] }}
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
