@@ -968,12 +968,26 @@ EOF
 # Why: metadata stack roots now use the same bounded history policy instead
 # of an unconditional class exemption, but rollback remains absolute.
 # From: Issue #1095 | PR #1586
+# What: rollback anchor checks (now two call sites, Rule-Ref: Issue #1613's
+# live-Dockerfile-digest reuse of the same helper) must all precede tag/
+# history classification.
+# Why: since #1613 reuses sra_digest_is_rollback_anchor for both the
+# maintainer-curated anchors and the newly-discovered live FROM digests,
+# a single-match assumption here no longer holds -- every call site found
+# must independently precede facts_line, not just exactly one of them.
+# From: Issue #1613
 @test "gc-sha-retention-audit.sh checks rollback_anchors before tag/history classification" {
-  anchor_line="$(grep -n 'sra_digest_is_rollback_anchor "\$digest"' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh" | cut -d: -f1)"
   facts_line="$(grep -n 'sra_version_tag_facts "\$version_json"' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh" | cut -d: -f1)"
-  [ -n "$anchor_line" ]
   [ -n "$facts_line" ]
-  [ "$anchor_line" -lt "$facts_line" ]
+
+  anchor_lines="$(grep -n 'sra_digest_is_rollback_anchor "\$digest"' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh" | cut -d: -f1)"
+  [ -n "$anchor_lines" ]
+
+  while IFS= read -r anchor_line; do
+    [ -n "$anchor_line" ] || continue
+    [ "$anchor_line" -lt "$facts_line" ]
+  done <<<"$anchor_lines"
+
   run grep -F 'metadata-stack-identity' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh"
   [ "$status" -eq 1 ]
 }
