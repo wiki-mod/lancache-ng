@@ -89,6 +89,12 @@ jobs:
       utilities: ${{ steps.filter.outputs.utilities }}
       proxy: ${{ steps.filter.outputs.proxy }}
       build_tools: ${{ steps.filter.outputs.build_tools }}
+      # What: true when a full-setup-validate-only action changed.
+      # Why: full-setup-validate's own gate below ORs this in alongside
+      #   deploy/workflow, since G15 narrowed workflow away from these
+      #   actions (they have no build-image consumer at all).
+      # From: Issue #1095 (G15)
+      validation_infra: ${{ steps.filter.outputs.validation_infra }}
       workflow: ${{ steps.filter.outputs.workflow }}
       docs: ${{ steps.filter.outputs.docs }}
       docs_only: ${{ steps.filter.outputs.docs_only }}
@@ -108,6 +114,7 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           BEFORE_SHA: ${{ github.event.before }}
+          FORCE_FULL_IMAGE_REBUILD: ${{ vars.FORCE_FULL_IMAGE_REBUILD }}
         run: |
           set -euo pipefail
 
@@ -116,7 +123,17 @@ jobs:
           # What: classification lives in classify-image-impact.sh.
           # Why: a merge-base diff needs the fetch-depth: 0 history above.
           # From: PR #1129
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+          # What: manual fail-safe override -- forces every service to rebuild
+          #   regardless of what actually changed, without a code change.
+          # Why: flipping a repository variable in GitHub settings is faster
+          #   than reverting/patching this script mid-incident if a future
+          #   classification gap is found; matches the existing
+          #   ALLOW_INSECURE_UI-style plain boolean repo variable convention.
+          # From: Issue #1095 (G15)
+          if [ "${FORCE_FULL_IMAGE_REBUILD:-false}" = "true" ]; then
+            echo "::notice::FORCE_FULL_IMAGE_REBUILD repository variable is true; classifying all paths as changed."
+            bash scripts/untracked/classify-image-impact.sh --all-changed >> "$GITHUB_OUTPUT"
+          elif [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
             : "${BASE_SHA:?pull request base SHA is required}"
             bash scripts/untracked/classify-image-impact.sh "$BASE_SHA" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
           else
@@ -2533,7 +2550,8 @@ jobs:
         (
           github.event_name != 'pull_request' ||
           needs['detect-changes'].outputs.deploy == 'true' ||
-          needs['detect-changes'].outputs.workflow == 'true'
+          needs['detect-changes'].outputs.workflow == 'true' ||
+          needs['detect-changes'].outputs.validation_infra == 'true'
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-light]
