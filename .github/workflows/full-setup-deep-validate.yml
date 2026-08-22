@@ -139,6 +139,26 @@ jobs:
       ntp: ${{ steps.plan.outputs.ntp }}
       syslog: ${{ steps.plan.outputs.syslog }}
     steps:
+      # What: force-resyncs the workspace to its current HEAD and clears any
+      # skip-worktree bits before this run's own checkout switches ref.
+      # Why: self-hosted runners reuse this workspace across unrelated PRs/jobs;
+      # a leftover tracked file can make the ref-switch checkout refuse to
+      # delete it ("not uptodate") even under --force despite matching HEAD.
+      # From: Issue #1095 (G15), PR #1640
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -euo pipefail
+          if [ -d .git ]; then
+            git sparse-checkout disable 2>/dev/null || true
+            rm -f .git/info/sparse-checkout
+            ls_files_before="$(git ls-files -v)"
+            mapfile -t remaining_skip_worktree < <(printf '%s\n' "$ls_files_before" | awk '/^S /{print substr($0,3)}')
+            if [ "${#remaining_skip_worktree[@]}" -gt 0 ]; then
+              git update-index --no-skip-worktree -- "${remaining_skip_worktree[@]}"
+            fi
+            git checkout --progress --force HEAD -- .
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # detect-full-setup-changes.sh diffs from the PR's real merge-base,
@@ -207,6 +227,27 @@ jobs:
       # untouched service from it. Same requirement, and same fix, as the
       # `plan` job's own fetch-depth: 0 checkout above (needed for
       # detect-full-setup-changes.sh's merge-base diff).
+      #
+      # What: force-resyncs the workspace to its current HEAD and clears any
+      # skip-worktree bits before this run's own checkout switches ref.
+      # Why: self-hosted runners reuse this workspace across unrelated PRs/jobs;
+      # a leftover tracked file can make the ref-switch checkout refuse to
+      # delete it ("not uptodate") even under --force despite matching HEAD.
+      # From: Issue #1095 (G15), PR #1640
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -euo pipefail
+          if [ -d .git ]; then
+            git sparse-checkout disable 2>/dev/null || true
+            rm -f .git/info/sparse-checkout
+            ls_files_before="$(git ls-files -v)"
+            mapfile -t remaining_skip_worktree < <(printf '%s\n' "$ls_files_before" | awk '/^S /{print substr($0,3)}')
+            if [ "${#remaining_skip_worktree[@]}" -gt 0 ]; then
+              git update-index --no-skip-worktree -- "${remaining_skip_worktree[@]}"
+            fi
+            git checkout --progress --force HEAD -- .
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -410,6 +451,26 @@ jobs:
       # per-run outputs as job-level env -- that job now lives in the reusable
       # full-setup-sims.yml, and the wrapper supplies the addresses anyway.
     steps:
+      # What: force-resyncs the workspace to its current HEAD and clears any
+      # skip-worktree bits before this run's own checkout switches ref.
+      # Why: self-hosted runners reuse this workspace across unrelated PRs/jobs;
+      # a leftover tracked file can make the ref-switch checkout refuse to
+      # delete it ("not uptodate") even under --force despite matching HEAD.
+      # From: Issue #1095 (G15), PR #1640
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -euo pipefail
+          if [ -d .git ]; then
+            git sparse-checkout disable 2>/dev/null || true
+            rm -f .git/info/sparse-checkout
+            ls_files_before="$(git ls-files -v)"
+            mapfile -t remaining_skip_worktree < <(printf '%s\n' "$ls_files_before" | awk '/^S /{print substr($0,3)}')
+            if [ "${#remaining_skip_worktree[@]}" -gt 0 ]; then
+              git update-index --no-skip-worktree -- "${remaining_skip_worktree[@]}"
+            fi
+            git checkout --progress --force HEAD -- .
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Resolve build-tools image
         # See ssl-mitm-cache-simulation's identical step above for why a
@@ -490,6 +551,26 @@ jobs:
       # full-setup-sims.yml, and the wrapper supplies the addresses anyway
       # (same reasoning as dns-zone-rollback-simulation above).
     steps:
+      # What: force-resyncs the workspace to its current HEAD and clears any
+      # skip-worktree bits before this run's own checkout switches ref.
+      # Why: self-hosted runners reuse this workspace across unrelated PRs/jobs;
+      # a leftover tracked file can make the ref-switch checkout refuse to
+      # delete it ("not uptodate") even under --force despite matching HEAD.
+      # From: Issue #1095 (G15), PR #1640
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -euo pipefail
+          if [ -d .git ]; then
+            git sparse-checkout disable 2>/dev/null || true
+            rm -f .git/info/sparse-checkout
+            ls_files_before="$(git ls-files -v)"
+            mapfile -t remaining_skip_worktree < <(printf '%s\n' "$ls_files_before" | awk '/^S /{print substr($0,3)}')
+            if [ "${#remaining_skip_worktree[@]}" -gt 0 ]; then
+              git update-index --no-skip-worktree -- "${remaining_skip_worktree[@]}"
+            fi
+            git checkout --progress --force HEAD -- .
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Resolve build-tools image
         # No BUILD_TOOLS_REQUIRE_PUBLISHED: same-PR tools/build-tools override
@@ -559,6 +640,26 @@ jobs:
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 45
     steps:
+      # What: force-resyncs the workspace to its current HEAD and clears any
+      # skip-worktree bits before this run's own checkout switches ref.
+      # Why: self-hosted runners reuse this workspace across unrelated PRs/jobs;
+      # a leftover tracked file can make the ref-switch checkout refuse to
+      # delete it ("not uptodate") even under --force despite matching HEAD.
+      # From: Issue #1095 (G15), PR #1640
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -euo pipefail
+          if [ -d .git ]; then
+            git sparse-checkout disable 2>/dev/null || true
+            rm -f .git/info/sparse-checkout
+            ls_files_before="$(git ls-files -v)"
+            mapfile -t remaining_skip_worktree < <(printf '%s\n' "$ls_files_before" | awk '/^S /{print substr($0,3)}')
+            if [ "${#remaining_skip_worktree[@]}" -gt 0 ]; then
+              git update-index --no-skip-worktree -- "${remaining_skip_worktree[@]}"
+            fi
+            git checkout --progress --force HEAD -- .
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Resolve build-tools image
         # No BUILD_TOOLS_REQUIRE_PUBLISHED: this script needs `expect` (real
