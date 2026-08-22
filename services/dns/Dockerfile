@@ -583,20 +583,18 @@ COPY --from=utilities-tools /usr/bin/lsof /usr/bin/lsof
 COPY --from=utilities-tools /usr/bin/rg /usr/bin/rg
 COPY --from=utilities-tools /usr/lib/libgcc_s.so.1 /usr/lib/libgcc_s.so.1
 COPY --from=utilities-tools /usr/lib/libpcre2-8.so.0* /usr/lib/
+COPY --from=utilities-tools /usr/local/bin/verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
 
 # What: verifies the copied binaries actually run, not just that they exist.
-# Why: see services/proxy/Dockerfile's identical comment for the reason.
-# From: Issue #1556
+# Why: a missing shared-library dependency fails at exec time, not at COPY
+#   time; the lsof check is delegated to a shared script (see that file).
+# From: Issue #1613
 RUN set -euo pipefail; \
     find . -maxdepth 0 -printf '%f\n' >/dev/null; \
     printf '%s' '$FOO' | FOO=bar envsubst >/dev/null; \
     rg --version >/dev/null; \
     curl --version >/dev/null; \
-    lsof_out="$(lsof -v 2>&1)" || true; \
-    case "$lsof_out" in \
-      *"lsof version information"*) : ;; \
-      *) printf '%s\n' "ERROR: lsof did not report its expected version banner: $lsof_out" >&2; exit 1 ;; \
-    esac
+    sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
 
 RUN apk add --no-cache \
     pdns \
