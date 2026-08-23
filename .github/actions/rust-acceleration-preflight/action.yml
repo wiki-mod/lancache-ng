@@ -1,7 +1,7 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# GitHub Action for validating Rust build acceleration infrastructure (sccache, sccache-dist, distcc, and services/dns's ccache-over-distcc layer) configuration and connectivity
+# GitHub Action for validating Rust build acceleration infrastructure (sccache, sccache-dist, distcc, and services/dns's and services/ui's ccache-over-distcc layer) configuration and connectivity
 name: Rust acceleration infrastructure preflight
 description: Validate Rust build acceleration infrastructure outside BuildKit cacheable Docker build layers.
 
@@ -24,9 +24,9 @@ inputs:
   ccache-redis-file:
     description: |
       Optional file containing the ccache Redis remote-storage endpoint for
-      services/dns/Dockerfile's ccache-over-distcc C-dependency cache only. Reuses the
-      same Redis URL as redis-file -- see build-push.yml's own comment on why this is
-      not a second secret.
+      services/dns/Dockerfile's and services/ui/Dockerfile's ccache-over-distcc
+      C-dependency cache. Reuses the same Redis URL as redis-file -- see
+      build-push.yml's own comment on why this is not a second secret.
     required: false
     default: ""
   build-tools-image:
@@ -505,9 +505,9 @@ runs:
                 echo "[INFO] plain cc fallback completed."
               fi
 
-              # What: validates ccache-over-distcc (services/dns only) with a real Redis
-              # write, then a real Redis read from a deliberately fresh local
-              # CCACHE_DIR, mirroring the sccache validation above.
+              # What: validates ccache-over-distcc (services/dns and services/ui) with a
+              # real Redis write, then a real Redis read from a deliberately fresh
+              # local CCACHE_DIR, mirroring the sccache validation above.
               # Why: only meaningful once real distcc dispatch above succeeded, and a
               # fresh CCACHE_DIR proves the Redis round trip instead of passing on
               # local-disk-only caching alone.
@@ -517,8 +517,8 @@ runs:
                 ccache_redis_endpoint="$(cat /run/lancache/ccache-redis-url)"
                 # What: normalizes a schemeless ccache_redis_endpoint to redis://.
                 # Why: ccache rejects a bare host:port outright, and this must accept
-                # the same configurations services/dns/Dockerfile's own normalization
-                # already accepts.
+                # the same configurations services/dns/Dockerfile's and
+                # services/ui/Dockerfile's own normalization already accept.
                 # From: Issue #887
                 case "$ccache_redis_endpoint" in
                   redis://*|redis+unix:*) ;;

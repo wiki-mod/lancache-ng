@@ -180,12 +180,20 @@ Important:
 
 ## Rust builds and ccache (distcc C-dependency cache)
 
-`services/dns/Dockerfile` can layer `ccache` in front of distcc for its
-C-dependency compile path (`ring`, via `rustls`), so a rebuild against
-unchanged C sources reuses a previous compile's result from Redis instead of
-recompiling and redistributing it every time. This is DNS-only today:
-`services/ui/Dockerfile`'s distcc wrapper does not understand ccache's
-`CCACHE_PREFIX` invocation convention yet.
+`services/dns/Dockerfile` and, since issue #1533, `services/ui/Dockerfile`
+can layer `ccache` in front of distcc for their C-dependency compile paths
+(`ring`/`aws-lc-sys`, via `rustls`), so a rebuild against unchanged C sources
+reuses a previous compile's result from Redis instead of recompiling and
+redistributing it every time. `services/ui/Dockerfile`'s custom
+`lancache-distcc-wrapper` now understands both distcc calling conventions --
+the original `$0`-basename masquerade dispatch, and ccache's `CCACHE_PREFIX`
+convention (invoked as `distcc <real-compiler-path> <args>`, real compiler is
+`$1`) -- disambiguated by checking `$0` first. **Known gap (confirmed
+2026-08-20, issue #1533): `build-push.yml`'s real CI pipeline does not yet
+populate the `ccache_redis_url` secret or the preflight action's
+`ccache-redis-file` input at any call site, for either service -- this layer
+has not been exercised against a real Redis endpoint in production CI yet.
+See `AGENTS.md`'s `AG-CI-022` Known Gaps note.**
 
 Important rules:
 
@@ -193,8 +201,8 @@ Important rules:
   a ccache Redis endpoint (BuildKit secret `ccache_redis_url`) is present --
   it automatically reuses the `SCCACHE_REDIS_URL` secret already documented
   above for sccache, not a second Redis URL
-- once both are enabled, `services/dns/Dockerfile` exports
-  `CC="ccache <real compiler>"` (not the plain `CC=distcc` every other
+- once both are enabled, `services/dns/Dockerfile` and `services/ui/Dockerfile`
+  export `CC="ccache <real compiler>"` (not the plain `CC=distcc` every other
   distcc-enabled builder uses), with `CCACHE_PREFIX=distcc` so ccache still
   dispatches actual cache misses through distcc
 - use `CCACHE_COMPILERCHECK=content`, not the ccache default of `mtime`,
