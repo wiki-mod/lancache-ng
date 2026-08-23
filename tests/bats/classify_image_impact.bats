@@ -104,7 +104,83 @@ val() {
     run_classify ".github/workflows/codeql.yml"
     [ "$(val workflow)" = "false" ]
 
+    # A genuinely-global action still sets workflow=true.
+    run_classify ".github/actions/ghcr-build-push-retry/action.yml"
+    [ "$(val workflow)" = "true" ]
+}
+
+# --- Per-action narrowing (Holzhammer fix, #1095, 2026-08-23) ---
+#
+# touches_build_workflow() used to treat ANY .github/actions/* change as
+# workflow=true, forcing every non-build-tools service to rebuild regardless
+# of which action actually changed (confirmed live via PR #1634: a
+# rust-acceleration-preflight-only change rebuilt all 10 services, though
+# only dns/ui consume that action). These cases pin the narrowed mapping.
+
+@test "rust-acceleration-preflight only affects dns_image/ui, not workflow" {
+    run_classify ".github/actions/rust-acceleration-preflight/action.yml"
+    [ "$(val dns_image)" = "true" ]
+    [ "$(val ui)" = "true" ]
+    [ "$(val watchdog)" = "false" ]
+    [ "$(val proxy)" = "false" ]
+    [ "$(val workflow)" = "false" ]
+}
+
+@test "configure-rust-sccache affects dns_rust/ui/watchdog, not workflow" {
+    run_classify ".github/actions/configure-rust-sccache/action.yml"
+    [ "$(val dns_rust)" = "true" ]
+    [ "$(val ui)" = "true" ]
+    [ "$(val watchdog)" = "true" ]
+    [ "$(val dns_image)" = "false" ]
+    [ "$(val workflow)" = "false" ]
+}
+
+@test "cargo-with-sccache-fallback affects dns_rust/ui/watchdog, not workflow" {
+    run_classify ".github/actions/cargo-with-sccache-fallback/action.yml"
+    [ "$(val dns_rust)" = "true" ]
+    [ "$(val ui)" = "true" ]
+    [ "$(val watchdog)" = "true" ]
+    [ "$(val workflow)" = "false" ]
+}
+
+@test "build-tools-candidate-smoke affects build_tools only" {
+    run_classify ".github/actions/build-tools-candidate-smoke/action.yml"
+    [ "$(val build_tools)" = "true" ]
+    [ "$(val workflow)" = "false" ]
+}
+
+@test "full-setup-validate actions set validation_infra, not workflow" {
     run_classify ".github/actions/derive-validation-network/action.yml"
+    [ "$(val validation_infra)" = "true" ]
+    [ "$(val workflow)" = "false" ]
+
+    run_classify ".github/actions/reserve-validation-subnet-stack/action.yml"
+    [ "$(val validation_infra)" = "true" ]
+
+    run_classify ".github/actions/wait-validation-stack-health/action.yml"
+    [ "$(val validation_infra)" = "true" ]
+}
+
+@test "pure PR-gate actions affect no build/test-scoping output" {
+    run_classify ".github/actions/file-headers-check/action.yml"
+    [ "$(val workflow)" = "false" ]
+    [ "$(val dns_image)" = "false" ]
+    [ "$(val ui)" = "false" ]
+    [ "$(val watchdog)" = "false" ]
+    [ "$(val build_tools)" = "false" ]
+    [ "$(val validation_infra)" = "false" ]
+}
+
+@test "a genuinely global action sets workflow true" {
+    run_classify ".github/actions/ghcr-attest-retry/action.yml"
+    [ "$(val workflow)" = "true" ]
+
+    run_classify ".github/actions/trivy-scan-with-cache/action.yml"
+    [ "$(val workflow)" = "true" ]
+}
+
+@test "an unmapped (not-yet-categorized) action fails closed to workflow true" {
+    run_classify ".github/actions/brand-new-thing/action.yml"
     [ "$(val workflow)" = "true" ]
 }
 
@@ -238,6 +314,27 @@ val() {
     [ "$(val docs_only)" = "false" ]
 }
 
+# FORCE_FULL_IMAGE_REBUILD is a standing GitHub Actions repository-variable
+# override for the same fail-safe verdict, checked ahead of --all-changed.
+@test "FORCE_FULL_IMAGE_REBUILD=true forces the same verdict as --all-changed" {
+    printf '%s\n' "README.md" > "$files"
+    CHANGED_FILES="$files" FORCE_FULL_IMAGE_REBUILD=true run bash "$script"
+    [ "$status" -eq 0 ]
+    [ "$(val ui)" = "true" ]
+    [ "$(val workflow)" = "true" ]
+    [ "$(val docs_only)" = "false" ]
+    [ "$(val IMAGE_IMPACT)" = "true" ]
+}
+
+@test "FORCE_FULL_IMAGE_REBUILD unset or non-true does not force the verdict" {
+    run_classify "README.md"
+    [ "$(val ui)" = "false" ]
+
+    printf '%s\n' "README.md" > "$files"
+    CHANGED_FILES="$files" FORCE_FULL_IMAGE_REBUILD=false run bash "$script"
+    [ "$(val ui)" = "false" ]
+}
+
 # The fallback must not depend on (or read) any diff input: it stays correct
 # even with a stale CHANGED_FILES pointing at a docs-only list in the
 # environment, because --all-changed short-circuits before any file is read.
@@ -343,6 +440,15 @@ commit_workflow_file() {
     cat > "$repo_dir/.github/workflows/build-push.yml"
     git -C "$repo_dir" add -A
     git -C "$repo_dir" commit -q -m "$1"
+    git -C "$repo_dir" rev-parse HEAD
+}
+
+commit_action_file() {
+    # $1 = action directory name, $2 = commit message, stdin = file content.
+    mkdir -p "$repo_dir/.github/actions/$1"
+    cat > "$repo_dir/.github/actions/$1/action.yml"
+    git -C "$repo_dir" add -A
+    git -C "$repo_dir" commit -q -m "$2"
     git -C "$repo_dir" rev-parse HEAD
 }
 
@@ -457,4 +563,59 @@ YAML
     run bash "$script" "$base_sha" "$head_sha"
     [ "$status" -eq 0 ]
     [ "$(val workflow)" = "true" ]
+}
+
+# --- Per-action comment-only awareness (Holzhammer fix, #1095, 2026-08-23) ---
+#
+# touches_action() applies the identical G14 content-diff check as
+# workflow_diff_is_comment_only, scoped to one action directory, so a
+# comment-only edit to a mapped action (e.g. a compression pass) does not
+# force a rebuild for that action's consumers either.
+
+@test "G14 per-action: a comment-only change to a mapped action does not touch its consumers" {
+    setup_g14_repo
+    base_sha="$(commit_action_file rust-acceleration-preflight base <<'YAML'
+name: test
+# a comment line v1
+runs:
+  using: composite
+  steps: []
+YAML
+)"
+    head_sha="$(commit_action_file rust-acceleration-preflight head <<'YAML'
+name: test
+# a comment line v2, still just a comment
+runs:
+  using: composite
+  steps: []
+YAML
+)"
+    run bash "$script" "$base_sha" "$head_sha"
+    [ "$status" -eq 0 ]
+    [ "$(val dns_image)" = "false" ]
+    [ "$(val ui)" = "false" ]
+    [ "$(val workflow)" = "false" ]
+}
+
+@test "G14 per-action: a substantive change to a mapped action DOES touch its consumers" {
+    setup_g14_repo
+    base_sha="$(commit_action_file rust-acceleration-preflight base <<'YAML'
+name: test
+runs:
+  using: composite
+  steps: []
+YAML
+)"
+    head_sha="$(commit_action_file rust-acceleration-preflight head <<'YAML'
+name: test
+runs:
+  using: composite
+  steps:
+    - run: echo hi
+YAML
+)"
+    run bash "$script" "$base_sha" "$head_sha"
+    [ "$status" -eq 0 ]
+    [ "$(val dns_image)" = "true" ]
+    [ "$(val ui)" = "true" ]
 }

@@ -89,6 +89,7 @@ jobs:
       utilities: ${{ steps.filter.outputs.utilities }}
       proxy: ${{ steps.filter.outputs.proxy }}
       build_tools: ${{ steps.filter.outputs.build_tools }}
+      validation_infra: ${{ steps.filter.outputs.validation_infra }}
       workflow: ${{ steps.filter.outputs.workflow }}
       docs: ${{ steps.filter.outputs.docs }}
       docs_only: ${{ steps.filter.outputs.docs_only }}
@@ -137,6 +138,11 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           BEFORE_SHA: ${{ github.event.before }}
+          # What: standing repo-variable override for a temporary
+          #   "rebuild everything" need, no code change required.
+          # Why: classify-image-impact.sh reads this env var directly.
+          # From: Issue #1095
+          FORCE_FULL_IMAGE_REBUILD: ${{ vars.FORCE_FULL_IMAGE_REBUILD }}
         run: |
           set -euo pipefail
 
@@ -2912,7 +2918,8 @@ jobs:
         (
           github.event_name != 'pull_request' ||
           needs['detect-changes'].outputs.deploy == 'true' ||
-          needs['detect-changes'].outputs.workflow == 'true'
+          needs['detect-changes'].outputs.workflow == 'true' ||
+          needs['detect-changes'].outputs.validation_infra == 'true'
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-light]

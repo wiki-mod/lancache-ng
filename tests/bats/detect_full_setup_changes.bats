@@ -93,9 +93,19 @@ value_from() {
     [ "$(val should_run)" = "true" ]
 }
 
-@test "composite action change counts as a workflow change (guard + run)" {
-    run_detect ".github/actions/derive-validation-network/action.yml"
+@test "a genuinely global composite action change counts as a workflow change (guard + run)" {
+    run_detect ".github/actions/ghcr-build-push-retry/action.yml"
     [ "$(val workflow)" = "true" ]
+    [ "$(val should_run)" = "true" ]
+}
+
+# derive-validation-network is narrowed to the shared classifier's own
+# validation_infra output, not workflow (#1095 Holzhammer fix) -- should_run
+# still goes true via this detector's own broad .github/actions/ prefix
+# check below, independent of the narrower shared workflow verdict.
+@test "a narrowly-scoped composite action still runs the suite without forcing the workflow guard" {
+    run_detect ".github/actions/derive-validation-network/action.yml"
+    [ "$(val workflow)" = "false" ]
     [ "$(val should_run)" = "true" ]
 }
 

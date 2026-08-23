@@ -18,13 +18,19 @@
 #       Reads a newline-separated changed-path list. Tests and callers that
 #       already resolved the event diff can use this without another git walk.
 #
+# FORCE_FULL_IMAGE_REBUILD=true forces the same maximal verdict as
+# --all-changed, checked before either form above. This is a standing
+# override switch (a GitHub Actions repository variable at the call site),
+# not a per-invocation flag, for a temporary "rebuild everything" need with
+# no code change required.
+#
 # Output is machine-readable key=value lines on stdout. The human-readable
 # changed-file list is written to stderr so callers can append stdout directly
 # to GITHUB_OUTPUT or consume one verdict without filtering diagnostics.
 set -euo pipefail
 
 force_all=false
-if [[ "${1:-}" == "--all-changed" ]]; then
+if [[ "${FORCE_FULL_IMAGE_REBUILD:-}" == "true" || "${1:-}" == "--all-changed" ]]; then
     force_all=true
 fi
 
@@ -92,6 +98,80 @@ touches_docs() {
     return 1
 }
 
+# What: actions whose own change plausibly affects every service candidate.
+# Why: kept in touches_build_workflow()'s workflow-wide fallback rather than
+#   narrowed to a per-service output, unlike the other 12 known actions.
+# From: Issue #1095
+GLOBAL_ACTIONS=(
+    ghcr-build-push-retry trivy-scan-exact-digest ghcr-attest-retry
+    buildx-setup-retry ghcr-attest-with-cache trivy-scan-with-cache
+    trivy-scan-retry
+)
+
+# What: the remaining 12 known .github/actions/* directories -- each either
+#   feeds one of the explicit touches_action() checks below, or (the 5
+#   pure PR-gate actions) legitimately produces no build/test-scoping
+#   output at all.
+# Why: kept separate from GLOBAL_ACTIONS so neither list repeats the
+#   other's 7 names; KNOWN_ACTIONS below is their union.
+# From: Issue #1095
+NON_GLOBAL_KNOWN_ACTIONS=(
+    build-tools-candidate-smoke cargo-with-sccache-fallback
+    compose-healthchecks-check configure-rust-sccache
+    derive-validation-network file-headers-check
+    pr-title-convention-check pr-tracking-metadata-fetch-and-validate
+    reserve-validation-subnet-stack rust-acceleration-preflight
+    shellcheck-and-standing-guards wait-validation-stack-health
+)
+
+# What: all 19 known .github/actions/* directory names.
+# Why: touches_unmapped_action() fails closed to workflow=true for any
+#   action directory not in this list (e.g. a brand-new one).
+# From: Issue #1095
+KNOWN_ACTIONS=("${GLOBAL_ACTIONS[@]}" "${NON_GLOBAL_KNOWN_ACTIONS[@]}")
+
+# What: touches_action(), except a diff to $1 that _cii_path_is_comment_only
+#   proves is comment/blank-only (base_ref/head_ref form only) does not
+#   count as a touch.
+# Why: same G14 principle as workflow_diff_is_comment_only, applied per
+#   action -- a comment-compression pass on a shared action must not force
+#   a rebuild for every one of its consumers either.
+# From: Issue #1095
+touches_action() {
+    [[ "$force_all" == "true" ]] && return 0
+    touches_prefix ".github/actions/$1/" || return 1
+    [[ -n "${merge_base:-}" && -n "${head_ref:-}" ]] || return 0
+    local path
+    while IFS= read -r path; do
+        [[ "$path" == ".github/actions/$1/"* ]] || continue
+        _cii_path_is_comment_only "$path" || return 0
+    done < "$changed_files"
+    return 1
+}
+
+# What: true if a changed path under .github/actions/ names a directory not
+#   present in KNOWN_ACTIONS.
+# Why: fail-closed default for a brand-new, not-yet-categorized action.
+# From: Issue #1095
+touches_unmapped_action() {
+    [[ "$force_all" == "true" ]] && return 1
+    local path action known name_matches
+    while IFS= read -r path; do
+        case "$path" in
+            .github/actions/*)
+                action="${path#.github/actions/}"
+                action="${action%%/*}"
+                known=false
+                for name_matches in "${KNOWN_ACTIONS[@]}"; do
+                    [[ "$action" == "$name_matches" ]] && { known=true; break; }
+                done
+                [[ "$known" == "true" ]] || return 0
+                ;;
+        esac
+    done < "$changed_files"
+    return 1
+}
+
 # What: prints $1 with every blank line and '#'-prefixed comment line
 #   removed, except inside a YAML block-scalar body (a `key: |`/`key: >`
 #   line and its more-indented or blank continuation lines), which is
@@ -126,12 +206,39 @@ _cii_normalize_workflow_comments() {
     ' "$1"
 }
 
-# What: true only in the <base_ref> <head_ref> form, when every touched
-#   build-workflow path is a plain text modification whose comment/blank
-#   lines are the only difference between its base and head content.
+# What: true only in the <base_ref> <head_ref> form, when $1's own diff is a
+#   plain text modification whose comment/blank lines are the only
+#   difference between its base and head content.
 # Why: comparing the two normalized (block-scalar-safe comment/blank-stripped)
 #   versions for exact equality proves nothing else changed, without having
-#   to map individual diff hunk lines back to base/head line numbers.
+#   to map individual diff hunk lines back to base/head line numbers. Shared
+#   by workflow_diff_is_comment_only (repo-wide) and touches_action
+#   (per-action) so both apply the identical, single-source check.
+# From: Issue #1095 (G14) | PR #1609 review
+_cii_path_is_comment_only() {
+    local p="$1" status added deleted base_hash head_hash
+    status="$(git diff --no-color --name-status "$merge_base" "$head_ref" -- "$p" | cut -f1)"
+    [[ "$status" == "M" ]] || return 1
+
+    read -r added deleted _ < <(git diff --no-color --numstat "$merge_base" "$head_ref" -- "$p")
+    # What: binary shows numstat "-\t-" (fails the numeric check below); a
+    #   mode-only change shows numeric "0\t0" (passes it, but its bytes
+    #   are unchanged so the hash comparison below would too) -- both
+    #   must fail closed rather than default to "no violation found".
+    # Why: a status=M path with no real +/- content delta is not provably
+    #   comment-only, it is simply unexamined by this function.
+    # From: Issue #1095 (G14) | PR #1609 review
+    [[ "$added" =~ ^[0-9]+$ && "$deleted" =~ ^[0-9]+$ ]] || return 1
+    (( added > 0 || deleted > 0 )) || return 1
+
+    base_hash="$(git show "${merge_base}:${p}" 2>/dev/null | _cii_normalize_workflow_comments /dev/stdin | sha256sum)"
+    head_hash="$(git show "${head_ref}:${p}" 2>/dev/null | _cii_normalize_workflow_comments /dev/stdin | sha256sum)"
+    [[ "$base_hash" == "$head_hash" ]]
+}
+
+# What: true only in the <base_ref> <head_ref> form, when every touched
+#   build-workflow path is comment/blank-only per _cii_path_is_comment_only.
+# Why: repo-wide gate for touches_build_workflow's own workflow-wide flag.
 # From: Issue #1095 (G14) | PR #1609 review
 workflow_diff_is_comment_only() {
     [[ -n "${merge_base:-}" && -n "${head_ref:-}" ]] || return 1
@@ -146,41 +253,36 @@ workflow_diff_is_comment_only() {
     done < "$changed_files"
     [[ ${#paths[@]} -gt 0 ]] || return 1
 
-    local p status added deleted base_hash head_hash
+    local p
     for p in "${paths[@]}"; do
-        status="$(git diff --no-color --name-status "$merge_base" "$head_ref" -- "$p" | cut -f1)"
-        [[ "$status" == "M" ]] || return 1
-
-        read -r added deleted _ < <(git diff --no-color --numstat "$merge_base" "$head_ref" -- "$p")
-        # What: binary shows numstat "-\t-" (fails the numeric check below); a
-        #   mode-only change shows numeric "0\t0" (passes it, but its bytes
-        #   are unchanged so the hash comparison below would too) -- both
-        #   must fail closed rather than default to "no violation found".
-        # Why: a status=M path with no real +/- content delta is not provably
-        #   comment-only, it is simply unexamined by this function.
-        # From: Issue #1095 (G14) | PR #1609 review
-        [[ "$added" =~ ^[0-9]+$ && "$deleted" =~ ^[0-9]+$ ]] || return 1
-        (( added > 0 || deleted > 0 )) || return 1
-
-        base_hash="$(git show "${merge_base}:${p}" 2>/dev/null | _cii_normalize_workflow_comments /dev/stdin | sha256sum)"
-        head_hash="$(git show "${head_ref}:${p}" 2>/dev/null | _cii_normalize_workflow_comments /dev/stdin | sha256sum)"
-        [[ "$base_hash" == "$head_hash" ]] || return 1
+        _cii_path_is_comment_only "$p" || return 1
     done
 
     return 0
 }
 
 touches_build_workflow() {
-    # What: workflow-wide impact for a build-workflow-path touch, unless
-    #   workflow_diff_is_comment_only proves the touched content is
-    #   comment/blank-only outside any block scalar.
-    # Why: those paths can alter how every service candidate is produced
-    #   even when no service source moved.
-    # From: Issue #1095 (G14) | PR #1609 review
-    local touched=false
+    # What: workflow-wide impact for build-push.yml/build-tools.yml, a
+    #   genuinely-global action, or an unmapped (not-yet-categorized)
+    #   action -- narrowed from a blanket ".github/actions/*" match.
+    # Why: a single-consumer action (e.g. rust-acceleration-preflight,
+    #   dns/ui only) must not force every service to rebuild; an unmapped
+    #   action still fails closed to workflow-wide impact.
+    # From: Issue #1095
+    local touched=false name
     if touches_exact ".github/workflows/build-push.yml" \
-        || touches_exact ".github/workflows/build-tools.yml" \
-        || touches_prefix ".github/actions/"; then
+        || touches_exact ".github/workflows/build-tools.yml"; then
+        touched=true
+    fi
+    if [[ "$touched" == "false" ]]; then
+        for name in "${GLOBAL_ACTIONS[@]}"; do
+            if touches_action "$name"; then
+                touched=true
+                break
+            fi
+        done
+    fi
+    if [[ "$touched" == "false" ]] && touches_unmapped_action; then
         touched=true
     fi
     [[ "$touched" == "true" ]] || return 1
@@ -189,14 +291,19 @@ touches_build_workflow() {
 }
 
 touches_codeql_rust() {
-    # CodeQL's Rust database contains these three Rust crates. It also depends
-    # on the shared build workflow/actions and on its own workflow/config, so a
-    # change to any of those inputs must rerun the Rust extraction even when no
-    # Rust source file changed.
+    # What: also fires on the two sccache actions codeql.yml itself
+    #   consumes to compile the Rust database (verified: `uses:
+    #   ./.github/actions/configure-rust-sccache` and
+    #   `.../cargo-with-sccache-fallback` in that workflow file).
+    # Why: touches_build_workflow no longer covers a single-consumer
+    #   action; codeql.yml's own consumption is a separate signal.
+    # From: Issue #1095
     touches_prefix "services/dns/nats-subscriber/" \
         || touches_prefix "services/ui/" \
         || touches_prefix "services/watchdog/" \
         || touches_build_workflow \
+        || touches_action "configure-rust-sccache" \
+        || touches_action "cargo-with-sccache-fallback" \
         || touches_exact ".github/workflows/codeql.yml" \
         || touches_prefix ".github/codeql/"
 }
@@ -250,10 +357,43 @@ output_bool() {
     fi
 }
 
-output_bool "dns_rust" touches_prefix "services/dns/nats-subscriber/"
-output_bool "dns_image" touches_prefix "services/dns/"
-output_bool "ui" touches_prefix "services/ui/"
-output_bool "watchdog" touches_prefix "services/watchdog/"
+# What: dns_rust/ui/watchdog also fire on the two shared Rust-acceleration
+#   quality/test/audit actions; dns_image/ui also fire on the shared
+#   ccache-over-distcc preflight action (build-job impact, watchdog has no
+#   compile step yet -- see AGENTS.md's AG-CI-002).
+# Why: narrows touches_build_workflow()'s prior blanket ".github/actions/*"
+#   match without losing per-service coverage for these two consumers.
+# From: Issue #1095
+if touches_prefix "services/dns/nats-subscriber/" \
+    || touches_action "configure-rust-sccache" \
+    || touches_action "cargo-with-sccache-fallback"; then
+    printf 'dns_rust=true\n'
+else
+    printf 'dns_rust=false\n'
+fi
+
+if touches_prefix "services/dns/" || touches_action "rust-acceleration-preflight"; then
+    printf 'dns_image=true\n'
+else
+    printf 'dns_image=false\n'
+fi
+
+if touches_prefix "services/ui/" \
+    || touches_action "rust-acceleration-preflight" \
+    || touches_action "configure-rust-sccache" \
+    || touches_action "cargo-with-sccache-fallback"; then
+    printf 'ui=true\n'
+else
+    printf 'ui=false\n'
+fi
+
+if touches_prefix "services/watchdog/" \
+    || touches_action "configure-rust-sccache" \
+    || touches_action "cargo-with-sccache-fallback"; then
+    printf 'watchdog=true\n'
+else
+    printf 'watchdog=false\n'
+fi
 output_bool "dhcp" touches_prefix "services/dhcp/"
 output_bool "dhcp_proxy" touches_prefix "services/dhcp-proxy/"
 output_bool "ntp" touches_prefix "services/ntp/"
@@ -281,7 +421,23 @@ else
     printf 'proxy=false\n'
 fi
 
-output_bool "build_tools" touches_prefix "tools/build-tools/"
+if touches_prefix "tools/build-tools/" || touches_action "build-tools-candidate-smoke"; then
+    printf 'build_tools=true\n'
+else
+    printf 'build_tools=false\n'
+fi
+
+# What: true when a full-setup-validate-only action changed.
+# Why: feeds that job's own gate instead of the workflow-wide fallback.
+# From: Issue #1095
+if touches_action "derive-validation-network" \
+    || touches_action "reserve-validation-subnet-stack" \
+    || touches_action "wait-validation-stack-health"; then
+    printf 'validation_infra=true\n'
+else
+    printf 'validation_infra=false\n'
+fi
+
 output_bool "workflow" touches_build_workflow
 output_bool "codeql_rust" touches_codeql_rust
 output_bool "docs" touches_docs
