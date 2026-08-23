@@ -92,13 +92,25 @@ touches_docs() {
     return 1
 }
 
-# What: true when a changed path falls under .github/actions/<name>/.
+# What: true when a changed path falls under .github/actions/<name>/, unless
+#   _cii_path_is_comment_only proves every such path's diff is comment/blank
+#   only (base_ref/head_ref form only).
 # Why: single helper so every per-action rule below and the global/unmapped
 #   checks share one definition of "touched", instead of each repeating its
-#   own prefix construction.
-# From: Issue #1095 (G15)
+#   own prefix construction. The comment-only exemption mirrors G14's own
+#   repo-wide workflow_diff_is_comment_only, applied per action so a
+#   comment-compression pass on a shared action does not rebuild its
+#   consumers either.
+# From: Issue #1095 (G14 | G15)
 touches_action() {
-    touches_prefix ".github/actions/$1/"
+    touches_prefix ".github/actions/$1/" || return 1
+    [[ -n "${merge_base:-}" && -n "${head_ref:-}" ]] || return 0
+    local path
+    while IFS= read -r path; do
+        [[ "$path" == ".github/actions/$1/"* ]] || continue
+        _cii_path_is_comment_only "$path" || return 0
+    done < "$changed_files"
+    return 1
 }
 
 # What: actions whose change must still force workflow=true for every service.
@@ -205,12 +217,39 @@ _cii_normalize_workflow_comments() {
     ' "$1"
 }
 
-# What: true only in the <base_ref> <head_ref> form, when every touched
-#   build-workflow path is a plain text modification whose comment/blank
-#   lines are the only difference between its base and head content.
+# What: true only in the <base_ref> <head_ref> form, when $1's own diff is a
+#   plain text modification whose comment/blank lines are the only
+#   difference between its base and head content.
 # Why: comparing the two normalized (block-scalar-safe comment/blank-stripped)
 #   versions for exact equality proves nothing else changed, without having
-#   to map individual diff hunk lines back to base/head line numbers.
+#   to map individual diff hunk lines back to base/head line numbers. Shared
+#   by workflow_diff_is_comment_only (repo-wide) and touches_action
+#   (per-action) so both apply the identical, single-source check.
+# From: Issue #1095 (G14) | PR #1609 review
+_cii_path_is_comment_only() {
+    local p="$1" status added deleted base_hash head_hash
+    status="$(git diff --no-color --name-status "$merge_base" "$head_ref" -- "$p" | cut -f1)"
+    [[ "$status" == "M" ]] || return 1
+
+    read -r added deleted _ < <(git diff --no-color --numstat "$merge_base" "$head_ref" -- "$p")
+    # What: binary shows numstat "-\t-" (fails the numeric check below); a
+    #   mode-only change shows numeric "0\t0" (passes it, but its bytes
+    #   are unchanged so the hash comparison below would too) -- both
+    #   must fail closed rather than default to "no violation found".
+    # Why: a status=M path with no real +/- content delta is not provably
+    #   comment-only, it is simply unexamined by this function.
+    # From: Issue #1095 (G14) | PR #1609 review
+    [[ "$added" =~ ^[0-9]+$ && "$deleted" =~ ^[0-9]+$ ]] || return 1
+    (( added > 0 || deleted > 0 )) || return 1
+
+    base_hash="$(git show "${merge_base}:${p}" 2>/dev/null | _cii_normalize_workflow_comments /dev/stdin | sha256sum)"
+    head_hash="$(git show "${head_ref}:${p}" 2>/dev/null | _cii_normalize_workflow_comments /dev/stdin | sha256sum)"
+    [[ "$base_hash" == "$head_hash" ]]
+}
+
+# What: true only in the <base_ref> <head_ref> form, when every touched
+#   build-workflow path is comment/blank-only per _cii_path_is_comment_only.
+# Why: repo-wide gate for touches_build_workflow's own workflow-wide flag.
 # From: Issue #1095 (G14) | PR #1609 review
 workflow_diff_is_comment_only() {
     [[ -n "${merge_base:-}" && -n "${head_ref:-}" ]] || return 1
@@ -225,25 +264,9 @@ workflow_diff_is_comment_only() {
     done < "$changed_files"
     [[ ${#paths[@]} -gt 0 ]] || return 1
 
-    local p status added deleted base_hash head_hash
+    local p
     for p in "${paths[@]}"; do
-        status="$(git diff --no-color --name-status "$merge_base" "$head_ref" -- "$p" | cut -f1)"
-        [[ "$status" == "M" ]] || return 1
-
-        read -r added deleted _ < <(git diff --no-color --numstat "$merge_base" "$head_ref" -- "$p")
-        # What: binary shows numstat "-\t-" (fails the numeric check below); a
-        #   mode-only change shows numeric "0\t0" (passes it, but its bytes
-        #   are unchanged so the hash comparison below would too) -- both
-        #   must fail closed rather than default to "no violation found".
-        # Why: a status=M path with no real +/- content delta is not provably
-        #   comment-only, it is simply unexamined by this function.
-        # From: Issue #1095 (G14) | PR #1609 review
-        [[ "$added" =~ ^[0-9]+$ && "$deleted" =~ ^[0-9]+$ ]] || return 1
-        (( added > 0 || deleted > 0 )) || return 1
-
-        base_hash="$(git show "${merge_base}:${p}" 2>/dev/null | _cii_normalize_workflow_comments /dev/stdin | sha256sum)"
-        head_hash="$(git show "${head_ref}:${p}" 2>/dev/null | _cii_normalize_workflow_comments /dev/stdin | sha256sum)"
-        [[ "$base_hash" == "$head_hash" ]] || return 1
+        _cii_path_is_comment_only "$p" || return 1
     done
 
     return 0
