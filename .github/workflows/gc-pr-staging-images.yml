@@ -134,6 +134,8 @@ jobs:
             "scripts/lib/ghcr-retry.sh"
             "scripts/lib/github-api-retry.sh"
             "scripts/lib/sha-retention-audit.sh"
+            "scripts/lib/build-tools-channel.sh"
+            "scripts/lib/docker-buildx-retry.sh"
             "release/stack-images.yml"
           )
           missing=()
@@ -169,6 +171,8 @@ jobs:
             scripts/lib/ghcr-retry.sh
             scripts/lib/github-api-retry.sh
             scripts/lib/sha-retention-audit.sh
+            scripts/lib/build-tools-channel.sh
+            scripts/lib/docker-buildx-retry.sh
             release/stack-images.yml
           sparse-checkout-cone-mode: false
 
