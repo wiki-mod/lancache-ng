@@ -56,7 +56,10 @@ on:
       minimum_age_seconds:
         description: Minimum version age before any deletion.
         type: string
-        default: "86400"
+        # What: manual-dispatch default, mirrors GC_MIN_AGE_SECONDS's own default.
+        # Why: raised from 24h to 7 days (604800s) per the v1.2 plan.
+        # From: Issue #1585
+        default: "604800"
 
 # What: no elevated `permissions:` block; deletion uses a separate PAT.
 # Why: GitHub's package-version-delete REST API requires a classic PAT with
@@ -126,6 +129,7 @@ jobs:
           required_paths=(
             "scripts/untracked/gc-pr-staging-images.sh"
             "scripts/untracked/gc-sha-retention-audit.sh"
+            "scripts/untracked/select-build-tools-image.sh"
             "scripts/lib/gc-pr-staging-images.sh"
             "scripts/lib/ghcr-retry.sh"
             "scripts/lib/github-api-retry.sh"
@@ -160,6 +164,7 @@ jobs:
           sparse-checkout: |
             scripts/untracked/gc-pr-staging-images.sh
             scripts/untracked/gc-sha-retention-audit.sh
+            scripts/untracked/select-build-tools-image.sh
             scripts/lib/gc-pr-staging-images.sh
             scripts/lib/ghcr-retry.sh
             scripts/lib/github-api-retry.sh
@@ -167,17 +172,103 @@ jobs:
             release/stack-images.yml
           sparse-checkout-cone-mode: false
 
+      # What: resolves the pinned build-tools image via the shared selector.
+      # Why: the collector below runs inside it for real sqlite3 availability
+      #   (SRA_CACHE_DB below), matching the audit workflow's own container.
+      # From: Issue #1095 (G17/#1585).
+      - name: Select immutable build-tools image
+        id: build_tools
+        if: steps.creds.outputs.have-pat == 'true' && steps.script-check.outputs.scripts-present == 'true'
+        env:
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          image="$(bash scripts/untracked/select-build-tools-image.sh)"
+          if [[ -z "$image" ]]; then
+            echo "::error::Build-tools selector returned an empty image reference."
+            exit 1
+          fi
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      # What: exports the runner.temp classification-cache dir via GITHUB_ENV.
+      # Why: reuses this job's own prior classification-cache writes; cross-
+      #   sharing with the audit workflow is narrower than the matching key
+      #   names suggest (GH Actions cache ref-scoping -- see PR/Issue).
+      # From: Issue #1095 (G17/#1585).
+      - name: Prepare incremental classification cache directory
+        if: steps.creds.outputs.have-pat == 'true' && steps.script-check.outputs.scripts-present == 'true'
+        env:
+          GC_CLASSIFICATION_CACHE_DIR: ${{ runner.temp }}/f17-sha-retention-classification-cache
+        run: |
+          set -euo pipefail
+          mkdir -p -- "$GC_CLASSIFICATION_CACHE_DIR"
+          echo "GC_CLASSIFICATION_CACHE_DIR=$GC_CLASSIFICATION_CACHE_DIR" >> "$GITHUB_ENV"
+
+      # What: restores the SQLite classification cache, same rotating-key +
+      #   prefix-fallback pattern as gc-sha-retention-audit.yml's own cache.
+      # Why: picks up whatever a prior run on the same ref-scope classified
+      #   -- in practice usually a prior run of this same job.
+      # From: Issue #1095 (G17/#1585).
+      - name: Restore SHA retention classification cache
+        if: steps.creds.outputs.have-pat == 'true' && steps.script-check.outputs.scripts-present == 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.GC_CLASSIFICATION_CACHE_DIR }}
+          key: sha-retention-classification-cache-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            sha-retention-classification-cache-
+
+      # What: runs the collector inside the pinned build-tools container,
+      #   with the shared classification cache mounted read-write.
+      # Why: gc_build_service_retention_plan() shells out to
+      #   gc-sha-retention-audit.sh internally; without this, that internal
+      #   re-run always reclassified cold, duplicating the audit's own work.
+      # From: Issue #1095 (G17/#1585).
       - name: Collect unprotected GHCR versions
         if: steps.creds.outputs.have-pat == 'true' && steps.script-check.outputs.scripts-present == 'true'
         env:
+          BUILD_TOOLS_IMAGE: ${{ steps.build_tools.outputs.image }}
           GH_TOKEN: ${{ secrets.GHCR_PACKAGE_DELETE_PAT }}
           GC_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
           GC_CONCURRENCY: ${{ github.event.inputs.concurrency || vars.GC_CONCURRENCY || '1' }}
           GC_MAX_DELETIONS_PER_SERVICE: ${{ github.event.inputs.max_deletions_per_service || vars.GC_MAX_DELETIONS_PER_SERVICE || '40' }}
           GC_MAX_DELETIONS_TOTAL: ${{ github.event.inputs.max_deletions_total || vars.GC_MAX_DELETIONS_TOTAL || '1500' }}
-          GC_MIN_AGE_SECONDS: ${{ github.event.inputs.minimum_age_seconds || vars.GC_MIN_AGE_SECONDS || '86400' }}
+          GC_MIN_AGE_SECONDS: ${{ github.event.inputs.minimum_age_seconds || vars.GC_MIN_AGE_SECONDS || '604800' }}
           GC_MAX_PR_LOOKUP_FAILURES: ${{ vars.GC_MAX_PR_LOOKUP_FAILURES || '10' }}
-        run: bash scripts/untracked/gc-pr-staging-images.sh
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -u "$(id -u):$(id -g)" \
+            -e GH_TOKEN \
+            -e GITHUB_REPOSITORY \
+            -e GC_DRY_RUN \
+            -e GC_CONCURRENCY \
+            -e GC_MAX_DELETIONS_PER_SERVICE \
+            -e GC_MAX_DELETIONS_TOTAL \
+            -e GC_MIN_AGE_SECONDS \
+            -e GC_MAX_PR_LOOKUP_FAILURES \
+            -e SRA_HISTORY_REF=origin/current_dev \
+            -e SRA_CACHE_DB=/classification-cache/sha-retention-audit.db \
+            -v "$PWD:/work:ro" \
+            -v "${GC_CLASSIFICATION_CACHE_DIR}:/classification-cache:rw" \
+            -w /work \
+            "$BUILD_TOOLS_IMAGE" \
+            bash scripts/untracked/gc-pr-staging-images.sh
+
+      # What: saves the classification cache with if: always(), matching
+      #   gc-sha-retention-audit.yml's own save step reasoning.
+      # Why: a failed/timed-out run still resolved a real prefix of
+      #   versions, worth keeping for the next audit or GC run.
+      # From: Issue #1095 (G17/#1585).
+      - name: Save SHA retention classification cache
+        if: always() && steps.creds.outputs.have-pat == 'true' && steps.script-check.outputs.scripts-present == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.GC_CLASSIFICATION_CACHE_DIR }}
+          key: sha-retention-classification-cache-${{ github.run_id }}-${{ github.run_attempt }}
 
       # What: restores a full working tree, verifying the real index state
       # rather than trusting `disable`'s exit code.

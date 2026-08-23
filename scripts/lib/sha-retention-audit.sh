@@ -55,6 +55,17 @@ sra_read_minimum_stable_releases() {
   _sra_read_manifest_positive_integer "$manifest" "minimum_stable_releases"
 }
 
+# What: reads retention.channel_buffer_versions from the manifest.
+# Why: v1.2 inverts protection for a non-ordinary-version
+# fallback (unrecognized tag shape, no protected-channel match) -- this
+# count is the per-package safety buffer kept regardless of age instead of
+# a permanent protect.
+# From: Issue #1585.
+sra_read_channel_buffer_versions() {
+  local manifest="${1:?sra_read_channel_buffer_versions: manifest is required}"
+  _sra_read_manifest_positive_integer "$manifest" "channel_buffer_versions"
+}
+
 # What: reads a `<key>:` block-list from the manifest, one item per line.
 # Why: shared parsing rule for every retention list key (today only
 # rollback_anchors), so a future second list key reuses it (AG-CODE-011).
@@ -454,20 +465,173 @@ sra_protected_reference_reason() {
   printf '%s\n' "$joined"
 }
 
-# What: combines the two tag-protection helpers into one always-succeeding call.
-# Why: only the root_count==0 branch uses this; a version with a root tag
-# must call sra_protected_reference_reason directly instead.
-# From: Issue #1095 | PR #1586
-sra_extra_tag_protect_reason() {
-  local tags_csv="${1?sra_extra_tag_protect_reason: tags CSV argument is required}"
-  local supported_releases="${2?sra_extra_tag_protect_reason: supported releases argument is required}"
-  local fallback_reason="${3:?sra_extra_tag_protect_reason: fallback reason is required}"
-  local other_tags reason
-
-  other_tags="$(sra_other_tags_from_csv "$tags_csv")" || return 1
-  if reason="$(sra_protected_reference_reason "$other_tags" "$supported_releases")"; then
-    printf '%s\n' "$reason"
+# What: classifies one already-ranked candidate's position against a budget.
+# Why: shared by both the ordinary-sha-root retention-budget loop and the
+# v1.2 non-ordinary-version buffer loop in the orchestrator,
+# so the same within/beyond-budget arithmetic is not duplicated (AG-CODE-011).
+# From: Issue #1585.
+sra_budget_decision() {
+  local position="${1:?sra_budget_decision: position is required}"
+  local budget="${2:?sra_budget_decision: budget is required}"
+  [[ "$position" =~ ^[0-9]+$ ]] || return 1
+  [[ "$budget" =~ ^[0-9]+$ ]] || return 1
+  if (( position <= budget )); then
+    printf 'protect\twithin-%s\n' "$budget"
   else
-    printf '%s\n' "$fallback_reason"
+    printf 'would-delete\tbeyond-%s\n' "$budget"
   fi
 }
+
+# --- Incremental classification cache (v1.2 point 4) ---------
+#
+# What: a small SQLite cache of the expensive-to-recompute per-version
+# resolution result (an ordinary sha-<commit> root's git-history rank, or a
+# rootless version's channel-match outcome), keyed by (package, version_id)
+# and fingerprinted by (digest, tags) so a changed version never reuses a
+# stale result.
+# Why: the final protect/would-delete decision always depends on a fresh,
+# in-memory sort of the current candidate pool (ranks/positions shift as
+# versions are added or removed), so nothing about the DELETE-relevant
+# decision itself is ever read from cache -- only the deterministic,
+# unchanged-if-digest/tags-unchanged *resolution* (git-history rank; or
+# "no protected channel matched") is, which is what made the original
+# 26,000-version run slow (one `git rev-parse`/`merge-base`
+# subprocess pair per candidate root, every run, even for versions whose
+# tags have not changed since the previous run).
+# From: Issue #1585.
+
+# What: the cache's schema, as a plain printable string.
+# Why: keeps the schema itself directly unit-testable without a live
+# sqlite3 invocation (its shape can be grepped/asserted on by bats).
+# From: Issue #1585.
+#
+# What: history_fingerprint identifies the managed-ref-set a row was cached
+# under and is part of the primary key, not just a stored column.
+# Why: two different real callers classify against different ref sets and
+# share this cache file; keying by fingerprint keeps each caller's rows
+# independent instead of one INSERT OR REPLACE evicting the other's.
+# From: Issue #1095.
+#
+# What: table renamed version_cache -> version_cache_v2 for this change.
+# Why: real cache blobs already exist under the old schema (no
+# history_fingerprint column); CREATE TABLE IF NOT EXISTS is a no-op
+# against them, so reusing the old name would silently break every write.
+# From: Issue #1095.
+sra_cache_schema_sql() {
+  cat <<'SQL'
+CREATE TABLE IF NOT EXISTS version_cache_v2 (
+  package TEXT NOT NULL,
+  version_id INTEGER NOT NULL,
+  digest TEXT NOT NULL,
+  tags TEXT NOT NULL,
+  resolution TEXT NOT NULL,
+  history_fingerprint TEXT NOT NULL,
+  history_ref_names TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (package, version_id, history_fingerprint)
+);
+SQL
+}
+
+# What: builds a "ref@resolved-commit;..." fingerprint for one run's ref set.
+# Why: ref-set drift (different caller, or a ref moving) must become a safe
+# cache miss, never a silently stale resolution; caller must pass a stable
+# ref order so the same ref set always fingerprints identically.
+# From: Issue #1095.
+sra_history_refs_fingerprint() {
+  local repo_root="${1:?sra_history_refs_fingerprint: repo root is required}"
+  shift
+  local ref resolved fingerprint=""
+  (( $# > 0 )) || return 1
+  for ref in "$@"; do
+    resolved="$(git -C "$repo_root" rev-parse --verify --quiet "${ref}^{commit}")" || return 1
+    fingerprint+="${fingerprint:+;}${ref}@${resolved}"
+  done
+  printf '%s\n' "$fingerprint"
+}
+
+# What: creates the cache database (idempotent) at the given path.
+# Why: a cache-miss run (first run ever, or a rotated-key restore-keys
+# fallback with no prior save under this run's exact key) must produce a
+# valid, empty, queryable database, not fail -- that clean fallback is the
+# cache's own required self-verification per the v1.2 plan.
+# From: Issue #1585.
+sra_cache_init() {
+  local db_path="${1:?sra_cache_init: db path is required}"
+  command -v sqlite3 >/dev/null 2>&1 || return 1
+  sra_cache_schema_sql | sqlite3 "$db_path"
+}
+
+# What: escapes a value for safe inclusion inside a single-quoted SQL literal.
+# Why: sqlite3's CLI has no separate parameter-binding mode for an ad hoc
+# statement string built from a shell script; doubling an embedded single
+# quote is SQL's own standard escape for exactly this case.
+# From: Issue #1585.
+sra_sql_quote() {
+  local value="${1?sra_sql_quote: value argument is required}"
+  printf '%s' "${value//\'/\'\'}"
+}
+
+# What: bulk-reads one package's cached rows for one history_fingerprint.
+# Why: one sqlite3 call per package, not per version; filtering by
+# fingerprint server-side means a caller only ever sees its own ref-set's
+# rows, never a different caller's stale one for the same version.
+# From: Issue #1585 | Issue #1095.
+sra_cache_read_package() {
+  local db_path="${1:?sra_cache_read_package: db path is required}"
+  local package="${2:?sra_cache_read_package: package is required}"
+  local history_fingerprint="${3:?sra_cache_read_package: history fingerprint is required}"
+  command -v sqlite3 >/dev/null 2>&1 || return 1
+  [[ -f "$db_path" ]] || return 1
+  sqlite3 -separator "$(printf '\t')" "$db_path" \
+    "SELECT version_id, digest, tags, resolution FROM version_cache_v2 WHERE package = '$(sra_sql_quote "$package")' AND history_fingerprint = '$(sra_sql_quote "$history_fingerprint")';"
+}
+
+# What: bulk-writes one package's updated cache rows in a single transaction.
+# Why: same one-call-per-package reasoning as the read side; rows_file is
+# pre-built TSV(version_id, digest, tags, resolution) fed on a real path,
+# not stdin, so the caller controls its own temp-file lifecycle.
+# From: Issue #1585.
+sra_cache_write_package() {
+  local db_path="${1:?sra_cache_write_package: db path is required}"
+  local package="${2:?sra_cache_write_package: package is required}"
+  local rows_file="${3:?sra_cache_write_package: rows file is required}"
+  local history_fingerprint="${4:?sra_cache_write_package: history fingerprint is required}"
+  local now version_id digest tags resolution sql_file history_ref_names fp_entry
+  local -a fp_entries
+  command -v sqlite3 >/dev/null 2>&1 || return 1
+  [[ -f "$rows_file" ]] || return 1
+
+  history_ref_names=""
+  IFS=';' read -ra fp_entries <<<"$history_fingerprint"
+  for fp_entry in "${fp_entries[@]}"; do
+    [[ -n "$fp_entry" ]] || continue
+    history_ref_names+="${history_ref_names:+;}${fp_entry%%@*}"
+  done
+
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  sql_file="$(mktemp)"
+  {
+    printf 'BEGIN TRANSACTION;\n'
+    while IFS=$'\t' read -r version_id digest tags resolution; do
+      [[ "$version_id" =~ ^[0-9]+$ ]] || continue
+      printf "INSERT OR REPLACE INTO version_cache_v2 (package, version_id, digest, tags, resolution, history_fingerprint, history_ref_names, updated_at) VALUES ('%s', %s, '%s', '%s', '%s', '%s', '%s', '%s');\n" \
+        "$(sra_sql_quote "$package")" "$version_id" "$(sra_sql_quote "$digest")" "$(sra_sql_quote "$tags")" "$(sra_sql_quote "$resolution")" "$(sra_sql_quote "$history_fingerprint")" "$(sra_sql_quote "$history_ref_names")" "$now"
+    done <"$rows_file"
+    # What: prunes a superseded generation for the same caller identity.
+    # Why: a tip-advance changes history_fingerprint on every write, and the
+    # composite key keeps old and new generations from evicting each other --
+    # without this, obsolete rows accumulate unbounded.
+    # From: Issue #1095.
+    printf "DELETE FROM version_cache_v2 WHERE package = '%s' AND history_ref_names = '%s' AND history_fingerprint != '%s';\n" \
+      "$(sra_sql_quote "$package")" "$(sra_sql_quote "$history_ref_names")" "$(sra_sql_quote "$history_fingerprint")"
+    printf 'COMMIT;\n'
+  } >"$sql_file"
+  if sqlite3 "$db_path" <"$sql_file"; then
+    rm -f -- "$sql_file"
+  else
+    rm -f -- "$sql_file"
+    return 1
+  fi
+}
+

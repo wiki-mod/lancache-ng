@@ -59,6 +59,16 @@ EOF
   [ "$output" = "3" ]
 }
 
+# What: reads the manifest's single channel_buffer_versions value.
+# Why: the v1.2 per-package buffer for a non-ordinary-version
+# candidate that matches no protected channel.
+# From: Issue #1585.
+@test "retention manifest defines exactly five channel buffer versions" {
+  run sra_read_channel_buffer_versions "$repo_root/release/stack-images.yml"
+  [ "$status" -eq 0 ]
+  [ "$output" = "5" ]
+}
+
 # What: retention keep and minimum stable releases parse independently.
 # Why: both share _sra_read_manifest_positive_integer -- the two keys'
 # values must never bleed into each other.
@@ -657,24 +667,301 @@ EOF
   [ "$status" -ne 0 ]
 }
 
-# What: extra tag protect reason returns the specific channel when one matches.
-# Why: the caller's protect reason must name the real matching channel, not
-# a generic fallback, whenever one genuinely applies.
-# From: Issue #1585 | PR #1586
-@test "extra tag protect reason returns the specific channel when one matches" {
-  run sra_extra_tag_protect_reason "sha-abcdef1,nightly" "" "non-ordinary-version"
+# What: budget decision protects a position at or within the budget.
+# Why: shared arithmetic used by both the ordinary-root and the v1.2
+# non-ordinary-version buffer loops; wrong-direction off-by-one here would
+# silently over- or under-protect every package audited.
+# From: Issue #1585.
+@test "budget decision protects within budget" {
+  run sra_budget_decision 5 5
   [ "$status" -eq 0 ]
-  [ "$output" = "nightly-channel-protected" ]
+  [ "$output" = $'protect\twithin-5' ]
 }
 
-# What: extra tag protect reason falls back to the caller's generic reason.
-# Why: this is only correct for the root_count==0 branch, which has no root
-# tag to rank by regardless of whether its extra tag is recognized.
-# From: Issue #1585 | PR #1586
-@test "extra tag protect reason falls back to the caller's generic reason" {
-  run sra_extra_tag_protect_reason "pr-1501-staging" "" "non-ordinary-version"
+# What: budget decision marks a position beyond the budget would-delete.
+# Why: confirms the off-by-one boundary the "within" case above establishes.
+# From: Issue #1585.
+@test "budget decision marks beyond-budget positions would-delete" {
+  run sra_budget_decision 6 5
   [ "$status" -eq 0 ]
-  [ "$output" = "non-ordinary-version" ]
+  [ "$output" = $'would-delete\tbeyond-5' ]
+}
+
+# What: budget decision fails closed on a non-numeric position or budget.
+# Why: a caller passing a malformed rank must not silently default to a
+# spuriously-protective or spuriously-deletable decision.
+# From: Issue #1585.
+@test "budget decision fails closed on non-numeric input" {
+  run sra_budget_decision "abc" 5
+  [ "$status" -ne 0 ]
+  run sra_budget_decision 5 "abc"
+  [ "$status" -ne 0 ]
+}
+
+# ---------------------------------------------------------------------------
+# Incremental classification cache (v1.2 point 4)
+# ---------------------------------------------------------------------------
+
+# What: the schema declares the cache's primary key and required columns.
+# Why: a pure string check -- catches an accidental column rename/drop
+# without needing a live sqlite3 invocation.
+# From: Issue #1585.
+@test "cache schema declares the version_cache_v2 table with its primary key" {
+  run sra_cache_schema_sql
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CREATE TABLE IF NOT EXISTS version_cache_v2"* ]]
+  [[ "$output" == *"PRIMARY KEY (package, version_id, history_fingerprint)"* ]]
+  [[ "$output" == *"history_fingerprint TEXT NOT NULL"* ]]
+  [[ "$output" == *"history_ref_names TEXT NOT NULL"* ]]
+}
+
+# What: doubles an embedded single quote, SQL's own escape for that literal.
+# Why: every cache write builds its statement string this way -- a wrong
+# escape here is a SQL-injection-shaped correctness bug, not just cosmetic.
+# From: Issue #1585.
+@test "sql quote doubles an embedded single quote" {
+  run sra_sql_quote "pr-1's-sha-abc"
+  [ "$status" -eq 0 ]
+  [ "$output" = "pr-1''s-sha-abc" ]
+}
+
+# What: init/write/read round-trips a real row through a real sqlite3 db.
+# Why: the pure-string/escaping tests above cannot catch a real SQL syntax
+# error; only an actual sqlite3 invocation can. Skips (not fails) when
+# sqlite3 is unavailable -- expected on a host outside the pinned
+# build-tools container (AG-VAL-016), where this dependency was added.
+# From: Issue #1585.
+@test "cache init/write/read round-trips a real row through sqlite3" {
+  command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not available on this host"
+  db_path="$tmp_dir/cache.db"
+  rows_file="$tmp_dir/rows.tsv"
+  digest="sha256:$(printf 'a%.0s' {1..64})"
+  printf '42\t%s\tsha-abc1234\trank:7\n' "$digest" >"$rows_file"
+
+  fingerprint="origin/current_dev@$(printf 'c%.0s' {1..40})"
+  run sra_cache_init "$db_path"
+  [ "$status" -eq 0 ]
+  run sra_cache_write_package "$db_path" "proxy" "$rows_file" "$fingerprint"
+  [ "$status" -eq 0 ]
+  run sra_cache_read_package "$db_path" "proxy" "$fingerprint"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"42"* ]]
+  [[ "$output" == *"$digest"* ]]
+  [[ "$output" == *"sha-abc1234"* ]]
+  [[ "$output" == *"rank:7"* ]]
+}
+
+# What: an inherited old-schema cache db does not break a new-schema write.
+# Why: a restored actions/cache blob can predate the version_cache_v2
+# rename; CREATE TABLE IF NOT EXISTS must not be fooled by an old table of
+# the same old name, and a real deployment must self-heal, not warn forever.
+# From: Issue #1095.
+@test "cache write self-heals against an inherited old-schema database" {
+  command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not available on this host"
+  db_path="$tmp_dir/cache.db"
+  rows_file="$tmp_dir/rows.tsv"
+  sqlite3 "$db_path" "CREATE TABLE IF NOT EXISTS version_cache (package TEXT NOT NULL, version_id INTEGER NOT NULL, digest TEXT NOT NULL, tags TEXT NOT NULL, resolution TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (package, version_id));"
+
+  fingerprint="origin/current_dev@$(printf 'c%.0s' {1..40})"
+  printf '42\tsha256:%s\tsha-abc1234\trank:7\n' "$(printf 'a%.0s' {1..64})" >"$rows_file"
+  run sra_cache_init "$db_path"
+  [ "$status" -eq 0 ]
+  run sra_cache_write_package "$db_path" "proxy" "$rows_file" "$fingerprint"
+  [ "$status" -eq 0 ]
+  run sra_cache_read_package "$db_path" "proxy" "$fingerprint"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"sha-abc1234"* ]]
+}
+
+# What: a cache write with no history fingerprint argument fails closed.
+# Why: history_fingerprint is a required column, not optional -- a caller
+# that forgets it must get a loud failure, never a silently written row.
+# From: Issue #1095.
+@test "cache write fails closed without a history fingerprint argument" {
+  command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not available on this host"
+  db_path="$tmp_dir/cache.db"
+  rows_file="$tmp_dir/rows.tsv"
+  printf '42\tsha256:%s\tsha-abc1234\trank:7\n' "$(printf 'a%.0s' {1..64})" >"$rows_file"
+  run sra_cache_init "$db_path"
+  [ "$status" -eq 0 ]
+  run sra_cache_write_package "$db_path" "proxy" "$rows_file"
+  [ "$status" -ne 0 ]
+}
+
+# What: a fresh, never-initialized database path is a clean read miss.
+# Why: this is the exact "cache miss falls back to a full scan" case the
+# v1.2 plan calls its own required self-verification -- must degrade,
+# never error the caller.
+# From: Issue #1585.
+@test "cache read on a nonexistent database fails closed without erroring the caller" {
+  command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not available on this host"
+  run sra_cache_read_package "$tmp_dir/does-not-exist.db" "proxy" "origin/current_dev@$(printf 'c%.0s' {1..40})"
+  [ "$status" -ne 0 ]
+}
+
+# What: re-writing the same (package, version_id, fingerprint) replaces.
+# Why: INSERT OR REPLACE is load-bearing -- a version reclassified again
+# under the same ref set must overwrite its stale row, not duplicate it.
+# From: Issue #1585 | Issue #1095.
+@test "cache write replaces an existing row for the same package, version id, and fingerprint" {
+  command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not available on this host"
+  db_path="$tmp_dir/cache.db"
+  rows_file="$tmp_dir/rows.tsv"
+  fingerprint="origin/current_dev@$(printf 'c%.0s' {1..40})"
+  run sra_cache_init "$db_path"
+  [ "$status" -eq 0 ]
+
+  printf '42\tsha256:%s\told-tag\trank:9\n' "$(printf 'a%.0s' {1..64})" >"$rows_file"
+  run sra_cache_write_package "$db_path" "proxy" "$rows_file" "$fingerprint"
+  [ "$status" -eq 0 ]
+
+  printf '42\tsha256:%s\tnew-tag\trank:3\n' "$(printf 'b%.0s' {1..64})" >"$rows_file"
+  run sra_cache_write_package "$db_path" "proxy" "$rows_file" "$fingerprint"
+  [ "$status" -eq 0 ]
+
+  run sra_cache_read_package "$db_path" "proxy" "$fingerprint"
+  [ "$status" -eq 0 ]
+  [ "$(wc -l <<<"$output")" -eq 1 ]
+  [[ "$output" == *"new-tag"* ]]
+  [[ "$output" != *"old-tag"* ]]
+}
+
+# What: two callers with different fingerprints keep independent rows.
+# Why: this is the property that makes cross-caller sharing safe instead of
+# each caller's write evicting the other's -- a read for one fingerprint
+# must never see the other's row for the same version id.
+# From: Issue #1095.
+@test "cache rows for different history fingerprints coexist and do not evict each other" {
+  command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not available on this host"
+  db_path="$tmp_dir/cache.db"
+  rows_file="$tmp_dir/rows.tsv"
+  narrow_fp="origin/current_dev@$(printf 'c%.0s' {1..40})"
+  wide_fp="origin/current_dev@$(printf 'c%.0s' {1..40});origin/master@$(printf 'd%.0s' {1..40})"
+  run sra_cache_init "$db_path"
+  [ "$status" -eq 0 ]
+
+  printf '42\tsha256:%s\tsha-abc1234\toutside-managed-history\n' "$(printf 'a%.0s' {1..64})" >"$rows_file"
+  run sra_cache_write_package "$db_path" "proxy" "$rows_file" "$narrow_fp"
+  [ "$status" -eq 0 ]
+
+  printf '42\tsha256:%s\tsha-abc1234\trank:3\n' "$(printf 'a%.0s' {1..64})" >"$rows_file"
+  run sra_cache_write_package "$db_path" "proxy" "$rows_file" "$wide_fp"
+  [ "$status" -eq 0 ]
+
+  run sra_cache_read_package "$db_path" "proxy" "$narrow_fp"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"outside-managed-history"* ]]
+
+  run sra_cache_read_package "$db_path" "proxy" "$wide_fp"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"rank:3"* ]]
+}
+
+# What: a same-ref-name-set generation is pruned when its exact fingerprint
+# changes (tip advance), but a different caller's generation is untouched.
+# Why: without pruning, every tip advance adds a permanent new generation
+# instead of replacing the prior one from the same caller -- unbounded
+# growth; pruning must not cross ref-name-set boundaries.
+# From: Issue #1095.
+@test "cache write prunes a superseded same-caller generation but not a different caller's" {
+  command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not available on this host"
+  db_path="$tmp_dir/cache.db"
+  rows_file="$tmp_dir/rows.tsv"
+  old_fp="origin/current_dev@$(printf 'c%.0s' {1..40})"
+  new_fp="origin/current_dev@$(printf 'e%.0s' {1..40})"
+  other_caller_fp="origin/current_dev@$(printf 'c%.0s' {1..40});origin/master@$(printf 'd%.0s' {1..40})"
+  run sra_cache_init "$db_path"
+  [ "$status" -eq 0 ]
+
+  printf '42\tsha256:%s\told-tag\trank:9\n' "$(printf 'a%.0s' {1..64})" >"$rows_file"
+  run sra_cache_write_package "$db_path" "proxy" "$rows_file" "$old_fp"
+  [ "$status" -eq 0 ]
+  run sra_cache_write_package "$db_path" "proxy" "$rows_file" "$other_caller_fp"
+  [ "$status" -eq 0 ]
+
+  printf '42\tsha256:%s\tnew-tag\trank:3\n' "$(printf 'b%.0s' {1..64})" >"$rows_file"
+  run sra_cache_write_package "$db_path" "proxy" "$rows_file" "$new_fp"
+  [ "$status" -eq 0 ]
+
+  run sra_cache_read_package "$db_path" "proxy" "$old_fp"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+
+  run sra_cache_read_package "$db_path" "proxy" "$new_fp"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"new-tag"* ]]
+
+  run sra_cache_read_package "$db_path" "proxy" "$other_caller_fp"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"old-tag"* ]]
+}
+
+# What: the fingerprint differs when the managed ref set changes.
+# Why: this is the mechanism the v1.2 cache's ref-set safety depends on --
+# it must actually change, not just exist unused.
+# From: Issue #1095.
+@test "history refs fingerprint changes when the ref set changes" {
+  git_dir="$tmp_dir/repo"
+  git init -q "$git_dir"
+  git -C "$git_dir" config user.name Test
+  git -C "$git_dir" config user.email test@example.invalid
+  printf 'one\n' >"$git_dir/file"
+  git -C "$git_dir" add file
+  git -C "$git_dir" commit -q -m one
+  git -C "$git_dir" update-ref refs/remotes/origin/current_dev HEAD
+  printf 'two\n' >>"$git_dir/file"
+  git -C "$git_dir" commit -q -am two
+  git -C "$git_dir" update-ref refs/remotes/origin/master HEAD
+
+  run sra_history_refs_fingerprint "$git_dir" origin/current_dev
+  [ "$status" -eq 0 ]
+  narrow_fingerprint="$output"
+
+  run sra_history_refs_fingerprint "$git_dir" origin/current_dev origin/master
+  [ "$status" -eq 0 ]
+  wide_fingerprint="$output"
+
+  [ "$narrow_fingerprint" != "$wide_fingerprint" ]
+  [[ "$narrow_fingerprint" == *"origin/current_dev@"* ]]
+  [[ "$wide_fingerprint" == *"origin/current_dev@"* ]]
+  [[ "$wide_fingerprint" == *"origin/master@"* ]]
+
+  # What: the same ref set, recomputed, is byte-identical.
+  # Why: stable across repeated same-input runs, not just "usually similar."
+  # From: Issue #1095.
+  run sra_history_refs_fingerprint "$git_dir" origin/current_dev
+  [ "$status" -eq 0 ]
+  [ "$output" = "$narrow_fingerprint" ]
+}
+
+# What: an unresolvable ref, or an empty ref list, fails closed.
+# Why: mirrors the fail-closed style already used by sra_budget_decision --
+# never silently proceed with an empty/partial fingerprint.
+# From: Issue #1095.
+@test "history refs fingerprint fails closed on an unknown ref or an empty ref list" {
+  git_dir="$tmp_dir/repo"
+  git init -q "$git_dir"
+  git -C "$git_dir" config user.name Test
+  git -C "$git_dir" config user.email test@example.invalid
+  printf 'one\n' >"$git_dir/file"
+  git -C "$git_dir" add file
+  git -C "$git_dir" commit -q -m one
+
+  run sra_history_refs_fingerprint "$git_dir" origin/does-not-exist
+  [ "$status" -ne 0 ]
+
+  run sra_history_refs_fingerprint "$git_dir"
+  [ "$status" -ne 0 ]
+}
+
+# What: the classification cache read passes history_fingerprint, not just
+# package, before trusting any cached row.
+# Why: a structural regression check -- catches a future edit that
+# reintroduces the fixed gap by dropping this argument.
+# From: Issue #1095.
+@test "gc-sha-retention-audit.sh passes the history fingerprint into the cache read" {
+  run grep -F 'sra_cache_read_package "$cache_db" "$package" "$history_fingerprint"' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh"
+  [ "$status" -eq 0 ]
 }
 
 # What: rollback anchors must precede tag/history classification for every class.
@@ -689,6 +976,29 @@ EOF
   [ "$anchor_line" -lt "$facts_line" ]
   run grep -F 'metadata-stack-identity' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh"
   [ "$status" -eq 1 ]
+}
+
+# What: a truly untagged rootless version (other_count==0) must still emit an
+# unconditional protect BEFORE the v1.2 buffer-candidate line is reachable.
+# Why: a completely untagged version (the common case for a manifest list's
+# own untagged amd64/arm64 platform children) must never share the
+# channel_buffer_versions buffer with a version that has an unrecognized tag
+# FORMAT -- doing so would make a live-manifest platform child a
+# would-delete candidate past a 5-slot buffer. The plan's own wording
+# targets "any historical or otherwise-unanticipated tag format" -- an
+# absent tag has no format, so it
+# must stay on the unconditional-protect path, never reach
+# other_tag_candidates at all. This is a structural/ordering check (the
+# orchestrator's own live GHCR pagination is not mocked here); it can only
+# assert source-code shape, not runtime behavior -- see the plan's own
+# request for real CI verification.
+# From: Issue #1585.
+@test "gc-sha-retention-audit.sh protects a truly untagged rootless version before any buffer routing" {
+  untagged_protect_line="$(grep -n 'root_count == 0 && other_count == 0' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh" | cut -d: -f1)"
+  buffer_write_line="$(grep -n '>>"\$other_tag_candidates"' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh" | head -1 | cut -d: -f1)"
+  [ -n "$untagged_protect_line" ]
+  [ -n "$buffer_write_line" ]
+  [ "$untagged_protect_line" -lt "$buffer_write_line" ]
 }
 
 # What: filtered mode is the package-parallel planner entry point used by GC.
