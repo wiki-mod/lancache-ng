@@ -92,6 +92,85 @@ touches_docs() {
     return 1
 }
 
+# What: true when a changed path falls under .github/actions/<name>/.
+# Why: single helper so every per-action rule below and the global/unmapped
+#   checks share one definition of "touched", instead of each repeating its
+#   own prefix construction.
+# From: Issue #1095 (G15)
+touches_action() {
+    touches_prefix ".github/actions/$1/"
+}
+
+# What: actions whose change must still force workflow=true for every service.
+# Why: consumed unconditionally by the shared build/merge-manifests/promote
+#   pipeline, or too infrequent to be worth narrowing further.
+# From: Issue #1095 (G15)
+globally_triggering_actions=(
+    ghcr-build-push-retry
+    trivy-scan-exact-digest
+    ghcr-attest-retry
+    buildx-setup-retry
+    ghcr-attest-with-cache
+    trivy-scan-with-cache
+    trivy-scan-retry
+)
+
+# What: every .github/actions/ directory this script currently categorizes.
+# Why: touches_unmapped_action() fails closed for anything not listed here,
+#   so a brand-new action defaults to a full rebuild until categorized.
+# From: Issue #1095 (G15)
+known_actions=(
+    "${globally_triggering_actions[@]}"
+    rust-acceleration-preflight
+    configure-rust-sccache
+    cargo-with-sccache-fallback
+    build-tools-candidate-smoke
+    derive-validation-network
+    reserve-validation-subnet-stack
+    wait-validation-stack-health
+    file-headers-check
+    compose-healthchecks-check
+    pr-tracking-metadata-fetch-and-validate
+    pr-title-convention-check
+    shellcheck-and-standing-guards
+)
+
+_cii_array_contains() {
+    local needle="$1" straw
+    shift
+    for straw in "$@"; do
+        [[ "$straw" == "$needle" ]] && return 0
+    done
+    return 1
+}
+
+touches_global_action() {
+    local name
+    for name in "${globally_triggering_actions[@]}"; do
+        touches_action "$name" && return 0
+    done
+    return 1
+}
+
+# What: true when a changed .github/actions/<name>/ path is not in known_actions.
+# Why: fails closed for an uncategorized action; an under-triggered stale
+#   image is worse than an unnecessary rebuild.
+# From: Issue #1095 (G15)
+touches_unmapped_action() {
+    [[ "$force_all" == "true" ]] && return 1
+    local path action_name
+    while IFS= read -r path; do
+        case "$path" in
+            .github/actions/*)
+                action_name="${path#.github/actions/}"
+                action_name="${action_name%%/*}"
+                _cii_array_contains "$action_name" "${known_actions[@]}" || return 0
+                ;;
+        esac
+    done < "$changed_files"
+    return 1
+}
+
 # What: prints $1 with every blank line and '#'-prefixed comment line
 #   removed, except inside a YAML block-scalar body (a `key: |`/`key: >`
 #   line and its more-indented or blank continuation lines), which is
@@ -171,16 +250,15 @@ workflow_diff_is_comment_only() {
 }
 
 touches_build_workflow() {
-    # What: workflow-wide impact for a build-workflow-path touch, unless
-    #   workflow_diff_is_comment_only proves the touched content is
-    #   comment/blank-only outside any block scalar.
-    # Why: those paths can alter how every service candidate is produced
-    #   even when no service source moved.
-    # From: Issue #1095 (G14) | PR #1609 review
+    # What: workflow-wide impact for global build-workflow paths only.
+    # Why: narrows the prior blanket .github/actions/* rule to only paths
+    #   consumed globally; per-service actions set their own output instead.
+    # From: Issue #1095 (G14 | G15) | PR #1609 review
     local touched=false
     if touches_exact ".github/workflows/build-push.yml" \
         || touches_exact ".github/workflows/build-tools.yml" \
-        || touches_prefix ".github/actions/"; then
+        || touches_global_action \
+        || touches_unmapped_action; then
         touched=true
     fi
     [[ "$touched" == "true" ]] || return 1
@@ -189,14 +267,17 @@ touches_build_workflow() {
 }
 
 touches_codeql_rust() {
-    # CodeQL's Rust database contains these three Rust crates. It also depends
-    # on the shared build workflow/actions and on its own workflow/config, so a
-    # change to any of those inputs must rerun the Rust extraction even when no
-    # Rust source file changed.
+    # What: true for any path CodeQL's Rust extraction actually depends on.
+    # Why: codeql.yml's own Rust job uses configure-rust-sccache and
+    #   cargo-with-sccache-fallback directly, so the narrower
+    #   touches_build_workflow() above must not silently drop them here.
+    # From: Issue #1095 (G15)
     touches_prefix "services/dns/nats-subscriber/" \
         || touches_prefix "services/ui/" \
         || touches_prefix "services/watchdog/" \
         || touches_build_workflow \
+        || touches_action "configure-rust-sccache" \
+        || touches_action "cargo-with-sccache-fallback" \
         || touches_exact ".github/workflows/codeql.yml" \
         || touches_prefix ".github/codeql/"
 }
@@ -250,10 +331,35 @@ output_bool() {
     fi
 }
 
-output_bool "dns_rust" touches_prefix "services/dns/nats-subscriber/"
-output_bool "dns_image" touches_prefix "services/dns/"
-output_bool "ui" touches_prefix "services/ui/"
-output_bool "watchdog" touches_prefix "services/watchdog/"
+# What: per-service extension for each action relocated off "workflow".
+# Why: rust-acceleration-preflight builds dns/ui; configure-rust-sccache and
+#   cargo-with-sccache-fallback run dns/ui/watchdog's quality/test/audit jobs.
+# From: Issue #1095 (G15)
+touches_dns_rust() {
+    touches_prefix "services/dns/nats-subscriber/" \
+        || touches_action "configure-rust-sccache" \
+        || touches_action "cargo-with-sccache-fallback"
+}
+touches_dns_image() {
+    touches_prefix "services/dns/" \
+        || touches_action "rust-acceleration-preflight"
+}
+touches_ui() {
+    touches_prefix "services/ui/" \
+        || touches_action "rust-acceleration-preflight" \
+        || touches_action "configure-rust-sccache" \
+        || touches_action "cargo-with-sccache-fallback"
+}
+touches_watchdog() {
+    touches_prefix "services/watchdog/" \
+        || touches_action "configure-rust-sccache" \
+        || touches_action "cargo-with-sccache-fallback"
+}
+
+output_bool "dns_rust" touches_dns_rust
+output_bool "dns_image" touches_dns_image
+output_bool "ui" touches_ui
+output_bool "watchdog" touches_watchdog
 output_bool "dhcp" touches_prefix "services/dhcp/"
 output_bool "dhcp_proxy" touches_prefix "services/dhcp-proxy/"
 output_bool "ntp" touches_prefix "services/ntp/"
@@ -281,7 +387,27 @@ else
     printf 'proxy=false\n'
 fi
 
-output_bool "build_tools" touches_prefix "tools/build-tools/"
+# What: build_tools also true when build-tools-candidate-smoke changed.
+# Why: that action validates a build-tools candidate image; a real change to
+#   it needs the same re-verification a tools/build-tools/ source change gets.
+# From: Issue #1095 (G15)
+touches_build_tools() {
+    touches_prefix "tools/build-tools/" \
+        || touches_action "build-tools-candidate-smoke"
+}
+output_bool "build_tools" touches_build_tools
+
+# What: true when a full-setup-validate-only action changed.
+# Why: these actions have no build-image consumer -- narrowing workflow away
+#   from them must not stop full-setup-validate from re-running for them.
+# From: Issue #1095 (G15)
+touches_validation_infra() {
+    touches_action "derive-validation-network" \
+        || touches_action "reserve-validation-subnet-stack" \
+        || touches_action "wait-validation-stack-health"
+}
+output_bool "validation_infra" touches_validation_infra
+
 output_bool "workflow" touches_build_workflow
 output_bool "codeql_rust" touches_codeql_rust
 output_bool "docs" touches_docs

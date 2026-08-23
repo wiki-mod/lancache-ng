@@ -89,6 +89,11 @@ jobs:
       utilities: ${{ steps.filter.outputs.utilities }}
       proxy: ${{ steps.filter.outputs.proxy }}
       build_tools: ${{ steps.filter.outputs.build_tools }}
+      # What: true when a full-setup-validate-only action changed.
+      # Why: full-setup-validate's own gate below ORs this in alongside
+      #   deploy/workflow, since these actions have no build-image consumer.
+      # From: Issue #1095 (G15)
+      validation_infra: ${{ steps.filter.outputs.validation_infra }}
       workflow: ${{ steps.filter.outputs.workflow }}
       docs: ${{ steps.filter.outputs.docs }}
       docs_only: ${{ steps.filter.outputs.docs_only }}
@@ -108,6 +113,7 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           BEFORE_SHA: ${{ github.event.before }}
+          FORCE_FULL_IMAGE_REBUILD: ${{ vars.FORCE_FULL_IMAGE_REBUILD }}
         run: |
           set -euo pipefail
 
@@ -116,7 +122,14 @@ jobs:
           # What: classification lives in classify-image-impact.sh.
           # Why: a merge-base diff needs the fetch-depth: 0 history above.
           # From: PR #1129
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+          # What: manual, code-change-free fail-safe repository variable.
+          # Why: flipping a GitHub Variable is faster than a script patch
+          #   mid-incident; matches the ALLOW_INSECURE_UI boolean convention.
+          # From: Issue #1095 (G15)
+          if [ "${FORCE_FULL_IMAGE_REBUILD:-false}" = "true" ]; then
+            echo "::notice::FORCE_FULL_IMAGE_REBUILD repository variable is true; classifying all paths as changed."
+            bash scripts/untracked/classify-image-impact.sh --all-changed >> "$GITHUB_OUTPUT"
+          elif [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
             : "${BASE_SHA:?pull request base SHA is required}"
             bash scripts/untracked/classify-image-impact.sh "$BASE_SHA" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
           else
@@ -2533,7 +2546,8 @@ jobs:
         (
           github.event_name != 'pull_request' ||
           needs['detect-changes'].outputs.deploy == 'true' ||
-          needs['detect-changes'].outputs.workflow == 'true'
+          needs['detect-changes'].outputs.workflow == 'true' ||
+          needs['detect-changes'].outputs.validation_infra == 'true'
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-light]
@@ -5438,6 +5452,38 @@ jobs:
             echo "SECRET_FILES"
           } >> "$GITHUB_OUTPUT"
 
+      # What: produces the ccache_redis_url secret for dns and utilities.
+      # Why: dns/utilities each mount it under a distinct BuildKit secret id
+      #   from sccache's own sccache_redis_url, reusing the same repository
+      #   secret rather than a second GitHub secret; honors the existing
+      #   SCCACHE_REDIS_MODE kill switch (AG-CI-004).
+      # From: Issue #1095 (G15 | #1556)
+      - name: Prepare ccache Redis endpoint (dns + utilities C-dependency cache)
+        if: >-
+          ${{
+            steps.should-build.outputs.should-build == 'true' &&
+            (matrix.service == 'dns' || matrix.service == 'utilities') &&
+            github.actor != 'dependabot[bot]' &&
+            github.event_name != 'pull_request'
+          }}
+        id: ccache-redis-secret
+        env:
+          SCCACHE_REDIS_URL: ${{ secrets.SCCACHE_REDIS_URL }}
+          SCCACHE_REDIS_MODE: ${{ vars.SCCACHE_REDIS_MODE }}
+        run: |
+          set -euo pipefail
+          if [ "${SCCACHE_REDIS_MODE:-}" = "off" ]; then
+            echo "::notice::SCCACHE_REDIS_MODE=off; ${{ matrix.service }}'s ccache layer stays disabled."
+          elif [ -n "$SCCACHE_REDIS_URL" ]; then
+            umask 077
+            redis_file="${{ runner.temp }}/ccache-redis-url-${{ matrix.service }}"
+            printf '%s' "$SCCACHE_REDIS_URL" > "$redis_file"
+            echo "redis-file=$redis_file" >> "$GITHUB_OUTPUT"
+            echo "secret-files=ccache_redis_url=$redis_file" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No SCCACHE_REDIS_URL configured; ${{ matrix.service }}'s ccache layer stays disabled (fails closed to a plain compile)."
+          fi
+
       - name: Select Rust acceleration network
         if: matrix.rust == true
         env:
@@ -5464,10 +5510,45 @@ jobs:
           redis-file: ${{ steps.sccache-secret.outputs.redis-file }}
           dist-config-file: ${{ steps.sccache-secret.outputs.dist-config-file }}
           distcc-hosts-file: ${{ steps.sccache-secret.outputs.distcc-hosts-file }}
-          ccache-redis-file: ${{ steps.sccache-secret.outputs.ccache-redis-file }}
+          # What: only wired for dns -- ui does not use this ccache layer.
+          # Why: reuses ccache-redis-secret's own output instead of a second
+          #   Redis-endpoint read.
+          # From: Issue #1095 (G15)
+          ccache-redis-file: ${{ matrix.service == 'dns' && steps['ccache-redis-secret'].outputs['redis-file'] || '' }}
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
           build-network: ${{ env.RUST_ACCELERATION_NETWORK }}
           platform: linux/amd64
+
+      # What: merges sccache-secret and ccache-redis-secret into one list.
+      # Why: a block-scalar interpolation of both step outputs would add
+      #   blank lines to every service where one or both are empty; this
+      #   reproduces the prior single-source input byte-for-byte instead.
+      # From: Issue #1095 (G15)
+      - name: Combine sccache/ccache secret files
+        id: combined-secret-files
+        env:
+          SCCACHE_FILES: ${{ steps.sccache-secret.outputs.secret-files }}
+          CCACHE_FILES: ${{ steps['ccache-redis-secret'].outputs['secret-files'] }}
+        run: |
+          set -euo pipefail
+          combined=""
+          if [ -n "$SCCACHE_FILES" ]; then
+            combined="$SCCACHE_FILES"
+          fi
+          if [ -n "$CCACHE_FILES" ]; then
+            if [ -n "$combined" ]; then
+              combined="$combined"$'\n'"$CCACHE_FILES"
+            else
+              combined="$CCACHE_FILES"
+            fi
+          fi
+          {
+            echo "secret-files<<SECRET_FILES"
+            if [ -n "$combined" ]; then
+              printf '%s\n' "$combined"
+            fi
+            echo "SECRET_FILES"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         # What: uses the shared ghcr-build-push-retry composite action.
@@ -5484,7 +5565,7 @@ jobs:
           builder: ${{ steps.buildx.outputs.name }}
           context: ${{ matrix.context }}
           build-contexts: ${{ matrix.build_contexts }}
-          secret-files: ${{ steps.sccache-secret.outputs.secret-files }}
+          secret-files: ${{ steps['combined-secret-files'].outputs['secret-files'] }}
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}

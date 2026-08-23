@@ -184,6 +184,8 @@ cat > /usr/local/lib/lancache-ui-build-accel.sh <<'LANCACHE_UI_HELPERS_EOF'
           export SCCACHE_CONF=/run/secrets/sccache_dist_config; \
           sccache --dist-status; \
         fi; \
+      else \
+        echo "[INFO] sccache disabled (no sccache_redis_url or sccache_dist_config secret present)." >&2; \
       fi; \
     }; \
     disable_distcc() { \
@@ -267,6 +269,8 @@ cat > /usr/local/lib/lancache-ui-build-accel.sh <<'LANCACHE_UI_HELPERS_EOF'
         fi; \
         extract_remote_toolchain_id "$distcc_probe_dir/distcc-probe.o"; \
         rm -rf "$distcc_probe_dir"; \
+      else \
+        echo "[INFO] distcc disabled (no distcc_potential_hosts secret present)." >&2; \
       fi; \
     }; \
     disable_ccache() { \
@@ -339,9 +343,13 @@ cat > /usr/local/lib/lancache-ui-build-accel.sh <<'LANCACHE_UI_HELPERS_EOF'
         cores="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN || echo 2)"; \
         jobs=$((cores - 2)); \
         if [ "$jobs" -lt 4 ]; then jobs=4; fi; \
+        jobs_source="auto-detected from $cores core(s)"; \
+      else \
+        jobs_source="explicit CARGO_BUILD_JOBS"; \
       fi; \
       case "$jobs" in ''|*[!0-9]*) echo "CARGO_BUILD_JOBS must be a positive integer" >&2; exit 1;; esac; \
       if [ "$jobs" -le 0 ]; then echo "CARGO_BUILD_JOBS must be greater than zero" >&2; exit 1; fi; \
+      echo "[INFO] using $jobs job(s) ($jobs_source)." >&2; \
       printf '%s\n' "$jobs"; \
     }; \
     run_cargo_build() { \

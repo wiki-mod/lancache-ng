@@ -1499,6 +1499,138 @@ omitted):**
   #1501's `#issuecomment-5292505929` records the open maintainer decision on
   whether to build the dedicated lookup.
 
+- **Recorded exception (2026-08-22, issue #1095 G15, PR #1640, Rule-Ref:
+  AG-VAL-029): `full-setup-deep-validate.yml`'s new pre-checkout resync guard
+  has no durable bats regression case yet, only a one-time manual scratch-repo
+  verification.**
+  - **Scope**: the "Resync workspace to its own HEAD before checkout
+    (self-hosted reuse hardening)" step added ahead of all 5 self-hosted
+    `actions/checkout` sites in `full-setup-deep-validate.yml`, fixing the
+    real F19/PR #1640 CI failure (a prior job's tracked file surviving into
+    this PR's own checkout because `git checkout --force` refused to remove
+    it against a stale inherited HEAD).
+  - **Reason**: `gc-pr-staging-images.yml` has an analogous inline
+    sparse-checkout/skip-worktree restore step, and that one *is* covered by
+    a durable bats case (`tests/bats/gc_pr_staging_images.bats`, the
+    "regresses the workflow's sparse-checkout-restore step via a throwaway
+    local `git init` repo" block). No existing bats file owns
+    `full-setup-deep-validate.yml`'s inline checkout-step shell bodies the
+    same way — `detect_full_setup_changes.bats`,
+    `full_setup_client_simulation_domain.bats`, `plan_deep_validation.bats`,
+    and `check_validation_subnet_wrapper_coverage.bats` each own a specific
+    `scripts/*.sh` file or a cross-workflow wrapper-usage guard, not this
+    step's own shell body. Per AG-CODE-013, a new file is a standing DISACK
+    absent either an existing owner to extend or an explicit maintainer ACK;
+    neither applies here, and the maintainer/coordinator was not asked for
+    that ACK within this dispatch's scope, so the compliant route is this
+    recorded exception rather than a new bats file created out of convenience.
+  - **Tracking**: PR #1640; issue #1095 G15. Real commits: `2a576888`/
+    `17803775` (initial guard), `f0cb604d` (added `::notice::` logging),
+    `821bee98` (hoisted an embedded `$(...)` substitution per AG-VAL-029's
+    own already-recorded embedded-call-shape entry above), `fd607602`
+    (gated the whole guard body on `git rev-parse --verify -q HEAD`
+    succeeding first, after real execution — not reasoning — found an
+    exit-128 crash on an unborn-HEAD `.git` directory).
+  - **Validation**: manual only. The guard's exact shell body was run against
+    3 real scratch git repositories during this PR's development: (1) a
+    valid HEAD with one file carrying the skip-worktree bit — exits 0,
+    restores the file; (2) a `.git` directory with no commit yet (unborn
+    HEAD) — exited 128 (`fatal: invalid reference: HEAD`) before the
+    `fd607602` gating fix, exits 0 as a clean no-op after it; (3) no `.git`
+    directory at all — exits 0 as a clean no-op via the `else` branch. These
+    scratch repositories were not preserved and this sequence is not wired
+    into any bats file, so re-verifying the guard after a future edit
+    requires manually re-deriving and re-running these 3 cases until a bats
+    file adopts ownership. Separately: case (1)'s own skip-worktree counter
+    (`${#remaining_skip_worktree[@]}`) was observed to always report 0 in
+    practice, because `git sparse-checkout disable` already clears the `S`
+    bit before `git ls-files -v` runs — so that specific `::notice::` count
+    is not meaningful evidence of anything and must not be read as proof no
+    skip-worktree bits were present; the inherited-HEAD `::notice::` line is
+    the guard's only currently-meaningful log signal.
+  - **Non-Expansion**: this exception covers only these 3 verified scenarios
+    for this specific guard as it exists after `fd607602`. It does not
+    exempt any other new inline workflow shell step from bats coverage, and
+    a future edit to this guard's shell body invalidates this entry's
+    validation claim (Rule-Ref: AG-WF-011) until the 3 cases are re-run
+    against the new body, ideally by finally giving this class of guard a
+    real bats home instead of repeating this manual cycle a third time
+    (Rule-Ref: AG-WF-025).
+
+- **Recorded exception (2026-08-22, issue #1095 G15, PR #1640, commit
+  `86a3b160`, Rule-Ref: AG-VAL-029): 5 silent-skip-branch fixes have no
+  durable regression check, only a one-time manual/standalone-harness
+  verification, and 2 of the 5 are cross-file duplication-drift risks with
+  no owning sync-check script yet.**
+  - **Scope**: a maintainer-directed repo-wide sweep (AG-WF-011/AG-CI-015 --
+    treating the checkout guard's silent-skip bug, above, as a failure class
+    rather than an isolated incident) found and fixed 5 more instances: (1)
+    `services/dns/Dockerfile` and (2) `services/watchdog/Dockerfile`'s
+    `configure_sccache`/`configure_distcc`/`configure_ccache` top-level skip
+    branches; (3) `services/ui/Dockerfile`'s byte-identical copies of the
+    same two functions in *two* separate RUN blocks (missed by the initial
+    pattern search, found only by this document's own author re-grepping
+    `services/` directly); (4) all three Dockerfiles'
+    `resolve_cargo_jobs()`, whose resolved value/source previously had zero
+    build-log trace on any path, not only the skip path; (5)
+    `.github/workflows/build-push-hosted-fallback.yml`'s "Compute Docker
+    build parallelism" step, confirmed missing the two `::notice::` lines
+    its `build-push.yml` sibling step already carries (real two-copy drift,
+    not a hypothetical); and `scripts/untracked/docker-socket-proxy.sh`'s
+    `LANCACHE_CONTAINER_SUFFIX` branch, silent on both its apply and skip
+    paths.
+  - **Reason**: (4) and (5) are genuinely drift-prone by construction --
+    `build-push.yml`/`build-push-hosted-fallback.yml` already maintain
+    several other duplicated-content pairs with dedicated sync checks
+    (`check-workflow-service-lists.sh`'s `#822` service-array-sync shape;
+    `check-dependabot-docker-base-consistency.sh`'s Dockerfile-`FROM`-line
+    shape, both cited above), so "keep this step's `::notice::` wording
+    synced between the two workflow copies" and "keep
+    `configure_sccache`/`configure_distcc`/`configure_ccache` synced across
+    3 Dockerfiles" are real candidates for the same treatment. Neither has
+    an owner today: `check-workflow-service-lists.sh`'s own docstring scopes
+    it specifically to hardcoded `services=(...)` array duplication (the
+    `#822` recurrence shape), a different conceptual class from step-body or
+    function-body log-line parity, so extending it would not be "the same
+    conceptual class" AG-CODE-013 requires for an owner-file extension. No
+    other `scripts/tracked/*.sh` owns either shape. Per AG-CODE-013, creating
+    a new dedicated sync-check script is a standing DISACK absent an
+    existing owner or an explicit maintainer ACK; neither applies within
+    this dispatch's scope, so this recorded exception is the compliant route
+    rather than silence, and a genuine candidate to promote into a real
+    mechanical check (mirroring how `check-dependabot-docker-base-
+    consistency.sh` itself was promoted out of a general exception once its
+    claim became concrete, per the AG-DOC-001 entry above) if the maintainer
+    decides the drift risk warrants it.
+  - **Tracking**: PR #1640; issue #1095 G15; commit `86a3b160`.
+  - **Validation**: manual only. A standalone, non-Dockerfile reproduction of
+    the four fixed Dockerfile functions' post-fix conditional logic and
+    message text (secret paths parametrized via a scratch directory instead
+    of `/run/secrets/*`, since real secret mounts require BuildKit) was run
+    against 5 real scenarios: no secrets; all secrets present with distcc
+    enabled; distcc secret present but distcc not enabled (exercises the
+    two-way `configure_ccache` message's harder branch); explicit
+    `CARGO_BUILD_JOBS`; distcc enabled but the ccache secret specifically
+    absent. All 5 produced exactly the expected message. This harness stubs
+    every enable-path body to a placeholder marker, so it proves the new
+    `else` branches and the two-way message selection, not that the
+    unmodified enable-path bodies still behave identically -- that claim
+    rests on `sh -n` syntax-checking the real, unmodified full RUN bodies
+    plus direct diff inspection (the enable-path lines are byte-for-byte
+    unchanged), not on execution. The edited workflow step was validated
+    with `sh -n` and PyYAML `yaml.safe_load`. `docker-socket-proxy.sh` was
+    additionally checked against `scripts/tracked/check-naming-
+    consistency.sh`, `check-compose-healthchecks.sh`, and
+    `check-workflow-service-lists.sh`, all three still passing against the
+    edited tree.
+  - **Non-Expansion**: this exception covers only these 5 locations as fixed
+    in commit `86a3b160`. Any future re-duplication of either the
+    Dockerfile-function or the workflow-step-content shape is a new
+    occurrence to evaluate on its own merits (Rule-Ref: AG-WF-011), and a
+    third occurrence of either specific drift shape should prompt actually
+    building the mechanical sync check named above rather than recording a
+    fourth exception (Rule-Ref: AG-WF-025).
+
 ---
 
 ## Appendix — Reusable Scripts/Commands Index

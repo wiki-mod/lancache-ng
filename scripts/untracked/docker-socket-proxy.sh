@@ -103,6 +103,11 @@ EOF
 # scripts/tracked/check-naming-consistency.sh both grep this script's static source
 # for the exact literal fixed names, so leaving that text untouched keeps
 # both checks passing unchanged regardless of whether a suffix is active.
+# What: both branches below now log which allowlist form (suffixed or fixed) was used.
+# Why: previously neither branch logged anything on success, so a container's own startup
+# log gave no evidence of whether the suffix override actually applied -- same
+# silent-decision-point class as issue #1095 G15's checkout guard.
+# From: Issue #1095 (G15), PR #1640
 LANCACHE_CONTAINER_SUFFIX="${LANCACHE_CONTAINER_SUFFIX:-}"
 if [ -n "$LANCACHE_CONTAINER_SUFFIX" ]; then
     # Fail closed (AG-OP-008/AG-VAL-002): reject anything but a plain
@@ -137,6 +142,9 @@ if [ -n "$LANCACHE_CONTAINER_SUFFIX" ]; then
         -e "s/lancache-netdata\([^-]\)/lancache-netdata${LANCACHE_CONTAINER_SUFFIX}\1/g" \
         -e "s/lancache-syslog\([^-]\)/lancache-syslog${LANCACHE_CONTAINER_SUFFIX}\1/g" \
         /tmp/lancache-haproxy.cfg
+    echo "socket-proxy allowlist: applied LANCACHE_CONTAINER_SUFFIX='$LANCACHE_CONTAINER_SUFFIX' to the generated allowlist." >&2
+else
+    echo "socket-proxy allowlist: LANCACHE_CONTAINER_SUFFIX not set; using unmodified fixed container names." >&2
 fi
 
 exec haproxy -f /tmp/lancache-haproxy.cfg

@@ -93,9 +93,13 @@ value_from() {
     [ "$(val should_run)" = "true" ]
 }
 
-@test "composite action change counts as a workflow change (guard + run)" {
+# G15: a full-setup-validate-only action has no build-image consumer, so it
+# must not force workflow true (which would also force the staging guard to
+# expect fresh per-commit tags for services this action never rebuilds) --
+# only should_run, via this script's own unconditional .github/actions/ check.
+@test "full-setup-validate-only composite action runs the suite but does not force workflow" {
     run_detect ".github/actions/derive-validation-network/action.yml"
-    [ "$(val workflow)" = "true" ]
+    [ "$(val workflow)" = "false" ]
     [ "$(val should_run)" = "true" ]
 }
 

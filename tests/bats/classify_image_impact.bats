@@ -103,8 +103,112 @@ val() {
 
     run_classify ".github/workflows/codeql.yml"
     [ "$(val workflow)" = "false" ]
+}
 
+# G15: a full-setup-validate-only action must set validation_infra, not the
+# global workflow signal -- it has no build-image consumer at all, and PR
+# #1634 showed the old blanket ".github/actions/* -> workflow=true" rule
+# forces every service to rebuild for a change that only affects the
+# full-setup validation stack.
+@test "G15: full-setup-validate-only action sets validation_infra, not workflow" {
     run_classify ".github/actions/derive-validation-network/action.yml"
+    [ "$(val validation_infra)" = "true" ]
+    [ "$(val workflow)" = "false" ]
+
+    run_classify ".github/actions/reserve-validation-subnet-stack/action.yml"
+    [ "$(val validation_infra)" = "true" ]
+    [ "$(val workflow)" = "false" ]
+
+    run_classify ".github/actions/wait-validation-stack-health/action.yml"
+    [ "$(val validation_infra)" = "true" ]
+    [ "$(val workflow)" = "false" ]
+}
+
+# G15: rust-acceleration-preflight only builds dns/ui in the `build` job
+# (matrix.rust) -- a change to it must not force watchdog/proxy/dhcp/etc. to
+# rebuild, the exact PR #1634 incident shape (a change to one action forced
+# all 10 services to rebuild).
+@test "G15: rust-acceleration-preflight change sets only dns_image/ui, workflow false" {
+    run_classify ".github/actions/rust-acceleration-preflight/action.yml"
+    [ "$(val dns_image)" = "true" ]
+    [ "$(val ui)" = "true" ]
+    [ "$(val dns_rust)" = "false" ]
+    [ "$(val watchdog)" = "false" ]
+    [ "$(val proxy)" = "false" ]
+    [ "$(val dhcp)" = "false" ]
+    [ "$(val build_tools)" = "false" ]
+    [ "$(val workflow)" = "false" ]
+}
+
+# G15: configure-rust-sccache/cargo-with-sccache-fallback are used by
+# dns/ui/watchdog's own quality/test/cargo-audit jobs, never by the image
+# build itself -- must not force proxy/dhcp/etc. to rebuild.
+@test "G15: configure-rust-sccache change sets only dns_rust/ui/watchdog, workflow false" {
+    run_classify ".github/actions/configure-rust-sccache/action.yml"
+    [ "$(val dns_rust)" = "true" ]
+    [ "$(val ui)" = "true" ]
+    [ "$(val watchdog)" = "true" ]
+    [ "$(val dns_image)" = "false" ]
+    [ "$(val proxy)" = "false" ]
+    [ "$(val build_tools)" = "false" ]
+    [ "$(val workflow)" = "false" ]
+
+    run_classify ".github/actions/cargo-with-sccache-fallback/action.yml"
+    [ "$(val dns_rust)" = "true" ]
+    [ "$(val ui)" = "true" ]
+    [ "$(val watchdog)" = "true" ]
+    [ "$(val workflow)" = "false" ]
+}
+
+# G15: build-tools-candidate-smoke only validates a candidate build-tools
+# image -- must not force the 9 product services to rebuild.
+@test "G15: build-tools-candidate-smoke change sets only build_tools, workflow false" {
+    run_classify ".github/actions/build-tools-candidate-smoke/action.yml"
+    [ "$(val build_tools)" = "true" ]
+    [ "$(val dns_image)" = "false" ]
+    [ "$(val ui)" = "false" ]
+    [ "$(val watchdog)" = "false" ]
+    [ "$(val workflow)" = "false" ]
+}
+
+# G15: a genuinely global action (consumed unconditionally by the shared
+# build/merge-manifests/promote pipeline for every service) must still force
+# workflow=true -- this is the one blast radius PR #1634's incident shape is
+# actually correct for.
+@test "G15: a genuinely global action change still sets workflow true" {
+    run_classify ".github/actions/ghcr-build-push-retry/action.yml"
+    [ "$(val workflow)" = "true" ]
+
+    run_classify ".github/actions/trivy-scan-exact-digest/action.yml"
+    [ "$(val workflow)" = "true" ]
+
+    run_classify ".github/actions/ghcr-attest-retry/action.yml"
+    [ "$(val workflow)" = "true" ]
+
+    run_classify ".github/actions/buildx-setup-retry/action.yml"
+    [ "$(val workflow)" = "true" ]
+
+    run_classify ".github/actions/ghcr-attest-with-cache/action.yml"
+    [ "$(val workflow)" = "true" ]
+}
+
+# G15: a pure PR-gate action (zero build/image relevance) must not force any
+# service to rebuild.
+@test "G15: a pure PR-gate action change does not set workflow or any service flag" {
+    run_classify ".github/actions/file-headers-check/action.yml"
+    [ "$(val workflow)" = "false" ]
+    [ "$(val dns_image)" = "false" ]
+    [ "$(val ui)" = "false" ]
+    [ "$(val build_tools)" = "false" ]
+    [ "$(val validation_infra)" = "false" ]
+}
+
+# G15 fail-closed case: a brand-new, never-before-seen action directory has
+# no established consumer yet, so its blast radius is unknown -- must default
+# to the maximal verdict (workflow=true) until a maintainer categorizes it,
+# per this script's own touches_unmapped_action().
+@test "G15: an unmapped/brand-new action directory fails closed to workflow true" {
+    run_classify ".github/actions/brand-new-thing/some-file.yml"
     [ "$(val workflow)" = "true" ]
 }
 
@@ -225,6 +329,7 @@ val() {
     [ "$(val build_tools)" = "true" ]
     [ "$(val syslog)" = "true" ]
     [ "$(val utilities)" = "true" ]
+    [ "$(val validation_infra)" = "true" ]
     [ "$(val workflow)" = "true" ]
     [ "$(val IMAGE_IMPACT)" = "true" ]
 }

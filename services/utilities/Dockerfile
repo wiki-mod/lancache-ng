@@ -39,6 +39,7 @@ RUN set -euo pipefail; \
 # From: Issue #1556
 RUN apk add --no-cache \
       build-base \
+      ccache \
       file \
       perl \
       openssl-dev \
@@ -56,11 +57,28 @@ RUN rm -f /usr/lib/libssl.so /usr/lib/libcrypto.so /usr/lib/libz.so
 
 WORKDIR /tmp/curl-${CURL_VERSION}
 
-# What: builds a fully static curl binary with proxy support enabled.
-# Why: matches this project's real curl usage (incl. the build fleet's
-#   own HTTP(S) proxy); static build stays portable across glibc/musl.
-# From: Issue #1556 | Issue #1637
-RUN set -euo pipefail; \
+# What: builds curl, wrapping the C compiler in ccache when a secret is mounted.
+# Why: reuses the same repository secret dns's AG-CI-022 ccache-over-distcc
+#   layer uses, under a distinct mount id; fails closed to plain gcc
+#   per AG-CI-009 otherwise.
+# From: Issue #1095 (G15 | #1556)
+RUN --mount=type=secret,id=ccache_redis_url \
+    set -euo pipefail; \
+    cc_wrapper=gcc; \
+    if [ -s /run/secrets/ccache_redis_url ]; then \
+      ccache_redis_endpoint="$(cat /run/secrets/ccache_redis_url)"; \
+      case "$ccache_redis_endpoint" in \
+        redis://* | redis+tls://*) ;; \
+        *) ccache_redis_endpoint="redis://$ccache_redis_endpoint" ;; \
+      esac; \
+      export CCACHE_REMOTE_STORAGE="$ccache_redis_endpoint"; \
+      export CCACHE_DIR=/tmp/ccache-utilities; \
+      export CCACHE_COMPILERCHECK=content; \
+      cc_wrapper="ccache gcc"; \
+      echo "[INFO] curl-builder: ccache enabled with Redis remote storage." >&2; \
+    else \
+      echo "[INFO] curl-builder: no ccache_redis_url secret mounted; compiling without a compiler cache." >&2; \
+    fi; \
     ./configure \
       --disable-shared --enable-static \
       --disable-ftp --disable-file --disable-ldap --disable-ldaps \
@@ -77,8 +95,11 @@ RUN set -euo pipefail; \
       --with-openssl \
       --with-ca-bundle=/etc/ssl/certs/ca-certificates.crt \
       --enable-http --enable-cookies --enable-ipv6 \
-      CFLAGS="-fno-PIE" LDFLAGS="-no-pie" PKG_CONFIG="pkg-config --static"; \
+      CC="$cc_wrapper" CFLAGS="-fno-PIE" LDFLAGS="-no-pie" PKG_CONFIG="pkg-config --static"; \
     make -j"$(nproc)" LDFLAGS="-all-static -no-pie"; \
+    if [ -n "${CCACHE_REMOTE_STORAGE:-}" ]; then \
+      ccache -s || true; \
+    fi; \
     mkdir -p /out/usr/local/bin /out/etc/ssl/certs; \
     install -m 0755 src/curl /out/usr/local/bin/curl; \
     /out/usr/local/bin/curl --version; \
