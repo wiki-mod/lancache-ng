@@ -1,0 +1,35 @@
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Composite action: release this job's own per-workspace checkout lock, if
+# still owned, unconditionally on job end.
+#
+# Single source for the byte-identical Release step that was copy-pasted
+# across all 31 self-hosted checkout sites in build-push.yml (issue #1095).
+# Pairs with checkout-lock-and-resync -- the caller must put this on a step
+# with `if: always()` (or `if: always() && <extra guard>` for a job whose
+# matrix mixes self-hosted and GitHub-hosted runners) so a clean, failed, or
+# cancelled job never leaves a stale lock behind for the next job on the
+# same self-hosted runner.
+#
+# What: removes the lock directory only if it is still this run's own lock
+# (matched by run ID) and is genuinely under $RUNNER_WORKSPACE.
+# Why: never delete blindly -- a lock reclaimed or recreated by a different
+# run in between must not be removed by this run's own release step.
+# From: Issue #1095
+
+name: Release checkout lock (self-hosted reuse hardening)
+description: >-
+  Releases this job's own per-workspace checkout lock (self-hosted reuse
+  hardening), if this run still owns it. Caller sets its own `if: always()`.
+
+runs:
+  using: composite
+  steps:
+    - name: Release per-workspace checkout lock (self-hosted reuse hardening)
+      shell: bash
+      run: |
+        set -uo pipefail
+        d="${RUNNER_WORKSPACE}/.ckt.lock"
+        m="$(cat "$d/m" 2>/dev/null || true)"
+        [ -d "$d" ] && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ] && [ "${m%% *}" = "${{ github.run_id }}" ] && rm -rf "$d"
+        exit 0
