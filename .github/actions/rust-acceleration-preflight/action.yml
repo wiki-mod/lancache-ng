@@ -550,8 +550,11 @@ runs:
                 run_logged "$cold_log" env CCACHE_DIR="$ccache_dir_cold" ccache "$real_cc" -c ccache-probe.c -o ccache-cold.o
                 cold_stats="$preflight_dir/ccache-cold-stats.log"
                 CCACHE_DIR="$ccache_dir_cold" ccache --print-stats > "$cold_stats"
-                if ! grep -qE '^remote_storage_write[[:space:]]+[1-9]' "$cold_stats"; then
-                  echo "[ERROR] ccache did not record a Redis remote-storage write on the cold compile." >&2
+                # What: a cache hit is also valid proof (not just a write).
+                # Why: stable cross-run key; after run one, it's always a hit.
+                # From: Issue #1095 (G15)
+                if ! grep -qE '^(remote_storage_write|direct_cache_hit)[[:space:]]+[1-9]' "$cold_stats"; then
+                  echo "[ERROR] ccache neither wrote to nor hit Redis remote storage on the cold compile." >&2
                   cat "$cold_stats" >&2
                   exit 1
                 fi
