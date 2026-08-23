@@ -2530,18 +2530,21 @@ jobs:
     # Wait for merge-manifests so PR validation consumes this PR staging manifest, not stale base-channel content.
     # Trusted non-PR validation likewise waits for the exact merged sha-* candidate before promotion.
     needs: [detect-changes, merge-manifests, compute-validation-network, validate-compose, push-supersession-check]
-    # What: also requires push-supersession-check's `superseded` to be false.
-    # Why: merge-manifests reports plain `success` even when it skipped every
-    #   service for a superseded push (see its own comment); relying on that
-    #   `result` alone would pull real images built for a stale commit --
-    #   this must check supersession itself, not just the upstream result.
-    # From: Issue #1095
+    # What: runs whenever merge-manifests wasn't itself cancelled, not only on its full success.
+    # Why: BUILD/ASSEMBLE/VERIFY/PROMOTE/CONSUME pipeline (maintainer decision):
+    #   this job IS verify, and must actually run and name the missing service(s) itself
+    #   (see "Pin full-setup service identities to immutable digests" below) rather than
+    #   being silently skipped -- one unrelated service's merge failure previously hid every
+    #   other service's real validation result behind a grey "skipped" job. promote's own
+    #   all-or-nothing gate is deliberately untouched by this change (see promote's header).
+    # From: Issue #1095 | PR #1642 | PR #1643
     if: >-
       ${{
         always() &&
+        needs['merge-manifests'].result != 'cancelled' &&
         (
-          (github.event_name == 'pull_request' && needs['merge-manifests'].result == 'success') ||
-          (github.event_name != 'pull_request' && needs['merge-manifests'].result == 'success' && needs['push-supersession-check'].outputs.superseded != 'true')
+          github.event_name == 'pull_request' ||
+          needs['push-supersession-check'].outputs.superseded != 'true'
         ) &&
         (
           github.event_name != 'pull_request' ||
@@ -2816,6 +2819,12 @@ jobs:
           # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
+          # What: collects every missing service before failing, instead of exit-1ing on the first.
+          # Why: this IS the pipeline's VERIFY completeness check (maintainer
+          #   decision) -- a single consolidated error naming every gap is the "clear error
+          #   message" that check requires, not just the first one found.
+          # From: Issue #1095 | PR #1642 | PR #1643
+          declare -a missing_services=()
           resolve_digest() {
             local service=$1 supplied=$2 image digest
             if [[ "$supplied" =~ ^sha256:[0-9a-fA-F]{64}$ ]]; then
@@ -2824,16 +2833,36 @@ jobs:
             fi
             image="ghcr.io/${REPOSITORY}/${service}:${IMAGE_TAG}"
             echo "::notice::No producer digest was exported for $service; resolving $image once and pinning the result for this validation run." >&2
-            digest="$(resolve_manifest_digest "$image" "${GHCR_RETRY_USERNAME:-}" "${GHCR_RETRY_PASSWORD:-}")" \
-              || { echo "::error::Could not resolve immutable digest for $image." >&2; exit 1; }
+            # What: resolve_manifest_digest is already ghcr_retry-wrapped.
+            # Why: by the time it fails, retries are exhausted, so this could be a genuinely
+            #   missing image OR GHCR not answering -- do not assert "missing" as fact.
+            # From: Issue #1095 | PR #1642 | PR #1643
+            if ! digest="$(resolve_manifest_digest "$image" "${GHCR_RETRY_USERNAME:-}" "${GHCR_RETRY_PASSWORD:-}")"; then
+              echo "::error::Could not resolve an immutable digest for $image after retries -- either $service is missing from this run's candidate set, or GHCR did not answer." >&2
+              missing_services+=("$service")
+              return 1
+            fi
             printf '%s\n' "$digest"
           }
 
-          proxy_digest="$(resolve_digest proxy "${PROXY_DIGEST:-}")"
-          dns_digest="$(resolve_digest dns "${DNS_DIGEST:-}")"
-          watchdog_digest="$(resolve_digest watchdog "${WATCHDOG_DIGEST:-}")"
-          ui_digest="$(resolve_digest ui "${UI_DIGEST:-}")"
-          build_tools_digest="$(resolve_digest build-tools "${BUILD_TOOLS_DIGEST:-}")"
+          proxy_digest="$(resolve_digest proxy "${PROXY_DIGEST:-}")" || true
+          dns_digest="$(resolve_digest dns "${DNS_DIGEST:-}")" || true
+          watchdog_digest="$(resolve_digest watchdog "${WATCHDOG_DIGEST:-}")" || true
+          ui_digest="$(resolve_digest ui "${UI_DIGEST:-}")" || true
+          build_tools_digest="$(resolve_digest build-tools "${BUILD_TOOLS_DIGEST:-}")" || true
+
+          # What: fails VERIFY here, before rendering a compose override from partial digests.
+          # Why: an incomplete candidate set must be a named, explicit VERIFY failure,
+          #   not a cryptic downstream compose-pull error; the leftover per-service
+          #   images this run DID publish are not specially deleted here -- they are ordinary
+          #   sha-* history, already in scope of gc-pr-staging-images.yml's existing 3-hourly
+          #   sweep (PR #1594), same as any other tag once it falls outside that policy's
+          #   retention window.
+          # From: Issue #1095 | PR #1642 | PR #1643
+          if [ "${#missing_services[@]}" -gt 0 ]; then
+            echo "::error::This run could not resolve a candidate image for ${#missing_services[@]} service(s) (${missing_services[*]}) -- see each service's own ::error:: above for whether that is a missing image or a GHCR read failure after retries. VERIFY cannot validate an incomplete stack. The images this run DID publish are not deleted by this step: they are ordinary sha-* history, already covered by gc-pr-staging-images.yml's existing 3-hourly retention sweep (no dedicated fast-path exists or was added here) -- push a new commit to retry the whole candidate set instead of waiting on that sweep."
+            exit 1
+          fi
 
           override_file=".ci-exact-digests.yml"
           mkdir -p "$(dirname "deploy/full-setup/${override_file}")"
@@ -6444,6 +6473,11 @@ jobs:
           REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          # What: delete-scoped PAT for the orphaned-tag cleanup below.
+          # Why: GITHUB_TOKEN cannot delete a GHCR package version; same PAT the Trivy
+          #   scan-failure deletion above and gc-pr-staging-images.yml already use.
+          # From: Issue #1095 | PR #1642
+          GH_TOKEN: ${{ secrets.GHCR_PACKAGE_DELETE_PAT }}
           DESCRIPTION_PROXY: *ci-description-proxy
           DESCRIPTION_DNS: *ci-description-dns
           DESCRIPTION_WATCHDOG: *ci-description-watchdog
@@ -6476,6 +6510,13 @@ jobs:
           # From: Issue #1095 (G2) | PR #1503
           source_tag="sha-${COMMIT_SHA}"
           declare -A merged_digests=()
+          # What: Tracks each service left with an orphaned single-platform tag this run.
+          # Why: amd64/arm64 builds are independent jobs that can genuinely diverge (one
+          #   fails, one succeeds) with no relation to concurrency. The prior code logged
+          #   an ordinary ::notice:: for that case and `exit 1`'d the whole loop on the
+          #   other-direction case, both silently orphaning the surviving per-arch tag.
+          # From: Issue #1095 | PR #1642
+          declare -A orphaned_services=()
 
           declare -A service_descriptions=(
             [proxy]="nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic."
@@ -6514,6 +6555,54 @@ jobs:
             printf '%s\n' "$digest"
           }
 
+          # What: deletes GHCR's copy of one orphaned single-platform tag.
+          # Why: an orphan (loop below) can never join a multi-platform manifest and would
+          #   sit in GHCR forever; scoped to this run's exact tag, and refuses to delete
+          #   when the matched version carries any other tag (a shared-digest version).
+          # From: Issue #1095 | PR #1642
+          delete_orphaned_tag() {
+            local service=$1 tag=$2
+            local org="wiki-mod"
+            local package="lancache-ng%2F${service}"
+            local versions_file version_json version_id tag_count other_tags
+
+            : "${GH_TOKEN:?GHCR_PACKAGE_DELETE_PAT secret is required to delete an orphaned single-platform tag -- see issue #1095. Without it, this stray tag cannot be removed automatically and needs manual deletion in GHCR.}"
+
+            versions_file="$(mktemp)"
+            fetch_versions() { gh api --paginate "orgs/${org}/packages/container/${package}/versions" > "$versions_file"; }
+            if ! ghcr_retry ghcr.io "" "" -- fetch_versions; then
+              echo "::error::Could not list GHCR package versions for lancache-ng/${service} to delete its orphaned tag ${tag}; leaving it in place for manual cleanup."
+              rm -f "$versions_file"
+              return 1
+            fi
+
+            version_json="$(jq -c --arg tag "$tag" '[.[] | select((.metadata.container.tags // []) | index($tag))][0] // empty' "$versions_file")"
+            rm -f "$versions_file"
+            if [ -z "$version_json" ]; then
+              echo "::error::No GHCR package version found carrying orphaned tag lancache-ng/${service}:${tag}; it may already be gone."
+              return 1
+            fi
+
+            # What: refuses to delete a version whose digest is shared by another tag.
+            # Why: `gh api -X DELETE .../versions/<id>` deletes the whole manifest version,
+            #   not just $tag -- an arm64 build byte-identical to an older commit's, or a
+            #   digest a promoted channel tag already references, would be destroyed too.
+            # From: Issue #1095 | PR #1642
+            version_id="$(jq -r '.id' <<<"$version_json")"
+            tag_count="$(jq -r '(.metadata.container.tags // []) | length' <<<"$version_json")"
+            if [ "$tag_count" -ne 1 ]; then
+              other_tags="$(jq -r '(.metadata.container.tags // []) | join(", ")' <<<"$version_json")"
+              echo "::error::GHCR package version ${version_id} for lancache-ng/${service} carries ${tag_count} tag(s) (${other_tags}), not only the orphaned ${tag} -- refusing to delete a version another tag or manifest may still reference. Manual verification is required."
+              return 1
+            fi
+
+            if ! ghcr_retry ghcr.io "" "" -- gh api -X DELETE "orgs/${org}/packages/container/${package}/versions/${version_id}"; then
+              echo "::error::Failed to delete GHCR package version ${version_id} (lancache-ng/${service}:${tag}); manual cleanup required."
+              return 1
+            fi
+            echo "::notice::Deleted orphaned GHCR package version ${version_id} (lancache-ng/${service}:${tag}) -- its counterpart architecture was never published for this commit."
+          }
+
           for service in "${services[@]}"; do
             amd64_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}-amd64"
             arm64_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}-arm64"
@@ -6528,12 +6617,24 @@ jobs:
             # to protect real registry-write operations below, not this expected-failure control
             # flow.
             if ! docker buildx imagetools inspect "$amd64_image" >/dev/null 2>&1; then
-              echo "::notice::Skipping $service: no linux/amd64 image was published for this commit -- either unchanged (build/build-arm64 correctly skipped it) or that service's own build job failed; check the build/build-arm64 job for $service to tell which."
+              if docker buildx imagetools inspect "$arm64_image" >/dev/null 2>&1; then
+                echo "::error::$service: linux/arm64 image $arm64_image was published for this commit but linux/amd64 was not -- the two architectures' build jobs diverged (one succeeded, the other failed or was skipped independently). $arm64_image is now a permanent orphan: it can never be merged into $target_image. Check the build (amd64) job for $service on this commit to find out why it did not publish, then push a new commit so both architectures retry together -- this run will not retry it for you."
+                orphaned_services["$service"]="$arm64_image"
+                # What: attempts real deletion; `|| true` isolates a delete failure.
+                # Why: must not trip `set -e` and abort remaining services (AG-WF-011).
+                # From: Issue #1095 | PR #1642
+                delete_orphaned_tag "$service" "${source_tag}-arm64" || true
+              else
+                echo "::notice::Skipping $service: no linux/amd64 or linux/arm64 image was published for this commit -- unchanged/not built on this push, or both architectures' builds independently failed; check the build and build-arm64 jobs for $service to tell which."
+              fi
               continue
             fi
             if ! docker buildx imagetools inspect "$arm64_image" >/dev/null 2>&1; then
-              echo "::error::$service has a linux/amd64 image but no linux/arm64 image ($arm64_image); refusing to publish a single-platform tag under the multi-platform contract."
-              exit 1
+              echo "::error::$service: linux/amd64 image $amd64_image was published for this commit but linux/arm64 was not -- the two architectures' build jobs diverged (one succeeded, the other failed or was skipped independently). $amd64_image is now a permanent orphan: it can never be merged into $target_image. Check the build-arm64 job for $service on this commit to find out why it did not publish, then push a new commit so both architectures retry together -- this run will not retry it for you."
+              orphaned_services["$service"]="$amd64_image"
+              # Same failure-isolation reasoning as the arm64-orphan branch above.
+              delete_orphaned_tag "$service" "${source_tag}-amd64" || true
+              continue
             fi
 
             amd64_digest="$(digest_for_image "$amd64_image")"
@@ -6559,6 +6660,17 @@ jobs:
             printf '%s_digest=%s\n' "${service//-/_}" "$merged_digest" >> "$GITHUB_OUTPUT"
           done
 
+          # What: Prints one consolidated ::error:: naming every orphan this run found.
+          # Why: Carries the full list in the run's log tail, not just scattered
+          #   per-service lines, even though delete_orphaned_tag above already
+          #   attempted real deletion for each one -- a deleted orphan is still a real
+          #   incident (an amd64/arm64 build divergence) worth surfacing loudly, and a
+          #   delete that itself failed leaves a stray tag this summary is the only
+          #   run-level signal for.
+          # From: Issue #1095 | PR #1642
+          if [ "${#orphaned_services[@]}" -gt 0 ]; then
+            echo "::error::${#orphaned_services[@]} service(s) ended this run with an orphaned single-platform tag for $source_tag that can never become part of a multi-platform manifest: ${!orphaned_services[*]}. See each service's own ::error:: above for its exact stray tag; the stack pointer step below will also fail because of this."
+          fi
 
           # Build the immutable stack pointer before any public channel is moved.
           # All service digests must already be present so the pointer can only
@@ -6662,6 +6774,19 @@ jobs:
             printf '%s\n' "$digest"
           }
 
+          # What: tracks each service whose amd64/arm64 PR-staging tags diverged this run.
+          # Why: the loop below now `continue`s past a divergence instead of `exit 1`ing
+          #   immediately (same fix as the trusted-ref step above) so every OTHER
+          #   service still gets processed -- but unlike that step, this loop has no
+          #   later stack-pointer check to re-assert completeness, so without this array
+          #   the step would exit 0 (job success) despite a real divergence, letting
+          #   full-setup-validate's base-channel fallback silently validate STALE content
+          #   for a service this PR actually touched -- exactly what the "Refusing to
+          #   fall back to the PR base commit's content for a touched service" guard in
+          #   "Ensure PR staging tags exist for full-setup services" exists to prevent.
+          # From: Issue #1095 | PR #1642 | PR #1643
+          declare -a diverged_services=()
+
           for service in "${services[@]}"; do
             amd64_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}-amd64"
             arm64_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}-arm64"
@@ -6674,8 +6799,15 @@ jobs:
               continue
             fi
             if ! docker buildx imagetools inspect "$arm64_image" >/dev/null 2>&1; then
-              echo "::error::$service has a linux/amd64 PR staging image but no linux/arm64 one ($arm64_image); build and build-arm64 disagreed on whether this service needed building."
-              exit 1
+              # What: `continue`, not `exit 1` -- same failure class already fixed for the
+              #   trusted-ref step above (found while working full-setup-validate's gate).
+              # Why: aborting the whole loop here silently dropped every service iterated
+              #   after this one from this step's outputs too, with no error naming them;
+              #   the post-loop check below still fails the step overall (see above).
+              # From: Issue #1095 | PR #1642 | PR #1643
+              echo "::error::$service has a linux/amd64 PR staging image but no linux/arm64 one ($arm64_image); build and build-arm64 disagreed on whether this service needed building. Continuing to process other services below, but this step still fails overall."
+              diverged_services+=("$service")
+              continue
             fi
 
             amd64_digest="$(digest_for_image "$amd64_image")"
@@ -6697,6 +6829,16 @@ jobs:
             merged_digest="$(digest_for_image "$target_image")"
             printf '%s_digest=%s\n' "${service//-/_}" "$merged_digest" >> "$GITHUB_OUTPUT"
           done
+
+          # What: the backstop `diverged_services` above exists to enforce -- fails the
+          #   step now that every service has been processed.
+          # Why: without this, the step would exit 0 despite a real divergence (see the
+          #   array's own comment above for the exact guard this would otherwise defeat).
+          # From: Issue #1095 | PR #1642 | PR #1643
+          if [ "${#diverged_services[@]}" -gt 0 ]; then
+            echo "::error::${#diverged_services[@]} service(s) had a linux/amd64 PR staging image but no linux/arm64 one this run (${diverged_services[*]}). See each service's own ::error:: above; this step fails so merge-manifests reports failure and full-setup-validate cannot silently fall back to stale base-channel content for a touched service."
+            exit 1
+          fi
 
       # "Set up Docker Buildx" above runs unconditionally (unlike the two
       # mutually-exclusive "Create ..." steps that consume it), so this
