@@ -2531,7 +2531,7 @@ jobs:
     # Trusted non-PR validation likewise waits for the exact merged sha-* candidate before promotion.
     needs: [detect-changes, merge-manifests, compute-validation-network, validate-compose, push-supersession-check]
     # What: runs whenever merge-manifests wasn't itself cancelled, not only on its full success.
-    # Why: BUILD/ASSEMBLE/VERIFY/PROMOTE/CONSUME pipeline (maintainer decision, issue #1095):
+    # Why: BUILD/ASSEMBLE/VERIFY/PROMOTE/CONSUME pipeline (maintainer decision):
     #   this job IS verify, and must actually run and name the missing service(s) itself
     #   (see "Pin full-setup service identities to immutable digests" below) rather than
     #   being silently skipped -- one unrelated service's merge failure previously hid every
@@ -2820,7 +2820,7 @@ jobs:
           REPOSITORY="$(dmeta_ghcr_repo)"
 
           # What: collects every missing service before failing, instead of exit-1ing on the first.
-          # Why: this IS the pipeline's VERIFY completeness check (issue #1095 maintainer
+          # Why: this IS the pipeline's VERIFY completeness check (maintainer
           #   decision) -- a single consolidated error naming every gap is the "clear error
           #   message" that check requires, not just the first one found.
           # From: Issue #1095 | PR #1642 | PR #1643
@@ -2852,8 +2852,8 @@ jobs:
           build_tools_digest="$(resolve_digest build-tools "${BUILD_TOOLS_DIGEST:-}")" || true
 
           # What: fails VERIFY here, before rendering a compose override from partial digests.
-          # Why: an incomplete candidate set must be a named, explicit VERIFY failure (issue
-          #   #1095), not a cryptic downstream compose-pull error; the leftover per-service
+          # Why: an incomplete candidate set must be a named, explicit VERIFY failure,
+          #   not a cryptic downstream compose-pull error; the leftover per-service
           #   images this run DID publish are not specially deleted here -- they are ordinary
           #   sha-* history, already in scope of gc-pr-staging-images.yml's existing 3-hourly
           #   sweep (PR #1594), same as any other tag once it falls outside that policy's
@@ -6555,7 +6555,7 @@ jobs:
             printf '%s\n' "$digest"
           }
 
-          # What: deletes GHCR's copy of one orphaned single-platform tag (issue #1095).
+          # What: deletes GHCR's copy of one orphaned single-platform tag.
           # Why: an orphan (loop below) can never join a multi-platform manifest and would
           #   sit in GHCR forever; scoped to this run's exact tag, and refuses to delete
           #   when the matched version carries any other tag (a shared-digest version).
@@ -6776,7 +6776,7 @@ jobs:
 
           # What: tracks each service whose amd64/arm64 PR-staging tags diverged this run.
           # Why: the loop below now `continue`s past a divergence instead of `exit 1`ing
-          #   immediately (same fix as the trusted-ref step, PR #1642) so every OTHER
+          #   immediately (same fix as the trusted-ref step above) so every OTHER
           #   service still gets processed -- but unlike that step, this loop has no
           #   later stack-pointer check to re-assert completeness, so without this array
           #   the step would exit 0 (job success) despite a real divergence, letting
@@ -6799,7 +6799,7 @@ jobs:
               continue
             fi
             if ! docker buildx imagetools inspect "$arm64_image" >/dev/null 2>&1; then
-              # What: `continue`, not `exit 1` -- same failure class PR #1642 fixed for the
+              # What: `continue`, not `exit 1` -- same failure class already fixed for the
               #   trusted-ref step above (found while working full-setup-validate's gate).
               # Why: aborting the whole loop here silently dropped every service iterated
               #   after this one from this step's outputs too, with no error naming them;
