@@ -130,8 +130,8 @@ runs:
             }
 
             # What: strips distcc's known-benign connect-failure diagnostic.
-            # Why: full reasoning + evidence on Issue #1095.
-            # From: Issue #1633
+            # Why: full reasoning + evidence on the linked issue.
+            # From: Issue #1095
             scan_distcc_compile_log() {
               local log_file="$1"
               local host_count="$2"
@@ -449,8 +449,8 @@ runs:
                 export CCACHE_PREFIX=distcc
                 export CCACHE_COMPILERCHECK=content
                 # What: pins CCACHE_BASEDIR so the probe's key stays stable.
-                # Why: full reasoning + verification on Issue #1095.
-                # From: Issue #887
+                # Why: full reasoning + verification on the linked issue.
+                # From: Issue #1095
                 export CCACHE_BASEDIR="$preflight_dir"
                 printf '%s\n' 'int main(void) { return 0; }' > "$preflight_dir/ccache-probe.c"
                 cd "$preflight_dir"
