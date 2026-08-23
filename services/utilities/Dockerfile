@@ -120,4 +120,10 @@ RUN set -euo pipefail; \
       command -v "$expected" >/dev/null 2>&1 || { echo "ERROR: expected coreutils/findutils binary missing: $expected" >&2; exit 1; }; \
     done
 
+# What: ships the shared copied-tool version-banner smoke check.
+# Why: dedupes the byte-identical lsof-banner check five consumer Dockerfiles
+# each carried inline.
+# From: Issue #1613
+COPY verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
+
 COPY --from=curl-builder /out/usr/local/bin/curl /usr/local/bin/curl

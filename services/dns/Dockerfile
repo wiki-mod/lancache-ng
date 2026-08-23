@@ -360,6 +360,13 @@ RUN --mount=type=secret,id=sccache_redis_url \
     fi; \
     cp "target/${musl_target}/release/nats-subscriber" /build/nats-subscriber-out
 
+# What: source stage for tools copied into the final image below.
+# Why: pinned by digest (not a mutable tag) for a reproducible build -- see
+#   services/proxy/Dockerfile's identical stage comment for the full
+#   digest-resolution rationale.
+# From: Issue #1556
+FROM ghcr.io/wiki-mod/lancache-ng/utilities@sha256:5c02fc536c53c2b2d42010b88508b0ea50adb27b0ef487f98a38457bfde18d85 AS utilities-tools
+
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 LABEL org.opencontainers.image.description="PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing."
@@ -557,28 +564,56 @@ LABEL org.opencontainers.image.description="PowerDNS recursor, authoritative DNS
 # advisory affects a version still shipping in v3.24 stable at that time --
 # do not treat this resolution as a promise that `pdns`/`pdns-backend-sqlite3`
 # will never need pinning again.
+# What: curl/findutils/envsubst/lsof/ripgrep come from the shared utilities image.
+# Why: same alpine:3.24 digest as utilities -- see services/proxy/Dockerfile's
+#   identical comment for the full rationale.
+# From: Issue #1556
+
+# What: removes the BusyBox symlinks at these paths before real binaries land.
+# Why: see services/proxy/Dockerfile's identical comment for the reason.
+# From: Issue #1556
+RUN rm -f /usr/bin/find /usr/bin/xargs /usr/bin/lsof
+
+COPY --from=utilities-tools /usr/local/bin/curl /usr/local/bin/curl
+COPY --from=utilities-tools /usr/bin/find /usr/bin/find
+COPY --from=utilities-tools /usr/bin/xargs /usr/bin/xargs
+COPY --from=utilities-tools /usr/bin/envsubst /usr/bin/envsubst
+COPY --from=utilities-tools /usr/lib/libintl.so.8 /usr/lib/libintl.so.8
+COPY --from=utilities-tools /usr/bin/lsof /usr/bin/lsof
+COPY --from=utilities-tools /usr/bin/rg /usr/bin/rg
+COPY --from=utilities-tools /usr/lib/libgcc_s.so.1 /usr/lib/libgcc_s.so.1
+COPY --from=utilities-tools /usr/lib/libpcre2-8.so.0* /usr/lib/
+COPY --from=utilities-tools /usr/local/bin/verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
+
+# What: verifies the copied binaries actually run, not just that they exist.
+# Why: a missing shared-library dependency fails at exec time, not at COPY
+#   time; the lsof check is delegated to a shared script (see that file).
+# From: Issue #1613
+RUN set -euo pipefail; \
+    find . -maxdepth 0 -printf '%f\n' >/dev/null; \
+    printf '%s' '$FOO' | FOO=bar envsubst >/dev/null; \
+    rg --version >/dev/null; \
+    curl --version >/dev/null; \
+    sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
+
 RUN apk add --no-cache \
     pdns \
     pdns-backend-sqlite3 \
     pdns-recursor-luajit \
     bind-tools \
     sqlite \
-    gettext-envsubst \
     iproute2 \
-    findutils \
     grep \
     coreutils \
     bash \
-    nano \
-    lsof \
-    ripgrep \
-    curl
+    nano
 
-# nano/lsof/ripgrep: in-container troubleshooting tools -- see
-# services/proxy/Dockerfile's identical comment for the full rationale.
-# curl: unlike Kea's Control Agent (reachable from the host directly via
-# network_mode: host), nats-subscriber's zone-rollback listener (port 8083,
-# see rollback_listener.rs) is only `expose`d to the Compose network, never
+# nano: in-container troubleshooting tool -- see services/proxy/Dockerfile's
+# identical comment for the full rationale; lsof/ripgrep are COPY'd above
+# but serve the same troubleshooting purpose. curl: unlike Kea's Control
+# Agent (reachable from the host directly via network_mode: host),
+# nats-subscriber's zone-rollback listener (port 8083, see
+# rollback_listener.rs) is only `expose`d to the Compose network, never
 # published to the host -- so `setup.sh reset-to-last-known-good-config
 # dns`/`pdns` reaches it via `docker compose exec` into THIS container
 # rather than calling it directly from the host. dhcp/proxy/ui/watchdog

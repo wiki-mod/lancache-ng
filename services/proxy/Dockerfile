@@ -22,6 +22,15 @@
 # and its signing key resolves to `nginx/1.31.3-r1`, and `nginx -V` shows
 # `--with-stream --with-stream_ssl_preread_module` compiled in statically,
 # matching the Debian package exactly.
+#
+# What: source stage for tools copied from the shared utilities image below.
+# Why: pinned by digest (not a mutable tag) so this build is reproducible;
+#   the digest is the `nightly` channel's manifest-list at the time of this
+#   change, resolved manually since consuming this image has no CI-side
+#   digest-resolution wiring (unlike BUILD_TOOLS_IMAGE).
+# From: Issue #1556
+FROM ghcr.io/wiki-mod/lancache-ng/utilities@sha256:5c02fc536c53c2b2d42010b88508b0ea50adb27b0ef487f98a38457bfde18d85 AS utilities-tools
+
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 LABEL org.opencontainers.image.description="nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic."
@@ -76,20 +85,49 @@ LABEL org.opencontainers.image.description="nginx-based lancache-ng caching prox
 #     `local`, indexed/associative arrays, `[[ ... ]]`, nameref parameters
 #     (`local -n`), and `${var,,}` lowercasing all require real bash --
 #     Alpine's base image has no bash by default, unlike Debian's.
+#
+# What: curl/findutils/envsubst/lsof/ripgrep come from the shared utilities image.
+# Why: avoids rebuilding the same tools per-image; safe since this stage
+#   pins the identical alpine:3.24 digest the utilities image itself uses.
+# From: Issue #1556
+
+# What: removes the BusyBox symlinks at these paths before real binaries land.
+# Why: COPY writes through an existing symlink to /bin/busybox (also
+#   /bin/sh's target), corrupting busybox and breaking /bin/sh in later RUNs.
+# From: Issue #1556
+RUN rm -f /usr/bin/find /usr/bin/xargs /usr/bin/lsof
+
+COPY --from=utilities-tools /usr/local/bin/curl /usr/local/bin/curl
+COPY --from=utilities-tools /usr/bin/find /usr/bin/find
+COPY --from=utilities-tools /usr/bin/xargs /usr/bin/xargs
+COPY --from=utilities-tools /usr/bin/envsubst /usr/bin/envsubst
+COPY --from=utilities-tools /usr/lib/libintl.so.8 /usr/lib/libintl.so.8
+COPY --from=utilities-tools /usr/bin/lsof /usr/bin/lsof
+COPY --from=utilities-tools /usr/bin/rg /usr/bin/rg
+COPY --from=utilities-tools /usr/lib/libgcc_s.so.1 /usr/lib/libgcc_s.so.1
+COPY --from=utilities-tools /usr/lib/libpcre2-8.so.0* /usr/lib/
+COPY --from=utilities-tools /usr/local/bin/verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
+
+# What: verifies the copied binaries actually run, not just that they exist.
+# Why: a missing shared-library dependency fails at exec time, not at COPY
+#   time; the lsof check is delegated to a shared script (see that file).
+# From: Issue #1613
+RUN set -euo pipefail; \
+    find . -maxdepth 0 -printf '%f\n' >/dev/null; \
+    printf '%s' '$FOO' | FOO=bar envsubst >/dev/null; \
+    rg --version >/dev/null; \
+    sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
+
 RUN apk upgrade --no-cache && \
-    apk add --no-cache curl ca-certificates openssl && \
+    apk add --no-cache ca-certificates openssl && \
     curl -fsSL -o /etc/apk/keys/nginx_signing.rsa.pub https://nginx.org/keys/nginx_signing.rsa.pub && \
     printf '%s\n' "@nginx https://nginx.org/packages/mainline/alpine/v$(cut -d. -f1,2 /etc/alpine-release)/main" >> /etc/apk/repositories && \
     apk update && \
     apk add --no-cache \
     nginx@nginx \
-    findutils \
     coreutils \
     bash \
-    gettext-envsubst \
-    nano \
-    lsof \
-    ripgrep
+    nano
 # curl/ca-certificates/openssl are kept at runtime (not purged): curl is
 # genuinely shelled out to by deploy/{prod,quickstart,full-setup}'s proxy
 # container healthcheck (`deploy/prod/docker-compose.yml`'s `curl -sf
@@ -99,9 +137,13 @@ RUN apk upgrade --no-cache && \
 # itself needs) -- same rationale as the prior Debian stage, no gnupg-style
 # purge-after-use step is needed here since Alpine's apk signing-key
 # mechanism (a plain RSA public key file) never pulls in a temporary
-# package the way apt's gpg-based key import did.
-# nano/lsof/ripgrep: in-container troubleshooting tools -- see
-# services/dns/Dockerfile's identical comment for the full rationale.
+# package the way apt's gpg-based key import did. ca-certificates itself
+# stays apk-installed (not copied from utilities): it is a certificate-data
+# package, not a binary, and this build needs its trust store before the
+# COPY'd curl's first HTTPS call above even runs.
+# nano: in-container troubleshooting tool -- see services/dns/Dockerfile's
+# identical comment for the full rationale; lsof/ripgrep are COPY'd above
+# but serve the same troubleshooting purpose.
 ENV EDITOR=nano
 ENV VISUAL=$EDITOR
 

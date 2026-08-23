@@ -559,6 +559,14 @@ RUN --mount=type=secret,id=sccache_redis_url \
 # Alpine base (issue #815): replaces the prior debian:trixie-slim final
 # stage. Same pinned alpine:3.24 digest already used by services/dhcp,
 # services/dhcp-proxy, services/watchdog, services/ntp, and services/dns.
+
+# What: source stage for tools copied into the final image below.
+# Why: pinned by digest (not a mutable tag) for a reproducible build -- see
+#   services/proxy/Dockerfile's identical stage comment for the full
+#   digest-resolution rationale.
+# From: Issue #1556
+FROM ghcr.io/wiki-mod/lancache-ng/utilities@sha256:5c02fc536c53c2b2d42010b88508b0ea50adb27b0ef487f98a38457bfde18d85 AS utilities-tools
+
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 LABEL org.opencontainers.image.description="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
@@ -580,19 +588,44 @@ LABEL org.opencontainers.image.description="lancache-ng Admin UI and control-pla
 #     privilege drop (`setpriv --reuid=lancache --regid=lancache
 #     --init-groups`) -- confirmed live that Alpine's util-linux package ships
 #     setpriv with identical --init-groups behavior to Debian's.
-#   - ca-certificates, curl, nano, lsof, ripgrep: unchanged package names,
-#     confirmed present on Alpine.
+#   - ca-certificates, coreutils: unchanged package names, confirmed present
+#     on Alpine, kept apk-installed (excluded from the utilities migration --
+#     see services/proxy/Dockerfile's comment for ca-certificates' reason).
 RUN apk add --no-cache \
     ca-certificates \
     coreutils \
-    curl \
     util-linux \
-    nano \
-    lsof \
-    ripgrep
+    nano
 
-# nano/lsof/ripgrep: in-container troubleshooting tools -- see
-# services/proxy/Dockerfile's identical comment for the full rationale.
+# What: curl/lsof/ripgrep come from the shared utilities image.
+# Why: same alpine:3.24 digest as utilities -- see services/proxy/Dockerfile's
+#   identical comment for the full rationale.
+# From: Issue #1556
+
+# What: removes the BusyBox symlink at this path before the real binary lands.
+# Why: see services/proxy/Dockerfile's identical comment for the reason.
+# From: Issue #1556
+RUN rm -f /usr/bin/lsof
+
+COPY --from=utilities-tools /usr/local/bin/curl /usr/local/bin/curl
+COPY --from=utilities-tools /usr/bin/lsof /usr/bin/lsof
+COPY --from=utilities-tools /usr/bin/rg /usr/bin/rg
+COPY --from=utilities-tools /usr/lib/libgcc_s.so.1 /usr/lib/libgcc_s.so.1
+COPY --from=utilities-tools /usr/lib/libpcre2-8.so.0* /usr/lib/
+COPY --from=utilities-tools /usr/local/bin/verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
+
+# What: verifies the copied binaries actually run.
+# Why: a missing shared-library dependency fails at exec time, not at COPY
+#   time; the lsof check is delegated to a shared script (see that file).
+# From: Issue #1613
+RUN set -euo pipefail; \
+    rg --version >/dev/null; \
+    curl --version >/dev/null; \
+    sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
+
+# nano: in-container troubleshooting tool -- see services/proxy/Dockerfile's
+# identical comment for the full rationale; lsof/ripgrep are COPY'd above
+# but serve the same troubleshooting purpose.
 ENV EDITOR=nano
 ENV VISUAL=$EDITOR
 

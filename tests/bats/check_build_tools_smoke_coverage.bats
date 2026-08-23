@@ -23,6 +23,11 @@ setup() {
     mkdir -p "$fixture/tools/build-tools" "$fixture/scripts/untracked"
 }
 
+fail() {
+    echo "$1" >&2
+    return 1
+}
+
 # write_dockerfile <tool>...
 # Writes a fixture build-tools Dockerfile whose final required_tools=() array
 # is exactly the given tools, and which verifies docker buildx/compose.
@@ -142,4 +147,70 @@ write_smoke() {
     run bash "$script" "$repo_root"
     [ "$status" -eq 0 ]
     [[ "$output" == *"OK"* ]]
+}
+
+# --- services/utilities/verify-version-banner.sh ---------------------------
+#
+# What: coverage for the shared copied-tool version-banner smoke check that
+# services/utilities/Dockerfile ships and five consumer Dockerfiles invoke,
+# plus those Dockerfiles' real usage of it.
+# Why: colocated here on maintainer instruction rather than as a new file
+# (AG-CODE-013): both sections cover a build/tool image's own smoke-check
+# mechanism -- this file's original scope for tools/build-tools, this
+# section for the shared utilities image -- even though the two mechanisms
+# parse different concrete shapes (a required_tools=() array vs. a single
+# generic argument-driven check). Searched tests/bats/ twice (once before
+# writing a since-removed standalone file, once more on maintainer request)
+# for an existing home; no file already covered either services/utilities/
+# or Dockerfile-copied-tool smoke checks generically.
+# From: Issue #1613
+
+@test "verify-version-banner.sh passes when the tool's output contains the expected banner" {
+    run sh "$repo_root/services/utilities/verify-version-banner.sh" "hello banner" printf "hello banner\n"
+    [ "$status" -eq 0 ]
+}
+
+@test "verify-version-banner.sh fails when the tool's output lacks the expected banner" {
+    run sh "$repo_root/services/utilities/verify-version-banner.sh" "hello banner" printf "goodnight\n"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"ERROR"* ]]
+    [[ "$output" == *"goodnight"* ]]
+}
+
+@test "verify-version-banner.sh ignores the checked tool's own exit code (the lsof -v convention)" {
+    # What: a fixture 'tool' that prints the banner but exits non-zero.
+    # Why: reproduces lsof's own unreliable -v exit-code contract (commit
+    #   b832d0dc) -- the banner text alone must decide pass/fail.
+    fixture_bin="$BATS_TEST_TMPDIR/fake-lsof"
+    {
+        printf '#!/bin/sh\n'
+        printf "printf 'lsof version information: fake\\\\n'\n"
+        printf 'exit 1\n'
+    } > "$fixture_bin"
+    chmod +x "$fixture_bin"
+    run sh "$repo_root/services/utilities/verify-version-banner.sh" "lsof version information" "$fixture_bin" -v
+    [ "$status" -eq 0 ]
+}
+
+@test "verify-version-banner.sh fails closed when called with fewer than 2 arguments" {
+    run sh "$repo_root/services/utilities/verify-version-banner.sh" "only-one-arg"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"usage:"* ]]
+}
+
+@test "the utilities image itself ships and COPYs verify-version-banner.sh into the final stage" {
+    grep -qF 'COPY verify-version-banner.sh /usr/local/bin/verify-version-banner.sh' \
+        "$repo_root/services/utilities/Dockerfile"
+}
+
+@test "each of the five lsof-copying consumers invokes the shared verify-version-banner.sh, not an inline banner check" {
+    for f in dhcp-proxy dhcp dns proxy ui; do
+        consumer_dockerfile="$repo_root/services/$f/Dockerfile"
+        grep -qF 'COPY --from=utilities-tools /usr/local/bin/verify-version-banner.sh /usr/local/bin/verify-version-banner.sh' "$consumer_dockerfile" \
+            || fail "services/$f/Dockerfile does not COPY the shared verify-version-banner.sh"
+        grep -qF 'sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v' "$consumer_dockerfile" \
+            || fail "services/$f/Dockerfile does not invoke the shared lsof banner check"
+        ! grep -qF 'lsof_out="$(lsof -v 2>&1)"' "$consumer_dockerfile" \
+            || fail "services/$f/Dockerfile still has the old inline lsof banner check"
+    done
 }

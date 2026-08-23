@@ -968,12 +968,25 @@ EOF
 # Why: metadata stack roots now use the same bounded history policy instead
 # of an unconditional class exemption, but rollback remains absolute.
 # From: Issue #1095 | PR #1586
+# What: rollback anchor checks (now two call sites, live-Dockerfile-digest
+# reuse of the same helper) must all precede tag/history classification.
+# Why: reusing sra_digest_is_rollback_anchor for both the maintainer-curated
+# anchors and the newly-discovered live FROM digests means a single-match
+# assumption here no longer holds -- every call site found must
+# independently precede facts_line, not just exactly one of them.
+# From: Issue #1613
 @test "gc-sha-retention-audit.sh checks rollback_anchors before tag/history classification" {
-  anchor_line="$(grep -n 'sra_digest_is_rollback_anchor "\$digest"' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh" | cut -d: -f1)"
   facts_line="$(grep -n 'sra_version_tag_facts "\$version_json"' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh" | cut -d: -f1)"
-  [ -n "$anchor_line" ]
   [ -n "$facts_line" ]
-  [ "$anchor_line" -lt "$facts_line" ]
+
+  anchor_lines="$(grep -n 'sra_digest_is_rollback_anchor "\$digest"' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh" | cut -d: -f1)"
+  [ -n "$anchor_lines" ]
+
+  while IFS= read -r anchor_line; do
+    [ -n "$anchor_line" ] || continue
+    [ "$anchor_line" -lt "$facts_line" ]
+  done <<<"$anchor_lines"
+
   run grep -F 'metadata-stack-identity' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh"
   [ "$status" -eq 1 ]
 }
@@ -1049,4 +1062,103 @@ EOF
     "$repo_root/scripts/lib/github-api-retry.sh" \
     "$repo_root/.github/workflows/gc-sha-retention-audit.yml"
   [ "$status" -eq 1 ]
+}
+
+# --- Live Dockerfile FROM-digest protection ---------------------------
+#
+# What: extends rollback_anchors so a digest six migrated service Dockerfiles
+# actively build FROM is protected too, without a maintainer-curated entry.
+# Why: the utilities image's digest had zero protection once it fell out of
+# the nightly channel's rolling window (thread PRRT_kwDOS--bIM6a9N8R).
+# From: Issue #1613
+
+# What: the digest extractor returns a plain FROM line's digest.
+# Why: baseline case -- the shape every migrated service Dockerfile uses.
+# From: Issue #1613
+@test "dockerfile digest extractor returns a plain FROM line's digest" {
+  content=$'FROM ghcr.io/wiki-mod/lancache-ng/utilities@sha256:'"$(printf 'a%.0s' {1..64})"$'\n'
+  run sra_dockerfile_from_digests "$content"
+  [ "$status" -eq 0 ]
+  [ "$output" = "sha256:$(printf 'a%.0s' {1..64})" ]
+}
+
+# What: the extractor covers a lowercase instruction and a --platform= flag.
+# Why: Docker's own grammar allows both (Rule-Ref: AG-VAL-036) -- a matcher
+# covering only the one concrete shape in mind misses real, valid Dockerfiles.
+# From: Issue #1613
+@test "dockerfile digest extractor covers lowercase 'from' and a --platform flag" {
+  content=$'from --platform=linux/amd64 ghcr.io/x/y@sha256:'"$(printf 'b%.0s' {1..64})"$' AS builder\n'
+  run sra_dockerfile_from_digests "$content"
+  [ "$status" -eq 0 ]
+  [ "$output" = "sha256:$(printf 'b%.0s' {1..64})" ]
+}
+
+# What: the extractor ignores a tag-only FROM line and returns nothing for it.
+# Why: a mutable-tag FROM (no digest) has no digest to protect via this path.
+# From: Issue #1613
+@test "dockerfile digest extractor ignores a tag-only FROM line" {
+  run sra_dockerfile_from_digests $'FROM alpine:3.24\n'
+  [ "$status" -eq 0 ]
+  [ "$output" = "" ]
+}
+
+# What: the extractor returns every digest, one per line, for multiple stages.
+# Why: a multi-stage build (builder + final) commonly pins two different
+# digests, both of which must be protected, not just the last one seen.
+# From: Issue #1613
+@test "dockerfile digest extractor returns one line per FROM stage" {
+  content=$'FROM alpine:3.24@sha256:'"$(printf 'c%.0s' {1..64})"$' AS builder\nFROM alpine:3.24@sha256:'"$(printf 'd%.0s' {1..64})"$'\n'
+  run sra_dockerfile_from_digests "$content"
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "sha256:$(printf 'c%.0s' {1..64})" ]
+  [ "${lines[1]}" = "sha256:$(printf 'd%.0s' {1..64})" ]
+}
+
+# What: the orchestrator checks live-Dockerfile protection before tag/history
+# classification, reusing sra_digest_is_rollback_anchor for both sets.
+# Why: proves the extension reuses the existing mechanism (maintainer
+# decision) rather than adding a second, parallel deletion-protection path.
+# From: Issue #1613
+@test "gc-sha-retention-audit.sh checks live Dockerfile FROM digests before tag/history classification, reusing the rollback-anchor check" {
+  script="$repo_root/scripts/untracked/gc-sha-retention-audit.sh"
+  rollback_line="$(grep -n 'sra_digest_is_rollback_anchor "\$digest" "\${!retention_rollback_anchor_digests\[@\]}"' "$script" | cut -d: -f1)"
+  live_line="$(grep -n 'sra_digest_is_rollback_anchor "\$digest" "\${!live_dockerfile_from_digests\[@\]}"' "$script" | cut -d: -f1)"
+  facts_line="$(grep -n 'sra_version_tag_facts "\$version_json"' "$script" | cut -d: -f1)"
+  [ -n "$rollback_line" ]
+  [ -n "$live_line" ]
+  [ -n "$facts_line" ]
+  [ "$rollback_line" -lt "$live_line" ]
+  [ "$live_line" -lt "$facts_line" ]
+}
+
+# What: the orchestrator discovers Dockerfiles via git ls-files, not a raw
+# filesystem walk.
+# Why: keeps discovery scoped to tracked files, matching how every other
+# repo-wide scan in this project's CI scripts already works.
+# From: Issue #1613
+@test "gc-sha-retention-audit.sh discovers live Dockerfiles via git ls-files" {
+  run grep -F "git -C \"\$repo_root\" ls-files -- '*Dockerfile*'" "$repo_root/scripts/untracked/gc-sha-retention-audit.sh"
+  [ "$status" -eq 0 ]
+}
+
+# What: the real repository's utilities digest is discovered as a live
+# Dockerfile FROM dependency.
+# Why: proves the discovery loop actually finds the concrete digest the
+# review thread was about, not only a synthetic fixture.
+# From: Issue #1613
+@test "the real repository's utilities image digest is discovered as a live FROM dependency" {
+  utilities_dockerfile_digest="$(grep -hoE 'FROM ghcr\.io/wiki-mod/lancache-ng/utilities@sha256:[0-9a-f]{64}' \
+    "$repo_root/services/proxy/Dockerfile" | grep -oE 'sha256:[0-9a-f]{64}')"
+  [ -n "$utilities_dockerfile_digest" ]
+
+  found=0
+  while IFS= read -r dockerfile_path; do
+    [ -n "$dockerfile_path" ] || continue
+    content="$(cat "$repo_root/$dockerfile_path")"
+    while IFS= read -r digest; do
+      [ -n "$digest" ] || continue
+      [ "$digest" = "$utilities_dockerfile_digest" ] && found=1
+    done < <(sra_dockerfile_from_digests "$content")
+  done < <(git -C "$repo_root" ls-files -- '*Dockerfile*')
+  [ "$found" -eq 1 ]
 }

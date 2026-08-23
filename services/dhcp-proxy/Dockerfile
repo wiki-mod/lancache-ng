@@ -19,6 +19,13 @@
 # Alpine version, not the base `gettext` package (verified: `apk info
 # gettext-envsubst` on alpine:3.24).
 
+# What: source stage for tools copied into the final image below.
+# Why: pinned by digest (not a mutable tag) for a reproducible build -- see
+#   services/proxy/Dockerfile's identical stage comment for the full
+#   digest-resolution rationale.
+# From: Issue #1556
+FROM ghcr.io/wiki-mod/lancache-ng/utilities@sha256:5c02fc536c53c2b2d42010b88508b0ea50adb27b0ef487f98a38457bfde18d85 AS utilities-tools
+
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 LABEL org.opencontainers.image.description="dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments."
@@ -76,19 +83,46 @@ LABEL org.opencontainers.image.description="dnsmasq-based DHCP proxy and relay h
 #    "no snapshot validates, restore the original live file" backup path)
 #    was run end-to-end against a real `dnsmasq --test` validator and
 #    behaved identically to the pre-migration Debian image.
+# What: findutils/envsubst/lsof/ripgrep come from the shared utilities image.
+# Why: same alpine:3.24 digest as utilities; coreutils stays apk-installed
+#   (excluded from migration, see services/proxy/Dockerfile's comment).
+# From: Issue #1556
+
+# What: removes the BusyBox symlinks at these paths before real binaries land.
+# Why: see services/proxy/Dockerfile's identical comment for the reason.
+# From: Issue #1556
+RUN rm -f /usr/bin/find /usr/bin/xargs /usr/bin/lsof
+
+COPY --from=utilities-tools /usr/bin/find /usr/bin/find
+COPY --from=utilities-tools /usr/bin/xargs /usr/bin/xargs
+COPY --from=utilities-tools /usr/bin/envsubst /usr/bin/envsubst
+COPY --from=utilities-tools /usr/lib/libintl.so.8 /usr/lib/libintl.so.8
+COPY --from=utilities-tools /usr/bin/lsof /usr/bin/lsof
+COPY --from=utilities-tools /usr/bin/rg /usr/bin/rg
+COPY --from=utilities-tools /usr/lib/libgcc_s.so.1 /usr/lib/libgcc_s.so.1
+COPY --from=utilities-tools /usr/lib/libpcre2-8.so.0* /usr/lib/
+COPY --from=utilities-tools /usr/local/bin/verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
+
+# What: verifies the copied binaries actually run, not just that they exist.
+# Why: a missing shared-library dependency fails at exec time, not at COPY
+#   time; the lsof check is delegated to a shared script (see that file).
+# From: Issue #1613
+RUN set -euo pipefail; \
+    find . -maxdepth 0 -printf '%f\n' >/dev/null; \
+    printf '%s' '$FOO' | FOO=bar envsubst >/dev/null; \
+    rg --version >/dev/null; \
+    sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
+
 RUN apk upgrade --no-cache && \
     apk add --no-cache \
     bash \
     dnsmasq \
-    gettext-envsubst \
-    findutils \
     coreutils \
-    nano \
-    lsof \
-    ripgrep
+    nano
 
-# nano/lsof/ripgrep: in-container troubleshooting tools -- see
-# services/proxy/Dockerfile's identical comment for the full rationale.
+# nano: in-container troubleshooting tool -- see services/proxy/Dockerfile's
+# identical comment for the full rationale; lsof/ripgrep are COPY'd above
+# but serve the same troubleshooting purpose.
 ENV EDITOR=nano
 ENV VISUAL=$EDITOR
 
