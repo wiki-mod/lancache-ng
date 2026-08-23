@@ -1,0 +1,57 @@
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Composite action: acquire a per-workspace checkout lock, then force-resync
+# the workspace to its own HEAD, before the job's real checkout runs.
+#
+# Single source for the byte-identical Acquire+Resync step pair that was
+# copy-pasted across all 31 self-hosted checkout sites in build-push.yml
+# (issue #1095). Must run as the first two steps of a job, before
+# actions/checkout -- both steps operate on the runner's persistent
+# workspace directory as it exists BEFORE the real checkout, guarding
+# against a previous crashed job on the same self-hosted runner leaving a
+# stale lock or a corrupted sparse-checkout/skip-worktree state behind.
+#
+# What: acquires a lock (mkdir-based, atomic) keyed to this run, reclaiming
+# a stale one (job completed, or older than 3h) if found; then clears any
+# leftover sparse-checkout/skip-worktree state and force-checks-out HEAD.
+# Why: a self-hosted runner reuses one working directory across unrelated
+# jobs -- a narrowed tree or a stale lock from a crashed prior job corrupts
+# whichever job runs next on the same runner instance (AG-WF-036).
+# From: Issue #1095
+
+name: Checkout lock and resync (self-hosted reuse hardening)
+description: >-
+  Acquires a per-workspace checkout lock and force-resyncs the workspace to
+  its own HEAD, guarding a self-hosted runner's reused workspace before the
+  real checkout runs.
+
+runs:
+  using: composite
+  steps:
+    - name: Acquire per-workspace checkout lock (self-hosted reuse hardening)
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -uo pipefail
+        d="${RUNNER_WORKSPACE}/.ckt.lock"
+        for _ in 1 2 3 4 5 6; do
+          mkdir "$d" 2>/dev/null && { echo "${{ github.run_id }} $(date +%s)" >"$d/m"; exit 0; }
+          h=; t=
+          read -r h t <"$d/m" 2>/dev/null || true
+          s=$(gh api "repos/${GITHUB_REPOSITORY,,}/actions/runs/${h:-0}" --jq .status 2>/dev/null || true)
+          a=-1; [ -n "$t" ] && a=$(( $(date +%s) - t ))
+          if { [ "$s" = completed ] || [ "$a" -gt 10800 ]; } && [ "$(dirname "$d")" = "$RUNNER_WORKSPACE" ]; then rm -rf "$d"; else sleep 10; fi
+        done
+        echo "::warning::lock busy (run ${h:-?} status ${s:-?}); continuing unlocked"; exit 0
+
+    - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+      shell: bash
+      run: |
+        set -uo pipefail
+        [ -d .git ] || exit 0
+        git sparse-checkout disable || true; rm -f .git/info/sparse-checkout
+        git config --local --unset-all core.sparseCheckout || true
+        mapfile -t w < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
+        [ "${#w[@]}" -eq 0 ] || git update-index --no-skip-worktree -- "${w[@]}"
+        git checkout --force HEAD -- . || echo "::warning::resync failed"
