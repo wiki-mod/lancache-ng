@@ -451,6 +451,15 @@ commit_workflow_file() {
     git -C "$repo_dir" rev-parse HEAD
 }
 
+commit_action_file() {
+    # $1 = action directory name, $2 = commit message, stdin = file content.
+    mkdir -p "$repo_dir/.github/actions/$1"
+    cat > "$repo_dir/.github/actions/$1/action.yml"
+    git -C "$repo_dir" add -A
+    git -C "$repo_dir" commit -q -m "$2"
+    git -C "$repo_dir" rev-parse HEAD
+}
+
 @test "G14: a changed '#' line inside a run: heredoc body is NOT comment-only" {
     setup_g14_repo
     base_sha="$(commit_workflow_file base <<'YAML'
@@ -562,4 +571,59 @@ YAML
     run bash "$script" "$base_sha" "$head_sha"
     [ "$status" -eq 0 ]
     [ "$(val workflow)" = "true" ]
+}
+
+# --- Per-action comment-only awareness (G14 extended to touches_action) ---
+#
+# touches_action() applies the identical G14 content-diff check as
+# workflow_diff_is_comment_only, scoped to one action directory, so a
+# comment-only edit to a mapped action (e.g. a compression pass) does not
+# force a rebuild for that action's consumers either.
+
+@test "G14 per-action: a comment-only change to a mapped action does not touch its consumers" {
+    setup_g14_repo
+    base_sha="$(commit_action_file rust-acceleration-preflight base <<'YAML'
+name: test
+# a comment line v1
+runs:
+  using: composite
+  steps: []
+YAML
+)"
+    head_sha="$(commit_action_file rust-acceleration-preflight head <<'YAML'
+name: test
+# a comment line v2, still just a comment
+runs:
+  using: composite
+  steps: []
+YAML
+)"
+    run bash "$script" "$base_sha" "$head_sha"
+    [ "$status" -eq 0 ]
+    [ "$(val dns_image)" = "false" ]
+    [ "$(val ui)" = "false" ]
+    [ "$(val workflow)" = "false" ]
+}
+
+@test "G14 per-action: a substantive change to a mapped action DOES touch its consumers" {
+    setup_g14_repo
+    base_sha="$(commit_action_file rust-acceleration-preflight base <<'YAML'
+name: test
+runs:
+  using: composite
+  steps: []
+YAML
+)"
+    head_sha="$(commit_action_file rust-acceleration-preflight head <<'YAML'
+name: test
+runs:
+  using: composite
+  steps:
+    - run: echo hi
+YAML
+)"
+    run bash "$script" "$base_sha" "$head_sha"
+    [ "$status" -eq 0 ]
+    [ "$(val dns_image)" = "true" ]
+    [ "$(val ui)" = "true" ]
 }
