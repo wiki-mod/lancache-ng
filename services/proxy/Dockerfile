@@ -29,7 +29,7 @@
 #   change, resolved manually since consuming this image has no CI-side
 #   digest-resolution wiring (unlike BUILD_TOOLS_IMAGE).
 # From: Issue #1556
-FROM ghcr.io/wiki-mod/lancache-ng/utilities@sha256:5c02fc536c53c2b2d42010b88508b0ea50adb27b0ef487f98a38457bfde18d85 AS utilities-tools
+FROM ghcr.io/wiki-mod/lancache-ng/utilities@sha256:718af4cf8f1352cee341e851cecb9821033de9a5c7804c64e1c6217b62c79186 AS utilities-tools
 
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
