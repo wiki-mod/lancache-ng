@@ -751,8 +751,7 @@ EOF
   [[ "$output" == *"rank:7"* ]]
 }
 
-# What: an inherited old-schema (pre-Issue-#1095) cache db does not break a
-# new-schema write.
+# What: an inherited old-schema cache db does not break a new-schema write.
 # Why: a restored actions/cache blob can predate the version_cache_v2
 # rename; CREATE TABLE IF NOT EXISTS must not be fooled by an old table of
 # the same old name, and a real deployment must self-heal, not warn forever.
@@ -829,8 +828,8 @@ EOF
 
 # What: two callers with different fingerprints keep independent rows.
 # Why: this is the property that makes cross-caller sharing safe instead of
-# each caller's write evicting the other's (Issue #1095) -- a read for one
-# fingerprint must never see the other's row for the same version id.
+# each caller's write evicting the other's -- a read for one fingerprint
+# must never see the other's row for the same version id.
 # From: Issue #1095.
 @test "cache rows for different history fingerprints coexist and do not evict each other" {
   command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not available on this host"
@@ -862,7 +861,7 @@ EOF
 # changes (tip advance), but a different caller's generation is untouched.
 # Why: without pruning, every tip advance adds a permanent new generation
 # instead of replacing the prior one from the same caller -- unbounded
-# growth (Issue #1095); pruning must not cross ref-name-set boundaries.
+# growth; pruning must not cross ref-name-set boundaries.
 # From: Issue #1095.
 @test "cache write prunes a superseded same-caller generation but not a different caller's" {
   command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not available on this host"
@@ -898,8 +897,8 @@ EOF
 }
 
 # What: the fingerprint differs when the managed ref set changes.
-# Why: this is the mechanism the v1.2 cache's ref-set safety depends on
-# (Issue #1095) -- it must actually change, not just exist unused.
+# Why: this is the mechanism the v1.2 cache's ref-set safety depends on --
+# it must actually change, not just exist unused.
 # From: Issue #1095.
 @test "history refs fingerprint changes when the ref set changes" {
   git_dir="$tmp_dir/repo"

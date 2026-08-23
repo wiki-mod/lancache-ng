@@ -502,7 +502,7 @@ audit_package() {
     # What: reuses a cached git-history resolution instead of recomputing it.
     # Why: avoids one `git rev-parse`/`merge-base` pair per root tag; a hit
     # requires exact digest+tags (cache_hits is already fingerprint-filtered
-    # by sra_cache_read_package above, per Issue #1095).
+    # by sra_cache_read_package above).
     # From: Issue #1585 | Issue #1095.
     cache_resolution=""
     if [[ -n "${cache_hits[$id]:-}" ]]; then

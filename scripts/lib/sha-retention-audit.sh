@@ -620,8 +620,8 @@ sra_cache_write_package() {
     done <"$rows_file"
     # What: prunes a superseded generation for the same caller identity.
     # Why: a tip-advance changes history_fingerprint on every write, and the
-    # composite key keeps old and new generations from evicting each other
-    # (Issue #1095) -- without this, obsolete rows accumulate unbounded.
+    # composite key keeps old and new generations from evicting each other --
+    # without this, obsolete rows accumulate unbounded.
     # From: Issue #1095.
     printf "DELETE FROM version_cache_v2 WHERE package = '%s' AND history_ref_names = '%s' AND history_fingerprint != '%s';\n" \
       "$(sra_sql_quote "$package")" "$(sra_sql_quote "$history_ref_names")" "$(sra_sql_quote "$history_fingerprint")"
