@@ -4,7 +4,7 @@
 # still owned, unconditionally on job end.
 #
 # Single source for the byte-identical Release step that was copy-pasted
-# across all 31 self-hosted checkout sites in build-push.yml (issue #1095).
+# across all 31 self-hosted checkout sites in build-push.yml.
 # Pairs with checkout-lock-and-resync -- the caller must put this on a step
 # with `if: always()` (or `if: always() && <extra guard>` for a job whose
 # matrix mixes self-hosted and GitHub-hosted runners) so a clean, failed, or

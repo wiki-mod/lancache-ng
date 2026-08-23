@@ -4,8 +4,8 @@
 # the workspace to its own HEAD, before the job's real checkout runs.
 #
 # Single source for the byte-identical Acquire+Resync step pair that was
-# copy-pasted across all 31 self-hosted checkout sites in build-push.yml
-# (issue #1095). Must run as the first two steps of a job, before
+# copy-pasted across all 31 self-hosted checkout sites in build-push.yml.
+# Must run as the first two steps of a job, before
 # actions/checkout -- both steps operate on the runner's persistent
 # workspace directory as it exists BEFORE the real checkout, guarding
 # against a previous crashed job on the same self-hosted runner leaving a
