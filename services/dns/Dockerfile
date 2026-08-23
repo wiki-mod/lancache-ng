@@ -148,7 +148,7 @@ COPY nats-subscriber/ .
 #   Why: previously a build log gave no evidence either way whether an accelerator was
 #   skipped intentionally (no secret configured) or due to a misconfiguration, and could
 #   not be distinguished from a build that never reached this RUN step at all -- the same
-#   silent-decision-point defect class found and fixed in issue #1095 G15's checkout guard
+#   silent-decision-point defect class the linked issue's G15 checkout guard already names
 #   (see docs/release-validation-plan.md's Coverage Assessment, AG-VAL-029 entry).
 #   From: Issue #1095 (G15), PR #1640
 # NOTE: comments cannot be embedded inside this block itself. Docker's line-continuation
