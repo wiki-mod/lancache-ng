@@ -226,26 +226,27 @@ When `SCCACHE_REDIS_MODE=required`, the runner must have `sccache` available in
 `PATH`. Install it from source and keep the installed binary on the runner
 service account's `PATH`.
 
-### ccache reuse for services/dns's C-dependency compiles
+### ccache reuse for services/dns's and services/ui's C-dependency compiles
 
-`services/dns/Dockerfile`'s C-dependency compile path (`ring`, via distcc) can
-layer `ccache` in front of distcc when both a distcc host list and a ccache
-Redis endpoint are configured. This is not a separate secret: it automatically
-reuses the same `SCCACHE_REDIS_URL` value already configured for `sccache`
-above, on the same Redis instance, whenever `DISTCC_POTENTIAL_HOSTS` is also
-set — `ccache`'s own fixed `ccache:` key namespace never collides with
-`sccache`'s distinct `SCCACHE_REDIS_KEY_PREFIX`-based one. There is no
-separate `CCACHE_REDIS_MODE` toggle; every ccache failure detected before the
-real Cargo build falls back to plain distcc (no cache layer) instead of
-hard-failing the build. A Redis error surfacing only during the real build
-cannot fall back after the fact (the compile already succeeded) and is
-reported as an `[INFO]` diagnostic instead. Unlike every other Rust service
-builder, `services/dns/Dockerfile` exports
-`CC="ccache <real compiler>"` (not the plain `CC=distcc` documented under
+`services/dns/Dockerfile`'s and `services/ui/Dockerfile`'s C-dependency
+compile paths (`ring`, via distcc) can layer `ccache` in front of distcc when
+both a distcc host list and a ccache Redis endpoint are configured. This is
+not a separate secret: it automatically reuses the same `SCCACHE_REDIS_URL`
+value already configured for `sccache` above, on the same Redis instance,
+whenever `DISTCC_POTENTIAL_HOSTS` is also set — `ccache`'s own fixed `ccache:`
+key namespace never collides with `sccache`'s distinct
+`SCCACHE_REDIS_KEY_PREFIX`-based one. There is no separate `CCACHE_REDIS_MODE`
+toggle; every ccache failure detected before the real Cargo build falls back
+to plain distcc (no cache layer) instead of hard-failing the build. A Redis
+error surfacing only during the real build cannot fall back after the fact
+(the compile already succeeded) and is reported as an `[INFO]` diagnostic
+instead. Unlike other Rust service builders, `services/dns/Dockerfile` and
+`services/ui/Dockerfile` export `CC="ccache <real compiler>"` (not the plain
+`CC=distcc` documented under
 [Rust builds and distcc/pump](local-runner-docker-performance.md#rust-builds-and-distccpump))
-once both distcc and ccache are enabled. See that Dockerfile's own
-`configure_ccache()`/`disable_ccache()` comments and issue #887 for the full
-mechanism.
+once both distcc and ccache are enabled. See those Dockerfiles' own
+`configure_ccache()`/`disable_ccache()` comments and issue #887/#1533 for the
+full mechanism.
 
 ## CodeQL
 
