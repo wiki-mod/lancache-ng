@@ -238,8 +238,8 @@ jobs:
 
       # What: adds the two ::notice:: lines this step's build-push.yml sibling already has.
       # Why: this copy silently resolved parallelism with no build-log trace of the value or
-      # its source (explicit vs. auto-detected) -- the same silent-decision-point class as
-      # issue #1095 G15's checkout guard, found via a repo-wide pattern search for it.
+      # its source (explicit vs. auto-detected) -- the same silent-decision-point class the
+      # linked issue's G15 checkout guard already names.
       # From: Issue #1095 (G15), PR #1640
       - name: Compute Docker build parallelism
         id: docker-build-jobs

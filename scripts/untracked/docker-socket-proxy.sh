@@ -106,7 +106,7 @@ EOF
 # What: both branches below now log which allowlist form (suffixed or fixed) was used.
 # Why: previously neither branch logged anything on success, so a container's own startup
 # log gave no evidence of whether the suffix override actually applied -- same
-# silent-decision-point class as issue #1095 G15's checkout guard.
+# silent-decision-point class the linked issue's G15 checkout guard already names.
 # From: Issue #1095 (G15), PR #1640
 LANCACHE_CONTAINER_SUFFIX="${LANCACHE_CONTAINER_SUFFIX:-}"
 if [ -n "$LANCACHE_CONTAINER_SUFFIX" ]; then
