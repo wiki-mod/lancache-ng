@@ -205,28 +205,40 @@ jobs:
         id: apt-cache-bust
         run: echo "value=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
 
-      # What: writes SCCACHE_REDIS_URL to a runner-temp file for the
-      # Dockerfile's git-build step to mount as a BuildKit secret.
-      # Why: pull_request runs never get this (no LAN Redis access should
-      # be assumed for that trigger); the git build still succeeds without
-      # it, just without Redis-backed caching, per its own fallback branch.
-      # From: Issue #1304 | Issue #1556
-      - name: Prepare sccache Redis secret for git build
+      # What: writes ccache_redis_url + distcc_potential_hosts secret files
+      #   for the Dockerfile's curl/git build to mount as BuildKit secrets.
+      # Why: pull_request runs never get this (no LAN access should be
+      #   assumed for that trigger); the git build still succeeds without
+      #   it, just without cache/distribution, per its own fallback ladder.
+      # From: Issue #1304 | Issue #1556 | PR #1661
+      - name: Prepare ccache/distcc secrets for git build
         if: github.event_name != 'pull_request'
-        id: sccache-secret
+        id: ccache-distcc-secret
         env:
           SCCACHE_REDIS_MODE: ${{ vars.SCCACHE_REDIS_MODE }}
           SCCACHE_REDIS_URL: ${{ secrets.SCCACHE_REDIS_URL }}
+          DISTCC_POTENTIAL_HOSTS: ${{ vars.DISTCC_POTENTIAL_HOSTS }}
         run: |
           set -euo pipefail
-          if [ "${SCCACHE_REDIS_MODE:-required}" = "off" ] || [ -z "$SCCACHE_REDIS_URL" ]; then
-            echo "::notice::No sccache Redis secret prepared for the git build (mode=off or secret unset)."
-            exit 0
-          fi
           umask 077
-          redis_file="${{ runner.temp }}/build-tools-sccache-redis-url"
-          printf '%s' "$SCCACHE_REDIS_URL" > "$redis_file"
-          echo "redis-file=$redis_file" >> "$GITHUB_OUTPUT"
+          if [ "${SCCACHE_REDIS_MODE:-required}" != "off" ] && [ -n "$SCCACHE_REDIS_URL" ]; then
+            redis_file="${{ runner.temp }}/build-tools-ccache-redis-url"
+            printf '%s' "$SCCACHE_REDIS_URL" > "$redis_file"
+            echo "ccache-redis-file=$redis_file" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No ccache Redis secret prepared for the git build (mode=off or secret unset)."
+          fi
+          if [ -n "$DISTCC_POTENTIAL_HOSTS" ]; then
+            if ! grep -q ',cpp' <<<"$DISTCC_POTENTIAL_HOSTS"; then
+              echo "::error::DISTCC_POTENTIAL_HOSTS must include at least one pump-capable host with the ',cpp' option."
+              exit 1
+            fi
+            distcc_hosts_file="${{ runner.temp }}/build-tools-distcc-potential-hosts"
+            printf '%s' "$DISTCC_POTENTIAL_HOSTS" > "$distcc_hosts_file"
+            echo "distcc-hosts-file=$distcc_hosts_file" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No distcc hosts secret prepared for the git build (DISTCC_POTENTIAL_HOSTS unset)."
+          fi
 
       # What: builds one local amd64 candidate for fork PRs.
       # Why: fork PRs cannot publish repository packages, but still need a
@@ -279,7 +291,8 @@ jobs:
           build-args: |
             APT_CACHE_BUST=${{ steps.apt-cache-bust.outputs.value }}
           secret-files: |
-            ${{ steps.sccache-secret.outputs.redis-file != '' && format('sccache_redis_url={0}', steps.sccache-secret.outputs.redis-file) || '' }}
+            ${{ steps.ccache-distcc-secret.outputs.ccache-redis-file != '' && format('ccache_redis_url={0}', steps.ccache-distcc-secret.outputs.ccache-redis-file) || '' }}
+            ${{ steps.ccache-distcc-secret.outputs.distcc-hosts-file != '' && format('distcc_potential_hosts={0}', steps.ccache-distcc-secret.outputs.distcc-hosts-file) || '' }}
           outputs: type=image,oci-mediatypes=true
           platforms: linux/amd64
           provenance: false

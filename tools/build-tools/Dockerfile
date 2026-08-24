@@ -268,160 +268,6 @@ RUN set -euo pipefail; \
     done; \
     rm -rf /usr/local/cargo/registry /usr/local/cargo/git
 
-# What: builds a feature-reduced, static curl.a from the real upstream
-# tarball (same version/config services/utilities/Dockerfile uses, ported
-# to glibc), then links git statically against it -- git no longer needs
-# any Debian curl package (dynamic or -dev) at all. Both compiled through
-# sccache, Redis-backed only once a real TCP probe confirms the Redis
-# endpoint is actually reachable. `libcurl4t64` itself is deliberately
-# NOT purged afterward: confirmed empirically that `cmake` has its own,
-# real dependency on it (apt-get autoremove strips cmake the moment
-# libcurl4t64 is purged) -- entirely unrelated to git, and out of this
-# PR's scope to also replace.
-# Why: real per-CVE verification against curl.se's own advisory pages
-# (2026-08-24, not Debian's tracker) confirms curl 8.21.0 genuinely fixes
-# all 4 currently-tracked CVE IDs (12064/8286/8458/8927) -- Debian's
-# trixie-backports package reports them as affected only because that
-# suite is not tracked as a first-class channel by Debian's Security
-# Tracker, the same class of gap already documented in .trivyignore.yaml
-# for these same IDs. Building the real release directly removes git's
-# own dependency on that tracker gap; cmake's separate, real dependency
-# on libcurl4t64 remains, now a candidate for a real not_affected VEX
-# disposition in .trivyignore.yaml rather than the accepted-risk framing
-# used before this was verified. A bare unreachable SCCACHE_REDIS value
-# hard-fails every single compile unit (sccache times out waiting for its
-# own server to connect, confirmed empirically), so this must not be
-# handed to sccache on faith.
-# From: Issue #1304 | Issue #1556
-RUN --mount=type=secret,id=sccache_redis_url \
-    set -euo pipefail; \
-    build_tmp="$(mktemp -d)"; \
-    trap 'rm -rf "$build_tmp"' EXIT; \
-    curl -fsSL -o "$build_tmp/curl.tar.xz" "https://curl.se/download/curl-${CURL_VERSION}.tar.xz"; \
-    printf '%s  %s\n' "$CURL_SHA256" "$build_tmp/curl.tar.xz" | sha256sum -c -; \
-    tar -xJf "$build_tmp/curl.tar.xz" -C "$build_tmp"; \
-    curl -fsSL -o "$build_tmp/git.tar.xz" "https://www.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.xz"; \
-    printf '%s  %s\n' "$GIT_SHA256" "$build_tmp/git.tar.xz" | sha256sum -c -; \
-    tar -xf "$build_tmp/git.tar.xz" -C "$build_tmp"; \
-    if [ -s /run/secrets/sccache_redis_url ]; then \
-      redis_url="$(cat /run/secrets/sccache_redis_url)"; \
-      redis_hostport="${redis_url#redis://}"; redis_hostport="${redis_hostport#*@}"; redis_hostport="${redis_hostport%%/*}"; \
-      redis_host="${redis_hostport%%:*}"; redis_port="${redis_hostport##*:}"; \
-      if timeout 3 bash -c "exec 3<>/dev/tcp/${redis_host}/${redis_port}" 2>/dev/null; then \
-        SCCACHE_REDIS="$redis_url"; export SCCACHE_REDIS; \
-        export SCCACHE_REDIS_KEY_PREFIX=lancache-build-tools-curl-git; \
-      else \
-        echo "[INFO] curl/git build: sccache_redis_url secret present but ${redis_host}:${redis_port} did not accept a TCP connection within 3s; falling back to sccache's local disk cache." >&2; \
-      fi; \
-    else \
-      echo "[INFO] curl/git build: sccache running without Redis (no sccache_redis_url secret present)." >&2; \
-    fi; \
-    ( cd "$build_tmp/curl-${CURL_VERSION}" \
-      && ./configure \
-        --disable-shared --enable-static \
-        --disable-ftp --disable-file --disable-ldap --disable-ldaps \
-        --disable-rtsp --disable-dict --disable-telnet --disable-tftp \
-        --disable-pop3 --disable-imap --disable-smtp --disable-smb \
-        --disable-gopher --disable-mqtt \
-        --disable-scp --disable-sftp --without-libssh2 --without-libssh \
-        --disable-ntlm --disable-kerberos-auth --disable-negotiate-auth \
-        --disable-aws \
-        --disable-manual --disable-libcurl-option \
-        --disable-ipfs --disable-websockets \
-        --without-librtmp --without-libidn2 --without-brotli --without-zstd \
-        --without-nghttp2 --without-nghttp3 --without-ngtcp2 --without-libpsl \
-        --with-openssl \
-        --with-ca-bundle=/etc/ssl/certs/ca-certificates.crt \
-        --enable-http --enable-cookies --enable-ipv6 \
-        CC="sccache gcc" \
-      && make -j"$(nproc)" ); \
-    curl_src="$build_tmp/curl-${CURL_VERSION}"; \
-    curl_libcurl="-Wl,-Bstatic -L${curl_src}/lib/.libs -lcurl -Wl,-Bdynamic -lssl -lcrypto -lz"; \
-    ( cd "$build_tmp/git-${GIT_VERSION}" \
-      && make -j"$(nproc)" prefix=/usr/local CC="sccache gcc" NO_TCLTK=YesPlease NO_GETTEXT=YesPlease \
-        CURL_CFLAGS="-I${curl_src}/include" CURL_LIBCURL="$curl_libcurl" install ); \
-    sccache --show-stats; \
-    git --version; \
-    git_remote_https="$(command -v git-remote-https || echo /usr/local/libexec/git-core/git-remote-https)"; \
-    git_remote_https_ldd="$(ldd "$git_remote_https")"; \
-    if grep -qi 'libcurl' <<<"$git_remote_https_ldd"; then \
-      echo "::error::git-remote-https unexpectedly linked against a dynamic libcurl after a static-curl build." >&2; \
-      exit 1; \
-    fi; \
-    git ls-remote https://github.com/git/git.git HEAD >/dev/null; \
-    apt-get purge -y zlib1g-dev; \
-    apt-get autoremove -y; \
-    rm -rf /var/lib/apt/lists/*; \
-    for pkg in libcurl3t64-gnutls libcurl4-gnutls libcurl4-openssl-dev; do \
-      if dpkg -s "$pkg" >/dev/null 2>&1; then \
-        echo "::error::$pkg is still installed despite git no longer depending on any Debian curl/libcurl package -- investigate the new consumer before proceeding." >&2; \
-        exit 1; \
-      fi; \
-    done; \
-    dpkg -s libcurl4t64 >/dev/null 2>&1 \
-      || { echo "::error::libcurl4t64 unexpectedly absent -- cmake's own real dependency on it (confirmed empirically: apt-get autoremove strips cmake if libcurl4t64 is purged) should keep it installed; investigate before proceeding." >&2; exit 1; }; \
-    git --version; \
-    git ls-remote https://github.com/git/git.git HEAD >/dev/null
-
-# What: fetches and checksum-verifies prebuilt release binaries for
-# cargo-audit and cargo-tarpaulin instead of building from source.
-# Why: unlike sccache, neither needs a non-default feature set, so a
-# source build would only add build time for no behavioral difference;
-# actionlint/docker/docker-compose/buildx are built from source instead --
-# see the actionlint-builder stage above for why.
-# From: Issue #1570 | PR #1571
-RUN set -euo pipefail; \
-    case "$(dpkg --print-architecture)" in \
-      amd64) \
-        cargo_audit_arch="x86_64-unknown-linux-gnu"; cargo_audit_sha256="${CARGO_AUDIT_SHA256_AMD64}"; \
-        tarpaulin_arch="x86_64-unknown-linux-gnu"; tarpaulin_sha256="${CARGO_TARPAULIN_SHA256_AMD64}" \
-        ;; \
-      arm64) \
-        cargo_audit_arch="aarch64-unknown-linux-gnu"; cargo_audit_sha256="${CARGO_AUDIT_SHA256_ARM64}"; \
-        tarpaulin_arch="aarch64-unknown-linux-gnu"; tarpaulin_sha256="${CARGO_TARPAULIN_SHA256_ARM64}" \
-        ;; \
-      *) echo "Unsupported architecture for prebuilt CI tool binaries: $(dpkg --print-architecture)" >&2; exit 1 ;; \
-    esac; \
-    prebuilt_tmp="$(mktemp -d)"; \
-    trap 'rm -rf "$prebuilt_tmp"' EXIT; \
-    curl -fsSL "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v${CARGO_AUDIT_VERSION}/cargo-audit-${cargo_audit_arch}-v${CARGO_AUDIT_VERSION}.tgz" \
-      -o "$prebuilt_tmp/cargo-audit.tgz"; \
-    printf '%s  %s\n' "$cargo_audit_sha256" "$prebuilt_tmp/cargo-audit.tgz" | sha256sum -c -; \
-    tar -xzf "$prebuilt_tmp/cargo-audit.tgz" -C "$prebuilt_tmp" "cargo-audit-${cargo_audit_arch}-v${CARGO_AUDIT_VERSION}/cargo-audit"; \
-    install -m 0755 "$prebuilt_tmp/cargo-audit-${cargo_audit_arch}-v${CARGO_AUDIT_VERSION}/cargo-audit" /usr/local/cargo/bin/cargo-audit; \
-    curl -fsSL "https://github.com/xd009642/tarpaulin/releases/download/${CARGO_TARPAULIN_VERSION}/cargo-tarpaulin-${tarpaulin_arch}.tar.gz" \
-      -o "$prebuilt_tmp/cargo-tarpaulin.tar.gz"; \
-    printf '%s  %s\n' "$tarpaulin_sha256" "$prebuilt_tmp/cargo-tarpaulin.tar.gz" | sha256sum -c -; \
-    tar -xzf "$prebuilt_tmp/cargo-tarpaulin.tar.gz" -C "$prebuilt_tmp" cargo-tarpaulin; \
-    install -m 0755 "$prebuilt_tmp/cargo-tarpaulin" /usr/local/cargo/bin/cargo-tarpaulin; \
-    ln -sf /usr/local/cargo/bin/cargo-audit /usr/local/bin/cargo-audit; \
-    ln -sf /usr/local/cargo/bin/cargo-tarpaulin /usr/local/bin/cargo-tarpaulin
-
-COPY --from=actionlint-builder /out/actionlint /usr/local/bin/actionlint
-
-RUN set -euo pipefail; \
-    shellspec_tmp="$(mktemp -d)"; \
-    trap 'rm -rf "$shellspec_tmp"' EXIT; \
-    curl -fsSL "https://github.com/shellspec/shellspec/releases/download/${SHELLSPEC_VERSION}/shellspec-dist.tar.gz" \
-      -o "$shellspec_tmp/shellspec-dist.tar.gz"; \
-    printf '%s  %s\n' "${SHELLSPEC_SHA256}" "$shellspec_tmp/shellspec-dist.tar.gz" | sha256sum -c -; \
-    tar -xzf "$shellspec_tmp/shellspec-dist.tar.gz" -C /opt; \
-    ln -sf /opt/shellspec/shellspec /usr/local/bin/shellspec; \
-    shellspec --version
-
-# What: copies docker/docker-compose/docker-buildx from the
-# actionlint-builder stage above.
-# Why: see that stage's own comments for why these are built from source
-# rather than using official release binaries.
-# From: Issue #1570 | PR #1571
-RUN install -d /usr/local/lib/docker/cli-plugins
-COPY --from=actionlint-builder /out/docker /usr/local/bin/docker
-COPY --from=actionlint-builder /out/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
-COPY --from=actionlint-builder /out/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx
-RUN docker --version; \
-    docker compose version; \
-    docker buildx version
-
 # What: isc-dhcp-client (dhclient) supports
 # scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh and
 # scripts/untracked/simulations/syslog-forwarding-simulation.sh, which perform a real
@@ -442,7 +288,7 @@ RUN docker --version; \
 # build inside a Docker bridge network (plausibly because these replies
 # carry a deliberately unusual UDP checksum tcpdump itself flags "bad");
 # reading the same reply from a tcpdump-written pcap file is unaffected by
-# that gap. python3 below is unrelated to this script -- it is required
+# that gap. python3 above is unrelated to this script -- it is required
 # by distcc-pump.
 # From: Issue #1570 | PR #1571
 
@@ -540,7 +386,224 @@ RUN set -euo pipefail; \
     python3 -Werror::SyntaxWarning -m py_compile "${distcc_pump_parser}"; \
     dpkg --configure distcc-pump; \
     python3 -Werror::SyntaxWarning -m compileall -q /usr/lib/python3/dist-packages/include_server; \
+    distcc_bin="$(command -v distcc)"; \
+    mkdir -p /usr/local/lib/distcc; \
+    for wrapper in cc gcc c++ g++; do ln -sf "$distcc_bin" "/usr/local/lib/distcc/$wrapper"; done; \
     rm -rf /var/lib/apt/lists/*
+
+# What: builds curl/git via a ccache-over-distcc cache, 3 fallback tiers.
+# Why: sccache cannot compile C (AG-CI-022); mirrors services/dns and
+#   services/utilities' proven pattern. Missing LAN-only secrets (fork
+#   PRs, arm64/GitHub-hosted) degrade gracefully, never abort the build.
+# From: Issue #1304 | Issue #1556 | PR #1661
+RUN --mount=type=secret,id=distcc_potential_hosts \
+    --mount=type=secret,id=ccache_redis_url \
+    set -euo pipefail; \
+    build_tmp="$(mktemp -d)"; \
+    distcc_pump_running=0; \
+    cleanup_curl_git_build() { \
+      rm -rf "$build_tmp"; \
+      if [ "$distcc_pump_running" = "1" ]; then distcc-pump --shutdown >/dev/null 2>&1 || true; fi; \
+    }; \
+    trap cleanup_curl_git_build EXIT; \
+    curl -fsSL -o "$build_tmp/curl.tar.xz" "https://curl.se/download/curl-${CURL_VERSION}.tar.xz"; \
+    printf '%s  %s\n' "$CURL_SHA256" "$build_tmp/curl.tar.xz" | sha256sum -c -; \
+    tar -xJf "$build_tmp/curl.tar.xz" -C "$build_tmp"; \
+    curl -fsSL -o "$build_tmp/git.tar.xz" "https://www.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.xz"; \
+    printf '%s  %s\n' "$GIT_SHA256" "$build_tmp/git.tar.xz" | sha256sum -c -; \
+    tar -xf "$build_tmp/git.tar.xz" -C "$build_tmp"; \
+    distcc_enabled=0; \
+    ccache_enabled=0; \
+    original_path="$PATH"; \
+    real_gcc="$(command -v gcc)"; \
+    resolve_distcc_wrapper_dir() { \
+      for candidate in /usr/local/lib/distcc /usr/lib/distcc; do \
+        if [ -x "$candidate/cc" ] && [ -x "$candidate/gcc" ]; then \
+          printf '%s\n' "$candidate"; \
+          return 0; \
+        fi; \
+      done; \
+      echo "distcc wrapper directory not found" >&2; \
+      exit 1; \
+    }; \
+    extract_remote_toolchain_id() { \
+      rm -f /tmp/ccache-remote-toolchain-id; \
+      if command -v readelf >/dev/null 2>&1; then \
+        readelf_comment_section="$(readelf -p .comment "$1" 2>/dev/null)"; \
+        sed -n 's/^ *\[[^]]*\] *//p' <<<"$readelf_comment_section" > /tmp/ccache-remote-toolchain-id; \
+      fi; \
+    }; \
+    disable_distcc() { \
+      distcc_enabled=0; \
+      unset DISTCC_POTENTIAL_HOSTS DISTCC_HOSTS DISTCC_FALLBACK; \
+      PATH="$original_path"; export PATH; \
+    }; \
+    if [ -s /run/secrets/distcc_potential_hosts ]; then \
+      distcc_probe_dir="$(mktemp -d)"; \
+      DISTCC_POTENTIAL_HOSTS="$(cat /run/secrets/distcc_potential_hosts)"; export DISTCC_POTENTIAL_HOSTS; \
+      distcc_wrapper_dir="$(resolve_distcc_wrapper_dir)"; \
+      export PATH="$distcc_wrapper_dir:$PATH" DISTCC_FALLBACK=0; \
+      if distcc_pump_env="$(distcc-pump --startup 2>"$distcc_probe_dir/pump.log")"; then \
+        eval "$distcc_pump_env"; \
+        distcc_pump_running=1; \
+        printf '%s\n' 'int main(void) { return 0; }' > "$distcc_probe_dir/probe.c"; \
+        if gcc -c "$distcc_probe_dir/probe.c" -o "$distcc_probe_dir/probe.o" >"$distcc_probe_dir/probe.log" 2>&1; then \
+          distcc_enabled=1; \
+          extract_remote_toolchain_id "$distcc_probe_dir/probe.o"; \
+        else \
+          echo "::notice::curl/git build: distcc probe compile failed; falling back to a plain, uncached compile." >&2; \
+          disable_distcc; \
+        fi; \
+      else \
+        echo "::notice::curl/git build: distcc-pump did not start (farm unreachable); falling back to a plain, uncached compile." >&2; \
+        disable_distcc; \
+      fi; \
+      rm -rf "$distcc_probe_dir"; \
+    else \
+      echo "::notice::curl/git build: no distcc_potential_hosts secret; falling back to a plain, uncached compile." >&2; \
+    fi; \
+    if [ "$distcc_enabled" = "1" ] && [ -s /run/secrets/ccache_redis_url ]; then \
+      if [ -s /tmp/ccache-remote-toolchain-id ]; then \
+        ccache_probe_dir="$(mktemp -d)"; \
+        ccache_redis_endpoint="$(cat /run/secrets/ccache_redis_url)"; \
+        case "$ccache_redis_endpoint" in \
+          redis://*|redis+unix:*) ;; \
+          *) ccache_redis_endpoint="redis://$ccache_redis_endpoint" ;; \
+        esac; \
+        export CCACHE_REMOTE_STORAGE="$ccache_redis_endpoint" CCACHE_DIR=/tmp/ccache-build-tools-curl-git; \
+        export CCACHE_PREFIX=distcc CCACHE_COMPILERCHECK=content; \
+        export CCACHE_EXTRAFILES=/tmp/ccache-remote-toolchain-id CCACHE_BASEDIR="$ccache_probe_dir"; \
+        printf '%s\n' 'int main(void) { return 0; }' > "$ccache_probe_dir/probe.c"; \
+        if (cd "$ccache_probe_dir" && ccache "$real_gcc" -c probe.c -o probe.o) >"$ccache_probe_dir/probe.log" 2>&1 \
+          && ccache --print-stats > "$ccache_probe_dir/stats.log" \
+          && grep -qE '^remote_storage_(write|hit)[[:space:]]+[1-9]' "$ccache_probe_dir/stats.log" \
+          && ! grep -qE '^remote_storage_error[[:space:]]+[1-9]' "$ccache_probe_dir/stats.log"; then \
+          ccache_enabled=1; \
+        else \
+          echo "::notice::curl/git build: ccache_redis_url probe failed; using distcc alone (no cache)." >&2; \
+          unset CCACHE_REMOTE_STORAGE CCACHE_DIR CCACHE_PREFIX CCACHE_COMPILERCHECK CCACHE_EXTRAFILES CCACHE_BASEDIR; \
+        fi; \
+        rm -rf "$ccache_probe_dir"; \
+      else \
+        echo "::notice::curl/git build: no verified remote distcc toolchain id; using distcc alone (no cache)." >&2; \
+      fi; \
+    elif [ "$distcc_enabled" = "1" ]; then \
+      echo "::notice::curl/git build: no ccache_redis_url secret; using distcc alone (no cache)." >&2; \
+    fi; \
+    if [ "$ccache_enabled" = "1" ]; then \
+      cc_wrapper="ccache $real_gcc"; \
+    elif [ "$distcc_enabled" = "1" ]; then \
+      cc_wrapper="gcc"; \
+    else \
+      cc_wrapper="$real_gcc"; \
+      echo "::warning::curl/git build: distcc unavailable; compiling with no cache and no distribution at all (last line of defense before this build cannot compile)." >&2; \
+    fi; \
+    ( cd "$build_tmp/curl-${CURL_VERSION}" \
+      && ./configure \
+        --disable-shared --enable-static \
+        --disable-ftp --disable-file --disable-ldap --disable-ldaps \
+        --disable-rtsp --disable-dict --disable-telnet --disable-tftp \
+        --disable-pop3 --disable-imap --disable-smtp --disable-smb \
+        --disable-gopher --disable-mqtt \
+        --disable-scp --disable-sftp --without-libssh2 --without-libssh \
+        --disable-ntlm --disable-kerberos-auth --disable-negotiate-auth \
+        --disable-aws \
+        --disable-manual --disable-libcurl-option \
+        --disable-ipfs --disable-websockets \
+        --without-librtmp --without-libidn2 --without-brotli --without-zstd \
+        --without-nghttp2 --without-nghttp3 --without-ngtcp2 --without-libpsl \
+        --with-openssl \
+        --with-ca-bundle=/etc/ssl/certs/ca-certificates.crt \
+        --enable-http --enable-cookies --enable-ipv6 \
+        CC="$cc_wrapper" \
+      && make -j"$(nproc)" ); \
+    curl_src="$build_tmp/curl-${CURL_VERSION}"; \
+    curl_libcurl="-Wl,-Bstatic -L${curl_src}/lib/.libs -lcurl -Wl,-Bdynamic -lssl -lcrypto -lz"; \
+    ( cd "$build_tmp/git-${GIT_VERSION}" \
+      && make -j"$(nproc)" prefix=/usr/local CC="$cc_wrapper" NO_TCLTK=YesPlease NO_GETTEXT=YesPlease \
+        CURL_CFLAGS="-I${curl_src}/include" CURL_LIBCURL="$curl_libcurl" install ); \
+    if [ "$ccache_enabled" = "1" ]; then ccache -s; fi; \
+    rm -f /tmp/ccache-remote-toolchain-id; \
+    git --version; \
+    git_remote_https="$(command -v git-remote-https || echo /usr/local/libexec/git-core/git-remote-https)"; \
+    git_remote_https_ldd="$(ldd "$git_remote_https")"; \
+    if grep -qi 'libcurl' <<<"$git_remote_https_ldd"; then \
+      echo "::error::git-remote-https unexpectedly linked against a dynamic libcurl after a static-curl build." >&2; \
+      exit 1; \
+    fi; \
+    git ls-remote https://github.com/git/git.git HEAD >/dev/null; \
+    apt-get purge -y zlib1g-dev; \
+    apt-get autoremove -y; \
+    rm -rf /var/lib/apt/lists/*; \
+    for pkg in libcurl3t64-gnutls libcurl4-gnutls libcurl4-openssl-dev; do \
+      if dpkg -s "$pkg" >/dev/null 2>&1; then \
+        echo "::error::$pkg is still installed despite git no longer depending on any Debian curl/libcurl package -- investigate the new consumer before proceeding." >&2; \
+        exit 1; \
+      fi; \
+    done; \
+    dpkg -s libcurl4t64 >/dev/null 2>&1 \
+      || { echo "::error::libcurl4t64 unexpectedly absent -- cmake's own real dependency on it (confirmed empirically: apt-get autoremove strips cmake if libcurl4t64 is purged) should keep it installed; investigate before proceeding." >&2; exit 1; }; \
+    git --version; \
+    git ls-remote https://github.com/git/git.git HEAD >/dev/null
+
+# What: fetches and checksum-verifies prebuilt release binaries for
+# cargo-audit and cargo-tarpaulin instead of building from source.
+# Why: unlike sccache, neither needs a non-default feature set, so a
+# source build would only add build time for no behavioral difference;
+# actionlint/docker/docker-compose/buildx are built from source instead --
+# see the actionlint-builder stage above for why.
+# From: Issue #1570 | PR #1571
+RUN set -euo pipefail; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) \
+        cargo_audit_arch="x86_64-unknown-linux-gnu"; cargo_audit_sha256="${CARGO_AUDIT_SHA256_AMD64}"; \
+        tarpaulin_arch="x86_64-unknown-linux-gnu"; tarpaulin_sha256="${CARGO_TARPAULIN_SHA256_AMD64}" \
+        ;; \
+      arm64) \
+        cargo_audit_arch="aarch64-unknown-linux-gnu"; cargo_audit_sha256="${CARGO_AUDIT_SHA256_ARM64}"; \
+        tarpaulin_arch="aarch64-unknown-linux-gnu"; tarpaulin_sha256="${CARGO_TARPAULIN_SHA256_ARM64}" \
+        ;; \
+      *) echo "Unsupported architecture for prebuilt CI tool binaries: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    prebuilt_tmp="$(mktemp -d)"; \
+    trap 'rm -rf "$prebuilt_tmp"' EXIT; \
+    curl -fsSL "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v${CARGO_AUDIT_VERSION}/cargo-audit-${cargo_audit_arch}-v${CARGO_AUDIT_VERSION}.tgz" \
+      -o "$prebuilt_tmp/cargo-audit.tgz"; \
+    printf '%s  %s\n' "$cargo_audit_sha256" "$prebuilt_tmp/cargo-audit.tgz" | sha256sum -c -; \
+    tar -xzf "$prebuilt_tmp/cargo-audit.tgz" -C "$prebuilt_tmp" "cargo-audit-${cargo_audit_arch}-v${CARGO_AUDIT_VERSION}/cargo-audit"; \
+    install -m 0755 "$prebuilt_tmp/cargo-audit-${cargo_audit_arch}-v${CARGO_AUDIT_VERSION}/cargo-audit" /usr/local/cargo/bin/cargo-audit; \
+    curl -fsSL "https://github.com/xd009642/tarpaulin/releases/download/${CARGO_TARPAULIN_VERSION}/cargo-tarpaulin-${tarpaulin_arch}.tar.gz" \
+      -o "$prebuilt_tmp/cargo-tarpaulin.tar.gz"; \
+    printf '%s  %s\n' "$tarpaulin_sha256" "$prebuilt_tmp/cargo-tarpaulin.tar.gz" | sha256sum -c -; \
+    tar -xzf "$prebuilt_tmp/cargo-tarpaulin.tar.gz" -C "$prebuilt_tmp" cargo-tarpaulin; \
+    install -m 0755 "$prebuilt_tmp/cargo-tarpaulin" /usr/local/cargo/bin/cargo-tarpaulin; \
+    ln -sf /usr/local/cargo/bin/cargo-audit /usr/local/bin/cargo-audit; \
+    ln -sf /usr/local/cargo/bin/cargo-tarpaulin /usr/local/bin/cargo-tarpaulin
+
+COPY --from=actionlint-builder /out/actionlint /usr/local/bin/actionlint
+
+RUN set -euo pipefail; \
+    shellspec_tmp="$(mktemp -d)"; \
+    trap 'rm -rf "$shellspec_tmp"' EXIT; \
+    curl -fsSL "https://github.com/shellspec/shellspec/releases/download/${SHELLSPEC_VERSION}/shellspec-dist.tar.gz" \
+      -o "$shellspec_tmp/shellspec-dist.tar.gz"; \
+    printf '%s  %s\n' "${SHELLSPEC_SHA256}" "$shellspec_tmp/shellspec-dist.tar.gz" | sha256sum -c -; \
+    tar -xzf "$shellspec_tmp/shellspec-dist.tar.gz" -C /opt; \
+    ln -sf /opt/shellspec/shellspec /usr/local/bin/shellspec; \
+    shellspec --version
+
+# What: copies docker/docker-compose/docker-buildx from the
+# actionlint-builder stage above.
+# Why: see that stage's own comments for why these are built from source
+# rather than using official release binaries.
+# From: Issue #1570 | PR #1571
+RUN install -d /usr/local/lib/docker/cli-plugins
+COPY --from=actionlint-builder /out/docker /usr/local/bin/docker
+COPY --from=actionlint-builder /out/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
+COPY --from=actionlint-builder /out/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx
+RUN docker --version; \
+    docker compose version; \
+    docker buildx version
 
 # What: adds a permanent, shared musl-libc cross-compilation target to this
 # image (Debian trixie's own musl-tools/musl-dev, 1.2.5-3.1~deb13u1, plus

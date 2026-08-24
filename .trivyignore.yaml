@@ -67,97 +67,127 @@ vulnerabilities:
   - id: CVE-2026-12064
     statement: >-
       What: Accepts CVE-2026-12064 (an SSH host-verification bypass via
-      schemeless SFTP/SCP URLs) as tracked risk for `tools/build-tools`'s
-      `curl`/`libcurl4t64`/`libcurl3t64-gnutls` package. Anchor entry for
-      this file's curl group (CVE-2026-8286/8927/8932/9079/9080/9545
-      below).
+      schemeless SFTP/SCP URLs) as tracked risk for `libcurl4t64` in
+      `tools/build-tools`. Anchor entry for this file's curl group
+      (CVE-2026-8286/8458/8927/8932/9079/9080/9545/10536 below).
 
       Why: Trivy reports `Status: affected`, `FixedVersion: None`; no
       `paths:` scoping applies since Trivy's Debian os-pkgs finding class
-      carries no `PkgPath`. `tools/build-tools`'s own curl usage is
-      exclusively `curl -fsSL` against pinned GitHub-release URLs, never a
-      schemeless SFTP/SCP URL. The 5 Alpine-based runtime images run curl
-      8.21.0 and show 0 findings (verified 2026-08-14, lancache-240).
+      carries no `PkgPath`. PR #1661 purges Debian's `curl`/
+      `libcurl3t64-gnutls` entirely (curl/git now build from source);
+      `libcurl4t64` remains solely as `cmake`'s package dependency
+      (`apt-get autoremove` strips cmake once it's purged) and drives only
+      already-vendored C/C++ builds (e.g. aws-lc-sys/BoringSSL for
+      services/ui), never a network fetch. Verified via a real Trivy scan
+      of the current image (2026-08-24, lancache-229): every finding in
+      this group attributes solely to `libcurl4t64`; `curl`/
+      `libcurl3t64-gnutls` no longer appear at all.
 
-      From: Issue #1304, PR #1548
-    expired_at: 2026-08-28
+      From: Issue #1304, PR #1661
+    expired_at: 2026-09-07
   - id: CVE-2026-8286
     statement: >-
       What: Accepts CVE-2026-8286 (an insecure TLS-configuration-mismatch
-      connection issue) as tracked risk for `tools/build-tools`'s curl
-      package.
+      connection issue) as tracked risk for `libcurl4t64` in
+      `tools/build-tools`.
 
       Why: Same curl finding group as CVE-2026-12064 above; `Status:
-      affected`, severity HIGH on `tools/build-tools`, absent from the
-      Alpine-based runtime images (verified 2026-08-14, lancache-240).
+      affected`, severity HIGH, cmake's unexercised transitive dependency
+      only (verified 2026-08-24, lancache-229).
 
-      From: Issue #1304, PR #1548
-    expired_at: 2026-08-28
+      From: Issue #1304, PR #1661
+    expired_at: 2026-09-07
+  - id: CVE-2026-8458
+    statement: >-
+      What: Accepts CVE-2026-8458 (a Negotiate-authentication connection-
+      reuse logical error letting a request reuse the wrong connection)
+      as tracked risk for `libcurl4t64` in `tools/build-tools`.
+
+      Why: Same curl finding group as CVE-2026-12064 above; requires an
+      application to actually make Negotiate-authenticated requests
+      through libcurl's connection pool, which cmake's unexercised
+      transitive dependency never does (verified 2026-08-24, lancache-229).
+
+      From: Issue #1304, PR #1661
+    expired_at: 2026-09-07
   - id: CVE-2026-8927
     statement: >-
       What: Accepts CVE-2026-8927 (a proxy-authentication-state
-      information-disclosure issue) as tracked risk for
-      `tools/build-tools`'s curl package.
+      information-disclosure issue) as tracked risk for `libcurl4t64` in
+      `tools/build-tools`.
 
       Why: Same curl finding group as CVE-2026-12064 above; `Status:
-      affected`, severity HIGH on `tools/build-tools`, absent from the
-      Alpine-based runtime images (verified 2026-08-14, lancache-240).
+      affected`, severity HIGH, cmake's unexercised transitive dependency
+      only (verified 2026-08-24, lancache-229).
 
-      From: Issue #1304, PR #1548
-    expired_at: 2026-08-28
+      From: Issue #1304, PR #1661
+    expired_at: 2026-09-07
   - id: CVE-2026-8932
     statement: >-
       What: Accepts CVE-2026-8932 (an mTLS-connection-reuse
-      security-feature-bypass issue) as tracked risk for
-      `tools/build-tools`'s curl package.
+      security-feature-bypass issue) as tracked risk for `libcurl4t64` in
+      `tools/build-tools`.
 
       Why: Same curl finding group as CVE-2026-12064 above; reclassified
-      to `Severity: MEDIUM`, `Status: affected` on `tools/build-tools`,
-      only visible under a full-severity scan (verified 2026-08-14,
-      lancache-240); absent from the Alpine-based runtime images.
+      to `Severity: MEDIUM`, cmake's unexercised transitive dependency
+      only (verified 2026-08-24, lancache-229).
 
-      From: Issue #1304, PR #1548
-    expired_at: 2026-08-28
+      From: Issue #1304, PR #1661
+    expired_at: 2026-09-07
   - id: CVE-2026-9079
     statement: >-
       What: Accepts CVE-2026-9079 (a proxy-authentication-credential
-      information-disclosure issue) as tracked risk for
-      `tools/build-tools`'s curl package.
+      information-disclosure issue) as tracked risk for `libcurl4t64` in
+      `tools/build-tools`.
 
       Why: Same curl finding group as CVE-2026-12064 above; reclassified
-      to `Severity: MEDIUM`, `Status: affected` on `tools/build-tools`
-      (verified 2026-08-14, lancache-240); absent from the Alpine-based
-      runtime images.
+      to `Severity: MEDIUM`, cmake's unexercised transitive dependency
+      only (verified 2026-08-24, lancache-229).
 
-      From: Issue #1304, PR #1548
-    expired_at: 2026-08-28
+      From: Issue #1304, PR #1661
+    expired_at: 2026-09-07
   - id: CVE-2026-9080
     statement: >-
       What: Accepts CVE-2026-9080 (a `curl_easy_pause()` use-after-free
       reachable via a libcurl multi-interface callback) as tracked risk
-      for `tools/build-tools`'s curl package.
+      for `libcurl4t64` in `tools/build-tools`.
 
       Why: Same curl finding group as CVE-2026-12064 above; the vulnerable
-      `CURLMOPT_SOCKETFUNCTION` callback API is never used --
-      `tools/build-tools`'s curl calls are plain `curl -fsSL` CLI
-      invocations, not code linking libcurl's callback API (verified
-      2026-08-14, lancache-240; absent from the Alpine-based images).
+      `CURLMOPT_SOCKETFUNCTION` callback API is never used -- cmake's
+      unexercised transitive dependency only (verified 2026-08-24,
+      lancache-229).
 
-      From: Issue #1304, PR #1548
-    expired_at: 2026-08-28
+      From: Issue #1304, PR #1661
+    expired_at: 2026-09-07
   - id: CVE-2026-9545
     statement: >-
       What: Accepts CVE-2026-9545 (a cached-SSL-session-and-early-data
-      information-disclosure issue) as tracked risk for
-      `tools/build-tools`'s curl package.
+      information-disclosure issue) as tracked risk for `libcurl4t64` in
+      `tools/build-tools`.
 
       Why: Same curl finding group as CVE-2026-12064 above; reachable only
-      across a long-lived process reusing a cached session, which does
-      not describe `tools/build-tools`'s short-lived, one-shot `curl
-      -fsSL` invocations (verified 2026-08-14, lancache-240).
+      across a long-lived process reusing a cached session, which does not
+      describe cmake's unexercised transitive dependency (verified
+      2026-08-24, lancache-229).
 
-      From: Issue #1304, PR #1548
-    expired_at: 2026-08-28
+      From: Issue #1304, PR #1661
+    expired_at: 2026-09-07
+  - id: CVE-2026-10536
+    statement: >-
+      What: Accepts CVE-2026-10536 (a use-after-free in libcurl's HTTP/2
+      stream-dependency handling, reachable via `CURLOPT_STREAM_DEPENDS`/
+      `CURLOPT_STREAM_DEPENDS_E` followed by `curl_easy_reset()` and
+      `curl_easy_cleanup()`) as tracked risk for `libcurl4t64` in
+      `tools/build-tools`.
+
+      Why: Same curl finding group as CVE-2026-12064 above; requires an
+      application to actually set HTTP/2 stream-dependency options via
+      libcurl's easy-handle API, which cmake's unexercised transitive
+      dependency never does (verified 2026-08-24, lancache-229). Newly
+      surfaced by this scan; not present in the prior curl-group review.
+
+      From: Issue #1304, PR #1661
+    expired_at: 2026-09-07
   - id: CVE-2011-4116
     statement: >-
       What: Marks CVE-2011-4116 (`perl-base`'s `File::Temp` module
