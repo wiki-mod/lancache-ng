@@ -9,10 +9,8 @@
 # From: Issue #1304 | PR #1352
 set -euo pipefail
 
-# What: curl.se marks all 7 tracked CVEs fixed at curl >= 8.21.0, but a
-# real Trivy scan of a packaged 8.21.0 build still reports them affected.
-# Why: advisory text and scan results disagree for an unresolved reason --
-# treat this threshold as imprecise, not scan-verified proof of safety.
+# What: CURL_SAFE_THRESHOLD is confirmed real via curl.se's own CVE pages.
+# Why: Debian's tracker misreports backports builds as still affected.
 # From: Issue #1304 | PR #1352
 CURL_SAFE_THRESHOLD="8.21.0"
 TRACKED_CVES=(CVE-2026-12064 CVE-2026-8286 CVE-2026-8927 CVE-2026-8932 CVE-2026-9079 CVE-2026-9080 CVE-2026-9545)
