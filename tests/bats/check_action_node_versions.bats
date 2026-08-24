@@ -467,3 +467,66 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" != *"rust-acceleration-preflight"* ]]
 }
+
+@test "fails when one file repeats the exact same third-party action ref literally" {
+    write_workflow <<'EOF'
+name: CI
+on: push
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa # v7.0.0
+      - uses: actions/checkout@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa # v7.0.0
+EOF
+    mock_curl_response "actions/checkout" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "" "action.yml" 200 \
+"runs:
+  using: 'node24'"
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"repeats third-party action ref"* ]]
+    [[ "$output" == *"actions/checkout@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"* ]]
+}
+
+@test "fails when one third-party action key drifts to multiple refs across .github" {
+    write_workflow <<'EOF'
+name: CI
+on: push
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa # v7.0.0
+      - uses: actions/checkout@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb # v7.0.1
+EOF
+    mock_curl_response "actions/checkout" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "" "action.yml" 200 \
+"runs:
+  using: 'node24'"
+    mock_curl_response "actions/checkout" "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" "" "action.yml" 200 \
+"runs:
+  using: 'node24'"
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"is pinned to multiple refs across .github/**"* ]]
+    [[ "$output" == *"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"* ]]
+    [[ "$output" == *"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"* ]]
+}
+
+@test "passes when one file centralizes a repeated third-party ref via YAML anchor and alias" {
+    write_workflow <<'EOF'
+name: CI
+on: push
+jobs:
+  build:
+    steps:
+      - uses: &checkout_centraliced_versioning actions/checkout@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa # v7.0.0
+      - uses: *checkout_centraliced_versioning # v7.0.0
+EOF
+    mock_curl_response "actions/checkout" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "" "action.yml" 200 \
+"runs:
+  using: 'node24'"
+
+    run "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+}

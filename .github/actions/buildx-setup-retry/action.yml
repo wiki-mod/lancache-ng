@@ -105,7 +105,7 @@ runs:
   using: composite
   steps:
     - id: attempt1
-      uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      uses: &docker_setup_buildx_centraliced_versioning docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
       continue-on-error: true
       with:
         version: ${{ inputs.version }}
@@ -130,7 +130,7 @@ runs:
 
     - id: attempt2
       if: steps.attempt1.outcome == 'failure'
-      uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      uses: *docker_setup_buildx_centraliced_versioning # v4.2.0
       continue-on-error: true
       with:
         version: ${{ inputs.version }}
@@ -155,7 +155,7 @@ runs:
 
     - id: attempt3
       if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure'
-      uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      uses: *docker_setup_buildx_centraliced_versioning # v4.2.0
       continue-on-error: true
       with:
         version: ${{ inputs.version }}
@@ -180,7 +180,7 @@ runs:
 
     - id: attempt4
       if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure' && steps.attempt3.outcome == 'failure'
-      uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      uses: *docker_setup_buildx_centraliced_versioning # v4.2.0
       continue-on-error: true
       with:
         version: ${{ inputs.version }}

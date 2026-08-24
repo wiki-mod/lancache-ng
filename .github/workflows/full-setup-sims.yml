@@ -91,7 +91,7 @@ jobs:
       project_name: ${{ steps.derive.outputs.project_name }}
       ui_port: ${{ steps.derive.outputs.ui_port }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: &checkout_centraliced_versioning actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Derive validation network
         id: derive
         uses: ./.github/actions/derive-validation-network
@@ -113,7 +113,7 @@ jobs:
     env:
       LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
 
       - name: Resolve immutable build-tools image
         id: build-tools
@@ -246,7 +246,7 @@ jobs:
       COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
       VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Resolve build-tools image
         # BUILD_TOOLS_REQUIRE_PUBLISHED=true: this job's dig/curl client checks
         # only need tools already in every published build-tools image, so it
@@ -319,7 +319,7 @@ jobs:
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Resolve build-tools image
         # What: same build-tools resolution as ssl-mitm-cache-simulation's step above.
         # Why: prefers the confirmed PR staging tag for a same-PR build-tools change.
@@ -370,7 +370,7 @@ jobs:
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Resolve build-tools image
         # What: same build-tools resolution as ssl-mitm-cache-simulation's step above.
         # Why: prefers the confirmed PR staging tag for a same-PR build-tools change.
@@ -412,7 +412,7 @@ jobs:
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Resolve build-tools image
         # What: same build-tools resolution as ssl-mitm-cache-simulation's step above.
         # Why: prefers the confirmed PR staging tag for a same-PR build-tools change.
@@ -472,7 +472,7 @@ jobs:
       COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
       VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Resolve build-tools image
         # What: same build-tools resolution as ssl-mitm-cache-simulation's step above.
         # Why: prefers the confirmed PR staging tag for a same-PR build-tools change.
@@ -549,7 +549,7 @@ jobs:
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Resolve build-tools image
         # No BUILD_TOOLS_REQUIRE_PUBLISHED: setup-cli-simulation.sh needs
         # `expect` from build-tools. On a PR that touched tools/build-tools,
@@ -667,7 +667,7 @@ jobs:
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Resolve build-tools image
         # No BUILD_TOOLS_REQUIRE_PUBLISHED: needs isc-dhcp-client from
         # build-tools. Same PR-staging-tag preference as setup-cli-simulation
@@ -736,7 +736,7 @@ jobs:
       COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
       VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Resolve build-tools image
         # What: same build-tools resolution as ssl-mitm-cache-simulation's step above.
         # Why: prefers the confirmed PR staging tag for a same-PR build-tools change.
@@ -807,7 +807,7 @@ jobs:
       COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
       VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Resolve build-tools image
         # No BUILD_TOOLS_REQUIRE_PUBLISHED: this job's curl check only needs
         # tools already in every published build-tools image, matching
@@ -883,7 +883,7 @@ jobs:
       COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
       VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Resolve build-tools image
         # No BUILD_TOOLS_REQUIRE_PUBLISHED: same-PR tools/build-tools override
         # preference, matching every other job in this suite.
@@ -961,7 +961,7 @@ jobs:
       COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
       VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Resolve build-tools image
         # No BUILD_TOOLS_REQUIRE_PUBLISHED: same-PR tools/build-tools override
         # preference, matching every other job in this suite. Read via env: +

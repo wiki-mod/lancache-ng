@@ -33,7 +33,7 @@ runs:
   using: composite
   steps:
     - id: attempt1
-      uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+      uses: &actions_attest_centraliced_versioning actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
       continue-on-error: true
       with:
         subject-name: ${{ inputs.subject-name }}
@@ -47,7 +47,7 @@ runs:
 
     - name: Re-authenticate to GHCR before retry 1
       if: steps.attempt1.outcome == 'failure'
-      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      uses: &docker_login_centraliced_versioning docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
       with:
         registry: ${{ inputs.registry }}
         username: ${{ inputs.username }}
@@ -55,7 +55,7 @@ runs:
 
     - id: attempt2
       if: steps.attempt1.outcome == 'failure'
-      uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+      uses: *actions_attest_centraliced_versioning # v4.2.0
       continue-on-error: true
       with:
         subject-name: ${{ inputs.subject-name }}
@@ -69,7 +69,7 @@ runs:
 
     - name: Re-authenticate to GHCR before retry 2
       if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure'
-      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      uses: *docker_login_centraliced_versioning # v4.6.0
       with:
         registry: ${{ inputs.registry }}
         username: ${{ inputs.username }}
@@ -77,7 +77,7 @@ runs:
 
     - id: attempt3
       if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure'
-      uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+      uses: *actions_attest_centraliced_versioning # v4.2.0
       continue-on-error: true
       with:
         subject-name: ${{ inputs.subject-name }}
@@ -91,7 +91,7 @@ runs:
 
     - name: Re-authenticate to GHCR before retry 3
       if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure' && steps.attempt3.outcome == 'failure'
-      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      uses: *docker_login_centraliced_versioning # v4.6.0
       with:
         registry: ${{ inputs.registry }}
         username: ${{ inputs.username }}
@@ -99,7 +99,7 @@ runs:
 
     - id: attempt4
       if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure' && steps.attempt3.outcome == 'failure'
-      uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+      uses: *actions_attest_centraliced_versioning # v4.2.0
       continue-on-error: true
       with:
         subject-name: ${{ inputs.subject-name }}
