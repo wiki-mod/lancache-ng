@@ -107,43 +107,7 @@ that never leaves the server). For a standard production install under
 section addresses is how to get that file onto **every** client device — phones,
 laptops, Steam Decks — without SSH-ing into the server for each one.
 
-> **Status: proposal pending maintainer decision.** The mechanisms below are
-> options with trade-offs, not all implemented yet. The recommendation is Option
-> A; the alternatives are listed so the trade-offs are explicit.
-
-### Option A (recommended): serve `ca.crt` over plain HTTP from the proxy
-
-Expose the certificate at a fixed, documented URL on the proxy's port 80, e.g.:
-
-```
-http://<lancache-lan-ip>/ca.crt
-```
-
-Any device on the LAN could then fetch and install it from a browser, with zero
-server access. This is the only option that reaches arbitrary client devices
-directly.
-
-- **Why it is acceptable security-wise:** `ca.crt` is public by design — serving
-  it leaks nothing (the secret is `ca.key`, which stays on the server with
-  restrictive permissions). Anyone on the LAN can already read all cached
-  content; trusting local devices is already the core assumption of this
-  appliance (see `docs/threat-model.md`).
-- **Trade-off to accept:** the endpoint is intentionally **not** behind the Admin
-  UI's auth gate, so it is reachable by any LAN device. That is the point, but it
-  should be a conscious decision.
-- **Open implementation questions for the maintainer** (this is why it is a
-  proposal, not yet shipped):
-  - It needs a small `location = /ca.crt` block in `services/proxy/conf.d/http.conf`
-    that serves the file from where it is mounted (`/etc/nginx/ssl/ca/ca.crt`),
-    taking priority over the catch-all `location /` that proxies to origins.
-  - **File readability must be verified first:** the entrypoint's `chmod 0644`
-    loop targets the per-domain cert dir, not the CA dir, so the nginx worker's
-    read access to `ca.crt` is not currently guaranteed and would need confirming.
-  - Decide the response `Content-Type` (`application/x-x509-ca-cert` is widely
-    accepted) and whether to gate the route on `SSL_ENABLED=1` (it is only
-    meaningful in SSL mode).
-
-### Option B (no code change): admin-run one-liner
+### Manual distribution
 
 The admin serves the file ad hoc — but **never** point `python3 -m http.server`
 at the `certs/` directory itself: it serves the entire current directory, and
@@ -193,7 +157,7 @@ scp user@<lancache-lan-ip>:/opt/lancache-ng/certs/ca.crt .
   it and remove the throwaway directory once every client device has fetched
   the file.
 
-### Option C (complementary): "Download CA certificate" button in the Admin UI
+### Possible future convenience: "Download CA certificate" button in the Admin UI
 
 Add a link/route in the Admin UI (which the operator already logs into) that
 downloads `ca.crt`.
@@ -202,14 +166,13 @@ downloads `ca.crt`.
   the UI's auth gate.
 - **Con:** it only helps the **operator's own** machine. It does **not** solve the
   "every device on the network" problem, because end-user client devices do not
-  log into the Admin UI. Best treated as a convenience on top of Option A, not a
+  log into the Admin UI. Best treated as a convenience on top of manual distribution, not a
   replacement.
 
 ### Recommendation
 
-Ship **Option A** as the primary mechanism (it is the only one that reaches
-arbitrary client devices unattended), optionally add **Option C** for operator
-convenience, and document **Option B** as the immediate no-code workaround until
-A lands. The maintainer may weigh the "unauthenticated LAN endpoint" trade-off
-differently and prefer C-only or B-only; that decision is intentionally left
-open here.
+Treat the **manual distribution** path above as the current documented solution.
+An Admin-UI download is optional future convenience only. Separately, the
+project still needs a safe documented workflow for issuing a **new** CA after
+compromise, replacing the server-side CA files, and re-distributing that new
+CA to clients.
