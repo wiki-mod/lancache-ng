@@ -9,7 +9,8 @@
 # used as a CI gate to enforce pinning (exit 1 if violations found) or as an
 # informational report (exit 0, violations reported to stdout/stderr).
 # Usage: check-mutable-refs.sh [--only action-refs|dockerfile-base-images|
-#        workflow-image-defaults|repository-case]; omitted runs every check.
+#        workflow-image-defaults|repository-case|action-pin-baseline];
+#        omitted runs every check.
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -32,12 +33,20 @@ fi
 violations=0
 warnings=0
 
+shopt -s nullglob
+github_workflow_files=(.github/workflows/*.yml .github/workflows/*.yaml)
+github_action_files=(.github/actions/*/action.yml .github/actions/*/action.yaml)
+shopt -u nullglob
+github_scan_files=("${github_workflow_files[@]}" "${github_action_files[@]}")
+github_uses_line_regex='^[[:space:]]*(-[[:space:]]+)?uses[[:space:]]*:[[:space:]]*[^[:space:]]+'
+github_uses_strip_expr='s/^[[:space:]]*(-[[:space:]]+)?uses[[:space:]]*:[[:space:]]*//; s/[[:space:]]*#.*$//; s/[[:space:]]+$//'
+
 # Check GitHub Actions for @v<number> style (non-SHA) references.
 # These should be pinned to @<sha> with a comment showing the version.
 check_action_refs() {
-    local pattern='uses:.*@v[0-9]'
+    local pattern='^[[:space:]]*(-[[:space:]]+)?uses[[:space:]]*:[[:space:]]*[^#[:space:]]+@v[0-9]+'
     local matches
-    matches=$(grep -rn "$pattern" .github/workflows/*.yml || true)
+    matches=$(grep -rnE "$pattern" "${github_scan_files[@]}" || true)
     if [[ -n "$matches" ]]; then
         printf "%b[ACTION REFS]%b Floating action version tags (should be pinned to @sha):\n" "$RED" "$NC"
         printf '%s\n' "$matches"
@@ -97,12 +106,144 @@ check_dockerfile_base_images() {
 check_workflow_image_defaults() {
     local pattern='BUILD_TOOLS_IMAGE=.*:latest'
     local matches
-    matches=$(grep -n "$pattern" .github/workflows/*.yml || true)
+    matches=$(grep -n "$pattern" "${github_workflow_files[@]}" || true)
     if [[ -n "$matches" ]]; then
         printf "%b[WORKFLOW DEFAULTS]%b BUILD_TOOLS_IMAGE environment defaults use :latest:\n" "$YELLOW" "$NC"
         printf '%s\n' "$matches"
         warnings=$((warnings + 1))
         return 0  # Warning, not violation
+    fi
+    return 0
+}
+
+# What: normalizes YAML `uses:` entries across workflows and composite actions into bare refs.
+# Why: GitHub accepts whitespace around the YAML key colon, so this guard must match the semantic
+#   `uses` entry rather than one formatter-specific `uses:` text shape.
+# From: Issue #1095
+list_uses_refs() {
+    grep -hE "$github_uses_line_regex" "$@" \
+        | sed -E "$github_uses_strip_expr"
+}
+
+# What: filters normalized `uses:` entries down to third-party refs only.
+# Why: repo-local actions are an intentional centralization point, so only direct external refs belong
+#   in the scattered-pin baseline this issue is trying to keep bounded.
+# From: Issue #1095
+list_external_uses_refs() {
+    list_uses_refs "$@" \
+        | grep -vE '^(\./|wiki-mod/lancache-ng/\.github/)'
+}
+
+count_external_action_ref() {
+    local ref="$1"
+    local count
+    count=$(
+        list_external_uses_refs "${github_scan_files[@]}" \
+            | grep -Fx "$ref" \
+            | wc -l
+    )
+    printf '%s\n' "${count//[[:space:]]/}"
+}
+
+files_for_external_action_ref() {
+    local ref="$1"
+    local file
+    for file in "${github_scan_files[@]}"; do
+        if list_external_uses_refs "$file" | grep -Fxq "$ref"; then
+            printf '%s\n' "$file"
+        fi
+    done
+}
+
+# What: inventories every external pinned Action ref in `.github/**` against a checked-in baseline.
+# Why: the first no-generator pass accepts a small explicit remainder, but new direct third-party
+#   pins or silent count growth must fail closed instead of reintroducing scattered maintenance.
+# From: Issue #1095
+check_action_pin_baseline() {
+    local mismatch=0
+    local ref actual expected actual_joined expected_joined
+    local -A expected_counts=(
+        [actions/add-to-project@5afcf98fcd03f1c2f92c3c83f58ae24323cc57fd]=1
+        [actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6]=4
+        [actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9]=5
+        [actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9]=5
+        [actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1]=80
+        [actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c]=1
+        [actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3]=2
+        [actions/labeler@bf12e9b00b37c5c0ca2b87b79b2daf7891dbda13]=1
+        [actions/setup-node@820762786026740c76f36085b0efc47a31fe5020]=1
+        [actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a]=2
+        [aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25]=4
+        [docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a]=5
+        [docker/login-action@dbcb813823bdd20940b903addbd779551569679f]=28
+        [docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302]=5
+        [docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c]=17
+        [dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4]=7
+        [github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd]=1
+        [github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd]=1
+        [release-drafter/release-drafter@34d80673e067bdc0c24568d3af899c216adcfaa9]=1
+        [stefanzweifel/changelog-updater-action@a938690fad7edf25368f37e43a1ed1b34303eb36]=1
+        [stefanzweifel/git-auto-commit-action@4a55954c782fc1ea30b9056cd3e7a2b40ca8887d]=1
+    )
+    local -A expected_files=(
+        [actions/add-to-project@5afcf98fcd03f1c2f92c3c83f58ae24323cc57fd]=$'.github/workflows/add-to-project.yml'
+        [actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6]=$'.github/actions/ghcr-attest-retry/action.yml'
+        [actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9]=$'.github/actions/ghcr-attest-with-cache/action.yml\n.github/actions/trivy-scan-with-cache/action.yml\n.github/workflows/gc-pr-staging-images.yml\n.github/workflows/gc-sha-retention-audit.yml'
+        [actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9]=$'.github/actions/ghcr-attest-with-cache/action.yml\n.github/actions/trivy-scan-with-cache/action.yml\n.github/workflows/gc-pr-staging-images.yml\n.github/workflows/gc-sha-retention-audit.yml'
+        [actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1]=$'.github/workflows/backfill-stack-latest.yml\n.github/workflows/build-push-hosted-fallback.yml\n.github/workflows/build-push.yml\n.github/workflows/build-tools-smoke.yml\n.github/workflows/build-tools.yml\n.github/workflows/channel-install-smoke.yml\n.github/workflows/codeql.yml\n.github/workflows/full-setup-deep-validate.yml\n.github/workflows/full-setup-sims.yml\n.github/workflows/full-setup-validate.yml\n.github/workflows/gc-pr-staging-images.yml\n.github/workflows/gc-sha-retention-audit.yml\n.github/workflows/orphaned-branches.yml\n.github/workflows/update-changelog.yaml\n.github/workflows/vex-regenerate.yml'
+        [actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c]=$'.github/workflows/build-push.yml'
+        [actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3]=$'.github/workflows/current-dev-auto-close.yml\n.github/workflows/first-interaction.yml'
+        [actions/labeler@bf12e9b00b37c5c0ca2b87b79b2daf7891dbda13]=$'.github/workflows/labeler.yml'
+        [actions/setup-node@820762786026740c76f36085b0efc47a31fe5020]=$'.github/workflows/first-interaction.yml'
+        [actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a]=$'.github/workflows/build-push.yml'
+        [aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25]=$'.github/actions/trivy-scan-retry/action.yml'
+        [docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a]=$'.github/actions/ghcr-build-push-retry/action.yml\n.github/workflows/build-tools.yml'
+        [docker/login-action@dbcb813823bdd20940b903addbd779551569679f]=$'.github/actions/ghcr-attest-retry/action.yml\n.github/actions/ghcr-build-push-retry/action.yml\n.github/actions/trivy-scan-retry/action.yml\n.github/workflows/backfill-stack-latest.yml\n.github/workflows/build-push-hosted-fallback.yml\n.github/workflows/build-push.yml\n.github/workflows/build-tools.yml\n.github/workflows/full-setup-deep-validate.yml'
+        [docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302]=$'.github/workflows/build-push-hosted-fallback.yml\n.github/workflows/build-push.yml\n.github/workflows/build-tools.yml'
+        [docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c]=$'.github/actions/buildx-setup-retry/action.yml\n.github/workflows/backfill-stack-latest.yml\n.github/workflows/build-push.yml\n.github/workflows/build-tools-smoke.yml\n.github/workflows/build-tools.yml\n.github/workflows/full-setup-deep-validate.yml\n.github/workflows/vex-regenerate.yml'
+        [dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4]=$'.github/workflows/build-push.yml\n.github/workflows/codeql.yml'
+        [github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd]=$'.github/workflows/codeql.yml'
+        [github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd]=$'.github/workflows/codeql.yml'
+        [release-drafter/release-drafter@34d80673e067bdc0c24568d3af899c216adcfaa9]=$'.github/workflows/release-drafter.yml'
+        [stefanzweifel/changelog-updater-action@a938690fad7edf25368f37e43a1ed1b34303eb36]=$'.github/workflows/update-changelog.yaml'
+        [stefanzweifel/git-auto-commit-action@4a55954c782fc1ea30b9056cd3e7a2b40ca8887d]=$'.github/workflows/update-changelog.yaml'
+    )
+
+    mapfile -t actual_refs < <(
+        list_external_uses_refs "${github_scan_files[@]}" \
+            | sort -u
+    )
+
+    for ref in "${actual_refs[@]}"; do
+        if [[ -z "${expected_counts[$ref]+x}" ]]; then
+            printf "%b[ACTION PIN BASELINE]%b unexpected external action pin: %s\n" "$RED" "$NC" "$ref"
+            mismatch=1
+        fi
+    done
+
+    for ref in "${!expected_counts[@]}"; do
+        expected="${expected_counts[$ref]}"
+        actual="$(count_external_action_ref "$ref")"
+        if [[ "$actual" != "$expected" ]]; then
+            printf "%b[ACTION PIN BASELINE]%b %s: expected %s occurrence(s), found %s.\n" "$RED" "$NC" "$ref" "$expected" "$actual"
+            mismatch=1
+        fi
+
+        if [[ -n "${expected_files[$ref]:-}" ]]; then
+            actual_joined="$(files_for_external_action_ref "$ref" | sort)"
+            expected_joined="$(printf '%s\n' "${expected_files[$ref]}" | sort)"
+            if [[ "$actual_joined" != "$expected_joined" ]]; then
+                printf "%b[ACTION PIN BASELINE]%b %s: allowed file inventory drifted.\n" "$RED" "$NC" "$ref"
+                printf '  Expected files:\n%s\n' "$(printf '%s\n' "$expected_joined" | sed 's/^/    /')"
+                printf '  Actual files:\n%s\n' "$(printf '%s\n' "$actual_joined" | sed 's/^/    /')"
+                mismatch=1
+            fi
+        fi
+    done
+
+    if [[ "$mismatch" -eq 1 ]]; then
+        violations=$((violations + 1))
+        return 1
     fi
     return 0
 }
@@ -191,7 +332,7 @@ case "${1:-}" in
     "") ;;
     *)
         printf 'check-mutable-refs: unknown argument: %s\n' "$1" >&2
-        printf 'Usage: check-mutable-refs.sh [--only action-refs|dockerfile-base-images|workflow-image-defaults|repository-case]\n' >&2
+        printf 'Usage: check-mutable-refs.sh [--only action-refs|dockerfile-base-images|workflow-image-defaults|repository-case|action-pin-baseline]\n' >&2
         exit 2
         ;;
 esac
@@ -208,6 +349,7 @@ run_check action-refs "Checking GitHub Actions references..." check_action_refs
 run_check dockerfile-base-images "Checking Dockerfile base images..." check_dockerfile_base_images
 run_check workflow-image-defaults "Checking workflow image defaults..." check_workflow_image_defaults
 run_check repository-case "Checking github.repository case-safety (issue #1504/#1095 G1)..." check_repository_case_expressions
+run_check action-pin-baseline "Checking external action pin baseline (issue #1095)..." check_action_pin_baseline
 
 if [[ -n "$only_check" && "$violations" -eq 0 && "$warnings" -eq 0 ]]; then
     printf 'check-mutable-refs --only %s: OK\n' "$only_check"
