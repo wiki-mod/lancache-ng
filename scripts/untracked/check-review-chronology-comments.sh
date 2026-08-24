@@ -76,17 +76,17 @@ REVIEW_CHRONOLOGY_PATTERN+="|(\\breview[[:space:]]+finding\\b)"
 # From: PR #1546
 FRAGILE_LINE_REF_PATTERN='\(([Ss]ee[[:space:]]+)?\bline\b[[:space:]]*~?[0-9]+'
 
-# What: Checks each line of $1 against $REVIEW_CHRONOLOGY_PATTERN, then a
-#   second pass joining each adjacent pair of hand-written comment lines.
-# Why: -H forces the filename prefix; the second pass catches a chronology
-#   phrase line-wrapped across two comment lines that neither line alone
-#   contains (real gap found in this repo's own history).
-# From: PR #1385, PR #1546
+# What: Checks $1 against the pattern, then joined adjacent-comment pairs.
+# Why: joined-pair pass catches a chronology phrase wrapped across two
+#   lines; bash's builtin [[ =~ ]] replaces a per-pair grep spawn that
+#   made this script time out in CI on large files (real, twice).
+# From: PR #1661
 check_review_chronology() {
     grep -EinIH "$REVIEW_CHRONOLOGY_PATTERN" "$1" || true
+    shopt -s nocasematch
     while IFS=$'\t' read -r line_no joined; do
         [ -n "$line_no" ] || continue
-        if grep -Eiq "$REVIEW_CHRONOLOGY_PATTERN" <<<"$joined"; then
+        if [[ "$joined" =~ $REVIEW_CHRONOLOGY_PATTERN ]]; then
             printf '%s:%s: %s\n' "$1" "$line_no" "$joined"
         fi
     done < <(awk '
@@ -108,6 +108,7 @@ check_review_chronology() {
             prev = cur
         }
     ' "$1")
+    shopt -u nocasematch
 }
 
 # What: Checks each line of $1 against $FRAGILE_LINE_REF_PATTERN.
