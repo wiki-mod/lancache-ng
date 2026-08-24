@@ -144,24 +144,24 @@ EOF
 }
 
 @test "main: the real services/netdata/Dockerfile currently pins a still-affected curl (documents current, known state)" {
-    # What: reads the real Dockerfile, not a fixture, without the date hook.
+    # What: reads the real Dockerfile, and the real v2.11.0 vendored curl tag.
     # Why: proves the check's current warn behavior against this project's
-    # actual real pin, not only a synthetic fixture value.
-    # From: Issue #1304
+    # actual real pin, not a stale/unrelated synthetic fixture value.
+    # From: Issue #1304 | PR #1662
     real_dockerfile="$BATS_TEST_DIRNAME/../../services/netdata/Dockerfile"
-    write_bundled_fixture "8_17_0"
+    write_bundled_fixture "8_20_0"
     BUNDLED_PACKAGES_CONTENT_FILE="$bundled_fixture" run bash "$script" "$real_dockerfile"
     [ "$status" -eq 0 ]
     [[ "$output" == *"::warning::"* ]]
 }
 
 @test "main: the real services/netdata/Dockerfile's pin would hard-fail once the grace period passes" {
-    # What: same real Dockerfile as above, with the date hook past ACCEPTED_UNTIL.
+    # What: same real Dockerfile+curl tag as above, date hook past ACCEPTED_UNTIL.
     # Why: proves the escalation-to-failure branch actually triggers against
-    # this project's real current pin, not only a synthetic fixture value.
-    # From: Issue #1304
+    # this project's real current pin, not a stale/unrelated fixture value.
+    # From: Issue #1304 | PR #1662
     real_dockerfile="$BATS_TEST_DIRNAME/../../services/netdata/Dockerfile"
-    write_bundled_fixture "8_17_0"
+    write_bundled_fixture "8_20_0"
     BUNDLED_PACKAGES_CONTENT_FILE="$bundled_fixture" NETDATA_CURL_PIN_TODAY="2026-08-30" \
         run bash "$script" "$real_dockerfile"
     [ "$status" -ne 0 ]
