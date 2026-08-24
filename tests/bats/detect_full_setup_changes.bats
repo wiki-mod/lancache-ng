@@ -72,6 +72,7 @@ value_from() {
 @test "workflow change: workflow true forces should_run" {
     run_detect ".github/workflows/build-push.yml"
     [ "$(val workflow)" = "true" ]
+    [ "$(val workflow_reuse_scope)" = "true" ]
     [ "$(val should_run)" = "true" ]
 }
 
@@ -90,6 +91,7 @@ value_from() {
     # staging guard would fail closed on tags that were never pushed.
     run_detect ".github/workflows/full-setup-deep-validate.yml"
     [ "$(val workflow)" = "false" ]
+    [ "$(val workflow_reuse_scope)" = "false" ]
     [ "$(val should_run)" = "true" ]
 }
 
@@ -100,12 +102,14 @@ value_from() {
 @test "full-setup-validate-only composite action runs the suite but does not force workflow" {
     run_detect ".github/actions/derive-validation-network/action.yml"
     [ "$(val workflow)" = "false" ]
+    [ "$(val workflow_reuse_scope)" = "false" ]
     [ "$(val should_run)" = "true" ]
 }
 
 @test "an unrelated workflow change runs the suite but does not force the guard" {
     run_detect ".github/workflows/codeql.yml"
     [ "$(val workflow)" = "false" ]
+    [ "$(val workflow_reuse_scope)" = "false" ]
     [ "$(val should_run)" = "true" ]
 }
 
@@ -281,7 +285,7 @@ EOF
 
     shared_keys=(
         proxy dns_image ui watchdog dhcp dhcp_proxy ntp syslog build_tools
-        deploy scripts setup_runtime workflow docs_only
+        deploy scripts setup_runtime workflow workflow_reuse_scope docs_only
     )
     for key in "${shared_keys[@]}"; do
         detector_value="$(value_from "$detector_output" "$key")"

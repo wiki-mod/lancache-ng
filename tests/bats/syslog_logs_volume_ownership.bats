@@ -47,3 +47,24 @@ assert syslog["depends_on"]["syslog-logs-permissions"]["condition"] == "service_
 PY
     done
 }
+
+@test "production and quickstart keep the combined syslog container capability-free" {
+    local compose rendered
+    for compose in deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml; do
+        rendered="$BATS_TEST_TMPDIR/$(basename "$(dirname "$compose")")-syslog-capless.json"
+        docker compose --profile logging --env-file /dev/null \
+            -f "$repo_root/$compose" config --format json > "$rendered"
+        python3 - "$compose" "$rendered" <<'PY'
+import json
+import sys
+
+compose, rendered = sys.argv[1:]
+with open(rendered, encoding="utf-8") as handle:
+    services = json.load(handle)["services"]
+syslog = services["syslog"]
+
+assert syslog["cap_drop"] == ["ALL"], compose
+assert "cap_add" not in syslog, compose
+PY
+    done
+}

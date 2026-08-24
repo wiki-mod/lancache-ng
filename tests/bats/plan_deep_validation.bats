@@ -29,6 +29,7 @@ val() {
     [ "$(val image_tag)" = "nightly" ]
     [ "$(val should_run)" = "true" ]
     [ "$(val pr_staging_available)" = "false" ]
+    [ "$(val workflow_reuse_scope)" = "false" ]
 }
 
 @test "same-repo PR: resolves its own staging tag and per-service flags" {
@@ -43,6 +44,7 @@ val() {
     # #825/#1141: master publishes latest, not nightly (current_dev does).
     [ "$(val base_channel_tag)" = "latest" ]
     [ "$(val proxy)" = "true" ]
+    [ "$(val workflow_reuse_scope)" = "false" ]
     [ "$(val should_run)" = "true" ]
 }
 
