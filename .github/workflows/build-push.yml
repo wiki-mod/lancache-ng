@@ -5481,17 +5481,18 @@ jobs:
             echo "SECRET_FILES"
           } >> "$GITHUB_OUTPUT"
 
-      # What: produces the ccache_redis_url secret for dns and utilities.
-      # Why: dns/utilities each mount it under a distinct BuildKit secret id
-      #   from sccache's own sccache_redis_url, reusing the same repository
+      # What: produces the ccache_redis_url secret for dns, utilities, and
+      #   build-tools.
+      # Why: each mounts it under a distinct BuildKit secret id from
+      #   sccache's own sccache_redis_url, reusing the same repository
       #   secret rather than a second GitHub secret; honors the existing
       #   SCCACHE_REDIS_MODE kill switch (AG-CI-004).
-      # From: Issue #1095 (G15 | #1556)
-      - name: Prepare ccache Redis endpoint (dns + utilities C-dependency cache)
+      # From: Issue #1095 (G15 | #1556) | PR #1661
+      - name: Prepare ccache Redis endpoint (dns + utilities + build-tools C-dependency cache)
         if: >-
           ${{
             steps.should-build.outputs.should-build == 'true' &&
-            (matrix.service == 'dns' || matrix.service == 'utilities') &&
+            (matrix.service == 'dns' || matrix.service == 'utilities' || matrix.service == 'build-tools') &&
             github.actor != 'dependabot[bot]' &&
             github.event_name != 'pull_request'
           }}
@@ -5513,10 +5514,46 @@ jobs:
             echo "::notice::No SCCACHE_REDIS_URL configured; ${{ matrix.service }}'s ccache layer stays disabled (fails closed to a plain compile)."
           fi
 
-      - name: Select Rust acceleration network
-        if: matrix.rust == true
+      # What: produces the distcc_potential_hosts secret for build-tools.
+      # Why: build-tools' curl/git build is C, not Rust -- it never sets
+      #   matrix.rust, so it misses the DISTCC_POTENTIAL_HOSTS wiring the
+      #   sccache-secret step above gives dns/ui/watchdog.
+      # From: PR #1661
+      - name: Prepare distcc hosts (build-tools C-dependency distribution)
+        if: >-
+          ${{
+            steps.should-build.outputs.should-build == 'true' &&
+            matrix.service == 'build-tools' &&
+            github.actor != 'dependabot[bot]' &&
+            github.event_name != 'pull_request'
+          }}
+        id: distcc-hosts-secret
         env:
-          SECRET_FILES: ${{ steps.sccache-secret.outputs.secret-files }}
+          DISTCC_POTENTIAL_HOSTS: ${{ vars.DISTCC_POTENTIAL_HOSTS }}
+        run: |
+          set -euo pipefail
+          if [ -z "$DISTCC_POTENTIAL_HOSTS" ]; then
+            echo "::notice::No DISTCC_POTENTIAL_HOSTS configured; build-tools' distcc layer stays disabled (fails closed to a plain compile)."
+            exit 0
+          fi
+          if ! grep -q ',cpp' <<<"$DISTCC_POTENTIAL_HOSTS"; then
+            echo "::error::DISTCC_POTENTIAL_HOSTS must include at least one pump-capable host with the ',cpp' option."
+            exit 1
+          fi
+          umask 077
+          hosts_file="${{ runner.temp }}/distcc-potential-hosts-${{ matrix.service }}"
+          printf '%s' "$DISTCC_POTENTIAL_HOSTS" > "$hosts_file"
+          echo "secret-files=distcc_potential_hosts=$hosts_file" >> "$GITHUB_OUTPUT"
+
+      - name: Select Rust acceleration network
+        if: matrix.rust == true || matrix.service == 'build-tools'
+        env:
+          SECRET_FILES: >-
+            ${{
+              steps.sccache-secret.outputs.secret-files ||
+              steps['ccache-redis-secret'].outputs['secret-files'] ||
+              steps['distcc-hosts-secret'].outputs['secret-files']
+            }}
         run: |
           set -euo pipefail
 
@@ -5548,16 +5585,19 @@ jobs:
           build-network: ${{ env.RUST_ACCELERATION_NETWORK }}
           platform: linux/amd64
 
-      # What: merges sccache-secret and ccache-redis-secret into one list.
-      # Why: a block-scalar interpolation of both step outputs would add
-      #   blank lines to every service where one or both are empty; this
-      #   reproduces the prior single-source input byte-for-byte instead.
-      # From: Issue #1095 (G15)
+      # What: merges sccache-secret, ccache-redis-secret, and
+      #   distcc-hosts-secret into one list.
+      # Why: a block-scalar interpolation of all three step outputs would
+      #   add blank lines to every service where one or more are empty;
+      #   this reproduces the prior single-source input byte-for-byte
+      #   instead.
+      # From: Issue #1095 (G15) | PR #1661
       - name: Combine sccache/ccache secret files
         id: combined-secret-files
         env:
           SCCACHE_FILES: ${{ steps.sccache-secret.outputs.secret-files }}
           CCACHE_FILES: ${{ steps['ccache-redis-secret'].outputs['secret-files'] }}
+          DISTCC_FILES: ${{ steps['distcc-hosts-secret'].outputs['secret-files'] }}
         run: |
           set -euo pipefail
           combined=""
@@ -5569,6 +5609,13 @@ jobs:
               combined="$combined"$'\n'"$CCACHE_FILES"
             else
               combined="$CCACHE_FILES"
+            fi
+          fi
+          if [ -n "$DISTCC_FILES" ]; then
+            if [ -n "$combined" ]; then
+              combined="$combined"$'\n'"$DISTCC_FILES"
+            else
+              combined="$DISTCC_FILES"
             fi
           fi
           {
