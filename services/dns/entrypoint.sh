@@ -329,7 +329,7 @@ PDNS_AUTH_CONF_FILE="/etc/pdns/auth/pdns.conf"
 # absent -> TSIG still enforced, unchanged from today's actual behavior).
 DNS_STATE_DIR="/var/lib/powerdns-state"
 DDNS_ALLOW_UNSIGNED_MARKER="${DNS_STATE_DIR}/ddns-allow-unsigned-updates"
-# Central logging pipeline (#633): PowerDNS has no native "log to file"
+# Central logging pipeline: PowerDNS has no native "log to file"
 # config directive on Linux -- confirmed against the upstream docs/mailing
 # list, both pdns_server and pdns_recursor only ever write to stdout/stderr
 # or syslog, never a plain file (the plan this followed assumed a
