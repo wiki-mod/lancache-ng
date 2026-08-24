@@ -95,6 +95,7 @@ jobs:
       # From: Issue #1095 (G15)
       validation_infra: ${{ steps.filter.outputs.validation_infra }}
       workflow: ${{ steps.filter.outputs.workflow }}
+      workflow_reuse_scope: ${{ steps.filter.outputs.workflow_reuse_scope }}
       docs: ${{ steps.filter.outputs.docs }}
       docs_only: ${{ steps.filter.outputs.docs_only }}
       governance: ${{ steps.filter.outputs.governance }}
@@ -2549,7 +2550,7 @@ jobs:
         (
           github.event_name != 'pull_request' ||
           needs['detect-changes'].outputs.deploy == 'true' ||
-          needs['detect-changes'].outputs.workflow == 'true' ||
+          needs['detect-changes'].outputs.workflow_reuse_scope == 'true' ||
           needs['detect-changes'].outputs.validation_infra == 'true'
         )
       }}
@@ -2679,7 +2680,7 @@ jobs:
           # Why: only runs when pr-staging-available is true.
           # From: Issue #1095 | PR #1619
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow }}
+          WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow_reuse_scope }}
           PROXY_TOUCHED: ${{ needs['detect-changes'].outputs.proxy }}
           DNS_TOUCHED: ${{ needs['detect-changes'].outputs.dns_image }}
           WATCHDOG_TOUCHED: ${{ needs['detect-changes'].outputs.watchdog }}
@@ -4091,7 +4092,7 @@ jobs:
           DNS_RUST_CHANGED: ${{ needs['detect-changes'].outputs.dns_rust }}
           UI_CHANGED: ${{ needs['detect-changes'].outputs.ui }}
           WATCHDOG_CHANGED: ${{ needs['detect-changes'].outputs.watchdog }}
-          WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow }}
+          WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow_reuse_scope }}
           DOCS_CHANGED: ${{ needs['detect-changes'].outputs.docs }}
           DOCS_ONLY: ${{ needs['detect-changes'].outputs.docs_only }}
           GOVERNANCE_CHANGED: ${{ needs['detect-changes'].outputs.governance }}
@@ -4641,7 +4642,6 @@ jobs:
         env:
           REF_NAME: ${{ github.ref_name }}
           COMMIT_SHA: ${{ github.sha }}
-          WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow }}
           PROXY_CHANGED: ${{ needs['detect-changes'].outputs.proxy }}
           DNS_CHANGED: ${{ needs['detect-changes'].outputs.dns_image }}
           UI_CHANGED: ${{ needs['detect-changes'].outputs.ui }}
@@ -4707,11 +4707,6 @@ jobs:
             local classify_key="$1" matrix_service="$2" before_sha_changed="$3"
             local output_key="${matrix_service//-/_}"
 
-            if [ "$WORKFLOW_CHANGED" = "true" ]; then
-              echo "::notice::$matrix_service: a build-affecting workflow file changed this push; not attempting reuse." >&2
-              printf 'false\n'
-              return
-            fi
             if [ "$before_sha_changed" != "false" ]; then
               echo "::notice::$matrix_service: detect-changes reports this service changed since the immediately preceding push; not attempting reuse (a real rebuild is needed regardless of channel state)." >&2
               printf 'false\n'
@@ -5037,7 +5032,7 @@ jobs:
                 exit 1
                 ;;
             esac
-            if [ "${{ needs['detect-changes'].outputs.workflow }}" = "true" ] && [ "$MATRIX_SERVICE" != "build-tools" ]; then
+            if [ "${{ needs['detect-changes'].outputs.workflow_reuse_scope }}" = "true" ] && [ "$MATRIX_SERVICE" != "build-tools" ]; then
               should_build=true
             fi
           elif [ "$REUSE_JOB_RESULT" = "success" ]; then
@@ -5957,7 +5952,7 @@ jobs:
                 exit 1
                 ;;
             esac
-            if [ "${{ needs['detect-changes'].outputs.workflow }}" = "true" ] && [ "$MATRIX_SERVICE" != "build-tools" ]; then
+            if [ "${{ needs['detect-changes'].outputs.workflow_reuse_scope }}" = "true" ] && [ "$MATRIX_SERVICE" != "build-tools" ]; then
               should_build=true
             fi
           elif [ "$REUSE_JOB_RESULT" = "success" ]; then
