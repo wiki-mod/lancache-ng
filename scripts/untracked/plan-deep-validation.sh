@@ -45,6 +45,7 @@ else
     {
         printf 'should_run=true\n'
         printf 'workflow=false\n'
+        printf 'workflow_reuse_scope=false\n'
         printf 'proxy=false\n'
         printf 'dns_image=false\n'
         printf 'watchdog=false\n'
