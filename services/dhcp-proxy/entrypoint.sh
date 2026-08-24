@@ -893,5 +893,9 @@ if [ "$DHCP_MODE" = "dnsmasq-relay" ]; then
 else
     echo "Starting dnsmasq DHCP proxy (subnet: $DHCP_SUBNET_START, DNS: $DHCP_DNS_PRIMARY, $DHCP_DNS_SECONDARY)..."
 fi
+# What: constrains the dnsmasq-created log file mode to 0640.
+# Why: gid 10001 keeps the collector read path working, while world read
+#   permission is no longer needed once the shared group exists.
+# From: Issue #1427
 umask 0027
 exec dnsmasq -k -C /etc/dnsmasq.conf

@@ -1314,6 +1314,10 @@ echo "[lancache-dns] Starting PowerDNS Authoritative and Recursor..."
 
 run_auth() {
     while true; do
+        # What: constrains the tee-created pdns-auth.log mode to 0640.
+        # Why: gid 10001 keeps the collector read path working, while world
+        #   read permission is no longer needed once the shared group exists.
+        # From: Issue #1427
         umask 0027
         pdns_server --config-dir=/etc/pdns/auth --guardian=no --daemon=no 2>&1 \
             | tee -a "$PDNS_LOG_DIR/pdns-auth.log" || true
@@ -1325,6 +1329,10 @@ run_auth() {
 run_recursor() {
     mkdir -p /var/run/pdns-recursor
     while true; do
+        # What: constrains the tee-created pdns-recursor.log mode to 0640.
+        # Why: gid 10001 keeps the collector read path working, while world
+        #   read permission is no longer needed once the shared group exists.
+        # From: Issue #1427
         umask 0027
         pdns_recursor --config-dir=/etc/pdns 2>&1 \
             | tee -a "$PDNS_LOG_DIR/pdns-recursor.log" || true
@@ -1358,9 +1366,10 @@ REC_PID=$!
 # ── 9. Start NATS Subscriber ────────────────────────────────────────────────
 run_nats_subscriber() {
     while true; do
-        # Central logging pipeline (#633): tee alongside pdns_server/pdns_recursor
-        # above so nats-subscriber's connect/auth/processing errors also reach
-        # fluent-bit's tail of $PDNS_LOG_DIR/*.log instead of only Docker stdout.
+        # What: keeps nats-subscriber's stderr/stdout mirrored into the shared log dir.
+        # Why: syslog must keep seeing subscriber failures, but the file mode
+        #   now also has to stay 0640 for the gid-10001 read contract.
+        # From: Issue #633 | Issue #1427
         umask 0027
         nats-subscriber 2>&1 \
             | tee -a "$PDNS_LOG_DIR/nats-subscriber.log" || true

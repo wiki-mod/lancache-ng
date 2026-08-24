@@ -850,18 +850,30 @@ if [ "$SNAPSHOT_FOUND" -eq 0 ] && ! _kea_validate_dhcp4_config "$KEAD_CONF_FILE"
     # DHCP_PID is intentionally not set so the trap below doesn't try to kill it
     # and the final `wait` at the bottom keeps the container alive
 else
+    # What: constrains the daemon-created Kea log files to 0640.
+    # Why: gid 10001 keeps the collector read path working, while world
+    #   read permission is no longer needed once the shared group exists.
+    # From: Issue #1427
     umask 0027
     kea-dhcp4 -c /var/lib/kea/kea-dhcp4.conf &
     DHCP_PID=$!
 fi
 
 echo "Starting Kea Control Agent on $KEA_CTRL_HOST:8000..."
+# What: constrains the daemon-created Kea control-agent log files to 0640.
+# Why: gid 10001 keeps the collector read path working, while world read
+#   permission is no longer needed once the shared group exists.
+# From: Issue #1427
 umask 0027
 kea-ctrl-agent -c /var/lib/kea/kea-ctrl-agent.conf &
 AGENT_PID=$!
 
 if command -v kea-dhcp-ddns &> /dev/null; then
     echo "Starting Kea DHCP DDNS server..."
+    # What: constrains the daemon-created Kea DDNS log files to 0640.
+    # Why: gid 10001 keeps the collector read path working, while world
+    #   read permission is no longer needed once the shared group exists.
+    # From: Issue #1427
     umask 0027
     kea-dhcp-ddns -c /var/lib/kea/kea-dhcp-ddns.conf &
     DDNS_PID=$!
