@@ -408,10 +408,8 @@ RUN --mount=type=secret,id=distcc_potential_hosts \
     trap cleanup_curl_git_build EXIT; \
     curl -fsSL -o "$build_tmp/curl.tar.xz" "https://curl.se/download/curl-${CURL_VERSION}.tar.xz"; \
     printf '%s  %s\n' "$CURL_SHA256" "$build_tmp/curl.tar.xz" | sha256sum -c -; \
-    tar -xJf "$build_tmp/curl.tar.xz" -C "$build_tmp"; \
     curl -fsSL -o "$build_tmp/git.tar.xz" "https://www.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.xz"; \
     printf '%s  %s\n' "$GIT_SHA256" "$build_tmp/git.tar.xz" | sha256sum -c -; \
-    tar -xf "$build_tmp/git.tar.xz" -C "$build_tmp"; \
     distcc_enabled=0; \
     ccache_enabled=0; \
     original_path="$PATH"; \
@@ -472,7 +470,7 @@ RUN --mount=type=secret,id=distcc_potential_hosts \
         esac; \
         export CCACHE_REMOTE_STORAGE="$ccache_redis_endpoint" CCACHE_DIR=/tmp/ccache-build-tools-curl-git; \
         export CCACHE_PREFIX=distcc CCACHE_COMPILERCHECK=content; \
-        export CCACHE_EXTRAFILES=/tmp/ccache-remote-toolchain-id CCACHE_BASEDIR="$ccache_probe_dir"; \
+        export CCACHE_EXTRAFILES=/tmp/ccache-remote-toolchain-id CCACHE_BASEDIR="$build_tmp"; \
         printf '%s\n' 'int main(void) { return 0; }' > "$ccache_probe_dir/probe.c"; \
         if (cd "$ccache_probe_dir" && ccache "$real_gcc" -c probe.c -o probe.o) >"$ccache_probe_dir/probe.log" 2>&1 \
           && ccache --print-stats > "$ccache_probe_dir/stats.log" \
@@ -498,30 +496,53 @@ RUN --mount=type=secret,id=distcc_potential_hosts \
       cc_wrapper="$real_gcc"; \
       echo "::warning::curl/git build: distcc unavailable; compiling with no cache and no distribution at all (last line of defense before this build cannot compile)." >&2; \
     fi; \
-    ( cd "$build_tmp/curl-${CURL_VERSION}" \
-      && ./configure \
-        --disable-shared --enable-static \
-        --disable-ftp --disable-file --disable-ldap --disable-ldaps \
-        --disable-rtsp --disable-dict --disable-telnet --disable-tftp \
-        --disable-pop3 --disable-imap --disable-smtp --disable-smb \
-        --disable-gopher --disable-mqtt \
-        --disable-scp --disable-sftp --without-libssh2 --without-libssh \
-        --disable-ntlm --disable-kerberos-auth --disable-negotiate-auth \
-        --disable-aws \
-        --disable-manual --disable-libcurl-option \
-        --disable-ipfs --disable-websockets \
-        --without-librtmp --without-libidn2 --without-brotli --without-zstd \
-        --without-nghttp2 --without-nghttp3 --without-ngtcp2 --without-libpsl \
-        --with-openssl \
-        --with-ca-bundle=/etc/ssl/certs/ca-certificates.crt \
-        --enable-http --enable-cookies --enable-ipv6 \
-        CC="$cc_wrapper" \
-      && make -j"$(nproc)" ); \
-    curl_src="$build_tmp/curl-${CURL_VERSION}"; \
-    curl_libcurl="-Wl,-Bstatic -L${curl_src}/lib/.libs -lcurl -Wl,-Bdynamic -lssl -lcrypto -lz"; \
-    ( cd "$build_tmp/git-${GIT_VERSION}" \
-      && make -j"$(nproc)" prefix=/usr/local CC="$cc_wrapper" NO_TCLTK=YesPlease NO_GETTEXT=YesPlease \
-        CURL_CFLAGS="-I${curl_src}/include" CURL_LIBCURL="$curl_libcurl" install ); \
+    attempt_curl_git_build() { \
+      rm -rf "$build_tmp/curl-${CURL_VERSION}" "$build_tmp/git-${GIT_VERSION}"; \
+      tar -xJf "$build_tmp/curl.tar.xz" -C "$build_tmp"; \
+      tar -xf "$build_tmp/git.tar.xz" -C "$build_tmp"; \
+      ( cd "$build_tmp/curl-${CURL_VERSION}" \
+        && ./configure \
+          --disable-shared --enable-static \
+          --disable-ftp --disable-file --disable-ldap --disable-ldaps \
+          --disable-rtsp --disable-dict --disable-telnet --disable-tftp \
+          --disable-pop3 --disable-imap --disable-smtp --disable-smb \
+          --disable-gopher --disable-mqtt \
+          --disable-scp --disable-sftp --without-libssh2 --without-libssh \
+          --disable-ntlm --disable-kerberos-auth --disable-negotiate-auth \
+          --disable-aws \
+          --disable-manual --disable-libcurl-option \
+          --disable-ipfs --disable-websockets \
+          --without-librtmp --without-libidn2 --without-brotli --without-zstd \
+          --without-nghttp2 --without-nghttp3 --without-ngtcp2 --without-libpsl \
+          --with-openssl \
+          --with-ca-bundle=/etc/ssl/certs/ca-certificates.crt \
+          --enable-http --enable-cookies --enable-ipv6 \
+          CC="$cc_wrapper" \
+        && make -j"$(nproc)" ) || return 1; \
+      curl_src="$build_tmp/curl-${CURL_VERSION}"; \
+      curl_libcurl="-Wl,-Bstatic -L${curl_src}/lib/.libs -lcurl -Wl,-Bdynamic -lssl -lcrypto -lz"; \
+      ( cd "$build_tmp/git-${GIT_VERSION}" \
+        && make -j"$(nproc)" prefix=/usr/local CC="$cc_wrapper" NO_TCLTK=YesPlease NO_GETTEXT=YesPlease \
+          CURL_CFLAGS="-I${curl_src}/include" CURL_LIBCURL="$curl_libcurl" install ) || return 1; \
+    }; \
+    build_ok=0; \
+    for tier in 1 2 3; do \
+      if attempt_curl_git_build; then build_ok=1; break; fi; \
+      if [ "$ccache_enabled" = "1" ]; then \
+        echo "::notice::curl/git build: tier $tier (ccache-over-distcc) failed; retrying with plain distcc (no cache)." >&2; \
+        unset CCACHE_REMOTE_STORAGE CCACHE_DIR CCACHE_PREFIX CCACHE_COMPILERCHECK CCACHE_EXTRAFILES CCACHE_BASEDIR; \
+        ccache_enabled=0; cc_wrapper="gcc"; \
+      elif [ "$distcc_enabled" = "1" ]; then \
+        echo "::notice::curl/git build: tier $tier (distcc) failed; retrying with a plain local compile." >&2; \
+        disable_distcc; cc_wrapper="$real_gcc"; \
+      else \
+        break; \
+      fi; \
+    done; \
+    if [ "$build_ok" != "1" ]; then \
+      echo "::error::curl/git build failed with no cache/distribution layer left to retry." >&2; \
+      exit 1; \
+    fi; \
     if [ "$ccache_enabled" = "1" ]; then ccache -s; fi; \
     rm -f /tmp/ccache-remote-toolchain-id; \
     git --version; \
@@ -532,7 +553,7 @@ RUN --mount=type=secret,id=distcc_potential_hosts \
       exit 1; \
     fi; \
     git ls-remote https://github.com/git/git.git HEAD >/dev/null; \
-    apt-get purge -y zlib1g-dev; \
+    apt-get purge -y libssl-dev zlib1g-dev; \
     apt-get autoremove -y; \
     rm -rf /var/lib/apt/lists/*; \
     for pkg in libcurl3t64-gnutls libcurl4-gnutls libcurl4-openssl-dev; do \
