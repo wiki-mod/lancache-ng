@@ -645,43 +645,12 @@ COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 # with `--dhcp-probe` (see deploy/*/docker-compose.yml's dhcp-probe
 # service `entrypoint:`), so no separate script needs to be copied in.
 
-# `adm` supplementary group: the UI process drops privileges to this
-# unprivileged user (see docker-entrypoint.sh's `setpriv --reuid=lancache
-# ... --init-groups`), but the dashboard/log-viewer must still READ the
-# proxy's nginx access log, mounted read-only at /var/log/nginx
-# (proxy-logs volume). nginx writes that log as mode 0640 owned by its own
-# runtime user and group `adm` -- the Debian convention for granting
-# log-read access. Without adm membership, uid 10001 is neither the owner
-# nor in the file's group, so every File::open on the log fails with
-# EACCES. That error is swallowed (parse_log_tail returns an empty Vec,
-# get_log_stats skips the unreadable file), so the Admin UI silently shows
-# an empty log viewer, 0% cache-hit-ratio, and empty "Recent requests" even
-# though caching is demonstrably working at the nginx level (issue #1068
-# item 6). `--init-groups` in the entrypoint is what carries this
-# supplementary group through the privilege drop; a bare `setpriv --regid`
-# alone would not.
-#
-# This group membership works across services/proxy's own base-OS choice
-# (Debian today, independently migrating to Alpine separately, issue #815)
-# because POSIX file-permission checks are GID-based, not name-based, and
-# `adm` resolves to the identical GID 4 on both Debian and Alpine (confirmed
-# live: Debian trixie's real running proxy image owns
-# /var/log/nginx/access.log as `nginx:adm` at GID 4; alpine:3.24's own
-# pre-defined `/etc/group` entry is also `adm:x:4:root,daemon`) -- no
-# GID mismatch regardless of which OS services/proxy itself ends up on.
-#
-# Alpine's base image ships no GNU-shadow-style `groupadd`/`useradd`
-# (confirmed live: neither binary exists on a bare alpine:3.24 container).
-# BusyBox's own `addgroup`/`adduser` applets cover user/primary-group
-# creation, but neither supports a `--groups`-style multiple-supplementary-
-# group flag at creation time (confirmed via their own --help output) --
-# supplementary membership is added afterward via addgroup's two-argument
-# `addgroup USER GROUP` form instead, matching services/watchdog's
-# already-established addgroup/adduser convention for this exact account
-# (uid/gid 10001, same fixed identity reused project-wide).
+# What: keeps the UI's fixed runtime gid at 10001.
+# Why: nginx's log files now land on this same shared reader gid, so the log
+#   viewer no longer needs an `adm`-specific compatibility path.
+# From: Issue #1427
 RUN addgroup -g 10001 lancache \
     && adduser -D -H -u 10001 -G lancache -s /sbin/nologin lancache \
-    && addgroup lancache adm \
     && mkdir -p /data /etc/nats \
     && chown -R lancache:lancache /data /etc/nats \
     && chmod +x /usr/local/bin/docker-entrypoint.sh

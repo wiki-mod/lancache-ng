@@ -36,7 +36,8 @@ for ((i = 0; i < ${#args[@]}; i++)); do
 done
 body="$(cat)"
 printf '%s' "$body" > "${MOCK_CURL_LOG:?}"
-[[ -n "$out" ]] && printf '%s' "${MOCK_CURL_BODY:-{\"secondary_id\":\"sec-1\"}}" > "$out"
+default_body='{"nats_url":"nats://primary.example:4222","nats_user":"sec-1","nats_password":"secret","consumer_name":"sec-1","pdns_api_key":"pdns-secret","ddns_tsig_key":"transfer-secret","dns_xfr_primary":"192.168.1.10:5300"}'
+[[ -n "$out" ]] && printf '%s' "${MOCK_CURL_BODY:-$default_body}" > "$out"
 printf '%s' "${MOCK_CURL_STATUS:-200}"
 MOCK
     chmod +x "$mock_bin/curl"
@@ -147,6 +148,15 @@ printf %s \"\$response\" > \"\$OUT_RESPONSE\"
 
     echo "$extracted_heredoc" | grep -q "start_period: 20s" \
         || fail "healthcheck start_period missing"
+
+    echo "$extracted_heredoc" | grep -q "DNS_REPLICATION_ROLE=secondary" \
+        || fail "secondary heredoc no longer runs PowerDNS in native secondary mode"
+
+    echo "$extracted_heredoc" | grep -q "NATS_RECORD_WRITES=0" \
+        || fail "secondary heredoc no longer disables local NATS record writes"
+
+    echo "$extracted_heredoc" | grep -q "DNS_XFR_PRIMARY=" \
+        || fail "secondary heredoc no longer receives the primary AXFR endpoint"
 
     # Verify the healthcheck block comes after the ports block and before restart
     # by checking line ordering in the extracted heredoc

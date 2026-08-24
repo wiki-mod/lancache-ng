@@ -129,6 +129,7 @@ jobs:
       pr_staging_available: ${{ steps.plan.outputs.pr_staging_available }}
       base_channel_tag: ${{ steps.plan.outputs.base_channel_tag }}
       workflow: ${{ steps.plan.outputs.workflow }}
+      workflow_reuse_scope: ${{ steps.plan.outputs.workflow_reuse_scope }}
       proxy: ${{ steps.plan.outputs.proxy }}
       dns_image: ${{ steps.plan.outputs.dns_image }}
       watchdog: ${{ steps.plan.outputs.watchdog }}
@@ -275,7 +276,7 @@ jobs:
         env:
           REPOSITORY: ${{ github.repository }}
           PR_TAG: ${{ needs.plan.outputs.image_tag }}
-          WORKFLOW_CHANGED: ${{ needs.plan.outputs.workflow }}
+          WORKFLOW_CHANGED: ${{ needs.plan.outputs.workflow_reuse_scope }}
           PROXY_TOUCHED: ${{ needs.plan.outputs.proxy }}
           DNS_TOUCHED: ${{ needs.plan.outputs.dns_image }}
           WATCHDOG_TOUCHED: ${{ needs.plan.outputs.watchdog }}

@@ -140,7 +140,7 @@ done <<< "$classifier_output"
 
 shared_keys=(
     proxy dns_image ui watchdog dhcp dhcp_proxy ntp syslog build_tools
-    deploy scripts setup_runtime workflow docs_only
+    deploy scripts setup_runtime workflow workflow_reuse_scope docs_only
 )
 for key in "${shared_keys[@]}"; do
     case "${shared[$key]:-}" in

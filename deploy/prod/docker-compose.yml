@@ -78,9 +78,10 @@ services:
     environment:
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       - PDNS_API_KEY=${PDNS_API_KEY}
-      # What: DDNS_ALLOW_FROM includes both IP_STANDARD and IP_SSL, overriding config/prod/dns-standard.env's empty value (env_file cannot interpolate ${VAR}, this `environment:` block can).
-      # Why: a DDNS update from the `dhcp` container always arrives with source = the host's primary LAN IP (IP_STANDARD); IP_SSL is a low-cost hedge, TSIG remains the real auth control.
-      # From: Issue #706
+      # What: DDNS_ALLOW_FROM admits the host IP used by Kea's D2 daemon.
+      # Why: dns-standard is the only DDNS write target; dns-ssl receives the
+      #   same records through PowerDNS AXFR/NOTIFY replication instead.
+      # From: Issue #1164
       - DDNS_ALLOW_FROM=${IP_STANDARD},${IP_SSL}
       - NATS_URL=nats://nats:4222
       - NATS_USER=${NATS_DNS_WRITER_USER:?NATS_DNS_WRITER_USER is required}
@@ -91,6 +92,8 @@ services:
       - NATS_PASSWORD_SHARED_SECRET=nats-dns-writer-password
       - NATS_CONSUMER=dns-standard
       - NATS_RECONCILER=1
+      - DNS_REPLICATION_ROLE=primary
+      - DNS_XFR_NOTIFY_TARGETS=dns-ssl:5300
     volumes:
       # What: shared-secrets volume, first-writer-wins for PDNS_API_KEY/DDNS_TSIG_KEY.
       # Why: every consumer of these secrets must agree on the same value.
@@ -113,10 +116,12 @@ services:
     ports:
       - "${IP_STANDARD}:53:53/udp"
       - "${IP_STANDARD}:53:53/tcp"
-      # What: publishes 5300/udp only, pdns_server's real DNS-protocol port.
-      # Why: lets the separate `dhcp` container's D2 daemon send real DNS UPDATE packets, which never arrive over UDP-only 53 to the recursor; TCP is not published since UPDATE fits one UDP datagram.
-      # From: Issue #706
+      # What: publishes pdns_server's DNS-protocol port for DDNS and AXFR.
+      # Why: Kea D2 sends TSIG-signed DNS UPDATEs over UDP; PowerDNS
+      #   secondaries need TCP for authoritative zone transfers.
+      # From: Issue #1164
       - "${IP_STANDARD}:5300:5300/udp"
+      - "${IP_STANDARD}:5300:5300/tcp"
     expose:
       - "8081"
       - "8082"
@@ -147,10 +152,7 @@ services:
     environment:
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       - PDNS_API_KEY=${PDNS_API_KEY}
-      # What: DDNS_ALLOW_FROM includes both IP_STANDARD and IP_SSL, same value as dns-standard's identical override.
-      # Why: DDNS update source is always the host's primary LAN IP regardless of which DNS server Kea's D2 daemon targets.
-      # From: Issue #706, this file's dns-standard service
-      - DDNS_ALLOW_FROM=${IP_STANDARD},${IP_SSL}
+      - DDNS_ALLOW_FROM=127.0.0.1
       - NATS_URL=nats://nats:4222
       - NATS_USER=${NATS_DNS_REPLICA_USER:?NATS_DNS_REPLICA_USER is required}
       - NATS_PASSWORD=${NATS_DNS_REPLICA_PASSWORD:-}
@@ -159,6 +161,9 @@ services:
       # From: Issue #858
       - NATS_PASSWORD_SHARED_SECRET=nats-dns-replica-password
       - NATS_CONSUMER=dns-ssl
+      - NATS_RECORD_WRITES=0
+      - DNS_REPLICATION_ROLE=secondary
+      - DNS_XFR_PRIMARY=dns-standard:5300
     volumes:
       # What: shared-secrets volume, first-writer-wins for PDNS_API_KEY/DDNS_TSIG_KEY.
       # Why: every consumer of these secrets must agree on the same value.
@@ -175,10 +180,6 @@ services:
     ports:
       - "${IP_SSL}:53:53/udp"
       - "${IP_SSL}:53:53/tcp"
-      # What: publishes 5300/udp only, same reasoning as dns-standard's identical port publish.
-      # Why: pdns_server's real DNS-protocol port for Kea's D2 daemon.
-      # From: Issue #706, this file's dns-standard service
-      - "${IP_SSL}:5300:5300/udp"
     expose:
       - "8081"
       - "8082"
@@ -245,7 +246,19 @@ services:
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
+        # What: prepares the shared watchdog log directory as gid 10001 + setgid.
+        # Why: watchdog.log is created by root via tee here, and upgraded
+        #   volumes may already contain older files that still need repairing.
+        # From: Issue #1427
         mkdir -p /var/log/lancache-watchdog
+        chgrp 10001 /var/log/lancache-watchdog
+        chmod 2775 /var/log/lancache-watchdog
+        find /var/log/lancache-watchdog -maxdepth 1 -type f -exec chgrp 10001 {} + -exec chmod g+r {} +
+        # What: constrains the tee-created watchdog.log mode to 0640.
+        # Why: gid 10001 keeps the collector read path working, while world
+        #   read permission is no longer needed once the shared group exists.
+        # From: Issue #1427
+        umask 0027
         exec /usr/local/bin/lancache-watchdog > >(tee -a /var/log/lancache-watchdog/watchdog.log) 2>&1
     env_file:
       - ../../config/prod/watchdog.env
@@ -370,7 +383,6 @@ services:
       - DHCP_DNS_PRIMARY=${IP_STANDARD}
       - DHCP_DNS_SECONDARY=${IP_SSL}
       - DHCP_DNS_SERVER_IP=${IP_STANDARD}
-      - DHCP_DNS_SERVER_IP_SSL=${IP_SSL}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       - KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}
       - DHCP_MODE=${DHCP_MODE:-disabled}
@@ -588,7 +600,19 @@ services:
           exit 1
         fi
         mkdir -p /etc/nats
+        # What: prepares nats-server's log directory as gid 10001 + setgid.
+        # Why: nats.log is created by the daemon itself, and upgraded
+        #   volumes may already contain older files that still need repairing.
+        # From: Issue #1427
         mkdir -p /var/log/lancache-nats
+        chgrp 10001 /var/log/lancache-nats
+        chmod 2775 /var/log/lancache-nats
+        find /var/log/lancache-nats -maxdepth 1 -type f -exec chgrp 10001 {} + -exec chmod g+r {} +
+        # What: constrains the daemon-created nats.log mode to 0640.
+        # Why: gid 10001 keeps the collector read path working, while world
+        #   read permission is no longer needed once the shared group exists.
+        # From: Issue #1427
+        umask 0027
         escape_sed() {
           printf '%s' "$$1" | sed 's/[\/&|]/\\&/g'
         }
@@ -800,13 +824,11 @@ services:
     container_name: lancache-syslog
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/syslog:${LANCACHE_IMAGE_TAG:-latest}
     profiles: [logging]
-    # What: runs as fixed non-root uid 10001 with exactly ONE added capability (DAC_READ_SEARCH), so fluent-bit can read root:root 0640 producer logs it doesn't own.
-    # Why: narrowest sufficient grant; the image's `setcap`-marked fluent-bit binary fails closed at exec without this -- see Dockerfile's own comment for the methodology behind ruling out other designs.
-    # From: Issue #1428 | PR #1431
+    # What: runs as fixed non-root uid 10001 with no added Linux capabilities.
+    # Why: every first-party producer log this collector tails is now created group-readable for gid 10001, so plain Unix permissions are sufficient.
+    # From: Issue #1427 | Issue #1428 | PR #1431
     cap_drop:
       - ALL
-    cap_add:
-      - DAC_READ_SEARCH
     depends_on:
       syslog-logs-permissions:
         condition: service_completed_successfully
@@ -1009,6 +1031,14 @@ services:
     command:
       - |
         set -e
+        # What: prepares netdata's log directory as owner netdata + gid 10001.
+        # Why: the daemon writes after dropping to its own user, while the
+        #   collector still needs group-based read access on new and old files.
+        # From: Issue #1427
+        mkdir -p /var/log/netdata
+        chown netdata:10001 /var/log/netdata
+        chmod 2775 /var/log/netdata
+        find /var/log/netdata -maxdepth 1 -type f -exec chgrp 10001 {} + -exec chmod g+r {} +
         cat > /etc/netdata/netdata.conf <<'CONF'
         [logs]
         daemon = /var/log/netdata/daemon.file.log

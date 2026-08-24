@@ -40,6 +40,29 @@ struct SnapshotContext {
     lock: Arc<AsyncMutex<()>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecordWriteMode {
+    Enabled,
+    Disabled,
+}
+
+impl RecordWriteMode {
+    fn from_env() -> Self {
+        Self::from_env_value(&env::var("NATS_RECORD_WRITES").unwrap_or_else(|_| "1".to_string()))
+    }
+
+    fn from_env_value(value: &str) -> Self {
+        match value.to_ascii_lowercase().as_str() {
+            "0" | "false" | "no" | "off" => Self::Disabled,
+            _ => Self::Enabled,
+        }
+    }
+
+    fn allows_writes(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
+
 // Missing/non-numeric/non-positive KEEP_KNOWN_GOOD_CONFIGS falls back to
 // `default` here at the env-parsing boundary; `zone_snapshots::
 // prune_snapshots`'s own `clamp_keep_n` re-clamps a raw 0 as a second,
@@ -183,6 +206,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    let record_write_mode = RecordWriteMode::from_env();
 
     let nats_reconciler = env::var("NATS_RECONCILER").ok();
 
@@ -372,6 +396,7 @@ async fn main() {
                                 &http_client,
                                 &snapshot_ctx,
                                 &mut applied_seqs,
+                                record_write_mode,
                             )
                             .await;
                             // #653 fix: what to do with THIS message is decided by the pure
@@ -647,6 +672,7 @@ async fn handle_message(
     http_client: &Arc<Client>,
     snapshot_ctx: &SnapshotContext,
     applied_seqs: &mut AppliedSequences,
+    record_write_mode: RecordWriteMode,
 ) -> HandleOutcome {
     let subject = msg.subject.as_ref();
 
@@ -656,6 +682,12 @@ async fn handle_message(
     }
 
     if subject == "lancache.dns.record" {
+        if !record_write_mode.allows_writes() {
+            println!(
+                "Acking DNS record message without local PowerDNS write because NATS_RECORD_WRITES is disabled on this node"
+            );
+            return HandleOutcome::Ack;
+        }
         return if handle_dns_record(msg, pdns_api_key, http_client, snapshot_ctx, applied_seqs)
             .await
         {
@@ -1113,6 +1145,28 @@ mod tests {
         let record: DNSRecord = serde_json::from_str(json).expect("DNSRecord must deserialize");
         assert_eq!(record.action, "replace");
         assert_eq!(record.zone, "lan");
+    }
+
+    // What: covers the secondary-node NATS record-write gate.
+    // Why: PowerDNS AXFR is authoritative for secondaries, so this parser
+    //   decides whether a node can apply independent local record writes.
+    // From: Issue #1164
+    #[test]
+    fn record_write_mode_disables_common_false_spellings() {
+        for value in ["0", "false", "no", "off"] {
+            assert_eq!(
+                RecordWriteMode::from_env_value(value),
+                RecordWriteMode::Disabled
+            );
+        }
+        assert_eq!(
+            RecordWriteMode::from_env_value("1"),
+            RecordWriteMode::Enabled
+        );
+        assert_eq!(
+            RecordWriteMode::from_env_value("unexpected"),
+            RecordWriteMode::Enabled
+        );
     }
 
     // REPLACE action must produce a zone update with all required fields (ttl, records)

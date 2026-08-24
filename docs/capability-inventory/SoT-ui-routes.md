@@ -189,7 +189,11 @@ Routes (from `main.rs`): `GET /dhcp`, `POST /dhcp/mode`, `POST /dhcp/proxy`, `PO
 - **#646** (open, spec) -- "define full Kea DHCP Admin UI feature scope": explicitly frames the current subnet/reservation/option/snapshot feature set as built incrementally without one agreed picture of the intended full surface, and asks (among other things) whether DHCP-DDNS follow-through and real behavior test coverage match what's actually verified -- this audit's E2E-gap findings above (subnet/option/mode/proxy/rollback routes untested end-to-end) are exactly the kind of evidence #646 is asking for.
 - **#647** (open, spec) -- sibling spec issue for dnsmasq-proxy mode, including an unresolved question about whether `dhcp-proxy=${UPSTREAM_DHCP_IP}` was an orphaned fragment of a never-finished real DHCP-relay capability (not just dead code) -- directly relevant to `update_dhcp_proxy`'s `upstream_dhcp_ip` field in this file.
 - **#837** (open) -- E2E gap for `POST /dhcp/snapshot/rollback`, confirmed accurate above.
-- **#770** (open, known-limitation) -- DDNS lease records only reach `dns-standard`, not `dns-ssl`, because Kea's `dns-servers` config is a failover pair, not a fan-out list. This is a Kea-DDNS-internal limitation, not something `dhcp.rs` itself could fix without a DDNS architecture change; relevant context for anyone reading this file's lease-management routes and wondering why a Kea-issued lease's DNS record doesn't appear on both DNS nodes.
+- **#770/#1164** -- DDNS lease records now intentionally target only
+  `dns-standard`, because Kea's `dns-servers` config is a failover pair, not a
+  fan-out list. `dns-ssl` and remote DNS secondaries receive those records
+  through native PowerDNS AXFR/NOTIFY, so `dhcp.rs` must not reintroduce a
+  second Kea-side DDNS writer.
 - **#836** (open) -- "setup.sh reset-to-last-known-good-config: complete the dns/pdns service target" -- the CLI-side sibling of this file's own `rollback_kea_snapshot`/`dns_snapshots.rs`'s `rollback_zone_snapshot`, tracking that the CLI rescue path doesn't yet cover every service target the Admin UI's own rollback routes do.
 - **#840** (open, umbrella) -- general DHCP (Kea + dnsmasq-proxy) scattered feature/bug/research tracker; this file's open E2E gaps and #646/#647 above are all threads that could reasonably roll up under it.
 

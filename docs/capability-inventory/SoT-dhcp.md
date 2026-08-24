@@ -305,23 +305,20 @@ daemon matches an update's target FQDN against each `ddns-domains` entry's
 name parses as a non-fully-qualified label and D2 silently discards every
 update with a "no match" error instead of sending it (confirmed
 empirically against a real Kea 2.6.3 instance, issue #706). Every
-`dns-servers` array lists `${DHCP_DNS_SERVER_IP}` (port `${DHCP_DDNS_PORT}`,
-default `5300` -- `pdns_server`'s real DNS-protocol port, not `53`, which is
-`pdns_recursor` and does not relay the DNS UPDATE opcode) then
-`${DHCP_DNS_SERVER_IP_SSL}` in that fixed order -- Kea's D2 treats this as a
-**first-to-last failover list, not fan-out**, so `dns-ssl` only ever
-receives a DDNS record if `dns-standard` is unreachable. This is a known,
-already-open architectural gap (issue #770), re-confirmed still present
-here, not proposed for a fix in this inventory.
+`dns-servers` array lists only `${DHCP_DNS_SERVER_IP}` (port
+`${DHCP_DDNS_PORT}`, default `5300` -- `pdns_server`'s real DNS-protocol
+port, not `53`, which is `pdns_recursor` and does not relay the DNS UPDATE
+opcode). This deliberately avoids the old two-entry list: Kea's D2 treats
+`dns-servers` as a **first-to-last failover list, not fan-out**, so
+`dns-standard` must be the single DDNS writer and `dns-ssl`/remote
+secondaries receive the result through native PowerDNS AXFR/NOTIFY.
 
-`DHCP_DDNS_PORT`'s only handling is a bare default
-(`: "${DHCP_DDNS_PORT:=5300}"`) -- no `is_ipv4`-style numeric gate -- and it
-is spliced **unquoted** into the JSON template (`"port": ${DHCP_DDNS_PORT}`,
-appearing once per `dns-servers` entry × 19 zone entries × 2 servers each).
-A non-numeric value renders syntactically invalid JSON, and because the D2
-daemon's death is invisible to the Compose healthcheck (§1's blind `wait`
-finding), the resulting startup failure would be completely silent. This
-is bug-hunt finding #2, already in `docs/bug-hunt/dhcp.md`.
+`DHCP_DDNS_PORT` defaults to `5300`, is validated as a numeric 1-65535 port in
+`services/dhcp/entrypoint.sh`, and is then spliced **unquoted** into the JSON
+template (`"port": ${DHCP_DDNS_PORT}`, appearing once per `dns-servers` entry
+× 19 zone entries × 1 server each). The field remains unquoted because Kea
+expects a JSON number; the pre-render gate closes the original bug-hunt #2
+failure mode where a typo produced invalid D2 JSON.
 
 ## 7. Kea Control Agent API surface actually exercised by the Admin UI
 
@@ -451,10 +448,11 @@ mocked unit coverage (already tracked as issue #837, open, v0.3.0).
 - **#556** (DHCP Admin UI missing lease release / custom option management)
   -- CLOSED, correctly: both gaps are implemented.
 - **#646** (spec: define full Kea DHCP Admin UI feature scope) -- OPEN,
-  v0.3.0. Still no written decision on DDNS follow-through end-state,
-  snapshot/rollback completeness, or coverage parity.
-- **#770** (DDNS `dns-servers` is failover, not fan-out) -- OPEN, re-confirmed
-  still present (§6).
+  v0.3.0. #1164 settles the DDNS follow-through end-state as single-writer
+  DDNS plus native PowerDNS AXFR/NOTIFY; snapshot/rollback completeness and
+  coverage parity still remain open.
+- **#770 / #1164** (DDNS `dns-servers` is failover, not fan-out) -- addressed
+  by the single-writer + native PowerDNS AXFR/NOTIFY design (§6).
 - **#773** (Kea file-logger path restriction outage) -- CLOSED; the fix
   (`/var/log/kea`, §4) is present and correct in current code.
 - **#837** (no real E2E test for the Admin UI's own rollback route) -- OPEN,
@@ -484,8 +482,8 @@ lease listing/release, mode switching, DDNS forward+reverse, known-good
 snapshot + two independent rollback paths, LAN-exposure firewalling,
 cross-container shared-secret convergence) is substantially built and
 mostly real-E2E-tested against actual Kea/DHCP traffic. Concrete open gaps,
-all already tracked except the last: the DDNS fan-out-vs-failover
-limitation (#770); the missing real E2E test for the Admin UI's own
+all already tracked except the last: native AXFR/NOTIFY convergence still
+needs its own real transfer proof (#1164); the missing real E2E test for the Admin UI's own
 rollback route (#837); the `migrate_dhcp4_config` test-coverage gap (no
 issue found, tracked only in `docs/bug-hunt/dhcp.md` finding #3); and the
 compose-healthcheck placeholder-detection drift newly filed from this pass
