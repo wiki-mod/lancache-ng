@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # First-party build of the `netdata` service, replacing the previously
-# pulled third-party `netdata/netdata` Docker image (Debian trixie based,
-# see issue #1304). netdata does not publish (and per its own
+# pulled third-party `netdata/netdata` Docker image (Debian trixie based).
+# netdata does not publish (and per its own
 # packaging/PLATFORM_SUPPORT.md, has never published) an Alpine-based
 # Docker image -- this Dockerfile instead installs netdata's own
 # officially-supported static musl release asset (a self-extracting
