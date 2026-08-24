@@ -175,7 +175,7 @@ push_reuse_decide() {
   fi
 
   # What: workflow_reuse_scope covers the full revision..github_sha span.
-  # Why: closes PR #1378's before..sha-only gap; job-scoped per G14.
+  # Why: closes a prior before..sha-only gap; job-scoped per G14.
   # From: Issue #1095 (G14) | PR #1378
   local workflow_flag
   workflow_flag="$(grep -m1 '^workflow_reuse_scope=' <<<"$classify_output" | cut -d= -f2)"
