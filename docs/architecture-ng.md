@@ -708,7 +708,7 @@ one) rather than being a given.
   (green/yellow/red) plus a cache-disk usage indicator, persistently visible
   in the dashboard's "Service health" card, live-polled every 10 seconds
   (issue #870; see the "Status" note under Watchdog above)
-- Netdata alarm forwarding (bug hunt #849, `docs/bug-hunt/observability.md`
+- Netdata alarm forwarding (bug-hunt #849 observability pass,
   finding #3): the `netdata` container's own `health.d` alarms (disk usage,
   CPU, memory, ...) previously had no notification integration or Admin UI
   surface of their own. The `netdata:` service's compose command block now
