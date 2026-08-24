@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Step 4 (issue #1095): per-service build/scan reuse-on-push decision for
+# Step 4: per-service build/scan reuse-on-push decision for
 # `build-push.yml`'s `build`/`build-arm64` jobs. On a push to a branch ref,
 # an unchanged service should retag its already-published channel image
 # (nightly/latest) instead of paying for a real rebuild+rescan -- but ONLY
@@ -13,9 +13,9 @@
 # stalled on (2026-07-23) -- `merge-manifests` has no cross-run lock and push
 # runs are deliberately un-throttled (#979/#987), so in a tight burst the
 # predecessor image is frequently not published yet, making that design's
-# real-world hit rate poor exactly when relief is most needed (see #1095's
-# own comment thread). A channel tag (nightly/latest) already exists before
-# this run starts, so there is nothing to wait for and no race.
+# real-world hit rate poor exactly when relief is most needed (see this
+# issue's own comment thread). A channel tag (nightly/latest) already
+# exists before this run starts, so there is nothing to wait for and no race.
 #
 # WHY that alone is NOT sufficient (this is the part issue #1290's own first
 # implementation got wrong, corrected during this same investigation, 2026-07-30):
@@ -43,7 +43,7 @@
 # CONTENT IDENTITY across the whole span back to the image's actual source
 # commit, which ancestry alone does not. Reuse requires all three; anything
 # missing, unreadable, ambiguous, or showing a real change fails closed to a
-# real rebuild. This mirrors the exact combination of primitives issue #1095
+# real rebuild. This mirrors the exact combination of primitives this issue
 # names as this design's own correctness requirement (see its "C-7" and
 # "Note on Step 4's actual implementation" sections) and issue #1290's
 # corrected implementation (in progress in parallel; both are expected to
@@ -174,22 +174,13 @@ push_reuse_decide() {
     return 0
   fi
 
-  # A caller's own before..sha diff (the immediately preceding push only,
-  # see this file's decide_one() caller in build-push.yml) cannot see a
-  # build-affecting workflow change that landed in an EARLIER push, before
-  # the channel's own last refresh -- the exact revision-span gap two Codex
-  # review threads on PR #1378 found. classify_output above already covers
-  # the FULL revision..github_sha span (not just before..sha), and
-  # classify-image-impact.sh already emits a "workflow" key alongside every
-  # per-service key for that identical span -- reading it here costs nothing
-  # extra (no second classify invocation) and closes the gap: reuse is only
-  # safe when no build-affecting workflow/composite-action file changed
-  # anywhere between the channel image's own recorded revision and
-  # github_sha, not merely in the last push.
+  # What: workflow_reuse_scope covers the full revision..github_sha span.
+  # Why: closes a prior before..sha-only gap; job-scoped per G14.
+  # From: Issue #1095 (G14) | PR #1378
   local workflow_flag
-  workflow_flag="$(grep -m1 '^workflow=' <<<"$classify_output" | cut -d= -f2)"
+  workflow_flag="$(grep -m1 '^workflow_reuse_scope=' <<<"$classify_output" | cut -d= -f2)"
   if [[ "$workflow_flag" != "false" ]]; then
-    echo "push_reuse_decide: classify-image-impact.sh reported 'workflow=${workflow_flag:-<missing>}' for ${revision}..${github_sha} -- a build-affecting workflow/composite-action file changed somewhere in the full revision span (not just the immediately preceding push) -- failing closed to a real rebuild." >&2
+    echo "push_reuse_decide: classify-image-impact.sh reported 'workflow_reuse_scope=${workflow_flag:-<missing>}' for ${revision}..${github_sha} -- a build-affecting workflow/composite-action file changed somewhere in the full revision span (not just the immediately preceding push) -- failing closed to a real rebuild." >&2
     printf 'false\n'
     return 0
   fi
