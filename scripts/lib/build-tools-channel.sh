@@ -58,3 +58,16 @@ resolve_build_tools_channel() {
             ;;
     esac
 }
+
+# What: derives the concrete `ghcr.io/.../build-tools:<channel>` image ref for a target ref.
+# Why: local/helper callers can then reuse the same branch-to-channel policy without retyping the
+#   repository path plus `latest`/`nightly` mapping as a second, drifting literal.
+# From: Issue #1095
+resolve_build_tools_image_ref() {
+    local channel_ref="$1"
+    local repository="${2:-wiki-mod/lancache-ng}"
+    local channel
+
+    channel="$(resolve_build_tools_channel "$channel_ref")"
+    printf 'ghcr.io/%s/build-tools:%s\n' "$repository" "$channel"
+}

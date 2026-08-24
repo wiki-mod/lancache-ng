@@ -13,13 +13,22 @@ if ! script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; then
     echo "::error::Failed to resolve the script's own directory." >&2
     exit 1
 fi
+repo_root="$(cd "$script_dir/../../.." && pwd)"
 # shellcheck source=scripts/lib/ghcr-retry.sh
 source "$script_dir/../../lib/ghcr-retry.sh"
+# shellcheck source=scripts/lib/build-tools-channel.sh
+source "$script_dir/../../lib/build-tools-channel.sh"
 # shellcheck source=scripts/lib/full-setup-domain-probe.sh
 source "$script_dir/../../lib/full-setup-domain-probe.sh"
 
 compose_file="${FULL_SETUP_COMPOSE_FILE:-deploy/full-setup/docker-compose.yml}"
-client_tools_image="${FULL_SETUP_CLIENT_TOOLS_IMAGE:-ghcr.io/wiki-mod/lancache-ng/build-tools:latest}"
+# What: resolves the current git branch to the matching build-tools channel image.
+# Why: this simulation's fallback client-tools image should follow the shared build-tools channel
+#   policy rather than carrying its own separate literal `:latest` default.
+# From: Issue #1095
+current_ref="$(git -C "$repo_root" branch --show-current 2>/dev/null || true)"
+default_client_tools_image="$(resolve_build_tools_image_ref "$current_ref")"
+client_tools_image="${FULL_SETUP_CLIENT_TOOLS_IMAGE:-$default_client_tools_image}"
 domain_file="${FULL_SETUP_DOMAIN_FILE:-services/dns/cdn-domains.txt}"
 client_domain="${FULL_SETUP_CLIENT_DOMAIN:-}"
 proxy_ip="${VALIDATION_PROXY_IP:-172.30.99.2}"

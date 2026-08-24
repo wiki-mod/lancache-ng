@@ -166,3 +166,33 @@ runs:
           -w /work \
           "${{ inputs.build-tools-image }}" \
           timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-mutable-refs.sh --only repository-case
+
+    - name: Check external action pin baseline
+      # What: runs the checked-in external Action pin inventory/baseline.
+      # Why: new direct third-party pins or count growth in `.github/**` must fail closed even
+      #   where a wrapper is not yet warranted, so the maintenance surface cannot silently spread.
+      # From: Issue #1095
+      shell: bash
+      run: |
+        set -euo pipefail
+        docker run --rm \
+          --user "$(id -u):$(id -g)" \
+          -v "$PWD:/work:ro" \
+          -w /work \
+          "${{ inputs.build-tools-image }}" \
+          timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-mutable-refs.sh --only action-pin-baseline
+
+    - name: Check remaining build-tools fallback default sites
+      # What: runs the approved-site baseline for literal `build-tools:latest` fallback defaults.
+      # Why: the shared channel helper removed two prior shell-script literals, and this keeps new
+      #   drift from reappearing outside the intentional remaining fallback sites.
+      # From: Issue #1095
+      shell: bash
+      run: |
+        set -euo pipefail
+        docker run --rm \
+          --user "$(id -u):$(id -g)" \
+          -v "$PWD:/work:ro" \
+          -w /work \
+          "${{ inputs.build-tools-image }}" \
+          timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-mutable-refs.sh --only build-tools-default-sites

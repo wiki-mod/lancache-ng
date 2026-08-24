@@ -11,12 +11,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || pwd)"
 # shellcheck source=scripts/lib/reserve-validation-subnet.sh
 source "$SCRIPT_DIR/../lib/reserve-validation-subnet.sh"
+# shellcheck source=scripts/lib/build-tools-channel.sh
+source "$SCRIPT_DIR/../lib/build-tools-channel.sh"
 UI_MANIFEST="services/ui/Cargo.toml"
+# What: resolves the current git branch to the matching build-tools channel image.
+# Why: keeps this local helper on the same `master` -> `latest` / everything-else -> `nightly`
+#   policy as the shared build-tools selector instead of a second hardcoded `:latest` default.
+# From: Issue #1095
+CURRENT_REF="$(git -C "$ROOT_DIR" branch --show-current 2>/dev/null || true)"
+DEFAULT_BUILD_TOOLS_IMAGE="$(resolve_build_tools_image_ref "$CURRENT_REF")"
 # Intentional developer/check default: use the repository build-tools image.
 # That image is the contract for local and CI-style UI checks and preinstalls
 # rustfmt, clippy, sccache, and PATH smoke tests. This is separate from pinned
 # production Dockerfiles.
-RUST_IMAGE="${RUST_IMAGE:-ghcr.io/wiki-mod/lancache-ng/build-tools:latest}"
+RUST_IMAGE="${RUST_IMAGE:-$DEFAULT_BUILD_TOOLS_IMAGE}"
 NETWORK_NAME=""
 REDIS_CONTAINER=""
 REDIS_URL="${SCCACHE_REDIS_URL:-}"
@@ -37,7 +45,7 @@ Run local Docker-based Rust checks for the Admin UI without requiring host rustc
 
 Options:
   --manifest <path>         Cargo manifest path (default: services/ui/Cargo.toml)
-  --rust-image <image>      Rust Docker image to use (default: ghcr.io/wiki-mod/lancache-ng/build-tools:latest)
+  --rust-image <image>      Rust Docker image to use (default: ${DEFAULT_BUILD_TOOLS_IMAGE})
   --fmt                     Run cargo fmt --all -- --check (default)
   --no-fmt                  Skip cargo fmt
   --check                   Run cargo check (default)
