@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Step 4 (issue #1095): per-service build/scan reuse-on-push decision for
+# Step 4: per-service build/scan reuse-on-push decision for
 # `build-push.yml`'s `build`/`build-arm64` jobs. On a push to a branch ref,
 # an unchanged service should retag its already-published channel image
 # (nightly/latest) instead of paying for a real rebuild+rescan -- but ONLY
@@ -13,9 +13,9 @@
 # stalled on (2026-07-23) -- `merge-manifests` has no cross-run lock and push
 # runs are deliberately un-throttled (#979/#987), so in a tight burst the
 # predecessor image is frequently not published yet, making that design's
-# real-world hit rate poor exactly when relief is most needed (see #1095's
-# own comment thread). A channel tag (nightly/latest) already exists before
-# this run starts, so there is nothing to wait for and no race.
+# real-world hit rate poor exactly when relief is most needed (see this
+# issue's own comment thread). A channel tag (nightly/latest) already
+# exists before this run starts, so there is nothing to wait for and no race.
 #
 # WHY that alone is NOT sufficient (this is the part issue #1290's own first
 # implementation got wrong, corrected during this same investigation, 2026-07-30):
@@ -43,7 +43,7 @@
 # CONTENT IDENTITY across the whole span back to the image's actual source
 # commit, which ancestry alone does not. Reuse requires all three; anything
 # missing, unreadable, ambiguous, or showing a real change fails closed to a
-# real rebuild. This mirrors the exact combination of primitives issue #1095
+# real rebuild. This mirrors the exact combination of primitives this issue
 # names as this design's own correctness requirement (see its "C-7" and
 # "Note on Step 4's actual implementation" sections) and issue #1290's
 # corrected implementation (in progress in parallel; both are expected to
