@@ -1,0 +1,47 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# What: files/updates/closes a standing issue for a scheduled run's result.
+# Why: nightly-refresh.yml only reports its own dispatch call, never the
+#   dispatched run's real outcome -- confirmed live, nightly frozen 9 days.
+# From: Issue #1095
+
+name: Report scheduled-CI status
+description: >-
+  File, update, or close the single standing "nightly-broken" tracking
+  issue based on a scheduled/dispatched run's real outcome. Must be
+  invoked from a job with issues:write that runs with if: always().
+
+inputs:
+  outcome:
+    description: "success or failure (compute from needs.*.result in the caller)"
+    required: true
+  scope:
+    description: "Human label for the pipeline, e.g. 'nightly channel promote'"
+    required: true
+  failed_jobs:
+    description: "Space-separated names of the jobs that failed (empty on success)"
+    required: false
+    default: ""
+  project_pat:
+    description: >-
+      secrets.PROJECT_AUTOMATION_PAT -- used only for the separate
+      project-board-add call (GITHUB_TOKEN cannot write Projects v2).
+      Left empty, the issue is simply not added to the board.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PROJECT_PAT: ${{ inputs.project_pat }}
+        REPO: ${{ github.repository }}
+        OUTCOME: ${{ inputs.outcome }}
+        SCOPE: ${{ inputs.scope }}
+        FAILED_JOBS: ${{ inputs.failed_jobs }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: bash "${GITHUB_ACTION_PATH}/report.sh"
