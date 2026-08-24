@@ -312,6 +312,8 @@ RUN --mount=type=secret,id=sccache_redis_url \
     fi; \
     cp "target/${musl_target}/release/lancache-watchdog" /build/lancache-watchdog-out
 
+FROM ghcr.io/wiki-mod/lancache-ng/utilities@sha256:718af4cf8f1352cee341e851cecb9821033de9a5c7804c64e1c6217b62c79186 AS utilities-tools
+
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 LABEL org.opencontainers.image.description="lancache-ng watchdog: compiled Rust health-check/restart daemon plus the separate file-retention sidecar entrypoint."
@@ -323,17 +325,12 @@ LABEL org.opencontainers.image.description="lancache-ng watchdog: compiled Rust 
 RUN apk upgrade --no-cache && \
     apk add --no-cache \
     bash \
-    curl \
     ca-certificates \
-    findutils \
     coreutils \
     util-linux \
     nano \
-    lsof \
-    ripgrep \
     zstd
-# What: bash/findutils/coreutils/util-linux/zstd/ca-certificates plus
-# nano/lsof/ripgrep/curl.
+# What: bash/coreutils/util-linux/zstd/ca-certificates plus nano.
 # Why: retention.sh (find -printf, realpath -m, stat -c, zstd) and
 # retention-entrypoint.sh (setpriv, from util-linux) still ship as bash
 # scripts in this same image -- see this file's own ENTRYPOINT comment
@@ -342,19 +339,46 @@ RUN apk upgrade --no-cache && \
 # compiled Rust binary parses JSON via serde internally (never shells out
 # to jq), and no remaining script in this image ever called it -- confirmed
 # by grepping healthcheck.sh/retention.sh/retention-entrypoint.sh, whose
-# only real tool usage is find/realpath/stat/zstd/setpriv. `curl` is kept
-# for operator-manual HTTP troubleshooting only (matches nano/lsof/ripgrep;
-# no script in this image calls it either), the same "internal/operational
-# HTTP calls" convention services/dns/Dockerfile's own comment documents
-# for proxy/dhcp/ui/watchdog. ca-certificates is a direct apk install here,
-# not copied from the shared `utilities` image (issue #1556): the compiled
+# only real tool usage is find/realpath/stat/zstd/setpriv. ca-certificates
+# is a direct apk install here, not copied from the shared `utilities`
+# image: the compiled
 # binary's reqwest client uses rustls-tls-native-roots (Cargo.toml), which
 # reads this image's own OS trust store, and a fresh apk-installed bundle
 # stays current independently of whichever utilities-image version might
 # otherwise be copied in.
-# From: Issue #842 | Issue #1360 (retention.sh extraction)
+# From: Issue #842 | Issue #1360 (retention.sh extraction) | Issue #1556
 #
-# nano/lsof/ripgrep: in-container troubleshooting tools -- see
+# What: curl/findutils/lsof/ripgrep come from the shared utilities image.
+# Why: same alpine:3.24 digest as utilities; keep the duplicated common
+# tools in one image instead of separately apk-installing them here too.
+# From: Issue #1556
+#
+# What: removes the BusyBox symlinks at these paths before the real binaries land.
+# Why: COPY follows an existing symlink target instead of replacing the link,
+#   which would overwrite /bin/busybox and break later /bin/sh-based RUNs.
+# From: Issue #1556
+RUN rm -f /usr/bin/find /usr/bin/xargs /usr/bin/lsof
+
+COPY --from=utilities-tools /usr/local/bin/curl /usr/local/bin/curl
+COPY --from=utilities-tools /usr/bin/find /usr/bin/find
+COPY --from=utilities-tools /usr/bin/xargs /usr/bin/xargs
+COPY --from=utilities-tools /usr/bin/lsof /usr/bin/lsof
+COPY --from=utilities-tools /usr/bin/rg /usr/bin/rg
+COPY --from=utilities-tools /usr/lib/libgcc_s.so.1 /usr/lib/libgcc_s.so.1
+COPY --from=utilities-tools /usr/lib/libpcre2-8.so.0* /usr/lib/
+COPY --from=utilities-tools /usr/local/bin/verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
+
+# What: verifies the copied binaries actually run.
+# Why: a missing shared-library dependency fails at exec time, not at COPY
+# time; the lsof check is delegated to a shared script (see that file).
+# From: Issue #1613 | Issue #1556
+RUN set -euo pipefail; \
+    find . -maxdepth 0 -printf '%f\n' >/dev/null; \
+    rg --version >/dev/null; \
+    curl --version >/dev/null; \
+    sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
+
+# nano/lsof/ripgrep/curl: in-container troubleshooting tools -- see
 # services/proxy/Dockerfile's identical comment for the full rationale.
 ENV EDITOR=nano
 ENV VISUAL=$EDITOR
