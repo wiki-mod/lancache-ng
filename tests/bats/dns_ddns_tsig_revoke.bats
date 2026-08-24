@@ -39,6 +39,12 @@ setup() {
 pdnsutil() {
     echo "$*" >> "$pdnsutil_calls"
     [ "${PDNSUTIL_FAIL_ALL:-0}" = "1" ] && return 1
+    if [ "${PDNSUTIL_CREATE_SECONDARY_EXISTS:-0}" = "1" ] \
+        && [ "${2:-}" = "zone" ] \
+        && [ "${3:-}" = "create-secondary" ]; then
+        echo "Zone '${4:-unknown}' exists already" >&2
+        return 1
+    fi
     return 0
 }
 
@@ -90,4 +96,47 @@ pdnsutil() {
 
     [ "$status" -ne 0 ]
     [[ "$output" == *"FATAL: DDNS_TSIG_KEY is still set to a default placeholder"* ]]
+}
+
+@test "import_ddns_tsig_key imports the shared key without granting DDNS writes" {
+    DDNS_TSIG_KEY="a-real-generated-shared-secret-not-a-placeholder"
+    run import_ddns_tsig_key
+
+    [ "$status" -eq 0 ]
+    grep -qF -- "--config-dir=/etc/pdns/auth import-tsig-key lancache-ddns-key hmac-sha256 a-real-generated-shared-secret-not-a-placeholder" "$pdnsutil_calls"
+    ! grep -qF "TSIG-ALLOW-DNSUPDATE" "$pdnsutil_calls"
+}
+
+@test "_dns_configure_primary_zone_replication sets serial and notify metadata for a primary zone" {
+    DNS_XFR_NOTIFY_TARGETS="dns-ssl:5300,192.0.2.53:5300"
+    run _dns_configure_primary_zone_replication lan
+
+    [ "$status" -eq 0 ]
+    grep -qF -- "--config-dir=/etc/pdns/auth zone set-kind lan primary" "$pdnsutil_calls"
+    grep -qF -- "--config-dir=/etc/pdns/auth set-meta lan SOA-EDIT-DNSUPDATE INCREASE" "$pdnsutil_calls"
+    grep -qF -- "--config-dir=/etc/pdns/auth set-meta lan SOA-EDIT-API INCREASE" "$pdnsutil_calls"
+    grep -qF -- "--config-dir=/etc/pdns/auth set-meta lan NOTIFY-DNSUPDATE 1" "$pdnsutil_calls"
+    grep -qF -- "--config-dir=/etc/pdns/auth tsigkey activate lan lancache-ddns-key primary" "$pdnsutil_calls"
+    grep -qF -- "--config-dir=/etc/pdns/auth set-meta lan ALSO-NOTIFY dns-ssl:5300 192.0.2.53:5300" "$pdnsutil_calls"
+    [ "$(grep -cF -- "--config-dir=/etc/pdns/auth set-meta lan ALSO-NOTIFY" "$pdnsutil_calls")" -eq 1 ]
+}
+
+@test "_dns_ensure_secondary_zone creates a secondary without granting local DDNS writes" {
+    run _dns_ensure_secondary_zone lan 192.0.2.10:5300
+
+    [ "$status" -eq 0 ]
+    grep -qF -- "--config-dir=/etc/pdns/auth zone create-secondary lan 192.0.2.10:5300" "$pdnsutil_calls"
+    grep -qF -- "--config-dir=/etc/pdns/auth tsigkey activate lan lancache-ddns-key secondary" "$pdnsutil_calls"
+    ! grep -qF "TSIG-ALLOW-DNSUPDATE" "$pdnsutil_calls"
+}
+
+@test "_dns_ensure_secondary_zone repairs an existing zone back to the primary" {
+    PDNSUTIL_CREATE_SECONDARY_EXISTS=1
+    run _dns_ensure_secondary_zone lan 192.0.2.10:5300
+
+    [ "$status" -eq 0 ]
+    grep -qF -- "--config-dir=/etc/pdns/auth zone create-secondary lan 192.0.2.10:5300" "$pdnsutil_calls"
+    grep -qF -- "--config-dir=/etc/pdns/auth zone set-kind lan secondary" "$pdnsutil_calls"
+    grep -qF -- "--config-dir=/etc/pdns/auth zone change-primary lan 192.0.2.10:5300" "$pdnsutil_calls"
+    grep -qF -- "--config-dir=/etc/pdns/auth tsigkey activate lan lancache-ddns-key secondary" "$pdnsutil_calls"
 }

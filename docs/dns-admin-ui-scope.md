@@ -56,7 +56,7 @@ restart every consumer of a shared env var, not just the DNS containers.
 | `DDNS_TSIG_KEY` / `DDNS_TSIG_NAME` / `DDNS_TSIG_ALGORITHM` | TSIG key material, imported on every start via `configure_ddns_tsig()`. The per-zone `TSIG-ALLOW-DNSUPDATE` metadata this key enables is **conditionally** re-applied every start, not unconditionally: `configure_ddns_tsig()` sets it (the default) or explicitly clears it, based on the `ddns-allow-unsigned-updates` Admin UI toggle described in 1b below — see that row for the real mechanism |
 | `LOG_QUERIES` | Query logging on/off |
 | `ROOT_ZONE_MIRROR` (`ENABLE_ROOT_MIRROR` in `docs/architecture-ng.md`) | AXFR root zone mirror |
-| `ENABLE_SECONDARY` / `NATS_BIND_IP` | **Not PowerDNS-native secondary/AXFR wiring — see 3a below.** `ENABLE_SECONDARY` is documentation-only narrative in `docs/architecture-ng.md` for when to include `deploy/prod/docker-compose.nats-secondary.yml`; no script reads it. `NATS_BIND_IP` is the one real env var here, consumed directly by that compose override to bind NATS to a trusted interface for the NATS-based secondary sync (3b) |
+| `NATS_BIND_IP` / `NATS_ADVERTISE_URL` | **Not PowerDNS-native secondary/AXFR wiring — see 3a below.** `DNS_REPLICATION_ROLE` and `DNS_XFR_PRIMARY` control zone transfer behavior. `NATS_BIND_IP` and `NATS_ADVERTISE_URL` only publish/advertise the NATS registration/event path for remote secondary setup; the old `ENABLE_SECONDARY` narrative name is not read by setup, Compose, DNS, or UI code. |
 | `NATS_URL` / `NATS_USER` / `NATS_PASSWORD` / `NATS_TOKEN` / `NATS_CONSUMER` / `NATS_RECONCILER` | This node's own NATS connection identity for the `nats-subscriber` process |
 | `KEEP_KNOWN_GOOD_CONFIGS` / `DNS_CONFIG_SNAPSHOT_DIR` | Known-good config snapshot retention/location (see #415) |
 
@@ -128,9 +128,9 @@ instance here ever created (only the narrower per-octet
 rejected with NOTAUTH — see #768 for the live-verified failure, root cause,
 and fix (one `ddns-domains` entry per real `PRIVATE_REVERSE_ZONES` subzone,
 instead of the one non-existent catch-all). Reverse/PTR DDNS updates now
-succeed against the correct per-octet zone. See 3b below for why NATS-driven
-secondary reconciliation does *not* cover any of these 19 zones today, only
-`lan.`.
+succeed against the correct per-octet zone. `dns-standard` is the only DDNS
+write target; `dns-ssl` and remote DNS secondaries receive the same forward
+and reverse zone state through native PowerDNS AXFR/NOTIFY.
 
 **Intentionally out of scope (not planned):**
 - Arbitrary zone creation/deletion via the Admin UI. The zone list is a fixed
@@ -183,44 +183,34 @@ secondary reconciliation does *not* cover any of these 19 zones today, only
 
 ## 3. Secondary / DDNS / NATS sync
 
-### 3a. PowerDNS-native secondary/AXFR — not implemented
+### 3a. PowerDNS-native secondary/AXFR
 
-Only one secondary mechanism exists in this codebase (3b below). PowerDNS's
-own built-in secondary/AXFR zone-transfer mode — a different replication
-method from the NATS-based sync below (PowerDNS pulling zone data directly
-from a master via AXFR) — is **not configured anywhere**:
-`services/dns/entrypoint.sh` and `services/dns/pdns.conf.template` never set
-up secondary/AXFR mode, and `SECONDARY_MASTERS` / `SECONDARY_ZONES` appear
-nowhere in this repository at all. `ENABLE_SECONDARY` is a real name, but it
-names something unrelated: documentation-only narrative in
-`docs/architecture-ng.md` for when to include
-`deploy/prod/docker-compose.nats-secondary.yml` (which binds NATS to a
-trusted interface via the one env var that compose file actually reads,
-`NATS_BIND_IP`) — no script gates any behavior on `ENABLE_SECONDARY` itself.
-This section is kept as a placeholder to record that PowerDNS-native
-secondary/AXFR is *not* implemented, so a future contributor who finds these
-env var names in `docs/architecture-ng.md`'s comments does not assume
-PowerDNS-side secondary/AXFR wiring exists to configure.
+**Current state (implemented for the fixed project zones):** `dns-standard`
+is the only writer for LAN/reverse zone data in the shipped production,
+quickstart, and validation topologies. `services/dns/entrypoint.sh` turns
+those zones into PowerDNS primary zones, enables SOA serial edits for
+DDNS/API writes, activates the shared TSIG key for transfer authorization,
+and configures `ALSO-NOTIFY` for configured local targets. `dns-ssl` and
+registered remote DNS nodes run the same image with `DNS_REPLICATION_ROLE=
+secondary`, create the fixed zones as PowerDNS secondaries of
+`DNS_XFR_PRIMARY`, and authenticate transfers with the same shared TSIG key.
 
-### 3b. NATS-based secondary sync (the actively developed mechanism, #433/#583)
+The Admin UI registration response includes the bootstrap fields a remote
+secondary needs for this native replication path: the PowerDNS API key, the
+shared DDNS/transfer TSIG secret, and the primary transfer endpoint. A
+registered secondary still also receives its per-node NATS credential, but
+its container sets `NATS_RECORD_WRITES=0` so NATS record messages do not
+become a second local PowerDNS writer.
 
-**Current state (implemented):** every DNS node — the primary's own
-co-located `dns-ssl` container and every remote secondary added via
-`setup.sh secondary` — runs the same `dns` image and its own
-`nats-subscriber` process, consuming the same JetStream stream
-(`LANCACHE_DNS`) and applying record changes to its own local PowerDNS
-instance independently. Each secondary gets its own per-node NATS
-auth-callout credential (issue #583, superseding an earlier shared-token
-model), managed entirely through `services/ui/src/routes/secondaries.rs`'s
-`/secondaries` page: register (issues a one-time-displayed credential),
-rotate (regenerates just that node's password; the old one is rejected
-starting from that node's next reconnect, not on its already-established
-connection — see the note in 1b above), remove (same next-reconnect
-revocation, `nats.conf` itself is never rewritten). LAN record adds/removes
-from the `/domains` page (1b) publish to the same stream every subscriber
-consumes, so a record
-change made once on the primary's Admin UI replicates to every registered
-secondary automatically.
+### 3b. NATS-based secondary control/event path (#433/#583)
+
+**Current state (implemented):** secondary registration, credential rotation,
+credential revocation, flush events, and primary-side UI/NATS record
+publishing still use the existing NATS infrastructure. What changed with
+#1164 is the authority boundary: secondaries no longer apply
+`lancache.dns.record` messages to their local PowerDNS databases. They
+acknowledge those messages when `NATS_RECORD_WRITES=0` and converge their
+zone data through native PowerDNS AXFR/refresh polling instead.
 
 **Intended end state vs. current state:** the identity/credential model
 (register/rotate/revoke per secondary) is complete per #583. What is not yet
@@ -234,14 +224,11 @@ present, but nothing in the codebase ever writes a non-NULL value to it:
 job — updates that column afterwards. So the column is dead state today,
 not a working-but-shallow health signal: the `/secondaries` page cannot
 currently show *when* a secondary was last seen, let alone whether its
-local zone data has actually converged with the primary's or is
-lagging/diverged for some reason (e.g. that secondary's `nats-subscriber`
-crashed after a partial batch — see #653, a currently-open related bug in
-the batch queue this issue belongs to, about a stale update surviving a
-same-batch failure). A liveness/convergence health indicator per secondary
-is planned-but-unbuilt, candidate v0.3.0 scope, not started — the
-`last_seen` column is schema groundwork for that future work, not an
-implemented feature.
+PowerDNS secondary zone serials have converged with the primary or are
+lagging/diverged. A liveness/convergence health indicator per secondary is
+planned-but-unbuilt, candidate v0.3.0 scope, not started — the `last_seen`
+column is schema groundwork for that future work, not an implemented
+feature.
 
 ## 4. Known-good config snapshot / rollback (#415/#616) — Admin UI perspective
 
@@ -319,8 +306,8 @@ UI-visible PowerDNS zone rollback" should eventually look like.
 | Global AAAA filter | Admin UI, implemented | `services/ui/src/routes/domains.rs`, `filter-aaaa.lua` |
 | Arbitrary zone create/delete | Not planned | Deliberately out of scope |
 | RPZ direct record editor | Not planned | Deliberately out of scope (edit via CDN domain list instead) |
-| PowerDNS-native secondary/AXFR | Not implemented (no code reads `SECONDARY_MASTERS`/`SECONDARY_ZONES`; `ENABLE_SECONDARY` names an unrelated NATS-bind doc convention, see 3a) | N/A |
-| NATS-based secondary registration/rotate/remove | Admin UI, implemented | `services/ui/src/routes/secondaries.rs`, `/secondaries` |
+| PowerDNS-native secondary/AXFR | Implemented for local `dns-ssl` and registered remote DNS secondaries; `dns-standard` remains the only zone writer | `services/dns/entrypoint.sh`, `deploy/*/docker-compose.yml`, `setup.sh secondary` |
+| NATS-based secondary registration/rotate/remove | Admin UI, implemented; registration now also returns AXFR endpoint and shared TSIG material for native zone transfer | `services/ui/src/routes/secondaries.rs`, `/secondaries` |
 | NATS secondary replication-health indicator | Not built | Planned, v0.3.0 candidate |
 | Static config snapshot/rollback status indicator | Not built (log-only today) | Planned, v0.3.0 candidate, not DNS-specific |
 | Zone/record snapshot/rollback (#628) | Admin UI, implemented (PR #788) | `services/ui/src/routes/dns_snapshots.rs`, `services/dns/nats-subscriber/src/{zone_snapshots,rollback_listener}.rs`, `/domains` "Zone-Snapshots & Rollback" tab |

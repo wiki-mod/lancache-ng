@@ -57,6 +57,8 @@ pub struct RegisterResponse {
     pub consumer_name: String,
     pub proxy_ip: String,
     pub pdns_api_key: String,
+    pub ddns_tsig_key: String,
+    pub dns_xfr_primary: String,
     pub image_registry: String,
     pub image_prefix: String,
     pub image_channel: String,
@@ -70,6 +72,31 @@ pub struct RegisterResponse {
 fn generate_nats_password() -> String {
     let bytes: [u8; 32] = rand::random();
     hex::encode(bytes)
+}
+
+// What: reads the shared TSIG secret returned to remote DNS secondaries.
+// Why: AXFR secondaries must authenticate transfers with the same key the
+//   primary uses for DDNS/transfer metadata, or remote nodes can drift.
+// From: Issue #1164
+fn read_ddns_tsig_key_from_shared_secret_dir(shared_secret_dir: &str) -> Result<String, StatusCode> {
+    let secret_path = FsPath::new(shared_secret_dir).join("ddns-tsig-key");
+    let secret = fs::read_to_string(&secret_path).map_err(|err| {
+        tracing::error!(
+            path = %secret_path.display(),
+            error = %err,
+            "refusing secondary registration: native AXFR secondaries need the shared DDNS TSIG key"
+        );
+        StatusCode::SERVICE_UNAVAILABLE
+    })?;
+    let secret = secret.trim().to_string();
+    if secret.is_empty() {
+        tracing::error!(
+            path = %secret_path.display(),
+            "refusing secondary registration: shared DDNS TSIG key file is empty"
+        );
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    Ok(secret)
 }
 
 #[derive(Serialize, Clone)]
@@ -192,6 +219,8 @@ pub async fn register_secondary(
         );
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
+    let ddns_tsig_key = read_ddns_tsig_key_from_shared_secret_dir(&state.config.shared_secret_dir)?;
+    let dns_xfr_primary = format!("{}:5300", state.config.standard_ip);
 
     // Issue #583: each secondary gets its own NATS identity now, not the old
     // shared DNS-reader credential. `name` doubles as the NATS username --
@@ -259,6 +288,8 @@ pub async fn register_secondary(
         consumer_name,
         proxy_ip: state.config.standard_ip.clone(),
         pdns_api_key: state.config.pdns_api_key.clone(),
+        ddns_tsig_key,
+        dns_xfr_primary,
         image_registry: state.config.lancache_image_registry.clone(),
         image_prefix: state.config.lancache_image_prefix.clone(),
         image_channel: state.config.lancache_image_channel.clone(),
@@ -726,6 +757,8 @@ mod tests {
             consumer_name: "secondary-a".to_string(),
             proxy_ip: "192.168.1.100".to_string(),
             pdns_api_key: "pdns-secret".to_string(),
+            ddns_tsig_key: "transfer-secret".to_string(),
+            dns_xfr_primary: "192.168.1.100:5300".to_string(),
             image_registry: "registry.example.test:5000".to_string(),
             image_prefix: "mirror/lancache-ng".to_string(),
             image_channel: "nightly".to_string(),
@@ -734,6 +767,8 @@ mod tests {
 
         let value = serde_json::to_value(response).unwrap();
         assert_eq!(value["image_registry"], "registry.example.test:5000");
+        assert_eq!(value["ddns_tsig_key"], "transfer-secret");
+        assert_eq!(value["dns_xfr_primary"], "192.168.1.100:5300");
         assert_eq!(value["image_prefix"], "mirror/lancache-ng");
         assert_eq!(value["image_channel"], "nightly");
         assert_eq!(value["image_tag"], "v1.2.3");

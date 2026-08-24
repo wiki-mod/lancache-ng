@@ -98,6 +98,8 @@ services:
       - NATS_PASSWORD=validation-nats-password
       - NATS_CONSUMER=dns-standard
       - NATS_RECONCILER=1
+      - DNS_REPLICATION_ROLE=primary
+      - DNS_XFR_NOTIFY_TARGETS=dns-ssl:5300
     volumes:
       # What: shared-secrets volume for first-writer-wins PDNS_API_KEY/
       # DDNS_TSIG_KEY resolution.
@@ -134,6 +136,9 @@ services:
       - NATS_USER=validation-dns-replica
       - NATS_PASSWORD=validation-nats-password
       - NATS_CONSUMER=dns-ssl
+      - NATS_RECORD_WRITES=0
+      - DNS_REPLICATION_ROLE=secondary
+      - DNS_XFR_PRIMARY=dns-standard:5300
     volumes:
       # What: shared-secrets volume for first-writer-wins PDNS_API_KEY/
       # DDNS_TSIG_KEY resolution.

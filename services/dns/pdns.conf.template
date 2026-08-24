@@ -18,6 +18,10 @@ local-address=127.0.0.1,${PDNS_LOCAL_ADDRESS}
 local-port=5300
 launch=gsqlite3
 gsqlite3-database=/var/lib/powerdns/pdns.sqlite3
+primary=${PDNS_PRIMARY_ENABLED}
+secondary=${PDNS_SECONDARY_ENABLED}
+xfr-cycle-interval=${PDNS_XFR_CYCLE_INTERVAL}
+allow-notify-from=${PDNS_ALLOW_NOTIFY_FROM}
 
 dnsupdate=yes
 allow-dnsupdate-from=${DDNS_ALLOW_FROM}

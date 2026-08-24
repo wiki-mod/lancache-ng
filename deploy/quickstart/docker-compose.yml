@@ -410,10 +410,13 @@ services:
       - NATS_RECONCILER=1
       - PDNS_API_KEY=${PDNS_API_KEY:-}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY:-}
-      # What: DDNS_ALLOW_FROM includes IP_STANDARD and IP_SSL, overriding the 127.0.0.1 default services/dns/entrypoint.sh falls back to.
-      # Why: a DDNS update from the `dhcp` container always arrives with source = the host's primary LAN IP (IP_STANDARD); IP_SSL is a low-cost hedge, TSIG remains the real auth control.
-      # From: Issue #706
+      # What: DDNS_ALLOW_FROM admits the host IP used by Kea's D2 daemon.
+      # Why: dns-standard is the only DDNS write target; dns-ssl receives the
+      #   same records through PowerDNS AXFR/NOTIFY replication instead.
+      # From: Issue #1164
       - DDNS_ALLOW_FROM=${IP_STANDARD},${IP_SSL:-}
+      - DNS_REPLICATION_ROLE=primary
+      - DNS_XFR_NOTIFY_TARGETS=dns-ssl:5300
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-3}
     volumes:
       # What: shared-secrets volume, first-writer-wins for PDNS_API_KEY/DDNS_TSIG_KEY.
@@ -432,10 +435,12 @@ services:
     ports:
       - "${IP_STANDARD}:53:53/udp"
       - "${IP_STANDARD}:53:53/tcp"
-      # What: publishes 5300/udp only, pdns_server's real DNS-protocol port.
-      # Why: lets the separate `dhcp` container's D2 daemon send real DNS UPDATE packets, which never arrive over UDP-only 53 to the recursor.
-      # From: Issue #706, deploy/prod/docker-compose.yml
+      # What: publishes pdns_server's DNS-protocol port for DDNS and AXFR.
+      # Why: Kea D2 sends TSIG-signed DNS UPDATEs over UDP; PowerDNS
+      #   secondaries need TCP for authoritative zone transfers.
+      # From: Issue #1164
       - "${IP_STANDARD}:5300:5300/udp"
+      - "${IP_STANDARD}:5300:5300/tcp"
     healthcheck:
       test: ["CMD-SHELL", "dig @127.0.0.1 content1.steampowered.com A +short +time=2 +tries=1 | grep -q ."]
       interval: 30s
@@ -463,10 +468,10 @@ services:
       - NATS_CONSUMER=dns-ssl
       - PDNS_API_KEY=${PDNS_API_KEY:-}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY:-}
-      # What: DDNS_ALLOW_FROM includes both IP_STANDARD and IP_SSL, same value as dns-standard's identical override.
-      # Why: DDNS update source is always the host's primary LAN IP regardless of which DNS server Kea's D2 daemon targets.
-      # From: Issue #706, this file's dns-standard service
-      - DDNS_ALLOW_FROM=${IP_STANDARD},${IP_SSL:-}
+      - DDNS_ALLOW_FROM=127.0.0.1
+      - NATS_RECORD_WRITES=0
+      - DNS_REPLICATION_ROLE=secondary
+      - DNS_XFR_PRIMARY=dns-standard:5300
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-3}
     volumes:
       # What: shared-secrets volume, first-writer-wins for PDNS_API_KEY/DDNS_TSIG_KEY.
@@ -485,10 +490,6 @@ services:
     ports:
       - "${IP_SSL}:53:53/udp"
       - "${IP_SSL}:53:53/tcp"
-      # What: publishes 5300/udp only, same reasoning as dns-standard's identical port publish.
-      # Why: pdns_server's real DNS-protocol port for Kea's D2 daemon.
-      # From: Issue #706, deploy/prod/docker-compose.yml
-      - "${IP_SSL}:5300:5300/udp"
     healthcheck:
       test: ["CMD-SHELL", "dig @127.0.0.1 content1.steampowered.com A +short +time=2 +tries=1 | grep -q ."]
       interval: 30s
@@ -658,7 +659,6 @@ services:
       - DHCP_DNS_PRIMARY=${IP_STANDARD}
       - DHCP_DNS_SECONDARY=${IP_SSL:-${IP_STANDARD}}
       - DHCP_DNS_SERVER_IP=${IP_STANDARD}
-      - DHCP_DNS_SERVER_IP_SSL=${IP_SSL:-${IP_STANDARD}}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY:-}
       - KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN:-}
       - DHCP_MODE=${DHCP_MODE:-disabled}

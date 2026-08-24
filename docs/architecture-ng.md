@@ -170,7 +170,9 @@ real host:
 |---|---|---|
 | `ROOT_ZONE_MIRROR` | `1` (enabled) in `services/dns/entrypoint.sh`'s own fallback; this repo's shipped `config/prod/dns-*.env` explicitly set `1` | Root zone mirror (AXFR from root servers). Was previously documented here as `ENABLE_ROOT_MIRROR` — that name does not exist in code; `docs/dns-admin-ui-scope.md` already used the correct name. |
 | Global AAAA-response filter | off by default | Suppresses all AAAA answers for every client, regardless of address family. Not an env var/restart-time setting: toggled live via the Admin UI (`POST /domains/aaaa-filter`), which writes/removes a marker file on the shared `powerdns-state` volume, read live by `filter-aaaa.lua`'s recursor `preresolve` hook. (Previously documented here as two separate env vars, `FILTER_AAAA_V4`/`FILTER_AAAA_V6` — neither name appears anywhere in `services/dns/` or `services/ui/src`; see `docs/dns-admin-ui-scope.md` §1b for the real, shipped mechanism.) **Planned change, not yet implemented**: starting with v0.3.0, this filter is intended to default to **on** instead of off (maintainer decision recorded in issue #1068; no dedicated tracking issue exists yet for the code change itself). Current shipped behavior as of this writing is still off-by-default — do not treat this bullet as already-shipped. |
-| `ENABLE_SECONDARY` | — | Not read by any code — a documentation-only narrative convention for when to include `deploy/prod/docker-compose.nats-secondary.yml`. The actual secondary-sync mechanism is NATS-based (see `NATS_BIND_IP`/`NATS_ADVERTISE_URL` below and `docs/dns-admin-ui-scope.md` §3); PowerDNS's own native secondary/AXFR mode is not implemented at all — `SECONDARY_MASTERS`/`SECONDARY_ZONES` (previously listed here) appear nowhere in this repository. |
+| `DNS_REPLICATION_ROLE` | `native` | Selects whether a DNS container owns local zones normally (`native`), acts as the transfer primary (`primary`), or creates the fixed LAN/reverse zones as PowerDNS secondaries (`secondary`). Shipped production/quickstart/full-setup topology sets `dns-standard` to `primary` and `dns-ssl` to `secondary`. |
+| `DNS_XFR_PRIMARY` | — | Required when `DNS_REPLICATION_ROLE=secondary`; host:port endpoint of the PowerDNS primary used for native AXFR/refresh polling. Remote secondaries receive this from the Admin UI registration response. |
+| `DNS_XFR_NOTIFY_TARGETS` | — | Comma/space-separated NOTIFY targets for a primary. Shipped local topology notifies `dns-ssl:5300`; remote secondaries can still converge through PowerDNS's refresh polling when they are not listed here. |
 | `NATS_BIND_IP` | — | Trusted LAN/VPN interface for optional NATS host binding used by remote secondaries; intentionally required by the secondary NATS override file. Also drives the address the Admin UI hands out during secondary registration -- see below. |
 | `NATS_ADVERTISE_URL` | — | Explicit override for the NATS URL the Admin UI hands a remote secondary during registration (issue #866), for setups `NATS_BIND_IP` alone can't express (non-default port, `tls://` scheme, VPN hostname). Always wins over `NATS_BIND_IP` when set. |
 
@@ -180,15 +182,16 @@ real host:
 
 The production Compose file keeps NATS on the Docker network by default and does not publish port `4222` on the host. This keeps the event bus closed for installations that do not use remote secondaries.
 
-There are two compatible ways to enable host binding for secondary DNS nodes:
-
-1. **Reuse the existing secondary switch**: when `ENABLE_SECONDARY=true`, include `deploy/prod/docker-compose.nats-secondary.yml` and set `NATS_BIND_IP` to the trusted LAN or VPN interface that secondary nodes use.
-2. **Use a separate explicit binding switch**: leave `ENABLE_SECONDARY` for DNS behavior, and include `deploy/prod/docker-compose.nats-secondary.yml` only when you intentionally want to publish NATS for remote secondary synchronization.
+Enable host binding for remote secondary DNS nodes only when you intentionally
+publish NATS to a trusted LAN or VPN interface. `ENABLE_SECONDARY` is not a
+runtime switch read by setup, Compose, DNS, or UI code; native zone replication
+is controlled by `DNS_REPLICATION_ROLE`/`DNS_XFR_PRIMARY`, while this override
+only publishes the NATS registration/event path.
 
 Example:
 
 ```sh
-ENABLE_SECONDARY=1 NATS_BIND_IP=192.168.1.5 \
+NATS_BIND_IP=192.168.1.5 \
   docker compose --env-file deploy/prod/.env.local -f deploy/prod/docker-compose.yml \
   -f deploy/prod/docker-compose.nats-secondary.yml up -d
 ```
@@ -255,7 +258,7 @@ recreated with it) to publish port 4222 on that address in the first place.
 `ui` only computes what to *advertise*; it does not control what `nats`
 itself publishes.
 
-**nsupdate (RFC 2136):** TSIG-secured dynamic DNS channel into PowerDNS authoritative. Kea DHCP sends lease add/update/delete events through `kea-dhcp-ddns`; PowerDNS accepts those updates only for the LAN and private reverse zones that are explicitly mapped to the shared `DDNS_TSIG_KEY`.
+**nsupdate (RFC 2136):** TSIG-secured dynamic DNS channel into PowerDNS authoritative. Kea DHCP sends lease add/update/delete events through `kea-dhcp-ddns` to `dns-standard` only; PowerDNS accepts those updates only for the LAN and private reverse zones that are explicitly mapped to the shared `DDNS_TSIG_KEY`. `dns-ssl` and registered remote DNS secondaries consume those same zone changes through native PowerDNS AXFR/NOTIFY, so DHCP-driven records have one writer and do not depend on Kea's `dns-servers` failover list behaving like fan-out.
 
 ## Kea DHCP
 

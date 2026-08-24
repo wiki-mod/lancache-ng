@@ -16,6 +16,10 @@ load_dns_ddns_tsig_helpers() {
     awk '
         /^secret_is_placeholder\(\) \{/ { in_fn = 1 }
         /^configure_ddns_tsig\(\) \{/ { in_fn = 1 }
+        /^import_ddns_tsig_key\(\) \{/ { in_fn = 1 }
+        /^_dns_set_zone_metadata\(\) \{/ { in_fn = 1 }
+        /^_dns_configure_primary_zone_replication\(\) \{/ { in_fn = 1 }
+        /^_dns_ensure_secondary_zone\(\) \{/ { in_fn = 1 }
         in_fn { print }
         in_fn && /^\}$/ { in_fn = 0 }
     ' "$repo_root/services/dns/entrypoint.sh" > "$helper_file"
