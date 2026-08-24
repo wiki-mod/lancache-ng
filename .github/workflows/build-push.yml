@@ -8118,6 +8118,7 @@ jobs:
       issues: write
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: List which needed jobs did not succeed
         id: failed-jobs
         env:
@@ -8145,7 +8146,7 @@ jobs:
             echo "outcome=$outcome"
             echo "list=${failed[*]}"
           } >> "$GITHUB_OUTPUT"
-      - uses: wiki-mod/lancache-ng/.github/actions/nightly-status@current_dev
+      - uses: ./.github/actions/nightly-status
         with:
           outcome: ${{ steps.failed-jobs.outputs.outcome }}
           scope: nightly channel promote (current_dev)
