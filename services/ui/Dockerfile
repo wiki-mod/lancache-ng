@@ -646,8 +646,8 @@ COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 # service `entrypoint:`), so no separate script needs to be copied in.
 
 # What: keeps the UI's fixed runtime gid at 10001.
-# Why: issue #1427 moves nginx's log files onto this same shared reader gid,
-#   so the log viewer no longer needs an `adm`-specific compatibility path.
+# Why: nginx's log files now land on this same shared reader gid, so the log
+#   viewer no longer needs an `adm`-specific compatibility path.
 # From: Issue #1427
 RUN addgroup -g 10001 lancache \
     && adduser -D -H -u 10001 -G lancache -s /sbin/nologin lancache \

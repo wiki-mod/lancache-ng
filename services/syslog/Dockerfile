@@ -83,7 +83,8 @@ RUN chmod 755 /entrypoint.sh /usr/local/bin/healthcheck.sh /usr/local/bin/data-l
     # From: Issue #1428 | PR #1431
     #
     # What: keeps the bundled fluent-bit closure entirely unprivileged.
-    # Why: issue #1427 moved every first-party producer log to gid-10001-readable creation, so file capabilities are no longer needed to tail them.
+    # Why: every first-party producer log now lands gid-10001-readable at
+    #   creation time, so file capabilities are no longer needed to tail them.
     # From: Issue #1427
 
 USER lancache:lancache
