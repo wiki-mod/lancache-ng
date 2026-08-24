@@ -205,6 +205,29 @@ jobs:
         id: apt-cache-bust
         run: echo "value=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
 
+      # What: writes SCCACHE_REDIS_URL to a runner-temp file for the
+      # Dockerfile's git-build step to mount as a BuildKit secret.
+      # Why: pull_request runs never get this (no LAN Redis access should
+      # be assumed for that trigger); the git build still succeeds without
+      # it, just without Redis-backed caching, per its own fallback branch.
+      # From: Issue #1304 | Issue #1556
+      - name: Prepare sccache Redis secret for git build
+        if: github.event_name != 'pull_request'
+        id: sccache-secret
+        env:
+          SCCACHE_REDIS_MODE: ${{ vars.SCCACHE_REDIS_MODE }}
+          SCCACHE_REDIS_URL: ${{ secrets.SCCACHE_REDIS_URL }}
+        run: |
+          set -euo pipefail
+          if [ "${SCCACHE_REDIS_MODE:-required}" = "off" ] || [ -z "$SCCACHE_REDIS_URL" ]; then
+            echo "::notice::No sccache Redis secret prepared for the git build (mode=off or secret unset)."
+            exit 0
+          fi
+          umask 077
+          redis_file="${{ runner.temp }}/build-tools-sccache-redis-url"
+          printf '%s' "$SCCACHE_REDIS_URL" > "$redis_file"
+          echo "redis-file=$redis_file" >> "$GITHUB_OUTPUT"
+
       # What: builds one local amd64 candidate for fork PRs.
       # Why: fork PRs cannot publish repository packages, but still need a
       #   candidate to run the same smoke/vulnerability policy against.
@@ -255,6 +278,8 @@ jobs:
             org.opencontainers.image.base.golang.digest=${{ steps.build-tools-base-digests.outputs.golang }}
           build-args: |
             APT_CACHE_BUST=${{ steps.apt-cache-bust.outputs.value }}
+          secret-files: |
+            ${{ steps.sccache-secret.outputs.redis-file != '' && format('sccache_redis_url={0}', steps.sccache-secret.outputs.redis-file) || '' }}
           outputs: type=image,oci-mediatypes=true
           platforms: linux/amd64
           provenance: false
