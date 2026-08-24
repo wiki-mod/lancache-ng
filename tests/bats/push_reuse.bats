@@ -85,7 +85,7 @@ STUB
 
 @test "push_reuse_decide: reuse=true when revision is a real ancestor and classify reports the service unchanged" {
     revision_stub "$c1"
-    classify_stub $'ntp=false\nworkflow=false'
+    classify_stub $'ntp=false\nworkflow_reuse_scope=false'
 
     run push_reuse_decide "ntp" "ghcr.io/example/ntp:nightly" "$c2"
 
@@ -128,7 +128,7 @@ STUB
     # something under this service's own path landed between revision and
     # sha (e.g. in an earlier push, before nightly's last refresh).
     revision_stub "$c1"
-    classify_stub $'ntp=true\nworkflow=false'
+    classify_stub $'ntp=true\nworkflow_reuse_scope=false'
 
     result="$(push_reuse_decide "ntp" "ghcr.io/example/ntp:nightly" "$c2" 2>/dev/null)"
 
@@ -142,21 +142,21 @@ STUB
     # build-affecting workflow/composite-action change that landed several
     # pushes earlier, before the channel's own last refresh. This service's
     # own key (ntp=false) alone must NOT be enough to declare reuse safe --
-    # the full-span "workflow" key from the SAME classify_output must also
-    # be checked.
+    # the full-span "workflow_reuse_scope" key from the SAME classify_output
+    # must also be checked.
     revision_stub "$c1"
-    classify_stub $'ntp=false\nworkflow=true'
+    classify_stub $'ntp=false\nworkflow_reuse_scope=true'
 
     result="$(push_reuse_decide "ntp" "ghcr.io/example/ntp:nightly" "$c2" 2>/dev/null)"
 
     [ "$result" = "false" ]
 }
 
-@test "push_reuse_decide: reuse=false (fail closed) when the classify output is missing the workflow key entirely" {
+@test "push_reuse_decide: reuse=false (fail closed) when the classify output is missing the workflow_reuse_scope key entirely" {
     # Mirrors the existing "missing this service's key entirely" test above,
-    # for the workflow key specifically: a malformed/unexpected classify
-    # output must not be silently treated as "no workflow change" just
-    # because grep found nothing to contradict it.
+    # for the workflow_reuse_scope key specifically: a malformed/unexpected
+    # classify output must not be silently treated as "no workflow change"
+    # just because grep found nothing to contradict it.
     revision_stub "$c1"
     classify_stub $'ntp=false'
 
@@ -180,7 +180,7 @@ STUB
     # silently treated as "unchanged" just because grep found nothing to
     # contradict it.
     revision_stub "$c1"
-    classify_stub $'workflow=false\ndns_image=false'
+    classify_stub $'workflow_reuse_scope=false\ndns_image=false'
 
     result="$(push_reuse_decide "ntp" "ghcr.io/example/ntp:nightly" "$c2" 2>/dev/null)"
 
