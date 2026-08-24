@@ -628,16 +628,16 @@ YAML
     [ "$(val ui)" = "true" ]
 }
 
-# --- touches_build_push_build_path: G14's job-scoped narrowing ---
+# --- workflow_reuse_scope: G14's job-scoped narrowing (a separate output
+#     key from "workflow" -- see classify-image-impact.sh's own comment on
+#     touches_build_workflow_reuse_scope for why the two are not merged) ---
 #
-# The comment-only exemption above narrows *how* a build-push.yml change is
-# read; these cases narrow *which lines count at all*. A realistic file with
-# all 5 build-affecting jobs (preamble + detect-changes +
-# determine-push-reuse-scope + determine-build-admission + build +
-# build-arm64) present is required so the region extraction actually
-# succeeds instead of failing closed -- proving the real narrowing, not the
-# fail-closed fallback the G14 comment-only cases above already exercise
-# incidentally with their minimal single-job fixtures.
+# A realistic file with all 5 build-affecting jobs (preamble +
+# detect-changes + determine-push-reuse-scope + determine-build-admission +
+# build + build-arm64) present is required so the region extraction
+# actually succeeds instead of failing closed -- proving the real
+# narrowing, not the fail-closed fallback the G14 comment-only cases above
+# already exercise incidentally with their minimal single-job fixtures.
 
 realistic_build_push_yml() {
     # $1 = a marker string inserted into the named region ($2): "preamble",
@@ -678,55 +678,56 @@ jobs:
 YAML
 }
 
-@test "G14 job-scoping: a merge-manifests-only change does NOT set workflow (PR #1642 shape)" {
+@test "G14 job-scoping: a merge-manifests-only change does NOT set workflow_reuse_scope (PR #1642 shape), but still sets workflow" {
     setup_g14_repo
     base_sha="$(realistic_build_push_yml v1 merge-manifests | commit_workflow_file base)"
     head_sha="$(realistic_build_push_yml v2 merge-manifests | commit_workflow_file head)"
     run bash "$script" "$base_sha" "$head_sha"
     [ "$status" -eq 0 ]
-    [ "$(val workflow)" = "false" ]
+    [ "$(val workflow_reuse_scope)" = "false" ]
+    [ "$(val workflow)" = "true" ]
 }
 
-@test "G14 job-scoping: a build-job-only change DOES set workflow" {
+@test "G14 job-scoping: a build-job-only change DOES set workflow_reuse_scope" {
     setup_g14_repo
     base_sha="$(realistic_build_push_yml v1 build | commit_workflow_file base)"
     head_sha="$(realistic_build_push_yml v2 build | commit_workflow_file head)"
     run bash "$script" "$base_sha" "$head_sha"
     [ "$status" -eq 0 ]
-    [ "$(val workflow)" = "true" ]
+    [ "$(val workflow_reuse_scope)" = "true" ]
 }
 
-@test "G14 job-scoping: a detect-changes-only change DOES set workflow" {
+@test "G14 job-scoping: a detect-changes-only change DOES set workflow_reuse_scope" {
     setup_g14_repo
     base_sha="$(realistic_build_push_yml v1 detect-changes | commit_workflow_file base)"
     head_sha="$(realistic_build_push_yml v2 detect-changes | commit_workflow_file head)"
     run bash "$script" "$base_sha" "$head_sha"
     [ "$status" -eq 0 ]
-    [ "$(val workflow)" = "true" ]
+    [ "$(val workflow_reuse_scope)" = "true" ]
 }
 
-@test "G14 job-scoping: a preamble-only change (env:/on:) DOES set workflow" {
+@test "G14 job-scoping: a preamble-only change (env:/on:) DOES set workflow_reuse_scope" {
     setup_g14_repo
     base_sha="$(realistic_build_push_yml v1 preamble | commit_workflow_file base)"
     head_sha="$(realistic_build_push_yml v2 preamble | commit_workflow_file head)"
     run bash "$script" "$base_sha" "$head_sha"
     [ "$status" -eq 0 ]
-    [ "$(val workflow)" = "true" ]
+    [ "$(val workflow_reuse_scope)" = "true" ]
 }
 
-@test "G14 job-scoping: a renamed build-affecting job fails closed to workflow true" {
+@test "G14 job-scoping: a renamed build-affecting job fails closed to workflow_reuse_scope true" {
     setup_g14_repo
     base_sha="$(realistic_build_push_yml v1 build | commit_workflow_file base)"
     head_sha="$(realistic_build_push_yml v1 build | sed 's/^  build:$/  build-renamed:/' | commit_workflow_file head)"
     run bash "$script" "$base_sha" "$head_sha"
     [ "$status" -eq 0 ]
-    [ "$(val workflow)" = "true" ]
+    [ "$(val workflow_reuse_scope)" = "true" ]
 }
 
-@test "G14 job-scoping: CHANGED_FILES mode (no ref context) still fails closed to workflow true" {
+@test "G14 job-scoping: CHANGED_FILES mode (no ref context) still fails closed to workflow_reuse_scope true" {
     setup_g14_repo
     printf '.github/workflows/build-push.yml\n' > "$BATS_TEST_TMPDIR/changed.txt"
     CHANGED_FILES="$BATS_TEST_TMPDIR/changed.txt" run bash "$script"
     [ "$status" -eq 0 ]
-    [ "$(val workflow)" = "true" ]
+    [ "$(val workflow_reuse_scope)" = "true" ]
 }
