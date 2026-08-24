@@ -383,9 +383,24 @@ fi
 PDNS_PRIMARY_ENABLED=no
 PDNS_SECONDARY_ENABLED=no
 PDNS_ALLOW_NOTIFY_FROM=
+PDNS_ALLOW_AXFR_IPS=127.0.0.0/8,::1
 case "$DNS_REPLICATION_ROLE" in
     primary)
         PDNS_PRIMARY_ENABLED=yes
+        # What: resolves each DNS_XFR_NOTIFY_TARGETS host to an IP for
+        #   allow-axfr-ips (PowerDNS's default is loopback-only, and TSIG
+        #   alone does not bypass it).
+        # Why: confirmed empirically (2026-08-24, lancache-229): a
+        #   correctly-TSIG-signed AXFR from a real secondary IP still got
+        #   REFUSED with no allow-axfr-ips entry for that IP.
+        # From: Issue #1164
+        if [ -n "$DNS_XFR_NOTIFY_TARGETS" ]; then
+            for target in ${DNS_XFR_NOTIFY_TARGETS//,/ }; do
+                [ -n "$target" ] || continue
+                target_resolved="$(dns_xfr_primary_endpoint "$target")"
+                PDNS_ALLOW_AXFR_IPS="${PDNS_ALLOW_AXFR_IPS},${target_resolved%%:*}"
+            done
+        fi
         ;;
     secondary)
         PDNS_SECONDARY_ENABLED=yes
@@ -472,7 +487,7 @@ fi
 echo "[lancache-dns] pdns_server will bind local-address=127.0.0.1,${PDNS_LOCAL_ADDRESS}"
 
 export PDNS_API_KEY DDNS_ALLOW_FROM PDNS_LOCAL_ADDRESS ROOT_ZONE_MIRROR NATS_URL NATS_USER NATS_PASSWORD NATS_TOKEN NATS_CONSUMER NATS_RECONCILER
-export PDNS_PRIMARY_ENABLED PDNS_SECONDARY_ENABLED PDNS_XFR_CYCLE_INTERVAL PDNS_ALLOW_NOTIFY_FROM
+export PDNS_PRIMARY_ENABLED PDNS_SECONDARY_ENABLED PDNS_XFR_CYCLE_INTERVAL PDNS_ALLOW_NOTIFY_FROM PDNS_ALLOW_AXFR_IPS
 # #628: nats-subscriber (the child process started below by
 # run_nats_subscriber) reads these three directly -- KEEP_KNOWN_GOOD_CONFIGS
 # and DNS_CONFIG_SNAPSHOT_DIR are shared with the recursor.conf/pdns.conf
@@ -1150,7 +1165,7 @@ echo "[lancache-dns] Generating pdns.conf..."
 # by configure_ddns_tsig() below based on DDNS_ALLOW_UNSIGNED_MARKER -- so
 # this line is passed no extra_sed and always renders the template's own
 # static "no" value.
-render_template_atomic '${PDNS_API_KEY}:${DDNS_ALLOW_FROM}:${PDNS_LOCAL_ADDRESS}:${PDNS_PRIMARY_ENABLED}:${PDNS_SECONDARY_ENABLED}:${PDNS_XFR_CYCLE_INTERVAL}:${PDNS_ALLOW_NOTIFY_FROM}' /etc/pdns/auth/pdns.conf.template "$PDNS_AUTH_CONF_FILE" ""
+render_template_atomic '${PDNS_API_KEY}:${DDNS_ALLOW_FROM}:${PDNS_LOCAL_ADDRESS}:${PDNS_PRIMARY_ENABLED}:${PDNS_SECONDARY_ENABLED}:${PDNS_XFR_CYCLE_INTERVAL}:${PDNS_ALLOW_NOTIFY_FROM}:${PDNS_ALLOW_AXFR_IPS}' /etc/pdns/auth/pdns.conf.template "$PDNS_AUTH_CONF_FILE" ""
 
 # ── 3. Initialize SQLite Database ────────────────────────────────────────────
 if [ ! -f /var/lib/powerdns/pdns.sqlite3 ]; then

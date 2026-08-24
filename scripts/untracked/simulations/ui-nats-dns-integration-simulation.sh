@@ -161,15 +161,21 @@ echo "UI accepted the record add (303 redirect)."
 
 echo "== Verifying the record reached PowerDNS via NATS -> nats-subscriber =="
 
-# No fixed reload/notify step exists between nats-subscriber's PowerDNS API
-# PATCH and a recursor query actually seeing it -- nats-subscriber's pull
-# consumer has its own fetch-window latency (up to ~5s worst case), so poll
-# instead of sleeping a fixed amount then checking once.
+# What: polls up to $3 times (default 10) instead of a fixed sleep.
+# Why: nats-subscriber's own pull consumer has ~5s worst-case fetch-window
+#   latency; dns-ssl instead relies entirely on PowerDNS's native AXFR
+#   secondary replication, which has no per-write NOTIFY trigger for an
+#   API-driven PATCH (only DNS UPDATE fires NOTIFY-DNSUPDATE) and falls
+#   back to entrypoint.sh's PDNS_XFR_CYCLE_INTERVAL (default 15s, bounded
+#   1-60s) polling -- confirmed empirically (2026-08-24, lancache-229) that
+#   a 10s budget is too short and the record resolves once ~15-20s pass.
+# From: Issue #1164
 verify_record_resolves() {
     local label="$1"
     local dns_ip="$2"
+    local max_attempts="${3:-10}"
     local attempt
-    for attempt in $(seq 1 10); do
+    for attempt in $(seq 1 "$max_attempts"); do
         # Under `set -euo pipefail`, `run_client ... | sort -u` can abort the
         # whole script silently before the resolved-value check below ever
         # runs: pipefail makes the pipeline's exit status reflect run_client's
@@ -184,12 +190,12 @@ verify_record_resolves() {
         [[ "$resolved" = "$test_content" ]] && { echo "$label resolves $test_fqdn to $test_content (attempt $attempt)."; return 0; }
         sleep 1
     done
-    echo "::error::$label never resolved $test_fqdn to $test_content after 10 attempts (last saw: '${resolved:-<empty>}')." >&2
+    echo "::error::$label never resolved $test_fqdn to $test_content after $max_attempts attempts (last saw: '${resolved:-<empty>}')." >&2
     return 1
 }
 
 verify_record_resolves "dns-standard" "$dns_standard_ip"
-verify_record_resolves "dns-ssl" "$dns_ssl_ip"
+verify_record_resolves "dns-ssl" "$dns_ssl_ip" 25
 
 echo "== UI: removing the LAN record via POST /domains/lan/remove =="
 

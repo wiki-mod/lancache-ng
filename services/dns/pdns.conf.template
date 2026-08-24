@@ -22,6 +22,7 @@ primary=${PDNS_PRIMARY_ENABLED}
 secondary=${PDNS_SECONDARY_ENABLED}
 xfr-cycle-interval=${PDNS_XFR_CYCLE_INTERVAL}
 allow-notify-from=${PDNS_ALLOW_NOTIFY_FROM}
+allow-axfr-ips=${PDNS_ALLOW_AXFR_IPS}
 
 dnsupdate=yes
 allow-dnsupdate-from=${DDNS_ALLOW_FROM}
