@@ -152,7 +152,7 @@ write_smoke() {
 # --- services/utilities/verify-version-banner.sh ---------------------------
 #
 # What: coverage for the shared copied-tool version-banner smoke check that
-# services/utilities/Dockerfile ships and five consumer Dockerfiles invoke,
+# services/utilities/Dockerfile ships and six consumer Dockerfiles invoke,
 # plus those Dockerfiles' real usage of it.
 # Why: colocated here on maintainer instruction rather than as a new file
 # (AG-CODE-013): both sections cover a build/tool image's own smoke-check
@@ -203,8 +203,8 @@ write_smoke() {
         "$repo_root/services/utilities/Dockerfile"
 }
 
-@test "each of the five lsof-copying consumers invokes the shared verify-version-banner.sh, not an inline banner check" {
-    for f in dhcp-proxy dhcp dns proxy ui; do
+@test "each of the six lsof-copying consumers invokes the shared verify-version-banner.sh, not an inline banner check" {
+    for f in dhcp-proxy dhcp dns proxy ui watchdog; do
         consumer_dockerfile="$repo_root/services/$f/Dockerfile"
         grep -qF 'COPY --from=utilities-tools /usr/local/bin/verify-version-banner.sh /usr/local/bin/verify-version-banner.sh' "$consumer_dockerfile" \
             || fail "services/$f/Dockerfile does not COPY the shared verify-version-banner.sh"
