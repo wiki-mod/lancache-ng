@@ -1,20 +1,23 @@
 //!
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
-//! First-run setup wizard displaying network configuration details, plus the
-//! ongoing release-channel / scheduled-update settings control (#819).
+//! First-run setup wizard displaying network configuration details, the
+//! ongoing release-channel / scheduled-update settings control (#819), and
+//! the Admin UI's own self-restart control.
 //!
-//! Unlike DHCP mode (routes/dhcp.rs), saving here never touches Docker at
-//! all: both settings are consumed entirely on the host, by setup.sh's
-//! lancache-converge.service, which already runs every 5 minutes with full
-//! systemctl authority and polls the same ui-data volume this write targets.
-//! That's a deliberate, lower-risk alternative to giving this container a new
-//! docker-socket-proxy path to manage a host systemd unit directly -- see the
-//! #819 issue thread for the full reasoning. Saving here therefore only ever
-//! needs to persist a settings file; there is nothing to reconcile/roll back
-//! synchronously the way update_dhcp_mode has to.
+//! Unlike DHCP mode (routes/dhcp.rs), the release-channel/auto-update save
+//! never touches Docker at all: both settings are consumed entirely on the
+//! host, by setup.sh's lancache-converge.service, which already runs every 5
+//! minutes with full systemctl authority and polls the same ui-data volume
+//! this write targets. That's a deliberate, lower-risk alternative to giving
+//! this container a new docker-socket-proxy path to manage a host systemd
+//! unit directly -- see the #819 issue thread for the full reasoning. Saving
+//! here therefore only ever needs to persist a settings file; there is
+//! nothing to reconcile/roll back synchronously the way update_dhcp_mode has
+//! to. restart_ui_service below is the one handler in this file that DOES
+//! touch Docker -- see its own doc comment.
 
-use crate::AppState;
+use crate::{AppState, docker_client};
 use axum::extract::{Form, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
@@ -157,6 +160,91 @@ pub async fn update_stack_settings(
     .map_err(|err| SettingsError::new(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
 
     Ok(Redirect::to("/setup"))
+}
+
+#[derive(Deserialize)]
+pub struct RestartUiServiceForm {
+    pub csrf_token: String,
+}
+
+// The page served in place of a redirect after a self-restart request: the
+// browser cannot follow a normal redirect here, since the process serving it
+// is about to disappear. Poll /health (this service's own unauthenticated
+// liveness probe, see main.rs) until it responds, then navigate to /setup --
+// the same bounded-handoff shape the maintainer decided on for this feature.
+// The first poll attempt is deliberately delayed so the operator sees this
+// page for a moment rather than an instant flash if the still-running old
+// process happens to answer /health before the restart below has landed.
+const RESTART_UI_PAGE: &str = r##"<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>Admin-UI wird neu gestartet</title>
+<style>
+  body { background:#0f172a; color:#e2e8f0; font-family: system-ui, sans-serif;
+         display:flex; align-items:center; justify-content:center; height:100vh; margin:0; }
+  .box { text-align:center; max-width: 28rem; padding: 2rem; }
+  .spinner { width:2rem; height:2rem; border:3px solid #334155; border-top-color:#3b82f6;
+             border-radius:50%; margin:0 auto 1rem; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  h1 { font-size:1.125rem; font-weight:600; margin:0 0 0.5rem; }
+  p { font-size: 0.875rem; color:#94a3b8; margin:0; }
+</style>
+</head>
+<body>
+<div class="box">
+  <div class="spinner"></div>
+  <h1>Admin-UI wird neu gestartet&hellip;</h1>
+  <p>Diese Seite leitet automatisch weiter, sobald die Admin-UI wieder erreichbar ist.</p>
+</div>
+<script>
+// What: only treats a 200 as recovery once a prior poll has already
+//   observed the instance down (non-ok or unreachable).
+// Why: a 200 alone does not prove the restart happened -- the old process
+//   may still answer /health if the restart was rejected or hasn't stopped it.
+// From: Codex review on PR #1610
+var sawDown = false;
+function pollHealth() {
+  fetch('/health', { cache: 'no-store' }).then(function (res) {
+    if (res.ok && sawDown) { window.location.href = '/setup'; return; }
+    sawDown = sawDown || !res.ok;
+    setTimeout(pollHealth, 1000);
+  }).catch(function () { sawDown = true; setTimeout(pollHealth, 1000); });
+}
+setTimeout(pollHealth, 1500);
+</script>
+</body>
+</html>
+"##;
+
+// What: validates the request, hands back the bounded-handoff page, then
+//   restarts `ui` from a detached background task.
+// Why: this process is about to be killed by its own restart, so the restart
+//   must run out-of-line, or the response could never be sent at all.
+// From: Issue #1486
+pub async fn restart_ui_service(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(form): Form<RestartUiServiceForm>,
+) -> Result<Html<&'static str>, SettingsError> {
+    crate::routes::verify_csrf_token(&headers, &form.csrf_token)
+        .map_err(|status| SettingsError::new(status, "Invalid or missing CSRF token."))?;
+
+    let restart_state = state.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+        let _ = docker_client::restart_service(
+            &restart_state.docker,
+            "ui",
+            &restart_state.config.container_suffix,
+        )
+        .await
+        .inspect_err(|err| {
+            tracing::error!("operator-requested Admin UI self-restart failed: {:#}", err);
+        });
+    });
+
+    Ok(Html(RESTART_UI_PAGE))
 }
 
 #[cfg(test)]

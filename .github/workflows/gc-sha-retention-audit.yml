@@ -179,11 +179,40 @@ jobs:
           restore-keys: |
             sha-retention-api-cache-
 
+      # What: exports the runner.temp classification-cache dir via GITHUB_ENV.
+      # Why: v1.2 point 4 -- same reasoning as the API response
+      # cache dir above (runner.temp is step-scoped only).
+      # From: Issue #1585.
+      - name: Prepare incremental classification cache directory
+        env:
+          AUDIT_CLASSIFICATION_CACHE_DIR: ${{ runner.temp }}/f17-sha-retention-classification-cache
+        run: |
+          set -euo pipefail
+          mkdir -p -- "$AUDIT_CLASSIFICATION_CACHE_DIR"
+          echo "AUDIT_CLASSIFICATION_CACHE_DIR=$AUDIT_CLASSIFICATION_CACHE_DIR" >> "$GITHUB_ENV"
+
+      # What: restores the SQLite classification cache via a run-scoped key
+      # with prefix fallback, same rotating-key pattern as the API cache
+      # above (cache entries are immutable per key once saved).
+      # Why: a cache miss (first run, or no prior save reachable via the
+      # prefix) must fall through to a fresh full scan, not fail --
+      # sra_cache_init's idempotent CREATE TABLE IF NOT EXISTS is exactly
+      # that clean fallback once the audit script runs against an empty dir.
+      # From: Issue #1585.
+      - name: Restore SHA retention classification cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.AUDIT_CLASSIFICATION_CACHE_DIR }}
+          key: sha-retention-classification-cache-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            sha-retention-classification-cache-
+
       # What: runs the real audit script against live GHCR data, read-only
-      # bind mount, with the API response cache mounted read-write.
+      # bind mount, with the API response cache and classification cache
+      # both mounted read-write.
       # Why: only a live run against real package data (not bats fixtures)
       # proves the classifier's ancestry/tag logic against the real registry.
-      # From: Issue #1095 | PR #1501.
+      # From: Issue #1095 | PR #1501 | Issue #1585.
       - name: Run live protect-only GHCR audit
         working-directory: f17-sha-retention-audit
         env:
@@ -197,8 +226,10 @@ jobs:
             -e GITHUB_REPOSITORY \
             -e SRA_HISTORY_REF=origin/current_dev \
             -e GITHUB_API_CACHE_DIR=/cache \
+            -e SRA_CACHE_DB=/classification-cache/sha-retention-audit.db \
             -v "$PWD:/work:ro" \
             -v "${AUDIT_API_CACHE_DIR}:/cache:rw" \
+            -v "${AUDIT_CLASSIFICATION_CACHE_DIR}:/classification-cache:rw" \
             -w /work \
             "$BUILD_TOOLS_IMAGE" \
             timeout --kill-after=30s 25m bash scripts/untracked/gc-sha-retention-audit.sh
@@ -214,6 +245,18 @@ jobs:
         with:
           path: ${{ env.AUDIT_API_CACHE_DIR }}
           key: sha-retention-api-cache-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # What: saves the classification cache with if: always(), matching the
+      # API cache save's own reasoning above.
+      # Why: v1.2 point 4 -- a partial run still resolved a
+      # real prefix of this package's versions, worth keeping for next time.
+      # From: Issue #1585.
+      - name: Save SHA retention classification cache
+        if: always()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.AUDIT_CLASSIFICATION_CACHE_DIR }}
+          key: sha-retention-classification-cache-${{ github.run_id }}-${{ github.run_attempt }}
 
       # What: removes the dedicated checkout path and verifies it is gone.
       # Why: if: always() so a failed run still frees the runner's disk

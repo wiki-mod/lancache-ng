@@ -24,6 +24,14 @@ retention:
   # evict still-relevant recent history during a busy review period.
   # From: Issue #1095 | PR #1501.
   accepted_ordinary_roots_per_package: 30
+  # What: per-package safety-buffer count for a version whose tags are
+  # neither a recognized sha-<commit> root nor a protected channel/release.
+  # Why: v1.2's inverted protection model stops treating an
+  # unrecognized tag shape as a permanent protect; this buffer still keeps
+  # the newest few such versions regardless of age, in case they are a
+  # recent/in-flight or historical-format publish rather than truly stale.
+  # From: Issue #1585.
+  channel_buffer_versions: 5
   keep_mutable_channels:
     - latest
     - nightly
@@ -162,12 +170,15 @@ tooling:
     description: >-
       Shared non-compiler CLI-tools image (curl, nano, lsof, ripgrep,
       findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd),
-      meant for COPY --from= consumption by other first-party images
-      instead of each one independently installing/building its own copy
-      (issue #1556). No live consumer yet -- migrating individual services
-      to COPY --from= this image is a deliberate, separate follow-up step,
-      not part of this manifest entry's own scope.
-    consumers: []
+      consumed via COPY --from= by six first-party images (issue #1556)
+      instead of each one independently installing/building its own copy.
+    consumers:
+      - services/proxy/Dockerfile
+      - services/dns/Dockerfile
+      - services/ui/Dockerfile
+      - services/dhcp/Dockerfile
+      - services/dhcp-proxy/Dockerfile
+      - services/ntp/Dockerfile
 metadata:
   - name: stack
     image: ghcr.io/wiki-mod/lancache-ng/stack

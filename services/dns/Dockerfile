@@ -137,10 +137,20 @@ COPY nats-subscriber/ .
 #     lancache-240: without this the probe misclassified a genuine cache hit as "write
 #     failed" and disabled ccache for the whole build).
 #     From: Issue #887
-#   resolve_cargo_jobs     - CARGO_BUILD_JOBS if set, else nproc-2 floored at 4.
+#   resolve_cargo_jobs     - CARGO_BUILD_JOBS if set, else nproc-2 floored at 4; now also
+#                            echoes the resolved value and its source (explicit vs.
+#                            auto-detected) to the build log.
 #   run_cargo_build        - builds with ccache+distcc if both enabled, retrying with
 #                            plain distcc first on failure, then a normal local compiler
 #                            if that also fails (three fallback tiers total).
+# Each configure_sccache/configure_distcc/configure_ccache above now also echoes an
+# `[INFO] ... disabled (<reason>)` line on its own skip path, not only on its enable path.
+#   Why: previously a build log gave no evidence either way whether an accelerator was
+#   skipped intentionally (no secret configured) or due to a misconfiguration, and could
+#   not be distinguished from a build that never reached this RUN step at all -- the same
+#   silent-decision-point defect class the linked issue's G15 checkout guard already names
+#   (see docs/release-validation-plan.md's Coverage Assessment, AG-VAL-029 entry).
+#   From: Issue #1095 (G15), PR #1640
 # NOTE: comments cannot be embedded inside this block itself. Docker's line-continuation
 # strips the backslash-newline entirely (no newline is inserted), so a "#" comment ending
 # in "\" would swallow every following continuation line as commented-out text instead of
@@ -169,6 +179,8 @@ RUN --mount=type=secret,id=sccache_redis_url \
           export SCCACHE_CONF=/run/secrets/sccache_dist_config; \
           sccache --dist-status; \
         fi; \
+      else \
+        echo "[INFO] sccache disabled (no sccache_redis_url or sccache_dist_config secret present)." >&2; \
       fi; \
     }; \
     disable_distcc() { \
@@ -224,6 +236,8 @@ RUN --mount=type=secret,id=sccache_redis_url \
         fi; \
         extract_remote_toolchain_id "$distcc_probe_dir/distcc-probe.o"; \
         rm -rf "$distcc_probe_dir"; \
+      else \
+        echo "[INFO] distcc disabled (no distcc_potential_hosts secret present)." >&2; \
       fi; \
     }; \
     disable_ccache() { \
@@ -273,6 +287,12 @@ RUN --mount=type=secret,id=sccache_redis_url \
           return 0; \
         fi; \
         rm -rf "$ccache_probe_dir"; \
+      else \
+        if [ "${distcc_enabled:-0}" != "1" ]; then \
+          echo "[INFO] ccache disabled (distcc is not enabled, so there is nothing to wrap)." >&2; \
+        else \
+          echo "[INFO] ccache disabled (no ccache_redis_url secret present)." >&2; \
+        fi; \
       fi; \
     }; \
     resolve_cargo_jobs() { \
@@ -281,9 +301,13 @@ RUN --mount=type=secret,id=sccache_redis_url \
         cores="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN || echo 2)"; \
         jobs=$((cores - 2)); \
         if [ "$jobs" -lt 4 ]; then jobs=4; fi; \
+        jobs_source="auto-detected from $cores core(s)"; \
+      else \
+        jobs_source="explicit CARGO_BUILD_JOBS"; \
       fi; \
       case "$jobs" in ''|*[!0-9]*) echo "CARGO_BUILD_JOBS must be a positive integer" >&2; exit 1;; esac; \
       if [ "$jobs" -le 0 ]; then echo "CARGO_BUILD_JOBS must be greater than zero" >&2; exit 1; fi; \
+      echo "[INFO] using $jobs job(s) ($jobs_source)." >&2; \
       printf '%s\n' "$jobs"; \
     }; \
     run_cargo_build() { \
@@ -359,6 +383,13 @@ RUN --mount=type=secret,id=sccache_redis_url \
       rm -f "$ccache_final_stats"; \
     fi; \
     cp "target/${musl_target}/release/nats-subscriber" /build/nats-subscriber-out
+
+# What: source stage for tools copied into the final image below.
+# Why: pinned by digest (not a mutable tag) for a reproducible build -- see
+#   services/proxy/Dockerfile's identical stage comment for the full
+#   digest-resolution rationale.
+# From: Issue #1556
+FROM ghcr.io/wiki-mod/lancache-ng/utilities@sha256:718af4cf8f1352cee341e851cecb9821033de9a5c7804c64e1c6217b62c79186 AS utilities-tools
 
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
@@ -557,28 +588,56 @@ LABEL org.opencontainers.image.description="PowerDNS recursor, authoritative DNS
 # advisory affects a version still shipping in v3.24 stable at that time --
 # do not treat this resolution as a promise that `pdns`/`pdns-backend-sqlite3`
 # will never need pinning again.
+# What: curl/findutils/envsubst/lsof/ripgrep come from the shared utilities image.
+# Why: same alpine:3.24 digest as utilities -- see services/proxy/Dockerfile's
+#   identical comment for the full rationale.
+# From: Issue #1556
+
+# What: removes the BusyBox symlinks at these paths before real binaries land.
+# Why: see services/proxy/Dockerfile's identical comment for the reason.
+# From: Issue #1556
+RUN rm -f /usr/bin/find /usr/bin/xargs /usr/bin/lsof
+
+COPY --from=utilities-tools /usr/local/bin/curl /usr/local/bin/curl
+COPY --from=utilities-tools /usr/bin/find /usr/bin/find
+COPY --from=utilities-tools /usr/bin/xargs /usr/bin/xargs
+COPY --from=utilities-tools /usr/bin/envsubst /usr/bin/envsubst
+COPY --from=utilities-tools /usr/lib/libintl.so.8 /usr/lib/libintl.so.8
+COPY --from=utilities-tools /usr/bin/lsof /usr/bin/lsof
+COPY --from=utilities-tools /usr/bin/rg /usr/bin/rg
+COPY --from=utilities-tools /usr/lib/libgcc_s.so.1 /usr/lib/libgcc_s.so.1
+COPY --from=utilities-tools /usr/lib/libpcre2-8.so.0* /usr/lib/
+COPY --from=utilities-tools /usr/local/bin/verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
+
+# What: verifies the copied binaries actually run, not just that they exist.
+# Why: a missing shared-library dependency fails at exec time, not at COPY
+#   time; the lsof check is delegated to a shared script (see that file).
+# From: Issue #1613
+RUN set -euo pipefail; \
+    find . -maxdepth 0 -printf '%f\n' >/dev/null; \
+    printf '%s' '$FOO' | FOO=bar envsubst >/dev/null; \
+    rg --version >/dev/null; \
+    curl --version >/dev/null; \
+    sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
+
 RUN apk add --no-cache \
     pdns \
     pdns-backend-sqlite3 \
     pdns-recursor-luajit \
     bind-tools \
     sqlite \
-    gettext-envsubst \
     iproute2 \
-    findutils \
     grep \
     coreutils \
     bash \
-    nano \
-    lsof \
-    ripgrep \
-    curl
+    nano
 
-# nano/lsof/ripgrep: in-container troubleshooting tools -- see
-# services/proxy/Dockerfile's identical comment for the full rationale.
-# curl: unlike Kea's Control Agent (reachable from the host directly via
-# network_mode: host), nats-subscriber's zone-rollback listener (port 8083,
-# see rollback_listener.rs) is only `expose`d to the Compose network, never
+# nano: in-container troubleshooting tool -- see services/proxy/Dockerfile's
+# identical comment for the full rationale; lsof/ripgrep are COPY'd above
+# but serve the same troubleshooting purpose. curl: unlike Kea's Control
+# Agent (reachable from the host directly via network_mode: host),
+# nats-subscriber's zone-rollback listener (port 8083, see
+# rollback_listener.rs) is only `expose`d to the Compose network, never
 # published to the host -- so `setup.sh reset-to-last-known-good-config
 # dns`/`pdns` reaches it via `docker compose exec` into THIS container
 # rather than calling it directly from the host. dhcp/proxy/ui/watchdog

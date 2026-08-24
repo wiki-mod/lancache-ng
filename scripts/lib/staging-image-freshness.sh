@@ -31,7 +31,7 @@
 # check answered a genuine ">= base.sha" question against a moving target.
 # Since #1254/#1255 (2026-07-25, nightly decoupled from current_dev push),
 # both callers instead pass the PR base commit's own durable per-commit
-# `sha-<short>` image -- the check now normally resolves to an exact equality
+# `sha-<commit>` image -- the check now normally resolves to an exact equality
 # rather than a real ">"; it is kept rather than simplified to a bare
 # existence probe because it still doubles as the bounded poll for the #808
 # race (that base-commit image may not have been pushed yet) and still
@@ -62,7 +62,7 @@
 # output if the image doesn't exist, the registry call fails, or the label is
 # absent.
 #
-# EVERY full-setup service's dev/nightly/latest/pr-<N>-sha-<short> tag is a
+# EVERY full-setup service's dev/nightly/latest/pr-<N>-sha-<full> tag is a
 # multi-platform OCI index (amd64+arm64, combined by merge-manifests) --
 # confirmed live against ghcr.io/wiki-mod/lancache-ng/dns:dev via the plain
 # registry HTTP API while building this fix: its manifest has a top-level

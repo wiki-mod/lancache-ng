@@ -96,6 +96,7 @@ require_grep '^image_prefix: wiki-mod/lancache-ng$' "${manifest#$repo_root/}" 'm
 require_grep '^retention:$' "${manifest#$repo_root/}" 'manifest must define retention rules'
 require_grep '^  minimum_stable_releases: 3$' "${manifest#$repo_root/}" 'retention must keep at least current plus two previous stable releases'
 require_grep '^  accepted_ordinary_roots_per_package: 30$' "${manifest#$repo_root/}" 'retention must keep exactly thirty accepted ordinary root identities per first-party package'
+require_grep '^  channel_buffer_versions: 5$' "${manifest#$repo_root/}" 'retention must keep exactly five buffered non-ordinary/non-channel versions per package (issue #1585 v1.2)'
 require_grep '^  protect_release_and_rollback_digests: true$' "${manifest#$repo_root/}" 'retention must protect release and rollback digests'
 require_grep '^  rollback_anchors:$' "${manifest#$repo_root/}" 'retention must define a rollback_anchors list (may be empty)'
 # What: validates the rollback_anchors list itself (well-formed header,

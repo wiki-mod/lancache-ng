@@ -2,13 +2,13 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Docker-free, git-free unit coverage for scripts/untracked/classify-image-impact.sh
-# (#819). Feeds canned changed-file lists (via CHANGED_FILES) and asserts the
+# Unit coverage for scripts/untracked/classify-image-impact.sh (#819). Most
+# cases feed canned changed-file lists (via CHANGED_FILES) and assert the
 # per-path booleans this script inherited verbatim from build-push.yml's
-# detect-changes job, plus the additive IMAGE_IMPACT verdict the promote job's
-# version-bump logic consumes. The per-path booleans are covered so the
-# extraction stays byte-for-byte equivalent to the inline job it replaced; the
-# IMAGE_IMPACT cases pin the "does this diff warrant a patch (Z) bump?" boundary.
+# detect-changes job, plus the additive IMAGE_IMPACT verdict the promote
+# job's version-bump logic consumes. The workflow_diff_is_comment_only
+# section (G14) instead builds a small real git repo, since that function
+# diffs the touched build-workflow paths against actual git history.
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -103,8 +103,112 @@ val() {
 
     run_classify ".github/workflows/codeql.yml"
     [ "$(val workflow)" = "false" ]
+}
 
+# G15: a full-setup-validate-only action must set validation_infra, not the
+# global workflow signal -- it has no build-image consumer at all, and PR
+# #1634 showed the old blanket ".github/actions/* -> workflow=true" rule
+# forces every service to rebuild for a change that only affects the
+# full-setup validation stack.
+@test "G15: full-setup-validate-only action sets validation_infra, not workflow" {
     run_classify ".github/actions/derive-validation-network/action.yml"
+    [ "$(val validation_infra)" = "true" ]
+    [ "$(val workflow)" = "false" ]
+
+    run_classify ".github/actions/reserve-validation-subnet-stack/action.yml"
+    [ "$(val validation_infra)" = "true" ]
+    [ "$(val workflow)" = "false" ]
+
+    run_classify ".github/actions/wait-validation-stack-health/action.yml"
+    [ "$(val validation_infra)" = "true" ]
+    [ "$(val workflow)" = "false" ]
+}
+
+# G15: rust-acceleration-preflight only builds dns/ui in the `build` job
+# (matrix.rust) -- a change to it must not force watchdog/proxy/dhcp/etc. to
+# rebuild, the exact PR #1634 incident shape (a change to one action forced
+# all 10 services to rebuild).
+@test "G15: rust-acceleration-preflight change sets only dns_image/ui, workflow false" {
+    run_classify ".github/actions/rust-acceleration-preflight/action.yml"
+    [ "$(val dns_image)" = "true" ]
+    [ "$(val ui)" = "true" ]
+    [ "$(val dns_rust)" = "false" ]
+    [ "$(val watchdog)" = "false" ]
+    [ "$(val proxy)" = "false" ]
+    [ "$(val dhcp)" = "false" ]
+    [ "$(val build_tools)" = "false" ]
+    [ "$(val workflow)" = "false" ]
+}
+
+# G15: configure-rust-sccache/cargo-with-sccache-fallback are used by
+# dns/ui/watchdog's own quality/test/cargo-audit jobs, never by the image
+# build itself -- must not force proxy/dhcp/etc. to rebuild.
+@test "G15: configure-rust-sccache change sets only dns_rust/ui/watchdog, workflow false" {
+    run_classify ".github/actions/configure-rust-sccache/action.yml"
+    [ "$(val dns_rust)" = "true" ]
+    [ "$(val ui)" = "true" ]
+    [ "$(val watchdog)" = "true" ]
+    [ "$(val dns_image)" = "false" ]
+    [ "$(val proxy)" = "false" ]
+    [ "$(val build_tools)" = "false" ]
+    [ "$(val workflow)" = "false" ]
+
+    run_classify ".github/actions/cargo-with-sccache-fallback/action.yml"
+    [ "$(val dns_rust)" = "true" ]
+    [ "$(val ui)" = "true" ]
+    [ "$(val watchdog)" = "true" ]
+    [ "$(val workflow)" = "false" ]
+}
+
+# G15: build-tools-candidate-smoke only validates a candidate build-tools
+# image -- must not force the 9 product services to rebuild.
+@test "G15: build-tools-candidate-smoke change sets only build_tools, workflow false" {
+    run_classify ".github/actions/build-tools-candidate-smoke/action.yml"
+    [ "$(val build_tools)" = "true" ]
+    [ "$(val dns_image)" = "false" ]
+    [ "$(val ui)" = "false" ]
+    [ "$(val watchdog)" = "false" ]
+    [ "$(val workflow)" = "false" ]
+}
+
+# G15: a genuinely global action (consumed unconditionally by the shared
+# build/merge-manifests/promote pipeline for every service) must still force
+# workflow=true -- this is the one blast radius PR #1634's incident shape is
+# actually correct for.
+@test "G15: a genuinely global action change still sets workflow true" {
+    run_classify ".github/actions/ghcr-build-push-retry/action.yml"
+    [ "$(val workflow)" = "true" ]
+
+    run_classify ".github/actions/trivy-scan-exact-digest/action.yml"
+    [ "$(val workflow)" = "true" ]
+
+    run_classify ".github/actions/ghcr-attest-retry/action.yml"
+    [ "$(val workflow)" = "true" ]
+
+    run_classify ".github/actions/buildx-setup-retry/action.yml"
+    [ "$(val workflow)" = "true" ]
+
+    run_classify ".github/actions/ghcr-attest-with-cache/action.yml"
+    [ "$(val workflow)" = "true" ]
+}
+
+# G15: a pure PR-gate action (zero build/image relevance) must not force any
+# service to rebuild.
+@test "G15: a pure PR-gate action change does not set workflow or any service flag" {
+    run_classify ".github/actions/file-headers-check/action.yml"
+    [ "$(val workflow)" = "false" ]
+    [ "$(val dns_image)" = "false" ]
+    [ "$(val ui)" = "false" ]
+    [ "$(val build_tools)" = "false" ]
+    [ "$(val validation_infra)" = "false" ]
+}
+
+# G15 fail-closed case: a brand-new, never-before-seen action directory has
+# no established consumer yet, so its blast radius is unknown -- must default
+# to the maximal verdict (workflow=true) until a maintainer categorizes it,
+# per this script's own touches_unmapped_action().
+@test "G15: an unmapped/brand-new action directory fails closed to workflow true" {
+    run_classify ".github/actions/brand-new-thing/some-file.yml"
     [ "$(val workflow)" = "true" ]
 }
 
@@ -225,6 +329,7 @@ val() {
     [ "$(val build_tools)" = "true" ]
     [ "$(val syslog)" = "true" ]
     [ "$(val utilities)" = "true" ]
+    [ "$(val validation_infra)" = "true" ]
     [ "$(val workflow)" = "true" ]
     [ "$(val IMAGE_IMPACT)" = "true" ]
 }
@@ -314,4 +419,211 @@ val() {
     run bash "$script" --all-changed
     [ "$status" -eq 0 ]
     [ "$(val codeql_rust)" = "true" ]
+}
+
+# --- workflow_diff_is_comment_only: content-aware workflow signal (G14, PR #1609 review) ---
+#
+# Needs real base/head refs to diff the touched build-workflow path with, so
+# each case builds a tiny disposable repo instead of using run_classify's
+# CHANGED_FILES path. Covers both Codex findings on the original #1609
+# implementation: a leading '#' inside a YAML block-scalar body is real data,
+# not a parsed comment (P1), and a binary or mode-only change carries no +/-
+# content line to inspect at all (P2) -- both must fail closed, not default
+# to "no violation found".
+
+setup_g14_repo() {
+    repo_dir="$BATS_TEST_TMPDIR/g14-repo"
+    mkdir -p "$repo_dir/.github/workflows" "$repo_dir/.github/actions/some-action"
+    git init -q "$repo_dir"
+    git -C "$repo_dir" config user.email test@example.com
+    git -C "$repo_dir" config user.name test
+    # The script resolves merge-base/diff against its own process cwd (it has
+    # no --git-dir override), so every G14 case must run from inside the
+    # disposable repo, not bats' own working directory.
+    cd "$repo_dir" || return 1
+}
+
+commit_workflow_file() {
+    # $1 = file content (heredoc-fed), $2 = commit message.
+    cat > "$repo_dir/.github/workflows/build-push.yml"
+    git -C "$repo_dir" add -A
+    git -C "$repo_dir" commit -q -m "$1"
+    git -C "$repo_dir" rev-parse HEAD
+}
+
+commit_action_file() {
+    # $1 = action directory name, $2 = commit message, stdin = file content.
+    mkdir -p "$repo_dir/.github/actions/$1"
+    cat > "$repo_dir/.github/actions/$1/action.yml"
+    git -C "$repo_dir" add -A
+    git -C "$repo_dir" commit -q -m "$2"
+    git -C "$repo_dir" rev-parse HEAD
+}
+
+@test "G14: a changed '#' line inside a run: heredoc body is NOT comment-only" {
+    setup_g14_repo
+    base_sha="$(commit_workflow_file base <<'YAML'
+jobs:
+  build:
+    steps:
+      - run: |
+          cat <<'EOF' > file.txt
+          # marker-v1
+          EOF
+YAML
+)"
+    head_sha="$(commit_workflow_file head <<'YAML'
+jobs:
+  build:
+    steps:
+      - run: |
+          cat <<'EOF' > file.txt
+          # marker-v2
+          EOF
+YAML
+)"
+    run bash "$script" "$base_sha" "$head_sha"
+    [ "$status" -eq 0 ]
+    [ "$(val workflow)" = "true" ]
+}
+
+@test "G14: a genuine top-level comment-only change IS comment-only" {
+    setup_g14_repo
+    base_sha="$(commit_workflow_file base <<'YAML'
+jobs:
+  build:
+    # a comment line v1
+    steps:
+      - run: echo hi
+YAML
+)"
+    head_sha="$(commit_workflow_file head <<'YAML'
+jobs:
+  build:
+    # a comment line v2, still just a comment
+    steps:
+      - run: echo hi
+YAML
+)"
+    run bash "$script" "$base_sha" "$head_sha"
+    [ "$status" -eq 0 ]
+    [ "$(val workflow)" = "false" ]
+}
+
+@test "G14: a blank-line-only change IS comment-only" {
+    setup_g14_repo
+    base_sha="$(commit_workflow_file base <<'YAML'
+jobs:
+  build:
+    steps:
+      - run: echo hi
+YAML
+)"
+    head_sha="$(commit_workflow_file head <<'YAML'
+jobs:
+  build:
+
+    steps:
+      - run: echo hi
+YAML
+)"
+    run bash "$script" "$base_sha" "$head_sha"
+    [ "$status" -eq 0 ]
+    [ "$(val workflow)" = "false" ]
+}
+
+@test "G14: a binary change under .github/actions/ is NOT comment-only" {
+    setup_g14_repo
+    printf '\x00\x01binary-v1' > "$repo_dir/.github/actions/some-action/blob.bin"
+    git -C "$repo_dir" add -A && git -C "$repo_dir" commit -q -m base
+    base_sha="$(git -C "$repo_dir" rev-parse HEAD)"
+    printf '\x00\x01binary-v2-different' > "$repo_dir/.github/actions/some-action/blob.bin"
+    git -C "$repo_dir" add -A && git -C "$repo_dir" commit -q -m head
+    head_sha="$(git -C "$repo_dir" rev-parse HEAD)"
+    run bash "$script" "$base_sha" "$head_sha"
+    [ "$status" -eq 0 ]
+    [ "$(val workflow)" = "true" ]
+}
+
+@test "G14: a mode-only change under .github/actions/ is NOT comment-only" {
+    setup_g14_repo
+    printf 'name: test\n' > "$repo_dir/.github/actions/some-action/action.yml"
+    git -C "$repo_dir" add -A && git -C "$repo_dir" commit -q -m base
+    base_sha="$(git -C "$repo_dir" rev-parse HEAD)"
+    # update-index --chmod is used instead of a filesystem chmod so this case
+    # is exercised the same way on every runner OS, not only ones with real
+    # POSIX executable bits.
+    git -C "$repo_dir" update-index --chmod=+x .github/actions/some-action/action.yml
+    git -C "$repo_dir" commit -q -m head
+    head_sha="$(git -C "$repo_dir" rev-parse HEAD)"
+    run bash "$script" "$base_sha" "$head_sha"
+    [ "$status" -eq 0 ]
+    [ "$(val workflow)" = "true" ]
+}
+
+@test "G14: an added (not modified) build-workflow file is NOT comment-only" {
+    setup_g14_repo
+    git -C "$repo_dir" commit -q --allow-empty -m base
+    base_sha="$(git -C "$repo_dir" rev-parse HEAD)"
+    printf 'name: new\n' > "$repo_dir/.github/actions/some-action/action.yml"
+    git -C "$repo_dir" add -A && git -C "$repo_dir" commit -q -m head
+    head_sha="$(git -C "$repo_dir" rev-parse HEAD)"
+    run bash "$script" "$base_sha" "$head_sha"
+    [ "$status" -eq 0 ]
+    [ "$(val workflow)" = "true" ]
+}
+
+# --- Per-action comment-only awareness (G14 extended to touches_action) ---
+#
+# touches_action() applies the identical G14 content-diff check as
+# workflow_diff_is_comment_only, scoped to one action directory, so a
+# comment-only edit to a mapped action (e.g. a compression pass) does not
+# force a rebuild for that action's consumers either.
+
+@test "G14 per-action: a comment-only change to a mapped action does not touch its consumers" {
+    setup_g14_repo
+    base_sha="$(commit_action_file rust-acceleration-preflight base <<'YAML'
+name: test
+# a comment line v1
+runs:
+  using: composite
+  steps: []
+YAML
+)"
+    head_sha="$(commit_action_file rust-acceleration-preflight head <<'YAML'
+name: test
+# a comment line v2, still just a comment
+runs:
+  using: composite
+  steps: []
+YAML
+)"
+    run bash "$script" "$base_sha" "$head_sha"
+    [ "$status" -eq 0 ]
+    [ "$(val dns_image)" = "false" ]
+    [ "$(val ui)" = "false" ]
+    [ "$(val workflow)" = "false" ]
+}
+
+@test "G14 per-action: a substantive change to a mapped action DOES touch its consumers" {
+    setup_g14_repo
+    base_sha="$(commit_action_file rust-acceleration-preflight base <<'YAML'
+name: test
+runs:
+  using: composite
+  steps: []
+YAML
+)"
+    head_sha="$(commit_action_file rust-acceleration-preflight head <<'YAML'
+name: test
+runs:
+  using: composite
+  steps:
+    - run: echo hi
+YAML
+)"
+    run bash "$script" "$base_sha" "$head_sha"
+    [ "$status" -eq 0 ]
+    [ "$(val dns_image)" = "true" ]
+    [ "$(val ui)" = "true" ]
 }

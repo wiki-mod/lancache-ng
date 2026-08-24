@@ -21,7 +21,7 @@
 # the two originals are kept untouched rather than merged in place).
 #
 # On a pull_request event this validates the PR's OWN commits by reusing the
-# #626/#627 pr-<N>-sha-<short> staging-tag mechanism (see
+# pr-<N>-sha-<full> staging-tag mechanism (see
 # scripts/untracked/ensure-pr-staging-images.sh) -- it does NOT reinvent a second
 # tagging scheme. workflow_dispatch is preserved as a manual trigger for
 # ad-hoc runs against a specific published channel tag.
@@ -61,7 +61,7 @@ on:
   # Branch-filtered to match build-push.yml's own pull_request trigger
   # EXACTLY (see build-push.yml's `on.pull_request.branches`). This suite's
   # whole pr_staging_available/ensure-pr-staging-images mechanism assumes
-  # build-push.yml ran for the same PR and pushed its pr-<N>-sha-<short>
+  # build-push.yml ran for the same PR and pushed its pr-<N>-sha-<full>
   # staging tags -- vit_pr_staging_available() (scripts/lib/
   # validation-image-tag.sh) has no base-branch check of its own, so without
   # this filter a PR opened against a base branch build-push.yml ignores
@@ -139,6 +139,30 @@ jobs:
       ntp: ${{ steps.plan.outputs.ntp }}
       syslog: ${{ steps.plan.outputs.syslog }}
     steps:
+      # What: if HEAD is valid, resyncs the workspace to it and clears skip-worktree bits; otherwise a no-op.
+      # Why: reused self-hosted workspaces can strand a leftover tracked file that
+      # makes the ref-switch checkout refuse to delete it ("not uptodate") even
+      # under --force; an unborn/missing HEAD instead crashes checkout (exit 128).
+      # From: Issue #1095 (G15), PR #1640
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -euo pipefail
+          if [ -d .git ] && git rev-parse --verify -q HEAD >/dev/null 2>&1; then
+            inherited_head="$(git rev-parse HEAD)"
+            echo "::notice::pre-checkout resync: inherited HEAD is $inherited_head"
+            git sparse-checkout disable || true
+            rm -f .git/info/sparse-checkout
+            ls_files_before="$(git ls-files -v)"
+            mapfile -t remaining_skip_worktree < <(printf '%s\n' "$ls_files_before" | awk '/^S /{print substr($0,3)}')
+            echo "::notice::pre-checkout resync: ${#remaining_skip_worktree[@]} skip-worktree path(s) found"
+            if [ "${#remaining_skip_worktree[@]}" -gt 0 ]; then
+              git update-index --no-skip-worktree -- "${remaining_skip_worktree[@]}"
+            fi
+            git checkout --progress --force HEAD -- .
+          else
+            echo "::notice::pre-checkout resync: no valid checked-out HEAD found (fresh or mid-clone workspace), guard is a no-op"
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # detect-full-setup-changes.sh diffs from the PR's real merge-base,
@@ -207,6 +231,31 @@ jobs:
       # untouched service from it. Same requirement, and same fix, as the
       # `plan` job's own fetch-depth: 0 checkout above (needed for
       # detect-full-setup-changes.sh's merge-base diff).
+      #
+      # What: if HEAD is valid, resyncs the workspace to it and clears skip-worktree bits; otherwise a no-op.
+      # Why: reused self-hosted workspaces can strand a leftover tracked file that
+      # makes the ref-switch checkout refuse to delete it ("not uptodate") even
+      # under --force; an unborn/missing HEAD instead crashes checkout (exit 128).
+      # From: Issue #1095 (G15), PR #1640
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -euo pipefail
+          if [ -d .git ] && git rev-parse --verify -q HEAD >/dev/null 2>&1; then
+            inherited_head="$(git rev-parse HEAD)"
+            echo "::notice::pre-checkout resync: inherited HEAD is $inherited_head"
+            git sparse-checkout disable || true
+            rm -f .git/info/sparse-checkout
+            ls_files_before="$(git ls-files -v)"
+            mapfile -t remaining_skip_worktree < <(printf '%s\n' "$ls_files_before" | awk '/^S /{print substr($0,3)}')
+            echo "::notice::pre-checkout resync: ${#remaining_skip_worktree[@]} skip-worktree path(s) found"
+            if [ "${#remaining_skip_worktree[@]}" -gt 0 ]; then
+              git update-index --no-skip-worktree -- "${remaining_skip_worktree[@]}"
+            fi
+            git checkout --progress --force HEAD -- .
+          else
+            echo "::notice::pre-checkout resync: no valid checked-out HEAD found (fresh or mid-clone workspace), guard is a no-op"
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -250,10 +299,10 @@ jobs:
           # the back-fill source image was actually built from it (or later)
           # before backfilling an untouched service, AND (since #1254/#1255)
           # to derive that source image's own tag directly (this PR's base
-          # commit's durable sha-<short> image, not a mutable channel tag --
+          # commit's durable sha-<commit> image, not a mutable channel tag --
           # no separate BASE_CHANNEL_TAG input is passed anymore, see
-          # scripts/untracked/ensure-pr-staging-images.sh's own base_sha_short
-          # computation). Always present here: this job only runs on a
+          # scripts/lib/staging-ancestor-fallback.sh's own
+          # saf_resolve_sha_image_ref). Always present here: this job only runs on a
           # pull_request event (see this job's own `if:` above, gated on
           # pr_staging_available).
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -410,6 +459,30 @@ jobs:
       # per-run outputs as job-level env -- that job now lives in the reusable
       # full-setup-sims.yml, and the wrapper supplies the addresses anyway.
     steps:
+      # What: if HEAD is valid, resyncs the workspace to it and clears skip-worktree bits; otherwise a no-op.
+      # Why: reused self-hosted workspaces can strand a leftover tracked file that
+      # makes the ref-switch checkout refuse to delete it ("not uptodate") even
+      # under --force; an unborn/missing HEAD instead crashes checkout (exit 128).
+      # From: Issue #1095 (G15), PR #1640
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -euo pipefail
+          if [ -d .git ] && git rev-parse --verify -q HEAD >/dev/null 2>&1; then
+            inherited_head="$(git rev-parse HEAD)"
+            echo "::notice::pre-checkout resync: inherited HEAD is $inherited_head"
+            git sparse-checkout disable || true
+            rm -f .git/info/sparse-checkout
+            ls_files_before="$(git ls-files -v)"
+            mapfile -t remaining_skip_worktree < <(printf '%s\n' "$ls_files_before" | awk '/^S /{print substr($0,3)}')
+            echo "::notice::pre-checkout resync: ${#remaining_skip_worktree[@]} skip-worktree path(s) found"
+            if [ "${#remaining_skip_worktree[@]}" -gt 0 ]; then
+              git update-index --no-skip-worktree -- "${remaining_skip_worktree[@]}"
+            fi
+            git checkout --progress --force HEAD -- .
+          else
+            echo "::notice::pre-checkout resync: no valid checked-out HEAD found (fresh or mid-clone workspace), guard is a no-op"
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Resolve build-tools image
         # See ssl-mitm-cache-simulation's identical step above for why a
@@ -490,6 +563,30 @@ jobs:
       # full-setup-sims.yml, and the wrapper supplies the addresses anyway
       # (same reasoning as dns-zone-rollback-simulation above).
     steps:
+      # What: if HEAD is valid, resyncs the workspace to it and clears skip-worktree bits; otherwise a no-op.
+      # Why: reused self-hosted workspaces can strand a leftover tracked file that
+      # makes the ref-switch checkout refuse to delete it ("not uptodate") even
+      # under --force; an unborn/missing HEAD instead crashes checkout (exit 128).
+      # From: Issue #1095 (G15), PR #1640
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -euo pipefail
+          if [ -d .git ] && git rev-parse --verify -q HEAD >/dev/null 2>&1; then
+            inherited_head="$(git rev-parse HEAD)"
+            echo "::notice::pre-checkout resync: inherited HEAD is $inherited_head"
+            git sparse-checkout disable || true
+            rm -f .git/info/sparse-checkout
+            ls_files_before="$(git ls-files -v)"
+            mapfile -t remaining_skip_worktree < <(printf '%s\n' "$ls_files_before" | awk '/^S /{print substr($0,3)}')
+            echo "::notice::pre-checkout resync: ${#remaining_skip_worktree[@]} skip-worktree path(s) found"
+            if [ "${#remaining_skip_worktree[@]}" -gt 0 ]; then
+              git update-index --no-skip-worktree -- "${remaining_skip_worktree[@]}"
+            fi
+            git checkout --progress --force HEAD -- .
+          else
+            echo "::notice::pre-checkout resync: no valid checked-out HEAD found (fresh or mid-clone workspace), guard is a no-op"
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Resolve build-tools image
         # No BUILD_TOOLS_REQUIRE_PUBLISHED: same-PR tools/build-tools override
@@ -559,6 +656,30 @@ jobs:
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 45
     steps:
+      # What: if HEAD is valid, resyncs the workspace to it and clears skip-worktree bits; otherwise a no-op.
+      # Why: reused self-hosted workspaces can strand a leftover tracked file that
+      # makes the ref-switch checkout refuse to delete it ("not uptodate") even
+      # under --force; an unborn/missing HEAD instead crashes checkout (exit 128).
+      # From: Issue #1095 (G15), PR #1640
+      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
+        run: |
+          set -euo pipefail
+          if [ -d .git ] && git rev-parse --verify -q HEAD >/dev/null 2>&1; then
+            inherited_head="$(git rev-parse HEAD)"
+            echo "::notice::pre-checkout resync: inherited HEAD is $inherited_head"
+            git sparse-checkout disable || true
+            rm -f .git/info/sparse-checkout
+            ls_files_before="$(git ls-files -v)"
+            mapfile -t remaining_skip_worktree < <(printf '%s\n' "$ls_files_before" | awk '/^S /{print substr($0,3)}')
+            echo "::notice::pre-checkout resync: ${#remaining_skip_worktree[@]} skip-worktree path(s) found"
+            if [ "${#remaining_skip_worktree[@]}" -gt 0 ]; then
+              git update-index --no-skip-worktree -- "${remaining_skip_worktree[@]}"
+            fi
+            git checkout --progress --force HEAD -- .
+          else
+            echo "::notice::pre-checkout resync: no valid checked-out HEAD found (fresh or mid-clone workspace), guard is a no-op"
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Resolve build-tools image
         # No BUILD_TOOLS_REQUIRE_PUBLISHED: this script needs `expect` (real

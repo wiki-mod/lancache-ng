@@ -4,20 +4,20 @@
 #
 # Makes the PR-scoped staging images the full-setup deep validation suite
 # needs actually present before the sims run, on a pull_request event. This
-# is where the deep gate REUSES the #626/#627 pr-<N>-sha-<short> mechanism
+# is where the deep gate REUSES the pr-<N>-sha-<full> mechanism
 # rather than inventing its own:
 #
 #   1. For every full-setup service this PR TOUCHED (or every service but
 #      build-tools if a workflow/CI-contract file changed), POLL the registry
 #      until build-push.yml's build/build-arm64/merge-manifests have pushed
-#      that service's pr-<N>-sha-<short> tag -- this poll IS the cross-
+#      that service's pr-<N>-sha-<full> tag -- this poll IS the cross-
 #      workflow wait, since a separate workflow cannot express `needs:` on
 #      build-push's jobs. If the tag never appears within the timeout, FAIL
 #      CLOSED: a touched service with no staging image means its build failed
 #      (or the registry is unreachable), and silently validating stale
 #      base-channel content behind a PR-looking tag is exactly #626's bug.
-#   2. For every service this PR did NOT touch, (re)point pr-<N>-sha-<short>
-#      at this PR's own base commit's durable per-commit sha-<short> image
+#   2. For every service this PR did NOT touch, (re)point pr-<N>-sha-<full>
+#      at this PR's own base commit's durable per-commit sha-<commit> image
 #      (#1254/#1255 -- see the #808 note below for why this is no longer a
 #      mutable channel tag) via a cheap registry-side `imagetools create`
 #      (never a rebuild) -- the correct image to validate an untouched
@@ -50,7 +50,7 @@
 #
 # #1254/#1255 (2026-07-25): the back-fill source itself changed from the
 # mutable nightly/latest base-channel tag to this PR's own base commit's
-# durable per-commit sha-<short> image. nightly is
+# durable per-commit sha-<commit> image. nightly is
 # no longer republished on every current_dev push (it is now a once-daily
 # scheduled/dispatch-only green-gated channel -- see nightly-refresh.yml), so
 # it could otherwise lag an untouched service's back-fill behind this PR's
@@ -112,7 +112,7 @@
 # commit landing on master/current_dev never runs the build pipeline at all
 # -- deliberately and correctly, per that trigger's own header comment. If
 # this PR's base commit happens to be exactly such a commit, its
-# sha-<short> image will never exist via a push-triggered build, for any
+# sha-<commit> image will never exist via a push-triggered build, for any
 # service, no matter how long this waits: the hard ceiling below was always
 # going to fire, with no possible resolution short of a maintainer manually
 # re-pointing a registry tag by hand.
@@ -150,7 +150,7 @@ source "$script_dir/../lib/staging-ancestor-fallback.sh"
 source "$script_dir/../lib/staging-poll-defaults.sh"
 
 : "${REPOSITORY:?REPOSITORY is required}"
-: "${PR_TAG:?PR_TAG (pr-<N>-sha-<short>) is required}"
+: "${PR_TAG:?PR_TAG (pr-<N>-sha-<full>) is required}"
 # #808: the PR's own base commit (github.event.pull_request.base.sha) --
 # required unconditionally (unlike BUILD_SHA below, which only feeds a
 # best-effort probe): every real caller of this script only ever runs on a

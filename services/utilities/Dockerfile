@@ -8,6 +8,17 @@
 
 FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS curl-builder
 
+# What: explicit proxy build-args, no default value set.
+# Why: this project's build fleet sits behind an HTTP(S) proxy; lets a
+#   caller pass a local-network NO_PROXY exception.
+# From: Issue #1637
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
+
 # What: pinned curl release, checksum-verified before extraction.
 # Why: matches this project's established checksum-verified download
 # pattern for third-party sources.
@@ -28,6 +39,7 @@ RUN set -euo pipefail; \
 # From: Issue #1556
 RUN apk add --no-cache \
       build-base \
+      ccache \
       file \
       perl \
       openssl-dev \
@@ -45,11 +57,28 @@ RUN rm -f /usr/lib/libssl.so /usr/lib/libcrypto.so /usr/lib/libz.so
 
 WORKDIR /tmp/curl-${CURL_VERSION}
 
-# What: configures and builds a fully static, feature-reduced curl binary.
-# Why: matches this project's real curl usage only; a fully static binary
-# is what makes it portable across glibc/musl consumers.
-# From: Issue #1556
-RUN set -euo pipefail; \
+# What: builds curl, wrapping the C compiler in ccache when a secret is mounted.
+# Why: reuses the same repository secret dns's AG-CI-022 ccache-over-distcc
+#   layer uses, under a distinct mount id; fails closed to plain gcc
+#   per AG-CI-009 otherwise.
+# From: Issue #1095 (G15 | #1556)
+RUN --mount=type=secret,id=ccache_redis_url \
+    set -euo pipefail; \
+    cc_wrapper=gcc; \
+    if [ -s /run/secrets/ccache_redis_url ]; then \
+      ccache_redis_endpoint="$(cat /run/secrets/ccache_redis_url)"; \
+      case "$ccache_redis_endpoint" in \
+        redis://* | redis+tls://*) ;; \
+        *) ccache_redis_endpoint="redis://$ccache_redis_endpoint" ;; \
+      esac; \
+      export CCACHE_REMOTE_STORAGE="$ccache_redis_endpoint"; \
+      export CCACHE_DIR=/tmp/ccache-utilities; \
+      export CCACHE_COMPILERCHECK=content; \
+      cc_wrapper="ccache gcc"; \
+      echo "[INFO] curl-builder: ccache enabled with Redis remote storage." >&2; \
+    else \
+      echo "[INFO] curl-builder: no ccache_redis_url secret mounted; compiling without a compiler cache." >&2; \
+    fi; \
     ./configure \
       --disable-shared --enable-static \
       --disable-ftp --disable-file --disable-ldap --disable-ldaps \
@@ -57,7 +86,6 @@ RUN set -euo pipefail; \
       --disable-pop3 --disable-imap --disable-smtp --disable-smb \
       --disable-gopher --disable-mqtt \
       --disable-scp --disable-sftp --without-libssh2 --without-libssh \
-      --disable-proxy \
       --disable-ntlm --disable-kerberos-auth --disable-negotiate-auth \
       --disable-aws \
       --disable-manual --disable-libcurl-option \
@@ -67,8 +95,11 @@ RUN set -euo pipefail; \
       --with-openssl \
       --with-ca-bundle=/etc/ssl/certs/ca-certificates.crt \
       --enable-http --enable-cookies --enable-ipv6 \
-      CFLAGS="-fno-PIE" LDFLAGS="-no-pie" PKG_CONFIG="pkg-config --static"; \
+      CC="$cc_wrapper" CFLAGS="-fno-PIE" LDFLAGS="-no-pie" PKG_CONFIG="pkg-config --static"; \
     make -j"$(nproc)" LDFLAGS="-all-static -no-pie"; \
+    if [ -n "${CCACHE_REMOTE_STORAGE:-}" ]; then \
+      ccache -s || true; \
+    fi; \
     mkdir -p /out/usr/local/bin /out/etc/ssl/certs; \
     install -m 0755 src/curl /out/usr/local/bin/curl; \
     /out/usr/local/bin/curl --version; \
@@ -109,5 +140,11 @@ RUN set -euo pipefail; \
     for expected in basename cp date dirname install mktemp mv rm sort realpath base64 od find xargs; do \
       command -v "$expected" >/dev/null 2>&1 || { echo "ERROR: expected coreutils/findutils binary missing: $expected" >&2; exit 1; }; \
     done
+
+# What: ships the shared copied-tool version-banner smoke check.
+# Why: dedupes the byte-identical lsof-banner check five consumer Dockerfiles
+# each carried inline.
+# From: Issue #1613
+COPY verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
 
 COPY --from=curl-builder /out/usr/local/bin/curl /usr/local/bin/curl

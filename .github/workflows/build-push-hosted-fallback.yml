@@ -28,15 +28,12 @@ on:
       merge_manifest:
         description: >-
           After the amd64 build, merge it with build-arm64's existing arm64
-          tag into the real multi-platform sha-<short> tag.
+          tag into the real multi-platform sha-<commit> tag.
         type: boolean
         default: true
 
 permissions:
   contents: read
-
-env:
-  DOCKER_METADATA_SHORT_SHA_LENGTH: "7"
 
 defaults:
   run:
@@ -195,21 +192,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Resolve short commit SHA
-        id: short-sha
-        run: |
-          set -euo pipefail
-
-          # shellcheck source=scripts/lib/docker-metadata.sh
-          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
-
-          # What: assigns the short SHA to a local before printf.
-          # Why: printf's own exit status stays 0 even when a command
-          #   substitution inside its argument fails, so `set -e` misses it.
-          # From: Issue #1095 (G2) | PR #1503
-          short_sha="$(dmeta_short_sha "$GITHUB_SHA")"
-          printf 'value=%s\n' "$short_sha" >> "$GITHUB_OUTPUT"
-
       # What: uses the retried builder-setup variant, not the plain action.
       # Why: this fresh hosted VM has no local image cache, the same
       #   Docker Hub rate-limit exposure build-arm64 hit.
@@ -231,7 +213,7 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}/${{ matrix.service }}
           tags: |
-            type=sha,prefix=sha-,format=short,suffix=-amd64
+            type=sha,prefix=sha-,format=long,suffix=-amd64
 
       - name: Resolve build-tools base image digests
         id: build-tools-base-digests
@@ -254,6 +236,11 @@ jobs:
             printf 'golang=%s\n' "$(digest_for_image golang:latest)"
           } >> "$GITHUB_OUTPUT"
 
+      # What: adds the two ::notice:: lines this step's build-push.yml sibling already has.
+      # Why: this copy silently resolved parallelism with no build-log trace of the value or
+      # its source (explicit vs. auto-detected) -- the same silent-decision-point class the
+      # linked issue's G15 checkout guard already names.
+      # From: Issue #1095 (G15), PR #1640
       - name: Compute Docker build parallelism
         id: docker-build-jobs
         run: |
@@ -264,10 +251,12 @@ jobs:
             esac
             [ "$CARGO_BUILD_JOBS" -gt 0 ] || { echo "::error::CARGO_BUILD_JOBS must be greater than zero."; exit 1; }
             jobs="$CARGO_BUILD_JOBS"
+            echo "::notice::Using CARGO_BUILD_JOBS=$jobs from repository variable for Docker builds."
           else
             detected_cores="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN || echo 2)"
             jobs=$((detected_cores - 2))
             [ "$jobs" -ge 4 ] || jobs=4
+            echo "::notice::Using CARGO_BUILD_JOBS=$jobs from $detected_cores detected cores for Docker builds."
           fi
           echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
 
@@ -351,7 +340,7 @@ jobs:
           SERVICE: ${{ matrix.service }}
           DESCRIPTION: ${{ matrix.description }}
           AMD64_DIGEST: ${{ steps.build.outputs.digest }}
-          SHORT_SHA: ${{ steps.short-sha.outputs.value }}
+          COMMIT_SHA: ${{ github.sha }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -370,7 +359,7 @@ jobs:
             exit 1
           }
 
-          arm64_tag="ghcr.io/${REPOSITORY}/${SERVICE}:sha-${SHORT_SHA}-arm64"
+          arm64_tag="ghcr.io/${REPOSITORY}/${SERVICE}:sha-${COMMIT_SHA}-arm64"
           lookup_log="$(mktemp)"
           cleanup_lookup_log() { rm -f "$lookup_log"; }
           trap cleanup_lookup_log EXIT
@@ -394,7 +383,7 @@ jobs:
 
           amd64_ref="ghcr.io/${REPOSITORY}/${SERVICE}@${AMD64_DIGEST}"
           arm64_ref="ghcr.io/${REPOSITORY}/${SERVICE}@${arm64_digest}"
-          target_image="ghcr.io/${REPOSITORY}/${SERVICE}:sha-${SHORT_SHA}"
+          target_image="ghcr.io/${REPOSITORY}/${SERVICE}:sha-${COMMIT_SHA}"
 
           # What: resolves the arm64 staging tag once, then merges by digest.
           # Why: keeps the tested amd64 candidate from being replaced between

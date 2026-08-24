@@ -143,11 +143,11 @@ jobs:
 
           # Same base/before resolution build-push.yml's detect-changes job
           # uses (#536's merge-base fix so an unrelated already-merged base
-          # change isn't misattributed to this branch; #1095's push
-          # before-SHA fallback for an all-zeros/force-pushed/unreachable
-          # base) -- mirrored inline rather than imported, since GitHub
-          # Actions has no cross-workflow step/job reuse for plain
-          # (non-reusable) workflows.
+          # change isn't misattributed to this branch; a push before-SHA
+          # fallback for an all-zeros/force-pushed/unreachable base) --
+          # mirrored inline rather than imported, since GitHub Actions has
+          # no cross-workflow step/job reuse for plain (non-reusable)
+          # workflows.
           changed_files="$(mktemp)"
           force_all=false
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
@@ -367,7 +367,37 @@ jobs:
           key-prefix: lancache-codeql-${{ matrix.language }}
           dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
           dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+      - name: Start CodeQL memory monitor
+        # What: samples host memory every 10s into a log file until stopped below.
+        # Why: the 512 MB/4-thread cap (see "Initialize CodeQL" below) is a
+        #   new, tight value; this makes real headroom visible per run
+        #   instead of only learning about it from the next OOM kill.
+        # From: Issue #1095
+        if: steps.admission.outputs.superseded != 'true' && (matrix.language != 'rust' || needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
+        run: |
+          set -uo pipefail
+          logfile="${RUNNER_TEMP}/codeql-memlog-${{ matrix.language }}.log"
+          pidfile="${RUNNER_TEMP}/codeql-memlog-${{ matrix.language }}.pid"
+          ( while true; do
+              printf '%s ' "$(date -u +%FT%TZ)"
+              free -m | awk 'NR==2{printf "total=%sMB used=%sMB free=%sMB avail=%sMB", $2,$3,$4,$7}'
+              printf '\n'
+              sleep 10
+            done ) >>"$logfile" 2>&1 &
+          disown
+          echo $! >"$pidfile" || echo "::warning::Could not start the CodeQL memory monitor (non-fatal, diagnostics only)."
+          {
+            echo "CODEQL_MEMLOG_FILE=$logfile"
+            echo "CODEQL_MEMLOG_PID_FILE=$pidfile"
+          } >> "$GITHUB_ENV"
+
       - name: Initialize CodeQL
+        # What: caps CodeQL at 512 MB RAM / 4 threads; also applies to "Perform CodeQL Analysis" below.
+        # Why: unset, CodeQL defaults to most of the host's memory; the
+        #   smallest lancache-heavy host has ~3.6 GiB, no swap, and its Java
+        #   extractor was confirmed OOM-killed under that default (dmesg).
+        # From: Issue #1095
+        #
         # 'actions' always analyzes; 'rust' only when Rust is actually relevant
         # (or on schedule/dispatch where detect-changes is skipped).
         if: steps.admission.outputs.superseded != 'true' && (matrix.language != 'rust' || needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
@@ -376,6 +406,8 @@ jobs:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
           config-file: ./.github/codeql/codeql-config.yml
+          ram: "512"
+          threads: "4"
 
       - name: Build DNS Rust crate for CodeQL
         if: steps.admission.outputs.superseded != 'true' && matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
@@ -405,6 +437,26 @@ jobs:
           # Persist the interpreted SARIF locally so the extraction-quality step can read
           # CodeQL's own diagnostic notifications. Results are still uploaded as usual.
           output: ${{ runner.temp }}/codeql-sarif
+
+      - name: Stop CodeQL memory monitor and print log
+        # What: kills the earlier monitor step's sampler and prints its log.
+        # Why: always() so the log is visible even when CodeQL itself was
+        #   OOM-killed -- that is the exact failure this monitor exists to
+        #   surface, instead of a bare "exit code 137".
+        # From: Issue #1095
+        if: always() && steps.admission.outputs.superseded != 'true' && (matrix.language != 'rust' || needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
+        run: |
+          set -uo pipefail
+          if [ -n "${CODEQL_MEMLOG_PID_FILE:-}" ] && [ -f "$CODEQL_MEMLOG_PID_FILE" ]; then
+            kill "$(cat "$CODEQL_MEMLOG_PID_FILE")" 2>/dev/null || true
+          fi
+          if [ -n "${CODEQL_MEMLOG_FILE:-}" ] && [ -f "$CODEQL_MEMLOG_FILE" ]; then
+            echo "::group::CodeQL memory usage (${{ matrix.language }}, 10s samples, 512 MB cap)"
+            cat "$CODEQL_MEMLOG_FILE"
+            echo "::endgroup::"
+          else
+            echo "::warning::No CodeQL memory monitor log found for ${{ matrix.language }} (monitor may not have started)."
+          fi
 
       # Make CodeQL's Rust extraction-quality determination visible on every run so a green
       # CodeQL Rust job is not silently misread as full extraction coverage (issue #394).

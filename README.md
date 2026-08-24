@@ -361,7 +361,7 @@ Compose. The interactive installer asks which channel to use, defaulting to
 - `vX.Y.Z` pins all stack services to an immutable stable release tag.
 - Branch and commit images are optional for development and testing.
   If CI has published them, valid examples are branch names (for branch pushes)
-  and short `sha-<short>` tags.
+  and `sha-<commit>` tags (full commit SHA).
 
 Recommended for production:
 

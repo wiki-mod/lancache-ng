@@ -42,17 +42,13 @@ frontend dockerfrontend
     acl safe_ping path,url_dec -m reg -i ^(/v[0-9.]+)?/_ping$
     acl safe_version path,url_dec -m reg -i ^(/v[0-9.]+)?/version$
     acl docker_container_path path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/
-    # ui/netdata/syslog (issue #842/#849): added to the master
-    # allowlist and to safe_container_inspect only, NOT to
-    # safe_service_restart below -- watchdog's Rust rewrite monitors these
-    # three for dashboard visibility (alert-only, see
-    # services/watchdog/src/main.rs's resolve_alert_only_targets()) but
-    # never restarts them, so no restart grant belongs here for any of the
-    # three (mirrors how lancache-dhcp/lancache-dhcp-proxy already have
-    # inspect access without a restart grant -- see safe_dhcp_action below
-    # for why those two use start/stop instead).
+    # What: ui/netdata get restart-only acls below; dhcp/dhcp-proxy/ntp stay
+    #   start/stop-only; syslog/watchdog get no restart grant at all.
+    # Why: not caller-specific (method/path only); watchdog must stay unable
+    #   to ever be disabled via the UI, since it recovers other services.
+    # From: Issue #842 | Issue #849 | Issue #1486
     # UPDATED (syslog+fluent-bit consolidation PR, 2026-08, merged
-    # concurrently with #842/#849 which originally added BOTH
+    # concurrently with the changes above which originally added BOTH
     # lancache-syslog and lancache-syslog-ng here as two separate entries):
     # syslog (fluent-bit) and syslog-ng are now one combined container under
     # the single name lancache-syslog -- lancache-syslog-ng removed from both
@@ -70,6 +66,18 @@ frontend dockerfrontend
     # to change when this service's allowlist entry changes independently.
     acl safe_ntp_action path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/lancache-ntp/(start|stop)$
     acl safe_probe_action path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/lancache-dhcp-probe/(start|stop|wait)$
+    # What: own acl for ui's restart-only grant, not folded into
+    #   safe_service_restart.
+    # Why: matches safe_ntp_action's pattern above, restart-only so this can
+    #   never leave ui stopped.
+    # From: Issue #1486
+    acl safe_ui_restart path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/lancache-ui/restart$
+    # What: own acl for netdata's restart grant, same pattern as
+    #   safe_ui_restart above.
+    # Why: keeps build-push.yml's exact-literal regex check isolated to
+    #   only this service's entry.
+    # From: Issue #842
+    acl safe_netdata_restart path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/lancache-netdata/restart$
     http-request allow if safe_get safe_ping
     http-request allow if safe_head safe_ping
     http-request allow if safe_get safe_version
@@ -79,6 +87,8 @@ frontend dockerfrontend
     http-request allow if safe_post safe_dhcp_action
     http-request allow if safe_post safe_ntp_action
     http-request allow if safe_post safe_probe_action
+    http-request allow if safe_post safe_ui_restart
+    http-request allow if safe_post safe_netdata_restart
     http-request deny if docker_container_path !lancache_container
     http-request deny
     default_backend dockerbackend
@@ -93,6 +103,11 @@ EOF
 # scripts/tracked/check-naming-consistency.sh both grep this script's static source
 # for the exact literal fixed names, so leaving that text untouched keeps
 # both checks passing unchanged regardless of whether a suffix is active.
+# What: both branches below now log which allowlist form (suffixed or fixed) was used.
+# Why: previously neither branch logged anything on success, so a container's own startup
+# log gave no evidence of whether the suffix override actually applied -- same
+# silent-decision-point class the linked issue's G15 checkout guard already names.
+# From: Issue #1095 (G15), PR #1640
 LANCACHE_CONTAINER_SUFFIX="${LANCACHE_CONTAINER_SUFFIX:-}"
 if [ -n "$LANCACHE_CONTAINER_SUFFIX" ]; then
     # Fail closed (AG-OP-008/AG-VAL-002): reject anything but a plain
@@ -127,6 +142,9 @@ if [ -n "$LANCACHE_CONTAINER_SUFFIX" ]; then
         -e "s/lancache-netdata\([^-]\)/lancache-netdata${LANCACHE_CONTAINER_SUFFIX}\1/g" \
         -e "s/lancache-syslog\([^-]\)/lancache-syslog${LANCACHE_CONTAINER_SUFFIX}\1/g" \
         /tmp/lancache-haproxy.cfg
+    echo "socket-proxy allowlist: applied LANCACHE_CONTAINER_SUFFIX='$LANCACHE_CONTAINER_SUFFIX' to the generated allowlist." >&2
+else
+    echo "socket-proxy allowlist: LANCACHE_CONTAINER_SUFFIX not set; using unmodified fixed container names." >&2
 fi
 
 exec haproxy -f /tmp/lancache-haproxy.cfg

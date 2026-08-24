@@ -226,7 +226,8 @@ as proof of it:**
 | **Watchdog — NATS monitoring** (new, PR #1167) | A hung (not crashed) `nats` container gets detected and restarted | `docker kill --signal=STOP lancache-nats` from **outside** the container's PID namespace (an in-container `kill -STOP 1` is a no-op — PID 1 ignores unhandled stop/kill signals from within its own namespace, confirmed live in #1167), wait 3× `CHECK_INTERVAL`, confirm watchdog logs `RESTARTING lancache-nats` and `docker inspect --format='{{.State.StartedAt}}'` shows a genuinely new start time | Fail if no restart occurs after 3 consecutive unhealthy reads, or if `StartedAt` is unchanged (a restart request that silently failed) |
 | **Watchdog — hang-simulation technique for multi-process monitored services** (corrected, issue #1391, 2026-08-05) | The row above's technique is **only valid for a genuinely single-process container** (`nats`). Confirmed live during the 2026-08-02 pass (see this document's own `docs/validation-state.json` record): `docker kill --signal=STOP <container>` only ever signals PID 1 inside the container's PID namespace. For `proxy` (nginx master + 8 worker processes + cache manager/loader) this stops only the master; the workers stay `S` (sleeping) and keep serving requests throughout (confirmed via `/proc/<pid>/status`), so the container's own healthcheck genuinely stays green and this technique cannot produce the hang it claims to test for any multi-process monitored service. **Corrected 2026-08-05 (this row previously prescribed `docker pause`, which was itself found on re-check, per an advisor review, to prove the wrong thing — see the two empirical results below, both required before this row was finalized):** the correct fix is **`docker top <container> -o pid` then `kill -STOP` every listed PID from outside the container (root/`sudo`, not `docker exec` for this part — an in-container, same-namespace signal to a sibling process would also work but was not the tested path here)**, not `docker pause`. | `docker inspect --format='{{.State.Health.Status}}'`/`{{.State.Health.FailingStreak}}` after stopping every PID, then `{{json .State.Health.Log}}` to confirm a real failing probe (not just a state-machine short-circuit) ran. **Both techniques verified empirically 2026-08-05** (isolated `nginx:alpine` container, own healthcheck, Docker Engine 29.6.1, self-hosted runner — real multi-process container: 1 master + 7 workers, confirmed via `docker top`): (1) **`docker pause` reproduced 2/2 but proves the wrong thing** — flips `.State.Health.Status` to `unhealthy` within one poll cycle, but `FailingStreak` stays `0` and `.State.Health.Log` gains no new entry; Docker's own pause-handling short-circuits health-checking entirely (a healthcheck `exec` cannot even start in a paused container's frozen cgroup) and stamps `unhealthy` from container *state*, not from a completed failing probe. This only proves "watchdog restarts a container Docker has already flagged unhealthy by other means" — already proven by the existing `docker stop`/crash coverage — and does **not** touch the actual open question, issue #1391's own wording: "it remains genuinely unknown whether Watchdog would detect a real full nginx hang." (2) **Multi-PID `SIGSTOP` closes that actual gap.** `docker top`-listed PIDs confirmed `State: T (stopped)` via `/proc/<pid>/status` after signalling every one (not just PID 1) from the host. Because `SIGSTOP` suspends existing processes without freezing the container's cgroup, Docker can still schedule a *new* healthcheck exec — which genuinely attempts to connect, genuinely cannot get a response (every worker able to `accept()`/serve is stopped), and genuinely times out at the configured `--health-timeout`: two consecutive real failed probes were recorded (`ExitCode: 1`, empty `Output`, ~2.0s duration matching the configured client timeout), `FailingStreak` reached `2`, and `Status` became `unhealthy` through this real timeout path — the same code path and timing character a real in-process hang would produce, unlike `docker pause`'s instant, probe-free flip. `SIGCONT` on every PID correctly restored `healthy`. Use multi-PID `SIGSTOP`/`SIGCONT` as the prescribed technique for `proxy`/`dns-standard`/`dns-ssl`; `docker pause` remains documented above only as a distinct, faster check for "does watchdog act on Docker's own unhealthy determination," not a hang-detection proof | Fail if `.State.Health.FailingStreak` does not increase via a real timed-out probe (`ExitCode` non-zero from an actual command run, not merely `Status` changing) within a few `CHECK_INTERVAL`-equivalent poll cycles after multi-PID-stopping a monitored service, or if a subsequent live pass against the real `proxy`/`dns-standard`/`dns-ssl` images does not show a genuine watchdog-triggered restart (new `StartedAt`) using this technique |
 | **Edition-2024 build (PR #1179)** | All three Rust crates actually build/test/lint clean on the real target (Linux, build-tools container) — not just a Windows-side `cargo check` | For each of `services/ui`, `services/dns/nats-subscriber`, `tools/pxe-client-probe`, inside the build-tools container: `cargo fmt --manifest-path <crate>/Cargo.toml -- --check`, `cargo check --locked --all-targets --manifest-path <crate>/Cargo.toml`, `cargo clippy --locked --all-targets --manifest-path <crate>/Cargo.toml -- -D warnings`, `cargo test --locked --manifest-path <crate>/Cargo.toml`. A **Windows-authored** `cargo check` result is not acceptable evidence per `.github/AGENTS.md`'s build-tools-container contract — the Windows host cannot build Rust for this project's Linux/Docker targets at all | Fail on any non-zero exit from any of the four commands for any of the three crates, or if the check ran outside the pinned build-tools container |
-| **SBOM/VEX generation (PR #1194)** | `scripts/untracked/generate-vex.sh`'s output matches the committed `vex.openvex.json` byte-for-byte, and the drift guard actually fails when it should | `bash scripts/tracked/check-vex-drift.sh` (must report in-sync); `bash scripts/untracked/generate-vex.sh \| jq empty` (must be valid JSON); as a negative control, mutate `.trivyignore.yaml` in a scratch copy and re-run the drift guard, confirming it exits non-zero with a clear diff (already proven once, 2026-07-24 — reuse this exact reusable check going forward rather than re-deriving it) | Fail if the drift guard passes on a real mismatch (the negative control), or if it reports drift on an untouched checkout |
+| **SBOM/VEX generation** (PR #1194; re-architected Issue #1095 F-23 — `vex.openvex.json` is no longer committed to `current_dev`) | `scripts/untracked/generate-vex.sh` always produces valid, non-empty OpenVEX JSON from `.trivyignore.yaml` (the generator-smoke-test guard, `scripts/tracked/check-vex-drift.sh`, no longer compares against a second committed copy — there isn't one); the `CI-Automation/vex` orphan branch is refreshed by `.github/workflows/vex-regenerate.yml` on real `.trivyignore.yaml`/generator changes; release tags regenerate their own asset fresh | `bash scripts/tracked/check-vex-drift.sh` (must report valid JSON with a non-zero statement count); `bash scripts/untracked/generate-vex.sh \| jq empty` (must be valid JSON); as a negative control, feed a scratch-copy `.trivyignore.yaml` with a syntax error into the generator and confirm the smoke test exits non-zero. `vex-regenerate.yml`'s own real `push`-triggered execution cannot be proven from a PR (AG-CI-012 — only provable after this file merges to `current_dev`); its `workflow_dispatch` input can exercise the generate/commit/push logic for real ahead of that, but does not prove the automatic path-filtered `push` trigger itself | Fail if the smoke test passes on genuinely malformed `.trivyignore.yaml` (the negative control), or reports invalid/empty JSON on an untouched checkout |
+| **`docker run` stdin-heredoc requires `-i`** (Issue #1095 F-23, confirmed real incident) | Confirmed empirically against the real v0.3.0 release (published 2026-08-03, run 30788959407): `build-push.yml`'s "Create or update GitHub release for built images" and "Attach OpenVEX document to the release" steps, plus `release-sbom`'s asset-upload step, all reported `success` but the release body carried none of the release-notes step's own generated text and the release carried zero assets — `docker run` without `-i` never attaches container stdin, so the `bash -s <<'MARKER'` heredoc fed to each ran nothing. All three fixed with `-i`; this third check is folded into `scripts/untracked/check-pipefail-early-exit-grep.sh` (maintainer decision, 2026-08-21: extend the existing standing guard rather than add a new file, per the identical call already made once for that script's own second check) and runs via `.github/actions/shellcheck-and-standing-guards/action.yml`'s existing step — now fails closed on any future `docker run ... \| bash -s`/`sh -s` heredoc invocation in `.github/workflows/**`/`.github/actions/**` missing `-i` | `bash scripts/untracked/check-pipefail-early-exit-grep.sh` (must report no violations on the current tree, across all three of its checks); as a negative control, scratch-copy a workflow file, strip `-i` from one known-good invocation, and confirm the check reports that exact file/line. The real v0.3.0 evidence above (`gh release view v0.3.0 --json body,assets`, `gh api .../actions/runs/30788959407/jobs`) is itself the primary confirmation this was a real bug, not merely a plausible one | Fail if the guard passes on a real missing-`-i` instance (the negative control), or if a future release still ships an empty release body/asset list despite these steps reporting success |
 | **Fixture key-drift guard (PR #1199)** | The bats guard actually catches a reintroduced historical `.env`-key gap, not just that it parses | `bats tests/bats/setup_update_idempotence.bats` (guard test runs first, must pass on a clean checkout). As a negative control, remove one known-required key (e.g. `NTP_ENABLED`) from `write_converged_env_fixture()` in a scratch copy and re-run — must fail naming that exact key (already proven once, 2026-07-24 — reuse this exact check) | Fail if the guard doesn't name the specific missing key on the negative control, or passes when a key truly is missing |
 | **CI/build-tools infra** (path-filter narrowing, permissions hardening — PRs #1190/#1202/#1204) | The narrowed path filters/permissions still trigger for every real change they must cover, and don't over- or under-trigger | `bash scripts/tracked/check-bats-path-filter-coverage.sh` (asserts every real bats dependency is covered by `build-tools.yml`'s path filters); `bash scripts/tracked/check-workflow-service-lists.sh` (keeps hardcoded service arrays in sync across workflow files); `actionlint -config-file .github/actionlint.yaml <changed workflow files>` for syntax/permissions/runner-label review per `AG-VAL-011` | Fail if either check script reports a gap, or `actionlint` reports any finding |
 | **Governance docs (AGPL/MAINTAINERS/OSPS/SBOM policy PRs)** | Documentation actually matches current code/CI behavior, not aspirational text | `bash scripts/tracked/check-file-headers.sh` (header contract); manual read-through of each touched doc against the actual current code path it describes, per `AG-DOC-001`. There is no automated drift-detection tool for this yet (`AGENTS.md`'s own "Known Gaps" section says so explicitly) — this remains a manual-review item | Fail (flag as a defect, not skip) if a doc's claim contradicts current code behavior |
@@ -235,7 +236,7 @@ as proof of it:**
 | **CodeQL PR supersession reclamation** (2026-08-08/09, AG-CI-017) | CodeQL runs do not share a GitHub concurrency group, because its one-pending-member behavior can let an older job evict the latest SHA. Each PR run instead checks the authoritative `refs/pull/<N>/head` before scheduling analysis and rechecks after runner admission; stale runs skip all expensive steps, while independent scheduling guarantees the current head cannot be displaced by an older run. **Accepted residual risk** (discussed and knowingly deferred, not fixed): the live head check only runs once, near the start of each run; a run already past it keeps running its full ~2h even if a later push on the same PR makes it stale, so pushes spaced further apart than detect-changes' own ~10-17s but closer together than ~2h can briefly occupy more than one `lancache-heavy` runner for the same PR. A source-level cap (counting this PR's other in-progress runs via the GitHub API) was scoped out: that call needs `curl`, which AG-VAL-016 requires running inside the build-tools container, and `detect-changes` has no container step today — adding one would cost real seconds on every PR push to guard against a scenario that is rare in practice. This is accepted for now, not closed: revisit if it stops being rare, or fold it into a future broader rework of this workflow's CI scheduling, where adding the cap is cheaper than bolting it on separately. | Push three Rust-relevant commits to a scratch PR with the middle run delayed in `detect-changes`. Confirm no `Analyze` job is cancelled by a concurrency group, the newest SHA reaches both matrix legs, and each older leg either finishes or reports `superseded=true` before CodeQL initialization. Also force the remote-head command to fail transiently and confirm it retries four times before the deliberate fail-open behavior, and confirm it fails closed immediately (no retry) on a permanent "ref not found" (exit code 2) result. Scheduler ordering requires real GitHub Actions runs; locally run the resolver bats tests and actionlint. | Fail if `analyze` gains a shared concurrency key, an older run cancels or displaces the newest SHA, a stale run proceeds past its successful live-head recheck, a current PR head is classified as superseded, or the newest Rust-relevant run does not execute actual Rust analysis. |
 | **Q1 — build-tools.yml trigger narrowing + build-tools-smoke.yml** (2026-07-25, issue #1253) | `build-tools.yml` only rebuilds the image for real `tools/build-tools/**` content changes; `build-tools-smoke.yml` still runs bats/shellspec against the published image for every other test/script-relevant change | `bash scripts/tracked/check-bats-path-filter-coverage.sh` (now targets `build-tools-smoke.yml`, per its retargeted header comment — confirm it still reports full coverage); open a scratch PR touching only a `tests/bats/**` file (not `tools/build-tools/**`) and confirm `build-tools.yml`'s image-build job does not trigger while `build-tools-smoke.yml` does and passes | Fail if a test-only change still triggers a full image rebuild, or if a real `tools/build-tools/**` change fails to trigger one |
 | **Runner-host cleanup script, versioned in-repo** (2026-07-25, `tools/runner-host/`) | The cleanup script actually reclaims disk (measure → clean → re-measure), reaps stale/orphaned build-tools containers across all self-hosted hosts, and is consistent (not host-local/ad-hoc) | `shellcheck tools/runner-host/*.sh` (must be clean); run the script for real on a self-hosted runner host via SSH, capture disk usage before/after, confirm the after-measurement shows real reclaimed space and that no `docker ps -a` entries for stopped/hung build-tools containers remain | Fail if the script only measures without a real reduction, or if it's missing from any host it's meant to run on |
-| **CVE-2026-34040 non-exploitability documentation** (2026-07-25, `.trivyignore.yaml`) | The accepted-risk justification is a verified technical claim (vulnerable code is daemon-only, absent from the vendored client binaries), not a deferred "revisit later" placeholder | `bash scripts/tracked/check-vex-drift.sh` (must report in-sync after the regenerated `vex.openvex.json`); read the `.trivyignore.yaml` entry's statement and confirm it names the specific reason (module split at moby v29, vulnerable code in `pkg/authorization`, daemon-only, absent from `docker-buildx`/`docker-compose` client binaries) rather than a vague "no fix available yet" | Fail if the ignorefile reverts to a vague justification, or if a real Trivy scan of the built images still flags this CVE as unaddressed without an equally specific replacement justification |
+| **CVE-2026-34040 non-exploitability documentation** (2026-07-25, `.trivyignore.yaml`) | The accepted-risk justification is a verified technical claim (vulnerable code is daemon-only, absent from the vendored client binaries), not a deferred "revisit later" placeholder | `bash scripts/tracked/check-vex-drift.sh` (must still report valid, non-empty OpenVEX JSON for this entry after any `.trivyignore.yaml` edit — see the SBOM/VEX generation row above for that guard's current, generator-smoke-test-only scope); read the `.trivyignore.yaml` entry's statement and confirm it names the specific reason (module split at moby v29, vulnerable code in `pkg/authorization`, daemon-only, absent from `docker-buildx`/`docker-compose` client binaries) rather than a vague "no fix available yet" | Fail if the ignorefile reverts to a vague justification, or if a real Trivy scan of the built images still flags this CVE as unaddressed without an equally specific replacement justification |
 | **New/renumbered governance rules — AG-CI-014, AG-CI-016/017 (post #1242 AG-CI-015 collision), AG-GH-008 correction, AG-WF-027** (2026-07-25) | `AGENTS.md` has no duplicate rule IDs, and the Rule Enforcement Matrix has a row for every rule | `grep -oE "\*\*\[AG-[A-Z]+-[0-9]+\]\*\*" AGENTS.md \| grep -oE "AG-[A-Z]+-[0-9]+" \| sort \| uniq -c` — every ID must appear exactly once as a rule definition (a second appearance elsewhere in prose as a `Rule-Ref:` cross-mention is fine; a second **definition** is not); cross-check each new/renumbered ID has a matching Rule Enforcement Matrix row | Fail on any duplicate rule-definition ID, or a rule missing its matrix row |
 | **CI script ecosystem — case-insensitive repo-name comparisons** (fixed, PR #1360, 2026-08-01 — no dedicated tracking issue; #842 is the unrelated watchdog-monitoring issue this PR's Part 1 also happened to ship alongside) | No script anywhere in `scripts/**`/`.github/**` (including inline workflow shell) compares a GitHub repository-identity value (`GITHUB_REPOSITORY`, `HEAD_REPO`/`head_repository`, `GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME`, `BASE_REPOSITORY`, or an equivalent) with a bare, case-sensitive `==`/`=`/`!=` — GitHub repository names are case-insensitive for identity, but the two context values feeding such a comparison are not guaranteed to agree on casing at every point in time (confirmed live during this repo's rename to `LanCache-NG`: `scripts/lib/validation-image-tag.sh`'s `vit_pr_staging_available()` and `scripts/untracked/select-build-tools-image.sh`'s fork-vs-same-repo trust check both misclassified a genuine same-repo PR as a fork PR under the old casing, one fail-closed in the safe direction and one merely wrong). Both known call sites are fixed (`${x,,}` lowercasing on both sides, per each file's own incident comment) with dedicated regression coverage: `tests/bats/validation_image_tag.bats` (2 new cases) and the new `tests/bats/select_build_tools_image.bats` (6 cases) | `bats tests/bats/validation_image_tag.bats tests/bats/select_build_tools_image.bats` (must pass, including the same-repo-different-casing case in each); as the ecosystem-wide guard against a *third* call site reintroducing this bug class elsewhere: `grep -rniE '"\$\{?[a-z_]*repo[a-z_]*\}?"[[:space:]]*(==\|!=\|=)[[:space:]]*"\$' scripts/ .github/` (deliberately no `--include` filter — a bare-`.sh` restriction would silently skip `build-push.yml`'s ~9000 lines of inline bash, the most likely place a third call site would appear). **Verified 2026-08-01, both directions**: run against the pre-fix commit (`git show 433c3fd2^:scripts/untracked/select-build-tools-image.sh \| grep -niE '...'`, same pattern) correctly flags the exact pre-fix lines (`"$head_repo" == "$repository"`, `"$head_repository" = "$base_repository"`); run against the current tree returns zero hits (both fixed call sites now use `${x,,}`, which the pattern's brace-then-bare-name shape correctly does not match) — a check that can't fail is not a check, and this one demonstrably can. No dedicated script exists for this today, so it remains a documented manual/grep-assisted check, not yet automated as its own CI job (a candidate for future consideration under `AG-VAL-028`'s periodic-reassessment recommendation, not yet acted on); every hit still needs a human glance to confirm it's a genuine repo-identity comparison and not an unrelated `repo`-substring false positive. **Explicit scope note**: this check targets shell-level (`bash`/`sh`) comparisons only, matching the two real fixed call sites. It deliberately does **not** flag the ~15 GitHub Actions expression-level `${{ github.event.pull_request.head.repo.full_name == github.repository }}` comparisons already present in `build-push.yml`/`codeql.yml` (e.g. `PR_IS_FORK`'s own definition) — checked against GitHub's own documentation (`docs.github.com`'s Expressions reference), which states plainly that `==`/`!=` string comparisons in workflow expressions are already case-insensitive ("GitHub ignores case when comparing strings"), unlike bash's `[[ ]]`/`[ ]`. Those YAML-expression comparisons are therefore not part of this bug class and are correctly out of this check's scope, not an unexamined gap in it | Fail if either bats file fails, or if the grep turns up a new case-sensitive shell-level repository-identity comparison with no `,,` lowercasing |
 | **build-push.yml — pushed image commit-label matches the PR's actual current head** (open gap, no structural fix yet — incident 2026-08-01, PR #1354) | A `build`/`build-arm64` run reporting `success` genuinely built and pushed the commit it claims to, not an earlier, already-superseded commit from the same branch | Confirmed live: rapid, closely-spaced `gh pr update-branch` calls on PR #1354 left `build-push.yml` labeling the pushed `proxy` image with `org.opencontainers.image.revision=220c80f` (a superseded commit) while the run's own reported `head_sha` was already the newer `c4c0e6b6` — a real `docker inspect <image> --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'` mismatch against `gh pr view --json headRefOid`, not merely a suspected race. The only remediation applied was an empty follow-up commit to force a clean, uncontested re-run (commit `2f737bcc`) — there is no code-level guard preventing recurrence, and no dedicated tracking issue exists yet (folded into the PR's own history only). Before trusting any `build`/`build-arm64` "success" as evidence for a specific commit — especially right after any rapid sequence of `gh pr update-branch`/force-push calls on the same PR — compare the pushed image's `org.opencontainers.image.revision` label against `gh pr view <n> --json headRefOid --jq .headRefOid` (or `git rev-parse HEAD` for a push event) for that exact SHA, not just a green check mark | Fail (and re-run) if the pushed image's revision label does not match the commit under test, regardless of the workflow run's own reported conclusion |
@@ -253,6 +254,12 @@ as proof of it:**
 | Subsystem | What to check | How to check it for real | Pass/fail |
 |---|---|---|---|
 | **Proxy `/healthz` unauthenticated-probe ACL — finding #11 (bug-hunt #849, PR #1472)** (fixed, then corrected, 2026-08-06/07) | `conf.d/http.conf`'s and `conf.d/https.conf`'s `location = /healthz` blocks genuinely reject a source outside `127.0.0.1/32`/`172.16.0.0/12`, not merely contain `allow`/`deny` text that looks correct | **A real bug was caught here, not just prevented**: the fix's first version served the body via a bare `return 200 "ok\n";` in the SAME location as the `allow`/`deny` directives. `bats tests/bats/proxy_healthz_acl_and_hidden_headers.bats`'s static grep-based assertions all passed against that version — they only check the ACL text is present, never that nginx enforces it. A real differential live-container test caught what the static test couldn't: two real `proxy` containers built from this branch, one queried from a genuinely excluded source (a second container on a dedicated Docker bridge network outside both allowed CIDRs, confirmed via a throwaway `$remote_addr`-echoing location that this was really the TCP peer address nginx saw, not an assumption) — that version returned **200 to every source, including the excluded one**. Root cause, confirmed in isolation on a stock, unmodified `nginx:1.27-alpine` image (not specific to this project's build): `return` is an `ngx_http_rewrite_module` directive that runs in nginx's rewrite phase, which executes **before** the access phase `allow`/`deny` are evaluated in — a bare `deny all;` alone in a fresh location correctly returned 403 in the same test rig, but the identical `deny all;` alongside a `return` in the same location returned 200 regardless of source. The corrected version serves the body via `alias` to a real file (`entrypoint.sh`'s own "3a." step generates `/etc/nginx/lancache-healthz-body.txt` at startup) — `alias` uses `ngx_http_static_module`'s content-phase handler, which runs *after* the access phase. Re-verified live after the fix, all four real call paths: (1) the exact Compose healthcheck commands (`curl -sf http://127.0.0.1/healthz`, `curl -ksf https://127.0.0.1:8445/healthz`, both via `docker exec` to match how Docker's own `HEALTHCHECK` actually invokes them inside the container's network namespace) both return `200`/`ok`; (2) a request from the same dedicated-network excluded source now correctly gets `403`; (3) a request from a Docker-bridge-range address (`172.17.0.2`, inside the allowed `172.16.0.0/12`) still gets `200`/`ok`, proving the fix didn't over-restrict the legitimate inter-container/gateway-probe case; (4) re-checked with `SSL_ENABLED=0` too (the port-80-only deployment mode, not exercised by the first three checks) -- `/healthz` still returns `200`/`ok` there, and the generated body file itself is `644 root:root` (world-readable, so the nginx worker user reading it as a non-owner/non-group process is not a permission-denied path that could be mistaken for the ACL's own 403). `tests/bats/proxy_healthz_acl_and_hidden_headers.bats` gained 2 new cases asserting the location bodies use `alias` and contain no `return`, so a regression back to the exact broken shape is caught statically even without a live-nginx harness (this project's `build-tools` image has no `nginx` binary, confirmed via `which nginx`/`nginx -v` both failing inside it — a real `nginx -t`/live-request CI harness for this remains a documented gap, not yet automated) | Fail if a genuinely excluded source ever gets `200` from either `/healthz` location, if a genuinely allowed source (loopback, Docker-bridge-range, or `SSL_ENABLED=0` mode) ever gets a non-`200`/wrong body, or if either bats file's `alias`/no-`return` assertions regress |
+
+**New standing check (2026-08-17, issue #1095): GHCR destructive retention GC**
+
+| Subsystem | What to check | How to check it for real | Pass/fail |
+|---|---|---|---|
+| **GHCR retention GC** | Protected `latest`, `nightly`, newest `minimum_stable_releases`, rollback anchors, within-budget ordinary roots, open/unknown PR versions, and shared artifact children survive; aged beyond-budget roots, their no-longer-live tagged closure, and genuine orphans are eventually collectible without redundant package/PR API pressure | First run `workflow_dispatch` with `dry_run=true` and record concrete root/closure/orphan `would-delete` IDs. Confirm sampled protected IDs are absent from the delete set. Repeat with concurrency 1/2/4 while recording GitHub API retries/429/5xx; increasing concurrency is acceptable only while the full sweep still completes without systemic API failure. Then run the real GC with a deliberately small deletion cap and re-query the exact candidate IDs: removed IDs must return 404 while sampled protected IDs remain 200. Force a cross-run closure case by allowing a root deletion while its child is deferred by quota, then confirm the next sweep can collect that stranded child. During a run, reopen a planned PR or add a protected tag before DELETE and confirm fresh revalidation keeps the version. Run `bats tests/bats/gc_pr_staging_images.bats tests/bats/sha_retention_audit.bats` in the pinned build-tools container as the reusable negative-control suite. | Fail if a protected sampled ID is deleted; if dry-run issues any DELETE; if a changed-tag/reopened-PR candidate is deleted; if a child deferred from an earlier root deletion has no later GC path; if a package is redundantly fully listed after its authoritative audit snapshot; if repeated package-worker PR lookups multiply the same planning lookup; if API pressure causes an incomplete sweep at the selected production concurrency; if worker counters/results are lost or malformed; or if any Bats case fails |
 
 ---
 
@@ -443,6 +450,19 @@ use a real Linux host, e.g. over SSH to a self-hosted runner, per
 - Confirm the three modes are genuinely mutually exclusive at the config-render level
   (`DHCP_MODE` selects exactly one rendered `dnsmasq`/Kea config) — inspect the
   rendered config inside the running container, not just the env var.
+- **Same-container dnsmasq sub-mode switch (added 2026-08-19, issue #1486):** with
+  `dhcp-proxy` already running under ProxyDHCP, switch to Relay via the Admin UI's
+  `/dhcp/mode` form (or the reverse direction) and confirm via `docker inspect
+  lancache-dhcp-proxy --format '{{.State.StartedAt}}'` (or `docker logs`'s own
+  entrypoint banner) that the container genuinely restarted, then confirm the
+  rendered dnsmasq config inside the container reflects the NEW sub-mode, not the
+  one it was running before the save. Before `routes/dhcp.rs`'s
+  `reconcile_dhcp_mode_stop`/`reconcile_dhcp_mode_start` split, this transition
+  silently kept serving the OLD sub-mode forever (`start_service` on an
+  already-running container is a no-op) — this scenario exists specifically to catch
+  a regression of that exact bug. **Not yet run as part of this pass** (tracked as a
+  live-stack follow-up): this document only records the reusable check and names it,
+  per this section's own "Coverage Assessment" discipline.
 
 ### 4. Cache hit/miss — HTTP and HTTPS
 
@@ -505,6 +525,23 @@ propagation path end-to-end via a real `dig`, both for creation and removal.
   live-transition proof, driven by an actual container stop/start, is the standard.
 - Cache-resize control (new): see Part A's entry — the `nginx -T` rendered-config
   proof, not a `200 OK`.
+- **Admin UI self-restart (added 2026-08-19, issue #1486):** from `/setup`, submit
+  the "Admin-UI neu starten" form and confirm three things against the real running
+  stack, not just a `200`/`303` from the handler: (1) `docker inspect lancache-ui
+  --format '{{.State.StartedAt}}'` shows a genuinely later timestamp afterward: (2)
+  the served `restart_ui_service` acknowledgement page's own `/health` poll actually
+  observes the container go briefly unreachable and then recover, ending on `/setup`
+  in the browser -- not just that the container restarts server-side while the poll
+  loop was never exercised; (3) `docker-socket-proxy`'s allowlist genuinely denies
+  the same `restart` call for `lancache-syslog`/`lancache-watchdog` (a negative
+  control -- confirm a raw `curl -X POST` through the proxy against either name
+  returns HAProxy's deny, not the Docker API's own 404/409). **Not yet run as part
+  of this pass** (tracked as a live-stack follow-up): `scripts/tracked/check-naming-consistency.sh`'s
+  new watchdog/syslog lifecycle-grant guard (see its own "watchdog/syslog must never
+  gain a lifecycle-action grant" section) is real, executed, mechanical proof for
+  item (3) above at the config-generation level; a live HAProxy-level negative
+  control against a real running `docker-socket-proxy` container is the remaining
+  Part B gap this bullet names.
 
 ### 7. Watchdog — auto-restart coverage
 
@@ -641,6 +678,20 @@ a CI proof does not, by itself, satisfy a Part B stack-validation claim.
   document only records that the reusable proof exists and names it, per this
   section's own "Coverage Assessment" discipline of being honest about what remains
   open.
+- **Enabled-to-enabled upstream-server config change (added 2026-08-19, issue
+  #1486):** with LanCache-NG-NTP already enabled and running, submit `/ntp/settings`
+  with a changed `ntp_upstream_servers` list while leaving `ntp_enabled` checked.
+  Confirm via `docker inspect lancache-ntp --format '{{.State.StartedAt}}'` that the
+  container genuinely restarted, and confirm `chronyc sources` (or the container's
+  own startup log line, "Starting LanCache-NG-NTP (chronyd) with upstream servers:
+  ...") now lists the NEW servers, not the ones configured before the save. Before
+  `routes/ntp.rs`'s `reconcile_ntp_container_stop`/`reconcile_ntp_container_start`
+  split, an already-running `ntp` container was never restarted on a settings save
+  (`start_service` on an already-running container is a no-op) — this scenario
+  exists specifically to catch a regression of that exact bug. **Not yet run as part
+  of this pass** (tracked as a live-stack follow-up): this document only records the
+  reusable check and names it, per this section's own "Coverage Assessment"
+  discipline.
 
 ### 11. `setup.sh update` (self-update) — live scenario (added 2026-08-05, issue #1391)
 
@@ -978,8 +1029,12 @@ below, per that same rule's "genuinely unautomatable case" carve-out):
   `sra_is_stable_release_tag`, `sra_release_sort_key`,
   `sra_select_supported_release_tags`, `sra_classify_channel_tag`,
   `sra_other_tags_from_csv`, `sra_protected_reference_reason`,
-  `sra_extra_tag_protect_reason`), including the combined-reason case, the
-  unsupported-old-release case, and the unrecognized-tag fallthrough case —
+  `sra_extra_tag_protect_reason` -- this last helper was removed in issue
+  #1585's v1.2 pass once its one caller needed to distinguish a real channel
+  match from its always-protect fallback; its coverage was replaced by
+  tests for the new shared `sra_budget_decision` helper), including the
+  combined-reason case, the unsupported-old-release case, and the
+  unrecognized-tag fallthrough case —
   this file's own standing coverage for this subsystem, satisfying AG-VAL-029
   for this change rather than leaving it as a point fix with no durable
   regression net. **Not implemented, recorded as an open gap below rather
@@ -1443,6 +1498,138 @@ omitted):**
   this is incidental retention, not a proven guarantee. **Tracking**: PR
   #1501's `#issuecomment-5292505929` records the open maintainer decision on
   whether to build the dedicated lookup.
+
+- **Recorded exception (2026-08-22, issue #1095 G15, PR #1640, Rule-Ref:
+  AG-VAL-029): `full-setup-deep-validate.yml`'s new pre-checkout resync guard
+  has no durable bats regression case yet, only a one-time manual scratch-repo
+  verification.**
+  - **Scope**: the "Resync workspace to its own HEAD before checkout
+    (self-hosted reuse hardening)" step added ahead of all 5 self-hosted
+    `actions/checkout` sites in `full-setup-deep-validate.yml`, fixing the
+    real F19/PR #1640 CI failure (a prior job's tracked file surviving into
+    this PR's own checkout because `git checkout --force` refused to remove
+    it against a stale inherited HEAD).
+  - **Reason**: `gc-pr-staging-images.yml` has an analogous inline
+    sparse-checkout/skip-worktree restore step, and that one *is* covered by
+    a durable bats case (`tests/bats/gc_pr_staging_images.bats`, the
+    "regresses the workflow's sparse-checkout-restore step via a throwaway
+    local `git init` repo" block). No existing bats file owns
+    `full-setup-deep-validate.yml`'s inline checkout-step shell bodies the
+    same way — `detect_full_setup_changes.bats`,
+    `full_setup_client_simulation_domain.bats`, `plan_deep_validation.bats`,
+    and `check_validation_subnet_wrapper_coverage.bats` each own a specific
+    `scripts/*.sh` file or a cross-workflow wrapper-usage guard, not this
+    step's own shell body. Per AG-CODE-013, a new file is a standing DISACK
+    absent either an existing owner to extend or an explicit maintainer ACK;
+    neither applies here, and the maintainer/coordinator was not asked for
+    that ACK within this dispatch's scope, so the compliant route is this
+    recorded exception rather than a new bats file created out of convenience.
+  - **Tracking**: PR #1640; issue #1095 G15. Real commits: `2a576888`/
+    `17803775` (initial guard), `f0cb604d` (added `::notice::` logging),
+    `821bee98` (hoisted an embedded `$(...)` substitution per AG-VAL-029's
+    own already-recorded embedded-call-shape entry above), `fd607602`
+    (gated the whole guard body on `git rev-parse --verify -q HEAD`
+    succeeding first, after real execution — not reasoning — found an
+    exit-128 crash on an unborn-HEAD `.git` directory).
+  - **Validation**: manual only. The guard's exact shell body was run against
+    3 real scratch git repositories during this PR's development: (1) a
+    valid HEAD with one file carrying the skip-worktree bit — exits 0,
+    restores the file; (2) a `.git` directory with no commit yet (unborn
+    HEAD) — exited 128 (`fatal: invalid reference: HEAD`) before the
+    `fd607602` gating fix, exits 0 as a clean no-op after it; (3) no `.git`
+    directory at all — exits 0 as a clean no-op via the `else` branch. These
+    scratch repositories were not preserved and this sequence is not wired
+    into any bats file, so re-verifying the guard after a future edit
+    requires manually re-deriving and re-running these 3 cases until a bats
+    file adopts ownership. Separately: case (1)'s own skip-worktree counter
+    (`${#remaining_skip_worktree[@]}`) was observed to always report 0 in
+    practice, because `git sparse-checkout disable` already clears the `S`
+    bit before `git ls-files -v` runs — so that specific `::notice::` count
+    is not meaningful evidence of anything and must not be read as proof no
+    skip-worktree bits were present; the inherited-HEAD `::notice::` line is
+    the guard's only currently-meaningful log signal.
+  - **Non-Expansion**: this exception covers only these 3 verified scenarios
+    for this specific guard as it exists after `fd607602`. It does not
+    exempt any other new inline workflow shell step from bats coverage, and
+    a future edit to this guard's shell body invalidates this entry's
+    validation claim (Rule-Ref: AG-WF-011) until the 3 cases are re-run
+    against the new body, ideally by finally giving this class of guard a
+    real bats home instead of repeating this manual cycle a third time
+    (Rule-Ref: AG-WF-025).
+
+- **Recorded exception (2026-08-22, issue #1095 G15, PR #1640, commit
+  `86a3b160`, Rule-Ref: AG-VAL-029): 5 silent-skip-branch fixes have no
+  durable regression check, only a one-time manual/standalone-harness
+  verification, and 2 of the 5 are cross-file duplication-drift risks with
+  no owning sync-check script yet.**
+  - **Scope**: a maintainer-directed repo-wide sweep (AG-WF-011/AG-CI-015 --
+    treating the checkout guard's silent-skip bug, above, as a failure class
+    rather than an isolated incident) found and fixed 5 more instances: (1)
+    `services/dns/Dockerfile` and (2) `services/watchdog/Dockerfile`'s
+    `configure_sccache`/`configure_distcc`/`configure_ccache` top-level skip
+    branches; (3) `services/ui/Dockerfile`'s byte-identical copies of the
+    same two functions in *two* separate RUN blocks (missed by the initial
+    pattern search, found only by this document's own author re-grepping
+    `services/` directly); (4) all three Dockerfiles'
+    `resolve_cargo_jobs()`, whose resolved value/source previously had zero
+    build-log trace on any path, not only the skip path; (5)
+    `.github/workflows/build-push-hosted-fallback.yml`'s "Compute Docker
+    build parallelism" step, confirmed missing the two `::notice::` lines
+    its `build-push.yml` sibling step already carries (real two-copy drift,
+    not a hypothetical); and `scripts/untracked/docker-socket-proxy.sh`'s
+    `LANCACHE_CONTAINER_SUFFIX` branch, silent on both its apply and skip
+    paths.
+  - **Reason**: (4) and (5) are genuinely drift-prone by construction --
+    `build-push.yml`/`build-push-hosted-fallback.yml` already maintain
+    several other duplicated-content pairs with dedicated sync checks
+    (`check-workflow-service-lists.sh`'s `#822` service-array-sync shape;
+    `check-dependabot-docker-base-consistency.sh`'s Dockerfile-`FROM`-line
+    shape, both cited above), so "keep this step's `::notice::` wording
+    synced between the two workflow copies" and "keep
+    `configure_sccache`/`configure_distcc`/`configure_ccache` synced across
+    3 Dockerfiles" are real candidates for the same treatment. Neither has
+    an owner today: `check-workflow-service-lists.sh`'s own docstring scopes
+    it specifically to hardcoded `services=(...)` array duplication (the
+    `#822` recurrence shape), a different conceptual class from step-body or
+    function-body log-line parity, so extending it would not be "the same
+    conceptual class" AG-CODE-013 requires for an owner-file extension. No
+    other `scripts/tracked/*.sh` owns either shape. Per AG-CODE-013, creating
+    a new dedicated sync-check script is a standing DISACK absent an
+    existing owner or an explicit maintainer ACK; neither applies within
+    this dispatch's scope, so this recorded exception is the compliant route
+    rather than silence, and a genuine candidate to promote into a real
+    mechanical check (mirroring how `check-dependabot-docker-base-
+    consistency.sh` itself was promoted out of a general exception once its
+    claim became concrete, per the AG-DOC-001 entry above) if the maintainer
+    decides the drift risk warrants it.
+  - **Tracking**: PR #1640; issue #1095 G15; commit `86a3b160`.
+  - **Validation**: manual only. A standalone, non-Dockerfile reproduction of
+    the four fixed Dockerfile functions' post-fix conditional logic and
+    message text (secret paths parametrized via a scratch directory instead
+    of `/run/secrets/*`, since real secret mounts require BuildKit) was run
+    against 5 real scenarios: no secrets; all secrets present with distcc
+    enabled; distcc secret present but distcc not enabled (exercises the
+    two-way `configure_ccache` message's harder branch); explicit
+    `CARGO_BUILD_JOBS`; distcc enabled but the ccache secret specifically
+    absent. All 5 produced exactly the expected message. This harness stubs
+    every enable-path body to a placeholder marker, so it proves the new
+    `else` branches and the two-way message selection, not that the
+    unmodified enable-path bodies still behave identically -- that claim
+    rests on `sh -n` syntax-checking the real, unmodified full RUN bodies
+    plus direct diff inspection (the enable-path lines are byte-for-byte
+    unchanged), not on execution. The edited workflow step was validated
+    with `sh -n` and PyYAML `yaml.safe_load`. `docker-socket-proxy.sh` was
+    additionally checked against `scripts/tracked/check-naming-
+    consistency.sh`, `check-compose-healthchecks.sh`, and
+    `check-workflow-service-lists.sh`, all three still passing against the
+    edited tree.
+  - **Non-Expansion**: this exception covers only these 5 locations as fixed
+    in commit `86a3b160`. Any future re-duplication of either the
+    Dockerfile-function or the workflow-step-content shape is a new
+    occurrence to evaluate on its own merits (Rule-Ref: AG-WF-011), and a
+    third occurrence of either specific drift shape should prompt actually
+    building the mechanical sync check named above rather than recording a
+    fourth exception (Rule-Ref: AG-WF-025).
 
 ---
 
