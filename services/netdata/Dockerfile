@@ -30,9 +30,9 @@ FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe
 
 LABEL org.opencontainers.image.description="First-party Alpine + netdata's official static musl build, replacing the pulled third-party netdata/netdata (Debian) image."
 
-# What: netdata's static build vendors its own curl; Trivy cannot see it.
-# Why: check-netdata-curl-pin.sh compares it to curl.se's real threshold.
-# From: Issue #1304
+# What: netdata's static build vendors curl 8.20.0, below the 8.21.0 fix.
+# Why: Trivy can't see it; check-netdata-curl-pin.sh tracks/enforces status.
+# From: Issue #1304 | PR #1662
 ARG NETDATA_VERSION=v2.11.0
 ARG NETDATA_X86_64_SHA256=b42d9937807f28812502a967906d370cff9ab443453813656b99ff6a9b3c5649
 

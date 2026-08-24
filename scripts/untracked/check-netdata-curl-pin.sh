@@ -11,7 +11,7 @@ set -euo pipefail
 
 # What: CURL_SAFE_THRESHOLD is confirmed real via curl.se's own CVE pages.
 # Why: Debian's tracker misreports backports builds as still affected.
-# From: Issue #1304 | PR #1352
+# From: Issue #1304 | PR #1662
 CURL_SAFE_THRESHOLD="8.21.0"
 TRACKED_CVES=(CVE-2026-12064 CVE-2026-8286 CVE-2026-8927 CVE-2026-8932 CVE-2026-9079 CVE-2026-9080 CVE-2026-9545)
 TRACKED_CVES_SOURCE_DATE="2026-08-14"
