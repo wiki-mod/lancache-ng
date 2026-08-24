@@ -73,9 +73,9 @@ vulnerabilities:
 
       Why: Trivy reports `Status: affected`, `FixedVersion: None`; no
       `paths:` scoping applies since Trivy's Debian os-pkgs finding class
-      carries no `PkgPath`. PR #1661 purges Debian's `curl`/
-      `libcurl3t64-gnutls` entirely (curl/git now build from source);
-      `libcurl4t64` remains solely as `cmake`'s package dependency
+      carries no `PkgPath`. This file's from-source curl/git build purges
+      Debian's `curl`/`libcurl3t64-gnutls` entirely; `libcurl4t64`
+      remains solely as `cmake`'s package dependency
       (`apt-get autoremove` strips cmake once it's purged) and drives only
       already-vendored C/C++ builds (e.g. aws-lc-sys/BoringSSL for
       services/ui), never a network fetch. Verified via a real Trivy scan
