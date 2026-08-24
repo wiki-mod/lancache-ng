@@ -98,9 +98,9 @@ RUN set -euo pipefail; \
     /out/docker-compose version
 
 # What: source stage for the shared, statically-linked curl binary.
-# Why: the same binary already used by proxy/dns/dhcp/ntp/ui (Issue #1556)
-# is portable to a glibc host too (static, no dynamic curl dependency),
-# so this image reuses it instead of Debian's own curl package.
+# Why: the same binary already used by proxy/dns/dhcp/ntp/ui is portable
+# to a glibc host too (static, no dynamic curl dependency), so this image
+# reuses it instead of Debian's own curl package.
 # From: Issue #1304 | Issue #1556
 FROM ghcr.io/wiki-mod/lancache-ng/utilities@sha256:718af4cf8f1352cee341e851cecb9821033de9a5c7804c64e1c6217b62c79186 AS utilities-tools
 
@@ -247,8 +247,8 @@ RUN set -euo pipefail; \
 # What: curl comes from the shared utilities image instead of Debian's
 # own curl package.
 # Why: reuses the same statically-linked, feature-reduced binary already
-# shipped to 5 other first-party images (Issue #1556), rather than
-# reinstalling a separately-tracked, more heavily-CVE'd Debian package.
+# shipped to 5 other first-party images, rather than reinstalling a
+# separately-tracked, more heavily-CVE'd Debian package.
 # From: Issue #1304 | Issue #1556
 COPY --from=utilities-tools /usr/local/bin/curl /usr/local/bin/curl
 RUN curl --version >/dev/null
@@ -343,7 +343,8 @@ RUN --mount=type=secret,id=sccache_redis_url \
     sccache --show-stats; \
     git --version; \
     git_remote_https="$(command -v git-remote-https || echo /usr/local/libexec/git-core/git-remote-https)"; \
-    if ldd "$git_remote_https" | grep -qi 'libcurl'; then \
+    git_remote_https_ldd="$(ldd "$git_remote_https")"; \
+    if grep -qi 'libcurl' <<<"$git_remote_https_ldd"; then \
       echo "::error::git-remote-https unexpectedly linked against a dynamic libcurl after a static-curl build." >&2; \
       exit 1; \
     fi; \
