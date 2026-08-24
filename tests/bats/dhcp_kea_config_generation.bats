@@ -29,7 +29,6 @@ setup() {
     export DHCP_DNS_SECONDARY="127.0.0.1"
     export DHCP_MAX_LEASE_TIME="172800"
     export DHCP_DNS_SERVER_IP="127.0.0.1"
-    export DHCP_DNS_SERVER_IP_SSL="127.0.0.1"
     export DHCP_DDNS_PORT="53"
     export KEA_CTRL_TOKEN="test-secret-token-12345678901234567890"
     export KEA_CTRL_HOST="0.0.0.0"
@@ -56,16 +55,16 @@ setup() {
     # by whatever happens to be in the shell environment. If this list
     # drifts from entrypoint.sh's, the test stops exercising the real
     # rendering behavior.
-    export ENVSUBST_VARS='${DHCP_SUBNET}${DHCP_RANGE_START}${DHCP_RANGE_END}${DHCP_GATEWAY}${DHCP_DOMAIN}${DHCP_LEASE_TIME}${DHCP_NTP_OPTION}${DHCP_DNS_PRIMARY}${DHCP_DNS_SECONDARY}${KEA_CTRL_TOKEN}${DHCP_MAX_LEASE_TIME}${DDNS_TSIG_KEY}${DHCP_DNS_SERVER_IP}${DHCP_DNS_SERVER_IP_SSL}${DHCP_DDNS_PORT}${KEA_CTRL_HOST}${KEA_LEASE_CMDS_HOOK_PATH}${DHCP_DDNS_ENABLED}'
+    export ENVSUBST_VARS='${DHCP_SUBNET}${DHCP_RANGE_START}${DHCP_RANGE_END}${DHCP_GATEWAY}${DHCP_DOMAIN}${DHCP_LEASE_TIME}${DHCP_NTP_OPTION}${DHCP_DNS_PRIMARY}${DHCP_DNS_SECONDARY}${KEA_CTRL_TOKEN}${DHCP_MAX_LEASE_TIME}${DDNS_TSIG_KEY}${DHCP_DNS_SERVER_IP}${DHCP_DDNS_PORT}${KEA_CTRL_HOST}${KEA_LEASE_CMDS_HOOK_PATH}${DHCP_DDNS_ENABLED}'
 }
 
 # is_ipv4 is the fail-fast address-format gate used by the NTP-resolution
 # helpers (resolve_ntp_server / is_ipv4_csv) and by the legacy NTP-servers
 # migration path in migrate_dhcp4_config -- it is not invoked for every
-# DHCP_*_IP/DHCP_*_SERVER value. DHCP_DNS_PRIMARY, DHCP_DNS_SECONDARY,
-# DHCP_DNS_SERVER_IP, and DHCP_DNS_SERVER_IP_SSL are exported straight into
-# the Kea templates in services/dhcp/entrypoint.sh with no is_ipv4 call at
-# all; these values are not currently validated at startup, so a malformed
+# DHCP_*_IP/DHCP_*_SERVER value. DHCP_DNS_PRIMARY, DHCP_DNS_SECONDARY, and
+# DHCP_DNS_SERVER_IP are exported straight into the Kea templates in
+# services/dhcp/entrypoint.sh with no is_ipv4 call at all; these values are
+# not currently validated at startup, so a malformed
 # one there would only surface later as a broken DNS/DDNS target, not as a
 # fail-fast error here.
 @test "IPv4 validation accepts valid addresses" {
@@ -315,6 +314,20 @@ setup() {
     [ "$status" -eq 0 ]
 }
 
+# What: asserts the DHCP_DDNS_PORT guard stays paired with the unquoted JSON field.
+# Why: malformed values would otherwise render invalid D2 config and stop DDNS updates.
+# From: Issue #1164
+@test "entrypoint validates DHCP_DDNS_PORT before unquoted DDNS rendering" {
+    grep -q 'DHCP_DDNS_PORT must be a numeric TCP/UDP port' "$repo_root/services/dhcp/entrypoint.sh" \
+        || fail "entrypoint no longer rejects non-numeric DHCP_DDNS_PORT"
+
+    grep -q 'DHCP_DDNS_PORT.*65535' "$repo_root/services/dhcp/entrypoint.sh" \
+        || fail "entrypoint no longer bounds DHCP_DDNS_PORT to the valid port range"
+
+    grep -q '"port": ${DHCP_DDNS_PORT}' "$repo_root/services/dhcp/kea-dhcp-ddns.conf" \
+        || fail "DDNS template no longer has the unquoted port field this guard protects"
+}
+
 @test "DHCP4 config contains NTP server data in option-data" {
     dhcp4_template="$repo_root/services/dhcp/kea-dhcp4.conf"
     dhcp4_output="$test_config_dir/kea-dhcp4-ntp.conf"
@@ -411,7 +424,7 @@ setup() {
 
     # Third and last template with its own JSON-validity check (DHCP4,
     # Control Agent above) -- this one carries the TSIG/DDNS substitutions
-    # (DDNS_TSIG_KEY, DHCP_DNS_SERVER_IP(_SSL), DHCP_DDNS_PORT), the
+    # (DDNS_TSIG_KEY, DHCP_DNS_SERVER_IP, DHCP_DDNS_PORT), the
     # densest set of secrets/networking values of the three templates. Not
     # `run`-wrapped for the same reason as the other two: `run cmd > file`
     # would leave $ddns_output empty and make the jq check below trivially
@@ -506,14 +519,12 @@ setup() {
     [ "$status" -eq 0 ]
     [[ "$output" == '"lancache-ddns-key"' ]]
 
-    # Two entries, not one: the template always lists both the standard-mode
-    # and SSL-mode DNS containers ($DHCP_DNS_SERVER_IP /
-    # $DHCP_DNS_SERVER_IP_SSL) as DDNS targets, regardless of which mode is
-    # actually active, so Kea keeps both DNS instances' zone data in sync
-    # even if only one is presently serving traffic.
+    # One entry, not two: Kea D2 treats dns-servers as failover, not fan-out,
+    # so dns-standard must be the only DDNS writer and PowerDNS native
+    # replication keeps dns-ssl/remote secondaries in sync.
     run jq -e '.DhcpDdns["forward-ddns"]["ddns-domains"][0]["dns-servers"] | length' "$ddns_output"
     [ "$status" -eq 0 ]
-    [ "$output" = "2" ]
+    [ "$output" = "1" ]
 }
 
 @test "DHCP-DDNS config reverse-ddns references TSIG key" {
@@ -536,11 +547,11 @@ setup() {
     [ "$status" -eq 0 ]
     [ "$output" = "true" ]
 
-    # Same two-entry invariant as forward-ddns: both the standard-mode and
-    # SSL-mode DNS containers are kept in sync for reverse/PTR updates too,
-    # regardless of which mode is presently active. Checked across every
-    # entry, for the same reason as key-name above.
-    run jq -e '[.DhcpDdns["reverse-ddns"]["ddns-domains"][]["dns-servers"] | length] | unique == [2]' "$ddns_output"
+    # Same single-writer invariant as forward-ddns: reverse/PTR updates go
+    # only to dns-standard, and secondaries receive them through PowerDNS
+    # native replication. Checked across every entry, for the same reason as
+    # key-name above.
+    run jq -e '[.DhcpDdns["reverse-ddns"]["ddns-domains"][]["dns-servers"] | length] | unique == [1]' "$ddns_output"
     [ "$status" -eq 0 ]
     [ "$output" = "true" ]
 }

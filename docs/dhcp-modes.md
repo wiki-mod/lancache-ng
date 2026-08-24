@@ -399,20 +399,11 @@ every asserted value explicitly (to the job log and, in CI,
 **What the Kea lease-flow simulation does NOT verify** (documented here per
 its own design -- see the script's header comment for the full rationale):
 
-- Whether `dns-ssl` (the SSL-mode PowerDNS instance) also receives DHCP
-  lease records. It doesn't, under normal operation (issue #770, discovered
-  during PR #769's review): `services/dhcp/kea-dhcp-ddns.conf` lists both
-  DNS servers in one `dns-servers` array, but Kea's D2 daemon treats that
-  list as first-to-last **failover**, not fan-out -- as long as
-  `dns-standard` is healthy (the first entry in prod/quickstart), it is the
-  only PowerDNS instance that ever receives the update. Clients that only
-  resolve against the SSL-mode DNS IP do not currently get DHCP-issued LAN
-  hostnames. This predates #706/#769 (before those fixes, DDNS reached
-  *neither* instance), so it isn't a regression, but it also isn't fixed by
-  them; real fan-out to both independent PowerDNS databases needs its own
-  design (zone replication or NATS-mediated delivery) and is tracked as new
-  work for v0.3.0 in issue #770, not squeezed into the v0.2.0 stabilization
-  fix this document otherwise describes.
+- Native PowerDNS AXFR/NOTIFY convergence from `dns-standard` to `dns-ssl`
+  or remote DNS secondaries. The simulation proves Kea's D2 daemon sends
+  TSIG-signed DDNS updates to the single intended writer (`dns-standard`);
+  #1164's replication path is a separate PowerDNS primary/secondary concern
+  and needs its own live transfer/convergence proof.
 - The `dnsmasq-proxy` DHCP mode -- entirely different code path
   (`services/dhcp-proxy`), covered instead by the PXE simulation below.
 

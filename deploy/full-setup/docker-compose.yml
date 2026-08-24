@@ -92,12 +92,14 @@ services:
       # From: Issue #668 | PR #795
       - PROXY_IP=${VALIDATION_STANDARD_SHIM_IP:-172.30.99.10}
       - PDNS_API_KEY=validation-pdns-key
-      - DDNS_TSIG_KEY=validation-ddns-key
+      - DDNS_TSIG_KEY=wENivVTXDsAGvRO2x3p5btaI39VMcyfkxqZmy1MH0LU=
       - NATS_URL=nats://nats:4222
       - NATS_USER=validation-dns-writer
       - NATS_PASSWORD=validation-nats-password
       - NATS_CONSUMER=dns-standard
       - NATS_RECONCILER=1
+      - DNS_REPLICATION_ROLE=primary
+      - DNS_XFR_NOTIFY_TARGETS=dns-ssl:5300
     volumes:
       # What: shared-secrets volume for first-writer-wins PDNS_API_KEY/
       # DDNS_TSIG_KEY resolution.
@@ -129,11 +131,14 @@ services:
     environment:
       - PROXY_IP=${VALIDATION_PROXY_IP:-172.30.99.2}
       - PDNS_API_KEY=validation-pdns-key
-      - DDNS_TSIG_KEY=validation-ddns-key
+      - DDNS_TSIG_KEY=wENivVTXDsAGvRO2x3p5btaI39VMcyfkxqZmy1MH0LU=
       - NATS_URL=nats://nats:4222
       - NATS_USER=validation-dns-replica
       - NATS_PASSWORD=validation-nats-password
       - NATS_CONSUMER=dns-ssl
+      - NATS_RECORD_WRITES=0
+      - DNS_REPLICATION_ROLE=secondary
+      - DNS_XFR_PRIMARY=dns-standard:5300
     volumes:
       # What: shared-secrets volume for first-writer-wins PDNS_API_KEY/
       # DDNS_TSIG_KEY resolution.

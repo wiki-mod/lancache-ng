@@ -161,15 +161,15 @@ almost none of it matches reality:
 |---|---|
 | `ENABLE_ROOT_MIRROR`, default `false` | Real var is `ROOT_ZONE_MIRROR` (`entrypoint.sh:56`: `ROOT_ZONE_MIRROR="${ROOT_ZONE_MIRROR:-1}"`) -- wrong name *and* wrong default (defaults to **on**, not off) |
 | `FILTER_AAAA_V4` / `FILTER_AAAA_V6`, two separate vars | Neither exists anywhere in `services/dns/` or `services/ui/src`; real mechanism is one global marker-file toggle (`filter-aaaa.lua`, no per-address-family split) |
-| `SECONDARY_MASTERS` / `SECONDARY_ZONES` | Confirmed absent from all of `pdns.conf.template`/`entrypoint.sh` -- no PowerDNS-native secondary/AXFR support exists at all (also independently confirmed by `docs/dns-admin-ui-scope.md` §3a) |
-| `ENABLE_SECONDARY` | Real, but per `docs/dns-admin-ui-scope.md` this names an unrelated NATS-bind convention, not a PowerDNS secondary/AXFR feature -- the table presents it as if it belonged to the same PowerDNS-secondary feature set as the two nonexistent vars next to it |
+| `SECONDARY_MASTERS` / `SECONDARY_ZONES` | Superseded by #1164: those historical variable names still do not exist, but native PowerDNS replication is now configured through `DNS_REPLICATION_ROLE`, `DNS_XFR_PRIMARY`, and `DNS_XFR_NOTIFY_TARGETS`. |
+| `ENABLE_SECONDARY` | Superseded by #1164: this documentation-only narrative name is no longer the secondary-replication control. Remote NATS binding still uses `NATS_BIND_IP`/`NATS_ADVERTISE_URL`, while zone convergence uses native PowerDNS AXFR. |
 
 This is the entire "Optional features" table for PowerDNS -- effectively none of the five
 rows accurately describes current code.
 
 **Evidence:** `docs/architecture-ng.md:77-87`; `services/dns/entrypoint.sh:56`;
-`services/dns/pdns.conf.template` (no `SECONDARY_MASTERS`/`SECONDARY_ZONES`/AXFR-secondary
-directives present); `docs/dns-admin-ui-scope.md` §3a.
+`services/dns/pdns.conf.template`; `docs/dns-admin-ui-scope.md` §3a. The
+AXFR-related part of this finding is historical after #1164.
 
 ---
 
@@ -350,7 +350,7 @@ referenced from `dns_zone_generation.bats` itself, no sync-check file found.
 
 ---
 
-## 9. [Documented-but-unfixed] `configure_ddns_tsig()` has no revoke path if `DDNS_TSIG_KEY` is later blanked
+## 9. [Resolved] `configure_ddns_tsig()` revokes stale TSIG metadata if `DDNS_TSIG_KEY` is later blanked
 
 ```bash
 configure_ddns_tsig() {
@@ -362,16 +362,14 @@ configure_ddns_tsig() {
         ...
 ```
 
-If an operator previously configured a real `DDNS_TSIG_KEY` (granting
-`TSIG-ALLOW-DNSUPDATE` on all 22 `DDNS_UPDATE_ZONES`) and later blanks it (config edit,
-migration), this function just logs and returns -- it never calls anything to revoke the
-previously-granted `TSIG-ALLOW-DNSUPDATE` metadata. The zones retain stale TSIG
-authorization indefinitely. Already documented as a known, unfixed gap in
-`docs/known-good-config-snapshots.md`'s "Zones, records" section; re-confirmed directly
-against the current code here. No open GitHub issue found tracking this specific gap.
+This was accurate when collected, but the current `configure_ddns_tsig()`
+empty-key branch now clears `TSIG-ALLOW-DNSUPDATE` for every
+`DDNS_UPDATE_ZONES` entry and deletes the now-orphaned TSIG key. Keep this
+section as historical #849 context only; it is no longer an open gap.
 
-**Evidence:** `services/dns/entrypoint.sh:413-434` (`configure_ddns_tsig`, no revoke call
-in the empty-key branch).
+**Evidence:** `services/dns/entrypoint.sh` (`configure_ddns_tsig` empty-key
+branch now calls `pdnsutil set-meta <zone> TSIG-ALLOW-DNSUPDATE` with no
+value and `pdnsutil delete-tsig-key`).
 
 ---
 
@@ -599,7 +597,8 @@ detail:
   `replace`+`ttl:None` dropped as 4xx-ack at main.rs:730-741; RPZ helper is a
   hand-copy with no sync guard, and `dns_zone_generation.bats:139` exercises the
   copy not the entrypoint).
-- **#9–#17 (info):** all confirmed (TSIG no-revoke; root uid; IPv4-only root
+- **#9–#17 (info):** originally confirmed (TSIG no-revoke is now resolved;
+  root uid; IPv4-only root
   AXFR; wildcard-only syntax unit-tested but 0 leading-dot lines in the shipped
   `cdn-domains.txt`; stale setup.sh #628 message; AAAA-filter no observability;
   `tail -c 11` no-op; `run_check_zone` no timeout; 22 sequential GETs on one

@@ -240,7 +240,6 @@ _ddns_tsig_key_cfg="${DDNS_TSIG_KEY:-}"
 if secret_is_placeholder "$_ddns_tsig_key_cfg"; then _ddns_tsig_key_cfg=""; fi
 DDNS_TSIG_KEY="$(resolve_shared_secret ddns-tsig-key "$_ddns_tsig_key_cfg" lancache_gen_base64_32)" || DDNS_TSIG_KEY=""
 : "${DHCP_DNS_SERVER_IP:=127.0.0.1}"
-: "${DHCP_DNS_SERVER_IP_SSL:=127.0.0.1}"
 # 5300, not 53 (issue #706): 5300 is pdns_server's (the authoritative
 # daemon, the only PowerDNS process with dnsupdate=yes) actual DNS-protocol
 # port, per services/dns/pdns.conf.template's local-port=5300. Port 53 is
@@ -248,6 +247,20 @@ DDNS_TSIG_KEY="$(resolve_shared_secret ddns-tsig-key "$_ddns_tsig_key_cfg" lanca
 # authoritative backend, so DDNS updates sent there simply time out
 # (confirmed empirically) with no error on either side.
 : "${DHCP_DDNS_PORT:=5300}"
+# What: validates the unquoted JSON port before rendering Kea D2 config.
+# Why: a typo here would otherwise produce invalid JSON and a dead DDNS
+#   daemon, making DHCP lease records stop updating DNS silently.
+# From: Issue #1164
+case "$DHCP_DDNS_PORT" in
+    "" | *[!0-9]*)
+        echo "ERROR: DHCP_DDNS_PORT must be a numeric TCP/UDP port (got: ${DHCP_DDNS_PORT})."
+        exit 1
+        ;;
+esac
+if [ "$DHCP_DDNS_PORT" -lt 1 ] || [ "$DHCP_DDNS_PORT" -gt 65535 ]; then
+    echo "ERROR: DHCP_DDNS_PORT must be between 1 and 65535 (got: ${DHCP_DDNS_PORT})."
+    exit 1
+fi
 : "${KEA_CTRL_HOST:=0.0.0.0}"
 
 # DDNS master switch (issue #1076). DHCP_DDNS_ENABLED gates Kea's
@@ -392,10 +405,10 @@ if [ -z "$KEA_LEASE_CMDS_HOOK_PATH" ]; then
 fi
 
 export DHCP_MAX_LEASE_TIME=$((DHCP_LEASE_TIME * 2))
-export DHCP_SUBNET DHCP_RANGE_START DHCP_RANGE_END DHCP_GATEWAY DHCP_DOMAIN DHCP_LEASE_TIME DHCP_NTP_SERVERS DHCP_DNS_PRIMARY DHCP_DNS_SECONDARY KEA_CTRL_TOKEN DHCP_MAX_LEASE_TIME DHCP_DNS_SERVER_IP DHCP_DNS_SERVER_IP_SSL DHCP_DDNS_PORT KEA_CTRL_HOST KEA_LEASE_CMDS_HOOK_PATH DHCP_DDNS_ENABLED
+export DHCP_SUBNET DHCP_RANGE_START DHCP_RANGE_END DHCP_GATEWAY DHCP_DOMAIN DHCP_LEASE_TIME DHCP_NTP_SERVERS DHCP_DNS_PRIMARY DHCP_DNS_SECONDARY KEA_CTRL_TOKEN DHCP_MAX_LEASE_TIME DHCP_DNS_SERVER_IP DHCP_DDNS_PORT KEA_CTRL_HOST KEA_LEASE_CMDS_HOOK_PATH DHCP_DDNS_ENABLED
 
 # shellcheck disable=SC2016
-ENVSUBST_VARS='${DHCP_SUBNET}${DHCP_RANGE_START}${DHCP_RANGE_END}${DHCP_GATEWAY}${DHCP_DOMAIN}${DHCP_LEASE_TIME}${DHCP_NTP_OPTION}${DHCP_DNS_PRIMARY}${DHCP_DNS_SECONDARY}${KEA_CTRL_TOKEN}${DHCP_MAX_LEASE_TIME}${DDNS_TSIG_KEY}${DHCP_DNS_SERVER_IP}${DHCP_DNS_SERVER_IP_SSL}${DHCP_DDNS_PORT}${KEA_CTRL_HOST}${KEA_LEASE_CMDS_HOOK_PATH}${DHCP_DDNS_ENABLED}'
+ENVSUBST_VARS='${DHCP_SUBNET}${DHCP_RANGE_START}${DHCP_RANGE_END}${DHCP_GATEWAY}${DHCP_DOMAIN}${DHCP_LEASE_TIME}${DHCP_NTP_OPTION}${DHCP_DNS_PRIMARY}${DHCP_DNS_SECONDARY}${KEA_CTRL_TOKEN}${DHCP_MAX_LEASE_TIME}${DDNS_TSIG_KEY}${DHCP_DNS_SERVER_IP}${DHCP_DDNS_PORT}${KEA_CTRL_HOST}${KEA_LEASE_CMDS_HOOK_PATH}${DHCP_DDNS_ENABLED}'
 
 render_kea_config() {
     local template=$1 target=$2
@@ -685,8 +698,8 @@ fi
 # unconditionally, for any octet -- confirmed against a real Kea 2.6.3 +
 # PowerDNS 5.2.11 stack. The fix mirrors PRIVATE_REVERSE_ZONES exactly: one
 # ddns-domains entry per IPv4 private-range subzone PowerDNS actually hosts
-# (the same 18 zones, verbatim), each targeting the same dns-servers as
-# forward-ddns above, so Kea's D2 can match a lease's reverse FQDN (e.g.
+# (the same 18 zones, verbatim), each targeting the same primary DNS server
+# as forward-ddns above, so Kea's D2 can match a lease's reverse FQDN (e.g.
 # "50.1.168.192.in-addr.arpa.") against the correct, real zone by suffix.
 # IPv6 reverse zones (c.f.ip6.arpa./d.f.ip6.arpa.) are deliberately excluded
 # here -- this project's Kea config is Dhcp4-only, no DHCPv6, so D2 never
