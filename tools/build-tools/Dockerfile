@@ -114,14 +114,27 @@ LABEL org.opencontainers.image.description="Prebuilt lancache-ng CI and develope
 # taking it, and the same check applies to any future bump too.
 # From: Issue #1570 | PR #1571
 # What: pins the source-built git version and its tarball checksum.
-# Why: the Debian-packaged git pulls in libcurl3t64-gnutls/libcurl4-gnutls
-# (transitively, via git-remote-https), which Trivy attributes 4 curl CVE
-# IDs to independently of the curl CLI package (#1556's own investigation);
-# building git from source against libcurl4-openssl-dev instead drops that
-# dependency entirely, since no other package in this image needs it.
+# Why: builds git from source, statically linked against a
+# feature-reduced curl (below) instead of Debian's packaged git, which
+# pulls in libcurl3t64-gnutls/libcurl4-gnutls via git-remote-https.
 # From: Issue #1304 | Issue #1556
 ARG GIT_VERSION=2.47.3
 ARG GIT_SHA256=9c2eb1250781b3e5bfef098572d07fdf132d67e6c065e4307332ade9819a1501
+# What: pins the same curl release/checksum services/utilities/Dockerfile
+# builds, rebuilt natively here for glibc (that image is Alpine/musl --
+# its static libcurl.a cannot be safely linked into a glibc git binary).
+# Why: real per-CVE verification against curl.se's own advisory pages
+# (not Debian's tracker) confirms all 4 currently-tracked curl CVE IDs
+# (12064/8286/8458/8927) are genuinely fixed at 8.21.0, not merely
+# unreachable for this project's usage -- Debian's trixie-backports
+# package still reports them as affected purely because that suite isn't
+# tracked as a first-class channel by Debian's Security Tracker (see the
+# existing CVE-2026-12064 entry in .trivyignore.yaml for the same,
+# already-documented gap). Building the real upstream release directly
+# avoids that tracker gap entirely rather than working around it.
+# From: Issue #1304 | Issue #1556
+ARG CURL_VERSION=8.21.0
+ARG CURL_SHA256=aa1b66a70eace83dc624508745646c08ae561de512ab403adffb93ac87fc72e6
 ARG SCCACHE_VERSION=0.17.0
 ARG CARGO_AUDIT_VERSION=0.22.2
 ARG CARGO_AUDIT_SHA256_AMD64=ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39
@@ -193,16 +206,19 @@ RUN echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sou
 #
 # What: purges `git`/`git-man`/`curl` -- not just skips installing them --
 # and only then installs this image's own package list, which excludes
-# both; `libcurl4-openssl-dev`/`zlib1g-dev` are only git's from-source
-# replacement's build deps (purged again once git is built).
+# both; `libssl-dev`/`zlib1g-dev` are only curl/git's from-source
+# replacement's build deps (purged again once both are built).
 # Why: `rust:latest` itself already ships Debian-packaged `git`/`curl`
 # (confirmed live: rustup's own install needs them), so simply never
 # naming them in this image's own install list is not sufficient -- the
 # base image's copies, and the libcurl4-gnutls/libcurl3t64-gnutls chain
 # git's `git-remote-https` pulls in, survive untouched otherwise, and the
 # `dist-upgrade` step above only upgrades them in place rather than
-# removing them. From: Issue #1304 | Issue #1556 (see the source-built
-# git step and the utilities-tools COPY below this block).
+# removing them. `libcurl4-openssl-dev` is deliberately NOT installed --
+# git links against a from-source-built curl (below), not Debian's
+# libcurl, so no Debian curl headers/library are needed at all.
+# From: Issue #1304 | Issue #1556 (see the source-built curl+git step and
+# the utilities-tools COPY below this block).
 RUN set -euo pipefail; \
     apt-get update; \
     apt-get purge -y git git-man curl; \
@@ -217,7 +233,6 @@ RUN set -euo pipefail; \
       cmake \
       expect \
       jq \
-      libcurl4-openssl-dev \
       libssl-dev \
       lld \
       make \
@@ -253,57 +268,99 @@ RUN set -euo pipefail; \
     done; \
     rm -rf /usr/local/cargo/registry /usr/local/cargo/git
 
-# What: builds git from source, linked against libcurl4-openssl-dev
-# instead of Debian's packaged git (which pulls in libcurl4-gnutls via
-# git-remote-https). Compiled through sccache, Redis-backed only once a
-# real TCP probe confirms the Redis endpoint is actually reachable.
-# Why: Trivy attributes 4 curl CVE IDs to libcurl4-gnutls regardless of
-# the curl CLI package's own state (#1556); a bare unreachable
-# SCCACHE_REDIS value hard-fails every single compile unit (sccache times
-# out waiting for its own server to connect, confirmed empirically), so
-# this must not be handed to sccache on faith.
+# What: builds a feature-reduced, static curl.a from the real upstream
+# tarball (same version/config services/utilities/Dockerfile uses, ported
+# to glibc), then links git statically against it -- git no longer needs
+# any Debian curl package (dynamic or -dev) at all. Both compiled through
+# sccache, Redis-backed only once a real TCP probe confirms the Redis
+# endpoint is actually reachable. `libcurl4t64` itself is deliberately
+# NOT purged afterward: confirmed empirically that `cmake` has its own,
+# real dependency on it (apt-get autoremove strips cmake the moment
+# libcurl4t64 is purged) -- entirely unrelated to git, and out of this
+# PR's scope to also replace.
+# Why: real per-CVE verification against curl.se's own advisory pages
+# (2026-08-24, not Debian's tracker) confirms curl 8.21.0 genuinely fixes
+# all 4 currently-tracked CVE IDs (12064/8286/8458/8927) -- Debian's
+# trixie-backports package reports them as affected only because that
+# suite is not tracked as a first-class channel by Debian's Security
+# Tracker, the same class of gap already documented in .trivyignore.yaml
+# for these same IDs. Building the real release directly removes git's
+# own dependency on that tracker gap; cmake's separate, real dependency
+# on libcurl4t64 remains, now a candidate for a real not_affected VEX
+# disposition in .trivyignore.yaml rather than the accepted-risk framing
+# used before this was verified. A bare unreachable SCCACHE_REDIS value
+# hard-fails every single compile unit (sccache times out waiting for its
+# own server to connect, confirmed empirically), so this must not be
+# handed to sccache on faith.
 # From: Issue #1304 | Issue #1556
 RUN --mount=type=secret,id=sccache_redis_url \
     set -euo pipefail; \
-    git_tmp="$(mktemp -d)"; \
-    trap 'rm -rf "$git_tmp"' EXIT; \
-    curl -fsSL -o "$git_tmp/git.tar.xz" "https://www.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.xz"; \
-    printf '%s  %s\n' "$GIT_SHA256" "$git_tmp/git.tar.xz" | sha256sum -c -; \
-    tar -xf "$git_tmp/git.tar.xz" -C "$git_tmp"; \
+    build_tmp="$(mktemp -d)"; \
+    trap 'rm -rf "$build_tmp"' EXIT; \
+    curl -fsSL -o "$build_tmp/curl.tar.xz" "https://curl.se/download/curl-${CURL_VERSION}.tar.xz"; \
+    printf '%s  %s\n' "$CURL_SHA256" "$build_tmp/curl.tar.xz" | sha256sum -c -; \
+    tar -xJf "$build_tmp/curl.tar.xz" -C "$build_tmp"; \
+    curl -fsSL -o "$build_tmp/git.tar.xz" "https://www.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.xz"; \
+    printf '%s  %s\n' "$GIT_SHA256" "$build_tmp/git.tar.xz" | sha256sum -c -; \
+    tar -xf "$build_tmp/git.tar.xz" -C "$build_tmp"; \
     if [ -s /run/secrets/sccache_redis_url ]; then \
       redis_url="$(cat /run/secrets/sccache_redis_url)"; \
       redis_hostport="${redis_url#redis://}"; redis_hostport="${redis_hostport#*@}"; redis_hostport="${redis_hostport%%/*}"; \
       redis_host="${redis_hostport%%:*}"; redis_port="${redis_hostport##*:}"; \
       if timeout 3 bash -c "exec 3<>/dev/tcp/${redis_host}/${redis_port}" 2>/dev/null; then \
         SCCACHE_REDIS="$redis_url"; export SCCACHE_REDIS; \
-        export SCCACHE_REDIS_KEY_PREFIX=lancache-build-tools-git; \
+        export SCCACHE_REDIS_KEY_PREFIX=lancache-build-tools-curl-git; \
       else \
-        echo "[INFO] git build: sccache_redis_url secret present but ${redis_host}:${redis_port} did not accept a TCP connection within 3s; falling back to sccache's local disk cache." >&2; \
+        echo "[INFO] curl/git build: sccache_redis_url secret present but ${redis_host}:${redis_port} did not accept a TCP connection within 3s; falling back to sccache's local disk cache." >&2; \
       fi; \
     else \
-      echo "[INFO] git build: sccache running without Redis (no sccache_redis_url secret present)." >&2; \
+      echo "[INFO] curl/git build: sccache running without Redis (no sccache_redis_url secret present)." >&2; \
     fi; \
-    ( cd "$git_tmp/git-${GIT_VERSION}" \
-      && make -j"$(nproc)" prefix=/usr/local CC="sccache gcc" NO_TCLTK=YesPlease NO_GETTEXT=YesPlease install ); \
+    ( cd "$build_tmp/curl-${CURL_VERSION}" \
+      && ./configure \
+        --disable-shared --enable-static \
+        --disable-ftp --disable-file --disable-ldap --disable-ldaps \
+        --disable-rtsp --disable-dict --disable-telnet --disable-tftp \
+        --disable-pop3 --disable-imap --disable-smtp --disable-smb \
+        --disable-gopher --disable-mqtt \
+        --disable-scp --disable-sftp --without-libssh2 --without-libssh \
+        --disable-ntlm --disable-kerberos-auth --disable-negotiate-auth \
+        --disable-aws \
+        --disable-manual --disable-libcurl-option \
+        --disable-ipfs --disable-websockets \
+        --without-librtmp --without-libidn2 --without-brotli --without-zstd \
+        --without-nghttp2 --without-nghttp3 --without-ngtcp2 --without-libpsl \
+        --with-openssl \
+        --with-ca-bundle=/etc/ssl/certs/ca-certificates.crt \
+        --enable-http --enable-cookies --enable-ipv6 \
+        CC="sccache gcc" \
+      && make -j"$(nproc)" ); \
+    curl_src="$build_tmp/curl-${CURL_VERSION}"; \
+    curl_libcurl="-Wl,-Bstatic -L${curl_src}/lib/.libs -lcurl -Wl,-Bdynamic -lssl -lcrypto -lz"; \
+    ( cd "$build_tmp/git-${GIT_VERSION}" \
+      && make -j"$(nproc)" prefix=/usr/local CC="sccache gcc" NO_TCLTK=YesPlease NO_GETTEXT=YesPlease \
+        CURL_CFLAGS="-I${curl_src}/include" CURL_LIBCURL="$curl_libcurl" install ); \
     sccache --show-stats; \
     git --version; \
     git_remote_https="$(command -v git-remote-https || echo /usr/local/libexec/git-core/git-remote-https)"; \
-    if ldd "$git_remote_https" | grep -q 'libcurl-gnutls'; then \
-      echo "::error::git-remote-https unexpectedly linked against libcurl-gnutls after a from-source build." >&2; \
+    if ldd "$git_remote_https" | grep -qi 'libcurl'; then \
+      echo "::error::git-remote-https unexpectedly linked against a dynamic libcurl after a static-curl build." >&2; \
       exit 1; \
     fi; \
-    ldd "$git_remote_https" | grep -q 'libcurl\.so' \
-      || { echo "::error::git-remote-https did not link against libcurl.so.4 (OpenSSL variant) as expected." >&2; exit 1; }; \
     git ls-remote https://github.com/git/git.git HEAD >/dev/null; \
-    if dpkg -s libcurl4-gnutls >/dev/null 2>&1; then \
-      echo "::error::libcurl4-gnutls is installed despite git no longer depending on it -- investigate the new consumer before proceeding." >&2; \
-      exit 1; \
-    fi; \
-    apt-get purge -y libcurl4-openssl-dev zlib1g-dev; \
+    apt-get purge -y zlib1g-dev; \
     apt-get autoremove -y; \
     rm -rf /var/lib/apt/lists/*; \
+    for pkg in libcurl3t64-gnutls libcurl4-gnutls libcurl4-openssl-dev; do \
+      if dpkg -s "$pkg" >/dev/null 2>&1; then \
+        echo "::error::$pkg is still installed despite git no longer depending on any Debian curl/libcurl package -- investigate the new consumer before proceeding." >&2; \
+        exit 1; \
+      fi; \
+    done; \
+    dpkg -s libcurl4t64 >/dev/null 2>&1 \
+      || { echo "::error::libcurl4t64 unexpectedly absent -- cmake's own real dependency on it (confirmed empirically: apt-get autoremove strips cmake if libcurl4t64 is purged) should keep it installed; investigate before proceeding." >&2; exit 1; }; \
     git --version; \
-    ldd "$git_remote_https" | grep -q 'libcurl\.so'
+    git ls-remote https://github.com/git/git.git HEAD >/dev/null
 
 # What: fetches and checksum-verifies prebuilt release binaries for
 # cargo-audit and cargo-tarpaulin instead of building from source.
