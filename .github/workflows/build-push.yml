@@ -8118,7 +8118,7 @@ jobs:
       issues: write
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: List which needed jobs did not succeed
         id: failed-jobs
         env:

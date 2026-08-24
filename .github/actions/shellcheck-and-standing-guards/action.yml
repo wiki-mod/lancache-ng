@@ -46,11 +46,11 @@ runs:
           timeout --kill-after=30 --signal=KILL 300 bash tests/setup-migration-semantics.sh
 
     - name: Check pinned GitHub Actions for runtime / drift / duplication guardrails
-      # What: runs check-action-node-versions.sh inside the build-tools container with GH_TOKEN.
-      # Why: the script calls curl against api.github.com (must not rely on a host-local tool,
-      # AG-VAL-016) and also enforces #1095's single-ref/no-drift invariants over .github/**;
-      # GH_TOKEN only raises the rate limit and also works fine unauthenticated at this repo's
-      # current pin count.
+      # What: runs check-action-node-versions.sh (Node-runtime + single-ref/
+      #   no-drift checks) inside the build-tools container with GH_TOKEN.
+      # Why: the script calls curl against api.github.com -- must not rely
+      #   on a host-local tool (AG-VAL-016); GH_TOKEN only raises the rate
+      #   limit, unauthenticated also works at this repo's current pin count.
       # From: Issue #801 | PR #804
       shell: bash
       env:
