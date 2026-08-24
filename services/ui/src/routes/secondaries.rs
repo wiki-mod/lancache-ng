@@ -78,7 +78,9 @@ fn generate_nats_password() -> String {
 // Why: AXFR secondaries must authenticate transfers with the same key the
 //   primary uses for DDNS/transfer metadata, or remote nodes can drift.
 // From: Issue #1164
-fn read_ddns_tsig_key_from_shared_secret_dir(shared_secret_dir: &str) -> Result<String, StatusCode> {
+fn read_ddns_tsig_key_from_shared_secret_dir(
+    shared_secret_dir: &str,
+) -> Result<String, StatusCode> {
     let secret_path = FsPath::new(shared_secret_dir).join("ddns-tsig-key");
     let secret = fs::read_to_string(&secret_path).map_err(|err| {
         tracing::error!(

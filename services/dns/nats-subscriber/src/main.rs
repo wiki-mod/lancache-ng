@@ -1154,10 +1154,19 @@ mod tests {
     #[test]
     fn record_write_mode_disables_common_false_spellings() {
         for value in ["0", "false", "no", "off"] {
-            assert_eq!(RecordWriteMode::from_env_value(value), RecordWriteMode::Disabled);
+            assert_eq!(
+                RecordWriteMode::from_env_value(value),
+                RecordWriteMode::Disabled
+            );
         }
-        assert_eq!(RecordWriteMode::from_env_value("1"), RecordWriteMode::Enabled);
-        assert_eq!(RecordWriteMode::from_env_value("unexpected"), RecordWriteMode::Enabled);
+        assert_eq!(
+            RecordWriteMode::from_env_value("1"),
+            RecordWriteMode::Enabled
+        );
+        assert_eq!(
+            RecordWriteMode::from_env_value("unexpected"),
+            RecordWriteMode::Enabled
+        );
     }
 
     // REPLACE action must produce a zone update with all required fields (ttl, records)

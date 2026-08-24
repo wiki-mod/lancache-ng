@@ -99,7 +99,7 @@ pdnsutil() {
 }
 
 @test "import_ddns_tsig_key imports the shared key without granting DDNS writes" {
-    DDNS_TSIG_KEY="a-real-generated-shared-secret-not-a-placeholder"
+    export DDNS_TSIG_KEY="a-real-generated-shared-secret-not-a-placeholder"
     run import_ddns_tsig_key
 
     [ "$status" -eq 0 ]
@@ -108,7 +108,7 @@ pdnsutil() {
 }
 
 @test "_dns_configure_primary_zone_replication sets serial and notify metadata for a primary zone" {
-    DNS_XFR_NOTIFY_TARGETS="dns-ssl:5300,192.0.2.53:5300"
+    export DNS_XFR_NOTIFY_TARGETS="dns-ssl:5300,192.0.2.53:5300"
     run _dns_configure_primary_zone_replication lan
 
     [ "$status" -eq 0 ]
