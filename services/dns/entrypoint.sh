@@ -35,6 +35,18 @@ lancache_shared_secret_gid() {
     printf '%s' "${LANCACHE_SHARED_SECRET_GID:-10001}"
 }
 
+# What: helper for producer log directories that must stay readable to gid 10001.
+# Why: root-created files on persistent volumes otherwise drift back to
+#   root-only readability after reopen or recreation.
+# From: Issue #1427
+prepare_log_dir_for_shared_reader() {
+    local dir="$1"
+    mkdir -p "$dir"
+    chgrp "$(lancache_shared_secret_gid)" "$dir"
+    chmod 2750 "$dir"
+    find "$dir" -maxdepth 1 -type f -exec chgrp "$(lancache_shared_secret_gid)" {} + -exec chmod g+r {} +
+}
+
 # lancache_gen_hex32
 # 64 hex characters from 32 random bytes. Uses od + /dev/urandom rather than
 # `openssl rand -hex 32` because this runs unchanged in the Debian dns/dhcp/ui
@@ -317,7 +329,7 @@ PDNS_AUTH_CONF_FILE="/etc/pdns/auth/pdns.conf"
 # absent -> TSIG still enforced, unchanged from today's actual behavior).
 DNS_STATE_DIR="/var/lib/powerdns-state"
 DDNS_ALLOW_UNSIGNED_MARKER="${DNS_STATE_DIR}/ddns-allow-unsigned-updates"
-# Central logging pipeline (#633): PowerDNS has no native "log to file"
+# Central logging pipeline: PowerDNS has no native "log to file"
 # config directive on Linux -- confirmed against the upstream docs/mailing
 # list, both pdns_server and pdns_recursor only ever write to stdout/stderr
 # or syslog, never a plain file (the plan this followed assumed a
@@ -327,7 +339,7 @@ DDNS_ALLOW_UNSIGNED_MARKER="${DNS_STATE_DIR}/ddns-allow-unsigned-updates"
 # container's normal stdout -- same dual-output shape as every other service
 # in this issue, just implemented at the process level instead of in config.
 PDNS_LOG_DIR="/var/log/lancache-dns"
-mkdir -p "$PDNS_LOG_DIR"
+prepare_log_dir_for_shared_reader "$PDNS_LOG_DIR"
 
 # Fail if PDNS_API_KEY is a known placeholder value. secret_is_placeholder's
 # universal CHANGE_ME*/changeme*/YOUR_*/*_HERE conventions (this project also
@@ -1045,6 +1057,7 @@ recursor_extra_sed=""
 if [ "$LOG_QUERIES" = "1" ]; then
     recursor_extra_sed='s/^  loglevel: 3$/  loglevel: 6/'
 fi
+# shellcheck disable=SC2016 # render_template_atomic needs literal envsubst variable names.
 render_template_atomic '${PDNS_API_KEY}' /etc/pdns/recursor.conf.template "$RECURSOR_CONF_FILE" "$recursor_extra_sed"
 _dns_recursor_validate_snapshot_or_rollback "$RECURSOR_CONF_FILE" || _dns_enter_rescue_mode "recursor"
 
@@ -1301,6 +1314,11 @@ echo "[lancache-dns] Starting PowerDNS Authoritative and Recursor..."
 
 run_auth() {
     while true; do
+        # What: constrains the tee-created pdns-auth.log mode to 0640.
+        # Why: gid 10001 keeps the collector read path working, while world
+        #   read permission is no longer needed once the shared group exists.
+        # From: Issue #1427
+        umask 0027
         pdns_server --config-dir=/etc/pdns/auth --guardian=no --daemon=no 2>&1 \
             | tee -a "$PDNS_LOG_DIR/pdns-auth.log" || true
         echo "[lancache-dns] pdns_server exited, restarting in 3s..."
@@ -1311,6 +1329,11 @@ run_auth() {
 run_recursor() {
     mkdir -p /var/run/pdns-recursor
     while true; do
+        # What: constrains the tee-created pdns-recursor.log mode to 0640.
+        # Why: gid 10001 keeps the collector read path working, while world
+        #   read permission is no longer needed once the shared group exists.
+        # From: Issue #1427
+        umask 0027
         pdns_recursor --config-dir=/etc/pdns 2>&1 \
             | tee -a "$PDNS_LOG_DIR/pdns-recursor.log" || true
         echo "[lancache-dns] pdns_recursor exited, restarting in 3s..."
@@ -1343,9 +1366,11 @@ REC_PID=$!
 # ── 9. Start NATS Subscriber ────────────────────────────────────────────────
 run_nats_subscriber() {
     while true; do
-        # Central logging pipeline (#633): tee alongside pdns_server/pdns_recursor
-        # above so nats-subscriber's connect/auth/processing errors also reach
-        # fluent-bit's tail of $PDNS_LOG_DIR/*.log instead of only Docker stdout.
+        # What: keeps nats-subscriber's stderr/stdout mirrored into the shared log dir.
+        # Why: syslog must keep seeing subscriber failures, but the file mode
+        #   now also has to stay 0640 for the gid-10001 read contract.
+        # From: Issue #633 | Issue #1427
+        umask 0027
         nats-subscriber 2>&1 \
             | tee -a "$PDNS_LOG_DIR/nats-subscriber.log" || true
         echo "[lancache-dns] nats-subscriber exited, restarting in 3s..."

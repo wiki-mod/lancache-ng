@@ -33,6 +33,18 @@ lancache_shared_secret_gid() {
     printf '%s' "${LANCACHE_SHARED_SECRET_GID:-10001}"
 }
 
+# What: helper for producer log directories that must stay readable to gid 10001.
+# Why: root-created files on persistent volumes otherwise drift back to
+#   root-only readability after reopen or recreation.
+# From: Issue #1427
+prepare_log_dir_for_shared_reader() {
+    local dir="$1"
+    mkdir -p "$dir"
+    chgrp "$(lancache_shared_secret_gid)" "$dir"
+    chmod 2750 "$dir"
+    find "$dir" -maxdepth 1 -type f -exec chgrp "$(lancache_shared_secret_gid)" {} + -exec chmod g+r {} +
+}
+
 # lancache_gen_hex32
 # 64 hex characters from 32 random bytes. Uses od + /dev/urandom rather than
 # `openssl rand -hex 32` because this runs unchanged in the Debian dns/dhcp/ui
@@ -174,7 +186,7 @@ mkdir -p /var/lib/kea
 # config-set -- any other path (the project's usual /var/log/lancache-dhcp
 # convention included) fails config load with "invalid path in `output`",
 # refusing to start at all, not just losing the file log.
-mkdir -p /var/log/kea
+prepare_log_dir_for_shared_reader /var/log/kea
 
 case "${1:-}" in
     nmap|/usr/bin/nmap|/bin/nmap)
@@ -838,16 +850,31 @@ if [ "$SNAPSHOT_FOUND" -eq 0 ] && ! _kea_validate_dhcp4_config "$KEAD_CONF_FILE"
     # DHCP_PID is intentionally not set so the trap below doesn't try to kill it
     # and the final `wait` at the bottom keeps the container alive
 else
+    # What: constrains the daemon-created Kea log files to 0640.
+    # Why: gid 10001 keeps the collector read path working, while world
+    #   read permission is no longer needed once the shared group exists.
+    # From: Issue #1427
+    umask 0027
     kea-dhcp4 -c /var/lib/kea/kea-dhcp4.conf &
     DHCP_PID=$!
 fi
 
 echo "Starting Kea Control Agent on $KEA_CTRL_HOST:8000..."
+# What: constrains the daemon-created Kea control-agent log files to 0640.
+# Why: gid 10001 keeps the collector read path working, while world read
+#   permission is no longer needed once the shared group exists.
+# From: Issue #1427
+umask 0027
 kea-ctrl-agent -c /var/lib/kea/kea-ctrl-agent.conf &
 AGENT_PID=$!
 
 if command -v kea-dhcp-ddns &> /dev/null; then
     echo "Starting Kea DHCP DDNS server..."
+    # What: constrains the daemon-created Kea DDNS log files to 0640.
+    # Why: gid 10001 keeps the collector read path working, while world
+    #   read permission is no longer needed once the shared group exists.
+    # From: Issue #1427
+    umask 0027
     kea-dhcp-ddns -c /var/lib/kea/kea-dhcp-ddns.conf &
     DDNS_PID=$!
 fi
