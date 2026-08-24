@@ -6441,6 +6441,7 @@ jobs:
       syslog_digest: ${{ steps.create-trusted-manifests.outputs.syslog_digest || steps.create-pr-staging-manifests.outputs.syslog_digest }}
       ui_digest: ${{ steps.create-trusted-manifests.outputs.ui_digest || steps.create-pr-staging-manifests.outputs.ui_digest }}
       build_tools_digest: ${{ steps.create-trusted-manifests.outputs.build_tools_digest || steps.create-pr-staging-manifests.outputs.build_tools_digest }}
+      utilities_digest: ${{ steps.create-trusted-manifests.outputs.utilities_digest || steps.create-pr-staging-manifests.outputs.utilities_digest }}
       stack_digest: ${{ steps.create-trusted-manifests.outputs.stack_digest }}
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
@@ -7123,6 +7124,7 @@ jobs:
           SYSLOG_DIGEST: ${{ needs['merge-manifests'].outputs.syslog_digest }}
           UI_DIGEST: ${{ needs['merge-manifests'].outputs.ui_digest }}
           BUILD_TOOLS_DIGEST: ${{ needs['merge-manifests'].outputs.build_tools_digest }}
+          UTILITIES_DIGEST: ${{ needs['merge-manifests'].outputs.utilities_digest }}
           STACK_DIGEST: ${{ needs['merge-manifests'].outputs.stack_digest }}
         run: |
           set -euo pipefail
@@ -7154,6 +7156,7 @@ jobs:
             [syslog]="$SYSLOG_DIGEST"
             [ui]="$UI_DIGEST"
             [build-tools]="$BUILD_TOOLS_DIGEST"
+            [utilities]="$UTILITIES_DIGEST"
           )
           declare -A previous_refs=()
           promoted_targets=()
