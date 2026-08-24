@@ -284,7 +284,7 @@ _cii_extract_build_push_job() {
 # Why: on:/env:/etc. apply to every job, so treat it as build-affecting too.
 # From: Issue #1095 (G14)
 _cii_extract_build_push_preamble() {
-    git show "${1}:.github/workflows/build-push.yml" 2>/dev/null | sed -n '1,/^jobs:$/p' | sed '$d'
+    git show "${1}:.github/workflows/build-push.yml" 2>/dev/null | sed -n '1,/^jobs:$/p' | sed '$d'  # pipefail-safe: no q/Q, reads to EOF (AG-VAL-032)
 }
 
 # What: prints ref $1's preamble + each build-affecting job, fixed order.
