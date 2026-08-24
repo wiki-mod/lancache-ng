@@ -174,22 +174,13 @@ push_reuse_decide() {
     return 0
   fi
 
-  # A caller's own before..sha diff (the immediately preceding push only,
-  # see this file's decide_one() caller in build-push.yml) cannot see a
-  # build-affecting workflow change that landed in an EARLIER push, before
-  # the channel's own last refresh -- the exact revision-span gap two Codex
-  # review threads on PR #1378 found. classify_output above already covers
-  # the FULL revision..github_sha span (not just before..sha), and
-  # classify-image-impact.sh already emits a "workflow" key alongside every
-  # per-service key for that identical span -- reading it here costs nothing
-  # extra (no second classify invocation) and closes the gap: reuse is only
-  # safe when no build-affecting workflow/composite-action file changed
-  # anywhere between the channel image's own recorded revision and
-  # github_sha, not merely in the last push.
+  # What: workflow_reuse_scope covers the full revision..github_sha span.
+  # Why: closes PR #1378's before..sha-only gap; job-scoped per G14.
+  # From: Issue #1095 (G14) | PR #1378
   local workflow_flag
-  workflow_flag="$(grep -m1 '^workflow=' <<<"$classify_output" | cut -d= -f2)"
+  workflow_flag="$(grep -m1 '^workflow_reuse_scope=' <<<"$classify_output" | cut -d= -f2)"
   if [[ "$workflow_flag" != "false" ]]; then
-    echo "push_reuse_decide: classify-image-impact.sh reported 'workflow=${workflow_flag:-<missing>}' for ${revision}..${github_sha} -- a build-affecting workflow/composite-action file changed somewhere in the full revision span (not just the immediately preceding push) -- failing closed to a real rebuild." >&2
+    echo "push_reuse_decide: classify-image-impact.sh reported 'workflow_reuse_scope=${workflow_flag:-<missing>}' for ${revision}..${github_sha} -- a build-affecting workflow/composite-action file changed somewhere in the full revision span (not just the immediately preceding push) -- failing closed to a real rebuild." >&2
     printf 'false\n'
     return 0
   fi

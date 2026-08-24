@@ -254,11 +254,8 @@ workflow_diff_is_comment_only() {
     return 0
 }
 
-# What: jobs whose own body can change what build/build-arm64 actually
-#   publish -- the workflow-level preamble (on:/permissions:/concurrency:/
-#   env:/defaults:) plus these five job names.
-# Why: named explicitly so a job rename/removal fails closed (below) instead
-#   of silently narrowing what counts as build-affecting.
+# What: jobs (+ preamble) that determine what build/build-arm64 publish.
+# Why: named explicitly so a rename/removal fails closed, not silently.
 # From: Issue #1095 (G14)
 build_push_build_affecting_jobs=(
     detect-changes
@@ -268,11 +265,8 @@ build_push_build_affecting_jobs=(
     build-arm64
 )
 
-# What: prints $2 (a job name) body from build-push.yml at ref $1, from its
-#   `  <job>:` header to the next top-level job key or EOF. Exit 1 if the
-#   job name is not found under `jobs:` in that ref's content at all.
-# Why: shared by _cii_extract_build_push_build_regions; kept its own
-#   function so a missing job can be told apart from an empty job body.
+# What: prints job $2's body from build-push.yml at ref $1; exit 1 if absent.
+# Why: lets a missing job be told apart from a legitimately empty body.
 # From: Issue #1095 (G14)
 _cii_extract_build_push_job() {
     local ref="$1" job="$2"
@@ -286,22 +280,15 @@ _cii_extract_build_push_job() {
     '
 }
 
-# What: prints ref $1's build-push.yml content up to (not including) the
-#   `jobs:` line -- the on:/permissions:/concurrency:/env:/defaults: block.
-# Why: these apply to every job (e.g. env.CI_BUILD_SERVICES, push.paths),
-#   so a change here must be treated the same as a build-affecting job.
+# What: prints ref $1's build-push.yml content before its `jobs:` line.
+# Why: on:/env:/etc. apply to every job, so treat it as build-affecting too.
 # From: Issue #1095 (G14)
 _cii_extract_build_push_preamble() {
     git show "${1}:.github/workflows/build-push.yml" 2>/dev/null | sed -n '1,/^jobs:$/p' | sed '$d'
 }
 
-# What: prints ref $1's full build-affecting extract (preamble + each job
-#   in build_push_build_affecting_jobs, fixed order), or fails (nonzero)
-#   if the preamble or any named job could not be found.
-# Why: content comparison across two refs, not diff-hunk line-range math --
-#   immune to unrelated line-number shifts elsewhere in this 8000+-line
-#   file, at the cost of re-reading the file twice per push (cheap; this
-#   already runs once per push, not per service).
+# What: prints ref $1's preamble + each build-affecting job, fixed order.
+# Why: content comparison, not diff-hunk line math -- immune to line shift.
 # From: Issue #1095 (G14)
 _cii_extract_build_push_build_regions() {
     local ref="$1" job out
@@ -313,12 +300,8 @@ _cii_extract_build_push_build_regions() {
     done
 }
 
-# What: true only when build-push.yml changed AND that change falls inside
-#   the build-affecting regions above (not e.g. merge-manifests/promote).
-# Why: G14's fix -- replaces the old file-wide touches_exact check, which
-#   forced workflow=true (killing reuse for all 8 services) on any edit
-#   anywhere in this file, including post-build-only logic (confirmed live
-#   on PR #1642, an orphan-tag-cleanup change inside merge-manifests).
+# What: true when build-push.yml's build-affecting regions actually changed.
+# Why: shared building block for touches_build_workflow_reuse_scope below.
 # From: Issue #1095 (G14)
 touches_build_push_build_path() {
     touches_exact ".github/workflows/build-push.yml" || return 1
@@ -340,6 +323,22 @@ touches_build_workflow() {
     # Why: narrows the prior blanket .github/actions/* rule to only paths
     #   consumed globally; per-service actions set their own output instead.
     # From: Issue #1095 (G14 | G15) | PR #1609 review
+    local touched=false
+    if touches_exact ".github/workflows/build-push.yml" \
+        || touches_exact ".github/workflows/build-tools.yml" \
+        || touches_global_action \
+        || touches_unmapped_action; then
+        touched=true
+    fi
+    [[ "$touched" == "true" ]] || return 1
+    workflow_diff_is_comment_only && return 1
+    return 0
+}
+
+# What: touches_build_workflow, but build-push.yml is job-region-scoped.
+# Why: G14 fix, scoped to push-reuse.sh only; 13 other consumers untouched.
+# From: Issue #1095 (G14)
+touches_build_workflow_reuse_scope() {
     local touched=false
     if touches_build_push_build_path \
         || touches_exact ".github/workflows/build-tools.yml" \
@@ -495,6 +494,7 @@ touches_validation_infra() {
 output_bool "validation_infra" touches_validation_infra
 
 output_bool "workflow" touches_build_workflow
+output_bool "workflow_reuse_scope" touches_build_workflow_reuse_scope
 output_bool "codeql_rust" touches_codeql_rust
 output_bool "docs" touches_docs
 printf 'docs_only=%s\n' "$docs_only"
