@@ -752,6 +752,18 @@ unknown SNI to the `127.0.0.1:9` discard sink). Info-level.
     resulting maintainer decision this leaves open (accept the residual curl
     risk as-is, purge curl and migrate the healthcheck off it, or something
     else).
+    **Corrected 2026-08-24**: the "have no fix anywhere yet" claim above is
+    itself now known wrong. Checked each of these 7 CVE IDs directly against
+    curl.se's own advisory pages (`https://curl.se/docs/CVE-2026-<id>.html`,
+    the authoritative fixed-version record) rather than Trivy/Debian's
+    tracker: all 7 are fixed at curl >= 8.21.0. Debian's Security Tracker
+    reporting `Status: affected, FixedVersion: None` for this backports build
+    is a tracker gap, not a real unpatched vulnerability -- it does not treat
+    `trixie-backports` as a first-class tracked suite, so a genuinely-fixed
+    package still shows as affected. This proxy service's own curl (8.21.0
+    via backports) is therefore not actually vulnerable to these 7 IDs; only
+    an image still pinned below 8.21.0 (e.g. netdata's vendored static curl,
+    tracked separately in issue #1304) remains genuinely affected.
   - `ca-certificates` and `openssl` remain kept for the same reason as
     before — both genuinely needed at runtime for TLS.
 - `proxy_ssl_verify_depth 2` was checked as a possible over-strict/over-lax

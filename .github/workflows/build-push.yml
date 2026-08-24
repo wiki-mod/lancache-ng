@@ -929,7 +929,7 @@ jobs:
         run: bash scripts/tracked/cleanup-stale-buildx-builders.sh
       - name: Set up Docker Buildx for manifest inspection
         id: buildx
-        uses: &docker_setup_buildx_centraliced_versioning docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        uses: &docker_setup_buildx_centraliced_versioning docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Resolve compose validation image
         id: select-compose-validation-image
@@ -2659,7 +2659,7 @@ jobs:
       - name: Set up Docker Buildx
         if: steps.channel.outputs.pr-staging-available == 'true'
         id: buildx
-        uses: *docker_setup_buildx_centraliced_versioning # v4.2.0
+        uses: *docker_setup_buildx_centraliced_versioning # v4.3.0
 
       - name: Log in to GHCR
         if: steps.channel.outputs.pr-staging-available == 'true'
@@ -5103,7 +5103,7 @@ jobs:
             (github.event_name == 'push' && steps.should-build.outputs.should-build == 'false')
           }}
         id: buildx
-        uses: *docker_setup_buildx_centraliced_versioning # v4.2.0
+        uses: *docker_setup_buildx_centraliced_versioning # v4.3.0
 
       - name: Log in to GHCR
         # What: also logs in on pull_request events, for the PR-scoped
@@ -6441,6 +6441,7 @@ jobs:
       syslog_digest: ${{ steps.create-trusted-manifests.outputs.syslog_digest || steps.create-pr-staging-manifests.outputs.syslog_digest }}
       ui_digest: ${{ steps.create-trusted-manifests.outputs.ui_digest || steps.create-pr-staging-manifests.outputs.ui_digest }}
       build_tools_digest: ${{ steps.create-trusted-manifests.outputs.build_tools_digest || steps.create-pr-staging-manifests.outputs.build_tools_digest }}
+      utilities_digest: ${{ steps.create-trusted-manifests.outputs.utilities_digest || steps.create-pr-staging-manifests.outputs.utilities_digest }}
       stack_digest: ${{ steps.create-trusted-manifests.outputs.stack_digest }}
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
@@ -6451,7 +6452,7 @@ jobs:
         run: bash scripts/tracked/cleanup-stale-buildx-builders.sh
       - name: Set up Docker Buildx
         id: buildx
-        uses: *docker_setup_buildx_centraliced_versioning # v4.2.0
+        uses: *docker_setup_buildx_centraliced_versioning # v4.3.0
 
       - name: Log in to GHCR
         uses: *docker_login_centraliced_versioning # v4.6.0
@@ -7096,7 +7097,7 @@ jobs:
         run: bash scripts/tracked/cleanup-stale-buildx-builders.sh
       - name: Set up Docker Buildx
         id: buildx
-        uses: *docker_setup_buildx_centraliced_versioning # v4.2.0
+        uses: *docker_setup_buildx_centraliced_versioning # v4.3.0
 
       - name: Log in to GHCR
         uses: *docker_login_centraliced_versioning # v4.6.0
@@ -7123,6 +7124,7 @@ jobs:
           SYSLOG_DIGEST: ${{ needs['merge-manifests'].outputs.syslog_digest }}
           UI_DIGEST: ${{ needs['merge-manifests'].outputs.ui_digest }}
           BUILD_TOOLS_DIGEST: ${{ needs['merge-manifests'].outputs.build_tools_digest }}
+          UTILITIES_DIGEST: ${{ needs['merge-manifests'].outputs.utilities_digest }}
           STACK_DIGEST: ${{ needs['merge-manifests'].outputs.stack_digest }}
         run: |
           set -euo pipefail
@@ -7154,6 +7156,7 @@ jobs:
             [syslog]="$SYSLOG_DIGEST"
             [ui]="$UI_DIGEST"
             [build-tools]="$BUILD_TOOLS_DIGEST"
+            [utilities]="$UTILITIES_DIGEST"
           )
           declare -A previous_refs=()
           promoted_targets=()
@@ -7503,7 +7506,7 @@ jobs:
         run: bash scripts/tracked/cleanup-stale-buildx-builders.sh
       - name: Set up Docker Buildx
         id: buildx
-        uses: *docker_setup_buildx_centraliced_versioning # v4.2.0
+        uses: *docker_setup_buildx_centraliced_versioning # v4.3.0
 
       - name: Log in to GHCR
         uses: *docker_login_centraliced_versioning # v4.6.0
@@ -7889,7 +7892,7 @@ jobs:
         run: bash scripts/tracked/cleanup-stale-buildx-builders.sh
       - name: Set up Docker Buildx
         id: buildx
-        uses: *docker_setup_buildx_centraliced_versioning # v4.2.0
+        uses: *docker_setup_buildx_centraliced_versioning # v4.3.0
 
       - name: Log in to GHCR
         uses: *docker_login_centraliced_versioning # v4.6.0
@@ -8097,3 +8100,55 @@ jobs:
 
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
+
+  # What: files/updates/closes a standing issue for a nightly dispatch's
+  #   real result -- nightly-refresh.yml only reports its own dispatch
+  #   call, never the dispatched run's actual outcome.
+  # Why: confirmed live -- nightly sat frozen on a 9-day-old commit while
+  #   nightly-refresh.yml reported daily "success" throughout.
+  # From: Issue #1095
+  report-nightly-status:
+    name: report nightly channel status
+    if: "always() && !cancelled() && github.event_name == 'workflow_dispatch' && inputs.channel == 'nightly'"
+    needs: [build, build-arm64, merge-manifests, full-setup-validate, promote]
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: List which needed jobs did not succeed
+        id: failed-jobs
+        env:
+          BUILD: ${{ needs.build.result }}
+          BUILD_ARM64: ${{ needs['build-arm64'].result }}
+          MERGE_MANIFESTS: ${{ needs['merge-manifests'].result }}
+          FULL_SETUP_VALIDATE: ${{ needs['full-setup-validate'].result }}
+          PROMOTE: ${{ needs.promote.result }}
+        run: |
+          set -euo pipefail
+          declare -A results=(
+            [build]="$BUILD"
+            [build-arm64]="$BUILD_ARM64"
+            [merge-manifests]="$MERGE_MANIFESTS"
+            [full-setup-validate]="$FULL_SETUP_VALIDATE"
+            [promote]="$PROMOTE"
+          )
+          failed=()
+          for job in "${!results[@]}"; do
+            [[ "${results[$job]}" == "success" ]] || failed+=("$job (${results[$job]})")
+          done
+          outcome="success"
+          [[ ${#failed[@]} -eq 0 ]] || outcome="failure"
+          {
+            echo "outcome=$outcome"
+            echo "list=${failed[*]}"
+          } >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/nightly-status
+        with:
+          outcome: ${{ steps.failed-jobs.outputs.outcome }}
+          scope: nightly channel promote (current_dev)
+          failed_jobs: ${{ steps.failed-jobs.outputs.list }}
+          project_pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}

@@ -254,6 +254,70 @@ workflow_diff_is_comment_only() {
     return 0
 }
 
+# What: jobs (+ preamble) that determine what build/build-arm64 publish.
+# Why: named explicitly so a rename/removal fails closed, not silently.
+# From: Issue #1095 (G14)
+build_push_build_affecting_jobs=(
+    detect-changes
+    determine-push-reuse-scope
+    determine-build-admission
+    build
+    build-arm64
+)
+
+# What: prints job $2's body from build-push.yml at ref $1; exit 1 if absent.
+# Why: lets a missing job be told apart from a legitimately empty body.
+# From: Issue #1095 (G14)
+_cii_extract_build_push_job() {
+    local ref="$1" job="$2"
+    git show "${ref}:.github/workflows/build-push.yml" 2>/dev/null | awk -v job="$job" '
+        $0 == "jobs:" { in_jobs = 1; next }
+        in_jobs && !in_target && $0 == "  " job ":" { in_target = 1; found = 1; print; next }
+        in_jobs && in_target {
+            if ($0 ~ /^  [A-Za-z_][A-Za-z0-9_-]*:$/) { in_target = 0 } else { print; next }
+        }
+        END { if (!found) exit 1 }
+    '
+}
+
+# What: prints ref $1's build-push.yml content before its `jobs:` line.
+# Why: on:/env:/etc. apply to every job, so treat it as build-affecting too.
+# From: Issue #1095 (G14)
+_cii_extract_build_push_preamble() {
+    git show "${1}:.github/workflows/build-push.yml" 2>/dev/null | sed -n '1,/^jobs:$/p' | sed '$d'  # pipefail-safe: no q/Q, reads to EOF (AG-VAL-032)
+}
+
+# What: prints ref $1's preamble + each build-affecting job, fixed order.
+# Why: content comparison, not diff-hunk line math -- immune to line shift.
+# From: Issue #1095 (G14)
+_cii_extract_build_push_build_regions() {
+    local ref="$1" job out
+    out="$(_cii_extract_build_push_preamble "$ref")"
+    [[ -n "$out" ]] || return 1
+    printf '%s\n' "$out"
+    for job in "${build_push_build_affecting_jobs[@]}"; do
+        _cii_extract_build_push_job "$ref" "$job" || return 1
+    done
+}
+
+# What: true when build-push.yml's build-affecting regions actually changed.
+# Why: shared building block for touches_build_workflow_reuse_scope below.
+# From: Issue #1095 (G14)
+touches_build_push_build_path() {
+    touches_exact ".github/workflows/build-push.yml" || return 1
+    # Fail closed: no diff-ref context (e.g. a caller supplying only
+    # CHANGED_FILES) cannot extract per-region content, so treat the file
+    # as touched rather than guess.
+    [[ -n "${merge_base:-}" && -n "${head_ref:-}" ]] || return 0
+    local base_regions head_regions
+    # Fail closed: an extraction failure (job renamed/removed, unexpected
+    # structure) means this classifier can no longer prove the change is
+    # scoped outside the build-affecting regions -- treat as touched.
+    base_regions="$(_cii_extract_build_push_build_regions "$merge_base")" || return 0
+    head_regions="$(_cii_extract_build_push_build_regions "$head_ref")" || return 0
+    [[ "$base_regions" != "$head_regions" ]]
+}
+
 touches_build_workflow() {
     # What: workflow-wide impact for global build-workflow paths only.
     # Why: narrows the prior blanket .github/actions/* rule to only paths
@@ -261,6 +325,22 @@ touches_build_workflow() {
     # From: Issue #1095 (G14 | G15) | PR #1609 review
     local touched=false
     if touches_exact ".github/workflows/build-push.yml" \
+        || touches_exact ".github/workflows/build-tools.yml" \
+        || touches_global_action \
+        || touches_unmapped_action; then
+        touched=true
+    fi
+    [[ "$touched" == "true" ]] || return 1
+    workflow_diff_is_comment_only && return 1
+    return 0
+}
+
+# What: touches_build_workflow, but build-push.yml is job-region-scoped.
+# Why: G14 fix, scoped to push-reuse.sh only; 13 other consumers untouched.
+# From: Issue #1095 (G14)
+touches_build_workflow_reuse_scope() {
+    local touched=false
+    if touches_build_push_build_path \
         || touches_exact ".github/workflows/build-tools.yml" \
         || touches_global_action \
         || touches_unmapped_action; then
@@ -414,6 +494,7 @@ touches_validation_infra() {
 output_bool "validation_infra" touches_validation_infra
 
 output_bool "workflow" touches_build_workflow
+output_bool "workflow_reuse_scope" touches_build_workflow_reuse_scope
 output_bool "codeql_rust" touches_codeql_rust
 output_bool "docs" touches_docs
 printf 'docs_only=%s\n' "$docs_only"
