@@ -6495,6 +6495,8 @@ EOF
     nats_password=$(echo "$response" | grep -oP '"nats_password"\s*:\s*"\K[^"]*' || true)
     consumer_name=$(echo "$response" | grep -oP '"consumer_name"\s*:\s*"\K[^"]*' || true)
     pdns_api_key=$(echo "$response" | grep -oP '"pdns_api_key"\s*:\s*"\K[^"]*' || true)
+    ddns_tsig_key=$(echo "$response" | grep -oP '"ddns_tsig_key"\s*:\s*"\K[^"]*' || true)
+    dns_xfr_primary=$(echo "$response" | grep -oP '"dns_xfr_primary"\s*:\s*"\K[^"]*' || true)
     response_image_registry=$(echo "$response" | grep -oP '"image_registry"\s*:\s*"\K[^"]*' || true)
     response_image_prefix=$(echo "$response" | grep -oP '"image_prefix"\s*:\s*"\K[^"]*' || true)
     response_image_channel=$(echo "$response" | grep -oP '"image_channel"\s*:\s*"\K[^"]*' || true)
@@ -6506,6 +6508,8 @@ EOF
     [[ -n "$nats_password" ]] || missing_fields+=("nats_password")
     [[ -n "$consumer_name" ]] || missing_fields+=("consumer_name")
     [[ -n "$pdns_api_key" ]] || missing_fields+=("pdns_api_key")
+    [[ -n "$ddns_tsig_key" ]] || missing_fields+=("ddns_tsig_key")
+    [[ -n "$dns_xfr_primary" ]] || missing_fields+=("dns_xfr_primary")
     if [[ ${#missing_fields[@]} -gt 0 ]]; then
         die "Invalid response from primary server; missing field(s): ${missing_fields[*]}"
     fi
@@ -6615,11 +6619,15 @@ services:
     environment:
       - PROXY_IP=\${PROXY_IP}
       - PDNS_API_KEY=\${PDNS_API_KEY}
+      - DDNS_TSIG_KEY=\${DDNS_TSIG_KEY}
       - NATS_URL=\${NATS_URL}
       - NATS_USER=\${NATS_USER}
       - NATS_PASSWORD=\${NATS_PASSWORD}
       - NATS_CONSUMER=\${NATS_CONSUMER}
       - DDNS_ALLOW_FROM=127.0.0.1
+      - NATS_RECORD_WRITES=0
+      - DNS_REPLICATION_ROLE=secondary
+      - DNS_XFR_PRIMARY=\${DNS_XFR_PRIMARY:-}
       # What: KEEP_KNOWN_GOOD_CONFIGS default, same variable as the
       #   primary's config/prod/dns-standard.env.
       # Why: retains known-good pdns.conf/recursor.conf snapshots for rollback.
@@ -6672,6 +6680,8 @@ EOF
 PROXY_IP=${proxy_ip}
 LISTEN_IP=${listen_ip}
 PDNS_API_KEY=${pdns_api_key}
+DDNS_TSIG_KEY=${ddns_tsig_key}
+DNS_XFR_PRIMARY=${dns_xfr_primary}
 NATS_URL=${nats_url}
 NATS_USER=${nats_user}
 NATS_PASSWORD=${nats_password}

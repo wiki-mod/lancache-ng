@@ -13,6 +13,16 @@
 # actions, now or after a future re-pin. This script scans ALL of them,
 # proactively, on every run.
 #
+# It also enforces two #1095 centralization invariants over the same scan
+# scope:
+#   1. one file must not repeat the exact same third-party `uses:` literal
+#      more than once -- a YAML anchor/alias or an existing internal owner
+#      action must carry that one maintenance point instead of N raw copies.
+#   2. one third-party action key (`owner/repo[/subpath]`) must not drift to
+#      multiple pinned refs across .github/** -- that is exactly the
+#      "same dependency, different versions, nobody sees it anymore" failure
+#      mode #1095 is meant to stop.
+#
 # Local composite actions (`uses: ./.github/actions/<name>`) are resolved by
 # reading their action.yml/action.yaml straight off disk -- no GitHub API
 # lookup needed, since we already have the file. Every composite action in
@@ -120,6 +130,21 @@ warn() {
   printf '::warning::%s\n' "$1" >&2
 }
 
+is_same_repo_owner_ref() {
+  local candidate="$1"
+  [[ "$candidate" == wiki-mod/lancache-ng/* ]]
+}
+
+is_external_action_ref() {
+  local candidate="$1"
+  [[ "$candidate" == *'@'* ]] || return 1
+  [[ "$candidate" == ./* ]] && return 1
+  [[ "$candidate" == \$/* ]] && return 1
+  [[ "$candidate" == docker://* ]] && return 1
+  is_same_repo_owner_ref "$candidate" && return 1
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # The Node runtimes GitHub Actions has deprecated. node24 is the current
 # runtime as of this writing (2026-07) -- when GitHub deprecates it too (a
@@ -162,10 +187,36 @@ extract_runs_using() {
 # CI-scope-policy guard greps for the literal text "uses:
 # ./.github/actions/rust-acceleration-preflight" as part of a different
 # check -- that line must NOT be mistaken for a real step here).
+declare -a uses_entries=()
+declare -a uses_literal_entries=()
+for scan_file in "${scan_files[@]}"; do
+  declare -A yaml_anchors=()
+  while IFS= read -r uses_line; do
+    raw_value="$(sed -E 's/^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*//; s/[[:space:]]*#.*$//; s/[[:space:]]+$//' <<<"$uses_line")"
+    resolved_value="$raw_value"
+    if [[ "$raw_value" =~ ^\&([A-Za-z0-9_-]+)[[:space:]]+(.+)$ ]]; then
+      anchor_name="${BASH_REMATCH[1]}"
+      resolved_value="${BASH_REMATCH[2]}"
+      yaml_anchors["$anchor_name"]="$resolved_value"
+      uses_literal_entries+=("${scan_file}"$'\t'"${resolved_value}")
+    elif [[ "$raw_value" =~ ^\*([A-Za-z0-9_-]+)$ ]]; then
+      anchor_name="${BASH_REMATCH[1]}"
+      if [ -z "${yaml_anchors[$anchor_name]+x}" ]; then
+        fail "'$scan_file' uses unresolved YAML alias '*$anchor_name' in a uses: step."
+        continue
+      fi
+      resolved_value="${yaml_anchors[$anchor_name]}"
+    else
+      uses_literal_entries+=("${scan_file}"$'\t'"${resolved_value}")
+    fi
+    uses_entries+=("${scan_file}"$'\t'"${resolved_value}")
+  done < <(
+    grep -E '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*[^[:space:]]+' "$scan_file"
+  )
+done
+
 mapfile -t uses_values < <(
-  grep -hE '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*[^[:space:]]+' "${scan_files[@]}" \
-    | sed -E 's/^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*//; s/[[:space:]]*#.*$//; s/[[:space:]]+$//' \
-    | sort -u
+  printf '%s\n' "${uses_entries[@]}" | sed $'s/^[^\t]*\t//' | sort -u
 )
 
 if [ "${#uses_values[@]}" -eq 0 ]; then
@@ -173,10 +224,15 @@ if [ "${#uses_values[@]}" -eq 0 ]; then
 fi
 
 referencing_files() {
-  local needle="$1" f matches=()
-  for f in "${scan_files[@]}"; do
-    if grep -qF "uses: ${needle}" "$f"; then
-      matches+=("$f")
+  local needle="$1" matches=() entry file value
+  for entry in "${uses_entries[@]}"; do
+    file="${entry%%$'\t'*}"
+    value="${entry#*$'\t'}"
+    if [ "$value" = "$needle" ]; then
+      case " ${matches[*]} " in
+        *" ${file} "*) ;;
+        *) matches+=("$file") ;;
+      esac
     fi
   done
   if [ "${#matches[@]}" -eq 0 ]; then
@@ -185,6 +241,65 @@ referencing_files() {
     printf '%s' "${matches[*]}"
   fi
 }
+
+declare -A literal_ref_counts_by_file=()
+declare -A ref_paths_by_key=()
+declare -A ref_counts_by_key=()
+
+for entry in "${uses_literal_entries[@]}"; do
+  scan_file="${entry%%$'\t'*}"
+  value="${entry#*$'\t'}"
+  if ! is_external_action_ref "$value"; then
+    continue
+  fi
+
+  exact_file_key="${scan_file}"$'\t'"${value}"
+  if [ -n "${literal_ref_counts_by_file[$exact_file_key]+x}" ]; then
+    literal_ref_counts_by_file[$exact_file_key]=$((literal_ref_counts_by_file[$exact_file_key] + 1))
+  else
+    literal_ref_counts_by_file[$exact_file_key]=1
+  fi
+
+  action_key="${value%@*}"
+  ref="${value##*@}"
+  if [ -n "${ref_paths_by_key[$action_key]+x}" ]; then
+    case " ${ref_paths_by_key[$action_key]} " in
+      *" ${ref} "*) ;;
+      *)
+        ref_paths_by_key[$action_key]="${ref_paths_by_key[$action_key]} ${ref}"
+        ref_counts_by_key[$action_key]=$((ref_counts_by_key[$action_key] + 1))
+        ;;
+    esac
+  else
+    ref_paths_by_key[$action_key]="$ref"
+    ref_counts_by_key[$action_key]=1
+  fi
+done
+
+# What: rejects repeated literal third-party `uses:` refs inside one file.
+# Why: once the same immutable ref appears twice, the file already has more
+#   maintenance points than needed; a YAML anchor/alias keeps GitHub's
+#   static-YAML requirement while collapsing the ref to one owner line.
+for exact_file_key in "${!literal_ref_counts_by_file[@]}"; do
+  count="${literal_ref_counts_by_file[$exact_file_key]}"
+  if [ "$count" -le 1 ]; then
+    continue
+  fi
+  scan_file="${exact_file_key%%$'\t'*}"
+  value="${exact_file_key#*$'\t'}"
+  fail "'$scan_file' repeats third-party action ref '$value' $count times. Collapse it to one maintenance point with a YAML anchor/alias or an existing internal owner action."
+done
+
+# What: rejects one external action key pinned to multiple distinct refs.
+# Why: #1095's drift class is not duplication alone; the real maintenance
+#   hazard is the same dependency silently splitting across versions.
+for action_key in "${!ref_counts_by_key[@]}"; do
+  count="${ref_counts_by_key[$action_key]}"
+  if [ "$count" -le 1 ]; then
+    continue
+  fi
+  fail "Third-party action '$action_key' is pinned to multiple refs across .github/** (${ref_paths_by_key[$action_key]}). Keep one canonical ref per action key."
+done
 
 gh_token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
 
@@ -400,4 +515,4 @@ if [ "$failures" -gt 0 ]; then
   exit 1
 fi
 
-printf 'check-action-node-versions: OK (every pinned action -- local and external -- declares a current Node runtime, or is not Node-based).\n'
+printf 'check-action-node-versions: OK (every pinned action -- local and external -- declares a current Node runtime, or is not Node-based; third-party action refs are de-duplicated per file and do not drift across .github/**).\n'

@@ -170,7 +170,9 @@ real host:
 |---|---|---|
 | `ROOT_ZONE_MIRROR` | `1` (enabled) in `services/dns/entrypoint.sh`'s own fallback; this repo's shipped `config/prod/dns-*.env` explicitly set `1` | Root zone mirror (AXFR from root servers). Was previously documented here as `ENABLE_ROOT_MIRROR` — that name does not exist in code; `docs/dns-admin-ui-scope.md` already used the correct name. |
 | Global AAAA-response filter | off by default | Suppresses all AAAA answers for every client, regardless of address family. Not an env var/restart-time setting: toggled live via the Admin UI (`POST /domains/aaaa-filter`), which writes/removes a marker file on the shared `powerdns-state` volume, read live by `filter-aaaa.lua`'s recursor `preresolve` hook. (Previously documented here as two separate env vars, `FILTER_AAAA_V4`/`FILTER_AAAA_V6` — neither name appears anywhere in `services/dns/` or `services/ui/src`; see `docs/dns-admin-ui-scope.md` §1b for the real, shipped mechanism.) **Planned change, not yet implemented**: starting with v0.3.0, this filter is intended to default to **on** instead of off (maintainer decision recorded in issue #1068; no dedicated tracking issue exists yet for the code change itself). Current shipped behavior as of this writing is still off-by-default — do not treat this bullet as already-shipped. |
-| `ENABLE_SECONDARY` | — | Not read by any code — a documentation-only narrative convention for when to include `deploy/prod/docker-compose.nats-secondary.yml`. The actual secondary-sync mechanism is NATS-based (see `NATS_BIND_IP`/`NATS_ADVERTISE_URL` below and `docs/dns-admin-ui-scope.md` §3); PowerDNS's own native secondary/AXFR mode is not implemented at all — `SECONDARY_MASTERS`/`SECONDARY_ZONES` (previously listed here) appear nowhere in this repository. |
+| `DNS_REPLICATION_ROLE` | `native` | Selects whether a DNS container owns local zones normally (`native`), acts as the transfer primary (`primary`), or creates the fixed LAN/reverse zones as PowerDNS secondaries (`secondary`). Shipped production/quickstart/full-setup topology sets `dns-standard` to `primary` and `dns-ssl` to `secondary`. |
+| `DNS_XFR_PRIMARY` | — | Required when `DNS_REPLICATION_ROLE=secondary`; host:port endpoint of the PowerDNS primary used for native AXFR/refresh polling. Remote secondaries receive this from the Admin UI registration response. |
+| `DNS_XFR_NOTIFY_TARGETS` | — | Comma/space-separated NOTIFY targets for a primary. Shipped local topology notifies `dns-ssl:5300`; remote secondaries can still converge through PowerDNS's refresh polling when they are not listed here. |
 | `NATS_BIND_IP` | — | Trusted LAN/VPN interface for optional NATS host binding used by remote secondaries; intentionally required by the secondary NATS override file. Also drives the address the Admin UI hands out during secondary registration -- see below. |
 | `NATS_ADVERTISE_URL` | — | Explicit override for the NATS URL the Admin UI hands a remote secondary during registration (issue #866), for setups `NATS_BIND_IP` alone can't express (non-default port, `tls://` scheme, VPN hostname). Always wins over `NATS_BIND_IP` when set. |
 
@@ -180,15 +182,16 @@ real host:
 
 The production Compose file keeps NATS on the Docker network by default and does not publish port `4222` on the host. This keeps the event bus closed for installations that do not use remote secondaries.
 
-There are two compatible ways to enable host binding for secondary DNS nodes:
-
-1. **Reuse the existing secondary switch**: when `ENABLE_SECONDARY=true`, include `deploy/prod/docker-compose.nats-secondary.yml` and set `NATS_BIND_IP` to the trusted LAN or VPN interface that secondary nodes use.
-2. **Use a separate explicit binding switch**: leave `ENABLE_SECONDARY` for DNS behavior, and include `deploy/prod/docker-compose.nats-secondary.yml` only when you intentionally want to publish NATS for remote secondary synchronization.
+Enable host binding for remote secondary DNS nodes only when you intentionally
+publish NATS to a trusted LAN or VPN interface. `ENABLE_SECONDARY` is not a
+runtime switch read by setup, Compose, DNS, or UI code; native zone replication
+is controlled by `DNS_REPLICATION_ROLE`/`DNS_XFR_PRIMARY`, while this override
+only publishes the NATS registration/event path.
 
 Example:
 
 ```sh
-ENABLE_SECONDARY=1 NATS_BIND_IP=192.168.1.5 \
+NATS_BIND_IP=192.168.1.5 \
   docker compose --env-file deploy/prod/.env.local -f deploy/prod/docker-compose.yml \
   -f deploy/prod/docker-compose.nats-secondary.yml up -d
 ```
@@ -255,7 +258,7 @@ recreated with it) to publish port 4222 on that address in the first place.
 `ui` only computes what to *advertise*; it does not control what `nats`
 itself publishes.
 
-**nsupdate (RFC 2136):** TSIG-secured dynamic DNS channel into PowerDNS authoritative. Kea DHCP sends lease add/update/delete events through `kea-dhcp-ddns`; PowerDNS accepts those updates only for the LAN and private reverse zones that are explicitly mapped to the shared `DDNS_TSIG_KEY`.
+**nsupdate (RFC 2136):** TSIG-secured dynamic DNS channel into PowerDNS authoritative. Kea DHCP sends lease add/update/delete events through `kea-dhcp-ddns` to `dns-standard` only; PowerDNS accepts those updates only for the LAN and private reverse zones that are explicitly mapped to the shared `DDNS_TSIG_KEY`. `dns-ssl` and registered remote DNS secondaries consume those same zone changes through native PowerDNS AXFR/NOTIFY, so DHCP-driven records have one writer and do not depend on Kea's `dns-servers` failover list behaving like fan-out.
 
 ## Kea DHCP
 
@@ -563,7 +566,7 @@ Central log receiver for the stack (#453), opt-in via `docker compose --profile 
 - Per-service wiring mechanism varies by what the underlying daemon actually supports (#633): a native dual stdout+file option where one exists (Kea's `output-options` array), a `tee` of the daemon's own stdout into a file where no such option exists (PowerDNS has no file-log directive on Linux at all; nats-server and dnsmasq each support only one log destination at a time, not both simultaneously), or a second application-level logging layer (the Admin UI's `tracing-subscriber` setup). Every one of these choices is a documented, deliberate trade-off recorded in the matrix's Notes column, not an oversight.
 - Storage-budget retention: `services/watchdog/retention.sh`'s `maybe_prune_syslog()` (since #842; opt-in via `SYSLOG_ENABLED=true`, `--profile logging`) enforces an overall storage budget on top of syslog-ng's own fixed-threshold rotation above. Age-based deletion runs first (`SYSLOG_RETENTION_DAYS`, default 30); if the tree under `SYSLOG_LOG_ROOT` is still over `SYSLOG_MAX_GB` (default 10) afterward, the oldest remaining files are deleted next — regardless of age — until back under budget. Size budget takes priority over the retention-days floor. Rate-limited via its own stamp file (once per day), same pattern as the cache purge above; `SYSLOG_LOG_ROOT` is validated (`realpath -m` + expected-prefix check) before any scan, same as `CACHE_DIR`.
 - Fluent-bit self-log rotation (#1236): `services/watchdog/retention.sh`'s `maybe_rotate_fluent_bit_selflog()` (since #842) bounds `/data/fluent-bit.log` (the combined container's own `fluent-bit` operational log, see the logging matrix row below) on the `syslog-data` volume, which neither of the two mechanisms above touches.
-- **Least-privilege capability posture** (new in the consolidation PR): the combined container runs entirely as fixed non-root uid 10001 (not root, unlike the previous two separate images), with exactly one added capability -- `DAC_READ_SEARCH` -- so fluent-bit can read today's root:root 0640 producer logs it doesn't own. Verified live to be sufficient for fluent-bit's read-only access pattern, narrower than a `DAC_OVERRIDE` grant would be. The fluent-bit interpreter binary carries a matching `setcap` file capability baked into the image; running this image without the matching `cap_add: [DAC_READ_SEARCH]` fails closed at exec, not silently. Producer logs themselves are not yet made group-readable for a fully-zero-capability posture -- tracked as a separate, real follow-up (see this PR's own body).
+- **Least-privilege capability posture**: the combined container runs entirely as fixed non-root uid 10001 (not root, unlike the previous two separate images), with **no added Linux capabilities**. Every first-party producer log it tails is now created under a setgid log directory whose group is the same fixed gid 10001, and startup repairs existing files on upgraded volumes the same way, so plain Unix permissions are enough even after reopen/recreation of the log file.
 - **Existing `logs` volume ownership migration**: Docker copies an image path's uid/gid only when it initializes a new named volume; it does not update an already-populated volume after an image upgrade. The `syslog-logs-permissions` one-shot Compose service therefore runs before `syslog` in both production and quickstart, recursively assigns the shared `/var/log/lancache` tree to uid/gid 10001, and must complete successfully before the non-root collector starts. The initializer has no network, a read-only root filesystem, and only `CAP_CHOWN`; repeated starts are intentionally idempotent. This keeps existing proxy-log copies writable without widening the long-running syslog container's capability set.
 - **Silent-data-loss detection** (new in the consolidation PR): a periodic detector compares syslog-ng's own "processed" stats counter (`syslog-ng-ctl stats`) against real bytes landing on disk under `SYSLOG_NG_LOG_ROOT`, alerting (and surfacing via a structured healthcheck status field) if syslog-ng believes it delivered messages that never actually reached disk -- e.g. a bind-mounted log-root directory left root-owned instead of chowned to uid 10001. `setup.sh` pre-creates and chowns this directory on fresh install specifically to avoid the condition; this detector is the defense-in-depth backstop for an installation that predates that fix or has its permissions changed later.
 - **Real dual-process healthcheck**: `services/syslog/healthcheck.sh` checks fluent-bit AND syslog-ng independently (not just "is the container running") and only reports healthy when both are, writing a structured per-process status file (including the data-loss alert flag above) for a future Admin UI/watchdog integration -- the granularity fix for the two-container era's single "one process, one Docker HEALTHCHECK slot" limitation.
@@ -573,7 +576,6 @@ Central log receiver for the stack (#453), opt-in via `docker compose --profile 
 **Not implemented yet:**
 - Per-service log level configuration in the Admin UI.
 - Configurable remote forwarding destination (IP/port/protocol) from the Admin UI.
-- Fully zero-added-capability posture for the combined container: needs every producer log this project controls to be group-readable by gid 10001, a real, separate cross-service change tracked in issue #1427.
 
 **Logging matrix** (maintained here per #453's requirement; kept up to date as more services are wired):
 

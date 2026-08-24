@@ -95,6 +95,7 @@ jobs:
       # From: Issue #1095 (G15)
       validation_infra: ${{ steps.filter.outputs.validation_infra }}
       workflow: ${{ steps.filter.outputs.workflow }}
+      workflow_reuse_scope: ${{ steps.filter.outputs.workflow_reuse_scope }}
       docs: ${{ steps.filter.outputs.docs }}
       docs_only: ${{ steps.filter.outputs.docs_only }}
       governance: ${{ steps.filter.outputs.governance }}
@@ -104,7 +105,7 @@ jobs:
       scripts: ${{ steps.filter.outputs.scripts }}
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: &checkout_centraliced_versioning actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -161,7 +162,7 @@ jobs:
       superseded: ${{ steps.check.outputs.superseded }}
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
 
       - name: Check whether this push is already superseded
         id: check
@@ -218,7 +219,7 @@ jobs:
       cancel-in-progress: true
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Select immutable build-tools image
         run: |
           set -euo pipefail
@@ -270,7 +271,7 @@ jobs:
       cancel-in-progress: true
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       # What: Composite action shared with compose-healthchecks-hosted below.
       # Why: The two jobs used to carry the identical step twice.
       # From: Issue #1095
@@ -291,7 +292,7 @@ jobs:
       pull-requests: read
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Validate PR template completeness
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -331,7 +332,7 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running PR template validation on GitHub-hosted runner as fallback for non-LAN-dependent linting."
@@ -371,7 +372,7 @@ jobs:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Auto-assign Dependabot PR milestone
         # What: assigns milestone #11 to Dependabot via PROJECT_AUTOMATION_PAT.
         # Why: must run before the action below fetches labels/milestone.
@@ -427,7 +428,7 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Select build-tools image
         # What: fallback resolves build-tools image independently.
         # Why: a needs: on validate-compose would defeat the fallback.
@@ -498,7 +499,7 @@ jobs:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
 
       # What: extracted into a composite action, shared with the hosted twin.
       # Why: job-level scheduling (needs/if/permissions) cannot live there.
@@ -522,7 +523,7 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Select build-tools image
         # What: fallback resolves its own image, not validate-compose's output.
         # Why: exists for when self-hosted runners are down; no needs: on them.
@@ -556,7 +557,7 @@ jobs:
     # From: PR #1218
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Select immutable build-tools image
         run: |
           set -euo pipefail
@@ -603,7 +604,7 @@ jobs:
     # From: PR #1218
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running compose-healthchecks check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
@@ -644,7 +645,7 @@ jobs:
       pull-requests: read
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Check tracked files use Unix (LF) line endings
         run: |
           set -euo pipefail
@@ -748,7 +749,7 @@ jobs:
     # Real runs: 4-8s. Same 15-minute floor as detect-changes above.
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running line-endings check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
@@ -778,7 +779,7 @@ jobs:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Check for banned-language source files (AG-REL-001)
         run: |
           set -euo pipefail
@@ -797,7 +798,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running language-policy check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
@@ -853,7 +854,7 @@ jobs:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
 
       # What: shellcheck/actionlint + 7 guards, in a composite action.
       # Why: avoids carrying the identical steps twice (shellcheck-hosted).
@@ -873,7 +874,7 @@ jobs:
     # "Run ShellCheck and ActionLint" step timeout added below.
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Select build-tools image
         # What: always resolves through the pinned, smoke-tested selector.
         # Why: must not trade the verified image for an unpinned :latest.
@@ -923,13 +924,13 @@ jobs:
       build_tools_image: ${{ steps.select-compose-validation-image.outputs.build_tools_image }}
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
 
       - name: Clean up stale Buildx builder containers (self-hosted reuse hardening)
         run: bash scripts/tracked/cleanup-stale-buildx-builders.sh
       - name: Set up Docker Buildx for manifest inspection
         id: buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: &docker_setup_buildx_centraliced_versioning docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Resolve compose validation image
         id: select-compose-validation-image
@@ -2520,7 +2521,7 @@ jobs:
       ui_port: ${{ steps.derive.outputs.ui_port }}
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Derive validation network
         id: derive
         uses: ./.github/actions/derive-validation-network
@@ -2551,7 +2552,7 @@ jobs:
         (
           github.event_name != 'pull_request' ||
           needs['detect-changes'].outputs.deploy == 'true' ||
-          needs['detect-changes'].outputs.workflow == 'true' ||
+          needs['detect-changes'].outputs.workflow_reuse_scope == 'true' ||
           needs['detect-changes'].outputs.validation_infra == 'true'
         )
       }}
@@ -2579,7 +2580,7 @@ jobs:
       # What: fetch-depth: 0 instead of the default shallow clone.
       # Why: needed for a merge-base diff below; see the linked issue.
       # From: Issue #1095 | PR #1532
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
         with:
           fetch-depth: 0
 
@@ -2661,11 +2662,11 @@ jobs:
       - name: Set up Docker Buildx
         if: steps.channel.outputs.pr-staging-available == 'true'
         id: buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: *docker_setup_buildx_centraliced_versioning # v4.3.0
 
       - name: Log in to GHCR
         if: steps.channel.outputs.pr-staging-available == 'true'
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: &docker_login_centraliced_versioning docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -2681,7 +2682,7 @@ jobs:
           # Why: only runs when pr-staging-available is true.
           # From: Issue #1095 | PR #1619
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow }}
+          WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow_reuse_scope }}
           PROXY_TOUCHED: ${{ needs['detect-changes'].outputs.proxy }}
           DNS_TOUCHED: ${{ needs['detect-changes'].outputs.dns_image }}
           WATCHDOG_TOUCHED: ${{ needs['detect-changes'].outputs.watchdog }}
@@ -3033,7 +3034,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Isolate Rust toolchain paths
         run: |
           {
@@ -3041,7 +3042,7 @@ jobs:
             echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/dns-nats-subscriber'
           } >> "$GITHUB_ENV"
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        uses: &dtolnay_rust_toolchain_centraliced_versioning dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: stable
           components: rustfmt, clippy
@@ -3105,7 +3106,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Isolate Rust toolchain paths
         run: |
           {
@@ -3113,7 +3114,7 @@ jobs:
             echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/ui'
           } >> "$GITHUB_ENV"
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        uses: *dtolnay_rust_toolchain_centraliced_versioning # stable
         with:
           toolchain: stable
           components: rustfmt, clippy
@@ -3178,7 +3179,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Isolate Rust toolchain paths
         run: |
           {
@@ -3186,7 +3187,7 @@ jobs:
             echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/watchdog'
           } >> "$GITHUB_ENV"
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        uses: *dtolnay_rust_toolchain_centraliced_versioning # stable
         with:
           toolchain: stable
           components: rustfmt, clippy
@@ -3270,7 +3271,7 @@ jobs:
       cancel-in-progress: true
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Isolate Rust toolchain paths
         run: |
           {
@@ -3278,7 +3279,7 @@ jobs:
             echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/dns-nats-subscriber'
           } >> "$GITHUB_ENV"
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        uses: *dtolnay_rust_toolchain_centraliced_versioning # stable
         with:
           toolchain: stable
       - name: Configure Redis-backed sccache
@@ -3349,7 +3350,7 @@ jobs:
       cancel-in-progress: true
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Isolate Rust toolchain paths
         run: |
           {
@@ -3357,7 +3358,7 @@ jobs:
             echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/ui'
           } >> "$GITHUB_ENV"
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        uses: *dtolnay_rust_toolchain_centraliced_versioning # stable
         with:
           toolchain: stable
       - name: Configure Redis-backed sccache
@@ -3428,7 +3429,7 @@ jobs:
       cancel-in-progress: true
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       # This job resolves its own build-tools image rather than reusing validate-compose's
       # exported build_tools_image output. That output is deliberately locked to the
       # published, digest-qualified image (never a branch-local fallback) because
@@ -3571,7 +3572,7 @@ jobs:
           cat coverage-badge/output.env >> "$GITHUB_OUTPUT"
       - name: Upload coverage reports
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: &actions_upload_artifact_centraliced_versioning actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: rust-coverage-reports
           path: |
@@ -3587,7 +3588,7 @@ jobs:
       # access, and it only ever runs on trusted push events.
       - name: Upload coverage badge data
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: *actions_upload_artifact_centraliced_versioning # v7.0.1
         with:
           name: rust-coverage-badge
           path: coverage-badge/rust.json
@@ -3623,7 +3624,7 @@ jobs:
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: *checkout_centraliced_versioning # v7.0.1
       - name: Download coverage badge data
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (v4.3.0 still declared deprecated Node 20 runtime, see #802)
         with:
@@ -3764,7 +3765,7 @@ jobs:
       cancel-in-progress: true
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: test (watchdog shell script)
         run: |
           bash -n services/watchdog/watchdog.sh
@@ -3776,7 +3777,7 @@ jobs:
             echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/watchdog'
           } >> "$GITHUB_ENV"
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        uses: *dtolnay_rust_toolchain_centraliced_versioning # stable
         with:
           toolchain: stable
       - name: Configure Redis-backed sccache
@@ -3811,7 +3812,7 @@ jobs:
     # Real runs: 3-5s. Same 15-minute floor as detect-changes above.
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running watchdog syntax check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
@@ -3868,7 +3869,7 @@ jobs:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Audit Rust dependencies (dns/nats-subscriber)
         run: |
           set -euo pipefail
@@ -3941,7 +3942,7 @@ jobs:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Audit Rust dependencies (ui)
         run: |
           set -euo pipefail
@@ -4017,7 +4018,7 @@ jobs:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Audit Rust dependencies (watchdog)
         run: |
           set -euo pipefail
@@ -4084,7 +4085,7 @@ jobs:
       # What: checks out the repo before the Buildx-step guard below.
       # Why: full reasoning (workspace reuse) on the linked issue.
       # From: Issue #1095 | PR #1532
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Enforce scoped CI gates
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -4093,7 +4094,7 @@ jobs:
           DNS_RUST_CHANGED: ${{ needs['detect-changes'].outputs.dns_rust }}
           UI_CHANGED: ${{ needs['detect-changes'].outputs.ui }}
           WATCHDOG_CHANGED: ${{ needs['detect-changes'].outputs.watchdog }}
-          WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow }}
+          WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow_reuse_scope }}
           DOCS_CHANGED: ${{ needs['detect-changes'].outputs.docs }}
           DOCS_ONLY: ${{ needs['detect-changes'].outputs.docs_only }}
           GOVERNANCE_CHANGED: ${{ needs['detect-changes'].outputs.governance }}
@@ -4393,7 +4394,7 @@ jobs:
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
         if: contains(matrix.runner, 'self-hosted')
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
 
       - name: Determine per-service publish scan reuse
         # What: reads determine-push-reuse-scope's reuse_<service> output.
@@ -4621,7 +4622,7 @@ jobs:
       # scripts/lib/push-reuse.sh's header) and github.sha itself. Same
       # requirement, same fix, as detect-changes' own fetch-depth: 0
       # checkout a few jobs up in this same file.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
         with:
           fetch-depth: 0
 
@@ -4632,7 +4633,7 @@ jobs:
         # file for the confirmed incident: "denied: denied" under a real push burst). This
         # job exists specifically to help with burst/push-cost behavior, so skipping this
         # login would risk reintroducing the exact class of failure it's meant to reduce.
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: *docker_login_centraliced_versioning # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -4643,7 +4644,6 @@ jobs:
         env:
           REF_NAME: ${{ github.ref_name }}
           COMMIT_SHA: ${{ github.sha }}
-          WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow }}
           PROXY_CHANGED: ${{ needs['detect-changes'].outputs.proxy }}
           DNS_CHANGED: ${{ needs['detect-changes'].outputs.dns_image }}
           UI_CHANGED: ${{ needs['detect-changes'].outputs.ui }}
@@ -4709,11 +4709,6 @@ jobs:
             local classify_key="$1" matrix_service="$2" before_sha_changed="$3"
             local output_key="${matrix_service//-/_}"
 
-            if [ "$WORKFLOW_CHANGED" = "true" ]; then
-              echo "::notice::$matrix_service: a build-affecting workflow file changed this push; not attempting reuse." >&2
-              printf 'false\n'
-              return
-            fi
             if [ "$before_sha_changed" != "false" ]; then
               echo "::notice::$matrix_service: detect-changes reports this service changed since the immediately preceding push; not attempting reuse (a real rebuild is needed regardless of channel state)." >&2
               printf 'false\n'
@@ -4975,7 +4970,7 @@ jobs:
           - service: utilities
             context: services/utilities
             build_contexts: ""
-            description: "Shared lancache-ng utilities image (curl, nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd) for COPY --from= consumption by other first-party images (issue #1556)."
+            description: "Shared lancache-ng utilities image (curl, nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd) for COPY --from= consumption by seven first-party images (issue #1556)."
             # Heavy, not light, despite being a small/fast build in practice
             # (curl's own C compile is ~20s): AG-CI-002's light-tier exception
             # requires "no real compile/link step of its own AT ALL", verified
@@ -4991,7 +4986,7 @@ jobs:
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: *checkout_centraliced_versioning # v7.0.1
 
       - name: Determine whether this service needs building
         id: should-build
@@ -5039,7 +5034,7 @@ jobs:
                 exit 1
                 ;;
             esac
-            if [ "${{ needs['detect-changes'].outputs.workflow }}" = "true" ] && [ "$MATRIX_SERVICE" != "build-tools" ]; then
+            if [ "${{ needs['detect-changes'].outputs.workflow_reuse_scope }}" = "true" ] && [ "$MATRIX_SERVICE" != "build-tools" ]; then
               should_build=true
             fi
           elif [ "$REUSE_JOB_RESULT" = "success" ]; then
@@ -5105,7 +5100,7 @@ jobs:
             (github.event_name == 'push' && steps.should-build.outputs.should-build == 'false')
           }}
         id: buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: *docker_setup_buildx_centraliced_versioning # v4.3.0
 
       - name: Log in to GHCR
         # What: also logs in on pull_request events, for the PR-scoped
@@ -5127,7 +5122,7 @@ jobs:
               )
             )
           }}
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: *docker_login_centraliced_versioning # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -5215,7 +5210,7 @@ jobs:
         # actually consume -- see docs/self-hosted-actions-runner.md.
         if: steps.should-build.outputs.should-build == 'true'
         id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        uses: &docker_metadata_centraliced_versioning docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/${{ github.repository }}/${{ matrix.service }}
           tags: |
@@ -5969,7 +5964,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: *checkout_centraliced_versioning # v7.0.1
 
       - name: Determine whether this service needs building
         id: should-build
@@ -6013,7 +6008,7 @@ jobs:
                 exit 1
                 ;;
             esac
-            if [ "${{ needs['detect-changes'].outputs.workflow }}" = "true" ] && [ "$MATRIX_SERVICE" != "build-tools" ]; then
+            if [ "${{ needs['detect-changes'].outputs.workflow_reuse_scope }}" = "true" ] && [ "$MATRIX_SERVICE" != "build-tools" ]; then
               should_build=true
             fi
           elif [ "$REUSE_JOB_RESULT" = "success" ]; then
@@ -6099,7 +6094,7 @@ jobs:
               )
             )
           }}
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: *docker_login_centraliced_versioning # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -6186,7 +6181,7 @@ jobs:
         # arm64 leg -- see the comment on build's own "Extract metadata" step.
         if: steps.should-build.outputs.should-build == 'true'
         id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        uses: *docker_metadata_centraliced_versioning # v6.2.0
         with:
           images: ghcr.io/${{ github.repository }}/${{ matrix.service }}
           tags: |
@@ -6497,20 +6492,21 @@ jobs:
       syslog_digest: ${{ steps.create-trusted-manifests.outputs.syslog_digest || steps.create-pr-staging-manifests.outputs.syslog_digest }}
       ui_digest: ${{ steps.create-trusted-manifests.outputs.ui_digest || steps.create-pr-staging-manifests.outputs.ui_digest }}
       build_tools_digest: ${{ steps.create-trusted-manifests.outputs.build_tools_digest || steps.create-pr-staging-manifests.outputs.build_tools_digest }}
+      utilities_digest: ${{ steps.create-trusted-manifests.outputs.utilities_digest || steps.create-pr-staging-manifests.outputs.utilities_digest }}
       stack_digest: ${{ steps.create-trusted-manifests.outputs.stack_digest }}
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: *checkout_centraliced_versioning # v7.0.1
 
       - name: Clean up stale Buildx builder containers (self-hosted reuse hardening)
         run: bash scripts/tracked/cleanup-stale-buildx-builders.sh
       - name: Set up Docker Buildx
         id: buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: *docker_setup_buildx_centraliced_versioning # v4.3.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: *docker_login_centraliced_versioning # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -6584,7 +6580,7 @@ jobs:
             [ui]="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
             [build-tools]="Prebuilt lancache-ng CI and developer validation toolchain image."
             [syslog]="Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428)."
-            [utilities]="Shared lancache-ng utilities image (curl, nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd) for COPY --from= consumption by other first-party images (issue #1556)."
+            [utilities]="Shared lancache-ng utilities image (curl, nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd) for COPY --from= consumption by seven first-party images (issue #1556)."
           )
 
           # Duplicated rather than factored into a shared script/action: GitHub Actions
@@ -7119,7 +7115,7 @@ jobs:
       # classify-image-impact.sh's merge-base diff, neither shallow-safe.
       # From: Issue #1095 | PR #1532
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: *checkout_centraliced_versioning # v7.0.1
         with:
           fetch-depth: 0
 
@@ -7152,10 +7148,10 @@ jobs:
         run: bash scripts/tracked/cleanup-stale-buildx-builders.sh
       - name: Set up Docker Buildx
         id: buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: *docker_setup_buildx_centraliced_versioning # v4.3.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: *docker_login_centraliced_versioning # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -7179,6 +7175,7 @@ jobs:
           SYSLOG_DIGEST: ${{ needs['merge-manifests'].outputs.syslog_digest }}
           UI_DIGEST: ${{ needs['merge-manifests'].outputs.ui_digest }}
           BUILD_TOOLS_DIGEST: ${{ needs['merge-manifests'].outputs.build_tools_digest }}
+          UTILITIES_DIGEST: ${{ needs['merge-manifests'].outputs.utilities_digest }}
           STACK_DIGEST: ${{ needs['merge-manifests'].outputs.stack_digest }}
         run: |
           set -euo pipefail
@@ -7210,6 +7207,7 @@ jobs:
             [syslog]="$SYSLOG_DIGEST"
             [ui]="$UI_DIGEST"
             [build-tools]="$BUILD_TOOLS_DIGEST"
+            [utilities]="$UTILITIES_DIGEST"
           )
           declare -A previous_refs=()
           promoted_targets=()
@@ -7553,16 +7551,16 @@ jobs:
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: *checkout_centraliced_versioning # v7.0.1
 
       - name: Clean up stale Buildx builder containers (self-hosted reuse hardening)
         run: bash scripts/tracked/cleanup-stale-buildx-builders.sh
       - name: Set up Docker Buildx
         id: buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: *docker_setup_buildx_centraliced_versioning # v4.3.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: *docker_login_centraliced_versioning # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -7939,16 +7937,16 @@ jobs:
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: *checkout_centraliced_versioning # v7.0.1
 
       - name: Clean up stale Buildx builder containers (self-hosted reuse hardening)
         run: bash scripts/tracked/cleanup-stale-buildx-builders.sh
       - name: Set up Docker Buildx
         id: buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: *docker_setup_buildx_centraliced_versioning # v4.3.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: *docker_login_centraliced_versioning # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -8153,3 +8151,55 @@ jobs:
 
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
+
+  # What: files/updates/closes a standing issue for a nightly dispatch's
+  #   real result -- nightly-refresh.yml only reports its own dispatch
+  #   call, never the dispatched run's actual outcome.
+  # Why: confirmed live -- nightly sat frozen on a 9-day-old commit while
+  #   nightly-refresh.yml reported daily "success" throughout.
+  # From: Issue #1095
+  report-nightly-status:
+    name: report nightly channel status
+    if: "always() && !cancelled() && github.event_name == 'workflow_dispatch' && inputs.channel == 'nightly'"
+    needs: [build, build-arm64, merge-manifests, full-setup-validate, promote]
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
+      - uses: *checkout_centraliced_versioning # v7.0.1
+      - name: List which needed jobs did not succeed
+        id: failed-jobs
+        env:
+          BUILD: ${{ needs.build.result }}
+          BUILD_ARM64: ${{ needs['build-arm64'].result }}
+          MERGE_MANIFESTS: ${{ needs['merge-manifests'].result }}
+          FULL_SETUP_VALIDATE: ${{ needs['full-setup-validate'].result }}
+          PROMOTE: ${{ needs.promote.result }}
+        run: |
+          set -euo pipefail
+          declare -A results=(
+            [build]="$BUILD"
+            [build-arm64]="$BUILD_ARM64"
+            [merge-manifests]="$MERGE_MANIFESTS"
+            [full-setup-validate]="$FULL_SETUP_VALIDATE"
+            [promote]="$PROMOTE"
+          )
+          failed=()
+          for job in "${!results[@]}"; do
+            [[ "${results[$job]}" == "success" ]] || failed+=("$job (${results[$job]})")
+          done
+          outcome="success"
+          [[ ${#failed[@]} -eq 0 ]] || outcome="failure"
+          {
+            echo "outcome=$outcome"
+            echo "list=${failed[*]}"
+          } >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/nightly-status
+        with:
+          outcome: ${{ steps.failed-jobs.outputs.outcome }}
+          scope: nightly channel promote (current_dev)
+          failed_jobs: ${{ steps.failed-jobs.outputs.list }}
+          project_pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}

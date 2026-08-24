@@ -63,7 +63,7 @@ jobs:
           fi
           echo "::notice::Hosted overflow fallback explicitly confirmed by dispatching operator."
 
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: &checkout_centraliced_versioning actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # What: sets up the builder select-build-tools-image.sh needs below.
       # Why: its imagetools inspect call requires a configured builder.
@@ -136,7 +136,7 @@ jobs:
             [syslog]="Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428)."
             [ui]="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
             [build-tools]="Prebuilt lancache-ng CI and developer validation toolchain image."
-            [utilities]="Shared lancache-ng utilities image (curl, nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd) for COPY --from= consumption by other first-party images (issue #1556)."
+            [utilities]="Shared lancache-ng utilities image (curl, nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd) for COPY --from= consumption by seven first-party images (issue #1556)."
           )
 
           if [ "$SERVICES_INPUT" = "all" ] || [ -z "$SERVICES_INPUT" ]; then
@@ -190,7 +190,7 @@ jobs:
     env:
       BUILD_TOOLS_IMAGE: ${{ needs.preflight.outputs.build_tools_image }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
 
       # What: uses the retried builder-setup variant, not the plain action.
       # Why: this fresh hosted VM has no local image cache, the same

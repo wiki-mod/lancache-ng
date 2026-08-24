@@ -117,7 +117,7 @@ runs:
     # From: PR #1542, Issue #1535
     - name: Log in to GHCR for authenticated Trivy DB pull
       continue-on-error: true
-      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      uses: &docker_login_centraliced_versioning docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
       with:
         registry: ${{ inputs.registry }}
         username: ${{ inputs.username }}
@@ -131,13 +131,13 @@ runs:
     - name: Log in to Docker Hub for the third DB-source tier
       if: inputs.dockerhub-username != ''
       continue-on-error: true
-      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      uses: *docker_login_centraliced_versioning # v4.6.0
       with:
         username: ${{ inputs.dockerhub-username }}
         password: ${{ inputs.dockerhub-password }}
 
     - id: attempt1
-      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      uses: &trivy_action_centraliced_versioning aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
       continue-on-error: true
       with:
         scan-type: ${{ inputs.scan-type }}
@@ -184,7 +184,7 @@ runs:
     - name: Re-authenticate to GHCR before retry 1
       if: steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true'
       continue-on-error: true
-      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      uses: *docker_login_centraliced_versioning # v4.6.0
       with:
         registry: ${{ inputs.registry }}
         username: ${{ inputs.username }}
@@ -198,14 +198,14 @@ runs:
     - name: Re-authenticate to Docker Hub before retry 1
       if: steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true' && inputs.dockerhub-username != ''
       continue-on-error: true
-      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      uses: *docker_login_centraliced_versioning # v4.6.0
       with:
         username: ${{ inputs.dockerhub-username }}
         password: ${{ inputs.dockerhub-password }}
 
     - id: attempt2
       if: steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true'
-      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      uses: *trivy_action_centraliced_versioning # v0.36.0
       continue-on-error: true
       with:
         scan-type: ${{ inputs.scan-type }}
@@ -251,7 +251,7 @@ runs:
         steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true' &&
         steps.attempt2.outcome == 'failure' && steps.classify2.outputs.retryable == 'true'
       continue-on-error: true
-      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      uses: *docker_login_centraliced_versioning # v4.6.0
       with:
         registry: ${{ inputs.registry }}
         username: ${{ inputs.username }}
@@ -266,7 +266,7 @@ runs:
         steps.attempt2.outcome == 'failure' && steps.classify2.outputs.retryable == 'true' &&
         inputs.dockerhub-username != ''
       continue-on-error: true
-      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      uses: *docker_login_centraliced_versioning # v4.6.0
       with:
         username: ${{ inputs.dockerhub-username }}
         password: ${{ inputs.dockerhub-password }}
@@ -275,7 +275,7 @@ runs:
       if: >-
         steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true' &&
         steps.attempt2.outcome == 'failure' && steps.classify2.outputs.retryable == 'true'
-      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      uses: *trivy_action_centraliced_versioning # v0.36.0
       continue-on-error: true
       with:
         scan-type: ${{ inputs.scan-type }}
@@ -323,7 +323,7 @@ runs:
         steps.attempt2.outcome == 'failure' && steps.classify2.outputs.retryable == 'true' &&
         steps.attempt3.outcome == 'failure' && steps.classify3.outputs.retryable == 'true'
       continue-on-error: true
-      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      uses: *docker_login_centraliced_versioning # v4.6.0
       with:
         registry: ${{ inputs.registry }}
         username: ${{ inputs.username }}
@@ -339,7 +339,7 @@ runs:
         steps.attempt3.outcome == 'failure' && steps.classify3.outputs.retryable == 'true' &&
         inputs.dockerhub-username != ''
       continue-on-error: true
-      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      uses: *docker_login_centraliced_versioning # v4.6.0
       with:
         username: ${{ inputs.dockerhub-username }}
         password: ${{ inputs.dockerhub-password }}
@@ -349,7 +349,7 @@ runs:
         steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true' &&
         steps.attempt2.outcome == 'failure' && steps.classify2.outputs.retryable == 'true' &&
         steps.attempt3.outcome == 'failure' && steps.classify3.outputs.retryable == 'true'
-      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      uses: *trivy_action_centraliced_versioning # v0.36.0
       continue-on-error: true
       with:
         scan-type: ${{ inputs.scan-type }}

@@ -101,38 +101,39 @@ and is not this project's goal.
 
 ## 3. DHCP-DDNS follow-through (Kea lease → PowerDNS record)
 
-**Current state.** `services/dhcp/kea-dhcp-ddns.conf` has `dhcp-ddns.enable-updates`
-hardcoded `true` in `kea-dhcp4.conf` (line 20). Kea's D2 daemon sends forward
+**Current state.** `services/dhcp/kea-dhcp4.conf` renders
+`dhcp-ddns.enable-updates` from `DHCP_DDNS_ENABLED`, and the Admin UI exposes
+an independent "Enable DDNS Updates" toggle for changing that value without
+turning the DHCP server itself on or off. Kea's D2 daemon sends forward
 host-record updates to `${DHCP_DOMAIN}` (default `lan`, landing in the
 UI-managed `lan.` PowerDNS zone) and reverse/PTR updates to the per-octet private
 reverse zones (fixed in #768 — previously a single non-existent `in-addr.arpa.`
 catch-all caused NOTAUTH rejections).
 
-**Two confirmed gaps, both open and in-flight as of this writing:**
+**Confirmed gaps and resolved follow-through notes:**
 
-- **#1076 — no independent "Enable DDNS Updates" toggle.** `enable-updates` is
-  hardcoded `true` with no way to turn DDNS off while leaving DHCP-Server on.
-  Issuing an address should not have to mean also updating DNS. The mockup's
-  DHCP-Server panel already shows this as a dedicated toggle in the merged
-  toggle-row; the real backend wiring (UI route + `entrypoint.sh` +
-  `kea-dhcp4.conf` templating) is the open work.
-- **#770 — DDNS updates only reach `dns-standard`, not `dns-ssl`.** Each
+- **#1076 — independent "Enable DDNS Updates" toggle.** Implemented: the
+  template uses `DHCP_DDNS_ENABLED`, `services/dhcp/entrypoint.sh` normalizes
+  the first-boot default and preserves the live persisted value, and
+  `services/ui/src/routes/dhcp.rs` exposes the live toggle.
+- **#770/#1164 — DDNS updates deliberately reach `dns-standard` only.** Each
   `forward-ddns`/`reverse-ddns` domain's `dns-servers` list is a **failover**
-  list (D2 tries the first server, falls back to the second only on failure),
-  **not** a fan-out. So only whichever server answers first gets the record; the
-  other DNS instance silently misses it. The real fix is to make DDNS reach
-  *both* `dns-standard` and `dns-ssl` (likely two separate `ddns-domains`
-  entries, one per target server, or another D2 mechanism).
-- **#1083 — lease release leaves orphaned DNS records.** `release_lease` calls
-  Kea `lease4-del`, which (confirmed against Kea's documentation) does **not**
-  trigger a DDNS removal. The A/PTR records the lease created via DDNS survive
-  the lease being released, leaving stale forward/reverse DNS entries.
+  list (D2 tries the first server, falls back only on failure), **not** a
+  fan-out. The resolved design is therefore a single DDNS writer:
+  `dns-standard` accepts the update, while `dns-ssl` and remote DNS
+  secondaries receive the resulting zone state through native PowerDNS
+  AXFR/NOTIFY.
+- **#1083 — lease release DDNS cleanup.** Implemented as a best-effort
+  cleanup: `release_lease` looks up the lease hostname before `lease4-del` and
+  publishes forward-A and reverse-PTR delete events. A NATS or lookup failure
+  can still leave stale records, but that is now an explicit residual risk
+  rather than the former no-cleanup behavior.
 
 **Intended end state:** DDNS is an operator-toggleable feature (#1076) that,
-when on, reliably writes to *every* project DNS instance (#770) and cleans up
-after itself when a lease is released or expires (#1083). Until those land,
-treat the current single-target, always-on, no-cleanup behaviour as a known
-limitation, not as intended final behaviour.
+when on, writes to the single project DNS primary and relies on native
+PowerDNS replication for every secondary (#770/#1164). Manual lease release
+also attempts to remove the corresponding DNS records (#1083); record cleanup
+remains best-effort when the external publish path itself fails.
 
 ## 4. Known-good config snapshot / rollback (#614/#631) — Admin UI perspective
 
@@ -202,11 +203,11 @@ ordering.
 | PXE keys (`next-server`/`server-hostname`/`boot-file-name`) | Not built | Planned, #1085 |
 | Standard-options table with tooltips | Not built | Planned, v0.3.0; i18n decision in §6 |
 | Lease release | Admin UI, implemented | `dhcp.rs::release_lease` |
-| Lease release → DDNS record cleanup | Not built (orphaned records) | Bug, #1083 |
+| Lease release → DDNS record cleanup | Implemented, best-effort on NATS/publish failures | #1083 |
 | DHCP conflict pre-check ("DHCP-Precheck") | Admin UI, implemented | `dhcp.rs::check_dhcp_conflict` |
 | Kea config snapshot rollback | Admin UI, implemented | `dhcp.rs::rollback_kea_snapshot`, #614 |
-| "Enable DDNS Updates" toggle (independent of DHCP-Server) | Not built (hardcoded on) | Planned, #1076 |
-| DDNS fan-out to both dns-standard + dns-ssl | Not built (failover, not fan-out) | Bug, #770 |
+| "Enable DDNS Updates" toggle (independent of DHCP-Server) | Admin UI, implemented | #1076 |
+| DDNS convergence to dns-standard + dns-ssl | Implemented via single-writer DDNS plus native PowerDNS AXFR/NOTIFY | #770/#1164 |
 | Snapshot-rollback status indicator | Not built (log-only) | Planned, v0.3.0, not Kea-specific |
 | UI i18n / localization | Not built (no infra at all) | Prerequisite for localized tooltips, §6 |
 | General Kea JSON config editor | Not planned | Deliberately out of scope |

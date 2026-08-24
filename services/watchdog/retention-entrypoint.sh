@@ -94,14 +94,16 @@ for path in /var/lib/lancache-retention-state /var/log/lancache-watchdog; do
         chown -R lancache:lancache "$path"
     fi
 done
+chgrp 10001 /var/log/lancache-watchdog
+chmod 2750 /var/log/lancache-watchdog
+find /var/log/lancache-watchdog -maxdepth 1 -type f -exec chmod g+r {} +
 
 # --reuid/--regid: switch to the fixed lancache uid/gid (10001) the
 # maintainer named, matching services/ui/Dockerfile's existing account.
 # --clear-groups: this container has no legitimate use for any
-# supplementary group (unlike the Admin UI's `adm` membership for reading
-# nginx's log) -- DAC_OVERRIDE below is what grants file access, not group
-# membership, so carrying over root's own supplementary groups would be
-# pure unused residual privilege.
+# supplementary group -- DAC_OVERRIDE below is what grants file access, not
+# group membership, so carrying over root's own supplementary groups would
+# be pure unused residual privilege.
 # --inh-caps / --ambient-caps: raise ONLY dac_override into the sets a
 # non-root process actually needs it in to keep using it post-switch (a
 # capability that stays merely "permitted" without also being "ambient"
@@ -118,4 +120,4 @@ exec setpriv \
     --reuid=10001 --regid=10001 --clear-groups \
     --inh-caps=+dac_override --ambient-caps=+dac_override \
     --bounding-set=-all,+dac_override \
-    /bin/bash -c 'exec /retention.sh > >(tee -a /var/log/lancache-watchdog/retention.log) 2>&1'
+    /bin/bash -c 'umask 0027; exec /retention.sh > >(tee -a /var/log/lancache-watchdog/retention.log) 2>&1'

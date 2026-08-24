@@ -129,12 +129,12 @@ setup() {
     [ "$output" = "false" ]
 }
 
-@test "should-have-staging: a workflow change forces every service except build-tools" {
+@test "should-have-staging: a build-affecting workflow change forces every service except build-tools" {
     run vit_service_should_have_staging_tag "ui" "false" "true"
     [ "$output" = "true" ]
 }
 
-@test "should-have-staging: build-tools keeps its narrower scoping even on a workflow change" {
+@test "should-have-staging: build-tools keeps its narrower scoping even on a build-affecting workflow change" {
     run vit_service_should_have_staging_tag "build-tools" "false" "true"
     [ "$output" = "false" ]
 }

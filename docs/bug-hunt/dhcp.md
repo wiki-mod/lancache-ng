@@ -53,23 +53,21 @@ here.
 definition in e.g. `deploy/quickstart/docker-compose.yml` lines 1090–1103
 (`config-get`/`service: ["dhcp4"]` only, no D2 check anywhere).
 
-### 2. `DHCP_DDNS_PORT` has no format validation before unquoted JSON interpolation (minor)
+### 2. [Resolved] `DHCP_DDNS_PORT` is validated before unquoted JSON interpolation
 
 `kea-dhcp-ddns.conf`'s template splices `${DHCP_DDNS_PORT}` in *unquoted*
-(`"port": ${DHCP_DDNS_PORT}`, used 12 times across forward/reverse `dns-servers`
+(`"port": ${DHCP_DDNS_PORT}`, used across forward/reverse `dns-servers`
 entries). Every other class of value in this file gets some form of gate:
 `DHCP_LEASE_TIME` is implicitly gated by bash arithmetic (`$((DHCP_LEASE_TIME * 2))`
 at line 189 aborts the whole script with a bash syntax error on non-numeric
 input), and every `*_IP`/NTP field goes through `is_ipv4`/`resolve_ntp_server`.
-`DHCP_DDNS_PORT` gets neither: `: "${DHCP_DDNS_PORT:=5300}"` (line 70) is the only
-handling. A non-numeric value (a deploy-config typo) renders syntactically
-invalid JSON, and per finding #1 above, the resulting `kea-dhcp-ddns` startup
-failure is completely silent (backgrounded, unmonitored, healthcheck doesn't
-cover it).
+This was accurate when collected. The current entrypoint validates
+`DHCP_DDNS_PORT` as a numeric 1-65535 port before rendering, so a typo now
+fails closed before invalid JSON reaches `kea-dhcp-ddns`.
 
-**Evidence:** `services/dhcp/entrypoint.sh` line 70 (default only, no validator
-call); `services/dhcp/kea-dhcp-ddns.conf` lines 24, 28, 42, 46, ... (`"port":
-${DHCP_DDNS_PORT}`, unquoted, repeated per zone entry).
+**Evidence:** `services/dhcp/entrypoint.sh` validates `DHCP_DDNS_PORT` before
+the `envsubst` rendering step; `services/dhcp/kea-dhcp-ddns.conf` still keeps
+the field unquoted because Kea expects a JSON number.
 
 ### 3. `migrate_dhcp4_config()` — the upgrade/migration jq pipeline — has zero direct test coverage (moderate)
 
@@ -250,33 +248,38 @@ currently no test proving that path is reachable/correct.
 `services/ui/dhcp-probe.sh` (no unconditional `exit` after the initial
 nmap-failure swallow at lines 35–37).
 
-### 10. Re-confirmed, already tracked: DDNS `dns-servers` is failover, not fan-out (issue #770, open) (info)
+### 10. [Superseded] DDNS `dns-servers` was failover, not fan-out (issue #770)
 
-Re-verified directly against current `services/dhcp/kea-dhcp-ddns.conf`: both
-`forward-ddns` and `reverse-ddns` list `${DHCP_DNS_SERVER_IP}` then
+Historical finding from the pre-#1164 template: `forward-ddns` and
+`reverse-ddns` listed `${DHCP_DNS_SERVER_IP}` then
 `${DHCP_DNS_SERVER_IP_SSL}` in that order for every zone entry. Kea's D2 daemon
-treats this as a first-to-last failover list, not fan-out, so as long as
-`dns-standard` answers, `dns-ssl` never receives a DHCP-driven DNS record.
-Already open as issue #770 and documented in `docs/dhcp-modes.md`; listed here
-only for the vacuum-first sweep's completeness requirement, not as a new
-finding.
+treats that as a first-to-last failover list, not fan-out, so as long as
+`dns-standard` answered, `dns-ssl` never received a DHCP-driven DNS record.
+Issue #770 tracked that design gap until #1164 replaced the duplicated target
+model.
 
-**Evidence:** `services/dhcp/kea-dhcp-ddns.conf` (every `dns-servers` array,
-e.g. lines 21–29); `docs/dhcp-modes.md` lines 327–340.
+**Update:** issue #1164 resolves this by removing the second Kea D2 target:
+`dns-standard` is now the only DDNS writer, and `dns-ssl`/remote DNS nodes
+receive zone state through native PowerDNS AXFR/NOTIFY.
 
-### 11. Config env-file drift note: `DHCP_DNS_SERVER_IP_SSL` absent from `config/dev/dhcp.env` (info, likely intentional)
+**Evidence:** current `services/dhcp/kea-dhcp-ddns.conf` now renders one
+`dns-servers` target per zone; `docs/dhcp-modes.md` documents that Kea writes
+to the primary and native PowerDNS replication converges secondaries.
 
-`config/dev/dhcp.env` sets `DHCP_DNS_SERVER_IP` (`172.28.0.3`) but has no
-`DHCP_DNS_SERVER_IP_SSL` entry, so it falls back to `entrypoint.sh`'s own
-default of `127.0.0.1` — meaning dev's reverse/forward DDNS "SSL" target is a
-loopback address inside the `dhcp` container itself, not a real dns-ssl
-instance. This is consistent with a single-DNS-instance dev setup and is very
-likely intentional (dev doesn't run a second PowerDNS instance by default), but
-is worth a maintainer glance since it's silent (no comment in the env file
-calls out that this field is being skipped rather than genuinely unset).
+### 11. [Superseded] Config env-file drift note for removed `DHCP_DNS_SERVER_IP_SSL`
 
-**Evidence:** `config/dev/dhcp.env` (no `DHCP_DNS_SERVER_IP_SSL` line);
-`services/dhcp/entrypoint.sh` line 63 (`: "${DHCP_DNS_SERVER_IP_SSL:=127.0.0.1}"`).
+Historical finding from the pre-#1164 template: `DHCP_DNS_SERVER_IP_SSL` could
+be absent from an env-file while the old entrypoint still carried a fallback,
+making the second DDNS target easy to misunderstand. That variable is no longer
+part of the active DHCP-DDNS render path.
+
+**Evidence:** current `services/dhcp/entrypoint.sh` and
+`services/dhcp/kea-dhcp-ddns.conf` no longer read/render
+`DHCP_DNS_SERVER_IP_SSL`.
+
+**Update:** issue #1164 removes `DHCP_DNS_SERVER_IP_SSL` from the active
+template/rendering path; the old observation is retained here as historical
+bug-hunt context only.
 
 ## Verification pass (self-verified against origin/v0.2.0)
 
@@ -296,11 +299,9 @@ independent follow-through for anything not yet traced to its end. Verdicts:
   while the container stays "healthy". Same single-blind-`wait` shape in
   `services/dns/entrypoint.sh`, so it is a project-wide class.
 
-- **#2 (`DHCP_DDNS_PORT` unvalidated, unquoted) — CONFIRMED, minor.** Only
-  handling is the default at line 70 (`: "${DHCP_DDNS_PORT:=5300}"`); no
-  `is_ipv4`/numeric gate. It is spliced *unquoted* into `kea-dhcp-ddns.conf`
-  (`"port": ${DHCP_DDNS_PORT}`, 36 occurrences), so a non-numeric value yields
-  syntactically invalid JSON and — per #1 — a *silent* D2 startup failure.
+- **#2 (`DHCP_DDNS_PORT` unvalidated, unquoted) — RESOLVED.** The template
+  still renders the port unquoted, but `services/dhcp/entrypoint.sh` now
+  validates it as a numeric 1-65535 port before rendering.
   Reachability proven by the mirror image of #2's own refutation: a repo-wide
   grep shows `DHCP_DDNS_PORT` is set in **no** compose `environment:` block and
   **no** env-file — it flows purely from the entrypoint default, so the value an
@@ -388,36 +389,29 @@ independent follow-through for anything not yet traced to its end. Verdicts:
   code — and it never masks a real conflict result (a found conflict still exits
   0). Reframe: correctly defensive, just untested.
 
-- **#10 (DDNS `dns-servers` is failover, not fan-out) — CONFIRMED, already
-  tracked (#770), info.** Re-verified: every `dns-servers` array in
-  `kea-dhcp-ddns.conf` lists `${DHCP_DNS_SERVER_IP}` then
-  `${DHCP_DNS_SERVER_IP_SSL}`; Kea D2 treats this first-to-last, so `dns-ssl`
-  never gets a record while `dns-standard` answers. Unchanged.
+- **#10 (DDNS `dns-servers` is failover, not fan-out) — SUPERSEDED by #1164.**
+  Historical verification before #1164: every `dns-servers` array listed
+  `${DHCP_DNS_SERVER_IP}` then `${DHCP_DNS_SERVER_IP_SSL}`; Kea D2 treated this
+  first-to-last, so `dns-ssl` never got a record while `dns-standard` answered.
+  Current #1164 state uses one DDNS target plus native PowerDNS AXFR/NOTIFY.
 
-- **#11 (dev `dhcp.env` missing `DHCP_DNS_SERVER_IP_SSL`) — REFUTED for the real
-  deployment path, info.** The env-file omission is inert: `deploy/dev` (line
-  240) and `deploy/prod` (line 278) set `DHCP_DNS_SERVER_IP_SSL=${IP_SSL}` in the
-  compose `environment:` block, which by Compose precedence overrides `env_file:`.
-  So the value comes from `IP_SSL` (from `deploy/*/.env`), never from the
-  entrypoint's `127.0.0.1` fallback, in any normal `docker compose` run. The
-  127.0.0.1 fallback would only ever appear if someone ran the container with the
-  env-file alone and no compose environment — not a deployment path. See new
-  finding N1 for the residual real inconsistency this uncovered.
+- **#11 (dev `dhcp.env` missing `DHCP_DNS_SERVER_IP_SSL`) — SUPERSEDED by
+  #1164 after earlier refutation for the real deployment path, info.** The
+  historical env-file omission is inert in the current tree because #1164
+  removes `DHCP_DNS_SERVER_IP_SSL` from the active DHCP-DDNS template and
+  compose wiring.
 
 ## New findings from this pass
 
-- **N1. dev/prod compose use bare `${IP_SSL}` where quickstart uses
-  `${IP_SSL:-${IP_STANDARD}}` (info/minor).** `deploy/quickstart` line 1073 sets
-  `DHCP_DNS_SERVER_IP_SSL=${IP_SSL:-${IP_STANDARD}}`, but `deploy/dev` (240) and
-  `deploy/prod` (278) use bare `${IP_SSL}` (same for `DHCP_DNS_SECONDARY`). In a
-  standard-only deployment where `IP_SSL` is unset in `deploy/*/.env`, dev/prod
-  resolve the SSL DDNS target (and the secondary DNS option) to empty →
-  entrypoint's `127.0.0.1` fallback, i.e. a dead second failover target inside
-  the dhcp container itself, whereas quickstart degrades to `IP_STANDARD`. This
-  is the actual residue of the (refuted) #11: not the env-file, but the missing
-  `:-${IP_STANDARD}` default in the two non-quickstart compose files. Low impact
-  because it is only the failover entry (#770), but it is a silent
-  standard-only-mode inconsistency between the three compose variants.
+- **N1. dev/prod compose used bare `${IP_SSL}` where quickstart used
+  `${IP_SSL:-${IP_STANDARD}}` (info/minor).** Historical finding from the
+  pre-#1164 DDNS target shape: non-quickstart compose variants could render an
+  empty SSL DDNS failover target in standard-only mode, while quickstart fell
+  back to `IP_STANDARD`.
+
+  **Update:** superseded by #1164 for DDNS targeting. The active
+  DHCP-DDNS template now has one target (`DHCP_DNS_SERVER_IP`) and the
+  compose files no longer pass `DHCP_DNS_SERVER_IP_SSL`.
 
 - **N2. `kea-dhcp4.conf` `valid-lifetime`/`max-valid-lifetime` are unquoted,
   incompletely-gated env splices (info).** Same unquoted-JSON-interpolation class

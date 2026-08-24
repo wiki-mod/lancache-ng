@@ -172,7 +172,7 @@ jobs:
       # rate-limit budget; the script's own TTL check still gates freshness.
       # From: Issue #1095 | PR #1501.
       - name: Restore GHCR API response cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: &actions_cache_restore_centraliced_versioning actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.AUDIT_API_CACHE_DIR }}
           key: sha-retention-api-cache-${{ github.run_id }}-${{ github.run_attempt }}
@@ -200,7 +200,7 @@ jobs:
       # that clean fallback once the audit script runs against an empty dir.
       # From: Issue #1585.
       - name: Restore SHA retention classification cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: *actions_cache_restore_centraliced_versioning # v6.1.0
         with:
           path: ${{ env.AUDIT_CLASSIFICATION_CACHE_DIR }}
           key: sha-retention-classification-cache-${{ github.run_id }}-${{ github.run_attempt }}
@@ -241,7 +241,7 @@ jobs:
       # From: Issue #1095 | PR #1501.
       - name: Save GHCR API response cache
         if: always()
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: &actions_cache_save_centraliced_versioning actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.AUDIT_API_CACHE_DIR }}
           key: sha-retention-api-cache-${{ github.run_id }}-${{ github.run_attempt }}
@@ -253,7 +253,7 @@ jobs:
       # From: Issue #1585.
       - name: Save SHA retention classification cache
         if: always()
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: *actions_cache_save_centraliced_versioning # v6.1.0
         with:
           path: ${{ env.AUDIT_CLASSIFICATION_CACHE_DIR }}
           key: sha-retention-classification-cache-${{ github.run_id }}-${{ github.run_attempt }}

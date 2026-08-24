@@ -35,6 +35,18 @@ lancache_shared_secret_gid() {
     printf '%s' "${LANCACHE_SHARED_SECRET_GID:-10001}"
 }
 
+# What: helper for producer log directories that must stay readable to gid 10001.
+# Why: root-created files on persistent volumes otherwise drift back to
+#   root-only readability after reopen or recreation.
+# From: Issue #1427
+prepare_log_dir_for_shared_reader() {
+    local dir="$1"
+    mkdir -p "$dir"
+    chgrp "$(lancache_shared_secret_gid)" "$dir"
+    chmod 2750 "$dir"
+    find "$dir" -maxdepth 1 -type f -exec chgrp "$(lancache_shared_secret_gid)" {} + -exec chmod g+r {} +
+}
+
 # lancache_gen_hex32
 # 64 hex characters from 32 random bytes. Uses od + /dev/urandom rather than
 # `openssl rand -hex 32` because this runs unchanged in the Debian dns/dhcp/ui
@@ -277,6 +289,10 @@ NATS_TOKEN="${NATS_TOKEN:-}"
 NATS_CONSUMER="${NATS_CONSUMER:-}"
 NATS_RECONCILER="${NATS_RECONCILER:-0}"
 KEEP_KNOWN_GOOD_CONFIGS="${KEEP_KNOWN_GOOD_CONFIGS:-3}"
+DNS_REPLICATION_ROLE="${DNS_REPLICATION_ROLE:-native}"
+DNS_XFR_PRIMARY="${DNS_XFR_PRIMARY:-}"
+DNS_XFR_NOTIFY_TARGETS="${DNS_XFR_NOTIFY_TARGETS:-}"
+PDNS_XFR_CYCLE_INTERVAL="${PDNS_XFR_CYCLE_INTERVAL:-15}"
 DNS_CONFIG_SNAPSHOT_DIR="${DNS_CONFIG_SNAPSHOT_DIR:-/var/lib/lancache-dns/config-snapshots}"
 # Zone/record rollback listener (#628, nats-subscriber's own process -- see
 # services/dns/nats-subscriber/src/rollback_listener.rs). Bound to 0.0.0.0,
@@ -317,7 +333,7 @@ PDNS_AUTH_CONF_FILE="/etc/pdns/auth/pdns.conf"
 # absent -> TSIG still enforced, unchanged from today's actual behavior).
 DNS_STATE_DIR="/var/lib/powerdns-state"
 DDNS_ALLOW_UNSIGNED_MARKER="${DNS_STATE_DIR}/ddns-allow-unsigned-updates"
-# Central logging pipeline (#633): PowerDNS has no native "log to file"
+# Central logging pipeline: PowerDNS has no native "log to file"
 # config directive on Linux -- confirmed against the upstream docs/mailing
 # list, both pdns_server and pdns_recursor only ever write to stdout/stderr
 # or syslog, never a plain file (the plan this followed assumed a
@@ -327,7 +343,87 @@ DDNS_ALLOW_UNSIGNED_MARKER="${DNS_STATE_DIR}/ddns-allow-unsigned-updates"
 # container's normal stdout -- same dual-output shape as every other service
 # in this issue, just implemented at the process level instead of in config.
 PDNS_LOG_DIR="/var/log/lancache-dns"
-mkdir -p "$PDNS_LOG_DIR"
+prepare_log_dir_for_shared_reader "$PDNS_LOG_DIR"
+
+# What: normalizes a transfer primary endpoint before rendering pdns.conf.
+# Why: PowerDNS's allow-notify-from setting needs an address, while Compose
+#   and setup.sh naturally hand the container a host:port endpoint.
+# From: Issue #1164
+dns_xfr_primary_endpoint() {
+    local endpoint="$1" host port resolved
+
+    host="${endpoint%%:*}"
+    port="${endpoint#*:}"
+    if [ -z "$host" ] || [ "$port" = "$endpoint" ] || [ -z "$port" ]; then
+        echo "[lancache-dns] FATAL: DNS_XFR_PRIMARY must use host:port form (got: ${endpoint})." >&2
+        exit 1
+    fi
+    resolved="$(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1; exit}')"
+    if [ -z "$resolved" ]; then
+        case "$host" in
+            *[!0-9.]* | *.*.*.*.* | .* | *.)
+                echo "[lancache-dns] FATAL: DNS_XFR_PRIMARY host '${host}' did not resolve to an IPv4 address." >&2
+                exit 1
+                ;;
+            *)
+                resolved="$host"
+                ;;
+        esac
+    fi
+    printf '%s:%s' "$resolved" "$port"
+}
+
+case "$DNS_REPLICATION_ROLE" in
+    native | primary | secondary) ;;
+    *)
+        echo "[lancache-dns] FATAL: DNS_REPLICATION_ROLE must be native, primary, or secondary (got: ${DNS_REPLICATION_ROLE})" >&2
+        exit 1
+        ;;
+esac
+
+case "$PDNS_XFR_CYCLE_INTERVAL" in
+    "" | *[!0-9]*)
+        echo "[lancache-dns] FATAL: PDNS_XFR_CYCLE_INTERVAL must be a positive integer (got: ${PDNS_XFR_CYCLE_INTERVAL})." >&2
+        exit 1
+        ;;
+esac
+if [ "$PDNS_XFR_CYCLE_INTERVAL" -lt 1 ] || [ "$PDNS_XFR_CYCLE_INTERVAL" -gt 60 ]; then
+    echo "[lancache-dns] FATAL: PDNS_XFR_CYCLE_INTERVAL must stay between 1 and 60 seconds so secondary refresh polling cannot drift beyond the #1164 bound." >&2
+    exit 1
+fi
+
+PDNS_PRIMARY_ENABLED=no
+PDNS_SECONDARY_ENABLED=no
+PDNS_ALLOW_NOTIFY_FROM=
+PDNS_ALLOW_AXFR_IPS=127.0.0.0/8,::1
+case "$DNS_REPLICATION_ROLE" in
+    primary)
+        PDNS_PRIMARY_ENABLED=yes
+        # What: resolves each DNS_XFR_NOTIFY_TARGETS host to an IP for
+        #   allow-axfr-ips (PowerDNS's default is loopback-only, and TSIG
+        #   alone does not bypass it).
+        # Why: confirmed empirically (2026-08-24, lancache-229): a
+        #   correctly-TSIG-signed AXFR from a real secondary IP still got
+        #   REFUSED with no allow-axfr-ips entry for that IP.
+        # From: Issue #1164
+        if [ -n "$DNS_XFR_NOTIFY_TARGETS" ]; then
+            for target in ${DNS_XFR_NOTIFY_TARGETS//,/ }; do
+                [ -n "$target" ] || continue
+                target_resolved="$(dns_xfr_primary_endpoint "$target")"
+                PDNS_ALLOW_AXFR_IPS="${PDNS_ALLOW_AXFR_IPS},${target_resolved%%:*}"
+            done
+        fi
+        ;;
+    secondary)
+        PDNS_SECONDARY_ENABLED=yes
+        if [ -z "$DNS_XFR_PRIMARY" ]; then
+            echo "[lancache-dns] FATAL: DNS_XFR_PRIMARY is required when DNS_REPLICATION_ROLE=secondary." >&2
+            exit 1
+        fi
+        DNS_XFR_PRIMARY_RESOLVED="$(dns_xfr_primary_endpoint "$DNS_XFR_PRIMARY")"
+        PDNS_ALLOW_NOTIFY_FROM="${DNS_XFR_PRIMARY_RESOLVED%%:*}"
+        ;;
+esac
 
 # Fail if PDNS_API_KEY is a known placeholder value. secret_is_placeholder's
 # universal CHANGE_ME*/changeme*/YOUR_*/*_HERE conventions (this project also
@@ -403,6 +499,7 @@ fi
 echo "[lancache-dns] pdns_server will bind local-address=127.0.0.1,${PDNS_LOCAL_ADDRESS}"
 
 export PDNS_API_KEY DDNS_ALLOW_FROM PDNS_LOCAL_ADDRESS ROOT_ZONE_MIRROR NATS_URL NATS_USER NATS_PASSWORD NATS_TOKEN NATS_CONSUMER NATS_RECONCILER
+export PDNS_PRIMARY_ENABLED PDNS_SECONDARY_ENABLED PDNS_XFR_CYCLE_INTERVAL PDNS_ALLOW_NOTIFY_FROM PDNS_ALLOW_AXFR_IPS
 # #628: nats-subscriber (the child process started below by
 # run_nats_subscriber) reads these three directly -- KEEP_KNOWN_GOOD_CONFIGS
 # and DNS_CONFIG_SNAPSHOT_DIR are shared with the recursor.conf/pdns.conf
@@ -778,8 +875,7 @@ configure_ddns_tsig() {
         exit 1
     fi
 
-    pdnsutil --config-dir=/etc/pdns/auth import-tsig-key \
-        "$DDNS_TSIG_NAME" "$DDNS_TSIG_ALGORITHM" "$DDNS_TSIG_KEY" >/dev/null
+    import_ddns_tsig_key
 
     # DDNS_ALLOW_UNSIGNED_MARKER (Admin UI "allow unsigned updates" toggle,
     # issue #815 follow-up) decides which state TSIG-ALLOW-DNSUPDATE ends up
@@ -806,6 +902,25 @@ configure_ddns_tsig() {
         done
         echo "[lancache-dns] Configured TSIG-authenticated DDNS updates for LAN zones."
     fi
+}
+
+# What: imports the shared TSIG key without changing DDNS update metadata.
+# Why: secondaries need the key for AXFR authentication but must not grant
+#   themselves TSIG-ALLOW-DNSUPDATE as an additional local write path.
+# From: Issue #1164
+import_ddns_tsig_key() {
+    if [ -z "$DDNS_TSIG_KEY" ]; then
+        echo "[lancache-dns] FATAL: DDNS_TSIG_KEY is required for native DNS zone transfer authentication." >&2
+        exit 1
+    fi
+    if secret_is_placeholder "$DDNS_TSIG_KEY"; then
+        echo "[lancache-dns] FATAL: DDNS_TSIG_KEY is still set to a default placeholder."
+        printf '%s\n' "[lancache-dns] Generate a shared key with: openssl rand -base64 32 | tr -d '\\n'"
+        exit 1
+    fi
+
+    pdnsutil --config-dir=/etc/pdns/auth import-tsig-key \
+        "$DDNS_TSIG_NAME" "$DDNS_TSIG_ALGORITHM" "$DDNS_TSIG_KEY" >/dev/null
 }
 
 # render_template_atomic <variables> <template> <target> [extra_sed_script]
@@ -1045,6 +1160,7 @@ recursor_extra_sed=""
 if [ "$LOG_QUERIES" = "1" ]; then
     recursor_extra_sed='s/^  loglevel: 3$/  loglevel: 6/'
 fi
+# shellcheck disable=SC2016 # render_template_atomic needs literal envsubst variable names.
 render_template_atomic '${PDNS_API_KEY}' /etc/pdns/recursor.conf.template "$RECURSOR_CONF_FILE" "$recursor_extra_sed"
 _dns_recursor_validate_snapshot_or_rollback "$RECURSOR_CONF_FILE" || _dns_enter_rescue_mode "recursor"
 
@@ -1062,7 +1178,7 @@ echo "[lancache-dns] Generating pdns.conf..."
 # by configure_ddns_tsig() below based on DDNS_ALLOW_UNSIGNED_MARKER -- so
 # this line is passed no extra_sed and always renders the template's own
 # static "no" value.
-render_template_atomic '${PDNS_API_KEY}:${DDNS_ALLOW_FROM}:${PDNS_LOCAL_ADDRESS}' /etc/pdns/auth/pdns.conf.template "$PDNS_AUTH_CONF_FILE" ""
+render_template_atomic '${PDNS_API_KEY}:${DDNS_ALLOW_FROM}:${PDNS_LOCAL_ADDRESS}:${PDNS_PRIMARY_ENABLED}:${PDNS_SECONDARY_ENABLED}:${PDNS_XFR_CYCLE_INTERVAL}:${PDNS_ALLOW_NOTIFY_FROM}:${PDNS_ALLOW_AXFR_IPS}' /etc/pdns/auth/pdns.conf.template "$PDNS_AUTH_CONF_FILE" ""
 
 # ── 3. Initialize SQLite Database ────────────────────────────────────────────
 if [ ! -f /var/lib/powerdns/pdns.sqlite3 ]; then
@@ -1184,17 +1300,71 @@ _dns_ensure_zone_exists() {
     exit 1
 }
 
-# Create LAN zones (idempotent across restarts via the existence check above)
-for zone in "${LAN_ZONES[@]}"; do
-    _dns_ensure_zone_exists "$zone"
-done
+_dns_set_zone_metadata() {
+    local zone="$1" kind="$2"
+    shift 2
+    pdnsutil --config-dir=/etc/pdns/auth set-meta "$zone" "$kind" "$@" >/dev/null
+}
 
-# Create empty reverse zones for privacy (prevent external PTR leakage)
-for zone in "${PRIVATE_REVERSE_ZONES[@]}"; do
-    _dns_ensure_zone_exists "$zone"
-done
+# What: marks a zone as the authoritative primary and enables transfer hints.
+# Why: every DDNS/API write must bump SOA serials and notify secondaries so
+#   NOTIFY and refresh polling converge to the same single-writer state.
+# From: Issue #1164
+_dns_configure_primary_zone_replication() {
+    local zone="$1" notify_targets=()
 
-configure_ddns_tsig
+    pdnsutil --config-dir=/etc/pdns/auth zone set-kind "$zone" primary >/dev/null
+    _dns_set_zone_metadata "$zone" SOA-EDIT-DNSUPDATE INCREASE
+    _dns_set_zone_metadata "$zone" SOA-EDIT-API INCREASE
+    _dns_set_zone_metadata "$zone" NOTIFY-DNSUPDATE 1
+    pdnsutil --config-dir=/etc/pdns/auth tsigkey activate "$zone" "$DDNS_TSIG_NAME" primary >/dev/null
+    if [ -n "$DNS_XFR_NOTIFY_TARGETS" ]; then
+        for target in ${DNS_XFR_NOTIFY_TARGETS//,/ }; do
+            [ -n "$target" ] || continue
+            notify_targets+=("$target")
+        done
+        _dns_set_zone_metadata "$zone" ALSO-NOTIFY "${notify_targets[@]}"
+    fi
+}
+
+# What: creates or repairs a zone as a PowerDNS secondary of the primary.
+# Why: local dns-ssl and remote nodes must consume the primary's zone state
+#   through AXFR instead of applying independent NATS record writes.
+# From: Issue #1164
+_dns_ensure_secondary_zone() {
+    local zone="$1" primary="$2" create_output
+
+    if create_output=$(pdnsutil --config-dir=/etc/pdns/auth zone create-secondary "$zone" "$primary" 2>&1); then
+        pdnsutil --config-dir=/etc/pdns/auth tsigkey activate "$zone" "$DDNS_TSIG_NAME" secondary >/dev/null
+        return 0
+    fi
+    if ! grep -qi "exists already" <<< "$create_output"; then
+        echo "[lancache-dns] FATAL: failed to create secondary zone '$zone': $create_output" >&2
+        exit 1
+    fi
+    pdnsutil --config-dir=/etc/pdns/auth zone set-kind "$zone" secondary >/dev/null
+    pdnsutil --config-dir=/etc/pdns/auth zone change-primary "$zone" "$primary" >/dev/null
+    pdnsutil --config-dir=/etc/pdns/auth tsigkey activate "$zone" "$DDNS_TSIG_NAME" secondary >/dev/null
+}
+
+if [ "$DNS_REPLICATION_ROLE" = "secondary" ]; then
+    import_ddns_tsig_key
+    echo "[lancache-dns] Creating LAN/reverse zones as AXFR secondaries of ${DNS_XFR_PRIMARY_RESOLVED}..."
+    for zone in "${DDNS_UPDATE_ZONES[@]}"; do
+        _dns_ensure_secondary_zone "$zone" "$DNS_XFR_PRIMARY_RESOLVED"
+    done
+else
+    echo "[lancache-dns] Creating LAN/reverse zones in authoritative database..."
+    for zone in "${DDNS_UPDATE_ZONES[@]}"; do
+        _dns_ensure_zone_exists "$zone"
+    done
+    configure_ddns_tsig
+    if [ "$DNS_REPLICATION_ROLE" = "primary" ]; then
+        for zone in "${DDNS_UPDATE_ZONES[@]}"; do
+            _dns_configure_primary_zone_replication "$zone"
+        done
+    fi
+fi
 
 # ── 7. Generate RPZ Zone from cdn-domains.txt ────────────────────────────────
 # Bug-hunt finding #8 (docs/bug-hunt/dns.md, re-verified 2026-08-06): this
@@ -1301,6 +1471,11 @@ echo "[lancache-dns] Starting PowerDNS Authoritative and Recursor..."
 
 run_auth() {
     while true; do
+        # What: constrains the tee-created pdns-auth.log mode to 0640.
+        # Why: gid 10001 keeps the collector read path working, while world
+        #   read permission is no longer needed once the shared group exists.
+        # From: Issue #1427
+        umask 0027
         pdns_server --config-dir=/etc/pdns/auth --guardian=no --daemon=no 2>&1 \
             | tee -a "$PDNS_LOG_DIR/pdns-auth.log" || true
         echo "[lancache-dns] pdns_server exited, restarting in 3s..."
@@ -1311,6 +1486,11 @@ run_auth() {
 run_recursor() {
     mkdir -p /var/run/pdns-recursor
     while true; do
+        # What: constrains the tee-created pdns-recursor.log mode to 0640.
+        # Why: gid 10001 keeps the collector read path working, while world
+        #   read permission is no longer needed once the shared group exists.
+        # From: Issue #1427
+        umask 0027
         pdns_recursor --config-dir=/etc/pdns 2>&1 \
             | tee -a "$PDNS_LOG_DIR/pdns-recursor.log" || true
         echo "[lancache-dns] pdns_recursor exited, restarting in 3s..."
@@ -1343,9 +1523,11 @@ REC_PID=$!
 # ── 9. Start NATS Subscriber ────────────────────────────────────────────────
 run_nats_subscriber() {
     while true; do
-        # Central logging pipeline (#633): tee alongside pdns_server/pdns_recursor
-        # above so nats-subscriber's connect/auth/processing errors also reach
-        # fluent-bit's tail of $PDNS_LOG_DIR/*.log instead of only Docker stdout.
+        # What: keeps nats-subscriber's stderr/stdout mirrored into the shared log dir.
+        # Why: syslog must keep seeing subscriber failures, but the file mode
+        #   now also has to stay 0640 for the gid-10001 read contract.
+        # From: Issue #633 | Issue #1427
+        umask 0027
         nats-subscriber 2>&1 \
             | tee -a "$PDNS_LOG_DIR/nats-subscriber.log" || true
         echo "[lancache-dns] nats-subscriber exited, restarting in 3s..."

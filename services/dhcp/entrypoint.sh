@@ -33,6 +33,18 @@ lancache_shared_secret_gid() {
     printf '%s' "${LANCACHE_SHARED_SECRET_GID:-10001}"
 }
 
+# What: helper for producer log directories that must stay readable to gid 10001.
+# Why: root-created files on persistent volumes otherwise drift back to
+#   root-only readability after reopen or recreation.
+# From: Issue #1427
+prepare_log_dir_for_shared_reader() {
+    local dir="$1"
+    mkdir -p "$dir"
+    chgrp "$(lancache_shared_secret_gid)" "$dir"
+    chmod 2750 "$dir"
+    find "$dir" -maxdepth 1 -type f -exec chgrp "$(lancache_shared_secret_gid)" {} + -exec chmod g+r {} +
+}
+
 # lancache_gen_hex32
 # 64 hex characters from 32 random bytes. Uses od + /dev/urandom rather than
 # `openssl rand -hex 32` because this runs unchanged in the Debian dns/dhcp/ui
@@ -174,7 +186,7 @@ mkdir -p /var/lib/kea
 # config-set -- any other path (the project's usual /var/log/lancache-dhcp
 # convention included) fails config load with "invalid path in `output`",
 # refusing to start at all, not just losing the file log.
-mkdir -p /var/log/kea
+prepare_log_dir_for_shared_reader /var/log/kea
 
 case "${1:-}" in
     nmap|/usr/bin/nmap|/bin/nmap)
@@ -228,7 +240,6 @@ _ddns_tsig_key_cfg="${DDNS_TSIG_KEY:-}"
 if secret_is_placeholder "$_ddns_tsig_key_cfg"; then _ddns_tsig_key_cfg=""; fi
 DDNS_TSIG_KEY="$(resolve_shared_secret ddns-tsig-key "$_ddns_tsig_key_cfg" lancache_gen_base64_32)" || DDNS_TSIG_KEY=""
 : "${DHCP_DNS_SERVER_IP:=127.0.0.1}"
-: "${DHCP_DNS_SERVER_IP_SSL:=127.0.0.1}"
 # 5300, not 53 (issue #706): 5300 is pdns_server's (the authoritative
 # daemon, the only PowerDNS process with dnsupdate=yes) actual DNS-protocol
 # port, per services/dns/pdns.conf.template's local-port=5300. Port 53 is
@@ -236,6 +247,20 @@ DDNS_TSIG_KEY="$(resolve_shared_secret ddns-tsig-key "$_ddns_tsig_key_cfg" lanca
 # authoritative backend, so DDNS updates sent there simply time out
 # (confirmed empirically) with no error on either side.
 : "${DHCP_DDNS_PORT:=5300}"
+# What: validates the unquoted JSON port before rendering Kea D2 config.
+# Why: a typo here would otherwise produce invalid JSON and a dead DDNS
+#   daemon, making DHCP lease records stop updating DNS silently.
+# From: Issue #1164
+case "$DHCP_DDNS_PORT" in
+    "" | *[!0-9]*)
+        echo "ERROR: DHCP_DDNS_PORT must be a numeric TCP/UDP port (got: ${DHCP_DDNS_PORT})."
+        exit 1
+        ;;
+esac
+if [ "$DHCP_DDNS_PORT" -lt 1 ] || [ "$DHCP_DDNS_PORT" -gt 65535 ]; then
+    echo "ERROR: DHCP_DDNS_PORT must be between 1 and 65535 (got: ${DHCP_DDNS_PORT})."
+    exit 1
+fi
 : "${KEA_CTRL_HOST:=0.0.0.0}"
 
 # DDNS master switch (issue #1076). DHCP_DDNS_ENABLED gates Kea's
@@ -380,10 +405,10 @@ if [ -z "$KEA_LEASE_CMDS_HOOK_PATH" ]; then
 fi
 
 export DHCP_MAX_LEASE_TIME=$((DHCP_LEASE_TIME * 2))
-export DHCP_SUBNET DHCP_RANGE_START DHCP_RANGE_END DHCP_GATEWAY DHCP_DOMAIN DHCP_LEASE_TIME DHCP_NTP_SERVERS DHCP_DNS_PRIMARY DHCP_DNS_SECONDARY KEA_CTRL_TOKEN DHCP_MAX_LEASE_TIME DHCP_DNS_SERVER_IP DHCP_DNS_SERVER_IP_SSL DHCP_DDNS_PORT KEA_CTRL_HOST KEA_LEASE_CMDS_HOOK_PATH DHCP_DDNS_ENABLED
+export DHCP_SUBNET DHCP_RANGE_START DHCP_RANGE_END DHCP_GATEWAY DHCP_DOMAIN DHCP_LEASE_TIME DHCP_NTP_SERVERS DHCP_DNS_PRIMARY DHCP_DNS_SECONDARY KEA_CTRL_TOKEN DHCP_MAX_LEASE_TIME DHCP_DNS_SERVER_IP DHCP_DDNS_PORT KEA_CTRL_HOST KEA_LEASE_CMDS_HOOK_PATH DHCP_DDNS_ENABLED
 
 # shellcheck disable=SC2016
-ENVSUBST_VARS='${DHCP_SUBNET}${DHCP_RANGE_START}${DHCP_RANGE_END}${DHCP_GATEWAY}${DHCP_DOMAIN}${DHCP_LEASE_TIME}${DHCP_NTP_OPTION}${DHCP_DNS_PRIMARY}${DHCP_DNS_SECONDARY}${KEA_CTRL_TOKEN}${DHCP_MAX_LEASE_TIME}${DDNS_TSIG_KEY}${DHCP_DNS_SERVER_IP}${DHCP_DNS_SERVER_IP_SSL}${DHCP_DDNS_PORT}${KEA_CTRL_HOST}${KEA_LEASE_CMDS_HOOK_PATH}${DHCP_DDNS_ENABLED}'
+ENVSUBST_VARS='${DHCP_SUBNET}${DHCP_RANGE_START}${DHCP_RANGE_END}${DHCP_GATEWAY}${DHCP_DOMAIN}${DHCP_LEASE_TIME}${DHCP_NTP_OPTION}${DHCP_DNS_PRIMARY}${DHCP_DNS_SECONDARY}${KEA_CTRL_TOKEN}${DHCP_MAX_LEASE_TIME}${DDNS_TSIG_KEY}${DHCP_DNS_SERVER_IP}${DHCP_DDNS_PORT}${KEA_CTRL_HOST}${KEA_LEASE_CMDS_HOOK_PATH}${DHCP_DDNS_ENABLED}'
 
 render_kea_config() {
     local template=$1 target=$2
@@ -673,8 +698,8 @@ fi
 # unconditionally, for any octet -- confirmed against a real Kea 2.6.3 +
 # PowerDNS 5.2.11 stack. The fix mirrors PRIVATE_REVERSE_ZONES exactly: one
 # ddns-domains entry per IPv4 private-range subzone PowerDNS actually hosts
-# (the same 18 zones, verbatim), each targeting the same dns-servers as
-# forward-ddns above, so Kea's D2 can match a lease's reverse FQDN (e.g.
+# (the same 18 zones, verbatim), each targeting the same primary DNS server
+# as forward-ddns above, so Kea's D2 can match a lease's reverse FQDN (e.g.
 # "50.1.168.192.in-addr.arpa.") against the correct, real zone by suffix.
 # IPv6 reverse zones (c.f.ip6.arpa./d.f.ip6.arpa.) are deliberately excluded
 # here -- this project's Kea config is Dhcp4-only, no DHCPv6, so D2 never
@@ -838,16 +863,31 @@ if [ "$SNAPSHOT_FOUND" -eq 0 ] && ! _kea_validate_dhcp4_config "$KEAD_CONF_FILE"
     # DHCP_PID is intentionally not set so the trap below doesn't try to kill it
     # and the final `wait` at the bottom keeps the container alive
 else
+    # What: constrains the daemon-created Kea log files to 0640.
+    # Why: gid 10001 keeps the collector read path working, while world
+    #   read permission is no longer needed once the shared group exists.
+    # From: Issue #1427
+    umask 0027
     kea-dhcp4 -c /var/lib/kea/kea-dhcp4.conf &
     DHCP_PID=$!
 fi
 
 echo "Starting Kea Control Agent on $KEA_CTRL_HOST:8000..."
+# What: constrains the daemon-created Kea control-agent log files to 0640.
+# Why: gid 10001 keeps the collector read path working, while world read
+#   permission is no longer needed once the shared group exists.
+# From: Issue #1427
+umask 0027
 kea-ctrl-agent -c /var/lib/kea/kea-ctrl-agent.conf &
 AGENT_PID=$!
 
 if command -v kea-dhcp-ddns &> /dev/null; then
     echo "Starting Kea DHCP DDNS server..."
+    # What: constrains the daemon-created Kea DDNS log files to 0640.
+    # Why: gid 10001 keeps the collector read path working, while world
+    #   read permission is no longer needed once the shared group exists.
+    # From: Issue #1427
+    umask 0027
     kea-dhcp-ddns -c /var/lib/kea/kea-dhcp-ddns.conf &
     DDNS_PID=$!
 fi

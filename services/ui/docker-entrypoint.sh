@@ -268,6 +268,14 @@ if [ "$(id -u)" = "0" ]; then
             chown -R lancache:lancache "$path"
         fi
     done
+    if [ -e /var/log/lancache-ui ]; then
+        # What: leaves the UI log directory setgid and repairs existing files to group-readable.
+        # Why: the UI already writes as gid 10001, but upgraded volumes can
+        #   still carry older top-level files that must converge immediately.
+        # From: Issue #1427
+        chmod 2775 /var/log/lancache-ui
+        find /var/log/lancache-ui -maxdepth 1 -type f -exec chmod g+r {} +
+    fi
 
     exec setpriv --reuid=lancache --regid=lancache --init-groups "$@"
 fi

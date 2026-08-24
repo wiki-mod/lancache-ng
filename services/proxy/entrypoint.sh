@@ -15,6 +15,7 @@ DOMAINS_FILE="/etc/nginx/cdn-domains.txt"
 PUBLIC_SUFFIX_LIST_FILE="/etc/nginx/public_suffix_list.dat"
 SSL_MAP_FILE="/etc/nginx/conf.d/00-ssl-map.conf"
 STREAM_TARGET_FILE="/etc/nginx/stream.d/00-stream-targets.conf"
+LOG_READER_GID=10001
 
 # ────────────────────────────────────────────────────────────────────────────
 # 0. Validate required environment variables
@@ -43,6 +44,16 @@ PROXY_ALLOWED_CLIENT_CIDRS="${PROXY_ALLOWED_CLIENT_CIDRS:-}"
 CACHE_MIN_FREE="${CACHE_MIN_FREE:-1g}"
 KEEP_KNOWN_GOOD_CONFIGS="${KEEP_KNOWN_GOOD_CONFIGS:-3}"
 PROXY_CONFIG_SNAPSHOT_DIR="${PROXY_CONFIG_SNAPSHOT_DIR:-/var/lib/lancache-proxy/config-snapshots}"
+
+# What: marks nginx's log directory setgid to gid 10001 and repairs existing files.
+# Why: every reopen/rotation must keep proxy logs readable to the non-root syslog collector, not just the first boot.
+# From: Issue #1427
+prepare_proxy_log_dir_for_syslog() {
+    mkdir -p /var/log/nginx
+    chown nginx:"$LOG_READER_GID" /var/log/nginx
+    chmod 2750 /var/log/nginx
+    find /var/log/nginx -maxdepth 1 -type f -exec chown nginx:"$LOG_READER_GID" {} + -exec chmod g+r {} +
+}
 
 # ────────────────────────────────────────────────────────────────────────────
 # 0a. Known-good configuration snapshot library (#415)
@@ -1417,9 +1428,11 @@ printf 'ok\n' > /etc/nginx/lancache-healthz-body.txt
 # ────────────────────────────────────────────────────────────────────────────
 # 4. Render nginx.conf and proxy-params from templates
 # ────────────────────────────────────────────────────────────────────────────
+# shellcheck disable=SC2016 # envsubst needs literal variable names, not shell-expanded ones.
 envsubst '${CACHE_MEM_MB} ${CACHE_MAX_SIZE} ${CACHE_MIN_FREE} ${CACHE_INACTIVE} ${NGINX_UPSTREAM_RESOLVER}' \
     < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
 
+# shellcheck disable=SC2016 # envsubst needs literal variable names, not shell-expanded ones.
 envsubst '${CACHE_SLICE_SIZE} ${CACHE_VALID_HIT} ${CACHE_VALID_ANY}' \
     < /etc/nginx/proxy-params.conf.template > /etc/nginx/proxy-params.conf
 
@@ -1527,4 +1540,5 @@ PROXY_CANDIDATE_FILES=(/etc/nginx/nginx.conf /etc/nginx/proxy-params.conf "$SSL_
 _proxy_validate_snapshot_or_rollback "${PROXY_CANDIDATE_FILES[@]}" || exit 1
 
 echo "[lancache] Starting nginx (IP_STANDARD=${IP_STANDARD}, SSL_ENABLED=${SSL_ENABLED})..."
+prepare_proxy_log_dir_for_syslog
 exec nginx -g "daemon off;"
