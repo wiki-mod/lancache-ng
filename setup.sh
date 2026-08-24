@@ -6627,7 +6627,7 @@ services:
       - DDNS_ALLOW_FROM=127.0.0.1
       - NATS_RECORD_WRITES=0
       - DNS_REPLICATION_ROLE=secondary
-      - DNS_XFR_PRIMARY=\${DNS_XFR_PRIMARY}
+      - DNS_XFR_PRIMARY=\${DNS_XFR_PRIMARY:-}
       # What: KEEP_KNOWN_GOOD_CONFIGS default, same variable as the
       #   primary's config/prod/dns-standard.env.
       # Why: retains known-good pdns.conf/recursor.conf snapshots for rollback.
