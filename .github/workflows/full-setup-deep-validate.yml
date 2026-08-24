@@ -164,7 +164,7 @@ jobs:
             echo "::notice::pre-checkout resync: no valid checked-out HEAD found (fresh or mid-clone workspace), guard is a no-op"
           fi
 
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: &checkout_centraliced_versioning actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # detect-full-setup-changes.sh diffs from the PR's real merge-base,
           # which needs full history (same reason build-push's detect-changes
@@ -257,7 +257,7 @@ jobs:
             echo "::notice::pre-checkout resync: no valid checked-out HEAD found (fresh or mid-clone workspace), guard is a no-op"
           fi
 
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
         with:
           fetch-depth: 0
 
@@ -422,7 +422,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Run ntp CAP_SYS_TIME / clock-discipline simulation
         env:
           REPOSITORY: ${{ github.repository }}
@@ -484,7 +484,7 @@ jobs:
             echo "::notice::pre-checkout resync: no valid checked-out HEAD found (fresh or mid-clone workspace), guard is a no-op"
           fi
 
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Resolve build-tools image
         # See ssl-mitm-cache-simulation's identical step above for why a
         # same-PR build-tools change prefers the confirmed PR staging tag.
@@ -588,7 +588,7 @@ jobs:
             echo "::notice::pre-checkout resync: no valid checked-out HEAD found (fresh or mid-clone workspace), guard is a no-op"
           fi
 
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Resolve build-tools image
         # No BUILD_TOOLS_REQUIRE_PUBLISHED: same-PR tools/build-tools override
         # preference, matching every other job in this suite.
@@ -681,7 +681,7 @@ jobs:
             echo "::notice::pre-checkout resync: no valid checked-out HEAD found (fresh or mid-clone workspace), guard is a no-op"
           fi
 
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Resolve build-tools image
         # No BUILD_TOOLS_REQUIRE_PUBLISHED: this script needs `expect` (real
         # setup.sh CLI fresh install, same reason setup-cli-simulation.sh

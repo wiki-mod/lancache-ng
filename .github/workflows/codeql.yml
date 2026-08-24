@@ -67,7 +67,7 @@ jobs:
       rust_relevant: ${{ steps.filter.outputs.rust_relevant }}
       superseded: ${{ steps.supersession.outputs.superseded }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: &checkout_centraliced_versioning actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -307,7 +307,7 @@ jobs:
             build-mode: none
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: *checkout_centraliced_versioning # v7.0.1
 
       # A run can become stale after detect-changes but before a runner admits
       # this job. Recheck on the runner so stale work stops before CodeQL or a
