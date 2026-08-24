@@ -8100,3 +8100,54 @@ jobs:
 
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
+
+  # What: files/updates/closes a standing issue for a nightly dispatch's
+  #   real result -- nightly-refresh.yml only reports its own dispatch
+  #   call, never the dispatched run's actual outcome.
+  # Why: confirmed live -- nightly sat frozen on a 9-day-old commit while
+  #   nightly-refresh.yml reported daily "success" throughout.
+  # From: Issue #1095
+  report-nightly-status:
+    name: report nightly channel status
+    if: "always() && !cancelled() && github.event_name == 'workflow_dispatch' && inputs.channel == 'nightly'"
+    needs: [build, build-arm64, merge-manifests, full-setup-validate, promote]
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
+      - name: List which needed jobs did not succeed
+        id: failed-jobs
+        env:
+          BUILD: ${{ needs.build.result }}
+          BUILD_ARM64: ${{ needs['build-arm64'].result }}
+          MERGE_MANIFESTS: ${{ needs['merge-manifests'].result }}
+          FULL_SETUP_VALIDATE: ${{ needs['full-setup-validate'].result }}
+          PROMOTE: ${{ needs.promote.result }}
+        run: |
+          set -euo pipefail
+          declare -A results=(
+            [build]="$BUILD"
+            [build-arm64]="$BUILD_ARM64"
+            [merge-manifests]="$MERGE_MANIFESTS"
+            [full-setup-validate]="$FULL_SETUP_VALIDATE"
+            [promote]="$PROMOTE"
+          )
+          failed=()
+          for job in "${!results[@]}"; do
+            [[ "${results[$job]}" == "success" ]] || failed+=("$job (${results[$job]})")
+          done
+          outcome="success"
+          [[ ${#failed[@]} -eq 0 ]] || outcome="failure"
+          {
+            echo "outcome=$outcome"
+            echo "list=${failed[*]}"
+          } >> "$GITHUB_OUTPUT"
+      - uses: wiki-mod/lancache-ng/.github/actions/nightly-status@current_dev
+        with:
+          outcome: ${{ steps.failed-jobs.outputs.outcome }}
+          scope: nightly channel promote (current_dev)
+          failed_jobs: ${{ steps.failed-jobs.outputs.list }}
+          project_pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
