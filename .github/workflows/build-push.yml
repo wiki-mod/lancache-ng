@@ -5543,6 +5543,7 @@ jobs:
           umask 077
           hosts_file="${{ runner.temp }}/distcc-potential-hosts-${{ matrix.service }}"
           printf '%s' "$DISTCC_POTENTIAL_HOSTS" > "$hosts_file"
+          echo "hosts-file=$hosts_file" >> "$GITHUB_OUTPUT"
           echo "secret-files=distcc_potential_hosts=$hosts_file" >> "$GITHUB_OUTPUT"
 
       - name: Select Rust acceleration network
@@ -5568,19 +5569,25 @@ jobs:
           printf 'RUST_ACCELERATION_NETWORK=%s\n' "$rust_network" >> "$GITHUB_ENV"
           printf 'RUST_BUILDX_NETWORK=%s\n' "$buildx_network" >> "$GITHUB_ENV"
 
+      # What: also runs for build-tools (no matrix.rust) so a broken Redis/
+      #   distcc endpoint can't hide behind a cached curl/git Docker layer.
+      # Why: the action itself is compiler-agnostic (validates via `cc`,
+      #   not rustc) and already gates each check on its own file input.
+      # From: PR #1661
       - name: Validate acceleration infrastructure outside BuildKit cache
-        if: matrix.rust == true
+        if: matrix.rust == true || matrix.service == 'build-tools'
         uses: ./.github/actions/rust-acceleration-preflight
         with:
           service: ${{ matrix.service }}
           redis-file: ${{ steps.sccache-secret.outputs.redis-file }}
           dist-config-file: ${{ steps.sccache-secret.outputs.dist-config-file }}
-          distcc-hosts-file: ${{ steps.sccache-secret.outputs.distcc-hosts-file }}
-          # What: only wired for dns -- ui does not use this ccache layer.
+          distcc-hosts-file: ${{ matrix.service == 'build-tools' && steps['distcc-hosts-secret'].outputs['hosts-file'] || steps.sccache-secret.outputs.distcc-hosts-file }}
+          # What: wired for dns and build-tools -- ui does not use this
+          #   ccache layer.
           # Why: reuses ccache-redis-secret's own output instead of a second
           #   Redis-endpoint read.
-          # From: Issue #1095 (G15)
-          ccache-redis-file: ${{ matrix.service == 'dns' && steps['ccache-redis-secret'].outputs['redis-file'] || '' }}
+          # From: Issue #1095 (G15) | PR #1661
+          ccache-redis-file: ${{ (matrix.service == 'dns' || matrix.service == 'build-tools') && steps['ccache-redis-secret'].outputs['redis-file'] || '' }}
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
           build-network: ${{ env.RUST_ACCELERATION_NETWORK }}
           platform: linux/amd64

@@ -532,6 +532,15 @@ RUN --mount=type=secret,id=distcc_potential_hosts \
         echo "::notice::curl/git build: tier $tier (ccache-over-distcc) failed; retrying with plain distcc (no cache)." >&2; \
         unset CCACHE_REMOTE_STORAGE CCACHE_DIR CCACHE_PREFIX CCACHE_COMPILERCHECK CCACHE_EXTRAFILES CCACHE_BASEDIR; \
         ccache_enabled=0; cc_wrapper="gcc"; \
+        distcc-pump --shutdown >/dev/null 2>&1 || true; \
+        distcc_pump_running=0; \
+        if distcc_pump_env="$(distcc-pump --startup 2>/dev/null)"; then \
+          eval "$distcc_pump_env"; \
+          distcc_pump_running=1; \
+        else \
+          echo "::notice::curl/git build: distcc-pump restart failed; retrying with a plain local compile." >&2; \
+          disable_distcc; cc_wrapper="$real_gcc"; \
+        fi; \
       elif [ "$distcc_enabled" = "1" ]; then \
         echo "::notice::curl/git build: tier $tier (distcc) failed; retrying with a plain local compile." >&2; \
         disable_distcc; cc_wrapper="$real_gcc"; \
@@ -544,7 +553,7 @@ RUN --mount=type=secret,id=distcc_potential_hosts \
       exit 1; \
     fi; \
     if [ "$ccache_enabled" = "1" ]; then ccache -s; fi; \
-    rm -f /tmp/ccache-remote-toolchain-id; \
+    rm -rf /tmp/ccache-build-tools-curl-git /tmp/ccache-remote-toolchain-id; \
     git --version; \
     git_remote_https="$(command -v git-remote-https || echo /usr/local/libexec/git-core/git-remote-https)"; \
     git_remote_https_ldd="$(ldd "$git_remote_https")"; \
