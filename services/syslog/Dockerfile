@@ -37,7 +37,6 @@ RUN apk add --no-cache \
         bash \
         zstd \
         tzdata \
-        libcap \
     # What: fixed uid/gid 10001, matching services/ui/Dockerfile's identity.
     # Why: syslog-ng writes files this uid needs to read back
     # (SYSLOG_NG_LOG_DIR); matching identities avoids a group workaround.
@@ -83,25 +82,9 @@ RUN chmod 755 /entrypoint.sh /usr/local/bin/healthcheck.sh /usr/local/bin/data-l
     # capabilities this single-uid design avoids needing at all.
     # From: Issue #1428 | PR #1431
     #
-    # What: setcap goes on $ld_interp, never the fluent-bit binary itself.
-    # Why: fluent-bit execs via an explicit ld-linux interpreter argument,
-    # so the kernel's real execve() target -- the only place a FILE
-    # capability reaches a non-root process -- is the interpreter.
-    # From: Issue #1428 | PR #1431
-    #
-    # What: grants CAP_DAC_READ_SEARCH only (not the broader DAC_OVERRIDE).
-    # Why: sufficient for fluent-bit's read-only tailing of producer logs
-    # it doesn't own (nginx/PowerDNS/Kea, root:root 0640); fixing every
-    # producer's own ownership is separate follow-up, issue #1427.
-    # From: Issue #1428 | PR #1431
-    #
-    # What: this setcap xattr is a HARD RUNTIME INVARIANT.
-    # Why: `--cap-drop ALL` without a matching `--cap-add DAC_READ_SEARCH`
-    # FAILS CLOSED at exec (exit 126), not a degraded start -- every
-    # compose file/CI script starting this service must carry both together.
-    # From: Issue #1428 | PR #1431
-    && setcap cap_dac_read_search+eip "/opt/fluent-bit-glibc/lib/$ld_interp" \
-    && apk del libcap
+    # What: keeps the bundled fluent-bit closure entirely unprivileged.
+    # Why: issue #1427 moved every first-party producer log to gid-10001-readable creation, so file capabilities are no longer needed to tail them.
+    # From: Issue #1427
 
 USER lancache:lancache
 

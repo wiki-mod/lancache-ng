@@ -13,7 +13,15 @@ set -e
 # (see dnsmasq.conf.template) points at a file under here; dnsmasq creates
 # the file itself but not a missing parent directory, so this must exist
 # before dnsmasq starts.
+#
+# What: marks the directory setgid to gid 10001 and repairs existing files.
+# Why: every newly-created dnsmasq log must stay readable to the non-root
+#   syslog collector, including on upgraded volumes.
+# From: Issue #1427
 mkdir -p /var/log/lancache-dhcp-proxy
+chgrp 10001 /var/log/lancache-dhcp-proxy
+chmod 2750 /var/log/lancache-dhcp-proxy
+find /var/log/lancache-dhcp-proxy -maxdepth 1 -type f -exec chgrp 10001 {} + -exec chmod g+r {} +
 
 # _dhcp_proxy_source_ui_settings <settings_file>
 #
@@ -778,11 +786,13 @@ _dhcp_proxy_render_pxe_service_directives() {
         # configured server address to a real client, via the classic
         # BOOTP file/siaddr fields instead of option 43 -- also confirmed
         # directly by packet capture.
-        printf 'pxe-service=x86PC,"lancache-ng PXE boot (BIOS)",%s,%s\n' \
-            "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS" "$DHCP_PROXY_PXE_BOOT_SERVER" >> "$dest_conf"
-        printf 'dhcp-match=set:lancache-pxe-bios,option:client-arch,0\n' >> "$dest_conf"
-        printf 'dhcp-boot=tag:lancache-pxe-bios,%s,,%s\n' \
-            "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS" "$DHCP_PROXY_PXE_BOOT_SERVER" >> "$dest_conf"
+        {
+            printf 'pxe-service=x86PC,"lancache-ng PXE boot (BIOS)",%s,%s\n' \
+                "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS" "$DHCP_PROXY_PXE_BOOT_SERVER"
+            printf 'dhcp-match=set:lancache-pxe-bios,option:client-arch,0\n'
+            printf 'dhcp-boot=tag:lancache-pxe-bios,%s,,%s\n' \
+                "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS" "$DHCP_PROXY_PXE_BOOT_SERVER"
+        } >> "$dest_conf"
     fi
 
     if [ "$have_uefi" -eq 1 ]; then
@@ -805,10 +815,12 @@ _dhcp_proxy_render_pxe_service_directives() {
         # is the only directive UEFI needs. One dhcp-match line per covered
         # architecture code sets the same tag; dhcp-boot then applies to
         # any of them via that shared tag.
-        printf 'dhcp-match=set:lancache-pxe-uefi,option:client-arch,7\n' >> "$dest_conf"
-        printf 'dhcp-match=set:lancache-pxe-uefi,option:client-arch,11\n' >> "$dest_conf"
-        printf 'dhcp-boot=tag:lancache-pxe-uefi,%s,,%s\n' \
-            "$DHCP_PROXY_PXE_BOOT_FILENAME_UEFI" "$DHCP_PROXY_PXE_BOOT_SERVER" >> "$dest_conf"
+        {
+            printf 'dhcp-match=set:lancache-pxe-uefi,option:client-arch,7\n'
+            printf 'dhcp-match=set:lancache-pxe-uefi,option:client-arch,11\n'
+            printf 'dhcp-boot=tag:lancache-pxe-uefi,%s,,%s\n' \
+                "$DHCP_PROXY_PXE_BOOT_FILENAME_UEFI" "$DHCP_PROXY_PXE_BOOT_SERVER"
+        } >> "$dest_conf"
     fi
 
     if [ "$have_bios" -eq 0 ]; then
@@ -881,4 +893,5 @@ if [ "$DHCP_MODE" = "dnsmasq-relay" ]; then
 else
     echo "Starting dnsmasq DHCP proxy (subnet: $DHCP_SUBNET_START, DNS: $DHCP_DNS_PRIMARY, $DHCP_DNS_SECONDARY)..."
 fi
+umask 0027
 exec dnsmasq -k -C /etc/dnsmasq.conf

@@ -354,15 +354,12 @@ checkout in quickstart" reasoning as fluent-bit).
 - Listens on `network(transport(tcp) port(601) flags(syslog-protocol))`.
 - Single destination: `file("/var/log/lancache-syslog-ng/$HOST/$YEAR$MONTH$DAY.log", template("$ISODATE $HOST $PROGRAM: $MSGONLY\n"), create-dirs(yes))`.
 - `dir-group(10001)`/`group(10001)` explicitly set (numeric gid, no
-  `/etc/group` entry needed) — the container runs as root with no `user()`
-  drop configured, so files/dirs would otherwise be `root:root` with
-  `0750`/`0640` perms, which would leave the Admin UI's unprivileged
-  `lancache` user (uid/gid 10001) with **zero read access** to its own
-  `logs-syslog-ng:ro` mount. This is a real, non-obvious fix documented
-  inline (referencing PR #758's review) — worth flagging as a concrete
-  example of "why the WHY-comment matters" per AGENTS.md's comment-style
-  rules, since the failure mode (silent empty `/logs` page, not a crash)
-  would be very hard to diagnose without the comment.
+  uid/gid 10001 directly, so syslog-ng's own destination files land
+  owner-owned by the same identity the Admin UI uses to read them back.
+- No reader-side `DAC_READ_SEARCH` capability is needed anymore: issue
+  #1427 moved every first-party producer log this collector tails onto gid
+  10001 with setgid directories plus startup repair of pre-existing files,
+  so plain Unix permissions cover both new and upgraded installs.
 - **Rotation/compression baseline** (fixed-threshold, not the full budget
   engine): a background loop (`while true; sleep
   SYSLOG_NG_ROTATE_INTERVAL_SECONDS`) finds any active log file over
