@@ -140,7 +140,19 @@ services:
           exit 1
         fi
         mkdir -p /etc/nats
+        # What: prepares nats-server's log directory as gid 10001 + setgid.
+        # Why: nats.log is created by the daemon itself, and upgraded
+        #   volumes may already contain older files that still need repairing.
+        # From: Issue #1427
         mkdir -p /var/log/lancache-nats
+        chgrp 10001 /var/log/lancache-nats
+        chmod 2775 /var/log/lancache-nats
+        find /var/log/lancache-nats -maxdepth 1 -type f -exec chgrp 10001 {} + -exec chmod g+r {} +
+        # What: constrains the daemon-created nats.log mode to 0640.
+        # Why: gid 10001 keeps the collector read path working, while world
+        #   read permission is no longer needed once the shared group exists.
+        # From: Issue #1427
+        umask 0027
         escape_sed() {
           printf '%s' "$$1" | sed 's/[\/&|]/\\&/g'
         }
@@ -345,13 +357,11 @@ services:
     container_name: lancache-syslog${LANCACHE_CONTAINER_SUFFIX:-}
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/syslog:${LANCACHE_IMAGE_TAG:-latest}
     profiles: [logging]
-    # What: runs as fixed non-root uid 10001 with exactly ONE added capability (DAC_READ_SEARCH), so fluent-bit can read root:root 0640 producer logs it doesn't own.
-    # Why: narrowest sufficient grant; the image's `setcap`-marked fluent-bit binary fails closed at exec without this -- see Dockerfile's own comment for the methodology behind ruling out other designs.
-    # From: Issue #1428 | PR #1431
+    # What: runs as fixed non-root uid 10001 with no added Linux capabilities.
+    # Why: every first-party producer log this collector tails is now created group-readable for gid 10001, so plain Unix permissions are sufficient.
+    # From: Issue #1427 | Issue #1428 | PR #1431
     cap_drop:
       - ALL
-    cap_add:
-      - DAC_READ_SEARCH
     depends_on:
       syslog-logs-permissions:
         condition: service_completed_successfully
@@ -547,7 +557,19 @@ services:
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
+        # What: prepares the shared watchdog log directory as gid 10001 + setgid.
+        # Why: watchdog.log is created by root via tee here, and upgraded
+        #   volumes may already contain older files that still need repairing.
+        # From: Issue #1427
         mkdir -p /var/log/lancache-watchdog
+        chgrp 10001 /var/log/lancache-watchdog
+        chmod 2775 /var/log/lancache-watchdog
+        find /var/log/lancache-watchdog -maxdepth 1 -type f -exec chgrp 10001 {} + -exec chmod g+r {} +
+        # What: constrains the tee-created watchdog.log mode to 0640.
+        # Why: gid 10001 keeps the collector read path working, while world
+        #   read permission is no longer needed once the shared group exists.
+        # From: Issue #1427
+        umask 0027
         exec /usr/local/bin/lancache-watchdog > >(tee -a /var/log/lancache-watchdog/watchdog.log) 2>&1
     environment:
       - DOCKER_PROXY_URL=http://docker-socket-proxy:2375
@@ -989,6 +1011,14 @@ services:
     command:
       - |
         set -e
+        # What: prepares netdata's log directory as owner netdata + gid 10001.
+        # Why: the daemon writes after dropping to its own user, while the
+        #   collector still needs group-based read access on new and old files.
+        # From: Issue #1427
+        mkdir -p /var/log/netdata
+        chown netdata:10001 /var/log/netdata
+        chmod 2775 /var/log/netdata
+        find /var/log/netdata -maxdepth 1 -type f -exec chgrp 10001 {} + -exec chmod g+r {} +
         cat > /etc/netdata/netdata.conf <<'CONF'
         [logs]
         daemon = /var/log/netdata/daemon.file.log

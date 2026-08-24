@@ -35,7 +35,14 @@
 # one -- without this, netdata falls back to stderr-only logging silently,
 # which would be a confusing, hard-to-notice degradation rather than a
 # hard failure.
+#
+# What: marks the directory setgid to gid 10001 and repairs existing files.
+# Why: netdata's post-drop process must keep creating logs the non-root syslog collector can read, including after reopen on an upgraded volume.
+# From: Issue #1427
 mkdir -p /var/log/netdata
+chown netdata:10001 /var/log/netdata
+chmod 2750 /var/log/netdata
+find /var/log/netdata -maxdepth 1 -type f -exec chown netdata:10001 {} \; -exec chmod g+r {} \;
 
 cat > /opt/netdata/etc/netdata/netdata.conf <<'CONF'
 [logs]
