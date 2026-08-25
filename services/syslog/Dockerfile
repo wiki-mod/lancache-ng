@@ -75,7 +75,7 @@ RUN chmod 755 /entrypoint.sh /usr/local/bin/healthcheck.sh /usr/local/bin/data-l
     && ld_interp="$(basename "$(ls /opt/fluent-bit-glibc/lib/ld-linux-*.so.* | head -n1)")" \
     && echo "$ld_interp" > /opt/fluent-bit-glibc/ld-interp-name \
     && chmod +x "/opt/fluent-bit-glibc/lib/$ld_interp" /opt/fluent-bit-glibc/bin/fluent-bit \
-    && chown -R lancache:lancache /opt/fluent-bit-glibc \
+    && chown -R lancache:lancache /opt/fluent-bit-glibc
     # What: runs entirely as fixed non-root uid 10001 (su-exec rejected).
     # Why: su-exec's setgroups() needs CAP_SETGID, and a root supervisor
     # without CAP_KILL cannot signal a different-uid child -- three added
@@ -86,6 +86,13 @@ RUN chmod 755 /entrypoint.sh /usr/local/bin/healthcheck.sh /usr/local/bin/data-l
     # Why: every first-party producer log now lands gid-10001-readable at
     #   creation time, so file capabilities are no longer needed to tail them.
     # From: Issue #1427
+    #
+    # What: this RUN's last content line must not end in `\`.
+    # Why: BuildKit silently keeps a `\`-continued RUN open across a
+    #   blank line (NoEmptyContinuation warns, doesn't fail) and merges
+    #   the next Dockerfile line in as literal text -- this exact bug
+    #   fused "USER lancache:lancache" into the chown call above.
+    # From: Issue #1095
 
 USER lancache:lancache
 
