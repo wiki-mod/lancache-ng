@@ -151,6 +151,7 @@ source "$script_dir/../lib/staging-poll-defaults.sh"
 
 : "${REPOSITORY:?REPOSITORY is required}"
 : "${PR_TAG:?PR_TAG (pr-<N>-sha-<full>) is required}"
+: "${BASE_REF:?BASE_REF (github.event.pull_request.base.ref) is required}"
 # #808: the PR's own base commit (github.event.pull_request.base.sha) --
 # required unconditionally (unlike BUILD_SHA below, which only feeds a
 # best-effort probe): every real caller of this script only ever runs on a
@@ -532,7 +533,7 @@ for service in "${full_setup_services[@]}"; do
         "$base_freshness_timeout_seconds" "$base_freshness_hard_ceiling_seconds" \
         "$ancestor_freshness_timeout_seconds" "$ancestor_freshness_hard_ceiling_seconds" \
         "$ancestor_extended_freshness_timeout_seconds" "$ancestor_extended_freshness_hard_ceiling_seconds" \
-        "$base_freshness_poll_interval_seconds" "$ancestor_search_depth" "${STAGING_FRESHNESS_GIT_DIR:-.}")"; then
+        "$base_freshness_poll_interval_seconds" "$ancestor_search_depth" "${STAGING_FRESHNESS_GIT_DIR:-.}" "$BASE_REF")"; then
         exit 1
     fi
     echo "::notice::(re)pointing $PR_TAG at $resolved_source."

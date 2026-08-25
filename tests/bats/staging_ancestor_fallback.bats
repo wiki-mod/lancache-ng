@@ -2121,6 +2121,65 @@ STUB
     [ "$((end_epoch - start_epoch))" -lt 2 ]
 }
 
+@test "saf_resolve_untouched_backfill_source: a later base-branch descendant with unchanged service content rescues a docs-only BASE_SHA even when an older touched candidate is broken" {
+    git_dir="$BATS_TEST_TMPDIR/repo"
+    git init -q "$git_dir"
+    git -C "$git_dir" config user.email test@example.com
+    git -C "$git_dir" config user.name test
+    mkdir -p "$git_dir/docs" "$git_dir/services/proxy" "$git_dir/services/ui"
+
+    echo "root" > "$git_dir/docs/root.md"
+    git -C "$git_dir" add docs/root.md
+    git -C "$git_dir" commit -q -m root
+    root_sha="$(git -C "$git_dir" rev-parse HEAD)"
+
+    echo "proxy change" > "$git_dir/services/proxy/nginx.conf"
+    git -C "$git_dir" add services/proxy/nginx.conf
+    git -C "$git_dir" commit -q -m "proxy change"
+    proxy_change_sha="$(git -C "$git_dir" rev-parse HEAD)"
+
+    echo "base docs" > "$git_dir/docs/base.md"
+    git -C "$git_dir" add docs/base.md
+    git -C "$git_dir" commit -q -m "base docs"
+    base_sha="$(git -C "$git_dir" rev-parse HEAD)"
+
+    echo "ui only" > "$git_dir/services/ui/main.rs"
+    git -C "$git_dir" add services/ui/main.rs
+    git -C "$git_dir" commit -q -m "ui only"
+    descendant_sha="$(git -C "$git_dir" rev-parse HEAD)"
+    git -C "$git_dir" update-ref refs/remotes/origin/current_dev "$descendant_sha"
+
+    install_run_exists_stub
+    cat > "$run_exists_stub" <<STUB
+#!/usr/bin/env bash
+case "\$1" in
+    "$base_sha") exit 1 ;;
+    "$proxy_change_sha") exit 0 ;;
+    "$descendant_sha") exit 0 ;;
+    *) exit 1 ;;
+esac
+STUB
+    chmod +x "$run_exists_stub"
+
+    revision_stub="$BATS_TEST_TMPDIR/revision_descendant.sh"
+    cat > "$revision_stub" <<STUB
+#!/usr/bin/env bash
+image="\$1"
+suffix="\${image##*:sha-}"
+case "\$suffix" in
+    "${descendant_sha}") echo "$descendant_sha" ;;
+    *) exit 1 ;;
+esac
+STUB
+    chmod +x "$revision_stub"
+    export STAGING_IMAGE_REVISION_CMD="$revision_stub"
+
+    run --separate-stderr saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "proxy" "$base_sha" 0 0 0 0 0 0 0 50 "$git_dir" "current_dev"
+    [ "$status" -eq 0 ]
+    [ "$output" = "ghcr.io/wiki-mod/lancache-ng/proxy:sha-${descendant_sha}" ]
+    [[ "$stderr" == *"Substituting later base-branch descendant ${descendant_sha}"* ]]
+}
+
 @test "saf_resolve_untouched_backfill_source: paths NOT confirmed ignorable blocks the fallback even with zero push runs" {
     setup_linear_fixture
     install_run_exists_stub
