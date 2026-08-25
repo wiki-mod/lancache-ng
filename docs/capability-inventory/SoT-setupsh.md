@@ -512,6 +512,13 @@ converge/validate; whatever partial `.env` writes happened are left on disk
 for inspection, with the reported error naming `setup.sh update` as the
 recovery path.
 
+**Still-open follow-up from the 2026-08-25 #456 re-audit:** the shared-volume
+guard only checks for a *running* foreign install using the same fixed Compose
+project name. A second install on the same host that is currently stopped can
+still own those named volumes, and `restore_compose_volumes` will then wipe and
+replace them without that guard firing. The existing protection is therefore
+"no running foreign stack", not yet "no foreign volume owner at all".
+
 **Idempotence**: restoring the SAME already-converged backup twice is a
 no-op for `.env` (mirrors AG-OP-011 for `update`). Restoring a legacy-format
 backup converges it exactly like `update` would.
@@ -536,6 +543,12 @@ backup converges it exactly like `update` would.
   health gate) calls `cmd_restore` directly, so restore's stop/rsync/
   reconverge path is additionally proven under a real failure-triggered
   rollback, not only under an explicit `setup.sh restore` invocation.
+
+What is still missing is a full archive round-trip proof: a test that creates a
+real backup archive, restores it into a fresh target, and then repeats the same
+restore against the same target while checking both file-state and Docker-volume
+state for convergence. The current CLI simulation proves important slices of
+restore behavior, but not that full archive round-trip end to end.
 
 ---
 
