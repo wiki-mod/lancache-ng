@@ -488,6 +488,46 @@ EOF
     [[ "$output" == *"actions/checkout@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"* ]]
 }
 
+@test "passes when a composite action.yml repeats the same third-party ref literally (no anchor)" {
+    # What: a composite action.yml under .github/actions/ is exempt from the
+    #   repeated-literal-ref failure the previous test enforces for workflow
+    #   files.
+    # Why: GitHub's composite-action manifest parser rejects YAML
+    #   anchors/aliases outright ("Anchors are not currently supported"),
+    #   confirmed live when PR #1665's own anchors broke every
+    #   build/build-arm64 job for every service -- literal repetition is the
+    #   only working form here, so this check must not demand an anchor a
+    #   composite action can never actually use.
+    # From: Issue #1095
+    write_workflow <<'EOF'
+name: CI
+on: push
+jobs:
+  build:
+    steps:
+      - uses: ./.github/actions/my-retry
+EOF
+    mkdir -p "$fixture_root/.github/actions/my-retry"
+    cat > "$fixture_root/.github/actions/my-retry/action.yml" <<'EOF'
+name: My retry
+runs:
+  using: composite
+  steps:
+    - id: attempt1
+      uses: actions/checkout@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa # v7.0.0
+    - id: attempt2
+      uses: actions/checkout@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa # v7.0.0
+EOF
+    mock_curl_response "actions/checkout" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "" "action.yml" 200 \
+"runs:
+  using: 'node24'"
+
+    run "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+    [[ "$output" != *"repeats third-party action ref"* ]]
+}
+
 @test "fails when one third-party action key drifts to multiple refs across .github" {
     write_workflow <<'EOF'
 name: CI

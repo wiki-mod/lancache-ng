@@ -276,10 +276,14 @@ for entry in "${uses_literal_entries[@]}"; do
   fi
 done
 
-# What: rejects repeated literal third-party `uses:` refs inside one file.
-# Why: once the same immutable ref appears twice, the file already has more
-#   maintenance points than needed; a YAML anchor/alias keeps GitHub's
-#   static-YAML requirement while collapsing the ref to one owner line.
+# What: rejects repeated literal third-party `uses:` refs inside one
+#   workflow file; a composite action.yml under .github/actions/ is exempt.
+# Why: a YAML anchor/alias collapses the maintenance point in a workflow
+#   file, but GitHub's composite-action manifest parser rejects anchors
+#   outright ("Anchors are not currently supported") -- confirmed live,
+#   PR #1665's own anchors here broke every build/build-arm64 job for
+#   every service. Literal repetition is the only working form there.
+# From: Issue #1095
 for exact_file_key in "${!literal_ref_counts_by_file[@]}"; do
   count="${literal_ref_counts_by_file[$exact_file_key]}"
   if [ "$count" -le 1 ]; then
@@ -287,6 +291,9 @@ for exact_file_key in "${!literal_ref_counts_by_file[@]}"; do
   fi
   scan_file="${exact_file_key%%$'\t'*}"
   value="${exact_file_key#*$'\t'}"
+  case "$scan_file" in
+    .github/actions/*) continue ;;
+  esac
   fail "'$scan_file' repeats third-party action ref '$value' $count times. Collapse it to one maintenance point with a YAML anchor/alias or an existing internal owner action."
 done
 
