@@ -485,7 +485,9 @@ restore target, which may not exist yet) to run
 `guard_restore_shared_project_volumes` (#669 #6 — since the Compose project
 name is fixed `lancache-ng` for every install, two installs on the same host
 share the same named volumes regardless of install-dir; refuses to proceed
-if a running stack elsewhere on this host is still using that project name).
+if a running/stopped stack elsewhere on this host is still using that project
+name, and now also refuses a same-host cross-directory restore when only the
+project-labeled named volumes remain and ownership is no longer attributable).
 Stops the stack (only restarts afterward if it was running before AND the
 restore succeeded — on failure, leaves it stopped with a printed recovery
 command using the correct `--env-file`, #669 #4); rsyncs files back
@@ -513,13 +515,13 @@ converge/validate; whatever partial `.env` writes happened are left on disk
 for inspection, with the reported error naming `setup.sh update` as the
 recovery path.
 
-**Still-open follow-up from the 2026-08-25 #456 re-audit:** the shared-volume
-guard now checks for any foreign install that still has Compose containers
-present under the same fixed project name, not only running containers. That
-closes the narrower "stopped but not down" case, but a second install on the
-same host can still own those named volumes after `docker compose down`
-removes its containers. The remaining protection is therefore "no foreign
-container owner left", not yet "no foreign volume owner at all".
+**Current shared-volume guard scope:** the restore guard now blocks three
+same-host ambiguity classes under the fixed `lancache-ng` Compose project
+name: a foreign running stack, a foreign stopped-but-not-`down` stack, and a
+cross-directory restore after `docker compose down` already removed the
+foreign containers but left the project-labeled named volumes behind. That
+last case is intentionally refused because Docker keeps the project label on
+the volume object but no longer retains a reliable install-dir owner marker.
 
 **Idempotence**: restoring the SAME already-converged backup twice is a
 no-op for `.env` (mirrors AG-OP-011 for `update`). Restoring a legacy-format

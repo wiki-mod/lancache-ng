@@ -151,7 +151,7 @@ teardown() {
         builtin command "$@"
     }
 
-    run guard_restore_shared_project_volumes "$compose_dir" "lancache-ng"
+    run guard_restore_shared_project_volumes "$compose_dir" "$compose_dir" "lancache-ng"
     unset -f command
     [ "$status" -eq 0 ]
 }
@@ -166,7 +166,7 @@ teardown() {
         esac
     }
 
-    run guard_restore_shared_project_volumes "$compose_dir" "lancache-ng"
+    run guard_restore_shared_project_volumes "$compose_dir" "$compose_dir" "lancache-ng"
     [ "$status" -ne 0 ]
     [[ "$output" == *"Refusing to restore"* ]]
 }
@@ -179,7 +179,7 @@ teardown() {
         esac
     }
 
-    run guard_restore_shared_project_volumes "$compose_dir" "lancache-ng"
+    run guard_restore_shared_project_volumes "$compose_dir" "$compose_dir" "lancache-ng"
     [ "$status" -eq 0 ]
 }
 
@@ -196,9 +196,48 @@ teardown() {
         esac
     }
 
-    run guard_restore_shared_project_volumes "$compose_dir" "lancache-ng"
+    run guard_restore_shared_project_volumes "$compose_dir" "$compose_dir" "lancache-ng"
     [ "$status" -ne 0 ]
     [[ "$output" == *"still has containers"* ]]
+}
+
+@test "guard_restore_shared_project_volumes refuses a same-host cross-directory restore when project-labeled volumes exist without surviving containers" {
+    archived_install="$BATS_TEST_TMPDIR/original-install"
+    mkdir -p "$archived_install"
+    docker() {
+        case "$1" in
+            ps)
+                [[ "$2" = "-a" ]] || return 1
+                return 0
+                ;;
+            volume)
+                [[ "$2" = "ls" ]] || return 1
+                printf 'lancache-ng_pdns-data\n'
+                ;;
+        esac
+    }
+
+    run guard_restore_shared_project_volumes "$compose_dir" "$archived_install" "lancache-ng"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"ownership-ambiguous"* ]]
+}
+
+@test "guard_restore_shared_project_volumes allows same-directory restore when only project-labeled volumes remain" {
+    docker() {
+        case "$1" in
+            ps)
+                [[ "$2" = "-a" ]] || return 1
+                return 0
+                ;;
+            volume)
+                [[ "$2" = "ls" ]] || return 1
+                printf 'lancache-ng_pdns-data\n'
+                ;;
+        esac
+    }
+
+    run guard_restore_shared_project_volumes "$compose_dir" "$compose_dir" "lancache-ng"
+    [ "$status" -eq 0 ]
 }
 
 @test "restore_compose_volumes replaces existing content with the archived files including dotfiles" {
