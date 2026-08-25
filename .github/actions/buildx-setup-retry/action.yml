@@ -104,8 +104,15 @@ outputs:
 runs:
   using: composite
   steps:
+    # What: each retry attempt repeats the same `uses:` pin literally.
+    # Why: GitHub's composite-action manifest parser (distinct from its
+    #   workflow-file parser) rejects YAML anchors/aliases outright
+    #   ("Anchors are not currently supported"), failing every step here
+    #   -- confirmed live, PR #1665's `&anchor`/`*alias` attempt broke
+    #   every build/build-arm64 job for every service.
+    # From: Issue #1095
     - id: attempt1
-      uses: &docker_setup_buildx_centraliced_versioning docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       continue-on-error: true
       with:
         version: ${{ inputs.version }}
@@ -130,7 +137,7 @@ runs:
 
     - id: attempt2
       if: steps.attempt1.outcome == 'failure'
-      uses: *docker_setup_buildx_centraliced_versioning # v4.3.0
+      uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       continue-on-error: true
       with:
         version: ${{ inputs.version }}
@@ -155,7 +162,7 @@ runs:
 
     - id: attempt3
       if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure'
-      uses: *docker_setup_buildx_centraliced_versioning # v4.3.0
+      uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       continue-on-error: true
       with:
         version: ${{ inputs.version }}
@@ -180,7 +187,7 @@ runs:
 
     - id: attempt4
       if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure' && steps.attempt3.outcome == 'failure'
-      uses: *docker_setup_buildx_centraliced_versioning # v4.3.0
+      uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       continue-on-error: true
       with:
         version: ${{ inputs.version }}
