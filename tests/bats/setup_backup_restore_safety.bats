@@ -261,10 +261,11 @@ teardown() {
                 mkdir -p "$volume_store/$3"
                 ;;
             run)
-                volume="${@: -1}"
+                local volume target
+                volume="${!#}"
                 target="$volume_store/$volume"
-                rm -rf "$target"/* "$target"/.[!.]* "$target"/..?* 2>/dev/null || true
                 mkdir -p "$target"
+                rm -rf "${target:?}/"* "${target:?}"/.[!.]* "${target:?}"/..?* 2>/dev/null || true
                 tar -C "$target" -xpf "$volume_root/$volume.tar"
                 ;;
         esac
@@ -345,7 +346,7 @@ EOF
                 ;;
             run)
                 local volume backup_mount target script
-                volume="${@: -1}"
+                volume="${!#}"
                 for arg in "$@"; do
                     case "$arg" in
                         *:/backup|*:/backup:ro) backup_mount="${arg%%:/backup*}" ;;
@@ -356,8 +357,8 @@ EOF
                 if [[ "$script" == *"tar -cpf"* ]]; then
                     tar -C "$volume_store/$volume" -cpf "$backup_mount/$volume.tar" .
                 else
-                    rm -rf "$volume_store/$volume"/* "$volume_store/$volume"/.[!.]* "$volume_store/$volume"/..?* 2>/dev/null || true
                     mkdir -p "$volume_store/$volume"
+                    rm -rf "${volume_store:?}/${volume:?}/"* "${volume_store:?}/${volume:?}"/.[!.]* "${volume_store:?}/${volume:?}"/..?* 2>/dev/null || true
                     tar -C "$volume_store/$volume" -xpf "$backup_mount/$volume.tar"
                 fi
                 ;;
@@ -419,6 +420,7 @@ EOF
         fi
         # shellcheck disable=SC1090
         source "$systemd_state"
+        : "${timer_exists:=0}" "${service_exists:=0}"
         case "$cmd" in
             list-unit-files)
                 case "$unit" in
@@ -498,6 +500,7 @@ EOF
         fi
         # shellcheck disable=SC1090
         source "$systemd_state"
+        : "${timer_exists:=0}" "${service_exists:=0}"
         case "$cmd" in
             list-unit-files)
                 case "$unit" in

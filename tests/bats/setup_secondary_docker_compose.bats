@@ -134,7 +134,7 @@ run_cmd_secondary_full() {
     assert_prebuilt_image_platform_supported() { :; }
     assert_resolved_image_tag_platform_supported() { :; }
     resolve_lancache_image_tag() { printf "%s\n" "${LANCACHE_IMAGE_TAG:-latest}"; }
-    cd "$run_dir"
+    cd "$run_dir" || return 1
     cmd_secondary "$@"
 }
 

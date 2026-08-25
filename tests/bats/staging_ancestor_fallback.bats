@@ -2131,8 +2131,6 @@ STUB
     echo "root" > "$git_dir/docs/root.md"
     git -C "$git_dir" add docs/root.md
     git -C "$git_dir" commit -q -m root
-    root_sha="$(git -C "$git_dir" rev-parse HEAD)"
-
     echo "proxy change" > "$git_dir/services/proxy/nginx.conf"
     git -C "$git_dir" add services/proxy/nginx.conf
     git -C "$git_dir" commit -q -m "proxy change"
