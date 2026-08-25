@@ -406,14 +406,13 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Initialize CodeQL
-        # What: RAM/thread cap come from repository Variables, defaulting to
-        #   values sized for GitHub-hosted (see runs-on above).
-        # Why: unset, CodeQL defaults to most of the host's memory -- the old
-        #   hardcoded 512MB/4-thread cap existed only because the smallest
-        #   self-hosted lancache-heavy host has ~3.6 GiB/no swap and was
-        #   confirmed OOM-killed at CodeQL's own default (dmesg). Both
-        #   Variables must be set back down if CODEQL_RUNNER_LABELS falls
-        #   back to that self-hosted pool.
+        # What: RAM picks one of two repository Variables based on
+        #   CODEQL_USE_SELF_HOSTED (runs-on above), instead of one Variable
+        #   someone must also remember to change when switching runner pools.
+        # Why: the self-hosted lancache-heavy pool's smallest host has ~3.6
+        #   GiB/no swap and was confirmed OOM-killed at CodeQL's own default
+        #   (dmesg) -- its cap must stay far below the GitHub-hosted
+        #   ubuntu-latest default (16GB total), which has real headroom.
         # From: Issue #1095
         #
         # 'actions' always analyzes; 'rust' only when Rust is actually relevant
@@ -424,7 +423,7 @@ jobs:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
           config-file: ./.github/codeql/codeql-config.yml
-          ram: ${{ vars.CODEQL_RAM_MB || '8192' }}
+          ram: ${{ vars.CODEQL_USE_SELF_HOSTED == 'true' && (vars.CODEQL_RAM_MB_SELFHOSTED || '2048') || (vars.CODEQL_RAM_MB_HOSTED || '10240') }}
           threads: ${{ vars.CODEQL_THREADS || '4' }}
 
       - name: Cache Cargo registry and target dirs for CodeQL's Rust build
@@ -491,7 +490,7 @@ jobs:
             kill "$(cat "$CODEQL_MEMLOG_PID_FILE")" 2>/dev/null || true
           fi
           if [ -n "${CODEQL_MEMLOG_FILE:-}" ] && [ -f "$CODEQL_MEMLOG_FILE" ]; then
-            echo "::group::CodeQL memory usage (${{ matrix.language }}, 10s samples, ${{ vars.CODEQL_RAM_MB || '8192' }} MB cap)"
+            echo "::group::CodeQL memory usage (${{ matrix.language }}, 10s samples, ${{ vars.CODEQL_USE_SELF_HOSTED == 'true' && (vars.CODEQL_RAM_MB_SELFHOSTED || '2048') || (vars.CODEQL_RAM_MB_HOSTED || '10240') }} MB cap)"
             cat "$CODEQL_MEMLOG_FILE"
             echo "::endgroup::"
           else
