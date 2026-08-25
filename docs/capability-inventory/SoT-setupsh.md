@@ -513,11 +513,12 @@ for inspection, with the reported error naming `setup.sh update` as the
 recovery path.
 
 **Still-open follow-up from the 2026-08-25 #456 re-audit:** the shared-volume
-guard only checks for a *running* foreign install using the same fixed Compose
-project name. A second install on the same host that is currently stopped can
-still own those named volumes, and `restore_compose_volumes` will then wipe and
-replace them without that guard firing. The existing protection is therefore
-"no running foreign stack", not yet "no foreign volume owner at all".
+guard now checks for any foreign install that still has Compose containers
+present under the same fixed project name, not only running containers. That
+closes the narrower "stopped but not down" case, but a second install on the
+same host can still own those named volumes after `docker compose down`
+removes its containers. The remaining protection is therefore "no foreign
+container owner left", not yet "no foreign volume owner at all".
 
 **Idempotence**: restoring the SAME already-converged backup twice is a
 no-op for `.env` (mirrors AG-OP-011 for `update`). Restoring a legacy-format

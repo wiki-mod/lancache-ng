@@ -124,14 +124,16 @@ instead of starting it against an unconverged or invalid configuration. Fix
 the reported problem in `.env`, then run `setup.sh update [install-dir]` to
 finish converging and start the stack.
 
-`restore` also refuses to proceed when a *running* stack from a different
-install directory is still using the same fixed Compose project name and
-named volumes. That guard is intentionally conservative, but it is not yet a
-full "foreign volume owner" detector: a second install on the same host that
-is currently stopped can still own those same named volumes. Before restoring
+`restore` also refuses to proceed when a different install directory still has
+Compose containers present for the same fixed Compose project name and named
+volumes, even if those containers are currently stopped. That guard is
+intentionally conservative, but it is not yet a full "foreign volume owner"
+detector: a second install on the same host can still own those same named
+volumes after `docker compose down` removes its containers. Before restoring
 onto a host with more than one lancache-ng install path, make sure any other
 install using the shared `lancache-ng` project name is not only stopped, but
-also not the state you still intend to keep attached to those named volumes.
+also no longer the state you still intend to keep attached to those named
+volumes.
 
 ## Restore testing
 

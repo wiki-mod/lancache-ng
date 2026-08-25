@@ -34,6 +34,7 @@ EOF
 
 teardown() {
     unset -f docker 2>/dev/null || true
+    unset -f systemctl 2>/dev/null || true
     unset COMPOSE_PROJECT_NAME
 }
 
@@ -180,4 +181,209 @@ teardown() {
 
     run guard_restore_shared_project_volumes "$compose_dir" "lancache-ng"
     [ "$status" -eq 0 ]
+}
+
+@test "guard_restore_shared_project_volumes also refuses a stopped foreign install that still has compose containers" {
+    other_install="$BATS_TEST_TMPDIR/stopped-other-install"
+    mkdir -p "$other_install"
+    docker() {
+        case "$1" in
+            ps)
+                [[ "$2" = "-a" ]] || return 1
+                printf 'stopped123\n'
+                ;;
+            inspect) printf '%s\n' "$other_install" ;;
+        esac
+    }
+
+    run guard_restore_shared_project_volumes "$compose_dir" "lancache-ng"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"still has containers"* ]]
+}
+
+@test "restore_compose_volumes replaces existing content with the archived files including dotfiles" {
+    volume_root="$BATS_TEST_TMPDIR/docker-volumes"
+    volume_store="$BATS_TEST_TMPDIR/volume-store"
+    mkdir -p "$volume_root" "$volume_store/lancache-ng_pdns-data"
+
+    mkdir -p "$BATS_TEST_TMPDIR/archive-src/subdir" "$BATS_TEST_TMPDIR/archive-src/empty-dir"
+    printf 'fresh\n' > "$BATS_TEST_TMPDIR/archive-src/subdir/restored.txt"
+    printf 'hidden\n' > "$BATS_TEST_TMPDIR/archive-src/.pdns.env"
+    tar -C "$BATS_TEST_TMPDIR/archive-src" -cpf "$volume_root/lancache-ng_pdns-data.tar" .
+
+    printf 'stale\n' > "$volume_store/lancache-ng_pdns-data/stale.txt"
+    printf 'old-hidden\n' > "$volume_store/lancache-ng_pdns-data/.stale"
+
+    compose_stack_available() { return 0; }
+    docker() {
+        case "$1" in
+            volume)
+                [[ "$2" = "create" ]] || return 1
+                mkdir -p "$volume_store/$3"
+                ;;
+            run)
+                volume="${@: -1}"
+                target="$volume_store/$volume"
+                rm -rf "$target"/* "$target"/.[!.]* "$target"/..?* 2>/dev/null || true
+                mkdir -p "$target"
+                tar -C "$target" -xpf "$volume_root/$volume.tar"
+                ;;
+        esac
+    }
+
+    run restore_compose_volumes "$compose_dir" "$volume_root"
+    [ "$status" -eq 0 ]
+    [ ! -e "$volume_store/lancache-ng_pdns-data/stale.txt" ]
+    [ ! -e "$volume_store/lancache-ng_pdns-data/.stale" ]
+    [ "$(cat "$volume_store/lancache-ng_pdns-data/subdir/restored.txt")" = "fresh" ]
+    [ "$(cat "$volume_store/lancache-ng_pdns-data/.pdns.env")" = "hidden" ]
+    [ -d "$volume_store/lancache-ng_pdns-data/empty-dir" ]
+}
+
+@test "pause_lancache_convergence_for_update records and disables the previous timer state" {
+    systemd_state="$BATS_TEST_TMPDIR/systemd-state"
+    cat > "$systemd_state" <<'EOF'
+timer_exists=1
+timer_active=1
+timer_enabled=1
+service_exists=1
+service_active=1
+EOF
+    SYSTEMD_LOG="$BATS_TEST_TMPDIR/systemd.log"
+    export systemd_state SYSTEMD_LOG
+
+    systemctl() {
+        local cmd="$1" unit="${2:-}"
+        local rc=0
+        if [[ "$unit" = "--quiet" ]]; then
+            unit="${3:-}"
+        fi
+        # shellcheck disable=SC1090
+        source "$systemd_state"
+        case "$cmd" in
+            list-unit-files)
+                case "$unit" in
+                    lancache-converge.timer) [[ "$timer_exists" = "1" ]] || rc=1 ;;
+                    lancache-converge.service) [[ "$service_exists" = "1" ]] || rc=1 ;;
+                esac
+                ;;
+            is-active)
+                case "$unit" in
+                    lancache-converge.timer) [[ "$timer_active" = "1" ]] || rc=1 ;;
+                    lancache-converge.service) [[ "$service_active" = "1" ]] || rc=1 ;;
+                esac
+                ;;
+            is-enabled)
+                [[ "$unit" = "lancache-converge.timer" && "$timer_enabled" = "1" ]] || rc=1
+                ;;
+            stop)
+                case "$unit" in
+                    lancache-converge.timer) timer_active=0 ;;
+                    lancache-converge.service) service_active=0 ;;
+                esac
+                printf 'stop %s\n' "$unit" >> "$SYSTEMD_LOG"
+                ;;
+            disable)
+                timer_enabled=0
+                printf 'disable %s\n' "$unit" >> "$SYSTEMD_LOG"
+                ;;
+            start)
+                case "$unit" in
+                    lancache-converge.timer) timer_active=1 ;;
+                    lancache-converge.service) service_active=1 ;;
+                esac
+                printf 'start %s\n' "$unit" >> "$SYSTEMD_LOG"
+                ;;
+            enable)
+                timer_enabled=1
+                printf 'enable %s\n' "$unit" >> "$SYSTEMD_LOG"
+                ;;
+        esac
+        cat > "$systemd_state" <<EOF
+timer_exists=$timer_exists
+timer_active=$timer_active
+timer_enabled=$timer_enabled
+service_exists=$service_exists
+service_active=$service_active
+EOF
+        return "$rc"
+    }
+
+    pause_lancache_convergence_for_update
+    [ "$CONVERGENCE_TIMER_WAS_ACTIVE" -eq 1 ]
+    [ "$CONVERGENCE_TIMER_WAS_ENABLED" -eq 1 ]
+    [ "$CONVERGENCE_SERVICE_WAS_ACTIVE" -eq 1 ]
+    log_output="$(cat "$SYSTEMD_LOG")"
+    [[ "$log_output" == *"stop lancache-converge.timer"* ]]
+    [[ "$log_output" == *"stop lancache-converge.service"* ]]
+    [[ "$log_output" == *"disable lancache-converge.timer"* ]]
+}
+
+@test "resume_lancache_convergence_after_update restores only the state that pause recorded" {
+    systemd_state="$BATS_TEST_TMPDIR/systemd-state"
+    cat > "$systemd_state" <<'EOF'
+timer_exists=1
+timer_active=0
+timer_enabled=0
+service_exists=1
+service_active=0
+EOF
+    SYSTEMD_LOG="$BATS_TEST_TMPDIR/systemd.log"
+    export systemd_state SYSTEMD_LOG
+
+    systemctl() {
+        local cmd="$1" unit="${2:-}"
+        local rc=0
+        if [[ "$unit" = "--quiet" ]]; then
+            unit="${3:-}"
+        fi
+        # shellcheck disable=SC1090
+        source "$systemd_state"
+        case "$cmd" in
+            list-unit-files)
+                case "$unit" in
+                    lancache-converge.timer) [[ "$timer_exists" = "1" ]] || rc=1 ;;
+                    lancache-converge.service) [[ "$service_exists" = "1" ]] || rc=1 ;;
+                esac
+                ;;
+            is-active)
+                case "$unit" in
+                    lancache-converge.timer) [[ "$timer_active" = "1" ]] || rc=1 ;;
+                    lancache-converge.service) [[ "$service_active" = "1" ]] || rc=1 ;;
+                esac
+                ;;
+            is-enabled)
+                [[ "$unit" = "lancache-converge.timer" && "$timer_enabled" = "1" ]] || rc=1
+                ;;
+            start)
+                case "$unit" in
+                    lancache-converge.timer) timer_active=1 ;;
+                    lancache-converge.service) service_active=1 ;;
+                esac
+                printf 'start %s\n' "$unit" >> "$SYSTEMD_LOG"
+                ;;
+            enable)
+                timer_enabled=1
+                printf 'enable %s\n' "$unit" >> "$SYSTEMD_LOG"
+                ;;
+        esac
+        cat > "$systemd_state" <<EOF
+timer_exists=$timer_exists
+timer_active=$timer_active
+timer_enabled=$timer_enabled
+service_exists=$service_exists
+service_active=$service_active
+EOF
+        return "$rc"
+    }
+
+    CONVERGENCE_TIMER_WAS_ACTIVE=1
+    CONVERGENCE_TIMER_WAS_ENABLED=1
+    CONVERGENCE_SERVICE_WAS_ACTIVE=1
+
+    resume_lancache_convergence_after_update true
+    log_output="$(cat "$SYSTEMD_LOG")"
+    [[ "$log_output" == *"start lancache-converge.service"* ]]
+    [[ "$log_output" == *"enable lancache-converge.timer"* ]]
+    [[ "$log_output" == *"start lancache-converge.timer"* ]]
 }

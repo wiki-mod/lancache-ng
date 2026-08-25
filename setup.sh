@@ -3489,8 +3489,9 @@ restore_compose_volumes() {
 # own --help documents remapping a restore to a different [install-dir] as
 # supported, but restore only stops the stack at the *target* install_dir
 # before restore_compose_volumes wipes and reloads those shared volumes — if
-# a DIFFERENT install on the same host is still actively running under the
-# same project name, its volumes get clobbered without ever being stopped.
+# a DIFFERENT install on the same host still has compose containers present
+# under the same project name, its volumes can get clobbered without ever
+# being detached from that other install first.
 #
 # This is a real, documented constraint of same-host multi-install setups:
 # giving each install a unique COMPOSE_PROJECT_NAME would fix it, but would
@@ -3499,7 +3500,11 @@ restore_compose_volumes() {
 # nothing would reattach them to a renamed project) — a real regression
 # swapped for a narrower one. So this guards against the unsafe case instead
 # of silently working around it: refuse the restore outright rather than
-# risk destroying another install's live state.
+# risk destroying another install's attached state. This now checks
+# `docker ps -a`, not only running containers, so a stopped-but-not-`down`
+# foreign install is also blocked; a fully removed foreign stack can still
+# leave the shared volumes behind, so this is intentionally not claimed as
+# a complete foreign-volume-owner detector yet.
 guard_restore_shared_project_volumes() {
     local install_dir="$1" project="$2" container working_dir
     command -v docker >/dev/null 2>&1 || return 0
@@ -3509,9 +3514,9 @@ guard_restore_shared_project_volumes() {
         [[ -n "$working_dir" ]] || continue
         working_dir=$(realpath -m "$working_dir")
         if [[ "$working_dir" != "$install_dir" ]]; then
-            die "Refusing to restore: a running stack for compose project '$project' is already active at $working_dir, which is not the restore target ($install_dir). Both installs share the same Docker-managed volumes because the compose project name is not per-install-dir (see #669). Stop the other install first (cd \"$working_dir\" && docker compose down), or restore into $working_dir instead."
+            die "Refusing to restore: compose project '$project' still has containers at $working_dir, which is not the restore target ($install_dir). Both installs share the same Docker-managed volumes because the compose project name is not per-install-dir (see #669). Remove the other install's containers first (cd \"$working_dir\" && docker compose down), or restore into $working_dir instead."
         fi
-    done < <(docker ps --filter "label=com.docker.compose.project=${project}" --format '{{.ID}}' 2>/dev/null)
+    done < <(docker ps -a --filter "label=com.docker.compose.project=${project}" --format '{{.ID}}' 2>/dev/null)
 }
 
 # Snapshots the exact image references/digests in use at backup time (JSON
