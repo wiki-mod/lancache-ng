@@ -3431,8 +3431,14 @@ compose_volume_names() {
 # From: Issue #456
 compose_project_has_named_volumes() {
     local project="$1"
-    docker volume ls --filter "label=com.docker.compose.project=${project}" --format '{{.Name}}' 2>/dev/null \
-        | grep -q .
+    local volume_names
+    # What: captures the labeled volume listing before checking whether any names exist.
+    # Why: under this file's `pipefail`, a live `docker volume ls | grep -q .`
+    #   pipeline can report SIGPIPE/141 once grep exits on the first match,
+    #   even though the project really does still own named volumes.
+    # From: Issue #456
+    volume_names="$(docker volume ls --filter "label=com.docker.compose.project=${project}" --format '{{.Name}}' 2>/dev/null)"
+    grep -q . <<<"$volume_names"
 }
 
 # Archives every Docker named volume used by this stack into its own tar file
