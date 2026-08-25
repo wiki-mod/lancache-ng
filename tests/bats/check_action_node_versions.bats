@@ -530,3 +530,41 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" == *"OK"* ]]
 }
+
+@test "passes when a composite action.yml repeats the same literal third-party ref (anchors don't load there, Issue #1095 F-24)" {
+    # Confirmed live (F-24, PR #1665): the Actions Runner's composite-action
+    # loader hard-fails on a YAML anchor/alias inside action.yml -- unlike a
+    # workflow file, where the previous test above proves the collapse is
+    # both possible and required. A repeated literal ref inside a composite
+    # action.yml is therefore the correct, GitHub-imposed shape, not a
+    # duplication violation, and must not fail this check the way the
+    # equivalent workflow-file case above correctly does.
+    write_workflow <<'EOF'
+name: CI
+on: push
+jobs:
+  build:
+    steps:
+      - uses: ./.github/actions/retry-wrapper
+EOF
+    mkdir -p "$fixture_root/.github/actions/retry-wrapper"
+    cat > "$fixture_root/.github/actions/retry-wrapper/action.yml" <<'EOF'
+name: Retry wrapper
+runs:
+  using: composite
+  steps:
+    - id: attempt1
+      uses: actions/checkout@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa # v7.0.0
+      continue-on-error: true
+    - id: attempt2
+      if: steps.attempt1.outcome == 'failure'
+      uses: actions/checkout@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa # v7.0.0
+EOF
+    mock_curl_response "actions/checkout" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "" "action.yml" 200 \
+"runs:
+  using: 'node24'"
+
+    run "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"repeats third-party action ref"* ]]
+}
