@@ -1140,8 +1140,8 @@ explicit pass:**
   a known, open, non-blocking bug that produces a false-negative warning log on a
   slow-to-stop container — validators must know to cross-check `StartedAt` rather
   than trusting the warning literally.
-- **Netdata-alarm → Admin UI notification integration** (`docs/bug-hunt/
-  observability.md` finding #3, PR #1165's remaining open half) has been built:
+- **Netdata-alarm → Admin UI notification integration** (observability
+  finding #3 from bug-hunt #849, PR #1165's remaining open half) has been built:
   the `netdata` container's `custom_sender()` integration
   (`deploy/*/docker-compose.yml`'s `netdata:` service, all three real profiles)
   POSTs each Netdata health.d alarm event to the Admin UI's new

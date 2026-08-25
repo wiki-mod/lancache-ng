@@ -343,8 +343,8 @@ record changes, or subscribes to read cache/DNS metadata.
     restored `lan.` records if `DNS_ROLLBACK_URL` is ever pointed at
     dns-ssl instead of its default `dns-standard:8083` (not the case in any
     shipped deployment today, but the identity's permissions must hold
-    regardless of which URL an operator configures); and (docs/bug-hunt/
-    nats.md's Finding D) `publish` on `$JS.API.STREAM.CREATE.LANCACHE_DNS`,
+    regardless of which URL an operator configures); and (the earlier NATS
+    audit's Finding D) `publish` on `$JS.API.STREAM.CREATE.LANCACHE_DNS`,
     so this identity's own `nats-subscriber` process can create the
     `LANCACHE_DNS` stream itself if it is ever the first of the two
     `nats-subscriber` processes (writer or replica) to connect after a cold

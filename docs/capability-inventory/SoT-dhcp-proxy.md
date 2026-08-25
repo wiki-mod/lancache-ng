@@ -231,6 +231,14 @@ resolved unilaterally in this audit.
   `DHCP_PROXY_PXE_BOOT_SERVER`/`_FILENAME_BIOS`/`_FILENAME_UEFI` (§6) —
   currently untracked, backend-complete/UI-incomplete gap per this
   project's own "Feature Completeness" governance rule.
+- Fold the missing Compose-level `healthcheck:` for `dhcp-proxy` into the
+  observability/governance track instead of a bug-hunt note. The service has
+  simulation coverage for its packet path, but no steady-state container
+  health signal in the shipped stacks yet.
+- Decide whether the direct env-to-dnsmasq rendering path needs an explicit
+  collision guard between the dedicated UI-managed option fields and free-form
+  custom directives. Today the UI blocks the overlapping codes, but the
+  container itself still trusts the final env file it receives.
 - Consider a bats-level unit test for
   `_dhcp_proxy_render_pxe_service_directives` (mirroring the pattern already
   used for the other two rendering functions) so a regression there is

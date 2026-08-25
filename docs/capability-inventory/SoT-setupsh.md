@@ -1007,3 +1007,15 @@ purely informational, never auto-restored).
    every call site gating it behind `env_key_has_usable_secret` first. That
    holds correctly everywhere today, but it is a single architectural
    control point rather than a property of the generator itself.
+
+## Post-#849 carry-over
+
+- **Backup-root scoping across multiple installs remains a real setup-level
+  follow-up.** `cmd_backup`/`rollback_stack_update` still assume the shared
+  backup root under `/var/backups/lancache-ng`, so a later multi-install pass
+  should prove that one install's newest rollback archive cannot be selected
+  for another install's recovery path by timestamp alone.
+- **"Deep full-setup validation must be a required check" is CI governance,
+  not `setup.sh` runtime behavior.** Keep that follow-up in the branch-
+  protection / required-checks governance track rather than re-opening a
+  deleted bug-hunt document for it.
