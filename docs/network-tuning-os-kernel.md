@@ -68,8 +68,8 @@ required even to read it) and `docker info | grep -iE 'storage driver'`.
 
 ### Why `userland-proxy: true` matters for this workload specifically
 
-This is not purely a throughput question. `docs/bug-hunt/proxy.md` (this
-project's own earlier bug-hunt pass, line ~750) already recorded a real,
+This is not purely a throughput question. This project's own earlier proxy
+audit already recorded a real,
 previously-noted finding: Docker's userland proxy (`docker-proxy`, the
 process that exists when `userland-proxy: true`) can present the proxy
 container with a rewritten source IP (the bridge gateway address) instead
@@ -122,7 +122,7 @@ true` (i.e. the docker-proxy path is not actually the one handling this
 project's specific port-publish configuration), disabling it is a
 lower-risk, low-overhead win with no behavior change. If it changes
 `$remote_addr` behavior in either direction, that is itself the answer to
-whether `docs/bug-hunt/proxy.md`'s existing "noted, not filed" nuance is
+whether that earlier proxy audit's existing "noted, not filed" nuance is
 real for a production deployment, and should be filed as its own issue at
 that point. This is recorded here as a **maintainer-owned follow-up test**,
 not applied in this pass.
@@ -393,7 +393,7 @@ which channel), not a technical gap in the monitoring itself.
 
 ## Item 15: RPS tuning -- the actual commands, computed, not copied
 
-The original bug-hunt note explicitly warned not to blindly copy example
+The original audit note explicitly warned not to blindly copy example
 `rps_cpus` values -- this section gives the real commands to compute the
 correct value for whatever host and interface is actually being tuned,
 plus what was found when those commands were actually run against this

@@ -44,8 +44,8 @@ not a real optional-feature switch). All three are killed together by a
 single `trap ... EXIT TERM`, which also tears down the iptables chain (see
 §3). **The trailing `wait` (line 706) takes no arguments**, so it blocks
 until *all three* background jobs exit -- if exactly one daemon dies, PID 1
-never exits and Docker's restart policy never fires (tracked as bug-hunt
-finding #1, already in `docs/bug-hunt/dhcp.md`, not repeated in full here).
+never exits and Docker's restart policy never fires (tracked as the earlier
+DHCP audit's finding #1, not repeated in full here).
 
 **Dockerfile**: at the time this section was audited (`origin/v0.2.0`), built
 `FROM debian:trixie-slim`, installing `kea-dhcp4-server`, `kea-ctrl-agent`,
@@ -150,8 +150,8 @@ copies in `services/dns/entrypoint.sh` and
   `KEA_CTRL_TOKEN=CHANGE_ME_KEA_CTRL_TOKEN`, which *does* match (prefix
   `change_me`) and is expected to be regenerated/operator-replaced.
 
-**Fresh finding from this pass** (see `docs/bug-hunt/dhcp.md` new finding
-N3): the three compose files' own `dhcp` service healthchecks each embed an
+**Fresh finding from this pass** (new finding N3 in the earlier DHCP audit):
+the three compose files' own `dhcp` service healthchecks each embed an
 *independent*, hand-written fallback pattern to detect "is `KEA_CTRL_TOKEN`
 still the compose-injected placeholder, in which case read the real
 generated value from the shared-secret file instead" -- because a
@@ -161,7 +161,7 @@ exported afterward. All three inline patterns are already flagged (not
 filed) as an out-of-scope 4th+ placeholder-detection family in a comment on
 #967 and in PR #988's own "Scope Boundaries" section -- this inventory
 independently re-confirms it live against current code and files it
-properly (see the bug-hunt doc and the linked issue).
+properly (see the linked issue and this inventory's summary below).
 
 ## 3. Kea Control Agent API firewalling (iptables)
 
@@ -237,7 +237,7 @@ coverage** -- the bats function-extractor whitelist for this file does not
 include `migrate_dhcp4_config`/`build_ntp_migration_map`, and both Kea E2E
 simulation scripts always boot from an empty volume, so the migration
 always runs exactly once against its own just-rendered template (already
-tracked as bug-hunt finding #3).
+tracked as the earlier DHCP audit's finding #3).
 
 **Kea's own file-logger path restriction** (comment at entrypoint.sh lines
 167-172, confirmed against Kea 2.6.3 packaged behavior): Kea hard-restricts
@@ -279,7 +279,7 @@ evaluates a pure-identifier non-numeric value (e.g. `abc`) as a nested
 variable reference that resolves to `0` with no error under
 `$(( ))`, rather than aborting -- only a value with genuine trailing
 garbage (e.g. `86400x`) trips a real arithmetic syntax error under `set
--e`. This is bug-hunt finding N2 (info), already in `docs/bug-hunt/dhcp.md`.
+-e`. This is the earlier DHCP audit's informational finding N2.
 
 ## 6. DHCP-DDNS (D2) -- forward + reverse
 
@@ -485,9 +485,9 @@ mostly real-E2E-tested against actual Kea/DHCP traffic. Concrete open gaps,
 all already tracked except the last: native AXFR/NOTIFY convergence still
 needs its own real transfer proof (#1164); the missing real E2E test for the Admin UI's own
 rollback route (#837); the `migrate_dhcp4_config` test-coverage gap (no
-issue found, tracked only in `docs/bug-hunt/dhcp.md` finding #3); and the
+issue found, tracked only in the earlier DHCP audit's finding #3); and the
 compose-healthcheck placeholder-detection drift newly filed from this pass
-(§2, `docs/bug-hunt/dhcp.md` finding N3).
+(§2, earlier DHCP audit finding N3).
 
 ## 14. Posting status
 
