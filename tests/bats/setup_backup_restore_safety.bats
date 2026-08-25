@@ -240,6 +240,126 @@ teardown() {
     [ -d "$volume_store/lancache-ng_pdns-data/empty-dir" ]
 }
 
+@test "cmd_backup plus cmd_restore round-trips files and volume payloads into a fresh target and the second restore stays stable" {
+    src_install="$BATS_TEST_TMPDIR/source-install"
+    dst_install="$BATS_TEST_TMPDIR/restored-install"
+    backup_root="$BATS_TEST_TMPDIR/backups"
+    volume_store="$BATS_TEST_TMPDIR/volume-store"
+    mkdir -p "$src_install/certs" "$src_install/scripts" "$src_install/state/pdns-standard" "$backup_root" "$volume_store/lancache-ng_pdns-data"
+
+    cat > "$src_install/docker-compose.yml" <<'EOF'
+name: lancache-ng
+
+services:
+  proxy:
+    image: foo
+EOF
+    cat > "$src_install/.env" <<EOF
+LANCACHE_STATE_DIR=$src_install/state
+PDNS_STANDARD_DIR=$src_install/state/pdns-standard
+CACHE_DIR=$src_install/cache
+EOF
+    printf 'cert-data\n' > "$src_install/certs/ca.crt"
+    printf 'script-data\n' > "$src_install/scripts/helper.sh"
+    printf 'zone-data\n' > "$src_install/state/pdns-standard/example.zone"
+    printf 'volume-v1\n' > "$volume_store/lancache-ng_pdns-data/data.txt"
+    printf 'secret-v1\n' > "$volume_store/lancache-ng_pdns-data/.hidden"
+
+    install_missing_tools() { :; }
+    compose_volume_names() { printf '%s\n' "lancache-ng_pdns-data"; }
+    install_quickstart_compose_assets() { :; }
+    migrate_env_for_update() { :; }
+    validate_compose_config() { :; }
+    stack_running_file="$BATS_TEST_TMPDIR/stack-running"
+    export volume_store stack_running_file
+
+    docker() {
+        local args="$*"
+        case "$1" in
+            ps)
+                return 0
+                ;;
+            compose)
+                shift
+                [[ "$1" = "--env-file" ]] && shift 2
+                case "$1" in
+                    ps)
+                        [[ "${2:-}" = "-q" && -f "$stack_running_file" ]] && printf 'abc123\n'
+                        ;;
+                    stop)
+                        rm -f "$stack_running_file"
+                        ;;
+                    up)
+                        : > "$stack_running_file"
+                        ;;
+                    config)
+                        return 0
+                        ;;
+                    version)
+                        return 0
+                        ;;
+                esac
+                ;;
+            volume)
+                [[ "$2" = "create" ]] || return 1
+                mkdir -p "$volume_store/$3"
+                ;;
+            run)
+                local volume backup_mount target script
+                volume="${@: -1}"
+                for arg in "$@"; do
+                    case "$arg" in
+                        *:/backup|*:/backup:ro) backup_mount="${arg%%:/backup*}" ;;
+                        *:/volume|*:/volume:ro) target="${arg%%:/volume*}" ;;
+                    esac
+                done
+                script="$args"
+                if [[ "$script" == *"tar -cpf"* ]]; then
+                    tar -C "$volume_store/$volume" -cpf "$backup_mount/$volume.tar" .
+                else
+                    rm -rf "$volume_store/$volume"/* "$volume_store/$volume"/.[!.]* "$volume_store/$volume"/..?* 2>/dev/null || true
+                    mkdir -p "$volume_store/$volume"
+                    tar -C "$volume_store/$volume" -xpf "$backup_mount/$volume.tar"
+                fi
+                ;;
+        esac
+    }
+
+    cmd_backup --config --dest "$backup_root" "$src_install"
+    archive="$(find "$backup_root" -maxdepth 1 -name 'lancache-ng-config-*.tar.gz' | head -1)"
+    [ -n "$archive" ]
+
+    printf 'mutated\n' > "$volume_store/lancache-ng_pdns-data/data.txt"
+    printf 'mutated-hidden\n' > "$volume_store/lancache-ng_pdns-data/.hidden"
+
+    cmd_restore "$archive" "$dst_install"
+    [ -f "$dst_install/.env" ]
+    [ -f "$dst_install/certs/ca.crt" ]
+    [ -f "$dst_install/scripts/helper.sh" ]
+    [ -f "$dst_install/state/pdns-standard/example.zone" ]
+    [ "$(cat "$dst_install/certs/ca.crt")" = "cert-data" ]
+    [ "$(cat "$dst_install/scripts/helper.sh")" = "script-data" ]
+    [ "$(cat "$dst_install/state/pdns-standard/example.zone")" = "zone-data" ]
+    grep -qx "LANCACHE_STATE_DIR=$dst_install/state" "$dst_install/.env"
+    grep -qx "PDNS_STANDARD_DIR=$dst_install/state/pdns-standard" "$dst_install/.env"
+    [ "$(cat "$volume_store/lancache-ng_pdns-data/data.txt")" = "volume-v1" ]
+    [ "$(cat "$volume_store/lancache-ng_pdns-data/.hidden")" = "secret-v1" ]
+
+    first_env="$(cat "$dst_install/.env")"
+    first_zone="$(cat "$dst_install/state/pdns-standard/example.zone")"
+    first_volume="$(cat "$volume_store/lancache-ng_pdns-data/data.txt")"
+    first_hidden="$(cat "$volume_store/lancache-ng_pdns-data/.hidden")"
+
+    printf 'drifted\n' > "$volume_store/lancache-ng_pdns-data/data.txt"
+    printf 'drifted-hidden\n' > "$volume_store/lancache-ng_pdns-data/.hidden"
+
+    cmd_restore "$archive" "$dst_install"
+    [ "$(cat "$dst_install/.env")" = "$first_env" ]
+    [ "$(cat "$dst_install/state/pdns-standard/example.zone")" = "$first_zone" ]
+    [ "$(cat "$volume_store/lancache-ng_pdns-data/data.txt")" = "$first_volume" ]
+    [ "$(cat "$volume_store/lancache-ng_pdns-data/.hidden")" = "$first_hidden" ]
+}
+
 @test "pause_lancache_convergence_for_update records and disables the previous timer state" {
     systemd_state="$BATS_TEST_TMPDIR/systemd-state"
     cat > "$systemd_state" <<'EOF'

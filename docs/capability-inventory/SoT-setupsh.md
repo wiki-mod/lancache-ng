@@ -529,7 +529,10 @@ backup converges it exactly like `update` would.
 - `tests/bats/setup_restore_stale_env_local.bats`: the stale-`.env.local`
   helper, function-level, fixture-driven.
 - `tests/bats/setup_backup_restore_safety.bats`: shared with `backup` above
-  (project-name/volume-guard logic, Docker mocked).
+  (project-name/volume-guard logic, Docker mocked), and now also includes a
+  direct `cmd_backup` + `cmd_restore` archive round-trip into a fresh target
+  followed by the same restore a second time, asserting both file-state and
+  Docker-volume payload convergence.
 - `scripts/untracked/simulations/setup-cli-simulation.sh` Phase 4a: real CLI — backs up, restores
   the SAME already-converged backup, byte-diffs `.env` (same exclusion list
   as Phase 2b), asserts no-op.
@@ -546,11 +549,12 @@ backup converges it exactly like `update` would.
   reconverge path is additionally proven under a real failure-triggered
   rollback, not only under an explicit `setup.sh restore` invocation.
 
-What is still missing is a full archive round-trip proof: a test that creates a
-real backup archive, restores it into a fresh target, and then repeats the same
-restore against the same target while checking both file-state and Docker-volume
-state for convergence. The current CLI simulation proves important slices of
-restore behavior, but not that full archive round-trip end to end.
+The remaining restore-side gap is no longer the archive round-trip itself:
+that path now has a direct mocked-orchestrator proof in
+`setup_backup_restore_safety.bats`. What still remains is the narrower
+same-host foreign-volume-owner edge after another install has already removed
+its Compose containers, plus broader project-wide failure-path/classification
+work outside this one restore path.
 
 ---
 
