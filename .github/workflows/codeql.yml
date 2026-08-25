@@ -218,10 +218,13 @@ jobs:
 
   analyze:
     name: Analyze (${{ matrix.language }})
-    # Run advanced CodeQL on repository-owned runners to avoid GitHub-hosted minutes.
-    # CodeQL can compile Rust and is memory-heavy enough to avoid the light runner tier.
-    # Repository default setup must be disabled in GitHub Security settings before SARIF upload.
-    runs-on: [self-hosted, linux, lancache, codeql, lancache-heavy]
+    # What: runner selection comes from a repository Variable (JSON), not a
+    #   hardcoded self-hosted label list; unset -> GitHub-hosted ubuntu-latest.
+    # Why: GitHub-hosted's 4 cores/16GB removes the self-hosted pool's tight
+    #   memory ceiling (see the RAM cap below) and gets GitHub's own build
+    #   caching; kept switchable back via this Variable, not a code change.
+    # From: Issue #1095 (maintainer request, 2026-08-25)
+    runs-on: ${{ fromJSON(vars.CODEQL_RUNNER_LABELS || '"ubuntu-latest"') }}
     timeout-minutes: 120
     needs: detect-changes
     # Do not add a shared GitHub concurrency group here. GitHub retains only
@@ -369,9 +372,10 @@ jobs:
           dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
       - name: Start CodeQL memory monitor
         # What: samples host memory every 10s into a log file until stopped below.
-        # Why: the 512 MB/4-thread cap (see "Initialize CodeQL" below) is a
-        #   new, tight value; this makes real headroom visible per run
-        #   instead of only learning about it from the next OOM kill.
+        # Why: the RAM/thread cap below (see "Initialize CodeQL") is
+        #   configurable and was once a tight, OOM-driven value on
+        #   self-hosted; this makes real headroom visible per run instead of
+        #   only learning about it from the next OOM kill.
         # From: Issue #1095
         if: steps.admission.outputs.superseded != 'true' && (matrix.language != 'rust' || needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
         run: |
@@ -392,10 +396,14 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Initialize CodeQL
-        # What: caps CodeQL at 512 MB RAM / 4 threads; also applies to "Perform CodeQL Analysis" below.
-        # Why: unset, CodeQL defaults to most of the host's memory; the
-        #   smallest lancache-heavy host has ~3.6 GiB, no swap, and its Java
-        #   extractor was confirmed OOM-killed under that default (dmesg).
+        # What: RAM/thread cap come from repository Variables, defaulting to
+        #   values sized for GitHub-hosted (see runs-on above).
+        # Why: unset, CodeQL defaults to most of the host's memory -- the old
+        #   hardcoded 512MB/4-thread cap existed only because the smallest
+        #   self-hosted lancache-heavy host has ~3.6 GiB/no swap and was
+        #   confirmed OOM-killed at CodeQL's own default (dmesg). Both
+        #   Variables must be set back down if CODEQL_RUNNER_LABELS falls
+        #   back to that self-hosted pool.
         # From: Issue #1095
         #
         # 'actions' always analyzes; 'rust' only when Rust is actually relevant
@@ -406,8 +414,8 @@ jobs:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
           config-file: ./.github/codeql/codeql-config.yml
-          ram: "512"
-          threads: "4"
+          ram: ${{ vars.CODEQL_RAM_MB || '8192' }}
+          threads: ${{ vars.CODEQL_THREADS || '4' }}
 
       - name: Build DNS Rust crate for CodeQL
         if: steps.admission.outputs.superseded != 'true' && matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
@@ -451,7 +459,7 @@ jobs:
             kill "$(cat "$CODEQL_MEMLOG_PID_FILE")" 2>/dev/null || true
           fi
           if [ -n "${CODEQL_MEMLOG_FILE:-}" ] && [ -f "$CODEQL_MEMLOG_FILE" ]; then
-            echo "::group::CodeQL memory usage (${{ matrix.language }}, 10s samples, 512 MB cap)"
+            echo "::group::CodeQL memory usage (${{ matrix.language }}, 10s samples, ${{ vars.CODEQL_RAM_MB || '8192' }} MB cap)"
             cat "$CODEQL_MEMLOG_FILE"
             echo "::endgroup::"
           else
