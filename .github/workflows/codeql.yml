@@ -365,7 +365,15 @@ jobs:
           }}
         uses: ./.github/actions/configure-rust-sccache
         with:
-          mode: ${{ vars.SCCACHE_REDIS_MODE }}
+          # What: hardcoded "optional", not vars.SCCACHE_REDIS_MODE.
+          # Why: confirmed live moving to GitHub-hosted (Issue #1095): the
+          #   global Variable defaults to "required" for the self-hosted
+          #   pool, where sccache is always preinstalled -- ubuntu-latest
+          #   has no sccache binary at all, and "required" hard-fails the
+          #   job instead of the graceful skip this step's own comment
+          #   above already promises ("CodeQL must still run if ...
+          #   unavailable"). "optional" still uses sccache when present.
+          mode: optional
           redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
           key-prefix: lancache-codeql-${{ matrix.language }}
           dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
