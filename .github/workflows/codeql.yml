@@ -218,13 +218,13 @@ jobs:
 
   analyze:
     name: Analyze (${{ matrix.language }})
-    # What: runner selection comes from a repository Variable (JSON), not a
-    #   hardcoded self-hosted label list; unset -> GitHub-hosted ubuntu-latest.
+    # What: a plain true/false Variable picks GitHub-hosted (default,
+    #   unset/false) vs. the previous self-hosted pool (true) -- no JSON.
     # Why: GitHub-hosted's 4 cores/16GB removes the self-hosted pool's tight
     #   memory ceiling (see the RAM cap below) and gets GitHub's own build
     #   caching; kept switchable back via this Variable, not a code change.
     # From: Issue #1095 (maintainer request, 2026-08-25)
-    runs-on: ${{ fromJSON(vars.CODEQL_RUNNER_LABELS || '"ubuntu-latest"') }}
+    runs-on: ${{ vars.CODEQL_USE_SELF_HOSTED == 'true' && fromJSON('["self-hosted","linux","lancache","codeql","lancache-heavy"]') || 'ubuntu-latest' }}
     timeout-minutes: 120
     needs: detect-changes
     # Do not add a shared GitHub concurrency group here. GitHub retains only
@@ -424,6 +424,28 @@ jobs:
           config-file: ./.github/codeql/codeql-config.yml
           ram: ${{ vars.CODEQL_RAM_MB || '8192' }}
           threads: ${{ vars.CODEQL_THREADS || '4' }}
+
+      - name: Cache Cargo registry and target dirs for CodeQL's Rust build
+        # What: caches ~/.cargo plus each crate's target/ across runs, keyed
+        #   on the 3 Cargo.lock files.
+        # Why: this job's own sccache/sccache-dist acceleration is LAN-only
+        #   and unreachable from a GitHub-hosted runner (mode: optional
+        #   above already handles that gracefully) -- without this, every
+        #   run recompiles all 3 crates from scratch instead of only their
+        #   changed dependencies.
+        # From: Issue #1095 (maintainer request, 2026-08-25)
+        if: steps.admission.outputs.superseded != 'true' && matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            services/dns/nats-subscriber/target
+            services/ui/target
+            services/watchdog/target
+          key: cargo-codeql-${{ runner.os }}-${{ hashFiles('services/dns/nats-subscriber/Cargo.lock', 'services/ui/Cargo.lock', 'services/watchdog/Cargo.lock') }}
+          restore-keys: |
+            cargo-codeql-${{ runner.os }}-
 
       - name: Build DNS Rust crate for CodeQL
         if: steps.admission.outputs.superseded != 'true' && matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
