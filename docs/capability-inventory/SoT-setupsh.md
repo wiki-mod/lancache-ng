@@ -811,9 +811,21 @@ its coverage claim is narrower than the file's actual test suite.
   per-PR gate).
 - **#843** (this umbrella issue) — project-wide capability inventory.
 
-No open issue currently tracks the `cmd_secondary`/`cmd_debug`/
-`converge-reconcile` real-CLI test-coverage gaps identified in this
-inventory — these are new observations from this audit, not yet filed.
+The original audit recorded that no open issue tracked the
+`cmd_secondary`/`cmd_debug`/`converge-reconcile` real-CLI test-coverage gaps
+identified here. After the 2026-08-25 re-audit under issue #456 / PR #1673,
+that statement is now too strong: these gaps are once again part of #456's
+remaining umbrella scope, but they are still not split into their own
+narrower follow-up issues yet.
+
+The same 2026-08-25 re-audit also narrowed #456's practical remaining scope:
+the earlier landed slices from PR #641 (repeat-run proof for
+`migrate_env_for_update()`), PR #759 (NATS-secondary override preservation
+and `.env.local` restore convergence), and issue #640's writer-coverage guard
+are no longer open work. The meaningful setup-side remainder is now the
+coverage blind spot around `cmd_secondary`, `cmd_debug`,
+`cmd_converge_reconcile`, the systemd convergence pause/resume helpers, and
+the lack of a full archive/restore round-trip proof for backup/restore.
 
 ---
 
