@@ -346,16 +346,15 @@ and an already-matching timer state does nothing (`[[ "$ui_channel" !=
 "$current_channel" ]]` guards, `systemctl is-enabled --quiet` guards before
 enabling/disabling).
 
-**Test coverage**: `tests/bats/setup_ui_channel_override.bats` covers
-`lancache_ui_channel_override_is_valid` directly (pure function). No test
-covers `lancache_read_ui_settings_override` (the actual Docker-volume read,
-via a real or mocked container), `reconcile_auto_update_timer_state` (real
-`systemctl` interaction), or `cmd_converge_reconcile` itself end-to-end. No
-`*-simulation.sh` script exercises this command. This is a real, currently
-uncovered surface — narrower in practice than it looks, since the two things
-it writes (`LANCACHE_IMAGE_CHANNEL`, `AUTO_UPDATE_ENABLED`) are individually
-simple `set_env_key` calls already proven safe elsewhere, but the volume-read
-plumbing and the systemd-timer-state sync are genuinely untested.
+**Test coverage**: `tests/bats/setup_ui_channel_override.bats` still covers
+`lancache_ui_channel_override_is_valid` directly (pure function), and
+`tests/bats/setup_create_logs_for_issue.bats` now also executes
+`cmd_converge_reconcile` itself against a mocked `ui-data` volume and
+asserts that it folds Admin UI overrides into `.env` exactly once and leaves
+the second identical run byte-stable. The remaining gap is narrower:
+`lancache_read_ui_settings_override`'s Docker-volume read and
+`reconcile_auto_update_timer_state`'s real `systemctl` interaction are still
+only covered via mocks, not a live host/service simulation.
 
 ---
 
@@ -371,10 +370,12 @@ differ rather than guessing); host LAN IPv4 addresses; and a real
 
 **Idempotence**: trivially yes — pure read, no state written anywhere.
 
-**Test coverage: none found.** No `tests/bats/setup_debug*.bats` file exists
-(confirmed via `git ls-tree` against `tests/bats/`), no `*-simulation.sh`
-script invokes `setup.sh debug`, and it isn't called from any other tested
-codepath either. Coverage is limited to whatever `bash -n`/`shellcheck` catch
+**Test coverage**: `tests/bats/setup_create_logs_for_issue.bats` now executes
+`cmd_debug` directly against a mocked `docker compose`/`curl` environment and
+asserts that repeated runs stay read-only and never call mutating compose
+subcommands such as `up`, `pull`, `down`, or `restart`. There is still no
+live-stack simulation for this command, but the read-only contract and the
+actual command body now have direct behavior coverage.
 syntactically (AG-VAL-007) — the actual runtime behavior of this command
 (does `docker compose ps` actually run with the resolved env-file, does the
 legacy-cache-path branch actually trigger correctly, does the healthz curl
@@ -599,27 +600,16 @@ entry that is not expected to need wildcard-only coverage, since it is not
 itself a CDN wildcard host the way `steamcontent.com` is.)
 
 **Idempotence**: `--rotate` explicitly preserves anything not being rotated
-(`KEEP_KNOWN_GOOD_CONFIGS` from existing `.env` if not overridden); a
-non-`--rotate` run against an existing directory `die()`s rather than
-silently overwriting — but that guard only protects the **local** files.
-The registration POST (`${primary}/api/secondary/register`) fires
-unconditionally before `cmd_secondary` ever checks whether `secondary_dir`
-already exists, and the primary's handler
-(`register_secondary` in `services/ui/src/routes/secondaries.rs`) does an
-unconditional `INSERT OR REPLACE INTO secondaries` for that name on every
-call, generating and hashing a brand-new `nats_password` whether or not this
-is a genuinely new registration. So re-running `setup.sh secondary` without
-`--rotate` against an already-provisioned local directory still rotates that
-secondary's credential on the primary before the local `die()` fires: the
-operator sees a clean failure with no local files touched, but the primary
-now expects a password this secondary's untouched local `.env` doesn't have,
-silently breaking that secondary's NATS auth until it is re-registered (this
-time with `--rotate`) to pick up the new credential. This is the same class
-of primary-mutates-before-local-guard risk that the `--rotate` preflight
-comment above (issue #665) already documents for the `--rotate` path itself;
-this repeat-without-rotate path has no equivalent guard on the primary side.
+(`KEEP_KNOWN_GOOD_CONFIGS` from existing `.env` if not overridden). Since the
+2026-08-25 #456 follow-up in PR #1673, a non-`--rotate` run now resolves
+`secondary_dir` and performs the local-existing-directory guard BEFORE the
+registration POST, so a repeat invocation against an already-provisioned
+secondary no longer rotates credentials on the primary and then fails only
+locally. The still-mutating case is the explicit `--rotate` path itself,
+which is intentionally a credential refresh rather than a no-op, but its
+local file outputs now converge for a stable response.
 
-**Test coverage — mostly text-pattern, with one real-execution exception.**
+**Test coverage — now includes a real full-command path.**
 `tests/bats/setup_secondary_docker_compose.bats`'s docker-compose.yml group
 is a REGRESSION TEST FOR A TEXT PATTERN, not a functional test: it locates
 the `write_generated_runtime_file "${secondary_dir}/docker-compose.yml"
@@ -633,24 +623,26 @@ these invoke `cmd_secondary` as a function or run `setup.sh secondary` as a
 subprocess, and they prove nothing about the argument parsing, image-tag
 resolution precedence chain, or the `--rotate` logic.
 
-The one exception, added for issue #1558: this file's register_secondary
-JSON-body-escaping tests extract the real "Registering secondary" fragment
-(the escaping + JSON-body printf + curl call, verbatim from `cmd_secondary`'s
-own source) and execute it for real in a `bash -c` child against a mocked
-`curl`, asserting on the actual bytes the mock received. This is genuine
-execution of that one fragment, not a source-text grep — but it is still not
-`cmd_secondary` as a whole, nor `setup.sh secondary` as a subprocess; the
-argument parsing, JSON-response handling, image-tag resolution precedence
-chain, and `--rotate` logic remain untested at that level.
+This file's register_secondary JSON-body-escaping tests still extract the real
+"Registering secondary" fragment (the escaping + JSON-body printf + curl call,
+verbatim from `cmd_secondary`'s own source) and execute it against a mocked
+`curl`, asserting on the actual bytes the mock received. In addition, the same
+file now executes `cmd_secondary` as a whole against mocked `curl`/`docker`
+helpers: it proves a pre-existing local target is rejected BEFORE contacting
+the primary, and it proves a first run plus a second `--rotate` run converge
+the generated local `.env` and `docker-compose.yml` byte-for-byte for a stable
+response. The remaining untested edge is not the CLI command path anymore, but
+the live backend side effects of a real primary registration/rotation exchange
+outside the mocked test harness.
 `scripts/untracked/simulations/nats-secondary-auth-callout-simulation.sh` (#583) IS a real, live,
 multi-container integration test — but it drives the Admin UI's HTTP routes
 directly (`curl … /api/secondary/register`), deliberately bypassing
 `setup.sh secondary` entirely, to prove the NATS auth-callout backend
 property (unique per-secondary credentials, revocation on delete, rotation)
-independent of the CLI. **Net result: `cmd_secondary` as a whole — the
-actual bash command an operator runs — still has no test that executes it
-end-to-end**, beyond `bash -n`/shellcheck syntax checking, source-text
-greps, and the one real-execution fragment above.
+independent of the CLI. Net result: `cmd_secondary` itself now has direct
+full-command behavior coverage under mocks, while the backend's real
+multi-container auth-callout behavior remains covered by the separate
+simulation.
 
 ---
 
@@ -780,12 +772,12 @@ its coverage claim is narrower than the file's actual test suite.
 | `install` | ✅ `setup-cli-simulation.sh` Phase 1 | ✅ (dhcp_mode, image_platform_guard, quickstart_assets, channel_stable_nightly) | — | — |
 | `update` | ✅ Phase 2, 2b, 3 | ✅ (env_migration, update_idempotence, nats_secondary_override) | — | — |
 | `auto-update` | — (only inherits `update`'s coverage via shared `perform_stack_update_flow`) | ✅ (`setup_auto_update_gate.bats`, pure gate function only) | — | partial — the `cmd_auto_update` wrapper itself |
-| `converge-reconcile` | — | ✅ (`setup_ui_channel_override.bats`, one helper only) | — | mostly — volume-read + systemd-sync + the command body |
-| `debug` | — | — | — | ✅ complete |
+| `converge-reconcile` | — | ✅ (`setup_ui_channel_override.bats`, `setup_create_logs_for_issue.bats`) | — | partial — live volume-read + live systemd-sync still mocked |
+| `debug` | — | ✅ (`setup_create_logs_for_issue.bats`) | — | — |
 | `create-logs-for-issue` | — | ✅ (`setup_create_logs_for_issue.bats`, real functions, mocked docker) | — | — (real Docker E2E not covered, but function coverage is strong) |
 | `backup` | ✅ (as setup step in Phase 3/4a/4b) | ✅ (`setup_backup_restore_safety.bats`) | — | — |
 | `restore` | ✅ Phase 4a, 4b, + indirectly via rollback in Phase 3 | ✅ (`setup_restore_stale_env_local.bats`, `setup_backup_restore_safety.bats`) | — | — |
-| `secondary` | — (NATS backend integration test bypasses the CLI) | — | ✅ (`setup_secondary_docker_compose.bats`: mostly source-text greps, plus one real-execution fragment test for #1558) | effectively ✅ — `cmd_secondary` as a whole never executes end-to-end in any test |
+| `secondary` | — (NATS backend integration test still bypasses the CLI) | ✅ (`setup_secondary_docker_compose.bats`, mocked full-command path) | ✅ (`setup_secondary_docker_compose.bats`) | partial — live primary/backend side effects still separate |
 | `update-ip` | — | ✅ (`setup_update_ip_install_dir.bats`, path-resolution only) | — | partial — prompt flow + restart |
 | `reset-to-last-known-good-config` | ✅ (`setup-reset-kea-config-simulation.sh`, `kea` target only) | — | — | `dns`/`pdns` target: unimplemented (not a test gap, #628/#836) |
 | `help` | N/A (static text) | N/A | N/A | N/A |
@@ -804,8 +796,8 @@ its coverage claim is narrower than the file's actual test suite.
   regardless of `install_dir`; fixed via `resolve_update_ip_config_paths`,
   covered by `setup_update_ip_install_dir.bats` (function-level only).
 - **#652** (CLOSED) — secondary's generated compose heredoc dropped its
-  healthcheck block; the ONLY regression test for `cmd_secondary` guards
-  exactly this and nothing else.
+  healthcheck block; still one of the regression tests for `cmd_secondary`,
+  but no longer the only direct coverage there.
 - **#762** — `create-logs-for-issue` (this whole command originates here).
 - **#763** — `reset-to-last-known-good-config` (this whole command
   originates here); Kea target implemented + E2E tested, DNS/PDNS target
@@ -828,19 +820,22 @@ its coverage claim is narrower than the file's actual test suite.
 The original audit recorded that no open issue tracked the
 `cmd_secondary`/`cmd_debug`/`converge-reconcile` real-CLI test-coverage gaps
 identified here. After the 2026-08-25 re-audit under issue #456 / PR #1673,
-that statement is no longer true: issue #456 itself now explicitly carries
-those setup-side command-path coverage gaps together with the backup/restore
-round-trip and foreign-volume-owner remainder, instead of leaving them only
-implicit in the older umbrella wording.
+that statement is now historically outdated: those setup-side command-path
+gaps have been worked down materially in the PR itself, and the practical
+remaining #456 scope has shifted away from those commands toward the still-open
+backup/restore round-trip and broader umbrella-classification/failure-path
+rest.
 
 The same 2026-08-25 re-audit also narrowed #456's practical remaining scope:
 the earlier landed slices from PR #641 (repeat-run proof for
 `migrate_env_for_update()`), PR #759 (NATS-secondary override preservation
 and `.env.local` restore convergence), and issue #640's writer-coverage guard
-are no longer open work. The meaningful setup-side remainder is now the
-coverage blind spot around `cmd_secondary`, `cmd_debug`,
-`cmd_converge_reconcile`, the systemd convergence pause/resume helpers, and
-the lack of a full archive/restore round-trip proof for backup/restore.
+are no longer open work. After PR #1673's current test/guard follow-ups, the
+meaningful concrete remainder is centered on the lack of a full
+archive/restore round-trip proof, the already-`down` foreign-volume-owner edge,
+and the larger umbrella-classification/contract/failure-path rest rather than
+on `cmd_secondary`, `cmd_debug`, or `cmd_converge_reconcile` command-path
+coverage themselves.
 
 ---
 

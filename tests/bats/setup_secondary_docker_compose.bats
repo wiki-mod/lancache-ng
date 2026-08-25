@@ -109,6 +109,35 @@ printf %s \"\$response\" > \"\$OUT_RESPONSE\"
     ' _ "$test_token" "$test_name" "$test_listen_ip" "$fragment" "$status_out" "$response_out"
 }
 
+run_cmd_secondary_full() {
+    local run_dir="$1"
+    shift
+    local helper_file="$BATS_TEST_TMPDIR/setup-secondary-full-helper.sh"
+    {
+        printf '%s\n' 'print_ok() { printf "OK: %s\n" "$*"; }'
+        printf '%s\n' 'print_step() { printf "STEP: %s\n" "$*"; }'
+        printf '%s\n' 'print_warn() { printf "WARN: %s\n" "$*" >&2; }'
+        printf '%s\n' 'print_error() { printf "ERR: %s\n" "$*" >&2; }'
+        printf '%s\n' 'die() { printf "%s\n" "$*" >&2; exit 9; }'
+        printf '%s\n' 'DEFAULT_UI_SESSION_TTL_SECONDS=86400'
+        printf '%s\n' 'MAX_UI_SESSION_TTL_SECONDS=31536000'
+        printf 'SCRIPT_DIR=%q\n' "$repo_root"
+        awk '
+            /^is_valid_ipv4\(\)/ { capture = 1 }
+            /^# ── Dispatch subcommands/ { capture = 0 }
+            capture { print }
+        ' "$repo_root/setup.sh"
+    } > "$helper_file"
+
+    # shellcheck source=/dev/null
+    source "$helper_file"
+    assert_prebuilt_image_platform_supported() { :; }
+    assert_resolved_image_tag_platform_supported() { :; }
+    resolve_lancache_image_tag() { printf "%s\n" "${LANCACHE_IMAGE_TAG:-latest}"; }
+    cd "$run_dir"
+    cmd_secondary "$@"
+}
+
 @test "cmd_secondary heredoc in setup.sh contains healthcheck block" {
     # What: Asserts the generated secondary docker-compose.yml heredoc
     #   includes a healthcheck block, in the right position.
@@ -362,4 +391,84 @@ printf %s \"\$response\" > \"\$OUT_RESPONSE\"
     run run_register_secondary_fragment 'tok' 'sec1' '192.168.1.50' "$status_out" "$response_out"
     [ "$status" -eq 9 ]
     [[ "$output" == *"DIE: Failed to connect to primary server"* ]]
+}
+
+@test "cmd_secondary refuses an existing secondary directory before contacting the primary" {
+    run_dir="$BATS_TEST_TMPDIR/full-secondary-existing"
+    mkdir -p "$run_dir/sec-a"
+    cat > "$run_dir/sec-a/.env" <<'EOF'
+PDNS_API_KEY=old
+EOF
+    cat > "$run_dir/sec-a/docker-compose.yml" <<'EOF'
+services: {}
+EOF
+    : > "$MOCK_CURL_LOG"
+
+    cat > "$mock_bin/docker" <<'MOCK'
+#!/usr/bin/env bash
+if [[ "$1" = "compose" && "$2" = "version" ]]; then exit 0; fi
+if [[ "$1" = "compose" ]]; then exit 0; fi
+MOCK
+    chmod +x "$mock_bin/docker"
+
+    run run_cmd_secondary_full "$run_dir" \
+        --primary http://primary.example:8080 \
+        --token tok \
+        --name sec-a \
+        --proxy-ip 192.168.1.10 \
+        --listen-ip 192.168.1.50
+    [ "$status" -eq 9 ]
+    [[ "$output" == *"already exists"* ]]
+    [ ! -s "$MOCK_CURL_LOG" ]
+}
+
+@test "cmd_secondary full command path writes converged local files and a second --rotate run keeps them stable" {
+    run_dir="$BATS_TEST_TMPDIR/full-secondary-rotate"
+    mkdir -p "$run_dir"
+    docker_log="$BATS_TEST_TMPDIR/cmd-secondary-docker.log"
+    export docker_log
+    : > "$MOCK_CURL_LOG"
+
+    cat > "$mock_bin/docker" <<'MOCK'
+#!/usr/bin/env bash
+if [[ "$1" = "compose" && "$2" = "version" ]]; then exit 0; fi
+if [[ "$1" = "compose" ]]; then
+  printf '%s\n' "$*" >> "${docker_log:?}"
+  exit 0
+fi
+exit 0
+MOCK
+    chmod +x "$mock_bin/docker"
+
+    export LANCACHE_IMAGE_TAG="sha-test-secondary"
+    export MOCK_CURL_BODY='{"nats_url":"nats://primary.example:4222","nats_user":"sec-a","nats_password":"secret","consumer_name":"sec-a","pdns_api_key":"pdns-secret","ddns_tsig_key":"transfer-secret","dns_xfr_primary":"192.168.1.10:5300"}'
+
+    run run_cmd_secondary_full "$run_dir" \
+        --primary http://primary.example:8080 \
+        --token tok \
+        --name sec-a \
+        --proxy-ip 192.168.1.10 \
+        --listen-ip 192.168.1.50
+    [ "$status" -eq 0 ]
+
+    first_env="$(cat "$run_dir/sec-a/.env")"
+    first_compose="$(cat "$run_dir/sec-a/docker-compose.yml")"
+    [[ "$first_env" == *"PROXY_IP=192.168.1.10"* ]]
+    [[ "$first_env" == *"LISTEN_IP=192.168.1.50"* ]]
+    [[ "$first_env" == *"LANCACHE_IMAGE_TAG=sha-test-secondary"* ]]
+    [[ "$first_compose" == *"dns-secondary:"* ]]
+
+    run run_cmd_secondary_full "$run_dir" \
+        --primary http://primary.example:8080 \
+        --token tok \
+        --name sec-a \
+        --proxy-ip 192.168.1.10 \
+        --listen-ip 192.168.1.50 \
+        --rotate
+    [ "$status" -eq 0 ]
+
+    second_env="$(cat "$run_dir/sec-a/.env")"
+    second_compose="$(cat "$run_dir/sec-a/docker-compose.yml")"
+    [ "$second_env" = "$first_env" ]
+    [ "$second_compose" = "$first_compose" ]
 }

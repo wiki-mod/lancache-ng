@@ -6365,6 +6365,21 @@ EOF
     print_ok "Secondary DNS bind IP: ${listen_ip}"
     assert_prebuilt_image_platform_supported
 
+    secondary_dir="${name}"
+    if [[ "$rotate" -eq 1 ]]; then
+        if [[ "$(basename "$PWD")" = "$name" && -f .env && -f docker-compose.yml ]]; then
+            secondary_dir="."
+        elif [[ ! -d "$secondary_dir" ]]; then
+            die "No existing secondary directory '${secondary_dir}' found. Run --rotate from its parent directory or from inside the existing '${name}' directory."
+        fi
+    else
+        if [[ "$(basename "$PWD")" = "$name" ]]; then
+            die "Current directory already matches secondary '${name}'; rerun with --rotate to update the secondary files"
+        elif [[ -d "$secondary_dir" ]]; then
+            die "Directory '${secondary_dir}' already exists; rerun with --rotate to update the secondary files"
+        fi
+    fi
+
     # --rotate against an existing secondary directory can resolve
     # registry/prefix/channel/tag entirely from local config (an explicit
     # LANCACHE_IMAGE_* env var or the existing .env) with no need for the
@@ -6380,10 +6395,7 @@ EOF
     # without the primary's response (e.g. a still-mutable, non-pinned
     # channel with no LANCACHE_IMAGE_TAG override).
     if [[ "$rotate" -eq 1 ]]; then
-        preflight_dir="${name}"
-        if [[ "$(basename "$PWD")" = "$name" && -f .env && -f docker-compose.yml ]]; then
-            preflight_dir="."
-        fi
+        preflight_dir="$secondary_dir"
         preflight_env_file=""
         [[ -f "${preflight_dir}/.env" ]] && preflight_env_file="${preflight_dir}/.env"
 
@@ -6519,16 +6531,6 @@ EOF
         die "Invalid response from primary server; missing field(s): ${missing_fields[*]}"
     fi
 
-    secondary_dir="${name}"
-    if [[ "$rotate" -eq 1 ]]; then
-        if [[ "$(basename "$PWD")" = "$name" && -f .env && -f docker-compose.yml ]]; then
-            secondary_dir="."
-        elif [[ ! -d "$secondary_dir" ]]; then
-            die "No existing secondary directory '${secondary_dir}' found. Run --rotate from its parent directory or from inside the existing '${name}' directory."
-        fi
-    elif [[ -d "$secondary_dir" ]]; then
-        die "Directory '${secondary_dir}' already exists; rerun with --rotate to update the secondary files"
-    fi
     mkdir -p "$secondary_dir"
 
     existing_env_file=""
