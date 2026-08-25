@@ -827,9 +827,10 @@ its coverage claim is narrower than the file's actual test suite.
 The original audit recorded that no open issue tracked the
 `cmd_secondary`/`cmd_debug`/`converge-reconcile` real-CLI test-coverage gaps
 identified here. After the 2026-08-25 re-audit under issue #456 / PR #1673,
-that statement is no longer true: those setup-side command-path coverage gaps
-are now split into issue #1674, and the backup/restore round-trip plus
-foreign-volume-owner remainder is split into issue #1675.
+that statement is no longer true: issue #456 itself now explicitly carries
+those setup-side command-path coverage gaps together with the backup/restore
+round-trip and foreign-volume-owner remainder, instead of leaving them only
+implicit in the older umbrella wording.
 
 The same 2026-08-25 re-audit also narrowed #456's practical remaining scope:
 the earlier landed slices from PR #641 (repeat-run proof for
