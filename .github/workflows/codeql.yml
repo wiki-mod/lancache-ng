@@ -365,21 +365,25 @@ jobs:
           }}
         uses: ./.github/actions/configure-rust-sccache
         with:
-          # What: hardcoded "optional" (not vars.SCCACHE_REDIS_MODE) and no
-          #   dist-scheduler-url/dist-auth-token at all.
-          # Why: confirmed live moving to GitHub-hosted (Issue #1095): the
-          #   global Variables target the self-hosted pool, where sccache is
-          #   preinstalled and the LAN-only sccache-dist scheduler is
-          #   reachable -- ubuntu-latest has neither. configure-rust-sccache
-          #   only takes its graceful "no sccache binary" skip path when
-          #   dist-scheduler-url is ALSO empty (confirmed live, run
-          #   32857132833: "optional" alone still hard-failed while the
-          #   global scheduler URL was passed through). Dropping both here
-          #   restores the skip this step's own comment already promises
-          #   ("CodeQL must still run if ... unavailable").
+          # What: hardcoded "optional" (not vars.SCCACHE_REDIS_MODE); dist-
+          #   scheduler-url/dist-auth-token stay wired (build-push.yml's own
+          #   guard requires both to appear here) but resolve empty unless
+          #   CODEQL_USE_SELF_HOSTED is true.
+          # Why: the global Variables/secrets target the self-hosted pool,
+          #   where the LAN-only sccache-dist scheduler is reachable --
+          #   ubuntu-latest has neither that access nor an sccache binary.
+          #   configure-rust-sccache only takes its graceful "no sccache
+          #   binary" skip path when dist-scheduler-url is ALSO empty
+          #   (confirmed live, run 32857132833: "optional" alone still
+          #   hard-failed while the global scheduler URL was passed
+          #   through) -- resolving it empty on GitHub-hosted restores the
+          #   skip this step's own comment already promises.
+          # From: Issue #1095
           mode: optional
           redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
           key-prefix: lancache-codeql-${{ matrix.language }}
+          dist-scheduler-url: ${{ vars.CODEQL_USE_SELF_HOSTED == 'true' && vars.SCCACHE_DIST_SCHEDULER_URL || '' }}
+          dist-auth-token: ${{ vars.CODEQL_USE_SELF_HOSTED == 'true' && secrets.SCCACHE_DIST_AUTH_TOKEN || '' }}
       - name: Start CodeQL memory monitor
         # What: samples host memory every 10s into a log file until stopped below.
         # Why: the RAM/thread cap below (see "Initialize CodeQL") is
