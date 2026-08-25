@@ -13,15 +13,16 @@
 # actions, now or after a future re-pin. This script scans ALL of them,
 # proactively, on every run.
 #
-# It also enforces two #1095 centralization invariants over the same scan
-# scope:
+# It also enforces two action-pin centralization invariants over the same
+# scan scope (see this file's own "repeats third-party action ref" and
+# "is pinned to multiple refs" sections below for the From: pointer):
 #   1. one file must not repeat the exact same third-party `uses:` literal
 #      more than once -- a YAML anchor/alias or an existing internal owner
 #      action must carry that one maintenance point instead of N raw copies.
 #   2. one third-party action key (`owner/repo[/subpath]`) must not drift to
 #      multiple pinned refs across .github/** -- that is exactly the
 #      "same dependency, different versions, nobody sees it anymore" failure
-#      mode #1095 is meant to stop.
+#      mode this guard is meant to stop.
 #
 # Local composite actions (`uses: ./.github/actions/<name>`) are resolved by
 # reading their action.yml/action.yaml straight off disk -- no GitHub API
@@ -298,8 +299,9 @@ for exact_file_key in "${!literal_ref_counts_by_file[@]}"; do
 done
 
 # What: rejects one external action key pinned to multiple distinct refs.
-# Why: #1095's drift class is not duplication alone; the real maintenance
+# Why: this drift class is not duplication alone; the real maintenance
 #   hazard is the same dependency silently splitting across versions.
+# From: Issue #1095
 for action_key in "${!ref_counts_by_key[@]}"; do
   count="${ref_counts_by_key[$action_key]}"
   if [ "$count" -le 1 ]; then
