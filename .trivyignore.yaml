@@ -11,6 +11,21 @@
 # unreachable; an omitted `status` marks an accepted, tracked risk.
 # `expired_at` is this entry's next mandatory re-review date.
 vulnerabilities:
+  - id: CVE-2026-14456
+    statement: >-
+      What: Accepts CVE-2026-14456 (OpenSSL QUIC-server unbounded-memory-
+      growth DoS) as tracked risk for `libssl3`/`libcrypto3` across every
+      Alpine-based first-party image (transitive dependency of `apk-tools`
+      itself, present regardless of any image's own TLS/QUIC usage).
+
+      Why: Time-boxed maintainer-authorized exception while
+      Issue #1095's apk-upgrade cache-bust fix (PR #1680) propagates
+      through every affected image's next rebuild; no `paths:` scoping
+      applies since Trivy's Alpine os-pkgs finding class carries no
+      PkgPath. None of this project's services run a QUIC server.
+
+      From: Issue #1095
+    expired_at: 2026-09-30
   - id: CVE-2026-34040
     paths:
       - usr/local/lib/docker/cli-plugins/docker-compose
