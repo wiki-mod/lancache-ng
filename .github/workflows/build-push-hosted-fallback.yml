@@ -278,6 +278,7 @@ jobs:
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
+            APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
           push: "true"
           tags: ${{ steps.meta.outputs.tags }}
           labels: |
