@@ -1,7 +1,7 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Validates sccache, sccache-dist, distcc, dns/ui ccache-over-distcc.
+# Validates sccache, sccache-dist, distcc, dns/ui/watchdog ccache-over-distcc.
 name: Rust acceleration infrastructure preflight
 description: Validate Rust build acceleration infrastructure outside BuildKit cacheable Docker build layers.
 
@@ -24,7 +24,7 @@ inputs:
   ccache-redis-file:
     description: |
       Optional file containing the ccache Redis remote-storage endpoint for
-      services/dns/Dockerfile's and services/ui/Dockerfile's ccache-over-distcc
+      services/dns, services/ui, and services/watchdog's ccache-over-distcc
       C-dependency cache. Reuses the same Redis URL as redis-file -- see
       build-push.yml's own comment on why this is not a second secret.
     required: false
@@ -139,13 +139,10 @@ runs:
               # Why: a real diagnostic sharing this line must still fail closed.
               # From: Issue #1633
               local benign_pattern='^distcc\[[0-9]+\] (ERROR|WARNING): nonblocking connect to [0-9]{1,3}(\.[0-9]{1,3}){3}:[0-9]+ failed: [A-Za-z0-9 ,.()'\''-]+$'
-              # What: also tolerates one host hanging mid-transfer (accepts the
-              #   connection, then never answers) instead of refusing cleanly.
-              # Why: confirmed live -- this shape is the same
-              #   "one host is bad, others are fine" case the pattern above
-              #   already tolerates -- only the failure mode differs (timeout
-              #   vs refused connect); the escalation ladder this preflight
-              #   guards still succeeded via a live host either way.
+              # What: also tolerates one host hanging (accepts, never answers).
+              # Why: same "one host bad, others fine" case as the pattern
+              #   above, just a timeout instead of a refused connect -- the
+              #   compile still succeeded via a live host either way.
               # From: Issue #1095
               benign_pattern+='|^distcc\[[0-9]+\] \(dcc_select_for_read\) ERROR: IO timeout$'
               benign_pattern+='|^distcc\[[0-9]+\] \(dcc_r_token_int\) ERROR: read failed while waiting for token "[A-Z]+"$'
@@ -443,14 +440,14 @@ runs:
                 echo "[INFO] plain cc fallback completed."
               fi
 
-              # What: validates dns/ui ccache-over-distcc via Redis write+read.
+              # What: validates dns/ui/watchdog ccache-over-distcc via Redis write+read.
               # Why: proves the round trip, not just local-disk caching.
               # From: Issue #887
               if [ -s /run/lancache/ccache-redis-url ] && [ "$distcc_enabled" = "1" ] && [ -n "${DISTCC_HOSTS:-}" ]; then
                 real_cc="$(PATH="$original_path" command -v cc)"
                 ccache_redis_endpoint="$(cat /run/lancache/ccache-redis-url)"
                 # What: normalizes a schemeless redis endpoint to redis://.
-                # Why: ccache rejects a bare host:port; matches dns/ui rule.
+                # Why: ccache rejects a bare host:port; matches dns/ui/watchdog rule.
                 # From: Issue #887
                 case "$ccache_redis_endpoint" in
                   redis://*|redis+unix:*) ;;

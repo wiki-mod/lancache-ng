@@ -5466,17 +5466,16 @@ jobs:
             echo "SECRET_FILES"
           } >> "$GITHUB_OUTPUT"
 
-      # What: produces the ccache_redis_url secret for dns, ui, watchdog, utilities.
-      # Why: each mounts it under a distinct BuildKit secret id, reusing
-      #   sccache's own repository secret. ui/watchdog were missing here
-      #   despite both implementing configure_ccache() -- their ccache
-      #   layer silently never activated in production.
+      # What: produces the ccache_redis_url secret for utilities only.
+      # Why: dns/ui/watchdog already get it from the generic "Prepare Rust
+      #   acceleration secret files" step above; duplicating it here too
+      #   created a second, conflicting ccache_redis_url secret-file entry.
       # From: Issue #1095 (G15 | #1556)
-      - name: Prepare ccache Redis endpoint (dns + ui + watchdog + utilities C-dependency cache)
+      - name: Prepare ccache Redis endpoint (utilities C-dependency cache)
         if: >-
           ${{
             steps.should-build.outputs.should-build == 'true' &&
-            (matrix.service == 'dns' || matrix.service == 'ui' || matrix.service == 'watchdog' || matrix.service == 'utilities') &&
+            matrix.service == 'utilities' &&
             github.actor != 'dependabot[bot]' &&
             github.event_name != 'pull_request'
           }}
@@ -5524,13 +5523,12 @@ jobs:
           redis-file: ${{ steps.sccache-secret.outputs.redis-file }}
           dist-config-file: ${{ steps.sccache-secret.outputs.dist-config-file }}
           distcc-hosts-file: ${{ steps.sccache-secret.outputs.distcc-hosts-file }}
-          # What: wired for dns, ui, and watchdog -- all three implement
-          #   configure_ccache() in their own Dockerfile.
-          # Why: reuses ccache-redis-secret's own output instead of a second
-          #   Redis-endpoint read; utilities is excluded here since it never
-          #   runs this Rust preflight (matrix.rust is false for it).
+          # What: sccache-secret already produces this for every Rust
+          #   service (dns, ui, watchdog all implement configure_ccache()).
+          # Why: one source of truth instead of a second, duplicate
+          #   Redis-endpoint read via ccache-redis-secret.
           # From: Issue #1095 (G15)
-          ccache-redis-file: ${{ (matrix.service == 'dns' || matrix.service == 'ui' || matrix.service == 'watchdog') && steps['ccache-redis-secret'].outputs['redis-file'] || '' }}
+          ccache-redis-file: ${{ steps.sccache-secret.outputs['ccache-redis-file'] }}
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
           build-network: ${{ env.RUST_ACCELERATION_NETWORK }}
           platform: linux/amd64
