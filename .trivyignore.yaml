@@ -24,7 +24,7 @@ vulnerabilities:
       Alpine os-pkgs finding class carries no PkgPath. None of this
       project's services run a QUIC server.
 
-      From: Issue #1095
+      From: Issue #1095, PR #1685
     expired_at: 2026-09-30
   - id: CVE-2026-34040
     paths:
