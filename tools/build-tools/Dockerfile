@@ -121,17 +121,10 @@ LABEL org.opencontainers.image.description="Prebuilt lancache-ng CI and develope
 ARG GIT_VERSION=2.47.3
 ARG GIT_SHA256=9c2eb1250781b3e5bfef098572d07fdf132d67e6c065e4307332ade9819a1501
 # What: pins the same curl release/checksum services/utilities/Dockerfile
-# builds, rebuilt natively here for glibc (that image is Alpine/musl --
-# its static libcurl.a cannot be safely linked into a glibc git binary).
-# Why: real per-CVE verification against curl.se's own advisory pages
-# (not Debian's tracker) confirms all 4 currently-tracked curl CVE IDs
-# (12064/8286/8458/8927) are genuinely fixed at 8.21.0, not merely
-# unreachable for this project's usage -- Debian's trixie-backports
-# package still reports them as affected purely because that suite isn't
-# tracked as a first-class channel by Debian's Security Tracker (see the
-# existing CVE-2026-12064 entry in .trivyignore.yaml for the same,
-# already-documented gap). Building the real upstream release directly
-# avoids that tracker gap entirely rather than working around it.
+# builds, rebuilt natively here for glibc (not that image's static musl lib).
+# Why: verified against curl.se's own advisories, all 4 tracked curl CVEs
+# are fixed at 8.21.0 -- Debian trixie-backports still flags them since it
+# isn't a first-class Security-Tracker channel (see .trivyignore.yaml).
 # From: Issue #1304 | Issue #1556
 ARG CURL_VERSION=8.21.0
 ARG CURL_SHA256=aa1b66a70eace83dc624508745646c08ae561de512ab403adffb93ac87fc72e6
@@ -427,7 +420,7 @@ RUN --mount=type=secret,id=distcc_potential_hosts \
     extract_remote_toolchain_id() { \
       rm -f /tmp/ccache-remote-toolchain-id; \
       if command -v readelf >/dev/null 2>&1; then \
-        readelf_comment_section="$(readelf -p .comment "$1" 2>/dev/null)"; \
+        readelf_comment_section="$(readelf -p .comment "$1" 2>/dev/null || true)"; \
         sed -n 's/^ *\[[^]]*\] *//p' <<<"$readelf_comment_section" > /tmp/ccache-remote-toolchain-id; \
       fi; \
     }; \

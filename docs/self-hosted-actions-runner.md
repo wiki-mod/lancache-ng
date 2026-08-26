@@ -226,11 +226,14 @@ When `SCCACHE_REDIS_MODE=required`, the runner must have `sccache` available in
 `PATH`. Install it from source and keep the installed binary on the runner
 service account's `PATH`.
 
-### ccache reuse for services/dns's and services/ui's C-dependency compiles
+### ccache reuse for services/dns's, services/ui's, and build-tools's C-dependency compiles
 
 `services/dns/Dockerfile`'s and `services/ui/Dockerfile`'s C-dependency
 compile paths (`ring`, via distcc) can layer `ccache` in front of distcc when
-both a distcc host list and a ccache Redis endpoint are configured. This is
+both a distcc host list and a ccache Redis endpoint are configured. Since
+issue #1304/PR #1661, `tools/build-tools/Dockerfile`'s from-source curl/git
+compile inherits the same mechanism, the same secrets, and the same
+single-probed-host limitation described below. This is
 not a separate secret: it automatically reuses the same `SCCACHE_REDIS_URL`
 value already configured for `sccache` above, on the same Redis instance,
 whenever `DISTCC_POTENTIAL_HOSTS` is also set — `ccache`'s own fixed `ccache:`

@@ -240,6 +240,44 @@ jobs:
             echo "::notice::No distcc hosts secret prepared for the git build (DISTCC_POTENTIAL_HOSTS unset)."
           fi
 
+      # What: host network only when the ccache/distcc secrets above were
+      #   actually prepared; bridge otherwise.
+      # Why: mirrors build-push.yml's identical RUST_ACCELERATION_NETWORK
+      #   selection so a broken Redis/distcc endpoint is checked the same
+      #   way here as for the matrix services.
+      # From: Issue #1304 | PR #1661
+      - name: Select acceleration network for the standalone build
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          network=bridge
+          if [ -n "${{ steps.ccache-distcc-secret.outputs.ccache-redis-file }}" ] || \
+             [ -n "${{ steps.ccache-distcc-secret.outputs.distcc-hosts-file }}" ]; then
+            network=host
+          fi
+          echo "RUST_ACCELERATION_NETWORK=$network" >> "$GITHUB_ENV"
+
+      # What: also runs for this standalone schedule/workflow_dispatch
+      #   route, not just build-push.yml's matrix -- see that file's own
+      #   identical step for the full rationale.
+      # Why: without this, a broken Redis/distcc endpoint on this route
+      #   hides behind the Dockerfile's own local-compile fallback instead
+      #   of being surfaced as a real infrastructure finding.
+      # From: Issue #1304 | PR #1661
+      - name: Validate acceleration infrastructure outside BuildKit cache
+        if: github.event_name != 'pull_request'
+        uses: ./.github/actions/rust-acceleration-preflight
+        with:
+          service: build-tools
+          distcc-hosts-file: ${{ steps.ccache-distcc-secret.outputs.distcc-hosts-file }}
+          ccache-redis-file: ${{ steps.ccache-distcc-secret.outputs.ccache-redis-file }}
+          # build-tools-image deliberately omitted: this job builds a NEW
+          # build-tools image, so the action's own already-published
+          # :latest fallback (not this job's own in-progress output) is
+          # the correct choice here.
+          build-network: ${{ env.RUST_ACCELERATION_NETWORK }}
+          platform: linux/amd64
+
       # What: builds one local amd64 candidate for fork PRs.
       # Why: fork PRs cannot publish repository packages, but still need a
       #   candidate to run the same smoke/vulnerability policy against.
