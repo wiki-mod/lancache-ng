@@ -31,7 +31,15 @@ LABEL org.opencontainers.image.description="Combined fluent-bit + syslog-ng firs
 # Why: 3.20 was an unintentional scaffold-commit inconsistency -- every
 # other first-party service already pins 3.24.
 # From: Issue #1554 | PR #1555
-RUN apk add --no-cache \
+# What: declares APT_CACHE_BUST right before the RUN it busts.
+# Why: without this, BuildKit's cache has no wall-clock expiry and can
+#   replay a stale apk index forever; see tools/build-tools/Dockerfile's
+#   identical ARG for the full rationale.
+# From: Issue #1095
+ARG APT_CACHE_BUST=""
+RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
+    apk upgrade --no-cache && \
+    apk add --no-cache \
         syslog-ng \
         syslog-ng-json \
         bash \
