@@ -120,7 +120,14 @@ FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec4
 # Why: apk-installed packages register in this image's own package
 # database, keeping them Trivy-visible.
 # From: Issue #1556
-RUN apk upgrade --no-cache && \
+# What: declares APT_CACHE_BUST right before the RUN it busts.
+# Why: without this, BuildKit's cache has no wall-clock expiry and can
+#   replay a stale `apk upgrade` forever; see tools/build-tools/Dockerfile's
+#   identical ARG for the full rationale.
+# From: Issue #1095
+ARG APT_CACHE_BUST=""
+RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
+    apk upgrade --no-cache && \
     apk add --no-cache \
       nano \
       lsof \

@@ -5336,17 +5336,6 @@ jobs:
 
           echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
 
-      # What: an ISO-week cache-bust value for build-tools's
-      # APT_CACHE_BUST build-arg below.
-      # Why: this job's Buildx cache has no wall-clock expiry.
-      # From: Issue #1095 | PR #1619
-      - name: Compute apt cache-bust value
-        if: steps.should-build.outputs.should-build == 'true'
-        id: apt-cache-bust
-        run: |
-          set -euo pipefail
-          echo "value=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
-
       - name: Prepare Rust acceleration secret files
         if: >-
           ${{
@@ -5594,7 +5583,7 @@ jobs:
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
-            APT_CACHE_BUST=${{ steps.apt-cache-bust.outputs.value }}
+            APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
           network: ${{ env.RUST_BUILDX_NETWORK }}
           allow: ${{ env.RUST_BUILDX_NETWORK == 'host' && 'network.host' || '' }}
           push: ${{ github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) }}
@@ -6220,16 +6209,6 @@ jobs:
 
           echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
 
-      # What: build-arm64's own ISO-week cache-bust value, mirroring
-      # build's identical step.
-      # Why: this job runs on a separate runner with no shared state.
-      # From: Issue #1095 | PR #1619
-      - name: Compute apt cache-bust value
-        if: steps.should-build.outputs.should-build == 'true'
-        id: apt-cache-bust
-        run: |
-          set -euo pipefail
-          echo "value=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         # No secret-files/network/allow here: this runner cannot reach the LAN-only
@@ -6254,7 +6233,7 @@ jobs:
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
-            APT_CACHE_BUST=${{ steps.apt-cache-bust.outputs.value }}
+            APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
           push: ${{ github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) }}
           tags: ${{ steps.pr-tag.outputs.image || steps.meta.outputs.tags }}
           labels: |
