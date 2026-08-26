@@ -545,7 +545,16 @@ RUN --mount=type=secret,id=distcc_potential_hosts \
       echo "::error::curl/git build failed with no cache/distribution layer left to retry." >&2; \
       exit 1; \
     fi; \
-    if [ "$ccache_enabled" = "1" ]; then ccache -s; fi; \
+    if [ "$ccache_enabled" = "1" ]; then \
+      ccache -s; \
+      ccache_final_stats="$(mktemp)"; \
+      ccache --print-stats > "$ccache_final_stats"; \
+      if grep -qE '^remote_storage_error[[:space:]]+[1-9]' "$ccache_final_stats"; then \
+        echo "[INFO] ccache recorded a Redis remote-storage error during the real curl/git build; this build's binaries are already correct and unaffected, but the optional Redis cache layer degraded mid-build -- see services/dns/Dockerfile's identical diagnostic." >&2; \
+        cat "$ccache_final_stats" >&2; \
+      fi; \
+      rm -f "$ccache_final_stats"; \
+    fi; \
     rm -rf /tmp/ccache-build-tools-curl-git /tmp/ccache-remote-toolchain-id; \
     git --version; \
     git_remote_https="$(command -v git-remote-https || echo /usr/local/libexec/git-core/git-remote-https)"; \

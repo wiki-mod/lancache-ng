@@ -246,16 +246,42 @@ jobs:
       #   selection so a broken Redis/distcc endpoint is checked the same
       #   way here as for the matrix services.
       # From: Issue #1304 | PR #1661
+      # What: computes both network vocabularies build-push.yml's identical
+      #   step does -- RUST_ACCELERATION_NETWORK (docker run's bridge/host)
+      #   for the preflight below, RUST_BUILDX_NETWORK (buildx's
+      #   default/host) for the real build further down.
+      # Why: without this, a host-networking-only Redis/distcc endpoint the
+      #   preflight can reach stays unreachable to the actual build, which
+      #   still runs on the default network and silently falls back to a
+      #   local, uncached compile.
+      # From: Issue #1304 | PR #1661
       - name: Select acceleration network for the standalone build
         if: github.event_name != 'pull_request'
         run: |
           set -euo pipefail
-          network=bridge
+          rust_network=bridge
+          buildx_network=default
           if [ -n "${{ steps.ccache-distcc-secret.outputs.ccache-redis-file }}" ] || \
              [ -n "${{ steps.ccache-distcc-secret.outputs.distcc-hosts-file }}" ]; then
-            network=host
+            rust_network=host
+            buildx_network=host
           fi
-          echo "RUST_ACCELERATION_NETWORK=$network" >> "$GITHUB_ENV"
+          printf 'RUST_ACCELERATION_NETWORK=%s\n' "$rust_network" >> "$GITHUB_ENV"
+          printf 'RUST_BUILDX_NETWORK=%s\n' "$buildx_network" >> "$GITHUB_ENV"
+
+      # What: resolves an immutable, already-published build-tools image for
+      #   the preflight below -- deliberately not this job's own in-progress
+      #   output, since that doesn't exist yet at this point in the job.
+      # Why: the preflight action's own default (:latest) is a mutable tag,
+      #   which the repository's immutable-image-selection contract forbids.
+      # From: Issue #1304 | PR #1661
+      - name: Select immutable build-tools image for preflight
+        if: github.event_name != 'pull_request'
+        id: preflight-image
+        run: |
+          set -euo pipefail
+          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+          printf 'image=%s\n' "$build_tools_image" >> "$GITHUB_OUTPUT"
 
       # What: also runs for this standalone schedule/workflow_dispatch
       #   route, not just build-push.yml's matrix -- see that file's own
@@ -271,10 +297,7 @@ jobs:
           service: build-tools
           distcc-hosts-file: ${{ steps.ccache-distcc-secret.outputs.distcc-hosts-file }}
           ccache-redis-file: ${{ steps.ccache-distcc-secret.outputs.ccache-redis-file }}
-          # build-tools-image deliberately omitted: this job builds a NEW
-          # build-tools image, so the action's own already-published
-          # :latest fallback (not this job's own in-progress output) is
-          # the correct choice here.
+          build-tools-image: ${{ steps.preflight-image.outputs.image }}
           build-network: ${{ env.RUST_ACCELERATION_NETWORK }}
           platform: linux/amd64
 
@@ -331,6 +354,14 @@ jobs:
           secret-files: |
             ${{ steps.ccache-distcc-secret.outputs.ccache-redis-file != '' && format('ccache_redis_url={0}', steps.ccache-distcc-secret.outputs.ccache-redis-file) || '' }}
             ${{ steps.ccache-distcc-secret.outputs.distcc-hosts-file != '' && format('distcc_potential_hosts={0}', steps.ccache-distcc-secret.outputs.distcc-hosts-file) || '' }}
+          # What: wires the network the preflight above already validated
+          #   into the real build too.
+          # Why: without this, the build stays on Buildx's default network
+          #   even when the preflight confirmed host networking is needed,
+          #   and silently falls back to a local, uncached compile.
+          # From: Issue #1304 | PR #1661
+          network: ${{ env.RUST_BUILDX_NETWORK }}
+          allow: ${{ env.RUST_BUILDX_NETWORK == 'host' && 'network.host' || '' }}
           outputs: type=image,oci-mediatypes=true
           platforms: linux/amd64
           provenance: false
