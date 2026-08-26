@@ -1202,8 +1202,8 @@ explicit pass:**
   e.g. `tests/bats/nats_conf_entrypoint_idempotence.bats`,
   `tests/bats/dhcp_proxy_known_good_snapshot.bats`. This document had not been
   synced with that correction until now — a small, concrete instance of exactly the
-  drift class issue #1391's proposed `AG-VAL-033` rule is meant to prevent going
-  forward. (Also note: the enforcement matrix itself lives in the repo-root
+  drift class `AG-VAL-033` (adopted 2026-08-15, issue #1391) is meant to prevent
+  going forward. (Also note: the enforcement matrix itself lives in the repo-root
   `AGENTS.md`, not `.github/AGENTS.md` — the latter is a 9-line pointer to the
   former; a prior version of this bullet cited the wrong file.)
 - **This document's own Validation State Tracking mechanism** (`docs/validation-
