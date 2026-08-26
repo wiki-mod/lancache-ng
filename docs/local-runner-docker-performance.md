@@ -200,10 +200,11 @@ Important rules:
   a ccache Redis endpoint (BuildKit secret `ccache_redis_url`) is present --
   it automatically reuses the `SCCACHE_REDIS_URL` secret already documented
   above for sccache, not a second Redis URL
-- once both are enabled, `services/dns/Dockerfile` and `services/ui/Dockerfile`
-  export `CC="ccache <real compiler>"` (not the plain `CC=distcc` every other
-  distcc-enabled builder uses), with `CCACHE_PREFIX=distcc` so ccache still
-  dispatches actual cache misses through distcc
+- once both are enabled, `services/dns/Dockerfile`, `services/ui/Dockerfile`,
+  and `services/watchdog/Dockerfile` export `CC="ccache <real compiler>"`
+  (not the plain `CC=distcc` every other distcc-enabled builder uses), with
+  `CCACHE_PREFIX=distcc` so ccache still dispatches actual cache misses
+  through distcc
 - use `CCACHE_COMPILERCHECK=content`, not the ccache default of `mtime`,
   since a build-tools image rebuild changes the compiler's mtime but not
   necessarily its output
