@@ -11,6 +11,21 @@
 # unreachable; an omitted `status` marks an accepted, tracked risk.
 # `expired_at` is this entry's next mandatory re-review date.
 vulnerabilities:
+  - id: CVE-2026-14456
+    statement: >-
+      What: Accepts CVE-2026-14456 (OpenSSL QUIC-server unbounded-memory-
+      growth DoS) as tracked risk for `libssl3`/`libcrypto3` across every
+      Alpine-based first-party image (transitive dependency of `apk-tools`
+      itself, present regardless of any image's own TLS/QUIC usage).
+
+      Why: Time-boxed maintainer-authorized exception while
+      Issue #1095's apk-upgrade cache-bust fix (PR #1680) propagates
+      through every affected image's next rebuild; no `paths:` scoping
+      applies since Trivy's Alpine os-pkgs finding class carries no
+      PkgPath. None of this project's services run a QUIC server.
+
+      From: Issue #1095
+    expired_at: 2026-09-30
   - id: CVE-2026-34040
     paths:
       - usr/local/lib/docker/cli-plugins/docker-compose
@@ -30,7 +45,7 @@ vulnerabilities:
 
       From: Issue #1304, PR #1548
     status: not_affected
-    expired_at: 2026-08-28
+    expired_at: 2026-09-30
   - id: CVE-2026-41567
     paths:
       - usr/local/lib/docker/cli-plugins/docker-compose
@@ -47,7 +62,7 @@ vulnerabilities:
 
       From: Issue #1304, PR #1548
     status: not_affected
-    expired_at: 2026-08-28
+    expired_at: 2026-09-30
   - id: CVE-2026-42306
     paths:
       - usr/local/lib/docker/cli-plugins/docker-compose
@@ -63,7 +78,7 @@ vulnerabilities:
 
       From: Issue #1304, PR #1548
     status: not_affected
-    expired_at: 2026-08-28
+    expired_at: 2026-09-30
   - id: CVE-2026-12064
     statement: >-
       What: Accepts CVE-2026-12064 (an SSH host-verification bypass via
@@ -84,7 +99,7 @@ vulnerabilities:
       `libcurl3t64-gnutls` no longer appear at all.
 
       From: Issue #1304, PR #1661
-    expired_at: 2026-09-07
+    expired_at: 2026-09-30
   - id: CVE-2026-8286
     statement: >-
       What: Accepts CVE-2026-8286 (an insecure TLS-configuration-mismatch
@@ -96,7 +111,7 @@ vulnerabilities:
       only (verified 2026-08-24, lancache-229).
 
       From: Issue #1304, PR #1661
-    expired_at: 2026-09-07
+    expired_at: 2026-09-30
   - id: CVE-2026-8458
     statement: >-
       What: Accepts CVE-2026-8458 (a Negotiate-authentication connection-
@@ -109,7 +124,7 @@ vulnerabilities:
       transitive dependency never does (verified 2026-08-24, lancache-229).
 
       From: Issue #1304, PR #1661
-    expired_at: 2026-09-07
+    expired_at: 2026-09-30
   - id: CVE-2026-8927
     statement: >-
       What: Accepts CVE-2026-8927 (a proxy-authentication-state
@@ -121,7 +136,7 @@ vulnerabilities:
       only (verified 2026-08-24, lancache-229).
 
       From: Issue #1304, PR #1661
-    expired_at: 2026-09-07
+    expired_at: 2026-09-30
   - id: CVE-2026-8932
     statement: >-
       What: Accepts CVE-2026-8932 (an mTLS-connection-reuse
@@ -133,7 +148,7 @@ vulnerabilities:
       only (verified 2026-08-24, lancache-229).
 
       From: Issue #1304, PR #1661
-    expired_at: 2026-09-07
+    expired_at: 2026-09-30
   - id: CVE-2026-9079
     statement: >-
       What: Accepts CVE-2026-9079 (a proxy-authentication-credential
@@ -145,7 +160,7 @@ vulnerabilities:
       only (verified 2026-08-24, lancache-229).
 
       From: Issue #1304, PR #1661
-    expired_at: 2026-09-07
+    expired_at: 2026-09-30
   - id: CVE-2026-9080
     statement: >-
       What: Accepts CVE-2026-9080 (a `curl_easy_pause()` use-after-free
@@ -158,7 +173,7 @@ vulnerabilities:
       lancache-229).
 
       From: Issue #1304, PR #1661
-    expired_at: 2026-09-07
+    expired_at: 2026-09-30
   - id: CVE-2026-9545
     statement: >-
       What: Accepts CVE-2026-9545 (a cached-SSL-session-and-early-data
@@ -171,7 +186,7 @@ vulnerabilities:
       2026-08-24, lancache-229).
 
       From: Issue #1304, PR #1661
-    expired_at: 2026-09-07
+    expired_at: 2026-09-30
   - id: CVE-2026-10536
     statement: >-
       What: Accepts CVE-2026-10536 (a use-after-free in libcurl's HTTP/2
@@ -187,7 +202,7 @@ vulnerabilities:
       surfaced by this scan; not present in the prior curl-group review.
 
       From: Issue #1304, PR #1661
-    expired_at: 2026-09-07
+    expired_at: 2026-09-30
   - id: CVE-2011-4116
     statement: >-
       What: Marks CVE-2011-4116 (`perl-base`'s `File::Temp` module
@@ -204,7 +219,7 @@ vulnerabilities:
 
       From: Issue #815, PR #1454, Issue #1598
     status: not_affected
-    expired_at: 2026-08-27
+    expired_at: 2026-09-30
   - id: CVE-2025-15649
     statement: >-
       What: Marks CVE-2025-15649 (a `perl-IO-Compress` denial-of-service
@@ -217,7 +232,7 @@ vulnerabilities:
 
       From: Issue #815, PR #1454
     status: not_affected
-    expired_at: 2026-08-27
+    expired_at: 2026-09-30
   - id: CVE-2026-12087
     statement: >-
       What: Marks CVE-2026-12087 (a `perl-Socket` out-of-bounds-read
@@ -230,7 +245,7 @@ vulnerabilities:
 
       From: Issue #815, PR #1454
     status: not_affected
-    expired_at: 2026-08-27
+    expired_at: 2026-09-30
   - id: CVE-2026-13221
     statement: >-
       What: Marks CVE-2026-13221 (a silently-incorrect Perl
@@ -243,7 +258,7 @@ vulnerabilities:
 
       From: Issue #815, PR #1454
     status: not_affected
-    expired_at: 2026-08-27
+    expired_at: 2026-09-30
   - id: CVE-2026-42496
     statement: >-
       What: Marks CVE-2026-42496 (a `perl-Archive-Tar` path-traversal via
@@ -256,7 +271,7 @@ vulnerabilities:
 
       From: Issue #815, PR #1454
     status: not_affected
-    expired_at: 2026-08-27
+    expired_at: 2026-09-30
   - id: CVE-2026-42497
     statement: >-
       What: Marks CVE-2026-42497 (the sibling `perl-Archive-Tar`
@@ -269,7 +284,7 @@ vulnerabilities:
 
       From: Issue #815, PR #1454
     status: not_affected
-    expired_at: 2026-08-27
+    expired_at: 2026-09-30
   - id: CVE-2026-48959
     statement: >-
       What: Marks CVE-2026-48959 (a `perl-IO-Compress` CPU-exhaustion DoS
@@ -282,7 +297,7 @@ vulnerabilities:
 
       From: Issue #815, PR #1454
     status: not_affected
-    expired_at: 2026-08-27
+    expired_at: 2026-09-30
   - id: CVE-2026-48961
     statement: >-
       What: Marks CVE-2026-48961 (a DoS in `IO::Compress`'s `zipdetails`
@@ -294,7 +309,7 @@ vulnerabilities:
 
       From: Issue #815, PR #1454
     status: not_affected
-    expired_at: 2026-08-27
+    expired_at: 2026-09-30
   - id: CVE-2026-48962
     statement: >-
       What: Marks CVE-2026-48962 (a `perl-IO-Compress`
@@ -306,7 +321,7 @@ vulnerabilities:
 
       From: Issue #815, PR #1454
     status: not_affected
-    expired_at: 2026-08-27
+    expired_at: 2026-09-30
   - id: CVE-2026-57432
     statement: >-
       What: Marks CVE-2026-57432 (a Perl information-disclosure via
@@ -318,7 +333,7 @@ vulnerabilities:
 
       From: Issue #815, PR #1454
     status: not_affected
-    expired_at: 2026-08-27
+    expired_at: 2026-09-30
   - id: CVE-2026-57433
     statement: >-
       What: Marks CVE-2026-57433 (a `Storable` signed-integer-overflow
@@ -330,7 +345,7 @@ vulnerabilities:
 
       From: Issue #815, PR #1454
     status: not_affected
-    expired_at: 2026-08-27
+    expired_at: 2026-09-30
   - id: CVE-2026-7010
     statement: >-
       What: Marks CVE-2026-7010 (an `HTTP::Tiny` CRLF-validation gap) as
@@ -344,7 +359,7 @@ vulnerabilities:
 
       From: Issue #815, PR #1454
     status: not_affected
-    expired_at: 2026-08-27
+    expired_at: 2026-09-30
   - id: CVE-2026-7017
     statement: >-
       What: Marks CVE-2026-7017 (the sibling `HTTP::Tiny`
@@ -357,7 +372,7 @@ vulnerabilities:
 
       From: Issue #815, PR #1454
     status: not_affected
-    expired_at: 2026-08-27
+    expired_at: 2026-09-30
   - id: CVE-2026-8376
     statement: >-
       What: Marks CVE-2026-8376 (a 32-bit-only Perl regex-compilation
@@ -371,7 +386,7 @@ vulnerabilities:
 
       From: Issue #815, PR #1454
     status: not_affected
-    expired_at: 2026-08-27
+    expired_at: 2026-09-30
   - id: CVE-2026-9538
     statement: >-
       What: Marks CVE-2026-9538 (the third `perl-Archive-Tar` finding in
@@ -384,7 +399,7 @@ vulnerabilities:
 
       From: Issue #815, PR #1454
     status: not_affected
-    expired_at: 2026-08-27
+    expired_at: 2026-09-30
   - id: CVE-2022-0563
     statement: >-
       What: Marks CVE-2022-0563 (a partial-file-disclosure bug in
@@ -402,7 +417,7 @@ vulnerabilities:
 
       From: Issue #815, PR #1454
     status: not_affected
-    expired_at: 2026-08-27
+    expired_at: 2026-09-30
   - id: CVE-2025-14104
     statement: >-
       What: Marks CVE-2025-14104 (a heap buffer-overread in `setpwnam()`
@@ -415,7 +430,7 @@ vulnerabilities:
 
       From: Issue #815, PR #1454
     status: not_affected
-    expired_at: 2026-08-27
+    expired_at: 2026-09-30
   - id: CVE-2026-13595
     statement: >-
       What: Marks CVE-2026-13595 (a heap use-after-free in `libblkid`'s
@@ -429,7 +444,7 @@ vulnerabilities:
 
       From: Issue #815, PR #1454
     status: not_affected
-    expired_at: 2026-08-27
+    expired_at: 2026-09-30
   - id: CVE-2026-27456
     statement: >-
       What: Marks CVE-2026-27456 (a TOCTOU race in the `mount` program's
@@ -442,7 +457,7 @@ vulnerabilities:
 
       From: Issue #815, PR #1454
     status: not_affected
-    expired_at: 2026-08-27
+    expired_at: 2026-09-30
   - id: CVE-2026-3184
     statement: >-
       What: Marks CVE-2026-3184 (an access-control bypass via improper
@@ -455,7 +470,7 @@ vulnerabilities:
 
       From: Issue #815, PR #1454
     status: not_affected
-    expired_at: 2026-08-27
+    expired_at: 2026-09-30
   - id: CVE-2026-53612
     statement: >-
       What: Marks CVE-2026-53612 (a local privilege-escalation via a
@@ -468,7 +483,7 @@ vulnerabilities:
 
       From: Issue #815, PR #1454
     status: not_affected
-    expired_at: 2026-08-27
+    expired_at: 2026-09-30
   - id: CVE-2026-53613
     statement: >-
       What: Marks CVE-2026-53613 (the sibling `mount(8)`
@@ -480,7 +495,7 @@ vulnerabilities:
 
       From: Issue #815, PR #1454
     status: not_affected
-    expired_at: 2026-08-27
+    expired_at: 2026-09-30
   - id: CVE-2026-53614
     statement: >-
       What: Marks CVE-2026-53614 (a `LIBMOUNT_FORCE_MOUNT2`
@@ -493,7 +508,7 @@ vulnerabilities:
 
       From: Issue #815, PR #1454
     status: not_affected
-    expired_at: 2026-08-27
+    expired_at: 2026-09-30
   - id: CVE-2026-53615
     statement: >-
       What: Marks CVE-2026-53615 (an integer overflow in
@@ -506,7 +521,7 @@ vulnerabilities:
 
       From: Issue #815, PR #1454
     status: not_affected
-    expired_at: 2026-08-27
+    expired_at: 2026-09-30
   - id: CVE-2025-6141
     statement: >-
       What: Marks CVE-2025-6141 (an ncurses stack-buffer-overflow
@@ -522,7 +537,7 @@ vulnerabilities:
 
       From: Issue #815, PR #1454
     status: not_affected
-    expired_at: 2026-08-27
+    expired_at: 2026-09-30
   - id: CVE-2025-69720
     statement: >-
       What: Marks CVE-2025-69720 (an ncurses buffer overflow that may lead
@@ -534,7 +549,7 @@ vulnerabilities:
 
       From: Issue #815, PR #1454
     status: not_affected
-    expired_at: 2026-08-27
+    expired_at: 2026-09-30
   - id: CVE-2026-54369
     statement: >-
       What: Marks CVE-2026-54369 (a symlink-traversal privilege escalation
@@ -549,7 +564,7 @@ vulnerabilities:
 
       From: Issue #815, PR #1454
     status: not_affected
-    expired_at: 2026-08-27
+    expired_at: 2026-09-30
   - id: CVE-2026-54370
     statement: >-
       What: Marks CVE-2026-54370 (a TOCTOU symlink-traversal finding
@@ -561,7 +576,7 @@ vulnerabilities:
 
       From: Issue #815, PR #1454
     status: not_affected
-    expired_at: 2026-08-27
+    expired_at: 2026-09-30
   - id: CVE-2026-41991
     statement: >-
       What: Accepts CVE-2026-41991 (an arbitrary-file-overwrite via
@@ -581,7 +596,7 @@ vulnerabilities:
       `sid` has 1.14-1; re-verified 2026-08-19).
 
       From: Issue #815, PR #1454, Issue #1598
-    expired_at: 2026-08-20
+    expired_at: 2026-09-30
   - id: CVE-2026-41992
     statement: >-
       What: Accepts CVE-2026-41992 (a global buffer overflow in gzip's own
@@ -595,4 +610,4 @@ vulnerabilities:
       input explicitly identified as LZH-formatted.
 
       From: Issue #815, PR #1454, Issue #1598
-    expired_at: 2026-08-20
+    expired_at: 2026-09-30

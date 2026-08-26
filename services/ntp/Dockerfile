@@ -74,7 +74,14 @@ RUN set -euo pipefail; \
 #   generates it -- without it, any HTTPS use of this troubleshooting tool
 #   fails cert verification.
 # From: Issue #1556
-RUN apk upgrade --no-cache && \
+# What: declares APT_CACHE_BUST right before the RUN it busts.
+# Why: without this, BuildKit's cache has no wall-clock expiry and can
+#   replay a stale `apk upgrade` forever; see tools/build-tools/Dockerfile's
+#   identical ARG for the full rationale.
+# From: Issue #1095
+ARG APT_CACHE_BUST=""
+RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
+    apk upgrade --no-cache && \
     apk add --no-cache \
     bash \
     ca-certificates \

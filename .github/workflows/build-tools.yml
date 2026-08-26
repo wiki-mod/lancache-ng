@@ -196,15 +196,6 @@ jobs:
             printf 'golang=%s\n' "$(digest_for_image golang:latest)"
           } >> "$GITHUB_OUTPUT"
 
-      # What: derives APT_CACHE_BUST from the current ISO week.
-      # Why: this job's Buildx cache has no wall-clock expiry, only cache-key
-      #   expiry, so a Debian security fix landing after a layer was first
-      #   cached would otherwise never get picked up.
-      # From: Issue #1147 | PR #1070
-      - name: Compute apt cache-bust value
-        id: apt-cache-bust
-        run: echo "value=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
-
       # What: writes ccache_redis_url + distcc_potential_hosts secret files for
       #   the Dockerfile's curl/git build to mount as BuildKit secrets.
       # Why: pull_request runs never get this (no LAN access assumed for that
@@ -299,7 +290,7 @@ jobs:
         if: github.event_name == 'pull_request'
         timeout-minutes: 60
         env:
-          APT_CACHE_BUST: ${{ steps.apt-cache-bust.outputs.value }}
+          APT_CACHE_BUST: ${{ vars.APT_CACHE_BUST }}
           BUILDX_BUILDER: ${{ steps.buildx.outputs.name }}
           BUILDX_CACHE_FROM_DIR: ${{ steps.buildx-cache.outputs.cache-from }}
           BUILDX_CACHE_TO_DIR: ${{ steps.buildx-cache.outputs.cache-to }}
@@ -339,7 +330,7 @@ jobs:
             org.opencontainers.image.base.rust.digest=${{ steps.build-tools-base-digests.outputs.rust }}
             org.opencontainers.image.base.golang.digest=${{ steps.build-tools-base-digests.outputs.golang }}
           build-args: |
-            APT_CACHE_BUST=${{ steps.apt-cache-bust.outputs.value }}
+            APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
           secret-files: |
             ${{ steps.ccache-distcc-secret.outputs.ccache-redis-file != '' && format('ccache_redis_url={0}', steps.ccache-distcc-secret.outputs.ccache-redis-file) || '' }}
             ${{ steps.ccache-distcc-secret.outputs.distcc-hosts-file != '' && format('distcc_potential_hosts={0}', steps.ccache-distcc-secret.outputs.distcc-hosts-file) || '' }}
@@ -547,15 +538,6 @@ jobs:
             printf 'golang=%s\n' "$(digest_for_image golang:latest)"
           } >> "$GITHUB_OUTPUT"
 
-      # What: derives the same ISO-week APT_CACHE_BUST as the amd64 leg.
-      # Why: computed independently since the two jobs run on separate
-      #   runners with no shared state; both derive it from wall-clock time
-      #   alone, so amd64 and arm64 bust in lockstep.
-      # From: Issue #1147 | PR #1070
-      - name: Compute apt cache-bust value
-        id: apt-cache-bust
-        run: echo "value=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
-
       # What: builds one local arm64 candidate for fork PRs.
       # Why: manual/scheduled runs take the pushed exact-digest path instead
       #   of building a second image.
@@ -573,7 +555,7 @@ jobs:
           tags: ${{ env.BUILD_TOOLS_SCAN_IMAGE_ARM64 }}
           platforms: linux/arm64
           build-args: |
-            APT_CACHE_BUST=${{ steps.apt-cache-bust.outputs.value }}
+            APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
           provenance: false
           cache-from: type=gha,scope=build-tools-arm64
           cache-to: type=gha,scope=build-tools-arm64,mode=max
@@ -595,7 +577,7 @@ jobs:
             org.opencontainers.image.base.rust.digest=${{ steps.build-tools-base-digests.outputs.rust }}
             org.opencontainers.image.base.golang.digest=${{ steps.build-tools-base-digests.outputs.golang }}
           build-args: |
-            APT_CACHE_BUST=${{ steps.apt-cache-bust.outputs.value }}
+            APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
           outputs: type=image,oci-mediatypes=true
           platforms: linux/arm64
           provenance: false
