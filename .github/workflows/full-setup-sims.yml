@@ -689,7 +689,7 @@ jobs:
           IMAGE_TAG: ${{ inputs.image_tag }}
           REPOSITORY: ${{ github.repository }}
           # What: widens select-build-tools-image.sh's smoke test to require dhclient.
-          # Why: dhclient is opt-in there, not baseline (issue #1095, Alpine
+          # Why: dhclient is opt-in there, not baseline (Alpine build-tools
           # evaluation); this job's own simulation below invokes dhclient directly.
           # From: Issue #1095
           EXTRA_REQUIRED_TOOLS: dhclient
