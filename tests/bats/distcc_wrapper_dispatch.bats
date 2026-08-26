@@ -201,6 +201,12 @@ EOF
     [ "$status" -eq 0 ]
 }
 
+@test "preflight: a token other than the literal DONE still fails closed even with 2+ hosts" {
+    printf 'distcc[294] (dcc_r_token_int) ERROR: read failed while waiting for token "ARGC"\n' > "$preflight_log_file"
+    run scan_distcc_compile_log "$preflight_log_file" 2
+    [ "$status" -eq 1 ]
+}
+
 @test "preflight: an unrelated real error still fails closed even with 2+ hosts" {
     printf 'error: linker `cc` not found\n' > "$preflight_log_file"
     run scan_distcc_compile_log "$preflight_log_file" 2

@@ -142,10 +142,12 @@ runs:
               # What: also tolerates one host hanging (accepts, never answers).
               # Why: same "one host bad, others fine" case as the pattern
               #   above, just a timeout instead of a refused connect -- the
-              #   compile still succeeded via a live host either way.
+              #   compile still succeeded via a live host either way. The
+              #   token is the literal "DONE" observed live, not a wildcard,
+              #   so a differently-shaped token still fails closed.
               # From: Issue #1095
               benign_pattern+='|^distcc\[[0-9]+\] \(dcc_select_for_read\) ERROR: IO timeout$'
-              benign_pattern+='|^distcc\[[0-9]+\] \(dcc_r_token_int\) ERROR: read failed while waiting for token "[A-Z]+"$'
+              benign_pattern+='|^distcc\[[0-9]+\] \(dcc_r_token_int\) ERROR: read failed while waiting for token "DONE"$'
               benign_pattern+='|^distcc\[[0-9]+\] \(dcc_r_result_header\) ERROR: server provided no answer\. Is the server configured to allow access from your IP address\? Is the server performing authentication and your client isn'\''t\? Does the server have the compiler installed\? Is the server configured to access the compiler\?$'
 
               if [ "$host_count" -le 1 ]; then
