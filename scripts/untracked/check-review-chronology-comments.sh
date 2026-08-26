@@ -6,20 +6,32 @@
 # Why: the maintainer's monolith-first direction; full evidence for each
 #   check's pattern design lives in the PR/commit history (#1385, #1546).
 # From: PR #1546
+#
+# What: $1 is always target_root (dir); any further args restrict the
+#   scan to exactly those files (relative to target_root) instead of
+#   enumerating the whole tree. CHRONOLOGY_WARN_ONLY=1 reports findings
+#   as ::warning:: and exits 0 instead of failing closed.
+# Why: lets a repo-wide baseline pass (informational) coexist with a
+#   diff-scoped pass (blocking) via check-pr-diff-review-chronology.sh,
+#   without a pre-existing unrelated violation blocking every other PR.
+# From: Issue #1095
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd "$script_dir/../.." && pwd)
 target_root="${1:-$repo_root}"
 cd "$target_root"
+shift || true
 
-# What: Excludes this script and its bats test from their own scan.
-# Why: Both quote the banned phrases verbatim as documentation.
-# From: PR #1546
+# What: Excludes this script and the bats files that quote its own
+#   banned phrases verbatim as fixtures.
+# Why: Fixture strings aren't a real violation of the rule they test.
+# From: PR #1546 | Issue #1095
 is_self_reference() {
     case "$1" in
         scripts/untracked/check-review-chronology-comments.sh) return 0 ;;
         tests/bats/check_review_chronology_comments.bats) return 0 ;;
+        tests/bats/check_pr_diff_review_chronology.bats) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -172,11 +184,17 @@ check_bare_issue_ref_duplicates_from() {
     done <<< "$from_nums"
 }
 
-# What: Checks for ".git" directly under target_root, not an ancestor dir.
-# Why: A bats fixture nested inside this repo's own working copy must stay
-#   a plain fixture, not fall through to git ls-files on the outer repo.
-# From: PR #1546
-if [ -e "$target_root/.git" ]; then
+# What: explicit file args (after target_root) scan only those; otherwise
+#   enumerate target_root's whole tree.
+# Why: check-pr-diff-review-chronology.sh needs a diff-scoped subset;
+#   ".git" is checked directly under target_root, not an ancestor dir, so
+#   a bats fixture nested inside this repo's own working copy stays a
+#   plain fixture instead of falling through to git ls-files on the
+#   outer repo.
+# From: PR #1546 | Issue #1095
+if [ "$#" -gt 0 ]; then
+    files=("$@")
+elif [ -e "$target_root/.git" ]; then
     mapfile -t files < <(git ls-files)
 else
     mapfile -t files < <(find . -type f -print | sed 's#^\./##')
@@ -249,6 +267,10 @@ if [ "${#duplicate_ref_violations[@]}" -gt 0 ]; then
 fi
 
 if [ "$violations_found" -eq 1 ]; then
+    if [ "${CHRONOLOGY_WARN_ONLY:-0}" = "1" ]; then
+        echo "::warning::check-review-chronology-comments: AG-CODE-002/003/012 violation(s) found repo-wide (see above) -- not blocking this run; a PR that touches the offending file must still fix it under the diff-scoped check." >&2
+        exit 0
+    fi
     exit 1
 fi
 

@@ -465,3 +465,58 @@ EOF
     run bash "$script" "$repo_root"
     [ "$status" -eq 0 ] || fail "real repo tree is not clean per this guard: $output"
 }
+
+# What: explicit file args after target_root restrict the scan to those.
+# Why: check-pr-diff-review-chronology.sh needs this to be diff-scoped;
+#   a violation in an unlisted file in the same tree must not surface.
+# From: Issue #1095
+@test "explicit file args scan only those files, ignoring an unlisted violation in the same tree" {
+    cat > "$fixture_root/violating.sh" <<'EOF'
+# caught in review: this one should be ignored, it is not in the file list.
+EOF
+    cat > "$fixture_root/clean.sh" <<'EOF'
+# A normal, compliant comment.
+EOF
+
+    run bash "$script" "$fixture_root" clean.sh
+    [ "$status" -eq 0 ] || fail "explicit-file-list mode must not see violating.sh: $output"
+}
+
+# What: explicit file args still catch a violation in a listed file.
+# Why: proves the mode restricts scope, it does not disable detection.
+# From: Issue #1095
+@test "explicit file args still fail on a violation in a listed file" {
+    cat > "$fixture_root/violating.sh" <<'EOF'
+# caught in review: this one is explicitly listed and must still fail.
+EOF
+
+    run bash "$script" "$fixture_root" violating.sh
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"violating.sh"* ]]
+}
+
+# What: CHRONOLOGY_WARN_ONLY=1 reports a real violation without failing.
+# Why: lets the repo-wide baseline pass stay informational, per Issue #1095.
+# From: Issue #1095
+@test "CHRONOLOGY_WARN_ONLY=1 reports a violation as a warning and exits 0" {
+    cat > "$fixture_root/example.sh" <<'EOF'
+# caught in review: something something.
+EOF
+
+    CHRONOLOGY_WARN_ONLY=1 run bash "$script" "$fixture_root"
+    [ "$status" -eq 0 ] || fail "warn-only mode must exit 0 despite a real violation: $output"
+    [[ "$output" == *"::warning::"* ]]
+    [[ "$output" == *"example.sh"* ]]
+}
+
+# What: without CHRONOLOGY_WARN_ONLY, the same violation still fails closed.
+# Why: confirms warn-only is opt-in, not the new default.
+# From: Issue #1095
+@test "the same violation still fails closed when CHRONOLOGY_WARN_ONLY is unset" {
+    cat > "$fixture_root/example.sh" <<'EOF'
+# caught in review: something something.
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ]
+}
