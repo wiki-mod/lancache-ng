@@ -139,6 +139,17 @@ runs:
               # Why: a real diagnostic sharing this line must still fail closed.
               # From: Issue #1633
               local benign_pattern='^distcc\[[0-9]+\] (ERROR|WARNING): nonblocking connect to [0-9]{1,3}(\.[0-9]{1,3}){3}:[0-9]+ failed: [A-Za-z0-9 ,.()'\''-]+$'
+              # What: also tolerates one host hanging mid-transfer (accepts the
+              #   connection, then never answers) instead of refusing cleanly.
+              # Why: confirmed live -- this shape is the same
+              #   "one host is bad, others are fine" case the pattern above
+              #   already tolerates -- only the failure mode differs (timeout
+              #   vs refused connect); the escalation ladder this preflight
+              #   guards still succeeded via a live host either way.
+              # From: Issue #1095
+              benign_pattern+='|^distcc\[[0-9]+\] \(dcc_select_for_read\) ERROR: IO timeout$'
+              benign_pattern+='|^distcc\[[0-9]+\] \(dcc_r_token_int\) ERROR: read failed while waiting for token "[A-Z]+"$'
+              benign_pattern+='|^distcc\[[0-9]+\] \(dcc_r_result_header\) ERROR: server provided no answer\..*$'
 
               if [ "$host_count" -le 1 ]; then
                 scan_log "$log_file"
