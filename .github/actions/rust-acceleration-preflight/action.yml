@@ -387,6 +387,24 @@ runs:
                 return 1
               }
 
+              # What: counts only real host tokens, matching
+              #   distcc_pump_published_hosts()'s own --* exclusion.
+              # Why: a bare `set -- $hosts; echo "$#"` count includes
+              #   option tokens (e.g. --randomize), inflating host_count
+              #   past 1 and wrongly relaxing scan_distcc_compile_log's
+              #   single-host fail-closed branch.
+              # From: Issue #1095
+              distcc_pump_real_host_count() {
+                distcc_pump_count=0
+                for distcc_host_token in $1; do
+                  case "$distcc_host_token" in
+                    --*) ;;
+                    *) distcc_pump_count=$((distcc_pump_count + 1)) ;;
+                  esac
+                done
+                echo "$distcc_pump_count"
+              }
+
               if [ "$distcc_enabled" = "1" ]; then
                 export PATH="$wrapper_dir:$PATH"
                 export DISTCC_FALLBACK=0
@@ -403,7 +421,7 @@ runs:
                     pump_started=1
                     pump_log="$preflight_dir/distcc-pump.log"
                     if cc -c "$preflight_dir/distcc-probe.c" -o "$preflight_dir/distcc-pump.o" >"$pump_log" 2>&1; then
-                      pump_host_count=$(set -- $distcc_pump_filtered_hosts; echo "$#")
+                      pump_host_count=$(distcc_pump_real_host_count "$distcc_pump_filtered_hosts")
                       scan_distcc_compile_log "$pump_log" "$pump_host_count"
                     else
                       cat "$pump_log" >&2

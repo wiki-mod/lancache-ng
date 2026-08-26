@@ -23,6 +23,7 @@ setup() {
     extract_wrapper_script
     install_stubs
     extract_preflight_scan_functions
+    extract_preflight_pump_host_count
 }
 
 # What: pulls scan_log()/scan_distcc_compile_log() out of
@@ -51,6 +52,33 @@ extract_preflight_scan_functions() {
     # shellcheck source=/dev/null
     source "$extracted"
     preflight_log_file="$BATS_TEST_TMPDIR/probe.log"
+}
+
+# What: pulls distcc_pump_published_hosts()/distcc_pump_real_host_count()
+#   out of the same action.yml, sourced independently of the scan pair.
+# Why: both functions share the same --* exclusion rule; testing them
+#   together catches the two ever silently diverging again.
+# From: Issue #1095
+extract_preflight_pump_host_count() {
+    local extracted="$BATS_TEST_TMPDIR/extracted-pump-host-count.sh"
+    awk '
+        /^ *distcc_pump_published_hosts\(\) \{$/ { capture=1 }
+        capture {
+            print
+            for (i=1; i<=length($0); i++) {
+                c = substr($0, i, 1)
+                if (c == "{") depth++
+                if (c == "}") {
+                    depth--
+                    if (depth == 0 && started) { exit }
+                }
+            }
+            if (/distcc_pump_real_host_count\(\) \{/) started=1
+        }
+    ' "$action_file" > "$extracted"
+    [ -s "$extracted" ] || fail "preflight pump-host-count extraction produced no output -- action.yml's function shape may have changed"
+    # shellcheck source=/dev/null
+    source "$extracted"
 }
 
 teardown() {
@@ -197,4 +225,16 @@ EOF
     printf 'nothing interesting here\n' > "$preflight_log_file"
     run scan_distcc_compile_log "$preflight_log_file" 3
     [ "$status" -eq 0 ]
+}
+
+@test "preflight: pump host count excludes option tokens (single real host plus a flag stays 1)" {
+    run distcc_pump_real_host_count "--randomize 192.168.1.229"
+    [ "$status" -eq 0 ]
+    [ "$output" -eq 1 ]
+}
+
+@test "preflight: pump host count matches real hosts with no option tokens present" {
+    run distcc_pump_real_host_count "192.168.1.229 192.168.1.240"
+    [ "$status" -eq 0 ]
+    [ "$output" -eq 2 ]
 }
