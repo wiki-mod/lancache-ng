@@ -2,12 +2,10 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: exercises services/ui/Dockerfile's distcc wrapper masquerade and
-#   CCACHE_PREFIX=distcc dispatch shapes, plus rust-acceleration-preflight's
-#   scan_log()/scan_distcc_compile_log() log-classification functions.
-# Why: both are distcc-adjacent bash extracted verbatim from their real
-#   source (Dockerfile heredoc / action.yml heredoc) so a future edit is
-#   exercised here without a second, hand-copied definition to keep in sync.
+# What: exercises distcc-adjacent bash: ui's wrapper dispatch and rust-acceleration-preflight's scan/host-count functions.
+# Why: both are extracted verbatim from their real source (Dockerfile/
+#   action.yml heredocs) so a future edit is exercised without a
+#   hand-copied duplicate to keep in sync.
 # From: Issue #1533 | PR #1612 | Issue #1095
 
 setup() {

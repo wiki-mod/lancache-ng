@@ -387,12 +387,10 @@ runs:
                 return 1
               }
 
-              # What: counts only real host tokens, matching
-              #   distcc_pump_published_hosts()'s own --* exclusion.
-              # Why: a bare `set -- $hosts; echo "$#"` count includes
-              #   option tokens (e.g. --randomize), inflating host_count
-              #   past 1 and wrongly relaxing scan_distcc_compile_log's
-              #   single-host fail-closed branch.
+              # What: counts only real host tokens, excluding --* flags.
+              # Why: a bare token count inflates host_count past 1 when a
+              #   flag like --randomize is present, wrongly relaxing the
+              #   single-host fail-closed scan branch.
               # From: Issue #1095
               distcc_pump_real_host_count() {
                 distcc_pump_count=0
@@ -452,10 +450,11 @@ runs:
               if [ "$distcc_enabled" = "1" ]; then
                 export DISTCC_HOSTS="$final_distcc_hosts"
                 distcc_log="$preflight_dir/distcc.log"
-                # What: counts hosts via an intentionally unquoted `set --`.
-                # Why: `set --`/`echo` can't fail, unlike the guarded calls.
-                # From: Issue #1633
-                final_distcc_host_count=$(set -- $final_distcc_hosts; echo "$#")
+                # What: reuses distcc_pump_real_host_count() for this list too.
+                # Why: DISTCC_HOSTS can carry flag tokens (e.g. --randomize)
+                #   here just like the pump-published list does.
+                # From: Issue #1095
+                final_distcc_host_count=$(distcc_pump_real_host_count "$final_distcc_hosts")
                 if cc -c "$preflight_dir/distcc-probe.c" -o "$preflight_dir/distcc.o" >"$distcc_log" 2>&1; then
                   scan_distcc_compile_log "$distcc_log" "$final_distcc_host_count"
                   echo "[INFO] distcc preflight completed."
