@@ -1093,6 +1093,32 @@ grep -E "legacy_rank=[0-9]" <logfile> | grep -v "decision=protect"
   introduced by this fix); recorded as an open gap in Coverage Assessment
   below rather than left unautomated silently.
 
+### Additions dated 2026-08-25 (real incident since the 2026-08-15 survey above)
+
+- **`services/syslog/Dockerfile`'s `USER lancache:lancache` instruction silently
+  merged into the preceding `RUN`** (Refs #1095, fixed) — real `build (syslog)`/
+  `build-arm64 (syslog)` job failure (run `32856385927`, error `chown: USER: No
+  such file or directory`). Root cause: the RUN's last content line
+  (`&& chown -R lancache:lancache /opt/fluent-bit-glibc`) kept a trailing `\`
+  continuation; BuildKit silently carries a `\`-continued RUN across comment
+  lines *and* a following blank line (its own `NoEmptyContinuation` lint warns,
+  never fails the build) and appended `USER lancache:lancache` as literal text
+  to the `chown` command instead of parsing it as a new instruction. Confirmed
+  live on a self-hosted runner (`codex-lxc`) three ways: (1) a minimal isolated
+  repro (`RUN echo one \` + comments + blank line + `USER root`) reproduced the
+  identical merge and the identical `NoEmptyContinuation` warning; (2) a real
+  `docker build --no-cache` of the unmodified `current_dev` Dockerfile
+  reproduced the exact CI error byte-for-byte; (3) after removing the trailing
+  `\`, `docker buildx build --call check` reports zero warnings, the full
+  11-step build completes, `docker inspect` shows `User=lancache:lancache`, and
+  the bundled fluent-bit binary runs successfully as uid 10001 via the same
+  `ld-interp --library-path` invocation `entrypoint.sh` itself uses. **New
+  standing check: none yet** — `docker buildx build --call check` (BuildKit's
+  own Dockerfile linter, no extra tooling needed) would have caught this
+  before merge for every first-party Dockerfile, but is not currently wired
+  into any CI job; recorded as an open gap below rather than left
+  unautomated silently.
+
 ## Coverage Assessment (from this survey — be honest about gaps)
 
 **Well-covered, reusable, real proofs already exist for:**
@@ -1630,6 +1656,27 @@ omitted):**
     third occurrence of either specific drift shape should prompt actually
     building the mechanical sync check named above rather than recording a
     fourth exception (Rule-Ref: AG-WF-025).
+
+- **Recorded gap (2026-08-25, Refs #1095): BuildKit's own Dockerfile linter
+  (`docker buildx build --call check`) is not wired into any CI job for any
+  first-party Dockerfile.**
+  - **Scope**: all `services/*/Dockerfile`, `deploy/full-setup/Dockerfile`,
+    and `tools/build-tools/Dockerfile`.
+  - **Reason**: no repo-wide guard exists yet; this was found only because a
+    real build failure (see the 2026-08-25 entry above) forced a manual
+    root-cause investigation. `--call check` is fast (no image pull/build
+    needed beyond base-image metadata) and would have caught the exact
+    `NoEmptyContinuation` warning that preceded this incident before merge.
+  - **Tracking**: Refs #1095 — no dedicated CI-wiring PR exists yet; wiring
+    it into `build-push.yml` is itself a CI-trigger-behavior change needing
+    the real-execution proof Rule-Ref: AG-CI-012 requires, out of scope for
+    the Dockerfile fix this entry accompanies.
+  - **Validation**: manual — run `docker buildx build --call check -f
+    <Dockerfile> <context>` by hand when editing any Dockerfile's
+    line-continuation structure.
+  - **Non-Expansion**: this exception covers only the missing CI wiring. It
+    does not exempt a Dockerfile author from checking their own edits by
+    hand in the meantime.
 
 ---
 
