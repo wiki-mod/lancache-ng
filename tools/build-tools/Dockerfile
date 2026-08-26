@@ -193,7 +193,7 @@ LABEL org.opencontainers.image.description="Prebuilt lancache-ng CI and develope
 
 ARG SCCACHE_VERSION=0.17.0
 ARG CARGO_AUDIT_VERSION=0.22.2
-ARG CARGO_TARPAULIN_VERSION=0.37.1
+ARG CARGO_TARPAULIN_VERSION=0.37.2
 ARG SHELLSPEC_VERSION=0.28.1
 ARG SHELLSPEC_SHA256=350d3de04ba61505c54eda31a3c2ee912700f1758b1a80a284bc08fd8b6c5992
 
@@ -213,11 +213,11 @@ ENV PATH="/usr/local/cargo/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin
 # From: Issue #1095
 ARG APK_CACHE_BUST=""
 
-# What: installs bash, GNU coreutils, and this image's other apk packages.
-# Why: Alpine's BusyBox applets differ from GNU behavior this project's
-# scripts rely on (AG-VAL-034). `clang22`/`lld22` are Alpine 3.24's real
-# package names, installing unversioned `clang`/`lld`/`ld.lld` binaries.
-# From: Issue #1095
+# What: installs bash, GNU coreutils, sqlite, and other apk packages.
+# Why: Alpine's BusyBox applets differ from GNU behavior (AG-VAL-034);
+# `clang22`/`lld22` are Alpine 3.24's real names, installing unversioned
+# `clang`/`lld`/`ld.lld`; `sqlite` mirrors Debian's sqlite3 (Issue #1585).
+# From: Issue #1095 | Issue #1585
 RUN set -euo pipefail; \
     : "apk-cache-bust=${APK_CACHE_BUST}"; \
     apk update; \
@@ -258,6 +258,7 @@ RUN set -euo pipefail; \
       rsync \
       sed \
       shellcheck \
+      sqlite \
       tcpdump \
       tzdata \
       util-linux \
@@ -284,13 +285,14 @@ RUN set -euo pipefail; \
     done; \
     rm -rf /usr/local/cargo/registry /usr/local/cargo/git
 
-# What: builds cargo-audit/cargo-tarpaulin from source, not prebuilt.
-# Why: the Debian stage's glibc release binaries do not run on musl
-# (missing required glibc symbol versions); source build avoids that.
+# What: builds cargo-audit/cargo-tarpaulin from source, clearing caches.
+# Why: prebuilt glibc binaries fail on Alpine; the clear (like sccache
+# above) avoids leaving vulnerable dependency source in the image.
 # From: Issue #1095
 RUN set -euo pipefail; \
     cargo install cargo-audit --version "${CARGO_AUDIT_VERSION}" --locked --root /usr/local; \
-    cargo install cargo-tarpaulin --version "${CARGO_TARPAULIN_VERSION}" --locked --root /usr/local
+    cargo install cargo-tarpaulin --version "${CARGO_TARPAULIN_VERSION}" --locked --root /usr/local; \
+    rm -rf /usr/local/cargo/registry /usr/local/cargo/git
 
 COPY --from=actionlint-builder-alpine /out/actionlint /usr/local/bin/actionlint
 

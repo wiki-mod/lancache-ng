@@ -101,10 +101,26 @@ Alpine 3.24.1:
 - Mitigation, real-tested and working: building both from source via `cargo install` (the same
   mechanism already used for `sccache` on the Debian branch) produces a native musl binary with no
   ABI dependency at all. `cargo-audit --version 0.22.2 --locked` built clean on `rust:alpine` in
-  ~110s. `cargo-tarpaulin --version 0.37.1 --locked`'s first attempt failed
+  ~110s. `cargo-tarpaulin --version 0.37.2 --locked`'s first attempt failed
   (`cannot find -lssl`/`-lcrypto`, static-pie linking needs static libs); adding
   `openssl-libs-static`/`zlib-static` fixed it, real build succeeded in ~2m26s, both binaries run
   and report their correct version.
+- Real Trivy finding, since fixed: an early version of this step did not clean up
+  `/usr/local/cargo/registry`/`/usr/local/cargo/git` afterward the way the `sccache` step above
+  does. A real `--severity HIGH,CRITICAL` scan of that version found 72 HIGH findings (0
+  CRITICAL), every one in Trivy's `lang-pkgs` class (vulnerable dependency *source* -- openssl-src,
+  gix-fs, aws-lc-sys/aws-lc-fips-sys, quinn-proto, rustls-webpki, pyo3, mio -- left behind by this
+  step's own `cargo install` calls, re-populating the cache the sccache step had already cleared,
+  never linked into either compiled binary) plus one secret-scanner false positive (an ECDSA test
+  fixture private key inside the vendored `openssl` crate's own test suite). Zero `os-pkgs`
+  findings, both before and after. Fixed by adding the identical `rm -rf /usr/local/cargo/registry
+  /usr/local/cargo/git` cleanup this step was missing. **Not yet re-scanned post-fix** as of this
+  writing -- the runner this evaluation ran on hit sustained overload (load average up to 108 on 8
+  cores, including one `apt-get dist-upgrade` stuck 30+ minutes in an uninterruptible I/O wait)
+  partway through re-verification; the fix is applied and reasoned-correct (identical pattern to
+  the already-working sccache cleanup, and the flagged CVE IDs all trace to this step's own
+  dependency tree) but the post-fix HIGH/CRITICAL count is not itself observed. Tracked as the one
+  open follow-up on this evaluation.
 
 This mirrors the maintainer's explicit preference for this evaluation ("prefer Alpine-native over
 external non-Alpine feeds when the CVE/currency bar is still met") -- source-building via `cargo
@@ -123,12 +139,65 @@ All four Go-built tools (AG-KD-003's justification: avoiding a stale embedded Go
 prebuilt release binaries) build clean from source against `golang:alpine`, same versions/pins as
 the Debian branch, using the identical `go install`/`go build`/vendor-override mechanism:
 - `actionlint` v1.7.12: `built with go1.26.7 compiler for linux/amd64`.
-- `docker-compose` v5.4.0: builds and runs.
-- `docker-buildx` v0.36.1: builds and runs.
+- `docker-compose` v5.5.0: builds and runs.
+- `docker-buildx` v0.36.1 (with the `moby/go-archive`/`golang.org/x/mod` CVE-fix vendor overrides
+  from Issue #1598): builds and runs.
 - `docker` CLI v29.7.2 (vendor.mod symlink approach): builds and runs, same static-pie
   linking flags as upstream's own `scripts/build/binary`.
 
 None of the four needed a musl-specific build-tag or linker change; none has a cgo dependency.
+
+## Security scan comparison (Phase 5, real Trivy runs)
+
+Real `--scanners vuln,secret --severity HIGH,CRITICAL --ignore-unfixed --trivyignores
+.trivyignore.yaml` scans (matching `build-tools.yml`'s own `trivy-scan-retry` parameters), run on
+`codex-lxc`:
+
+| Image | HIGH | CRITICAL | Secrets | Notes |
+|---|---|---|---|---|
+| Alpine candidate, `alpine-final` target, pre-fix | 72 | 0 | 1 | All 72 `lang-pkgs`; 0 `os-pkgs`. See the cargo-audit/cargo-tarpaulin finding above. |
+| Debian, `ghcr.io/.../build-tools@sha-3f5f9794` (built 2026-08-26 07:56 CEST from commit `f347f034`, the exact `current_dev` tip this evaluation's branch is rebased onto) | 0 | 0 | 0 | Real, current, same-base-commit comparison -- not the older `nightly` tag (built 2026-08-16 from commit `f152669`, kept only as a secondary, staler data point). |
+
+**Reading this honestly**: Alpine's own OS-package attack surface (`os-pkgs`, i.e. `apk`-installed
+packages) already matches Debian's real result -- 0 HIGH/CRITICAL each. This is **parity, not an
+improvement** -- the maintainer's expectation that switching to Alpine would resolve existing CVE
+findings is not confirmed by this data; Debian's own `trixie-backports` pin (AG-KD-007) is already
+keeping its HIGH/CRITICAL count at zero too. The 72 HIGH findings that did show up on Alpine were
+entirely self-inflicted (leftover cargo registry source, fixed as described above), not a property
+of the Alpine base itself. The post-fix Alpine rescan needed to close this out cleanly did not
+complete (see Known Gaps below) -- treat the Alpine `os-pkgs`-vs-Debian parity claim as
+well-evidenced, but the exact post-fix Alpine total as not yet re-observed.
+
+## Two infrastructure findings from this evaluation's own manual verification process
+
+- **`docker buildx build` auto-forwards a caller's shell `http_proxy`/`https_proxy` as an implicit
+  proxy build-arg into every `RUN` step.** `codex-lxc`'s `/etc/environment` exports
+  `http_proxy=http://192.168.1.40:6666` (a LAN Squid cache) for interactive/login shells; the real
+  GitHub Actions runner *service* processes do not have this variable in their own environment
+  (checked via `/proc/<pid>/environ`), so this does not affect real CI. It does affect any manual
+  SSH-driven verification build, though: this specific Squid instance served corrupted/stale
+  responses for `proxy.golang.org` module fetches (`Cache-Status: squid;detail=mismatch`, real
+  `go.sum` checksum-mismatch errors, and outright request hangs) during this evaluation, until the
+  proxy variables were explicitly unset before invoking `docker buildx build`. Worth remembering
+  for any future manual build-tools verification on this host.
+- **This evaluation's `actionlint` run initially reported false-positive "unknown label" errors**
+  for `lancache`/`lancache-light` on the two changed workflow files, despite
+  `.github/actionlint.yaml` correctly listing both. Root cause: the ad hoc repo copy synced to the
+  runner for this evaluation excluded `.git` (to keep the sync small), and `actionlint`'s own
+  config-file auto-discovery could not resolve `.github/actionlint.yaml` relative to a `.git`-less
+  checkout. Passing `-config-file .github/actionlint.yaml` explicitly resolved it (0 findings). Not
+  a real Dockerfile or workflow defect -- an artifact of this evaluation's own sync method.
+
+## Known gaps in this evaluation
+
+- The post-fix Alpine Trivy rescan (see Security scan comparison above) did not complete: the
+  runner hit sustained overload partway through re-verification (load average up to 108 on an
+  8-core host, including one `apt-get dist-upgrade` stuck 30+ minutes in an uninterruptible I/O
+  wait on an unrelated manual Debian control build). The fix itself (registry-cache cleanup,
+  identical to the existing sccache step's own cleanup) is applied; its numeric effect on the
+  Alpine image is not yet directly observed.
+- `dhclient`/`isc-dhcp-client` has no Alpine equivalent (see the Phase 2 finding above); this
+  evaluation does not resolve that gap, only documents and gates around it.
 
 ## Musl target: not needed on the Alpine branch
 
