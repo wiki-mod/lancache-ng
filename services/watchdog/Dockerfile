@@ -322,7 +322,14 @@ LABEL org.opencontainers.image.description="lancache-ng watchdog: compiled Rust 
 # packages already baked into the alpine:3.24 base layer itself -- see
 # services/dhcp-proxy/Dockerfile's identical comment/block for the full
 # rationale and the real verification behind it.
-RUN apk upgrade --no-cache && \
+# What: declares APT_CACHE_BUST right before the RUN it busts.
+# Why: without this, BuildKit's cache has no wall-clock expiry and can
+#   replay a stale `apk upgrade` forever; see tools/build-tools/Dockerfile's
+#   identical ARG for the full rationale.
+# From: Issue #1095
+ARG APT_CACHE_BUST=""
+RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
+    apk upgrade --no-cache && \
     apk add --no-cache \
     bash \
     ca-certificates \

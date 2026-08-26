@@ -111,7 +111,13 @@ RUN set -euo pipefail; \
     curl --version >/dev/null; \
     sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
 
-RUN apk update --no-cache && apk upgrade --no-cache && apk add --no-cache \
+# What: declares APT_CACHE_BUST right before the RUN it busts.
+# Why: without this, BuildKit's cache has no wall-clock expiry and can
+#   replay a stale `apk upgrade` forever; see tools/build-tools/Dockerfile's
+#   identical ARG for the full rationale.
+# From: Issue #1095
+ARG APT_CACHE_BUST=""
+RUN : "apt-cache-bust=${APT_CACHE_BUST}" && apk update --no-cache && apk upgrade --no-cache && apk add --no-cache \
     kea-dhcp4 \
     kea-ctrl-agent \
     kea-dhcp-ddns \
