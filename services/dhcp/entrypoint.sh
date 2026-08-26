@@ -33,18 +33,6 @@ lancache_shared_secret_gid() {
     printf '%s' "${LANCACHE_SHARED_SECRET_GID:-10001}"
 }
 
-# What: helper for producer log directories that must stay readable to gid 10001.
-# Why: root-created files on persistent volumes otherwise drift back to
-#   root-only readability after reopen or recreation.
-# From: Issue #1427
-prepare_log_dir_for_shared_reader() {
-    local dir="$1"
-    mkdir -p "$dir"
-    chgrp "$(lancache_shared_secret_gid)" "$dir"
-    chmod 2750 "$dir"
-    find "$dir" -maxdepth 1 -type f -exec chgrp "$(lancache_shared_secret_gid)" {} + -exec chmod g+r {} +
-}
-
 # lancache_gen_hex32
 # 64 hex characters from 32 random bytes. Uses od + /dev/urandom rather than
 # `openssl rand -hex 32` because this runs unchanged in the Debian dns/dhcp/ui
@@ -171,6 +159,20 @@ resolve_shared_secret() {
     return 1
 }
 # END shared-secret-bootstrap library
+
+# What: helper for producer log directories that must stay readable to gid 10001.
+# Why: root-created files on persistent volumes otherwise drift back to
+#   root-only readability after reopen or recreation. dns/dhcp-only (not part
+#   of the shared-secret-bootstrap contract ui also embeds), so it lives after
+#   the sync-guarded block instead of inside it.
+# From: Issue #1427
+prepare_log_dir_for_shared_reader() {
+    local dir="$1"
+    mkdir -p "$dir"
+    chgrp "$(lancache_shared_secret_gid)" "$dir"
+    chmod 2750 "$dir"
+    find "$dir" -maxdepth 1 -type f -exec chgrp "$(lancache_shared_secret_gid)" {} + -exec chmod g+r {} +
+}
 
 install -d -m 750 /run/kea
 mkdir -p /var/lib/kea
