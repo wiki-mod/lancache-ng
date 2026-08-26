@@ -218,10 +218,13 @@ jobs:
 
   analyze:
     name: Analyze (${{ matrix.language }})
-    # Run advanced CodeQL on repository-owned runners to avoid GitHub-hosted minutes.
-    # CodeQL can compile Rust and is memory-heavy enough to avoid the light runner tier.
-    # Repository default setup must be disabled in GitHub Security settings before SARIF upload.
-    runs-on: [self-hosted, linux, lancache, codeql, lancache-heavy]
+    # What: a plain true/false Variable picks GitHub-hosted (default,
+    #   unset/false) vs. the previous self-hosted pool (true) -- no JSON.
+    # Why: GitHub-hosted's 4 cores/16GB removes the self-hosted pool's tight
+    #   memory ceiling (see the RAM cap below) and gets GitHub's own build
+    #   caching; kept switchable back via this Variable, not a code change.
+    # From: Issue #1095 (maintainer request, 2026-08-25)
+    runs-on: ${{ vars.CODEQL_USE_SELF_HOSTED == 'true' && fromJSON('["self-hosted","linux","lancache","codeql","lancache-heavy"]') || 'ubuntu-latest' }}
     timeout-minutes: 120
     needs: detect-changes
     # Do not add a shared GitHub concurrency group here. GitHub retains only
@@ -362,16 +365,31 @@ jobs:
           }}
         uses: ./.github/actions/configure-rust-sccache
         with:
-          mode: ${{ vars.SCCACHE_REDIS_MODE }}
+          # What: hardcoded "optional" (not vars.SCCACHE_REDIS_MODE); dist-
+          #   scheduler-url/dist-auth-token stay wired (build-push.yml's own
+          #   guard requires both to appear here) but resolve empty unless
+          #   CODEQL_USE_SELF_HOSTED is true.
+          # Why: the global Variables/secrets target the self-hosted pool,
+          #   where the LAN-only sccache-dist scheduler is reachable --
+          #   ubuntu-latest has neither that access nor an sccache binary.
+          #   configure-rust-sccache only takes its graceful "no sccache
+          #   binary" skip path when dist-scheduler-url is ALSO empty
+          #   (confirmed live, run 32857132833: "optional" alone still
+          #   hard-failed while the global scheduler URL was passed
+          #   through) -- resolving it empty on GitHub-hosted restores the
+          #   skip this step's own comment already promises.
+          # From: Issue #1095
+          mode: optional
           redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
           key-prefix: lancache-codeql-${{ matrix.language }}
-          dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
-          dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          dist-scheduler-url: ${{ vars.CODEQL_USE_SELF_HOSTED == 'true' && vars.SCCACHE_DIST_SCHEDULER_URL || '' }}
+          dist-auth-token: ${{ vars.CODEQL_USE_SELF_HOSTED == 'true' && secrets.SCCACHE_DIST_AUTH_TOKEN || '' }}
       - name: Start CodeQL memory monitor
         # What: samples host memory every 10s into a log file until stopped below.
-        # Why: the 512 MB/4-thread cap (see "Initialize CodeQL" below) is a
-        #   new, tight value; this makes real headroom visible per run
-        #   instead of only learning about it from the next OOM kill.
+        # Why: the RAM/thread cap below (see "Initialize CodeQL") is
+        #   configurable and was once a tight, OOM-driven value on
+        #   self-hosted; this makes real headroom visible per run instead of
+        #   only learning about it from the next OOM kill.
         # From: Issue #1095
         if: steps.admission.outputs.superseded != 'true' && (matrix.language != 'rust' || needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
         run: |
@@ -392,10 +410,13 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Initialize CodeQL
-        # What: caps CodeQL at 512 MB RAM / 4 threads; also applies to "Perform CodeQL Analysis" below.
-        # Why: unset, CodeQL defaults to most of the host's memory; the
-        #   smallest lancache-heavy host has ~3.6 GiB, no swap, and its Java
-        #   extractor was confirmed OOM-killed under that default (dmesg).
+        # What: RAM picks one of two repository Variables based on
+        #   CODEQL_USE_SELF_HOSTED (runs-on above), instead of one Variable
+        #   someone must also remember to change when switching runner pools.
+        # Why: the self-hosted lancache-heavy pool's smallest host has ~3.6
+        #   GiB/no swap and was confirmed OOM-killed at CodeQL's own default
+        #   (dmesg) -- its cap must stay far below the GitHub-hosted
+        #   ubuntu-latest default (16GB total), which has real headroom.
         # From: Issue #1095
         #
         # 'actions' always analyzes; 'rust' only when Rust is actually relevant
@@ -406,8 +427,30 @@ jobs:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
           config-file: ./.github/codeql/codeql-config.yml
-          ram: "512"
-          threads: "4"
+          ram: ${{ vars.CODEQL_USE_SELF_HOSTED == 'true' && (vars.CODEQL_RAM_MB_SELFHOSTED || '2048') || (vars.CODEQL_RAM_MB_HOSTED || '10240') }}
+          threads: ${{ vars.CODEQL_THREADS || '4' }}
+
+      - name: Cache Cargo registry and target dirs for CodeQL's Rust build
+        # What: caches ~/.cargo plus each crate's target/ across runs, keyed
+        #   on the 3 Cargo.lock files.
+        # Why: this job's own sccache/sccache-dist acceleration is LAN-only
+        #   and unreachable from a GitHub-hosted runner (mode: optional
+        #   above already handles that gracefully) -- without this, every
+        #   run recompiles all 3 crates from scratch instead of only their
+        #   changed dependencies.
+        # From: Issue #1095 (maintainer request, 2026-08-25)
+        if: steps.admission.outputs.superseded != 'true' && matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            services/dns/nats-subscriber/target
+            services/ui/target
+            services/watchdog/target
+          key: cargo-codeql-${{ runner.os }}-${{ hashFiles('services/dns/nats-subscriber/Cargo.lock', 'services/ui/Cargo.lock', 'services/watchdog/Cargo.lock') }}
+          restore-keys: |
+            cargo-codeql-${{ runner.os }}-
 
       - name: Build DNS Rust crate for CodeQL
         if: steps.admission.outputs.superseded != 'true' && matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
@@ -451,7 +494,7 @@ jobs:
             kill "$(cat "$CODEQL_MEMLOG_PID_FILE")" 2>/dev/null || true
           fi
           if [ -n "${CODEQL_MEMLOG_FILE:-}" ] && [ -f "$CODEQL_MEMLOG_FILE" ]; then
-            echo "::group::CodeQL memory usage (${{ matrix.language }}, 10s samples, 512 MB cap)"
+            echo "::group::CodeQL memory usage (${{ matrix.language }}, 10s samples, ${{ vars.CODEQL_USE_SELF_HOSTED == 'true' && (vars.CODEQL_RAM_MB_SELFHOSTED || '2048') || (vars.CODEQL_RAM_MB_HOSTED || '10240') }} MB cap)"
             cat "$CODEQL_MEMLOG_FILE"
             echo "::endgroup::"
           else

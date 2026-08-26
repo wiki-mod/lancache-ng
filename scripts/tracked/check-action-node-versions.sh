@@ -15,13 +15,17 @@
 #
 # It also enforces two #1095 centralization invariants over the same scan
 # scope:
-#   1. one file must not repeat the exact same third-party `uses:` literal
-#      more than once -- a YAML anchor/alias or an existing internal owner
-#      action must carry that one maintenance point instead of N raw copies.
+#   1. one WORKFLOW file must not repeat the exact same third-party `uses:`
+#      literal more than once -- a YAML anchor/alias must carry that one
+#      maintenance point instead of N raw copies. Deliberately scoped to
+#      workflow files only (is_workflow_file() below): a composite
+#      action.yml cannot use an anchor at all (confirmed live, F-24 -- see
+#      that check's own comment), so duplication there is the correct shape.
 #   2. one third-party action key (`owner/repo[/subpath]`) must not drift to
 #      multiple pinned refs across .github/** -- that is exactly the
 #      "same dependency, different versions, nobody sees it anymore" failure
-#      mode #1095 is meant to stop.
+#      mode #1095 is meant to stop. Applies to both workflow and composite
+#      action files, since it has nothing to do with anchors.
 #
 # Local composite actions (`uses: ./.github/actions/<name>`) are resolved by
 # reading their action.yml/action.yaml straight off disk -- no GitHub API
@@ -145,6 +149,18 @@ is_external_action_ref() {
   return 0
 }
 
+# What: a composite action.yml file cannot use a YAML anchor/alias at all.
+# Why: confirmed live (Issue #1095 F-24, PR #1665): the Actions Runner's own
+#   composite-action loader hard-fails with "Anchors are not currently
+#   supported" -- unlike a workflow file, which a separate, more permissive
+#   parser already tolerates (pre-existing anchors in build-push.yml's env:
+#   blocks predate this and still work). The duplicate-ref check below must
+#   only apply where an anchor is an actual, usable fix.
+is_workflow_file() {
+  local candidate="$1"
+  [[ "$candidate" == "$workflow_dir"/* ]]
+}
+
 # ---------------------------------------------------------------------------
 # The Node runtimes GitHub Actions has deprecated. node24 is the current
 # runtime as of this writing (2026-07) -- when GitHub deprecates it too (a
@@ -253,11 +269,13 @@ for entry in "${uses_literal_entries[@]}"; do
     continue
   fi
 
-  exact_file_key="${scan_file}"$'\t'"${value}"
-  if [ -n "${literal_ref_counts_by_file[$exact_file_key]+x}" ]; then
-    literal_ref_counts_by_file[$exact_file_key]=$((literal_ref_counts_by_file[$exact_file_key] + 1))
-  else
-    literal_ref_counts_by_file[$exact_file_key]=1
+  if is_workflow_file "$scan_file"; then
+    exact_file_key="${scan_file}"$'\t'"${value}"
+    if [ -n "${literal_ref_counts_by_file[$exact_file_key]+x}" ]; then
+      literal_ref_counts_by_file[$exact_file_key]=$((literal_ref_counts_by_file[$exact_file_key] + 1))
+    else
+      literal_ref_counts_by_file[$exact_file_key]=1
+    fi
   fi
 
   action_key="${value%@*}"
@@ -276,10 +294,13 @@ for entry in "${uses_literal_entries[@]}"; do
   fi
 done
 
-# What: rejects repeated literal third-party `uses:` refs inside one file.
-# Why: once the same immutable ref appears twice, the file already has more
-#   maintenance points than needed; a YAML anchor/alias keeps GitHub's
-#   static-YAML requirement while collapsing the ref to one owner line.
+# What: rejects a repeated literal third-party `uses:` ref inside one
+#   workflow file (never inside a composite action.yml -- see
+#   is_workflow_file() above).
+# Why: once the same immutable ref appears twice in a workflow file, a YAML
+#   anchor/alias collapses it to one owner line; the same collapse is not an
+#   option inside a composite action.yml (Issue #1095 F-24), so duplication
+#   there is simply the correct, GitHub-imposed shape, not a violation.
 for exact_file_key in "${!literal_ref_counts_by_file[@]}"; do
   count="${literal_ref_counts_by_file[$exact_file_key]}"
   if [ "$count" -le 1 ]; then
@@ -287,7 +308,7 @@ for exact_file_key in "${!literal_ref_counts_by_file[@]}"; do
   fi
   scan_file="${exact_file_key%%$'\t'*}"
   value="${exact_file_key#*$'\t'}"
-  fail "'$scan_file' repeats third-party action ref '$value' $count times. Collapse it to one maintenance point with a YAML anchor/alias or an existing internal owner action."
+  fail "'$scan_file' repeats third-party action ref '$value' $count times. Collapse it to one maintenance point with a YAML anchor/alias."
 done
 
 # What: rejects one external action key pinned to multiple distinct refs.
