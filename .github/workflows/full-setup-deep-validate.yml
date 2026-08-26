@@ -307,6 +307,7 @@ jobs:
           # pull_request event (see this job's own `if:` above, gated on
           # pr_staging_available).
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
           # #895: github.sha on a pull_request event is the same synthetic
           # merge commit build-push.yml built and tagged (see this workflow's
           # own BUILD_SHA comment in the "plan" job) -- kept here purely for

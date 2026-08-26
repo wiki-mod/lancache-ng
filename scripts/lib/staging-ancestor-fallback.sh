@@ -957,6 +957,155 @@ saf_resolve_sha_image_ref() {
   return 0
 }
 
+# saf_descendant_preserves_service_content <base_sha> <candidate_sha> <classify_key> [git_dir]
+#
+# Answers the descendant-side counterpart to saf_base_commit_service_untouched:
+# is the service still provably content-equivalent between <base_sha> and the
+# later first-parent commit <candidate_sha>? A later candidate is only safe
+# when BOTH the service itself and build-affecting workflow wiring stayed
+# unchanged across the FULL span -- a superseded service-changing commit or a
+# later workflow/composite-action change anywhere in that span would make the
+# descendant a different proof target from <base_sha>'s own image.
+#
+# Returns 0 only when classify-image-impact.sh reports both
+# <classify_key>=false and workflow=false for the full span. Returns 1 when
+# either changed, and 2 when the classify command itself is inconclusive.
+saf_descendant_preserves_service_content() {
+  local base_sha="${1:?saf_descendant_preserves_service_content: base_sha is required}"
+  local candidate_sha="${2:?saf_descendant_preserves_service_content: candidate_sha is required}"
+  local classify_key="${3:?saf_descendant_preserves_service_content: classify_key is required}"
+  local git_dir="${4:-.}"
+  local classify_script="${STAGING_DESCENDANT_CLASSIFY_SCRIPT:-$(dirname "${BASH_SOURCE[0]}")/../untracked/classify-image-impact.sh}"
+  local classify_output changed_flag workflow_flag changed_files_tmp
+  changed_files_tmp="$(mktemp)" || return 2
+
+  if ! git -C "$git_dir" diff --name-only "$base_sha" "$candidate_sha" > "$changed_files_tmp" 2>/dev/null; then
+    rm -f "$changed_files_tmp"
+    return 2
+  fi
+
+  classify_output="$(CHANGED_FILES="$changed_files_tmp" bash "$classify_script" 2>/dev/null)" || {
+    rm -f "$changed_files_tmp"
+    return 2
+  }
+  rm -f "$changed_files_tmp"
+
+  # What: reads the exact per-service key build-push.yml already routes on.
+  # Why: avoids inventing a second service/path mapping for descendant rescue.
+  # From: Issue #456 | PR #1673
+  changed_flag="$(grep -m1 "^${classify_key}=" <<<"$classify_output" | cut -d= -f2)"
+  if [[ "$changed_flag" != "false" ]]; then
+    return 1
+  fi
+
+  # What: also requires workflow=false across the same full span.
+  # Why: later images built under changed build wiring are not equivalent proof.
+  # From: Issue #456 | PR #1673
+  workflow_flag="$(grep -m1 '^workflow=' <<<"$classify_output" | cut -d= -f2)"
+  if [[ "$workflow_flag" != "false" ]]; then
+    return 1
+  fi
+
+  return 0
+}
+
+# saf_find_built_descendant <repository> <base_sha> <base_ref> <service> <classify_key> \
+#     <search_depth> <freshness_timeout_seconds> <freshness_hard_ceiling_seconds> \
+#     <freshness_poll_interval_seconds> <extended_timeout_seconds> \
+#     <extended_hard_ceiling_seconds> [git_dir]
+#
+# Searches the later first-parent history of origin/<base_ref> for the nearest
+# commit whose image for <service> can safely stand in for <base_sha>. This is
+# the complement to saf_find_built_ancestor: a superseded service-changing
+# commit can make the older-only walk fail even though the base branch later
+# published the SAME unchanged service content, and that contradiction is
+# exactly what this helper resolves.
+#
+# Safety bar: the full <base_sha>..<candidate> span must preserve both the
+# service's own content and workflow wiring (saf_descendant_preserves_service_content),
+# a tag-publishing run must exist for the candidate, and the candidate's own
+# per-commit image must be freshness-confirmed at or after <base_sha>. Reverse
+# ancestry is deliberately NOT accepted here: a descendant tag carrying a
+# revision older than <base_sha> would not prove it includes <base_sha>'s
+# service state.
+#
+# Returns 0 and echoes the qualifying descendant SHA on success, 1 when no
+# qualifying descendant exists within the bounded search, and 2 when the
+# descendant search itself is inconclusive.
+saf_find_built_descendant() {
+  local repository="${1:?saf_find_built_descendant: repository is required}"
+  local base_sha="${2:?saf_find_built_descendant: base_sha is required}"
+  local base_ref="${3:?saf_find_built_descendant: base_ref is required}"
+  local service="${4:?saf_find_built_descendant: service is required}"
+  local classify_key="${5:?saf_find_built_descendant: classify_key is required}"
+  local search_depth="${6:?saf_find_built_descendant: search_depth is required}"
+  local freshness_timeout_seconds="${7:?saf_find_built_descendant: freshness_timeout_seconds is required}"
+  local freshness_hard_ceiling_seconds="${8:?saf_find_built_descendant: freshness_hard_ceiling_seconds is required}"
+  local freshness_poll_interval_seconds="${9:?saf_find_built_descendant: freshness_poll_interval_seconds is required}"
+  local extended_timeout_seconds="${10:?saf_find_built_descendant: extended_timeout_seconds is required}"
+  local extended_hard_ceiling_seconds="${11:?saf_find_built_descendant: extended_hard_ceiling_seconds is required}"
+  local git_dir="${12:-.}"
+  local remote_ref="origin/${base_ref}"
+
+  if ! git -C "$git_dir" cat-file -e "${remote_ref}^{commit}" 2>/dev/null; then
+    echo "::warning::Descendant rescue could not inspect ${remote_ref}: the base branch ref is not present in local git history. Skipping the later-descendant search rather than guessing." >&2
+    return 2
+  fi
+
+  local descendants
+  descendants="$(git -C "$git_dir" rev-list --first-parent --ancestry-path --reverse --max-count="$search_depth" "${base_sha}..${remote_ref}" 2>/dev/null)" || return 2
+  [[ -n "$descendants" ]] || return 1
+
+  local candidate equivalence_status has_run activity_status descendant_image
+  while IFS= read -r candidate; do
+    [[ -z "$candidate" ]] && continue
+
+    equivalence_status=0
+    saf_descendant_preserves_service_content "$base_sha" "$candidate" "$classify_key" "$git_dir" || equivalence_status=$?
+    if (( equivalence_status == 2 )); then
+      echo "::warning::Descendant rescue could not prove whether $service stayed unchanged between $base_sha and later base-branch commit $candidate. Skipping the descendant search rather than guessing." >&2
+      return 2
+    fi
+    if (( equivalence_status == 1 )); then
+      # What: stops at the first later span that changes the service/workflow proof.
+      # Why: every even-later descendant includes that same changed span too.
+      # From: Issue #456 | PR #1673
+      echo "::notice::Later base-branch commit $candidate changed $service ($classify_key) or build-affecting workflow wiring somewhere in the full $base_sha..$candidate span, so no still-later descendant can prove equivalence either. Stopping the descendant rescue here." >&2
+      return 1
+    fi
+
+    has_run=0
+    saf_base_commit_has_confirmed_run "$repository" "$candidate" "" || has_run=$?
+    if (( has_run == 2 )); then
+      echo "::warning::Descendant rescue could not positively determine whether later base-branch commit $candidate has a tag-publishing build-push.yml run. Skipping the descendant search rather than guessing." >&2
+      return 2
+    fi
+    if (( has_run == 1 )); then
+      continue
+    fi
+
+    descendant_image="ghcr.io/${repository}/${service}:sha-${candidate}"
+    if sif_wait_for_fresh_base_image "$descendant_image" "$base_sha" "$service" \
+      "$freshness_timeout_seconds" "$freshness_hard_ceiling_seconds" "$freshness_poll_interval_seconds" >/dev/null; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+
+    activity_status=0
+    saf_candidate_run_is_active "$repository" "$candidate" || activity_status=$?
+    if (( activity_status == 0 )); then
+      echo "::warning::Later base-branch commit $candidate still appears to be actively building $service -- giving it one extended descendant-rescue retry before moving on." >&2
+      if sif_wait_for_fresh_base_image "$descendant_image" "$base_sha" "$service" \
+        "$extended_timeout_seconds" "$extended_hard_ceiling_seconds" "$freshness_poll_interval_seconds" >/dev/null; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+    fi
+  done <<< "$descendants"
+
+  return 1
+}
+
 # saf_find_built_ancestor <repository> <base_sha> <service> <classify_key> <search_depth> \
 #     <freshness_timeout_seconds> <freshness_hard_ceiling_seconds> \
 #     <freshness_poll_interval_seconds> \
@@ -1461,7 +1610,7 @@ saf_find_built_ancestor() {
 #     <base_freshness_timeout_seconds> <base_freshness_hard_ceiling_seconds> \
 #     <ancestor_freshness_timeout_seconds> <ancestor_freshness_hard_ceiling_seconds> \
 #     <ancestor_extended_freshness_timeout_seconds> <ancestor_extended_freshness_hard_ceiling_seconds> \
-#     <freshness_poll_interval_seconds> <ancestor_search_depth> [git_dir]
+#     <freshness_poll_interval_seconds> <ancestor_search_depth> [git_dir] [base_ref]
 #
 # The single shared orchestrator both callers (scripts/untracked/ensure-pr-staging-images.sh
 # and build-push.yml's own "Ensure PR staging tags exist for full-setup
@@ -1576,6 +1725,7 @@ saf_resolve_untouched_backfill_source() {
   local ancestor_extended_freshness_timeout_seconds="$9" ancestor_extended_freshness_hard_ceiling_seconds="${10}"
   local freshness_poll_interval_seconds="${11}" ancestor_search_depth="${12}"
   local git_dir="${13:-.}"
+  local base_ref="${14:-}"
   # See saf_find_built_ancestor's own comment for why this is set at all, and
   # why it is `local -x` (exported, but restored to the caller's own value when
   # this function returns) rather than a bare `export`:
@@ -1651,6 +1801,18 @@ saf_resolve_untouched_backfill_source() {
       printf '%s\n' "$base_image"
       return 0
     fi
+    if [[ -n "$base_ref" ]]; then
+      local descendant_sha
+      if descendant_sha="$(saf_find_built_descendant "$repository" "$base_sha" "$base_ref" "$service" "$classify_key" "$ancestor_search_depth" \
+        "$ancestor_freshness_timeout_seconds" "$ancestor_freshness_hard_ceiling_seconds" "$freshness_poll_interval_seconds" \
+        "$ancestor_extended_freshness_timeout_seconds" "$ancestor_extended_freshness_hard_ceiling_seconds" "$git_dir")"; then
+        local descendant_image
+        descendant_image="$(saf_resolve_sha_image_ref "$repository" "$service" "$descendant_sha" "$git_dir")"
+        echo "::notice::Substituting later base-branch descendant $descendant_sha for base commit $base_sha ($service stayed provably unchanged from $base_sha through ${base_ref}, and that later commit published a freshness-confirmed per-commit image). (re)pointing at $descendant_image, its own immutable per-commit tag -- never the mutable nightly/latest channel." >&2
+        printf '%s\n' "$descendant_image"
+        return 0
+      fi
+    fi
     if ! ancestor_sha="$(saf_find_built_ancestor "$repository" "$base_sha" "$service" "$classify_key" "$ancestor_search_depth" \
       "$ancestor_freshness_timeout_seconds" "$ancestor_freshness_hard_ceiling_seconds" "$freshness_poll_interval_seconds" \
       "$ancestor_extended_freshness_timeout_seconds" "$ancestor_extended_freshness_hard_ceiling_seconds" "$git_dir")"; then
@@ -1716,6 +1878,18 @@ saf_resolve_untouched_backfill_source() {
   fi
 
   echo "::notice::$post_reason -- not a broken build. Searching up to $ancestor_search_depth ancestor commits for the nearest one with both a recorded build-push.yml run and a freshness-confirmed $service image to back-fill from instead." >&2
+  if [[ -n "$base_ref" ]]; then
+    local descendant_sha
+    if descendant_sha="$(saf_find_built_descendant "$repository" "$base_sha" "$base_ref" "$service" "$classify_key" "$ancestor_search_depth" \
+      "$ancestor_freshness_timeout_seconds" "$ancestor_freshness_hard_ceiling_seconds" "$freshness_poll_interval_seconds" \
+      "$ancestor_extended_freshness_timeout_seconds" "$ancestor_extended_freshness_hard_ceiling_seconds" "$git_dir")"; then
+      local descendant_image
+      descendant_image="$(saf_resolve_sha_image_ref "$repository" "$service" "$descendant_sha" "$git_dir")"
+      echo "::notice::Substituting later base-branch descendant $descendant_sha for base commit $base_sha ($service stayed provably unchanged from $base_sha through ${base_ref}, and that later commit published a freshness-confirmed per-commit image). (re)pointing at $descendant_image, its own immutable per-commit tag -- never the mutable nightly/latest channel." >&2
+      printf '%s\n' "$descendant_image"
+      return 0
+    fi
+  fi
   if ! ancestor_sha="$(saf_find_built_ancestor "$repository" "$base_sha" "$service" "$classify_key" "$ancestor_search_depth" \
     "$ancestor_freshness_timeout_seconds" "$ancestor_freshness_hard_ceiling_seconds" "$freshness_poll_interval_seconds" \
     "$ancestor_extended_freshness_timeout_seconds" "$ancestor_extended_freshness_hard_ceiling_seconds" "$git_dir")"; then

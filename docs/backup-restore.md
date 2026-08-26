@@ -124,6 +124,20 @@ instead of starting it against an unconverged or invalid configuration. Fix
 the reported problem in `.env`, then run `setup.sh update [install-dir]` to
 finish converging and start the stack.
 
+`restore` also refuses to proceed when a different install directory still has
+Compose containers present for the same fixed Compose project name and named
+volumes, even if those containers are currently stopped. The guard is now
+deliberately stricter for same-host cross-directory restores as well: if the
+backup is being restored into a *different* install path and Docker still has
+any named volumes labeled for that archived Compose project, restore refuses
+even when the old containers are already gone. After `docker compose down`,
+Docker leaves the project label on the volume object but no longer retains a
+reliable install-directory owner marker, so reusing those volumes from a
+different local path would be ownership-ambiguous. Same-directory restore and
+cross-host restore remain allowed; same-host cross-directory restore now
+requires first removing the old project's named volumes if they are no longer
+needed.
+
 ## Restore testing
 
 Test restores periodically on a spare host or VM:

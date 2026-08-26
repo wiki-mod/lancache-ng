@@ -302,3 +302,99 @@ EOF
     [[ "$(cat "$bundle_dir/compose-ps.txt")" == *"[REDACTED]"* ]]
     [[ "$(cat "$bundle_dir/logs/proxy.log")" == *"[REDACTED]"* ]]
 }
+
+@test "cmd_debug stays read-only across repeated runs and only uses diagnostic docker compose subcommands" {
+    cache_dir="$install_dir/cache"
+    mkdir -p "$cache_dir"
+    cat > "$install_dir/.env" <<EOF
+IP_STANDARD=192.168.1.10
+IP_SSL=
+CACHE_DIR=$cache_dir
+SSL_ENABLED=0
+EOF
+
+    before_env="$(cat "$install_dir/.env")"
+    docker_log="$BATS_TEST_TMPDIR/cmd-debug-docker.log"
+    export docker_log
+
+    docker() {
+        if [[ "$1" = "compose" ]]; then
+            shift
+            [[ "$1" = "--env-file" ]] && shift 2
+            printf '%s\n' "$1 ${2:-}" >> "$docker_log"
+            case "$1" in
+                ps) printf 'proxy running\n' ;;
+                logs) printf 'proxy log output\n' ;;
+                up|pull|down|rm|restart|stop) return 97 ;;
+            esac
+        fi
+    }
+    curl() { return 0; }
+    ip() { printf '2: eth0    inet 192.168.1.50/24 brd 192.168.1.255 scope global eth0\n'; }
+    du() { printf '1G\t%s\n' "$2"; }
+
+    run cmd_debug "$install_dir"
+    [ "$status" -eq 0 ]
+    run cmd_debug "$install_dir"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$install_dir/.env")" = "$before_env" ]
+
+    log_output="$(cat "$docker_log")"
+    [[ "$log_output" == *"ps "* ]]
+    [[ "$log_output" == *"logs --tail=30"* ]]
+    [[ "$log_output" != *"up "* ]]
+    [[ "$log_output" != *"pull "* ]]
+    [[ "$log_output" != *"down "* ]]
+}
+
+@test "cmd_converge_reconcile folds Admin UI overrides into .env once and is idempotent on the second run" {
+    cat > "$install_dir/.env" <<'EOF'
+LANCACHE_IMAGE_CHANNEL=stable
+AUTO_UPDATE_ENABLED=0
+DHCP_MODE=disabled
+COMPOSE_PROFILES=
+SSL_ENABLED=0
+NTP_ENABLED=0
+LOGGING_ENABLED=0
+CACHE_MAX_SIZE=50g
+CACHE_MAX_GB=50
+EOF
+    ui_settings_file="$BATS_TEST_TMPDIR/lancache-ui-settings.env"
+    cat > "$ui_settings_file" <<'EOF'
+LANCACHE_IMAGE_CHANNEL=nightly
+AUTO_UPDATE_ENABLED=1
+DHCP_MODE=kea
+LOGGING_ENABLED=1
+CACHE_MAX_GB=75
+EOF
+
+    reconcile_log="$BATS_TEST_TMPDIR/converge-reconcile.log"
+    export ui_settings_file reconcile_log
+    docker() {
+        case "$1" in
+            volume)
+                [[ "$2" = "inspect" && "$3" = "lancache-ng_ui-data" ]] || return 1
+                ;;
+            run)
+                cat "$ui_settings_file"
+                ;;
+        esac
+    }
+    reconcile_auto_update_timer_state() {
+        printf 'reconcile %s\n' "$1" >> "$reconcile_log"
+    }
+
+    cmd_converge_reconcile "$install_dir"
+    first_env="$(cat "$install_dir/.env")"
+    [[ "$first_env" == *"LANCACHE_IMAGE_CHANNEL=nightly"* ]]
+    [[ "$first_env" == *"AUTO_UPDATE_ENABLED=1"* ]]
+    [[ "$first_env" == *"DHCP_MODE=kea"* ]]
+    [[ "$first_env" == *"LOGGING_ENABLED=1"* ]]
+    [[ "$first_env" == *"CACHE_MAX_SIZE=75g"* ]]
+    [[ "$first_env" == *"CACHE_MAX_GB=75"* ]]
+    [[ "$first_env" == *"COMPOSE_PROFILES=dhcp-kea,logging"* ]]
+
+    cmd_converge_reconcile "$install_dir"
+    second_env="$(cat "$install_dir/.env")"
+    [ "$second_env" = "$first_env" ]
+}
