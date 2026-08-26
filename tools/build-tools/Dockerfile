@@ -120,11 +120,10 @@ LABEL org.opencontainers.image.description="Prebuilt lancache-ng CI and develope
 # From: Issue #1304 | Issue #1556
 ARG GIT_VERSION=2.47.3
 ARG GIT_SHA256=9c2eb1250781b3e5bfef098572d07fdf132d67e6c065e4307332ade9819a1501
-# What: pins the same curl release/checksum services/utilities/Dockerfile
-# builds, rebuilt natively here for glibc (not that image's static musl lib).
-# Why: verified against curl.se's own advisories, all 4 tracked curl CVEs
-# are fixed at 8.21.0 -- Debian trixie-backports still flags them since it
-# isn't a first-class Security-Tracker channel (see .trivyignore.yaml).
+# What: pins the curl release/checksum also used by services/utilities/Dockerfile,
+#   rebuilt natively here for glibc (not that image's static musl lib).
+# Why: verified against curl.se's advisories, all 4 tracked CVEs are fixed at
+#   8.21.0 -- trixie-backports still flags them (not a Security-Tracker channel).
 # From: Issue #1304 | Issue #1556
 ARG CURL_VERSION=8.21.0
 ARG CURL_SHA256=aa1b66a70eace83dc624508745646c08ae561de512ab403adffb93ac87fc72e6
@@ -197,21 +196,11 @@ RUN echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sou
 # Admin UI Rust binary is a separate, unrelated build and provides no CLI.
 # From: Issue #1585.
 #
-# What: purges `git`/`git-man`/`curl` -- not just skips installing them --
-# and only then installs this image's own package list, which excludes
-# both; `libssl-dev`/`zlib1g-dev` are only curl/git's from-source
-# replacement's build deps (purged again once both are built).
-# Why: `rust:latest` itself already ships Debian-packaged `git`/`curl`
-# (confirmed live: rustup's own install needs them), so simply never
-# naming them in this image's own install list is not sufficient -- the
-# base image's copies, and the libcurl4-gnutls/libcurl3t64-gnutls chain
-# git's `git-remote-https` pulls in, survive untouched otherwise, and the
-# `dist-upgrade` step above only upgrades them in place rather than
-# removing them. `libcurl4-openssl-dev` is deliberately NOT installed --
-# git links against a from-source-built curl (below), not Debian's
-# libcurl, so no Debian curl headers/library are needed at all.
-# From: Issue #1304 | Issue #1556 (see the source-built curl+git step and
-# the utilities-tools COPY below this block).
+# What: purges git/git-man/curl before installing this image's own list
+#   (excludes both); libssl-dev/zlib1g-dev are only the from-source builds' deps.
+# Why: rust:latest already ships Debian's git/curl -- untouched by the
+#   dist-upgrade above (which patches in place, never removes them).
+# From: Issue #1304 | Issue #1556
 RUN set -euo pipefail; \
     apt-get update; \
     apt-get purge -y git git-man curl; \
@@ -237,11 +226,10 @@ RUN set -euo pipefail; \
     apt-get autoremove -y; \
     rm -rf /var/lib/apt/lists/*
 
-# What: curl comes from the shared utilities image instead of Debian's
-# own curl package.
+# What: curl comes from the shared utilities image instead of Debian's own package.
 # Why: reuses the same statically-linked, feature-reduced binary already
-# shipped to 5 other first-party images, rather than reinstalling a
-# separately-tracked, more heavily-CVE'd Debian package.
+#   shared by every other first-party image, rather than a separately-tracked,
+#   more heavily-CVE'd Debian package.
 # From: Issue #1304 | Issue #1556
 COPY --from=utilities-tools /usr/local/bin/curl /usr/local/bin/curl
 RUN curl --version >/dev/null

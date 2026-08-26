@@ -1816,9 +1816,7 @@ jobs:
             || { echo "::error::Acceleration infrastructure network must be selected per job from generated secret files."; exit 1; }
           grep -E '^[[:space:]]+redis-file:[[:space:]]+\$\{\{[[:space:]]*steps\.sccache-secret\.outputs\.redis-file[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
             && grep -E '^[[:space:]]+dist-config-file:[[:space:]]+\$\{\{[[:space:]]*steps\.sccache-secret\.outputs\.dist-config-file[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
-            && grep -E 'distcc-hosts-file:[[:space:]]+\$\{\{[[:space:]]*matrix\.service' .github/workflows/build-push.yml >/dev/null \
-            && grep -F "steps['distcc-hosts-secret'].outputs['hosts-file']" .github/workflows/build-push.yml >/dev/null \
-            && grep -F 'steps.sccache-secret.outputs.distcc-hosts-file' .github/workflows/build-push.yml >/dev/null \
+            && grep -E '^[[:space:]]+distcc-hosts-file:[[:space:]]+\$\{\{[[:space:]]*matrix\.service[[:space:]]*==[[:space:]]*.build-tools.[[:space:]]*&&[[:space:]]*steps\[.distcc-hosts-secret.\]\.outputs\[.hosts-file.\][[:space:]]*\|\|[[:space:]]*steps\.sccache-secret\.outputs\.distcc-hosts-file[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
             && grep -E '^[[:space:]]+build-tools-image:[[:space:]]+\$\{\{[[:space:]]*env\.BUILD_TOOLS_IMAGE[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
             && grep -E '^[[:space:]]+build-network:[[:space:]]+\$\{\{[[:space:]]*env\.RUST_ACCELERATION_NETWORK[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
             && grep -E '^[[:space:]]+platform:[[:space:]]+linux/amd64[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
@@ -4971,7 +4969,7 @@ jobs:
           - service: utilities
             context: services/utilities
             build_contexts: ""
-            description: "Shared lancache-ng utilities image (curl, nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd) for COPY --from= consumption by seven first-party images (issue #1556)."
+            description: "Shared lancache-ng utilities image (curl, nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd) for COPY --from= consumption by eight first-party images (issue #1556)."
             # Heavy, not light, despite being a small/fast build in practice
             # (curl's own C compile is ~20s): AG-CI-002's light-tier exception
             # requires "no real compile/link step of its own AT ALL", verified
@@ -5479,12 +5477,10 @@ jobs:
             echo "SECRET_FILES"
           } >> "$GITHUB_OUTPUT"
 
-      # What: produces the ccache_redis_url secret for dns, utilities, and
-      #   build-tools.
-      # Why: each mounts it under a distinct BuildKit secret id from
-      #   sccache's own sccache_redis_url, reusing the same repository
-      #   secret rather than a second GitHub secret; honors the existing
-      #   SCCACHE_REDIS_MODE kill switch (AG-CI-004).
+      # What: produces the ccache_redis_url secret for dns, utilities, and build-tools.
+      # Why: each mounts it under a distinct BuildKit secret id from sccache's
+      #   own sccache_redis_url, reusing the same repository secret; honors
+      #   the existing SCCACHE_REDIS_MODE kill switch (AG-CI-004).
       # From: Issue #1095 (G15 | #1556) | PR #1661
       - name: Prepare ccache Redis endpoint (dns + utilities + build-tools C-dependency cache)
         if: >-
@@ -5590,12 +5586,10 @@ jobs:
           build-network: ${{ env.RUST_ACCELERATION_NETWORK }}
           platform: linux/amd64
 
-      # What: merges sccache-secret, ccache-redis-secret, and
-      #   distcc-hosts-secret into one list.
-      # Why: a block-scalar interpolation of all three step outputs would
-      #   add blank lines to every service where one or more are empty;
-      #   this reproduces the prior single-source input byte-for-byte
-      #   instead.
+      # What: merges sccache-secret, ccache-redis-secret, and distcc-hosts-secret.
+      # Why: a block-scalar interpolation of all three outputs would add blank
+      #   lines wherever one is empty; this reproduces the prior single-source
+      #   input byte-for-byte instead.
       # From: Issue #1095 (G15) | PR #1661
       - name: Combine sccache/ccache secret files
         id: combined-secret-files
@@ -6581,7 +6575,7 @@ jobs:
             [ui]="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
             [build-tools]="Prebuilt lancache-ng CI and developer validation toolchain image."
             [syslog]="Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428)."
-            [utilities]="Shared lancache-ng utilities image (curl, nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd) for COPY --from= consumption by seven first-party images (issue #1556)."
+            [utilities]="Shared lancache-ng utilities image (curl, nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd) for COPY --from= consumption by eight first-party images (issue #1556)."
           )
 
           # Duplicated rather than factored into a shared script/action: GitHub Actions

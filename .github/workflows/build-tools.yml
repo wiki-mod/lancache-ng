@@ -205,11 +205,10 @@ jobs:
         id: apt-cache-bust
         run: echo "value=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
 
-      # What: writes ccache_redis_url + distcc_potential_hosts secret files
-      #   for the Dockerfile's curl/git build to mount as BuildKit secrets.
-      # Why: pull_request runs never get this (no LAN access should be
-      #   assumed for that trigger); the git build still succeeds without
-      #   it, just without cache/distribution, per its own fallback ladder.
+      # What: writes ccache_redis_url + distcc_potential_hosts secret files for
+      #   the Dockerfile's curl/git build to mount as BuildKit secrets.
+      # Why: pull_request runs never get this (no LAN access assumed for that
+      #   trigger); the git build still succeeds without it, just uncached.
       # From: Issue #1304 | Issue #1556 | PR #1661
       - name: Prepare ccache/distcc secrets for git build
         if: github.event_name != 'pull_request'
@@ -240,20 +239,10 @@ jobs:
             echo "::notice::No distcc hosts secret prepared for the git build (DISTCC_POTENTIAL_HOSTS unset)."
           fi
 
-      # What: host network only when the ccache/distcc secrets above were
-      #   actually prepared; bridge otherwise.
-      # Why: mirrors build-push.yml's identical RUST_ACCELERATION_NETWORK
-      #   selection so a broken Redis/distcc endpoint is checked the same
-      #   way here as for the matrix services.
-      # From: Issue #1304 | PR #1661
-      # What: computes both network vocabularies build-push.yml's identical
-      #   step does -- RUST_ACCELERATION_NETWORK (docker run's bridge/host)
-      #   for the preflight below, RUST_BUILDX_NETWORK (buildx's
-      #   default/host) for the real build further down.
-      # Why: without this, a host-networking-only Redis/distcc endpoint the
-      #   preflight can reach stays unreachable to the actual build, which
-      #   still runs on the default network and silently falls back to a
-      #   local, uncached compile.
+      # What: computes RUST_ACCELERATION_NETWORK/RUST_BUILDX_NETWORK -- host
+      #   only when the ccache/distcc secrets above were prepared, bridge otherwise.
+      # Why: an unreachable host-only endpoint would otherwise leave the build
+      #   on the default network, silently falling back to an uncached compile.
       # From: Issue #1304 | PR #1661
       - name: Select acceleration network for the standalone build
         if: github.event_name != 'pull_request'
