@@ -2680,6 +2680,7 @@ jobs:
           # Why: only runs when pr-staging-available is true.
           # From: Issue #1095 | PR #1619
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
           WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow_reuse_scope }}
           PROXY_TOUCHED: ${{ needs['detect-changes'].outputs.proxy }}
           DNS_TOUCHED: ${{ needs['detect-changes'].outputs.dns_image }}
@@ -2785,7 +2786,7 @@ jobs:
             if ! resolved_source="$(saf_resolve_untouched_backfill_source "$REPOSITORY" "$service" "${classify_key_map[$service]}" "$BASE_SHA" \
               900 1200 \
               300 600 \
-              0 0 15 50 "$GITHUB_WORKSPACE")"; then
+              0 0 15 50 "$GITHUB_WORKSPACE" "$BASE_REF")"; then
               exit 1
             fi
             echo "::notice::(re)pointing $PR_TAG at $resolved_source."

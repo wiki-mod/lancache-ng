@@ -3426,6 +3426,21 @@ compose_volume_names() {
     } | sort -u
 }
 
+# What: reports whether any named Docker volume still carries this Compose project label.
+# Why: after `docker compose down`, the durable project label remains on the volume object even when the containers and their working_dir owner label are already gone, so restore must still detect this ambiguity source.
+# From: Issue #456
+compose_project_has_named_volumes() {
+    local project="$1"
+    local volume_names
+    # What: captures the labeled volume listing before checking whether any names exist.
+    # Why: under this file's `pipefail`, a live `docker volume ls | grep -q .`
+    #   pipeline can report SIGPIPE/141 once grep exits on the first match,
+    #   even though the project really does still own named volumes.
+    # From: Issue #456
+    volume_names="$(docker volume ls --filter "label=com.docker.compose.project=${project}" --format '{{.Name}}' 2>/dev/null)"
+    grep -q . <<<"$volume_names"
+}
+
 # Archives every Docker named volume used by this stack into its own tar file
 # under volume_root, using a throwaway alpine container to read the volume
 # read-only — avoids needing tar/permissions to reach the volume's real
@@ -3489,19 +3504,15 @@ restore_compose_volumes() {
 # own --help documents remapping a restore to a different [install-dir] as
 # supported, but restore only stops the stack at the *target* install_dir
 # before restore_compose_volumes wipes and reloads those shared volumes — if
-# a DIFFERENT install on the same host is still actively running under the
-# same project name, its volumes get clobbered without ever being stopped.
+# a DIFFERENT install on the same host still has compose containers present
+# under the same project name, its volumes can get clobbered without ever
+# being detached from that other install first.
 #
-# This is a real, documented constraint of same-host multi-install setups:
-# giving each install a unique COMPOSE_PROJECT_NAME would fix it, but would
-# also orphan every EXISTING install's already-created volumes on its next
-# `docker compose up` (the volumes are named `<old-project>_<name>`, and
-# nothing would reattach them to a renamed project) — a real regression
-# swapped for a narrower one. So this guards against the unsafe case instead
-# of silently working around it: refuse the restore outright rather than
-# risk destroying another install's live state.
+# What: blocks restore when the fixed Compose project's shared named volumes are still attributable to a different or now-unattributable same-host install.
+# Why: the project name is not per-install-dir, so restores can otherwise overwrite another install's attached state; `docker ps -a` catches live/stopped containers, and the surviving volume label catches the post-`docker compose down` cross-directory ambiguity Docker can no longer attribute to one install path.
+# From: Issue #456
 guard_restore_shared_project_volumes() {
-    local install_dir="$1" project="$2" container working_dir
+    local install_dir="$1" archived_install_dir="$2" project="$3" container working_dir
     command -v docker >/dev/null 2>&1 || return 0
     while IFS= read -r container; do
         [[ -n "$container" ]] || continue
@@ -3509,9 +3520,14 @@ guard_restore_shared_project_volumes() {
         [[ -n "$working_dir" ]] || continue
         working_dir=$(realpath -m "$working_dir")
         if [[ "$working_dir" != "$install_dir" ]]; then
-            die "Refusing to restore: a running stack for compose project '$project' is already active at $working_dir, which is not the restore target ($install_dir). Both installs share the same Docker-managed volumes because the compose project name is not per-install-dir (see #669). Stop the other install first (cd \"$working_dir\" && docker compose down), or restore into $working_dir instead."
+            die "Refusing to restore: compose project '$project' still has containers at $working_dir, which is not the restore target ($install_dir). Both installs share the same Docker-managed volumes because the compose project name is not per-install-dir (see #669). Remove the other install's containers first (cd \"$working_dir\" && docker compose down), or restore into $working_dir instead."
+            return 1
         fi
-    done < <(docker ps --filter "label=com.docker.compose.project=${project}" --format '{{.ID}}' 2>/dev/null)
+    done < <(docker ps -a --filter "label=com.docker.compose.project=${project}" --format '{{.ID}}' 2>/dev/null)
+    if [[ "$install_dir" != "$archived_install_dir" ]] && compose_project_has_named_volumes "$project"; then
+        die "Refusing to restore: compose project '$project' still has named Docker volumes on this host, but the backup is being restored into a different install directory ($install_dir instead of $archived_install_dir). After docker compose down, Docker keeps the project label on the volumes but no longer retains a reliable install-dir owner marker, so same-host cross-directory restore would be ownership-ambiguous. Restore into $archived_install_dir instead, or remove the existing '$project' volumes first if they are no longer needed."
+        return 1
+    fi
 }
 
 # Snapshots the exact image references/digests in use at backup time (JSON
@@ -3783,7 +3799,7 @@ cmd_restore() {
     # .env would silently fall back to the tracked template's name and make
     # the guard check the wrong project's running containers (PR #748 review).
     archived_project=$(compose_project_name "$root/$rel_install" "$(runtime_env_file_for_install_dir "$root/$rel_install")")
-    guard_restore_shared_project_volumes "$install_dir" "$archived_project"
+    guard_restore_shared_project_volumes "$install_dir" "$archived_install" "$archived_project"
 
     # Captured before compose_stack_stop so restore_cleanup only restarts the
     # stack on a successful restore if it was actually running beforehand
@@ -6360,6 +6376,21 @@ EOF
     print_ok "Secondary DNS bind IP: ${listen_ip}"
     assert_prebuilt_image_platform_supported
 
+    secondary_dir="${name}"
+    if [[ "$rotate" -eq 1 ]]; then
+        if [[ "$(basename "$PWD")" = "$name" && -f .env && -f docker-compose.yml ]]; then
+            secondary_dir="."
+        elif [[ ! -d "$secondary_dir" ]]; then
+            die "No existing secondary directory '${secondary_dir}' found. Run --rotate from its parent directory or from inside the existing '${name}' directory."
+        fi
+    else
+        if [[ "$(basename "$PWD")" = "$name" ]]; then
+            die "Current directory already matches secondary '${name}'; rerun with --rotate to update the secondary files"
+        elif [[ -d "$secondary_dir" ]]; then
+            die "Directory '${secondary_dir}' already exists; rerun with --rotate to update the secondary files"
+        fi
+    fi
+
     # --rotate against an existing secondary directory can resolve
     # registry/prefix/channel/tag entirely from local config (an explicit
     # LANCACHE_IMAGE_* env var or the existing .env) with no need for the
@@ -6375,10 +6406,7 @@ EOF
     # without the primary's response (e.g. a still-mutable, non-pinned
     # channel with no LANCACHE_IMAGE_TAG override).
     if [[ "$rotate" -eq 1 ]]; then
-        preflight_dir="${name}"
-        if [[ "$(basename "$PWD")" = "$name" && -f .env && -f docker-compose.yml ]]; then
-            preflight_dir="."
-        fi
+        preflight_dir="$secondary_dir"
         preflight_env_file=""
         [[ -f "${preflight_dir}/.env" ]] && preflight_env_file="${preflight_dir}/.env"
 
@@ -6514,16 +6542,6 @@ EOF
         die "Invalid response from primary server; missing field(s): ${missing_fields[*]}"
     fi
 
-    secondary_dir="${name}"
-    if [[ "$rotate" -eq 1 ]]; then
-        if [[ "$(basename "$PWD")" = "$name" && -f .env && -f docker-compose.yml ]]; then
-            secondary_dir="."
-        elif [[ ! -d "$secondary_dir" ]]; then
-            die "No existing secondary directory '${secondary_dir}' found. Run --rotate from its parent directory or from inside the existing '${name}' directory."
-        fi
-    elif [[ -d "$secondary_dir" ]]; then
-        die "Directory '${secondary_dir}' already exists; rerun with --rotate to update the secondary files"
-    fi
     mkdir -p "$secondary_dir"
 
     existing_env_file=""

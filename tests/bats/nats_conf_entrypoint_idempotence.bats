@@ -20,9 +20,10 @@
 # extracted command block twice (see helpers/nats-entrypoint-helpers.sh for the
 # extraction and its faithful-reproduction rationale).
 #
-# `nats-server` and `chown` are stubbed as no-ops (the only two I/O boundaries:
-# the final `exec nats-server` and the ownership handoff to UID 10001); the
-# config-generation logic runs unmodified.
+# `nats-server`, `chown`, and `chgrp` are stubbed as no-ops: the suite cares
+# about the generated config bytes and the never-overwrite auth_callout branch,
+# not whether an unprivileged bats sandbox can mutate host-side uid/gid
+# ownership metadata exactly like the real container can.
 #
 # Also covers real-content regressions, not just repeat-run convergence: the
 # `generate`/`nats_conf_content` helpers below make asserting on specific
@@ -45,7 +46,8 @@ setup() {
     mkdir -p "$stub_bin"
     printf '#!/bin/sh\nexit 0\n' > "$stub_bin/nats-server"
     printf '#!/bin/sh\nexit 0\n' > "$stub_bin/chown"
-    chmod +x "$stub_bin/nats-server" "$stub_bin/chown"
+    printf '#!/bin/sh\nexit 0\n' > "$stub_bin/chgrp"
+    chmod +x "$stub_bin/nats-server" "$stub_bin/chown" "$stub_bin/chgrp"
 
     # The static role credentials the generator interpolates. Values are
     # arbitrary but fixed, so "same env in -> byte-identical nats.conf out" is
