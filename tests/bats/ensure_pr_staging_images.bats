@@ -174,6 +174,7 @@ STUB
     export STAGING_FRESHNESS_GIT_DIR="$git_dir"
     export STAGING_BASE_BUILD_RUN_EXISTS_CMD="$base_run_exists_stub"
     export BASE_SHA="$base_sha"
+    export BASE_REF="current_dev"
     # Keep the fail path fast: no real waiting in tests.
     export STAGING_POLL_TIMEOUT_SECONDS=0
     export STAGING_POLL_INTERVAL_SECONDS=0
@@ -199,6 +200,7 @@ STUB
     export ANCESTOR_EXTENDED_FRESHNESS_POLL_HARD_CEILING_SECONDS=0
     export REPOSITORY="wiki-mod/lancache-ng"
     export PR_TAG="pr-715-sha-abcdef0"
+    git -C "$git_dir" update-ref "refs/remotes/origin/${BASE_REF}" "$base_sha"
 }
 
 @test "untouched services are all back-filled from the PR base commit's own per-commit image" {
