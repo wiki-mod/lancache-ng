@@ -33,9 +33,9 @@ runs:
     # What: repo-wide review-chronology baseline (AG-CODE-002/003/012), warn-only.
     # Why: catches drift anywhere, but CHRONOLOGY_WARN_ONLY=1 stops a
     #   pre-existing violation in an untouched file from blocking every
-    #   other PR -- check-pr-diff-review-chronology.sh (in build-push.yml,
-    #   alongside the SPDX diff-scoped step) is the blocking half, scoped
-    #   to this PR's own diff.
+    #   other PR -- build-push.yml's own diff-scoped step (alongside the
+    #   SPDX check) runs the same script with CHRONOLOGY_DIFF_BASE_SHA
+    #   set instead, which is the blocking half, scoped to this PR's diff.
     # From: PR #1546 | Issue #1095
     - name: Check for review-chronology comments repo-wide (AG-CODE-003, non-blocking)
       shell: bash

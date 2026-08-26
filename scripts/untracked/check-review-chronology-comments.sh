@@ -10,10 +10,18 @@
 # What: $1 is always target_root (dir); any further args restrict the
 #   scan to exactly those files (relative to target_root) instead of
 #   enumerating the whole tree. CHRONOLOGY_WARN_ONLY=1 reports findings
-#   as ::warning:: and exits 0 instead of failing closed.
+#   as ::warning:: and exits 0 instead of failing closed. When
+#   CHRONOLOGY_DIFF_BASE_SHA/CHRONOLOGY_DIFF_BASE_REF/GITHUB_SHA are all
+#   set, the scan is restricted to exactly the files a real `git diff`
+#   between them touched, computed here (fetch, verify, NUL-safe diff)
+#   rather than by a separate wrapper script.
 # Why: lets a repo-wide baseline pass (informational) coexist with a
-#   diff-scoped pass (blocking) via check-pr-diff-review-chronology.sh,
-#   without a pre-existing unrelated violation blocking every other PR.
+#   diff-scoped pass (blocking), without a pre-existing unrelated
+#   violation blocking every other PR. Folded the diff-computation in
+#   here rather than a sibling script (the pattern
+#   check-pr-diff-file-headers.sh uses) per AG-CODE-013 -- this script's
+#   own header already states a monolith-first direction, and no
+#   maintainer ACK exists for a second file.
 # From: Issue #1095
 set -euo pipefail
 
@@ -23,15 +31,13 @@ target_root="${1:-$repo_root}"
 cd "$target_root"
 shift || true
 
-# What: Excludes this script and the bats files that quote its own
-#   banned phrases verbatim as fixtures.
-# Why: Fixture strings aren't a real violation of the rule they test.
-# From: PR #1546 | Issue #1095
+# What: Excludes this script and its bats test from their own scan.
+# Why: Both quote the banned phrases verbatim as documentation/fixtures.
+# From: PR #1546
 is_self_reference() {
     case "$1" in
         scripts/untracked/check-review-chronology-comments.sh) return 0 ;;
         tests/bats/check_review_chronology_comments.bats) return 0 ;;
-        tests/bats/check_pr_diff_review_chronology.bats) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -184,15 +190,50 @@ check_bare_issue_ref_duplicates_from() {
     done <<< "$from_nums"
 }
 
-# What: explicit file args (after target_root) scan only those; otherwise
-#   enumerate target_root's whole tree.
-# Why: check-pr-diff-review-chronology.sh needs a diff-scoped subset;
-#   ".git" is checked directly under target_root, not an ancestor dir, so
-#   a bats fixture nested inside this repo's own working copy stays a
+# What: computes the changed-file list between CHRONOLOGY_DIFF_BASE_SHA
+#   and GITHUB_SHA when both are set, mirroring
+#   check-pr-diff-file-headers.sh's own fetch/diff/mapfile mechanism.
+# Why: NUL-delimited diff written to a real file, never a substitution --
+#   a process/command substitution's exit status is invisible to set -e,
+#   and $(...) additionally strips embedded NULs, corrupting -z's format.
+# From: Issue #1095
+diff_scoped_files() {
+    # shellcheck source=scripts/lib/git-fetch-retry.sh
+    source "$script_dir/../lib/git-fetch-retry.sh"
+    : "${CHRONOLOGY_DIFF_BASE_REF:?CHRONOLOGY_DIFF_BASE_REF is required}"
+    : "${GITHUB_SHA:?GITHUB_SHA is required}"
+
+    git_fetch_retry --no-tags --depth=1 origin \
+        "+refs/heads/${CHRONOLOGY_DIFF_BASE_REF}:refs/remotes/origin/${CHRONOLOGY_DIFF_BASE_REF}"
+    git_fetch_retry --no-tags --depth=1 origin "$CHRONOLOGY_DIFF_BASE_SHA"
+    git cat-file -e "${CHRONOLOGY_DIFF_BASE_SHA}^{commit}"
+    git cat-file -e "${GITHUB_SHA}^{commit}"
+
+    local diff_file
+    diff_file="$(mktemp)"
+    trap 'rm -f "$diff_file"' RETURN
+    if ! git diff -z --name-only --diff-filter=ACMRTUXB "$CHRONOLOGY_DIFF_BASE_SHA" "$GITHUB_SHA" > "$diff_file"; then
+        echo "::error::check-review-chronology-comments: \`git diff\` itself failed between $CHRONOLOGY_DIFF_BASE_SHA and $GITHUB_SHA. Not treating this as a clean (empty) pass." >&2
+        exit 1
+    fi
+    if [ -s "$diff_file" ]; then
+        mapfile -d '' files < "$diff_file"
+    else
+        files=()
+    fi
+}
+
+# What: explicit file args (after target_root) scan only those; diff-mode
+#   env vars scan only the real changed-file set; otherwise enumerate
+#   target_root's whole tree.
+# Why: ".git" is checked directly under target_root, not an ancestor dir,
+#   so a bats fixture nested inside this repo's own working copy stays a
 #   plain fixture instead of falling through to git ls-files on the
 #   outer repo.
 # From: PR #1546 | Issue #1095
-if [ "$#" -gt 0 ]; then
+if [ -n "${CHRONOLOGY_DIFF_BASE_SHA:-}" ]; then
+    diff_scoped_files
+elif [ "$#" -gt 0 ]; then
     files=("$@")
 elif [ -e "$target_root/.git" ]; then
     mapfile -t files < <(git ls-files)

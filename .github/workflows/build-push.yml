@@ -259,20 +259,20 @@ jobs:
         # From: Issue #1095
         if: github.event_name == 'pull_request'
         env:
-          SPDX_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          SPDX_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          CHRONOLOGY_DIFF_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CHRONOLOGY_DIFF_BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           set -euo pipefail
           docker run --rm \
             --user "$(id -u):$(id -g)" \
             -v "$PWD:/source:ro" \
             -w /tmp \
-            -e SPDX_BASE_SHA \
-            -e SPDX_BASE_REF \
+            -e CHRONOLOGY_DIFF_BASE_SHA \
+            -e CHRONOLOGY_DIFF_BASE_REF \
             -e GITHUB_SHA \
             "$BUILD_TOOLS_IMAGE" \
             timeout --kill-after=30 --signal=KILL 300 bash -c \
-              'cp -a /source /tmp/work && cd /tmp/work && bash scripts/untracked/check-pr-diff-review-chronology.sh'
+              'cp -a /source /tmp/work && cd /tmp/work && bash scripts/untracked/check-review-chronology-comments.sh'
 
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
@@ -623,20 +623,20 @@ jobs:
         # From: Issue #1095
         if: github.event_name == 'pull_request'
         env:
-          SPDX_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          SPDX_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          CHRONOLOGY_DIFF_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CHRONOLOGY_DIFF_BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           set -euo pipefail
           docker run --rm \
             --user "$(id -u):$(id -g)" \
             -v "$PWD:/source:ro" \
             -w /tmp \
-            -e SPDX_BASE_SHA \
-            -e SPDX_BASE_REF \
+            -e CHRONOLOGY_DIFF_BASE_SHA \
+            -e CHRONOLOGY_DIFF_BASE_REF \
             -e GITHUB_SHA \
             "$BUILD_TOOLS_IMAGE" \
             timeout --kill-after=30 --signal=KILL 300 bash -c \
-              'cp -a /source /tmp/work && cd /tmp/work && bash scripts/untracked/check-pr-diff-review-chronology.sh'
+              'cp -a /source /tmp/work && cd /tmp/work && bash scripts/untracked/check-review-chronology-comments.sh'
 
   compose-healthchecks-hosted:
     name: compose healthchecks (GitHub-hosted fallback)
