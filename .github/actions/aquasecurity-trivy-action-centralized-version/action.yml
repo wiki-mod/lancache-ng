@@ -1,0 +1,89 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+name: Centralized version -- aquasecurity/trivy-action
+description: >-
+  Single owner of the aquasecurity/trivy-action pin. Every caller that
+  needs this action goes through here instead of repeating the ref, so a
+  version bump is one edit, not N.
+
+# What: exists because a YAML anchor/alias cannot serve this role.
+# Why: GitHub's composite-action manifest parser rejects anchors/aliases
+#   outright ("Anchors are not currently supported") -- confirmed live,
+#   PR #1665's `&anchor`/`*alias` attempt broke every build/build-arm64
+#   job for every service (issue #1095). A local `uses: ./...` reference
+#   has no such restriction, so this thin pass-through wrapper is the
+#   pin's one real maintenance point instead.
+# From: Issue #1095
+inputs:
+  scan-type:
+    required: false
+    default: ""
+  image-ref:
+    required: false
+    default: ""
+  format:
+    required: false
+    default: ""
+  output:
+    required: false
+    default: ""
+  scanners:
+    required: false
+    default: ""
+  severity:
+    required: false
+    default: ""
+  ignore-unfixed:
+    required: false
+    default: ""
+  trivyignores:
+    required: false
+    default: ""
+  skip-dirs:
+    required: false
+    default: ""
+  hide-progress:
+    required: false
+    default: ""
+  cache:
+    required: false
+    default: ""
+  cache-dir:
+    required: false
+    default: ""
+  timeout:
+    required: false
+    default: ""
+  exit-code:
+    required: false
+    default: ""
+  trivy-config:
+    description: >-
+      Absolute path to a trivy-config.yaml. Must be computed by the caller
+      as ${{ github.action_path }}/trivy-config.yaml against the CALLER's
+      own action_path -- this wrapper's own github.action_path would
+      resolve to its own directory, not the caller's, so it cannot compute
+      this path itself.
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      with:
+        scan-type: ${{ inputs.scan-type }}
+        image-ref: ${{ inputs.image-ref }}
+        format: ${{ inputs.format }}
+        output: ${{ inputs.output }}
+        scanners: ${{ inputs.scanners }}
+        severity: ${{ inputs.severity }}
+        ignore-unfixed: ${{ inputs.ignore-unfixed }}
+        trivyignores: ${{ inputs.trivyignores }}
+        skip-dirs: ${{ inputs.skip-dirs }}
+        hide-progress: ${{ inputs.hide-progress }}
+        cache: ${{ inputs.cache }}
+        cache-dir: ${{ inputs.cache-dir }}
+        timeout: ${{ inputs.timeout }}
+        exit-code: ${{ inputs.exit-code }}
+        trivy-config: ${{ inputs.trivy-config }}

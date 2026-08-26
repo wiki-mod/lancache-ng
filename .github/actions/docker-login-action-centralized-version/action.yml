@@ -1,0 +1,36 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+name: Centralized version -- docker/login-action
+description: >-
+  Single owner of the docker/login-action pin. Every caller that needs this
+  action goes through here instead of repeating the ref, so a version bump
+  is one edit, not N.
+
+# What: exists because a YAML anchor/alias cannot serve this role.
+# Why: GitHub's composite-action manifest parser rejects anchors/aliases
+#   outright ("Anchors are not currently supported") -- confirmed live,
+#   PR #1665's `&anchor`/`*alias` attempt broke every build/build-arm64
+#   job for every service (issue #1095). A local `uses: ./...` reference
+#   has no such restriction, so this thin pass-through wrapper is the
+#   pin's one real maintenance point instead.
+# From: Issue #1095
+inputs:
+  registry:
+    description: >-
+      Registry to log in to. Left empty (the docker/login-action default)
+      logs in to Docker Hub instead of a named registry.
+    required: false
+    default: ""
+  username:
+    required: true
+  password:
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      with:
+        registry: ${{ inputs.registry }}
+        username: ${{ inputs.username }}
+        password: ${{ inputs.password }}

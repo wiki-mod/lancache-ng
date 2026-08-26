@@ -1,0 +1,96 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+name: Centralized version -- docker/build-push-action
+description: >-
+  Single owner of the docker/build-push-action pin. Every caller that needs
+  this action goes through here instead of repeating the ref, so a version
+  bump is one edit, not N.
+
+# What: exists because a YAML anchor/alias cannot serve this role.
+# Why: GitHub's composite-action manifest parser rejects anchors/aliases
+#   outright ("Anchors are not currently supported") -- confirmed live,
+#   PR #1665's `&anchor`/`*alias` attempt broke every build/build-arm64
+#   job for every service (issue #1095). A local `uses: ./...` reference
+#   has no such restriction, so this thin pass-through wrapper is the
+#   pin's one real maintenance point instead.
+# From: Issue #1095
+inputs:
+  builder:
+    required: false
+    default: ""
+  context:
+    required: false
+    default: ""
+  build-contexts:
+    required: false
+    default: ""
+  secret-files:
+    required: false
+    default: ""
+  build-args:
+    required: false
+    default: ""
+  network:
+    required: false
+    default: ""
+  allow:
+    required: false
+    default: ""
+  push:
+    required: false
+    default: ""
+  tags:
+    required: false
+    default: ""
+  labels:
+    required: false
+    default: ""
+  outputs:
+    required: false
+    default: ""
+  platforms:
+    required: false
+    default: ""
+  provenance:
+    required: false
+    default: ""
+  load:
+    required: false
+    default: ""
+  pull:
+    required: false
+    default: ""
+  cache-from:
+    required: false
+    default: ""
+  cache-to:
+    required: false
+    default: ""
+outputs:
+  digest:
+    description: Digest of the pushed image.
+    value: ${{ steps.build.outputs.digest }}
+runs:
+  using: composite
+  steps:
+    - id: build
+      uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      with:
+        builder: ${{ inputs.builder }}
+        context: ${{ inputs.context }}
+        build-contexts: ${{ inputs.build-contexts }}
+        secret-files: ${{ inputs.secret-files }}
+        build-args: ${{ inputs.build-args }}
+        network: ${{ inputs.network }}
+        allow: ${{ inputs.allow }}
+        push: ${{ inputs.push }}
+        tags: ${{ inputs.tags }}
+        labels: ${{ inputs.labels }}
+        outputs: ${{ inputs.outputs }}
+        platforms: ${{ inputs.platforms }}
+        provenance: ${{ inputs.provenance }}
+        load: ${{ inputs.load }}
+        pull: ${{ inputs.pull }}
+        cache-from: ${{ inputs.cache-from }}
+        cache-to: ${{ inputs.cache-to }}
