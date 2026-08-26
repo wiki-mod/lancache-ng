@@ -2,11 +2,15 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: exercises the script's three checks against fixture trees.
+# What: exercises the script's three content checks, its explicit-file
+#   and warn-only modes, and its real fetch/diff CHRONOLOGY_DIFF_BASE_SHA
+#   mode, against fixture trees.
 # Why: `mktemp -d` (not BATS_TEST_TMPDIR) keeps the fixture root
 #   unambiguously outside this repo's own .git, since the script
-#   switches its file-listing strategy on that.
-# From: PR #1546
+#   switches its file-listing strategy on that. The diff-mode tests use
+#   a real bare-origin + work-dir git pair (never mocked), mirroring
+#   tests/bats/check_pr_diff_file_headers.bats's own fixture shape.
+# From: PR #1546 | Issue #1095
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -464,4 +468,167 @@ EOF
 @test "the guard also passes when pointed at the real repository tree" {
     run bash "$script" "$repo_root"
     [ "$status" -eq 0 ] || fail "real repo tree is not clean per this guard: $output"
+}
+
+# What: explicit file args after target_root restrict the scan to those.
+# Why: proves the mode restricts scope before the diff-mode tests below
+#   rely on the same underlying files=(...) mechanism.
+# From: Issue #1095
+@test "explicit file args scan only those files, ignoring an unlisted violation in the same tree" {
+    cat > "$fixture_root/violating.sh" <<'EOF'
+# caught in review: this one should be ignored, it is not in the file list.
+EOF
+    cat > "$fixture_root/clean.sh" <<'EOF'
+# A normal, compliant comment.
+EOF
+
+    run bash "$script" "$fixture_root" clean.sh
+    [ "$status" -eq 0 ] || fail "explicit-file-list mode must not see violating.sh: $output"
+}
+
+# What: explicit file args still catch a violation in a listed file.
+# Why: proves the mode restricts scope, it does not disable detection.
+# From: Issue #1095
+@test "explicit file args still fail on a violation in a listed file" {
+    cat > "$fixture_root/violating.sh" <<'EOF'
+# caught in review: this one is explicitly listed and must still fail.
+EOF
+
+    run bash "$script" "$fixture_root" violating.sh
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"violating.sh"* ]]
+}
+
+# What: CHRONOLOGY_WARN_ONLY=1 reports a real violation without failing.
+# Why: lets the repo-wide baseline pass stay informational, per Issue #1095.
+# From: Issue #1095
+@test "CHRONOLOGY_WARN_ONLY=1 reports a violation as a warning and exits 0" {
+    cat > "$fixture_root/example.sh" <<'EOF'
+# caught in review: something something.
+EOF
+
+    CHRONOLOGY_WARN_ONLY=1 run bash "$script" "$fixture_root"
+    [ "$status" -eq 0 ] || fail "warn-only mode must exit 0 despite a real violation: $output"
+    [[ "$output" == *"::warning::"* ]]
+    [[ "$output" == *"example.sh"* ]]
+}
+
+# What: without CHRONOLOGY_WARN_ONLY, the same violation still fails closed.
+# Why: confirms warn-only is opt-in, not the new default.
+# From: Issue #1095
+@test "the same violation still fails closed when CHRONOLOGY_WARN_ONLY is unset" {
+    cat > "$fixture_root/example.sh" <<'EOF'
+# caught in review: something something.
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ]
+}
+
+# What: sets up a real bare-origin + work-dir git pair for the diff-mode
+#   tests below, mirroring check_pr_diff_file_headers.bats's own fixture.
+# Why: the diff-mode env vars need real fetch/diff behavior, not a mock.
+# From: Issue #1095
+setup_diff_fixture() {
+    diff_origin_dir="$fixture_root/origin.git"
+    diff_work_dir="$fixture_root/work"
+    git init --quiet --bare "$diff_origin_dir"
+    git init --quiet -b main "$diff_work_dir"
+    mkdir -p "$diff_work_dir/scripts/untracked" "$diff_work_dir/scripts/lib"
+    cp "$script" "$diff_work_dir/scripts/untracked/check-review-chronology-comments.sh"
+    cp "$repo_root/scripts/lib/git-fetch-retry.sh" "$diff_work_dir/scripts/lib/git-fetch-retry.sh"
+    (
+        cd "$diff_work_dir" || exit 1
+        git config user.email test@example.invalid
+        git config user.name "Test"
+        git remote add origin "$diff_origin_dir"
+        printf '# A normal, compliant comment.\n' > example.sh
+        git add example.sh scripts
+        git commit --quiet -m "base commit"
+        git push --quiet origin main
+    )
+    diff_base_sha="$(cd "$diff_work_dir" && git rev-parse HEAD)"
+}
+
+# What: diff-mode env vars, empty diff, must pass silently.
+# Why: base case for CHRONOLOGY_DIFF_BASE_SHA/CHRONOLOGY_DIFF_BASE_REF mode.
+# From: Issue #1095
+@test "diff mode passes silently when the diff is empty (base and head are the same commit)" {
+    setup_diff_fixture
+    run bash -c "cd '$diff_work_dir' && CHRONOLOGY_DIFF_BASE_SHA='$diff_base_sha' CHRONOLOGY_DIFF_BASE_REF=main GITHUB_SHA='$diff_base_sha' bash scripts/untracked/check-review-chronology-comments.sh"
+    [ "$status" -eq 0 ]
+}
+
+# What: diff mode fails on a real changed file that introduces a violation.
+# Why: proves the diff-scoped path still detects a real, in-diff violation.
+# From: Issue #1095
+@test "diff mode fails on a real changed file that introduces a violation" {
+    setup_diff_fixture
+    (
+        cd "$diff_work_dir"
+        printf '# caught in review: this line should not exist here.\n' > bad.sh
+        git add bad.sh
+        git commit --quiet -m "add a file with a chronology violation"
+    )
+    diff_head_sha="$(cd "$diff_work_dir" && git rev-parse HEAD)"
+    run bash -c "cd '$diff_work_dir' && CHRONOLOGY_DIFF_BASE_SHA='$diff_base_sha' CHRONOLOGY_DIFF_BASE_REF=main GITHUB_SHA='$diff_head_sha' bash scripts/untracked/check-review-chronology-comments.sh"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"bad.sh"* ]]
+}
+
+# What: a violation in a file the diff does NOT touch must not surface.
+# Why: this is the entire point of diff mode -- an unrelated, pre-existing
+#   violation elsewhere in the tree must not block this PR.
+# From: Issue #1095
+@test "diff mode: a pre-existing violation in a file outside this diff does not block the PR" {
+    setup_diff_fixture
+    (
+        cd "$diff_work_dir"
+        printf '# caught in review: pre-existing, not part of any diff.\n' > pre_existing_violation.sh
+        git add pre_existing_violation.sh
+        git commit --quiet -m "base commit gains an unrelated pre-existing violation"
+        git push --quiet origin main
+    )
+    diff_new_base_sha="$(cd "$diff_work_dir" && git rev-parse HEAD)"
+    (
+        cd "$diff_work_dir"
+        printf '# A second normal, compliant comment, the actual PR diff.\n' > unrelated_change.sh
+        git add unrelated_change.sh
+        git commit --quiet -m "the actual PR change, unrelated to the pre-existing violation"
+    )
+    diff_head_sha="$(cd "$diff_work_dir" && git rev-parse HEAD)"
+    run bash -c "cd '$diff_work_dir' && CHRONOLOGY_DIFF_BASE_SHA='$diff_new_base_sha' CHRONOLOGY_DIFF_BASE_REF=main GITHUB_SHA='$diff_head_sha' bash scripts/untracked/check-review-chronology-comments.sh"
+    [ "$status" -eq 0 ] || fail "a violation outside the diff must not fail this PR: $output"
+}
+
+# What: diff mode fails closed when a required environment variable is missing.
+# Why: mirrors check-pr-diff-file-headers.sh's own required-env-var guard.
+# From: Issue #1095
+@test "diff mode fails closed with a clear diagnostic when a required environment variable is missing" {
+    setup_diff_fixture
+    run bash -c "cd '$diff_work_dir' && CHRONOLOGY_DIFF_BASE_SHA='$diff_base_sha' GITHUB_SHA='$diff_base_sha' bash scripts/untracked/check-review-chronology-comments.sh"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHRONOLOGY_DIFF_BASE_REF"* ]]
+}
+
+# What: diff mode fails closed when git diff itself fails after both
+#   reachability checks pass.
+# Why: mirrors check-pr-diff-file-headers.sh's own synthetic-failure test.
+# From: Issue #1095
+@test "diff mode fails closed when git diff itself fails after both reachability checks pass" {
+    setup_diff_fixture
+    real_git="$(command -v git)"
+    mkdir -p "$fixture_root/bin"
+    cat > "$fixture_root/bin/git" <<EOF
+#!/usr/bin/env bash
+if [ "\${1-}" = diff ]; then
+    echo "synthetic git diff failure" >&2
+    exit 73
+fi
+exec "$real_git" "\$@"
+EOF
+    chmod +x "$fixture_root/bin/git"
+    run bash -c "cd '$diff_work_dir' && PATH='$fixture_root/bin:$PATH' CHRONOLOGY_DIFF_BASE_SHA='$diff_base_sha' CHRONOLOGY_DIFF_BASE_REF=main GITHUB_SHA='$diff_base_sha' bash scripts/untracked/check-review-chronology-comments.sh"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"git diff\` itself failed"* ]]
 }
