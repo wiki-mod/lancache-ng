@@ -1820,7 +1820,7 @@ jobs:
             || { echo "::error::Acceleration infrastructure network must be selected per job from generated secret files."; exit 1; }
           grep -E '^[[:space:]]+redis-file:[[:space:]]+\$\{\{[[:space:]]*steps\.sccache-secret\.outputs\.redis-file[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
             && grep -E '^[[:space:]]+dist-config-file:[[:space:]]+\$\{\{[[:space:]]*steps\.sccache-secret\.outputs\.dist-config-file[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
-            && grep -E '^[[:space:]]+distcc-hosts-file:[[:space:]]+\$\{\{[[:space:]]*steps\.sccache-secret\.outputs\.distcc-hosts-file[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
+            && grep -E '^[[:space:]]+distcc-hosts-file:[[:space:]]+\$\{\{[[:space:]]*matrix\.service[[:space:]]*==[[:space:]]*.build-tools.[[:space:]]*&&[[:space:]]*steps\[.distcc-hosts-secret.\]\.outputs\[.hosts-file.\][[:space:]]*\|\|[[:space:]]*steps\.sccache-secret\.outputs\.distcc-hosts-file[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
             && grep -E '^[[:space:]]+build-tools-image:[[:space:]]+\$\{\{[[:space:]]*env\.BUILD_TOOLS_IMAGE[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
             && grep -E '^[[:space:]]+build-network:[[:space:]]+\$\{\{[[:space:]]*env\.RUST_ACCELERATION_NETWORK[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
             && grep -E '^[[:space:]]+platform:[[:space:]]+linux/amd64[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
@@ -4973,7 +4973,7 @@ jobs:
           - service: utilities
             context: services/utilities
             build_contexts: ""
-            description: "Shared lancache-ng utilities image (curl, nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd) for COPY --from= consumption by seven first-party images (issue #1556)."
+            description: "Shared lancache-ng utilities image (curl, nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd) for COPY --from= consumption by eight first-party images (issue #1556)."
             # Heavy, not light, despite being a small/fast build in practice
             # (curl's own C compile is ~20s): AG-CI-002's light-tier exception
             # requires "no real compile/link step of its own AT ALL", verified
@@ -5470,17 +5470,16 @@ jobs:
             echo "SECRET_FILES"
           } >> "$GITHUB_OUTPUT"
 
-      # What: produces the ccache_redis_url secret for dns and utilities.
-      # Why: dns/utilities each mount it under a distinct BuildKit secret id
-      #   from sccache's own sccache_redis_url, reusing the same repository
-      #   secret rather than a second GitHub secret; honors the existing
-      #   SCCACHE_REDIS_MODE kill switch (AG-CI-004).
-      # From: Issue #1095 (G15 | #1556)
-      - name: Prepare ccache Redis endpoint (dns + utilities C-dependency cache)
+      # What: produces the ccache_redis_url secret for dns, utilities, and build-tools.
+      # Why: each mounts it under a distinct BuildKit secret id from sccache's
+      #   own sccache_redis_url, reusing the same repository secret; honors
+      #   the existing SCCACHE_REDIS_MODE kill switch (AG-CI-004).
+      # From: Issue #1095 (G15 | #1556) | PR #1661
+      - name: Prepare ccache Redis endpoint (dns + utilities + build-tools C-dependency cache)
         if: >-
           ${{
             steps.should-build.outputs.should-build == 'true' &&
-            (matrix.service == 'dns' || matrix.service == 'utilities') &&
+            (matrix.service == 'dns' || matrix.service == 'utilities' || matrix.service == 'build-tools') &&
             github.actor != 'dependabot[bot]' &&
             github.event_name != 'pull_request'
           }}
@@ -5502,10 +5501,47 @@ jobs:
             echo "::notice::No SCCACHE_REDIS_URL configured; ${{ matrix.service }}'s ccache layer stays disabled (fails closed to a plain compile)."
           fi
 
-      - name: Select Rust acceleration network
-        if: matrix.rust == true
+      # What: produces the distcc_potential_hosts secret for build-tools.
+      # Why: build-tools' curl/git build is C, not Rust -- it never sets
+      #   matrix.rust, so it misses the DISTCC_POTENTIAL_HOSTS wiring the
+      #   sccache-secret step above gives dns/ui/watchdog.
+      # From: PR #1661
+      - name: Prepare distcc hosts (build-tools C-dependency distribution)
+        if: >-
+          ${{
+            steps.should-build.outputs.should-build == 'true' &&
+            matrix.service == 'build-tools' &&
+            github.actor != 'dependabot[bot]' &&
+            github.event_name != 'pull_request'
+          }}
+        id: distcc-hosts-secret
         env:
-          SECRET_FILES: ${{ steps.sccache-secret.outputs.secret-files }}
+          DISTCC_POTENTIAL_HOSTS: ${{ vars.DISTCC_POTENTIAL_HOSTS }}
+        run: |
+          set -euo pipefail
+          if [ -z "$DISTCC_POTENTIAL_HOSTS" ]; then
+            echo "::notice::No DISTCC_POTENTIAL_HOSTS configured; build-tools' distcc layer stays disabled (fails closed to a plain compile)."
+            exit 0
+          fi
+          if ! grep -q ',cpp' <<<"$DISTCC_POTENTIAL_HOSTS"; then
+            echo "::error::DISTCC_POTENTIAL_HOSTS must include at least one pump-capable host with the ',cpp' option."
+            exit 1
+          fi
+          umask 077
+          hosts_file="${{ runner.temp }}/distcc-potential-hosts-${{ matrix.service }}"
+          printf '%s' "$DISTCC_POTENTIAL_HOSTS" > "$hosts_file"
+          echo "hosts-file=$hosts_file" >> "$GITHUB_OUTPUT"
+          echo "secret-files=distcc_potential_hosts=$hosts_file" >> "$GITHUB_OUTPUT"
+
+      - name: Select Rust acceleration network
+        if: matrix.rust == true || matrix.service == 'build-tools'
+        env:
+          SECRET_FILES: >-
+            ${{
+              steps.sccache-secret.outputs.secret-files ||
+              steps['ccache-redis-secret'].outputs['secret-files'] ||
+              steps['distcc-hosts-secret'].outputs['secret-files']
+            }}
         run: |
           set -euo pipefail
 
@@ -5520,33 +5556,40 @@ jobs:
           printf 'RUST_ACCELERATION_NETWORK=%s\n' "$rust_network" >> "$GITHUB_ENV"
           printf 'RUST_BUILDX_NETWORK=%s\n' "$buildx_network" >> "$GITHUB_ENV"
 
+      # What: also runs for build-tools (no matrix.rust) so a broken Redis/
+      #   distcc endpoint can't hide behind a cached curl/git Docker layer.
+      # Why: the action itself is compiler-agnostic (validates via `cc`,
+      #   not rustc) and already gates each check on its own file input.
+      # From: PR #1661
       - name: Validate acceleration infrastructure outside BuildKit cache
-        if: matrix.rust == true
+        if: matrix.rust == true || matrix.service == 'build-tools'
         uses: ./.github/actions/rust-acceleration-preflight
         with:
           service: ${{ matrix.service }}
           redis-file: ${{ steps.sccache-secret.outputs.redis-file }}
           dist-config-file: ${{ steps.sccache-secret.outputs.dist-config-file }}
-          distcc-hosts-file: ${{ steps.sccache-secret.outputs.distcc-hosts-file }}
-          # What: only wired for dns -- ui does not use this ccache layer.
+          distcc-hosts-file: ${{ matrix.service == 'build-tools' && steps['distcc-hosts-secret'].outputs['hosts-file'] || steps.sccache-secret.outputs.distcc-hosts-file }}
+          # What: wired for dns and build-tools -- ui does not use this
+          #   ccache layer.
           # Why: reuses ccache-redis-secret's own output instead of a second
           #   Redis-endpoint read.
-          # From: Issue #1095 (G15)
-          ccache-redis-file: ${{ matrix.service == 'dns' && steps['ccache-redis-secret'].outputs['redis-file'] || '' }}
+          # From: Issue #1095 (G15) | PR #1661
+          ccache-redis-file: ${{ (matrix.service == 'dns' || matrix.service == 'build-tools') && steps['ccache-redis-secret'].outputs['redis-file'] || '' }}
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
           build-network: ${{ env.RUST_ACCELERATION_NETWORK }}
           platform: linux/amd64
 
-      # What: merges sccache-secret and ccache-redis-secret into one list.
-      # Why: a block-scalar interpolation of both step outputs would add
-      #   blank lines to every service where one or both are empty; this
-      #   reproduces the prior single-source input byte-for-byte instead.
-      # From: Issue #1095 (G15)
+      # What: merges sccache-secret, ccache-redis-secret, and distcc-hosts-secret.
+      # Why: a block-scalar interpolation of all three outputs would add blank
+      #   lines wherever one is empty; this reproduces the prior single-source
+      #   input byte-for-byte instead.
+      # From: Issue #1095 (G15) | PR #1661
       - name: Combine sccache/ccache secret files
         id: combined-secret-files
         env:
           SCCACHE_FILES: ${{ steps.sccache-secret.outputs.secret-files }}
           CCACHE_FILES: ${{ steps['ccache-redis-secret'].outputs['secret-files'] }}
+          DISTCC_FILES: ${{ steps['distcc-hosts-secret'].outputs['secret-files'] }}
         run: |
           set -euo pipefail
           combined=""
@@ -5558,6 +5601,13 @@ jobs:
               combined="$combined"$'\n'"$CCACHE_FILES"
             else
               combined="$CCACHE_FILES"
+            fi
+          fi
+          if [ -n "$DISTCC_FILES" ]; then
+            if [ -n "$combined" ]; then
+              combined="$combined"$'\n'"$DISTCC_FILES"
+            else
+              combined="$DISTCC_FILES"
             fi
           fi
           {
@@ -6508,7 +6558,7 @@ jobs:
             [ui]="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
             [build-tools]="Prebuilt lancache-ng CI and developer validation toolchain image."
             [syslog]="Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428)."
-            [utilities]="Shared lancache-ng utilities image (curl, nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd) for COPY --from= consumption by seven first-party images (issue #1556)."
+            [utilities]="Shared lancache-ng utilities image (curl, nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd) for COPY --from= consumption by eight first-party images (issue #1556)."
           )
 
           # Duplicated rather than factored into a shared script/action: GitHub Actions
