@@ -9,9 +9,15 @@
 
 name: Report scheduled-CI status
 description: >-
-  File, update, or close the single standing "nightly-broken" tracking
-  issue based on a scheduled/dispatched run's real outcome. Must be
-  invoked from a job with issues:write that runs with if: always().
+  File, update, or close a single standing tracking issue based on a
+  run's real outcome, keyed by `label` (default "nightly-broken" -- this
+  action originated for the nightly pipeline, per Issue #1095, but the
+  label input makes it reusable for any recurring, self-healing
+  pass/fail signal, e.g. an untriaged Trivy finding). A distinct label
+  per caller keeps standing issues from different contexts (nightly vs.
+  a specific image's Trivy scan) from colliding or cross-closing each
+  other. Must be invoked from a job with issues:write that runs with
+  if: always().
 
 inputs:
   outcome:
@@ -20,6 +26,14 @@ inputs:
   scope:
     description: "Human label for the pipeline, e.g. 'nightly channel promote'"
     required: true
+  label:
+    description: >-
+      Issue label used both to find/reuse a standing issue and as the
+      idempotency key across runs. Distinct callers (e.g. per Trivy
+      scan context) must use distinct labels so their standing issues
+      don't collide.
+    required: false
+    default: "nightly-broken"
   failed_jobs:
     description: "Space-separated names of the jobs that failed (empty on success)"
     required: false
@@ -42,6 +56,7 @@ runs:
         REPO: ${{ github.repository }}
         OUTCOME: ${{ inputs.outcome }}
         SCOPE: ${{ inputs.scope }}
+        LABEL: ${{ inputs.label }}
         FAILED_JOBS: ${{ inputs.failed_jobs }}
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       run: bash "${GITHUB_ACTION_PATH}/report.sh"

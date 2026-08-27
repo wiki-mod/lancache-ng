@@ -122,6 +122,23 @@ jobs:
     concurrency:
       group: build-tools-amd64-image-build
       cancel-in-progress: false
+    # What: adds issues:write to this job's own permissions (job-level
+    # `permissions:` replaces, not merges with, the workflow-level block
+    # above -- every other scope from that block, incl. the "Attest
+    # amd64 build-tools image provenance" step's attestations/artifact-
+    # metadata scopes further down in this job, is repeated here
+    # unchanged).
+    # Why: the PR-context Trivy scan below files/closes a self-closing
+    # tracking issue instead of hard-failing the job (see AGENTS.md's
+    # trivy-scan-retry PR-context decision).
+    # From: Issue #1095
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+      issues: write
     outputs:
       candidate-digest: ${{ steps.build.outputs.digest }}
     steps:
@@ -390,8 +407,25 @@ jobs:
       # Why: this exact step previously hit a DB-download failure with no
       #   retry anywhere.
       # From: PR #1542, Issue #1535
+      #
+      # What: continue-on-error -- a HIGH/CRITICAL finding not covered by
+      #   .trivyignore.yaml no longer hard-fails this PR job directly; the
+      #   steps below turn it into a self-closing tracking issue instead
+      #   (report-nightly-status's pattern, generalized).
+      # Why: maintainer decision (2026-08) -- an untriaged Trivy finding
+      #   should not block merging unrelated PR work while it's being
+      #   triaged; it must still be visibly tracked, not silently
+      #   swallowed (AG-INT-002). This applies to PR-context scans only:
+      #   the push-time "Scan pushed amd64 build-tools digest" step below
+      #   (pre-publish gate) and container-scan/release-sbom's scans
+      #   elsewhere in this repo are deliberately left hard-failing --
+      #   shipping a fresh image with an unreviewed HIGH/CRITICAL finding
+      #   is a release-gate decision, not a PR-review one.
+      # From: Issue #1095
       - name: Scan local build-tools amd64 image with Trivy
+        id: trivy-scan
         if: github.event_name == 'pull_request'
+        continue-on-error: true
         # What: allows 50 minutes for this scan step.
         # Why: trivy-scan-retry can run up to 4 attempts.
         # From: Issue #1535
@@ -418,6 +452,58 @@ jobs:
           cache-dir: ${{ steps.trivy-cache.outputs.dir }}
           timeout: 10m
           exit-code: "1"
+
+      # What: a fork PR's GITHUB_TOKEN is read-only (no issues:write),
+      #   regardless of this workflow's own permissions: block -- GitHub
+      #   downgrades it unconditionally for pull_request-triggered runs
+      #   from a fork (AGENTS.md AG-GH-008 documents the identical gap
+      #   for pr-tracking-metadata-check).
+      # Why: computed once here so both steps below share one source of
+      #   truth instead of re-deriving it.
+      # From: Issue #1095
+      - name: Detect fork PR (no issues:write token available here)
+        id: trivy-fork-check
+        if: always() && github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.repository }}" ]; then
+            echo "is-fork=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is-fork=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # What: explicit, visible warning on a fork PR instead of silently
+      #   dropping the finding (AG-INT-002 forbids hiding a real signal).
+      # From: Issue #1095
+      - name: Warn on fork PR -- Trivy finding could not be filed as an issue
+        if: >-
+          always() && github.event_name == 'pull_request' &&
+          steps.trivy-scan.outcome == 'failure' &&
+          steps.trivy-fork-check.outputs.is-fork == 'true'
+        run: |
+          echo "::warning::Trivy reported a HIGH/CRITICAL finding not covered by .trivyignore.yaml (see the 'Scan local build-tools amd64 image with Trivy' step above for the report), but this is a fork PR -- GITHUB_TOKEN has no issues:write here, so no tracking issue could be filed. A maintainer must review that report manually before merging."
+
+      # What: files, updates, or closes a standing "trivy-finding-build-
+      #   tools-amd64" issue instead of hard-failing this job, reusing
+      #   nightly-status/report.sh's label-keyed self-closing pattern
+      #   (Issue #1095's own nightly-status action, generalized via its
+      #   `label` input).
+      # Why: same-repo PRs only -- a fork PR's finding is surfaced by the
+      #   warning step above instead, since the token here cannot write
+      #   issues on this repo for a fork-originated run.
+      # From: Issue #1095
+      - name: Report Trivy PR-scan status (non-blocking, self-closing issue)
+        if: >-
+          always() && github.event_name == 'pull_request' &&
+          steps.trivy-fork-check.outputs.is-fork == 'false'
+        uses: ./.github/actions/nightly-status
+        with:
+          outcome: ${{ steps.trivy-scan.outcome == 'success' && 'success' || 'failure' }}
+          scope: >-
+            Trivy HIGH/CRITICAL finding in tools/build-tools (amd64),
+            not covered by .trivyignore.yaml
+          label: trivy-finding-build-tools-amd64
+          project_pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
 
       - name: Scan pushed amd64 build-tools digest with Trivy
         if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
@@ -488,6 +574,22 @@ jobs:
     needs: determine-publish-scope
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 150
+    # What: adds issues:write to this job's own permissions (job-level
+    # `permissions:` replaces, not merges with, the workflow-level block
+    # above -- every other scope from that block, incl. the "Attest
+    # arm64 build-tools image provenance" step's attestations/artifact-
+    # metadata scopes further down in this job, is repeated here
+    # unchanged).
+    # Why: same PR-context self-closing Trivy issue as the amd64
+    # build-tools job above.
+    # From: Issue #1095
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+      issues: write
     outputs:
       candidate-digest: ${{ steps.build.outputs.digest }}
     steps:
@@ -602,8 +704,15 @@ jobs:
       # What: scans via trivy-scan-retry for its retry/GHCR-mirror/auth.
       # Why: same DB-download exposure as the amd64 leg's identical step.
       # From: Issue #1535
+      #
+      # What: continue-on-error -- same PR-context non-blocking decision
+      #   as the amd64 leg's identical step; see that step's comment for
+      #   the full reasoning.
+      # From: Issue #1095
       - name: Scan local build-tools arm64 image with Trivy
+        id: trivy-scan
         if: github.event_name == 'pull_request'
+        continue-on-error: true
         # What: allows 50 minutes for this scan step.
         # Why: trivy-scan-retry can run up to 4 attempts.
         # From: Issue #1535
@@ -628,6 +737,47 @@ jobs:
           cache: "false"
           timeout: 10m
           exit-code: "1"
+
+      # What: same fork-PR detection as the amd64 leg's identical step.
+      # From: Issue #1095
+      - name: Detect fork PR (no issues:write token available here)
+        id: trivy-fork-check
+        if: always() && github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.repository }}" ]; then
+            echo "is-fork=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is-fork=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # What: same explicit fork-PR warning as the amd64 leg's identical
+      #   step.
+      # From: Issue #1095
+      - name: Warn on fork PR -- Trivy finding could not be filed as an issue
+        if: >-
+          always() && github.event_name == 'pull_request' &&
+          steps.trivy-scan.outcome == 'failure' &&
+          steps.trivy-fork-check.outputs.is-fork == 'true'
+        run: |
+          echo "::warning::Trivy reported a HIGH/CRITICAL finding not covered by .trivyignore.yaml (see the 'Scan local build-tools arm64 image with Trivy' step above for the report), but this is a fork PR -- GITHUB_TOKEN has no issues:write here, so no tracking issue could be filed. A maintainer must review that report manually before merging."
+
+      # What: same self-closing tracking issue as the amd64 leg, under
+      #   its own arm64-specific label so a fix on one arch doesn't
+      #   auto-close the other arch's still-open finding.
+      # From: Issue #1095
+      - name: Report Trivy PR-scan status (non-blocking, self-closing issue)
+        if: >-
+          always() && github.event_name == 'pull_request' &&
+          steps.trivy-fork-check.outputs.is-fork == 'false'
+        uses: ./.github/actions/nightly-status
+        with:
+          outcome: ${{ steps.trivy-scan.outcome == 'success' && 'success' || 'failure' }}
+          scope: >-
+            Trivy HIGH/CRITICAL finding in tools/build-tools (arm64),
+            not covered by .trivyignore.yaml
+          label: trivy-finding-build-tools-arm64
+          project_pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
 
       - name: Scan pushed arm64 build-tools digest with Trivy
         if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'

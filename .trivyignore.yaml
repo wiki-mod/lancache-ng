@@ -19,10 +19,38 @@ vulnerabilities:
       itself, present regardless of any image's own TLS/QUIC usage).
 
       Why: Time-boxed maintainer-authorized exception while the
-      apk-upgrade cache-bust fix propagates through every affected
-      image's next rebuild; no `paths:` scoping applies since Trivy's
-      Alpine os-pkgs finding class carries no PkgPath. None of this
-      project's services run a QUIC server.
+      apk-upgrade cache-bust fix (PR #1680, merged 2026-08-26T12:01:29Z)
+      propagates through every affected image's next rebuild; no
+      `paths:` scoping applies since Trivy's Alpine os-pkgs finding
+      class carries no PkgPath. None of this project's services run a
+      QUIC server.
+
+      Re-verified 2026-08-27 (not yet removable): every first-party
+      GHCR `:nightly` tag checked (`proxy`/`dhcp`/`ntp`/`dhcp-proxy`/
+      `dns`/`syslog`/`watchdog`/`utilities`/`ui`/`build-tools`; 10 of
+      11 -- `netdata` denied a pull under this image path, not
+      independently resolved) has a `docker inspect` `.Created`
+      timestamp between 2026-08-10 and 2026-08-16, all before the PR
+      #1680 merge -- no rebuild has propagated the fix yet. A live
+      Trivy scan of `ui:nightly` (Alpine 3.24.1) without `--ignore-
+      unfixed`/`--trivyignores` confirms the finding is real and fixed
+      upstream but not yet in the built image: `CVE-2026-14456`
+      `libssl3`/`libcrypto3`, `FixedVersion: 3.5.8-r0`. Re-check after
+      the next rebuild of all listed images.
+
+      Scope correction (found 2026-08-27, not previously documented):
+      since this entry has no `paths:` key, it is not actually
+      Alpine-only in effect -- a same-CVE-ID live finding also exists
+      on `tools/build-tools`'s Debian `openssl`/`libssl3t64`/
+      `openssl-provider-legacy`/`libssl-dev` packages (`FixedVersion:
+      3.5.7-1~deb13u2`, confirmed via a live Trivy scan of
+      `build-tools:nightly` without `--ignore-unfixed`/`--trivyignores`)
+      and is being suppressed by this same entry as a side effect. PR
+      #1680 fixed only the Alpine `apk`-upgrade cache-bust; whether
+      `tools/build-tools`'s Debian `apt`-upgrade path has an equivalent
+      staleness problem is unverified and out of scope for this
+      re-review -- flagged for the maintainer as a follow-up, not
+      resolved here.
 
       From: Issue #1095, PR #1685
     expired_at: 2026-09-30
@@ -41,7 +69,11 @@ vulnerabilities:
       github.com/docker/docker only as an API client library and never
       compile it. No fixed release exists at the pinned
       v28.5.2+incompatible module path (verified 2026-08-14 against both
-      projects' vendored modules).
+      projects' vendored modules; re-checked 2026-08-27 that
+      DOCKER_COMPOSE_VERSION/DOCKER_BUILDX_VERSION in
+      tools/build-tools/Dockerfile are unchanged since that
+      verification -- the vendored-module content itself was not
+      re-derived this pass, since that requires a build).
 
       From: Issue #1304, PR #1548
     status: not_affected
@@ -97,6 +129,19 @@ vulnerabilities:
       of the current image (2026-08-24, lancache-229): every finding in
       this group attributes solely to `libcurl4t64`; `curl`/
       `libcurl3t64-gnutls` no longer appear at all.
+
+      Debian trixie fix status individually re-checked against
+      security-tracker.debian.org on 2026-08-27 for the 7 IDs then in
+      this group (CVE-2026-8458/10536 were added after this check):
+      all still `vulnerable`/`no-dsa` at curl 8.14.1-2+deb13u4 -- a
+      same-day batch source-package-tracker query misreported
+      CVE-2026-9079/9080 as "fixed"; each CVE's own tracker page was
+      re-fetched individually and both confirm `vulnerable`. Caveat:
+      this check (and this session's own live Trivy scans) predate the
+      libcurl4t64-only purge above (2026-08-24 per that note, checked
+      2026-08-27) -- not re-run against the post-purge image; the
+      Debian trixie fix status itself is unaffected by which package
+      Trivy currently attributes the finding to.
 
       From: Issue #1304, PR #1661
     expired_at: 2026-09-30
@@ -215,7 +260,13 @@ vulnerabilities:
       packages or their hard link-time dependents, so none can be purged;
       "not exploitable" is the only available disposition short of
       migrating the image off Debian. Neither image invokes Perl at all
-      (grep-confirmed; re-verified 2026-08-19 against the current tree).
+      (grep-confirmed; re-verified 2026-08-19 against the current tree;
+      re-confirmed 2026-08-27 via a fresh grep against origin/current_dev:
+      zero `perl`/`setfacl`/`getfacl`/`chfn`/`chsh`/`gzexe`/`mount`
+      invocations in `services/ui`/`tools/build-tools`; no ncurses-linked
+      crate in `services/ui/Cargo.toml`/`Cargo.lock`; `services/ui`'s
+      privilege drop uses `setpriv`, confirmed live in
+      `services/ui/docker-entrypoint.sh`).
 
       From: Issue #815, PR #1454, Issue #1598
     status: not_affected
@@ -593,7 +644,10 @@ vulnerabilities:
       checksum-verified release tarballs via `gzip`, never invoking
       `gzexe` itself or on attacker-supplied input. No `trixie`/
       `trixie-backports` fix exists yet (Debian security-tracker: only
-      `sid` has 1.14-1; re-verified 2026-08-19).
+      `sid` has 1.14-1; re-verified 2026-08-19; re-confirmed 2026-08-27
+      against security-tracker.debian.org: trixie gzip 1.13-1 remains
+      `vulnerable` for both CVE-2026-41991 and CVE-2026-41992, fix only
+      in sid 1.14-1).
 
       From: Issue #815, PR #1454, Issue #1598
     expired_at: 2026-09-30

@@ -2,8 +2,13 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: files, updates, or closes one standing "nightly-broken" issue.
+# What: files, updates, or closes one standing issue, keyed by LABEL
+#   (default "nightly-broken").
 # Why: reused across consecutive failures; closed on the next success.
+#   Originated for the nightly pipeline; LABEL is caller-overridable
+#   (see action.yml's `label` input) so any other recurring, self-
+#   healing signal -- e.g. an untriaged Trivy finding -- can reuse this
+#   same script under its own label instead of a new one being written.
 # From: Issue #1095
 
 set -euo pipefail
@@ -120,7 +125,7 @@ fi
 # Why: gh label create erroring on an already-existing label is harmless.
 # From: Issue #1095
 run gh label create "${LABEL}" --repo "${REPO}" --color b60205 \
-  --description "A scheduled nightly CI run is failing" 2>/dev/null || true
+  --description "Recurring, self-closing tracking issue: ${SCOPE}" 2>/dev/null || true
 
 detail="${SCOPE} failed in ${RUN_URL}"
 if [ -n "${FAILED_JOBS}" ]; then
