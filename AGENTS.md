@@ -356,7 +356,7 @@ No other runtime language may be introduced without explicit maintainer approval
 
 ## Architecture
 
-Everything runs in Docker containers. Base OS is mixed, not uniformly Debian: `services/dhcp`, `services/dhcp-proxy`, `services/watchdog`, `services/ntp`, `services/dns`, `services/proxy`, `services/ui`, and `services/syslog` all run on Alpine — the first six as issue #815's staged migration off Debian, `services/syslog` (#1431/#1433) by starting on Alpine from its first commit rather than migrating. `tools/build-tools` (the shared CI/dev image) stays Debian-based by default (Rule-Ref: AG-KD-009), independent of any individual service's own base-OS choice — it is the only first-party image with Debian as its active default; issue #1095's evaluation added a real, verified Alpine candidate to the same Dockerfile as an opt-in `--target alpine-final` alternative, but switching the default remains a separate maintainer decision not yet made. See issue #815 for the full per-service OS evaluation history.
+Everything runs in Docker containers. Base OS is mixed, not uniformly Debian: `services/dhcp`, `services/dhcp-proxy`, `services/watchdog`, `services/ntp`, `services/dns`, `services/proxy`, `services/ui`, and `services/syslog` all run on Alpine — the first six as issue #815's staged migration off Debian, `services/syslog` (#1431/#1433) by starting on Alpine from its first commit rather than migrating. `tools/build-tools` (the shared CI/dev image) stays Debian-based by default (Rule-Ref: AG-KD-009), independent of any individual service's own base-OS choice — it is the only first-party image with Debian as its active default; issue #1095's evaluation added a real Alpine candidate to the same Dockerfile as an opt-in `--target alpine-final` alternative (`os-pkgs` CVE-surface parity confirmed, full post-fix rescan still outstanding), but switching the default remains a separate maintainer decision not yet made. See issue #815 for the full per-service OS evaluation history.
 
 ```
 services/proxy/          # nginx: unified proxy serving both standard + SSL mode via different ports
@@ -455,8 +455,9 @@ by configuring which DNS server IP they point to:
   SSH against Linux self-hosted runners rather than a local Docker Desktop install (Rust
   builds and full-stack `docker compose up` runs are not exercised on the Windows
   authoring host — see AG-IPV6-001 for one concrete Docker-Desktop-on-Windows limitation).
-- **[AG-KD-009]** **`build-tools` stays Debian by default; a real, verified Alpine candidate now
-  exists in the same Dockerfile as an opt-in alternative, pending a maintainer decision on whether
+- **[AG-KD-009]** **`build-tools` stays Debian by default; a real Alpine candidate now
+  exists in the same Dockerfile as an opt-in alternative (`os-pkgs` CVE-surface parity confirmed,
+  full post-fix rescan still outstanding), pending a maintainer decision on whether
   to switch (issue #1095).** #815's own research had originally excluded `tools/build-tools` from
   the project's Alpine-migration push (unlike `dhcp`, `dhcp-proxy`, `dns`, `proxy`, `ntp`, and
   `ui`'s runtime stage, all evaluated or migrated separately), on the grounds that rebasing
