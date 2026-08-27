@@ -18,10 +18,12 @@
 //! touch Docker -- see its own doc comment.
 
 use crate::{AppState, docker_client};
-use axum::extract::{Form, State};
+use axum::Json;
+use axum::extract::{Form, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use serde::Deserialize;
+use std::fs;
 use std::sync::Arc;
 use tera::Context;
 
@@ -247,6 +249,71 @@ pub async fn restart_ui_service(
     Ok(Html(RESTART_UI_PAGE))
 }
 
+#[derive(Deserialize)]
+pub struct SetServiceDesiredStateForm {
+    pub state: String,
+}
+
+// What: dock start/stop -- only writes desired-state.json
+// Why: watchdog alone starts/stops dhcp/ntp, not this route
+// Why: base.html calls this via fetch(), not a submitted form
+// From: Issue #1437
+// Mirrors is_valid_ui_channel's shape below: only these two service
+// concepts are ever reconciled (see watchdog's own reconcile_desired_state).
+fn is_valid_dock_service(service: &str) -> bool {
+    matches!(service, "dhcp" | "ntp")
+}
+
+fn is_valid_desired_state(state: &str) -> bool {
+    matches!(state, "running" | "stopped")
+}
+
+pub async fn set_service_desired_state(
+    State(state): State<Arc<AppState>>,
+    Path(service): Path<String>,
+    headers: HeaderMap,
+    Json(form): Json<SetServiceDesiredStateForm>,
+) -> Result<StatusCode, StatusCode> {
+    crate::routes::verify_csrf_header(&headers)?;
+
+    if !is_valid_dock_service(&service) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    if !is_valid_desired_state(&form.state) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    write_desired_state(&state.config.desired_state_file, &service, &form.state).map_err(
+        |err| {
+            tracing::error!("failed to persist desired state for {service}: {err:#}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        },
+    )?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// What: read-modify-write one key in the shared file
+// Why: must not clobber the other service's existing override
+// Why: a malformed prior file must not block a new write
+// From: Issue #1437
+fn write_desired_state(path: &str, service: &str, state: &str) -> anyhow::Result<()> {
+    let mut current: serde_json::Map<String, serde_json::Value> = fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_default();
+    current.insert(
+        service.to_string(),
+        serde_json::Value::String(state.to_string()),
+    );
+    let json = serde_json::to_string_pretty(&current)?;
+
+    let tmp_path = format!("{path}.tmp");
+    fs::write(&tmp_path, json)?;
+    fs::rename(&tmp_path, path)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,5 +332,84 @@ mod tests {
         assert!(!is_valid_ui_channel("latest"));
         assert!(!is_valid_ui_channel(""));
         assert!(!is_valid_ui_channel("STABLE"));
+    }
+
+    #[test]
+    fn only_dhcp_and_ntp_are_valid_dock_services() {
+        assert!(is_valid_dock_service("dhcp"));
+        assert!(is_valid_dock_service("ntp"));
+        assert!(!is_valid_dock_service("dhcp-proxy"));
+        assert!(!is_valid_dock_service("ui"));
+        assert!(!is_valid_dock_service(""));
+    }
+
+    #[test]
+    fn only_running_and_stopped_are_valid_desired_states() {
+        assert!(is_valid_desired_state("running"));
+        assert!(is_valid_desired_state("stopped"));
+        assert!(!is_valid_desired_state("Running"));
+        assert!(!is_valid_desired_state("started"));
+        assert!(!is_valid_desired_state(""));
+    }
+
+    fn desired_state_temp_path(name: &str) -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("lancache-ui-desired-state-{name}-{nonce}.json"))
+    }
+
+    // The common case: writing a fresh service key creates the file, and no
+    // .tmp leftover survives the atomic rename -- same proof
+    // nats_conf_write_replaces_file_atomically already establishes for its
+    // own target file.
+    #[test]
+    fn write_desired_state_creates_file_with_no_tmp_leftover() {
+        let path = desired_state_temp_path("fresh");
+        write_desired_state(path.to_str().unwrap(), "dhcp", "stopped").unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["dhcp"], "stopped");
+
+        let tmp_path = format!("{}.tmp", path.display());
+        assert!(
+            !std::path::Path::new(&tmp_path).exists(),
+            "the .tmp file must be renamed away, not left behind"
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    // Writing "ntp" must not erase an existing "dhcp" override -- this is
+    // the read-modify-write behavior that distinguishes this function from
+    // a naive whole-file overwrite.
+    #[test]
+    fn write_desired_state_preserves_the_other_services_key() {
+        let path = desired_state_temp_path("preserve");
+        write_desired_state(path.to_str().unwrap(), "dhcp", "stopped").unwrap();
+        write_desired_state(path.to_str().unwrap(), "ntp", "running").unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["dhcp"], "stopped");
+        assert_eq!(parsed["ntp"], "running");
+        let _ = fs::remove_file(&path);
+    }
+
+    // A corrupted pre-existing file must not block a new, well-formed
+    // write -- degrades to an empty map and proceeds, matching this
+    // function's own tolerant-read documentation.
+    #[test]
+    fn write_desired_state_recovers_from_a_malformed_existing_file() {
+        let path = desired_state_temp_path("malformed");
+        fs::write(&path, "{ not valid json").unwrap();
+
+        write_desired_state(path.to_str().unwrap(), "ntp", "stopped").unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["ntp"], "stopped");
+        let _ = fs::remove_file(&path);
     }
 }

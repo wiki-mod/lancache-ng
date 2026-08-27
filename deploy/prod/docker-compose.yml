@@ -277,6 +277,10 @@ services:
       - proxy-cache:/var/cache/lancache:ro
       - watchdog-status:/var/run/watchdog
       - watchdog-logs:/var/log/lancache-watchdog
+      # What: read-only; only desired-state.json is read here
+      # Why: ui writes it, this container only reads it
+      # From: Issue #1437
+      - ui-data:/data:ro
     healthcheck:
       # What: freshness-based (mtime) probe, not just file existence.
       # Why: a stalled main loop would otherwise leave a stale-but-present status.json reading as healthy forever.

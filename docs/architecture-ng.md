@@ -367,18 +367,31 @@ the inspect allowlist does not grant or imply a Docker restart action for it.
   active `DHCP_MODE`). Deliberately kept start/stop-only in
   `scripts/untracked/docker-socket-proxy.sh` (`safe_dhcp_action`), never given a
   `restart` grant: Kea/dnsmasq's own known-good-config rollback semantics
-  and the Admin UI's start/stop-driven lifecycle control are the intended
-  recovery path, and a watchdog-triggered blind restart mid-rollback could
-  actively conflict with that -- a concern raised explicitly in #842's own
-  history and not yet reversed by any later maintainer decision.
+  make a blind watchdog-triggered restart mid-rollback risky -- a concern
+  raised explicitly in #842's own history. **Updated (issue #1437,
+  maintainer-directed watchdog-as-actor architecture):** the actual caller of
+  `safe_dhcp_action`'s start/stop is now watchdog's own main loop, not the
+  Admin UI -- the Admin UI only writes an operator's intent to
+  `desired-state.json` (`services/ui/src/routes/setup.rs`'s
+  `set_service_desired_state`), and watchdog's `reconcile_one`
+  (`services/watchdog/src/main.rs`) reads it fresh every `CHECK_INTERVAL`
+  and issues `start`/`stop` accordingly. This still never issues a
+  `restart` and never acts without an explicit prior dock action (an
+  absent `desired-state.json` entry is "no opinion", not "should run" --
+  see `status::DesiredState`'s own doc comment), so the original rollback
+  concern this paragraph describes is unchanged; only which process holds
+  the socket-proxy allowlist grant changed.
 - **`netdata`**: promoted to real restart-capability (#842, 2026-08-07
   decision) -- see the `Auto-restart` paragraph above. Its own dedicated
   `safe_netdata_restart` allowlist grant follows the same
   one-acl-per-service pattern `safe_ntp_action`/`safe_dhcp_action` already
   use, rather than widening the shared `safe_service_restart` acl.
 - **`ntp` (chrony)**: alert-only monitored when `NTP_ENABLED` is truthy. Its
-  own start/stop-only Admin-UI toggle (`safe_ntp_action`) mirrors `dhcp`'s
-  shape; no restart grant exists for it either.
+  own start/stop-only allowlist grant (`safe_ntp_action`) mirrors `dhcp`'s
+  shape; no restart grant exists for it either. As of issue #1437, the
+  actual caller of that grant is watchdog's main loop, reconciling against
+  `desired-state.json`, the same way as `dhcp` above -- see that entry for
+  the full mechanism.
 - **`syslog` (combined fluent-bit + syslog-ng)**: alert-only monitored when
   `LOGGING_ENABLED` is truthy. Its dual-process healthcheck
   (`services/syslog/healthcheck.sh`) feeds the Docker health state consumed

@@ -26,13 +26,20 @@ use lancache_watchdog::status::{self, DiskInfo, ServiceHealth, WatchdogStatus};
 /// restart-capability decision): it is real restart-capable now, wired
 /// directly into `monitored`/`failure_counters` in `main()` below, with its
 /// own dedicated `safe_netdata_restart` docker-socket-proxy allowlist grant.
-/// `ui`/`dhcp`/`dhcp-proxy`/`syslog`/`ntp` stay alert-only here -- `ui` is
-/// tracked separately (PR #1610, Refs #1486), `dhcp`/`dhcp-proxy`/`ntp`
-/// deliberately keep their own start/stop-only Admin-UI-driven lifecycle
+/// `ui`/`dhcp`/`dhcp-proxy`/`syslog`/`ntp` stay alert-only in THIS list --
+/// `ui` is tracked separately (PR #1610, Refs #1486), and `syslog`/
+/// `watchdog` itself must never be user-disableable (#1486's cross-reference
+/// on #842). `dhcp`/`dhcp-proxy`/`ntp` are still never *restarted* here
 /// (Kea/dnsmasq known-good-config rollback semantics a blind watchdog
-/// restart could race), and `syslog`/`watchdog` itself must never be
-/// user-disableable (#1486's cross-reference on #842) -- see this crate's
-/// own PR body for the full per-service reasoning.
+/// restart could race), but as of issue #1437 this crate's main loop is the
+/// sole actor that starts/stops them, reconciling against an operator's
+/// EXPLICIT desired-state override only -- an absent entry is "no opinion",
+/// never treated as "should run" (see `status::DesiredState`'s own doc
+/// comment for why: it would otherwise fight a settings-reconcile that just
+/// deliberately stopped one of these containers mid mode-switch). See
+/// `desired_state_targets`/`reconcile_desired_state` below, which run
+/// independently of this function's own alert-only health reporting for the
+/// same two services.
 ///
 /// Central logging runs fluent-bit and syslog-ng in one `services/syslog/`
 /// container named by `CONTAINER_SYSLOG`. Its own dual-process healthcheck
@@ -64,6 +71,95 @@ fn resolve_alert_only_targets(
         targets.push(format!("{}{container_suffix}", config::CONTAINER_NTP));
     }
     targets
+}
+
+// What: dhcp/ntp targets reconcile_desired_state acts on
+// Why: shared shape between the loop call site and its own tests
+// From: Issue #1437
+fn desired_state_targets(
+    dhcp_mode: &str,
+    ntp_enabled: bool,
+    container_suffix: &str,
+) -> Vec<(&'static str, String)> {
+    let mut targets = Vec::new();
+    if let Some(dhcp_container) = config::dhcp_alert_container(dhcp_mode) {
+        targets.push(("dhcp", format!("{dhcp_container}{container_suffix}")));
+    }
+    if ntp_enabled {
+        targets.push((
+            "ntp",
+            format!("{}{container_suffix}", config::CONTAINER_NTP),
+        ));
+    }
+    targets
+}
+
+// What: starts/stops one service to match its desired state
+// Why: only acts when actual and desired truly differ
+// Why: no entry means no opinion, never defaults to "should run"
+// From: Issue #1437
+async fn reconcile_one(
+    client: &DockerProxyClient,
+    label: &str,
+    container_name: &str,
+    desired: Option<status::DesiredRunState>,
+    timeout: Option<Duration>,
+    action_timeout: Option<Duration>,
+) {
+    // No entry in desired-state.json is not "should run": that would make
+    // watchdog start a container settings-reconcile just stopped on purpose
+    // (dhcp_mode/ntp_enabled are resolved once at watchdog startup, so a
+    // mode switch can leave a stale target here for several minutes). Only
+    // an explicit dock action justifies watchdog taking either action.
+    let Some(desired) = desired else {
+        return;
+    };
+    let should_run = desired.should_run();
+    let Some(running) = client.is_running(container_name, timeout).await else {
+        return;
+    };
+    if should_run && !running {
+        log(&format!(
+            "STARTING {container_name} ({label}: desired state is running)"
+        ));
+        if !client.start(container_name, action_timeout).await {
+            log_err(&format!("WARNING: start call failed for {container_name}"));
+        }
+    } else if !should_run && running {
+        log(&format!(
+            "STOPPING {container_name} ({label}: desired state is stopped)"
+        ));
+        if !client.stop(container_name, action_timeout).await {
+            log_err(&format!("WARNING: stop call failed for {container_name}"));
+        }
+    }
+}
+
+// What: reconciles dhcp/ntp against the operator's desired-state.json
+// Why: watchdog is now the sole actor for these two services
+// From: Issue #1437
+async fn reconcile_desired_state(client: &DockerProxyClient, settings: &Settings) {
+    let desired = status::read_desired_state(&settings.desired_state_file);
+    for (label, container_name) in desired_state_targets(
+        &settings.dhcp_mode,
+        settings.ntp_enabled,
+        &settings.container_suffix,
+    ) {
+        let desired_state = match label {
+            "dhcp" => desired.dhcp,
+            "ntp" => desired.ntp,
+            _ => None,
+        };
+        reconcile_one(
+            client,
+            label,
+            &container_name,
+            desired_state,
+            settings.curl_max_time,
+            settings.curl_max_time_restart,
+        )
+        .await;
+    }
 }
 
 // Matches watchdog.sh's log()/log_err(): "[watchdog] HH:MM:SS msg". Kept as
@@ -105,6 +201,10 @@ struct Settings {
     disk_warn_pct: u32,
     disk_alarm_pct: u32,
     status_file: PathBuf,
+    // What: read fresh every loop iteration, not once
+    // Why: an operator's dock action must apply without a restart
+    // From: Issue #1437
+    desired_state_file: PathBuf,
     cache_dir: PathBuf,
     container_names: ContainerNames,
     // resolve_alert_only_targets() builds names from the plain
@@ -201,6 +301,13 @@ fn load_settings() -> Settings {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/var/run/watchdog/status.json"));
 
+    // What: default path matches ui's own /data mount point
+    // Why: no compose env override needed (like STATUS_FILE)
+    // From: Issue #1437
+    let desired_state_file = env("DESIRED_STATE_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/data/desired-state.json"));
+
     // Mirrors watchdog.sh's resolve_cache_dir(): CACHE_DIR wins outright,
     // but an older installation may still only have the pre-CACHE_DIR
     // split CACHE_DIR_STANDARD/CACHE_DIR_SSL pair set -- reading only
@@ -246,6 +353,7 @@ fn load_settings() -> Settings {
         disk_warn_pct,
         disk_alarm_pct,
         status_file,
+        desired_state_file,
         cache_dir,
         container_names,
         container_suffix,
@@ -352,6 +460,11 @@ async fn main() {
     ));
 
     loop {
+        // What: acts on the operator's dhcp/ntp overrides this tick
+        // Why: must run before health reporting reflects the result
+        // From: Issue #1437
+        reconcile_desired_state(&client, &settings).await;
+
         let mut services_status: HashMap<String, ServiceHealth> = HashMap::new();
 
         for service in &monitored {
@@ -469,6 +582,8 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::net::TcpListener;
+    use tokio::time::timeout;
 
     #[test]
     // With every optional profile disabled, only the one always-on
@@ -543,5 +658,68 @@ mod tests {
     fn resolve_alert_only_targets_is_unchanged_with_no_suffix() {
         let targets = resolve_alert_only_targets("disabled", false, false, "");
         assert_eq!(targets, vec!["lancache-ui".to_string()]);
+    }
+
+    // What: only provisioned services are reconcile candidates
+    // Why: proves disabled DHCP/NTP produce zero reconcile targets
+    // From: Issue #1437
+    #[test]
+    fn desired_state_targets_is_empty_when_neither_service_is_provisioned() {
+        let targets = desired_state_targets("disabled", false, "");
+        assert!(targets.is_empty());
+    }
+
+    #[test]
+    // Both the Kea and dnsmasq DHCP_MODE values must resolve to the "dhcp"
+    // label -- an operator's start/stop control must not care which
+    // container is actually behind it, only that "dhcp" is provisioned.
+    fn desired_state_targets_resolves_dhcp_for_either_provisioned_mode() {
+        let kea = desired_state_targets("kea", false, "");
+        assert_eq!(kea, vec![("dhcp", "lancache-dhcp".to_string())]);
+
+        let dnsmasq = desired_state_targets("dnsmasq-proxy", false, "");
+        assert_eq!(dnsmasq, vec![("dhcp", "lancache-dhcp-proxy".to_string())]);
+    }
+
+    #[test]
+    // The coordinated container suffix must reach these targets too, the
+    // same way resolve_alert_only_targets_applies_the_coordinated_suffix
+    // above already proves for the plain alert-only set.
+    fn desired_state_targets_applies_the_coordinated_suffix() {
+        let targets = desired_state_targets("kea", true, "-ci1");
+        assert_eq!(
+            targets,
+            vec![
+                ("dhcp", "lancache-dhcp-ci1".to_string()),
+                ("ntp", "lancache-ntp-ci1".to_string()),
+            ]
+        );
+    }
+
+    // What: absent desired-state entry must not touch the docker proxy
+    // Why: prevents watchdog fighting an in-progress settings-reconcile
+    // From: Issue #1437
+    #[tokio::test]
+    async fn reconcile_one_takes_no_action_when_desired_state_is_absent() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind an ephemeral local port");
+        let addr = listener
+            .local_addr()
+            .expect("listener must have a local address");
+        let client = DockerProxyClient::new(format!("http://{addr}"))
+            .expect("valid base url for an ephemeral loopback port");
+
+        reconcile_one(&client, "dhcp", "lancache-dhcp", None, None, None).await;
+
+        // No entry means "no opinion" (see status::DesiredState's doc
+        // comment): reconcile_one must return before ever calling
+        // is_running/start/stop, so no connection to the proxy is ever
+        // attempted. A short timeout on accept() proves that absence.
+        let accept_result = timeout(Duration::from_millis(200), listener.accept()).await;
+        assert!(
+            accept_result.is_err(),
+            "reconcile_one must not contact the docker proxy when desired state is absent"
+        );
     }
 }

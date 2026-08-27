@@ -1237,6 +1237,10 @@ async fn main() -> Result<()> {
         .route("/setup", get(routes::setup::setup_page))
         .route("/setup/update", post(routes::setup::update_stack_settings))
         .route("/setup/restart-ui", post(routes::setup::restart_ui_service))
+        .route(
+            "/api/services/{service}/desired-state",
+            post(routes::setup::set_service_desired_state),
+        )
         .route("/cache/resize", post(routes::cache::resize_cache))
         .route("/api/metrics", get(routes::dashboard::metrics_api))
         .route(
@@ -1940,6 +1944,10 @@ mod tests {
         );
         ctx.insert("selected_host", &Some("watchdog".to_string()));
         ctx.insert("logs", &Vec::<nginx_client::LogEntry>::new());
+        // What: base.html's beambar form now needs csrf_token too
+        // Why: unlike logs_page(), this test builds ctx by hand
+        // From: Issue #1437
+        ctx.insert("csrf_token", "test-csrf-token");
 
         let rendered = templates.render("logs.html", &ctx).unwrap();
         assert!(
