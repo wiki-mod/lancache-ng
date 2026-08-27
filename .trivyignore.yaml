@@ -133,17 +133,17 @@ vulnerabilities:
       `libcurl3t64-gnutls` no longer appear at all.
 
       Debian trixie fix status individually re-checked against
-      security-tracker.debian.org on 2026-08-27 for the 7 IDs then in
-      this group (CVE-2026-8458/10536 were added after this check):
-      all still `vulnerable`/`no-dsa` at curl 8.14.1-2+deb13u4 -- a
+      security-tracker.debian.org on 2026-08-27 for all 9 IDs in this
+      group, including CVE-2026-8458/10536 added by PR #1661: all
+      still `vulnerable`/`no-dsa` at curl 8.14.1-2+deb13u4 -- a
       same-day batch source-package-tracker query misreported
       CVE-2026-9079/9080 as "fixed"; each CVE's own tracker page was
       re-fetched individually and both confirm `vulnerable`. Caveat:
-      this check (and this session's own live Trivy scans) predate the
-      libcurl4t64-only purge above (2026-08-24 per that note, checked
-      2026-08-27) -- not re-run against the post-purge image; the
-      Debian trixie fix status itself is unaffected by which package
-      Trivy currently attributes the finding to.
+      this session's own live Trivy scans (elsewhere in this audit)
+      predate the libcurl4t64-only purge above (2026-08-24 per that
+      note, checked 2026-08-27) -- not re-run against the post-purge
+      image; the Debian trixie fix status itself is unaffected by
+      which package Trivy currently attributes the finding to.
 
       From: Issue #1304, PR #1661
     expired_at: 2026-09-30
