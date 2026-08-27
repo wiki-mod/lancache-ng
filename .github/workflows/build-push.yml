@@ -1851,6 +1851,13 @@ jobs:
             && grep -E '^[[:space:]]+build-network:[[:space:]]+\$\{\{[[:space:]]*env\.RUST_ACCELERATION_NETWORK[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
             && grep -E '^[[:space:]]+platform:[[:space:]]+linux/amd64[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Acceleration preflight must receive all generated secret file paths."; exit 1; }
+          # What: guards the ccache-redis-file wiring specifically.
+          # Why: this exact input silently went unwired for ui/watchdog
+          #   before; checking its declaration in the action file alone
+          #   already missed that regression once.
+          # From: Issue #1095
+          grep -E '^[[:space:]]+ccache-redis-file:[[:space:]]+\$\{\{[[:space:]]*steps\.sccache-secret\.outputs\['\''ccache-redis-file'\''\][[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::Acceleration preflight must receive ccache-redis-file from steps.sccache-secret's own output."; exit 1; }
           grep -F 'sccache rustc' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'sccache --dist-status' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'run_logged()' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
@@ -5507,16 +5514,15 @@ jobs:
             echo "SECRET_FILES"
           } >> "$GITHUB_OUTPUT"
 
-      # What: produces the ccache_redis_url secret for dns, utilities, and build-tools.
-      # Why: each mounts it under a distinct BuildKit secret id from sccache's
-      #   own sccache_redis_url, reusing the same repository secret; honors
-      #   the existing SCCACHE_REDIS_MODE kill switch (AG-CI-004).
+      # What: produces ccache_redis_url for utilities and build-tools.
+      # Why: dns/ui/watchdog already get it from the generic secret-file
+      #   step above; only these two lack a matrix.rust step for it.
       # From: Issue #1095 (G15 | #1556) | PR #1661
-      - name: Prepare ccache Redis endpoint (dns + utilities + build-tools C-dependency cache)
+      - name: Prepare ccache Redis endpoint (utilities + build-tools C-dependency cache)
         if: >-
           ${{
             steps.should-build.outputs.should-build == 'true' &&
-            (matrix.service == 'dns' || matrix.service == 'utilities' || matrix.service == 'build-tools') &&
+            (matrix.service == 'utilities' || matrix.service == 'build-tools') &&
             github.actor != 'dependabot[bot]' &&
             github.event_name != 'pull_request'
           }}
@@ -5606,12 +5612,11 @@ jobs:
           redis-file: ${{ steps.sccache-secret.outputs.redis-file }}
           dist-config-file: ${{ steps.sccache-secret.outputs.dist-config-file }}
           distcc-hosts-file: ${{ matrix.service == 'build-tools' && steps['distcc-hosts-secret'].outputs['hosts-file'] || steps.sccache-secret.outputs.distcc-hosts-file }}
-          # What: wired for dns and build-tools -- ui does not use this
-          #   ccache layer.
-          # Why: reuses ccache-redis-secret's own output instead of a second
-          #   Redis-endpoint read.
+          # What: wired via ccache-redis-secret for build-tools only now.
+          # Why: dns/ui/watchdog already get ccache-redis-file from the
+          #   generic sccache-secret step above; avoids a duplicate read.
           # From: Issue #1095 (G15) | PR #1661
-          ccache-redis-file: ${{ (matrix.service == 'dns' || matrix.service == 'build-tools') && steps['ccache-redis-secret'].outputs['redis-file'] || '' }}
+          ccache-redis-file: ${{ matrix.service == 'build-tools' && steps['ccache-redis-secret'].outputs['redis-file'] || steps.sccache-secret.outputs['ccache-redis-file'] }}
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
           build-network: ${{ env.RUST_ACCELERATION_NETWORK }}
           platform: linux/amd64

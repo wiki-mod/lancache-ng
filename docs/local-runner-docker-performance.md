@@ -180,27 +180,24 @@ Important:
 
 ## Rust builds and ccache (distcc C-dependency cache)
 
-`services/dns/Dockerfile` and, since issue #1533, `services/ui/Dockerfile`
-can layer `ccache` in front of distcc for their C-dependency compile paths
-(`ring`/`aws-lc-sys`, via `rustls`), so a rebuild against unchanged C sources
-reuses a previous compile's result from Redis instead of recompiling and
-redistributing it every time. Since issue #1304/PR #1661,
-`tools/build-tools/Dockerfile` layers the same ccache-over-distcc mechanism
-in front of its own from-source curl/git C compiles, with its own
-`ccache_redis_url`/`distcc_potential_hosts` secrets populated by both
-`build-tools.yml`'s standalone schedule/workflow_dispatch route and
-`build-push.yml`'s matrix entry -- unlike dns/ui below, this path is
-verified against a real Redis endpoint (see that PR's own validation).
-`services/ui/Dockerfile`'s custom
-`lancache-distcc-wrapper` now understands both distcc calling conventions --
-the original `$0`-basename masquerade dispatch, and ccache's `CCACHE_PREFIX`
-convention (invoked as `distcc <real-compiler-path> <args>`, real compiler is
-`$1`) -- disambiguated by checking `$0` first. **Known gap (confirmed
-2026-08-20, issue #1533): `build-push.yml`'s real CI pipeline does not yet
-populate the `ccache_redis_url` secret or the preflight action's
-`ccache-redis-file` input at any call site, for either service -- this layer
-has not been exercised against a real Redis endpoint in production CI yet.
-See `AGENTS.md`'s `AG-CI-022` Known Gaps note.**
+`services/dns/Dockerfile`, `services/ui/Dockerfile` (issue #1533), and
+`services/watchdog/Dockerfile` (issue #1095) can layer `ccache` in front of
+distcc for their C-dependency compile paths (`ring`/`aws-lc-sys`, via
+`rustls`), so a rebuild against unchanged C sources reuses a previous
+compile's result from Redis instead of recompiling and redistributing it
+every time. Since issue #1304/PR #1661, `tools/build-tools/Dockerfile`
+layers the same ccache-over-distcc mechanism in front of its own
+from-source curl/git C compiles, with its own `ccache_redis_url`/
+`distcc_potential_hosts` secrets populated by both `build-tools.yml`'s
+standalone schedule/workflow_dispatch route and `build-push.yml`'s matrix
+entry. `services/ui/Dockerfile`'s custom `lancache-distcc-wrapper` now
+understands both distcc calling conventions -- the original `$0`-basename
+masquerade dispatch, and ccache's `CCACHE_PREFIX` convention (invoked as
+`distcc <real-compiler-path> <args>`, real compiler is `$1`) --
+disambiguated by checking `$0` first. `build-push.yml`'s real CI pipeline
+populates the `ccache_redis_url` secret and the preflight action's
+`ccache-redis-file` input for all four services (confirmed live, issue
+#1095) -- see `AGENTS.md`'s `AG-CI-022` note for the wiring history.
 
 Important rules:
 
@@ -208,10 +205,11 @@ Important rules:
   a ccache Redis endpoint (BuildKit secret `ccache_redis_url`) is present --
   it automatically reuses the `SCCACHE_REDIS_URL` secret already documented
   above for sccache, not a second Redis URL
-- once both are enabled, `services/dns/Dockerfile` and `services/ui/Dockerfile`
-  export `CC="ccache <real compiler>"` (not the plain `CC=distcc` every other
-  distcc-enabled builder uses), with `CCACHE_PREFIX=distcc` so ccache still
-  dispatches actual cache misses through distcc
+- once both are enabled, `services/dns/Dockerfile`, `services/ui/Dockerfile`,
+  and `services/watchdog/Dockerfile` export `CC="ccache <real compiler>"`
+  (not the plain `CC=distcc` every other distcc-enabled builder uses), with
+  `CCACHE_PREFIX=distcc` so ccache still dispatches actual cache misses
+  through distcc
 - use `CCACHE_COMPILERCHECK=content`, not the ccache default of `mtime`,
   since a build-tools image rebuild changes the compiler's mtime but not
   necessarily its output

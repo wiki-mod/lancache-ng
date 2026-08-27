@@ -1,7 +1,7 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Validates sccache, sccache-dist, distcc, dns/ui ccache-over-distcc.
+# Validates sccache, sccache-dist, distcc, dns/ui/watchdog ccache-over-distcc.
 name: Rust acceleration infrastructure preflight
 description: Validate Rust build acceleration infrastructure outside BuildKit cacheable Docker build layers.
 
@@ -24,7 +24,7 @@ inputs:
   ccache-redis-file:
     description: |
       Optional file containing the ccache Redis remote-storage endpoint for
-      services/dns/Dockerfile's and services/ui/Dockerfile's ccache-over-distcc
+      services/dns, services/ui, and services/watchdog's ccache-over-distcc
       C-dependency cache. Reuses the same Redis URL as redis-file -- see
       build-push.yml's own comment on why this is not a second secret.
     required: false
@@ -139,6 +139,14 @@ runs:
               # Why: a real diagnostic sharing this line must still fail closed.
               # From: Issue #1633
               local benign_pattern='^distcc\[[0-9]+\] (ERROR|WARNING): nonblocking connect to [0-9]{1,3}(\.[0-9]{1,3}){3}:[0-9]+ failed: [A-Za-z0-9 ,.()'\''-]+$'
+              # What: also tolerates one host hanging (accepts, never answers).
+              # Why: same "one host bad, others fine" case as the pattern above,
+              #   just a timeout instead of a refused connect. The token is the
+              #   literal "DONE" observed live, so a different token still fails.
+              # From: Issue #1095
+              benign_pattern+='|^distcc\[[0-9]+\] \(dcc_select_for_read\) ERROR: IO timeout$'
+              benign_pattern+='|^distcc\[[0-9]+\] \(dcc_r_token_int\) ERROR: read failed while waiting for token "DONE"$'
+              benign_pattern+='|^distcc\[[0-9]+\] \(dcc_r_result_header\) ERROR: server provided no answer\. Is the server configured to allow access from your IP address\? Is the server performing authentication and your client isn'\''t\? Does the server have the compiler installed\? Is the server configured to access the compiler\?$'
 
               if [ "$host_count" -le 1 ]; then
                 scan_log "$log_file"
@@ -177,6 +185,23 @@ runs:
                 exit 1
               fi
               scan_log "$log_file"
+            }
+
+            # What: like run_logged, but scans via scan_distcc_compile_log.
+            # Why: a distcc-routed command (ccache's CCACHE_PREFIX=distcc
+            #   probes) can emit the same tolerable per-host diagnostics
+            #   scan_log would wrongly treat as fatal.
+            # From: Issue #1095
+            run_logged_distcc() {
+              local log_file="$1" host_count="$2"
+              shift 2
+
+              if ! "$@" >"$log_file" 2>&1; then
+                cat "$log_file" >&2
+                echo "[ERROR] Rust acceleration preflight command failed: $*" >&2
+                exit 1
+              fi
+              scan_distcc_compile_log "$log_file" "$host_count"
             }
 
             # What: fails closed unless sccache-dist has a connected scheduler.
@@ -350,16 +375,28 @@ runs:
               distcc_hosts_without_pump="${distcc_hosts_without_pump:-$distcc_hosts}"
 
               # What: checks for a real host token after pump's own flag.
-              # Why: pump exports that flag even with zero live hosts found.
-              # From: PR #613
+              # Why: pump exports that flag even with zero live hosts found;
+              #   delegates to distcc_pump_real_host_count() below so the
+              #   --* exclusion rule can't drift between the two callers.
+              # From: PR #613 | Issue #1095
               distcc_pump_published_hosts() {
+                [ "$(distcc_pump_real_host_count "$1")" -gt 0 ]
+              }
+
+              # What: counts only real host tokens, excluding --* flags.
+              # Why: a bare token count inflates host_count past 1 when a
+              #   flag like --randomize is present, wrongly relaxing the
+              #   single-host fail-closed scan branch.
+              # From: Issue #1095
+              distcc_pump_real_host_count() {
+                distcc_pump_count=0
                 for distcc_host_token in $1; do
                   case "$distcc_host_token" in
                     --*) ;;
-                    *) return 0 ;;
+                    *) distcc_pump_count=$((distcc_pump_count + 1)) ;;
                   esac
                 done
-                return 1
+                echo "$distcc_pump_count"
               }
 
               if [ "$distcc_enabled" = "1" ]; then
@@ -378,7 +415,8 @@ runs:
                     pump_started=1
                     pump_log="$preflight_dir/distcc-pump.log"
                     if cc -c "$preflight_dir/distcc-probe.c" -o "$preflight_dir/distcc-pump.o" >"$pump_log" 2>&1; then
-                      scan_log "$pump_log"
+                      pump_host_count=$(distcc_pump_real_host_count "$distcc_pump_filtered_hosts")
+                      scan_distcc_compile_log "$pump_log" "$pump_host_count"
                     else
                       cat "$pump_log" >&2
                       echo "[INFO] distcc-pump probe did not complete; continuing with plain distcc fallback."
@@ -408,10 +446,11 @@ runs:
               if [ "$distcc_enabled" = "1" ]; then
                 export DISTCC_HOSTS="$final_distcc_hosts"
                 distcc_log="$preflight_dir/distcc.log"
-                # What: counts hosts via an intentionally unquoted `set --`.
-                # Why: `set --`/`echo` can't fail, unlike the guarded calls.
-                # From: Issue #1633
-                final_distcc_host_count=$(set -- $final_distcc_hosts; echo "$#")
+                # What: reuses distcc_pump_real_host_count() for this list too.
+                # Why: DISTCC_HOSTS can carry flag tokens (e.g. --randomize)
+                #   here just like the pump-published list does.
+                # From: Issue #1095
+                final_distcc_host_count=$(distcc_pump_real_host_count "$final_distcc_hosts")
                 if cc -c "$preflight_dir/distcc-probe.c" -o "$preflight_dir/distcc.o" >"$distcc_log" 2>&1; then
                   scan_distcc_compile_log "$distcc_log" "$final_distcc_host_count"
                   echo "[INFO] distcc preflight completed."
@@ -432,14 +471,14 @@ runs:
                 echo "[INFO] plain cc fallback completed."
               fi
 
-              # What: validates dns/ui ccache-over-distcc via Redis write+read.
+              # What: validates dns/ui/watchdog ccache-over-distcc via Redis write+read.
               # Why: proves the round trip, not just local-disk caching.
               # From: Issue #887
               if [ -s /run/lancache/ccache-redis-url ] && [ "$distcc_enabled" = "1" ] && [ -n "${DISTCC_HOSTS:-}" ]; then
                 real_cc="$(PATH="$original_path" command -v cc)"
                 ccache_redis_endpoint="$(cat /run/lancache/ccache-redis-url)"
                 # What: normalizes a schemeless redis endpoint to redis://.
-                # Why: ccache rejects a bare host:port; matches dns/ui rule.
+                # Why: ccache rejects a bare host:port; matches dns/ui/watchdog rule.
                 # From: Issue #887
                 case "$ccache_redis_endpoint" in
                   redis://*|redis+unix:*) ;;
@@ -459,7 +498,7 @@ runs:
                 mkdir -p "$ccache_dir_cold"
                 CCACHE_DIR="$ccache_dir_cold" ccache --zero-stats >/dev/null
                 cold_log="$preflight_dir/ccache-cold.log"
-                run_logged "$cold_log" env CCACHE_DIR="$ccache_dir_cold" ccache "$real_cc" -c ccache-probe.c -o ccache-cold.o
+                run_logged_distcc "$cold_log" "$final_distcc_host_count" env CCACHE_DIR="$ccache_dir_cold" ccache "$real_cc" -c ccache-probe.c -o ccache-cold.o
                 cold_stats="$preflight_dir/ccache-cold-stats.log"
                 CCACHE_DIR="$ccache_dir_cold" ccache --print-stats > "$cold_stats"
                 # What: a cache hit is also valid proof (not just a write).
@@ -475,7 +514,7 @@ runs:
                 mkdir -p "$ccache_dir_warm"
                 CCACHE_DIR="$ccache_dir_warm" ccache --zero-stats >/dev/null
                 warm_log="$preflight_dir/ccache-warm.log"
-                run_logged "$warm_log" env CCACHE_DIR="$ccache_dir_warm" ccache "$real_cc" -c ccache-probe.c -o ccache-warm.o
+                run_logged_distcc "$warm_log" "$final_distcc_host_count" env CCACHE_DIR="$ccache_dir_warm" ccache "$real_cc" -c ccache-probe.c -o ccache-warm.o
                 warm_stats="$preflight_dir/ccache-warm-stats.log"
                 CCACHE_DIR="$ccache_dir_warm" ccache --print-stats > "$warm_stats"
                 if ! grep -qE '^remote_storage_hit[[:space:]]+[1-9]' "$warm_stats"; then
