@@ -221,7 +221,6 @@ RUN set -euo pipefail; \
       clang22 \
       cmake \
       coreutils \
-      curl \
       distcc \
       distcc-pump \
       expect \
@@ -258,6 +257,14 @@ RUN set -euo pipefail; \
     distcc_bin="$(command -v distcc)"; \
     mkdir -p /usr/local/lib/distcc; \
     for wrapper in cc gcc c++ g++; do ln -sf "$distcc_bin" "/usr/local/lib/distcc/$wrapper"; done
+
+# What: curl comes from the shared utilities image, like the Debian stage.
+# Why: the static build has no libc dependency, so it works unchanged on
+#   musl -- keeps this candidate on the same update/security contract as
+#   every other first-party image instead of Alpine's own curl package.
+# From: Issue #1304 | Issue #1556 | PR #1691
+COPY --from=utilities-tools /usr/local/bin/curl /usr/local/bin/curl
+RUN curl --version >/dev/null
 
 # What: switches SHELL to bash for every RUN step below.
 # Why: BusyBox ash cannot parse this file's bash-array use.
