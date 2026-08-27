@@ -307,6 +307,12 @@ RUN docker --version; \
 # simulation scripts only, documented not dropped silently.
 # From: Issue #1095
 
+# What: symlinks musl-gcc to gcc for the musl-gcc contract.
+# Why: gcc here already targets musl -- functionally correct,
+# not a fake pass; dns/ui/watchdog hard-require musl-gcc.
+# From: Issue #1095 | PR #1691
+RUN ln -sf /usr/bin/gcc /usr/local/bin/musl-gcc
+
 # What: no separate musl cross-compile step, unlike Debian.
 # Why: musl is already this image's default rustc triple.
 # From: Issue #1095
@@ -352,6 +358,7 @@ RUN set -euo pipefail; \
       expect \
       find \
       flock \
+      musl-gcc \
       getent \
       grep \
       gzip \
@@ -405,7 +412,8 @@ RUN set -euo pipefail; \
       *) echo "/usr/local/cargo/bin is missing from PATH" >&2; exit 1 ;; \
     esac; \
     rustc_host_line="$(rustc -vV)"; \
-    grep -qE '^host: .*-musl$' <<<"${rustc_host_line}"
+    grep -qE '^host: .*-musl$' <<<"${rustc_host_line}"; \
+    musl-gcc --version
 
 WORKDIR /workspace
 
