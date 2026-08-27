@@ -3421,9 +3421,12 @@ jobs:
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
   rust_coverage:
-    # What: also skips on a metadata-only pull_request event.
-    # Why: full reasoning (coverage tolerance) on the linked issue.
-    # From: Issue #1095 | PR #1532
+    # What: content-gated only; carries no event-type skip clause.
+    # Why: directly required by branch protection with no tolerant
+    #   aggregator in front, unlike dns_cargo_audit/dns_test's own
+    #   labeled-event skip -- that skip can outrace and permanently
+    #   overwrite this check's real result for the same commit.
+    # From: Issue #1095
     name: coverage (Rust)
     needs: [validate-compose, dns_test, ui_test, detect-changes]
     if: >-
@@ -3432,10 +3435,6 @@ jobs:
         needs['validate-compose'].result == 'success' &&
         (needs.dns_test.result == 'success' || needs.dns_test.result == 'skipped') &&
         (needs.ui_test.result == 'success' || needs.ui_test.result == 'skipped') &&
-        (
-          github.event_name != 'pull_request' ||
-          !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
-        ) &&
         (
           github.event_name != 'pull_request' ||
           needs['detect-changes'].outputs.dns_rust == 'true' ||
