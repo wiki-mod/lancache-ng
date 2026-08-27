@@ -974,8 +974,8 @@ jobs:
 
       # What: resolves utilities:latest to an immutable digest once per run.
       # Why: consumer Dockerfiles use a mutable tag (AG-KD-010); resolving it
-      #   once here and passing the same digest to every consumer build keeps
-      #   them consistent within one run, closing a same-run staleness race.
+      #   once keeps every consumer build mutually consistent within one run
+      #   (does not bind consumers to a candidate rebuilt in the same run).
       # From: Issue #1095 | PR #1687
       - name: Resolve utilities image digest
         id: resolve-utilities-image
@@ -987,10 +987,8 @@ jobs:
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source scripts/lib/ghcr-retry.sh
 
-          utilities_digest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect ghcr.io/wiki-mod/lancache-ng/utilities:latest --format '{{json .Manifest.Digest}}')"
-          utilities_digest="${utilities_digest%\"}"
-          utilities_digest="${utilities_digest#\"}"
-          if [[ -z "$utilities_digest" || "$utilities_digest" == "null" ]]; then
+          utilities_digest="$(resolve_manifest_digest ghcr.io/wiki-mod/lancache-ng/utilities:latest "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")"
+          if [[ -z "$utilities_digest" ]]; then
             echo "::error::Could not resolve digest for ghcr.io/wiki-mod/lancache-ng/utilities:latest." >&2
             exit 1
           fi
