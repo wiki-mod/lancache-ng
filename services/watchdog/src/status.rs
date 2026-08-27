@@ -2,16 +2,26 @@
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
 //!
-//! `status.json` production: watchdog.sh's `write_status()`/`disk_info()`,
-//! reshaped as typed structs that deliberately mirror
-//! `services/ui/src/watchdog_status.rs`'s own `WatchdogStatus`/
-//! `ServiceHealth`/`DiskInfo`/`DiskHealth` field-for-field (that module is
-//! the sole reader of this file, so its expected shape is the contract,
-//! not this crate's own preference). The two definitions are intentionally
-//! duplicated rather than shared via a common crate: this project has no
-//! existing shared-library pattern between `services/ui` and any other
-//! service, and introducing one for a handful of struct fields would be a
-//! disproportionate coupling for the benefit gained.
+//! Runtime state file I/O for this crate's main loop, in both directions:
+//!
+//! - `status.json` production: watchdog.sh's `write_status()`/`disk_info()`,
+//!   reshaped as typed structs that deliberately mirror
+//!   `services/ui/src/watchdog_status.rs`'s own `WatchdogStatus`/
+//!   `ServiceHealth`/`DiskInfo`/`DiskHealth` field-for-field (that module is
+//!   the sole reader of this file, so its expected shape is the contract,
+//!   not this crate's own preference). The two definitions are intentionally
+//!   duplicated rather than shared via a common crate: this project has no
+//!   existing shared-library pattern between `services/ui` and any other
+//!   service, and introducing one for a handful of struct fields would be a
+//!   disproportionate coupling for the benefit gained.
+//! - `desired-state.json` consumption (issue #1437): the reverse direction
+//!   of the same runtime-state-exchange concern -- `services/ui` is the sole
+//!   writer, this crate's main loop is the sole reader, read fresh on every
+//!   iteration (see `main.rs`'s `reconcile_desired_state`). Same tolerant-
+//!   reader philosophy as `read_status`-equivalent code elsewhere in this
+//!   project: a missing or malformed file must never stall or crash the
+//!   main loop, and defaults to "running" so an install with no such file
+//!   yet (or one that predates this feature) behaves exactly as before.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -65,6 +75,56 @@ pub struct WatchdogStatus {
     // services/ui/src/watchdog_status.rs's own reader-side HashMap.
     pub services: HashMap<String, ServiceHealth>,
     pub disk: DiskInfo,
+}
+
+/// Operator-requested run state for a service the main loop now reconciles
+/// against reality (issue #1437), written by `services/ui/src/routes/
+/// setup.rs`'s `set_service_desired_state`. `serde(rename_all = "lowercase")`
+/// makes the on-disk JSON read `"running"`/`"stopped"`, matching this
+/// project's existing lowercase-string convention for status/health fields
+/// (`ServiceHealth::status`, `HealthReading::as_status_str`) rather than
+/// Rust's default `PascalCase` variant names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DesiredRunState {
+    Running,
+    Stopped,
+}
+
+impl DesiredRunState {
+    pub fn should_run(self) -> bool {
+        matches!(self, Self::Running)
+    }
+}
+
+/// Sparse override map: an absent key (missing file, or a key the operator
+/// never touched) means "running" -- the always-on behavior every install
+/// already had before this file could exist at all. Only `dhcp` and `ntp`
+/// are reconciled today (see `main.rs`'s `reconcile_desired_state`); `dhcp`
+/// covers whichever of Kea/dnsmasq is actually provisioned, resolved via
+/// `config::dhcp_alert_container`, so this file is keyed by stable service
+/// concept rather than by the container name that happens to be active.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DesiredState {
+    #[serde(default)]
+    pub dhcp: Option<DesiredRunState>,
+    #[serde(default)]
+    pub ntp: Option<DesiredRunState>,
+}
+
+/// Tolerant reader for `desired-state.json`, called fresh on every main-loop
+/// iteration. Every failure mode (missing file, unreadable, malformed JSON)
+/// collapses to `DesiredState::default()` (both fields `None`, i.e.
+/// "running") rather than propagating an error -- a transient read glitch or
+/// an install that predates this feature must never stop or crash the main
+/// loop, mirroring `services/ui/src/watchdog_status.rs`'s own
+/// missing-file-is-a-normal-state philosophy for the reverse-direction file.
+pub fn read_desired_state(path: &Path) -> DesiredState {
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return DesiredState::default(),
+    };
+    serde_json::from_str(&content).unwrap_or_default()
 }
 
 /// Renders the current UTC time as watchdog.sh's `date -u
@@ -264,5 +324,58 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn desired_state_temp_path(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "lancache-watchdog-desired-state-{name}-{nonce}.json"
+        ))
+    }
+
+    // A never-written desired-state file (no install has ever used a dock
+    // control, or this install predates the feature) must resolve to
+    // "running" for every service -- the same always-on behavior every
+    // install already had before this file could exist.
+    #[test]
+    fn read_desired_state_missing_file_defaults_to_running() {
+        let path = desired_state_temp_path("missing");
+        let state = read_desired_state(&path);
+        assert!(state.dhcp.is_none());
+        assert!(state.ntp.is_none());
+    }
+
+    // A corrupted file must fail closed to "running" (the safe default),
+    // not stop the main loop from reconciling other services.
+    #[test]
+    fn read_desired_state_malformed_json_defaults_to_running() {
+        let path = desired_state_temp_path("malformed");
+        fs::write(&path, "{ not valid json").unwrap();
+        let state = read_desired_state(&path);
+        assert!(state.dhcp.is_none());
+        assert!(state.ntp.is_none());
+        let _ = fs::remove_file(&path);
+    }
+
+    // The common case: a real operator override round-trips, and an
+    // omitted key (ntp here) stays None rather than being padded in as a
+    // fabricated "running" value.
+    #[test]
+    fn read_desired_state_parses_a_real_override() {
+        let path = desired_state_temp_path("real");
+        fs::write(&path, r#"{"dhcp":"stopped"}"#).unwrap();
+        let state = read_desired_state(&path);
+        assert_eq!(state.dhcp, Some(DesiredRunState::Stopped));
+        assert!(state.ntp.is_none());
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn desired_run_state_should_run_matches_variant() {
+        assert!(DesiredRunState::Running.should_run());
+        assert!(!DesiredRunState::Stopped.should_run());
     }
 }

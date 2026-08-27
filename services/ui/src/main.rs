@@ -1237,6 +1237,10 @@ async fn main() -> Result<()> {
         .route("/setup", get(routes::setup::setup_page))
         .route("/setup/update", post(routes::setup::update_stack_settings))
         .route("/setup/restart-ui", post(routes::setup::restart_ui_service))
+        .route(
+            "/api/services/{service}/desired-state",
+            post(routes::setup::set_service_desired_state),
+        )
         .route("/cache/resize", post(routes::cache::resize_cache))
         .route("/api/metrics", get(routes::dashboard::metrics_api))
         .route(

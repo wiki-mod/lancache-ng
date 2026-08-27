@@ -286,6 +286,11 @@
   </div>
 
   <script>
+    // What: shared token for every fetch()-driven POST below
+    // Why: base.html has no <form>, so no hidden csrf_token field
+    // From: Issue #1437
+    const CSRF_TOKEN = "{{ csrf_token }}";
+
     // What: persist/apply the explicit light/dark theme override
     // Why: mockup wants prefers-color-scheme + manual override
     // From: Issue #1437
@@ -356,6 +361,37 @@
       return { colorClass: colorClass, onUpdate: onUpdate, refresh: refresh };
     })();
 
+    // What: dock start/stop POST -- watchdog is the actor
+    // Why: shared by every controllable service's button below
+    // From: Issue #1437
+    async function setDockServiceState(service, state, button) {
+      button.disabled = true;
+      try {
+        const response = await fetch('/api/services/' + service + '/desired-state', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF_TOKEN },
+          body: JSON.stringify({ state: state }),
+        });
+        if (response.ok) {
+          window.LancacheWatchdog.refresh();
+        }
+      } catch (err) {
+        // What: leave the button re-enabled below either way
+        // Why: a network hiccup must not strand a disabled button
+        // From: Issue #1437
+      }
+      button.disabled = false;
+    }
+
+    // What: maps a watchdog container name to its dock service key
+    // Why: only dhcp/dhcp-proxy/ntp have a real start/stop route
+    // From: Issue #1437
+    const DOCK_CONTROLLABLE_SERVICES = {
+      'lancache-dhcp': 'dhcp',
+      'lancache-dhcp-proxy': 'dhcp',
+      'lancache-ntp': 'ntp',
+    };
+
     // What: render beambar service entries via DOM nodes
     // Why: avoids building HTML from server-supplied strings
     // From: Issue #1437
@@ -368,6 +404,23 @@
         dot.className = 'beambar-dot ' + window.LancacheWatchdog.colorClass(svc.status);
         wrap.appendChild(dot);
         wrap.appendChild(document.createTextNode(svc.label));
+        const dockService = DOCK_CONTROLLABLE_SERVICES[svc.name];
+        if (dockService) {
+          // What: red/gray reads as "not running" for the button label
+          // Why: status.json has no separate running/stopped field
+          // From: Issue #1437
+          const running = svc.status !== 'red' && svc.status !== 'gray';
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'theme-toggle';
+          button.style.marginLeft = '0.35rem';
+          button.style.padding = '0 0.4rem';
+          button.textContent = running ? 'Stopp' : 'Start';
+          button.addEventListener('click', function () {
+            setDockServiceState(dockService, running ? 'stopped' : 'running', button);
+          });
+          wrap.appendChild(button);
+        }
         return wrap;
       }
       function render(data) {
