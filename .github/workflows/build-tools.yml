@@ -60,7 +60,7 @@ jobs:
       contents: read
     outputs:
       should-publish: ${{ steps.should-publish.outputs.should-publish }}
-      utilities-image: ${{ steps.resolve-utilities-image.outputs.utilities-image }}
+      utilities-image: ${{ steps['resolve-utilities-image'].outputs['utilities-image'] }}
     steps:
       - name: Confirm standalone route
         run: |
@@ -148,7 +148,7 @@ jobs:
       group: build-tools-amd64-image-build
       cancel-in-progress: false
     env:
-      UTILITIES_IMAGE: ${{ needs['determine-publish-scope'].outputs.utilities-image }}
+      UTILITIES_IMAGE: ${{ needs['determine-publish-scope'].outputs['utilities-image'] }}
     # What: adds issues:write; other scopes below stay unchanged.
     # Why: job-level permissions: replaces, not merges, the
     #   workflow-level block -- issues:write is for the self-closing
@@ -553,7 +553,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 150
     env:
-      UTILITIES_IMAGE: ${{ needs['determine-publish-scope'].outputs.utilities-image }}
+      UTILITIES_IMAGE: ${{ needs['determine-publish-scope'].outputs['utilities-image'] }}
     # What: adds issues:write; other scopes below stay unchanged.
     # Why: same addition as the amd64 build-tools job above.
     # From: Issue #1095
