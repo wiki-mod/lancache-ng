@@ -202,9 +202,10 @@ ENV PATH="/usr/local/cargo/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin
 # From: Issue #1095
 ARG APK_CACHE_BUST=""
 
-# What: installs bash, GNU coreutils, sqlite, apk packages.
+# What: installs bash, GNU coreutils, github-cli, packages.
 # Why: BusyBox differs from GNU (AG-VAL-034); `clang22`,
-# `lld22` are Alpine's real names; sqlite mirrors Debian's.
+# `lld22` are Alpine's names; `github-cli` provides `gh`;
+# sqlite mirrors Debian's own sqlite3 addition.
 # From: Issue #1095 | Issue #1585
 RUN set -euo pipefail; \
     : "apk-cache-bust=${APK_CACHE_BUST}"; \
@@ -229,6 +230,7 @@ RUN set -euo pipefail; \
       gawk \
       gettext \
       git \
+      github-cli \
       gnupg \
       grep \
       iproute2 \
@@ -324,6 +326,7 @@ RUN set -euo pipefail; \
       shellspec \
       shellcheck \
       jq \
+      gh \
       git \
       gpg \
       pkg-config \
