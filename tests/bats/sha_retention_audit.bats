@@ -1142,11 +1142,10 @@ EOF
 }
 
 # What: a real repository digest-pinned FROM dependency is discovered.
-# Why: proves the discovery loop actually finds a concrete digest, not only
-#   a synthetic fixture. Was the utilities image (issue #1613); switched to
-#   the base alpine image once utilities moved to a mutable :latest tag
-#   (AG-KD-010) and stopped being a digest-pinned FROM dependency at all.
-# From: Issue #1613 | AG-KD-010
+# Why: proves the discovery loop finds a concrete digest, not only a
+#   synthetic fixture -- the alpine base image, per Rule-Ref: AG-KD-010,
+#   now that utilities itself is no longer digest-pinned.
+# From: Issue #1613 | PR #1687
 @test "the real repository's alpine base image digest is discovered as a live FROM dependency" {
   alpine_dockerfile_digest="$(grep -hoE 'FROM mirror\.gcr\.io/library/alpine:[0-9.]+@sha256:[0-9a-f]{64}' \
     "$repo_root/services/proxy/Dockerfile" | grep -oE 'sha256:[0-9a-f]{64}')"

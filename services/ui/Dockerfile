@@ -13,6 +13,12 @@
 # Intentional ARG default (overridable at build time via --build-arg).
 # Actual digest pinning for release builds is tracked in issue #508.
 ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
+# What: declared here (meta-arg, before any FROM) so it is usable by the
+#   utilities-tools stage's own FROM further down -- an ARG declared after
+#   the first FROM is not visible to a later FROM's image reference at all.
+# Why: same override contract as BUILD_TOOLS_IMAGE above (AG-KD-010).
+# From: Issue #1095 | AG-KD-010
+ARG UTILITIES_IMAGE=ghcr.io/wiki-mod/lancache-ng/utilities:latest
 FROM ${BUILD_TOOLS_IMAGE} AS builder
 
 # The shared build-tools image already carries the Rust toolchain, sccache,
@@ -572,7 +578,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
 # Why: uses the mutable `:latest` tag -- see services/proxy/Dockerfile's
 #   identical stage comment and AG-KD-010 for the full rationale.
 # From: Issue #1095 | AG-KD-010
-FROM ghcr.io/wiki-mod/lancache-ng/utilities:latest AS utilities-tools
+FROM ${UTILITIES_IMAGE} AS utilities-tools
 
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
