@@ -2,8 +2,10 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: files, updates, or closes one standing "nightly-broken" issue.
-# Why: reused across consecutive failures; closed on the next success.
+# What: files, updates, or closes one standing issue, keyed by LABEL.
+# Why: reused across consecutive failures, closed on next success --
+#   LABEL is caller-overridable so any recurring signal (e.g. a Trivy
+#   finding) reuses this script instead of a near-duplicate one.
 # From: Issue #1095
 
 set -euo pipefail
@@ -108,7 +110,7 @@ if [ "${OUTCOME}" = "success" ]; then
     add_to_project_board "https://github.com/${REPO}/issues/${existing}"
     echo "success: closing standing ${LABEL} issue #${existing}"
     run gh issue comment "${existing}" --repo "${REPO}" \
-      --body "Recovered: ${SCOPE} succeeded in ${RUN_URL}. Closing this standing tracking issue automatically; it will re-open if a later scheduled run fails."
+      --body "Recovered: ${SCOPE} succeeded in ${RUN_URL}. Closing this standing tracking issue automatically; it will re-open if this check fails again."
     run gh issue close "${existing}" --repo "${REPO}"
   else
     echo "success and no open ${LABEL} issue: nothing to do"
@@ -116,11 +118,13 @@ if [ "${OUTCOME}" = "success" ]; then
   exit 0
 fi
 
-# What: OUTCOME is a failure; ensures the label exists, reuses/opens issue.
-# Why: gh label create erroring on an already-existing label is harmless.
+# What: ensures the label exists before reusing/opening an issue.
+# Why: truncated to 100 chars -- GitHub's hard label-description
+#   limit; untruncated, `|| true` would mask that real failure too.
 # From: Issue #1095
+label_description="Recurring, self-closing tracking issue: ${SCOPE}"
 run gh label create "${LABEL}" --repo "${REPO}" --color b60205 \
-  --description "A scheduled nightly CI run is failing" 2>/dev/null || true
+  --description "${label_description:0:100}" 2>/dev/null || true
 
 detail="${SCOPE} failed in ${RUN_URL}"
 if [ -n "${FAILED_JOBS}" ]; then
@@ -135,8 +139,8 @@ if [ -n "${existing}" ]; then
 else
   echo "failure: opening a new standing ${LABEL} issue"
   new_issue_url="$(run gh issue create --repo "${REPO}" --label "${LABEL}" \
-    --title "[${LABEL}] a scheduled CI run is failing" \
-    --body "A scheduled CI run failed. This standing issue is reused across consecutive failures and closed automatically on the next successful run.
+    --title "[${LABEL}] ${SCOPE}" \
+    --body "This standing issue is reused across consecutive failures of this check and closed automatically on the next success.
 
 ${detail}.")"
   if [ "${DRY_RUN}" = "true" ]; then

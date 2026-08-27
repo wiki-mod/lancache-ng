@@ -2013,6 +2013,50 @@ same decision
 same semantics
 ```
 
+### 72.1 Fallback means sequential, not parallel (added during review)
+
+Same semantics is necessary but not sufficient. The current CI runs the
+self-hosted and hosted-fallback variant of a check **concurrently, always**
+-- not "self-hosted first, hosted only if self-hosted fails or is
+unavailable." That is not a fallback; it is unconditional duplicate work on
+both a shared self-hosted runner pool and GitHub-hosted minutes, for every
+run, regardless of whether the self-hosted side ever had a problem.
+
+Confirmed with real data, not assumption: on PR #1695 (a two-line
+documentation-only change), every one of 9 self-hosted/hosted-fallback job
+pairs started within the same second of each other:
+
+```text
+PR template validation      | self: 07:52:59Z | fallback: 07:52:59Z
+compose healthchecks        | self: 07:52:59Z | fallback: 07:52:59Z
+file purpose headers        | self: 07:52:59Z | fallback: 07:52:59Z
+language policy             | self: 07:54:11Z | fallback: 07:52:59Z
+line endings                | self: 07:54:11Z | fallback: 07:52:59Z
+shellcheck                  | self: 07:54:10Z | fallback: 07:52:59Z
+test (watchdog)              | self: 07:54:10Z | fallback: 07:52:59Z
+PR tracking metadata         | self: 07:54:11Z | fallback: 07:52:59Z
+PR title Conventional-Commit | self: 07:54:11Z | fallback: 07:52:59Z
+```
+
+A real fallback is sequential and conditional:
+
+```text
+self-hosted job
+        |
+        +-> succeeds -> DONE, hosted variant never runs
+        |
+        +-> fails/unavailable/times out
+                |
+                v
+        hosted-fallback job runs
+```
+
+Not two independently-triggered jobs that both always run. In CI 2.0 this
+is one job in `ci.yml` with `needs:`/`if:` gating the hosted variant on the
+self-hosted attempt's actual outcome, calling the same `ci.sh` command
+either way (per §72) -- never two parallel workflow jobs for the same
+check.
+
 ## 73. CodeQL
 
 CodeQL stays technically separate because GitHub has its own
@@ -2659,6 +2703,36 @@ looking beyond the changed files, or is repo-wide scope just how it happened
 to be written the first time. Every check inherited from `build-push.yml`
 during migration (§81) should carry an explicit note recording which of the
 two it is, not silently keep whatever scope it already had.
+
+## 99. Implementation-process rules for building ci.sh/ci.bats itself (added during review)
+
+Hard rules for whoever (human or agent) actually implements CI 2.0, not
+rules about the CI's own runtime behavior:
+
+**Verification depth has no line-count shortcut.** Before starting
+implementation work on any part of `ci.sh`/`ci.bats`, or before relying on
+an existing file's current behavior, read the real source in full -- never
+truncate a verification read to an arbitrary line count and generalize
+from the partial result. When a single read would exceed a practical
+limit, read in sequential chunks of up to ~24,999 tokens each and keep
+going, chunk after chunk, until the entire file/document has actually been
+covered. A conclusion drawn from a partial read is not verification, it is
+a guess wearing verification's clothes.
+
+**Bash tools before API calls, always.** Matches `AG-VAL-005`, restated
+here because `ci.sh` implementation work leans on shell tooling by its
+nature: prefer a native local command (`grep`, `sed`, `awk`, `find`,
+`git`, etc.) over an API call at any time, instead of and/or before
+reaching for an API call. An API call is for the case with no local
+equivalent, not the default first move.
+
+**Bulk operations over one-by-one edits.** Wherever a change genuinely
+applies uniformly across multiple lines or files, use a bulk/batch tool
+(`sed` and equivalents) instead of many individual edits. This is about
+using the right tool for a uniform transformation, not a license to apply
+a blind, unreviewed find-and-replace across semantically different call
+sites -- the semantic-impact discipline in §11/§12 still governs whether a
+given change is actually uniform in the first place.
 
 ## Open decisions
 

@@ -122,6 +122,18 @@ jobs:
     concurrency:
       group: build-tools-amd64-image-build
       cancel-in-progress: false
+    # What: adds issues:write; other scopes below stay unchanged.
+    # Why: job-level permissions: replaces, not merges, the
+    #   workflow-level block -- issues:write is for the self-closing
+    #   Trivy report below, not the amd64 attest step further down.
+    # From: Issue #1095
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+      issues: write
     outputs:
       candidate-digest: ${{ steps.build.outputs.digest }}
     steps:
@@ -390,8 +402,15 @@ jobs:
       # Why: this exact step previously hit a DB-download failure with no
       #   retry anywhere.
       # From: PR #1542, Issue #1535
+      #
+      # What: continue-on-error -- a finding reports via the step below.
+      # Why: PR-context only; release/push scans stay hard-failing
+      #   (maintainer decision, AG-INT-002 -- still tracked, not hidden).
+      # From: Issue #1095
       - name: Scan local build-tools amd64 image with Trivy
+        id: trivy-scan
         if: github.event_name == 'pull_request'
+        continue-on-error: true
         # What: allows 50 minutes for this scan step.
         # Why: trivy-scan-retry can run up to 4 attempts.
         # From: Issue #1535
@@ -418,6 +437,22 @@ jobs:
           cache-dir: ${{ steps.trivy-cache.outputs.dir }}
           timeout: 10m
           exit-code: "1"
+
+      # What: reports the scan outcome as a self-closing issue.
+      # Why: nightly-status/action.yml owns this pattern; reused here
+      #   instead of a near-duplicate (AG-CODE-013), fork-PR-aware.
+      # From: Issue #1095
+      - name: Report Trivy PR-scan status (non-blocking, self-closing issue)
+        if: github.event_name == 'pull_request'
+        uses: ./.github/actions/nightly-status
+        with:
+          outcome: ${{ steps.trivy-scan.outcome == 'failure' && 'failure' || 'success' }}
+          label: trivy-finding-build-tools-amd64
+          scope: >-
+            Trivy HIGH/CRITICAL finding in tools/build-tools (amd64),
+            not covered by .trivyignore.yaml
+          fork-check-step-name: Scan local build-tools amd64 image with Trivy
+          project_pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
 
       - name: Scan pushed amd64 build-tools digest with Trivy
         if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
@@ -488,6 +523,16 @@ jobs:
     needs: determine-publish-scope
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 150
+    # What: adds issues:write; other scopes below stay unchanged.
+    # Why: same addition as the amd64 build-tools job above.
+    # From: Issue #1095
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+      issues: write
     outputs:
       candidate-digest: ${{ steps.build.outputs.digest }}
     steps:
@@ -602,8 +647,14 @@ jobs:
       # What: scans via trivy-scan-retry for its retry/GHCR-mirror/auth.
       # Why: same DB-download exposure as the amd64 leg's identical step.
       # From: Issue #1535
+      #
+      # What: continue-on-error -- same non-blocking decision as amd64.
+      # Why: PR-context only; see the amd64 leg's identical step.
+      # From: Issue #1095
       - name: Scan local build-tools arm64 image with Trivy
+        id: trivy-scan
         if: github.event_name == 'pull_request'
+        continue-on-error: true
         # What: allows 50 minutes for this scan step.
         # Why: trivy-scan-retry can run up to 4 attempts.
         # From: Issue #1535
@@ -628,6 +679,23 @@ jobs:
           cache: "false"
           timeout: 10m
           exit-code: "1"
+
+      # What: reports the scan outcome as a self-closing issue.
+      # Why: own arm64 label so one arch's fix doesn't close the
+      #   other's still-open finding; see the amd64 leg for why
+      #   nightly-status (not a new file) owns this.
+      # From: Issue #1095
+      - name: Report Trivy PR-scan status (non-blocking, self-closing issue)
+        if: github.event_name == 'pull_request'
+        uses: ./.github/actions/nightly-status
+        with:
+          outcome: ${{ steps.trivy-scan.outcome == 'failure' && 'failure' || 'success' }}
+          label: trivy-finding-build-tools-arm64
+          scope: >-
+            Trivy HIGH/CRITICAL finding in tools/build-tools (arm64),
+            not covered by .trivyignore.yaml
+          fork-check-step-name: Scan local build-tools arm64 image with Trivy
+          project_pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
 
       - name: Scan pushed arm64 build-tools digest with Trivy
         if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
