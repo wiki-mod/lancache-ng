@@ -2038,21 +2038,29 @@ PR tracking metadata         | self: 07:54:11Z | fallback: 07:52:59Z
 PR title Conventional-Commit | self: 07:54:11Z | fallback: 07:52:59Z
 ```
 
-A real fallback is sequential and conditional:
+A real fallback is sequential and conditional -- and, per §72.2 below,
+conditional specifically on *why* nothing usable happened, not merely on
+whether it happened:
 
 ```text
 self-hosted job
         |
         +-> succeeds -> DONE, hosted variant never runs
         |
-        +-> fails/unavailable/times out
+        +-> runner unavailable/never picked up the job/timed out
+        |       |
+        |       v
+        |   hosted-fallback job runs
+        |
+        +-> runner ran the job and it genuinely failed
                 |
                 v
-        hosted-fallback job runs
+            FAIL -- hosted variant never runs, nothing reruns elsewhere
 ```
 
-Not two independently-triggered jobs that both always run. In CI 2.0 this
-is one job in `ci.yml` with `needs:`/`if:` gating the hosted variant on the
+Not two independently-triggered jobs that both always run, and not a
+fallback that fires on any non-success outcome. In CI 2.0 this is one job
+in `ci.yml` with `needs:`/`if:` gating the hosted variant on the
 self-hosted attempt's actual outcome, calling the same `ci.sh` command
 either way (per §72) -- never two parallel workflow jobs for the same
 check.
