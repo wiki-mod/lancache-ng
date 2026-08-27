@@ -391,7 +391,7 @@ require_grep 'docker buildx imagetools create --prefer-index=false -t "\$target_
 # What: checks for `actions/attest@` inside the centralized pin-owner
 # wrapper, not ghcr-attest-retry or build-push.yml directly.
 # Why: ghcr-attest-retry (retry + fresh re-login on a transient GHCR 401)
-# now calls that wrapper instead of actions/attest itself (issue #1095).
+# now calls that wrapper instead of actions/attest itself.
 # From: PR #1501 | Issue #1095
 require_grep 'uses: \./\.github/actions/ghcr-attest-retry' \
   .github/workflows/build-push.yml \
