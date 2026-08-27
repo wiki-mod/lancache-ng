@@ -3,10 +3,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # What: AG-VAL-029 standing check -- aquasecurity/trivy-action must only be
-# invoked from .github/actions/trivy-scan-retry/action.yml.
-# Why: a direct call site bypasses that wrapper's retry/auth fix, the exact
-# zero-retry gap that caused two real CI failures (PR #1503, #1500).
-# From: PR #1542, Issue #1535
+# invoked from the centralized pin-owner wrapper action.
+# Why: a direct call site bypasses trivy-scan-retry's own retry/auth fix
+# (issue #1535), and a second pin outside the one owner drifts (issue #1095).
+# From: PR #1542, Issue #1535 | Issue #1095
 
 # What: check_dockerhub_wiring() is a second check -- every real
 # trivy-scan-retry call site must set both dockerhub-* keys.
@@ -26,8 +26,8 @@ else
 fi
 cd "$repo_root"
 
-# The one legitimate call site: the wrapper action's own four attempt steps.
-allowed_file=".github/actions/trivy-scan-retry/action.yml"
+# The one legitimate call site: the centralized pin-owner wrapper itself.
+allowed_file=".github/actions/aquasecurity-trivy-action-centralized-version/action.yml"
 
 check_direct_usage() {
     local violations=0
@@ -36,7 +36,7 @@ check_direct_usage() {
         if [ "$file" = "$allowed_file" ]; then
             continue
         fi
-        echo "::error::check-trivy-action-direct-usage: $file calls aquasecurity/trivy-action directly -- use ./.github/actions/trivy-scan-retry instead (issue #1535, AG-CI-013)" >&2
+        echo "::error::check-trivy-action-direct-usage: $file calls aquasecurity/trivy-action directly -- use ./.github/actions/aquasecurity-trivy-action-centralized-version instead (issue #1535, AG-CI-013)" >&2
         violations=$((violations + 1))
     done < <(grep -rn --include='*.yml' --include='*.yaml' -E "uses: *[\"']?aquasecurity/trivy-action@" .github/workflows .github/actions 2>/dev/null || true)
     return "$violations"
@@ -186,4 +186,4 @@ if [ "$total" -gt 0 ]; then
     exit 1
 fi
 
-echo "check-trivy-action-direct-usage: no direct aquasecurity/trivy-action call sites outside .github/actions/trivy-scan-retry/action.yml, and every trivy-scan-retry call site sets dockerhub-username/dockerhub-password"
+echo "check-trivy-action-direct-usage: no direct aquasecurity/trivy-action call sites outside $allowed_file, and every trivy-scan-retry call site sets dockerhub-username/dockerhub-password"
