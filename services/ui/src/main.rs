@@ -1940,6 +1940,10 @@ mod tests {
         );
         ctx.insert("selected_host", &Some("watchdog".to_string()));
         ctx.insert("logs", &Vec::<nginx_client::LogEntry>::new());
+        // What: base.html's beambar form now needs csrf_token too
+        // Why: unlike logs_page(), this test builds ctx by hand
+        // From: Issue #1437
+        ctx.insert("csrf_token", "test-csrf-token");
 
         let rendered = templates.render("logs.html", &ctx).unwrap();
         assert!(

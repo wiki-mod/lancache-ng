@@ -134,30 +134,41 @@ pub fn read_status(path: &str) -> WatchdogStatusReadResult {
     }
 }
 
-// Human-friendly label for a container name watchdog.sh reports. Falls back
-// to the raw key for anything unrecognized (e.g. an operator-renamed
-// container, or a future service watchdog starts monitoring) rather than
-// hiding it -- see watchdog.sh's own C_PROXY/C_DNS_STD/C_DNS_SSL comment for
-// why these exact literal names are the only ones watchdog can actually
-// report today (renaming isn't wired through the socket-proxy allowlist).
+// What: friendly label for every name watchdog can report
+// Why: watchdog now monitors 10 services, was 3 (#842/#1296)
+// From: Issue #1437
 pub fn display_label(container_name: &str) -> String {
     match container_name {
         "lancache-proxy" => "Proxy".to_string(),
         "lancache-dns-standard" => "DNS (standard)".to_string(),
         "lancache-dns-ssl" => "DNS (SSL)".to_string(),
+        "lancache-nats" => "NATS".to_string(),
+        "lancache-ui" => "Admin UI".to_string(),
+        "lancache-netdata" => "Netdata".to_string(),
+        "lancache-dhcp" => "DHCP (Kea)".to_string(),
+        "lancache-dhcp-proxy" => "DHCP (proxy/relay)".to_string(),
+        "lancache-syslog" => "Central logging".to_string(),
+        "lancache-ntp" => "NTP".to_string(),
         other => other.to_string(),
     }
 }
 
-// Fixed priority for the three names watchdog.sh can currently report (see
-// its C_PROXY/C_DNS_STD/C_DNS_SSL comment), lowest sorts first. Anything
-// unrecognized sorts after all three, alphabetically among itself.
+// What: sort order for every name watchdog can report
+// Why: restart-capable services sort before alert-only ones
+// From: Issue #1437
 fn display_priority(container_name: &str) -> (u8, &str) {
     match container_name {
         "lancache-proxy" => (0, container_name),
         "lancache-dns-standard" => (1, container_name),
         "lancache-dns-ssl" => (2, container_name),
-        other => (3, other),
+        "lancache-nats" => (3, container_name),
+        "lancache-ui" => (4, container_name),
+        "lancache-dhcp" => (5, container_name),
+        "lancache-dhcp-proxy" => (6, container_name),
+        "lancache-ntp" => (7, container_name),
+        "lancache-syslog" => (8, container_name),
+        "lancache-netdata" => (9, container_name),
+        other => (10, other),
     }
 }
 
@@ -320,6 +331,37 @@ mod tests {
         assert_eq!(display_label("lancache-proxy"), "Proxy");
         assert_eq!(display_label("lancache-dns-standard"), "DNS (standard)");
         assert_eq!(display_label("lancache-dns-ssl"), "DNS (SSL)");
+        assert_eq!(display_label("lancache-nats"), "NATS");
+        assert_eq!(display_label("lancache-ui"), "Admin UI");
+        assert_eq!(display_label("lancache-netdata"), "Netdata");
+        assert_eq!(display_label("lancache-dhcp"), "DHCP (Kea)");
+        assert_eq!(display_label("lancache-dhcp-proxy"), "DHCP (proxy/relay)");
+        assert_eq!(display_label("lancache-syslog"), "Central logging");
+        assert_eq!(display_label("lancache-ntp"), "NTP");
         assert_eq!(display_label("some-future-service"), "some-future-service");
+    }
+
+    // Issue #1437: watchdog's alert-only services (#842/#1296) previously had
+    // no display_priority entry at all, so sorted_service_views would have
+    // shown them after every unrecognized name too, in undefined relative
+    // order (HashMap iteration) instead of a stable, deliberate position.
+    #[test]
+    fn display_label_sorts_alert_only_services_before_unknown_names() {
+        let mut names = vec![
+            "some-future-service",
+            "lancache-netdata",
+            "lancache-proxy",
+            "lancache-nats",
+        ];
+        names.sort_by(|a, b| display_priority(a).cmp(&display_priority(b)));
+        assert_eq!(
+            names,
+            vec![
+                "lancache-proxy",
+                "lancache-nats",
+                "lancache-netdata",
+                "some-future-service",
+            ]
+        );
     }
 }

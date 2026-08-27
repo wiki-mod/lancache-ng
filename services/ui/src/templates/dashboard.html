@@ -190,15 +190,15 @@
       {% if standard_status %}
       <div class="grid grid-cols-3 gap-2 text-center mt-3" id="standard-metrics">
         <div>
-          <p class="text-2xl font-bold text-white" id="standard-active">{{ standard_status.active }}</p>
+          <p class="stat-num text-2xl font-bold text-white" id="standard-active">{{ standard_status.active }}</p>
           <p class="text-xs text-slate-400">Connections</p>
         </div>
         <div>
-          <p class="text-2xl font-bold text-white" id="standard-requests">{{ standard_status.requests }}</p>
+          <p class="stat-num text-2xl font-bold text-white" id="standard-requests">{{ standard_status.requests }}</p>
           <p class="text-xs text-slate-400">Requests</p>
         </div>
         <div>
-          <p class="text-2xl font-bold text-white" id="standard-waiting">{{ standard_status.waiting }}</p>
+          <p class="stat-num text-2xl font-bold text-white" id="standard-waiting">{{ standard_status.waiting }}</p>
           <p class="text-xs text-slate-400">Waiting</p>
         </div>
       </div>
@@ -217,15 +217,15 @@
       {% elif ssl_status %}
       <div class="grid grid-cols-3 gap-2 text-center mt-3" id="ssl-metrics">
         <div>
-          <p class="text-2xl font-bold text-white" id="ssl-active">{{ ssl_status.active }}</p>
+          <p class="stat-num text-2xl font-bold text-white" id="ssl-active">{{ ssl_status.active }}</p>
           <p class="text-xs text-slate-400">Connections</p>
         </div>
         <div>
-          <p class="text-2xl font-bold text-white" id="ssl-requests">{{ ssl_status.requests }}</p>
+          <p class="stat-num text-2xl font-bold text-white" id="ssl-requests">{{ ssl_status.requests }}</p>
           <p class="text-xs text-slate-400">Requests</p>
         </div>
         <div>
-          <p class="text-2xl font-bold text-white" id="ssl-waiting">{{ ssl_status.waiting }}</p>
+          <p class="stat-num text-2xl font-bold text-white" id="ssl-waiting">{{ ssl_status.waiting }}</p>
           <p class="text-xs text-slate-400">Waiting</p>
         </div>
       </div>
@@ -239,19 +239,19 @@
        (see nginx_client::get_log_stats) rather than from nginx itself. -->
   <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
     <div class="card text-center">
-      <p class="text-3xl font-bold text-emerald-400">{{ log_stats.hit_pct | round(precision=1) }}%</p>
+      <p class="stat-num text-3xl font-bold text-emerald-400">{{ log_stats.hit_pct | round(precision=1) }}%</p>
       <p class="text-sm text-slate-400 mt-1">Cache hit rate</p>
     </div>
     <div class="card text-center">
-      <p class="text-3xl font-bold text-white">{{ log_stats.total_requests }}</p>
+      <p class="stat-num text-3xl font-bold text-white">{{ log_stats.total_requests }}</p>
       <p class="text-sm text-slate-400 mt-1">Total requests</p>
     </div>
     <div class="card text-center">
-      <p class="text-3xl font-bold text-emerald-400">{{ log_stats.hits }}</p>
+      <p class="stat-num text-3xl font-bold text-emerald-400">{{ log_stats.hits }}</p>
       <p class="text-sm text-slate-400 mt-1">Cache HITs</p>
     </div>
     <div class="card text-center">
-      <p class="text-3xl font-bold text-white">{{ log_stats.total_bytes_gb | round(precision=1) }} GB</p>
+      <p class="stat-num text-3xl font-bold text-white">{{ log_stats.total_bytes_gb | round(precision=1) }} GB</p>
       <p class="text-sm text-slate-400 mt-1">Data served</p>
     </div>
   </div>
@@ -412,86 +412,57 @@
 
   setInterval(refreshDashboardMetrics, 10000);
 
-  // Issue #870: polls GET /api/watchdog-status (routes/dashboard.rs::
-  // watchdog_status_api) every 10s and patches the "Service health" card's
-  // dot colors and freshness note in place. Deliberately does not rebuild
-  // the whole card's markup: the set of services rendered server-side
-  // (watchdog_status.services) only changes on a container restart with a
-  // different SSL_ENABLED value, never mid-session, so patching existing
-  // [data-service] rows by name is enough and avoids re-deriving the same
-  // label/color mapping twice (once in Tera, once in JS).
-  // 'bg-amber-400' (issue #1296) kept in sync with the Tera template's own
-  // color ternary above and with HealthReading::color() on the Rust side
-  // (services/watchdog/src/health.rs) -- update all three together if this
-  // ever changes.
-  const WATCHDOG_DOT_COLOR_CLASSES = ['bg-green-400', 'bg-amber-400', 'bg-yellow-400', 'bg-red-400', 'bg-slate-500'];
+  // What: this card's own bg-*-400 classes, one per status token
+  // Why: dot markup predates the shared color-token scheme
+  // From: Issue #1437
+  const DASHBOARD_DOT_CLASSES = ['bg-green-400', 'bg-amber-400', 'bg-yellow-400', 'bg-red-400', 'bg-slate-500'];
 
-  function watchdogColorClass(status) {
-    if (status === 'green') return 'bg-green-400';
-    if (status === 'amber') return 'bg-amber-400';
-    if (status === 'yellow') return 'bg-yellow-400';
-    if (status === 'red') return 'bg-red-400';
-    return 'bg-slate-500';
+  function dashboardDotClass(status) {
+    const token = window.LancacheWatchdog.colorClass(status);
+    return token === 'gray' ? 'bg-slate-500' : 'bg-' + token + '-400';
   }
 
-  // `health` is optional (the disk-cache dot has no equivalent health
-  // string, only a color) -- only touches the title attribute when a
-  // value is actually supplied, so a poller call that omits it never wipes
-  // out the server-rendered tooltip with an empty string.
+  // What: skip title update when health is omitted
+  // Why: the disk-cache dot has no health string to show
+  // From: Issue #1437
   function setWatchdogDotColor(dot, status, health) {
     if (!dot) {
       return;
     }
-    dot.classList.remove(...WATCHDOG_DOT_COLOR_CLASSES);
-    dot.classList.add(watchdogColorClass(status));
+    dot.classList.remove(...DASHBOARD_DOT_CLASSES);
+    dot.classList.add(dashboardDotClass(status));
     if (health !== undefined) {
       dot.setAttribute('title', health);
     }
   }
 
-  async function refreshWatchdogStatus() {
-    try {
-      const response = await fetch('/api/watchdog-status');
-      if (!response.ok) {
-        return;
+  window.LancacheWatchdog.onUpdate(function (data) {
+    const note = document.getElementById('watchdog-status-note');
+    if (note) {
+      if (data.state === 'stale') {
+        note.textContent = 'stale (' + data.age_seconds + 's old)';
+      } else if (data.state === 'unavailable') {
+        note.textContent = 'watchdog status unavailable';
+      } else {
+        note.textContent = 'live';
       }
-      const data = await response.json();
-      const note = document.getElementById('watchdog-status-note');
-      if (note) {
-        if (data.state === 'stale') {
-          note.textContent = 'stale (' + data.age_seconds + 's old)';
-        } else if (data.state === 'unavailable') {
-          note.textContent = 'watchdog status unavailable';
-        } else {
-          note.textContent = 'live';
-        }
-      }
-      // Unavailable carries no services/disk data (see
-      // watchdog_status_json in routes/dashboard.rs) -- nothing further to
-      // patch, and the initial server render already shows the empty-state
-      // message for this case.
-      if (data.state === 'unavailable') {
-        return;
-      }
-      (data.services || []).forEach(function (svc) {
-        const row = document.querySelector('[data-service="' + svc.name + '"]');
-        if (!row) {
-          return;
-        }
-        setWatchdogDotColor(row.querySelector('[data-role="dot"]'), svc.status, svc.health);
-      });
-      if (data.disk && data.disk.cache) {
-        const diskRow = document.querySelector('[data-service="disk-cache"]');
-        if (diskRow) {
-          setWatchdogDotColor(diskRow.querySelector('[data-role="dot"]'), data.disk.cache.status);
-        }
-      }
-    } catch (err) {
-      // Network hiccup or the UI itself restarting -- leave the last known
-      // colors on screen and try again on the next interval tick.
     }
-  }
-
-  setInterval(refreshWatchdogStatus, 10000);
+    if (data.state === 'unavailable') {
+      return;
+    }
+    (data.services || []).forEach(function (svc) {
+      const row = document.querySelector('[data-service="' + svc.name + '"]');
+      if (!row) {
+        return;
+      }
+      setWatchdogDotColor(row.querySelector('[data-role="dot"]'), svc.status, svc.health);
+    });
+    if (data.disk && data.disk.cache) {
+      const diskRow = document.querySelector('[data-service="disk-cache"]');
+      if (diskRow) {
+        setWatchdogDotColor(diskRow.querySelector('[data-role="dot"]'), data.disk.cache.status);
+      }
+    }
+  });
 </script>
 {% endblock %}
