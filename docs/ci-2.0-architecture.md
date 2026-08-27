@@ -2013,6 +2013,50 @@ same decision
 same semantics
 ```
 
+### 72.1 Fallback means sequential, not parallel (added during review)
+
+Same semantics is necessary but not sufficient. The current CI runs the
+self-hosted and hosted-fallback variant of a check **concurrently, always**
+-- not "self-hosted first, hosted only if self-hosted fails or is
+unavailable." That is not a fallback; it is unconditional duplicate work on
+both a shared self-hosted runner pool and GitHub-hosted minutes, for every
+run, regardless of whether the self-hosted side ever had a problem.
+
+Confirmed with real data, not assumption: on PR #1695 (a two-line
+documentation-only change), every one of 9 self-hosted/hosted-fallback job
+pairs started within the same second of each other:
+
+```text
+PR template validation      | self: 07:52:59Z | fallback: 07:52:59Z
+compose healthchecks        | self: 07:52:59Z | fallback: 07:52:59Z
+file purpose headers        | self: 07:52:59Z | fallback: 07:52:59Z
+language policy             | self: 07:54:11Z | fallback: 07:52:59Z
+line endings                | self: 07:54:11Z | fallback: 07:52:59Z
+shellcheck                  | self: 07:54:10Z | fallback: 07:52:59Z
+test (watchdog)              | self: 07:54:10Z | fallback: 07:52:59Z
+PR tracking metadata         | self: 07:54:11Z | fallback: 07:52:59Z
+PR title Conventional-Commit | self: 07:54:11Z | fallback: 07:52:59Z
+```
+
+A real fallback is sequential and conditional:
+
+```text
+self-hosted job
+        |
+        +-> succeeds -> DONE, hosted variant never runs
+        |
+        +-> fails/unavailable/times out
+                |
+                v
+        hosted-fallback job runs
+```
+
+Not two independently-triggered jobs that both always run. In CI 2.0 this
+is one job in `ci.yml` with `needs:`/`if:` gating the hosted variant on the
+self-hosted attempt's actual outcome, calling the same `ci.sh` command
+either way (per §72) -- never two parallel workflow jobs for the same
+check.
+
 ## 73. CodeQL
 
 CodeQL stays technically separate because GitHub has its own

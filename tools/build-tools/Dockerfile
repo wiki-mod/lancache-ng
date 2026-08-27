@@ -204,9 +204,8 @@ RUN echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sou
 #   dist-upgrade above (which patches in place, never removes them).
 # From: Issue #1304 | Issue #1556
 RUN set -euo pipefail; \
-    apt-get update; \
-    apt-get purge -y git git-man curl; \
-    apt-get install -y --no-install-recommends \
+      apt-get update; \
+      apt-get install -y --no-install-recommends \
       bash \
       bats \
       bc \
@@ -216,6 +215,8 @@ RUN set -euo pipefail; \
       clang \
       cmake \
       expect \
+      gh \
+      git \
       jq \
       libssl-dev \
       lld \
@@ -225,7 +226,8 @@ RUN set -euo pipefail; \
       sqlite3 \
       xz-utils \
       zlib1g-dev; \
-    apt-get autoremove -y; \
+      apt-get dist-upgrade -yy; \
+      apt-get autoremove -y; \
     rm -rf /var/lib/apt/lists/*
 
 # What: curl comes from the shared utilities image instead of Debian's own package.
@@ -704,6 +706,7 @@ RUN set -euo pipefail; \
       dig \
       dirname \
       distcc \
+      gh \
       distcc-pump \
       docker \
       dpkg \

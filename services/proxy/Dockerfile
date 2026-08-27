@@ -24,11 +24,12 @@
 # matching the Debian package exactly.
 #
 # What: source stage for tools copied from the shared utilities image below.
-# Why: uses the mutable `:latest` tag, not a pinned digest -- a deliberate
-#   reversal of the original digest-pin approach; see AG-KD-010 for the
-#   full rationale.
+# Why: ARG default is the mutable `:latest` tag (AG-KD-010); real CI builds
+#   override it via --build-arg with the digest validate-compose resolved
+#   once for this run, so every consumer and the release SBOM merge agree.
 # From: Issue #1095 | AG-KD-010
-FROM ghcr.io/wiki-mod/lancache-ng/utilities:latest AS utilities-tools
+ARG UTILITIES_IMAGE=ghcr.io/wiki-mod/lancache-ng/utilities:latest
+FROM ${UTILITIES_IMAGE} AS utilities-tools
 
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 

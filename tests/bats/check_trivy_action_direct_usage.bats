@@ -18,7 +18,8 @@ setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     script="$repo_root/scripts/untracked/check-trivy-action-direct-usage.sh"
     fixture_root="$(mktemp -d)"
-    mkdir -p "$fixture_root/.github/workflows" "$fixture_root/.github/actions/trivy-scan-retry"
+    mkdir -p "$fixture_root/.github/workflows" "$fixture_root/.github/actions/trivy-scan-retry" \
+        "$fixture_root/.github/actions/aquasecurity-trivy-action-centralized-version"
 }
 
 teardown() {
@@ -42,9 +43,9 @@ fail() {
 # What: baseline happy path for check_direct_usage().
 # Why: the one legitimate call site (inside the wrapper itself) must
 #   not be flagged.
-@test "passes when aquasecurity/trivy-action only appears inside the retry wrapper" {
-    cat > "$fixture_root/.github/actions/trivy-scan-retry/action.yml" <<'EOF'
-name: Trivy scan with retry
+@test "passes when aquasecurity/trivy-action only appears inside the centralized wrapper" {
+    cat > "$fixture_root/.github/actions/aquasecurity-trivy-action-centralized-version/action.yml" <<'EOF'
+name: Centralized version -- aquasecurity/trivy-action
 runs:
   using: composite
   steps:
@@ -78,8 +79,8 @@ EOF
 # Why: fail-closed proof (AG-VAL-024) -- must be caught, not just the
 #   passing case above.
 @test "fails when a workflow calls aquasecurity/trivy-action directly" {
-    cat > "$fixture_root/.github/actions/trivy-scan-retry/action.yml" <<'EOF'
-name: Trivy scan with retry
+    cat > "$fixture_root/.github/actions/aquasecurity-trivy-action-centralized-version/action.yml" <<'EOF'
+name: Centralized version -- aquasecurity/trivy-action
 runs:
   using: composite
   steps:
@@ -106,8 +107,8 @@ EOF
 # What: the same bypass, inside a second composite action instead of a workflow.
 # Why: confirms the scan covers .github/actions too, not just workflows.
 @test "fails when a different composite action calls aquasecurity/trivy-action directly" {
-    cat > "$fixture_root/.github/actions/trivy-scan-retry/action.yml" <<'EOF'
-name: Trivy scan with retry
+    cat > "$fixture_root/.github/actions/aquasecurity-trivy-action-centralized-version/action.yml" <<'EOF'
+name: Centralized version -- aquasecurity/trivy-action
 runs:
   using: composite
   steps:
@@ -133,8 +134,8 @@ EOF
 #   must be caught too, not just the unquoted form above.
 # From: PR #1543, Issue #1535
 @test "fails when a workflow calls aquasecurity/trivy-action directly with a quoted uses: scalar" {
-    cat > "$fixture_root/.github/actions/trivy-scan-retry/action.yml" <<'EOF'
-name: Trivy scan with retry
+    cat > "$fixture_root/.github/actions/aquasecurity-trivy-action-centralized-version/action.yml" <<'EOF'
+name: Centralized version -- aquasecurity/trivy-action
 runs:
   using: composite
   steps:
@@ -162,8 +163,8 @@ EOF
 # too (check_direct_usage() also scans .github/actions, and an empty/
 # missing wrapper file is not what these fixtures are testing).
 write_wrapper_fixture() {
-    cat > "$fixture_root/.github/actions/trivy-scan-retry/action.yml" <<'EOF'
-name: Trivy scan with retry
+    cat > "$fixture_root/.github/actions/aquasecurity-trivy-action-centralized-version/action.yml" <<'EOF'
+name: Centralized version -- aquasecurity/trivy-action
 runs:
   using: composite
   steps:
