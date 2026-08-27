@@ -9,16 +9,15 @@
 # early; production service Dockerfiles stay separately pinned instead,
 # for reproducible runtime image builds.
 # From: Issue #1570 | PR #1571
-# What: global ARG so the later utilities-tools FROM can use it.
-# Why: an ARG used in a FROM must precede the file's first FROM to be
-#   in scope there, matching dns/watchdog/ui's Dockerfiles.
-# From: Issue #1095 | PR #1706
+# What: shared version pins for both Go-tool build stages, plus the
+# global utilities-tools image ARG -- all declared before the file's
+# first FROM, since an ARG used in a FROM (or inherited via a later
+# bare ARG redeclaration) must precede it to be in scope.
+# Why: keeps the two Go-tool stages in sync; a prior copy had already
+# drifted. UTILITIES_IMAGE placement matches dns/watchdog/ui's
+# Dockerfiles.
+# From: Issue #1095 | Issue #1598 | PR #1706
 ARG UTILITIES_IMAGE=ghcr.io/wiki-mod/lancache-ng/utilities:latest
-FROM golang:latest AS actionlint-builder
-
-# What: shared version pins for both Go-tool build stages.
-# Why: keeps them in sync; a prior copy had already drifted.
-# From: Issue #1095 | Issue #1598
 ARG ACTIONLINT_VERSION=1.7.12
 ARG DOCKER_CLI_VERSION=29.7.2
 ARG DOCKER_COMPOSE_VERSION=5.5.0
