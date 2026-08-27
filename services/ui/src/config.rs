@@ -338,6 +338,10 @@ pub struct Config {
     // by design: the Admin UI is never a writer of this file, only watchdog
     // is (see watchdog_status.rs's module doc comment).
     pub watchdog_status_file: String,
+    // What: reverse of watchdog_status_file (ui writes)
+    // Why: dock start/stop needs a signal watchdog polls
+    // From: Issue #1437
+    pub desired_state_file: String,
 }
 
 // Redacts every secret-bearing field (tokens, passwords, API keys) so a stray
@@ -468,6 +472,7 @@ impl fmt::Debug for Config {
             .field("ntp_upstream_servers", &self.ntp_upstream_servers)
             .field("ntp_auto_dhcp", &self.ntp_auto_dhcp)
             .field("watchdog_status_file", &self.watchdog_status_file)
+            .field("desired_state_file", &self.desired_state_file)
             .finish()
     }
 }
@@ -980,6 +985,7 @@ impl Config {
             // Matches services/watchdog/watchdog.sh's own STATUS_FILE default
             // exactly (see its `STATUS_FILE="${STATUS_FILE:-/var/run/watchdog/status.json}"`).
             watchdog_status_file: env_str("WATCHDOG_STATUS_FILE", "/var/run/watchdog/status.json"),
+            desired_state_file: env_str("DESIRED_STATE_FILE", "/data/desired-state.json"),
         })
     }
 }

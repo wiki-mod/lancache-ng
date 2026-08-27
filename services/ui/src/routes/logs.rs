@@ -12,6 +12,7 @@
 
 use crate::{AppState, nginx_client, syslog_client};
 use axum::extract::{Query, State};
+use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -34,10 +35,15 @@ pub struct LogFilter {
 
 pub async fn logs_page(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Query(params): Query<LogFilter>,
 ) -> impl IntoResponse {
     let mut ctx = Context::new();
     ctx.insert("active_page", "logs");
+    // What: makes the beambar's restart-ui form's token valid here
+    // Why: base.html now renders that form on every page (was dashboard-only)
+    // From: Issue #1437
+    crate::routes::insert_csrf_token(&mut ctx, &headers);
 
     let max_entries = state.config.ui_logs_max_entries;
 

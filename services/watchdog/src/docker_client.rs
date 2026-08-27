@@ -4,28 +4,35 @@
 //!
 //! HTTP client for the narrow subset of the Docker API
 //! `scripts/untracked/docker-socket-proxy.sh`'s HAProxy allowlist actually permits:
-//! reading a container's health JSON, restarting a container, and pinging
-//! docker-socket-proxy itself. Mirrors watchdog.sh's `get_health()`/
-//! `restart_container()`/`probe_docker_socket_proxy()` curl invocations.
+//! reading a container's health/running-state JSON, restarting/starting/
+//! stopping a container, and pinging docker-socket-proxy itself. Mirrors
+//! watchdog.sh's `get_health()`/`restart_container()`/
+//! `probe_docker_socket_proxy()` curl invocations, plus `start()`/`stop()`/
+//! `is_running()` (issue #1437: this crate's main loop is now the sole
+//! actor reconciling `dhcp`/`ntp` against an operator-written desired-state
+//! file, so it needs the start/stop verbs the allowlist already granted
+//! this same `DOCKER_PROXY_URL` endpoint for those two services -- see
+//! `main.rs`'s `reconcile_desired_state`).
 //!
 //! Deliberately plain `reqwest`, not `bollard` (the Docker SDK
 //! `services/ui/src/docker_client.rs` uses): bollard's own client can issue
-//! any Docker Engine API call, but this daemon must only ever hit exactly
-//! three allowlisted paths -- a hand-rolled client with exactly three
-//! methods makes "watchdog cannot accidentally call an unallowlisted Docker
-//! endpoint" true by construction (there is no method that would let it),
-//! rather than true only by convention. That same "only these three
-//! allowlisted paths" guarantee is why the client below disables HTTP
-//! redirects entirely: a misconfigured or compromised `docker-socket-proxy`
-//! (or an operator-supplied `DOCKER_PROXY_URL`) returning a 3xx would
-//! otherwise send reqwest's default client on to whatever arbitrary
-//! `Location` it names, which would defeat exactly the "only these three
-//! endpoints, never anything else" property this module exists to
-//! guarantee. The bash implementation never had this exposure: plain
-//! `curl` without `-L` never follows redirects either. With redirects
-//! disabled, a 3xx response is not an error to reqwest -- it is returned
-//! as an ordinary response whose status is not `2xx`, so the existing
-//! `is_success()` checks below already treat it the same as any other
+//! any Docker Engine API call, but this daemon must only ever hit the
+//! narrow, explicitly allowlisted set of paths below -- a hand-rolled
+//! client whose every method maps to one allowlisted path/verb pair makes
+//! "watchdog cannot accidentally call an unallowlisted Docker endpoint"
+//! true by construction (there is no method that would let it), rather
+//! than true only by convention. That same "only these allowlisted paths"
+//! guarantee is why the client below disables HTTP redirects entirely: a
+//! misconfigured or compromised `docker-socket-proxy` (or an
+//! operator-supplied `DOCKER_PROXY_URL`) returning a 3xx would otherwise
+//! send reqwest's default client on to whatever arbitrary `Location` it
+//! names, which would defeat exactly the "only these endpoints, never
+//! anything else" property this module exists to guarantee. The bash
+//! implementation never had this exposure: plain `curl` without `-L` never
+//! follows redirects either. With redirects disabled, a 3xx response is
+//! not an error to reqwest -- it is returned as an ordinary response whose
+//! status is not `2xx`, so the existing `is_success()` checks below already
+//! treat it the same as any other
 //! failed/unreachable response.
 
 use std::time::Duration;
@@ -96,8 +103,8 @@ impl DockerProxyClient {
         Ok(Self {
             // No-redirect policy: see this module's own doc comment above
             // for why silently following a 3xx would defeat the "only
-            // these three allowlisted paths" guarantee this client exists
-            // to provide.
+            // these allowlisted paths" guarantee this client exists to
+            // provide.
             client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
@@ -191,6 +198,86 @@ impl DockerProxyClient {
         success.unwrap_or(false)
     }
 
+    /// What: starts a container via the socket-proxy allowlist
+    /// Why: reconcile_desired_state acts on operator overrides
+    /// From: Issue #1437
+    ///
+    /// `POST /containers/<name>/start`, already permitted by
+    /// `scripts/untracked/docker-socket-proxy.sh`'s `safe_dhcp_action`/
+    /// `safe_ntp_action` ACLs for exactly the two services this crate calls
+    /// this on (`services/ui/src/docker_client.rs::start_service` already
+    /// uses the identical endpoint for the same two services' settings-save
+    /// path) -- no allowlist change needed. Same shape as `restart()`
+    /// above: no response body read, so `bounded()` is kept only for a
+    /// uniform call shape, not because the body-stall race applies here.
+    pub async fn start(&self, container_name: &str, timeout: Option<Duration>) -> bool {
+        let url = format!("{}/containers/{container_name}/start", self.base_url);
+        let success = bounded(timeout, async {
+            apply_timeout(self.client.post(&url), timeout)
+                .send()
+                .await
+                .is_ok_and(|r| r.status().is_success())
+        })
+        .await;
+        success.unwrap_or(false)
+    }
+
+    /// What: stops a container via the socket-proxy allowlist
+    /// Why: reconcile_desired_state acts on operator overrides
+    /// From: Issue #1437
+    ///
+    /// `POST /containers/<name>/stop`, same allowlist coverage as
+    /// `start()` above (`safe_dhcp_action`/`safe_ntp_action` permit both
+    /// verbs on the same two container names).
+    pub async fn stop(&self, container_name: &str, timeout: Option<Duration>) -> bool {
+        let url = format!("{}/containers/{container_name}/stop", self.base_url);
+        let success = bounded(timeout, async {
+            apply_timeout(self.client.post(&url), timeout)
+                .send()
+                .await
+                .is_ok_and(|r| r.status().is_success())
+        })
+        .await;
+        success.unwrap_or(false)
+    }
+
+    /// What: reads whether a container is actually running now
+    /// Why: reconcile_desired_state must not act on stale info
+    /// From: Issue #1437
+    ///
+    /// `GET /containers/<name>/json`, the identical allowlisted endpoint
+    /// `get_health()` already uses (`safe_container_inspect`) -- extracts
+    /// `.State.Running` instead of `.State.Health.Status`. A container can
+    /// be running with no health check configured at all (`get_health()`
+    /// would report `None` for it), so `Running` is the only field that
+    /// reliably answers "should I call start or stop" regardless of
+    /// whether the container has a `HEALTHCHECK`. Returns `None` (not
+    /// `Some(false)`) on any failure to reach/parse this endpoint --
+    /// `reconcile_desired_state` must skip acting this tick rather than
+    /// risk calling `start()` on a container that is actually already
+    /// running but merely unreachable through a flaky proxy right now.
+    pub async fn is_running(
+        &self,
+        container_name: &str,
+        timeout: Option<Duration>,
+    ) -> Option<bool> {
+        let url = format!("{}/containers/{container_name}/json", self.base_url);
+        let body: Option<serde_json::Value> = bounded(timeout, async {
+            let response = apply_timeout(self.client.get(&url), timeout)
+                .send()
+                .await
+                .ok()?;
+            if !response.status().is_success() {
+                return None;
+            }
+            response.json().await.ok()
+        })
+        .await
+        .flatten();
+
+        body.and_then(|b| b.pointer("/State/Running").and_then(|v| v.as_bool()))
+    }
+
     /// watchdog.sh's `probe_docker_socket_proxy()`: `GET /_ping`. Already
     /// permitted by the allowlist's `safe_ping` ACL (the same one
     /// `get_health()` relies on), needs no new privilege.
@@ -266,9 +353,9 @@ mod tests {
     // Deliberately not a mocking crate dependency (this repository has none
     // today, see this module's own doc comment on why a hand-rolled client
     // was preferred over bollard for a similar minimalism reason) -- the
-    // three request shapes this client makes are simple enough that a raw
-    // TCP responder is less machinery than pulling in wiremock/mockito for
-    // a handful of tests.
+    // request shapes this client makes are simple enough that a raw TCP
+    // responder is less machinery than pulling in wiremock/mockito for a
+    // handful of tests.
     //
     // Takes an owned `impl Into<String>` rather than `&'static str` so a
     // caller can build the response body at runtime (e.g. embedding a
@@ -455,6 +542,86 @@ mod tests {
     }
 
     #[tokio::test]
+    // What: 2xx from POST .../start is reported as success
+    // Why: reconcile_desired_state's only success signal
+    // From: Issue #1437
+    async fn start_reports_success_from_2xx_response() {
+        let base_url =
+            serve_one_response("HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n").await;
+        let client = DockerProxyClient::new(base_url).unwrap();
+        assert!(
+            client
+                .start("lancache-dhcp", Some(Duration::from_secs(2)))
+                .await
+        );
+    }
+
+    #[tokio::test]
+    // What: 2xx from POST .../stop is reported as success
+    // Why: reconcile_desired_state's only success signal
+    // From: Issue #1437
+    async fn stop_reports_success_from_2xx_response() {
+        let base_url =
+            serve_one_response("HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n").await;
+        let client = DockerProxyClient::new(base_url).unwrap();
+        assert!(
+            client
+                .stop("lancache-ntp", Some(Duration::from_secs(2)))
+                .await
+        );
+    }
+
+    #[tokio::test]
+    // What: a running container's State.Running parses as Some(true)
+    // Why: reconcile_desired_state's start/stop decision depends on it
+    // From: Issue #1437
+    async fn is_running_parses_true_from_a_real_response() {
+        let base_url = serve_one_response(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"State\":{\"Running\":true}}",
+        )
+        .await;
+        let client = DockerProxyClient::new(base_url).unwrap();
+        assert_eq!(
+            client
+                .is_running("lancache-dhcp", Some(Duration::from_secs(2)))
+                .await,
+            Some(true)
+        );
+    }
+
+    #[tokio::test]
+    // What: a stopped container's State.Running parses as Some(false)
+    // Why: this is the exact case reconcile_desired_state acts on
+    // From: Issue #1437
+    async fn is_running_parses_false_from_a_real_response() {
+        let base_url = serve_one_response(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"State\":{\"Running\":false}}",
+        )
+        .await;
+        let client = DockerProxyClient::new(base_url).unwrap();
+        assert_eq!(
+            client
+                .is_running("lancache-dhcp", Some(Duration::from_secs(2)))
+                .await,
+            Some(false)
+        );
+    }
+
+    #[tokio::test]
+    // What: an unreachable proxy yields None, not a guessed bool
+    // Why: caller must skip acting this tick, never assume a state
+    // From: Issue #1437
+    async fn is_running_returns_none_when_unreachable() {
+        let client = DockerProxyClient::new("http://127.0.0.1:1").unwrap();
+        assert_eq!(
+            client
+                .is_running("lancache-dhcp", Some(Duration::from_millis(200)))
+                .await,
+            None
+        );
+    }
+
+    #[tokio::test]
     // Confirms the probe requires the real Docker /_ping payload ("OK"),
     // not merely a 2xx status -- this is the fix for a gateway that
     // answers headers successfully but never finishes the body: consuming
@@ -484,7 +651,7 @@ mod tests {
     #[tokio::test]
     // Regression test for the no-redirect policy documented on
     // DockerProxyClient::new(): a 3xx response must never be followed to
-    // an arbitrary Location, since that would defeat the "only these three
+    // an arbitrary Location, since that would defeat the "only these
     // allowlisted paths" guarantee this module exists to provide. The
     // redirect target below is a real, otherwise-healthy server -- if the
     // client ever followed the redirect, this test would wrongly observe
