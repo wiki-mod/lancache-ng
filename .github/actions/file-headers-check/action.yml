@@ -10,6 +10,18 @@ inputs:
   build-tools-image:
     description: Immutable build-tools image selected by the calling workflow
     required: true
+  diff-base-sha:
+    description: >-
+      Base commit SHA for the PR-scoped review-chronology check. Empty
+      (the default) skips that step entirely.
+    required: false
+    default: ''
+  diff-base-ref:
+    description: >-
+      Base branch ref for the PR-scoped review-chronology check. Empty
+      (the default) skips that step entirely.
+    required: false
+    default: ''
 runs:
   using: composite
   steps:
@@ -30,20 +42,41 @@ runs:
         "${{ inputs.build-tools-image }}" timeout --kill-after=30s 5m
         bash scripts/untracked/check-workflow-line-limit.sh
 
-    # What: repo-wide review-chronology baseline (AG-CODE-002/003/012), warn-only.
-    # Why: catches drift anywhere, but CHRONOLOGY_WARN_ONLY=1 stops a
-    #   pre-existing violation in an untouched file from blocking every
-    #   other PR -- build-push.yml's own diff-scoped step (alongside the
-    #   SPDX check) runs the same script with CHRONOLOGY_DIFF_BASE_SHA
-    #   set instead, which is the blocking half, scoped to this PR's diff.
+    # What: repo-wide review-chronology baseline; warn-only on a pull_request, blocking on a push.
+    # Why: the diff-scoped step below already blocks pull_request on its
+    #   own diff; a push event has no PR diff to scope to, so this
+    #   baseline is the only guard for it and must stay blocking there.
     # From: PR #1546 | Issue #1095
-    - name: Check for review-chronology comments repo-wide (AG-CODE-003, non-blocking)
+    - name: Check for review-chronology comments repo-wide (AG-CODE-003)
       shell: bash
+      env:
+        CHRONOLOGY_WARN_ONLY: ${{ github.event_name == 'pull_request' && '1' || '0' }}
       run: >-
         docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work
-        -e CHRONOLOGY_WARN_ONLY=1
+        -e CHRONOLOGY_WARN_ONLY
         "${{ inputs.build-tools-image }}" timeout --kill-after=30s 5m
         bash scripts/untracked/check-review-chronology-comments.sh
+
+    # What: diff-scoped, blocking review-chronology check on PR-changed files.
+    # Why: the repo-wide step above is warn-only on pull_request, so a
+    #   pre-existing violation elsewhere doesn't block this PR; this catches
+    #   a violation this PR's own diff introduces or touches.
+    # From: Issue #1095 | PR #1686
+    - name: Check review-chronology comments on this PR's changed files (AG-CODE-002/003/012)
+      if: inputs.diff-base-sha != ''
+      shell: bash
+      run: |
+        set -euo pipefail
+        docker run --rm \
+          --user "$(id -u):$(id -g)" \
+          -v "$PWD:/source:ro" \
+          -w /tmp \
+          -e CHRONOLOGY_DIFF_BASE_SHA="${{ inputs.diff-base-sha }}" \
+          -e CHRONOLOGY_DIFF_BASE_REF="${{ inputs.diff-base-ref }}" \
+          -e GITHUB_SHA \
+          "${{ inputs.build-tools-image }}" \
+          timeout --kill-after=30 --signal=KILL 300 bash -c \
+            'cp -a /source /tmp/work && cd /tmp/work && bash scripts/untracked/check-review-chronology-comments.sh'
 
     # See scripts/tracked/check-dependabot-docker-base-consistency.sh's own header
     # for the shared-base-image assumption this guards.

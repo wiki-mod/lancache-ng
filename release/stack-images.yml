@@ -170,7 +170,7 @@ tooling:
     description: >-
       Shared non-compiler CLI-tools image (curl, nano, lsof, ripgrep,
       findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd),
-      consumed via COPY --from= by seven first-party images (issue #1556)
+      consumed via COPY --from= by eight first-party images (issue #1556)
       instead of each one independently installing/building its own copy.
     consumers:
       - services/proxy/Dockerfile
@@ -180,6 +180,7 @@ tooling:
       - services/dhcp-proxy/Dockerfile
       - services/ntp/Dockerfile
       - services/watchdog/Dockerfile
+      - tools/build-tools/Dockerfile
 metadata:
   - name: stack
     image: ghcr.io/wiki-mod/lancache-ng/stack

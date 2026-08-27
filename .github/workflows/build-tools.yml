@@ -196,6 +196,91 @@ jobs:
             printf 'golang=%s\n' "$(digest_for_image golang:latest)"
           } >> "$GITHUB_OUTPUT"
 
+      # What: writes ccache_redis_url + distcc_potential_hosts secret files for
+      #   the Dockerfile's curl/git build to mount as BuildKit secrets.
+      # Why: pull_request runs never get this (no LAN access assumed for that
+      #   trigger); the git build still succeeds without it, just uncached.
+      # From: Issue #1304 | Issue #1556 | PR #1661
+      - name: Prepare ccache/distcc secrets for git build
+        if: github.event_name != 'pull_request'
+        id: ccache-distcc-secret
+        env:
+          SCCACHE_REDIS_MODE: ${{ vars.SCCACHE_REDIS_MODE }}
+          SCCACHE_REDIS_URL: ${{ secrets.SCCACHE_REDIS_URL }}
+          DISTCC_POTENTIAL_HOSTS: ${{ vars.DISTCC_POTENTIAL_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          if [ "${SCCACHE_REDIS_MODE:-required}" != "off" ] && [ -n "$SCCACHE_REDIS_URL" ]; then
+            redis_file="${{ runner.temp }}/build-tools-ccache-redis-url"
+            printf '%s' "$SCCACHE_REDIS_URL" > "$redis_file"
+            echo "ccache-redis-file=$redis_file" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No ccache Redis secret prepared for the git build (mode=off or secret unset)."
+          fi
+          if [ -n "$DISTCC_POTENTIAL_HOSTS" ]; then
+            if ! grep -q ',cpp' <<<"$DISTCC_POTENTIAL_HOSTS"; then
+              echo "::error::DISTCC_POTENTIAL_HOSTS must include at least one pump-capable host with the ',cpp' option."
+              exit 1
+            fi
+            distcc_hosts_file="${{ runner.temp }}/build-tools-distcc-potential-hosts"
+            printf '%s' "$DISTCC_POTENTIAL_HOSTS" > "$distcc_hosts_file"
+            echo "distcc-hosts-file=$distcc_hosts_file" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No distcc hosts secret prepared for the git build (DISTCC_POTENTIAL_HOSTS unset)."
+          fi
+
+      # What: computes RUST_ACCELERATION_NETWORK/RUST_BUILDX_NETWORK -- host
+      #   only when the ccache/distcc secrets above were prepared, bridge otherwise.
+      # Why: an unreachable host-only endpoint would otherwise leave the build
+      #   on the default network, silently falling back to an uncached compile.
+      # From: Issue #1304 | PR #1661
+      - name: Select acceleration network for the standalone build
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          rust_network=bridge
+          buildx_network=default
+          if [ -n "${{ steps.ccache-distcc-secret.outputs.ccache-redis-file }}" ] || \
+             [ -n "${{ steps.ccache-distcc-secret.outputs.distcc-hosts-file }}" ]; then
+            rust_network=host
+            buildx_network=host
+          fi
+          printf 'RUST_ACCELERATION_NETWORK=%s\n' "$rust_network" >> "$GITHUB_ENV"
+          printf 'RUST_BUILDX_NETWORK=%s\n' "$buildx_network" >> "$GITHUB_ENV"
+
+      # What: resolves an immutable, already-published build-tools image for
+      #   the preflight below -- deliberately not this job's own in-progress
+      #   output, since that doesn't exist yet at this point in the job.
+      # Why: the preflight action's own default (:latest) is a mutable tag,
+      #   which the repository's immutable-image-selection contract forbids.
+      # From: Issue #1304 | PR #1661
+      - name: Select immutable build-tools image for preflight
+        if: github.event_name != 'pull_request'
+        id: preflight-image
+        run: |
+          set -euo pipefail
+          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+          printf 'image=%s\n' "$build_tools_image" >> "$GITHUB_OUTPUT"
+
+      # What: also runs for this standalone schedule/workflow_dispatch
+      #   route, not just build-push.yml's matrix -- see that file's own
+      #   identical step for the full rationale.
+      # Why: without this, a broken Redis/distcc endpoint on this route
+      #   hides behind the Dockerfile's own local-compile fallback instead
+      #   of being surfaced as a real infrastructure finding.
+      # From: Issue #1304 | PR #1661
+      - name: Validate acceleration infrastructure outside BuildKit cache
+        if: github.event_name != 'pull_request'
+        uses: ./.github/actions/rust-acceleration-preflight
+        with:
+          service: build-tools
+          distcc-hosts-file: ${{ steps.ccache-distcc-secret.outputs.distcc-hosts-file }}
+          ccache-redis-file: ${{ steps.ccache-distcc-secret.outputs.ccache-redis-file }}
+          build-tools-image: ${{ steps.preflight-image.outputs.image }}
+          build-network: ${{ env.RUST_ACCELERATION_NETWORK }}
+          platform: linux/amd64
+
       # What: builds one local amd64 candidate for fork PRs.
       # Why: fork PRs cannot publish repository packages, but still need a
       #   candidate to run the same smoke/vulnerability policy against.
@@ -246,6 +331,17 @@ jobs:
             org.opencontainers.image.base.golang.digest=${{ steps.build-tools-base-digests.outputs.golang }}
           build-args: |
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
+          secret-files: |
+            ${{ steps.ccache-distcc-secret.outputs.ccache-redis-file != '' && format('ccache_redis_url={0}', steps.ccache-distcc-secret.outputs.ccache-redis-file) || '' }}
+            ${{ steps.ccache-distcc-secret.outputs.distcc-hosts-file != '' && format('distcc_potential_hosts={0}', steps.ccache-distcc-secret.outputs.distcc-hosts-file) || '' }}
+          # What: wires the network the preflight above already validated
+          #   into the real build too.
+          # Why: without this, the build stays on Buildx's default network
+          #   even when the preflight confirmed host networking is needed,
+          #   and silently falls back to a local, uncached compile.
+          # From: Issue #1304 | PR #1661
+          network: ${{ env.RUST_BUILDX_NETWORK }}
+          allow: ${{ env.RUST_BUILDX_NETWORK == 'host' && 'network.host' || '' }}
           outputs: type=image,oci-mediatypes=true
           platforms: linux/amd64
           provenance: false

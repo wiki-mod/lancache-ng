@@ -1141,15 +1141,16 @@ EOF
   [ "$status" -eq 0 ]
 }
 
-# What: the real repository's utilities digest is discovered as a live
-# Dockerfile FROM dependency.
-# Why: proves the discovery loop actually finds the concrete digest the
-# review thread was about, not only a synthetic fixture.
-# From: Issue #1613
-@test "the real repository's utilities image digest is discovered as a live FROM dependency" {
-  utilities_dockerfile_digest="$(grep -hoE 'FROM ghcr\.io/wiki-mod/lancache-ng/utilities@sha256:[0-9a-f]{64}' \
+# What: a real repository digest-pinned FROM dependency is discovered.
+# Why: proves the discovery loop actually finds a concrete digest, not only
+#   a synthetic fixture. Was the utilities image (issue #1613); switched to
+#   the base alpine image once utilities moved to a mutable :latest tag
+#   (AG-KD-010) and stopped being a digest-pinned FROM dependency at all.
+# From: Issue #1613 | AG-KD-010
+@test "the real repository's alpine base image digest is discovered as a live FROM dependency" {
+  alpine_dockerfile_digest="$(grep -hoE 'FROM mirror\.gcr\.io/library/alpine:[0-9.]+@sha256:[0-9a-f]{64}' \
     "$repo_root/services/proxy/Dockerfile" | grep -oE 'sha256:[0-9a-f]{64}')"
-  [ -n "$utilities_dockerfile_digest" ]
+  [ -n "$alpine_dockerfile_digest" ]
 
   found=0
   while IFS= read -r dockerfile_path; do
@@ -1157,7 +1158,7 @@ EOF
     content="$(cat "$repo_root/$dockerfile_path")"
     while IFS= read -r digest; do
       [ -n "$digest" ] || continue
-      [ "$digest" = "$utilities_dockerfile_digest" ] && found=1
+      [ "$digest" = "$alpine_dockerfile_digest" ] && found=1
     done < <(sra_dockerfile_from_digests "$content")
   done < <(git -C "$repo_root" ls-files -- '*Dockerfile*')
   [ "$found" -eq 1 ]

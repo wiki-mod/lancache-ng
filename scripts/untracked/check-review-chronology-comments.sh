@@ -7,22 +7,11 @@
 #   check's pattern design lives in the PR/commit history (#1385, #1546).
 # From: PR #1546
 #
-# What: $1 is always target_root (dir); any further args restrict the
-#   scan to exactly those files (relative to target_root) instead of
-#   enumerating the whole tree. CHRONOLOGY_WARN_ONLY=1 reports findings
-#   as ::warning:: and exits 0 instead of failing closed. When
-#   CHRONOLOGY_DIFF_BASE_SHA/CHRONOLOGY_DIFF_BASE_REF/GITHUB_SHA are all
-#   set, the scan is restricted to exactly the files a real `git diff`
-#   between them touched, computed here (fetch, verify, NUL-safe diff)
-#   rather than by a separate wrapper script.
-# Why: lets a repo-wide baseline pass (informational) coexist with a
-#   diff-scoped pass (blocking), without a pre-existing unrelated
-#   violation blocking every other PR. Folded the diff-computation in
-#   here rather than a sibling script (the pattern
-#   check-pr-diff-file-headers.sh uses) per AG-CODE-013 -- this script's
-#   own header already states a monolith-first direction, and no
-#   maintainer ACK exists for a second file.
-# From: Issue #1095
+# What: adds explicit-file, warn-only, and diff-scoped scan modes.
+# Why: lets a repo-wide warn-only baseline coexist with a diff-scoped
+#   blocking pass without one violation blocking every PR (kept here,
+#   not a sibling file, per this file's own monolith-first direction).
+# From: Issue #1095 | PR #1686
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -95,10 +84,8 @@ REVIEW_CHRONOLOGY_PATTERN+="|(\\breview[[:space:]]+finding\\b)"
 FRAGILE_LINE_REF_PATTERN='\(([Ss]ee[[:space:]]+)?\bline\b[[:space:]]*~?[0-9]+'
 
 # What: Checks $1 against the pattern, then joined adjacent-comment pairs.
-# Why: joined-pair pass catches a chronology phrase wrapped across two
-#   lines; bash's builtin [[ =~ ]] replaces a per-pair grep spawn that
-#   made this script time out in CI on large files (real, twice).
-# From: PR #1665
+# Why: it reduces unnecessary doubling of tool calls
+# From: PR #1661
 check_review_chronology() {
     grep -EinIH "$REVIEW_CHRONOLOGY_PATTERN" "$1" || true
     shopt -s nocasematch
@@ -190,13 +177,11 @@ check_bare_issue_ref_duplicates_from() {
     done <<< "$from_nums"
 }
 
-# What: computes the changed-file list between CHRONOLOGY_DIFF_BASE_SHA
-#   and GITHUB_SHA when both are set, mirroring
-#   check-pr-diff-file-headers.sh's own fetch/diff/mapfile mechanism.
-# Why: NUL-delimited diff written to a real file, never a substitution --
-#   a process/command substitution's exit status is invisible to set -e,
-#   and $(...) additionally strips embedded NULs, corrupting -z's format.
-# From: Issue #1095
+# What: computes the changed-file list between the diff base and GITHUB_SHA.
+# Why: mirrors check-pr-diff-file-headers.sh's fetch/diff/mapfile
+#   mechanism; the NUL-delimited diff goes to a real file, never a
+#   substitution, since $(...) strips NULs and hides set -e's exit status.
+# From: Issue #1095 | PR #1686
 diff_scoped_files() {
     # shellcheck source=scripts/lib/git-fetch-retry.sh
     source "$script_dir/../lib/git-fetch-retry.sh"
@@ -223,13 +208,10 @@ diff_scoped_files() {
     fi
 }
 
-# What: explicit file args (after target_root) scan only those; diff-mode
-#   env vars scan only the real changed-file set; otherwise enumerate
-#   target_root's whole tree.
-# Why: ".git" is checked directly under target_root, not an ancestor dir,
-#   so a bats fixture nested inside this repo's own working copy stays a
-#   plain fixture instead of falling through to git ls-files on the
-#   outer repo.
+# What: dispatches to diff-scoped files, explicit file args, or a full scan.
+# Why: ".git" is checked directly under target_root, not an ancestor
+#   dir, so a bats fixture nested inside this repo's own working copy
+#   stays a plain fixture instead of falling through to the outer repo.
 # From: PR #1546 | Issue #1095
 if [ -n "${CHRONOLOGY_DIFF_BASE_SHA:-}" ]; then
     diff_scoped_files
