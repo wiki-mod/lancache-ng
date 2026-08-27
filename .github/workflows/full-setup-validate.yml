@@ -211,6 +211,12 @@ jobs:
         # builds a fresh branch-local image instead of trying the published
         # tag first.
         id: build-tools-image
+        env:
+          # What: widens select-build-tools-image.sh's smoke test to require dhclient.
+          # Why: dhclient is opt-in there, not baseline (issue #1095, Alpine
+          # evaluation); this job's own simulation below invokes dhclient directly.
+          # From: Issue #1095
+          EXTRA_REQUIRED_TOOLS: dhclient
         run: |
           set -euo pipefail
           image="$(bash scripts/untracked/select-build-tools-image.sh)"
