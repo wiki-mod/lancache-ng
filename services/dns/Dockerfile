@@ -18,9 +18,9 @@ FROM ${BUILD_TOOLS_IMAGE} AS subscriber-builder
 # distcc, distcc-pump, and the supporting Debian packages. Keep this stage
 # lean and fail closed if the contract is not met.
 #
-# What: Detects host arch to pick the musl cross-compile target for cargo.
-# Why: `uname -m` needs no extra package, unlike `dpkg` (Debian-only).
-# Why: Mirrors tools/build-tools/Dockerfile's native-arch-only musl targets.
+# What: detects host arch for the musl cross-compile target.
+# Why: `uname -m` needs no extra package (unlike Debian-only
+# `dpkg`); mirrors build-tools/Dockerfile's arch pattern.
 # From: Issue #1095
 RUN set -eu; \
     for tool in cargo rustc rustup rustfmt clippy-driver sccache distcc distcc-pump python3 pkg-config; do \

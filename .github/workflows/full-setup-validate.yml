@@ -212,9 +212,8 @@ jobs:
         # tag first.
         id: build-tools-image
         env:
-          # What: widens select-build-tools-image.sh's smoke test to require dhclient.
-          # Why: dhclient is opt-in there, not baseline (issue #1095, Alpine
-          # evaluation); this job's own simulation below invokes dhclient directly.
+          # What: requires dhclient in the smoke-test check.
+          # Why: opt-in only; this job's own sim needs it.
           # From: Issue #1095
           EXTRA_REQUIRED_TOOLS: dhclient
         run: |

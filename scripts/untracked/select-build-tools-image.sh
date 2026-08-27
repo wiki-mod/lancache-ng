@@ -100,10 +100,9 @@ smoke_test_image() {
       tcpdump
     )
 
-    # What: dhclient is opt-in via EXTRA_REQUIRED_TOOLS, not baseline.
-    # Why: no Alpine apk package ships dhclient/isc-dhcp-client; making
-    # it baseline would break every consumer once an Alpine build-tools
-    # image ships. Three callers opt in themselves via this variable.
+    # What: dhclient is opt-in via EXTRA_REQUIRED_TOOLS.
+    # Why: no Alpine apk package ships dhclient; would break
+    # every caller once Alpine ships. Three callers opt in.
     # From: Issue #1095
 
     if [[ -n "${EXTRA_REQUIRED_TOOLS:-}" ]]; then

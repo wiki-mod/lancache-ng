@@ -25,9 +25,9 @@ FROM ${BUILD_TOOLS_IMAGE} AS builder
 # distcc, distcc-pump, and the supporting Debian packages. Keep this stage
 # lean and fail closed if the contract is not met.
 #
-# What: Detects host arch to pick the musl cross-compile target for cargo.
-# Why: `uname -m` needs no extra package, unlike `dpkg` (Debian-only).
-# Why: Written to /tmp/musl-target since RUN layers share no shell state.
+# What: detects host arch for the musl cross-compile target.
+# Why: `uname -m` needs no extra package (unlike Debian-only
+# `dpkg`); a file carries it since RUN steps share no shell.
 # From: Issue #1095
 #
 # Everything below builds a custom distcc wrapper. It exists because

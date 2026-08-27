@@ -23,9 +23,9 @@ FROM ${BUILD_TOOLS_IMAGE} AS watchdog-builder
 # other mention below refers to it by description, not by number, per
 # AG-CODE-012)
 #
-# What: Detects host arch to pick the musl cross-compile target for cargo.
-# Why: `uname -m` needs no extra package, unlike `dpkg` (Debian-only).
-# Why: Mirrors services/dns/Dockerfile's identical native-arch-only pattern.
+# What: detects host arch for the musl cross-compile target.
+# Why: `uname -m` needs no extra package (unlike Debian-only
+# `dpkg`); mirrors build-tools/Dockerfile's arch pattern.
 # From: Issue #1095
 RUN set -eu; \
     for tool in cargo rustc rustup rustfmt clippy-driver sccache distcc distcc-pump python3 pkg-config; do \
