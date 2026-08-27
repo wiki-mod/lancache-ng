@@ -140,11 +140,9 @@ runs:
               # From: Issue #1633
               local benign_pattern='^distcc\[[0-9]+\] (ERROR|WARNING): nonblocking connect to [0-9]{1,3}(\.[0-9]{1,3}){3}:[0-9]+ failed: [A-Za-z0-9 ,.()'\''-]+$'
               # What: also tolerates one host hanging (accepts, never answers).
-              # Why: same "one host bad, others fine" case as the pattern
-              #   above, just a timeout instead of a refused connect -- the
-              #   compile still succeeded via a live host either way. The
-              #   token is the literal "DONE" observed live, not a wildcard,
-              #   so a differently-shaped token still fails closed.
+              # Why: same "one host bad, others fine" case as the pattern above,
+              #   just a timeout instead of a refused connect. The token is the
+              #   literal "DONE" observed live, so a different token still fails.
               # From: Issue #1095
               benign_pattern+='|^distcc\[[0-9]+\] \(dcc_select_for_read\) ERROR: IO timeout$'
               benign_pattern+='|^distcc\[[0-9]+\] \(dcc_r_token_int\) ERROR: read failed while waiting for token "DONE"$'
@@ -377,16 +375,12 @@ runs:
               distcc_hosts_without_pump="${distcc_hosts_without_pump:-$distcc_hosts}"
 
               # What: checks for a real host token after pump's own flag.
-              # Why: pump exports that flag even with zero live hosts found.
-              # From: PR #613
+              # Why: pump exports that flag even with zero live hosts found;
+              #   delegates to distcc_pump_real_host_count() below so the
+              #   --* exclusion rule can't drift between the two callers.
+              # From: PR #613 | Issue #1095
               distcc_pump_published_hosts() {
-                for distcc_host_token in $1; do
-                  case "$distcc_host_token" in
-                    --*) ;;
-                    *) return 0 ;;
-                  esac
-                done
-                return 1
+                [ "$(distcc_pump_real_host_count "$1")" -gt 0 ]
               }
 
               # What: counts only real host tokens, excluding --* flags.
