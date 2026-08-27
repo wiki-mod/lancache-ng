@@ -187,6 +187,7 @@ RUN set -euo pipefail; \
       cmake \
       curl \
       expect \
+      gh \
       git \
       jq \
       libssl-dev \
@@ -469,6 +470,7 @@ RUN set -euo pipefail; \
       dig \
       dirname \
       distcc \
+      gh \
       distcc-pump \
       docker \
       dpkg \
