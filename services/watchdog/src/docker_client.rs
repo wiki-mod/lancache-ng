@@ -8,8 +8,8 @@
 //! stopping a container, and pinging docker-socket-proxy itself. Mirrors
 //! watchdog.sh's `get_health()`/`restart_container()`/
 //! `probe_docker_socket_proxy()` curl invocations, plus `start()`/`stop()`/
-//! `is_running()` (issue #1437: this crate's main loop is now the sole
-//! actor reconciling `dhcp`/`ntp` against an operator-written desired-state
+//! `is_running()` -- this crate's main loop is now the sole actor
+//! reconciling `dhcp`/`ntp` against an operator-written desired-state
 //! file, so it needs the start/stop verbs the allowlist already granted
 //! this same `DOCKER_PROXY_URL` endpoint for those two services -- see
 //! `main.rs`'s `reconcile_desired_state`).
