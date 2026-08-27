@@ -388,19 +388,19 @@ require_grep 'docker buildx imagetools create --prefer-index=false -t "\$target_
 require_grep 'docker buildx imagetools create --prefer-index=false -t "\$target_image" "\$source_image"' \
   .github/workflows/build-push.yml \
   'promotion must preserve single-platform service image metadata when moving channel tags'
-# What: checks for `actions/attest@` inside the ghcr-attest-retry composite
-# action's own action.yml, not build-push.yml.
-# Why: every actions/attest call goes through that composite action (retry
-# + fresh re-login on a transient GHCR 401), so those literals live there.
-# From: PR #1501.
+# What: checks for `actions/attest@` inside the centralized pin-owner
+# wrapper, not ghcr-attest-retry or build-push.yml directly.
+# Why: ghcr-attest-retry (retry + fresh re-login on a transient GHCR 401)
+# now calls that wrapper instead of actions/attest itself (issue #1095).
+# From: PR #1501 | Issue #1095
 require_grep 'uses: \./\.github/actions/ghcr-attest-retry' \
   .github/workflows/build-push.yml \
   'release workflow must create provenance attestations for published first-party images through the shared GHCR retry wrapper'
 require_grep 'actions/attest@' \
-  .github/actions/ghcr-attest-retry/action.yml \
-  'the attestation retry wrapper must still call the real actions/attest action'
+  .github/actions/actions-attest-centralized-version/action.yml \
+  'the centralized attest wrapper must still call the real actions/attest action'
 require_grep 'push-to-registry: true' \
-  .github/actions/ghcr-attest-retry/action.yml \
+  .github/actions/actions-attest-centralized-version/action.yml \
   'provenance attestations must be pushed to the registry'
 # What: checks `steps.build.outputs.digest`, not a separate "retry-build" step id.
 # Why: build/build-arm64's "Build and push" step runs through
