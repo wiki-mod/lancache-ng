@@ -590,10 +590,17 @@ propagation path end-to-end via a real `dig`, both for creation and removal.
   operator start/stop via the dock, reconciled against `desired-state.json` (see
   Part B's "DHCP/NTP dock start/stop controls" row above) -- that only fires on
   an explicit dock action, never as a reaction to health state. The two
-  mechanisms share the container but not the trigger; a Part B pass should
-  confirm they don't interact (e.g. stopping `dhcp` via the dock must not
-  register as a health-check failure the restart-capable path would otherwise
-  act on, since `dhcp` was never in the restart-capable set to begin with).
+  mechanisms share the container but not the trigger, and they **do** interact
+  in one known, accepted way: `resolve_alert_only_targets` (unchanged by issue
+  #1437) still monitors `dhcp`/`dhcp-proxy`/`ntp` whenever provisioned, so
+  stopping one via the dock reads as "unreachable" to that monitor and climbs
+  its `AlertCounter` exactly like an unplanned outage would, producing a
+  standing red row on the dashboard for as long as the operator leaves it
+  stopped. This is not a bug and needs no fix -- it is the expected, visible
+  cost of exposing a real stop control for a service that was previously
+  always-on whenever provisioned. A Part B pass should confirm this specific
+  behavior (red row appears on dock-initiated Stop, clears on dock-initiated
+  Start) rather than treating red-while-deliberately-stopped as a regression.
 - For `nats` (the only single-process monitored service), repeat the hung-not-crashed
   proof pattern from Part A's NATS-monitoring row (external `SIGSTOP`, not an
   in-container one) and confirm a genuine restart (new `StartedAt`).
