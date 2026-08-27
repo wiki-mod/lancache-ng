@@ -83,7 +83,7 @@
 # own convention: this file only defines functions for a caller to invoke
 # under the caller's own shell options.
 
-# push_reuse_decide <service_key> <channel_image> <github_sha>
+# push_reuse_decide <service_key> <channel_image> <github_sha> [dep_keys]
 #
 # <service_key> is the exact key.classify-image-impact.sh emits for this
 # service on stdout (e.g. "ntp", "watchdog", "dhcp_proxy", "dns_image" for
@@ -97,6 +97,17 @@
 # its actual logic, and is reused as-is here rather than duplicated -- see
 # this function's own callers).
 # <github_sha> is the full 40-char commit SHA being built.
+# [dep_keys] is an optional space-separated list of ADDITIONAL classify keys
+# (e.g. "utilities", "utilities build_tools") that must also show unchanged
+# across the same revision..github_sha span for reuse to be safe -- for a
+# service whose own Dockerfile COPYs from another first-party image (issue
+# #1095: proxy/dns/dhcp/dhcp-proxy/ntp/ui/watchdog all depend on utilities;
+# dns/ui/watchdog also depend on build-tools), that dependency's own content
+# is invisible to <service_key>'s own touched-check, so it must be checked
+# here too, or a consumer with no changes of its own would keep retagging a
+# now-outdated image forever after its dependency moved on, silently, with
+# no bound on how long. Empty/omitted preserves this function's prior
+# behavior exactly (no extra keys checked).
 #
 # Always prints exactly "true" or "false" to stdout and returns 0 -- a
 # non-zero return means a genuine usage error (missing argument), never an
@@ -123,6 +134,7 @@ push_reuse_decide() {
   local service_key="${1:?push_reuse_decide: service_key is required}"
   local channel_image="${2:?push_reuse_decide: channel_image is required}"
   local github_sha="${3:?push_reuse_decide: github_sha is required}"
+  local dep_keys="${4:-}"
 
   local revision
   if ! revision="$(sif_image_revision "$channel_image")"; then
@@ -184,6 +196,19 @@ push_reuse_decide() {
     printf 'false\n'
     return 0
   fi
+
+  # What: also fails closed if any declared dependency key changed.
+  # Why: a consumer's own key can't see a first-party base image's change.
+  # From: Issue #1095
+  local dep_key dep_flag
+  for dep_key in $dep_keys; do
+    dep_flag="$(grep -m1 "^${dep_key}=" <<<"$classify_output" | cut -d= -f2)"
+    if [[ "$dep_flag" != "false" ]]; then
+      echo "push_reuse_decide: classify-image-impact.sh reported '${dep_key}=${dep_flag:-<missing>}' for ${revision}..${github_sha} -- a declared dependency (${dep_key}) changed in the full revision span -- failing closed to a real rebuild." >&2
+      printf 'false\n'
+      return 0
+    fi
+  done
 
   printf 'true\n'
 }
