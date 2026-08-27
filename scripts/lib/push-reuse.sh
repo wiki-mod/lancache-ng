@@ -100,8 +100,8 @@
 # [dep_keys] is an optional space-separated list of ADDITIONAL classify keys
 # (e.g. "utilities", "utilities build_tools") that must also show unchanged
 # across the same revision..github_sha span for reuse to be safe -- for a
-# service whose own Dockerfile COPYs from another first-party image (issue
-# #1095: proxy/dns/dhcp/dhcp-proxy/ntp/ui/watchdog all depend on utilities;
+# service whose own Dockerfile COPYs from another first-party image
+# (proxy/dns/dhcp/dhcp-proxy/ntp/ui/watchdog all depend on utilities;
 # dns/ui/watchdog also depend on build-tools), that dependency's own content
 # is invisible to <service_key>'s own touched-check, so it must be checked
 # here too, or a consumer with no changes of its own would keep retagging a
