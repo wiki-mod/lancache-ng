@@ -2038,24 +2038,111 @@ PR tracking metadata         | self: 07:54:11Z | fallback: 07:52:59Z
 PR title Conventional-Commit | self: 07:54:11Z | fallback: 07:52:59Z
 ```
 
-A real fallback is sequential and conditional:
+A real fallback is sequential and conditional -- and, per §72.2 below,
+conditional specifically on *why* nothing usable happened, not merely on
+whether it happened:
 
 ```text
 self-hosted job
         |
         +-> succeeds -> DONE, hosted variant never runs
         |
-        +-> fails/unavailable/times out
+        +-> runner unavailable/never picked up the job/timed out
+        |       |
+        |       v
+        |   hosted-fallback job runs
+        |
+        +-> runner ran the job and it genuinely failed
                 |
                 v
-        hosted-fallback job runs
+            FAIL -- hosted variant never runs, nothing reruns elsewhere
 ```
 
-Not two independently-triggered jobs that both always run. In CI 2.0 this
-is one job in `ci.yml` with `needs:`/`if:` gating the hosted variant on the
+Not two independently-triggered jobs that both always run, and not a
+fallback that fires on any non-success outcome. In CI 2.0 this is one job
+in `ci.yml` with `needs:`/`if:` gating the hosted variant on the
 self-hosted attempt's actual outcome, calling the same `ci.sh` command
 either way (per §72) -- never two parallel workflow jobs for the same
 check.
+
+### 72.2 Fallback triggers on infrastructure absence, never on a genuine failure (added during review)
+
+This generalizes beyond the self-hosted/hosted pair in §72.1 to **every**
+degradation/fallback chain CI 2.0 has, including the cache chain in §42
+(sccache/ccache+Redis+distcc -> a cache service degraded -> local
+ccache/sccache -> direct `cc`/`rustc` compile). The same single principle
+governs all of them, at whichever infrastructure layer they sit:
+
+A fallback/degradation step may trigger only when the reason nothing usable
+happened is that some **infrastructure component itself was unavailable**
+-- a runner offline/never picked up the job/timed out, a cache service
+(Redis, registry, distcc/sccache backend) unreachable, a package proxy
+unreachable. It is never triggered because the thing that actually ran (the
+runner, the compiler, the linker, the test suite) did its job for real and
+produced a genuine negative result -- a real compile error, a real test
+failure, a real lint violation, a real build error. That genuine failure
+must propagate immediately as `FAIL`, at whatever point in the chain it
+occurs, and must never cause a retry on different infrastructure or a
+continued attempt further down a degradation chain in the hope that a
+different environment makes it disappear -- doing so is exactly the "retry
+silently until green" pattern already forbidden elsewhere in this project's
+governance (Rule-Ref: AG-INT-002), laundering a genuine defect as an
+infrastructure hiccup.
+
+```text
+self-hosted runner never picks up the job / goes offline / times out
+        |
+        v
+UNKNOWN (no verdict was ever produced)
+        |
+        v
+automatic fallback to a GHCR/hosted run is correct here
+
+self-hosted runner picks up the job and runs it
+        |
+        v
+the job itself fails (test failure, build error, lint violation)
+        |
+        v
+that is a real verdict -- FAIL, not UNKNOWN
+never falls back and re-runs elsewhere hoping for a different result
+```
+
+Concretely, for §42's cache chain: Redis being down, or a build-cache
+backend being unreachable, is infrastructure absence -- degrading to local
+ccache/sccache, then to a direct `cc`/`rustc` compile, is correct and
+expected. A compile error at any point in this chain is not infrastructure
+absence -- the build fails because the compiled program itself has a real
+defect, not because the chain was cut short by an infrastructure problem.
+The chain is not driven further at that point in an attempt to route
+around the error -- the failure's cause is always the code defect, never an
+infrastructure outage.
+
+This is the same `UNKNOWN != BUILD` discipline from §2.3/§18, restated for
+the fallback mechanism specifically: `UNKNOWN` (no answer was produced,
+because the infrastructure that would have produced one wasn't there) is
+never conflated with `FAIL` (an answer was produced, and it was negative).
+Only `UNKNOWN` is what a fallback exists to resolve.
+
+### 72.3 Classifying UNKNOWN vs. FAIL in practice (direction, not yet fully specified)
+
+§72.1/§72.2 assume CI 2.0 can actually tell "the runner was unavailable"
+apart from "the runner ran the job and it genuinely failed." That
+classifier is not yet designed; this records the intended direction, not a
+finished specification.
+
+A possible approach: a fixed queue-timeout threshold (e.g. 15 minutes) on
+the self-hosted attempt -- if the runner has not even picked up the job
+within that window, and the job carries no completed-failure status, treat
+it as `UNKNOWN` and trigger the hosted fallback. If the job was picked up
+and ran to a completed, failed status, that is `FAIL` by definition,
+regardless of elapsed time, and never triggers a fallback. Distinguishing a
+slow-but-running self-hosted job from a genuinely hung one, and confirming
+a completed failure is infrastructure rather than code, additionally needs
+log-based inspection (e.g. whether real compiler/test-runner output is
+present in the job log at all). The exact log signals and thresholds are
+not yet designed -- an open implementation detail for whoever builds this
+in CI 2.0, not a blocker to recording the principle here.
 
 ## 73. CodeQL
 
