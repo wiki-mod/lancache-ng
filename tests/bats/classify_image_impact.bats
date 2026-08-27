@@ -310,7 +310,7 @@ val() {
     [ "$(val IMAGE_IMPACT)" = "false" ]
 }
 
-# --- --all-changed push fail-safe (#1095) ---
+# --- --all-changed push fail-safe ---
 
 # When build-push.yml's detect-changes push step cannot diff github.event.before
 # (all-zeros first push, force-push, GC'd base), it calls the classifier with

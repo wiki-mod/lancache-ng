@@ -50,9 +50,7 @@ vulnerabilities:
       and is being suppressed by this same entry as a side effect. PR
       #1680 fixed only the Alpine `apk`-upgrade cache-bust; whether
       `tools/build-tools`'s Debian `apt`-upgrade path has an equivalent
-      staleness problem is unverified and out of scope for this
-      re-review -- flagged for the maintainer as a follow-up, not
-      resolved here.
+      staleness problem remains unverified and needs its own check.
 
       From: Issue #1095, PR #1685
     expired_at: 2026-09-30
@@ -134,7 +132,7 @@ vulnerabilities:
 
       Debian trixie fix status individually re-checked against
       security-tracker.debian.org on 2026-08-27 for all 9 IDs in this
-      group, including CVE-2026-8458/10536 added by PR #1661: all
+      group, including CVE-2026-8458/10536: all
       still `vulnerable`/`no-dsa` at curl 8.14.1-2+deb13u4 -- a
       same-day batch source-package-tracker query misreported
       CVE-2026-9079/9080 as "fixed"; each CVE's own tracker page was

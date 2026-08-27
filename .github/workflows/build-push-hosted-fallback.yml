@@ -92,7 +92,7 @@ jobs:
       # What: resolves utilities:latest to an immutable digest once per run.
       # Why: consumer Dockerfiles use a mutable tag (AG-KD-010); without this,
       #   a hosted-fallback-built consumer has no build-time digest to record
-      #   in its utilities base-digest label (Issue #1095).
+      #   in its utilities base-digest label.
       # From: Issue #1095 | PR #1687
       - name: Resolve utilities image digest
         id: resolve-utilities-image
