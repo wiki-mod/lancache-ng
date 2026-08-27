@@ -172,7 +172,7 @@ well-evidenced, but the exact post-fix Alpine total as not yet re-observed.
 
 - **`docker buildx build` auto-forwards a caller's shell `http_proxy`/`https_proxy` as an implicit
   proxy build-arg into every `RUN` step.** `codex-lxc`'s `/etc/environment` exports
-  `http_proxy=http://192.168.1.40:6666` (a LAN Squid cache) for interactive/login shells; the real
+  `http_proxy=http://192.0.2.40:6666` (a LAN Squid cache) for interactive/login shells; the real
   GitHub Actions runner *service* processes do not have this variable in their own environment
   (checked via `/proc/<pid>/environ`), so this does not affect real CI. It does affect any manual
   SSH-driven verification build, though: this specific Squid instance served corrupted/stale
