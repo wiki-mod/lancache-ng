@@ -84,10 +84,8 @@ REVIEW_CHRONOLOGY_PATTERN+="|(\\breview[[:space:]]+finding\\b)"
 FRAGILE_LINE_REF_PATTERN='\(([Ss]ee[[:space:]]+)?\bline\b[[:space:]]*~?[0-9]+'
 
 # What: Checks $1 against the pattern, then joined adjacent-comment pairs.
-# Why: joined-pair pass catches a chronology phrase wrapped across two
-#   lines; bash's builtin [[ =~ ]] replaces a per-pair grep spawn that
-#   made this script time out in CI on large files (real, twice).
-# From: PR #1665
+# Why: it reduces unnecessary doubling of tool calls
+# From: PR #1661
 check_review_chronology() {
     grep -EinIH "$REVIEW_CHRONOLOGY_PATTERN" "$1" || true
     shopt -s nocasematch
