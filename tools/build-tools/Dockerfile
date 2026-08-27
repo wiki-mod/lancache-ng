@@ -100,9 +100,11 @@ RUN set -euo pipefail; \
 # What: source stage for the shared, statically-linked curl binary.
 # Why: the same binary already used by proxy/dns/dhcp/ntp/ui is portable
 # to a glibc host too (static, no dynamic curl dependency), so this image
-# reuses it instead of Debian's own curl package.
-# From: Issue #1304 | Issue #1556
-FROM ghcr.io/wiki-mod/lancache-ng/utilities@sha256:718af4cf8f1352cee341e851cecb9821033de9a5c7804c64e1c6217b62c79186 AS utilities-tools
+# reuses it instead of Debian's own curl package. Mutable :latest tag per
+# AG-KD-010, matching every other utilities consumer -- never digest-pin
+# this image.
+# From: Issue #1304 | Issue #1556 | Issue #1095 (AG-KD-010)
+FROM ghcr.io/wiki-mod/lancache-ng/utilities:latest AS utilities-tools
 
 FROM rust:latest
 
