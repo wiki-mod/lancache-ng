@@ -98,7 +98,7 @@ All GitHub Actions in the current set of workflows are already pinned to SHA dig
 
 ### Docker Base Images in Dockerfiles
 
-All `FROM` directives in first-party Dockerfiles are pinned to explicit SHA-256 digests:
+Every first-party Dockerfile's own **runtime** base image is pinned to an explicit SHA-256 digest (see the inventory below). Two categories of **build-time-only, intermediate** stage are a deliberate, documented exception to that: the `BUILD_TOOLS_IMAGE`-based builder stage (`services/dns`, `services/ui`) and, since AG-KD-010, the `UTILITIES_IMAGE`-based `utilities-tools` stage (all seven first-party consumers) -- see "Build-Time Images (Builder Stages)" below for both.
 
 The first-party runtime Dockerfiles intentionally use `mirror.gcr.io/library/*`
 as the pull source for their runtime bases. Base OS is mixed, not uniformly
@@ -154,6 +154,11 @@ undocumented per-Dockerfile fallback logic.
   - ARG default (line 12): `ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest`
   - **Status**: ⚠️ ARG default is mutable (`:latest`) — intentional fallback, permanently
   - **Rationale**: Same as `services/dns/Dockerfile` above — issue #508 closed as already-resolved-by-design; see `AGENTS.md`'s Rule-Ref: AG-CI-008.
+
+- `services/proxy`, `services/dns`, `services/dhcp`, `services/dhcp-proxy`, `services/ntp`, `services/ui`, `services/watchdog` (each Dockerfile's own `utilities-tools` stage): `FROM ${UTILITIES_IMAGE} AS utilities-tools`
+  - ARG default: `ARG UTILITIES_IMAGE=ghcr.io/wiki-mod/lancache-ng/utilities:latest`
+  - **Status**: ⚠️ ARG default is mutable (`:latest`) — a deliberate reversal of an earlier hardcoded-digest pin, AG-KD-010.
+  - **Rationale**: Unlike `BUILD_TOOLS_IMAGE`, this ARG default is not purely a manual-build fallback — real CI builds also override it, but with a digest resolved once per run (`validate-compose`'s "Resolve utilities image digest" step) rather than a hand-maintained pin, so a `utilities` security/tooling update reaches every consumer's next build automatically instead of requiring someone to notice and re-pin seven files. The accepted tradeoff (a `utilities` regression also reaches every consumer's next build) is documented in `AGENTS.md`'s Rule-Ref: AG-KD-010. Every consumer image also carries an `org.opencontainers.image.base.utilities.digest` label recording the exact digest actually baked in at build time, so the release SBOM merge step (and any other later inspection) reads the real, per-image value instead of re-resolving `utilities:latest`/`:<tag>` independently and risking a mismatch against what that specific image actually contains.
 
 ### Workflow Build-Tools References
 

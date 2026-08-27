@@ -926,6 +926,8 @@ jobs:
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     outputs:
       build_tools_image: ${{ steps.select-compose-validation-image.outputs.build_tools_image }}
+      utilities_image: ${{ steps.resolve-utilities-image.outputs.utilities_image }}
+      utilities_digest: ${{ steps.resolve-utilities-image.outputs.utilities_digest }}
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - uses: *checkout_centraliced_versioning # v7.0.1
@@ -969,6 +971,30 @@ jobs:
 
           printf 'BUILD_TOOLS_IMAGE=%s\n' "$validation_build_tools_image" >> "$GITHUB_ENV"
           printf 'build_tools_image=%s\n' "$downstream_build_tools_image" >> "$GITHUB_OUTPUT"
+
+      # What: resolves utilities:latest to an immutable digest once per run.
+      # Why: consumer Dockerfiles use a mutable tag (AG-KD-010); resolving it
+      #   once keeps every consumer build mutually consistent within one run
+      #   (does not bind consumers to a candidate rebuilt in the same run).
+      # From: Issue #1095 | PR #1687
+      - name: Resolve utilities image digest
+        id: resolve-utilities-image
+        env:
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # shellcheck source=scripts/lib/ghcr-retry.sh
+          source scripts/lib/ghcr-retry.sh
+
+          utilities_digest="$(resolve_manifest_digest ghcr.io/wiki-mod/lancache-ng/utilities:latest "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")"
+          if [[ -z "$utilities_digest" ]]; then
+            echo "::error::Could not resolve digest for ghcr.io/wiki-mod/lancache-ng/utilities:latest." >&2
+            exit 1
+          fi
+
+          printf 'utilities_image=ghcr.io/wiki-mod/lancache-ng/utilities@%s\n' "$utilities_digest" >> "$GITHUB_OUTPUT"
+          printf 'utilities_digest=%s\n' "$utilities_digest" >> "$GITHUB_OUTPUT"
 
       # What: removes the buildx builder right after its only consumer step.
       # Why: the fallback path uses plain docker build, not buildx.
@@ -4907,6 +4933,8 @@ jobs:
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
+      UTILITIES_IMAGE: ${{ needs['validate-compose'].outputs.utilities_image }}
+      UTILITIES_DIGEST: ${{ needs['validate-compose'].outputs.utilities_digest }}
     permissions:
       contents: read
       packages: write
@@ -5641,6 +5669,7 @@ jobs:
           secret-files: ${{ steps['combined-secret-files'].outputs['secret-files'] }}
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
+            UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
           network: ${{ env.RUST_BUILDX_NETWORK }}
@@ -5652,6 +5681,7 @@ jobs:
             org.opencontainers.image.description=${{ matrix.description }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
+            ${{ contains(fromJSON('["proxy","dns","dhcp","dhcp-proxy","ntp","ui","watchdog"]'), matrix.service) && format('org.opencontainers.image.base.utilities.digest={0}', env.UTILITIES_DIGEST) || '' }}
           # What: no `annotations:` input on this single-platform push.
           # Why: no index exists here for `--annotation` to attach to.
           # From: Issue #1095 | PR #1619
@@ -5940,6 +5970,8 @@ jobs:
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
+      UTILITIES_IMAGE: ${{ needs['validate-compose'].outputs.utilities_image }}
+      UTILITIES_DIGEST: ${{ needs['validate-compose'].outputs.utilities_digest }}
     permissions:
       contents: read
       packages: write
@@ -6291,6 +6323,7 @@ jobs:
           build-contexts: ${{ matrix.build_contexts }}
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
+            UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
           push: ${{ github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) }}
@@ -6300,6 +6333,7 @@ jobs:
             org.opencontainers.image.description=${{ matrix.description }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
+            ${{ contains(fromJSON('["proxy","dns","dhcp","dhcp-proxy","ntp","ui","watchdog"]'), matrix.service) && format('org.opencontainers.image.base.utilities.digest={0}', env.UTILITIES_DIGEST) || '' }}
           # What: no `annotations:` input here, mirroring build's step.
           # Why: no index exists here for `--annotation` to attach to.
           # From: Issue #1095 | PR #1619
@@ -7968,19 +8002,18 @@ jobs:
           fi
           echo "image-ref=ghcr.io/${REPOSITORY}/${SERVICE}@${digest}" >> "$GITHUB_OUTPUT"
 
-          # What: also resolves the utilities image's digest, for consumers only.
-          # Why: their SBOM step below merges in utilities' own components,
-          # since curl/findutils/gettext-envsubst/lsof/ripgrep are COPY'd from
-          # it rather than apk-installed here.
-          # From: Issue #1613
+          # What: reads utilities' digest from the released image's own
+          #   build-time label via the digest-qualified ref resolved above.
+          # Why: utilities:latest can move between builds; the label+digest
+          #   keep this bound to what the scan above actually covers (AG-VAL-026).
+          # From: Issue #1613 | Issue #1095
           case "$SERVICE" in
-            proxy|dhcp|dhcp-proxy|dns|ntp|ui)
-              utilities_image="ghcr.io/${REPOSITORY}/utilities:${TAG_NAME}"
-              utilities_digest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$utilities_image" --format '{{json .Manifest.Digest}}')"
-              utilities_digest="${utilities_digest%\"}"
-              utilities_digest="${utilities_digest#\"}"
-              if [[ -z "$utilities_digest" || "$utilities_digest" == "null" ]]; then
-                echo "::error::Could not resolve digest for $utilities_image." >&2
+            proxy|dhcp|dhcp-proxy|dns|ntp|ui|watchdog)
+              released_image="ghcr.io/${REPOSITORY}/${SERVICE}@${digest}"
+              ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker pull "$released_image" >/dev/null
+              utilities_digest="$(docker image inspect "$released_image" --format '{{ index .Config.Labels "org.opencontainers.image.base.utilities.digest" }}')"
+              if [[ ! "$utilities_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                echo "::error::$released_image is missing its build-time utilities base-digest label (org.opencontainers.image.base.utilities.digest)." >&2
                 exit 1
               fi
               echo "utilities-image-ref=ghcr.io/${REPOSITORY}/utilities@${utilities_digest}" >> "$GITHUB_OUTPUT"
@@ -8022,7 +8055,7 @@ jobs:
       - name: Generate utilities image SBOM for component merge
         # Consumer-only: scans the same released utilities digest resolved
         # above so its components can be merged below.
-        if: contains(fromJSON('["proxy", "dhcp", "dhcp-proxy", "dns", "ntp", "ui"]'), matrix.service)
+        if: contains(fromJSON('["proxy", "dhcp", "dhcp-proxy", "dns", "ntp", "ui", "watchdog"]'), matrix.service)
         timeout-minutes: 50
         uses: ./.github/actions/trivy-scan-retry
         with:
@@ -8045,7 +8078,7 @@ jobs:
         # utilities, not apk-installed here, so this image's own apk-db scan
         # can no longer see them on its own.
         # From: Issue #1613
-        if: contains(fromJSON('["proxy", "dhcp", "dhcp-proxy", "dns", "ntp", "ui"]'), matrix.service)
+        if: contains(fromJSON('["proxy", "dhcp", "dhcp-proxy", "dns", "ntp", "ui", "watchdog"]'), matrix.service)
         env:
           SERVICE: ${{ matrix.service }}
         run: |
