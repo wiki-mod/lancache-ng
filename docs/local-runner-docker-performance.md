@@ -185,13 +185,18 @@ Important:
 distcc for their C-dependency compile paths (`ring`/`aws-lc-sys`, via
 `rustls`), so a rebuild against unchanged C sources reuses a previous
 compile's result from Redis instead of recompiling and redistributing it
-every time. `services/ui/Dockerfile`'s custom `lancache-distcc-wrapper` now
+every time. Since issue #1304/PR #1661, `tools/build-tools/Dockerfile`
+layers the same ccache-over-distcc mechanism in front of its own
+from-source curl/git C compiles, with its own `ccache_redis_url`/
+`distcc_potential_hosts` secrets populated by both `build-tools.yml`'s
+standalone schedule/workflow_dispatch route and `build-push.yml`'s matrix
+entry. `services/ui/Dockerfile`'s custom `lancache-distcc-wrapper` now
 understands both distcc calling conventions -- the original `$0`-basename
 masquerade dispatch, and ccache's `CCACHE_PREFIX` convention (invoked as
 `distcc <real-compiler-path> <args>`, real compiler is `$1`) --
 disambiguated by checking `$0` first. `build-push.yml`'s real CI pipeline
 populates the `ccache_redis_url` secret and the preflight action's
-`ccache-redis-file` input for all three services (confirmed live, issue
+`ccache-redis-file` input for all four services (confirmed live, issue
 #1095) -- see `AGENTS.md`'s `AG-CI-022` note for the wiring history.
 
 Important rules:

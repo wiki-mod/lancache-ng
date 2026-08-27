@@ -20,11 +20,10 @@
 # gettext-envsubst` on alpine:3.24).
 
 # What: source stage for tools copied into the final image below.
-# Why: pinned by digest (not a mutable tag) for a reproducible build -- see
-#   services/proxy/Dockerfile's identical stage comment for the full
-#   digest-resolution rationale.
-# From: Issue #1556
-FROM ghcr.io/wiki-mod/lancache-ng/utilities@sha256:718af4cf8f1352cee341e851cecb9821033de9a5c7804c64e1c6217b62c79186 AS utilities-tools
+# Why: uses the mutable `:latest` tag -- see services/proxy/Dockerfile's
+#   identical stage comment and AG-KD-010 for the full rationale.
+# From: Issue #1095 | AG-KD-010
+FROM ghcr.io/wiki-mod/lancache-ng/utilities:latest AS utilities-tools
 
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
