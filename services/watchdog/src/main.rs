@@ -31,8 +31,8 @@ use lancache_watchdog::status::{self, DiskInfo, ServiceHealth, WatchdogStatus};
 /// `watchdog` itself must never be user-disableable (#1486's cross-reference
 /// on #842). `dhcp`/`dhcp-proxy`/`ntp` are still never *restarted* here
 /// (Kea/dnsmasq known-good-config rollback semantics a blind watchdog
-/// restart could race), but as of issue #1437 this crate's main loop is the
-/// sole actor that starts/stops them, reconciling against an operator's
+/// restart could race), but this crate's main loop is now the sole actor
+/// that starts/stops them, reconciling against an operator's
 /// EXPLICIT desired-state override only -- an absent entry is "no opinion",
 /// never treated as "should run" (see `status::DesiredState`'s own doc
 /// comment for why: it would otherwise fight a settings-reconcile that just
