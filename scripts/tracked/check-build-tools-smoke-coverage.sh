@@ -106,6 +106,17 @@ done
 #     here, since the direction-1 loop below already finds it covered by
 #     smoke_tools and never reaches this list.
 #     From: Issue #887
+#
+#     gh (issue #1095, PR #1694) is the identical situation: a real
+#     consumer (scripts/untracked/gc-pr-staging-images.sh's main()) hard-
+#     requires it, but the currently published :latest/:nightly build-tools
+#     image predates PR #1694 -- the last successful build-tools.yml
+#     publish was 2026-08-16, before gh was added to the Dockerfile.
+#     Gating this strict smoke-test path on gh now would fail every
+#     unrelated PR until a build-tools.yml run actually rebuilds and
+#     republishes. Revisit moving gh from here into smoke_test_image()'s
+#     required_tools once a successful publish confirms the published
+#     image actually carries it.
 EXCLUDED_TOOLS=(
   # Opt-in (EXTRA_REQUIRED_TOOLS)
   cargo-tarpaulin
@@ -117,6 +128,8 @@ EXCLUDED_TOOLS=(
   test timeout xargs xz
   # Musl cross-compilation toolchain (issue #815)
   musl-gcc
+  # Bootstrap gap pending a successful build-tools.yml republish (issue #1095, PR #1694)
+  gh
 )
 
 # Multi-word capabilities the Dockerfile verifies via a subcommand invocation
