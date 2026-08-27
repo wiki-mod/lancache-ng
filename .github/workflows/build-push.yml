@@ -972,11 +972,9 @@ jobs:
           printf 'BUILD_TOOLS_IMAGE=%s\n' "$validation_build_tools_image" >> "$GITHUB_ENV"
           printf 'build_tools_image=%s\n' "$downstream_build_tools_image" >> "$GITHUB_OUTPUT"
 
-      # What: resolves utilities:latest to an immutable digest once per run.
-      # Why: consumer Dockerfiles use a mutable tag (AG-KD-010); resolving it
-      #   once keeps every consumer build mutually consistent within one run
-      #   (does not bind consumers to a candidate rebuilt in the same run).
-      # From: Issue #1095 | PR #1687
+      # What: resolves utilities:latest, falls back to :nightly.
+      # Why: latest has never been published; nightly exists and works.
+      # From: Issue #1095 | PR #1706
       - name: Resolve utilities image digest
         id: resolve-utilities-image
         env:
@@ -987,9 +985,11 @@ jobs:
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source scripts/lib/ghcr-retry.sh
 
-          utilities_digest="$(resolve_manifest_digest ghcr.io/wiki-mod/lancache-ng/utilities:latest "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")"
+          utilities_digest="$(resolve_manifest_digest ghcr.io/wiki-mod/lancache-ng/utilities:latest "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")" \
+            || utilities_digest="$(resolve_manifest_digest ghcr.io/wiki-mod/lancache-ng/utilities:nightly "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")" \
+            || utilities_digest=""
           if [[ -z "$utilities_digest" ]]; then
-            echo "::error::Could not resolve digest for ghcr.io/wiki-mod/lancache-ng/utilities:latest." >&2
+            echo "::error::Could not resolve digest for ghcr.io/wiki-mod/lancache-ng/utilities:latest or :nightly." >&2
             exit 1
           fi
 
