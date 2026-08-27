@@ -18,37 +18,20 @@ FROM ${BUILD_TOOLS_IMAGE} AS subscriber-builder
 # distcc, distcc-pump, and the supporting Debian packages. Keep this stage
 # lean and fail closed if the contract is not met.
 #
-# musl cross-compilation target (issue #815): the final stage below now runs
-# on an Alpine (musl) base, so the nats-subscriber binary this stage compiles
-# must be musl-linked, not the glibc-linked binary a plain `rust:slim`-style
-# builder would have produced. tools/build-tools/Dockerfile (#815, PR #1374)
-# already added the musl-tools/musl-dev packages and a rustup target matching
-# this image's own host architecture (x86_64-unknown-linux-musl on amd64,
-# aarch64-unknown-linux-musl on arm64) -- deliberately the *native*-arch musl
-# target only, not a cross-arch one, so no separate cross-linker is needed
-# (see that file's own comments for why). Resolving the target by
-# `dpkg --print-architecture` here mirrors that file's exact pattern rather
-# than inventing a new one. Verified empirically (2026-08-05, runner
-# 192.168.1.229, the real ghcr.io/wiki-mod/lancache-ng/build-tools:latest
-# image): `cargo build --release --target x86_64-unknown-linux-musl --locked`
-# against this exact nats-subscriber crate (including `ring`, a cc-crate
-# dependency pulled in via rustls) succeeds with zero source changes and no
-# extra CC_*/CARGO_TARGET_*_LINKER environment variables -- musl-gcc is
-# picked up automatically for the native-arch musl target once musl-tools is
-# installed. The resulting binary was confirmed `static-pie linked` (no
-# dynamic library dependencies at all) via `file`, and confirmed to actually
-# execute its own application logic (reaching a real startup-validation error
-# message, not just failing to load) inside a real `alpine:3.24` container.
+# What: Detects host arch to pick the musl cross-compile target for cargo.
+# Why: `uname -m` needs no extra package, unlike `dpkg` (Debian-only).
+# Why: Mirrors tools/build-tools/Dockerfile's native-arch-only musl targets.
+# From: Issue #1095
 RUN set -eu; \
     for tool in cargo rustc rustup rustfmt clippy-driver sccache distcc distcc-pump python3 pkg-config; do \
       command -v "$tool" >/dev/null; \
     done; \
     command -v musl-gcc >/dev/null; \
     command -v ccache >/dev/null; \
-    case "$(dpkg --print-architecture)" in \
-      amd64) echo "x86_64-unknown-linux-musl" > /tmp/musl-target; ;; \
-      arm64) echo "aarch64-unknown-linux-musl" > /tmp/musl-target; ;; \
-      *) echo "Unsupported architecture for musl cross-compilation target: $(dpkg --print-architecture)" >&2; exit 1; ;; \
+    case "$(uname -m)" in \
+      x86_64) echo "x86_64-unknown-linux-musl" > /tmp/musl-target; ;; \
+      aarch64) echo "aarch64-unknown-linux-musl" > /tmp/musl-target; ;; \
+      *) echo "Unsupported architecture for musl cross-compilation target: $(uname -m)" >&2; exit 1; ;; \
     esac; \
     # Captured into a variable first, then grepped via a here-string
     # (AG-VAL-032): a live `rustup target list --installed | grep -qx`

@@ -96,10 +96,20 @@ smoke_test_image() {
       openssl
       rsync
       envsubst
-      dhclient
       expect
       tcpdump
     )
+
+    # What: dhclient is opt-in via EXTRA_REQUIRED_TOOLS, not a baseline
+    # requirement, unlike every other tool above.
+    # Why: real-verified (issue #1095, Alpine evaluation) -- no Alpine apk
+    # package provides ISC dhclient/isc-dhcp-client at all, so a baseline
+    # requirement here would hard-fail every consumer of this script the
+    # moment an Alpine-based build-tools image is ever published, not just
+    # the two real consumers (dhcp-kea-lease-flow-simulation.sh,
+    # syslog-forwarding-simulation.sh) that actually invoke dhclient
+    # themselves. Those two callers set EXTRA_REQUIRED_TOOLS=dhclient.
+    # From: Issue #1095
 
     if [[ -n "${EXTRA_REQUIRED_TOOLS:-}" ]]; then
       read -ra extra_tools <<<"$EXTRA_REQUIRED_TOOLS"

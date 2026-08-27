@@ -25,19 +25,10 @@ FROM ${BUILD_TOOLS_IMAGE} AS builder
 # distcc, distcc-pump, and the supporting Debian packages. Keep this stage
 # lean and fail closed if the contract is not met.
 #
-# musl cross-compilation target (issue #815): the runtime stage below now
-# runs on an Alpine (musl) base, so this binary must be musl-linked, not the
-# glibc-linked binary a plain build-tools-image build would produce.
-# tools/build-tools/Dockerfile (#815, PR #1374) already added musl-tools/
-# musl-dev and a rustup target matching this image's own host architecture
-# (x86_64-unknown-linux-musl on amd64, aarch64-unknown-linux-musl on arm64)
-# -- the native-arch target only, no separate cross-linker needed. Resolving
-# the target via `dpkg --print-architecture` into a file mirrors the exact
-# pattern services/dns/Dockerfile's nats-subscriber builder already
-# established for the identical problem, rather than inventing a new one --
-# see that file's own comments for the full empirical verification history.
-# Written to /tmp/musl-target (not a shell variable) because Docker RUN
-# layers do not share shell state; every later RUN in this stage re-reads it.
+# What: Detects host arch to pick the musl cross-compile target for cargo.
+# Why: `uname -m` needs no extra package, unlike `dpkg` (Debian-only).
+# Why: Written to /tmp/musl-target since RUN layers share no shell state.
+# From: Issue #1095
 #
 # Everything below builds a custom distcc wrapper. It exists because
 # distcc-pump preprocesses every `#include` locally before sending the job to
@@ -61,10 +52,10 @@ RUN set -eu; \
       command -v "$tool" >/dev/null; \
     done; \
     command -v musl-gcc >/dev/null; \
-    case "$(dpkg --print-architecture)" in \
-      amd64) echo "x86_64-unknown-linux-musl" > /tmp/musl-target; ;; \
-      arm64) echo "aarch64-unknown-linux-musl" > /tmp/musl-target; ;; \
-      *) echo "Unsupported architecture for musl cross-compilation target: $(dpkg --print-architecture)" >&2; exit 1; ;; \
+    case "$(uname -m)" in \
+      x86_64) echo "x86_64-unknown-linux-musl" > /tmp/musl-target; ;; \
+      aarch64) echo "aarch64-unknown-linux-musl" > /tmp/musl-target; ;; \
+      *) echo "Unsupported architecture for musl cross-compilation target: $(uname -m)" >&2; exit 1; ;; \
     esac; \
     # Captured into a variable first, then grepped via a here-string
     # (AG-VAL-032): a live `rustup target list --installed | grep -qx`

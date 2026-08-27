@@ -108,7 +108,11 @@ done
 #     From: Issue #887
 EXCLUDED_TOOLS=(
   # Opt-in (EXTRA_REQUIRED_TOOLS)
-  cargo-tarpaulin
+  # dhclient (issue #1095): moved from smoke_test_image()'s baseline to
+  # opt-in, since no Alpine apk package provides it; the two real callers
+  # (dhcp-kea-lease-flow-simulation.sh, syslog-forwarding-simulation.sh)
+  # now set EXTRA_REQUIRED_TOOLS=dhclient themselves.
+  cargo-tarpaulin dhclient
   # Build toolchain
   ar ranlib cc c++ g++ clang ld.lld make cmake pkg-config git gpg
   # Base utilities (coreutils / util-linux / base image)
