@@ -2624,6 +2624,42 @@ REFERENCED        UNREACHABLE
 KEEP             DELETE
 ```
 
+## 98. Checks must be scoped to the PR, not the repository, unless the check's own semantics require otherwise
+
+A check that re-scans/re-searches the entire repository on every run, when
+its actual purpose only concerns the files a PR touches, silently
+reintroduces the same "everything is a candidate by default" failure mode
+this whole document exists to remove — just at the level of a single check
+instead of the whole build. Every check migrated into `ci.sh`/`ci.bats`
+must be explicitly justified as either PR/diff-scoped (the default
+expectation) or genuinely repository-wide (an explicit, named exception,
+e.g. a full reachability GC pass or a cross-service dependency-graph
+check that cannot be answered from a diff alone).
+
+Two real examples already found in this repository's current CI, kept here
+as concrete evidence rather than a hypothetical:
+
+```text
+.github/actions/shellcheck-and-standing-guards/action.yml
+-> find . \( -name "*.sh" -o -name "*.bats" \) | xargs shellcheck
+-> unconditional, repository-wide, no diff-scoping at all
+
+build-push.yml's shellcheck-hosted job
+-> no `if:` condition whatsoever, not even the docs_only check
+   its self-hosted twin has
+-> verified live against PR #1648 (a single-file AGENTS.md-only PR):
+   self-hosted shellcheck correctly reported "skipping",
+   the hosted fallback still ran a full 3m7s repo-wide scan anyway
+```
+
+Migrating a check like this into CI 2.0 is not just "move the shell script
+into `ci.sh`" — it must also gain the same semantic-impact gate every build
+decision gets (§11): does this specific check's rationale actually require
+looking beyond the changed files, or is repo-wide scope just how it happened
+to be written the first time. Every check inherited from `build-push.yml`
+during migration (§81) should carry an explicit note recording which of the
+two it is, not silently keep whatever scope it already had.
+
 ## Open decisions
 
 These are explicitly open, not resolved by this document:
