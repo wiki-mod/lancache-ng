@@ -13,9 +13,13 @@ The Debian branch (`FROM golang:latest AS actionlint-builder` / `FROM rust:lates
 stage) is unchanged and remains this Dockerfile's default `docker build` target. The Alpine
 candidate lives in two additional named stages earlier in the same file
 (`actionlint-builder-alpine`, `alpine-final`), selected explicitly via `docker build --target
-alpine-final`. Stage order matters: Docker's default build target is always the last stage in the
-file when no `--target` is given, so the Alpine stages are placed before the unnamed Debian final
-stage to keep the Debian branch building by default with zero caller changes.
+alpine-final --build-arg APK_CACHE_BUST=$(date +%s)`. The cache-bust build-arg matters here
+specifically: with the base image digest unchanged, BuildKit can otherwise replay the `apk
+update`/`apk add` layer indefinitely, so a later rebuild-and-rescan of this candidate would
+silently evaluate stale Alpine packages rather than the current repositories. Stage order also
+matters: Docker's default build target is always the last stage in the file when no `--target` is
+given, so the Alpine stages are placed before the unnamed Debian final stage to keep the Debian
+branch building by default with zero caller changes.
 
 ## Prior work this evaluation builds on
 
@@ -34,21 +38,27 @@ self-check array (Debian stage). Real usage across `.github/workflows/build-push
 `docker run ... "$BUILD_TOOLS_IMAGE"` call sites), the composite actions under `.github/actions/**`
 that consume this image (`shellcheck-and-standing-guards`, `rust-acceleration-preflight`,
 `file-headers-check`, `pr-title-convention-check`, `pr-tracking-metadata-fetch-and-validate`),
-`scripts/tracked/**`/`scripts/untracked/**` (including all 13 `scripts/untracked/simulations/*.sh`),
+`scripts/tracked/**`/`scripts/untracked/**` (including all 19 `scripts/untracked/simulations/*.sh`),
 and `tests/bats/**` (131 files) / `tests/shellspec/**` (1 spec file, run wholesale inside the
 container by `build-tools-smoke.yml`/`.github/actions/build-tools-candidate-smoke`) was
 cross-checked against that array. No command was found running inside a `BUILD_TOOLS_IMAGE`
 container that is missing from the array.
 
-Only one of the 13 simulation scripts (`syslog-forwarding-simulation.sh`) itself runs as the direct
-payload of a `docker run ... "$BUILD_TOOLS_IMAGE"` call; the other 12 run on the bare runner host but
+Only one of the 19 simulation scripts (`syslog-forwarding-simulation.sh`) itself runs as the direct
+payload of a `docker run ... "$BUILD_TOOLS_IMAGE"` call; the other 18 run on the bare runner host but
 make their own internal `docker run ... "$BUILD_TOOLS_IMAGE" ...` sub-calls for `curl`/`dig`/`openssl`/
 `cat`/`bash`/`timeout`/`sleep` against Kea/DNS/proxy containers on an isolated network -- those
 sub-calls are real container-side command usage even though the wrapping script is host-side.
 
 ## AG-VAL-034 (GNU vs BusyBox) findings
 
-- No `find -printf`, no `date +%N` usage found anywhere in the real command surface.
+- `find -printf` (`scripts/lib/known-good-snapshots.sh`, sourced by the Bats suite run wholesale
+  inside the container) and `date +%s%N` (`syslog-forwarding-simulation.sh`) are both real,
+  in-container GNU-specific usage -- corrected from an earlier "none found" claim in this
+  document. Both are already covered: this apk list installs `coreutils` and `findutils`
+  specifically for GNU compatibility (see the apt/apk parity comment above), and Alpine's
+  `findutils`/`coreutils` packages are real GNU findutils/coreutils, not BusyBox applets, so both
+  flags work identically to the Debian stage.
 - No `readlink -f` usage found.
 - `grep -oP` (PCRE) is real and used inside the container (several `tests/bats/*.bats`,
   `check-workflow-service-lists.sh`). Verified live on `alpine:3.24.1`: the `grep` apk package

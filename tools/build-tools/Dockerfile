@@ -254,7 +254,10 @@ RUN set -euo pipefail; \
       xz \
       zlib-dev \
       zlib-static; \
-    ln -sf /usr/bin/pump /usr/bin/distcc-pump
+    ln -sf /usr/bin/pump /usr/bin/distcc-pump; \
+    distcc_bin="$(command -v distcc)"; \
+    mkdir -p /usr/local/lib/distcc; \
+    for wrapper in cc gcc c++ g++; do ln -sf "$distcc_bin" "/usr/local/lib/distcc/$wrapper"; done
 
 # What: switches SHELL to bash for every RUN step below.
 # Why: BusyBox ash cannot parse this file's bash-array use.
