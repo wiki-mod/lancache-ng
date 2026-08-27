@@ -973,10 +973,9 @@ jobs:
           printf 'build_tools_image=%s\n' "$downstream_build_tools_image" >> "$GITHUB_OUTPUT"
 
       # What: resolves utilities:latest to an immutable digest once per run.
-      # Why: consumer Dockerfiles reference it via a mutable tag (AG-KD-010);
-      #   resolving it once here and passing the same digest to every
-      #   consumer build keeps them consistent within one run, closing the
-      #   same-run staleness race a stale/fresh split would otherwise cause.
+      # Why: consumer Dockerfiles use a mutable tag (AG-KD-010); resolving it
+      #   once here and passing the same digest to every consumer build keeps
+      #   them consistent within one run, closing a same-run staleness race.
       # From: Issue #1095 | PR #1687
       - name: Resolve utilities image digest
         id: resolve-utilities-image
@@ -7950,20 +7949,18 @@ jobs:
           fi
           echo "image-ref=ghcr.io/${REPOSITORY}/${SERVICE}@${digest}" >> "$GITHUB_OUTPUT"
 
-          # What: for consumers, reads the utilities digest baked into THIS
-          #   released image's own build-time label, not a fresh independent
-          #   resolution of utilities:${TAG_NAME}.
-          # Why: utilities:latest can move between when this image was built
-          #   (rebuilt this run, or retagged/reused from an earlier one) and
-          #   when this SBOM step runs; only the label travels with the
-          #   image and reflects what it actually contains (Issue #1095).
+          # What: reads utilities' digest from the released image's own
+          #   build-time label via the digest-qualified ref resolved above.
+          # Why: utilities:latest can move between builds; the label+digest
+          #   keep this bound to what the scan above actually covers (AG-VAL-026).
           # From: Issue #1613 | Issue #1095
           case "$SERVICE" in
             proxy|dhcp|dhcp-proxy|dns|ntp|ui|watchdog)
-              ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker pull "$image" >/dev/null
-              utilities_digest="$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.base.utilities.digest" }}')"
+              released_image="ghcr.io/${REPOSITORY}/${SERVICE}@${digest}"
+              ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker pull "$released_image" >/dev/null
+              utilities_digest="$(docker image inspect "$released_image" --format '{{ index .Config.Labels "org.opencontainers.image.base.utilities.digest" }}')"
               if [[ ! "$utilities_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-                echo "::error::$image is missing its build-time utilities base-digest label (org.opencontainers.image.base.utilities.digest)." >&2
+                echo "::error::$released_image is missing its build-time utilities base-digest label (org.opencontainers.image.base.utilities.digest)." >&2
                 exit 1
               fi
               echo "utilities-image-ref=ghcr.io/${REPOSITORY}/utilities@${utilities_digest}" >> "$GITHUB_OUTPUT"

@@ -76,12 +76,10 @@ check_dockerfile_base_images() {
         violations_found=1
     fi
 
-    # What: warns on BUILD_TOOLS_IMAGE/UTILITIES_IMAGE ARG defaults using
-    #   :latest, override-able at build time -- not a hard violation.
-    # Why: both are real CI's actual mutable-tag exceptions (AG-CI-008,
-    #   AG-KD-010); the FROM-line check above only sees a literal
-    #   `FROM ...:latest`, which ARG indirection deliberately avoids, so
-    #   this second pass keeps both exceptions visible instead of silent.
+    # What: warns when BUILD_TOOLS_IMAGE/UTILITIES_IMAGE ARG defaults use
+    #   :latest -- override-able at build time, not a hard violation.
+    # Why: the FROM-line check above only catches a literal `FROM ...:latest`,
+    #   which ARG indirection (AG-CI-008, AG-KD-010) deliberately avoids.
     # From: Issue #1095 | PR #1687
     local mutable_arg_defaults
     mutable_arg_defaults=$(grep -nE 'ARG (BUILD_TOOLS_IMAGE|UTILITIES_IMAGE).*:latest' services/*/Dockerfile || true)
