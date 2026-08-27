@@ -4,8 +4,8 @@
 #
 # What: AG-VAL-029 standing check -- aquasecurity/trivy-action must only be
 # invoked from the centralized pin-owner wrapper action.
-# Why: a direct call site bypasses trivy-scan-retry's own retry/auth fix
-# (issue #1535), and a second pin outside the one owner drifts (issue #1095).
+# Why: a direct call site bypasses trivy-scan-retry's own retry/auth fix,
+# and a second pin outside the one owner drifts.
 # From: PR #1542, Issue #1535 | Issue #1095
 
 # What: check_dockerhub_wiring() is a second check -- every real
