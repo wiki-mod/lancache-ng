@@ -2057,6 +2057,49 @@ self-hosted attempt's actual outcome, calling the same `ci.sh` command
 either way (per §72) -- never two parallel workflow jobs for the same
 check.
 
+### 72.2 Fallback triggers on infrastructure absence, never on a genuine failure (added during review)
+
+This generalizes beyond the self-hosted/hosted pair in §72.1 -- the same
+distinction applies to every fallback path CI 2.0 has, not only tests.
+"The self-hosted attempt's actual outcome" in §72.1 must be read narrowly:
+a fallback may trigger only when the reason nothing usable happened is that
+**the runner itself was unavailable** -- offline, never picked up the job,
+connection failure, timed out waiting for a runner slot to exist at all.
+
+A fallback must never trigger because the runner picked up the job, ran it
+for real, and the job itself failed on its merits (a real test failure, a
+real build error, a real lint violation). Re-running the identical work on
+different infrastructure in that case is not a fallback, it is exactly the
+"retry silently until green" pattern already forbidden elsewhere in this
+project's governance (Rule-Ref: AG-INT-002) -- it launders a genuine defect
+as an infrastructure hiccup by giving it a second, unrelated environment to
+maybe not reproduce in, instead of surfacing the failure.
+
+```text
+self-hosted runner never picks up the job / goes offline / times out
+        |
+        v
+UNKNOWN (no verdict was ever produced)
+        |
+        v
+automatic fallback to a GHCR/hosted run is correct here
+
+self-hosted runner picks up the job and runs it
+        |
+        v
+the job itself fails (test failure, build error, lint violation)
+        |
+        v
+that is a real verdict -- FAIL, not UNKNOWN
+never falls back and re-runs elsewhere hoping for a different result
+```
+
+This is the same `UNKNOWN != BUILD` discipline from §2.3/§18, restated for
+the fallback mechanism specifically: `UNKNOWN` (no answer was produced,
+because the infrastructure that would have produced one wasn't there) is
+never conflated with `FAIL` (an answer was produced, and it was negative).
+Only `UNKNOWN` is what a fallback exists to resolve.
+
 ## 73. CodeQL
 
 CodeQL stays technically separate because GitHub has its own
