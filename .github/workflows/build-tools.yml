@@ -463,7 +463,16 @@ jobs:
       # From: Issue #1095
       - name: Detect fork PR (no issues:write token available here)
         id: trivy-fork-check
-        if: always() && github.event_name == 'pull_request'
+        # What: no always()/failure() status-check function here on
+        #   purpose -- this step (and the two below) must NOT run if an
+        #   earlier, unrelated step in this job already failed (e.g. the
+        #   image build itself), or a real build failure would be
+        #   misreported as a Trivy finding. trivy-scan's own
+        #   continue-on-error: true already keeps the job's implicit
+        #   success() gating satisfied when the scan itself is what
+        #   failed, which is the only case these steps need to run for.
+        # From: Issue #1095
+        if: github.event_name == 'pull_request'
         run: |
           set -euo pipefail
           if [ "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.repository }}" ]; then
@@ -477,7 +486,7 @@ jobs:
       # From: Issue #1095
       - name: Warn on fork PR -- Trivy finding could not be filed as an issue
         if: >-
-          always() && github.event_name == 'pull_request' &&
+          github.event_name == 'pull_request' &&
           steps.trivy-scan.outcome == 'failure' &&
           steps.trivy-fork-check.outputs.is-fork == 'true'
         run: |
@@ -494,7 +503,7 @@ jobs:
       # From: Issue #1095
       - name: Report Trivy PR-scan status (non-blocking, self-closing issue)
         if: >-
-          always() && github.event_name == 'pull_request' &&
+          github.event_name == 'pull_request' &&
           steps.trivy-fork-check.outputs.is-fork == 'false'
         uses: ./.github/actions/nightly-status
         with:
@@ -742,7 +751,10 @@ jobs:
       # From: Issue #1095
       - name: Detect fork PR (no issues:write token available here)
         id: trivy-fork-check
-        if: always() && github.event_name == 'pull_request'
+        # What: no always()/failure() status-check function here on
+        #   purpose -- same reasoning as the amd64 leg's identical step.
+        # From: Issue #1095
+        if: github.event_name == 'pull_request'
         run: |
           set -euo pipefail
           if [ "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.repository }}" ]; then
@@ -756,7 +768,7 @@ jobs:
       # From: Issue #1095
       - name: Warn on fork PR -- Trivy finding could not be filed as an issue
         if: >-
-          always() && github.event_name == 'pull_request' &&
+          github.event_name == 'pull_request' &&
           steps.trivy-scan.outcome == 'failure' &&
           steps.trivy-fork-check.outputs.is-fork == 'true'
         run: |
@@ -768,7 +780,7 @@ jobs:
       # From: Issue #1095
       - name: Report Trivy PR-scan status (non-blocking, self-closing issue)
         if: >-
-          always() && github.event_name == 'pull_request' &&
+          github.event_name == 'pull_request' &&
           steps.trivy-fork-check.outputs.is-fork == 'false'
         uses: ./.github/actions/nightly-status
         with:

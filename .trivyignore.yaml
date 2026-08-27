@@ -268,6 +268,25 @@ vulnerabilities:
       privilege drop uses `setpriv`, confirmed live in
       `services/ui/docker-entrypoint.sh`).
 
+      Applicability flag (found 2026-08-27, not resolved here):
+      `services/ui/Dockerfile`'s final stage is `FROM
+      mirror.gcr.io/library/alpine:3.24`, and every Trivy scan of a
+      first-party service in this repo's CI (`trivy-scan-exact-digest`
+      in build-push.yml/build-push-hosted-fallback.yml) targets the
+      exact pushed final-stage digest, never an intermediate build
+      stage. A live scan of `ui:nightly` confirms Trivy detects it as
+      `alpine 3.24.1`, not Debian -- none of this 30-ID group's Debian
+      package names can appear in that scan's `os-pkgs` findings at
+      all. This group may therefore no longer need `services/ui` in its
+      applicability claim (only `tools/build-tools`, confirmed Debian
+      and confirmed still matching several of these IDs live, e.g.
+      CVE-2026-13221/CVE-2026-8376/CVE-2026-42496/CVE-2026-42497/
+      CVE-2026-9538/CVE-2026-54369/CVE-2025-69720/CVE-2026-41992 in a
+      2026-08-27 full-severity, no-ignorefile scan of `build-tools:
+      nightly`) -- not changed in this pass since it doesn't affect
+      whether these 30 entries stay or go, flagged for the maintainer
+      to confirm/correct the wording.
+
       From: Issue #815, PR #1454, Issue #1598
     status: not_affected
     expired_at: 2026-09-30
