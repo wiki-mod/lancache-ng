@@ -9,6 +9,11 @@
 # early; production service Dockerfiles stay separately pinned instead,
 # for reproducible runtime image builds.
 # From: Issue #1570 | PR #1571
+# What: global ARG so the later utilities-tools FROM can use it.
+# Why: an ARG used in a FROM must precede the file's first FROM to be
+#   in scope there, matching dns/watchdog/ui's Dockerfiles.
+# From: Issue #1095 | PR #1706
+ARG UTILITIES_IMAGE=ghcr.io/wiki-mod/lancache-ng/utilities:latest
 FROM golang:latest AS actionlint-builder
 
 ARG ACTIONLINT_VERSION=1.7.12
@@ -102,9 +107,10 @@ RUN set -euo pipefail; \
 # to a glibc host too (static, no dynamic curl dependency), so this image
 # reuses it instead of Debian's own curl package. Mutable :latest tag per
 # AG-KD-010, matching every other utilities consumer -- never digest-pin
-# this image.
-# From: Issue #1304 | Issue #1556 | Issue #1095 (AG-KD-010)
-FROM ghcr.io/wiki-mod/lancache-ng/utilities:latest AS utilities-tools
+# this image. UTILITIES_IMAGE is declared globally near the top of this
+# file (required for use in a FROM), matching dns/watchdog/ui.
+# From: Issue #1304 | Issue #1556 | Issue #1095 (AG-KD-010) | PR #1706
+FROM ${UTILITIES_IMAGE} AS utilities-tools
 
 FROM rust:latest
 
