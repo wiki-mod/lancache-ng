@@ -110,7 +110,7 @@ if [ "${OUTCOME}" = "success" ]; then
     add_to_project_board "https://github.com/${REPO}/issues/${existing}"
     echo "success: closing standing ${LABEL} issue #${existing}"
     run gh issue comment "${existing}" --repo "${REPO}" \
-      --body "Recovered: ${SCOPE} succeeded in ${RUN_URL}. Closing this standing tracking issue automatically; it will re-open if a later scheduled run fails."
+      --body "Recovered: ${SCOPE} succeeded in ${RUN_URL}. Closing this standing tracking issue automatically; it will re-open if this check fails again."
     run gh issue close "${existing}" --repo "${REPO}"
   else
     echo "success and no open ${LABEL} issue: nothing to do"
@@ -139,8 +139,8 @@ if [ -n "${existing}" ]; then
 else
   echo "failure: opening a new standing ${LABEL} issue"
   new_issue_url="$(run gh issue create --repo "${REPO}" --label "${LABEL}" \
-    --title "[${LABEL}] a scheduled CI run is failing" \
-    --body "A scheduled CI run failed. This standing issue is reused across consecutive failures and closed automatically on the next successful run.
+    --title "[${LABEL}] ${SCOPE}" \
+    --body "This standing issue is reused across consecutive failures of this check and closed automatically on the next success.
 
 ${detail}.")"
   if [ "${DRY_RUN}" = "true" ]; then
