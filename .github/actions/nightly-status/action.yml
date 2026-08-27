@@ -2,22 +2,18 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: files/updates/closes a standing issue for a scheduled run's result.
-# Why: nightly-refresh.yml only reports its own dispatch call, never the
-#   dispatched run's real outcome -- confirmed live, nightly frozen 9 days.
+# What: files/updates/closes a standing issue for a run's real outcome.
+# Why: nightly-refresh.yml only reported its own dispatch, never the
+#   dispatched run's real result -- nightly sat frozen 9 days.
 # From: Issue #1095
 
 name: Report scheduled-CI status
 description: >-
   File, update, or close a single standing tracking issue based on a
-  run's real outcome, keyed by `label` (default "nightly-broken" -- this
-  action originated for the nightly pipeline, per Issue #1095, but the
-  label input makes it reusable for any recurring, self-healing
-  pass/fail signal, e.g. an untriaged Trivy finding). A distinct label
-  per caller keeps standing issues from different contexts (nightly vs.
-  a specific image's Trivy scan) from colliding or cross-closing each
-  other. Must be invoked from a job with issues:write that runs with
-  if: always().
+  run's real outcome, keyed by `label` (default "nightly-broken" --
+  reusable for any recurring, self-healing pass/fail signal via a
+  distinct label per caller, e.g. an untriaged Trivy finding). Must be
+  invoked from a job with issues:write that runs with if: always().
 
 inputs:
   outcome:
@@ -45,11 +41,62 @@ inputs:
       Left empty, the issue is simply not added to the board.
     required: false
     default: ""
+  fork-check-step-name:
+    description: >-
+      Display name of the caller's own check step (e.g. a Trivy scan
+      step) to reference in a fork-PR warning. Leave empty (default)
+      to skip fork handling entirely -- the original nightly-refresh
+      caller (never a pull_request event) does not set this and keeps
+      its original behavior unchanged. Non-empty enables: on a fork
+      pull_request, this action warns instead of trying to write an
+      issue (a fork PR's GITHUB_TOKEN has no issues:write regardless
+      of the caller's own permissions: block).
+    required: false
+    default: ""
 
 runs:
   using: composite
   steps:
-    - shell: bash
+    # What: detects a fork PR, only when fork-check-step-name is set.
+    # Why: a fork PR's token cannot write issues here either way; this
+    #   lets a same-repo caller skip fork-check entirely by omitting
+    #   the input, unchanged from this action's original behavior.
+    # From: Issue #1095
+    - name: Detect fork PR (no issues:write token available here)
+      id: fork-check
+      shell: bash
+      if: >-
+        inputs.fork-check-step-name != '' &&
+        github.event_name == 'pull_request'
+      run: |
+        set -euo pipefail
+        if [ "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.repository }}" ]; then
+          echo "is-fork=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "is-fork=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    # What: explicit warning on a fork PR instead of a silent drop.
+    # Why: AG-INT-002 -- a real signal must stay visible, not vanish.
+    # From: Issue #1095
+    - name: Warn on fork PR -- finding could not be filed as an issue
+      shell: bash
+      if: >-
+        inputs.outcome == 'failure' &&
+        steps.fork-check.outputs.is-fork == 'true'
+      run: |
+        echo "::warning::${{ inputs.scope }} failed, but this is a fork PR -- GITHUB_TOKEN has no issues:write here, so no tracking issue could be filed (see the '${{ inputs.fork-check-step-name }}' step above for the real report). A maintainer must review that report manually before merging."
+
+    # What: files/updates/closes the standing issue for non-fork runs.
+    # Why: continue-on-error -- a reporting-path failure (missing gh,
+    #   an API error, report.sh's own set -e) must never reintroduce
+    #   the hard fail a caller made itself non-blocking to avoid.
+    # From: Issue #1095
+    - name: Report status (self-closing issue)
+      id: report
+      shell: bash
+      if: steps.fork-check.outputs.is-fork != 'true'
+      continue-on-error: true
       env:
         GH_TOKEN: ${{ github.token }}
         PROJECT_PAT: ${{ inputs.project_pat }}
@@ -60,3 +107,12 @@ runs:
         FAILED_JOBS: ${{ inputs.failed_jobs }}
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       run: bash "${GITHUB_ACTION_PATH}/report.sh"
+
+    # What: surfaces a reporting-path failure instead of swallowing it.
+    # Why: AG-INT-002 -- must not look identical to "nothing to report."
+    # From: Issue #1095
+    - name: Warn if the report step itself failed
+      shell: bash
+      if: steps.report.outcome == 'failure'
+      run: |
+        echo "::warning::Reporting '${{ inputs.scope }}' as a self-closing issue failed (see the 'Report status (self-closing issue)' step above). The underlying finding is not hidden by this -- see the check step's own output -- but no tracking issue could be filed/updated for it this run."

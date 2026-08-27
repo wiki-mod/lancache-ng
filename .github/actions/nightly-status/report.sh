@@ -2,13 +2,10 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: files, updates, or closes one standing issue, keyed by LABEL
-#   (default "nightly-broken").
-# Why: reused across consecutive failures; closed on the next success.
-#   Originated for the nightly pipeline; LABEL is caller-overridable
-#   (see action.yml's `label` input) so any other recurring, self-
-#   healing signal -- e.g. an untriaged Trivy finding -- can reuse this
-#   same script under its own label instead of a new one being written.
+# What: files, updates, or closes one standing issue, keyed by LABEL.
+# Why: reused across consecutive failures, closed on next success --
+#   LABEL is caller-overridable so any recurring signal (e.g. a Trivy
+#   finding) reuses this script instead of a near-duplicate one.
 # From: Issue #1095
 
 set -euo pipefail
@@ -121,15 +118,9 @@ if [ "${OUTCOME}" = "success" ]; then
   exit 0
 fi
 
-# What: OUTCOME is a failure; ensures the label exists, reuses/opens issue.
-# Why: gh label create erroring on an already-existing label is harmless
-#   (the `|| true`); the 100-char truncation below is not that same kind
-#   of "harmless swallow" -- GitHub's label description field has a hard
-#   100-character limit, and an over-length description would otherwise
-#   make gh label create fail for a reason unrelated to "label already
-#   exists," get masked by the same `|| true`, and silently leave the
-#   label undescribed (AG-INT-002: don't let a real failure hide behind
-#   an intentionally-tolerated one).
+# What: ensures the label exists before reusing/opening an issue.
+# Why: truncated to 100 chars -- GitHub's hard label-description
+#   limit; untruncated, `|| true` would mask that real failure too.
 # From: Issue #1095
 label_description="Recurring, self-closing tracking issue: ${SCOPE}"
 run gh label create "${LABEL}" --repo "${REPO}" --color b60205 \
