@@ -24,7 +24,7 @@ The first-party tooling package is:
 
 - `build-tools`
 - `utilities` (issue #1556; shared non-compiler CLI-tools image, consumed via
-  `COPY --from=` by seven first-party images -- see `release/stack-images.yml`'s
+  `COPY --from=` by eight first-party images -- see `release/stack-images.yml`'s
   own entry for the current `consumers:` list)
 
 The first-party metadata package is:
