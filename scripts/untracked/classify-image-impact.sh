@@ -417,8 +417,8 @@ output_bool() {
 }
 
 # What: per-service extension for each action relocated off "workflow".
-# Why: rust-acceleration-preflight builds dns/ui; configure-rust-sccache and
-#   cargo-with-sccache-fallback run dns/ui/watchdog's quality/test/audit jobs.
+# Why: rust-acceleration-preflight builds dns/ui/watchdog; configure-rust-sccache
+#   and cargo-with-sccache-fallback run dns/ui/watchdog's quality/test/audit jobs.
 # From: Issue #1095 (G15)
 touches_dns_rust() {
     touches_prefix "services/dns/nats-subscriber/" \
@@ -437,6 +437,7 @@ touches_ui() {
 }
 touches_watchdog() {
     touches_prefix "services/watchdog/" \
+        || touches_action "rust-acceleration-preflight" \
         || touches_action "configure-rust-sccache" \
         || touches_action "cargo-with-sccache-fallback"
 }
