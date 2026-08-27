@@ -4926,6 +4926,11 @@ jobs:
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
+    # What: adds issues:write; other scopes below stay unchanged.
+    # Why: job-level permissions: replaces, not merges, the
+    #   workflow-level block; issues:write is for the self-closing
+    #   Trivy report added to this job.
+    # From: Issue #1095
       UTILITIES_IMAGE: ${{ needs['validate-compose'].outputs.utilities_image }}
       UTILITIES_DIGEST: ${{ needs['validate-compose'].outputs.utilities_digest }}
     permissions:
@@ -4934,6 +4939,7 @@ jobs:
       id-token: write
       attestations: write
       artifact-metadata: write
+      issues: write
     strategy:
       fail-fast: false
       matrix:
@@ -5820,6 +5826,11 @@ jobs:
               )
             )
           }}
+        # What: soft-fails only on a PR; push stays hard-failing.
+        # Why: a PR-context finding reports via the step below instead
+        #   (release-gate decision -- still tracked, not hidden).
+        # From: Issue #1095
+        continue-on-error: ${{ github.event_name == 'pull_request' }}
         # What: 50-minute timeout for this Trivy scan step.
         # Why: The wrapped trivy-scan-retry action can attempt up to 4 scans.
         # From: Issue #1095 | PR #1619
@@ -5833,6 +5844,23 @@ jobs:
           image-ref: ghcr.io/${{ github.repository }}/${{ matrix.service }}@${{ steps.build.outputs.digest }}
           cache-dir: ${{ steps.trivy-cache.outputs.dir }}
           cleanup-cache: ${{ steps.trivy-cache.outputs.ephemeral == 'true' && 'true' || 'false' }}
+
+      # What: reports the scan outcome as a self-closing issue.
+      # Why: nightly-status owns this pattern (AG-CODE-013); the
+      #   "-amd64" label keeps this arch's finding from cross-closing
+      #   build-arm64's own report for the same service.
+      # From: Issue #1095
+      - name: Report Trivy PR-scan status (non-blocking, self-closing issue)
+        if: github.event_name == 'pull_request' && steps.build.outcome == 'success'
+        uses: ./.github/actions/nightly-status
+        with:
+          outcome: ${{ steps.trivy-scan-pushed.outcome == 'failure' && 'failure' || 'success' }}
+          label: trivy-finding-${{ matrix.service }}-amd64
+          scope: >-
+            Trivy HIGH/CRITICAL finding in ${{ matrix.service }} (amd64),
+            not covered by .trivyignore.yaml
+          fork-check-step-name: Scan pushed service digest with Trivy
+          project_pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
 
       - name: Delete GHCR package version pushed by a failed scan
         # What: deletes the just-pushed digest when its own Trivy scan fails.
@@ -5965,6 +5993,11 @@ jobs:
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
+    # What: adds issues:write; other scopes below stay unchanged.
+    # Why: job-level permissions: replaces, not merges, the
+    #   workflow-level block; issues:write is for the self-closing
+    #   Trivy report added to this job.
+    # From: Issue #1095
       UTILITIES_IMAGE: ${{ needs['validate-compose'].outputs.utilities_image }}
       UTILITIES_DIGEST: ${{ needs['validate-compose'].outputs.utilities_digest }}
     permissions:
@@ -5973,6 +6006,7 @@ jobs:
       id-token: write
       attestations: write
       artifact-metadata: write
+      issues: write
     strategy:
       fail-fast: false
       matrix:
@@ -6374,6 +6408,11 @@ jobs:
               )
             )
           }}
+        # What: soft-fails only on a PR; push stays hard-failing.
+        # Why: a PR-context finding reports via the step below instead
+        #   (release-gate decision -- still tracked, not hidden).
+        # From: Issue #1095
+        continue-on-error: ${{ github.event_name == 'pull_request' }}
         # What: 50-minute timeout for this Trivy scan step.
         # Why: The wrapped trivy-scan-retry action can attempt up to 4 scans.
         # From: Issue #1095 | PR #1619
@@ -6387,6 +6426,23 @@ jobs:
           image-ref: ghcr.io/${{ github.repository }}/${{ matrix.service }}@${{ steps.build.outputs.digest }}
           cache-dir: ${{ runner.temp }}/trivy-${{ matrix.service }}-arm64-${{ github.run_id }}-${{ github.run_attempt }}
           cleanup-cache: "true"
+
+      # What: reports the scan outcome as a self-closing issue.
+      # Why: nightly-status owns this pattern (AG-CODE-013); the
+      #   "-arm64" label keeps this arch's finding from cross-closing
+      #   build's own report for the same service.
+      # From: Issue #1095
+      - name: Report Trivy PR-scan status (non-blocking, self-closing issue)
+        if: github.event_name == 'pull_request' && steps.build.outcome == 'success'
+        uses: ./.github/actions/nightly-status
+        with:
+          outcome: ${{ steps.trivy-scan-pushed.outcome == 'failure' && 'failure' || 'success' }}
+          label: trivy-finding-${{ matrix.service }}-arm64
+          scope: >-
+            Trivy HIGH/CRITICAL finding in ${{ matrix.service }} (arm64),
+            not covered by .trivyignore.yaml
+          fork-check-step-name: Scan pushed service digest with Trivy
+          project_pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
 
       - name: Delete GHCR package version pushed by a failed scan
         # What: same cleanup as build's own step, for this job's arm64 leg.
