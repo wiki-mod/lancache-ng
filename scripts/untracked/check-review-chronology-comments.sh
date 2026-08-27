@@ -6,15 +6,22 @@
 # Why: the maintainer's monolith-first direction; full evidence for each
 #   check's pattern design lives in the PR/commit history (#1385, #1546).
 # From: PR #1546
+#
+# What: adds explicit-file, warn-only, and diff-scoped scan modes.
+# Why: lets a repo-wide warn-only baseline coexist with a diff-scoped
+#   blocking pass without one violation blocking every PR (kept here,
+#   not a sibling file, per this file's own monolith-first direction).
+# From: Issue #1095 | PR #1686
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd "$script_dir/../.." && pwd)
 target_root="${1:-$repo_root}"
 cd "$target_root"
+shift || true
 
 # What: Excludes this script and its bats test from their own scan.
-# Why: Both quote the banned phrases verbatim as documentation.
+# Why: Both quote the banned phrases verbatim as documentation/fixtures.
 # From: PR #1546
 is_self_reference() {
     case "$1" in
@@ -170,11 +177,47 @@ check_bare_issue_ref_duplicates_from() {
     done <<< "$from_nums"
 }
 
-# What: Checks for ".git" directly under target_root, not an ancestor dir.
-# Why: A bats fixture nested inside this repo's own working copy must stay
-#   a plain fixture, not fall through to git ls-files on the outer repo.
-# From: PR #1546
-if [ -e "$target_root/.git" ]; then
+# What: computes the changed-file list between the diff base and GITHUB_SHA.
+# Why: mirrors check-pr-diff-file-headers.sh's fetch/diff/mapfile
+#   mechanism; the NUL-delimited diff goes to a real file, never a
+#   substitution, since $(...) strips NULs and hides set -e's exit status.
+# From: Issue #1095 | PR #1686
+diff_scoped_files() {
+    # shellcheck source=scripts/lib/git-fetch-retry.sh
+    source "$script_dir/../lib/git-fetch-retry.sh"
+    : "${CHRONOLOGY_DIFF_BASE_REF:?CHRONOLOGY_DIFF_BASE_REF is required}"
+    : "${GITHUB_SHA:?GITHUB_SHA is required}"
+
+    git_fetch_retry --no-tags --depth=1 origin \
+        "+refs/heads/${CHRONOLOGY_DIFF_BASE_REF}:refs/remotes/origin/${CHRONOLOGY_DIFF_BASE_REF}"
+    git_fetch_retry --no-tags --depth=1 origin "$CHRONOLOGY_DIFF_BASE_SHA"
+    git cat-file -e "${CHRONOLOGY_DIFF_BASE_SHA}^{commit}"
+    git cat-file -e "${GITHUB_SHA}^{commit}"
+
+    local diff_file
+    diff_file="$(mktemp)"
+    trap 'rm -f "$diff_file"' RETURN
+    if ! git diff -z --name-only --diff-filter=ACMRTUXB "$CHRONOLOGY_DIFF_BASE_SHA" "$GITHUB_SHA" > "$diff_file"; then
+        echo "::error::check-review-chronology-comments: \`git diff\` itself failed between $CHRONOLOGY_DIFF_BASE_SHA and $GITHUB_SHA. Not treating this as a clean (empty) pass." >&2
+        exit 1
+    fi
+    if [ -s "$diff_file" ]; then
+        mapfile -d '' files < "$diff_file"
+    else
+        files=()
+    fi
+}
+
+# What: dispatches to diff-scoped files, explicit file args, or a full scan.
+# Why: ".git" is checked directly under target_root, not an ancestor
+#   dir, so a bats fixture nested inside this repo's own working copy
+#   stays a plain fixture instead of falling through to the outer repo.
+# From: PR #1546 | Issue #1095
+if [ -n "${CHRONOLOGY_DIFF_BASE_SHA:-}" ]; then
+    diff_scoped_files
+elif [ "$#" -gt 0 ]; then
+    files=("$@")
+elif [ -e "$target_root/.git" ]; then
     mapfile -t files < <(git ls-files)
 else
     mapfile -t files < <(find . -type f -print | sed 's#^\./##')
@@ -247,6 +290,10 @@ if [ "${#duplicate_ref_violations[@]}" -gt 0 ]; then
 fi
 
 if [ "$violations_found" -eq 1 ]; then
+    if [ "${CHRONOLOGY_WARN_ONLY:-0}" = "1" ]; then
+        echo "::warning::check-review-chronology-comments: AG-CODE-002/003/012 violation(s) found repo-wide (see above) -- not blocking this run; a PR that touches the offending file must still fix it under the diff-scoped check." >&2
+        exit 0
+    fi
     exit 1
 fi
 

@@ -231,6 +231,8 @@ jobs:
       - uses: ./.github/actions/file-headers-check
         with:
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
+          diff-base-sha: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
+          diff-base-ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || '' }}
       - name: Check SPDX header on this PR's changed files (AG-HDR-008)
         # What: diff-scoped SPDX header check (AG-HDR-008) on PR-changed files.
         # Why: repo-wide check is a hard gate; this is PR-specific attribution.
@@ -575,6 +577,8 @@ jobs:
       - uses: ./.github/actions/file-headers-check
         with:
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
+          diff-base-sha: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
+          diff-base-ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || '' }}
       - name: Check SPDX header on this PR's changed files (AG-HDR-008)
         # What: mirrors the self-hosted file-headers job's step exactly.
         # Why: keeps parity: same PR-diff header check either way.
