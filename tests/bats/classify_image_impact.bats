@@ -124,11 +124,11 @@ val() {
     [ "$(val workflow)" = "false" ]
 }
 
-# G15: rust-acceleration-preflight only builds dns/ui/watchdog in the
-# `build` job (matrix.rust) -- a change to it must not force proxy/dhcp/etc.
-# to rebuild, the exact PR #1634 incident shape (a change to one action
-# forced all 10 services to rebuild). watchdog joined dns/ui once the
-# ccache-over-distcc preflight coverage gap (Issue #1095) was fixed.
+# What: rust-acceleration-preflight changes set only dns/ui/watchdog image
+#   flags in the `build` job's matrix.rust, never the other services.
+# Why: guards against the PR #1634 regression shape, where a change to one
+#   shared action forced all 10 services to rebuild.
+# From: Issue #1095
 @test "G15: rust-acceleration-preflight change sets only dns_image/ui/watchdog, workflow false" {
     run_classify ".github/actions/rust-acceleration-preflight/action.yml"
     [ "$(val dns_image)" = "true" ]

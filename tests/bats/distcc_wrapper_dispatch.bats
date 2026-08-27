@@ -6,7 +6,7 @@
 # Why: both are extracted verbatim from their real source (Dockerfile/
 #   action.yml heredocs) so a future edit is exercised without a
 #   hand-copied duplicate to keep in sync.
-# From: Issue #1533 | PR #1612 | Issue #1095
+# From: Issue #1095
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -24,8 +24,7 @@ setup() {
     extract_preflight_pump_host_count
 }
 
-# What: pulls scan_log()/scan_distcc_compile_log() out of
-#   rust-acceleration-preflight/action.yml's heredoc and sources them.
+# What: pulls scan_log()/scan_distcc_compile_log() out of action.yml's heredoc.
 # Why: brace-depth tracking is required, not a bare closing-brace match,
 #   since both functions nest their own if/then blocks.
 # From: Issue #1095
@@ -52,8 +51,7 @@ extract_preflight_scan_functions() {
     preflight_log_file="$BATS_TEST_TMPDIR/probe.log"
 }
 
-# What: pulls distcc_pump_published_hosts()/distcc_pump_real_host_count()
-#   out of the same action.yml, sourced independently of the scan pair.
+# What: pulls distcc_pump_published_hosts()/distcc_pump_real_host_count() out of action.yml.
 # Why: both functions share the same --* exclusion rule; testing them
 #   together catches the two ever silently diverging again.
 # From: Issue #1095
@@ -186,7 +184,7 @@ EOF
 }
 
 @test "preflight: single benign connect-refused line is tolerated with 2+ hosts" {
-    printf 'distcc[123] ERROR: nonblocking connect to 192.168.1.229:3632 failed: Connection refused\n' > "$preflight_log_file"
+    printf 'distcc[123] ERROR: nonblocking connect to 192.0.2.1:3632 failed: Connection refused\n' > "$preflight_log_file"
     run scan_distcc_compile_log "$preflight_log_file" 2
     [ "$status" -eq 0 ]
 }
@@ -232,13 +230,13 @@ EOF
 }
 
 @test "preflight: pump host count excludes option tokens (single real host plus a flag stays 1)" {
-    run distcc_pump_real_host_count "--randomize 192.168.1.229"
+    run distcc_pump_real_host_count "--randomize 192.0.2.1"
     [ "$status" -eq 0 ]
     [ "$output" -eq 1 ]
 }
 
 @test "preflight: pump host count matches real hosts with no option tokens present" {
-    run distcc_pump_real_host_count "192.168.1.229 192.168.1.240"
+    run distcc_pump_real_host_count "192.0.2.1 192.0.2.2"
     [ "$status" -eq 0 ]
     [ "$output" -eq 2 ]
 }
