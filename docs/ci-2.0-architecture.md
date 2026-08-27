@@ -2157,7 +2157,7 @@ readable.
 > `What:`/`Why:`/`From:` narratives from workflow YAML does **not** remove
 > this project's required `What:`/`Why:`/`From:` code-documentation
 > convention. That convention remains applicable to `ci.sh` and `ci.bats`
-> wherever `AG-CODE-012` mandates it (max 80 characters each for `What:`
+> wherever `AG-CODE-012` mandates it (max 60 characters each for `What:`
 > and `Why:`; `From:` may list more than one source where genuinely
 > applicable). The goal of this section is removing duplicated
 > implementation history from orchestration YAML, not reducing required
