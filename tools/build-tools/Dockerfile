@@ -102,9 +102,11 @@ RUN set -euo pipefail; \
 # to a glibc host too (static, no dynamic curl dependency), so this image
 # reuses it instead of Debian's own curl package. Mutable :latest tag per
 # AG-KD-010, matching every other utilities consumer -- never digest-pin
-# this image.
-# From: Issue #1304 | Issue #1556 | Issue #1095 (AG-KD-010)
-FROM ghcr.io/wiki-mod/lancache-ng/utilities:latest AS utilities-tools
+# this image. Overridable via UTILITIES_IMAGE, matching every other
+# consumer Dockerfile's ARG/FROM pattern (e.g. services/proxy/Dockerfile).
+# From: Issue #1304 | Issue #1556 | Issue #1095 (AG-KD-010) | PR #1706
+ARG UTILITIES_IMAGE=ghcr.io/wiki-mod/lancache-ng/utilities:latest
+FROM ${UTILITIES_IMAGE} AS utilities-tools
 
 FROM rust:latest
 

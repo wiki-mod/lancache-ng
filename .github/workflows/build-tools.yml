@@ -60,6 +60,7 @@ jobs:
       contents: read
     outputs:
       should-publish: ${{ steps.should-publish.outputs.should-publish }}
+      utilities-image: ${{ steps.resolve-utilities-image.outputs.utilities-image }}
     steps:
       - name: Confirm standalone route
         run: |
@@ -68,6 +69,30 @@ jobs:
 
       - name: Checkout
         uses: &checkout_centraliced_versioning actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # What: resolves utilities:latest, falls back to :nightly.
+      # Why: this workflow's own Dockerfile build has no UTILITIES_IMAGE
+      #   build-arg override, so it needs a real resolved reference.
+      # From: Issue #1095 | PR #1706
+      - name: Resolve utilities image digest
+        id: resolve-utilities-image
+        env:
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # shellcheck source=scripts/lib/ghcr-retry.sh
+          source scripts/lib/ghcr-retry.sh
+
+          utilities_digest="$(resolve_manifest_digest ghcr.io/wiki-mod/lancache-ng/utilities:latest "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")" \
+            || utilities_digest="$(resolve_manifest_digest ghcr.io/wiki-mod/lancache-ng/utilities:nightly "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")" \
+            || utilities_digest=""
+          if [[ -z "$utilities_digest" ]]; then
+            echo "::error::Could not resolve digest for ghcr.io/wiki-mod/lancache-ng/utilities:latest or :nightly." >&2
+            exit 1
+          fi
+
+          printf 'utilities-image=ghcr.io/wiki-mod/lancache-ng/utilities@%s\n' "$utilities_digest" >> "$GITHUB_OUTPUT"
 
       # What: computes should-publish once, shared by build-tools/build-tools-arm64 (AG-CI-010).
       # Why: skips a redundant rebuild/republish when neither tools/build-tools/** nor this
@@ -122,6 +147,8 @@ jobs:
     concurrency:
       group: build-tools-amd64-image-build
       cancel-in-progress: false
+    env:
+      UTILITIES_IMAGE: ${{ needs['determine-publish-scope'].outputs.utilities-image }}
     # What: adds issues:write; other scopes below stay unchanged.
     # Why: job-level permissions: replaces, not merges, the
     #   workflow-level block -- issues:write is for the self-closing
@@ -317,6 +344,7 @@ jobs:
             --platform linux/amd64 \
             --provenance=false \
             --build-arg "APT_CACHE_BUST=$APT_CACHE_BUST" \
+            --build-arg "UTILITIES_IMAGE=$UTILITIES_IMAGE" \
             --cache-from "type=local,src=$BUILDX_CACHE_FROM_DIR" \
             --cache-to "type=local,dest=$BUILDX_CACHE_TO_DIR,mode=max" \
             tools/build-tools
@@ -343,6 +371,7 @@ jobs:
             org.opencontainers.image.base.golang.digest=${{ steps.build-tools-base-digests.outputs.golang }}
           build-args: |
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
+            UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
           secret-files: |
             ${{ steps.ccache-distcc-secret.outputs.ccache-redis-file != '' && format('ccache_redis_url={0}', steps.ccache-distcc-secret.outputs.ccache-redis-file) || '' }}
             ${{ steps.ccache-distcc-secret.outputs.distcc-hosts-file != '' && format('distcc_potential_hosts={0}', steps.ccache-distcc-secret.outputs.distcc-hosts-file) || '' }}
@@ -523,6 +552,8 @@ jobs:
     needs: determine-publish-scope
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 150
+    env:
+      UTILITIES_IMAGE: ${{ needs['determine-publish-scope'].outputs.utilities-image }}
     # What: adds issues:write; other scopes below stay unchanged.
     # Why: same addition as the amd64 build-tools job above.
     # From: Issue #1095
@@ -601,6 +632,7 @@ jobs:
           platforms: linux/arm64
           build-args: |
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
+            UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
           provenance: false
           cache-from: type=gha,scope=build-tools-arm64
           cache-to: type=gha,scope=build-tools-arm64,mode=max
@@ -623,6 +655,7 @@ jobs:
             org.opencontainers.image.base.golang.digest=${{ steps.build-tools-base-digests.outputs.golang }}
           build-args: |
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
+            UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
           outputs: type=image,oci-mediatypes=true
           platforms: linux/arm64
           provenance: false
