@@ -14,7 +14,7 @@
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    script="$repo_root/scripts/untracked/check-review-chronology-comments.sh"
+    script="$repo_root/scripts/tracked/check-review-chronology-comments.sh"
     fixture_root="$(mktemp -d)"
 }
 
@@ -201,11 +201,11 @@ EOF
 # From: PR #1546
 @test "does not flag itself: the script's own file and its bats test are excluded from the scan" {
     mkdir -p "$fixture_root/scripts/untracked" "$fixture_root/tests/bats"
-    cp "$script" "$fixture_root/scripts/untracked/check-review-chronology-comments.sh"
+    cp "$script" "$fixture_root/scripts/tracked/check-review-chronology-comments.sh"
     cp "$BATS_TEST_DIRNAME/check_review_chronology_comments.bats" \
         "$fixture_root/tests/bats/check_review_chronology_comments.bats"
 
-    run bash "$fixture_root/scripts/untracked/check-review-chronology-comments.sh" "$fixture_root"
+    run bash "$fixture_root/scripts/tracked/check-review-chronology-comments.sh" "$fixture_root"
     [ "$status" -eq 0 ] || fail "guard flagged its own documentation/test file: $output"
 }
 
@@ -535,7 +535,7 @@ setup_diff_fixture() {
     git init --quiet --bare "$diff_origin_dir"
     git init --quiet -b main "$diff_work_dir"
     mkdir -p "$diff_work_dir/scripts/untracked" "$diff_work_dir/scripts/lib"
-    cp "$script" "$diff_work_dir/scripts/untracked/check-review-chronology-comments.sh"
+    cp "$script" "$diff_work_dir/scripts/tracked/check-review-chronology-comments.sh"
     cp "$repo_root/scripts/lib/git-fetch-retry.sh" "$diff_work_dir/scripts/lib/git-fetch-retry.sh"
     (
         cd "$diff_work_dir" || exit 1
@@ -555,7 +555,7 @@ setup_diff_fixture() {
 # From: Issue #1095
 @test "diff mode passes silently when the diff is empty (base and head are the same commit)" {
     setup_diff_fixture
-    run bash -c "cd '$diff_work_dir' && CHRONOLOGY_DIFF_BASE_SHA='$diff_base_sha' CHRONOLOGY_DIFF_BASE_REF=main GITHUB_SHA='$diff_base_sha' bash scripts/untracked/check-review-chronology-comments.sh"
+    run bash -c "cd '$diff_work_dir' && CHRONOLOGY_DIFF_BASE_SHA='$diff_base_sha' CHRONOLOGY_DIFF_BASE_REF=main GITHUB_SHA='$diff_base_sha' bash scripts/tracked/check-review-chronology-comments.sh"
     [ "$status" -eq 0 ]
 }
 
@@ -571,7 +571,7 @@ setup_diff_fixture() {
         git commit --quiet -m "add a file with a chronology violation"
     )
     diff_head_sha="$(cd "$diff_work_dir" && git rev-parse HEAD)"
-    run bash -c "cd '$diff_work_dir' && CHRONOLOGY_DIFF_BASE_SHA='$diff_base_sha' CHRONOLOGY_DIFF_BASE_REF=main GITHUB_SHA='$diff_head_sha' bash scripts/untracked/check-review-chronology-comments.sh"
+    run bash -c "cd '$diff_work_dir' && CHRONOLOGY_DIFF_BASE_SHA='$diff_base_sha' CHRONOLOGY_DIFF_BASE_REF=main GITHUB_SHA='$diff_head_sha' bash scripts/tracked/check-review-chronology-comments.sh"
     [ "$status" -eq 1 ]
     [[ "$output" == *"bad.sh"* ]]
 }
@@ -597,7 +597,7 @@ setup_diff_fixture() {
         git commit --quiet -m "the actual PR change, unrelated to the pre-existing violation"
     )
     diff_head_sha="$(cd "$diff_work_dir" && git rev-parse HEAD)"
-    run bash -c "cd '$diff_work_dir' && CHRONOLOGY_DIFF_BASE_SHA='$diff_new_base_sha' CHRONOLOGY_DIFF_BASE_REF=main GITHUB_SHA='$diff_head_sha' bash scripts/untracked/check-review-chronology-comments.sh"
+    run bash -c "cd '$diff_work_dir' && CHRONOLOGY_DIFF_BASE_SHA='$diff_new_base_sha' CHRONOLOGY_DIFF_BASE_REF=main GITHUB_SHA='$diff_head_sha' bash scripts/tracked/check-review-chronology-comments.sh"
     [ "$status" -eq 0 ] || fail "a violation outside the diff must not fail this PR: $output"
 }
 
@@ -606,7 +606,7 @@ setup_diff_fixture() {
 # From: Issue #1095
 @test "diff mode fails closed with a clear diagnostic when a required environment variable is missing" {
     setup_diff_fixture
-    run bash -c "cd '$diff_work_dir' && CHRONOLOGY_DIFF_BASE_SHA='$diff_base_sha' GITHUB_SHA='$diff_base_sha' bash scripts/untracked/check-review-chronology-comments.sh"
+    run bash -c "cd '$diff_work_dir' && CHRONOLOGY_DIFF_BASE_SHA='$diff_base_sha' GITHUB_SHA='$diff_base_sha' bash scripts/tracked/check-review-chronology-comments.sh"
     [ "$status" -ne 0 ]
     [[ "$output" == *"CHRONOLOGY_DIFF_BASE_REF"* ]]
 }
@@ -628,7 +628,7 @@ fi
 exec "$real_git" "\$@"
 EOF
     chmod +x "$fixture_root/bin/git"
-    run bash -c "cd '$diff_work_dir' && PATH='$fixture_root/bin:$PATH' CHRONOLOGY_DIFF_BASE_SHA='$diff_base_sha' CHRONOLOGY_DIFF_BASE_REF=main GITHUB_SHA='$diff_base_sha' bash scripts/untracked/check-review-chronology-comments.sh"
+    run bash -c "cd '$diff_work_dir' && PATH='$fixture_root/bin:$PATH' CHRONOLOGY_DIFF_BASE_SHA='$diff_base_sha' CHRONOLOGY_DIFF_BASE_REF=main GITHUB_SHA='$diff_base_sha' bash scripts/tracked/check-review-chronology-comments.sh"
     [ "$status" -eq 1 ]
     [[ "$output" == *"git diff\` itself failed"* ]]
 }

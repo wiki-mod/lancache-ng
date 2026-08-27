@@ -2,13 +2,13 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Regression coverage for scripts/tracked/check-file-headers.sh. Fixtures exercise the
+# Regression coverage for scripts/untracked/check-file-headers.sh. Fixtures exercise the
 # exact physical line contract, native comment syntax, duplicate/legacy-header
 # rejection, and the pre-existing exclusion/path behavior. Whole-repository
 # mode is also exercised now that the backfill is complete and hard-enforced.
 
 setup() {
-    script="$BATS_TEST_DIRNAME/../../scripts/tracked/check-file-headers.sh"
+    script="$BATS_TEST_DIRNAME/../../scripts/untracked/check-file-headers.sh"
     fixture_dir="$BATS_TEST_TMPDIR/fx"
     mkdir -p "$fixture_dir"
 }

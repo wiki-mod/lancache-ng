@@ -2,10 +2,10 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Coverage for scripts/tracked/check-setup-prompt-drift.sh (#1176): the CI guard that
+# Coverage for scripts/untracked/check-setup-prompt-drift.sh (#1176): the CI guard that
 # fails when setup.sh's interactive install wizard and its expect-driven
-# simulation scripts (scripts/untracked/simulations/setup-cli-simulation.sh,
-# scripts/untracked/simulations/syslog-forwarding-simulation.sh) drift apart
+# simulation scripts (scripts/tracked/simulations/setup-cli-simulation.sh,
+# scripts/tracked/simulations/syslog-forwarding-simulation.sh) drift apart
 # on the wizard's hand-duplicated
 # prompt text -- the exact failure class that let PR #1082 hang both
 # simulation scripts (issue #1175) when a new unconditional prompt was added
@@ -26,9 +26,9 @@
 # sandbox.
 
 setup() {
-    script="$BATS_TEST_DIRNAME/../../scripts/tracked/check-setup-prompt-drift.sh"
+    script="$BATS_TEST_DIRNAME/../../scripts/untracked/check-setup-prompt-drift.sh"
     fixture_root="$BATS_TEST_TMPDIR/fixture-repo"
-    mkdir -p "$fixture_root/scripts/untracked/simulations"
+    mkdir -p "$fixture_root/scripts/tracked/simulations"
 }
 
 # write_setup <wizard_body>
@@ -87,8 +87,8 @@ EOF
 
 write_both_sims() {
     local calls="$1"
-    write_sim "$fixture_root/scripts/untracked/simulations/setup-cli-simulation.sh" "$calls"
-    write_sim "$fixture_root/scripts/untracked/simulations/syslog-forwarding-simulation.sh" "$calls"
+    write_sim "$fixture_root/scripts/tracked/simulations/setup-cli-simulation.sh" "$calls"
+    write_sim "$fixture_root/scripts/tracked/simulations/syslog-forwarding-simulation.sh" "$calls"
 }
 
 @test "passes when the only unconditional prompt is covered by both simulation scripts" {
@@ -123,11 +123,11 @@ ask "Enable Widget Mode? [y/N]" "N"
 ask "Server IP (Standard mode)" "192.168.1.10"
 ask "Enable Widget Mode? [y/N]" "N"
 '
-    write_sim "$fixture_root/scripts/untracked/simulations/setup-cli-simulation.sh" '
+    write_sim "$fixture_root/scripts/tracked/simulations/setup-cli-simulation.sh" '
 expect_prompt {Server IP \(Standard mode\)} "192.168.1.10"
 expect_prompt {Enable Widget Mode\? \[y/N\]} ""
 '
-    write_sim "$fixture_root/scripts/untracked/simulations/syslog-forwarding-simulation.sh" '
+    write_sim "$fixture_root/scripts/tracked/simulations/syslog-forwarding-simulation.sh" '
 expect_prompt {Server IP \(Standard mode\)} "192.168.1.10"
 '
 
@@ -241,8 +241,8 @@ ask "$prompt_var" "N"'
 
 @test "fails closed when a simulation script has zero expect_prompt patterns" {
     write_setup 'ask "Server IP (Standard mode)" "192.168.1.10"'
-    write_sim "$fixture_root/scripts/untracked/simulations/setup-cli-simulation.sh" 'expect_prompt {Server IP \(Standard mode\)} "192.168.1.10"'
-    write_sim "$fixture_root/scripts/untracked/simulations/syslog-forwarding-simulation.sh" '# nothing at all'
+    write_sim "$fixture_root/scripts/tracked/simulations/setup-cli-simulation.sh" 'expect_prompt {Server IP \(Standard mode\)} "192.168.1.10"'
+    write_sim "$fixture_root/scripts/tracked/simulations/syslog-forwarding-simulation.sh" '# nothing at all'
 
     run bash "$script" "$fixture_root"
     [ "$status" -ne 0 ]
@@ -309,11 +309,11 @@ if [[ "${SOME_FLAG:-}" = "y" ]]; then
     # that would otherwise be reported stale if statically checked -- if
     # is_introspection_driven's skip did not work, this would fail on either
     # the zero-patterns check or a staleness mismatch.
-    write_sim "$fixture_root/scripts/untracked/simulations/setup-cli-simulation.sh" '
+    write_sim "$fixture_root/scripts/tracked/simulations/setup-cli-simulation.sh" '
 build_expect_prompt_block "setup.sh" "/tmp/does-not-matter" "192.168.1.10"
 spawn bash setup.sh
 '
-    write_sim "$fixture_root/scripts/untracked/simulations/syslog-forwarding-simulation.sh" 'expect_prompt {Server IP \(Standard mode\)} "192.168.1.10"'
+    write_sim "$fixture_root/scripts/tracked/simulations/syslog-forwarding-simulation.sh" 'expect_prompt {Server IP \(Standard mode\)} "192.168.1.10"'
 
     run bash "$script" "$fixture_root"
     [ "$status" -eq 0 ]
@@ -322,10 +322,10 @@ spawn bash setup.sh
 
 @test "is_introspection_driven: fails closed if a sim script references build_expect_prompt_block but no longer spawns setup.sh" {
     write_setup 'ask "Server IP (Standard mode)" "192.168.1.10"'
-    write_sim "$fixture_root/scripts/untracked/simulations/setup-cli-simulation.sh" '
+    write_sim "$fixture_root/scripts/tracked/simulations/setup-cli-simulation.sh" '
 build_expect_prompt_block "setup.sh" "/tmp/does-not-matter" "192.168.1.10"
 '
-    write_sim "$fixture_root/scripts/untracked/simulations/syslog-forwarding-simulation.sh" 'expect_prompt {Server IP \(Standard mode\)} "192.168.1.10"'
+    write_sim "$fixture_root/scripts/tracked/simulations/syslog-forwarding-simulation.sh" 'expect_prompt {Server IP \(Standard mode\)} "192.168.1.10"'
 
     run bash "$script" "$fixture_root"
     [ "$status" -ne 0 ]

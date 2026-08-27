@@ -351,7 +351,7 @@ fix_chrony_dir_ownership
 # (via chronyd's own `-x` flag, since every one of those hosts dies earlier
 # at the unrelated CAP_SYS_TIME/adjtimex restriction below, so `-F 1` was
 # never actually observed reaching a real synchronised state there) and a
-# GitHub-hosted `ubuntu-24.04` runner (`scripts/untracked/simulations/ntp-cap-sys-time-
+# GitHub-hosted `ubuntu-24.04` runner (`scripts/tracked/simulations/ntp-cap-sys-time-
 # simulation.sh`). Real end-to-end validation on a genuine, non-LXC KVM
 # VM (Debian 13, kernel 6.12.100) for issue #1296 found that `-F 1`
 # deterministically crashes chronyd there -- 4/4 real, unmodified `docker

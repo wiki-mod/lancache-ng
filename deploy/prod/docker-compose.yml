@@ -13,7 +13,7 @@
 name: lancache-ng
 
 # What: the Docker socket proxy's HAProxy allowlist lives in exactly one
-# place, scripts/untracked/docker-socket-proxy.sh (mounted read-only below).
+# place, scripts/tracked/docker-socket-proxy.sh (mounted read-only below).
 # Why: docs/naming-conventions.md names this the canonical source -- do not
 # duplicate the allowlist as a YAML anchor in this file.
 # From: PR #635
@@ -203,7 +203,7 @@ services:
         max-file: "2"
 
   # ── Watchdog (health monitor, auto-restart, purge cron) ──────────────────
-  # What: docker-socket-proxy limits Docker API access to Admin UI/watchdog operations via scripts/untracked/docker-socket-proxy.sh's custom HAProxy config.
+  # What: docker-socket-proxy limits Docker API access to Admin UI/watchdog operations via scripts/tracked/docker-socket-proxy.sh's custom HAProxy config.
   # Why: replaces Tecnativa's broad CONTAINERS/POST toggles with a deny-by-default allowlist for named lancache-ng containers.
   # From: PR #635
   docker-socket-proxy:
@@ -214,12 +214,12 @@ services:
     stdin_open: true
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ../../scripts/untracked/docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro
+      - ../../scripts/tracked/docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro
     networks:
       - docker-api
     healthcheck:
       # What: real HTTP probe against the Docker API's own /_ping endpoint, not a bare TCP connect; uses wget (BusyBox), this pinned Alpine image ships no curl.
-      # Why: proves the HAProxy frontend actually forwards to the real Docker socket, the same path watchdog itself depends on; /_ping is allowlisted by scripts/untracked/docker-socket-proxy.sh's `safe_ping` ACL.
+      # Why: proves the HAProxy frontend actually forwards to the real Docker socket, the same path watchdog itself depends on; /_ping is allowlisted by scripts/tracked/docker-socket-proxy.sh's `safe_ping` ACL.
       # From: Issue #1169
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:2375/_ping || exit 1"]
       interval: 30s
@@ -503,7 +503,7 @@ services:
       # From: Issue #1079 | PR #1082
       - "123:123/udp"
     # What: `cap_drop: [ALL]`, then only the capabilities below are added back for chronyd.
-    # Why: least-privilege posture; each grant was verified necessary via strace, and real clock-stepping under this set is proven on every PR by scripts/untracked/simulations/ntp-cap-sys-time-simulation.sh's GitHub-hosted job (self-hosted runners can't prove this).
+    # Why: least-privilege posture; each grant was verified necessary via strace, and real clock-stepping under this set is proven on every PR by scripts/tracked/simulations/ntp-cap-sys-time-simulation.sh's GitHub-hosted job (self-hosted runners can't prove this).
     # From: Issue #1413
     cap_drop:
       - ALL

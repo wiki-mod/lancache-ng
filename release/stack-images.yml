@@ -4,7 +4,7 @@
 # What: release manifest -- first-party/external images, tag channels,
 # and the image retention policy.
 # Why: consumed by the release/promotion CI workflow and
-# scripts/untracked/validate-stack-images.sh as the single source of release state.
+# scripts/tracked/validate-stack-images.sh as the single source of release state.
 # From: PR #432
 #
 # What: master publishes `latest` continuously; current_dev publishes
@@ -107,7 +107,7 @@ runtime:
       - deploy/prod/docker-compose.yml
       # What: deploy/quickstart/docker-compose.yml defines a `dhcp` too.
       # Why: never updated when quickstart grew its own Kea/dnsmasq-proxy
-      # DHCP path, so scripts/untracked/validate-stack-images.sh had nothing to check.
+      # DHCP path, so scripts/tracked/validate-stack-images.sh had nothing to check.
       # From: Issue #849
       - deploy/quickstart/docker-compose.yml
   - name: dhcp-proxy

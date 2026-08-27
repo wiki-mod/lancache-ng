@@ -2,10 +2,10 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Coverage for scripts/tracked/check-build-tools-smoke-coverage.sh (issues #790/#791
+# Coverage for scripts/untracked/check-build-tools-smoke-coverage.sh (issues #790/#791
 # / #822 Pattern G): the guard that fails CI when tools/build-tools/
 # Dockerfile's final verification list gains a tool that
-# scripts/untracked/select-build-tools-image.sh's smoke_test_image() neither checks nor
+# scripts/tracked/select-build-tools-image.sh's smoke_test_image() neither checks nor
 # explicitly excludes.
 #
 # Each scenario writes a minimal fixture pair (a Dockerfile with a
@@ -17,7 +17,7 @@
 # repo. The guard is invoked as `bash "$script"` per Rule-Ref: AG-VAL-024.
 
 setup() {
-    script="$BATS_TEST_DIRNAME/../../scripts/tracked/check-build-tools-smoke-coverage.sh"
+    script="$BATS_TEST_DIRNAME/../../scripts/untracked/check-build-tools-smoke-coverage.sh"
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     fixture="$BATS_TEST_TMPDIR/fx"
     mkdir -p "$fixture/tools/build-tools" "$fixture/scripts/untracked"
@@ -83,7 +83,7 @@ write_smoke() {
             echo '  # docker buildx is verified elsewhere (prose mention only)'
         fi
         echo '}'
-    } > "$fixture/scripts/untracked/select-build-tools-image.sh"
+    } > "$fixture/scripts/tracked/select-build-tools-image.sh"
 }
 
 @test "passes when the smoke test covers every Dockerfile-verified tool" {

@@ -4,14 +4,14 @@
 #
 # Docker-free, git-free unit coverage for
 # scripts/lib/full-setup-domain-probe.sh's resolve_full_setup_probe_domain()
-# (issue #1140): scripts/untracked/simulations/full-setup-client-simulation.sh used to pass a
+# (issue #1140): scripts/tracked/simulations/full-setup-client-simulation.sh used to pass a
 # leading-dot cdn-domains.txt entry (e.g. ".steamcontent.com", the
 # wildcard-only scope form from #1072/#1073/#1074) straight to `dig`, which
 # rejects it as an illegal empty-label name and fails the dns-standard check
 # on every full-setup validation run. Also sources scripts/lib/domain-
 # validation.sh to prove the resolved probe name is genuinely dig-legal, not
 # just superficially non-empty, and re-derives the real first
-# cdn-domains.txt entry the same way scripts/untracked/simulations/full-setup-client-simulation.sh
+# cdn-domains.txt entry the same way scripts/tracked/simulations/full-setup-client-simulation.sh
 # itself does, so this test breaks loudly (rather than silently passing) if
 # that entry's leading-dot form is ever removed or the file's first line
 # changes shape.

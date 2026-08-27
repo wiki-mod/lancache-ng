@@ -77,8 +77,8 @@
 # validation_subnet_release, which it's built on) is also reused, as a
 # generic "reserve one free integer with host-local flock" primitive, by two
 # entirely independent consumers on their OWN separate /16 ranges --
-# scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh (172.31.0.0/16) and
-# scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh (172.29.0.0/16) -- neither of which
+# scripts/tracked/simulations/dhcp-kea-lease-flow-simulation.sh (172.31.0.0/16) and
+# scripts/tracked/simulations/dhcp-proxy-pxe-simulation.sh (172.29.0.0/16) -- neither of which
 # has (or wants) a `/27` subdivision; both still want a single, whole `/24`
 # per octet, exactly as before. A first version of this redesign renamed
 # this function's output to "slot" and changed what it locked/derived,
@@ -260,8 +260,8 @@ validation_subnet_release() {
 #
 # For the general 172.30.0.0/16 validation-stack pool ONLY -- see
 # validation_subnet_reserve_slot (below) for the `/27`-per-slot equivalent.
-# scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh and
-# scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh call THIS function (on their own,
+# scripts/tracked/simulations/dhcp-kea-lease-flow-simulation.sh and
+# scripts/tracked/simulations/dhcp-proxy-pxe-simulation.sh call THIS function (on their own,
 # separate 172.31.0.0/16 / 172.29.0.0/16 lock_root/range), expecting a plain
 # octet, unchanged by the #832 redesign.
 #
@@ -427,8 +427,8 @@ PYEOF
 # #832: only 10 of the /27's 30 usable host addresses (base+1..base+10) are
 # claimed here; base+11..base+30 stay free for a couple of consumer scripts
 # that need a few MORE addresses within the SAME reserved subnet
-# (scripts/untracked/simulations/dhcp-kea-ctrl-agent-mutation-simulation.sh,
-# scripts/untracked/simulations/setup-reset-kea-config-simulation.sh -- each derives its own
+# (scripts/tracked/simulations/dhcp-kea-ctrl-agent-mutation-simulation.sh,
+# scripts/tracked/simulations/setup-reset-kea-config-simulation.sh -- each derives its own
 # extra addresses directly from $VALIDATION_SUBNET's actual base, see those
 # scripts' own comments) and for genuine future growth of the validation
 # stack itself.

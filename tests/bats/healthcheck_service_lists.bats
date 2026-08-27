@@ -30,8 +30,8 @@
 #    archived vY.X.Z branch still predate #1112 and keep the original
 #    byte-for-byte-across-three-files shape, so this rewrite is not
 #    cherry-picked there.
-# 2. scripts/untracked/simulations/setup-cli-simulation.sh and
-#    scripts/untracked/simulations/syslog-forwarding-simulation.sh wait on a
+# 2. scripts/tracked/simulations/setup-cli-simulation.sh and
+#    scripts/tracked/simulations/syslog-forwarding-simulation.sh wait on a
 #    DIFFERENT compose target
 #    (deploy/quickstart/docker-compose.yml) with different profiles enabled
 #    (minimal vs. ssl+logging), so they legitimately track a different,
@@ -107,13 +107,13 @@ extract_services_with_healthcheck() {
     # this script uses for services with no healthcheck at all (e.g.
     # docker-socket-proxy, syslog, syslog-ng). This test fails if that
     # regresses.
-    list="$(extract_services_with_healthcheck "$repo_root/scripts/untracked/simulations/syslog-forwarding-simulation.sh")"
+    list="$(extract_services_with_healthcheck "$repo_root/scripts/tracked/simulations/syslog-forwarding-simulation.sh")"
     [ -n "$list" ] || fail "syslog-forwarding-simulation.sh: services_with_healthcheck not found"
     [[ " $list " == *" watchdog "* ]] || fail "syslog-forwarding-simulation.sh's services_with_healthcheck ('$list') no longer includes watchdog, despite deploy/quickstart/docker-compose.yml's watchdog service defining a real HEALTHCHECK"
 }
 
 @test "syslog-forwarding-simulation.sh does not double-list watchdog between all_services and services_with_healthcheck" {
-    all_line="$(grep -oE '^all_services="[^"]*"' "$repo_root/scripts/untracked/simulations/syslog-forwarding-simulation.sh" | head -1)"
+    all_line="$(grep -oE '^all_services="[^"]*"' "$repo_root/scripts/tracked/simulations/syslog-forwarding-simulation.sh" | head -1)"
     [ -n "$all_line" ] || fail "syslog-forwarding-simulation.sh: all_services assignment not found"
     # The static prefix before the interpolated $services_with_healthcheck
     # must not itself list watchdog a second time.
@@ -136,7 +136,7 @@ extract_services_with_healthcheck() {
     # deploy/quickstart/docker-compose.yml's docker-socket-proxy and netdata
     # services both gained a real Docker HEALTHCHECK under #1169 -- neither
     # had one before.
-    hc="$(extract_services_with_healthcheck "$repo_root/scripts/untracked/simulations/setup-cli-simulation.sh")"
+    hc="$(extract_services_with_healthcheck "$repo_root/scripts/tracked/simulations/setup-cli-simulation.sh")"
     [ -n "$hc" ] || fail "setup-cli-simulation.sh: services_with_healthcheck not found"
     [[ " $hc " == *" docker-socket-proxy "* ]] || fail "setup-cli-simulation.sh's services_with_healthcheck ('$hc') no longer includes docker-socket-proxy"
     [[ " $hc " == *" netdata "* ]] || fail "setup-cli-simulation.sh's services_with_healthcheck ('$hc') no longer includes netdata"
@@ -157,7 +157,7 @@ extract_services_with_healthcheck() {
     # test's own expected-membership list since it is no longer a Compose
     # service name at all, matching syslog-forwarding-simulation.sh's own
     # updated services_with_healthcheck list.
-    hc="$(extract_services_with_healthcheck "$repo_root/scripts/untracked/simulations/syslog-forwarding-simulation.sh")"
+    hc="$(extract_services_with_healthcheck "$repo_root/scripts/tracked/simulations/syslog-forwarding-simulation.sh")"
     [ -n "$hc" ] || fail "syslog-forwarding-simulation.sh: services_with_healthcheck not found"
     for svc in docker-socket-proxy dhcp-proxy syslog; do
         [[ " $hc " == *" $svc "* ]] || fail "syslog-forwarding-simulation.sh's services_with_healthcheck ('$hc') no longer includes $svc"
@@ -170,8 +170,8 @@ extract_services_with_healthcheck() {
     # smaller quickstart-minimal-profile list, per its own inline comment) --
     # this only guards the weaker invariant that every service claimed to
     # have a healthcheck is also a service this script actually starts.
-    hc="$(extract_services_with_healthcheck "$repo_root/scripts/untracked/simulations/setup-cli-simulation.sh")"
-    all="$(grep -oE 'local all_services="[^"]*"' "$repo_root/scripts/untracked/simulations/setup-cli-simulation.sh" | head -1 | sed -E 's/^local all_services="//; s/"$//')"
+    hc="$(extract_services_with_healthcheck "$repo_root/scripts/tracked/simulations/setup-cli-simulation.sh")"
+    all="$(grep -oE 'local all_services="[^"]*"' "$repo_root/scripts/tracked/simulations/setup-cli-simulation.sh" | head -1 | sed -E 's/^local all_services="//; s/"$//')"
     [ -n "$hc" ] || fail "setup-cli-simulation.sh: services_with_healthcheck not found"
     [ -n "$all" ] || fail "setup-cli-simulation.sh: all_services not found"
     for svc in $hc; do

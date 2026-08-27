@@ -22,8 +22,8 @@ setup() {
     # Why: the script's own BASH_SOURCE guard only calls main() when
     # executed, never when sourced -- safe without a real GH_TOKEN.
     # From: Issue #1557 | PR #1586
-    # shellcheck source=scripts/untracked/gc-pr-staging-images.sh
-    source "$repo_root/scripts/untracked/gc-pr-staging-images.sh"
+    # shellcheck source=scripts/tracked/gc-pr-staging-images.sh
+    source "$repo_root/scripts/tracked/gc-pr-staging-images.sh"
 }
 
 teardown() {

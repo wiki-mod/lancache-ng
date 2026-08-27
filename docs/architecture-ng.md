@@ -289,7 +289,7 @@ Lightweight container with Docker socket access (restart permission).
 **Health checks:** every persistent-daemon service across `deploy/*/docker-compose.yml`
 has a Docker Compose `healthcheck:` block (#1169 closed the last gaps:
 `dhcp-proxy`, `ntp`, `netdata`, and `docker-socket-proxy` previously had none
-at all), enforced going forward by `scripts/tracked/check-compose-healthchecks.sh`
+at all), enforced going forward by `scripts/untracked/check-compose-healthchecks.sh`
 (CI job `compose-healthchecks` in `build-push.yml`) so a newly added service
 can't silently regress this. Two deliberate exceptions: `dhcp-probe` (see its
 own row further down), a one-shot helper the Admin UI starts and stops on
@@ -310,7 +310,7 @@ restarted by the watchdog daemon.
 - dhcp-proxy (dnsmasq): liveness + config-integrity, not a functional DHCP probe (#1169) -- dnsmasq has no REST/control-socket API and this config disables DNS entirely (`port=0`), so a query/response probe like PowerDNS's isn't possible, and synthesizing a real DHCPDISCOVER every interval would inject genuine broadcast LAN traffic as a healthcheck side effect. Checks that PID 1 is still `dnsmasq` (the entrypoint execs it directly, no wrapper shell) and that `dnsmasq --test` still validates the on-disk config
 - ntp (chrony): real query/response probe via `chronyc tracking` against chronyd's own command socket (#1169) -- a genuine round-trip, not a bare port-listen check, but deliberately does not require an already-synchronised stratum, since "alive but not yet synced" is a legitimate transient state during `start_period` or an upstream network blip
 - netdata: HTTP probe against its own REST API, `GET /api/v1/info` (#1169), matching the check `deploy/full-setup/docker-compose.yml`'s validation stack already used for the same pinned image
-- docker-socket-proxy: HTTP probe against the Docker API's own `/_ping` endpoint (#1169), explicitly allowlisted by `scripts/untracked/docker-socket-proxy.sh`'s own `safe_ping` ACL -- proves the HAProxy frontend is actually forwarding to the real Docker socket backend, not just that port 2375 is open
+- docker-socket-proxy: HTTP probe against the Docker API's own `/_ping` endpoint (#1169), explicitly allowlisted by `scripts/tracked/docker-socket-proxy.sh`'s own `safe_ping` ACL -- proves the HAProxy frontend is actually forwarding to the real Docker socket backend, not just that port 2375 is open
 
 **Auto-restart:** X failed checks → `docker restart <container>`. Scope,
 verified against the compiled `services/watchdog` Rust binary (the production
@@ -365,7 +365,7 @@ the inspect allowlist does not grant or imply a Docker restart action for it.
 - **`dhcp` (Kea) and `dhcp-proxy` (dnsmasq)**: both have real Docker
   healthchecks and are alert-only monitored (the container matching the
   active `DHCP_MODE`). Deliberately kept start/stop-only in
-  `scripts/untracked/docker-socket-proxy.sh` (`safe_dhcp_action`), never given a
+  `scripts/tracked/docker-socket-proxy.sh` (`safe_dhcp_action`), never given a
   `restart` grant: Kea/dnsmasq's own known-good-config rollback semantics
   and the Admin UI's start/stop-driven lifecycle control are the intended
   recovery path, and a watchdog-triggered blind restart mid-rollback could
@@ -389,7 +389,7 @@ the inspect allowlist does not grant or imply a Docker restart action for it.
 
 **Alert-only monitoring's own allowlist precondition (issue #842/#849,
 2026-08-05):** alert-only health reads require inspect-only Docker API access
-through `scripts/untracked/docker-socket-proxy.sh`'s allowlist. That inspection grant is
+through `scripts/tracked/docker-socket-proxy.sh`'s allowlist. That inspection grant is
 separate from the `safe_service_restart` allowlist; alert-only monitoring does
 not call `restart_container()`, so observing a target never makes it
 restart-capable. **Watchdog's alert-only monitoring of `syslog` is gated by
@@ -419,7 +419,7 @@ watchdog's deployment-state input inconsistent.
   always` only reacts to the process exiting, and nothing else in the stack
   polled it at all. The watchdog binary's `main()` loop now
   hits `docker-socket-proxy`'s own `GET /_ping` endpoint every cycle (already
-  permitted by `scripts/untracked/docker-socket-proxy.sh`'s `safe_ping` ACL -- zero new
+  permitted by `scripts/tracked/docker-socket-proxy.sh`'s `safe_ping` ACL -- zero new
   privilege) and writes the result into `status.json`'s `services` map like
   any other monitored container, so it renders on the Admin UI dashboard.
   This is deliberately alert-only, driven through `AlertCounter` rather
@@ -570,7 +570,7 @@ Central log receiver for the stack (#453), opt-in via `docker compose --profile 
 - **Existing `logs` volume ownership migration**: Docker copies an image path's uid/gid only when it initializes a new named volume; it does not update an already-populated volume after an image upgrade. The `syslog-logs-permissions` one-shot Compose service therefore runs before `syslog` in both production and quickstart, recursively assigns the shared `/var/log/lancache` tree to uid/gid 10001, and must complete successfully before the non-root collector starts. The initializer has no network, a read-only root filesystem, and only `CAP_CHOWN`; repeated starts are intentionally idempotent. This keeps existing proxy-log copies writable without widening the long-running syslog container's capability set.
 - **Silent-data-loss detection** (new in the consolidation PR): a periodic detector compares syslog-ng's own "processed" stats counter (`syslog-ng-ctl stats`) against real bytes landing on disk under `SYSLOG_NG_LOG_ROOT`, alerting (and surfacing via a structured healthcheck status field) if syslog-ng believes it delivered messages that never actually reached disk -- e.g. a bind-mounted log-root directory left root-owned instead of chowned to uid 10001. `setup.sh` pre-creates and chowns this directory on fresh install specifically to avoid the condition; this detector is the defense-in-depth backstop for an installation that predates that fix or has its permissions changed later.
 - **Real dual-process healthcheck**: `services/syslog/healthcheck.sh` checks fluent-bit AND syslog-ng independently (not just "is the container running") and only reports healthy when both are, writing a structured per-process status file (including the data-loss alert flag above) for a future Admin UI/watchdog integration -- the granularity fix for the two-container era's single "one process, one Docker HEALTHCHECK slot" limitation.
-- `scripts/tracked/check-logging-matrix.sh`, run in CI's `validate-compose` job, fails if a Compose service has no row in the logging matrix table below, or if a row names a service that no longer exists.
+- `scripts/untracked/check-logging-matrix.sh`, run in CI's `validate-compose` job, fails if a Compose service has no row in the logging matrix table below, or if a row names a service that no longer exists.
 - Admin UI log reading from the central path: `services/ui/src/syslog_client.rs` (opt-in via `SYSLOG_ENABLED=true`, same 4-variable contract watchdog's retention engine uses) reads `/logs` and a dashboard tile from `SYSLOG_LOG_ROOT` directly, transparently decompressing rotated `.zst`/`.gz` files, instead of the `STANDARD_LOG`/`SSL_LOG` direct-nginx-read path. Disabled installs keep the old direct-nginx-read behavior unchanged.
 
 **Not implemented yet:**

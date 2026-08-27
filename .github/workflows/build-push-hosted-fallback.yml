@@ -78,7 +78,7 @@ jobs:
         id: select-image
         run: |
           set -euo pipefail
-          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/tracked/select-build-tools-image.sh)"
           case "$build_tools_image" in
             *@sha256:*)
               ;;
@@ -424,7 +424,7 @@ jobs:
             docker buildx imagetools create -t "$target_image" "$amd64_ref" "$arm64_ref" \
             --annotation "index:org.opencontainers.image.description=${DESCRIPTION}"
           GHCR_RETRY_USERNAME="$GHCR_RETRY_USERNAME" GHCR_RETRY_PASSWORD="$GHCR_RETRY_PASSWORD" \
-            bash scripts/untracked/require-image-platforms.sh "$target_image" linux/amd64,linux/arm64
+            bash scripts/tracked/require-image-platforms.sh "$target_image" linux/amd64,linux/arm64
 
           merged_digest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
             docker buildx imagetools inspect "$target_image" --format '{{json .Manifest.Digest}}')"

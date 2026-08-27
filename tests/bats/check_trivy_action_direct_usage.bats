@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-# What: Exercises scripts/untracked/check-trivy-action-direct-usage.sh against
+# What: Exercises scripts/tracked/check-trivy-action-direct-usage.sh against
 # throwaway fixture trees, both passing and failing cases.
 # Why: a check proven only against an already-green tree never actually
 # proves its fail-closed path is reachable (AG-VAL-024).
@@ -16,7 +16,7 @@
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    script="$repo_root/scripts/untracked/check-trivy-action-direct-usage.sh"
+    script="$repo_root/scripts/tracked/check-trivy-action-direct-usage.sh"
     fixture_root="$(mktemp -d)"
     mkdir -p "$fixture_root/.github/workflows" "$fixture_root/.github/actions/trivy-scan-retry" \
         "$fixture_root/.github/actions/aquasecurity-trivy-action-centralized-version"

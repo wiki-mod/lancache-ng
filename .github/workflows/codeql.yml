@@ -109,7 +109,7 @@ jobs:
             # while refs/pull/<N>/head identifies the contributor's head. Use
             # like-for-like SHAs so a current PR is not rejected as stale.
             : "${CHECK_PR_HEAD_SHA:?pull_request event must carry a head SHA}"
-            if ! current_head="$(bash scripts/tracked/resolve-remote-ref-with-retry.sh \
+            if ! current_head="$(bash scripts/untracked/resolve-remote-ref-with-retry.sh \
               origin "refs/pull/${CHECK_PR_NUMBER}/head")"; then
               current_head=""
             fi
@@ -184,7 +184,7 @@ jobs:
           if [ "$force_all" = "true" ]; then
             rust_via_shared_classifier=true
           else
-            classifier_output="$(CHANGED_FILES="$changed_files" bash scripts/untracked/classify-image-impact.sh)"
+            classifier_output="$(CHANGED_FILES="$changed_files" bash scripts/tracked/classify-image-impact.sh)"
             # here-string, not `printf ... | grep -q` (AG-VAL-032): grep -q
             # can exit on its first match while printf is still writing the
             # classifier's remaining `key=value` lines, and under pipefail
@@ -327,7 +327,7 @@ jobs:
           : "${CHECK_PR_HEAD_SHA:?pull_request event must carry a head SHA}"
           : "${CHECK_PR_NUMBER:?pull_request event must carry a PR number}"
           current_head=""
-          if ! current_head="$(bash scripts/tracked/resolve-remote-ref-with-retry.sh \
+          if ! current_head="$(bash scripts/untracked/resolve-remote-ref-with-retry.sh \
             origin "refs/pull/${CHECK_PR_NUMBER}/head")"; then
             echo "::warning::Could not resolve the current remote head after retry; failing open."
           fi

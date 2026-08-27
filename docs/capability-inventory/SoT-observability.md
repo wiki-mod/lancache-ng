@@ -220,7 +220,7 @@ to the operator anywhere in this project:**
   per-container matrix, Admin UI integration, full retention/storage-budget
   engine, CI logging-matrix guard, fluent-bit healthcheck).
 - Both #632 and #633 closed by 2026-07-13, verified against real merged
-  code across 4 PRs: #753 (CI guard `scripts/tracked/check-logging-matrix.sh` +
+  code across 4 PRs: #753 (CI guard `scripts/untracked/check-logging-matrix.sh` +
   fluent-bit healthcheck), #756 (wired remaining 9 services into the
   pipeline), #757 (`maybe_prune_syslog()` retention engine in
   `watchdog.sh`), #758 (`syslog_client.rs` + `/logs`/dashboard Admin UI
@@ -235,7 +235,7 @@ to the operator anywhere in this project:**
   still-open bug** was found in `services/ui/src/routes/logs.rs`
   (see §3.4 below) and a **real compose-topology gap** was found:
   `deploy/full-setup/docker-compose.yml` — the base every existing
-  `scripts/untracked/simulations/*-simulation.sh` CI script builds on
+  `scripts/tracked/simulations/*-simulation.sh` CI script builds on
   (formerly `scripts/*-simulation.sh` before the F-16 restructure) — has
   neither
   `dhcp`/`dhcp-proxy` nor the `logging` profile (`syslog-ng`/`fluent-bit`)
@@ -245,7 +245,7 @@ to the operator anywhere in this project:**
   research pass -- this paragraph's earlier "open, not yet merged" status
   was left stale after that merge; see the summary table and currency-check
   note above for the already-corrected status)
-  adds `scripts/untracked/simulations/syslog-forwarding-simulation.sh` running against
+  adds `scripts/tracked/simulations/syslog-forwarding-simulation.sh` running against
   `deploy/quickstart` instead, proving 6 of 9 services
   (`proxy`, `ui`, `nats`, `dns-standard`, `dns-ssl`, `watchdog`) end-to-end
   with a real per-run-unique marker, plus a documented **weaker** check for
@@ -484,7 +484,7 @@ above, just on the dashboard instead of the logs page.
 | Persisted log storage path defined | `SYSLOG_LOG_ROOT=/var/log/lancache-syslog-ng`, fixed, not independently overridable by design |
 | Admin UI reads aggregated central logs | Partially — `/logs` and dashboard both read from syslog-ng store when enabled, but with the real per-host/filter gaps in §3.4 |
 | Retention/storage-budget engine | Done — `watchdog.sh`'s `maybe_prune_syslog()`, age-first-then-size-budget-priority |
-| CI guard for logging matrix | Done — `scripts/tracked/check-logging-matrix.sh` in `validate-compose` |
+| CI guard for logging matrix | Done — `scripts/untracked/check-logging-matrix.sh` in `validate-compose` |
 | fluent-bit healthcheck | Done (binary-integrity only, documented limitation) |
 | **Live E2E proof: real event → syslog-ng → Admin UI visibility** | **Merged 2026-07-15** (`4a5e0c11`, PR #828) — covers 6/9 services with per-run markers + a weaker netdata check; `dhcp`/`dhcp-proxy` explicitly deferred |
 | **`logs.rs` per-host bug found during that E2E scoping** | **FIXED 2026-07-16** by PR #865 (`2137157f`) — `?host=` now wired through to `parse_syslog_tail`; see currency-check note above |

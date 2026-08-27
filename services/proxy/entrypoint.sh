@@ -916,7 +916,7 @@ if [ "${SSL_ENABLED}" = "1" ]; then
         # could let grep exit after an early match while echo is still
         # writing, which pipefail would report as failure even though grep
         # matched -- the general SIGPIPE-under-pipefail hazard that
-        # scripts/untracked/check-pipefail-early-exit-grep.sh guards against repo-wide.
+        # scripts/tracked/check-pipefail-early-exit-grep.sh guards against repo-wide.
         grep -q "DNS:" <<< "$san" || return 0
         if [ -n "${IP_SSL}" ]; then
             # `grep -q "IP Address:${IP_SSL}"` would be an unanchored substring

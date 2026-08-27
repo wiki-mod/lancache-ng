@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Coverage for scripts/tracked/check-validation-subnet-wrapper-coverage.sh (#896):
+# Coverage for scripts/untracked/check-validation-subnet-wrapper-coverage.sh (#896):
 # the standing CI guard that fails a build if a job in full-setup-validate.yml
 # or full-setup-deep-validate.yml consumes compute-validation-network's raw
 # per-run subnet output without going through the collision-safe
@@ -15,7 +15,7 @@
 # argument for exactly this reason.
 
 setup() {
-    script="$BATS_TEST_DIRNAME/../../scripts/tracked/check-validation-subnet-wrapper-coverage.sh"
+    script="$BATS_TEST_DIRNAME/../../scripts/untracked/check-validation-subnet-wrapper-coverage.sh"
     fixture_root="$BATS_TEST_TMPDIR/fixture-repo"
     mkdir -p "$fixture_root/.github/workflows"
     # full-setup-sims.yml is one of the guard's scanned files (#1014), so every
@@ -78,7 +78,7 @@ EOF
         env:
           FOO: bar
         run: |
-          bash scripts/lib/run-in-validation-subnet.sh bash scripts/untracked/simulations/ssl-mitm-cache-simulation.sh
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/tracked/simulations/ssl-mitm-cache-simulation.sh
 '
     # This job never actually references the raw output itself, so it should
     # not even be counted -- add a second, real consumer below to exercise
@@ -98,7 +98,7 @@ EOF
     steps:
       - name: Run simulation
         run: |
-          bash scripts/lib/run-in-validation-subnet.sh bash scripts/untracked/simulations/ssl-mitm-cache-simulation.sh
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/tracked/simulations/ssl-mitm-cache-simulation.sh
 '
 
     run "$script" "$fixture_root"
@@ -155,7 +155,7 @@ EOF
     steps:
       - name: Run simulation
         run: |
-          bash scripts/untracked/simulations/ui-reachability-crash-loop-simulation.sh
+          bash scripts/tracked/simulations/ui-reachability-crash-loop-simulation.sh
 '
 
     run "$script" "$fixture_root"
@@ -188,7 +188,7 @@ EOF
     env:
       VALIDATION_SUBNET: ${{ needs['"'"'compute-validation-network'"'"'].outputs.subnet }}
     steps:
-      - run: bash scripts/untracked/simulations/ui-reachability-crash-loop-simulation.sh
+      - run: bash scripts/tracked/simulations/ui-reachability-crash-loop-simulation.sh
 '
 
     run "$script" "$fixture_root"
@@ -219,7 +219,7 @@ EOF
     steps:
       - name: Run simulation
         run: |
-          bash scripts/untracked/simulations/ui-reachability-crash-loop-simulation.sh
+          bash scripts/tracked/simulations/ui-reachability-crash-loop-simulation.sh
 '
 
     run "$script" "$fixture_root"
@@ -246,7 +246,7 @@ EOF
     steps:
       - name: Run simulation
         run: |
-          bash scripts/untracked/simulations/setup-reset-kea-config-simulation.sh
+          bash scripts/tracked/simulations/setup-reset-kea-config-simulation.sh
 '
 
     run "$script" "$fixture_root"
@@ -269,7 +269,7 @@ EOF
     env:
       VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
     steps:
-      - run: bash scripts/untracked/simulations/ui-reachability-crash-loop-simulation.sh
+      - run: bash scripts/tracked/simulations/ui-reachability-crash-loop-simulation.sh
 
   setup-reset-kea-config-simulation:
     needs: compute-validation-network
@@ -277,7 +277,7 @@ EOF
     env:
       VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
     steps:
-      - run: bash scripts/untracked/simulations/setup-reset-kea-config-simulation.sh
+      - run: bash scripts/tracked/simulations/setup-reset-kea-config-simulation.sh
 '
 
     run "$script" "$fixture_root"
@@ -310,7 +310,7 @@ EOF
       VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
     steps:
       - run: |
-          bash scripts/lib/run-in-validation-subnet.sh bash scripts/untracked/simulations/ssl-mitm-cache-simulation.sh
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/tracked/simulations/ssl-mitm-cache-simulation.sh
 
   setup-cli-simulation:
     runs-on: ubuntu-latest
@@ -318,13 +318,13 @@ EOF
       - run: |
           exec {lock_fd}>/tmp/lancache-setup-cli-simulation.lock
           flock "$lock_fd"
-          bash scripts/untracked/simulations/setup-cli-simulation.sh
+          bash scripts/tracked/simulations/setup-cli-simulation.sh
 
   dhcp-kea-lease-flow-simulation:
     needs: setup-cli-simulation
     runs-on: ubuntu-latest
     steps:
-      - run: bash scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh
+      - run: bash scripts/tracked/simulations/dhcp-kea-lease-flow-simulation.sh
 '
 
     run "$script" "$fixture_root"
@@ -395,7 +395,7 @@ jobs:
       VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
     steps:
       - run: |
-          bash scripts/lib/run-in-validation-subnet.sh bash scripts/untracked/simulations/ssl-mitm-cache-simulation.sh
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/tracked/simulations/ssl-mitm-cache-simulation.sh
 EOF
     write_trivial_deep_validate_yml
 

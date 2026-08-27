@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Docker-free coverage for scripts/untracked/ensure-pr-staging-images.sh (#715) -- the
+# Docker-free coverage for scripts/tracked/ensure-pr-staging-images.sh (#715) -- the
 # fail-closed staging guard + untouched-service back-fill that reuses the
 # pr-<N>-sha-<full> mechanism. The registry probe and the
 # imagetools back-fill are stubbed via STAGING_IMAGE_EXISTS_CMD /
@@ -76,7 +76,7 @@ bats_require_minimum_version 1.5.0
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    script="$repo_root/scripts/untracked/ensure-pr-staging-images.sh"
+    script="$repo_root/scripts/tracked/ensure-pr-staging-images.sh"
     backfill_log="$BATS_TEST_TMPDIR/backfill.log"
     : > "$backfill_log"
 

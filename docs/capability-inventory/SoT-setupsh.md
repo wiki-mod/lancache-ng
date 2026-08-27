@@ -8,8 +8,8 @@ posted to #843; kept here so progress survives interruptions.
 Methodology: read `setup.sh` in full (every `cmd_*` function, the dispatcher,
 the interactive `install` main-flow body, and the shared helpers each command
 calls), cross-referenced against `.github/AGENTS.md` (AG-OP-006..013,
-Convergence/Idempotence Checklist), `scripts/tracked/check-idempotence-test-coverage.sh`,
-`scripts/untracked/simulations/setup-cli-simulation.sh`, the other `scripts/untracked/simulations/*-simulation.sh` files,
+Convergence/Idempotence Checklist), `scripts/untracked/check-idempotence-test-coverage.sh`,
+`scripts/tracked/simulations/setup-cli-simulation.sh`, the other `scripts/tracked/simulations/*-simulation.sh` files,
 every `tests/bats/setup_*.bats` file, and `gh issue` lookups for the issues
 named in code comments (#639, #665, #669, #762, #763, #819, #665, #666, #628,
 #652, #785, #836, #456).
@@ -87,7 +87,7 @@ after the dispatcher's `case` falls through (only `install|""` has no
 5. Release channel: prompts `stable`/`nightly` UNLESS `LANCACHE_IMAGE_CHANNEL` is
    already set in the environment — that case is respected outright with no
    prompt (documented non-interactive path: `LANCACHE_IMAGE_CHANNEL=nightly
-   ./setup.sh install`, and `scripts/untracked/simulations/setup-cli-simulation.sh`'s own
+   ./setup.sh install`, and `scripts/tracked/simulations/setup-cli-simulation.sh`'s own
    `LANCACHE_IMAGE_CHANNEL=pinned` + explicit tag for CI's own just-built
    images — comment explicitly calls out both real callers).
 6. Scheduled automatic updates prompt → `AUTO_UPDATE_ENABLED` (default `N`).
@@ -147,7 +147,7 @@ first-time flow, and a second run is an explicit overwrite decision, not a
 silent convergence. Directory/systemd-unit writes are idempotent (`mkdir -p`,
 overwriting the same unit file content, `daemon-reload`).
 
-**Test coverage**: `scripts/untracked/simulations/setup-cli-simulation.sh` Phase 1 runs the real
+**Test coverage**: `scripts/tracked/simulations/setup-cli-simulation.sh` Phase 1 runs the real
 CLI via `expect` end-to-end (fresh install, all prompts, waits for a healthy
 running stack, asserts `.env` contains the expected `IP_STANDARD`/
 `UI_AUTH_USER`). This is real CLI E2E coverage, not just an extracted
@@ -244,7 +244,7 @@ directly target this function.
 - `tests/bats/setup_env_migration.bats`: individual migration helpers
   (`append_env_migrated_assignment_if_missing`,
   `migrate_proxy_security_mode_for_update`, etc.) at the function level.
-- `scripts/untracked/simulations/setup-cli-simulation.sh` Phase 2: real `bash setup.sh update`
+- `scripts/tracked/simulations/setup-cli-simulation.sh` Phase 2: real `bash setup.sh update`
   against a seeded legacy `.env` (`PROXY_SECURITY_MODE=strict`), asserts the
   migration fired through the actual CLI, not just the extracted function,
   and the stack comes up healthy.
@@ -467,7 +467,7 @@ real functions (`compose_project_name`, `compose_cache_volume_name`,
 `compose_volume_names`, `backup_compose_volumes`, `compose_stack_running`,
 `guard_restore_shared_project_volumes`) with Docker mocked as a shell
 function — covers the #669 safety-gap fixes (guard/discovery/gating logic),
-not literal `tar`/`rsync` I/O. `scripts/untracked/simulations/setup-cli-simulation.sh` Phase 3 and
+not literal `tar`/`rsync` I/O. `scripts/tracked/simulations/setup-cli-simulation.sh` Phase 3 and
 Phase 4a/4b invoke the real `bash setup.sh backup --config …` CLI (not just
 the extracted functions) as setup for its rollback-safety and restore-
 convergence assertions — so `backup` DOES get real-CLI E2E exercise, just as
@@ -535,7 +535,7 @@ backup converges it exactly like `update` would.
   direct `cmd_backup` + `cmd_restore` archive round-trip into a fresh target
   followed by the same restore a second time, asserting both file-state and
   Docker-volume payload convergence.
-- `scripts/untracked/simulations/setup-cli-simulation.sh` Phase 4a: real CLI — backs up, restores
+- `scripts/tracked/simulations/setup-cli-simulation.sh` Phase 4a: real CLI — backs up, restores
   the SAME already-converged backup, byte-diffs `.env` (same exclusion list
   as Phase 2b), asserts no-op.
 - Phase 4b: real CLI — synthetically rewrites a real backup's embedded `.env`
@@ -640,7 +640,7 @@ the generated local `.env` and `docker-compose.yml` byte-for-byte for a stable
 response. The remaining untested edge is not the CLI command path anymore, but
 the live backend side effects of a real primary registration/rotation exchange
 outside the mocked test harness.
-`scripts/untracked/simulations/nats-secondary-auth-callout-simulation.sh` (#583) IS a real, live,
+`scripts/tracked/simulations/nats-secondary-auth-callout-simulation.sh` (#583) IS a real, live,
 multi-container integration test — but it drives the Admin UI's HTTP routes
 directly (`curl … /api/secondary/register`), deliberately bypassing
 `setup.sh secondary` entirely, to prove the NATS auth-callout backend
@@ -717,7 +717,7 @@ itself does not record a fresh snapshot of the just-restored state (the
 Admin UI's own `rollback_kea_snapshot` does, when reached that way) —
 explicitly flagged to the operator in the command's own final `print_warn`.
 
-**Test coverage**: `scripts/untracked/simulations/setup-reset-kea-config-simulation.sh` is a real,
+**Test coverage**: `scripts/tracked/simulations/setup-reset-kea-config-simulation.sh` is a real,
 live, multi-container E2E test (#763/#634 topology reuse) — starts a real
 Kea container + a real Admin UI container sharing a bind-mounted `kea-data`
 dir, creates two known-good snapshots via genuine Admin UI HTTP routes
@@ -745,7 +745,7 @@ caught by `bash -n` if the heredocs were malformed.
 
 ---
 
-## Cross-cutting: `scripts/tracked/check-idempotence-test-coverage.sh` scope note
+## Cross-cutting: `scripts/untracked/check-idempotence-test-coverage.sh` scope note
 
 This CI guard (per AGENTS.md's Convergence/Idempotence Checklist,
 `AG-OP-006`/`007`/`011` enforcement rows) treats **all of `setup.sh` as ONE
@@ -972,7 +972,7 @@ guard) has NO isolated test found, nor do `validate_lancache_image_registry`,
 one function that does a real `docker pull`/`cp`/`tar` against a live
 registry to resolve a channel pointer to an immutable `sha-*`) has no bats
 test — by design, it needs a real registry, so it's covered instead only by
-`scripts/untracked/simulations/setup-cli-simulation.sh`'s real end-to-end run (subject to the #785
+`scripts/tracked/simulations/setup-cli-simulation.sh`'s real end-to-end run (subject to the #785
 gap noted above: only exercised on non-PR CI events since the per-PR gate
 switched to pinned images).
 

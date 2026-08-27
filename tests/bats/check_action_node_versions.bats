@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Coverage for scripts/tracked/check-action-node-versions.sh (#801): the CI guard
+# Coverage for scripts/untracked/check-action-node-versions.sh (#801): the CI guard
 # that fails a build if any pinned GitHub Action -- local composite or
 # external, resolved via the GitHub Contents API -- declares a deprecated
 # Node runtime in its own action.yml/action.yaml.
@@ -25,7 +25,7 @@
 # verification step that leaves no trace once this PR merges.
 
 setup() {
-    script="$BATS_TEST_DIRNAME/../../scripts/tracked/check-action-node-versions.sh"
+    script="$BATS_TEST_DIRNAME/../../scripts/untracked/check-action-node-versions.sh"
     fixture_root="$BATS_TEST_TMPDIR/fixture-repo"
     mock_bin_dir="$BATS_TEST_TMPDIR/mock-bin"
     mock_fixtures_dir="$BATS_TEST_TMPDIR/mock-curl-fixtures"

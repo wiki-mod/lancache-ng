@@ -119,7 +119,7 @@ jobs:
         id: build-tools
         run: |
           set -euo pipefail
-          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/tracked/select-build-tools-image.sh)"
           case "$build_tools_image" in
             *@sha256:*) ;;
             *)
@@ -161,7 +161,7 @@ jobs:
           FULL_SETUP_CLIENT_TOOLS_IMAGE: ghcr.io/${{ github.repository }}/build-tools:${{ inputs.image_tag }}
         run: |
           set -euo pipefail
-          bash scripts/untracked/simulations/full-setup-client-simulation.sh
+          bash scripts/tracked/simulations/full-setup-client-simulation.sh
 
       - name: Tear down full-setup validation stack
         if: always()
@@ -219,7 +219,7 @@ jobs:
       # build-push.yml's own shallow validate job when both run for the same
       # PR (they derive different values from different run ids). The
       # VALIDATION_SUBNET/*_IP/GATEWAY block below is needed too, not just
-      # the project name: scripts/untracked/simulations/ssl-mitm-cache-simulation.sh calls `docker
+      # the project name: scripts/tracked/simulations/ssl-mitm-cache-simulation.sh calls `docker
       # compose up` against deploy/full-setup/docker-compose.yml, whose
       # network block falls back to the fixed 172.30.99.0/27 subnet
       # (docker-compose.yml's own ${VALIDATION_SUBNET:-172.30.99.0/27}
@@ -253,7 +253,7 @@ jobs:
         # should fail loudly rather than silently build a branch-local one.
         # EXCEPTION: when this PR itself touched tools/build-tools,
         # ensure-pr-staging-images has already polled for and confirmed
-        # build-tools:$PR_TAG exists (scripts/untracked/ensure-pr-staging-images.sh),
+        # build-tools:$PR_TAG exists (scripts/tracked/ensure-pr-staging-images.sh),
         # so use that PR-scoped image directly instead of build-tools:latest
         # -- otherwise a same-PR build-tools change that still happens to
         # pass select-build-tools-image.sh's baseline smoke test would never
@@ -274,7 +274,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/tracked/select-build-tools-image.sh)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run SSL MITM cache simulation
@@ -288,13 +288,13 @@ jobs:
           # this host. The wrapper exports the whole VALIDATION_* set (incl.
           # VALIDATION_STANDARD_SHIM_IP, which compose reads to place the
           # standard-passthrough-shim this sim relies on) for the slot it wins.
-          bash scripts/lib/run-in-validation-subnet.sh bash scripts/untracked/simulations/ssl-mitm-cache-simulation.sh
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/tracked/simulations/ssl-mitm-cache-simulation.sh
 
   proxy-deep-wildcard-tls-simulation:
     # Real TLS-handshake test for entrypoint.sh's deep leading-dot wildcard
     # cert path (_EXTRA_WILDCARD_BASES/_bounded_cert_name/_sign_cert),
     # exercising a synthetic example.com-rooted fixture rather than the real
-    # cdn-domains.txt (see scripts/untracked/simulations/proxy-deep-wildcard-tls-simulation.sh's own
+    # cdn-domains.txt (see scripts/tracked/simulations/proxy-deep-wildcard-tls-simulation.sh's own
     # header for why this needs its own locally-built image instead of
     # reusing ssl-mitm-cache-simulation's published-image approach). Does not
     # need the compute-validation-network subnet/IP outputs at all -- it
@@ -336,7 +336,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/tracked/select-build-tools-image.sh)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run proxy deep-wildcard TLS simulation
@@ -344,7 +344,7 @@ jobs:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
         run: |
           set -euo pipefail
-          bash scripts/untracked/simulations/proxy-deep-wildcard-tls-simulation.sh
+          bash scripts/tracked/simulations/proxy-deep-wildcard-tls-simulation.sh
 
   proxy-standard-mode-sni-routing-simulation:
     # Real TLS-handshake test for entrypoint.sh's standard-mode (SNI
@@ -353,7 +353,7 @@ jobs:
     # different nginx context (the stream module's own :8443 passthrough
     # listener, not the http block's cert-selection map the sibling
     # proxy-deep-wildcard-tls-simulation job above validates). See
-    # scripts/untracked/simulations/proxy-standard-mode-sni-routing-simulation.sh's own header for
+    # scripts/tracked/simulations/proxy-standard-mode-sni-routing-simulation.sh's own header for
     # the full fake-origin/Docker-embedded-DNS mechanism this needs and why
     # it can't reuse either sibling script's approach. Chained after the
     # existing proxy-deep-wildcard-tls-simulation job for the same
@@ -387,7 +387,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/tracked/select-build-tools-image.sh)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run proxy standard-mode SNI routing simulation
@@ -395,7 +395,7 @@ jobs:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
         run: |
           set -euo pipefail
-          bash scripts/untracked/simulations/proxy-standard-mode-sni-routing-simulation.sh
+          bash scripts/tracked/simulations/proxy-standard-mode-sni-routing-simulation.sh
 
   proxy-ssl-mode-two-relay-dispatch-simulation:
     # What: end-to-end test for the SSL-mode SNI depth-dispatch and two-relay client-IP fix.
@@ -429,7 +429,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/tracked/select-build-tools-image.sh)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run proxy SSL-mode two-relay dispatch simulation
@@ -437,7 +437,7 @@ jobs:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
         run: |
           set -euo pipefail
-          bash scripts/untracked/simulations/proxy-ssl-mode-two-relay-dispatch-simulation.sh
+          bash scripts/tracked/simulations/proxy-ssl-mode-two-relay-dispatch-simulation.sh
 
   ui-nats-dns-integration-simulation:
     # Real UI -> NATS -> nats-subscriber -> PowerDNS integration test. Wiring
@@ -493,7 +493,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/tracked/select-build-tools-image.sh)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run UI/NATS/DNS integration simulation
@@ -503,7 +503,7 @@ jobs:
           set -euo pipefail
           # Reserve a collision-free subnet (flock + retry, #820) and run the
           # sim inside it rather than racing the shared job-level subnet.
-          bash scripts/lib/run-in-validation-subnet.sh bash scripts/untracked/simulations/ui-nats-dns-integration-simulation.sh
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/tracked/simulations/ui-nats-dns-integration-simulation.sh
 
   setup-cli-simulation:
     # Runs the real setup.sh installer end-to-end (fresh install, update/
@@ -579,7 +579,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image."
           else
-            image="$(bash scripts/untracked/select-build-tools-image.sh)"
+            image="$(bash scripts/tracked/select-build-tools-image.sh)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run setup.sh CLI simulation
@@ -648,7 +648,7 @@ jobs:
             -e SETUP_SIM_IMAGE_TAG \
             "$BUILD_TOOLS_IMAGE" \
             timeout --kill-after=30 --signal=KILL 1800 \
-            bash scripts/untracked/simulations/setup-cli-simulation.sh
+            bash scripts/tracked/simulations/setup-cli-simulation.sh
 
   dhcp-kea-lease-flow-simulation:
     # Real DHCP lease flow against a Kea container built from THIS checkout's
@@ -656,7 +656,7 @@ jobs:
     # directly and needs no staging tag. This is where dhcp coverage lands in
     # the automatic gate (it was absent from the shallow check). dhcp-proxy's
     # own real, live-Docker PXE simulation now exists too
-    # (scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh, issue #705, closed), but it
+    # (scripts/tracked/simulations/dhcp-proxy-pxe-simulation.sh, issue #705, closed), but it
     # currently runs only as a manual-dispatch job in full-setup-validate.yml,
     # not as part of THIS automatic per-PR gate -- wiring it in here (mirroring
     # this job's own shape) is a real, separate CI-trigger-behavior change,
@@ -694,7 +694,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image."
           else
-            image="$(bash scripts/untracked/select-build-tools-image.sh)"
+            image="$(bash scripts/tracked/select-build-tools-image.sh)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run DHCP Kea lease-flow simulation
@@ -702,7 +702,7 @@ jobs:
           DHCP_LEASE_FLOW_CLIENT_IMAGE: ${{ steps.build-tools-image.outputs.image }}
         run: |
           set -euo pipefail
-          bash scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh
+          bash scripts/tracked/simulations/dhcp-kea-lease-flow-simulation.sh
 
   nats-auth-callout-simulation:
     # Real per-secondary NATS auth-callout integration test. Pulls the real
@@ -721,7 +721,7 @@ jobs:
       LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
       # See ssl-mitm-cache-simulation's identical block above: this job's own
       # `docker compose up proxy docker-socket-proxy dns-standard dns-ssl nats
-      # ui` call (in scripts/untracked/simulations/nats-secondary-auth-callout-simulation.sh) needs
+      # ui` call (in scripts/tracked/simulations/nats-secondary-auth-callout-simulation.sh) needs
       # these to land on this run's derived subnet.
       VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
       VALIDATION_GATEWAY: ${{ needs.compute-validation-network.outputs.gateway }}
@@ -757,7 +757,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/tracked/select-build-tools-image.sh)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run NATS auth-callout simulation
@@ -769,7 +769,7 @@ jobs:
           # sim inside it. This is the exact job whose octet-22 stack died on
           # "Pool overlaps" in run 29287590206 -- the concrete recurrence this
           # wrapper eliminates.
-          bash scripts/lib/run-in-validation-subnet.sh bash scripts/untracked/simulations/nats-secondary-auth-callout-simulation.sh
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/tracked/simulations/nats-secondary-auth-callout-simulation.sh
 
   ui-reachability-crash-loop-simulation:
     # Real end-to-end proof for #763: deliberately crash-loops `proxy` (a
@@ -792,7 +792,7 @@ jobs:
       LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
       # See ssl-mitm-cache-simulation's identical block above: this job's own
       # `docker compose up ui` call (in
-      # scripts/untracked/simulations/ui-reachability-crash-loop-simulation.sh) needs these to land
+      # scripts/tracked/simulations/ui-reachability-crash-loop-simulation.sh) needs these to land
       # on this run's derived subnet.
       VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
       VALIDATION_GATEWAY: ${{ needs.compute-validation-network.outputs.gateway }}
@@ -830,7 +830,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/tracked/select-build-tools-image.sh)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run Admin UI reachability during crash-loop simulation
@@ -848,7 +848,7 @@ jobs:
           # _validation network, the same failure class
           # ssl-mitm-cache-simulation/ui-nats-dns-integration-simulation
           # already guard against with this same wrapper.
-          bash scripts/lib/run-in-validation-subnet.sh bash scripts/untracked/simulations/ui-reachability-crash-loop-simulation.sh
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/tracked/simulations/ui-reachability-crash-loop-simulation.sh
 
   setup-reset-kea-config-simulation:
     # Real end-to-end proof for #763's CLI-fallback item: `setup.sh
@@ -857,7 +857,7 @@ jobs:
     # not just return success. Builds Kea from THIS checkout's services/dhcp
     # (like dhcp-kea-lease-flow-simulation above), so it needs no staging tag
     # for that image; only the published `ui` image is pulled. See
-    # scripts/untracked/simulations/setup-reset-kea-config-simulation.sh's own header for exactly
+    # scripts/tracked/simulations/setup-reset-kea-config-simulation.sh's own header for exactly
     # what this does and does not prove.
     name: setup.sh reset-to-last-known-good-config (Kea) simulation
     needs: [compute-validation-network, ui-reachability-crash-loop-simulation]
@@ -903,7 +903,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/tracked/select-build-tools-image.sh)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run setup.sh reset-to-last-known-good-config (Kea) simulation
@@ -919,14 +919,14 @@ jobs:
           # concurrent run's _validation network, the same failure class
           # ssl-mitm-cache-simulation/ui-nats-dns-integration-simulation
           # already guard against with this same wrapper.
-          bash scripts/lib/run-in-validation-subnet.sh bash scripts/untracked/simulations/setup-reset-kea-config-simulation.sh
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/tracked/simulations/setup-reset-kea-config-simulation.sh
 
   setup-reset-dns-config-simulation:
     # Real end-to-end proof for issue #836's CLI-fallback item: `setup.sh
     # reset-to-last-known-good-config dns` must genuinely roll a real,
     # running PowerDNS zone's live record data back to an earlier known-good
     # snapshot via nats-subscriber's rollback listener, not just return
-    # success. See scripts/untracked/simulations/setup-reset-dns-config-simulation.sh's own header
+    # success. See scripts/tracked/simulations/setup-reset-dns-config-simulation.sh's own header
     # for exactly what this does and does not prove -- including the
     # deliberate wrong-PDNS_API_KEY regression guard for the
     # host-.env-vs-in-container key resolution this command depends on.
@@ -985,7 +985,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/tracked/select-build-tools-image.sh)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run setup.sh reset-to-last-known-good-config (DNS) simulation
@@ -996,4 +996,4 @@ jobs:
           # Reserve a collision-free subnet (flock + retry, #820) and run the
           # sim inside it -- same reasoning as setup-reset-kea-config-
           # simulation above.
-          bash scripts/lib/run-in-validation-subnet.sh bash scripts/untracked/simulations/setup-reset-dns-config-simulation.sh
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/tracked/simulations/setup-reset-dns-config-simulation.sh

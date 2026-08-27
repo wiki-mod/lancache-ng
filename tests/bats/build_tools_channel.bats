@@ -13,10 +13,10 @@
 #
 # Before #1153's fix, every ref resolved to `dev` (issue #1035's short-term
 # fix) -- a channel #1142 retired outright, making every job that calls
-# scripts/untracked/select-build-tools-image.sh with BUILD_TOOLS_REQUIRE_PUBLISHED=true
+# scripts/tracked/select-build-tools-image.sh with BUILD_TOOLS_REQUIRE_PUBLISHED=true
 # fail with a hard "denied" pull. The real registry-pull smoke-test path stays
 # covered by CI itself (every workflow job that actually invokes
-# scripts/untracked/select-build-tools-image.sh), not re-mocked here.
+# scripts/tracked/select-build-tools-image.sh), not re-mocked here.
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"

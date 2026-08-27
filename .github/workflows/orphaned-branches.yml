@@ -9,7 +9,7 @@
 # not a per-push gate -- the problem it guards against (branches quietly
 # accumulating over days with no written trace anywhere) only shows up by
 # looking at the whole repository's branch state periodically, not by
-# reacting to any single push. See scripts/tracked/check-orphaned-branches.sh for the
+# reacting to any single push. See scripts/untracked/check-orphaned-branches.sh for the
 # full detection logic and its documented design decisions.
 #
 # Deliberately advisory, not blocking: there is no pull request here for a
@@ -50,7 +50,7 @@ on:
 # Read-only: this job only lists/reads branches, pull requests, and issues.
 # No PAT is needed (unlike check-pr-tracking-metadata.sh's project-board
 # check) -- the default GITHUB_TOKEN's repo-scoped read access covers every
-# API call scripts/tracked/check-orphaned-branches.sh makes.
+# API call scripts/untracked/check-orphaned-branches.sh makes.
 permissions:
   contents: read
   issues: read
@@ -91,7 +91,7 @@ jobs:
         # pattern as pr-tracking-metadata-check-hosted in build-push.yml.
         run: |
           set -euo pipefail
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)" >> "$GITHUB_ENV"
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/tracked/select-build-tools-image.sh)" >> "$GITHUB_ENV"
 
       - name: Scan for orphaned branches
         env:
@@ -106,4 +106,4 @@ jobs:
             -e REPO \
             -e GH_TOKEN \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/tracked/check-orphaned-branches.sh
+            bash scripts/untracked/check-orphaned-branches.sh

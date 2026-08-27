@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # #808: shared "is this back-fill source image actually fresh enough to
-# validate an untouched service against" check. scripts/untracked/ensure-pr-staging-images.sh
+# validate an untouched service against" check. scripts/tracked/ensure-pr-staging-images.sh
 # (full-setup-deep-validate.yml) and build-push.yml's own "Ensure PR staging
 # tags exist for full-setup services" step both back-fill any full-setup
 # service a PR did NOT touch by re-pointing that PR's staging tag at a source
@@ -40,7 +40,7 @@
 # only its callers' choice of tag changed.
 #
 # Pure-ish functions (one intentional side effect: sif_image_revision shells
-# out to the registry). Sourced directly by scripts/untracked/ensure-pr-staging-images.sh
+# out to the registry). Sourced directly by scripts/tracked/ensure-pr-staging-images.sh
 # and by build-push.yml's "Ensure PR staging tags exist for full-setup
 # services" step (via "$GITHUB_WORKSPACE/scripts/lib/staging-image-freshness.sh",
 # the same sourcing convention scripts/lib/ghcr-retry.sh already uses for the
@@ -68,7 +68,7 @@
 # registry HTTP API while building this fix: its manifest has a top-level
 # "manifests" array, not a "config" object. `docker buildx imagetools
 # inspect --format '{{.Image...}}'` only populates `.Image` for a genuinely
-# single-platform manifest -- scripts/untracked/require-image-platforms.sh's own
+# single-platform manifest -- scripts/tracked/require-image-platforms.sh's own
 # `{{if .Image}}...{{end}}` guard exists for exactly this reason (that
 # script's images happen to be amd64-only single manifests today, so the
 # guard is usually true there, but it would be EMPTY for a real
@@ -129,7 +129,7 @@
 #
 # Deliberately does NOT match a bare "not found": AG-CI-001 requires
 # assuming self-hosted runners do not provide project tooling, and
-# scripts/untracked/ensure-pr-staging-images.sh (one of this file's two real callers)
+# scripts/tracked/ensure-pr-staging-images.sh (one of this file's two real callers)
 # runs directly on a bare `lancache-light` runner, not inside the pinned
 # build-tools image -- so `docker` itself being absent from PATH is a real,
 # reachable failure mode here, and its shell-level error ("docker: command
@@ -230,7 +230,7 @@ _sif_inspect_attempt() {
 # optional -- see ghcr_retry's own header for the credential-less case) and
 # must already be sourced by the caller (scripts/lib/ghcr-retry.sh, the same
 # convention every other dual script/workflow-step caller in this project
-# already follows -- see e.g. scripts/untracked/require-image-platforms.sh).
+# already follows -- see e.g. scripts/tracked/require-image-platforms.sh).
 #
 # Echoes stdout on success (return 0). On failure, echoes nothing and
 # returns 2 for a confirmed absence, 1 for everything else -- this is the
@@ -365,7 +365,7 @@ sif_image_revision() {
 # is this PR's own base commit, known from the very start (before the
 # checkout even ran), so its absence means the CALLER'S checkout is
 # genuinely misconfigured (needs `fetch-depth: 0`, same as
-# scripts/untracked/classify-image-impact.sh and detect-full-setup-changes.sh already
+# scripts/tracked/classify-image-impact.sh and detect-full-setup-changes.sh already
 # require for their own merge-base diffs) -- a caller should fail immediately
 # on 2 instead of polling, since no amount of waiting fixes a shallow clone.
 #

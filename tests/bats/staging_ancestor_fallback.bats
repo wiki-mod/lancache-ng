@@ -4,7 +4,7 @@
 #
 # Docker-free unit + integration coverage for
 # scripts/lib/staging-ancestor-fallback.sh, the shared ancestor-fallback
-# recovery path scripts/untracked/ensure-pr-staging-images.sh and build-push.yml's own
+# recovery path scripts/tracked/ensure-pr-staging-images.sh and build-push.yml's own
 # "Ensure PR staging tags exist for full-setup services" step both use.
 #
 # Each of the properties below is load-bearing for this mechanism's
@@ -1334,7 +1334,7 @@ STUB
     # Second "service", same base_sha/candidate chain -- must hit the cache,
     # not issue a second real query, even though this is a completely
     # separate saf_find_built_ancestor call (a different service in the same
-    # process, exactly like scripts/untracked/ensure-pr-staging-images.sh's own loop
+    # process, exactly like scripts/tracked/ensure-pr-staging-images.sh's own loop
     # over full_setup_services).
     run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "dns" "dns_image" 10 0 0 0 0 0 "$git_dir"
     [ "$status" -eq 0 ]
@@ -1478,7 +1478,7 @@ STUB
     export STAGING_IMAGE_REVISION_CMD="$revision_stub"
 
     # Deliberately an UNRECOGNIZED classify_key ("nonexistent-service", not a
-    # real scripts/untracked/classify-image-impact.sh output key): forces
+    # real scripts/tracked/classify-image-impact.sh output key): forces
     # saf_base_commit_service_untouched to be inconclusive (status 2) on
     # every call regardless of what base_sha actually touched, so this test
     # still exercises the paths_are_ignorable + has_confirmed_run route this
@@ -2292,7 +2292,7 @@ STUB
     # (this file's own header, saf_resolve_untouched_backfill_source comment,
     # documents the full reasoning): if ancestor_extended_freshness_* were
     # ever collapsed back into sharing base_freshness_*'s value, ANY caller
-    # passing a generous base_freshness pair (scripts/untracked/ensure-pr-staging-images.sh's
+    # passing a generous base_freshness pair (scripts/tracked/ensure-pr-staging-images.sh's
     # real 900/5400) would silently force that same generous extension onto
     # the ancestor candidate's extended retry too, regardless of what
     # ancestor_extended_freshness_* itself said -- exactly the shape of bug

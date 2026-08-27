@@ -563,7 +563,7 @@ scripts\untracked\install-ca-cert.ps1
 Use:
 
 ```bash
-sudo scripts/untracked/install-ca-cert.sh
+sudo scripts/tracked/install-ca-cert.sh
 ```
 
 ### Manual instructions

@@ -70,7 +70,7 @@ jobs:
     # address, the architecture-appropriate boot filename, and the LanCache
     # NG DNS servers -- plus a negative case confirming an ordinary,
     # non-PXE-tagged DISCOVER still receives no reply at all. See
-    # scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh's own header comment and
+    # scripts/tracked/simulations/dhcp-proxy-pxe-simulation.sh's own header comment and
     # docs/dhcp-modes.md for exactly what is and is not verified (PXE menu
     # behavior and a real TFTP/HTTP transfer against the external boot
     # server are both explicitly out of scope -- this project only ever
@@ -108,7 +108,7 @@ jobs:
         id: build-tools-image
         run: |
           set -euo pipefail
-          image="$(bash scripts/untracked/select-build-tools-image.sh)"
+          image="$(bash scripts/tracked/select-build-tools-image.sh)"
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
       - name: Run DHCP proxy PXE simulation
@@ -116,7 +116,7 @@ jobs:
           DHCP_PXE_SIMULATION_CLIENT_IMAGE: ${{ steps.build-tools-image.outputs.image }}
         run: |
           set -euo pipefail
-          bash scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh
+          bash scripts/tracked/simulations/dhcp-proxy-pxe-simulation.sh
 
   dhcp-relay-flow-simulation:
     # Real DHCP-relay behavior test for our own dnsmasq-relay mode (issue
@@ -150,7 +150,7 @@ jobs:
       - name: Run DHCP relay flow simulation
         run: |
           set -euo pipefail
-          bash scripts/untracked/simulations/dhcp-relay-flow-simulation.sh
+          bash scripts/tracked/simulations/dhcp-relay-flow-simulation.sh
 
   dhcp-kea-ctrl-agent-mutation-simulation:
     # Real Kea Control Agent mutation round-trip (issue #634): the sibling
@@ -166,7 +166,7 @@ jobs:
     # and asserts a SUBSEQUENT real DHCP lease request actually reflects each
     # change -- not just that the API call returned success or that the
     # config file was written. See
-    # scripts/untracked/simulations/dhcp-kea-ctrl-agent-mutation-simulation.sh's own header comment
+    # scripts/tracked/simulations/dhcp-kea-ctrl-agent-mutation-simulation.sh's own header comment
     # and docs/dhcp-modes.md for exactly what is and is not verified.
     # Independent of the full-setup-validate compose project's own running
     # containers (it starts docker-socket-proxy/proxy/nats/ui and a
@@ -185,7 +185,7 @@ jobs:
     # deterministic collision, not a rare one). Confirmed for real: this
     # exact job died on "Pool overlaps" for lancache-ng-validation-69_
     # validation in the run that surfaced this gap. The script itself
-    # (scripts/untracked/simulations/dhcp-kea-ctrl-agent-mutation-simulation.sh) now reads
+    # (scripts/tracked/simulations/dhcp-kea-ctrl-agent-mutation-simulation.sh) now reads
     # VALIDATION_SUBNET/GATEWAY/UI_IP with the same fallback-default pattern
     # its siblings use, so wrapping it here is sufficient -- no separate
     # per-job env threading is needed, the wrapper supplies the complete set.
@@ -213,7 +213,7 @@ jobs:
         id: build-tools-image
         run: |
           set -euo pipefail
-          image="$(bash scripts/untracked/select-build-tools-image.sh)"
+          image="$(bash scripts/tracked/select-build-tools-image.sh)"
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
       - name: Run DHCP Kea Control Agent mutation simulation
@@ -222,4 +222,4 @@ jobs:
           LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
           set -euo pipefail
-          bash scripts/lib/run-in-validation-subnet.sh bash scripts/untracked/simulations/dhcp-kea-ctrl-agent-mutation-simulation.sh
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/tracked/simulations/dhcp-kea-ctrl-agent-mutation-simulation.sh

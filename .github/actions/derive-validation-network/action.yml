@@ -71,7 +71,7 @@ outputs:
   standard_shim_ip:
     description: >-
       standard-passthrough-shim service IP (issue #668) -- only started by
-      scripts/untracked/simulations/ssl-mitm-cache-simulation.sh's own `docker compose up` call
+      scripts/tracked/simulations/ssl-mitm-cache-simulation.sh's own `docker compose up` call
       (the service is Compose-profile-gated), but derived here alongside
       every other per-run address so that job's env block can thread a
       collision-free value the same way it already does for the others.

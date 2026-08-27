@@ -34,7 +34,7 @@ runs:
         # Services with an explicit healthcheck report a real "healthy"
         # status. docker-socket-proxy joined this list under #1169 (an HTTP
         # probe against the Docker API's own /_ping, allowlisted by
-        # scripts/untracked/docker-socket-proxy.sh's own ACL) -- previously it had none
+        # scripts/tracked/docker-socket-proxy.sh's own ACL) -- previously it had none
         # at all, so all_services (below) is now identical to
         # services_with_healthcheck; kept as a separate variable/list anyway
         # so a future service added to this stack without a healthcheck slots

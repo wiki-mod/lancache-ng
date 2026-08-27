@@ -2,19 +2,19 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Coverage for scripts/tracked/check-pipefail-scope-coverage.sh: verifies it
+# Coverage for scripts/untracked/check-pipefail-scope-coverage.sh: verifies it
 # correctly derives check-pipefail-early-exit-grep.sh's own scan_files
 # prefixes, independently enforces this project's own pinned minimum
 # required scope, and flags a bats file that doesn't exercise one of the
 # prefixes actually scanned. Each fixture recreates the exact directory
 # shape the script under
-# test expects at its (fixture-root)/scripts/untracked/check-pipefail-early-exit-grep.sh
+# test expects at its (fixture-root)/scripts/tracked/check-pipefail-early-exit-grep.sh
 # and (fixture-root)/tests/bats/check_pipefail_early_exit_grep.bats paths,
 # using the script's own directory-argument override so no test here ever
 # touches this repository's real guard script or its real bats file.
 
 setup() {
-    script="$BATS_TEST_DIRNAME/../../scripts/tracked/check-pipefail-scope-coverage.sh"
+    script="$BATS_TEST_DIRNAME/../../scripts/untracked/check-pipefail-scope-coverage.sh"
     fixture="$BATS_TEST_TMPDIR/fx"
     mkdir -p "$fixture/scripts/untracked" "$fixture/tests/bats"
 }
@@ -35,7 +35,7 @@ write_guard() {
         printf "  'setup.sh')\"; then\n"
         printf '  exit 1\n'
         printf 'fi\n'
-    } > "$fixture/scripts/untracked/check-pipefail-early-exit-grep.sh"
+    } > "$fixture/scripts/tracked/check-pipefail-early-exit-grep.sh"
 }
 
 write_bats() {
@@ -141,7 +141,7 @@ write_bats() {
 }
 
 @test "fails closed when the guard script itself is missing from the given directory" {
-    rm -f "$fixture/scripts/untracked/check-pipefail-early-exit-grep.sh"
+    rm -f "$fixture/scripts/tracked/check-pipefail-early-exit-grep.sh"
     write_bats 'write_script "scripts/example.sh"'
     run bash "$script" "$fixture"
     [ "$status" -eq 1 ]

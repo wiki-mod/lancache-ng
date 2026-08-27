@@ -163,14 +163,14 @@ undocumented per-Dockerfile fallback logic.
 ### Workflow Build-Tools References
 
 - `.github/workflows/build-push.yml`:
-  - There is no standalone `BUILD_TOOLS_IMAGE=...:latest` fallback assignment in this file — that mechanism was replaced by the selector script entirely. Every consumer resolves the image by calling `scripts/untracked/select-build-tools-image.sh` and writing its stdout to `$GITHUB_ENV` (see lines 300/314/316 for the two call sites, and line 1719 for a third).
+  - There is no standalone `BUILD_TOOLS_IMAGE=...:latest` fallback assignment in this file — that mechanism was replaced by the selector script entirely. Every consumer resolves the image by calling `scripts/tracked/select-build-tools-image.sh` and writing its stdout to `$GITHUB_ENV` (see lines 300/314/316 for the two call sites, and line 1719 for a third).
   - **Status**: ✅ No mutable tag is assigned directly in this workflow; resolution always goes through the selector script.
-  - **Rationale**: The selector script (`scripts/untracked/select-build-tools-image.sh`) resolves all `:latest` tags to immutable digest-qualified references before returning them to the workflow. This is the authoritative policy for the active CI path.
+  - **Rationale**: The selector script (`scripts/tracked/select-build-tools-image.sh`) resolves all `:latest` tags to immutable digest-qualified references before returning them to the workflow. This is the authoritative policy for the active CI path.
 
 - `.github/actions/rust-acceleration-preflight/action.yml`:
   - Input default (line 29): `default: ghcr.io/wiki-mod/lancache-ng/build-tools:latest`
   - **Status**: ⚠️ Input default uses mutable tag — intentional fallback for local use
-  - **Rationale**: This action is a validation-only preflight that runs against whatever image the caller specifies. Primary workflows (`build-push.yml`) pass an explicit pinned digest selected via `scripts/untracked/select-build-tools-image.sh`. The `:latest` default is provided for developers and other tools that call this action directly without overriding the input.
+  - **Rationale**: This action is a validation-only preflight that runs against whatever image the caller specifies. Primary workflows (`build-push.yml`) pass an explicit pinned digest selected via `scripts/tracked/select-build-tools-image.sh`. The `:latest` default is provided for developers and other tools that call this action directly without overriding the input.
 
 ## Known Mutable References and Decision Summary
 
@@ -191,9 +191,9 @@ The following references use mutable tags and are intentionally kept as fallback
 
 1. **`.github/actions/rust-acceleration-preflight/action.yml` input default** (line 29):
    - **Decision**: Keep as `:latest` fallback for local developer use.
-   - **Why**: Primary workflows always override this with a pinned digest from `scripts/untracked/select-build-tools-image.sh`. The action is validation-only, not build-time critical.
+   - **Why**: Primary workflows always override this with a pinned digest from `scripts/tracked/select-build-tools-image.sh`. The action is validation-only, not build-time critical.
 
-2. **`scripts/untracked/select-build-tools-image.sh` internal `published_image` variable** (line 16):
+2. **`scripts/tracked/select-build-tools-image.sh` internal `published_image` variable** (line 16):
    - **Decision**: Keep as `:latest` because the script immediately resolves it to a pinned digest (line 98: `printf '%s@%s\n' "${image%:*}" "$digest"`).
    - **Why**: Callers of this script receive a digest-qualified reference, never the mutable tag.
 
@@ -202,7 +202,7 @@ The following references use mutable tags and are intentionally kept as fallback
 The `BUILD_TOOLS_IMAGE` ARG defaults above are intentionally **not** pinned
 (see "Resolved: Issue #508" above) — the steps below are kept as general
 guidance for pinning a `build-tools` image reference elsewhere (e.g. a real
-CI consumption point resolved through `scripts/untracked/select-build-tools-image.sh`),
+CI consumption point resolved through `scripts/tracked/select-build-tools-image.sh`),
 not an open task against those two ARG defaults:
 
 1. **Determine the target build-tools version**:
@@ -227,7 +227,7 @@ not an open task against those two ARG defaults:
    ```
 
 5. **Validate**:
-   - Run `bash scripts/tracked/check-mutable-refs.sh` to confirm all references are pinned.
+   - Run `bash scripts/untracked/check-mutable-refs.sh` to confirm all references are pinned.
    - Run the full CI workflow to ensure the pinned image is still compatible.
 
 ## Local Mutable Channels (Documented Exception)
@@ -245,7 +245,7 @@ These channels are documented in `release/stack-images.yml` and are intended to 
 To verify that all CI-sensitive images are pinned, run:
 
 ```bash
-bash scripts/tracked/check-mutable-refs.sh
+bash scripts/untracked/check-mutable-refs.sh
 ```
 
 This script checks for floating-tag patterns in workflows and Dockerfiles and reports violations.

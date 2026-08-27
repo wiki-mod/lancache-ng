@@ -11,11 +11,11 @@
 # function (not a reimplementation) and asserts on the raw lines it appends,
 # independent of `dnsmasq --test` or a live packet capture (covered
 # separately, for the BIOS+UEFI-both-configured case only, by
-# scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh's real Docker-based end-to-end run).
+# scripts/tracked/simulations/dhcp-proxy-pxe-simulation.sh's real Docker-based end-to-end run).
 #
 # The have_bios=0 (UEFI-only) branch below is the one real gap named in
 # finding #8 ("UEFI-only PXE path never tested end-to-end"):
-# scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh always configures BOTH BIOS and UEFI
+# scripts/tracked/simulations/dhcp-proxy-pxe-simulation.sh always configures BOTH BIOS and UEFI
 # filenames together, so it never exercises the IA64_EFI pxe-service
 # fallback this function renders specifically when only UEFI is configured.
 # These tests give that branch real, deterministic coverage at the

@@ -2,13 +2,13 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Docker-free, git-free unit coverage for scripts/untracked/compute-next-release-tag.sh
+# Docker-free, git-free unit coverage for scripts/tracked/compute-next-release-tag.sh
 # (#819): the pure patch-bump arithmetic the promote job's version-bump step
 # relies on. No network/git dependency, so every boundary is pinned directly.
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    script="$repo_root/scripts/untracked/compute-next-release-tag.sh"
+    script="$repo_root/scripts/tracked/compute-next-release-tag.sh"
 }
 
 @test "simple patch bump" {

@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Pure channel-name mapping for scripts/untracked/select-build-tools-image.sh: which
+# Pure channel-name mapping for scripts/tracked/select-build-tools-image.sh: which
 # GHCR "build-tools:<channel>" tag a given target ref should resolve to.
 # Extracted into its own file (mirroring scripts/lib/ghcr-retry.sh's own
 # convention, already sourced by select-build-tools-image.sh) specifically so

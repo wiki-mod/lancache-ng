@@ -1,14 +1,14 @@
 #!/usr/bin/env bats
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: coverage for scripts/tracked/check-executable-bits.sh, the CI guard
+# What: coverage for scripts/untracked/check-executable-bits.sh, the CI guard
 # for a bare-path/non-executable script or .githooks/ hook.
 # Why: every scenario commits fixture files at deterministic modes and
 # invokes the guard via `bash "$script"`, never bare `run` (AG-VAL-024).
 # From: Issue #1019 | Issue #1095 | PR #1501.
 
 setup() {
-    script="$BATS_TEST_DIRNAME/../../scripts/tracked/check-executable-bits.sh"
+    script="$BATS_TEST_DIRNAME/../../scripts/untracked/check-executable-bits.sh"
     fixture="$BATS_TEST_TMPDIR/repo"
     mkdir -p "$fixture/.github/workflows"
     git -C "$fixture" init -q
@@ -230,8 +230,8 @@ EOF
     # script, invoked directly from a workflow, committed non-executable) so
     # this suite is itself the evidence the guard would have caught it,
     # without a one-off manual verification that leaves no trace once merged.
-    add_script scripts/untracked/simulations/ui-nats-dns-integration-simulation.sh no
-    write_workflow 'scripts/untracked/simulations/ui-nats-dns-integration-simulation.sh'
+    add_script scripts/tracked/simulations/ui-nats-dns-integration-simulation.sh no
+    write_workflow 'scripts/tracked/simulations/ui-nats-dns-integration-simulation.sh'
     commit_fixture
 
     run bash "$script" "$fixture"

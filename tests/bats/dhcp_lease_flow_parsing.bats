@@ -6,7 +6,7 @@
 # #448). Feeds canned dhclient .leases fixtures and asserts the extracted
 # offered-address/server-identifier/router/DNS/NTP/lease-time/domain fields
 # -- this is what actually keeps the option-parsing logic honest between
-# real, Docker-based runs of scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh
+# real, Docker-based runs of scripts/tracked/simulations/dhcp-kea-lease-flow-simulation.sh
 # (which only runs via workflow_dispatch and needs a runner with Docker), so
 # a regression in the parser itself is still caught by normal, fast bats CI.
 

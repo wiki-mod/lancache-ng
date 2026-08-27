@@ -208,7 +208,7 @@ coherent stack.
   construction, since every non-PR push already publishes a fresh
   per-commit tag for every service (see `build-push.yml`'s "Ensure PR
   staging tags exist for full-setup services" step and
-  `scripts/untracked/ensure-pr-staging-images.sh`).
+  `scripts/tracked/ensure-pr-staging-images.sh`).
 - #808's bounded-wait/ancestry-check mechanism
   (`scripts/lib/staging-image-freshness.sh`) is unchanged and still used: it
   doubles as the poll for the base commit's own push-triggered build
@@ -273,10 +273,10 @@ channel-tag promotion and its `#777` debounce/coalesce check both succeed,
 1. resolves the current release with `git describe --tags --match
    'v[0-9]*.[0-9]*.[0-9]*' --abbrev=0`;
 2. classifies every change since that tag's commit with
-   `scripts/untracked/classify-image-impact.sh` -- the same classifier `detect-changes`
+   `scripts/tracked/classify-image-impact.sh` -- the same classifier `detect-changes`
    uses, not a second copy;
 3. if that diff is image-affecting (`IMAGE_IMPACT=true`), computes the next
-   patch version with `scripts/untracked/compute-next-release-tag.sh` and pushes an
+   patch version with `scripts/tracked/compute-next-release-tag.sh` and pushes an
    annotated `vX.Y.Z` tag using the `PROJECT_AUTOMATION_PAT` secret;
 4. otherwise cuts nothing and moves on.
 
@@ -322,7 +322,7 @@ prebuilt production images if either:
   aarch64/arm64 are supported), or
 - the specific tag/channel this install resolved to does not actually publish
   a manifest for this host's architecture (checked via `docker buildx
-  imagetools inspect`, mirroring `scripts/untracked/require-image-platforms.sh`'s
+  imagetools inspect`, mirroring `scripts/tracked/require-image-platforms.sh`'s
   release/promotion guard).
 
 Adding another platform beyond amd64/arm64 requires updating the manifest,
@@ -415,7 +415,7 @@ merely because a mutable channel once pointed at them unless another retention
 rule still protects that identity.
 
 **The protected-reference model (issue #1501).** The audit
-(`scripts/lib/sha-retention-audit.sh`, `scripts/untracked/gc-sha-retention-audit.sh`)
+(`scripts/lib/sha-retention-audit.sh`, `scripts/tracked/gc-sha-retention-audit.sh`)
 checks every classified package version's attached tags against the
 `nightly`/`latest`/supported-stable-release categories above and reports a
 specific reason instead of a generic one whenever a match is found:
@@ -547,13 +547,13 @@ until a maintainer deliberately adds one.
   moved or deleted out from under an anchor, silently repointing or
   breaking the guarantee this mechanism exists to provide, without the
   audit ever noticing — a content-addressed digest cannot.
-- `scripts/untracked/validate-stack-images.sh` statically rejects any entry
+- `scripts/tracked/validate-stack-images.sh` statically rejects any entry
   that is not an exact `sha256:<64-hex>` string (reusing
   `scripts/lib/sha-retention-audit.sh`'s `sra_is_rollback_anchor_digest`,
   the single canonical definition of the accepted shape). That static check
   cannot prove a listed digest actually *exists* under its intended
   package, since it has no GHCR access.
-- `scripts/untracked/gc-sha-retention-audit.sh` does that existence check
+- `scripts/tracked/gc-sha-retention-audit.sh` does that existence check
   for real, at audit time, against the package versions it fetches from
   GHCR, and marks every declared anchor digest it actually observes. **Any
   declared anchor digest never observed in any audited first-party package

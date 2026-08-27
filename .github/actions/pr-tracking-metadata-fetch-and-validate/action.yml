@@ -82,4 +82,4 @@ runs:
           -e GH_TOKEN \
           -e PR_IS_FORK \
           "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-          timeout --kill-after=30 --signal=KILL 600 bash scripts/tracked/check-pr-tracking-metadata.sh
+          timeout --kill-after=30 --signal=KILL 600 bash scripts/untracked/check-pr-tracking-metadata.sh

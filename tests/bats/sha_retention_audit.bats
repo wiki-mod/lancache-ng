@@ -960,7 +960,7 @@ EOF
 # reintroduces the fixed gap by dropping this argument.
 # From: Issue #1095.
 @test "gc-sha-retention-audit.sh passes the history fingerprint into the cache read" {
-  run grep -F 'sra_cache_read_package "$cache_db" "$package" "$history_fingerprint"' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh"
+  run grep -F 'sra_cache_read_package "$cache_db" "$package" "$history_fingerprint"' "$repo_root/scripts/tracked/gc-sha-retention-audit.sh"
   [ "$status" -eq 0 ]
 }
 
@@ -976,10 +976,10 @@ EOF
 # independently precede facts_line, not just exactly one of them.
 # From: Issue #1613
 @test "gc-sha-retention-audit.sh checks rollback_anchors before tag/history classification" {
-  facts_line="$(grep -n 'sra_version_tag_facts "\$version_json"' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh" | cut -d: -f1)"
+  facts_line="$(grep -n 'sra_version_tag_facts "\$version_json"' "$repo_root/scripts/tracked/gc-sha-retention-audit.sh" | cut -d: -f1)"
   [ -n "$facts_line" ]
 
-  anchor_lines="$(grep -n 'sra_digest_is_rollback_anchor "\$digest"' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh" | cut -d: -f1)"
+  anchor_lines="$(grep -n 'sra_digest_is_rollback_anchor "\$digest"' "$repo_root/scripts/tracked/gc-sha-retention-audit.sh" | cut -d: -f1)"
   [ -n "$anchor_lines" ]
 
   while IFS= read -r anchor_line; do
@@ -987,7 +987,7 @@ EOF
     [ "$anchor_line" -lt "$facts_line" ]
   done <<<"$anchor_lines"
 
-  run grep -F 'metadata-stack-identity' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh"
+  run grep -F 'metadata-stack-identity' "$repo_root/scripts/tracked/gc-sha-retention-audit.sh"
   [ "$status" -eq 1 ]
 }
 
@@ -1007,8 +1007,8 @@ EOF
 # request for real CI verification.
 # From: Issue #1585.
 @test "gc-sha-retention-audit.sh protects a truly untagged rootless version before any buffer routing" {
-  untagged_protect_line="$(grep -n 'root_count == 0 && other_count == 0' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh" | cut -d: -f1)"
-  buffer_write_line="$(grep -n '>>"\$other_tag_candidates"' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh" | head -1 | cut -d: -f1)"
+  untagged_protect_line="$(grep -n 'root_count == 0 && other_count == 0' "$repo_root/scripts/tracked/gc-sha-retention-audit.sh" | cut -d: -f1)"
+  buffer_write_line="$(grep -n '>>"\$other_tag_candidates"' "$repo_root/scripts/tracked/gc-sha-retention-audit.sh" | head -1 | cut -d: -f1)"
   [ -n "$untagged_protect_line" ]
   [ -n "$buffer_write_line" ]
   [ "$untagged_protect_line" -lt "$buffer_write_line" ]
@@ -1018,11 +1018,11 @@ EOF
 # Why: it must exist without adding DELETE capability to the audit itself.
 # From: Issue #1095 | PR #1586
 @test "gc-sha-retention-audit.sh exposes a read-only package filter and reusable snapshot for GC workers" {
-  run grep -F 'SRA_PACKAGE_FILTER' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh"
+  run grep -F 'SRA_PACKAGE_FILTER' "$repo_root/scripts/tracked/gc-sha-retention-audit.sh"
   [ "$status" -eq 0 ]
-  run grep -F 'SRA_VERSION_SNAPSHOT_FILE' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh"
+  run grep -F 'SRA_VERSION_SNAPSHOT_FILE' "$repo_root/scripts/tracked/gc-sha-retention-audit.sh"
   [ "$status" -eq 0 ]
-  run grep -F 'ordinary-root-beyond-retention-budget' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh"
+  run grep -F 'ordinary-root-beyond-retention-budget' "$repo_root/scripts/tracked/gc-sha-retention-audit.sh"
   [ "$status" -eq 0 ]
 }
 
@@ -1032,7 +1032,7 @@ EOF
 # From: Issue #1585
 @test "gc-sha-retention-audit.sh rejects invalid package concurrency" {
   run env GITHUB_REPOSITORY=wiki-mod/lancache-ng GH_TOKEN=test SRA_CONCURRENCY=0 \
-    bash "$repo_root/scripts/untracked/gc-sha-retention-audit.sh"
+    bash "$repo_root/scripts/tracked/gc-sha-retention-audit.sh"
   [ "$status" -ne 0 ]
   [[ "$output" == *"SRA_CONCURRENCY must be a positive integer"* ]]
 }
@@ -1042,7 +1042,7 @@ EOF
 # rollback anchors through parent variables; all three channels must survive.
 # From: Issue #1585
 @test "gc-sha-retention-audit.sh preserves concurrent worker results" {
-  script="$repo_root/scripts/untracked/gc-sha-retention-audit.sh"
+  script="$repo_root/scripts/tracked/gc-sha-retention-audit.sh"
   run grep -F 'offset+=audit_concurrency' "$script"
   [ "$status" -eq 0 ]
   run grep -F 'wait "${worker_pids[$worker_index]}"' "$script"
@@ -1057,7 +1057,7 @@ EOF
 # From: Issue #1585 | PR #1586
 @test "retention audit code and workflow contain no destructive package path" {
   run grep -ER --line-number -- '-X[[:space:]]+DELETE|delete:packages|GHCR_PACKAGE_DELETE_PAT' \
-    "$repo_root/scripts/untracked/gc-sha-retention-audit.sh" \
+    "$repo_root/scripts/tracked/gc-sha-retention-audit.sh" \
     "$repo_root/scripts/lib/sha-retention-audit.sh" \
     "$repo_root/scripts/lib/github-api-retry.sh" \
     "$repo_root/.github/workflows/gc-sha-retention-audit.yml"
@@ -1120,7 +1120,7 @@ EOF
 # decision) rather than adding a second, parallel deletion-protection path.
 # From: Issue #1613
 @test "gc-sha-retention-audit.sh checks live Dockerfile FROM digests before tag/history classification, reusing the rollback-anchor check" {
-  script="$repo_root/scripts/untracked/gc-sha-retention-audit.sh"
+  script="$repo_root/scripts/tracked/gc-sha-retention-audit.sh"
   rollback_line="$(grep -n 'sra_digest_is_rollback_anchor "\$digest" "\${!retention_rollback_anchor_digests\[@\]}"' "$script" | cut -d: -f1)"
   live_line="$(grep -n 'sra_digest_is_rollback_anchor "\$digest" "\${!live_dockerfile_from_digests\[@\]}"' "$script" | cut -d: -f1)"
   facts_line="$(grep -n 'sra_version_tag_facts "\$version_json"' "$script" | cut -d: -f1)"
@@ -1137,7 +1137,7 @@ EOF
 # repo-wide scan in this project's CI scripts already works.
 # From: Issue #1613
 @test "gc-sha-retention-audit.sh discovers live Dockerfiles via git ls-files" {
-  run grep -F "git -C \"\$repo_root\" ls-files -- '*Dockerfile*'" "$repo_root/scripts/untracked/gc-sha-retention-audit.sh"
+  run grep -F "git -C \"\$repo_root\" ls-files -- '*Dockerfile*'" "$repo_root/scripts/tracked/gc-sha-retention-audit.sh"
   [ "$status" -eq 0 ]
 }
 

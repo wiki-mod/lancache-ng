@@ -434,9 +434,9 @@ a distinct, non-root, fixed UID.
 | `tests/bats/shared_secret_bootstrap_sync.bats` (4 tests) | Byte-identity of the embedded copy in this file vs. the canonical library and the two sibling copies |
 | `dhcp.rs` `#[cfg(test)]`/`#[tokio::test]` (70 in-file tests) | `kea_config_modify`'s success/rollback/retry/ambiguous-failure matrix, global-reservation-identifiers guard, `lease4-del` result-code handling, CSRF/mode gating, validation helpers |
 | `kea_snapshots.rs` `#[test]` (8 in-file tests) | Snapshot creation, retention, rollback ID membership |
-| `scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh` (issues #448/#642) | Real `dhclient` DORA exchange against a real Kea container; pool/router/DNS/NTP/lease-time options, static-reservation-honored-by-real-lease, forward+reverse DDNS follow-through against real PowerDNS |
-| `scripts/untracked/simulations/dhcp-kea-ctrl-agent-mutation-simulation.sh` (issue #634) | Real Admin UI HTTP route `POST /dhcp/static/add`/`/remove` (session+CSRF), confirms via `config-get` and a subsequent real lease request -- "representative, not route-by-route exhaustive," explicitly does not cover subnet/option routes or DDNS |
-| `scripts/untracked/simulations/setup-reset-kea-config-simulation.sh` (issue #794, Refs #763) | The **CLI** rollback (`setup.sh reset-to-last-known-good-config kea --yes`) genuinely rolls a real running Kea server back |
+| `scripts/tracked/simulations/dhcp-kea-lease-flow-simulation.sh` (issues #448/#642) | Real `dhclient` DORA exchange against a real Kea container; pool/router/DNS/NTP/lease-time options, static-reservation-honored-by-real-lease, forward+reverse DDNS follow-through against real PowerDNS |
+| `scripts/tracked/simulations/dhcp-kea-ctrl-agent-mutation-simulation.sh` (issue #634) | Real Admin UI HTTP route `POST /dhcp/static/add`/`/remove` (session+CSRF), confirms via `config-get` and a subsequent real lease request -- "representative, not route-by-route exhaustive," explicitly does not cover subnet/option routes or DDNS |
+| `scripts/tracked/simulations/setup-reset-kea-config-simulation.sh` (issue #794, Refs #763) | The **CLI** rollback (`setup.sh reset-to-last-known-good-config kea --yes`) genuinely rolls a real running Kea server back |
 
 **Not covered**: `migrate_dhcp4_config`/`build_ntp_migration_map` (§4,
 zero direct coverage -- bug-hunt finding #3); the Admin UI's own

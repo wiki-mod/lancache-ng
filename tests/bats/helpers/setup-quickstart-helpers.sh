@@ -40,7 +40,7 @@ load_setup_quickstart_helpers() {
     # shellcheck disable=SC2034
     QUICKSTART_COMPOSE="$repo_root/deploy/quickstart/docker-compose.yml"
     # shellcheck disable=SC2034
-    DOCKER_SOCKET_PROXY_SCRIPT="$repo_root/scripts/untracked/docker-socket-proxy.sh"
+    DOCKER_SOCKET_PROXY_SCRIPT="$repo_root/scripts/tracked/docker-socket-proxy.sh"
     # shellcheck disable=SC2034
     SHARED_SECRET_BOOTSTRAP_SCRIPT="$repo_root/scripts/lib/shared-secret-bootstrap.sh"
 }

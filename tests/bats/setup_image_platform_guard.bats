@@ -130,7 +130,7 @@ setup() {
 # Multi-platform index manifests (what release/stack-images.yml actually
 # publishes today) report no single .Image field, so the guard must fall back
 # to parsing the plain "Platform:" lines -- this is the same fallback
-# scripts/untracked/require-image-platforms.sh uses.
+# scripts/tracked/require-image-platforms.sh uses.
 @test "assert_resolved_image_tag_platform_supported succeeds via the multi-platform index fallback" {
     FAKE_ARCH=aarch64
     FAKE_SINGLE_PLATFORM="<no value>/<no value>"

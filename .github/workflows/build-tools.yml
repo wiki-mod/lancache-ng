@@ -272,7 +272,7 @@ jobs:
         id: preflight-image
         run: |
           set -euo pipefail
-          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/tracked/select-build-tools-image.sh)"
           printf 'image=%s\n' "$build_tools_image" >> "$GITHUB_OUTPUT"
 
       # What: also runs for this standalone schedule/workflow_dispatch
@@ -811,7 +811,7 @@ jobs:
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          bash scripts/untracked/require-image-platforms.sh "${{ steps.merge.outputs.source-tag }}" linux/amd64,linux/arm64
+          bash scripts/tracked/require-image-platforms.sh "${{ steps.merge.outputs.source-tag }}" linux/amd64,linux/arm64
 
       - name: Resolve merged manifest digest
         id: merged-digest

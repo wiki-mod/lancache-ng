@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Regression test for scripts/untracked/require-image-platforms.sh: a
+# Regression test for scripts/tracked/require-image-platforms.sh: a
 # transient GHCR failure on the first `docker buildx imagetools inspect`
 # attempt, recovered by ghcr_retry's own retry loop on a later attempt, must
 # not corrupt the platform-detection result. Capturing the whole ghcr_retry
@@ -16,7 +16,7 @@
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    script="$repo_root/scripts/untracked/require-image-platforms.sh"
+    script="$repo_root/scripts/tracked/require-image-platforms.sh"
     fake_bin_dir="$BATS_TEST_TMPDIR/fakebin"
     mkdir -p "$fake_bin_dir"
     call_log="$BATS_TEST_TMPDIR/docker_calls.log"

@@ -62,4 +62,4 @@ runs:
           -e PR_AUTHOR \
           -e PR_TITLE_LINT_MODE \
           "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-          timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-pr-title-convention.sh
+          timeout --kill-after=30 --signal=KILL 300 bash scripts/untracked/check-pr-title-convention.sh

@@ -19,7 +19,7 @@
 # mapping function directly is both simpler and strictly more reliable, since
 # it has no dependency on docker/tar/PATH resolution behavior at all -- the
 # actual registry pull path stays covered by the real end-to-end CI
-# simulations (scripts/untracked/simulations/setup-cli-simulation.sh,
+# simulations (scripts/tracked/simulations/setup-cli-simulation.sh,
 # scripts/watchtower-update-simulation.sh) instead of an in-bats mock.
 
 setup() {

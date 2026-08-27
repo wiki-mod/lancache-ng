@@ -5,7 +5,7 @@
 # Pure (Docker-free, registry-free) helpers for deciding WHICH image tag the
 # full-setup deep validation suite should test, and whether a PR is eligible
 # for its own per-PR staging tag. Sourced by
-# scripts/untracked/ensure-pr-staging-images.sh and by the deep-validate workflow, and
+# scripts/tracked/ensure-pr-staging-images.sh and by the deep-validate workflow, and
 # unit-tested directly by tests/bats/validation_image_tag.bats so the tag
 # maths stay honest without needing a runner with Docker.
 #
@@ -16,7 +16,7 @@
 # vit_base_channel_tag/vit_pr_staging_available/vit_resolve_tag/
 # vit_service_should_have_staging_tag directly instead of reimplementing
 # the same decisions inline a second time. This file is the single
-# implementation both build-push.yml and scripts/untracked/ensure-pr-staging-images.sh
+# implementation both build-push.yml and scripts/tracked/ensure-pr-staging-images.sh
 # (plus this file's own tests/bats/validation_image_tag.bats) share --
 # agreement is now structural, not a "keep in sync by hand" invariant.
 # #715's own original clarification ("deliberately left that job untouched")

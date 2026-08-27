@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Shared helper: turns a services/dns/cdn-domains.txt entry into a DNS-legal
-# probe name for scripts/untracked/simulations/full-setup-client-simulation.sh's live `dig` checks
+# probe name for scripts/tracked/simulations/full-setup-client-simulation.sh's live `dig` checks
 # (issue #1140). Per AG-OP-015 (AGENTS.md's "Domain scope semantics" rule), a
 # leading-dot entry such as ".steamcontent.com" is an explicit wildcard-only
 # scope: it matches *.steamcontent.com (see services/dns/entrypoint.sh's RPZ
@@ -19,7 +19,7 @@
 # answered for that kind of entry.
 #
 # Pure function, no top-level executable code: sourced directly by
-# scripts/untracked/simulations/full-setup-client-simulation.sh and by
+# scripts/tracked/simulations/full-setup-client-simulation.sh and by
 # tests/bats/full_setup_client_simulation_domain.bats, mirroring
 # scripts/lib/ghcr-retry.sh's sourcing convention.
 

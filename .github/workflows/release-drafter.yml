@@ -6,7 +6,7 @@
 # (#899, decided on #894). Replaces the manual "collect merged PRs by hand
 # at release time" step -- see CONTRIBUTING.md's "Releasing Changes to
 # CHANGELOG.md" section, which now treats
-# scripts/untracked/collect-changelog-entries.sh as a fallback, not the primary path.
+# scripts/tracked/collect-changelog-entries.sh as a fallback, not the primary path.
 name: Release Drafter
 
 on:

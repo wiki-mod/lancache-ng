@@ -7,7 +7,7 @@ services), so contributors do not need `rustc` on the host machine.
 The checks run inside a container specifically so every contributor and CI
 job validates the Admin UI against the exact same toolchain version,
 regardless of what Rust (if any) is installed on the host -- see
-`scripts/untracked/ui-rust-checks.sh`'s own header comment for the same rationale in
+`scripts/tracked/ui-rust-checks.sh`'s own header comment for the same rationale in
 the script itself, and `AGENTS.md`'s build-tools verification contract for
 why this is the only supported way to run these checks at all (host-local
 `cargo`/`rustc` are not treated as valid verification, even if present).
@@ -28,7 +28,7 @@ workflow container-scan path rather than this local Rust check image.
 Run from the repository root:
 
 ```bash
-./scripts/untracked/ui-rust-checks.sh
+./scripts/tracked/ui-rust-checks.sh
 ```
 
 The script runs, in this order:
@@ -42,7 +42,7 @@ The script runs, in this order:
 You can override the image for investigation:
 
 ```bash
-./scripts/untracked/ui-rust-checks.sh --rust-image rust:latest --no-fmt --no-clippy
+./scripts/tracked/ui-rust-checks.sh --rust-image rust:latest --no-fmt --no-clippy
 ```
 
 If you override the image, it must already contain `rustfmt`, `clippy`, and
@@ -61,13 +61,13 @@ This is a contributor/CI optimization only; setup, update, and runtime image
 pulls do not depend on it.
 
 ```bash
-SCCACHE_REDIS_URL=redis://<redis-host>:6379/0 ./scripts/untracked/ui-rust-checks.sh --sccache
+SCCACHE_REDIS_URL=redis://<redis-host>:6379/0 ./scripts/tracked/ui-rust-checks.sh --sccache
 ```
 
 If you do not already have Redis, the script can start a temporary Redis sidecar:
 
 ```bash
-./scripts/untracked/ui-rust-checks.sh --sccache --with-redis
+./scripts/tracked/ui-rust-checks.sh --sccache --with-redis
 ```
 
 Plain `--sccache` without Redis fails on purpose, because cache results should be shareable and predictable.

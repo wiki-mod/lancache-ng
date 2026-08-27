@@ -30,9 +30,9 @@ runs:
       run: >-
         docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work
         "${{ inputs.build-tools-image }}" timeout --kill-after=30s 5m
-        bash scripts/tracked/check-file-headers.sh
+        bash scripts/untracked/check-file-headers.sh
 
-    # What: runs scripts/untracked/check-workflow-line-limit.sh in the build-tools container.
+    # What: runs scripts/tracked/check-workflow-line-limit.sh in the build-tools container.
     # Why: enforces AG-CI-021's whole-file and per-run:-block ceilings.
     # From: Issue #1095 | Issue #1535
     - name: Check workflow files stay under the line/byte/run-block ceilings
@@ -40,7 +40,7 @@ runs:
       run: >-
         docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work
         "${{ inputs.build-tools-image }}" timeout --kill-after=30s 5m
-        bash scripts/untracked/check-workflow-line-limit.sh
+        bash scripts/tracked/check-workflow-line-limit.sh
 
     # What: repo-wide review-chronology baseline; warn-only on a pull_request, blocking on a push.
     # Why: the diff-scoped step below already blocks pull_request on its
@@ -55,7 +55,7 @@ runs:
         docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work
         -e CHRONOLOGY_WARN_ONLY
         "${{ inputs.build-tools-image }}" timeout --kill-after=30s 5m
-        bash scripts/untracked/check-review-chronology-comments.sh
+        bash scripts/tracked/check-review-chronology-comments.sh
 
     # What: diff-scoped, blocking review-chronology check on PR-changed files.
     # Why: the repo-wide step above is warn-only on pull_request, so a
@@ -76,18 +76,18 @@ runs:
           -e GITHUB_SHA \
           "${{ inputs.build-tools-image }}" \
           timeout --kill-after=30 --signal=KILL 300 bash -c \
-            'cp -a /source /tmp/work && cd /tmp/work && bash scripts/untracked/check-review-chronology-comments.sh'
+            'cp -a /source /tmp/work && cd /tmp/work && bash scripts/tracked/check-review-chronology-comments.sh'
 
-    # See scripts/tracked/check-dependabot-docker-base-consistency.sh's own header
+    # See scripts/untracked/check-dependabot-docker-base-consistency.sh's own header
     # for the shared-base-image assumption this guards.
     - name: Check dependabot.yml's docker-group base-image assumption still holds
       shell: bash
       run: >-
         docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work
         "${{ inputs.build-tools-image }}" timeout --kill-after=30s 5m
-        bash scripts/tracked/check-dependabot-docker-base-consistency.sh
+        bash scripts/untracked/check-dependabot-docker-base-consistency.sh
 
-    # See scripts/untracked/check-trivy-action-direct-usage.sh's own header for why a
+    # See scripts/tracked/check-trivy-action-direct-usage.sh's own header for why a
     # direct call site regresses the retry/auth/mirror fix
     # (AG-VAL-029: a point fix alone is not sufficient).
     - name: Check no direct aquasecurity/trivy-action call sites outside the retry wrapper
@@ -95,9 +95,9 @@ runs:
       run: >-
         docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work
         "${{ inputs.build-tools-image }}" timeout --kill-after=30s 5m
-        bash scripts/untracked/check-trivy-action-direct-usage.sh
+        bash scripts/tracked/check-trivy-action-direct-usage.sh
 
-    # What: runs scripts/untracked/check-deny-short-sha.sh in the build-tools container.
+    # What: runs scripts/tracked/check-deny-short-sha.sh in the build-tools container.
     # Why: short SHAs are banned outright (not merely required to stay
     #   consistent); see that script's own header comment for the full
     #   rationale.
@@ -107,4 +107,4 @@ runs:
       run: >-
         docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work
         "${{ inputs.build-tools-image }}" timeout --kill-after=30s 5m
-        bash scripts/untracked/check-deny-short-sha.sh
+        bash scripts/tracked/check-deny-short-sha.sh

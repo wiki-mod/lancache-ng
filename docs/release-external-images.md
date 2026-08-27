@@ -149,7 +149,7 @@ Accepted, deliberately-suppressed vulnerability findings live in the repo-root
 periodic re-review). That file is Trivy-specific and not something a downstream
 consumer's non-Trivy tooling can parse.
 
-`scripts/untracked/generate-vex.sh` converts those entries into a standard
+`scripts/tracked/generate-vex.sh` converts those entries into a standard
 [OpenVEX](https://openvex.dev) JSON document, `vex.openvex.json`. Each
 accepted-vulnerability entry becomes an OpenVEX statement: the vulnerable
 component is present and the finding is accepted or deferred (typically
@@ -171,7 +171,7 @@ exact class of bug it was meant to prevent. Instead:
 - A dedicated orphan branch, `CI-Automation/vex`, carries only the current
   `vex.openvex.json` plus a short README. `.github/workflows/vex-regenerate.yml`
   regenerates and commits to that branch automatically whenever
-  `.trivyignore.yaml` or `scripts/untracked/generate-vex.sh` changes on
+  `.trivyignore.yaml` or `scripts/tracked/generate-vex.sh` changes on
   `current_dev` -- no PR, no review gate, mirroring this repo's existing
   precedent for other mechanically-reproducible automated commits (e.g.
   `nightly-refresh.yml`'s channel-tag refresh, and `build-push.yml`'s own
@@ -182,11 +182,11 @@ exact class of bug it was meant to prevent. Instead:
   Issue #1095) but does open/reuse a `vex-generator-broken`-labeled GitHub
   issue and emit a visible `::error::` annotation -- see that workflow file's
   own header comment for the documented-exception rationale.
-- `scripts/tracked/check-vex-drift.sh`, run as the "Check VEX generator
+- `scripts/untracked/check-vex-drift.sh`, run as the "Check VEX generator
   produces valid OpenVEX JSON" step in the `validate-compose` job, no longer
   compares two committed copies (there is only one, and it isn't on
   `current_dev`) -- it is a generator smoke test: run
-  `scripts/untracked/generate-vex.sh` and assert the result is valid,
+  `scripts/tracked/generate-vex.sh` and assert the result is valid,
   non-empty OpenVEX JSON. This still fails a PR that breaks the generator or
   feeds it malformed `.trivyignore.yaml`, just without a second-copy
   comparison.

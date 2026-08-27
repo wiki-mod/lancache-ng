@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Coverage for scripts/tracked/check-changelog-direct-edit.sh (#893): the warn-only CI
+# Coverage for scripts/untracked/check-changelog-direct-edit.sh (#893): the warn-only CI
 # guard that flags a PR editing CHANGELOG.md directly, since #899 that file is
 # normally written by an automated bot commit (update-changelog.yaml), never
 # through a PR. This suite invokes the real script by path (per AG-VAL-024:
@@ -17,7 +17,7 @@
 # `::warning::`, a `::notice::`, or nothing) differs.
 
 setup() {
-    script="$BATS_TEST_DIRNAME/../../scripts/tracked/check-changelog-direct-edit.sh"
+    script="$BATS_TEST_DIRNAME/../../scripts/untracked/check-changelog-direct-edit.sh"
     changed_files="$BATS_TEST_TMPDIR/changed-files.txt"
     labels_file="$BATS_TEST_TMPDIR/labels.txt"
     unset CHANGELOG_GUARD_PR_LABELS

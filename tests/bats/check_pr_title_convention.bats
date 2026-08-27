@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Coverage for scripts/tracked/check-pr-title-convention.sh (#850, AG-GH-018): the
+# Coverage for scripts/untracked/check-pr-title-convention.sh (#850, AG-GH-018): the
 # CI guard that validates a pull request's TITLE against this repo's
 # Conventional-Commit taxonomy. This repo merges (not squashes) pull
 # requests, so the PR title is the enforcement unit -- these fixtures write
@@ -24,7 +24,7 @@
 # down proves the current default (unset PR_TITLE_LINT_MODE) is warn-only.
 
 setup() {
-    script="$BATS_TEST_DIRNAME/../../scripts/tracked/check-pr-title-convention.sh"
+    script="$BATS_TEST_DIRNAME/../../scripts/untracked/check-pr-title-convention.sh"
     title_file="$BATS_TEST_TMPDIR/pr-title.txt"
 }
 

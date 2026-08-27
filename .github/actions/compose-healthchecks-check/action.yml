@@ -14,4 +14,4 @@ runs:
   steps:
     - name: Check every deploy/*/docker-compose.yml service has a healthcheck
       shell: bash
-      run: bash scripts/tracked/check-compose-healthchecks.sh
+      run: bash scripts/untracked/check-compose-healthchecks.sh

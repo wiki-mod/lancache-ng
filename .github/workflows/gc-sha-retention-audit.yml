@@ -17,11 +17,11 @@ on:
       - .github/workflows/gc-sha-retention-audit.yml
       - release/stack-images.yml
       - docs/release-versioning.md
-      - scripts/untracked/select-build-tools-image.sh
-      - scripts/untracked/gc-sha-retention-audit.sh
+      - scripts/tracked/select-build-tools-image.sh
+      - scripts/tracked/gc-sha-retention-audit.sh
       - scripts/lib/github-api-retry.sh
       - scripts/lib/sha-retention-audit.sh
-      - scripts/untracked/validate-stack-images.sh
+      - scripts/tracked/validate-stack-images.sh
       - tests/bats/sha_retention_audit.bats
   workflow_dispatch:
 
@@ -93,8 +93,8 @@ jobs:
           git rev-parse --verify --quiet 'origin/current_dev^{commit}' >/dev/null
           for required in \
             release/stack-images.yml \
-            scripts/untracked/select-build-tools-image.sh \
-            scripts/untracked/gc-sha-retention-audit.sh \
+            scripts/tracked/select-build-tools-image.sh \
+            scripts/tracked/gc-sha-retention-audit.sh \
             scripts/lib/github-api-retry.sh \
             scripts/lib/sha-retention-audit.sh \
             tests/bats/sha_retention_audit.bats; do
@@ -123,7 +123,7 @@ jobs:
           GHCR_RETRY_PASSWORD: ${{ github.token }}
         run: |
           set -euo pipefail
-          image="$(bash scripts/untracked/select-build-tools-image.sh)"
+          image="$(bash scripts/tracked/select-build-tools-image.sh)"
           if [[ -z "$image" ]]; then
             echo "::error::Build-tools selector returned an empty image reference."
             exit 1
@@ -148,12 +148,12 @@ jobs:
             "$BUILD_TOOLS_IMAGE" \
             timeout --kill-after=30s 15m bash -lc '
               set -euo pipefail
-              bash -n scripts/untracked/gc-sha-retention-audit.sh scripts/lib/github-api-retry.sh scripts/lib/sha-retention-audit.sh scripts/untracked/validate-stack-images.sh
-              shellcheck --severity=warning scripts/untracked/gc-sha-retention-audit.sh scripts/lib/github-api-retry.sh scripts/lib/sha-retention-audit.sh scripts/untracked/validate-stack-images.sh tests/bats/sha_retention_audit.bats
+              bash -n scripts/tracked/gc-sha-retention-audit.sh scripts/lib/github-api-retry.sh scripts/lib/sha-retention-audit.sh scripts/tracked/validate-stack-images.sh
+              shellcheck --severity=warning scripts/tracked/gc-sha-retention-audit.sh scripts/lib/github-api-retry.sh scripts/lib/sha-retention-audit.sh scripts/tracked/validate-stack-images.sh tests/bats/sha_retention_audit.bats
               actionlint .github/workflows/gc-sha-retention-audit.yml
               bats tests/bats/sha_retention_audit.bats
-              bash scripts/untracked/validate-stack-images.sh
-              bash scripts/untracked/check-workflow-line-limit.sh
+              bash scripts/tracked/validate-stack-images.sh
+              bash scripts/tracked/check-workflow-line-limit.sh
             '
 
       # What: exports the runner.temp cache dir via GITHUB_ENV for later steps.
@@ -232,7 +232,7 @@ jobs:
             -v "${AUDIT_CLASSIFICATION_CACHE_DIR}:/classification-cache:rw" \
             -w /work \
             "$BUILD_TOOLS_IMAGE" \
-            timeout --kill-after=30s 25m bash scripts/untracked/gc-sha-retention-audit.sh
+            timeout --kill-after=30s 25m bash scripts/tracked/gc-sha-retention-audit.sh
 
       # What: saves the cache with if: always(), not only on success.
       # Why: a failed/timed-out audit run should still keep whatever pages

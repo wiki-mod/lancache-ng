@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Unit coverage for scripts/untracked/classify-image-impact.sh (#819). Most
+# Unit coverage for scripts/tracked/classify-image-impact.sh (#819). Most
 # cases feed canned changed-file lists (via CHANGED_FILES) and assert the
 # per-path booleans this script inherited verbatim from build-push.yml's
 # detect-changes job, plus the additive IMAGE_IMPACT verdict the promote
@@ -12,7 +12,7 @@
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    script="$repo_root/scripts/untracked/classify-image-impact.sh"
+    script="$repo_root/scripts/tracked/classify-image-impact.sh"
     files="$BATS_TEST_TMPDIR/changed.txt"
 }
 
@@ -239,7 +239,7 @@ val() {
     [ "$(val setup_runtime)" = "true" ]
     [ "$(val scripts)" = "false" ]
 
-    run_classify "scripts/untracked/simulations/ssl-mitm-cache-simulation.sh"
+    run_classify "scripts/tracked/simulations/ssl-mitm-cache-simulation.sh"
     [ "$(val setup_runtime)" = "true" ]
     [ "$(val scripts)" = "true" ]
 }

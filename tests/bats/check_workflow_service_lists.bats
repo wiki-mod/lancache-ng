@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Coverage for scripts/tracked/check-workflow-service-lists.sh (#822): the CI guard
+# Coverage for scripts/untracked/check-workflow-service-lists.sh (#822): the CI guard
 # that fails a build if build-push.yml's several independent `services=(...)`
 # arrays (which drive manifest merge, channel promotion, and release) ever
 # diverge from the build matrix's canonical service set, or if
@@ -17,15 +17,15 @@
 #
 # The remaining tests cover the guard's extension (#822 pattern audit, beyond
 # issue #935's original build-push.yml-only scope) to 3 more real files that
-# duplicate the same service-list class: scripts/untracked/gc-pr-staging-images.sh,
-# backfill-stack-latest.yml, and scripts/untracked/ensure-pr-staging-images.sh. These
+# duplicate the same service-list class: scripts/tracked/gc-pr-staging-images.sh,
+# backfill-stack-latest.yml, and scripts/tracked/ensure-pr-staging-images.sh. These
 # invoke the script with a matrix-source fixture PLUS additional fixture
 # files, mirroring the script's own `[primary] [extra]...` argument shape.
 #
 # gc_fixture is named gc-pr-staging-images.sh, not .yml: it used to model
 # the array as it looked embedded in
 # .github/workflows/gc-pr-staging-images.yml's own `run:` block, before that
-# logic moved into scripts/untracked/gc-pr-staging-images.sh as a real, standalone
+# logic moved into scripts/tracked/gc-pr-staging-images.sh as a real, standalone
 # script. check_services_arrays() in the script under test keys
 # REQUIRES_SERVICES_ARRAY/SUBSET_SERVICES_FILES by `basename "$file"` -- a
 # fixture still named *.yml here would silently stop being treated as
@@ -33,7 +33,7 @@
 # letting every "no services=(...) array found"/"diverges" test below pass
 # for the wrong reason (or not fail at all) without anyone noticing.
 setup() {
-    script="$BATS_TEST_DIRNAME/../../scripts/tracked/check-workflow-service-lists.sh"
+    script="$BATS_TEST_DIRNAME/../../scripts/untracked/check-workflow-service-lists.sh"
     fixture="$BATS_TEST_TMPDIR/build-push.yml"
     gc_fixture="$BATS_TEST_TMPDIR/gc-pr-staging-images.sh"
     backfill_fixture="$BATS_TEST_TMPDIR/backfill-stack-latest.yml"
@@ -196,7 +196,7 @@ EOF
 }
 
 # Writes correct, in-sync content for all 3 extended-scope fixtures, modeled
-# on the real files: scripts/untracked/gc-pr-staging-images.sh equals the canonical
+# on the real files: scripts/tracked/gc-pr-staging-images.sh equals the canonical
 # set, declared at column 0 like ensure-pr-staging-images.sh below (it is a
 # plain shell script, not indented inside a YAML `run:` block -- unlike
 # before this array moved out of .github/workflows/gc-pr-staging-images.yml's
@@ -238,7 +238,7 @@ write_matrix_source_with_services() {
     [[ "$output" == *"consistent"* ]]
 }
 
-# The exact #822 recurrence shape, now in scripts/untracked/gc-pr-staging-images.sh
+# The exact #822 recurrence shape, now in scripts/tracked/gc-pr-staging-images.sh
 # specifically: a service silently missing from its (must-equal-canonical)
 # services=(...) copy must fail and name the file.
 @test "multi-file: fails when gc-pr-staging-images.sh's services=() diverges from canonical" {
@@ -357,7 +357,7 @@ write_matrix_source_with_services() {
     [[ "$output" == *"$ensure_fixture"* ]]
 }
 
-# scripts/untracked/gc-pr-staging-images.sh and backfill-stack-latest.yml are both
+# scripts/tracked/gc-pr-staging-images.sh and backfill-stack-latest.yml are both
 # "required" services=(...) files (see REQUIRES_SERVICES_ARRAY in the
 # script): if the array vanishes entirely (renamed, refactored away), the
 # guard must fail closed instead of silently no-op'ing on that file. This is
@@ -494,8 +494,8 @@ EOF
 
 # Defense-in-depth: proves the guard's default zero-argument production
 # invocation -- the exact way build-push.yml's CI step calls it, covering
-# the real build-push.yml plus the real scripts/untracked/gc-pr-staging-images.sh,
-# backfill-stack-latest.yml, scripts/untracked/ensure-pr-staging-images.sh, and (since
+# the real build-push.yml plus the real scripts/tracked/gc-pr-staging-images.sh,
+# backfill-stack-latest.yml, scripts/tracked/ensure-pr-staging-images.sh, and (since
 # the hosted-fallback drift class above) the real
 # build-push-hosted-fallback.yml too, since check-workflow-service-lists.sh's
 # own zero-arg default now also passes --hosted-fallback -- is actually green

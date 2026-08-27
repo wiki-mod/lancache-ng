@@ -13,7 +13,7 @@ cosmetic one — see "Why this document exists" below.
 
 If you add a new service, volume, environment variable, or allowlist entry,
 follow the rule for its category below, and update every place listed under
-"Where each name actually lives" for that category. `scripts/tracked/check-naming-consistency.sh`
+"Where each name actually lives" for that category. `scripts/untracked/check-naming-consistency.sh`
 (wired into CI, see "CI guard" below) checks the parts of this contract that
 are mechanically checkable; it does not replace reading this document.
 
@@ -21,7 +21,7 @@ are mechanically checkable; it does not replace reading this document.
 
 This came out of issue #454, itself a follow-up from hardening the Docker
 socket proxy in #377. The socket proxy's HAProxy allowlist
-(`scripts/untracked/docker-socket-proxy.sh`) only allows Docker API calls against a
+(`scripts/tracked/docker-socket-proxy.sh`) only allows Docker API calls against a
 fixed list of container names. Every other layer that talks about "the proxy
 container" or "the DNS-standard container" — the Admin UI's Docker API
 client, the watchdog's health-check loop, each Compose file's
@@ -52,7 +52,7 @@ and they intentionally use different literal values:
    concept of a Compose service name; it only knows container names/IDs.
    The Admin UI's Docker socket calls (`services/ui/src/docker_client.rs`),
    the watchdog's health/restart loop (`services/watchdog/watchdog.sh`), and
-   the socket proxy's allowlist (`scripts/untracked/docker-socket-proxy.sh`) all
+   the socket proxy's allowlist (`scripts/tracked/docker-socket-proxy.sh`) all
    operate in this namespace.
 
 **Do not "fix" the difference between these two by unifying them.** Making
@@ -125,7 +125,7 @@ the Docker socket proxy currently allowlists:
 
 1. **Docker socket proxy allowlist targets.** Any container the Admin UI or
    watchdog can start/stop/restart/inspect through
-   `scripts/untracked/docker-socket-proxy.sh` must have a name that exactly matches
+   `scripts/tracked/docker-socket-proxy.sh` must have a name that exactly matches
    the allowlist regex, or the request is denied (fails closed, but that's
    still a bug). Today that set is `lancache-proxy`,
    `lancache-dns-standard`, `lancache-dns-ssl`, `lancache-dhcp`,
@@ -190,7 +190,7 @@ unchanged).
 The variable exists only so CI can start more than one quickstart-compose
 stack concurrently on the same physical self-hosted runner host (several
 runner instances can share one Docker daemon). `COMPOSE_PROJECT_NAME`
-already gives each CI run a unique value (`scripts/untracked/simulations/setup-cli-simulation.sh`'s
+already gives each CI run a unique value (`scripts/tracked/simulations/setup-cli-simulation.sh`'s
 `sim_compose_project_name()`), but an explicit `container_name:` overrides
 Compose's own project-name-based isolation entirely — that mismatch is
 exactly what let two CI runs with distinct project names collide on the
@@ -202,11 +202,11 @@ Three consumers besides the compose file itself must agree on the suffix
 actually in effect for a given run, or the mismatch FATALs/denies exactly
 as an unrelated rename would:
 
-1. `scripts/untracked/docker-socket-proxy.sh` reads `LANCACHE_CONTAINER_SUFFIX` at
+1. `scripts/tracked/docker-socket-proxy.sh` reads `LANCACHE_CONTAINER_SUFFIX` at
    container startup and appends it to every name in its own generated
    HAProxy allowlist (a runtime transform of the *generated* config, never
    of this script's own checked-in source — see that script's own comment
-   for why, and `scripts/tracked/check-naming-consistency.sh`'s matching
+   for why, and `scripts/untracked/check-naming-consistency.sh`'s matching
    quickstart-specific literal-suffix expectation).
 2. `services/watchdog/watchdog.sh` must receive the same
    `LANCACHE_CONTAINER_SUFFIX`, plus `CONTAINER_PROXY`/etc. already carrying
@@ -220,7 +220,7 @@ as an unrelated rename would:
 `services/ui/src/docker_client.rs`'s `container_name_for_service()` is
 **deliberately not wired to this suffix**: no CI simulation drives the
 Admin UI's Docker-API-backed restart/start/stop routes today (verified by
-grepping every `scripts/untracked/simulations/*-simulation.sh` for a call
+grepping every `scripts/tracked/simulations/*-simulation.sh` for a call
 into those routes), and
 a real production install never sets a suffix, so there is no reachable
 path where this gap could produce incorrect behavior. Revisit this if a
@@ -308,7 +308,7 @@ it must match is also a fixed, non-configurable set of strings.
 
 ### Docker socket proxy allowlist
 
-Rule: `scripts/untracked/docker-socket-proxy.sh` is the **single source of truth**
+Rule: `scripts/tracked/docker-socket-proxy.sh` is the **single source of truth**
 for the allowlist. It is mounted read-only into the `docker-socket-proxy`
 container identically from `deploy/prod` and
 `deploy/quickstart` — there is exactly one copy of the allowlist logic, not
@@ -325,7 +325,7 @@ calls `GET /_ping` on `docker-socket-proxy` directly by URL (`DOCKER_PROXY_URL`)
 not a `/containers/<name>/...` Docker-API call built from a `CONTAINER_*`
 default. Its `C_DOCKER_PROXY="lancache-docker-socket-proxy"` label is
 therefore a plain literal, not a `${CONTAINER_*:-lancache-*}`-shaped
-default — `scripts/tracked/check-naming-consistency.sh`'s `watchdog_names`
+default — `scripts/untracked/check-naming-consistency.sh`'s `watchdog_names`
 extraction (which greps for exactly that shape) correctly never sees it, and
 it correctly is not, and must not become, an allowlist entry (see
 "Operator-visible consistency" above: `docker-socket-proxy` has a real
@@ -335,7 +335,7 @@ Historical note: earlier revisions of this project also carried three
 near-identical copies of this HAProxy config as an unused Compose YAML
 anchor (`x-docker-socket-proxy-command`) at the top of each of the three
 Compose files, left over from before the config was extracted into
-`scripts/untracked/docker-socket-proxy.sh` and mounted in. Those anchors were never
+`scripts/tracked/docker-socket-proxy.sh` and mounted in. Those anchors were never
 referenced by anything (`grep` for `*docker-socket-proxy-command` found no
 alias use) — they were dead, unreachable duplicates of the real allowlist
 that could silently drift from it without any functional effect, which is
@@ -352,7 +352,7 @@ hardcode volume names — a new volume that follows the naming rule above is
 automatically included without a `setup.sh` change. The one place names are
 hardcoded is the `deploy_prod_repo_input_paths()` allowlist of repo-root
 paths reached via `../../` from `deploy/prod` (certs, `config/prod`,
-`services/dns/cdn-domains.txt`, `scripts/untracked/docker-socket-proxy.sh`) — any new
+`services/dns/cdn-domains.txt`, `scripts/tracked/docker-socket-proxy.sh`) — any new
 repo-root file a production Compose service reads via a relative bind mount
 must be added there too, or a config-mode backup/restore silently misses
 it.
@@ -363,21 +363,21 @@ it.
 |---|---|---|
 | Compose project name | `deploy/{prod,quickstart}/docker-compose.yml` `name:` | — |
 | Compose service names | `deploy/{prod,quickstart}/docker-compose.yml` service keys | `services/ui/src/config.rs` (`*_SERVICE` defaults), `deploy/{prod,quickstart}/docker-compose.yml` env values that build internal URLs |
-| Container names | `deploy/{prod,quickstart}/docker-compose.yml` `container_name:` | `scripts/untracked/docker-socket-proxy.sh` (allowlist), `services/ui/src/docker_client.rs` (`container_name_for_service`), `services/watchdog/watchdog.sh` and `services/watchdog/src/config.rs` (`CONTAINER_*` defaults/guard), `config/prod/watchdog.env` and `deploy/quickstart/docker-compose.yml` (`CONTAINER_*` overrides) |
-| `LANCACHE_CONTAINER_SUFFIX` (quickstart only) | `deploy/quickstart/docker-compose.yml` `container_name:`/environment entries | `scripts/untracked/docker-socket-proxy.sh` (runtime allowlist suffix), `services/watchdog/watchdog.sh` (guard), `scripts/tracked/check-naming-consistency.sh` (quickstart-specific literal-suffix check) — see "`LANCACHE_CONTAINER_SUFFIX` (quickstart only, issue #1415)" above |
+| Container names | `deploy/{prod,quickstart}/docker-compose.yml` `container_name:` | `scripts/tracked/docker-socket-proxy.sh` (allowlist), `services/ui/src/docker_client.rs` (`container_name_for_service`), `services/watchdog/watchdog.sh` and `services/watchdog/src/config.rs` (`CONTAINER_*` defaults/guard), `config/prod/watchdog.env` and `deploy/quickstart/docker-compose.yml` (`CONTAINER_*` overrides) |
+| `LANCACHE_CONTAINER_SUFFIX` (quickstart only) | `deploy/quickstart/docker-compose.yml` `container_name:`/environment entries | `scripts/tracked/docker-socket-proxy.sh` (runtime allowlist suffix), `services/watchdog/watchdog.sh` (guard), `scripts/untracked/check-naming-consistency.sh` (quickstart-specific literal-suffix check) — see "`LANCACHE_CONTAINER_SUFFIX` (quickstart only, issue #1415)" above |
 | Docker volumes | `deploy/{prod,quickstart}/docker-compose.yml` `volumes:` top-level block | Service-level `volumes:` mount lists in the same files |
 | Host bind-mount directories | `docs/backup-restore.md`, `docs/how-to-change-ip.md` | `deploy/prod/docker-compose.yml`, `setup.sh` |
 | GHCR image/package names | `release/stack-images.yml` | `docs/release-versioning.md`, both Compose files' `image:` lines |
 | Service-referring env vars | See table above | `services/ui/src/config.rs`, `services/watchdog/watchdog.sh`, `config/prod/*.env` |
-| Socket proxy allowlist | `scripts/untracked/docker-socket-proxy.sh` | (mounted read-only, unchanged, into both Compose files' `docker-socket-proxy` service) |
+| Socket proxy allowlist | `scripts/tracked/docker-socket-proxy.sh` | (mounted read-only, unchanged, into both Compose files' `docker-socket-proxy` service) |
 
 ## CI guard
 
-`scripts/tracked/check-naming-consistency.sh` runs as part of the `validate-compose`
+`scripts/untracked/check-naming-consistency.sh` runs as part of the `validate-compose`
 job in `.github/workflows/build-push.yml` on every PR and checks the parts
 of this contract that are mechanically verifiable:
 
-- Every allowlist container name in `scripts/untracked/docker-socket-proxy.sh` has a
+- Every allowlist container name in `scripts/tracked/docker-socket-proxy.sh` has a
   matching `container_name:` in `deploy/prod` and
   `deploy/quickstart`.
 - Every container-name literal `services/ui/src/docker_client.rs` can

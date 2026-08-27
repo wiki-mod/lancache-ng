@@ -4,10 +4,10 @@
 #
 # Docker-free coverage for scripts/lib/staging-image-freshness.sh (#808): the
 # shared "is this base-channel image actually built from a commit at or after
-# this PR's base.sha" check used by both scripts/untracked/ensure-pr-staging-images.sh
+# this PR's base.sha" check used by both scripts/tracked/ensure-pr-staging-images.sh
 # and build-push.yml's own "Ensure PR staging tags exist for full-setup
 # services" step. sif_image_revision is stubbed via STAGING_IMAGE_REVISION_CMD
-# (the same override-hook convention scripts/untracked/ensure-pr-staging-images.sh
+# (the same override-hook convention scripts/tracked/ensure-pr-staging-images.sh
 # already uses for STAGING_IMAGE_EXISTS_CMD/STAGING_BACKFILL_CMD); the git
 # ancestry check itself runs against a real, disposable git repo (via
 # STAGING_FRESHNESS_GIT_DIR) with synthetic commits, so the actual
@@ -364,7 +364,7 @@ STUB
 @test "_sif_inspect_failure_is_confirmed_absence: does NOT classify a missing-docker-binary shell error as absence (AG-CI-001)" {
     # A bare "not found" would also match "docker: command not found" / "bash:
     # docker: command not found" -- exactly what a bare `lancache-light`
-    # runner without docker on PATH produces (scripts/untracked/ensure-pr-staging-images.sh,
+    # runner without docker on PATH produces (scripts/tracked/ensure-pr-staging-images.sh,
     # one of this file's two real callers, runs there directly, not inside the
     # pinned build-tools image). Misclassifying that as a confirmed registry
     # absence would report the registry as having confirmed something it was

@@ -4,7 +4,7 @@
 #
 # Coverage for #849 bug-hunt finding observability.md#16 and the new
 # web_log-job-config parity section it added to
-# scripts/tracked/check-logging-matrix.sh: deploy/quickstart/docker-compose.yml
+# scripts/untracked/check-logging-matrix.sh: deploy/quickstart/docker-compose.yml
 # generates its own inline copy of netdata's web_log collector job config
 # (services/syslog/netdata-web_log.conf is bind-mounted directly in
 # deploy/prod, but quickstart's install_dir has no services/ directory to
@@ -14,14 +14,14 @@
 # services/syslog/netdata-web_log.conf's own header explains was removed
 # 2026-07-31 for breaking the go.d parser).
 #
-# scripts/tracked/check-logging-matrix.sh's earlier matrix-row section needs a real
+# scripts/untracked/check-logging-matrix.sh's earlier matrix-row section needs a real
 # `docker compose config` invocation (see that script's own header for why),
 # so this file does not attempt to run the whole script end-to-end -- it
 # instead exercises the exact extraction-and-comparison awk/sed pipeline the
 # script's new section uses, duplicated here the same way
 # tests/bats/netdata_network_isolation.bats and
 # tests/bats/watchdog_docker_socket_proxy_depends_on_healthy.bats already
-# duplicate scripts/tracked/check-compose-healthchecks.sh's own service-block
+# duplicate scripts/untracked/check-compose-healthchecks.sh's own service-block
 # extraction rather than requiring Docker just to prove a text-comparison is
 # correct. Both the real-files case (proving no regression today) and a
 # synthetic drift case (proving the comparison actually catches a mismatch,

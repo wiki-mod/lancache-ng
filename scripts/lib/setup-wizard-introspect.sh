@@ -3,13 +3,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Issue #1176 (Angle 1): shared helper sourced by scripts/setup-cli-
-# simulation.sh and scripts/untracked/simulations/syslog-forwarding-simulation.sh so both derive
+# simulation.sh and scripts/tracked/simulations/syslog-forwarding-simulation.sh so both derive
 # the expect-driven prompt-matching sequence they drive setup.sh's install
 # wizard through from a REAL `setup.sh list-prompts` run, instead of hand-
 # encoding the prompt text as a second, independently maintained copy.
 #
 # Why this is the fix, not just another check: PR #1256's
-# scripts/tracked/check-setup-prompt-drift.sh (issue #1176, Angle 2) already catches
+# scripts/untracked/check-setup-prompt-drift.sh (issue #1176, Angle 2) already catches
 # a new UNCONDITIONAL prompt with no matching hand-encoded expect_prompt
 # pattern -- but by its own documented design, it cannot catch a new prompt
 # added along a CONDITIONAL branch that a simulation script's own answers

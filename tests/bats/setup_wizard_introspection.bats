@@ -4,10 +4,10 @@
 #
 # Coverage for issue #1176 (Angle 1): setup.sh's `list-prompts` introspection
 # subcommand and scripts/lib/setup-wizard-introspect.sh, the shared helper
-# scripts/untracked/simulations/setup-cli-simulation.sh and scripts/untracked/simulations/syslog-forwarding-simulation.sh
+# scripts/tracked/simulations/setup-cli-simulation.sh and scripts/tracked/simulations/syslog-forwarding-simulation.sh
 # now use to derive their expect_prompt sequences instead of hand-encoding
 # them. See setup.sh's own `wizard_introspect_record_prompt` comment and
-# scripts/tracked/check-setup-prompt-drift.sh's header for the specific blind spot
+# scripts/untracked/check-setup-prompt-drift.sh's header for the specific blind spot
 # (a new prompt on a conditional branch a sim script's answers actually
 # reach) this closes.
 #

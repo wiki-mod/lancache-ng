@@ -238,7 +238,7 @@ jobs:
           [[ "$source_stack_digest" = "$source_stack_immutable_digest" ]] \
             || { echo "::error::${source_stack} digest does not match ${source_stack_immutable}; refusing to promote drifted release sources."; exit 1; }
           GHCR_RETRY_USERNAME="$GHCR_RETRY_USERNAME" GHCR_RETRY_PASSWORD="$GHCR_RETRY_PASSWORD" \
-            bash scripts/untracked/require-image-platforms.sh "ghcr.io/${REPOSITORY}/stack@${source_stack_digest}" "$REQUIRED_PLATFORMS"
+            bash scripts/tracked/require-image-platforms.sh "ghcr.io/${REPOSITORY}/stack@${source_stack_digest}" "$REQUIRED_PLATFORMS"
 
           for service in "${services[@]}"; do
             source_release_image="ghcr.io/${REPOSITORY}/${service}:${SOURCE_RELEASE_TAG}"
@@ -248,10 +248,10 @@ jobs:
             [[ "$source_release_digest" = "$source_sha_digest" ]] \
               || { echo "::error::${source_release_image} digest does not match ${source_image}; refusing to promote drifted release sources."; exit 1; }
             GHCR_RETRY_USERNAME="$GHCR_RETRY_USERNAME" GHCR_RETRY_PASSWORD="$GHCR_RETRY_PASSWORD" \
-              bash scripts/untracked/require-image-platforms.sh "ghcr.io/${REPOSITORY}/${service}@${source_release_digest}" "$REQUIRED_PLATFORMS"
+              bash scripts/tracked/require-image-platforms.sh "ghcr.io/${REPOSITORY}/${service}@${source_release_digest}" "$REQUIRED_PLATFORMS"
           done
 
-          bash scripts/tracked/check-stable-external-images.sh
+          bash scripts/untracked/check-stable-external-images.sh
 
           for service in "${services[@]}"; do
             source_release_image="ghcr.io/${REPOSITORY}/${service}:${SOURCE_RELEASE_TAG}"

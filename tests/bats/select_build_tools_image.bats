@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Docker-free unit coverage for scripts/untracked/select-build-tools-image.sh's
+# Docker-free unit coverage for scripts/tracked/select-build-tools-image.sh's
 # select_build_tools_trusted_fallback_allowed() -- the trust-boundary
 # decision that gates whether a pull_request event is allowed to trigger a
 # branch-local fallback build of tools/build-tools's own Dockerfile (a real

@@ -2,14 +2,14 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: coverage for scripts/untracked/check-netdata-curl-pin.sh's version-parsing,
+# What: coverage for scripts/tracked/check-netdata-curl-pin.sh's version-parsing,
 # comparison, and grace-period logic.
 # Why: all tests run offline via the script's own
 # BUNDLED_PACKAGES_CONTENT_FILE test hook, no real network needed.
 # From: Issue #1304 | PR #1352
 
 setup() {
-    script="$BATS_TEST_DIRNAME/../../scripts/untracked/check-netdata-curl-pin.sh"
+    script="$BATS_TEST_DIRNAME/../../scripts/tracked/check-netdata-curl-pin.sh"
     dockerfile_fixture="$BATS_TEST_TMPDIR/Dockerfile"
     bundled_fixture="$BATS_TEST_TMPDIR/bundled-packages.version"
 }

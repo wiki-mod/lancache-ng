@@ -22,7 +22,7 @@ export LANG=C LC_ALL=C
 # an explicit future opt-in path, not inside the default first-user flow.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)"
 QUICKSTART_COMPOSE="$SCRIPT_DIR/deploy/quickstart/docker-compose.yml"
-DOCKER_SOCKET_PROXY_SCRIPT="$SCRIPT_DIR/scripts/untracked/docker-socket-proxy.sh"
+DOCKER_SOCKET_PROXY_SCRIPT="$SCRIPT_DIR/scripts/tracked/docker-socket-proxy.sh"
 # dhcp-probe.sh (formerly copied the same way as the two scripts below) was
 # retired by issue #1288 -- the dhcp-probe container now runs the ui
 # image's own `lancache-ui --dhcp-probe` native CLI mode, so there is no
@@ -1643,10 +1643,10 @@ compose_file_args_for_install_dir() {
 install_quickstart_compose_assets() {
     local install_dir="$1" socket_proxy_target helper_target
 
-    socket_proxy_target="$install_dir/scripts/untracked/docker-socket-proxy.sh"
+    socket_proxy_target="$install_dir/scripts/tracked/docker-socket-proxy.sh"
     helper_target="$install_dir/scripts/shared-secret-bootstrap.sh"
     # docker-socket-proxy.sh's own source moved one directory level deeper
-    # (issue #1095, scripts/untracked/docker-socket-proxy.sh); the
+    # (issue #1095, scripts/tracked/docker-socket-proxy.sh); the
     # installed copy mirrors that same nesting, so the target directory
     # needs both levels created, not just the flat "scripts" mkdir that
     # sufficed before that move.
@@ -1767,12 +1767,12 @@ deploy_prod_repo_input_paths() {
     [[ -d "$repo_root/certs" ]] && printf '%s\n' "$repo_root/certs"
     [[ -d "$repo_root/config/prod" ]] && printf '%s\n' "$repo_root/config/prod"
     [[ -f "$repo_root/services/dns/cdn-domains.txt" ]] && printf '%s\n' "$repo_root/services/dns/cdn-domains.txt"
-    # docker-socket-proxy is also mounted via ../../scripts/untracked/docker-socket-proxy.sh
+    # docker-socket-proxy is also mounted via ../../scripts/tracked/docker-socket-proxy.sh
     # (see docs/naming-conventions.md's "Docker socket proxy allowlist"
     # section) -- without this, a manual deploy/prod config backup would
     # silently omit the one file that defines which container names the
     # socket proxy allows the Admin UI/watchdog to act on.
-    [[ -f "$repo_root/scripts/untracked/docker-socket-proxy.sh" ]] && printf '%s\n' "$repo_root/scripts/untracked/docker-socket-proxy.sh"
+    [[ -f "$repo_root/scripts/tracked/docker-socket-proxy.sh" ]] && printf '%s\n' "$repo_root/scripts/tracked/docker-socket-proxy.sh"
     # Shared-secret bootstrap helper (issue #858) is likewise mounted read-only
     # via ../../scripts/lib/shared-secret-bootstrap.sh into the nats service in
     # deploy/prod/docker-compose.yml. Without it in the manifest, a config
@@ -1986,7 +1986,7 @@ host_image_platform() {
 # .env/compose state for this install (#665). Call this once the tag is fully
 # resolved and before the first state-mutating write for that install/update.
 #
-# Mirrors scripts/untracked/require-image-platforms.sh's `docker buildx imagetools
+# Mirrors scripts/tracked/require-image-platforms.sh's `docker buildx imagetools
 # inspect` approach, but inlined rather than shelled out to that script:
 # setup.sh is documented (see README.md) to run standalone via `curl | bash`,
 # so it cannot assume a full repository checkout with scripts/ present on
@@ -2167,7 +2167,7 @@ validate_lancache_image_tag() {
             ;;
         pr-*)
             # CI-only immutable staging-tag format pr-<N>-sha-<full>, pushed by
-            # build-push.yml (and back-filled by scripts/untracked/ensure-pr-staging-images.sh)
+            # build-push.yml (and back-filled by scripts/tracked/ensure-pr-staging-images.sh)
             # for a same-repo PR's merge commit. It is keyed on that commit's sha
             # and never re-pointed, so it is a legitimate PINNED target that lets
             # the full-setup deep-validate suite's setup.sh CLI simulation install
@@ -4013,11 +4013,11 @@ the order prompts are expected to be asked. A blank line (or running out of
 lines) falls back to that prompt's own default, the same as an operator
 pressing Enter. Omitting the file entirely walks the all-defaults path.
 
-Intended consumer: scripts/untracked/simulations/setup-cli-simulation.sh and
-scripts/untracked/simulations/syslog-forwarding-simulation.sh derive their expect-driven prompt
+Intended consumer: scripts/tracked/simulations/setup-cli-simulation.sh and
+scripts/tracked/simulations/syslog-forwarding-simulation.sh derive their expect-driven prompt
 sequences from this command's output instead of hand-encoding them, so a new
 prompt on any branch those scripts' answers actually reach cannot silently
-drift out of sync (see scripts/tracked/check-setup-prompt-drift.sh for the
+drift out of sync (see scripts/untracked/check-setup-prompt-drift.sh for the
 complementary static drift guard, which stays in place as a second net).
 EOF
             ;;
@@ -4381,7 +4381,7 @@ _verify_healthz_endpoint() {
 # /healthz check already used by cmd_debug's "Health checks" step (now split
 # into a reachability + Docker-binding-identity + loopback-content trio, see
 # _verify_healthz_endpoint above), and a real dig-based DNS query in the same style
-# scripts/untracked/simulations/dns-zone-rollback-simulation.sh already uses. `ping`/`ss` are
+# scripts/tracked/simulations/dns-zone-rollback-simulation.sh already uses. `ping`/`ss` are
 # deliberately not used here -- neither proves the service actually answers a
 # real request.
 #
@@ -7043,7 +7043,7 @@ print_step "Release channel"
 # respected outright and the prompt is skipped entirely. Two real callers rely
 # on this: (1) the documented `LANCACHE_IMAGE_CHANNEL=nightly ./setup.sh install`
 # non-interactive invocation (see resolve_lancache_stack_channel_tag's own
-# die() message), and (2) scripts/untracked/simulations/setup-cli-simulation.sh, which exports
+# die() message), and (2) scripts/tracked/simulations/setup-cli-simulation.sh, which exports
 # LANCACHE_IMAGE_CHANNEL=pinned (plus an explicit LANCACHE_IMAGE_TAG) so CI
 # installs THIS commit's own just-built images rather than any published
 # channel. "pinned" is not a stable/nightly choice at all -- it is a request for
@@ -7559,7 +7559,7 @@ fi
 # systemd unit files, `systemctl daemon-reload`) -- none of it can run in
 # introspection mode, which must leave the host completely untouched. No
 # prompt is asked anywhere in this span (confirmed by
-# scripts/tracked/check-setup-prompt-drift.sh's own wizard-region scan, which would
+# scripts/untracked/check-setup-prompt-drift.sh's own wizard-region scan, which would
 # fail closed on a stray ask()/confirm() call site inside a newly
 # unbalanced block here), so skipping it wholesale changes no prompt
 # ordering -- control falls straight through to the unconditional

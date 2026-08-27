@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Sets default_poll_timeout_seconds/default_poll_hard_ceiling_seconds for the
-# given workflow_changed value, used by scripts/untracked/ensure-pr-staging-images.sh.
+# given workflow_changed value, used by scripts/tracked/ensure-pr-staging-images.sh.
 # A separate, larger pair applies when it is "true": a workflow/composite-
 # action change forces every one of the 9 services to rebuild at once on the
 # scarce heavy-runner tier (build-push.yml's own "workflow or composite-

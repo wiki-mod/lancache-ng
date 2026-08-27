@@ -23,7 +23,7 @@
 name: lancache-ng
 
 # What: the Docker socket proxy's HAProxy allowlist lives in exactly one
-# place, scripts/untracked/docker-socket-proxy.sh (mounted read-only below).
+# place, scripts/tracked/docker-socket-proxy.sh (mounted read-only below).
 # Why: docs/naming-conventions.md names this the canonical source -- do not
 # duplicate the allowlist as a YAML anchor in this file.
 # From: PR #635
@@ -71,7 +71,7 @@ services:
       - "${IP_STANDARD}:80:80"
       - "${IP_STANDARD}:443:8443"
       # What: `${IP_SSL:-${IP_SSL_BIND_FALLBACK:-127.0.0.1}}`, not a bare `${IP_SSL:-127.0.0.1}`; left unset (real installs) both forms resolve to the same 127.0.0.1 literal.
-      # Why: setup.sh's wizard leaves .env's IP_SSL genuinely EMPTY (not unset) when SSL is declined, so two SSL-declined installs on one host both fell back to the same literal; IP_SSL_BIND_FALLBACK is a separate knob only scripts/untracked/simulations/setup-cli-simulation.sh sets, to a per-run derived address, for CI isolation.
+      # Why: setup.sh's wizard leaves .env's IP_SSL genuinely EMPTY (not unset) when SSL is declined, so two SSL-declined installs on one host both fell back to the same literal; IP_SSL_BIND_FALLBACK is a separate knob only scripts/tracked/simulations/setup-cli-simulation.sh sets, to a per-run derived address, for CI isolation.
       # From: Issue #1415
       - "${IP_SSL:-${IP_SSL_BIND_FALLBACK:-127.0.0.1}}:80:80"
       - "${IP_SSL:-${IP_SSL_BIND_FALLBACK:-127.0.0.1}}:443:443"
@@ -528,12 +528,12 @@ services:
       - LANCACHE_CONTAINER_SUFFIX=${LANCACHE_CONTAINER_SUFFIX:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ./scripts/untracked/docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro
+      - ./scripts/tracked/docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro
     networks:
       - docker-api
     healthcheck:
       # What: real HTTP probe against the Docker API's own /_ping endpoint, not a bare TCP connect; uses wget (BusyBox), this pinned Alpine image ships no curl.
-      # Why: proves the HAProxy frontend actually forwards to the real Docker socket, the same path watchdog itself depends on; /_ping is allowlisted by scripts/untracked/docker-socket-proxy.sh's `safe_ping` ACL.
+      # Why: proves the HAProxy frontend actually forwards to the real Docker socket, the same path watchdog itself depends on; /_ping is allowlisted by scripts/tracked/docker-socket-proxy.sh's `safe_ping` ACL.
       # From: Issue #1169
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:2375/_ping || exit 1"]
       interval: 30s

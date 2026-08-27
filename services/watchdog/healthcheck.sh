@@ -39,7 +39,7 @@ esac
 # `10#` forces base-10 evaluation (found live, 2026-07-31, PR #1347's CI):
 # the digit-only guard above accepts ANY all-digits string, including one
 # with a leading zero -- CHECK_INTERVAL is routinely set to exactly such a
-# value by scripts/untracked/simulations/syslog-forwarding-simulation.sh, which deliberately uses
+# value by scripts/tracked/simulations/syslog-forwarding-simulation.sh, which deliberately uses
 # the last 8 digits of a nanosecond timestamp as a unique per-run marker
 # (see that script's own comment). Without the `10#` prefix, Bash's `$(( ))`
 # treats a leading-zero numeric literal as octal, and a marker whose

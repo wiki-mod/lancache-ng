@@ -86,7 +86,7 @@ teardown() {
 
 @test "derived octet always falls in the reserved pool, excluding 0, 1, 28, and 99" {
     # UNCHANGED by the #832 /27 redesign: scripts/dhcp-kea-lease-flow-
-    # simulation.sh and scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh both still call
+    # simulation.sh and scripts/tracked/simulations/dhcp-proxy-pxe-simulation.sh both still call
     # validation_subnet_reserve (which derives via THIS function) on their
     # own separate 172.31.0.0/16 / 172.29.0.0/16 ranges, expecting a plain
     # octet -- a real CI regression (confirmed via a genuine run) came from
@@ -163,8 +163,8 @@ teardown() {
     # second, genuinely concurrent workflow run that got there first -- this
     # is #703's exact scenario, reproduced with two real flock-backed
     # processes instead of two real GitHub Actions runs. Exercises the exact
-    # path scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh/
-    # scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh use (validation_subnet_reserve,
+    # path scripts/tracked/simulations/dhcp-kea-lease-flow-simulation.sh/
+    # scripts/tracked/simulations/dhcp-proxy-pxe-simulation.sh use (validation_subnet_reserve,
     # NOT validation_subnet_reserve_slot -- see the separate slot-based test
     # below for the general pool's own path).
     run_id="run-abc"

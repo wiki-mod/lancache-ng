@@ -134,7 +134,7 @@ As of #899, updating it is automatic and requires no manual collection step:
 Applying the `skip-changelog` label to a PR excludes it from the drafted
 release notes (e.g. a pure internal refactor with no user-visible effect).
 
-`scripts/untracked/collect-changelog-entries.sh` (added in #890) remains as a manual
+`scripts/tracked/collect-changelog-entries.sh` (added in #890) remains as a manual
 fallback -- useful for reconstructing history or if the automated pipeline is
 ever disabled -- but is no longer the primary path.
 
@@ -156,8 +156,8 @@ All actionable static analysis warnings are treated as build failures under the 
 - `shellcheck` warnings — enforced via `shellcheck --severity=warning` in the `shellcheck` job
 - `actionlint` warnings — enforced via `actionlint .github/workflows/*.yml`
 - `docker compose config` warnings — enforce via pattern matching for `warn|warning` in `validate-compose` job
-- File header checks — enforced via `bash scripts/tracked/check-file-headers.sh`
-- SPDX license identifier — enforced for files a PR changes via `bash scripts/tracked/check-pr-diff-file-headers.sh`
+- File header checks — enforced via `bash scripts/untracked/check-file-headers.sh`
+- SPDX license identifier — enforced for files a PR changes via `bash scripts/untracked/check-pr-diff-file-headers.sh`
 
 **Known exception (tracked in issue #394):**
 GitHub's CodeQL Rust extractor emits `macro expansion failed` warnings for ordinary macros (`format!`, `assert_eq!`, `vec!`, `json!`, `tracing::*`, etc.) as a documented upstream limitation, not due to code defects in this repository. This exception is **scoped to CodeQL Rust macro-expansion extraction warnings only** and does not extend to `cargo check` or `cargo clippy` warnings, which remain hard failures. Every instance of a CodeQL macro-expansion warning must stay tracked in #394, and #394 must be periodically reevaluated to monitor upstream status rather than being left as a permanent blanket excuse.
@@ -191,8 +191,8 @@ Because of this limitation, **a green CodeQL Rust job must not be read as full s
 
 These are required, not stylistic suggestions — a PR missing them will fail CI or get flagged in review.
 
-- **File headers.** Every source/config file you add or touch (Rust, shell, YAML, Dockerfiles, `.conf`/template files, HTML/CSS/JS) must open with a short header: the project name and repo URL in the exact form `lancache-ng (https://github.com/wiki-mod/lancache-ng)`, followed by a purpose description of that specific file, using the comment syntax valid for that file's language (`//!` for Rust, `#` for shell/YAML/Dockerfiles, Tera's `{# ... #}` for HTML templates under `services/ui/src/templates/`, `/* ... */` for CSS, `//` for JS). `scripts/tracked/check-file-headers.sh` enforces this in CI (`file-headers` job in `build-push.yml`) — it fails a PR if any non-excluded tracked file is missing the exact header string. A short list of files are excluded (`.md` files, the root `.env`/`.env.example`, lockfiles, `.gitkeep`, the `VERSION` file, JSON-backed `.conf` files, vendored/generated build artifacts) — see `scripts/tracked/check-file-headers.sh`'s `is_excluded()` function for the exact list, and AGENTS.md's "File Headers" section for the full rationale (why each exclusion exists, how to scale header detail to a file's complexity, and what NOT to invent in a header).
-- **SPDX license identifier.** Every file in scope for the header above also carries a `SPDX-License-Identifier: AGPL-3.0-or-later` line, placed immediately after the shebang (if any) and before the `lancache-ng (...)` header line, in that file's own comment syntax. `scripts/tracked/check-pr-diff-file-headers.sh` enforces this in CI (same `file-headers` job) against every file a pull request actually changes; the repo-wide backfill for files a PR doesn't touch is tracked separately and not yet a hard failure. See AGENTS.md's Rule-Ref: AG-HDR-008.
+- **File headers.** Every source/config file you add or touch (Rust, shell, YAML, Dockerfiles, `.conf`/template files, HTML/CSS/JS) must open with a short header: the project name and repo URL in the exact form `lancache-ng (https://github.com/wiki-mod/lancache-ng)`, followed by a purpose description of that specific file, using the comment syntax valid for that file's language (`//!` for Rust, `#` for shell/YAML/Dockerfiles, Tera's `{# ... #}` for HTML templates under `services/ui/src/templates/`, `/* ... */` for CSS, `//` for JS). `scripts/untracked/check-file-headers.sh` enforces this in CI (`file-headers` job in `build-push.yml`) — it fails a PR if any non-excluded tracked file is missing the exact header string. A short list of files are excluded (`.md` files, the root `.env`/`.env.example`, lockfiles, `.gitkeep`, the `VERSION` file, JSON-backed `.conf` files, vendored/generated build artifacts) — see `scripts/untracked/check-file-headers.sh`'s `is_excluded()` function for the exact list, and AGENTS.md's "File Headers" section for the full rationale (why each exclusion exists, how to scale header detail to a file's complexity, and what NOT to invent in a header).
+- **SPDX license identifier.** Every file in scope for the header above also carries a `SPDX-License-Identifier: AGPL-3.0-or-later` line, placed immediately after the shebang (if any) and before the `lancache-ng (...)` header line, in that file's own comment syntax. `scripts/untracked/check-pr-diff-file-headers.sh` enforces this in CI (same `file-headers` job) against every file a pull request actually changes; the repo-wide backfill for files a PR doesn't touch is tracked separately and not yet a hard failure. See AGENTS.md's Rule-Ref: AG-HDR-008.
 - **Code comments.** Comment only when the WHY would not be obvious from well-named identifiers and the surrounding code — not what the code does, which should be readable from the code itself. Do comment: complex logic, guards, fallbacks, security decisions, non-obvious side effects, a workaround for a specific bug, or a deliberate deviation from the obvious approach. A missing WHY-comment on code that clearly needs one is treated as a defect, whether or not it predates your change — if you're already touching that code, add the missing comment as part of your PR rather than leaving the gap. Do not reference the current task, PR number, or fix in a comment (e.g. "fixed for #123") — that belongs in the PR description, not in code that outlives the change. See AGENTS.md's "Comment Style" section for the full guidance, including how to document a deliberately deferred fix versus a straightforward WHY-comment.
 
 ## Building from source
@@ -213,7 +213,7 @@ images.
   service builders (`services/dns/nats-subscriber`, `services/ui`)
   consume the prebuilt `ghcr.io/wiki-mod/lancache-ng/build-tools` image
   (selected via `BUILD_TOOLS_IMAGE`, resolved by
-  `scripts/untracked/select-build-tools-image.sh`) inside their own multi-stage
+  `scripts/tracked/select-build-tools-image.sh`) inside their own multi-stage
   Dockerfile, so `cargo`/`rustc` never need to be installed on the host.
   If you do want a local Rust toolchain for editor tooling (rust-analyzer,
   etc.), any recent stable toolchain matching the edition declared in
@@ -260,7 +260,7 @@ matching local tag is used as-is, with no push/pull round-trip required.
 ```bash
 # Example: rebuild only the Admin UI image.
 docker build -t lancache-ng-ui:local \
-  --build-arg BUILD_TOOLS_IMAGE="$(bash scripts/untracked/select-build-tools-image.sh)" \
+  --build-arg BUILD_TOOLS_IMAGE="$(bash scripts/tracked/select-build-tools-image.sh)" \
   services/ui
 ```
 
@@ -327,11 +327,11 @@ Treat host-local tools (`cargo`, `rustc`, `rustfmt`, `clippy`, `shellcheck`, `ac
 
 To run checks with the build-tools container:
 
-1. The build-tools image is selected automatically: `bash scripts/untracked/select-build-tools-image.sh` determines the correct version (published image or local build).
+1. The build-tools image is selected automatically: `bash scripts/tracked/select-build-tools-image.sh` determines the correct version (published image or local build).
 2. Run checks inside the container with the standard pattern:
 
 ```bash
-BUILD_TOOLS_IMAGE="$(bash scripts/untracked/select-build-tools-image.sh)"
+BUILD_TOOLS_IMAGE="$(bash scripts/tracked/select-build-tools-image.sh)"
 docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" <check-command>
 ```
 
@@ -342,7 +342,7 @@ Run the checks that match your change.
 For shell scripts, run the checks inside the build-tools container:
 
 ```bash
-BUILD_TOOLS_IMAGE="$(bash scripts/untracked/select-build-tools-image.sh)"
+BUILD_TOOLS_IMAGE="$(bash scripts/tracked/select-build-tools-image.sh)"
 docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" \
   bash -lc 'set -euo pipefail; find . -name "*.sh" -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --severity=warning'
 ```
@@ -357,28 +357,28 @@ docker compose -f deploy/prod/docker-compose.yml config
 For image inventory, release, or package-channel changes, run inside the build-tools container:
 
 ```bash
-BUILD_TOOLS_IMAGE="$(bash scripts/untracked/select-build-tools-image.sh)"
+BUILD_TOOLS_IMAGE="$(bash scripts/tracked/select-build-tools-image.sh)"
 docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" \
-  bash scripts/untracked/validate-stack-images.sh
+  bash scripts/tracked/validate-stack-images.sh
 ```
 
 For workflow changes, run inside the build-tools container:
 
 ```bash
-BUILD_TOOLS_IMAGE="$(bash scripts/untracked/select-build-tools-image.sh)"
+BUILD_TOOLS_IMAGE="$(bash scripts/tracked/select-build-tools-image.sh)"
 docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" \
   actionlint .github/workflows/*.yml
 ```
 
-Also run `scripts/tracked/check-action-node-versions.sh` (issue #801) if you changed or re-pinned any `uses:` action reference -- it scans every pinned action across all workflows and fails if any of them declares a deprecated Node runtime in its own `action.yml`/`action.yaml`:
+Also run `scripts/untracked/check-action-node-versions.sh` (issue #801) if you changed or re-pinned any `uses:` action reference -- it scans every pinned action across all workflows and fails if any of them declares a deprecated Node runtime in its own `action.yml`/`action.yaml`:
 
 ```bash
-bash scripts/tracked/check-action-node-versions.sh
+bash scripts/untracked/check-action-node-versions.sh
 ```
 
 #### Optional: a local pre-push hook for this same check
 
-`.githooks/pre-push` runs `scripts/tracked/check-action-node-versions.sh` automatically before a push that touches any `.github/workflows/*.yml`/`*.yaml` file, so a deprecated-runtime pin surfaces before you push, not only after CI comes back red. This is an **optional, best-effort local convenience layer only** -- the build-push.yml `shellcheck`/`shellcheck-hosted` jobs are the actual, non-bypassable enforcement (they run the same script inside the pinned build-tools container). The hook degrades cleanly (never blocks a push) if it can't run in your environment at all (e.g. no `curl` on `PATH`), but does block the push if it actually runs and finds a real deprecated-runtime pin -- bypass with `git push --no-verify` if needed, same as any other pre-push hook.
+`.githooks/pre-push` runs `scripts/untracked/check-action-node-versions.sh` automatically before a push that touches any `.github/workflows/*.yml`/`*.yaml` file, so a deprecated-runtime pin surfaces before you push, not only after CI comes back red. This is an **optional, best-effort local convenience layer only** -- the build-push.yml `shellcheck`/`shellcheck-hosted` jobs are the actual, non-bypassable enforcement (they run the same script inside the pinned build-tools container). The hook degrades cleanly (never blocks a push) if it can't run in your environment at all (e.g. no `curl` on `PATH`), but does block the push if it actually runs and finds a real deprecated-runtime pin -- bypass with `git push --no-verify` if needed, same as any other pre-push hook.
 
 Enable it once per checkout:
 
@@ -390,7 +390,7 @@ For Rust services, run the relevant Cargo checks for the service you changed ins
 the build-tools container. The UI service lives in `services/ui`. The DNS crate is in `services/dns/nats-subscriber`.
 
 ```bash
-BUILD_TOOLS_IMAGE="$(bash scripts/untracked/select-build-tools-image.sh)"
+BUILD_TOOLS_IMAGE="$(bash scripts/tracked/select-build-tools-image.sh)"
 docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" \
   bash -lc 'cargo test --locked --manifest-path services/ui/Cargo.toml && cargo test --locked --manifest-path services/dns/nats-subscriber/Cargo.toml'
 ```
@@ -398,7 +398,7 @@ docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS
 For Rust coverage checks (requires the build-tools container with `cargo-tarpaulin`), use:
 
 ```bash
-BUILD_TOOLS_IMAGE="$(bash scripts/untracked/select-build-tools-image.sh)"
+BUILD_TOOLS_IMAGE="$(bash scripts/tracked/select-build-tools-image.sh)"
 docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" \
   bash -lc 'cargo tarpaulin --engine llvm --manifest-path services/ui/Cargo.toml --locked --out json && cargo tarpaulin --engine llvm --manifest-path services/dns/nats-subscriber/Cargo.toml --locked --out json'
 ```
@@ -461,7 +461,7 @@ Required rules:
 - compose image references must keep `LANCACHE_IMAGE_REGISTRY`,
   `LANCACHE_IMAGE_PREFIX`, and `LANCACHE_IMAGE_TAG` wired consistently
 - package, workflow, release-note, and setup changes must run
-  `bash scripts/untracked/validate-stack-images.sh`
+  `bash scripts/tracked/validate-stack-images.sh`
 
 ## Admin UI changes
 

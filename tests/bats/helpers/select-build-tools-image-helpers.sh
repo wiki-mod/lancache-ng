@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Bats helper that loads scripts/untracked/select-build-tools-image.sh's
+# Bats helper that loads scripts/tracked/select-build-tools-image.sh's
 # select_build_tools_trusted_fallback_allowed() function in isolation,
 # without sourcing or executing the rest of that script -- which has real
 # side effects from its very first non-comment line (sources
@@ -20,7 +20,7 @@ load_select_build_tools_image_functions() {
         /^select_build_tools_trusted_fallback_allowed\(\) \{/ { capture = 1 }
         capture { print }
         capture && /^}/ { capture = 0 }
-    ' "$repo_root/scripts/untracked/select-build-tools-image.sh" > "$helper_file"
+    ' "$repo_root/scripts/tracked/select-build-tools-image.sh" > "$helper_file"
 
     # shellcheck source=/dev/null
     source "$helper_file"

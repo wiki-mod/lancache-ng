@@ -53,7 +53,7 @@ is real, live, running code, not just work sitting in source control.
   container is reachable, which is not guaranteed in the crash-loop
   scenario it exists to help recover from -- tracked separately as #763.
   Also added a real end-to-end CI test
-  (`scripts/untracked/simulations/dns-zone-rollback-simulation.sh`, wired
+  (`scripts/tracked/simulations/dns-zone-rollback-simulation.sh`, wired
   into `.github/workflows/full-setup-deep-validate.yml`'s
   `dns-zone-rollback-simulation` job) that drives two real
   DNS writes through the actual UI/NATS path, calls the rollback listener's
@@ -81,7 +81,7 @@ is real, live, running code, not just work sitting in source control.
   missing bzip2 middle tier. Automatic upload/attachment to GitHub is
   explicitly out of scope -- the operator reviews and attaches the archive
   themselves.
-- Added `scripts/tracked/check-action-node-versions.sh`, a CI guard (issue #801,
+- Added `scripts/untracked/check-action-node-versions.sh`, a CI guard (issue #801,
   systemic follow-up to #799/#800) that scans every pinned GitHub Action
   across all `.github/workflows/*.yml` files -- both third-party actions and
   this repo's own local composite actions under `.github/actions/` -- and
@@ -115,7 +115,7 @@ is real, live, running code, not just work sitting in source control.
   gate, which was meant to guarantee the Admin UI starts independently of
   whether `proxy`/`nats`/`docker-socket-proxy` are healthy -- but that claim
   had only ever been read off the compose file, never actually exercised.
-  `scripts/untracked/simulations/ui-reachability-crash-loop-simulation.sh` (new, wired into both
+  `scripts/tracked/simulations/ui-reachability-crash-loop-simulation.sh` (new, wired into both
   `full-setup-deep-validate.yml` and `full-setup-validate.yml` as
   `ui-reachability-crash-loop-simulation`) deliberately forces `proxy` into a
   genuine, continuous crash loop and confirms the Admin UI still starts,
@@ -130,7 +130,7 @@ is real, live, running code, not just work sitting in source control.
   `config-write` against the real Kea Control Agent) into one invocation --
   the same sequence `services/ui/src/routes/dhcp.rs`'s `rollback_kea_snapshot`
   already runs when the Admin UI IS reachable. Verified end-to-end by the new
-  `scripts/untracked/simulations/setup-reset-kea-config-simulation.sh` (wired into both workflows as
+  `scripts/tracked/simulations/setup-reset-kea-config-simulation.sh` (wired into both workflows as
   `setup-reset-kea-config-simulation`): adds two real reservations through the
   Admin UI (creating two known-good snapshots), rolls back to the first via
   the new CLI command, and confirms via a fresh `config-get` against the real
@@ -156,7 +156,7 @@ is real, live, running code, not just work sitting in source control.
   so its config-rendering logic was pulled out into a pure `render_nats_conf`
   function and a test now drives the render → atomic-write pipeline twice in
   a row, proving it converges to byte-identical output for an unchanged
-  config. Also added `scripts/tracked/check-idempotence-test-coverage.sh`, a small CI
+  config. Also added `scripts/untracked/check-idempotence-test-coverage.sh`, a small CI
   guard (with its own `tests/bats/check_idempotence_test_coverage.bats`
   fixture coverage) that fails the build if any known config-writer
   entrypoint loses its repeat-run test.
@@ -174,7 +174,7 @@ is real, live, running code, not just work sitting in source control.
     triggers on changes to the guard script itself, so its own fixture suite
     runs on script-only PRs instead of only the real-repo happy-path check
     in `build-push.yml`.
-- Extended `scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh` with a static host
+- Extended `scripts/tracked/simulations/dhcp-kea-lease-flow-simulation.sh` with a static host
   reservation scenario (#707): after its existing Discover/Offer/Request/Ack
   check, it now adds a real reservation for a known MAC directly through
   Kea's own Control Agent API and confirms a subsequent real DHCP lease
@@ -255,7 +255,7 @@ is real, live, running code, not just work sitting in source control.
   against `services/ui` and `services/dns/nats-subscriber`), uploading JSON
   reports as artifacts and failing the job on regression (#495).
 - Added a CI image-pinning policy (`docs/ci-image-pinning-policy.md`) and
-  `scripts/tracked/check-mutable-refs.sh` to detect mutable image references,
+  `scripts/untracked/check-mutable-refs.sh` to detect mutable image references,
   including untagged `FROM` lines (#497).
 - Added a PR-template completeness check: non-draft PRs now fail CI if a
   required template section is missing; draft PRs warn without blocking
@@ -296,7 +296,7 @@ is real, live, running code, not just work sitting in source control.
   same DNS-sync permissions the old shared role had. `rotate_token` now
   actually regenerates that one secondary's own credential; removing a
   secondary revokes only that secondary, immediately, with zero effect on any
-  other. Added `scripts/untracked/simulations/nats-secondary-auth-callout-simulation.sh`, a real
+  other. Added `scripts/tracked/simulations/nats-secondary-auth-callout-simulation.sh`, a real
   multi-service integration test proving registration, isolation between two
   independently registered secondaries, immediate revocation on removal, and
   credential rotation all work against a real nats-server and the real
@@ -322,7 +322,7 @@ is real, live, running code, not just work sitting in source control.
   `logs-syslog-ng` volume into the `watchdog` service; documented as
   commented samples in `deploy/prod/.env`, matching the existing
   `SYSLOG_MAX_FILE_MB` precedent.
-- Added `scripts/tracked/check-logging-matrix.sh` (#633, follow-up to #453/#632),
+- Added `scripts/untracked/check-logging-matrix.sh` (#633, follow-up to #453/#632),
   wired into the `validate-compose` CI job right after the existing naming
   consistency check: compares `docs/architecture-ng.md`'s logging matrix
   table against the real Compose service list (via
@@ -408,7 +408,7 @@ is real, live, running code, not just work sitting in source control.
   reference and the wire-level details (`dhcp-boot`/`dhcp-match`, not
   `pxe-service`, is what actually delivers the configured external server to
   UEFI and, for the external-address case, BIOS clients too), and
-  `scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh` for the new end-to-end simulation
+  `scripts/tracked/simulations/dhcp-proxy-pxe-simulation.sh` for the new end-to-end simulation
   (a synthetic PXE client, via `scapy`) that proves it against a real
   `dnsmasq` container for both architectures and confirms an ordinary,
   non-PXE-tagged client still receives no reply.
@@ -439,9 +439,9 @@ is real, live, running code, not just work sitting in source control.
   fixed two consumer scripts that computed their OWN additional addresses
   (beyond the ~10 the core services claim) directly from the reserved
   subnet's assumed `/24` shape --
-  `scripts/untracked/simulations/dhcp-kea-ctrl-agent-mutation-simulation.sh` (a Kea test server,
+  `scripts/tracked/simulations/dhcp-kea-ctrl-agent-mutation-simulation.sh` (a Kea test server,
   DHCP pool, and static reservation address) and
-  `scripts/untracked/simulations/setup-reset-kea-config-simulation.sh` (the same, for its own
+  `scripts/tracked/simulations/setup-reset-kea-config-simulation.sh` (the same, for its own
   separate Kea instance) -- both renumbered to fit within a `/27` and
   rewritten to parse the reserved subnet's actual base offset instead of
   assuming it is always `.0`. Also consolidated three call sites
@@ -458,8 +458,8 @@ is real, live, running code, not just work sitting in source control.
   `validation_subnet_reserve` (in `scripts/lib/reserve-validation-subnet.sh`)
   turned out to be a generic "reserve one free integer with host-local
   flock" primitive ALSO reused, on their own separate `172.31.0.0/16` /
-  `172.29.0.0/16` ranges, by `scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh` and
-  `scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh` -- neither of which has (or wants)
+  `172.29.0.0/16` ranges, by `scripts/tracked/simulations/dhcp-kea-lease-flow-simulation.sh` and
+  `scripts/tracked/simulations/dhcp-proxy-pxe-simulation.sh` -- neither of which has (or wants)
   a `/27` subdivision. An earlier version of this change renamed that
   function's output from `octet=` to `slot=` for the general pool's benefit,
   which silently broke both DHCP scripts (still parsing the now-gone
@@ -562,7 +562,7 @@ is real, live, running code, not just work sitting in source control.
   applied to PowerDNS). Also added a bats regression test asserting the
   real generated `nats.conf` grants the permission across dev/prod/
   quickstart, and a `flush_ok` assertion in the existing
-  `scripts/untracked/simulations/dns-zone-rollback-simulation.sh` E2E test -- that stack's own
+  `scripts/tracked/simulations/dns-zone-rollback-simulation.sh` E2E test -- that stack's own
   identities carry no `publish` block at all (nats-server treats that as
   unrestricted, unlike the restrictive allow-lists this bug actually
   lived in), so the new assertion is what proves the response's
@@ -644,7 +644,7 @@ is real, live, running code, not just work sitting in source control.
 - Fixed `build-tools.yml`'s bats-triggering path filter silently excluding
   most of the project's actual bats-tested files (#873). The filter only
   ever matched `tests/bats/**`/`tests/shellspec/**` themselves, `setup.sh`,
-  and `scripts/tracked/check-idempotence-test-coverage.sh` -- so a PR that changed
+  and `scripts/untracked/check-idempotence-test-coverage.sh` -- so a PR that changed
   only, say, `services/watchdog/watchdog.sh` never ran the
   `watchdog_idempotence.bats`/`watchdog_syslog_prune.bats` suite already
   written for it, since `build-tools.yml` is the only workflow that ever
@@ -811,7 +811,7 @@ is real, live, running code, not just work sitting in source control.
   purge scan can't age the file out on its own and cause a false-positive
   unhealthy flap. `CONTAINER_PROXY`/`CONTAINER_DNS_STANDARD`/
   `CONTAINER_DNS_SSL` looked like supported renaming knobs, but
-  `scripts/untracked/docker-socket-proxy.sh`'s HAProxy allowlist and the Admin UI's
+  `scripts/tracked/docker-socket-proxy.sh`'s HAProxy allowlist and the Admin UI's
   `docker_client.rs` both hardcode the same three default container names
   and read neither knob at all -- a rename silently made every health check
   for that container return "unreachable" and every restart 403 through the
@@ -922,7 +922,7 @@ is real, live, running code, not just work sitting in source control.
   word "resolver" from the written `.env`'s own comment. Escaped the
   backticks; the `NGINX_UPSTREAM_RESOLVER=` value itself was always correct
   and unaffected.
-- Fixed `scripts/untracked/simulations/dns-zone-rollback-simulation.sh` (#809) never pulling fresh
+- Fixed `scripts/tracked/simulations/dns-zone-rollback-simulation.sh` (#809) never pulling fresh
   images before starting its stack, unlike its sibling
   `ssl-mitm-cache-simulation.sh`: Compose's default `pull_policy: missing`
   silently reuses whatever image a runner already has cached locally under
@@ -937,7 +937,7 @@ is real, live, running code, not just work sitting in source control.
   runtime (#799). Bumped to `v7.0.1`; the `name`/`path`/`retention-days` inputs
   used here are unaffected across that range.
 - Fixed the `full-setup-deep-validate.yml` PR gate's `setup.sh CLI simulation`
-  job perpetually validating stale images. `scripts/untracked/simulations/setup-cli-simulation.sh`
+  job perpetually validating stale images. `scripts/tracked/simulations/setup-cli-simulation.sh`
   hardcoded the mutable `edge` channel, which only moves on a push to `master`;
   with `master` long frozen, every PR (including every `v0.2.0` PR) revalidated
   months-old images instead of its own code -- the same "blocking check coupled
@@ -952,7 +952,7 @@ is real, live, running code, not just work sitting in source control.
   as a pinned target (operator-facing pinned/derive messages still name only
   `sha-*`/`vX.Y.Z`, so these ephemeral CI tags are not advertised for
   production installs).
-- Fixed `scripts/untracked/simulations/ssl-mitm-cache-simulation.sh` being unable to prove SSL
+- Fixed `scripts/tracked/simulations/ssl-mitm-cache-simulation.sh` being unable to prove SSL
   mode's DNS actually routes to a distinct MITM endpoint (#668): it
   previously asserted `dns-standard` and `dns-ssl` both resolve a test CDN
   domain to the exact same hardcoded proxy address, so a `dns-ssl` wrongly
@@ -969,7 +969,7 @@ is real, live, running code, not just work sitting in source control.
   origin's own certificate (and validate cleanly against the public trust
   store) -- proving the DNS-driven MITM-vs-passthrough distinction
   end-to-end instead of a shared-address assumption. Also updated
-  `scripts/untracked/simulations/full-setup-client-simulation.sh`'s DNS check to expect the two
+  `scripts/tracked/simulations/full-setup-client-simulation.sh`'s DNS check to expect the two
   nameservers' now-genuinely-different answers.
 - Fixed `cargo-with-sccache-fallback`'s `is_sccache_failure` check missing the
   sccache-dist remote-build failure signature (issue #783): when a
@@ -1017,7 +1017,7 @@ is real, live, running code, not just work sitting in source control.
   exact file into the image at build time (the `dns-domains` named build
   context, baked in as `/etc/nginx/cdn-domains.txt`), but both
   `.github/workflows/build-push.yml`'s `detect-changes` job and its hand-kept
-  mirror `scripts/untracked/detect-full-setup-changes.sh` only treated `services/proxy/`
+  mirror `scripts/tracked/detect-full-setup-changes.sh` only treated `services/proxy/`
   itself as a proxy-touching path, so a domain-list-only change shipped a
   fresh `dns` image while leaving the proxy image's baked-in domain list
   stale until some unrelated `services/proxy/` change next happened to
@@ -1054,7 +1054,7 @@ is real, live, running code, not just work sitting in source control.
   path now write to `/var/log/kea/*.log`, and the `dhcp-logs` volume mount
   plus fluent-bit's tail source were remapped to match in all three Compose
   files (#773).
-- Fixed `scripts/untracked/select-build-tools-image.sh` silently trusting a stale,
+- Fixed `scripts/tracked/select-build-tools-image.sh` silently trusting a stale,
   incomplete published build-tools image. Its `BUILD_TOOLS_REQUIRE_PUBLISHED=true`
   strict path hardcoded `:latest`, a channel that only moves on a stable
   `vX.Y.Z` release tag (none exist yet) and so can sit stale for weeks, while
@@ -1143,18 +1143,18 @@ is real, live, running code, not just work sitting in source control.
 - Fixed an outdated two-proxy architecture description in the docs (#511).
 - Fixed a shellcheck `SC2064` warning in a test cleanup trap, no functional
   change (#514).
-- Fixed `scripts/untracked/simulations/nats-secondary-auth-callout-simulation.sh` being committed
+- Fixed `scripts/tracked/simulations/nats-secondary-auth-callout-simulation.sh` being committed
   without the executable bit, which made `full-setup-validate.yml`'s "NATS
   auth-callout simulation" job fail every run with exit code 126 (`Permission
   denied`) — a recurrence of the same defect class already fixed once in
-  #617 for a different script. `scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh`
+  #617 for a different script. `scripts/tracked/simulations/dhcp-kea-lease-flow-simulation.sh`
   had the identical missing-bit defect, only masked because its own workflow
   step already invoked it via an explicit `bash` prefix; fixed its
   executable bit too, and normalized every `scripts/*.sh` invocation in
   `full-setup-validate.yml` to use an explicit `bash scripts/...sh` prefix so
   the executable bit can no longer cause a job failure for any of them
   (#711).
-- Fixed `scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh` failing its own
+- Fixed `scripts/tracked/simulations/dhcp-kea-lease-flow-simulation.sh` failing its own
   success-check (`dhclient never obtained a lease from the Kea container`)
   despite a genuinely successful DHCP exchange (`DHCPACK`/`bound to` in the
   raw `dhclient` log). Root cause: ISC dhclient drops privileges to an
@@ -1220,7 +1220,7 @@ is real, live, running code, not just work sitting in source control.
   guard and only fail deep inside `docker compose pull`, after setup.sh had
   already written install state. Added
   `assert_resolved_image_tag_platform_supported()`, which mirrors
-  `scripts/untracked/require-image-platforms.sh`'s `docker buildx imagetools inspect`
+  `scripts/tracked/require-image-platforms.sh`'s `docker buildx imagetools inspect`
   approach, and calls it right after the tag/channel is resolved and before
   the first state-mutating write in the install, update, and secondary-node
   flows (#665).
@@ -1245,14 +1245,14 @@ is real, live, running code, not just work sitting in source control.
   auto-selects over the network fetch once `go get` touches `go.mod` --
   `go mod vendor` re-syncs it before the build to avoid an "inconsistent
   vendoring" failure. Filed #791 as a deliberate follow-up (not done here)
-  to widen `scripts/untracked/select-build-tools-image.sh`'s smoke test for `docker
+  to widen `scripts/tracked/select-build-tools-image.sh`'s smoke test for `docker
   buildx version`, matching the #775 precedent: that check can only be
   added once the published `:dev`/`:edge` build-tools image actually
   contains buildx, i.e. after this fix merges and republishes -- adding it
   in this same PR would fail the strict, no-fallback `validate-compose` and
   `shellcheck (GitHub-hosted fallback)` jobs against the still-stale
   currently-published image (#787).
-- Fixed `scripts/untracked/simulations/setup-cli-simulation.sh` (shared by the `setup.sh CLI
+- Fixed `scripts/tracked/simulations/setup-cli-simulation.sh` (shared by the `setup.sh CLI
   simulation` job in both `full-setup-deep-validate.yml` and
   `full-setup-validate.yml`) colliding with itself across concurrent CI runs
   on the shared self-hosted runner pool: `deploy/quickstart/docker-compose.yml`
@@ -1345,7 +1345,7 @@ is real, live, running code, not just work sitting in source control.
   edit `CHANGELOG.md` in the same PR (#889): every simultaneously-open PR
   appending to this same section's heading guaranteed a merge conflict with
   every other one, which is exactly what motivated this entry to be added
-  the old way one more time. Added `scripts/untracked/collect-changelog-entries.sh`,
+  the old way one more time. Added `scripts/tracked/collect-changelog-entries.sh`,
   a maintainer-invoked, read-only aid that gathers merged PRs' `## Changelog`
   body sections since the last release so they can be hand-organized into
   this file at release time, per CONTRIBUTING.md's existing "Releasing

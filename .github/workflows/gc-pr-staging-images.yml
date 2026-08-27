@@ -127,9 +127,9 @@ jobs:
           # `--silent` discards the file body, only the HTTP status decides.
           # From: Issue #1095 | PR #1528
           required_paths=(
-            "scripts/untracked/gc-pr-staging-images.sh"
-            "scripts/untracked/gc-sha-retention-audit.sh"
-            "scripts/untracked/select-build-tools-image.sh"
+            "scripts/tracked/gc-pr-staging-images.sh"
+            "scripts/tracked/gc-sha-retention-audit.sh"
+            "scripts/tracked/select-build-tools-image.sh"
             "scripts/lib/gc-pr-staging-images.sh"
             "scripts/lib/ghcr-retry.sh"
             "scripts/lib/github-api-retry.sh"
@@ -164,9 +164,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
           sparse-checkout: |
-            scripts/untracked/gc-pr-staging-images.sh
-            scripts/untracked/gc-sha-retention-audit.sh
-            scripts/untracked/select-build-tools-image.sh
+            scripts/tracked/gc-pr-staging-images.sh
+            scripts/tracked/gc-sha-retention-audit.sh
+            scripts/tracked/select-build-tools-image.sh
             scripts/lib/gc-pr-staging-images.sh
             scripts/lib/ghcr-retry.sh
             scripts/lib/github-api-retry.sh
@@ -190,7 +190,7 @@ jobs:
           GHCR_RETRY_PASSWORD: ${{ github.token }}
         run: |
           set -euo pipefail
-          image="$(bash scripts/untracked/select-build-tools-image.sh)"
+          image="$(bash scripts/tracked/select-build-tools-image.sh)"
           if [[ -z "$image" ]]; then
             echo "::error::Build-tools selector returned an empty image reference."
             exit 1
@@ -260,7 +260,7 @@ jobs:
             -v "${GC_CLASSIFICATION_CACHE_DIR}:/classification-cache:rw" \
             -w /work \
             "$BUILD_TOOLS_IMAGE" \
-            bash scripts/untracked/gc-pr-staging-images.sh
+            bash scripts/tracked/gc-pr-staging-images.sh
 
       # What: saves the classification cache with if: always(), matching
       #   gc-sha-retention-audit.yml's own save step reasoning.

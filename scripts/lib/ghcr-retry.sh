@@ -17,8 +17,8 @@
 # "401 Unauthorized: unauthenticated" log.
 #
 # Pure functions, no top-level executable code: sourced directly both by
-# plain scripts (scripts/untracked/ensure-pr-staging-images.sh,
-# scripts/untracked/require-image-platforms.sh) and by workflow `run:` steps (which
+# plain scripts (scripts/tracked/ensure-pr-staging-images.sh,
+# scripts/tracked/require-image-platforms.sh) and by workflow `run:` steps (which
 # source it via "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh", the same
 # convention scripts/lib/reserve-validation-subnet.sh already uses). Kept out
 # of a composite action for the shell case specifically because embedding an
@@ -106,7 +106,7 @@ ghcr_relogin() {
 #
 # <registry> is always required, but <username>/<password> may each be an
 # empty string: a caller with no credentials in scope (e.g.
-# scripts/untracked/require-image-platforms.sh run ad hoc outside CI) still gets
+# scripts/tracked/require-image-platforms.sh run ad hoc outside CI) still gets
 # backoff+retry, just without a fresh login between attempts -- strictly
 # better than the single bare attempt every call site had before #822, even
 # without credentials to relogin with.

@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Docker-free, git-free unit coverage for scripts/untracked/detect-full-setup-changes.sh
+# Docker-free, git-free unit coverage for scripts/tracked/detect-full-setup-changes.sh
 # (#715). Feeds canned changed-file lists (via CHANGED_FILES) and asserts the
 # per-service flags + should_run gate + docs_only handling, so the deep gate's
 # "run or skip, and which services need a staging image" decisions stay
@@ -10,8 +10,8 @@
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    script="$repo_root/scripts/untracked/detect-full-setup-changes.sh"
-    classifier="$repo_root/scripts/untracked/classify-image-impact.sh"
+    script="$repo_root/scripts/tracked/detect-full-setup-changes.sh"
+    classifier="$repo_root/scripts/tracked/classify-image-impact.sh"
     files="$BATS_TEST_TMPDIR/changed.txt"
 }
 
@@ -120,38 +120,38 @@ value_from() {
 }
 
 @test "scripts change: scripts + setup_runtime true, should_run true" {
-    run_detect "scripts/untracked/simulations/ssl-mitm-cache-simulation.sh"
+    run_detect "scripts/tracked/simulations/ssl-mitm-cache-simulation.sh"
     [ "$(val scripts)" = "true" ]
     [ "$(val setup_runtime)" = "true" ]
     [ "$(val should_run)" = "true" ]
 }
 
 # Issue #1095: a CI-tooling-only script (verified zero stack
-# dependency, now living under scripts/tracked/ -- see that directory's own
+# dependency, now living under scripts/untracked/ -- see that directory's own
 # README and detect-full-setup-changes.sh's header comment for the full
 # history) must no longer force the deep suite to run on its own. Reproduces
 # the real, confirmed regression (PR #1333, run 30616274721: touching only
 # AGENTS.md + the then-flat scripts/check-pr-title-convention.sh ran the
 # full ~15-job simulation suite) so this test fails again if the narrowing
-# regresses. This now exercises the scripts/tracked/ prefix match, not the
+# regresses. This now exercises the scripts/untracked/ prefix match, not the
 # (now-empty) ci_tooling_only_scripts array -- see the dedicated array-is-
 # empty test below for that.
 @test "CI-tooling-only script change alone does not force should_run" {
-    run_detect "AGENTS.md" "scripts/tracked/check-pr-title-convention.sh"
+    run_detect "AGENTS.md" "scripts/untracked/check-pr-title-convention.sh"
     [ "$(val scripts)" = "true" ]
     [ "$(val should_run)" = "false" ]
 }
 
 # Follow-up (post-v0.3.0-release execution, issue #1095): once every
 # individually-verified CI-tooling-only script actually moved into
-# scripts/tracked/ (git mv, not a fresh add), the by-name
-# ci_tooling_only_scripts array became redundant -- scripts/tracked/'s own
+# scripts/untracked/ (git mv, not a fresh add), the by-name
+# ci_tooling_only_scripts array became redundant -- scripts/untracked/'s own
 # directory-prefix match (exercised above and by the dedicated prefix test
 # below) covers every one of them already. Asserts the array is genuinely
 # empty, not merely unused, so a future accidental re-population (e.g. a
 # careless revert) is caught here rather than silently reintroducing
 # by-name maintenance the directory-prefix design was meant to retire.
-@test "ci_tooling_only_scripts array is empty now that scripts/tracked/ is populated" {
+@test "ci_tooling_only_scripts array is empty now that scripts/untracked/ is populated" {
     # The script has no "am I sourced" guard -- it always runs emit() at the
     # bottom -- so source it (rather than exec it) inside a subshell with a
     # real CHANGED_FILES fixture, redirecting emit()'s own stdout away, then
@@ -172,7 +172,7 @@ value_from() {
     # Not every touched scripts/ path is on the allowlist here, so should_run
     # must stay true -- the allowlist only narrows the all-safe case, never a
     # mixed diff.
-    run_detect "scripts/tracked/check-pr-title-convention.sh" "scripts/untracked/simulations/ssl-mitm-cache-simulation.sh"
+    run_detect "scripts/untracked/check-pr-title-convention.sh" "scripts/tracked/simulations/ssl-mitm-cache-simulation.sh"
     [ "$(val should_run)" = "true" ]
 }
 
@@ -187,14 +187,14 @@ value_from() {
     [ "$(val should_run)" = "true" ]
 }
 
-@test "any path under scripts/tracked/ is recognized as CI-tooling-only, even without an array entry" {
-    run_detect "scripts/tracked/some-newly-migrated-guard.sh"
+@test "any path under scripts/untracked/ is recognized as CI-tooling-only, even without an array entry" {
+    run_detect "scripts/untracked/some-newly-migrated-guard.sh"
     [ "$(val scripts)" = "true" ]
     [ "$(val should_run)" = "false" ]
 }
 
-@test "scripts/untracked/ gets no special prefix handling and still fails closed to should_run true" {
-    run_detect "scripts/untracked/some-utility.sh"
+@test "scripts/tracked/ gets no special prefix handling and still fails closed to should_run true" {
+    run_detect "scripts/tracked/some-utility.sh"
     [ "$(val scripts)" = "true" ]
     [ "$(val should_run)" = "true" ]
 }

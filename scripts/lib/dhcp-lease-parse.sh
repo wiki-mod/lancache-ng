@@ -4,7 +4,7 @@
 #
 # Parser for ISC dhclient .leases files (issue #448). Pure functions, no
 # top-level executable code, so this can be sourced directly both by
-# scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh (the real, opt-in Kea
+# scripts/tracked/simulations/dhcp-kea-lease-flow-simulation.sh (the real, opt-in Kea
 # lease-flow test) and by tests/bats/dhcp_lease_flow_parsing.bats (fast,
 # Docker-free unit coverage of the parsing logic against canned fixtures).
 #

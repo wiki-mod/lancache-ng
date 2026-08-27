@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Coverage for scripts/untracked/plan-deep-validation.sh (#715): the glue that turns a
+# Coverage for scripts/tracked/plan-deep-validation.sh (#715): the glue that turns a
 # triggering event into the deep suite's plan (image_tag / pr_staging_available
 # / should_run / per-service flags) written to $GITHUB_OUTPUT. The tag maths
 # themselves are covered by validation_image_tag.bats and the path rules by
@@ -11,7 +11,7 @@
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    script="$repo_root/scripts/untracked/plan-deep-validation.sh"
+    script="$repo_root/scripts/tracked/plan-deep-validation.sh"
     out="$BATS_TEST_TMPDIR/out.txt"
     : > "$out"
     files="$BATS_TEST_TMPDIR/changed.txt"

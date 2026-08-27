@@ -140,7 +140,7 @@ dns_snapshots are the other agent's scope.)
 **`health()`** — literal `"ok"`, no NATS/Docker/DNS reachability check.
 Explicitly documented as intentionally *shallow*: mirrors the proxy service's
 unauthenticated `/healthz`. This is the exact endpoint
-`scripts/untracked/simulations/ui-reachability-crash-loop-simulation.sh` polls to prove the Admin UI
+`scripts/tracked/simulations/ui-reachability-crash-loop-simulation.sh` polls to prove the Admin UI
 answers HTTP while `proxy` is crash-looping (issue #763's requirement) — see
 section 11.
 
@@ -763,7 +763,7 @@ not cover this file for that same reason.
 **Two end-to-end simulation scripts were checked in full**, both real
 multi-container integration tests (not mocks):
 
-- **`scripts/untracked/simulations/nats-secondary-auth-callout-simulation.sh`** (261 lines) —
+- **`scripts/tracked/simulations/nats-secondary-auth-callout-simulation.sh`** (261 lines) —
   starts `proxy`, `docker-socket-proxy`, `dns-standard`, `dns-ssl`, `nats`,
   `ui` from *published* images (not a fresh build of the PR's own code —
   same caveat issue #626 raised generally about this class of validation),
@@ -777,7 +777,7 @@ multi-container integration tests (not mocks):
   .../rotate-token` and asserts old-rejected/new-accepted. This is a
   genuinely strong, real end-to-end proof of the exact property #583/#433
   asked for — not a stub.
-- **`scripts/untracked/simulations/ui-reachability-crash-loop-simulation.sh`** (192 lines) —
+- **`scripts/tracked/simulations/ui-reachability-crash-loop-simulation.sh`** (192 lines) —
   forces the real `proxy` service into an actual, continuous crash loop
   (`exit 1` entrypoint override, `restart: unless-stopped` unchanged) and
   proves: the Admin UI still starts and becomes `healthy`, its own
@@ -844,7 +844,7 @@ history at the bottom of this document for the full account).
 --locked` only, never `cargo test` — but that's expected and correct, since
 the Dockerfile builds the release binary for the running image; test
 enforcement living in the CI workflow rather than the Dockerfile is the
-normal, sound split. Separately, **`scripts/untracked/ui-rust-checks.sh`** (a real,
+normal, sound split. Separately, **`scripts/tracked/ui-rust-checks.sh`** (a real,
 well-built local Docker-based fmt/check/clippy/test/build script, documented
 in `docs/ui-rust-dev-checks.md` as letting contributors skip installing a
 host Rust toolchain) is referenced by nothing in the repository except its
@@ -862,7 +862,7 @@ retracted "no CI test coverage" claim above.
 | Finding | File | Status |
 |---|---|---|
 | ~~`cargo test` never runs in any GitHub Actions workflow for `services/ui`~~ — **RETRACTED**: `build-push.yml`'s `ui_test`/`dns_test` jobs do run `cargo test` for `services/ui` and `services/dns/nats-subscriber` respectively, correctly path-scoped via `detect-changes`. See section 11. | crate-wide | **Corrected finding — was wrong, fixed after maintainer review** |
-| `scripts/untracked/ui-rust-checks.sh` (a real local fmt/check/clippy/test/build script) is referenced by nothing in the repo except its own doc page — likely redundant given `build-push.yml` already runs the equivalent checks in CI | crate-wide | Still valid, smaller finding (unaffected by the retraction above) |
+| `scripts/tracked/ui-rust-checks.sh` (a real local fmt/check/clippy/test/build script) is referenced by nothing in the repo except its own doc page — likely redundant given `build-push.yml` already runs the equivalent checks in CI | crate-wide | Still valid, smaller finding (unaffected by the retraction above) |
 | `impl fmt::Display for Config` is a stub (hardcoded `"..."` ellipsis, only 2 of ~55 fields shown) — present but not meaningfully usable, and nothing appears to call it over `Debug` | `config.rs` | Defined but decorative; not a bug, just dead-ish |
 | `docker_client.rs` has zero `#[cfg(test)]` coverage, despite `container_name_for_service`'s match arms being pure and trivially testable | `docker_client.rs` | Gap, low severity |
 | `routes/mod.rs` has two near-duplicate CSRF-verification helpers (`verify_csrf_token` vs `verify_csrf_header`) with slightly different call conventions | `routes/mod.rs` | Minor duplication, not a bug |
@@ -906,7 +906,7 @@ retracted "no CI test coverage" claim above.
 - This document corrects both: adds sections 7–8 (nginx_client.rs,
   syslog_client.rs) and section 10 (explicit kea_snapshots.rs scoping
   note), replaces every test count with a `grep -c '#\[test\]'`-verified
-  number, and adds the `scripts/untracked/ui-rust-checks.sh` finding to the CI-gap
+  number, and adds the `scripts/tracked/ui-rust-checks.sh` finding to the CI-gap
   analysis (a real cargo-test-capable script exists but is wired to nothing
   in CI).
 - **Retraction**: the headline CI-gap claim in the previous revision ("no

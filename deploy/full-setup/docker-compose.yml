@@ -50,7 +50,7 @@ services:
   # From: Issue #668 | PR #795
   #
   # What: gated behind a Compose profile, started only by
-  # scripts/untracked/simulations/ssl-mitm-cache-simulation.sh's own explicit service name.
+  # scripts/tracked/simulations/ssl-mitm-cache-simulation.sh's own explicit service name.
   # Why: every other job brings the stack up unrestricted with no use for
   # this shim; an un-threaded default IP could land outside a reserved subnet.
   # From: Issue #668 | PR #795

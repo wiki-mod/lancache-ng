@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # What: shared classification/lookup functions for the GHCR PR-staging-image
-# reaper (scripts/untracked/gc-pr-staging-images.sh).
+# reaper (scripts/tracked/gc-pr-staging-images.sh).
 # Why: an untagged version (a per-platform/attestation sub-manifest) is only
 # provably orphaned by reading the real manifest graph, not by tag state
 # alone -- gcps_extract_manifest_children() below is that check.

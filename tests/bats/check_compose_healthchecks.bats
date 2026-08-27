@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Exercises scripts/tracked/check-compose-healthchecks.sh (issue #1169) against small,
+# Exercises scripts/untracked/check-compose-healthchecks.sh (issue #1169) against small,
 # throwaway deploy/*/docker-compose.yml fixture trees rather than this repo's
 # own real compose files, so a positive (all healthchecked) and a negative
 # (one missing) case are both proven -- per AG-VAL-024, a check that only
@@ -11,7 +11,7 @@
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    script="$repo_root/scripts/tracked/check-compose-healthchecks.sh"
+    script="$repo_root/scripts/untracked/check-compose-healthchecks.sh"
     fixture_root="$(mktemp -d)"
     mkdir -p "$fixture_root/deploy/prod" "$fixture_root/deploy/quickstart"
 }

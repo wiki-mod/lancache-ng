@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Coverage for scripts/tracked/check-idempotence-test-coverage.sh (#640): the CI
+# Coverage for scripts/untracked/check-idempotence-test-coverage.sh (#640): the CI
 # guard that fails a build if a known config-writer entrypoint has no
 # repeat-run/idempotence test. This file does NOT merely run the guard
 # against the real repo (that would only prove "passes today", not that the
@@ -22,7 +22,7 @@
 # tree.
 
 setup() {
-    script="$BATS_TEST_DIRNAME/../../scripts/tracked/check-idempotence-test-coverage.sh"
+    script="$BATS_TEST_DIRNAME/../../scripts/untracked/check-idempotence-test-coverage.sh"
     fixture_root="$BATS_TEST_TMPDIR/fixture-repo"
     # bats-core's own preprocessor (tools/build-tools's bats-preprocess,
     # BATS_TEST_PATTERN='^[[:blank:]]*@test[[:blank:]]+...') scans every

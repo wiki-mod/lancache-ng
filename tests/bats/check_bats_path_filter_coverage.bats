@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Coverage for scripts/tracked/check-bats-path-filter-coverage.sh (#879): the CI
+# Coverage for scripts/untracked/check-bats-path-filter-coverage.sh (#879): the CI
 # guard that fails a build if .github/workflows/build-tools-smoke.yml's
 # on.push.paths / on.pull_request.paths filter drifts out of sync with the
 # real, non-fixture file dependencies of tests/bats/*.bats and
@@ -32,7 +32,7 @@
 # defense in depth, but no call site here relies on that bit.
 
 setup() {
-    script="$BATS_TEST_DIRNAME/../../scripts/tracked/check-bats-path-filter-coverage.sh"
+    script="$BATS_TEST_DIRNAME/../../scripts/untracked/check-bats-path-filter-coverage.sh"
     fixture_root="$BATS_TEST_TMPDIR/fixture-repo"
     mkdir -p "$fixture_root/tests/bats/helpers"
     mkdir -p "$fixture_root/.github/workflows"

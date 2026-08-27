@@ -17,7 +17,7 @@
 #     (stdout), which the `CACHE_DIR="$(resolve_cache_dir)"` command
 #     substitution silently captured and discarded -- it must reach stderr.
 #   - CONTAINER_PROXY/CONTAINER_DNS_STANDARD/CONTAINER_DNS_SSL: renaming a
-#     monitored container is not wired through scripts/untracked/docker-socket-proxy.sh's
+#     monitored container is not wired through scripts/tracked/docker-socket-proxy.sh's
 #     hardcoded HAProxy allowlist (nor the Admin UI's docker_client.rs, which
 #     hardcodes the same three names again) -- watchdog now fails loudly at
 #     startup on a mismatch instead of silently degrading every health check

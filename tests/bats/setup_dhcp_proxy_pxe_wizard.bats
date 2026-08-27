@@ -7,14 +7,14 @@
 # convergence check, both of which share
 # pxe_boot_pointer_answers_are_complete() as the single source of truth for
 # "does this answer set actually activate PXE boot-pointer support." Neither
-# scripts/untracked/simulations/setup-cli-simulation.sh nor scripts/untracked/simulations/syslog-forwarding-simulation.sh
+# scripts/tracked/simulations/setup-cli-simulation.sh nor scripts/tracked/simulations/syslog-forwarding-simulation.sh
 # drives the interactive wizard through dnsmasq-proxy mode at all (both
 # always answer "disabled" for DHCP mode), so the real, previously
 # hand-verified-only combined-invariant decision ("a server needs at least
 # one boot filename to matter, and vice versa") had no automated coverage
 # before this file. Building a full expect-driven interactive simulation of
 # the dnsmasq-proxy + PXE prompt sequence is a materially larger, separate
-# undertaking (extending scripts/untracked/simulations/setup-cli-simulation.sh's own generated
+# undertaking (extending scripts/tracked/simulations/setup-cli-simulation.sh's own generated
 # expect_prompt mechanism to a DHCP mode it does not exercise for any mode
 # today) -- this file instead drives the real decision function the wizard
 # and the update-time migration both call, which is where an actual logic

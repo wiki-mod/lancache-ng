@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Coverage for scripts/tracked/check-orphaned-branches.sh (#990, AG-GH-017's
+# Coverage for scripts/untracked/check-orphaned-branches.sh (#990, AG-GH-017's
 # automated companion guard). Branch age/exclusion logic is exercised
 # against a REAL fixture git repository with controlled commit timestamps
 # (via GIT_COMMITTER_DATE/GIT_AUTHOR_DATE), not a mocked git -- git's own
@@ -28,7 +28,7 @@
 # suite that other contributors' CI runs will also execute.
 
 setup() {
-    script="$BATS_TEST_DIRNAME/../../scripts/tracked/check-orphaned-branches.sh"
+    script="$BATS_TEST_DIRNAME/../../scripts/untracked/check-orphaned-branches.sh"
     fixture_repo="$BATS_TEST_TMPDIR/fixture-repo"
     mock_bin_dir="$BATS_TEST_TMPDIR/mock-bin"
     mock_fixtures_dir="$BATS_TEST_TMPDIR/mock-curl-fixtures"

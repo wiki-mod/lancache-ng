@@ -247,7 +247,7 @@ fi
 # architecture with a dhcp-match/dhcp-boot rule. That claim is false as
 # stated -- it directly contradicts the code below, which deliberately
 # renders BOTH a pxe-service=x86PC line and a dhcp-match/dhcp-boot pair
-# for the SAME architecture (0), and scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh
+# for the SAME architecture (0), and scripts/tracked/simulations/dhcp-proxy-pxe-simulation.sh
 # (run against this exact code in CI) confirms the BIOS case correctly
 # delivers the operator-configured external siaddr/filename, not
 # dnsmasq's own address or an empty one. UEFI (architectures 7/11) gets
@@ -581,7 +581,7 @@ _dhcp_proxy_render_optional_directives() {
         # the directive the dnsmasq man page documents as working together
         # with ProxyDHCP mode ("it is possible, and useful, to configure
         # dnsmasq as both a PXE proxy-DHCP server and a DHCP relay"), and it
-        # is what the existing PXE tooling (scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh,
+        # is what the existing PXE tooling (scripts/tracked/simulations/dhcp-proxy-pxe-simulation.sh,
         # tools/pxe-client-probe) expects. Server-name is left empty; only
         # filename and (optionally) server-address are operator-configurable
         # here. Confirmed against dnsmasq's own upstream documentation
@@ -806,7 +806,7 @@ _dhcp_proxy_render_pxe_service_directives() {
         # not because it would suppress dhcp-boot (PR #765 review corrected
         # an earlier version of this comment that claimed exactly that; see
         # the header comment above's "Correction" paragraph and
-        # scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh, which asserts the BIOS case
+        # scripts/tracked/simulations/dhcp-proxy-pxe-simulation.sh, which asserts the BIOS case
         # combining both directives for the SAME architecture in CI). It is
         # simply redundant: the x86PC pxe-service line rendered above
         # already satisfies the "at least one pxe-service directive must

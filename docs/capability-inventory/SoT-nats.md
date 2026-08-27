@@ -38,7 +38,7 @@ the time, before commit `83567a8`):
 - **PR #828** (`test(ci): real syslog-ng -> Admin UI visibility E2E
   simulation`), at that point, only touched
   `.github/workflows/full-setup-deep-validate.yml` and
-  `scripts/untracked/simulations/syslog-forwarding-simulation.sh`. It did **not** touch any
+  `scripts/tracked/simulations/syslog-forwarding-simulation.sh`. It did **not** touch any
   `docker-compose.yml`, did **not** add a healthcheck to `nats`, and did
   **not** configure `http_port`/`8222` anywhere. It hardcoded
   `services_with_healthcheck="proxy dns-standard dns-ssl netdata"` —

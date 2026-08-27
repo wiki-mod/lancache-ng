@@ -12,7 +12,7 @@ Scope examined (all against `origin/v0.2.0`):
 - `services/dhcp-proxy/entrypoint.sh` (675 lines)
 - `config/prod/dhcp-proxy.env`
 - `deploy/prod/docker-compose.yml` (dhcp-proxy service block + cross-references in `ui`/`dhcp` services)
-- `scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh` (389 lines)
+- `scripts/tracked/simulations/dhcp-proxy-pxe-simulation.sh` (389 lines)
 - `tests/bats/dhcp_proxy_known_good_snapshot.bats`, `tests/bats/dhcp_proxy_optional_directives.bats` + their helpers
 - `docs/dhcp-modes.md`
 - `services/ui/src/routes/dhcp.rs`, `services/ui/src/templates/dhcp.html` (Admin UI cross-reference)
@@ -77,7 +77,7 @@ option covered by issue #450** (DNS injection included) had been silently
 inert since #450 shipped: accepted by `dnsmasq --test`, never once delivered
 to a real client. This is why `_dhcp_proxy_render_pxe_service_directives` is
 the single most important function in `entrypoint.sh` and is exercised by
-`scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh` — but that script is the *only* thing
+`scripts/tracked/simulations/dhcp-proxy-pxe-simulation.sh` — but that script is the *only* thing
 that exercises it (see §5).
 
 ## 4. Docker Compose wiring (dev + prod, structurally identical)
@@ -111,7 +111,7 @@ that exercises it (see §5).
    `_dhcp_proxy_render_custom_options` via `awk` — confirmed by reading the
    helper directly. `git grep -n "_dhcp_proxy_render_pxe_service_directives"
    -- tests/` returns nothing. The *only* thing that exercises this
-   function's actual output is `scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh`, a full
+   function's actual output is `scripts/tracked/simulations/dhcp-proxy-pxe-simulation.sh`, a full
    Docker-container-and-scapy integration test.
 
 2. **That integration test is `workflow_dispatch`-only, not part of the

@@ -39,7 +39,7 @@ jobs:
         id: build-tools
         run: |
           set -euo pipefail
-          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/tracked/select-build-tools-image.sh)"
           case "$build_tools_image" in
             *@sha256:*) ;;
             *)

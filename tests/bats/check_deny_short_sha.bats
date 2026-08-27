@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: exercises scripts/untracked/check-deny-short-sha.sh against throwaway
+# What: exercises scripts/tracked/check-deny-short-sha.sh against throwaway
 #   fixture trees (mirrors check_review_chronology_comments.bats's fixture
 #   shape), proving both the passing and the fail-closed path.
 # Why: a check that only ever runs against an already-green tree never
@@ -16,7 +16,7 @@
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    script="$repo_root/scripts/untracked/check-deny-short-sha.sh"
+    script="$repo_root/scripts/tracked/check-deny-short-sha.sh"
     fixture_root="$(mktemp -d)"
     mkdir -p "$fixture_root/.github/workflows" "$fixture_root/scripts/lib"
 }

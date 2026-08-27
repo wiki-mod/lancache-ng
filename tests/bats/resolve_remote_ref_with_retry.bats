@@ -4,7 +4,7 @@
 # Proves the remote-ref resolver's success, retry, and exhausted-budget paths offline.
 
 setup() {
-    script="$BATS_TEST_DIRNAME/../../scripts/tracked/resolve-remote-ref-with-retry.sh"
+    script="$BATS_TEST_DIRNAME/../../scripts/untracked/resolve-remote-ref-with-retry.sh"
     fake_bin="$BATS_TEST_TMPDIR/bin"
     attempt_log="$BATS_TEST_TMPDIR/attempts"
     mkdir -p "$fake_bin"

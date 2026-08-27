@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Exercises scripts/tracked/check-dependabot-docker-base-consistency.sh against
+# Exercises scripts/untracked/check-dependabot-docker-base-consistency.sh against
 # small, throwaway fixture trees rather than only this repo's own real
 # tree, so both the passing and failing path are proven -- per AG-VAL-024,
 # a check that only ever runs against an already-green tree never actually
@@ -10,7 +10,7 @@
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    script="$repo_root/scripts/tracked/check-dependabot-docker-base-consistency.sh"
+    script="$repo_root/scripts/untracked/check-dependabot-docker-base-consistency.sh"
     fixture_root="$(mktemp -d)"
     mkdir -p "$fixture_root/.github"
 }
