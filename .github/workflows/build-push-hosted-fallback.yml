@@ -50,6 +50,8 @@ jobs:
     timeout-minutes: 30
     outputs:
       build_tools_image: ${{ steps.select-image.outputs.build_tools_image }}
+      utilities_image: ${{ steps.resolve-utilities-image.outputs.utilities_image }}
+      utilities_digest: ${{ steps.resolve-utilities-image.outputs.utilities_digest }}
       matrix: ${{ steps.services.outputs.matrix }}
     steps:
       - name: Require explicit opt-in
@@ -86,6 +88,30 @@ jobs:
               ;;
           esac
           printf 'build_tools_image=%s\n' "$build_tools_image" >> "$GITHUB_OUTPUT"
+
+      # What: resolves utilities:latest to an immutable digest once per run.
+      # Why: consumer Dockerfiles use a mutable tag (AG-KD-010); without this,
+      #   a hosted-fallback-built consumer has no build-time digest to record
+      #   in its utilities base-digest label (Issue #1095).
+      # From: Issue #1095 | PR #1687
+      - name: Resolve utilities image digest
+        id: resolve-utilities-image
+        env:
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # shellcheck source=scripts/lib/ghcr-retry.sh
+          source scripts/lib/ghcr-retry.sh
+
+          utilities_digest="$(resolve_manifest_digest ghcr.io/wiki-mod/lancache-ng/utilities:latest "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")"
+          if [[ -z "$utilities_digest" ]]; then
+            echo "::error::Could not resolve digest for ghcr.io/wiki-mod/lancache-ng/utilities:latest." >&2
+            exit 1
+          fi
+
+          printf 'utilities_image=ghcr.io/wiki-mod/lancache-ng/utilities@%s\n' "$utilities_digest" >> "$GITHUB_OUTPUT"
+          printf 'utilities_digest=%s\n' "$utilities_digest" >> "$GITHUB_OUTPUT"
 
       - name: Remove buildx builder
         if: always()
@@ -189,6 +215,8 @@ jobs:
       matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}
     env:
       BUILD_TOOLS_IMAGE: ${{ needs.preflight.outputs.build_tools_image }}
+      UTILITIES_IMAGE: ${{ needs.preflight.outputs.utilities_image }}
+      UTILITIES_DIGEST: ${{ needs.preflight.outputs.utilities_digest }}
     steps:
       - uses: *checkout_centraliced_versioning # v7.0.1
 
@@ -277,6 +305,7 @@ jobs:
           build-contexts: ${{ matrix.build_contexts }}
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
+            UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
           push: "true"
@@ -286,6 +315,7 @@ jobs:
             org.opencontainers.image.description=${{ matrix.description }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
+            ${{ contains(fromJSON('["proxy","dns","dhcp","dhcp-proxy","ntp","ui","watchdog"]'), matrix.service) && format('org.opencontainers.image.base.utilities.digest={0}', env.UTILITIES_DIGEST) || '' }}
           outputs: type=image,oci-mediatypes=true
           platforms: linux/amd64
           provenance: false
