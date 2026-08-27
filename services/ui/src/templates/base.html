@@ -37,8 +37,9 @@
       --font-display: Georgia, Cambria, "Times New Roman", serif;
       --font-body: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
     }
-    /* prefers-color-scheme: light -- only applies while no explicit
-       data-theme override is stored (see the toggle script below). */
+    /* What: light palette, only without an explicit override
+       Why: manual toggle below must always win over OS setting
+       From: Issue #1437 */
     @media (prefers-color-scheme: light) {
       :root:not([data-theme="dark"]) {
         --color-bg: #f6f4ec;
@@ -53,10 +54,9 @@
         --color-accent-coral-soft: rgba(200, 70, 47, 0.12);
       }
     }
-    /* Explicit override always wins regardless of OS preference -- this is
-       what a manual toggle-button click sets via localStorage + this
-       attribute, satisfying the mockup's "prefers-color-scheme + explicit
-       override" requirement rather than prefers-color-scheme alone. */
+    /* What: explicit light override, wins over OS preference
+       Why: mockup wants an explicit toggle, not just OS setting
+       From: Issue #1437 */
     :root[data-theme="light"] {
       --color-bg: #f6f4ec;
       --color-surface: #ffffff;
@@ -303,7 +303,9 @@
       try {
         stored = localStorage.getItem(STORAGE_KEY);
       } catch (err) {
-        // Private browsing / storage blocked -- fall back to prefers-color-scheme only.
+        // What: fall back silently when storage read fails
+        // Why: private browsing can block localStorage access
+        // From: Issue #1437
       }
       apply(stored);
       document.getElementById('theme-toggle').addEventListener('click', function () {
@@ -314,7 +316,9 @@
         try {
           localStorage.setItem(STORAGE_KEY, next);
         } catch (err) {
-          // Non-fatal: theme just won't persist across reloads.
+          // What: ignore storage write failure
+          // Why: theme just won't persist across reloads
+          // From: Issue #1437
         }
       });
     })();
@@ -340,8 +344,9 @@
           }
           data = await response.json();
         } catch (err) {
-          // Network hiccup or the UI itself restarting -- leave the last
-          // known render in place and try again on the next interval tick.
+          // What: keep last render, retry on next interval
+          // Why: network hiccup or the UI itself restarting
+          // From: Issue #1437
           return;
         }
         listeners.forEach(function (fn) {

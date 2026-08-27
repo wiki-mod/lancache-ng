@@ -341,12 +341,11 @@ mod tests {
         assert_eq!(display_label("some-future-service"), "some-future-service");
     }
 
-    // Issue #1437: watchdog's alert-only services (#842/#1296) previously had
-    // no display_priority entry at all, so sorted_service_views would have
-    // shown them after every unrecognized name too, in undefined relative
-    // order (HashMap iteration) instead of a stable, deliberate position.
+    // What: alert-only services sort before unrecognized names
+    // Why: was missing, they'd sort with undefined HashMap order
+    // From: Issue #1437
     #[test]
-    fn display_label_sorts_alert_only_services_before_unknown_names() {
+    fn display_priority_sorts_alert_only_services_before_unknown_names() {
         let mut names = vec![
             "some-future-service",
             "lancache-netdata",
