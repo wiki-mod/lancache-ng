@@ -4737,12 +4737,12 @@ jobs:
             esac
           }
 
-          # decide_one <classify_key> <matrix_service> <before_sha_changed>
-          # What: before_sha_changed is detect-changes' before..sha verdict.
-          # Why: full reasoning on the linked issue.
+          # decide_one <classify_key> <matrix_service> <before_sha_changed> [dep_keys]
+          # What: dep_keys are extra classify keys that must also show unchanged.
+          # Why: push_reuse_decide needs them to check base-image dependencies.
           # From: Issue #1095 | PR #1532
           decide_one() {
-            local classify_key="$1" matrix_service="$2" before_sha_changed="$3"
+            local classify_key="$1" matrix_service="$2" before_sha_changed="$3" dep_keys="${4:-}"
             local output_key="${matrix_service//-/_}"
 
             if [ "$before_sha_changed" != "false" ]; then
@@ -4776,21 +4776,24 @@ jobs:
 
             local pinned_ref="ghcr.io/${REPOSITORY}/${matrix_service}@${digest}"
             local reuse
-            reuse="$(push_reuse_decide "$classify_key" "$pinned_ref" "$COMMIT_SHA")"
+            reuse="$(push_reuse_decide "$classify_key" "$pinned_ref" "$COMMIT_SHA" "$dep_keys")"
             if [ "$reuse" = "true" ]; then
               printf 'digest_%s=%s\n' "$output_key" "$digest" >> "$GITHUB_OUTPUT"
             fi
             printf '%s\n' "$reuse"
           }
 
+          # What: 7 services depend on utilities; dns/ui/watchdog also on build-tools.
+          # Why: matches each Dockerfile's real FROM/COPY --from= dependency graph.
+          # From: Issue #1095
           {
-            printf 'reuse_proxy=%s\n' "$(decide_one proxy proxy "$PROXY_CHANGED")"
-            printf 'reuse_dns=%s\n' "$(decide_one dns_image dns "$DNS_CHANGED")"
-            printf 'reuse_ui=%s\n' "$(decide_one ui ui "$UI_CHANGED")"
-            printf 'reuse_watchdog=%s\n' "$(decide_one watchdog watchdog "$WATCHDOG_CHANGED")"
-            printf 'reuse_dhcp=%s\n' "$(decide_one dhcp dhcp "$DHCP_CHANGED")"
-            printf 'reuse_dhcp_proxy=%s\n' "$(decide_one dhcp_proxy dhcp-proxy "$DHCP_PROXY_CHANGED")"
-            printf 'reuse_ntp=%s\n' "$(decide_one ntp ntp "$NTP_CHANGED")"
+            printf 'reuse_proxy=%s\n' "$(decide_one proxy proxy "$PROXY_CHANGED" utilities)"
+            printf 'reuse_dns=%s\n' "$(decide_one dns_image dns "$DNS_CHANGED" "utilities build_tools")"
+            printf 'reuse_ui=%s\n' "$(decide_one ui ui "$UI_CHANGED" "utilities build_tools")"
+            printf 'reuse_watchdog=%s\n' "$(decide_one watchdog watchdog "$WATCHDOG_CHANGED" "utilities build_tools")"
+            printf 'reuse_dhcp=%s\n' "$(decide_one dhcp dhcp "$DHCP_CHANGED" utilities)"
+            printf 'reuse_dhcp_proxy=%s\n' "$(decide_one dhcp_proxy dhcp-proxy "$DHCP_PROXY_CHANGED" utilities)"
+            printf 'reuse_ntp=%s\n' "$(decide_one ntp ntp "$NTP_CHANGED" utilities)"
             printf 'reuse_build_tools=%s\n' "$(decide_one build_tools build-tools "$BUILD_TOOLS_CHANGED")"
             printf 'reuse_syslog=%s\n' "$(decide_one syslog syslog "$SYSLOG_CHANGED")"
             printf 'reuse_utilities=%s\n' "$(decide_one utilities utilities "$UTILITIES_CHANGED")"

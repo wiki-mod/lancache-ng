@@ -16,7 +16,10 @@
 # unreadable/missing revision label, a revision that is not a real ancestor
 # of github.sha, a classify failure, a classify verdict of "true" (real
 # change) for the service under test, a missing/malformed classify key, and
-# the one path where all three checks pass and reuse is declared safe.
+# the one path where all three checks pass and reuse is declared safe. Also
+# covers the optional dep_keys parameter (issue #1095): a service whose own
+# key is unchanged must still fail closed if a declared base-image
+# dependency (e.g. utilities, build_tools) changed in the same span.
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -185,6 +188,63 @@ STUB
     result="$(push_reuse_decide "ntp" "ghcr.io/example/ntp:nightly" "$c2" 2>/dev/null)"
 
     [ "$result" = "false" ]
+}
+
+@test "push_reuse_decide: reuse=true when a dependency key is given and shows unchanged too" {
+    revision_stub "$c1"
+    classify_stub $'proxy=false\nworkflow_reuse_scope=false\nutilities=false'
+
+    run push_reuse_decide "proxy" "ghcr.io/example/proxy:nightly" "$c2" "utilities"
+
+    [ "$status" -eq 0 ]
+    [ "$output" = "true" ]
+}
+
+@test "push_reuse_decide: reuse=false when a declared dependency changed, even though the service's own key is unchanged" {
+    revision_stub "$c1"
+    classify_stub $'proxy=false\nworkflow_reuse_scope=false\nutilities=true'
+
+    result="$(push_reuse_decide "proxy" "ghcr.io/example/proxy:nightly" "$c2" "utilities" 2>/dev/null)"
+
+    [ "$result" = "false" ]
+}
+
+@test "push_reuse_decide: reuse=false (fail closed) when a declared dependency key is missing from classify output" {
+    revision_stub "$c1"
+    classify_stub $'proxy=false\nworkflow_reuse_scope=false'
+
+    result="$(push_reuse_decide "proxy" "ghcr.io/example/proxy:nightly" "$c2" "utilities" 2>/dev/null)"
+
+    [ "$result" = "false" ]
+}
+
+@test "push_reuse_decide: reuse=false when the second of two declared dependencies changed" {
+    revision_stub "$c1"
+    classify_stub $'dns_image=false\nworkflow_reuse_scope=false\nutilities=false\nbuild_tools=true'
+
+    result="$(push_reuse_decide "dns_image" "ghcr.io/example/dns:nightly" "$c2" "utilities build_tools" 2>/dev/null)"
+
+    [ "$result" = "false" ]
+}
+
+@test "push_reuse_decide: reuse=true when both of two declared dependencies show unchanged" {
+    revision_stub "$c1"
+    classify_stub $'dns_image=false\nworkflow_reuse_scope=false\nutilities=false\nbuild_tools=false'
+
+    run push_reuse_decide "dns_image" "ghcr.io/example/dns:nightly" "$c2" "utilities build_tools"
+
+    [ "$status" -eq 0 ]
+    [ "$output" = "true" ]
+}
+
+@test "push_reuse_decide: an empty dependency-keys argument behaves exactly like omitting it" {
+    revision_stub "$c1"
+    classify_stub $'ntp=false\nworkflow_reuse_scope=false'
+
+    run push_reuse_decide "ntp" "ghcr.io/example/ntp:nightly" "$c2" ""
+
+    [ "$status" -eq 0 ]
+    [ "$output" = "true" ]
 }
 
 @test "push_reuse_decide: requires all three positional arguments" {
