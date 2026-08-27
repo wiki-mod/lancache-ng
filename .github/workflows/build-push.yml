@@ -5855,14 +5855,14 @@ jobs:
 
       # What: reports the scan outcome as a self-closing issue.
       # Why: nightly-status owns this pattern (AG-CODE-013); the
-      #   "-amd64" label keeps this arch's finding from cross-closing
-      #   build-arm64's own report for the same service.
+      #   "-amd64" label keeps this separate from arm64's own
+      #   report; excludes a pure DB-download failure too.
       # From: Issue #1095
       - name: Report Trivy PR-scan status (non-blocking, self-closing issue)
         if: github.event_name == 'pull_request' && steps.build.outcome == 'success'
         uses: ./.github/actions/nightly-status
         with:
-          outcome: ${{ steps.trivy-scan-pushed.outcome == 'failure' && 'failure' || 'success' }}
+          outcome: ${{ (steps.trivy-scan-pushed.outcome == 'failure' && steps.trivy-scan-pushed.outputs.db-unavailable != 'true') && 'failure' || 'success' }}
           label: trivy-finding-${{ matrix.service }}-amd64
           scope: >-
             Trivy HIGH/CRITICAL finding in ${{ matrix.service }} (amd64),
@@ -5871,11 +5871,12 @@ jobs:
           project_pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
 
       - name: Delete GHCR package version pushed by a failed scan
-        # What: deletes the just-pushed digest when its own Trivy scan fails.
-        # Why: the scan targets the digest "Build and push" already
-        # pushed -- otherwise a never-vetted image stays reachable in GHCR.
+        # What: deletes the just-pushed digest on a genuine scan failure.
+        # Why: keeps a never-vetted image out of GHCR; excludes a pure
+        #   DB-download failure (confirmed live 2026-08-27: a good
+        #   image was deleted for no real finding, only a DB miss).
         # From: Issue #1095 | Issue #626 | PR #1443
-        if: ${{ always() && steps.build.outcome == 'success' && steps.trivy-scan-pushed.outcome == 'failure' }}
+        if: ${{ always() && steps.build.outcome == 'success' && steps.trivy-scan-pushed.outcome == 'failure' && steps.trivy-scan-pushed.outputs.db-unavailable != 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GHCR_PACKAGE_DELETE_PAT }}
           SERVICE: ${{ matrix.service }}
@@ -6437,14 +6438,14 @@ jobs:
 
       # What: reports the scan outcome as a self-closing issue.
       # Why: nightly-status owns this pattern (AG-CODE-013); the
-      #   "-arm64" label keeps this arch's finding from cross-closing
-      #   build's own report for the same service.
+      #   "-arm64" label keeps this separate from build's own
+      #   report; excludes a pure DB-download failure too.
       # From: Issue #1095
       - name: Report Trivy PR-scan status (non-blocking, self-closing issue)
         if: github.event_name == 'pull_request' && steps.build.outcome == 'success'
         uses: ./.github/actions/nightly-status
         with:
-          outcome: ${{ steps.trivy-scan-pushed.outcome == 'failure' && 'failure' || 'success' }}
+          outcome: ${{ (steps.trivy-scan-pushed.outcome == 'failure' && steps.trivy-scan-pushed.outputs.db-unavailable != 'true') && 'failure' || 'success' }}
           label: trivy-finding-${{ matrix.service }}-arm64
           scope: >-
             Trivy HIGH/CRITICAL finding in ${{ matrix.service }} (arm64),
@@ -6454,10 +6455,11 @@ jobs:
 
       - name: Delete GHCR package version pushed by a failed scan
         # What: same cleanup as build's own step, for this job's arm64 leg.
-        # Why: scan targets an already-pushed digest -- a failure would
-        # otherwise leave it reachable in GHCR indefinitely.
+        # Why: scan targets an already-pushed digest; excludes a pure
+        #   DB-download failure (confirmed live 2026-08-27: a good
+        #   image was deleted for no real finding, only a DB miss).
         # From: Issue #1095 | Issue #626 | PR #1443
-        if: ${{ always() && steps.build.outcome == 'success' && steps.trivy-scan-pushed.outcome == 'failure' }}
+        if: ${{ always() && steps.build.outcome == 'success' && steps.trivy-scan-pushed.outcome == 'failure' && steps.trivy-scan-pushed.outputs.db-unavailable != 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GHCR_PACKAGE_DELETE_PAT }}
           SERVICE: ${{ matrix.service }}
