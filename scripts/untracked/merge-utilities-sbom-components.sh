@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# What: filters+merges utilities' SBOM by each service's COPY'd packages.
+# Why: each consumer COPY's only a subset of utilities' apk packages;
+# merging the whole SBOM over-reports what a released image ships.
+# Per-service allowlist below; see docs/release-validation-plan.md.
+# From: Issue #1613 | Issue #1095
+set -euo pipefail
+
+usage() {
+  echo "usage: $0 <service> <service-cdx-json> <utilities-cdx-json>" >&2
+}
+
+service="${1:-}"
+service_sbom="${2:-}"
+utilities_sbom="${3:-}"
+
+if [ -z "$service" ] || [ -z "$service_sbom" ] || [ -z "$utilities_sbom" ]; then
+  usage
+  exit 1
+fi
+
+command -v jq >/dev/null 2>&1 || {
+  echo "error: jq is required to merge the utilities SBOM." >&2
+  exit 1
+}
+[ -s "$service_sbom" ] || { echo "error: missing or empty $service_sbom." >&2; exit 1; }
+[ -s "$utilities_sbom" ] || { echo "error: missing or empty $utilities_sbom." >&2; exit 1; }
+
+# apk package names each service's Dockerfile COPY's from utilities-tools.
+case "$service" in
+  proxy | dhcp | dhcp-proxy | dns)
+    allowed_packages="findutils gettext-envsubst libintl lsof ripgrep libgcc pcre2"
+    ;;
+  ntp)
+    allowed_packages="gettext-envsubst libintl"
+    ;;
+  watchdog)
+    allowed_packages="findutils lsof ripgrep libgcc pcre2"
+    ;;
+  ui)
+    allowed_packages="lsof ripgrep libgcc pcre2"
+    ;;
+  *)
+    echo "error: no utilities-package allowlist defined for service '$service'." >&2
+    exit 1
+    ;;
+esac
+
+allowed_json="$(printf '%s\n' $allowed_packages | jq -R . | jq -s .)"
+
+jq -s --argjson allowed "$allowed_json" '
+  .[0] as $svc | .[1] as $utilities |
+  $svc | .components = (
+    (
+      ($svc.components // [])
+      + (($utilities.components // []) | map(select(.name as $n | $allowed | index($n) != null)))
+    )
+    | unique_by(.["bom-ref"] // .purl // (.name + "@" + (.version // "")))
+  )
+' "$service_sbom" "$utilities_sbom"
