@@ -8131,31 +8131,18 @@ jobs:
           timeout: 10m
 
       - name: Merge utilities components into this service's SBOM
-        # What: appends utilities-for-merge.cdx.json's components into this
-        # service's own SBOM, deduped by bom-ref/purl/name.
-        # Why: curl/findutils/gettext-envsubst/lsof/ripgrep are COPY'd from
-        # utilities, not apk-installed here, so this image's own apk-db scan
-        # can no longer see them on its own.
-        # From: Issue #1613
+        # What: merges only the utilities apk packages this service COPY's.
+        # Why: those packages aren't apk-installed here so this image's own
+        # scan can't see them; merging the FULL utilities SBOM over-reports.
+        # From: Issue #1613 | Issue #1095
         if: contains(fromJSON('["proxy", "dhcp", "dhcp-proxy", "dns", "ntp", "ui", "watchdog"]'), matrix.service)
         env:
           SERVICE: ${{ matrix.service }}
         run: |
           set -euo pipefail
-          command -v jq >/dev/null 2>&1 || {
-            echo "::error::jq is required on this runner to merge the utilities SBOM." >&2
-            exit 1
-          }
           asset="${SERVICE}.cdx.json"
-          [ -s "$asset" ] || { echo "::error::Missing $asset before SBOM merge." >&2; exit 1; }
-          [ -s utilities-for-merge.cdx.json ] || { echo "::error::Missing utilities-for-merge.cdx.json before SBOM merge." >&2; exit 1; }
-          jq -s '
-            .[0] as $svc | .[1] as $utilities |
-            $svc | .components = (
-              (($svc.components // []) + ($utilities.components // []))
-              | unique_by(.["bom-ref"] // .purl // (.name + "@" + (.version // "")))
-            )
-          ' "$asset" utilities-for-merge.cdx.json > "${asset}.merged"
+          bash scripts/untracked/merge-utilities-sbom-components.sh \
+            "$SERVICE" "$asset" utilities-for-merge.cdx.json > "${asset}.merged"
           mv "${asset}.merged" "$asset"
 
       - name: Attach SBOM to the release
