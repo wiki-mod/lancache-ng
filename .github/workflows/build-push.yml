@@ -1856,8 +1856,8 @@ jobs:
           #   before; checking its declaration in the action file alone
           #   already missed that regression once.
           # From: Issue #1095
-          grep -E '^[[:space:]]+ccache-redis-file:[[:space:]]+\$\{\{[[:space:]]*steps\.sccache-secret\.outputs\['\''ccache-redis-file'\''\][[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
-            || { echo "::error::Acceleration preflight must receive ccache-redis-file from steps.sccache-secret's own output."; exit 1; }
+          grep -E '^[[:space:]]+ccache-redis-file:[[:space:]]+\$\{\{[[:space:]]*matrix\.service[[:space:]]*==[[:space:]]*.build-tools.[[:space:]]*&&[[:space:]]*steps\[.ccache-redis-secret.\]\.outputs\[.redis-file.\][[:space:]]*\|\|[[:space:]]*steps\.sccache-secret\.outputs\['\''ccache-redis-file'\''\][[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::Acceleration preflight must receive ccache-redis-file from steps.sccache-secret's own output (or build-tools' own ccache-redis-secret)."; exit 1; }
           grep -F 'sccache rustc' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'sccache --dist-status' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'run_logged()' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
