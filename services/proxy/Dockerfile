@@ -24,12 +24,11 @@
 # matching the Debian package exactly.
 #
 # What: source stage for tools copied from the shared utilities image below.
-# Why: pinned by digest (not a mutable tag) so this build is reproducible;
-#   the digest is the `nightly` channel's manifest-list at the time of this
-#   change, resolved manually since consuming this image has no CI-side
-#   digest-resolution wiring (unlike BUILD_TOOLS_IMAGE).
-# From: Issue #1556
-FROM ghcr.io/wiki-mod/lancache-ng/utilities@sha256:718af4cf8f1352cee341e851cecb9821033de9a5c7804c64e1c6217b62c79186 AS utilities-tools
+# Why: uses the mutable `:latest` tag, not a pinned digest -- a deliberate
+#   reversal of the original digest-pin approach; see AG-KD-010 for the
+#   full rationale.
+# From: Issue #1095 | AG-KD-010
+FROM ghcr.io/wiki-mod/lancache-ng/utilities:latest AS utilities-tools
 
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
