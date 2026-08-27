@@ -33,9 +33,13 @@ use lancache_watchdog::status::{self, DiskInfo, ServiceHealth, WatchdogStatus};
 /// (Kea/dnsmasq known-good-config rollback semantics a blind watchdog
 /// restart could race), but as of issue #1437 this crate's main loop is the
 /// sole actor that starts/stops them, reconciling against an operator's
-/// desired-state override -- see `desired_state_targets`/
-/// `reconcile_desired_state` below, which run independently of this
-/// function's own alert-only health reporting for the same two services.
+/// EXPLICIT desired-state override only -- an absent entry is "no opinion",
+/// never treated as "should run" (see `status::DesiredState`'s own doc
+/// comment for why: it would otherwise fight a settings-reconcile that just
+/// deliberately stopped one of these containers mid mode-switch). See
+/// `desired_state_targets`/`reconcile_desired_state` below, which run
+/// independently of this function's own alert-only health reporting for the
+/// same two services.
 ///
 /// Central logging runs fluent-bit and syslog-ng in one `services/syslog/`
 /// container named by `CONTAINER_SYSLOG`. Its own dual-process healthcheck
@@ -92,7 +96,7 @@ fn desired_state_targets(
 
 // What: starts/stops one service to match its desired state
 // Why: only acts when actual and desired truly differ
-// Why: None from is_running means skip, never assume stopped
+// Why: no entry means no opinion, never defaults to "should run"
 // From: Issue #1437
 async fn reconcile_one(
     client: &DockerProxyClient,
@@ -102,9 +106,15 @@ async fn reconcile_one(
     timeout: Option<Duration>,
     action_timeout: Option<Duration>,
 ) {
-    let should_run = desired
-        .map(status::DesiredRunState::should_run)
-        .unwrap_or(true);
+    // No entry in desired-state.json is not "should run": that would make
+    // watchdog start a container settings-reconcile just stopped on purpose
+    // (dhcp_mode/ntp_enabled are resolved once at watchdog startup, so a
+    // mode switch can leave a stale target here for several minutes). Only
+    // an explicit dock action justifies watchdog taking either action.
+    let Some(desired) = desired else {
+        return;
+    };
+    let should_run = desired.should_run();
     let Some(running) = client.is_running(container_name, timeout).await else {
         return;
     };
@@ -572,6 +582,8 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::net::TcpListener;
+    use tokio::time::timeout;
 
     #[test]
     // With every optional profile disabled, only the one always-on
@@ -681,6 +693,33 @@ mod tests {
                 ("dhcp", "lancache-dhcp-ci1".to_string()),
                 ("ntp", "lancache-ntp-ci1".to_string()),
             ]
+        );
+    }
+
+    // What: absent desired-state entry must not touch the docker proxy
+    // Why: prevents watchdog fighting an in-progress settings-reconcile
+    // From: Issue #1437
+    #[tokio::test]
+    async fn reconcile_one_takes_no_action_when_desired_state_is_absent() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind an ephemeral local port");
+        let addr = listener
+            .local_addr()
+            .expect("listener must have a local address");
+        let client = DockerProxyClient::new(format!("http://{addr}"))
+            .expect("valid base url for an ephemeral loopback port");
+
+        reconcile_one(&client, "dhcp", "lancache-dhcp", None, None, None).await;
+
+        // No entry means "no opinion" (see status::DesiredState's doc
+        // comment): reconcile_one must return before ever calling
+        // is_running/start/stop, so no connection to the proxy is ever
+        // attempted. A short timeout on accept() proves that absence.
+        let accept_result = timeout(Duration::from_millis(200), listener.accept()).await;
+        assert!(
+            accept_result.is_err(),
+            "reconcile_one must not contact the docker proxy when desired state is absent"
         );
     }
 }

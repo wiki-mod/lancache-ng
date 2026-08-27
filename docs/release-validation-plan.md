@@ -548,6 +548,31 @@ propagation path end-to-end via a real `dig`, both for creation and removal.
   item (3) above at the config-generation level; a live HAProxy-level negative
   control against a real running `docker-socket-proxy` container is the remaining
   Part B gap this bullet names.
+- **DHCP/NTP dock start/stop controls (added issue #1437, maintainer-directed
+  watchdog-as-actor architecture):** the dock's Start/Stop buttons for the `dhcp`
+  and `ntp` rows POST to `/api/services/{service}/desired-state`, which writes
+  `desired-state.json` (`services/ui/src/routes/setup.rs`'s
+  `set_service_desired_state`); watchdog's own main loop (not the UI, not
+  `dhcp.rs`/`ntp.rs`'s existing settings-reconcile paths) is the sole actor that
+  reads that file and calls `start`/`stop` through `docker-socket-proxy`'s
+  existing `safe_dhcp_action`/`safe_ntp_action` allowlist entries (no new grant
+  was added; verified those ACLs are method+path-based, not caller-based). Real
+  Part B proof for this specific capability should confirm: (1) clicking Stop on
+  a running `lancache-dhcp`/`lancache-dhcp-proxy`/`lancache-ntp` container
+  produces a genuine `docker inspect --format '{{.State.Status}}'` transition to
+  `exited` within one watchdog `CHECK_INTERVAL`, not just a `204` from the
+  route; (2) clicking Start reverses it with a genuinely later `StartedAt`; (3)
+  with no dock action ever taken (no `desired-state.json`, or a key absent),
+  watchdog never starts or stops either service on its own -- confirming
+  `reconcile_one`'s "absent means no opinion" contract holds against the real
+  proxy, not only the unit-test double. **Not yet run against a real running
+  stack as of this PR** (tracked as a live-stack follow-up, no issue filed yet):
+  this is genuinely new functionality with no prior Part A/B coverage at all
+  (Rule-Ref: AG-VAL-033(c)) -- unit/integration tests in `services/watchdog` and
+  `services/ui` cover the reconcile logic and the write/read file contract in
+  isolation (see those crates' test suites), but no live-stack pass has yet
+  exercised a real `docker-socket-proxy` start/stop call for `dhcp`/`ntp`
+  triggered from the actual dock UI.
 
 ### 7. Watchdog — auto-restart coverage
 
@@ -559,6 +584,16 @@ propagation path end-to-end via a real `dig`, both for creation and removal.
   `ui`/`dhcp`, no meaningful healthcheck defined for `dhcp-proxy`/`netdata`, no fixed
   `container_name` for `syslog`). Do not treat an unmonitored service in this list as
   a regression — check `docs/architecture-ng.md`'s table before filing anything.
+  **This table is about health-triggered restart and remains unchanged by issue
+  #1437**: `dhcp`/`dhcp-proxy`/`ntp` are still never *restarted* on an unhealthy
+  reading. Issue #1437 adds a separate, narrower mechanism -- an explicit
+  operator start/stop via the dock, reconciled against `desired-state.json` (see
+  Part B's "DHCP/NTP dock start/stop controls" row above) -- that only fires on
+  an explicit dock action, never as a reaction to health state. The two
+  mechanisms share the container but not the trigger; a Part B pass should
+  confirm they don't interact (e.g. stopping `dhcp` via the dock must not
+  register as a health-check failure the restart-capable path would otherwise
+  act on, since `dhcp` was never in the restart-capable set to begin with).
 - For `nats` (the only single-process monitored service), repeat the hung-not-crashed
   proof pattern from Part A's NATS-monitoring row (external `SIGSTOP`, not an
   in-container one) and confirm a genuine restart (new `StartedAt`).

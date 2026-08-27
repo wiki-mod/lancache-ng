@@ -20,8 +20,11 @@
 //!   iteration (see `main.rs`'s `reconcile_desired_state`). Same tolerant-
 //!   reader philosophy as `read_status`-equivalent code elsewhere in this
 //!   project: a missing or malformed file must never stall or crash the
-//!   main loop, and defaults to "running" so an install with no such file
-//!   yet (or one that predates this feature) behaves exactly as before.
+//!   main loop, and collapses to "no entries", which `reconcile_one`
+//!   treats as "no opinion, take no action" -- not "should run". An install
+//!   with no such file yet (or one that predates this feature) therefore
+//!   behaves exactly as before: watchdog never starts or stops dhcp/ntp on
+//!   its own initiative, only when the dock has explicitly said so.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -98,12 +101,20 @@ impl DesiredRunState {
 }
 
 /// Sparse override map: an absent key (missing file, or a key the operator
-/// never touched) means "running" -- the always-on behavior every install
-/// already had before this file could exist at all. Only `dhcp` and `ntp`
-/// are reconciled today (see `main.rs`'s `reconcile_desired_state`); `dhcp`
-/// covers whichever of Kea/dnsmasq is actually provisioned, resolved via
-/// `config::dhcp_alert_container`, so this file is keyed by stable service
-/// concept rather than by the container name that happens to be active.
+/// never touched) means "no opinion" -- `reconcile_one` takes no start/stop
+/// action at all for that service, the always-off-by-default behavior every
+/// install already had before this file could exist. Deliberately NOT
+/// treated as "should run": `dhcp_mode`/`ntp_enabled` are resolved once at
+/// watchdog startup, so a mode switch in progress (settings-reconcile
+/// stopping the old container) can leave a stale target here for several
+/// minutes -- defaulting an absent entry to "running" would make watchdog
+/// fight that in-progress switch and restart what was just deliberately
+/// stopped. Only an explicit dock action justifies either action. Only
+/// `dhcp` and `ntp` are reconciled today (see `main.rs`'s
+/// `reconcile_desired_state`); `dhcp` covers whichever of Kea/dnsmasq is
+/// actually provisioned, resolved via `config::dhcp_alert_container`, so
+/// this file is keyed by stable service concept rather than by the
+/// container name that happens to be active.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct DesiredState {
     #[serde(default)]
@@ -114,11 +125,12 @@ pub struct DesiredState {
 
 /// Tolerant reader for `desired-state.json`, called fresh on every main-loop
 /// iteration. Every failure mode (missing file, unreadable, malformed JSON)
-/// collapses to `DesiredState::default()` (both fields `None`, i.e.
-/// "running") rather than propagating an error -- a transient read glitch or
-/// an install that predates this feature must never stop or crash the main
-/// loop, mirroring `services/ui/src/watchdog_status.rs`'s own
-/// missing-file-is-a-normal-state philosophy for the reverse-direction file.
+/// collapses to `DesiredState::default()` (both fields `None`, i.e. "no
+/// opinion, take no action" -- see `DesiredState`'s own doc comment) rather
+/// than propagating an error -- a transient read glitch or an install that
+/// predates this feature must never stop or crash the main loop, mirroring
+/// `services/ui/src/watchdog_status.rs`'s own missing-file-is-a-normal-state
+/// philosophy for the reverse-direction file.
 pub fn read_desired_state(path: &Path) -> DesiredState {
     let content = match fs::read_to_string(path) {
         Ok(c) => c,
@@ -337,21 +349,22 @@ mod tests {
     }
 
     // A never-written desired-state file (no install has ever used a dock
-    // control, or this install predates the feature) must resolve to
-    // "running" for every service -- the same always-on behavior every
-    // install already had before this file could exist.
+    // control, or this install predates the feature) must resolve to "no
+    // opinion" for every service -- reconcile_one then takes no start/stop
+    // action at all, the same behavior every install already had before
+    // this file could exist.
     #[test]
-    fn read_desired_state_missing_file_defaults_to_running() {
+    fn read_desired_state_missing_file_defaults_to_no_action() {
         let path = desired_state_temp_path("missing");
         let state = read_desired_state(&path);
         assert!(state.dhcp.is_none());
         assert!(state.ntp.is_none());
     }
 
-    // A corrupted file must fail closed to "running" (the safe default),
+    // A corrupted file must fail closed to "no opinion" (the safe default),
     // not stop the main loop from reconciling other services.
     #[test]
-    fn read_desired_state_malformed_json_defaults_to_running() {
+    fn read_desired_state_malformed_json_defaults_to_no_action() {
         let path = desired_state_temp_path("malformed");
         fs::write(&path, "{ not valid json").unwrap();
         let state = read_desired_state(&path);
