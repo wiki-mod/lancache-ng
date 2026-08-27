@@ -9,12 +9,9 @@ description: >-
 
 # What: exists because a YAML anchor/alias cannot serve this role.
 # Why: GitHub's composite-action manifest parser rejects anchors/aliases
-#   outright ("Anchors are not currently supported") -- confirmed live,
-#   PR #1665's `&anchor`/`*alias` attempt broke every build/build-arm64
-#   job for every service (issue #1095). A local `uses: ./...` reference
-#   has no such restriction, so this thin pass-through wrapper is the
-#   pin's one real maintenance point instead.
-# From: Issue #1095
+#   outright ("Anchors are not currently supported"); a local
+#   `uses: ./...` reference has no such restriction.
+# From: Issue #1095 | PR #1665
 inputs:
   builder:
     required: false

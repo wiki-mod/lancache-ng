@@ -38,7 +38,6 @@ runs:
       with:
         subject-name: ${{ inputs.subject-name }}
         subject-digest: ${{ inputs.subject-digest }}
-        push-to-registry: true
 
     - name: Wait before retry 1
       if: steps.attempt1.outcome == 'failure'
@@ -60,7 +59,6 @@ runs:
       with:
         subject-name: ${{ inputs.subject-name }}
         subject-digest: ${{ inputs.subject-digest }}
-        push-to-registry: true
 
     - name: Wait before retry 2
       if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure'
@@ -82,7 +80,6 @@ runs:
       with:
         subject-name: ${{ inputs.subject-name }}
         subject-digest: ${{ inputs.subject-digest }}
-        push-to-registry: true
 
     - name: Wait before retry 3
       if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure' && steps.attempt3.outcome == 'failure'
@@ -104,7 +101,6 @@ runs:
       with:
         subject-name: ${{ inputs.subject-name }}
         subject-digest: ${{ inputs.subject-digest }}
-        push-to-registry: true
 
     # continue-on-error on every attempt above means none of their failures
     # fail this composite action by itself -- this step surfaces the real
