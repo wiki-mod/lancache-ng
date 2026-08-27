@@ -122,10 +122,18 @@ if [ "${OUTCOME}" = "success" ]; then
 fi
 
 # What: OUTCOME is a failure; ensures the label exists, reuses/opens issue.
-# Why: gh label create erroring on an already-existing label is harmless.
+# Why: gh label create erroring on an already-existing label is harmless
+#   (the `|| true`); the 100-char truncation below is not that same kind
+#   of "harmless swallow" -- GitHub's label description field has a hard
+#   100-character limit, and an over-length description would otherwise
+#   make gh label create fail for a reason unrelated to "label already
+#   exists," get masked by the same `|| true`, and silently leave the
+#   label undescribed (AG-INT-002: don't let a real failure hide behind
+#   an intentionally-tolerated one).
 # From: Issue #1095
+label_description="Recurring, self-closing tracking issue: ${SCOPE}"
 run gh label create "${LABEL}" --repo "${REPO}" --color b60205 \
-  --description "Recurring, self-closing tracking issue: ${SCOPE}" 2>/dev/null || true
+  --description "${label_description:0:100}" 2>/dev/null || true
 
 detail="${SCOPE} failed in ${RUN_URL}"
 if [ -n "${FAILED_JOBS}" ]; then

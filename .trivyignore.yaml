@@ -27,9 +27,11 @@ vulnerabilities:
 
       Re-verified 2026-08-27 (not yet removable): every first-party
       GHCR `:nightly` tag checked (`proxy`/`dhcp`/`ntp`/`dhcp-proxy`/
-      `dns`/`syslog`/`watchdog`/`utilities`/`ui`/`build-tools`; 10 of
-      11 -- `netdata` denied a pull under this image path, not
-      independently resolved) has a `docker inspect` `.Created`
+      `dns`/`syslog`/`watchdog`/`utilities`/`ui`/`build-tools`; `netdata`
+      excluded -- `gh api users/wiki-mod/packages?package_type=container`
+      confirms `lancache-ng/netdata` is not among this org's published
+      GHCR packages, so it isn't a first-party image to check here) has
+      a `docker inspect` `.Created`
       timestamp between 2026-08-10 and 2026-08-16, all before the PR
       #1680 merge -- no rebuild has propagated the fix yet. A live
       Trivy scan of `ui:nightly` (Alpine 3.24.1) without `--ignore-

@@ -507,7 +507,7 @@ jobs:
           steps.trivy-fork-check.outputs.is-fork == 'false'
         uses: ./.github/actions/nightly-status
         with:
-          outcome: ${{ steps.trivy-scan.outcome == 'success' && 'success' || 'failure' }}
+          outcome: ${{ steps.trivy-scan.outcome == 'failure' && 'failure' || 'success' }}
           scope: >-
             Trivy HIGH/CRITICAL finding in tools/build-tools (amd64),
             not covered by .trivyignore.yaml
@@ -784,7 +784,7 @@ jobs:
           steps.trivy-fork-check.outputs.is-fork == 'false'
         uses: ./.github/actions/nightly-status
         with:
-          outcome: ${{ steps.trivy-scan.outcome == 'success' && 'success' || 'failure' }}
+          outcome: ${{ steps.trivy-scan.outcome == 'failure' && 'failure' || 'success' }}
           scope: >-
             Trivy HIGH/CRITICAL finding in tools/build-tools (arm64),
             not covered by .trivyignore.yaml
