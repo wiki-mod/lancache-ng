@@ -475,10 +475,10 @@ by configuring which DNS server IP they point to:
   install`, the same mechanism already used for `sccache`; all four Go-built tools
   (`actionlint`/`docker`/`docker-buildx`/`docker-compose`) build clean against `golang:alpine`
   with no musl-specific change. The one confirmed, unresolved gap: no Alpine package provides
-  `dhclient`/`isc-dhcp-client` (only BusyBox's unrelated `udhcpc` exists), affecting exactly two
-  CI simulation scripts that perform a real DORA exchange against Kea; `dhclient` was moved from a
+  `dhclient`/`isc-dhcp-client` (only BusyBox's unrelated `udhcpc` exists), affecting three
+  CI simulation scripts that invoke dhclient against Kea; `dhclient` was moved from a
   baseline to an opt-in (`EXTRA_REQUIRED_TOOLS`) smoke-test requirement so this gap fails closed
-  only for the two real consumers, not for every other caller of this image. A real Trivy scan
+  only for those three real consumers, not for every other caller of this image. A real Trivy scan
   (`--severity HIGH,CRITICAL`, matching `build-tools.yml`'s own scan parameters) found Alpine's
   `os-pkgs` (apk-installed package) surface at 0 HIGH/CRITICAL — the same result as a real,
   same-base-commit Debian scan — meaning this is **CVE-surface parity with the current Debian

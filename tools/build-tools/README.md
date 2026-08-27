@@ -82,10 +82,10 @@ Naming differences from the Debian package list (real, not blockers):
 Real gap, no apk equivalent at all:
 - **`dhclient`/isc-dhcp-client**: no Alpine package provides it. Only `busybox-extras`' `udhcpc`
   (a different, independent DHCP client implementation) exists. Affects
-  `scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh` and
-  `syslog-forwarding-simulation.sh`, which currently perform a real DORA exchange against Kea via
+  `scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh`,
+  `syslog-forwarding-simulation.sh`, and `dhcp-kea-ctrl-agent-mutation-simulation.sh`, which invoke
   real ISC dhclient behavior. Does not affect `bats tests/bats`/`shellspec tests/shellspec` (Phase
-  3 scope). Left as an open item: either adapt those two scripts to `udhcpc` (behavior not yet
+  3 scope). Left as an open item: either adapt those three scripts to `udhcpc` (behavior not yet
   verified as equivalent) or another approach, pending a decision this evaluation does not make.
 
 ## Prebuilt-binary vs source-build ABI findings (Phase 2 point 4)
