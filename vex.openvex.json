@@ -1,10 +1,10 @@
 {
   "@context": "https://openvex.dev/ns/v0.2.0",
-  "@id": "https://github.com/wiki-mod/lancache-ng/vex/lancache-ng-2026-08-27T07:27:28Z",
+  "@id": "https://github.com/wiki-mod/lancache-ng/vex/lancache-ng-2026-08-27T08:35:30Z",
   "author": "lancache-ng release automation (https://github.com/wiki-mod/lancache-ng)",
   "statements": [
     {
-      "action_statement": "What: Accepts CVE-2026-14456 (OpenSSL QUIC-server unbounded-memory- growth DoS) as tracked risk for `libssl3`/`libcrypto3` across every Alpine-based first-party image (transitive dependency of `apk-tools` itself, present regardless of any image's own TLS/QUIC usage). Why: Time-boxed maintainer-authorized exception while the apk-upgrade cache-bust fix propagates through every affected image's next rebuild; no `paths:` scoping applies since Trivy's Alpine os-pkgs finding class carries no PkgPath. None of this project's services run a QUIC server. From: Issue #1095, PR #1685 (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-09-30 and must be re-reviewed on or before that date.)",
+      "action_statement": "What: Accepts CVE-2026-14456 (OpenSSL QUIC-server unbounded-memory- growth DoS) as tracked risk for `libssl3`/`libcrypto3` across every Alpine-based first-party image (transitive dependency of `apk-tools` itself, present regardless of any image's own TLS/QUIC usage). Why: Time-boxed maintainer-authorized exception while the apk-upgrade cache-bust fix (PR #1680, merged 2026-08-26T12:01:29Z) propagates through every affected image's next rebuild; no `paths:` scoping applies since Trivy's Alpine os-pkgs finding class carries no PkgPath. None of this project's services run a QUIC server. Re-verified 2026-08-27 (not yet removable): every first-party GHCR `:nightly` tag checked (`proxy`/`dhcp`/`ntp`/`dhcp-proxy`/ `dns`/`syslog`/`watchdog`/`utilities`/`ui`/`build-tools`; `netdata` excluded -- `gh api users/wiki-mod/packages?package_type=container` confirms `lancache-ng/netdata` is not among this org's published GHCR packages, so it isn't a first-party image to check here) has a `docker inspect` `.Created` timestamp between 2026-08-10 and 2026-08-16, all before the PR Trivy scan of `ui:nightly` (Alpine 3.24.1) without `--ignore- unfixed`/`--trivyignores` confirms the finding is real and fixed upstream but not yet in the built image: `CVE-2026-14456` `libssl3`/`libcrypto3`, `FixedVersion: 3.5.8-r0`. Re-check after the next rebuild of all listed images. Scope correction (found 2026-08-27, not previously documented): since this entry has no `paths:` key, it is not actually Alpine-only in effect -- a same-CVE-ID live finding also exists on `tools/build-tools`'s Debian `openssl`/`libssl3t64`/ `openssl-provider-legacy`/`libssl-dev` packages (`FixedVersion: 3.5.7-1~deb13u2`, confirmed via a live Trivy scan of `build-tools:nightly` without `--ignore-unfixed`/`--trivyignores`) and is being suppressed by this same entry as a side effect. PR `tools/build-tools`'s Debian `apt`-upgrade path has an equivalent staleness problem is unverified and out of scope for this re-review -- flagged for the maintainer as a follow-up, not resolved here. From: Issue #1095, PR #1685 (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-09-30 and must be re-reviewed on or before that date.)",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -12,13 +12,13 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-14456"
       }
     },
     {
-      "impact_statement": "What: Suppresses CVE-2026-34040 (a Docker daemon authorization-plugin bypass) for docker-compose/docker-buildx; anchor entry for the docker/docker client-library-only group (CVE-2026-41567/42306 below share this background). Why: Vulnerable code not present -- the fix is daemon-side pkg/authorization middleware; these binaries embed github.com/docker/docker only as an API client library and never compile it. No fixed release exists at the pinned v28.5.2+incompatible module path (verified 2026-08-14 against both projects' vendored modules). From: Issue #1304, PR #1548 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Suppresses CVE-2026-34040 (a Docker daemon authorization-plugin bypass) for docker-compose/docker-buildx; anchor entry for the docker/docker client-library-only group (CVE-2026-41567/42306 below share this background). Why: Vulnerable code not present -- the fix is daemon-side pkg/authorization middleware; these binaries embed github.com/docker/docker only as an API client library and never compile it. No fixed release exists at the pinned v28.5.2+incompatible module path (verified 2026-08-14 against both projects' vendored modules; re-checked 2026-08-27 that DOCKER_COMPOSE_VERSION/DOCKER_BUILDX_VERSION in tools/build-tools/Dockerfile are unchanged since that verification -- the vendored-module content itself was not re-derived this pass, since that requires a build). From: Issue #1304, PR #1548 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -34,7 +34,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-34040"
       }
@@ -56,7 +56,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-41567"
       }
@@ -78,13 +78,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-42306"
       }
     },
     {
-      "action_statement": "What: Accepts CVE-2026-12064 (an SSH host-verification bypass via schemeless SFTP/SCP URLs) as tracked risk for `libcurl4t64` in `tools/build-tools`. Anchor entry for this file's curl group (CVE-2026-8286/8458/8927/8932/9079/9080/9545/10536 below). Why: Trivy reports `Status: affected`, `FixedVersion: None`; no `paths:` scoping applies since Trivy's Debian os-pkgs finding class carries no `PkgPath`. This file's from-source curl/git build purges Debian's `curl`/`libcurl3t64-gnutls` entirely; `libcurl4t64` remains solely as `cmake`'s package dependency (`apt-get autoremove` strips cmake once it's purged) and drives only already-vendored C/C++ builds (e.g. aws-lc-sys/BoringSSL for services/ui), never a network fetch. Verified via a real Trivy scan of the current image (2026-08-24, lancache-229): every finding in this group attributes solely to `libcurl4t64`; `curl`/ `libcurl3t64-gnutls` no longer appear at all. From: Issue #1304, PR #1661 (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-09-30 and must be re-reviewed on or before that date.)",
+      "action_statement": "What: Accepts CVE-2026-12064 (an SSH host-verification bypass via schemeless SFTP/SCP URLs) as tracked risk for `libcurl4t64` in `tools/build-tools`. Anchor entry for this file's curl group (CVE-2026-8286/8458/8927/8932/9079/9080/9545/10536 below). Why: Trivy reports `Status: affected`, `FixedVersion: None`; no `paths:` scoping applies since Trivy's Debian os-pkgs finding class carries no `PkgPath`. This file's from-source curl/git build purges Debian's `curl`/`libcurl3t64-gnutls` entirely; `libcurl4t64` remains solely as `cmake`'s package dependency (`apt-get autoremove` strips cmake once it's purged) and drives only already-vendored C/C++ builds (e.g. aws-lc-sys/BoringSSL for services/ui), never a network fetch. Verified via a real Trivy scan of the current image (2026-08-24, lancache-229): every finding in this group attributes solely to `libcurl4t64`; `curl`/ `libcurl3t64-gnutls` no longer appear at all. Debian trixie fix status individually re-checked against security-tracker.debian.org on 2026-08-27 for all 9 IDs in this group, including CVE-2026-8458/10536 added by PR #1661: all still `vulnerable`/`no-dsa` at curl 8.14.1-2+deb13u4 -- a same-day batch source-package-tracker query misreported CVE-2026-9079/9080 as \"fixed\"; each CVE's own tracker page was re-fetched individually and both confirm `vulnerable`. Caveat: this session's own live Trivy scans (elsewhere in this audit) predate the libcurl4t64-only purge above (2026-08-24 per that note, checked 2026-08-27) -- not re-run against the post-purge image; the Debian trixie fix status itself is unaffected by which package Trivy currently attributes the finding to. From: Issue #1304, PR #1661 (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-09-30 and must be re-reviewed on or before that date.)",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -92,7 +92,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-12064"
       }
@@ -106,7 +106,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-8286"
       }
@@ -120,7 +120,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-8458"
       }
@@ -134,7 +134,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-8927"
       }
@@ -148,7 +148,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-8932"
       }
@@ -162,7 +162,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-9079"
       }
@@ -176,7 +176,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-9080"
       }
@@ -190,7 +190,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-9545"
       }
@@ -204,13 +204,13 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-10536"
       }
     },
     {
-      "impact_statement": "What: Marks CVE-2011-4116 (`perl-base`'s `File::Temp` module creating temporary files insecurely) as not exploitable in `services/ui` and `tools/build-tools`. Anchor entry for a 30-ID group spanning the Debian `perl-base`, util-linux, ncurses, `gzip`, and `libacl1` package groups. Why: All 30 are `Priority: required`/`Essential: yes` Debian packages or their hard link-time dependents, so none can be purged; \"not exploitable\" is the only available disposition short of migrating the image off Debian. Neither image invokes Perl at all (grep-confirmed; re-verified 2026-08-19 against the current tree). From: Issue #815, PR #1454, Issue #1598 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Marks CVE-2011-4116 (`perl-base`'s `File::Temp` module creating temporary files insecurely) as not exploitable in `services/ui` and `tools/build-tools`. Anchor entry for a 30-ID group spanning the Debian `perl-base`, util-linux, ncurses, `gzip`, and `libacl1` package groups. Why: All 30 are `Priority: required`/`Essential: yes` Debian packages or their hard link-time dependents, so none can be purged; \"not exploitable\" is the only available disposition short of migrating the image off Debian. Neither image invokes Perl at all (grep-confirmed; re-verified 2026-08-19 against the current tree; re-confirmed 2026-08-27 via a fresh grep against origin/current_dev: zero `perl`/`setfacl`/`getfacl`/`chfn`/`chsh`/`gzexe`/`mount` invocations in `services/ui`/`tools/build-tools`; no ncurses-linked crate in `services/ui/Cargo.toml`/`Cargo.lock`; `services/ui`'s privilege drop uses `setpriv`, confirmed live in `services/ui/docker-entrypoint.sh`). Applicability flag (found 2026-08-27, not resolved here): `services/ui/Dockerfile`'s final stage is `FROM mirror.gcr.io/library/alpine:3.24`, and every Trivy scan of a first-party service in this repo's CI (`trivy-scan-exact-digest` in build-push.yml/build-push-hosted-fallback.yml) targets the exact pushed final-stage digest, never an intermediate build stage. A live scan of `ui:nightly` confirms Trivy detects it as `alpine 3.24.1`, not Debian -- none of this 30-ID group's Debian package names can appear in that scan's `os-pkgs` findings at all. This group may therefore no longer need `services/ui` in its applicability claim (only `tools/build-tools`, confirmed Debian and confirmed still matching several of these IDs live, e.g. CVE-2026-13221/CVE-2026-8376/CVE-2026-42496/CVE-2026-42497/ CVE-2026-9538/CVE-2026-54369/CVE-2025-69720/CVE-2026-41992 in a 2026-08-27 full-severity, no-ignorefile scan of `build-tools: nightly`) -- not changed in this pass since it doesn't affect whether these 30 entries stay or go, flagged for the maintainer to confirm/correct the wording. From: Issue #815, PR #1454, Issue #1598 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -219,7 +219,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2011-4116"
       }
@@ -234,7 +234,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2025-15649"
       }
@@ -249,7 +249,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-12087"
       }
@@ -264,7 +264,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-13221"
       }
@@ -279,7 +279,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-42496"
       }
@@ -294,7 +294,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-42497"
       }
@@ -309,7 +309,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-48959"
       }
@@ -324,7 +324,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-48961"
       }
@@ -339,7 +339,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-48962"
       }
@@ -354,7 +354,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-57432"
       }
@@ -369,7 +369,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-57433"
       }
@@ -384,7 +384,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-7010"
       }
@@ -399,7 +399,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-7017"
       }
@@ -414,7 +414,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-8376"
       }
@@ -429,7 +429,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-9538"
       }
@@ -444,7 +444,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2022-0563"
       }
@@ -459,7 +459,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2025-14104"
       }
@@ -474,7 +474,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-13595"
       }
@@ -489,7 +489,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-27456"
       }
@@ -504,7 +504,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-3184"
       }
@@ -519,7 +519,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-53612"
       }
@@ -534,7 +534,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-53613"
       }
@@ -549,7 +549,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-53614"
       }
@@ -564,7 +564,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-53615"
       }
@@ -579,7 +579,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2025-6141"
       }
@@ -594,7 +594,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2025-69720"
       }
@@ -609,7 +609,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-54369"
       }
@@ -624,13 +624,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-54370"
       }
     },
     {
-      "action_statement": "What: Accepts CVE-2026-41991 (an arbitrary-file-overwrite via insecure temporary-file handling in the `gzexe` utility) as tracked risk for `tools/build-tools` only; `services/ui` is unaffected. Anchor entry for the 2-ID gzip group (this and CVE-2026-41992 below) -- the only ID in this file's 30-ID batch where the two images' exploitability genuinely differs. Why: `services/ui` never invokes `gzip`/`gzexe` (grep-confirmed). Trivy's finding applies per-CVE-ID repo-wide with no per-image `paths:` scoping for Debian os-pkgs, so the disposition reflects the more exploitable image: `tools/build-tools` unpacks pinned, checksum-verified release tarballs via `gzip`, never invoking `gzexe` itself or on attacker-supplied input. No `trixie`/ `trixie-backports` fix exists yet (Debian security-tracker: only `sid` has 1.14-1; re-verified 2026-08-19). From: Issue #815, PR #1454, Issue #1598 (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-09-30 and must be re-reviewed on or before that date.)",
+      "action_statement": "What: Accepts CVE-2026-41991 (an arbitrary-file-overwrite via insecure temporary-file handling in the `gzexe` utility) as tracked risk for `tools/build-tools` only; `services/ui` is unaffected. Anchor entry for the 2-ID gzip group (this and CVE-2026-41992 below) -- the only ID in this file's 30-ID batch where the two images' exploitability genuinely differs. Why: `services/ui` never invokes `gzip`/`gzexe` (grep-confirmed). Trivy's finding applies per-CVE-ID repo-wide with no per-image `paths:` scoping for Debian os-pkgs, so the disposition reflects the more exploitable image: `tools/build-tools` unpacks pinned, checksum-verified release tarballs via `gzip`, never invoking `gzexe` itself or on attacker-supplied input. No `trixie`/ `trixie-backports` fix exists yet (Debian security-tracker: only `sid` has 1.14-1; re-verified 2026-08-19; re-confirmed 2026-08-27 against security-tracker.debian.org: trixie gzip 1.13-1 remains `vulnerable` for both CVE-2026-41991 and CVE-2026-41992, fix only in sid 1.14-1). From: Issue #815, PR #1454, Issue #1598 (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-09-30 and must be re-reviewed on or before that date.)",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -638,7 +638,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-41991"
       }
@@ -652,12 +652,12 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-27T07:27:28Z",
+      "timestamp": "2026-08-27T08:35:30Z",
       "vulnerability": {
         "name": "CVE-2026-41992"
       }
     }
   ],
-  "timestamp": "2026-08-27T07:27:28Z",
+  "timestamp": "2026-08-27T08:35:30Z",
   "version": 1
 }
