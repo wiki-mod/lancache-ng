@@ -83,16 +83,17 @@ inputs:
     required: false
     default: ""
 outputs:
-  db-unavailable:
+  db-status:
     description: >-
-      "true" only when the final attempt wrote no report AND no DB file
-      exists in cache-dir (the DB itself never downloaded) -- never
-      "true" for a genuine finding (which always writes a report) or
-      for any other pre-report error while a DB is already present
-      (target-image pull/auth, config, scanner crash). "false" on
-      overall success too. See "Determine DB-unavailable vs genuine
-      finding" step below.
-    value: ${{ steps.db-unavailable.outputs.value }}
+      Three-valued, never a boolean: "unavailable" when the final attempt
+      wrote no report AND no DB file exists (the DB never downloaded);
+      "available" when a report was written (genuine finding) or a DB was
+      present (some other pre-report error), and on overall success;
+      "unknown" when this action did not reach its own determination step
+      at all (timeout, cancellation, output-propagation failure). A
+      consumer must treat "unknown" as NOT-RUN -- never as recovery, never
+      as a finding. See "Determine DB status" step below.
+    value: ${{ steps.db-status.outputs.value }}
 runs:
   using: composite
   steps:
@@ -136,7 +137,11 @@ runs:
         set -euo pipefail
         attempt="$1"
         report="$2"
-        cache_dir="$3"
+        cache_dir="${3:-}"
+        # Empty cache-dir means trivy-action used its own default.
+        if [ -z "$cache_dir" ]; then
+          cache_dir="${HOME}/.cache/trivy"
+        fi
         if [ -s "$report" ]; then
           echo "retryable=false" >> "$GITHUB_OUTPUT"
           echo "::warning::Trivy attempt $attempt failed but its report ('$report') was written -- a genuine finding or non-download error, not retryable." >&2
@@ -425,19 +430,17 @@ runs:
         echo "::error::All Trivy scan attempts for image-ref '${{ inputs.image-ref }}' failed." >&2
         exit 1
 
-    # What: exposes overall DB-unavailability as this output.
-    # Why: classify4's own retryable value alone decides it once
-    #   reached; if classify4 never ran, an earlier classify already
-    #   found a real report, so the empty case means "not unavailable".
+    # What: emits db-status as unavailable or available.
+    # Why: a consumer must tell "not run" from "recovered".
     # From: Issue #1095
-    - name: Determine DB-unavailable vs genuine finding
-      id: db-unavailable
+    - name: Determine DB status
+      id: db-status
       if: always()
       shell: bash
       run: |
         set -euo pipefail
         if [[ "${{ steps.classify4.outputs.retryable }}" == "true" ]]; then
-          echo "value=true" >> "$GITHUB_OUTPUT"
+          echo "value=unavailable" >> "$GITHUB_OUTPUT"
         else
-          echo "value=false" >> "$GITHUB_OUTPUT"
+          echo "value=available" >> "$GITHUB_OUTPUT"
         fi

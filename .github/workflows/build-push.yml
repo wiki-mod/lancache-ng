@@ -5849,16 +5849,31 @@ jobs:
           cache-dir: ${{ steps.trivy-cache.outputs.dir }}
           cleanup-cache: ${{ steps.trivy-cache.outputs.ephemeral == 'true' && 'true' || 'false' }}
 
+      # What: fails the job when db-status came back neither value.
+      # Why: an unknown status must never be read as a clean scan.
+      # From: Issue #1095
+      - name: Require a determined Trivy DB status (amd64)
+        if: >-
+          github.event_name == 'pull_request' && steps.build.outcome == 'success' &&
+          steps.trivy-scan-pushed.outputs.db-status != 'unavailable' &&
+          steps.trivy-scan-pushed.outputs.db-status != 'available'
+        run: |
+          echo "::error::Trivy db-status for ${{ matrix.service }} (amd64) is '${{ steps.trivy-scan-pushed.outputs.db-status }}' -- the scan never reached its own determination step (timeout, cancellation, or output-propagation failure). Treating this as NOT-RUN: no status report is filed and no image is deleted, because nothing was established either way." >&2
+          exit 1
+
       # What: reports DB-unavailability as a separate issue.
       # Why: a distinct label keeps this visible without closing a
       #   real open vulnerability finding on a mere DB miss.
       # From: Issue #1095
       - name: Report Trivy DB-unavailable status (amd64, separate issue)
-        if: github.event_name == 'pull_request' && steps.build.outcome == 'success'
+        if: >-
+          github.event_name == 'pull_request' && steps.build.outcome == 'success' &&
+          (steps.trivy-scan-pushed.outputs.db-status == 'unavailable' ||
+           steps.trivy-scan-pushed.outputs.db-status == 'available')
         uses: ./.github/actions/nightly-status
         with:
-          outcome: ${{ steps.trivy-scan-pushed.outputs.db-unavailable == 'true' && 'failure' || 'success' }}
-          label: trivy-db-unavailable-${{ matrix.service }}-amd64
+          outcome: ${{ steps.trivy-scan-pushed.outputs.db-status == 'unavailable' && 'failure' || 'success' }}
+          label: trivy-db-unavailable-buildpush-${{ matrix.service }}-amd64
           scope: >-
             Trivy vulnerability DB never downloaded for
             ${{ matrix.service }} (amd64) across all retry attempts
@@ -5868,12 +5883,12 @@ jobs:
       # What: reports the scan outcome as a self-closing issue.
       # Why: nightly-status owns this pattern (AG-CODE-013); the
       #   "-amd64" label keeps this separate from arm64's own
-      #   report; skipped entirely on a pure DB-download failure.
+      #   report; runs only for an explicitly available DB.
       # From: Issue #1095
       - name: Report Trivy PR-scan status (non-blocking, self-closing issue)
         if: >-
           github.event_name == 'pull_request' && steps.build.outcome == 'success' &&
-          steps.trivy-scan-pushed.outputs.db-unavailable != 'true'
+          steps.trivy-scan-pushed.outputs.db-status == 'available'
         uses: ./.github/actions/nightly-status
         with:
           outcome: ${{ steps.trivy-scan-pushed.outcome == 'failure' && 'failure' || 'success' }}
@@ -5886,10 +5901,10 @@ jobs:
 
       - name: Delete GHCR package version pushed by a failed scan
         # What: deletes the just-pushed digest on a genuine scan failure.
-        # Why: keeps a never-vetted image out of GHCR; excludes a pure
-        #   DB-download failure, which never proves the image unsafe.
+        # Why: only an available DB proves the image unsafe;
+        #   unavailable and unknown both leave the image untouched.
         # From: Issue #1095 | Issue #626 | PR #1443
-        if: ${{ always() && steps.build.outcome == 'success' && steps.trivy-scan-pushed.outcome == 'failure' && steps.trivy-scan-pushed.outputs.db-unavailable != 'true' }}
+        if: ${{ always() && steps.build.outcome == 'success' && steps.trivy-scan-pushed.outcome == 'failure' && steps.trivy-scan-pushed.outputs.db-status == 'available' }}
         env:
           GH_TOKEN: ${{ secrets.GHCR_PACKAGE_DELETE_PAT }}
           SERVICE: ${{ matrix.service }}
@@ -6449,16 +6464,31 @@ jobs:
           cache-dir: ${{ runner.temp }}/trivy-${{ matrix.service }}-arm64-${{ github.run_id }}-${{ github.run_attempt }}
           cleanup-cache: "true"
 
+      # What: fails the job when db-status came back neither value.
+      # Why: an unknown status must never be read as a clean scan.
+      # From: Issue #1095
+      - name: Require a determined Trivy DB status (arm64)
+        if: >-
+          github.event_name == 'pull_request' && steps.build.outcome == 'success' &&
+          steps.trivy-scan-pushed.outputs.db-status != 'unavailable' &&
+          steps.trivy-scan-pushed.outputs.db-status != 'available'
+        run: |
+          echo "::error::Trivy db-status for ${{ matrix.service }} (arm64) is '${{ steps.trivy-scan-pushed.outputs.db-status }}' -- the scan never reached its own determination step (timeout, cancellation, or output-propagation failure). Treating this as NOT-RUN: no status report is filed and no image is deleted, because nothing was established either way." >&2
+          exit 1
+
       # What: reports DB-unavailability as a separate issue.
       # Why: a distinct label keeps this visible without closing a
       #   real open vulnerability finding on a mere DB miss.
       # From: Issue #1095
       - name: Report Trivy DB-unavailable status (arm64, separate issue)
-        if: github.event_name == 'pull_request' && steps.build.outcome == 'success'
+        if: >-
+          github.event_name == 'pull_request' && steps.build.outcome == 'success' &&
+          (steps.trivy-scan-pushed.outputs.db-status == 'unavailable' ||
+           steps.trivy-scan-pushed.outputs.db-status == 'available')
         uses: ./.github/actions/nightly-status
         with:
-          outcome: ${{ steps.trivy-scan-pushed.outputs.db-unavailable == 'true' && 'failure' || 'success' }}
-          label: trivy-db-unavailable-${{ matrix.service }}-arm64
+          outcome: ${{ steps.trivy-scan-pushed.outputs.db-status == 'unavailable' && 'failure' || 'success' }}
+          label: trivy-db-unavailable-buildpush-${{ matrix.service }}-arm64
           scope: >-
             Trivy vulnerability DB never downloaded for
             ${{ matrix.service }} (arm64) across all retry attempts
@@ -6468,12 +6498,12 @@ jobs:
       # What: reports the scan outcome as a self-closing issue.
       # Why: nightly-status owns this pattern (AG-CODE-013); the
       #   "-arm64" label keeps this separate from build's own
-      #   report; skipped entirely on a pure DB-download failure.
+      #   report; runs only for an explicitly available DB.
       # From: Issue #1095
       - name: Report Trivy PR-scan status (non-blocking, self-closing issue)
         if: >-
           github.event_name == 'pull_request' && steps.build.outcome == 'success' &&
-          steps.trivy-scan-pushed.outputs.db-unavailable != 'true'
+          steps.trivy-scan-pushed.outputs.db-status == 'available'
         uses: ./.github/actions/nightly-status
         with:
           outcome: ${{ steps.trivy-scan-pushed.outcome == 'failure' && 'failure' || 'success' }}
@@ -6486,10 +6516,10 @@ jobs:
 
       - name: Delete GHCR package version pushed by a failed scan
         # What: same cleanup as build's own step, for this job's arm64 leg.
-        # Why: scan targets an already-pushed digest; excludes a pure
-        #   DB-download failure, which never proves the image unsafe.
+        # Why: only an available DB proves the image unsafe;
+        #   unavailable and unknown both leave the image untouched.
         # From: Issue #1095 | Issue #626 | PR #1443
-        if: ${{ always() && steps.build.outcome == 'success' && steps.trivy-scan-pushed.outcome == 'failure' && steps.trivy-scan-pushed.outputs.db-unavailable != 'true' }}
+        if: ${{ always() && steps.build.outcome == 'success' && steps.trivy-scan-pushed.outcome == 'failure' && steps.trivy-scan-pushed.outputs.db-status == 'available' }}
         env:
           GH_TOKEN: ${{ secrets.GHCR_PACKAGE_DELETE_PAT }}
           SERVICE: ${{ matrix.service }}
