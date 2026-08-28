@@ -219,7 +219,7 @@ This rule exists because real drift was discovered and fixed in issue #529: `doc
 - **[AG-VAL-003]** Quote search patterns so literals such as backticks, `$()`, `${...}`, pipes, and redirects cannot be interpreted by the shell. A command that accidentally executes part of the search pattern is malformed and invalidates that verification attempt.
 - **[AG-VAL-004]** Do not hide required command failures with `|| true`. Use optional fallbacks only when the command is explicitly optional and the reason is documented.
 - **[AG-VAL-005]** Prefer native local commands to do the work at any time, instead and/or before you want to do an API call. For example: local Bash tools such as `rg`/`grep` for text search rather than vague manual inspection; local file reads (`cat`, `tail`, `grep`, `rg`) and writes (`echo`, `tee`, a dedicated file-edit tool) rather than a `gh api`/GitHub API round-trip when the content is already available in, or belongs in, a local checkout. This does not mean avoiding the API where it is genuinely the correct tool — reach for it specifically when an operation has no local equivalent (posting a comment, reading a PR's live review-thread state, anything that exists only as remote GitHub state) — only that at any time a native local command must be preferred whenever both would genuinely do the same job.
-- **[AG-REL-001]** Do not introduce another runtime language (Go, Python, Node.js, etc.) into the project without explicit approval from @djdomi. Local, one-off commands for inspection or validation (e.g. a quick `python3` JSON/YAML check, a one-off text transform) are fine as long as nothing from that language is committed to or into the repository. If a different language or tool was used for testing, you must state which language/tool was used and exactly what was tested with it. This project's own language (Rust, and shell for scripts) is about avoiding language sprawl in our own source, not a blanket ban on ever invoking another language's toolchain — a third-party CI tool (e.g. `actionlint`) that happens to be written in Go may still need to be *compiled* with a current Go toolchain for a real technical reason (e.g. avoiding a stale, statically-embedded stdlib with known CVEs baked into its upstream prebuilt release binary; see Rule-Ref: AG-KD-003 for the full, repeatedly-reconfirmed history of this exact case). That distinction — installing/running vs. writing new source in another language, or introducing a language runtime for a reason beyond "the upstream tool happens to be written in it" — still needs explicit approval from the user before doing it, **every time, not just once**. (CLAUDE.md's `AG-GOV-003` retired 2026-07-30: merged here, which said the same thing — the actionlint/Docker-CLI nuance above was folded in from it. Not reused per AG-WF-016.)
+- **[AG-REL-001]** Do not introduce another runtime language (Go, Python, Node.js, etc.) into the project without explicit approval from @djdomi. Local, one-off commands for inspection or validation (e.g. a quick `python3` JSON/YAML check, a one-off text transform) are fine as long as nothing from that language is committed to or into the repository. If a different language or tool was used for testing, you must state which language/tool was used and exactly what was tested with it. This project's own language (Rust, and shell for scripts) is about avoiding language sprawl in our own source, not a blanket ban on ever invoking another language's toolchain — a third-party CI tool that happens to be written in Go may still need to be *compiled* with a current Go toolchain for a real technical reason (e.g. avoiding a stale, statically-embedded stdlib or vendored dependency with a known vulnerability baked into its upstream prebuilt release binary; see Rule-Ref: AG-KD-003 for the exemption test and the tools currently exempted under it). That distinction — installing/running vs. writing new source in another language, or introducing a language runtime for a reason beyond "the upstream tool happens to be written in it" — still needs explicit approval from the user before doing it, **every time, not just once**. (CLAUDE.md's `AG-GOV-003` retired 2026-07-30: merged here, which said the same thing — the actionlint/Docker-CLI nuance above was folded in from it. Not reused per AG-WF-016.)
 - **[AG-GH-007]** Project-facing text must be in English.
 - **[AG-WF-013]** Take the big picture; think big. Always look at the bigger picture — do not only consider the change itself. Consider its dependencies, its impact, and what may happen as a result. When fixing an identified problem, do not limit the analysis or the fix to the exact line being edited: check the lines immediately before and after it, and any other line in the same file that references, depends on, or would become inconsistent with the change. Treat the whole file, not the single line under edit, as the smallest unit of correctness to verify — a fix that only touches the flagged line while leaving a directly connected inconsistency elsewhere in the same file is incomplete.
 - **[AG-WF-016]** Do not silently remove, narrow, or "simplify" any AGENTS.md content — values, rules, or anything else that belongs in this file — without the maintainer's explicit consent. Do not replace existing content with a different representation or style just because that would be easier to satisfy technically. Rules may be numbered to allow direct reference (e.g. when citing a violation). No rule number may be reused for a new rule; a rule ID always identifies exactly one rule. Referencing an existing rule elsewhere in the document must use the explicit form `Rule-Ref: <ID>` (e.g. "see Rule-Ref: AG-WF-004"), never a bare repeated ID.
@@ -540,30 +540,35 @@ reading the document for anything that needs human judgment.
 - **[AG-CI-003]** **Runner portability**: LAN-only acceleration such as Redis-backed sccache, sccache-dist, distcc, local Buildx cache paths, and self-hosted runner labels must stay explicitly configurable. Treat the current self-hosted runner farm as an optimization layer, not as the only valid CI environment. GitHub-hosted fallback jobs must validate without inheriting LAN-only assumptions about Redis URLs, distcc schedulers, cache paths, or runner labels; use documented modes, variables, and fail-closed capability checks instead of hidden host assumptions.
 - **[AG-VAL-017]** **Build-tools image**: `tools/build-tools/Dockerfile` intentionally uses `rust:latest`, then installs and smoke-tests required tools such as `rustfmt`, `clippy`, `sccache`, `cargo-audit`, `shellcheck`, `actionlint`, `bats`, `shellspec`, `distcc`, `distcc-pump`, Docker CLI, Docker Compose, and DNS/setup/template fixture tools such as `dig`, `ip`, `openssl`, `rsync`, and `envsubst`. It must explicitly set and verify `PATH`, especially `/usr/local/cargo/bin`, to avoid false `command not found` failures. CI jobs that only need bundled validation tools must use the prebuilt image instead of compiling those tools per job; for example, do not install `cargo-audit` in workflow jobs. CodeQL and Trivy image scanning remain GitHub workflow and runner capabilities, not tools bundled into this image.
 - **[AG-KD-003]** **`build-tools`'s third-party CI tools are installed as checksum-verified
-  prebuilt release binaries or distro packages, never compiled from source, unless a source
-  build is the only way to close a real, currently-reachable vulnerability in the tool's
-  embedded dependencies.** This default applies to every third-party tool in `build-tools`;
-  compiling any of this project's own Rust code is a separate matter and outside this rule's
-  scope. Only this project's own product code is ever compiled as a matter of course — a
-  third-party tool is source-built only under the exemption test below, never by default and
-  never for convenience.
+  prebuilt release binaries or distro packages, never compiled from source, unless no such
+  prebuilt artifact meets this project's actual requirement for the tool.** This default
+  applies to every third-party tool in `build-tools`; compiling any of this project's own Rust
+  code is a separate matter and outside this rule's scope. Only this project's own product code
+  is ever compiled as a matter of course — a third-party tool is source-built only under one of
+  the exemption tests below, never by default and never for convenience.
 
-  An exemption requires all of the following: a real, currently-valid scan finding (not a
-  hypothetical one), a vulnerable code path that is actually reachable in how this project
-  invokes the tool, and no clean official release currently available. Exemptions currently in
-  force: the Docker CLI, `docker-buildx`, and `docker-compose`, all three built from source
-  against a current toolchain because they statically embed a language runtime's standard
-  library — a stale official release binary can carry standard-library vulnerabilities with no
-  upstream fix available, and a source build against a current toolchain is the only way to get
-  a patched standard library into the binary. This is a narrow, tool-specific exception to the
-  "Rust and shell only" project-language rule (Rule-Ref: AG-REL-001/AG-REL-004), not a general
-  license to add other language toolchains or to source-build other tools; each exemption must
-  independently satisfy the test above.
+  A source build is justified, and only for as long as, one of the following holds and no clean
+  official release closes the gap: the tool's official release artifacts do not support the
+  target platform or C library this image builds for; the tool's official release artifacts do
+  not offer a required, non-default build feature; or a real, currently-reachable vulnerability
+  exists in the tool's embedded dependencies with no clean official release available.
+
+  Exemptions currently in force: `sccache`, built from source because its official release
+  artifacts do not offer a required non-default build feature; and the Docker CLI,
+  `docker-buildx`, and `docker-compose`, built from source because they statically embed a
+  language runtime and its dependencies — a stale official release binary can carry
+  vulnerabilities in that embedded code (the runtime's standard library or a vendored
+  third-party module alike) with no upstream fix available, and a source build against a
+  current toolchain is the only way to get a patched dependency into the binary. The Docker
+  CLI/`docker-buildx`/`docker-compose` exemption is additionally a narrow, tool-specific
+  exception to the "Rust and shell only" project-language rule (Rule-Ref:
+  AG-REL-001/AG-REL-004); it is not a general license to add other language toolchains or to
+  source-build other tools — each exemption must independently satisfy the tests above.
 
   **Standing exception, not default.** Each exemption above is reviewed periodically, not
-  granted permanently: once a tool's current official release is clean, or its vulnerability
-  class is no longer reachable in how this project invokes it, the exemption is dropped and the
-  tool reverts to a checksum-verified prebuilt binary or package. The maintainer may revert any
+  granted permanently: once a tool's current official release meets the requirement that
+  justified its exemption, the exemption is dropped and the tool reverts to a checksum-verified
+  prebuilt binary or package. The maintainer may revert any
   exemption to plain package/binary installation at any time, for any reason, independent of
   this review.
 (AG-KD-001 retired, retroactively documented 2026-08-01: originally "upstream nginx resolver must be real DNS, never the local PowerDNS recursor" -- silently removed from this file at some point with no retirement stub left behind, discovered only via git history (`git log -S "AG-KD-001"`) during this session's numbering audit. The same requirement lives on today as AG-OP-002, which states the identical fact. Not reused per AG-WF-016.)
