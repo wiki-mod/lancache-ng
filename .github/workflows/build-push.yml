@@ -5851,7 +5851,7 @@ jobs:
 
       # What: fails when db-status is undetermined, scan ran.
       # Why: an unknown status must never be read as a clean scan.
-      # From: Issue #1095
+      # From: Issue #1095 | PR #1735
       - name: Require a determined Trivy DB status (amd64)
         if: >-
           github.event_name == 'pull_request' && steps.build.outcome == 'success' &&
@@ -5883,7 +5883,7 @@ jobs:
 
       # What: reports a pre-report scan error, not a finding.
       # Why: no report exists to evaluate as a finding here.
-      # From: Issue #1095
+      # From: Issue #1095 | PR #1735
       - name: Report Trivy scan-error status (amd64, separate issue)
         if: >-
           github.event_name == 'pull_request' && steps.build.outcome == 'success' &&
@@ -5902,7 +5902,7 @@ jobs:
 
       # What: reports the scan outcome as a self-closing issue.
       # Why: runs only for an available DB with an actual report.
-      # From: Issue #1095
+      # From: Issue #1095 | PR #1735
       - name: Report Trivy PR-scan status (non-blocking, self-closing issue)
         if: >-
           github.event_name == 'pull_request' && steps.build.outcome == 'success' &&
@@ -5921,7 +5921,7 @@ jobs:
       - name: Delete GHCR package version pushed by a failed scan
         # What: deletes the just-pushed digest on a genuine finding.
         # Why: only an actual report proves the image unsafe.
-        # From: Issue #1095
+        # From: Issue #1095 | PR #1735
         if: >-
           ${{
             always() && steps.build.outcome == 'success' &&
@@ -6490,7 +6490,7 @@ jobs:
 
       # What: fails when db-status is undetermined, scan ran.
       # Why: an unknown status must never be read as a clean scan.
-      # From: Issue #1095
+      # From: Issue #1095 | PR #1735
       - name: Require a determined Trivy DB status (arm64)
         if: >-
           github.event_name == 'pull_request' && steps.build.outcome == 'success' &&
@@ -6522,7 +6522,7 @@ jobs:
 
       # What: reports a pre-report scan error, not a finding.
       # Why: no report exists to evaluate as a finding here.
-      # From: Issue #1095
+      # From: Issue #1095 | PR #1735
       - name: Report Trivy scan-error status (arm64, separate issue)
         if: >-
           github.event_name == 'pull_request' && steps.build.outcome == 'success' &&
@@ -6541,7 +6541,7 @@ jobs:
 
       # What: reports the scan outcome as a self-closing issue.
       # Why: runs only for an available DB with an actual report.
-      # From: Issue #1095
+      # From: Issue #1095 | PR #1735
       - name: Report Trivy PR-scan status (non-blocking, self-closing issue)
         if: >-
           github.event_name == 'pull_request' && steps.build.outcome == 'success' &&
@@ -6560,7 +6560,7 @@ jobs:
       - name: Delete GHCR package version pushed by a failed scan
         # What: same cleanup as build's arm64 leg's own scan.
         # Why: only an actual report proves the image unsafe.
-        # From: Issue #1095
+        # From: Issue #1095 | PR #1735
         if: >-
           ${{
             always() && steps.build.outcome == 'success' &&

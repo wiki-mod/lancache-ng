@@ -65,7 +65,7 @@ outputs:
     description: |
       What: forwards trivy-scan-retry's own scan-error output.
       Why: a pre-report error must reach this action's callers.
-      From: Issue #1095
+      From: Issue #1095 | PR #1735
     value: ${{ steps.scan.outputs.scan-error }}
 
 runs:

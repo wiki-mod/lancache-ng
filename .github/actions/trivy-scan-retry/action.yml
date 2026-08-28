@@ -444,21 +444,37 @@ runs:
 
     # What: emits db-status and a separate scan-error flag.
     # Why: a pre-report error must not read as a finding.
-    # From: Issue #1095
+    # From: Issue #1095 | PR #1735
     - name: Determine DB status
       id: db-status
       if: always()
       shell: bash
       env:
+        OUT1: ${{ steps.attempt1.outcome }}
+        OUT2: ${{ steps.attempt2.outcome }}
+        OUT3: ${{ steps.attempt3.outcome }}
+        OUT4: ${{ steps.attempt4.outcome }}
         KIND1: ${{ steps.classify1.outputs.error-kind }}
         KIND2: ${{ steps.classify2.outputs.error-kind }}
         KIND3: ${{ steps.classify3.outputs.error-kind }}
         KIND4: ${{ steps.classify4.outputs.error-kind }}
       run: |
         set -euo pipefail
-        # What: picks the terminal classify step's error-kind.
-        # Why: only the last attempt reflects the real result.
-        # From: Issue #1095
+        # What: checks overall success before any error-kind.
+        # Why: a later success must never read as unavailable.
+        # From: Issue #1095 | PR #1735
+        succeeded=false
+        for outcome in "$OUT1" "$OUT2" "$OUT3" "$OUT4"; do
+          if [ "$outcome" = "success" ]; then
+            succeeded=true
+            break
+          fi
+        done
+        if [ "$succeeded" = "true" ]; then
+          echo "value=available" >> "$GITHUB_OUTPUT"
+          echo "scan-error=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
         kind=""
         for candidate in "$KIND4" "$KIND3" "$KIND2" "$KIND1"; do
           if [ -n "$candidate" ]; then

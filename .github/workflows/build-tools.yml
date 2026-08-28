@@ -481,7 +481,7 @@ jobs:
 
       # What: shortens the label under GitHub's 50-char cap.
       # Why: buildtoolswf pushed the old label to 51 chars.
-      # From: Issue #1095
+      # From: Issue #1095 | PR #1735
       - name: Report Trivy DB-unavailable status (amd64, separate issue)
         if: >-
           github.event_name == 'pull_request' &&
@@ -499,7 +499,7 @@ jobs:
 
       # What: reports a pre-report scan error, not a finding.
       # Why: no report exists to evaluate as a finding here.
-      # From: Issue #1095
+      # From: Issue #1095 | PR #1735
       - name: Report Trivy scan-error status (amd64, separate issue)
         if: >-
           github.event_name == 'pull_request' &&
@@ -518,7 +518,7 @@ jobs:
 
       # What: reports the scan outcome as a self-closing issue.
       # Why: runs only for an available DB with an actual report.
-      # From: Issue #1095
+      # From: Issue #1095 | PR #1735
       - name: Report Trivy PR-scan status (non-blocking, self-closing issue)
         if: >-
           github.event_name == 'pull_request' &&
@@ -778,7 +778,7 @@ jobs:
 
       # What: shortens the label under GitHub's 50-char cap.
       # Why: buildtoolswf pushed the old label to 51 chars.
-      # From: Issue #1095
+      # From: Issue #1095 | PR #1735
       - name: Report Trivy DB-unavailable status (arm64, separate issue)
         if: >-
           github.event_name == 'pull_request' &&
@@ -796,7 +796,7 @@ jobs:
 
       # What: reports a pre-report scan error, not a finding.
       # Why: no report exists to evaluate as a finding here.
-      # From: Issue #1095
+      # From: Issue #1095 | PR #1735
       - name: Report Trivy scan-error status (arm64, separate issue)
         if: >-
           github.event_name == 'pull_request' &&
@@ -815,7 +815,7 @@ jobs:
 
       # What: reports the scan outcome as a self-closing issue.
       # Why: runs only for an available DB with an actual report.
-      # From: Issue #1095
+      # From: Issue #1095 | PR #1735
       - name: Report Trivy PR-scan status (non-blocking, self-closing issue)
         if: >-
           github.event_name == 'pull_request' &&
