@@ -61,9 +61,8 @@ inputs:
       as its own github dot action_path joined with trivy-config.yaml --
       this wrapper's own action_path would resolve to its own directory,
       not the caller's, so it cannot compute this path itself. (Written
-      without literal expression syntax: GitHub's manifest template
-      validator evaluates any ${{ }}-shaped text found in a description
-      field, even when it is meant only as documentation prose.)
+      without GitHub Actions expression syntax on purpose: this field's
+      template gets evaluated even as plain documentation prose.)
     required: false
     default: ""
 runs:
