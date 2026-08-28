@@ -281,47 +281,8 @@ jobs:
           path: ${{ env.GC_CLASSIFICATION_CACHE_DIR }}
           key: sha-retention-classification-cache-${{ github.run_id }}-${{ github.run_attempt }}
 
-      # What: restores a full working tree, verifying the real index state
-      # rather than trusting `disable`'s exit code.
-      # Why: non-cone sparse-checkout doesn't reliably clear on `disable`;
-      # a narrowed tree corrupts the next job reusing this runner instance.
-      # From: PR #1492
-      #
-      # What: runs unconditionally, not gated on `scripts-present`.
-      # Why: when the preflight above skips Checkout, this step's commands
-      # are trivial no-ops -- still a safety net for pre-existing narrowing.
-      # From: Issue #1095 | PR #1528
-      - name: Restore full working tree for the next job on this runner
-        if: always() && steps.creds.outputs.have-pat == 'true'
-        run: |
-          set -euo pipefail
-          git sparse-checkout init || true
-          git sparse-checkout disable || true
-          git config --local --unset-all core.sparseCheckout || true
-          rm -f .git/info/sparse-checkout
-
-          # What: sweeps remaining skip-worktree bits, capturing `git
-          # ls-files -v` into a variable before piping to awk.
-          # Why: a direct pipe would hide a real git failure behind awk's
-          # own exit code instead of tripping `set -e`.
-          # From: PR #1492
-          ls_files_before="$(git ls-files -v)"
-          mapfile -t remaining_skip_worktree < <(printf '%s\n' "$ls_files_before" | awk '/^S /{print substr($0,3)}')
-          if [ "${#remaining_skip_worktree[@]}" -gt 0 ]; then
-            git update-index --no-skip-worktree -- "${remaining_skip_worktree[@]}"
-          fi
-          git checkout --progress --force HEAD -- .
-
-          # What: verifies the restore worked, failing loudly if any path
-          # is still excluded, using awk's count (not `grep -c`).
-          # Why: awk's exit code is always 0 regardless of match count, so
-          # a `|| true` fallback could silently skip the `-ne 0` check.
-          # From: PR #1492
-          ls_files_after="$(git ls-files -v)"
-          remaining_after="$(printf '%s\n' "$ls_files_after" | awk '/^S /{c++} END{print c+0}')"
-          if [ "$remaining_after" -ne 0 ]; then
-            echo "::error::${remaining_after} path(s) still carry the skip-worktree bit after the restore sequence -- the working tree may still be narrowed for the next job on this runner." >&2
-            printf '%s\n' "$ls_files_after" | grep '^S ' >&2 || true
-            exit 1
-          fi
+      # What: no post-job working-tree restore step on this job.
+      # Why: ubuntu-latest is a fresh VM per run; the self-hosted
+      #   reuse hazard this step guarded against cannot occur here.
+      # From: Issue #1095
 
