@@ -211,6 +211,11 @@ jobs:
         # builds a fresh branch-local image instead of trying the published
         # tag first.
         id: build-tools-image
+        env:
+          # What: requires dhclient in the smoke-test check.
+          # Why: opt-in only; this job's own sim needs it.
+          # From: Issue #1095
+          EXTRA_REQUIRED_TOOLS: dhclient
         run: |
           set -euo pipefail
           image="$(bash scripts/untracked/select-build-tools-image.sh)"

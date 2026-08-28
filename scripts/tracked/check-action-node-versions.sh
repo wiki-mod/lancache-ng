@@ -2,41 +2,14 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Enforces issue #801: every pinned GitHub Action referenced from any
-# .github/workflows/*.yml file (and every local composite action under
-# .github/actions/) must declare a Node runtime GitHub Actions still
-# considers current in its own action.yml/action.yaml. This exists because
-# issue #799 was found reactively -- a CI log deprecation warning about
-# actions/upload-artifact@834a144... (v4.3.6) still declaring `runs.using:
-# node20`, only fixed one instance at a time by PR #800 -- and the same
-# class of problem can recur for any of this project's many other pinned
-# actions, now or after a future re-pin. This script scans ALL of them,
-# proactively, on every run.
+# What: enforces every pinned Action uses a current runtime.
+# Why: issue #799 was found reactively, one pin at a time.
+# From: Issue #1095 | PR #1734
 #
-# It also enforces two #1095 centralization invariants over the same scan
-# scope:
-#   1. one WORKFLOW file must not repeat the exact same third-party `uses:`
-#      literal more than once -- a YAML anchor/alias must carry that one
-#      maintenance point instead of N raw copies. Deliberately scoped to
-#      workflow files only (is_workflow_file() below): a composite
-#      action.yml cannot use an anchor at all (confirmed live, F-24 -- see
-#      that check's own comment), so duplication there is the correct shape.
-#   2. one third-party action key (`owner/repo[/subpath]`) must not drift to
-#      multiple pinned refs across .github/** -- that is exactly the
-#      "same dependency, different versions, nobody sees it anymore" failure
-#      mode #1095 is meant to stop. Applies to both workflow and composite
-#      action files, since it has nothing to do with anchors.
-#   3. no composite action.yml `description:` field may contain GitHub
-#      Actions expression syntax. GitHub's manifest template validator
-#      evaluates a `description:` body even when it is pure documentation
-#      prose, so a literal `${{ github.action_path }}` written as an
-#      explanation fails the ENTIRE action with "Unrecognized named-value:
-#      'github'" -- which broke every build/build-arm64 job across all
-#      services (issue #1095, PR #1719). The class recurred immediately:
-#      the first fix attempt reintroduced it while explaining the bug in
-#      that same description, producing "An expression was expected". A
-#      YAML `#` comment is NOT template-evaluated and is the safe place to
-#      show the real syntax.
+# It also enforces two centralization invariants and a description-field
+# expression-syntax check over the same scan scope -- see is_workflow_file(),
+# the duplicate-ref check, the ref-drift check, and the description-field
+# check below, each with its own What/Why/From comment at its point of use.
 #
 # Local composite actions (`uses: ./.github/actions/<name>`) are resolved by
 # reading their action.yml/action.yaml straight off disk -- no GitHub API
@@ -135,6 +108,10 @@ fi
 scan_files=("${workflow_files[@]}" "${local_action_files[@]}")
 
 failures=0
+# What: counts extraction failures, a subset of $failures.
+# Why: these aren't pinned-action or field failures.
+# From: Issue #1095 | PR #1734
+extraction_failures=0
 
 fail() {
   printf '::error::%s\n' "$1" >&2
@@ -160,13 +137,9 @@ is_external_action_ref() {
   return 0
 }
 
-# What: a composite action.yml file cannot use a YAML anchor/alias at all.
-# Why: confirmed live (Issue #1095 F-24, PR #1665): the Actions Runner's own
-#   composite-action loader hard-fails with "Anchors are not currently
-#   supported" -- unlike a workflow file, which a separate, more permissive
-#   parser already tolerates (pre-existing anchors in build-push.yml's env:
-#   blocks predate this and still work). The duplicate-ref check below must
-#   only apply where an anchor is an actual, usable fix.
+# What: composite action.yml can't use a YAML anchor/alias.
+# Why: anchors fail in composites, work in workflows.
+# From: Issue #1095 | PR #1734
 is_workflow_file() {
   local candidate="$1"
   [[ "$candidate" == "$workflow_dir"/* ]]
@@ -230,6 +203,7 @@ for scan_file in "${scan_files[@]}"; do
       anchor_name="${BASH_REMATCH[1]}"
       if [ -z "${yaml_anchors[$anchor_name]+x}" ]; then
         fail "'$scan_file' uses unresolved YAML alias '*$anchor_name' in a uses: step."
+        extraction_failures=$((extraction_failures + 1))
         continue
       fi
       resolved_value="${yaml_anchors[$anchor_name]}"
@@ -248,6 +222,7 @@ mapfile -t uses_values < <(
 
 if [ "${#uses_values[@]}" -eq 0 ]; then
   fail "Found no 'uses:' step directives in any of ${scan_files[*]} -- check the extraction pattern in this script."
+  extraction_failures=$((extraction_failures + 1))
 fi
 
 referencing_files() {
@@ -305,13 +280,9 @@ for entry in "${uses_literal_entries[@]}"; do
   fi
 done
 
-# What: rejects a repeated literal third-party `uses:` ref inside one
-#   workflow file (never inside a composite action.yml -- see
-#   is_workflow_file() above).
-# Why: once the same immutable ref appears twice in a workflow file, a YAML
-#   anchor/alias collapses it to one owner line; the same collapse is not an
-#   option inside a composite action.yml (Issue #1095 F-24), so duplication
-#   there is simply the correct, GitHub-imposed shape, not a violation.
+# What: rejects a workflow file repeating one `uses:` ref.
+# Why: an anchor collapses duplicates in workflows only.
+# From: Issue #1095 | PR #1734
 for exact_file_key in "${!literal_ref_counts_by_file[@]}"; do
   count="${literal_ref_counts_by_file[$exact_file_key]}"
   if [ "$count" -le 1 ]; then
@@ -322,32 +293,24 @@ for exact_file_key in "${!literal_ref_counts_by_file[@]}"; do
   fail "'$scan_file' repeats third-party action ref '$value' $count times. Collapse it to one maintenance point with a YAML anchor/alias."
 done
 
-# What: rejects one external action key pinned to multiple distinct refs.
-# Why: #1095's drift class is not duplication alone; the real maintenance
-#   hazard is the same dependency silently splitting across versions.
+# What: rejects an action key pinned to multiple refs.
+# Why: the same dependency splits into different refs.
+# From: Issue #1095 | PR #1734
 for action_key in "${!ref_counts_by_key[@]}"; do
   count="${ref_counts_by_key[$action_key]}"
   if [ "$count" -le 1 ]; then
     continue
   fi
-  fail "Third-party action '$action_key' is pinned to multiple refs across .github/** (${ref_paths_by_key[$action_key]}). Keep one canonical ref per action key."
+  ref_detail=""
+  for ref in ${ref_paths_by_key[$action_key]}; do
+    ref_detail="${ref_detail}${ref} (in $(referencing_files "${action_key}@${ref}")); "
+  done
+  fail "Third-party action '$action_key' is pinned to multiple refs across .github/**: ${ref_detail%; }. Keep one canonical ref per action key."
 done
 
-# What: rejects expression syntax in an action description: field.
-# Why: a description: body is template-evaluated even as pure prose,
-#   so a literal expression stops the whole manifest from loading
-#   and breaks every job that uses the action.
-# From: Issue #1095 | PR #1719
-#
-# Scoped to composite action manifests only, not workflow files: the
-# confirmed failure mode is the action-manifest loader (a literal
-# ${{ github.action_path }} left as documentation text in an input's
-# description: failed every build/build-arm64 job with "Unrecognized
-# named-value: 'github'"). Workflow-level description: fields are
-# validated by a different parser and are deliberately not claimed
-# here without their own evidence. Block-scalar aware, so a folded
-# (>-) or literal (|) multi-line description body is scanned in full,
-# which is exactly the shape the real incident used.
+# What: rejects expression syntax in a description: field.
+# Why: description: is template-evaluated, breaking jobs.
+# From: Issue #1095 | PR #1734
 for action_file in "${local_action_files[@]}"; do
   description_expression_hits="$(
     awk '
@@ -587,8 +550,17 @@ for value in "${uses_values[@]}"; do
 done
 
 if [ "$failures" -gt 0 ]; then
-  printf '::error::check-action-node-versions: %d finding(s) -- a pinned action declares a deprecated Node runtime, could not be resolved, drifted/duplicated a ref, or a composite action description: field contains expression syntax (see issues #801, #1095).\n' "$failures" >&2
+  pin_or_field_failures=$((failures - extraction_failures))
+  if [ "$pin_or_field_failures" -gt 0 ]; then
+    printf '::error::check-action-node-versions: %d pinned action(s) or manifest field(s) failed. Each failure is printed above as its own ::error:: line naming the affected file or action ref and the reason -- read those, not this summary.
+' "$pin_or_field_failures" >&2
+  fi
+  if [ "$extraction_failures" -gt 0 ]; then
+    printf '::error::check-action-node-versions: %d extraction problem(s) kept this scan from running fully -- see the ::error:: line(s) above naming the affected file.
+' "$extraction_failures" >&2
+  fi
   exit 1
 fi
 
-printf 'check-action-node-versions: OK (every pinned action -- local and external -- declares a current Node runtime, or is not Node-based; third-party action refs are de-duplicated per file and do not drift across .github/**; no composite action description: field contains GitHub Actions expression syntax).\n'
+printf 'check-action-node-versions: OK (every pinned action -- local and external -- declares a current Node runtime, or is not Node-based; third-party action refs are de-duplicated per file and do not drift across .github/**; no composite action.yml declares GitHub Actions expression syntax in a description field).
+'

@@ -23,25 +23,20 @@ FROM ${BUILD_TOOLS_IMAGE} AS watchdog-builder
 # other mention below refers to it by description, not by number, per
 # AG-CODE-012)
 #
-# musl cross-compilation (issue #815 pattern, mirrored from
-# services/dns/Dockerfile's identical nats-subscriber builder stage): the
-# final stage below runs on Alpine (musl), so this binary must be
-# musl-linked. tools/build-tools/Dockerfile already carries the native-arch
-# musl target (x86_64-unknown-linux-musl on amd64,
-# aarch64-unknown-linux-musl on arm64) and musl-tools/musl-dev, so no
-# separate cross-linker setup is needed here -- resolving the target by
-# `dpkg --print-architecture` mirrors that established pattern exactly
-# rather than inventing a new one.
+# What: detects host arch for the musl cross-compile target.
+# Why: `uname -m` needs no extra package (unlike Debian-only
+# `dpkg`); mirrors build-tools/Dockerfile's arch pattern.
+# From: Issue #1095
 RUN set -eu; \
     for tool in cargo rustc rustup rustfmt clippy-driver sccache distcc distcc-pump python3 pkg-config; do \
       command -v "$tool" >/dev/null; \
     done; \
     command -v musl-gcc >/dev/null; \
     command -v ccache >/dev/null; \
-    case "$(dpkg --print-architecture)" in \
-      amd64) echo "x86_64-unknown-linux-musl" > /tmp/musl-target; ;; \
-      arm64) echo "aarch64-unknown-linux-musl" > /tmp/musl-target; ;; \
-      *) echo "Unsupported architecture for musl cross-compilation target: $(dpkg --print-architecture)" >&2; exit 1; ;; \
+    case "$(uname -m)" in \
+      x86_64) echo "x86_64-unknown-linux-musl" > /tmp/musl-target; ;; \
+      aarch64) echo "aarch64-unknown-linux-musl" > /tmp/musl-target; ;; \
+      *) echo "Unsupported architecture for musl cross-compilation target: $(uname -m)" >&2; exit 1; ;; \
     esac; \
     # Captured into a variable first, then grepped via a here-string
     # (AG-VAL-032): a live pipe into `grep -qx` is the exact SIGPIPE-under-
