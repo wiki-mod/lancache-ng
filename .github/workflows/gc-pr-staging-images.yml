@@ -81,7 +81,10 @@ jobs:
   gc:
     name: collect unprotected GHCR versions
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/current_dev'
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    # What: GitHub-hosted, not self-hosted -- no LAN dependency here.
+    # Why: a shared self-hosted workspace race broke a live GC run.
+    # From: Issue #1095
+    runs-on: ubuntu-latest
     # What: gives the bounded package-parallel collector a 120-minute ceiling.
     # Why: backlog-drain dispatches may legitimately process thousands of
     # deletions while a stuck API/registry call still needs a hard stop.
@@ -190,7 +193,11 @@ jobs:
           GHCR_RETRY_PASSWORD: ${{ github.token }}
         run: |
           set -euo pipefail
-          image="$(bash scripts/untracked/select-build-tools-image.sh)"
+          # What: pull-only; never build build-tools on this runner.
+          # Why: a throwaway GitHub-hosted runner has no reason to run
+          #   a slow multi-arch image build for a GHCR housekeeping job.
+          # From: Issue #1095
+          image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
           if [[ -z "$image" ]]; then
             echo "::error::Build-tools selector returned an empty image reference."
             exit 1
