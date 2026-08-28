@@ -356,7 +356,7 @@ No other runtime language may be introduced without explicit maintainer approval
 
 ## Architecture
 
-Everything runs in Docker containers. Base OS is mixed, not uniformly Debian: `services/dhcp`, `services/dhcp-proxy`, `services/watchdog`, `services/ntp`, `services/dns`, `services/proxy`, `services/ui`, and `services/syslog` all run on Alpine — the first six as issue #815's staged migration off Debian, `services/syslog` (#1431/#1433) by starting on Alpine from its first commit rather than migrating. `tools/build-tools` (the shared CI/dev image) currently stays Debian-based (Rule-Ref: AG-KD-009), independent of any individual service's own base-OS choice — it is the only first-party image left on Debian, and this base is under active re-evaluation (issue #1095). See issue #815 for the full per-service OS evaluation history.
+Everything runs in Docker containers. Base OS is mixed, not uniformly Debian: `services/dhcp`, `services/dhcp-proxy`, `services/watchdog`, `services/ntp`, `services/dns`, `services/proxy`, `services/ui`, and `services/syslog` all run on Alpine — the first six as issue #815's staged migration off Debian, `services/syslog` (#1431/#1433) by starting on Alpine from its first commit rather than migrating. `tools/build-tools` (the shared CI/dev image) stays Debian-based by default (Rule-Ref: AG-KD-009), independent of any individual service's own base-OS choice — it is the only first-party image with Debian as its active default; issue #1095's evaluation added a real Alpine candidate to the same Dockerfile as an opt-in `--target alpine-final` alternative (`os-pkgs` CVE-surface parity confirmed, full post-fix rescan still outstanding), but switching the default remains a separate maintainer decision not yet made. See issue #815 for the full per-service OS evaluation history.
 
 ```
 services/proxy/          # nginx: unified proxy serving both standard + SSL mode via different ports
@@ -455,30 +455,54 @@ by configuring which DNS server IP they point to:
   SSH against Linux self-hosted runners rather than a local Docker Desktop install (Rust
   builds and full-stack `docker compose up` runs are not exercised on the Windows
   authoring host — see AG-IPV6-001 for one concrete Docker-Desktop-on-Windows limitation).
-- **[AG-KD-009]** **`build-tools` currently stays Debian, with `trixie-backports` pinned in for
-  currency; its base OS is under active re-evaluation (issue #1095)**: #815's own research
-  explicitly excluded `tools/build-tools` from the project's Alpine-migration push (unlike
-  `dhcp`, `dhcp-proxy`, `dns`, `proxy`, `ntp`, and `ui`'s runtime stage, all evaluated or migrated
-  separately), on the grounds that rebasing `build-tools` itself onto Alpine/musl would hit its
-  own full CI/dev toolchain (`distcc`/`distcc-pump` as a Debian `.deb`, `isc-dhcp-client`,
-  `tcpdump`, `bind9-dnsutils`, `cmake`/`clang`/`lld`, `python3` for `distcc-pump`'s include-server)
-  — largely glibc/`apt`-idiomatic tooling with no clean musl equivalent, and no attack-surface
-  argument in this image's favor the way there is for a network-facing runtime service. Issue
-  #1095's evaluation must verify or refute this specific tool list against Alpine's own package
-  availability, not just assume it still holds. `trixie-backports` (the same project-wide pin
-  already applied in every Debian-based service's Dockerfile) is pinned into this image too, so
-  its tools stay reasonably current without needing a base-OS change in the meantime. If Debian's
-  package currency ever becomes a real blocker for this image specifically, Ubuntu (or another
-  actively-current Debian derivative) is a fallback to evaluate — #815's `services/proxy` research
-  already piloted Ubuntu 26.04 ("resolute") for a different service and found its
-  `resolute-backports` channel has no `Suite`/`Codename` mismatch (unlike Debian's own
-  `trixie-backports` gotcha, see AG-KD-007's sibling Dockerfile comments), a real,
-  already-verified mechanism this image could reuse if the maintainer decides to pursue it. This
-  is separate from the musl cross-compilation *target* already added to this image for
-  `services/ui`/`services/dns`'s Rust builder stages (#815, landed via PR #1374) — that does not
-  change this image's own base OS. The binding requirement remains: any base-OS/image-tag change
-  needs full verification and maintainer approval, regardless of which distribution issue #1095
-  concludes with.
+- **[AG-KD-009]** **`build-tools` stays Debian by default; a real Alpine candidate now
+  exists in the same Dockerfile as an opt-in alternative (`os-pkgs` CVE-surface parity confirmed,
+  full post-fix rescan still outstanding), pending a maintainer decision on whether
+  to switch (issue #1095).** #815's own research had originally excluded `tools/build-tools` from
+  the project's Alpine-migration push (unlike `dhcp`, `dhcp-proxy`, `dns`, `proxy`, `ntp`, and
+  `ui`'s runtime stage, all evaluated or migrated separately), on the grounds that rebasing
+  `build-tools` itself onto Alpine/musl would hit its own full CI/dev toolchain
+  (`distcc`/`distcc-pump` as a Debian `.deb`, `isc-dhcp-client`, `tcpdump`, `bind9-dnsutils`,
+  `cmake`/`clang`/`lld`, `python3` for `distcc-pump`'s include-server) — largely glibc/`apt`-
+  idiomatic tooling with no clean musl equivalent, and no attack-surface argument in this image's
+  favor the way there is for a network-facing runtime service. Issue #1095's evaluation checked
+  that specific tool list against Alpine's own real package availability rather than assuming it
+  still held, and found every tool has either a direct `apk` equivalent or a working source-build
+  path (see `tools/build-tools/README.md` for the full, phase-by-phase record): `distcc`/
+  `distcc-pump` ship as native Alpine packages (no Debian-style Python regex patch needed);
+  `cargo-audit`/`cargo-tarpaulin` (Debian: prebuilt glibc release binaries) fail on Alpine even
+  with `gcompat` (missing glibc-2.38+ symbol versions) but build cleanly from source via `cargo
+  install`, the same mechanism already used for `sccache`; all four Go-built tools
+  (`actionlint`/`docker`/`docker-buildx`/`docker-compose`) build clean against `golang:alpine`
+  with no musl-specific change. The one confirmed, unresolved gap: no Alpine package provides
+  `dhclient`/`isc-dhcp-client` (only BusyBox's unrelated `udhcpc` exists), affecting three
+  CI simulation scripts that invoke dhclient against Kea; `dhclient` was moved from a
+  baseline to an opt-in (`EXTRA_REQUIRED_TOOLS`) smoke-test requirement so this gap fails closed
+  only for those three real consumers, not for every other caller of this image. A real Trivy scan
+  (`--severity HIGH,CRITICAL`, matching `build-tools.yml`'s own scan parameters) found Alpine's
+  `os-pkgs` (apk-installed package) surface at 0 HIGH/CRITICAL — the same result as a real,
+  same-base-commit Debian scan — meaning this is **CVE-surface parity with the current Debian
+  branch, not an improvement**; do not assume or state elsewhere that switching to Alpine would by
+  itself resolve any currently-tracked Debian CVE finding. The result of this evaluation is a new
+  `alpine-final` stage added to `tools/build-tools/Dockerfile`, placed before the existing unnamed
+  Debian stage so Debian remains the implicit `docker build` default with zero behavior change for
+  every existing consumer; the Alpine candidate is reachable only via `docker build --target
+  alpine-final` and is not wired into any CI workflow as the active build-tools image. Switching
+  the actual default remains a separate, explicit maintainer decision, not made by this evaluation.
+  `trixie-backports` (the same project-wide pin already applied in every Debian-based service's
+  Dockerfile) stays pinned into the Debian stage regardless, so its tools stay reasonably current
+  without needing a base-OS change in the meantime. If Debian's package currency ever becomes a
+  real blocker for this image specifically, Ubuntu (or another actively-current Debian derivative)
+  remains a fallback to evaluate — #815's `services/proxy` research already piloted Ubuntu 26.04
+  ("resolute") for a different service and found its `resolute-backports` channel has no
+  `Suite`/`Codename` mismatch (unlike Debian's own `trixie-backports` gotcha, see AG-KD-007's
+  sibling Dockerfile comments), a real, already-verified mechanism this image could reuse if the
+  maintainer decides to pursue it instead. This is separate from the musl cross-compilation
+  *target* already added to the Debian stage for `services/ui`/`services/dns`'s Rust builder
+  stages (#815, landed via PR #1374) — unneeded on the Alpine candidate, since `rust:alpine`'s
+  default rustc host triple already IS `x86_64-unknown-linux-musl`. The binding requirement
+  remains: actually switching the default base-OS/image-tag still needs the maintainer's explicit
+  sign-off, regardless of what this evaluation found.
 
 - **[AG-KD-010]** **First-party consumers reference the shared `utilities` image via the mutable `:latest` tag, not a pinned digest — a deliberate maintainer override, not an oversight.** `services/proxy`, `dns`, `dhcp`, `dhcp-proxy`, `ntp`, `ui`, `watchdog`, and `tools/build-tools` must all use `FROM ghcr.io/wiki-mod/lancache-ng/utilities:latest`. This reverses the digest-pin approach issue #1556 originally introduced (`FROM ...utilities@sha256:<digest>`, one identical hardcoded digest copy-pasted across every consumer): that approach had no CI-side freshness or staleness check of any kind (confirmed during issue #1095's CI-health pass — no dependabot/renovate config references `utilities`, and `BUILD_TOOLS_IMAGE`'s own `scripts/untracked/select-build-tools-image.sh` resolution mechanism, the one precedent for automated digest resolution in this repo, was never extended to it) and required every consumer Dockerfile to be hand-edited in lockstep on the rare occasion a maintainer did bump it by hand — confirmed exactly once in this project's history, across the then-seven consumers (`5c02fc53...` → `718af4cf...`, commit `194c44d7` and its two sibling commits touching every consumer at once). `tools/build-tools/Dockerfile` did not consume the `utilities` image at all when this rule was first written; issue #1304's shared-curl work later added it as the eighth consumer, using `:latest` from the start rather than reintroducing the digest-pin pattern this rule already rejects. `:latest` trades the digest pin's reproducibility guarantee for zero-maintenance currency: every consumer image always builds against whatever `utilities` build most recently published that tag, with no separate update step, no drift between consumers (a mutable tag can't itself fork into inconsistent copies the way hand-edited digest literals can), and no possibility of a consumer silently running stale, unpatched `utilities` tooling (`curl`, `ripgrep`, `jq`, `ca-certificates`, etc.) for months because nobody remembered to re-pin it. The accepted tradeoff: a `utilities` image regression is no longer scoped to the deliberate bump that introduces it — it reaches every consumer's next build immediately, so `services/utilities/Dockerfile` changes need the same build/smoke-test scrutiny before merge that any other first-party base-layer change gets. Do not silently reintroduce digest-pinning here as a "safer" default in a future edit; it was tried, evaluated, and explicitly reversed for this specific image.
 
