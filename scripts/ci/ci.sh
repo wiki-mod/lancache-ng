@@ -89,11 +89,11 @@ declare -Ag CI_SERVICE_CONTEXT=(
     [utilities]="services/utilities"
 )
 
-# What: external build contexts per service, if any (§13).
-# Why: §13's dependency graph avoids re-parsing Dockerfiles.
+# What: external build contexts per service, file-exact (§13).
+# Why: proxy only COPYs cdn-domains.txt, not dns/.
 # From: Issue #1683
 declare -Ag CI_SERVICE_EXTERNAL_CONTEXT=(
-    [proxy]="dns=services/dns"
+    [proxy]="dns-domains=services/dns/cdn-domains.txt"
     [dns]=""
     [watchdog]=""
     [dhcp]=""
@@ -239,14 +239,30 @@ ci_path_is_markdown() {
     [[ "$1" == *.md ]]
 }
 
+# What: space-separated .md paths that ARE real build inputs.
+# Why: §12.4's exception, env-driven not hardcoded.
+# From: Issue #1683
+CI_MARKDOWN_BUILD_INPUTS="${CI_MARKDOWN_BUILD_INPUTS:-}"
+
+ci_markdown_is_build_input() {
+    # What: true iff $1 is on the markdown build-input allowlist.
+    # Why: §12.4's escape hatch for a real build input.
+    # From: Issue #1683
+    local path="$1" entry
+    for entry in $CI_MARKDOWN_BUILD_INPUTS; do
+        [[ "$path" == "$entry" ]] && return 0
+    done
+    return 1
+}
+
 ci_normalize_for_hash() {
     # What: strips comment/blank lines and CRLF; keeps the rest.
-    # Why: shell/YAML/Dockerfile share '#' comments (§12.1-12.3).
+    # Why: shell/Dockerfile '#' is always a comment.
     # From: Issue #1683
     local path="$1"
     awk '
-        NR == 1 { print; next }
         { line = $0; sub(/\r$/, "", line) }
+        NR == 1 { print line; next }
         { stripped = line; sub(/^[ \t]*/, "", stripped) }
         stripped == "" { next }
         substr(stripped, 1, 1) == "#" { next }
@@ -254,11 +270,54 @@ ci_normalize_for_hash() {
     ' "$path"
 }
 
-ci_content_hash() {
-    # What: prints the sha256 of $1's normalized content.
-    # Why: single hash primitive every identity calculation reads.
+ci_normalize_yaml_for_hash() {
+    # What: YAML '#' stripping that spares block scalars.
+    # Why: '#' in a `key: |` body is text, not a comment.
     # From: Issue #1683
-    ci_normalize_for_hash "$1" | sha256sum | cut -d' ' -f1
+    local path="$1"
+    awk '
+        { raw = $0; sub(/\r$/, "", raw) }
+        {
+            match(raw, /^[ ]*/)
+            indent = RLENGTH
+            is_blank = (raw ~ /^[ ]*$/)
+        }
+        in_literal {
+            if (is_blank || indent > literal_indent) { print raw; next }
+            in_literal = 0
+        }
+        !is_blank && raw ~ /:[ ]*[|>][+-]?[0-9]*[ ]*(#.*)?$/ {
+            literal_indent = indent
+            in_literal = 1
+            print raw
+            next
+        }
+        {
+            content = raw
+            sub(/^[ \t]*/, "", content)
+        }
+        content == "" { next }
+        substr(content, 1, 1) == "#" { next }
+        { print raw }
+    ' "$path"
+}
+
+ci_normalize_dispatch() {
+    # What: normalizes stdin by $1's file extension.
+    # Why: routes .yml/.yaml through the block-scalar-aware path.
+    # From: Issue #1683
+    case "$1" in
+        *.yml | *.yaml) ci_normalize_yaml_for_hash /dev/stdin ;;
+        *) ci_normalize_for_hash /dev/stdin ;;
+    esac
+}
+
+ci_content_hash() {
+    # What: prints the sha256 of $1's normalized content + mode.
+    # Why: an exec-bit flip is a real input change too.
+    # From: Issue #1683
+    local path="$1" mode="${2:-}"
+    { printf 'mode=%s\n' "$mode"; ci_normalize_dispatch "$path" < "$path"; } | sha256sum | cut -d' ' -f1
 }
 
 # ============================================================
@@ -293,7 +352,9 @@ ci_impacted_services() {
     local svc path
     for svc in "${CI_SERVICES[@]}"; do
         for path in "$@"; do
-            ci_path_is_markdown "$path" && continue
+            if ci_path_is_markdown "$path" && ! ci_markdown_is_build_input "$path"; then
+                continue
+            fi
             if ci_service_touches_path "$svc" "$path"; then
                 printf '%s\n' "$svc"
                 break
@@ -302,13 +363,26 @@ ci_impacted_services() {
     done
 }
 
-ci_semantic_diff_is_noop() {
-    # What: true iff path $3's normalized content is unchanged.
-    # Why: a comment-only edit must resolve to NOOP, not build.
+ci_ref_path_mode() {
+    # What: prints path $2's git mode at ref $1.
+    # Why: mode lives in the tree, not the blob.
     # From: Issue #1683
-    local base_ref="$1" head_ref="$2" path="$3" base_hash head_hash
-    base_hash="$(git show "${base_ref}:${path}" 2>/dev/null | ci_normalize_for_hash /dev/stdin | sha256sum)"
-    head_hash="$(git show "${head_ref}:${path}" 2>/dev/null | ci_normalize_for_hash /dev/stdin | sha256sum)"
+    git ls-tree "$1" -- "$2" | awk '{print $1}'
+}
+
+ci_semantic_diff_is_noop() {
+    # What: true iff $3's mode and content both match.
+    # Why: identity must track mode too, not content alone (§16).
+    # From: Issue #1683
+    local base_ref="$1" head_ref="$2" path="$3"
+    local base_mode head_mode base_hash head_hash
+
+    base_mode="$(ci_ref_path_mode "$base_ref" "$path")"
+    head_mode="$(ci_ref_path_mode "$head_ref" "$path")"
+    [[ -n "$head_mode" && "$base_mode" == "$head_mode" ]] || return 1
+
+    base_hash="$(git show "${base_ref}:${path}" 2>/dev/null | ci_normalize_dispatch "$path" | sha256sum)"
+    head_hash="$(git show "${head_ref}:${path}" 2>/dev/null | ci_normalize_dispatch "$path" | sha256sum)"
     [[ "$base_hash" == "$head_hash" ]]
 }
 
