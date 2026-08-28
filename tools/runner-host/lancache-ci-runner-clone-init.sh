@@ -1877,34 +1877,40 @@ cmd_runner_hook_env() {
 #   per-unit '.service.d/override.conf' drop-in -- never edits the
 #   installer-generated unit file itself, so a future 'svc.sh uninstall &&
 #   install' cycle does not silently need this re-applied by hand.
-#   Idempotent: a unit already at exactly this policy is left untouched and
-#   does not trigger a daemon-reload.
+#   Idempotent: a unit whose drop-in already holds exactly this policy is
+#   left untouched and does not trigger a daemon-reload. Deliberately globs
+#   every installed actions.runner.*.service unit, including one that turns
+#   out to be a stale/orphaned leftover no longer registered with GitHub --
+#   the policy is harmless on a dead unit, and skipping it would need a
+#   reliable way to tell "stale" from "real" that this script does not have.
 # Why: The GitHub Actions installer's own generated unit carries no restart
 #   policy at all (Restart=no), so a crashed or OOM-killed runner stays
 #   offline until a human notices and restarts it by hand. The old fleet had
 #   this backfilled manually, host by host, but the fix was never folded
 #   into this script, so every host onboarded through it since has repeated
 #   the same gap -- confirmed missing on every reachable new-fleet host
-#   surveyed for this issue.
+#   surveyed for this issue. Idempotence is checked against the drop-in
+#   FILE's own content, not systemd's reported RestartUSec value -- the
+#   latter is a normalized/rounded display string whose exact format is not
+#   guaranteed across systemd versions, so comparing it literally would risk
+#   a false "changed" on every run on some host and defeat idempotence.
 # From: #1738
 cmd_runner_restart_policy() {
     [[ -d /etc/systemd/system ]] || { echo "ERROR: /etc/systemd/system not found." >&2; return 1; }
 
-    local unit_file unit dropin_dir dropin current_restart current_restart_sec
+    local unit_file unit dropin_dir dropin
     local found=0 changed=0
     for unit_file in /etc/systemd/system/actions.runner.*.service; do
         [[ -e "$unit_file" ]] || continue # no nullglob: literal pattern when no match
         found=1
         unit="$(basename "$unit_file")"
-        current_restart="$(systemctl show "$unit" -p Restart --value 2>/dev/null || true)"
-        current_restart_sec="$(systemctl show "$unit" -p RestartUSec --value 2>/dev/null || true)"
-        if [[ "$current_restart" == "on-failure" && "$current_restart_sec" == "10s" ]]; then
-            echo "  $unit: already Restart=on-failure/RestartSec=10, leaving as-is."
-            continue
-        fi
         dropin_dir="/etc/systemd/system/${unit}.d"
         dropin="${dropin_dir}/override.conf"
-        echo "  $unit: was Restart=${current_restart:-<unset>}/RestartUSec=${current_restart_sec:-<unset>} -- writing $dropin"
+        if [[ -f "$dropin" ]] && grep -qx 'Restart=on-failure' "$dropin" && grep -qx 'RestartSec=10' "$dropin"; then
+            echo "  $unit: $dropin already has Restart=on-failure/RestartSec=10, leaving as-is."
+            continue
+        fi
+        echo "  $unit: writing $dropin (Restart=on-failure, RestartSec=10)"
         sudo mkdir -p "$dropin_dir"
         printf '[Service]\nRestart=on-failure\nRestartSec=10\n' | sudo tee "$dropin" >/dev/null
         changed=1
