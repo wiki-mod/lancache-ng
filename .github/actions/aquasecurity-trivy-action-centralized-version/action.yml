@@ -58,10 +58,11 @@ inputs:
   trivy-config:
     description: >-
       Absolute path to a trivy-config.yaml. Must be computed by the caller
-      as ${{ github.action_path }}/trivy-config.yaml against the CALLER's
-      own action_path -- this wrapper's own github.action_path would
-      resolve to its own directory, not the caller's, so it cannot compute
-      this path itself.
+      as its own github dot action_path joined with trivy-config.yaml --
+      this wrapper's own action_path would resolve to its own directory,
+      not the caller's, so it cannot compute this path itself. (Written
+      without GitHub Actions expression syntax on purpose: this field's
+      template gets evaluated even as plain documentation prose.)
     required: false
     default: ""
 runs:
