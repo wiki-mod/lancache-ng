@@ -691,7 +691,7 @@ STUB
 
 @test "BASE_SHA's own image with a push-reuse-retagged (older) revision label is accepted directly, no ancestor substitution" {
     # What: BASE_SHA's retagged image is accepted, not walked.
-    # Why: without allow_reverse_ancestry, older labels look stale.
+    # Why: without allow_reverse_ancestry, old labels look stale.
     # From: Issue #1095 | PR #1734
     revision_map_stub="$BATS_TEST_TMPDIR/revision_map.sh"
     cat > "$revision_map_stub" <<STUB

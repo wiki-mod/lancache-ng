@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: enforces every pinned Action declares a current runtime.
+# What: enforces every pinned Action uses a current runtime.
 # Why: issue #799 was found reactively, one pin at a time.
 # From: Issue #1095 | PR #1734
 #
@@ -108,6 +108,10 @@ fi
 scan_files=("${workflow_files[@]}" "${local_action_files[@]}")
 
 failures=0
+# What: counts extraction failures, a subset of $failures.
+# Why: these aren't pinned-action or field failures.
+# From: Issue #1095 | PR #1734
+extraction_failures=0
 
 fail() {
   printf '::error::%s\n' "$1" >&2
@@ -134,7 +138,7 @@ is_external_action_ref() {
 }
 
 # What: composite action.yml can't use a YAML anchor/alias.
-# Why: composite manifests reject anchors; workflows allow them.
+# Why: anchors fail in composites, work in workflows.
 # From: Issue #1095 | PR #1734
 is_workflow_file() {
   local candidate="$1"
@@ -199,6 +203,7 @@ for scan_file in "${scan_files[@]}"; do
       anchor_name="${BASH_REMATCH[1]}"
       if [ -z "${yaml_anchors[$anchor_name]+x}" ]; then
         fail "'$scan_file' uses unresolved YAML alias '*$anchor_name' in a uses: step."
+        extraction_failures=$((extraction_failures + 1))
         continue
       fi
       resolved_value="${yaml_anchors[$anchor_name]}"
@@ -217,6 +222,7 @@ mapfile -t uses_values < <(
 
 if [ "${#uses_values[@]}" -eq 0 ]; then
   fail "Found no 'uses:' step directives in any of ${scan_files[*]} -- check the extraction pattern in this script."
+  extraction_failures=$((extraction_failures + 1))
 fi
 
 referencing_files() {
@@ -275,7 +281,7 @@ for entry in "${uses_literal_entries[@]}"; do
 done
 
 # What: rejects a workflow file repeating one `uses:` ref.
-# Why: an anchor can collapse duplicates only in workflow files.
+# Why: an anchor collapses duplicates in workflows only.
 # From: Issue #1095 | PR #1734
 for exact_file_key in "${!literal_ref_counts_by_file[@]}"; do
   count="${literal_ref_counts_by_file[$exact_file_key]}"
@@ -287,8 +293,8 @@ for exact_file_key in "${!literal_ref_counts_by_file[@]}"; do
   fail "'$scan_file' repeats third-party action ref '$value' $count times. Collapse it to one maintenance point with a YAML anchor/alias."
 done
 
-# What: rejects an external action key pinned to multiple refs.
-# Why: the same dependency silently splits into different refs.
+# What: rejects an action key pinned to multiple refs.
+# Why: the same dependency splits into different refs.
 # From: Issue #1095 | PR #1734
 for action_key in "${!ref_counts_by_key[@]}"; do
   count="${ref_counts_by_key[$action_key]}"
@@ -302,8 +308,8 @@ for action_key in "${!ref_counts_by_key[@]}"; do
   fail "Third-party action '$action_key' is pinned to multiple refs across .github/**: ${ref_detail%; }. Keep one canonical ref per action key."
 done
 
-# What: rejects expression syntax in an action description: field.
-# Why: description: fields are template-evaluated, breaking jobs.
+# What: rejects expression syntax in a description: field.
+# Why: description: is template-evaluated, breaking jobs.
 # From: Issue #1095 | PR #1734
 for action_file in "${local_action_files[@]}"; do
   description_expression_hits="$(
@@ -544,8 +550,15 @@ for value in "${uses_values[@]}"; do
 done
 
 if [ "$failures" -gt 0 ]; then
-  printf '::error::check-action-node-versions: %d pinned action(s) or manifest field(s) failed. Each failure is printed above as its own ::error:: line naming the affected file or action ref and the reason -- read those, not this summary.
-' "$failures" >&2
+  pin_or_field_failures=$((failures - extraction_failures))
+  if [ "$pin_or_field_failures" -gt 0 ]; then
+    printf '::error::check-action-node-versions: %d pinned action(s) or manifest field(s) failed. Each failure is printed above as its own ::error:: line naming the affected file or action ref and the reason -- read those, not this summary.
+' "$pin_or_field_failures" >&2
+  fi
+  if [ "$extraction_failures" -gt 0 ]; then
+    printf '::error::check-action-node-versions: %d extraction problem(s) kept this scan from running fully -- see the ::error:: line(s) above naming the affected file.
+' "$extraction_failures" >&2
+  fi
   exit 1
 fi
 
