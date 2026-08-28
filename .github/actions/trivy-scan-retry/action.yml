@@ -83,14 +83,17 @@ inputs:
     required: false
     default: ""
 outputs:
-  db-unavailable:
+  db-status:
     description: >-
-      "true" only when every attempt failed with no report ever written
-      (the vulnerability DB itself never downloaded across all 4 tries) --
-      never "true" for a genuine vulnerability/secret finding, which always
-      writes a report before its attempt fails. "false" on overall success
-      too. See "Determine DB-unavailable vs genuine finding" step below.
-    value: ${{ steps.db-unavailable.outputs.value }}
+      Three-valued, never a boolean: "unavailable" when the final attempt
+      wrote no report AND no DB file exists (the DB never downloaded);
+      "available" when a report was written (genuine finding) or a DB was
+      present (some other pre-report error), and on overall success;
+      "unknown" when this action did not reach its own determination step
+      at all (timeout, cancellation, output-propagation failure). A
+      consumer must treat "unknown" as NOT-RUN -- never as recovery, never
+      as a finding. See "Determine DB status" step below.
+    value: ${{ steps.db-status.outputs.value }}
 runs:
   using: composite
   steps:
@@ -120,7 +123,8 @@ runs:
       run: rm -f "${{ steps.outpath.outputs.path }}"
 
     # What: writes one shared attempt-failure classifier script.
-    # Why: 4 identical copies previously diverged per attempt.
+    # Why: 4 identical copies previously diverged per attempt; a
+    #   missing report alone does not prove a DB-download failure.
     # From: Issue #1095
     - name: Prepare shared attempt-classifier script
       id: classify-script
@@ -133,12 +137,20 @@ runs:
         set -euo pipefail
         attempt="$1"
         report="$2"
+        cache_dir="${3:-}"
+        # Empty cache-dir means trivy-action used its own default.
+        if [ -z "$cache_dir" ]; then
+          cache_dir="${HOME}/.cache/trivy"
+        fi
         if [ -s "$report" ]; then
           echo "retryable=false" >> "$GITHUB_OUTPUT"
           echo "::warning::Trivy attempt $attempt failed but its report ('$report') was written -- a genuine finding or non-download error, not retryable." >&2
+        elif [ -s "$cache_dir/db/trivy.db" ]; then
+          echo "retryable=false" >> "$GITHUB_OUTPUT"
+          echo "::warning::Trivy attempt $attempt failed with no report, but the vulnerability DB IS present in '$cache_dir/db' -- not a DB-download failure, some other pre-report error (target-image pull/auth, config, scanner crash)." >&2
         else
           echo "retryable=true" >> "$GITHUB_OUTPUT"
-          echo "::warning::Trivy attempt $attempt failed with no report written to '$report' -- classified as a DB-download failure." >&2
+          echo "::warning::Trivy attempt $attempt failed with no report and no DB file in '$cache_dir/db' -- classified as a DB-download failure." >&2
         fi
         CLASSIFY
         echo "path=$script" >> "$GITHUB_OUTPUT"
@@ -198,7 +210,7 @@ runs:
       id: classify1
       if: steps.attempt1.outcome == 'failure'
       shell: bash
-      run: bash "${{ steps.classify-script.outputs.path }}" 1 "${{ steps.outpath.outputs.path }}"
+      run: bash "${{ steps.classify-script.outputs.path }}" 1 "${{ steps.outpath.outputs.path }}" "${{ inputs.cache-dir }}"
 
     - name: Wait before retry 1
       if: steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true'
@@ -252,7 +264,7 @@ runs:
       id: classify2
       if: steps.attempt2.outcome == 'failure'
       shell: bash
-      run: bash "${{ steps.classify-script.outputs.path }}" 2 "${{ steps.outpath.outputs.path }}"
+      run: bash "${{ steps.classify-script.outputs.path }}" 2 "${{ steps.outpath.outputs.path }}" "${{ inputs.cache-dir }}"
 
     - name: Wait before retry 2
       if: >-
@@ -313,7 +325,7 @@ runs:
       id: classify3
       if: steps.attempt3.outcome == 'failure'
       shell: bash
-      run: bash "${{ steps.classify-script.outputs.path }}" 3 "${{ steps.outpath.outputs.path }}"
+      run: bash "${{ steps.classify-script.outputs.path }}" 3 "${{ steps.outpath.outputs.path }}" "${{ inputs.cache-dir }}"
 
     - name: Wait before retry 3
       if: >-
@@ -381,7 +393,7 @@ runs:
       id: classify4
       if: steps.attempt4.outcome == 'failure'
       shell: bash
-      run: bash "${{ steps.classify-script.outputs.path }}" 4 "${{ steps.outpath.outputs.path }}"
+      run: bash "${{ steps.classify-script.outputs.path }}" 4 "${{ steps.outpath.outputs.path }}" "${{ inputs.cache-dir }}"
 
     # What: Prints the report file's content to the job log, table format
     # only.
@@ -418,19 +430,17 @@ runs:
         echo "::error::All Trivy scan attempts for image-ref '${{ inputs.image-ref }}' failed." >&2
         exit 1
 
-    # What: exposes overall DB-unavailability as this output.
-    # Why: classify4's own retryable value alone decides it once
-    #   reached; if classify4 never ran, an earlier classify already
-    #   found a real report, so the empty case means "not unavailable".
+    # What: emits db-status as unavailable or available.
+    # Why: a consumer must tell "not run" from "recovered".
     # From: Issue #1095
-    - name: Determine DB-unavailable vs genuine finding
-      id: db-unavailable
+    - name: Determine DB status
+      id: db-status
       if: always()
       shell: bash
       run: |
         set -euo pipefail
         if [[ "${{ steps.classify4.outputs.retryable }}" == "true" ]]; then
-          echo "value=true" >> "$GITHUB_OUTPUT"
+          echo "value=unavailable" >> "$GITHUB_OUTPUT"
         else
-          echo "value=false" >> "$GITHUB_OUTPUT"
+          echo "value=available" >> "$GITHUB_OUTPUT"
         fi

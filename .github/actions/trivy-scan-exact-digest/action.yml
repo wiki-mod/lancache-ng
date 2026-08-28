@@ -55,13 +55,12 @@ inputs:
     default: ""
 
 outputs:
-  db-unavailable:
+  db-status:
     description: |
-      What: forwards trivy-scan-retry's own db-unavailable output.
-      Why: "true" only for DB-download failure, never a genuine finding --
-        see that action's own output for the full contract.
+      What: forwards trivy-scan-retry's own db-status output.
+      Why: three-valued; empty here means "unknown", never recovery.
       From: Issue #1095
-    value: ${{ steps.scan.outputs.db-unavailable }}
+    value: ${{ steps.scan.outputs.db-status }}
 
 runs:
   using: composite
