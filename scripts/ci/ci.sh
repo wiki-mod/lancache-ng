@@ -18,12 +18,17 @@ CI_SH_VERSION="0.1.0"
 readonly CI_FULL_GIT_SHA_REGEX='^[0-9a-f]{40}$'
 readonly CI_FULL_OCI_DIGEST_REGEX='^sha256:[0-9a-f]{64}$'
 
-ci_die() {
-    # What: prints an error to stderr and exits non-zero.
-    # Why: one exit point keeps error formatting consistent.
+# What: collects every failure so the run can summarize them.
+# Why: a reader must never scroll back to find what failed.
+# From: Issue #1683
+declare -ag CI_FAILURES=()
+
+ci_annotate() {
+    # What: emits a GitHub ::error::/::warning:: annotation.
+    # Why: puts the cause in the job summary, not just the log.
     # From: Issue #1683
-    printf 'ci.sh: error: %s\n' "$*" >&2
-    exit 1
+    local level="$1"; shift
+    printf '::%s::%s\n' "$level" "$*" >&2
 }
 
 ci_log() {
@@ -31,6 +36,58 @@ ci_log() {
     # Why: §79 requires every CI decision to be justified.
     # From: Issue #1683
     printf 'ci.sh: %s\n' "$*" >&2
+}
+
+ci_report_failure() {
+    # What: reports a failure with expected vs. actual.
+    # Why: an exit code alone never says what actually went wrong.
+    # From: Issue #1683
+    local check="$1" subject="$2" expected="$3" actual="$4" remedy="${5:-}"
+    local line="$check failed for '$subject': expected $expected, got $actual"
+    [[ -n "$remedy" ]] && line="$line -- fix: $remedy"
+    CI_FAILURES+=("$line")
+    ci_annotate error "$line"
+}
+
+ci_failure_summary() {
+    # What: prints every recorded failure, then returns non-zero.
+    # Why: the reader sees all causes, not just the first.
+    # From: Issue #1683
+    (( ${#CI_FAILURES[@]} == 0 )) && return 0
+    printf '\n=== ci.sh: %d failure(s) ===\n' "${#CI_FAILURES[@]}" >&2
+    local f
+    for f in "${CI_FAILURES[@]}"; do
+        printf '  - %s\n' "$f" >&2
+    done
+    [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && {
+        printf '### ci.sh: %d failure(s)\n\n' "${#CI_FAILURES[@]}" >> "$GITHUB_STEP_SUMMARY"
+        for f in "${CI_FAILURES[@]}"; do
+            printf -- '- %s\n' "$f" >> "$GITHUB_STEP_SUMMARY"
+        done
+    }
+    return 1
+}
+
+ci_die() {
+    # What: annotates the cause, then exits non-zero.
+    # Why: a bare exit 1 leaves the reader with no cause at all.
+    # From: Issue #1683
+    ci_annotate error "ci.sh: $*"
+    printf 'ci.sh: error: %s\n' "$*" >&2
+    exit 1
+}
+
+ci_run_checked() {
+    # What: runs a command, naming it if it exits non-zero.
+    # Why: §68 -- never pass a foreign exit code up unexplained.
+    # From: Issue #1683
+    local label="$1"; shift
+    local rc=0
+    "$@" || rc=$?
+    (( rc == 0 )) && return 0
+    ci_annotate error "$label failed (exit $rc): $*"
+    printf 'ci.sh: %s failed (exit %d): %s\n' "$label" "$rc" "$*" >&2
+    return "$rc"
 }
 
 # What: repo root, resolved relative to this file's location.
@@ -389,10 +446,175 @@ ci_semantic_diff_is_noop() {
 # ============================================================
 # IDENTITY ENGINE
 # ============================================================
+#
+# What: content-derived identities, one per domain (§14).
+# Why: a commit SHA answers "when", never "is this the same".
+# From: Issue #1683
+
+# What: toolchain identity, supplied by the caller.
+# Why: §16 folds it in; the repo cannot derive it.
+# From: Issue #1683
+CI_TOOLCHAIN_IDENTITY="${CI_TOOLCHAIN_IDENTITY:-unset}"
+
+# What: resolved base-image digests, newline-separated (§17).
+# Why: mutable tags must be pinned before hashing.
+# From: Issue #1683
+CI_BASE_IMAGE_DIGESTS="${CI_BASE_IMAGE_DIGESTS:-}"
+
+ci_path_identity() {
+    # What: prints "<git-mode> <normalized-content-hash>" for $1.
+    # Why: mode and content together are the file's real identity.
+    # From: Issue #1683
+    local path="$1" mode
+    mode="$(git ls-files -s -- "$path" | awk '{print $1}')"
+    [[ -n "$mode" ]] || ci_die "not a tracked file: $path"
+    printf '%s %s\n' "$mode" "$(ci_content_hash "$path" "$mode")"
+}
+
+ci_service_input_paths() {
+    # What: prints service $1's tracked build-input paths, sorted.
+    # Why: a stable order keeps the hash reproducible.
+    # From: Issue #1683
+    ci_service_input_entries "$1" | cut -f2
+}
+
+ci_service_input_entries() {
+    # What: prints "<mode>\t<path>" per build input of service $1.
+    # Why: one git call for all modes; per-file calls are slow.
+    # From: Issue #1683
+    local service="$1"
+    ci_require_service "$service"
+    {
+        git ls-files -s -- "${CI_SERVICE_CONTEXT[$service]}"
+        local pair
+        while IFS= read -r pair; do
+            [[ -z "$pair" ]] && continue
+            git ls-files -s -- "${pair#*=}"
+        done < <(ci_service_external_contexts "$service")
+    } | awk -F'\t' '{split($1, m, " "); print m[1] "\t" $2}' | sort -u -t$'\t' -k2,2
+}
+
+ci_normalize_many() {
+    # What: normalizes every path in entries file $1 in one pass.
+    # Why: a subprocess per file made one identity take ~12s.
+    # From: Issue #1683
+    local entries="$1"
+    [[ -s "$entries" ]] || return 0
+    cut -f2 "$entries" | tr '\n' '\0' | xargs -0 awk -v entries="$entries" '
+        BEGIN {
+            FS = "\t"
+            while ((getline line < entries) > 0) {
+                split(line, parts, "\t")
+                mode[parts[2]] = parts[1]
+            }
+            close(entries)
+            FS = "\n"
+        }
+        FNR == 1 {
+            is_yaml = (FILENAME ~ /\.ya?ml$/)
+            in_literal = 0
+            printf "=== %s %s\n", FILENAME, mode[FILENAME]
+            first_line = 1
+        }
+        {
+            raw = $0
+            sub(/\r$/, "", raw)
+        }
+        !is_yaml && first_line { first_line = 0; print raw; next }
+        {
+            first_line = 0
+            match(raw, /^[ ]*/)
+            indent = RLENGTH
+            is_blank = (raw ~ /^[ ]*$/)
+        }
+        is_yaml && in_literal {
+            if (is_blank || indent > literal_indent) { print raw; next }
+            in_literal = 0
+        }
+        is_yaml && !is_blank && raw ~ /:[ ]*[|>][+-]?[0-9]*[ ]*(#.*)?$/ {
+            literal_indent = indent
+            in_literal = 1
+            print raw
+            next
+        }
+        {
+            content = raw
+            sub(/^[ \t]*/, "", content)
+        }
+        content == "" { next }
+        substr(content, 1, 1) == "#" { next }
+        { print raw }
+    '
+}
+
+ci_build_identity() {
+    # What: prints service $1's build identity for platform $2.
+    # Why: §16 -- content, platform, toolchain, pinned bases only.
+    # From: Issue #1683
+    local service="$1" platform="$2"
+    ci_require_service "$service"
+    [[ -n "$platform" ]] || ci_die "ci_build_identity: platform is required for $service"
+    local entries
+    entries="$(mktemp)"
+    ci_service_input_entries "$service" > "$entries"
+    {
+        printf 'service=%s\n' "$service"
+        printf 'platform=%s\n' "$platform"
+        printf 'toolchain=%s\n' "$CI_TOOLCHAIN_IDENTITY"
+        printf 'bases=%s\n' "$CI_BASE_IMAGE_DIGESTS"
+        ci_normalize_many "$entries"
+    } | sha256sum | cut -d' ' -f1
+    rm -f "$entries"
+}
+
+ci_test_identity() {
+    # What: prints service $1's test identity (§14.3).
+    # Why: §29 -- tests re-run on a test change, without a build.
+    # From: Issue #1683
+    local service="$1" path
+    ci_require_service "$service"
+    {
+        printf 'service=%s\n' "$service"
+        while IFS= read -r path; do
+            [[ -n "$path" ]] || continue
+            printf '%s %s\n' "$path" "$(ci_path_identity "$path")"
+        done < <(git ls-files -- 'tests/' 'scripts/ci/ci.bats')
+    } | sha256sum | cut -d' ' -f1
+}
+
+ci_validation_identity() {
+    # What: prints the validation identity for digest $1 (§14.4).
+    # Why: §30 -- a policy change rescans, never rebuilds.
+    # From: Issue #1683
+    local digest="$1"
+    ci_validate_full_oci_digest "$digest"
+    {
+        printf 'digest=%s\n' "$digest"
+        printf 'policy=%s\n' "${CI_VALIDATION_POLICY_ID:-unset}"
+    } | sha256sum | cut -d' ' -f1
+}
 
 # ============================================================
 # ARTIFACT RESOLVER
 # ============================================================
+#
+# What: the six resolver states of §18.
+# Why: §2.3 -- UNKNOWN is never MISSING_CONFIRMED.
+# From: Issue #1683
+
+readonly CI_STATE_PRESENT_ACCEPTED="PRESENT_ACCEPTED"
+readonly CI_STATE_MISSING_CONFIRMED="MISSING_CONFIRMED"
+readonly CI_STATE_BUILD_IN_PROGRESS="BUILD_IN_PROGRESS"
+readonly CI_STATE_PRODUCED_UNVERIFIED="PRODUCED_UNVERIFIED"
+readonly CI_STATE_MISMATCH="MISMATCH"
+readonly CI_STATE_UNKNOWN="UNKNOWN"
+
+ci_state_permits_build() {
+    # What: true only for MISSING_CONFIRMED.
+    # Why: §19 -- only a confirmed absence may build.
+    # From: Issue #1683
+    [[ "$1" == "$CI_STATE_MISSING_CONFIRMED" ]]
+}
 
 # ============================================================
 # ACCEPTANCE INDEX
@@ -436,6 +658,38 @@ ci_retry_build_op() {
 # ============================================================
 # VERIFY / TEST / SCAN
 # ============================================================
+
+ci_run_bats() {
+    # What: runs bats, then re-reports every 'not ok' at the end.
+    # Why: a bare exit code buries failures thousands of lines up.
+    # From: Issue #1683
+    local logfile rc=0
+    logfile="$(mktemp)"
+
+    bats --tap "$@" 2>&1 | tee "$logfile"
+    rc="${PIPESTATUS[0]}"
+
+    local failed
+    failed="$(grep -c '^not ok' "$logfile" || true)"
+
+    if (( failed > 0 )); then
+        printf '\n=== bats: %d failing test(s) ===\n' "$failed" >&2
+        local line
+        while IFS= read -r line; do
+            printf '  - %s\n' "$line" >&2
+            ci_annotate error "bats: $line"
+        done < <(grep '^not ok' "$logfile")
+        [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && {
+            printf '### bats: %d failing test(s)\n\n' "$failed" >> "$GITHUB_STEP_SUMMARY"
+            grep '^not ok' "$logfile" | sed 's/^/- /' >> "$GITHUB_STEP_SUMMARY"
+        }
+    elif (( rc != 0 )); then
+        ci_annotate error "bats exited $rc with no failing test -- suite or harness error"
+    fi
+
+    rm -f "$logfile"
+    return "$rc"
+}
 
 # ============================================================
 # ASSEMBLY

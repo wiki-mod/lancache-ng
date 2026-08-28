@@ -77,6 +77,247 @@ setup() {
 }
 
 # ============================================================
+# ERROR REPORTING
+# ============================================================
+
+# What: a reported failure names expected and actual values.
+# Why: an exit code alone never says what went wrong.
+# From: Issue #1683
+@test "errors: ci_report_failure states expected and actual" {
+    ci_report_failure "digest check" "proxy" "sha256:aa" "sha256:bb"
+    [[ "${CI_FAILURES[0]}" == *"proxy"* ]]
+    [[ "${CI_FAILURES[0]}" == *"expected sha256:aa"* ]]
+    [[ "${CI_FAILURES[0]}" == *"got sha256:bb"* ]]
+}
+
+# What: a reported failure emits a GitHub error annotation.
+# Why: the cause must reach the job summary, not just the log.
+# From: Issue #1683
+@test "errors: ci_report_failure emits a ::error:: annotation" {
+    run ci_report_failure "digest check" "proxy" "sha256:aa" "sha256:bb"
+    [[ "$output" == *"::error::"* ]]
+}
+
+# What: an optional remedy is included in the failure line.
+# Why: a fail-closed path must say what to do about it.
+# From: Issue #1683
+@test "errors: ci_report_failure includes a remedy when given" {
+    ci_report_failure "mode check" "ci.sh" "100755" "100644" "chmod +x"
+    [[ "${CI_FAILURES[0]}" == *"fix: chmod +x"* ]]
+}
+
+# What: the summary lists every failure and returns non-zero.
+# Why: the reader must see all causes, not just one.
+# From: Issue #1683
+@test "errors: ci_failure_summary lists all failures and fails" {
+    ci_report_failure "check A" "svc1" "x" "y"
+    ci_report_failure "check B" "svc2" "p" "q"
+    run ci_failure_summary
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"2 failure(s)"* ]]
+    [[ "$output" == *"check A"* ]]
+    [[ "$output" == *"check B"* ]]
+}
+
+# What: an empty failure list summarizes as success.
+# Why: reporting must not turn a clean run red.
+# From: Issue #1683
+@test "errors: ci_failure_summary succeeds when nothing failed" {
+    run ci_failure_summary
+    [ "$status" -eq 0 ]
+}
+
+# What: a failing command is named with its exit code.
+# Why: §68 -- no unexplained foreign exit codes.
+# From: Issue #1683
+@test "errors: ci_run_checked names the failing command and code" {
+    run ci_run_checked "smoke test" bash -c 'exit 3'
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"smoke test"* ]]
+    [[ "$output" == *"exit 3"* ]]
+}
+
+# What: a succeeding command produces no error output.
+# Why: the wrapper must stay silent on the happy path.
+# From: Issue #1683
+@test "errors: ci_run_checked is silent on success" {
+    run ci_run_checked "smoke test" true
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"::error::"* ]]
+}
+
+# What: ci_die annotates the cause before exiting non-zero.
+# Why: a bare exit 1 leaves the reader with no cause at all.
+# From: Issue #1683
+@test "errors: ci_die annotates before exiting" {
+    run ci_die "registry unreachable"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"::error::"* ]]
+    [[ "$output" == *"registry unreachable"* ]]
+}
+
+# ============================================================
+# IDENTITY ENGINE
+# ============================================================
+
+# What: a file's identity carries its mode and hash.
+# Why: identity must track mode, not content alone (§16).
+# From: Issue #1683
+@test "identity: ci_path_identity returns mode and content hash" {
+    run ci_path_identity "scripts/ci/ci.sh"
+    [ "$status" -eq 0 ]
+    [[ "$output" == "100755 "* ]]
+}
+
+# What: an untracked path is rejected, not hashed.
+# Why: hashing a missing file would fake an identity.
+# From: Issue #1683
+@test "identity: ci_path_identity dies on an untracked path" {
+    run ci_path_identity "no/such/file.txt"
+    [ "$status" -ne 0 ]
+}
+
+# What: a service's input paths include its own context files.
+# Why: the build identity is only as complete as this list.
+# From: Issue #1683
+@test "identity: ci_service_input_paths covers the service context" {
+    run ci_service_input_paths proxy
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"services/proxy/Dockerfile"* ]]
+}
+
+# What: proxy's input paths include dns's cdn-domains.txt.
+# Why: §13 -- a named external context is a real build input.
+# From: Issue #1683
+@test "identity: ci_service_input_paths covers external contexts" {
+    run ci_service_input_paths proxy
+    [[ "$output" == *"services/dns/cdn-domains.txt"* ]]
+}
+
+# What: a build identity is a full 64-hex-char sha256 value.
+# Why: §15 -- identities are never abbreviated anywhere.
+# From: Issue #1683
+@test "identity: ci_build_identity returns a full sha256 hex value" {
+    run ci_build_identity proxy linux/amd64
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^[0-9a-f]{64}$ ]]
+}
+
+# What: the same inputs produce the same identity twice.
+# Why: an unstable identity never matches a baseline.
+# From: Issue #1683
+@test "identity: ci_build_identity is reproducible" {
+    [ "$(ci_build_identity proxy linux/amd64)" = "$(ci_build_identity proxy linux/amd64)" ]
+}
+
+# What: branch, PR and run id do not change it.
+# Why: §16 names these as excluded from the build identity.
+# From: Issue #1683
+@test "identity: ci_build_identity ignores branch, PR and run id" {
+    local before after
+    before="$(ci_build_identity proxy linux/amd64)"
+    export GITHUB_REF="refs/heads/some-other-branch"
+    export GITHUB_RUN_ID="999999"
+    export GITHUB_SHA="0000000000000000000000000000000000000000"
+    export PR_NUMBER="4242"
+    after="$(ci_build_identity proxy linux/amd64)"
+    [ "$before" = "$after" ]
+}
+
+# What: two platforms of one service get different identities.
+# Why: §44 -- each platform is its own artifact.
+# From: Issue #1683
+@test "identity: ci_build_identity differs per platform" {
+    [ "$(ci_build_identity proxy linux/amd64)" != "$(ci_build_identity proxy linux/arm64)" ]
+}
+
+# What: two different services get different identities.
+# Why: a collision would let one service reuse another.
+# From: Issue #1683
+@test "identity: ci_build_identity differs per service" {
+    [ "$(ci_build_identity proxy linux/amd64)" != "$(ci_build_identity dns linux/amd64)" ]
+}
+
+# What: a changed toolchain changes the identity.
+# Why: §16 folds it in; a compiler bump is real.
+# From: Issue #1683
+@test "identity: ci_build_identity folds in the toolchain identity" {
+    local before after
+    before="$(ci_build_identity proxy linux/amd64)"
+    CI_TOOLCHAIN_IDENTITY="rust-1.99.0"
+    after="$(ci_build_identity proxy linux/amd64)"
+    [ "$before" != "$after" ]
+}
+
+# What: a changed base digest changes the identity.
+# Why: §17 -- a pinned base is part of what the artifact is.
+# From: Issue #1683
+@test "identity: ci_build_identity folds in base image digests" {
+    local before after
+    before="$(ci_build_identity proxy linux/amd64)"
+    CI_BASE_IMAGE_DIGESTS="sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    after="$(ci_build_identity proxy linux/amd64)"
+    [ "$before" != "$after" ]
+}
+
+# What: a build identity requires a platform argument.
+# Why: without it, arches would collide silently.
+# From: Issue #1683
+@test "identity: ci_build_identity requires a platform" {
+    run ci_build_identity proxy ""
+    [ "$status" -ne 0 ]
+}
+
+# What: a policy change changes the validation identity.
+# Why: §30 -- new policy forces a rescan of the same digest.
+# From: Issue #1683
+@test "identity: ci_validation_identity tracks the policy id" {
+    local digest="sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    local before after
+    CI_VALIDATION_POLICY_ID="policy-1"
+    before="$(ci_validation_identity "$digest")"
+    CI_VALIDATION_POLICY_ID="policy-2"
+    after="$(ci_validation_identity "$digest")"
+    [ "$before" != "$after" ]
+}
+
+# What: the validation identity rejects an abbreviated digest.
+# Why: §15 applies to every identity input.
+# From: Issue #1683
+@test "identity: ci_validation_identity rejects a short digest" {
+    run ci_validation_identity "sha-deadbeef"
+    [ "$status" -ne 0 ]
+}
+
+# ============================================================
+# RESOLVER STATES
+# ============================================================
+
+# What: only MISSING_CONFIRMED authorizes a build.
+# Why: §19 -- a confirmed absence is the sole trigger.
+# From: Issue #1683
+@test "resolver: only MISSING_CONFIRMED permits a build" {
+    ci_state_permits_build "$CI_STATE_MISSING_CONFIRMED"
+}
+
+# What: UNKNOWN never authorizes a build.
+# Why: §2.3 -- uncertainty is not a licence to build.
+# From: Issue #1683
+@test "resolver: UNKNOWN does not permit a build" {
+    ! ci_state_permits_build "$CI_STATE_UNKNOWN"
+}
+
+# What: no other resolver state authorizes a build.
+# Why: §18's remaining states each have their own handling.
+# From: Issue #1683
+@test "resolver: no other state permits a build" {
+    ! ci_state_permits_build "$CI_STATE_PRESENT_ACCEPTED"
+    ! ci_state_permits_build "$CI_STATE_BUILD_IN_PROGRESS"
+    ! ci_state_permits_build "$CI_STATE_PRODUCED_UNVERIFIED"
+    ! ci_state_permits_build "$CI_STATE_MISMATCH"
+}
+
+# ============================================================
 # RETRY CLASSIFIER
 # ============================================================
 
