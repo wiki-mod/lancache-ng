@@ -34,7 +34,7 @@ runs:
 
     # What: Checks workflow line/byte/run-block limits
     # Why: Enforces AG-CI-021 policy
-    # From: Issue #1095 | Issue #1535
+    # From: Issue #1535 | PR #1575
     - name: Check workflow files stay under the line/byte/run-block ceilings
       shell: bash
       run: >-

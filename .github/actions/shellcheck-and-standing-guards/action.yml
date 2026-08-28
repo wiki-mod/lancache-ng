@@ -15,7 +15,7 @@ runs:
   steps:
     # What: Nested timeouts guard against actionlint deadlock.
     # Why: Embedded shellcheck can hang in Go deadlock state.
-    # From: PR #1383 | PR #1523
+    # From: Issue #1255 | PR #1258
     - name: Run ShellCheck and ActionLint
       shell: bash
       run: |
@@ -98,7 +98,7 @@ runs:
     - name: Check build-tools smoke-test coverage
       # What: Verifies build-tools image tools vs. Dockerfile.
       # Why: Tools drift silently without smoke-test coverage.
-      # From: Issue #790, Issue #791 | PR #1022
+      # From: Issue #822 | PR #1022
       shell: bash
       run: |
         set -euo pipefail
@@ -140,7 +140,7 @@ runs:
     - name: Check github.repository case-safety in GHCR paths
       # What: Checks repository case for GHCR lowercase requirement.
       # Why: github.repository is not guaranteed lowercase for GHCR.
-      # From: Issue #1095 (G1) | Issue #1504
+      # From: Issue #1095 (G1) | PR #1597
       shell: bash
       run: |
         set -euo pipefail
