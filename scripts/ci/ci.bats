@@ -1045,3 +1045,25 @@ setup() {
 @test "acceptance O: ci.sh contains no abbreviated SHA or digest" {
     ! grep -nE "['\"]sha-[0-9a-f]{6,8}['\"]|['\"][0-9a-f]{7}['\"]" "$repo_root/scripts/ci/ci.sh"
 }
+
+# ============================================================
+# STANDING CHECKS
+# ============================================================
+
+# What: every listed standing-check script exists on disk.
+# Why: a renamed/removed script must fail loudly, not silently.
+# From: Issue #1683
+@test "standing checks: every listed script exists" {
+    local script
+    for script in "${CI_STANDING_CHECKS[@]}"; do
+        [ -f "$repo_root/$script" ]
+    done
+}
+
+# What: the checks command runs to completion on a clean tree.
+# Why: this repo's own tree is the checks' first real fixture.
+# From: Issue #1683
+@test "standing checks: ci.sh checks runs on this repo's tree" {
+    run bash "$repo_root/scripts/ci/ci.sh" checks
+    [ "$status" -eq 0 ]
+}

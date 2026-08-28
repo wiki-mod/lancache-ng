@@ -1242,6 +1242,45 @@ ci_cmd_release() {
 }
 
 # ============================================================
+# STANDING CHECKS
+# ============================================================
+#
+# What: one call site for every kept repo-wide guard script.
+# Why: consolidates 9 separate build-push.yml docker-run steps.
+# From: Issue #1683
+
+# What: kept guards with no explicit-file mode; run whole-repo.
+# Why: each is diff-scoped internally or is inherently repo-wide.
+# From: Issue #1683
+readonly -a CI_STANDING_CHECKS=(
+    scripts/tracked/check-naming-consistency.sh
+    scripts/tracked/check-workflow-service-lists.sh
+    scripts/tracked/check-vex-drift.sh
+    scripts/untracked/check-netdata-curl-pin.sh
+    scripts/tracked/check-idempotence-test-coverage.sh
+    scripts/tracked/check-bats-path-filter-coverage.sh
+    scripts/untracked/check-setup-prompt-drift.sh
+    scripts/untracked/check-proxy-cache-env-doc-drift.sh
+    scripts/tracked/check-logging-matrix.sh
+)
+
+ci_cmd_checks() {
+    # What: runs every standing check, reporting all failures.
+    # Why: one aggregate verdict instead of 9 separate CI jobs.
+    # From: Issue #1683
+    local script name
+    for script in "${CI_STANDING_CHECKS[@]}"; do
+        name="$(basename "$script")"
+        [[ -f "$CI_REPO_ROOT/$script" ]] || ci_die "missing standing check: $script"
+        if ! bash "$CI_REPO_ROOT/$script"; then
+            ci_report_failure "standing check" "$name" "exit 0" "non-zero" \
+                "see this check's own output above for the actual cause"
+        fi
+    done
+    ci_failure_summary
+}
+
+# ============================================================
 # GC
 # ============================================================
 #
@@ -1585,6 +1624,7 @@ Commands:
   nightly                      Promote the desired stack to nightly.
   release <channel>            Promote an accepted stack to a release.
   gc [--execute]               Report unreachable artifacts.
+  checks                       Run every kept standing-check script.
   test [path...]               Run bats, summarizing every failure.
   version                      Print ci.sh's own version.
 USAGE
@@ -1610,6 +1650,7 @@ ci_main() {
         nightly) ci_cmd_nightly ;;
         release) ci_cmd_release "${1:?release: channel required}" ;;
         gc) ci_cmd_gc "${1:-report}" ;;
+        checks) ci_cmd_checks ;;
         test) ci_run_bats "${@:-$CI_SH_DIR/ci.bats}" ;;
         version) printf '%s\n' "$CI_SH_VERSION" ;;
         -h|--help|help) ci_usage ;;
