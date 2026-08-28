@@ -1,10 +1,8 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: read-only GHCR audit for the ordinary sha-* retention policy.
-# Why: a dedicated checkout directory and read-only permissions keep PR code
-# from ever inheriting the destructive credentials used by the operational
-# PR/orphan reaper.
+# What: read-only GHCR audit for standard sha-* retention policy.
+# Why: prevents PR code access to reaper credentials via read-only.
 # From: Issue #1095 | PR #1501.
 name: SHA Retention Audit
 
@@ -33,10 +31,8 @@ concurrency:
 
 jobs:
   audit:
-    # What: skips this job for a fork PR instead of running a weaker mode.
-    # Why: a fork PR cannot hold repository package-read permissions, so a
-    # weaker fallback would look equivalent in the check list while proving
-    # nothing.
+    # What: skips job for fork PR instead of running weaker mode.
+    # Why: fork PRs lack package-read perms; fallback would be false.
     # From: Issue #1095 | PR #1501.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, linux, lancache, lancache-light]
@@ -49,8 +45,7 @@ jobs:
 
     steps:
       # What: guards then removes the dedicated audit checkout path.
-      # Why: the hardcoded expected-path check keeps this rm -rf from ever
-      # running against an unexpected value if AUDIT_CHECKOUT is misconfigured.
+      # Why: path validation prevents rm -rf on misconfigured checkout.
       # From: Issue #1095 | PR #1501.
       - name: Prepare dedicated audit checkout directory
         run: |
@@ -62,10 +57,8 @@ jobs:
           fi
           rm -rf -- "$AUDIT_CHECKOUT"
 
-      # What: full-history, credential-less checkout into a dedicated subpath.
-      # Why: sra_resolve_commit_prefix needs the whole Git history to rank
-      # sha-<commit> tags by ancestry; persist-credentials:false keeps this
-      # read-only job's checkout free of any push-capable token.
+      # What: full-history, credential-less checkout to subpath.
+      # Why: git history needed for commit ranking; no push token.
       # From: Issue #1095 | PR #1501.
       - name: Checkout full repository history for read-only audit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -74,10 +67,8 @@ jobs:
           persist-credentials: false
           path: f17-sha-retention-audit
 
-      # What: confirms checkout identity, current_dev availability, required
-      # files, and no stale skip-worktree entries.
-      # Why: a self-hosted runner can reuse a stale/incomplete working
-      # directory; this catches that before classification trusts it.
+      # What: confirms checkout identity, files, no skip-worktree state.
+      # Why: self-hosted runners may reuse stale dirs; gate errors.
       # From: Issue #1095 | PR #1501.
       - name: Verify isolated checkout identity and completeness
         working-directory: f17-sha-retention-audit
@@ -109,9 +100,8 @@ jobs:
             exit 1
           fi
 
-      # What: resolves the pinned build-tools image via the shared selector.
-      # Why: GHCR_RETRY_USERNAME/PASSWORD authenticate the pull against
-      # GHCR's much lower anonymous rate limit under concurrent CI load.
+      # What: resolves pinned build-tools image via shared selector.
+      # Why: GHCR_RETRY creds bypass anonymous rate limits on pulls.
       # From: Issue #1095 | PR #1501.
       - name: Select immutable build-tools image
         id: build_tools
@@ -130,10 +120,8 @@ jobs:
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
-      # What: runs syntax/lint/unit checks for the audit scripts inside the
-      # pinned build-tools container, never on the runner host directly.
-      # Why: AG-VAL-016 requires verification through build-tools since host
-      # tools are not guaranteed present or current.
+      # What: runs syntax/lint/unit checks for audit scripts in container.
+      # Why: AG-VAL-016 requires build-tools; host tools unpredictable.
       # From: Issue #1095 | PR #1501.
       - name: Validate audit implementation in build-tools
         working-directory: f17-sha-retention-audit
@@ -156,8 +144,8 @@ jobs:
               bash scripts/untracked/check-workflow-line-limit.sh
             '
 
-      # What: exports the runner.temp cache dir via GITHUB_ENV for later steps.
-      # Why: runner.temp is valid only in step context, not a job-level env: block.
+      # What: exports runner.temp cache dir via GITHUB_ENV.
+      # Why: runner.temp is step-scoped, not available at job level.
       # From: Issue #1095 | PR #1501.
       - name: Prepare rate-limit-aware API response cache directory
         env:
@@ -167,9 +155,8 @@ jobs:
           mkdir -p -- "$AUDIT_API_CACHE_DIR"
           echo "AUDIT_API_CACHE_DIR=$AUDIT_API_CACHE_DIR" >> "$GITHUB_ENV"
 
-      # What: restores the GHCR API cache via a run-scoped key with prefix fallback.
-      # Why: lets a nearby re-run reuse recent pages instead of spending fresh
-      # rate-limit budget; the script's own TTL check still gates freshness.
+      # What: restores GHCR API cache via run-scoped key with fallback.
+      # Why: re-runs reuse cached pages; TTL check enforces freshness.
       # From: Issue #1095 | PR #1501.
       - name: Restore GHCR API response cache
         uses: &actions_cache_restore_centraliced_versioning actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -179,9 +166,8 @@ jobs:
           restore-keys: |
             sha-retention-api-cache-
 
-      # What: exports the runner.temp classification-cache dir via GITHUB_ENV.
-      # Why: v1.2 point 4 -- same reasoning as the API response
-      # cache dir above (runner.temp is step-scoped only).
+      # What: exports runner.temp classification cache via GITHUB_ENV.
+      # Why: runner.temp step-scoped; export for access in later steps.
       # From: Issue #1585.
       - name: Prepare incremental classification cache directory
         env:
@@ -191,13 +177,8 @@ jobs:
           mkdir -p -- "$AUDIT_CLASSIFICATION_CACHE_DIR"
           echo "AUDIT_CLASSIFICATION_CACHE_DIR=$AUDIT_CLASSIFICATION_CACHE_DIR" >> "$GITHUB_ENV"
 
-      # What: restores the SQLite classification cache via a run-scoped key
-      # with prefix fallback, same rotating-key pattern as the API cache
-      # above (cache entries are immutable per key once saved).
-      # Why: a cache miss (first run, or no prior save reachable via the
-      # prefix) must fall through to a fresh full scan, not fail --
-      # sra_cache_init's idempotent CREATE TABLE IF NOT EXISTS is exactly
-      # that clean fallback once the audit script runs against an empty dir.
+      # What: restores the SQLite classification cache via run-scoped key.
+      # Why: cache miss falls through to fresh scan; idempotent create.
       # From: Issue #1585.
       - name: Restore SHA retention classification cache
         uses: *actions_cache_restore_centraliced_versioning # v6.1.0
@@ -207,12 +188,9 @@ jobs:
           restore-keys: |
             sha-retention-classification-cache-
 
-      # What: runs the real audit script against live GHCR data, read-only
-      # bind mount, with the API response cache and classification cache
-      # both mounted read-write.
-      # Why: only a live run against real package data (not bats fixtures)
-      # proves the classifier's ancestry/tag logic against the real registry.
-      # From: Issue #1095 | PR #1501 | Issue #1585.
+      # What: runs audit script against live GHCR data, read-only.
+      # Why: live data proves classifier logic; non-fixture verification.
+      # From: Issue #1585.
       - name: Run live protect-only GHCR audit
         working-directory: f17-sha-retention-audit
         env:
@@ -235,9 +213,7 @@ jobs:
             timeout --kill-after=30s 25m bash scripts/untracked/gc-sha-retention-audit.sh
 
       # What: saves the cache with if: always(), not only on success.
-      # Why: a failed/timed-out audit run should still keep whatever pages
-      # it fetched before failing, not discard that rate-limit-relevant
-      # progress.
+      # Why: preserve fetched pages even on failure; rate-limit-relevant.
       # From: Issue #1095 | PR #1501.
       - name: Save GHCR API response cache
         if: always()
@@ -246,10 +222,8 @@ jobs:
           path: ${{ env.AUDIT_API_CACHE_DIR }}
           key: sha-retention-api-cache-${{ github.run_id }}-${{ github.run_attempt }}
 
-      # What: saves the classification cache with if: always(), matching the
-      # API cache save's own reasoning above.
-      # Why: v1.2 point 4 -- a partial run still resolved a
-      # real prefix of this package's versions, worth keeping for next time.
+      # What: saves the classification cache with if: always().
+      # Why: partial runs resolve version prefixes; keep for re-runs.
       # From: Issue #1585.
       - name: Save SHA retention classification cache
         if: always()
@@ -259,8 +233,7 @@ jobs:
           key: sha-retention-classification-cache-${{ github.run_id }}-${{ github.run_attempt }}
 
       # What: removes the dedicated checkout path and verifies it is gone.
-      # Why: if: always() so a failed run still frees the runner's disk
-      # instead of accumulating stale checkouts across repeated failures.
+      # Why: if: always() frees disk on failure; avoid stale checkouts.
       # From: Issue #1095 | PR #1501.
       - name: Remove dedicated audit checkout directory
         if: always()

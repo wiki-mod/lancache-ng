@@ -2,32 +2,25 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: reaps closed PR, orphan, and over-budget sha-* GHCR versions.
-# Why: CI continuously creates immutable history and artifact closure, so
-# the registry needs a bounded retention collector rather than PR-only GC.
-# From: Issue #1095.
+# What: reaps closed PR, orphan, and over-budget sha-* GHCR versions
+# Why: CI creates unbounded immutable history; GC bounds retention
+# From: Issue #1095
 #
-# What: closed PRs reap promptly and an 8x/day schedule bounds normal growth.
-# Why: the delete-capable checkout is pinned below to a trusted merged ref,
-# never to feature-branch code, regardless of which event invoked the job.
-# From: Issue #1095.
+# What: 8x/day schedule promptly reaps closed PRs
+# Why: always uses trusted merged ref, never feature code
+# From: Issue #1095
 name: GHCR Retention GC
 
 on:
   pull_request:
     types: [closed]
-    # What: also matches current_dev, the active development branch.
-    # Why: without it, a closed current_dev PR misses this prompt reap and
-    # falls back to the 8x/day schedule sweep as its only cleanup path.
+    # What: also matches current_dev, the active development branch
+    # Why: closed current_dev PR would miss prompt reap without it
     # From: PR #1110
     branches: [master, current_dev, "release/**", "v[0-9]*"]
   schedule:
-    # What: sweep every 3 hours (8x/day) at :17 past the hour.
-    # Why: the capped max_deletions_per_service/_total limits mean one run
-    # cannot clear the existing backlog; running 8x/day instead of daily
-    # reaches the same total ceiling faster without raising per-run caps.
-    # Minute offset preserved from build-tools.yml's 03:23 refresh so the
-    # two scheduled jobs don't contend for the same runner.
+    # What: sweep every 3 hours (8x/day) at :17 past the hour
+    # Why: capped deletion limits require 8x/day to clear backlog
     # From: Issue #1585 | PR #1586
     - cron: "17 */3 * * *"
   workflow_dispatch:
@@ -40,9 +33,8 @@ on:
       concurrency:
         description: Packages processed in parallel.
         type: string
-        # What: starts supervised/manual sweeps with one package worker.
-        # Why: real 2026-08-17 dry-runs showed transient GitHub API failures even at
-        # five workers; one worker stays the conservative default while higher values remain opt-in.
+        # What: starts supervised/manual sweeps with one package worker
+        # Why: API fails at concurrency > 1; one worker is default
         # From: Issue #1585 | PR #1586
         default: "1"
       max_deletions_per_service:
@@ -56,22 +48,18 @@ on:
       minimum_age_seconds:
         description: Minimum version age before any deletion.
         type: string
-        # What: manual-dispatch default, mirrors GC_MIN_AGE_SECONDS's own default.
-        # Why: raised from 24h to 7 days (604800s) per the v1.2 plan.
+        # What: manual dispatch default mirrors GC_MIN_AGE_SECONDS
+        # Why: raised from 24h to 7 days (604800s) per spec
         # From: Issue #1585
         default: "604800"
 
-# What: no elevated `permissions:` block; deletion uses a separate PAT.
-# Why: GitHub's package-version-delete REST API requires a classic PAT with
-# read:packages+delete:packages -- the Actions-issued GITHUB_TOKEN cannot do
-# this regardless of any `packages: write` job permission.
+# What: no elevated permissions; deletion uses separate PAT
+# Why: package-delete API needs classic PAT, not GITHUB_TOKEN
 # From: PR #627
 permissions: {}
 
-# What: one shared concurrency group serializes every run;
-# `cancel-in-progress: false`, not the more common `true`.
-# Why: two concurrent sweeps exhausted the shared PAT rate limit; every run
-# is a full sweep (never "just PR <N>"), so a running one must finish.
+# What: one concurrency group serializes all runs
+# Why: two sweeps exhaust rate limit; full sweep must finish
 # From: PR #1443
 concurrency:
   group: gc-pr-staging-images
@@ -82,21 +70,18 @@ jobs:
     name: collect unprotected GHCR versions
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/current_dev'
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # What: gives the bounded package-parallel collector a 120-minute ceiling.
-    # Why: backlog-drain dispatches may legitimately process thousands of
-    # deletions while a stuck API/registry call still needs a hard stop.
-    # From: Issue #1095.
+    # What: 120-minute ceiling for bounded collector
+    # Why: backlog drains need timeout despite stuck API calls
+    # From: Issue #1095
     timeout-minutes: 120
     env:
-      # What: the collector checkout uses the protected PR base, current_dev, or default ref.
-      # Why: the delete-capable script itself never comes from a feature checkout;
-      # manual dispatch is additionally gated above to refs/heads/current_dev.
-      # From: Issue #1095.
+      # What: checkout uses protected PR base or default ref
+      # Why: never from feature code; gated to current_dev
+      # From: Issue #1095
       GC_CODE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || (github.event_name == 'workflow_dispatch' && 'current_dev' || github.event.repository.default_branch) }}
     steps:
-      # What: checks whether GHCR_PACKAGE_DELETE_PAT is configured.
-      # Why: minting this PAT is a deliberate admin action, not automatable;
-      # absent, this job degrades to a loud no-op instead of failing.
+      # What: checks whether GHCR_PACKAGE_DELETE_PAT is configured
+      # Why: admin-only; absent becomes loud no-op not failure
       # From: PR #627
       - name: Check for GHCR deletion credentials
         id: creds
@@ -111,9 +96,9 @@ jobs:
             echo "have-pat=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # What: preflight-checks every required collector path on GC_CODE_REF.
-      # Why: an incomplete trusted checkout must stop before delete-capable code runs.
-      # From: Issue #1095.
+      # What: preflight-check every required collector path
+      # Why: incomplete checkout must stop before delete code runs
+      # From: Issue #1095
       - name: Verify required collector paths exist on trusted ref
         id: script-check
         if: steps.creds.outputs.have-pat == 'true'
@@ -121,10 +106,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # What: read-only Contents-API existence check per required path,
-          # using GITHUB_TOKEN, not GHCR_PACKAGE_DELETE_PAT.
-          # Why: that PAT is scoped for package deletion, not repo reads;
-          # `--silent` discards the file body, only the HTTP status decides.
+          # What: read-only Contents-API check per required path
+          # Why: PAT scoped for deletion, not reads; GITHUB_TOKEN for status
           # From: Issue #1095 | PR #1528
           required_paths=(
             "scripts/untracked/gc-pr-staging-images.sh"
@@ -152,10 +135,9 @@ jobs:
             echo "scripts-present=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # What: sparse-checks out the collector, shared retention code, and manifest.
-      # Why: fetch-depth 0 supplies all producer-branch history needed to rank
-      # current_dev/master/release/v* roots while the narrow tree stays minimal.
-      # From: Issue #1095.
+      # What: sparse-check out collector and retention code
+      # Why: fetch-depth 0 gets history; narrow tree stays minimal
+      # From: Issue #1095
       - name: Checkout GHCR collector and retention planner
         if: steps.creds.outputs.have-pat == 'true' && steps.script-check.outputs.scripts-present == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -176,10 +158,9 @@ jobs:
             release/stack-images.yml
           sparse-checkout-cone-mode: false
 
-      # What: resolves the pinned build-tools image via the shared selector.
-      # Why: the collector below runs inside it for real sqlite3 availability
-      #   (SRA_CACHE_DB below), matching the audit workflow's own container.
-      # From: Issue #1095 (G17/#1585).
+      # What: resolve pinned build-tools image via selector
+      # Why: collector needs sqlite3; matches audit workflow container
+      # From: Issue #1095 | PR #1594
       - name: Select immutable build-tools image
         id: build_tools
         if: steps.creds.outputs.have-pat == 'true' && steps.script-check.outputs.scripts-present == 'true'
@@ -197,11 +178,9 @@ jobs:
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
-      # What: exports the runner.temp classification-cache dir via GITHUB_ENV.
-      # Why: reuses this job's own prior classification-cache writes; cross-
-      #   sharing with the audit workflow is narrower than the matching key
-      #   names suggest (GH Actions cache ref-scoping -- see PR/Issue).
-      # From: Issue #1095 (G17/#1585).
+      # What: export runner.temp classification-cache via GITHUB_ENV
+      # Why: reuses prior job writes; narrower than key names suggest
+      # From: Issue #1095 | PR #1594
       - name: Prepare incremental classification cache directory
         if: steps.creds.outputs.have-pat == 'true' && steps.script-check.outputs.scripts-present == 'true'
         env:
@@ -211,11 +190,9 @@ jobs:
           mkdir -p -- "$GC_CLASSIFICATION_CACHE_DIR"
           echo "GC_CLASSIFICATION_CACHE_DIR=$GC_CLASSIFICATION_CACHE_DIR" >> "$GITHUB_ENV"
 
-      # What: restores the SQLite classification cache, same rotating-key +
-      #   prefix-fallback pattern as gc-sha-retention-audit.yml's own cache.
-      # Why: picks up whatever a prior run on the same ref-scope classified
-      #   -- in practice usually a prior run of this same job.
-      # From: Issue #1095 (G17/#1585).
+      # What: restore SQLite cache with rotating-key fallback pattern
+      # Why: picks up prior classifications for this ref-scope job
+      # From: Issue #1095 | PR #1594
       - name: Restore SHA retention classification cache
         if: steps.creds.outputs.have-pat == 'true' && steps.script-check.outputs.scripts-present == 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -225,12 +202,9 @@ jobs:
           restore-keys: |
             sha-retention-classification-cache-
 
-      # What: runs the collector inside the pinned build-tools container,
-      #   with the shared classification cache mounted read-write.
-      # Why: gc_build_service_retention_plan() shells out to
-      #   gc-sha-retention-audit.sh internally; without this, that internal
-      #   re-run always reclassified cold, duplicating the audit's own work.
-      # From: Issue #1095 (G17/#1585).
+      # What: run collector inside build-tools with cache rw
+      # Why: avoids re-classifying in gc_build_service_retention_plan()
+      # From: Issue #1095 | PR #1594
       - name: Collect unprotected GHCR versions
         if: steps.creds.outputs.have-pat == 'true' && steps.script-check.outputs.scripts-present == 'true'
         env:
@@ -262,11 +236,9 @@ jobs:
             "$BUILD_TOOLS_IMAGE" \
             bash scripts/untracked/gc-pr-staging-images.sh
 
-      # What: saves the classification cache with if: always(), matching
-      #   gc-sha-retention-audit.yml's own save step reasoning.
-      # Why: a failed/timed-out run still resolved a real prefix of
-      #   versions, worth keeping for the next audit or GC run.
-      # From: Issue #1095 (G17/#1585).
+      # What: save cache with if: always() like audit workflow
+      # Why: partial runs cached; useful for next audit or GC
+      # From: Issue #1095 | PR #1594
       - name: Save SHA retention classification cache
         if: always() && steps.creds.outputs.have-pat == 'true' && steps.script-check.outputs.scripts-present == 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -274,15 +246,12 @@ jobs:
           path: ${{ env.GC_CLASSIFICATION_CACHE_DIR }}
           key: sha-retention-classification-cache-${{ github.run_id }}-${{ github.run_attempt }}
 
-      # What: restores a full working tree, verifying the real index state
-      # rather than trusting `disable`'s exit code.
-      # Why: non-cone sparse-checkout doesn't reliably clear on `disable`;
-      # a narrowed tree corrupts the next job reusing this runner instance.
+      # What: restore full tree; verify real index state
+      # Why: non-cone sparse-checkout doesn't clear reliably
       # From: PR #1492
       #
-      # What: runs unconditionally, not gated on `scripts-present`.
-      # Why: when the preflight above skips Checkout, this step's commands
-      # are trivial no-ops -- still a safety net for pre-existing narrowing.
+      # What: run unconditionally, not gated on scripts check
+      # Why: cleanup commands are no-ops if skipped; safety net
       # From: Issue #1095 | PR #1528
       - name: Restore full working tree for the next job on this runner
         if: always() && steps.creds.outputs.have-pat == 'true'
@@ -293,10 +262,8 @@ jobs:
           git config --local --unset-all core.sparseCheckout || true
           rm -f .git/info/sparse-checkout
 
-          # What: sweeps remaining skip-worktree bits, capturing `git
-          # ls-files -v` into a variable before piping to awk.
-          # Why: a direct pipe would hide a real git failure behind awk's
-          # own exit code instead of tripping `set -e`.
+          # What: sweep skip-worktree bits into variable for awk
+          # Why: direct pipe hides git failure behind awk exit code
           # From: PR #1492
           ls_files_before="$(git ls-files -v)"
           mapfile -t remaining_skip_worktree < <(printf '%s\n' "$ls_files_before" | awk '/^S /{print substr($0,3)}')
@@ -305,10 +272,8 @@ jobs:
           fi
           git checkout --progress --force HEAD -- .
 
-          # What: verifies the restore worked, failing loudly if any path
-          # is still excluded, using awk's count (not `grep -c`).
-          # Why: awk's exit code is always 0 regardless of match count, so
-          # a `|| true` fallback could silently skip the `-ne 0` check.
+          # What: verify restore worked; check paths via awk count
+          # Why: awk exits 0 always; fallback could skip -ne 0 check
           # From: PR #1492
           ls_files_after="$(git ls-files -v)"
           remaining_after="$(printf '%s\n' "$ls_files_after" | awk '/^S /{c++} END{print c+0}')"
