@@ -227,10 +227,90 @@ ci_service_external_contexts() {
 # ============================================================
 # SEMANTIC PARSERS
 # ============================================================
+#
+# What: §12.5's deliberately narrow v1, not full equivalence.
+# Why: 4 grammars in bash is a project, not a helper (§12.5).
+# From: Issue #1683
+
+ci_path_is_markdown() {
+    # What: true iff $1 is a Markdown file (*.md).
+    # Why: Markdown is NOOP by default in the impact engine.
+    # From: Issue #1683
+    [[ "$1" == *.md ]]
+}
+
+ci_normalize_for_hash() {
+    # What: strips comment/blank lines and CRLF; keeps the rest.
+    # Why: shell/YAML/Dockerfile share '#' comments (§12.1-12.3).
+    # From: Issue #1683
+    local path="$1"
+    awk '
+        NR == 1 { print; next }
+        { line = $0; sub(/\r$/, "", line) }
+        { stripped = line; sub(/^[ \t]*/, "", stripped) }
+        stripped == "" { next }
+        substr(stripped, 1, 1) == "#" { next }
+        { print line }
+    ' "$path"
+}
+
+ci_content_hash() {
+    # What: prints the sha256 of $1's normalized content.
+    # Why: single hash primitive every identity calculation reads.
+    # From: Issue #1683
+    ci_normalize_for_hash "$1" | sha256sum | cut -d' ' -f1
+}
 
 # ============================================================
 # IMPACT ENGINE
 # ============================================================
+#
+# What: path -> service impact (§11) + dependency graph (§13).
+# Why: file path != service boundary; the build graph decides.
+# From: Issue #1683
+
+ci_service_touches_path() {
+    # What: true iff path $2 is a build input for service $1.
+    # Why: checks the service's own + external contexts (§13).
+    # From: Issue #1683
+    local service="$1" path="$2"
+    ci_require_service "$service"
+    local ctx="${CI_SERVICE_CONTEXT[$service]}"
+    [[ "$path" == "$ctx" || "$path" == "$ctx"/* ]] && return 0
+    local pair extpath
+    while IFS= read -r pair; do
+        [[ -z "$pair" ]] && continue
+        extpath="${pair#*=}"
+        [[ "$path" == "$extpath" || "$path" == "$extpath"/* ]] && return 0
+    done < <(ci_service_external_contexts "$service")
+    return 1
+}
+
+ci_impacted_services() {
+    # What: prints services impacted by the given changed paths.
+    # Why: markdown is excluded by default, one path per hit.
+    # From: Issue #1683
+    local svc path
+    for svc in "${CI_SERVICES[@]}"; do
+        for path in "$@"; do
+            ci_path_is_markdown "$path" && continue
+            if ci_service_touches_path "$svc" "$path"; then
+                printf '%s\n' "$svc"
+                break
+            fi
+        done
+    done
+}
+
+ci_semantic_diff_is_noop() {
+    # What: true iff path $3's normalized content is unchanged.
+    # Why: a comment-only edit must resolve to NOOP, not build.
+    # From: Issue #1683
+    local base_ref="$1" head_ref="$2" path="$3" base_hash head_hash
+    base_hash="$(git show "${base_ref}:${path}" 2>/dev/null | ci_normalize_for_hash /dev/stdin | sha256sum)"
+    head_hash="$(git show "${head_ref}:${path}" 2>/dev/null | ci_normalize_for_hash /dev/stdin | sha256sum)"
+    [[ "$base_hash" == "$head_hash" ]]
+}
 
 # ============================================================
 # IDENTITY ENGINE

@@ -74,6 +74,76 @@ setup() {
 }
 
 # ============================================================
+# SEMANTIC IMPACT
+# ============================================================
+
+@test "semantic: ci_path_is_markdown recognizes .md files" {
+    ci_path_is_markdown "README.md"
+    ! ci_path_is_markdown "README.sh"
+}
+
+@test "semantic: ci_normalize_for_hash strips comments and blank lines" {
+    local f="$BATS_TEST_TMPDIR/sample.sh"
+    printf '#!/bin/bash\n# a comment\n\ncmd1\n  # indented comment\ncmd2\n' > "$f"
+    run ci_normalize_for_hash "$f"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output")" = "$(printf '#!/bin/bash\ncmd1\ncmd2')" ]
+}
+
+@test "semantic: ci_content_hash is stable across comment-only edits" {
+    local f1="$BATS_TEST_TMPDIR/a.sh" f2="$BATS_TEST_TMPDIR/b.sh"
+    printf '#!/bin/bash\n# old comment\ncmd1\n' > "$f1"
+    printf '#!/bin/bash\n# new comment\ncmd1\n' > "$f2"
+    [ "$(ci_content_hash "$f1")" = "$(ci_content_hash "$f2")" ]
+}
+
+@test "semantic: ci_content_hash changes on a real code edit" {
+    local f1="$BATS_TEST_TMPDIR/a.sh" f2="$BATS_TEST_TMPDIR/b.sh"
+    printf '#!/bin/bash\ncmd1\n' > "$f1"
+    printf '#!/bin/bash\ncmd2\n' > "$f2"
+    [ "$(ci_content_hash "$f1")" != "$(ci_content_hash "$f2")" ]
+}
+
+@test "impact: proxy touches its own context path" {
+    ci_service_touches_path proxy "services/proxy/entrypoint.sh"
+}
+
+@test "impact: proxy touches dns's cdn-domains.txt via external context" {
+    ci_service_touches_path proxy "services/dns/cdn-domains.txt"
+}
+
+@test "impact: dns does not touch proxy's own path" {
+    ! ci_service_touches_path dns "services/proxy/entrypoint.sh"
+}
+
+@test "impact: watchdog is unaffected by a dns-only change" {
+    ! ci_service_touches_path watchdog "services/dns/cdn-domains.txt"
+}
+
+@test "impact: ci_impacted_services reports dns and proxy for cdn-domains.txt" {
+    local impacted
+    impacted="$(ci_impacted_services "services/dns/cdn-domains.txt")"
+    [[ "$impacted" == *"dns"* ]]
+    [[ "$impacted" == *"proxy"* ]]
+}
+
+@test "impact: ci_impacted_services excludes a markdown-only change" {
+    local impacted
+    impacted="$(ci_impacted_services "services/dns/README.md")"
+    [ -z "$impacted" ]
+}
+
+@test "impact: ci_impacted_services is empty for an unrelated path" {
+    local impacted
+    impacted="$(ci_impacted_services "docs/ci-2.0-architecture.md")"
+    [ -z "$impacted" ]
+}
+
+@test "impact: ci_semantic_diff_is_noop is true for HEAD vs itself" {
+    ci_semantic_diff_is_noop HEAD HEAD "scripts/ci/ci.sh"
+}
+
+# ============================================================
 # SERVICE INVENTORY
 # ============================================================
 
