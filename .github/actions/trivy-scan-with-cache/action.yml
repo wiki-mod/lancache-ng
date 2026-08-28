@@ -2,11 +2,9 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: Skips the Trivy scan when the same digest was already confirmed
-# clean within the caller-supplied freshness window.
-# Why: a vulnerability verdict is time-dependent (unlike an SBOM), so how
-# coarse "still fresh" is stays a caller decision, not this action's.
-# From: PR #1467, Issue #1095
+# What: Cache scan results keyed by digest and bucket
+# Why: Vulnerability verdicts time-depend; caller sets window
+# From: Issue #1095
 name: Trivy scan with digest-bound result cache
 description: >-
   Scans an image with Trivy, but skips the scan entirely if the exact same
@@ -59,11 +57,9 @@ outputs:
 runs:
   using: composite
   steps:
-    # What: Restores a clean-scan marker keyed on scope+digest+bucket, if
-    # one exists from a prior run.
-    # Why: this same key must match the "Save scan-result marker" step
-    # below exactly, or a save can never be found by a later restore.
-    # From: PR #1467, Issue #1095
+    # What: Restore clean-scan marker from prior run
+    # Why: Key must match the save step exactly for hits
+    # From: Issue #1095
     - name: Restore scan-result marker
       id: restore
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -71,9 +67,8 @@ runs:
         path: ${{ runner.temp }}/trivy-scan-clean
         key: trivy-scan-clean-${{ inputs.cache-key-scope }}-${{ inputs.digest }}-${{ inputs.freshness-bucket }}
 
-    # What: scans with trivy-scan-retry, not aquasecurity/trivy-action directly.
-    # Why: the unauthenticated first-choice vulnerability-DB mirror caused
-    #   real CI failures with zero retry anywhere.
+    # What: Scan with trivy-scan-retry, not trivy-action
+    # Why: Default mirror lacked retry; caused CI failures
     # From: PR #1542 | Issue #1535
     - name: Scan image with Trivy
       if: steps.restore.outputs.cache-hit != 'true'
@@ -95,10 +90,9 @@ runs:
         timeout: 10m
         exit-code: "1"
 
-    # What: Writes the clean-scan marker after a passing Trivy scan.
-    # Why: composite steps stop on the first failure by default, so a
-    # vulnerable/failed scan never reaches here and never gets cached clean.
-    # From: PR #1467, Issue #1095
+    # What: Write clean-scan marker after passing Trivy
+    # Why: Failing scans never reach here; safe to cache
+    # From: Issue #1095
     - name: Write scan-result marker
       if: steps.restore.outputs.cache-hit != 'true'
       shell: bash
@@ -107,9 +101,9 @@ runs:
         mkdir -p "${{ runner.temp }}/trivy-scan-clean"
         date -u +%Y-%m-%dT%H:%M:%SZ > "${{ runner.temp }}/trivy-scan-clean/scanned-at"
 
-    # What: Saves the marker under the same key the "Restore scan-result
-    # marker" step above reads.
-    # From: PR #1467, Issue #1095
+    # What: Save scan-result marker with restore key
+    # Why: Key must match restore step to enable cache hits
+    # From: Issue #1095
     - name: Save scan-result marker
       if: steps.restore.outputs.cache-hit != 'true'
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
