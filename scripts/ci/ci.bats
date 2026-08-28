@@ -1139,6 +1139,22 @@ setup() {
     [ "$status" -eq 0 ]
 }
 
+# What: line-endings-check runs clean on this repo's tree.
+# Why: this repo's own tracked files are the check's fixture.
+# From: Issue #1683
+@test "line-endings-check: ci.sh line-endings-check runs on this repo's tree" {
+    run bash "$repo_root/scripts/ci/ci.sh" line-endings-check
+    [ "$status" -eq 0 ]
+}
+
+# What: language-policy-check runs clean on this repo's tree.
+# Why: this repo's own tracked files are the check's fixture.
+# From: Issue #1683
+@test "language-policy-check: ci.sh language-policy-check runs on this repo's tree" {
+    run bash "$repo_root/scripts/ci/ci.sh" language-policy-check
+    [ "$status" -eq 0 ]
+}
+
 # What: docker compose config succeeds for a real compose file.
 # Why: proves the wrapper works against this repo's actual files.
 # From: Issue #1683

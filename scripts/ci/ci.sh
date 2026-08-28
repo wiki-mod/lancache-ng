@@ -1329,6 +1329,20 @@ ci_cmd_compose_healthchecks() {
     bash "$CI_REPO_ROOT/scripts/tracked/check-compose-healthchecks.sh"
 }
 
+ci_cmd_line_endings_check() {
+    # What: the one script line-endings/-hosted both need.
+    # Why: §72 -- same function, same decision, either runner.
+    # From: Issue #1683
+    bash "$CI_REPO_ROOT/scripts/tracked/check-line-endings.sh"
+}
+
+ci_cmd_language_policy_check() {
+    # What: the one script language-policy/-hosted both need.
+    # Why: §72 -- same function, same decision, either runner.
+    # From: Issue #1683
+    bash "$CI_REPO_ROOT/scripts/tracked/check-language-policy.sh"
+}
+
 ci_compose_config_clean() {
     # What: true iff "docker compose $* config" is warning-free.
     # Why: a silent compose warning today is a real bug tomorrow.
@@ -1767,6 +1781,8 @@ Commands:
   file-header-checks           Run file-headers/-hosted's 6 repo-wide checks.
   diff-checks <sha> <ref>      Run the PR-diff-scoped header/chronology checks.
   compose-healthchecks         Run compose-healthchecks/-hosted's own check.
+  line-endings-check           Run line-endings/-hosted's own check.
+  language-policy-check        Run language-policy/-hosted's own check.
   test [path...]               Run bats, summarizing every failure.
   version                      Print ci.sh's own version.
 USAGE
@@ -1796,6 +1812,8 @@ ci_main() {
         file-header-checks) ci_cmd_file_header_checks ;;
         diff-checks) ci_cmd_diff_checks "${1:?diff-checks: base sha required}" "${2:?diff-checks: base ref required}" ;;
         compose-healthchecks) ci_cmd_compose_healthchecks ;;
+        line-endings-check) ci_cmd_line_endings_check ;;
+        language-policy-check) ci_cmd_language_policy_check ;;
         test) ci_run_bats "${@:-$CI_SH_DIR/ci.bats}" ;;
         version) printf '%s\n' "$CI_SH_VERSION" ;;
         -h|--help|help) ci_usage ;;

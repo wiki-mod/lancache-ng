@@ -672,6 +672,9 @@ jobs:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Check tracked files use Unix (LF) line endings
+        # What: ci.sh call shared with the hosted job below.
+        # Why: §72 -- same function, same decision, either runner.
+        # From: Issue #1683
         run: |
           set -euo pipefail
           docker run --rm \
@@ -680,7 +683,7 @@ jobs:
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             timeout --kill-after=30 --signal=KILL 300 \
-            bash -lc 'set -euo pipefail; bash scripts/tracked/check-line-endings.sh'
+            bash -lc 'set -euo pipefail; bash scripts/ci/ci.sh line-endings-check'
 
       # What: governance guardrails step relocated from shellcheck.
       # Why: shellcheck self-skips docs-only PRs; this must always run.
@@ -779,7 +782,10 @@ jobs:
         run: |
           echo "::notice::Running line-endings check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
       - name: Check tracked files use Unix (LF) line endings
-        run: bash scripts/tracked/check-line-endings.sh
+        # What: same ci.sh call as the self-hosted job.
+        # Why: §72 -- same function, same decision, either runner.
+        # From: Issue #1683
+        run: bash scripts/ci/ci.sh line-endings-check
 
   language-policy:
     # What: asserts the absence of banned-language files (AG-REL-001).
@@ -806,6 +812,9 @@ jobs:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Check for banned-language source files (AG-REL-001)
+        # What: ci.sh call shared with the hosted job below.
+        # Why: §72 -- same function, same decision, either runner.
+        # From: Issue #1683
         run: |
           set -euo pipefail
           docker run --rm \
@@ -814,7 +823,7 @@ jobs:
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             timeout --kill-after=30 --signal=KILL 300 \
-            bash -lc 'set -euo pipefail; bash scripts/tracked/check-language-policy.sh'
+            bash -lc 'set -euo pipefail; bash scripts/ci/ci.sh language-policy-check'
 
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
@@ -828,7 +837,10 @@ jobs:
         run: |
           echo "::notice::Running language-policy check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
       - name: Check for banned-language source files (AG-REL-001)
-        run: bash scripts/tracked/check-language-policy.sh
+        # What: same ci.sh call as the self-hosted job.
+        # Why: §72 -- same function, same decision, either runner.
+        # From: Issue #1683
+        run: bash scripts/ci/ci.sh language-policy-check
 
   # What: hosted fallbacks are limited to cheap lint jobs only.
   # Why: Rust builds/scans need self-hosted-only build-tools/sccache/distcc.
