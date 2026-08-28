@@ -43,6 +43,52 @@ ARG MOBY_GO_ARCHIVE_VERSION=0.3.3
 # From: Issue #1598
 ARG GOLANG_X_MOD_VERSION=0.40.0
 
+# What: builds the Go-tool script once for both stages
+# Why: Debian/Alpine RUN bodies were byte-identical
+# From: Issue #1095
+FROM scratch AS go-tools-script
+COPY <<'BUILD_GO_TOOLS_EOF' /build-go-tools.sh
+#!/bin/sh
+set -eu
+GOBIN=/out go install "github.com/rhysd/actionlint/cmd/actionlint@v${ACTIONLINT_VERSION}"
+/out/actionlint --version
+buildx_src="$(mktemp -d)"
+git clone --depth 1 --branch "v${DOCKER_BUILDX_VERSION}" https://github.com/docker/buildx.git "$buildx_src"
+( cd "$buildx_src" \
+  && go get "github.com/containerd/containerd/v2@v${DOCKER_BUILDX_CONTAINERD_VERSION}" \
+  && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
+  && go get "golang.org/x/text@v${GOLANG_X_TEXT_VERSION}" \
+  && go get "github.com/moby/go-archive@v${MOBY_GO_ARCHIVE_VERSION}" \
+  && go get "golang.org/x/mod@v${GOLANG_X_MOD_VERSION}" \
+  && go mod vendor \
+  && go build -ldflags "-X github.com/docker/buildx/version.Version=v${DOCKER_BUILDX_VERSION}" -o /out/docker-buildx ./cmd/buildx )
+rm -rf "$buildx_src"
+/out/docker-buildx version
+docker_cli_src="$(go env GOPATH)/src/github.com/docker/cli"
+install -d "$(dirname "$docker_cli_src")"
+git clone --depth 1 --branch "v${DOCKER_CLI_VERSION}" https://github.com/docker/cli.git "$docker_cli_src"
+( cd "$docker_cli_src" \
+  && ln -s vendor.mod go.mod && ln -s vendor.sum go.sum \
+  && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
+  && go get "golang.org/x/text@v${GOLANG_X_TEXT_VERSION}" \
+  && go get "golang.org/x/mod@v${GOLANG_X_MOD_VERSION}" \
+  && go mod vendor \
+  && rm go.mod go.sum \
+  && VERSION="${DOCKER_CLI_VERSION}" sh ./scripts/build/binary )
+install -m 0755 "$docker_cli_src/build/docker-$(go env GOOS)-$(go env GOARCH)" /out/docker
+rm -rf "$(go env GOPATH)/src/github.com"
+/out/docker --version
+compose_src="$(mktemp -d)"
+git clone --depth 1 --branch "v${DOCKER_COMPOSE_VERSION}" https://github.com/docker/compose.git "$compose_src"
+( cd "$compose_src" \
+  && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
+  && go get "golang.org/x/text@v${GOLANG_X_TEXT_VERSION}" \
+  && go get "golang.org/x/mod@v${GOLANG_X_MOD_VERSION}" \
+  && go build -ldflags "-X github.com/docker/compose/v5/internal.Version=${DOCKER_COMPOSE_VERSION}" -o /out/docker-compose ./cmd )
+rm -rf "$compose_src"
+/out/docker-compose version
+BUILD_GO_TOOLS_EOF
+
 FROM golang:latest AS actionlint-builder
 
 ARG ACTIONLINT_VERSION
@@ -56,49 +102,13 @@ ARG MOBY_GO_ARCHIVE_VERSION
 ARG GOLANG_X_MOD_VERSION
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+COPY --from=go-tools-script /build-go-tools.sh /build-go-tools.sh
 
 # What: builds actionlint/CLI/compose/buildx from source.
 # Why: gets a current Go stdlib; vendor-only module quirks
 # rule out plain `go install` for the vendor bump tools.
 # From: Issue #1570 | PR #1571 | Issue #1598
-RUN set -euo pipefail; \
-    GOBIN=/out go install "github.com/rhysd/actionlint/cmd/actionlint@v${ACTIONLINT_VERSION}"; \
-    /out/actionlint --version; \
-    buildx_src="$(mktemp -d)"; \
-    git clone --depth 1 --branch "v${DOCKER_BUILDX_VERSION}" https://github.com/docker/buildx.git "$buildx_src"; \
-    ( cd "$buildx_src" \
-      && go get "github.com/containerd/containerd/v2@v${DOCKER_BUILDX_CONTAINERD_VERSION}" \
-      && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
-      && go get "golang.org/x/text@v${GOLANG_X_TEXT_VERSION}" \
-      && go get "github.com/moby/go-archive@v${MOBY_GO_ARCHIVE_VERSION}" \
-      && go get "golang.org/x/mod@v${GOLANG_X_MOD_VERSION}" \
-      && go mod vendor \
-      && go build -ldflags "-X github.com/docker/buildx/version.Version=v${DOCKER_BUILDX_VERSION}" -o /out/docker-buildx ./cmd/buildx ); \
-    rm -rf "$buildx_src"; \
-    /out/docker-buildx version; \
-    docker_cli_src="$(go env GOPATH)/src/github.com/docker/cli"; \
-    install -d "$(dirname "$docker_cli_src")"; \
-    git clone --depth 1 --branch "v${DOCKER_CLI_VERSION}" https://github.com/docker/cli.git "$docker_cli_src"; \
-    ( cd "$docker_cli_src" \
-      && ln -s vendor.mod go.mod && ln -s vendor.sum go.sum \
-      && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
-      && go get "golang.org/x/text@v${GOLANG_X_TEXT_VERSION}" \
-      && go get "golang.org/x/mod@v${GOLANG_X_MOD_VERSION}" \
-      && go mod vendor \
-      && rm go.mod go.sum \
-      && VERSION="${DOCKER_CLI_VERSION}" sh ./scripts/build/binary ); \
-    install -m 0755 "$docker_cli_src/build/docker-$(go env GOOS)-$(go env GOARCH)" /out/docker; \
-    rm -rf "$(go env GOPATH)/src/github.com"; \
-    /out/docker --version; \
-    compose_src="$(mktemp -d)"; \
-    git clone --depth 1 --branch "v${DOCKER_COMPOSE_VERSION}" https://github.com/docker/compose.git "$compose_src"; \
-    ( cd "$compose_src" \
-      && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
-      && go get "golang.org/x/text@v${GOLANG_X_TEXT_VERSION}" \
-      && go get "golang.org/x/mod@v${GOLANG_X_MOD_VERSION}" \
-      && go build -ldflags "-X github.com/docker/compose/v5/internal.Version=${DOCKER_COMPOSE_VERSION}" -o /out/docker-compose ./cmd ); \
-    rm -rf "$compose_src"; \
-    /out/docker-compose version
+RUN chmod +x /build-go-tools.sh && /build-go-tools.sh
 
 # What: source stage for the shared, statically-linked curl binary.
 # Why: the same binary already used by proxy/dns/dhcp/ntp/ui is portable
@@ -127,50 +137,24 @@ ARG MOBY_GO_ARCHIVE_VERSION
 ARG GOLANG_X_MOD_VERSION
 
 SHELL ["/bin/sh", "-o", "pipefail", "-c"]
+COPY --from=go-tools-script /build-go-tools.sh /build-go-tools.sh
+
+# What: declares APK_CACHE_BUST before this stage's RUN
+# Why: matches the other Alpine stage's cache-bust knob
+# From: Issue #1095
+ARG APK_CACHE_BUST=""
 
 # What: builds the same four Go tools as actionlint-builder.
 # Why: none of the four has a cgo dependency, so musl needs
 # no build-tag or linker change here.
 # From: Issue #1095
 RUN set -euo pipefail; \
+    : "apk-cache-bust=${APK_CACHE_BUST}"; \
+    apk update; \
+    apk upgrade --no-cache; \
     apk add --no-cache git build-base; \
-    GOBIN=/out go install "github.com/rhysd/actionlint/cmd/actionlint@v${ACTIONLINT_VERSION}"; \
-    /out/actionlint --version; \
-    buildx_src="$(mktemp -d)"; \
-    git clone --depth 1 --branch "v${DOCKER_BUILDX_VERSION}" https://github.com/docker/buildx.git "$buildx_src"; \
-    ( cd "$buildx_src" \
-      && go get "github.com/containerd/containerd/v2@v${DOCKER_BUILDX_CONTAINERD_VERSION}" \
-      && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
-      && go get "golang.org/x/text@v${GOLANG_X_TEXT_VERSION}" \
-      && go get "github.com/moby/go-archive@v${MOBY_GO_ARCHIVE_VERSION}" \
-      && go get "golang.org/x/mod@v${GOLANG_X_MOD_VERSION}" \
-      && go mod vendor \
-      && go build -ldflags "-X github.com/docker/buildx/version.Version=v${DOCKER_BUILDX_VERSION}" -o /out/docker-buildx ./cmd/buildx ); \
-    rm -rf "$buildx_src"; \
-    /out/docker-buildx version; \
-    docker_cli_src="$(go env GOPATH)/src/github.com/docker/cli"; \
-    install -d "$(dirname "$docker_cli_src")"; \
-    git clone --depth 1 --branch "v${DOCKER_CLI_VERSION}" https://github.com/docker/cli.git "$docker_cli_src"; \
-    ( cd "$docker_cli_src" \
-      && ln -s vendor.mod go.mod && ln -s vendor.sum go.sum \
-      && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
-      && go get "golang.org/x/text@v${GOLANG_X_TEXT_VERSION}" \
-      && go get "golang.org/x/mod@v${GOLANG_X_MOD_VERSION}" \
-      && go mod vendor \
-      && rm go.mod go.sum \
-      && VERSION="${DOCKER_CLI_VERSION}" sh ./scripts/build/binary ); \
-    install -m 0755 "$docker_cli_src/build/docker-$(go env GOOS)-$(go env GOARCH)" /out/docker; \
-    rm -rf "$(go env GOPATH)/src/github.com"; \
-    /out/docker --version; \
-    compose_src="$(mktemp -d)"; \
-    git clone --depth 1 --branch "v${DOCKER_COMPOSE_VERSION}" https://github.com/docker/compose.git "$compose_src"; \
-    ( cd "$compose_src" \
-      && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
-      && go get "golang.org/x/text@v${GOLANG_X_TEXT_VERSION}" \
-      && go get "golang.org/x/mod@v${GOLANG_X_MOD_VERSION}" \
-      && go build -ldflags "-X github.com/docker/compose/v5/internal.Version=${DOCKER_COMPOSE_VERSION}" -o /out/docker-compose ./cmd ); \
-    rm -rf "$compose_src"; \
-    /out/docker-compose version
+    chmod +x /build-go-tools.sh; \
+    /build-go-tools.sh
 
 # What: Alpine build-tools candidate, pinned to Alpine 3.24.
 # Why: keeps Debian as the default target; the pin avoids
