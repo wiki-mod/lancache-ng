@@ -651,3 +651,49 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" != *"description: field contains"* ]]
 }
+
+# What: an unresolved alias isn't a pinned-action failure.
+# Why: the summary must not conflate the two failure kinds.
+# From: Issue #1095 | PR #1734
+@test "an extraction-only failure (unresolved alias) is not mislabeled as a pinned-action failure" {
+    write_workflow <<'EOF'
+name: CI
+on: push
+jobs:
+  build:
+    steps:
+      - uses: *never_defined_anchor
+      - uses: actions/checkout@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa # v7.0.0
+EOF
+    mock_curl_response "actions/checkout" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "" "action.yml" 200 \
+"runs:
+  using: 'node24'"
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"1 extraction problem(s)"* ]]
+    [[ "$output" != *"pinned action(s)"* ]]
+}
+
+# What: a real bad pin plus an unresolved alias, together.
+# Why: extraction and pinned-action counts must not merge.
+# From: Issue #1095 | PR #1734
+@test "a mixed run counts extraction and pinned-action failures separately, not combined" {
+    write_workflow <<'EOF'
+name: CI
+on: push
+jobs:
+  build:
+    steps:
+      - uses: *never_defined_anchor
+      - uses: actions/upload-artifact@ffffffffffffffffffffffffffffffffffffffff # v4.3.0
+EOF
+    mock_curl_response "actions/upload-artifact" "ffffffffffffffffffffffffffffffffffffffff" "" "action.yml" 200 \
+"runs:
+  using: 'node20'"
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"1 pinned action(s) or manifest field(s) failed"* ]]
+    [[ "$output" == *"1 extraction problem(s)"* ]]
+}
