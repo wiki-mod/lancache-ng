@@ -157,8 +157,16 @@ FROM rust:alpine3.24 AS alpine-final
 LABEL org.opencontainers.image.description="Prebuilt lancache-ng CI and developer validation toolchain image (Alpine candidate)."
 
 ARG SCCACHE_VERSION=0.17.0
+# What: pins cargo-audit's musl prebuilt binary checksum.
+# Why: recomputed per version; a stale pin skips verification.
+# From: Issue #1095 | PR #1743
 ARG CARGO_AUDIT_VERSION=0.22.2
+ARG CARGO_AUDIT_SHA256_MUSL_AMD64=7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428
+# What: pins cargo-tarpaulin's musl prebuilt binary checksum.
+# Why: recomputed per version; a stale pin skips verification.
+# From: Issue #1095 | PR #1743
 ARG CARGO_TARPAULIN_VERSION=0.37.2
+ARG CARGO_TARPAULIN_SHA256_MUSL_AMD64=837dc54d21da101e96e888c6f6680d25f3c06554b0614880ea385cdf68cd5173
 # What: pins actionlint's prebuilt binary and its checksums.
 # Why: recomputed per version; a stale pin skips verification.
 # From: Issue #1095 | PR #1743
@@ -264,14 +272,28 @@ RUN set -euo pipefail; \
     done; \
     rm -rf /usr/local/cargo/registry /usr/local/cargo/git
 
-# What: builds cargo-audit/cargo-tarpaulin, clearing caches.
-# Why: prebuilt glibc binaries fail on Alpine; the clear
-# avoids leaving vulnerable dependency source in the image.
-# From: Issue #1095
+# What: fetches cargo-audit/tarpaulin musl release bins.
+# Why: native musl assets exist; matches AG-KD-003 policy.
+# From: Issue #1095 | PR #1743
 RUN set -euo pipefail; \
-    cargo install cargo-audit --version "${CARGO_AUDIT_VERSION}" --locked --root /usr/local; \
-    cargo install cargo-tarpaulin --version "${CARGO_TARPAULIN_VERSION}" --locked --root /usr/local; \
-    rm -rf /usr/local/cargo/registry /usr/local/cargo/git
+    case "$(apk --print-arch)" in \
+      x86_64) ;; \
+      *) echo "alpine-final is amd64-only: no aarch64-musl cargo-audit release exists" >&2; exit 1 ;; \
+    esac; \
+    prebuilt_tmp="$(mktemp -d)"; \
+    trap 'rm -rf "$prebuilt_tmp"' EXIT; \
+    curl -fsSL "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v${CARGO_AUDIT_VERSION}/cargo-audit-x86_64-unknown-linux-musl-v${CARGO_AUDIT_VERSION}.tgz" \
+      -o "$prebuilt_tmp/cargo-audit.tgz"; \
+    printf '%s  %s\n' "${CARGO_AUDIT_SHA256_MUSL_AMD64}" "$prebuilt_tmp/cargo-audit.tgz" | sha256sum -c -; \
+    tar -xzf "$prebuilt_tmp/cargo-audit.tgz" -C "$prebuilt_tmp" "cargo-audit-x86_64-unknown-linux-musl-v${CARGO_AUDIT_VERSION}/cargo-audit"; \
+    install -m 0755 "$prebuilt_tmp/cargo-audit-x86_64-unknown-linux-musl-v${CARGO_AUDIT_VERSION}/cargo-audit" /usr/local/cargo/bin/cargo-audit; \
+    curl -fsSL "https://github.com/xd009642/tarpaulin/releases/download/${CARGO_TARPAULIN_VERSION}/cargo-tarpaulin-x86_64-unknown-linux-musl.tar.gz" \
+      -o "$prebuilt_tmp/cargo-tarpaulin.tar.gz"; \
+    printf '%s  %s\n' "${CARGO_TARPAULIN_SHA256_MUSL_AMD64}" "$prebuilt_tmp/cargo-tarpaulin.tar.gz" | sha256sum -c -; \
+    tar -xzf "$prebuilt_tmp/cargo-tarpaulin.tar.gz" -C "$prebuilt_tmp" cargo-tarpaulin; \
+    install -m 0755 "$prebuilt_tmp/cargo-tarpaulin" /usr/local/cargo/bin/cargo-tarpaulin; \
+    ln -sf /usr/local/cargo/bin/cargo-audit /usr/local/bin/cargo-audit; \
+    ln -sf /usr/local/cargo/bin/cargo-tarpaulin /usr/local/bin/cargo-tarpaulin
 
 # What: fetches actionlint's checksum-verified release binary.
 # Why: static Go binary; no reachable stdlib CVE path here.
