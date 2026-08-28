@@ -924,6 +924,70 @@ ci_build_lock_is_held() {
 # Why: a failed push retries the push, not the build.
 # From: Issue #1683
 
+ci_do_build() {
+    # What: runs the real docker buildx build for $1 on $2.
+    # Why: §21 -- the one place an image is actually produced.
+    # From: Issue #1683
+    local service="$1" platform="$2" identity="$3"
+    local context dockerfile ref
+    ci_require_service "$service"
+    context="${CI_SERVICE_CONTEXT[$service]}"
+    dockerfile="$context/Dockerfile"
+    [[ -f "$dockerfile" ]] || ci_die "no Dockerfile for $service at $dockerfile"
+    ref="$(ci_image_ref "$service")"
+
+    # What: named external contexts, passed through unmodified.
+    # Why: §13 -- e.g. proxy's dns-domains context (§8).
+    # From: Issue #1683
+    local -a extra_contexts=()
+    local pair
+    while IFS= read -r pair; do
+        [[ -z "$pair" ]] && continue
+        extra_contexts+=(--build-context "$pair")
+    done < <(ci_service_external_contexts "$service")
+
+    ci_retry_build_op -- docker buildx build         --platform "$platform"         --file "$dockerfile"         --tag "${ref}:${identity}"         --load         "${extra_contexts[@]}"         "$context"
+}
+
+ci_cmd_build_one() {
+    # What: admission, build, publish, readback for one matrix leg.
+    # Why: §19-24 -- the full chain a real build job must run.
+    # From: Issue #1683
+    local service="$1" platform="$2" outdir="${3:?ci.sh build: result dir required}"
+    local identity admission
+    identity="$(ci_build_identity "$service" "$platform")"
+    admission="$(ci_build_admission "$service" "$platform")"
+
+    if [[ "$admission" != "ACK" ]]; then
+        ci_log "$service/$platform: admission=$admission, nothing to do"
+        return 0
+    fi
+
+    # What: the lock ref is created before building, removed after.
+    # Why: §20 -- a second runner must see this build in progress.
+    # From: Issue #1683
+    local lock_ref remote="${CI_GIT_REMOTE:-origin}"
+    lock_ref="$(ci_build_lock_ref "$service" "$platform" "$identity")"
+    git push "$remote" "HEAD:$lock_ref" >/dev/null 2>&1 || true
+
+    local state="REJECTED" digest=""
+    if ci_do_build "$service" "$platform" "$identity"; then
+        if digest="$(ci_publish_by_digest "$service" "$platform" "$identity")"             && ci_readback_verify "$(ci_image_ref "$service"):${identity}" "$digest"; then
+            state="ACCEPTED"
+        else
+            ci_report_failure "build pipeline" "$service/$platform" "publish+readback" "failed"                 "see the publish/readback failure above; the build itself succeeded"
+        fi
+    else
+        ci_report_failure "build" "$service/$platform" "successful build" "failed"             "check the Dockerfile/build context for $service"
+    fi
+
+    git push "$remote" ":$lock_ref" >/dev/null 2>&1 || true
+
+    [[ -n "$digest" ]] || digest="sha256:$(printf '%064d' 0)"
+    ci_result_record "$service" "$platform" "$identity" "$digest" "$state" "$outdir"
+    [[ "$state" == "ACCEPTED" ]]
+}
+
 ci_publish_by_digest() {
     # What: pushes the built image and prints its exact digest.
     # Why: §96 -- a candidate gets a digest before any moving tag.
@@ -1325,11 +1389,42 @@ ci_plan_compute() {
     fi
 }
 
+ci_matrix_runs_on() {
+    # What: prints the real runs-on JSON value for $1/$2.
+    # Why: arm64 uses a native GH runner, amd64 self-hosted.
+    # From: Issue #1683
+    local service="$1" platform="$2" class
+    if [[ "$platform" == "linux/arm64" ]]; then
+        printf '"ubuntu-24.04-arm"'
+        return 0
+    fi
+    class="$(ci_service_runner_class "$service")"
+    printf '["self-hosted","linux","lancache","lancache-%s"]' "$class"
+}
+
+ci_plan_build_matrix_json() {
+    # What: prints the build_matrix JSON array for the current plan.
+    # Why: shared by ci_plan_render_json and the workflow output.
+    # From: Issue #1683
+    local svc platform first=1
+    printf '['
+    for svc in "${CI_PLAN_IMPACTED[@]}"; do
+        [[ -n "$svc" ]] || continue
+        while IFS= read -r platform; do
+            (( first )) || printf ','
+            first=0
+            printf '{"service":"%s","platform":"%s","runs_on":%s}' \
+                "$svc" "$platform" "$(ci_matrix_runs_on "$svc" "$platform")"
+        done < <(ci_service_platforms "$svc")
+    done
+    printf ']'
+}
+
 ci_plan_render_json() {
     # What: renders the already-computed verdict as JSON.
     # Why: §10.2 -- YAML consumes a machine-readable plan.
     # From: Issue #1683
-    local svc platform first=1
+    local svc first=1
     printf '{"global":{"state":"%s","test_required":%s},"services":{' \
         "$CI_PLAN_STATE" "$CI_PLAN_TEST_REQUIRED"
     for svc in "${CI_SERVICES[@]}"; do
@@ -1341,18 +1436,7 @@ ci_plan_render_json() {
             printf '"%s":{"state":"NOOP"}' "$svc"
         fi
     done
-    printf '},"build_matrix":['
-    first=1
-    for svc in "${CI_PLAN_IMPACTED[@]}"; do
-        [[ -n "$svc" ]] || continue
-        while IFS= read -r platform; do
-            (( first )) || printf ','
-            first=0
-            printf '{"service":"%s","platform":"%s","runner":"%s"}' \
-                "$svc" "$platform" "$(ci_service_runner_class "$svc")"
-        done < <(ci_service_platforms "$svc")
-    done
-    printf ']}\n'
+    printf '},"build_matrix":%s}\n' "$(ci_plan_build_matrix_json)"
 }
 
 ci_plan_json() {
@@ -1423,9 +1507,14 @@ ci_cmd_plan_outputs() {
     ci_emit_output test-required "$CI_PLAN_TEST_REQUIRED"
 
     # What: impacted services, space-separated, may be empty.
-    # Why: §71 derives the build matrix from exactly this.
+    # Why: readable alongside the JSON matrix for log output.
     # From: Issue #1683
     ci_emit_output impacted-services "${CI_PLAN_IMPACTED[*]:-}"
+
+    # What: the real GH Actions matrix, one leg per platform.
+    # Why: §71 -- the build job's strategy.matrix comes from here.
+    # From: Issue #1683
+    ci_emit_output build-matrix "$(ci_plan_build_matrix_json)"
 
     # What: one human-readable line stating the decision reached.
     # Why: §79 -- a reader must see why CI did or skipped work.
@@ -1438,6 +1527,7 @@ ci_cmd_report_result() {
     # Why: §62 -- the required check reports even on a NOOP run.
     # From: Issue #1683
     local plan_result="${PLAN_RESULT:-}" tests_result="${TESTS_RESULT:-}"
+    local build_result="${BUILD_RESULT:-}" aggregate_result="${AGGREGATE_RESULT:-}"
     local state="${GLOBAL_STATE:-}"
 
     # What: the planner itself must have completed successfully.
@@ -1457,6 +1547,14 @@ ci_cmd_report_result() {
     # From: Issue #1683
     [[ "$tests_result" == "success" || "$tests_result" == "skipped" ]] \
         || ci_report_failure "engine tests" "ci.bats" "success" "$tests_result" "see the failing tests listed in that job"
+
+    # What: build/aggregate are legitimately skipped when idle.
+    # Why: has-builds=false must not fail a job that never ran.
+    # From: Issue #1683
+    [[ "$build_result" == "success" || "$build_result" == "skipped" ]] \
+        || ci_report_failure "build" "ci.yml" "success" "$build_result" "see the failing build leg(s) above"
+    [[ "$aggregate_result" == "success" || "$aggregate_result" == "skipped" ]] \
+        || ci_report_failure "aggregate" "ci.yml" "success" "$aggregate_result" "see the aggregate job log"
 
     # What: prints every collected failure before failing the job.
     # Why: the reader must never hunt backwards for the cause.
@@ -1479,6 +1577,7 @@ Commands:
   identity <service> <plat>    Print the content-derived build identity.
   plan <base-ref> <head-ref>   Print the planner verdict as JSON.
   admission <service> <plat>   Print ACK or DISACK for one build.
+  build-one <svc> <plat> <dir> Admit, build, publish, verify; record.
   assemble <service> <ident>   Assemble the multi-arch index.
   stack-candidate              Print the accepted stack as service=digest.
   aggregate <result-dir>       Merge job results into the ledger, once.
@@ -1503,6 +1602,7 @@ ci_main() {
         plan-outputs) ci_cmd_plan_outputs ;;
         report-result) ci_cmd_report_result ;;
         admission) ci_build_admission "${1:?admission: service required}" "${2:?admission: platform required}" ;;
+        build-one) ci_cmd_build_one "${1:?build-one: service required}" "${2:?build-one: platform required}" "${3:?build-one: result dir required}" ;;
         assemble) ci_assemble_index "${1:?assemble: service required}" "${2:?assemble: identity required}" ;;
         stack-candidate) ci_stack_candidate ;;
         aggregate) ci_ledger_aggregate "${1:?aggregate: result directory required}" ;;
