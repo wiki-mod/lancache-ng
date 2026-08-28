@@ -1329,6 +1329,16 @@ ci_cmd_file_header_checks() {
     ci_failure_summary
 }
 
+ci_cmd_compose_healthchecks() {
+    # What: the one script compose-healthchecks/-hosted both need.
+    # Why: §72 -- same function, same decision, either runner. No
+    #   build-tools container: a pure bash/grep scan of committed
+    #   compose files, same host-tool exception the removed composite
+    #   action itself already documented and relied on.
+    # From: Issue #1683
+    bash "$CI_REPO_ROOT/scripts/tracked/check-compose-healthchecks.sh"
+}
+
 ci_compose_config_clean() {
     # What: true iff "docker compose $* config" is warning-free.
     # Why: a silent compose warning today is a real bug tomorrow.
@@ -1767,6 +1777,7 @@ Commands:
   checks                       Run every kept standing-check script.
   file-header-checks           Run file-headers/-hosted's 6 repo-wide checks.
   diff-checks <sha> <ref>      Run the PR-diff-scoped header/chronology checks.
+  compose-healthchecks         Run compose-healthchecks/-hosted's own check.
   test [path...]               Run bats, summarizing every failure.
   version                      Print ci.sh's own version.
 USAGE
@@ -1795,6 +1806,7 @@ ci_main() {
         checks) ci_cmd_checks ;;
         file-header-checks) ci_cmd_file_header_checks ;;
         diff-checks) ci_cmd_diff_checks "${1:?diff-checks: base sha required}" "${2:?diff-checks: base ref required}" ;;
+        compose-healthchecks) ci_cmd_compose_healthchecks ;;
         test) ci_run_bats "${@:-$CI_SH_DIR/ci.bats}" ;;
         version) printf '%s\n' "$CI_SH_VERSION" ;;
         -h|--help|help) ci_usage ;;

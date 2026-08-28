@@ -285,10 +285,11 @@ jobs:
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - uses: *checkout_centraliced_versioning # v7.0.1
-      # What: Composite action shared with compose-healthchecks-hosted below.
-      # Why: The two jobs used to carry the identical step twice.
-      # From: Issue #1095
-      - uses: ./.github/actions/compose-healthchecks-check
+      # What: ci.sh call shared with compose-healthchecks-hosted below.
+      # Why: §72 -- same function, same decision, either runner.
+      # From: Issue #1095 | Issue #1683
+      - name: Run compose-healthchecks check (ci.sh compose-healthchecks)
+        run: bash scripts/ci/ci.sh compose-healthchecks
 
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
@@ -631,10 +632,11 @@ jobs:
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running compose-healthchecks check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      # What: same composite action as compose-healthchecks.
-      # Why: keeps the hosted fallback in parity with its twin.
-      # From: PR #1249
-      - uses: ./.github/actions/compose-healthchecks-check
+      # What: same ci.sh call as compose-healthchecks.
+      # Why: §72 -- same function, same decision, either runner.
+      # From: PR #1249 | Issue #1683
+      - name: Run compose-healthchecks check (ci.sh compose-healthchecks)
+        run: bash scripts/ci/ci.sh compose-healthchecks
 
   line-endings:
     # What: DO NOT RENAME -- line endings IS the required-check string.

@@ -1132,6 +1132,14 @@ setup() {
     [ "$status" -ne 0 ]
 }
 
+# What: the compose-healthchecks command runs clean on this repo's tree.
+# Why: this repo's own compose files are the check's real fixture.
+# From: Issue #1683
+@test "compose-healthchecks: ci.sh compose-healthchecks runs on this repo's tree" {
+    run bash "$repo_root/scripts/ci/ci.sh" compose-healthchecks
+    [ "$status" -eq 0 ]
+}
+
 # What: docker compose config succeeds for a real compose file.
 # Why: proves the wrapper works against this repo's actual files.
 # From: Issue #1683
