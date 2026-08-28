@@ -7,10 +7,8 @@ description: >-
   this action goes through here instead of repeating the ref, so a version
   bump is one edit, not N.
 
-# What: exists because a YAML anchor/alias cannot serve this role.
-# Why: GitHub's composite-action manifest parser rejects anchors/aliases
-#   outright ("Anchors are not currently supported"); a local
-#   `uses: ./...` reference has no such restriction.
+# What: Centralizes docker/build-push-action pin version.
+# Why: GitHub composite-action parser rejects YAML anchors.
 # From: Issue #1095 | PR #1665
 inputs:
   builder:

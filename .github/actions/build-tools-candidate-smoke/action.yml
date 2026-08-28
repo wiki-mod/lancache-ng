@@ -31,8 +31,8 @@ runs:
         : "${IMAGE_REF:?image-ref is required}"
         : "${PLATFORM:?platform is required}"
 
-        # What: runs the timeout inside the candidate container, around the tool-version checks.
-        # Why: a signal-deaf tool would otherwise outlive the docker client and leave the runner slot wedged.
+        # What: Runs timeout in candidate container over tool checks.
+        # Why: Prevents signal-deaf tool from wedging runner slot.
         # From: Issue #1522 | PR #1523
         docker run --rm --platform "$PLATFORM" "$IMAGE_REF" \
           timeout --kill-after=30s --signal=TERM 14m bash -c '
@@ -68,10 +68,8 @@ runs:
       run: |
         set -euo pipefail
 
-        # What: raises the open-file ulimit and runs with an init process as container PID 1.
-        # Why: `--init` (tini) reaps the lock-holder subprocess
-        # tests/bats/reserve_validation_subnet.bats spawns and kills; without a
-        # PID-1 reaper it becomes a permanent zombie that `kill -0` still reports as alive.
+        # What: Raises open-file ulimit; runs init as container PID 1.
+        # Why: `--init` (tini) reaps lock-holder subprocess as PID 1.
         # From: Issue #1522 | PR #1523
         docker run --rm --init \
           --user "$(id -u):$(id -g)" \
@@ -90,8 +88,8 @@ runs:
       run: |
         set -euo pipefail
 
-        # What: uses the same ulimit/init container settings as the Bats step above.
-        # Why: keeps both candidate fixture runners on one resource-lifecycle contract.
+        # What: Uses same ulimit/init container settings as Bats step.
+        # Why: Uniform resource-lifecycle for both fixture runners.
         # From: Issue #1522 | PR #1523
         docker run --rm --init \
           --user "$(id -u):$(id -g)" \

@@ -7,10 +7,8 @@ description: >-
   needs this action goes through here instead of repeating the ref, so a
   version bump is one edit, not N.
 
-# What: exists because a YAML anchor/alias cannot serve this role.
-# Why: GitHub's composite-action manifest parser rejects anchors/aliases
-#   outright ("Anchors are not currently supported"); a local
-#   `uses: ./...` reference has no such restriction.
+# What: Centralized pin for aquasecurity/trivy-action
+# Why: YAML anchors unsupported in composite-action parser
 # From: Issue #1095 | PR #1665
 inputs:
   scan-type:

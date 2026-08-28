@@ -12,12 +12,8 @@
 # against a previous crashed job on the same self-hosted runner leaving a
 # stale lock or a corrupted sparse-checkout/skip-worktree state behind.
 #
-# What: acquires a lock (mkdir-based, atomic) keyed to this run, reclaiming
-# a stale one (job completed, or older than 3h) if found; then clears any
-# leftover sparse-checkout/skip-worktree state and force-checks-out HEAD.
-# Why: a self-hosted runner reuses one working directory across unrelated
-# jobs -- a narrowed tree or a stale lock from a crashed prior job corrupts
-# whichever job runs next on the same runner instance (AG-WF-036).
+# What: Acquires lock; reclaims stale; resets sparse-checkout.
+# Why: Dir reuse: stale lock/worktree state from prior crash.
 # From: Issue #1095
 
 name: Checkout lock and resync (self-hosted reuse hardening)
