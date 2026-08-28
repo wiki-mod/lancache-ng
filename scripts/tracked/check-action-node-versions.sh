@@ -160,13 +160,9 @@ is_external_action_ref() {
   return 0
 }
 
-# What: a composite action.yml file cannot use a YAML anchor/alias at all.
-# Why: the Actions Runner's own
-#   composite-action loader hard-fails with "Anchors are not currently
-#   supported" -- unlike a workflow file, which a separate, more permissive
-#   parser already tolerates (pre-existing anchors in build-push.yml's env:
-#   blocks predate this and still work). The duplicate-ref check below must
-#   only apply where an anchor is an actual, usable fix.
+# What: composite action.yml can't use a YAML anchor/alias.
+# Why: composite manifests reject anchors; workflows allow them.
+# From: Issue #1095 | PR #1665
 is_workflow_file() {
   local candidate="$1"
   [[ "$candidate" == "$workflow_dir"/* ]]
@@ -305,13 +301,9 @@ for entry in "${uses_literal_entries[@]}"; do
   fi
 done
 
-# What: rejects a repeated literal third-party `uses:` ref inside one
-#   workflow file (never inside a composite action.yml -- see
-#   is_workflow_file() above).
-# Why: once the same immutable ref appears twice in a workflow file, a YAML
-#   anchor/alias collapses it to one owner line; the same collapse is not an
-#   option inside a composite action.yml, so duplication
-#   there is simply the correct, GitHub-imposed shape, not a violation.
+# What: rejects a workflow file repeating one `uses:` ref.
+# Why: an anchor can collapse duplicates only in workflow files.
+# From: Issue #1095 | PR #1665
 for exact_file_key in "${!literal_ref_counts_by_file[@]}"; do
   count="${literal_ref_counts_by_file[$exact_file_key]}"
   if [ "$count" -le 1 ]; then
@@ -322,21 +314,23 @@ for exact_file_key in "${!literal_ref_counts_by_file[@]}"; do
   fail "'$scan_file' repeats third-party action ref '$value' $count times. Collapse it to one maintenance point with a YAML anchor/alias."
 done
 
-# What: rejects one external action key pinned to multiple distinct refs.
-# Why: the drift class is not duplication alone; the real maintenance
-#   hazard is the same dependency silently splitting across versions.
+# What: rejects an external action key pinned to multiple refs.
+# Why: the same dependency silently splits into different refs.
+# From: Issue #1095 | PR #1665
 for action_key in "${!ref_counts_by_key[@]}"; do
   count="${ref_counts_by_key[$action_key]}"
   if [ "$count" -le 1 ]; then
     continue
   fi
-  fail "Third-party action '$action_key' is pinned to multiple refs across .github/** (${ref_paths_by_key[$action_key]}). Keep one canonical ref per action key."
+  ref_detail=""
+  for ref in ${ref_paths_by_key[$action_key]}; do
+    ref_detail="${ref_detail}${ref} (in $(referencing_files "${action_key}@${ref}")); "
+  done
+  fail "Third-party action '$action_key' is pinned to multiple refs across .github/**: ${ref_detail%; }. Keep one canonical ref per action key."
 done
 
 # What: rejects expression syntax in an action description: field.
-# Why: a description: body is template-evaluated even as pure prose,
-#   so a literal expression stops the whole manifest from loading
-#   and breaks every job that uses the action.
+# Why: description: fields are template-evaluated, breaking jobs.
 # From: Issue #1095 | PR #1719
 #
 # Scoped to composite action manifests only, not workflow files: the
@@ -587,10 +581,10 @@ for value in "${uses_values[@]}"; do
 done
 
 if [ "$failures" -gt 0 ]; then
-  printf '::error::check-action-node-versions: %d pinned action(s) or manifest field(s) failed. Each failure is printed above as its own ::error:: line naming the exact file, line and reason -- read those, not this summary.
+  printf '::error::check-action-node-versions: %d pinned action(s) or manifest field(s) failed. Each failure is printed above as its own ::error:: line naming the affected file or action ref and the reason -- read those, not this summary.
 ' "$failures" >&2
   exit 1
 fi
 
-printf 'check-action-node-versions: OK (every pinned action -- local and external -- declares a current Node runtime, or is not Node-based; third-party action refs are de-duplicated per file and do not drift across .github/**; no composite manifest declares expression syntax where the template validator would evaluate it).
+printf 'check-action-node-versions: OK (every pinned action -- local and external -- declares a current Node runtime, or is not Node-based; third-party action refs are de-duplicated per file and do not drift across .github/**; no composite action.yml declares GitHub Actions expression syntax in a description field).
 '
