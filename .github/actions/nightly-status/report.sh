@@ -2,10 +2,8 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: files, updates, or closes one standing issue, keyed by LABEL.
-# Why: reused across consecutive failures, closed on next success --
-#   LABEL is caller-overridable so any recurring signal (e.g. a Trivy
-#   finding) reuses this script instead of a near-duplicate one.
+# What: file, update, or close standing issue by LABEL.
+# Why: reuses same issue across failures, closes on success.
 # From: Issue #1095
 
 set -euo pipefail
@@ -19,15 +17,14 @@ LABEL="${LABEL:-nightly-broken}"
 DRY_RUN="${DRY_RUN:-false}"
 FAILED_JOBS="${FAILED_JOBS:-}"
 PROJECT_PAT="${PROJECT_PAT:-}"
-# What: KANBAN-Lancache-NG board, matching add-to-project.yml's own URL.
-# Why: kept in sync manually; update both together if the board changes.
+# What: KANBAN board URL for add-to-project webhook.
+# Why: manual sync required; update both if board changes.
 # From: Issue #1095
 PROJECT_OWNER="${PROJECT_OWNER:-wiki-mod}"
 PROJECT_NUMBER="${PROJECT_NUMBER:-6}"
 
-# What: adds the standing issue to the project board via PROJECT_PAT.
-# Why: GH_TOKEN-created issues suppress the issues:opened webhook that
-#   would otherwise trigger add-to-project.yml automatically.
+# What: add standing issue to project board.
+# Why: GH_TOKEN suppresses issues:opened webhook.
 # From: Issue #1095
 add_to_project_board() {
   local issue_url="$1"
@@ -43,8 +40,8 @@ add_to_project_board() {
     --owner "${PROJECT_OWNER}" --url "${issue_url}" >/dev/null
 }
 
-# What: echoes a mutating command instead of running it when DRY_RUN=true.
-# Why: lets the branch logic be exercised locally without touching issues.
+# What: echo command instead of running it when DRY_RUN=true.
+# Why: exercise branch logic locally without side effects.
 # From: Issue #1095
 run() {
   if [ "${DRY_RUN}" = "true" ]; then
@@ -54,8 +51,8 @@ run() {
   fi
 }
 
-# What: assigns the "Bug" issue type to $1 if it doesn't already have one.
-# Why: called on every failure path so a failed one-shot attempt self-heals.
+# What: assign "Bug" issue type to argument if needed.
+# Why: every failure path ensures correct type.
 # From: Issue #1095
 ensure_bug_type() {
   local issue_number="$1" owner name issue_query_result issue_node_id current_type bug_type_id
@@ -98,8 +95,8 @@ ensure_bug_type() {
     }' -F issueId="${issue_node_id}" -F typeId="${bug_type_id}" >/dev/null
 }
 
-# What: finds the oldest open standing issue for this label, if any.
-# Why: --jq yields the number or nothing, avoiding a SIGPIPE-prone pipe.
+# What: find oldest open standing issue for this label.
+# Why: --jq avoids SIGPIPE-prone pipe chains.
 # From: Issue #1095
 existing="$(gh issue list --repo "${REPO}" --label "${LABEL}" --state open \
   --json number --jq 'sort_by(.number) | .[0].number // empty')"
@@ -118,9 +115,8 @@ if [ "${OUTCOME}" = "success" ]; then
   exit 0
 fi
 
-# What: ensures the label exists before reusing/opening an issue.
-# Why: truncated to 100 chars -- GitHub's hard label-description
-#   limit; untruncated, `|| true` would mask that real failure too.
+# What: ensure label exists before reusing or opening issue.
+# Why: truncated to 100 chars; GitHub's hard limit.
 # From: Issue #1095
 label_description="Recurring, self-closing tracking issue: ${SCOPE}"
 run gh label create "${LABEL}" --repo "${REPO}" --color b60205 \
