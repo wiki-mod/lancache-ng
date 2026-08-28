@@ -151,7 +151,11 @@ smoke_test_image() {
 published_image_reference() {
   local image="$1" digest=""
 
-  if digest="$(resolve_manifest_digest "$image")"; then
+  # What: forwards the same optional GHCR credentials used above.
+  # Why: an anonymous digest lookup can be rate-limited even after
+  # an authenticated pull already succeeded.
+  # From: Issue #1095
+  if digest="$(resolve_manifest_digest "$image" "${GHCR_RETRY_USERNAME:-}" "${GHCR_RETRY_PASSWORD:-}")"; then
     printf '%s@%s\n' "${image%:*}" "$digest"
   else
     fail "could not resolve multi-platform manifest digest for $image"
