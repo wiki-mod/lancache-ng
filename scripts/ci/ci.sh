@@ -1265,6 +1265,70 @@ readonly -a CI_STANDING_CHECKS=(
     scripts/tracked/check-logging-matrix.sh
 )
 
+# What: the repo-wide half of file-headers/file-headers-hosted's own
+#   composite action (6 scripts), kept as its own list, not merged
+#   into CI_STANDING_CHECKS.
+# Why: CI_STANDING_CHECKS already runs once per push/PR inside the
+#   validate-compose job (§72); merging these in would run these 6
+#   scripts a second time from file-headers/file-headers-hosted too,
+#   the exact duplicate-work waste this design exists to remove.
+# From: Issue #1683
+readonly -a CI_FILE_HEADER_CHECKS=(
+    scripts/tracked/check-file-headers.sh
+    scripts/untracked/check-workflow-line-limit.sh
+    scripts/untracked/check-review-chronology-comments.sh
+    scripts/tracked/check-dependabot-docker-base-consistency.sh
+    scripts/untracked/check-trivy-action-direct-usage.sh
+    scripts/untracked/check-deny-short-sha.sh
+)
+
+# What: per-script env overrides a generic checks loop can't infer.
+# Why: chronology's warn/block split is event-scoped, not file-scoped.
+# From: Issue #1683
+ci_standing_check_env() {
+    local name="$1"
+    case "$name" in
+        check-review-chronology-comments.sh)
+            if [[ "${EVENT_NAME:-}" == "pull_request" ]]; then
+                printf 'CHRONOLOGY_WARN_ONLY=1\n'
+            else
+                printf 'CHRONOLOGY_WARN_ONLY=0\n'
+            fi
+            ;;
+    esac
+}
+
+ci_run_check_list() {
+    # What: runs every script passed as an argument, sharing CI_FAILURES.
+    # Why: §72 -- one loop implementation, not one loop per caller. Takes
+    #   the list by value (caller expands "${ARR[@]}"), not a nameref by
+    #   name, so static analysis sees each caller's array actually used.
+    # From: Issue #1683
+    local script name
+    local -a run_env
+    for script in "$@"; do
+        name="$(basename "$script")"
+        if [[ ! -f "$CI_REPO_ROOT/$script" ]]; then
+            ci_report_failure "standing check" "$name" "script exists" "missing at $script" \
+                "the script moved or was renamed; update the check list"
+            continue
+        fi
+        mapfile -t run_env < <(ci_standing_check_env "$name")
+        if ! env "${run_env[@]}" bash "$CI_REPO_ROOT/$script"; then
+            ci_report_failure "standing check" "$name" "exit 0" "non-zero" \
+                "see this check's own output above for the actual cause"
+        fi
+    done
+}
+
+ci_cmd_file_header_checks() {
+    # What: the 6 repo-wide checks file-headers/-hosted both need.
+    # Why: §72 -- same function, same decision, either runner.
+    # From: Issue #1683
+    ci_run_check_list "${CI_FILE_HEADER_CHECKS[@]}"
+    ci_failure_summary
+}
+
 ci_compose_config_clean() {
     # What: true iff "docker compose $* config" is warning-free.
     # Why: a silent compose warning today is a real bug tomorrow.
@@ -1307,23 +1371,42 @@ ci_check_compose_files() {
     done
 }
 
+ci_cmd_diff_checks() {
+    # What: runs the two PR-diff-scoped header/chronology checks.
+    # Why: §72 -- one shared call site for both runner variants.
+    # From: Issue #1683
+    local base_sha="${1:?ci.sh diff-checks: base sha is required}"
+    local base_ref="${2:?ci.sh diff-checks: base ref is required}"
+
+    # What: both scripts `git fetch` the base ref; needs a writable
+    #   .git, so this requires a writable checkout, not a :ro mount.
+    # Why: matches the -v ...:ro + cp -a pattern the caller must use.
+    # From: Issue #1683
+    local start_dir
+    start_dir="$(pwd)"
+    cd "$CI_REPO_ROOT"
+
+    if ! SPDX_BASE_SHA="$base_sha" SPDX_BASE_REF="$base_ref" GITHUB_SHA="${GITHUB_SHA:-HEAD}" \
+        bash "$CI_REPO_ROOT/scripts/tracked/check-pr-diff-file-headers.sh"; then
+        ci_report_failure "diff check" "check-pr-diff-file-headers.sh" "exit 0" "non-zero" \
+            "see this check's own output above for the actual cause"
+    fi
+
+    if ! CHRONOLOGY_DIFF_BASE_SHA="$base_sha" CHRONOLOGY_DIFF_BASE_REF="$base_ref" GITHUB_SHA="${GITHUB_SHA:-HEAD}" \
+        bash "$CI_REPO_ROOT/scripts/untracked/check-review-chronology-comments.sh"; then
+        ci_report_failure "diff check" "check-review-chronology-comments.sh (diff-scoped)" "exit 0" "non-zero" \
+            "see this check's own output above for the actual cause"
+    fi
+
+    cd "$start_dir"
+    ci_failure_summary
+}
+
 ci_cmd_checks() {
     # What: runs every standing check, reporting all failures.
     # Why: one aggregate verdict instead of 9 separate CI jobs.
     # From: Issue #1683
-    local script name
-    for script in "${CI_STANDING_CHECKS[@]}"; do
-        name="$(basename "$script")"
-        if [[ ! -f "$CI_REPO_ROOT/$script" ]]; then
-            ci_report_failure "standing check" "$name" "script exists" "missing at $script" \
-                "the script moved or was renamed; update CI_STANDING_CHECKS"
-            continue
-        fi
-        if ! bash "$CI_REPO_ROOT/$script"; then
-            ci_report_failure "standing check" "$name" "exit 0" "non-zero" \
-                "see this check's own output above for the actual cause"
-        fi
-    done
+    ci_run_check_list "${CI_STANDING_CHECKS[@]}"
 
     # What: no subshell -- ci_report_failure's array must stay shared.
     # Why: a subshell's CI_FAILURES writes never reach the caller.
@@ -1682,6 +1765,8 @@ Commands:
   release <channel>            Promote an accepted stack to a release.
   gc [--execute]               Report unreachable artifacts.
   checks                       Run every kept standing-check script.
+  file-header-checks           Run file-headers/-hosted's 6 repo-wide checks.
+  diff-checks <sha> <ref>      Run the PR-diff-scoped header/chronology checks.
   test [path...]               Run bats, summarizing every failure.
   version                      Print ci.sh's own version.
 USAGE
@@ -1708,6 +1793,8 @@ ci_main() {
         release) ci_cmd_release "${1:?release: channel required}" ;;
         gc) ci_cmd_gc "${1:-report}" ;;
         checks) ci_cmd_checks ;;
+        file-header-checks) ci_cmd_file_header_checks ;;
+        diff-checks) ci_cmd_diff_checks "${1:?diff-checks: base sha required}" "${2:?diff-checks: base ref required}" ;;
         test) ci_run_bats "${@:-$CI_SH_DIR/ci.bats}" ;;
         version) printf '%s\n' "$CI_SH_VERSION" ;;
         -h|--help|help) ci_usage ;;

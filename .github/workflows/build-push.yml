@@ -228,31 +228,42 @@ jobs:
           # From: PR #1503
           build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
           printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
-      - uses: ./.github/actions/file-headers-check
-        with:
-          build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
-          diff-base-sha: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
-          diff-base-ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || '' }}
-      - name: Check SPDX header on this PR's changed files (AG-HDR-008)
-        # What: diff-scoped SPDX header check (AG-HDR-008) on PR-changed files.
-        # Why: repo-wide check is a hard gate; this is PR-specific attribution.
-        # From: Issue #1510 | PR #1511
+      - name: Run file-headers repo-wide checks (ci.sh file-header-checks)
+        # What: 6 formerly separate composite-action steps, now one call.
+        # Why: same 6 scripts, delegated not duplicated (#72).
+        # From: Issue #1683
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          docker run --rm -i \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            --env EVENT_NAME \
+            "$BUILD_TOOLS_IMAGE" \
+            timeout --kill-after=30 --signal=KILL 300 \
+            bash scripts/ci/ci.sh file-header-checks
+      - name: Run PR-diff-scoped header/chronology checks (ci.sh diff-checks)
+        # What: SPDX + diff-scoped chronology, now one shared call site.
+        # Why: was duplicated verbatim across this job and its hosted twin.
+        # From: Issue #1510 | PR #1511 | Issue #1683
         if: github.event_name == 'pull_request'
         env:
-          SPDX_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          SPDX_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           set -euo pipefail
           docker run --rm \
             --user "$(id -u):$(id -g)" \
             -v "$PWD:/source:ro" \
             -w /tmp \
-            -e SPDX_BASE_SHA \
-            -e SPDX_BASE_REF \
+            -e BASE_SHA \
+            -e BASE_REF \
             -e GITHUB_SHA \
             "$BUILD_TOOLS_IMAGE" \
             timeout --kill-after=30 --signal=KILL 300 bash -c \
-              'cp -a /source /tmp/work && cd /tmp/work && bash scripts/tracked/check-pr-diff-file-headers.sh'
+              'cp -a /source /tmp/work && cd /tmp/work && bash scripts/ci/ci.sh diff-checks "$BASE_SHA" "$BASE_REF"'
 
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
@@ -571,34 +582,42 @@ jobs:
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running file-headers check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      # What: same composite action as the self-hosted job.
-      # Why: the action metadata is the single source of truth for its checks.
-      # From: PR #1467
-      - uses: ./.github/actions/file-headers-check
-        with:
-          build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
-          diff-base-sha: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
-          diff-base-ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || '' }}
-      - name: Check SPDX header on this PR's changed files (AG-HDR-008)
+      # What: same ci.sh call as the self-hosted job.
+      # Why: §72 -- same function, same decision, either runner.
+      # From: Issue #1683
+      - name: Run file-headers repo-wide checks (ci.sh file-header-checks)
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          docker run --rm -i \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            --env EVENT_NAME \
+            "$BUILD_TOOLS_IMAGE" \
+            timeout --kill-after=30 --signal=KILL 300 \
+            bash scripts/ci/ci.sh file-header-checks
+      - name: Run PR-diff-scoped header/chronology checks (ci.sh diff-checks)
         # What: mirrors the self-hosted file-headers job's step exactly.
-        # Why: keeps parity: same PR-diff header check either way.
-        # From: Issue #1510 | PR #1511
+        # Why: keeps parity: same PR-diff header/chronology check either way.
+        # From: Issue #1510 | PR #1511 | Issue #1683
         if: github.event_name == 'pull_request'
         env:
-          SPDX_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          SPDX_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           set -euo pipefail
           docker run --rm \
             --user "$(id -u):$(id -g)" \
             -v "$PWD:/source:ro" \
             -w /tmp \
-            -e SPDX_BASE_SHA \
-            -e SPDX_BASE_REF \
+            -e BASE_SHA \
+            -e BASE_REF \
             -e GITHUB_SHA \
             "$BUILD_TOOLS_IMAGE" \
             timeout --kill-after=30 --signal=KILL 300 bash -c \
-              'cp -a /source /tmp/work && cd /tmp/work && bash scripts/tracked/check-pr-diff-file-headers.sh'
+              'cp -a /source /tmp/work && cd /tmp/work && bash scripts/ci/ci.sh diff-checks "$BASE_SHA" "$BASE_REF"'
 
   compose-healthchecks-hosted:
     name: compose healthchecks (GitHub-hosted fallback)

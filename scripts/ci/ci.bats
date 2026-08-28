@@ -1068,6 +1068,70 @@ setup() {
     [ "$status" -eq 0 ]
 }
 
+# What: every file-headers repo-wide check script exists on disk.
+# Why: mirrors "every listed script exists" for the separate list.
+# From: Issue #1683
+@test "file-header checks: every listed script exists" {
+    local script
+    for script in "${CI_FILE_HEADER_CHECKS[@]}"; do
+        [ -f "$repo_root/$script" ]
+    done
+}
+
+# What: CI_FILE_HEADER_CHECKS and CI_STANDING_CHECKS share no script.
+# Why: §72 -- a script in both lists would run twice per CI run.
+# From: Issue #1683
+@test "file-header checks: no overlap with CI_STANDING_CHECKS" {
+    local a b
+    for a in "${CI_FILE_HEADER_CHECKS[@]}"; do
+        for b in "${CI_STANDING_CHECKS[@]}"; do
+            [ "$a" != "$b" ]
+        done
+    done
+}
+
+# What: the file-header-checks command runs clean on this repo's tree.
+# Why: this repo's own tree is the checks' first real fixture.
+# From: Issue #1683
+@test "file-header checks: ci.sh file-header-checks runs on this repo's tree" {
+    EVENT_NAME=push run bash "$repo_root/scripts/ci/ci.sh" file-header-checks
+    [ "$status" -eq 0 ]
+}
+
+# What: check-review-chronology-comments.sh gets CHRONOLOGY_WARN_ONLY
+#   derived from EVENT_NAME, not left to the script's own default.
+# Why: pull_request must warn-only; every other event must block.
+# From: Issue #1683
+@test "standing checks: chronology env is warn-only for pull_request" {
+    # What: an unset EVENT_NAME must fail closed to blocking, not warn.
+    # Why: an unrecognized/unset event must never silently soften a gate.
+    unset EVENT_NAME
+    run ci_standing_check_env "check-review-chronology-comments.sh"
+    [ "$status" -eq 0 ]
+    [ "$output" = "CHRONOLOGY_WARN_ONLY=0" ]
+
+    EVENT_NAME=pull_request run ci_standing_check_env "check-review-chronology-comments.sh"
+    [ "$status" -eq 0 ]
+    [ "$output" = "CHRONOLOGY_WARN_ONLY=1" ]
+
+    EVENT_NAME=push run ci_standing_check_env "check-review-chronology-comments.sh"
+    [ "$status" -eq 0 ]
+    [ "$output" = "CHRONOLOGY_WARN_ONLY=0" ]
+}
+
+# What: diff-checks refuses to run without both required arguments.
+# Why: a silently-empty base sha/ref must never pass as "no diff".
+# From: Issue #1683
+@test "diff-checks: fails fast when base sha is missing" {
+    run bash "$repo_root/scripts/ci/ci.sh" diff-checks
+    [ "$status" -ne 0 ]
+}
+
+@test "diff-checks: fails fast when base ref is missing" {
+    run bash "$repo_root/scripts/ci/ci.sh" diff-checks "HEAD"
+    [ "$status" -ne 0 ]
+}
+
 # What: docker compose config succeeds for a real compose file.
 # Why: proves the wrapper works against this repo's actual files.
 # From: Issue #1683
