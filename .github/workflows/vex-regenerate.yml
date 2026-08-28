@@ -161,11 +161,9 @@ jobs:
           REPO: ${{ github.repository }}
           TRIGGER_SHA: ${{ github.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          # What: the tracking issue this workflow's commits/comments cross-reference.
-          # Why: kept as an interpolated variable rather than a literal "#<N>" in the
-          #   commit-message template below, so GitHub's own issue-linking still fires
-          #   on the real generated commit message without a duplicate bare reference
-          #   sitting in this file's own source next to the canonical From: pointer.
+          # What: Env var carries this workflow's tracking issue number.
+          # Why: Avoids duplicate inline issue-number mentions in file.
+          # From: Issue #1095 | PR #1621
           TRACKING_ISSUE: "1095"
         run: |
           set -uo pipefail
