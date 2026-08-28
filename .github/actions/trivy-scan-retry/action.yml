@@ -94,6 +94,15 @@ outputs:
       consumer must treat "unknown" as NOT-RUN -- never as recovery, never
       as a finding. See "Determine DB status" step below.
     value: ${{ steps.db-status.outputs.value }}
+  scan-error:
+    description: >-
+      "true" only when the terminal attempt failed with no report AND the
+      DB was already present -- a pre-report error (image pull/auth
+      failure, bad config, scanner crash), never a genuine finding and
+      never a DB outage. A consumer must not treat this as a finding and
+      must not delete/promote on db-status "available" alone when this is
+      "true". "false" on every other outcome, including overall success.
+    value: ${{ steps.db-status.outputs.scan-error }}
 runs:
   using: composite
   steps:
@@ -144,12 +153,15 @@ runs:
         fi
         if [ -s "$report" ]; then
           echo "retryable=false" >> "$GITHUB_OUTPUT"
+          echo "error-kind=finding" >> "$GITHUB_OUTPUT"
           echo "::warning::Trivy attempt $attempt failed but its report ('$report') was written -- a genuine finding or non-download error, not retryable." >&2
         elif [ -s "$cache_dir/db/trivy.db" ]; then
           echo "retryable=false" >> "$GITHUB_OUTPUT"
+          echo "error-kind=pre-report-error" >> "$GITHUB_OUTPUT"
           echo "::warning::Trivy attempt $attempt failed with no report, but the vulnerability DB IS present in '$cache_dir/db' -- not a DB-download failure, some other pre-report error (target-image pull/auth, config, scanner crash)." >&2
         else
           echo "retryable=true" >> "$GITHUB_OUTPUT"
+          echo "error-kind=db-missing" >> "$GITHUB_OUTPUT"
           echo "::warning::Trivy attempt $attempt failed with no report and no DB file in '$cache_dir/db' -- classified as a DB-download failure." >&2
         fi
         CLASSIFY
@@ -430,17 +442,57 @@ runs:
         echo "::error::All Trivy scan attempts for image-ref '${{ inputs.image-ref }}' failed." >&2
         exit 1
 
-    # What: emits db-status as unavailable or available.
-    # Why: a consumer must tell "not run" from "recovered".
-    # From: Issue #1095
+    # What: emits db-status and a separate scan-error flag.
+    # Why: a pre-report error must not read as a finding.
+    # From: Issue #1095 | PR #1735
     - name: Determine DB status
       id: db-status
       if: always()
       shell: bash
+      env:
+        OUT1: ${{ steps.attempt1.outcome }}
+        OUT2: ${{ steps.attempt2.outcome }}
+        OUT3: ${{ steps.attempt3.outcome }}
+        OUT4: ${{ steps.attempt4.outcome }}
+        KIND1: ${{ steps.classify1.outputs.error-kind }}
+        KIND2: ${{ steps.classify2.outputs.error-kind }}
+        KIND3: ${{ steps.classify3.outputs.error-kind }}
+        KIND4: ${{ steps.classify4.outputs.error-kind }}
       run: |
         set -euo pipefail
-        if [[ "${{ steps.classify4.outputs.retryable }}" == "true" ]]; then
-          echo "value=unavailable" >> "$GITHUB_OUTPUT"
-        else
+        # What: checks overall success before any error-kind.
+        # Why: a later success must never read as unavailable.
+        # From: Issue #1095 | PR #1735
+        succeeded=false
+        for outcome in "$OUT1" "$OUT2" "$OUT3" "$OUT4"; do
+          if [ "$outcome" = "success" ]; then
+            succeeded=true
+            break
+          fi
+        done
+        if [ "$succeeded" = "true" ]; then
           echo "value=available" >> "$GITHUB_OUTPUT"
+          echo "scan-error=false" >> "$GITHUB_OUTPUT"
+          exit 0
         fi
+        kind=""
+        for candidate in "$KIND4" "$KIND3" "$KIND2" "$KIND1"; do
+          if [ -n "$candidate" ]; then
+            kind="$candidate"
+            break
+          fi
+        done
+        case "$kind" in
+          db-missing)
+            echo "value=unavailable" >> "$GITHUB_OUTPUT"
+            echo "scan-error=false" >> "$GITHUB_OUTPUT"
+            ;;
+          pre-report-error)
+            echo "value=available" >> "$GITHUB_OUTPUT"
+            echo "scan-error=true" >> "$GITHUB_OUTPUT"
+            ;;
+          *)
+            echo "value=available" >> "$GITHUB_OUTPUT"
+            echo "scan-error=false" >> "$GITHUB_OUTPUT"
+            ;;
+        esac

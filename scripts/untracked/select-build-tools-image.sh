@@ -96,10 +96,14 @@ smoke_test_image() {
       openssl
       rsync
       envsubst
-      dhclient
       expect
       tcpdump
     )
+
+    # What: dhclient is opt-in via EXTRA_REQUIRED_TOOLS.
+    # Why: no Alpine apk package ships dhclient; would break
+    # every caller once Alpine ships. Three callers opt in.
+    # From: Issue #1095
 
     if [[ -n "${EXTRA_REQUIRED_TOOLS:-}" ]]; then
       read -ra extra_tools <<<"$EXTRA_REQUIRED_TOOLS"
