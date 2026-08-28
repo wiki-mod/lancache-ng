@@ -2323,124 +2323,10 @@ jobs:
             exit 1
           fi
 
-      - name: Check naming consistency (docs/naming-conventions.md)
-        run: |
-          set -euo pipefail
-
-          docker run --rm -i \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            timeout --kill-after=30 --signal=KILL 300 \
-            bash scripts/tracked/check-naming-consistency.sh
-
-      - name: Check workflow service lists stay in sync
-        # What: checks this file's 4 hardcoded services=() copies plus 3 others.
-        # Why: a new matrix service missed in one copy silently drops out.
-        # From: Issue #1095 | PR #1532
-        run: |
-          set -euo pipefail
-
-          docker run --rm -i \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            timeout --kill-after=30 --signal=KILL 300 \
-            bash scripts/tracked/check-workflow-service-lists.sh
-
-      - name: Check VEX generator produces valid OpenVEX JSON (.trivyignore.yaml -> generate-vex.sh)
-        # What: runs generate-vex.sh, asserts valid non-empty OpenVEX output.
-        # Why: catches a generator/input bug here, not post-merge or at release.
-        # From: Issue #1095 (F-22) | PR #1620
-        run: |
-          set -euo pipefail
-
-          docker run --rm -i \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            timeout --kill-after=30 --signal=KILL 300 \
-            bash scripts/tracked/check-vex-drift.sh
-
-      - name: Check netdata's vendored curl pin against issue #1304's tracked CVEs (PR #1352 tracking mechanism)
-        # What: checks netdata's vendored curl against 7 tracked CVE IDs.
-        # Why: Trivy's os-pkg scan cannot see netdata's static-linked curl.
-        # From: Issue #1095 | PR #1532
-        run: |
-          set -euo pipefail
-
-          docker run --rm -i \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            timeout --kill-after=30 --signal=KILL 300 \
-            bash scripts/untracked/check-netdata-curl-pin.sh
-
-      - name: Check config-writer idempotence test coverage (#640)
-        run: |
-          set -euo pipefail
-
-          docker run --rm -i \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            timeout --kill-after=30 --signal=KILL 300 \
-            bash scripts/tracked/check-idempotence-test-coverage.sh
-
-      - name: Check bats path-filter coverage (build-tools.yml vs. real bats dependencies, issue #879)
-        # What: checks every bats-sourced file is in build-tools.yml's paths.
-        # Why: a missing path leaves coverage that exists on paper, never runs.
-        # From: Issue #1095 | PR #1532
-        run: |
-          set -euo pipefail
-
-          docker run --rm -i \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            timeout --kill-after=30 --signal=KILL 300 \
-            bash scripts/tracked/check-bats-path-filter-coverage.sh
-
-      - name: Check setup.sh/simulation-script prompt drift (issue #1176)
-        # What: check-setup-prompt-drift.sh fails on a missing expect_prompt.
-        # Why: an out-of-sync prompt hangs both simulations until timeout.
-        # From: Issue #1095 | PR #1532
-        run: |
-          set -euo pipefail
-
-          docker run --rm -i \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            timeout --kill-after=30 --signal=KILL 300 \
-            bash scripts/tracked/check-setup-prompt-drift.sh
-
-      - name: Check proxy cache env/doc drift (docs/architecture-ng.md, bug-hunt #849/#1068 item 11)
-        # What: fails when the CACHE_* docs table disagrees with proxy.env.
-        # Why: the table hand-duplicates defaults; drift is otherwise silent.
-        # From: Issue #1095 | PR #1532
-        run: |
-          set -euo pipefail
-
-          docker run --rm -i \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            timeout --kill-after=30 --signal=KILL 300 \
-            bash scripts/untracked/check-proxy-cache-env-doc-drift.sh
-
-      - name: Check logging matrix (docs/architecture-ng.md, issue #633)
-        # What: reuses Validate compose files' dummy env, in its own env: block.
-        # Why: docker compose config needs every var set; kept separately.
-        # From: Issue #1095 | PR #1532
+      - name: Run consolidated standing checks (ci.sh checks)
+        # What: 9 formerly separate steps, now one ci.sh call.
+        # Why: same 9 scripts, delegated not duplicated.
+        # From: Issue #1683
         env:
           CACHE_INACTIVE: 365d
           CACHE_MAX_SIZE: 10g
@@ -2518,8 +2404,8 @@ jobs:
             --env SSL_CACHE_MAX_GB \
             --env STANDARD_CACHE_MAX_GB \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            timeout --kill-after=30 --signal=KILL 300 \
-            bash scripts/tracked/check-logging-matrix.sh
+            timeout --kill-after=60 --signal=KILL 300 \
+            bash scripts/ci/ci.sh checks
 
       - name: Remove fallback compose validation image
         if: always()
