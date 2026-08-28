@@ -34,6 +34,45 @@ setup() {
     ! [[ "sha-deadbeef" =~ $CI_FULL_OCI_DIGEST_REGEX ]]
 }
 
+@test "core: ci_validate_full_git_sha accepts a real 40-char SHA" {
+    ci_validate_full_git_sha "569022c2fba37618c6bb41aa4927753af0f762d3"
+}
+
+@test "core: ci_validate_full_git_sha dies on an abbreviated SHA" {
+    run ci_validate_full_git_sha "569022c"
+    [ "$status" -ne 0 ]
+}
+
+@test "core: ci_validate_full_oci_digest accepts a real digest" {
+    ci_validate_full_oci_digest "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+}
+
+@test "core: ci_validate_full_oci_digest dies on an abbreviated digest" {
+    run ci_validate_full_oci_digest "sha-deadbeef"
+    [ "$status" -ne 0 ]
+}
+
+# ============================================================
+# RETRY CLASSIFIER
+# ============================================================
+
+@test "retry: ci_retry_build_op delegates to build_retry (succeeds first try)" {
+    export BUILD_RETRY_MAX_ATTEMPTS=3 BUILD_RETRY_BASE_BACKOFF_SECONDS=0
+    run ci_retry_build_op -- true
+    [ "$status" -eq 0 ]
+}
+
+@test "retry: ci_retry_build_op propagates a real (non-transient) failure" {
+    export BUILD_RETRY_MAX_ATTEMPTS=3 BUILD_RETRY_BASE_BACKOFF_SECONDS=0
+    run ci_retry_build_op -- false
+    [ "$status" -ne 0 ]
+}
+
+@test "retry: ghcr_retry and build_retry functions are available (sourced)" {
+    declare -F ghcr_retry >/dev/null
+    declare -F build_retry >/dev/null
+}
+
 # ============================================================
 # SERVICE INVENTORY
 # ============================================================

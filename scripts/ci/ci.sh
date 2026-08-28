@@ -33,6 +33,26 @@ ci_log() {
     printf 'ci.sh: %s\n' "$*" >&2
 }
 
+# What: repo root, resolved relative to this file's location.
+# Why: needed to source scripts/lib/*.sh from any caller cwd.
+# From: Issue #1683
+CI_SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CI_REPO_ROOT="$(cd "$CI_SH_DIR/../.." && pwd)"
+
+ci_validate_full_git_sha() {
+    # What: dies unless $1 is a full 40-hex-char Git SHA.
+    # Why: §15 forbids abbreviated Git SHAs anywhere in CI 2.0.
+    # From: Issue #1683
+    [[ "${1:-}" =~ $CI_FULL_GIT_SHA_REGEX ]] || ci_die "not a full git SHA: ${1:-<empty>}"
+}
+
+ci_validate_full_oci_digest() {
+    # What: dies unless $1 is a full sha256: OCI digest.
+    # Why: §15 forbids abbreviated OCI digests anywhere in CI 2.0.
+    # From: Issue #1683
+    [[ "${1:-}" =~ $CI_FULL_OCI_DIGEST_REGEX ]] || ci_die "not a full OCI digest: ${1:-<empty>}"
+}
+
 # ============================================================
 # SERVICE INVENTORY
 # ============================================================
@@ -227,6 +247,29 @@ ci_service_external_contexts() {
 # ============================================================
 # RETRY CLASSIFIER
 # ============================================================
+#
+# What: §67 retry, delegated to this repo's proven wrappers.
+# Why: reuse the existing proven retry primitives instead.
+# From: Issue #1683
+
+# shellcheck source=scripts/lib/ghcr-retry.sh
+source "$CI_REPO_ROOT/scripts/lib/ghcr-retry.sh"
+# shellcheck source=scripts/lib/build-retry.sh
+source "$CI_REPO_ROOT/scripts/lib/build-retry.sh"
+
+ci_retry_registry_op() {
+    # What: retries a registry op via ghcr_retry (env creds).
+    # Why: one CI 2.0 name for §67's operation-level retry.
+    # From: Issue #1683
+    ghcr_retry "$1" "${GHCR_RETRY_USERNAME-}" "${GHCR_RETRY_PASSWORD-}" -- "${@:2}"
+}
+
+ci_retry_build_op() {
+    # What: retries a build op via build_retry's classifier.
+    # Why: one CI 2.0 name for §67's operation-level retry.
+    # From: Issue #1683
+    build_retry "$@"
+}
 
 # ============================================================
 # CACHE CONFIGURATION
