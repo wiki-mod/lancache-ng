@@ -18,7 +18,6 @@
 # Dockerfiles.
 # From: Issue #1095 | Issue #1598 | PR #1706
 ARG UTILITIES_IMAGE=ghcr.io/wiki-mod/lancache-ng/utilities:latest
-ARG ACTIONLINT_VERSION=1.7.12
 ARG DOCKER_CLI_VERSION=29.7.2
 ARG DOCKER_COMPOSE_VERSION=5.5.0
 ARG DOCKER_BUILDX_VERSION=0.36.1
@@ -50,8 +49,6 @@ FROM scratch AS go-tools-script
 COPY <<'BUILD_GO_TOOLS_EOF' /build-go-tools.sh
 #!/bin/sh
 set -eu
-GOBIN=/out go install "github.com/rhysd/actionlint/cmd/actionlint@v${ACTIONLINT_VERSION}"
-/out/actionlint --version
 buildx_src="$(mktemp -d)"
 git clone --depth 1 --branch "v${DOCKER_BUILDX_VERSION}" https://github.com/docker/buildx.git "$buildx_src"
 ( cd "$buildx_src" \
@@ -89,9 +86,8 @@ rm -rf "$compose_src"
 /out/docker-compose version
 BUILD_GO_TOOLS_EOF
 
-FROM golang:latest AS actionlint-builder
+FROM golang:latest AS go-tools-builder
 
-ARG ACTIONLINT_VERSION
 ARG DOCKER_CLI_VERSION
 ARG DOCKER_COMPOSE_VERSION
 ARG DOCKER_BUILDX_VERSION
@@ -104,10 +100,9 @@ ARG GOLANG_X_MOD_VERSION
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 COPY --from=go-tools-script /build-go-tools.sh /build-go-tools.sh
 
-# What: builds actionlint/CLI/compose/buildx from source.
-# Why: gets a current Go stdlib; vendor-only module quirks
-# rule out plain `go install` for the vendor bump tools.
-# From: Issue #1570 | PR #1571 | Issue #1598
+# What: builds CLI/compose/buildx from source (Go tools).
+# Why: needs current Go stdlib; vendor bump forces a build.
+# From: Issue #1095 | PR #1743
 RUN chmod +x /build-go-tools.sh && /build-go-tools.sh
 
 # What: source stage for the shared, statically-linked curl binary.
@@ -120,13 +115,11 @@ RUN chmod +x /build-go-tools.sh && /build-go-tools.sh
 # From: Issue #1304 | Issue #1556 | Issue #1095 (AG-KD-010) | PR #1706
 FROM ${UTILITIES_IMAGE} AS utilities-tools
 
-# What: Alpine equivalent of actionlint-builder above.
-# Why: kept as its own stage so the Debian stage stays
-# unchanged; opt-in only via `--target`.
-# From: Issue #1095
-FROM golang:alpine AS actionlint-builder-alpine
+# What: Alpine equivalent of go-tools-builder above.
+# Why: kept separate so the Debian stage stays unchanged.
+# From: Issue #1095 | PR #1743
+FROM golang:alpine AS go-tools-builder-alpine
 
-ARG ACTIONLINT_VERSION
 ARG DOCKER_CLI_VERSION
 ARG DOCKER_COMPOSE_VERSION
 ARG DOCKER_BUILDX_VERSION
@@ -144,10 +137,9 @@ COPY --from=go-tools-script /build-go-tools.sh /build-go-tools.sh
 # From: Issue #1095
 ARG APK_CACHE_BUST=""
 
-# What: builds the same four Go tools as actionlint-builder.
-# Why: none of the four has a cgo dependency, so musl needs
-# no build-tag or linker change here.
-# From: Issue #1095
+# What: builds the same three Go tools as go-tools-builder.
+# Why: none needs a cgo dependency; musl needs no build-tag.
+# From: Issue #1095 | PR #1743
 RUN set -euo pipefail; \
     : "apk-cache-bust=${APK_CACHE_BUST}"; \
     apk update; \
@@ -167,6 +159,12 @@ LABEL org.opencontainers.image.description="Prebuilt lancache-ng CI and develope
 ARG SCCACHE_VERSION=0.17.0
 ARG CARGO_AUDIT_VERSION=0.22.2
 ARG CARGO_TARPAULIN_VERSION=0.37.2
+# What: pins actionlint's prebuilt binary and its checksums.
+# Why: recomputed per version; a stale pin skips verification.
+# From: Issue #1095 | PR #1743
+ARG ACTIONLINT_VERSION=1.7.12
+ARG ACTIONLINT_SHA256_AMD64=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+ARG ACTIONLINT_SHA256_ARM64=325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6
 ARG SHELLSPEC_VERSION=0.28.1
 ARG SHELLSPEC_SHA256=350d3de04ba61505c54eda31a3c2ee912700f1758b1a80a284bc08fd8b6c5992
 
@@ -275,7 +273,23 @@ RUN set -euo pipefail; \
     cargo install cargo-tarpaulin --version "${CARGO_TARPAULIN_VERSION}" --locked --root /usr/local; \
     rm -rf /usr/local/cargo/registry /usr/local/cargo/git
 
-COPY --from=actionlint-builder-alpine /out/actionlint /usr/local/bin/actionlint
+# What: fetches actionlint's checksum-verified release binary.
+# Why: static Go binary; no reachable stdlib CVE path here.
+# From: Issue #1095 | PR #1743
+RUN set -euo pipefail; \
+    case "$(apk --print-arch)" in \
+      x86_64) actionlint_arch="amd64"; actionlint_sha256="${ACTIONLINT_SHA256_AMD64}" ;; \
+      aarch64) actionlint_arch="arm64"; actionlint_sha256="${ACTIONLINT_SHA256_ARM64}" ;; \
+      *) echo "Unsupported architecture for actionlint prebuilt binary: $(apk --print-arch)" >&2; exit 1 ;; \
+    esac; \
+    actionlint_tmp="$(mktemp -d)"; \
+    trap 'rm -rf "$actionlint_tmp"' EXIT; \
+    curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_${actionlint_arch}.tar.gz" \
+      -o "$actionlint_tmp/actionlint.tar.gz"; \
+    printf '%s  %s\n' "$actionlint_sha256" "$actionlint_tmp/actionlint.tar.gz" | sha256sum -c -; \
+    tar -xzf "$actionlint_tmp/actionlint.tar.gz" -C "$actionlint_tmp" actionlint; \
+    install -m 0755 "$actionlint_tmp/actionlint" /usr/local/bin/actionlint; \
+    actionlint --version
 
 RUN set -euo pipefail; \
     shellspec_tmp="$(mktemp -d)"; \
@@ -288,9 +302,9 @@ RUN set -euo pipefail; \
     shellspec --version
 
 RUN install -d /usr/local/lib/docker/cli-plugins
-COPY --from=actionlint-builder-alpine /out/docker /usr/local/bin/docker
-COPY --from=actionlint-builder-alpine /out/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
-COPY --from=actionlint-builder-alpine /out/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx
+COPY --from=go-tools-builder-alpine /out/docker /usr/local/bin/docker
+COPY --from=go-tools-builder-alpine /out/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
+COPY --from=go-tools-builder-alpine /out/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx
 RUN docker --version; \
     docker compose version; \
     docker buildx version
@@ -434,6 +448,12 @@ ARG CARGO_AUDIT_SHA256_ARM64=c6603814ddaa45e51263dafd31c0ac98808f688d26f7395804f
 ARG CARGO_TARPAULIN_VERSION=0.37.2
 ARG CARGO_TARPAULIN_SHA256_AMD64=8e47625d26c3c265886faf1ef8cfa3ccaf071abc87bf4854ef8e239f5ffeabd8
 ARG CARGO_TARPAULIN_SHA256_ARM64=c8cc929a259871cfe4e3cda6e31975abe33b9b0a6078b76cbd466b6494c72792
+# What: pins actionlint's prebuilt binary and its checksums.
+# Why: recomputed per version; a stale pin skips verification.
+# From: Issue #1095 | PR #1743
+ARG ACTIONLINT_VERSION=1.7.12
+ARG ACTIONLINT_SHA256_AMD64=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+ARG ACTIONLINT_SHA256_ARM64=325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6
 ARG DISTCC_PUMP_PACKAGE_VERSION=3.4+really3.4-12
 ARG SHELLSPEC_VERSION=0.28.1
 ARG SHELLSPEC_SHA256=350d3de04ba61505c54eda31a3c2ee912700f1758b1a80a284bc08fd8b6c5992
@@ -721,13 +741,9 @@ RUN set -euo pipefail; \
     for wrapper in cc gcc c++ g++; do ln -sf "$distcc_bin" "/usr/local/lib/distcc/$wrapper"; done; \
     rm -rf /var/lib/apt/lists/*
 
-# What: fetches and checksum-verifies prebuilt release binaries for
-# cargo-audit and cargo-tarpaulin instead of building from source.
-# Why: unlike sccache, neither needs a non-default feature set, so a
-# source build would only add build time for no behavioral difference;
-# actionlint/docker/docker-compose/buildx are built from source instead --
-# see the actionlint-builder stage above for why.
-# From: Issue #1570 | PR #1571
+# What: fetches cargo-audit/tarpaulin prebuilt binaries.
+# Why: no behavioral diff building Rust tools from source.
+# From: Issue #1095 | PR #1743
 RUN set -euo pipefail; \
     case "$(dpkg --print-architecture)" in \
       amd64) \
@@ -755,7 +771,23 @@ RUN set -euo pipefail; \
     ln -sf /usr/local/cargo/bin/cargo-audit /usr/local/bin/cargo-audit; \
     ln -sf /usr/local/cargo/bin/cargo-tarpaulin /usr/local/bin/cargo-tarpaulin
 
-COPY --from=actionlint-builder /out/actionlint /usr/local/bin/actionlint
+# What: fetches actionlint's checksum-verified release binary.
+# Why: static Go binary; no reachable stdlib CVE path here.
+# From: Issue #1095 | PR #1743
+RUN set -euo pipefail; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) actionlint_arch="amd64"; actionlint_sha256="${ACTIONLINT_SHA256_AMD64}" ;; \
+      arm64) actionlint_arch="arm64"; actionlint_sha256="${ACTIONLINT_SHA256_ARM64}" ;; \
+      *) echo "Unsupported architecture for actionlint prebuilt binary: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    actionlint_tmp="$(mktemp -d)"; \
+    trap 'rm -rf "$actionlint_tmp"' EXIT; \
+    curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_${actionlint_arch}.tar.gz" \
+      -o "$actionlint_tmp/actionlint.tar.gz"; \
+    printf '%s  %s\n' "$actionlint_sha256" "$actionlint_tmp/actionlint.tar.gz" | sha256sum -c -; \
+    tar -xzf "$actionlint_tmp/actionlint.tar.gz" -C "$actionlint_tmp" actionlint; \
+    install -m 0755 "$actionlint_tmp/actionlint" /usr/local/bin/actionlint; \
+    actionlint --version
 
 RUN set -euo pipefail; \
     shellspec_tmp="$(mktemp -d)"; \
@@ -767,15 +799,13 @@ RUN set -euo pipefail; \
     ln -sf /opt/shellspec/shellspec /usr/local/bin/shellspec; \
     shellspec --version
 
-# What: copies docker/docker-compose/docker-buildx from the
-# actionlint-builder stage above.
-# Why: see that stage's own comments for why these are built from source
-# rather than using official release binaries.
-# From: Issue #1570 | PR #1571
+# What: copies docker/compose/buildx from go-tools-builder.
+# Why: see that stage's comments for the source-build reason.
+# From: Issue #1095 | PR #1743
 RUN install -d /usr/local/lib/docker/cli-plugins
-COPY --from=actionlint-builder /out/docker /usr/local/bin/docker
-COPY --from=actionlint-builder /out/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
-COPY --from=actionlint-builder /out/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx
+COPY --from=go-tools-builder /out/docker /usr/local/bin/docker
+COPY --from=go-tools-builder /out/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
+COPY --from=go-tools-builder /out/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx
 RUN docker --version; \
     docker compose version; \
     docker buildx version
