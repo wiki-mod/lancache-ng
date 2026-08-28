@@ -1,0 +1,44 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# What: thin release orchestrator; all logic lives in ci.sh.
+# Why: §56 -- build once, promote many; a release builds nothing.
+# From: Issue #1683
+name: CI 2.0 release
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "Release channel tag to promote the accepted stack to"
+        required: true
+        default: "latest"
+
+permissions:
+  contents: read
+  packages: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # What: promote the exact accepted candidate to the channel.
+  # Why: §51 -- promote verifies, moves refs, reads back; no build.
+  # From: Issue #1683
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Promote the accepted stack to the release channel
+        env:
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          CI_IMAGE_REPO: ${{ github.repository }}
+          RELEASE_CHANNEL: ${{ inputs.channel }}
+        run: bash scripts/ci/ci.sh release "$RELEASE_CHANNEL"

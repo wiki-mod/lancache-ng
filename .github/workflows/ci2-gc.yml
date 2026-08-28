@@ -1,0 +1,40 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# What: thin GC orchestrator; all logic lives in ci.sh.
+# Why: §74 -- reachability decides, age alone never deletes.
+# From: Issue #1683
+name: CI 2.0 gc
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "15 4 * * *"
+
+permissions:
+  contents: read
+  packages: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # What: report unreachable artifacts; deletion stays gated.
+  # Why: §97 -- the ledger proposes, the graph decides, we review.
+  # From: Issue #1683
+  gc-report:
+    name: gc report
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Report GC candidates (no deletion)
+        env:
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          CI_IMAGE_REPO: ${{ github.repository }}
+        run: bash scripts/ci/ci.sh gc

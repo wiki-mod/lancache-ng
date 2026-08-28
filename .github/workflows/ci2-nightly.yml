@@ -1,0 +1,42 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# What: thin nightly orchestrator; all logic lives in ci.sh.
+# Why: §54 -- nightly promotes the desired stack, never rebuilds.
+# From: Issue #1683
+name: CI 2.0 nightly
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 2 * * *"
+
+permissions:
+  contents: read
+  packages: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # What: resolve desired state, promote only if it differs.
+  # Why: §54.2 -- an unchanged nightly does no build, no retag.
+  # From: Issue #1683
+  nightly:
+    name: nightly
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: current_dev
+
+      - name: Promote the desired stack to nightly
+        env:
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          CI_IMAGE_REPO: ${{ github.repository }}
+        run: bash scripts/ci/ci.sh nightly
