@@ -119,7 +119,11 @@ done
 #     image actually carries it.
 EXCLUDED_TOOLS=(
   # Opt-in (EXTRA_REQUIRED_TOOLS)
-  cargo-tarpaulin
+  # dhclient (issue #1095): moved from smoke_test_image()'s baseline to
+  # opt-in, since no Alpine apk package provides it; the two real callers
+  # (dhcp-kea-lease-flow-simulation.sh, syslog-forwarding-simulation.sh)
+  # now set EXTRA_REQUIRED_TOOLS=dhclient themselves.
+  cargo-tarpaulin dhclient
   # Build toolchain
   ar ranlib cc c++ g++ clang ld.lld make cmake pkg-config git gpg
   # Base utilities (coreutils / util-linux / base image)
@@ -149,10 +153,12 @@ fail() {
 }
 
 # extract_required_tools <file>
-# Prints one tool name per line from the first `required_tools=( ... )` array
-# in <file>. Strips line-continuation backslashes (the Dockerfile array uses
-# them; the smoke array does not -- harmless either way) and skips blank and
-# comment lines.
+# Prints one tool name per line from every `required_tools=( ... )` array in
+# <file> (union, not just the first): the Dockerfile has carried two since
+# Issue #1095 added an Alpine candidate stage above the Debian final stage,
+# and both must stay covered by the smoke test or EXCLUDED_TOOLS below.
+# Strips line-continuation backslashes (the Dockerfile array uses them; the
+# smoke array does not -- harmless either way) and skips blank/comment lines.
 extract_required_tools() {
   awk '
     /required_tools=\(/ { in_arr = 1; next }
