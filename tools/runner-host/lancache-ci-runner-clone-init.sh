@@ -1826,7 +1826,10 @@ ENVEOF
     echo "'runner-hook-env $instance_dir' AFTER config.sh (and before starting the"
     echo "service) to restore it."
     echo "Then 'sudo ./svc.sh install' and hold off on 'sudo ./svc.sh start' until"
-    echo "the go-ahead to accept real jobs is confirmed."
+    echo "the go-ahead to accept real jobs is confirmed. Once installed, run"
+    echo "'runner-restart-policy' (no args) so a crashed/OOM-killed runner comes"
+    echo "back on its own instead of staying dead until someone notices -- the"
+    echo "installer's own generated unit sets no restart policy at all."
 }
 
 # Writes/re-verifies an already-registered runner instance's
@@ -1867,6 +1870,59 @@ cmd_runner_hook_env() {
         echo "$expected_completed"
     } | sudo tee -a "$instance_dir/.env" >/dev/null
     echo "Appended correct hook wiring to $instance_dir/.env."
+}
+
+# What: Ensure every actions-runner systemd unit already installed on this
+#   host (via 'svc.sh install') has Restart=on-failure/RestartSec=10, via a
+#   per-unit '.service.d/override.conf' drop-in -- never edits the
+#   installer-generated unit file itself, so a future 'svc.sh uninstall &&
+#   install' cycle does not silently need this re-applied by hand.
+#   Idempotent: a unit already at exactly this policy is left untouched and
+#   does not trigger a daemon-reload.
+# Why: The GitHub Actions installer's own generated unit carries no restart
+#   policy at all (Restart=no), so a crashed or OOM-killed runner stays
+#   offline until a human notices and restarts it by hand. The old fleet had
+#   this backfilled manually, host by host, but the fix was never folded
+#   into this script, so every host onboarded through it since has repeated
+#   the same gap -- confirmed missing on every reachable new-fleet host
+#   surveyed for this issue.
+# From: #1738
+cmd_runner_restart_policy() {
+    [[ -d /etc/systemd/system ]] || { echo "ERROR: /etc/systemd/system not found." >&2; return 1; }
+
+    local unit_file unit dropin_dir dropin current_restart current_restart_sec
+    local found=0 changed=0
+    for unit_file in /etc/systemd/system/actions.runner.*.service; do
+        [[ -e "$unit_file" ]] || continue # no nullglob: literal pattern when no match
+        found=1
+        unit="$(basename "$unit_file")"
+        current_restart="$(systemctl show "$unit" -p Restart --value 2>/dev/null || true)"
+        current_restart_sec="$(systemctl show "$unit" -p RestartUSec --value 2>/dev/null || true)"
+        if [[ "$current_restart" == "on-failure" && "$current_restart_sec" == "10s" ]]; then
+            echo "  $unit: already Restart=on-failure/RestartSec=10, leaving as-is."
+            continue
+        fi
+        dropin_dir="/etc/systemd/system/${unit}.d"
+        dropin="${dropin_dir}/override.conf"
+        echo "  $unit: was Restart=${current_restart:-<unset>}/RestartUSec=${current_restart_sec:-<unset>} -- writing $dropin"
+        sudo mkdir -p "$dropin_dir"
+        printf '[Service]\nRestart=on-failure\nRestartSec=10\n' | sudo tee "$dropin" >/dev/null
+        changed=1
+    done
+
+    if [[ "$found" -eq 0 ]]; then
+        echo "No actions.runner.*.service units found on this host -- nothing to do. Run this AFTER 'svc.sh install', not before."
+        return 0
+    fi
+    [[ "$changed" -eq 1 ]] && sudo systemctl daemon-reload
+
+    echo
+    echo "--- Verification ---"
+    for unit_file in /etc/systemd/system/actions.runner.*.service; do
+        [[ -e "$unit_file" ]] || continue
+        unit="$(basename "$unit_file")"
+        echo "  $unit: Restart=$(systemctl show "$unit" -p Restart --value 2>/dev/null), RestartUSec=$(systemctl show "$unit" -p RestartUSec --value 2>/dev/null)"
+    done
 }
 
 # --- sccache-check: verify the sccache client tooling heavy hosts need ----
@@ -2037,6 +2093,14 @@ Modes:
                                  Run this AFTER config.sh -- config.sh's own
                                  env.sh truncates .env, wiping out whatever
                                  runner-fetch wrote before registration.
+  runner-restart-policy         Backfills Restart=on-failure/RestartSec=10
+                                 (via a '.service.d/override.conf' drop-in,
+                                 never editing the installer-generated unit
+                                 itself) onto every actions-runner systemd
+                                 unit already installed on this host. Run
+                                 this AFTER 'svc.sh install'. Idempotent --
+                                 safe to re-run, no-ops on a unit already at
+                                 this policy.
   full-reset-check             Read-only broader de-clone survey (shell
                                 history, known_hosts, foreign authorized_keys
                                 entries, stale journal machine-id dirs,
@@ -2103,6 +2167,7 @@ main() {
         host-prep) cmd_host_prep ;;
         runner-fetch) cmd_runner_fetch "$@" ;;
         runner-hook-env) cmd_runner_hook_env "$@" ;;
+        runner-restart-policy) cmd_runner_restart_policy ;;
         full-reset-check) cmd_full_reset_check ;;
         full-reset-clean) cmd_full_reset_clean ;;
         set-hostname) cmd_set_hostname "$@" ;;
