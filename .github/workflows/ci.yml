@@ -1,0 +1,97 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# What: thin CI 2.0 orchestrator; all logic lives in ci.sh.
+# Why: §5 -- YAML answers when/where, never what.
+# From: Issue #1683 | docs/ci-2.0-architecture.md
+name: CI 2.0
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [master, current_dev]
+  push:
+    branches: [current_dev]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci2-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # What: cheap first stage answering "is any work required?".
+  # Why: §70 -- no heavy runner starts before this.
+  # From: Issue #1683
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      global-state: ${{ steps.plan.outputs.global-state }}
+      build-matrix: ${{ steps.plan.outputs.build-matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Resolve base and head refs
+        id: refs
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: bash scripts/ci/ci.sh resolve-refs
+
+      - name: Run the planner
+        id: plan
+        env:
+          BASE_REF: ${{ steps.refs.outputs.base-ref }}
+          HEAD_REF: ${{ steps.refs.outputs.head-ref }}
+        run: bash scripts/ci/ci.sh plan-outputs
+
+  # What: the engine's own regression suite.
+  # Why: ci.sh decides everything; gate it on its tests.
+  # From: Issue #1683
+  engine-tests:
+    name: engine tests
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install bats
+        run: sudo apt-get update && sudo apt-get install -y bats
+
+      - name: Run ci.bats
+        run: bash scripts/ci/ci.sh test
+
+  # What: single required check, reported even on a NOOP run.
+  # Why: §62 -- a required check must never silently not appear.
+  # From: Issue #1683
+  result:
+    name: result
+    needs: [plan, engine-tests]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Report the aggregate verdict
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          TESTS_RESULT: ${{ needs.engine-tests.result }}
+          GLOBAL_STATE: ${{ needs.plan.outputs.global-state }}
+        run: bash scripts/ci/ci.sh report-result

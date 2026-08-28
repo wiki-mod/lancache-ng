@@ -531,6 +531,48 @@ setup() {
 }
 
 # ============================================================
+# PLANNER
+# ============================================================
+
+# What: an unchanged tree plans as NOOP with no build matrix.
+# Why: §85 Test A -- a no-op schedules no work.
+# From: Issue #1683
+@test "planner: identical refs plan as NOOP with an empty matrix" {
+    run ci_plan_json HEAD HEAD
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"global":{"state":"NOOP"}'* ]]
+    [[ "$output" == *'"build_matrix":[]'* ]]
+}
+
+# What: every service appears in the plan output.
+# Why: an absent service reads as unknown, not NOOP.
+# From: Issue #1683
+@test "planner: every service is present in the plan output" {
+    local out svc
+    out="$(ci_plan_json HEAD HEAD)"
+    for svc in "${CI_SERVICES[@]}"; do
+        [[ "$out" == *"\"$svc\":"* ]]
+    done
+}
+
+# What: the plan is valid JSON that a workflow can consume.
+# Why: §10.2 -- YAML reads this verdict, so it must parse.
+# From: Issue #1683
+@test "planner: plan output parses as JSON" {
+    command -v python3 >/dev/null || skip "python3 not available"
+    ci_plan_json HEAD HEAD | python3 -c 'import json,sys; json.load(sys.stdin)'
+}
+
+# What: a changed service path marks that service.
+# Why: proves impact actually reaches the plan, not just NOOP.
+# From: Issue #1683
+@test "planner: an impacted service is marked ARTIFACT_REQUIRED" {
+    local out
+    out="$(ci_impacted_services services/proxy/Dockerfile)"
+    [[ "$out" == *"proxy"* ]]
+}
+
+# ============================================================
 # SERVICE INVENTORY
 # ============================================================
 

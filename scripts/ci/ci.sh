@@ -708,6 +708,133 @@ ci_run_bats() {
 # ============================================================
 
 # ============================================================
+# PLANNER
+# ============================================================
+#
+# What: the first stage; decides what work a change requires.
+# Why: §10 -- it builds nothing and needs no heavy runner.
+# From: Issue #1683
+
+ci_changed_paths() {
+    # What: prints paths changed between refs $1 and $2.
+    # Why: §10.1 -- the planner's only input is the real diff.
+    # From: Issue #1683
+    local base_ref="$1" head_ref="$2"
+    git diff --no-color --name-only "$base_ref" "$head_ref"
+}
+
+ci_semantic_changed_paths() {
+    # What: drops paths whose normalized content did not change.
+    # Why: §11 -- a comment-only edit must not reach the planner.
+    # From: Issue #1683
+    local base_ref="$1" head_ref="$2" path
+    while IFS= read -r path; do
+        [[ -n "$path" ]] || continue
+        ci_semantic_diff_is_noop "$base_ref" "$head_ref" "$path" && continue
+        printf '%s\n' "$path"
+    done < <(ci_changed_paths "$base_ref" "$head_ref")
+}
+
+ci_plan_json() {
+    # What: prints the planner verdict for refs $1..$2 as JSON.
+    # Why: §10.2 -- YAML consumes a machine-readable plan.
+    # From: Issue #1683
+    local base_ref="$1" head_ref="$2"
+    local -a changed=() impacted=()
+    mapfile -t changed < <(ci_semantic_changed_paths "$base_ref" "$head_ref")
+    (( ${#changed[@]} > 0 )) && mapfile -t impacted < <(ci_impacted_services "${changed[@]}")
+
+    local global_state="NOOP"
+    (( ${#impacted[@]} > 0 )) && global_state="WORK_REQUIRED"
+
+    local svc platform first=1
+    printf '{"global":{"state":"%s"},"services":{' "$global_state"
+    for svc in "${CI_SERVICES[@]}"; do
+        (( first )) || printf ','
+        first=0
+        if printf '%s\n' "${impacted[@]}" | grep -qx "$svc"; then
+            printf '"%s":{"state":"ARTIFACT_REQUIRED","build_ack":false}' "$svc"
+        else
+            printf '"%s":{"state":"NOOP"}' "$svc"
+        fi
+    done
+    printf '},"build_matrix":['
+    first=1
+    for svc in "${impacted[@]}"; do
+        [[ -n "$svc" ]] || continue
+        while IFS= read -r platform; do
+            (( first )) || printf ','
+            first=0
+            printf '{"service":"%s","platform":"%s","runner":"%s"}' \
+                "$svc" "$platform" "$(ci_service_runner_class "$svc")"
+        done < <(ci_service_platforms "$svc")
+    done
+    printf ']}\n'
+}
+
+ci_emit_output() {
+    # What: writes name=value to GITHUB_OUTPUT, else stdout.
+    # Why: keeps workflow YAML free of output-plumbing shell (§5).
+    # From: Issue #1683
+    local name="$1" value="$2"
+    if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+        printf '%s=%s\n' "$name" "$value" >> "$GITHUB_OUTPUT"
+    else
+        printf '%s=%s\n' "$name" "$value"
+    fi
+}
+
+ci_cmd_resolve_refs() {
+    # What: resolves the diff base/head for the triggering event.
+    # Why: §10.1 -- one place decides what the planner diffs.
+    # From: Issue #1683
+    local base head="${HEAD_REF:-${HEAD_SHA:-HEAD}}"
+    case "${EVENT_NAME:-}" in
+        pull_request) base="${PR_BASE_SHA:-}" ;;
+        push) base="${PUSH_BEFORE_SHA:-}" ;;
+        *) base="" ;;
+    esac
+    # What: an unusable base falls back to the head itself.
+    # Why: fail safe as NOOP, not a whole-tree diff.
+    # From: Issue #1683
+    if [[ -z "$base" || "$base" =~ ^0+$ ]] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+        ci_log "no usable diff base for event '${EVENT_NAME:-unknown}'; planning against head"
+        base="$head"
+    fi
+    ci_emit_output base-ref "$base"
+    ci_emit_output head-ref "$head"
+}
+
+ci_cmd_plan_outputs() {
+    # What: runs the planner and exports its verdict as outputs.
+    # Why: §10.2 -- the job graph reads its matrix here.
+    # From: Issue #1683
+    local plan
+    plan="$(ci_plan_json "${BASE_REF:?BASE_REF is required}" "${HEAD_REF:?HEAD_REF is required}")"
+    printf '%s\n' "$plan"
+    local global_state matrix
+    global_state="$(printf '%s' "$plan" | sed -n 's/.*"global":{"state":"\([A-Z_]*\)".*/\1/p')"
+    matrix="$(printf '%s' "$plan" | sed -n 's/.*"build_matrix":\(\[.*\]\)}$/\1/p')"
+    ci_emit_output global-state "${global_state:-UNKNOWN}"
+    ci_emit_output build-matrix "${matrix:-[]}"
+    ci_log "planner verdict: ${global_state:-UNKNOWN}"
+}
+
+ci_cmd_report_result() {
+    # What: turns the job results into one pass/fail verdict.
+    # Why: §62 -- the required check reports even on a NOOP run.
+    # From: Issue #1683
+    local plan_result="${PLAN_RESULT:-}" tests_result="${TESTS_RESULT:-}"
+    local state="${GLOBAL_STATE:-UNKNOWN}"
+    [[ "$plan_result" == "success" ]] \
+        || ci_report_failure "plan job" "ci.yml" "success" "$plan_result" "see the plan job log"
+    [[ "$tests_result" == "success" || "$tests_result" == "skipped" ]] \
+        || ci_report_failure "engine tests" "ci.bats" "success" "$tests_result" "see the failing tests listed in that job"
+    ci_failure_summary || ci_die "CI 2.0 result: FAILED (see the failures listed above)"
+    ci_log "CI 2.0 result: SUCCESS (planner state: $state)"
+}
+
+# ============================================================
 # DISPATCH
 # ============================================================
 
@@ -716,20 +843,29 @@ ci_usage() {
 Usage: ci.sh <command> [args...]
 
 Commands:
-  services                 List the one authoritative service list.
-  version                  Print ci.sh's own version.
+  services                     List the one authoritative service list.
+  identity <service> <plat>    Print the content-derived build identity.
+  plan <base-ref> <head-ref>   Print the planner verdict as JSON.
+  test [path...]               Run bats, summarizing every failure.
+  version                      Print ci.sh's own version.
 USAGE
 }
 
 ci_main() {
     local cmd="${1:-}"
-    [[ -z "$cmd" ]] && { ci_usage >&2; exit 1; }
+    [[ -z "$cmd" ]] && { ci_usage >&2; ci_die "no command given"; }
     shift || true
     case "$cmd" in
         services) ci_service_list ;;
+        identity) ci_build_identity "${1:-}" "${2:-}" ;;
+        plan) ci_plan_json "${1:?ci.sh plan: base ref required}" "${2:?ci.sh plan: head ref required}" ;;
+        resolve-refs) ci_cmd_resolve_refs ;;
+        plan-outputs) ci_cmd_plan_outputs ;;
+        report-result) ci_cmd_report_result ;;
+        test) ci_run_bats "${@:-$CI_SH_DIR/ci.bats}" ;;
         version) printf '%s\n' "$CI_SH_VERSION" ;;
         -h|--help|help) ci_usage ;;
-        *) ci_die "unknown command: $cmd" ;;
+        *) ci_die "unknown command: $cmd (try: ci.sh help)" ;;
     esac
 }
 
