@@ -594,13 +594,10 @@ STUB
     export BUILD_SHA="$merge_sha"
     export PR_HEAD_SHA="$real_head_sha"
     export STAGING_POLL_TIMEOUT_SECONDS=0
-    # Keep the polling loop fast: no real waiting in tests. Without this, the
-    # real 15s default (scripts/untracked/ensure-pr-staging-images.sh's
-    # poll_interval_seconds) sleeps past the 5s hard ceiling below before the
-    # stubbed image_exists() ever gets its second (successful) call, so the
-    # loop always hits the hard-ceiling error path deterministically -- not a
-    # flake, just this export missing relative to every sibling test in this
-    # file that also drives wait_for_touched_image().
+    # What: STAGING_POLL_INTERVAL_SECONDS=0, like sibling tests.
+    # Why: the real 15s default outlasts this test's 5s ceiling
+    #   below, so the loop always hits the error path.
+    # From: Issue #1095
     export STAGING_POLL_INTERVAL_SECONDS=0
     export STAGING_POLL_HARD_CEILING_SECONDS=5
     export STAGING_POLL_CONGESTION_CHECK_INTERVAL_SECONDS=0

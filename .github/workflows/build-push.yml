@@ -5853,16 +5853,28 @@ jobs:
           cache-dir: ${{ steps.trivy-cache.outputs.dir }}
           cleanup-cache: ${{ steps.trivy-cache.outputs.ephemeral == 'true' && 'true' || 'false' }}
 
+      # What: warns; does not report on a DB-download failure.
+      # Why: reporting success here would auto-close a real
+      #   open finding -- a DB miss proves nothing.
+      # From: Issue #1095
+      - name: Warn on Trivy DB-unavailable (amd64, no status report)
+        if: >-
+          github.event_name == 'pull_request' && steps.build.outcome == 'success' &&
+          steps.trivy-scan-pushed.outcome == 'failure' && steps.trivy-scan-pushed.outputs.db-unavailable == 'true'
+        run: echo "::warning::Trivy DB never downloaded for ${{ matrix.service }} (amd64) -- skipping the status report so a real open finding is not auto-closed."
+
       # What: reports the scan outcome as a self-closing issue.
       # Why: nightly-status owns this pattern (AG-CODE-013); the
       #   "-amd64" label keeps this separate from arm64's own
-      #   report; excludes a pure DB-download failure too.
+      #   report; skipped entirely on a pure DB-download failure.
       # From: Issue #1095
       - name: Report Trivy PR-scan status (non-blocking, self-closing issue)
-        if: github.event_name == 'pull_request' && steps.build.outcome == 'success'
+        if: >-
+          github.event_name == 'pull_request' && steps.build.outcome == 'success' &&
+          steps.trivy-scan-pushed.outputs.db-unavailable != 'true'
         uses: ./.github/actions/nightly-status
         with:
-          outcome: ${{ (steps.trivy-scan-pushed.outcome == 'failure' && steps.trivy-scan-pushed.outputs.db-unavailable != 'true') && 'failure' || 'success' }}
+          outcome: ${{ steps.trivy-scan-pushed.outcome == 'failure' && 'failure' || 'success' }}
           label: trivy-finding-${{ matrix.service }}-amd64
           scope: >-
             Trivy HIGH/CRITICAL finding in ${{ matrix.service }} (amd64),
@@ -5873,8 +5885,7 @@ jobs:
       - name: Delete GHCR package version pushed by a failed scan
         # What: deletes the just-pushed digest on a genuine scan failure.
         # Why: keeps a never-vetted image out of GHCR; excludes a pure
-        #   DB-download failure (confirmed live 2026-08-27: a good
-        #   image was deleted for no real finding, only a DB miss).
+        #   DB-download failure, which never proves the image unsafe.
         # From: Issue #1095 | Issue #626 | PR #1443
         if: ${{ always() && steps.build.outcome == 'success' && steps.trivy-scan-pushed.outcome == 'failure' && steps.trivy-scan-pushed.outputs.db-unavailable != 'true' }}
         env:
@@ -6436,16 +6447,28 @@ jobs:
           cache-dir: ${{ runner.temp }}/trivy-${{ matrix.service }}-arm64-${{ github.run_id }}-${{ github.run_attempt }}
           cleanup-cache: "true"
 
+      # What: warns; does not report on a DB-download failure.
+      # Why: reporting success here would auto-close a real
+      #   open finding -- a DB miss proves nothing.
+      # From: Issue #1095
+      - name: Warn on Trivy DB-unavailable (arm64, no status report)
+        if: >-
+          github.event_name == 'pull_request' && steps.build.outcome == 'success' &&
+          steps.trivy-scan-pushed.outcome == 'failure' && steps.trivy-scan-pushed.outputs.db-unavailable == 'true'
+        run: echo "::warning::Trivy DB never downloaded for ${{ matrix.service }} (arm64) -- skipping the status report so a real open finding is not auto-closed."
+
       # What: reports the scan outcome as a self-closing issue.
       # Why: nightly-status owns this pattern (AG-CODE-013); the
       #   "-arm64" label keeps this separate from build's own
-      #   report; excludes a pure DB-download failure too.
+      #   report; skipped entirely on a pure DB-download failure.
       # From: Issue #1095
       - name: Report Trivy PR-scan status (non-blocking, self-closing issue)
-        if: github.event_name == 'pull_request' && steps.build.outcome == 'success'
+        if: >-
+          github.event_name == 'pull_request' && steps.build.outcome == 'success' &&
+          steps.trivy-scan-pushed.outputs.db-unavailable != 'true'
         uses: ./.github/actions/nightly-status
         with:
-          outcome: ${{ (steps.trivy-scan-pushed.outcome == 'failure' && steps.trivy-scan-pushed.outputs.db-unavailable != 'true') && 'failure' || 'success' }}
+          outcome: ${{ steps.trivy-scan-pushed.outcome == 'failure' && 'failure' || 'success' }}
           label: trivy-finding-${{ matrix.service }}-arm64
           scope: >-
             Trivy HIGH/CRITICAL finding in ${{ matrix.service }} (arm64),
@@ -6456,8 +6479,7 @@ jobs:
       - name: Delete GHCR package version pushed by a failed scan
         # What: same cleanup as build's own step, for this job's arm64 leg.
         # Why: scan targets an already-pushed digest; excludes a pure
-        #   DB-download failure (confirmed live 2026-08-27: a good
-        #   image was deleted for no real finding, only a DB miss).
+        #   DB-download failure, which never proves the image unsafe.
         # From: Issue #1095 | Issue #626 | PR #1443
         if: ${{ always() && steps.build.outcome == 'success' && steps.trivy-scan-pushed.outcome == 'failure' && steps.trivy-scan-pushed.outputs.db-unavailable != 'true' }}
         env:
