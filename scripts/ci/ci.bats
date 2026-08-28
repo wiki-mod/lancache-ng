@@ -1161,6 +1161,72 @@ setup() {
     [ "$status" -eq 0 ]
 }
 
+# What: setup-migration-check runs clean on this repo's tree.
+# Why: this repo's own setup.sh is the test's real fixture.
+# From: Issue #1683
+@test "setup-migration-check: ci.sh setup-migration-check runs on this repo's tree" {
+    run bash "$repo_root/scripts/ci/ci.sh" setup-migration-check
+    [ "$status" -eq 0 ]
+}
+
+# What: validation-subnet-check runs clean on this repo.
+# Why: this repo's own workflows are the check's real fixture.
+# From: Issue #1683
+@test "validation-subnet-check: ci.sh validation-subnet-check runs on this repo's tree" {
+    run bash "$repo_root/scripts/ci/ci.sh" validation-subnet-check
+    [ "$status" -eq 0 ]
+}
+
+# What: executable-bits-check runs clean on this repo's tree.
+# Why: this repo's own tracked files are the check's fixture.
+# From: Issue #1683
+@test "executable-bits-check: ci.sh executable-bits-check runs on this repo's tree" {
+    run bash "$repo_root/scripts/ci/ci.sh" executable-bits-check
+    [ "$status" -eq 0 ]
+}
+
+# What: build-tools-smoke-cov-check runs clean on this repo.
+# Why: this repo's own Dockerfile is the check's real fixture.
+# From: Issue #1683
+@test "build-tools-smoke-cov-check: ci.sh build-tools-smoke-cov-check runs on this repo's tree" {
+    run bash "$repo_root/scripts/ci/ci.sh" build-tools-smoke-cov-check
+    [ "$status" -eq 0 ]
+}
+
+# What: pipefail-early-exit-check runs clean on this repo.
+# Why: this repo's own tracked files are the check's fixture.
+# From: Issue #1683
+@test "pipefail-early-exit-check: ci.sh pipefail-early-exit-check runs on this repo's tree" {
+    run bash "$repo_root/scripts/ci/ci.sh" pipefail-early-exit-check
+    [ "$status" -eq 0 ]
+}
+
+# What: pipefail-scope-check runs clean on this repo's tree.
+# Why: this repo's own tracked files are the check's fixture.
+# From: Issue #1683
+@test "pipefail-scope-check: ci.sh pipefail-scope-check runs on this repo's tree" {
+    run bash "$repo_root/scripts/ci/ci.sh" pipefail-scope-check
+    [ "$status" -eq 0 ]
+}
+
+# What: repository-case-check runs clean on this repo's tree.
+# Why: this repo's own workflows are the check's real fixture.
+# From: Issue #1683
+@test "repository-case-check: ci.sh repository-case-check runs on this repo's tree" {
+    run bash "$repo_root/scripts/ci/ci.sh" repository-case-check
+    [ "$status" -eq 0 ]
+}
+
+# What: action-node-versions-check runs clean on this repo.
+# Why: needs live GH API access; skipped when unreachable.
+# From: Issue #1683
+@test "action-node-versions-check: ci.sh action-node-versions-check runs on this repo's tree" {
+    run curl -fsS --max-time 5 https://api.github.com/rate_limit
+    [ "$status" -eq 0 ] || skip "no live api.github.com access in this environment"
+    run bash "$repo_root/scripts/ci/ci.sh" action-node-versions-check
+    [ "$status" -eq 0 ]
+}
+
 # What: docker compose config succeeds for a real compose file.
 # Why: proves the wrapper works against this repo's actual files.
 # From: Issue #1683

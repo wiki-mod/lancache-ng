@@ -1349,6 +1349,62 @@ ci_cmd_language_policy_check() {
     bash "$CI_REPO_ROOT/scripts/tracked/check-language-policy.sh"
 }
 
+ci_cmd_setup_migration_check() {
+    # What: shellcheck-hosted's setup-migration-semantics test.
+    # Why: §72 -- same function, same decision, either runner.
+    # From: Issue #1683
+    bash "$CI_REPO_ROOT/tests/setup-migration-semantics.sh"
+}
+
+ci_cmd_action_node_versions_check() {
+    # What: shellcheck-hosted's action-node-versions guard.
+    # Why: §72 -- same function, same decision, either runner.
+    # From: Issue #1683
+    bash "$CI_REPO_ROOT/scripts/tracked/check-action-node-versions.sh"
+}
+
+ci_cmd_validation_subnet_check() {
+    # What: shellcheck-hosted's validation-subnet-wrapper guard.
+    # Why: §72 -- same function, same decision, either runner.
+    # From: Issue #1683
+    bash "$CI_REPO_ROOT/scripts/tracked/check-validation-subnet-wrapper-coverage.sh"
+}
+
+ci_cmd_executable_bits_check() {
+    # What: shellcheck-hosted's executable-bits guard.
+    # Why: §72 -- same function, same decision, either runner.
+    # From: Issue #1683
+    bash "$CI_REPO_ROOT/scripts/tracked/check-executable-bits.sh"
+}
+
+ci_cmd_build_tools_smoke_coverage_check() {
+    # What: shellcheck-hosted's smoke-coverage guard.
+    # Why: §72 -- same function, same decision, either runner.
+    # From: Issue #1683
+    bash "$CI_REPO_ROOT/scripts/tracked/check-build-tools-smoke-coverage.sh"
+}
+
+ci_cmd_pipefail_early_exit_check() {
+    # What: shellcheck-hosted's pipefail-early-exit guard.
+    # Why: §72 -- same function, same decision, either runner.
+    # From: Issue #1683
+    bash "$CI_REPO_ROOT/scripts/untracked/check-pipefail-early-exit-grep.sh"
+}
+
+ci_cmd_pipefail_scope_check() {
+    # What: shellcheck-hosted's pipefail-scope-coverage guard.
+    # Why: §72 -- same function, same decision, either runner.
+    # From: Issue #1683
+    bash "$CI_REPO_ROOT/scripts/tracked/check-pipefail-scope-coverage.sh"
+}
+
+ci_cmd_repository_case_check() {
+    # What: shellcheck-hosted's repository-case-only guard.
+    # Why: §72 -- same function, same decision, either runner.
+    # From: Issue #1683
+    bash "$CI_REPO_ROOT/scripts/tracked/check-mutable-refs.sh" --only repository-case
+}
+
 ci_compose_config_clean() {
     # What: true iff "docker compose $* config" is warning-free.
     # Why: a silent compose warning today is a real bug tomorrow.
@@ -1468,8 +1524,9 @@ ci_gc_is_protected() {
     # What: true iff digest $2 of service $1 is a protected root.
     # Why: §76 -- a reachable object is kept, never collected.
     # From: Issue #1683
-    local service="$1" digest="$2"
-    ci_gc_roots | grep -qx "$service $digest"
+    local service="$1" digest="$2" roots
+    roots="$(ci_gc_roots)"
+    grep -qx "$service $digest" <<< "$roots"
 }
 
 ci_gc_candidates() {
@@ -1622,13 +1679,14 @@ ci_plan_render_json() {
     # What: renders the already-computed verdict as JSON.
     # Why: §10.2 -- YAML consumes a machine-readable plan.
     # From: Issue #1683
-    local svc first=1
+    local svc first=1 impacted
+    impacted="$(printf '%s\n' "${CI_PLAN_IMPACTED[@]}")"
     printf '{"global":{"state":"%s","test_required":%s},"services":{' \
         "$CI_PLAN_STATE" "$CI_PLAN_TEST_REQUIRED"
     for svc in "${CI_SERVICES[@]}"; do
         (( first )) || printf ','
         first=0
-        if printf '%s\n' "${CI_PLAN_IMPACTED[@]}" | grep -qx "$svc"; then
+        if grep -qx "$svc" <<< "$impacted"; then
             printf '"%s":{"state":"ARTIFACT_REQUIRED","build_ack":false}' "$svc"
         else
             printf '"%s":{"state":"NOOP"}' "$svc"
@@ -1789,6 +1847,14 @@ Commands:
   compose-healthchecks         Run compose-healthchecks/-hosted's own check.
   line-endings-check           Run line-endings/-hosted's own check.
   language-policy-check        Run language-policy/-hosted's own check.
+  setup-migration-check        Run shellcheck-hosted's migration test.
+  action-node-versions-check   Run shellcheck-hosted's action-pin guard.
+  validation-subnet-check      Run shellcheck-hosted's subnet guard.
+  executable-bits-check        Run shellcheck-hosted's exec-bit guard.
+  build-tools-smoke-cov-check  Run shellcheck-hosted's smoke-cov guard.
+  pipefail-early-exit-check    Run shellcheck-hosted's pipefail guard.
+  pipefail-scope-check         Run shellcheck-hosted's pipefail-scope guard.
+  repository-case-check        Run shellcheck-hosted's repo-case guard.
   test [path...]               Run bats, summarizing every failure.
   version                      Print ci.sh's own version.
 USAGE
@@ -1820,6 +1886,14 @@ ci_main() {
         compose-healthchecks) ci_cmd_compose_healthchecks ;;
         line-endings-check) ci_cmd_line_endings_check ;;
         language-policy-check) ci_cmd_language_policy_check ;;
+        setup-migration-check) ci_cmd_setup_migration_check ;;
+        action-node-versions-check) ci_cmd_action_node_versions_check ;;
+        validation-subnet-check) ci_cmd_validation_subnet_check ;;
+        executable-bits-check) ci_cmd_executable_bits_check ;;
+        build-tools-smoke-cov-check) ci_cmd_build_tools_smoke_coverage_check ;;
+        pipefail-early-exit-check) ci_cmd_pipefail_early_exit_check ;;
+        pipefail-scope-check) ci_cmd_pipefail_scope_check ;;
+        repository-case-check) ci_cmd_repository_case_check ;;
         test) ci_run_bats "${@:-$CI_SH_DIR/ci.bats}" ;;
         version) printf '%s\n' "$CI_SH_VERSION" ;;
         -h|--help|help) ci_usage ;;

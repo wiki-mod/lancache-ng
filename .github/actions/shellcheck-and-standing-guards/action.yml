@@ -43,7 +43,7 @@ runs:
           -v "$PWD:/work:ro" \
           -w /work \
           "${{ inputs.build-tools-image }}" \
-          timeout --kill-after=30 --signal=KILL 300 bash tests/setup-migration-semantics.sh
+          timeout --kill-after=30 --signal=KILL 300 bash scripts/ci/ci.sh setup-migration-check
 
     - name: Check pinned GitHub Actions for runtime / drift / duplication guardrails
       # What: runs check-action-node-versions.sh (Node-runtime + single-ref/
@@ -71,7 +71,7 @@ runs:
           -w /work \
           -e GH_TOKEN \
           "${{ inputs.build-tools-image }}" \
-          timeout --kill-after=30 --signal=KILL 600 bash scripts/tracked/check-action-node-versions.sh
+          timeout --kill-after=30 --signal=KILL 600 bash scripts/ci/ci.sh action-node-versions-check
 
     - name: Check validation-subnet wrapper coverage
       # What: asserts every full-setup-validate.yml/full-setup-deep-validate.yml job that
@@ -87,7 +87,7 @@ runs:
           -v "$PWD:/work:ro" \
           -w /work \
           "${{ inputs.build-tools-image }}" \
-          timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-validation-subnet-wrapper-coverage.sh
+          timeout --kill-after=30 --signal=KILL 300 bash scripts/ci/ci.sh validation-subnet-check
 
     - name: Check executable bits on bare-path script invocations
       # What: scans every workflow/composite-action file and .githooks/ hook for a bare-path
@@ -103,7 +103,7 @@ runs:
           -v "$PWD:/work:ro" \
           -w /work \
           "${{ inputs.build-tools-image }}" \
-          timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-executable-bits.sh
+          timeout --kill-after=30 --signal=KILL 300 bash scripts/ci/ci.sh executable-bits-check
 
     - name: Check build-tools smoke-test coverage
       # What: compares select-build-tools-image.sh's smoke_test_image() required-tools list
@@ -119,7 +119,7 @@ runs:
           -v "$PWD:/work:ro" \
           -w /work \
           "${{ inputs.build-tools-image }}" \
-          timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-build-tools-smoke-coverage.sh
+          timeout --kill-after=30 --signal=KILL 300 bash scripts/ci/ci.sh build-tools-smoke-cov-check
 
     - name: Check for pipefail/SIGPIPE early-exit-consumer pattern (AG-VAL-029)
       # What: scans scripts/**, tools/**, services/**, and setup.sh for a live producer
@@ -135,7 +135,7 @@ runs:
           -v "$PWD:/work:ro" \
           -w /work \
           "${{ inputs.build-tools-image }}" \
-          timeout --kill-after=30 --signal=KILL 300 bash scripts/untracked/check-pipefail-early-exit-grep.sh
+          timeout --kill-after=30 --signal=KILL 300 bash scripts/ci/ci.sh pipefail-early-exit-check
 
     - name: Check pipefail guard's own scope coverage
       # What: verifies the pipefail-early-exit bats fixture covers every path prefix
@@ -151,7 +151,7 @@ runs:
           -v "$PWD:/work:ro" \
           -w /work \
           "${{ inputs.build-tools-image }}" \
-          timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-pipefail-scope-coverage.sh
+          timeout --kill-after=30 --signal=KILL 300 bash scripts/ci/ci.sh pipefail-scope-check
 
     - name: Check github.repository case-safety in GHCR paths
       # What: runs check-mutable-refs.sh's repository-case check only.
@@ -166,4 +166,4 @@ runs:
           -v "$PWD:/work:ro" \
           -w /work \
           "${{ inputs.build-tools-image }}" \
-          timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-mutable-refs.sh --only repository-case
+          timeout --kill-after=30 --signal=KILL 300 bash scripts/ci/ci.sh repository-case-check
