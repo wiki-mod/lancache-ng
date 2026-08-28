@@ -294,22 +294,17 @@ services:
         EOF
         cat > /etc/nats/auth_callout.conf <<'EOF'
         auth_callout {
-          # What: public half of the ui service's fixed NATS_ISSUER_SEED.
-          # Why: the Admin UI's restart-to-apply no-ops here, so this
-          # prebaked copy (byte-compatible with the UI's own derivation) is
-          # what actually serves the simulation, not a dynamic write.
+          # What: public half of ui's fixed NATS_ISSUER_SEED.
+          # Why: UI restart-to-apply no-ops; prebaked serves simulation.
           # From: Issue #583 | PR #621
           issuer: "AAMEAN73N2SJ4YIEL5PJW3JLQHXNWEFTNOI2THICSHILKYUGVAQJMAA6"
-          # What: public half of the ui service's fixed NATS_XKEY_SEED.
-          # Why: same restart-no-op reason as issuer above -- without it the
-          # xkey encryption path would go completely untested here.
+          # What: public half of ui's fixed NATS_XKEY_SEED.
+          # Why: same restart-no-op as issuer; xkey path untested without.
           # From: Issue #682 | PR #1168
           xkey: "XD2QB5UPSAVJTWTFAHROYX2PBK2JKJKJDZARP3SRYKHGU2R46FUV2BTY"
-          # What: every static nats.conf user listed here, including
-          # validation-nats-sys (a different account than the other four).
-          # Why: auth_callout interception is server-wide, not scoped to
-          # $$G -- omitting one makes it fall through instead of matching.
-          # From: Issue #681 | PR #1172 | PR #1316
+          # What: all static nats.conf users are listed here.
+          # Why: auth_callout server-wide; omitting user causes fallthrough.
+          # From: Issue #681 | PR #1316
           auth_users: ["validation-ui", "validation-dns-writer", "validation-dns-replica", "validation-nats-callout", "validation-nats-sys"]
         }
         EOF
@@ -322,10 +317,8 @@ services:
         ipv4_address: ${VALIDATION_NATS_IP:-172.30.99.8}
     restart: unless-stopped
     healthcheck:
-      # What: real HTTP probe against the monitor endpoint (http_port: 8222
-      # above), not just a bare TCP connect, via wget (BusyBox).
-      # Why: proves the HTTP monitor is actually answering; nats:2-alpine
-      # ships BusyBox's wget/nc but no curl (verified).
+      # What: HTTP probe to monitor endpoint via wget (not bare TCP).
+      # Why: proves HTTP monitor answering; Alpine has wget/nc, no curl.
       # From: PR #828
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8222/healthz || exit 1"]
       interval: 10s
@@ -338,14 +331,12 @@ services:
     image: "${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}"
     volumes:
       # What: UI entrypoint resolves PDNS_API_KEY from this volume.
-      # Why: inert here -- this validation stack hardcodes a consistent
-      # PDNS_API_KEY instead.
+      # Why: inert here; stack hardcodes consistent PDNS_API_KEY.
       # From: Issue #858 | PR #886
       - shared-secrets:/var/lib/lancache-secrets
       - nats-conf:/etc/nats
       # What: read-only reader for watchdog's status.json.
-      # Why: renders the dashboard's "Service health" card; see the
-      # `watchdog` service above and dev/prod/quickstart's identical mount.
+      # Why: renders dashboard health card; see watchdog/dev/prod mount.
       # From: Issue #870 | PR #1165
       - watchdog-status:/var/run/watchdog:ro
     ports:
@@ -418,9 +409,8 @@ services:
       validation:
         ipv4_address: ${VALIDATION_UI_IP:-172.30.99.9}
       validation-api:
-    # What: `service_started` (not `service_healthy`) for all three deps.
-    # Why: the dashboard must still start when docker-socket-proxy is
-    # unhealthy; individual actions report their own degraded state later.
+    # What: `service_started` not `service_healthy` (all three deps).
+    # Why: dashboard must start when proxy is unhealthy.
     # From: PR #1489
     depends_on:
       docker-socket-proxy:
@@ -442,18 +432,15 @@ services:
     image: netdata/netdata@sha256:a130dbbf3d6e6a5472efdebaa123797190a5822627e908106d34edae02bc8a74
     hostname: lancache-netdata-validation
     # What: `pid: host`, matching deploy/prod and deploy/quickstart.
-    # Why: required by netdata's own docs for apps.plugin to read other
-    # containers' /proc/<pid> entries; keeps this profile representative.
-    # From: PR #1220 | PR #1125
+    # Why: netdata requires it for apps.plugin to read container /proc.
+    # From: PR #1125
     pid: host
     cap_add:
       - SYS_PTRACE
     security_opt:
       - apparmor:unconfined
-    # What: Netdata alarm -> Admin UI forwarding, wired into this profile
-    # too (a new forward channel must be exercised by CI, not only prod).
-    # Why: hardcodes the token (like every other credential here) rather
-    # than the shared-secrets volume -- no dynamic-secret path exists here.
+    # What: Netdata alarm -> UI forwarding wired into this profile.
+    # Why: hardcodes token; no dynamic-secret path like prod uses.
     # From: Issue #849 | PR #1444
     entrypoint: ["/usr/bin/bash", "-c"]
     command:
@@ -462,16 +449,13 @@ services:
         printf '%s' "$$NETDATA_ALARM_TOKEN" > /etc/netdata/.netdata-alarm-token
         chmod 0600 /etc/netdata/.netdata-alarm-token
         # What: chowns the token file to netdata:netdata.
-        # Why: netdata's real daemon runs as unprivileged uid 201, not
-        # root; without this the token stays root:root/0600 and every real
-        # alarm silently fails auth with 401.
+        # Why: netdata runs uid 201; without this, alarms auth fails.
         # From: PR #1444
         chown netdata:netdata /etc/netdata/.netdata-alarm-token
         cat > /etc/netdata/health_alarm_notify.conf <<'ALARMCONF'
         # shellcheck disable=SC2154
         # What: name/chart/host/etc. below are unassigned in this fragment.
-        # Why: populated by Netdata's own alarm-notify.sh before it sources
-        # this file's custom_sender(); see deploy/prod's matching heredoc.
+        # Why: populated by Netdata before sourcing; see prod's heredoc.
         # From: PR #1444
         # shellcheck disable=SC2034
         # What: SEND_CUSTOM/DEFAULT_RECIPIENT_CUSTOM appear unused here.
@@ -495,9 +479,8 @@ services:
         ALARMCONF
         exec /usr/sbin/run.sh
     environment:
-      # What: fixed literal, matching every other credential in this harness.
-      # Why: this profile hardcodes credentials instead of the
-      # shared-secrets resolution prod/quickstart use.
+      # What: fixed literal like all harness credentials.
+      # Why: profile hardcodes; prod/quickstart use shared-secrets.
       # From: Issue #849 | PR #1444
       - NETDATA_ALARM_TOKEN=validation-netdata-alarm-token
     volumes:
@@ -524,10 +507,8 @@ networks:
     ipam:
       driver: default
       config:
-        # What: this fallback (no CI subnet reservation) keeps the same
-        # dotted addresses, only the CIDR suffix changed from /24 to /27.
-        # Why: every other ${VALIDATION_*_IP:-172.30.99.N} default needed
-        # no change; see scripts/lib/reserve-validation-subnet.sh.
+        # What: fallback keeps same IPs, CIDR /24 -> /27.
+        # Why: other defaults unchanged; uses reserve-validation-subnet.sh.
         # From: Issue #832 | PR #884
         - subnet: ${VALIDATION_SUBNET:-172.30.99.0/27}
           gateway: ${VALIDATION_GATEWAY:-172.30.99.1}
@@ -535,10 +516,8 @@ networks:
     internal: true
 
 volumes:
-  # What: shared handshake secrets, mounted into every service that must
-  # agree on a generated secret.
-  # Why: inert here (secrets are hardcoded); present for parity with
-  # dev/prod/quickstart.
+  # What: shared handshake secrets mounted for secret agreement.
+  # Why: inert (hardcoded); for parity with dev/prod/quickstart.
   # From: Issue #858 | PR #886
   shared-secrets:
   proxy-cache:
@@ -549,14 +528,11 @@ volumes:
   netdataconfig:
   netdatalib:
   netdatacache:
-  # What: shared between `watchdog` (sole writer) and `ui` (read-only
-  # reader) so this stack exercises the same mount dev/prod/quickstart use.
-  # Why: previously watchdog wrote status.json to its own unshared
-  # filesystem.
+  # What: shared by watchdog (writer) and ui (reader) for same mount.
+  # Why: previously watchdog wrote to own unshared filesystem.
   # From: Issue #870 | PR #1165
   watchdog-status:
   # What: retention.sh's own PURGE_STAMP/SYSLOG_PRUNE_STAMP volume.
-  # Why: separate from watchdog-status above -- see the `retention:`
-  # service's own comment.
+  # Why: separate from watchdog-status; see retention: comment.
   # From: Issue #842 | PR #1360
   retention-state:
