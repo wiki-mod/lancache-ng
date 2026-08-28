@@ -421,20 +421,6 @@ LABEL org.opencontainers.image.description="Prebuilt lancache-ng CI and develope
 # opt-in flag; confirmed this bump enables nothing new by default before
 # taking it, and the same check applies to any future bump too.
 # From: Issue #1570 | PR #1571
-# What: pins the source-built git version and its tarball checksum.
-# Why: builds git from source, statically linked against a
-# feature-reduced curl (below) instead of Debian's packaged git, which
-# pulls in libcurl3t64-gnutls/libcurl4-gnutls via git-remote-https.
-# From: Issue #1304 | Issue #1556
-ARG GIT_VERSION=2.47.3
-ARG GIT_SHA256=9c2eb1250781b3e5bfef098572d07fdf132d67e6c065e4307332ade9819a1501
-# What: pins the curl release/checksum also used by services/utilities/Dockerfile,
-#   rebuilt natively here for glibc (not that image's static musl lib).
-# Why: verified against curl.se's advisories, all 4 tracked CVEs are fixed at
-#   8.21.0 -- trixie-backports still flags them (not a Security-Tracker channel).
-# From: Issue #1304 | Issue #1556
-ARG CURL_VERSION=8.21.0
-ARG CURL_SHA256=aa1b66a70eace83dc624508745646c08ae561de512ab403adffb93ac87fc72e6
 ARG SCCACHE_VERSION=0.17.0
 ARG CARGO_AUDIT_VERSION=0.22.2
 ARG CARGO_AUDIT_SHA256_AMD64=ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39
@@ -504,11 +490,22 @@ RUN echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sou
 # Admin UI Rust binary is a separate, unrelated build and provides no CLI.
 # From: Issue #1585.
 #
-# What: purges git/git-man/curl before installing this image's own list
-#   (excludes both); libssl-dev/zlib1g-dev are only the from-source builds' deps.
-# Why: rust:latest already ships Debian's git/curl -- untouched by the
-#   dist-upgrade above (which patches in place, never removes them).
-# From: Issue #1304 | Issue #1556
+# What: installs this image's own tool list, including git, as plain
+#   Debian packages -- no source build for any tool in this list.
+# Why: git and curl (see the utilities-tools COPY below) previously had a
+#   dedicated from-source build in this stage (statically linking git
+#   against a feature-reduced curl) to dodge git's dynamic dependency on
+#   libcurl3t64-gnutls. Maintainer decision (2026-08-28): that self-build
+#   never delivered the CVE-avoidance it was built for -- issue #1304's own
+#   2026-08-14 Trivy scan found the exact same CVE IDs still `affected` on
+#   the self-built curl 8.21.0 as on Debian's packaged curl, and found
+#   git's libcurl3t64-gnutls dependency persisted in dpkg regardless of the
+#   self-build (nothing in this stage ever purged Debian's own git package),
+#   so the static link never actually removed that dependency from the
+#   image -- it only made the CLI's own curl binary invisible to Trivy's
+#   package scanner. No source compilation for third-party tools in this
+#   stage going forward; plain package installs only.
+# From: Issue #1095 | Issue #1304 | Issue #1556
 RUN set -euo pipefail; \
       apt-get update; \
       apt-get install -y --no-install-recommends \
@@ -524,16 +521,58 @@ RUN set -euo pipefail; \
       gh \
       git \
       jq \
-      libssl-dev \
       lld \
       make \
       pkg-config \
       shellcheck \
       sqlite3 \
-      xz-utils \
-      zlib1g-dev; \
+      xz-utils; \
       apt-get dist-upgrade -yy; \
       apt-get autoremove -y; \
+    rm -rf /var/lib/apt/lists/*
+
+# What: purges a cluster of Cairo/GLib/GTK/ImageMagick/MariaDB/OpenEXR
+#   -dev and X11 packages baked into the plain `rust:latest` base image,
+#   none of which this stage's own tool list (above) needs or pulled in.
+# Why: found while removing the curl/git self-build stage below -- its own
+#   `apt-get purge -y libssl-dev zlib1g-dev` had been incidentally
+#   cascading this same ~20-package cluster out via `autoremove` as a
+#   side effect (confirmed via a real `apt-get purge`+`autoremove --dry-run`
+#   on this exact base image: removing libssl-dev alone orphans this whole
+#   cluster). Dropping the self-build without an explicit replacement here
+#   would have silently regressed this image back to the base image's
+#   uncleaned, larger HIGH/CRITICAL-CVE surface. Verified via a real build
+#   + Trivy scan on 192.168.1.240 that a direct purge of this cluster
+#   (independent of libssl-dev, which this stage no longer installs at
+#   all) cascades identically through `autoremove` with none of our own
+#   tools (git, cmake, gh, ccache, etc.) affected.
+# From: Issue #1095
+RUN set -euo pipefail; \
+    apt-get purge -y \
+      default-libmysqlclient-dev \
+      libcairo2-dev \
+      libcurl4-openssl-dev \
+      libfontconfig-dev \
+      libfreetype-dev \
+      libgdk-pixbuf-2.0-dev \
+      libgio-2.0-dev \
+      libglib2.0-dev \
+      libharfbuzz-dev \
+      libmagickcore-dev \
+      libmagickwand-dev \
+      libmariadb-dev \
+      libmariadb-dev-compat \
+      libopenexr-dev \
+      libpango1.0-dev \
+      libpng-dev \
+      libpq-dev \
+      librsvg2-dev \
+      librtmp-dev \
+      libssh2-1-dev \
+      libtiff-dev \
+      libwmf-dev \
+      libxft-dev; \
+    apt-get autoremove -y; \
     rm -rf /var/lib/apt/lists/*
 
 # What: curl comes from the shared utilities image instead of Debian's own package.
@@ -681,200 +720,6 @@ RUN set -euo pipefail; \
     mkdir -p /usr/local/lib/distcc; \
     for wrapper in cc gcc c++ g++; do ln -sf "$distcc_bin" "/usr/local/lib/distcc/$wrapper"; done; \
     rm -rf /var/lib/apt/lists/*
-
-# What: builds curl/git via a ccache-over-distcc cache, 3 fallback tiers.
-# Why: sccache cannot compile C (AG-CI-022); mirrors services/dns and
-#   services/utilities' proven pattern. Missing LAN-only secrets (fork
-#   PRs, arm64/GitHub-hosted) degrade gracefully, never abort the build.
-# From: Issue #1304 | Issue #1556 | PR #1661
-RUN --mount=type=secret,id=distcc_potential_hosts \
-    --mount=type=secret,id=ccache_redis_url \
-    set -euo pipefail; \
-    build_tmp="$(mktemp -d)"; \
-    distcc_pump_running=0; \
-    cleanup_curl_git_build() { \
-      rm -rf "$build_tmp"; \
-      if [ "$distcc_pump_running" = "1" ]; then distcc-pump --shutdown >/dev/null 2>&1 || true; fi; \
-    }; \
-    trap cleanup_curl_git_build EXIT; \
-    curl -fsSL -o "$build_tmp/curl.tar.xz" "https://curl.se/download/curl-${CURL_VERSION}.tar.xz"; \
-    printf '%s  %s\n' "$CURL_SHA256" "$build_tmp/curl.tar.xz" | sha256sum -c -; \
-    curl -fsSL -o "$build_tmp/git.tar.xz" "https://www.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.xz"; \
-    printf '%s  %s\n' "$GIT_SHA256" "$build_tmp/git.tar.xz" | sha256sum -c -; \
-    distcc_enabled=0; \
-    ccache_enabled=0; \
-    original_path="$PATH"; \
-    real_gcc="$(command -v gcc)"; \
-    resolve_distcc_wrapper_dir() { \
-      for candidate in /usr/local/lib/distcc /usr/lib/distcc; do \
-        if [ -x "$candidate/cc" ] && [ -x "$candidate/gcc" ]; then \
-          printf '%s\n' "$candidate"; \
-          return 0; \
-        fi; \
-      done; \
-      echo "distcc wrapper directory not found" >&2; \
-      exit 1; \
-    }; \
-    extract_remote_toolchain_id() { \
-      rm -f /tmp/ccache-remote-toolchain-id; \
-      if command -v readelf >/dev/null 2>&1; then \
-        readelf_comment_section="$(readelf -p .comment "$1" 2>/dev/null || true)"; \
-        sed -n 's/^ *\[[^]]*\] *//p' <<<"$readelf_comment_section" > /tmp/ccache-remote-toolchain-id; \
-      fi; \
-    }; \
-    disable_distcc() { \
-      distcc_enabled=0; \
-      unset DISTCC_POTENTIAL_HOSTS DISTCC_HOSTS DISTCC_FALLBACK; \
-      PATH="$original_path"; export PATH; \
-    }; \
-    if [ -s /run/secrets/distcc_potential_hosts ]; then \
-      distcc_probe_dir="$(mktemp -d)"; \
-      DISTCC_POTENTIAL_HOSTS="$(cat /run/secrets/distcc_potential_hosts)"; export DISTCC_POTENTIAL_HOSTS; \
-      distcc_wrapper_dir="$(resolve_distcc_wrapper_dir)"; \
-      export PATH="$distcc_wrapper_dir:$PATH" DISTCC_FALLBACK=0; \
-      if distcc_pump_env="$(distcc-pump --startup 2>"$distcc_probe_dir/pump.log")"; then \
-        eval "$distcc_pump_env"; \
-        distcc_pump_running=1; \
-        printf '%s\n' 'int main(void) { return 0; }' > "$distcc_probe_dir/probe.c"; \
-        if gcc -c "$distcc_probe_dir/probe.c" -o "$distcc_probe_dir/probe.o" >"$distcc_probe_dir/probe.log" 2>&1; then \
-          distcc_enabled=1; \
-          extract_remote_toolchain_id "$distcc_probe_dir/probe.o"; \
-        else \
-          echo "::notice::curl/git build: distcc probe compile failed; falling back to a plain, uncached compile." >&2; \
-          disable_distcc; \
-        fi; \
-      else \
-        echo "::notice::curl/git build: distcc-pump did not start (farm unreachable); falling back to a plain, uncached compile." >&2; \
-        disable_distcc; \
-      fi; \
-      rm -rf "$distcc_probe_dir"; \
-    else \
-      echo "::notice::curl/git build: no distcc_potential_hosts secret; falling back to a plain, uncached compile." >&2; \
-    fi; \
-    if [ "$distcc_enabled" = "1" ] && [ -s /run/secrets/ccache_redis_url ]; then \
-      if [ -s /tmp/ccache-remote-toolchain-id ]; then \
-        ccache_probe_dir="$(mktemp -d)"; \
-        ccache_redis_endpoint="$(cat /run/secrets/ccache_redis_url)"; \
-        case "$ccache_redis_endpoint" in \
-          redis://*|redis+unix:*) ;; \
-          *) ccache_redis_endpoint="redis://$ccache_redis_endpoint" ;; \
-        esac; \
-        export CCACHE_REMOTE_STORAGE="$ccache_redis_endpoint" CCACHE_DIR=/tmp/ccache-build-tools-curl-git; \
-        export CCACHE_PREFIX=distcc CCACHE_COMPILERCHECK=content; \
-        export CCACHE_EXTRAFILES=/tmp/ccache-remote-toolchain-id CCACHE_BASEDIR="$build_tmp"; \
-        printf '%s\n' 'int main(void) { return 0; }' > "$ccache_probe_dir/probe.c"; \
-        if (cd "$ccache_probe_dir" && ccache "$real_gcc" -c probe.c -o probe.o) >"$ccache_probe_dir/probe.log" 2>&1 \
-          && ccache --print-stats > "$ccache_probe_dir/stats.log" \
-          && grep -qE '^remote_storage_(write|hit)[[:space:]]+[1-9]' "$ccache_probe_dir/stats.log" \
-          && ! grep -qE '^remote_storage_error[[:space:]]+[1-9]' "$ccache_probe_dir/stats.log"; then \
-          ccache_enabled=1; \
-        else \
-          echo "::notice::curl/git build: ccache_redis_url probe failed; using distcc alone (no cache)." >&2; \
-          unset CCACHE_REMOTE_STORAGE CCACHE_DIR CCACHE_PREFIX CCACHE_COMPILERCHECK CCACHE_EXTRAFILES CCACHE_BASEDIR; \
-        fi; \
-        rm -rf "$ccache_probe_dir"; \
-      else \
-        echo "::notice::curl/git build: no verified remote distcc toolchain id; using distcc alone (no cache)." >&2; \
-      fi; \
-    elif [ "$distcc_enabled" = "1" ]; then \
-      echo "::notice::curl/git build: no ccache_redis_url secret; using distcc alone (no cache)." >&2; \
-    fi; \
-    if [ "$ccache_enabled" = "1" ]; then \
-      cc_wrapper="ccache $real_gcc"; \
-    elif [ "$distcc_enabled" = "1" ]; then \
-      cc_wrapper="gcc"; \
-    else \
-      cc_wrapper="$real_gcc"; \
-      echo "::warning::curl/git build: distcc unavailable; compiling with no cache and no distribution at all (last line of defense before this build cannot compile)." >&2; \
-    fi; \
-    attempt_curl_git_build() { \
-      rm -rf "$build_tmp/curl-${CURL_VERSION}" "$build_tmp/git-${GIT_VERSION}"; \
-      tar -xJf "$build_tmp/curl.tar.xz" -C "$build_tmp"; \
-      tar -xf "$build_tmp/git.tar.xz" -C "$build_tmp"; \
-      ( cd "$build_tmp/curl-${CURL_VERSION}" \
-        && ./configure \
-          --disable-shared --enable-static \
-          --disable-ftp --disable-file --disable-ldap --disable-ldaps \
-          --disable-rtsp --disable-dict --disable-telnet --disable-tftp \
-          --disable-pop3 --disable-imap --disable-smtp --disable-smb \
-          --disable-gopher --disable-mqtt \
-          --disable-scp --disable-sftp --without-libssh2 --without-libssh \
-          --disable-ntlm --disable-kerberos-auth --disable-negotiate-auth \
-          --disable-aws \
-          --disable-manual --disable-libcurl-option \
-          --disable-ipfs --disable-websockets \
-          --without-librtmp --without-libidn2 --without-brotli --without-zstd \
-          --without-nghttp2 --without-nghttp3 --without-ngtcp2 --without-libpsl \
-          --with-openssl \
-          --with-ca-bundle=/etc/ssl/certs/ca-certificates.crt \
-          --enable-http --enable-cookies --enable-ipv6 \
-          CC="$cc_wrapper" \
-        && make -j"$(nproc)" ) || return 1; \
-      curl_src="$build_tmp/curl-${CURL_VERSION}"; \
-      curl_libcurl="-Wl,-Bstatic -L${curl_src}/lib/.libs -lcurl -Wl,-Bdynamic -lssl -lcrypto -lz"; \
-      ( cd "$build_tmp/git-${GIT_VERSION}" \
-        && make -j"$(nproc)" prefix=/usr/local CC="$cc_wrapper" NO_TCLTK=YesPlease NO_GETTEXT=YesPlease \
-          CURL_CFLAGS="-I${curl_src}/include" CURL_LIBCURL="$curl_libcurl" install ) || return 1; \
-    }; \
-    build_ok=0; \
-    for tier in 1 2 3; do \
-      if attempt_curl_git_build; then build_ok=1; break; fi; \
-      if [ "$ccache_enabled" = "1" ]; then \
-        echo "::notice::curl/git build: tier $tier (ccache-over-distcc) failed; retrying with plain distcc (no cache)." >&2; \
-        unset CCACHE_REMOTE_STORAGE CCACHE_DIR CCACHE_PREFIX CCACHE_COMPILERCHECK CCACHE_EXTRAFILES CCACHE_BASEDIR; \
-        ccache_enabled=0; cc_wrapper="gcc"; \
-        distcc-pump --shutdown >/dev/null 2>&1 || true; \
-        distcc_pump_running=0; \
-        if distcc_pump_env="$(distcc-pump --startup 2>/dev/null)"; then \
-          eval "$distcc_pump_env"; \
-          distcc_pump_running=1; \
-        else \
-          echo "::notice::curl/git build: distcc-pump restart failed; retrying with a plain local compile." >&2; \
-          disable_distcc; cc_wrapper="$real_gcc"; \
-        fi; \
-      elif [ "$distcc_enabled" = "1" ]; then \
-        echo "::notice::curl/git build: tier $tier (distcc) failed; retrying with a plain local compile." >&2; \
-        disable_distcc; cc_wrapper="$real_gcc"; \
-      else \
-        break; \
-      fi; \
-    done; \
-    if [ "$build_ok" != "1" ]; then \
-      echo "::error::curl/git build failed with no cache/distribution layer left to retry." >&2; \
-      exit 1; \
-    fi; \
-    if [ "$ccache_enabled" = "1" ]; then \
-      ccache -s; \
-      ccache_final_stats="$(mktemp)"; \
-      ccache --print-stats > "$ccache_final_stats"; \
-      if grep -qE '^remote_storage_error[[:space:]]+[1-9]' "$ccache_final_stats"; then \
-        echo "[INFO] ccache recorded a Redis remote-storage error during the real curl/git build; this build's binaries are already correct and unaffected, but the optional Redis cache layer degraded mid-build -- see services/dns/Dockerfile's identical diagnostic." >&2; \
-        cat "$ccache_final_stats" >&2; \
-      fi; \
-      rm -f "$ccache_final_stats"; \
-    fi; \
-    rm -rf /tmp/ccache-build-tools-curl-git /tmp/ccache-remote-toolchain-id; \
-    git --version; \
-    git_remote_https="$(command -v git-remote-https || echo /usr/local/libexec/git-core/git-remote-https)"; \
-    git_remote_https_ldd="$(ldd "$git_remote_https")"; \
-    if grep -qi 'libcurl' <<<"$git_remote_https_ldd"; then \
-      echo "::error::git-remote-https unexpectedly linked against a dynamic libcurl after a static-curl build." >&2; \
-      exit 1; \
-    fi; \
-    git ls-remote https://github.com/git/git.git HEAD >/dev/null; \
-    apt-get purge -y libssl-dev zlib1g-dev; \
-    apt-get autoremove -y; \
-    rm -rf /var/lib/apt/lists/*; \
-    for pkg in libcurl3t64-gnutls libcurl4-gnutls libcurl4-openssl-dev; do \
-      if dpkg -s "$pkg" >/dev/null 2>&1; then \
-        echo "::error::$pkg is still installed despite git no longer depending on any Debian curl/libcurl package -- investigate the new consumer before proceeding." >&2; \
-        exit 1; \
-      fi; \
-    done; \
-    dpkg -s libcurl4t64 >/dev/null 2>&1 \
-      || { echo "::error::libcurl4t64 unexpectedly absent -- cmake's own real dependency on it (confirmed empirically: apt-get autoremove strips cmake if libcurl4t64 is purged) should keep it installed; investigate before proceeding." >&2; exit 1; }; \
-    git --version; \
-    git ls-remote https://github.com/git/git.git HEAD >/dev/null
 
 # What: fetches and checksum-verifies prebuilt release binaries for
 # cargo-audit and cargo-tarpaulin instead of building from source.
