@@ -162,7 +162,7 @@ is_external_action_ref() {
 
 # What: composite action.yml can't use a YAML anchor/alias.
 # Why: composite manifests reject anchors; workflows allow them.
-# From: Issue #1095 | PR #1665
+# From: Issue #1095 | PR #1734
 is_workflow_file() {
   local candidate="$1"
   [[ "$candidate" == "$workflow_dir"/* ]]
@@ -303,7 +303,7 @@ done
 
 # What: rejects a workflow file repeating one `uses:` ref.
 # Why: an anchor can collapse duplicates only in workflow files.
-# From: Issue #1095 | PR #1665
+# From: Issue #1095 | PR #1734
 for exact_file_key in "${!literal_ref_counts_by_file[@]}"; do
   count="${literal_ref_counts_by_file[$exact_file_key]}"
   if [ "$count" -le 1 ]; then
@@ -316,7 +316,7 @@ done
 
 # What: rejects an external action key pinned to multiple refs.
 # Why: the same dependency silently splits into different refs.
-# From: Issue #1095 | PR #1665
+# From: Issue #1095 | PR #1734
 for action_key in "${!ref_counts_by_key[@]}"; do
   count="${ref_counts_by_key[$action_key]}"
   if [ "$count" -le 1 ]; then
@@ -331,7 +331,7 @@ done
 
 # What: rejects expression syntax in an action description: field.
 # Why: description: fields are template-evaluated, breaking jobs.
-# From: Issue #1095 | PR #1719
+# From: Issue #1095 | PR #1734
 for action_file in "${local_action_files[@]}"; do
   description_expression_hits="$(
     awk '

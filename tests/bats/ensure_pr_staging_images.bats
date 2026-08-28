@@ -692,7 +692,7 @@ STUB
 @test "BASE_SHA's own image with a push-reuse-retagged (older) revision label is accepted directly, no ancestor substitution" {
     # What: BASE_SHA's retagged image is accepted, not walked.
     # Why: without allow_reverse_ancestry, older labels look stale.
-    # From: Issue #1095 | PR #1490
+    # From: Issue #1095 | PR #1734
     revision_map_stub="$BATS_TEST_TMPDIR/revision_map.sh"
     cat > "$revision_map_stub" <<STUB
 #!/usr/bin/env bash
@@ -955,7 +955,7 @@ STUB
 
     # What: stale_stub returns exit 1 for every queried image.
     # Why: an ancestor's sha would now be accepted as fresh.
-    # From: Issue #1095 | PR #1490
+    # From: Issue #1095 | PR #1734
     stale_stub="$BATS_TEST_TMPDIR/stale_revision_no_ancestor.sh"
     cat > "$stale_stub" <<'STUB'
 #!/usr/bin/env bash
@@ -1009,7 +1009,7 @@ STUB
 
     # What: exact-BASE_SHA freshness check fails first, not later.
     # Why: an ancestor's sha would now be accepted as fresh.
-    # From: Issue #1095 | PR #1490
+    # From: Issue #1095 | PR #1734
     stale_stub="$BATS_TEST_TMPDIR/stale_revision_run_exists.sh"
     cat > "$stale_stub" <<'STUB'
 #!/usr/bin/env bash
@@ -1048,7 +1048,7 @@ STUB
 
     # What: exact-BASE_SHA freshness check fails first, not later.
     # Why: an ancestor's sha would now be accepted as fresh.
-    # From: Issue #1095 | PR #1490
+    # From: Issue #1095 | PR #1734
     stale_stub="$BATS_TEST_TMPDIR/stale_revision_indeterminate.sh"
     cat > "$stale_stub" <<'STUB'
 #!/usr/bin/env bash
