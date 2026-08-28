@@ -1259,7 +1259,7 @@ readonly -a CI_STANDING_CHECKS=(
     scripts/untracked/check-netdata-curl-pin.sh
     scripts/tracked/check-idempotence-test-coverage.sh
     scripts/tracked/check-bats-path-filter-coverage.sh
-    scripts/untracked/check-setup-prompt-drift.sh
+    scripts/tracked/check-setup-prompt-drift.sh
     scripts/untracked/check-proxy-cache-env-doc-drift.sh
     scripts/tracked/check-logging-matrix.sh
 )
@@ -1271,7 +1271,11 @@ ci_cmd_checks() {
     local script name
     for script in "${CI_STANDING_CHECKS[@]}"; do
         name="$(basename "$script")"
-        [[ -f "$CI_REPO_ROOT/$script" ]] || ci_die "missing standing check: $script"
+        if [[ ! -f "$CI_REPO_ROOT/$script" ]]; then
+            ci_report_failure "standing check" "$name" "script exists" "missing at $script" \
+                "the script moved or was renamed; update CI_STANDING_CHECKS"
+            continue
+        fi
         if ! bash "$CI_REPO_ROOT/$script"; then
             ci_report_failure "standing check" "$name" "exit 0" "non-zero" \
                 "see this check's own output above for the actual cause"
