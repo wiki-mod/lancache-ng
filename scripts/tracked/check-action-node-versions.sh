@@ -13,7 +13,7 @@
 # actions, now or after a future re-pin. This script scans ALL of them,
 # proactively, on every run.
 #
-# It also enforces two #1095 centralization invariants over the same scan
+# It also enforces two centralization invariants over the same scan
 # scope:
 #   1. one WORKFLOW file must not repeat the exact same third-party `uses:`
 #      literal more than once -- a YAML anchor/alias must carry that one
@@ -24,7 +24,7 @@
 #   2. one third-party action key (`owner/repo[/subpath]`) must not drift to
 #      multiple pinned refs across .github/** -- that is exactly the
 #      "same dependency, different versions, nobody sees it anymore" failure
-#      mode #1095 is meant to stop. Applies to both workflow and composite
+#      mode this guard is meant to stop. Applies to workflow and composite
 #      action files, since it has nothing to do with anchors.
 #   3. no composite action.yml `description:` field may contain GitHub
 #      Actions expression syntax. GitHub's manifest template validator
@@ -32,7 +32,7 @@
 #      prose, so a literal `${{ github.action_path }}` written as an
 #      explanation fails the ENTIRE action with "Unrecognized named-value:
 #      'github'" -- which broke every build/build-arm64 job across all
-#      services (issue #1095, PR #1719). The class recurred immediately:
+#      services. The class recurred immediately:
 #      the first fix attempt reintroduced it while explaining the bug in
 #      that same description, producing "An expression was expected". A
 #      YAML `#` comment is NOT template-evaluated and is the safe place to
@@ -161,7 +161,7 @@ is_external_action_ref() {
 }
 
 # What: a composite action.yml file cannot use a YAML anchor/alias at all.
-# Why: confirmed live (Issue #1095 F-24, PR #1665): the Actions Runner's own
+# Why: the Actions Runner's own
 #   composite-action loader hard-fails with "Anchors are not currently
 #   supported" -- unlike a workflow file, which a separate, more permissive
 #   parser already tolerates (pre-existing anchors in build-push.yml's env:
@@ -310,7 +310,7 @@ done
 #   is_workflow_file() above).
 # Why: once the same immutable ref appears twice in a workflow file, a YAML
 #   anchor/alias collapses it to one owner line; the same collapse is not an
-#   option inside a composite action.yml (Issue #1095 F-24), so duplication
+#   option inside a composite action.yml, so duplication
 #   there is simply the correct, GitHub-imposed shape, not a violation.
 for exact_file_key in "${!literal_ref_counts_by_file[@]}"; do
   count="${literal_ref_counts_by_file[$exact_file_key]}"
@@ -323,7 +323,7 @@ for exact_file_key in "${!literal_ref_counts_by_file[@]}"; do
 done
 
 # What: rejects one external action key pinned to multiple distinct refs.
-# Why: #1095's drift class is not duplication alone; the real maintenance
+# Why: the drift class is not duplication alone; the real maintenance
 #   hazard is the same dependency silently splitting across versions.
 for action_key in "${!ref_counts_by_key[@]}"; do
   count="${ref_counts_by_key[$action_key]}"
@@ -587,8 +587,10 @@ for value in "${uses_values[@]}"; do
 done
 
 if [ "$failures" -gt 0 ]; then
-  printf '::error::check-action-node-versions: %d finding(s) -- a pinned action declares a deprecated Node runtime, could not be resolved, drifted/duplicated a ref, or a composite action description: field contains expression syntax (see issues #801, #1095).\n' "$failures" >&2
+  printf '::error::check-action-node-versions: %d pinned action(s) or manifest field(s) failed. Each failure is printed above as its own ::error:: line naming the exact file, line and reason -- read those, not this summary.
+' "$failures" >&2
   exit 1
 fi
 
-printf 'check-action-node-versions: OK (every pinned action -- local and external -- declares a current Node runtime, or is not Node-based; third-party action refs are de-duplicated per file and do not drift across .github/**; no composite action description: field contains GitHub Actions expression syntax).\n'
+printf 'check-action-node-versions: OK (every pinned action -- local and external -- declares a current Node runtime, or is not Node-based; third-party action refs are de-duplicated per file and do not drift across .github/**; no composite manifest declares expression syntax where the template validator would evaluate it).
+'
