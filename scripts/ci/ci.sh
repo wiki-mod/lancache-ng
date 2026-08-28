@@ -646,7 +646,13 @@ ci_state_permits_build() {
     # What: true only for MISSING_CONFIRMED.
     # Why: §19 -- only a confirmed absence may build.
     # From: Issue #1683
-    [[ "$1" == "$CI_STATE_MISSING_CONFIRMED" ]]
+    case "$1" in
+        "$CI_STATE_MISSING_CONFIRMED") return 0 ;;
+        "$CI_STATE_PRESENT_ACCEPTED" | "$CI_STATE_BUILD_IN_PROGRESS" | \
+        "$CI_STATE_PRODUCED_UNVERIFIED" | "$CI_STATE_MISMATCH" | "$CI_STATE_UNKNOWN")
+            return 1 ;;
+        *) return 1 ;;
+    esac
 }
 
 # ============================================================

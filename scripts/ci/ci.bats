@@ -343,17 +343,17 @@ setup() {
 # Why: §2.3 -- uncertainty is not a licence to build.
 # From: Issue #1683
 @test "resolver: UNKNOWN does not permit a build" {
-    ! ci_state_permits_build "$CI_STATE_UNKNOWN"
+    run ! ci_state_permits_build "$CI_STATE_UNKNOWN"
 }
 
 # What: no other resolver state authorizes a build.
 # Why: §18's remaining states each have their own handling.
 # From: Issue #1683
 @test "resolver: no other state permits a build" {
-    ! ci_state_permits_build "$CI_STATE_PRESENT_ACCEPTED"
-    ! ci_state_permits_build "$CI_STATE_BUILD_IN_PROGRESS"
-    ! ci_state_permits_build "$CI_STATE_PRODUCED_UNVERIFIED"
-    ! ci_state_permits_build "$CI_STATE_MISMATCH"
+    run ! ci_state_permits_build "$CI_STATE_PRESENT_ACCEPTED"
+    run ! ci_state_permits_build "$CI_STATE_BUILD_IN_PROGRESS"
+    run ! ci_state_permits_build "$CI_STATE_PRODUCED_UNVERIFIED"
+    run ! ci_state_permits_build "$CI_STATE_MISMATCH"
 }
 
 # ============================================================
@@ -374,7 +374,9 @@ setup() {
 # From: Issue #1683
 @test "ledger: an accepted result is recorded and found again" {
     CI_LEDGER_DIR="$BATS_TEST_TMPDIR/ledger"
-    local results="$BATS_TEST_TMPDIR/results" d="sha256:$(printf 'a%.0s' {1..64})"
+    local results="$BATS_TEST_TMPDIR/results"
+    local d
+    d="sha256:$(printf 'a%.0s' {1..64})"
     ci_result_record proxy linux/amd64 id1 "$d" ACCEPTED "$results" >/dev/null
     ci_ledger_aggregate "$results" >/dev/null
     [ "$(ci_ledger_lookup proxy linux/amd64 id1)" = "$d" ]
@@ -385,7 +387,9 @@ setup() {
 # From: Issue #1683
 @test "ledger: a rejected result is not recorded" {
     CI_LEDGER_DIR="$BATS_TEST_TMPDIR/ledger"
-    local results="$BATS_TEST_TMPDIR/results" d="sha256:$(printf 'b%.0s' {1..64})"
+    local results="$BATS_TEST_TMPDIR/results"
+    local d
+    d="sha256:$(printf 'b%.0s' {1..64})"
     ci_result_record proxy linux/amd64 id2 "$d" REJECTED "$results" >/dev/null
     ci_ledger_aggregate "$results" >/dev/null
     run ci_ledger_lookup proxy linux/amd64 id2
@@ -397,7 +401,9 @@ setup() {
 # From: Issue #1683
 @test "ledger: re-aggregating the same results is idempotent" {
     CI_LEDGER_DIR="$BATS_TEST_TMPDIR/ledger"
-    local results="$BATS_TEST_TMPDIR/results" d="sha256:$(printf 'c%.0s' {1..64})"
+    local results="$BATS_TEST_TMPDIR/results"
+    local d
+    d="sha256:$(printf 'c%.0s' {1..64})"
     ci_result_record dns linux/amd64 id3 "$d" ACCEPTED "$results" >/dev/null
     ci_ledger_aggregate "$results" >/dev/null
     ci_ledger_aggregate "$results" >/dev/null
@@ -995,28 +1001,28 @@ setup() {
 # Why: §85 G -- a lookup failure must never authorize a build.
 # From: Issue #1683
 @test "acceptance G: an unreachable registry does not permit a build" {
-    ! ci_state_permits_build "$CI_STATE_UNKNOWN"
+    run ! ci_state_permits_build "$CI_STATE_UNKNOWN"
 }
 
 # What: Test H -- an in-progress build blocks a twin.
 # Why: §85 H -- runner B waits and reuses instead.
 # From: Issue #1683
 @test "acceptance H: BUILD_IN_PROGRESS does not permit a build" {
-    ! ci_state_permits_build "$CI_STATE_BUILD_IN_PROGRESS"
+    run ! ci_state_permits_build "$CI_STATE_BUILD_IN_PROGRESS"
 }
 
 # What: Test I/J -- unverified output never rebuilds.
 # Why: §85 I/J -- retry publish, never build twice.
 # From: Issue #1683
 @test "acceptance I+J: PRODUCED_UNVERIFIED does not permit a build" {
-    ! ci_state_permits_build "$CI_STATE_PRODUCED_UNVERIFIED"
+    run ! ci_state_permits_build "$CI_STATE_PRODUCED_UNVERIFIED"
 }
 
 # What: Test K -- a mismatch names both digests.
 # Why: §85 K -- no replacement build after a mismatch.
 # From: Issue #1683
 @test "acceptance K: a digest mismatch fails, naming both digests" {
-    ! ci_state_permits_build "$CI_STATE_MISMATCH"
+    run ! ci_state_permits_build "$CI_STATE_MISMATCH"
     ci_report_failure "digest match" "proxy" "sha256:aa" "sha256:bb" "fail, never rebuild"
     [[ "${CI_FAILURES[0]}" == *"sha256:aa"* ]]
     [[ "${CI_FAILURES[0]}" == *"sha256:bb"* ]]
