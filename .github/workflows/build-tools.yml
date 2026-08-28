@@ -467,25 +467,46 @@ jobs:
           timeout: 10m
           exit-code: "1"
 
-      # What: warns; does not report on a DB-download failure.
-      # Why: reporting success here would auto-close a real
-      #   open finding -- a DB miss proves nothing.
+      # What: fails the job when db-status came back neither value.
+      # Why: an unknown status must never be read as a clean scan.
       # From: Issue #1095
-      - name: Warn on Trivy DB-unavailable (amd64, no status report)
+      - name: Require a determined Trivy DB status (amd64)
         if: >-
           github.event_name == 'pull_request' &&
-          steps.trivy-scan.outcome == 'failure' && steps.trivy-scan.outputs.db-unavailable == 'true'
-        run: echo "::warning::Trivy DB never downloaded for build-tools (amd64) -- skipping the status report so a real open finding is not auto-closed."
+          steps.trivy-scan.outputs.db-status != 'unavailable' &&
+          steps.trivy-scan.outputs.db-status != 'available'
+        run: |
+          echo "::error::Trivy db-status for build-tools (amd64) is '${{ steps.trivy-scan.outputs.db-status }}' -- the scan never reached its own determination step (timeout, cancellation, or output-propagation failure). Treating this as NOT-RUN: no status report is filed, because nothing was established either way." >&2
+          exit 1
+
+      # What: reports DB-unavailability as a separate issue.
+      # Why: a workflow-specific label avoids colliding with
+      #   service's label in build-push.yml's own matrix.
+      # From: Issue #1095
+      - name: Report Trivy DB-unavailable status (amd64, separate issue)
+        if: >-
+          github.event_name == 'pull_request' &&
+          (steps.trivy-scan.outputs.db-status == 'unavailable' ||
+           steps.trivy-scan.outputs.db-status == 'available')
+        uses: ./.github/actions/nightly-status
+        with:
+          outcome: ${{ steps.trivy-scan.outputs.db-status == 'unavailable' && 'failure' || 'success' }}
+          label: trivy-db-unavailable-buildtoolswf-build-tools-amd64
+          scope: >-
+            Trivy vulnerability DB never downloaded for
+            tools/build-tools (amd64) across all retry attempts
+          fork-check-step-name: Scan local build-tools amd64 image with Trivy
+          project_pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
 
       # What: reports the scan outcome as a self-closing issue.
       # Why: nightly-status/action.yml owns this pattern; reused here
-      #   instead of a near-duplicate (AG-CODE-013); skipped entirely
-      #   on a pure DB-download failure.
+      #   instead of a near-duplicate (AG-CODE-013); runs only
+      #   explicitly available DB.
       # From: Issue #1095
       - name: Report Trivy PR-scan status (non-blocking, self-closing issue)
         if: >-
           github.event_name == 'pull_request' &&
-          steps.trivy-scan.outputs.db-unavailable != 'true'
+          steps.trivy-scan.outputs.db-status == 'available'
         uses: ./.github/actions/nightly-status
         with:
           outcome: ${{ steps.trivy-scan.outcome == 'failure' && 'failure' || 'success' }}
@@ -726,25 +747,46 @@ jobs:
           timeout: 10m
           exit-code: "1"
 
-      # What: warns; does not report on a DB-download failure.
-      # Why: reporting success here would auto-close a real
-      #   open finding -- a DB miss proves nothing.
+      # What: fails the job when db-status came back neither value.
+      # Why: an unknown status must never be read as a clean scan.
       # From: Issue #1095
-      - name: Warn on Trivy DB-unavailable (arm64, no status report)
+      - name: Require a determined Trivy DB status (arm64)
         if: >-
           github.event_name == 'pull_request' &&
-          steps.trivy-scan.outcome == 'failure' && steps.trivy-scan.outputs.db-unavailable == 'true'
-        run: echo "::warning::Trivy DB never downloaded for build-tools (arm64) -- skipping the status report so a real open finding is not auto-closed."
+          steps.trivy-scan.outputs.db-status != 'unavailable' &&
+          steps.trivy-scan.outputs.db-status != 'available'
+        run: |
+          echo "::error::Trivy db-status for build-tools (arm64) is '${{ steps.trivy-scan.outputs.db-status }}' -- the scan never reached its own determination step (timeout, cancellation, or output-propagation failure). Treating this as NOT-RUN: no status report is filed, because nothing was established either way." >&2
+          exit 1
+
+      # What: reports DB-unavailability as a separate issue.
+      # Why: a workflow-specific label avoids colliding with
+      #   service's label in build-push.yml's own matrix.
+      # From: Issue #1095
+      - name: Report Trivy DB-unavailable status (arm64, separate issue)
+        if: >-
+          github.event_name == 'pull_request' &&
+          (steps.trivy-scan.outputs.db-status == 'unavailable' ||
+           steps.trivy-scan.outputs.db-status == 'available')
+        uses: ./.github/actions/nightly-status
+        with:
+          outcome: ${{ steps.trivy-scan.outputs.db-status == 'unavailable' && 'failure' || 'success' }}
+          label: trivy-db-unavailable-buildtoolswf-build-tools-arm64
+          scope: >-
+            Trivy vulnerability DB never downloaded for
+            tools/build-tools (arm64) across all retry attempts
+          fork-check-step-name: Scan local build-tools arm64 image with Trivy
+          project_pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
 
       # What: reports the scan outcome as a self-closing issue.
       # Why: own arm64 label so one arch's fix doesn't close the
-      #   other's still-open finding; skipped on a pure DB-download
-      #   failure, same as the amd64 leg.
+      #   other's still-open finding; runs only for an explicitly
+      #   available DB, same as the amd64 leg.
       # From: Issue #1095
       - name: Report Trivy PR-scan status (non-blocking, self-closing issue)
         if: >-
           github.event_name == 'pull_request' &&
-          steps.trivy-scan.outputs.db-unavailable != 'true'
+          steps.trivy-scan.outputs.db-status == 'available'
         uses: ./.github/actions/nightly-status
         with:
           outcome: ${{ steps.trivy-scan.outcome == 'failure' && 'failure' || 'success' }}
