@@ -1,23 +1,19 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: runs tests/bats + tests/shellspec against the already-published build-tools image only.
-# Why: split from build-tools.yml so a script/test-only change gets full
-#   regression coverage without a wasteful full multi-arch rebuild.
-# From: Issue #1253 | Issue #1255 | PR #1501
+# What: runs bats/shellspec against published build-tools
+# Why: split from build-tools.yml to avoid full rebuilds
+# From: Issue #1253 | PR #1501
 name: Build Tools Smoke Tests
 
 on:
   push:
-    # What: mirrors build-tools.yml's own branches list.
-    # Why: current_dev is the active development branch; v0.2.0 stays
-    # listed as the frozen long-lived hotfix branch (issue #709).
-    # From: PR #1501.
+    # What: mirrors build-tools.yml's own branches list
+    # Why: current_dev is active; v0.2.0 stays frozen
+    # From: PR #1501
     branches: [master, current_dev, v0.2.0]
-    # What: every entry below mirrors scripts/tracked/check-bats-path-filter-coverage.sh's own bats/shellspec dependency scan.
-    # Why: that script is the authoritative source for exactly which files
-    #   are real test dependencies; treat it (not this list) as truth, and
-    #   re-run it after touching this list.
+    # What: mirrors check-bats-path-filter-coverage dependencies
+    # Why: script is authoritative source for test file selection
     # From: Issue #1095 | PR #1501
     paths:
       - ".github/workflows/build-tools-smoke.yml"
@@ -109,14 +105,12 @@ on:
       - "deploy/secondary/docker-compose.yml"
       - "deploy/full-setup/docker-compose.yml"
   pull_request:
-    # What: mirrors build-tools.yml's own branches list.
-    # Why: current_dev is the active development branch; v0.2.0 stays
-    # listed as the frozen long-lived hotfix branch (issue #709).
-    # From: PR #1501.
+    # What: mirrors build-tools.yml's own branches list
+    # Why: current_dev is active; v0.2.0 stays frozen
+    # From: PR #1501
     branches: [master, current_dev, v0.2.0]
-    # What: identical to the push.paths list above.
-    # Why: pull_request and push must trigger on the same file set; kept as
-    #   two literal lists since GitHub Actions has no include mechanism.
+    # What: identical to push.paths list above
+    # Why: pull_request and push must share file set
     # From: Issue #1095 | PR #1501
     paths:
       - ".github/workflows/build-tools-smoke.yml"
@@ -208,17 +202,15 @@ on:
       - "deploy/secondary/docker-compose.yml"
       - "deploy/full-setup/docker-compose.yml"
 
-# What: grants only read access to repository contents.
-# Why: this job never writes to the repo or registry, so no broader scope
-# is requested (least privilege).
-# From: PR #1501.
+# What: grants only read access to repository contents
+# Why: job never writes, so applies least privilege
+# From: PR #1501
 permissions:
   contents: read
 
-# What: cancels a superseded run for the same workflow+ref.
-# Why: unlike build-tools.yml (which must finish once it starts publishing
-# tags), this read-only job has published nothing yet, so canceling is safe.
-# From: PR #1501.
+# What: cancels a superseded run for the same workflow+ref
+# Why: read-only job hasn't published, so canceling is safe
+# From: PR #1501
 concurrency:
   group: ${{ format('{0}-{1}', github.workflow, github.ref) }}
   cancel-in-progress: true
@@ -229,34 +221,28 @@ defaults:
 
 jobs:
   bats-shellspec-smoke:
-    # What: runs on the light tier, not heavy.
-    # Why: pulls an already-built, already-smoke-tested digest and runs two
-    # suites -- pure shell execution, fitting the light tier's contract (AG-CI-002).
-    # From: PR #1501.
+    # What: runs on the light tier, not heavy
+    # Why: pulls digest and runs suites per light tier contract
+    # From: PR #1501
     name: run bats/shellspec suites against the published build-tools image
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # What: sets a generous timeout well above real observed runtime.
-    # Why: real runs are dominated by the image pull (seconds on a warm
-    # runner) plus the two suites; this headroom covers a cold pull under
-    # concurrent load.
-    # From: PR #1501.
+    # What: sets a generous timeout well above observed runtime
+    # Why: headroom covers image pull and test suites under load
+    # From: PR #1501
     timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # What: sets up Docker Buildx for manifest inspection.
-      # Why: the image selector resolves a channel tag to its digest via
-      # `docker buildx imagetools inspect`, same as build-push.yml's validate-compose.
-      # From: PR #1501.
+      # What: sets up Docker Buildx for manifest inspection
+      # Why: resolves channel tag to digest via buildx imagetools
+      # From: PR #1501
       - name: Set up Docker Buildx for manifest inspection
         id: buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
-      # What: authenticates the published-image pull with GHCR_RETRY_USERNAME/PASSWORD.
-      # Why: avoids GHCR's much lower anonymous rate limit under concurrent
-      #   CI load, the same fix as validate-compose's identical env block
-      #   in build-push.yml.
+      # What: authenticates published-image pull with credentials
+      # Why: avoids GHCR's lower anonymous rate limit under CI load
       # From: PR #1501
       - name: Select published build-tools image
         id: select-image
@@ -267,11 +253,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          # What: sets BUILD_TOOLS_REQUIRE_PUBLISHED=true.
-          # Why: forces the strict pull-only path (no local Docker build
-          # fallback) on this light-tier job -- a local fallback build
-          # would be the very heavy-tier work this split exists to avoid.
-          # From: PR #1501.
+          # What: sets BUILD_TOOLS_REQUIRE_PUBLISHED=true
+          # Why: forces strict pull-only path for this light-tier job
+          # From: PR #1501
           image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
           case "$image" in
             *@sha256:*)
@@ -283,18 +267,16 @@ jobs:
           esac
           printf 'BUILD_TOOLS_IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
 
-      # What: mirrors build-tools.yml's identically-named step against the pulled published image.
-      # Why: this light-tier job must stay pull-only and never build locally.
+      # What: mirrors identically-named step against published image
+      # Why: light-tier job must stay pull-only, never build locally
       # From: PR #1501
       - name: Run Bats setup fixtures
         timeout-minutes: 20
         run: |
           set -euo pipefail
 
-          # What: runs with an init process as container PID 1.
-          # Why: without a PID-1 reaper, the lock-holder subprocess
-          # tests/bats/reserve_validation_subnet.bats kills becomes a
-          # permanent zombie that `kill -0` still reports as alive.
+          # What: runs with init process as container PID 1
+          # Why: without PID-1 reaper, zombie processes remain alive
           # From: Issue #1522 | PR #1523
           docker run --rm --init \
             --user "$(id -u):$(id -g)" \
@@ -303,17 +285,16 @@ jobs:
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash -lc 'set -euo pipefail; bats tests/bats'
 
-      # What: mirrors build-tools.yml's identically-named ShellSpec step.
-      # Why: keeps this light-tier job pull-only, consistent with the Bats
-      #   step above.
+      # What: mirrors identically-named ShellSpec step
+      # Why: keeps light-tier job pull-only and consistent
       # From: PR #1501
       - name: Run ShellSpec setup fixtures
         timeout-minutes: 20
         run: |
           set -euo pipefail
 
-          # What: uses the same init-as-PID-1 container setting as the Bats step above.
-          # Why: keeps both fixture runners on the same resource-lifecycle contract.
+          # What: uses init-as-PID-1 container like Bats step
+          # Why: keeps fixture runners on same lifecycle contract
           # From: Issue #1522 | PR #1523
           docker run --rm --init \
             --user "$(id -u):$(id -g)" \
