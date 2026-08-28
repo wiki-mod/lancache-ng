@@ -594,6 +594,11 @@ STUB
     export BUILD_SHA="$merge_sha"
     export PR_HEAD_SHA="$real_head_sha"
     export STAGING_POLL_TIMEOUT_SECONDS=0
+    # What: STAGING_POLL_INTERVAL_SECONDS=0, like sibling tests.
+    # Why: the real 15s default outlasts this test's 5s ceiling
+    #   below, so the loop always hits the error path.
+    # From: Issue #1095
+    export STAGING_POLL_INTERVAL_SECONDS=0
     export STAGING_POLL_HARD_CEILING_SECONDS=5
     export STAGING_POLL_CONGESTION_CHECK_INTERVAL_SECONDS=0
     export EXISTING_IMAGES=""
