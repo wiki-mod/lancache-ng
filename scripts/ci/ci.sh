@@ -1265,13 +1265,8 @@ readonly -a CI_STANDING_CHECKS=(
     scripts/tracked/check-logging-matrix.sh
 )
 
-# What: the repo-wide half of file-headers/file-headers-hosted's own
-#   composite action (6 scripts), kept as its own list, not merged
-#   into CI_STANDING_CHECKS.
-# Why: CI_STANDING_CHECKS already runs once per push/PR inside the
-#   validate-compose job (§72); merging these in would run these 6
-#   scripts a second time from file-headers/file-headers-hosted too,
-#   the exact duplicate-work waste this design exists to remove.
+# What: file-headers/-hosted's 6-script list, kept separate.
+# Why: merging into CI_STANDING_CHECKS would run them twice.
 # From: Issue #1683
 readonly -a CI_FILE_HEADER_CHECKS=(
     scripts/tracked/check-file-headers.sh
@@ -1282,8 +1277,8 @@ readonly -a CI_FILE_HEADER_CHECKS=(
     scripts/untracked/check-deny-short-sha.sh
 )
 
-# What: per-script env overrides a generic checks loop can't infer.
-# Why: chronology's warn/block split is event-scoped, not file-scoped.
+# What: per-script env override the check loop can't infer.
+# Why: chronology warn/block split is per-event, not per-file.
 # From: Issue #1683
 ci_standing_check_env() {
     local name="$1"
@@ -1299,10 +1294,8 @@ ci_standing_check_env() {
 }
 
 ci_run_check_list() {
-    # What: runs every script passed as an argument, sharing CI_FAILURES.
-    # Why: §72 -- one loop implementation, not one loop per caller. Takes
-    #   the list by value (caller expands "${ARR[@]}"), not a nameref by
-    #   name, so static analysis sees each caller's array actually used.
+    # What: runs each script argument, sharing collected failures.
+    # Why: one shared loop body instead of one loop per caller.
     # From: Issue #1683
     local script name
     local -a run_env
@@ -1331,10 +1324,7 @@ ci_cmd_file_header_checks() {
 
 ci_cmd_compose_healthchecks() {
     # What: the one script compose-healthchecks/-hosted both need.
-    # Why: §72 -- same function, same decision, either runner. No
-    #   build-tools container: a pure bash/grep scan of committed
-    #   compose files, same host-tool exception the removed composite
-    #   action itself already documented and relied on.
+    # Why: no build-tools container -- a plain bash/grep scan.
     # From: Issue #1683
     bash "$CI_REPO_ROOT/scripts/tracked/check-compose-healthchecks.sh"
 }
@@ -1388,9 +1378,8 @@ ci_cmd_diff_checks() {
     local base_sha="${1:?ci.sh diff-checks: base sha is required}"
     local base_ref="${2:?ci.sh diff-checks: base ref is required}"
 
-    # What: both scripts `git fetch` the base ref; needs a writable
-    #   .git, so this requires a writable checkout, not a :ro mount.
-    # Why: matches the -v ...:ro + cp -a pattern the caller must use.
+    # What: both scripts run `git fetch`, so need a writable tree.
+    # Why: matches the caller's :ro-mount-then-copy convention.
     # From: Issue #1683
     local start_dir
     start_dir="$(pwd)"

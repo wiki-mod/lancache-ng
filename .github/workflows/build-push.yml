@@ -229,7 +229,7 @@ jobs:
           build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
           printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
       - name: Run file-headers repo-wide checks (ci.sh file-header-checks)
-        # What: 6 formerly separate composite-action steps, now one call.
+        # What: 6 composite-action steps folded into one call.
         # Why: same 6 scripts, delegated not duplicated (#72).
         # From: Issue #1683
         env:
@@ -245,9 +245,9 @@ jobs:
             timeout --kill-after=30 --signal=KILL 300 \
             bash scripts/ci/ci.sh file-header-checks
       - name: Run PR-diff-scoped header/chronology checks (ci.sh diff-checks)
-        # What: SPDX + diff-scoped chronology, now one shared call site.
-        # Why: was duplicated verbatim across this job and its hosted twin.
-        # From: Issue #1510 | PR #1511 | Issue #1683
+        # What: SPDX + diff-scoped chronology, one shared call.
+        # Why: was duplicated verbatim across both runner jobs.
+        # From: Issue #1683
         if: github.event_name == 'pull_request'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -285,9 +285,9 @@ jobs:
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - uses: *checkout_centraliced_versioning # v7.0.1
-      # What: ci.sh call shared with compose-healthchecks-hosted below.
+      # What: ci.sh call shared with the hosted job below.
       # Why: §72 -- same function, same decision, either runner.
-      # From: Issue #1095 | Issue #1683
+      # From: Issue #1683
       - name: Run compose-healthchecks check (ci.sh compose-healthchecks)
         run: bash scripts/ci/ci.sh compose-healthchecks
 
@@ -601,8 +601,8 @@ jobs:
             bash scripts/ci/ci.sh file-header-checks
       - name: Run PR-diff-scoped header/chronology checks (ci.sh diff-checks)
         # What: mirrors the self-hosted file-headers job's step exactly.
-        # Why: keeps parity: same PR-diff header/chronology check either way.
-        # From: Issue #1510 | PR #1511 | Issue #1683
+        # Why: keeps parity: same header/chronology check either way.
+        # From: Issue #1683
         if: github.event_name == 'pull_request'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -634,7 +634,7 @@ jobs:
           echo "::notice::Running compose-healthchecks check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
       # What: same ci.sh call as compose-healthchecks.
       # Why: §72 -- same function, same decision, either runner.
-      # From: PR #1249 | Issue #1683
+      # From: Issue #1683
       - name: Run compose-healthchecks check (ci.sh compose-healthchecks)
         run: bash scripts/ci/ci.sh compose-healthchecks
 
