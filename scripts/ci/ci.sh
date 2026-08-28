@@ -4,7 +4,7 @@
 #
 # What: single authoritative CI 2.0 implementation (ci.sh).
 # Why: replaces build-push.yml's per-runner-type duplication.
- docs/ci-2.0-architecture.md$| docs/ci-2.0-architecture.md
+# From: Issue #1683
 
 # ============================================================
 # CONSTANTS / EXIT HANDLING

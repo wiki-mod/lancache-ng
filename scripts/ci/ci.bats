@@ -4,7 +4,7 @@
 #
 # What: regression suite for scripts/ci/ci.sh (CI 2.0 engine).
 # Why: §66 wants one suite covering every domain.
- docs/ci-2.0-architecture.md$| docs/ci-2.0-architecture.md
+# From: Issue #1683
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
