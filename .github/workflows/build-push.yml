@@ -5852,9 +5852,12 @@ jobs:
       # What: fails when db-status is undetermined, scan ran.
       # Why: an unknown status must never be read as a clean scan.
       # From: Issue #1095 | PR #1735
+      # What (issue #1710/#1711/etc.): no longer pull_request-only, and now
+      #   marked always() -- see the trivy-finding step below for why the
+      #   event-type and always() changes both belong here too.
       - name: Require a determined Trivy DB status (amd64)
         if: >-
-          github.event_name == 'pull_request' && steps.build.outcome == 'success' &&
+          always() && steps.build.outcome == 'success' &&
           steps.trivy-scan-pushed.outcome != 'skipped' &&
           steps.trivy-scan-pushed.outputs.db-status != 'unavailable' &&
           steps.trivy-scan-pushed.outputs.db-status != 'available'
@@ -5868,7 +5871,7 @@ jobs:
       # From: Issue #1095
       - name: Report Trivy DB-unavailable status (amd64, separate issue)
         if: >-
-          github.event_name == 'pull_request' && steps.build.outcome == 'success' &&
+          always() && steps.build.outcome == 'success' &&
           (steps.trivy-scan-pushed.outputs.db-status == 'unavailable' ||
            steps.trivy-scan-pushed.outputs.db-status == 'available')
         uses: ./.github/actions/nightly-status
@@ -5886,7 +5889,7 @@ jobs:
       # From: Issue #1095 | PR #1735
       - name: Report Trivy scan-error status (amd64, separate issue)
         if: >-
-          github.event_name == 'pull_request' && steps.build.outcome == 'success' &&
+          always() && steps.build.outcome == 'success' &&
           steps.trivy-scan-pushed.outputs.db-status == 'available'
         uses: ./.github/actions/nightly-status
         with:
@@ -5902,9 +5905,25 @@ jobs:
       # What: reports the scan outcome as a self-closing issue.
       # Why: runs only for an available DB with an actual report.
       # From: Issue #1095 | PR #1735
-      - name: Report Trivy PR-scan status (non-blocking, self-closing issue)
+      # What (issue #1710/#1711/#1712/#1713/#1714/#1715/#1720-#1731):
+      #   dropped the `github.event_name == 'pull_request'` restriction
+      #   (replaced by `always()`, needed because push/schedule/
+      #   workflow_dispatch runs do NOT set continue-on-error on the
+      #   scan step above, so a genuine push-triggered failure would
+      #   otherwise skip this step via the implicit success() gate).
+      # Why: this standing issue's own body promises "closed automatically
+      #   on the next success", but with the old pull_request-only gate no
+      #   push/schedule/workflow_dispatch run against current_dev or master
+      #   -- i.e. no run of the actually-canonical branch -- could EVER
+      #   produce that closing signal. Only a pull_request run touching
+      #   this exact service could close it, so a shared standing issue
+      #   could be kept open indefinitely by any single stale, unrelated,
+      #   not-yet-rebased PR branch re-reporting its own (already-fixed
+      #   upstream) failure, even while current_dev itself was fully
+      #   healthy and had no way to prove it via this mechanism.
+      - name: Report Trivy scan status (non-blocking, self-closing issue)
         if: >-
-          github.event_name == 'pull_request' && steps.build.outcome == 'success' &&
+          always() && steps.build.outcome == 'success' &&
           steps.trivy-scan-pushed.outputs.db-status == 'available' &&
           steps.trivy-scan-pushed.outputs.scan-error != 'true'
         uses: ./.github/actions/nightly-status
@@ -6490,9 +6509,12 @@ jobs:
       # What: fails when db-status is undetermined, scan ran.
       # Why: an unknown status must never be read as a clean scan.
       # From: Issue #1095 | PR #1735
+      # What (issue #1710/#1711/etc.): no longer pull_request-only, and now
+      #   marked always() -- see the trivy-finding step below for why the
+      #   event-type and always() changes both belong here too.
       - name: Require a determined Trivy DB status (arm64)
         if: >-
-          github.event_name == 'pull_request' && steps.build.outcome == 'success' &&
+          always() && steps.build.outcome == 'success' &&
           steps.trivy-scan-pushed.outcome != 'skipped' &&
           steps.trivy-scan-pushed.outputs.db-status != 'unavailable' &&
           steps.trivy-scan-pushed.outputs.db-status != 'available'
@@ -6506,7 +6528,7 @@ jobs:
       # From: Issue #1095
       - name: Report Trivy DB-unavailable status (arm64, separate issue)
         if: >-
-          github.event_name == 'pull_request' && steps.build.outcome == 'success' &&
+          always() && steps.build.outcome == 'success' &&
           (steps.trivy-scan-pushed.outputs.db-status == 'unavailable' ||
            steps.trivy-scan-pushed.outputs.db-status == 'available')
         uses: ./.github/actions/nightly-status
@@ -6524,7 +6546,7 @@ jobs:
       # From: Issue #1095 | PR #1735
       - name: Report Trivy scan-error status (arm64, separate issue)
         if: >-
-          github.event_name == 'pull_request' && steps.build.outcome == 'success' &&
+          always() && steps.build.outcome == 'success' &&
           steps.trivy-scan-pushed.outputs.db-status == 'available'
         uses: ./.github/actions/nightly-status
         with:
@@ -6540,9 +6562,25 @@ jobs:
       # What: reports the scan outcome as a self-closing issue.
       # Why: runs only for an available DB with an actual report.
       # From: Issue #1095 | PR #1735
-      - name: Report Trivy PR-scan status (non-blocking, self-closing issue)
+      # What (issue #1710/#1711/#1712/#1713/#1714/#1715/#1720-#1731):
+      #   dropped the `github.event_name == 'pull_request'` restriction
+      #   (replaced by `always()`, needed because push/schedule/
+      #   workflow_dispatch runs do NOT set continue-on-error on the
+      #   scan step above, so a genuine push-triggered failure would
+      #   otherwise skip this step via the implicit success() gate).
+      # Why: this standing issue's own body promises "closed automatically
+      #   on the next success", but with the old pull_request-only gate no
+      #   push/schedule/workflow_dispatch run against current_dev or master
+      #   -- i.e. no run of the actually-canonical branch -- could EVER
+      #   produce that closing signal. Only a pull_request run touching
+      #   this exact service could close it, so a shared standing issue
+      #   could be kept open indefinitely by any single stale, unrelated,
+      #   not-yet-rebased PR branch re-reporting its own (already-fixed
+      #   upstream) failure, even while current_dev itself was fully
+      #   healthy and had no way to prove it via this mechanism.
+      - name: Report Trivy scan status (non-blocking, self-closing issue)
         if: >-
-          github.event_name == 'pull_request' && steps.build.outcome == 'success' &&
+          always() && steps.build.outcome == 'success' &&
           steps.trivy-scan-pushed.outputs.db-status == 'available' &&
           steps.trivy-scan-pushed.outputs.scan-error != 'true'
         uses: ./.github/actions/nightly-status
