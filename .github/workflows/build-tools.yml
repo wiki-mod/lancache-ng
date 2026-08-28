@@ -503,11 +503,10 @@ jobs:
       - name: Report Trivy scan-error status (amd64, separate issue)
         if: >-
           github.event_name == 'pull_request' &&
-          steps.trivy-scan.outputs.db-status == 'available' &&
-          steps.trivy-scan.outputs.scan-error == 'true'
+          steps.trivy-scan.outputs.db-status == 'available'
         uses: ./.github/actions/nightly-status
         with:
-          outcome: failure
+          outcome: ${{ steps.trivy-scan.outputs.scan-error == 'true' && 'failure' || 'success' }}
           label: trivy-scan-error-local-build-tools-amd64
           scope: >-
             Trivy scan of tools/build-tools (amd64) failed before
@@ -800,11 +799,10 @@ jobs:
       - name: Report Trivy scan-error status (arm64, separate issue)
         if: >-
           github.event_name == 'pull_request' &&
-          steps.trivy-scan.outputs.db-status == 'available' &&
-          steps.trivy-scan.outputs.scan-error == 'true'
+          steps.trivy-scan.outputs.db-status == 'available'
         uses: ./.github/actions/nightly-status
         with:
-          outcome: failure
+          outcome: ${{ steps.trivy-scan.outputs.scan-error == 'true' && 'failure' || 'success' }}
           label: trivy-scan-error-local-build-tools-arm64
           scope: >-
             Trivy scan of tools/build-tools (arm64) failed before

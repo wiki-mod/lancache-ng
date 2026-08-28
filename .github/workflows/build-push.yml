@@ -5887,11 +5887,10 @@ jobs:
       - name: Report Trivy scan-error status (amd64, separate issue)
         if: >-
           github.event_name == 'pull_request' && steps.build.outcome == 'success' &&
-          steps.trivy-scan-pushed.outputs.db-status == 'available' &&
-          steps.trivy-scan-pushed.outputs.scan-error == 'true'
+          steps.trivy-scan-pushed.outputs.db-status == 'available'
         uses: ./.github/actions/nightly-status
         with:
-          outcome: failure
+          outcome: ${{ steps.trivy-scan-pushed.outputs.scan-error == 'true' && 'failure' || 'success' }}
           label: trivy-scan-error-buildpush-${{ matrix.service }}-amd64
           scope: >-
             Trivy scan of ${{ matrix.service }} (amd64) failed before
@@ -6526,11 +6525,10 @@ jobs:
       - name: Report Trivy scan-error status (arm64, separate issue)
         if: >-
           github.event_name == 'pull_request' && steps.build.outcome == 'success' &&
-          steps.trivy-scan-pushed.outputs.db-status == 'available' &&
-          steps.trivy-scan-pushed.outputs.scan-error == 'true'
+          steps.trivy-scan-pushed.outputs.db-status == 'available'
         uses: ./.github/actions/nightly-status
         with:
-          outcome: failure
+          outcome: ${{ steps.trivy-scan-pushed.outputs.scan-error == 'true' && 'failure' || 'success' }}
           label: trivy-scan-error-buildpush-${{ matrix.service }}-arm64
           scope: >-
             Trivy scan of ${{ matrix.service }} (arm64) failed before
