@@ -332,16 +332,6 @@ done
 # What: rejects expression syntax in an action description: field.
 # Why: description: fields are template-evaluated, breaking jobs.
 # From: Issue #1095 | PR #1719
-#
-# Scoped to composite action manifests only, not workflow files: the
-# confirmed failure mode is the action-manifest loader (a literal
-# ${{ github.action_path }} left as documentation text in an input's
-# description: failed every build/build-arm64 job with "Unrecognized
-# named-value: 'github'"). Workflow-level description: fields are
-# validated by a different parser and are deliberately not claimed
-# here without their own evidence. Block-scalar aware, so a folded
-# (>-) or literal (|) multi-line description body is scanned in full,
-# which is exactly the shape the real incident used.
 for action_file in "${local_action_files[@]}"; do
   description_expression_hits="$(
     awk '
