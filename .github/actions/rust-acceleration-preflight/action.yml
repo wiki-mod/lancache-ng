@@ -87,14 +87,14 @@ runs:
           exit 0
         fi
 
-        # What: pulls the tools image outside BuildKit, via the retry wrapper.
-        # Why: a BuildKit layer could mask an infra failure; repeats per leg.
+        # What: pull tools image via retry wrapper outside BuildKit.
+        # Why: BuildKit layer can mask infra failures; runs per leg.
         # From: Issue #822 | PR #833
         source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
         ghcr_retry ghcr.io "${GHCR_RETRY_USERNAME:-}" "${GHCR_RETRY_PASSWORD:-}" -- docker pull --platform "$BUILD_PLATFORM" "$BUILD_TOOLS_IMAGE" >/dev/null
 
-        # What: docker run needs its own SIGKILL timeout; 600s here, not 300s.
-        # Why: full reasoning + live verification on the linked issue.
+        # What: docker run has 600s timeout vs BuildKit's 300s limit.
+        # Why: preflight compile may exceed BuildKit layer timeout.
         # From: Issue #1095
         docker run --rm -i --platform "$BUILD_PLATFORM" --network "$BUILD_NETWORK" \
           "${mount_args[@]}" \
@@ -104,8 +104,8 @@ runs:
             set -euo pipefail
 
             preflight_dir="$(mktemp -d)"
-            # What: bounds distcc-pump --shutdown with its own short timeout.
-            # Why: --shutdown can hang; a failed one must not fail the build.
+            # What: bounds distcc-pump shutdown with a short timeout.
+            # Why: shutdown can hang; failed one must not fail build.
             # From: Issue #1590
             shutdown_distcc_pump() {
               timeout --kill-after=5 --signal=KILL 10 distcc-pump --shutdown >/dev/null 2>&1 || true
@@ -118,8 +118,8 @@ runs:
             }
             trap cleanup EXIT
 
-            # What: fails closed on a warning/error/failure/panic diagnostic.
-            # Why: a silently-degraded acceleration tool must not pass as clean.
+            # What: fail closed on any warning/error/failure diagnostic.
+            # Why: degraded tool must not pass as healthy.
             # From: PR #441
             scan_log() {
               local log_file="$1"
@@ -129,20 +129,18 @@ runs:
               fi
             }
 
-            # What: strips distcc's known-benign connect-failure diagnostic.
-            # Why: full reasoning + evidence on the linked issue.
+            # What: strip distcc benign connect-failure diagnostics.
+            # Why: one bad host must not fail whole compile.
             # From: Issue #1095
             scan_distcc_compile_log() {
               local log_file="$1"
               local host_count="$2"
-              # What: benign_pattern is anchored (^...$), not a prefix match.
-              # Why: a real diagnostic sharing this line must still fail closed.
+              # What: benign_pattern anchored (^...$) not prefix match.
+              # Why: real diagnostic matching must still fail closed.
               # From: Issue #1633
               local benign_pattern='^distcc\[[0-9]+\] (ERROR|WARNING): nonblocking connect to [0-9]{1,3}(\.[0-9]{1,3}){3}:[0-9]+ failed: [A-Za-z0-9 ,.()'\''-]+$'
-              # What: also tolerates one host hanging (accepts, never answers).
-              # Why: same "one host bad, others fine" case as the pattern above,
-              #   just a timeout instead of a refused connect. The token is the
-              #   literal "DONE" observed live, so a different token still fails.
+              # What: tolerate one host hanging (accept, never answers).
+              # Why: one failed host doesn't fail whole compile.
               # From: Issue #1095
               benign_pattern+='|^distcc\[[0-9]+\] \(dcc_select_for_read\) ERROR: IO timeout$'
               benign_pattern+='|^distcc\[[0-9]+\] \(dcc_r_token_int\) ERROR: read failed while waiting for token "DONE"$'
@@ -172,8 +170,8 @@ runs:
               echo "[INFO] Tolerated $tolerated_count distcc per-host connectivity diagnostic(s) ($host_count hosts configured; every suspicious line fully matched the known benign shape, so the compile succeeded via a live host anyway)."
             }
 
-            # What: runs a command, logs it, then scans the log for diagnostics.
-            # Why: every call needs this fail-closed/log/scan step.
+            # What: run command, log output, scan for forbidden errors.
+            # Why: every call needs fail-closed/log/scan pattern.
             # From: PR #441
             run_logged() {
               local log_file="$1"
@@ -187,10 +185,8 @@ runs:
               scan_log "$log_file"
             }
 
-            # What: like run_logged, but scans via scan_distcc_compile_log.
-            # Why: a distcc-routed command (ccache's CCACHE_PREFIX=distcc
-            #   probes) can emit the same tolerable per-host diagnostics
-            #   scan_log would wrongly treat as fatal.
+            # What: run distcc compile and scan with relaxed rules.
+            # Why: distcc per-host errors must tolerate single failures.
             # From: Issue #1095
             run_logged_distcc() {
               local log_file="$1" host_count="$2"
@@ -204,8 +200,8 @@ runs:
               scan_distcc_compile_log "$log_file" "$host_count"
             }
 
-            # What: fails closed unless sccache-dist has a connected scheduler.
-            # Why: a misconfigured dist client can start unconnected.
+            # What: fail closed unless sccache-dist has scheduler.
+            # Why: misconfigured dist client starts unconnected.
             # From: PR #441
             require_sccache_dist_connected() {
               local status_file="$1"
@@ -216,8 +212,8 @@ runs:
               fi
             }
 
-            # What: fails closed unless sccache shows compile+cache activity.
-            # Why: a "successful" compile never touching Redis masks a break.
+            # What: fail closed unless sccache shows activity.
+            # Why: bypass to native compile hides Redis/sccache breaks.
             # From: PR #441
             require_sccache_activity() {
               local stats_file="$1"
@@ -267,8 +263,8 @@ runs:
               fi
             }
 
-            # What: fails closed unless sccache-dist ran a real dist compile.
-            # Why: a silent local-only fallback would pass without using dist.
+            # What: fail closed unless sccache-dist actually distributed.
+            # Why: fallback to native compile would hide dist failures.
             # From: PR #441
             require_sccache_dist_activity() {
               local stats_file="$1"
@@ -329,8 +325,8 @@ runs:
             fi
 
             if [ -s /run/lancache/distcc-potential-hosts ]; then
-              # What: locates the cc/gcc/c++/g++ distcc wrapper directory.
-              # Why: two valid, image-dependent layouts exist; else disabled.
+              # What: locate cc/gcc/c++/g++ distcc wrapper directory.
+              # Why: layouts vary; if not found, distcc disabled.
               # From: Issue #1590
               wrapper_dir=""
               for candidate in /usr/local/lib/distcc /usr/lib/distcc; do
@@ -348,8 +344,8 @@ runs:
 
               printf '%s\n' 'int main(void) { return 0; }' > "$preflight_dir/distcc-probe.c"
 
-              # What: splits hosts into pump-capable vs plain distcc hosts.
-              # Why: pump vs plain distcc dispatch need different list shapes.
+              # What: split hosts into pump-capable vs plain distcc.
+              # Why: pump and plain dispatch use different formats.
               # From: Issue #1590
               distcc_hosts=""
               distcc_pump_hosts=""
@@ -374,19 +370,15 @@ runs:
               fi
               distcc_hosts_without_pump="${distcc_hosts_without_pump:-$distcc_hosts}"
 
-              # What: checks for a real host token after pump's own flag.
-              # Why: pump exports that flag even with zero live hosts found;
-              #   delegates to distcc_pump_real_host_count() below so the
-              #   --* exclusion rule can't drift between the two callers.
+              # What: check real host token after pump's own flag token.
+              # Why: flag exists even when no hosts found; consistent count.
               # From: PR #613 | Issue #1095
               distcc_pump_published_hosts() {
                 [ "$(distcc_pump_real_host_count "$1")" -gt 0 ]
               }
 
-              # What: counts only real host tokens, excluding --* flags.
-              # Why: a bare token count inflates host_count past 1 when a
-              #   flag like --randomize is present, wrongly relaxing the
-              #   single-host fail-closed scan branch.
+              # What: count only real hosts, exclude --* flag tokens.
+              # Why: flags inflate count and relax single-host checks.
               # From: Issue #1095
               distcc_pump_real_host_count() {
                 distcc_pump_count=0
@@ -430,8 +422,8 @@ runs:
                   unset pump_started INCLUDE_SERVER_PORT INCLUDE_SERVER_PID DISTCC_POTENTIAL_HOSTS DISTCC_HOSTS
                 fi
 
-                # What: uses distcc_hosts_without_pump, not pump-published ones.
-                # Why: that suffix only matters to a running pump server.
+                # What: use hosts without pump, not pump-filtered list.
+                # Why: suffix only matters to pump server, not plain.
                 # From: PR #613
                 final_distcc_hosts="$distcc_hosts_without_pump"
                 if [ -z "$final_distcc_hosts" ]; then
@@ -446,9 +438,8 @@ runs:
               if [ "$distcc_enabled" = "1" ]; then
                 export DISTCC_HOSTS="$final_distcc_hosts"
                 distcc_log="$preflight_dir/distcc.log"
-                # What: reuses distcc_pump_real_host_count() for this list too.
-                # Why: DISTCC_HOSTS can carry flag tokens (e.g. --randomize)
-                #   here just like the pump-published list does.
+                # What: reuse distcc_pump_real_host_count for plain hosts.
+                # Why: DISTCC_HOSTS carries flags like pump-published list.
                 # From: Issue #1095
                 final_distcc_host_count=$(distcc_pump_real_host_count "$final_distcc_hosts")
                 if cc -c "$preflight_dir/distcc-probe.c" -o "$preflight_dir/distcc.o" >"$distcc_log" 2>&1; then
@@ -471,14 +462,14 @@ runs:
                 echo "[INFO] plain cc fallback completed."
               fi
 
-              # What: validates dns/ui/watchdog ccache-over-distcc via Redis write+read.
-              # Why: proves the round trip, not just local-disk caching.
+              # What: validate ccache-over-distcc with Redis round trip.
+              # Why: proves remote storage; local-disk caching insufficient.
               # From: Issue #887
               if [ -s /run/lancache/ccache-redis-url ] && [ "$distcc_enabled" = "1" ] && [ -n "${DISTCC_HOSTS:-}" ]; then
                 real_cc="$(PATH="$original_path" command -v cc)"
                 ccache_redis_endpoint="$(cat /run/lancache/ccache-redis-url)"
-                # What: normalizes a schemeless redis endpoint to redis://.
-                # Why: ccache rejects a bare host:port; matches dns/ui/watchdog rule.
+                # What: normalize redis endpoint to redis:// scheme.
+                # Why: ccache rejects bare host:port; matches services.
                 # From: Issue #887
                 case "$ccache_redis_endpoint" in
                   redis://*|redis+unix:*) ;;
@@ -487,8 +478,8 @@ runs:
                 export CCACHE_REMOTE_STORAGE="$ccache_redis_endpoint"
                 export CCACHE_PREFIX=distcc
                 export CCACHE_COMPILERCHECK=content
-                # What: pins CCACHE_BASEDIR so the probe's key stays stable.
-                # Why: full reasoning + verification on the linked issue.
+                # What: pin CCACHE_BASEDIR so probe key stays stable.
+                # Why: stable key enables cross-run Redis hits on warm run.
                 # From: Issue #1095
                 export CCACHE_BASEDIR="$preflight_dir"
                 printf '%s\n' 'int main(void) { return 0; }' > "$preflight_dir/ccache-probe.c"
@@ -501,9 +492,9 @@ runs:
                 run_logged_distcc "$cold_log" "$final_distcc_host_count" env CCACHE_DIR="$ccache_dir_cold" ccache "$real_cc" -c ccache-probe.c -o ccache-cold.o
                 cold_stats="$preflight_dir/ccache-cold-stats.log"
                 CCACHE_DIR="$ccache_dir_cold" ccache --print-stats > "$cold_stats"
-                # What: a cache hit is also valid proof (not just a write).
-                # Why: stable cross-run key; after run one, it's always a hit.
-                # From: Issue #1095 (G15)
+                # What: cache hit also proves redis remote storage works.
+                # Why: stable cross-run key allows hit on warm probe run.
+                # From: Issue #1095
                 if ! grep -qE '^(remote_storage_write|direct_cache_hit)[[:space:]]+[1-9]' "$cold_stats"; then
                   echo "[ERROR] ccache neither wrote to nor hit Redis remote storage on the cold compile." >&2
                   cat "$cold_stats" >&2

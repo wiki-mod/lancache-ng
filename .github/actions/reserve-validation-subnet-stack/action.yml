@@ -1,10 +1,8 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: single source for the reserve-lock/start-stack step shared by every
-# full-setup validation caller; writes VALIDATION_*/COMPOSE_PROJECT_NAME/
-# VALIDATION_UI_PORT/VALIDATION_LOCK_HOLDER_PID to $GITHUB_ENV.
-# Why: the callers' copies of this step had silently drifted before extraction.
+# What: Centralized reserve/start-stack for validation caller.
+# Why: Caller copies had silently drifted before extraction.
 # From: Issue #1014 | PR #1112
 name: Reserve validation subnet and start the stack
 description: >-
@@ -93,9 +91,8 @@ runs:
         lock_root="$RESERVE_LOCK_ROOT"
         max_attempts="$RESERVE_MAX_ATTEMPTS"
 
-        # What: checks the candidate subnet against host-level network state, not just Docker's.
-        # Why: a non-Docker route/interface (another NIC, a VPN, a foreign bridge) is invisible
-        # to `docker network ls` but the kernel still refuses an overlapping bridge for it.
+        # What: Check subnet against host-level network state.
+        # Why: Non-Docker interfaces (VPN/bridge) invisible to docker.
         # From: Issue #820 | PR #821
 
         compose_args=(-f docker-compose.yml)
@@ -104,9 +101,8 @@ runs:
           compose_args+=(-f "$COMPOSE_OVERRIDE_FILE")
         fi
 
-        # What: pulls images via the shared retry wrapper before reserving a scarce subnet slot.
-        # Why: registry reads are a transient external operation (AG-CI-013); anonymous callers
-        # still get backoff/retry, credentials just add a re-login between attempts.
+        # What: Pull images via retry wrapper before slot reservation.
+        # Why: Retries; adds re-login when credentials are set.
         # From: PR #1112
         # shellcheck source=scripts/lib/ghcr-retry.sh
         source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
@@ -126,15 +122,13 @@ runs:
           slot="$(printf '%s\n' "$reservation" | sed -n 's/^slot=//p')"
           candidate_pid="$(printf '%s\n' "$reservation" | sed -n 's/^holder_pid=//p')"
 
-          # What: re-derives the full VALIDATION_* set from THIS attempt's own slot every loop.
-          # Why: a value derived only once, from attempt 1, would stay wrong on a retry
-          # that loses the lock race and lands on a different slot.
+          # What: Re-derive VALIDATION_* from current attempt's slot.
+          # Why: Value from attempt 1 stays wrong on lock-race retry.
           # From: PR #1112
           validation_subnet_export_env "$slot"
 
-          # What: writes this attempt's identifiers on every loop pass, not just after success.
-          # Why: a non-retryable `docker compose up` failure used to leave COMPOSE_PROJECT_NAME
-          # unset for the always()-teardown step, stranding that attempt's network.
+          # What: Write attempt identifiers on every loop pass.
+          # Why: Compose failure left COMPOSE_PROJECT_NAME unset.
           # From: Issue #932 | PR #933
           {
             echo "COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME"
