@@ -61,6 +61,12 @@ outputs:
       Why: three-valued; empty here means "unknown", never recovery.
       From: Issue #1095
     value: ${{ steps.scan.outputs.db-status }}
+  scan-error:
+    description: |
+      What: forwards trivy-scan-retry's own scan-error output.
+      Why: a pre-report error must reach this action's callers.
+      From: Issue #1095
+    value: ${{ steps.scan.outputs.scan-error }}
 
 runs:
   using: composite
