@@ -2,41 +2,14 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Enforces issue #801: every pinned GitHub Action referenced from any
-# .github/workflows/*.yml file (and every local composite action under
-# .github/actions/) must declare a Node runtime GitHub Actions still
-# considers current in its own action.yml/action.yaml. This exists because
-# issue #799 was found reactively -- a CI log deprecation warning about
-# actions/upload-artifact@834a144... (v4.3.6) still declaring `runs.using:
-# node20`, only fixed one instance at a time by PR #800 -- and the same
-# class of problem can recur for any of this project's many other pinned
-# actions, now or after a future re-pin. This script scans ALL of them,
-# proactively, on every run.
+# What: enforces every pinned Action declares a current runtime.
+# Why: issue #799 was found reactively, one pin at a time.
+# From: Issue #1095 | PR #1734
 #
-# It also enforces two centralization invariants over the same scan
-# scope:
-#   1. one WORKFLOW file must not repeat the exact same third-party `uses:`
-#      literal more than once -- a YAML anchor/alias must carry that one
-#      maintenance point instead of N raw copies. Deliberately scoped to
-#      workflow files only (is_workflow_file() below): a composite
-#      action.yml cannot use an anchor at all (confirmed live, F-24 -- see
-#      that check's own comment), so duplication there is the correct shape.
-#   2. one third-party action key (`owner/repo[/subpath]`) must not drift to
-#      multiple pinned refs across .github/** -- that is exactly the
-#      "same dependency, different versions, nobody sees it anymore" failure
-#      mode this guard is meant to stop. Applies to workflow and composite
-#      action files, since it has nothing to do with anchors.
-#   3. no composite action.yml `description:` field may contain GitHub
-#      Actions expression syntax. GitHub's manifest template validator
-#      evaluates a `description:` body even when it is pure documentation
-#      prose, so a literal `${{ github.action_path }}` written as an
-#      explanation fails the ENTIRE action with "Unrecognized named-value:
-#      'github'" -- which broke every build/build-arm64 job across all
-#      services. The class recurred immediately:
-#      the first fix attempt reintroduced it while explaining the bug in
-#      that same description, producing "An expression was expected". A
-#      YAML `#` comment is NOT template-evaluated and is the safe place to
-#      show the real syntax.
+# It also enforces two centralization invariants and a description-field
+# expression-syntax check over the same scan scope -- see is_workflow_file(),
+# the duplicate-ref check, the ref-drift check, and the description-field
+# check below, each with its own What/Why/From comment at its point of use.
 #
 # Local composite actions (`uses: ./.github/actions/<name>`) are resolved by
 # reading their action.yml/action.yaml straight off disk -- no GitHub API
