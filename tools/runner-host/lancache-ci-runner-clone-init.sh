@@ -160,7 +160,11 @@ own_primary_ipv4() {
     # .80 (see the long comment above). This function must always exit 0;
     # "could not determine the IP" is communicated via an empty stdout, not
     # a non-zero exit code.
-    { ip -4 route get 1.1.1.1 2>/dev/null || true; } | grep -oE 'src [0-9.]+' | head -n1 | awk '{print $2}' || true
+    local route_output matches first_match
+    route_output="$(ip -4 route get 1.1.1.1 2>/dev/null || true)"
+    matches="$(grep -oE 'src [0-9.]+' <<<"$route_output" || true)"
+    first_match="${matches%%$'\n'*}"
+    printf '%s\n' "${first_match#src }"
 }
 
 # What: Return the last octet of own_primary_ipv4 as a second, independent
@@ -1257,7 +1261,7 @@ cmd_full_reset_clean() {
 # purge_pve_package_list() is the single source of truth both modes below
 # use, so `check`'s simulation and `clean`'s real run can never drift apart.
 purge_pve_package_list() {
-    echo "corosync libcorosync-common4 libproxmox-acme-perl libproxmox-acme-plugins libproxmox-backup-qemu0 libproxmox-rs-perl libpve-access-control libpve-apiclient-perl libpve-cluster-api-perl libpve-cluster-perl libpve-common-perl libpve-guest-common-perl libpve-http-server-perl libpve-network-api-perl libpve-network-perl libpve-notify-perl libpve-rs-perl libpve-storage-perl proxmox-backup-client proxmox-backup-file-restore proxmox-backup-restore-image proxmox-firewall proxmox-mail-forward proxmox-mini-journalreader proxmox-offline-mirror-docs proxmox-offline-mirror-helper proxmox-termproxy proxmox-ve proxmox-websocket-tunnel proxmox-widget-toolkit pve-cluster pve-container pve-docs pve-esxi-import-tools pve-firewall pve-ha-manager pve-i18n pve-lxc-syscalld pve-manager pve-nvidia-vgpu-helper pve-qemu-kvm pve-xtermjs pve-yew-mobile-gui pve-yew-mobile-i18n proxmox-enterprise-support-keyring"
+    printf '%s\n' corosync libcorosync-common4 libproxmox-acme-perl libproxmox-acme-plugins libproxmox-backup-qemu0 libproxmox-rs-perl libpve-access-control libpve-apiclient-perl libpve-cluster-api-perl libpve-cluster-perl libpve-common-perl libpve-guest-common-perl libpve-http-server-perl libpve-network-api-perl libpve-network-perl libpve-notify-perl libpve-rs-perl libpve-storage-perl proxmox-backup-client proxmox-backup-file-restore proxmox-backup-restore-image proxmox-firewall proxmox-mail-forward proxmox-mini-journalreader proxmox-offline-mirror-docs proxmox-offline-mirror-helper proxmox-termproxy proxmox-ve proxmox-websocket-tunnel proxmox-widget-toolkit pve-cluster pve-container pve-docs pve-esxi-import-tools pve-firewall pve-ha-manager pve-i18n pve-lxc-syscalld pve-manager pve-nvidia-vgpu-helper pve-qemu-kvm pve-xtermjs pve-yew-mobile-gui pve-yew-mobile-i18n proxmox-enterprise-support-keyring
 }
 
 # Names of the actively-running services this package set owns, stopped
@@ -1266,7 +1270,7 @@ purge_pve_package_list() {
 # proxmox-firewall came back "active" on their own between two individual
 # `systemctl stop` calls -- apt's removal itself is what reliably wins).
 purge_pve_service_list() {
-    echo "pveproxy pvedaemon pvestatd pvescheduler spiceproxy pve-ha-crm pve-ha-lrm pve-firewall proxmox-firewall pve-lxc-syscalld qmeventd pve-cluster corosync pvefw-logger proxmox-firewall.timer watchdog-mux"
+    printf '%s\n' pveproxy pvedaemon pvestatd pvescheduler spiceproxy pve-ha-crm pve-ha-lrm pve-firewall proxmox-firewall pve-lxc-syscalld qmeventd pve-cluster corosync pvefw-logger proxmox-firewall.timer watchdog-mux
 }
 
 cmd_purge_pve_check() {
@@ -1290,7 +1294,9 @@ cmd_purge_pve_check() {
         echo "  FOUND: open file handles under /etc/pve -- review before purging"
         dep_found=1
     fi
-    if sudo -n grep -rli pve /etc/cron.d /etc/cron.daily /etc/cron.hourly 2>/dev/null | grep -q .; then
+    local cron_pve_hits
+    cron_pve_hits="$(sudo -n grep -rli pve /etc/cron.d /etc/cron.daily /etc/cron.hourly 2>/dev/null || true)"
+    if [[ -n "$cron_pve_hits" ]]; then
         echo "  FOUND: a cron.d/daily/hourly entry references pve -- review before purging"
         dep_found=1
     fi
@@ -1311,8 +1317,9 @@ cmd_purge_pve_check() {
     echo "  ${rss_mb:-0} MB"
     echo
     echo "--- Simulated purge (no kernel/firmware package must appear below) ---"
-    # shellcheck disable=SC2046
-    sudo -n apt-get purge --simulate $(purge_pve_package_list) 2>&1 | tail -20
+    local -a pkg_list
+    mapfile -t pkg_list < <(purge_pve_package_list)
+    sudo -n apt-get purge --simulate "${pkg_list[@]}" 2>&1 | tail -20
     echo
     echo "No files were changed (purge-pve-check mode)."
 }
@@ -1331,8 +1338,9 @@ cmd_purge_pve() {
     # kernel/firmware package would be touched -- never trust that the
     # package list stayed accurate as this fleet's images change over time.
     local sim
-    # shellcheck disable=SC2046
-    sim="$(sudo -n apt-get purge --simulate $(purge_pve_package_list) 2>&1)"
+    local -a pkg_list
+    mapfile -t pkg_list < <(purge_pve_package_list)
+    sim="$(sudo -n apt-get purge --simulate "${pkg_list[@]}" 2>&1)"
     if grep -qiE 'proxmox-kernel|proxmox-default-kernel|proxmox-kernel-helper|pve-firmware|pve-edk2-firmware' <<<"$sim"; then
         echo "ERROR: the simulated purge would touch a kernel/firmware package -- refusing." >&2
         echo "This host's package set has likely changed since this script was written." >&2
@@ -1341,8 +1349,9 @@ cmd_purge_pve() {
     fi
 
     echo "Stopping pve/proxmox/corosync services..."
-    # shellcheck disable=SC2046
-    sudo -n systemctl stop $(purge_pve_service_list) 2>&1 || true
+    local -a svc_list
+    mapfile -t svc_list < <(purge_pve_service_list)
+    sudo -n systemctl stop "${svc_list[@]}" 2>&1 || true
 
     echo "Overriding pve-apt-hook's proxmox-ve removal guard (deliberate, confirmed"
     echo "real on .81 -- apt otherwise refuses to remove the proxmox-ve meta-package)."
@@ -1358,8 +1367,9 @@ cmd_purge_pve() {
     trap 'sudo -n rm -f /please-remove-proxmox-ve' EXIT
 
     echo "Purging..."
-    # shellcheck disable=SC2046
-    sudo -n DEBIAN_FRONTEND=noninteractive apt-get purge -y $(purge_pve_package_list) 2>&1
+    local -a pkg_list
+    mapfile -t pkg_list < <(purge_pve_package_list)
+    sudo -n DEBIAN_FRONTEND=noninteractive apt-get purge -y "${pkg_list[@]}" 2>&1
 
     # Validate the autoremove target list before running it for real: the
     # earlier five-name kernel/firmware guard only labels an already-decided
@@ -1374,7 +1384,7 @@ cmd_purge_pve() {
     autoremove_sim="$(sudo -n DEBIAN_FRONTEND=noninteractive apt-get autoremove --simulate 2>&1)"
     local autoremove_unexpected
     autoremove_unexpected="$(grep -E '^Remv ' <<<"$autoremove_sim" | grep -viE 'pve-|proxmox-|libpve-|libproxmox-|pmxcfs|corosync|spice' || true)"
-    if [[ -n "$autoremove_unexpected" ]] || grep -qiE 'proxmox-kernel|proxmox-default-kernel|proxmox-kernel-helper|pve-firmware|pve-edk2-firmware' <<<"$autoremove_sim"; then
+    if [[ -n "$autoremove_unexpected" ]] || grep -qiE 'proxmox-kernel|proxmox-default-kernel|proxmox-kernel-helper|pve-firmware|pve-edk2-firmware' <<<"$autoremove_sim"; then # pipefail-safe: here-string input is already fully materialized before grep starts, not a live producer
         echo "ERROR: apt autoremove's simulated target list includes package(s) outside the expected PVE-dependency set (or a kernel/firmware package) -- refusing to run it automatically. Review and run 'apt-get autoremove' by hand if these removals are genuinely intended:" >&2
         echo "$autoremove_sim" >&2
         return 1
@@ -1588,7 +1598,9 @@ enable_backports() {
 # yet, so -- like enable_backports above -- this is a new rollout, not a
 # replication of existing host state.
 purge_apt_listchanges() {
-    if dpkg -l apt-listchanges 2>/dev/null | grep -q '^ii'; then
+    local dpkg_status
+    dpkg_status="$(dpkg -l apt-listchanges 2>/dev/null || true)"
+    if grep -q '^ii' <<<"$dpkg_status"; then
         sudo -n env DEBIAN_FRONTEND=noninteractive apt-get purge -y apt-listchanges 2>&1 | tail -10
         echo "Purged apt-listchanges."
     else
