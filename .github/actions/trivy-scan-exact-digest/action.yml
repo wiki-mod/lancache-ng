@@ -54,6 +54,15 @@ inputs:
     required: false
     default: ""
 
+outputs:
+  db-unavailable:
+    description: |
+      What: forwards trivy-scan-retry's own db-unavailable output.
+      Why: "true" only for DB-download failure, never a genuine finding --
+        see that action's own output for the full contract.
+      From: Issue #1095
+    value: ${{ steps.scan.outputs.db-unavailable }}
+
 runs:
   using: composite
   steps:
@@ -122,6 +131,7 @@ runs:
     #   real CI failures with zero retry anywhere.
     # From: PR #1542 | Issue #1535
     - name: Scan exact image digest with Trivy
+      id: scan
       uses: ./.github/actions/trivy-scan-retry
       with:
         username: ${{ inputs.registry-username }}

@@ -82,6 +82,15 @@ inputs:
   exit-code:
     required: false
     default: ""
+outputs:
+  db-unavailable:
+    description: >-
+      "true" only when every attempt failed with no report ever written
+      (the vulnerability DB itself never downloaded across all 4 tries) --
+      never "true" for a genuine vulnerability/secret finding, which always
+      writes a report before its attempt fails. "false" on overall success
+      too. See "Determine DB-unavailable vs genuine finding" step below.
+    value: ${{ steps.db-unavailable.outputs.value }}
 runs:
   using: composite
   steps:
@@ -109,6 +118,30 @@ runs:
     - name: Clear any stale Trivy report file
       shell: bash
       run: rm -f "${{ steps.outpath.outputs.path }}"
+
+    # What: writes one shared attempt-failure classifier script.
+    # Why: 4 identical copies previously diverged per attempt.
+    # From: Issue #1095
+    - name: Prepare shared attempt-classifier script
+      id: classify-script
+      shell: bash
+      run: |
+        set -euo pipefail
+        script="${{ runner.temp }}/trivy-scan-retry-classify.sh"
+        cat > "$script" <<'CLASSIFY'
+        #!/usr/bin/env bash
+        set -euo pipefail
+        attempt="$1"
+        report="$2"
+        if [ -s "$report" ]; then
+          echo "retryable=false" >> "$GITHUB_OUTPUT"
+          echo "::warning::Trivy attempt $attempt failed but its report ('$report') was written -- a genuine finding or non-download error, not retryable." >&2
+        else
+          echo "retryable=true" >> "$GITHUB_OUTPUT"
+          echo "::warning::Trivy attempt $attempt failed with no report written to '$report' -- classified as a DB-download failure." >&2
+        fi
+        CLASSIFY
+        echo "path=$script" >> "$GITHUB_OUTPUT"
 
     # What: Authenticates to GHCR before the Trivy DB pull; continue-on-error
     # so a login failure never blocks an otherwise-working anonymous pull.
@@ -165,16 +198,7 @@ runs:
       id: classify1
       if: steps.attempt1.outcome == 'failure'
       shell: bash
-      run: |
-        set -euo pipefail
-        report="${{ steps.outpath.outputs.path }}"
-        if [ -s "$report" ]; then
-          echo "retryable=false" >> "$GITHUB_OUTPUT"
-          echo "::warning::Trivy attempt 1 failed but its report ('$report') was written -- a genuine finding or non-download error, not retrying." >&2
-        else
-          echo "retryable=true" >> "$GITHUB_OUTPUT"
-          echo "::warning::Trivy attempt 1 failed with no report written to '$report' -- treating as a retryable DB-download failure." >&2
-        fi
+      run: bash "${{ steps.classify-script.outputs.path }}" 1 "${{ steps.outpath.outputs.path }}"
 
     - name: Wait before retry 1
       if: steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true'
@@ -228,16 +252,7 @@ runs:
       id: classify2
       if: steps.attempt2.outcome == 'failure'
       shell: bash
-      run: |
-        set -euo pipefail
-        report="${{ steps.outpath.outputs.path }}"
-        if [ -s "$report" ]; then
-          echo "retryable=false" >> "$GITHUB_OUTPUT"
-          echo "::warning::Trivy attempt 2 failed but its report ('$report') was written -- a genuine finding or non-download error, not retrying." >&2
-        else
-          echo "retryable=true" >> "$GITHUB_OUTPUT"
-          echo "::warning::Trivy attempt 2 failed with no report written to '$report' -- treating as a retryable DB-download failure." >&2
-        fi
+      run: bash "${{ steps.classify-script.outputs.path }}" 2 "${{ steps.outpath.outputs.path }}"
 
     - name: Wait before retry 2
       if: >-
@@ -298,16 +313,7 @@ runs:
       id: classify3
       if: steps.attempt3.outcome == 'failure'
       shell: bash
-      run: |
-        set -euo pipefail
-        report="${{ steps.outpath.outputs.path }}"
-        if [ -s "$report" ]; then
-          echo "retryable=false" >> "$GITHUB_OUTPUT"
-          echo "::warning::Trivy attempt 3 failed but its report ('$report') was written -- a genuine finding or non-download error, not retrying." >&2
-        else
-          echo "retryable=true" >> "$GITHUB_OUTPUT"
-          echo "::warning::Trivy attempt 3 failed with no report written to '$report' -- treating as a retryable DB-download failure." >&2
-        fi
+      run: bash "${{ steps.classify-script.outputs.path }}" 3 "${{ steps.outpath.outputs.path }}"
 
     - name: Wait before retry 3
       if: >-
@@ -368,6 +374,15 @@ runs:
         exit-code: ${{ inputs.exit-code }}
         trivy-config: ${{ github.action_path }}/trivy-config.yaml
 
+    # What: classifies attempt 4 via the shared script too.
+    # Why: a DB failure through all 4 tries looked like a finding.
+    # From: Issue #1095
+    - name: Classify attempt 4 failure
+      id: classify4
+      if: steps.attempt4.outcome == 'failure'
+      shell: bash
+      run: bash "${{ steps.classify-script.outputs.path }}" 4 "${{ steps.outpath.outputs.path }}"
+
     # What: Prints the report file's content to the job log, table format
     # only.
     # Why: writing to a file suppresses table output from stdout; a
@@ -402,3 +417,20 @@ runs:
         done
         echo "::error::All Trivy scan attempts for image-ref '${{ inputs.image-ref }}' failed." >&2
         exit 1
+
+    # What: exposes overall DB-unavailability as this output.
+    # Why: classify4's own retryable value alone decides it once
+    #   reached; if classify4 never ran, an earlier classify already
+    #   found a real report, so the empty case means "not unavailable".
+    # From: Issue #1095
+    - name: Determine DB-unavailable vs genuine finding
+      id: db-unavailable
+      if: always()
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [[ "${{ steps.classify4.outputs.retryable }}" == "true" ]]; then
+          echo "value=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "value=false" >> "$GITHUB_OUTPUT"
+        fi
