@@ -95,6 +95,7 @@ These protect against failures that remain fully possible. They change only in
 | `check-dependabot-docker-base-consistency.sh` | Dependabot grouping vs. real Dockerfile bases |
 | `check-idempotence-test-coverage.sh` | Convergence/idempotence tests stay present |
 | `check-validation-subnet-wrapper-coverage.sh` | Subnet-collision wrapper coverage |
+| `check-build-tools-smoke-coverage.sh` | Every tool the build-tools Dockerfile verifies is either covered by the smoke test or explicitly excluded |
 | `check-review-chronology-comments.sh` | AG-CODE-002/003/012 comment-content rules |
 | `check-trivy-action-direct-usage.sh` | AG-VAL-029: trivy-action only via the retry wrapper |
 | `check-pipefail-early-exit-grep.sh` | pipefail/SIGPIPE early-exit `grep` pattern |
@@ -116,7 +117,6 @@ mapping) are all **kept as requirements**. They move out of workflow YAML into
 |---|---|
 | `check-workflow-service-lists.sh` | It exists because service lists are duplicated across workflows. CI 2.0 has exactly one list, in `ci.sh` (§7). With no second copy, there is nothing to keep in sync. Replaced by `ci.bats`'s inventory tests, which assert the single list is complete and every service has full metadata. |
 | `check-bats-path-filter-coverage.sh` | It keeps hand-maintained `on.push.paths` / `on.pull_request.paths` lists in `build-tools-smoke.yml` aligned with real bats dependencies. CI 2.0 derives impact from content in the planner instead of from hand-written path filters (§10, §11), so the lists it guards cease to exist. |
-| `check-build-tools-smoke-coverage.sh` | Same premise: a coverage guard over hand-maintained workflow path/job lists that the planner replaces. |
 | `check-pr-diff-file-headers.sh` | A second entry point into the same header contract as `check-file-headers.sh`, existing only because the old CI needed a separate diff-scoped job. Diff scoping is the default in CI 2.0, so one implementation covers both. |
 
 **Not dropped silently:** each of these represents a real past incident. The

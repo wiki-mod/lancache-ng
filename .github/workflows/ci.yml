@@ -35,7 +35,8 @@ jobs:
     timeout-minutes: 10
     outputs:
       global-state: ${{ steps.plan.outputs.global-state }}
-      build-matrix: ${{ steps.plan.outputs.build-matrix }}
+      test-required: ${{ steps.plan.outputs.test-required }}
+      impacted-services: ${{ steps.plan.outputs.impacted-services }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -64,6 +65,7 @@ jobs:
   engine-tests:
     name: engine tests
     needs: plan
+    if: needs.plan.outputs.test-required == 'true' || needs.plan.outputs.global-state == 'WORK_REQUIRED'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

@@ -77,6 +77,30 @@ ci_die() {
     exit 1
 }
 
+ci_mktemp() {
+    # What: creates a temp file, dying if mktemp itself failed.
+    # Why: an empty path would reach rm and redirects later.
+    # From: Issue #1683
+    local path
+    path="$(mktemp)" || ci_die "mktemp failed; refusing to continue without a temp file"
+    [[ -n "$path" && -f "$path" ]] || ci_die "mktemp returned no usable path"
+    printf '%s\n' "$path"
+}
+
+ci_rm_temp() {
+    # What: removes $1 only if it is a real file under a temp dir.
+    # Why: an empty or stray path must never reach rm.
+    # From: Issue #1683
+    local path="${1:-}"
+    [[ -n "$path" ]] || return 0
+    case "$path" in
+        /tmp/* | /var/tmp/* | "${TMPDIR:-/nonexistent}"/*) ;;
+        *) ci_die "refusing to remove '$path': not a temp-directory path" ;;
+    esac
+    [[ -f "$path" ]] || return 0
+    rm -f -- "$path"
+}
+
 ci_run_checked() {
     # What: runs a command, naming it if it exits non-zero.
     # Why: §68 -- never pass a foreign exit code up unexplained.
@@ -491,7 +515,7 @@ ci_service_input_entries() {
             [[ -z "$pair" ]] && continue
             git ls-files -s -- "${pair#*=}"
         done < <(ci_service_external_contexts "$service")
-    } | awk -F'\t' '{split($1, m, " "); print m[1] "\t" $2}' | sort -u -t$'\t' -k2,2
+    } | awk -F'\t' '{split($1, m, " "); print m[1] "\t" $2}' | LC_ALL=C sort -u
 }
 
 ci_normalize_many() {
@@ -554,9 +578,17 @@ ci_build_identity() {
     local service="$1" platform="$2"
     ci_require_service "$service"
     [[ -n "$platform" ]] || ci_die "ci_build_identity: platform is required for $service"
+
+    # What: the file list is materialized once for the awk pass.
+    # Why: awk reads modes from it while walking the same files.
+    # From: Issue #1683
     local entries
-    entries="$(mktemp)"
+    entries="$(ci_mktemp)"
     ci_service_input_entries "$service" > "$entries"
+
+    # What: the hashed record: identity inputs, then file content.
+    # Why: §16 -- exactly these inputs define the artifact.
+    # From: Issue #1683
     {
         printf 'service=%s\n' "$service"
         printf 'platform=%s\n' "$platform"
@@ -564,7 +596,8 @@ ci_build_identity() {
         printf 'bases=%s\n' "$CI_BASE_IMAGE_DIGESTS"
         ci_normalize_many "$entries"
     } | sha256sum | cut -d' ' -f1
-    rm -f "$entries"
+
+    ci_rm_temp "$entries"
 }
 
 ci_test_identity() {
@@ -664,11 +697,17 @@ ci_run_bats() {
     # Why: a bare exit code buries failures thousands of lines up.
     # From: Issue #1683
     local logfile rc=0
-    logfile="$(mktemp)"
+    logfile="$(ci_mktemp)"
 
+    # What: streams bats live while keeping a copy to re-read.
+    # Why: PIPESTATUS[0] is bats' status; tee's would always be 0.
+    # From: Issue #1683
     bats --tap "$@" 2>&1 | tee "$logfile"
     rc="${PIPESTATUS[0]}"
 
+    # What: counts failing TAP lines in the captured output.
+    # Why: `|| true` keeps a zero-match grep from ending the run.
+    # From: Issue #1683
     local failed
     failed="$(grep -c '^not ok' "$logfile" || true)"
 
@@ -687,7 +726,7 @@ ci_run_bats() {
         ci_annotate error "bats exited $rc with no failing test -- suite or harness error"
     fi
 
-    rm -f "$logfile"
+    ci_rm_temp "$logfile"
     return "$rc"
 }
 
@@ -723,36 +762,86 @@ ci_changed_paths() {
     git diff --no-color --name-only "$base_ref" "$head_ref"
 }
 
+ci_path_touches_any_service() {
+    # What: true iff $1 is a build input of at least one service.
+    # Why: cheap pure-bash filter before any per-path git work.
+    # From: Issue #1683
+    local path="$1" svc
+    for svc in "${CI_SERVICES[@]}"; do
+        ci_service_touches_path "$svc" "$path" && return 0
+    done
+    return 1
+}
+
 ci_semantic_changed_paths() {
-    # What: drops paths whose normalized content did not change.
-    # Why: §11 -- a comment-only edit must not reach the planner.
+    # What: service-relevant paths with real content change.
+    # Why: normalizing paths no service consumes is wasted work.
     # From: Issue #1683
     local base_ref="$1" head_ref="$2" path
     while IFS= read -r path; do
         [[ -n "$path" ]] || continue
+        ci_path_touches_any_service "$path" || continue
         ci_semantic_diff_is_noop "$base_ref" "$head_ref" "$path" && continue
         printf '%s\n' "$path"
     done < <(ci_changed_paths "$base_ref" "$head_ref")
 }
 
-ci_plan_json() {
-    # What: prints the planner verdict for refs $1..$2 as JSON.
-    # Why: §10.2 -- YAML consumes a machine-readable plan.
+ci_test_required() {
+    # What: true iff a changed path is a test or engine input.
+    # Why: §64 -- a ci.sh edit must still run the engine's tests.
+    # From: Issue #1683
+    local base_ref="$1" head_ref="$2" path
+    while IFS= read -r path; do
+        case "$path" in
+            tests/* | scripts/ci/*) return 0 ;;
+        esac
+    done < <(ci_changed_paths "$base_ref" "$head_ref")
+    return 1
+}
+
+ci_plan_compute() {
+    # What: computes the verdict once into CI_PLAN_* variables.
+    # Why: rendering and output export must not recompute it.
     # From: Issue #1683
     local base_ref="$1" head_ref="$2"
-    local -a changed=() impacted=()
+    local -a changed=()
+    CI_PLAN_IMPACTED=()
+
+    # What: changed paths, mapped to affected services.
+    # Why: §11 -- a touched path is a candidate, never a verdict.
+    # From: Issue #1683
     mapfile -t changed < <(ci_semantic_changed_paths "$base_ref" "$head_ref")
-    (( ${#changed[@]} > 0 )) && mapfile -t impacted < <(ci_impacted_services "${changed[@]}")
+    (( ${#changed[@]} > 0 )) && mapfile -t CI_PLAN_IMPACTED < <(ci_impacted_services "${changed[@]}")
 
-    local global_state="NOOP"
-    (( ${#impacted[@]} > 0 )) && global_state="WORK_REQUIRED"
+    # What: whether the engine's own tests must run this time.
+    # Why: service impact never implies this, so it is separate.
+    # From: Issue #1683
+    CI_PLAN_TEST_REQUIRED="false"
+    ci_test_required "$base_ref" "$head_ref" && CI_PLAN_TEST_REQUIRED="true"
 
+    # What: an if/else chain, never a trailing `[[ ]] && assign`.
+    # Why: that form returns 1 when false, failing the no-op run.
+    # From: Issue #1683
+    if (( ${#CI_PLAN_IMPACTED[@]} > 0 )); then
+        CI_PLAN_STATE="WORK_REQUIRED"
+    elif [[ "$CI_PLAN_TEST_REQUIRED" == "true" ]]; then
+        CI_PLAN_STATE="TEST_REQUIRED"
+    else
+        CI_PLAN_STATE="NOOP"
+    fi
+}
+
+ci_plan_render_json() {
+    # What: renders the already-computed verdict as JSON.
+    # Why: §10.2 -- YAML consumes a machine-readable plan.
+    # From: Issue #1683
     local svc platform first=1
-    printf '{"global":{"state":"%s"},"services":{' "$global_state"
+    printf '{"global":{"state":"%s","test_required":%s},"services":{' \
+        "$CI_PLAN_STATE" "$CI_PLAN_TEST_REQUIRED"
     for svc in "${CI_SERVICES[@]}"; do
         (( first )) || printf ','
         first=0
-        if printf '%s\n' "${impacted[@]}" | grep -qx "$svc"; then
+        if printf '%s\n' "${CI_PLAN_IMPACTED[@]}" | grep -qx "$svc"; then
             printf '"%s":{"state":"ARTIFACT_REQUIRED","build_ack":false}' "$svc"
         else
             printf '"%s":{"state":"NOOP"}' "$svc"
@@ -760,7 +849,7 @@ ci_plan_json() {
     done
     printf '},"build_matrix":['
     first=1
-    for svc in "${impacted[@]}"; do
+    for svc in "${CI_PLAN_IMPACTED[@]}"; do
         [[ -n "$svc" ]] || continue
         while IFS= read -r platform; do
             (( first )) || printf ','
@@ -770,6 +859,14 @@ ci_plan_json() {
         done < <(ci_service_platforms "$svc")
     done
     printf ']}\n'
+}
+
+ci_plan_json() {
+    # What: computes and prints the plan for refs $1..$2 as JSON.
+    # Why: the standalone entry point for `ci.sh plan`.
+    # From: Issue #1683
+    ci_plan_compute "$1" "$2"
+    ci_plan_render_json
 }
 
 ci_emit_output() {
@@ -789,6 +886,10 @@ ci_cmd_resolve_refs() {
     # Why: §10.1 -- one place decides what the planner diffs.
     # From: Issue #1683
     local base head="${HEAD_REF:-${HEAD_SHA:-HEAD}}"
+
+    # What: each event carries its base in its own field.
+    # Why: an unknown event has no base to diff against.
+    # From: Issue #1683
     case "${EVENT_NAME:-}" in
         pull_request) base="${PR_BASE_SHA:-}" ;;
         push) base="${PUSH_BEFORE_SHA:-}" ;;
@@ -809,15 +910,33 @@ ci_cmd_plan_outputs() {
     # What: runs the planner and exports its verdict as outputs.
     # Why: §10.2 -- the job graph reads its matrix here.
     # From: Issue #1683
-    local plan
-    plan="$(ci_plan_json "${BASE_REF:?BASE_REF is required}" "${HEAD_REF:?HEAD_REF is required}")"
-    printf '%s\n' "$plan"
-    local global_state matrix
-    global_state="$(printf '%s' "$plan" | sed -n 's/.*"global":{"state":"\([A-Z_]*\)".*/\1/p')"
-    matrix="$(printf '%s' "$plan" | sed -n 's/.*"build_matrix":\(\[.*\]\)}$/\1/p')"
-    ci_emit_output global-state "${global_state:-UNKNOWN}"
-    ci_emit_output build-matrix "${matrix:-[]}"
-    ci_log "planner verdict: ${global_state:-UNKNOWN}"
+    local base="${BASE_REF:?BASE_REF is required}" head="${HEAD_REF:?HEAD_REF is required}"
+
+    # What: computes once, then prints and exports it.
+    # Why: recomputing or re-parsing would waste or lie.
+    # From: Issue #1683
+    ci_plan_compute "$base" "$head"
+    ci_plan_render_json
+
+    # What: the state every downstream job's `if:` is gated on.
+    # Why: NOOP here is what keeps a no-op run from starting jobs.
+    # From: Issue #1683
+    ci_emit_output global-state "$CI_PLAN_STATE"
+
+    # What: separate signal for "run the engine's own tests".
+    # Why: §64 -- a ci.sh edit impacts no service, but tests.
+    # From: Issue #1683
+    ci_emit_output test-required "$CI_PLAN_TEST_REQUIRED"
+
+    # What: impacted services, space-separated, may be empty.
+    # Why: §71 derives the build matrix from exactly this.
+    # From: Issue #1683
+    ci_emit_output impacted-services "${CI_PLAN_IMPACTED[*]:-}"
+
+    # What: one human-readable line stating the decision reached.
+    # Why: §79 -- a reader must see why CI did or skipped work.
+    # From: Issue #1683
+    ci_log "planner verdict: $CI_PLAN_STATE (tests required: $CI_PLAN_TEST_REQUIRED)"
 }
 
 ci_cmd_report_result() {
@@ -825,12 +944,31 @@ ci_cmd_report_result() {
     # Why: §62 -- the required check reports even on a NOOP run.
     # From: Issue #1683
     local plan_result="${PLAN_RESULT:-}" tests_result="${TESTS_RESULT:-}"
-    local state="${GLOBAL_STATE:-UNKNOWN}"
+    local state="${GLOBAL_STATE:-}"
+
+    # What: the planner itself must have completed successfully.
+    # Why: without a verdict there is nothing to report on.
+    # From: Issue #1683
     [[ "$plan_result" == "success" ]] \
         || ci_report_failure "plan job" "ci.yml" "success" "$plan_result" "see the plan job log"
+
+    # What: an absent or UNKNOWN planner state fails the run.
+    # Why: §2.3 -- UNKNOWN is never silently treated as a pass.
+    # From: Issue #1683
+    [[ -n "$state" && "$state" != "UNKNOWN" ]] \
+        || ci_report_failure "planner state" "ci.yml" "a decided state" "${state:-<empty>}" "check the plan job's output"
+
+    # What: skipped passes; other non-success does not.
+    # Why: the tests job is legitimately skipped on a no-op run.
+    # From: Issue #1683
     [[ "$tests_result" == "success" || "$tests_result" == "skipped" ]] \
         || ci_report_failure "engine tests" "ci.bats" "success" "$tests_result" "see the failing tests listed in that job"
+
+    # What: prints every collected failure before failing the job.
+    # Why: the reader must never hunt backwards for the cause.
+    # From: Issue #1683
     ci_failure_summary || ci_die "CI 2.0 result: FAILED (see the failures listed above)"
+
     ci_log "CI 2.0 result: SUCCESS (planner state: $state)"
 }
 

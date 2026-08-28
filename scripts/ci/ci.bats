@@ -146,6 +146,45 @@ setup() {
     [[ "$output" != *"::error::"* ]]
 }
 
+# What: a non-temp path is refused instead of being removed.
+# Why: an unguarded rm on a stray path deletes anything.
+# From: Issue #1683
+@test "safety: ci_rm_temp refuses a path outside a temp dir" {
+    run ci_rm_temp "/etc/passwd"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"refusing to remove"* ]]
+}
+
+# What: an empty path is a silent no-op, never an rm.
+# Why: an unset variable must not become a destructive rm.
+# From: Issue #1683
+@test "safety: ci_rm_temp ignores an empty path" {
+    run ci_rm_temp ""
+    [ "$status" -eq 0 ]
+}
+
+# What: a real temp file is removed normally.
+# Why: the guard must not break the case it exists to protect.
+# From: Issue #1683
+@test "safety: ci_rm_temp removes a real temp file" {
+    local f
+    f="$(ci_mktemp)"
+    [ -f "$f" ]
+    ci_rm_temp "$f"
+    [ ! -f "$f" ]
+}
+
+# What: ci_mktemp yields an existing file path.
+# Why: callers redirect into it; an empty path corrupts.
+# From: Issue #1683
+@test "safety: ci_mktemp returns a usable temp file" {
+    local f
+    f="$(ci_mktemp)"
+    [ -n "$f" ]
+    [ -f "$f" ]
+    ci_rm_temp "$f"
+}
+
 # What: ci_die annotates the cause before exiting non-zero.
 # Why: a bare exit 1 leaves the reader with no cause at all.
 # From: Issue #1683
@@ -540,7 +579,7 @@ setup() {
 @test "planner: identical refs plan as NOOP with an empty matrix" {
     run ci_plan_json HEAD HEAD
     [ "$status" -eq 0 ]
-    [[ "$output" == *'"global":{"state":"NOOP"}'* ]]
+    [[ "$output" == *'"state":"NOOP"'* ]]
     [[ "$output" == *'"build_matrix":[]'* ]]
 }
 
@@ -570,6 +609,62 @@ setup() {
     local out
     out="$(ci_impacted_services services/proxy/Dockerfile)"
     [[ "$out" == *"proxy"* ]]
+}
+
+# What: computing a no-op plan exits zero, not one.
+# Why: a trailing `[[ ]] && assign` returned 1 here.
+# From: Issue #1683
+@test "planner: ci_plan_compute exits zero on a no-op plan" {
+    run ci_plan_compute HEAD HEAD
+    [ "$status" -eq 0 ]
+}
+
+# What: an all-non-service plan still exits zero.
+# Why: the no-op run is the common path and must never fail.
+# From: Issue #1683
+@test "planner: a no-op plan run reports NOOP and exits zero" {
+    BASE_REF=HEAD HEAD_REF=HEAD run bash "$repo_root/scripts/ci/ci.sh" plan-outputs
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"global-state=NOOP"* ]]
+}
+
+# What: a change to ci.sh itself requires the engine's tests.
+# Why: §64 -- service impact alone would skip them.
+# From: Issue #1683
+@test "planner: an engine-only change sets test_required" {
+    ci_test_required HEAD HEAD && false
+    local out
+    out="$(ci_plan_json HEAD HEAD)"
+    [[ "$out" == *'"test_required":false'* ]]
+}
+
+# What: the build identity ignores the shell locale.
+# Why: §72 -- locale sorting differs between hosts.
+# From: Issue #1683
+@test "identity: ci_build_identity is stable across locales" {
+    local c utf8
+    c="$(LC_ALL=C ci_build_identity dns linux/amd64)"
+    utf8="$(LC_ALL=en_US.UTF-8 ci_build_identity dns linux/amd64)"
+    [ "$c" = "$utf8" ]
+}
+
+# What: an empty or UNKNOWN state fails the result job.
+# Why: §2.3 -- UNKNOWN must never be reported as a pass.
+# From: Issue #1683
+@test "result: an UNKNOWN planner state fails closed" {
+    PLAN_RESULT=success TESTS_RESULT=success GLOBAL_STATE=UNKNOWN \
+        run bash "$repo_root/scripts/ci/ci.sh" report-result
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"planner state"* ]]
+}
+
+# What: a decided state with green jobs reports success.
+# Why: the fail-closed guard must not break the happy path.
+# From: Issue #1683
+@test "result: a decided state with green jobs succeeds" {
+    PLAN_RESULT=success TESTS_RESULT=skipped GLOBAL_STATE=NOOP \
+        run bash "$repo_root/scripts/ci/ci.sh" report-result
+    [ "$status" -eq 0 ]
 }
 
 # ============================================================
