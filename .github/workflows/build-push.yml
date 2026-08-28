@@ -3421,12 +3421,11 @@ jobs:
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
   rust_coverage:
-    # What: content-gated only; carries no event-type skip clause.
-    # Why: directly required by branch protection with no tolerant
-    #   aggregator in front, unlike dns_cargo_audit/dns_test's own
-    #   labeled-event skip -- that skip can outrace and permanently
-    #   overwrite this check's real result for the same commit.
-    # From: Issue #1095
+    # What: content-gated only; no event-type skip clause here.
+    # Why: branch protection requires it directly; with no
+    #   tolerant aggregator in front, its own labeled-event skip
+    #   could overwrite the real result for the same commit.
+    # From: Issue #1095 | PR #1718
     name: coverage (Rust)
     needs: [validate-compose, dns_test, ui_test, detect-changes]
     if: >-
