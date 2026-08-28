@@ -159,7 +159,7 @@ services:
     restart: unless-stopped
     healthcheck:
       # What: HTTP probe against Docker API /_ping via wget.
-      # Why: proves proxy forwards to real socket; Alpine has wget, no curl.
+      # Why: proves proxy forwards to real socket; Alpine lacks curl.
       # From: Issue #1169 | PR #1249
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:2375/_ping || exit 1"]
       interval: 30s
@@ -223,8 +223,8 @@ services:
       - retention-state:/var/lib/lancache-retention-state
     restart: unless-stopped
 
-  # What: NATS with no container_name; all credentials are baked literals.
-  # Why: isolated -p CI instances share runner; fixed name would collide.
+  # What: NATS with no container_name; credentials are baked literals.
+  # Why: isolated -p CI instances share runner; fixed name collides.
   # From: Issue #583 | PR #621
   #
   # What: prebakes nats.conf and auth_callout.conf pair.
@@ -274,14 +274,12 @@ services:
             }
           ]
           # What: loads the auth_callout {} stanza from a separate fragment.
-          # Why: prebaked below so it exists before nats-server starts (a
-          # missing include is a fatal boot error); mirrors dev/prod.
+          # Why: missing include is a fatal boot error; mirrors dev/prod.
           # From: Issue #811 | PR #817
           include "auth_callout.conf"
         }
-        # What: a minimal system account, additive alongside `authorization`.
-        # Why: nats-server's $$SYS.REQ.SERVER.* API (used by nats_kick.rs to
-        # force-disconnect a removed secondary) needs a system-account client.
+        # What: minimal system account, additive alongside `authorization`.
+        # Why: nats_kick.rs needs $$SYS.REQ.SERVER.* to force-disconnect.
         # From: Issue #681 | PR #1172
         accounts {
           SYS: {
@@ -304,7 +302,7 @@ services:
           xkey: "XD2QB5UPSAVJTWTFAHROYX2PBK2JKJKJDZARP3SRYKHGU2R46FUV2BTY"
           # What: all static nats.conf users are listed here.
           # Why: auth_callout server-wide; omitting user causes fallthrough.
-          # From: Issue #681 | PR #1316
+          # From: Issue #681 | PR #1172
           auth_users: ["validation-ui", "validation-dns-writer", "validation-dns-replica", "validation-nats-callout", "validation-nats-sys"]
         }
         EOF
@@ -372,10 +370,8 @@ services:
       # From: Issue #849 | PR #1444
       - NETDATA_ALARM_TOKEN=validation-netdata-alarm-token
       - NATS_URL=nats://nats:4222
-      # What: sets NATS_ADVERTISE_URL explicitly rather than relying on a
-      # bare-NATS_URL fallback.
-      # Why: register_secondary refuses registration (HTTP 503) unless
-      # NATS_BIND_IP or this is set; see deploy/prod's identical comment.
+      # What: sets NATS_ADVERTISE_URL instead of bare-NATS_URL fallback.
+      # Why: register_secondary needs NATS_BIND_IP or this (else 503).
       # From: Issue #866 | PR #881
       - NATS_ADVERTISE_URL=nats://nats:4222
       - NATS_UI_USER=validation-ui
@@ -387,21 +383,16 @@ services:
       - NATS_CALLOUT_USER=validation-nats-callout
       - NATS_CALLOUT_PASSWORD=validation-nats-callout-password
       # What: must match the nats service's prebaked SYS account user.
-      # Why: lets nats_kick.rs look up (CONNZ) and force-disconnect (KICK)
-      # a removed/rotated secondary's live connection.
+      # Why: lets nats_kick.rs (CONNZ/KICK) find a rotated secondary.
       # From: Issue #681 | PR #1172
       - NATS_SYS_USER=validation-nats-sys
       - NATS_SYS_PASSWORD=validation-nats-sys-password
-      # What: fixed literal seed (not the file-based NATS_ISSUER_SEED_PATH
-      # default), so its public half can be baked into nats' bootstrap ahead.
-      # Why: this harness has no persistent /data volume to generate-and-
-      # persist into, and no fixed nats name to safely restart-by-name.
+      # What: seed baked so public half preloads into nats' bootstrap.
+      # Why: no persistent /data volume; no fixed name to restart-by.
       # From: Issue #583 | PR #621
       - NATS_ISSUER_SEED=SAAIHYJ2XBQO3QSKX3V5MS4JH25WGTXEFOOXEZ5EXSGDGWOGCMCVWHWTYY
-      # What: same fixed-literal-seed pattern as NATS_ISSUER_SEED above, for
-      # the separate xkey encryption keypair.
-      # Why: no persistent /data volume means generate-and-persist would
-      # produce a fresh, unpredictable xkey every run.
+      # What: same fixed-seed pattern as above, for xkey encryption pair.
+      # Why: no persistent /data volume; xkey would differ every run.
       # From: Issue #682 | PR #1168
       - NATS_XKEY_SEED=SXADCNQXCKZPJEX3EBNKYHKTD2WGVLHBN6YZYP42MCR6IKRRMYS56WQILQ
       - SECONDARY_REGISTRATION_TOKEN=validation-secondary-registration-token
