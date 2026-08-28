@@ -5921,7 +5921,7 @@ jobs:
       #   not-yet-rebased PR branch re-reporting its own (already-fixed
       #   upstream) failure, even while current_dev itself was fully
       #   healthy and had no way to prove it via this mechanism.
-      - name: Report Trivy scan status (non-blocking, self-closing issue)
+      - name: Report Trivy scan status (self-closing issue)
         if: >-
           always() && steps.build.outcome == 'success' &&
           steps.trivy-scan-pushed.outputs.db-status == 'available' &&
@@ -6578,7 +6578,7 @@ jobs:
       #   not-yet-rebased PR branch re-reporting its own (already-fixed
       #   upstream) failure, even while current_dev itself was fully
       #   healthy and had no way to prove it via this mechanism.
-      - name: Report Trivy scan status (non-blocking, self-closing issue)
+      - name: Report Trivy scan status (self-closing issue)
         if: >-
           always() && steps.build.outcome == 'success' &&
           steps.trivy-scan-pushed.outputs.db-status == 'available' &&
