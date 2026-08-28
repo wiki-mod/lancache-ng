@@ -568,3 +568,86 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" != *"repeats third-party action ref"* ]]
 }
+
+@test "fails on the exact #1095 literal-expression-in-description bug (folded block scalar)" {
+    # Verbatim reproduction of the real broken description: body that failed
+    # every build/build-arm64 job with "Unrecognized named-value: 'github'".
+    # The manifest template validator evaluates a description: body even when
+    # it is pure documentation prose, so this must fail the guard rather than
+    # be waved through as harmless text. Folded (>-) block scalar specifically:
+    # that is the shape the real incident used, and a naive same-line-only
+    # scan would miss it entirely.
+    write_workflow <<'EOF'
+name: CI
+on: push
+jobs:
+  build:
+    steps:
+      - uses: ./.github/actions/trivy-centralized
+EOF
+    mkdir -p "$fixture_root/.github/actions/trivy-centralized"
+    cat > "$fixture_root/.github/actions/trivy-centralized/action.yml" <<'EOF'
+name: Centralized trivy
+inputs:
+  trivy-config:
+    description: >-
+      Absolute path to a trivy-config.yaml. Must be computed by the caller
+      as ${{ github.action_path }}/trivy-config.yaml against the CALLER's
+      own action_path.
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - run: echo hi
+      shell: bash
+EOF
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"description: field contains GitHub Actions expression syntax"* ]]
+}
+
+@test "passes on prose-only description text, and ignores expressions in YAML comments and runs: steps" {
+    # The valid-case half of the guard: the post-fix wording must not trip it,
+    # and neither may the two places a literal expression is genuinely correct.
+    # A YAML '#' comment is never template-evaluated, so it is the recommended
+    # home for a note that needs to show the real syntax -- a guard that
+    # flagged it would push authors away from the one safe place to explain
+    # this. Expressions under runs: are ordinary required interpolation.
+    write_workflow <<'EOF'
+name: CI
+on: push
+jobs:
+  build:
+    steps:
+      - uses: ./.github/actions/trivy-centralized
+EOF
+    mkdir -p "$fixture_root/.github/actions/trivy-centralized"
+    cat > "$fixture_root/.github/actions/trivy-centralized/action.yml" <<'EOF'
+name: Centralized trivy
+# Callers pass ${{ github.action_path }}/trivy-config.yaml from their own
+# action_path; safe to write literally here because comments are not
+# template-evaluated.
+inputs:
+  trivy-config:
+    description: >-
+      Absolute path to a trivy-config.yaml. Must be computed by the caller
+      as its own github dot action_path joined with trivy-config.yaml.
+    required: false
+    default: ""
+  scan-type:
+    description: Scan type passed straight through to trivy-action.
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - run: echo "${{ inputs.trivy-config }} ${{ inputs.scan-type }}"
+      shell: bash
+EOF
+
+    run "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"description: field contains"* ]]
+}

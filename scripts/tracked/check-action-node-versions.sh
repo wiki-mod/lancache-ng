@@ -26,6 +26,17 @@
 #      "same dependency, different versions, nobody sees it anymore" failure
 #      mode #1095 is meant to stop. Applies to both workflow and composite
 #      action files, since it has nothing to do with anchors.
+#   3. no composite action.yml `description:` field may contain GitHub
+#      Actions expression syntax. GitHub's manifest template validator
+#      evaluates a `description:` body even when it is pure documentation
+#      prose, so a literal `${{ github.action_path }}` written as an
+#      explanation fails the ENTIRE action with "Unrecognized named-value:
+#      'github'" -- which broke every build/build-arm64 job across all
+#      services (issue #1095, PR #1719). The class recurred immediately:
+#      the first fix attempt reintroduced it while explaining the bug in
+#      that same description, producing "An expression was expected". A
+#      YAML `#` comment is NOT template-evaluated and is the safe place to
+#      show the real syntax.
 #
 # Local composite actions (`uses: ./.github/actions/<name>`) are resolved by
 # reading their action.yml/action.yaml straight off disk -- no GitHub API
@@ -322,6 +333,50 @@ for action_key in "${!ref_counts_by_key[@]}"; do
   fail "Third-party action '$action_key' is pinned to multiple refs across .github/** (${ref_paths_by_key[$action_key]}). Keep one canonical ref per action key."
 done
 
+# What: rejects expression syntax in an action description: field.
+# Why: a description: body is template-evaluated even as pure prose,
+#   so a literal expression stops the whole manifest from loading
+#   and breaks every job that uses the action.
+# From: Issue #1095 | PR #1719
+#
+# Scoped to composite action manifests only, not workflow files: the
+# confirmed failure mode is the action-manifest loader (a literal
+# ${{ github.action_path }} left as documentation text in an input's
+# description: failed every build/build-arm64 job with "Unrecognized
+# named-value: 'github'"). Workflow-level description: fields are
+# validated by a different parser and are deliberately not claimed
+# here without their own evidence. Block-scalar aware, so a folded
+# (>-) or literal (|) multi-line description body is scanned in full,
+# which is exactly the shape the real incident used.
+for action_file in "${local_action_files[@]}"; do
+  description_expression_hits="$(
+    awk '
+      in_block {
+        if ($0 ~ /^[[:space:]]*$/) { next }
+        match($0, /^[[:space:]]*/)
+        if (RLENGTH > block_indent) {
+          if (index($0, "${{") > 0 || index($0, "}}") > 0) { print NR }
+          next
+        }
+        in_block = 0
+      }
+      /^[[:space:]]*description[[:space:]]*:/ {
+        match($0, /^[[:space:]]*/)
+        block_indent = RLENGTH
+        rest = $0
+        sub(/^[[:space:]]*description[[:space:]]*:[[:space:]]*/, "", rest)
+        if (rest ~ /^[>|]/) { in_block = 1; next }
+        if (index(rest, "${{") > 0 || index(rest, "}}") > 0) { print NR }
+      }
+    ' "$action_file"
+  )"
+  if [ -n "$description_expression_hits" ]; then
+    while IFS= read -r hit_line; do
+      fail "'$action_file' line $hit_line: a description: field contains GitHub Actions expression syntax. The manifest template validator evaluates a description: body even when it is pure documentation prose, so the whole action fails to load. Describe the expression in words instead, or move the note into a YAML '#' comment (comments are not template-evaluated)."
+    done <<<"$description_expression_hits"
+  fi
+done
+
 gh_token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
 
 # fetch_external_action_yaml <owner> <repo> <subpath> <ref>
@@ -532,8 +587,8 @@ for value in "${uses_values[@]}"; do
 done
 
 if [ "$failures" -gt 0 ]; then
-  printf '::error::check-action-node-versions: %d pinned action(s) declare a deprecated Node runtime or could not be resolved (see issue #801).\n' "$failures" >&2
+  printf '::error::check-action-node-versions: %d finding(s) -- a pinned action declares a deprecated Node runtime, could not be resolved, drifted/duplicated a ref, or a composite action description: field contains expression syntax (see issues #801, #1095).\n' "$failures" >&2
   exit 1
 fi
 
-printf 'check-action-node-versions: OK (every pinned action -- local and external -- declares a current Node runtime, or is not Node-based; third-party action refs are de-duplicated per file and do not drift across .github/**).\n'
+printf 'check-action-node-versions: OK (every pinned action -- local and external -- declares a current Node runtime, or is not Node-based; third-party action refs are de-duplicated per file and do not drift across .github/**; no composite action description: field contains GitHub Actions expression syntax).\n'
