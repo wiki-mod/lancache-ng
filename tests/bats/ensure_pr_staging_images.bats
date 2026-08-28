@@ -690,25 +690,9 @@ STUB
 }
 
 @test "BASE_SHA's own image with a push-reuse-retagged (older) revision label is accepted directly, no ancestor substitution" {
-    # Discriminating test for the two allow_reverse_ancestry=true call sites
-    # issue #1095 added inside saf_resolve_untouched_backfill_source() (Step 1's
-    # fast path here, since every service is untouched by default per
-    # setup()'s docs-only fixture -- Step 2's normal-path call site carries
-    # the identical fix and reasoning, see that call site's own comment).
-    #
-    # Simulates the real push-reuse shape (#1095 Step 4): base_sha's own
-    # per-commit tag exists, but imagetools create copied the label from the
-    # older commit whose content it reused -- so the revision label reads
-    # older_sha, a genuine strict ancestor of base_sha, not base_sha itself.
-    # Only base_sha's own tag resolves to anything at all; every other tag
-    # (including any ancestor candidate's) reports "no image" -- this makes
-    # the pass/fail outcome unambiguous: if allow_reverse_ancestry is not
-    # honored here, the freshness check rejects older_sha as stale, falls
-    # through to saf_find_built_ancestor, and that walk finds nothing usable
-    # either (every ancestor's own tag is also stubbed absent) -- a hard
-    # failure, not a quieter wrong-answer. Verified this test fails against
-    # the earlier baseline for exactly that reason (status non-zero, "No
-    # usable ancestor" error) before writing this comment.
+    # What: BASE_SHA's retagged image is accepted, not walked.
+    # Why: without allow_reverse_ancestry, old labels look stale.
+    # From: Issue #1095 | PR #1734
     revision_map_stub="$BATS_TEST_TMPDIR/revision_map.sh"
     cat > "$revision_map_stub" <<STUB
 #!/usr/bin/env bash
@@ -969,25 +953,9 @@ STUB
     chmod +x "$run_exists_stub"
     export STAGING_BASE_BUILD_RUN_EXISTS_CMD="$run_exists_stub"
 
-    # Must also force the exact-BASE_SHA freshness check to fail first --
-    # otherwise setup()'s default revision stub (always fresh at BASE_SHA)
-    # would let the ordinary backfill succeed before this scenario is even
-    # reached, the same reason the dedicated "confirmed run" test below needs
-    # this override too. `exit 1` for every image, not "echo an older
-    # ancestor's sha" (issue #1095, 2026-08-07): since
-    # saf_resolve_untouched_backfill_source's own BASE_SHA-level checks now
-    # pass allow_reverse_ancestry=true (the same push-reuse-retag-aware
-    # acceptance saf_find_built_ancestor's own candidate checks already used),
-    # echoing a genuine ancestor of base_sha here would now be LEGITIMATELY
-    # accepted as fresh instead of refused -- see the "#808: ... is NOT
-    # back-filled ... stale relative to BASE_SHA" test's own comment a few
-    # hundred lines up in this same file for the identical reasoning, written
-    # before this fixture needed to catch up to it. This test's own fixture
-    # name ("no ancestor anywhere has a usable run") means every image query
-    # -- BASE_SHA's own and every ancestor candidate's -- must correctly
-    # report "no such image" for the scenario to hold at all, so a single
-    # unconditional `exit 1` is not just simpler than the old per-tag `case`,
-    # it is the only shape that still means what this test's name says.
+    # What: stale_stub returns exit 1 for every queried image.
+    # Why: an ancestor's sha would now be accepted as fresh.
+    # From: Issue #1095 | PR #1734
     stale_stub="$BATS_TEST_TMPDIR/stale_revision_no_ancestor.sh"
     cat > "$stale_stub" <<'STUB'
 #!/usr/bin/env bash
@@ -1039,15 +1007,9 @@ STUB
     chmod +x "$run_exists_stub"
     export STAGING_BASE_BUILD_RUN_EXISTS_CMD="$run_exists_stub"
 
-    # Force the exact-BASE_SHA freshness check to fail first, so the script
-    # actually reaches the new fallback decision point instead of succeeding
-    # earlier. `exit 1` (no such image), not "echo an older ancestor's sha"
-    # (issue #1095, 2026-08-07): saf_resolve_untouched_backfill_source's own
-    # BASE_SHA-level checks now pass allow_reverse_ancestry=true, so echoing
-    # a genuine ancestor of base_sha here would now be legitimately accepted
-    # as fresh instead of refused -- see the "#808: ... is NOT back-filled
-    # ... stale relative to BASE_SHA" test's own comment for the identical
-    # reasoning.
+    # What: exact-BASE_SHA freshness check fails first, not later.
+    # Why: an ancestor's sha would now be accepted as fresh.
+    # From: Issue #1095 | PR #1734
     stale_stub="$BATS_TEST_TMPDIR/stale_revision_run_exists.sh"
     cat > "$stale_stub" <<'STUB'
 #!/usr/bin/env bash
@@ -1084,13 +1046,9 @@ STUB
     chmod +x "$indeterminate_stub"
     export STAGING_BASE_BUILD_RUN_EXISTS_CMD="$indeterminate_stub"
 
-    # Force the exact-BASE_SHA freshness check to fail first. `exit 1` (no
-    # such image), not "echo an older ancestor's sha" (issue #1095,
-    # 2026-08-07): saf_resolve_untouched_backfill_source's own BASE_SHA-level
-    # checks now pass allow_reverse_ancestry=true, so echoing a genuine
-    # ancestor of base_sha here would now be legitimately accepted as fresh
-    # instead of refused -- see the "#808: ... is NOT back-filled ... stale
-    # relative to BASE_SHA" test's own comment for the identical reasoning.
+    # What: exact-BASE_SHA freshness check fails first, not later.
+    # Why: an ancestor's sha would now be accepted as fresh.
+    # From: Issue #1095 | PR #1734
     stale_stub="$BATS_TEST_TMPDIR/stale_revision_indeterminate.sh"
     cat > "$stale_stub" <<'STUB'
 #!/usr/bin/env bash

@@ -9,98 +9,106 @@
 # early; production service Dockerfiles stay separately pinned instead,
 # for reproducible runtime image builds.
 # From: Issue #1570 | PR #1571
-# What: global ARG so the later utilities-tools FROM can use it.
-# Why: an ARG used in a FROM must precede the file's first FROM to be
-#   in scope there, matching dns/watchdog/ui's Dockerfiles.
-# From: Issue #1095 | PR #1706
+# What: shared version pins for both Go-tool build stages, plus the
+# global utilities-tools image ARG -- all declared before the file's
+# first FROM, since an ARG used in a FROM (or inherited via a later
+# bare ARG redeclaration) must precede it to be in scope.
+# Why: keeps the two Go-tool stages in sync; a prior copy had already
+# drifted. UTILITIES_IMAGE placement matches dns/watchdog/ui's
+# Dockerfiles.
+# From: Issue #1095 | Issue #1598 | PR #1706
 ARG UTILITIES_IMAGE=ghcr.io/wiki-mod/lancache-ng/utilities:latest
-FROM golang:latest AS actionlint-builder
-
 ARG ACTIONLINT_VERSION=1.7.12
 ARG DOCKER_CLI_VERSION=29.7.2
 ARG DOCKER_COMPOSE_VERSION=5.5.0
 ARG DOCKER_BUILDX_VERSION=0.36.1
-# What: pins buildx's vendored containerd/containerd/v2 dependency at or
-# above buildx's own upstream go.mod floor.
-# Why: earlier buildx releases have lagged a fixed containerd CVE class
-# before catching up on their own (AGENTS.md AG-KD-003); buildx v0.36.1
-# itself already floors at v2.3.3 (checked against that tag's go.mod), so
-# 2.3.4 keeps this override one real patch ahead on the same line.
+# What: pins buildx's vendored containerd/v2 dependency.
+# Why: buildx v0.36.1 floors at v2.3.3; 2.3.4 stays ahead.
 # From: Issue #1570 | PR #1571
 ARG DOCKER_BUILDX_CONTAINERD_VERSION=2.3.4
-# What: pins buildx/compose/cli's vendored google.golang.org/grpc dependency
-# at or above their own go.mod/vendor.mod floor.
-# Why: these tools' releases repeatedly lag a fixed grpc-go CVE before
-# catching up (AG-KD-003); all three floor at v1.82.1, so 1.83.1 keeps this current.
+# What: pins buildx/compose/cli's vendored grpc-go floor.
+# Why: all three floor at v1.82.1; 1.83.1 stays current.
 # From: Issue #1570 | PR #1571 | Issue #1598
 ARG GRPC_GO_VERSION=1.83.1
-# What: pins buildx/compose/cli's vendored golang.org/x/text dependency at
-# or above their own go.mod/vendor.mod floor (actionlint has no x/text
-# dependency, so it needs no override).
-# Why: same recurring lagged-CVE pattern as the grpc-go override above
-# (AGENTS.md AG-KD-003); all three now floor at v0.40.0 themselves, so
-# 0.41.0 -- the current upstream release -- keeps this override current.
+# What: pins buildx/compose/cli's vendored x/text floor.
+# Why: all three floor at v0.40.0; 0.41.0 stays current.
 # From: Issue #1570 | PR #1571
 ARG GOLANG_X_TEXT_VERSION=0.41.0
-# What: pins buildx's vendored github.com/moby/go-archive dependency (Docker
-# CLI/compose already floor at v0.3.3, no override needed there).
-# Why: same lagged-CVE pattern as the overrides above (AG-KD-003); buildx
-# v0.36.1 floors at the CVE-2026-17106-affected v0.2.1.
+# What: pins buildx's vendored moby/go-archive dependency.
+# Why: buildx v0.36.1 floors at the CVE-affected v0.2.1.
 # From: Issue #1598
 ARG MOBY_GO_ARCHIVE_VERSION=0.3.3
-# What: pins buildx/compose/cli's vendored golang.org/x/mod dependency.
-# Why: same lagged-CVE pattern as the overrides above (AG-KD-003); all three
-# floor at v0.38.0 (CVE-2026-56864/56865), so 0.40.0 -- the fix version --
-# keeps this override current.
+# What: pins buildx/compose/cli's vendored x/mod floor.
+# Why: all three floor at v0.38.0; 0.40.0 is the fix.
 # From: Issue #1598
 ARG GOLANG_X_MOD_VERSION=0.40.0
 
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+# What: builds the Go-tool script once for both stages
+# Why: Debian/Alpine RUN bodies were byte-identical
+# From: Issue #1095
+FROM scratch AS go-tools-script
+COPY <<'BUILD_GO_TOOLS_EOF' /build-go-tools.sh
+#!/bin/sh
+set -eu
+GOBIN=/out go install "github.com/rhysd/actionlint/cmd/actionlint@v${ACTIONLINT_VERSION}"
+/out/actionlint --version
+buildx_src="$(mktemp -d)"
+git clone --depth 1 --branch "v${DOCKER_BUILDX_VERSION}" https://github.com/docker/buildx.git "$buildx_src"
+( cd "$buildx_src" \
+  && go get "github.com/containerd/containerd/v2@v${DOCKER_BUILDX_CONTAINERD_VERSION}" \
+  && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
+  && go get "golang.org/x/text@v${GOLANG_X_TEXT_VERSION}" \
+  && go get "github.com/moby/go-archive@v${MOBY_GO_ARCHIVE_VERSION}" \
+  && go get "golang.org/x/mod@v${GOLANG_X_MOD_VERSION}" \
+  && go mod vendor \
+  && go build -ldflags "-X github.com/docker/buildx/version.Version=v${DOCKER_BUILDX_VERSION}" -o /out/docker-buildx ./cmd/buildx )
+rm -rf "$buildx_src"
+/out/docker-buildx version
+docker_cli_src="$(go env GOPATH)/src/github.com/docker/cli"
+install -d "$(dirname "$docker_cli_src")"
+git clone --depth 1 --branch "v${DOCKER_CLI_VERSION}" https://github.com/docker/cli.git "$docker_cli_src"
+( cd "$docker_cli_src" \
+  && ln -s vendor.mod go.mod && ln -s vendor.sum go.sum \
+  && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
+  && go get "golang.org/x/text@v${GOLANG_X_TEXT_VERSION}" \
+  && go get "golang.org/x/mod@v${GOLANG_X_MOD_VERSION}" \
+  && go mod vendor \
+  && rm go.mod go.sum \
+  && VERSION="${DOCKER_CLI_VERSION}" sh ./scripts/build/binary )
+install -m 0755 "$docker_cli_src/build/docker-$(go env GOOS)-$(go env GOARCH)" /out/docker
+rm -rf "$(go env GOPATH)/src/github.com"
+/out/docker --version
+compose_src="$(mktemp -d)"
+git clone --depth 1 --branch "v${DOCKER_COMPOSE_VERSION}" https://github.com/docker/compose.git "$compose_src"
+( cd "$compose_src" \
+  && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
+  && go get "golang.org/x/text@v${GOLANG_X_TEXT_VERSION}" \
+  && go get "golang.org/x/mod@v${GOLANG_X_MOD_VERSION}" \
+  && go build -ldflags "-X github.com/docker/compose/v5/internal.Version=${DOCKER_COMPOSE_VERSION}" -o /out/docker-compose ./cmd )
+rm -rf "$compose_src"
+/out/docker-compose version
+BUILD_GO_TOOLS_EOF
 
-# What: builds actionlint/Docker CLI/docker-compose/buildx from source, with
-# grpc-go/containerd/x-text/go-archive/x-mod vendor bumps applied via
-# go.mod/vendor.mod swaps.
-# Why: gets a current Go stdlib without waiting on upstream; each tool's own
-# module quirks (vendor.mod-only, exclude directives) rule out `go install`.
+FROM golang:latest AS actionlint-builder
+
+ARG ACTIONLINT_VERSION
+ARG DOCKER_CLI_VERSION
+ARG DOCKER_COMPOSE_VERSION
+ARG DOCKER_BUILDX_VERSION
+ARG DOCKER_BUILDX_CONTAINERD_VERSION
+ARG GRPC_GO_VERSION
+ARG GOLANG_X_TEXT_VERSION
+ARG MOBY_GO_ARCHIVE_VERSION
+ARG GOLANG_X_MOD_VERSION
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+COPY --from=go-tools-script /build-go-tools.sh /build-go-tools.sh
+
+# What: builds actionlint/CLI/compose/buildx from source.
+# Why: gets a current Go stdlib; vendor-only module quirks
+# rule out plain `go install` for the vendor bump tools.
 # From: Issue #1570 | PR #1571 | Issue #1598
-RUN set -euo pipefail; \
-    GOBIN=/out go install "github.com/rhysd/actionlint/cmd/actionlint@v${ACTIONLINT_VERSION}"; \
-    /out/actionlint --version; \
-    buildx_src="$(mktemp -d)"; \
-    git clone --depth 1 --branch "v${DOCKER_BUILDX_VERSION}" https://github.com/docker/buildx.git "$buildx_src"; \
-    ( cd "$buildx_src" \
-      && go get "github.com/containerd/containerd/v2@v${DOCKER_BUILDX_CONTAINERD_VERSION}" \
-      && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
-      && go get "golang.org/x/text@v${GOLANG_X_TEXT_VERSION}" \
-      && go get "github.com/moby/go-archive@v${MOBY_GO_ARCHIVE_VERSION}" \
-      && go get "golang.org/x/mod@v${GOLANG_X_MOD_VERSION}" \
-      && go mod vendor \
-      && go build -ldflags "-X github.com/docker/buildx/version.Version=v${DOCKER_BUILDX_VERSION}" -o /out/docker-buildx ./cmd/buildx ); \
-    rm -rf "$buildx_src"; \
-    /out/docker-buildx version; \
-    docker_cli_src="$(go env GOPATH)/src/github.com/docker/cli"; \
-    install -d "$(dirname "$docker_cli_src")"; \
-    git clone --depth 1 --branch "v${DOCKER_CLI_VERSION}" https://github.com/docker/cli.git "$docker_cli_src"; \
-    ( cd "$docker_cli_src" \
-      && ln -s vendor.mod go.mod && ln -s vendor.sum go.sum \
-      && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
-      && go get "golang.org/x/text@v${GOLANG_X_TEXT_VERSION}" \
-      && go get "golang.org/x/mod@v${GOLANG_X_MOD_VERSION}" \
-      && go mod vendor \
-      && rm go.mod go.sum \
-      && VERSION="${DOCKER_CLI_VERSION}" sh ./scripts/build/binary ); \
-    install -m 0755 "$docker_cli_src/build/docker-$(go env GOOS)-$(go env GOARCH)" /out/docker; \
-    rm -rf "$(go env GOPATH)/src/github.com"; \
-    /out/docker --version; \
-    compose_src="$(mktemp -d)"; \
-    git clone --depth 1 --branch "v${DOCKER_COMPOSE_VERSION}" https://github.com/docker/compose.git "$compose_src"; \
-    ( cd "$compose_src" \
-      && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
-      && go get "golang.org/x/text@v${GOLANG_X_TEXT_VERSION}" \
-      && go get "golang.org/x/mod@v${GOLANG_X_MOD_VERSION}" \
-      && go build -ldflags "-X github.com/docker/compose/v5/internal.Version=${DOCKER_COMPOSE_VERSION}" -o /out/docker-compose ./cmd ); \
-    rm -rf "$compose_src"; \
-    /out/docker-compose version
+RUN chmod +x /build-go-tools.sh && /build-go-tools.sh
 
 # What: source stage for the shared, statically-linked curl binary.
 # Why: the same binary already used by proxy/dns/dhcp/ntp/ui is portable
@@ -111,6 +119,298 @@ RUN set -euo pipefail; \
 # file (required for use in a FROM), matching dns/watchdog/ui.
 # From: Issue #1304 | Issue #1556 | Issue #1095 (AG-KD-010) | PR #1706
 FROM ${UTILITIES_IMAGE} AS utilities-tools
+
+# What: Alpine equivalent of actionlint-builder above.
+# Why: kept as its own stage so the Debian stage stays
+# unchanged; opt-in only via `--target`.
+# From: Issue #1095
+FROM golang:alpine AS actionlint-builder-alpine
+
+ARG ACTIONLINT_VERSION
+ARG DOCKER_CLI_VERSION
+ARG DOCKER_COMPOSE_VERSION
+ARG DOCKER_BUILDX_VERSION
+ARG DOCKER_BUILDX_CONTAINERD_VERSION
+ARG GRPC_GO_VERSION
+ARG GOLANG_X_TEXT_VERSION
+ARG MOBY_GO_ARCHIVE_VERSION
+ARG GOLANG_X_MOD_VERSION
+
+SHELL ["/bin/sh", "-o", "pipefail", "-c"]
+COPY --from=go-tools-script /build-go-tools.sh /build-go-tools.sh
+
+# What: declares APK_CACHE_BUST before this stage's RUN
+# Why: matches the other Alpine stage's cache-bust knob
+# From: Issue #1095
+ARG APK_CACHE_BUST=""
+
+# What: builds the same four Go tools as actionlint-builder.
+# Why: none of the four has a cgo dependency, so musl needs
+# no build-tag or linker change here.
+# From: Issue #1095
+RUN set -euo pipefail; \
+    : "apk-cache-bust=${APK_CACHE_BUST}"; \
+    apk update; \
+    apk upgrade --no-cache; \
+    apk add --no-cache git build-base; \
+    chmod +x /build-go-tools.sh; \
+    /build-go-tools.sh
+
+# What: Alpine build-tools candidate, pinned to Alpine 3.24.
+# Why: keeps Debian as the default target; the pin avoids
+# `clang22`/`lld22` breaking on a later Alpine major.
+# From: Issue #1095
+FROM rust:alpine3.24 AS alpine-final
+
+LABEL org.opencontainers.image.description="Prebuilt lancache-ng CI and developer validation toolchain image (Alpine candidate)."
+
+ARG SCCACHE_VERSION=0.17.0
+ARG CARGO_AUDIT_VERSION=0.22.2
+ARG CARGO_TARPAULIN_VERSION=0.37.2
+ARG SHELLSPEC_VERSION=0.28.1
+ARG SHELLSPEC_SHA256=350d3de04ba61505c54eda31a3c2ee912700f1758b1a80a284bc08fd8b6c5992
+
+# What: uses plain /bin/sh for the apk-install step only.
+# Why: rust:alpine has no bash until that step installs it.
+# From: Issue #1095
+SHELL ["/bin/sh", "-c"]
+
+ENV PATH="/usr/local/cargo/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    CARGO_INSTALL_ROOT="/usr/local" \
+    RUST_BACKTRACE=1
+
+# What: declares `APK_CACHE_BUST` right before its RUN step.
+# Why: matches `APT_CACHE_BUST` below; an unrotated layer
+# would replay stale packages forever.
+# From: Issue #1095
+ARG APK_CACHE_BUST=""
+
+# What: installs bash, GNU coreutils, github-cli, packages.
+# Why: BusyBox differs from GNU (AG-VAL-034); `clang22`,
+# `lld22` are Alpine's names; `github-cli` provides `gh`;
+# sqlite mirrors Debian's own sqlite3 addition.
+# From: Issue #1095 | Issue #1585
+RUN set -euo pipefail; \
+    : "apk-cache-bust=${APK_CACHE_BUST}"; \
+    apk update; \
+    apk upgrade --no-cache; \
+    apk add --no-cache \
+      bash \
+      bats \
+      bc \
+      bind-tools \
+      build-base \
+      ca-certificates \
+      ccache \
+      clang22 \
+      cmake \
+      coreutils \
+      distcc \
+      distcc-pump \
+      expect \
+      findutils \
+      gawk \
+      gettext \
+      git \
+      github-cli \
+      gnupg \
+      grep \
+      iproute2 \
+      jq \
+      lld22 \
+      make \
+      musl-dev \
+      openssl \
+      openssl-dev \
+      openssl-libs-static \
+      perl \
+      pkgconf \
+      procps-ng \
+      python3 \
+      rsync \
+      sed \
+      shellcheck \
+      sqlite \
+      tcpdump \
+      tzdata \
+      util-linux \
+      xz \
+      zlib-dev \
+      zlib-static; \
+    ln -sf /usr/bin/pump /usr/bin/distcc-pump; \
+    distcc_bin="$(command -v distcc)"; \
+    mkdir -p /usr/local/lib/distcc; \
+    for wrapper in cc gcc c++ g++; do ln -sf "$distcc_bin" "/usr/local/lib/distcc/$wrapper"; done
+
+# What: curl comes from the shared utilities image, like the Debian stage.
+# Why: the static build has no libc dependency, so it works unchanged on
+#   musl -- keeps this candidate on the same update/security contract as
+#   every other first-party image instead of Alpine's own curl package.
+# From: Issue #1304 | Issue #1556 | PR #1691
+COPY --from=utilities-tools /usr/local/bin/curl /usr/local/bin/curl
+RUN curl --version >/dev/null
+
+# What: switches SHELL to bash for every RUN step below.
+# Why: BusyBox ash cannot parse this file's bash-array use.
+# From: Issue #1095
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# What: builds sccache from source, like the Debian stage.
+# Why: no prebuilt release exists on either branch here.
+# From: Issue #1095
+RUN set -euo pipefail; \
+    rustup component add rustfmt clippy; \
+    cargo install sccache --version "${SCCACHE_VERSION}" --no-default-features --features redis,dist-client --root /usr/local; \
+    for tool in cargo cargo-clippy cargo-fmt clippy-driver rustc rustdoc rustfmt rustup; do \
+      ln -sf "/usr/local/cargo/bin/${tool}" "/usr/local/bin/${tool}"; \
+    done; \
+    rm -rf /usr/local/cargo/registry /usr/local/cargo/git
+
+# What: builds cargo-audit/cargo-tarpaulin, clearing caches.
+# Why: prebuilt glibc binaries fail on Alpine; the clear
+# avoids leaving vulnerable dependency source in the image.
+# From: Issue #1095
+RUN set -euo pipefail; \
+    cargo install cargo-audit --version "${CARGO_AUDIT_VERSION}" --locked --root /usr/local; \
+    cargo install cargo-tarpaulin --version "${CARGO_TARPAULIN_VERSION}" --locked --root /usr/local; \
+    rm -rf /usr/local/cargo/registry /usr/local/cargo/git
+
+COPY --from=actionlint-builder-alpine /out/actionlint /usr/local/bin/actionlint
+
+RUN set -euo pipefail; \
+    shellspec_tmp="$(mktemp -d)"; \
+    trap 'rm -rf "$shellspec_tmp"' EXIT; \
+    curl -fsSL "https://github.com/shellspec/shellspec/releases/download/${SHELLSPEC_VERSION}/shellspec-dist.tar.gz" \
+      -o "$shellspec_tmp/shellspec-dist.tar.gz"; \
+    printf '%s  %s\n' "${SHELLSPEC_SHA256}" "$shellspec_tmp/shellspec-dist.tar.gz" | sha256sum -c -; \
+    tar -xzf "$shellspec_tmp/shellspec-dist.tar.gz" -C /opt; \
+    ln -sf /opt/shellspec/shellspec /usr/local/bin/shellspec; \
+    shellspec --version
+
+RUN install -d /usr/local/lib/docker/cli-plugins
+COPY --from=actionlint-builder-alpine /out/docker /usr/local/bin/docker
+COPY --from=actionlint-builder-alpine /out/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
+COPY --from=actionlint-builder-alpine /out/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx
+RUN docker --version; \
+    docker compose version; \
+    docker buildx version
+
+# What: no dhclient/isc-dhcp-client exists in Alpine 3.24.
+# Why: only busybox-extras' udhcpc exists; affects two dhcp
+# simulation scripts only, documented not dropped silently.
+# From: Issue #1095
+
+# What: symlinks musl-gcc to gcc for the musl-gcc contract.
+# Why: gcc here already targets musl -- functionally correct,
+# not a fake pass; dns/ui/watchdog hard-require musl-gcc.
+# From: Issue #1095 | PR #1691
+RUN ln -sf /usr/bin/gcc /usr/local/bin/musl-gcc
+
+# What: no separate musl cross-compile step, unlike Debian.
+# Why: musl is already this image's default rustc triple.
+# From: Issue #1095
+RUN set -euo pipefail; \
+    required_tools=( \
+      bash \
+      bats \
+      cargo \
+      rustc \
+      rustup \
+      rustfmt \
+      clippy-driver \
+      sccache \
+      cargo-audit \
+      cargo-tarpaulin \
+      actionlint \
+      shellspec \
+      shellcheck \
+      jq \
+      gh \
+      git \
+      gpg \
+      pkg-config \
+      cmake \
+      ar \
+      awk \
+      basename \
+      cat \
+      chgrp \
+      chmod \
+      chown \
+      clang \
+      c++ \
+      ccache \
+      cp \
+      curl \
+      dig \
+      dirname \
+      distcc \
+      distcc-pump \
+      docker \
+      envsubst \
+      expect \
+      find \
+      flock \
+      musl-gcc \
+      getent \
+      grep \
+      gzip \
+      install \
+      ip \
+      ld.lld \
+      make \
+      mkdir \
+      mktemp \
+      mv \
+      openssl \
+      printf \
+      ps \
+      rm \
+      rsync \
+      sed \
+      sha256sum \
+      sort \
+      tar \
+      tcpdump \
+      tee \
+      test \
+      timeout \
+      xargs \
+      xz \
+      cc \
+      g++ \
+    ); \
+    for tool in "${required_tools[@]}"; do \
+      command -v "$tool" >/dev/null; \
+    done; \
+    cargo --version; \
+    rustc --version; \
+    cargo fmt --version; \
+    cargo clippy --version; \
+    sccache --version; \
+    ccache --version; \
+    cargo audit --version; \
+    cargo tarpaulin --version; \
+    actionlint --version; \
+    bats --version; \
+    shellspec --version; \
+    shellcheck --version; \
+    docker --version; \
+    docker compose version; \
+    docker buildx version; \
+    expect -v; \
+    printf 'PATH=%s\n' "$PATH"; \
+    case ":$PATH:" in \
+      *:/usr/local/cargo/bin:*) ;; \
+      *) echo "/usr/local/cargo/bin is missing from PATH" >&2; exit 1 ;; \
+    esac; \
+    rustc_host_line="$(rustc -vV)"; \
+    grep -qE '^host: .*-musl$' <<<"${rustc_host_line}"; \
+    musl-gcc --version
+
+WORKDIR /workspace
+
+CMD ["bash"]
 
 FROM rust:latest
 
