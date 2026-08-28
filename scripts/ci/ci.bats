@@ -752,7 +752,8 @@ setup() {
 # Why: §2.3 -- UNKNOWN must never be reported as a pass.
 # From: Issue #1683
 @test "result: an UNKNOWN planner state fails closed" {
-    PLAN_RESULT=success TESTS_RESULT=success GLOBAL_STATE=UNKNOWN \
+    PLAN_RESULT=success TESTS_RESULT=success BUILD_RESULT=skipped \
+        AGGREGATE_RESULT=skipped GLOBAL_STATE=UNKNOWN \
         run bash "$repo_root/scripts/ci/ci.sh" report-result
     [ "$status" -ne 0 ]
     [[ "$output" == *"planner state"* ]]
@@ -762,7 +763,8 @@ setup() {
 # Why: the fail-closed guard must not break the happy path.
 # From: Issue #1683
 @test "result: a decided state with green jobs succeeds" {
-    PLAN_RESULT=success TESTS_RESULT=skipped GLOBAL_STATE=NOOP \
+    PLAN_RESULT=success TESTS_RESULT=skipped BUILD_RESULT=skipped \
+        AGGREGATE_RESULT=skipped GLOBAL_STATE=NOOP \
         run bash "$repo_root/scripts/ci/ci.sh" report-result
     [ "$status" -eq 0 ]
 }
