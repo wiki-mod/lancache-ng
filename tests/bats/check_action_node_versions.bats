@@ -675,6 +675,9 @@ EOF
     [[ "$output" != *"pinned action(s)"* ]]
 }
 
+# What: a real bad pin plus an unresolved alias, together.
+# Why: extraction and pinned-action counts must not merge.
+# From: Issue #1095 | PR #1734
 @test "a mixed run counts extraction and pinned-action failures separately, not combined" {
     write_workflow <<'EOF'
 name: CI
