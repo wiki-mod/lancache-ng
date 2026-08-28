@@ -1253,6 +1253,7 @@ ci_cmd_release() {
 # Why: each is diff-scoped internally or is inherently repo-wide.
 # From: Issue #1683
 readonly -a CI_STANDING_CHECKS=(
+    scripts/untracked/validate-stack-images.sh
     scripts/tracked/check-naming-consistency.sh
     scripts/tracked/check-workflow-service-lists.sh
     scripts/tracked/check-vex-drift.sh
@@ -1263,6 +1264,48 @@ readonly -a CI_STANDING_CHECKS=(
     scripts/untracked/check-proxy-cache-env-doc-drift.sh
     scripts/tracked/check-logging-matrix.sh
 )
+
+ci_compose_config_clean() {
+    # What: true iff "docker compose $* config" is warning-free.
+    # Why: a silent compose warning today is a real bug tomorrow.
+    # From: Issue #1683
+    local output
+    if ! output="$(docker compose "$@" config --quiet 2>&1)"; then
+        printf '%s\n' "$output" >&2
+        return 1
+    fi
+    # What: here-string, not printf | grep -q.
+    # Why: grep -q's early exit can SIGPIPE the producer under -e.
+    if grep -Eqi '(^|[[:space:]])(warn|warning|level=warning)' <<<"$output"; then
+        printf 'compose warnings treated as errors:\n%s\n' "$output" >&2
+        return 1
+    fi
+    return 0
+}
+
+ci_check_compose_files() {
+    # What: renders every real compose file/profile combination.
+    # Why: profile-less renders skip inactive profiles entirely.
+    # From: Issue #1683
+    local compose_file
+    ci_compose_config_clean -f deploy/quickstart/docker-compose.yml --profile ssl \
+        || ci_report_failure "compose config" "quickstart (ssl)" "clean" "warnings/errors" "fix the reported compose issue"
+    ci_compose_config_clean -f deploy/prod/docker-compose.yml \
+        || ci_report_failure "compose config" "prod" "clean" "warnings/errors" "fix the reported compose issue"
+    ci_compose_config_clean -f deploy/secondary/docker-compose.yml \
+        || ci_report_failure "compose config" "secondary" "clean" "warnings/errors" "fix the reported compose issue"
+    ci_compose_config_clean --env-file deploy/quickstart/.env -f deploy/quickstart/docker-compose.yml --profile ssl \
+        || ci_report_failure "compose config" "quickstart (.env, ssl)" "clean" "warnings/errors" "fix the reported compose issue"
+
+    for compose_file in deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml; do
+        ci_compose_config_clean -f "$compose_file" --profile dhcp-kea \
+            || ci_report_failure "compose config" "$compose_file (dhcp-kea)" "clean" "warnings/errors" "fix the reported compose issue"
+        ci_compose_config_clean -f "$compose_file" --profile dhcp-proxy \
+            || ci_report_failure "compose config" "$compose_file (dhcp-proxy)" "clean" "warnings/errors" "fix the reported compose issue"
+        ci_compose_config_clean -f "$compose_file" --profile logging \
+            || ci_report_failure "compose config" "$compose_file (logging)" "clean" "warnings/errors" "fix the reported compose issue"
+    done
+}
 
 ci_cmd_checks() {
     # What: runs every standing check, reporting all failures.
@@ -1281,6 +1324,16 @@ ci_cmd_checks() {
                 "see this check's own output above for the actual cause"
         fi
     done
+
+    # What: no subshell -- ci_report_failure's array must stay shared.
+    # Why: a subshell's CI_FAILURES writes never reach the caller.
+    # From: Issue #1683
+    local start_dir
+    start_dir="$(pwd)"
+    cd "$CI_REPO_ROOT"
+    ci_check_compose_files
+    cd "$start_dir"
+
     ci_failure_summary
 }
 

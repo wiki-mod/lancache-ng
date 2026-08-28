@@ -1067,3 +1067,24 @@ setup() {
     run bash "$repo_root/scripts/ci/ci.sh" checks
     [ "$status" -eq 0 ]
 }
+
+# What: docker compose config succeeds for a real compose file.
+# Why: proves the wrapper works against this repo's actual files.
+# From: Issue #1683
+@test "compose: ci_compose_config_clean passes for quickstart+ssl" {
+    command -v docker >/dev/null || skip "docker not available"
+    cd "$repo_root"
+    run ci_compose_config_clean -f deploy/quickstart/docker-compose.yml --profile ssl
+    [ "$status" -eq 0 ]
+}
+
+# What: the full compose-files check runs clean on this repo.
+# Why: this repo's own compose files are the check's real fixture.
+# From: Issue #1683
+@test "compose: ci_check_compose_files reports no failures here" {
+    command -v docker >/dev/null || skip "docker not available"
+    cd "$repo_root"
+    CI_FAILURES=()
+    ci_check_compose_files
+    [ "${#CI_FAILURES[@]}" -eq 0 ]
+}
