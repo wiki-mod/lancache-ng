@@ -539,45 +539,33 @@ reading the document for anything that needs human judgment.
 - **[AG-CI-009]** **Build acceleration scope**: `sccache`, `sccache-dist`, `distcc`, `distcc-pump`, and local Buildx cache paths are allowed only as Dev/CI optimizations. Production, runtime, setup, and update flows must stay pull-only against prebuilt images and must not depend on those accelerators.
 - **[AG-CI-003]** **Runner portability**: LAN-only acceleration such as Redis-backed sccache, sccache-dist, distcc, local Buildx cache paths, and self-hosted runner labels must stay explicitly configurable. Treat the current self-hosted runner farm as an optimization layer, not as the only valid CI environment. GitHub-hosted fallback jobs must validate without inheriting LAN-only assumptions about Redis URLs, distcc schedulers, cache paths, or runner labels; use documented modes, variables, and fail-closed capability checks instead of hidden host assumptions.
 - **[AG-VAL-017]** **Build-tools image**: `tools/build-tools/Dockerfile` intentionally uses `rust:latest`, then installs and smoke-tests required tools such as `rustfmt`, `clippy`, `sccache`, `cargo-audit`, `shellcheck`, `actionlint`, `bats`, `shellspec`, `distcc`, `distcc-pump`, Docker CLI, Docker Compose, and DNS/setup/template fixture tools such as `dig`, `ip`, `openssl`, `rsync`, and `envsubst`. It must explicitly set and verify `PATH`, especially `/usr/local/cargo/bin`, to avoid false `command not found` failures. CI jobs that only need bundled validation tools must use the prebuilt image instead of compiling those tools per job; for example, do not install `cargo-audit` in workflow jobs. CodeQL and Trivy image scanning remain GitHub workflow and runner capabilities, not tools bundled into this image.
-- **[AG-KD-003]** **`build-tools`'s CI tools: prebuilt binary by default, source-build only when there's a
-  concrete reason**: `cargo-audit` and `cargo-tarpaulin` are fetched as checksum-verified
-  prebuilt release binaries — they're Rust, so there's no behavioral difference from building
-  them ourselves, just wasted build time. `actionlint`, the Docker CLI, and `docker-compose`
-  are the exceptions, all built from source against `golang:latest` for the same reason: Go
-  statically embeds its entire standard library into every compiled binary, so a stale upstream
-  release binary permanently carries whatever stdlib CVEs existed when *its* maintainers last
-  cut a release. Confirmed for real (2026-07-09): actionlint's latest release (v1.7.12,
-  published 2026-03-30) scores 11 HIGH/CRITICAL Trivy findings (crypto/x509, crypto/tls,
-  net/mail, HTTP/2) via its embedded Go 1.26.1 stdlib, while building the same version from
-  source with `golang:latest` picks up a current Go toolchain (1.26.5 as of this writing) and
-  scores 0. Confirmed again (2026-07-10, CVE-2026-39822): the official static release binaries
-  for Docker CLI v29.6.1 and docker-compose v5.2.0 carry the same class of embedded-stdlib
-  vulnerability, with no patched upstream release available yet — building both from source
-  (`docker/cli`'s own `scripts/build/binary`, and a local `go build ./cmd` for
-  `docker/compose`, since neither project supports a plain `go install pkg@version`) against a
-  current Go toolchain is the only way to get a current, patched stdlib into them. This is a
-  narrow, justified exception to the "Rust and shell only" project-language rule (Rule-Ref:
-  AG-REL-001/AG-REL-004), not a general license to add other language toolchains — re-justify
-  it the same way (a real Trivy/CVE finding, not a hypothetical one) before reaching for a
-  compiled-from-source dependency in another language again. Confirmed a third time
-  (2026-07-22, GHSA-hrxh-6v49-42gf, issue #1080): `docker-buildx` v0.35.0, `docker-compose`
-  v5.2.0, AND the Docker CLI v29.6.1 all pinned `google.golang.org/grpc` at v1.81.1, a
-  HIGH-severity gRPC-Go xDS RBAC/HTTP-2 vulnerability fixed in v1.82.1 — found on buildx/compose
-  via CI's Trivy scan, and on the Docker CLI only by then auditing all four source-built tools
-  for the same CVE class rather than stopping at the two CI happened to flag. Fixed by an
-  explicit `go get google.golang.org/grpc@1.82.1` before each tool's build (mirroring the
-  existing `containerd/containerd/v2` override already used for buildx); the Docker CLI's
-  `vendor.mod`-only layout (no real `go.mod`) needed a temporary `go.mod -> vendor.mod` /
-  `go.sum -> vendor.sum` symlink for `go get`/`go mod vendor` to have a module root to write
-  through, removed again before the build itself runs. Verified clean (0 HIGH/CRITICAL across
-  all four binaries) via a real Docker build + real Trivy scan with CI's exact flags, not just a
-  module-graph inspection. Confirmed a fourth time (2026-07-29, CVE-2026-56852, issue #1281):
-  `docker-buildx` v0.35.0 (go.mod: v0.37.0) and `docker-compose` v5.2.0 / the Docker CLI v29.6.1
-  (both: v0.38.0) pinned `golang.org/x/text` at versions carrying a HIGH-severity `norm.Iter`
-  infinite-loop CVE fixed in v0.39.0 — `actionlint` has no `golang.org/x/text` dependency at
-  all, so needed no override. Fixed the same way as the grpc/containerd overrides above: an
-  explicit `go get golang.org/x/text@v0.40.0` before each affected tool's build. Verified clean
-  via a real Docker build + real Trivy scan with CI's exact flags.
+- **[AG-KD-003]** **`build-tools`'s third-party CI tools are installed as checksum-verified
+  prebuilt release binaries or distro packages, never compiled from source, unless a source
+  build is the only way to close a real, currently-reachable vulnerability in the tool's
+  embedded dependencies.** This default applies to every third-party tool in `build-tools`;
+  compiling any of this project's own Rust code is a separate matter and outside this rule's
+  scope. Only this project's own product code is ever compiled as a matter of course — a
+  third-party tool is source-built only under the exemption test below, never by default and
+  never for convenience.
+
+  An exemption requires all of the following: a real, currently-valid scan finding (not a
+  hypothetical one), a vulnerable code path that is actually reachable in how this project
+  invokes the tool, and no clean official release currently available. Exemptions currently in
+  force: the Docker CLI, `docker-buildx`, and `docker-compose`, all three built from source
+  against a current toolchain because they statically embed a language runtime's standard
+  library — a stale official release binary can carry standard-library vulnerabilities with no
+  upstream fix available, and a source build against a current toolchain is the only way to get
+  a patched standard library into the binary. This is a narrow, tool-specific exception to the
+  "Rust and shell only" project-language rule (Rule-Ref: AG-REL-001/AG-REL-004), not a general
+  license to add other language toolchains or to source-build other tools; each exemption must
+  independently satisfy the test above.
+
+  **Standing exception, not default.** Each exemption above is reviewed periodically, not
+  granted permanently: once a tool's current official release is clean, or its vulnerability
+  class is no longer reachable in how this project invokes it, the exemption is dropped and the
+  tool reverts to a checksum-verified prebuilt binary or package. The maintainer may revert any
+  exemption to plain package/binary installation at any time, for any reason, independent of
+  this review.
 (AG-KD-001 retired, retroactively documented 2026-08-01: originally "upstream nginx resolver must be real DNS, never the local PowerDNS recursor" -- silently removed from this file at some point with no retirement stub left behind, discovered only via git history (`git log -S "AG-KD-001"`) during this session's numbering audit. The same requirement lives on today as AG-OP-002, which states the identical fact. Not reused per AG-WF-016.)
 - **[AG-KD-002]** **Serial file**: OpenSSL's certificate serial file (`ca.srl`, used by `services/proxy`'s
   wildcard-cert generation) is stored alongside the CA certificate and key in the certs directory
