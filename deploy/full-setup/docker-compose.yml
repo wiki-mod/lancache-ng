@@ -2,10 +2,8 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: full-setup validation harness -- deterministic compose config,
-# dummy images, deterministic IPs/secrets, no external network assumptions.
-# Why: validation/testing only, not production; see docs/release-
-# versioning.md and release/stack-images.yml for the production image list.
+# What: deterministic validation harness, no external deps.
+# Why: testing harness only; see release-versioning.md for prod.
 # From: Issue #498
 
 name: lancache-ng-validation
@@ -17,10 +15,8 @@ services:
     image: "${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/proxy:${LANCACHE_IMAGE_TAG:-latest}"
     environment:
       - IP_STANDARD=${VALIDATION_PROXY_IP:-172.30.99.2}
-      # What: IP_SSL is a logical value only -- never actually reachable
-      # here (only VALIDATION_PROXY_IP is bound below).
-      # Why: prod binds IP_SSL to a real second host NIC; this harness's
-      # bridge traffic has no such equivalent.
+      # What: IP_SSL is logical only, never reachable here.
+      # Why: prod binds IP_SSL to a real NIC; harness has no equivalent.
       # From: Issue #668 | PR #747
       - IP_SSL=${VALIDATION_PROXY_SSL_IP:-172.30.99.4}
       - SSL_ENABLED=1
@@ -43,16 +39,12 @@ services:
       retries: 2
       start_period: 10s
 
-  # What: a socat shim reproducing prod's IP_STANDARD:443 -> proxy:8443
-  # forward as a separately dialable address.
-  # Why: this harness has no per-host-IP publish mechanism; without it
-  # dns-standard and dns-ssl resolved to the same endpoint.
+  # What: socat shim for IP_STANDARD:443 -> proxy:8443 forward.
+  # Why: harness lacks per-host-IP publish; DNSs resolved equally.
   # From: Issue #668 | PR #795
   #
-  # What: gated behind a Compose profile, started only by
-  # scripts/untracked/simulations/ssl-mitm-cache-simulation.sh's own explicit service name.
-  # Why: every other job brings the stack up unrestricted with no use for
-  # this shim; an un-threaded default IP could land outside a reserved subnet.
+  # What: gated to ssl-mitm-proof profile, explicit-service startup.
+  # Why: default IP allocation must stay within reserved subnet.
   # From: Issue #668 | PR #795
   standard-passthrough-shim:
     profiles: [ssl-mitm-proof]
@@ -65,16 +57,13 @@ services:
         ipv4_address: ${VALIDATION_STANDARD_SHIM_IP:-172.30.99.10}
     depends_on:
       - proxy
-    # What: restart is explicit quoted `"no"` (bare `no` parses as `false`).
-    # Why: "unless-stopped" defeats the runner-host leak detector's age
-    # check -- confirmed live: a reboot reset `.State.StartedAt`, masking
-    # 2-day-old leaked containers as ~1-minute-old.
+    # What: restart must be explicit `"no"`, not bare no (parses false).
+    # Why: unless-stopped masks age; reboot resets .State.StartedAt.
     # From: PR #1426
     restart: "no"
     healthcheck:
-      # What: `nc -z` proves a real listener is up.
-      # Why: same check style nats' own healthcheck uses (both images are
-      # alpine-family with busybox nc built in).
+      # What: `nc -z` proves real listener is up (TCP conn).
+      # Why: matches nats' healthcheck style; both have busybox nc.
       # From: Issue #668 | PR #795
       test: ["CMD-SHELL", "nc -z 127.0.0.1 443 || exit 1"]
       interval: 10s
@@ -86,9 +75,8 @@ services:
   dns-standard:
     image: "${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${LANCACHE_IMAGE_TAG:-latest}"
     environment:
-      # What: points at standard-passthrough-shim above, not proxy directly.
-      # Why: makes dns-standard's answer behaviorally distinct from
-      # dns-ssl's -- both used to resolve to the identical endpoint.
+      # What: points at standard-passthrough-shim, not proxy directly.
+      # Why: makes dns-standard distinct from dns-ssl (were identical).
       # From: Issue #668 | PR #795
       - PROXY_IP=${VALIDATION_STANDARD_SHIM_IP:-172.30.99.10}
       - PDNS_API_KEY=validation-pdns-key
@@ -101,10 +89,8 @@ services:
       - DNS_REPLICATION_ROLE=primary
       - DNS_XFR_NOTIFY_TARGETS=dns-ssl:5300
     volumes:
-      # What: shared-secrets volume for first-writer-wins PDNS_API_KEY/
-      # DDNS_TSIG_KEY resolution.
-      # Why: inert here -- this validation stack hardcodes a consistent
-      # PDNS_API_KEY instead.
+      # What: shared-secrets volume for PDNS_API_KEY/DDNS_TSIG_KEY.
+      # Why: inert here; stack hardcodes consistent PDNS_API_KEY.
       # From: Issue #858 | PR #886
       - shared-secrets:/var/lib/lancache-secrets
       - pdns-data-standard:/var/lib/powerdns
@@ -115,10 +101,8 @@ services:
       - nats
     restart: unless-stopped
     healthcheck:
-      # What: real query/response probe (AG-VAL-018), matching
-      # deploy/quickstart/docker-compose.yml's compliant check.
-      # Why: the prior `rec_control ping ... || true` forced exit 0
-      # regardless of the real result -- pure decoration, never unhealthy.
+      # What: real query/response probe matching quickstart's check.
+      # Why: prior rec_control ping was decoration, forced exit 0 always.
       # From: Issue #869 | PR #876
       test: ["CMD-SHELL", "dig @127.0.0.1 content1.steampowered.com A +short +time=2 +tries=1 | grep -q ."]
       interval: 10s
@@ -140,10 +124,8 @@ services:
       - DNS_REPLICATION_ROLE=secondary
       - DNS_XFR_PRIMARY=dns-standard:5300
     volumes:
-      # What: shared-secrets volume for first-writer-wins PDNS_API_KEY/
-      # DDNS_TSIG_KEY resolution.
-      # Why: inert here -- this validation stack hardcodes a consistent
-      # PDNS_API_KEY instead.
+      # What: shared-secrets volume for PDNS_API_KEY/DDNS_TSIG_KEY.
+      # Why: inert here; stack hardcodes consistent PDNS_API_KEY.
       # From: Issue #858 | PR #886
       - shared-secrets:/var/lib/lancache-secrets
       - pdns-data-ssl:/var/lib/powerdns
@@ -154,10 +136,8 @@ services:
       - nats
     restart: unless-stopped
     healthcheck:
-      # What: real query/response probe (AG-VAL-018), matching
-      # deploy/quickstart/docker-compose.yml's compliant check.
-      # Why: the prior `rec_control ping ... || true` forced exit 0
-      # regardless of the real result -- pure decoration, never unhealthy.
+      # What: real query/response probe matching quickstart's check.
+      # Why: prior rec_control ping was decoration, forced exit 0 always.
       # From: Issue #869 | PR #876
       test: ["CMD-SHELL", "dig @127.0.0.1 content1.steampowered.com A +short +time=2 +tries=1 | grep -q ."]
       interval: 10s
@@ -178,10 +158,8 @@ services:
       - validation-api
     restart: unless-stopped
     healthcheck:
-      # What: real HTTP probe against the Docker API's own /_ping endpoint,
-      # via the vanilla image entrypoint (PING=1 default), using wget.
-      # Why: proves the proxy actually forwards to the real Docker socket;
-      # this pinned Alpine-base image ships wget but not curl (verified).
+      # What: HTTP probe against Docker API /_ping via wget.
+      # Why: proves proxy forwards to real socket; Alpine has wget, no curl.
       # From: Issue #1169 | PR #1249
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:2375/_ping || exit 1"]
       interval: 30s
@@ -193,20 +171,16 @@ services:
   watchdog:
     image: "${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}"
     volumes:
-      # What: read-only mount -- the watchdog binary only reads this tree now.
-      # Why: the destructive purge moved to the `retention` service below;
-      # see deploy/prod/docker-compose.yml's identical mount. This service
-      # has no entrypoint/command override, so it picks up the image's own
-      # default ENTRYPOINT (the compiled binary) directly.
+      # What: cache mount is read-only (purge moved to retention).
+      # Why: watchdog only reads; see deploy/prod's identical mount.
       # From: Issue #842 | PR #1360
       - proxy-cache:/var/cache/lancache:ro
       # What: shared with `ui` below (read-only).
-      # Why: exercises the same status.json hand-off dev/prod/quickstart use.
+      # Why: shares status.json hand-off used by dev/prod/quickstart.
       # From: Issue #870 | PR #1165
       - watchdog-status:/var/run/watchdog
     # What: `service_started`, not `service_healthy`.
-    # Why: watchdog's own monitoring must survive a degraded Docker API
-    # channel, not disappear if docker-socket-proxy is briefly slow to start.
+    # Why: watchdog monitoring must survive degraded/slow Docker API.
     # From: PR #1489
     depends_on:
       docker-socket-proxy:
@@ -217,10 +191,8 @@ services:
       validation-api:
     restart: unless-stopped
     healthcheck:
-      # What: freshness-based (mtime) check, not just existence -- upgraded
-      # from a prior `test -f status.json` check.
-      # Why: a stalled main loop would otherwise leave a stale-but-present
-      # status.json reading as healthy forever; see healthcheck.sh's comment.
+      # What: freshness-based (mtime) check, not just file existence.
+      # Why: stalled loop leaves stale status.json appearing healthy.
       # From: PR #885
       test: ["CMD", "/healthcheck.sh"]
       interval: 10s
@@ -228,11 +200,9 @@ services:
       retries: 2
       start_period: 15s
 
-  # What: file-retention daemon; see deploy/prod's `retention:` service
-  # for the full cap_drop/DAC_OVERRIDE/network_mode rationale.
-  # Why: no syslog-ng/fluent-bit exists in this stack, so those prune
-  # functions simply no-op (fail-closed, not fatal).
-  # From: Issue #842 | PR #1360 | PR #1412
+  # What: file-retention daemon with fail-closed prune logic.
+  # Why: no syslog-ng/fluent-bit here; prune functions no-op safely.
+  # From: Issue #842 | PR #1360
   retention:
     image: "${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}"
     entrypoint: ["/retention-entrypoint.sh"]
@@ -253,16 +223,12 @@ services:
       - retention-state:/var/lib/lancache-retention-state
     restart: unless-stopped
 
-  # What: NATS message bus; no `container_name`, every credential is a
-  # baked literal, not `${VAR}`.
-  # Why: isolated `-p <project>` CI instances share one runner -- a fixed
-  # name would collide; literals keep the callout-simulation reproducible.
+  # What: NATS with no container_name; all credentials are baked literals.
+  # Why: isolated -p CI instances share runner; fixed name would collide.
   # From: Issue #583 | PR #621
   #
-  # What: prebakes both nats.conf and a separate auth_callout.conf
-  # fragment (mirroring dev/prod's real config split).
-  # Why: the Admin UI's restart-to-apply no-ops here, so the entrypoint
-  # must produce a fully callout-ready pair itself, on a fixed issuer key.
+  # What: prebakes nats.conf and auth_callout.conf pair.
+  # Why: UI restart-to-apply no-ops; entrypoint must be fully ready.
   # From: Issue #811 | PR #817
   nats:
     image: nats:2-alpine@sha256:c11af972c99ae542de8925e6a7d9c533aa1eb039660420d2074beed6089b3bf0
@@ -275,9 +241,8 @@ services:
         jetstream {
           store_dir: /data
         }
-        # What: monitor endpoint, mirroring dev/prod/quickstart's entrypoint.
-        # Why: without this, nats-server has no HTTP monitor at all, so
-        # /healthz below would never answer.
+        # What: HTTP monitor endpoint for nats-server.
+        # Why: without this, nats-server lacks HTTP monitor entirely.
         # From: PR #828
         http_port: 8222
         authorization {
