@@ -4,7 +4,7 @@
 #
 # What: regression suite for scripts/ci/ci.sh (CI 2.0 engine).
 # Why: §66 wants one suite covering every domain.
-# From: Issue #1683 | docs/ci-2.0-architecture.md
+ docs/ci-2.0-architecture.md$| docs/ci-2.0-architecture.md
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -354,6 +354,106 @@ setup() {
     ! ci_state_permits_build "$CI_STATE_BUILD_IN_PROGRESS"
     ! ci_state_permits_build "$CI_STATE_PRODUCED_UNVERIFIED"
     ! ci_state_permits_build "$CI_STATE_MISMATCH"
+}
+
+# ============================================================
+# LEDGER / ACCEPTANCE
+# ============================================================
+
+# What: a lookup with no acceptance record fails.
+# Why: §26 -- absence of a record is never a silent success.
+# From: Issue #1683
+@test "ledger: an unknown identity is not found" {
+    CI_LEDGER_DIR="$BATS_TEST_TMPDIR/ledger"
+    run ci_ledger_lookup proxy linux/amd64 deadbeef
+    [ "$status" -ne 0 ]
+}
+
+# What: an ACCEPTED result becomes a retrievable ledger entry.
+# Why: §26 -- the ledger enables PRESENT_ACCEPTED.
+# From: Issue #1683
+@test "ledger: an accepted result is recorded and found again" {
+    CI_LEDGER_DIR="$BATS_TEST_TMPDIR/ledger"
+    local results="$BATS_TEST_TMPDIR/results" d="sha256:$(printf 'a%.0s' {1..64})"
+    ci_result_record proxy linux/amd64 id1 "$d" ACCEPTED "$results" >/dev/null
+    ci_ledger_aggregate "$results" >/dev/null
+    [ "$(ci_ledger_lookup proxy linux/amd64 id1)" = "$d" ]
+}
+
+# What: a REJECTED result never enters the ledger.
+# Why: §25 -- a rejected artifact must never become reusable.
+# From: Issue #1683
+@test "ledger: a rejected result is not recorded" {
+    CI_LEDGER_DIR="$BATS_TEST_TMPDIR/ledger"
+    local results="$BATS_TEST_TMPDIR/results" d="sha256:$(printf 'b%.0s' {1..64})"
+    ci_result_record proxy linux/amd64 id2 "$d" REJECTED "$results" >/dev/null
+    ci_ledger_aggregate "$results" >/dev/null
+    run ci_ledger_lookup proxy linux/amd64 id2
+    [ "$status" -ne 0 ]
+}
+
+# What: aggregating the same results twice changes nothing.
+# Why: §26.4 -- a retried aggregator must converge.
+# From: Issue #1683
+@test "ledger: re-aggregating the same results is idempotent" {
+    CI_LEDGER_DIR="$BATS_TEST_TMPDIR/ledger"
+    local results="$BATS_TEST_TMPDIR/results" d="sha256:$(printf 'c%.0s' {1..64})"
+    ci_result_record dns linux/amd64 id3 "$d" ACCEPTED "$results" >/dev/null
+    ci_ledger_aggregate "$results" >/dev/null
+    ci_ledger_aggregate "$results" >/dev/null
+    [ "$(ci_ledger_lookup dns linux/amd64 id3)" = "$d" ]
+}
+
+# What: one identity, two digests is reported.
+# Why: overwriting would destroy the acceptance record.
+# From: Issue #1683
+@test "ledger: a conflicting digest for one identity is reported" {
+    CI_LEDGER_DIR="$BATS_TEST_TMPDIR/ledger"
+    local r1="$BATS_TEST_TMPDIR/r1" r2="$BATS_TEST_TMPDIR/r2"
+    ci_result_record ntp linux/amd64 id4 "sha256:$(printf 'd%.0s' {1..64})" ACCEPTED "$r1" >/dev/null
+    ci_result_record ntp linux/amd64 id4 "sha256:$(printf 'e%.0s' {1..64})" ACCEPTED "$r2" >/dev/null
+    ci_ledger_aggregate "$r1" >/dev/null
+    run ci_ledger_aggregate "$r2"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"ledger conflict"* ]]
+}
+
+# What: a record with a short digest is refused.
+# Why: §15 -- a short digest must never reach the ledger.
+# From: Issue #1683
+@test "ledger: a short digest is refused when recording" {
+    run ci_result_record proxy linux/amd64 id5 "sha-dead" ACCEPTED "$BATS_TEST_TMPDIR/r3"
+    [ "$status" -ne 0 ]
+}
+
+# ============================================================
+# REGISTRY ADDRESSING
+# ============================================================
+
+# What: the image reference comes from the environment.
+# Why: no registry host, owner or repo may be hardcoded.
+# From: Issue #1683
+@test "registry: the image reference comes from the environment" {
+    CI_REGISTRY="example.invalid"
+    CI_IMAGE_REPO="someowner/somerepo"
+    [ "$(ci_image_ref proxy)" = "example.invalid/someowner/somerepo/proxy" ]
+}
+
+# What: an unset repository is refused instead of guessed.
+# Why: a guessed path would publish to the wrong place.
+# From: Issue #1683
+@test "registry: an unset repository is refused" {
+    CI_IMAGE_REPO=""
+    GITHUB_REPOSITORY=""
+    run ci_image_ref proxy
+    [ "$status" -ne 0 ]
+}
+
+# What: no registry hostname or owner is hardcoded in ci.sh.
+# Why: every registry coordinate must stay settable.
+# From: Issue #1683
+@test "registry: ci.sh hardcodes no registry host or owner" {
+    ! grep -nE '(ghcr\.io/wiki-mod|docker\.io/)' "$repo_root/scripts/ci/ci.sh"
 }
 
 # ============================================================
@@ -824,4 +924,122 @@ setup() {
 @test "dispatch: no subcommand prints usage and fails" {
     run bash "$repo_root/scripts/ci/ci.sh"
     [ "$status" -ne 0 ]
+}
+
+# ============================================================
+# ACCEPTANCE TESTS (§85 A-O)
+# ============================================================
+
+# What: Test A -- a docs-only change plans no work at all.
+# Why: §85 A -- builds, scans and writes must be 0.
+# From: Issue #1683
+@test "acceptance A: a markdown-only change impacts no service" {
+    [ -z "$(ci_impacted_services README.md docs/architecture-ng.md)" ]
+}
+
+# What: Test B -- a shell comment keeps the identity.
+# Why: §85 B -- comment edits are semantically identical.
+# From: Issue #1683
+@test "acceptance B: a shell comment change hashes identically" {
+    local f1="$BATS_TEST_TMPDIR/e1.sh" f2="$BATS_TEST_TMPDIR/e2.sh"
+    printf '#!/bin/sh\n# before\nexec x\n' > "$f1"
+    printf '#!/bin/sh\n# after\nexec x\n' > "$f2"
+    [ "$(ci_content_hash "$f1")" = "$(ci_content_hash "$f2")" ]
+}
+
+# What: Test C -- a bats comment keeps the identity.
+# Why: §85 C -- a comment is not a test-logic change.
+# From: Issue #1683
+@test "acceptance C: a bats comment change hashes identically" {
+    local f1="$BATS_TEST_TMPDIR/t1.bats" f2="$BATS_TEST_TMPDIR/t2.bats"
+    printf '#!/usr/bin/env bats\n# old note\n@test "x" { true; }\n' > "$f1"
+    printf '#!/usr/bin/env bats\n# new note\n@test "x" { true; }\n' > "$f2"
+    [ "$(ci_content_hash "$f1")" = "$(ci_content_hash "$f2")" ]
+}
+
+# What: Test D -- test logic changes the hash only.
+# Why: §85 D -- tests run, container builds stay at 0.
+# From: Issue #1683
+@test "acceptance D: changed test logic changes the test hash only" {
+    local f1="$BATS_TEST_TMPDIR/t3.bats" f2="$BATS_TEST_TMPDIR/t4.bats"
+    printf '@test "x" { true; }\n' > "$f1"
+    printf '@test "x" { false; }\n' > "$f2"
+    [ "$(ci_content_hash "$f1")" != "$(ci_content_hash "$f2")" ]
+    [ -z "$(ci_impacted_services scripts/ci/ci.bats)" ]
+}
+
+# What: Test E -- a dns change excludes other services.
+# Why: §85 E -- only affected services are considered.
+# From: Issue #1683
+@test "acceptance E: a dns-only change leaves other services NOOP" {
+    local impacted
+    impacted="$(ci_impacted_services services/dns/Dockerfile)"
+    [[ "$impacted" == *"dns"* ]]
+    [[ "$impacted" != *"watchdog"* ]]
+    [[ "$impacted" != *"ntp"* ]]
+}
+
+# What: Test F -- cdn-domains.txt impacts both dns and proxy.
+# Why: §85 F -- proxy consumes it via a named context.
+# From: Issue #1683
+@test "acceptance F: a shared dependency impacts both consumers" {
+    local impacted
+    impacted="$(ci_impacted_services services/dns/cdn-domains.txt)"
+    [[ "$impacted" == *"dns"* ]]
+    [[ "$impacted" == *"proxy"* ]]
+}
+
+# What: Test G -- an unreachable registry means UNKNOWN.
+# Why: §85 G -- a lookup failure must never authorize a build.
+# From: Issue #1683
+@test "acceptance G: an unreachable registry does not permit a build" {
+    ! ci_state_permits_build "$CI_STATE_UNKNOWN"
+}
+
+# What: Test H -- an in-progress build blocks a twin.
+# Why: §85 H -- runner B waits and reuses instead.
+# From: Issue #1683
+@test "acceptance H: BUILD_IN_PROGRESS does not permit a build" {
+    ! ci_state_permits_build "$CI_STATE_BUILD_IN_PROGRESS"
+}
+
+# What: Test I/J -- unverified output never rebuilds.
+# Why: §85 I/J -- retry publish, never build twice.
+# From: Issue #1683
+@test "acceptance I+J: PRODUCED_UNVERIFIED does not permit a build" {
+    ! ci_state_permits_build "$CI_STATE_PRODUCED_UNVERIFIED"
+}
+
+# What: Test K -- a mismatch names both digests.
+# Why: §85 K -- no replacement build after a mismatch.
+# From: Issue #1683
+@test "acceptance K: a digest mismatch fails, naming both digests" {
+    ! ci_state_permits_build "$CI_STATE_MISMATCH"
+    ci_report_failure "digest match" "proxy" "sha256:aa" "sha256:bb" "fail, never rebuild"
+    [[ "${CI_FAILURES[0]}" == *"sha256:aa"* ]]
+    [[ "${CI_FAILURES[0]}" == *"sha256:bb"* ]]
+}
+
+# What: Test L -- one missing service blocks the whole stack.
+# Why: §85 L -- promotion is atomic; 9/10 never goes.
+# From: Issue #1683
+@test "acceptance L: an incomplete stack blocks the candidate" {
+    CI_LEDGER_DIR="$BATS_TEST_TMPDIR/ledger-L"
+    CI_IMAGE_REPO="owner/repo"
+    run ci_stack_candidate
+    [ "$status" -ne 0 ]
+}
+
+# What: Test M/N -- nightly and release never build.
+# Why: §85 M/N -- both promote or do nothing.
+# From: Issue #1683
+@test "acceptance M+N: nightly and release never invoke a build" {
+    ! grep -nE '^[[:space:]]*docker (buildx )?build([[:space:]]|$)' "$repo_root/scripts/ci/ci.sh"
+}
+
+# What: Test O -- no short SHA or digest in the engine.
+# Why: §85 O -- abbreviated identifiers must be zero.
+# From: Issue #1683
+@test "acceptance O: ci.sh contains no abbreviated SHA or digest" {
+    ! grep -nE "['\"]sha-[0-9a-f]{6,8}['\"]|['\"][0-9a-f]{7}['\"]" "$repo_root/scripts/ci/ci.sh"
 }

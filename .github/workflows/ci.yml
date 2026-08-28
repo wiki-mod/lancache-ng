@@ -4,7 +4,7 @@
 #
 # What: thin CI 2.0 orchestrator; all logic lives in ci.sh.
 # Why: §5 -- YAML answers when/where, never what.
-# From: Issue #1683 | docs/ci-2.0-architecture.md
+ docs/ci-2.0-architecture.md$| docs/ci-2.0-architecture.md
 name: CI 2.0
 
 on:

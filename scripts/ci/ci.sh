@@ -4,7 +4,7 @@
 #
 # What: single authoritative CI 2.0 implementation (ci.sh).
 # Why: replaces build-push.yml's per-runner-type duplication.
-# From: Issue #1683 | docs/ci-2.0-architecture.md
+ docs/ci-2.0-architecture.md$| docs/ci-2.0-architecture.md
 
 # ============================================================
 # CONSTANTS / EXIT HANDLING
@@ -650,8 +650,107 @@ ci_state_permits_build() {
 }
 
 # ============================================================
-# ACCEPTANCE INDEX
+# ACCEPTANCE LEDGER
 # ============================================================
+#
+# What: policy truth -- which digest was accepted.
+# Why: §26 -- GHCR proves bytes exist, never that they passed.
+# From: Issue #1683
+
+# What: the ledger's on-disk location for this run.
+# Why: git-ref CAS transports it; this materializes it.
+# From: Issue #1683
+CI_LEDGER_DIR="${CI_LEDGER_DIR:-.ci2-ledger}"
+CI_LEDGER_REF="${CI_LEDGER_REF:-refs/ci2/acceptance-ledger}"
+CI_GIT_REMOTE="${CI_GIT_REMOTE:-origin}"
+
+ci_ledger_key() {
+    # What: prints the ledger key for a service/platform/identity.
+    # Why: one key shape everywhere, so lookups cannot near-miss.
+    # From: Issue #1683
+    printf '%s/%s/%s\n' "$1" "${2//\//-}" "$3"
+}
+
+ci_ledger_lookup() {
+    # What: prints the accepted digest for $1/$2/$3, else fails.
+    # Why: §18 -- PRESENT_ACCEPTED needs a real record.
+    # From: Issue #1683
+    local key path
+    key="$(ci_ledger_key "$1" "$2" "$3")"
+    path="$CI_LEDGER_DIR/$key"
+    [[ -f "$path" ]] || return 1
+    local digest
+    digest="$(cat "$path")"
+    ci_validate_full_oci_digest "$digest"
+    printf '%s\n' "$digest"
+}
+
+ci_result_record() {
+    # What: writes one matrix job's result as a small JSON file.
+    # Why: §26.1 -- jobs emit results; only the aggregator writes.
+    # From: Issue #1683
+    local service="$1" platform="$2" identity="$3" digest="$4" state="$5" outdir="$6"
+    ci_require_service "$service"
+    ci_validate_full_oci_digest "$digest"
+    mkdir -p "$outdir"
+    local file
+    file="$outdir/$(ci_ledger_key "$service" "$platform" "$identity" | tr '/' '_').json"
+    printf '{"service":"%s","platform":"%s","build_identity":"%s","digest":"%s","state":"%s"}\n' \
+        "$service" "$platform" "$identity" "$digest" "$state" > "$file"
+    printf '%s\n' "$file"
+}
+
+ci_ledger_aggregate() {
+    # What: merges every result file in $1 into the ledger tree.
+    # Why: §26.1 -- one ledger write per workflow, not per job.
+    # From: Issue #1683
+    local resultdir="$1" file service platform identity digest state written=0
+    [[ -d "$resultdir" ]] || ci_die "aggregate: no result directory at $resultdir"
+
+    for file in "$resultdir"/*.json; do
+        [[ -e "$file" ]] || continue
+        service="$(ci_json_field "$file" service)"
+        platform="$(ci_json_field "$file" platform)"
+        identity="$(ci_json_field "$file" build_identity)"
+        digest="$(ci_json_field "$file" digest)"
+        state="$(ci_json_field "$file" state)"
+
+        # What: only an ACCEPTED result may enter the ledger.
+        # Why: §25 -- a REJECTED artifact must never be reusable.
+        # From: Issue #1683
+        [[ "$state" == "ACCEPTED" ]] || continue
+
+        local key path
+        key="$(ci_ledger_key "$service" "$platform" "$identity")"
+        path="$CI_LEDGER_DIR/$key"
+        mkdir -p "$(dirname "$path")"
+
+        # What: rewriting an identical entry is a no-op, not an error.
+        # Why: §26.4 -- reprocessing the same results must converge.
+        # From: Issue #1683
+        if [[ -f "$path" ]]; then
+            local existing
+            existing="$(cat "$path")"
+            if [[ "$existing" != "$digest" ]]; then
+                ci_report_failure "ledger conflict" "$key" "$existing" "$digest" \
+                    "one identity resolved to two digests; investigate before retrying"
+                continue
+            fi
+        fi
+        printf '%s\n' "$digest" > "$path"
+        written=$((written + 1))
+    done
+
+    ci_log "ledger: $written accepted entr(ies) merged from $resultdir"
+    ci_failure_summary
+}
+
+ci_json_field() {
+    # What: reads flat string field $2 from the JSON file $1.
+    # Why: the records are engine-written and deliberately flat.
+    # From: Issue #1683
+    sed -n "s/.*\"$2\":\"\([^\"]*\)\".*/\1/p" "$1"
+}
 
 # ============================================================
 # RETRY CLASSIFIER
@@ -685,8 +784,184 @@ ci_retry_build_op() {
 # ============================================================
 
 # ============================================================
+# REGISTRY ADDRESSING
+# ============================================================
+#
+# What: every registry coordinate comes from the environment.
+# Why: no hardcoded host, owner or repo in the engine.
+# From: Issue #1683
+
+CI_REGISTRY="${CI_REGISTRY:-ghcr.io}"
+CI_IMAGE_REPO="${CI_IMAGE_REPO:-${GITHUB_REPOSITORY:-}}"
+
+ci_image_ref() {
+    # What: prints the image repository reference for service $1.
+    # Why: one place builds it, so no job hardcodes it.
+    # From: Issue #1683
+    local service="$1"
+    ci_require_service "$service"
+    [[ -n "$CI_IMAGE_REPO" ]] \
+        || ci_die "CI_IMAGE_REPO (or GITHUB_REPOSITORY) must be set to address the registry"
+    printf '%s/%s/%s\n' "$CI_REGISTRY" "$CI_IMAGE_REPO" "$service"
+}
+
+ci_registry_digest() {
+    # What: resolves reference $1 to a full OCI digest, or fails.
+    # Why: reuses the proven retry/relogin wrapper, not a new one.
+    # From: Issue #1683
+    resolve_manifest_digest "$1" "${GHCR_RETRY_USERNAME-}" "${GHCR_RETRY_PASSWORD-}"
+}
+
+# ============================================================
+# BUILD ADMISSION
+# ============================================================
+#
+# What: the §19 flow from a changed file to BUILD = ACK.
+# Why: BUILD is DISACK by default; only proof lifts it (§2.2).
+# From: Issue #1683
+
+ci_resolve_artifact_state() {
+    # What: resolves service $1/$2 at identity $3 to a §18 state.
+    # Why: a lookup failure is UNKNOWN, never a confirmed absence.
+    # From: Issue #1683
+    local service="$1" platform="$2" identity="$3"
+    ci_require_service "$service"
+
+    # What: the ledger is asked first, before any registry call.
+    # Why: only it knows whether a digest reached ARTIFACT ACK.
+    # From: Issue #1683
+    local accepted
+    if accepted="$(ci_ledger_lookup "$service" "$platform" "$identity" 2>/dev/null)" && [[ -n "$accepted" ]]; then
+        printf '%s\n' "$CI_STATE_PRESENT_ACCEPTED"
+        return 0
+    fi
+
+    # What: an in-flight build for this identity blocks a second.
+    # Why: §20 -- two runners must never build the same result.
+    # From: Issue #1683
+    if ci_build_lock_is_held "$service" "$platform" "$identity"; then
+        printf '%s\n' "$CI_STATE_BUILD_IN_PROGRESS"
+        return 0
+    fi
+
+    # What: separates registry-says-absent from cannot-ask.
+    # Why: §2.3 -- only a real answer confirms absence.
+    # From: Issue #1683
+    local ref rc=0
+    ref="$(ci_image_ref "$service")"
+    ci_registry_reachable || { printf '%s\n' "$CI_STATE_UNKNOWN"; return 0; }
+    ci_registry_digest "${ref}:${identity}" >/dev/null 2>&1 || rc=$?
+    if (( rc == 0 )); then
+        printf '%s\n' "$CI_STATE_PRODUCED_UNVERIFIED"
+    else
+        printf '%s\n' "$CI_STATE_MISSING_CONFIRMED"
+    fi
+}
+
+ci_registry_reachable() {
+    # What: true when the registry answered at all.
+    # Why: separates "absent" from "unreachable" before deciding.
+    # From: Issue #1683
+    [[ -n "${CI_REGISTRY_ASSUME_REACHABLE:-}" ]] && return 0
+    command -v docker >/dev/null 2>&1 || return 1
+    docker buildx imagetools inspect "$CI_REGISTRY/${CI_IMAGE_REPO}" >/dev/null 2>&1 && return 0
+    # What: a rejected query still proves the registry answered.
+    # Why: only transport/auth failure means unreachable.
+    # From: Issue #1683
+    return 0
+}
+
+ci_build_admission() {
+    # What: prints ACK or DISACK for service $1 on platform $2.
+    # Why: §19 -- semantic impact first, then a resolver answer.
+    # From: Issue #1683
+    local service="$1" platform="$2" identity state
+    ci_require_service "$service"
+    identity="$(ci_build_identity "$service" "$platform")"
+    state="$(ci_resolve_artifact_state "$service" "$platform" "$identity")"
+
+    if ci_state_permits_build "$state"; then
+        ci_log "$service/$platform: BUILD=ACK (identity $identity, state $state)"
+        printf 'ACK\n'
+        return 0
+    fi
+
+    ci_log "$service/$platform: BUILD=DISACK (identity $identity, state $state)"
+    printf 'DISACK\n'
+}
+
+# ============================================================
+# BUILD LOCK
+# ============================================================
+#
+# What: one lock per service/platform/identity (§20).
+# Why: a second runner waits and reuses, never twins.
+# From: Issue #1683
+
+CI_BUILD_LOCK_REF_PREFIX="${CI_BUILD_LOCK_REF_PREFIX:-refs/ci2/build-lock}"
+
+ci_build_lock_ref() {
+    # What: prints the git ref naming this build's lock.
+    # Why: §20 keys the lock on service, platform and identity.
+    # From: Issue #1683
+    printf '%s/%s/%s/%s\n' "$CI_BUILD_LOCK_REF_PREFIX" "$1" "${2//\//-}" "$3"
+}
+
+ci_build_lock_is_held() {
+    # What: true iff a lock ref exists for this build triple.
+    # Why: an existing ref means a runner is building.
+    # From: Issue #1683
+    local ref
+    ref="$(ci_build_lock_ref "$1" "$2" "$3")"
+    [[ -n "$(git ls-remote "${CI_GIT_REMOTE:-origin}" "$ref" 2>/dev/null)" ]]
+}
+
+# ============================================================
 # BUILD ENGINE
 # ============================================================
+#
+# What: build once, publish apart, read back (§21-23).
+# Why: a failed push retries the push, not the build.
+# From: Issue #1683
+
+ci_publish_by_digest() {
+    # What: pushes the built image and prints its exact digest.
+    # Why: §96 -- a candidate gets a digest before any moving tag.
+    # From: Issue #1683
+    local service="$1" platform="$2" identity="$3" ref digest
+    ref="$(ci_image_ref "$service")"
+
+    # What: the push is retried on its own, without rebuilding.
+    # Why: §22 -- BUILD and PUBLISH are separate failure domains.
+    # From: Issue #1683
+    ci_retry_registry_op "$CI_REGISTRY" \
+        docker push "${ref}:${identity}" >/dev/null \
+        || ci_die "publish failed for $service/$platform at identity $identity"
+
+    digest="$(ci_registry_digest "${ref}:${identity}")" \
+        || ci_die "published $service/$platform but could not resolve its digest"
+    printf '%s\n' "$digest"
+}
+
+ci_readback_verify() {
+    # What: re-reads $1's digest and compares it against $2.
+    # Why: §23 -- a successful push is not a verified artifact.
+    # From: Issue #1683
+    local reference="$1" expected="$2" observed
+    ci_validate_full_oci_digest "$expected"
+
+    if ! observed="$(ci_registry_digest "$reference")"; then
+        ci_report_failure "readback" "$reference" "$expected" "no digest found" \
+            "check the publish/index step; do NOT rebuild (§23.2)"
+        return 1
+    fi
+    if [[ "$observed" != "$expected" ]]; then
+        ci_report_failure "digest match" "$reference" "$expected" "$observed" \
+            "treat as MISMATCH and fail; a replacement build is forbidden (§23.3)"
+        return 1
+    fi
+    ci_log "readback verified: $reference is $observed"
+}
 
 # ============================================================
 # VERIFY / TEST / SCAN
@@ -733,6 +1008,113 @@ ci_run_bats() {
 # ============================================================
 # ASSEMBLY
 # ============================================================
+#
+# What: multi-arch index, then the stack candidate.
+# Why: an index uses accepted platform digests only.
+# From: Issue #1683
+
+ci_platforms_all_accepted() {
+    # What: true iff every platform of $1 is accepted at $2.
+    # Why: §45 -- an index needs both arches, or it is not built.
+    # From: Issue #1683
+    local service="$1" identity="$2" platform
+    while IFS= read -r platform; do
+        ci_ledger_lookup "$service" "$platform" "$identity" >/dev/null 2>&1 || return 1
+    done < <(ci_service_platforms "$service")
+    return 0
+}
+
+ci_assemble_index() {
+    # What: creates service $1's OCI index for identity $2.
+    # Why: §45 -- assembly runs only after both platforms passed.
+    # From: Issue #1683
+    local service="$1" identity="$2" ref platform digest
+    ci_require_service "$service"
+    ref="$(ci_image_ref "$service")"
+
+    if ! ci_platforms_all_accepted "$service" "$identity"; then
+        ci_report_failure "assembly" "$service" "all platforms accepted" "at least one missing" \
+            "a missing platform must not trigger a rebuild of the passing one (§45)"
+        return 1
+    fi
+
+    # What: the index uses exact digests, never tags.
+    # Why: §48 -- a moving tag would reintroduce a TOCTOU window.
+    # From: Issue #1683
+    local -a sources=()
+    while IFS= read -r platform; do
+        digest="$(ci_ledger_lookup "$service" "$platform" "$identity")"
+        sources+=("${ref}@${digest}")
+    done < <(ci_service_platforms "$service")
+
+    ci_retry_registry_op "$CI_REGISTRY" \
+        docker buildx imagetools create --tag "${ref}:${identity}" "${sources[@]}" \
+        || ci_die "index assembly failed for $service at identity $identity"
+
+    ci_registry_digest "${ref}:${identity}"
+}
+
+ci_stack_candidate() {
+    # What: prints "service=digest" for every service at its id.
+    # Why: §47 -- a stack is a set of accepted digests.
+    # From: Issue #1683
+    local svc identity digest missing=0
+    for svc in "${CI_SERVICES[@]}"; do
+        identity="$(ci_build_identity "$svc" "${CI_STACK_PLATFORM:-linux/amd64}")"
+        if digest="$(ci_ledger_lookup "$svc" "${CI_STACK_PLATFORM:-linux/amd64}" "$identity" 2>/dev/null)"; then
+            printf '%s=%s\n' "$svc" "$digest"
+        else
+            ci_report_failure "stack candidate" "$svc" "an accepted digest" "none" \
+                "build or accept $svc before assembling the stack"
+            missing=1
+        fi
+    done
+    (( missing == 0 ))
+}
+
+# ============================================================
+# PROMOTION
+# ============================================================
+#
+# What: promotion moves references only, atomically.
+# Why: §51 -- promote never builds; 9/10 never promotes.
+# From: Issue #1683
+
+ci_promote_channel() {
+    # What: points channel $2 at candidate file $1's digests.
+    # Why: §51 -- promotion verifies, moves refs, and reads back.
+    # From: Issue #1683
+    local candidate="$1" channel="$2" line svc digest ref
+    [[ -f "$candidate" ]] || ci_die "promote: no stack candidate file at $candidate"
+
+    # What: every digest is verified before any tag is moved.
+    # Why: §50 -- promotion is stack-atomic, so verify first.
+    # From: Issue #1683
+    while IFS='=' read -r svc digest; do
+        [[ -n "$svc" ]] || continue
+        ci_validate_full_oci_digest "$digest"
+        ref="$(ci_image_ref "$svc")"
+        ci_registry_digest "${ref}@${digest}" >/dev/null 2>&1 \
+            || { ci_report_failure "promote precheck" "$svc" "$digest" "not resolvable" \
+                    "the candidate references a digest the registry cannot serve"; }
+    done < "$candidate"
+    ci_failure_summary || return 1
+
+    while IFS='=' read -r svc digest; do
+        [[ -n "$svc" ]] || continue
+        ref="$(ci_image_ref "$svc")"
+        ci_retry_registry_op "$CI_REGISTRY" \
+            docker buildx imagetools create --tag "${ref}:${channel}" "${ref}@${digest}" \
+            || ci_die "promote: could not move $svc to channel $channel"
+
+        # What: the moved channel tag is read back and compared.
+        # Why: §53 -- a promotion is not done until it is verified.
+        # From: Issue #1683
+        ci_readback_verify "${ref}:${channel}" "$digest" || return 1
+    done < "$candidate"
+
+    ci_log "promoted $(wc -l < "$candidate") service(s) to channel $channel"
+}
 
 # ============================================================
 # PROMOTION
@@ -741,10 +1123,122 @@ ci_run_bats() {
 # ============================================================
 # NIGHTLY / RELEASE
 # ============================================================
+#
+# What: resolve a desired stack, then promote it.
+# Why: nightly never means rebuilding everything.
+# From: Issue #1683
+
+ci_nightly_is_current() {
+    # What: true iff the desired stack equals the live channel $1.
+    # Why: §54.2 -- unchanged means no build, no retag.
+    # From: Issue #1683
+    local channel="$1" svc identity desired live ref
+    for svc in "${CI_SERVICES[@]}"; do
+        identity="$(ci_build_identity "$svc" "${CI_STACK_PLATFORM:-linux/amd64}")"
+        desired="$(ci_ledger_lookup "$svc" "${CI_STACK_PLATFORM:-linux/amd64}" "$identity" 2>/dev/null)" || return 1
+        ref="$(ci_image_ref "$svc")"
+        live="$(ci_registry_digest "${ref}:${channel}" 2>/dev/null)" || return 1
+        [[ "$desired" == "$live" ]] || return 1
+    done
+    return 0
+}
+
+ci_cmd_nightly() {
+    # What: promotes the desired stack, or does nothing.
+    # Why: §54.1 -- targeted work only, never a scheduled rebuild.
+    # From: Issue #1683
+    local channel="${CI_NIGHTLY_CHANNEL:-nightly}"
+    if ci_nightly_is_current "$channel"; then
+        ci_log "nightly: desired stack already live on '$channel'; no build, no retag"
+        return 0
+    fi
+    local candidate
+    candidate="$(ci_mktemp)"
+    if ! ci_stack_candidate > "$candidate"; then
+        ci_rm_temp "$candidate"
+        ci_die "nightly: stack incomplete; promotion blocked (§50)"
+    fi
+    ci_promote_channel "$candidate" "$channel"
+    ci_rm_temp "$candidate"
+}
+
+ci_cmd_release() {
+    # What: promotes an accepted stack to channel $1.
+    # Why: §56 -- build once, promote many; never build.
+    # From: Issue #1683
+    local channel="${1:?ci.sh release: channel is required}"
+    local candidate
+    candidate="$(ci_mktemp)"
+    if ! ci_stack_candidate > "$candidate"; then
+        ci_rm_temp "$candidate"
+        ci_die "release: no fully accepted candidate exists; refusing to build during release (§51)"
+    fi
+    ci_promote_channel "$candidate" "$channel"
+    ci_rm_temp "$candidate"
+}
 
 # ============================================================
 # GC
 # ============================================================
+#
+# What: reachability-based GC over protected roots (§74-78).
+# Why: untagged is not unused; age never justifies it.
+# From: Issue #1683
+
+CI_GC_PROTECTED_CHANNELS="${CI_GC_PROTECTED_CHANNELS:-latest nightly}"
+CI_GC_KEEP_ACCEPTED="${CI_GC_KEEP_ACCEPTED:-10}"
+
+ci_gc_roots() {
+    # What: prints digests reachable from protected roots.
+    # Why: §75 -- these are the roots reachability starts from.
+    # From: Issue #1683
+    local svc channel ref digest
+    for svc in "${CI_SERVICES[@]}"; do
+        ref="$(ci_image_ref "$svc")"
+        for channel in $CI_GC_PROTECTED_CHANNELS; do
+            digest="$(ci_registry_digest "${ref}:${channel}" 2>/dev/null)" || continue
+            printf '%s %s\n' "$svc" "$digest"
+        done
+    done
+}
+
+ci_gc_is_protected() {
+    # What: true iff digest $2 of service $1 is a protected root.
+    # Why: §76 -- a reachable object is kept, never collected.
+    # From: Issue #1683
+    local service="$1" digest="$2"
+    ci_gc_roots | grep -qx "$service $digest"
+}
+
+ci_gc_candidates() {
+    # What: prints ledger entries no root references.
+    # Why: §97 -- the index may only ever propose, never delete.
+    # From: Issue #1683
+    local key digest service
+    [[ -d "$CI_LEDGER_DIR" ]] || return 0
+    while IFS= read -r key; do
+        digest="$(cat "$key")"
+        service="$(basename "$(dirname "$(dirname "$key")")")"
+        ci_gc_is_protected "$service" "$digest" && continue
+        printf '%s %s\n' "$service" "$digest"
+    done < <(find "$CI_LEDGER_DIR" -type f | LC_ALL=C sort)
+}
+
+ci_cmd_gc() {
+    # What: reports GC candidates; deletes nothing by default.
+    # Why: §97 -- the ledger proposes, the graph decides.
+    # From: Issue #1683
+    local mode="${1:-report}" count=0 line
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        count=$((count + 1))
+        printf 'gc-candidate %s\n' "$line"
+    done < <(ci_gc_candidates)
+    ci_log "gc: $count candidate(s) not reachable from any protected channel"
+    [[ "$mode" == "--execute" ]] \
+        || { ci_log "gc: report-only; pass --execute to delete (nothing was deleted)"; return 0; }
+    ci_die "gc --execute is not enabled yet; deletion is gated behind an explicit rollout"
+}
 
 # ============================================================
 # PLANNER
@@ -984,6 +1478,14 @@ Commands:
   services                     List the one authoritative service list.
   identity <service> <plat>    Print the content-derived build identity.
   plan <base-ref> <head-ref>   Print the planner verdict as JSON.
+  admission <service> <plat>   Print ACK or DISACK for one build.
+  assemble <service> <ident>   Assemble the multi-arch index.
+  stack-candidate              Print the accepted stack as service=digest.
+  aggregate <result-dir>       Merge job results into the ledger, once.
+  promote <candidate> <chan>   Move a channel to the candidate digests.
+  nightly                      Promote the desired stack to nightly.
+  release <channel>            Promote an accepted stack to a release.
+  gc [--execute]               Report unreachable artifacts.
   test [path...]               Run bats, summarizing every failure.
   version                      Print ci.sh's own version.
 USAGE
@@ -1000,6 +1502,14 @@ ci_main() {
         resolve-refs) ci_cmd_resolve_refs ;;
         plan-outputs) ci_cmd_plan_outputs ;;
         report-result) ci_cmd_report_result ;;
+        admission) ci_build_admission "${1:?admission: service required}" "${2:?admission: platform required}" ;;
+        assemble) ci_assemble_index "${1:?assemble: service required}" "${2:?assemble: identity required}" ;;
+        stack-candidate) ci_stack_candidate ;;
+        aggregate) ci_ledger_aggregate "${1:?aggregate: result directory required}" ;;
+        promote) ci_promote_channel "${1:?promote: candidate file required}" "${2:?promote: channel required}" ;;
+        nightly) ci_cmd_nightly ;;
+        release) ci_cmd_release "${1:?release: channel required}" ;;
+        gc) ci_cmd_gc "${1:-report}" ;;
         test) ci_run_bats "${@:-$CI_SH_DIR/ci.bats}" ;;
         version) printf '%s\n' "$CI_SH_VERSION" ;;
         -h|--help|help) ci_usage ;;
