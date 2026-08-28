@@ -467,15 +467,21 @@ jobs:
           timeout: 10m
           exit-code: "1"
 
-      # What: warns; does not report on a DB-download failure.
-      # Why: reporting success here would auto-close a real
-      #   open finding -- a DB miss proves nothing.
+      # What: reports DB-unavailability as a separate issue.
+      # Why: a distinct label keeps this visible without closing a
+      #   real open vulnerability finding on a mere DB miss.
       # From: Issue #1095
-      - name: Warn on Trivy DB-unavailable (amd64, no status report)
-        if: >-
-          github.event_name == 'pull_request' &&
-          steps.trivy-scan.outcome == 'failure' && steps.trivy-scan.outputs.db-unavailable == 'true'
-        run: echo "::warning::Trivy DB never downloaded for build-tools (amd64) -- skipping the status report so a real open finding is not auto-closed."
+      - name: Report Trivy DB-unavailable status (amd64, separate issue)
+        if: github.event_name == 'pull_request'
+        uses: ./.github/actions/nightly-status
+        with:
+          outcome: ${{ steps.trivy-scan.outputs.db-unavailable == 'true' && 'failure' || 'success' }}
+          label: trivy-db-unavailable-build-tools-amd64
+          scope: >-
+            Trivy vulnerability DB never downloaded for
+            tools/build-tools (amd64) across all retry attempts
+          fork-check-step-name: Scan local build-tools amd64 image with Trivy
+          project_pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
 
       # What: reports the scan outcome as a self-closing issue.
       # Why: nightly-status/action.yml owns this pattern; reused here
@@ -726,15 +732,21 @@ jobs:
           timeout: 10m
           exit-code: "1"
 
-      # What: warns; does not report on a DB-download failure.
-      # Why: reporting success here would auto-close a real
-      #   open finding -- a DB miss proves nothing.
+      # What: reports DB-unavailability as a separate issue.
+      # Why: a distinct label keeps this visible without closing a
+      #   real open vulnerability finding on a mere DB miss.
       # From: Issue #1095
-      - name: Warn on Trivy DB-unavailable (arm64, no status report)
-        if: >-
-          github.event_name == 'pull_request' &&
-          steps.trivy-scan.outcome == 'failure' && steps.trivy-scan.outputs.db-unavailable == 'true'
-        run: echo "::warning::Trivy DB never downloaded for build-tools (arm64) -- skipping the status report so a real open finding is not auto-closed."
+      - name: Report Trivy DB-unavailable status (arm64, separate issue)
+        if: github.event_name == 'pull_request'
+        uses: ./.github/actions/nightly-status
+        with:
+          outcome: ${{ steps.trivy-scan.outputs.db-unavailable == 'true' && 'failure' || 'success' }}
+          label: trivy-db-unavailable-build-tools-arm64
+          scope: >-
+            Trivy vulnerability DB never downloaded for
+            tools/build-tools (arm64) across all retry attempts
+          fork-check-step-name: Scan local build-tools arm64 image with Trivy
+          project_pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
 
       # What: reports the scan outcome as a self-closing issue.
       # Why: own arm64 label so one arch's fix doesn't close the
