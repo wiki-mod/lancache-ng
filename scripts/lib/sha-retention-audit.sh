@@ -2,8 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # What: pure helpers for the read-only SHA retention audit.
-# Why: never mutates GHCR; kept pure so every rule is directly unit-testable
-# without a live audit run.
+# Why: Never mutates; kept pure for direct unit testing always.
 # From: Issue #1095 | PR #1586
 
 if [[ -n "${SHA_RETENTION_AUDIT_LIB_LOADED:-}" ]]; then
@@ -14,9 +13,8 @@ if [[ -n "${SHA_RETENTION_AUDIT_LIB_LOADED:-}" ]]; then
 fi
 SHA_RETENTION_AUDIT_LIB_LOADED=1
 
-# What: reads one "  <key>: <positive-integer>" line from the manifest.
-# Why: sra_read_retention_keep and sra_read_minimum_stable_releases share
-# this exact parsing rule to avoid a driftable second copy (AG-CODE-011).
+# What: reads one "  <key>: <int>" line from manifest.
+# Why: Shared parsing rule avoids duplication (AG-CODE-011).
 # From: Issue #1095 | PR #1586
 _sra_read_manifest_positive_integer() {
   local manifest="${1:?_sra_read_manifest_positive_integer: manifest is required}"
@@ -36,9 +34,8 @@ _sra_read_manifest_positive_integer() {
   printf '%s\n' "$value"
 }
 
-# What: reads retention.accepted_ordinary_roots_per_package from the manifest.
-# Why: this count is the per-package budget of ordinary sha roots kept before
-# an over-budget root becomes a would-delete/delete candidate.
+# What: reads retention.accepted_ordinary_roots_per_package.
+# Why: Per-package budget for ordinary sha roots before deletion.
 # From: Issue #1095 | PR #1586
 sra_read_retention_keep() {
   local manifest="${1:?sra_read_retention_keep: manifest is required}"
@@ -46,9 +43,7 @@ sra_read_retention_keep() {
 }
 
 # What: reads retention.minimum_stable_releases from the manifest.
-# Why: sra_select_supported_release_tags needs this count to know how many
-# recent vX.Y.Z tags stay protected (docs/release-versioning.md's Retention
-# section).
+# Why: Minimum stable releases must remain protected indefinitely.
 # From: Issue #1095 | PR #1586
 sra_read_minimum_stable_releases() {
   local manifest="${1:?sra_read_minimum_stable_releases: manifest is required}"
@@ -56,19 +51,15 @@ sra_read_minimum_stable_releases() {
 }
 
 # What: reads retention.channel_buffer_versions from the manifest.
-# Why: v1.2 inverts protection for a non-ordinary-version
-# fallback (unrecognized tag shape, no protected-channel match) -- this
-# count is the per-package safety buffer kept regardless of age instead of
-# a permanent protect.
-# From: Issue #1585.
+# Why: Fallback safety buffer when tags match no protected channel.
+# From: Issue #1585
 sra_read_channel_buffer_versions() {
   local manifest="${1:?sra_read_channel_buffer_versions: manifest is required}"
   _sra_read_manifest_positive_integer "$manifest" "channel_buffer_versions"
 }
 
-# What: reads a `<key>:` block-list from the manifest, one item per line.
-# Why: shared parsing rule for every retention list key (today only
-# rollback_anchors), so a future second list key reuses it (AG-CODE-011).
+# What: reads a `<key>:` block-list, one item per line.
+# Why: Shared rule for list parsing; future keys will reuse it.
 # From: Issue #1095 | PR #1586
 _sra_read_manifest_list() {
   local manifest="${1:?_sra_read_manifest_list: manifest is required}"
@@ -104,28 +95,24 @@ _sra_read_manifest_list() {
   printf '%s\n' "$items"
 }
 
-# What: reads retention.rollback_anchors from the manifest, one digest per line.
-# Why: the manifest's steady state is an empty list -- a maintainer only adds
-# an entry after a real regression is found, so an absent list is not an error.
+# What: reads retention.rollback_anchors, one digest per line.
+# Why: Steady state empty; entries added only after regressions.
 # From: Issue #1095 | PR #1586
 sra_read_rollback_anchors() {
   local manifest="${1:?sra_read_rollback_anchors: manifest is required}"
   _sra_read_manifest_list "$manifest" rollback_anchors true
 }
 
-# What: checks whether a value has the exact sha256:<64-hex> digest shape.
-# Why: a rollback anchor is deliberately digest-only, never a git tag/ref --
-# a tag can be moved or deleted out from under an anchor unnoticed; a
-# content-addressed digest cannot.
+# What: checks for sha256:<64-hex> digest shape exactly.
+# Why: Digests prevent anchor staleness from tag moves or deletes.
 # From: Issue #1095 | PR #1586
 sra_is_rollback_anchor_digest() {
   local value="${1:?sra_is_rollback_anchor_digest: value is required}"
   [[ "$value" =~ ^sha256:[0-9a-f]{64}$ ]]
 }
 
-# What: exact-match membership check between a digest and a set of anchors.
-# Why: never a substring/prefix match, the same conservative-match philosophy
-# as this file's other tag/digest comparisons.
+# What: exact-match digest membership in anchor set.
+# Why: Exact match only, consistent with other tag/digest checks.
 # From: Issue #1095 | PR #1586
 sra_digest_is_rollback_anchor() {
   local digest="${1:?sra_digest_is_rollback_anchor: digest is required}"
@@ -137,9 +124,8 @@ sra_digest_is_rollback_anchor() {
   return 1
 }
 
-# What: validates an already-read rollback_anchors list, entry by entry.
-# Why: a pure function (no manifest path, no exit calls) so the CI-time
-# static check and the audit's own read-time re-validation share one rule.
+# What: validates rollback_anchors list, entry by entry.
+# Why: Pure function; CI and runtime share one validation rule.
 # From: Issue #1095 | PR #1586
 sra_validate_rollback_anchors_list() {
   local anchors_raw="${1:-}" entry
@@ -158,10 +144,9 @@ sra_validate_rollback_anchors_list() {
   done <<<"$anchors_raw"
 }
 
-# What: lists class/name packages from caller-selected manifest sections.
-# Why: retention audit and destructive GC need one parser while the default
-# remains the current runtime/tooling/metadata first-party inventory.
-# From: Issue #1095.
+# What: lists packages by class/name from manifest sections.
+# Why: Audit and GC share one parser; default remains separate.
+# From: Issue #1095
 sra_manifest_packages() {
   local manifest="${1:?sra_manifest_packages: manifest is required}"
   local sections="${2:-runtime tooling metadata}"
@@ -185,9 +170,8 @@ sra_manifest_packages() {
   ' "$manifest"
 }
 
-# What: validates a fetched GHCR versions page against the shape classification needs.
-# Why: refusing a malformed page here, before classification runs, avoids
-# misclassifying partial or unexpected data as a real audit result.
+# What: validates GHCR versions page against shape needs.
+# Why: Prevents misclassification of malformed page data as result.
 # From: Issue #1095 | PR #1586
 sra_validate_version_page() {
   local page_file="${1:?sra_validate_version_page: page file is required}"
@@ -211,9 +195,8 @@ sra_validate_version_page() {
   ' "$page_file" >/dev/null
 }
 
-# What: classifies one tag as a root, a per-platform child, or other shape.
-# Why: root vs. child vs. other drives every downstream protect/would-delete
-# decision, so this classification is centralized in one place.
+# What: classifies tag as root, per-platform child, other.
+# Why: Centralized classification drives all downstream decisions.
 # From: Issue #1095 | PR #1586
 sra_tag_kind() {
   local tag="${1:?sra_tag_kind: tag is required}"
@@ -226,9 +209,8 @@ sra_tag_kind() {
   fi
 }
 
-# What: resolves a short/full hex commit prefix to a real 40-char commit.
-# Why: an unresolvable prefix must fail closed, not be silently treated as
-# an unknown/unranked commit that could then rank as newest.
+# What: resolves hex commit prefix to 40-char commit.
+# Why: Unresolvable prefix fails closed to prevent false ranking.
 # From: Issue #1095 | PR #1586
 sra_resolve_commit_prefix() {
   local git_dir="${1:?sra_resolve_commit_prefix: git directory is required}"
@@ -245,11 +227,9 @@ sra_resolve_commit_prefix() {
   printf '%s\n' "$resolved"
 }
 
-# What: checks whether a resolved commit is an ancestor of history_ref.
-# Why: a root tag pointing at a commit outside the audited history (e.g. a
-# rebased-away or force-pushed commit) cannot be ranked and must not be
-# treated as deletable.
-# From: Issue #1095 | PR #1501.
+# What: checks if commit is ancestor of history_ref.
+# Why: Commits outside audited history can't rank; protect always.
+# From: Issue #1095 | PR #1501
 sra_commit_is_on_history_ref() {
   local git_dir="${1:?sra_commit_is_on_history_ref: git directory is required}"
   local commit="${2:?sra_commit_is_on_history_ref: commit is required}"
@@ -257,19 +237,16 @@ sra_commit_is_on_history_ref() {
   git -C "$git_dir" merge-base --is-ancestor "$commit" "$history_ref"
 }
 
-# What: checks a string against the GHCR created_at shape (YYYY-MM-DDTHH:MM:SSZ).
-# Why: split from sra_version_created_at so the hot loop validates an
-# already-extracted value instead of paying a second per-version jq call.
+# What: validates GHCR created_at format (YYYY-MM-DDTHH:MM:SSZ).
+# Why: Hot loop validates; avoids second per-version jq call.
 # From: Issue #1095 | PR #1586
 sra_validate_created_at_string() {
   local created_at="${1?sra_validate_created_at_string: value argument is required}"
   [[ "$created_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
 }
 
-# What: extracts the GHCR-reported build timestamp for one package version.
-# Why: display-only -- ranking stays 100% git-history-derived; the
-# orchestrator's hot loop calls sra_validate_created_at_string directly
-# instead of this helper.
+# What: extracts GHCR build timestamp for one package version.
+# Why: Display-only; ranking is purely git-history-derived always.
 # From: Issue #1095 | PR #1586
 sra_version_created_at() {
   local version_json="${1:?sra_version_created_at: version JSON is required}"
@@ -285,10 +262,8 @@ sra_version_created_at() {
   printf '%s\n' "$created_at"
 }
 
-# What: formats one AUDIT report line for a classified package version.
-# Why: a pure formatter, directly unit-testable without a live run; the tags
-# arg uses "${5?}" (no colon) since a legitimately empty tag list must not be
-# rejected the way a truly missing arg is.
+# What: formats AUDIT report line for classified version.
+# Why: Pure formatter; unit-testable; correctly handles empty tags.
 # From: Issue #1095 | PR #1586
 sra_emit_record() {
   local class="${1:?sra_emit_record: class is required}"
@@ -306,9 +281,8 @@ sra_emit_record() {
 }
 
 # What: counts a version's tags by sra_tag_kind (root/child/other).
-# Why: the orchestrator's classification branches on these three counts
-# together, so computing them once here keeps that branching logic simple.
-# From: Issue #1095 | PR #1501.
+# Why: Compute once; keeps branching logic simple in orchestrator.
+# From: Issue #1095 | PR #1501
 sra_version_tag_facts() {
   local version_json="${1:?sra_version_tag_facts: version JSON is required}"
   local encoded_tags encoded_tag tag kind root_count=0 child_count=0 other_count=0
@@ -349,18 +323,16 @@ sra_version_tag_facts() {
   printf '%s\t%s\t%s\n' "$root_count" "$child_count" "$other_count"
 }
 
-# What: checks whether a tag has the stable-release shape vX.Y.Z (no suffix).
-# Why: distinct from a release-candidate tag (vX.Y.Z-rc.N) -- only a genuine
-# stable release counts toward minimum_stable_releases.
+# What: checks tag for stable-release shape vX.Y.Z (no suffix).
+# Why: Distinguishes stable from RC tags; counts toward minimum.
 # From: Issue #1095 | PR #1586
 sra_is_stable_release_tag() {
   local tag="${1:?sra_is_stable_release_tag: tag is required}"
   [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
 }
 
-# What: converts a vX.Y.Z tag into a zero-padded, lexically-sortable key.
-# Why: bash has no native semver comparator; zero-padding each component
-# lets a plain `sort -r` order releases newest-first.
+# What: converts vX.Y.Z tag to zero-padded sortable key.
+# Why: Zero-padding lets plain sort order releases newest-first.
 # From: Issue #1095 | PR #1586
 sra_release_sort_key() {
   local tag="${1:?sra_release_sort_key: tag is required}"
@@ -370,10 +342,8 @@ sra_release_sort_key() {
   printf '%020d.%020d.%020d\n' "$major" "$minor" "$patch"
 }
 
-# What: prints the newest `count` stable-release tags read from stdin.
-# Why: sort's output is captured into a variable before head/cut -- piping
-# sort directly into an early-exiting consumer under `set -o pipefail` can
-# misreport SIGPIPE as failure (AG-VAL-032).
+# What: prints newest `count` stable-release tags.
+# Why: Avoids SIGPIPE misreport under set -o pipefail with sort.
 # From: Issue #1095 | PR #1586
 sra_select_supported_release_tags() {
   local count="${1:?sra_select_supported_release_tags: count is required}"
@@ -394,9 +364,8 @@ sra_select_supported_release_tags() {
   cut -d'|' -f2- <<<"$selected"
 }
 
-# What: classifies one "other"-kind tag into the protected channel it identifies.
-# Why: separates nightly/latest/stable-release from an unrecognized tag so
-# the caller can report a specific protection reason, not a generic one.
+# What: classifies "other"-kind tag to its protected channel.
+# Why: Separates channels so caller reports specific, not generic.
 # From: Issue #1095 | PR #1586
 sra_classify_channel_tag() {
   local tag="${1:?sra_classify_channel_tag: tag is required}"
@@ -413,9 +382,8 @@ sra_classify_channel_tag() {
   esac
 }
 
-# What: extracts every "other"-kind tag from an already comma-joined tag list.
-# Why: pure-bash split avoids a second per-version jq/base64 round-trip; a
-# literal comma split is safe since OCI's tag grammar forbids commas.
+# What: extracts "other"-kind tags from comma-joined list.
+# Why: Bash split avoids jq/base64; comma safe in OCI tag grammar.
 # From: Issue #1095 | PR #1586
 sra_other_tags_from_csv() {
   local tags_csv="${1?sra_other_tags_from_csv: tags CSV argument is required}"
@@ -431,9 +399,8 @@ sra_other_tags_from_csv() {
   done
 }
 
-# What: returns a "+"-joined reason covering every protected channel that matches.
-# Why: a digest can match several channels at once, so picking one would
-# hide information; failure means none matched.
+# What: returns reasons covering all matching protected channels.
+# Why: Multiple channels can match; report all to preserve info.
 # From: Issue #1095 | PR #1586
 sra_protected_reference_reason() {
   local other_tags="${1?sra_protected_reference_reason: other tags argument is required}"
@@ -465,11 +432,9 @@ sra_protected_reference_reason() {
   printf '%s\n' "$joined"
 }
 
-# What: classifies one already-ranked candidate's position against a budget.
-# Why: shared by both the ordinary-sha-root retention-budget loop and the
-# v1.2 non-ordinary-version buffer loop in the orchestrator,
-# so the same within/beyond-budget arithmetic is not duplicated (AG-CODE-011).
-# From: Issue #1585.
+# What: classifies ranked candidate position against budget.
+# Why: Shared by budget loops to avoid arithmetic code duplication.
+# From: Issue #1585
 sra_budget_decision() {
   local position="${1:?sra_budget_decision: position is required}"
   local budget="${2:?sra_budget_decision: budget is required}"
@@ -484,39 +449,21 @@ sra_budget_decision() {
 
 # --- Incremental classification cache (v1.2 point 4) ---------
 #
-# What: a small SQLite cache of the expensive-to-recompute per-version
-# resolution result (an ordinary sha-<commit> root's git-history rank, or a
-# rootless version's channel-match outcome), keyed by (package, version_id)
-# and fingerprinted by (digest, tags) so a changed version never reuses a
-# stale result.
-# Why: the final protect/would-delete decision always depends on a fresh,
-# in-memory sort of the current candidate pool (ranks/positions shift as
-# versions are added or removed), so nothing about the DELETE-relevant
-# decision itself is ever read from cache -- only the deterministic,
-# unchanged-if-digest/tags-unchanged *resolution* (git-history rank; or
-# "no protected channel matched") is, which is what made the original
-# 26,000-version run slow (one `git rev-parse`/`merge-base`
-# subprocess pair per candidate root, every run, even for versions whose
-# tags have not changed since the previous run).
-# From: Issue #1585.
+# What: SQLite cache of expensive per-version resolution results.
+# Why: Resolution is cached, not decision; pool shifts rankings.
+# From: Issue #1585
 
 # What: the cache's schema, as a plain printable string.
-# Why: keeps the schema itself directly unit-testable without a live
-# sqlite3 invocation (its shape can be grepped/asserted on by bats).
-# From: Issue #1585.
-#
-# What: history_fingerprint identifies the managed-ref-set a row was cached
-# under and is part of the primary key, not just a stored column.
-# Why: two different real callers classify against different ref sets and
-# share this cache file; keying by fingerprint keeps each caller's rows
-# independent instead of one INSERT OR REPLACE evicting the other's.
-# From: Issue #1095.
-#
-# What: table renamed version_cache -> version_cache_v2 for this change.
-# Why: real cache blobs already exist under the old schema (no
-# history_fingerprint column); CREATE TABLE IF NOT EXISTS is a no-op
-# against them, so reusing the old name would silently break every write.
-# From: Issue #1095.
+# Why: Keeps schema unit-testable without live sqlite3 invocation.
+# From: Issue #1585
+
+# What: Identifies ref-set; primary key part prevents row eviction.
+# Why: Separates caller rows; prevents INSERT OR REPLACE eviction.
+# From: Issue #1095
+
+# What: table: version_cache → version_cache_v2 for change.
+# Why: Old schema incompatible; new name prevents write breakage.
+# From: Issue #1095
 sra_cache_schema_sql() {
   cat <<'SQL'
 CREATE TABLE IF NOT EXISTS version_cache_v2 (
@@ -533,11 +480,9 @@ CREATE TABLE IF NOT EXISTS version_cache_v2 (
 SQL
 }
 
-# What: builds a "ref@resolved-commit;..." fingerprint for one run's ref set.
-# Why: ref-set drift (different caller, or a ref moving) must become a safe
-# cache miss, never a silently stale resolution; caller must pass a stable
-# ref order so the same ref set always fingerprints identically.
-# From: Issue #1095.
+# What: builds "ref@resolved-commit;..." fingerprint for ref set.
+# Why: Ref-set drift causes cache miss; stable order needed always.
+# From: Issue #1095
 sra_history_refs_fingerprint() {
   local repo_root="${1:?sra_history_refs_fingerprint: repo root is required}"
   shift
@@ -551,32 +496,25 @@ sra_history_refs_fingerprint() {
 }
 
 # What: creates the cache database (idempotent) at the given path.
-# Why: a cache-miss run (first run ever, or a rotated-key restore-keys
-# fallback with no prior save under this run's exact key) must produce a
-# valid, empty, queryable database, not fail -- that clean fallback is the
-# cache's own required self-verification per the v1.2 plan.
-# From: Issue #1585.
+# Why: Cache-miss runs must succeed; fallback init needed always.
+# From: Issue #1585
 sra_cache_init() {
   local db_path="${1:?sra_cache_init: db path is required}"
   command -v sqlite3 >/dev/null 2>&1 || return 1
   sra_cache_schema_sql | sqlite3 "$db_path"
 }
 
-# What: escapes a value for safe inclusion inside a single-quoted SQL literal.
-# Why: sqlite3's CLI has no separate parameter-binding mode for an ad hoc
-# statement string built from a shell script; doubling an embedded single
-# quote is SQL's own standard escape for exactly this case.
-# From: Issue #1585.
+# What: escapes value for single-quoted SQL literal inclusion.
+# Why: Doubling quotes is SQL's escape for ad hoc statements.
+# From: Issue #1585
 sra_sql_quote() {
   local value="${1?sra_sql_quote: value argument is required}"
   printf '%s' "${value//\'/\'\'}"
 }
 
-# What: bulk-reads one package's cached rows for one history_fingerprint.
-# Why: one sqlite3 call per package, not per version; filtering by
-# fingerprint server-side means a caller only ever sees its own ref-set's
-# rows, never a different caller's stale one for the same version.
-# From: Issue #1585 | Issue #1095.
+# What: bulk-reads package's cached rows for history_fingerprint.
+# Why: One call per package; server-side filter isolates rows.
+# From: Issue #1585
 sra_cache_read_package() {
   local db_path="${1:?sra_cache_read_package: db path is required}"
   local package="${2:?sra_cache_read_package: package is required}"
@@ -587,11 +525,9 @@ sra_cache_read_package() {
     "SELECT version_id, digest, tags, resolution FROM version_cache_v2 WHERE package = '$(sra_sql_quote "$package")' AND history_fingerprint = '$(sra_sql_quote "$history_fingerprint")';"
 }
 
-# What: bulk-writes one package's updated cache rows in a single transaction.
-# Why: same one-call-per-package reasoning as the read side; rows_file is
-# pre-built TSV(version_id, digest, tags, resolution) fed on a real path,
-# not stdin, so the caller controls its own temp-file lifecycle.
-# From: Issue #1585.
+# What: bulk-writes package's cache rows in single transaction.
+# Why: One call per package; caller controls TSV file lifecycle.
+# From: Issue #1585
 sra_cache_write_package() {
   local db_path="${1:?sra_cache_write_package: db path is required}"
   local package="${2:?sra_cache_write_package: package is required}"
@@ -619,11 +555,8 @@ sra_cache_write_package() {
         "$(sra_sql_quote "$package")" "$version_id" "$(sra_sql_quote "$digest")" "$(sra_sql_quote "$tags")" "$(sra_sql_quote "$resolution")" "$(sra_sql_quote "$history_fingerprint")" "$(sra_sql_quote "$history_ref_names")" "$now"
     done <"$rows_file"
     # What: prunes a superseded generation for the same caller identity.
-    # Why: a tip-advance changes history_fingerprint on every write, and the
-    # composite key keeps old and new generations from evicting each other --
-    # without this, obsolete rows accumulate unbounded.
-    # From: Issue #1095.
-    printf "DELETE FROM version_cache_v2 WHERE package = '%s' AND history_ref_names = '%s' AND history_fingerprint != '%s';\n" \
+    # Why: Prevents accumulation of obsolete rows via composite key.
+    # From: Issue #1095
       "$(sra_sql_quote "$package")" "$(sra_sql_quote "$history_ref_names")" "$(sra_sql_quote "$history_fingerprint")"
     printf 'COMMIT;\n'
   } >"$sql_file"
@@ -636,11 +569,8 @@ sra_cache_write_package() {
 }
 
 
-# What: extracts every referenced digest from one Dockerfile's FROM lines.
-# Why: pure text parsing (no filesystem globbing) keeps this unit-testable;
-# case-insensitive and an optional --flag group (e.g. --platform=...) cover
-# grammar variants a prior Dockerfile-matching heuristic here missed at
-# first (Rule-Ref: AG-VAL-036, PR #1506).
+# What: extracts digests from Dockerfile's FROM lines.
+# Why: Pure text parsing; unit-testable; covers grammar variants.
 # From: Issue #1613
 sra_dockerfile_from_digests() {
   local dockerfile_content="${1?sra_dockerfile_from_digests: dockerfile content argument is required}"
