@@ -480,14 +480,14 @@ ci_semantic_diff_is_noop() {
 # From: Issue #1683
 CI_TOOLCHAIN_IDENTITY="${CI_TOOLCHAIN_IDENTITY:-unset}"
 
-# What: resolved base-image digests, newline-separated (§17).
+# What: resolved base-image digests (§17).
 # Why: mutable tags must be pinned before hashing.
 # From: Issue #1683
 CI_BASE_IMAGE_DIGESTS="${CI_BASE_IMAGE_DIGESTS:-}"
 
 ci_path_identity() {
-    # What: prints "<git-mode> <normalized-content-hash>" for $1.
-    # Why: mode and content together are the file's real identity.
+    # What: prints mode + normalized hash for $1.
+    # Why: mode and content are file's identity.
     # From: Issue #1683
     local path="$1" mode
     mode="$(git ls-files -s -- "$path" | awk '{print $1}')"
@@ -496,15 +496,15 @@ ci_path_identity() {
 }
 
 ci_service_input_paths() {
-    # What: prints service $1's tracked build-input paths, sorted.
-    # Why: a stable order keeps the hash reproducible.
+    # What: prints $1's input paths, sorted.
+    # Why: stable order keeps hash reproducible.
     # From: Issue #1683
     ci_service_input_entries "$1" | cut -f2
 }
 
 ci_service_input_entries() {
-    # What: prints "<mode>\t<path>" per build input of service $1.
-    # Why: one git call for all modes; per-file calls are slow.
+    # What: prints mode/path per input of $1.
+    # Why: one git call, not per-file calls.
     # From: Issue #1683
     local service="$1"
     ci_require_service "$service"
@@ -519,8 +519,8 @@ ci_service_input_entries() {
 }
 
 ci_normalize_many() {
-    # What: normalizes every path in entries file $1 in one pass.
-    # Why: a subprocess per file made one identity take ~12s.
+    # What: normalizes paths in file $1 in one pass.
+    # Why: per-file subprocesses made identity ~12s.
     # From: Issue #1683
     local entries="$1"
     [[ -s "$entries" ]] || return 0
@@ -572,22 +572,22 @@ ci_normalize_many() {
 }
 
 ci_build_identity() {
-    # What: prints service $1's build identity for platform $2.
-    # Why: §16 -- content, platform, toolchain, pinned bases only.
+    # What: prints $1's identity for platform $2.
+    # Why: §16 — content, platform, bases.
     # From: Issue #1683
     local service="$1" platform="$2"
     ci_require_service "$service"
     [[ -n "$platform" ]] || ci_die "ci_build_identity: platform is required for $service"
 
-    # What: the file list is materialized once for the awk pass.
-    # Why: awk reads modes from it while walking the same files.
+    # What: materializes file list once for awk.
+    # Why: awk reads modes while walking files.
     # From: Issue #1683
     local entries
     entries="$(ci_mktemp)"
     ci_service_input_entries "$service" > "$entries"
 
-    # What: the hashed record: identity inputs, then file content.
-    # Why: §16 -- exactly these inputs define the artifact.
+    # What: hashed identity inputs, then content.
+    # Why: §16 — these inputs define artifact.
     # From: Issue #1683
     {
         printf 'service=%s\n' "$service"
@@ -601,8 +601,8 @@ ci_build_identity() {
 }
 
 ci_test_identity() {
-    # What: prints service $1's test identity (§14.3).
-    # Why: §29 -- tests re-run on a test change, without a build.
+    # What: prints $1's test identity (§14.3).
+    # Why: §29 — rerun on change, not rebuild.
     # From: Issue #1683
     local service="$1" path
     ci_require_service "$service"
@@ -616,8 +616,8 @@ ci_test_identity() {
 }
 
 ci_validation_identity() {
-    # What: prints the validation identity for digest $1 (§14.4).
-    # Why: §30 -- a policy change rescans, never rebuilds.
+    # What: prints validation identity for $1 (§14.4).
+    # Why: §30 — policy change rescans.
     # From: Issue #1683
     local digest="$1"
     ci_validate_full_oci_digest "$digest"
