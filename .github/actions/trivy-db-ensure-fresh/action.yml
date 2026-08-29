@@ -11,13 +11,9 @@ description: >-
   skip-db-update: true so it never writes to the DB itself -- only this
   action's single, lock-held invocation ever does.
 
-# What: closes the actual concurrent-writer race that motivated the
-#   per-run-wiped directory this replaces, without going back to it.
-# Why: pointing every scan job at one shared directory (trivy-cache-dir)
-#   without this step would make the original BoltDB race worse, not
-#   better -- now every self-hosted runner's concurrent jobs contend for
-#   the SAME file instead of each getting its own throwaway copy.
-# From: Issue #1095 | Issue #912 | PR #927
+# What: serializes DB refresh with lock to prevent races
+# Why: concurrent jobs need exclusive write access to DB
+# From: Issue #1095 | PR #1747
 
 inputs:
   cache-dir:
@@ -69,12 +65,9 @@ runs:
         poll_interval=5
         waited=0
 
-        # What: mkdir is atomic on both a real local filesystem and NFSv4
-        #   (unlike flock, which this repo's own NFS mount -- `soft`,
-        #   `local_lock=none` -- cannot rely on).
-        # Why: this is the actual mechanism that makes concurrent jobs
-        #   safe against a corrupted concurrent write, not a courtesy.
-        # From: Issue #1095 | Issue #912
+        # What: uses atomic mkdir for lock, not flock
+        # Why: soft NFS mount cannot reliably support flock
+        # From: Issue #1095 | PR #1747
         acquire() {
           mkdir "$lock_dir" 2>/dev/null
         }
@@ -99,11 +92,9 @@ runs:
           waited=$(( waited + poll_interval ))
         done
 
-        # What: always releases the lock, even on failure/cancellation.
-        # Why: an unreleased lock would wedge every later job for
-        #   stale-lock-seconds, or forever on a genuinely correct-looking
-        #   directory this action can't tell is abandoned.
-        # From: Issue #1095
+        # What: trap ensures lock release even on failure
+        # Why: unreleased lock would wedge later jobs
+        # From: Issue #1095 | PR #1747
         trap 'rm -rf -- "$lock_dir"' EXIT
 
         echo "::notice::Holding Trivy DB-update lock on '$lock_dir' -- running trivy's own --download-db-only freshness check (real download only if metadata.json's NextUpdate has actually passed)."

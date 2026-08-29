@@ -8,19 +8,9 @@ description: >-
   writable, otherwise a real local-disk fallback -- never the per-run
   ephemeral directories this replaces, and never tmpfs/OS-default /tmp.
 
-# What: replaces the "Prepare candidate/pushed Trivy cache" steps that
-#   derived a fresh, empty directory per ref/run for pull_request,
-#   workflow_dispatch, and retried runs.
-# Why: an always-empty directory defeats Trivy's own DB-freshness check
-#   (metadata.json's NextUpdate), forcing a full ~1.3 GB re-download on
-#   every single one of those runs. This action instead returns a
-#   directory that is genuinely persistent, so that freshness check can
-#   finally do its job. Race-safety against a concurrent-writer BoltDB
-#   corruption is NOT this action's job -- it only ever resolves and
-#   read/write-probes a path. The caller must run
-#   trivy-db-ensure-fresh (lock-guarded) before treating this directory as
-#   safe to scan against with skip-db-update.
-# From: Issue #1095 | Issue #912 | PR #927
+# What: returns a persistent Trivy cache instead of empty
+# Why: always-empty dir defeats Trivy's DB freshness check
+# From: Issue #1095 | PR #1747
 
 inputs:
   shared-dir:
@@ -54,28 +44,17 @@ runs:
       id: resolve
       shell: bash
       env:
-        # What: overridable via caller inputs for testing; defaults match
-        #   the real runner-hosting NFS layout.
-        # Why: a hardcoded path with no override would make the fallback
-        #   path itself untestable without physically unmounting NFS.
-        # From: Issue #1095
+        # What: overridable via caller inputs for testing
+        # Why: hardcoded path needs NFS unmount to test
+        # From: Issue #1095 | PR #1747
         PRIMARY_DIR: ${{ inputs.shared-dir }}
         FALLBACK_DIR: ${{ inputs.fallback-dir }}
       run: |
         set -euo pipefail
 
-        # What: writes and reads back a uniquely-named probe file AND a
-        #   probe subdirectory with a file inside it, then removes both.
-        # Why: a directory merely "existing" proves nothing -- a stale or
-        #   half-dead NFS mount (server down, export revoked) can still
-        #   list as a directory while every real I/O hangs or fails. The
-        #   subdirectory half is load-bearing, not redundant: file-create
-        #   and directory-create permissions can differ on a shared
-        #   directory (setgid bits, ACLs, ownership), and Trivy itself
-        #   creates fanal/, policy/, and java-db/ subdirectories under
-        #   cache-dir on first use -- a flat-file-only probe cannot catch
-        #   a directory that is writable for files but not for mkdir.
-        # From: Issue #1095 | Issue #912
+        # What: probes file and subdir creation/cleanup
+        # Why: stale mount might list but fail actual I/O
+        # From: Issue #1095 | PR #1747
         probe_writable() {
           local dir="$1"
           local probe="$dir/.trivy-cache-dir-write-probe.$$.${RANDOM}"
@@ -99,11 +78,9 @@ runs:
           exit 0
         fi
 
-        # What: loud, explicit warning -- never a silent degrade.
-        # Why: AG-INT-002 -- a real capability loss (no shared DB across
-        #   runners, back to per-host downloads) must be visible in the
-        #   job log, not swallowed.
-        # From: Issue #1095
+        # What: explicit warning on NFS unavailability
+        # Why: shared DB loss must be visible in job log
+        # From: Issue #1095 | PR #1747
         echo "::warning::Shared Trivy DB cache '$PRIMARY_DIR' is not mounted or not writable (NFS server unreachable, export revoked, or genuinely absent). Falling back to a real local-disk directory on THIS runner host only -- never tmpfs/OS-default /tmp, since that was the actual cause of a prior 'no space left on device' outage. This runner will not share the DB with any other runner host until the mount recovers."
 
         mkdir -p "$FALLBACK_DIR" || {

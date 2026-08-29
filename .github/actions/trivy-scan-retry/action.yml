@@ -2,11 +2,9 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: Retries aquasecurity/trivy-action up to 4 times, re-authenticating
-# before each retry, only when a DB-download attempt failed.
-# Why: trivy's own fallback only advances on a transient-classified
-# failure; a non-transient one aborts with zero retry (PR #1503/#1500).
-# From: PR #1542, Issue #1535
+# What: retries trivy up to 4x with re-auth on DB failure
+# Why: trivy does not retry on non-transient failures
+# From: Issue #1095 | PR #1747
 name: Trivy scan with GHCR-first DB mirror, authenticated pull, and retry
 description: >-
   Wraps aquasecurity/trivy-action with a 4-attempt retry and a GHCR-first,
@@ -116,11 +114,9 @@ outputs:
 runs:
   using: composite
   steps:
-    # What: Resolves one output path used by every attempt + classify step
-    # below, defaulting to a fixed runner.temp file when unset.
-    # Why: the retry discriminator needs one stable path to check across
-    # all 4 attempts, not a caller-supplied one that might change.
-    # From: PR #1542, Issue #1535
+    # What: resolves output path for all attempts
+    # Why: retry discriminator needs one stable path
+    # From: Issue #1095 | PR #1747
     - name: Resolve effective Trivy output path
       id: outpath
       shell: bash
@@ -132,19 +128,16 @@ runs:
           echo "path=${{ runner.temp }}/trivy-scan-retry-output.txt" >> "$GITHUB_OUTPUT"
         fi
 
-    # What: Deletes any leftover report file from an earlier invocation of
-    # this action within the same job.
-    # Why: a stale file would let the first classify step misread an old
-    # result as this attempt's own.
-    # From: PR #1542, Issue #1535
+    # What: clears stale report from earlier invocation
+    # Why: prevent misreading old result as current attempt
+    # From: Issue #1095 | PR #1747
     - name: Clear any stale Trivy report file
       shell: bash
       run: rm -f "${{ steps.outpath.outputs.path }}"
 
-    # What: writes one shared attempt-failure classifier script.
-    # Why: 4 identical copies previously diverged per attempt; a
-    #   missing report alone does not prove a DB-download failure.
-    # From: Issue #1095
+    # What: creates shared failure classifier script
+    # Why: prevent per-attempt divergence on status
+    # From: Issue #1095 | PR #1747
     - name: Prepare shared attempt-classifier script
       id: classify-script
       shell: bash
@@ -177,11 +170,9 @@ runs:
         CLASSIFY
         echo "path=$script" >> "$GITHUB_OUTPUT"
 
-    # What: Authenticates to GHCR before the Trivy DB pull; continue-on-error
-    # so a login failure never blocks an otherwise-working anonymous pull.
-    # Why: self-hosted runners share a small egress-IP pool across
-    # concurrent scans -- authenticating is real defense-in-depth.
-    # From: PR #1542, Issue #1535
+    # What: logs in to GHCR for Trivy DB pull
+    # Why: shared egress IP needs authentication rate-limit
+    # From: Issue #1095 | PR #1747
     - name: Log in to GHCR for authenticated Trivy DB pull
       continue-on-error: true
       uses: ./.github/actions/docker-login-action-centralized-version
@@ -190,11 +181,9 @@ runs:
         username: ${{ inputs.username }}
         password: ${{ inputs.password }}
 
-    # What: Authenticates to Docker Hub for the optional third DB-source
-    # tier; skipped entirely when dockerhub-username is unset.
-    # Why: no registry: input -- docker/login-action defaults to Docker
-    # Hub, confirmed identical to `docker login docker.io` on a live runner.
-    # From: PR #1543, Issue #1535
+    # What: logs in to Docker Hub for third DB source
+    # Why: defaults to Hub when registry input unset
+    # From: Issue #1095 | PR #1747
     - name: Log in to Docker Hub for the third DB-source tier
       if: inputs.dockerhub-username != ''
       continue-on-error: true
@@ -225,11 +214,9 @@ runs:
         exit-code: ${{ inputs.exit-code }}
         trivy-config: ${{ github.action_path }}/trivy-config.yaml
 
-    # What: Checks whether trivy's report file exists and is non-empty
-    # after a failed attempt (AG-CI-013 retryable-vs-genuine discriminator).
-    # Why: trivy only writes a report once scanning completes -- an empty
-    # file means the DB download failed (retry); a written one is real.
-    # From: PR #1542, Issue #1535
+    # What: classifies attempt via report file presence
+    # Why: report = genuine; no report = DB failure (retry)
+    # From: Issue #1095 | PR #1747
     - name: Classify attempt 1 failure
       id: classify1
       if: steps.attempt1.outcome == 'failure'
@@ -250,11 +237,9 @@ runs:
         username: ${{ inputs.username }}
         password: ${{ inputs.password }}
 
-    # What: Re-authenticates to Docker Hub before retry 1, same condition
-    # as the GHCR re-auth above plus the dockerhub-username guard.
-    # Why: kept condition-identical to its GHCR twin so an edit to one
-    # retry gate cannot silently diverge from the other.
-    # From: PR #1543, Issue #1535
+    # What: re-auth Docker Hub before retry 1
+    # Why: mirror GHCR condition so edits stay in sync
+    # From: Issue #1095 | PR #1747
     - name: Re-authenticate to Docker Hub before retry 1
       if: steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true' && inputs.dockerhub-username != ''
       continue-on-error: true
@@ -310,9 +295,9 @@ runs:
         username: ${{ inputs.username }}
         password: ${{ inputs.password }}
 
-    # What: Same Docker Hub re-auth as retry 1 above, for retry 2's
-    # compound condition.
-    # From: PR #1543, Issue #1535
+    # What: same Docker Hub re-auth pattern for retry 2
+    # Why: compound condition ensures synchronized edits
+    # From: Issue #1095 | PR #1747
     - name: Re-authenticate to Docker Hub before retry 2
       if: >-
         steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true' &&
@@ -375,9 +360,9 @@ runs:
         username: ${{ inputs.username }}
         password: ${{ inputs.password }}
 
-    # What: Same Docker Hub re-auth as retry 1 above, for retry 3's
-    # compound condition.
-    # From: PR #1543, Issue #1535
+    # What: same Docker Hub re-auth pattern for retry 3
+    # Why: compound condition ensures synchronized edits
+    # From: Issue #1095 | PR #1747
     - name: Re-authenticate to Docker Hub before retry 3
       if: >-
         steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true' &&
@@ -416,20 +401,18 @@ runs:
         exit-code: ${{ inputs.exit-code }}
         trivy-config: ${{ github.action_path }}/trivy-config.yaml
 
-    # What: classifies attempt 4 via the shared script too.
-    # Why: a DB failure through all 4 tries looked like a finding.
-    # From: Issue #1095
+    # What: classifies final attempt via shared script
+    # Why: distinguish DB failure from genuine findings
+    # From: Issue #1095 | PR #1747
     - name: Classify attempt 4 failure
       id: classify4
       if: steps.attempt4.outcome == 'failure'
       shell: bash
       run: bash "${{ steps.classify-script.outputs.path }}" 4 "${{ steps.outpath.outputs.path }}" "${{ inputs.cache-dir }}"
 
-    # What: Prints the report file's content to the job log, table format
-    # only.
-    # Why: writing to a file suppresses table output from stdout; a
-    # non-table caller already writes its own final artifact separately.
-    # From: PR #1542, Issue #1535
+    # What: print table report to stdout after file write
+    # Why: file write suppresses stdout; restore for table
+    # From: Issue #1095 | PR #1747
     - name: Show Trivy report
       if: always() && inputs.format == 'table'
       shell: bash
@@ -442,11 +425,9 @@ runs:
           echo "No Trivy report file was produced (every attempt failed before reaching report generation)."
         fi
 
-    # What: Surfaces overall pass/fail to the calling job across all 4
-    # attempts (continue-on-error hides each individual attempt's failure).
-    # Why: a skipped attempt (ruled non-retryable earlier) must also count
-    # as failure here, same as an exhausted-retries failure.
-    # From: PR #1542, Issue #1535
+    # What: surface overall pass/fail across all attempts
+    # Why: skipped attempts must count as failure
+    # From: Issue #1095 | PR #1747
     - name: Resolve outcome across all attempts
       if: always()
       shell: bash
@@ -460,9 +441,9 @@ runs:
         echo "::error::All Trivy scan attempts for image-ref '${{ inputs.image-ref }}' failed." >&2
         exit 1
 
-    # What: emits db-status and a separate scan-error flag.
-    # Why: a pre-report error must not read as a finding.
-    # From: Issue #1095 | PR #1735
+    # What: emit db-status and scan-error flags
+    # Why: pre-report errors must not read as findings
+    # From: Issue #1095 | PR #1747
     - name: Determine DB status
       id: db-status
       if: always()
@@ -478,9 +459,9 @@ runs:
         KIND4: ${{ steps.classify4.outputs.error-kind }}
       run: |
         set -euo pipefail
-        # What: checks overall success before any error-kind.
-        # Why: a later success must never read as unavailable.
-        # From: Issue #1095 | PR #1735
+        # What: check overall success before error-kind
+        # Why: success anywhere means DB is available
+        # From: Issue #1095 | PR #1747
         succeeded=false
         for outcome in "$OUT1" "$OUT2" "$OUT3" "$OUT4"; do
           if [ "$outcome" = "success" ]; then
