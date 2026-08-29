@@ -5750,19 +5750,15 @@ jobs:
       # What: resolves the shared, persistent NFS-backed Trivy DB directory
       #   (real local-disk fallback if the mount is unavailable), then
       #   refreshes it under a lock using Trivy's own --download-db-only
-      #   freshness check. Shared by both the amd64 leg here and the arm64
-      #   leg further below in this same job -- one resolve+refresh per
-      #   job run covers both, since they run sequentially, not in
-      #   parallel, within one matrix.service instance.
-      # Why: replaces a directory that was wiped empty on every
-      #   pull_request/workflow_dispatch/retry/tag-push run (and, on the
-      #   arm64 leg specifically, on EVERY run unconditionally -- see that
-      #   leg's own comment below), which defeated Trivy's own
-      #   DB-freshness check and forced a full ~1.3 GB re-download every
-      #   time. skip-db-update below (steps.trivy-db-fresh.outputs.db-present)
-      #   is what actually prevents reintroducing the original concurrent-
-      #   writer race now that the directory is shared across every
-      #   matrix.service instance instead of being per-service/per-ref.
+      #   freshness check. This job builds linux/amd64 only (see
+      #   build-arm64 for the native arm64 leg, a separate GitHub-hosted
+      #   job with no route to this NFS mount -- its own step below stays
+      #   on its prior runner.temp design for that reason).
+      # Why: skip-db-update below (steps.trivy-db-fresh.outputs.db-present)
+      #   is what keeps every matrix.service instance's concurrent read
+      #   safe against the shared directory's single writer -- the actual
+      #   fix for the redundant-download outage a per-run-wiped directory
+      #   used to cause on pull_request/workflow_dispatch/retry/tag-push.
       # From: Issue #1095 | Issue #912 | PR #927 | PR #1532
       - name: Resolve shared Trivy DB cache directory
         id: trivy-cache

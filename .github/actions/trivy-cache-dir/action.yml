@@ -69,14 +69,12 @@ runs:
         # Why: a directory merely "existing" proves nothing -- a stale or
         #   half-dead NFS mount (server down, export revoked) can still
         #   list as a directory while every real I/O hangs or fails. The
-        #   subdirectory half of this probe is not redundant: a real
-        #   incident during this action's own development found a shared
-        #   directory where flat-file writes at the root succeeded but
-        #   `mkdir` for a NEW subdirectory (which is exactly what Trivy
-        #   itself does on first use -- it creates fanal/, policy/, and
-        #   java-db/ under cache-dir alongside db/) failed with EACCES,
-        #   which a flat-file-only probe would have missed entirely,
-        #   passing this action while every real scan then crashed.
+        #   subdirectory half is load-bearing, not redundant: file-create
+        #   and directory-create permissions can differ on a shared
+        #   directory (setgid bits, ACLs, ownership), and Trivy itself
+        #   creates fanal/, policy/, and java-db/ subdirectories under
+        #   cache-dir on first use -- a flat-file-only probe cannot catch
+        #   a directory that is writable for files but not for mkdir.
         # From: Issue #1095 | Issue #912
         probe_writable() {
           local dir="$1"
