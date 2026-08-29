@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: bounded retry for authenticated read-only GitHub REST GETs, with an
-# optional TTL file cache in front of the retry loop.
-# Why: separate from the registry helper since API GETs need no login
-# recovery; the token goes to curl via stdin, never argv or diagnostics.
+# What: Retry mechanism for GitHub API reads with TTL cache
+# Why: API reads need no login recovery; token protected via stdin
 # From: Issue #1095 | PR #1501.
 
 if [[ -n "${GITHUB_API_RETRY_SH_LOADED:-}" ]]; then
@@ -18,10 +16,8 @@ GITHUB_API_RETRY_SH_LOADED=1
 GITHUB_API_RETRY_ATTEMPTS="${GITHUB_API_RETRY_ATTEMPTS:-4}"
 GITHUB_API_RETRY_DELAY_SECONDS="${GITHUB_API_RETRY_DELAY_SECONDS:-5}"
 GITHUB_API_HTTP_STATUS=""
-# What: optional TTL file cache for successful GET responses, keyed by URL,
-# disabled (empty dir) by default.
-# Why: repeated nearby report runs would otherwise re-fetch identical
-# pages and burn shared rate-limit budget.
+# What: TTL file cache for successful GET responses, keyed by URL
+# Why: Reusing cache across runs avoids rate-limit exhaustion
 # From: Issue #1095 | PR #1501.
 GITHUB_API_CACHE_DIR="${GITHUB_API_CACHE_DIR:-}"
 GITHUB_API_CACHE_TTL_SECONDS="${GITHUB_API_CACHE_TTL_SECONDS:-600}"
@@ -36,9 +32,8 @@ _github_api_cache_path() {
 }
 
 _github_api_cache_hit() {
-  # What: checks for a fresh (within TTL), non-empty cached response.
-  # Why: mtime-based freshness lets a cache directory be safely reused across
-  # runs (e.g. restored by actions/cache) without serving stale data.
+  # What: Checks for fresh, non-empty cached response within TTL
+  # Why: mtime-based freshness allows safe cache reuse across runs
   # From: Issue #1095 | PR #1501.
   local url="${1:?_github_api_cache_hit: url is required}"
   local body_file="${2:?_github_api_cache_hit: body file is required}"
@@ -47,9 +42,8 @@ _github_api_cache_hit() {
   cache_file="$(_github_api_cache_path "$url")" || return 1
   [[ -s "$cache_file" ]] || return 1
   now="$(date +%s)" || return 1
-  # What: reads mtime with GNU stat's `-c` form only, no BSD `stat -f` branch.
-  # Why: this project's build-tools image stays Debian-based (AG-KD-009), so
-  # a BSD fallback would be untested, unreachable dead code.
+  # What: Reads mtime via GNU stat -c only (no BSD fallback)
+  # Why: Build-tools Debian-based; BSD fallback untested, unreachable
   # From: Issue #1095 | PR #1501.
   mtime="$(stat -c %Y "$cache_file" 2>/dev/null)" || return 1
   [[ "$mtime" =~ ^[0-9]+$ ]] || return 1
@@ -59,10 +53,8 @@ _github_api_cache_hit() {
 }
 
 _github_api_cache_store() {
-  # What: writes the successful GET's body into the cache, best-effort.
-  # Why: caching is a rate-limit optimization, never a correctness
-  # requirement, so a write failure must not fail the GET that already
-  # succeeded.
+  # What: Writes successful GET body to cache, best-effort
+  # Why: Caching optimizes rate-limit; write failure is non-fatal
   # From: Issue #1095 | PR #1501.
   local url="${1:?_github_api_cache_store: url is required}"
   local body_file="${2:?_github_api_cache_store: body file is required}"
@@ -133,10 +125,8 @@ github_api_get_with_retry() {
       return 0
     fi
 
-    # What: fails immediately on HTTP 401/404 instead of retrying.
-    # Why: retrying an auth failure or a not-found cannot establish the
-    # positive proof this audit requires; treating either as retryable would
-    # risk silently reading it as an empty result later.
+    # What: Fails immediately on HTTP 401/404 instead of retrying
+    # Why: Auth and 404 failures must not be retried per audit rules
     # From: Issue #1095 | PR #1501.
     if (( call_status == 0 )) && [[ "$http_status" == "401" || "$http_status" == "404" ]]; then
       echo "::error::GitHub REST GET failed permanently with HTTP $http_status for $url; refusing to interpret this response as an empty result." >&2
@@ -152,10 +142,8 @@ github_api_get_with_retry() {
       return 1
     fi
 
-    # What: logs a mid-retry attempt as ::notice::, not ::warning::.
-    # Why: a recovered transient is not a warning under this repository's
-    # warnings-as-errors policy; only the exhausted-retries failure above
-    # becomes an ::error::.
+    # What: Logs mid-retry attempts as ::notice::, not ::warning::
+    # Why: Recovered transients excluded from warnings-as-errors policy
     # From: Issue #1095 | PR #1501.
     if [[ -n "$http_status" ]]; then
       echo "::notice::GitHub REST GET attempt $attempt/$GITHUB_API_RETRY_ATTEMPTS returned HTTP $http_status; retrying after ${GITHUB_API_RETRY_DELAY_SECONDS}s." >&2
