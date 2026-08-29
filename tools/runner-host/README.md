@@ -7,13 +7,17 @@ live in the repo, PR-reviewable and consistent across all hosts).
 ## Files
 - `lancache-ci-cleanup.sh` — the cleanup script.
 - `lancache-ci-cleanup.service` / `lancache-ci-cleanup.timer` — systemd units.
-- `lancache-ci-docker-daemon-config.sh` — the go-gated `/etc/docker/daemon.json`
-  bounded-build-cache + log-rotation rollout (see below). Separate from the
-  cleanup script above: the cleanup script reclaims space on a timer; this
-  script bounds how large the build cache is allowed to grow *between* those
-  runs in the first place, and (unlike the cleanup script) requires a full
-  `dockerd` restart to take effect, which is why it is never wired into a
-  timer and is only ever run by hand, one host at a time.
+- `lancache-ci-docker-daemon-config.sh` — two unrelated but similarly-shaped
+  runner-host maintenance subsystems (AG-CODE-013 consolidation), selected by
+  mode name: the go-gated `/etc/docker/daemon.json` bounded-build-cache +
+  log-rotation rollout (bare `check`/`stage`/`apply`/`restart` modes, see
+  below) and the LAN apt-caching proxy (`apt-proxy-*` modes, see below).
+  Separate from the cleanup script above: the cleanup script reclaims space
+  on a timer; the daemon.json half of this script bounds how large the build
+  cache is allowed to grow *between* those runs in the first place, and
+  (unlike the cleanup script) requires a full `dockerd` restart to take
+  effect, which is why it is never wired into a timer and is only ever run
+  by hand, one host at a time.
 
 ## Deploy (to **every** runner host — 229, 240, 241, 243, …)
 
@@ -210,30 +214,33 @@ written or restarted. The actual `restart` step has deliberately NOT been
 run against any real runner host — that remains a maintainer-scheduled
 action for an agreed quiet window, one host at a time**, per issue #1255.
 
-## `lancache-ci-apt-cache-proxy.sh` (LAN apt-caching proxy, Issue #1095 item 2)
+## Apt-cache proxy modes of `lancache-ci-docker-daemon-config.sh` (Issue #1095 item 2)
 
 Stands up `apt-cacher-ng`, backed by the NFS export at
 `192.168.1.10:/srv/runner-hosting/apt-cache` (real local-disk fallback,
 never tmpfs, if that mount is unavailable). See
 `docs/ci-2.0-architecture.md` §40.1 for the design rationale and why this
-covers only the apt half of Issue #1095's caching task, not ccache.
-
-Same safe-by-default / maintainer-scheduled-disruptive-step split as
-`lancache-ci-docker-daemon-config.sh` above:
+covers only the apt half of Issue #1095's caching task, not ccache. This
+started as its own `lancache-ci-apt-cache-proxy.sh` file and was folded
+into `lancache-ci-docker-daemon-config.sh` as the `apt-proxy-*` modes
+below (AG-CODE-013 file consolidation): the two subsystems are unrelated
+in what they configure, but share the same runner-host-maintenance,
+safe-by-default / maintainer-scheduled-disruptive-step shape used
+throughout this directory.
 
 ```sh
 # 1. Read-only: verifies the NFS mount + fallback dir + pinned image.
 #    Starts no container.
-bash tools/runner-host/lancache-ci-apt-cache-proxy.sh check
+bash tools/runner-host/lancache-ci-docker-daemon-config.sh apt-proxy-check
 
 # 2. Runs the proxy in --rm mode, does a real smoke request and a real
 #    apt-get update through it, then removes the container. No
 #    persistent state change to the host afterward.
-bash tools/runner-host/lancache-ci-apt-cache-proxy.sh test
+bash tools/runner-host/lancache-ci-docker-daemon-config.sh apt-proxy-test
 
 # 3. THE DISRUPTIVE STEP -- starts a --restart=always container, a
 #    permanent addition to this host's running services. Requires:
-CONFIRM_APT_CACHE_PROXY_INSTALL=yes bash tools/runner-host/lancache-ci-apt-cache-proxy.sh install
+CONFIRM_APT_CACHE_PROXY_INSTALL=yes bash tools/runner-host/lancache-ci-docker-daemon-config.sh apt-proxy-install
 ```
 
 **Status as of 2026-08-29: `check` and `test` have both been run for real

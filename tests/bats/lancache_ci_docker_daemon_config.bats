@@ -123,3 +123,23 @@ EOF
     # ... alongside the new builder.gc this rollout adds.
     [ "$(jq -r '.builder.gc.defaultReservedSpace' <<<"$output")" = "20GB" ]
 }
+
+@test "resolve_apt_cache_dir: a genuinely writable mount is used as-is" {
+    APT_CACHE_MOUNT="$BATS_TEST_TMPDIR/apt-cache-mount"
+    mkdir -p "$APT_CACHE_MOUNT"
+    run resolve_apt_cache_dir
+    [ "$status" -eq 0 ]
+    [ "$output" = "$APT_CACHE_MOUNT" ]
+    # The probe file/dir must not survive a successful probe.
+    [ -z "$(find "$APT_CACHE_MOUNT" -mindepth 1 2>/dev/null)" ]
+}
+
+@test "resolve_apt_cache_dir: a missing mount falls back to real local disk, never tmpfs" {
+    APT_CACHE_MOUNT="$BATS_TEST_TMPDIR/does-not-exist"
+    APT_CACHE_FALLBACK_DIR="$BATS_TEST_TMPDIR/apt-cache-fallback"
+    run --separate-stderr resolve_apt_cache_dir
+    [ "$status" -eq 0 ]
+    [ "$output" = "$APT_CACHE_FALLBACK_DIR" ]
+    [ -d "$APT_CACHE_FALLBACK_DIR" ]
+    [[ "$stderr" == *"falling back to a real local-disk directory"* ]]
+}
