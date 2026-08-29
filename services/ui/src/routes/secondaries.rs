@@ -74,9 +74,8 @@ fn generate_nats_password() -> String {
     hex::encode(bytes)
 }
 
-// What: reads the shared TSIG secret returned to remote DNS secondaries.
-// Why: AXFR secondaries must authenticate transfers with the same key the
-//   primary uses for DDNS/transfer metadata, or remote nodes can drift.
+// What: reads the shared TSIG secret returned to DNS secondaries.
+// Why: AXFR secondaries must share the primary's DDNS/transfer key.
 // From: Issue #1164
 fn read_ddns_tsig_key_from_shared_secret_dir(
     shared_secret_dir: &str,
@@ -572,17 +571,14 @@ pub async fn reload_nats_conf(
     )
     .await
     // What: uses {e:#} (anyhow's full chain), not {e}.
-    // Why: {e} alone hid the real bollard/Docker-API cause during this
-    // issue's own live-container debugging.
+    // Why: {e} alone hid the real bollard/Docker-API root cause.
     // From: Issue #1590
     .map_err(|e| format!("Failed to restart NATS service: {e:#}").into())
 }
 
 // What: returns whether the fragment actually changed on disk.
-// Why: every UI startup calls reload_nats_conf, including after a UI
-//   self-restart -- restarting NATS unconditionally on an unchanged
-//   fragment would drop live client connections for nothing.
-// From: Codex review on PR #1610
+// Why: restarting NATS on an unchanged fragment drops live clients.
+// From: PR #1610
 pub async fn update_nats_conf(
     state: &AppState,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
@@ -611,11 +607,9 @@ pub async fn update_nats_conf(
     Ok(true)
 }
 
-// What: true only when `rendered` differs from what is currently on disk at
-//   `path` (a missing/unreadable file counts as "differs").
-// Why: pulled out as its own pure function so the skip-vs-write decision is
-//   directly unit-testable, same rationale as render_nats_auth_callout below.
-// From: Codex review on PR #1610
+// What: true only when `rendered` differs from what is on disk.
+// Why: pure function makes skip-vs-write decision unit-testable.
+// From: PR #1610
 fn nats_conf_fragment_changed(path: &str, rendered: &str) -> bool {
     fs::read_to_string(path).ok().as_deref() != Some(rendered)
 }
