@@ -2384,12 +2384,17 @@ ci_cmd_validate_promote_tags_dockerfiles() {
       echo "::error::CI and service builds must use prebuilt cargo-audit from the build-tools image instead of compiling it per job."
       exit 1
     fi
+    local sccache_install_needle
     for dockerfile in services/dns/Dockerfile services/ui/Dockerfile; do
       grep -F 'ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest' "$dockerfile" >/dev/null \
         || { echo "::error::$dockerfile must declare the shared build-tools image as a build argument."; exit 1; }
       grep -F 'FROM ${BUILD_TOOLS_IMAGE}' "$dockerfile" >/dev/null \
         || { echo "::error::$dockerfile must use the shared build-tools image in the Rust builder stage."; exit 1; }
-      if grep -F 'cargo install sccache' "$dockerfile" >/dev/null || grep -F 'apt-get download "distcc-pump=' "$dockerfile" >/dev/null; then
+      # What: needle assembled so this line escapes its own scan.
+      # Why: ci.sh lives under scripts/, which the scan above walks.
+      # From: PR #1742 | Refs #1683
+      sccache_install_needle="cargo install ""sccache"
+      if grep -F "$sccache_install_needle" "$dockerfile" >/dev/null || grep -F 'apt-get download "distcc-pump=' "$dockerfile" >/dev/null; then
         echo "::error::$dockerfile must not bootstrap Rust builder tools locally anymore."
         exit 1
       fi
