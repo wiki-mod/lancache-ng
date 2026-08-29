@@ -1283,8 +1283,8 @@ readonly -a CI_FILE_HEADER_CHECKS=(
     scripts/untracked/check-deny-short-sha.sh
 )
 
-# What: per-script env override the check loop can't infer.
-# Why: chronology warn/block split is per-event, not per-file.
+# What: per-script env override for checks.
+# Why: chronology warn/block per-event.
 # From: Issue #1683
 ci_standing_check_env() {
     local name="$1"
@@ -1300,8 +1300,8 @@ ci_standing_check_env() {
 }
 
 ci_run_check_list() {
-    # What: runs each script argument, sharing collected failures.
-    # Why: one shared loop body instead of one loop per caller.
+    # What: runs scripts, shares failures.
+    # Why: one loop, not per caller.
     # From: Issue #1683
     local script name
     local -a run_env
@@ -1321,93 +1321,93 @@ ci_run_check_list() {
 }
 
 ci_cmd_file_header_checks() {
-    # What: the 6 repo-wide checks file-headers/-hosted both need.
-    # Why: §72 -- same function, same decision, either runner.
+    # What: 6 repo-wide file-header checks.
+    # Why: §72 — same decision, either runner.
     # From: Issue #1683
     ci_run_check_list "${CI_FILE_HEADER_CHECKS[@]}"
     ci_failure_summary
 }
 
 ci_cmd_compose_healthchecks() {
-    # What: the one script compose-healthchecks/-hosted both need.
-    # Why: no build-tools container -- a plain bash/grep scan.
+    # What: compose health check script.
+    # Why: plain bash/grep scan, no build-tools.
     # From: Issue #1683
     bash "$CI_REPO_ROOT/scripts/tracked/check-compose-healthchecks.sh"
 }
 
 ci_cmd_line_endings_check() {
-    # What: the one script line-endings/-hosted both need.
-    # Why: §72 -- same function, same decision, either runner.
+    # What: line-endings check script.
+    # Why: §72 — same decision, either runner.
     # From: Issue #1683
     bash "$CI_REPO_ROOT/scripts/tracked/check-line-endings.sh"
 }
 
 ci_cmd_language_policy_check() {
-    # What: the one script language-policy/-hosted both need.
-    # Why: §72 -- same function, same decision, either runner.
+    # What: language-policy check script.
+    # Why: §72 — same decision, either runner.
     # From: Issue #1683
     bash "$CI_REPO_ROOT/scripts/tracked/check-language-policy.sh"
 }
 
 ci_cmd_setup_migration_check() {
-    # What: shellcheck-hosted's setup-migration-semantics test.
-    # Why: §72 -- same function, same decision, either runner.
+    # What: setup-migration-semantics test.
+    # Why: §72 — same decision, either runner.
     # From: Issue #1683
     bash "$CI_REPO_ROOT/tests/setup-migration-semantics.sh"
 }
 
 ci_cmd_action_node_versions_check() {
-    # What: shellcheck-hosted's action-node-versions guard.
-    # Why: §72 -- same function, same decision, either runner.
+    # What: action-node-versions guard.
+    # Why: §72 — same decision, either runner.
     # From: Issue #1683
     bash "$CI_REPO_ROOT/scripts/tracked/check-action-node-versions.sh"
 }
 
 ci_cmd_validation_subnet_check() {
-    # What: shellcheck-hosted's validation-subnet-wrapper guard.
-    # Why: §72 -- same function, same decision, either runner.
+    # What: validation-subnet-wrapper guard.
+    # Why: §72 — same decision, either runner.
     # From: Issue #1683
     bash "$CI_REPO_ROOT/scripts/tracked/check-validation-subnet-wrapper-coverage.sh"
 }
 
 ci_cmd_executable_bits_check() {
-    # What: shellcheck-hosted's executable-bits guard.
-    # Why: §72 -- same function, same decision, either runner.
+    # What: executable-bits guard.
+    # Why: §72 — same decision, either runner.
     # From: Issue #1683
     bash "$CI_REPO_ROOT/scripts/tracked/check-executable-bits.sh"
 }
 
 ci_cmd_build_tools_smoke_coverage_check() {
-    # What: shellcheck-hosted's smoke-coverage guard.
-    # Why: §72 -- same function, same decision, either runner.
+    # What: smoke-coverage guard.
+    # Why: §72 — same decision, either runner.
     # From: Issue #1683
     bash "$CI_REPO_ROOT/scripts/tracked/check-build-tools-smoke-coverage.sh"
 }
 
 ci_cmd_pipefail_early_exit_check() {
-    # What: shellcheck-hosted's pipefail-early-exit guard.
-    # Why: §72 -- same function, same decision, either runner.
+    # What: pipefail-early-exit guard.
+    # Why: §72 — same decision, either runner.
     # From: Issue #1683
     bash "$CI_REPO_ROOT/scripts/untracked/check-pipefail-early-exit-grep.sh"
 }
 
 ci_cmd_pipefail_scope_check() {
-    # What: shellcheck-hosted's pipefail-scope-coverage guard.
-    # Why: §72 -- same function, same decision, either runner.
+    # What: pipefail-scope-coverage guard.
+    # Why: §72 — same decision, either runner.
     # From: Issue #1683
     bash "$CI_REPO_ROOT/scripts/tracked/check-pipefail-scope-coverage.sh"
 }
 
 ci_cmd_repository_case_check() {
-    # What: shellcheck-hosted's repository-case-only guard.
-    # Why: §72 -- same function, same decision, either runner.
+    # What: repository-case-only guard.
+    # Why: §72 — same decision, either runner.
     # From: Issue #1683
     bash "$CI_REPO_ROOT/scripts/tracked/check-mutable-refs.sh" --only repository-case
 }
 
 ci_compose_config_clean() {
-    # What: true iff "docker compose $* config" is warning-free.
-    # Why: a silent compose warning today is a real bug tomorrow.
+    # What: true iff config is warning-free.
+    # Why: silent warning is real bug tomorrow.
     # From: Issue #1683
     local output
     if ! output="$(docker compose "$@" config --quiet 2>&1)"; then
@@ -1425,8 +1425,8 @@ ci_compose_config_clean() {
 }
 
 ci_check_compose_files() {
-    # What: renders every real compose file/profile combination.
-    # Why: profile-less renders skip inactive profiles entirely.
+    # What: renders compose file/profile combos.
+    # Why: profile-less skips inactive profiles.
     # From: Issue #1683
     local compose_file
     ci_compose_config_clean -f deploy/quickstart/docker-compose.yml --profile ssl \
@@ -1449,14 +1449,14 @@ ci_check_compose_files() {
 }
 
 ci_cmd_diff_checks() {
-    # What: runs the two PR-diff-scoped header/chronology checks.
-    # Why: §72 -- one shared call site for both runner variants.
+    # What: runs header/chronology diff checks.
+    # Why: §72 — shared call site.
     # From: Issue #1683
     local base_sha="${1:?ci.sh diff-checks: base sha is required}"
     local base_ref="${2:?ci.sh diff-checks: base ref is required}"
 
-    # What: both scripts run `git fetch`, so need a writable tree.
-    # Why: matches the caller's :ro-mount-then-copy convention.
+    # What: both scripts need writable tree.
+    # Why: they run git fetch operations.
     # From: Issue #1683
     local start_dir
     start_dir="$(pwd)"
@@ -1479,13 +1479,13 @@ ci_cmd_diff_checks() {
 }
 
 ci_cmd_checks() {
-    # What: runs every standing check, reporting all failures.
-    # Why: one aggregate verdict instead of 9 separate CI jobs.
+    # What: runs all checks, reports failures.
+    # Why: aggregate verdict, not separate.
     # From: Issue #1683
     ci_run_check_list "${CI_STANDING_CHECKS[@]}"
 
-    # What: no subshell -- ci_report_failure's array must stay shared.
-    # Why: a subshell's CI_FAILURES writes never reach the caller.
+    # What: no subshell, keep array shared.
+    # Why: subshell writes don't reach caller.
     # From: Issue #1683
     local start_dir
     start_dir="$(pwd)"
@@ -1500,16 +1500,16 @@ ci_cmd_checks() {
 # GC
 # ============================================================
 #
-# What: reachability-based GC over protected roots (§74-78).
-# Why: untagged is not unused; age never justifies it.
+# What: reachability GC over roots (§74-78).
+# Why: untagged ≠ unused; age irrelevant.
 # From: Issue #1683
 
 CI_GC_PROTECTED_CHANNELS="${CI_GC_PROTECTED_CHANNELS:-latest nightly}"
 CI_GC_KEEP_ACCEPTED="${CI_GC_KEEP_ACCEPTED:-10}"
 
 ci_gc_roots() {
-    # What: prints digests reachable from protected roots.
-    # Why: §75 -- these are the roots reachability starts from.
+    # What: prints reachable digests from roots.
+    # Why: §75 — starting points for reach.
     # From: Issue #1683
     local svc channel ref digest
     for svc in "${CI_SERVICES[@]}"; do
@@ -1522,8 +1522,8 @@ ci_gc_roots() {
 }
 
 ci_gc_is_protected() {
-    # What: true iff digest $2 of service $1 is a protected root.
-    # Why: §76 -- a reachable object is kept, never collected.
+    # What: true iff $2 of $1 is root.
+    # Why: §76 — reachable kept, not GC'd.
     # From: Issue #1683
     local service="$1" digest="$2" roots
     roots="$(ci_gc_roots)"
