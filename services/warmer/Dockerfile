@@ -21,6 +21,7 @@ RUN set -eu; \
     for tool in cargo rustc rustup; do \
       command -v "$tool" >/dev/null; \
     done; \
+    command -v musl-gcc >/dev/null; \
     case "$(uname -m)" in \
       x86_64) echo "x86_64-unknown-linux-musl" > /tmp/musl-target; ;; \
       aarch64) echo "aarch64-unknown-linux-musl" > /tmp/musl-target; ;; \
@@ -47,7 +48,23 @@ RUN set -eu; \
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src/ ./src/
+# What: exports CC/GCC/CXX/GXX explicitly before the build, matching
+#   services/dns/Dockerfile, services/ui/Dockerfile, and
+#   services/watchdog/Dockerfile's identical builder stages (every one of
+#   their code paths, accelerated or not, sets these -- see each file's own
+#   disable_distcc/disable_ccache fallback functions).
+# Why: this crate pulls in `ring` (a real C-dependency compile) via
+#   reqwest's rustls-tls feature, the same as those three crates' own
+#   documented reason. On this image `cc`/`gcc` already default to
+#   musl-targeting output (build-tools/Dockerfile's own comment: "musl is
+#   already this image's default rustc triple"), so this export is
+#   functionally a no-op today rather than a cross-compile requirement --
+#   kept explicit anyway, matching the other three services' convention of
+#   never relying on an implicit default for the C compiler a Rust build
+#   script will invoke.
+# From: Issue #871
 RUN set -eu; \
+    export CC=cc GCC=gcc CXX=c++ GXX=g++; \
     musl_target="$(cat /tmp/musl-target)"; \
     cargo build --release --locked --target "$musl_target"; \
     cp "target/${musl_target}/release/lancache-warmer" /build/lancache-warmer-out

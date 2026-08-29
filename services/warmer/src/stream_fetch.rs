@@ -123,35 +123,53 @@ pub async fn fetch_many_and_discard(
 
 /// Spawns a background task that logs the current throughput (bytes
 /// fetched since the last tick, divided by the tick interval) every
-/// interval, until counter's only remaining strong reference is this
-/// task's own clone (i.e. every fetch task has finished and dropped its
-/// clone). This is the throughput visibility the maintainer asked
-/// mbuffer/pv for -- see this module's own doc comment for why an
-/// external process is not needed for it.
-pub fn spawn_throughput_logger(counter: Arc<ByteCounter>, interval: Duration) {
+/// interval, until `stop` fires. This is the throughput visibility the
+/// maintainer asked mbuffer/pv for -- see this module's own doc comment
+/// for why an external process is not needed for it.
+///
+/// The caller is expected to hold `stop`'s sender and fire it once its own
+/// fetch work is done, then `.await` the returned `JoinHandle` before
+/// reading `counter`'s final total -- an explicit stop signal, not a
+/// strong-count guess, is what makes "the logger has genuinely stopped"
+/// observable. (An earlier version of this function tried to infer
+/// completion from `Arc::strong_count(&counter) == 1`, but the caller
+/// necessarily keeps its own clone alive to read the final total after
+/// this task's clone still exists too, so that count could never actually
+/// reach 1 -- the loop only ended when the whole process exited. Fixed by
+/// making shutdown an explicit signal instead of an inferred one.)
+pub fn spawn_throughput_logger(
+    counter: Arc<ByteCounter>,
+    interval: Duration,
+    mut stop: tokio::sync::oneshot::Receiver<()>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut last_total = counter.total();
         let mut ticker = tokio::time::interval(interval);
         loop {
-            ticker.tick().await;
-            if Arc::strong_count(&counter) == 1 {
-                // What: this task is the only remaining owner of counter.
-                // Why: every fetch task finished; nothing left to report.
-                // From: Issue #871
-                break;
+            tokio::select! {
+                _ = ticker.tick() => {
+                    let current_total = counter.total();
+                    let delta = current_total.saturating_sub(last_total);
+                    let mbit_per_sec = (delta as f64 * 8.0) / interval.as_secs_f64() / 1_000_000.0;
+                    tracing::info!(
+                        bytes_total = current_total,
+                        bytes_since_last = delta,
+                        mbit_per_sec = format!("{mbit_per_sec:.1}"),
+                        "prefill throughput"
+                    );
+                    last_total = current_total;
+                }
+                _ = &mut stop => {
+                    // What: the caller's fetch work is done; stop ticking.
+                    // Why: an explicit signal, not an Arc-count guess (see
+                    //   this function's own doc comment for why the guess
+                    //   was wrong).
+                    // From: Issue #871
+                    break;
+                }
             }
-            let current_total = counter.total();
-            let delta = current_total.saturating_sub(last_total);
-            let mbit_per_sec = (delta as f64 * 8.0) / interval.as_secs_f64() / 1_000_000.0;
-            tracing::info!(
-                bytes_total = current_total,
-                bytes_since_last = delta,
-                mbit_per_sec = format!("{mbit_per_sec:.1}"),
-                "prefill throughput"
-            );
-            last_total = current_total;
         }
-    });
+    })
 }
 
 #[cfg(test)]
@@ -187,5 +205,35 @@ mod tests {
             (mbit_per_sec - 10.0).abs() < 0.001,
             "1,250,000 bytes/sec should be exactly 10.0 Mbit/s, got {mbit_per_sec}"
         );
+    }
+
+    // Verifies the fix this round made: the logger task actually
+    // terminates promptly once `stop` fires, rather than running until
+    // process exit (the bug the strong-count-based version above had --
+    // see spawn_throughput_logger's own doc comment).
+    //
+    // Uses a real (unpaused) clock, deliberately: tokio's `test-util`
+    // feature (needed for `start_paused`) is not a dependency any other
+    // service in this repo carries, and a long interval combined with
+    // `tokio::time::interval`'s documented "first tick fires immediately"
+    // behavior already makes this deterministic without it -- the select!
+    // below either logs once on that immediate first tick or catches the
+    // already-sent `stop` first, and either way the *second* loop
+    // iteration always sees `stop` ready (it was sent before the task was
+    // even polled), so this cannot hang waiting for a real 3600s tick.
+    #[tokio::test]
+    async fn spawn_throughput_logger_stops_promptly_when_signaled() {
+        let counter = ByteCounter::new();
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+        let handle =
+            spawn_throughput_logger(Arc::clone(&counter), Duration::from_secs(3600), stop_rx);
+
+        stop_tx
+            .send(())
+            .expect("logger task must still be listening");
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("logger task should stop promptly after `stop` fires, not hang until the interval next ticks")
+            .expect("logger task should not panic");
     }
 }

@@ -70,6 +70,25 @@ fn resolve_credential_persistence() -> anyhow::Result<CredentialPersistence> {
     }
 }
 
+/// Rejects an explicitly-set placeholder outright rather than silently
+/// treating it as "unset" -- mirrors services/ui/src/main.rs's own
+/// secondary_registration_token handling: a checked-in example value left
+/// in place by mistake must fail closed with a clear error, not be dropped
+/// quietly and leave the operator wondering why no credential was
+/// configured. `None` (the variable was never set at all) passes through
+/// unchanged -- only a *present-but-placeholder* value is an error.
+fn reject_placeholder_credential(value: Option<String>) -> anyhow::Result<Option<String>> {
+    if let Some(inner) = value.as_deref()
+        && credential_is_placeholder(inner)
+    {
+        anyhow::bail!(
+            "WARMER_STEAM_CREDENTIAL is set to a default placeholder value -- refusing to start. \
+             Set it to a real Steam credential, or unset it entirely to run without one."
+        );
+    }
+    Ok(value)
+}
+
 /// Resolves the Steam credential to hold for this run, honoring the
 /// operator's persistence choice:
 /// - `None`: the plaintext from `WARMER_STEAM_CREDENTIAL` (if any) is
@@ -84,8 +103,7 @@ fn resolve_steam_credential(
     persistence: CredentialPersistence,
     data_dir: &str,
 ) -> anyhow::Result<Option<String>> {
-    let env_value = std::env::var("WARMER_STEAM_CREDENTIAL").ok();
-    let env_value = env_value.filter(|value| !credential_is_placeholder(value));
+    let env_value = reject_placeholder_credential(std::env::var("WARMER_STEAM_CREDENTIAL").ok())?;
 
     match persistence {
         CredentialPersistence::None => Ok(env_value),
@@ -178,10 +196,26 @@ async fn main() -> anyhow::Result<()> {
 
     let concurrency = resolve_concurrency();
     let counter = ByteCounter::new();
-    spawn_throughput_logger(Arc::clone(&counter), Duration::from_secs(10));
+    let (stop_logger_tx, stop_logger_rx) = tokio::sync::oneshot::channel();
+    let logger_handle = spawn_throughput_logger(
+        Arc::clone(&counter),
+        Duration::from_secs(10),
+        stop_logger_rx,
+    );
 
     let client = reqwest::Client::new();
     let results = fetch_many_and_discard(client, urls, concurrency, Arc::clone(&counter)).await;
+
+    // What: signals the logger to stop, then waits for it to actually
+    //   have stopped before reading counter's final total below.
+    // Why: an explicit, awaited shutdown -- not a guess based on Arc
+    //   ownership -- is what makes "the logger will not log again after
+    //   this point" true (see spawn_throughput_logger's own doc comment
+    //   for the strong-count approach this replaced and why it never
+    //   actually terminated).
+    // From: Issue #871
+    let _ = stop_logger_tx.send(());
+    let _ = logger_handle.await;
 
     let (ok_count, err_count) = results.iter().fold((0usize, 0usize), |(ok, err), result| {
         if result.is_ok() {
@@ -203,4 +237,104 @@ async fn main() -> anyhow::Result<()> {
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // credential_is_placeholder's own cases (mirrors
+    // services/ui/src/main.rs's identical parity test for the function
+    // this one is duplicated from -- see this function's own doc comment
+    // for why it is a duplicate rather than a shared crate).
+    #[test]
+    fn credential_is_placeholder_matches_known_shapes() {
+        assert!(credential_is_placeholder(""));
+        assert!(credential_is_placeholder("CHANGE_ME_now"));
+        assert!(credential_is_placeholder("YOUR_STEAM_PASSWORD_HERE"));
+        assert!(credential_is_placeholder("<steam-password>"));
+        assert!(!credential_is_placeholder("a-real-looking-secret-value"));
+    }
+
+    // The fail-closed behavior this round added: an unset variable passes
+    // through as None (nothing configured, not an error), but a
+    // *present-and-placeholder* value must be rejected outright rather
+    // than silently downgraded to None -- see reject_placeholder_credential's
+    // own doc comment for the AG-SEC-002/AG-OP-008 rationale.
+    #[test]
+    fn reject_placeholder_credential_passes_through_none() {
+        assert_eq!(reject_placeholder_credential(None).unwrap(), None);
+    }
+
+    #[test]
+    fn reject_placeholder_credential_passes_through_real_value() {
+        let real = Some("a-real-looking-secret-value".to_string());
+        assert_eq!(reject_placeholder_credential(real.clone()).unwrap(), real);
+    }
+
+    #[test]
+    fn reject_placeholder_credential_fails_closed_on_placeholder() {
+        let result = reject_placeholder_credential(Some("CHANGE_ME_now".to_string()));
+        assert!(
+            result.is_err(),
+            "a placeholder value must be rejected, not silently dropped"
+        );
+    }
+
+    // credential_is_placeholder is a deliberate byte-for-byte duplicate of
+    // services/ui/src/main.rs's secondary_registration_token_is_placeholder
+    // (see this function's own doc comment for why it is duplicated rather
+    // than shared). Checked against the same shared fixture's "rust" column
+    // that function is checked against -- see
+    // tests/fixtures/placeholder-detection-cases.txt's own header for why
+    // this is drift protection between two copies of the same pattern set,
+    // not the #967 Option B legitimate-divergence case the fixture's other
+    // columns cover.
+    #[test]
+    fn credential_is_placeholder_matches_shared_parity_fixture() {
+        let fixture_path = format!(
+            "{}/../../tests/fixtures/placeholder-detection-cases.txt",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let contents = std::fs::read_to_string(&fixture_path)
+            .unwrap_or_else(|e| panic!("could not read shared parity fixture {fixture_path}: {e}"));
+
+        let mut total = 0usize;
+        let mut mismatches: Vec<String> = Vec::new();
+
+        for line in contents.lines() {
+            let line = line.trim_end();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let [value, _shared, _setup, rust] = fields.as_slice() else {
+                panic!(
+                    "malformed shared parity fixture line (expected \"<value> <shared> <setup> <rust>\"): {line:?}"
+                );
+            };
+            let expect = *rust;
+            total += 1;
+
+            let actual = if credential_is_placeholder(value) {
+                "placeholder"
+            } else {
+                "real"
+            };
+            if actual != expect {
+                mismatches.push(format!("'{value}' expected={expect} actual={actual}"));
+            }
+        }
+
+        assert!(total > 0, "shared parity fixture had zero usable cases");
+        assert!(
+            mismatches.is_empty(),
+            "{} of {total} shared parity fixture case(s) disagreed with credential_is_placeholder \
+             (it is meant to be a byte-for-byte copy of services/ui's implementation -- see this \
+             test's own doc comment):\n{}",
+            mismatches.len(),
+            mismatches.join("\n")
+        );
+    }
 }
