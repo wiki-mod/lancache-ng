@@ -1,6 +1,6 @@
 {
   "@context": "https://openvex.dev/ns/v0.2.0",
-  "@id": "https://github.com/wiki-mod/lancache-ng/vex/lancache-ng-2026-08-27T12:19:49Z",
+  "@id": "https://github.com/wiki-mod/lancache-ng/vex/lancache-ng-2026-08-29T03:56:37Z",
   "author": "lancache-ng release automation (https://github.com/wiki-mod/lancache-ng)",
   "statements": [
     {
@@ -12,7 +12,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-14456"
       }
@@ -34,7 +34,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-34040"
       }
@@ -56,7 +56,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-41567"
       }
@@ -78,7 +78,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-42306"
       }
@@ -92,7 +92,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-12064"
       }
@@ -106,7 +106,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-8286"
       }
@@ -120,7 +120,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-8458"
       }
@@ -134,7 +134,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-8927"
       }
@@ -148,7 +148,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-8932"
       }
@@ -162,7 +162,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-9079"
       }
@@ -176,7 +176,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-9080"
       }
@@ -190,7 +190,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-9545"
       }
@@ -204,7 +204,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-10536"
       }
@@ -219,7 +219,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2011-4116"
       }
@@ -234,7 +234,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2025-15649"
       }
@@ -249,7 +249,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-12087"
       }
@@ -264,7 +264,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-13221"
       }
@@ -279,7 +279,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-42496"
       }
@@ -294,7 +294,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-42497"
       }
@@ -309,7 +309,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-48959"
       }
@@ -324,7 +324,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-48961"
       }
@@ -339,7 +339,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-48962"
       }
@@ -354,7 +354,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-57432"
       }
@@ -369,7 +369,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-57433"
       }
@@ -384,7 +384,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-7010"
       }
@@ -399,7 +399,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-7017"
       }
@@ -414,7 +414,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-8376"
       }
@@ -429,7 +429,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-9538"
       }
@@ -444,7 +444,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2022-0563"
       }
@@ -459,7 +459,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2025-14104"
       }
@@ -474,7 +474,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-13595"
       }
@@ -489,7 +489,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-27456"
       }
@@ -504,7 +504,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-3184"
       }
@@ -519,7 +519,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-53612"
       }
@@ -534,7 +534,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-53613"
       }
@@ -549,7 +549,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-53614"
       }
@@ -564,7 +564,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-53615"
       }
@@ -579,7 +579,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2025-6141"
       }
@@ -594,7 +594,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2025-69720"
       }
@@ -609,7 +609,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-54369"
       }
@@ -624,7 +624,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-54370"
       }
@@ -638,7 +638,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-41991"
       }
@@ -652,12 +652,392 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-27T12:19:49Z",
+      "timestamp": "2026-08-29T03:56:37Z",
       "vulnerability": {
         "name": "CVE-2026-41992"
       }
+    },
+    {
+      "impact_statement": "What: Suppresses CVE-2026-27145 (Go stdlib crypto/x509 DoS via excessive DNS SAN processing) for actionlint's release binary. Anchor entry for a 20-ID embedded-Go-stdlib group (the 19 sibling entries below share this background) -- actionlint v1.7.12's official release binary statically embeds a Go stdlib older than the fixes for all 20 IDs, confirmed by a real Trivy scan (aquasec/trivy v0.74.0, vulnerability DB updated 2026-08-28T17:56Z) of tools/build-tools's built image on 2026-08-28. Why: All 20 IDs in this group are DoS/parsing findings in networking-adjacent stdlib packages (crypto/tls, crypto/x509, net, net/http, net/mail, net/url, mime, encoding/xml, encoding/asn1, html/template, golang.org/x/net). tools/build-tools invokes actionlint only for a fully offline static lint of local workflow YAML files (actionlint <file>..., per AG-VAL-017/AG-CI-001) -- that invocation never opens a TLS/HTTP connection, resolves DNS, or parses an attacker-supplied email/MIME/XML/HTML document, so none of this group's vulnerable code paths is reachable from how this project actually runs the tool. Per the rewritten AG-KD-003 (PR exemption precisely because its vulnerable code is unreachable in this invocation -- this is a reachability finding, not a general accepted-risk waiver. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "justification": "vulnerable_code_not_present",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-08-29T03:56:37Z",
+      "vulnerability": {
+        "name": "CVE-2026-27145"
+      }
+    },
+    {
+      "impact_statement": "What: Suppresses CVE-2026-32280 (crypto/tls DoS via certificate chain building) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. TLS certificate-chain building is never exercised by this project's offline lint invocation. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "justification": "vulnerable_code_not_present",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-08-29T03:56:37Z",
+      "vulnerability": {
+        "name": "CVE-2026-32280"
+      }
+    },
+    {
+      "impact_statement": "What: Suppresses CVE-2026-32281 (crypto/x509 DoS via inefficient certificate chain validation) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. Certificate chain validation is never exercised by this project's offline lint invocation. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "justification": "vulnerable_code_not_present",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-08-29T03:56:37Z",
+      "vulnerability": {
+        "name": "CVE-2026-32281"
+      }
+    },
+    {
+      "impact_statement": "What: Suppresses CVE-2026-32283 (crypto/tls DoS via TLS 1.3 key update messages) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. No TLS connection of any kind is opened by this project's offline lint invocation. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "justification": "vulnerable_code_not_present",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-08-29T03:56:37Z",
+      "vulnerability": {
+        "name": "CVE-2026-32283"
+      }
+    },
+    {
+      "impact_statement": "What: Suppresses CVE-2026-33810 (crypto/x509 certificate validation bypass via DNS constraint handling) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. Certificate validation is never exercised by this project's offline lint invocation. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "justification": "vulnerable_code_not_present",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-08-29T03:56:37Z",
+      "vulnerability": {
+        "name": "CVE-2026-33810"
+      }
+    },
+    {
+      "impact_statement": "What: Suppresses CVE-2026-33811 (net package DoS via long CNAME response in LookupCNAME) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. This project's offline lint invocation never resolves DNS. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "justification": "vulnerable_code_not_present",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-08-29T03:56:37Z",
+      "vulnerability": {
+        "name": "CVE-2026-33811"
+      }
+    },
+    {
+      "impact_statement": "What: Suppresses CVE-2026-33814 (HTTP/2 DoS via malformed SETTINGS_MAX_FRAME_SIZE frame) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. No HTTP/2 connection is ever opened by this project's offline lint invocation. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "justification": "vulnerable_code_not_present",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-08-29T03:56:37Z",
+      "vulnerability": {
+        "name": "CVE-2026-33814"
+      }
+    },
+    {
+      "impact_statement": "What: Suppresses CVE-2026-33818 (encoding/asn1 DoS via excessive recursion in Unmarshal) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. This project's offline lint invocation never unmarshals ASN.1 data (no TLS/certificate handling occurs). From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "justification": "vulnerable_code_not_present",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-08-29T03:56:37Z",
+      "vulnerability": {
+        "name": "CVE-2026-33818"
+      }
+    },
+    {
+      "impact_statement": "What: Suppresses CVE-2026-39820 (net/mail DoS via crafted email inputs) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. This project's offline lint invocation never parses email addresses. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "justification": "vulnerable_code_not_present",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-08-29T03:56:37Z",
+      "vulnerability": {
+        "name": "CVE-2026-39820"
+      }
+    },
+    {
+      "impact_statement": "What: Suppresses CVE-2026-39821 (golang.org/x/net/idna privilege escalation via Punycode label processing) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. This project's offline lint invocation never processes a hostname or Punycode label. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "justification": "vulnerable_code_not_present",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-08-29T03:56:37Z",
+      "vulnerability": {
+        "name": "CVE-2026-39821"
+      }
+    },
+    {
+      "impact_statement": "What: Suppresses CVE-2026-39822 (os.Root symlink-following directory traversal) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. actionlint's own source does not use os.Root; the lint invocation only opens the workflow file paths given on its own command line. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "justification": "vulnerable_code_not_present",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-08-29T03:56:37Z",
+      "vulnerability": {
+        "name": "CVE-2026-39822"
+      }
+    },
+    {
+      "impact_statement": "What: Suppresses CVE-2026-39836 (net package DoS via NUL byte in Dial/LookupPort on Windows) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above; also Windows-only, while this image is Linux-only (Debian trixie / Alpine). This project's offline lint invocation never dials a network connection. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "justification": "vulnerable_code_not_present",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-08-29T03:56:37Z",
+      "vulnerability": {
+        "name": "CVE-2026-39836"
+      }
+    },
+    {
+      "impact_statement": "What: Suppresses CVE-2026-42499 (net/mail DoS via pathological email address parsing) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. This project's offline lint invocation never parses email addresses. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "justification": "vulnerable_code_not_present",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-08-29T03:56:37Z",
+      "vulnerability": {
+        "name": "CVE-2026-42499"
+      }
+    },
+    {
+      "impact_statement": "What: Suppresses CVE-2026-42504 (mime DoS via maliciously-crafted MIME header) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. This project's offline lint invocation never parses a MIME header. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "justification": "vulnerable_code_not_present",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-08-29T03:56:37Z",
+      "vulnerability": {
+        "name": "CVE-2026-42504"
+      }
+    },
+    {
+      "impact_statement": "What: Suppresses CVE-2026-46600 (golang.org/x/net/dns/dnsmessage DoS via invalid DNS record parsing) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. This project's offline lint invocation never resolves DNS. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "justification": "vulnerable_code_not_present",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-08-29T03:56:37Z",
+      "vulnerability": {
+        "name": "CVE-2026-46600"
+      }
+    },
+    {
+      "impact_statement": "What: Suppresses CVE-2026-56853 (net/http DoS via unencrypted HTTP/2 connections) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. No HTTP connection of any kind is opened by this project's offline lint invocation. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "justification": "vulnerable_code_not_present",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-08-29T03:56:37Z",
+      "vulnerability": {
+        "name": "CVE-2026-56853"
+      }
+    },
+    {
+      "impact_statement": "What: Suppresses CVE-2026-56858 (html/template XSS via pathological input) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. actionlint's normal CLI lint output is plain text to stdout/stderr, not rendered HTML; html/template is never invoked. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "justification": "vulnerable_code_not_present",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-08-29T03:56:37Z",
+      "vulnerability": {
+        "name": "CVE-2026-56858"
+      }
+    },
+    {
+      "impact_statement": "What: Suppresses CVE-2026-56859 (encoding/xml DoS via decoding recursion depth) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. This project's offline lint invocation only parses YAML workflow files, never XML. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "justification": "vulnerable_code_not_present",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-08-29T03:56:37Z",
+      "vulnerability": {
+        "name": "CVE-2026-56859"
+      }
+    },
+    {
+      "impact_statement": "What: Suppresses CVE-2026-56860 (net/url DoS via quadratic- complexity path resolution) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. This project's offline lint invocation does not resolve URLs against attacker-supplied input. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "justification": "vulnerable_code_not_present",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-08-29T03:56:37Z",
+      "vulnerability": {
+        "name": "CVE-2026-56860"
+      }
+    },
+    {
+      "impact_statement": "What: Suppresses CVE-2026-56862 (crypto/tls DoS via indefinite KeyUpdate messages) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. No TLS connection of any kind is opened by this project's offline lint invocation. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "justification": "vulnerable_code_not_present",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-08-29T03:56:37Z",
+      "vulnerability": {
+        "name": "CVE-2026-56862"
+      }
     }
   ],
-  "timestamp": "2026-08-27T12:19:49Z",
+  "timestamp": "2026-08-29T03:56:37Z",
   "version": 1
 }
