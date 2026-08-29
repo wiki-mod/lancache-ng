@@ -22,7 +22,7 @@ document.
 | Watchdog | on | — | Health checks, auto-restart, purge cron |
 | syslog (fluent-bit + syslog-ng, combined) | on (`logging` Compose profile, default-enabled since #1343; real opt-out via `LOGGING_ENABLED=0`) | — | Central log receiver; fluent-bit forwards logs from every wired service to syslog-ng inside the same container (#453, combined into one image 2026-08) — see the syslog-ng section's full logging matrix below, not just proxy access logs |
 | Admin UI | on | — | Axum/Rust, Tera, Tailwind, separate port |
-| Cache Warmer | not implemented | — | **Design-only, not shipped**: no `services/` code, no Compose service, nothing runnable exists yet under this name. Mechanism decided (issue #871): stream-and-discard prefill, not SteamCMD. See [docs/design-steam-prefill.md](design-steam-prefill.md) (issue #816, issue #871) for the current design plan and its remaining open decisions (credential strategy; which service houses the engine). Do not treat this row as an existing on/off feature until that design actually lands. |
+| Cache Warmer | not implemented | — | **Scaffold only, not shipped**: `services/warmer` exists (credential-store + stream-fetch primitives, issue #871), but has no Compose service and no real Steam depot-fetch capability yet. Mechanism decided: stream-and-discard prefill, not SteamCMD; new independently-switchable service (not a `services/ui` module). See [docs/design-steam-prefill.md](design-steam-prefill.md) (issue #816, issue #871) for the current design plan and its one remaining open decision (credential strategy). Do not treat this row as a runnable feature until Steam control-plane/depot integration lands. |
 
 ## nginx
 
@@ -616,12 +616,26 @@ Central log receiver for the stack (#453), opt-in via `docker compose --profile 
 section previously described as the plan is retired.** The maintainer decided (recorded on
 issue #871) that the engine described below — `steamcmd` fetching a full local game install —
 conflicts with issue #816's non-negotiable stream-and-discard requirement and is not the
-direction this project takes. **This section now describes the current plan only; nothing
-below is shipped** — confirmed directly against the real tree (`services/warmer/` does not
-exist; no warming service in any `deploy/*/docker-compose.yml`). See
+direction this project takes. See
 [docs/design-steam-prefill.md](design-steam-prefill.md) (issue #816, issue #871) for the full
-design discussion and its still-open implementation decisions (credential strategy; which
-service houses the engine) before relying on any detail here.
+design discussion and its still-open implementation decisions (credential strategy is
+unresolved; which-service-houses-the-engine is resolved below) before relying on any detail
+here.
+
+**Updated 2026-08-29 (issue #871, scaffold PR): `services/warmer` now exists as a Rust crate**
+(maintainer decision: a new, independently-switchable service, not a `services/ui` module —
+the operator must be able to turn Cache Warming off without affecting the rest of the stack).
+Implemented so far: the credential-store (Argon2id-as-KDF + XChaCha20-Poly1305 AEAD encryption
+of an operator-supplied Steam credential, with optional persistence — see "Credential handling"
+below) and the stream-fetch primitive (bounded-concurrency streaming GET into a discard sink,
+with throughput logging — see "Throughput display" below). **Not yet implemented**: the Steam
+control-plane login (`steam-vent`) and depot/manifest parsing (`steamroom`) that would resolve a
+real app ID into real CDN chunk URLs — this needs a real Steam account to test safely against
+and is deliberately deferred (see `services/warmer/src/main.rs`'s own module doc comment). Not
+yet wired into any `deploy/*/docker-compose.yml` or into full-stack CI validation (AG-VAL-027)
+for the same reason: an inert scaffold with no real depot-fetch behavior would add CI surface
+without a testable claim to validate. Do not treat this row as a runnable feature until that
+integration lands.
 
 **Decision: stream-and-discard prefill, no SteamCMD.** `steamcmd` was rejected because
 `steamcmd app_update` performs a real local install — it downloads, verifies, decompresses, and

@@ -49,6 +49,12 @@ services/dns/nats-subscriber/target/
 # build-tools container per AG-VAL-016) -- this entry was simply never
 # added when watchdog gained its own Cargo.toml.
 services/watchdog/target/
+# Issue #871: added when services/warmer gained its own Cargo.toml, same
+# gap #1415's comment above already describes for watchdog -- added
+# immediately this time rather than discovered missing later, after this
+# session's own local cargo build/test/clippy/fmt sanity pass (real
+# commands/output in this PR's own body) against services/warmer.
+services/warmer/target/
 
 # Editor
 *.swp
