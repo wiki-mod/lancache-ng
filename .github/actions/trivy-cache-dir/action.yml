@@ -15,9 +15,9 @@ description: >-
 #   (metadata.json's NextUpdate), forcing a full ~1.3 GB re-download on
 #   every single one of those runs. This action instead returns a
 #   directory that is genuinely persistent, so that freshness check can
-#   finally do its job. Race-safety against Issue #912 (concurrent writers
-#   corrupting Trivy's BoltDB) is NOT this action's job -- it only ever
-#   resolves and read/write-probes a path. The caller must run
+#   finally do its job. Race-safety against a concurrent-writer BoltDB
+#   corruption is NOT this action's job -- it only ever resolves and
+#   read/write-probes a path. The caller must run
 #   trivy-db-ensure-fresh (lock-guarded) before treating this directory as
 #   safe to scan against with skip-db-update.
 # From: Issue #1095 | Issue #912 | PR #927

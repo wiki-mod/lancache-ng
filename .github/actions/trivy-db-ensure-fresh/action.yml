@@ -11,8 +11,8 @@ description: >-
   skip-db-update: true so it never writes to the DB itself -- only this
   action's single, lock-held invocation ever does.
 
-# What: closes the actual race Issue #912 | PR #927 were about, without
-#   going back to a per-run-wiped directory to avoid it.
+# What: closes the actual concurrent-writer race that motivated the
+#   per-run-wiped directory this replaces, without going back to it.
 # Why: pointing every scan job at one shared directory (trivy-cache-dir)
 #   without this step would make the original BoltDB race worse, not
 #   better -- now every self-hosted runner's concurrent jobs contend for
@@ -73,7 +73,7 @@ runs:
         #   (unlike flock, which this repo's own NFS mount -- `soft`,
         #   `local_lock=none` -- cannot rely on).
         # Why: this is the actual mechanism that makes concurrent jobs
-        #   safe against Issue #912, not a courtesy.
+        #   safe against a corrupted concurrent write, not a courtesy.
         # From: Issue #1095 | Issue #912
         acquire() {
           mkdir "$lock_dir" 2>/dev/null

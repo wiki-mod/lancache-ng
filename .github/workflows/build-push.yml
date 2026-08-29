@@ -5760,7 +5760,7 @@ jobs:
       #   leg's own comment below), which defeated Trivy's own
       #   DB-freshness check and forced a full ~1.3 GB re-download every
       #   time. skip-db-update below (steps.trivy-db-fresh.outputs.db-present)
-      #   is what actually prevents reintroducing Issue #912's concurrent-
+      #   is what actually prevents reintroducing the original concurrent-
       #   writer race now that the directory is shared across every
       #   matrix.service instance instead of being per-service/per-ref.
       # From: Issue #1095 | Issue #912 | PR #927 | PR #1532
