@@ -268,19 +268,23 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # schedule this stage's own heavy RUN steps (the sccache/rustup compile
 # immediately below, in particular) fully in parallel with
 # go-tools-builder-alpine's own heavy `go build` of docker-cli/buildx/
-# compose from source. Confirmed live and reproduced on an idle self-hosted
-# runner (192.168.1.80, 4 vCPU / 5.8 GiB RAM): building go-tools-builder
-# alone succeeds cleanly every time, but building the full multi-stage
-# Dockerfile (which runs it concurrently with this stage's own cargo/rustup
-# compile) intermittently corrupts the Go toolchain's own build state under
-# that resource pressure -- three distinct symptoms observed across real
-# current_dev CI runs and this local repro, all from the exact same
-# go-tools-builder RUN step: "panic: methodref has no signature" (already
-# documented in scripts/lib/docker-buildx-retry.sh), "can't find export
-# data (bufio: buffer full)", and "unexpected NUL in input" / "cannot find
-# package . (using -importcfg)". Moving this COPY ahead of the heavy RUN
-# forces BuildKit's real dependency graph to serialize the two stages
-# instead of racing them on a 4-vCPU/5.8-GiB host.
+# compose from source. Reproduced and fixed on an idle self-hosted runner
+# (192.168.1.80, 4 vCPU / 5.8 GiB RAM), using the Debian final stage below
+# (this Alpine stage is not reachable from a plain `docker build` with no
+# --target, so it was not itself built during that repro -- this is the
+# same fix applied to a structurally identical, untested mirror). A full
+# multi-stage build without this fix let go-tools-builder run concurrently
+# with the final stage's own cargo/rustup compile and intermittently
+# corrupted the Go toolchain's own build state under that resource
+# pressure -- three distinct symptoms observed across real current_dev CI
+# runs and this local repro, all from the exact same go-tools-builder RUN
+# step: "panic: methodref has no signature" (already documented in
+# scripts/lib/docker-buildx-retry.sh), "can't find export data (bufio:
+# buffer full)", and "unexpected NUL in input" / "cannot find package .
+# (using -importcfg)". With this COPY moved ahead of the heavy RUN, a real
+# build log confirms the final stage's heavy RUN genuinely blocks until
+# go-tools-builder's own last step reports DONE (no interleaved output),
+# and the full build then completes cleanly end to end.
 # From: Issue #1095 | Issue #1671 | PR #1743
 RUN install -d /usr/local/lib/docker/cli-plugins
 COPY --from=go-tools-builder-alpine /out/docker /usr/local/bin/docker
@@ -626,21 +630,25 @@ RUN curl --version >/dev/null
 # stage, BuildKit was free to schedule this stage's own heavy RUN steps
 # (the sccache/rustup compile immediately below, in particular) fully in
 # parallel with go-tools-builder's own heavy `go build` of docker-cli/
-# buildx/compose from source. Confirmed live and reproduced on an idle
-# self-hosted runner (192.168.1.80, 4 vCPU / 5.8 GiB RAM): building
-# go-tools-builder alone succeeds cleanly every time, but building the
-# full multi-stage Dockerfile (which runs it concurrently with this
-# stage's own cargo/rustup compile) intermittently corrupts the Go
-# toolchain's own build state under that resource pressure -- three
+# buildx/compose from source. Reproduced and fixed live on an idle
+# self-hosted runner (192.168.1.80, 4 vCPU / 5.8 GiB RAM): a full
+# multi-stage build without this fix let go-tools-builder run concurrently
+# with this stage's own cargo/rustup compile and intermittently corrupted
+# the Go toolchain's own build state under that resource pressure -- three
 # distinct symptoms observed across real current_dev CI runs and this
 # local repro, all from the exact same go-tools-builder RUN step: "panic:
 # methodref has no signature" (already documented in
 # scripts/lib/docker-buildx-retry.sh), "can't find export data (bufio:
 # buffer full)", and "unexpected NUL in input" / "cannot find package .
-# (using -importcfg)". Moving this COPY ahead of the heavy RUN forces
-# BuildKit's real dependency graph to serialize the two stages instead of
-# racing them on a 4-vCPU/5.8-GiB host. Same fix applied to alpine-final's
-# identical structure above.
+# (using -importcfg)". With this COPY moved ahead of the heavy RUN, a real
+# build log (captured against an isolated copy of this build context, not
+# the shared runner workspace, to rule out a concurrent real CI checkout
+# clobbering the test) confirms the sccache RUN below genuinely blocks
+# until go-tools-builder's own last step reports DONE (no interleaved
+# output between the two), and the full build then completes cleanly end
+# to end. Same fix applied to alpine-final's identical structure above,
+# though that stage was not itself exercised by this repro (a plain
+# `docker build` with no --target never reaches it).
 # From: Issue #1095 | Issue #1671 | PR #1743
 RUN install -d /usr/local/lib/docker/cli-plugins
 COPY --from=go-tools-builder /out/docker /usr/local/bin/docker
