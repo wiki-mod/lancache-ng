@@ -30,6 +30,17 @@ ARG MOBY_GO_ARCHIVE_VERSION=0.3.3
 # Why: all three floor at v0.38.0; 0.40.0 is the fix.
 # From: Issue #1598
 ARG GOLANG_X_MOD_VERSION=0.40.0
+# What: hoists sccache/audit/tarpaulin/actionlint pins
+# Why: alpine-final and final stage had duplicate values
+# From: Issue #1671 | PR #1750
+ARG SCCACHE_VERSION=0.17.0
+ARG CARGO_AUDIT_VERSION=0.22.2
+ARG CARGO_TARPAULIN_VERSION=0.37.2
+ARG ACTIONLINT_VERSION=1.7.12
+ARG ACTIONLINT_SHA256_AMD64=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+ARG ACTIONLINT_SHA256_ARM64=325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6
+ARG SHELLSPEC_VERSION=0.28.1
+ARG SHELLSPEC_SHA256=350d3de04ba61505c54eda31a3c2ee912700f1758b1a80a284bc08fd8b6c5992
 
 # What: builds the Go-tool script once for both stages
 # Why: Debian/Alpine RUN bodies were byte-identical
@@ -139,25 +150,28 @@ FROM rust:alpine3.24 AS alpine-final
 
 LABEL org.opencontainers.image.description="Prebuilt lancache-ng CI and developer validation toolchain image (Alpine candidate)."
 
-ARG SCCACHE_VERSION=0.17.0
+# What: inherits shared version pins from top-level ARGs
+# Why: avoids re-declaring the same literal per stage
+# From: Issue #1671 | PR #1750
+ARG SCCACHE_VERSION
 # What: pins cargo-audit musl binary checksum
 # Why: stale pin skips verification; recomputed per version
 # From: Issue #1095 | PR #1743
-ARG CARGO_AUDIT_VERSION=0.22.2
+ARG CARGO_AUDIT_VERSION
 ARG CARGO_AUDIT_SHA256_MUSL_AMD64=7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428
 # What: pins cargo-tarpaulin musl binary checksum
 # Why: stale pin skips verification; recomputed per version
 # From: Issue #1095 | PR #1743
-ARG CARGO_TARPAULIN_VERSION=0.37.2
+ARG CARGO_TARPAULIN_VERSION
 ARG CARGO_TARPAULIN_SHA256_MUSL_AMD64=837dc54d21da101e96e888c6f6680d25f3c06554b0614880ea385cdf68cd5173
 # What: pins actionlint prebuilt binary and checksums
 # Why: stale pin skips verification; recomputed per version
 # From: Issue #1095 | PR #1743
-ARG ACTIONLINT_VERSION=1.7.12
-ARG ACTIONLINT_SHA256_AMD64=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
-ARG ACTIONLINT_SHA256_ARM64=325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6
-ARG SHELLSPEC_VERSION=0.28.1
-ARG SHELLSPEC_SHA256=350d3de04ba61505c54eda31a3c2ee912700f1758b1a80a284bc08fd8b6c5992
+ARG ACTIONLINT_VERSION
+ARG ACTIONLINT_SHA256_AMD64
+ARG ACTIONLINT_SHA256_ARM64
+ARG SHELLSPEC_VERSION
+ARG SHELLSPEC_SHA256
 
 # What: uses plain /bin/sh for the apk-install step only.
 # Why: rust:alpine has no bash until that step installs it.
@@ -431,28 +445,28 @@ FROM rust:latest
 
 LABEL org.opencontainers.image.description="Prebuilt lancache-ng CI and developer validation toolchain image."
 
-# What: bump sccache to current upstream release
-# Why: verify no new default behavior enabled before bump
-# From: Issue #1570 | PR #1571
-ARG SCCACHE_VERSION=0.17.0
-ARG CARGO_AUDIT_VERSION=0.22.2
+# What: inherits shared version pins from top-level ARGs
+# Why: avoids re-declaring the same literal per stage
+# From: Issue #1671 | PR #1750
+ARG SCCACHE_VERSION
+ARG CARGO_AUDIT_VERSION
 ARG CARGO_AUDIT_SHA256_AMD64=ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39
 ARG CARGO_AUDIT_SHA256_ARM64=c6603814ddaa45e51263dafd31c0ac98808f688d26f7395804f9670b0fd599dd
 # What: pins cargo-tarpaulin binary and SHA256 checksums
 # Why: stale checksum breaks build verification silently
 # From: Issue #1570 | PR #1571
-ARG CARGO_TARPAULIN_VERSION=0.37.2
+ARG CARGO_TARPAULIN_VERSION
 ARG CARGO_TARPAULIN_SHA256_AMD64=8e47625d26c3c265886faf1ef8cfa3ccaf071abc87bf4854ef8e239f5ffeabd8
 ARG CARGO_TARPAULIN_SHA256_ARM64=c8cc929a259871cfe4e3cda6e31975abe33b9b0a6078b76cbd466b6494c72792
 # What: pins actionlint prebuilt binary and checksums
 # Why: stale pin skips verification; recomputed per version
 # From: Issue #1095 | PR #1743
-ARG ACTIONLINT_VERSION=1.7.12
-ARG ACTIONLINT_SHA256_AMD64=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
-ARG ACTIONLINT_SHA256_ARM64=325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6
+ARG ACTIONLINT_VERSION
+ARG ACTIONLINT_SHA256_AMD64
+ARG ACTIONLINT_SHA256_ARM64
 ARG DISTCC_PUMP_PACKAGE_VERSION=3.4+really3.4-12
-ARG SHELLSPEC_VERSION=0.28.1
-ARG SHELLSPEC_SHA256=350d3de04ba61505c54eda31a3c2ee912700f1758b1a80a284bc08fd8b6c5992
+ARG SHELLSPEC_VERSION
+ARG SHELLSPEC_SHA256
 ARG DEBIAN_FRONTEND=noninteractive
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -823,10 +837,9 @@ RUN set -euo pipefail; \
     rustc_host_line="$(rustc -vV)"; \
     grep -qE '^host: .*-gnu$' <<<"${rustc_host_line}"
 
-# A generic default working directory for interactive/manual use of this
-# image (e.g. a developer shelling in locally); CI callers never rely on
-# it, since every CI invocation of this image explicitly bind-mounts the
-# checked-out repository at /work and passes -w /work of its own accord.
+# What: default WORKDIR for interactive/manual container use
+# Why: CI always bind-mounts /work itself; not a real default
+# From: Issue #1671 | PR #1750
 WORKDIR /workspace
 
 CMD ["bash"]
