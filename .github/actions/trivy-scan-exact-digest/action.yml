@@ -94,9 +94,8 @@ runs:
         : "${CACHE_DIR:?cache-dir is required}"
 
         cleanup_safe=false
-        # What: restricts safe-to-delete cache paths to two known roots.
-        # Why: a typo in the caller-controlled cache-dir input must never
-        #   turn a reusable action into an arbitrary recursive deletion.
+        # What: restricts safe-to-delete cache paths to known roots.
+        # Why: prevent typo-driven arbitrary recursive deletion.
         # From: PR #1523
         if [[ "$CLEANUP_CACHE" == "true" ]]; then
           [[ "$CACHE_DIR" == /* ]] || {
@@ -131,9 +130,8 @@ runs:
         fi
         printf 'cleanup-safe=%s\n' "$cleanup_safe" >> "$GITHUB_OUTPUT"
 
-    # What: scans with trivy-scan-retry, not aquasecurity/trivy-action directly.
-    # Why: the unauthenticated first-choice vulnerability-DB mirror caused
-    #   real CI failures with zero retry anywhere.
+    # What: scans with trivy-scan-retry, not trivy-action.
+    # Why: unauthenticated mirror caused CI failures; needs retry.
     # From: PR #1542 | Issue #1535
     - name: Scan exact image digest with Trivy
       id: scan
