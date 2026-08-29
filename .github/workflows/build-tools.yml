@@ -406,26 +406,28 @@ jobs:
           platform: linux/amd64
           run-fixtures: "true"
 
-      # What: keys the Trivy cache dir by sanitized ref, ephemeral for
-      #   pull_request/workflow_dispatch/rerun events, persistent otherwise.
-      # Why: a fixed shared directory let concurrent runs race on Trivy's
-      #   single-writer BoltDB backend.
-      # From: Issue #912 | PR #927
-      - name: Prepare candidate Trivy cache
+      # What: resolves the shared, persistent NFS-backed Trivy DB directory
+      #   (real local-disk fallback if the mount is unavailable), then
+      #   refreshes it under a lock using Trivy's own --download-db-only
+      #   freshness check. Used for every scan step below (amd64 + arm64,
+      #   local-image + exact-digest) -- this job runs both platforms
+      #   sequentially, so one resolve+refresh per job run is enough.
+      # Why: replaces a directory that was wiped empty on every
+      #   pull_request/workflow_dispatch/retry run, which defeated Trivy's
+      #   own DB-freshness check and forced a full ~1.3 GB re-download every
+      #   time. skip-db-update below (steps.trivy-db-fresh.outputs.db-present)
+      #   is what actually prevents reintroducing the original concurrent-
+      #   writer race now that the directory is shared instead of ephemeral.
+      # From: Issue #1095 | Issue #912 | PR #927
+      - name: Resolve shared Trivy DB cache directory
         id: trivy-cache
-        run: |
-          set -euo pipefail
-          sanitized_ref="$(printf '%s' "$GITHUB_REF" | tr '/:@' '---' | tr -cd 'A-Za-z0-9_.-')"
-          [[ -n "$sanitized_ref" ]] || { echo "::error::Could not derive safe cache key."; exit 1; }
-          cache_dir="/var/tmp/lancache-ng-trivy-cache/build-tools-${sanitized_ref}"
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] || [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] || [ "$GITHUB_RUN_ATTEMPT" != "1" ]; then
-            cache_dir="${cache_dir}-${GITHUB_RUN_ID}"
-            echo "ephemeral=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "ephemeral=false" >> "$GITHUB_OUTPUT"
-          fi
-          mkdir -p "$cache_dir"
-          echo "dir=$cache_dir" >> "$GITHUB_OUTPUT"
+        uses: ./.github/actions/trivy-cache-dir
+
+      - name: Ensure shared Trivy DB is current
+        id: trivy-db-fresh
+        uses: ./.github/actions/trivy-db-ensure-fresh
+        with:
+          cache-dir: ${{ steps.trivy-cache.outputs.dir }}
 
       # What: scans via trivy-scan-retry for its retry/GHCR-mirror/auth.
       # Why: this exact step previously hit a DB-download failure with no
@@ -464,6 +466,7 @@ jobs:
           hide-progress: true
           cache: "false"
           cache-dir: ${{ steps.trivy-cache.outputs.dir }}
+          skip-db-update: ${{ steps.trivy-db-fresh.outputs.db-present == 'true' }}
           timeout: 10m
           exit-code: "1"
 
@@ -547,17 +550,7 @@ jobs:
           dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
           image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
           cache-dir: ${{ steps.trivy-cache.outputs.dir }}
-
-      - name: Remove ephemeral Trivy cache
-        if: ${{ always() && steps.trivy-cache.outputs.ephemeral == 'true' }}
-        env:
-          TRIVY_CACHE_DIR: ${{ steps.trivy-cache.outputs.dir }}
-        run: |
-          set -euo pipefail
-          case "$TRIVY_CACHE_DIR" in
-            /var/tmp/lancache-ng-trivy-cache/?*) rm -rf -- "$TRIVY_CACHE_DIR" ;;
-            *) echo "::error::Refusing unexpected cache path '$TRIVY_CACHE_DIR'."; exit 1 ;;
-          esac
+          skip-db-update: ${{ steps.trivy-db-fresh.outputs.db-present == 'true' }}
 
       - name: Attest amd64 build-tools image provenance
         if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
@@ -842,6 +835,18 @@ jobs:
           dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
           dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
           image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
+          # What: unchanged from before this PR -- a runner.temp path,
+          #   cleaned up every run.
+          # Why: this job (build-tools-arm64) runs on GitHub-hosted
+          #   ubuntu-24.04-arm, not the self-hosted LAN runners the shared
+          #   NFS Trivy-DB mount (/mnt/trivy-db) lives on. A GitHub-hosted
+          #   runner's entire filesystem is destroyed after the job anyway,
+          #   so neither the shared mount nor a local persistent-fallback
+          #   directory would survive to a later run here regardless --
+          #   there is nothing to fix on this leg. See the amd64
+          #   "build-tools" job's identical step above (self-hosted) for
+          #   the actual fix.
+          # From: Issue #1095 | Issue #912
           cache-dir: ${{ runner.temp }}/trivy-build-tools-arm64-${{ github.run_id }}-${{ github.run_attempt }}
           cleanup-cache: "true"
 

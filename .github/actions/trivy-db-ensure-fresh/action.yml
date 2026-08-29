@@ -1,0 +1,117 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+name: Ensure the shared Trivy DB is current (lock-guarded)
+description: >-
+  Runs Trivy's own --download-db-only freshness check against a shared,
+  persistent cache-dir, serialized by a real cross-job lock so that
+  concurrent scan jobs (e.g. build-tools' amd64+arm64, or build+build-arm64+
+  container-scan+release-sbom in the same push) never write to the same
+  BoltDB file at once. Every scan step downstream of this action must pass
+  skip-db-update: true so it never writes to the DB itself -- only this
+  action's single, lock-held invocation ever does.
+
+# What: serializes DB refresh with lock to prevent races
+# Why: concurrent jobs need exclusive write access to DB
+# From: Issue #1095 | PR #1747
+
+inputs:
+  cache-dir:
+    description: The directory returned by trivy-cache-dir's `dir` output.
+    required: true
+  lock-timeout-seconds:
+    description: >-
+      Maximum time to wait for the lock before giving up and scanning with
+      whatever DB is already present (possibly one refresh cycle stale)
+      rather than blocking the whole pipeline indefinitely.
+    required: false
+    default: "900"
+  stale-lock-seconds:
+    description: >-
+      A lock directory older than this is assumed to belong to a crashed
+      holder and is reclaimed. Generous on purpose: a genuine ~1.3 GB DB
+      download over a home-lab link can legitimately take several minutes.
+    required: false
+    default: "1200"
+outputs:
+  db-present:
+    description: >-
+      "true" once a real trivy.db file exists in cache-dir after this
+      action runs (whether it was already fresh, was just refreshed, or is
+      merely what a prior generation left behind after a lock timeout).
+      "false" only when no DB exists at all yet -- the sole case where a
+      downstream scan step must NOT pass skip-db-update, so Trivy's own
+      first-time bootstrap download can still happen (unlocked, same as
+      before this action existed, since there is nothing yet to race over).
+    value: ${{ steps.check.outputs.db-present }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install trivy CLI for the DB-refresh check
+      uses: ./.github/actions/aquasecurity-setup-trivy-centralized-version
+
+    - name: Acquire lock, run Trivy's own DB-freshness check, release lock
+      id: refresh
+      shell: bash
+      env:
+        CACHE_DIR: ${{ inputs.cache-dir }}
+        LOCK_TIMEOUT: ${{ inputs.lock-timeout-seconds }}
+        STALE_AFTER: ${{ inputs.stale-lock-seconds }}
+      run: |
+        set -euo pipefail
+        : "${CACHE_DIR:?cache-dir is required}"
+        lock_dir="$CACHE_DIR/.trivy-db-update.lock"
+        poll_interval=5
+        waited=0
+
+        # What: uses atomic mkdir for lock, not flock
+        # Why: soft NFS mount cannot reliably support flock
+        # From: Issue #1095 | PR #1747
+        acquire() {
+          mkdir "$lock_dir" 2>/dev/null
+        }
+
+        while ! acquire; do
+          if [ -d "$lock_dir" ]; then
+            lock_mtime="$(stat -c %Y "$lock_dir" 2>/dev/null || echo 0)"
+            now="$(date +%s)"
+            age=$(( now - lock_mtime ))
+            if [ "$age" -gt "$STALE_AFTER" ]; then
+              echo "::warning::Reclaiming stale Trivy DB-update lock '$lock_dir' (age ${age}s > ${STALE_AFTER}s) -- previous holder almost certainly crashed or was cancelled mid-download."
+              rm -rf -- "$lock_dir"
+              continue
+            fi
+          fi
+          if [ "$waited" -ge "$LOCK_TIMEOUT" ]; then
+            echo "::warning::Timed out after ${LOCK_TIMEOUT}s waiting for the Trivy DB-update lock held by another concurrent job -- proceeding WITHOUT refreshing the DB this run. The scan below will use whatever DB is already present (possibly one refresh cycle stale), never a corrupted concurrent write."
+            echo "refreshed=timeout" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          sleep "$poll_interval"
+          waited=$(( waited + poll_interval ))
+        done
+
+        # What: trap ensures lock release even on failure
+        # Why: unreleased lock would wedge later jobs
+        # From: Issue #1095 | PR #1747
+        trap 'rm -rf -- "$lock_dir"' EXIT
+
+        echo "::notice::Holding Trivy DB-update lock on '$lock_dir' -- running trivy's own --download-db-only freshness check (real download only if metadata.json's NextUpdate has actually passed)."
+        trivy image --download-db-only --cache-dir "$CACHE_DIR"
+        echo "refreshed=checked" >> "$GITHUB_OUTPUT"
+
+    - name: Determine whether a DB is present after the check
+      id: check
+      if: always()
+      shell: bash
+      env:
+        CACHE_DIR: ${{ inputs.cache-dir }}
+      run: |
+        set -euo pipefail
+        if [ -s "$CACHE_DIR/db/trivy.db" ]; then
+          echo "db-present=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "::warning::No trivy.db present in '$CACHE_DIR' after the freshness check (lock timeout on a cold cache, or the download itself failed) -- the next scan step will run WITHOUT skip-db-update so Trivy can still attempt its own unlocked bootstrap download, exactly as it would have before this action existed."
+          echo "db-present=false" >> "$GITHUB_OUTPUT"
+        fi

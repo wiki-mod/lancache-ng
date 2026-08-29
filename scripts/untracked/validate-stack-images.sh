@@ -465,17 +465,26 @@ require_grep 'is missing required platform' \
 # Why: container-scan no longer builds/scans locally (G8), so
 # only this surviving Trivy cache directory still enforces #904's invariant.
 # From: Issue #1095 | PR #1501.
-require_grep 'cache_dir="/var/tmp/lancache-ng-trivy-cache/\$\{MATRIX_SERVICE\}-pushed-\$\{sanitized_ref\}"' \
+#
+# What: #904's invariant used to be enforced by a service- and
+# run_id-suffixed cache-dir path, one throwaway directory per matrix job so
+# concurrent writers could never collide. It is now enforced differently: a
+# shared trivy-cache-dir directory (real write+subdirectory probe, real
+# local-disk fallback, never tmpfs) plus a lock-guarded trivy-db-ensure-fresh
+# refresh step, so every scan reads with skip-db-update and only the
+# lock-holder ever writes.
+# Why: pointing every service+platform at one shared, persistent Trivy DB
+# is the actual fix for the redundant-download outage this replaced --
+# wiping the directory every pull_request/workflow_dispatch/retry run
+# defeated Trivy's own DB-freshness check; the per-job-unique directory
+# this check used to require would have reintroduced that outage.
+# From: Issue #1095 | Issue #912
+require_grep 'uses: \./\.github/actions/trivy-cache-dir' \
   .github/workflows/build-push.yml \
-  'the pushed per-service digest scan must use a service- and ref-specific Trivy cache directory too (see #904; widened from build-tools-only to every service by Step 3, issue #1095)'
-# What: checks that the Trivy cache-dir key suffixes GITHUB_RUN_ID, not the
-# old hardcoded "build-tools-" prefix.
-# Why: a cache-dir key must be at least as fine as its job's concurrency
-# group; ref alone left a real race open for workflow_dispatch/rerun (#904).
-# From: Issue #1095 | PR #1501.
-require_grep 'cache_dir="\$\{cache_dir\}-\$\{GITHUB_RUN_ID\}"' \
+  'the pushed per-service digest scan must resolve its Trivy DB cache directory via trivy-cache-dir (shared NFS + real local-disk fallback, never tmpfs; see #904, superseded by Issue #1095/#912)'
+require_grep 'uses: \./\.github/actions/trivy-db-ensure-fresh' \
   .github/workflows/build-push.yml \
-  'Trivy cache-dir keys must mirror their concurrency groups run_id suffix for workflow_dispatch/rerun, not just the ref component (see #904)'
+  'the pushed per-service digest scan must refresh its shared Trivy DB via the lock-guarded trivy-db-ensure-fresh action, the mechanism that now provides #904s concurrent-writer safety'
 # Keep release verification aligned with the canonical first-party service
 # set plus the immutable stack pointer (#1428 added syslog, #1556 added
 # utilities, both for the same reason the runtime_images/Dockerfile loops
