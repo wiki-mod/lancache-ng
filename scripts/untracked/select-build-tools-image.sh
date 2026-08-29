@@ -90,6 +90,19 @@ smoke_test_image() {
       distcc
       distcc-pump
       docker
+      # What: verified here now, graduated out of
+      # check-build-tools-smoke-coverage.sh EXCLUDED_TOOLS.
+      # Why: gc-pr-staging-images.sh main entry point hard-requires gh and
+      # previously failed deep inside a live GC run, Required tool gh was
+      # not found, whenever the published image predated PR #1694 adding it
+      # to this Dockerfile -- the smoke test never caught that gap up front.
+      # The published nightly image now carries gh, confirmed live: the
+      # currently-tagged nightly digest passes gc-pr-staging-images.sh own
+      # tool check, so the deferred exclusion no longer applies.
+      # No apostrophes or parens in this comment -- single-quoted bash -lc
+      # argument, and this guard scans for a literal closing paren per line.
+      # From: Issue #1095 | PR #1694.
+      gh
       jq
       dig
       ip
