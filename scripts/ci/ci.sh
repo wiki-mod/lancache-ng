@@ -236,15 +236,15 @@ declare -Ag CI_SERVICE_COMPILER_CLASS=(
 )
 
 ci_service_list() {
-    # What: prints the authoritative service list, one per line.
-    # Why: keeps §7's "exactly one list" true for reads too.
+    # What: prints authoritative service list, one per line.
+    # Why: keeps §7's "exactly one list" for reads too.
     # From: Issue #1683
     printf '%s\n' "${CI_SERVICES[@]}"
 }
 
 ci_service_exists() {
-    # What: returns success iff $1 is a member of CI_SERVICES.
-    # Why: single membership check, not re-implemented per caller.
+    # What: returns success iff $1 is in CI_SERVICES.
+    # Why: single check, not re-implemented per caller.
     # From: Issue #1683
     local candidate="$1" svc
     for svc in "${CI_SERVICES[@]}"; do
@@ -254,8 +254,8 @@ ci_service_exists() {
 }
 
 ci_require_service() {
-    # What: validates $1 is a known service, dies otherwise.
-    # Why: fail closed on a typo instead of an undefined lookup.
+    # What: validates $1 is known service, dies otherwise.
+    # Why: fail closed on typo, not undefined lookup.
     # From: Issue #1683
     local candidate="$1"
     ci_service_exists "$candidate" || ci_die "unknown service: $candidate (expected one of: ${CI_SERVICES[*]})"
@@ -270,8 +270,8 @@ ci_service_context() {
 }
 
 ci_service_platforms() {
-    # What: prints service $1's build platforms, one per line.
-    # Why: §43 reads platforms from one place, not per matrix job.
+    # What: prints $1's platforms, one per line.
+    # Why: §43 reads from one place, not per job.
     # From: Issue #1683
     ci_require_service "$1"
     # shellcheck disable=SC2086 # word-split space-separated platforms on purpose
@@ -279,24 +279,24 @@ ci_service_platforms() {
 }
 
 ci_service_runner_class() {
-    # What: prints service $1's runner class (heavy|light).
-    # Why: §71 dynamic matrix needs this to pick a runner pool.
+    # What: prints $1's runner class (heavy|light).
+    # Why: §71 matrix needs this to pick runner.
     # From: Issue #1683
     ci_require_service "$1"
     printf '%s\n' "${CI_SERVICE_RUNNER_CLASS[$1]}"
 }
 
 ci_service_compiler_class() {
-    # What: prints service $1's compiler class (none|rust|c).
-    # Why: selects the build's cache-tier configuration.
+    # What: prints $1's compiler (none|rust|c).
+    # Why: selects cache-tier configuration.
     # From: Issue #1683
     ci_require_service "$1"
     printf '%s\n' "${CI_SERVICE_COMPILER_CLASS[$1]}"
 }
 
 ci_service_external_contexts() {
-    # What: prints service $1's external build contexts, if any.
-    # Why: §13 needs proxy's real dns dependency, not a guess.
+    # What: prints $1's external build contexts.
+    # Why: §13 needs proxy's dns dependency.
     # From: Issue #1683
     ci_require_service "$1"
     local raw="${CI_SERVICE_EXTERNAL_CONTEXT[$1]}"
@@ -309,8 +309,8 @@ ci_service_external_contexts() {
 # SEMANTIC PARSERS
 # ============================================================
 #
-# What: §12.5's deliberately narrow v1, not full equivalence.
-# Why: 4 grammars in bash is a project, not a helper (§12.5).
+# What: §12.5's narrow v1, not full equivalence.
+# Why: 4 grammars in bash is a project (§12.5).
 # From: Issue #1683
 
 ci_path_is_markdown() {
@@ -320,14 +320,14 @@ ci_path_is_markdown() {
     [[ "$1" == *.md ]]
 }
 
-# What: space-separated .md paths that ARE real build inputs.
+# What: .md paths that are real build inputs.
 # Why: §12.4's exception, env-driven not hardcoded.
 # From: Issue #1683
 CI_MARKDOWN_BUILD_INPUTS="${CI_MARKDOWN_BUILD_INPUTS:-}"
 
 ci_markdown_is_build_input() {
-    # What: true iff $1 is on the markdown build-input allowlist.
-    # Why: §12.4's escape hatch for a real build input.
+    # What: true iff $1 is on build-input allowlist.
+    # Why: §12.4's escape hatch for build input.
     # From: Issue #1683
     local path="$1" entry
     for entry in $CI_MARKDOWN_BUILD_INPUTS; do
@@ -337,8 +337,8 @@ ci_markdown_is_build_input() {
 }
 
 ci_normalize_for_hash() {
-    # What: strips comment/blank lines and CRLF; keeps the rest.
-    # Why: shell/Dockerfile '#' is always a comment.
+    # What: strips comments, blanks, CRLF; keeps code.
+    # Why: shell/Dockerfile '#' is always comment.
     # From: Issue #1683
     local path="$1"
     awk '
