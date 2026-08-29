@@ -838,7 +838,7 @@ RUN set -euo pipefail; \
     grep -qE '^host: .*-gnu$' <<<"${rustc_host_line}"
 
 # What: default WORKDIR for interactive/manual container use
-# Why: CI always bind-mounts /work itself; not a real default
+# Why: CI always bind-mounts /work; not a real default here
 # From: Issue #1671 | PR #1750
 WORKDIR /workspace
 
