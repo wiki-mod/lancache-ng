@@ -2,11 +2,9 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: real DNS/HTTP/HTTPS caching test against a genuinely fetchable target.
-# Why: game CDN domains need signed/session URLs a plain curl can't satisfy;
-#   deb.debian.org is already a cached distro mirror needing no custom image,
-#   and proves dns-ssl's DNS answer leads to a genuinely distinct MITM endpoint.
-# From: Issue #597 | Issue #668.
+# What: Real DNS/HTTP/HTTPS caching test against a fetchable target.
+# Why: Proves dns-ssl's DNS answer leads to MITM, not passthrough.
+# From: Issue #597.
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
@@ -17,10 +15,9 @@ source "$repo_root/scripts/lib/reserve-validation-subnet.sh"
 
 test_domain="deb.debian.org"
 test_path="/debian/README"
-# What: the SSL-mode leg uses a distinct path from the standard-mode leg.
-# Why: the proxy cache key is $host$uri$slice_range (AGENTS.md AG-OP-001),
-#   shared between HTTP and HTTPS on the same container -- reusing the same
-#   path found it already cached, reporting a false HIT on the first request.
+# What: SSL-mode leg uses distinct path from standard-mode leg.
+# Why: Cache key shared between modes; reuse causes false HIT.
+# From: Issue #597
 ssl_test_path="/debian/dists/stable/Release"
 work_dir="$repo_root/.ssl-mitm-simulation-tmp"
 rm -rf "$work_dir"
@@ -28,19 +25,14 @@ mkdir -p "$work_dir"
 
 compose_project="${COMPOSE_PROJECT_NAME:-lancache-ng-validation}"
 network_name="${compose_project}_validation"
-# What: defaults must exactly match docker-compose.yml's own VALIDATION_* fallbacks.
-# Why: `docker compose up` reads the same vars to decide the real container
-#   IPs; a mismatch targets the wrong address. Overridden per-run by the
-#   automatic concurrent-PR gate for collision-free subnets.
-# From: Issue #667 | Issue #715.
+# What: Defaults must match docker-compose VALIDATION_* fallbacks.
+# Why: docker compose reads same vars; mismatch targets wrong IP.
+# From: Issue #667.
 proxy_ip="${VALIDATION_PROXY_IP:-172.30.99.2}"
 dns_standard_ip="${VALIDATION_DNS_STANDARD_IP:-172.30.99.3}"
 dns_ssl_ip="${VALIDATION_DNS_SSL_IP:-172.30.99.5}"
-# What: never reads/hardcodes $VALIDATION_STANDARD_SHIM_IP directly.
-# Why: unlike the dig-target IPs above, the shim's address is only ever a
-#   dig ANSWER; hardcoding and asserting against it would reintroduce the
-#   shallow check of comparing a DNS answer to a literal instead of proving
-#   it leads somewhere real.
+# What: Never hardcodes $VALIDATION_STANDARD_SHIM_IP directly.
+# Why: DNS answer proves reachability; hardcoding loses proof.
 # From: Issue #668.
 build_tools_image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
 image_tag="${LANCACHE_IMAGE_TAG:-nightly}"
@@ -53,10 +45,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# What: clears leftover compose state before `up -d` runs.
-# Why: a killed (not exited) prior run skips the EXIT trap, leaving the
-#   fixed-name proxy-cache volume populated -- this run's first request
-#   would then come back a false HIT instead of the expected MISS.
+# What: Clears leftover compose state before up -d.
+# Why: Killed run skips EXIT trap, leaving cache with false HIT.
 # From: Issue #667.
 echo "== Clearing any leftover state from a previous run =="
 "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
@@ -64,30 +54,27 @@ validation_project_networks_teardown "$compose_project" || true
 
 echo "== Pulling the published $image_tag images =="
 
-# What: explicit pull before `up -d`; standard-passthrough-shim excluded.
-# Why: Compose's pull_policy: missing would otherwise silently reuse a
-#   locally cached image instead of the one actually published for this run.
-#   The shim (plain Docker Hub alpine) is pulled/started by `up -d` itself.
+# What: explicit pull before up -d; shim excluded.
+# Why: pull_policy: missing reuses cached image; shim excluded.
 # From: Issue #667.
 LANCACHE_IMAGE_TAG="$image_tag" "${compose[@]}" pull --quiet proxy dns-standard dns-ssl nats
 
 echo "== Starting proxy/dns-standard/dns-ssl/nats/standard-passthrough-shim from the published $image_tag images =="
 
-# What: standard-passthrough-shim is named explicitly in `up -d`.
-# Why: it is Compose-profile-gated; an explicitly-named service always
-#   starts regardless of active profiles, so no --profile flag is needed.
+# What: standard-passthrough-shim is named explicitly in up -d.
+# Why: Compose-profile-gated; explicit name starts regardless.
+# From: Issue #667
 LANCACHE_IMAGE_TAG="$image_tag" "${compose[@]}" up -d proxy dns-standard dns-ssl nats standard-passthrough-shim
 
 # What: reuses the health-wait pattern already proven elsewhere.
-# Why: matches full-setup-validate.yml and setup-cli-simulation.sh so
-#   readiness semantics stay consistent across simulations.
+# Why: Reuses proven pattern for consistent readiness semantics.
+# From: Issue #1095
 deadline=$((SECONDS + 90))
 while (( SECONDS < deadline )); do
     all_ready=1
     for service in proxy dns-standard dns-ssl standard-passthrough-shim; do
-        # What: wraps `cid="$(compose ps -q ...)"` in an explicit `if !` check.
-        # Why: under `set -euo pipefail`, a bare assignment aborts silently
-        #   the instant the command fails, before any diagnostic prints.
+        # What: wraps cid assignment in explicit if ! check.
+        # Why: Bare assignment under set -euo pipefail aborts silently.
         # From: Issue #841.
         if ! cid="$("${compose[@]}" ps -q "$service")"; then
             echo "::error::Could not query the compose container id for service '$service'." >&2
@@ -119,10 +106,9 @@ if ! proxy_cid="$("${compose[@]}" ps -q proxy)"; then
 fi
 docker cp "$proxy_cid:/etc/nginx/ssl/ca/ca.crt" "$work_dir/ca.crt"
 
-# What: /shared is bind-mounted from work_dir into every run_client call.
-# Why: each call is a brand new --rm container, so /tmp inside it never
-#   survives past that one call -- files written by one call would not
-#   exist for a later call, or for cmp/test on the host, without this.
+# What: /shared is bind-mounted from work_dir into run_client.
+# Why: --rm container ephemeral; files only survive via /shared.
+# From: Issue #667
 mkdir -p "$work_dir/shared"
 run_client() {
     docker run --rm --network "$network_name" \
@@ -132,27 +118,21 @@ run_client() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────
-# What: proof is driven by dig's actual DNS answer; standard-passthrough-shim
-#   reproduces prod's IP_STANDARD/IP_SSL port-publish split on this bridge.
-# Why: asserting both nameservers resolve to one shared hardcoded address
-#   only proves the harness is reachable, never that dns-ssl's answer leads
-#   somewhere distinct -- a swapped/misrouted PROXY_IP would pass identically.
+# What: proof driven by dig's DNS answer; split IP_STANDARD/IP_SSL.
+# Why: asserting hardcoded IP only proves reachability, not DNS.
 # From: Issue #668.
 echo "== DNS: resolving $test_domain against dns-standard and dns-ssl =="
 
-# What: wraps `resolved_dns_standard="$(run_client ... | sort -u)"` in `if !`.
-# Why: `sort -u` always succeeds even on zero lines of input, so pipefail
-#   alone would still mask a failed dig/run_client invocation with no
-#   explanation once it reaches the empty/ambiguous check below.
+# What: wraps resolved_dns output in if ! to catch failures.
+# Why: sort -u succeeds; wrapping catches dig command failure.
 # From: Issue #841.
 if ! resolved_dns_standard="$(run_client "dig +time=3 +tries=2 +short @$dns_standard_ip A $test_domain" | sort -u)"; then
     echo "::error::Failed to run dig against dns-standard ($dns_standard_ip) for $test_domain (run_client/docker invocation failed)." >&2
     exit 1
 fi
-# What: `sort -u` collapses duplicate-but-identical DNS answers only.
-# Why: a real ambiguity (more than one distinct address, or none) leaves no
-#   well-defined target, and must fail loudly rather than silently picking
-#   whichever line came first.
+# What: sort -u collapses identical DNS answers.
+# Why: Ambiguity must fail, not silently pick first line.
+# From: Issue #841
 if [[ -z "$resolved_dns_standard" ]] || [[ "$resolved_dns_standard" == *$'\n'* ]]; then
     echo "::error::dns-standard returned an empty or ambiguous DNS answer for $test_domain: '$resolved_dns_standard'" >&2
     exit 1
@@ -176,9 +156,8 @@ fi
 
 echo "== Port routing: proving dns-ssl's answer leads to genuine MITM interception and dns-standard's answer leads to genuine SNI passthrough (issue #668) =="
 
-# What: reads our own LAN CA's subject as the issuer-comparison reference.
-# Why: it becomes the ISSUER field of every certificate our CA signs, so
-#   both legs below compare their presented issuer against this value.
+# What: reads LAN CA subject as issuer-comparison reference.
+# Why: ISSUER field in our CA's signed certs; used for comparison.
 # From: Issue #668.
 if ! ca_subject="$(run_client "openssl x509 -noout -subject -in /ca.crt" | sed 's/^subject=//')"; then
     echo "::error::Failed to read our own LAN CA's subject from ca.crt (run_client/openssl invocation failed)." >&2
@@ -188,17 +167,12 @@ fi
 echo "LAN CA subject: $ca_subject"
 
 # --- dns-ssl's resolved address: must present a certificate WE signed ---
-# What: pipes `openssl s_client`'s PEM handshake output into `openssl x509`
-#   to extract the issuer, under a `timeout` with `< /dev/null` as stdin.
-# Why: `s_client` prints the leaf certificate as normal handshake output (no
-#   -showcerts needed); `timeout` stops it lingering for application data
-#   that never comes, and `< /dev/null` signals EOF instead of a stray newline.
+# What: pipes openssl s_client/x509 to extract TLS handshake issuer.
+# Why: s_client outputs leaf cert; x509 extracts issuer; timeout.
 # From: Issue #668.
 #
-# What: openssl's own stderr is captured into /shared; only s_client's own
-#   exit status fails the run_client call, not x509's.
-# Why: x509 returning nothing is a legitimate "no certificate presented"
-#   result, not an invocation failure -- the two must stay distinguishable.
+# What: openssl stderr in /shared; only s_client exit fails abort.
+# Why: x509 returning nothing is legitimate, not failure.
 # From: Issue #1095.
 : >"$work_dir/shared/openssl-stderr-ssl.log"
 if ! ssl_issuer="$(run_client "timeout 10 openssl s_client -connect $resolved_dns_ssl:443 -servername $test_domain < /dev/null 2>/shared/openssl-stderr-ssl.log | openssl x509 -noout -issuer 2>>/shared/openssl-stderr-ssl.log; s=\${PIPESTATUS[0]}; [[ \$s -eq 0 ]] || exit 1" | sed 's/^issuer=//')"; then
@@ -211,9 +185,8 @@ if [[ "$ssl_issuer" != "$ca_subject" ]]; then
 fi
 echo "dns-ssl's resolved address ($resolved_dns_ssl) presents a certificate issued by our own LAN CA -- genuine MITM interception confirmed, driven by the actual DNS answer."
 
-# What: a plain curl (system CA trust store, no --cacert) must FAIL here.
-# Why: success would mean the certificate is publicly trusted, which our
-#   private LAN CA's certs never are -- the negative half of the MITM proof.
+# What: plain curl (system CA, no --cacert) must FAIL here.
+# Why: certificate is private LAN CA, never public-trusted.
 # From: Issue #668.
 if run_client "curl -sS --connect-timeout 5 --max-time 10 --resolve $test_domain:443:$resolved_dns_ssl -o /dev/null 'https://$test_domain$ssl_test_path'"; then
     echo "::error::A plain curl (default system CA trust store, no --cacert) trusted dns-ssl's resolved endpoint's certificate. A genuinely intercepted connection should only validate against our own ca.crt, never the public trust store." >&2
@@ -222,10 +195,8 @@ fi
 echo "dns-ssl's resolved endpoint's certificate is correctly rejected by the public/system CA trust store (only trusted via our own ca.crt) -- confirms interception, not passthrough."
 
 # --- dns-standard's resolved address: must present the REAL origin's own certificate ---
-# What: openssl's own stderr is captured into /shared; only s_client's own
-#   exit status fails the run_client call, not x509's.
-# Why: x509 returning nothing is a legitimate "no certificate presented"
-#   result, handled by the explicit check below, not an invocation failure.
+# What: openssl stderr in /shared; only s_client exit fails abort.
+# Why: x509 returning nothing is legitimate, not failure.
 # From: Issue #1095.
 : >"$work_dir/shared/openssl-stderr-standard.log"
 if ! standard_issuer="$(run_client "timeout 10 openssl s_client -connect $resolved_dns_standard:443 -servername $test_domain < /dev/null 2>/shared/openssl-stderr-standard.log | openssl x509 -noout -issuer 2>>/shared/openssl-stderr-standard.log; s=\${PIPESTATUS[0]}; [[ \$s -eq 0 ]] || exit 1" | sed 's/^issuer=//')"; then
@@ -240,9 +211,8 @@ if [[ "$standard_issuer" == "$ca_subject" ]]; then
 fi
 echo "dns-standard's resolved address ($resolved_dns_standard) presents a certificate NOT issued by our LAN CA (issuer: $standard_issuer) -- genuine SNI passthrough to the real origin confirmed, driven by the actual DNS answer."
 
-# What: the inverse of the negative check above -- plain curl MUST succeed.
-# Why: this leg is meant to reach the real origin's own publicly-trusted
-#   certificate, not ours.
+# What: Inverse: plain curl MUST succeed here.
+# Why: Real origin's publicly-trusted certificate, not ours.
 # From: Issue #668.
 run_client "curl -sS --connect-timeout 5 --max-time 10 --resolve $test_domain:443:$resolved_dns_standard -o /dev/null 'https://$test_domain$ssl_test_path'" \
     || { echo "::error::A plain curl (default system CA trust store, no --cacert) FAILED to validate dns-standard's resolved endpoint's certificate. Expected the real origin's own publicly-trusted certificate to validate cleanly there." >&2; exit 1; }
@@ -250,18 +220,15 @@ echo "dns-standard's resolved endpoint's certificate validates cleanly against t
 
 echo "Distinguishing property proven end-to-end (issue #668): dns-ssl's own DNS answer for $test_domain leads to a TLS endpoint presenting a certificate signed by our LAN CA (real MITM interception), while dns-standard's own DNS answer for the SAME domain leads to a genuinely different TLS endpoint presenting the real origin's own certificate (SNI passthrough, no interception) -- these are provably distinct endpoints determined by the DNS answer itself, not by a hardcoded address shared between both paths."
 
-# What: curl uses a 30s --max-time and inlines -w's quoted format string per run_client call.
-# Why: these are real proxy fetches needing more headroom than a loopback
-#   health check; a shared curl_opts array loses its quoting across
-#   run_client's second, inner bash -c, and silently breaks the -w output.
+# What: curl uses 30s --max-time, inlines -w format per run_client.
+# Why: Real fetches need headroom; shared array loses quoting.
 # From: Issue #667.
 curl_timeouts="-sS --connect-timeout 5 --max-time 30"
 
 echo "== Standard mode: HTTP MISS then HIT for a real file =="
 
-# What: uses $proxy_ip directly here, not a DNS-resolved address.
-# Why: port 80 is shared/identical between both modes in prod too; there is
-#   no per-mode HTTP behavior to distinguish, only the port-443 split above.
+# What: uses proxy_ip directly, not DNS-resolved address.
+# Why: Port 80 is shared; no per-mode behavior to distinguish.
 # From: Issue #668.
 if ! http_status_1="$(run_client "curl $curl_timeouts -w '\nHTTP_STATUS:%{http_code}\n' -o /shared/body1 -D - -H 'Host: $test_domain' 'http://$proxy_ip$test_path'")"; then
     echo "::error::First standard-mode HTTP request via run_client failed outright (curl/docker invocation error)." >&2
@@ -289,9 +256,8 @@ echo "Standard mode: MISS then HIT confirmed, with identical real file content o
 
 echo "== SSL mode: HTTPS MITM MISS then HIT for a real file =="
 
-# What: --resolve targets $resolved_dns_ssl, the actual dns-ssl DNS answer.
-# Why: like the port-routing proof above it, this cache test is driven by
-#   DNS rather than by an address dns-ssl merely happens to share.
+# What: --resolve targets dns-ssl's DNS answer.
+# Why: Cache test driven by DNS, not shared address.
 # From: Issue #668.
 if ! https_status_1="$(run_client "curl $curl_timeouts -w '\nHTTP_STATUS:%{http_code}\n' --resolve $test_domain:443:$resolved_dns_ssl --cacert /ca.crt -o /shared/sbody1 -D - 'https://$test_domain$ssl_test_path'")"; then
     echo "::error::First SSL-mode HTTPS request via run_client failed outright (curl/docker invocation error)." >&2
