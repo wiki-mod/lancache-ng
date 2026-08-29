@@ -384,8 +384,8 @@ ci_normalize_yaml_for_hash() {
 }
 
 ci_normalize_dispatch() {
-    # What: normalizes stdin by $1's file extension.
-    # Why: routes .yml/.yaml through the block-scalar-aware path.
+    # What: normalizes stdin by $1's extension.
+    # Why: routes .yml/.yaml through block-scalar path.
     # From: Issue #1683
     case "$1" in
         *.yml | *.yaml) ci_normalize_yaml_for_hash /dev/stdin ;;
@@ -394,8 +394,8 @@ ci_normalize_dispatch() {
 }
 
 ci_content_hash() {
-    # What: prints the sha256 of $1's normalized content + mode.
-    # Why: an exec-bit flip is a real input change too.
+    # What: prints sha256 of $1's normalized content.
+    # Why: exec-bit flip is a real input change.
     # From: Issue #1683
     local path="$1" mode="${2:-}"
     { printf 'mode=%s\n' "$mode"; ci_normalize_dispatch "$path" < "$path"; } | sha256sum | cut -d' ' -f1
@@ -405,13 +405,13 @@ ci_content_hash() {
 # IMPACT ENGINE
 # ============================================================
 #
-# What: path -> service impact (§11) + dependency graph (§13).
-# Why: file path != service boundary; the build graph decides.
+# What: path → impact (§11) + dependency (§13).
+# Why: path != boundary; build graph decides.
 # From: Issue #1683
 
 ci_service_touches_path() {
-    # What: true iff path $2 is a build input for service $1.
-    # Why: checks the service's own + external contexts (§13).
+    # What: true iff $2 is input for service $1.
+    # Why: checks service's own + external (§13).
     # From: Issue #1683
     local service="$1" path="$2"
     ci_require_service "$service"
@@ -427,8 +427,8 @@ ci_service_touches_path() {
 }
 
 ci_impacted_services() {
-    # What: prints services impacted by the given changed paths.
-    # Why: markdown is excluded by default, one path per hit.
+    # What: prints services impacted by paths.
+    # Why: markdown excluded by default, unique paths.
     # From: Issue #1683
     local svc path
     for svc in "${CI_SERVICES[@]}"; do
@@ -452,8 +452,8 @@ ci_ref_path_mode() {
 }
 
 ci_semantic_diff_is_noop() {
-    # What: true iff $3's mode and content both match.
-    # Why: identity must track mode too, not content alone (§16).
+    # What: true iff $3's mode and content match.
+    # Why: identity tracks mode too, not just (§16).
     # From: Issue #1683
     local base_ref="$1" head_ref="$2" path="$3"
     local base_mode head_mode base_hash head_hash
@@ -471,8 +471,8 @@ ci_semantic_diff_is_noop() {
 # IDENTITY ENGINE
 # ============================================================
 #
-# What: content-derived identities, one per domain (§14).
-# Why: a commit SHA answers "when", never "is this the same".
+# What: content-derived identities per domain (§14).
+# Why: SHA answers "when", not "is same".
 # From: Issue #1683
 
 # What: toolchain identity, supplied by the caller.
