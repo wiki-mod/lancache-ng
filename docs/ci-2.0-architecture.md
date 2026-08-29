@@ -230,6 +230,26 @@ are build inputs, which test is necessary.
 
 These decisions belong exclusively in `scripts/ci/ci.sh`.
 
+### 5.1 No embedded Python
+
+`ci.sh` and every script it calls are shell only, per `AG-REL-001`. A
+`python3 <<EOF ... EOF` heredoc (or `python3 -c`) buried in a tracked
+script is not the "local one-off command" that rule allows -- it is
+committed, CI-invoked logic, no different in effect from writing that
+logic in Python outright just because it's wrapped in a shell function.
+CI 2.0 replaces every such heredoc with equivalent shell/awk, or, where
+the logic is genuinely non-trivial (e.g. CIDR-overlap arithmetic), with
+a small Rust helper built and tested like any other part of this
+project's own product code -- never with more embedded Python.
+
+Known instances to migrate (re-grep `python3.*<<\|python3 -c` under
+`scripts/` before starting work -- this list is a starting checklist,
+not a guarantee it is still complete or accurate): `scripts/lib/reserve-validation-subnet.sh`
+(a CIDR-overlap check whose own comment currently misapplies the
+`AG-REL-001` one-off allowance to a permanently-invoked function),
+`scripts/tracked/check-pr-tracking-metadata.sh` (JSON parsing), and two
+DHCP simulation scripts under `scripts/untracked/simulations/`.
+
 ## 6. Target workflows
 
 CI-related workflows should be reduced to roughly these roles:
