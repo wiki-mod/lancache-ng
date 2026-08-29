@@ -2,21 +2,10 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # CI and developer validation toolchain with Rust, sccache, ccache, distcc, and build utilities.
-#
-# What: uses `rust:latest`/`golang:latest` as this image's base, unlike
-# production service Dockerfiles.
-# Why: developer and CI validation should see current Rust/Go tooling
-# early; production service Dockerfiles stay separately pinned instead,
-# for reproducible runtime image builds.
-# From: Issue #1570 | PR #1571
-# What: shared version pins for both Go-tool build stages, plus the
-# global utilities-tools image ARG -- all declared before the file's
-# first FROM, since an ARG used in a FROM (or inherited via a later
-# bare ARG redeclaration) must precede it to be in scope.
-# Why: keeps the two Go-tool stages in sync; a prior copy had already
-# drifted. UTILITIES_IMAGE placement matches dns/watchdog/ui's
-# Dockerfiles.
-# From: Issue #1095 | Issue #1598 | PR #1706
+
+# What: Rust/Go latest base with ARG placement
+# Why: latest for CI; ARGs precede FROM; stages in sync
+# From: Issue #1570 | Issue #1095 | PR #1571 | PR #1706
 ARG UTILITIES_IMAGE=ghcr.io/wiki-mod/lancache-ng/utilities:latest
 ARG DOCKER_CLI_VERSION=29.7.2
 ARG DOCKER_COMPOSE_VERSION=5.5.0
@@ -105,14 +94,9 @@ COPY --from=go-tools-script /build-go-tools.sh /build-go-tools.sh
 # From: Issue #1095 | PR #1743
 RUN chmod +x /build-go-tools.sh && /build-go-tools.sh
 
-# What: source stage for the shared, statically-linked curl binary.
-# Why: the same binary already used by proxy/dns/dhcp/ntp/ui is portable
-# to a glibc host too (static, no dynamic curl dependency), so this image
-# reuses it instead of Debian's own curl package. Mutable :latest tag per
-# AG-KD-010, matching every other utilities consumer -- never digest-pin
-# this image. UTILITIES_IMAGE is declared globally near the top of this
-# file (required for use in a FROM), matching dns/watchdog/ui.
-# From: Issue #1304 | Issue #1556 | Issue #1095 (AG-KD-010) | PR #1706
+# What: source stage for shared static curl binary
+# Why: portable across glibc/musl; reuses single build
+# From: Issue #1304 | Issue #1556 | Issue #1095 | PR #1706
 FROM ${UTILITIES_IMAGE} AS utilities-tools
 
 # What: Alpine equivalent of go-tools-builder above.
@@ -148,27 +132,26 @@ RUN set -euo pipefail; \
     chmod +x /build-go-tools.sh; \
     /build-go-tools.sh
 
-# What: Alpine build-tools candidate, pinned to Alpine 3.24.
-# Why: keeps Debian as the default target; the pin avoids
-# `clang22`/`lld22` breaking on a later Alpine major.
+# What: Alpine 3.24 candidate build-tools stage
+# Why: Debian default; pin avoids clang22/lld22 breakage
 # From: Issue #1095
 FROM rust:alpine3.24 AS alpine-final
 
 LABEL org.opencontainers.image.description="Prebuilt lancache-ng CI and developer validation toolchain image (Alpine candidate)."
 
 ARG SCCACHE_VERSION=0.17.0
-# What: pins cargo-audit's musl prebuilt binary checksum.
-# Why: recomputed per version; a stale pin skips verification.
+# What: pins cargo-audit musl binary checksum
+# Why: stale pin skips verification; recomputed per version
 # From: Issue #1095 | PR #1743
 ARG CARGO_AUDIT_VERSION=0.22.2
 ARG CARGO_AUDIT_SHA256_MUSL_AMD64=7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428
-# What: pins cargo-tarpaulin's musl prebuilt binary checksum.
-# Why: recomputed per version; a stale pin skips verification.
+# What: pins cargo-tarpaulin musl binary checksum
+# Why: stale pin skips verification; recomputed per version
 # From: Issue #1095 | PR #1743
 ARG CARGO_TARPAULIN_VERSION=0.37.2
 ARG CARGO_TARPAULIN_SHA256_MUSL_AMD64=837dc54d21da101e96e888c6f6680d25f3c06554b0614880ea385cdf68cd5173
-# What: pins actionlint's prebuilt binary and its checksums.
-# Why: recomputed per version; a stale pin skips verification.
+# What: pins actionlint prebuilt binary and checksums
+# Why: stale pin skips verification; recomputed per version
 # From: Issue #1095 | PR #1743
 ARG ACTIONLINT_VERSION=1.7.12
 ARG ACTIONLINT_SHA256_AMD64=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
@@ -185,16 +168,13 @@ ENV PATH="/usr/local/cargo/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin
     CARGO_INSTALL_ROOT="/usr/local" \
     RUST_BACKTRACE=1
 
-# What: declares `APK_CACHE_BUST` right before its RUN step.
-# Why: matches `APT_CACHE_BUST` below; an unrotated layer
-# would replay stale packages forever.
+# What: declare APK_CACHE_BUST before RUN
+# Why: bust layer cache on rotation; matches APT pattern
 # From: Issue #1095
 ARG APK_CACHE_BUST=""
 
-# What: installs bash, GNU coreutils, github-cli, packages.
-# Why: BusyBox differs from GNU (AG-VAL-034); `clang22`,
-# `lld22` are Alpine's names; `github-cli` provides `gh`;
-# sqlite mirrors Debian's own sqlite3 addition.
+# What: installs bash, coreutils, github-cli, sqlite, etc
+# Why: GNU coreutils differ from BusyBox (AG-VAL-034)
 # From: Issue #1095 | Issue #1585
 RUN set -euo pipefail; \
     : "apk-cache-bust=${APK_CACHE_BUST}"; \
@@ -248,8 +228,8 @@ RUN set -euo pipefail; \
     mkdir -p /usr/local/lib/distcc; \
     for wrapper in cc gcc c++ g++; do ln -sf "$distcc_bin" "/usr/local/lib/distcc/$wrapper"; done
 
-# What: curl comes from the shared utilities image, like the Debian stage.
-# Why: static curl has no libc dep; works on musl unchanged.
+# What: curl from shared utilities image (static binary)
+# Why: no libc dependency; portable across glibc and musl
 # From: Issue #1556 | PR #1691
 COPY --from=utilities-tools /usr/local/bin/curl /usr/local/bin/curl
 RUN curl --version >/dev/null
@@ -259,32 +239,8 @@ RUN curl --version >/dev/null
 # From: Issue #1095
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-# What: copies docker/compose/buildx from go-tools-builder-alpine, moved
-# here (ahead of the sccache-from-source RUN below) rather than left next
-# to its Debian-stage counterpart's original position near the end of this
-# stage.
-# Why: a COPY --from=<stage> is the only thing that makes BuildKit actually
-# wait for that stage before proceeding -- moved late, BuildKit is free to
-# schedule this stage's own heavy RUN steps (the sccache/rustup compile
-# immediately below, in particular) fully in parallel with
-# go-tools-builder-alpine's own heavy `go build` of docker-cli/buildx/
-# compose from source. Reproduced and fixed on an idle self-hosted runner
-# (192.168.1.80, 4 vCPU / 5.8 GiB RAM), using the Debian final stage below
-# (this Alpine stage is not reachable from a plain `docker build` with no
-# --target, so it was not itself built during that repro -- this is the
-# same fix applied to a structurally identical, untested mirror). A full
-# multi-stage build without this fix let go-tools-builder run concurrently
-# with the final stage's own cargo/rustup compile and intermittently
-# corrupted the Go toolchain's own build state under that resource
-# pressure -- three distinct symptoms observed across real current_dev CI
-# runs and this local repro, all from the exact same go-tools-builder RUN
-# step: "panic: methodref has no signature" (already documented in
-# scripts/lib/docker-buildx-retry.sh), "can't find export data (bufio:
-# buffer full)", and "unexpected NUL in input" / "cannot find package .
-# (using -importcfg)". With this COPY moved ahead of the heavy RUN, a real
-# build log confirms the final stage's heavy RUN genuinely blocks until
-# go-tools-builder's own last step reports DONE (no interleaved output),
-# and the full build then completes cleanly end to end.
+# What: COPY --from before heavy RUN serializes build
+# Why: dependency blocks compile; prevents corruption
 # From: Issue #1095 | Issue #1671 | PR #1743
 RUN install -d /usr/local/lib/docker/cli-plugins
 COPY --from=go-tools-builder-alpine /out/docker /usr/local/bin/docker
@@ -328,8 +284,8 @@ RUN set -euo pipefail; \
     ln -sf /usr/local/cargo/bin/cargo-audit /usr/local/bin/cargo-audit; \
     ln -sf /usr/local/cargo/bin/cargo-tarpaulin /usr/local/bin/cargo-tarpaulin
 
-# What: fetches actionlint's checksum-verified release binary.
-# Why: static Go binary; no reachable stdlib CVE path here.
+# What: fetches actionlint checksum-verified binary
+# Why: static Go binary; no reachable stdlib CVE exposure
 # From: Issue #1095 | PR #1743
 RUN set -euo pipefail; \
     case "$(apk --print-arch)" in \
@@ -356,14 +312,12 @@ RUN set -euo pipefail; \
     ln -sf /opt/shellspec/shellspec /usr/local/bin/shellspec; \
     shellspec --version
 
-# What: no dhclient/isc-dhcp-client exists in Alpine 3.24.
-# Why: only busybox-extras' udhcpc exists; affects two dhcp
-# simulation scripts only, documented not dropped silently.
+# What: Alpine 3.24 lacks dhclient; uses busybox udhcpc
+# Why: affects 2 DHCP simulation scripts; documented gap
 # From: Issue #1095
 
-# What: symlinks musl-gcc to gcc for the musl-gcc contract.
-# Why: gcc here already targets musl -- functionally correct,
-# not a fake pass; dns/ui/watchdog hard-require musl-gcc.
+# What: symlink musl-gcc to gcc; gcc targets musl already
+# Why: required by dns/ui/watchdog; avoids duplicate binary
 # From: Issue #1095 | PR #1691
 RUN ln -sf /usr/bin/gcc /usr/local/bin/musl-gcc
 
@@ -477,26 +431,21 @@ FROM rust:latest
 
 LABEL org.opencontainers.image.description="Prebuilt lancache-ng CI and developer validation toolchain image."
 
-# What: bumps the source-built sccache pin to its current upstream release.
-# Why: sccache release notes occasionally add new behavior gated behind an
-# opt-in flag; confirmed this bump enables nothing new by default before
-# taking it, and the same check applies to any future bump too.
+# What: bump sccache to current upstream release
+# Why: verify no new default behavior enabled before bump
 # From: Issue #1570 | PR #1571
 ARG SCCACHE_VERSION=0.17.0
 ARG CARGO_AUDIT_VERSION=0.22.2
 ARG CARGO_AUDIT_SHA256_AMD64=ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39
 ARG CARGO_AUDIT_SHA256_ARM64=c6603814ddaa45e51263dafd31c0ac98808f688d26f7395804f9670b0fd599dd
-# What: pins cargo-tarpaulin's prebuilt release binary and its checksums.
-# Why: SHA256 values are recomputed against each pinned version's actual
-# release assets, not carried forward from the previous version -- an
-# unchanged checksum next to a bumped version number would silently break
-# the build's own verification step.
+# What: pins cargo-tarpaulin binary and SHA256 checksums
+# Why: stale checksum breaks build verification silently
 # From: Issue #1570 | PR #1571
 ARG CARGO_TARPAULIN_VERSION=0.37.2
 ARG CARGO_TARPAULIN_SHA256_AMD64=8e47625d26c3c265886faf1ef8cfa3ccaf071abc87bf4854ef8e239f5ffeabd8
 ARG CARGO_TARPAULIN_SHA256_ARM64=c8cc929a259871cfe4e3cda6e31975abe33b9b0a6078b76cbd466b6494c72792
-# What: pins actionlint's prebuilt binary and its checksums.
-# Why: recomputed per version; a stale pin skips verification.
+# What: pins actionlint prebuilt binary and checksums
+# Why: stale pin skips verification; recomputed per version
 # From: Issue #1095 | PR #1743
 ARG ACTIONLINT_VERSION=1.7.12
 ARG ACTIONLINT_SHA256_AMD64=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
@@ -512,25 +461,8 @@ ENV PATH="/usr/local/cargo/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin
     CARGO_INSTALL_ROOT="/usr/local" \
     RUST_BACKTRACE=1
 
-# What: adds trixie-backports as an apt source with a project-wide
-# `Package: *` pin at Pin-Priority 500 (tied with the regular archive), then
-# runs `apt-get dist-upgrade`/`full-upgrade` so any package either archive
-# has already patched gets picked up on every rebuild -- including
-# libexpat1/libexpat1-dev, a transitive dependency of the plain
-# `rust:latest` base image never named in this Dockerfile's own install
-# lists, which Trivy has repeatedly flagged with HIGH-severity CVEs.
-# Why: this is the standard package-source pattern for every Debian-based
-# image in this project (see services/proxy/Dockerfile), not a
-# curl-only/package-scoped exception. The pin selector below MUST use
-# `a=stable-backports`, not `a=trixie-backports` -- APT's `a=` selector
-# matches the Release file's `Suite:` field, which trixie-backports
-# declares as `stable-backports`; the codename alone silently matches
-# nothing, leaving every "backports-sourced" package on its vulnerable
-# plain-trixie version despite the pin file being present. Debian Security
-# Tracker data for libexpat has flipped between "fixed" and "affected"
-# once before without a package-version change (residual risk tracked in
-# issue #1314) -- re-verify with a fresh Trivy scan before asserting its
-# CVE status rather than trusting a comment's snapshot of it.
+# What: add trixie-backports source and apt pin; upgrade
+# Why: get all patches; pin uses a= suite not codename
 # From: Issue #1570 | PR #1571
 RUN echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sources.list.d/backports.list \
     && printf 'Package: *\nPin: release a=stable-backports\nPin-Priority: 500\n' > /etc/apt/preferences.d/backports \
@@ -539,27 +471,9 @@ RUN echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sou
     && apt-get full-upgrade -y \
     && rm -rf /var/lib/apt/lists/*
 
-# What: installs ccache from Debian's own package (not source-built).
-# Why: caches the C-dependency compile step (`-sys` crates, e.g. `ring`)
-# that distcc alone only distributes, never caches. sccache (installed
-# separately below) was ruled out for this specific job at the time this
-# was written, because it shelled its own `-E` preprocessing pass through
-# `CC` in a way that crashed against a `,cpp`-tagged distcc host list,
-# while ccache preprocesses locally by default; re-verify against the
-# sccache version pinned below before relying on this if sccache's
-# preprocessing behavior is ever reconsidered for this job.
-# From: Issue #1570 | PR #1571
-#
-# What: this same block also adds `sqlite3` (the CLI, not a library).
-# Why: v1.2's GHCR retention-audit incremental cache reads
-# and writes a small SQLite database from `scripts/lib/sha-retention-audit.sh`
-# via the `sqlite3` command; `rusqlite`'s statically-linked SQLite inside the
-# Admin UI Rust binary is a separate, unrelated build and provides no CLI.
-# From: Issue #1585.
-#
-# What: installs git as a plain Debian package, no self-build.
-# Why: self-build never removed the real CVE exposure.
-# From: Issue #1095 | PR #1743
+# What: install ccache, sqlite3, git, and other tools
+# Why: ccache for C-deps; sqlite3 for audit; git for CI
+# From: Issue #1570 | Issue #1585 | Issue #1095 | PR #1571
 RUN set -euo pipefail; \
       apt-get update; \
       apt-get install -y --no-install-recommends \
@@ -622,33 +536,8 @@ RUN set -euo pipefail; \
 COPY --from=utilities-tools /usr/local/bin/curl /usr/local/bin/curl
 RUN curl --version >/dev/null
 
-# What: copies docker/compose/buildx from go-tools-builder, moved here
-# (ahead of the sccache-from-source RUN below) rather than left next to
-# where it originally sat, near the end of this stage.
-# Why: a COPY --from=<stage> is the only thing that makes BuildKit actually
-# wait for that stage before proceeding -- left near the end of this
-# stage, BuildKit was free to schedule this stage's own heavy RUN steps
-# (the sccache/rustup compile immediately below, in particular) fully in
-# parallel with go-tools-builder's own heavy `go build` of docker-cli/
-# buildx/compose from source. Reproduced and fixed live on an idle
-# self-hosted runner (192.168.1.80, 4 vCPU / 5.8 GiB RAM): a full
-# multi-stage build without this fix let go-tools-builder run concurrently
-# with this stage's own cargo/rustup compile and intermittently corrupted
-# the Go toolchain's own build state under that resource pressure -- three
-# distinct symptoms observed across real current_dev CI runs and this
-# local repro, all from the exact same go-tools-builder RUN step: "panic:
-# methodref has no signature" (already documented in
-# scripts/lib/docker-buildx-retry.sh), "can't find export data (bufio:
-# buffer full)", and "unexpected NUL in input" / "cannot find package .
-# (using -importcfg)". With this COPY moved ahead of the heavy RUN, a real
-# build log (captured against an isolated copy of this build context, not
-# the shared runner workspace, to rule out a concurrent real CI checkout
-# clobbering the test) confirms the sccache RUN below genuinely blocks
-# until go-tools-builder's own last step reports DONE (no interleaved
-# output between the two), and the full build then completes cleanly end
-# to end. Same fix applied to alpine-final's identical structure above,
-# though that stage was not itself exercised by this repro (a plain
-# `docker build` with no --target never reaches it).
+# What: COPY --from before heavy RUN serializes build
+# Why: dependency blocks compile; prevents corruption
 # From: Issue #1095 | Issue #1671 | PR #1743
 RUN install -d /usr/local/lib/docker/cli-plugins
 COPY --from=go-tools-builder /out/docker /usr/local/bin/docker
@@ -658,12 +547,8 @@ RUN docker --version; \
     docker compose version; \
     docker buildx version
 
-# What: builds sccache from source with --no-default-features, enabling
-# only the redis and dist-client feature backends.
-# Why: the official release binary's default feature set also bundles
-# s3/memcached/gcs/azure/gha/webdav/oss/cos backends this project never
-# uses; building only what's needed keeps the binary smaller and its
-# dependency surface narrower.
+# What: build sccache with redis/dist-client only
+# Why: excludes unused backends; smaller binary
 # From: Issue #1570 | PR #1571
 RUN set -euo pipefail; \
     rustup component add rustfmt clippy; \
@@ -673,42 +558,16 @@ RUN set -euo pipefail; \
     done; \
     rm -rf /usr/local/cargo/registry /usr/local/cargo/git
 
-# What: isc-dhcp-client (dhclient) supports
-# scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh and
-# scripts/untracked/simulations/syslog-forwarding-simulation.sh, which perform a real
-# Discover/Offer/Request/Ack exchange against a Kea container on an
-# isolated Docker bridge network.
-# Why: the Admin UI's own dhcp-probe feature now uses a native Rust DHCP
-# client (services/ui/src/dhcp_probe_native.rs) with no dhclient
-# dependency, so isc-dhcp-client is kept in this image solely for the two
-# CI simulation scripts above, which test Kea's own server behavior and
-# are a separate concern from the Admin UI's probe.
+# What: keep dhclient for DHCP/Kea simulation scripts
+# Why: Admin UI probe native Rust; dhclient for CI tests
 # From: Issue #1570 | PR #1571
 
-# What: tcpdump supports scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh, capturing
-# dnsmasq's real DHCPOFFER reply to a synthetic PXE DHCPDISCOVER
-# (tools/pxe-client-probe, a Rust binary built from source by that script)
-# to a pcap file rather than sniffing live in-process.
-# Why: an in-process live sniff misses real replies from this dnsmasq
-# build inside a Docker bridge network (plausibly because these replies
-# carry a deliberately unusual UDP checksum tcpdump itself flags "bad");
-# reading the same reply from a tcpdump-written pcap file is unaffected by
-# that gap. python3 above is unrelated to this script -- it is required
-# by distcc-pump.
+# What: tcpdump for DHCP-PXE-simulation pcap capture
+# Why: live sniff misses replies from Docker bridge network
 # From: Issue #1570 | PR #1571
 
-# What: declares `APT_CACHE_BUST` immediately before the one RUN step that
-# references it (not with this stage's other ARGs near the top), forcing
-# that RUN's BuildKit layer-cache key to change on a weekly cadence (CI
-# passes a value that rotates once per ISO week).
-# Why: BuildKit's cache has no wall-clock expiry, only cache-key (text)
-# expiry, so an unreferenced ARG would let `apt-get dist-upgrade`/
-# `full-upgrade` below replay a stale layer forever regardless of new
-# Debian security fixes; an ARG's declaration point, not just where it's
-# expanded, affects cache-key computation for every instruction after it
-# in the same stage, so declaring it earlier (confirmed empirically, across
-# real builds) needlessly busts unrelated, unchanged earlier layers on
-# every rotation too.
+# What: declare APT_CACHE_BUST right before this RUN
+# Why: declaration affects cache-key; busts on rotation
 # From: Issue #1570 | PR #1571
 ARG APT_CACHE_BUST=""
 RUN set -euo pipefail; \
@@ -826,8 +685,8 @@ RUN set -euo pipefail; \
     ln -sf /usr/local/cargo/bin/cargo-audit /usr/local/bin/cargo-audit; \
     ln -sf /usr/local/cargo/bin/cargo-tarpaulin /usr/local/bin/cargo-tarpaulin
 
-# What: fetches actionlint's checksum-verified release binary.
-# Why: static Go binary; no reachable stdlib CVE path here.
+# What: fetches actionlint checksum-verified binary
+# Why: static Go binary; no reachable stdlib CVE exposure
 # From: Issue #1095 | PR #1743
 RUN set -euo pipefail; \
     case "$(dpkg --print-architecture)" in \
@@ -854,21 +713,8 @@ RUN set -euo pipefail; \
     ln -sf /opt/shellspec/shellspec /usr/local/bin/shellspec; \
     shellspec --version
 
-# What: adds a permanent, shared musl-libc cross-compilation target to this
-# image (Debian trixie's own musl-tools/musl-dev, 1.2.5-3.1~deb13u1, plus
-# `rustup target add` for only this build's own host architecture,
-# mirroring the cargo-audit/cargo-tarpaulin `case` block earlier in this
-# stage).
-# Why: proven by services/ui's real static-pie build (rusqlite/zstd/
-# reqwest-on-aws-lc-rs all included) during issue #815's OS-evaluation
-# research, so every musl consumer (services/ui, and separately
-# services/dns's nats-subscriber) reuses this instead of repeating the same
-# apt-get/rustup steps per crate; it only registers a second target's std
-# library alongside the default (an ordinary build with no explicit
-# `--target` is unaffected, confirmed via `rustc -vV`'s `host:` line
-# staying the `-gnu` triple) and is native-arch only -- cross-compiling to
-# the *other* architecture's musl target would additionally need a
-# cross-linker this image does not carry.
+# What: add musl-libc for cross-compilation static builds
+# Why: services/ui/dns need static PIE; native-arch only
 # From: Issue #1570 | PR #1571
 RUN set -euo pipefail; \
     case "$(dpkg --print-architecture)" in \
@@ -883,17 +729,8 @@ RUN set -euo pipefail; \
     rustup target add "${musl_target}"; \
     rm -rf /var/lib/apt/lists/*
 
-# What: captures `rustup target list --installed` and `rustc -vV` into
-# shell variables first, then greps each variable via a here-string,
-# rather than grepping their live stdout directly.
-# Why: `grep -q` piped from a still-writing producer under `set -o
-# pipefail` exits early on its first match and sends the producer SIGPIPE
-# (exit 141) even though the match succeeded -- the same "early-exiting
-# consumer piped from a still-writing producer" failure shape as PR
-# #1371's `find_built_ancestor()`. Capturing full output first removes the
-# live pipe an early exit could break; the distcc-pump-parser checks above
-# sidestep the same class differently, by grepping a file rather than a
-# live process's stdout.
+# What: capture tool output to variables before grepping
+# Why: prevents SIGPIPE when grep -q exits early
 # From: Issue #1570 | PR #1571
 RUN set -euo pipefail; \
     required_tools=( \
