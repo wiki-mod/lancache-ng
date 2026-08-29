@@ -690,6 +690,38 @@ SHA256(
 Branch name does NOT belong in it. PR number does NOT belong in it. Workflow
 run ID does NOT belong in it. Timestamp does NOT belong in it.
 
+### 16.1 Builder-image granularity feeds false-positive rebuild triggers
+
+`resolved base image digests` above is correct as an input. But
+`tools/build-tools/Dockerfile` currently bundles many mutually independent
+tools into one image: the Rust toolchain, `docker`/`docker-compose`/
+`docker-buildx`, `actionlint`, `distcc`, `bats`, `shellcheck`, and
+`isc-dhcp-client`/`tcpdump` (kept solely for the DHCP simulation scripts
+under `scripts/untracked/simulations/`). Every Rust service Dockerfile
+that compiles against this image (`services/dns/Dockerfile`'s
+`subscriber-builder` stage, `services/ui/Dockerfile`'s `builder` stage,
+`services/watchdog/Dockerfile`'s `watchdog-builder` stage -- each verified
+`FROM ${BUILD_TOOLS_IMAGE} AS ...`) inherits `build-tools`' single image
+digest as part of its own Build Identity.
+
+Changing any one bundled tool -- e.g. swapping the DHCP simulation
+package, bumping `actionlint`, nothing to do with Rust at all -- changes
+that one shared digest, which changes every dependent Rust service's
+Build Identity, which triggers a rebuild for all of them, even though no
+`.rs` file, `Cargo.toml`, or `Cargo.lock` changed. `sccache`/`ccache`
+still make the rebuild cheap (an object-cache hit, not a real
+recompile), so the cost is small, but the trigger itself is spurious --
+exactly what §11 (Semantic impact detection) exists to prevent, and is
+here undermined by builder-image granularity rather than by a semantic
+normalization gap.
+
+Direction, not a finished decision: split `build-tools` into a narrow,
+stable image carrying only the compiler toolchain plus `sccache`/`ccache`
+configuration, and a separate, broader image for CI-only tooling
+(linters, `distcc`, the DHCP simulation clients, etc.). Rust services
+would then depend only on the narrow image's digest, which changes only
+when the toolchain itself changes.
+
 ## 17. External build inputs
 
 Mutable external inputs such as `rust:latest`, `golang:latest`, base images,
