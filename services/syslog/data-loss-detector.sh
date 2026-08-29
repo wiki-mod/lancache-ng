@@ -2,29 +2,24 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: silent-data-loss detector; compares syslog-ng's stats counter
-# against real bytes on disk, run in a loop by entrypoint.sh as uid 10001.
-# Why: a root:root bind-mount destination silently swallows messages with
-# no error logged; stats-vs-disk also catches a full disk or perm change.
+# What: detects silent data loss; syslog-ng stats vs disk bytes
+# Why: bind-mount swallows messages; also catches disk/perm issues
 # From: Issue #1428 | PR #1431
 set -euo pipefail
 
 CTL_SOCKET="${1:?usage: data-loss-detector.sh <ctl-socket-path> <log-root>}"
 LOG_ROOT="${2:?usage: data-loss-detector.sh <ctl-socket-path> <log-root>}"
 
-# What: extracts the `processed` counter for the d_lancache destination
-# from syslog-ng-ctl's semicolon-delimited stats format.
-# Why: field layout confirmed live against a real running instance
-# (`destination;d_lancache;;<state>;processed;<N>`), not assumed from docs.
+# What: extracts d_lancache `processed` counter from syslog-ng stats
+# Why: field layout confirmed from syslog-ng; not from docs
 # From: Issue #1428 | PR #1431
 processed_count() {
     syslog-ng-ctl stats --control="$CTL_SOCKET" 2>/dev/null \
         | awk -F';' '$1 == "destination" && $2 == "d_lancache" && $5 == "processed" {print $6}'
 }
 
-# What: sums real bytes under the log root via `find -exec stat -c%s`.
-# Why: not `du`, whose block-rounded output would mask a small real write
-# inside a large block -- a single byte landing must show as a nonzero delta.
+# What: sums real bytes via `find -exec stat -c%s` under log root
+# Why: `du` rounds blocks; must detect every write byte-accurately
 # From: Issue #1428 | PR #1431
 disk_bytes() {
     find "$LOG_ROOT" -type f -exec stat -c%s {} + 2>/dev/null \
