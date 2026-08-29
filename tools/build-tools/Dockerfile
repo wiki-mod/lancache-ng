@@ -249,10 +249,8 @@ RUN set -euo pipefail; \
     for wrapper in cc gcc c++ g++; do ln -sf "$distcc_bin" "/usr/local/lib/distcc/$wrapper"; done
 
 # What: curl comes from the shared utilities image, like the Debian stage.
-# Why: the static build has no libc dependency, so it works unchanged on
-#   musl -- keeps this candidate on the same update/security contract as
-#   every other first-party image instead of Alpine's own curl package.
-# From: Issue #1304 | Issue #1556 | PR #1691
+# Why: static curl has no libc dep; works on musl unchanged.
+# From: Issue #1556 | PR #1691
 COPY --from=utilities-tools /usr/local/bin/curl /usr/local/bin/curl
 RUN curl --version >/dev/null
 
@@ -532,22 +530,9 @@ RUN echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sou
 # Admin UI Rust binary is a separate, unrelated build and provides no CLI.
 # From: Issue #1585.
 #
-# What: installs this image's own tool list, including git, as plain
-#   Debian packages -- no source build for any tool in this list.
-# Why: git and curl (see the utilities-tools COPY below) previously had a
-#   dedicated from-source build in this stage (statically linking git
-#   against a feature-reduced curl) to dodge git's dynamic dependency on
-#   libcurl3t64-gnutls. Maintainer decision (2026-08-28): that self-build
-#   never delivered the CVE-avoidance it was built for -- issue #1304's own
-#   2026-08-14 Trivy scan found the exact same CVE IDs still `affected` on
-#   the self-built curl 8.21.0 as on Debian's packaged curl, and found
-#   git's libcurl3t64-gnutls dependency persisted in dpkg regardless of the
-#   self-build (nothing in this stage ever purged Debian's own git package),
-#   so the static link never actually removed that dependency from the
-#   image -- it only made the CLI's own curl binary invisible to Trivy's
-#   package scanner. No source compilation for third-party tools in this
-#   stage going forward; plain package installs only.
-# From: Issue #1095 | Issue #1304 | Issue #1556
+# What: installs git as a plain Debian package, no self-build.
+# Why: self-build never removed the real CVE exposure.
+# From: Issue #1095 | PR #1743
 RUN set -euo pipefail; \
       apt-get update; \
       apt-get install -y --no-install-recommends \
@@ -573,22 +558,9 @@ RUN set -euo pipefail; \
       apt-get autoremove -y; \
     rm -rf /var/lib/apt/lists/*
 
-# What: purges a cluster of Cairo/GLib/GTK/ImageMagick/MariaDB/OpenEXR
-#   -dev and X11 packages baked into the plain `rust:latest` base image,
-#   none of which this stage's own tool list (above) needs or pulled in.
-# Why: found while removing the curl/git self-build stage below -- its own
-#   `apt-get purge -y libssl-dev zlib1g-dev` had been incidentally
-#   cascading this same ~20-package cluster out via `autoremove` as a
-#   side effect (confirmed via a real `apt-get purge`+`autoremove --dry-run`
-#   on this exact base image: removing libssl-dev alone orphans this whole
-#   cluster). Dropping the self-build without an explicit replacement here
-#   would have silently regressed this image back to the base image's
-#   uncleaned, larger HIGH/CRITICAL-CVE surface. Verified via a real build
-#   + Trivy scan on 192.168.1.240 that a direct purge of this cluster
-#   (independent of libssl-dev, which this stage no longer installs at
-#   all) cascades identically through `autoremove` with none of our own
-#   tools (git, cmake, gh, ccache, etc.) affected.
-# From: Issue #1095
+# What: purges Cairo/GLib/ImageMagick/MariaDB dev bloat.
+# Why: self-build's purge cascaded this away; now separate.
+# From: Issue #1095 | PR #1743
 RUN set -euo pipefail; \
     apt-get purge -y \
       default-libmysqlclient-dev \
@@ -617,11 +589,9 @@ RUN set -euo pipefail; \
     apt-get autoremove -y; \
     rm -rf /var/lib/apt/lists/*
 
-# What: curl comes from the shared utilities image instead of Debian's own package.
-# Why: reuses the same statically-linked, feature-reduced binary already
-#   shared by every other first-party image, rather than a separately-tracked,
-#   more heavily-CVE'd Debian package.
-# From: Issue #1304 | Issue #1556
+# What: curl comes from the shared utilities image.
+# Why: reuses the shared static binary, not Debian's own.
+# From: Issue #1556 | PR #1661
 COPY --from=utilities-tools /usr/local/bin/curl /usr/local/bin/curl
 RUN curl --version >/dev/null
 
