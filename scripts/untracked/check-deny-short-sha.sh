@@ -2,15 +2,9 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: fails if any tracked .github/workflows/*.yml or scripts/lib/*.sh
-#   file slices a sha-named variable via ${VAR::N}/${VAR:0:N} bash syntax,
-#   for ANY length N (literal or variable) -- not merely an inconsistent
-#   literal length.
-# Why: short-SHA truncation is banned outright, not just required to stay
-#   consistent (maintainer decision: "short format is forbidden, that was
-#   never approved by me"); a blind local slice re-introduces the exact
-#   collision-unsafe truncation dmeta_short_sha() used to perform.
-# From: Issue #1095 (G2)
+# What: fails if tracked files slice SHA-named variables via bash
+# Why: short-SHA banned; slice creates collision-unsafe truncation
+# From: Issue #1095
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -19,8 +13,8 @@ target_root="${1:-$repo_root}"
 cd "$target_root"
 
 # What: excludes this script and its own bats fixture from the scan.
-# Why: the header above quotes the banned pattern verbatim as documentation.
-# From: Issue #1095 (G2)
+# Why: script header quotes the banned pattern verbatim
+# From: Issue #1095
 is_self_reference() {
     case "$1" in
         scripts/untracked/check-deny-short-sha.sh) return 0 ;;
@@ -29,23 +23,15 @@ is_self_reference() {
     esac
 }
 
-# What: matches a ${VAR::N}/${VAR:0:N} slice on a sha/commit/candidate/revision-named VAR.
-# Why: a slice on any known SHA-holding-variable naming convention actually
-#   used in this codebase is banned, not only ones literally named "sha" --
-#   this codebase's own commit/candidate/revision-named variables hold full
-#   SHAs too (confirmed live in scripts/lib/staging-ancestor-fallback.sh);
-#   this is a maintained allowlist of known conventions, not a semantic
-#   check, and may need extension if a new naming convention appears.
-# From: Issue #1095 (G2) | PR #1611
+# What: detects substring slices ${VAR::N} on SHA-holding variables
+# Why: bans slices on sha/commit/candidate/revision-named variables
+# From: Issue #1095 | PR #1611
 SHORT_SHA_SLICE_PATTERN='\$\{([A-Za-z_][A-Za-z0-9_]*)?([Ss][Hh][Aa]|[Cc][Oo][Mm][Mm][Ii][Tt]|[Cc][Aa][Nn][Dd][Ii][Dd][Aa][Tt][Ee]|[Rr][Ee][Vv][Ii][Ss][Ii][Oo][Nn])[A-Za-z0-9_]*[[:space:]]*(:[[:space:]]*:[[:space:]]*[A-Za-z0-9_]+|:[[:space:]]*0[[:space:]]*:[[:space:]]*[A-Za-z0-9_]+)\}'
 
 
-# What: enumerates target files via command substitution, not a
-#   `mapfile -t files < <(...)` process substitution.
-# Why: a process substitution's own exit status is invisible to mapfile and
-#   to set -e/pipefail, so a real enumeration failure would silently scan
-#   zero files and report a false clean pass.
-# From: Issue #1095 (G2)
+# What: enumerates via command substitution not process substitution
+# Why: process substitution fails silently with mapfile and set -e
+# From: Issue #1095
 if [ -e "$target_root/.git" ]; then
     if ! files_raw="$(git ls-files -- '.github/workflows/*.yml' 'scripts/lib/*.sh')"; then
         echo "::error::check-deny-short-sha: \`git ls-files\` itself failed -- is $target_root a real git work tree? Not treating this as a clean pass." >&2
@@ -67,12 +53,9 @@ for path in "${files[@]}"; do
     [ -f "$path" ] || continue
     is_self_reference "$path" && continue
 
-    # What: captures grep's output via command substitution and checks its
-    #   real exit status explicitly.
-    # Why: status 1 means "no match" (expected), but status >1 means grep
-    #   itself failed (e.g. an unreadable file), which must fail this guard
-    #   closed instead of a bare `|| true` folding it into "no match".
-    # From: Issue #1095 (G2)
+    # What: captures grep output and checks exit status explicitly
+    # Why: status 1 means no match; status >1 means grep error occurred
+    # From: Issue #1095
     grep_status=0
     grep_output="$(grep -EnH "$SHORT_SHA_SLICE_PATTERN" "$path")" || grep_status=$?
     if [ "$grep_status" -gt 1 ]; then
