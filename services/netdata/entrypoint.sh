@@ -36,8 +36,8 @@
 # which would be a confusing, hard-to-notice degradation rather than a
 # hard failure.
 #
-# What: marks the directory setgid to gid 10001 and repairs existing files.
-# Why: netdata's post-drop process must keep creating logs the non-root syslog collector can read, including after reopen on an upgraded volume.
+# What: Set directory gid 10001 and repair file permissions.
+# Why: Non-root syslog must read logs on volume reopen.
 # From: Issue #1427
 mkdir -p /var/log/netdata
 chown netdata:10001 /var/log/netdata
