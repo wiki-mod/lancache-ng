@@ -68,7 +68,31 @@ inputs:
 runs:
   using: composite
   steps:
+    # What: forces the underlying trivy binary's scratch/temp directory
+    # (its image-export work, in particular) onto real runner disk instead
+    # of its Go-toolchain default of os.TempDir(), which resolves to /tmp.
+    # Why: confirmed live and root-caused on the self-hosted fleet (issue
+    # #1671, 2026-08-29): this project's own runners mount /tmp as a
+    # RAM-backed tmpfs sized far below the images this Dockerfile now
+    # produces (2.0-2.8 GiB tmpfs vs. 62-65 GiB free on the real root
+    # filesystem) -- a real "Scan pushed amd64 build-tools digest with
+    # Trivy" failure hit exactly this: `write
+    # /tmp/trivy-<pid>/docker-export-<n>: no space left on device`, despite
+    # the host's actual disk having tens of gigabytes free throughout. This
+    # is a distinct bug from the Trivy vulnerability-DB cache-dir sizing
+    # work tracked separately under issue #1095 (trivy-cache-dir/
+    # trivy-db-ensure-fresh): that work targets the DB cache directory this
+    # action already receives as `cache-dir` (already real-disk,
+    # `/var/tmp/lancache-ng-trivy-cache/...`); this fixes trivy's own
+    # separate, unconfigurable image-export scratch directory, which never
+    # goes through cache-dir at all. /var/tmp is this repo's own existing
+    # convention for Trivy's real-disk scratch space (see cache-dir above)
+    # and is safe for concurrent scans: trivy names its own scratch
+    # subdirectory uniquely per invocation.
+    # From: Issue #1095 | Issue #1671
     - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      env:
+        TMPDIR: /var/tmp
       with:
         scan-type: ${{ inputs.scan-type }}
         image-ref: ${{ inputs.image-ref }}

@@ -259,6 +259,37 @@ RUN curl --version >/dev/null
 # From: Issue #1095
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
+# What: copies docker/compose/buildx from go-tools-builder-alpine, moved
+# here (ahead of the sccache-from-source RUN below) rather than left next
+# to its Debian-stage counterpart's original position near the end of this
+# stage.
+# Why: a COPY --from=<stage> is the only thing that makes BuildKit actually
+# wait for that stage before proceeding -- moved late, BuildKit is free to
+# schedule this stage's own heavy RUN steps (the sccache/rustup compile
+# immediately below, in particular) fully in parallel with
+# go-tools-builder-alpine's own heavy `go build` of docker-cli/buildx/
+# compose from source. Confirmed live and reproduced on an idle self-hosted
+# runner (192.168.1.80, 4 vCPU / 5.8 GiB RAM): building go-tools-builder
+# alone succeeds cleanly every time, but building the full multi-stage
+# Dockerfile (which runs it concurrently with this stage's own cargo/rustup
+# compile) intermittently corrupts the Go toolchain's own build state under
+# that resource pressure -- three distinct symptoms observed across real
+# current_dev CI runs and this local repro, all from the exact same
+# go-tools-builder RUN step: "panic: methodref has no signature" (already
+# documented in scripts/lib/docker-buildx-retry.sh), "can't find export
+# data (bufio: buffer full)", and "unexpected NUL in input" / "cannot find
+# package . (using -importcfg)". Moving this COPY ahead of the heavy RUN
+# forces BuildKit's real dependency graph to serialize the two stages
+# instead of racing them on a 4-vCPU/5.8-GiB host.
+# From: Issue #1095 | Issue #1671 | PR #1743
+RUN install -d /usr/local/lib/docker/cli-plugins
+COPY --from=go-tools-builder-alpine /out/docker /usr/local/bin/docker
+COPY --from=go-tools-builder-alpine /out/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
+COPY --from=go-tools-builder-alpine /out/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx
+RUN docker --version; \
+    docker compose version; \
+    docker buildx version
+
 # What: builds sccache from source, like the Debian stage.
 # Why: no prebuilt release exists on either branch here.
 # From: Issue #1095
@@ -320,14 +351,6 @@ RUN set -euo pipefail; \
     tar -xzf "$shellspec_tmp/shellspec-dist.tar.gz" -C /opt; \
     ln -sf /opt/shellspec/shellspec /usr/local/bin/shellspec; \
     shellspec --version
-
-RUN install -d /usr/local/lib/docker/cli-plugins
-COPY --from=go-tools-builder-alpine /out/docker /usr/local/bin/docker
-COPY --from=go-tools-builder-alpine /out/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
-COPY --from=go-tools-builder-alpine /out/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx
-RUN docker --version; \
-    docker compose version; \
-    docker buildx version
 
 # What: no dhclient/isc-dhcp-client exists in Alpine 3.24.
 # Why: only busybox-extras' udhcpc exists; affects two dhcp
@@ -595,6 +618,38 @@ RUN set -euo pipefail; \
 COPY --from=utilities-tools /usr/local/bin/curl /usr/local/bin/curl
 RUN curl --version >/dev/null
 
+# What: copies docker/compose/buildx from go-tools-builder, moved here
+# (ahead of the sccache-from-source RUN below) rather than left next to
+# where it originally sat, near the end of this stage.
+# Why: a COPY --from=<stage> is the only thing that makes BuildKit actually
+# wait for that stage before proceeding -- left near the end of this
+# stage, BuildKit was free to schedule this stage's own heavy RUN steps
+# (the sccache/rustup compile immediately below, in particular) fully in
+# parallel with go-tools-builder's own heavy `go build` of docker-cli/
+# buildx/compose from source. Confirmed live and reproduced on an idle
+# self-hosted runner (192.168.1.80, 4 vCPU / 5.8 GiB RAM): building
+# go-tools-builder alone succeeds cleanly every time, but building the
+# full multi-stage Dockerfile (which runs it concurrently with this
+# stage's own cargo/rustup compile) intermittently corrupts the Go
+# toolchain's own build state under that resource pressure -- three
+# distinct symptoms observed across real current_dev CI runs and this
+# local repro, all from the exact same go-tools-builder RUN step: "panic:
+# methodref has no signature" (already documented in
+# scripts/lib/docker-buildx-retry.sh), "can't find export data (bufio:
+# buffer full)", and "unexpected NUL in input" / "cannot find package .
+# (using -importcfg)". Moving this COPY ahead of the heavy RUN forces
+# BuildKit's real dependency graph to serialize the two stages instead of
+# racing them on a 4-vCPU/5.8-GiB host. Same fix applied to alpine-final's
+# identical structure above.
+# From: Issue #1095 | Issue #1671 | PR #1743
+RUN install -d /usr/local/lib/docker/cli-plugins
+COPY --from=go-tools-builder /out/docker /usr/local/bin/docker
+COPY --from=go-tools-builder /out/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
+COPY --from=go-tools-builder /out/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx
+RUN docker --version; \
+    docker compose version; \
+    docker buildx version
+
 # What: builds sccache from source with --no-default-features, enabling
 # only the redis and dist-client feature backends.
 # Why: the official release binary's default feature set also bundles
@@ -790,17 +845,6 @@ RUN set -euo pipefail; \
     tar -xzf "$shellspec_tmp/shellspec-dist.tar.gz" -C /opt; \
     ln -sf /opt/shellspec/shellspec /usr/local/bin/shellspec; \
     shellspec --version
-
-# What: copies docker/compose/buildx from go-tools-builder.
-# Why: see that stage's comments for the source-build reason.
-# From: Issue #1095 | PR #1743
-RUN install -d /usr/local/lib/docker/cli-plugins
-COPY --from=go-tools-builder /out/docker /usr/local/bin/docker
-COPY --from=go-tools-builder /out/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
-COPY --from=go-tools-builder /out/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx
-RUN docker --version; \
-    docker compose version; \
-    docker buildx version
 
 # What: adds a permanent, shared musl-libc cross-compilation target to this
 # image (Debian trixie's own musl-tools/musl-dev, 1.2.5-3.1~deb13u1, plus
