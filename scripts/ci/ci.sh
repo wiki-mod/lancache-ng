@@ -659,8 +659,8 @@ ci_state_permits_build() {
 # ACCEPTANCE LEDGER
 # ============================================================
 #
-# What: policy truth -- which digest was accepted.
-# Why: §26 -- GHCR proves bytes exist, never that they passed.
+# What: policy truth — accepted digest.
+# Why: §26 — GHCR proves bytes, not policy.
 # From: Issue #1683
 
 # What: the ledger's on-disk location for this run.
@@ -671,15 +671,15 @@ CI_LEDGER_REF="${CI_LEDGER_REF:-refs/ci2/acceptance-ledger}"
 CI_GIT_REMOTE="${CI_GIT_REMOTE:-origin}"
 
 ci_ledger_key() {
-    # What: prints the ledger key for a service/platform/identity.
-    # Why: one key shape everywhere, so lookups cannot near-miss.
+    # What: prints ledger key for service/platform.
+    # Why: one key shape prevents lookup misses.
     # From: Issue #1683
     printf '%s/%s/%s\n' "$1" "${2//\//-}" "$3"
 }
 
 ci_ledger_lookup() {
-    # What: prints the accepted digest for $1/$2/$3, else fails.
-    # Why: §18 -- PRESENT_ACCEPTED needs a real record.
+    # What: prints accepted digest for $1/$2/$3.
+    # Why: §18 — PRESENT_ACCEPTED needs record.
     # From: Issue #1683
     local key path
     key="$(ci_ledger_key "$1" "$2" "$3")"
@@ -692,8 +692,8 @@ ci_ledger_lookup() {
 }
 
 ci_result_record() {
-    # What: writes one matrix job's result as a small JSON file.
-    # Why: §26.1 -- jobs emit results; only the aggregator writes.
+    # What: writes job's result as JSON file.
+    # Why: §26.1 — only aggregator writes.
     # From: Issue #1683
     local service="$1" platform="$2" identity="$3" digest="$4" state="$5" outdir="$6"
     ci_require_service "$service"
@@ -707,8 +707,8 @@ ci_result_record() {
 }
 
 ci_ledger_aggregate() {
-    # What: merges every result file in $1 into the ledger tree.
-    # Why: §26.1 -- one ledger write per workflow, not per job.
+    # What: merges result files into ledger tree.
+    # Why: §26.1 — one write per workflow.
     # From: Issue #1683
     local resultdir="$1" file service platform identity digest state written=0
     [[ -d "$resultdir" ]] || ci_die "aggregate: no result directory at $resultdir"
@@ -721,8 +721,8 @@ ci_ledger_aggregate() {
         digest="$(ci_json_field "$file" digest)"
         state="$(ci_json_field "$file" state)"
 
-        # What: only an ACCEPTED result may enter the ledger.
-        # Why: §25 -- a REJECTED artifact must never be reusable.
+        # What: only ACCEPTED results enter ledger.
+        # Why: §25 — REJECTED never reusable.
         # From: Issue #1683
         [[ "$state" == "ACCEPTED" ]] || continue
 
@@ -731,8 +731,8 @@ ci_ledger_aggregate() {
         path="$CI_LEDGER_DIR/$key"
         mkdir -p "$(dirname "$path")"
 
-        # What: rewriting an identical entry is a no-op, not an error.
-        # Why: §26.4 -- reprocessing the same results must converge.
+        # What: identical rewrites are no-ops.
+        # Why: §26.4 — reprocessing must converge.
         # From: Issue #1683
         if [[ -f "$path" ]]; then
             local existing
@@ -752,8 +752,8 @@ ci_ledger_aggregate() {
 }
 
 ci_json_field() {
-    # What: reads flat string field $2 from the JSON file $1.
-    # Why: the records are engine-written and deliberately flat.
+    # What: reads flat field $2 from JSON $1.
+    # Why: records are engine-written flat.
     # From: Issue #1683
     sed -n "s/.*\"$2\":\"\([^\"]*\)\".*/\1/p" "$1"
 }
@@ -762,8 +762,8 @@ ci_json_field() {
 # RETRY CLASSIFIER
 # ============================================================
 #
-# What: §67 retry, delegated to this repo's proven wrappers.
-# Why: reuse the existing proven retry primitives instead.
+# What: §67 retry via proven wrappers.
+# Why: reuse existing proven primitives.
 # From: Issue #1683
 
 # shellcheck source=scripts/lib/ghcr-retry.sh
@@ -772,8 +772,8 @@ source "$CI_REPO_ROOT/scripts/lib/ghcr-retry.sh"
 source "$CI_REPO_ROOT/scripts/lib/build-retry.sh"
 
 ci_retry_registry_op() {
-    # What: retries a registry op via ghcr_retry (env creds).
-    # Why: one CI 2.0 name for §67's operation-level retry.
+    # What: retries registry op via ghcr_retry.
+    # Why: CI 2.0 name for §67 operation retry.
     # From: Issue #1683
     ghcr_retry "$1" "${GHCR_RETRY_USERNAME-}" "${GHCR_RETRY_PASSWORD-}" -- "${@:2}"
 }
