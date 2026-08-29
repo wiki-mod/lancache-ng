@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # What: thin nightly orchestrator; all logic lives in ci.sh.
-# Why: §54 -- nightly promotes the desired stack, never rebuilds.
+# Why: §54 -- promotes desired stack, never rebuilds.
 # From: Issue #1683
 name: CI 2.0 nightly
 
@@ -22,7 +22,7 @@ defaults:
 
 jobs:
   # What: resolve desired state, promote only if it differs.
-  # Why: §54.2 -- an unchanged nightly does no build, no retag.
+  # Why: §54.2 -- unchanged nightly: no build, no retag.
   # From: Issue #1683
   nightly:
     name: nightly

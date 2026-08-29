@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # What: thin GC orchestrator; all logic lives in ci.sh.
-# Why: §74 -- reachability decides, age alone never deletes.
+# Why: §74 -- reachability decides; age never deletes.
 # From: Issue #1683
 name: CI 2.0 gc
 
@@ -22,7 +22,7 @@ defaults:
 
 jobs:
   # What: report unreachable artifacts; deletion stays gated.
-  # Why: §97 -- the ledger proposes, the graph decides, we review.
+  # Why: §97 -- ledger proposes, graph decides, we review.
   # From: Issue #1683
   gc-report:
     name: gc report

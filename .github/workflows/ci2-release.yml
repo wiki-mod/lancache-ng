@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # What: thin release orchestrator; all logic lives in ci.sh.
-# Why: §56 -- build once, promote many; a release builds nothing.
+# Why: §56 -- build once, promote; release builds nothing.
 # From: Issue #1683
 name: CI 2.0 release
 
@@ -25,7 +25,7 @@ defaults:
 
 jobs:
   # What: promote the exact accepted candidate to the channel.
-  # Why: §51 -- promote verifies, moves refs, reads back; no build.
+  # Why: §51 -- promote verifies, moves refs, reads back.
   # From: Issue #1683
   release:
     name: release
