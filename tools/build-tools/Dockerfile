@@ -579,13 +579,8 @@ RUN set -euo pipefail; \
         if [ -x /usr/sbin/invoke-rc.d.real ]; then mv /usr/sbin/invoke-rc.d.real /usr/sbin/invoke-rc.d; fi; \
     }; \
     trap cleanup_build_tools_apt EXIT; \
-    # What: temporarily replaces /usr/sbin/invoke-rc.d with a no-op stub
-    # for this RUN step, restored by the EXIT trap above.
-    # Why: distcc-pump's package configuration below invokes service
-    # management via invoke-rc.d, which has no real init system to act on
-    # inside this container and would otherwise fail/hang `dpkg
-    # --configure`; the original binary is restored so later RUN steps see
-    # normal behavior.
+    # What: replace invoke-rc.d with no-op; restore via trap
+    # Why: distcc-pump needs init; container has none
     # From: Issue #1570 | PR #1571
     if [ -x /usr/sbin/invoke-rc.d ]; then mv /usr/sbin/invoke-rc.d /usr/sbin/invoke-rc.d.real; fi; \
     printf '%s\n' '#!/bin/sh' 'exit 0' > /usr/sbin/invoke-rc.d; \
@@ -603,29 +598,19 @@ RUN set -euo pipefail; \
       python3 \
       rsync \
       tcpdump; \
-    # What: runs dist-upgrade then full-upgrade before patching distcc-pump.
-    # Why: base/tool packages can receive fixes after rust:latest was
-    # published; applying upgrades first means later package updates
-    # cannot overwrite the distcc-pump warning fix below. Both verbs are
-    # kept explicit, matching the backports-pin RUN step above, even
-    # though modern apt treats `full-upgrade` as the same operation
-    # `dist-upgrade` performs.
+    # What: run dist-upgrade then full-upgrade before patch
+    # Why: fetch fixes after rust:latest; both verbs needed
     # From: Issue #1570 | PR #1571
     apt-get dist-upgrade -y; \
     apt-get full-upgrade -y; \
-    # What: force-upgrades linux-libc-dev, jq, libjq1, libpq-dev, and libpq5 explicitly, beyond dist-upgrade/full-upgrade above.
-    # Why: jq/libjq1 are confirmed transitively pulled in by an earlier, non-cache-busted
-    #   apt-get install (CVE-2026-32316); libpq-dev/libpq5 hit the identical
-    #   still-outdated-after-dist-upgrade symptom for CVE-2026-6473, though their own origin is not established here -- the same proven fix applies regardless.
+    # What: force-upgrade jq/libjq1/libpq for known CVEs
+    # Why: jq/libpq pulled transitively with CVE exposure
     # From: Issue #1570 | PR #1571
     apt-get install -y --no-install-recommends --only-upgrade linux-libc-dev jq libjq1 libpq-dev libpq5; \
     distcc_pump_tmp="$(mktemp -d)"; \
     chmod 0755 "${distcc_pump_tmp}"; \
-    # What: chowns the download temp dir to _apt:root before `apt-get
-    # download` writes into it.
-    # Why: `apt-get download` runs its actual fetch as the unprivileged
-    # `_apt` user; a dir left owned by the build user would leave `_apt`
-    # unable to write the downloaded .deb into it.
+    # What: chown temp dir to _apt:root for apt-get
+    # Why: apt-get download runs as _apt; needs ownership
     # From: Issue #1570 | PR #1571
     chown _apt:root "${distcc_pump_tmp}"; \
     (cd "${distcc_pump_tmp}" && apt-get download "distcc-pump=${DISTCC_PUMP_PACKAGE_VERSION}"); \
@@ -633,12 +618,8 @@ RUN set -euo pipefail; \
     distcc_pump_parser="/usr/lib/python3/dist-packages/include_server/parse_command.py"; \
     grep -F "'-Wa,(%s\\.s)'" "${distcc_pump_parser}" >/dev/null; \
     grep -F "'-Wa,\\[(%s\\.s)\\]'" "${distcc_pump_parser}" >/dev/null; \
-    # What: patches two invalid Python regex escapes in distcc-pump's own
-    # parser before `dpkg --configure`, then compiles with warnings as
-    # errors.
-    # Why: Debian's distcc-pump 3.4+really3.4-12 package ships these
-    # escapes as-is; compiling with `-Werror::SyntaxWarning` below would
-    # otherwise fail package configuration on the unpatched file.
+    # What: patch Python regex escapes before dpkg configure
+    # Why: Debian distcc-pump ships invalid regex escapes
     # From: Issue #1570 | PR #1571
     sed -i \
       -e 's/%s\\.s/%s\\\\.s/g' \
