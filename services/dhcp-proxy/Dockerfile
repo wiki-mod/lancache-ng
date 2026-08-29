@@ -20,9 +20,8 @@
 # gettext-envsubst` on alpine:3.24).
 
 # What: source stage for tools copied into the final image below.
-# Why: uses the mutable `:latest` tag -- see services/proxy/Dockerfile's
-#   identical stage comment and AG-KD-010 for the full rationale.
-# From: Issue #1095 | AG-KD-010
+# Why: uses the mutable `:latest` tag -- see proxy/Dockerfile
+# From: Issue #1095
 ARG UTILITIES_IMAGE=ghcr.io/wiki-mod/lancache-ng/utilities:latest
 FROM ${UTILITIES_IMAGE} AS utilities-tools
 
@@ -83,13 +82,12 @@ LABEL org.opencontainers.image.description="dnsmasq-based DHCP proxy and relay h
 #    "no snapshot validates, restore the original live file" backup path)
 #    was run end-to-end against a real `dnsmasq --test` validator and
 #    behaved identically to the pre-migration Debian image.
-# What: findutils/envsubst/lsof/ripgrep come from the shared utilities image.
-# Why: same alpine:3.24 digest as utilities; coreutils stays apk-installed
-#   (excluded from migration, see services/proxy/Dockerfile's comment).
+# What: shared utilities image provides find/xargs/envsubst/lsof/rg
+# Why: alpine:3.24 digest matches utilities; coreutils excluded
 # From: Issue #1556
 
-# What: removes the BusyBox symlinks at these paths before real binaries land.
-# Why: see services/proxy/Dockerfile's identical comment for the reason.
+# What: remove BusyBox symlinks before copying real binaries
+# Why: prevents loader from using wrong binary version
 # From: Issue #1556
 RUN rm -f /usr/bin/find /usr/bin/xargs /usr/bin/lsof
 
@@ -103,9 +101,8 @@ COPY --from=utilities-tools /usr/lib/libgcc_s.so.1 /usr/lib/libgcc_s.so.1
 COPY --from=utilities-tools /usr/lib/libpcre2-8.so.0* /usr/lib/
 COPY --from=utilities-tools /usr/local/bin/verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
 
-# What: verifies the copied binaries actually run, not just that they exist.
-# Why: a missing shared-library dependency fails at exec time, not at COPY
-#   time; the lsof check is delegated to a shared script (see that file).
+# What: verify copied binaries can run, not just exist
+# Why: missing shared libraries fail at exec time, not COPY
 # From: Issue #1613
 RUN set -euo pipefail; \
     find . -maxdepth 0 -printf '%f\n' >/dev/null; \
@@ -114,9 +111,7 @@ RUN set -euo pipefail; \
     sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
 
 # What: declares APT_CACHE_BUST right before the RUN it busts.
-# Why: without this, BuildKit's cache has no wall-clock expiry and can
-#   replay a stale `apk upgrade` forever; see tools/build-tools/Dockerfile's
-#   identical ARG for the full rationale.
+# Why: BuildKit's cache needs wall-clock expiry for fresh packages
 # From: Issue #1095
 ARG APT_CACHE_BUST=""
 RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
