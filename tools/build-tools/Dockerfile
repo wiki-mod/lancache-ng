@@ -265,7 +265,7 @@ RUN docker --version; \
     docker buildx version
 
 # What: builds sccache from source, like the Debian stage.
-# Why: no prebuilt release exists on either branch here.
+# Why: prebuilt release lacks Redis+dist-client feature
 # From: Issue #1095
 RUN set -euo pipefail; \
     rustup component add rustfmt clippy; \
@@ -327,7 +327,7 @@ RUN set -euo pipefail; \
     shellspec --version
 
 # What: Alpine 3.24 lacks dhclient; uses busybox udhcpc
-# Why: affects 2 DHCP simulation scripts; documented gap
+# Why: udhcpc ships in busybox base, nothing to install
 # From: Issue #1095
 
 # What: symlink musl-gcc to gcc; gcc targets musl already
