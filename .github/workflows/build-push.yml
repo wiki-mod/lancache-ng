@@ -5637,10 +5637,10 @@ jobs:
 
       # What: fails when db-status is undetermined, scan ran.
       # Why: an unknown status must never be read as a clean scan.
-      # From: Issue #1095 | PR #1735
+      # From: Issue #1095 | PR #1741
       - name: Require a determined Trivy DB status (amd64)
         if: >-
-          github.event_name == 'pull_request' && steps.build.outcome == 'success' &&
+          always() && steps.build.outcome == 'success' &&
           steps.trivy-scan-pushed.outcome != 'skipped' &&
           steps.trivy-scan-pushed.outputs.db-status != 'unavailable' &&
           steps.trivy-scan-pushed.outputs.db-status != 'available'
@@ -5654,7 +5654,8 @@ jobs:
       # From: Issue #1095
       - name: Report Trivy DB-unavailable status (amd64, separate issue)
         if: >-
-          github.event_name == 'pull_request' && steps.build.outcome == 'success' &&
+          always() && steps.build.outcome == 'success' &&
+          (github.event_name == 'pull_request' || github.ref == 'refs/heads/current_dev' || github.ref == 'refs/heads/master') &&
           (steps.trivy-scan-pushed.outputs.db-status == 'unavailable' ||
            steps.trivy-scan-pushed.outputs.db-status == 'available')
         uses: ./.github/actions/nightly-status
@@ -5672,7 +5673,8 @@ jobs:
       # From: Issue #1095 | PR #1735
       - name: Report Trivy scan-error status (amd64, separate issue)
         if: >-
-          github.event_name == 'pull_request' && steps.build.outcome == 'success' &&
+          always() && steps.build.outcome == 'success' &&
+          (github.event_name == 'pull_request' || github.ref == 'refs/heads/current_dev' || github.ref == 'refs/heads/master') &&
           steps.trivy-scan-pushed.outputs.db-status == 'available'
         uses: ./.github/actions/nightly-status
         with:
@@ -5686,11 +5688,13 @@ jobs:
           project_pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
 
       # What: reports the scan outcome as a self-closing issue.
-      # Why: runs only for an available DB with an actual report.
-      # From: Issue #1095 | PR #1735
-      - name: Report Trivy PR-scan status (non-blocking, self-closing issue)
+      # Why: PR or canonical-ref runs only; avoids a stale non-
+      #   canonical ref opening/closing a shared standing issue.
+      # From: Issue #1095 | PR #1741
+      - name: Report Trivy scan status (self-closing issue)
         if: >-
-          github.event_name == 'pull_request' && steps.build.outcome == 'success' &&
+          always() && steps.build.outcome == 'success' &&
+          (github.event_name == 'pull_request' || github.ref == 'refs/heads/current_dev' || github.ref == 'refs/heads/master') &&
           steps.trivy-scan-pushed.outputs.db-status == 'available' &&
           steps.trivy-scan-pushed.outputs.scan-error != 'true'
         uses: ./.github/actions/nightly-status
@@ -6275,10 +6279,10 @@ jobs:
 
       # What: fails when db-status is undetermined, scan ran.
       # Why: an unknown status must never be read as a clean scan.
-      # From: Issue #1095 | PR #1735
+      # From: Issue #1095 | PR #1741
       - name: Require a determined Trivy DB status (arm64)
         if: >-
-          github.event_name == 'pull_request' && steps.build.outcome == 'success' &&
+          always() && steps.build.outcome == 'success' &&
           steps.trivy-scan-pushed.outcome != 'skipped' &&
           steps.trivy-scan-pushed.outputs.db-status != 'unavailable' &&
           steps.trivy-scan-pushed.outputs.db-status != 'available'
@@ -6292,7 +6296,8 @@ jobs:
       # From: Issue #1095
       - name: Report Trivy DB-unavailable status (arm64, separate issue)
         if: >-
-          github.event_name == 'pull_request' && steps.build.outcome == 'success' &&
+          always() && steps.build.outcome == 'success' &&
+          (github.event_name == 'pull_request' || github.ref == 'refs/heads/current_dev' || github.ref == 'refs/heads/master') &&
           (steps.trivy-scan-pushed.outputs.db-status == 'unavailable' ||
            steps.trivy-scan-pushed.outputs.db-status == 'available')
         uses: ./.github/actions/nightly-status
@@ -6310,7 +6315,8 @@ jobs:
       # From: Issue #1095 | PR #1735
       - name: Report Trivy scan-error status (arm64, separate issue)
         if: >-
-          github.event_name == 'pull_request' && steps.build.outcome == 'success' &&
+          always() && steps.build.outcome == 'success' &&
+          (github.event_name == 'pull_request' || github.ref == 'refs/heads/current_dev' || github.ref == 'refs/heads/master') &&
           steps.trivy-scan-pushed.outputs.db-status == 'available'
         uses: ./.github/actions/nightly-status
         with:
@@ -6324,11 +6330,13 @@ jobs:
           project_pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
 
       # What: reports the scan outcome as a self-closing issue.
-      # Why: runs only for an available DB with an actual report.
-      # From: Issue #1095 | PR #1735
-      - name: Report Trivy PR-scan status (non-blocking, self-closing issue)
+      # Why: PR or canonical-ref runs only; avoids a stale non-
+      #   canonical ref opening/closing a shared standing issue.
+      # From: Issue #1095 | PR #1741
+      - name: Report Trivy scan status (self-closing issue)
         if: >-
-          github.event_name == 'pull_request' && steps.build.outcome == 'success' &&
+          always() && steps.build.outcome == 'success' &&
+          (github.event_name == 'pull_request' || github.ref == 'refs/heads/current_dev' || github.ref == 'refs/heads/master') &&
           steps.trivy-scan-pushed.outputs.db-status == 'available' &&
           steps.trivy-scan-pushed.outputs.scan-error != 'true'
         uses: ./.github/actions/nightly-status
