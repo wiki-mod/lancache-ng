@@ -1038,20 +1038,20 @@ ci_readback_verify() {
 # ============================================================
 
 ci_run_bats() {
-    # What: runs bats, then re-reports every 'not ok' at the end.
-    # Why: a bare exit code buries failures thousands of lines up.
+    # What: runs bats, re-reports failures at end.
+    # Why: bare exit code buries failures.
     # From: Issue #1683
     local logfile rc=0
     logfile="$(ci_mktemp)"
 
-    # What: streams bats live while keeping a copy to re-read.
-    # Why: PIPESTATUS[0] is bats' status; tee's would always be 0.
+    # What: streams bats live, keeps copy.
+    # Why: PIPESTATUS[0] is bats' status.
     # From: Issue #1683
     bats --tap "$@" 2>&1 | tee "$logfile"
     rc="${PIPESTATUS[0]}"
 
-    # What: counts failing TAP lines in the captured output.
-    # Why: `|| true` keeps a zero-match grep from ending the run.
+    # What: counts TAP failures in output.
+    # Why: `|| true` keeps grep from failing.
     # From: Issue #1683
     local failed
     failed="$(grep -c '^not ok' "$logfile" || true)"
@@ -1084,8 +1084,8 @@ ci_run_bats() {
 # From: Issue #1683
 
 ci_platforms_all_accepted() {
-    # What: true iff every platform of $1 is accepted at $2.
-    # Why: §45 -- an index needs both arches, or it is not built.
+    # What: true iff all platforms of $1 at $2.
+    # Why: §45 — index needs both arches.
     # From: Issue #1683
     local service="$1" identity="$2" platform
     while IFS= read -r platform; do
@@ -1095,8 +1095,8 @@ ci_platforms_all_accepted() {
 }
 
 ci_assemble_index() {
-    # What: creates service $1's OCI index for identity $2.
-    # Why: §45 -- assembly runs only after both platforms passed.
+    # What: creates $1's OCI index for $2.
+    # Why: §45 — assembly after platforms.
     # From: Issue #1683
     local service="$1" identity="$2" ref platform digest
     ci_require_service "$service"
@@ -1108,8 +1108,8 @@ ci_assemble_index() {
         return 1
     fi
 
-    # What: the index uses exact digests, never tags.
-    # Why: §48 -- a moving tag would reintroduce a TOCTOU window.
+    # What: index uses exact digests.
+    # Why: §48 — moving tag TOCTOU.
     # From: Issue #1683
     local -a sources=()
     while IFS= read -r platform; do
@@ -1125,8 +1125,8 @@ ci_assemble_index() {
 }
 
 ci_stack_candidate() {
-    # What: prints "service=digest" for every service at its id.
-    # Why: §47 -- a stack is a set of accepted digests.
+    # What: prints service=digest for each.
+    # Why: §47 — stack is accepted set.
     # From: Issue #1683
     local svc identity digest missing=0
     for svc in "${CI_SERVICES[@]}"; do
@@ -1151,14 +1151,14 @@ ci_stack_candidate() {
 # From: Issue #1683
 
 ci_promote_channel() {
-    # What: points channel $2 at candidate file $1's digests.
-    # Why: §51 -- promotion verifies, moves refs, and reads back.
+    # What: points channel $2 at $1.
+    # Why: §51 — verify, move, readback.
     # From: Issue #1683
     local candidate="$1" channel="$2" line svc digest ref
     [[ -f "$candidate" ]] || ci_die "promote: no stack candidate file at $candidate"
 
-    # What: every digest is verified before any tag is moved.
-    # Why: §50 -- promotion is stack-atomic, so verify first.
+    # What: digests verified before tags move.
+    # Why: §50 — stack-atomic, verify first.
     # From: Issue #1683
     while IFS='=' read -r svc digest; do
         [[ -n "$svc" ]] || continue
@@ -1177,8 +1177,8 @@ ci_promote_channel() {
             docker buildx imagetools create --tag "${ref}:${channel}" "${ref}@${digest}" \
             || ci_die "promote: could not move $svc to channel $channel"
 
-        # What: the moved channel tag is read back and compared.
-        # Why: §53 -- a promotion is not done until it is verified.
+        # What: moved tag read back, compared.
+        # Why: §53 — not done without verify.
         # From: Issue #1683
         ci_readback_verify "${ref}:${channel}" "$digest" || return 1
     done < "$candidate"
@@ -1199,8 +1199,8 @@ ci_promote_channel() {
 # From: Issue #1683
 
 ci_nightly_is_current() {
-    # What: true iff the desired stack equals the live channel $1.
-    # Why: §54.2 -- unchanged means no build, no retag.
+    # What: true iff desired equals live on $1.
+    # Why: §54.2 — unchanged, no action.
     # From: Issue #1683
     local channel="$1" svc identity desired live ref
     for svc in "${CI_SERVICES[@]}"; do
@@ -1214,8 +1214,8 @@ ci_nightly_is_current() {
 }
 
 ci_cmd_nightly() {
-    # What: promotes the desired stack, or does nothing.
-    # Why: §54.1 -- targeted work only, never a scheduled rebuild.
+    # What: promotes desired or does nothing.
+    # Why: §54.1 — targeted, not rebuild.
     # From: Issue #1683
     local channel="${CI_NIGHTLY_CHANNEL:-nightly}"
     if ci_nightly_is_current "$channel"; then
@@ -1251,12 +1251,12 @@ ci_cmd_release() {
 # STANDING CHECKS
 # ============================================================
 #
-# What: one call site for every kept repo-wide guard script.
-# Why: consolidates 9 separate build-push.yml docker-run steps.
+# What: call site for repo-wide guards.
+# Why: consolidates separate docker-run steps.
 # From: Issue #1683
 
-# What: kept guards with no explicit-file mode; run whole-repo.
-# Why: each is diff-scoped internally or is inherently repo-wide.
+# What: guards with no file mode; run whole.
+# Why: diff-scoped or inherently repo-wide.
 # From: Issue #1683
 readonly -a CI_STANDING_CHECKS=(
     scripts/untracked/validate-stack-images.sh
@@ -1271,8 +1271,8 @@ readonly -a CI_STANDING_CHECKS=(
     scripts/tracked/check-logging-matrix.sh
 )
 
-# What: file-headers/-hosted's 6-script list, kept separate.
-# Why: merging into CI_STANDING_CHECKS would run them twice.
+# What: file-headers checks, kept separate.
+# Why: merging would run them twice.
 # From: Issue #1683
 readonly -a CI_FILE_HEADER_CHECKS=(
     scripts/tracked/check-file-headers.sh
