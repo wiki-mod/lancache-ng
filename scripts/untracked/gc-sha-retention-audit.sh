@@ -15,6 +15,13 @@ repo_root="$(cd "$script_dir/../.." && pwd)"
 # From: Issue #1095 | PR #1586
 # shellcheck source=scripts/lib/github-api-retry.sh
 source "$repo_root/scripts/lib/github-api-retry.sh"
+# What: reuses gcps age-check + manifest-fetch helpers
+# Why: avoids a second copy of either, per AG-CODE-011
+# From: Issue #1095
+# shellcheck source=scripts/lib/ghcr-retry.sh
+source "$repo_root/scripts/lib/ghcr-retry.sh"
+# shellcheck source=scripts/lib/gc-pr-staging-images.sh
+source "$repo_root/scripts/lib/gc-pr-staging-images.sh"
 # shellcheck source=scripts/lib/sha-retention-audit.sh
 source "$repo_root/scripts/lib/sha-retention-audit.sh"
 
@@ -26,6 +33,11 @@ history_refs_raw="${SRA_HISTORY_REFS:-${SRA_HISTORY_REF:-origin/current_dev}}"
 package_filter="${SRA_PACKAGE_FILTER:-}"
 version_snapshot_file="${SRA_VERSION_SNAPSHOT_FILE:-}"
 max_pages_per_package="${SRA_MAX_PAGES_PER_PACKAGE:-500}"
+# What: safety margin before an orphan closure is deletable
+# Why: 14 days exceeds any real merge job's runtime by far
+# From: Issue #1095
+orphan_closure_min_age_seconds="${SRA_ORPHAN_CLOSURE_MIN_AGE_SECONDS:-1209600}"
+now_epoch="$(date -u +%s)"
 # What: bounds how many packages are audited concurrently in one batch.
 # Why: package listings/classifications are independent and dominate live
 # runtime; a background-worker batch (see the main loop below) is what
@@ -368,6 +380,37 @@ audit_package() {
     return 1
   }
 
+  # What: builds root manifests' child-digest reference set
+  # Why: old 'separate pass' only ever covers PR-staging
+  # From: Issue #1095
+  declare -A closure_referenced_children=()
+  local closure_check_ok=1
+  local closure_registry_token=""
+  if closure_registry_token="$(ghcr_retry ghcr.io "" "" -- gcps_registry_anon_token "$package" "$GITHUB_REPOSITORY")" && [[ -n "$closure_registry_token" ]]; then
+    local root_digest root_manifest root_children_output root_child
+    while IFS= read -r root_digest; do
+      [[ -n "$root_digest" ]] || continue
+      if ! root_manifest="$(ghcr_retry ghcr.io "" "" -- gcps_fetch_manifest "$package" "$root_digest" "$GITHUB_REPOSITORY" "$closure_registry_token")" \
+          || [[ -z "$root_manifest" ]] || ! gcps_manifest_looks_valid "$root_manifest"; then
+        echo "::warning::Cannot fetch/validate root manifest $root_digest for ${repository_name}/${package}; disabling the non-ordinary-version closure check for this package (falls back to unconditional protect)." >&2
+        closure_check_ok=0
+        break
+      fi
+      if ! root_children_output="$(gcps_extract_manifest_children "$root_manifest")"; then
+        echo "::warning::Cannot extract manifest children for root $root_digest in ${repository_name}/${package}; disabling the non-ordinary-version closure check for this package." >&2
+        closure_check_ok=0
+        break
+      fi
+      while IFS= read -r root_child; do
+        [[ -n "$root_child" ]] || continue
+        closure_referenced_children["$root_child"]=1
+      done <<<"$root_children_output"
+    done < <(jq -r 'select((.metadata.container.tags // []) | any(test("^sha-[0-9a-f]{7,40}$"))) | .name' "$versions_file")
+  else
+    echo "::warning::Cannot obtain an anonymous pull token for ${repository_name}/${package}; disabling the non-ordinary-version closure check for this package." >&2
+    closure_check_ok=0
+  fi
+
   local root_candidates="$package_dir/root-candidates.tsv"
   : >"$root_candidates"
   # What: v1.2 buffer pool for a rootless, non-channel-matched
@@ -462,25 +505,36 @@ audit_package() {
     }
 
     if (( root_count == 0 && child_count > 0 )); then
-      sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "closure" "protect" "artifact-child-closure-unresolved"
+      # What: ages a merge-orphaned child past safety margin
+      # Why: a real merge job cannot run this long anymore
+      # From: Issue #1095
+      local closure_epoch=""
+      if [[ "$built" != "unknown" ]]; then
+        closure_epoch="$(gcps_created_at_to_epoch "$built")" || closure_epoch=""
+      fi
+      if [[ -n "$closure_epoch" ]] && gcps_is_old_enough_to_delete "$closure_epoch" "$now_epoch" "$orphan_closure_min_age_seconds"; then
+        sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "closure" "would-delete" "artifact-child-closure-orphaned-past-safety-margin"
+        direct_would_delete_count=$((direct_would_delete_count + 1))
+      else
+        sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "closure" "protect" "artifact-child-closure-unresolved"
+      fi
       continue
     fi
-    # What: classifies a rootless version -- a truly untagged version
-    # (other_count==0) stays permanently protected exactly as before; a
-    # matched protected channel/release also stays protected; only a
-    # rootless version that HAS tags but matches no protected channel
-    # becomes a channel_buffer_versions-ranked candidate below.
-    # Why: v1.2 targets "any historical or otherwise-
-    # unanticipated tag FORMAT" -- a genuinely untagged version has no tag
-    # format to be unanticipated, and is almost always a manifest-list's
-    # own untagged amd64/arm64 platform child (this reaper's own separate
-    # orphan-closure pass, not this classifier, is the correct place to
-    # decide whether such a child is truly orphaned -- it already checks
-    # forward-reference edges from a still-retained parent manifest, which
-    # this classifier cannot see). Only "has tags, none recognized" is the
-    # actual gap this rule inverts; an absence of tags is not that gap.
-    # From: Issue #1585.
+    # What: checks untagged version against root children
+    # Why: referenced or unverifiable -- stays protected
+    # From: Issue #1585 | Issue #1095
     if (( root_count == 0 && other_count == 0 )); then
+      if (( closure_check_ok == 1 )) && [[ -z "${closure_referenced_children[$digest]+x}" ]]; then
+        local nonord_epoch=""
+        if [[ "$built" != "unknown" ]]; then
+          nonord_epoch="$(gcps_created_at_to_epoch "$built")" || nonord_epoch=""
+        fi
+        if [[ -n "$nonord_epoch" ]] && gcps_is_old_enough_to_delete "$nonord_epoch" "$now_epoch" "$orphan_closure_min_age_seconds"; then
+          sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "protected" "would-delete" "non-ordinary-version-unreferenced-past-safety-margin"
+          direct_would_delete_count=$((direct_would_delete_count + 1))
+          continue
+        fi
+      fi
       sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "protected" "protect" "non-ordinary-version"
       continue
     fi
