@@ -469,15 +469,8 @@ ARG SHELLSPEC_VERSION
 ARG SHELLSPEC_SHA256
 ARG DEBIAN_FRONTEND=noninteractive
 
-# What: LAN apt-caching proxy address (host:port), empty by default.
-# Why: apt package downloads happen over the network, unlike ccache's
-#   filesystem cache -- a LAN-reachable proxy is reachable from inside a
-#   build the same way the public internet already is, no BuildKit
-#   mount-type limitation involved (see tools/runner-host/lancache-ci-
-#   apt-cache-proxy.sh for the proxy side of this and its own real
-#   verification). Empty default matches this file's existing
-#   APT_CACHE_BUST="" idiom -- omitting the build-arg must reproduce
-#   today's direct-internet behavior exactly.
+# What: LAN apt-cache proxy host:port; empty disables it.
+# Why: empty must reproduce today's direct-internet build.
 # From: Issue #1095
 ARG APT_CACHE_PROXY=""
 
