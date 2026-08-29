@@ -1639,6 +1639,27 @@ The existing, already-proven cross-host CAS lock approach can be reused, or
 integrated into `ci.sh`. A global promotion lock is not necessary for
 mutually independent builds.
 
+### 52.1 A mutable channel tag needs a real trigger, not just a schedule
+
+Real, found in production, not hypothetical: the current `build-tools.yml`
+workflow has no `push` trigger at all -- only `workflow_dispatch`, a
+weekly `schedule`, and `pull_request` (build/validate only, no
+promotion). Its promote-to-`:nightly` step only fires when
+`github.ref_name == 'current_dev'`, but a `schedule` trigger always runs
+on the repository's default branch (`master` here) -- so the weekly run
+can only ever reach the `:latest` path, never `:nightly`. Net effect:
+`:nightly` only updates when someone remembers to dispatch it manually.
+Confirmed stuck on a 13-day-old digest in production, missing several
+already-merged fixes that depended on it (including a `build-tools`
+tool the GC workflows require).
+
+CI 2.0 must not repeat this for any mutable channel tag other CI jobs
+depend on (`build-tools` here, but the same applies to any future
+shared image): the tag needs a real, automatic trigger tied to the
+actual event that should refresh it -- a push/merge to the channel's
+source branch -- not only a manual dispatch or a schedule whose
+run-context ref doesn't match what the promotion logic checks for.
+
 ## 53. Promotion Readback
 
 After promotion:
