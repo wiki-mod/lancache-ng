@@ -1,0 +1,97 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+name: Resolve shared Trivy vulnerability-DB cache directory
+description: >-
+  Resolves one shared, persistent Trivy DB cache directory for every
+  self-hosted scan job: the NFS-backed share when it is really mounted and
+  writable, otherwise a real local-disk fallback -- never the per-run
+  ephemeral directories this replaces, and never tmpfs/OS-default /tmp.
+
+# What: returns a persistent Trivy cache instead of empty
+# Why: always-empty dir defeats Trivy's DB freshness check
+# From: Issue #1095 | PR #1747
+
+inputs:
+  shared-dir:
+    description: >-
+      The NFS-backed shared Trivy DB directory to probe first.
+      Written without GitHub Actions expression syntax on purpose: this
+      field's template gets evaluated even as plain documentation prose
+      (see aquasecurity-trivy-action-centralized-version's own
+      trivy-config input for the same note). An input, not a caller
+      env-var override, on purpose: a composite action's own expressions
+      do not see the calling workflow/job's environment context -- only
+      inputs reliably cross that boundary in GitHub Actions.
+    required: false
+    default: /mnt/trivy-db
+  fallback-dir:
+    description: Real local-disk directory to use when shared-dir is not mounted/writable. Never tmpfs/OS-default /tmp.
+    required: false
+    default: /var/tmp/lancache-ng-trivy-cache-fallback
+outputs:
+  dir:
+    description: The resolved, real, writable cache directory to pass as Trivy's cache-dir.
+    value: ${{ steps.resolve.outputs.dir }}
+  source:
+    description: "'nfs-shared' or 'local-fallback' -- which path was actually used, for logging/diagnostics."
+    value: ${{ steps.resolve.outputs.source }}
+
+runs:
+  using: composite
+  steps:
+    - name: Probe shared Trivy DB mount, fall back to real local disk
+      id: resolve
+      shell: bash
+      env:
+        # What: overridable via caller inputs for testing
+        # Why: hardcoded path needs NFS unmount to test
+        # From: Issue #1095 | PR #1747
+        PRIMARY_DIR: ${{ inputs.shared-dir }}
+        FALLBACK_DIR: ${{ inputs.fallback-dir }}
+      run: |
+        set -euo pipefail
+
+        # What: probes file and subdir creation/cleanup
+        # Why: stale mount might list but fail actual I/O
+        # From: Issue #1095 | PR #1747
+        probe_writable() {
+          local dir="$1"
+          local probe="$dir/.trivy-cache-dir-write-probe.$$.${RANDOM}"
+          local subdir="$dir/.trivy-cache-dir-write-probe-dir.$$.${RANDOM}"
+          [ -d "$dir" ] || return 1
+          ( set -e
+            printf 'probe' > "$probe"
+            [ "$(cat "$probe")" = "probe" ]
+            rm -f "$probe"
+            mkdir "$subdir"
+            printf 'probe' > "$subdir/probe"
+            [ "$(cat "$subdir/probe")" = "probe" ]
+            rm -rf "$subdir"
+          ) 2>/dev/null
+        }
+
+        if probe_writable "$PRIMARY_DIR"; then
+          echo "::notice::Using shared NFS-backed Trivy DB cache at '$PRIMARY_DIR'."
+          echo "dir=$PRIMARY_DIR" >> "$GITHUB_OUTPUT"
+          echo "source=nfs-shared" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # What: explicit warning on NFS unavailability
+        # Why: shared DB loss must be visible in job log
+        # From: Issue #1095 | PR #1747
+        echo "::warning::Shared Trivy DB cache '$PRIMARY_DIR' is not mounted or not writable (NFS server unreachable, export revoked, or genuinely absent). Falling back to a real local-disk directory on THIS runner host only -- never tmpfs/OS-default /tmp, since that was the actual cause of a prior 'no space left on device' outage. This runner will not share the DB with any other runner host until the mount recovers."
+
+        mkdir -p "$FALLBACK_DIR" || {
+          echo "::error::Could not create local fallback Trivy cache dir '$FALLBACK_DIR' on real disk either -- refusing to fall through to tmpfs/OS-default /tmp."
+          exit 1
+        }
+
+        if ! probe_writable "$FALLBACK_DIR"; then
+          echo "::error::Local fallback Trivy cache dir '$FALLBACK_DIR' exists but failed a real write+read+delete test -- refusing to proceed onto ephemeral/tmp storage."
+          exit 1
+        fi
+
+        echo "dir=$FALLBACK_DIR" >> "$GITHUB_OUTPUT"
+        echo "source=local-fallback" >> "$GITHUB_OUTPUT"

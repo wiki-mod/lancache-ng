@@ -5747,10 +5747,20 @@ jobs:
             mv "$BUILDX_CACHE_DEST" "$cache_dir"
           ) 9>"$lock_file"
 
-      - name: Prepare pushed service Trivy cache
-        # What: same shared-cache-directory race as container-scan's step.
-        # Why: full reasoning on the linked issue.
-        # From: Issue #1095 | PR #1532
+      # What: resolves the shared, persistent NFS-backed Trivy DB directory
+      #   (real local-disk fallback if the mount is unavailable), then
+      #   refreshes it under a lock using Trivy's own --download-db-only
+      #   freshness check. This job builds linux/amd64 only (see
+      #   build-arm64 for the native arm64 leg, a separate GitHub-hosted
+      #   job with no route to this NFS mount -- its own step below stays
+      #   on its prior runner.temp design for that reason).
+      # Why: skip-db-update below (steps.trivy-db-fresh.outputs.db-present)
+      #   is what keeps every matrix.service instance's concurrent read
+      #   safe against the shared directory's single writer -- the actual
+      #   fix for the redundant-download outage a per-run-wiped directory
+      #   used to cause on pull_request/workflow_dispatch/retry/tag-push.
+      # From: Issue #1095 | Issue #912 | PR #927 | PR #1532
+      - name: Resolve shared Trivy DB cache directory
         id: trivy-cache
         if: >-
           ${{
@@ -5763,56 +5773,14 @@ jobs:
                         )
                       )
                     }}
-        env:
-          MATRIX_SERVICE: ${{ matrix.service }}
-        run: |
-          set -euo pipefail
-          sanitized_ref="$(printf '%s' "$GITHUB_REF" | tr '/:@' '---' | tr -cd 'A-Za-z0-9_.-')"
-          if [ -z "$sanitized_ref" ]; then
-            echo "::error::Could not derive a safe Trivy cache directory name from ref '$GITHUB_REF'."
-            exit 1
-          fi
-          cache_dir="/var/tmp/lancache-ng-trivy-cache/${MATRIX_SERVICE}-pushed-${sanitized_ref}"
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] || [ "$GITHUB_RUN_ATTEMPT" != "1" ] \
-            || [ "${GITHUB_REF#refs/tags/}" != "$GITHUB_REF" ]; then
-            cache_dir="${cache_dir}-${GITHUB_RUN_ID}"
-            echo "ephemeral=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "ephemeral=false" >> "$GITHUB_OUTPUT"
-          fi
-          mkdir -p "$cache_dir"
-          echo "dir=$cache_dir" >> "$GITHUB_OUTPUT"
+        uses: ./.github/actions/trivy-cache-dir
 
-      - name: Enforce pushed service Trivy cache generation retention
-        # Same rationale, sentinel-file mechanism, and #927 build-tools.yml
-        # deferral as container-scan's "Enforce Trivy cache generation
-        # retention" step above -- see that step's comment for the full
-        # reasoning. This is the `<service>-pushed-<ref>` persistent dir's
-        # equivalent: reused on every non-PR push/schedule run, never
-        # touched by the ephemeral cleanup step below or by host-level
-        # tmpfiles aging (#928).
-        if: ${{ steps.trivy-cache.outputs.ephemeral == 'false' }}
-        env:
-          TRIVY_CACHE_DIR: ${{ steps.trivy-cache.outputs.dir }}
-          TRIVY_CACHE_MAX_AGE_DAYS: "14"
-        run: |
-          set -euo pipefail
-          case "$TRIVY_CACHE_DIR" in
-            /var/tmp/lancache-ng-trivy-cache/?*) ;;
-            *)
-              echo "::error::Refusing to touch unexpected Trivy cache path '$TRIVY_CACHE_DIR'."
-              exit 1
-              ;;
-          esac
-          stamp="$TRIVY_CACHE_DIR/.generation-stamp"
-          if [ -f "$stamp" ] && [ -z "$(find "$stamp" -mtime "+${TRIVY_CACHE_MAX_AGE_DAYS}" -print -quit)" ]; then
-            echo "Trivy cache generation for $TRIVY_CACHE_DIR is within ${TRIVY_CACHE_MAX_AGE_DAYS}d, keeping it."
-            exit 0
-          fi
-          echo "Resetting Trivy cache generation for $TRIVY_CACHE_DIR (stamp missing or older than ${TRIVY_CACHE_MAX_AGE_DAYS}d)."
-          rm -rf -- "$TRIVY_CACHE_DIR"
-          mkdir -p -- "$TRIVY_CACHE_DIR"
-          touch -- "$stamp"
+      - name: Ensure shared Trivy DB is current
+        id: trivy-db-fresh
+        if: ${{ steps.trivy-cache.outcome == 'success' }}
+        uses: ./.github/actions/trivy-db-ensure-fresh
+        with:
+          cache-dir: ${{ steps.trivy-cache.outputs.dir }}
 
       - name: Scan pushed service digest with Trivy
         # What: Step 3 -- scans the exact pushed digest before promotion.
@@ -5847,7 +5815,13 @@ jobs:
           dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
           image-ref: ghcr.io/${{ github.repository }}/${{ matrix.service }}@${{ steps.build.outputs.digest }}
           cache-dir: ${{ steps.trivy-cache.outputs.dir }}
-          cleanup-cache: ${{ steps.trivy-cache.outputs.ephemeral == 'true' && 'true' || 'false' }}
+          # What: never cleaned up now -- it's the shared/fallback dir, not
+          #   a per-run throwaway.
+          # Why: cleanup-cache "true" here would delete the shared DB out
+          #   from under every other concurrent matrix.service job.
+          # From: Issue #1095 | Issue #912
+          cleanup-cache: "false"
+          skip-db-update: ${{ steps.trivy-db-fresh.outputs.db-present == 'true' }}
 
       # What: fails when db-status is undetermined, scan ran.
       # Why: an unknown status must never be read as a clean scan.
@@ -5974,28 +5948,6 @@ jobs:
           image-ref: ghcr.io/${{ github.repository }}/build-tools@${{ steps.build.outputs.digest }}
           platform: linux/amd64
           run-fixtures: "true"
-      - name: Remove ephemeral pushed service Trivy cache
-        # Same rationale and fail-closed path guard as container-scan's
-        # "Remove ephemeral Trivy cache" step above: ephemeral dirs
-        # (dispatch/rerun/tag) are never read by any later run, so they are
-        # deleted at job end instead of leaking ~1-2.5 GB per run onto the
-        # runner host (#912). `always()` covers a failed/cancelled scan; a
-        # skipped prepare step leaves the output empty, skipping this too.
-        if: ${{ always() && steps.trivy-cache.outputs.ephemeral == 'true' }}
-        env:
-          TRIVY_CACHE_DIR: ${{ steps.trivy-cache.outputs.dir }}
-        run: |
-          set -euo pipefail
-          case "$TRIVY_CACHE_DIR" in
-            /var/tmp/lancache-ng-trivy-cache/?*)
-              rm -rf -- "$TRIVY_CACHE_DIR"
-              ;;
-            *)
-              echo "::error::Refusing to delete unexpected Trivy cache path '$TRIVY_CACHE_DIR'."
-              exit 1
-              ;;
-          esac
-
       # No separate "Log in to GHCR for provenance attestation" step: the
       # ghcr-attest-retry composite action re-authenticates itself before
       # each retry (see that action), and its first attempt reuses the
@@ -6488,6 +6440,17 @@ jobs:
           dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
           dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
           image-ref: ghcr.io/${{ github.repository }}/${{ matrix.service }}@${{ steps.build.outputs.digest }}
+          # What: unchanged from before this PR -- a runner.temp path,
+          #   cleaned up every run.
+          # Why: this job (build-arm64) runs on GitHub-hosted
+          #   ubuntu-24.04-arm, not the self-hosted LAN runners the shared
+          #   NFS Trivy-DB mount (/mnt/trivy-db) lives on. A GitHub-hosted
+          #   runner's entire filesystem is destroyed after the job anyway,
+          #   so neither the shared mount nor a local persistent-fallback
+          #   directory would survive to a later run here regardless --
+          #   there is nothing to fix on this leg. See the amd64 "build"
+          #   job's identical step above (self-hosted) for the actual fix.
+          # From: Issue #1095 | Issue #912
           cache-dir: ${{ runner.temp }}/trivy-${{ matrix.service }}-arm64-${{ github.run_id }}-${{ github.run_attempt }}
           cleanup-cache: "true"
 
