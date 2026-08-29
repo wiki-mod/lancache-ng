@@ -146,7 +146,15 @@ cmd_test() {
         debian:trixie-slim bash -c "set -euo pipefail; printf 'Acquire::http::Proxy \"http://127.0.0.1:3142\";\n' > /etc/apt/apt.conf.d/00proxy; apt-get update"
     echo "OK: apt-get update through the proxy succeeded."
     echo "Cache directory now contains:"
-    find "$chosen_dir" -maxdepth 4 -type f 2>/dev/null | head -5 || true
+    # What: captures find's output into a variable before piping to head.
+    # Why: find | head is an early-exiting consumer fed by a live producer
+    #   under this script's own pipefail -- head exiting after 5 lines
+    #   while find is still writing can fail with an unrelated-looking
+    #   SIGPIPE (AG-VAL-029/AG-VAL-032). Capturing first avoids that.
+    # From: Issue #1095
+    local found_files
+    found_files="$(find "$chosen_dir" -maxdepth 4 -type f 2>/dev/null || true)"
+    head -5 <<<"$found_files"
     echo "== test complete -- smoke-test container removed, no persistent state left running =="
 }
 
