@@ -8,7 +8,7 @@
 ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
 # What: declared pre-FROM for use in later FROM lines.
 # Why: same override contract as BUILD_TOOLS_IMAGE (AG-KD-010).
-# From: Issue #1095 | AG-KD-010
+# From: Issue #1095
 ARG UTILITIES_IMAGE=ghcr.io/wiki-mod/lancache-ng/utilities:latest
 FROM ${BUILD_TOOLS_IMAGE} AS subscriber-builder
 
@@ -79,13 +79,8 @@ COPY nats-subscriber/ .
 #                            distcc is already enabled and a ccache Redis secret was
 #                            mounted; probes with a trivial compile first, same as
 #                            configure_distcc.
-#     What: `CC="ccache <real compiler>"` + `CCACHE_PREFIX=distcc` +
-#     `CCACHE_REMOTE_STORAGE=redis://...` + `CCACHE_COMPILERCHECK=content`.
-#     Why: ccache preprocesses locally by default (unlike sccache, which always shells
-#     its own `-E` pass through `CC` and crashes on a `,cpp`-tagged distcc host list);
-#     `content` checking avoids false hits from a Redis cache shared across
-#     build-tools image versions (ccache's own manual documents `mtime`'s default
-#     tradeoff here).
+#     What: sets CC/CCACHE_PREFIX/REMOTE_STORAGE/COMPILERCHECK vars.
+#     Why: sccache can't wrap distcc; content avoids stale Redis hits.
 #     From: Issue #887
 #   `$real_cc`/`$real_gcc`/`$real_cxx`/`$real_gxx` are resolved from `$original_path`
 #     before configure_distcc mutates PATH.
@@ -116,10 +111,9 @@ COPY nats-subscriber/ .
 #     probe's own key stable across builds despite `$ccache_probe_dir` being a fresh mktemp
 #     path every time; without it, every build would leak a new, never-reused Redis entry.
 #     Consequently the probe's own success check accepts either a remote write OR a remote
-#     hit as proof of a healthy round trip (a second build against the same generation
-#     legitimately hits instead of writing -- verified empirically, real Redis, 2026-08-14,
-#     lancache-240: without this the probe misclassified a genuine cache hit as "write
-#     failed" and disabled ccache for the whole build).
+#     hit as proof of a healthy round trip -- a second build against the same generation
+#     legitimately hits instead of writing; without this, the probe misclassifies a genuine
+#     cache hit as a write failure and disables ccache for the whole build.
 #     From: Issue #887
 #   resolve_cargo_jobs     - CARGO_BUILD_JOBS if set, else nproc-2 floored at 4; now also
 #                            echoes the resolved value and its source (explicit vs.
@@ -127,14 +121,9 @@ COPY nats-subscriber/ .
 #   run_cargo_build        - builds with ccache+distcc if both enabled, retrying with
 #                            plain distcc first on failure, then a normal local compiler
 #                            if that also fails (three fallback tiers total).
-# Each configure_sccache/configure_distcc/configure_ccache above now also echoes an
-# `[INFO] ... disabled (<reason>)` line on its own skip path, not only on its enable path.
-#   Why: previously a build log gave no evidence either way whether an accelerator was
-#   skipped intentionally (no secret configured) or due to a misconfiguration, and could
-#   not be distinguished from a build that never reached this RUN step at all -- the same
-#   silent-decision-point defect class the linked issue's G15 checkout guard already names
-#   (see docs/release-validation-plan.md's Coverage Assessment, AG-VAL-029 entry).
-#   From: Issue #1095 (G15), PR #1640
+#   What: echoes "[INFO] ... disabled (reason)" on each skip path.
+#   Why: build log couldn't tell intentional skip from misconfig.
+#   From: Issue #1095 | PR #1640
 # NOTE: comments cannot be embedded inside this block itself. Docker's line-continuation
 # strips the backslash-newline entirely (no newline is inserted), so a "#" comment ending
 # in "\" would swallow every following continuation line as commented-out text instead of
@@ -347,7 +336,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     cargo_jobs="$(resolve_cargo_jobs)"; \
     run_cargo_build; \
     # What: dumps ccache-s, checks for mid-build Redis errors.
-    # Why: Redis outages don't fail build; forbid warnings with success.
+    # Why: Redis outage doesn't fail build; no warnings on success.
     # From: Issue #887
     if [ "${ccache_enabled:-0}" = "1" ]; then \
       ccache -s; \
@@ -363,7 +352,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
 
 # What: source stage for tools copied into the final image below.
 # Why: uses mutable `:latest` tag; see AG-KD-010 for rationale.
-# From: Issue #1095 | AG-KD-010
+# From: Issue #1095
 FROM ${UTILITIES_IMAGE} AS utilities-tools
 
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
@@ -563,12 +552,12 @@ LABEL org.opencontainers.image.description="PowerDNS recursor, authoritative DNS
 # advisory affects a version still shipping in v3.24 stable at that time --
 # do not treat this resolution as a promise that `pdns`/`pdns-backend-sqlite3`
 # will never need pinning again.
-# What: curl/findutils/envsubst/lsof/ripgrep from shared utilities image.
-# Why: same alpine:3.24 digest; see services/proxy/Dockerfile for details.
+# What: curl/findutils/envsubst/lsof/ripgrep from utilities image.
+# Why: same alpine:3.24 digest as services/proxy/Dockerfile.
 # From: Issue #1556
 
-# What: removes BusyBox symlinks at these paths before real binaries.
-# Why: see services/proxy/Dockerfile's identical comment for reason.
+# What: removes BusyBox symlinks before real binaries land.
+# Why: see services/proxy/Dockerfile's identical comment.
 # From: Issue #1556
 RUN rm -f /usr/bin/find /usr/bin/xargs /usr/bin/lsof
 
@@ -583,9 +572,8 @@ COPY --from=utilities-tools /usr/lib/libgcc_s.so.1 /usr/lib/libgcc_s.so.1
 COPY --from=utilities-tools /usr/lib/libpcre2-8.so.0* /usr/lib/
 COPY --from=utilities-tools /usr/local/bin/verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
 
-# What: verifies the copied binaries actually run, not just that they exist.
-# Why: a missing shared-library dependency fails at exec time, not at COPY
-#   time; the lsof check is delegated to a shared script (see that file).
+# What: verifies copied binaries actually run, not just exist.
+# Why: missing shared-lib dep fails at exec time, not at COPY.
 # From: Issue #1613
 RUN set -euo pipefail; \
     find . -maxdepth 0 -printf '%f\n' >/dev/null; \
@@ -595,9 +583,7 @@ RUN set -euo pipefail; \
     sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
 
 # What: declares APT_CACHE_BUST right before the RUN it busts.
-# Why: without this, BuildKit's cache has no wall-clock expiry and can
-#   replay a stale apk index forever; see tools/build-tools/Dockerfile's
-#   identical ARG for the full rationale.
+# Why: BuildKit cache has no wall-clock expiry without this ARG.
 # From: Issue #1095
 ARG APT_CACHE_BUST=""
 RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
