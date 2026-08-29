@@ -907,15 +907,15 @@ ci_build_admission() {
 CI_BUILD_LOCK_REF_PREFIX="${CI_BUILD_LOCK_REF_PREFIX:-refs/ci2/build-lock}"
 
 ci_build_lock_ref() {
-    # What: prints the git ref naming this build's lock.
-    # Why: §20 keys the lock on service, platform and identity.
+    # What: prints git ref for build lock.
+    # Why: §20 keys on service/platform/id.
     # From: Issue #1683
     printf '%s/%s/%s/%s\n' "$CI_BUILD_LOCK_REF_PREFIX" "$1" "${2//\//-}" "$3"
 }
 
 ci_build_lock_is_held() {
-    # What: true iff a lock ref exists for this build triple.
-    # Why: an existing ref means a runner is building.
+    # What: true iff lock ref exists.
+    # Why: existing ref means runner building.
     # From: Issue #1683
     local ref
     ref="$(ci_build_lock_ref "$1" "$2" "$3")"
@@ -931,8 +931,8 @@ ci_build_lock_is_held() {
 # From: Issue #1683
 
 ci_do_build() {
-    # What: runs the real docker buildx build for $1 on $2.
-    # Why: §21 -- the one place an image is actually produced.
+    # What: runs docker buildx build for $1 on $2.
+    # Why: §21 — only place image produced.
     # From: Issue #1683
     local service="$1" platform="$2" identity="$3"
     local context dockerfile ref
@@ -942,8 +942,8 @@ ci_do_build() {
     [[ -f "$dockerfile" ]] || ci_die "no Dockerfile for $service at $dockerfile"
     ref="$(ci_image_ref "$service")"
 
-    # What: named external contexts, passed through unmodified.
-    # Why: §13 -- e.g. proxy's dns-domains context (§8).
+    # What: named external contexts pass-through.
+    # Why: §13 — e.g. proxy's dns context.
     # From: Issue #1683
     local -a extra_contexts=()
     local pair
@@ -956,8 +956,8 @@ ci_do_build() {
 }
 
 ci_cmd_build_one() {
-    # What: admission, build, publish, readback for one matrix leg.
-    # Why: §19-24 -- the full chain a real build job must run.
+    # What: admission, build, publish, readback.
+    # Why: §19-24 — full chain for build job.
     # From: Issue #1683
     local service="$1" platform="$2" outdir="${3:?ci.sh build: result dir required}"
     local identity admission
@@ -969,8 +969,8 @@ ci_cmd_build_one() {
         return 0
     fi
 
-    # What: the lock ref is created before building, removed after.
-    # Why: §20 -- a second runner must see this build in progress.
+    # What: lock created before, removed after.
+    # Why: §20 — second runner sees progress.
     # From: Issue #1683
     local lock_ref remote="${CI_GIT_REMOTE:-origin}"
     lock_ref="$(ci_build_lock_ref "$service" "$platform" "$identity")"
@@ -995,14 +995,14 @@ ci_cmd_build_one() {
 }
 
 ci_publish_by_digest() {
-    # What: pushes the built image and prints its exact digest.
-    # Why: §96 -- a candidate gets a digest before any moving tag.
+    # What: pushes image, prints exact digest.
+    # Why: §96 — digest before any tag.
     # From: Issue #1683
     local service="$1" platform="$2" identity="$3" ref digest
     ref="$(ci_image_ref "$service")"
 
-    # What: the push is retried on its own, without rebuilding.
-    # Why: §22 -- BUILD and PUBLISH are separate failure domains.
+    # What: push retried without rebuilding.
+    # Why: §22 — BUILD and PUBLISH separate.
     # From: Issue #1683
     ci_retry_registry_op "$CI_REGISTRY" \
         docker push "${ref}:${identity}" >/dev/null \
@@ -1014,8 +1014,8 @@ ci_publish_by_digest() {
 }
 
 ci_readback_verify() {
-    # What: re-reads $1's digest and compares it against $2.
-    # Why: §23 -- a successful push is not a verified artifact.
+    # What: re-reads $1 digest, compares to $2.
+    # Why: §23 — push success ≠ verified.
     # From: Issue #1683
     local reference="$1" expected="$2" observed
     ci_validate_full_oci_digest "$expected"
