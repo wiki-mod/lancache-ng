@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # What: authoritative CI 2.0 implementation entry point.
-# Why: replaces build-push.yml's per-runner-type duplication.
+# Why: consolidates per-runner-type duplication.
 # From: Issue #1683
 
 # ============================================================
@@ -102,8 +102,8 @@ ci_rm_temp() {
 }
 
 ci_run_checked() {
-    # What: runs a command, naming it if it exits non-zero.
-    # Why: §68 -- never pass a foreign exit code up unexplained.
+    # What: runs command, names it if exit non-zero.
+    # Why: §68 — never pass exit code up unexplained.
     # From: Issue #1683
     local label="$1"; shift
     local rc=0
@@ -114,22 +114,22 @@ ci_run_checked() {
     return "$rc"
 }
 
-# What: repo root, resolved relative to this file's location.
-# Why: needed to source scripts/lib/*.sh from any caller cwd.
+# What: repo root resolved from this file's location.
+# Why: needed to source scripts/lib/*.sh from any cwd.
 # From: Issue #1683
 CI_SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CI_REPO_ROOT="$(cd "$CI_SH_DIR/../.." && pwd)"
 
 ci_validate_full_git_sha() {
-    # What: dies unless $1 is a full 40-hex-char Git SHA.
-    # Why: §15 forbids abbreviated Git SHAs anywhere in CI 2.0.
+    # What: dies unless $1 is full 40-hex Git SHA.
+    # Why: §15 forbids abbreviated SHAs in CI 2.0.
     # From: Issue #1683
     [[ "${1:-}" =~ $CI_FULL_GIT_SHA_REGEX ]] || ci_die "not a full git SHA: ${1:-<empty>}"
 }
 
 ci_validate_full_oci_digest() {
-    # What: dies unless $1 is a full sha256: OCI digest.
-    # Why: §15 forbids abbreviated OCI digests anywhere in CI 2.0.
+    # What: dies unless $1 is full sha256: digest.
+    # Why: §15 forbids abbreviated digests in CI 2.0.
     # From: Issue #1683
     [[ "${1:-}" =~ $CI_FULL_OCI_DIGEST_REGEX ]] || ci_die "not a full OCI digest: ${1:-<empty>}"
 }
@@ -138,8 +138,8 @@ ci_validate_full_oci_digest() {
 # SERVICE INVENTORY
 # ============================================================
 #
-# What: the one authoritative service list + metadata (§7/8).
-# Why: prevents the many-copies drift class §7 exists to stop.
+# What: authoritative service list + metadata (§7/8).
+# Why: prevents §7's many-copies drift class.
 # From: Issue #1683
 
 readonly -a CI_SERVICES=(
@@ -170,7 +170,7 @@ declare -Ag CI_SERVICE_CONTEXT=(
     [utilities]="services/utilities"
 )
 
-# What: external build contexts per service, file-exact (§13).
+# What: external build contexts per service (§13).
 # Why: proxy only COPYs cdn-domains.txt, not dns/.
 # From: Issue #1683
 declare -Ag CI_SERVICE_EXTERNAL_CONTEXT=(
