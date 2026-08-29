@@ -143,10 +143,8 @@
 # that alternative in the pattern below), keeps the match specific to an
 # actual registry response instead of any shell-level "not found" text.
 #
-# What: Added a 4th alternative, `^ERROR:.*: not found$`.
-# Why: buildx's real wording for a missing GHCR tag is `ERROR: <ref>: not
-# found`, not "manifest unknown" -- verified live on two real buildx builds;
-# this misclassification made every touched-service wait hard-fail at ~95s.
+# What: Identifies `^ERROR:.*: not found$` as confirmed absence.
+# Why: buildx reports missing tags as `ERROR: <ref>: not found`.
 # From: Issue #1581
 #
 # Deliberately conservative in the other direction too: text this hasn't
@@ -206,9 +204,8 @@ _sif_inspect_attempt() {
   if [[ -n "$err_text" ]] && _sif_inspect_failure_is_confirmed_absence "$err_text"; then
     return "${GHCR_RETRY_PERMANENT_FAILURE_EXIT_CODE:-99}"
   fi
-  # What: Echoes the real stderr instead of only returning 1 (discarding it).
-  # Why: previously undiagnosable from the job log alone -- the root cause
-  #   needed live reproduction against a real runner to find.
+  # What: Echoes real stderr instead of discarding it.
+  # Why: Needed live runner reproduction to diagnose root cause.
   # From: Issue #1581
   if [[ -n "$err_text" ]]; then
     echo "docker buildx imagetools inspect failed with stderr not recognized as a confirmed absence: $err_text" >&2
