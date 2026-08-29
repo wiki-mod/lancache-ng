@@ -28,8 +28,10 @@
 #   panic: methodref has no signature
 #
 # A genuine Go compiler/toolchain-internal panic, surfaced inside
-# tools/build-tools/Dockerfile's actionlint-builder stage while building
-# docker-buildx/docker-cli/docker-compose from source. That stage
+# tools/build-tools/Dockerfile's go-tools-builder stage (renamed from
+# actionlint-builder in PR #1743 once actionlint moved off this
+# stage) while building docker-buildx/docker-cli/docker-compose from
+# source. That stage
 # deliberately uses `FROM golang:latest` (and the image's final stage
 # `FROM rust:latest`) rather than a pinned digest -- an intentional,
 # documented exception to this project's general image-pinning policy (see
