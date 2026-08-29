@@ -118,7 +118,7 @@ done
 #     From: Issue #1095.
 EXCLUDED_TOOLS=(
   # Opt-in (EXTRA_REQUIRED_TOOLS)
-  # dhclient (issue #1095): moved from smoke_test_image()'s baseline to
+  # dhclient: moved from smoke_test_image()'s baseline to
   # opt-in, since no Alpine apk package provides it; the two real callers
   # (dhcp-kea-lease-flow-simulation.sh, syslog-forwarding-simulation.sh)
   # now set EXTRA_REQUIRED_TOOLS=dhclient themselves.
@@ -151,9 +151,9 @@ fail() {
 
 # extract_required_tools <file>
 # Prints one tool name per line from every `required_tools=( ... )` array in
-# <file> (union, not just the first): the Dockerfile has carried two since
-# Issue #1095 added an Alpine candidate stage above the Debian final stage,
-# and both must stay covered by the smoke test or EXCLUDED_TOOLS below.
+# <file> (union, not just the first): the Dockerfile carries two arrays,
+# an Alpine candidate stage above the Debian final stage, and both must
+# stay covered by the smoke test or EXCLUDED_TOOLS below.
 # Strips line-continuation backslashes (the Dockerfile array uses them; the
 # smoke array does not -- harmless either way) and skips blank/comment lines.
 extract_required_tools() {
