@@ -1416,7 +1416,7 @@ ci_compose_config_clean() {
     fi
     # What: here-string, not printf | grep -q.
     # Why: grep -q's early exit can SIGPIPE the producer under -e.
-    # From: PR #1683
+    # From: Issue #1683
     if grep -Eqi '(^|[[:space:]])(warn|warning|level=warning)' <<<"$output"; then
         printf 'compose warnings treated as errors:\n%s\n' "$output" >&2
         return 1
