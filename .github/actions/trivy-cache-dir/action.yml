@@ -22,7 +22,23 @@ description: >-
 #   safe to scan against with skip-db-update.
 # From: Issue #1095 | Issue #912 | PR #927
 
-inputs: {}
+inputs:
+  shared-dir:
+    description: >-
+      The NFS-backed shared Trivy DB directory to probe first.
+      An input (not a caller `env:` override) on purpose: a composite
+      action's own `${{ env.X }}` expressions do not see the calling
+      workflow/job's `env:` context -- only `inputs` reliably cross that
+      boundary in GitHub Actions. An earlier version of this action tried
+      the env-context approach and would have silently always taken the
+      fallback branch (unverified in this repo's real CI so far; caught
+      before merge).
+    required: false
+    default: /mnt/trivy-db
+  fallback-dir:
+    description: Real local-disk directory to use when shared-dir is not mounted/writable. Never tmpfs/OS-default /tmp.
+    required: false
+    default: /var/tmp/lancache-ng-trivy-cache-fallback
 outputs:
   dir:
     description: The resolved, real, writable cache directory to pass as Trivy's cache-dir.
@@ -38,13 +54,13 @@ runs:
       id: resolve
       shell: bash
       env:
-        # What: overridable via workflow/job env for testing; defaults
-        #   match the real runner-hosting NFS layout.
+        # What: overridable via caller inputs for testing; defaults match
+        #   the real runner-hosting NFS layout.
         # Why: a hardcoded path with no override would make the fallback
         #   path itself untestable without physically unmounting NFS.
         # From: Issue #1095
-        PRIMARY_DIR: ${{ env.TRIVY_SHARED_CACHE_DIR || '/mnt/trivy-db' }}
-        FALLBACK_DIR: ${{ env.TRIVY_FALLBACK_CACHE_DIR || '/var/tmp/lancache-ng-trivy-cache-fallback' }}
+        PRIMARY_DIR: ${{ inputs.shared-dir }}
+        FALLBACK_DIR: ${{ inputs.fallback-dir }}
       run: |
         set -euo pipefail
 

@@ -5825,7 +5825,7 @@ jobs:
           #   from under every other concurrent matrix.service job.
           # From: Issue #1095 | Issue #912
           cleanup-cache: "false"
-          skip-db-update: ${{ steps.trivy-db-fresh.outputs.db-present }}
+          skip-db-update: ${{ steps.trivy-db-fresh.outputs.db-present == 'true' }}
 
       # What: fails when db-status is undetermined, scan ran.
       # Why: an unknown status must never be read as a clean scan.
