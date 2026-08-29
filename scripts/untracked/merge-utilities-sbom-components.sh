@@ -2,11 +2,9 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: filters+merges utilities' SBOM by each service's COPY'd packages.
-# Why: each consumer COPY's only a subset of utilities' apk packages;
-# merging the whole SBOM over-reports what a released image ships.
-# Per-service allowlist below; see docs/release-validation-plan.md.
-# From: Issue #1613 | Issue #1095
+# What: merges utilities' SBOM filtered by COPY'd packages.
+# Why: full SBOM over-reports un-COPY'd packages as shipped.
+# From: Issue #1613 | PR #1703
 set -euo pipefail
 
 usage() {
