@@ -100,11 +100,8 @@ pub fn is_container_not_created(err: &anyhow::Error) -> bool {
 }
 
 // What: appends `suffix` to the fixed base name for `service_name`.
-// Why: docker-socket-proxy.sh and watchdog.sh both already accept
-// LANCACHE_CONTAINER_SUFFIX-suffixed names (issue #1415); this was the one
-// remaining hardcoded consumer, breaking every restart/start/stop call in a
-// suffixed CI run. `suffix` is "" for every real install.
-// From: Issue #1590
+// Why: this was the last hardcoded consumer needing suffix support.
+// From: Issue #1592
 pub fn container_name_for_service(service_name: &str, suffix: &str) -> Result<String> {
     let base = match service_name {
         "proxy" | "lancache-proxy" => "lancache-proxy",
@@ -177,10 +174,9 @@ mod tests {
         assert!(!is_container_not_created(&err));
     }
 
-    // What: an empty suffix (every real install) must be byte-identical to
-    // pre-suffix behavior.
-    // Why: this is the only regression that matters for production installs.
-    // From: Issue #1590
+    // What: an empty suffix must match pre-suffix byte-identically.
+    // Why: this is the only production regression that matters.
+    // From: Issue #1592
     #[test]
     fn container_name_for_service_with_empty_suffix_matches_pre_suffix_behavior() {
         assert_eq!(
@@ -194,9 +190,8 @@ mod tests {
     }
 
     // What: a non-empty suffix is appended to the resolved base name.
-    // Why: this is exactly what a suffixed CI simulation run needs to
-    // restart/start/stop the container it actually created.
-    // From: Issue #1590
+    // Why: CI runs create suffixed container names, UI must use them.
+    // From: Issue #1592
     #[test]
     fn container_name_for_service_appends_a_non_empty_suffix() {
         assert_eq!(
