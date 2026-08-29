@@ -9,6 +9,11 @@ description: >-
   inline copies: build's linux/amd64 leg and build-arm64's linux/arm64 leg.
   The caller keeps its own `if:` gate, which is what decides whether a scan
   outcome is a genuine finding rather than a scanner/DB error.
+
+# What: revokes a scan-failed image from GHCR by exact digest.
+# Why: build and build-arm64 ran byte-identical copies of this.
+# From: PR #1742 | Refs #1683
+
 inputs:
   service:
     description: Service name; the GHCR package is lancache-ng/<service>.

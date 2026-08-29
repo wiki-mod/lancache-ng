@@ -5662,7 +5662,7 @@ jobs:
       - name: Delete GHCR package version pushed by a failed scan
         # What: deletes the just-pushed digest on a genuine finding.
         # Why: only an actual report proves the image unsafe.
-        # From: PR #1742 | Refs #1683
+        # From: Issue #1095 | PR #1735
         if: >-
           ${{
             always() && steps.build.outcome == 'success' &&
@@ -6275,7 +6275,7 @@ jobs:
       - name: Delete GHCR package version pushed by a failed scan
         # What: same cleanup as build's arm64 leg's own scan.
         # Why: only an actual report proves the image unsafe.
-        # From: PR #1742 | Refs #1683
+        # From: Issue #1095 | PR #1735
         if: >-
           ${{
             always() && steps.build.outcome == 'success' &&
