@@ -5,7 +5,7 @@
 
 # What: Rust/Go latest base with ARG placement
 # Why: latest for CI; ARGs precede FROM; stages in sync
-# From: Issue #1570 | Issue #1095 | PR #1571 | PR #1706
+# From: PR #1706
 ARG UTILITIES_IMAGE=ghcr.io/wiki-mod/lancache-ng/utilities:latest
 ARG DOCKER_CLI_VERSION=29.7.2
 ARG DOCKER_COMPOSE_VERSION=5.5.0
@@ -16,7 +16,7 @@ ARG DOCKER_BUILDX_VERSION=0.36.1
 ARG DOCKER_BUILDX_CONTAINERD_VERSION=2.3.4
 # What: pins buildx/compose/cli's vendored grpc-go floor.
 # Why: all three floor at v1.82.1; 1.83.1 stays current.
-# From: Issue #1570 | PR #1571 | Issue #1598
+# From: Issue #1598
 ARG GRPC_GO_VERSION=1.83.1
 # What: pins buildx/compose/cli's vendored x/text floor.
 # Why: all three floor at v0.40.0; 0.41.0 stays current.
@@ -107,7 +107,7 @@ RUN chmod +x /build-go-tools.sh && /build-go-tools.sh
 
 # What: source stage for shared static curl binary
 # Why: portable across glibc/musl; reuses single build
-# From: Issue #1304 | Issue #1556 | Issue #1095 | PR #1706
+# From: Issue #1556
 FROM ${UTILITIES_IMAGE} AS utilities-tools
 
 # What: Alpine equivalent of go-tools-builder above.
@@ -189,7 +189,7 @@ ARG APK_CACHE_BUST=""
 
 # What: installs bash, coreutils, github-cli, sqlite, etc
 # Why: GNU coreutils differ from BusyBox (AG-VAL-034)
-# From: Issue #1095 | Issue #1585
+# From: Issue #1095
 RUN set -euo pipefail; \
     : "apk-cache-bust=${APK_CACHE_BUST}"; \
     apk update; \
@@ -255,7 +255,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # What: COPY --from before heavy RUN serializes build
 # Why: dependency blocks compile; prevents corruption
-# From: Issue #1095 | Issue #1671 | PR #1743
+# From: Issue #1671 | PR #1750
 RUN install -d /usr/local/lib/docker/cli-plugins
 COPY --from=go-tools-builder-alpine /out/docker /usr/local/bin/docker
 COPY --from=go-tools-builder-alpine /out/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
@@ -487,7 +487,7 @@ RUN echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sou
 
 # What: install ccache, sqlite3, git, and other tools
 # Why: ccache for C-deps; sqlite3 for audit; git for CI
-# From: Issue #1570 | Issue #1585 | Issue #1095 | PR #1571
+# From: Issue #1585
 RUN set -euo pipefail; \
       apt-get update; \
       apt-get install -y --no-install-recommends \
@@ -552,7 +552,7 @@ RUN curl --version >/dev/null
 
 # What: COPY --from before heavy RUN serializes build
 # Why: dependency blocks compile; prevents corruption
-# From: Issue #1095 | Issue #1671 | PR #1743
+# From: Issue #1671 | PR #1750
 RUN install -d /usr/local/lib/docker/cli-plugins
 COPY --from=go-tools-builder /out/docker /usr/local/bin/docker
 COPY --from=go-tools-builder /out/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
