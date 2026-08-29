@@ -176,7 +176,7 @@ jobs:
             scripts/lib/build-tools-channel.sh
             scripts/lib/docker-buildx-retry.sh
             release/stack-images.yml
-            **/Dockerfile
+            **/*Dockerfile*
           sparse-checkout-cone-mode: false
 
       # What: resolves the pinned build-tools image via the shared selector.
