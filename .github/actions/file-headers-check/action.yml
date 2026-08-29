@@ -44,7 +44,7 @@ runs:
 
     # What: Repo-wide review-chronology baseline check
     # Why: Push events need repo-wide guard; PR has diff-check
-    # From: PR #1546 | Issue #1095
+    # From: Issue #1095 | PR #1546
     - name: Check for review-chronology comments repo-wide (AG-CODE-003)
       shell: bash
       env:

@@ -69,7 +69,7 @@ runs:
 
     # What: Scan with trivy-scan-retry, not trivy-action
     # Why: Default mirror lacked retry; caused CI failures
-    # From: PR #1542 | Issue #1535
+    # From: Issue #1535 | PR #1542
     - name: Scan image with Trivy
       if: steps.restore.outputs.cache-hit != 'true'
       uses: ./.github/actions/trivy-scan-retry

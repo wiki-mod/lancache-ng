@@ -372,7 +372,7 @@ runs:
 
               # What: check real host token after pump's own flag token.
               # Why: flag exists even when no hosts found; consistent count.
-              # From: PR #613 | Issue #1095
+              # From: Issue #1095 | PR #613
               distcc_pump_published_hosts() {
                 [ "$(distcc_pump_real_host_count "$1")" -gt 0 ]
               }

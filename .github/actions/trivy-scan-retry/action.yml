@@ -4,7 +4,7 @@
 #
 # What: Retries trivy-action up to 4 times with re-auth.
 # Why: trivy only retries on transient DB failures.
-# From: PR #1542 | Issue #1535
+# From: Issue #1535 | PR #1542
 name: Trivy scan with GHCR-first DB mirror, authenticated pull, and retry
 description: >-
   Wraps aquasecurity/trivy-action with a 4-attempt retry and a GHCR-first,
@@ -106,7 +106,7 @@ runs:
   steps:
     # What: Resolves output path, defaulting to runner.temp file.
     # Why: retry discriminator needs stable path across all attempts.
-    # From: PR #1542 | Issue #1535
+    # From: Issue #1535 | PR #1542
     - name: Resolve effective Trivy output path
       id: outpath
       shell: bash
@@ -120,7 +120,7 @@ runs:
 
     # What: Deletes leftover report file from earlier invocation.
     # Why: stale file would misread as current attempt's result.
-    # From: PR #1542 | Issue #1535
+    # From: Issue #1535 | PR #1542
     - name: Clear any stale Trivy report file
       shell: bash
       run: rm -f "${{ steps.outpath.outputs.path }}"
@@ -162,7 +162,7 @@ runs:
 
     # What: Authenticate to GHCR before Trivy DB pull.
     # Why: defense-in-depth for shared egress-IP pool runners.
-    # From: PR #1542 | Issue #1535
+    # From: Issue #1535 | PR #1542
     - name: Log in to GHCR for authenticated Trivy DB pull
       continue-on-error: true
       uses: ./.github/actions/docker-login-action-centralized-version
@@ -173,7 +173,7 @@ runs:
 
     # What: Authenticate to Docker Hub for third DB-source tier.
     # Why: default docker/login-action target is Hub.
-    # From: PR #1543 | Issue #1535
+    # From: Issue #1535 | PR #1543
     - name: Log in to Docker Hub for the third DB-source tier
       if: inputs.dockerhub-username != ''
       continue-on-error: true
@@ -204,7 +204,7 @@ runs:
 
     # What: Check trivy report file presence and size after failure.
     # Why: report means scanning succeeded; missing = DB failure.
-    # From: PR #1542 | Issue #1535
+    # From: Issue #1535 | PR #1542
     - name: Classify attempt 1 failure
       id: classify1
       if: steps.attempt1.outcome == 'failure'
@@ -227,7 +227,7 @@ runs:
 
     # What: Re-authenticate to Docker Hub before retry 1.
     # Why: match GHCR retry gate so edits cannot diverge.
-    # From: PR #1543 | Issue #1535
+    # From: Issue #1535 | PR #1543
     - name: Re-authenticate to Docker Hub before retry 1
       if: steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true' && inputs.dockerhub-username != ''
       continue-on-error: true
@@ -283,7 +283,7 @@ runs:
 
     # What: Re-authenticate to Docker Hub before retry 2.
     # Why: match GHCR retry gate so edits cannot diverge.
-    # From: PR #1543 | Issue #1535
+    # From: Issue #1535 | PR #1543
     - name: Re-authenticate to Docker Hub before retry 2
       if: >-
         steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true' &&
@@ -346,7 +346,7 @@ runs:
 
     # What: Re-authenticate to Docker Hub before retry 3.
     # Why: match GHCR retry gate so edits cannot diverge.
-    # From: PR #1543 | Issue #1535
+    # From: Issue #1535 | PR #1543
     - name: Re-authenticate to Docker Hub before retry 3
       if: >-
         steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true' &&
@@ -394,7 +394,7 @@ runs:
 
     # What: Print report file to job log for table format output.
     # Why: writing to file suppresses stdout; caller handles output.
-    # From: PR #1542 | Issue #1535
+    # From: Issue #1535 | PR #1542
     - name: Show Trivy report
       if: always() && inputs.format == 'table'
       shell: bash
@@ -409,7 +409,7 @@ runs:
 
     # What: Surface pass/fail status across all attempts.
     # Why: non-retryable attempt must count as failure.
-    # From: PR #1542 | Issue #1535
+    # From: Issue #1535 | PR #1542
     - name: Resolve outcome across all attempts
       if: always()
       shell: bash

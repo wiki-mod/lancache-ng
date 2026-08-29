@@ -132,7 +132,7 @@ runs:
 
     # What: scans with trivy-scan-retry, not trivy-action.
     # Why: unauthenticated mirror caused CI failures; needs retry.
-    # From: PR #1542 | Issue #1535
+    # From: Issue #1535 | PR #1542
     - name: Scan exact image digest with Trivy
       id: scan
       uses: ./.github/actions/trivy-scan-retry
