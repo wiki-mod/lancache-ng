@@ -305,6 +305,7 @@ jobs:
         timeout-minutes: 60
         env:
           APT_CACHE_BUST: ${{ vars.APT_CACHE_BUST }}
+          APT_CACHE_PROXY: ${{ vars.APT_CACHE_PROXY }}
           BUILDX_BUILDER: ${{ steps.buildx.outputs.name }}
           BUILDX_CACHE_FROM_DIR: ${{ steps.buildx-cache.outputs.cache-from }}
           BUILDX_CACHE_TO_DIR: ${{ steps.buildx-cache.outputs.cache-to }}
@@ -319,6 +320,7 @@ jobs:
             --platform linux/amd64 \
             --provenance=false \
             --build-arg "APT_CACHE_BUST=$APT_CACHE_BUST" \
+            --build-arg "APT_CACHE_PROXY=$APT_CACHE_PROXY" \
             --build-arg "UTILITIES_IMAGE=$UTILITIES_IMAGE" \
             --cache-from "type=local,src=$BUILDX_CACHE_FROM_DIR" \
             --cache-to "type=local,dest=$BUILDX_CACHE_TO_DIR,mode=max" \
@@ -345,6 +347,7 @@ jobs:
             org.opencontainers.image.base.golang.digest=${{ steps.build-tools-base-digests.outputs.golang }}
           build-args: |
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
+            APT_CACHE_PROXY=${{ vars.APT_CACHE_PROXY }}
             UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
           secret-files: |
             ${{ steps.ccache-distcc-secret.outputs.ccache-redis-file != '' && format('ccache_redis_url={0}', steps.ccache-distcc-secret.outputs.ccache-redis-file) || '' }}
@@ -631,6 +634,7 @@ jobs:
           platforms: linux/arm64
           build-args: |
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
+            APT_CACHE_PROXY=${{ vars.APT_CACHE_PROXY }}
             UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
           provenance: false
           cache-from: type=gha,scope=build-tools-arm64
@@ -654,6 +658,7 @@ jobs:
             org.opencontainers.image.base.golang.digest=${{ steps.build-tools-base-digests.outputs.golang }}
           build-args: |
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
+            APT_CACHE_PROXY=${{ vars.APT_CACHE_PROXY }}
             UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
           outputs: type=image,oci-mediatypes=true
           platforms: linux/arm64

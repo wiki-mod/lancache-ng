@@ -469,11 +469,34 @@ ARG SHELLSPEC_VERSION
 ARG SHELLSPEC_SHA256
 ARG DEBIAN_FRONTEND=noninteractive
 
+# What: LAN apt-caching proxy address (host:port), empty by default.
+# Why: apt package downloads happen over the network, unlike ccache's
+#   filesystem cache -- a LAN-reachable proxy is reachable from inside a
+#   build the same way the public internet already is, no BuildKit
+#   mount-type limitation involved (see tools/runner-host/lancache-ci-
+#   apt-cache-proxy.sh for the proxy side of this and its own real
+#   verification). Empty default matches this file's existing
+#   APT_CACHE_BUST="" idiom -- omitting the build-arg must reproduce
+#   today's direct-internet behavior exactly.
+# From: Issue #1095
+ARG APT_CACHE_PROXY=""
+
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ENV PATH="/usr/local/cargo/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin" \
     CARGO_INSTALL_ROOT="/usr/local" \
     RUST_BACKTRACE=1
+
+# What: probes proxy; writes apt config only if it answers.
+# Why: unreachable/unset proxy must never break the build.
+# From: Issue #1095
+RUN set -euo pipefail; \
+    if [ -n "$APT_CACHE_PROXY" ] && curl -sf --max-time 3 "http://${APT_CACHE_PROXY}/acng-report.html" >/dev/null 2>&1; then \
+      echo "Acquire::http::Proxy \"http://${APT_CACHE_PROXY}\";" > /etc/apt/apt.conf.d/00-lancache-apt-cache-proxy; \
+      echo "[INFO] Using apt-cache proxy at ${APT_CACHE_PROXY}." >&2; \
+    else \
+      echo "[INFO] apt-cache proxy unset or unreachable -- using direct internet access (unchanged from before this ARG existed)." >&2; \
+    fi
 
 # What: add trixie-backports source and apt pin; upgrade
 # Why: get all patches; pin uses a= suite not codename

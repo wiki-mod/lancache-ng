@@ -209,3 +209,41 @@ against the live file). `check` and `apply` both also run dockerd's own
 written or restarted. The actual `restart` step has deliberately NOT been
 run against any real runner host — that remains a maintainer-scheduled
 action for an agreed quiet window, one host at a time**, per issue #1255.
+
+## `lancache-ci-apt-cache-proxy.sh` (LAN apt-caching proxy, Issue #1095 item 2)
+
+Stands up `apt-cacher-ng`, backed by the NFS export at
+`192.168.1.10:/srv/runner-hosting/apt-cache` (real local-disk fallback,
+never tmpfs, if that mount is unavailable). See
+`docs/ci-2.0-architecture.md` §40.1 for the design rationale and why this
+covers only the apt half of Issue #1095's caching task, not ccache.
+
+Same safe-by-default / maintainer-scheduled-disruptive-step split as
+`lancache-ci-docker-daemon-config.sh` above:
+
+```sh
+# 1. Read-only: verifies the NFS mount + fallback dir + pinned image.
+#    Starts no container.
+bash tools/runner-host/lancache-ci-apt-cache-proxy.sh check
+
+# 2. Runs the proxy in --rm mode, does a real smoke request and a real
+#    apt-get update through it, then removes the container. No
+#    persistent state change to the host afterward.
+bash tools/runner-host/lancache-ci-apt-cache-proxy.sh test
+
+# 3. THE DISRUPTIVE STEP -- starts a --restart=always container, a
+#    permanent addition to this host's running services. Requires:
+CONFIRM_APT_CACHE_PROXY_INSTALL=yes bash tools/runner-host/lancache-ci-apt-cache-proxy.sh install
+```
+
+**Status as of 2026-08-29: `check` and `test` have both been run for real
+against the actual runner host `192.168.1.80`** (`shellcheck --severity=warning`
+clean; a real smoke-test fetch confirmed live via `apt-cacher-ng`'s own
+access log and the NFS-backed cache directory actually gaining the
+fetched files; a full end-to-end build using `tools/build-tools/Dockerfile`'s
+own new `APT_CACHE_PROXY` build-arg confirmed the proxy gets used when
+reachable and the build still succeeds unchanged when it is not). **`install`
+has deliberately NOT been run against any real runner host** — per this
+directory's own convention, starting a permanent service is a
+maintainer-scheduled action, not something this script performs as a
+side effect of anything else.

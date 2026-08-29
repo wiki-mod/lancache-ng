@@ -1375,6 +1375,25 @@ Internet
 
 Possible contents: APT, APK, Cargo, Go, npm, pip, Maven, Gradle, OCI pulls.
 
+### 40.1 APT half (implemented precedent)
+
+A concrete instance of this section's shape now exists for APT
+specifically: `apt-cacher-ng`, backed by the NFS-shared
+`/srv/runner-hosting/apt-cache` (real local-disk fallback, never tmpfs,
+resolved via the same write+subdirectory probe as §41.1's Trivy example),
+reachable over the LAN the same way the public internet already is from
+inside a build -- no BuildKit mount-type involved, unlike a filesystem
+cache (see §41.1 and the ccache discussion it links). The build side is a
+single, empty-by-default build-arg plus a short reachability probe: unset
+or unreachable falls through to direct internet, identical to behavior
+before the arg existed. `tools/runner-host/lancache-ci-apt-cache-proxy.sh`
+is the proxy side, following the same safe-by-default /
+maintainer-scheduled-install split as this directory's daemon-config
+script. ccache is deliberately not extended the same way here -- it is a
+filesystem cache written from inside a BuildKit build stage, which this
+pattern cannot reach; see §41.1's own text for why that is a materially
+different problem.
+
 ## 41. No universal NFS cache
 
 Not:

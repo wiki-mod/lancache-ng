@@ -5746,6 +5746,7 @@ jobs:
             UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
+            APT_CACHE_PROXY=${{ vars.APT_CACHE_PROXY }}
           network: ${{ env.RUST_BUILDX_NETWORK }}
           allow: ${{ env.RUST_BUILDX_NETWORK == 'host' && 'network.host' || '' }}
           push: ${{ github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) }}
@@ -6487,6 +6488,7 @@ jobs:
             UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
+            APT_CACHE_PROXY=${{ vars.APT_CACHE_PROXY }}
           push: ${{ github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) }}
           tags: ${{ steps.pr-tag.outputs.image || steps.meta.outputs.tags }}
           labels: |
