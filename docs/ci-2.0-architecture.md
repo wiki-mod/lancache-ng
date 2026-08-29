@@ -1237,6 +1237,40 @@ rescan exact digest
 
 No containers are rebuilt because of this.
 
+### 31.1 Source-build exemption re-verification
+
+Distinct from rescanning published product digests above: `build-tools`
+carries a small number of third-party tools built from source under
+`AG-KD-003`'s exemption test (currently the Docker CLI, `docker-buildx`,
+`docker-compose`), each exempted only because their current official
+release fails a real, currently-reachable Trivy finding. That fact
+decays on its own schedule -- an upstream release can go clean at any
+time, independent of anything in this repository changing.
+
+```text
+scheduled exemption re-check
+        |
+        v
+for each AG-KD-003-exempted tool
+        |
+        v
+scan current official release binary
+        |
+        v
+still fails the exemption test? -> no action, exemption stands
+now passes?                      -> flag for maintainer review
+                                     (do not auto-drop the exemption)
+```
+
+This runs on its own schedule, independent of both normal commit CI and
+the security-revalidation cadence in §31 above (that one rescans *this
+project's own published images* for newly-published CVEs; this one
+rescans *upstream's* release artifacts for a newly-*absent* CVE). It
+only ever recommends dropping an exemption -- flipping `build-tools`
+back to a prebuilt-binary install for a tool is a deliberate, reviewed
+change (Dockerfile edit + `AGENTS.md` update), never an automated
+side effect of a scheduled scan.
+
 ## 32. Caching baseline rule
 
 ```text
