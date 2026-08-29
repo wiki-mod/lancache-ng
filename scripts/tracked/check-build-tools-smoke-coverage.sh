@@ -107,19 +107,15 @@ done
 #     smoke_tools and never reaches this list.
 #     From: Issue #887
 #
-#     gh (issue #1095, PR #1694) went through this exact same chicken-and-egg
-#     window: a real consumer (scripts/untracked/gc-pr-staging-images.sh's
-#     main()) hard-requires it, but the published :latest/:nightly
-#     build-tools image predated PR #1694 for a while (last successful
-#     build-tools.yml publish before PR #1694 was 2026-08-16), so gating this
-#     strict smoke-test path on gh would have failed every unrelated PR until
-#     a republish landed. A build-tools.yml run has since rebuilt and
-#     republished the image with gh (confirmed live, Issue #1095's 2026-08-29
-#     GC-workflow root-cause pass: the currently-tagged nightly digest passes
-#     gc-pr-staging-images.sh's own `command -v gh` tool check), so it has
-#     been added to smoke_test_image()'s own required_tools, exactly like
-#     ccache above -- no longer listed here, since the direction-1 loop below
-#     already finds it covered by smoke_tools and never reaches this list.
+#     gh went through this exact same chicken-and-egg window: a real
+#     consumer (gc-pr-staging-images.sh) hard-requires it, but the
+#     published build-tools image once predated its Dockerfile addition.
+#     STATUS: as of 2026-08-29, the published nightly digest carries gh;
+#     it has been added to smoke_test_image()'s own required_tools, same
+#     as ccache above -- no longer listed here, since the direction-1 loop
+#     below already finds it covered by smoke_tools and never reaches
+#     this list.
+#     From: Issue #1095.
 EXCLUDED_TOOLS=(
   # Opt-in (EXTRA_REQUIRED_TOOLS)
   # dhclient (issue #1095): moved from smoke_test_image()'s baseline to

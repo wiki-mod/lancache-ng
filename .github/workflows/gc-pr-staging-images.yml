@@ -129,19 +129,6 @@ jobs:
           # Why: that PAT is scoped for package deletion, not repo reads;
           # `--silent` discards the file body, only the HTTP status decides.
           # From: Issue #1095 | PR #1528
-          #
-          # What: does NOT enumerate every Dockerfile here even though the
-          # checkout step below now sparse-checks them out too.
-          # Why: this list is a small, fixed, hand-maintained set; the
-          # Dockerfile set is open-ended and already discovered at run time
-          # by gc-sha-retention-audit.sh's own `git ls-files -- '*Dockerfile*'`
-          # (Issue #1613) against the checked-out tree. Duplicating that
-          # discovery here via a recursive Contents-API tree walk just to
-          # preflight-check it would be a second, divergence-prone
-          # implementation of the same enumeration; the checkout step's
-          # `**/Dockerfile` sparse-checkout pattern is the actual fix for the
-          # missing-Dockerfile failure mode, not this preflight.
-          # From: Issue #1095 | Issue #1613.
           required_paths=(
             "scripts/untracked/gc-pr-staging-images.sh"
             "scripts/untracked/gc-sha-retention-audit.sh"
@@ -168,23 +155,9 @@ jobs:
             echo "scripts-present=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # What: sparse-checks out the collector, shared retention code, the
-      # manifest, and every tracked Dockerfile.
-      # Why: fetch-depth 0 supplies all producer-branch history needed to rank
-      # current_dev/master/release/v* roots while the narrow tree stays
-      # minimal. The `**/Dockerfile` entry is required, not decorative:
-      # gc-sha-retention-audit.sh's live_dockerfile_from_digests discovery
-      # (Issue #1613) runs `git ls-files -- '*Dockerfile*'` and `cat`s every
-      # match to protect live FROM-line digests from deletion -- under
-      # non-cone sparse-checkout, `git ls-files` still lists every tracked
-      # match from the index regardless of what got populated to disk, so
-      # omitting this pattern silently produced `cat: No such file or
-      # directory` for every Dockerfile the audit tried to read, aborting it
-      # (set -e) and failing retention planning for every service on every
-      # run. Verified empirically (isolated clone, same sparse patterns):
-      # `**/Dockerfile` populates all 12 currently-tracked Dockerfiles,
-      # matching `git ls-files -- '*Dockerfile*'` exactly.
-      # From: Issue #1095 | Issue #1613.
+      # What: sparse-checks out collector code and all Dockerfiles.
+      # Why: audit script cats every tracked Dockerfile by path.
+      # From: Issue #1095.
       - name: Checkout GHCR collector and retention planner
         if: steps.creds.outputs.have-pat == 'true' && steps.script-check.outputs.scripts-present == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
