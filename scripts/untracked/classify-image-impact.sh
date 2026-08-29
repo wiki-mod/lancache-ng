@@ -92,9 +92,9 @@ touches_docs() {
     return 1
 }
 
-# What: touches_action() also exempts a comment/blank-only action diff.
-# Why: applies G14's own repo-wide comment-only exemption per action too.
-# From: Issue #1095 (G14 | G15)
+# What: touches_action() exempts comment/blank-only action diffs.
+# Why: exempts G14's repo-wide comment-only exemption per action.
+# From: Issue #1095
 touches_action() {
     touches_prefix ".github/actions/$1/" || return 1
     [[ -n "${merge_base:-}" && -n "${head_ref:-}" ]] || return 0
@@ -106,10 +106,9 @@ touches_action() {
     return 1
 }
 
-# What: actions whose change must still force workflow=true for every service.
-# Why: consumed unconditionally by the shared build/merge-manifests/promote
-#   pipeline, or too infrequent to be worth narrowing further.
-# From: Issue #1095 (G15)
+# What: actions forcing workflow=true for all services globally.
+# Why: consumed globally; too infrequent to narrow further.
+# From: Issue #1095
 globally_triggering_actions=(
     ghcr-build-push-retry
     trivy-scan-exact-digest
@@ -120,10 +119,9 @@ globally_triggering_actions=(
     trivy-scan-retry
 )
 
-# What: every .github/actions/ directory this script currently categorizes.
-# Why: touches_unmapped_action() fails closed for anything not listed here,
-#   so a brand-new action defaults to a full rebuild until categorized.
-# From: Issue #1095 (G15)
+# What: list all recognized .github/actions/ directories.
+# Why: unmapped actions fail closed; defaults to full rebuild.
+# From: Issue #1095
 known_actions=(
     "${globally_triggering_actions[@]}"
     rust-acceleration-preflight
@@ -157,10 +155,9 @@ touches_global_action() {
     return 1
 }
 
-# What: true when a changed .github/actions/<name>/ path is not in known_actions.
-# Why: fails closed for an uncategorized action; an under-triggered stale
-#   image is worse than an unnecessary rebuild.
-# From: Issue #1095 (G15)
+# What: true for changed actions not in known_actions list.
+# Why: unmapped actions fail closed; stale worse than rebuild.
+# From: Issue #1095
 touches_unmapped_action() {
     [[ "$force_all" == "true" ]] && return 1
     local path action_name
@@ -176,14 +173,9 @@ touches_unmapped_action() {
     return 1
 }
 
-# What: prints $1 with every blank line and '#'-prefixed comment line
-#   removed, except inside a YAML block-scalar body (a `key: |`/`key: >`
-#   line and its more-indented or blank continuation lines), which is
-#   printed byte-for-byte unchanged.
-# Why: a leading '#' inside a block-scalar body is literal scalar data (e.g.
-#   a heredoc body byte), not a parsed YAML/shell comment, so it must never
-#   be stripped the way a real comment is.
-# From: Issue #1095 (G14) | PR #1609 review
+# What: removes comments/blanks except in YAML block-scalar bodies.
+# Why: literal '#' inside block-scalars is data, not a comment.
+# From: Issue #1095 | PR #1609
 _cii_normalize_workflow_comments() {
     awk '
         BEGIN { in_block = 0; block_indent = -1 }
@@ -210,9 +202,9 @@ _cii_normalize_workflow_comments() {
     ' "$1"
 }
 
-# What: true when $1's diff is comment/blank-only (base_ref/head_ref form).
-# Why: shared by workflow_diff_is_comment_only and touches_action alike.
-# From: Issue #1095 (G14) | PR #1609 review
+# What: returns true when diff is comment/blank-only (git form).
+# Why: shared by workflow_diff_is_comment_only and touches_action.
+# From: Issue #1095 | PR #1609
 _cii_path_is_comment_only() {
     local p="$1" status added deleted base_hash head_hash
     status="$(git diff --no-color --name-status "$merge_base" "$head_ref" -- "$p" | cut -f1)"
@@ -220,8 +212,8 @@ _cii_path_is_comment_only() {
 
     read -r added deleted _ < <(git diff --no-color --numstat "$merge_base" "$head_ref" -- "$p")
     # What: binary/mode-only numstat shapes must fail closed, not pass.
-    # Why: a status=M path with no real +/- delta is unexamined, not proven.
-    # From: Issue #1095 (G14) | PR #1609 review
+    # Why: status=M paths without +/- delta are unexamined, not proven.
+    # From: Issue #1095 | PR #1609
     [[ "$added" =~ ^[0-9]+$ && "$deleted" =~ ^[0-9]+$ ]] || return 1
     (( added > 0 || deleted > 0 )) || return 1
 
@@ -231,8 +223,8 @@ _cii_path_is_comment_only() {
 }
 
 # What: true when every touched build-workflow path is comment-only.
-# Why: repo-wide gate for touches_build_workflow's own workflow-wide flag.
-# From: Issue #1095 (G14) | PR #1609 review
+# Why: gate for touches_build_workflow's workflow-wide flag.
+# From: Issue #1095 | PR #1609
 workflow_diff_is_comment_only() {
     [[ -n "${merge_base:-}" && -n "${head_ref:-}" ]] || return 1
 
@@ -254,9 +246,9 @@ workflow_diff_is_comment_only() {
     return 0
 }
 
-# What: jobs (+ preamble) that determine what build/build-arm64 publish.
-# Why: named explicitly so a rename/removal fails closed, not silently.
-# From: Issue #1095 (G14)
+# What: jobs (+ preamble) determining build/build-arm64 publication.
+# Why: named explicitly so rename/removal fails closed.
+# From: Issue #1095
 build_push_build_affecting_jobs=(
     detect-changes
     determine-push-reuse-scope
@@ -265,9 +257,9 @@ build_push_build_affecting_jobs=(
     build-arm64
 )
 
-# What: prints job $2's body from build-push.yml at ref $1; exit 1 if absent.
-# Why: lets a missing job be told apart from a legitimately empty body.
-# From: Issue #1095 (G14)
+# What: extracts job body from build-push.yml or exits.
+# Why: distinguishes missing jobs from legitimately empty bodies.
+# From: Issue #1095
 _cii_extract_build_push_job() {
     local ref="$1" job="$2"
     git show "${ref}:.github/workflows/build-push.yml" 2>/dev/null | awk -v job="$job" '
@@ -280,16 +272,16 @@ _cii_extract_build_push_job() {
     '
 }
 
-# What: prints ref $1's build-push.yml content before its `jobs:` line.
-# Why: on:/env:/etc. apply to every job, so treat it as build-affecting too.
-# From: Issue #1095 (G14)
+# What: extracts build-push.yml preamble up to the jobs: line.
+# Why: on:/env:/etc apply globally to all jobs; build-affecting.
+# From: Issue #1095
 _cii_extract_build_push_preamble() {
     git show "${1}:.github/workflows/build-push.yml" 2>/dev/null | sed -n '1,/^jobs:$/p' | sed '$d'  # pipefail-safe: no q/Q, reads to EOF (AG-VAL-032)
 }
 
-# What: prints ref $1's preamble + each build-affecting job, fixed order.
-# Why: content comparison, not diff-hunk line math -- immune to line shift.
-# From: Issue #1095 (G14)
+# What: extracts preamble and build-affecting jobs in fixed order.
+# Why: content comparison immune to line-shift; not diff-hunk math.
+# From: Issue #1095
 _cii_extract_build_push_build_regions() {
     local ref="$1" job out
     out="$(_cii_extract_build_push_preamble "$ref")"
@@ -300,9 +292,9 @@ _cii_extract_build_push_build_regions() {
     done
 }
 
-# What: true when build-push.yml's build-affecting regions actually changed.
-# Why: shared building block for touches_build_workflow_reuse_scope below.
-# From: Issue #1095 (G14)
+# What: returns true when build-push.yml regions changed content.
+# Why: shared by touches_build_workflow_reuse_scope for narrowing.
+# From: Issue #1095
 touches_build_push_build_path() {
     touches_exact ".github/workflows/build-push.yml" || return 1
     # Fail closed: no diff-ref context (e.g. a caller supplying only
@@ -320,9 +312,8 @@ touches_build_push_build_path() {
 
 touches_build_workflow() {
     # What: workflow-wide impact for global build-workflow paths only.
-    # Why: narrows the prior blanket .github/actions/* rule to only paths
-    #   consumed globally; per-service actions set their own output instead.
-    # From: Issue #1095 (G14 | G15) | PR #1609 review
+    # Why: narrowed scope; per-service actions set their own outputs.
+    # From: Issue #1095 | PR #1609
     local touched=false
     if touches_exact ".github/workflows/build-push.yml" \
         || touches_exact ".github/workflows/build-tools.yml" \
@@ -335,9 +326,9 @@ touches_build_workflow() {
     return 0
 }
 
-# What: touches_build_workflow, but build-push.yml is job-region-scoped.
-# Why: G14 fix, scoped to push-reuse.sh only; 13 other consumers untouched.
-# From: Issue #1095 (G14)
+# What: touches_build_workflow but build-push.yml is region-scoped.
+# Why: narrower scope for push-reuse.sh; other consumers untouched.
+# From: Issue #1095
 touches_build_workflow_reuse_scope() {
     local touched=false
     if touches_build_push_build_path \
@@ -352,11 +343,9 @@ touches_build_workflow_reuse_scope() {
 }
 
 touches_codeql_rust() {
-    # What: true for any path CodeQL's Rust extraction actually depends on.
-    # Why: codeql.yml's own Rust job uses configure-rust-sccache and
-    #   cargo-with-sccache-fallback directly, so the narrower
-    #   touches_build_workflow() above must not silently drop them here.
-    # From: Issue #1095 (G15)
+    # What: returns true for paths CodeQL's Rust extraction depends on.
+    # Why: codeql.yml directly uses rust actions; don't silently drop.
+    # From: Issue #1095
     touches_prefix "services/dns/nats-subscriber/" \
         || touches_prefix "services/ui/" \
         || touches_prefix "services/watchdog/" \
@@ -416,10 +405,9 @@ output_bool() {
     fi
 }
 
-# What: per-service extension for each action relocated off "workflow".
-# Why: rust-acceleration-preflight builds dns/ui/watchdog; configure-rust-sccache
-#   and cargo-with-sccache-fallback run dns/ui/watchdog's quality/test/audit jobs.
-# From: Issue #1095 (G15)
+# What: per-service actions extension off the shared workflow rule.
+# Why: run per-service tests; track per service, not globally.
+# From: Issue #1095
 touches_dns_rust() {
     touches_prefix "services/dns/nats-subscriber/" \
         || touches_action "configure-rust-sccache" \
@@ -473,10 +461,9 @@ else
     printf 'proxy=false\n'
 fi
 
-# What: build_tools also true when build-tools-candidate-smoke changed.
-# Why: that action validates a build-tools candidate image; a real change to
-#   it needs the same re-verification a tools/build-tools/ source change gets.
-# From: Issue #1095 (G15)
+# What: build_tools true when build-tools-candidate-smoke changed.
+# Why: action validates candidates; changes need re-verification.
+# From: Issue #1095
 touches_build_tools() {
     touches_prefix "tools/build-tools/" \
         || touches_action "build-tools-candidate-smoke"
@@ -484,9 +471,8 @@ touches_build_tools() {
 output_bool "build_tools" touches_build_tools
 
 # What: true when a full-setup-validate-only action changed.
-# Why: these actions have no build-image consumer -- narrowing workflow away
-#   from them must not stop full-setup-validate from re-running for them.
-# From: Issue #1095 (G15)
+# Why: no build-image consumer; must not skip validation re-run.
+# From: Issue #1095
 touches_validation_infra() {
     touches_action "derive-validation-network" \
         || touches_action "reserve-validation-subnet-stack" \
