@@ -866,6 +866,82 @@ setup() {
 }
 
 # ============================================================
+# REPO CONTRACT VALIDATION
+# ============================================================
+
+# What: validate-prebuilt-install passes on this repo's own tree.
+# Why: this tree is the check's real fixture, not a mock.
+# From: PR #1742 | Refs #1683
+@test "repo contracts: ci.sh validate-prebuilt-install holds on this tree" {
+    run bash "$repo_root/scripts/ci/ci.sh" validate-prebuilt-install
+    [ "$status" -eq 0 ]
+}
+
+# What: validate-nats-socket-proxy passes on this repo's own tree.
+# Why: this tree is the check's real fixture, not a mock.
+# From: PR #1742 | Refs #1683
+@test "repo contracts: ci.sh validate-nats-socket-proxy holds on this tree" {
+    run bash "$repo_root/scripts/ci/ci.sh" validate-nats-socket-proxy
+    [ "$status" -eq 0 ]
+}
+
+# What: validate-dhcp-proxy-env passes on this repo's own tree.
+# Why: this tree is the check's real fixture, not a mock.
+# From: PR #1742 | Refs #1683
+@test "repo contracts: ci.sh validate-dhcp-proxy-env holds on this tree" {
+    run bash "$repo_root/scripts/ci/ci.sh" validate-dhcp-proxy-env
+    [ "$status" -eq 0 ]
+}
+
+# What: validate-setup-keys-kea passes on this repo's own tree.
+# Why: this tree is the check's real fixture, not a mock.
+# From: PR #1742 | Refs #1683
+@test "repo contracts: ci.sh validate-setup-keys-kea holds on this tree" {
+    run bash "$repo_root/scripts/ci/ci.sh" validate-setup-keys-kea
+    [ "$status" -eq 0 ]
+}
+
+# What: validate-setup-update-migration passes on this repo's own tree.
+# Why: this tree is the check's real fixture, not a mock.
+# From: PR #1742 | Refs #1683
+@test "repo contracts: ci.sh validate-setup-update-migration holds on this tree" {
+    run bash "$repo_root/scripts/ci/ci.sh" validate-setup-update-migration
+    [ "$status" -eq 0 ]
+}
+
+# What: validate-accel-policy passes on this repo's own tree.
+# Why: this tree is the check's real fixture, not a mock.
+# From: PR #1742 | Refs #1683
+@test "repo contracts: ci.sh validate-accel-policy holds on this tree" {
+    run bash "$repo_root/scripts/ci/ci.sh" validate-accel-policy
+    [ "$status" -eq 0 ]
+}
+
+# What: validate-rust-preflight-chain passes on this repo's own tree.
+# Why: this tree is the check's real fixture, not a mock.
+# From: PR #1742 | Refs #1683
+@test "repo contracts: ci.sh validate-rust-preflight-chain holds on this tree" {
+    run bash "$repo_root/scripts/ci/ci.sh" validate-rust-preflight-chain
+    [ "$status" -eq 0 ]
+}
+
+# What: validate-promote-tags-dockerfiles passes on this repo's own tree.
+# Why: this tree is the check's real fixture, not a mock.
+# From: PR #1742 | Refs #1683
+@test "repo contracts: ci.sh validate-promote-tags-dockerfiles holds on this tree" {
+    run bash "$repo_root/scripts/ci/ci.sh" validate-promote-tags-dockerfiles
+    [ "$status" -eq 0 ]
+}
+
+# What: validate-image-channel-resolution passes on this repo's own tree.
+# Why: this tree is the check's real fixture, not a mock.
+# From: PR #1742 | Refs #1683
+@test "repo contracts: ci.sh validate-image-channel-resolution holds on this tree" {
+    run bash "$repo_root/scripts/ci/ci.sh" validate-image-channel-resolution
+    [ "$status" -eq 0 ]
+}
+
+# ============================================================
 # SERVICE INVENTORY
 # ============================================================
 
