@@ -200,11 +200,9 @@ const RESTART_UI_PAGE: &str = r##"<!DOCTYPE html>
   <p>Diese Seite leitet automatisch weiter, sobald die Admin-UI wieder erreichbar ist.</p>
 </div>
 <script>
-// What: only treats a 200 as recovery once a prior poll has already
-//   observed the instance down (non-ok or unreachable).
-// Why: a 200 alone does not prove the restart happened -- the old process
-//   may still answer /health if the restart was rejected or hasn't stopped it.
-// From: Codex review on PR #1610
+// What: treat 200 as recovery only after instance down
+// Why: 200 doesn't prove restart; old process may still respond
+// From: PR #1610
 var sawDown = false;
 function pollHealth() {
   fetch('/health', { cache: 'no-store' }).then(function (res) {
@@ -219,10 +217,8 @@ setTimeout(pollHealth, 1500);
 </html>
 "##;
 
-// What: validates the request, hands back the bounded-handoff page, then
-//   restarts `ui` from a detached background task.
-// Why: this process is about to be killed by its own restart, so the restart
-//   must run out-of-line, or the response could never be sent at all.
+// What: validate, send bounded-handoff page, restart ui async
+// Why: process dies on restart; restart must run out-of-line
 // From: Issue #1486
 pub async fn restart_ui_service(
     State(state): State<Arc<AppState>>,
@@ -255,8 +251,7 @@ pub struct SetServiceDesiredStateForm {
 }
 
 // What: dock start/stop -- only writes desired-state.json
-// Why: watchdog alone starts/stops dhcp/ntp, not this route
-// Why: base.html calls this via fetch(), not a submitted form
+// Why: watchdog handles start/stop; base.html calls via fetch().
 // From: Issue #1437
 // Mirrors is_valid_ui_channel's shape below: only these two service
 // concepts are ever reconciled (see watchdog's own reconcile_desired_state).
@@ -294,8 +289,7 @@ pub async fn set_service_desired_state(
 }
 
 // What: read-modify-write one key in the shared file
-// Why: must not clobber the other service's existing override
-// Why: a malformed prior file must not block a new write
+// Why: must not clobber other override; bad file must not block.
 // From: Issue #1437
 fn write_desired_state(path: &str, service: &str, state: &str) -> anyhow::Result<()> {
     let mut current: serde_json::Map<String, serde_json::Value> = fs::read_to_string(path)
