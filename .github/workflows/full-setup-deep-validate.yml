@@ -142,7 +142,7 @@ jobs:
     steps:
       # What: Resyncs HEAD, clears skip-worktree bits.
       # Why: Prior checkout's leftover blocks ref-switch on reused host.
-      # From: Issue #1095 (G15) | PR #1640
+      # From: Issue #1095 | PR #1640
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -euo pipefail
@@ -233,7 +233,7 @@ jobs:
       #
       # What: Resyncs HEAD, clears skip-worktree bits.
       # Why: Prior checkout's leftover blocks ref-switch on reused host.
-      # From: Issue #1095 (G15) | PR #1640
+      # From: Issue #1095 | PR #1640
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -euo pipefail
@@ -459,7 +459,7 @@ jobs:
     steps:
       # What: Resyncs HEAD, clears skip-worktree bits.
       # Why: Prior checkout's leftover blocks ref-switch on reused host.
-      # From: Issue #1095 (G15) | PR #1640
+      # From: Issue #1095 | PR #1640
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -euo pipefail
@@ -561,7 +561,7 @@ jobs:
     steps:
       # What: Resyncs HEAD, clears skip-worktree bits.
       # Why: Prior checkout's leftover blocks ref-switch on reused host.
-      # From: Issue #1095 (G15) | PR #1640
+      # From: Issue #1095 | PR #1640
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -euo pipefail
@@ -652,7 +652,7 @@ jobs:
     steps:
       # What: Resyncs HEAD, clears skip-worktree bits.
       # Why: Prior checkout's leftover blocks ref-switch on reused host.
-      # From: Issue #1095 (G15) | PR #1640
+      # From: Issue #1095 | PR #1640
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -euo pipefail

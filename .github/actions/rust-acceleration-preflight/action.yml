@@ -494,7 +494,7 @@ runs:
                 CCACHE_DIR="$ccache_dir_cold" ccache --print-stats > "$cold_stats"
                 # What: cache hit also proves redis remote storage works.
                 # Why: stable cross-run key allows hit on warm probe run.
-                # From: Issue #1095 (G15)
+                # From: Issue #1095
                 if ! grep -qE '^(remote_storage_write|direct_cache_hit)[[:space:]]+[1-9]' "$cold_stats"; then
                   echo "[ERROR] ccache neither wrote to nor hit Redis remote storage on the cold compile." >&2
                   cat "$cold_stats" >&2

@@ -140,7 +140,7 @@ runs:
     - name: Check github.repository case-safety in GHCR paths
       # What: Checks repository case for GHCR lowercase requirement.
       # Why: github.repository is not guaranteed lowercase for GHCR.
-      # From: Issue #1095 (G1) | PR #1597
+      # From: Issue #1095 | PR #1597
       shell: bash
       run: |
         set -euo pipefail
