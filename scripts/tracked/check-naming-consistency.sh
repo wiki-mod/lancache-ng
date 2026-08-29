@@ -131,11 +131,8 @@ EOF_ALLOWLIST
 # UI would send a request the proxy silently denies (fails closed, but is
 # still a drift bug worth catching before it ships).
 #
-# What: matches a match-arm base literal (`=> "lancache-x"`), not a whole
-# `Ok("lancache-x")` return.
-# Why: container_name_for_service was changed to append a runtime suffix
-# (`Ok(format!("{base}{suffix}"))` once, outside the match), so no arm
-# returns a bare `Ok(...)` anymore -- only the base-name literal itself.
+# What: Extracts base literal from match arm, not Ok() wrapper
+# Why: Match arms never return bare Ok(); suffix applied outside
 # From: Issue #1592
 docker_client_names=$(grep -oE '=> "lancache-[a-z0-9-]+"' "$DOCKER_CLIENT_RS" \
   | grep -oE 'lancache-[a-z0-9-]+' \
@@ -173,11 +170,8 @@ $watchdog_names
 EOF_WATCHDOG
 
 # --- watchdog/syslog must never gain a lifecycle-action grant -----
-# What: watchdog stays fully absent from the allowlist; syslog keeps
-#   inspect-only access; the verb-acl set below is derived from the file
-#   itself (any acl regex ending in a start/stop/restart/wait segment).
-# Why: a hardcoded name list would silently miss a differently-named future
-#   verb-granting acl, letting a watchdog/syslog regression pass unnoticed.
+# What: watchdog absent from allowlist; syslog inspect-only
+# Why: Hardcoded list misses future lifecycle-action drift
 # From: Issue #1486
 watchdog_acl_lines=$(grep -Ei '^[[:space:]]*(acl|http-request)[[:space:]].*lancache-watchdog' "$SOCKET_PROXY_SCRIPT" || true)
 if grep -q . <<<"$watchdog_acl_lines"; then
