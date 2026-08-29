@@ -6,10 +6,8 @@
 # Intentional ARG default (overridable at build time via --build-arg).
 # Actual digest pinning for release builds is tracked in issue #508.
 ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
-# What: declared here (meta-arg, before any FROM) so it is usable by the
-#   utilities-tools stage's own FROM further down -- an ARG declared after
-#   the first FROM is not visible to a later FROM's image reference at all.
-# Why: same override contract as BUILD_TOOLS_IMAGE above (AG-KD-010).
+# What: declared pre-FROM for use in later FROM lines.
+# Why: same override contract as BUILD_TOOLS_IMAGE (AG-KD-010).
 # From: Issue #1095 | AG-KD-010
 ARG UTILITIES_IMAGE=ghcr.io/wiki-mod/lancache-ng/utilities:latest
 FROM ${BUILD_TOOLS_IMAGE} AS subscriber-builder
@@ -18,9 +16,8 @@ FROM ${BUILD_TOOLS_IMAGE} AS subscriber-builder
 # distcc, distcc-pump, and the supporting Debian packages. Keep this stage
 # lean and fail closed if the contract is not met.
 #
-# What: detects host arch for the musl cross-compile target.
-# Why: `uname -m` needs no extra package (unlike Debian-only
-# `dpkg`); mirrors build-tools/Dockerfile's arch pattern.
+# What: detects host arch for musl cross-compile target.
+# Why: `uname -m` needs no extra package, unlike dpkg.
 # From: Issue #1095
 RUN set -eu; \
     for tool in cargo rustc rustup rustfmt clippy-driver sccache distcc distcc-pump python3 pkg-config; do \
@@ -61,10 +58,8 @@ RUN set -eu; \
     chmod +x /usr/local/bin/lancache-rustc-wrapper
 
 ARG CARGO_BUILD_JOBS=
-# What: redeclares BUILD_TOOLS_IMAGE (already set pre-FROM above) so it is visible as a
-# shell variable inside this stage's RUN block, not just usable in the FROM line itself.
-# Why: configure_ccache() below folds this value into the ccache remote-storage cache key
-# (Docker ARG scoping requires a bare post-FROM redeclaration for that).
+# What: redeclares BUILD_TOOLS_IMAGE for RUN stage visibility.
+# Why: configure_ccache() folds it into the cache key.
 # From: Issue #887
 ARG BUILD_TOOLS_IMAGE
 
@@ -351,15 +346,8 @@ RUN --mount=type=secret,id=sccache_redis_url \
     configure_ccache; \
     cargo_jobs="$(resolve_cargo_jobs)"; \
     run_cargo_build; \
-    # What: dumps `ccache -s` (fails this RUN under set -eu if that command itself
-    # errors), then inspects `ccache --print-stats` for a nonzero
-    # remote_storage_error recorded during the real Cargo build, not just
-    # configure_ccache's own pre-build probe.
-    # Why: a mid-build Redis outage is nonfatal to ccache, and the compile already
-    # succeeded correctly using its local disk cache -- AG-VAL-001 (AGENTS.md) forbids
-    # reporting a successful check after emitting a warning, so this is deliberately an
-    # `[INFO]` diagnostic about an optional accelerator's degraded state, never a
-    # `[WARN]`/failure signal paired with build success.
+    # What: dumps ccache-s, checks for mid-build Redis errors.
+    # Why: Redis outages don't fail build; forbid warnings with success.
     # From: Issue #887
     if [ "${ccache_enabled:-0}" = "1" ]; then \
       ccache -s; \
@@ -374,8 +362,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     cp "target/${musl_target}/release/nats-subscriber" /build/nats-subscriber-out
 
 # What: source stage for tools copied into the final image below.
-# Why: uses the mutable `:latest` tag -- see services/proxy/Dockerfile's
-#   identical stage comment and AG-KD-010 for the full rationale.
+# Why: uses mutable `:latest` tag; see AG-KD-010 for rationale.
 # From: Issue #1095 | AG-KD-010
 FROM ${UTILITIES_IMAGE} AS utilities-tools
 
@@ -576,13 +563,12 @@ LABEL org.opencontainers.image.description="PowerDNS recursor, authoritative DNS
 # advisory affects a version still shipping in v3.24 stable at that time --
 # do not treat this resolution as a promise that `pdns`/`pdns-backend-sqlite3`
 # will never need pinning again.
-# What: curl/findutils/envsubst/lsof/ripgrep come from the shared utilities image.
-# Why: same alpine:3.24 digest as utilities -- see services/proxy/Dockerfile's
-#   identical comment for the full rationale.
+# What: curl/findutils/envsubst/lsof/ripgrep from shared utilities image.
+# Why: same alpine:3.24 digest; see services/proxy/Dockerfile for details.
 # From: Issue #1556
 
-# What: removes the BusyBox symlinks at these paths before real binaries land.
-# Why: see services/proxy/Dockerfile's identical comment for the reason.
+# What: removes BusyBox symlinks at these paths before real binaries.
+# Why: see services/proxy/Dockerfile's identical comment for reason.
 # From: Issue #1556
 RUN rm -f /usr/bin/find /usr/bin/xargs /usr/bin/lsof
 
