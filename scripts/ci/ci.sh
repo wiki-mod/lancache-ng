@@ -1715,6 +1715,39 @@ ci_emit_output() {
     fi
 }
 
+ci_remote_ref_tip() {
+    # What: prints the remote's current tip SHA for ref $1.
+    # Why: one seam for a live tip, so a test can substitute it.
+    # From: PR #1742 | Refs #1683
+    git ls-remote "${CI_GIT_REMOTE:-origin}" "$1" | cut -f1
+}
+
+ci_cmd_push_supersession_check() {
+    # What: emits superseded=true iff a newer push moved this ref.
+    # Why: §5 -- the skip decision belongs here, not in YAML.
+    # From: PR #1742 | Refs #1683
+    local event="${EVENT_NAME:-}" ref="${PUSH_REF:-}" sha="${PUSH_SHA:-}"
+    local superseded="false" current_tip=""
+
+    # What: only meaningful for a push to a mutable branch ref.
+    # Why: other events have no supersession concept; false is safe.
+    # From: PR #1334
+    if [[ "$event" == "push" && "$ref" == refs/heads/* ]]; then
+        # What: an unresolvable tip fails OPEN, unlike promote's copy.
+        # Why: wrongly reporting superseded=true skips the only build.
+        # From: PR #1334
+        current_tip="$(ci_remote_ref_tip "$ref" || true)"
+        if [[ -z "$current_tip" ]]; then
+            ci_annotate warning "Could not resolve the current remote tip of ${ref}; failing open (treating this push as NOT superseded, so build/container-scan still run)."
+        elif [[ "$current_tip" != "$sha" ]]; then
+            ci_annotate notice "${ref} has already moved to ${current_tip} since this run was triggered for ${sha}; a newer push already supersedes this one, skipping the heavy build/container-scan work for this run."
+            superseded="true"
+        fi
+    fi
+
+    ci_emit_output superseded "$superseded"
+}
+
 ci_cmd_resolve_refs() {
     # What: resolves the diff base/head for the triggering event.
     # Why: §10.1 -- one place decides what the planner diffs.
@@ -1832,6 +1865,7 @@ Commands:
   services                     List the one authoritative service list.
   identity <service> <plat>    Print the content-derived build identity.
   plan <base-ref> <head-ref>   Print the planner verdict as JSON.
+  push-supersession-check      Emit superseded=true/false for this push.
   admission <service> <plat>   Print ACK or DISACK for one build.
   build-one <svc> <plat> <dir> Admit, build, publish, verify; record.
   assemble <service> <ident>   Assemble the multi-arch index.
@@ -1869,6 +1903,7 @@ ci_main() {
         identity) ci_build_identity "${1:-}" "${2:-}" ;;
         plan) ci_plan_json "${1:?ci.sh plan: base ref required}" "${2:?ci.sh plan: head ref required}" ;;
         resolve-refs) ci_cmd_resolve_refs ;;
+        push-supersession-check) ci_cmd_push_supersession_check ;;
         plan-outputs) ci_cmd_plan_outputs ;;
         report-result) ci_cmd_report_result ;;
         admission) ci_build_admission "${1:?admission: service required}" "${2:?admission: platform required}" ;;

@@ -776,6 +776,91 @@ setup() {
 }
 
 # ============================================================
+# PUSH SUPERSESSION
+# ============================================================
+
+# What: an unresolvable remote tip reports NOT superseded.
+# Why: a wrong true here skips the only build this push gets.
+# From: PR #1742 | Refs #1683
+@test "supersession: an unresolvable remote tip fails open" {
+    ci_remote_ref_tip() { return 1; }
+    GITHUB_OUTPUT="" EVENT_NAME=push PUSH_REF=refs/heads/current_dev \
+        PUSH_SHA=569022c2fba37618c6bb41aa4927753af0f762d3 \
+        run ci_cmd_push_supersession_check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"superseded=false"* ]]
+}
+
+# What: an empty (but successful) tip lookup also fails open.
+# Why: ls-remote prints nothing for a ref deleted mid-run.
+# From: PR #1742 | Refs #1683
+@test "supersession: an empty remote tip fails open" {
+    ci_remote_ref_tip() { printf ''; }
+    GITHUB_OUTPUT="" EVENT_NAME=push PUSH_REF=refs/heads/current_dev \
+        PUSH_SHA=569022c2fba37618c6bb41aa4927753af0f762d3 \
+        run ci_cmd_push_supersession_check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"superseded=false"* ]]
+}
+
+# What: a tip equal to this run's SHA is not superseded.
+# Why: the common case must never skip its own build.
+# From: PR #1742 | Refs #1683
+@test "supersession: an unchanged tip reports not superseded" {
+    ci_remote_ref_tip() { printf '569022c2fba37618c6bb41aa4927753af0f762d3\n'; }
+    GITHUB_OUTPUT="" EVENT_NAME=push PUSH_REF=refs/heads/current_dev \
+        PUSH_SHA=569022c2fba37618c6bb41aa4927753af0f762d3 \
+        run ci_cmd_push_supersession_check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"superseded=false"* ]]
+}
+
+# What: a tip that moved past this run's SHA reports superseded.
+# Why: this is the one case the whole check exists to detect.
+# From: PR #1742 | Refs #1683
+@test "supersession: a moved tip reports superseded" {
+    ci_remote_ref_tip() { printf 'd4946b5d5fab914d75dca96b95c0ea06bc01d4ef\n'; }
+    GITHUB_OUTPUT="" EVENT_NAME=push PUSH_REF=refs/heads/current_dev \
+        PUSH_SHA=569022c2fba37618c6bb41aa4927753af0f762d3 \
+        run ci_cmd_push_supersession_check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"superseded=true"* ]]
+}
+
+# What: a non-push event never consults the remote at all.
+# Why: only push has a supersession concept; false is safe.
+# From: PR #1742 | Refs #1683
+@test "supersession: a pull_request event is never superseded" {
+    ci_remote_ref_tip() { printf 'd4946b5d5fab914d75dca96b95c0ea06bc01d4ef\n'; }
+    GITHUB_OUTPUT="" EVENT_NAME=pull_request PUSH_REF=refs/heads/current_dev \
+        PUSH_SHA=569022c2fba37618c6bb41aa4927753af0f762d3 \
+        run ci_cmd_push_supersession_check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"superseded=false"* ]]
+}
+
+# What: a non-branch push ref (a tag) is never superseded.
+# Why: a tag is immutable, so it can never be moved past.
+# From: PR #1742 | Refs #1683
+@test "supersession: a tag push ref is never superseded" {
+    ci_remote_ref_tip() { printf 'd4946b5d5fab914d75dca96b95c0ea06bc01d4ef\n'; }
+    GITHUB_OUTPUT="" EVENT_NAME=push PUSH_REF=refs/tags/v0.3.0 \
+        PUSH_SHA=569022c2fba37618c6bb41aa4927753af0f762d3 \
+        run ci_cmd_push_supersession_check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"superseded=false"* ]]
+}
+
+# What: the subcommand is reachable through ci.sh's dispatcher.
+# Why: a function with no case arm is unreachable from the job.
+# From: PR #1742 | Refs #1683
+@test "supersession: ci.sh push-supersession-check is dispatchable" {
+    EVENT_NAME=schedule run bash "$repo_root/scripts/ci/ci.sh" push-supersession-check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"superseded=false"* ]]
+}
+
+# ============================================================
 # SERVICE INVENTORY
 # ============================================================
 

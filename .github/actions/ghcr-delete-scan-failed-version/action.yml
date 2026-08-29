@@ -1,0 +1,54 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+name: Delete a GHCR package version whose Trivy scan failed
+description: >-
+  Deletes the exact just-pushed GHCR package version for one service digest
+  after that image's own Trivy scan reported a genuine finding, so a
+  scan-failed image is never left reachable. Extracted from two byte-identical
+  inline copies: build's linux/amd64 leg and build-arm64's linux/arm64 leg.
+  The caller keeps its own `if:` gate, which is what decides whether a scan
+  outcome is a genuine finding rather than a scanner/DB error.
+inputs:
+  service:
+    description: Service name; the GHCR package is lancache-ng/<service>.
+    required: true
+  digest:
+    description: The just-pushed image digest (sha256:...) to delete.
+    required: true
+  package-delete-pat:
+    description: >-
+      Caller's `secrets.GHCR_PACKAGE_DELETE_PAT` value (a classic PAT with
+      read:packages + delete:packages; the default GITHUB_TOKEN cannot delete
+      package versions). An input, not an env override: a composite action
+      cannot resolve `secrets.*` itself, so the caller must pass it in.
+    required: true
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Delete the scan-failed GHCR package version
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.package-delete-pat }}
+        SERVICE: ${{ inputs.service }}
+        DIGEST: ${{ inputs.digest }}
+      run: |
+        set -euo pipefail
+        # shellcheck source=scripts/lib/ghcr-retry.sh
+        source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+        : "${GH_TOKEN:?GHCR_PACKAGE_DELETE_PAT secret is required to delete a scan-failed package version -- see issue #626. Without it, this scan-failed image cannot be removed automatically and needs immediate manual deletion in GHCR.}"
+        org="wiki-mod"
+        package="lancache-ng%2F${SERVICE}"
+        fetch_versions() { gh api --paginate "orgs/${org}/packages/container/${package}/versions" > "$versions_file"; }
+        versions_file="$(mktemp)"
+        trap 'rm -f "$versions_file"' EXIT
+        ghcr_retry ghcr.io "" "" -- fetch_versions
+        version_id="$(jq -r --arg digest "$DIGEST" '[.[] | select(.name == $digest)][0].id // empty' "$versions_file")"
+        if [ -z "$version_id" ]; then
+          echo "::error::Trivy scan failed for the just-pushed lancache-ng/${SERVICE}@${DIGEST}, but no matching GHCR package version was found to delete. Manual verification in GHCR is required."
+          exit 1
+        fi
+        echo "::notice::Trivy scan failed for lancache-ng/${SERVICE}@${DIGEST} (GHCR package version ${version_id}) -- deleting it immediately (issue #1095 G8): a scan-failed image must never remain reachable."
+        ghcr_retry ghcr.io "" "" -- gh api -X DELETE "orgs/${org}/packages/container/${package}/versions/${version_id}"
+        echo "::notice::Deleted GHCR package version ${version_id} (lancache-ng/${SERVICE}@${DIGEST}) after its Trivy scan failed."
