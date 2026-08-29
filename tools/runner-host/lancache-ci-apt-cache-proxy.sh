@@ -7,8 +7,8 @@
 # 192.168.1.10:/srv/runner-hosting/apt-cache, with a real local-disk
 # fallback (never tmpfs/OS-default /tmp) when that mount is unavailable.
 #
-# Background (Issue #1095, item 2 of the CI-caching task): apt package
-# downloads happen over the network during a Docker build, unlike ccache
+# Background (item 2 of the CI-caching task): apt package downloads
+# happen over the network during a Docker build, unlike ccache
 # (a filesystem cache written from inside a BuildKit RUN instruction,
 # which has no host-bind-mount type -- see this same issue's ccache
 # discussion, deliberately NOT addressed by this script or by any
