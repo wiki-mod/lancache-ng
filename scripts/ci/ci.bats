@@ -6,6 +6,11 @@
 # Why: §66 wants one suite covering every domain.
 # From: Issue #1683
 
+# What: declares the Bats feature level this suite relies on.
+# Why: silences BW02 for the `run !` form every acceptance test uses.
+# From: PR #1742 | Refs #1683
+bats_require_minimum_version 1.5.0
+
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
 
