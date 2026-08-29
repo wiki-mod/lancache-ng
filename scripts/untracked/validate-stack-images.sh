@@ -432,15 +432,16 @@ require_grep 'is missing required platform' \
 # What: checks pushed-digest scan cache on build-arm64.
 # Why: container-scan no longer scans locally; Trivy enforces it.
 # From: Issue #1095 | PR #1501.
-require_grep 'cache_dir="/var/tmp/lancache-ng-trivy-cache/\$\{MATRIX_SERVICE\}-pushed-\$\{sanitized_ref\}"' \
+#
+# What: old per-job cache-dir isolation replaced by shared dir+lock.
+# Why: shared NFS DB fixes the redundant re-download outage.
+# From: Issue #1095 | PR #1747
+require_grep 'uses: \./\.github/actions/trivy-cache-dir' \
   .github/workflows/build-push.yml \
-  'the pushed per-service digest scan must use a service- and ref-specific Trivy cache directory too (see #904; widened from build-tools-only to every service by Step 3, issue #1095)'
-# What: checks Trivy cache-dir uses RUN_ID suffix, not prefix.
-# Why: cache-dir must match concurrency group to avoid races.
-# From: Issue #1095 | PR #1501.
-require_grep 'cache_dir="\$\{cache_dir\}-\$\{GITHUB_RUN_ID\}"' \
+  'the pushed per-service digest scan must resolve its Trivy DB cache directory via trivy-cache-dir (shared NFS + real local-disk fallback, never tmpfs; see #904, superseded by Issue #1095/#912)'
+require_grep 'uses: \./\.github/actions/trivy-db-ensure-fresh' \
   .github/workflows/build-push.yml \
-  'Trivy cache-dir keys must mirror their concurrency groups run_id suffix for workflow_dispatch/rerun, not just the ref component (see #904)'
+  'the pushed per-service digest scan must refresh its shared Trivy DB via the lock-guarded trivy-db-ensure-fresh action, the mechanism that now provides #904s concurrent-writer safety'
 # Keep release verification aligned with the canonical first-party service
 # set plus the immutable stack pointer (#1428 added syslog, #1556 added
 # utilities, both for the same reason the runtime_images/Dockerfile loops

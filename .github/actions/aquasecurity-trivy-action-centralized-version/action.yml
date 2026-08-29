@@ -7,8 +7,8 @@ description: >-
   needs this action goes through here instead of repeating the ref, so a
   version bump is one edit, not N.
 
-# What: Centralized pin for aquasecurity/trivy-action
-# Why: YAML anchors unsupported in composite-action parser
+# What: wraps trivy-action to centralize version pin
+# Why: parser rejects YAML anchors/aliases
 # From: Issue #1095 | PR #1665
 inputs:
   scan-type:
@@ -66,7 +66,12 @@ inputs:
 runs:
   using: composite
   steps:
+    # What: force image-export scratch to /var/tmp not /tmp
+    # Why: /tmp RAM-tmpfs too small; /var/tmp is large disk
+    # From: Issue #1095 | Issue #1671
     - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      env:
+        TMPDIR: /var/tmp
       with:
         scan-type: ${{ inputs.scan-type }}
         image-ref: ${{ inputs.image-ref }}

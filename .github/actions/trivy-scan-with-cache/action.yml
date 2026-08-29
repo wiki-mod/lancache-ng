@@ -33,6 +33,15 @@ inputs:
     description: Trivy's own vulnerability-database cache dir (a different concept from this action's scan-result cache above) -- passed through to trivy-action's cache-dir input unchanged.
     required: false
     default: ""
+  vuln-db-skip-update:
+    description: >-
+      What: forwarded to trivy-scan-retry's own skip-db-update input.
+      Why: set "true" once the caller's own trivy-db-ensure-fresh step has
+        already refreshed vuln-db-cache-dir under its lock, so this scan
+        never writes to the shared DB itself (Issue #912).
+      From: Issue #1095
+    required: false
+    default: "false"
   registry-username:
     description: Registry username, forwarded to trivy-scan-retry for GHCR authentication and retry re-login.
     required: true
@@ -87,6 +96,7 @@ runs:
         hide-progress: true
         cache: "false"
         cache-dir: ${{ inputs.vuln-db-cache-dir }}
+        skip-db-update: ${{ inputs.vuln-db-skip-update }}
         timeout: 10m
         exit-code: "1"
 

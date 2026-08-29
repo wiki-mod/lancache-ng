@@ -377,28 +377,22 @@ jobs:
           platform: linux/amd64
           run-fixtures: "true"
 
-      # What: key Trivy cache by sanitized ref; ephemeral on PR/rerun.
-      # Why: prevents concurrent runs racing on BoltDB single-writer.
-      # From: Issue #912 | PR #927
-      - name: Prepare candidate Trivy cache
+      # What: resolves shared, NFS-backed Trivy DB cache directory.
+      # Why: replaces a dir wiped every run, forcing full DB re-download.
+      # From: Issue #1095 | PR #1747
+      - name: Resolve shared Trivy DB cache directory
         id: trivy-cache
-        run: |
-          set -euo pipefail
-          sanitized_ref="$(printf '%s' "$GITHUB_REF" | tr '/:@' '---' | tr -cd 'A-Za-z0-9_.-')"
-          [[ -n "$sanitized_ref" ]] || { echo "::error::Could not derive safe cache key."; exit 1; }
-          cache_dir="/var/tmp/lancache-ng-trivy-cache/build-tools-${sanitized_ref}"
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] || [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] || [ "$GITHUB_RUN_ATTEMPT" != "1" ]; then
-            cache_dir="${cache_dir}-${GITHUB_RUN_ID}"
-            echo "ephemeral=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "ephemeral=false" >> "$GITHUB_OUTPUT"
-          fi
-          mkdir -p "$cache_dir"
-          echo "dir=$cache_dir" >> "$GITHUB_OUTPUT"
+        uses: ./.github/actions/trivy-cache-dir
+
+      - name: Ensure shared Trivy DB is current
+        id: trivy-db-fresh
+        uses: ./.github/actions/trivy-db-ensure-fresh
+        with:
+          cache-dir: ${{ steps.trivy-cache.outputs.dir }}
 
       # What: scan via trivy-scan-retry for retry/GHCR-mirror/auth.
       # Why: earlier step hit DB-download failure with no retry.
-      # From: PR #1542 | Issue #1535
+      # From: Issue #1535 | PR #1542
       #
       # What: continue-on-error; finding reported by step below.
       # Why: PR-context only; release/push scans fail hard (maintainer).
@@ -417,7 +411,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
           # What: empty (not real secret) on pull_request.
           # Why: avoid Docker Hub credential exfiltration via same-repo PR.
-          # From: PR #1543 | Issue #1535
+          # From: Issue #1535 | PR #1543
           dockerhub-username: ${{ github.event_name != 'pull_request' && secrets.DOCKERHUB_USERNAME || '' }}
           dockerhub-password: ${{ github.event_name != 'pull_request' && secrets.DOCKERHUB_TOKEN || '' }}
           image-ref: ${{ env.BUILD_TOOLS_SCAN_IMAGE_AMD64 }}
@@ -429,6 +423,7 @@ jobs:
           hide-progress: true
           cache: "false"
           cache-dir: ${{ steps.trivy-cache.outputs.dir }}
+          skip-db-update: ${{ steps.trivy-db-fresh.outputs.db-present == 'true' }}
           timeout: 10m
           exit-code: "1"
 
@@ -512,17 +507,7 @@ jobs:
           dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
           image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
           cache-dir: ${{ steps.trivy-cache.outputs.dir }}
-
-      - name: Remove ephemeral Trivy cache
-        if: ${{ always() && steps.trivy-cache.outputs.ephemeral == 'true' }}
-        env:
-          TRIVY_CACHE_DIR: ${{ steps.trivy-cache.outputs.dir }}
-        run: |
-          set -euo pipefail
-          case "$TRIVY_CACHE_DIR" in
-            /var/tmp/lancache-ng-trivy-cache/?*) rm -rf -- "$TRIVY_CACHE_DIR" ;;
-            *) echo "::error::Refusing unexpected cache path '$TRIVY_CACHE_DIR'."; exit 1 ;;
-          esac
+          skip-db-update: ${{ steps.trivy-db-fresh.outputs.db-present == 'true' }}
 
       - name: Attest amd64 build-tools image provenance
         if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
@@ -805,6 +790,9 @@ jobs:
           dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
           dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
           image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
+          # What: unchanged from before -- runner.temp path, cleaned every run
+          # Why: GitHub-hosted arm64 runner has no access to the NFS DB mount
+          # From: Issue #1095 | PR #1747
           cache-dir: ${{ runner.temp }}/trivy-build-tools-arm64-${{ github.run_id }}-${{ github.run_attempt }}
           cleanup-cache: "true"
 

@@ -27,6 +27,15 @@ inputs:
       From: PR #1523
     required: false
     default: "false"
+  skip-db-update:
+    description: |
+      What: forwarded to trivy-scan-retry's own skip-db-update input.
+      Why: set "true" once trivy-db-ensure-fresh has already refreshed
+        cache-dir under its own lock, so this scan never writes to the
+        shared DB itself (Issue #912).
+      From: Issue #1095
+    required: false
+    default: "false"
   registry-username:
     description: |
       What: registry username forwarded to trivy-scan-retry.
@@ -94,9 +103,9 @@ runs:
         : "${CACHE_DIR:?cache-dir is required}"
 
         cleanup_safe=false
-        # What: restricts safe-to-delete cache paths to known roots.
-        # Why: prevent typo-driven arbitrary recursive deletion.
-        # From: PR #1523
+        # What: restrict deletion to two known safe paths
+        # Why: caller typo in path must not trigger rm -rf
+        # From: Issue #1095 | PR #1747
         if [[ "$CLEANUP_CACHE" == "true" ]]; then
           [[ "$CACHE_DIR" == /* ]] || {
             echo "::error::Refusing to clean non-absolute Trivy cache path '$CACHE_DIR'."
@@ -130,9 +139,9 @@ runs:
         fi
         printf 'cleanup-safe=%s\n' "$cleanup_safe" >> "$GITHUB_OUTPUT"
 
-    # What: scans with trivy-scan-retry, not trivy-action.
-    # Why: unauthenticated mirror caused CI failures; needs retry.
-    # From: Issue #1535 | PR #1542
+    # What: uses trivy-scan-retry instead of scan action
+    # Why: upstream mirror failures need retry logic
+    # From: Issue #1095 | PR #1747
     - name: Scan exact image digest with Trivy
       id: scan
       uses: ./.github/actions/trivy-scan-retry
@@ -150,6 +159,7 @@ runs:
         hide-progress: true
         cache: "false"
         cache-dir: ${{ inputs.cache-dir }}
+        skip-db-update: ${{ inputs.skip-db-update }}
         timeout: 10m
         exit-code: "1"
 

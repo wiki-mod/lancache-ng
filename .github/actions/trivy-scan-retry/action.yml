@@ -2,9 +2,9 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: Retries trivy-action up to 4 times with re-auth.
-# Why: trivy only retries on transient DB failures.
-# From: Issue #1535 | PR #1542
+# What: retries trivy up to 4x with re-auth on DB failure
+# Why: trivy does not retry on non-transient failures
+# From: Issue #1095 | PR #1747
 name: Trivy scan with GHCR-first DB mirror, authenticated pull, and retry
 description: >-
   Wraps aquasecurity/trivy-action with a 4-attempt retry and a GHCR-first,
@@ -74,6 +74,16 @@ inputs:
   cache-dir:
     required: false
     default: ${{ github.workspace }}/.cache/trivy
+  skip-db-update:
+    description: >-
+      "true" tells every attempt to never write to cache-dir's vulnerability
+      DB at all (env TRIVY_SKIP_DB_UPDATE) -- set this once trivy-db-ensure-fresh
+      has already refreshed cache-dir under its own lock, so concurrent
+      scan attempts here can never race on the same BoltDB file (Issue #912).
+      "false" (default) preserves this action's prior behavior unchanged
+      for any caller that does not use the shared-cache-dir flow.
+    required: false
+    default: "false"
   timeout:
     required: false
     default: ""
@@ -104,9 +114,9 @@ outputs:
 runs:
   using: composite
   steps:
-    # What: Resolves output path, defaulting to runner.temp file.
-    # Why: retry discriminator needs stable path across all attempts.
-    # From: Issue #1535 | PR #1542
+    # What: resolves output path for all attempts
+    # Why: retry discriminator needs one stable path
+    # From: Issue #1095 | PR #1747
     - name: Resolve effective Trivy output path
       id: outpath
       shell: bash
@@ -118,16 +128,16 @@ runs:
           echo "path=${{ runner.temp }}/trivy-scan-retry-output.txt" >> "$GITHUB_OUTPUT"
         fi
 
-    # What: Deletes leftover report file from earlier invocation.
-    # Why: stale file would misread as current attempt's result.
-    # From: Issue #1535 | PR #1542
+    # What: clears stale report from earlier invocation
+    # Why: prevent misreading old result as current attempt
+    # From: Issue #1095 | PR #1747
     - name: Clear any stale Trivy report file
       shell: bash
       run: rm -f "${{ steps.outpath.outputs.path }}"
 
-    # What: Write shared attempt-failure classifier script.
-    # Why: unified classifier prevents divergence across attempts.
-    # From: Issue #1095
+    # What: creates shared failure classifier script
+    # Why: prevent per-attempt divergence on status
+    # From: Issue #1095 | PR #1747
     - name: Prepare shared attempt-classifier script
       id: classify-script
       shell: bash
@@ -160,9 +170,9 @@ runs:
         CLASSIFY
         echo "path=$script" >> "$GITHUB_OUTPUT"
 
-    # What: Authenticate to GHCR before Trivy DB pull.
-    # Why: defense-in-depth for shared egress-IP pool runners.
-    # From: Issue #1535 | PR #1542
+    # What: logs in to GHCR for Trivy DB pull
+    # Why: shared egress IP needs authentication rate-limit
+    # From: Issue #1095 | PR #1747
     - name: Log in to GHCR for authenticated Trivy DB pull
       continue-on-error: true
       uses: ./.github/actions/docker-login-action-centralized-version
@@ -171,9 +181,9 @@ runs:
         username: ${{ inputs.username }}
         password: ${{ inputs.password }}
 
-    # What: Authenticate to Docker Hub for third DB-source tier.
-    # Why: default docker/login-action target is Hub.
-    # From: Issue #1535 | PR #1543
+    # What: logs in to Docker Hub for third DB source
+    # Why: defaults to Hub when registry input unset
+    # From: Issue #1095 | PR #1747
     - name: Log in to Docker Hub for the third DB-source tier
       if: inputs.dockerhub-username != ''
       continue-on-error: true
@@ -185,6 +195,8 @@ runs:
     - id: attempt1
       uses: ./.github/actions/aquasecurity-trivy-action-centralized-version
       continue-on-error: true
+      env:
+        TRIVY_SKIP_DB_UPDATE: ${{ inputs.skip-db-update }}
       with:
         scan-type: ${{ inputs.scan-type }}
         image-ref: ${{ inputs.image-ref }}
@@ -202,9 +214,9 @@ runs:
         exit-code: ${{ inputs.exit-code }}
         trivy-config: ${{ github.action_path }}/trivy-config.yaml
 
-    # What: Check trivy report file presence and size after failure.
-    # Why: report means scanning succeeded; missing = DB failure.
-    # From: Issue #1535 | PR #1542
+    # What: classifies attempt via report file presence
+    # Why: report = genuine; no report = DB failure (retry)
+    # From: Issue #1095 | PR #1747
     - name: Classify attempt 1 failure
       id: classify1
       if: steps.attempt1.outcome == 'failure'
@@ -225,9 +237,9 @@ runs:
         username: ${{ inputs.username }}
         password: ${{ inputs.password }}
 
-    # What: Re-authenticate to Docker Hub before retry 1.
-    # Why: match GHCR retry gate so edits cannot diverge.
-    # From: Issue #1535 | PR #1543
+    # What: re-auth Docker Hub before retry 1
+    # Why: mirror GHCR condition so edits stay in sync
+    # From: Issue #1095 | PR #1747
     - name: Re-authenticate to Docker Hub before retry 1
       if: steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true' && inputs.dockerhub-username != ''
       continue-on-error: true
@@ -240,6 +252,8 @@ runs:
       if: steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true'
       uses: ./.github/actions/aquasecurity-trivy-action-centralized-version
       continue-on-error: true
+      env:
+        TRIVY_SKIP_DB_UPDATE: ${{ inputs.skip-db-update }}
       with:
         scan-type: ${{ inputs.scan-type }}
         image-ref: ${{ inputs.image-ref }}
@@ -281,9 +295,9 @@ runs:
         username: ${{ inputs.username }}
         password: ${{ inputs.password }}
 
-    # What: Re-authenticate to Docker Hub before retry 2.
-    # Why: match GHCR retry gate so edits cannot diverge.
-    # From: Issue #1535 | PR #1543
+    # What: same Docker Hub re-auth pattern for retry 2
+    # Why: compound condition ensures synchronized edits
+    # From: Issue #1095 | PR #1747
     - name: Re-authenticate to Docker Hub before retry 2
       if: >-
         steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true' &&
@@ -301,6 +315,8 @@ runs:
         steps.attempt2.outcome == 'failure' && steps.classify2.outputs.retryable == 'true'
       uses: ./.github/actions/aquasecurity-trivy-action-centralized-version
       continue-on-error: true
+      env:
+        TRIVY_SKIP_DB_UPDATE: ${{ inputs.skip-db-update }}
       with:
         scan-type: ${{ inputs.scan-type }}
         image-ref: ${{ inputs.image-ref }}
@@ -344,9 +360,9 @@ runs:
         username: ${{ inputs.username }}
         password: ${{ inputs.password }}
 
-    # What: Re-authenticate to Docker Hub before retry 3.
-    # Why: match GHCR retry gate so edits cannot diverge.
-    # From: Issue #1535 | PR #1543
+    # What: same Docker Hub re-auth pattern for retry 3
+    # Why: compound condition ensures synchronized edits
+    # From: Issue #1095 | PR #1747
     - name: Re-authenticate to Docker Hub before retry 3
       if: >-
         steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true' &&
@@ -366,6 +382,8 @@ runs:
         steps.attempt3.outcome == 'failure' && steps.classify3.outputs.retryable == 'true'
       uses: ./.github/actions/aquasecurity-trivy-action-centralized-version
       continue-on-error: true
+      env:
+        TRIVY_SKIP_DB_UPDATE: ${{ inputs.skip-db-update }}
       with:
         scan-type: ${{ inputs.scan-type }}
         image-ref: ${{ inputs.image-ref }}
@@ -383,18 +401,18 @@ runs:
         exit-code: ${{ inputs.exit-code }}
         trivy-config: ${{ github.action_path }}/trivy-config.yaml
 
-    # What: Classify attempt 4 via shared script.
-    # Why: unified classifier prevents misread across all attempts.
-    # From: Issue #1095
+    # What: classifies final attempt via shared script
+    # Why: distinguish DB failure from genuine findings
+    # From: Issue #1095 | PR #1747
     - name: Classify attempt 4 failure
       id: classify4
       if: steps.attempt4.outcome == 'failure'
       shell: bash
       run: bash "${{ steps.classify-script.outputs.path }}" 4 "${{ steps.outpath.outputs.path }}" "${{ inputs.cache-dir }}"
 
-    # What: Print report file to job log for table format output.
-    # Why: writing to file suppresses stdout; caller handles output.
-    # From: Issue #1535 | PR #1542
+    # What: print table report to stdout after file write
+    # Why: file write suppresses stdout; restore for table
+    # From: Issue #1095 | PR #1747
     - name: Show Trivy report
       if: always() && inputs.format == 'table'
       shell: bash
@@ -407,9 +425,9 @@ runs:
           echo "No Trivy report file was produced (every attempt failed before reaching report generation)."
         fi
 
-    # What: Surface pass/fail status across all attempts.
-    # Why: non-retryable attempt must count as failure.
-    # From: Issue #1535 | PR #1542
+    # What: surface overall pass/fail across all attempts
+    # Why: skipped attempts must count as failure
+    # From: Issue #1095 | PR #1747
     - name: Resolve outcome across all attempts
       if: always()
       shell: bash
@@ -423,9 +441,9 @@ runs:
         echo "::error::All Trivy scan attempts for image-ref '${{ inputs.image-ref }}' failed." >&2
         exit 1
 
-    # What: Emit db-status and separate scan-error flag.
-    # Why: pre-report error must not read as finding.
-    # From: Issue #1095 | PR #1735
+    # What: emit db-status and scan-error flags
+    # Why: pre-report errors must not read as findings
+    # From: Issue #1095 | PR #1747
     - name: Determine DB status
       id: db-status
       if: always()
@@ -441,9 +459,9 @@ runs:
         KIND4: ${{ steps.classify4.outputs.error-kind }}
       run: |
         set -euo pipefail
-        # What: Check overall success before any error-kind.
-        # Why: later success must never read as unavailable.
-        # From: Issue #1095 | PR #1735
+        # What: check overall success before error-kind
+        # Why: success anywhere means DB is available
+        # From: Issue #1095 | PR #1747
         succeeded=false
         for outcome in "$OUT1" "$OUT2" "$OUT3" "$OUT4"; do
           if [ "$outcome" = "success" ]; then
