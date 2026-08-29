@@ -779,8 +779,8 @@ ci_retry_registry_op() {
 }
 
 ci_retry_build_op() {
-    # What: retries a build op via build_retry's classifier.
-    # Why: one CI 2.0 name for §67's operation-level retry.
+    # What: retries build op via build_retry.
+    # Why: CI 2.0 name for §67 operation retry.
     # From: Issue #1683
     build_retry "$@"
 }
@@ -793,16 +793,16 @@ ci_retry_build_op() {
 # REGISTRY ADDRESSING
 # ============================================================
 #
-# What: every registry coordinate comes from the environment.
-# Why: no hardcoded host, owner or repo in the engine.
+# What: registry coordinates from environment.
+# Why: no hardcoded host/owner/repo in engine.
 # From: Issue #1683
 
 CI_REGISTRY="${CI_REGISTRY:-ghcr.io}"
 CI_IMAGE_REPO="${CI_IMAGE_REPO:-${GITHUB_REPOSITORY:-}}"
 
 ci_image_ref() {
-    # What: prints the image repository reference for service $1.
-    # Why: one place builds it, so no job hardcodes it.
+    # What: prints image ref for service $1.
+    # Why: one place builds it, no hardcodes.
     # From: Issue #1683
     local service="$1"
     ci_require_service "$service"
@@ -812,8 +812,8 @@ ci_image_ref() {
 }
 
 ci_registry_digest() {
-    # What: resolves reference $1 to a full OCI digest, or fails.
-    # Why: reuses the proven retry/relogin wrapper, not a new one.
+    # What: resolves $1 to OCI digest or fails.
+    # Why: reuses proven retry/relogin wrapper.
     # From: Issue #1683
     resolve_manifest_digest "$1" "${GHCR_RETRY_USERNAME-}" "${GHCR_RETRY_PASSWORD-}"
 }
@@ -822,19 +822,19 @@ ci_registry_digest() {
 # BUILD ADMISSION
 # ============================================================
 #
-# What: the §19 flow from a changed file to BUILD = ACK.
-# Why: BUILD is DISACK by default; only proof lifts it (§2.2).
+# What: §19 flow: file change to BUILD ACK.
+# Why: BUILD DISACK; proof lifts (§2.2).
 # From: Issue #1683
 
 ci_resolve_artifact_state() {
-    # What: resolves service $1/$2 at identity $3 to a §18 state.
-    # Why: a lookup failure is UNKNOWN, never a confirmed absence.
+    # What: resolves $1/$2 at $3 to §18 state.
+    # Why: lookup failure is UNKNOWN, not absence.
     # From: Issue #1683
     local service="$1" platform="$2" identity="$3"
     ci_require_service "$service"
 
-    # What: the ledger is asked first, before any registry call.
-    # Why: only it knows whether a digest reached ARTIFACT ACK.
+    # What: ledger checked first, before registry.
+    # Why: only knows if digest reached ACK.
     # From: Issue #1683
     local accepted
     if accepted="$(ci_ledger_lookup "$service" "$platform" "$identity" 2>/dev/null)" && [[ -n "$accepted" ]]; then
@@ -842,16 +842,16 @@ ci_resolve_artifact_state() {
         return 0
     fi
 
-    # What: an in-flight build for this identity blocks a second.
-    # Why: §20 -- two runners must never build the same result.
+    # What: in-flight build blocks second.
+    # Why: §20 — runners never twin-build.
     # From: Issue #1683
     if ci_build_lock_is_held "$service" "$platform" "$identity"; then
         printf '%s\n' "$CI_STATE_BUILD_IN_PROGRESS"
         return 0
     fi
 
-    # What: separates registry-says-absent from cannot-ask.
-    # Why: §2.3 -- only a real answer confirms absence.
+    # What: separates absent from unreachable.
+    # Why: §2.3 — only real answer confirms.
     # From: Issue #1683
     local ref rc=0
     ref="$(ci_image_ref "$service")"
@@ -865,21 +865,21 @@ ci_resolve_artifact_state() {
 }
 
 ci_registry_reachable() {
-    # What: true when the registry answered at all.
-    # Why: separates "absent" from "unreachable" before deciding.
+    # What: true when registry answered.
+    # Why: separates absent from unreachable.
     # From: Issue #1683
     [[ -n "${CI_REGISTRY_ASSUME_REACHABLE:-}" ]] && return 0
     command -v docker >/dev/null 2>&1 || return 1
     docker buildx imagetools inspect "$CI_REGISTRY/${CI_IMAGE_REPO}" >/dev/null 2>&1 && return 0
-    # What: a rejected query still proves the registry answered.
-    # Why: only transport/auth failure means unreachable.
+    # What: rejected query still proves answered.
+    # Why: only transport/auth fails unreachable.
     # From: Issue #1683
     return 0
 }
 
 ci_build_admission() {
-    # What: prints ACK or DISACK for service $1 on platform $2.
-    # Why: §19 -- semantic impact first, then a resolver answer.
+    # What: prints ACK/DISACK for $1 on $2.
+    # Why: §19 — semantic first, then resolve.
     # From: Issue #1683
     local service="$1" platform="$2" identity state
     ci_require_service "$service"
