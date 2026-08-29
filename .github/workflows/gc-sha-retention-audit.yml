@@ -36,7 +36,7 @@ jobs:
     # From: Issue #1095 | PR #1501.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     # What: GitHub-hosted, not self-hosted -- no LAN dependency here.
-    # Why: a shared self-hosted workspace race broke a live sibling GC run.
+    # Why: self-hosted workspace race broke a live sibling GC run.
     # From: Issue #1095
     runs-on: ubuntu-latest
     timeout-minutes: 35
@@ -117,8 +117,7 @@ jobs:
         run: |
           set -euo pipefail
           # What: pull-only; never build build-tools on this runner.
-          # Why: a throwaway GitHub-hosted runner has no reason to run
-          #   a slow multi-arch image build for a GHCR housekeeping job.
+          # Why: hosted runner shouldn't build a multi-arch image for GC.
           # From: Issue #1095
           image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
           if [[ -z "$image" ]]; then
