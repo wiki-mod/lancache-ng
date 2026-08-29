@@ -1531,8 +1531,8 @@ ci_gc_is_protected() {
 }
 
 ci_gc_candidates() {
-    # What: prints ledger entries no root references.
-    # Why: §97 -- the index may only ever propose, never delete.
+    # What: prints unrooted ledger entries.
+    # Why: §97 — index proposes, never delete.
     # From: Issue #1683
     local key digest service
     [[ -d "$CI_LEDGER_DIR" ]] || return 0
@@ -1545,8 +1545,8 @@ ci_gc_candidates() {
 }
 
 ci_cmd_gc() {
-    # What: reports GC candidates; deletes nothing by default.
-    # Why: §97 -- the ledger proposes, the graph decides.
+    # What: reports candidates, deletes nothing.
+    # Why: §97 — ledger proposes, graph decides.
     # From: Issue #1683
     local mode="${1:-report}" count=0 line
     while IFS= read -r line; do
@@ -1564,21 +1564,21 @@ ci_cmd_gc() {
 # PLANNER
 # ============================================================
 #
-# What: the first stage; decides what work a change requires.
-# Why: §10 -- it builds nothing and needs no heavy runner.
+# What: first stage — plan required work.
+# Why: §10 — builds nothing, no heavy.
 # From: Issue #1683
 
 ci_changed_paths() {
-    # What: prints paths changed between refs $1 and $2.
-    # Why: §10.1 -- the planner's only input is the real diff.
+    # What: prints changed paths between refs.
+    # Why: §10.1 — planner's real diff input.
     # From: Issue #1683
     local base_ref="$1" head_ref="$2"
     git diff --no-color --name-only "$base_ref" "$head_ref"
 }
 
 ci_path_touches_any_service() {
-    # What: true iff $1 is a build input of at least one service.
-    # Why: cheap pure-bash filter before any per-path git work.
+    # What: true iff $1 touches any service.
+    # Why: cheap filter before git work.
     # From: Issue #1683
     local path="$1" svc
     for svc in "${CI_SERVICES[@]}"; do
@@ -1588,8 +1588,8 @@ ci_path_touches_any_service() {
 }
 
 ci_semantic_changed_paths() {
-    # What: service-relevant paths with real content change.
-    # Why: normalizing paths no service consumes is wasted work.
+    # What: service paths with real change.
+    # Why: don't normalize unused paths.
     # From: Issue #1683
     local base_ref="$1" head_ref="$2" path
     while IFS= read -r path; do
@@ -1601,8 +1601,8 @@ ci_semantic_changed_paths() {
 }
 
 ci_test_required() {
-    # What: true iff a changed path is a test or engine input.
-    # Why: §64 -- a ci.sh edit must still run the engine's tests.
+    # What: true iff path is test/engine.
+    # Why: §64 — ci.sh edits run tests.
     # From: Issue #1683
     local base_ref="$1" head_ref="$2" path
     while IFS= read -r path; do
@@ -1614,27 +1614,27 @@ ci_test_required() {
 }
 
 ci_plan_compute() {
-    # What: computes the verdict once into CI_PLAN_* variables.
-    # Why: rendering and output export must not recompute it.
+    # What: computes verdict into CI_PLAN_*.
+    # Why: render/export must not recompute.
     # From: Issue #1683
     local base_ref="$1" head_ref="$2"
     local -a changed=()
     CI_PLAN_IMPACTED=()
 
-    # What: changed paths, mapped to affected services.
-    # Why: §11 -- a touched path is a candidate, never a verdict.
+    # What: paths mapped to services.
+    # Why: §11 — touched is candidate.
     # From: Issue #1683
     mapfile -t changed < <(ci_semantic_changed_paths "$base_ref" "$head_ref")
     (( ${#changed[@]} > 0 )) && mapfile -t CI_PLAN_IMPACTED < <(ci_impacted_services "${changed[@]}")
 
-    # What: whether the engine's own tests must run this time.
-    # Why: service impact never implies this, so it is separate.
+    # What: engine tests must run?
+    # Why: service impact doesn't imply.
     # From: Issue #1683
     CI_PLAN_TEST_REQUIRED="false"
     ci_test_required "$base_ref" "$head_ref" && CI_PLAN_TEST_REQUIRED="true"
 
-    # What: an if/else chain, never a trailing `[[ ]] && assign`.
-    # Why: that form returns 1 when false, failing the no-op run.
+    # What: if/else chain, not && assign.
+    # Why: && returns 1, fails no-op.
     # From: Issue #1683
     if (( ${#CI_PLAN_IMPACTED[@]} > 0 )); then
         CI_PLAN_STATE="WORK_REQUIRED"
@@ -1659,8 +1659,8 @@ ci_matrix_runs_on() {
 }
 
 ci_plan_build_matrix_json() {
-    # What: prints the build_matrix JSON array for the current plan.
-    # Why: shared by ci_plan_render_json and the workflow output.
+    # What: prints build_matrix JSON array.
+    # Why: shared by render and workflow.
     # From: Issue #1683
     local svc platform first=1
     printf '['
@@ -1677,8 +1677,8 @@ ci_plan_build_matrix_json() {
 }
 
 ci_plan_render_json() {
-    # What: renders the already-computed verdict as JSON.
-    # Why: §10.2 -- YAML consumes a machine-readable plan.
+    # What: renders verdict as JSON.
+    # Why: §10.2 — YAML needs readable.
     # From: Issue #1683
     local svc first=1 impacted
     impacted="$(printf '%s\n' "${CI_PLAN_IMPACTED[@]}")"
@@ -1697,16 +1697,16 @@ ci_plan_render_json() {
 }
 
 ci_plan_json() {
-    # What: computes and prints the plan for refs $1..$2 as JSON.
-    # Why: the standalone entry point for `ci.sh plan`.
+    # What: computes/prints plan as JSON.
+    # Why: standalone entry point.
     # From: Issue #1683
     ci_plan_compute "$1" "$2"
     ci_plan_render_json
 }
 
 ci_emit_output() {
-    # What: writes name=value to GITHUB_OUTPUT, else stdout.
-    # Why: keeps workflow YAML free of output-plumbing shell (§5).
+    # What: writes name=value to GITHUB_OUTPUT.
+    # Why: keeps YAML clean (§5).
     # From: Issue #1683
     local name="$1" value="$2"
     if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
@@ -1717,8 +1717,8 @@ ci_emit_output() {
 }
 
 ci_cmd_resolve_refs() {
-    # What: resolves the diff base/head for the triggering event.
-    # Why: §10.1 -- one place decides what the planner diffs.
+    # What: resolves diff base/head.
+    # Why: §10.1 — one place decides.
     # From: Issue #1683
     local base head="${HEAD_REF:-${HEAD_SHA:-HEAD}}"
 
@@ -1742,24 +1742,24 @@ ci_cmd_resolve_refs() {
 }
 
 ci_cmd_plan_outputs() {
-    # What: runs the planner and exports its verdict as outputs.
-    # Why: §10.2 -- the job graph reads its matrix here.
+    # What: runs planner, exports verdict.
+    # Why: §10.2 — graph reads matrix.
     # From: Issue #1683
     local base="${BASE_REF:?BASE_REF is required}" head="${HEAD_REF:?HEAD_REF is required}"
 
-    # What: computes once, then prints and exports it.
-    # Why: recomputing or re-parsing would waste or lie.
+    # What: computes once, prints/exports.
+    # Why: recompute or re-parse wastes.
     # From: Issue #1683
     ci_plan_compute "$base" "$head"
     ci_plan_render_json
 
-    # What: the state every downstream job's `if:` is gated on.
-    # Why: NOOP here is what keeps a no-op run from starting jobs.
+    # What: state for downstream job `if:`.
+    # Why: NOOP prevents no-op job start.
     # From: Issue #1683
     ci_emit_output global-state "$CI_PLAN_STATE"
 
-    # What: separate signal for "run the engine's own tests".
-    # Why: §64 -- a ci.sh edit impacts no service, but tests.
+    # What: signal to run engine tests.
+    # Why: §64 — ci.sh edits run tests.
     # From: Issue #1683
     ci_emit_output test-required "$CI_PLAN_TEST_REQUIRED"
 
@@ -1768,53 +1768,53 @@ ci_cmd_plan_outputs() {
     # From: Issue #1683
     ci_emit_output impacted-services "${CI_PLAN_IMPACTED[*]:-}"
 
-    # What: the real GH Actions matrix, one leg per platform.
-    # Why: §71 -- the build job's strategy.matrix comes from here.
+    # What: GH Actions matrix per platform.
+    # Why: §71 — build job matrix source.
     # From: Issue #1683
     ci_emit_output build-matrix "$(ci_plan_build_matrix_json)"
 
-    # What: one human-readable line stating the decision reached.
-    # Why: §79 -- a reader must see why CI did or skipped work.
+    # What: readable line stating decision.
+    # Why: §79 — reader sees why CI did.
     # From: Issue #1683
     ci_log "planner verdict: $CI_PLAN_STATE (tests required: $CI_PLAN_TEST_REQUIRED)"
 }
 
 ci_cmd_report_result() {
-    # What: turns the job results into one pass/fail verdict.
-    # Why: §62 -- the required check reports even on a NOOP run.
+    # What: turns results into verdict.
+    # Why: §62 — check reports always.
     # From: Issue #1683
     local plan_result="${PLAN_RESULT:-}" tests_result="${TESTS_RESULT:-}"
     local build_result="${BUILD_RESULT:-}" aggregate_result="${AGGREGATE_RESULT:-}"
     local state="${GLOBAL_STATE:-}"
 
-    # What: the planner itself must have completed successfully.
-    # Why: without a verdict there is nothing to report on.
+    # What: planner must complete ok.
+    # Why: no verdict = nothing report.
     # From: Issue #1683
     [[ "$plan_result" == "success" ]] \
         || ci_report_failure "plan job" "ci.yml" "success" "$plan_result" "see the plan job log"
 
-    # What: an absent or UNKNOWN planner state fails the run.
-    # Why: §2.3 -- UNKNOWN is never silently treated as a pass.
+    # What: state absent/UNKNOWN fails.
+    # Why: §2.3 — UNKNOWN ≠ pass.
     # From: Issue #1683
     [[ -n "$state" && "$state" != "UNKNOWN" ]] \
         || ci_report_failure "planner state" "ci.yml" "a decided state" "${state:-<empty>}" "check the plan job's output"
 
-    # What: skipped passes; other non-success does not.
-    # Why: the tests job is legitimately skipped on a no-op run.
+    # What: skipped passes, others fail.
+    # Why: tests job legitimately skipped.
     # From: Issue #1683
     [[ "$tests_result" == "success" || "$tests_result" == "skipped" ]] \
         || ci_report_failure "engine tests" "ci.bats" "success" "$tests_result" "see the failing tests listed in that job"
 
-    # What: build/aggregate are legitimately skipped when idle.
-    # Why: has-builds=false must not fail a job that never ran.
+    # What: build/aggregate legitimately skip.
+    # Why: has-builds=false doesn't fail.
     # From: Issue #1683
     [[ "$build_result" == "success" || "$build_result" == "skipped" ]] \
         || ci_report_failure "build" "ci.yml" "success" "$build_result" "see the failing build leg(s) above"
     [[ "$aggregate_result" == "success" || "$aggregate_result" == "skipped" ]] \
         || ci_report_failure "aggregate" "ci.yml" "success" "$aggregate_result" "see the aggregate job log"
 
-    # What: prints every collected failure before failing the job.
-    # Why: the reader must never hunt backwards for the cause.
+    # What: prints failures before fail.
+    # Why: reader never hunt backwards.
     # From: Issue #1683
     ci_failure_summary || ci_die "CI 2.0 result: FAILED (see the failures listed above)"
 
@@ -1906,8 +1906,8 @@ ci_main() {
 # Why: ci.bats sources this file to unit-test functions.
 # From: Issue #1683
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    # What: strict mode only for real execution, not sourcing.
-    # Why: ci.bats's own setup() sources this under its options.
+    # What: strict mode only for exec.
+    # Why: ci.bats sources this.
     # From: Issue #1683
     set -euo pipefail
     ci_main "$@"
