@@ -1447,6 +1447,44 @@ robust official mechanism exists for it.
 Use: Cargo registry cache, Cargo git cache, sccache. Not: one globally
 writable `target/` shared by 15 runners. `target/` stays local/per-job.
 
+### 39.1 One dependency version, not N independently drifting Cargo.lock files
+
+Real, found by comparing all five current Rust-service lockfiles
+(`services/dns/nats-subscriber/Cargo.lock`, `services/ui/Cargo.lock`,
+`services/watchdog/Cargo.lock`, `tools/pxe-client-probe/Cargo.lock`, and
+`services/warmer/Cargo.lock` from PR #1751): the same logical dependency
+routinely resolves to different versions across services, because each
+service's `Cargo.lock` is independent and nothing keeps them aligned.
+
+Concrete case: `services/dns/nats-subscriber/Cargo.lock`,
+`services/ui/Cargo.lock`, and `services/watchdog/Cargo.lock` all resolve
+`chacha20` to `0.10.2`. `services/warmer/Cargo.lock` (PR #1751, created
+after that alignment) still pulls `chacha20 0.9.1` transitively via
+`chacha20poly1305 0.10.1` -- an older version than the other three
+services carry, drifted purely because `warmer`'s lockfile is its own
+independent resolution, not because of any deliberate version choice.
+
+Maintainer requirement, verbatim, non-negotiable: CI 2.0 must have one
+central source for dependency versions across Rust services, not N
+independent `Cargo.lock` files that can each drift on their own.
+
+Direction, not a finished decision: a real Cargo workspace at the repo
+root, with `[workspace.dependencies]`; every service crate becomes a
+workspace member; one root `Cargo.lock`. Cargo then either resolves the
+same version for every member or reports a real conflict -- it cannot
+silently drift the way N independent lockfiles do today.
+
+Real trade-off, same pattern as §16.1 (there: a shared builder-image
+digest; here: a shared root `Cargo.lock`): today, each service's Docker
+build context is isolated, giving clean per-service layer caching. A
+shared root `Cargo.lock` widens what counts as a build input -- a
+dependency bump for one service could invalidate another service's
+build-cache trigger even though that service's own code and direct
+dependencies did not change. As with §16.1, `sccache`/`ccache` keep the
+actual recompile cost low; the concern is the same class of
+spurious-trigger risk, now at the Cargo level instead of the
+Docker-image level.
+
 ## 40. Package download cache
 
 ```text
