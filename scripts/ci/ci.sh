@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: single authoritative CI 2.0 implementation (ci.sh).
+# What: authoritative CI 2.0 implementation entry point.
 # Why: replaces build-push.yml's per-runner-type duplication.
 # From: Issue #1683
 
@@ -13,34 +13,34 @@
 CI_SH_VERSION="0.1.0"
 
 # What: full-length-only Git SHA / OCI digest regexes.
-# Why: §15 forbids abbreviated identifiers anywhere in CI 2.0.
+# Why: §15 forbids abbreviated identifiers in CI 2.0.
 # From: Issue #1683
 readonly CI_FULL_GIT_SHA_REGEX='^[0-9a-f]{40}$'
 readonly CI_FULL_OCI_DIGEST_REGEX='^sha256:[0-9a-f]{64}$'
 
-# What: collects every failure so the run can summarize them.
-# Why: a reader must never scroll back to find what failed.
+# What: collects failures for final summary output.
+# Why: reader must not scroll back to find failures.
 # From: Issue #1683
 declare -ag CI_FAILURES=()
 
 ci_annotate() {
-    # What: emits a GitHub ::error::/::warning:: annotation.
-    # Why: puts the cause in the job summary, not just the log.
+    # What: emits GitHub ::error:: or ::warning:: annotation.
+    # Why: puts cause in job summary, not just logs.
     # From: Issue #1683
     local level="$1"; shift
     printf '::%s::%s\n' "$level" "$*" >&2
 }
 
 ci_log() {
-    # What: prints a structured, greppable log line to stderr.
-    # Why: §79 requires every CI decision to be justified.
+    # What: prints structured, greppable log to stderr.
+    # Why: §79 requires every CI decision justified.
     # From: Issue #1683
     printf 'ci.sh: %s\n' "$*" >&2
 }
 
 ci_report_failure() {
-    # What: reports a failure with expected vs. actual.
-    # Why: an exit code alone never says what actually went wrong.
+    # What: reports failure with expected vs. actual.
+    # Why: exit code alone doesn't show what failed.
     # From: Issue #1683
     local check="$1" subject="$2" expected="$3" actual="$4" remedy="${5:-}"
     local line="$check failed for '$subject': expected $expected, got $actual"
@@ -50,8 +50,8 @@ ci_report_failure() {
 }
 
 ci_failure_summary() {
-    # What: prints every recorded failure, then returns non-zero.
-    # Why: the reader sees all causes, not just the first.
+    # What: prints all recorded failures, returns non-zero.
+    # Why: reader sees all causes, not just first.
     # From: Issue #1683
     (( ${#CI_FAILURES[@]} == 0 )) && return 0
     printf '\n=== ci.sh: %d failure(s) ===\n' "${#CI_FAILURES[@]}" >&2
@@ -69,8 +69,8 @@ ci_failure_summary() {
 }
 
 ci_die() {
-    # What: annotates the cause, then exits non-zero.
-    # Why: a bare exit 1 leaves the reader with no cause at all.
+    # What: annotates cause, then exits non-zero.
+    # Why: bare exit 1 leaves reader with no cause.
     # From: Issue #1683
     ci_annotate error "ci.sh: $*"
     printf 'ci.sh: error: %s\n' "$*" >&2
@@ -78,8 +78,8 @@ ci_die() {
 }
 
 ci_mktemp() {
-    # What: creates a temp file, dying if mktemp itself failed.
-    # Why: an empty path would reach rm and redirects later.
+    # What: creates temp file, dies if mktemp fails.
+    # Why: empty path would reach rm and redirects.
     # From: Issue #1683
     local path
     path="$(mktemp)" || ci_die "mktemp failed; refusing to continue without a temp file"
@@ -88,8 +88,8 @@ ci_mktemp() {
 }
 
 ci_rm_temp() {
-    # What: removes $1 only if it is a real file under a temp dir.
-    # Why: an empty or stray path must never reach rm.
+    # What: removes $1 only if in a temp directory.
+    # Why: empty or stray paths must never reach rm.
     # From: Issue #1683
     local path="${1:-}"
     [[ -n "$path" ]] || return 0
@@ -1416,6 +1416,7 @@ ci_compose_config_clean() {
     fi
     # What: here-string, not printf | grep -q.
     # Why: grep -q's early exit can SIGPIPE the producer under -e.
+    # From: PR #1683
     if grep -Eqi '(^|[[:space:]])(warn|warning|level=warning)' <<<"$output"; then
         printf 'compose warnings treated as errors:\n%s\n' "$output" >&2
         return 1
