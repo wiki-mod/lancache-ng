@@ -1634,7 +1634,7 @@ ci_cmd_validate_nats_socket_proxy() {
     grep -Fq 'mktemp "${target_dir}/.${target_name}.tmp.XXXXXX"' services/dns/entrypoint.sh \
       || { echo "::error::DNS entrypoint generated configs must stage temp files in the target directory."; exit 1; }
     if grep -Fq '> /tmp/recursor.conf' services/dns/entrypoint.sh \
-      || grep -Fq '> /tmp/pdns.conf' services/dns/entrypoint.sh; then
+      || grep -Fq '> /tmp/pdns.conf' services/dns/entrypoint.sh; then  # pipefail-safe: '||' is logical OR, not a pipe; grep reads a file arg
       echo "::error::DNS entrypoint must not render PDNS configs through /tmp before replacing target configs."
       exit 1
     fi
