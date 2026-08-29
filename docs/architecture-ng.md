@@ -22,7 +22,7 @@ document.
 | Watchdog | on | — | Health checks, auto-restart, purge cron |
 | syslog (fluent-bit + syslog-ng, combined) | on (`logging` Compose profile, default-enabled since #1343; real opt-out via `LOGGING_ENABLED=0`) | — | Central log receiver; fluent-bit forwards logs from every wired service to syslog-ng inside the same container (#453, combined into one image 2026-08) — see the syslog-ng section's full logging matrix below, not just proxy access logs |
 | Admin UI | on | — | Axum/Rust, Tera, Tailwind, separate port |
-| Cache Warmer | not implemented | — | **Design-only, not shipped**: no `services/` code, no Compose service, nothing runnable exists yet under this name. See [docs/design-steam-prefill.md](design-steam-prefill.md) (issue #816, overlapping #871) for the current proactive cache-warming design plan and its open maintainer decisions. Do not treat this row as an existing on/off feature until that design actually lands. |
+| Cache Warmer | not implemented | — | **Design-only, not shipped**: no `services/` code, no Compose service, nothing runnable exists yet under this name. Mechanism decided (issue #871): stream-and-discard prefill, not SteamCMD. See [docs/design-steam-prefill.md](design-steam-prefill.md) (issue #816, issue #871) for the current design plan and its remaining open decisions (credential strategy; which service houses the engine). Do not treat this row as an existing on/off feature until that design actually lands. |
 
 ## nginx
 
@@ -612,24 +612,57 @@ Central log receiver for the stack (#453), opt-in via `docker compose --profile 
 
 ## Cache Warming
 
-**Corrected 2026-08-05 (issue #1391 doc-sweep audit): this section previously described Cache
-Warming in the present tense as an already-shipped feature, contradicting this document's own
-services table above ("Cache Warmer | not implemented ... Design-only, not shipped: no
-`services/` code, no Compose service, nothing runnable exists yet under this name"), which is
-the accurate statement — confirmed directly against the real tree (`services/warmer/` does not
-exist; no `warmer`/`steamcmd` service in any `deploy/*/docker-compose.yml`).** The design below
-describes the current *plan*, not a shipped capability — see
-[docs/design-steam-prefill.md](design-steam-prefill.md) (issue #816, overlapping #871) for the
-authoritative, up-to-date design discussion and its open maintainer decisions before relying on
-any detail here.
+**Corrected 2026-08-29 (issue #871 decision-rework pass): the `steamcmd`-based engine this
+section previously described as the plan is retired.** The maintainer decided (recorded on
+issue #871) that the engine described below — `steamcmd` fetching a full local game install —
+conflicts with issue #816's non-negotiable stream-and-discard requirement and is not the
+direction this project takes. **This section now describes the current plan only; nothing
+below is shipped** — confirmed directly against the real tree (`services/warmer/` does not
+exist; no warming service in any `deploy/*/docker-compose.yml`). See
+[docs/design-steam-prefill.md](design-steam-prefill.md) (issue #816, issue #871) for the full
+design discussion and its still-open implementation decisions (credential strategy; which
+service houses the engine) before relying on any detail here.
+
+**Decision: stream-and-discard prefill, no SteamCMD.** `steamcmd` was rejected because
+`steamcmd app_update` performs a real local install — it downloads, verifies, decompresses, and
+writes the full depot content to disk on whatever host runs it, which is exactly the
+disk-space/SSD-wear cost this project does not want to impose on an operator's warmer host. The
+selected mechanism instead talks to Steam's CDN directly and streams each depot chunk's HTTP
+response body straight into a discard sink — the bytes exist only long enough to pass through
+lancache-ng's proxy (which is what actually caches them) and are never buffered to a file or
+held as a complete object in memory.
 
 **Planned workflow** (not yet implemented — design-only):
-1. User enters Steam app ID
-2. `steamcmd` fetches depot manifest (anonymous for F2P, optional with account for paid games)
-3. Chunk URLs fetched through local proxy → cached
-4. Progress displayed live in Admin UI (total chunks / completed / MB/s)
+1. Operator enters a Steam app ID (Admin UI or CLI, per the still-open "which service houses
+   this" decision).
+2. A depot/manifest layer resolves the app ID's depots and chunk list (control-plane login only
+   where required — see the credential-strategy decision below).
+3. Each chunk's CDN URL is fetched with a plain streaming HTTP GET, routed through the LAN's
+   standard-mode DNS/proxy path so lancache-ng's own cache observes and stores it, and the
+   response body is drained directly into a discard sink as it arrives — never written to disk,
+   never fully buffered in memory.
+4. Progress (bytes/chunks fetched, current throughput) is displayed live to the operator.
 
-**Steam account:** planned to be optional via env var (`STEAM_USER`, `STEAM_PASS`) — never in repo, never in image.
+**Throughput display and safety margin:** the maintainer asked that the design consider
+`mbuffer` or `pv` between the download and the discard step, for (a) a speed readout in the
+log and (b) a safety net if the download ever outpaces the discard. In the Rust
+streaming-to-`tokio::io::sink()` design this decision selects, (b) does not apply structurally —
+there is no separate consumer stage that can fall behind; the network read itself is always the
+rate-limiting step, so nothing can back up behind a slower "discard" stage. (a) is still a real,
+worthwhile requirement and is satisfied natively: a byte counter around the copy loop, logged on
+a periodic interval, gives the same throughput visibility `pv` would, without needing an
+external process or an extra pipe stage. An external `mbuffer`/`pv` stage would only become
+relevant if a future revision of this design moves the fetch loop out of process (e.g. a shell
+pipeline instead of an in-process Rust stream); if that ever happens, verify package
+availability on this project's actual base images first (per AG-VAL-023) rather than assuming.
+The real lever for sustaining line-rate throughput at 1–10 Gbit/s is fetch concurrency (multiple
+chunks in flight at once), not buffering — a single HTTP stream rarely saturates a 10 GbE link
+against a real CDN.
+
+**Steam account:** credential strategy (dedicated/throwaway account vs. the operator's own,
+where credentials are stored) is still an open decision — see
+[docs/design-steam-prefill.md](design-steam-prefill.md). Whatever is decided, credentials are
+never committed to the repo or baked into an image.
 
 **Tracking:** planned: which app IDs were warmed + which CDN URLs belong to them → basis for targeted purging.
 

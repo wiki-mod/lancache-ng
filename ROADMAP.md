@@ -61,8 +61,9 @@ duplicate, their acceptance criteria):
 - **Base image evaluation** (#815, #1287): evaluate migrating DNS/DHCP and
   proxy/ntp/watchdog/ui services to Alpine base images for fresher packages.
 - **Undocumented-vs-real-capability audits** (#843, #871): reconcile
-  documentation that describes capabilities (e.g. the steamcmd-based Cache
-  Warmer design) against what actually exists in the codebase today.
+  documentation that describes capabilities against what actually exists in
+  the codebase today — e.g. the Cache Warmer, whose mechanism is now decided
+  (stream-and-discard prefill, not steamcmd, per #871) but not yet built.
 - **CI/tooling health**: several open `ci`/`tooling`-labeled issues (e.g.
   #1014 consolidating workflow files, #1065's runner-pool saturation,
   #1253/#1290 narrowing build-tools rebuild triggers) reduce CI cost and
