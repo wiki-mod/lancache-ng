@@ -408,14 +408,9 @@ check_docker_run_stdin_heredoc_missing_i() {
   done < <(grep -noE '(bash|sh)[[:space:]]+-s[[:space:]]*<<' "$file" 2>/dev/null || true)
 }
 
-# What: file discovery specific to the third check, independent of
-#   scan_files above -- see this file's own header ("THIRD, INDEPENDENT
-#   CHECK" / SCOPE) for why this domain is deliberately separate.
-# Why: `git ls-files` (not `find`) so a new workflow/action file is
-#   automatically covered without a hand-maintained list, and so this only
-#   ever scans tracked, committed files -- mirroring scan_files's own
-#   rationale above, and its own fail-closed discovery-failure check.
-# From: Issue #1095 (F-23)
+# What: YAML discovery independent of scan_files above
+# Why: git ls-files auto-covers new YAML, no hand-maintained list
+# From: Issue #1095
 if ! yaml_scan_files_raw="$(git ls-files -- \
   '.github/workflows/*.yml' '.github/workflows/*.yaml' \
   '.github/actions/**/*.yml' '.github/actions/**/*.yaml')"; then
