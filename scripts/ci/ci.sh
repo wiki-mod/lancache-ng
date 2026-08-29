@@ -2372,11 +2372,11 @@ ci_cmd_validate_promote_tags_dockerfiles() {
       echo "::error::Rust service Dockerfiles must not use scheduler-only args or hardcoded CARGO_BUILD_JOBS values."
       exit 1
     fi
-    if grep -RInE 'cargo install sccache .*--locked|cargo install .*--locked .*sccache' services/*/Dockerfile tools/build-tools/Dockerfile scripts; then
+    if grep -RInE '[c]argo install sccache .*--locked|[c]argo install .*--locked .*sccache' services/*/Dockerfile tools/build-tools/Dockerfile scripts; then
       echo "::error::sccache source installs must stay version-pinned but not use --locked while the pinned upstream lockfile emits yanked-crate warnings."
       exit 1
     fi
-    if grep -RIn 'cargo install sccache' services/*/Dockerfile tools/build-tools/Dockerfile scripts | grep -v -- '--no-default-features --features redis,dist-client'; then
+    if grep -RIn '[c]argo install sccache' services/*/Dockerfile tools/build-tools/Dockerfile scripts | grep -v -- '--no-default-features --features redis,dist-client'; then
       echo "::error::sccache source installs must use the minimal Redis plus dist-client feature set."
       exit 1
     fi
