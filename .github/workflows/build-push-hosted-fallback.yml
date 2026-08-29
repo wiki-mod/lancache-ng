@@ -258,7 +258,7 @@ jobs:
 
       # What: Add ::notice:: lines from build-push.yml sibling.
       # Why: Expose parallelism decision to build log for clarity.
-      # From: Issue #1095 (G15), PR #1640
+      # From: Issue #1095 | PR #1640
       - name: Compute Docker build parallelism
         id: docker-build-jobs
         run: |
@@ -366,7 +366,7 @@ jobs:
 
           # What: reads the single declared, lowercased GHCR owner/repo.
           # Why: github.repository may not be lowercase; GHCR requires it.
-          # From: Issue #1095 (G1) | PR #1503
+          # From: Issue #1095 | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
           [[ "$AMD64_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || {

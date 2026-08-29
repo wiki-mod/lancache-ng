@@ -95,7 +95,7 @@ runs:
 
     # What: Deny any short-SHA slice
     # Why: Short SHAs banned; see script header for rationale
-    # From: Issue #1095 (G2)
+    # From: Issue #1095
     - name: Deny any short-SHA slice
       shell: bash
       run: >-
