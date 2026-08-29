@@ -1,9 +1,8 @@
 //!
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
-//! lancache-warmer entry point (issue #871): wires the credential-store
-//! and stream-fetch primitives (see lib.rs) together into a runnable
-//! binary. This is a scaffold, not the finished Cache Warmer: it does not
+//! lancache-warmer entry point: wires the credential-store and
+//! stream-fetch primitives (see lib.rs) together into a runnable binary. This is a scaffold, not the finished Cache Warmer: it does not
 //! yet log into Steam, resolve an app ID to depots, or parse a manifest.
 //! What it does prove end-to-end: an operator-supplied credential can be
 //! encrypted at rest (or held only in memory, operator's choice) and
@@ -11,8 +10,8 @@
 //! streamed through and discarded with live throughput logging, the same
 //! mechanism the eventual real depot-chunk fetch will reuse unchanged.
 //!
-//! Deliberately NOT implemented in this PR (see issue #871's own body for
-//! the full scope note): the steam-vent login flow, steamroom depot/
+//! Deliberately NOT implemented in this PR (see this crate's own tracking
+//! issue for the full scope note): the steam-vent login flow, steamroom depot/
 //! manifest parsing, and therefore any real Steam CDN URL resolution --
 //! integrating those needs a real Steam account to test safely against,
 //! which this session could not do. `WARMER_URLS` below is this
@@ -58,8 +57,8 @@ fn credential_is_placeholder(value: &str) -> bool {
 /// Resolves the operator's chosen credential-persistence mode from
 /// `WARMER_CREDENTIAL_PERSISTENCE`. Fails closed on an unrecognized value
 /// rather than silently defaulting either way -- persistence is the
-/// operator's own decision (maintainer directive, issue #871), not
-/// something this binary should guess.
+/// operator's own decision (maintainer directive), not something this
+/// binary should guess.
 fn resolve_credential_persistence() -> anyhow::Result<CredentialPersistence> {
     match std::env::var("WARMER_CREDENTIAL_PERSISTENCE").as_deref() {
         Ok("none") | Err(_) => Ok(CredentialPersistence::None),

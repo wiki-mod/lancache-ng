@@ -1,9 +1,9 @@
 //!
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
-//! At-rest storage for the operator-supplied Steam credential (issue
-//! #871). Composes two mechanisms already established elsewhere in this
-//! project rather than inventing new ones (AG-CODE-011):
+//! At-rest storage for the operator-supplied Steam credential. Composes
+//! two mechanisms already established elsewhere in this project rather
+//! than inventing new ones (AG-CODE-011):
 //!
 //! - Argon2id, already a project dependency and used for one-way password
 //!   verification in services/ui/src/nats_auth_callout.rs (issue #680),
@@ -63,7 +63,7 @@ const SALT_LEN: usize = 16;
 ///   192-bit random nonce keeps collision probability negligible even
 ///   across many repeated re-encryptions (e.g. credential rotation),
 ///   which a 96-bit random nonce could not guarantee at the same scale
-///   (maintainer decision, issue #871).
+///   (maintainer decision).
 const NONCE_LEN: usize = 24;
 /// What: byte length of the derived symmetric key.
 /// Why: fixed key size (X)ChaCha20-Poly1305 requires.

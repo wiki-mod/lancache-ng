@@ -1,8 +1,8 @@
 //!
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
-//! Stream-and-discard HTTP fetch primitive (issue #871, carrying forward
-//! issue #816's own non-negotiable requirement): each response body is
+//! Stream-and-discard HTTP fetch primitive (carrying forward issue #816's
+//! own non-negotiable requirement): each response body is
 //! read and dropped as it arrives, never buffered whole in memory and
 //! never written to a file. The fetch itself has no side effect beyond
 //! making the bytes flow through lancache-ng's own proxy on the way --

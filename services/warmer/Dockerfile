@@ -1,10 +1,10 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Runtime for lancache-warmer, the Steam cache-warming prefill daemon
-# (issue #871). Scaffold stage: builds and runs the credential-store and
-# stream-fetch primitives only -- see services/warmer/src/main.rs's own
-# module doc comment for what is deliberately not yet implemented.
+# Runtime for lancache-warmer, the Steam cache-warming prefill daemon.
+# Scaffold stage: builds and runs the credential-store and stream-fetch
+# primitives only -- see services/warmer/src/main.rs's own module doc
+# comment for what is deliberately not yet implemented.
 
 # Intentional ARG default (overridable at build time via --build-arg).
 # Actual digest pinning for release builds is tracked in issue #508 (same
@@ -41,8 +41,8 @@ RUN set -eu; \
 #   correctly without it, just without shared-cache speedup. Copying the
 #   existing accelerated block by hand without any way to test it risked
 #   a subtle, hard-to-debug CI failure for a marginal, deferrable benefit;
-#   left as explicit, named follow-up (issue #871) rather than silently
-#   shipped either broken or absent with no explanation.
+#   left as an explicit, named follow-up rather than silently shipped
+#   either broken or absent with no explanation.
 # From: Issue #871
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
