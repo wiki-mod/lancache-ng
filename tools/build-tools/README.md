@@ -9,11 +9,13 @@ issue #1095. It is a log of real, executed findings, not a design proposal. AG-K
 Alpine as a supported build base for this image but requires full verification and maintainer
 approval before any actual switch; nothing here constitutes that switch decision.
 
-The Debian branch (`FROM golang:latest AS actionlint-builder` / `FROM rust:latest`, unnamed final
+The Debian branch (`FROM golang:latest AS go-tools-builder` / `FROM rust:latest`, unnamed final
 stage) is unchanged and remains this Dockerfile's default `docker build` target. The Alpine
 candidate lives in two additional named stages earlier in the same file
-(`actionlint-builder-alpine`, `alpine-final`), selected explicitly via `docker build --target
-alpine-final --build-arg APK_CACHE_BUST=$(date +%s)`. The cache-bust build-arg matters here
+(`go-tools-builder-alpine`, `alpine-final`), selected explicitly via `docker build --target
+alpine-final --build-arg APK_CACHE_BUST=$(date +%s)`. (Both Go-tool builder stages were renamed
+from `actionlint-builder`/`actionlint-builder-alpine` in PR #1743's actionlint follow-up, once
+they stopped building actionlint itself -- see the Phase 2 finding below for what changed.) The cache-bust build-arg matters here
 specifically: with the base image digest unchanged, BuildKit can otherwise replay the `apk
 update`/`apk add` layer indefinitely, so a later rebuild-and-rescan of this candidate would
 silently evaluate stale Alpine packages rather than the current repositories. Stage order also
@@ -145,9 +147,10 @@ real version parity, not assumed:
 - `rust:latest` and `rust:alpine`: both `rustc 1.97.1 (8bab26f4f 2026-07-14)` / `cargo 1.97.1`.
 - `golang:latest` and `golang:alpine`: both `go1.26.7 linux/amd64`.
 
-All four Go-built tools (AG-KD-003's justification: avoiding a stale embedded Go stdlib in
-prebuilt release binaries) build clean from source against `golang:alpine`, same versions/pins as
-the Debian branch, using the identical `go install`/`go build`/vendor-override mechanism:
+At the time of this evaluation, all four Go-built tools (AG-KD-003's justification: avoiding a
+stale embedded Go stdlib in prebuilt release binaries) built clean from source against
+`golang:alpine`, same versions/pins as the Debian branch, using the identical `go
+install`/`go build`/vendor-override mechanism:
 - `actionlint` v1.7.12: `built with go1.26.7 compiler for linux/amd64`.
 - `docker-compose` v5.5.0: builds and runs.
 - `docker-buildx` v0.36.1 (with the `moby/go-archive`/`golang.org/x/mod` CVE-fix vendor overrides
@@ -156,6 +159,15 @@ the Debian branch, using the identical `go install`/`go build`/vendor-override m
   linking flags as upstream's own `scripts/build/binary`.
 
 None of the four needed a musl-specific build-tag or linker change; none has a cgo dependency.
+
+**Update (PR #1743, actionlint follow-up):** `actionlint` no longer builds from source on either
+branch -- `AG-KD-003` was rewritten (PR #1744) to require a genuinely reachable vulnerability for
+the source-build exemption, and actionlint's CI-only, fully-offline lint invocation does not have
+one. Both branches now install actionlint as a checksum-verified official release binary instead
+(the `go-tools-builder`/`go-tools-builder-alpine` stages above build only the remaining three Go
+tools). The musl-portability finding above is unaffected: actionlint's official release binary is
+a static, `CGO_ENABLED=0` Go build with no libc dependency, confirmed to run unmodified on
+`alpine:3.24` the same way the finding above already establishes for the from-source build.
 
 ## Security scan comparison (Phase 5, real Trivy runs)
 
