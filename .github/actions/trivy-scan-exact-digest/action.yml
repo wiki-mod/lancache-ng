@@ -27,6 +27,15 @@ inputs:
       From: PR #1523
     required: false
     default: "false"
+  skip-db-update:
+    description: |
+      What: forwarded to trivy-scan-retry's own skip-db-update input.
+      Why: set "true" once trivy-db-ensure-fresh has already refreshed
+        cache-dir under its own lock, so this scan never writes to the
+        shared DB itself (Issue #912).
+      From: Issue #1095
+    required: false
+    default: "false"
   registry-username:
     description: |
       What: registry username forwarded to trivy-scan-retry.
@@ -152,6 +161,7 @@ runs:
         hide-progress: true
         cache: "false"
         cache-dir: ${{ inputs.cache-dir }}
+        skip-db-update: ${{ inputs.skip-db-update }}
         timeout: 10m
         exit-code: "1"
 

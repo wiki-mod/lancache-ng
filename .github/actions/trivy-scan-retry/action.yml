@@ -76,6 +76,16 @@ inputs:
   cache-dir:
     required: false
     default: ${{ github.workspace }}/.cache/trivy
+  skip-db-update:
+    description: >-
+      "true" tells every attempt to never write to cache-dir's vulnerability
+      DB at all (env TRIVY_SKIP_DB_UPDATE) -- set this once trivy-db-ensure-fresh
+      has already refreshed cache-dir under its own lock, so concurrent
+      scan attempts here can never race on the same BoltDB file (Issue #912).
+      "false" (default) preserves this action's prior behavior unchanged
+      for any caller that does not use the shared-cache-dir flow.
+    required: false
+    default: "false"
   timeout:
     required: false
     default: ""
@@ -196,6 +206,8 @@ runs:
     - id: attempt1
       uses: ./.github/actions/aquasecurity-trivy-action-centralized-version
       continue-on-error: true
+      env:
+        TRIVY_SKIP_DB_UPDATE: ${{ inputs.skip-db-update }}
       with:
         scan-type: ${{ inputs.scan-type }}
         image-ref: ${{ inputs.image-ref }}
@@ -255,6 +267,8 @@ runs:
       if: steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true'
       uses: ./.github/actions/aquasecurity-trivy-action-centralized-version
       continue-on-error: true
+      env:
+        TRIVY_SKIP_DB_UPDATE: ${{ inputs.skip-db-update }}
       with:
         scan-type: ${{ inputs.scan-type }}
         image-ref: ${{ inputs.image-ref }}
@@ -316,6 +330,8 @@ runs:
         steps.attempt2.outcome == 'failure' && steps.classify2.outputs.retryable == 'true'
       uses: ./.github/actions/aquasecurity-trivy-action-centralized-version
       continue-on-error: true
+      env:
+        TRIVY_SKIP_DB_UPDATE: ${{ inputs.skip-db-update }}
       with:
         scan-type: ${{ inputs.scan-type }}
         image-ref: ${{ inputs.image-ref }}
@@ -381,6 +397,8 @@ runs:
         steps.attempt3.outcome == 'failure' && steps.classify3.outputs.retryable == 'true'
       uses: ./.github/actions/aquasecurity-trivy-action-centralized-version
       continue-on-error: true
+      env:
+        TRIVY_SKIP_DB_UPDATE: ${{ inputs.skip-db-update }}
       with:
         scan-type: ${{ inputs.scan-type }}
         image-ref: ${{ inputs.image-ref }}

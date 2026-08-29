@@ -1,0 +1,41 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+name: Centralized version -- aquasecurity/setup-trivy
+description: >-
+  Single owner of the aquasecurity/setup-trivy pin, mirroring the existing
+  aquasecurity-trivy-action-centralized-version pattern for the same
+  third-party org. A version bump is one edit, not N.
+
+# What: needed as a standalone install so a step can run the trivy CLI
+#   directly (e.g. `trivy image --download-db-only`) outside of
+#   aquasecurity/trivy-action's own scan flow, which installs trivy
+#   internally but does not expose that install as a reusable output.
+# Why: the shared-NFS Trivy-DB refresh step (trivy-db-ensure-fresh) needs
+#   the trivy binary on PATH before it can call --download-db-only.
+# From: Issue #1095 | Issue #912 | PR #927
+
+inputs:
+  version:
+    description: >-
+      Trivy version to install. Kept in sync with
+      aquasecurity-trivy-action-centralized-version's own pinned
+      aquasecurity/trivy-action release's default `version` input
+      (currently v0.70.0) -- bump both together, since a version skew
+      between the binary that refreshes the shared DB and the binary
+      that reads it risks an incompatible DB schema.
+    required: false
+    default: v0.70.0
+outputs: {}
+runs:
+  using: composite
+  steps:
+    # What: pinned to the exact same commit aquasecurity/trivy-action
+    #   v0.36.0 itself uses to install trivy.
+    # Why: one real trivy binary source for this repo, not two
+    #   independently-drifting pins for what is the same underlying tool.
+    # From: Issue #1095
+    - uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6
+      with:
+        version: ${{ inputs.version }}
+        cache: "true"

@@ -1393,6 +1393,63 @@ Not:
 with all 15 runners as parallel writers. Instead: local cache plus a
 purpose-built shared backend service.
 
+### 41.1 Trivy vulnerability-DB cache (validated precedent)
+
+The Trivy vulnerability database is not a build cache in the sense the rest
+of this chapter means (ccache/sccache/BuildKit/Cargo/Go artifacts, one per
+compiler/toolchain invocation, genuinely written by every job). It is a
+single ~1.3 GB dataset, read by nearly every job and genuinely written only
+once every DB-refresh interval (hours), by nobody in particular. That
+read-mostly, single-artifact shape is what makes a shared NFS directory the
+right tool here specifically, without reopening this section's rejection of
+an NFS free-for-all for the build-cache families above:
+
+```text
+self-hosted scan job
+  |
+  v
+resolve cache dir: NFS share reachable + write-probed? -> use it
+                    else                                -> real local disk
+                                                             (never tmpfs)
+  |
+  v
+acquire mkdir-based lock on the resolved dir
+  |
+  v
+run Trivy's own --download-db-only freshness check
+  (a real download only if the DB is genuinely stale)
+  |
+  v
+release lock
+  |
+  v
+every scan job (this one and every concurrent one) reads with
+skip-db-update: true -- nobody but the lock-holder above ever writes
+```
+
+This is the "purpose-built shared backend" this section calls for, not a
+reopening of the rejected pattern: exactly one write path (the lock-guarded
+freshness check), serialized; every scan itself is read-only. The mount and
+its write-probe fallback both refuse ever to degrade onto tmpfs/OS-default
+`/tmp` -- a shared cache directory that quietly becomes RAM-backed on
+fallback is how a full disk becomes a full RAM, not a smaller problem.
+Reachability of the shared mount is never assumed: every resolution
+attempt performs a real write-then-read-then-delete probe (a file **and** a
+freshly created subdirectory with a file inside it -- Trivy itself creates
+`fanal/`, `policy/`, and `java-db/` subdirectories under the DB directory
+on first use, so a probe that only checks a flat file at the mount root can
+pass while every real scan still fails on that first `mkdir`) before
+trusting it, never a bare existence check.
+
+One prerequisite this pattern depends on and that does not show up in the
+diagram above: every directory the scan jobs need to create or write under
+the shared mount must be writable by whichever OS user each self-hosted
+runner host's job actually runs as -- these are not necessarily the same
+UID across every host in the runner fleet. World-writable with the sticky
+bit (mode `1777`, the same convention `/tmp` itself uses) on the shared
+directory tree is what makes that true regardless of which host's UID
+touches it first.
+
 ## 42. Cache failure
 
 Cache is an optimization. Therefore:
