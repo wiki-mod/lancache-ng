@@ -1,16 +1,17 @@
 # Steam Prefill (Proactive Cache Warming) — Design Plan
 
-**Status: design proposal only, not committed, not scheduled.** Nothing in
-this document is approved for implementation. This is the written design
-plan issue [#816](https://github.com/wiki-mod/lancache-ng/issues/816) asked
-for, produced for maintainer review before any code is written. Most of the
-research below was already captured directly in #816's own issue body and
-its 2026-07-14 self-correction comment; this document consolidates that
-research into a single reviewable place and adds one piece of net-new
-analysis that wasn't in the issue: an explicit overlap check against
-[#871](https://github.com/wiki-mod/lancache-ng/issues/871) (see
-["Overlap with #871"](#overlap-with-871-cache-warmer) below), which the
-maintainer specifically asked this pass to resolve.
+**Status (updated 2026-08-29): mechanism decided, implementation not yet
+started.** The maintainer has decided the engine: stream-and-discard, no
+SteamCMD (see the "Overlap with #871" section below). Credential strategy and which service houses the engine remain
+open (see "Open decisions" below) — no implementation may begin until
+those are answered. This is the written design plan issue
+[#816](https://github.com/wiki-mod/lancache-ng/issues/816) asked for. Most
+of the research below was already captured directly in #816's own issue
+body and its 2026-07-14 self-correction comment; this document
+consolidates that research into a single reviewable place and originally
+added one piece of net-new analysis that wasn't in the issue: an explicit
+overlap check against [#871](https://github.com/wiki-mod/lancache-ng/issues/871),
+which the maintainer asked that pass to resolve and has since resolved.
 
 ## Goal
 
@@ -153,11 +154,24 @@ satisfied for any future non-Steam prefill work. Net takeaway: no single
 generic detection pattern across CDNs; each storefront's client has its own
 quirk.
 
-## Overlap with #871 (Cache Warmer)
+## Overlap with #871 (Cache Warmer) — resolved 2026-08-29
 
-**These two issues are not distinct features — they are two different
+**Decision (recorded on issue #871): this document's stream-and-discard
+mechanism is the selected engine. SteamCMD is retired as a candidate.**
+Framing (1) below is the one that applies — #871's own `steamcmd`-based
+design is superseded by this document's mechanism; #871's Admin UI
+progress-reporting and app-ID → CDN-URL purge-tracking ideas survive as
+requirements for whichever service ends up housing this engine (still an
+open decision, see below), without adopting `steamcmd` itself. Framing (2)
+("maintain both engines") was not chosen — the maintainer accepted the
+disk/SSD-avoidance requirement as decisive rather than optional.
+
+The history below is kept for context (why the conflict existed, what the
+tradeoffs were), not because the choice is still open.
+
+**These two issues were not distinct features — they were two different
 proposed mechanisms for the same underlying need, and the mechanisms
-actively conflict.**
+actively conflicted.**
 
 [#871](https://github.com/wiki-mod/lancache-ng/issues/871) found that
 `docs/architecture-ng.md` documents an entire "Cache Warmer" subsystem
@@ -194,44 +208,45 @@ thing" — they trade off real operational costs against each other:
 | Targeted-purge tracking (app ID → CDN URLs) | Already specified in the doc | Not designed here; would need its own work |
 | Credential handling | Documented (env vars) | Explicitly flagged as an open decision (see below) |
 
-**This is a maintainer reconciliation call, not something to resolve by
-picking a side unilaterally.** Two honest framings are possible, and both
-are legitimate:
+**This was a maintainer reconciliation call, not something either issue's
+authors could resolve unilaterally.** Two honest framings were possible:
 
-1. **#816 supersedes #871.** If the no-disk-write requirement is a hard
-   product requirement (as #816 states), then the `steamcmd`-based design
-   `architecture-ng.md` currently describes is simply the wrong mechanism
-   and should be retired from the doc in favor of this design once it is
-   approved. Under this framing, #871's real value is the parts #816
-   doesn't cover yet — Admin UI progress reporting and app-ID → URL
-   tracking for targeted purging — which could be adopted as UI/tracking
+1. **#816 supersedes #871.** *(Selected, 2026-08-29 — see above.)* If the
+   no-disk-write requirement is a hard product requirement (as #816
+   states), then the `steamcmd`-based design `architecture-ng.md` used to
+   describe is simply the wrong mechanism and is retired from the doc in
+   favor of this design. Under this framing, #871's real value is the
+   parts #816 doesn't cover yet — Admin UI progress reporting and app-ID →
+   URL tracking for targeted purging — which are adopted as UI/tracking
    requirements for whichever engine actually gets built, without adopting
    `steamcmd` itself.
-2. **Both stay, serving different operators.** An operator who doesn't
-   mind the disk/SSD cost and wants the simplicity and maturity of
-   wrapping Valve's own official tool might prefer a `steamcmd`-based
-   warmer; an operator who cares about warmer-host disk wear wants this
-   issue's approach. This would mean building and maintaining two separate
-   engines for the same job, which is real ongoing cost the project should
-   only take on deliberately, not by default.
-
-This document does not pick between (1) and (2) — that is exactly the kind
-of decision `AGENTS.md`'s Agent Autonomy rule reserves for the maintainer
-(real product/scope tradeoff, not a fact determinable from code alone).
-Whichever way it resolves, neither issue should be closed until that
-decision is made and reflected in both issues.
+2. **Both stay, serving different operators.** *(Not selected.)* An
+   operator who doesn't mind the disk/SSD cost and wants the simplicity
+   and maturity of wrapping Valve's own official tool might have preferred
+   a `steamcmd`-based warmer; an operator who cares about warmer-host disk
+   wear wants this issue's approach. This would have meant building and
+   maintaining two separate engines for the same job — real ongoing cost
+   the maintainer chose not to take on.
 
 ## Open decisions for the maintainer
 
-1. **Credential strategy**: dedicated/throwaway Steam account for prefill
-   vs. the owner's main account; where credentials are stored (env var /
-   secret file, never committed). Real consequences (account, blast radius
-   if the prefill host is compromised) — not decided here.
-2. **In-repo vs. separate binary/repo**: package as a new Rust binary in
-   its own crate under this repo (following the `tools/build-tools`
-   convention), or as a standalone companion tool in a separate repo.
-3. **#871 reconciliation** (see above): supersede, adopt partial ideas from
-   #871's UI/tracking scope, or maintain both engines.
+1. **Credential strategy** (still open): dedicated/throwaway Steam account
+   for prefill vs. the owner's main account; where credentials are stored
+   (env var / secret file, never committed). Real consequences (account,
+   blast radius if the prefill host is compromised) — not decided here.
+2. **Which service houses the engine** (still open, replaces the earlier
+   "in-repo vs. separate binary/repo" framing now that in-repo is the
+   working assumption): a new `services/warmer` service, vs. a module
+   inside the existing `services/ui` Admin UI service (which already
+   depends on `reqwest` with streaming support — see
+   `services/ui/src/routes/netdata_proxy.rs`'s `bytes_stream()` usage —
+   and is the documented control surface for warming: app-ID input, live
+   progress, purge tracking). This is a new-file/new-service decision
+   under `AGENTS.md`'s AG-CODE-013 (new files carry a standing DISACK
+   until a suitable existing home is ruled out and the maintainer
+   explicitly ACKs a new one) and needs the maintainer's explicit answer
+   before any service scaffolding is created.
+3. ~~**#871 reconciliation**~~ — resolved 2026-08-29, see above.
 
 ## Proposed ordered plan (pending the decisions above)
 
@@ -245,10 +260,16 @@ decision is made and reflected in both issues.
    enumerate chunk hashes for a given AppID/depot.
 4. Implement the data-plane fetch: plain `reqwest` GET per chunk URL, body
    streamed via `bytes_stream()`/`tokio::io::copy(..., tokio::io::sink())`,
-   never written to a file. Verify end-to-end against a running dev
-   `docker compose` stack in **standard mode**: first request MISS through
-   lancache, second identical request HIT — confirming the proxy (not the
-   prefill tool) holds the cached bytes.
+   never written to a file, with a byte counter logged at a periodic
+   interval as the throughput readout (see `docs/architecture-ng.md`'s
+   "Cache Warming" section for why an external `mbuffer`/`pv` stage is not
+   needed for this in-process design). Use bounded concurrent fetches
+   (multiple chunks in flight), not a single serial stream, to have any
+   realistic chance of approaching multi-Gbit/s line rates. Verify
+   end-to-end against a running dev `docker compose` stack in **standard
+   mode**: first request MISS through lancache, second identical request
+   HIT — confirming the proxy (not the prefill tool) holds the cached
+   bytes.
 5. Extend to real-account login once decision 1 is made, plus a
    configurable list of AppIDs to prefill.
 6. Package per decision 2.
