@@ -2203,7 +2203,11 @@ ci_cmd_validate_accel_policy() {
       && grep -F 'remote_storage_hit' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
       && grep -F 'ccache_dir_warm="$preflight_dir/ccache-dir-warm"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
       || { echo "::error::Acceleration preflight must validate ccache-over-distcc with a real Redis write then a real Redis read from a fresh local CCACHE_DIR."; exit 1; }
-    grep -F -- '--network "$RUST_ACCELERATION_NETWORK"' .github/workflows/build-push.yml >/dev/null \
+    # What: asserts the real network wiring on both sides.
+    # Why: the old literal existed only here, so it matched itself.
+    # From: PR #1742 | Refs #1683
+    grep -F 'build-network: ${{ env.RUST_ACCELERATION_NETWORK }}' .github/workflows/build-push.yml >/dev/null \
+      && grep -F -- '--network "$BUILD_NETWORK"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
       && grep -E '^[[:space:]]+network:[[:space:]]+' .github/workflows/build-push.yml | grep -F 'env.RUST_BUILDX_NETWORK' >/dev/null \
       && grep -E '^[[:space:]]+allow:[[:space:]]+' .github/workflows/build-push.yml | grep -F 'network.host' >/dev/null \
       || { echo "::error::Acceleration infrastructure must use the same network mode as the preflight."; exit 1; }
@@ -2386,7 +2390,10 @@ ci_cmd_validate_promote_tags_dockerfiles() {
     fi
     local sccache_install_needle
     for dockerfile in services/dns/Dockerfile services/ui/Dockerfile; do
-      grep -F 'ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest' "$dockerfile" >/dev/null \
+      # What: asserts the build arg exists, not its fallback value.
+      # Why: AG-CI-008 -- CI always passes --build-arg; the default is not.
+      # From: PR #1742 | Refs #1683
+      grep -F 'ARG BUILD_TOOLS_IMAGE=' "$dockerfile" >/dev/null \
         || { echo "::error::$dockerfile must declare the shared build-tools image as a build argument."; exit 1; }
       grep -F 'FROM ${BUILD_TOOLS_IMAGE}' "$dockerfile" >/dev/null \
         || { echo "::error::$dockerfile must use the shared build-tools image in the Rust builder stage."; exit 1; }
