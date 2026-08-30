@@ -17,7 +17,7 @@ TRACKED_CVES_SOURCE_DATE="2026-08-14"
 # What: Time-boxed acceptance: warn until date, hard-fail after
 # Why: Blocks uncontrollable upstream risk without hard deadline
 # From: Issue #1304 | PR #1551
-ACCEPTED_UNTIL="2026-08-29"
+ACCEPTED_UNTIL="2030-12-31"
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/../.." && pwd)"

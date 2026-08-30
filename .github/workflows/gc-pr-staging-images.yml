@@ -138,8 +138,8 @@ jobs:
             echo "scripts-present=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # What: sparse-check out collector and retention code
-      # Why: fetch-depth 0 gets history; narrow tree stays minimal
+      # What: sparse-checks out collector code and all Dockerfiles.
+      # Why: audit script cats every tracked Dockerfile by path.
       # From: Issue #1095
       - name: Checkout GHCR collector and retention planner
         if: steps.creds.outputs.have-pat == 'true' && steps.script-check.outputs.scripts-present == 'true'
@@ -159,6 +159,7 @@ jobs:
             scripts/lib/build-tools-channel.sh
             scripts/lib/docker-buildx-retry.sh
             release/stack-images.yml
+            **/*Dockerfile*
           sparse-checkout-cone-mode: false
 
       # What: resolve pinned build-tools image via selector

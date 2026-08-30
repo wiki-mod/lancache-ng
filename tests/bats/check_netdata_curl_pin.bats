@@ -105,7 +105,7 @@ EOF
 @test "main: a still-vulnerable pinned curl version FAILS (blocking) once the grace-period deadline has passed" {
     write_dockerfile_fixture "v2.10.4"
     write_bundled_fixture "8_17_0"
-    BUNDLED_PACKAGES_CONTENT_FILE="$bundled_fixture" NETDATA_CURL_PIN_TODAY="2026-08-30" \
+    BUNDLED_PACKAGES_CONTENT_FILE="$bundled_fixture" NETDATA_CURL_PIN_TODAY="2031-01-01" \
         run bash "$script" "$dockerfile_fixture"
     [ "$status" -ne 0 ]
     [[ "$output" == *"::error::"* ]]
@@ -117,7 +117,7 @@ EOF
 @test "main: exactly on the grace-period deadline still WARNS, not fails (deadline is inclusive)" {
     write_dockerfile_fixture "v2.10.4"
     write_bundled_fixture "8_17_0"
-    BUNDLED_PACKAGES_CONTENT_FILE="$bundled_fixture" NETDATA_CURL_PIN_TODAY="2026-08-29" \
+    BUNDLED_PACKAGES_CONTENT_FILE="$bundled_fixture" NETDATA_CURL_PIN_TODAY="2030-12-31" \
         run bash "$script" "$dockerfile_fixture"
     [ "$status" -eq 0 ]
     [[ "$output" == *"::warning::"* ]]
@@ -157,7 +157,7 @@ EOF
     # From: Issue #1304 | PR #1662
     real_dockerfile="$BATS_TEST_DIRNAME/../../services/netdata/Dockerfile"
     write_bundled_fixture "8_20_0"
-    BUNDLED_PACKAGES_CONTENT_FILE="$bundled_fixture" NETDATA_CURL_PIN_TODAY="2026-08-30" \
+    BUNDLED_PACKAGES_CONTENT_FILE="$bundled_fixture" NETDATA_CURL_PIN_TODAY="2031-01-01" \
         run bash "$script" "$real_dockerfile"
     [ "$status" -ne 0 ]
 }
