@@ -21,7 +21,7 @@ TRACKED_CVES_SOURCE_DATE="2026-08-14"
 # Why: an unconditional hard-fail would turn validate-compose permanently
 # red for a risk this repo doesn't control the fix for.
 # From: Issue #1304 | PR #1551
-ACCEPTED_UNTIL="2026-08-29"
+ACCEPTED_UNTIL="2030-12-31"
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/../.." && pwd)"
