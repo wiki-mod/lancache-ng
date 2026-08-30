@@ -63,13 +63,8 @@ setup() {
     [ "$status" -eq 0 ]
 }
 
-# What: the settings file's value unconditionally overwrites an
-# already-set env var of the same name, not just fills in an unset one.
-# Why: the enabled-to-enabled NTP upstream-server restart fix depends on
-# this -- config/prod/ntp.env sets a real default
-# NTP_UPSTREAM_SERVERS env var, so if the settings-file assignment below
-# were conditional on "unset", a freshly persisted upstream-server list
-# would never actually take effect on restart.
+# What: settings-file value overwrites an already-set var.
+# Why: enabled-to-enabled NTP restart fix depends on this.
 # From: Issue #1486
 @test "the settings file's NTP_UPSTREAM_SERVERS overwrites an already-set environment value" {
     printf 'NTP_UPSTREAM_SERVERS=time.example.net\n' > "$settings_file"

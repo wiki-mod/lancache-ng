@@ -41,11 +41,8 @@ extract_detection() {
 }
 
 # extract_auth_call <compose-file>
-# What: prints the dhcp healthcheck's shared-secret-file fallback through
-# its final curl/jq invocation -- the part extract_detection() excludes.
-# Why: closes a blind spot where the two compose files' credential-handling
-# code, not just their placeholder-detection code, could silently diverge
-# undetected by the existing detection-fragment test alone.
+# What: prints the dhcp healthcheck's own curl/jq call.
+# Why: credential code, not just detection, can drift too.
 # From: Issue #1304 | PR #1550
 extract_auth_call() {
     awk '
