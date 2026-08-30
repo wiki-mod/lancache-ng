@@ -285,7 +285,10 @@ jobs:
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - uses: *checkout_centraliced_versioning # v7.0.1
-      - name: Validate PR template completeness
+      - name: Validate PR template completeness (ci.sh validate-pr-template)
+        # What: live gh pr view fetch + template validation, in ci.sh.
+        # Why: §5 -- was a docker-free inline decision step in YAML.
+        # From: PR #1742 | Refs #1683
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -294,18 +297,7 @@ jobs:
           # Why: validate-pr-template.sh skips checks for Dependabot auto-PRs.
           # From: PR #903
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-        run: |
-          set -euo pipefail
-          # What: fetches PR body live via gh pr view, not the webhook payload.
-          # Why: temporary diagnostic for the 2026-07-16 empty-body incident.
-          # From: PR #903
-          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body -q .body > /tmp/pr-body-live.txt 2> /tmp/pr-body-live.stderr || {
-            echo "::error::gh pr view failed, exit code $?"
-            cat /tmp/pr-body-live.stderr
-            exit 1
-          }
-          echo "::notice::gh pr view succeeded. Body byte count: $(wc -c < /tmp/pr-body-live.txt). stderr: $(cat /tmp/pr-body-live.stderr)"
-          bash scripts/tracked/validate-pr-template.sh /tmp/pr-body-live.txt
+        run: bash scripts/ci/ci.sh validate-pr-template
 
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
@@ -328,7 +320,7 @@ jobs:
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running PR template validation on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      - name: Validate PR template completeness
+      - name: Validate PR template completeness (ci.sh validate-pr-template-fallback)
         # What: same live gh pr view fetch as pr-template-check.
         # Why: see that job's comment for why a live fetch is used.
         # From: PR #903
@@ -340,10 +332,7 @@ jobs:
           # Why: validate-pr-template.sh skips checks for Dependabot auto-PRs.
           # From: PR #903
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-        run: |
-          set -euo pipefail
-          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body -q .body > /tmp/pr-body-live.txt
-          bash scripts/tracked/validate-pr-template.sh /tmp/pr-body-live.txt
+        run: bash scripts/ci/ci.sh validate-pr-template-fallback
 
   pr-tracking-metadata-check:
     # What: enforces AG-GH-008 (labels + milestone required).
@@ -666,7 +655,10 @@ jobs:
       # What: governance guardrails step relocated from shellcheck.
       # Why: shellcheck self-skips docs-only PRs; this must always run.
       # From: PR #1325
-      - name: Run governance guardrails
+      - name: Run governance guardrails (ci.sh governance-guardrails)
+        # What: PR diff + title/body governance gate, now in ci.sh.
+        # Why: §5 -- YAML must not decide this; only orchestrate it.
+        # From: PR #1742 | Refs #1683
         if: github.event_name == 'pull_request'
         env:
           GOVERNANCE_BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -676,76 +668,21 @@ jobs:
           # From: Issue #1095 (G1) | PR #1503
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          set -euo pipefail
-
-          changed_files="$(mktemp "$PWD/.governance-changed-files.XXXXXX")"
-          trap 'rm -f "$changed_files"' EXIT
-          git fetch --no-tags --depth=1 origin \
-            "+refs/heads/${GOVERNANCE_BASE_REF}:refs/remotes/origin/${GOVERNANCE_BASE_REF}"
-          # What: fetches GOVERNANCE_BASE_SHA by exact SHA, not just branch-tip.
-          # Why: a long-lived PR's base may have advanced past the snapshot.
-          # From: PR #1325
-          git fetch --no-tags --depth=1 origin "$GOVERNANCE_BASE_SHA"
-          git cat-file -e "${GOVERNANCE_BASE_SHA}^{commit}"
-          git cat-file -e "${GITHUB_SHA}^{commit}"
-          git diff --name-only --diff-filter=ACMRTUXB "$GOVERNANCE_BASE_SHA" "$GITHUB_SHA" > "$changed_files"
-
-          # What: fetches PR title/body live, same pattern as pr-template-check.
-          # Why: the webhook snapshot is stale; a rerun replays the old text.
-          # From: PR #903
-          governance_pr_title="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json title -q .title)"
-          governance_pr_body="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body -q .body)"
-
-          # What: PR title/body passed as -e KEY=VALUE docker arguments.
-          # Why: never interpolated into a run: string; never runs as shell.
-          # From: PR #1325
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            -e GITHUB_REPOSITORY \
-            -e GOVERNANCE_PR_TITLE="$governance_pr_title" \
-            -e GOVERNANCE_PR_BODY="$governance_pr_body" \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            timeout --kill-after=30 --signal=KILL 300 \
-            bash scripts/tracked/check-governance-guards.sh --changed-files-file "/work/$(basename "$changed_files")"
+        run: bash scripts/ci/ci.sh governance-guardrails
 
       # What: warn-only guard for a PR editing CHANGELOG.md directly.
       # Why: never fails the job; the script always exits 0 (AG-VAL-004).
       # From: PR #1325
-      - name: Warn on direct CHANGELOG.md edits outside a release PR
+      - name: Warn on direct CHANGELOG.md edits outside a release PR (ci.sh changelog-direct-edit-warn)
+        # What: warn-only CHANGELOG.md direct-edit gate, now in ci.sh.
+        # Why: §5 -- same decision-out-of-YAML move as the guard above.
+        # From: PR #1742 | Refs #1683
         if: github.event_name == 'pull_request'
         env:
           GOVERNANCE_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           GOVERNANCE_BASE_REF: ${{ github.event.pull_request.base.ref }}
           PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
-        run: |
-          set -uo pipefail
-
-          changelog_guard_changed_files="$(mktemp "$PWD/.changelog-guard-changed-files.XXXXXX")"
-          trap 'rm -f "$changelog_guard_changed_files"' EXIT
-
-          if git fetch --no-tags --depth=1 origin \
-               "+refs/heads/${GOVERNANCE_BASE_REF}:refs/remotes/origin/${GOVERNANCE_BASE_REF}" \
-             && git fetch --no-tags --depth=1 origin "$GOVERNANCE_BASE_SHA" \
-             && git cat-file -e "${GOVERNANCE_BASE_SHA}^{commit}" \
-             && git cat-file -e "${GITHUB_SHA}^{commit}"; then
-            git diff --name-only --diff-filter=ACMRTUXB "$GOVERNANCE_BASE_SHA" "$GITHUB_SHA" > "$changelog_guard_changed_files"
-          else
-            echo "::warning::check-changelog-direct-edit: could not compute this PR's changed-files diff; skipping the CHANGELOG.md direct-edit check for this run."
-            : > "$changelog_guard_changed_files"
-          fi
-
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            -e CHANGELOG_GUARD_PR_LABELS="$PR_LABELS" \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            timeout --kill-after=30 --signal=KILL 300 \
-            bash scripts/tracked/check-changelog-direct-edit.sh --changed-files-file "/work/$(basename "$changelog_guard_changed_files")" \
-          || true
+        run: bash scripts/ci/ci.sh changelog-direct-edit-warn
 
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
@@ -986,26 +923,15 @@ jobs:
       # What: resolves utilities:latest, falls back to :nightly.
       # Why: latest has never been published; nightly exists and works.
       # From: Issue #1095 | PR #1706
-      - name: Resolve utilities image digest
+      - name: Resolve utilities image digest (ci.sh resolve-utilities-digest)
+        # What: latest-with-nightly-fallback digest resolution, in ci.sh.
+        # Why: §5 -- reuses ci.sh's own ci_registry_digest, not a new copy.
+        # From: PR #1742 | Refs #1683
         id: resolve-utilities-image
         env:
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          # shellcheck source=scripts/lib/ghcr-retry.sh
-          source scripts/lib/ghcr-retry.sh
-
-          utilities_digest="$(resolve_manifest_digest ghcr.io/wiki-mod/lancache-ng/utilities:latest "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")" \
-            || utilities_digest="$(resolve_manifest_digest ghcr.io/wiki-mod/lancache-ng/utilities:nightly "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")" \
-            || utilities_digest=""
-          if [[ -z "$utilities_digest" ]]; then
-            echo "::error::Could not resolve digest for ghcr.io/wiki-mod/lancache-ng/utilities:latest or :nightly." >&2
-            exit 1
-          fi
-
-          printf 'utilities_image=ghcr.io/wiki-mod/lancache-ng/utilities@%s\n' "$utilities_digest" >> "$GITHUB_OUTPUT"
-          printf 'utilities_digest=%s\n' "$utilities_digest" >> "$GITHUB_OUTPUT"
+        run: bash scripts/ci/ci.sh resolve-utilities-digest
 
       # What: removes the buildx builder right after its only consumer step.
       # Why: the fallback path uses plain docker build, not buildx.

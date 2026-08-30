@@ -1303,6 +1303,87 @@ setup() {
     [ "$status" -ne 0 ]
 }
 
+# ============================================================
+# PR GATES
+# ============================================================
+
+# What: validate-pr-template needs PR_NUMBER to fetch a body.
+# Why: a silently-empty PR number is not "no PR".
+# From: PR #1742 | Refs #1683
+@test "validate-pr-template: fails fast when PR_NUMBER is missing" {
+    run ci_cmd_validate_pr_template
+    [ "$status" -ne 0 ]
+}
+
+@test "validate-pr-template-fallback: fails fast when PR_NUMBER is missing" {
+    run ci_cmd_validate_pr_template_fallback
+    [ "$status" -ne 0 ]
+}
+
+# What: governance-guardrails needs its three PR-identity inputs.
+# Why: a silently-empty base/PR number is not "no diff to check".
+# From: PR #1742 | Refs #1683
+@test "governance-guardrails: fails fast when GOVERNANCE_BASE_SHA is missing" {
+    run ci_cmd_governance_guardrails
+    [ "$status" -ne 0 ]
+}
+
+@test "governance-guardrails: fails fast when GOVERNANCE_BASE_REF is missing" {
+    GOVERNANCE_BASE_SHA=d4946b5d5fab914d75dca96b95c0ea06bc01d4ef \
+        run ci_cmd_governance_guardrails
+    [ "$status" -ne 0 ]
+}
+
+@test "governance-guardrails: fails fast when PR_NUMBER is missing" {
+    GOVERNANCE_BASE_SHA=d4946b5d5fab914d75dca96b95c0ea06bc01d4ef \
+        GOVERNANCE_BASE_REF=current_dev \
+        run ci_cmd_governance_guardrails
+    [ "$status" -ne 0 ]
+}
+
+# What: changelog-direct-edit-warn needs the same two base inputs.
+# Why: same fail-fast contract as governance-guardrails above.
+# From: PR #1742 | Refs #1683
+@test "changelog-direct-edit-warn: fails fast when GOVERNANCE_BASE_SHA is missing" {
+    run ci_cmd_changelog_direct_edit_warn
+    [ "$status" -ne 0 ]
+}
+
+@test "changelog-direct-edit-warn: fails fast when GOVERNANCE_BASE_REF is missing" {
+    GOVERNANCE_BASE_SHA=d4946b5d5fab914d75dca96b95c0ea06bc01d4ef \
+        run ci_cmd_changelog_direct_edit_warn
+    [ "$status" -ne 0 ]
+}
+
+# What: resolve-utilities-digest prefers :latest, falls back to :nightly.
+# Why: latest has never been published; nightly must still resolve it.
+# From: Issue #1095 | PR #1706
+@test "resolve-utilities-digest: uses the latest digest when it resolves" {
+    ci_registry_digest() {
+        [[ "$1" == *:latest ]] && { printf 'sha256:%064d\n' 1; return 0; }
+        return 1
+    }
+    GITHUB_OUTPUT="" run ci_cmd_resolve_utilities_digest
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"utilities_digest=sha256:$(printf '%064d' 1)"* ]]
+}
+
+@test "resolve-utilities-digest: falls back to nightly when latest fails" {
+    ci_registry_digest() {
+        [[ "$1" == *:nightly ]] && { printf 'sha256:%064d\n' 2; return 0; }
+        return 1
+    }
+    GITHUB_OUTPUT="" run ci_cmd_resolve_utilities_digest
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"utilities_digest=sha256:$(printf '%064d' 2)"* ]]
+}
+
+@test "resolve-utilities-digest: fails when both latest and nightly fail" {
+    ci_registry_digest() { return 1; }
+    run ci_cmd_resolve_utilities_digest
+    [ "$status" -ne 0 ]
+}
+
 # What: compose-healthchecks runs clean on this repo's tree.
 # Why: this repo's own compose files are the check's fixture.
 # From: Issue #1683

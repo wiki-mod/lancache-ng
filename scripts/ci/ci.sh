@@ -1496,6 +1496,151 @@ ci_cmd_checks() {
 }
 
 # ============================================================
+# PR GATES
+# ============================================================
+#
+# What: PR-metadata gates that were inline docker-run steps.
+# Why: §5 -- each decided its own pass/fail directly in YAML.
+# From: PR #1742 | Refs #1683
+
+ci_cmd_validate_pr_template() {
+    # What: fetches the PR body live, then validates its template.
+    # Why: pr-template-check's own diagnostic for the 2026-07-16 bug.
+    # From: PR #903
+    local pr_number="${PR_NUMBER:?PR_NUMBER is required}"
+    local body_file="/tmp/pr-body-live.txt"
+    local stderr_file="/tmp/pr-body-live.stderr"
+
+    gh pr view "$pr_number" --repo "$GITHUB_REPOSITORY" --json body -q .body \
+        > "$body_file" 2> "$stderr_file" || {
+        ci_annotate error "gh pr view failed, exit code $?"
+        cat "$stderr_file" >&2
+        exit 1
+    }
+    ci_annotate notice "gh pr view succeeded. Body byte count: $(wc -c < "$body_file"). stderr: $(cat "$stderr_file")"
+    bash "$CI_REPO_ROOT/scripts/tracked/validate-pr-template.sh" "$body_file"
+}
+
+ci_cmd_validate_pr_template_fallback() {
+    # What: fetches the PR body live, then validates its template.
+    # Why: GitHub-hosted fallback's own copy; no live-fetch diagnostic.
+    # From: PR #903
+    local pr_number="${PR_NUMBER:?PR_NUMBER is required}"
+    local body_file="/tmp/pr-body-live.txt"
+
+    gh pr view "$pr_number" --repo "$GITHUB_REPOSITORY" --json body -q .body > "$body_file"
+    bash "$CI_REPO_ROOT/scripts/tracked/validate-pr-template.sh" "$body_file"
+}
+
+ci_cmd_governance_guardrails() {
+    # What: runs check-governance-guards.sh over this PR's diff.
+    # Why: §5 -- the PR's changed-files/title/body gate belongs here.
+    # From: PR #1325 | Refs #1683
+    local base_sha="${GOVERNANCE_BASE_SHA:?GOVERNANCE_BASE_SHA is required}"
+    local base_ref="${GOVERNANCE_BASE_REF:?GOVERNANCE_BASE_REF is required}"
+    local pr_number="${PR_NUMBER:?PR_NUMBER is required}"
+
+    cd "$CI_REPO_ROOT"
+
+    # What: the file must live under $PWD for the docker :ro mount below.
+    # Why: matches this check's own pre-extraction mktemp convention.
+    # From: PR #1325 | Refs #1683
+    local changed_files
+    changed_files="$(mktemp "$PWD/.governance-changed-files.XXXXXX")"
+    trap 'rm -f "$changed_files"' EXIT
+    git fetch --no-tags --depth=1 origin \
+        "+refs/heads/${base_ref}:refs/remotes/origin/${base_ref}"
+    # What: fetches base_sha by exact SHA, not just branch-tip.
+    # Why: a long-lived PR's base may have advanced past the snapshot.
+    # From: PR #1325
+    git fetch --no-tags --depth=1 origin "$base_sha"
+    git cat-file -e "${base_sha}^{commit}"
+    git cat-file -e "${GITHUB_SHA}^{commit}"
+    git diff --name-only --diff-filter=ACMRTUXB "$base_sha" "$GITHUB_SHA" > "$changed_files"
+
+    # What: fetches PR title/body live, same as pr-template-check.
+    # Why: the webhook snapshot is stale; a rerun replays the old text.
+    # From: PR #903
+    local governance_pr_title governance_pr_body
+    governance_pr_title="$(gh pr view "$pr_number" --repo "$GITHUB_REPOSITORY" --json title -q .title)"
+    governance_pr_body="$(gh pr view "$pr_number" --repo "$GITHUB_REPOSITORY" --json body -q .body)"
+
+    # What: PR title/body passed as -e KEY=VALUE docker arguments.
+    # Why: never interpolated into a run: string; never runs as shell.
+    # From: PR #1325
+    docker run --rm \
+        --user "$(id -u):$(id -g)" \
+        -v "$PWD:/work:ro" \
+        -w /work \
+        -e GITHUB_REPOSITORY \
+        -e GOVERNANCE_PR_TITLE="$governance_pr_title" \
+        -e GOVERNANCE_PR_BODY="$governance_pr_body" \
+        "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+        timeout --kill-after=30 --signal=KILL 300 \
+        bash scripts/tracked/check-governance-guards.sh --changed-files-file "/work/$(basename "$changed_files")"
+}
+
+ci_cmd_changelog_direct_edit_warn() {
+    # What: warns (never fails) on a direct CHANGELOG.md edit.
+    # Why: AG-VAL-004 -- this check must never fail the job.
+    # From: PR #1325 | Refs #1683
+    local base_sha="${GOVERNANCE_BASE_SHA:?GOVERNANCE_BASE_SHA is required}"
+    local base_ref="${GOVERNANCE_BASE_REF:?GOVERNANCE_BASE_REF is required}"
+    local pr_labels="${PR_LABELS:-}"
+
+    cd "$CI_REPO_ROOT"
+    # What: disables ci.sh's own top-level errexit for this function.
+    # Why: the original step used `set -uo pipefail` (no -e) on purpose,
+    #   so a fetch failure falls through to the warning path below,
+    #   not an aborted job.
+    # From: PR #1325 | Refs #1683
+    set +e
+
+    local changed_files
+    changed_files="$(mktemp "$PWD/.changelog-guard-changed-files.XXXXXX")"
+    trap 'rm -f "$changed_files"' EXIT
+
+    if git fetch --no-tags --depth=1 origin \
+         "+refs/heads/${base_ref}:refs/remotes/origin/${base_ref}" \
+       && git fetch --no-tags --depth=1 origin "$base_sha" \
+       && git cat-file -e "${base_sha}^{commit}" \
+       && git cat-file -e "${GITHUB_SHA}^{commit}"; then
+        git diff --name-only --diff-filter=ACMRTUXB "$base_sha" "$GITHUB_SHA" > "$changed_files"
+    else
+        ci_annotate warning "check-changelog-direct-edit: could not compute this PR's changed-files diff; skipping the CHANGELOG.md direct-edit check for this run."
+        : > "$changed_files"
+    fi
+
+    docker run --rm \
+        --user "$(id -u):$(id -g)" \
+        -v "$PWD:/work:ro" \
+        -w /work \
+        -e CHANGELOG_GUARD_PR_LABELS="$pr_labels" \
+        "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+        timeout --kill-after=30 --signal=KILL 300 \
+        bash scripts/tracked/check-changelog-direct-edit.sh --changed-files-file "/work/$(basename "$changed_files")" \
+    || true
+
+    set -e
+}
+
+ci_cmd_resolve_utilities_digest() {
+    # What: resolves utilities:latest, falls back to :nightly.
+    # Why: latest has never been published; nightly exists and works.
+    # From: Issue #1095 | PR #1706
+    local digest
+    digest="$(ci_registry_digest ghcr.io/wiki-mod/lancache-ng/utilities:latest)" \
+        || digest="$(ci_registry_digest ghcr.io/wiki-mod/lancache-ng/utilities:nightly)" \
+        || digest=""
+    if [[ -z "$digest" ]]; then
+        ci_annotate error "Could not resolve digest for ghcr.io/wiki-mod/lancache-ng/utilities:latest or :nightly."
+        exit 1
+    fi
+    ci_emit_output utilities_image "ghcr.io/wiki-mod/lancache-ng/utilities@$digest"
+    ci_emit_output utilities_digest "$digest"
+}
+
+# ============================================================
 # REPO CONTRACT VALIDATION
 # ============================================================
 #
@@ -2947,6 +3092,11 @@ Commands:
   release <channel>            Promote an accepted stack to a release.
   gc [--execute]               Report unreachable artifacts.
   checks                       Run every kept standing-check script.
+  validate-pr-template         Run PR-template validation (self-hosted, with diagnostics).
+  validate-pr-template-fallback Run PR-template validation (hosted fallback copy).
+  governance-guardrails        Run check-governance-guards.sh over this PR diff.
+  changelog-direct-edit-warn   Warn (never fail) on a direct CHANGELOG.md edit.
+  resolve-utilities-digest     Resolve utilities:latest digest, fallback :nightly.
   file-header-checks           Run file-headers/-hosted's 6 repo-wide checks.
   diff-checks <sha> <ref>      Run the PR-diff-scoped header/chronology checks.
   compose-healthchecks         Run compose-healthchecks/-hosted's own check.
@@ -2996,6 +3146,11 @@ ci_main() {
         release) ci_cmd_release "${1:?release: channel required}" ;;
         gc) ci_cmd_gc "${1:-report}" ;;
         checks) ci_cmd_checks ;;
+        validate-pr-template) ci_cmd_validate_pr_template ;;
+        validate-pr-template-fallback) ci_cmd_validate_pr_template_fallback ;;
+        governance-guardrails) ci_cmd_governance_guardrails ;;
+        changelog-direct-edit-warn) ci_cmd_changelog_direct_edit_warn ;;
+        resolve-utilities-digest) ci_cmd_resolve_utilities_digest ;;
         file-header-checks) ci_cmd_file_header_checks ;;
         diff-checks) ci_cmd_diff_checks "${1:?diff-checks: base sha required}" "${2:?diff-checks: base ref required}" ;;
         compose-healthchecks) ci_cmd_compose_healthchecks ;;
