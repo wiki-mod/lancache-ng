@@ -31,6 +31,11 @@ history_refs_raw="${SRA_HISTORY_REFS:-${SRA_HISTORY_REF:-origin/current_dev}}"
 package_filter="${SRA_PACKAGE_FILTER:-}"
 version_snapshot_file="${SRA_VERSION_SNAPSHOT_FILE:-}"
 max_pages_per_package="${SRA_MAX_PAGES_PER_PACKAGE:-500}"
+# What: safety margin before an orphan closure is deletable
+# Why: 14 days exceeds any real merge job's runtime by far
+# From: Issue #1095
+orphan_closure_min_age_seconds="${SRA_ORPHAN_CLOSURE_MIN_AGE_SECONDS:-1209600}"
+now_epoch="$(date -u +%s)"
 # What: Bounds concurrent package audit batch size
 # Why: Enables full registry audits within CI timeout via batching
 # From: Issue #1585
