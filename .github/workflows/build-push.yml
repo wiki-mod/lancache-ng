@@ -2701,7 +2701,7 @@ jobs:
 
       - name: Log in to GHCR
         if: steps.channel.outputs.pr-staging-available == 'true'
-        uses: &docker_login_centraliced_versioning docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: &docker_login_centraliced_versioning ./.github/actions/docker-login-action-centralized-version
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -4665,7 +4665,7 @@ jobs:
         # file for the confirmed incident: "denied: denied" under a real push burst). This
         # job exists specifically to help with burst/push-cost behavior, so skipping this
         # login would risk reintroducing the exact class of failure it's meant to reduce.
-        uses: *docker_login_centraliced_versioning # v4.6.0
+        uses: *docker_login_centraliced_versioning
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -5165,7 +5165,7 @@ jobs:
               )
             )
           }}
-        uses: *docker_login_centraliced_versioning # v4.6.0
+        uses: *docker_login_centraliced_versioning
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -6164,7 +6164,7 @@ jobs:
               )
             )
           }}
-        uses: *docker_login_centraliced_versioning # v4.6.0
+        uses: *docker_login_centraliced_versioning
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -6661,7 +6661,7 @@ jobs:
         uses: *docker_setup_buildx_centraliced_versioning # v4.3.0
 
       - name: Log in to GHCR
-        uses: *docker_login_centraliced_versioning # v4.6.0
+        uses: *docker_login_centraliced_versioning
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -7306,7 +7306,7 @@ jobs:
         uses: *docker_setup_buildx_centraliced_versioning # v4.3.0
 
       - name: Log in to GHCR
-        uses: *docker_login_centraliced_versioning # v4.6.0
+        uses: *docker_login_centraliced_versioning
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -7715,7 +7715,7 @@ jobs:
         uses: *docker_setup_buildx_centraliced_versioning # v4.3.0
 
       - name: Log in to GHCR
-        uses: *docker_login_centraliced_versioning # v4.6.0
+        uses: *docker_login_centraliced_versioning
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -8101,7 +8101,7 @@ jobs:
         uses: *docker_setup_buildx_centraliced_versioning # v4.3.0
 
       - name: Log in to GHCR
-        uses: *docker_login_centraliced_versioning # v4.6.0
+        uses: *docker_login_centraliced_versioning
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
