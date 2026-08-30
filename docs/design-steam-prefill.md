@@ -1,10 +1,12 @@
 # Steam Prefill (Proactive Cache Warming) — Design Plan
 
-**Status (updated 2026-08-29): mechanism decided, implementation not yet
-started.** The maintainer has decided the engine: stream-and-discard, no
-SteamCMD (see the "Overlap with #871" section below). Credential strategy and which service houses the engine remain
-open (see "Open decisions" below) — no implementation may begin until
-those are answered. This is the written design plan issue
+**Status (updated 2026-08-29): mechanism decided, implementation started
+as a scaffold.** The maintainer has decided the engine: stream-and-discard,
+no SteamCMD (see the "Overlap with #871" section below). All three
+originally-open decisions are now resolved (see "Open decisions" below);
+`services/warmer` exists with real credential-store and stream-fetch code,
+but not yet the Steam control-plane/depot integration that would make it
+functional end-to-end. This is the written design plan issue
 [#816](https://github.com/wiki-mod/lancache-ng/issues/816) asked for. Most
 of the research below was already captured directly in #816's own issue
 body and its 2026-07-14 self-correction comment; this document
@@ -230,22 +232,35 @@ authors could resolve unilaterally.** Two honest framings were possible:
 
 ## Open decisions for the maintainer
 
-1. **Credential strategy** (still open): dedicated/throwaway Steam account
-   for prefill vs. the owner's main account; where credentials are stored
-   (env var / secret file, never committed). Real consequences (account,
-   blast radius if the prefill host is compromised) — not decided here.
-2. **Which service houses the engine** (still open, replaces the earlier
-   "in-repo vs. separate binary/repo" framing now that in-repo is the
-   working assumption): a new `services/warmer` service, vs. a module
-   inside the existing `services/ui` Admin UI service (which already
-   depends on `reqwest` with streaming support — see
-   `services/ui/src/routes/netdata_proxy.rs`'s `bytes_stream()` usage —
-   and is the documented control surface for warming: app-ID input, live
-   progress, purge tracking). This is a new-file/new-service decision
-   under `AGENTS.md`'s AG-CODE-013 (new files carry a standing DISACK
-   until a suitable existing home is ruled out and the maintainer
-   explicitly ACKs a new one) and needs the maintainer's explicit answer
-   before any service scaffolding is created.
+1. ~~**Credential strategy**~~ — resolved 2026-08-29. The maintainer's own
+   account is explicitly excluded as an option ("ich werde sicher nicht
+   mein Account hier hinterlegen"). Beyond that, this is not the
+   project's decision to make at all: whether an operator's own
+   lancache-ng instance persists a Steam credential across restarts, or
+   never writes it to disk (re-entered every run), is that operator's own
+   choice, configurable per instance (`services/warmer`'s
+   `WARMER_CREDENTIAL_PERSISTENCE=none|persistent`). If an operator
+   chooses persistence, the credential is never stored in a
+   plaintext-readable form: `services/warmer/src/credential_store.rs`
+   derives a symmetric key from a locally-generated master secret via
+   Argon2id (already an established project dependency, issue #680 —
+   reused here as a raw KDF rather than its one-way password-hash form)
+   plus a random per-credential salt, then encrypts the credential with
+   XChaCha20-Poly1305 (AEAD, random 192-bit nonce per encryption). At
+   rest, only salt + nonce + ciphertext exist; the plaintext is
+   recoverable only by the running process, for internal use, and is
+   never returned by any Admin-UI/API surface (mirrors how
+   `UI_AUTH_PASSWORD` is compared but never echoed back).
+2. ~~**Which service houses the engine**~~ — resolved 2026-08-29: a new
+   `services/warmer` service (not a `services/ui` module). Maintainer's
+   stated reasoning: the warmer must be independently, separately
+   switchable off without affecting the rest of the stack, which favors a
+   clearly-bounded standalone service over an embedded module. The
+   `services/ui` `reqwest`-streaming precedent named in the earlier
+   version of this decision (`bytes_stream()` in
+   `services/ui/src/routes/netdata_proxy.rs`) was a real, considered
+   alternative — not dismissed for a technical reason, superseded by this
+   operational one.
 3. ~~**#871 reconciliation**~~ — resolved 2026-08-29, see above.
 
 ## Proposed ordered plan (pending the decisions above)
