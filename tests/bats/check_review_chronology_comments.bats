@@ -308,8 +308,8 @@ EOF
 # From: PR #1546
 @test "fails when a comment repeats a number already declared by this file's own From: pointer" {
     cat > "$fixture_root/example.dockerfile" <<'EOF'
-# What: ccache preprocesses locally instead of shelling
-# Why: sccache always shells its own -E pass, which
+# What: ccache preprocesses locally instead of shelling through distcc.
+# Why: shells own -E pass, which crashes ,cpp-tagged distcc host list
 # From: Issue #887
 RUN true
 EOF

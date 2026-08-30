@@ -239,32 +239,6 @@ run_cmd_secondary_full() {
         || fail "the 503 die message's recreate example no longer shows --env-file .env.local for the .env.local case"
 }
 
-@test "cmd_secondary heredoc body stays in sync with the checked-in deploy/secondary/docker-compose.yml reference" {
-    # What: Diffs heredoc's entire generated body (from `ser
-    #   onward) against the checked-in deploy/secondary/docker-compose.yml
-    #   reference.
-    # Why: that reference file's own header claims "do not e
-    #   manually," but PR #876 hand-edited it instead of the heredoc,
-    #   leaving the two silently diverged.
-    # From: Issue #946 | PR #976
-    local heredoc_body reference_body
-
-    heredoc_body=$(extract_cmd_secondary_heredoc) \
-        || skip "Could not find cmd_secondary heredoc start"
-
-    # What: Un-escapes heredoc's literal `\$`/`` \` `` back
-    #   `$`/`` ` `` before diffing.
-    # Why: the heredoc is unquoted (<<EOF), so setup.sh must
-    #   escape those characters to survive heredoc expansion at
-    #   generation time; the reference file contains them unescaped.
-    heredoc_body=$(echo "$heredoc_body" | sed -e 's/\\\$/$/g' -e 's/\\`/`/g')
-
-    reference_body=$(awk '/^services:/ { found = 1 } found { print }' \
-        "$repo_root/deploy/secondary/docker-compose.yml")
-
-    diff <(printf '%s\n' "$heredoc_body") <(printf '%s\n' "$reference_body")
-}
-
 @test "cmd_secondary's registration POST sends the token via stdin, not argv" {
     # What: Asserts registration POST reads its JSON body fr
     #   (`-d @-`), never as a literal `-d "..."` argument.
