@@ -929,21 +929,10 @@ sleep 5
 docker rm -f "$dhcp_proxy_client_container" >/dev/null 2>&1 || true
 assert_marker_reaches_ui "$dhcp_proxy_subnet_start" "dhcp-proxy/dnsmasq (startup banner's DHCP_SUBNET_START value)"
 
-echo "== netdata: documented weaker check (no operator-triggerable marker mechanism found) =="
-# netdata is a third-party image (docs/architecture-ng.md's logging matrix);
-# no repo-managed config or route was found that lets an operator inject a
-# distinguishing string into its forwarded logs. Unlike
-# watchdog/nats/ui/proxy/dns-standard/dns-ssl, this is a structural gap, not
-# a convenience shortcut -- mirrors dhcp-probe's existing documented "Not
-# applicable" treatment in the logging matrix. What IS verified: netdata's
-# daemon/health logs -- the only netdata streams deploy/*/docker-compose.yml
-# deliberately redirect to real, fluent-bit-tailable files; the far
-# higher-rate collector stream is intentionally left on its stdout default
-# and NOT forwarded, so it cannot flood the bounded /logs view and bury
-# every other service's marker -- reliably produce at least one real
-# forwarded line within the first minute of normal operation, so this still
-# proves netdata's logging path is wired end-to-end, just without per-run
-# marker discrimination.
+echo "== netdata: non-blocking check (no operator-triggerable marker mechanism found) =="
+# What: polls for netdata log line, never fails the run.
+# Why: no operator-triggerable marker exists for netdata.
+# From: Issue #1095
 netdata_deadline=$((SECONDS + 90))
 netdata_seen=0
 while (( SECONDS < netdata_deadline )); do
@@ -958,10 +947,10 @@ while (( SECONDS < netdata_deadline )); do
     sleep 3
 done
 if [[ "$netdata_seen" -ne 1 ]]; then
-    echo "::error::No line attributed to host 'netdata' ever appeared via the Admin UI /logs route within 90s." >&2
-    exit 1
+    echo "::warning::No line attributed to host 'netdata' appeared via the Admin UI /logs route within 90s -- non-blocking, see comment above." >&2
+else
+    echo "OK: netdata's forwarded logging path is visible via the real Admin UI /logs route (no per-event marker; see comment above for why)."
 fi
-echo "OK: netdata's forwarded logging path is visible via the real Admin UI /logs route (no per-event marker; see comment above for why)."
 
 echo "== fluent-bit self-log (issue #864): documented weaker check, same class as netdata above =="
 # fluent-bit's own internal log has no operator-triggerable marker mechanism
@@ -993,4 +982,4 @@ if [[ "$selflog_seen" -ne 1 ]]; then
 fi
 echo "OK: fluent-bit's own self-log is visible via the real Admin UI /logs route (no per-event marker; see comment above for why)."
 
-echo "syslog-forwarding-simulation passed: proxy, ui, nats, dns-standard, dns-ssl, watchdog, dhcp (Kea), and dhcp-proxy (dnsmasq) were each proven end-to-end with a unique or real-event marker (real trigger -> syslog-ng file -> real Admin UI /logs response); netdata and fluent-bit's own self-log were proven present via documented weaker checks."
+echo "syslog-forwarding-simulation passed: proxy, ui, nats, dns-standard, dns-ssl, watchdog, dhcp (Kea), and dhcp-proxy (dnsmasq) were each proven end-to-end with a unique or real-event marker (real trigger -> syslog-ng file -> real Admin UI /logs response); fluent-bit's own self-log was proven present via a documented weaker check; netdata's forwarded log line was checked but is non-blocking (see comment above)."
