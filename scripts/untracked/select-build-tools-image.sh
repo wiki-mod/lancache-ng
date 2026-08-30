@@ -90,6 +90,10 @@ smoke_test_image() {
       distcc
       distcc-pump
       docker
+      # What: verifies gh is present in the image.
+      # Why: gc-pr-staging-images.sh requires gh at runtime.
+      # From: Issue #1095.
+      gh
       jq
       dig
       ip

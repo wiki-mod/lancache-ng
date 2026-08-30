@@ -24,12 +24,22 @@
 #     a stretch reading of it.
 #   - The client's own veth/eth0 is left exactly as Docker's IPAM
 #     configured it: dhclient runs with `-sf /bin/true` (a no-op "apply
-#     the lease" script) -- this script deliberately still uses real
-#     `dhclient` here (a controlled, isolated-network CI test of Kea's own
-#     server behavior, not a rewrite target of issue #1288, which only
+#     the lease" script) -- this script deliberately still uses a real
+#     DHCP client here (a controlled, isolated-network CI test of Kea's
+#     own server behavior, not a rewrite target of issue #1288, which only
 #     replaced the Admin UI's own dhcp-probe container) -- a real lease is
 #     negotiated over the wire, but nothing ever calls `ip addr add`/
-#     `ip route` to actually apply it.
+#     `ip route` to actually apply it. Since issue #1095 (Alpine's
+#     `alpine-final` build stage ships no ISC dhclient package at all --
+#     confirmed via a real `apk search` -- see AGENTS.md's own "AG-VAL-028
+#     family assessment" entry), this script detects at container runtime
+#     whether `$client_tool_image` provides `dhclient` or BusyBox `udhcpc`
+#     (`dhcp_client_capture_script`, defined near `client_tool_image`
+#     below) and uses whichever is present; udhcpc's own equivalent to
+#     `-sf /bin/true` is a capture-only `-s` hook script that never calls
+#     `ip`/`ifconfig`/`route` either, confirmed empirically to leave the
+#     container's interface/routes untouched exactly like dhclient's own
+#     no-op script does.
 #   - Docker's own container-address allocation is confined to a small
 #     sub-range (see --ip-range below) that never overlaps the Kea pool,
 #     so there is no possibility of the test's own plumbing colliding with
@@ -45,7 +55,7 @@
 # sequence services/ui/src/routes/dhcp.rs's kea_config_modify() drives for
 # the Admin UI's /dhcp/static/add route, just called here without going
 # through the Admin UI HTTP layer -- and then runs a SECOND and THIRD real
-# dhclient client (assert_static_reservation_honored below) to prove Kea's
+# DHCP client (assert_static_reservation_honored below) to prove Kea's
 # own runtime actually honors it: the reserved MAC receives the reserved,
 # out-of-pool address, and a second, unrelated MAC still receives a normal
 # pool address rather than leaking the reservation. This is a different
@@ -132,11 +142,105 @@ source "$repo_root/scripts/lib/dhcp-lease-parse.sh"
 # shellcheck source=scripts/lib/reserve-validation-subnet.sh
 source "$repo_root/scripts/lib/reserve-validation-subnet.sh"
 
-client_tool_image="${DHCP_LEASE_FLOW_CLIENT_IMAGE:?DHCP_LEASE_FLOW_CLIENT_IMAGE is required (an image providing dhclient, e.g. the build-tools image)}"
+client_tool_image="${DHCP_LEASE_FLOW_CLIENT_IMAGE:?DHCP_LEASE_FLOW_CLIENT_IMAGE is required (an image providing dhclient or udhcpc/busybox, e.g. the build-tools image)}"
 
 work_dir="$repo_root/.dhcp-kea-lease-flow-simulation-tmp"
 rm -rf "$work_dir"
 mkdir -p "$work_dir/client-state"
+
+# dhcp_client_capture_script (issue #1095's Alpine dhcp-client research --
+# see AGENTS.md's own "AG-VAL-028 family assessment" entry for the full
+# comparison this codifies): the in-container command run for every real
+# DHCP client negotiation in this file. Detects at container runtime which
+# client $client_tool_image actually provides -- ISC dhclient (the Debian
+# build-tools image, still the default today) or BusyBox udhcpc (the
+# Alpine build-tools candidate stage, issue #1691, which ships no ISC
+# dhclient package at all -- confirmed via a real `apk search`) -- and
+# always leaves a dhclient-compatible `lease { ... }` block at
+# /dhcp-test/dhclient.leases, so every caller below (the polling loop,
+# dhcp_lease_parse_latest) stays client-agnostic and needs no changes of
+# its own regardless of which binary actually ran.
+#
+# Neither branch ever applies the negotiated lease to the container's own
+# interface. dhclient's own -sf /bin/true (unchanged from before this
+# dispatch existed) is a real no-op apply-script. udhcpc's -s hook below
+# only ever appends the lease's option values to a file -- no ip/ifconfig/
+# route invocation anywhere in it -- which is a real, literal equivalent
+# by construction, confirmed empirically (issue #1095): unlike dhclient,
+# BusyBox delegates 100% of interface configuration to this external
+# hook script rather than doing it internally, so a hook that never calls
+# ip/ifconfig/route can never mutate interface/route state. (dhcpcd, also
+# investigated and rejected for this file, has no equivalent: its only
+# non-applying mode, -T/--test, never completes the handshake past
+# DHCPOFFER -- confirmed against this same Kea image via Kea's own
+# server-side packet log and an empty kea-leases4.csv -- and its normal
+# mode configures the interface itself via internal netlink calls with no
+# flag to suppress that.)
+#
+# The udhcpc branch also sends an explicit client hostname
+# (-x hostname:"$(hostname)"): confirmed empirically (issue #1095) that
+# Kea's DDNS (DHCP_DDNS_ENABLED=true, exercised further below) only fires
+# when the client supplies some hostname/Option 12 value for
+# ddns-replace-client-name's "when-present" default to act on -- exactly
+# what dhclient already does unconditionally via Debian's default
+# dhclient.conf (`host-name = gethostname()`, see this file's own header
+# comment on ddns_expected_fqdn below), but which udhcpc does not send on
+# its own. Without this flag, a real run showed a clean DHCPACK but no
+# DHCP_DDNS_ADD_SUCCEEDED log line and no A/PTR record at all; with it,
+# both the forward and reverse records were created exactly as with
+# dhclient.
+read -r -d '' dhcp_client_capture_script <<'CLIENT_SCRIPT' || true
+set -u
+if command -v dhclient >/dev/null 2>&1; then
+    dhclient -4 -1 -v -d -sf /bin/true -pf /dhcp-test/dhclient.pid -lf /dhcp-test/dhclient.leases eth0 >/dhcp-test/dhclient.out 2>&1
+elif command -v udhcpc >/dev/null 2>&1 || command -v busybox >/dev/null 2>&1; then
+    cat > /tmp/udhcpc-lease-capture.sh <<'HOOK_SCRIPT'
+#!/bin/sh
+# See dhcp_client_capture_script's own comment in
+# dhcp-kea-lease-flow-simulation.sh for why this hook exists and why it
+# never mutates interface/route state: it contains no ip/ifconfig/route
+# call at all, only ever appending option values to a file.
+[ "$1" = "bound" ] || [ "$1" = "renew" ] || exit 0
+csv() { printf '%s' "$1" | tr ' ' ','; }
+{
+    echo "lease {"
+    [ -n "${ip:-}" ] && echo "  fixed-address ${ip};"
+    [ -n "${router:-}" ] && echo "  option routers ${router};"
+    [ -n "${serverid:-}" ] && echo "  option dhcp-server-identifier ${serverid};"
+    [ -n "${dns:-}" ] && echo "  option domain-name-servers $(csv "${dns}");"
+    [ -n "${ntpsrv:-}" ] && echo "  option ntp-servers $(csv "${ntpsrv}");"
+    [ -n "${lease:-}" ] && echo "  option dhcp-lease-time ${lease};"
+    [ -n "${domain:-}" ] && echo "  option domain-name \"${domain}\";"
+    [ -n "${subnet:-}" ] && echo "  option subnet-mask ${subnet};"
+    echo "}"
+} >> /dhcp-test/dhclient.leases
+HOOK_SCRIPT
+    chmod +x /tmp/udhcpc-lease-capture.sh
+    # Two separate command lines, not one built from a dynamically-quoted
+    # variable: `udhcpc_bin="busybox udhcpc"` followed by `"$udhcpc_bin" ...`
+    # would quote the whole two-word string into a single argv[0], which
+    # exec(2) would then look for as one literal (and nonexistent) binary
+    # named "busybox udhcpc" -- a real bug caught before this shipped, not
+    # a hypothetical one; word-splitting an unquoted variable would dodge
+    # it too, but at the cost of shellcheck's SC2086 flagging the very
+    # thing this comment would then have to justify. Alpine's own busybox
+    # package always symlinks each enabled applet (udhcpc included) to a
+    # standalone binary, so the `command -v udhcpc` branch is what actually
+    # runs on the alpine-final image this dispatch exists for; the bare
+    # `busybox udhcpc` fallback below only matters for a hypothetical image
+    # that ships busybox without that symlink.
+    if command -v udhcpc >/dev/null 2>&1; then
+        udhcpc -i eth0 -s /tmp/udhcpc-lease-capture.sh -x hostname:"$(hostname)" -q -n -f >/dhcp-test/dhclient.out 2>&1
+    else
+        busybox udhcpc -i eth0 -s /tmp/udhcpc-lease-capture.sh -x hostname:"$(hostname)" -q -n -f >/dhcp-test/dhclient.out 2>&1
+    fi
+else
+    echo "::error::Neither dhclient nor udhcpc/busybox is available in this image; cannot run a real DHCP client." >&2
+    exit 1
+fi
+echo DONE >> /dhcp-test/dhclient.out
+CLIENT_SCRIPT
+readonly dhcp_client_capture_script
 
 # ISC dhclient (4.4.x, the Debian isc-dhcp-client package) binds the raw DHCP
 # socket as root, then permanently drops privileges to an unprivileged,
@@ -155,7 +259,12 @@ mkdir -p "$work_dir/client-state"
 # world-writable is safe here: it is a throwaway, per-run temp directory
 # scoped to this one script invocation, not a shared or security-sensitive
 # path, and this is what lets dhclient's post-privilege-drop identity
-# actually write the lease file the rest of this script depends on.
+# actually write the lease file the rest of this script depends on. This
+# applies only to the dhclient branch above -- BusyBox udhcpc runs as root
+# throughout (no privilege drop) and needs no such workaround, but the
+# directory is made world-writable unconditionally regardless of which
+# client ends up running, since that is determined only once the container
+# below actually starts.
 chmod 0777 "$work_dir/client-state"
 
 # dhcp_test_domain: a distinctive, run-unique DHCP_DOMAIN value (not the
@@ -548,48 +657,60 @@ if [[ "$kea_ready" -ne 1 ]]; then
 fi
 echo "Kea DHCPv4 server is up (Subnet: $subnet, Pool: $pool_start - $pool_end)."
 
-echo "== Running a real DHCP client (dhclient) against Kea: Discover/Offer/Request/Ack =="
-# -sf /bin/true: negotiate a real lease over the wire but never apply it to
-# this container's own interface (see the safety-model comment above).
-# dhclient does not reliably exit on its own after -1 on every distro build
-# once bound (confirmed directly during development of this script) so this
-# polls for the lease file instead of trusting dhclient's own exit code, and
-# force-kills it once a lease has actually been written.
+echo "== Running a real DHCP client (dhclient or udhcpc, whichever \$client_tool_image provides) against Kea: Discover/Offer/Request/Ack =="
+# dhcp_client_capture_script (defined above, near client_tool_image) picks
+# the right client at container runtime and negotiates a real lease over
+# the wire without ever applying it to this container's own interface (see
+# that variable's own comment, and the safety-model comment near the top of
+# this file). Neither client reliably exits on its own once bound on every
+# distro build (confirmed directly for dhclient during development of this
+# script; udhcpc's -q does exit promptly in practice but this script does
+# not rely on that), so this polls for the lease file instead of trusting
+# either client's own exit code, and force-kills the container once a lease
+# has actually been written.
 client_container="lancache-ng-dhcp448-client-${octet}-$$"
 
-# No custom -cf/dhclient.conf here (issue #706) -- deliberately, after an
-# earlier version of this section that added one regressed the pre-existing
-# NTP-servers assertion below (a custom -cf file entirely replaces
-# dhclient's system default /etc/dhcp/dhclient.conf, including its
-# `request ... ntp-servers;` line, so a minimal custom file that only
-# `send`s a hostname silently stops requesting NTP servers at all) without
-# even achieving its own goal: Debian's default dhclient.conf already sends
-# `host-name = gethostname()` (the container's own Docker-assigned
-# hostname) on every run, with or without a custom -cf, and Kea's own
-# ddns-replace-client-name default, "when-present" (services/dhcp/
-# entrypoint.sh's migrate_dhcp4_config), does NOT mean "use the client's
-# name when present" -- verified empirically against a real Kea 2.6.3 D2
-# instance -- it means the opposite: Kea REPLACES whatever hostname the
-# client sent with its own ddns-generated-prefix-based name (confirmed:
-# Kea's own DHCPOFFER/DHCPACK echo back Option 12 as
-# "dhcp-<dashed-ip>.<domain>", not the client-sent value) precisely because
-# a name WAS present to trigger the replacement. So the DDNS record Kea
-# will actually create is deterministic from the offered address alone,
-# with no client-side cooperation needed at all -- see
-# assert_ddns_record_matches_lease's caller below.
+# No custom -cf/dhclient.conf for the dhclient branch (issue #706) --
+# deliberately, after an earlier version of this section that added one
+# regressed the pre-existing NTP-servers assertion below (a custom -cf file
+# entirely replaces dhclient's system default /etc/dhcp/dhclient.conf,
+# including its `request ... ntp-servers;` line, so a minimal custom file
+# that only `send`s a hostname silently stops requesting NTP servers at
+# all) without even achieving its own goal: Debian's default dhclient.conf
+# already sends `host-name = gethostname()` (the container's own
+# Docker-assigned hostname) on every run, with or without a custom -cf --
+# and dhcp_client_capture_script's udhcpc branch sends the equivalent
+# explicit `-x hostname:"$(hostname)"` for the same reason (see that
+# variable's own comment: udhcpc does not send a hostname on its own, and
+# without one, Kea never triggers DDNS for the lease at all -- confirmed
+# empirically, issue #1095). Kea's own ddns-replace-client-name default,
+# "when-present" (services/dhcp/entrypoint.sh's migrate_dhcp4_config), does
+# NOT mean "use the client's name when present" -- verified empirically
+# against a real Kea 2.6.3 D2 instance -- it means the opposite: Kea
+# REPLACES whatever hostname the client sent with its own
+# ddns-generated-prefix-based name (confirmed: Kea's own DHCPOFFER/DHCPACK
+# echo back Option 12 as "dhcp-<dashed-ip>.<domain>", not the client-sent
+# value) precisely because a name WAS present to trigger the replacement.
+# So the DDNS record Kea will actually create is deterministic from the
+# offered address alone, with no client-side cooperation needed beyond
+# sending *some* hostname -- see assert_ddns_record_matches_lease's caller
+# below.
 #
 # NET_RAW: before a lease is granted this container has no IP of its own,
-# so dhclient must send/receive DHCP over a raw broadcast socket rather than
-# a normal bound UDP socket -- that needs CAP_NET_RAW regardless of -sf's
-# no-op lease-apply step. NET_ADMIN is added alongside it because dhclient
-# also touches interface-level state (e.g. ARP) while negotiating, before
-# it ever gets to the point of calling -sf.
+# so the DHCP client must send/receive DHCP over a raw broadcast socket
+# rather than a normal bound UDP socket -- that needs CAP_NET_RAW
+# regardless of which client runs or its own no-op lease-apply mechanism.
+# NET_ADMIN is added alongside it because dhclient also touches
+# interface-level state (e.g. ARP) while negotiating, before it ever gets
+# to the point of calling -sf; harmless if the udhcpc branch runs instead,
+# since that branch's own hook never uses either capability to mutate
+# anything (see dhcp_client_capture_script's own comment).
 docker run -d --name "$client_container" \
     --network "$network_name" \
     --cap-add NET_ADMIN --cap-add NET_RAW \
     -v "$work_dir/client-state:/dhcp-test" \
     "$client_tool_image" \
-    bash -c 'dhclient -4 -1 -v -d -sf /bin/true -pf /dhcp-test/dhclient.pid -lf /dhcp-test/dhclient.leases eth0 >/dhcp-test/dhclient.out 2>&1; echo DONE >> /dhcp-test/dhclient.out' \
+    bash -c "$dhcp_client_capture_script" \
     >/dev/null
 
 # lease_timeout_seconds is kept separate from lease_deadline (an absolute
@@ -601,9 +722,10 @@ lease_timeout_seconds=30
 lease_deadline=$((SECONDS + lease_timeout_seconds))
 lease_obtained=0
 while (( SECONDS < lease_deadline )); do
-    # `-s` alone is not enough: the lease file appears the moment dhclient
-    # starts writing it, well before the record is complete. The trailing
+    # `-s` alone is not enough: the lease file appears the moment the DHCP
+    # client starts writing it, well before the record is complete. The trailing
     # `^}` (a closing brace at column 0) is what ISC dhclient writes only
+    # (and what dhcp_client_capture_script's udhcpc branch replicates)
     # once a lease record is fully committed to the file, so checking for it
     # is what actually distinguishes "lease negotiation still in progress,
     # file exists but is partially written" from "lease obtained and safe to
@@ -618,12 +740,12 @@ done
 
 docker rm -f "$client_container" >/dev/null 2>&1 || true
 
-echo "::group::Raw dhclient output"
+echo "::group::Raw DHCP client output"
 cat "$work_dir/client-state/dhclient.out" 2>/dev/null || echo "(no client output captured)"
 echo "::endgroup::"
 
 if [[ "$lease_obtained" -ne 1 ]]; then
-    echo "::error::dhclient never obtained a lease from the Kea container within ${lease_timeout_seconds}s." >&2
+    echo "::error::The DHCP client never obtained a lease from the Kea container within ${lease_timeout_seconds}s." >&2
     docker logs "$kea_container" >&2 || true
     exit 1
 fi
@@ -693,12 +815,12 @@ echo "== Verifying Kea's DDNS update produced a matching PowerDNS A record (issu
 # above) directly on its actual listening address (127.0.0.1:5300 inside
 # that container, per services/dns/pdns.conf.template) for <fqdn>'s A
 # record, and checks it equals <expected_ip>. Kea's kea-dhcp-ddns daemon
-# (running inside $kea_container, driven by the real lease dhclient just
-# obtained above) is the only thing that can have created this record: DDNS
-# is asynchronous (kea-dhcp-ddns processes its NCR queue and sends the
+# (running inside $kea_container, driven by the real lease just obtained
+# above) is the only thing that can have created this record: DDNS is
+# asynchronous (kea-dhcp-ddns processes its NCR queue and sends the
 # TSIG-signed nsupdate after the DHCPACK has already gone out to the
-# client), so the record is not guaranteed to exist the instant dhclient's
-# lease file appeared -- this polls rather than checking once.
+# client), so the record is not guaranteed to exist the instant the
+# client's lease file appeared -- this polls rather than checking once.
 assert_ddns_record_matches_lease() {
     local fqdn="$1" expected_ip="$2" resolved_ip=""
     local ddns_deadline=$((SECONDS + 30))
@@ -724,15 +846,18 @@ assert_ddns_record_matches_lease() {
     return 1
 }
 
-# ddns_expected_fqdn is NOT the client's own hostname (see the dhclient
+# ddns_expected_fqdn is NOT the client's own hostname (see the DHCP client
 # invocation's comment above for why): it is Kea's own auto-generated name
 # for this lease, "<ddns-generated-prefix>-<dashed-ip>.<ddns-qualifying-
 # suffix>." -- ddns-generated-prefix is hardcoded "dhcp" (services/dhcp/
 # entrypoint.sh's migrate_dhcp4_config), confirmed live against a real Kea
 # 2.6.3 instance to be exactly what it substitutes whenever
 # ddns-replace-client-name is "when-present" (the project default) and the
-# client sent any hostname at all -- which every dhclient does by default
-# (send host-name = gethostname()). $domain_name is not hardcoded a second
+# client sent any hostname at all -- which dhclient does by default (send
+# host-name = gethostname()), and which dhcp_client_capture_script's udhcpc
+# branch replicates via an explicit -x hostname flag (confirmed empirically,
+# issue #1095: without it, udhcpc's DHCPACK is clean but Kea never triggers
+# DDNS for that lease at all). $domain_name is not hardcoded a second
 # time here -- it is the exact domain-name option value already parsed from
 # the granted lease above (confirmed by the assertion just before this
 # section), which is the same value Kea's ddns-qualifying-suffix was
@@ -927,15 +1052,21 @@ print("yes" if found else "no")
 }
 
 # assert_static_reservation_honored <label> <mac> <state_subdir>
-# Runs one fresh, one-shot dhclient container for <mac> (a distinct
+# Runs one fresh, one-shot DHCP client container for <mac> (a distinct
 # --mac-address per call, unlike the base scenario's client above which
 # relies on Docker's own auto-assigned MAC) and prints the offered IPv4
-# address, using the identical -sf /bin/true no-op-lease-apply / poll-for-
+# address, using the same dhcp_client_capture_script dispatch / poll-for-
 # "^}" / force-kill technique as the base scenario above -- see that
 # section's own comments for why each of those choices is safe and
-# necessary. Kept as its own function (not inlined) so it can be called once
-# for the reserved MAC and once for the unrelated MAC below without
-# duplicating this logic.
+# necessary. Both branches of dhcp_client_capture_script identify the
+# client to Kea via the container's own interface MAC (Docker's
+# --mac-address here), not a separate client-id flag, so this works
+# unchanged for either dhclient or udhcpc -- confirmed empirically
+# (issue #1095): a real udhcpc run with --mac-address set to a
+# Kea-reserved MAC received exactly the reserved address, the same way
+# dhclient already does. Kept as its own function (not inlined) so it can
+# be called once for the reserved MAC and once for the unrelated MAC below
+# without duplicating this logic.
 assert_static_reservation_honored() {
     local label="$1" mac="$2" state_subdir="$3" client_container
     client_container="lancache-ng-dhcp448-client-${state_subdir}-${octet}-$$"
@@ -947,7 +1078,7 @@ assert_static_reservation_honored() {
         --cap-add NET_ADMIN --cap-add NET_RAW \
         -v "$work_dir/$state_subdir:/dhcp-test" \
         "$client_tool_image" \
-        bash -c 'dhclient -4 -1 -v -d -sf /bin/true -pf /dhcp-test/dhclient.pid -lf /dhcp-test/dhclient.leases eth0 >/dhcp-test/dhclient.out 2>&1; echo DONE >> /dhcp-test/dhclient.out' \
+        bash -c "$dhcp_client_capture_script" \
         >/dev/null
 
     local deadline=$((SECONDS + 30)) obtained=0
@@ -964,13 +1095,13 @@ assert_static_reservation_honored() {
     # captured via command substitution by every caller below (the offered
     # address is the only thing that must appear there).
     {
-        echo "::group::$label: raw dhclient output"
+        echo "::group::$label: raw DHCP client output"
         cat "$work_dir/$state_subdir/dhclient.out" 2>/dev/null || echo "(no client output captured)"
         echo "::endgroup::"
     } >&2
 
     if [[ "$obtained" -ne 1 ]]; then
-        echo "::error::$label: dhclient never obtained a lease for $mac within 30s." >&2
+        echo "::error::$label: the DHCP client never obtained a lease for $mac within 30s." >&2
         return 1
     fi
 
