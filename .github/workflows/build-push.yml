@@ -4033,11 +4033,13 @@ jobs:
 
           # shellcheck source=scripts/lib/docker-metadata.sh
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+          # shellcheck source=scripts/lib/validation-image-tag.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/validation-image-tag.sh"
 
           # What: uses the full commit SHA directly, no local truncation.
           # Why: short-SHA tags are banned; a local slice risks collisions.
           # From: Issue #1095 (G2) | PR #1503
-          tag="pr-${PR_NUMBER}-sha-${BUILD_SHA}-amd64"
+          tag="$(vit_pr_staging_tag "$PR_NUMBER" "$BUILD_SHA")-amd64"
           echo "::notice::This PR's linux/amd64 staging tag for $MATRIX_SERVICE is $tag."
           # What: reads the single declared, lowercased GHCR owner/repo.
           # Why: github.repository may be mixed-case; GHCR needs lowercase.
@@ -5017,11 +5019,13 @@ jobs:
 
           # shellcheck source=scripts/lib/docker-metadata.sh
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+          # shellcheck source=scripts/lib/validation-image-tag.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/validation-image-tag.sh"
 
           # What: uses the full commit SHA directly, no local truncation.
           # Why: short-SHA tags are banned; a local slice risks collisions.
           # From: Issue #1095 (G2) | PR #1503
-          tag="pr-${PR_NUMBER}-sha-${BUILD_SHA}-arm64"
+          tag="$(vit_pr_staging_tag "$PR_NUMBER" "$BUILD_SHA")-arm64"
           echo "::notice::This PR's linux/arm64 staging tag for $MATRIX_SERVICE is $tag."
           # What: reads the single declared, lowercased GHCR owner/repo.
           # Why: github.repository may be mixed-case; GHCR needs lowercase.
@@ -5664,6 +5668,8 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
           # shellcheck source=scripts/lib/docker-metadata.sh
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+          # shellcheck source=scripts/lib/validation-image-tag.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/validation-image-tag.sh"
 
           read -ra services <<< "$CI_BUILD_SERVICES"
           # What: reads the single declared, lowercased GHCR owner/repo.
@@ -5674,7 +5680,7 @@ jobs:
           # What: uses the full commit SHA directly, no local truncation.
           # Why: short-SHA tags are banned; a local slice risks collisions.
           # From: Issue #1095 (G2) | PR #1503
-          source_tag="pr-${PR_NUMBER}-sha-${BUILD_SHA}"
+          source_tag="$(vit_pr_staging_tag "$PR_NUMBER" "$BUILD_SHA")"
 
           # Same helper as the trusted-ref step above (and promote's own
           # copy) -- kept duplicated per step/job rather than shared, which

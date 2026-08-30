@@ -94,6 +94,19 @@ vit_pr_staging_available() {
 # reasons documented at length in its own "Determine validation image
 # channel" step, and this MUST match byte-for-byte or the suite would look
 # for a tag build-push never pushed.
+# What: the one PR staging-tag stem build-push.yml pushes.
+# Why: the deep suite must find the exact tag build-push wrote.
+# From: PR #1742 | Refs #1683
+#
+# Callers needing a per-platform tag append their own '-amd64'/'-arm64' to
+# this stem; the bare stem is the multi-platform manifest tag.
+vit_pr_staging_tag() {
+    local pr_number="${1:?vit_pr_staging_tag: pr number is required}"
+    local build_sha="${2:?vit_pr_staging_tag: build sha is required}"
+    printf 'pr-%s-sha-%s
+' "$pr_number" "$build_sha"
+}
+
 vit_resolve_tag() {
     local event_name="$1" base_ref="$2" pr_number="$3" build_sha="$4"
     local actor="$5" head_repo="$6" repository="$7" dispatch_tag="$8"
@@ -104,7 +117,7 @@ vit_resolve_tag() {
     fi
 
     if [[ "$(vit_pr_staging_available "$event_name" "$actor" "$head_repo" "$repository")" == "true" ]]; then
-        printf 'pr-%s-sha-%s\n' "$pr_number" "$build_sha"
+        vit_pr_staging_tag "$pr_number" "$build_sha"
         return 0
     fi
 

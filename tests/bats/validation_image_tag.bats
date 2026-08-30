@@ -163,3 +163,23 @@ setup() {
     ! grep -qF 'base_channel_tag=latest' "$workflow_file" \
         || fail "build-push.yml appears to reimplement the base-channel mapping inline again"
 }
+
+# What: the stem is the exact pr-<N>-sha-<full-sha> build-push.yml pushes.
+# Why: a drifted stem makes the deep suite hunt a tag nobody ever wrote.
+# From: PR #1742 | Refs #1683
+@test "vit_pr_staging_tag builds the pr-<n>-sha-<sha> stem with no platform suffix" {
+    run vit_pr_staging_tag 1742 569022c2fba37618c6bb41aa4927753af0f762d3
+    [ "$status" -eq 0 ]
+    [ "$output" = "pr-1742-sha-569022c2fba37618c6bb41aa4927753af0f762d3" ]
+}
+
+# What: vit_resolve_tag returns exactly the shared stem for a PR.
+# Why: proves the resolver and build-push.yml cannot drift apart.
+# From: PR #1742 | Refs #1683
+@test "vit_resolve_tag returns the shared stem for an eligible same-repo PR" {
+    local stem resolved
+    stem="$(vit_pr_staging_tag 1742 569022c2fba37618c6bb41aa4927753af0f762d3)"
+    resolved="$(vit_resolve_tag pull_request refs/heads/current_dev 1742 \
+        569022c2fba37618c6bb41aa4927753af0f762d3 someuser wiki-mod/lancache-ng wiki-mod/lancache-ng "")"
+    [ "$resolved" = "$stem" ]
+}
