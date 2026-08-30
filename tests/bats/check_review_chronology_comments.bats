@@ -308,15 +308,15 @@ EOF
 # From: PR #1546
 @test "fails when a comment repeats a number already declared by this file's own From: pointer" {
     cat > "$fixture_root/example.dockerfile" <<'EOF'
-# What: ccache preprocesses locally instead of shelling through distcc.
-# Why: shells own -E pass, which crashes ,cpp-tagged distcc host list
+# What: ccache preprocesses locally instead of shelling.
+# Why: crashes the same distcc host list noted in #887.
 # From: Issue #887
 RUN true
 EOF
 
     run bash "$script" "$fixture_root"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"example.dockerfile:3"* ]] || fail "did not name the offending line: $output"
+    [[ "$output" == *"example.dockerfile:2"* ]] || fail "did not name the offending line: $output"
     [[ "$output" == *"AG-CODE-012"* ]] || fail "did not cite the governing rule: $output"
 }
 

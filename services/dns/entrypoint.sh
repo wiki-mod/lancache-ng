@@ -352,19 +352,19 @@ prepare_log_dir_for_shared_reader "$PDNS_LOG_DIR"
 #   and setup.sh naturally hand the container a host:port endpoint.
 # From: Issue #1164
 dns_xfr_primary_endpoint() {
-    local endpoint="$1" host port resolved
+    local endpoint="$1" var_name="${2:-DNS_XFR_PRIMARY}" host port resolved
 
     host="${endpoint%%:*}"
     port="${endpoint#*:}"
     if [ -z "$host" ] || [ "$port" = "$endpoint" ] || [ -z "$port" ]; then
-        echo "[lancache-dns] FATAL: DNS_XFR_PRIMARY must use host:port form (got: ${endpoint})." >&2
+        echo "[lancache-dns] FATAL: ${var_name} must use host:port form (got: ${endpoint})." >&2
         exit 1
     fi
     resolved="$(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1; exit}')"
     if [ -z "$resolved" ]; then
         case "$host" in
             *[!0-9.]* | *.*.*.*.* | .* | *.)
-                echo "[lancache-dns] FATAL: DNS_XFR_PRIMARY host '${host}' did not resolve to an IPv4 address." >&2
+                echo "[lancache-dns] FATAL: ${var_name} host '${host}' did not resolve to an IPv4 address." >&2
                 exit 1
                 ;;
             *)
@@ -411,7 +411,7 @@ case "$DNS_REPLICATION_ROLE" in
         if [ -n "$DNS_XFR_NOTIFY_TARGETS" ]; then
             for target in ${DNS_XFR_NOTIFY_TARGETS//,/ }; do
                 [ -n "$target" ] || continue
-                target_resolved="$(dns_xfr_primary_endpoint "$target")"
+                target_resolved="$(dns_xfr_primary_endpoint "$target" DNS_XFR_NOTIFY_TARGETS)"
                 PDNS_ALLOW_AXFR_IPS="${PDNS_ALLOW_AXFR_IPS},${target_resolved%%:*}"
             done
         fi
