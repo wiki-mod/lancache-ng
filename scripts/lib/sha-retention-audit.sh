@@ -554,9 +554,10 @@ sra_cache_write_package() {
       printf "INSERT OR REPLACE INTO version_cache_v2 (package, version_id, digest, tags, resolution, history_fingerprint, history_ref_names, updated_at) VALUES ('%s', %s, '%s', '%s', '%s', '%s', '%s', '%s');\n" \
         "$(sra_sql_quote "$package")" "$version_id" "$(sra_sql_quote "$digest")" "$(sra_sql_quote "$tags")" "$(sra_sql_quote "$resolution")" "$(sra_sql_quote "$history_fingerprint")" "$(sra_sql_quote "$history_ref_names")" "$now"
     done <"$rows_file"
-    # What: prunes a superseded generation for the same caller identity.
-    # Why: Prevents accumulation of obsolete rows via composite key.
+    # What: prunes a superseded same-caller cache row.
+    # Why: keeps old/new generations from colliding forever.
     # From: Issue #1095
+    printf "DELETE FROM version_cache_v2 WHERE package = '%s' AND history_ref_names = '%s' AND history_fingerprint != '%s';\n" \
       "$(sra_sql_quote "$package")" "$(sra_sql_quote "$history_ref_names")" "$(sra_sql_quote "$history_fingerprint")"
     printf 'COMMIT;\n'
   } >"$sql_file"
