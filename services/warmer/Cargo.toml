@@ -1,0 +1,75 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Manifest for lancache-warmer, the Steam cache-warming prefill daemon
+# (issue #871): stream-and-discard depot chunk fetch through the proxy,
+# never a full local game install (issue #816's non-negotiable
+# requirement). Scope of this crate as of this PR: the credential-store
+# and stream-fetch primitives only -- NOT yet the Steam control-plane/
+# depot-manifest integration (steam-vent/steamroom), which needs a real
+# Steam account to test against and is deliberately deferred as follow-up
+# (see this PR's own body / issue #871 for the full scope note).
+
+[package]
+name = "lancache-warmer"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+
+[lib]
+# Exposes every pure, no-network module (credential_store, the
+# stream_fetch byte-counting logic) so unit tests can exercise them
+# without a live Steam account or a real HTTP server -- mirrors
+# services/ui's and services/watchdog's own lib.rs pure-module split.
+name = "lancache_warmer"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lancache-warmer"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+# rustls, never openssl-sys (Rule-Ref: AG-REL-003) -- the Alpine final
+# image has no OpenSSL headers. Plain "rustls-tls" (public webpki roots),
+# not "-native-roots": this crate talks to Steam's public CDN over the
+# public Internet CA trust chain, not a private-CA internal service (the
+# watchdog/docker-socket-proxy case "-native-roots" exists for) -- see
+# that crate's own Cargo.toml comment for the distinction.
+reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls"] }
+# StreamExt for reqwest::Response::bytes_stream()'s .next() -- same crate
+# services/ui already depends on for the identical purpose
+# (services/ui/src/routes/netdata_proxy.rs's read_bounded_body), reused
+# here rather than pulling in a different streaming-combinator crate.
+futures-util = "0.3"
+# Argon2id: already a project dependency (services/ui/Cargo.toml, issue
+# #680) for one-way password verification. Reused here in its lower-level
+# raw-KDF form (hash_password_into, not the PHC-string hash_password API)
+# to derive a symmetric encryption key -- a genuinely different use of the
+# same already-vetted crate, not a new hashing library.
+argon2 = "0.5"
+# AEAD encryption for the operator-supplied Steam credential at rest: no
+# existing project dependency does this (Argon2id above is one-way and
+# cannot recover a login-usable plaintext; see services/warmer/src/
+# credential_store.rs's own module doc for the full research trail this
+# combination followed). XChaCha20Poly1305 specifically (192-bit nonce),
+# not the 96-bit ChaCha20Poly1305 variant, because nonces here are
+# randomly generated per encryption rather than counter-based (maintainer
+# decision, issue #871).
+chacha20poly1305 = "0.10"
+rand = "0.10"
+hex = "0.4"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Deliberate release-profile tuning, matching services/ui's/
+# services/watchdog's identical [profile.release] block -- see either
+# crate's own comment for the full reasoning (fat LTO for cross-crate
+# inlining; codegen-units=2 traded against the project's own sccache/
+# distcc build-farm capacity).
+[profile.release]
+lto = "fat"
+codegen-units = 2
