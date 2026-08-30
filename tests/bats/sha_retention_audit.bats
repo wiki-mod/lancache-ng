@@ -4,7 +4,7 @@
 # What: regression coverage for read-only SHA retention plan
 # Why: destructive GC consumes planner output, so its protec
 # must remain independently testable without any DELETE capability here.
-# From: Issue #1095.
+# From: Issue #1095
 
 # What: sources both libraries & creates a per-test scratch
 # Why: sourcing (not executing) pulls in every sra_* functio
@@ -62,7 +62,7 @@ EOF
 # What: reads manifest's single channel_buffer_versions valu
 # Why: the v1.2 per-package buffer for a non-ordinary-versio
 # candidate that matches no protected channel.
-# From: Issue #1585.
+# From: Issue #1585
 @test "retention manifest defines exactly five channel buffer versions" {
   run sra_read_channel_buffer_versions "$repo_root/release/stack-images.yml"
   [ "$status" -eq 0 ]
@@ -671,7 +671,7 @@ EOF
 # Why: shared arithmetic used by both ordinary-root & v1.2
 # non-ordinary-version buffer loops; wrong-direction off-by-one here would
 # silently over- or under-protect every package audited.
-# From: Issue #1585.
+# From: Issue #1585
 @test "budget decision protects within budget" {
   run sra_budget_decision 5 5
   [ "$status" -eq 0 ]
@@ -680,7 +680,7 @@ EOF
 
 # What: budget decision marks a position beyond budget would
 # Why: confirms off-by-one boundary "within" case above esta
-# From: Issue #1585.
+# From: Issue #1585
 @test "budget decision marks beyond-budget positions would-delete" {
   run sra_budget_decision 6 5
   [ "$status" -eq 0 ]
@@ -690,7 +690,7 @@ EOF
 # What: budget decision fails closed on a non-numeric positi
 # Why: a caller passing a malformed rank must not silently d
 # spuriously-protective or spuriously-deletable decision.
-# From: Issue #1585.
+# From: Issue #1585
 @test "budget decision fails closed on non-numeric input" {
   run sra_budget_decision "abc" 5
   [ "$status" -ne 0 ]
@@ -705,7 +705,7 @@ EOF
 # What: the schema declares cache's primary key & required c
 # Why: a pure string check -- catches an accidental column r
 # without needing a live sqlite3 invocation.
-# From: Issue #1585.
+# From: Issue #1585
 @test "cache schema declares the version_cache_v2 table with its primary key" {
   run sra_cache_schema_sql
   [ "$status" -eq 0 ]
@@ -718,7 +718,7 @@ EOF
 # What: doubles an embedded single quote, SQL's own escape f
 # Why: every cache write builds its statement string this wa
 # escape here is a SQL-injection-shaped correctness bug, not just cosmetic.
-# From: Issue #1585.
+# From: Issue #1585
 @test "sql quote doubles an embedded single quote" {
   run sra_sql_quote "pr-1's-sha-abc"
   [ "$status" -eq 0 ]
@@ -730,7 +730,7 @@ EOF
 # error; only an actual sqlite3 invocation can. Skips (not fails) when
 # sqlite3 is unavailable -- expected on a host outside the pinned
 # build-tools container (AG-VAL-016), where this dependency was added.
-# From: Issue #1585.
+# From: Issue #1585
 @test "cache init/write/read round-trips a real row through sqlite3" {
   command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not available on this host"
   db_path="$tmp_dir/cache.db"
@@ -755,7 +755,7 @@ EOF
 # Why: a restored actions/cache blob can predate version_cac
 # rename; CREATE TABLE IF NOT EXISTS must not be fooled by an old table of
 # the same old name, and a real deployment must self-heal, not warn forever.
-# From: Issue #1095.
+# From: Issue #1095
 @test "cache write self-heals against an inherited old-schema database" {
   command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not available on this host"
   db_path="$tmp_dir/cache.db"
@@ -776,7 +776,7 @@ EOF
 # What: a cache write with no history fingerprint argument f
 # Why: history_fingerprint is a required column, not optiona
 # that forgets it must get a loud failure, never a silently written row.
-# From: Issue #1095.
+# From: Issue #1095
 @test "cache write fails closed without a history fingerprint argument" {
   command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not available on this host"
   db_path="$tmp_dir/cache.db"
@@ -792,7 +792,7 @@ EOF
 # Why: this is exact "cache miss falls back to a full scan"
 # v1.2 plan calls its own required self-verification -- must degrade,
 # never error the caller.
-# From: Issue #1585.
+# From: Issue #1585
 @test "cache read on a nonexistent database fails closed without erroring the caller" {
   command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not available on this host"
   run sra_cache_read_package "$tmp_dir/does-not-exist.db" "proxy" "origin/current_dev@$(printf 'c%.0s' {1..40})"
@@ -802,7 +802,7 @@ EOF
 # What: re-writing same (package, version_id, fingerprint) r
 # Why: INSERT OR REPLACE is load-bearing -- a version reclas
 # under the same ref set must overwrite its stale row, not duplicate it.
-# From: Issue #1585 | Issue #1095.
+# From: Issue #1585 | Issue #1095
 @test "cache write replaces an existing row for the same package, version id, and fingerprint" {
   command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not available on this host"
   db_path="$tmp_dir/cache.db"
@@ -830,7 +830,7 @@ EOF
 # Why: this is property that makes cross-caller sharing safe
 # each caller's write evicting the other's -- a read for one fingerprint
 # must never see the other's row for the same version id.
-# From: Issue #1095.
+# From: Issue #1095
 @test "cache rows for different history fingerprints coexist and do not evict each other" {
   command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not available on this host"
   db_path="$tmp_dir/cache.db"
@@ -862,7 +862,7 @@ EOF
 # Why: without pruning, every tip advance adds a permanent n
 # instead of replacing the prior one from the same caller -- unbounded
 # growth; pruning must not cross ref-name-set boundaries.
-# From: Issue #1095.
+# From: Issue #1095
 @test "cache write prunes a superseded same-caller generation but not a different caller's" {
   command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not available on this host"
   db_path="$tmp_dir/cache.db"
@@ -899,7 +899,7 @@ EOF
 # What: the fingerprint differs when managed ref set changes
 # Why: this is mechanism v1.2 cache's ref-set safety depends
 # it must actually change, not just exist unused.
-# From: Issue #1095.
+# From: Issue #1095
 @test "history refs fingerprint changes when the ref set changes" {
   git_dir="$tmp_dir/repo"
   git init -q "$git_dir"
@@ -928,7 +928,7 @@ EOF
 
   # What: the same ref set, recomputed, is byte-identical.
   # Why: stable across repeated same-input runs, not just "u
-  # From: Issue #1095.
+  # From: Issue #1095
   run sra_history_refs_fingerprint "$git_dir" origin/current_dev
   [ "$status" -eq 0 ]
   [ "$output" = "$narrow_fingerprint" ]
@@ -937,7 +937,7 @@ EOF
 # What: an unresolvable ref, or an empty ref list, fails clo
 # Why: mirrors fail-closed style already used by sra_budget_
 # never silently proceed with an empty/partial fingerprint.
-# From: Issue #1095.
+# From: Issue #1095
 @test "history refs fingerprint fails closed on an unknown ref or an empty ref list" {
   git_dir="$tmp_dir/repo"
   git init -q "$git_dir"
@@ -958,7 +958,7 @@ EOF
 # package, before trusting any cached row.
 # Why: a structural regression check -- catches a future edi
 # reintroduces the fixed gap by dropping this argument.
-# From: Issue #1095.
+# From: Issue #1095
 @test "gc-sha-retention-audit.sh passes the history fingerprint into the cache read" {
   run grep -F 'sra_cache_read_package "$cache_db" "$package" "$history_fingerprint"' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh"
   [ "$status" -eq 0 ]
@@ -1005,7 +1005,7 @@ EOF
 # orchestrator's own live GHCR pagination is not mocked here); it can only
 # assert source-code shape, not runtime behavior -- see the plan's own
 # request for real CI verification.
-# From: Issue #1585.
+# From: Issue #1585
 @test "gc-sha-retention-audit.sh protects a truly untagged rootless version before any buffer routing" {
   untagged_protect_line="$(grep -n 'root_count == 0 && other_count == 0' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh" | cut -d: -f1)"
   buffer_write_line="$(grep -n '>>"\$other_tag_candidates"' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh" | head -1 | cut -d: -f1)"
