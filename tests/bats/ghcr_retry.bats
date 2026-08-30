@@ -310,3 +310,59 @@ always_fail_cmd() {
     [ "$status" -eq 1 ]
     [ "$(wc -l < "$attempt_log")" -eq 1 ]
 }
+
+# What: the registry argument defaults to ghcr.io when omitted.
+# Why: every pre-existing caller passes three args and must not change.
+# From: PR #1742 | Refs #1683
+@test "resolve_manifest_digest relogs in against ghcr.io by default" {
+    FAKE_FAIL_COUNT=1
+    docker() {
+        if [[ "$1" = "login" ]]; then
+            echo "$2" >> "$relogin_log"
+            return 0
+        fi
+        if [[ "$1" = "buildx" ]]; then
+            echo "attempt" >> "$attempt_log"
+            local calls
+            calls=$(wc -l < "$attempt_log")
+            if (( calls <= "${FAKE_FAIL_COUNT:-0}" )); then
+                return 1
+            fi
+            echo '"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"'
+            return 0
+        fi
+        return 1
+    }
+    export -f docker
+    run resolve_manifest_digest "ghcr.io/wiki-mod/lancache-ng/build-tools:nightly" testuser testpass
+    [ "$status" -eq 0 ]
+    [ "$(cat "$relogin_log")" = "ghcr.io" ]
+}
+
+# What: an explicit registry is the one re-authenticated against.
+# Why: Docker Hub creds must never produce a docker login to ghcr.io.
+# From: PR #1742 | Refs #1683
+@test "resolve_manifest_digest relogs in against an explicitly given registry" {
+    FAKE_FAIL_COUNT=1
+    docker() {
+        if [[ "$1" = "login" ]]; then
+            echo "$2" >> "$relogin_log"
+            return 0
+        fi
+        if [[ "$1" = "buildx" ]]; then
+            echo "attempt" >> "$attempt_log"
+            local calls
+            calls=$(wc -l < "$attempt_log")
+            if (( calls <= "${FAKE_FAIL_COUNT:-0}" )); then
+                return 1
+            fi
+            echo '"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"'
+            return 0
+        fi
+        return 1
+    }
+    export -f docker
+    run resolve_manifest_digest "rust:latest" hubuser hubtoken docker.io
+    [ "$status" -eq 0 ]
+    [ "$(cat "$relogin_log")" = "docker.io" ]
+}

@@ -178,7 +178,7 @@ ghcr_retry() {
   return "$status"
 }
 
-# resolve_manifest_digest <image-ref> [username] [password]
+# resolve_manifest_digest <image-ref> [username] [password] [registry]
 #
 # Resolves <image-ref> to its immutable multi-platform manifest digest via
 # `docker buildx imagetools inspect --format '{{json .Manifest.Digest}}'`.
@@ -212,9 +212,13 @@ ghcr_retry() {
 resolve_manifest_digest() {
   local image="${1:?resolve_manifest_digest: image is required}"
   local username="${2:-}" password="${3:-}"
+  # What: registry the retry wrapper re-authenticates against.
+  # Why: a Docker Hub ref must not trigger a ghcr.io relogin.
+  # From: PR #1742 | Refs #1683
+  local registry="${4:-ghcr.io}"
   local digest=""
   if [[ -n "$username" && -n "$password" ]]; then
-    digest="$(ghcr_retry ghcr.io "$username" "$password" -- docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}' 2>/dev/null || true)"
+    digest="$(ghcr_retry "$registry" "$username" "$password" -- docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}' 2>/dev/null || true)"
   else
     digest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}' 2>/dev/null || true)"
   fi
