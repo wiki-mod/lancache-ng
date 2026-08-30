@@ -262,11 +262,22 @@ jobs:
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: ./.github/actions/docker-login-action-centralized-version
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      # What: authenticates Docker Hub pulls for this workflow.
+      # Why: shared egress IP hits Docker Hub pull-rate limit.
+      # From: Issue #1095
+      - name: Log in to Docker Hub
+        if: ${{ secrets.DOCKERHUB_USERNAME != '' }}
+        continue-on-error: true
+        uses: ./.github/actions/docker-login-action-centralized-version
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Wait for and ensure PR staging images
         env:
