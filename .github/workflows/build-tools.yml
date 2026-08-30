@@ -221,18 +221,28 @@ jobs:
       - name: Resolve build-tools base image digests
         id: build-tools-base-digests
         if: github.event_name != 'pull_request'
+        env:
+          # What: Docker Hub credentials for the base-image digest read.
+          # Why: an anonymous Hub read is rate-limited per runner egress IP.
+          # From: PR #1742 | Refs #1683
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
           set -euo pipefail
-          digest_for_image() {
-            local image=$1 digest
-            digest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}')"
-            digest="${digest%\"}"; digest="${digest#\"}"
-            [[ -n "$digest" && "$digest" != "null" ]] || { echo "::error::Could not read digest for $image."; exit 1; }
-            printf '%s\n' "$digest"
-          }
+          # shellcheck source=scripts/lib/ghcr-retry.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+
+          # What: each digest is assigned and checked before printf sees it.
+          # Why: a failed substitution inside printf's args still exits 0.
+          # From: PR #1742 | Refs #1683
+          rust_digest="$(resolve_manifest_digest rust:latest "${DOCKERHUB_USERNAME:-}" "${DOCKERHUB_TOKEN:-}" docker.io)" \
+            || { echo "::error::Could not read digest for rust:latest."; exit 1; }
+          golang_digest="$(resolve_manifest_digest golang:latest "${DOCKERHUB_USERNAME:-}" "${DOCKERHUB_TOKEN:-}" docker.io)" \
+            || { echo "::error::Could not read digest for golang:latest."; exit 1; }
+
           {
-            printf 'rust=%s\n' "$(digest_for_image rust:latest)"
-            printf 'golang=%s\n' "$(digest_for_image golang:latest)"
+            printf 'rust=%s\n' "$rust_digest"
+            printf 'golang=%s\n' "$golang_digest"
           } >> "$GITHUB_OUTPUT"
 
       # What: writes ccache_redis_url + distcc_potential_hosts secret files for
@@ -643,18 +653,28 @@ jobs:
       - name: Resolve build-tools base image digests
         id: build-tools-base-digests
         if: github.event_name != 'pull_request'
+        env:
+          # What: Docker Hub credentials for the base-image digest read.
+          # Why: an anonymous Hub read is rate-limited per runner egress IP.
+          # From: PR #1742 | Refs #1683
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
           set -euo pipefail
-          digest_for_image() {
-            local image=$1 digest
-            digest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}')"
-            digest="${digest%\"}"; digest="${digest#\"}"
-            [[ -n "$digest" && "$digest" != "null" ]] || { echo "::error::Could not read digest for $image."; exit 1; }
-            printf '%s\n' "$digest"
-          }
+          # shellcheck source=scripts/lib/ghcr-retry.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+
+          # What: each digest is assigned and checked before printf sees it.
+          # Why: a failed substitution inside printf's args still exits 0.
+          # From: PR #1742 | Refs #1683
+          rust_digest="$(resolve_manifest_digest rust:latest "${DOCKERHUB_USERNAME:-}" "${DOCKERHUB_TOKEN:-}" docker.io)" \
+            || { echo "::error::Could not read digest for rust:latest."; exit 1; }
+          golang_digest="$(resolve_manifest_digest golang:latest "${DOCKERHUB_USERNAME:-}" "${DOCKERHUB_TOKEN:-}" docker.io)" \
+            || { echo "::error::Could not read digest for golang:latest."; exit 1; }
+
           {
-            printf 'rust=%s\n' "$(digest_for_image rust:latest)"
-            printf 'golang=%s\n' "$(digest_for_image golang:latest)"
+            printf 'rust=%s\n' "$rust_digest"
+            printf 'golang=%s\n' "$golang_digest"
           } >> "$GITHUB_OUTPUT"
 
       # What: builds one local arm64 candidate for fork PRs.

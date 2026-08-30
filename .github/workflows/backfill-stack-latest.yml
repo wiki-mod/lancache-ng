@@ -168,19 +168,6 @@ jobs:
           # 401 here is a pure retry candidate. The `|| true` callers below
           # (previous_refs) tolerate genuine absence the same way
           # promote/backfill's build-push.yml counterparts do.
-          digest_for_image() {
-            local image=$1 digest
-
-            # shellcheck disable=SC2016 # Go template is evaluated by Docker.
-            if ! digest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}' 2>/dev/null)"; then
-              return 1
-            fi
-            digest="${digest%\"}"
-            digest="${digest#\"}"
-            [[ -n "$digest" && "$digest" != "null" ]]
-            printf '%s\n' "$digest"
-          }
-
           rollback_promotions() {
             local status=$? target_image previous_digest
 
@@ -233,8 +220,8 @@ jobs:
           git checkout --detach "$SOURCE_RELEASE_TAG"
 
           source_stack_immutable="ghcr.io/${REPOSITORY}/stack:${resolved_source_tag}"
-          source_stack_digest="$(digest_for_image "$source_stack")"
-          source_stack_immutable_digest="$(digest_for_image "$source_stack_immutable")"
+          source_stack_digest="$(resolve_manifest_digest "$source_stack" "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")"
+          source_stack_immutable_digest="$(resolve_manifest_digest "$source_stack_immutable" "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")"
           [[ "$source_stack_digest" = "$source_stack_immutable_digest" ]] \
             || { echo "::error::${source_stack} digest does not match ${source_stack_immutable}; refusing to promote drifted release sources."; exit 1; }
           GHCR_RETRY_USERNAME="$GHCR_RETRY_USERNAME" GHCR_RETRY_PASSWORD="$GHCR_RETRY_PASSWORD" \
@@ -243,8 +230,8 @@ jobs:
           for service in "${services[@]}"; do
             source_release_image="ghcr.io/${REPOSITORY}/${service}:${SOURCE_RELEASE_TAG}"
             source_image="ghcr.io/${REPOSITORY}/${service}:${resolved_source_tag}"
-            source_release_digest="$(digest_for_image "$source_release_image")"
-            source_sha_digest="$(digest_for_image "$source_image")"
+            source_release_digest="$(resolve_manifest_digest "$source_release_image" "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")"
+            source_sha_digest="$(resolve_manifest_digest "$source_image" "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")"
             [[ "$source_release_digest" = "$source_sha_digest" ]] \
               || { echo "::error::${source_release_image} digest does not match ${source_image}; refusing to promote drifted release sources."; exit 1; }
             GHCR_RETRY_USERNAME="$GHCR_RETRY_USERNAME" GHCR_RETRY_PASSWORD="$GHCR_RETRY_PASSWORD" \
@@ -255,16 +242,16 @@ jobs:
 
           for service in "${services[@]}"; do
             source_release_image="ghcr.io/${REPOSITORY}/${service}:${SOURCE_RELEASE_TAG}"
-            source_release_digest="$(digest_for_image "$source_release_image")"
+            source_release_digest="$(resolve_manifest_digest "$source_release_image" "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")"
             target_image="ghcr.io/${REPOSITORY}/${service}:latest"
-            previous_refs["$target_image"]="$(digest_for_image "$target_image" || true)"
+            previous_refs["$target_image"]="$(resolve_manifest_digest "$target_image" "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" || true)"
             ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
               docker buildx imagetools create --prefer-index=false -t "$target_image" "ghcr.io/${REPOSITORY}/${service}@${source_release_digest}"
             promoted_targets+=("$target_image")
           done
 
           target_stack="ghcr.io/${REPOSITORY}/stack:latest"
-          previous_refs["$target_stack"]="$(digest_for_image "$target_stack" || true)"
+          previous_refs["$target_stack"]="$(resolve_manifest_digest "$target_stack" "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" || true)"
           ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
             docker buildx imagetools create --prefer-index=false -t "$target_stack" "ghcr.io/${REPOSITORY}/stack@${source_stack_digest}"
           promoted_targets+=("$target_stack")
@@ -272,10 +259,10 @@ jobs:
           for service in "${services[@]}"; do
             source_release_image="ghcr.io/${REPOSITORY}/${service}:${SOURCE_RELEASE_TAG}"
             target_image="ghcr.io/${REPOSITORY}/${service}:latest"
-            [[ "$(digest_for_image "$source_release_image")" = "$(digest_for_image "$target_image")" ]] \
+            [[ "$(resolve_manifest_digest "$source_release_image" "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")" = "$(resolve_manifest_digest "$target_image" "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")" ]] \
               || { echo "::error::latest digest mismatch for ${service}."; exit 1; }
           done
-          [[ "$(digest_for_image "$source_stack")" = "$(digest_for_image "$target_stack")" ]] \
+          [[ "$(resolve_manifest_digest "$source_stack" "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")" = "$(resolve_manifest_digest "$target_stack" "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")" ]] \
             || { echo "::error::latest digest mismatch for stack pointer."; exit 1; }
 
           {
