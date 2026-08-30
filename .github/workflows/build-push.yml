@@ -5467,19 +5467,6 @@ jobs:
           # Why: a transient GHCR read failure here is a real retry
           # candidate, not an expected-absent probe.
           # From: Issue #1095 | PR #1619
-          digest_for_image() {
-            local image=$1
-            local digest
-
-            if ! digest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}' 2>/dev/null)"; then
-              return 1
-            fi
-            digest="${digest%\"}"
-            digest="${digest#\"}"
-            [[ -n "$digest" && "$digest" != "null" ]]
-            printf '%s\n' "$digest"
-          }
-
           # What: deletes GHCR's copy of one orphaned single-platform tag.
           # Why: an orphan (loop below) can never join a multi-platform manifest and would
           #   sit in GHCR forever; scoped to this run's exact tag, and refuses to delete
@@ -5562,8 +5549,8 @@ jobs:
               continue
             fi
 
-            amd64_digest="$(digest_for_image "$amd64_image")"
-            arm64_digest="$(digest_for_image "$arm64_image")"
+            amd64_digest="$(resolve_manifest_digest "$amd64_image" "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")"
+            arm64_digest="$(resolve_manifest_digest "$arm64_image" "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")"
             [[ "$amd64_digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid amd64 digest for $service: $amd64_digest"; exit 1; }
             [[ "$arm64_digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid arm64 digest for $service: $arm64_digest"; exit 1; }
             amd64_ref="ghcr.io/${REPOSITORY}/${service}@${amd64_digest}"
@@ -5579,7 +5566,7 @@ jobs:
             # hyphens, which the expression syntax in the attest steps below
             # would otherwise parse as subtraction) so those steps can
             # reference steps.create-trusted-manifests.outputs.<service>_digest.
-            merged_digest="$(digest_for_image "$target_image")"
+            merged_digest="$(resolve_manifest_digest "$target_image" "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")"
             [[ "$merged_digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid merged digest for $service: $merged_digest"; exit 1; }
             merged_digests["$service"]="$merged_digest"
             printf '%s_digest=%s\n' "${service//-/_}" "$merged_digest" >> "$GITHUB_OUTPUT"
@@ -5637,7 +5624,7 @@ jobs:
             "$pointer_context"
           GHCR_RETRY_USERNAME="$GHCR_RETRY_USERNAME" GHCR_RETRY_PASSWORD="$GHCR_RETRY_PASSWORD" \
             bash scripts/untracked/require-image-platforms.sh "$stack_pointer_image" "$REQUIRED_PLATFORMS"
-          stack_digest="$(digest_for_image "$stack_pointer_image")"
+          stack_digest="$(resolve_manifest_digest "$stack_pointer_image" "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")"
           [[ "$stack_digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid stack pointer digest: $stack_digest"; exit 1; }
           printf 'stack_digest=%s\n' "$stack_digest" >> "$GITHUB_OUTPUT"
           cleanup_pointer_context
@@ -5686,19 +5673,6 @@ jobs:
           # is the existing convention in this file. Same ghcr_retry
           # reasoning as that step's copy: this reads a manifest just
           # created below, not an expected-absence probe.
-          digest_for_image() {
-            local image=$1
-            local digest
-
-            if ! digest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}' 2>/dev/null)"; then
-              return 1
-            fi
-            digest="${digest%\"}"
-            digest="${digest#\"}"
-            [[ -n "$digest" && "$digest" != "null" ]]
-            printf '%s\n' "$digest"
-          }
-
           # What: tracks each service whose amd64/arm64 PR-staging tags diverged this run.
           # Why: the loop below now `continue`s past a divergence instead of `exit 1`ing
           #   immediately (same fix as the trusted-ref step above) so every OTHER
@@ -5735,8 +5709,8 @@ jobs:
               continue
             fi
 
-            amd64_digest="$(digest_for_image "$amd64_image")"
-            arm64_digest="$(digest_for_image "$arm64_image")"
+            amd64_digest="$(resolve_manifest_digest "$amd64_image" "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")"
+            arm64_digest="$(resolve_manifest_digest "$arm64_image" "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")"
             [[ "$amd64_digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid amd64 digest for $service: $amd64_digest"; exit 1; }
             [[ "$arm64_digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid arm64 digest for $service: $arm64_digest"; exit 1; }
             amd64_ref="ghcr.io/${REPOSITORY}/${service}@${amd64_digest}"
@@ -5751,7 +5725,7 @@ jobs:
             # This PR staging manifest is the exact tag full-setup-validate
             # pulls and runs for this PR's commits, not a throwaway build
             # artifact, so it gets the same provenance attestation.
-            merged_digest="$(digest_for_image "$target_image")"
+            merged_digest="$(resolve_manifest_digest "$target_image" "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")"
             printf '%s_digest=%s\n' "${service//-/_}" "$merged_digest" >> "$GITHUB_OUTPUT"
           done
 
@@ -6089,19 +6063,6 @@ jobs:
           # unlike merge-manifests' existence probes.
           # Why: rollback_promotions needs the real previous digest.
           # From: Issue #1095 | PR #1619
-          digest_for_image() {
-            local image=$1
-            local digest
-
-            if ! digest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}' 2>/dev/null)"; then
-              return 1
-            fi
-            digest="${digest%\"}"
-            digest="${digest#\"}"
-            [[ -n "$digest" && "$digest" != "null" ]]
-            printf '%s\n' "$digest"
-          }
-
           rollback_promotions() {
             local status=$?
             local target_image previous_digest
@@ -6192,7 +6153,7 @@ jobs:
               exit 1
             }
             source_tag_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}"
-            source_tag_digest="$(digest_for_image "$source_tag_image")"
+            source_tag_digest="$(resolve_manifest_digest "$source_tag_image" "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")"
             [[ "$source_tag_digest" = "$expected_digest" ]] || {
               echo "::error::$source_tag_image moved away from the merge-manifests digest; refusing promotion."
               exit 1
@@ -6203,7 +6164,7 @@ jobs:
 
           [[ "$STACK_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Missing or malformed stack pointer digest '$STACK_DIGEST'."; exit 1; }
           stack_tag_image="ghcr.io/${REPOSITORY}/stack:${source_tag}"
-          [[ "$(digest_for_image "$stack_tag_image")" = "$STACK_DIGEST" ]] || {
+          [[ "$(resolve_manifest_digest "$stack_tag_image" "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")" = "$STACK_DIGEST" ]] || {
             echo "::error::$stack_tag_image moved away from the merge-manifests stack pointer digest; refusing promotion."
             exit 1
           }
@@ -6217,7 +6178,7 @@ jobs:
             source_image="ghcr.io/${REPOSITORY}/${service}@${candidate_digests[$service]}"
             for channel_tag in "${channel_tags[@]}"; do
               target_image="ghcr.io/${REPOSITORY}/${service}:${channel_tag}"
-              previous_refs["$target_image"]="$(digest_for_image "$target_image" || true)"
+              previous_refs["$target_image"]="$(resolve_manifest_digest "$target_image" "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" || true)"
               ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
                 docker buildx imagetools create --prefer-index=false -t "$target_image" "$source_image"
               promoted_targets+=("$target_image")
@@ -6226,7 +6187,7 @@ jobs:
 
           for channel_tag in "${channel_tags[@]}"; do
             target_image="ghcr.io/${REPOSITORY}/stack:${channel_tag}"
-            previous_refs["$target_image"]="$(digest_for_image "$target_image" || true)"
+            previous_refs["$target_image"]="$(resolve_manifest_digest "$target_image" "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" || true)"
             ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
               docker buildx imagetools create --prefer-index=false -t "$target_image" "$stack_pointer_image"
             promoted_targets+=("$target_image")
@@ -6513,20 +6474,6 @@ jobs:
             exit 1
           fi
 
-          digest_for_image() {
-            local image=$1
-            local digest
-
-            digest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}')"
-            digest="${digest%\"}"
-            digest="${digest#\"}"
-            if [[ -z "$digest" || "$digest" = "null" ]]; then
-              echo "::error::Could not read digest for $image."
-              exit 1
-            fi
-            printf '%s\n' "$digest"
-          }
-
           build_tools_image="ghcr.io/${REPOSITORY}/build-tools:${TAG_NAME}"
           stack_pointer_image="ghcr.io/${REPOSITORY}/stack:${TAG_NAME}"
           ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$build_tools_image" >/dev/null
@@ -6550,8 +6497,8 @@ jobs:
             for service in "${services[@]}"; do
               tag_image="ghcr.io/${REPOSITORY}/${service}:${TAG_NAME}"
               sha_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}"
-              tag_digest="$(digest_for_image "$tag_image")"
-              sha_digest="$(digest_for_image "$sha_image")"
+              tag_digest="$(resolve_manifest_digest "$tag_image" "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")"
+              sha_digest="$(resolve_manifest_digest "$sha_image" "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")"
               if [[ "$tag_digest" != "$sha_digest" ]]; then
                 echo "::error::Release tag digest for $tag_image does not match $sha_image."
                 exit 1
@@ -6561,12 +6508,12 @@ jobs:
             printf '\nMatching immutable SHA image tags:\n\n'
             for service in "${services[@]}"; do
               sha_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}"
-              sha_digest="$(digest_for_image "$sha_image")"
+              sha_digest="$(resolve_manifest_digest "$sha_image" "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")"
               printf -- '- %s -> %s\n' "$sha_image" "$sha_digest"
             done
             printf '\nStack channel pointer:\n\n'
-            printf -- '- %s -> %s\n' "$stack_pointer_image" "$(digest_for_image "$stack_pointer_image")"
-            printf -- '- ghcr.io/%s/stack:%s -> %s\n' "$REPOSITORY" "$source_tag" "$(digest_for_image "ghcr.io/${REPOSITORY}/stack:${source_tag}")"
+            printf -- '- %s -> %s\n' "$stack_pointer_image" "$(resolve_manifest_digest "$stack_pointer_image" "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")"
+            printf -- '- ghcr.io/%s/stack:%s -> %s\n' "$REPOSITORY" "$source_tag" "$(resolve_manifest_digest "ghcr.io/${REPOSITORY}/stack:${source_tag}" "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")"
             printf '\nResolved build-tools base image digests:\n\n'
             printf -- '- rust:latest -> %s\n' "$rust_base_digest"
             printf -- '- golang:latest -> %s\n' "$golang_base_digest"

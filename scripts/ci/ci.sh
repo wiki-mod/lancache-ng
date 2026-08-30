@@ -1999,8 +1999,14 @@ ci_cmd_validate_setup_update_migration() {
       || { echo "::error::Stable release promotion must only move latest for exact vX.Y.Z tags."; exit 1; }
     grep -F 'if [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then' .github/workflows/build-push.yml >/dev/null \
       || { echo "::error::Release candidate promotion must only accept exact vX.Y.Z-rc.N tags."; exit 1; }
-    grep -F 'docker buildx imagetools inspect "$source_image"' .github/workflows/build-push.yml >/dev/null \
-      || { echo "::error::Promotion must verify every source sha-* image before moving channel tags."; exit 1; }
+    # What: every digest read goes through the authenticated helper.
+    # Why: an anonymous registry read is rate-limited and fails closed.
+    # From: PR #1742 | Refs #1683
+    if grep -n 'resolve_manifest_digest ' .github/workflows/build-push.yml \
+      | grep -vE ':[[:space:]]*#' | grep -v 'GHCR_RETRY_PASSWORD' >/dev/null; then
+      echo "::error::Every resolve_manifest_digest call in build-push.yml must pass GHCR credentials. Promotion resolves each image digest before moving a channel tag; an unauthenticated read is rate-limited by the registry and fails closed mid-promotion, so the credential arguments are the checked property, not merely the helper name."
+      exit 1
+    fi
     grep -F 'needs: promote' .github/workflows/build-push.yml >/dev/null \
       || { echo "::error::Release notes must run after channel promotion."; exit 1; }
 
