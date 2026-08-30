@@ -2672,7 +2672,7 @@ migrate_env_for_update() {
     local prodsync_default_proxy_router="" prodsync_default_ntp_servers="" prodsync_default_proxy_domain=""
     local prodsync_default_boot_filename="" prodsync_default_boot_server="" prodsync_default_pxe_boot_server=""
     local prodsync_default_pxe_boot_filename_bios="" prodsync_default_pxe_boot_filename_uefi=""
-    local allow_insecure_ui cache_dir cache_max_gb cache_max_size cache_gb cache_mem_mb ip_ssl ssl_enabled ui_generated_password ui_password ui_user
+    local allow_insecure_ui cache_dir cache_max_gb cache_max_size cache_gb cache_mem_mb ip_ssl ssl_enabled dns_xfr_notify_targets ui_generated_password ui_password ui_user
     local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_subnet_start ip_standard upstream_dhcp_ip
     local kea_data_default kea_data_dir nats_conf_default nats_conf_dir nats_data_default nats_data_dir
     local ntp_data_default ntp_data_dir ntp_enabled logging_enabled
@@ -2744,6 +2744,13 @@ migrate_env_for_update() {
     ssl_enabled=0
     [[ -n "$ip_ssl" ]] && ssl_enabled=1
     set_env_key_if_empty_or_missing SSL_ENABLED "$ssl_enabled" "$env_file"
+
+    # What: migrates AXFR notify-target for old installs.
+    # Why: dns-ssl exists only if SSL on, else crash-loop.
+    # From: Issue #1095
+    dns_xfr_notify_targets=""
+    [[ "$ssl_enabled" = "1" ]] && dns_xfr_notify_targets="dns-ssl:5300"
+    append_env_key_if_missing DNS_XFR_NOTIFY_TARGETS "$dns_xfr_notify_targets" "$env_file"
 
     # An install from before #819 has no AUTO_UPDATE_ENABLED key at all; "0"
     # (disabled) is the safe default, matching the interactive picker's own
@@ -6946,8 +6953,10 @@ printf "  Requires a second IP and a CA certificate on clients.\n\n"
 ask "Enable SSL mode? [y/N]" "N"
 SSL_ENABLED=0
 IP_SSL=""
+DNS_XFR_NOTIFY_TARGETS=""
 if [[ "${REPLY,,}" = "y" ]]; then
     SSL_ENABLED=1
+    DNS_XFR_NOTIFY_TARGETS="dns-ssl:5300"
     suggested_ssl="${IP_STANDARD%.*}.$((10#${IP_STANDARD##*.} + 1))"
     while true; do
         ask "SSL mode IP (second LAN IP)" "$suggested_ssl"
@@ -7683,6 +7692,10 @@ IP_SSL=${IP_SSL}
 
 # ── SSL ────────────────────────────────────────────────────────────────────────
 SSL_ENABLED=${SSL_ENABLED}
+
+# dns-standard's AXFR notify target. Empty when SSL mode is off (dns-ssl
+# does not exist as a container then); "dns-ssl:5300" when SSL is on.
+DNS_XFR_NOTIFY_TARGETS=${DNS_XFR_NOTIFY_TARGETS}
 
 # ── Cache ──────────────────────────────────────────────────────────────────────
 CACHE_DIR=${CACHE_DIR}

@@ -426,7 +426,10 @@ services:
       # From: Issue #1164
       - DDNS_ALLOW_FROM=${IP_STANDARD},${IP_SSL:-}
       - DNS_REPLICATION_ROLE=primary
-      - DNS_XFR_NOTIFY_TARGETS=dns-ssl:5300
+      # What: empty if SSL off, else dns-ssl:5300.
+      # Why: dns-ssl has no container when SSL is off.
+      # From: Issue #1095
+      - DNS_XFR_NOTIFY_TARGETS=${DNS_XFR_NOTIFY_TARGETS:-}
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-3}
     volumes:
       # What: shared-secrets volume, first-writer-wins for PDNS_API_KEY/DDNS_TSIG_KEY.
