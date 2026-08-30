@@ -1,14 +1,14 @@
 #!/bin/bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: verifies .env migration/update value-preservation semantics.
-# Why: validates the AGENTS.md guarantee "existing non-empty local
+# What: verifies .env migration/update value-preservation se
+# Why: validates AGENTS.md guarantee "existing non-empty loc
 #   values must be preserved by default."
 # From: PR #1546
 set -euo pipefail
 
-# What: would extract setup.sh's .env helpers by hardcoded line range.
-# Why: STATUS 2026-08-13 -- dead code (unused) with a stale range; left
+# What: would extract setup.sh's .env helpers by hardcoded l
+# Why: STATUS 2026-08-13 -- dead code (unused) with a stale
 #   for a maintainer decision on removal vs. a real extraction mechanism.
 # From: PR #1546
 setup_sh_helpers() {
@@ -16,8 +16,8 @@ setup_sh_helpers() {
     sed -n '446,628p' "$setup_sh"
 }
 
-# What: runs a single test function against its own scratch env file.
-# Why: gives each test a fresh, isolated .env fixture and a PASS/FAIL line.
+# What: runs a single test function against its own scratch
+# Why: gives each test a fresh, isolated .env fixture & a PA
 # From: PR #1546
 run_test() {
     local test_name="$1"
@@ -33,8 +33,8 @@ run_test() {
     fi
 }
 
-# What: an existing non-empty value is preserved, not overwritten.
-# Why: validates the same AGENTS.md guarantee cited in the file header.
+# What: an existing non-empty value is preserved, not overwr
+# Why: validates same AGENTS.md guarantee cited in file head
 # From: PR #1546
 test_existing_value_preserved() {
     local env_file="$1"
@@ -58,7 +58,7 @@ test_existing_value_preserved() {
 }
 
 # What: a missing key is added on first run (install).
-# Why: setup logic must converge old/incomplete installations toward
+# Why: setup logic must converge old/incomplete installation
 #   the current expected state.
 # From: PR #1546
 test_missing_key_added() {
@@ -77,7 +77,7 @@ test_missing_key_added() {
     [ "$actual" = "50.0" ] || return 1
 }
 
-# What: an intentionally-empty value stays empty, not replaced.
+# What: an intentionally-empty value stays empty, not replac
 # Why: e.g. UI_BIND_IP= deliberately triggers the
 #   ${UI_BIND_IP:-${IP_STANDARD}} compose fallback to IP_STANDARD.
 # From: PR #1546

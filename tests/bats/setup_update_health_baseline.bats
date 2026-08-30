@@ -2,8 +2,8 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: coverage for setup.sh's pre-update health-baseline gate.
-# Why: without a baseline, one permanently-unhealthy opt-in service (e.g.
+# What: coverage for setup.sh's pre-update health-baseline g
+# Why: without a baseline, one permanently-unhealthy opt-in
 #   ntp under this project's CI runners) blocked every future update;
 #   the gate must only fail on a real regression, never a pre-existing one.
 # From: Issue #1391 | PR #1546
@@ -18,21 +18,21 @@ setup() {
     source "$BATS_TEST_DIRNAME/helpers/setup-functional-health-helpers.sh"
     load_setup_functional_health_helpers "$repo_root" "$helper_file"
 
-    # What: re-declares the sourced _UPDATE_HEALTH_BASELINE as global+associative.
-    # Why: a plain (non -g) `declare` inside setup() scopes it local and it
+    # What: re-declares sourced _UPDATE_HEALTH_BASELINE as g
+    # Why: a plain (non -g) `declare` inside setup() scopes
     #   evaporates on return; test-harness-only, setup.sh's own top-level
     #   source never runs inside a function.
     # From: Issue #1391 | PR #1546
     declare -gA _UPDATE_HEALTH_BASELINE=()
 
-    # What: stubs verify_stack_functional_health to a plain success.
-    # Why: its curl/dig probes are covered by setup_functional_health_gate.bats;
+    # What: stubs verify_stack_functional_health to a plain
+    # Why: its curl/dig probes are covered by setup_function
     #   stubbing isolates the per-container baseline/regression logic here.
     # From: Issue #1391 | PR #1546
     verify_stack_functional_health() { return 0; }
 
-    # What: fake container tables, keyed by service name / container id.
-    # Why: an unset lookup reads empty, same as the fakes below treat a
+    # What: fake container tables, keyed by service name / c
+    # Why: an unset lookup reads empty, same as fakes below
     #   container that doesn't exist for real docker/dc_update.
     # From: Issue #1391 | PR #1546
     declare -gA FAKE_CONTAINER_ID=()
@@ -40,21 +40,21 @@ setup() {
     declare -gA FAKE_STATUS=()          # container id -> running | exited | restarting
     declare -gA FAKE_RESTART_POLICY=()  # container id -> no | always
     declare -gA FAKE_EXIT_CODE=()       # container id -> exit code string
-    # What: per-service scripted health sequence (one reading consumed per call).
-    # Why: simulates a flapping container's state changing between samples;
+    # What: per-service scripted health sequence (one readin
+    # Why: simulates a flapping container's state changing b
     #   tracked via a file (see fake docker() below), a subshell copy of an
     #   in-memory counter would not survive across calls.
     # From: Issue #1391 | PR #1546
     declare -gA FAKE_HEALTH_SEQUENCE=() # service -> space-separated sequence of health readings, consumed one per call
 
-    # What: shortens the baseline sample count/interval for fast test runs.
-    # Why: keeps this suite fast without changing the gate's real logic.
+    # What: shortens baseline sample count/interval for fast
+    # Why: keeps this suite fast without changing gate's rea
     # From: Issue #1391 | PR #1546
     _UPDATE_HEALTH_BASELINE_SAMPLES=3
     _UPDATE_HEALTH_BASELINE_SAMPLE_INTERVAL=0
 
-    # What: overrides dc_update; only its "ps -a -q <service>" shape is handled.
-    # Why: keeps the fake minimal, matching only what the code under test calls.
+    # What: overrides dc_update; only its "ps -a -q <service
+    # Why: keeps fake minimal, matching only what code under
     # From: Issue #1391 | PR #1546
     dc_update() {
         if [[ "$1" = "ps" ]]; then
@@ -64,14 +64,14 @@ setup() {
         return 0
     }
 
-    # What: overrides `docker`; dispatches its `inspect --format`/`logs` shapes.
-    # Why: FAKE_HEALTH_SEQUENCE's call counter is a file under
+    # What: overrides `docker`; dispatches its `inspect --fo
+    # Why: FAKE_HEALTH_SEQUENCE's call counter is a file und
     #   BATS_TEST_TMPDIR, since `$(docker inspect ...)` runs in a subshell
     #   whose in-memory state would not survive across calls.
     # From: Issue #1391 | PR #1546
     docker() {
-        # What: fakes `docker logs --tail 50`, or fails if FAKE_LOGS_SHOULD_FAIL=1.
-        # Why: proves the `|| print_warn` fallback fires under real
+        # What: fakes `docker logs --tail 50`, or fails if F
+        # Why: proves `|| print_warn` fallback fires under r
         #   `set -euo pipefail`, not just that the dump doesn't crash.
         # From: Issue #1391 | PR #1546
         if [[ "$1" = "logs" ]]; then
@@ -96,8 +96,8 @@ setup() {
                     local idx=0
                     [[ -f "$count_file" ]] && idx=$(<"$count_file")
                     printf '%s' "$(( idx + 1 ))" > "$count_file"
-                    # What: clamps idx to the last entry once the sequence is exhausted.
-                    # Why: an unset index would read empty, misrepresenting "no
+                    # What: clamps idx to last entry once se
+                    # Why: an unset index would read empty,
                     #   healthcheck declared" instead of the scripted state.
                     # From: Issue #1391 | PR #1546
                     (( idx >= ${#sequence[@]} )) && idx=$(( ${#sequence[@]} - 1 ))
@@ -136,8 +136,8 @@ setup() {
 }
 
 @test "capture_stack_health_baseline does not mistake a single lucky sample of a flapping container for stable health" {
-    # What: a crash-looping container reads healthy once, then unhealthy.
-    # Why: a single sample would misread the healthy blip as stable; only
+    # What: a crash-looping container reads healthy once, th
+    # Why: a single sample would misread healthy blip as sta
     #   _UPDATE_HEALTH_BASELINE_SAMPLES consecutive healthy reads may count.
     # From: Issue #1391 | PR #1546
     FAKE_CONTAINER_ID[flaky]="c-flaky"
@@ -159,7 +159,7 @@ setup() {
 
 @test "capture_stack_health_baseline leaves a brand-new service (no pre-existing container) out of the baseline map entirely" {
     # What: no FAKE_CONTAINER_ID entry for "watchdog".
-    # Why: mirrors `docker compose ps -a -q` for a service the update is
+    # Why: mirrors `docker compose ps -a -q` for a service u
     #   introducing for the first time.
     # From: Issue #1391 | PR #1546
     capture_stack_health_baseline watchdog
@@ -206,8 +206,8 @@ setup() {
 }
 
 @test "wait_for_stack_health's log-dump fallback fires when docker logs itself fails, under real set -euo pipefail" {
-    # What: enables set -euo pipefail (bats isolates each @test's process).
-    # Why: the `docker logs ... | sed ... || print_warn` fallback is only
+    # What: enables set -euo pipefail (bats isolates each @t
+    # Why: the `docker logs ... | sed ... || print_warn` fal
     #   reachable when pipefail propagates a failing producer's status.
     # From: Issue #1391 | PR #1546
     set -euo pipefail
@@ -225,7 +225,7 @@ setup() {
 }
 
 # ── _REGRESSED_SERVICE_SYSLOG_HOST / dump_service_syslog_ng_tail ──────────────
-# What: nats/dhcp-proxy/syslog only log to file once LOGGING_ENABLED is set.
+# What: nats/dhcp-proxy/syslog only log to file once LOGGING
 # Why: `docker logs` alone goes quiet for them; tests point
 #   INSTALL_DIR/_UPDATE_ENV_FILE at a throwaway tmp tree instead.
 # From: Issue #1391 | PR #1546
@@ -263,7 +263,7 @@ setup() {
     run wait_for_stack_health 2 nats
     [ "$status" -eq 1 ]
     # What: file exists and would match if read.
-    # Why: proves this is a real LOGGING_ENABLED=0 skip, not a wrong-path miss.
+    # Why: proves this is a real LOGGING_ENABLED=0 skip, not
     # From: Issue #1391 | PR #1546
     [[ "$output" != *"Last 50 forwarded log lines"* ]]
     [[ "$output" != *"FAKE_NATS_SYSLOG_LINE"* ]]
@@ -274,7 +274,7 @@ setup() {
     _UPDATE_ENV_FILE="$BATS_TEST_TMPDIR/.env"
     : > "$_UPDATE_ENV_FILE"
     # What: no mkdir/file created.
-    # Why: simulates a fresh stack whose syslog-ng bind mount has not
+    # Why: simulates a fresh stack whose syslog-ng bind moun
     #   received any forwarded lines for this service yet.
     # From: Issue #1391 | PR #1546
 
@@ -303,7 +303,7 @@ setup() {
 
 @test "wait_for_stack_health reports no container found when a regressed service's container is already gone" {
     # What: no FAKE_CONTAINER_ID entry for "ghost".
-    # Why: mirrors a container docker compose can no longer find (already
+    # Why: mirrors a container docker compose can no longer
     #   removed/recreated by the time the gate's failure path runs).
     # From: Issue #1391 | PR #1546
     _UPDATE_HEALTH_BASELINE=([ghost]="1")
@@ -345,8 +345,8 @@ setup() {
     run wait_for_stack_health 2 ntp proxy
     [ "$status" -eq 1 ]
     [[ "$output" == *"proxy"* ]]
-    # What: ntp is named as forgiven, not folded into the regression message.
-    # Why: proves the mix case reports the two services independently.
+    # What: ntp is named as forgiven, not folded into regres
+    # Why: proves mix case reports two services independentl
     # From: Issue #1391 | PR #1546
     [[ "$output" != *"regressed"*"ntp"* ]]
 }
