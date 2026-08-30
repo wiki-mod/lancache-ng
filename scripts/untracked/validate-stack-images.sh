@@ -342,7 +342,7 @@ fi
 require_grep 'channel_tags\+=\(latest\)' \
   .github/workflows/build-push.yml \
   'stable release promotion must publish latest'
-require_grep 'source_tag_digest="\$\(digest_for_image "\$source_tag_image"\)"' \
+require_grep 'source_tag_digest="\$\(resolve_manifest_digest "\$source_tag_image" "\$GHCR_RETRY_USERNAME" "\$GHCR_RETRY_PASSWORD"\)"' \
   .github/workflows/build-push.yml \
   'promotion must verify the sha-* record still resolves to the exact producer digest before moving a public channel'
 require_grep 'imagetools inspect "\$image" --format' \
@@ -409,7 +409,7 @@ require_grep 'push-to-registry: true' \
 require_grep 'subject-digest: \$\{\{ steps\.build\.outputs\.digest \}\}' \
   .github/workflows/build-push.yml \
   'provenance attestations must bind to the pushed image digest'
-require_grep 'digest_for_image\(\)' \
+require_grep 'tag_digest="\$\(resolve_manifest_digest ' \
   .github/workflows/build-push.yml \
   'release notes must read immutable image digests'
 require_grep 'tag_digest.*!=.*sha_digest|sha_digest.*!=.*tag_digest' \
