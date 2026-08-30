@@ -107,19 +107,18 @@ done
 #     smoke_tools and never reaches this list.
 #     From: Issue #887
 #
-#     gh (issue #1095, PR #1694) is the identical situation: a real
-#     consumer (scripts/untracked/gc-pr-staging-images.sh's main()) hard-
-#     requires it, but the currently published :latest/:nightly build-tools
-#     image predates PR #1694 -- the last successful build-tools.yml
-#     publish was 2026-08-16, before gh was added to the Dockerfile.
-#     Gating this strict smoke-test path on gh now would fail every
-#     unrelated PR until a build-tools.yml run actually rebuilds and
-#     republishes. Revisit moving gh from here into smoke_test_image()'s
-#     required_tools once a successful publish confirms the published
-#     image actually carries it.
+#     gh went through this exact same chicken-and-egg window: a real
+#     consumer (gc-pr-staging-images.sh) hard-requires it, but the
+#     published build-tools image once predated its Dockerfile addition.
+#     STATUS: as of 2026-08-29, the published nightly digest carries gh;
+#     it has been added to smoke_test_image()'s own required_tools, same
+#     as ccache above -- no longer listed here, since the direction-1 loop
+#     below already finds it covered by smoke_tools and never reaches
+#     this list.
+#     From: Issue #1095.
 EXCLUDED_TOOLS=(
   # Opt-in (EXTRA_REQUIRED_TOOLS)
-  # dhclient (issue #1095): moved from smoke_test_image()'s baseline to
+  # dhclient: moved from smoke_test_image()'s baseline to
   # opt-in, since no Alpine apk package provides it; the two real callers
   # (dhcp-kea-lease-flow-simulation.sh, syslog-forwarding-simulation.sh)
   # now set EXTRA_REQUIRED_TOOLS=dhclient themselves.
@@ -132,8 +131,6 @@ EXCLUDED_TOOLS=(
   test timeout xargs xz
   # Musl cross-compilation toolchain (issue #815)
   musl-gcc
-  # Bootstrap gap pending a successful build-tools.yml republish (issue #1095, PR #1694)
-  gh
 )
 
 # Multi-word capabilities the Dockerfile verifies via a subcommand invocation
@@ -154,9 +151,9 @@ fail() {
 
 # extract_required_tools <file>
 # Prints one tool name per line from every `required_tools=( ... )` array in
-# <file> (union, not just the first): the Dockerfile has carried two since
-# Issue #1095 added an Alpine candidate stage above the Debian final stage,
-# and both must stay covered by the smoke test or EXCLUDED_TOOLS below.
+# <file> (union, not just the first): the Dockerfile carries two arrays,
+# an Alpine candidate stage above the Debian final stage, and both must
+# stay covered by the smoke test or EXCLUDED_TOOLS below.
 # Strips line-continuation backslashes (the Dockerfile array uses them; the
 # smoke array does not -- harmless either way) and skips blank/comment lines.
 extract_required_tools() {
