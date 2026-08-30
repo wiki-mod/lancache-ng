@@ -4,11 +4,12 @@
 #
 # Docker-free unit coverage for scripts/lib/validation-image-tag.sh (#715) --
 # the pure tag-resolution helpers that decide which image the deep full-setup
-# validation suite tests. These mirror build-push.yml's inline staging-tag
-# logic, so a drift between the two (e.g. the pr-<N>-sha-<full> format, or
-# the base-channel mapping) is exactly the kind of regression that would
-# silently make the deep gate test the wrong image; this keeps it honest in
-# fast CI without needing a runner with a registry.
+# validation suite tests. build-push.yml no longer rebuilds the
+# pr-<N>-sha-<full> stem inline; it calls vit_pr_staging_tag here, so producer
+# and consumer share one definition (PR #1742). The base-channel mapping is
+# still mirrored rather than shared, and a drift there is exactly the kind of
+# regression that would silently make the deep gate test the wrong image; this
+# keeps it honest in fast CI without needing a runner with a registry.
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
