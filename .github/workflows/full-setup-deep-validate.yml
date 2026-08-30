@@ -222,6 +222,11 @@ jobs:
       # endpoint requires this scope either way, since the job already
       # narrows permissions below the repository default.
       actions: read
+    # What: mirrors secret into env for a later if: to read.
+    # Why: actionlint bans secrets.* inside a step if: expr.
+    # From: Issue #1095
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
     steps:
       # #808: fetch-depth: 0 (not the default shallow depth-1 clone) so
       # scripts/untracked/ensure-pr-staging-images.sh can prove real git ancestry
@@ -272,7 +277,7 @@ jobs:
       # Why: shared egress IP hits Docker Hub pull-rate limit.
       # From: Issue #1095
       - name: Log in to Docker Hub
-        if: ${{ secrets.DOCKERHUB_USERNAME != '' }}
+        if: ${{ env.DOCKERHUB_USERNAME != '' }}
         continue-on-error: true
         uses: ./.github/actions/docker-login-action-centralized-version
         with:
