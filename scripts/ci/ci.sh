@@ -2003,8 +2003,8 @@ ci_cmd_validate_setup_update_migration() {
     # Why: an anonymous registry read is rate-limited and fails closed.
     # From: PR #1742 | Refs #1683
     if grep -n 'resolve_manifest_digest ' .github/workflows/build-push.yml \
-      | grep -vE ':[[:space:]]*#' | grep -v 'GHCR_RETRY_PASSWORD' >/dev/null; then
-      echo "::error::Every resolve_manifest_digest call in build-push.yml must pass GHCR credentials. Promotion resolves each image digest before moving a channel tag; an unauthenticated read is rate-limited by the registry and fails closed mid-promotion, so the credential arguments are the checked property, not merely the helper name."
+      | grep -vE ':[[:space:]]*#' | grep -vE 'GHCR_RETRY_PASSWORD|DOCKERHUB_TOKEN' >/dev/null; then
+      echo "::error::Every resolve_manifest_digest call in build-push.yml must pass registry credentials (GHCR_RETRY_PASSWORD for ghcr.io, DOCKERHUB_TOKEN for docker.io). Promotion resolves each image digest before moving a channel tag, and base-image reads hit Docker Hub; an unauthenticated read is rate-limited by the registry and fails closed, so the credential arguments are the checked property, not merely the helper name."
       exit 1
     fi
     grep -F 'needs: promote' .github/workflows/build-push.yml >/dev/null \
