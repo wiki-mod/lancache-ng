@@ -186,9 +186,9 @@ push_reuse_decide() {
     return 0
   fi
 
-  # What: workflow_reuse_scope covers the full revision..github_sha span.
-  # Why: closes a prior before..sha-only gap; job-scoped per G14.
-  # From: Issue #1095 (G14) | PR #1378
+  # What: workflow_reuse_scope covers revision..github_sha span.
+  # Why: closes a prior before..sha-only gap.
+  # From: Issue #1095 | PR #1378
   local workflow_flag
   workflow_flag="$(grep -m1 '^workflow_reuse_scope=' <<<"$classify_output" | cut -d= -f2)"
   if [[ "$workflow_flag" != "false" ]]; then
@@ -198,7 +198,7 @@ push_reuse_decide() {
   fi
 
   # What: also fails closed if any declared dependency key changed.
-  # Why: a consumer's own key can't see a first-party base image's change.
+  # Why: consumer's key can't see first-party base image change.
   # From: Issue #1095
   local dep_key dep_flag
   for dep_key in $dep_keys; do

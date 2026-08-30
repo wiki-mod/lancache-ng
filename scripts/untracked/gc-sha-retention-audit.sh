@@ -1,20 +1,25 @@
 #!/usr/bin/env bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: read-only GHCR retention audit -- inventories, ranks, and classifies.
-# Why: never issues DELETE; the destructive GC may consume only its exact
-# would-delete identities after independent live safety revalidation.
+# What: read-only GHCR audit: inventories, ranks, classifies
+# Why: GC consumes would-delete identities only after revalidation
 # From: Issue #1095 | PR #1586
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
-# What: the `# shellcheck source=` lines below are shellcheck directives.
-# Why: not commented-out code -- they tell the linter which file a dynamic
-# `source` call resolves to, since shellcheck cannot infer that itself.
+# What: `shellcheck source=` lines are linter directives
+# Why: Tells linter which file dynamic source calls resolve to
 # From: Issue #1095 | PR #1586
 # shellcheck source=scripts/lib/github-api-retry.sh
 source "$repo_root/scripts/lib/github-api-retry.sh"
+# What: reuses gcps age-check + manifest-fetch helpers
+# Why: avoids a second copy of either, per AG-CODE-011
+# From: Issue #1095
+# shellcheck source=scripts/lib/ghcr-retry.sh
+source "$repo_root/scripts/lib/ghcr-retry.sh"
+# shellcheck source=scripts/lib/gc-pr-staging-images.sh
+source "$repo_root/scripts/lib/gc-pr-staging-images.sh"
 # shellcheck source=scripts/lib/sha-retention-audit.sh
 source "$repo_root/scripts/lib/sha-retention-audit.sh"
 
@@ -26,26 +31,17 @@ history_refs_raw="${SRA_HISTORY_REFS:-${SRA_HISTORY_REF:-origin/current_dev}}"
 package_filter="${SRA_PACKAGE_FILTER:-}"
 version_snapshot_file="${SRA_VERSION_SNAPSHOT_FILE:-}"
 max_pages_per_package="${SRA_MAX_PAGES_PER_PACKAGE:-500}"
-# What: bounds how many packages are audited concurrently in one batch.
-# Why: package listings/classifications are independent and dominate live
-# runtime; a background-worker batch (see the main loop below) is what
-# makes a full ~26,000-version registry audit finish inside CI's job
-# timeout instead of the single-package-at-a-time run that originally
-# timed out at this issue's opening.
-# From: Issue #1585.
+# What: Bounds concurrent package audit batch size
+# Why: Enables full registry audits within CI timeout via batching
+# From: Issue #1585
 audit_concurrency="${SRA_CONCURRENCY:-2}"
-# What: optional path to the v1.2 incremental classification cache.
-# Why: opt-in/fail-safe -- unset, or any cache failure/miss, falls back to
-# full classification; a read also requires an exact history_fingerprint
-# match (see sra_history_refs_fingerprint), not just digest+tags, since two
-# real callers here classify against different managed-history ref sets.
-# From: Issue #1585 | Issue #1095.
+# What: optional path to the v1.2 incremental classification cache
+# Why: Opt-in/fail-safe cache: misses fall back to classification
+# From: Issue #1585
 #
-# What: sra_cache_write_package's sqlite3 connection sets no busy_timeout.
-# Why: concurrent workers writing the same cache_db can hit SQLITE_BUSY,
-# handled as a soft ::warning:: (falls back to full classification next
-# run), never a hard error or corrupted decision. Flagged for follow-up.
-# From: Issue #1585.
+# What: Cache sqlite3 connection omits busy_timeout on purpose
+# Why: Workers hitting SQLITE_BUSY fall back to full classification
+# From: Issue #1585
 cache_db="${SRA_CACHE_DB:-}"
 per_page=100
 
@@ -91,7 +87,7 @@ else
   echo "::error::Cannot read exactly one valid accepted_ordinary_roots_per_package value from $manifest." >&2
   exit 1
 fi
-# What: reads how many newest vX.Y.Z tags per package still count as supported.
+# What: Reads how many newest version tags count as supported
 # Why: needed for protected-reference classification below.
 # From: Issue #1095 | PR #1586
 if minimum_stable_releases="$(sra_read_minimum_stable_releases "$manifest")"; then
@@ -100,9 +96,9 @@ else
   echo "::error::Cannot read exactly one valid minimum_stable_releases value from $manifest." >&2
   exit 1
 fi
-# What: reads the v1.2 non-ordinary-version safety-buffer count.
-# Why: needed below for the inverted-protection buffer/would-delete ranking.
-# From: Issue #1585.
+# What: Reads v1.2 non-ordinary-version safety-buffer count
+# Why: Needed for inverted-protection buffer ranking
+# From: Issue #1585
 if channel_buffer="$(sra_read_channel_buffer_versions "$manifest")"; then
   :
 else
@@ -110,10 +106,8 @@ else
   exit 1
 fi
 
-# What: reads and format-validates retention.rollback_anchors defensively.
-# Why: an explicit, maintainer-curated digest list, independent of git
-# history/tags/release status; re-validated here since this script has no
-# guarantee validate-stack-images.sh's static CI check already ran first.
+# What: Validates retention.rollback_anchors format defensively
+# Why: Maintainer-curated digest list re-validated before use
 # From: Issue #1095 | PR #1586
 if retention_rollback_anchors_raw="$(sra_read_rollback_anchors "$manifest")"; then
   :
@@ -134,16 +128,13 @@ if [[ -n "$retention_rollback_anchors_raw" ]]; then
     retention_rollback_anchor_digests["$retention_rollback_anchor_entry"]=1
   done <<<"$retention_rollback_anchors_raw"
 fi
-# What: tracks which declared rollback anchors were actually observed.
-# Why: an anchor is proven real only by being seen among a package's fetched
-# GHCR versions; the post-loop check below fails closed on any unobserved one.
+# What: Tracks which rollback anchors were actually observed
+# Why: Post-loop check fails closed on any unobserved anchor
 # From: Issue #1095 | PR #1586
 declare -A retention_rollback_anchor_found=()
 
-# What: discovers every digest a live Dockerfile FROM line currently builds from.
-# Why: extends rollback_anchors protection to build dependencies (utilities'
-#   digest had none once it left the nightly window); re-derived every run
-#   so a removed FROM line drops protection with it.
+# What: Discovers digests that live Dockerfile FROM lines build from
+# Why: Extends protection to build dependencies dynamically
 # From: Issue #1613
 declare -A live_dockerfile_from_digests=()
 while IFS= read -r live_dockerfile_path; do
@@ -156,10 +147,9 @@ while IFS= read -r live_dockerfile_path; do
 done < <(git -C "$repo_root" ls-files -- '*Dockerfile*')
 
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/lancache-ng-sha-retention-audit.XXXXXX")"
-# What: removes work_dir on exit, guarded by an own-prefix path check.
-# Why: the guard keeps this rm -rf from ever touching anything but this
-# script's own mktemp path, even if work_dir were somehow reassigned.
-# From: Issue #1095 | PR #1501.
+# What: Removes work_dir on exit guarded by path prefix check
+# Why: Guard prevents rm -rf from touching anything but mktemp
+# From: Issue #1095 | PR #1501
 cleanup() {
   if [[ -n "${work_dir:-}" && -d "$work_dir" && "$work_dir" == */lancache-ng-sha-retention-audit.* ]]; then
     rm -rf -- "$work_dir"
@@ -168,9 +158,8 @@ cleanup() {
 trap cleanup EXIT
 
 packages_file="$work_dir/packages.tsv"
-# What: filtered mode includes declared legacy packages for per-package GC.
-# Why: standalone audit keeps its original first-party scope while the GC
-# can intentionally retire manifest-declared historical package names.
+# What: Filtered mode includes legacy packages for per-package GC
+# Why: Audit scope remains first-party; GC can retire legacy
 # From: Issue #1095 | PR #1586
 if [[ -n "$package_filter" ]]; then
   sra_manifest_packages "$manifest" "runtime tooling metadata legacy" >"$packages_file"
@@ -250,9 +239,9 @@ for history_ref in "${history_refs[@]}"; do
   done <"$history_file"
 done
 
-# What: fingerprints this run's managed-history ref set for the cache.
-# Why: gates every cache read in audit_package (see SRA_CACHE_DB above).
-# From: Issue #1095.
+# What: Fingerprints run's managed-history ref set for cache
+# Why: Gates cache reads in audit_package per SRA_CACHE_DB
+# From: Issue #1095
 if history_fingerprint="$(sra_history_refs_fingerprint "$repo_root" "${history_refs[@]}")"; then
   :
 else
@@ -260,9 +249,8 @@ else
   exit 1
 fi
 
-# What: audits one package -- fetches, classifies, prints AUDIT/SUMMARY lines.
-# Why: the single per-package entry point; everything else in this file only
-# sets up its inputs (manifest, history, credentials) or loops over it.
+# What: Audits single package: fetches, classifies, prints AUDIT
+# Why: Single per-package entry point; sets up credentials
 # From: Issue #1095 | PR #1586
 audit_package() {
   local class="${1:?audit_package: class is required}"
@@ -278,12 +266,9 @@ audit_package() {
   : >"$versions_file"
   package_path="${repository_name}%2F${package}"
 
-  # What: loads this package's cached resolutions (v1.2 point 4).
-  # Why: a fresh row set every run means a cache miss (no cache_db, no
-  # sqlite3, first run, or a rotated-key restore-keys fallback with no
-  # matching data) degrades to a plain empty array -- every version below
-  # then simply takes the existing full-classification path unchanged.
-  # From: Issue #1585.
+  # What: Loads package's cached v1.2 resolutions (or miss)
+  # Why: Cache miss falls back to full classification path
+  # From: Issue #1585
   declare -A cache_hits=()
   cache_rows_out="$package_dir/cache-rows-out.tsv"
   : >"$cache_rows_out"
@@ -337,10 +322,8 @@ audit_package() {
     return 1
   }
 
-  # What: exports the exact normalized inventory used for this filtered audit.
-  # Why: the destructive collector can reuse the same snapshot for graph/PR/
-  # orphan classification instead of immediately listing thousands of package
-  # versions a second time; fresh per-version GETs still guard each DELETE.
+  # What: Exports normalized inventory for filtered audit snapshot
+  # Why: Collector reuses snapshot to avoid re-listing versions
   # From: Issue #1585 | PR #1586
   if [[ -n "$version_snapshot_file" ]]; then
     if cp -- "$versions_file" "$version_snapshot_file"; then
@@ -351,10 +334,8 @@ audit_package() {
     fi
   fi
 
-  # What: computes this package's stable-release tag set once via one jq pass.
-  # Why: avoids a per-version jq call (the cost class that made run
-  # 31774741729 time out); a nonzero pipeline exit is treated as an empty
-  # result, since `grep` alone exits 1 on zero matches under pipefail.
+  # What: Computes stable-release tag set once via one jq pass
+  # Why: Per-version jq calls caused timeout; single pass avoids
   # From: Issue #1095 | PR #1586
   local release_tags_file="$package_dir/release-tags.txt"
   if jq -r '.metadata.container.tags[]? // empty' "$versions_file" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -u >"$release_tags_file"; then
@@ -368,14 +349,42 @@ audit_package() {
     return 1
   }
 
+  # What: builds root manifests' child-digest reference set
+  # Why: old 'separate pass' only ever covers PR-staging
+  # From: Issue #1095
+  declare -A closure_referenced_children=()
+  local closure_check_ok=1
+  local closure_registry_token=""
+  if closure_registry_token="$(ghcr_retry ghcr.io "" "" -- gcps_registry_anon_token "$package" "$GITHUB_REPOSITORY")" && [[ -n "$closure_registry_token" ]]; then
+    local root_digest root_manifest root_children_output root_child
+    while IFS= read -r root_digest; do
+      [[ -n "$root_digest" ]] || continue
+      if ! root_manifest="$(ghcr_retry ghcr.io "" "" -- gcps_fetch_manifest "$package" "$root_digest" "$GITHUB_REPOSITORY" "$closure_registry_token")" \
+          || [[ -z "$root_manifest" ]] || ! gcps_manifest_looks_valid "$root_manifest"; then
+        echo "::warning::Cannot fetch/validate root manifest $root_digest for ${repository_name}/${package}; disabling the non-ordinary-version closure check for this package (falls back to unconditional protect)." >&2
+        closure_check_ok=0
+        break
+      fi
+      if ! root_children_output="$(gcps_extract_manifest_children "$root_manifest")"; then
+        echo "::warning::Cannot extract manifest children for root $root_digest in ${repository_name}/${package}; disabling the non-ordinary-version closure check for this package." >&2
+        closure_check_ok=0
+        break
+      fi
+      while IFS= read -r root_child; do
+        [[ -n "$root_child" ]] || continue
+        closure_referenced_children["$root_child"]=1
+      done <<<"$root_children_output"
+    done < <(jq -r 'select((.metadata.container.tags // []) | any(test("^sha-[0-9a-f]{7,40}$"))) | .name' "$versions_file")
+  else
+    echo "::warning::Cannot obtain an anonymous pull token for ${repository_name}/${package}; disabling the non-ordinary-version closure check for this package." >&2
+    closure_check_ok=0
+  fi
+
   local root_candidates="$package_dir/root-candidates.tsv"
   : >"$root_candidates"
-  # What: v1.2 buffer pool for a rootless, non-channel-matched
-  # version -- ranked by build date instead of git history (it has none).
-  # Why: replaces the old unconditional "non-ordinary-version" permanent
-  # protect; only the newest channel_buffer_versions such versions per
-  # package stay protected, the rest become would-delete candidates.
-  # From: Issue #1585.
+  # What: V1.2 buffer pool ranks rootless non-channel versions
+  # Why: Replaces permanent protection with newest-first buffer
+  # From: Issue #1585
   local other_tag_candidates="$package_dir/other-tag-candidates.tsv"
   : >"$other_tag_candidates"
   local version_json id digest tags built facts root_count child_count other_count
@@ -391,11 +400,9 @@ audit_package() {
   local version_fields created_at_raw
   while IFS= read -r version_json; do
     [[ -n "$version_json" ]] || continue
-    # What: extracts id/digest/tags/created_at via one combined jq call.
-    # Why: one call instead of four avoids the per-version subprocess cost;
-    # "|"-joined (not @tsv) since bash `read` treats a literal tab as IFS
-    # whitespace, silently collapsing an empty middle field.
-    # From: Issue #1095 | PR #1501.
+    # What: Extracts id/digest/tags/created_at in one jq call
+    # Why: One call avoids per-version subprocess cost
+    # From: Issue #1095 | PR #1501
     if version_fields="$(jq -r '[.id, .name, (.metadata.container.tags | sort | join(",")), (.created_at // "")] | join("|")' <<<"$version_json")"; then
       :
     else
@@ -418,10 +425,9 @@ audit_package() {
     seen_id_digest["$id"]="$digest"
     seen_digest_id["$digest"]="$id"
 
-    # What: reports a missing/malformed build date as its own ::warning::.
-    # Why: it is a real data-quality defect in the image-publish pipeline,
-    # not something to fold silently into an unrelated classification.
-    # From: Issue #1095 | PR #1501.
+    # What: Reports missing build date as separate warning
+    # Why: Flags data-quality defects in image pipeline
+    # From: Issue #1095 | PR #1501
     if sra_validate_created_at_string "$created_at_raw"; then
       built="$created_at_raw"
     else
@@ -430,19 +436,16 @@ audit_package() {
       echo "::warning::Package version $id (digest $digest) in ${repository_name}/${package} has no usable GHCR build date; this is a build-pipeline defect, not audit absence." >&2
     fi
 
-    # What: checks rollback-anchor membership before every other classification.
-    # Why: an explicit, maintainer-curated anchor is the highest-priority
-    # protect signal and overrides tag/class/history-budget classification;
-    # a match also marks this anchor "observed" for the post-loop check below.
+    # What: Checks rollback-anchor membership first
+    # Why: Explicit anchor overrides tag/class/history budget
     # From: Issue #1095 | PR #1586
     if sra_digest_is_rollback_anchor "$digest" "${!retention_rollback_anchor_digests[@]}"; then
       printf '%s\n' "$digest" >>"$anchor_result_file"
       sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "protected" "protect" "explicit-rollback-anchor"
       continue
     fi
-    # What: reuses the rollback-anchor membership check against live FROM digests.
-    # Why: extends, not duplicates, the existing protection mechanism; no
-    #   "observed" post-check applies since a live digest must already exist.
+    # What: Reuses check against live Dockerfile FROM digests
+    # Why: Extends protection to build dependencies
     # From: Issue #1613
     if sra_digest_is_rollback_anchor "$digest" "${!live_dockerfile_from_digests[@]}"; then
       sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "protected" "protect" "live-dockerfile-from-reference"
@@ -462,25 +465,36 @@ audit_package() {
     }
 
     if (( root_count == 0 && child_count > 0 )); then
-      sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "closure" "protect" "artifact-child-closure-unresolved"
+      # What: ages a merge-orphaned child past safety margin
+      # Why: a real merge job cannot run this long anymore
+      # From: Issue #1095
+      local closure_epoch=""
+      if [[ "$built" != "unknown" ]]; then
+        closure_epoch="$(gcps_created_at_to_epoch "$built")" || closure_epoch=""
+      fi
+      if [[ -n "$closure_epoch" ]] && gcps_is_old_enough_to_delete "$closure_epoch" "$now_epoch" "$orphan_closure_min_age_seconds"; then
+        sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "closure" "would-delete" "artifact-child-closure-orphaned-past-safety-margin"
+        direct_would_delete_count=$((direct_would_delete_count + 1))
+      else
+        sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "closure" "protect" "artifact-child-closure-unresolved"
+      fi
       continue
     fi
-    # What: classifies a rootless version -- a truly untagged version
-    # (other_count==0) stays permanently protected exactly as before; a
-    # matched protected channel/release also stays protected; only a
-    # rootless version that HAS tags but matches no protected channel
-    # becomes a channel_buffer_versions-ranked candidate below.
-    # Why: v1.2 targets "any historical or otherwise-
-    # unanticipated tag FORMAT" -- a genuinely untagged version has no tag
-    # format to be unanticipated, and is almost always a manifest-list's
-    # own untagged amd64/arm64 platform child (this reaper's own separate
-    # orphan-closure pass, not this classifier, is the correct place to
-    # decide whether such a child is truly orphaned -- it already checks
-    # forward-reference edges from a still-retained parent manifest, which
-    # this classifier cannot see). Only "has tags, none recognized" is the
-    # actual gap this rule inverts; an absence of tags is not that gap.
-    # From: Issue #1585.
+    # What: checks untagged version against root children
+    # Why: referenced or unverifiable -- stays protected
+    # From: Issue #1585 | Issue #1095
     if (( root_count == 0 && other_count == 0 )); then
+      if (( closure_check_ok == 1 )) && [[ -z "${closure_referenced_children[$digest]+x}" ]]; then
+        local nonord_epoch=""
+        if [[ "$built" != "unknown" ]]; then
+          nonord_epoch="$(gcps_created_at_to_epoch "$built")" || nonord_epoch=""
+        fi
+        if [[ -n "$nonord_epoch" ]] && gcps_is_old_enough_to_delete "$nonord_epoch" "$now_epoch" "$orphan_closure_min_age_seconds"; then
+          sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "protected" "would-delete" "non-ordinary-version-unreferenced-past-safety-margin"
+          direct_would_delete_count=$((direct_would_delete_count + 1))
+          continue
+        fi
+      fi
       sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "protected" "protect" "non-ordinary-version"
       continue
     fi
@@ -492,11 +506,9 @@ audit_package() {
       if reason="$(sra_protected_reference_reason "$other_tags" "$supported_releases")"; then
         sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "protected" "protect" "$reason"
       else
-        # What: buffers this candidate for a build-date-ranked pass below.
-        # Why: an "unknown" build date sorts first (oldest) on purpose, so a
-        # missing date is treated conservatively as an early would-delete
-        # candidate rather than accidentally winning the newest-first buffer.
-        # From: Issue #1585.
+        # What: Buffers candidate for build-date-ranked pass below
+        # Why: Unknown date sorts first, treated conservatively
+        # From: Issue #1585
         sort_key="$built"
         [[ "$sort_key" == "unknown" ]] && sort_key="0000-00-00T00:00:00Z"
         printf '%s\t%s\t%s\t%s\t%s\n' "$sort_key" "$id" "$digest" "$tags" "$built" >>"$other_tag_candidates"
@@ -507,9 +519,8 @@ audit_package() {
       sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "protected" "protect" "mixed-root-and-child-tags"
       continue
     fi
-    # What: classifies a root tag's extra tags into a protect reason, if any.
-    # Why: promote retags an existing digest rather than rebuilding, so only
-    # a recognized active channel/release may protect here.
+    # What: Classifies root tag's extra tags into protect reason
+    # Why: Retags reuse existing digest; only channel matches protect
     # From: Issue #1095 | PR #1586
     if (( other_count > 0 )); then
       other_tags="$(sra_other_tags_from_csv "$tags")" || {
@@ -522,11 +533,9 @@ audit_package() {
       fi
     fi
 
-    # What: reuses a cached git-history resolution instead of recomputing it.
-    # Why: avoids one `git rev-parse`/`merge-base` pair per root tag; a hit
-    # requires exact digest+tags (cache_hits is already fingerprint-filtered
-    # by sra_cache_read_package above).
-    # From: Issue #1585 | Issue #1095.
+    # What: Reuses cached git-history resolution from cache_hits
+    # Why: Avoids per-root-tag rev-parse/merge-base computation
+    # From: Issue #1585
     cache_resolution=""
     if [[ -n "${cache_hits[$id]:-}" ]]; then
       IFS=$'\t' read -r cache_digest cache_tags cache_resolution <<<"${cache_hits[$id]}"
@@ -561,10 +570,9 @@ audit_package() {
             printf '%s\t%s\t%s\t%s\n' "$id" "$digest" "$tags" "$cache_resolution" >>"$cache_rows_out"
             continue
           fi
-          # What: falls through to full recomputation on a malformed cache value.
-          # Why: fail-safe -- a corrupt/unexpected cached string must never
-          # silently skip real classification (AG-INT-002).
-          # From: Issue #1585.
+          # What: Falls through on malformed cache value
+          # Why: Fail-safe: corrupt cache never skips classification
+          # From: Issue #1585
           ;;
       esac
     fi
@@ -637,12 +645,9 @@ audit_package() {
     printf '%s\t%s\t%s\trank:%s\n' "$id" "$digest" "$tags" "$min_rank" >>"$cache_rows_out"
   done <"$versions_file"
 
-  # What: persists this run's resolutions back to the cache database.
-  # Why: a no-op when cache_db is unset, sqlite3 is unavailable, or nothing
-  # was written this run (e.g. every version hit the cache already);
-  # sra_cache_write_package's own command -v/[[ -f ]] guards make this safe
-  # to call unconditionally in either case.
-  # From: Issue #1585.
+  # What: Persists resolutions to v1.2 cache database
+  # Why: No-op when cache_db unset; soft warning on failure
+  # From: Issue #1585
   if [[ -n "$cache_db" && -s "$cache_rows_out" ]]; then
     if sra_cache_init "$cache_db" && sra_cache_write_package "$cache_db" "$package" "$cache_rows_out" "$history_fingerprint"; then
       :
@@ -667,10 +672,9 @@ audit_package() {
   while IFS=$'\t' read -r rank id digest tags built; do
     [[ -n "$id" ]] || continue
     (( legacy_position += 1 ))
-    # What: marks only roots outside the manifest's storage budget deletable.
-    # Why: the destructive GC consumes these exact identities after its
-    # independent age, tag, PR-state, graph, and live-revalidation gates.
-    # From: Issue #1095.
+    # What: Marks roots outside retention budget deletable
+    # Why: GC consumes identities after revalidation gates
+    # From: Issue #1095
     if budget_decision_line="$(sra_budget_decision "$legacy_position" "$package_retention_keep")"; then
       :
     else
@@ -687,14 +691,9 @@ audit_package() {
     sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "$legacy_position" "$budget" "$decision" "$reason"
   done <"$sorted_candidates"
 
-  # What: ranks the v1.2 rootless/non-channel-matched
-  # candidate pool by build date, newest first (no git-history root exists
-  # to rank these by, unlike the ordinary sha-* roots above).
-  # Why: replaces the old permanent "non-ordinary-version" protect with a
-  # real, bounded buffer -- mirrors root_candidates' own plain sort-to-file
-  # pattern immediately above (a direct redirect, not a pipe, so AG-VAL-032
-  # does not apply here).
-  # From: Issue #1585.
+  # What: Ranks v1.2 rootless versions by build date newest
+  # Why: Replaces permanent protect with bounded buffer pattern
+  # From: Issue #1585
   local other_tag_sorted="$package_dir/other-tag-candidates.sorted.tsv"
   if sort -t $'\t' -k1,1r "$other_tag_candidates" >"$other_tag_sorted"; then
     :
@@ -729,10 +728,8 @@ audit_package() {
   fi
 }
 
-# What: audits packages in bounded batches and merges each worker deterministically.
-# Why: package listings are independent and dominate the live runtime, while
-# per-worker files preserve output, failures, and rollback-anchor evidence
-# across the background-shell boundary under set -euo pipefail.
+# What: Audits packages in bounded batches, merges workers
+# Why: Per-worker files preserve output and state across shell
 # From: Issue #1585
 overall_status=0
 mapfile -t package_targets <"$packages_file"
@@ -780,10 +777,8 @@ for (( offset=0; offset<package_count; offset+=audit_concurrency )); do
   done
 done
 
-# What: fails closed on any declared rollback anchor never observed live.
-# Why: an unobserved anchor is a typo, an already-deleted digest, or one
-# that never existed; the error message itself notes an earlier package
-# failure above as a possible cause, so this stays silent on that nuance.
+# What: Fails closed on unobserved declared rollback anchors
+# Why: Detects typos and deleted digests in anchor list
 # From: Issue #1095 | PR #1586
 if [[ -z "$package_filter" ]]; then
 for retention_rollback_anchor_entry in "${!retention_rollback_anchor_digests[@]}"; do

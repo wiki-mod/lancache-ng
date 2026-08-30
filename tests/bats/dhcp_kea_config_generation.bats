@@ -314,8 +314,8 @@ setup() {
     [ "$status" -eq 0 ]
 }
 
-# What: asserts the DHCP_DDNS_PORT guard stays paired with the unquoted JSON field.
-# Why: malformed values would otherwise render invalid D2 config and stop DDNS updates.
+# What: DHCP_DDNS_PORT guard stays with the unquoted field.
+# Why: a bad value renders invalid D2 config, stops DDNS.
 # From: Issue #1164
 @test "entrypoint validates DHCP_DDNS_PORT before unquoted DDNS rendering" {
     grep -q 'DHCP_DDNS_PORT must be a numeric TCP/UDP port' "$repo_root/services/dhcp/entrypoint.sh" \

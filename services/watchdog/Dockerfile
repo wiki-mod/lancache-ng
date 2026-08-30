@@ -7,25 +7,18 @@
 # Intentional ARG default (overridable at build time via --build-arg).
 # Actual digest pinning for release builds is tracked in issue #508.
 ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
-# What: declared here (meta-arg, before any FROM) so it is usable by the
-#   utilities-tools stage's own FROM further down -- an ARG declared after
-#   the first FROM is not visible to a later FROM's image reference at all.
-# Why: same override contract as BUILD_TOOLS_IMAGE above (AG-KD-010).
-# From: Issue #1095 | AG-KD-010
+# What: declared pre-FROM so utilities-tools' FROM can see it.
+# Why: same override contract as BUILD_TOOLS_IMAGE above.
+# From: Issue #1095
 ARG UTILITIES_IMAGE=ghcr.io/wiki-mod/lancache-ng/utilities:latest
 FROM ${BUILD_TOOLS_IMAGE} AS watchdog-builder
 
-# What: verifies the build-tools contract (Rust toolchain, sccache, distcc,
-# distcc-pump, musl cross target) is present before relying on any of it.
-# Why: fail closed rather than a confusing mid-build "command not found" if
-# the pinned build-tools image ever regresses this contract.
-# From: Issue #842 (this file's own sole pointer for that number -- every
-# other mention below refers to it by description, not by number, per
-# AG-CODE-012)
+# What: verifies the build-tools contract is present first.
+# Why: fail closed, not a confusing mid-build not-found.
+# From: Issue #842
 #
 # What: detects host arch for the musl cross-compile target.
-# Why: `uname -m` needs no extra package (unlike Debian-only
-# `dpkg`); mirrors build-tools/Dockerfile's arch pattern.
+# Why: uname -m needs no extra package, unlike dpkg.
 # From: Issue #1095
 RUN set -eu; \
     for tool in cargo rustc rustup rustfmt clippy-driver sccache distcc distcc-pump python3 pkg-config; do \
@@ -60,11 +53,9 @@ RUN set -eu; \
     chmod +x /usr/local/bin/lancache-rustc-wrapper
 
 ARG CARGO_BUILD_JOBS=
-# What: redeclares BUILD_TOOLS_IMAGE (already set pre-FROM above) so it is
-# visible as a shell variable inside this stage's RUN block.
-# Why: Docker ARG scoping requires a bare post-FROM redeclaration; the
-# ccache toolchain-identity key below needs this value.
-# From: Issue #842 (mirrors services/dns/Dockerfile, Issue #887)
+# What: redeclares BUILD_TOOLS_IMAGE as a shell var here.
+# Why: post-FROM ARG scoping; ccache key below needs it.
+# From: Issue #842
 ARG BUILD_TOOLS_IMAGE
 
 WORKDIR /build
@@ -81,14 +72,9 @@ COPY src/ ./src/
 # per-crate identifiers differ: SCCACHE_REDIS_KEY_PREFIX/CCACHE_DIR use
 # "lancache-watchdog" instead of "lancache-dns", and the copied binary is
 # this crate's own `lancache-watchdog`, not `nats-subscriber`.
-# What: builds the release binary with sccache + ccache-over-distcc
-# acceleration (AG-CI-004/005/007/022), falling back through plain distcc
-# then a normal local compiler if either accelerator's live probe fails.
-# Why: this crate pulls in `ring` (a real C-dependency compile) via
-# reqwest's rustls-tls-native-roots feature, so it needs the exact same
-# build-acceleration wiring dns/ui already have, per the 2026-08-07
-# maintainer decision (acceleration required from day one).
-# From: Issue #842 | Issue #887 (pattern origin)
+# What: builds the release binary with sccache/ccache-distcc.
+# Why: ring's C-dependency compile needs the same wiring.
+# From: Issue #842
 # NOTE: comments cannot be embedded inside this block itself -- Docker's
 # line-continuation strips the backslash-newline entirely, so a "#" comment
 # ending in "\" would swallow every following continuation line as
@@ -313,10 +299,9 @@ RUN --mount=type=secret,id=sccache_redis_url \
     fi; \
     cp "target/${musl_target}/release/lancache-watchdog" /build/lancache-watchdog-out
 
-# What: source stage for tools copied into the final image below.
-# Why: uses the mutable `:latest` tag -- see services/proxy/Dockerfile's
-#   identical stage comment and AG-KD-010 for the full rationale.
-# From: Issue #1095 | AG-KD-010
+# What: source stage for tools copied into final image.
+# Why: uses the mutable :latest tag (see AG-KD-010).
+# From: Issue #1095
 FROM ${UTILITIES_IMAGE} AS utilities-tools
 
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
@@ -328,9 +313,7 @@ LABEL org.opencontainers.image.description="lancache-ng watchdog: compiled Rust 
 # services/dhcp-proxy/Dockerfile's identical comment/block for the full
 # rationale and the real verification behind it.
 # What: declares APT_CACHE_BUST right before the RUN it busts.
-# Why: without this, BuildKit's cache has no wall-clock expiry and can
-#   replay a stale `apk upgrade` forever; see tools/build-tools/Dockerfile's
-#   identical ARG for the full rationale.
+# Why: without this, BuildKit cache has no wall-clock expiry.
 # From: Issue #1095
 ARG APT_CACHE_BUST=""
 RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
@@ -342,32 +325,16 @@ RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
     util-linux \
     nano \
     zstd
-# What: bash/coreutils/util-linux/zstd/ca-certificates plus nano.
-# Why: retention.sh (find -printf, realpath -m, stat -c, zstd) and
-# retention-entrypoint.sh (setpriv, from util-linux) still ship as bash
-# scripts in this same image -- see this file's own ENTRYPOINT comment
-# below for why the health-monitor binary and the retention sidecar remain
-# two different executables sharing one image. `jq` is dropped: the
-# compiled Rust binary parses JSON via serde internally (never shells out
-# to jq), and no remaining script in this image ever called it -- confirmed
-# by grepping healthcheck.sh/retention.sh/retention-entrypoint.sh, whose
-# only real tool usage is find/realpath/stat/zstd/setpriv. ca-certificates
-# is a direct apk install here, not copied from the shared `utilities`
-# image: the compiled
-# binary's reqwest client uses rustls-tls-native-roots (Cargo.toml), which
-# reads this image's own OS trust store, and a fresh apk-installed bundle
-# stays current independently of whichever utilities-image version might
-# otherwise be copied in.
-# From: Issue #842 | Issue #1360 (retention.sh extraction) | Issue #1556
-#
-# What: curl/findutils/lsof/ripgrep come from the shared utilities image.
-# Why: same alpine:3.24 digest as utilities; keep the duplicated common
-# tools in one image instead of separately apk-installing them here too.
+# What: bash/coreutils/util-linux/zstd/ca-certificates+nano.
+# Why: retention.sh/-entrypoint.sh need these; jq is unused.
 # From: Issue #1556
 #
-# What: removes the BusyBox symlinks at these paths before the real binaries land.
-# Why: COPY follows an existing symlink target instead of replacing the link,
-#   which would overwrite /bin/busybox and break later /bin/sh-based RUNs.
+# What: curl/findutils/lsof/ripgrep from shared utilities.
+# Why: same digest as utilities; avoid duplicate installs.
+# From: Issue #1556
+#
+# What: removes BusyBox symlinks before real binaries land.
+# Why: COPY follows symlinks, would overwrite /bin/busybox.
 # From: Issue #1556
 RUN rm -f /usr/bin/find /usr/bin/xargs /usr/bin/lsof
 
@@ -381,9 +348,8 @@ COPY --from=utilities-tools /usr/lib/libpcre2-8.so.0* /usr/lib/
 COPY --from=utilities-tools /usr/local/bin/verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
 
 # What: verifies the copied binaries actually run.
-# Why: a missing shared-library dependency fails at exec time, not at COPY
-# time; the lsof check is delegated to a shared script (see that file).
-# From: Issue #1613 | Issue #1556
+# Why: a missing shared lib fails at exec, not at COPY.
+# From: Issue #1556
 RUN set -euo pipefail; \
     find . -maxdepth 0 -printf '%f\n' >/dev/null; \
     rg --version >/dev/null; \
@@ -412,20 +378,7 @@ RUN addgroup -g 10001 lancache && \
     mkdir -p /var/lib/lancache-retention-state && \
     chown lancache:lancache /var/lib/lancache-retention-state
 
-# What: default ENTRYPOINT is now the compiled Rust binary, not the bash
-# `watchdog.sh` script.
-# Why: the 2026-08-07 maintainer decision authorized the ENTRYPOINT swap
-# once the existing full-setup-deep-validate suite passes with this binary
-# in place. `watchdog.sh` itself is removed from this image (no longer
-# `COPY`'d in) but deliberately kept in the repository, unused, as a
-# rollback-safety reference -- it has no remaining image caller:
-# `deploy/*/docker-compose.yml`'s `watchdog` service `command:` overrides
-# for prod/quickstart now `exec` this binary instead (see those files' own
-# comments), and `deploy/full-setup` has no override at all, so it picks up
-# this new default directly. The `retention` compose service continues to
-# override this with `entrypoint: ["/retention-entrypoint.sh"]` (see
-# deploy/*/docker-compose.yml's own `retention:` service block) -- both
-# executables still ship in this one image so a single build serves either
-# role, chosen entirely by which compose service invokes it.
+# What: default ENTRYPOINT is the compiled Rust binary now.
+# Why: maintainer decision authorized the ENTRYPOINT swap.
 # From: Issue #842
 ENTRYPOINT ["/usr/local/bin/lancache-watchdog"]

@@ -2,16 +2,12 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: combined fluent-bit + syslog-ng container, replacing two separate
-# services (`syslog`=fluent-bit, `syslog-ng`=central receiver).
-# Why: the maintainer accepted crash-coupling/one-HEALTHCHECK-slot/no-
-# independent-restart trade-offs for one image instead of two.
+# What: combined fluent-bit + syslog-ng container.
+# Why: accepted crash-coupling/one-HEALTHCHECK-slot tradeoff.
 # From: Issue #1428 | PR #1431
 #
-# What: copies the pinned fluent-bit binary + glibc closure into a
-# private prefix, execed via an explicit ld-linux interpreter argument.
-# Why: Alpine stable never packages fluent-bit (only edge's unpinnable
-# repo); an isolated closure avoids gcompat's known gaps for this binary.
+# What: copies pinned fluent-bit binary + glibc to prefix.
+# Why: Alpine stable lacks fluent-bit; isolated avoids gaps.
 # From: Issue #1428 | PR #1431
 FROM cr.fluentbit.io/fluent/fluent-bit:3.2.10@sha256:d6dec000c4929a439562525728c708f6e99800d7ddc82efd6aa4f45f3a20b562 AS fluent-bit-src
 
@@ -28,13 +24,10 @@ LABEL org.opencontainers.image.description="Combined fluent-bit + syslog-ng firs
 # step below for why a runtime privilege-drop design was tried and rejected).
 #
 # What: pins the Alpine base to 3.24 (was 3.20).
-# Why: 3.20 was an unintentional scaffold-commit inconsistency -- every
-# other first-party service already pins 3.24.
+# Why: unintentional inconsistency; other services pin 3.24.
 # From: Issue #1554 | PR #1555
 # What: declares APT_CACHE_BUST right before the RUN it busts.
-# Why: without this, BuildKit's cache has no wall-clock expiry and can
-#   replay a stale apk index forever; see tools/build-tools/Dockerfile's
-#   identical ARG for the full rationale.
+# Why: prevents stale apk-index replay; see build-tools/Dockerfile.
 # From: Issue #1095
 ARG APT_CACHE_BUST=""
 RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
@@ -45,24 +38,19 @@ RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
         bash \
         zstd \
         tzdata \
-    # What: fixed uid/gid 10001, matching services/ui/Dockerfile's identity.
-    # Why: syslog-ng writes files this uid needs to read back
-    # (SYSLOG_NG_LOG_DIR); matching identities avoids a group workaround.
+        # What: fixed uid/gid 10001, matching services/ui/Dockerfile.
+    # Why: syslog-ng needs to read files; avoid group workaround.
     # From: Issue #1428 | PR #1431
     && addgroup -g 10001 lancache \
     && adduser -D -H -u 10001 -G lancache lancache \
     && mkdir -p /var/log/lancache-syslog-ng /var/lib/lancache-syslog-data /etc/syslog-ng /etc/fluent-bit /data /var/log/lancache \
     && chown -R lancache:lancache /var/log/lancache-syslog-ng /var/lib/lancache-syslog-data /etc/syslog-ng /etc/fluent-bit /data /var/log/lancache
-# What: pre-creates+chowns `/data`, `/var/log/lancache` (named volumes) and
-# `/var/log/lancache-syslog-ng` (bind mount, SYSLOG_NG_LOG_DIR).
-# Why: an image-absent path becomes an unwritable root:root dir for uid
-# 10001 -- the bind-mount case is the bug data-loss-detector.sh guards.
+# What: pre-creates directories for `/data`, logs, and syslog-ng.
+# Why: avoids unwritable root:root dirs; guards against data loss.
 # From: Issue #1428 | PR #1431
 
-# What: globs the `*-linux-gnu` triplet directory instead of hardcoding
-# either arch's name, matching both amd64 and arm64 unmodified.
-# Why: an earlier hardcoded x86_64-linux-gnu path failed closed on arm64;
-# Docker's COPY --from pattern matches via Go's filepath.Match per segment.
+# What: globs *-linux-gnu for multiarch support (amd64/arm64).
+# Why: hardcoded path failed on arm64; glob is arch-agnostic.
 # From: Issue #1428 | PR #1431
 COPY --from=fluent-bit-src /fluent-bit/bin/fluent-bit /opt/fluent-bit-glibc/bin/fluent-bit
 COPY --from=fluent-bit-src /lib/*-linux-gnu/. /opt/fluent-bit-glibc/lib/
@@ -75,44 +63,34 @@ COPY healthcheck.sh /usr/local/bin/healthcheck.sh
 COPY data-loss-detector.sh /usr/local/bin/data-loss-detector.sh
 
 RUN chmod 755 /entrypoint.sh /usr/local/bin/healthcheck.sh /usr/local/bin/data-loss-detector.sh \
-    # What: discovers the dynamic-linker interpreter's real filename
-    # instead of hardcoding an arch (see the COPY step's own comment).
-    # Why: an empty glob makes `ls` exit non-zero, aborting this `set -e`
-    # RUN loudly rather than silently proceeding with no interpreter.
+        # What: discovers the dynamic-linker interpreter filename.
+    # Why: empty glob exits non-zero; aborting loudly vs. silently.
     # From: Issue #1428 | PR #1431
     && ld_interp="$(basename "$(ls /opt/fluent-bit-glibc/lib/ld-linux-*.so.* | head -n1)")" \
     && echo "$ld_interp" > /opt/fluent-bit-glibc/ld-interp-name \
     && chmod +x "/opt/fluent-bit-glibc/lib/$ld_interp" /opt/fluent-bit-glibc/bin/fluent-bit \
     && chown -R lancache:lancache /opt/fluent-bit-glibc
-    # What: runs entirely as fixed non-root uid 10001 (su-exec rejected).
-    # Why: su-exec's setgroups() needs CAP_SETGID, and a root supervisor
-    # without CAP_KILL cannot signal a different-uid child -- three added
-    # capabilities this single-uid design avoids needing at all.
+    # What: runs entirely as non-root uid 10001 (su-exec rejected).
+    # Why: avoids three capabilities: CAP_SETGID, CAP_KILL, CAP_NET_*.
     # From: Issue #1428 | PR #1431
     #
     # What: keeps the bundled fluent-bit closure entirely unprivileged.
-    # Why: every first-party producer log now lands gid-10001-readable at
-    #   creation time, so file capabilities are no longer needed to tail them.
+    # Why: logs are gid-10001-readable; no file capabilities needed.
     # From: Issue #1427
     #
     # What: this RUN's last content line must not end in `\`.
-    # Why: BuildKit silently keeps a `\`-continued RUN open across a
-    #   blank line (NoEmptyContinuation warns, doesn't fail) and merges
-    #   the next Dockerfile line in as literal text -- this exact bug
-    #   fused "USER lancache:lancache" into the chown call above.
+    # Why: BuildKit merges next line as literal if backslash-escaped.
     # From: Issue #1095
 
 USER lancache:lancache
 
 # What: syslog-ng's receiver is 6601 (renumbered from 601).
-# Why: 601 is a genuinely privileged port and this container has no
-# CAP_NET_BIND_SERVICE grant; 601 was never published/documented externally.
+# Why: 601 is privileged; container lacks CAP_NET_BIND_SERVICE.
 # From: Issue #1428 | PR #1431
 EXPOSE 6601/tcp 2020/tcp
 
-# What: healthcheck.sh checks BOTH fluent-bit and syslog-ng independently.
-# Why: only one Docker HEALTHCHECK slot exists for two processes; see
-# healthcheck.sh's own header for the per-process status-file mechanism.
+# What: healthcheck.sh checks fluent-bit and syslog-ng separately.
+# Why: one HEALTHCHECK slot; see healthcheck.sh for status logic.
 # From: Issue #1428 | PR #1431
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=20s \
     CMD ["/usr/local/bin/healthcheck.sh"]

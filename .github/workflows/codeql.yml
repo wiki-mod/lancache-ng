@@ -218,12 +218,9 @@ jobs:
 
   analyze:
     name: Analyze (${{ matrix.language }})
-    # What: a plain true/false Variable picks GitHub-hosted (default,
-    #   unset/false) vs. the previous self-hosted pool (true) -- no JSON.
-    # Why: GitHub-hosted's 4 cores/16GB removes the self-hosted pool's tight
-    #   memory ceiling (see the RAM cap below) and gets GitHub's own build
-    #   caching; kept switchable back via this Variable, not a code change.
-    # From: Issue #1095 (maintainer request, 2026-08-25)
+    # What: Variable picks GitHub or self-hosted runner pool
+    # Why: GitHub-hosted (4 cores/16GB) avoids self-hosted OOM
+    # From: Issue #1095
     runs-on: ${{ vars.CODEQL_USE_SELF_HOSTED == 'true' && fromJSON('["self-hosted","linux","lancache","codeql","lancache-heavy"]') || 'ubuntu-latest' }}
     timeout-minutes: 120
     needs: detect-changes
@@ -365,19 +362,8 @@ jobs:
           }}
         uses: ./.github/actions/configure-rust-sccache
         with:
-          # What: hardcoded "optional" (not vars.SCCACHE_REDIS_MODE); dist-
-          #   scheduler-url/dist-auth-token stay wired (build-push.yml's own
-          #   guard requires both to appear here) but resolve empty unless
-          #   CODEQL_USE_SELF_HOSTED is true.
-          # Why: the global Variables/secrets target the self-hosted pool,
-          #   where the LAN-only sccache-dist scheduler is reachable --
-          #   ubuntu-latest has neither that access nor an sccache binary.
-          #   configure-rust-sccache only takes its graceful "no sccache
-          #   binary" skip path when dist-scheduler-url is ALSO empty
-          #   (confirmed live, run 32857132833: "optional" alone still
-          #   hard-failed while the global scheduler URL was passed
-          #   through) -- resolving it empty on GitHub-hosted restores the
-          #   skip this step's own comment already promises.
+          # What: Mode "optional"; scheduler URL only set on self-hosted
+          # Why: GitHub-hosted can't reach LAN scheduler; must empty URL
           # From: Issue #1095
           mode: optional
           redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
@@ -385,11 +371,8 @@ jobs:
           dist-scheduler-url: ${{ vars.CODEQL_USE_SELF_HOSTED == 'true' && vars.SCCACHE_DIST_SCHEDULER_URL || '' }}
           dist-auth-token: ${{ vars.CODEQL_USE_SELF_HOSTED == 'true' && secrets.SCCACHE_DIST_AUTH_TOKEN || '' }}
       - name: Start CodeQL memory monitor
-        # What: samples host memory every 10s into a log file until stopped below.
-        # Why: the RAM/thread cap below (see "Initialize CodeQL") is
-        #   configurable and was once a tight, OOM-driven value on
-        #   self-hosted; this makes real headroom visible per run instead of
-        #   only learning about it from the next OOM kill.
+        # What: Samples host memory every 10s; logs to temp file
+        # Why: Makes OOM failures visible instead of silent quits
         # From: Issue #1095
         if: steps.admission.outputs.superseded != 'true' && (matrix.language != 'rust' || needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
         run: |
@@ -410,13 +393,8 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Initialize CodeQL
-        # What: RAM picks one of two repository Variables based on
-        #   CODEQL_USE_SELF_HOSTED (runs-on above), instead of one Variable
-        #   someone must also remember to change when switching runner pools.
-        # Why: the self-hosted lancache-heavy pool's smallest host has ~3.6
-        #   GiB/no swap and was confirmed OOM-killed at CodeQL's own default
-        #   (dmesg) -- its cap must stay far below the GitHub-hosted
-        #   ubuntu-latest default (16GB total), which has real headroom.
+        # What: RAM setting changes with runner pool (no manual sync)
+        # Why: Self-hosted pool OOM'd; GitHub-hosted has more headroom
         # From: Issue #1095
         #
         # 'actions' always analyzes; 'rust' only when Rust is actually relevant
@@ -431,14 +409,9 @@ jobs:
           threads: ${{ vars.CODEQL_THREADS || '4' }}
 
       - name: Cache Cargo registry and target dirs for CodeQL's Rust build
-        # What: caches ~/.cargo plus each crate's target/ across runs, keyed
-        #   on the 3 Cargo.lock files.
-        # Why: this job's own sccache/sccache-dist acceleration is LAN-only
-        #   and unreachable from a GitHub-hosted runner (mode: optional
-        #   above already handles that gracefully) -- without this, every
-        #   run recompiles all 3 crates from scratch instead of only their
-        #   changed dependencies.
-        # From: Issue #1095 (maintainer request, 2026-08-25)
+        # What: Caches ~/.cargo and targets; key: 3 Cargo.lock files
+        # Why: LAN sccache unreachable; prevents full recompilation
+        # From: Issue #1095
         if: steps.admission.outputs.superseded != 'true' && matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -482,10 +455,8 @@ jobs:
           output: ${{ runner.temp }}/codeql-sarif
 
       - name: Stop CodeQL memory monitor and print log
-        # What: kills the earlier monitor step's sampler and prints its log.
-        # Why: always() so the log is visible even when CodeQL itself was
-        #   OOM-killed -- that is the exact failure this monitor exists to
-        #   surface, instead of a bare "exit code 137".
+        # What: Kills memory monitor sampler; prints collected log
+        # Why: Shows OOM failures hidden behind exit code 137
         # From: Issue #1095
         if: always() && steps.admission.outputs.superseded != 'true' && (matrix.language != 'rust' || needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
         run: |

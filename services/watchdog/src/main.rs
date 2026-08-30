@@ -74,7 +74,7 @@ fn resolve_alert_only_targets(
 }
 
 // What: dhcp/ntp targets reconcile_desired_state acts on
-// Why: shared shape between the loop call site and its own tests
+// Why: shared shape for loop call site and tests
 // From: Issue #1437
 fn desired_state_targets(
     dhcp_mode: &str,
@@ -95,8 +95,7 @@ fn desired_state_targets(
 }
 
 // What: starts/stops one service to match its desired state
-// Why: only acts when actual and desired truly differ
-// Why: no entry means no opinion, never defaults to "should run"
+// Why: acts on diff; absent entry = no opinion
 // From: Issue #1437
 async fn reconcile_one(
     client: &DockerProxyClient,
@@ -135,7 +134,7 @@ async fn reconcile_one(
     }
 }
 
-// What: reconciles dhcp/ntp against the operator's desired-state.json
+// What: reconcile DHCP/NTP to desired state
 // Why: watchdog is now the sole actor for these two services
 // From: Issue #1437
 async fn reconcile_desired_state(client: &DockerProxyClient, settings: &Settings) {
@@ -696,8 +695,8 @@ mod tests {
         );
     }
 
-    // What: absent desired-state entry must not touch the docker proxy
-    // Why: prevents watchdog fighting an in-progress settings-reconcile
+    // What: absent entry prevents proxy contact
+    // Why: prevent watchdog-sync conflict
     // From: Issue #1437
     #[tokio::test]
     async fn reconcile_one_takes_no_action_when_desired_state_is_absent() {

@@ -2,10 +2,8 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: exercises distcc-adjacent bash: ui's wrapper dispatch and rust-acceleration-preflight's scan/host-count functions.
-# Why: both are extracted verbatim from their real source (Dockerfile/
-#   action.yml heredocs) so a future edit is exercised without a
-#   hand-copied duplicate to keep in sync.
+# What: exercises distcc wrapper and scan functions
+# Why: extracted verbatim; future changes auto-picked up
 # From: Issue #1095
 
 setup() {
@@ -24,9 +22,8 @@ setup() {
     extract_preflight_pump_host_count
 }
 
-# What: pulls scan_log()/scan_distcc_compile_log() out of action.yml's heredoc.
-# Why: brace-depth tracking is required, not a bare closing-brace match,
-#   since both functions nest their own if/then blocks.
+# What: extracts scan_log()/scan_distcc_compile_log()
+# Why: brace-depth tracking needed; functions nest
 # From: Issue #1095
 extract_preflight_scan_functions() {
     local extracted="$BATS_TEST_TMPDIR/extracted-preflight-functions.sh"
@@ -51,9 +48,8 @@ extract_preflight_scan_functions() {
     preflight_log_file="$BATS_TEST_TMPDIR/probe.log"
 }
 
-# What: pulls distcc_pump_published_hosts()/distcc_pump_real_host_count() out of action.yml.
-# Why: both functions share the same --* exclusion rule; testing them
-#   together catches the two ever silently diverging again.
+# What: extracts distcc_pump functions from action.yml
+# Why: both share same --* exclusion rule; test
 # From: Issue #1095
 extract_preflight_pump_host_count() {
     local extracted="$BATS_TEST_TMPDIR/extracted-pump-host-count.sh"
@@ -86,10 +82,8 @@ fail() {
     return 1
 }
 
-# What: extracts the lancache-distcc-wrapper script verbatim into an isolated fixture directory.
-# Why: a hand-duplicated copy would silently drift from the real generated
-#   script; extracting the real content is the only way this test proves
-#   what the Dockerfile actually ships (AG-CODE-011).
+# What: extracts lancache-distcc-wrapper into fixture
+# Why: extracted script prevents hand-copy drift
 # From: Issue #1533 | PR #1612
 extract_wrapper_script() {
     local end_line start_line

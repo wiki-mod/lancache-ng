@@ -23,10 +23,8 @@ runs:
   using: composite
   steps:
     - name: Fetch current PR title live
-      # What: fetches the PR title via `gh pr view` instead of using the event payload.
-      # Why: the event payload is a snapshot from trigger time and goes stale on a
-      # title-only edit; `github.token` covers this read-only call since a composite
-      # action cannot resolve `secrets.*` directly.
+      # What: fetches PR title live via `gh pr view` not event.
+      # Why: event payload snapshots go stale on title edits.
       # From: PR #1467
       id: live-title
       shell: bash
@@ -41,12 +39,12 @@ runs:
       shell: bash
       env:
         PR_DRAFT: ${{ github.event.pull_request.draft }}
-        # What: PR author login, read for check-pr-title-convention.sh's dependabot[bot] exemption.
+        # What: PR author login for dependabot exemption.
+        # Why: check script skips linting for dependabot[bot].
         # From: PR #1467
         PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-        # What: warn/block switch for the lint result (default unset = warn).
-        # Why: maintainer's transitional grace-period decision; a warn result is still an
-        # AG-GH-018 violation that must be fixed before merge, it just does not hard-block yet.
+        # What: lint mode switch: warn (default) vs block.
+        # Why: transitional period; warns don't hard-block yet.
         # From: Issue #850
         PR_TITLE_LINT_MODE: ${{ inputs.pr-title-lint-mode }}
         BUILD_TOOLS_IMAGE: ${{ inputs.build-tools-image }}

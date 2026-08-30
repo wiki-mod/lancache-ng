@@ -76,10 +76,8 @@ check_dockerfile_base_images() {
         violations_found=1
     fi
 
-    # What: warns when BUILD_TOOLS_IMAGE/UTILITIES_IMAGE ARG defaults use
-    #   :latest -- override-able at build time, not a hard violation.
-    # Why: the FROM-line check above only catches a literal `FROM ...:latest`,
-    #   which ARG indirection (AG-CI-008, AG-KD-010) deliberately avoids.
+    # What: ARG BUILD_TOOLS_IMAGE/UTILITIES_IMAGE defaults to :latest
+    # Why: FROM-line check doesn't detect ARG :latest indirection
     # From: Issue #1095 | PR #1687
     local mutable_arg_defaults
     mutable_arg_defaults=$(grep -nE 'ARG (BUILD_TOOLS_IMAGE|UTILITIES_IMAGE).*:latest' services/*/Dockerfile || true)
@@ -111,20 +109,16 @@ check_workflow_image_defaults() {
     return 0
 }
 
-# What: flags raw github.repository expressions against a counted baseline.
-# Why: GHCR requires a lowercase owner/repo; github.repository is not
-#   guaranteed lowercase.
+# What: flags raw ${{ github.repository }} for GHCR safety
+# Why: GHCR lowercase requirement; github.repository not guaranteed
 # From: Issue #1504
 check_repository_case_expressions() {
     # What: matches ${{ github.repository }} with braces fully escaped.
-    # Why: GNU grep tolerates a bare, syntactically-invalid ERE interval as
-    #   a literal brace, but a strict POSIX grep is not required to, and
-    #   this script's container is not guaranteed to run GNU grep.
+    # Why: escape braces for POSIX grep compatibility in containers
     # From: Issue #1504
     local pattern='\$\{\{ *github\.repository *\}\}'
-    # What: file -> expected TOTAL raw github.repository count (live baseline).
-    # Why: must be updated in the same commit that changes the real count,
-    #   or this guard silently stops meaning anything.
+    # What: expected baseline count for github.repository expressions
+    # Why: must sync with real count in same commit, or guard breaks
     # From: Issue #1504
     local -A expected_counts=(
         [.github/workflows/build-push.yml]=29
@@ -180,9 +174,8 @@ report() {
     return 0
 }
 
-# What: --only NAME runs exactly one named check instead of the full sweep.
-# Why: lets a caller wire a single check into CI without also gating on
-#   the other checks' own, independent state.
+# What: --only flag runs one named check instead of full sweep
+# Why: allows single check gating without blocking other checks
 # From: Issue #1504
 only_check=""
 case "${1:-}" in

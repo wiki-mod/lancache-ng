@@ -32,9 +32,9 @@ runs:
         "${{ inputs.build-tools-image }}" timeout --kill-after=30s 5m
         bash scripts/tracked/check-file-headers.sh
 
-    # What: runs scripts/untracked/check-workflow-line-limit.sh in the build-tools container.
-    # Why: enforces AG-CI-021's whole-file and per-run:-block ceilings.
-    # From: Issue #1095 | Issue #1535
+    # What: Checks workflow line/byte/run-block limits
+    # Why: Enforces AG-CI-021 policy
+    # From: Issue #1535 | PR #1575
     - name: Check workflow files stay under the line/byte/run-block ceilings
       shell: bash
       run: >-
@@ -42,11 +42,9 @@ runs:
         "${{ inputs.build-tools-image }}" timeout --kill-after=30s 5m
         bash scripts/untracked/check-workflow-line-limit.sh
 
-    # What: repo-wide review-chronology baseline; warn-only on a pull_request, blocking on a push.
-    # Why: the diff-scoped step below already blocks pull_request on its
-    #   own diff; a push event has no PR diff to scope to, so this
-    #   baseline is the only guard for it and must stay blocking there.
-    # From: PR #1546 | Issue #1095
+    # What: Repo-wide review-chronology baseline check
+    # Why: Push events need repo-wide guard; PR has diff-check
+    # From: Issue #1095 | PR #1546
     - name: Check for review-chronology comments repo-wide (AG-CODE-003)
       shell: bash
       env:
@@ -57,10 +55,8 @@ runs:
         "${{ inputs.build-tools-image }}" timeout --kill-after=30s 5m
         bash scripts/untracked/check-review-chronology-comments.sh
 
-    # What: diff-scoped, blocking review-chronology check on PR-changed files.
-    # Why: the repo-wide step above is warn-only on pull_request, so a
-    #   pre-existing violation elsewhere doesn't block this PR; this catches
-    #   a violation this PR's own diff introduces or touches.
+    # What: Diff-scoped review-chronology check on PR changes
+    # Why: Repo-wide is warn-only; this blocks PR violations
     # From: Issue #1095 | PR #1686
     - name: Check review-chronology comments on this PR's changed files (AG-CODE-002/003/012)
       if: inputs.diff-base-sha != ''
@@ -97,11 +93,9 @@ runs:
         "${{ inputs.build-tools-image }}" timeout --kill-after=30s 5m
         bash scripts/untracked/check-trivy-action-direct-usage.sh
 
-    # What: runs scripts/untracked/check-deny-short-sha.sh in the build-tools container.
-    # Why: short SHAs are banned outright (not merely required to stay
-    #   consistent); see that script's own header comment for the full
-    #   rationale.
-    # From: Issue #1095 (G2)
+    # What: Deny any short-SHA slice
+    # Why: Short SHAs banned; see script header for rationale
+    # From: Issue #1095
     - name: Deny any short-SHA slice
       shell: bash
       run: >-

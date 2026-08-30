@@ -429,25 +429,15 @@ check_hosted_fallback_matrix() {
     done
 }
 
-# What: fails if any of a maintained allowlist of push-triggered
-#   image-publishing jobs in $1 is missing push-supersession-check from its
-#   own needs: list.
-# Why: referencing needs['push-supersession-check'] without declaring it in
-#   needs: is not a syntax error, just a silent empty string that no prior
-#   check caught.
+# What: fails if push-triggered jobs lack push-supersession-check
+# Why: referencing needs[] without declaring is a silent no-op
 # From: Issue #1095 | PR #1628
 check_push_supersession_wiring() {
     local file="$1" job block needs_section
     local -a required_jobs=(build build-arm64 container-scan merge-manifests full-setup-validate)
 
-    # What: skips this whole check unless $file defines ALL five required
-    #   jobs; only then does a missing job trip a "renamed?" failure.
-    # Why: the narrow, single-purpose fixtures the other checks in this
-    #   script use only ever model a `build:` matrix, never the other four
-    #   real jobs -- requiring all five present before checking any of them
-    #   makes this check a no-op against those fixtures without weakening it
-    #   against a real (or realistically complete) build-push.yml, where all
-    #   five always exist together.
+    # What: skips check unless file defines all five required jobs
+    # Why: narrow test fixtures model only build: matrix, not all five
     # From: Issue #1095 | PR #1628
     for job in "${required_jobs[@]}"; do
         grep -qE "^  ${job}:[[:space:]]*\$" "$file" || return 0
@@ -459,13 +449,8 @@ check_push_supersession_wiring() {
             found && /^  [a-zA-Z][a-zA-Z0-9_-]*:[[:space:]]*$/ && $0 != job { exit }
             found { print }
         ' "$file")"
-        # What: extracts only the needs: declaration itself (flow-style
-        #   `needs: [...]` on one line, or block-style `needs:` plus its
-        #   immediately-following 6-space-indented `- x` list items).
-        # Why: a bare `grep -q` against the whole job block also matches this
-        #   very check's own reference comments mentioning the string --
-        #   confirmed live: mutating merge-manifests' needs: alone did not
-        #   trip this check until scoped to needs: specifically.
+        # What: extracts only needs: declaration, not the whole job block
+        # Why: bare grep matches check's own reference comments as well
         # From: Issue #1095 | PR #1628
         needs_section="$(awk '
             /^    needs:/ { grab=1; print; next }

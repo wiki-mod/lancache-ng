@@ -14,9 +14,8 @@ set -e
 # the file itself but not a missing parent directory, so this must exist
 # before dnsmasq starts.
 #
-# What: marks the directory setgid to gid 10001 and repairs existing files.
-# Why: every newly-created dnsmasq log must stay readable to the non-root
-#   syslog collector, including on upgraded volumes.
+# What: set directory setgid, repair log file ownership.
+# Why: ensure dnsmasq logs readable to syslog collector.
 # From: Issue #1427
 mkdir -p /var/log/lancache-dhcp-proxy
 chgrp 10001 /var/log/lancache-dhcp-proxy
@@ -893,9 +892,8 @@ if [ "$DHCP_MODE" = "dnsmasq-relay" ]; then
 else
     echo "Starting dnsmasq DHCP proxy (subnet: $DHCP_SUBNET_START, DNS: $DHCP_DNS_PRIMARY, $DHCP_DNS_SECONDARY)..."
 fi
-# What: constrains the dnsmasq-created log file mode to 0640.
-# Why: gid 10001 keeps the collector read path working, while world read
-#   permission is no longer needed once the shared group exists.
+# What: set umask to 0027 for dnsmasq log files.
+# Why: world read-permission not needed; gid 10001 grants access.
 # From: Issue #1427
 umask 0027
 exec dnsmasq -k -C /etc/dnsmasq.conf

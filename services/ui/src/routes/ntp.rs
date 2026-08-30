@@ -206,12 +206,9 @@ pub async fn update_ntp_settings(
     );
 
     if let Err(persist_err) = persist_result {
-        // What: if the rollback restart below also fails, combine both
-        //   errors instead of only reporting the persist failure.
-        // Why: mirrors dhcp.rs's persist-then-rollback pattern -- silently
-        //   discarding a rollback failure would hide that NTP is now
-        //   stopped and unrecovered, not just that the save failed.
-        // From: Codex review on PR #1610
+        // What: combine both errors if rollback restart fails
+        // Why: hides that NTP stopped and unrecovered from operator
+        // From: PR #1610
         if was_enabled
             && let Err(rollback_err) =
                 docker_client::start_service(&state.docker, "ntp", &state.config.container_suffix)
@@ -245,15 +242,8 @@ pub async fn update_ntp_settings(
     Ok(Redirect::to("/ntp"))
 }
 
-// What: stops the predeclared `ntp` Compose service whenever the save
-// targets disabled OR the container is already running and staying enabled.
-// Why: called BEFORE persist so an already-enabled config change (e.g. a new
-// upstream server list) forces a real stop -- entrypoint.sh only reads
-// NTP_UPSTREAM_SERVERS at container start, so leaving an already-running
-// container untouched (the pre-fix behavior) silently kept serving the
-// OLD config. A disabled->enabled transition needs no stop here (nothing is
-// running yet); a same-mode disabled resubmit is a harmless idempotent
-// stop_service_if_present no-op.
+// What: stop NTP when disabled or already running and enabled
+// Why: force re-read of config at next start, not serve stale one
 // From: Issue #1486
 async fn reconcile_ntp_container_stop(
     state: &AppState,
@@ -272,15 +262,8 @@ async fn reconcile_ntp_container_stop(
     Ok(())
 }
 
-// What: starts the predeclared `ntp` Compose service when the just-persisted
-// state should be enabled.
-// Why: called AFTER persist so this fresh start (following the stop half
-// above) rereads the just-written settings file, mirroring
-// routes/dhcp.rs's reconcile_dhcp_mode_start split. A missing container (the
-// `ntp` Compose profile was never activated, e.g. a fresh install that left
-// LanCache-NG-NTP disabled at setup.sh time) surfaces as a visible operator
-// error rather than silently diverging from the persisted toggle state --
-// same tradeoff routes/dhcp.rs already accepts for `dhcp`/`dhcp-proxy`.
+// What: start NTP after settings persisted when enabled
+// Why: ensure fresh start re-reads just-written config file
 // From: Issue #1486
 async fn reconcile_ntp_container_start(
     state: &AppState,

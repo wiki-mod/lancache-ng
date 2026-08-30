@@ -2,10 +2,8 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: coverage for scripts/untracked/check-netdata-curl-pin.sh's version-parsing,
-# comparison, and grace-period logic.
-# Why: all tests run offline via the script's own
-# BUNDLED_PACKAGES_CONTENT_FILE test hook, no real network needed.
+# What: coverage for check-netdata-curl-pin.sh's parsing.
+# Why: all tests run offline via the script's own hook.
 # From: Issue #1304 | PR #1352
 
 setup() {
@@ -87,9 +85,8 @@ EOF
 
 # --- main(): end-to-end via the BUNDLED_PACKAGES_CONTENT_FILE test hook -----
 #
-# What: tests below use NETDATA_CURL_PIN_TODAY to exercise both sides of
-# the ACCEPTED_UNTIL grace-period boundary deterministically.
-# Why: avoids depending on (or waiting for) the real wall-clock date.
+# What: uses NETDATA_CURL_PIN_TODAY for the grace-period edge.
+# Why: avoids depending on the real wall-clock date.
 # From: Issue #1304 | PR #1352
 
 @test "main: a still-vulnerable pinned curl version WARNS (non-blocking) before the grace-period deadline" {
@@ -144,9 +141,8 @@ EOF
 }
 
 @test "main: the real services/netdata/Dockerfile currently pins a still-affected curl (documents current, known state)" {
-    # What: reads the real Dockerfile, and the real v2.11.0 vendored curl tag.
-    # Why: proves the check's current warn behavior against this project's
-    # actual real pin, not a stale/unrelated synthetic fixture value.
+    # What: reads the real Dockerfile and its vendored curl tag.
+    # Why: proves warn behavior against this project's real pin.
     # From: Issue #1304 | PR #1662
     real_dockerfile="$BATS_TEST_DIRNAME/../../services/netdata/Dockerfile"
     write_bundled_fixture "8_20_0"
@@ -156,9 +152,8 @@ EOF
 }
 
 @test "main: the real services/netdata/Dockerfile's pin would hard-fail once the grace period passes" {
-    # What: same real Dockerfile+curl tag as above, date hook past ACCEPTED_UNTIL.
-    # Why: proves the escalation-to-failure branch actually triggers against
-    # this project's real current pin, not a stale/unrelated fixture value.
+    # What: same real Dockerfile+tag, date past ACCEPTED_UNTIL.
+    # Why: proves the escalation-to-failure branch triggers.
     # From: Issue #1304 | PR #1662
     real_dockerfile="$BATS_TEST_DIRNAME/../../services/netdata/Dockerfile"
     write_bundled_fixture "8_20_0"

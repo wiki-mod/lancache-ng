@@ -1148,8 +1148,7 @@ mod tests {
     }
 
     // What: covers the secondary-node NATS record-write gate.
-    // Why: PowerDNS AXFR is authoritative for secondaries, so this parser
-    //   decides whether a node can apply independent local record writes.
+    // Why: AXFR is authoritative for secondaries; gate controls writes
     // From: Issue #1164
     #[test]
     fn record_write_mode_disables_common_false_spellings() {

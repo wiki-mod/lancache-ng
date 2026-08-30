@@ -2,15 +2,14 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: shared image with curl plus 9 non-compiler CLI tools for `COPY --from=`.
-# Why: avoids each service independently installing/building its own copy.
+# What: shared image with curl + 9 CLI tools, COPY --from=.
+# Why: avoids each service installing its own copy.
 # From: Issue #1556
 
 FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS curl-builder
 
 # What: explicit proxy build-args, no default value set.
-# Why: this project's build fleet sits behind an HTTP(S) proxy; lets a
-#   caller pass a local-network NO_PROXY exception.
+# Why: build fleet sits behind a proxy; allow a NO_PROXY.
 # From: Issue #1637
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
@@ -19,9 +18,8 @@ ARG http_proxy
 ARG https_proxy
 ARG no_proxy
 
-# What: pinned curl release, checksum-verified before extraction.
-# Why: matches this project's established checksum-verified download
-# pattern for third-party sources.
+# What: pinned curl release, checksum-verified before extract.
+# Why: matches this project's checksum-verified fetch pattern.
 # From: Issue #1556
 ARG CURL_VERSION=8.21.0
 ARG CURL_SHA256=aa1b66a70eace83dc624508745646c08ae561de512ab403adffb93ac87fc72e6
@@ -33,9 +31,8 @@ RUN set -euo pipefail; \
     tar -xJf /tmp/curl.tar.xz -C /tmp; \
     apk del .fetch-deps
 
-# What: build-time deps for a static curl build; libpsl deliberately excluded.
-# Why: Alpine's libpsl-static does not link cleanly into a static build, and
-# this project's curl usage only targets a small, fixed, trusted host set.
+# What: build deps for a static curl build; libpsl excluded.
+# Why: Alpine's libpsl-static won't link into a static build.
 # From: Issue #1556
 RUN apk add --no-cache \
       build-base \
@@ -48,20 +45,16 @@ RUN apk add --no-cache \
       zlib-static \
       ca-certificates
 
-# What: removes unversioned .so linker symlinks before the static build.
-# Why: libtool's own -static handling does not forward to the non-libtool
-# openssl/zlib libraries, so the linker keeps resolving shared .so files
-# unless those symlinks are gone; confined to this throwaway stage.
+# What: removes unversioned .so symlinks before static build.
+# Why: libtool's -static handling doesn't forward to the libs.
 # From: Issue #1556
 RUN rm -f /usr/lib/libssl.so /usr/lib/libcrypto.so /usr/lib/libz.so
 
 WORKDIR /tmp/curl-${CURL_VERSION}
 
-# What: builds curl, wrapping the C compiler in ccache when a secret is mounted.
-# Why: reuses the same repository secret dns's AG-CI-022 ccache-over-distcc
-#   layer uses, under a distinct mount id; fails closed to plain gcc
-#   per AG-CI-009 otherwise.
-# From: Issue #1095 (G15 | #1556)
+# What: builds curl, wraps compiler in ccache when mounted.
+# Why: reuses dns's AG-CI-022 ccache-over-distcc layer.
+# From: Issue #1556
 RUN --mount=type=secret,id=ccache_redis_url \
     set -euo pipefail; \
     cc_wrapper=gcc; \
@@ -109,21 +102,16 @@ RUN --mount=type=secret,id=ccache_redis_url \
       *) echo "ERROR: curl build is not fully static: $curl_file_type" >&2; exit 1 ;; \
     esac
 
-# What: this stage is the ghcr.io/wiki-mod/lancache-ng/utilities image itself.
-# Why: only this stage's own runtime base matters here -- curl is already
-# static (built above); the other 9 tools are ordinary Alpine dynamic
-# binaries, tied to this base's musl libc.
+# What: this stage is the utilities image itself.
+# Why: only this base matters; curl is already static.
 # From: Issue #1556
 FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
-# What: upgrades base packages, installs the 9 non-curl tools via apk.
-# Why: apk-installed packages register in this image's own package
-# database, keeping them Trivy-visible.
+# What: upgrades base packages, installs 9 non-curl tools.
+# Why: apk installs register in the image's package db.
 # From: Issue #1556
 # What: declares APT_CACHE_BUST right before the RUN it busts.
-# Why: without this, BuildKit's cache has no wall-clock expiry and can
-#   replay a stale `apk upgrade` forever; see tools/build-tools/Dockerfile's
-#   identical ARG for the full rationale.
+# Why: without this, BuildKit cache has no wall-clock expiry.
 # From: Issue #1095
 ARG APT_CACHE_BUST=""
 RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
@@ -139,18 +127,16 @@ RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
       zstd \
       ca-certificates
 
-# What: verifies expected coreutils/findutils commands still resolve.
-# Why: installing coreutils overwrites some of Alpine's own BusyBox
-# symlinks; this catches a regression if any expected command breaks.
+# What: verifies coreutils/findutils commands still resolve.
+# Why: coreutils overwrites some BusyBox symlinks.
 # From: Issue #1556
 RUN set -euo pipefail; \
     for expected in basename cp date dirname install mktemp mv rm sort realpath base64 od find xargs; do \
       command -v "$expected" >/dev/null 2>&1 || { echo "ERROR: expected coreutils/findutils binary missing: $expected" >&2; exit 1; }; \
     done
 
-# What: ships the shared copied-tool version-banner smoke check.
-# Why: dedupes the byte-identical lsof-banner check six consumer Dockerfiles
-# each carried inline.
+# What: ships the shared version-banner smoke check.
+# Why: dedupes the lsof-banner check six Dockerfiles carried.
 # From: Issue #1613
 COPY verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
 

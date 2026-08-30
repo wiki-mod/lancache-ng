@@ -2,16 +2,14 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: relays a merged current_dev PR's body onto, and closes, every issue its `## Linked Issues` section references.
-# Why: GitHub's native "Closes #N" auto-close only fires for merges into
-#   the default branch (master), never current_dev.
+# What: Relay merged PR body and close linked issues.
+# Why: Closes only triggers on master, not current_dev.
 # From: Issue #1496
 name: current_dev Auto-Close Linked Issues
 
 on:
-  # What: Uses pull_request_target (matching first-interaction.yml/labeler.yml).
-  # Why: Runs with the base repo's token; evaluates the workflow already
-  # merged into the base branch. No fork-code risk: never checks out PR code.
+  # What: Use pull_request_target like first-interaction.yml.
+  # Why: Runs with repo token; no fork-code risk.
   # From: Issue #1137 | PR #1157
   pull_request_target:
     types: [closed]
@@ -26,9 +24,8 @@ on:
         type: number
 
 permissions:
-  # What: grants write to issues and read-only to pull requests.
-  # Why: this workflow only relays a merged PR's body and closes issues; it
-  #   never touches repo contents or code.
+  # What: Grants write to issues and read-only to pull requests.
+  # Why: Relays merged PR body; never touches repo.
   # From: Issue #1137 | PR #1157
   issues: write
   pull-requests: read
@@ -37,9 +34,8 @@ jobs:
   auto-close:
     name: Relay PR body and close linked issues
     runs-on: ubuntu-latest
-    # What: Guards on `merged == true` in addition to the trigger's own filter.
-    # Why: a closed-without-merging PR still matches `types: [closed]`;
-    #   workflow_dispatch always runs since it is dry-run only.
+    # What: Guard on merged==true in addition to trigger filter.
+    # Why: Closed-without-merging PR still matches types:[closed].
     # From: Issue #1137 | PR #1157
     if: >-
       github.event_name == 'workflow_dispatch' ||
@@ -54,10 +50,8 @@ jobs:
             const repo = context.repo.repo;
             const isDryRun = context.eventName === 'workflow_dispatch';
 
-            // What: resolves the PR to process; workflow_dispatch fetches it, the real trigger already has it.
-            // Why: `context.payload.inputs` values arrive as strings even
-            //   when declared `type: number`, so the dry-run number needs
-            //   an explicit conversion before use below.
+            // What: Resolve PR for dispatch; real trigger already has it.
+            // Why: payload.inputs arrives as strings; needs conversion.
             // From: Issue #1137 | PR #1157
             let pr;
             if (isDryRun) {
@@ -87,15 +81,13 @@ jobs:
             const mergedAt = pr.merged_at || 'unknown time';
             const mergeSha = pr.merge_commit_sha || 'unknown commit';
 
-            // What: Locates every line matching the exact "## Linked Issues" heading.
-            // Why: A near-miss heading (case, extra text) must be treated
-            // as missing, never fuzzy-matched into an unintended section.
+            // What: Match exact "## Linked Issues" heading.
+            // Why: Near-miss headings must not fuzzy-match into sections.
             // From: Issue #1496
             const bodyLines = prBody.split(/\r\n|\r|\n/);
             const linkedIssuesHeadingRe = /^## Linked Issues\s*$/;
-            // What: Matches any ATX heading level (1-6), not only level 2.
-            // Why: `/^## /` alone does not match `### `/`# ` and would let
-            // the section run past a deeper sub-heading into later content.
+            // What: Match all ATX heading levels (1-6), not only level 2.
+            // Why: /^##/ misses ### and #; prevents section bleed.
             // From: Issue #1496
             const anyAtxHeadingRe = /^#{1,6} /;
             const headingLineIndexes = [];
@@ -106,10 +98,8 @@ jobs:
             });
 
             let linkedIssuesText = null;
-            // What: Fails closed to "close nothing" when the heading is missing or duplicated.
-            // Why: a missing or ambiguous "## Linked Issues" heading has no
-            //   safe way to guess the right section; failing open risks
-            //   closing an issue the PR never actually resolved.
+            // What: Fail closed if heading missing or duplicated.
+            // Why: Missing/ambiguous heading risks closing wrong issue.
             // From: Issue #1496
             if (headingLineIndexes.length === 0) {
               core.warning(`PR #${prNumber}'s body has no exact "## Linked Issues" section. Failing closed to "close nothing" (issue #1496).`);
@@ -127,15 +117,13 @@ jobs:
               linkedIssuesText = bodyLines.slice(sectionStart, sectionEnd).join('\n');
             }
 
-            // What: Normalizes a null extraction result to an empty string.
-            // Why: Missing, duplicated, and genuinely empty sections must
-            // all converge on zero keyword matches ("close nothing").
+            // What: Normalize null result to empty string.
+            // Why: Missing, duplicate, empty sections converge to zero.
             // From: Issue #1496
             const linkedIssuesSectionText = linkedIssuesText || '';
 
-            // What: parses the Linked Issues section text, matching close/fix/resolve + #N while excluding a same-sentence negated mention and `Refs`.
-            // Why: without the negation guard, prose like "does not close
-            //   #N" matched as a real close.
+            // What: Extract link-close keywords; skip negated & Refs.
+            // Why: Negation guard prevents matching "does not close".
             // From: PR #1491
             const keywordPattern = /(?<!\b(?:not|never|cannot)\b[^.!?\n]{0,20}|n't\b[^.!?\n]{0,20})\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#(\d+)/gi;
             const issueNumbers = new Set();
@@ -162,10 +150,8 @@ jobs:
               prBody,
             ].join('\n');
 
-            // What: processes each referenced issue independently; no single failure aborts the loop.
-            // Why: a missing/closed/PR-not-issue reference or a transient
-            //   per-issue API error (rate limit, permissions) must not
-            //   stop the rest.
+            // What: Process issues independently; failure doesn't abort.
+            // Why: Missing/closed/PR reference or API error must not stop.
             // From: Issue #1137 | PR #1157
             for (const issueNumber of issueNumbers) {
               try {
@@ -182,8 +168,7 @@ jobs:
                 }
 
                 // What: Skips a referenced number when it is a PR.
-                // Why: The Issues API returns pull requests too (a PR is a
-                // superset of an issue in GitHub's data model).
+                // Why: GitHub Issues API returns PRs as superset of issues.
                 // From: Issue #1137 | PR #1157
                 if (issue.pull_request) {
                   core.warning(`Skipping #${issueNumber}: it is a pull request, not an issue.`);

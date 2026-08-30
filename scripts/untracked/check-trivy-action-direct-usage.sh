@@ -2,17 +2,13 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: AG-VAL-029 standing check -- aquasecurity/trivy-action must only be
-# invoked from the centralized pin-owner wrapper action.
-# Why: a direct call site bypasses trivy-scan-retry's own retry/auth fix,
-# and a second pin outside the one owner drifts.
-# From: PR #1542, Issue #1535 | Issue #1095
+# What: AG-VAL-029: only call trivy-action via wrapper action
+# Why: Bypasses retry/auth fixes; separate pin drifts without sync
+# From: Issue #1535 | PR #1542
 
-# What: check_dockerhub_wiring() is a second check -- every real
-# trivy-scan-retry call site must set both dockerhub-* keys.
-# Why: a caller that forgets either key silently falls back to only the
-# first two DB-source tiers, unnoticed.
-# From: PR #1543, Issue #1535
+# What: Check all trivy-scan-retry calls set both dockerhub-* keys
+# Why: Missing either key silently falls back to fewer DB sources
+# From: Issue #1535 | PR #1543
 
 # Accepts an optional repo_root argument so a bats test can point it at a
 # throwaway fixture tree instead of the real repository.
@@ -42,22 +38,18 @@ check_direct_usage() {
     return "$violations"
 }
 
-# What: Forward-scanning state machine that confirms each trivy-scan-retry
-# call site's with: block sets both dockerhub keys with valid values.
-# Why: a single regex can't cover indentation depth, key order, interleaved
-# comments, and a missing with: block all at once (AG-VAL-036).
-# From: PR #1543, Issue #1535
+# What: State machine validates trivy-scan-retry with: blocks
+# Why: Single regex cannot handle indentation, order, gaps
+# From: Issue #1535 | PR #1543
 check_dockerhub_wiring() {
     local violations=0
     local file
     while IFS= read -r file; do
         [ -n "$file" ] || continue
         local out rc
-        # What: Toggles errexit off around the awk substitution below, whose
-        # own `exit bad + 0` returns the per-file violation count.
-        # Why: an unprotected non-zero exit under set -e would abort on the
-        # first offending file instead of collecting every violation.
-        # From: PR #1543, Issue #1535
+        # What: Disable errexit in awk substitution for violation counting
+        # Why: Unprotected non-zero exit would abort at first error file
+        # From: Issue #1535 | PR #1543
         set +e
         # SQ carries a real single-quote character into the awk program via
         # -v: the program text itself is bash-single-quoted, so a literal
@@ -65,11 +57,9 @@ check_dockerhub_wiring() {
         out=$(awk -v SQ="'" '
             function indent(line,    t) { t = line; sub(/[^ ].*$/, "", t); return length(t) }
             function trimmed(line,    t) { t = line; gsub(/^[ \t]+/, "", t); return t }
-            # What: Column where `key` (e.g. "uses:") starts, regardless of
-            # a preceding YAML list dash.
-            # Why: raw leading-whitespace comparison conflates `- uses:` and
-            # sibling-key `uses:` shapes, since the dash eats 2 columns.
-            # From: PR #1543, Issue #1535
+            # What: Calculate key column accounting for optional YAML list dash
+            # Why: Whitespace-only comparison conflates dash/sibling key shapes
+            # From: Issue #1535 | PR #1543
             function keycol(line, key,    i) { i = index(line, key); return (i == 0) ? -1 : i - 1 }
             function report(reason) {
                 print FILENAME ":" useline ": trivy-scan-retry call site " reason
@@ -89,11 +79,9 @@ check_dockerhub_wiring() {
                 sub(/[ \t]+#.*$/, "", v)
                 return unquote(trim(v))
             }
-            # What: Accepts the expected secret or a forwarded inputs.*
-            # pass-through; rejects an empty or a wrong-secret value.
-            # Why: a wrapper action (trivy-scan-with-cache) relays a
-            # caller-owned value one level down -- not chased any deeper.
-            # From: PR #1543, Issue #1535
+            # What: Validate secret value: accept expected or forwarded inputs
+            # Why: Wrapper passes caller value one level down, does not recurse
+            # From: Issue #1535 | PR #1543
             function bad_value_reason(v, expected_secret) {
                 if (v == "") return "empty value"
                 if (v ~ /inputs\./) return ""
@@ -113,11 +101,9 @@ check_dockerhub_wiring() {
                 }
             }
             BEGIN {
-                # What: Matches uses: with an optional single or double
-                # quote around the wrapper path.
-                # Why: an unquoted-only pattern silently skips a valid
-                # `uses: "./path"` call site (AG-VAL-036).
-                # From: PR #1543, Issue #1535
+                # What: Match uses: with optional quotes around wrapper path
+                # Why: Unquoted-only regex silently skips valid quoted path calls
+                # From: Issue #1535 | PR #1543
                 USES_RE = "^-?[ \t]*uses:[ \t]*[\"" SQ "]?\\./\\.github/actions/trivy-scan-retry[\"" SQ "]?[ \t]*(#.*)?$"
             }
             FNR == 1 { state = 0; useline = 0; usesindent = 0 }
