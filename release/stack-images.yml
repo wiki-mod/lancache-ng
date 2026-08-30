@@ -1,16 +1,12 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: release manifest -- first-party/external images, tag channels,
-# and the image retention policy.
-# Why: consumed by the release/promotion CI workflow and
-# scripts/untracked/validate-stack-images.sh as the single source of release state.
+# What: Release manifest for first-party/external images.
+# Why: Single source of release state for CI and validation.
 # From: PR #432
 #
-# What: master publishes `latest` continuously; current_dev publishes
-# `nightly` once daily plus on-demand, gated on a green build+scan.
-# Why: see docs/release-versioning.md's "Branch/channel model" section
-# and nightly-refresh.yml for the full current mechanism.
+# What: master publishes latest continuously; current_dev nightly.
+# Why: Defined in docs/release-versioning.md Branch/channel model.
 # From: PR #1142 | PR #1251
 schema: stack-images/v1
 generated_from: origin/master
@@ -18,33 +14,22 @@ registry: ghcr.io
 image_prefix: wiki-mod/lancache-ng
 retention:
   minimum_stable_releases: 3
-  # What: raises accepted_ordinary_roots_per_package from 10 to 30.
-  # Why: a burst of concurrently open, YAML/governance-only PRs still
-  # produces one new sha-<commit> image per push; a ten-slot window could
-  # evict still-relevant recent history during a busy review period.
-  # From: Issue #1095 | PR #1501.
+  # What: Raises accepted_ordinary_roots_per_package from 10 to 30.
+  # Why: Avoids evicting recent builds during active review waves.
+  # From: Issue #1095 | PR #1501
   accepted_ordinary_roots_per_package: 30
-  # What: per-package safety-buffer count for a version whose tags are
-  # neither a recognized sha-<commit> root nor a protected channel/release.
-  # Why: v1.2's inverted protection model stops treating an
-  # unrecognized tag shape as a permanent protect; this buffer still keeps
-  # the newest few such versions regardless of age, in case they are a
-  # recent/in-flight or historical-format publish rather than truly stale.
-  # From: Issue #1585.
+  # What: Per-package safety-buffer for unrecognized tag versions.
+  # Why: Preserves recent/in-flight unrecognized tags until stale.
+  # From: Issue #1585
   channel_buffer_versions: 5
   keep_mutable_channels:
     - latest
     - nightly
   keep_sha_tags_for_supported_releases: true
   protect_release_and_rollback_digests: true
-  # What: maintainer-curated list of exact sha256:<64-hex> digests explicitly
-  # designated as protected rollback targets, empty until a maintainer adds
-  # one after a real regression is found.
-  # Why: closes the "DECISION NEEDED" rollback-anchor gap -- a rollback
-  # target is an explicit maintainer judgment call, not something Git
-  # history or GHCR tag state can derive on its own, so it needs its own
-  # declared list (see docs/release-versioning.md's Retention section).
-  # From: Issue #1095 | PR #1501.
+  # What: Maintainer-curated list of rollback target digests.
+  # Why: Rollback decision needs explicit maintainer judgment.
+  # From: Issue #1095 | PR #1501
   rollback_anchors:
   deletion_policy: manual-or-approved-automation-only
 channels:
@@ -105,9 +90,8 @@ runtime:
       - linux/arm64
     compose:
       - deploy/prod/docker-compose.yml
-      # What: deploy/quickstart/docker-compose.yml defines a `dhcp` too.
-      # Why: never updated when quickstart grew its own Kea/dnsmasq-proxy
-      # DHCP path, so scripts/untracked/validate-stack-images.sh had nothing to check.
+      # What: Records dhcp in compose files matching services.
+      # Why: Missing reference when quickstart added Kea/dnsmasq-proxy.
       # From: Issue #849
       - deploy/quickstart/docker-compose.yml
   - name: dhcp-proxy
@@ -118,7 +102,8 @@ runtime:
       - linux/arm64
     compose:
       - deploy/prod/docker-compose.yml
-      # What: same gap as dhcp above.
+      # What: Records dhcp-proxy in compose files matching services.
+      # Why: Missing reference when dhcp-proxy was separated.
       # From: Issue #849
       - deploy/quickstart/docker-compose.yml
   - name: ntp
@@ -129,7 +114,8 @@ runtime:
       - linux/arm64
     compose:
       - deploy/prod/docker-compose.yml
-      # What: same gap as dhcp/dhcp-proxy above (AG-WF-011 failure class).
+      # What: Records ntp in compose files matching other services.
+      # Why: Missing reference to ntp service addition.
       # From: Issue #849
       - deploy/quickstart/docker-compose.yml
   - name: ui

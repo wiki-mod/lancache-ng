@@ -269,10 +269,9 @@ if [ "$(id -u)" = "0" ]; then
         fi
     done
     if [ -e /var/log/lancache-ui ]; then
-        # What: leaves the UI log directory setgid and repairs existing files to group-readable.
-        # Why: the UI already writes as gid 10001, but upgraded volumes can
-        #   still carry older top-level files that must converge immediately.
-        # From: Issue #1427
+        # What: Set UI log directory setgid and repair files
+        # Why: upgraded volumes need permission convergence
+        # From: Issue #1427 | PR #1670
         chmod 2775 /var/log/lancache-ui
         find /var/log/lancache-ui -maxdepth 1 -type f -exec chmod g+r {} +
     fi

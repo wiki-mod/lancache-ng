@@ -13,11 +13,9 @@
 # Intentional ARG default (overridable at build time via --build-arg).
 # Actual digest pinning for release builds is tracked in issue #508.
 ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
-# What: declared here (meta-arg, before any FROM) so it is usable by the
-#   utilities-tools stage's own FROM further down -- an ARG declared after
-#   the first FROM is not visible to a later FROM's image reference at all.
-# Why: same override contract as BUILD_TOOLS_IMAGE above (AG-KD-010).
-# From: Issue #1095 | AG-KD-010
+# What: ARG declared before first FROM, usable by later stages
+# Why: maintains override contract like BUILD_TOOLS_IMAGE above
+# From: Issue #1095
 ARG UTILITIES_IMAGE=ghcr.io/wiki-mod/lancache-ng/utilities:latest
 FROM ${BUILD_TOOLS_IMAGE} AS builder
 
@@ -25,9 +23,8 @@ FROM ${BUILD_TOOLS_IMAGE} AS builder
 # distcc, distcc-pump, and the supporting Debian packages. Keep this stage
 # lean and fail closed if the contract is not met.
 #
-# What: detects host arch for the musl cross-compile target.
-# Why: `uname -m` needs no extra package (unlike Debian-only
-# `dpkg`); a file carries it since RUN steps share no shell.
+# What: detects host architecture for musl cross-compile target
+# Why: uname -m needs no extra package; carries value in file
 # From: Issue #1095
 #
 # Everything below builds a custom distcc wrapper. It exists because
@@ -42,11 +39,9 @@ FROM ${BUILD_TOOLS_IMAGE} AS builder
 # compiler if none is configured) instead of letting it go through pump mode
 # and fail.
 #
-# What: the wrapper also understands ccache's CCACHE_PREFIX convention
-#   (invoked as `distcc <real-compiler-path> <args>`), alongside $0-basename.
-# Why: without this, $0=="distcc" fell through to a hardcoded "cc" default
-#   and re-passed $1 as a stray positional argument, corrupting the compile.
-# From: Issue #1533 | Refs #887
+# What: wrapper understands ccache's CCACHE_PREFIX convention
+# Why: prevents $0=="distcc" fallthrough to hardcoded "cc" default
+# From: Issue #1533
 RUN set -eu; \
     for tool in cargo rustc rustup rustfmt clippy-driver sccache distcc distcc-pump python3 pkg-config; do \
       command -v "$tool" >/dev/null; \
@@ -162,11 +157,9 @@ RUN set -eu; \
       > /usr/local/bin/lancache-rustc-wrapper; \
     chmod +x /usr/local/bin/lancache-rustc-wrapper
 
-# What: writes shared cargo-accel helper functions once, to a file both
-#   build RUN blocks below source (each RUN starts a fresh shell).
-# Why: keeps the pre-cache and real-source builds byte-for-byte identical
-#   instead of two copies that could silently drift.
-# From: Issue #1533 | Refs #887
+# What: writes shared cargo-accel helper functions to file
+# Why: both RUN blocks reuse same functions without drift
+# From: Issue #1533
 RUN <<'LANCACHE_UI_BUILD_ACCEL_EOF'
 set -eu
 cat > /usr/local/lib/lancache-ui-build-accel.sh <<'LANCACHE_UI_HELPERS_EOF'
@@ -276,12 +269,9 @@ cat > /usr/local/lib/lancache-ui-build-accel.sh <<'LANCACHE_UI_HELPERS_EOF'
       rm -f /tmp/ccache-toolchain-id /tmp/ccache-remote-toolchain-id; \
       export CC=cc GCC=gcc CXX=c++ GXX=g++; \
     }; \
-    # What: the cache key below only reflects whichever single farm host
-    #   answered this build's own probe, not every DISTCC_POTENTIAL_HOSTS entry.
-    # Why: a heterogeneous farm could mix cache entries across compilers;
-    #   verified 2026-08-21 (real SSH, 6 old+new fleet hosts) all run
-    #   identical Debian trixie/GCC 14.2.0-19, so this gap is not live today.
-    # From: Codex review on PR #1612
+    # What: cache key reflects only single answering farm host
+    # Why: prevents cache mixing across heterogeneous farm compilers
+    # From: PR #1612
     configure_ccache() { \
       if [ "${distcc_enabled:-0}" = "1" ] && [ -s /run/secrets/ccache_redis_url ]; then \
         if [ ! -s /tmp/ccache-remote-toolchain-id ]; then \
@@ -305,13 +295,9 @@ cat > /usr/local/lib/lancache-ui-build-accel.sh <<'LANCACHE_UI_HELPERS_EOF'
         export CC="ccache $real_cc" GCC="ccache $real_gcc" CXX="ccache $real_cxx" GXX="ccache $real_gxx"; \
         ccache_enabled=1; \
         printf '%s\n' 'int main(void) { return 0; }' > "$ccache_probe_dir/ccache-probe.c"; \
-        # What: probes into a fresh, throwaway CCACHE_DIR under
-        #   $ccache_probe_dir, not the real (shared, cross-RUN-persistent)
-        #   /tmp/ccache-ui.
-        # Why: the real-source RUN's probe would otherwise inherit stats/
-        #   content from the pre-cache RUN's own build, so a stale write/hit
-        #   could pass this check without this probe reaching Redis at all.
-        # From: Codex review on PR #1612
+        # What: probes into fresh throwaway CCACHE_DIR per build
+        # Why: prevents probe cache pollution from pre-cache RUN stats
+        # From: PR #1612
         ccache_probe_cache_dir="$ccache_probe_dir/probe-cache"; \
         mkdir -p "$ccache_probe_cache_dir"; \
         if ! (cd "$ccache_probe_dir" && CCACHE_DIR="$ccache_probe_cache_dir" $CC -c ccache-probe.c -o ccache-probe.o) >"$ccache_probe_dir/ccache-probe.log" 2>&1; then \
@@ -412,11 +398,9 @@ LANCACHE_UI_HELPERS_EOF
 LANCACHE_UI_BUILD_ACCEL_EOF
 
 ARG CARGO_BUILD_JOBS=
-# What: redeclares BUILD_TOOLS_IMAGE (already set pre-FROM above) so it is visible as a
-# shell variable inside this stage's RUN blocks, not just usable in the FROM line itself.
-# Why: configure_ccache() below folds this value into the ccache remote-storage cache key
-# (Docker ARG scoping requires a bare post-FROM redeclaration for that).
-# From: Issue #1533 | Refs #887
+# What: redeclares BUILD_TOOLS_IMAGE for RUN blocks visibility
+# Why: Docker ARG scoping requires post-FROM redeclaration for use
+# From: Issue #1533
 ARG BUILD_TOOLS_IMAGE
 
 WORKDIR /build
@@ -565,10 +549,9 @@ RUN --mount=type=secret,id=sccache_redis_url \
 # stage. Same pinned alpine:3.24 digest already used by services/dhcp,
 # services/dhcp-proxy, services/watchdog, services/ntp, and services/dns.
 
-# What: source stage for tools copied into the final image below.
-# Why: uses the mutable `:latest` tag -- see services/proxy/Dockerfile's
-#   identical stage comment and AG-KD-010 for the full rationale.
-# From: Issue #1095 | AG-KD-010
+# What: source stage for tools copied into final image
+# Why: uses mutable :latest tag for shared utilities image
+# From: Issue #1095
 FROM ${UTILITIES_IMAGE} AS utilities-tools
 
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
@@ -595,10 +578,8 @@ LABEL org.opencontainers.image.description="lancache-ng Admin UI and control-pla
 #   - ca-certificates, coreutils: unchanged package names, confirmed present
 #     on Alpine, kept apk-installed (excluded from the utilities migration --
 #     see services/proxy/Dockerfile's comment for ca-certificates' reason).
-# What: declares APT_CACHE_BUST right before the RUN it busts.
-# Why: without this, BuildKit's cache has no wall-clock expiry and can
-#   replay a stale apk index forever; see tools/build-tools/Dockerfile's
-#   identical ARG for the full rationale.
+# What: declares APT_CACHE_BUST right before RUN that uses it
+# Why: prevents BuildKit cache replaying stale apk index forever
 # From: Issue #1095
 ARG APT_CACHE_BUST=""
 RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
@@ -609,13 +590,12 @@ RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
     util-linux \
     nano
 
-# What: curl/lsof/ripgrep come from the shared utilities image.
-# Why: same alpine:3.24 digest as utilities -- see services/proxy/Dockerfile's
-#   identical comment for the full rationale.
+# What: curl/lsof/ripgrep come from shared utilities image
+# Why: same alpine:3.24 digest as utilities for consistency
 # From: Issue #1556
 
-# What: removes the BusyBox symlink at this path before the real binary lands.
-# Why: see services/proxy/Dockerfile's identical comment for the reason.
+# What: removes BusyBox symlink before real binary lands
+# Why: see services/proxy/Dockerfile's identical comment for reason
 # From: Issue #1556
 RUN rm -f /usr/bin/lsof
 
@@ -626,9 +606,8 @@ COPY --from=utilities-tools /usr/lib/libgcc_s.so.1 /usr/lib/libgcc_s.so.1
 COPY --from=utilities-tools /usr/lib/libpcre2-8.so.0* /usr/lib/
 COPY --from=utilities-tools /usr/local/bin/verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
 
-# What: verifies the copied binaries actually run.
-# Why: a missing shared-library dependency fails at exec time, not at COPY
-#   time; the lsof check is delegated to a shared script (see that file).
+# What: verifies copied binaries run with dependencies present
+# Why: shared-library dependency failures happen at exec time only
 # From: Issue #1613
 RUN set -euo pipefail; \
     rg --version >/dev/null; \
@@ -649,9 +628,8 @@ COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 # with `--dhcp-probe` (see deploy/*/docker-compose.yml's dhcp-probe
 # service `entrypoint:`), so no separate script needs to be copied in.
 
-# What: keeps the UI's fixed runtime gid at 10001.
-# Why: nginx's log files now land on this same shared reader gid, so the log
-#   viewer no longer needs an `adm`-specific compatibility path.
+# What: keeps UI's fixed runtime gid at 10001
+# Why: nginx logs use same gid, eliminating adm compatibility path
 # From: Issue #1427
 RUN addgroup -g 10001 lancache \
     && adduser -D -H -u 10001 -G lancache -s /sbin/nologin lancache \

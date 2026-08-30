@@ -2,9 +2,9 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: exercises scripts/untracked/check-workflow-line-limit.sh against throwaway
+# What: exercises scripts/untracked/check-workflow-line-limi
 # .github/workflows fixture trees, both passing and failing paths.
-# Why: AG-VAL-024 -- a check that only ever runs against an already-green
+# Why: AG-VAL-024 -- a check that only ever runs against an
 # tree never proves its fail-closed path is reachable.
 # From: Issue #1095 | Issue #1535
 
@@ -20,7 +20,7 @@ teardown() {
 }
 
 # What: prints a message to stderr, then returns non-zero.
-# Why: gives a bats assertion failure a readable reason instead of a bare
+# Why: gives a bats assertion failure a readable reason inst
 # false-condition line number.
 # From: Issue #1095
 fail() {
@@ -28,8 +28,8 @@ fail() {
     return 1
 }
 
-# What: writes <count> numbered comment lines to a fixture file.
-# Why: line-count-only fixture; the fixed "# line N" text keeps byte size
+# What: writes <count> numbered comment lines to a fixture f
+# Why: line-count-only fixture; fixed "# line N" text keeps
 # incidental so the line dimension stays independently testable.
 # From: Issue #1095
 write_lines() {
@@ -39,8 +39,8 @@ write_lines() {
     done > "$path"
 }
 
-# What: writes a single padded comment line totaling <count> bytes.
-# Why: one long line (not many short ones) keeps line count trivially low
+# What: writes a single padded comment line totaling <count>
+# Why: one long line (not many short ones) keeps line count
 # while byte count hits the target, so the two dimensions stay independently
 # testable.
 # From: Issue #1095
@@ -49,8 +49,8 @@ write_bytes() {
     printf '# %*s\n' "$((count - 3))" '' | tr ' ' 'x' > "$path"
 }
 
-# What: appends one padded content line to an already-started run: block.
-# Why: exactly <indent> real leading spaces are needed for the byte-walk to
+# What: appends one padded content line to an already-starte
+# Why: exactly <indent> real leading spaces are needed for b
 # find the block's end; padding hits the exact <total_line_bytes> target.
 # From: Issue #1535
 write_run_block_line() {
@@ -63,10 +63,10 @@ write_run_block_line() {
     } >> "$path"
 }
 
-# What: writes a minimal workflow with one run: block scalar (<scalar>,
+# What: writes a minimal workflow with one run: block scalar
 # e.g. "|" or ">-") totaling exactly <block_bytes>, plus a trailing plain
 # run: step.
-# Why: the trailing step gives every fixture a real "does the block end
+# Why: the trailing step gives every fixture a real "does bl
 # where it should" boundary, not just EOF.
 # From: Issue #1535
 write_workflow_with_run_block() {
@@ -87,8 +87,8 @@ write_workflow_with_run_block() {
     } >> "$path"
 }
 
-# What: asserts a passing run when every file is under all three limits.
-# Why: proves the non-failing path stays green after adding the third
+# What: asserts a passing run when every file is under all t
+# Why: proves non-failing path stays green after adding thir
 # (run: block) dimension.
 # From: Issue #1535
 @test "passes when every workflow file is under all three limits" {
@@ -100,8 +100,8 @@ write_workflow_with_run_block() {
     [[ "$output" == *"within the 100-line, 100000-byte, and 1000-byte-per-run-block hard limits"* ]] || fail "unexpected output: $output"
 }
 
-# What: asserts a red result names only the file over the line limit.
-# Why: proves the fail-closed path is reachable and the offending file is
+# What: asserts a red result names only file over line limit
+# Why: proves fail-closed path is reachable & offending file
 # identified, not just a generic failure.
 # From: Issue #1095
 @test "fails and names the offending file(s) when over the line limit" {
@@ -116,8 +116,8 @@ write_workflow_with_run_block() {
     return 0
 }
 
-# What: asserts the byte dimension fails independently of low line count.
-# Why: proves a file with few lines but many bytes is still caught.
+# What: asserts byte dimension fails independently of low li
+# Why: proves a file with few lines but many bytes is still
 # From: Issue #1095
 @test "fails and names the offending file(s) when over the byte limit, even with few lines" {
     write_lines "$fixture_root/.github/workflows/a.yml" 5
@@ -131,7 +131,7 @@ write_workflow_with_run_block() {
     return 0
 }
 
-# What: asserts MAX_WORKFLOW_LINES/BYTES are read from the environment.
+# What: asserts MAX_WORKFLOW_LINES/BYTES are read from envir
 # Why: proves the defaults are overridable, not hardcoded.
 # From: Issue #1095
 @test "MAX_WORKFLOW_LINES and MAX_WORKFLOW_BYTES are independently overridable via environment" {
@@ -142,7 +142,7 @@ write_workflow_with_run_block() {
     [[ "$output" == *"a.yml"* ]] || fail "did not respect the overridden line threshold: $output"
 }
 
-# What: asserts a run: block under MAX_RUN_BLOCK_BYTES passes.
+# What: asserts a run: block under MAX_RUN_BLOCK_BYTES passe
 # Why: proves the new dimensions non-failing path.
 # From: Issue #1535
 @test "passes when a run: block is under the per-block byte limit" {
@@ -153,8 +153,8 @@ write_workflow_with_run_block() {
     [[ "$output" == *"per-run-block hard limits"* ]] || fail "unexpected output: $output"
 }
 
-# What: asserts an oversized run: block fails and names its start line.
-# Why: proves the fail-closed path this whole check exists for is real,
+# What: asserts an oversized run: block fails & names its st
+# Why: proves fail-closed path this whole check exists for i
 # not only asserted in prose.
 # From: Issue #1535
 @test "fails and names the offending run: block when over the per-block byte limit" {
@@ -167,7 +167,7 @@ write_workflow_with_run_block() {
     [[ "$output" == *"block starting at line"* ]] || fail "did not name the offending block's start line: $output"
 }
 
-# What: asserts MAX_RUN_BLOCK_BYTES is read from the environment.
+# What: asserts MAX_RUN_BLOCK_BYTES is read from environment
 # Why: proves the default is overridable, not hardcoded.
 # From: Issue #1535
 @test "MAX_RUN_BLOCK_BYTES is independently overridable via environment" {
@@ -178,8 +178,8 @@ write_workflow_with_run_block() {
     [[ "$output" == *"a.yml"* ]] || fail "did not respect the overridden run-block threshold: $output"
 }
 
-# What: asserts a folded (>-) block scalar is detected the same as literal.
-# Why: proves the header regex covers both YAML block-scalar indicators,
+# What: asserts a folded (>-) block scalar is detected same
+# Why: proves header regex covers both YAML block-scalar ind
 # not only the one this repo's current workflows happen to use.
 # From: Issue #1535
 @test "detects an oversized folded (>-) block scalar the same as a literal (|) one" {
@@ -190,8 +190,8 @@ write_workflow_with_run_block() {
     [[ "$output" == *"folded.yml"* ]] || fail "did not detect the oversized >- block: $output"
 }
 
-# What: asserts a plain single-line run: value is never measured as a block.
-# Why: proves the header regex only matches a real block-scalar indicator,
+# What: asserts a plain single-line run: value is never meas
+# Why: proves header regex only matches a real block-scalar
 # not any run: value regardless of length.
 # From: Issue #1535
 @test "does not flag a plain single-line run: value, however long" {
@@ -208,8 +208,8 @@ write_workflow_with_run_block() {
     [ "$status" -eq 0 ] || fail "a plain (non-block-scalar) run: line must not be measured as a run: block: $output"
 }
 
-# What: asserts two under-limit blocks in one file are not summed together.
-# Why: proves each block is measured and compared independently against
+# What: asserts two under-limit blocks in one file are not s
+# Why: proves each block is measured & compared independentl
 # MAX_RUN_BLOCK_BYTES, not aggregated per file.
 # From: Issue #1535
 @test "measures multiple run: blocks in one file independently, not as one combined total" {
@@ -225,9 +225,9 @@ write_workflow_with_run_block() {
     [ "$status" -eq 0 ] || fail "two under-limit run: blocks in one file must not be summed together: $output"
 }
 
-# What: runs the real script against this worktree's own current
+# What: runs real script against this worktree's own current
 # .github/workflows/*.yml files, with no fixture involved.
-# Why: calibrates the check against real content, not synthetic data alone.
+# Why: calibrates check against real content, not synthetic
 # From: Issue #1535
 @test "passes when pointed at this repository's own real .github/workflows directory" {
     run bash "$script" "$repo_root"

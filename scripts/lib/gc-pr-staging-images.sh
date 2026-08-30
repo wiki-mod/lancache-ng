@@ -2,19 +2,14 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: shared classification/lookup functions for the GHCR PR-staging-image
-# reaper (scripts/untracked/gc-pr-staging-images.sh).
-# Why: an untagged version (a per-platform/attestation sub-manifest) is only
-# provably orphaned by reading the real manifest graph, not by tag state
-# alone -- gcps_extract_manifest_children() below is that check.
+# What: shared helpers for GHCR package classification and deletion.
+# Why: untagged versions prove orphaned only by manifest graph.
 # From: Issue #1095 | PR #1586
 
 # gcps_version_name_is_digest <name>
 #
-# What: checks a GHCR package version's `.name` matches sha256:<64 hex>.
-# Why: orphan classification below compares `.name` against manifest-child
-# digests; a failure here must skip classification for the WHOLE service --
-# a partially-populated protected-digest set is worse than an empty one.
+# What: checks if .name matches valid sha256:<64-hex> digest.
+# Why: invalid name aborts whole service's orphan classification.
 # From: Issue #1095 | PR #1586
 gcps_version_name_is_digest() {
   local name="$1"
@@ -23,10 +18,8 @@ gcps_version_name_is_digest() {
 
 # gcps_extract_manifest_children <manifest-json>
 #
-# What: prints forward `.manifests[].digest` child edges of an image index.
-# Why: `.subject.digest` points the opposite direction (referrer to
-# subject) and must never count as a child, or a stale attestation could
-# keep an otherwise-orphaned subject alive; walks one level only.
+# What: extracts forward .manifests[].digest child edges only.
+# Why: subject.digest (reverse) must not keep stale subject alive.
 # From: Issue #1095 | PR #1586
 gcps_extract_manifest_children() {
   local manifest_json="$1"
@@ -40,11 +33,9 @@ gcps_extract_manifest_children() {
 
 # gcps_extract_manifest_subject <manifest-json>
 #
-# What: prints the top-level OCI `.subject.digest` when present.
-# Why: kept separate from gcps_extract_manifest_children -- a subject is a
-# reverse referrer edge, and must not by itself make an otherwise-dead
-# subject immortal while the referrer that names it remains live.
-# From: Issue #1585 | PR #1586
+# What: extracts the top-level OCI .subject.digest when present.
+# Why: reverse edge cannot keep otherwise-orphaned subject alive.
+# From: Issue #1095 | PR #1586
 gcps_extract_manifest_subject() {
   local manifest_json="$1"
   local subject_child
@@ -57,10 +48,8 @@ gcps_extract_manifest_subject() {
 
 # gcps_manifest_looks_valid <manifest-json>
 #
-# What: returns 0 only when the input is well-formed JSON carrying `mediaType`.
-# Why: distinguishes "fetched fine, genuinely no children" from "the fetch
-# nominally succeeded but returned something untrustworthy" (an HTML error
-# page, a truncated body) -- the latter must abort orphan classification.
+# What: returns 0 only when input is valid JSON with mediaType.
+# Why: detects untrustworthy responses (HTML errors) that abort.
 # From: Issue #1095 | PR #1586
 gcps_manifest_looks_valid() {
   local manifest_json="$1"
@@ -71,10 +60,8 @@ gcps_manifest_looks_valid() {
 
 # gcps_created_at_to_epoch <iso8601-timestamp>
 #
-# What: converts a GHCR `.created_at` timestamp to Unix epoch seconds.
-# Why: a parse failure must be treated as "too young to delete" (fail
-# closed), never as satisfying the configurable safety margin every
-# deletion category requires.
+# What: converts GHCR .created_at timestamp to Unix epoch seconds.
+# Why: failure must fail-closed, never satisfy configured margin.
 # From: Issue #1095 | PR #1586
 gcps_created_at_to_epoch() {
   local created_at="$1"
@@ -83,10 +70,8 @@ gcps_created_at_to_epoch() {
 
 # gcps_is_old_enough_to_delete <created-at-epoch> <now-epoch> <min-age-seconds>
 #
-# What: checks whether now minus created_at meets the configured safety margin.
-# Why: applies uniformly to every deletion category (closed-PR and orphan
-# alike) -- a version can look deletable by tag/reference state alone while
-# still being the output of a build still actively in flight elsewhere.
+# What: checks if age meets configured safety margin for deletion.
+# Why: uniform across categories; tag state alone is insufficient.
 # From: Issue #1095 | PR #1586
 gcps_is_old_enough_to_delete() {
   local created_at_epoch="$1" now_epoch="$2" min_age_seconds="$3"
@@ -95,11 +80,9 @@ gcps_is_old_enough_to_delete() {
 
 # gcps_pr_lookup_state <pr-number> <repository> <cache-array-name> [<result-var-name>]
 #
-# What: prints OPEN/CLOSED/LOOKUP_FAILED for a PR, caching per-call via nameref.
-# Why: a real HTTP 404 (PR truly gone) reads as CLOSED, but every other API
-# failure stays LOOKUP_FAILED (never CLOSED) -- an ambiguous lookup must
-# never license a deletion; the caller tracks a run-wide LOOKUP_FAILED count.
-# From: Issue #1095 | PR #1586
+# What: prints PR state OPEN/CLOSED/LOOKUP_FAILED, caching via ref.
+# Why: 404 is CLOSED; ambiguous failures never license deletion.
+# From: Issue #1585 | PR #1586
 gcps_pr_lookup_state() {
   local pr_number="$1" repository="$2" cache_array_name="$3" result_var_name="${4:-}"
   local -n cache_ref="$cache_array_name"
@@ -108,10 +91,8 @@ gcps_pr_lookup_state() {
 
   lookup_state="${cache_ref[$pr_number]:-}"
 
-  # What: optionally reuses confirmed OPEN/CLOSED states across package workers.
-  # Why: package workers are separate shells, so their associative arrays
-  # cannot deduplicate the same PR across services; a run-local file cache
-  # bounds that API amplification without persisting state between sweeps.
+  # What: optionally reuse OPEN/CLOSED states across separate workers.
+  # Why: run-local file cache deduplicates calls between workers.
   # From: Issue #1585 | PR #1586
   if [[ -z "$lookup_state" && -n "${GCPS_PR_STATE_CACHE_DIR:-}" ]]; then
     shared_cache_dir="${GCPS_PR_STATE_CACHE_DIR%/}"
@@ -129,17 +110,14 @@ gcps_pr_lookup_state() {
       lookup_state=""
     fi
 
-    # What: serializes only the first live lookup for one PR number.
-    # Why: an atomic result file alone still lets concurrent workers miss it
-    # at the same time and issue duplicate pulls API requests. mkdir is the
-    # lock primitive so no extra flock dependency is required.
+    # What: serialize only first live lookup for one PR via mkdir lock.
+    # Why: prevents concurrent workers issuing duplicate API requests.
     # From: Issue #1585 | PR #1586
     if [[ -z "$lookup_state" ]]; then
       shared_cache_lock="${shared_cache_file}.lock"
       for (( wait_attempt=1; wait_attempt<=100; wait_attempt++ )); do
-        # What: re-reads the cache file right after taking the lock.
-        # Why: another owner may have written and released it between this
-        # worker's first read and this mkdir, avoiding a wasted API call.
+        # What: re-read cache file after lock to avoid wasted API call.
+        # Why: another worker may have written between first read & lock.
         # From: Issue #1585 | PR #1586
         if mkdir "$shared_cache_lock" 2>/dev/null; then
           lock_owned=1
@@ -173,8 +151,8 @@ gcps_pr_lookup_state() {
     fi
   fi
 
-  # What: the live `gh api` call's assignment stays inside the if-condition.
-  # Why: a failed call must be classified below, not trip a caller's `set -e`.
+  # What: keep live gh api call assignment inside the if-condition.
+  # Why: failure must not trigger set -e; needs classification logic.
   # From: Issue #1095 | PR #1586
   if [[ -z "$lookup_state" ]]; then
     if api_output="$(gh api "repos/${repository}/pulls/${pr_number}" 2>&1)"; then
@@ -199,9 +177,8 @@ gcps_pr_lookup_state() {
     fi
     cache_ref["$pr_number"]="$lookup_state"
 
-    # What: shares only confirmed answers, written atomically.
-    # Why: LOOKUP_FAILED must remain retriable; a transient API failure must
-    # not poison every other package worker for the rest of the sweep.
+    # What: share only confirmed answers, keep LOOKUP_FAILED retriable.
+    # Why: transient API failures must not poison other package runs.
     # From: Issue #1585 | PR #1586
     if [[ "$lock_owned" == "1" && -n "$shared_cache_file" && -d "$shared_cache_dir" && "$lookup_state" != "LOOKUP_FAILED" ]]; then
       shared_cache_tmp="${shared_cache_file}.${BASHPID}.tmp"
@@ -228,10 +205,8 @@ gcps_pr_lookup_state() {
 
 # gcps_registry_anon_token <service> <repository>
 #
-# What: fetches an anonymous read-only pull-scoped Bearer token from GHCR.
-# Why: checks curl's own exit status before handing output to jq -- a live
-# `curl -f | jq -r '.token'` pipe would report success even on a failed
-# curl, since jq treats empty input as an empty value, not a parse error.
+# What: fetch anonymous pull-scoped Bearer token from GHCR.
+# Why: check curl status before piping to jq; jq treats empty ok.
 # From: Issue #1095 | PR #1586
 gcps_registry_anon_token() {
   local service="$1" repository="$2"
@@ -245,10 +220,8 @@ gcps_registry_anon_token() {
 
 # gcps_fetch_manifest <service> <digest> <repository> <token>
 #
-# What: fetches the raw manifest JSON for <digest> via the registry v2 API.
-# Why: requests all four Buildx-relevant media types in one Accept header --
-# asking for only one risks the registry silently returning a CONVERTED
-# single-platform manifest for an index that genuinely has children.
+# What: fetch raw manifest JSON via registry v2 API for digest.
+# Why: request all Buildx types in Accept header; prevent rewrites.
 # From: Issue #1095 | PR #1586
 gcps_fetch_manifest() {
   local service="$1" digest="$2" repository="$3" token="$4"
@@ -258,11 +231,9 @@ gcps_fetch_manifest() {
     "https://ghcr.io/v2/${repository}/${service}/manifests/${digest}"
 }
 
-# What: performs one GitHub package-version DELETE attempt and classifies it.
-# Why: ghcr_retry needs permanent-vs-transient signaling; gcps_delete_result
-# is a cross-file output var the sourced caller reads after return (SC2034);
-# 404 is an idempotent success when another cleanup path already removed it.
-# From: Issue #1095 | PR #1586
+# What: DELETE one version and classify result (404 is idempotent).
+# Why: signals permanent vs transient failure for ghcr_retry.
+# From: Issue #1585 | PR #1586
 gcps_delete_package_version_once() {
   local endpoint="${1:?gcps_delete_package_version_once: endpoint is required}"
   local output http_status
@@ -291,11 +262,9 @@ gcps_delete_package_version_once() {
   return 1
 }
 
-# What: probes whether one package exists and classifies the API result.
-# Why: manifest-declared legacy names may be intentionally absent; transient/
-# auth failures must still use the shared bounded retry contract; the output
-# var is read by the sourced caller after return (SC2034).
-# From: Issue #1095 | PR #1586
+# What: probe existence and classify; legacy names may be absent.
+# Why: transient/auth failures must use bounded retry contract.
+# From: Issue #1585 | PR #1586
 gcps_package_presence_once() {
   local endpoint="${1:?gcps_package_presence_once: endpoint is required}"
   local output http_status

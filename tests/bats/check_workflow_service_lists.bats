@@ -522,9 +522,9 @@ write_supersession_fixture() {
     local job needs
 
     write_canonical_matrix
-    # What: extends the just-written build: stanza with its own needs: key.
-    # Why: write_canonical_matrix already opens `  build:`; a second
-    #   `  build:` header here would be a duplicate YAML mapping key.
+    # What: extends build: with job-specific needs: line
+    # Why: build: content depends on caller's break_job
+    # From: Issue #1095 | PR #1628
     if [[ "$break_job" == "build" ]]; then
         printf '    needs: [build-arm64]\n'
     else
@@ -541,10 +541,8 @@ write_supersession_fixture() {
     done
 }
 
-# What: proves the check applies once a file defines all five required jobs.
-# Why: a required job's needs: list silently missing push-supersession-check
-#   must be caught, even though the same check must stay a no-op against the
-#   narrower fixtures every other test above uses.
+# What: detects job missing push-supersession-check
+# Why: missing dependency silently breaks CI guard
 # From: Issue #1095 | PR #1628
 @test "supersession wiring: fails when merge-manifests is missing push-supersession-check from needs" {
     write_supersession_fixture merge-manifests > "$fixture"
@@ -554,8 +552,8 @@ write_supersession_fixture() {
     [[ "$output" == *"job 'merge-manifests'"*"missing push-supersession-check"* ]]
 }
 
-# What: proves the check passes when all five jobs correctly depend on
-#   push-supersession-check.
+# What: verifies check passes with correct dependencies
+# Why: guards must pass when dependencies are correct
 # From: Issue #1095 | PR #1628
 @test "supersession wiring: passes when all five required jobs depend on push-supersession-check" {
     write_supersession_fixture > "$fixture"
@@ -565,12 +563,8 @@ write_supersession_fixture() {
     [[ "$output" == *"consistent"* ]]
 }
 
-# What: proves the check is a no-op against a fixture that only defines
-#   `build:` (every other test in this file uses exactly this shape).
-# Why: without this content-gated design, this check would have broken the
-#   entire rest of this test suite -- confirmed live while building it: an
-#   earlier version required all five jobs unconditionally and failed every
-#   single-file test above before this gate was added.
+# What: proves check is no-op when only build: defined
+# Why: unscoped check would incorrectly fail other tests
 # From: Issue #1095 | PR #1628
 @test "supersession wiring: stays a no-op against a fixture defining only build:" {
     {

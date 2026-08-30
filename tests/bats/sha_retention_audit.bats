@@ -1,13 +1,13 @@
 #!/usr/bin/env bats
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: regression coverage for the read-only SHA retention planner and API helper.
-# Why: destructive GC consumes planner output, so its protection decisions
+# What: regression coverage for read-only SHA retention plan
+# Why: destructive GC consumes planner output, so its protec
 # must remain independently testable without any DELETE capability here.
-# From: Issue #1095.
+# From: Issue #1095
 
-# What: sources both libraries and creates a per-test scratch directory.
-# Why: sourcing (not executing) pulls in every sra_* function without
+# What: sources both libraries & creates a per-test scratch
+# Why: sourcing (not executing) pulls in every sra_* functio
 # running any live audit.
 # From: Issue #1585 | PR #1586
 setup() {
@@ -19,15 +19,15 @@ setup() {
   tmp_dir="$(mktemp -d "${BATS_TEST_TMPDIR}/sha-retention-audit.XXXXXX")"
 }
 
-# What: removes the per-test scratch directory created by setup().
-# Why: runs after every test regardless of outcome, keeping BATS_TEST_TMPDIR clean.
+# What: removes per-test scratch directory created by setup(
+# Why: runs after every test regardless of outcome, keeping
 # From: Issue #1585 | PR #1586
 teardown() {
   rm -rf -- "$tmp_dir"
 }
 
-# What: reads the manifest's single accepted_ordinary_roots_per_package value.
-# Why: the machine-readable ordinary-root storage-retention budget.
+# What: reads manifest's single accepted_ordinary_roots_per_
+# Why: the machine-readable ordinary-root storage-retention
 # From: Issue #1585 | PR #1586
 @test "retention manifest defines exactly thirty accepted ordinary roots" {
   run sra_read_retention_keep "$repo_root/release/stack-images.yml"
@@ -35,8 +35,8 @@ teardown() {
   [ "$output" = "30" ]
 }
 
-# What: rejects a manifest with a duplicated retention budget key.
-# Why: a duplicate key creates two competing retention values, so parsing
+# What: rejects a manifest with a duplicated retention budge
+# Why: a duplicate key creates two competing retention value
 # must fail rather than silently pick one.
 # From: Issue #1585 | PR #1586
 @test "retention parser rejects duplicate budget declarations" {
@@ -49,8 +49,8 @@ EOF
   [ "$status" -ne 0 ]
 }
 
-# What: reads the manifest's single minimum_stable_releases value.
-# Why: feeds sra_select_supported_release_tags's "how many recent stable
+# What: reads manifest's single minimum_stable_releases valu
+# Why: feeds sra_select_supported_release_tags's "how many r
 # releases stay protected" question.
 # From: Issue #1585 | PR #1586
 @test "retention manifest defines exactly three minimum stable releases" {
@@ -59,18 +59,18 @@ EOF
   [ "$output" = "3" ]
 }
 
-# What: reads the manifest's single channel_buffer_versions value.
-# Why: the v1.2 per-package buffer for a non-ordinary-version
+# What: reads manifest's single channel_buffer_versions valu
+# Why: the v1.2 per-package buffer for a non-ordinary-versio
 # candidate that matches no protected channel.
-# From: Issue #1585.
+# From: Issue #1585
 @test "retention manifest defines exactly five channel buffer versions" {
   run sra_read_channel_buffer_versions "$repo_root/release/stack-images.yml"
   [ "$status" -eq 0 ]
   [ "$output" = "5" ]
 }
 
-# What: retention keep and minimum stable releases parse independently.
-# Why: both share _sra_read_manifest_positive_integer -- the two keys'
+# What: retention keep & minimum stable releases parse indep
+# Why: both share _sra_read_manifest_positive_integer -- two
 # values must never bleed into each other.
 # From: Issue #1585 | PR #1586
 @test "retention keep and minimum stable releases parse independently" {
@@ -88,8 +88,8 @@ EOF
   [ "$output" = "3" ]
 }
 
-# What: rollback_anchors reader succeeds with empty output on the real manifest.
-# Why: the real manifest's steady state is an empty rollback_anchors list.
+# What: rollback_anchors reader succeeds with empty output o
+# Why: the real manifest's steady state is an empty rollback
 # From: Issue #1585 | PR #1586
 @test "rollback_anchors reader succeeds with empty output on the real manifest" {
   run sra_read_rollback_anchors "$repo_root/release/stack-images.yml"
@@ -97,8 +97,8 @@ EOF
   [ "$output" = "" ]
 }
 
-# What: rollback_anchors reader succeeds with empty output when the header is absent.
-# Why: an entirely absent header must read the same as an empty list -- the
+# What: rollback_anchors reader succeeds with empty output w
+# Why: an entirely absent header must read same as an empty
 # manifest's steady state before the key ever existed at all.
 # From: Issue #1585 | PR #1586
 @test "rollback_anchors reader succeeds with empty output when the header is entirely absent" {
@@ -111,8 +111,8 @@ EOF
   [ "$output" = "" ]
 }
 
-# What: rollback_anchors reader rejects a duplicate list header.
-# Why: two competing list declarations are a malformed manifest in every case.
+# What: rollback_anchors reader rejects a duplicate list hea
+# Why: two competing list declarations are a malformed manif
 # From: Issue #1585 | PR #1586
 @test "rollback_anchors reader rejects a duplicate list header" {
   cat >"$tmp_dir/manifest.yml" <<'EOF'
@@ -125,8 +125,8 @@ EOF
   [ "$status" -ne 0 ]
 }
 
-# What: rollback_anchors reader returns declared digest entries, one per line.
-# Why: entries must come back in manifest order for reproducible reporting.
+# What: rollback_anchors reader returns declared digest entr
+# Why: entries must come back in manifest order for reproduc
 # From: Issue #1585 | PR #1586
 @test "rollback_anchors reader returns declared digest entries" {
   cat >"$tmp_dir/manifest.yml" <<'EOF'
@@ -141,8 +141,8 @@ EOF
   [ "${lines[1]}" = "sha256:2222222222222222222222222222222222222222222222222222222222222222" ]
 }
 
-# What: rollback anchor digest format accepts only an exact sha256:<64-hex> value.
-# Why: a rollback anchor is deliberately digest-only -- a tag/ref must never pass.
+# What: rollback anchor digest format accepts only an exact
+# Why: a rollback anchor is deliberately digest-only -- a ta
 # From: Issue #1585 | PR #1586
 @test "rollback anchor digest format accepts only an exact sha256:<64-hex> value" {
   run sra_is_rollback_anchor_digest "sha256:$(printf 'a%.0s' {1..64})"
@@ -155,8 +155,8 @@ EOF
   [ "$status" -ne 0 ]
 }
 
-# What: rollback anchor membership check is exact, not a prefix match.
-# Why: a substring/prefix match would let an unrelated digest sharing a
+# What: rollback anchor membership check is exact, not a pre
+# Why: a substring/prefix match would let an unrelated diges
 # prefix falsely match a declared anchor.
 # From: Issue #1585 | PR #1586
 @test "rollback anchor membership check is exact, not a prefix match" {
@@ -170,8 +170,8 @@ EOF
   [ "$status" -ne 0 ]
 }
 
-# What: rollback anchor list validator accepts a well-formed digest list.
-# Why: this validator is what both the CI static check and the live audit share.
+# What: rollback anchor list validator accepts a well-formed
+# Why: this validator is what both CI static check & live au
 # From: Issue #1585 | PR #1586
 @test "rollback anchor list validator accepts a well-formed digest list" {
   list="$(printf 'sha256:%s\nsha256:%s\n' "$(printf 'a%.0s' {1..64})" "$(printf 'b%.0s' {1..64})")"
@@ -179,16 +179,16 @@ EOF
   [ "$status" -eq 0 ]
 }
 
-# What: rollback anchor list validator accepts an empty list.
-# Why: the empty steady state must validate cleanly too, never as an error.
+# What: rollback anchor list validator accepts an empty list
+# Why: the empty steady state must validate cleanly too, nev
 # From: Issue #1585 | PR #1586
 @test "rollback anchor list validator accepts an empty list" {
   run sra_validate_rollback_anchors_list ""
   [ "$status" -eq 0 ]
 }
 
-# What: rollback anchor list validator rejects a git tag/ref in place of a digest.
-# Why: a tag/ref in place of a digest defeats the whole point of an immutable anchor.
+# What: rollback anchor list validator rejects a git tag/ref
+# Why: a tag/ref in place of a digest defeats whole point of
 # From: Issue #1585 | PR #1586
 @test "rollback anchor list validator rejects a git tag/ref in place of a digest" {
   run sra_validate_rollback_anchors_list "nightly"
@@ -196,8 +196,8 @@ EOF
   [[ "$output" == *"not an exact sha256"* ]]
 }
 
-# What: rollback anchor list validator rejects a blank entry.
-# Why: a blank line in the list must be caught explicitly, not silently accepted.
+# What: rollback anchor list validator rejects a blank entry
+# Why: a blank line in list must be caught explicitly, not s
 # From: Issue #1585 | PR #1586
 @test "rollback anchor list validator rejects a blank entry" {
   list="$(printf 'sha256:%s\n\nsha256:%s\n' "$(printf 'a%.0s' {1..64})" "$(printf 'b%.0s' {1..64})")"
@@ -206,8 +206,8 @@ EOF
   [[ "$output" == *"blank entry"* ]]
 }
 
-# What: manifest runtime and tooling packages match the real build matrix.
-# Why: retention must follow the same publisher inventory build-push.yml uses.
+# What: manifest runtime & tooling packages match real build
+# Why: retention must follow same publisher inventory build-
 # From: Issue #1585 | PR #1586
 @test "manifest runtime and tooling packages match the build matrix" {
   package_inventory="$(sra_manifest_packages "$repo_root/release/stack-images.yml")"
@@ -220,8 +220,8 @@ EOF
   [[ "$manifest_services" == *"build-tools"* ]]
 }
 
-# What: manifest package parser exposes legacy packages only when explicitly requested.
-# Why: the destructive GC may retire manifest-declared historical packages,
+# What: manifest package parser exposes legacy packages only
+# Why: the destructive GC may retire manifest-declared histo
 # while the standalone audit must retain its original first-party scope.
 # From: Issue #1095 | PR #1586
 @test "manifest package parser exposes legacy only when explicitly requested" {
@@ -232,8 +232,8 @@ EOF
   [[ "$legacy_inventory" == *$'legacy\tfluent-bit'* ]]
 }
 
-# What: package-version page schema accepts a complete, well-formed object.
-# Why: GHCR version objects are deletion units -- every required field must
+# What: package-version page schema accepts a complete, well
+# Why: GHCR version objects are deletion units -- every requ
 # be valid before classification runs at all.
 # From: Issue #1585 | PR #1586
 @test "package-version page schema accepts complete objects" {
@@ -250,8 +250,8 @@ EOF
   [ "$status" -eq 0 ]
 }
 
-# What: package-version page schema rejects control characters in tags.
-# Why: tag text is emitted into line-oriented audit output; a control
+# What: package-version page schema rejects control characte
+# Why: tag text is emitted into line-oriented audit output;
 # character (e.g. an embedded tab) would corrupt that format.
 # From: Issue #1585 | PR #1586
 @test "package-version page schema rejects control characters in tags" {
@@ -268,8 +268,8 @@ EOF
   [ "$status" -ne 0 ]
 }
 
-# What: package-version page schema rejects missing tag metadata.
-# Why: missing tag metadata must never collapse into an apparently untagged version.
+# What: package-version page schema rejects missing tag meta
+# Why: missing tag metadata must never collapse into an appa
 # From: Issue #1585 | PR #1586
 @test "package-version page schema rejects missing tag metadata" {
   cat >"$tmp_dir/page.json" <<'EOF'
@@ -285,8 +285,8 @@ EOF
   [ "$status" -ne 0 ]
 }
 
-# What: package-version page schema rejects a null version id.
-# Why: a missing/null id cannot be used as a stable package-version identity.
+# What: package-version page schema rejects a null version i
+# Why: a missing/null id cannot be used as a stable package-
 # From: Issue #1585 | PR #1586
 @test "package-version page schema rejects null version ids" {
   cat >"$tmp_dir/page.json" <<'EOF'
@@ -302,8 +302,8 @@ EOF
   [ "$status" -ne 0 ]
 }
 
-# What: package-version page schema rejects a malformed digest.
-# Why: a malformed digest must not enter the identity graph as if it were a real OCI digest.
+# What: package-version page schema rejects a malformed dige
+# Why: a malformed digest must not enter identity graph as i
 # From: Issue #1585 | PR #1586
 @test "package-version page schema rejects malformed digests" {
   cat >"$tmp_dir/page.json" <<'EOF'
@@ -319,8 +319,8 @@ EOF
   [ "$status" -ne 0 ]
 }
 
-# What: tag facts preserve multiple root aliases on one version.
-# Why: multiple SHA aliases on one version are one stored root identity, not
+# What: tag facts preserve multiple root aliases on one vers
+# Why: multiple SHA aliases on one version are one stored ro
 # multiple counted slots.
 # From: Issue #1585 | PR #1586
 @test "tag facts preserve multiple root aliases on one version" {
@@ -330,8 +330,8 @@ EOF
   [ "$output" = $'2\t0\t0' ]
 }
 
-# What: tag facts classify protected non-SHA tags separately.
-# Why: a protected non-SHA identity attached to the version must be visible
+# What: tag facts classify protected non-SHA tags separately
+# Why: a protected non-SHA identity attached to version must
 # to the orchestrator's classifier, not folded into the root/child counts.
 # From: Issue #1585 | PR #1586
 @test "tag facts classify protected non-SHA tags separately" {
@@ -341,8 +341,8 @@ EOF
   [ "$output" = $'1\t0\t1' ]
 }
 
-# What: tag facts distinguish architecture child tags from root tags.
-# Why: platform child tags are closure, not ordinary root-history slots.
+# What: tag facts distinguish architecture child tags from r
+# Why: platform child tags are closure, not ordinary root-hi
 # From: Issue #1585 | PR #1586
 @test "tag facts distinguish architecture child tags" {
   version='{"metadata":{"container":{"tags":["sha-abcdef1-amd64","sha-abcdef1-arm64"]}}}'
@@ -351,8 +351,8 @@ EOF
   [ "$output" = $'0\t2\t0' ]
 }
 
-# What: GitHub REST retry treats 404 as a hard unknown failure, not empty.
-# Why: an ambiguous or absent REST resource is not positive proof of package
+# What: GitHub REST retry treats 404 as a hard unknown failu
+# Why: an ambiguous or absent REST resource is not positive
 # absence, so it must not be silently treated as an empty result.
 # From: Issue #1585 | PR #1586
 @test "GitHub REST retry treats 404 as a hard unknown failure" {
@@ -368,8 +368,8 @@ EOF
   [[ "$output" == *"refusing to interpret this response as an empty result"* ]]
 }
 
-# What: GitHub REST retry recovers a transient status without warning output.
-# Why: a recovered transient failure is a notice, not a warning, under the
+# What: GitHub REST retry recovers a transient status withou
+# Why: a recovered transient failure is a notice, not a warn
 # repo's warnings-as-errors contract.
 # From: Issue #1585 | PR #1586
 @test "GitHub REST retry recovers transient status without warning output" {
@@ -394,7 +394,7 @@ EOF
 }
 
 # What: commit-prefix resolution is exact and history-aware.
-# Why: SHA abbreviation handling must resolve through Git itself and reject
+# Why: SHA abbreviation handling must resolve through Git it
 # an unknown/unresolvable prefix, not guess.
 # From: Issue #1585 | PR #1586
 @test "commit-prefix resolution is exact and history-aware" {
@@ -421,8 +421,8 @@ EOF
   [ "$status" -ne 0 ]
 }
 
-# What: created_at string validator accepts only the exact GHCR timestamp shape.
-# Why: split out so the orchestrator's hot loop can validate an
+# What: created_at string validator accepts only exact GHCR
+# Why: split out so orchestrator's hot loop can validate an
 # already-extracted value without a second jq subprocess per version.
 # From: Issue #1585 | PR #1586
 @test "created_at string validator accepts only the exact GHCR shape" {
@@ -436,8 +436,8 @@ EOF
   [ "$status" -ne 0 ]
 }
 
-# What: version created_at is extracted for display when well-formed.
-# Why: the dry-run report shows a real build date per candidate; created_at
+# What: version created_at is extracted for display when wel
+# Why: the dry-run report shows a real build date per candid
 # must never feed ranking itself.
 # From: Issue #1585 | PR #1586
 @test "version created_at is extracted for display when well-formed" {
@@ -447,8 +447,8 @@ EOF
   [ "$output" = "2026-08-01T12:00:00Z" ]
 }
 
-# What: version created_at fails closed when missing or malformed.
-# Why: a missing/malformed build date is a real build-pipeline defect, and
+# What: version created_at fails closed when missing or malf
+# Why: a missing/malformed build date is a real build-pipeli
 # the caller must be able to detect and report it separately.
 # From: Issue #1585 | PR #1586
 @test "version created_at fails closed when missing or malformed" {
@@ -459,8 +459,8 @@ EOF
   [ "$status" -ne 0 ]
 }
 
-# What: emit_record labels a within-budget candidate as protect.
-# Why: a within-budget ordinary root stays a plain protect decision.
+# What: emit_record labels a within-budget candidate as prot
+# Why: a within-budget ordinary root stays a plain protect d
 # From: Issue #1585 | PR #1586
 @test "emit_record labels a within-budget candidate as protect" {
   run sra_emit_record runtime proxy 1 sha256:aa sha-abcdef1 2026-08-01T12:00:00Z 3 within-30 protect acceptance-evidence-unavailable
@@ -470,8 +470,8 @@ EOF
   [[ "$output" == *"built=2026-08-01T12:00:00Z"* ]]
 }
 
-# What: emit_record labels a beyond-budget candidate as would-delete.
-# Why: this is the dry-run "I would delete this" report line the destructive
+# What: emit_record labels a beyond-budget candidate as woul
+# Why: this is dry-run "I would delete this" report line des
 # GC later consumes.
 # From: Issue #1585 | PR #1586
 @test "emit_record labels a beyond-budget candidate as would-delete" {
@@ -482,7 +482,7 @@ EOF
 }
 
 # What: emit_record accepts a legitimately empty tags value.
-# Why: an untagged version (e.g. an attestation manifest) has a legitimately
+# Why: an untagged version (e.g. an attestation manifest) ha
 # empty tags string; a naive "${5:?}" guard would reject it as missing.
 # From: Issue #1585 | PR #1586
 @test "emit_record accepts a legitimately empty tags value" {
@@ -491,8 +491,8 @@ EOF
   [[ "$output" == *$'\ttags=\t'* ]]
 }
 
-# What: GitHub REST retry performs a real GET when no cache directory is set.
-# Why: a cold cache (no directory configured) must fall through to a real
+# What: GitHub REST retry performs a real GET when no cache
+# Why: a cold cache (no directory configured) must fall thro
 # GET, exactly matching this helper's pre-caching behavior.
 # From: Issue #1585 | PR #1586
 @test "GitHub REST retry performs a real GET when no cache directory is set" {
@@ -509,8 +509,8 @@ EOF
   [ "$calls" -eq 1 ]
 }
 
-# What: GitHub REST retry serves a fresh cache hit without a real GET, and expires it.
-# Why: a fresh cached response must be served without a second real GET, and
+# What: GitHub REST retry serves a fresh cache hit without a
+# Why: a fresh cached response must be served without a seco
 # a response older than the TTL must not be trusted as current; the cache
 # entry's mtime is force-set into the past rather than sleeping for real.
 # From: Issue #1585 | PR #1586
@@ -536,8 +536,8 @@ EOF
   [ "$calls" -eq 2 ]
 }
 
-# What: stable release tag shape accepts vX.Y.Z and rejects rc/other shapes.
-# Why: only a genuine stable release counts toward minimum_stable_releases --
+# What: stable release tag shape accepts vX.Y.Z & rejects rc
+# Why: only a genuine stable release counts toward minimum_s
 # a release-candidate tag must not be mistaken for one.
 # From: Issue #1585 | PR #1586
 @test "stable release tag shape accepts vX.Y.Z and rejects rc/other shapes" {
@@ -554,8 +554,8 @@ EOF
   [ "$status" -ne 0 ]
 }
 
-# What: release sort key orders newer releases ahead of older ones.
-# Why: bash has no native semver comparator; the zero-padded key must order
+# What: release sort key orders newer releases ahead of olde
+# Why: bash has no native semver comparator; zero-padded key
 # releases correctly even across differing digit widths (v2.0.0 > v1.20.0).
 # From: Issue #1585 | PR #1586
 @test "release sort key orders newer releases ahead of older ones" {
@@ -565,15 +565,15 @@ EOF
 }
 
 # What: release sort key rejects a non-stable-release tag.
-# Why: an rc/other-shaped tag has no defined sort position and must fail closed.
+# Why: an rc/other-shaped tag has no defined sort position &
 # From: Issue #1585 | PR #1586
 @test "release sort key rejects a non-stable-release tag" {
   run sra_release_sort_key "v1.2.3-rc.1"
   [ "$status" -ne 0 ]
 }
 
-# What: select supported release tags picks the newest N by semver.
-# Why: retention.minimum_stable_releases (3) must select by real semver
+# What: select supported release tags picks newest N by semv
+# Why: retention.minimum_stable_releases (3) must select by
 # order, not by input/file order.
 # From: Issue #1585 | PR #1586
 @test "select supported release tags picks the newest N by semver" {
@@ -581,8 +581,8 @@ EOF
   [ "$supported" = $'v2.0.0\nv1.10.0\nv1.2.0' ]
 }
 
-# What: select supported release tags returns empty for a package with no releases yet.
-# Why: an empty release-tag set (a brand-new package) is a legitimate empty
+# What: select supported release tags returns empty for a pa
+# Why: an empty release-tag set (a brand-new package) is a l
 # result, not a failure.
 # From: Issue #1585 | PR #1586
 @test "select supported release tags returns empty for a package with no releases yet" {
@@ -590,8 +590,8 @@ EOF
   [ -z "$supported" ]
 }
 
-# What: channel tag classifier recognizes nightly, latest, and stable release shapes.
-# Why: each protected channel must be individually distinguishable from an
+# What: channel tag classifier recognizes nightly, latest, &
+# Why: each protected channel must be individually distingui
 # ordinary or unrecognized tag.
 # From: Issue #1585 | PR #1586
 @test "channel tag classifier recognizes nightly, latest, and stable release shapes" {
@@ -616,8 +616,8 @@ EOF
   [ "$output" = "other" ]
 }
 
-# What: other tags from csv excludes sha root and child aliases.
-# Why: the orchestrator's root_count==0/other_count>0 branches need the
+# What: other tags from csv excludes sha root & child aliase
+# Why: the orchestrator's root_count==0/other_count>0 branch
 # actual "other"-kind tag text, not just sra_version_tag_facts's count.
 # From: Issue #1585 | PR #1586
 @test "other tags from csv excludes sha root and child aliases" {
@@ -627,8 +627,8 @@ EOF
   [[ "$other_tags" != *"sha-abcdef1"* ]]
 }
 
-# What: protected reference reason combines every channel that applies.
-# Why: a digest can legitimately be nightly AND latest AND a just-cut stable
+# What: protected reference reason combines every channel th
+# Why: a digest can legitimately be nightly AND latest AND a
 # release at once -- all applicable reasons must be reported, not just one.
 # From: Issue #1585 | PR #1586
 @test "protected reference reason combines every channel that applies" {
@@ -639,8 +639,8 @@ EOF
   [ "$output" = "nightly-channel-protected+latest-channel-protected+stable-release-protected" ]
 }
 
-# What: protected reference reason reports only the channel that actually applies.
-# Why: a single-channel digest must not be over-reported with unrelated reasons.
+# What: protected reference reason reports only channel that
+# Why: a single-channel digest must not be over-reported wit
 # From: Issue #1585 | PR #1586
 @test "protected reference reason reports only the channel that actually applies" {
   run sra_protected_reference_reason "nightly" ""
@@ -648,8 +648,8 @@ EOF
   [ "$output" = "nightly-channel-protected" ]
 }
 
-# What: protected reference reason does not credit an unsupported old release tag.
-# Why: a tag past minimum_stable_releases is real history, not one of the
+# What: protected reference reason does not credit an unsupp
+# Why: a tag past minimum_stable_releases is real history, n
 # currently supported releases, and must not be mislabeled as protected.
 # From: Issue #1585 | PR #1586
 @test "protected reference reason does not credit an unsupported old release tag" {
@@ -658,8 +658,8 @@ EOF
   [ "$status" -ne 0 ]
 }
 
-# What: an unrecognized extra tag must not be mislabeled as a protected channel.
-# Why: the orchestrator's other_count>0 branch relies on this exact failure
+# What: an unrecognized extra tag must not be mislabeled as
+# Why: the orchestrator's other_count>0 branch relies on thi
 # to fall through to ordinary root-candidate ranking instead of protecting.
 # From: Issue #1095 | PR #1586
 @test "protected reference reason fails for an unrecognized tag" {
@@ -667,30 +667,30 @@ EOF
   [ "$status" -ne 0 ]
 }
 
-# What: budget decision protects a position at or within the budget.
-# Why: shared arithmetic used by both the ordinary-root and the v1.2
+# What: budget decision protects a position at or within bud
+# Why: shared arithmetic used by both ordinary-root & v1.2
 # non-ordinary-version buffer loops; wrong-direction off-by-one here would
 # silently over- or under-protect every package audited.
-# From: Issue #1585.
+# From: Issue #1585
 @test "budget decision protects within budget" {
   run sra_budget_decision 5 5
   [ "$status" -eq 0 ]
   [ "$output" = $'protect\twithin-5' ]
 }
 
-# What: budget decision marks a position beyond the budget would-delete.
-# Why: confirms the off-by-one boundary the "within" case above establishes.
-# From: Issue #1585.
+# What: budget decision marks a position beyond budget would
+# Why: confirms off-by-one boundary "within" case above esta
+# From: Issue #1585
 @test "budget decision marks beyond-budget positions would-delete" {
   run sra_budget_decision 6 5
   [ "$status" -eq 0 ]
   [ "$output" = $'would-delete\tbeyond-5' ]
 }
 
-# What: budget decision fails closed on a non-numeric position or budget.
-# Why: a caller passing a malformed rank must not silently default to a
+# What: budget decision fails closed on a non-numeric positi
+# Why: a caller passing a malformed rank must not silently d
 # spuriously-protective or spuriously-deletable decision.
-# From: Issue #1585.
+# From: Issue #1585
 @test "budget decision fails closed on non-numeric input" {
   run sra_budget_decision "abc" 5
   [ "$status" -ne 0 ]
@@ -702,10 +702,10 @@ EOF
 # Incremental classification cache (v1.2 point 4)
 # ---------------------------------------------------------------------------
 
-# What: the schema declares the cache's primary key and required columns.
-# Why: a pure string check -- catches an accidental column rename/drop
+# What: the schema declares cache's primary key & required c
+# Why: a pure string check -- catches an accidental column r
 # without needing a live sqlite3 invocation.
-# From: Issue #1585.
+# From: Issue #1585
 @test "cache schema declares the version_cache_v2 table with its primary key" {
   run sra_cache_schema_sql
   [ "$status" -eq 0 ]
@@ -715,22 +715,22 @@ EOF
   [[ "$output" == *"history_ref_names TEXT NOT NULL"* ]]
 }
 
-# What: doubles an embedded single quote, SQL's own escape for that literal.
-# Why: every cache write builds its statement string this way -- a wrong
+# What: doubles an embedded single quote, SQL's own escape f
+# Why: every cache write builds its statement string this wa
 # escape here is a SQL-injection-shaped correctness bug, not just cosmetic.
-# From: Issue #1585.
+# From: Issue #1585
 @test "sql quote doubles an embedded single quote" {
   run sra_sql_quote "pr-1's-sha-abc"
   [ "$status" -eq 0 ]
   [ "$output" = "pr-1''s-sha-abc" ]
 }
 
-# What: init/write/read round-trips a real row through a real sqlite3 db.
-# Why: the pure-string/escaping tests above cannot catch a real SQL syntax
+# What: init/write/read round-trips a real row through a rea
+# Why: the pure-string/escaping tests above cannot catch a r
 # error; only an actual sqlite3 invocation can. Skips (not fails) when
 # sqlite3 is unavailable -- expected on a host outside the pinned
 # build-tools container (AG-VAL-016), where this dependency was added.
-# From: Issue #1585.
+# From: Issue #1585
 @test "cache init/write/read round-trips a real row through sqlite3" {
   command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not available on this host"
   db_path="$tmp_dir/cache.db"
@@ -751,11 +751,11 @@ EOF
   [[ "$output" == *"rank:7"* ]]
 }
 
-# What: an inherited old-schema cache db does not break a new-schema write.
-# Why: a restored actions/cache blob can predate the version_cache_v2
+# What: an inherited old-schema cache db does not break a ne
+# Why: a restored actions/cache blob can predate version_cac
 # rename; CREATE TABLE IF NOT EXISTS must not be fooled by an old table of
 # the same old name, and a real deployment must self-heal, not warn forever.
-# From: Issue #1095.
+# From: Issue #1095
 @test "cache write self-heals against an inherited old-schema database" {
   command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not available on this host"
   db_path="$tmp_dir/cache.db"
@@ -773,10 +773,10 @@ EOF
   [[ "$output" == *"sha-abc1234"* ]]
 }
 
-# What: a cache write with no history fingerprint argument fails closed.
-# Why: history_fingerprint is a required column, not optional -- a caller
+# What: a cache write with no history fingerprint argument f
+# Why: history_fingerprint is a required column, not optiona
 # that forgets it must get a loud failure, never a silently written row.
-# From: Issue #1095.
+# From: Issue #1095
 @test "cache write fails closed without a history fingerprint argument" {
   command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not available on this host"
   db_path="$tmp_dir/cache.db"
@@ -788,21 +788,21 @@ EOF
   [ "$status" -ne 0 ]
 }
 
-# What: a fresh, never-initialized database path is a clean read miss.
-# Why: this is the exact "cache miss falls back to a full scan" case the
+# What: a fresh, never-initialized database path is a clean
+# Why: this is exact "cache miss falls back to a full scan"
 # v1.2 plan calls its own required self-verification -- must degrade,
 # never error the caller.
-# From: Issue #1585.
+# From: Issue #1585
 @test "cache read on a nonexistent database fails closed without erroring the caller" {
   command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not available on this host"
   run sra_cache_read_package "$tmp_dir/does-not-exist.db" "proxy" "origin/current_dev@$(printf 'c%.0s' {1..40})"
   [ "$status" -ne 0 ]
 }
 
-# What: re-writing the same (package, version_id, fingerprint) replaces.
-# Why: INSERT OR REPLACE is load-bearing -- a version reclassified again
+# What: re-writing same (package, version_id, fingerprint) r
+# Why: INSERT OR REPLACE is load-bearing -- a version reclas
 # under the same ref set must overwrite its stale row, not duplicate it.
-# From: Issue #1585 | Issue #1095.
+# From: Issue #1585 | Issue #1095
 @test "cache write replaces an existing row for the same package, version id, and fingerprint" {
   command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not available on this host"
   db_path="$tmp_dir/cache.db"
@@ -826,11 +826,11 @@ EOF
   [[ "$output" != *"old-tag"* ]]
 }
 
-# What: two callers with different fingerprints keep independent rows.
-# Why: this is the property that makes cross-caller sharing safe instead of
+# What: two callers with different fingerprints keep indepen
+# Why: this is property that makes cross-caller sharing safe
 # each caller's write evicting the other's -- a read for one fingerprint
 # must never see the other's row for the same version id.
-# From: Issue #1095.
+# From: Issue #1095
 @test "cache rows for different history fingerprints coexist and do not evict each other" {
   command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not available on this host"
   db_path="$tmp_dir/cache.db"
@@ -857,12 +857,12 @@ EOF
   [[ "$output" == *"rank:3"* ]]
 }
 
-# What: a same-ref-name-set generation is pruned when its exact fingerprint
+# What: a same-ref-name-set generation is pruned when its ex
 # changes (tip advance), but a different caller's generation is untouched.
-# Why: without pruning, every tip advance adds a permanent new generation
+# Why: without pruning, every tip advance adds a permanent n
 # instead of replacing the prior one from the same caller -- unbounded
 # growth; pruning must not cross ref-name-set boundaries.
-# From: Issue #1095.
+# From: Issue #1095
 @test "cache write prunes a superseded same-caller generation but not a different caller's" {
   command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not available on this host"
   db_path="$tmp_dir/cache.db"
@@ -896,10 +896,10 @@ EOF
   [[ "$output" == *"old-tag"* ]]
 }
 
-# What: the fingerprint differs when the managed ref set changes.
-# Why: this is the mechanism the v1.2 cache's ref-set safety depends on --
+# What: the fingerprint differs when managed ref set changes
+# Why: this is mechanism v1.2 cache's ref-set safety depends
 # it must actually change, not just exist unused.
-# From: Issue #1095.
+# From: Issue #1095
 @test "history refs fingerprint changes when the ref set changes" {
   git_dir="$tmp_dir/repo"
   git init -q "$git_dir"
@@ -927,17 +927,17 @@ EOF
   [[ "$wide_fingerprint" == *"origin/master@"* ]]
 
   # What: the same ref set, recomputed, is byte-identical.
-  # Why: stable across repeated same-input runs, not just "usually similar."
-  # From: Issue #1095.
+  # Why: stable across repeated same-input runs, not just "u
+  # From: Issue #1095
   run sra_history_refs_fingerprint "$git_dir" origin/current_dev
   [ "$status" -eq 0 ]
   [ "$output" = "$narrow_fingerprint" ]
 }
 
-# What: an unresolvable ref, or an empty ref list, fails closed.
-# Why: mirrors the fail-closed style already used by sra_budget_decision --
+# What: an unresolvable ref, or an empty ref list, fails clo
+# Why: mirrors fail-closed style already used by sra_budget_
 # never silently proceed with an empty/partial fingerprint.
-# From: Issue #1095.
+# From: Issue #1095
 @test "history refs fingerprint fails closed on an unknown ref or an empty ref list" {
   git_dir="$tmp_dir/repo"
   git init -q "$git_dir"
@@ -954,23 +954,23 @@ EOF
   [ "$status" -ne 0 ]
 }
 
-# What: the classification cache read passes history_fingerprint, not just
+# What: the classification cache read passes history_fingerp
 # package, before trusting any cached row.
-# Why: a structural regression check -- catches a future edit that
+# Why: a structural regression check -- catches a future edi
 # reintroduces the fixed gap by dropping this argument.
-# From: Issue #1095.
+# From: Issue #1095
 @test "gc-sha-retention-audit.sh passes the history fingerprint into the cache read" {
   run grep -F 'sra_cache_read_package "$cache_db" "$package" "$history_fingerprint"' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh"
   [ "$status" -eq 0 ]
 }
 
-# What: rollback anchors must precede tag/history classification for every class.
-# Why: metadata stack roots now use the same bounded history policy instead
+# What: rollback anchors must precede tag/history classifica
+# Why: metadata stack roots now use same bounded history pol
 # of an unconditional class exemption, but rollback remains absolute.
 # From: Issue #1095 | PR #1586
-# What: rollback anchor checks (now two call sites, live-Dockerfile-digest
+# What: rollback anchor checks (now two call sites, live-Doc
 # reuse of the same helper) must all precede tag/history classification.
-# Why: reusing sra_digest_is_rollback_anchor for both the maintainer-curated
+# Why: reusing sra_digest_is_rollback_anchor for both mainta
 # anchors and the newly-discovered live FROM digests means a single-match
 # assumption here no longer holds -- every call site found must
 # independently precede facts_line, not just exactly one of them.
@@ -991,9 +991,9 @@ EOF
   [ "$status" -eq 1 ]
 }
 
-# What: a truly untagged rootless version (other_count==0) must still emit an
+# What: a truly untagged rootless version (other_count==0) m
 # unconditional protect BEFORE the v1.2 buffer-candidate line is reachable.
-# Why: a completely untagged version (the common case for a manifest list's
+# Why: a completely untagged version (the common case for a
 # own untagged amd64/arm64 platform children) must never share the
 # channel_buffer_versions buffer with a version that has an unrecognized tag
 # FORMAT -- doing so would make a live-manifest platform child a
@@ -1005,7 +1005,7 @@ EOF
 # orchestrator's own live GHCR pagination is not mocked here); it can only
 # assert source-code shape, not runtime behavior -- see the plan's own
 # request for real CI verification.
-# From: Issue #1585.
+# From: Issue #1585
 @test "gc-sha-retention-audit.sh protects a truly untagged rootless version before any buffer routing" {
   untagged_protect_line="$(grep -n 'root_count == 0 && other_count == 0' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh" | cut -d: -f1)"
   buffer_write_line="$(grep -n '>>"\$other_tag_candidates"' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh" | head -1 | cut -d: -f1)"
@@ -1014,8 +1014,8 @@ EOF
   [ "$untagged_protect_line" -lt "$buffer_write_line" ]
 }
 
-# What: filtered mode is the package-parallel planner entry point used by GC.
-# Why: it must exist without adding DELETE capability to the audit itself.
+# What: filtered mode is package-parallel planner entry poin
+# Why: it must exist without adding DELETE capability to aud
 # From: Issue #1095 | PR #1586
 @test "gc-sha-retention-audit.sh exposes a read-only package filter and reusable snapshot for GC workers" {
   run grep -F 'SRA_PACKAGE_FILTER' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh"
@@ -1026,8 +1026,8 @@ EOF
   [ "$status" -eq 0 ]
 }
 
-# What: audit concurrency rejects zero before any registry request can run.
-# Why: an invalid worker bound must fail closed instead of disabling the audit
+# What: audit concurrency rejects zero before any registry r
+# Why: an invalid worker bound must fail closed instead of d
 # loop or creating an unbounded package fan-out.
 # From: Issue #1585
 @test "gc-sha-retention-audit.sh rejects invalid package concurrency" {
@@ -1037,8 +1037,8 @@ EOF
   [[ "$output" == *"SRA_CONCURRENCY must be a positive integer"* ]]
 }
 
-# What: package workers use bounded batches and file-backed result handoff.
-# Why: background shells cannot return audit output, failure state, or observed
+# What: package workers use bounded batches & file-backed re
+# Why: background shells cannot return audit output, failure
 # rollback anchors through parent variables; all three channels must survive.
 # From: Issue #1585
 @test "gc-sha-retention-audit.sh preserves concurrent worker results" {
@@ -1051,8 +1051,8 @@ EOF
   [ "$status" -eq 0 ]
 }
 
-# What: retention audit code and workflow contain no destructive package path.
-# Why: the read-only audit surface must remain structurally incapable of
+# What: retention audit code & workflow contain no destructi
+# Why: the read-only audit surface must remain structurally
 # package deletion, verified by grepping for any DELETE-capable pattern.
 # From: Issue #1585 | PR #1586
 @test "retention audit code and workflow contain no destructive package path" {
@@ -1066,14 +1066,14 @@ EOF
 
 # --- Live Dockerfile FROM-digest protection ---------------------------
 #
-# What: extends rollback_anchors so a digest six migrated service Dockerfiles
+# What: extends rollback_anchors so a digest six migrated se
 # actively build FROM is protected too, without a maintainer-curated entry.
-# Why: the utilities image's digest had zero protection once it fell out of
+# Why: the utilities image's digest had zero protection once
 # the nightly channel's rolling window (thread PRRT_kwDOS--bIM6a9N8R).
 # From: Issue #1613
 
-# What: the digest extractor returns a plain FROM line's digest.
-# Why: baseline case -- the shape every migrated service Dockerfile uses.
+# What: the digest extractor returns a plain FROM line's dig
+# Why: baseline case -- shape every migrated service Dockerf
 # From: Issue #1613
 @test "dockerfile digest extractor returns a plain FROM line's digest" {
   content=$'FROM ghcr.io/wiki-mod/lancache-ng/utilities@sha256:'"$(printf 'a%.0s' {1..64})"$'\n'
@@ -1082,8 +1082,8 @@ EOF
   [ "$output" = "sha256:$(printf 'a%.0s' {1..64})" ]
 }
 
-# What: the extractor covers a lowercase instruction and a --platform= flag.
-# Why: Docker's own grammar allows both (Rule-Ref: AG-VAL-036) -- a matcher
+# What: the extractor covers a lowercase instruction & a --p
+# Why: Docker's own grammar allows both (Rule-Ref: AG-VAL-03
 # covering only the one concrete shape in mind misses real, valid Dockerfiles.
 # From: Issue #1613
 @test "dockerfile digest extractor covers lowercase 'from' and a --platform flag" {
@@ -1093,8 +1093,8 @@ EOF
   [ "$output" = "sha256:$(printf 'b%.0s' {1..64})" ]
 }
 
-# What: the extractor ignores a tag-only FROM line and returns nothing for it.
-# Why: a mutable-tag FROM (no digest) has no digest to protect via this path.
+# What: the extractor ignores a tag-only FROM line & returns
+# Why: a mutable-tag FROM (no digest) has no digest to prote
 # From: Issue #1613
 @test "dockerfile digest extractor ignores a tag-only FROM line" {
   run sra_dockerfile_from_digests $'FROM alpine:3.24\n'
@@ -1102,8 +1102,8 @@ EOF
   [ "$output" = "" ]
 }
 
-# What: the extractor returns every digest, one per line, for multiple stages.
-# Why: a multi-stage build (builder + final) commonly pins two different
+# What: the extractor returns every digest, one per line, fo
+# Why: a multi-stage build (builder + final) commonly pins t
 # digests, both of which must be protected, not just the last one seen.
 # From: Issue #1613
 @test "dockerfile digest extractor returns one line per FROM stage" {
@@ -1114,9 +1114,9 @@ EOF
   [ "${lines[1]}" = "sha256:$(printf 'd%.0s' {1..64})" ]
 }
 
-# What: the orchestrator checks live-Dockerfile protection before tag/history
+# What: the orchestrator checks live-Dockerfile protection b
 # classification, reusing sra_digest_is_rollback_anchor for both sets.
-# Why: proves the extension reuses the existing mechanism (maintainer
+# Why: proves extension reuses existing mechanism (maintaine
 # decision) rather than adding a second, parallel deletion-protection path.
 # From: Issue #1613
 @test "gc-sha-retention-audit.sh checks live Dockerfile FROM digests before tag/history classification, reusing the rollback-anchor check" {
@@ -1131,9 +1131,9 @@ EOF
   [ "$live_line" -lt "$facts_line" ]
 }
 
-# What: the orchestrator discovers Dockerfiles via git ls-files, not a raw
+# What: the orchestrator discovers Dockerfiles via git ls-fi
 # filesystem walk.
-# Why: keeps discovery scoped to tracked files, matching how every other
+# Why: keeps discovery scoped to tracked files, matching how
 # repo-wide scan in this project's CI scripts already works.
 # From: Issue #1613
 @test "gc-sha-retention-audit.sh discovers live Dockerfiles via git ls-files" {
@@ -1141,8 +1141,8 @@ EOF
   [ "$status" -eq 0 ]
 }
 
-# What: a real repository digest-pinned FROM dependency is discovered.
-# Why: proves the discovery loop finds a concrete digest, not only a
+# What: a real repository digest-pinned FROM dependency is d
+# Why: proves discovery loop finds a concrete digest, not on
 #   synthetic fixture -- the alpine base image, per Rule-Ref: AG-KD-010,
 #   now that utilities itself is no longer digest-pinned.
 # From: Issue #1613 | PR #1687

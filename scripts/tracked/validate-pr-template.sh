@@ -23,9 +23,7 @@
 set -euo pipefail
 
 # What: Exits 0 (explicit pass) for a dependabot[bot]-authored PR.
-# Why: Dependabot only writes its own fixed dependency-bump description and
-# can never fill in this repo's custom template sections; an explicit pass
-# keeps this a real reported success for the required-status-check gate.
+# Why: Dependabot can't fill template; explicit pass needed for CI.
 # From: PR #1064
 if [ "${PR_AUTHOR:-}" = "dependabot[bot]" ]; then
     echo "PR template validation skipped: PR authored by dependabot[bot], which cannot fill in this repo's custom template body."
@@ -49,10 +47,8 @@ else
     exit 1
 fi
 
-# What: Strips CRLF line endings from the fetched PR body before parsing.
-# Why: A trailing `\r` breaks section_exists_with_content()'s end-anchored
-# awk pattern on an awk build that doesn't normalize CRLF itself (e.g.
-# `mawk`, this project's runner default) -- confirmed live on PR #881.
+# What: Strips CRLF line endings from PR body before parsing.
+# Why: Trailing \r breaks awk end-anchored pattern on mawk.
 # From: PR #909
 pr_body="${pr_body//$'\r'/}"
 
@@ -64,8 +60,7 @@ pr_draft="${PR_DRAFT:-false}"
 # Derived from .github/pull_request_template.md sections.
 #
 # What: "Linked Issues" is required and non-empty for non-draft PRs.
-# Why: current-dev-auto-close.yml now scans only this exact section for
-# closing keywords, so it must be structurally mandatory, not assumed.
+# Why: Auto-close workflow scans this exact section for closing.
 # From: Issue #1496
 declare -a required_sections=(
     "Summary"
@@ -94,9 +89,7 @@ section_exists_with_content() {
     local body="$2"
 
     # What: Searches via a here-string, not `echo "$body" | grep`.
-    # Why: Under `set -o pipefail`, a large `$body` plus awk's `exit` below
-    # can SIGPIPE the echo mid-write, non-deterministically failing the
-    # pipeline -- confirmed live. A here-string has no such race.
+    # Why: Avoids SIGPIPE when awk exits mid-pipeline with pipefail.
     # From: PR #627
     if ! grep -qF "## $section" <<<"$body"; then
         return 1

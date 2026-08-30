@@ -2,11 +2,9 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: enforces AG-CI-021's three .github/workflows/*.yml size ceilings.
-# Why: GitHub silently drops pull_request runs above a whole-file
-# byte/line threshold, and actionlint's embedded shellcheck hangs above a
-# separate per-run:-block byte threshold; both are bisected, not invented.
-# From: Issue #1095 | Issue #1535
+# What: Enforces three .github/workflows size ceiling limits.
+# Why: GitHub drops runs above limit; actionlint hangs on blocks.
+# From: Issue #1535 | PR #1575
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -14,27 +12,23 @@ repo_root=$(cd "$script_dir/../.." && pwd)
 target_root="${1:-$repo_root}"
 cd "$target_root"
 
-# What: whole-file line ceiling.
-# Why: GitHub creates zero pull_request runs for a self-modifying workflow
-# file above ~9000 lines; 8999 is the maintainer's own bisected reference.
+# What: Whole-file line ceiling.
+# Why: GitHub drops self-modifying workflows above ~9000 lines.
 # From: Issue #1095
 MAX_WORKFLOW_LINES="${MAX_WORKFLOW_LINES:-8999}"
 
-# What: whole-file byte ceiling, independent of MAX_WORKFLOW_LINES.
-# Why: tracks the same GitHub dispatch cliff for a file whose line lengths
-# differ from the bisected reference file's.
+# What: Whole-file byte ceiling limit.
+# Why: Tracks GitHub dispatch cliff across varying line lengths.
 # From: Issue #1095
 MAX_WORKFLOW_BYTES="${MAX_WORKFLOW_BYTES:-512000}"
 
-# What: per-run:-block byte ceiling, a distinct dimension from the two above.
-# Why: actionlint's embedded shellcheck hangs on a single run: block above
-# ~75440-75465 bytes, independent of whole-file size.
+# What: Per-run block byte ceiling limit.
+# Why: actionlint's shellcheck hangs on large per-block bytes.
 # From: Issue #1535
 MAX_RUN_BLOCK_BYTES="${MAX_RUN_BLOCK_BYTES:-74000}"
 
-# What: extracts each run: block-scalar's byte span as <line>\t<bytes>.
-# Why: a shared function avoids re-deriving the indentation walk at each
-# call site (AG-CODE-011/AG-CODE-013 reuse point).
+# What: Extracts run block-scalar byte spans for measurement.
+# Why: Shared function avoids re-deriving indentation logic.
 # From: Issue #1535
 measure_run_blocks() {
     local file="$1"
@@ -47,9 +41,8 @@ measure_run_blocks() {
             if (started) {
                 printf "%d\t%d\n", block_start, block_bytes
             }
-            # What: also resets started, not just in_block.
-            # Why: leaving started=1 after a mid-file flush makes the
-            # trailing END block call flush_block() a second time.
+            # What: Resets started flag in addition to in_block.
+            # Why: Leaving started=1 causes flush_block() to be called twice.
             # From: Issue #1535
             in_block = 0
             started = 0
@@ -78,10 +71,8 @@ measure_run_blocks() {
                     block_bytes += length(line) + 1
                     next
                 }
-                # What: flushes the block, then re-checks this same line as
-                # a possible new header.
-                # Why: indentation dropped to/below the parent level, so
-                # the block scalar ended here.
+                # What: Flushes block, re-checks line as possible header.
+                # Why: Indentation dropped; block scalar ended here.
                 # From: Issue #1535
                 flush_block()
             }
@@ -95,10 +86,8 @@ measure_run_blocks() {
                 in_block = 1
                 block_start = NR + 1
                 block_bytes = 0
-                # What: uses a fixed content indent when an explicit digit
-                # indicator is present, instead of auto-detecting it.
-                # Why: an all-blank-first-lines block would otherwise be
-                # mis-detected as empty.
+                # What: Uses fixed indent when digit indicator present.
+                # Why: Avoids mis-detecting all-blank-first-lines blocks.
                 # From: Issue #1535
                 if (digit != "") {
                     started = 1
@@ -113,11 +102,9 @@ measure_run_blocks() {
     ' "$file"
 }
 
-# What: collects every offending .github/workflows/*.yml file/block across
-# all three ceilings above, one pass per file.
-# Why: a single loop keeps the three independent checks (line count, byte
-# count, run: block bytes) applied consistently to the same file list.
-# From: Issue #1095 | Issue #1535
+# What: Collects offending workflow files/blocks across ceilings.
+# Why: Single loop applies three checks consistently per file.
+# From: Issue #1535 | PR #1575
 line_offenders=()
 byte_offenders=()
 run_block_offenders=()
@@ -130,10 +117,8 @@ while IFS= read -r -d '' file; do
     if [ "$bytes" -gt "$MAX_WORKFLOW_BYTES" ]; then
         byte_offenders+=("$file:$bytes")
     fi
-    # What: captures measure_run_blocks output into a variable, checked
-    # for a non-zero exit, before consuming it via a here-string.
-    # Why: a process-substitution failure is invisible to set -e; feeding
-    # the loop directly would silently report zero blocks (AG-INT-002).
+    # What: Captures measure_run_blocks output before consuming it.
+    # Why: Process-substitution failures are invisible to set -e.
     # From: Issue #1535
     if ! block_report=$(measure_run_blocks "$file"); then
         echo "check-workflow-line-limit: failed to analyze run: blocks in $file (awk exited non-zero)" >&2
@@ -147,10 +132,9 @@ while IFS= read -r -d '' file; do
     done <<< "$block_report"
 done < <(find .github/workflows -maxdepth 1 -name '*.yml' -print0)
 
-# What: reports every collected offender, then exits non-zero.
-# Why: a single combined report (rather than exiting on the first hit)
-# lets one CI run show every violation instead of one per push.
-# From: Issue #1095 | Issue #1535
+# What: Reports collected offenders and exits non-zero.
+# Why: Single report shows all violations instead of one per push.
+# From: Issue #1535 | PR #1575
 if [ "${#line_offenders[@]}" -gt 0 ] || [ "${#byte_offenders[@]}" -gt 0 ] || [ "${#run_block_offenders[@]}" -gt 0 ]; then
     if [ "${#line_offenders[@]}" -gt 0 ]; then
         echo "Workflow file(s) over the ${MAX_WORKFLOW_LINES}-line hard limit:" >&2
@@ -174,11 +158,9 @@ if [ "${#line_offenders[@]}" -gt 0 ] || [ "${#byte_offenders[@]}" -gt 0 ] || [ "
             echo "  ${f} (block starting at line ${block_line}, ${block_bytes} bytes)" >&2
         done
     fi
-    # What: prints one human-readable explanation for whichever ceiling(s)
-    # were exceeded above.
-    # Why: a CI reader needs the fix direction (split, don't raise the
-    # limit), not just a bare offender list.
-    # From: Issue #1095 | Issue #1535
+    # What: Prints explanation for exceeded ceiling(s).
+    # Why: CI reader needs fix direction; don't just list offenders.
+    # From: Issue #1535 | PR #1575
     echo "" >&2
     echo "The line/byte limits exist because GitHub silently stops dispatching" >&2
     echo "pull_request runs for a workflow file that modifies itself past some" >&2

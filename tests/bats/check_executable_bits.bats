@@ -1,11 +1,9 @@
 #!/usr/bin/env bats
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: coverage for scripts/tracked/check-executable-bits.sh, the CI guard
-# for a bare-path/non-executable script or .githooks/ hook.
-# Why: every scenario commits fixture files at deterministic modes and
-# invokes the guard via `bash "$script"`, never bare `run` (AG-VAL-024).
-# From: Issue #1019 | Issue #1095 | PR #1501.
+# What: coverage for check-executable-bits.sh, the CI guard.
+# Why: every scenario invokes the guard via bash, not run.
+# From: Issue #1019 | PR #1501
 
 setup() {
     script="$BATS_TEST_DIRNAME/../../scripts/tracked/check-executable-bits.sh"
@@ -18,11 +16,9 @@ setup() {
     git -C "$fixture" config commit.gpgsign false
 }
 
-# What: add_script() creates a script under the fixture, staged executable
-# or not.
-# Why: `update-index --chmod` sets the committed mode deterministically,
-# independent of the fixture's umask or host's core.filemode.
-# From: Issue #1019 | Issue #1095 | PR #1501.
+# What: add_script() stages a script, executable or not.
+# Why: update-index --chmod sets mode deterministically.
+# From: Issue #1019 | PR #1501
 add_script() {
     local rel="$1" want_exec="$2"
     mkdir -p "$fixture/$(dirname "$rel")"
@@ -35,11 +31,9 @@ add_script() {
     fi
 }
 
-# What: write_workflow() writes a minimal single-step workflow whose run:
-# block contains the given shell line, and stages it.
-# Why: a real workflow file, not a synthetic string, exercises the guard's
-# actual YAML `run:` parsing path end to end.
-# From: Issue #1019 | Issue #1095 | PR #1501.
+# What: write_workflow() writes and stages a run: workflow.
+# Why: a real file exercises the guard's YAML parsing path.
+# From: Issue #1019 | PR #1501
 write_workflow() {
     local body="$1"
     cat > "$fixture/.github/workflows/ci.yml" <<EOF
@@ -239,9 +233,9 @@ EOF
     [[ "$output" == *"ui-nats-dns-integration-simulation.sh"* ]]
 }
 
-# What: the four tests below cover the YAML `run:` block-scalar parser
-# rewrite.
-# From: Issue #1095 | PR #1501.
+# What: four tests below cover the run: block-scalar parser.
+# Why: block-scalar YAML needs its own parsing coverage.
+# From: Issue #1019 | PR #1501
 @test "does not treat a workflow paths filter entry as a script invocation" {
     # `on.*.paths` is YAML configuration data, not shell content. A path that
     # happens to name a non-executable script must not be classified as a

@@ -2,10 +2,10 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: Regression tests for setup.sh's cmd_secondary(): the generated
+# What: Regression tests for setup.sh's cmd_secondary(): gen
 #   secondary docker-compose.yml, and the register_secondary JSON request
 #   body sent to the primary.
-# Why: guards a docker-compose.yml healthcheck block that regressed
+# Why: guards a docker-compose.yml healthcheck block that re
 #   twice, and a printf-built JSON body against unescaped '"'/'\'
 #   corrupting its structure.
 # From: Issues #652, #946, #955 | PRs #976, #982, #1561
@@ -15,9 +15,9 @@ bats_require_minimum_version 1.5.0
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
 
-    # What: Mocks curl for the register_secondary tests; logs stdin bytes
+    # What: Mocks curl for register_secondary tests; logs st
     #   received, and can simulate failure via MOCK_CURL_FAIL.
-    # Why: the real call sends the JSON body via `-d @-` (stdin), not
+    # Why: the real call sends JSON body via `-d @-` (stdin)
     #   argv, so the mock must read stdin to assert on bytes sent.
     # From: Issue #955 | PR #982
     mock_bin="$BATS_TEST_TMPDIR/mock-bin"
@@ -48,7 +48,7 @@ MOCK
 # What: Extracts the heredoc body cmd_secondary() writes to
 #   ${secondary_dir}/docker-compose.yml -- from write_generated_runtime_file
 #   (exclusive) through the closing bare "EOF" (exclusive).
-# Why: shared by both tests below so the extraction logic can't silently
+# Why: shared by both tests below so extraction logic can't
 #   diverge between them, as it briefly did before this helper existed.
 # From: PR #981
 extract_cmd_secondary_heredoc() {
@@ -64,10 +64,10 @@ extract_cmd_secondary_heredoc() {
     ' "$repo_root/setup.sh"
 }
 
-# What: Extracts the "Registering secondary" fragment (escaping,
+# What: Extracts "Registering secondary" fragment (escaping,
 #   JSON-body printf, curl call/die guard) verbatim from setup.sh, bounded
 #   by its print_step banner and the closing `fi`.
-# Why: capturing by content marker instead of a hand copy means an edit
+# Why: capturing by content marker instead of a hand copy me
 #   to the real code is exercised here, not a stale duplicate.
 # From: Issue #1558 | PR #1561
 extract_register_secondary_fragment() {
@@ -78,9 +78,9 @@ extract_register_secondary_fragment() {
     ' "$repo_root/setup.sh"
 }
 
-# What: Runs the extracted fragment in a fresh bash -c child with
+# What: Runs extracted fragment in a fresh bash -c child wit
 #   $token/$name/$listen_ip/$primary set and print_step/die stubbed.
-# Why: a real child process (not sourcing into the test shell) reproduces
+# Why: a real child process (not sourcing into test shell) r
 #   the fragment's `local`/EXIT-trap behavior as it runs in cmd_secondary().
 # From: Issue #1558 | PR #1561
 run_register_secondary_fragment() {
@@ -90,9 +90,9 @@ run_register_secondary_fragment() {
     fragment="$(extract_register_secondary_fragment)"
     [[ -n "$fragment" ]] || return 91
 
-    # What: Wraps the fragment in a real function (via eval) rather than
+    # What: Wraps fragment in a real function (via eval) rat
     #   loose top-level statements.
-    # Why: bash's `local` errors outside a function; OUT_STATUS/
+    # Why: bash's `local` errors outside a function; OUT_STA
     #   OUT_RESPONSE stay non-local so they survive after the fragment's
     #   own local-scoped vars go out of scope.
     bash -c '
@@ -139,9 +139,9 @@ run_cmd_secondary_full() {
 }
 
 @test "cmd_secondary heredoc in setup.sh contains healthcheck block" {
-    # What: Asserts the generated secondary docker-compose.yml heredoc
+    # What: Asserts generated secondary docker-compose.yml h
     #   includes a healthcheck block, in the right position.
-    # Why: this block is critical for PowerDNS health detection in
+    # Why: this block is critical for PowerDNS health detect
     #   production and had silently regressed out of the heredoc before.
     # From: Issue #652
 
@@ -153,10 +153,10 @@ run_cmd_secondary_full() {
     echo "$extracted_heredoc" | grep -q "healthcheck:" \
         || fail "healthcheck: block missing"
 
-    # What: Asserts the heredoc emits the real dig query/response probe
+    # What: Asserts heredoc emits real dig query/response pr
     #   (AG-VAL-018) and explicitly rejects the old bare `rec_control
     #   ping` probe (liveness only, AG-VAL-019).
-    # Why: asserting both presence and absence makes a partial revert
+    # Why: asserting both presence & absence makes a partial
     #   (e.g. merging an older heredoc back in) fail loudly.
     # From: Issue #946 | PR #976
     echo "$extracted_heredoc" | grep -qF 'test: ["CMD-SHELL", "dig @127.0.0.1 content1.steampowered.com A +short +time=2 +tries=1 | grep -q ."]' \
@@ -206,10 +206,10 @@ run_cmd_secondary_full() {
 }
 
 @test "cmd_secondary gives an actionable message for the issue #866 HTTP 503 refusal" {
-    # What: Asserts cmd_secondary's HTTP 503 branch gives an actionable,
+    # What: Asserts cmd_secondary's HTTP 503 branch gives an
     #   NATS-specific message instead of the generic 4xx "verify
     #   token/name/logs" message.
-    # Why: register_secondary refuses (503) when the primary has neither
+    # Why: register_secondary refuses (503) when primary has
     #   NATS_BIND_IP nor NATS_ADVERTISE_URL configured -- a primary-side
     #   config gap the operator can't fix via their own CLI arguments.
     # From: Issue #866 | PR #881
@@ -228,9 +228,9 @@ run_cmd_secondary_full() {
 }
 
 @test "cmd_secondary's 503 recreate example includes --env-file .env.local for the .env.local case" {
-    # What: Asserts the 503 message's recreate example includes
+    # What: Asserts 503 message's recreate example includes
     #   --env-file .env.local.
-    # Why: Compose only auto-loads the default .env, never .env.local; a
+    # Why: Compose only auto-loads default .env, never .env.
     #   recreate command missing this flag leaves
     #   docker-compose.nats-secondary.yml's NATS_BIND_IP guard unset, so
     #   NATS never gets recreated with the override applied.
@@ -240,10 +240,10 @@ run_cmd_secondary_full() {
 }
 
 @test "cmd_secondary heredoc body stays in sync with the checked-in deploy/secondary/docker-compose.yml reference" {
-    # What: Diffs the heredoc's entire generated body (from `services:`
+    # What: Diffs heredoc's entire generated body (from `ser
     #   onward) against the checked-in deploy/secondary/docker-compose.yml
     #   reference.
-    # Why: that reference file's own header claims "do not edit
+    # Why: that reference file's own header claims "do not e
     #   manually," but PR #876 hand-edited it instead of the heredoc,
     #   leaving the two silently diverged.
     # From: Issue #946 | PR #976
@@ -252,9 +252,9 @@ run_cmd_secondary_full() {
     heredoc_body=$(extract_cmd_secondary_heredoc) \
         || skip "Could not find cmd_secondary heredoc start"
 
-    # What: Un-escapes the heredoc's literal `\$`/`` \` `` back to
+    # What: Un-escapes heredoc's literal `\$`/`` \` `` back
     #   `$`/`` ` `` before diffing.
-    # Why: the heredoc is unquoted (<<EOF), so setup.sh must backslash-
+    # Why: the heredoc is unquoted (<<EOF), so setup.sh must
     #   escape those characters to survive heredoc expansion at
     #   generation time; the reference file contains them unescaped.
     heredoc_body=$(echo "$heredoc_body" | sed -e 's/\\\$/$/g' -e 's/\\`/`/g')
@@ -266,9 +266,9 @@ run_cmd_secondary_full() {
 }
 
 @test "cmd_secondary's registration POST sends the token via stdin, not argv" {
-    # What: Asserts the registration POST reads its JSON body from stdin
+    # What: Asserts registration POST reads its JSON body fr
     #   (`-d @-`), never as a literal `-d "..."` argument.
-    # Why: an argv-passed token stays visible in this process's argv for
+    # Why: an argv-passed token stays visible in this proces
     #   the whole request (readable via `ps`/`/proc/<pid>/cmdline`) --
     #   same exposure class kea_ctrl_post's Basic-Auth fix closed.
     # From: Issue #955 | PR #982
@@ -284,10 +284,10 @@ run_cmd_secondary_full() {
 }
 
 @test "cmd_secondary collects all missing required arguments and reports them together" {
-    # What: Asserts cmd_secondary reports all missing required arguments
+    # What: Asserts cmd_secondary reports all missing requir
     #   (--primary, --token, --name, --proxy-ip) together, not just the
     #   first one found.
-    # Why: matches the pattern already used for collecting missing fields
+    # Why: matches pattern already used for collecting missi
     #   from the primary server's response; avoids forcing the operator
     #   to re-run the command once per missing argument.
     # From: PR #984
@@ -315,9 +315,9 @@ run_cmd_secondary_full() {
         || fail "cmd_secondary does not report all missing arguments together"
 }
 
-# What: proves the current escaping in setup.sh keeps the JSON body valid
+# What: proves current escaping in setup.sh keeps JSON body
 #   for a token containing a double-quote and backslash.
-# Why: the historical bug was an unescaped '"' corrupting the JSON
+# Why: the historical bug was an unescaped '"' corrupting JS
 #   structure; if escaping regresses, `jq empty` below fails the same way
 #   it does against the raw pre-fix body in the next test.
 # From: Issue #1558 | PR #1561
@@ -335,9 +335,9 @@ run_cmd_secondary_full() {
     [ "$output" = "true" ]
 }
 
-# What: reproduces the pre-fix corrupted JSON body directly, bypassing
+# What: reproduces pre-fix corrupted JSON body directly, byp
 #   the fix.
-# Why: proves the previous test's `jq empty` failure is a meaningful
+# Why: proves previous test's `jq empty` failure is a meanin
 #   assertion, not one that would fail regardless of escaping.
 # From: Issue #1558 | PR #1561
 @test "an unescaped JSON body (pre-fix shape) genuinely fails to parse for the same malicious token" {
@@ -346,9 +346,9 @@ run_cmd_secondary_full() {
     [ "$status" -ne 0 ]
 }
 
-# What: asserts a backslash-only value (no quote) also survives
+# What: asserts a backslash-only value (no quote) also survi
 #   escaping.
-# Why: the sed idiom escapes backslash and quote independently and order
+# Why: the sed idiom escapes backslash & quote independently
 #   matters -- escaping the quote first would double-escape a backslash
 #   introduced by that step.
 # From: Issue #1558 | PR #1561
@@ -364,9 +364,9 @@ run_cmd_secondary_full() {
     [ "$output" = "true" ]
 }
 
-# What: asserts ordinary values with no special characters round-trip
+# What: asserts ordinary values with no special characters r
 #   unchanged.
-# Why: confirms the escaping fix does not alter behavior for the common
+# Why: confirms escaping fix does not alter behavior for com
 #   case.
 # From: Issue #1558 | PR #1561
 @test "register_secondary JSON body is unchanged for ordinary values with no special characters" {
@@ -379,9 +379,9 @@ run_cmd_secondary_full() {
     [ "$(cat "$status_out")" = "200" ]
 }
 
-# What: asserts a curl transport failure still fails closed via the
+# What: asserts a curl transport failure still fails closed
 #   fragment's own die guard.
-# Why: unrelated to the escaping fix itself -- confirms the extraction
+# Why: unrelated to escaping fix itself -- confirms extracti
 #   didn't accidentally drop that error path.
 # From: Issue #1558 | PR #1561
 @test "register_secondary fragment fails closed via die when curl cannot connect" {

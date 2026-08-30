@@ -41,7 +41,7 @@ pub async fn logs_page(
     let mut ctx = Context::new();
     ctx.insert("active_page", "logs");
     // What: makes the beambar's restart-ui form's token valid here
-    // Why: base.html now renders that form on every page (was dashboard-only)
+    // Why: renders form on every page (was dashboard-only)
     // From: Issue #1437
     crate::routes::insert_csrf_token(&mut ctx, &headers);
 

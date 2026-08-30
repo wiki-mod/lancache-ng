@@ -2,17 +2,13 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: Read via trivy-action's `trivy-config` input, not an env var.
-# Why: an env var is not reliably propagated into a nested composite
-# action's own steps; an input is a normal with: value at invocation time,
-# same as every other input this action forwards.
-# From: PR #1542, Issue #1535
+# What: Use trivy-config input instead of env var.
+# Why: env vars unreliable in nested composite actions.
+# From: Issue #1535 | PR #1542
 
-# What: Orders trivy's DB-source repos -- GHCR first, mirror.gcr.io second,
-# a third directly-authenticated Docker Hub entry last.
-# Why: Docker Hub sits last (not second) -- live measurement (8 pulls,
-# delta 0) showed mirror.gcr.io does not draw from Docker Hub's own quota.
-# From: PR #1543, Issue #1535
+# What: Order trivy DB repos: GHCR, mirror.gcr.io, Docker Hub.
+# Why: mirror.gcr.io not using Docker quota; Hub sits last.
+# From: Issue #1535 | PR #1543
 db:
   repository:
     - ghcr.io/aquasecurity/trivy-db:2

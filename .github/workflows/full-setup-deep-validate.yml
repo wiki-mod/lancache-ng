@@ -140,11 +140,9 @@ jobs:
       ntp: ${{ steps.plan.outputs.ntp }}
       syslog: ${{ steps.plan.outputs.syslog }}
     steps:
-      # What: if HEAD is valid, resyncs the workspace to it and clears skip-worktree bits; otherwise a no-op.
-      # Why: reused self-hosted workspaces can strand a leftover tracked file that
-      # makes the ref-switch checkout refuse to delete it ("not uptodate") even
-      # under --force; an unborn/missing HEAD instead crashes checkout (exit 128).
-      # From: Issue #1095 (G15), PR #1640
+      # What: Resyncs HEAD, clears skip-worktree bits.
+      # Why: Prior checkout's leftover blocks ref-switch on reused host.
+      # From: Issue #1095 | PR #1640
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -euo pipefail
@@ -233,11 +231,9 @@ jobs:
       # `plan` job's own fetch-depth: 0 checkout above (needed for
       # detect-full-setup-changes.sh's merge-base diff).
       #
-      # What: if HEAD is valid, resyncs the workspace to it and clears skip-worktree bits; otherwise a no-op.
-      # Why: reused self-hosted workspaces can strand a leftover tracked file that
-      # makes the ref-switch checkout refuse to delete it ("not uptodate") even
-      # under --force; an unborn/missing HEAD instead crashes checkout (exit 128).
-      # From: Issue #1095 (G15), PR #1640
+      # What: Resyncs HEAD, clears skip-worktree bits.
+      # Why: Prior checkout's leftover blocks ref-switch on reused host.
+      # From: Issue #1095 | PR #1640
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -euo pipefail
@@ -461,11 +457,9 @@ jobs:
       # per-run outputs as job-level env -- that job now lives in the reusable
       # full-setup-sims.yml, and the wrapper supplies the addresses anyway.
     steps:
-      # What: if HEAD is valid, resyncs the workspace to it and clears skip-worktree bits; otherwise a no-op.
-      # Why: reused self-hosted workspaces can strand a leftover tracked file that
-      # makes the ref-switch checkout refuse to delete it ("not uptodate") even
-      # under --force; an unborn/missing HEAD instead crashes checkout (exit 128).
-      # From: Issue #1095 (G15), PR #1640
+      # What: Resyncs HEAD, clears skip-worktree bits.
+      # Why: Prior checkout's leftover blocks ref-switch on reused host.
+      # From: Issue #1095 | PR #1640
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -euo pipefail
@@ -565,11 +559,9 @@ jobs:
       # full-setup-sims.yml, and the wrapper supplies the addresses anyway
       # (same reasoning as dns-zone-rollback-simulation above).
     steps:
-      # What: if HEAD is valid, resyncs the workspace to it and clears skip-worktree bits; otherwise a no-op.
-      # Why: reused self-hosted workspaces can strand a leftover tracked file that
-      # makes the ref-switch checkout refuse to delete it ("not uptodate") even
-      # under --force; an unborn/missing HEAD instead crashes checkout (exit 128).
-      # From: Issue #1095 (G15), PR #1640
+      # What: Resyncs HEAD, clears skip-worktree bits.
+      # Why: Prior checkout's leftover blocks ref-switch on reused host.
+      # From: Issue #1095 | PR #1640
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -euo pipefail
@@ -658,11 +650,9 @@ jobs:
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 45
     steps:
-      # What: if HEAD is valid, resyncs the workspace to it and clears skip-worktree bits; otherwise a no-op.
-      # Why: reused self-hosted workspaces can strand a leftover tracked file that
-      # makes the ref-switch checkout refuse to delete it ("not uptodate") even
-      # under --force; an unborn/missing HEAD instead crashes checkout (exit 128).
-      # From: Issue #1095 (G15), PR #1640
+      # What: Resyncs HEAD, clears skip-worktree bits.
+      # Why: Prior checkout's leftover blocks ref-switch on reused host.
+      # From: Issue #1095 | PR #1640
       - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
         run: |
           set -euo pipefail
@@ -701,9 +691,8 @@ jobs:
           BUILD_TOOLS_TOUCHED: ${{ needs.plan.outputs.build_tools }}
           IMAGE_TAG: ${{ needs.plan.outputs.image_tag }}
           REPOSITORY: ${{ github.repository }}
-          # What: widens select-build-tools-image.sh's smoke test to require dhclient.
-          # Why: dhclient is opt-in there, not baseline (Alpine build-tools
-          # evaluation); this job's own simulation below invokes dhclient directly.
+          # What: Widens smoke test to require dhclient (not baseline Alpine).
+          # Why: This sim uses dhclient; Alpine lacks it in stock apk.
           # From: Issue #1095
           EXTRA_REQUIRED_TOOLS: dhclient
         run: |

@@ -190,19 +190,16 @@ jobs:
             validation_project_networks_teardown "$COMPOSE_PROJECT_NAME" || true
           fi
 
-          # What: releases the host-local subnet lock the reserve composite acquired.
-          # Why: frees the slot for the next run immediately, without waiting for this
-          # job's whole process tree to exit; only set if a lock was actually reserved.
+          # What: releases the host-local subnet lock acquired by reserve.
+          # Why: frees the slot immediately without waiting for process exit.
           # From: PR #1523
           if [[ -n "${VALIDATION_LOCK_HOLDER_PID:-}" ]]; then
             kill "$VALIDATION_LOCK_HOLDER_PID" 2>/dev/null || true
           fi
 
   ssl-mitm-cache-simulation:
-    # What: real DNS/HTTP/HTTPS caching test (deb.debian.org) against the PR's own
-    # proxy/dns (LANCACHE_IMAGE_TAG threads the resolved PR staging tag).
-    # Why: chained after the health-check job to serialize onto the shared runner
-    # tier and fixed validation IPs; if: always() keeps its signal independent.
+    # What: real DNS/HTTP/HTTPS caching test (deb.debian.org).
+    # Why: serializes to shared runner; if: always() independent.
     # From: PR #1523
     name: SSL MITM cache simulation
     needs: [compute-validation-network, full-setup-validate]
@@ -238,9 +235,8 @@ jobs:
       VALIDATION_NETDATA_IP: ${{ needs.compute-validation-network.outputs.netdata_ip }}
       VALIDATION_NATS_IP: ${{ needs.compute-validation-network.outputs.nats_ip }}
       VALIDATION_UI_IP: ${{ needs.compute-validation-network.outputs.ui_ip }}
-      # What: threads a collision-safe IP for the Compose-profile-gated standard-passthrough-shim.
-      # Why: only this job's own `docker compose up ... standard-passthrough-shim` call ever
-      # starts that service, so no other job needs this value.
+      # What: threads collision-safe IP for standard-passthrough-shim.
+      # Why: only this job starts this service; no other needs it.
       # From: Issue #668
       VALIDATION_STANDARD_SHIM_IP: ${{ needs.compute-validation-network.outputs.standard_shim_ip }}
       COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
@@ -261,8 +257,8 @@ jobs:
         id: build-tools-image
         env:
           EVENT_NAME: ${{ github.event_name }}
-          # What: passes inputs via env: + quoted shell vars, not ${{ }} interpolation.
-          # Why: OSPS-BR-01.04 script-injection hardening; matches this file's own convention.
+          # What: passes inputs via env:, not ${{ }} interpolation.
+          # Why: OSPS-BR-01.04 script-injection hardening.
           # From: Issue #1130
           PR_STAGING_AVAILABLE: ${{ inputs.pr_staging_available }}
           BUILD_TOOLS_TOUCHED: ${{ inputs.build_tools_touched }}
@@ -321,8 +317,8 @@ jobs:
     steps:
       - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Resolve build-tools image
-        # What: same build-tools resolution as ssl-mitm-cache-simulation's step above.
-        # Why: prefers the confirmed PR staging tag for a same-PR build-tools change.
+        # What: same build-tools resolution as ssl-mitm-cache-sim above.
+        # Why: prefers PR staging tag for same-PR build-tools change.
         # From: PR #1523
         id: build-tools-image
         env:
@@ -372,8 +368,8 @@ jobs:
     steps:
       - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Resolve build-tools image
-        # What: same build-tools resolution as ssl-mitm-cache-simulation's step above.
-        # Why: prefers the confirmed PR staging tag for a same-PR build-tools change.
+        # What: same build-tools resolution as ssl-mitm-cache-sim above.
+        # Why: prefers PR staging tag for same-PR build-tools change.
         # From: PR #1523
         id: build-tools-image
         env:
@@ -398,9 +394,8 @@ jobs:
           bash scripts/untracked/simulations/proxy-standard-mode-sni-routing-simulation.sh
 
   proxy-ssl-mode-two-relay-dispatch-simulation:
-    # What: end-to-end test for the SSL-mode SNI depth-dispatch and two-relay client-IP fix.
-    # Why: no "pre-fix" image is rebuilt from git history; the base branch already contains
-    # the fix. Chained after the sibling job for the same AG-CI-017 contention reasons.
+    # What: end-to-end test for SSL-mode SNI two-relay dispatch.
+    # Why: base branch has fix; chains for AG-CI-017 contention.
     # From: Issue #1276
     name: Proxy SSL-mode two-relay dispatch simulation
     needs: [compute-validation-network, proxy-standard-mode-sni-routing-simulation]
@@ -414,8 +409,8 @@ jobs:
     steps:
       - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Resolve build-tools image
-        # What: same build-tools resolution as ssl-mitm-cache-simulation's step above.
-        # Why: prefers the confirmed PR staging tag for a same-PR build-tools change.
+        # What: same build-tools resolution as ssl-mitm-cache-sim above.
+        # Why: prefers PR staging tag for same-PR build-tools change.
         # From: PR #1523
         id: build-tools-image
         env:
@@ -474,8 +469,8 @@ jobs:
     steps:
       - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Resolve build-tools image
-        # What: same build-tools resolution as ssl-mitm-cache-simulation's step above.
-        # Why: prefers the confirmed PR staging tag for a same-PR build-tools change.
+        # What: same build-tools resolution as ssl-mitm-cache-sim above.
+        # Why: prefers PR staging tag for same-PR build-tools change.
         # From: PR #1523
         id: build-tools-image
         # See ssl-mitm-cache-simulation's "Resolve build-tools image" step
@@ -688,9 +683,8 @@ jobs:
           BUILD_TOOLS_TOUCHED: ${{ inputs.build_tools_touched }}
           IMAGE_TAG: ${{ inputs.image_tag }}
           REPOSITORY: ${{ github.repository }}
-          # What: widens select-build-tools-image.sh's smoke test to require dhclient.
-          # Why: dhclient is opt-in there, not baseline (Alpine build-tools
-          # evaluation); this job's own simulation below invokes dhclient directly.
+          # What: widens smoke test to require dhclient; job invokes it.
+          # Why: dhclient is opt-in, not baseline in Alpine build-tools.
           # From: Issue #1095
           EXTRA_REQUIRED_TOOLS: dhclient
         run: |
@@ -743,8 +737,8 @@ jobs:
     steps:
       - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Resolve build-tools image
-        # What: same build-tools resolution as ssl-mitm-cache-simulation's step above.
-        # Why: prefers the confirmed PR staging tag for a same-PR build-tools change.
+        # What: same build-tools resolution as ssl-mitm-cache-sim above.
+        # Why: prefers PR staging tag for same-PR build-tools change.
         # From: PR #1523
         id: build-tools-image
         # See ssl-mitm-cache-simulation's "Resolve build-tools image" step for

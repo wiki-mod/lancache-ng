@@ -160,12 +160,9 @@ resolve_shared_secret() {
 }
 # END shared-secret-bootstrap library
 
-# What: helper for producer log directories that must stay readable to gid 10001.
-# Why: root-created files on persistent volumes otherwise drift back to
-#   root-only readability after reopen or recreation. dns/dhcp-only (not part
-#   of the shared-secret-bootstrap contract ui also embeds), so it lives after
-#   the sync-guarded block instead of inside it.
-# From: Issue #1427
+# What: keep log dirs readable to gid 10001 across volume reopen.
+# Why: root-created files on volumes revert to root-only readable.
+# From: Issue #1427 | PR #1670
 prepare_log_dir_for_shared_reader() {
     local dir="$1"
     mkdir -p "$dir"
@@ -249,10 +246,9 @@ DDNS_TSIG_KEY="$(resolve_shared_secret ddns-tsig-key "$_ddns_tsig_key_cfg" lanca
 # authoritative backend, so DDNS updates sent there simply time out
 # (confirmed empirically) with no error on either side.
 : "${DHCP_DDNS_PORT:=5300}"
-# What: validates the unquoted JSON port before rendering Kea D2 config.
-# Why: a typo here would otherwise produce invalid JSON and a dead DDNS
-#   daemon, making DHCP lease records stop updating DNS silently.
-# From: Issue #1164
+# What: validate JSON port before rendering Kea D2 config.
+# Why: typo produces invalid JSON; DDNS daemon fails silently.
+# From: Issue #1164 | PR #1667
 case "$DHCP_DDNS_PORT" in
     "" | *[!0-9]*)
         echo "ERROR: DHCP_DDNS_PORT must be a numeric TCP/UDP port (got: ${DHCP_DDNS_PORT})."
@@ -865,30 +861,27 @@ if [ "$SNAPSHOT_FOUND" -eq 0 ] && ! _kea_validate_dhcp4_config "$KEAD_CONF_FILE"
     # DHCP_PID is intentionally not set so the trap below doesn't try to kill it
     # and the final `wait` at the bottom keeps the container alive
 else
-    # What: constrains the daemon-created Kea log files to 0640.
-    # Why: gid 10001 keeps the collector read path working, while world
-    #   read permission is no longer needed once the shared group exists.
-    # From: Issue #1427
+    # What: constrains daemon-created Kea log files to 0640 mode.
+    # Why: gid 10001 can read; world-readable no longer needed.
+    # From: Issue #1427 | PR #1670
     umask 0027
     kea-dhcp4 -c /var/lib/kea/kea-dhcp4.conf &
     DHCP_PID=$!
 fi
 
 echo "Starting Kea Control Agent on $KEA_CTRL_HOST:8000..."
-# What: constrains the daemon-created Kea control-agent log files to 0640.
-# Why: gid 10001 keeps the collector read path working, while world read
-#   permission is no longer needed once the shared group exists.
-# From: Issue #1427
+# What: constrains daemon-created control-agent log files to 0640.
+# Why: gid 10001 can read; world-readable no longer needed.
+# From: Issue #1427 | PR #1670
 umask 0027
 kea-ctrl-agent -c /var/lib/kea/kea-ctrl-agent.conf &
 AGENT_PID=$!
 
 if command -v kea-dhcp-ddns &> /dev/null; then
     echo "Starting Kea DHCP DDNS server..."
-    # What: constrains the daemon-created Kea DDNS log files to 0640.
-    # Why: gid 10001 keeps the collector read path working, while world
-    #   read permission is no longer needed once the shared group exists.
-    # From: Issue #1427
+    # What: constrains daemon-created Kea DDNS log files to 0640.
+    # Why: gid 10001 can read; world-readable no longer needed.
+    # From: Issue #1427 | PR #1670
     umask 0027
     kea-dhcp-ddns -c /var/lib/kea/kea-dhcp-ddns.conf &
     DDNS_PID=$!

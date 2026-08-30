@@ -2,15 +2,12 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: three comment-content checks, one per function, in one script.
-# Why: the maintainer's monolith-first direction; full evidence for each
-#   check's pattern design lives in the PR/commit history (#1385, #1546).
+# What: three comment-content checks, one per function, in script.
+# Why: monolith-first design; evidence in PR/commit history
 # From: PR #1546
 #
 # What: adds explicit-file, warn-only, and diff-scoped scan modes.
-# Why: lets a repo-wide warn-only baseline coexist with a diff-scoped
-#   blocking pass without one violation blocking every PR (kept here,
-#   not a sibling file, per this file's own monolith-first direction).
+# Why: coexists baseline/diff modes; one violation doesn't block PR
 # From: Issue #1095 | PR #1686
 set -euo pipefail
 
@@ -21,7 +18,7 @@ cd "$target_root"
 shift || true
 
 # What: Excludes this script and its bats test from their own scan.
-# Why: Both quote the banned phrases verbatim as documentation/fixtures.
+# Why: Both quote banned phrases verbatim as docs/test fixtures
 # From: PR #1546
 is_self_reference() {
     case "$1" in
@@ -32,8 +29,7 @@ is_self_reference() {
 }
 
 # What: Files exempt from all three comment-content scans.
-# Why: Mirrors check-file-headers.sh's is_excluded() -- docs/config/binary
-#   files aren't hand-written code comments this guard targets.
+# Why: Excludes docs/config/binary like check-file-headers.sh does
 # From: PR #1546
 is_excluded() {
     case "$1" in
@@ -53,24 +49,19 @@ is_excluded() {
     esac
 }
 
-# What: Case-insensitive, per-line grep patterns for the checks below.
-# Why: Tight adjacency (not a wide free-text window) avoids matching
-#   unrelated prose like "review the list" in a 9000-line file; POSIX
-#   [[:space:]] matches this repo's existing regex convention.
+# What: Case-insensitive, per-line grep patterns for checks
+# Why: Tight adjacency avoids false matches; uses POSIX [[:space:]]
 # From: PR #1546
 DISCOVERY_VERBS='(caught|found|flagged|spotted|identified|discovered|noticed)'
-# What: "<verb> in/during [a/the/this] [code/pr/peer] [self-]review".
-# Why: Only whitespace and a small filler-word set allowed before "review",
-#   so an unrelated clause breaks the match instead of being silently
-#   absorbed.
+# What: "<verb> in/during [a/the/this] [code/pr/peer] [self-]review"
+# Why: Small filler-word set; unrelated clauses fail to match
 # From: PR #1546
 REVIEW_CHRONOLOGY_PATTERN="(\\b${DISCOVERY_VERBS}\\b[[:space:]]+(in|during)[[:space:]]+((a|the|this)[[:space:]]+)?(code[[:space:]]+|pr[[:space:]]+|peer[[:space:]]+)?(self-)?review\\b)"
-# What: "review ... <verb>" (e.g. "a PR review (#765) found ...").
-# Why: Gap restricted to non-letter chars so it can span a short
-#   parenthetical without crossing into a new sentence.
+# What: "review ... <verb>" (e.g. "a PR review found ...").
+# Why: Non-letter chars allow gap to span short parenthetical
 # From: PR #1546
 REVIEW_CHRONOLOGY_PATTERN+="|(\\breview\\b[^a-zA-Z.]{0,20}\\b${DISCOVERY_VERBS}\\b)"
-# What: "before/prior to/until this fix/change/commit/patch" self-reference.
+# What: Deictic self-refs: before/until this fix/change/commit/patch
 # Why: catches the deictic half of review-chronology narration.
 # From: PR #1546
 REVIEW_CHRONOLOGY_PATTERN+="|(\\b(before|prior to|until)[[:space:]]+this[[:space:]]+(fix|change|commit|patch)\\b)"
@@ -83,7 +74,7 @@ REVIEW_CHRONOLOGY_PATTERN+="|(\\breview[[:space:]]+finding\\b)"
 # From: PR #1546
 FRAGILE_LINE_REF_PATTERN='\(([Ss]ee[[:space:]]+)?\bline\b[[:space:]]*~?[0-9]+'
 
-# What: Checks $1 against the pattern, then joined adjacent-comment pairs.
+# What: Checks $1 against patterns and joined adjacent-comment pairs
 # Why: it reduces unnecessary doubling of tool calls
 # From: PR #1661
 check_review_chronology() {
@@ -117,16 +108,14 @@ check_review_chronology() {
 }
 
 # What: Checks each line of $1 against $FRAGILE_LINE_REF_PATTERN.
-# Why: -H forces the filename prefix even for a single-file invocation.
+# Why: -H forces filename prefix for single-file invocation
 # From: PR #1546
 check_fragile_line_references() {
     grep -EinIH "$FRAGILE_LINE_REF_PATTERN" "$1" || true
 }
 
-# What: Flags a #N repeated outside this file's own From: pointer line(s).
-# Why: AG-CODE-012 requires From: to be the sole place a comment names a
-#   PR/Issue number; scoped per-file/already-declared-number to avoid a
-#   large false-positive flood from legitimate historical references.
+# What: Flags #N repeated outside this file's own From: pointer
+# Why: From: must be sole place for numbers (AG-CODE-012)
 # From: PR #1546
 check_bare_issue_ref_duplicates_from() {
     local path="$1" from_nums num
@@ -140,9 +129,7 @@ check_bare_issue_ref_duplicates_from() {
     while IFS= read -r num; do
         [ -n "$num" ] || continue
         # What: scans every #N on a line, skipping matches inside a string.
-        # Why: a #N inside a string (e.g. an echo message) is not a
-        #   governed comment; a `'` opens a string only when not preceded
-        #   by a word char, so contractions like "it's" aren't misread.
+        # Why: skips #N inside strings; apostrophe-aware, not misread.
         # From: PR #1546
         awk -v n="$num" '
             $0 ~ /From:/ { next }
@@ -177,10 +164,8 @@ check_bare_issue_ref_duplicates_from() {
     done <<< "$from_nums"
 }
 
-# What: computes the changed-file list between the diff base and GITHUB_SHA.
-# Why: mirrors check-pr-diff-file-headers.sh's fetch/diff/mapfile
-#   mechanism; the NUL-delimited diff goes to a real file, never a
-#   substitution, since $(...) strips NULs and hides set -e's exit status.
+# What: Computes changed-file list between diff base and GITHUB_SHA
+# Why: NUL-delimited diffs to file prevent substitution stripping
 # From: Issue #1095 | PR #1686
 diff_scoped_files() {
     # shellcheck source=scripts/lib/git-fetch-retry.sh
@@ -208,11 +193,9 @@ diff_scoped_files() {
     fi
 }
 
-# What: dispatches to diff-scoped files, explicit file args, or a full scan.
-# Why: ".git" is checked directly under target_root, not an ancestor
-#   dir, so a bats fixture nested inside this repo's own working copy
-#   stays a plain fixture instead of falling through to the outer repo.
-# From: PR #1546 | Issue #1095
+# What: Dispatches to diff-scoped files, explicit args, or full scan
+# Why: Scoped .git check prevents nested fixtures falling through
+# From: Issue #1095 | PR #1546
 if [ -n "${CHRONOLOGY_DIFF_BASE_SHA:-}" ]; then
     diff_scoped_files
 elif [ "$#" -gt 0 ]; then
@@ -232,8 +215,7 @@ for path in "${files[@]}"; do
     is_excluded "$path" && continue
 
     # What: -I skips binary files during the match loop.
-    # Why: without it, grep's own "Binary file ... matches" line would be
-    #   wrongly recorded as a violation.
+    # Why: binary matches skip; grep's own marker isn't a violation.
     # From: PR #1546
     while IFS= read -r match; do
         [ -n "$match" ] || continue

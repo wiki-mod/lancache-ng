@@ -2,15 +2,15 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-# What: Exercises scripts/untracked/check-trivy-action-direct-usage.sh against
+# What: Exercises scripts/untracked/check-trivy-action-direc
 # throwaway fixture trees, both passing and failing cases.
-# Why: a check proven only against an already-green tree never actually
+# Why: a check proven only against an already-green tree nev
 # proves its fail-closed path is reachable (AG-VAL-024).
 # From: PR #1542, Issue #1535
 
-# What: check_dockerhub_wiring()'s tests below cover call-site YAML-shape
+# What: check_dockerhub_wiring()'s tests below cover call-si
 #   variation (quoting, indentation, key order, comments, missing with:) in one pass.
-# Why: AG-VAL-036 -- enumerate a matcher's real variation axes up front,
+# Why: AG-VAL-036 -- enumerate a matcher's real variation ax
 #   not one gap per review round.
 # From: PR #1543, Issue #1535
 
@@ -23,16 +23,16 @@ setup() {
 }
 
 teardown() {
-    # What: only removes fixture_root when it is a real, non-empty directory.
-    # Why: a silently-empty fixture_root (e.g. a failed mktemp -d in setup())
+    # What: only removes fixture_root when it is a real, non
+    # Why: a silently-empty fixture_root (e.g. a failed mkte
     #   must not turn rm -rf into a blind delete of an unintended path.
     # From: PR #1546 review, djdomi, 2026-08-16
     [ -n "$fixture_root" ] && [ -d "$fixture_root" ] && rm -rf "$fixture_root"
 }
 
 
-# What: prints a message to stderr and fails the current bats test.
-# Why: gives assertion failures a readable message instead of bats' own
+# What: prints a message to stderr & fails current bats test
+# Why: gives assertion failures a readable message instead o
 #   generic "[ status -eq 0 ]"-style output.
 # From: PR #1542, Issue #1535
 fail() {
@@ -41,7 +41,7 @@ fail() {
 }
 
 # What: baseline happy path for check_direct_usage().
-# Why: the one legitimate call site (inside the wrapper itself) must
+# Why: the one legitimate call site (inside wrapper itself)
 #   not be flagged.
 @test "passes when aquasecurity/trivy-action only appears inside the centralized wrapper" {
     cat > "$fixture_root/.github/actions/aquasecurity-trivy-action-centralized-version/action.yml" <<'EOF'
@@ -76,7 +76,7 @@ EOF
 }
 
 # What: a direct call site bypassing the wrapper.
-# Why: fail-closed proof (AG-VAL-024) -- must be caught, not just the
+# Why: fail-closed proof (AG-VAL-024) -- must be caught, not
 #   passing case above.
 @test "fails when a workflow calls aquasecurity/trivy-action directly" {
     cat > "$fixture_root/.github/actions/aquasecurity-trivy-action-centralized-version/action.yml" <<'EOF'
@@ -104,8 +104,8 @@ EOF
     [[ "$output" == *".github/workflows/build.yml"* ]] || fail "missing offending file in output: $output"
 }
 
-# What: the same bypass, inside a second composite action instead of a workflow.
-# Why: confirms the scan covers .github/actions too, not just workflows.
+# What: the same bypass, inside a second composite action in
+# Why: confirms scan covers .github/actions too, not just wo
 @test "fails when a different composite action calls aquasecurity/trivy-action directly" {
     cat > "$fixture_root/.github/actions/aquasecurity-trivy-action-centralized-version/action.yml" <<'EOF'
 name: Centralized version -- aquasecurity/trivy-action
@@ -129,8 +129,8 @@ EOF
     [[ "$output" == *"some-other-action/action.yml"* ]] || fail "missing offending file in output: $output"
 }
 
-# What: a double-quoted `uses: "aquasecurity/trivy-action@..."` scalar.
-# Why: regression proof for check_direct_usage()'s quoted-form fix --
+# What: a double-quoted `uses: "aquasecurity/trivy-action@..
+# Why: regression proof for check_direct_usage()'s quoted-fo
 #   must be caught too, not just the unquoted form above.
 # From: PR #1543, Issue #1535
 @test "fails when a workflow calls aquasecurity/trivy-action directly with a quoted uses: scalar" {
@@ -173,8 +173,8 @@ runs:
 EOF
 }
 
-# What: dockerhub keys set in reverse order with an interleaved YAML comment.
-# Why: the scanner must not depend on key order or the absence of a comment.
+# What: dockerhub keys set in reverse order with an interlea
+# Why: the scanner must not depend on key order or absence o
 @test "passes when a trivy-scan-retry call site sets both dockerhub keys, any order, with an interleaved comment" {
     write_wrapper_fixture
     cat > "$fixture_root/.github/workflows/build.yml" <<'EOF'
@@ -197,8 +197,8 @@ EOF
     [ "$status" -eq 0 ] || fail "expected pass, got status $status: $output"
 }
 
-# What: a caller that never wires either dockerhub key at all.
-# Why: the exact silent-fallback shape this guard exists to catch.
+# What: a caller that never wires either dockerhub key at al
+# Why: the exact silent-fallback shape this guard exists to
 @test "fails when a trivy-scan-retry call site's with: block sets neither dockerhub key" {
     write_wrapper_fixture
     cat > "$fixture_root/.github/workflows/build.yml" <<'EOF'
@@ -220,7 +220,7 @@ EOF
 }
 
 # What: only one of the two dockerhub keys set.
-# Why: proves the two missing-key messages don't cross-contaminate
+# Why: proves two missing-key messages don't cross-contamina
 #   (see the second assertion below).
 @test "fails when a trivy-scan-retry call site's with: block sets only one dockerhub key" {
     write_wrapper_fixture
@@ -245,7 +245,7 @@ EOF
 }
 
 # What: a call site with no with: block at all.
-# Why: the state machine must treat this distinctly, not as "0 keys found".
+# Why: the state machine must treat this distinctly, not as
 @test "fails when a trivy-scan-retry call site has no with: block at all" {
     write_wrapper_fixture
     cat > "$fixture_root/.github/workflows/build.yml" <<'EOF'
@@ -265,8 +265,8 @@ EOF
     [[ "$output" == *"has no with: block"* ]] || fail "missing expected message: $output"
 }
 
-# What: a double-quoted `uses:` scalar for a trivy-scan-retry call site.
-# Why: must be scanned, not silently skipped by the prefilter/regex.
+# What: a double-quoted `uses:` scalar for a trivy-scan-retr
+# Why: must be scanned, not silently skipped by prefilter/re
 # From: PR #1543, Issue #1535
 @test "fails when a double-quoted trivy-scan-retry call site is missing dockerhub wiring" {
     write_wrapper_fixture
@@ -289,7 +289,7 @@ EOF
 }
 
 # What: single-quoted `uses:` scalar variant, positive case.
-# Why: same quoted-form coverage as the double-quoted test above.
+# Why: same quoted-form coverage as double-quoted test above
 # From: PR #1543, Issue #1535
 @test "passes when a single-quoted trivy-scan-retry call site sets both dockerhub keys" {
     write_wrapper_fixture
@@ -312,8 +312,8 @@ EOF
     [ "$status" -eq 0 ] || fail "expected pass, got status $status: $output"
 }
 
-# What: dockerhub-username set to a present-but-empty literal.
-# Why: an empty value used to pass the old key-presence-only check;
+# What: dockerhub-username set to a present-but-empty litera
+# Why: an empty value used to pass old key-presence-only che
 #   must fail now that values are validated.
 # From: PR #1543, Issue #1535
 @test "fails when a trivy-scan-retry call site sets dockerhub-username to an empty literal" {
@@ -338,8 +338,8 @@ EOF
     [[ "$output" == *"dockerhub-username empty value"* ]] || fail "missing expected message: $output"
 }
 
-# What: dockerhub-username referencing the wrong secret name (DOCKERHUB_USER).
-# Why: non-empty but still wrong -- the same value-validation gap as the
+# What: dockerhub-username referencing wrong secret name (DO
+# Why: non-empty but still wrong -- same value-validation ga
 #   empty-literal case above.
 # From: PR #1543, Issue #1535
 @test "fails when a trivy-scan-retry call site references the wrong secret name" {
@@ -364,8 +364,8 @@ EOF
     [[ "$output" == *"references the wrong secret (expected secrets.DOCKERHUB_USERNAME)"* ]] || fail "missing expected message: $output"
 }
 
-# What: a longer secret name sharing the expected prefix (DOCKERHUB_USERNAME_OLD).
-# Why: an unanchored regex would let this falsely pass as the expected secret.
+# What: a longer secret name sharing expected prefix (DOCKER
+# Why: an unanchored regex would let this falsely pass as ex
 # From: PR #1543, Issue #1535
 @test "fails when a trivy-scan-retry call site references a longer secret name sharing the expected prefix" {
     write_wrapper_fixture
@@ -389,8 +389,8 @@ EOF
     [[ "$output" == *"references the wrong secret (expected secrets.DOCKERHUB_USERNAME)"* ]] || fail "missing expected message: $output"
 }
 
-# What: dockerhub-username set to a hardcoded literal (not secrets.*/inputs.*).
-# Why: exercises bad_value_reason()'s last branch, distinct from the
+# What: dockerhub-username set to a hardcoded literal (not s
+# Why: exercises bad_value_reason()'s last branch, distinct
 #   wrong-secret-name case above.
 # From: PR #1543, Issue #1535
 @test "fails when a trivy-scan-retry call site sets dockerhub-username to a hardcoded literal" {
@@ -415,8 +415,8 @@ EOF
     [[ "$output" == *"does not reference secrets.DOCKERHUB_USERNAME or a forwarded inputs.* value"* ]] || fail "missing expected message: $output"
 }
 
-# What: dockerhub keys forwarded via inputs.* (a caller-owned pass-through).
-# Why: value validation must not false-positive on trivy-scan-with-cache's
+# What: dockerhub keys forwarded via inputs.* (a caller-owne
+# Why: value validation must not false-positive on trivy-sca
 #   own real forwarding shape.
 # From: PR #1543, Issue #1535
 @test "passes when a trivy-scan-retry call site forwards a caller-owned inputs.* value" {
@@ -440,9 +440,9 @@ EOF
     [ "$status" -eq 0 ] || fail "expected pass, got status $status: $output"
 }
 
-# What: a trivy-scan-retry call site nested inside a plain .github/actions
+# What: a trivy-scan-retry call site nested inside a plain .
 #   wrapper (not a workflow).
-# Why: the scan must not be workflows-only -- this is trivy-scan-with-
+# Why: the scan must not be workflows-only -- this is trivy-
 #   cache/action.yml's real shape.
 # From: PR #1543, Issue #1535
 @test "fails when a nested composite action (not a workflow) calls trivy-scan-retry without dockerhub wiring" {
@@ -466,8 +466,8 @@ EOF
     [[ "$output" == *"missing dockerhub-username and dockerhub-password"* ]] || fail "missing expected message: $output"
 }
 
-# What: two call sites in one file at different indentation levels.
-# Why: the second sits under a dash-only list-item line -- a real shape
+# What: two call sites in one file at different indentation
+# Why: the second sits under a dash-only list-item line -- a
 #   a hardcoded-column check would miscompute.
 # From: PR #1543, Issue #1535
 @test "passes when multiple trivy-scan-retry call sites in one file are all fully wired, at different indentation" {

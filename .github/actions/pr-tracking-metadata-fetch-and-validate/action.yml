@@ -22,10 +22,8 @@ runs:
   using: composite
   steps:
     - name: Fetch current labels/milestone live
-      # What: fetches labels/milestone via `gh pr view` instead of using the event payload.
-      # Why: the event payload is a snapshot from trigger time and goes stale;
-      # `github.token` covers this read-only call since a composite action
-      # cannot resolve `secrets.*` directly.
+      # What: Fetch live labels/milestone via gh pr view.
+      # Why: Event payload goes stale; github.token covers read.
       # From: PR #1467
       id: live-metadata
       shell: bash
@@ -50,17 +48,15 @@ runs:
         PR_NUMBER: ${{ github.event.pull_request.number }}
         REPO: ${{ github.repository }}
         GH_TOKEN: ${{ inputs.project-automation-pat }}
-        # What: tells check-pr-tracking-metadata.sh whether this run is from a fork PR.
-        # Why: GitHub never passes repository secrets to fork pull_request runs, so
-        # GH_TOKEN is empty there regardless of PROJECT_AUTOMATION_PAT configuration;
-        # the script needs this flag to give the right explanation for that.
+        # What: Signals whether run is from fork PR.
+        # Why: GitHub doesn't pass secrets to fork runs; flag needed.
         # From: PR #1467
         PR_IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
         BUILD_TOOLS_IMAGE: ${{ inputs.build-tools-image }}
       run: |
         set -euo pipefail
-        # What: reads PR_LABELS_JSON's file content before passing it to the container.
-        # Why: PR_LABELS_JSON names a live-fetched file, not an inline JSON string.
+        # What: Reads PR_LABELS_JSON file content before docker run.
+        # Why: PR_LABELS_JSON is live-fetched file, not inline JSON.
         # From: PR #1467
         labels_json="$(cat "$PR_LABELS_JSON")"
         # 600s: this script makes real GraphQL Projects v2 calls (and a

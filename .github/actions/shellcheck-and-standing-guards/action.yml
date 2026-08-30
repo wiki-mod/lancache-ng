@@ -13,11 +13,9 @@ inputs:
 runs:
   using: composite
   steps:
-    # What: nested in-container timeouts (300s actionlint, 600s docker run).
-    # Why: actionlint's embedded shellcheck can hang indefinitely in a
-    #   Go-runtime deadlock; a composite-action step can't declare
-    #   timeout-minutes, so an in-container SIGKILL is the only protection.
-    # From: PR #1383 | PR #1523
+    # What: Nested timeouts guard against actionlint deadlock.
+    # Why: Embedded shellcheck can hang in Go deadlock state.
+    # From: Issue #1255 | PR #1258
     - name: Run ShellCheck and ActionLint
       shell: bash
       run: |
@@ -34,9 +32,8 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        # What: mounts the repo read-only for this test.
-        # Why: tests/setup-migration-semantics.sh only reads setup.sh and writes to mktemp -d
-        # (container /tmp), so a read-only mount is sufficient.
+        # What: Mount repo read-only for test.
+        # Why: Script only reads setup.sh, writes to /tmp via mktemp.
         # From: PR #1467
         docker run --rm \
           --user "$(id -u):$(id -g)" \
@@ -46,11 +43,8 @@ runs:
           timeout --kill-after=30 --signal=KILL 300 bash tests/setup-migration-semantics.sh
 
     - name: Check pinned GitHub Actions for runtime / drift / duplication guardrails
-      # What: runs check-action-node-versions.sh (Node-runtime + single-ref/
-      #   no-drift checks) inside the build-tools container with GH_TOKEN.
-      # Why: the script calls curl against api.github.com -- must not rely
-      #   on a host-local tool (AG-VAL-016); GH_TOKEN only raises the rate
-      #   limit, unauthenticated also works at this repo's current pin count.
+      # What: Validates Actions versions in build-tools container.
+      # Why: Calls api.github.com; avoid host tools (AG-VAL-016).
       # From: Issue #801 | PR #804
       shell: bash
       env:
@@ -74,10 +68,8 @@ runs:
           timeout --kill-after=30 --signal=KILL 600 bash scripts/tracked/check-action-node-versions.sh
 
     - name: Check validation-subnet wrapper coverage
-      # What: asserts every full-setup-validate.yml/full-setup-deep-validate.yml job that
-      # starts its own compose stack is wired through the collision-safe subnet reservation.
-      # Why: two jobs added after the original wiring pass were never connected to it and hit
-      # a real "Pool overlaps" collision under concurrent CI load.
+      # What: Ensures compose jobs use collision-safe subnet.
+      # Why: Late-added jobs weren't connected to subnet wiring.
       # From: Issue #896 | PR #917
       shell: bash
       run: |
@@ -90,10 +82,8 @@ runs:
           timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-validation-subnet-wrapper-coverage.sh
 
     - name: Check executable bits on bare-path script invocations
-      # What: scans every workflow/composite-action file and .githooks/ hook for a bare-path
-      # script invocation and asserts each such file is committed with mode 100755.
-      # Why: a script committed 100644 but invoked by bare path fails in CI with exit 126, a
-      # defect invisible from a Windows/core.filemode=false author host (AG-VAL-024).
+      # What: Asserts bare-path scripts have executable bits.
+      # Why: Exit 126 if script lacks execute bit (AG-VAL-024).
       # From: Issue #1019 | PR #1021
       shell: bash
       run: |
@@ -106,11 +96,9 @@ runs:
           timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-executable-bits.sh
 
     - name: Check build-tools smoke-test coverage
-      # What: compares select-build-tools-image.sh's smoke_test_image() required-tools list
-      # against tools/build-tools/Dockerfile's own verification list.
-      # Why: a tool the Dockerfile installs and a consumer needs had repeatedly gone silently
-      # unverified by the smoke test after drifting behind the Dockerfile's list.
-      # From: Issue #790, Issue #791 | PR #1022
+      # What: Verifies build-tools image tools vs. Dockerfile.
+      # Why: Tools drift silently without smoke-test coverage.
+      # From: Issue #822 | PR #1022
       shell: bash
       run: |
         set -euo pipefail
@@ -122,10 +110,8 @@ runs:
           timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-build-tools-smoke-coverage.sh
 
     - name: Check for pipefail/SIGPIPE early-exit-consumer pattern (AG-VAL-029)
-      # What: scans scripts/**, tools/**, services/**, and setup.sh for a live producer
-      # piped into an early-exiting consumer (`grep -q`, `head`, ...) under `set -o pipefail`.
-      # Why: the consumer exiting early closes the pipe while the producer is still
-      # writing, so the producer's SIGPIPE gets reported as a pipefail failure.
+      # What: Detects live producer piped to early-exiting consumer.
+      # Why: Early exit closes pipe; SIGPIPE becomes pipefail error.
       # From: Issue #815 | PR #1374
       shell: bash
       run: |
@@ -138,10 +124,8 @@ runs:
           timeout --kill-after=30 --signal=KILL 300 bash scripts/untracked/check-pipefail-early-exit-grep.sh
 
     - name: Check pipefail guard's own scope coverage
-      # What: verifies the pipefail-early-exit bats fixture covers every path prefix
-      # check-pipefail-early-exit-grep.sh's scan_files scans, and that scan_files has
-      # not narrowed below this project's pinned required minimum.
-      # Why: a scan_files narrower than its documented scope can hide a real gap.
+      # What: Ensures bats fixture covers all scan_files paths.
+      # Why: Narrower scan scope than documented can hide real gaps.
       # From: PR #1500
       shell: bash
       run: |
@@ -154,10 +138,9 @@ runs:
           timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-pipefail-scope-coverage.sh
 
     - name: Check github.repository case-safety in GHCR paths
-      # What: runs check-mutable-refs.sh's repository-case check only.
-      # Why: GHCR requires a lowercase owner/repo; github.repository is not
-      #   guaranteed lowercase.
-      # From: Issue #1095 (G1) | Issue #1504
+      # What: Checks repository case for GHCR lowercase requirement.
+      # Why: github.repository is not guaranteed lowercase for GHCR.
+      # From: Issue #1095 | PR #1597
       shell: bash
       run: |
         set -euo pipefail

@@ -42,18 +42,9 @@ frontend dockerfrontend
     acl safe_ping path,url_dec -m reg -i ^(/v[0-9.]+)?/_ping$
     acl safe_version path,url_dec -m reg -i ^(/v[0-9.]+)?/version$
     acl docker_container_path path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/
-    # What: ui/netdata get restart-only acls below; dhcp/dhcp-proxy/ntp stay
-    #   start/stop-only; syslog/watchdog get no restart grant at all.
-    # Why: not caller-specific (method/path only); watchdog must stay unable
-    #   to ever be disabled via the UI, since it recovers other services.
-    # From: Issue #842 | Issue #849 | Issue #1486
-    # UPDATED (syslog+fluent-bit consolidation PR, 2026-08, merged
-    # concurrently with the changes above which originally added BOTH
-    # lancache-syslog and lancache-syslog-ng here as two separate entries):
-    # syslog (fluent-bit) and syslog-ng are now one combined container under
-    # the single name lancache-syslog -- lancache-syslog-ng removed from both
-    # regexes below rather than left as permanently-unmatchable dead weight,
-    # since no compose file will ever start a container by that name again.
+    # What: ui/netdata: restart; dhcp/ntp: start/stop; syslog: denied
+    # Why: watchdog not disableable via UI; recovers services
+    # From: Issue #1486
     acl lancache_container path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/(lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-dhcp|lancache-dhcp-proxy|lancache-dhcp-probe|lancache-nats|lancache-ntp|lancache-ui|lancache-netdata|lancache-syslog)(/|$)
     acl safe_container_inspect path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/(lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-dhcp|lancache-dhcp-proxy|lancache-dhcp-probe|lancache-nats|lancache-ntp|lancache-ui|lancache-netdata|lancache-syslog)/json$
     acl safe_container_logs path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/lancache-dhcp-probe/logs$
@@ -66,16 +57,12 @@ frontend dockerfrontend
     # to change when this service's allowlist entry changes independently.
     acl safe_ntp_action path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/lancache-ntp/(start|stop)$
     acl safe_probe_action path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/lancache-dhcp-probe/(start|stop|wait)$
-    # What: own acl for ui's restart-only grant, not folded into
-    #   safe_service_restart.
-    # Why: matches safe_ntp_action's pattern above, restart-only so this can
-    #   never leave ui stopped.
+    # What: ui restart acl separate from safe_service_restart
+    # Why: restart-only, prevents ui being accidentally stopped
     # From: Issue #1486
     acl safe_ui_restart path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/lancache-ui/restart$
-    # What: own acl for netdata's restart grant, same pattern as
-    #   safe_ui_restart above.
-    # Why: keeps build-push.yml's exact-literal regex check isolated to
-    #   only this service's entry.
+    # What: netdata restart acl matches ui pattern, kept separate
+    # Why: isolated from build-push.yml's exact regex check
     # From: Issue #842
     acl safe_netdata_restart path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/lancache-netdata/restart$
     http-request allow if safe_get safe_ping
@@ -103,11 +90,9 @@ EOF
 # scripts/tracked/check-naming-consistency.sh both grep this script's static source
 # for the exact literal fixed names, so leaving that text untouched keeps
 # both checks passing unchanged regardless of whether a suffix is active.
-# What: both branches below now log which allowlist form (suffixed or fixed) was used.
-# Why: previously neither branch logged anything on success, so a container's own startup
-# log gave no evidence of whether the suffix override actually applied -- same
-# silent-decision-point class the linked issue's G15 checkout guard already names.
-# From: Issue #1095 (G15), PR #1640
+# What: both branches log applied allowlist form (suffixed or fixed)
+# Why: shows if suffix override applied (silent-decision-point)
+# From: Issue #1095 | PR #1640
 LANCACHE_CONTAINER_SUFFIX="${LANCACHE_CONTAINER_SUFFIX:-}"
 if [ -n "$LANCACHE_CONTAINER_SUFFIX" ]; then
     # Fail closed (AG-OP-008/AG-VAL-002): reject anything but a plain

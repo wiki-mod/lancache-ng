@@ -2,9 +2,8 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: files/updates/closes a standing issue for a run's real outcome.
-# Why: nightly-refresh.yml only reported its own dispatch, never the
-#   dispatched run's real result -- nightly sat frozen 9 days.
+# What: Files/updates/closes standing issue for run outcome.
+# Why: nightly-refresh reported dispatch, never run result.
 # From: Issue #1095
 
 name: Report scheduled-CI status
@@ -57,10 +56,8 @@ inputs:
 runs:
   using: composite
   steps:
-    # What: detects a fork PR, only when fork-check-step-name is set.
-    # Why: a fork PR's token cannot write issues here either way; this
-    #   lets a same-repo caller skip fork-check entirely by omitting
-    #   the input, unchanged from this action's original behavior.
+    # What: Detects fork PR when fork-check-step-name is set.
+    # Why: fork PR token lacks write access; skip when omitted.
     # From: Issue #1095
     - name: Detect fork PR (no issues:write token available here)
       id: fork-check
@@ -76,8 +73,8 @@ runs:
           echo "is-fork=false" >> "$GITHUB_OUTPUT"
         fi
 
-    # What: explicit warning on a fork PR instead of a silent drop.
-    # Why: AG-INT-002 -- a real signal must stay visible, not vanish.
+    # What: Warn on fork PR instead of silently dropping.
+    # Why: Real signal must stay visible, not vanish (AG-INT-002).
     # From: Issue #1095
     - name: Warn on fork PR -- finding could not be filed as an issue
       shell: bash
@@ -87,10 +84,8 @@ runs:
       run: |
         echo "::warning::${{ inputs.scope }} failed, but this is a fork PR -- GITHUB_TOKEN has no issues:write here, so no tracking issue could be filed (see the '${{ inputs.fork-check-step-name }}' step above for the real report). A maintainer must review that report manually before merging."
 
-    # What: files/updates/closes the standing issue for non-fork runs.
-    # Why: continue-on-error -- a reporting-path failure (missing gh,
-    #   an API error, report.sh's own set -e) must never reintroduce
-    #   the hard fail a caller made itself non-blocking to avoid.
+    # What: Files/updates/closes standing issue on non-fork runs.
+    # Why: Report failure can't reintroduce original hard fail.
     # From: Issue #1095
     - name: Report status (self-closing issue)
       id: report
@@ -108,8 +103,8 @@ runs:
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       run: bash "${GITHUB_ACTION_PATH}/report.sh"
 
-    # What: surfaces a reporting-path failure instead of swallowing it.
-    # Why: AG-INT-002 -- must not look identical to "nothing to report."
+    # What: Surfaces reporting failure instead of swallowing it.
+    # Why: Avoid looking identical to 'nothing to report'.
     # From: Issue #1095
     - name: Warn if the report step itself failed
       shell: bash

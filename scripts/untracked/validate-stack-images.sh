@@ -1,57 +1,47 @@
 #!/usr/bin/env bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: validates release/stack-images.yml against the repo -- schema,
-# platform coverage, compose variables, and build-push.yml's release contract.
-# Why: a CI gate asserting the manifest and real workflow/compose state
-# agree, since nothing else enforces that agreement structurally.
+# What: validates stack-images: schema, platforms, compose.
+# Why: asserts manifest and workflow/compose state agreement.
 # From: PR #1501.
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd "$script_dir/../.." && pwd)
 manifest=${1:-"$repo_root/release/stack-images.yml"}
-# What: sources sha-retention-audit.sh's shared retention-list parsing.
-# Why: this static check and gc-sha-retention-audit.sh's own read-time
-# re-validation must share one canonical rollback_anchors acceptance rule
-# (AG-CODE-011) instead of two independently-drifting regexes.
+# What: sources sha-retention-audit.sh's shared parsing library.
+# Why: both checks must share one canonical rollback_anchors rule.
 # From: Issue #1095 | PR #1501.
 # shellcheck source=scripts/lib/sha-retention-audit.sh
 source "$repo_root/scripts/lib/sha-retention-audit.sh"
 
 # fail <message>
 # What: prints a prefixed error to stderr and exits 1.
-# Why: every check below shares one exit path, so a failing assertion's
-# message is always immediately visible without hunting for which check ran.
+# Why: centralizes exit path so failures are immediately visible.
 # From: PR #1501.
 fail() {
   printf 'validate-stack-images: %s\n' "$1" >&2
   exit 1
 }
 
-# What: require_file() fails unless <repo-relative-path> exists under repo_root.
-# Why: a manifest field pointing at a moved/deleted file must fail fast,
-# not surface later as an unrelated build error.
+# What: require_file() fails if a repo-relative path is missing.
+# Why: catches manifest field errors before build failures.
 # From: PR #1501.
 require_file() {
   local path=$1
   [[ -f "$repo_root/$path" ]] || fail "missing required file: $path"
 }
 
-# What: require_grep() fails with a given message unless an extended-regex
-# pattern matches a given file.
-# Why: lets every substantive check below be one line pairing a pattern
-# with the specific real-world contract it proves.
+# What: require_grep() fails unless pattern matches a file.
+# Why: pairs each pattern with contract it proves in one line.
 # From: PR #1501.
 require_grep() {
   local pattern=$1 path=$2 message=$3
   grep -Eq -- "$pattern" "$repo_root/$path" || fail "$message"
 }
 
-# What: collect_names() prints every `- name:` value under a top-level
-# manifest section (e.g. runtime, tooling, metadata, external).
-# Why: the manifest has no separate per-section name index, so this parses
-# the raw YAML structure directly.
+# What: collect_names() prints every `- name:` in a section.
+# Why: manifest lacks per-section index, parses raw YAML directly.
 # From: PR #1501.
 collect_names() {
   local section=$1
@@ -62,20 +52,16 @@ collect_names() {
   ' "$manifest"
 }
 
-# What: require_name() fails unless <name> appears exactly among given
-# newline-joined names (used with collect_names's output).
-# Why: an exact match only, so a typo'd or renamed image fails instead of
-# silently passing on a partial match.
+# What: require_name() fails unless name appears exactly in list.
+# Why: exact match prevents typos and renames silently passing.
 # From: PR #1501.
 require_name() {
   local names=$1 name=$2 section=$3
   grep -Fxq "$name" <<<"$names" || fail "missing $section image: $name"
 }
 
-# What: require_manifest_platform() fails unless the manifest's entry for
-# <name> declares <platform> under its own `platforms:` list.
-# Why: a manifest platform gap would silently under-declare what a service
-# actually builds for.
+# What: require_manifest_platform() validates platform coverage.
+# Why: platform gaps silently under-declare build capabilities.
 # From: PR #1501.
 require_manifest_platform() {
   local name=$1 platform=$2
@@ -99,12 +85,8 @@ require_grep '^  accepted_ordinary_roots_per_package: 30$' "${manifest#$repo_roo
 require_grep '^  channel_buffer_versions: 5$' "${manifest#$repo_root/}" 'retention must keep exactly five buffered non-ordinary/non-channel versions per package (issue #1585 v1.2)'
 require_grep '^  protect_release_and_rollback_digests: true$' "${manifest#$repo_root/}" 'retention must protect release and rollback digests'
 require_grep '^  rollback_anchors:$' "${manifest#$repo_root/}" 'retention must define a rollback_anchors list (may be empty)'
-# What: validates the rollback_anchors list itself (well-formed header,
-# every entry an exact sha256:<64-hex> digest) via the shared library
-# helpers, not a second independently-drifting regex.
-# Why: this is a static, offline format check only -- it cannot prove a
-# listed digest actually exists in GHCR under its intended package; that
-# live existence check is gc-sha-retention-audit.sh's job alone.
+# What: validates rollback_anchors format via shared library.
+# Why: static format check only; existence is gc-sha-retention.sh.
 # From: Issue #1095 | PR #1501.
 require_rollback_anchors_format() {
   local anchors_raw error_message
@@ -153,10 +135,8 @@ require_manifest_platform utilities linux/arm64
 require_name "$metadata_names" stack metadata
 require_manifest_platform stack linux/amd64
 require_manifest_platform stack linux/arm64
-# What: does not check fluent-bit/syslog-ng here anymore (moved to
-# release/stack-images.yml's `legacy:` section).
-# Why: the first-party `syslog` image now bundles fluent-bit's binary and
-# Alpine's syslog-ng package internally, so neither is pulled standalone.
+# What: skips fluent-bit/syslog-ng check (moved to legacy section).
+# Why: syslog image bundles both internally, not pulled standalone.
 # From: PR #1501.
 for image in docker-socket-proxy nats netdata busybox; do
   require_name "$external_names" "$image" external
@@ -196,10 +176,8 @@ require_grep "image: ${first_party_ref}/watchdog:\\$\\{LANCACHE_IMAGE_TAG:-lates
 require_grep "image: ${first_party_ref}/ui:\\$\\{LANCACHE_IMAGE_TAG:-latest\\}" \
   deploy/quickstart/docker-compose.yml \
   'quickstart compose must use registry/prefix/tag variables for ui'
-# What: checks dhcp/dhcp-proxy/ntp/syslog against quickstart's compose
-# explicitly, not via a loop over runtime_images.
-# Why: not every runtime image is deployed by quickstart (dns collapses to
-# one pair there), so an explicit list is cheaper than an exclusion list.
+# What: explicitly checks dhcp/dhcp-proxy/ntp/syslog in quickstart.
+# Why: quickstart differs from runtime; needs explicit list.
 # From: PR #1501.
 require_grep "image: ${first_party_ref}/dhcp:\\$\\{LANCACHE_IMAGE_TAG:-latest\\}" \
   deploy/quickstart/docker-compose.yml \
@@ -258,10 +236,8 @@ require_grep 'annotation "index:org\.opencontainers\.image\.description=' \
 require_grep 'outputs: type=image,oci-mediatypes=true' \
   .github/workflows/build-push.yml \
   'per-platform service builds must force OCI mediatypes so downstream imagetools create can actually attach index annotations'
-# What: requires build-tools.yml to force OCI mediatypes and publish index
-# annotations too, not just build-push.yml.
-# Why: build-tools.yml independently publishes build-tools:latest/mutable
-# tags, and most CI/dev paths consume those rather than build-push.yml's.
+# What: requires build-tools.yml OCI mediatypes and annotations.
+# Why: build-tools.yml publishes independently from build-push.
 # From: PR #1501.
 require_grep 'outputs: type=image,oci-mediatypes=true' \
   .github/workflows/build-tools.yml \
@@ -299,10 +275,8 @@ forbidden_latest_default_branch="${forbidden_latest_default_branch}_branch}}"
 if grep -Fq "$forbidden_latest_default_branch" "$repo_root/.github/workflows/build-push.yml"; then
   fail 'default branch must not publish latest via an unaudited build-time tag; latest may only move through the gated promote job'
 fi
-# What: checks that `channel_tags+=(latest)` sits inside master's own
-# if/elif arm, not a flat grep anywhere in the file.
-# Why: a flat grep would still pass if the line existed but were tied to
-# the wrong branch; scoping to the arm catches that regression.
+# What: checks channel_tags+=(latest) in master's if/elif arm.
+# Why: flat grep fails if wrong branch; arm scope catches it.
 # From: PR #1501.
 if ! awk '
   /if \[\[ "\$GITHUB_REF" = "refs\/heads\/master" \]\]; then/ { in_branch=1; next }
@@ -312,10 +286,8 @@ if ! awk '
 ' "$repo_root/.github/workflows/build-push.yml"; then
   fail 'master branch promotion must publish the latest channel'
 fi
-# What: fails if current_dev's if/elif arm still auto-publishes nightly.
-# Why: nightly is a real once-daily scheduled/dispatch-only, green-gated
-# channel now (see nightly-refresh.yml), the mirror image of the check
-# above (issue #1254/#1255).
+# What: fails if current_dev auto-publishes nightly (dispatch only).
+# Why: nightly is dispatch-only via nightly-refresh.yml.
 # From: PR #1501.
 if awk '
   /elif \[\[ "\$GITHUB_REF" = "refs\/heads\/current_dev" \]\]; then/ { in_branch=1; next }
@@ -388,11 +360,9 @@ require_grep 'docker buildx imagetools create --prefer-index=false -t "\$target_
 require_grep 'docker buildx imagetools create --prefer-index=false -t "\$target_image" "\$source_image"' \
   .github/workflows/build-push.yml \
   'promotion must preserve single-platform service image metadata when moving channel tags'
-# What: checks for `actions/attest@` inside the centralized pin-owner
-# wrapper, not ghcr-attest-retry or build-push.yml directly.
-# Why: ghcr-attest-retry (retry + fresh re-login on a transient GHCR 401)
-# now calls that wrapper instead of actions/attest itself.
-# From: PR #1501 | Issue #1095
+# What: checks actions/attest in centralized pin-owner wrapper.
+# Why: ghcr-attest-retry calls wrapper instead of actions/attest.
+# From: Issue #1095 | PR #1501.
 require_grep 'uses: \./\.github/actions/ghcr-attest-retry' \
   .github/workflows/build-push.yml \
   'release workflow must create provenance attestations for published first-party images through the shared GHCR retry wrapper'
@@ -402,9 +372,8 @@ require_grep 'actions/attest@' \
 require_grep 'push-to-registry: true' \
   .github/actions/actions-attest-centralized-version/action.yml \
   'provenance attestations must be pushed to the registry'
-# What: checks `steps.build.outputs.digest`, not a separate "retry-build" step id.
-# Why: build/build-arm64's "Build and push" step runs through
-# ghcr-build-push-retry, so that one output already resolves correctly.
+# What: checks steps.build.outputs.digest via push-retry wrapper.
+# Why: build/build-arm64 "Build and push" uses retry wrapper.
 # From: PR #1501.
 require_grep 'subject-digest: \$\{\{ steps\.build\.outputs\.digest \}\}' \
   .github/workflows/build-push.yml \
@@ -460,25 +429,13 @@ require_grep 'bash scripts/untracked/require-image-platforms\.sh "\$image" "\$RE
 require_grep 'is missing required platform' \
   scripts/untracked/require-image-platforms.sh \
   'the shared platform coverage guard must fail closed when a release image misses a required platform'
-# What: checks only build/build-arm64's pushed-digest scan cache dir now,
-# not container-scan's former local-build cache dir.
-# Why: container-scan no longer builds/scans locally (G8), so
-# only this surviving Trivy cache directory still enforces #904's invariant.
+# What: checks pushed-digest scan cache on build-arm64.
+# Why: container-scan no longer scans locally; Trivy enforces it.
 # From: Issue #1095 | PR #1501.
 #
-# What: #904's invariant used to be enforced by a service- and
-# run_id-suffixed cache-dir path, one throwaway directory per matrix job so
-# concurrent writers could never collide. It is now enforced differently: a
-# shared trivy-cache-dir directory (real write+subdirectory probe, real
-# local-disk fallback, never tmpfs) plus a lock-guarded trivy-db-ensure-fresh
-# refresh step, so every scan reads with skip-db-update and only the
-# lock-holder ever writes.
-# Why: pointing every service+platform at one shared, persistent Trivy DB
-# is the actual fix for the redundant-download outage this replaced --
-# wiping the directory every pull_request/workflow_dispatch/retry run
-# defeated Trivy's own DB-freshness check; the per-job-unique directory
-# this check used to require would have reintroduced that outage.
-# From: Issue #1095 | Issue #912
+# What: old per-job cache-dir isolation replaced by shared dir+lock.
+# Why: shared NFS DB fixes the redundant re-download outage.
+# From: Issue #1095 | PR #1747
 require_grep 'uses: \./\.github/actions/trivy-cache-dir' \
   .github/workflows/build-push.yml \
   'the pushed per-service digest scan must resolve its Trivy DB cache directory via trivy-cache-dir (shared NFS + real local-disk fallback, never tmpfs; see #904, superseded by Issue #1095/#912)'

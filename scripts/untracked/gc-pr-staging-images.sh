@@ -2,10 +2,9 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: garbage-collects unprotected GHCR versions for manifest packages.
-# Why: closed PRs and orphans are not enough; ordinary sha-* history must
-# also obey the manifest retention budget instead of growing indefinitely.
-# From: Issue #1095.
+# What: garbage-collects unprotected GHCR version history.
+# Why: sha-* history must obey the retention budget like PRs.
+# From: Issue #1095
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,9 +18,9 @@ source "$script_dir/../lib/github-api-retry.sh"
 # shellcheck source=scripts/lib/sha-retention-audit.sh
 source "$script_dir/../lib/sha-retention-audit.sh"
 
-# What: disables GET caching inside the destructive collector process.
-# Why: immediate pre-delete revalidation must always read current API state.
-# From: Issue #1095.
+# What: disables GET caching in the destructive collector.
+# Why: pre-delete revalidation must read current API state.
+# From: Issue #1095
 # shellcheck disable=SC2034 # read by github_api_get_with_retry() in the sourced library
 GITHUB_API_CACHE_DIR=""
 
@@ -30,66 +29,52 @@ GITHUB_API_CACHE_DIR=""
 org="wiki-mod"
 repo="wiki-mod/lancache-ng"
 manifest="${GC_RETENTION_MANIFEST:-$repo_root/release/stack-images.yml}"
-# What: every service build-push.yml's build/build-arm64 jobs can push a
-# PR staging tag for (including dhcp/dhcp-proxy and build-tools).
-# Why: check-workflow-service-lists.sh requires this to equal the full
-# canonical service set, so it must track build-push.yml's own matrix.
+# What: build/build-arm64 jobs push PR staging tags per service.
+# Why: must match check-workflow-service-lists.sh service matrix.
 # From: Issue #626 | PR #627
 services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities)
 
-# What: keeps the existing per-package deletion cap, default 40.
-# Why: each package gets its own bounded drain budget so one large backlog
-# cannot starve every later package in the same sweep.
-# From: Issue #1095.
+# What: keeps per-package deletion cap at default 40.
+# Why: one backlog cannot starve other packages in same sweep.
+# From: Issue #1095
 max_deletions_per_service="${GC_MAX_DELETIONS_PER_SERVICE:-40}"
 
-# What: caps destructive work across the whole run, independent of package count.
-# Why: a large manual per-package cap must not multiply into an unbounded API drain.
-# From: Issue #1095.
+# What: caps destructive work across entire run.
+# Why: per-package cap must not multiply into unbounded API drain.
+# From: Issue #1095
 max_deletions_total="${GC_MAX_DELETIONS_TOTAL:-1500}"
 
-# What: bounds how many packages may be processed concurrently, default 1.
-# Why: package-level parallelism attacks listing/audit wall time while every
-# individual package still performs DELETE operations serially.
-# From: Issue #1095.
+# What: bounds concurrent package processing, default 1.
+# Why: parallelism reduces wall time; DELETE stays serial.
+# From: Issue #1095
 gc_concurrency="${GC_CONCURRENCY:-1}"
 
-# What: optionally performs every classification/revalidation but no DELETE.
-# Why: workflow_dispatch needs a live safety preview before a large drain.
-# From: Issue #1095.
+# What: optionally classifies/revalidates without deleting.
+# Why: workflow_dispatch needs live safety preview before drain.
+# From: Issue #1095
 gc_dry_run="${GC_DRY_RUN:-false}"
 
-# What: 7-day safety margin, applied to every deletion category alike.
-# Why: a version deletable by tag/reference state alone can still be a
-# build/promotion/backfill still in flight; age is simpler than tracking
-# every concurrent producer. Raised from the original 24h default to 7 days
-# (604800s) per the v1.2 plan -- 24h was judged too tight once
-# active deletion (not just dry-run classification) is really running.
-# From: Issue #1095 | PR #1443 | Issue #1585
+# What: 7-day safety margin for all deletion categories.
+# Why: age covers in-flight builds; 24h too short for deletions.
+# From: Issue #1585 | PR #1443
 min_age_seconds="${GC_MIN_AGE_SECONDS:-604800}"
 
 now_epoch="$(date -u +%s)"
 
-# What: a top-level (not per-service) array -- a PR number is unique
-# repo-wide, so a looked-up state stays valid across services.
-# Why: passed by bare name into a nameref parameter, which static
-# analysis can't trace (hence the disable below).
+# What: top-level array for PR state; PR number unique repo-wide.
+# Why: nameref parameter prevents static analysis without disable.
 # From: Issue #1095 | PR #1443
 # shellcheck disable=SC2034
 declare -A pr_state_cache=()
 
-# What: caps how many LOOKUP_FAILED results a run tolerates before
-# failing loudly, default 10.
-# Why: nearly every lookup failing would otherwise silently no-op the
-# reap path behind a healthy-looking summary.
+# What: caps tolerable LOOKUP_FAILED results, default 10.
+# Why: all lookups failing silently no-ops reap, appears healthy.
 # From: Issue #1095 | PR #1443
 max_pr_lookup_failures="${GC_MAX_PR_LOOKUP_FAILURES:-10}"
 pr_lookup_failures=0
 
-# What: counts services hitting "no GHCR package yet" (404 on listing);
-# threshold scales off the real service count.
-# Why: GitHub's REST docs say 404 can also mean access-denied, so many
-# at once reads as a credential problem, not several launches at once.
+# What: counts services reporting no GHCR package (404).
+# Why: many 404s suggest credential issue, not listing error.
 # From: Issue #1557 | PR #1559
 services_not_found=0
 
@@ -101,23 +86,20 @@ would_delete=0
 gcps_delete_result=""
 gcps_package_presence=""
 
-# What: stores exact root-version identities authorized by the read-only audit.
-# Why: normal sha-* deletion must consume the existing classifier's result,
-# not independently reimplement its release/channel/history policy here.
-# From: Issue #1095.
+# What: stores root-version identities from read-only audit.
+# Why: sha-* deletion reuses existing classifier's policy.
+# From: Issue #1095
 declare -A retention_delete_candidates=()
 retention_history_refs=""
-# What: package inventory exported by the authoritative filtered audit.
-# Why: the collector reuses it instead of immediately listing the same
-# package again; fresh exact-version GETs still protect every DELETE.
+# What: package inventory exported by filtered audit.
+# Why: avoids re-listing same package; fresh GETs protect DELETE.
 # From: Issue #1585 | PR #1586
 retention_versions_snapshot=""
 retention_package_absent=0
 
-# What: runs one DELETE through the existing bounded retry wrapper.
-# Why: every destructive category needs the same retry/idempotency behavior,
-# while dry-run must exercise classification without touching GHCR state.
-# From: Issue #1095.
+# What: runs DELETE through bounded retry wrapper.
+# Why: all destructive categories need same retry behavior.
+# From: Issue #1095
 gc_delete_version() {
   local endpoint="$1" description="$2"
   gc_delete_result="FAILED"
@@ -144,11 +126,9 @@ gc_delete_version() {
   return 1
 }
 
-# What: resolves the Git histories whose sha-* roots share the retention budget.
-# Why: current_dev/master, release branches, and v* release refs are all
-# legitimate producers; an old root must not become immortal merely because
-# it is no longer reachable from current_dev alone.
-# From: Issue #1095.
+# What: resolves Git histories sharing sha-* retention budget.
+# Why: current_dev/master/release/v* all produce legitimate roots.
+# From: Issue #1095
 gc_resolve_retention_history_refs() {
   local explicit="${GC_RETENTION_HISTORY_REFS:-}" refs_output ref
   local -a refs=()
@@ -193,18 +173,9 @@ gc_resolve_retention_history_refs() {
   printf '%s\n' "$normalized"
 }
 
-# What: lists every real container package under this org via the live
-# GHCR API, as a best-effort addition to the static services array/manifest.
-# Why: v1.2 -- a package this repo actually publishes but
-# that nobody added to the static services array or to the manifest's
-# metadata/legacy sections was previously invisible to this reaper with no
-# error or warning at all. A failure here (missing packages-listing scope,
-# transient API error, a test double with no matching mock) degrades to a
-# warning and an empty result rather than failing the whole run -- the
-# static services array plus the manifest's metadata/legacy sections
-# remain the always-present baseline this is additive to, never the sole
-# source of truth, so a discovery outage cannot regress today's coverage.
-# From: Issue #1585.
+# What: lists all real container packages from GHCR API.
+# Why: discovery extends static array without silent gaps.
+# From: Issue #1585
 gc_discover_org_container_packages() {
   local package_prefix="${repo#*/}/" listing_json name
   local -a discovered=()
@@ -226,10 +197,9 @@ gc_discover_org_container_packages() {
   printf '%s\n' "${discovered[@]}"
 }
 
-# What: builds one package's exact would-delete map with the existing audit.
-# Why: filtered audits let package workers run concurrently without creating
-# a second retention classifier or serializing the full registry inventory.
-# From: Issue #1095.
+# What: builds package would-delete map from audit.
+# Why: filtered audits enable concurrent workers safely.
+# From: Issue #1095
 gc_build_service_retention_plan() {
   local service="$1" audit_output snapshot_file line field package_name version_id digest tags decision package
   local -a audit_fields=()
@@ -299,16 +269,15 @@ gc_build_service_retention_plan() {
   rm -f -- "$audit_output"
 }
 
-# What: re-reads one exact package version immediately before any GC deletion.
-# Why: digest, complete tags, age, and PR state can change after the sweep
-# snapshot; every destructive category needs the same fresh fail-closed gate.
-# From: Issue #1095 | Issue #1585 | PR #1586
+# What: re-reads package version before any GC deletion.
+# Why: digest/tags/age/PR state change; need fresh gate.
+# From: Issue #1585 | PR #1586
 gc_revalidate_retention_candidate() {
   local service="$1" package="$2" version_id="$3" expected_digest="$4" expected_tags="$5"
   local body_file fields fresh_id fresh_digest fresh_tags fresh_created_at fresh_epoch tag pr_number pr_state
-  # What: suppresses SC2034 for a nameref-backed PR-state cache.
-  # Why: gcps_pr_lookup_state receives its name and accesses it through local -n.
-  # From: Issue #1095 | PR #1585.
+  # What: suppresses SC2034 for nameref-backed PR-state cache.
+  # Why: gcps_pr_lookup_state accesses it through local -n.
+  # From: Issue #1095 | PR #1585
   # shellcheck disable=SC2034
   local -A fresh_pr_state_cache=()
   local -a fresh_tag_array=()
@@ -346,9 +315,8 @@ gc_revalidate_retention_candidate() {
   for tag in "${fresh_tag_array[@]}"; do
     if [[ "$tag" =~ ^pr-([0-9]+)-sha-[0-9a-f]{7,}(-amd64|-arm64)?$ ]]; then
       pr_number="${BASH_REMATCH[1]}"
-      # What: bypasses the run-local planning cache for the final safety check.
-      # Why: a PR can reopen after planning; only a live answer immediately
-      # before DELETE may authorize removal of a PR-associated version.
+      # What: bypasses run-local cache for final safety check.
+      # Why: PR can reopen after planning; need live answer.
       # From: Issue #1585 | PR #1586
       GCPS_PR_STATE_CACHE_DIR="" gcps_pr_lookup_state "$pr_number" "$repo" fresh_pr_state_cache pr_state
       if [[ "$pr_state" == "LOOKUP_FAILED" ]]; then
@@ -364,10 +332,8 @@ gc_revalidate_retention_candidate() {
 }
 
 # process_service <service> [version-snapshot-jsonl]
-# What: runs in the current shell -- called as a plain statement, never
-# wrapped in `$(...)`.
-# Why: top-level had_errors/deleted/kept/pr_state_cache updates must stay
-# visible to later calls; a subshell would silently discard them.
+# What: runs in shell as plain statement, no substitution.
+# Why: updates to globals must stay visible to callers.
 # From: Issue #1095 | PR #1443
 process_service() {
   local service="$1"
@@ -378,11 +344,8 @@ process_service() {
   local -A retained_root_prefixes=() live_subject_digests=()
   local revalidate_status delete_description kind prefix
 
-  # What: production reuses the exact JSONL inventory exported by the
-  # authoritative filtered retention audit. Direct unit callers may omit the
-  # snapshot and retain the legacy mocked gh-listing path.
-  # Why: a live GC previously fetched every multi-thousand-version package
-  # twice before deleting anything, multiplying API pressure for no safety gain.
+  # What: production reuses JSONL inventory from filtered audit.
+  # Why: avoids fetching multi-thousand-version packages twice.
   # From: Issue #1585 | PR #1586
   if [[ -n "$version_snapshot_file" ]]; then
     if [[ ! -s "$version_snapshot_file" ]]; then
@@ -396,9 +359,8 @@ process_service() {
       return
     fi
   else
-    # What: compatibility path for direct unit tests and standalone sourced use.
-    # Why: production workers always pass the audit snapshot; keeping this path
-    # avoids coupling process_service() unit coverage to the audit subprocess.
+    # What: compatibility path for unit tests/standalone sourced use.
+    # Why: decouples unit coverage from audit subprocess.
     # From: Issue #1585 | PR #1586
     local versions_stderr
     versions_stderr="$(mktemp)"
@@ -427,10 +389,8 @@ process_service() {
   local registry_token=""
   local service_deletions=0
 
-  # What: Pass 0 validates every version's `.name` matches the digest shape
-  # the orphan phase's digest-set comparisons assume.
-  # Why: one malformed entry disables orphan classification for the whole
-  # service -- a partial digest set is more dangerous than an empty one.
+  # What: Pass 0 validates version .name matches digest.
+  # Why: malformed entry disables orphan classification.
   # From: Issue #1095 | PR #1443
   local version_entry name
   while IFS= read -r version_entry; do
@@ -442,10 +402,8 @@ process_service() {
       continue
     fi
     if ! gcps_version_name_is_digest "$name"; then
-      # What: a malformed digest shape is `::error::` + had_errors=1
-      # (AG-VAL-001), not a soft warning.
-      # Why: required classification evidence is unavailable here, same as
-      # the jq-read failure above -- the run must not exit 0 looking clean.
+      # What: malformed digest triggers error, not soft warning.
+      # Why: required classification evidence unavailable; must fail.
       # From: Issue #1557 | PR #1559
       echo "::error::A $service package version's .name ('$name') is not the expected sha256:<64-hex> digest shape -- disabling orphan (untagged-version) classification for this service this run. Closed-PR tagged-version reaping is unaffected."
       had_errors=1
@@ -454,10 +412,8 @@ process_service() {
     fi
   done <<< "$version_list"
 
-  # What: fetches the anonymous pull token once per service before Pass 1,
-  # regardless of tagged-version count.
-  # Why: deferring to "the first tagged version Pass 1 sees" would leave it
-  # empty for a wholly-untagged service, but Pass 2 needs it either way.
+  # What: fetches anonymous pull token once per service before Pass 1.
+  # Why: untagged service needs token for Pass 2 manifest fetches.
   # From: Issue #1095 | PR #1443
   if [[ "$orphan_phase_ok" == "1" ]]; then
     if ! registry_token="$(ghcr_retry ghcr.io "" "" -- gcps_registry_anon_token "$service" "$repo")" || [[ -z "$registry_token" ]]; then
@@ -467,10 +423,8 @@ process_service() {
     fi
   fi
 
-  # What: Pass 1 -- closed-PR tagged-version classification, plus (when
-  # orphan_phase_ok) collecting manifest children into children_digests.
-  # Why: Pass 2 needs children_digests to tell a genuinely orphaned
-  # version apart from one still referenced by a live tag's index.
+  # What: Pass 1 classifies closed-PR versions, collects children.
+  # Why: Pass 2 needs children digests for true orphan check.
   # From: Issue #1095 | PR #1443
   local version_id tag_list planned_identity planned_digest planned_tags current_digest current_tags retention_candidate
   while IFS= read -r version_entry; do
@@ -496,10 +450,8 @@ process_service() {
       continue # untagged -- classified in Pass 2 below, not here
     fi
 
-    # What: sha256-<subject> tags are NOT added to the forward child set.
-    # Why: they are reverse attestation/referrer edges; allowing a stale
-    # attestation to protect its otherwise-orphaned subject creates a cycle
-    # in which neither object can ever become garbage.
+    # What: sha256-<subject> tags excluded from forward child set.
+    # Why: stale attestations create retention cycles with subjects.
     # From: Issue #1585 | PR #1586
     local protected=0 has_closed_pr_tag=0 tag
     retention_candidate=0
@@ -523,10 +475,8 @@ process_service() {
       [[ -z "$tag" ]] && continue
       if [[ "$tag" =~ ^pr-([0-9]+)-sha-[0-9a-f]{7,}(-amd64|-arm64)?$ ]]; then
         local pr_number="${BASH_REMATCH[1]}"
-        # What: called as a plain statement with a result-variable arg,
-        # not wrapped in `$(...)`.
-        # Why: command substitution forks a subshell, so the nameref cache
-        # write would land on a private copy and vanish.
+        # What: called as plain statement with result-variable arg.
+        # Why: subshell would lose nameref cache write to private copy.
         # From: Issue #1557 | PR #1559
         local pr_state
         gcps_pr_lookup_state "$pr_number" "$repo" pr_state_cache pr_state
@@ -535,10 +485,8 @@ process_service() {
             protected=1
             ;;
           LOOKUP_FAILED)
-            # What: treated exactly like an open PR (keep, don't delete),
-            # but counted separately in pr_lookup_failures.
-            # Why: counting separately lets max_pr_lookup_failures catch a
-            # run where this happens pervasively, not just once.
+            # What: treated like open PR; kept but counted separately.
+            # Why: separate count lets max_pr_lookup_failures catch pattern.
             # From: Issue #1095 | PR #1443
             protected=1
             pr_lookup_failures=$((pr_lookup_failures + 1))
@@ -553,9 +501,7 @@ process_service() {
           continue
         fi
         # What: any non pr-* tag is protected unconditionally.
-        # Why: a scan-failed sha-<commit> tag is already deleted upstream
-        # by build-push.yml's own cleanup step, so this reaper never
-        # needs to re-derive that outcome itself.
+        # Why: scan-failed sha-<commit> tags already deleted upstream.
         # From: Issue #1095 | PR #1443
         protected=1
         break
@@ -565,9 +511,8 @@ process_service() {
 
     if [[ "$orphan_phase_ok" == "1" ]]; then
       local version_digest manifest_json
-      # What: `if ! version_digest=...`, not a bare assignment.
-      # Why: an unguarded failure here would exit the entire script under
-      # `set -euo pipefail` -- no summary, no had_errors, no other services.
+      # What: guarded assignment: `if ! version_digest=...`.
+      # Why: unguarded failure exits script under pipefail.
       # From: Issue #1095 | PR #1443
       if ! version_digest="$(printf '%s' "$version_entry" | jq -r '.name' 2>&1)"; then
         echo "::error::Failed to read $service version $version_id's own digest via jq: $version_digest"
@@ -583,10 +528,8 @@ process_service() {
           orphan_phase_ok=0
         else
           local child_digest children_output
-          # What: gcps_extract_manifest_children failing is treated the
-          # same as a fetch failure above.
-          # Why: an incomplete children set is what actually protects a
-          # live platform manifest from being misclassified as orphaned.
+          # What: extract_manifest_children failure treated as fetch fail.
+          # Why: incomplete set misclassifies manifests as orphaned.
           # From: Issue #1095 | PR #1443
           if ! children_output="$(gcps_extract_manifest_children "$manifest_json")"; then
             echo "::error::Failed to extract manifest children for $service digest $version_digest -- disabling orphan classification for this service this run."
@@ -608,10 +551,8 @@ process_service() {
     fi
 
     local created_at created_epoch
-    # What: a malformed/unreadable .created_at flags had_errors, not a
-    # silent fail-closed keep.
-    # Why: a bad timestamp on a real GHCR record is a "should never
-    # happen" data-integrity signal (AG-VAL-001), not a transient blip.
+    # What: malformed .created_at flags error, not silent keep.
+    # Why: bad timestamp signals data-integrity issue (AG-VAL-001).
     # From: Issue #1557 | PR #1559
     if ! created_at="$(printf '%s' "$version_entry" | jq -r '.created_at' 2>&1)"; then
       echo "::error::Failed to read created_at for $service version $version_id via jq: $created_at -- keeping it this run (fail closed)."
@@ -630,10 +571,8 @@ process_service() {
       continue
     fi
 
-    # What: tags_display is cosmetic (log message only); a jq failure here
-    # degrades the message instead of aborting.
-    # Why: this isn't actually blocking the delete, since tag_list above
-    # already fully resolved this version's tags.
+    # What: tags_display cosmetic for log message; jq failure degrades.
+    # Why: tag_list already resolved tags; not blocking delete.
     # From: Issue #1095 | PR #1443
     local tags_display
     tags_display="$(printf '%s' "$version_entry" | jq -rc '.metadata.container.tags // []' 2>&1)" || tags_display="<jq error: $tags_display>"
@@ -676,9 +615,8 @@ process_service() {
     fi
   done <<< "$version_list"
 
-  # What: protects forward children of every tagged parent that remains after Pass 1.
-  # Why: shared platform/attestation closure follows the final simulated/real
-  # parent state, not the stale inventory state from before retention deletes.
+  # What: protects forward children of remaining tagged parents.
+  # Why: closure follows final parent state, not stale inventory.
   # From: Issue #1095 | PR #1586
   local parent_version_id retained_child_digest
   for parent_version_id in "${!manifest_children_by_version[@]}"; do
@@ -689,10 +627,8 @@ process_service() {
     done <<<"${manifest_children_by_version[$parent_version_id]}"
   done
 
-  # What: rebuilds live root/subject identities from the versions that remain
-  # after Pass 1 (WOULD_DELETE counts as removed in dry-run simulation).
-  # Why: tagged closure must still be collectible on a later sweep when its
-  # root was deleted in an earlier run; same-run removed_* maps lose that fact.
+  # What: rebuilds live root/subject identities after deletions.
+  # Why: closure collectible later after root deletion.
   # From: Issue #1585 | PR #1586
   local retained_version_id retained_digest retained_tags
   while IFS= read -r version_entry; do
@@ -722,10 +658,9 @@ process_service() {
     live_subject_digests["$retained_child_digest"]=1
   done
 
-  # What: Pass 1.5 removes tagged closure whose root/subject is no longer live.
-  # Why: sha-*-<arch> and sha256-<subject> objects must remain collectible
-  # across GC runs instead of requiring their root to be deleted in this run.
-  # From: Issue #1095 | Issue #1585 | PR #1586
+  # What: Pass 1.5 removes tagged closure with no live root/subject.
+  # Why: sha-*-<arch> and sha256-<subject> stay collectible later.
+  # From: Issue #1585 | PR #1586
   if [[ "$orphan_phase_ok" == "1" ]]; then
     local associated_candidate associated_tag_count association_ok candidate_digest expected_tags
     local child_subject_digest
@@ -798,10 +733,9 @@ process_service() {
     return
   fi
 
-  # What: Pass 2 -- orphan classification against the retained-parent graph.
-  # Why: children of roots removed in this or a prior run must not remain
-  # protected by stale edges from the beginning of this sweep.
-  # From: Issue #1095 | Issue #1585 | PR #1586
+  # What: Pass 2 classifies orphans against retained-parent graph.
+  # Why: children of deleted roots need new edge check this sweep.
+  # From: Issue #1585 | PR #1586
   while IFS= read -r version_entry; do
     [[ -z "$version_entry" ]] && continue
     if (( service_deletions >= max_deletions_per_service )); then
@@ -827,19 +761,16 @@ process_service() {
       continue
     fi
     if [[ -n "${protected_children_digests[$name]:-}" ]]; then
-      # What: still referenced as a forward child by a parent that remains.
-      # Why: only retained-parent edges protect closure; an edge from a root
-      # deleted earlier in this sweep must not make the child immortal.
+      # What: still referenced as forward child by remaining parent.
+      # Why: only retained-parent edges protect closure; stale don't.
       # From: Issue #1095 | PR #1586
       kept=$((kept + 1))
       continue
     fi
 
     local created_at created_epoch
-    # What: a jq read failure and an unparseable timestamp both flag
-    # had_errors and log why.
-    # Why: same required-evidence reasoning as Pass 1's identical check
-    # above (AG-VAL-001).
+    # What: jq failure and unparseable timestamp flag had_errors.
+    # Why: same required-evidence reasoning as Pass 1 (AG-VAL-001).
     # From: Issue #1557 | PR #1559
     if ! created_at="$(printf '%s' "$version_entry" | jq -r '.created_at' 2>&1)"; then
       echo "::error::Failed to read created_at for $service version $version_id via jq: $created_at -- keeping it this run (fail closed)."
@@ -858,16 +789,12 @@ process_service() {
       continue
     fi
 
-    # What: a candidate with no retained `.manifests[]` parent may still be a
-    # REFERRERS-API attestation via its own manifest's `subject` field.
-    # Why: one extra GET per candidate is cheap insurance against deleting
-    # a still-relevant attestation.
+    # What: candidate may be REFERRERS-API attestation.
+    # Why: one extra GET per candidate guards attestations.
     # From: Issue #1095 | PR #1443
     local candidate_manifest
-    # What: a failed fetch here flags had_errors, in addition to keeping
-    # the candidate (fail closed).
-    # Why: matches Pass 1's manifest-fetch reasoning (AG-VAL-001) -- the
-    # exit code must reflect an incomplete required check.
+    # What: fetch failure flags error and keeps candidate (fail closed).
+    # Why: matches Pass 1's manifest-fetch reasoning (AG-VAL-001).
     # From: Issue #1557 | PR #1559
     if ! candidate_manifest="$(ghcr_retry ghcr.io "" "" -- gcps_fetch_manifest "$service" "$name" "$repo" "$registry_token")" || [[ -z "$candidate_manifest" ]]; then
       echo "::error::Could not fetch $service candidate orphan $name's own manifest to check for a subject reference -- keeping it this run rather than risk deleting a live attestation."
@@ -883,17 +810,15 @@ process_service() {
       continue
     fi
     if [[ -n "$subject_digest" && -n "${live_subject_digests[$subject_digest]:-}" ]]; then
-      # What: an OCI referrer is retained only while its subject is itself live.
-      # Why: mere existence of an otherwise-orphaned subject must not create a
-      # subject<->attestation retention cycle that survives forever.
+      # What: OCI referrer retained only while subject is live.
+      # Why: orphaned subject must not create immortal retention cycle.
       # From: Issue #1585 | PR #1586
       kept=$((kept + 1))
       continue
     fi
 
-    # What: revalidates an orphan's exact identity and still-empty tag set.
-    # Why: a version can gain a channel/release/root tag after the package
-    # snapshot was taken; stale untagged evidence must never authorize DELETE.
+    # What: revalidates orphan identity and empty tag set.
+    # Why: versions can gain tags after snapshot; need recheck.
     # From: Issue #1585 | PR #1586
     if gc_revalidate_retention_candidate "$service" "$package" "$version_id" "$name" ""; then
       :
@@ -912,10 +837,9 @@ process_service() {
   done <<< "$version_list"
 }
 
-# What: runs one package worker and serializes its mutable counters.
-# Why: background shells cannot update the parent's globals directly, so
-# bounded package concurrency needs an explicit result handoff.
-# From: Issue #1095.
+# What: runs package worker and serializes mutable counters.
+# Why: background shells can't update parent globals; need handoff.
+# From: Issue #1095
 gc_run_package_worker() {
   local service="$1" result_file="$2" package_deletion_cap="$3"
   max_deletions_per_service="$package_deletion_cap"
@@ -925,16 +849,15 @@ gc_run_package_worker() {
   would_delete=0
   pr_lookup_failures=0
   services_not_found=0
-  # What: suppresses SC2034 for the worker-local reset of the nameref cache.
-  # Why: gcps_pr_lookup_state accesses pr_state_cache indirectly through local -n.
-  # From: Issue #1095 | PR #1585.
+  # What: suppresses SC2034 for worker-local nameref cache reset.
+  # Why: gcps_pr_lookup_state accesses cache through local -n.
+  # From: Issue #1095 | PR #1585
   # shellcheck disable=SC2034
   pr_state_cache=()
 
   if ! gc_build_service_retention_plan "$service"; then
-    # What: skips the second collector phase when the authoritative plan failed.
-    # Why: retrying the same package through an independent full listing after
-    # an API failure increases pressure and cannot restore safe SHA evidence.
+    # What: skips collector phase when authoritative plan failed.
+    # Why: retry increases API pressure; can't restore evidence.
     # From: Issue #1585 | PR #1586
     had_errors=1
   elif (( retention_package_absent == 0 )); then
@@ -949,23 +872,17 @@ gc_run_package_worker() {
 }
 
 # main
-# What: everything requiring a real GH_TOKEN, real tools, and an actual
-# sweep lives here, not at plain top level.
-# Why: the bats suite sources this file under mocked gh/curl; main() must
-# not run out from under a plain `source` (BASH_SOURCE guard, file bottom).
+# What: real GH_TOKEN, tools, and sweep work located in main().
+# Why: bats sources under mocks; guard prevents bad execution.
 # From: Issue #1095 | PR #1443
 main() {
-  # What: this `${var:?message}` error avoids apostrophes/single quotes
-  # (shellcheck SC1011).
-  # Why: an apostrophe inside the expansion gets misparsed as opening a
-  # quoted string that desyncs on the next real quote.
+  # What: ${var:?message} error avoids apostrophes (SC1011).
+  # Why: apostrophe inside expansion misparsed as opening quote.
   # From: Issue #1095 | PR #1443
   : "${GH_TOKEN:?GH_TOKEN (the GHCR_PACKAGE_DELETE_PAT secret configured on this repository) is required -- see the calling workflow, specifically its Check for GHCR deletion credentials step, which must gate whether this script ever runs.}"
 
-  # What: fails loud and early (AG-CI-001) if gh/jq/curl/date are missing,
-  # not a confusing mid-run parse error.
-  # Why: self-hosted lancache-light runners aren't the pinned build-tools
-  # container -- no tool beyond the bare OS can be assumed present.
+  # What: fails early (AG-CI-001) if gh/jq/curl/date are missing.
+  # Why: self-hosted runners lack pinned build-tools container tools.
   # From: Issue #1095 | PR #1443
   local required_cmd
   for required_cmd in gh jq curl date git awk mkdir mktemp sleep sort uniq; do
@@ -1019,13 +936,9 @@ main() {
     package_targets+=("$target_name")
   done <<<"$target_inventory"
 
-  # What: adds any live GHCR package not already covered by the static
-  # services array or the manifest's metadata/legacy sections.
-  # Why: v1.2 point 1 -- dynamic discovery must never remove
-  # or replace the existing baseline, only extend it, so a discovery outage
-  # (see gc_discover_org_container_packages's own fallback) cannot regress
-  # today's coverage.
-  # From: Issue #1585.
+  # What: adds live GHCR packages not in static array/manifest.
+  # Why: discovery extends baseline; outage can't regress coverage.
+  # From: Issue #1585
   declare -A package_targets_seen=()
   for target_name in "${package_targets[@]}"; do
     package_targets_seen["$target_name"]=1
@@ -1054,10 +967,8 @@ main() {
     gc_concurrency="$package_count"
   fi
 
-  # What: shares confirmed PR planning states across package-worker shells.
-  # Why: without a run-local cross-worker cache the same PR is queried once
-  # per package, multiplying GitHub API pressure during large registry sweeps.
-  # Fresh pre-delete checks bypass this directory explicitly.
+  # What: shares confirmed PR planning states across package workers.
+  # Why: cross-worker cache avoids querying same PR per package.
   # From: Issue #1585 | PR #1586
   local shared_pr_cache_dir
   shared_pr_cache_dir="$(mktemp -d "${TMPDIR:-/tmp}/lancache-ng-gc-pr-state.XXXXXX")"
@@ -1132,10 +1043,8 @@ main() {
     had_errors=1
   fi
 
-  # What: more than half of the configured services hitting "no GHCR
-  # package yet" in one run is treated as a real, run-failing error.
-  # Why: GitHub's REST docs say a 404 can also hide an authorization
-  # failure this reaper can't distinguish from genuine absence.
+  # What: >half of services with no GHCR package treated as error.
+  # Why: 404 can hide authorization failure vs. genuine absence.
   # From: Issue #1557 | PR #1559
   local max_services_not_found=$(( (${#package_targets[@]} / 2) + 1 ))
   if (( services_not_found >= max_services_not_found )); then
@@ -1149,10 +1058,8 @@ main() {
   fi
 }
 
-# What: `"${BASH_SOURCE[0]}" == "${0}"` is true only when this file runs
-# directly, not when it's `source`d.
-# Why: the bats suite sources this file under mocked gh/curl; main()
-# (hard-requiring a real GH_TOKEN) must not run out from under a `source`.
+# What: ${BASH_SOURCE[0]} == ${0} guards direct execution only.
+# Why: bats sources file with mocks; main() needs real GH_TOKEN.
 # From: Issue #1095 | PR #1443
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   main

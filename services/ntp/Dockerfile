@@ -31,10 +31,9 @@
 # package, matching the same finding already made for the other three
 # already-migrated/being-migrated services in this project.
 
-# What: source stage for tools copied into the final image below.
-# Why: uses the mutable `:latest` tag -- see services/proxy/Dockerfile's
-#   identical stage comment and AG-KD-010 for the full rationale.
-# From: Issue #1095 | AG-KD-010
+# What: source stage for tools copied into final image.
+# Why: mutable `:latest` tag for build flexibility.
+# From: Issue #1095
 ARG UTILITIES_IMAGE=ghcr.io/wiki-mod/lancache-ng/utilities:latest
 FROM ${UTILITIES_IMAGE} AS utilities-tools
 
@@ -49,35 +48,25 @@ LABEL org.opencontainers.image.description="LanCache-NG-NTP: chrony-based NTP se
 # services/dhcp-proxy/Dockerfile's matching comment for the fuller
 # rationale and live verification of this behavior.
 
-# What: curl/gettext-envsubst(envsubst) come from the shared utilities
-#   image (COPY below) instead of apk-installed here.
-# Why: same alpine:3.24 base digest as the utilities image, so this is a
-#   safe binary-compatible swap -- see services/proxy/Dockerfile's
-#   identical comment for the full rationale.
+# What: curl/envsubst binaries from shared utilities image.
+# Why: same Alpine base digest ensures binary compatibility.
 # From: Issue #1556
 COPY --from=utilities-tools /usr/local/bin/curl /usr/local/bin/curl
 COPY --from=utilities-tools /usr/bin/envsubst /usr/bin/envsubst
 COPY --from=utilities-tools /usr/lib/libintl.so.8 /usr/lib/libintl.so.8
 
-# What: verifies the copied binaries actually run.
-# Why: a missing shared-library dependency fails at exec time, not at
-#   COPY time -- see services/proxy/Dockerfile's identical comment.
+# What: verifies copied binaries work on target system.
+# Why: shared libraries fail at runtime, not copy time.
 # From: Issue #1556
 RUN set -euo pipefail; \
     printf '%s' '$FOO' | FOO=bar envsubst >/dev/null; \
     curl --version >/dev/null
 
-# What: ca-certificates is installed even though nothing here calls curl
-#   over HTTPS today.
-# Why: the copied curl is compiled with a fixed CA bundle path
-#   (services/utilities/Dockerfile), which only exists once this package
-#   generates it -- without it, any HTTPS use of this troubleshooting tool
-#   fails cert verification.
+# What: ca-certificates package enables curl's CA bundle.
+# Why: copied curl has fixed CA path; package generates it.
 # From: Issue #1556
-# What: declares APT_CACHE_BUST right before the RUN it busts.
-# Why: without this, BuildKit's cache has no wall-clock expiry and can
-#   replay a stale `apk upgrade` forever; see tools/build-tools/Dockerfile's
-#   identical ARG for the full rationale.
+# What: APT_CACHE_BUST invalidates BuildKit's upgrade cache.
+# Why: without this, BuildKit replays stale cache forever.
 # From: Issue #1095
 ARG APT_CACHE_BUST=""
 RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
