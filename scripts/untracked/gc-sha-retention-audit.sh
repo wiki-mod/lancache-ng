@@ -13,6 +13,13 @@ repo_root="$(cd "$script_dir/../.." && pwd)"
 # From: Issue #1095 | PR #1586
 # shellcheck source=scripts/lib/github-api-retry.sh
 source "$repo_root/scripts/lib/github-api-retry.sh"
+# What: reuses gcps age-check + manifest-fetch helpers
+# Why: avoids a second copy of either, per AG-CODE-011
+# From: Issue #1095
+# shellcheck source=scripts/lib/ghcr-retry.sh
+source "$repo_root/scripts/lib/ghcr-retry.sh"
+# shellcheck source=scripts/lib/gc-pr-staging-images.sh
+source "$repo_root/scripts/lib/gc-pr-staging-images.sh"
 # shellcheck source=scripts/lib/sha-retention-audit.sh
 source "$repo_root/scripts/lib/sha-retention-audit.sh"
 
@@ -342,6 +349,37 @@ audit_package() {
     return 1
   }
 
+  # What: builds root manifests' child-digest reference set
+  # Why: old 'separate pass' only ever covers PR-staging
+  # From: Issue #1095
+  declare -A closure_referenced_children=()
+  local closure_check_ok=1
+  local closure_registry_token=""
+  if closure_registry_token="$(ghcr_retry ghcr.io "" "" -- gcps_registry_anon_token "$package" "$GITHUB_REPOSITORY")" && [[ -n "$closure_registry_token" ]]; then
+    local root_digest root_manifest root_children_output root_child
+    while IFS= read -r root_digest; do
+      [[ -n "$root_digest" ]] || continue
+      if ! root_manifest="$(ghcr_retry ghcr.io "" "" -- gcps_fetch_manifest "$package" "$root_digest" "$GITHUB_REPOSITORY" "$closure_registry_token")" \
+          || [[ -z "$root_manifest" ]] || ! gcps_manifest_looks_valid "$root_manifest"; then
+        echo "::warning::Cannot fetch/validate root manifest $root_digest for ${repository_name}/${package}; disabling the non-ordinary-version closure check for this package (falls back to unconditional protect)." >&2
+        closure_check_ok=0
+        break
+      fi
+      if ! root_children_output="$(gcps_extract_manifest_children "$root_manifest")"; then
+        echo "::warning::Cannot extract manifest children for root $root_digest in ${repository_name}/${package}; disabling the non-ordinary-version closure check for this package." >&2
+        closure_check_ok=0
+        break
+      fi
+      while IFS= read -r root_child; do
+        [[ -n "$root_child" ]] || continue
+        closure_referenced_children["$root_child"]=1
+      done <<<"$root_children_output"
+    done < <(jq -r 'select((.metadata.container.tags // []) | any(test("^sha-[0-9a-f]{7,40}$"))) | .name' "$versions_file")
+  else
+    echo "::warning::Cannot obtain an anonymous pull token for ${repository_name}/${package}; disabling the non-ordinary-version closure check for this package." >&2
+    closure_check_ok=0
+  fi
+
   local root_candidates="$package_dir/root-candidates.tsv"
   : >"$root_candidates"
   # What: V1.2 buffer pool ranks rootless non-channel versions
@@ -427,13 +465,36 @@ audit_package() {
     }
 
     if (( root_count == 0 && child_count > 0 )); then
-      sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "closure" "protect" "artifact-child-closure-unresolved"
+      # What: ages a merge-orphaned child past safety margin
+      # Why: a real merge job cannot run this long anymore
+      # From: Issue #1095
+      local closure_epoch=""
+      if [[ "$built" != "unknown" ]]; then
+        closure_epoch="$(gcps_created_at_to_epoch "$built")" || closure_epoch=""
+      fi
+      if [[ -n "$closure_epoch" ]] && gcps_is_old_enough_to_delete "$closure_epoch" "$now_epoch" "$orphan_closure_min_age_seconds"; then
+        sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "closure" "would-delete" "artifact-child-closure-orphaned-past-safety-margin"
+        direct_would_delete_count=$((direct_would_delete_count + 1))
+      else
+        sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "closure" "protect" "artifact-child-closure-unresolved"
+      fi
       continue
     fi
-    # What: Truly untagged version stays protected; others buffer
-    # Why: Only version with tags but no match becomes candidate
-    # From: Issue #1585
+    # What: checks untagged version against root children
+    # Why: referenced or unverifiable -- stays protected
+    # From: Issue #1585 | Issue #1095
     if (( root_count == 0 && other_count == 0 )); then
+      if (( closure_check_ok == 1 )) && [[ -z "${closure_referenced_children[$digest]+x}" ]]; then
+        local nonord_epoch=""
+        if [[ "$built" != "unknown" ]]; then
+          nonord_epoch="$(gcps_created_at_to_epoch "$built")" || nonord_epoch=""
+        fi
+        if [[ -n "$nonord_epoch" ]] && gcps_is_old_enough_to_delete "$nonord_epoch" "$now_epoch" "$orphan_closure_min_age_seconds"; then
+          sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "protected" "would-delete" "non-ordinary-version-unreferenced-past-safety-margin"
+          direct_would_delete_count=$((direct_would_delete_count + 1))
+          continue
+        fi
+      fi
       sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "protected" "protect" "non-ordinary-version"
       continue
     fi
