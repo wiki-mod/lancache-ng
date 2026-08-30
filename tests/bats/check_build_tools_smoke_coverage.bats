@@ -151,18 +151,8 @@ write_smoke() {
 
 # --- services/utilities/verify-version-banner.sh ---------------------------
 #
-# What: coverage for the shared copied-tool version-banner smoke check that
-# services/utilities/Dockerfile ships and six consumer Dockerfiles invoke,
-# plus those Dockerfiles' real usage of it.
-# Why: colocated here on maintainer instruction rather than as a new file
-# (AG-CODE-013): both sections cover a build/tool image's own smoke-check
-# mechanism -- this file's original scope for tools/build-tools, this
-# section for the shared utilities image -- even though the two mechanisms
-# parse different concrete shapes (a required_tools=() array vs. a single
-# generic argument-driven check). Searched tests/bats/ twice (once before
-# writing a since-removed standalone file, once more on maintainer request)
-# for an existing home; no file already covered either services/utilities/
-# or Dockerfile-copied-tool smoke checks generically.
+# What: coverage for the shared version-banner smoke check.
+# Why: colocated here per maintainer decision (AG-CODE-013).
 # From: Issue #1613
 
 @test "verify-version-banner.sh passes when the tool's output contains the expected banner" {
@@ -178,9 +168,9 @@ write_smoke() {
 }
 
 @test "verify-version-banner.sh ignores the checked tool's own exit code (the lsof -v convention)" {
-    # What: a fixture 'tool' that prints the banner but exits non-zero.
-    # Why: reproduces lsof's own unreliable -v exit-code contract (commit
-    #   b832d0dc) -- the banner text alone must decide pass/fail.
+    # What: fixture tool prints the banner, exits non-zero.
+    # Why: lsof's -v exit code is unreliable; banner text decides.
+    # From: Issue #1613
     fixture_bin="$BATS_TEST_TMPDIR/fake-lsof"
     {
         printf '#!/bin/sh\n'

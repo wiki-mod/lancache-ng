@@ -124,10 +124,8 @@ val() {
     [ "$(val workflow)" = "false" ]
 }
 
-# What: rust-acceleration-preflight changes set only dns/ui/watchdog image
-#   flags in the `build` job's matrix.rust, never the other services.
-# Why: guards against the PR #1634 regression shape, where a change to one
-#   shared action forced all 10 services to rebuild.
+# What: rust-acceleration-preflight sets only dns/ui/watchdog.
+# Why: guards a past regression forcing all 10 to rebuild.
 # From: Issue #1095
 @test "G15: rust-acceleration-preflight change sets only dns_image/ui/watchdog, workflow false" {
     run_classify ".github/actions/rust-acceleration-preflight/action.yml"

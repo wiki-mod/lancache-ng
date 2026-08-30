@@ -135,7 +135,7 @@ pub fn read_status(path: &str) -> WatchdogStatusReadResult {
 }
 
 // What: friendly label for every name watchdog can report
-// Why: watchdog now monitors 10 services, was 3 (#842/#1296)
+// Why: watchdog now monitors 10 services, was 3.
 // From: Issue #1437
 pub fn display_label(container_name: &str) -> String {
     match container_name {
