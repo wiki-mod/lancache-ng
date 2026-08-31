@@ -191,6 +191,16 @@ val() {
     [ "$(val workflow)" = "true" ]
 }
 
+# What: guards the retry-wrapper action files against losing raw failure diagnostics.
+# Why: a future cleanup could otherwise collapse them back to generic final exits.
+# From: PR #1774
+@test "G15: retry-wrapper actions keep their raw failure diagnostics" {
+    grep -F 'dump_retry_diagnostics()' "$repo_root/.github/actions/buildx-setup-retry/action.yml" >/dev/null
+    grep -F 'dump_retry_diagnostics()' "$repo_root/.github/actions/ghcr-build-push-retry/action.yml" >/dev/null
+    grep -F 'dump_retry_diagnostics()' "$repo_root/.github/actions/ghcr-attest-retry/action.yml" >/dev/null
+    grep -F 'dump_retry_diagnostics()' "$repo_root/.github/actions/trivy-scan-retry/action.yml" >/dev/null
+}
+
 # G15: a pure PR-gate action (zero build/image relevance) must not force any
 # service to rebuild.
 @test "G15: a pure PR-gate action change does not set workflow or any service flag" {
