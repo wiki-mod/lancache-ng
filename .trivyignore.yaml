@@ -39,7 +39,7 @@ vulnerabilities:
       affected/action_statement shape used for entries genuinely awaiting an
       upstream fix).
     status: not_affected
-    expired_at: 2026-11-15
+
   - id: CVE-2026-41567
     paths:
       - usr/local/lib/docker/cli-plugins/docker-compose
@@ -67,7 +67,7 @@ vulnerabilities:
       archive/cp handling) -- confirming the actual vulnerable daemon
       code is not present in this binary at all.
     status: not_affected
-    expired_at: 2026-11-15
+
   - id: CVE-2026-42306
     paths:
       - usr/local/lib/docker/cli-plugins/docker-compose
@@ -86,7 +86,7 @@ vulnerabilities:
       actually vendored from this module in docker/buildx v0.35.0; neither
       binary implements or executes the daemon's cp handler).
     status: not_affected
-    expired_at: 2026-11-15
+
   - id: CVE-2026-12064
     statement: >-
       Accepted, tracked risk -- not a non-exploitability disposition; curl's
@@ -170,7 +170,7 @@ vulnerabilities:
       affected images off curl entirely). See issue #1304 for the
       complete before/after Trivy evidence per image and the maintainer's
       recorded decision.
-    expired_at: 2026-08-15
+
   - id: CVE-2026-8286
     statement: >-
       Accepted, tracked risk -- same curl/libcurl4t64 finding group as
@@ -183,7 +183,7 @@ vulnerabilities:
       2026-07-30, same 5 confirmed-affected images (`services/proxy`,
       `services/dns`, `services/watchdog`, `services/ui`, `services/ntp`),
       disclosed 2026-07-03.
-    expired_at: 2026-08-15
+
   - id: CVE-2026-8927
     statement: >-
       Accepted, tracked risk -- same curl/libcurl4t64 finding group as
@@ -196,7 +196,7 @@ vulnerabilities:
       backports, sid) as of 2026-07-30, same 5 confirmed-affected images
       (`services/proxy`, `services/dns`, `services/watchdog`, `services/ui`,
       `services/ntp`), disclosed 2026-07-03.
-    expired_at: 2026-08-15
+
   - id: CVE-2026-8932
     statement: >-
       Accepted, tracked risk -- same curl/libcurl4t64 finding group as
@@ -209,7 +209,7 @@ vulnerabilities:
       2026-07-30, same 5 confirmed-affected images (`services/proxy`,
       `services/dns`, `services/watchdog`, `services/ui`, `services/ntp`),
       disclosed 2026-07-03.
-    expired_at: 2026-08-15
+
   - id: CVE-2026-9079
     statement: >-
       Accepted, tracked risk -- same curl/libcurl4t64 finding group as
@@ -222,7 +222,7 @@ vulnerabilities:
       as of 2026-07-30, same 5 confirmed-affected images (`services/proxy`,
       `services/dns`, `services/watchdog`, `services/ui`, `services/ntp`),
       disclosed 2026-07-03.
-    expired_at: 2026-08-15
+
   - id: CVE-2026-9080
     statement: >-
       Accepted, tracked risk -- same curl/libcurl4t64 finding group as
@@ -238,7 +238,7 @@ vulnerabilities:
       backports, sid) as of 2026-07-30, same 5 confirmed-affected images
       (`services/proxy`, `services/dns`, `services/watchdog`, `services/ui`,
       `services/ntp`), disclosed 2026-07-03.
-    expired_at: 2026-08-15
+
   - id: CVE-2026-9545
     statement: >-
       Accepted, tracked risk -- same curl/libcurl4t64 finding group as
@@ -254,7 +254,7 @@ vulnerabilities:
       backports, sid) as of 2026-07-30, same 5 confirmed-affected images
       (`services/proxy`, `services/dns`, `services/watchdog`, `services/ui`,
       `services/ntp`), disclosed 2026-07-03.
-    expired_at: 2026-08-15
+
   - id: CVE-2025-59375
     statement: >-
       Accepted, tracked risk -- not a non-exploitability disposition; the
@@ -291,7 +291,7 @@ vulnerabilities:
       `paths:` value does not suppress this finding class). See issue
       #1314 for the complete before/after Trivy evidence and the
       maintainer's recorded decision.
-    expired_at: 2026-08-15
+
   - id: CVE-2026-25210
     statement: >-
       Accepted, tracked risk -- same libexpat finding group as
@@ -303,7 +303,7 @@ vulnerabilities:
       backports, sid) as of 2026-07-31, same single affected image
       (`tools/build-tools`), same non-reachable usage (no untrusted XML
       input ever reaches libexpat in this image).
-    expired_at: 2026-08-15
+
   - id: CVE-2026-45186
     statement: >-
       Accepted, tracked risk -- same libexpat finding group as
@@ -316,7 +316,7 @@ vulnerabilities:
       2026-07-31, same single affected image (`tools/build-tools`), same
       non-reachable usage (no untrusted XML input ever reaches libexpat in
       this image).
-    expired_at: 2026-08-15
+
   - id: CVE-2026-56131
     statement: >-
       Accepted, tracked risk -- same libexpat finding group as
@@ -328,7 +328,7 @@ vulnerabilities:
       (trixie, backports, sid) as of 2026-07-31, same single affected image
       (`tools/build-tools`), same non-reachable usage (no untrusted XML
       input ever reaches libexpat in this image).
-    expired_at: 2026-08-15
+
   - id: CVE-2026-56408
     statement: >-
       Accepted, tracked risk -- same libexpat finding group as
@@ -340,4 +340,4 @@ vulnerabilities:
       2026-07-31, same single affected image (`tools/build-tools`), same
       non-reachable usage (no untrusted XML input ever reaches libexpat in
       this image).
-    expired_at: 2026-08-15
+
