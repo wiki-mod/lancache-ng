@@ -2568,17 +2568,8 @@ jobs:
     # Wait for merge-manifests so PR validation consumes this PR staging manifest, not stale base-channel content.
     # Trusted non-PR validation likewise waits for the exact merged sha-* candidate before promotion.
     needs: [detect-changes, determine-build-admission, merge-manifests, compute-validation-network, validate-compose, push-supersession-check]
-    # What: runs whenever merge-manifests wasn't itself cancelled, but only after
-    # build admission allowed image-producing jobs to run in the first place.
-    # Why: BUILD/ASSEMBLE/VERIFY/PROMOTE/CONSUME pipeline (maintainer decision):
-    #   this job IS verify, and must actually run and name the missing service(s) itself
-    #   (see "Pin full-setup service identities to immutable digests" below) rather than
-    #   being silently skipped -- one unrelated service's merge failure previously hid every
-    #   other service's real validation result behind a grey "skipped" job. When the
-    #   build admission gate is already closed (for example after a Rust quality failure),
-    #   there are intentionally no fresh sha-* images to verify, so running this job only
-    #   adds misleading missing-image noise. promote's own all-or-nothing gate is
-    #   deliberately untouched by this change (see promote's header).
+    # What: skips full-setup validation when build admission is closed.
+    # Why: no fresh sha-* images exist, so the job would only emit noise.
     # From: Issue #1095 | PR #1642 | PR #1643
     if: >-
       ${{
@@ -6617,14 +6608,8 @@ jobs:
     # reason.
     name: merge multi-platform manifests
     needs: [determine-build-admission, build, build-arm64, push-supersession-check]
-    # What: runs whenever build/build-arm64 ran at all, not just on
-    # full success, but only after the shared build-admission gate opened.
-    # Why: needs.<job>.result is 'failure' if ANY matrix entry fails; the
-    # per-service loop below already skips unpublished services, so full
-    # success would block every other service over one unrelated failure.
-    # If build admission is false, both image-producing jobs are intentionally
-    # skipped and this job has no valid image inputs; running it would turn
-    # the real upstream gate failure into misleading missing-image errors.
+    # What: merges manifests only after build admission opens.
+    # Why: skipped image jobs leave no valid manifest inputs.
     # From: Issue #1095
     if: "!cancelled() && needs['determine-build-admission'].result == 'success' && needs['determine-build-admission'].outputs.admitted == 'true' && needs.build.result != 'cancelled' && needs['build-arm64'].result != 'cancelled'"
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
