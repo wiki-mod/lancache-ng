@@ -115,6 +115,40 @@ runs:
     run "$script" "$fixture_root"
     [ "$status" -eq 0 ]
     [[ "$output" == *"OK"* ]]
+    [[ "$output" == *"unauthenticated GitHub API fallback"* ]]
+}
+
+@test "uses authenticated GitHub API requests when GH_TOKEN is set" {
+    write_workflow <<'EOF'
+name: CI
+on: push
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa # v7.0.0
+EOF
+    cat > "$mock_bin_dir/curl" <<'MOCKCURL'
+#!/usr/bin/env bash
+set -euo pipefail
+out_file=""
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+    if [ "${args[$i]}" = "-o" ]; then
+        out_file="${args[$((i + 1))]}"
+    fi
+done
+printf '%s\n' "$@" > "${MOCK_CURL_ARGS:?MOCK_CURL_ARGS not set}"
+printf 'runs:\n  using: node24\n' > "$out_file"
+printf '200'
+MOCKCURL
+    chmod +x "$mock_bin_dir/curl"
+    export MOCK_CURL_ARGS="$BATS_TEST_TMPDIR/curl-args.txt"
+    export GH_TOKEN="test-token"
+
+    run "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"authenticated GitHub API requests"* ]]
+    grep -qFx "Authorization: Bearer test-token" "$MOCK_CURL_ARGS"
 }
 
 @test "fails on the exact pre-#800 actions/upload-artifact@834a144... pin (the #799 regression)" {

@@ -341,6 +341,11 @@ for action_file in "${local_action_files[@]}"; do
 done
 
 gh_token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+if [ -n "$gh_token" ]; then
+  echo "::notice::check-action-node-versions: using authenticated GitHub API requests for external action metadata."
+else
+  echo "::notice::check-action-node-versions: GH_TOKEN/GITHUB_TOKEN unset; using unauthenticated GitHub API fallback for external action metadata."
+fi
 
 # fetch_external_action_yaml <owner> <repo> <subpath> <ref>
 # Prints one status line to stdout, followed by the resolved action.yml/
