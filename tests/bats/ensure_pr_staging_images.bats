@@ -375,34 +375,42 @@ STUB
     ! printf '%s\n' "$output" | grep -q "confirmed no such manifest"
 }
 
-@test "workflow change no longer forces unrelated services to be treated as touched" {
-    # The workflow flag alone should be inert now: with no real service touch,
-    # every service is eligible for the cheap base-commit back-fill path.
+@test "workflow change forces every service but build-tools to be treated as touched" {
+    # What: workflow edits widen the touched set.
+    # Why: build-push.yml must fail closed for non-build-tools changes.
+    # From: Issue #1095 | PR #1771
     export EXISTING_IMAGES="ghcr.io/wiki-mod/lancache-ng/build-tools:pr-715-sha-abcdef0"
     export WORKFLOW_CHANGED="true"
     export PROXY_TOUCHED="false" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
     run bash "$script"
     [ "$status" -eq 0 ]
-    [ "$(wc -l < "$backfill_log")" -eq 5 ]
-    grep -qF "build-tools:pr-715-sha-abcdef0" "$backfill_log"
+    printf '%s\n' "$output" | grep -q "never appeared"
 }
 
-@test "workflow change: a real service touch still leaves unrelated services back-fill eligible" {
-    # The workflow flag must not broaden the touched set; only the real
-    # service touch below should remain required, while the others back-fill.
+@test "workflow change: build-tools untouched is still back-filled, not required" {
+    # What: build-tools stays back-fill eligible on workflow changes.
+    # Why: only build-affecting services should be forced touched.
+    # From: Issue #1095 | PR #1771
     # Declared and exported separately (SC2155): combining them would mask a
     # real failure exit status from the command substitution behind the
     # export builtin's own (always-successful-here) return value.
     EXISTING_IMAGES="$(printf '%s\n' \
-        ghcr.io/wiki-mod/lancache-ng/proxy:pr-715-sha-abcdef0)"
+        ghcr.io/wiki-mod/lancache-ng/proxy:pr-715-sha-abcdef0 \
+        ghcr.io/wiki-mod/lancache-ng/dns:pr-715-sha-abcdef0 \
+        ghcr.io/wiki-mod/lancache-ng/watchdog:pr-715-sha-abcdef0 \
+        ghcr.io/wiki-mod/lancache-ng/ui:pr-715-sha-abcdef0 \
+        ghcr.io/wiki-mod/lancache-ng/dhcp:pr-715-sha-abcdef0 \
+        ghcr.io/wiki-mod/lancache-ng/dhcp-proxy:pr-715-sha-abcdef0 \
+        ghcr.io/wiki-mod/lancache-ng/ntp:pr-715-sha-abcdef0 \
+        ghcr.io/wiki-mod/lancache-ng/syslog:pr-715-sha-abcdef0)"
     export EXISTING_IMAGES
     export WORKFLOW_CHANGED="true"
     export PROXY_TOUCHED="true" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
     export DHCP_TOUCHED="false" DHCP_PROXY_TOUCHED="false" NTP_TOUCHED="false" SYSLOG_TOUCHED="false"
     run bash "$script"
     [ "$status" -eq 0 ]
-    # The untouched four still back-fill, including build-tools.
-    [ "$(wc -l < "$backfill_log")" -eq 4 ]
+    # The untouched service still back-fills.
+    [ "$(wc -l < "$backfill_log")" -eq 1 ]
     grep -qF "build-tools:pr-715-sha-abcdef0" "$backfill_log"
 }
 
@@ -1128,10 +1136,10 @@ STUB
     [ "$default_poll_hard_ceiling_seconds" -eq 1200 ]
 }
 
-@test "staging poll defaults: workflow_changed=true now uses the same service-scoped budget" {
+@test "staging poll defaults: workflow_changed=true widens the full-rebuild budget to 3600s" {
     # shellcheck source=scripts/lib/staging-poll-defaults.sh
     source "$repo_root/scripts/lib/staging-poll-defaults.sh"
     staging_poll_set_defaults_for_workflow_changed "true"
-    [ "$default_poll_timeout_seconds" -eq 1500 ]
-    [ "$default_poll_hard_ceiling_seconds" -eq 1200 ]
+    [ "$default_poll_timeout_seconds" -eq 3600 ]
+    [ "$default_poll_hard_ceiling_seconds" -eq 3600 ]
 }

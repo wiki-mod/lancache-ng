@@ -119,17 +119,22 @@ setup() {
 }
 
 @test "should-have-staging: a touched service is expected to have a tag" {
-    run vit_service_should_have_staging_tag "proxy" "true"
+    run vit_service_should_have_staging_tag "proxy" "true" "false"
     [ "$output" = "true" ]
 }
 
 @test "should-have-staging: an untouched service is not" {
-    run vit_service_should_have_staging_tag "dns" "false"
+    run vit_service_should_have_staging_tag "dns" "false" "false"
     [ "$output" = "false" ]
 }
 
-@test "should-have-staging: build-tools is not special when it was not touched" {
-    run vit_service_should_have_staging_tag "build-tools" "false"
+@test "should-have-staging: a build-affecting workflow change forces every service except build-tools" {
+    run vit_service_should_have_staging_tag "ui" "false" "true"
+    [ "$output" = "true" ]
+}
+
+@test "should-have-staging: build-tools keeps its narrower scoping even on a build-affecting workflow change" {
+    run vit_service_should_have_staging_tag "build-tools" "false" "true"
     [ "$output" = "false" ]
 }
 

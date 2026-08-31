@@ -111,16 +111,14 @@ vit_resolve_tag() {
     vit_base_channel_tag "$base_ref"
 }
 
-# Whether a given full-setup service is expected to already have a pushed
-# staging image for this PR. Mirrors the real per-service touch result only:
-# if detect-changes says the service was touched, this returns "true";
-# otherwise it returns "false". The workflow-level reuse signal is still
-# available to other callers as diagnostics, but it no longer broadens the
-# build/staging admission decision here. Echoes "true"/"false". Used by the
-# fail-closed guard so a touched service whose build genuinely failed is
-# caught, while a legitimately untouched service is allowed the cheap
-# base-channel back-fill.
+# What: workflow changes force non-build-tools staging tags.
+# Why: build-push.yml must fail closed on build-affecting edits.
+# From: Issue #1095 | PR #1771
 vit_service_should_have_staging_tag() {
-    local touched="$2"
-    printf '%s\n' "$touched"
+    local service="$1" touched="$2" build_workflow_changed="${3:-false}"
+    if [[ "$build_workflow_changed" == "true" && "$service" != "build-tools" ]]; then
+        printf 'true\n'
+    else
+        printf '%s\n' "$touched"
+    fi
 }

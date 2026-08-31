@@ -2720,6 +2720,7 @@ jobs:
           WATCHDOG_TOUCHED: ${{ needs['detect-changes'].outputs.watchdog }}
           UI_TOUCHED: ${{ needs['detect-changes'].outputs.ui }}
           BUILD_TOOLS_TOUCHED: ${{ needs['detect-changes'].outputs.build_tools }}
+          WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow_reuse_scope }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
           # scripts/lib/staging-ancestor-fallback.sh's saf_base_commit_has_confirmed_run()
@@ -2750,11 +2751,11 @@ jobs:
 
           : "${BASE_SHA:?BASE_SHA (github.event.pull_request.base.sha) is required}"
 
-          # What: calls vit_service_should_have_staging_tag directly.
-          # Why: keeps the staging decision tied to the per-service touch result.
-          # From: Issue #1095 | PR #1619
+          # What: passes the workflow flag to the staging helper.
+          # Why: workflow edits still fail closed for non-build-tools.
+          # From: Issue #1095 | PR #1771
           service_should_have_staging_tag() {
-            vit_service_should_have_staging_tag "$1" "$2"
+            vit_service_should_have_staging_tag "$1" "$2" "$WORKFLOW_CHANGED"
           }
 
           declare -A touched_map=(
@@ -5073,6 +5074,9 @@ jobs:
                 exit 1
                 ;;
             esac
+            if [ "${{ needs['detect-changes'].outputs.workflow_reuse_scope }}" = "true" ] && [ "$MATRIX_SERVICE" != "build-tools" ]; then
+              should_build=true
+            fi
           elif [ "$REUSE_JOB_RESULT" = "success" ]; then
             # What: determine-push-reuse-scope's check covers all 10 services.
             # Why: full reasoning on the linked issue.
@@ -6071,6 +6075,9 @@ jobs:
                 exit 1
                 ;;
             esac
+            if [ "${{ needs['detect-changes'].outputs.workflow_reuse_scope }}" = "true" ] && [ "$MATRIX_SERVICE" != "build-tools" ]; then
+              should_build=true
+            fi
           elif [ "$REUSE_JOB_RESULT" = "success" ]; then
             # What: mirrors build's own (amd64) identical Step 4 branch.
             # Why: full reasoning on the linked issue.
