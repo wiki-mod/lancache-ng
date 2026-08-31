@@ -13,8 +13,9 @@
 # reserve-validation-subnet-stack in the same job.
 name: Wait for validation stack health
 description: >-
-  Poll the full-setup validation stack until healthy, then fail closed if any
-  service is missing, not running, unhealthy, or crash-looping.
+  Poll the full-setup validation stack until healthy, then fail closed with
+  raw container-state diagnostics if any service is missing, not running,
+  unhealthy, or crash-looping.
 
 inputs:
   working-directory:
@@ -30,6 +31,26 @@ runs:
       working-directory: ${{ inputs.working-directory }}
       run: |
         set -euo pipefail
+
+        dump_service_diagnostics() {
+          local service="$1"
+          local cid
+          local state
+          local health
+
+          cid="$(docker compose ps -q "$service")"
+          echo "::group::$service raw diagnostics"
+          if [[ -z "$cid" ]]; then
+            echo "container_id=<missing>"
+          else
+            state="$(docker inspect --format '{{json .State}}' "$cid" 2>/dev/null || true)"
+            health="$(docker inspect --format '{{json .State.Health}}' "$cid" 2>/dev/null || true)"
+            printf 'container_id=%s\n' "$cid"
+            printf 'state=%s\n' "$state"
+            printf 'health=%s\n' "$health"
+          fi
+          echo "::endgroup::"
+        }
 
         # Services with an explicit healthcheck report a real "healthy"
         # status. docker-socket-proxy joined this list under #1169 (an HTTP
@@ -64,10 +85,13 @@ runs:
 
         failed=0
         for service in $all_services; do
+          service_failed=0
           cid="$(docker compose ps -q "$service")"
           if [[ -z "$cid" ]]; then
             echo "::error::$service has no running container"
             failed=1
+            service_failed=1
+            dump_service_diagnostics "$service"
             continue
           fi
 
@@ -77,12 +101,14 @@ runs:
           if [[ "$container_status" != "running" ]]; then
             echo "::error::$service is not running (state: $container_status)"
             failed=1
+            service_failed=1
           elif (( restart_count > 1 )); then
             # > 1, not > 0: a single restart during normal startup
             # ordering (e.g. waiting on a dependency that wasn't healthy
             # yet) is expected and not itself a crash loop.
             echo "::error::$service has restarted $restart_count times (crash-loop suspected)"
             failed=1
+            service_failed=1
           fi
 
           if [[ " $services_with_healthcheck " == *" $service "* ]]; then
@@ -90,7 +116,12 @@ runs:
             if [[ "$health" != "healthy" ]]; then
               echo "::error::$service did not become healthy (status: $health)"
               failed=1
+              service_failed=1
             fi
+          fi
+
+          if [[ "$service_failed" -eq 1 ]]; then
+            dump_service_diagnostics "$service"
           fi
         done
 

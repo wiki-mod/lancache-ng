@@ -1,0 +1,8 @@
+- Error description:
+  - Retry wrapper composite actions ended with only a generic "all attempts failed" message and did not emit raw attempt-level values.
+- Cause:
+  - The final resolve step in each wrapper only selected success/failure and exited without dumping the attempt outputs or classification data that would explain the failure.
+- Fix:
+  - Added raw diagnostics blocks to `buildx-setup-retry`, `ghcr-build-push-retry`, `ghcr-attest-retry`, and `trivy-scan-retry` before their terminal failure exits.
+- Prevention rule:
+  - Any retry wrapper that aggregates multiple attempts should print attempt-level raw outcomes and relevant outputs before its final `exit 1`.
