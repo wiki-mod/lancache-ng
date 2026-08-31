@@ -1,10 +1,10 @@
 {
   "@context": "https://openvex.dev/ns/v0.2.0",
-  "@id": "https://github.com/wiki-mod/lancache-ng/vex/lancache-ng-2026-08-29T03:56:37Z",
+  "@id": "https://github.com/wiki-mod/lancache-ng/vex/lancache-ng-2026-08-31T15:16:15Z",
   "author": "lancache-ng release automation (https://github.com/wiki-mod/lancache-ng)",
   "statements": [
     {
-      "action_statement": "What: Accepts CVE-2026-14456 (OpenSSL QUIC-server unbounded-memory- growth DoS) as tracked risk for `libssl3`/`libcrypto3` across every Alpine-based first-party image (transitive dependency of `apk-tools` itself, present regardless of any image's own TLS/QUIC usage). Why: Time-boxed maintainer-authorized exception while the apk-upgrade cache-bust fix (PR #1680, merged 2026-08-26T12:01:29Z) propagates through every affected image's next rebuild; no `paths:` scoping applies since Trivy's Alpine os-pkgs finding class carries no PkgPath. None of this project's services run a QUIC server. Re-verified 2026-08-27 (not yet removable): every first-party GHCR `:nightly` tag checked (`proxy`/`dhcp`/`ntp`/`dhcp-proxy`/ `dns`/`syslog`/`watchdog`/`utilities`/`ui`/`build-tools`; `netdata` excluded -- `gh api users/wiki-mod/packages?package_type=container` confirms `lancache-ng/netdata` is not among this org's published GHCR packages, so it isn't a first-party image to check here) has a `docker inspect` `.Created` timestamp between 2026-08-10 and 2026-08-16, all before the PR Trivy scan of `ui:nightly` (Alpine 3.24.1) without `--ignore- unfixed`/`--trivyignores` confirms the finding is real and fixed upstream but not yet in the built image: `CVE-2026-14456` `libssl3`/`libcrypto3`, `FixedVersion: 3.5.8-r0`. Re-check after the next rebuild of all listed images. Scope correction (found 2026-08-27, not previously documented): since this entry has no `paths:` key, it is not actually Alpine-only in effect -- a same-CVE-ID live finding also exists on `tools/build-tools`'s Debian `openssl`/`libssl3t64`/ `openssl-provider-legacy`/`libssl-dev` packages (`FixedVersion: 3.5.7-1~deb13u2`, confirmed via a live Trivy scan of `build-tools:nightly` without `--ignore-unfixed`/`--trivyignores`) and is being suppressed by this same entry as a side effect. PR `tools/build-tools`'s Debian `apt`-upgrade path has an equivalent staleness problem remains unverified and needs its own check. From: Issue #1095, PR #1685 (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-09-30 and must be re-reviewed on or before that date.)",
+      "action_statement": "What: Accepts CVE-2026-14456 (OpenSSL QUIC-server unbounded-memory- growth DoS) as tracked risk for `libssl3`/`libcrypto3` across every Alpine-based first-party image (transitive dependency of `apk-tools` itself, present regardless of any image's own TLS/QUIC usage). Why: Time-boxed maintainer-authorized exception while the apk-upgrade cache-bust fix (PR #1680, merged 2026-08-26T12:01:29Z) propagates through every affected image's next rebuild; no `paths:` scoping applies since Trivy's Alpine os-pkgs finding class carries no PkgPath. None of this project's services run a QUIC server. Re-verified 2026-08-27 (not yet removable): every first-party GHCR `:nightly` tag checked (`proxy`/`dhcp`/`ntp`/`dhcp-proxy`/ `dns`/`syslog`/`watchdog`/`utilities`/`ui`/`build-tools`; `netdata` excluded -- `gh api users/wiki-mod/packages?package_type=container` confirms `lancache-ng/netdata` is not among this org's published GHCR packages, so it isn't a first-party image to check here) has a `docker inspect` `.Created` timestamp between 2026-08-10 and 2026-08-16, all before the PR Trivy scan of `ui:nightly` (Alpine 3.24.1) without `--ignore- unfixed`/`--trivyignores` confirms the finding is real and fixed upstream but not yet in the built image: `CVE-2026-14456` `libssl3`/`libcrypto3`, `FixedVersion: 3.5.8-r0`. Re-check after the next rebuild of all listed images. Scope correction (found 2026-08-27, not previously documented): since this entry has no `paths:` key, it is not actually Alpine-only in effect -- a same-CVE-ID live finding also exists on `tools/build-tools`'s Debian `openssl`/`libssl3t64`/ `openssl-provider-legacy`/`libssl-dev` packages (`FixedVersion: 3.5.7-1~deb13u2`, confirmed via a live Trivy scan of `build-tools:nightly` without `--ignore-unfixed`/`--trivyignores`) and is being suppressed by this same entry as a side effect. PR `tools/build-tools`'s Debian `apt`-upgrade path has an equivalent staleness problem remains unverified and needs its own check. From: Issue #1095, PR #1685",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -12,13 +12,13 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-14456"
       }
     },
     {
-      "impact_statement": "What: Suppresses CVE-2026-34040 (a Docker daemon authorization-plugin bypass) for docker-compose/docker-buildx; anchor entry for the docker/docker client-library-only group (CVE-2026-41567/42306 below share this background). Why: Vulnerable code not present -- the fix is daemon-side pkg/authorization middleware; these binaries embed github.com/docker/docker only as an API client library and never compile it. No fixed release exists at the pinned v28.5.2+incompatible module path (verified 2026-08-14 against both projects' vendored modules; re-checked 2026-08-27 that DOCKER_COMPOSE_VERSION/DOCKER_BUILDX_VERSION in tools/build-tools/Dockerfile are unchanged since that verification -- the vendored-module content itself was not re-derived this pass, since that requires a build). From: Issue #1304, PR #1548 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Suppresses CVE-2026-34040 (a Docker daemon authorization-plugin bypass) for docker-compose/docker-buildx; anchor entry for the docker/docker client-library-only group (CVE-2026-41567/42306 below share this background). Why: Vulnerable code not present -- the fix is daemon-side pkg/authorization middleware; these binaries embed github.com/docker/docker only as an API client library and never compile it. No fixed release exists at the pinned v28.5.2+incompatible module path (verified 2026-08-14 against both projects' vendored modules; re-checked 2026-08-27 that DOCKER_COMPOSE_VERSION/DOCKER_BUILDX_VERSION in tools/build-tools/Dockerfile are unchanged since that verification -- the vendored-module content itself was not re-derived this pass, since that requires a build). From: Issue #1304, PR #1548",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -34,13 +34,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-34040"
       }
     },
     {
-      "impact_statement": "What: Suppresses CVE-2026-41567 (a Docker daemon `docker cp`/archive- upload host code execution finding) for docker-compose/docker-buildx. Why: Same docker/docker client-library-only disposition as CVE-2026-34040 above. This is server-side request-handling code in the daemon's archive handler; docker/buildx's vendor/modules.txt vendors only pkg/namesgenerator, confirming the handler is absent (verified 2026-08-14). From: Issue #1304, PR #1548 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Suppresses CVE-2026-41567 (a Docker daemon `docker cp`/archive- upload host code execution finding) for docker-compose/docker-buildx. Why: Same docker/docker client-library-only disposition as CVE-2026-34040 above. This is server-side request-handling code in the daemon's archive handler; docker/buildx's vendor/modules.txt vendors only pkg/namesgenerator, confirming the handler is absent (verified 2026-08-14). From: Issue #1304, PR #1548",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -56,13 +56,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-41567"
       }
     },
     {
-      "impact_statement": "What: Suppresses CVE-2026-42306 (GHSA-rg2x-37c3-w2rh, a Docker daemon `docker cp` bind-mount race condition) for docker-compose/docker-buildx. Why: Same docker/docker client-library-only disposition as CVE-2026-34040 above. This is a race condition in the daemon's own `docker cp` implementation; confirmed absent by the same vendor/modules.txt check (verified 2026-08-14). From: Issue #1304, PR #1548 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Suppresses CVE-2026-42306 (GHSA-rg2x-37c3-w2rh, a Docker daemon `docker cp` bind-mount race condition) for docker-compose/docker-buildx. Why: Same docker/docker client-library-only disposition as CVE-2026-34040 above. This is a race condition in the daemon's own `docker cp` implementation; confirmed absent by the same vendor/modules.txt check (verified 2026-08-14). From: Issue #1304, PR #1548",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -78,13 +78,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-42306"
       }
     },
     {
-      "action_statement": "What: Accepts CVE-2026-12064 (an SSH host-verification bypass via schemeless SFTP/SCP URLs) as tracked risk for `libcurl4t64` in `tools/build-tools`. Anchor entry for this file's curl group (CVE-2026-8286/8458/8927/8932/9079/9080/9545/10536 below). Why: Trivy reports `Status: affected`, `FixedVersion: None`; no `paths:` scoping applies since Trivy's Debian os-pkgs finding class carries no `PkgPath`. This file's from-source curl/git build purges Debian's `curl`/`libcurl3t64-gnutls` entirely; `libcurl4t64` remains solely as `cmake`'s package dependency (`apt-get autoremove` strips cmake once it's purged) and drives only already-vendored C/C++ builds (e.g. aws-lc-sys/BoringSSL for services/ui), never a network fetch. Verified via a real Trivy scan of the current image (2026-08-24, lancache-229): every finding in this group attributes solely to `libcurl4t64`; `curl`/ `libcurl3t64-gnutls` no longer appear at all. Debian trixie fix status individually re-checked against security-tracker.debian.org on 2026-08-27 for all 9 IDs in this group, including CVE-2026-8458/10536: all still `vulnerable`/`no-dsa` at curl 8.14.1-2+deb13u4 -- a same-day batch source-package-tracker query misreported CVE-2026-9079/9080 as \"fixed\"; each CVE's own tracker page was re-fetched individually and both confirm `vulnerable`. Caveat: this session's own live Trivy scans (elsewhere in this audit) predate the libcurl4t64-only purge above (2026-08-24 per that note, checked 2026-08-27) -- not re-run against the post-purge image; the Debian trixie fix status itself is unaffected by which package Trivy currently attributes the finding to. From: Issue #1304, PR #1661 (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-09-30 and must be re-reviewed on or before that date.)",
+      "action_statement": "What: Accepts CVE-2026-12064 (an SSH host-verification bypass via schemeless SFTP/SCP URLs) as tracked risk for `libcurl4t64` in `tools/build-tools`. Anchor entry for this file's curl group (CVE-2026-8286/8458/8927/8932/9079/9080/9545/10536 below). Why: Trivy reports `Status: affected`, `FixedVersion: None`; no `paths:` scoping applies since Trivy's Debian os-pkgs finding class carries no `PkgPath`. This file's from-source curl/git build purges Debian's `curl`/`libcurl3t64-gnutls` entirely; `libcurl4t64` remains solely as `cmake`'s package dependency (`apt-get autoremove` strips cmake once it's purged) and drives only already-vendored C/C++ builds (e.g. aws-lc-sys/BoringSSL for services/ui), never a network fetch. Verified via a real Trivy scan of the current image (2026-08-24, lancache-229): every finding in this group attributes solely to `libcurl4t64`; `curl`/ `libcurl3t64-gnutls` no longer appear at all. Debian trixie fix status individually re-checked against security-tracker.debian.org on 2026-08-27 for all 9 IDs in this group, including CVE-2026-8458/10536: all still `vulnerable`/`no-dsa` at curl 8.14.1-2+deb13u4 -- a same-day batch source-package-tracker query misreported CVE-2026-9079/9080 as \"fixed\"; each CVE's own tracker page was re-fetched individually and both confirm `vulnerable`. Caveat: this session's own live Trivy scans (elsewhere in this audit) predate the libcurl4t64-only purge above (2026-08-24 per that note, checked 2026-08-27) -- not re-run against the post-purge image; the Debian trixie fix status itself is unaffected by which package Trivy currently attributes the finding to. From: Issue #1304, PR #1661",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -92,13 +92,13 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-12064"
       }
     },
     {
-      "action_statement": "What: Accepts CVE-2026-8286 (an insecure TLS-configuration-mismatch connection issue) as tracked risk for `libcurl4t64` in `tools/build-tools`. Why: Same curl finding group as CVE-2026-12064 above; `Status: affected`, severity HIGH, cmake's unexercised transitive dependency only (verified 2026-08-24, lancache-229). From: Issue #1304, PR #1661 (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-09-30 and must be re-reviewed on or before that date.)",
+      "action_statement": "What: Accepts CVE-2026-8286 (an insecure TLS-configuration-mismatch connection issue) as tracked risk for `libcurl4t64` in `tools/build-tools`. Why: Same curl finding group as CVE-2026-12064 above; `Status: affected`, severity HIGH, cmake's unexercised transitive dependency only (verified 2026-08-24, lancache-229). From: Issue #1304, PR #1661",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -106,13 +106,13 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-8286"
       }
     },
     {
-      "action_statement": "What: Accepts CVE-2026-8458 (a Negotiate-authentication connection- reuse logical error letting a request reuse the wrong connection) as tracked risk for `libcurl4t64` in `tools/build-tools`. Why: Same curl finding group as CVE-2026-12064 above; requires an application to actually make Negotiate-authenticated requests through libcurl's connection pool, which cmake's unexercised transitive dependency never does (verified 2026-08-24, lancache-229). From: Issue #1304, PR #1661 (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-09-30 and must be re-reviewed on or before that date.)",
+      "action_statement": "What: Accepts CVE-2026-8458 (a Negotiate-authentication connection- reuse logical error letting a request reuse the wrong connection) as tracked risk for `libcurl4t64` in `tools/build-tools`. Why: Same curl finding group as CVE-2026-12064 above; requires an application to actually make Negotiate-authenticated requests through libcurl's connection pool, which cmake's unexercised transitive dependency never does (verified 2026-08-24, lancache-229). From: Issue #1304, PR #1661",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -120,13 +120,13 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-8458"
       }
     },
     {
-      "action_statement": "What: Accepts CVE-2026-8927 (a proxy-authentication-state information-disclosure issue) as tracked risk for `libcurl4t64` in `tools/build-tools`. Why: Same curl finding group as CVE-2026-12064 above; `Status: affected`, severity HIGH, cmake's unexercised transitive dependency only (verified 2026-08-24, lancache-229). From: Issue #1304, PR #1661 (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-09-30 and must be re-reviewed on or before that date.)",
+      "action_statement": "What: Accepts CVE-2026-8927 (a proxy-authentication-state information-disclosure issue) as tracked risk for `libcurl4t64` in `tools/build-tools`. Why: Same curl finding group as CVE-2026-12064 above; `Status: affected`, severity HIGH, cmake's unexercised transitive dependency only (verified 2026-08-24, lancache-229). From: Issue #1304, PR #1661",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -134,13 +134,13 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-8927"
       }
     },
     {
-      "action_statement": "What: Accepts CVE-2026-8932 (an mTLS-connection-reuse security-feature-bypass issue) as tracked risk for `libcurl4t64` in `tools/build-tools`. Why: Same curl finding group as CVE-2026-12064 above; reclassified to `Severity: MEDIUM`, cmake's unexercised transitive dependency only (verified 2026-08-24, lancache-229). From: Issue #1304, PR #1661 (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-09-30 and must be re-reviewed on or before that date.)",
+      "action_statement": "What: Accepts CVE-2026-8932 (an mTLS-connection-reuse security-feature-bypass issue) as tracked risk for `libcurl4t64` in `tools/build-tools`. Why: Same curl finding group as CVE-2026-12064 above; reclassified to `Severity: MEDIUM`, cmake's unexercised transitive dependency only (verified 2026-08-24, lancache-229). From: Issue #1304, PR #1661",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -148,13 +148,13 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-8932"
       }
     },
     {
-      "action_statement": "What: Accepts CVE-2026-9079 (a proxy-authentication-credential information-disclosure issue) as tracked risk for `libcurl4t64` in `tools/build-tools`. Why: Same curl finding group as CVE-2026-12064 above; reclassified to `Severity: MEDIUM`, cmake's unexercised transitive dependency only (verified 2026-08-24, lancache-229). From: Issue #1304, PR #1661 (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-09-30 and must be re-reviewed on or before that date.)",
+      "action_statement": "What: Accepts CVE-2026-9079 (a proxy-authentication-credential information-disclosure issue) as tracked risk for `libcurl4t64` in `tools/build-tools`. Why: Same curl finding group as CVE-2026-12064 above; reclassified to `Severity: MEDIUM`, cmake's unexercised transitive dependency only (verified 2026-08-24, lancache-229). From: Issue #1304, PR #1661",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -162,13 +162,13 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-9079"
       }
     },
     {
-      "action_statement": "What: Accepts CVE-2026-9080 (a `curl_easy_pause()` use-after-free reachable via a libcurl multi-interface callback) as tracked risk for `libcurl4t64` in `tools/build-tools`. Why: Same curl finding group as CVE-2026-12064 above; the vulnerable `CURLMOPT_SOCKETFUNCTION` callback API is never used -- cmake's unexercised transitive dependency only (verified 2026-08-24, lancache-229). From: Issue #1304, PR #1661 (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-09-30 and must be re-reviewed on or before that date.)",
+      "action_statement": "What: Accepts CVE-2026-9080 (a `curl_easy_pause()` use-after-free reachable via a libcurl multi-interface callback) as tracked risk for `libcurl4t64` in `tools/build-tools`. Why: Same curl finding group as CVE-2026-12064 above; the vulnerable `CURLMOPT_SOCKETFUNCTION` callback API is never used -- cmake's unexercised transitive dependency only (verified 2026-08-24, lancache-229). From: Issue #1304, PR #1661",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -176,13 +176,13 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-9080"
       }
     },
     {
-      "action_statement": "What: Accepts CVE-2026-9545 (a cached-SSL-session-and-early-data information-disclosure issue) as tracked risk for `libcurl4t64` in `tools/build-tools`. Why: Same curl finding group as CVE-2026-12064 above; reachable only across a long-lived process reusing a cached session, which does not describe cmake's unexercised transitive dependency (verified 2026-08-24, lancache-229). From: Issue #1304, PR #1661 (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-09-30 and must be re-reviewed on or before that date.)",
+      "action_statement": "What: Accepts CVE-2026-9545 (a cached-SSL-session-and-early-data information-disclosure issue) as tracked risk for `libcurl4t64` in `tools/build-tools`. Why: Same curl finding group as CVE-2026-12064 above; reachable only across a long-lived process reusing a cached session, which does not describe cmake's unexercised transitive dependency (verified 2026-08-24, lancache-229). From: Issue #1304, PR #1661",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -190,13 +190,13 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-9545"
       }
     },
     {
-      "action_statement": "What: Accepts CVE-2026-10536 (a use-after-free in libcurl's HTTP/2 stream-dependency handling, reachable via `CURLOPT_STREAM_DEPENDS`/ `CURLOPT_STREAM_DEPENDS_E` followed by `curl_easy_reset()` and `curl_easy_cleanup()`) as tracked risk for `libcurl4t64` in `tools/build-tools`. Why: Same curl finding group as CVE-2026-12064 above; requires an application to actually set HTTP/2 stream-dependency options via libcurl's easy-handle API, which cmake's unexercised transitive dependency never does (verified 2026-08-24, lancache-229). Newly surfaced by this scan; not present in the prior curl-group review. From: Issue #1304, PR #1661 (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-09-30 and must be re-reviewed on or before that date.)",
+      "action_statement": "What: Accepts CVE-2026-10536 (a use-after-free in libcurl's HTTP/2 stream-dependency handling, reachable via `CURLOPT_STREAM_DEPENDS`/ `CURLOPT_STREAM_DEPENDS_E` followed by `curl_easy_reset()` and `curl_easy_cleanup()`) as tracked risk for `libcurl4t64` in `tools/build-tools`. Why: Same curl finding group as CVE-2026-12064 above; requires an application to actually set HTTP/2 stream-dependency options via libcurl's easy-handle API, which cmake's unexercised transitive dependency never does (verified 2026-08-24, lancache-229). Newly surfaced by this scan; not present in the prior curl-group review. From: Issue #1304, PR #1661",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -204,13 +204,13 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-10536"
       }
     },
     {
-      "impact_statement": "What: Marks CVE-2011-4116 (`perl-base`'s `File::Temp` module creating temporary files insecurely) as not exploitable in `services/ui` and `tools/build-tools`. Anchor entry for a 30-ID group spanning the Debian `perl-base`, util-linux, ncurses, `gzip`, and `libacl1` package groups. Why: All 30 are `Priority: required`/`Essential: yes` Debian packages or their hard link-time dependents, so none can be purged; \"not exploitable\" is the only available disposition short of migrating the image off Debian. Neither image invokes Perl at all (grep-confirmed; re-verified 2026-08-19 against the current tree; re-confirmed 2026-08-27 via a fresh grep against origin/current_dev: zero `perl`/`setfacl`/`getfacl`/`chfn`/`chsh`/`gzexe`/`mount` invocations in `services/ui`/`tools/build-tools`; no ncurses-linked crate in `services/ui/Cargo.toml`/`Cargo.lock`; `services/ui`'s privilege drop uses `setpriv`, confirmed live in `services/ui/docker-entrypoint.sh`). Applicability flag (found 2026-08-27, not resolved here): `services/ui/Dockerfile`'s final stage is `FROM mirror.gcr.io/library/alpine:3.24`, and every Trivy scan of a first-party service in this repo's CI (`trivy-scan-exact-digest` in build-push.yml/build-push-hosted-fallback.yml) targets the exact pushed final-stage digest, never an intermediate build stage. A live scan of `ui:nightly` confirms Trivy detects it as `alpine 3.24.1`, not Debian -- none of this 30-ID group's Debian package names can appear in that scan's `os-pkgs` findings at all. This group may therefore no longer need `services/ui` in its applicability claim (only `tools/build-tools`, confirmed Debian and confirmed still matching several of these IDs live, e.g. CVE-2026-13221/CVE-2026-8376/CVE-2026-42496/CVE-2026-42497/ CVE-2026-9538/CVE-2026-54369/CVE-2025-69720/CVE-2026-41992 in a 2026-08-27 full-severity, no-ignorefile scan of `build-tools: nightly`) -- not changed in this pass since it doesn't affect whether these 30 entries stay or go, flagged for the maintainer to confirm/correct the wording. From: Issue #815, PR #1454, Issue #1598 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Marks CVE-2011-4116 (`perl-base`'s `File::Temp` module creating temporary files insecurely) as not exploitable in `services/ui` and `tools/build-tools`. Anchor entry for a 30-ID group spanning the Debian `perl-base`, util-linux, ncurses, `gzip`, and `libacl1` package groups. Why: All 30 are `Priority: required`/`Essential: yes` Debian packages or their hard link-time dependents, so none can be purged; \"not exploitable\" is the only available disposition short of migrating the image off Debian. Neither image invokes Perl at all (grep-confirmed; re-verified 2026-08-19 against the current tree; re-confirmed 2026-08-27 via a fresh grep against origin/current_dev: zero `perl`/`setfacl`/`getfacl`/`chfn`/`chsh`/`gzexe`/`mount` invocations in `services/ui`/`tools/build-tools`; no ncurses-linked crate in `services/ui/Cargo.toml`/`Cargo.lock`; `services/ui`'s privilege drop uses `setpriv`, confirmed live in `services/ui/docker-entrypoint.sh`). Applicability flag (found 2026-08-27, not resolved here): `services/ui/Dockerfile`'s final stage is `FROM mirror.gcr.io/library/alpine:3.24`, and every Trivy scan of a first-party service in this repo's CI (`trivy-scan-exact-digest` in build-push.yml/build-push-hosted-fallback.yml) targets the exact pushed final-stage digest, never an intermediate build stage. A live scan of `ui:nightly` confirms Trivy detects it as `alpine 3.24.1`, not Debian -- none of this 30-ID group's Debian package names can appear in that scan's `os-pkgs` findings at all. This group may therefore no longer need `services/ui` in its applicability claim (only `tools/build-tools`, confirmed Debian and confirmed still matching several of these IDs live, e.g. CVE-2026-13221/CVE-2026-8376/CVE-2026-42496/CVE-2026-42497/ CVE-2026-9538/CVE-2026-54369/CVE-2025-69720/CVE-2026-41992 in a 2026-08-27 full-severity, no-ignorefile scan of `build-tools: nightly`) -- not changed in this pass since it doesn't affect whether these 30 entries stay or go, flagged for the maintainer to confirm/correct the wording. From: Issue #815, PR #1454, Issue #1598",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -219,13 +219,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2011-4116"
       }
     },
     {
-      "impact_statement": "What: Marks CVE-2025-15649 (a `perl-IO-Compress` denial-of-service via a malformed DOS date field in a zip header) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same perl-base finding group as CVE-2011-4116 above. Reachable only through code calling `IO::Compress::Zip`; neither image invokes Perl at all. From: Issue #815, PR #1454 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Marks CVE-2025-15649 (a `perl-IO-Compress` denial-of-service via a malformed DOS date field in a zip header) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same perl-base finding group as CVE-2011-4116 above. Reachable only through code calling `IO::Compress::Zip`; neither image invokes Perl at all. From: Issue #815, PR #1454",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -234,13 +234,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2025-15649"
       }
     },
     {
-      "impact_statement": "What: Marks CVE-2026-12087 (a `perl-Socket` out-of-bounds-read information disclosure) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same perl-base finding group as CVE-2011-4116 above. Reachable only through code exercising Perl's `Socket` module; neither image invokes Perl at all. From: Issue #815, PR #1454 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Marks CVE-2026-12087 (a `perl-Socket` out-of-bounds-read information disclosure) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same perl-base finding group as CVE-2011-4116 above. Reachable only through code exercising Perl's `Socket` module; neither image invokes Perl at all. From: Issue #815, PR #1454",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -249,13 +249,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-12087"
       }
     },
     {
-      "impact_statement": "What: Marks CVE-2026-13221 (a silently-incorrect Perl regular-expression-matching result under certain patterns) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same perl-base finding group as CVE-2011-4116 above. Reachable only through code that runs Perl regexes; neither image invokes Perl at all. From: Issue #815, PR #1454 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Marks CVE-2026-13221 (a silently-incorrect Perl regular-expression-matching result under certain patterns) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same perl-base finding group as CVE-2011-4116 above. Reachable only through code that runs Perl regexes; neither image invokes Perl at all. From: Issue #815, PR #1454",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -264,13 +264,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-13221"
       }
     },
     {
-      "impact_statement": "What: Marks CVE-2026-42496 (a `perl-Archive-Tar` path-traversal via crafted symlinks during archive extraction) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same perl-base finding group as CVE-2011-4116 above. Reachable only through Perl code using `Archive::Tar`; neither image invokes Perl, and this project's own tar handling is plain shell `tar`. From: Issue #815, PR #1454 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Marks CVE-2026-42496 (a `perl-Archive-Tar` path-traversal via crafted symlinks during archive extraction) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same perl-base finding group as CVE-2011-4116 above. Reachable only through Perl code using `Archive::Tar`; neither image invokes Perl, and this project's own tar handling is plain shell `tar`. From: Issue #815, PR #1454",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -279,13 +279,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-42496"
       }
     },
     {
-      "impact_statement": "What: Marks CVE-2026-42497 (the sibling `perl-Archive-Tar` arbitrary-file-modification-via-hardlinks finding to CVE-2026-42496) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same perl-base finding group and non-reachability as CVE-2026-42496 above (neither image invokes Perl or `Archive::Tar` at all). From: Issue #815, PR #1454 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Marks CVE-2026-42497 (the sibling `perl-Archive-Tar` arbitrary-file-modification-via-hardlinks finding to CVE-2026-42496) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same perl-base finding group and non-reachability as CVE-2026-42496 above (neither image invokes Perl or `Archive::Tar` at all). From: Issue #815, PR #1454",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -294,13 +294,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-42497"
       }
     },
     {
-      "impact_statement": "What: Marks CVE-2026-48959 (a `perl-IO-Compress` CPU-exhaustion DoS via a per-byte read loop) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same perl-base finding group as CVE-2011-4116 above. Reachable only through Perl code using `IO::Compress`; neither image invokes Perl at all. From: Issue #815, PR #1454 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Marks CVE-2026-48959 (a `perl-IO-Compress` CPU-exhaustion DoS via a per-byte read loop) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same perl-base finding group as CVE-2011-4116 above. Reachable only through Perl code using `IO::Compress`; neither image invokes Perl at all. From: Issue #815, PR #1454",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -309,13 +309,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-48959"
       }
     },
     {
-      "impact_statement": "What: Marks CVE-2026-48961 (a DoS in `IO::Compress`'s `zipdetails` CLI tool via a malformed Info-ZIP Unix Extra Field) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same perl-base finding group as CVE-2011-4116 above. Neither image invokes Perl or `zipdetails` at all. From: Issue #815, PR #1454 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Marks CVE-2026-48961 (a DoS in `IO::Compress`'s `zipdetails` CLI tool via a malformed Info-ZIP Unix Extra Field) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same perl-base finding group as CVE-2011-4116 above. Neither image invokes Perl or `zipdetails` at all. From: Issue #815, PR #1454",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -324,13 +324,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-48961"
       }
     },
     {
-      "impact_statement": "What: Marks CVE-2026-48962 (a `perl-IO-Compress` arbitrary-code-execution via an attacker-controlled output glob) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same perl-base finding group as CVE-2011-4116 above. Neither image invokes Perl or `IO::Compress` at all. From: Issue #815, PR #1454 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Marks CVE-2026-48962 (a `perl-IO-Compress` arbitrary-code-execution via an attacker-controlled output glob) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same perl-base finding group as CVE-2011-4116 above. Neither image invokes Perl or `IO::Compress` at all. From: Issue #815, PR #1454",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -339,13 +339,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-48962"
       }
     },
     {
-      "impact_statement": "What: Marks CVE-2026-57432 (a Perl information-disclosure via integer overflow in `pack`/`unpack` operations) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same perl-base finding group as CVE-2011-4116 above. Neither image invokes Perl at all. From: Issue #815, PR #1454 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Marks CVE-2026-57432 (a Perl information-disclosure via integer overflow in `pack`/`unpack` operations) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same perl-base finding group as CVE-2011-4116 above. Neither image invokes Perl at all. From: Issue #815, PR #1454",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -354,13 +354,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-57432"
       }
     },
     {
-      "impact_statement": "What: Marks CVE-2026-57433 (a `Storable` signed-integer-overflow finding) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same perl-base finding group as CVE-2011-4116 above. Neither image invokes Perl or `Storable` at all. From: Issue #815, PR #1454 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Marks CVE-2026-57433 (a `Storable` signed-integer-overflow finding) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same perl-base finding group as CVE-2011-4116 above. Neither image invokes Perl or `Storable` at all. From: Issue #815, PR #1454",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -369,13 +369,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-57433"
       }
     },
     {
-      "impact_statement": "What: Marks CVE-2026-7010 (an `HTTP::Tiny` CRLF-validation gap) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same perl-base finding group as CVE-2011-4116 above. Neither image invokes Perl or `HTTP::Tiny` at all; both images' own HTTP clients are Rust (`reqwest`, `services/ui`) or shell `curl` (`tools/build-tools`), never Perl. From: Issue #815, PR #1454 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Marks CVE-2026-7010 (an `HTTP::Tiny` CRLF-validation gap) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same perl-base finding group as CVE-2011-4116 above. Neither image invokes Perl or `HTTP::Tiny` at all; both images' own HTTP clients are Rust (`reqwest`, `services/ui`) or shell `curl` (`tools/build-tools`), never Perl. From: Issue #815, PR #1454",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -384,13 +384,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-7010"
       }
     },
     {
-      "impact_statement": "What: Marks CVE-2026-7017 (the sibling `HTTP::Tiny` credential-header-forwarding finding to CVE-2026-7010) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same perl-base finding group and non-reachability as CVE-2026-7010 above (neither image invokes Perl or `HTTP::Tiny` at all). From: Issue #815, PR #1454 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Marks CVE-2026-7017 (the sibling `HTTP::Tiny` credential-header-forwarding finding to CVE-2026-7010) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same perl-base finding group and non-reachability as CVE-2026-7010 above (neither image invokes Perl or `HTTP::Tiny` at all). From: Issue #815, PR #1454",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -399,13 +399,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-7017"
       }
     },
     {
-      "impact_statement": "What: Marks CVE-2026-8376 (a 32-bit-only Perl regex-compilation heap-buffer-overflow) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same perl-base finding group as CVE-2011-4116 above. Neither image invokes Perl at all, and both are built for `linux/amd64`/`linux/arm64` (64-bit only), an independent reason this finding cannot trigger even if Perl were invoked. From: Issue #815, PR #1454 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Marks CVE-2026-8376 (a 32-bit-only Perl regex-compilation heap-buffer-overflow) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same perl-base finding group as CVE-2011-4116 above. Neither image invokes Perl at all, and both are built for `linux/amd64`/`linux/arm64` (64-bit only), an independent reason this finding cannot trigger even if Perl were invoked. From: Issue #815, PR #1454",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -414,13 +414,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-8376"
       }
     },
     {
-      "impact_statement": "What: Marks CVE-2026-9538 (the third `perl-Archive-Tar` finding in this group -- DoS via a crafted tar header with a large entry size) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same perl-base finding group and non-reachability as CVE-2026-42496/CVE-2026-42497 above (neither image invokes Perl or `Archive::Tar` at all). From: Issue #815, PR #1454 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Marks CVE-2026-9538 (the third `perl-Archive-Tar` finding in this group -- DoS via a crafted tar header with a large entry size) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same perl-base finding group and non-reachability as CVE-2026-42496/CVE-2026-42497 above (neither image invokes Perl or `Archive::Tar` at all). From: Issue #815, PR #1454",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -429,13 +429,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-9538"
       }
     },
     {
-      "impact_statement": "What: Marks CVE-2022-0563 (a partial-file-disclosure bug in `chfn`/`chsh` when compiled with `libreadline` support) as not exploitable in `services/ui` and `tools/build-tools`. Anchor entry for a 9-ID group against the util-linux package family (`bsdutils`, `libblkid1`, `libmount1`, `liblastlog2-2`, `libsmartcols1`, `libuuid1`, `login`, `mount`, `util-linux`). Why: Same full-severity scan as CVE-2011-4116 above. Neither image's own code calls any util-linux CLI tool (grep-confirmed; `services/ui`'s privilege-drop handling uses `setpriv`, not `chfn`/`chsh`); the family is present only as a required base-Debian dependency. From: Issue #815, PR #1454 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Marks CVE-2022-0563 (a partial-file-disclosure bug in `chfn`/`chsh` when compiled with `libreadline` support) as not exploitable in `services/ui` and `tools/build-tools`. Anchor entry for a 9-ID group against the util-linux package family (`bsdutils`, `libblkid1`, `libmount1`, `liblastlog2-2`, `libsmartcols1`, `libuuid1`, `login`, `mount`, `util-linux`). Why: Same full-severity scan as CVE-2011-4116 above. Neither image's own code calls any util-linux CLI tool (grep-confirmed; `services/ui`'s privilege-drop handling uses `setpriv`, not `chfn`/`chsh`); the family is present only as a required base-Debian dependency. From: Issue #815, PR #1454",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -444,13 +444,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2022-0563"
       }
     },
     {
-      "impact_statement": "What: Marks CVE-2025-14104 (a heap buffer-overread in `setpwnam()` when processing 256-byte usernames) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same util-linux finding group as CVE-2022-0563 above. Reachable only through code that calls `setpwnam()`; neither image invokes any util-linux CLI tool at all. From: Issue #815, PR #1454 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Marks CVE-2025-14104 (a heap buffer-overread in `setpwnam()` when processing 256-byte usernames) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same util-linux finding group as CVE-2022-0563 above. Reachable only through code that calls `setpwnam()`; neither image invokes any util-linux CLI tool at all. From: Issue #815, PR #1454",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -459,13 +459,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2025-14104"
       }
     },
     {
-      "impact_statement": "What: Marks CVE-2026-13595 (a heap use-after-free in `libblkid`'s nested-partition-table probing) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same util-linux finding group as CVE-2022-0563 above. Reachable only through code that calls `libblkid` to probe a partition table; neither image has block-device access, running under a normal Docker overlay filesystem. From: Issue #815, PR #1454 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Marks CVE-2026-13595 (a heap use-after-free in `libblkid`'s nested-partition-table probing) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same util-linux finding group as CVE-2022-0563 above. Reachable only through code that calls `libblkid` to probe a partition table; neither image has block-device access, running under a normal Docker overlay filesystem. From: Issue #815, PR #1454",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -474,13 +474,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-13595"
       }
     },
     {
-      "impact_statement": "What: Marks CVE-2026-27456 (a TOCTOU race in the `mount` program's loop-device setup) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same util-linux finding group as CVE-2022-0563 above. Neither image invokes `mount` at all, and neither container runs with the `CAP_SYS_ADMIN` capability `mount` requires. From: Issue #815, PR #1454 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Marks CVE-2026-27456 (a TOCTOU race in the `mount` program's loop-device setup) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same util-linux finding group as CVE-2022-0563 above. Neither image invokes `mount` at all, and neither container runs with the `CAP_SYS_ADMIN` capability `mount` requires. From: Issue #815, PR #1454",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -489,13 +489,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-27456"
       }
     },
     {
-      "impact_statement": "What: Marks CVE-2026-3184 (an access-control bypass via improper hostname canonicalization) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same util-linux finding group as CVE-2022-0563 above. Neither image performs hostname-based access-control decisions through any util-linux component. From: Issue #815, PR #1454 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Marks CVE-2026-3184 (an access-control bypass via improper hostname canonicalization) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same util-linux finding group as CVE-2022-0563 above. Neither image performs hostname-based access-control decisions through any util-linux component. From: Issue #815, PR #1454",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -504,13 +504,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-3184"
       }
     },
     {
-      "impact_statement": "What: Marks CVE-2026-53612 (a local privilege-escalation via a TOCTOU race in `mount(8)`'s own `hook_owner.c` chmod/chown handling) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same util-linux finding group as CVE-2022-0563 above. Requires invoking a SUID-installed `mount(8)` binary; neither image invokes `mount`, and neither container runs with the needed capabilities. From: Issue #815, PR #1454 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Marks CVE-2026-53612 (a local privilege-escalation via a TOCTOU race in `mount(8)`'s own `hook_owner.c` chmod/chown handling) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same util-linux finding group as CVE-2022-0563 above. Requires invoking a SUID-installed `mount(8)` binary; neither image invokes `mount`, and neither container runs with the needed capabilities. From: Issue #815, PR #1454",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -519,13 +519,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-53612"
       }
     },
     {
-      "impact_statement": "What: Marks CVE-2026-53613 (the sibling `mount(8)` target-path-redirection TOCTOU finding to CVE-2026-53612) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same util-linux finding group and non-reachability as CVE-2026-53612 above (neither image invokes `mount` at all). From: Issue #815, PR #1454 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Marks CVE-2026-53613 (the sibling `mount(8)` target-path-redirection TOCTOU finding to CVE-2026-53612) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same util-linux finding group and non-reachability as CVE-2026-53612 above (neither image invokes `mount` at all). From: Issue #815, PR #1454",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -534,13 +534,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-53613"
       }
     },
     {
-      "impact_statement": "What: Marks CVE-2026-53614 (a `LIBMOUNT_FORCE_MOUNT2` environment-variable nosuid/noexec bypass in SUID `mount(8)`) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same util-linux finding group and non-reachability as CVE-2026-53612/CVE-2026-53613 above (neither image invokes `mount` at all, let alone sets this environment variable). From: Issue #815, PR #1454 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Marks CVE-2026-53614 (a `LIBMOUNT_FORCE_MOUNT2` environment-variable nosuid/noexec bypass in SUID `mount(8)`) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same util-linux finding group and non-reachability as CVE-2026-53612/CVE-2026-53613 above (neither image invokes `mount` at all, let alone sets this environment variable). From: Issue #815, PR #1454",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -549,13 +549,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-53614"
       }
     },
     {
-      "impact_statement": "What: Marks CVE-2026-53615 (an integer overflow in `libblkid/src/partitions/dos.c`'s DOS/MBR partition-table parsing) as not exploitable in `services/ui` and `tools/build-tools`. The one HIGH-severity finding in this group. Why: Same util-linux finding group and non-reachability as CVE-2026-13595 above (neither image ever parses a partition table). From: Issue #815, PR #1454 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Marks CVE-2026-53615 (an integer overflow in `libblkid/src/partitions/dos.c`'s DOS/MBR partition-table parsing) as not exploitable in `services/ui` and `tools/build-tools`. The one HIGH-severity finding in this group. Why: Same util-linux finding group and non-reachability as CVE-2026-13595 above (neither image ever parses a partition table). From: Issue #815, PR #1454",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -564,13 +564,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-53615"
       }
     },
     {
-      "impact_statement": "What: Marks CVE-2025-6141 (an ncurses stack-buffer-overflow reachable through malformed terminfo data or terminal-control- sequence parsing) as not exploitable in `services/ui` and `tools/build-tools`. Anchor entry for a 2-ID group against the ncurses package family. Why: Same full-severity scan as CVE-2011-4116 above. Neither image invokes an ncurses-linked program with untrusted input: `services/ui`'s Rust binary does not link ncurses (`ldd`-confirmed), and `tools/build-tools`'s scripts run entirely non-interactively. From: Issue #815, PR #1454 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Marks CVE-2025-6141 (an ncurses stack-buffer-overflow reachable through malformed terminfo data or terminal-control- sequence parsing) as not exploitable in `services/ui` and `tools/build-tools`. Anchor entry for a 2-ID group against the ncurses package family. Why: Same full-severity scan as CVE-2011-4116 above. Neither image invokes an ncurses-linked program with untrusted input: `services/ui`'s Rust binary does not link ncurses (`ldd`-confirmed), and `tools/build-tools`'s scripts run entirely non-interactively. From: Issue #815, PR #1454",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -579,13 +579,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2025-6141"
       }
     },
     {
-      "impact_statement": "What: Marks CVE-2025-69720 (an ncurses buffer overflow that may lead to arbitrary code execution) as not exploitable in `services/ui` and `tools/build-tools`. The second HIGH-severity finding in this group. Why: Same ncurses finding group and non-reachability as CVE-2025-6141 above. From: Issue #815, PR #1454 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Marks CVE-2025-69720 (an ncurses buffer overflow that may lead to arbitrary code execution) as not exploitable in `services/ui` and `tools/build-tools`. The second HIGH-severity finding in this group. Why: Same ncurses finding group and non-reachability as CVE-2025-6141 above. From: Issue #815, PR #1454",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -594,13 +594,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2025-69720"
       }
     },
     {
-      "impact_statement": "What: Marks CVE-2026-54369 (a symlink-traversal privilege escalation via libacl's own functions) as not exploitable in `services/ui` and `tools/build-tools`. Anchor entry for a 2-ID group against `libacl1`; the HIGH-severity ID in this group. Why: Same full-severity scan as CVE-2011-4116 above. Reachable only via `setfacl`/`getfacl`; grep-confirmed zero invocations in either image -- `libacl1` is present only as a transitive link dependency of `coreutils`/`tar`/`sed`. From: Issue #815, PR #1454 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Marks CVE-2026-54369 (a symlink-traversal privilege escalation via libacl's own functions) as not exploitable in `services/ui` and `tools/build-tools`. Anchor entry for a 2-ID group against `libacl1`; the HIGH-severity ID in this group. Why: Same full-severity scan as CVE-2011-4116 above. Reachable only via `setfacl`/`getfacl`; grep-confirmed zero invocations in either image -- `libacl1` is present only as a transitive link dependency of `coreutils`/`tar`/`sed`. From: Issue #815, PR #1454",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -609,13 +609,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-54369"
       }
     },
     {
-      "impact_statement": "What: Marks CVE-2026-54370 (a TOCTOU symlink-traversal finding specifically in the `getfacl`/`setfacl` CLI tools) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same libacl1 finding group and non-reachability as CVE-2026-54369 above. From: Issue #815, PR #1454 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Marks CVE-2026-54370 (a TOCTOU symlink-traversal finding specifically in the `getfacl`/`setfacl` CLI tools) as not exploitable in `services/ui` and `tools/build-tools`. Why: Same libacl1 finding group and non-reachability as CVE-2026-54369 above. From: Issue #815, PR #1454",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -624,13 +624,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-54370"
       }
     },
     {
-      "action_statement": "What: Accepts CVE-2026-41991 (an arbitrary-file-overwrite via insecure temporary-file handling in the `gzexe` utility) as tracked risk for `tools/build-tools` only; `services/ui` is unaffected. Anchor entry for the 2-ID gzip group (this and CVE-2026-41992 below) -- the only ID in this file's 30-ID batch where the two images' exploitability genuinely differs. Why: `services/ui` never invokes `gzip`/`gzexe` (grep-confirmed). Trivy's finding applies per-CVE-ID repo-wide with no per-image `paths:` scoping for Debian os-pkgs, so the disposition reflects the more exploitable image: `tools/build-tools` unpacks pinned, checksum-verified release tarballs via `gzip`, never invoking `gzexe` itself or on attacker-supplied input. No `trixie`/ `trixie-backports` fix exists yet (Debian security-tracker: only `sid` has 1.14-1; re-verified 2026-08-19; re-confirmed 2026-08-27 against security-tracker.debian.org: trixie gzip 1.13-1 remains `vulnerable` for both CVE-2026-41991 and CVE-2026-41992, fix only in sid 1.14-1). From: Issue #815, PR #1454, Issue #1598 (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-09-30 and must be re-reviewed on or before that date.)",
+      "action_statement": "What: Accepts CVE-2026-41991 (an arbitrary-file-overwrite via insecure temporary-file handling in the `gzexe` utility) as tracked risk for `tools/build-tools` only; `services/ui` is unaffected. Anchor entry for the 2-ID gzip group (this and CVE-2026-41992 below) -- the only ID in this file's 30-ID batch where the two images' exploitability genuinely differs. Why: `services/ui` never invokes `gzip`/`gzexe` (grep-confirmed). Trivy's finding applies per-CVE-ID repo-wide with no per-image `paths:` scoping for Debian os-pkgs, so the disposition reflects the more exploitable image: `tools/build-tools` unpacks pinned, checksum-verified release tarballs via `gzip`, never invoking `gzexe` itself or on attacker-supplied input. No `trixie`/ `trixie-backports` fix exists yet (Debian security-tracker: only `sid` has 1.14-1; re-verified 2026-08-19; re-confirmed 2026-08-27 against security-tracker.debian.org: trixie gzip 1.13-1 remains `vulnerable` for both CVE-2026-41991 and CVE-2026-41992, fix only in sid 1.14-1). From: Issue #815, PR #1454, Issue #1598",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -638,13 +638,13 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-41991"
       }
     },
     {
-      "action_statement": "What: Accepts CVE-2026-41992 (a global buffer overflow in gzip's own LZH decompression path -- legacy `.lzh`/SCO-compress-format support) as tracked risk for `tools/build-tools` only; the HIGH-severity ID in this group. Why: Same gzip finding group as CVE-2026-41991 above. `tools/build-tools`'s `gzip` usage (unpacking plain `.tar.gz` tarballs) never exercises the LZH code path, which only triggers on input explicitly identified as LZH-formatted. From: Issue #815, PR #1454, Issue #1598 (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-09-30 and must be re-reviewed on or before that date.)",
+      "action_statement": "What: Accepts CVE-2026-41992 (a global buffer overflow in gzip's own LZH decompression path -- legacy `.lzh`/SCO-compress-format support) as tracked risk for `tools/build-tools` only; the HIGH-severity ID in this group. Why: Same gzip finding group as CVE-2026-41991 above. `tools/build-tools`'s `gzip` usage (unpacking plain `.tar.gz` tarballs) never exercises the LZH code path, which only triggers on input explicitly identified as LZH-formatted. From: Issue #815, PR #1454, Issue #1598",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -652,13 +652,13 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-41992"
       }
     },
     {
-      "impact_statement": "What: Suppresses CVE-2026-27145 (Go stdlib crypto/x509 DoS via excessive DNS SAN processing) for actionlint's release binary. Anchor entry for a 20-ID embedded-Go-stdlib group (the 19 sibling entries below share this background) -- actionlint v1.7.12's official release binary statically embeds a Go stdlib older than the fixes for all 20 IDs, confirmed by a real Trivy scan (aquasec/trivy v0.74.0, vulnerability DB updated 2026-08-28T17:56Z) of tools/build-tools's built image on 2026-08-28. Why: All 20 IDs in this group are DoS/parsing findings in networking-adjacent stdlib packages (crypto/tls, crypto/x509, net, net/http, net/mail, net/url, mime, encoding/xml, encoding/asn1, html/template, golang.org/x/net). tools/build-tools invokes actionlint only for a fully offline static lint of local workflow YAML files (actionlint <file>..., per AG-VAL-017/AG-CI-001) -- that invocation never opens a TLS/HTTP connection, resolves DNS, or parses an attacker-supplied email/MIME/XML/HTML document, so none of this group's vulnerable code paths is reachable from how this project actually runs the tool. Per the rewritten AG-KD-003 (PR exemption precisely because its vulnerable code is unreachable in this invocation -- this is a reachability finding, not a general accepted-risk waiver. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Suppresses CVE-2026-27145 (Go stdlib crypto/x509 DoS via excessive DNS SAN processing) for actionlint's release binary. Anchor entry for a 20-ID embedded-Go-stdlib group (the 19 sibling entries below share this background) -- actionlint v1.7.12's official release binary statically embeds a Go stdlib older than the fixes for all 20 IDs, confirmed by a real Trivy scan (aquasec/trivy v0.74.0, vulnerability DB updated 2026-08-28T17:56Z) of tools/build-tools's built image on 2026-08-28. Why: All 20 IDs in this group are DoS/parsing findings in networking-adjacent stdlib packages (crypto/tls, crypto/x509, net, net/http, net/mail, net/url, mime, encoding/xml, encoding/asn1, html/template, golang.org/x/net). tools/build-tools invokes actionlint only for a fully offline static lint of local workflow YAML files (actionlint <file>..., per AG-VAL-017/AG-CI-001) -- that invocation never opens a TLS/HTTP connection, resolves DNS, or parses an attacker-supplied email/MIME/XML/HTML document, so none of this group's vulnerable code paths is reachable from how this project actually runs the tool. Per the rewritten AG-KD-003 (PR exemption precisely because its vulnerable code is unreachable in this invocation -- this is a reachability finding, not a general accepted-risk waiver. From: Issue #1095, PR #1743",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -671,13 +671,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-27145"
       }
     },
     {
-      "impact_statement": "What: Suppresses CVE-2026-32280 (crypto/tls DoS via certificate chain building) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. TLS certificate-chain building is never exercised by this project's offline lint invocation. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Suppresses CVE-2026-32280 (crypto/tls DoS via certificate chain building) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. TLS certificate-chain building is never exercised by this project's offline lint invocation. From: Issue #1095, PR #1743",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -690,13 +690,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-32280"
       }
     },
     {
-      "impact_statement": "What: Suppresses CVE-2026-32281 (crypto/x509 DoS via inefficient certificate chain validation) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. Certificate chain validation is never exercised by this project's offline lint invocation. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Suppresses CVE-2026-32281 (crypto/x509 DoS via inefficient certificate chain validation) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. Certificate chain validation is never exercised by this project's offline lint invocation. From: Issue #1095, PR #1743",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -709,13 +709,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-32281"
       }
     },
     {
-      "impact_statement": "What: Suppresses CVE-2026-32283 (crypto/tls DoS via TLS 1.3 key update messages) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. No TLS connection of any kind is opened by this project's offline lint invocation. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Suppresses CVE-2026-32283 (crypto/tls DoS via TLS 1.3 key update messages) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. No TLS connection of any kind is opened by this project's offline lint invocation. From: Issue #1095, PR #1743",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -728,13 +728,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-32283"
       }
     },
     {
-      "impact_statement": "What: Suppresses CVE-2026-33810 (crypto/x509 certificate validation bypass via DNS constraint handling) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. Certificate validation is never exercised by this project's offline lint invocation. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Suppresses CVE-2026-33810 (crypto/x509 certificate validation bypass via DNS constraint handling) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. Certificate validation is never exercised by this project's offline lint invocation. From: Issue #1095, PR #1743",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -747,13 +747,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-33810"
       }
     },
     {
-      "impact_statement": "What: Suppresses CVE-2026-33811 (net package DoS via long CNAME response in LookupCNAME) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. This project's offline lint invocation never resolves DNS. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Suppresses CVE-2026-33811 (net package DoS via long CNAME response in LookupCNAME) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. This project's offline lint invocation never resolves DNS. From: Issue #1095, PR #1743",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -766,13 +766,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-33811"
       }
     },
     {
-      "impact_statement": "What: Suppresses CVE-2026-33814 (HTTP/2 DoS via malformed SETTINGS_MAX_FRAME_SIZE frame) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. No HTTP/2 connection is ever opened by this project's offline lint invocation. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Suppresses CVE-2026-33814 (HTTP/2 DoS via malformed SETTINGS_MAX_FRAME_SIZE frame) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. No HTTP/2 connection is ever opened by this project's offline lint invocation. From: Issue #1095, PR #1743",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -785,13 +785,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-33814"
       }
     },
     {
-      "impact_statement": "What: Suppresses CVE-2026-33818 (encoding/asn1 DoS via excessive recursion in Unmarshal) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. This project's offline lint invocation never unmarshals ASN.1 data (no TLS/certificate handling occurs). From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Suppresses CVE-2026-33818 (encoding/asn1 DoS via excessive recursion in Unmarshal) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. This project's offline lint invocation never unmarshals ASN.1 data (no TLS/certificate handling occurs). From: Issue #1095, PR #1743",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -804,13 +804,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-33818"
       }
     },
     {
-      "impact_statement": "What: Suppresses CVE-2026-39820 (net/mail DoS via crafted email inputs) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. This project's offline lint invocation never parses email addresses. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Suppresses CVE-2026-39820 (net/mail DoS via crafted email inputs) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. This project's offline lint invocation never parses email addresses. From: Issue #1095, PR #1743",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -823,13 +823,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-39820"
       }
     },
     {
-      "impact_statement": "What: Suppresses CVE-2026-39821 (golang.org/x/net/idna privilege escalation via Punycode label processing) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. This project's offline lint invocation never processes a hostname or Punycode label. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Suppresses CVE-2026-39821 (golang.org/x/net/idna privilege escalation via Punycode label processing) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. This project's offline lint invocation never processes a hostname or Punycode label. From: Issue #1095, PR #1743",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -842,13 +842,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-39821"
       }
     },
     {
-      "impact_statement": "What: Suppresses CVE-2026-39822 (os.Root symlink-following directory traversal) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. actionlint's own source does not use os.Root; the lint invocation only opens the workflow file paths given on its own command line. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Suppresses CVE-2026-39822 (os.Root symlink-following directory traversal) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. actionlint's own source does not use os.Root; the lint invocation only opens the workflow file paths given on its own command line. From: Issue #1095, PR #1743",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -861,13 +861,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-39822"
       }
     },
     {
-      "impact_statement": "What: Suppresses CVE-2026-39836 (net package DoS via NUL byte in Dial/LookupPort on Windows) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above; also Windows-only, while this image is Linux-only (Debian trixie / Alpine). This project's offline lint invocation never dials a network connection. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Suppresses CVE-2026-39836 (net package DoS via NUL byte in Dial/LookupPort on Windows) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above; also Windows-only, while this image is Linux-only (Debian trixie / Alpine). This project's offline lint invocation never dials a network connection. From: Issue #1095, PR #1743",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -880,13 +880,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-39836"
       }
     },
     {
-      "impact_statement": "What: Suppresses CVE-2026-42499 (net/mail DoS via pathological email address parsing) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. This project's offline lint invocation never parses email addresses. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Suppresses CVE-2026-42499 (net/mail DoS via pathological email address parsing) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. This project's offline lint invocation never parses email addresses. From: Issue #1095, PR #1743",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -899,13 +899,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-42499"
       }
     },
     {
-      "impact_statement": "What: Suppresses CVE-2026-42504 (mime DoS via maliciously-crafted MIME header) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. This project's offline lint invocation never parses a MIME header. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Suppresses CVE-2026-42504 (mime DoS via maliciously-crafted MIME header) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. This project's offline lint invocation never parses a MIME header. From: Issue #1095, PR #1743",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -918,13 +918,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-42504"
       }
     },
     {
-      "impact_statement": "What: Suppresses CVE-2026-46600 (golang.org/x/net/dns/dnsmessage DoS via invalid DNS record parsing) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. This project's offline lint invocation never resolves DNS. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Suppresses CVE-2026-46600 (golang.org/x/net/dns/dnsmessage DoS via invalid DNS record parsing) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. This project's offline lint invocation never resolves DNS. From: Issue #1095, PR #1743",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -937,13 +937,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-46600"
       }
     },
     {
-      "impact_statement": "What: Suppresses CVE-2026-56853 (net/http DoS via unencrypted HTTP/2 connections) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. No HTTP connection of any kind is opened by this project's offline lint invocation. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Suppresses CVE-2026-56853 (net/http DoS via unencrypted HTTP/2 connections) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. No HTTP connection of any kind is opened by this project's offline lint invocation. From: Issue #1095, PR #1743",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -956,13 +956,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-56853"
       }
     },
     {
-      "impact_statement": "What: Suppresses CVE-2026-56858 (html/template XSS via pathological input) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. actionlint's normal CLI lint output is plain text to stdout/stderr, not rendered HTML; html/template is never invoked. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Suppresses CVE-2026-56858 (html/template XSS via pathological input) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. actionlint's normal CLI lint output is plain text to stdout/stderr, not rendered HTML; html/template is never invoked. From: Issue #1095, PR #1743",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -975,13 +975,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-56858"
       }
     },
     {
-      "impact_statement": "What: Suppresses CVE-2026-56859 (encoding/xml DoS via decoding recursion depth) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. This project's offline lint invocation only parses YAML workflow files, never XML. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Suppresses CVE-2026-56859 (encoding/xml DoS via decoding recursion depth) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. This project's offline lint invocation only parses YAML workflow files, never XML. From: Issue #1095, PR #1743",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -994,13 +994,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-56859"
       }
     },
     {
-      "impact_statement": "What: Suppresses CVE-2026-56860 (net/url DoS via quadratic- complexity path resolution) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. This project's offline lint invocation does not resolve URLs against attacker-supplied input. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Suppresses CVE-2026-56860 (net/url DoS via quadratic- complexity path resolution) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. This project's offline lint invocation does not resolve URLs against attacker-supplied input. From: Issue #1095, PR #1743",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -1013,13 +1013,13 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-56860"
       }
     },
     {
-      "impact_statement": "What: Suppresses CVE-2026-56862 (crypto/tls DoS via indefinite KeyUpdate messages) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. No TLS connection of any kind is opened by this project's offline lint invocation. From: Issue #1095, PR #1743 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-09-30 in case the underlying module pin or upstream situation has changed.)",
+      "impact_statement": "What: Suppresses CVE-2026-56862 (crypto/tls DoS via indefinite KeyUpdate messages) for actionlint's release binary. Why: Same embedded-Go-stdlib disposition as CVE-2026-27145 above. No TLS connection of any kind is opened by this project's offline lint invocation. From: Issue #1095, PR #1743",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -1032,12 +1032,12 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-08-29T03:56:37Z",
+      "timestamp": "2026-08-31T15:16:15Z",
       "vulnerability": {
         "name": "CVE-2026-56862"
       }
     }
   ],
-  "timestamp": "2026-08-29T03:56:37Z",
+  "timestamp": "2026-08-31T15:16:15Z",
   "version": 1
 }
