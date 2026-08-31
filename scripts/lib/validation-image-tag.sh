@@ -112,19 +112,15 @@ vit_resolve_tag() {
 }
 
 # Whether a given full-setup service is expected to already have a pushed
-# staging image for this PR. Mirrors build/build-arm64's should-build
-# override exactly: a BUILD-affecting workflow/CI-contract change (the
-# narrower workflow_reuse_scope signal, not the broader workflow key) forces
-# every service EXCEPT build-tools to be treated as touched. build-tools' own
-# detect-changes scoping, tools/build-tools/** only, is intentionally
-# narrower. Echoes "true"/"false". Used by the fail-closed guard so a
-# touched service whose build genuinely failed is caught, while a
-# legitimately untouched service is allowed the cheap base-channel back-fill.
+# staging image for this PR. Mirrors the real per-service touch result only:
+# if detect-changes says the service was touched, this returns "true";
+# otherwise it returns "false". The workflow-level reuse signal is still
+# available to other callers as diagnostics, but it no longer broadens the
+# build/staging admission decision here. Echoes "true"/"false". Used by the
+# fail-closed guard so a touched service whose build genuinely failed is
+# caught, while a legitimately untouched service is allowed the cheap
+# base-channel back-fill.
 vit_service_should_have_staging_tag() {
-    local service="$1" touched="$2" build_workflow_changed="$3"
-    if [[ "$build_workflow_changed" == "true" && "$service" != "build-tools" ]]; then
-        printf 'true\n'
-    else
-        printf '%s\n' "$touched"
-    fi
+    local touched="$2"
+    printf '%s\n' "$touched"
 }

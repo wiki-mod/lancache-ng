@@ -2715,7 +2715,6 @@ jobs:
           # From: Issue #1095 | PR #1619
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
-          WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow_reuse_scope }}
           PROXY_TOUCHED: ${{ needs['detect-changes'].outputs.proxy }}
           DNS_TOUCHED: ${{ needs['detect-changes'].outputs.dns_image }}
           WATCHDOG_TOUCHED: ${{ needs['detect-changes'].outputs.watchdog }}
@@ -2752,10 +2751,10 @@ jobs:
           : "${BASE_SHA:?BASE_SHA (github.event.pull_request.base.sha) is required}"
 
           # What: calls vit_service_should_have_staging_tag directly.
-          # Why: keeps this decision alongside the other shared-function calls.
+          # Why: keeps the staging decision tied to the per-service touch result.
           # From: Issue #1095 | PR #1619
           service_should_have_staging_tag() {
-            vit_service_should_have_staging_tag "$1" "$2" "$WORKFLOW_CHANGED"
+            vit_service_should_have_staging_tag "$1" "$2"
           }
 
           declare -A touched_map=(
@@ -5074,9 +5073,6 @@ jobs:
                 exit 1
                 ;;
             esac
-            if [ "${{ needs['detect-changes'].outputs.workflow_reuse_scope }}" = "true" ] && [ "$MATRIX_SERVICE" != "build-tools" ]; then
-              should_build=true
-            fi
           elif [ "$REUSE_JOB_RESULT" = "success" ]; then
             # What: determine-push-reuse-scope's check covers all 10 services.
             # Why: full reasoning on the linked issue.
@@ -6075,9 +6071,6 @@ jobs:
                 exit 1
                 ;;
             esac
-            if [ "${{ needs['detect-changes'].outputs.workflow_reuse_scope }}" = "true" ] && [ "$MATRIX_SERVICE" != "build-tools" ]; then
-              should_build=true
-            fi
           elif [ "$REUSE_JOB_RESULT" = "success" ]; then
             # What: mirrors build's own (amd64) identical Step 4 branch.
             # Why: full reasoning on the linked issue.

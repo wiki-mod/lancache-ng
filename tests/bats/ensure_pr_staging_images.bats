@@ -375,42 +375,34 @@ STUB
     ! printf '%s\n' "$output" | grep -q "confirmed no such manifest"
 }
 
-@test "workflow change forces every service but build-tools to be treated as touched" {
-    # build-tools present (its narrower scoping keeps it touched only if built);
-    # proxy/dns/watchdog/ui are forced-touched by the workflow change but none
-    # exist -> must fail closed on the first one.
+@test "workflow change no longer forces unrelated services to be treated as touched" {
+    # The workflow flag alone should be inert now: with no real service touch,
+    # every service is eligible for the cheap base-commit back-fill path.
     export EXISTING_IMAGES="ghcr.io/wiki-mod/lancache-ng/build-tools:pr-715-sha-abcdef0"
     export WORKFLOW_CHANGED="true"
     export PROXY_TOUCHED="false" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
     run bash "$script"
-    [ "$status" -ne 0 ]
-    printf '%s\n' "$output" | grep -q "never appeared"
+    [ "$status" -eq 0 ]
+    [ "$(wc -l < "$backfill_log")" -eq 5 ]
+    grep -qF "build-tools:pr-715-sha-abcdef0" "$backfill_log"
 }
 
-@test "workflow change: build-tools untouched is still back-filled, not required" {
-    # Every forced-touched service present (#1296: dhcp/dhcp-proxy joined
-    # first, ntp completed that set; #1428 then added syslog); build-tools
-    # untouched -> back-fill.
+@test "workflow change: a real service touch still leaves unrelated services back-fill eligible" {
+    # The workflow flag must not broaden the touched set; only the real
+    # service touch below should remain required, while the others back-fill.
     # Declared and exported separately (SC2155): combining them would mask a
     # real failure exit status from the command substitution behind the
     # export builtin's own (always-successful-here) return value.
     EXISTING_IMAGES="$(printf '%s\n' \
-        ghcr.io/wiki-mod/lancache-ng/proxy:pr-715-sha-abcdef0 \
-        ghcr.io/wiki-mod/lancache-ng/dns:pr-715-sha-abcdef0 \
-        ghcr.io/wiki-mod/lancache-ng/watchdog:pr-715-sha-abcdef0 \
-        ghcr.io/wiki-mod/lancache-ng/ui:pr-715-sha-abcdef0 \
-        ghcr.io/wiki-mod/lancache-ng/dhcp:pr-715-sha-abcdef0 \
-        ghcr.io/wiki-mod/lancache-ng/dhcp-proxy:pr-715-sha-abcdef0 \
-        ghcr.io/wiki-mod/lancache-ng/ntp:pr-715-sha-abcdef0 \
-        ghcr.io/wiki-mod/lancache-ng/syslog:pr-715-sha-abcdef0)"
+        ghcr.io/wiki-mod/lancache-ng/proxy:pr-715-sha-abcdef0)"
     export EXISTING_IMAGES
     export WORKFLOW_CHANGED="true"
-    export PROXY_TOUCHED="false" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
+    export PROXY_TOUCHED="true" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
     export DHCP_TOUCHED="false" DHCP_PROXY_TOUCHED="false" NTP_TOUCHED="false" SYSLOG_TOUCHED="false"
     run bash "$script"
     [ "$status" -eq 0 ]
-    # Only build-tools is back-filled.
-    [ "$(wc -l < "$backfill_log")" -eq 1 ]
+    # The untouched four still back-fill, including build-tools.
+    [ "$(wc -l < "$backfill_log")" -eq 4 ]
     grep -qF "build-tools:pr-715-sha-abcdef0" "$backfill_log"
 }
 
@@ -1126,8 +1118,8 @@ STUB
 }
 
 # scripts/lib/staging-poll-defaults.sh coverage: sourced directly (not via a
-# full run of $script) so these two cases run instantly instead of actually
-# waiting out a real 3600s poll to observe the workflow_changed=true default.
+# full run of $script) so these cases run instantly instead of actually
+# waiting out a real poll.
 @test "staging poll defaults: normal (workflow_changed=false) case is unchanged" {
     # shellcheck source=scripts/lib/staging-poll-defaults.sh
     source "$repo_root/scripts/lib/staging-poll-defaults.sh"
@@ -1136,10 +1128,10 @@ STUB
     [ "$default_poll_hard_ceiling_seconds" -eq 1200 ]
 }
 
-@test "staging poll defaults: workflow_changed=true widens the full-rebuild budget to 3600s" {
+@test "staging poll defaults: workflow_changed=true now uses the same service-scoped budget" {
     # shellcheck source=scripts/lib/staging-poll-defaults.sh
     source "$repo_root/scripts/lib/staging-poll-defaults.sh"
     staging_poll_set_defaults_for_workflow_changed "true"
-    [ "$default_poll_timeout_seconds" -eq 3600 ]
-    [ "$default_poll_hard_ceiling_seconds" -eq 3600 ]
+    [ "$default_poll_timeout_seconds" -eq 1500 ]
+    [ "$default_poll_hard_ceiling_seconds" -eq 1200 ]
 }

@@ -7,15 +7,14 @@
 # is where the deep gate REUSES the pr-<N>-sha-<full> mechanism
 # rather than inventing its own:
 #
-#   1. For every full-setup service this PR TOUCHED (or every service but
-#      build-tools if a workflow/CI-contract file changed), POLL the registry
-#      until build-push.yml's build/build-arm64/merge-manifests have pushed
-#      that service's pr-<N>-sha-<full> tag -- this poll IS the cross-
-#      workflow wait, since a separate workflow cannot express `needs:` on
-#      build-push's jobs. If the tag never appears within the timeout, FAIL
-#      CLOSED: a touched service with no staging image means its build failed
-#      (or the registry is unreachable), and silently validating stale
-#      base-channel content behind a PR-looking tag is exactly #626's bug.
+#   1. For every full-setup service this PR TOUCHED, POLL the registry until
+#      build-push.yml's build/build-arm64/merge-manifests have pushed that
+#      service's pr-<N>-sha-<full> tag -- this poll IS the cross-workflow
+#      wait, since a separate workflow cannot express `needs:` on build-
+#      push's jobs. If the tag never appears within the timeout, FAIL CLOSED:
+#      a touched service with no staging image means its build failed (or the
+#      registry is unreachable), and silently validating stale base-channel
+#      content behind a PR-looking tag is exactly #626's bug.
 #   2. For every service this PR did NOT touch, (re)point pr-<N>-sha-<full>
 #      at this PR's own base commit's durable per-commit sha-<commit> image
 #      (#1254/#1255 -- see the #808 note below for why this is no longer a
@@ -167,7 +166,6 @@ source "$script_dir/../lib/staging-poll-defaults.sh"
 # not duplicated here.
 : "${BASE_SHA:?BASE_SHA (github.event.pull_request.base.sha) is required}"
 
-workflow_changed="${WORKFLOW_CHANGED:-false}"
 # The commit build-push.yml built and tagged for this PR (github.sha on a
 # pull_request event -- see full-setup-deep-validate.yml's own BUILD_SHA
 # comment in the "plan" job for why this must be the synthetic merge commit,
@@ -195,7 +193,7 @@ pr_head_sha="${PR_HEAD_SHA:-}"
 # they can legitimately take many minutes; past this budget we start asking
 # whether build-push's own run is still active rather than failing outright
 # (see #895 note above). Overridable for tests.
-staging_poll_set_defaults_for_workflow_changed "$workflow_changed"
+staging_poll_set_defaults_for_workflow_changed "false"
 poll_timeout_seconds="${STAGING_POLL_TIMEOUT_SECONDS:-$default_poll_timeout_seconds}"
 poll_interval_seconds="${STAGING_POLL_INTERVAL_SECONDS:-15}"
 
@@ -203,8 +201,7 @@ poll_interval_seconds="${STAGING_POLL_INTERVAL_SECONDS:-15}"
 # genuinely hung build-push run must not hold this runner forever. 1200s:
 # maintainer-directed cut from 5400s (2026-08-02); the real fix for how often
 # this ceiling gets hit is #1378's Step 4 reuse mechanism cutting unnecessary
-# rebuilds, not a bigger number here. (The workflow_changed exception above is
-# a different, narrower category, not a reversal of that cut.)
+# rebuilds, not a bigger number here.
 poll_hard_ceiling_seconds="${STAGING_POLL_HARD_CEILING_SECONDS:-$default_poll_hard_ceiling_seconds}"
 # Clamp up so a misconfigured ceiling below the timeout can't produce a
 # negative wait window.
@@ -472,13 +469,13 @@ wait_for_touched_image() {
 
 for service in "${full_setup_services[@]}"; do
     pr_image="ghcr.io/${REPOSITORY}/${service}:${PR_TAG}"
-    should_exist="$(vit_service_should_have_staging_tag "$service" "${touched_map[$service]}" "$workflow_changed")"
+    should_exist="$(vit_service_should_have_staging_tag "$service" "${touched_map[$service]}")"
 
     if [[ "$should_exist" == "true" ]]; then
         if wait_for_touched_image "$pr_image" "$service"; then
             continue
         fi
-        echo "::error::$service's PR staging tag ($pr_image) never appeared even though this PR touched it (or a workflow/CI-contract file changed) -- waited past the normal ${poll_timeout_seconds}s budget (and, if build-push's own run was still active, up to the ${poll_hard_ceiling_seconds}s hard ceiling; see the notice/warning lines above for which applied). Refusing to fall back to the PR base commit's content for a touched service -- that would silently revalidate the stale image #626 exists to stop testing, behind a tag name that looks PR-specific. Check whether build-push actually built and pushed $service for this commit."
+        echo "::error::$service's PR staging tag ($pr_image) never appeared even though this PR touched it -- waited past the normal ${poll_timeout_seconds}s budget (and, if build-push's own run was still active, up to the ${poll_hard_ceiling_seconds}s hard ceiling; see the notice/warning lines above for which applied). Refusing to fall back to the PR base commit's content for a touched service -- that would silently revalidate the stale image #626 exists to stop testing, behind a tag name that looks PR-specific. Check whether build-push actually built and pushed $service for this commit."
         exit 1
     fi
 
