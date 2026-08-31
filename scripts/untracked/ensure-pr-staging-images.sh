@@ -71,8 +71,8 @@
 # it just arrived ~9 minutes after the 1500s poll gave up). Rather than
 # blindly raising the fixed number (which only pushes the same failure mode
 # further out and would hide a genuinely stuck build behind a much longer
-# silent wait), wait_for_touched_image() now asks a concrete question once
-# the normal budget is exceeded: is build-push.yml's OWN run for this exact
+# silent wait), wait_for_touched_image() now asks a concrete question as soon
+# as the tag is still missing: is build-push.yml's OWN run for this exact
 # commit still active? If yes, that's real evidence of congestion, not a
 # stuck build, so the wait extends (up to a hard, still-finite ceiling). If
 # that run has already finished without producing the tag, no amount of
@@ -435,6 +435,11 @@ wait_for_touched_image() {
         # From: Issue #1449 | PR #1538
         if (( exists_status != 2 )); then
             echo "::error::$service staging image ($pr_image) registry check failed (elapsed $((SECONDS - start_time))s) -- the last registry check did NOT positively confirm absence (network/timeout/rate-limit/auth, or an unrecognized error shape), and the shared GHCR retry budget is already exhausted for this check. Refusing to keep polling on an error that budget could not resolve; if this tag is later found to have existed all along, that is evidence of a registry-call failure being misread as absence, not a real missing build."
+            return 1
+        fi
+
+        if ! build_push_run_active; then
+            echo "::notice::build-push's run for this PR's head ($pr_head_sha, tag commit $build_sha) has already finished (or could not be found) and $service's staging tag still hasn't appeared -- further waiting cannot help, so treating this as a real failure now instead of idling until the ${poll_hard_ceiling_seconds}s hard ceiling."
             return 1
         fi
 
