@@ -454,9 +454,9 @@ STUB
 }
 
 @test "#895: a confirmed-finished build-push run fails immediately instead of waiting for the hard ceiling" {
-    # The hard ceiling is set generously large (100s); a passing test that
-    # completes quickly proves the script did NOT idle out that ceiling once
-    # the congestion probe confirmed build-push's run already finished.
+    # The workflow_changed default still opens the largest polling budget;
+    # a passing test that completes quickly proves the script now bails out
+    # as soon as it sees that build-push's own run has already finished.
     inactive_stub="$BATS_TEST_TMPDIR/inactive.sh"
     cat > "$inactive_stub" <<'STUB'
 #!/usr/bin/env bash
@@ -466,11 +466,10 @@ STUB
 
     export STAGING_BUILD_RUN_STATUS_CMD="$inactive_stub"
     export BUILD_SHA="deadbeef0123"
-    export STAGING_POLL_TIMEOUT_SECONDS=0
     export STAGING_POLL_HARD_CEILING_SECONDS=100
     export STAGING_POLL_CONGESTION_CHECK_INTERVAL_SECONDS=0
     export EXISTING_IMAGES=""
-    export WORKFLOW_CHANGED="false"
+    export WORKFLOW_CHANGED="true"
     export PROXY_TOUCHED="true" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
 
     start_epoch="$(date +%s)"

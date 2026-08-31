@@ -30,6 +30,7 @@ write_converged_env_fixture() {
         'IP_STANDARD=192.0.2.10' \
         'IP_SSL=192.0.2.11' \
         'SSL_ENABLED=1' \
+        'DNS_XFR_NOTIFY_TARGETS=dns-ssl:5300' \
         'UI_SESSION_TTL_SECONDS=86400' \
         'LANCACHE_STATE_DIR=/opt/lancache-ng/state' \
         'CACHE_DIR=/opt/lancache-ng/cache' \

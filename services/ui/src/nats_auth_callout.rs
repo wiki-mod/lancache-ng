@@ -126,9 +126,7 @@
 
 use crate::AppState;
 use argon2::Argon2;
-use argon2::password_hash::{
-    PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng,
-};
+use argon2::password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash};
 use base64::Engine as _;
 use nkeys::{KeyPair, XKey};
 use serde_json::{Value, json};
@@ -325,9 +323,8 @@ pub fn load_or_create_xkey(path: &str) -> Result<XKey, String> {
 /// surfaced as an error rather than panicked because both callers
 /// (`register_secondary`, `rotate_token`) run inside request handlers.
 pub fn hash_nats_password(password: &str) -> Result<String, String> {
-    let salt = SaltString::generate(&mut OsRng);
     Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
+        .hash_password(password.as_bytes())
         .map(|hash| hash.to_string())
         .map_err(|e| format!("failed to hash secondary password with Argon2id: {e}"))
 }

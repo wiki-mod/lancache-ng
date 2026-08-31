@@ -162,3 +162,17 @@ setup() {
     ! grep -qF 'base_channel_tag=latest' "$workflow_file" \
         || fail "build-push.yml appears to reimplement the base-channel mapping inline again"
 }
+
+@test "build-push.yml does not run manifest/full-setup follow-ups after build admission closed" {
+    workflow_file="$repo_root/.github/workflows/build-push.yml"
+    [ -f "$workflow_file" ] || fail "build-push.yml not found"
+
+    grep -qF "needs: [determine-build-admission, build, build-arm64, push-supersession-check]" "$workflow_file" \
+        || fail "merge-manifests must depend on determine-build-admission, otherwise skipped build jobs can still trigger missing-image noise"
+    grep -qF "needs['determine-build-admission'].outputs.admitted == 'true' && needs.build.result" "$workflow_file" \
+        || fail "merge-manifests must require admitted=true before inspecting sha-* image inputs"
+    grep -qF "needs: [detect-changes, determine-build-admission, merge-manifests, compute-validation-network, validate-compose, push-supersession-check]" "$workflow_file" \
+        || fail "full-setup-validate must depend on determine-build-admission"
+    grep -qF "needs['determine-build-admission'].outputs.admitted == 'true' &&" "$workflow_file" \
+        || fail "full-setup-validate must require admitted=true before pulling validation images"
+}
