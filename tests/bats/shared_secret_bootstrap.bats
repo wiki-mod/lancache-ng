@@ -50,7 +50,6 @@ teardown() {
     # What: unwritable parent -> mkdir -p/mktemp both fail for the secret dir
     # Why: a configured value must never fail closed just because persisting
     #      it opportunistically wasn't possible (regression: it briefly did)
-    # From: Issue #858
     mkdir -p "$TEST_DIR/readonly"
     chmod 0500 "$TEST_DIR/readonly"
     export LANCACHE_SHARED_SECRET_DIR="$TEST_DIR/readonly/secrets"
