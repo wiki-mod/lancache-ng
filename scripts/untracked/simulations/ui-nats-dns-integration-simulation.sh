@@ -188,7 +188,7 @@ verify_record_resolves() {
     # What: dumps dns-standard/dns-ssl/nats logs on convergence failure.
     # Why: teardown below runs before any logs would otherwise be seen.
     # From: PR #1775
-    docker compose -p "$compose_project" logs --no-color --tail=200 dns-standard dns-ssl nats >&2 || true
+    "${compose[@]}" logs --no-color --tail=200 dns-standard dns-ssl nats >&2 || true
     return 1
 }
 
@@ -233,7 +233,7 @@ verify_record_gone() {
         sleep 1
     done
     echo "::error::$label still resolves $test_fqdn to '$resolved' after $max_attempts attempts; removal did not take effect." >&2
-    docker compose -p "$compose_project" logs --no-color --tail=200 dns-standard dns-ssl nats >&2 || true
+    "${compose[@]}" logs --no-color --tail=200 dns-standard dns-ssl nats >&2 || true
     return 1
 }
 
