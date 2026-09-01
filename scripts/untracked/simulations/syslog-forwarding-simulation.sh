@@ -670,7 +670,7 @@ if [[ "$failed" -eq 1 ]]; then
 
     echo "::group::Failure diagnostics: dhcp's own Kea log"
     # What: dhcp emitted nothing at all in a real failing run.
-    # Why: reads Kea's own log file directly in case stdout is empty.
+    # Why: reads Kea's own log in case stdout stays empty.
     # From: PR #1775
     "${compose[@]}" exec -T dhcp sh -c 'cat /var/log/kea/kea-dhcp4.log 2>/dev/null | tail -n 200' || true
     echo "::endgroup::"

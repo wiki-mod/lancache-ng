@@ -98,7 +98,10 @@ secret_is_placeholder() {
     return 1
 }
 
-# resolve_shared_secret <name> <current_value_or_empty> <gen_func>
+# resolve_shared_secret <name> <current_value_or_empty> <gen_func> [require_persist]
+#   <require_persist> (optional, any non-empty value): the caller value
+#   must be durably written before counting as resolved -- for secrets a
+#   different, file-only consumer reads directly (no env copy of its own).
 # Resolves a shared secret and prints it on stdout with no trailing newline.
 #   - If <current_value_or_empty> is non-empty, that real value seeds the shared
 #     volume when the file is absent, and refreshes it when a stale/different
@@ -119,6 +122,7 @@ resolve_shared_secret() {
     _rss_name="$1"
     _rss_cur="$2"
     _rss_gen="$3"
+    _rss_require_persist="${4:-}"
 
     _rss_dir="$(lancache_shared_secret_dir)"
     _rss_file="${_rss_dir}/${_rss_name}"
@@ -130,7 +134,7 @@ resolve_shared_secret() {
             return 0
         fi
         # What: this secret's disk value differs from the caller's.
-        # Why: a later write failure must fail closed, not split-brain.
+        # Why: a later write failure fails closed, not split-brain.
         # From: PR #1775
         _rss_had_conflict=1
     elif [ -e "$_rss_file" ] && [ -n "$_rss_cur" ]; then
@@ -151,8 +155,11 @@ resolve_shared_secret() {
         fi
     fi
 
+    # What: returns the caller's value unpersisted on write fail.
+    # Why: safe only because no on-disk value could disagree yet.
+    # From: PR #1775
     _rss_tmp="$(mktemp "${_rss_dir}/.secret.XXXXXX" 2>/dev/null)" || {
-        if [ -n "$_rss_cur" ] && [ "$_rss_had_conflict" -eq 0 ]; then
+        if [ -n "$_rss_cur" ] && [ "$_rss_had_conflict" -eq 0 ] && [ -z "$_rss_require_persist" ]; then
             printf '%s' "$_rss_cur"
             return 0
         fi
@@ -178,7 +185,7 @@ resolve_shared_secret() {
         tr -d '\n' < "$_rss_file"
         return 0
     fi
-    if [ -n "$_rss_cur" ] && [ "$_rss_had_conflict" -eq 0 ]; then
+    if [ -n "$_rss_cur" ] && [ "$_rss_had_conflict" -eq 0 ] && [ -z "$_rss_require_persist" ]; then
         printf '%s' "$_rss_cur"
         return 0
     fi
@@ -263,7 +270,7 @@ fi
 KEA_CTRL_TOKEN="$(resolve_shared_secret kea-ctrl-token "$_kea_ctrl_token_cfg" lancache_gen_hex32)" || KEA_CTRL_TOKEN=""
 _ddns_tsig_key_cfg="${DDNS_TSIG_KEY:-}"
 if secret_is_placeholder "$_ddns_tsig_key_cfg"; then _ddns_tsig_key_cfg=""; fi
-DDNS_TSIG_KEY="$(resolve_shared_secret ddns-tsig-key "$_ddns_tsig_key_cfg" lancache_gen_base64_32)" || DDNS_TSIG_KEY=""
+DDNS_TSIG_KEY="$(resolve_shared_secret ddns-tsig-key "$_ddns_tsig_key_cfg" lancache_gen_base64_32 require-persist)" || DDNS_TSIG_KEY=""
 : "${DHCP_DNS_SERVER_IP:=127.0.0.1}"
 # 5300, not 53 (issue #706): 5300 is pdns_server's (the authoritative
 # daemon, the only PowerDNS process with dnsupdate=yes) actual DNS-protocol

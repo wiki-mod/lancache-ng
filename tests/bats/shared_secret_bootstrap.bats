@@ -47,8 +47,8 @@ teardown() {
 }
 
 @test "a real configured value still wins when the shared-secrets volume cannot be created" {
-    # What: a regular file as parent -> mkdir -p fails for any uid.
-    # Why: immune to root/CAP_DAC_OVERRIDE, unlike a chmod-based test.
+    # What: a regular file as parent; mkdir -p fails for any uid.
+    # Why: immune to root/CAP_DAC_OVERRIDE, unlike chmod-based.
     # From: PR #1775
     : > "$TEST_DIR/not-a-directory"
     export LANCACHE_SHARED_SECRET_DIR="$TEST_DIR/not-a-directory/secrets"
@@ -58,8 +58,8 @@ teardown() {
 }
 
 @test "a stale conflicting value fails closed when it cannot be refreshed" {
-    # What: stubs mktemp to fail deterministically, for any uid.
-    # Why: a stale on-disk value must not split-brain other readers.
+    # What: stubs mktemp to fail deterministically, any uid.
+    # Why: a stale value must not split-brain other readers.
     # From: PR #1775
     mkdir -p "$LANCACHE_SHARED_SECRET_DIR"
     printf '%s' "old-value" > "$LANCACHE_SHARED_SECRET_DIR/nats-ui-password"
@@ -70,8 +70,8 @@ teardown() {
 }
 
 @test "a present but empty secret file also fails closed when it cannot be replaced" {
-    # What: an existing zero-byte file, not merely a missing one.
-    # Why: consumers treat empty as absent; must not silently succeed.
+    # What: an existing zero-byte file, not just a missing one.
+    # Why: consumers treat empty as absent, not a real value.
     # From: PR #1775
     mkdir -p "$LANCACHE_SHARED_SECRET_DIR"
     : > "$LANCACHE_SHARED_SECRET_DIR/nats-ui-password"
@@ -80,9 +80,19 @@ teardown() {
     [ "$status" -ne 0 ]
 }
 
+@test "a require-persist secret fails closed even without a prior conflict" {
+    # What: require-persist ignores the no-conflict fallback too.
+    # Why: ddns-tsig-key has a file-only reader, the Admin UI.
+    # From: PR #1775
+    : > "$TEST_DIR/not-a-directory"
+    export LANCACHE_SHARED_SECRET_DIR="$TEST_DIR/not-a-directory/secrets"
+    run resolve_shared_secret ddns-tsig-key "operator-supplied-real-value" lancache_gen_base64_32 require-persist
+    [ "$status" -ne 0 ]
+}
+
 @test "the operator-value fallback survives a real set -euo pipefail caller" {
-    # What: reproduces the entrypoints' VAR="$(resolve_shared_secret ...)".
-    # Why: proves the || fallback works under the callers' own shell opts.
+    # What: reproduces the entrypoints' own command substitution.
+    # Why: proves the fallback survives the caller's shell opts.
     # From: PR #1775
     : > "$TEST_DIR/not-a-directory"
     export LANCACHE_SHARED_SECRET_DIR="$TEST_DIR/not-a-directory/secrets"

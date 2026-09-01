@@ -185,8 +185,8 @@ verify_record_resolves() {
         sleep 1
     done
     echo "::error::$label never resolved $test_fqdn to $test_content after $max_attempts attempts (last saw: '${resolved:-<empty>}')." >&2
-    # What: dumps dns-standard/dns-ssl/nats logs on convergence failure.
-    # Why: teardown below runs before any logs would otherwise be seen.
+    # What: dumps dns-standard/dns-ssl/nats logs on failure.
+    # Why: teardown runs before logs would otherwise be seen.
     # From: PR #1775
     "${compose[@]}" logs --no-color --tail=200 dns-standard dns-ssl nats >&2 || true
     return 1
