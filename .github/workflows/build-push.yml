@@ -4596,13 +4596,15 @@ jobs:
     # the tag-scoped build-tools image fresh; the same reasoning applies to
     # every other service here). Release tags always get a full, fresh
     # build/scan -- no reuse path at all.
-    # What: always() plus explicit skipped-tolerant detect-changes check.
-    # Why: detect-changes skips off push/PR; bare `if:` implies success().
+    # What: skip-tolerant; excludes schedule/nightly-dispatch too.
+    # Why: dependency-refresh triggers must always build fresh.
     # From: Issue #1683 | PR #1778
     if: >-
       ${{
         always() &&
         (github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/')) &&
+        github.event_name != 'schedule' &&
+        !(github.event_name == 'workflow_dispatch' && github.event.inputs.channel == 'nightly') &&
         (needs['detect-changes'].result == 'success' || needs['detect-changes'].result == 'skipped')
       }}
     runs-on: [self-hosted, linux, lancache, lancache-light]
