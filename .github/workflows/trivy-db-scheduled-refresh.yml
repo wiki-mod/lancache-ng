@@ -56,20 +56,20 @@
 #
 # PERMISSION DIAGNOSTICS: added after a maintainer-reported live
 # failure on the real shared mount ("mkdir /mnt/trivy-db/db: permission
-# denied") surfaced while this issue was being scoped. Every regular
-# CI job that already writes here today runs as the self-hosted
-# runner's own "codex" uid and succeeds (confirmed: trivy-cache-dir's
-# own write-probe already exercises mkdir+write+delete against this
-# exact mount on every job, and the prior lock-based design's own
-# `mkdir "$lock_dir"` succeeded routinely) -- so a uid other than the
-# CI runner's own (e.g. a manual/root shell session on the runner host)
-# most likely left a differently-owned entry under the shared path.
-# This job cannot chown a path it does not already own, so instead of
-# failing with trivy's own opaque FATAL error, "Diagnose Trivy DB
+# denied"), and independently reproduced during this PR's own live
+# verification (build-push.yml run 33537310760, job "build (ui, ...)",
+# 2026-09-01 ~17:49-17:51 UTC: trivy-cache-dir resolved the real NFS
+# mount, trivy-db-ensure-fresh's own lock succeeded, yet
+# `trivy image --download-db-only` itself failed this exact way on all
+# 4 retry attempts) -- SAME self-hosted runner uid ("codex") as every
+# other successful write against this mount that same run, so this is
+# not a stray differently-owned entry from another uid; root cause is
+# unconfirmed without host/SSH access (see PR body). "Diagnose Trivy DB
 # directory permissions before download" below fails loudly with the
-# actual uid/ownership state attached, and this workflow never
-# swallows that failure (AG-INT-002) -- see this change's own PR body
-# for the operator-side remediation this cannot perform from CI.
+# actual uid/ownership state attached instead of trivy's own opaque
+# FATAL error, and this workflow never swallows that failure
+# (AG-INT-002) -- see this change's own PR body for the live evidence
+# and the operator-side remediation this cannot perform from CI.
 name: Trivy DB Scheduled Refresh
 
 on:
@@ -159,13 +159,18 @@ jobs:
           : "${CACHE_DIR:?cache-dir is required}"
           echo "::group::Trivy DB permission diagnostics"
           echo "Running as: $(id)"
+          # What: shows if this is a live mount right now.
+          # Why: an autofs mount can expire between steps.
+          # From: Issue #1780
+          mountpoint "$CACHE_DIR" 2>&1 || true
+          mount | grep -F "$CACHE_DIR" || echo "(no mount-table entry for $CACHE_DIR)"
           ls -la "$CACHE_DIR" || true
           [ -d "$CACHE_DIR/db" ] && ls -ld "$CACHE_DIR/db"
           echo "::endgroup::"
 
           db_dir="$CACHE_DIR/db"
           if ! mkdir -p "$db_dir" 2>/tmp/trivy-db-mkdir-err.txt; then
-            echo "::error::Cannot create/use '$db_dir' as $(id -un) ($(id -u):$(id -g)): $(cat /tmp/trivy-db-mkdir-err.txt). This job is the shared Trivy DB's sole writer; every regular CI job already succeeds writing here as this same runner uid (trivy-cache-dir's own write-probe proves it), so a mismatched owner/mode on this exact path is almost certainly left over from a manual/root session on the runner host, not something a workflow step can chown -- needs an operator fix on the runner host (see this change's PR body)." >&2
+            echo "::error::Cannot create/use '$db_dir' as $(id -un) ($(id -u):$(id -g)): $(cat /tmp/trivy-db-mkdir-err.txt). trivy-cache-dir's own write-probe against the parent directory already succeeded as this same uid, so this is scoped to the 'db' entry specifically -- needs an operator fix on the runner host, root cause not yet confirmed without host access (see this change's PR body)." >&2
             exit 1
           fi
           probe="$db_dir/.trivy-db-scheduled-refresh-write-probe.$$"
