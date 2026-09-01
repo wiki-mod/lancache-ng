@@ -194,7 +194,13 @@ services:
       retries: 3
       start_period: 20s
     depends_on:
-      - nats
+      nats:
+        condition: service_started
+      # What: waits for the primary's port 5300 before this starts.
+      # Why: an early SOA check against a dead port wedges xfr.
+      # From: PR #1775
+      dns-standard:
+        condition: service_healthy
     restart: always
     logging:
       driver: json-file
