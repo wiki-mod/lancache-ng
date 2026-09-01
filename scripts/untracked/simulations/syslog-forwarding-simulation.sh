@@ -682,6 +682,15 @@ if [[ "$failed" -eq 1 ]]; then
     "${compose[@]}" exec -T dhcp sh -c 'cat /var/log/kea/kea-ctrl-agent.log 2>/dev/null | tail -n 200' || true
     echo "::endgroup::"
 
+    echo "::group::Failure diagnostics: dhcp's Docker healthcheck output"
+    # What: neither Kea log shows the healthcheck's own result.
+    # Why: Docker keeps the real stdout/stderr of recent attempts.
+    # From: PR #1775
+    if dhcp_cid="$("${compose[@]}" ps -q dhcp)" && [[ -n "$dhcp_cid" ]]; then
+        docker inspect --format '{{json .State.Health}}' "$dhcp_cid" | jq . || true
+    fi
+    echo "::endgroup::"
+
     echo "::group::Logs from all services (failure diagnostics)"
     "${compose[@]}" logs --no-color
     echo "::endgroup::"
