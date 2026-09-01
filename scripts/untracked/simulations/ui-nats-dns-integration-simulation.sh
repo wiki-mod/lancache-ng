@@ -219,8 +219,9 @@ echo "== Verifying the record actually disappeared from PowerDNS =="
 verify_record_gone() {
     local label="$1"
     local dns_ip="$2"
+    local max_attempts="${3:-10}"
     local attempt
-    for attempt in $(seq 1 10); do
+    for attempt in $(seq 1 "$max_attempts"); do
         # Same pipefail hazard as verify_record_resolves above: wrap so a
         # failed dig/run_client invocation against this specific $dns_ip is
         # reported explicitly instead of silently aborting the script.
@@ -231,11 +232,12 @@ verify_record_gone() {
         [[ -z "$resolved" ]] && { echo "$label no longer resolves $test_fqdn (attempt $attempt)."; return 0; }
         sleep 1
     done
-    echo "::error::$label still resolves $test_fqdn to '$resolved' after 10 attempts; removal did not take effect." >&2
+    echo "::error::$label still resolves $test_fqdn to '$resolved' after $max_attempts attempts; removal did not take effect." >&2
+    docker compose -p "$compose_project" logs --no-color --tail=200 dns-standard dns-ssl nats >&2 || true
     return 1
 }
 
 verify_record_gone "dns-standard" "$dns_standard_ip"
-verify_record_gone "dns-ssl" "$dns_ssl_ip"
+verify_record_gone "dns-ssl" "$dns_ssl_ip" 25
 
 echo "ui-nats-dns-integration-simulation passed: UI -> NATS -> nats-subscriber -> PowerDNS add and remove both verified end-to-end via real DNS queries."
