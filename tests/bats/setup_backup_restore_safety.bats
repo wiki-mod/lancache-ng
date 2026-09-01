@@ -570,30 +570,36 @@ EOF
     printf 'cert-data\n' > "$src_install/certs/ca.crt"
     printf 'volume-v1\n' > "$volume_store/lancache-ng_pdns-data/data.txt"
 
-    install_missing_tools() { :; }
-    compose_volume_names() { printf '%s\n' "lancache-ng_pdns-data"; }
     stack_running_file="$BATS_TEST_TMPDIR/stack-running"
     : > "$stack_running_file"
     export volume_store stack_running_file
 
-    docker() {
-        case "$1" in
-            ps) return 0 ;;
-            compose)
-                shift
-                [[ "$1" = "--env-file" ]] && shift 2
-                case "$1" in
-                    ps) [[ "${2:-}" = "-q" && -f "$stack_running_file" ]] && printf 'abc123\n' ;;
-                    stop) rm -f "$stack_running_file" ;;
-                    up) : > "$stack_running_file" ;;
-                    version) return 0 ;;
-                esac
-                ;;
-            run) return 1 ;;
-        esac
-    }
-
-    run cmd_backup --config --dest "$backup_root" "$src_install"
+    # What: mocks defined after sourcing, real set -e caller.
+    # Why: plain run skips set -e; order avoids mock overwrite.
+    # From: PR #1775
+    run bash -c '
+        set -euo pipefail
+        source "$1"
+        install_missing_tools() { :; }
+        compose_volume_names() { printf "%s\n" "lancache-ng_pdns-data"; }
+        docker() {
+            case "$1" in
+                ps) return 0 ;;
+                compose)
+                    shift
+                    [[ "$1" = "--env-file" ]] && shift 2
+                    case "$1" in
+                        ps) [[ "${2:-}" = "-q" && -f "$stack_running_file" ]] && printf "abc123\n" ;;
+                        stop) rm -f "$stack_running_file" ;;
+                        up) : > "$stack_running_file" ;;
+                        version) return 0 ;;
+                    esac
+                    ;;
+                run) return 1 ;;
+            esac
+        }
+        cmd_backup --config --dest "$2" "$3"
+    ' _ "$helper_file" "$backup_root" "$src_install"
     [ "$status" -ne 0 ]
     [[ "$output" != *"unbound variable"* ]]
     [ -f "$stack_running_file" ]
