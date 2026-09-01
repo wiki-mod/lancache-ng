@@ -69,6 +69,19 @@ teardown() {
     [ "$(cat "$LANCACHE_SHARED_SECRET_DIR/nats-ui-password")" = "old-value" ]
 }
 
+@test "a winner appearing between the check and mktemp still fails closed" {
+    # What: mktemp itself races a concurrent winner, then fails.
+    # Why: closes the TOCTOU gap between the check and the write.
+    # From: PR #1775
+    mktemp() {
+        printf '%s' "old-winner" > "$LANCACHE_SHARED_SECRET_DIR/nats-ui-password"
+        return 1
+    }
+    run resolve_shared_secret nats-ui-password "operator-value" lancache_gen_hex32
+    [ "$status" -ne 0 ]
+    [ "$(cat "$LANCACHE_SHARED_SECRET_DIR/nats-ui-password")" = "old-winner" ]
+}
+
 @test "a present but empty secret file also fails closed when it cannot be replaced" {
     # What: an existing zero-byte file, not just a missing one.
     # Why: consumers treat empty as absent, not a real value.

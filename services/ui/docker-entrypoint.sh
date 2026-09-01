@@ -96,9 +96,9 @@ secret_is_placeholder() {
 }
 
 # resolve_shared_secret <name> <current_value_or_empty> <gen_func> [require_persist]
-#   <require_persist> (optional, any non-empty value): the caller value
-#   must be durably written before counting as resolved -- for secrets a
-#   different, file-only consumer reads directly (no env copy of its own).
+# What: 4th arg require_persist enforces a durable write.
+# Why: some secrets (ddns-tsig-key) have file-only readers.
+# From: PR #1775
 # Resolves a shared secret and prints it on stdout with no trailing newline.
 #   - If <current_value_or_empty> is non-empty, that real value seeds the shared
 #     volume when the file is absent, and refreshes it when a stale/different
@@ -124,21 +124,21 @@ resolve_shared_secret() {
     _rss_dir="$(lancache_shared_secret_dir)"
     _rss_file="${_rss_dir}/${_rss_name}"
 
-    _rss_had_conflict=0
-    if [ -s "$_rss_file" ]; then
-        if [ -z "$_rss_cur" ] || [ "$(tr -d '\n' < "$_rss_file")" = "$_rss_cur" ]; then
-            tr -d '\n' < "$_rss_file"
-            return 0
+    # What: re-checks for a conflict right before returning.
+    # Why: closes the TOCTOU window a concurrent writer opens.
+    # From: PR #1775
+    _rss_conflict_now() {
+        [ -n "$_rss_cur" ] || return 1
+        if [ -s "$_rss_file" ]; then
+            [ "$(tr -d '\n' < "$_rss_file")" != "$_rss_cur" ]
+        else
+            [ -e "$_rss_file" ]
         fi
-        # What: this secret's disk value differs from the caller's.
-        # Why: a later write failure fails closed, not split-brain.
-        # From: PR #1775
-        _rss_had_conflict=1
-    elif [ -e "$_rss_file" ] && [ -n "$_rss_cur" ]; then
-        # What: an existing empty file also counts as a conflict.
-        # Why: consumers treat empty as absent, not a real value.
-        # From: PR #1775
-        _rss_had_conflict=1
+    }
+
+    if [ -s "$_rss_file" ] && { [ -z "$_rss_cur" ] || [ "$(tr -d '\n' < "$_rss_file")" = "$_rss_cur" ]; }; then
+        tr -d '\n' < "$_rss_file"
+        return 0
     fi
 
     mkdir -p "$_rss_dir" 2>/dev/null || true
@@ -156,7 +156,7 @@ resolve_shared_secret() {
     # Why: safe only because no on-disk value could disagree yet.
     # From: PR #1775
     _rss_tmp="$(mktemp "${_rss_dir}/.secret.XXXXXX" 2>/dev/null)" || {
-        if [ -n "$_rss_cur" ] && [ "$_rss_had_conflict" -eq 0 ] && [ -z "$_rss_require_persist" ]; then
+        if [ -n "$_rss_cur" ] && [ -z "$_rss_require_persist" ] && ! _rss_conflict_now; then
             printf '%s' "$_rss_cur"
             return 0
         fi
@@ -182,7 +182,7 @@ resolve_shared_secret() {
         tr -d '\n' < "$_rss_file"
         return 0
     fi
-    if [ -n "$_rss_cur" ] && [ "$_rss_had_conflict" -eq 0 ] && [ -z "$_rss_require_persist" ]; then
+    if [ -n "$_rss_cur" ] && [ -z "$_rss_require_persist" ] && ! _rss_conflict_now; then
         printf '%s' "$_rss_cur"
         return 0
     fi
