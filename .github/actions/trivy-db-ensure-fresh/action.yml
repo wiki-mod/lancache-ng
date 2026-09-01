@@ -63,6 +63,52 @@ outputs:
 runs:
   using: composite
   steps:
+    # What: creates shared freshness-check script
+    # Why: precheck/check must never diverge (AG-CODE-011)
+    # From: Issue #1780
+    - name: Prepare shared freshness-check script
+      id: freshness-script
+      shell: bash
+      run: |
+        set -euo pipefail
+        script="${{ runner.temp }}/trivy-db-freshness.sh"
+        cat > "$script" <<'FRESHNESS'
+        #!/usr/bin/env bash
+        # Exit 0 = a currently-fresh trivy.db exists in cache_dir/db.
+        # Exit 1 = missing DB, missing/unparsable metadata, or NextUpdate
+        # has already passed -- caller must treat all three identically.
+        set -euo pipefail
+        cache_dir="$1"
+        db_file="$cache_dir/db/trivy.db"
+        meta_file="$cache_dir/db/metadata.json"
+
+        if [ ! -s "$db_file" ]; then
+          exit 1
+        fi
+
+        next_update="$(jq -r '.NextUpdate // empty' "$meta_file" 2>/dev/null || true)"
+        if [ -z "$next_update" ]; then
+          echo "::notice::'$meta_file' missing or unreadable -- treating the DB as stale rather than trusting trivy.db's mere presence." >&2
+          exit 1
+        fi
+
+        next_update_epoch="$(date -d "$next_update" +%s 2>/dev/null || true)"
+        if [ -z "$next_update_epoch" ]; then
+          echo "::warning::Could not parse NextUpdate '$next_update' from '$meta_file' -- treating the DB as stale rather than trusting an unparsable date." >&2
+          exit 1
+        fi
+
+        now_epoch="$(date +%s)"
+        if [ "$now_epoch" -lt "$next_update_epoch" ]; then
+          echo "::notice::Trivy DB in '$cache_dir/db' is fresh (NextUpdate '$next_update' not yet passed)." >&2
+          exit 0
+        else
+          echo "::notice::Trivy DB in '$cache_dir/db' is past its NextUpdate ('$next_update')." >&2
+          exit 1
+        fi
+        FRESHNESS
+        echo "path=$script" >> "$GITHUB_OUTPUT"
+
     # What: reads NextUpdate; no lock, no trivy call.
     # Why: a stale DB must never read as "fine" (see above).
     # From: Issue #1780
@@ -74,34 +120,11 @@ runs:
       run: |
         set -euo pipefail
         : "${CACHE_DIR:?cache-dir is required}"
-        db_file="$CACHE_DIR/db/trivy.db"
-        meta_file="$CACHE_DIR/db/metadata.json"
-
-        if [ ! -s "$db_file" ]; then
-          echo "present=false" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-
-        next_update="$(jq -r '.NextUpdate // empty' "$meta_file" 2>/dev/null || true)"
-        if [ -z "$next_update" ]; then
-          echo "::notice::'$meta_file' missing or unreadable -- treating the DB as stale rather than trusting trivy.db's mere presence."
-          echo "present=false" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-
-        next_update_epoch="$(date -d "$next_update" +%s 2>/dev/null || true)"
-        if [ -z "$next_update_epoch" ]; then
-          echo "::warning::Could not parse NextUpdate '$next_update' from '$meta_file' -- treating the DB as stale rather than trusting an unparsable date."
-          echo "present=false" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-
-        now_epoch="$(date +%s)"
-        if [ "$now_epoch" -lt "$next_update_epoch" ]; then
-          echo "::notice::Trivy DB in '$CACHE_DIR/db' is fresh (NextUpdate '$next_update' not yet passed) -- trusting trivy-db-scheduled-refresh.yml as sole writer, no lock and no per-job trivy call needed."
+        if bash "${{ steps.freshness-script.outputs.path }}" "$CACHE_DIR"; then
+          echo "::notice::Trusting trivy-db-scheduled-refresh.yml as sole writer -- no lock and no per-job trivy call needed."
           echo "present=true" >> "$GITHUB_OUTPUT"
         else
-          echo "::notice::Trivy DB in '$CACHE_DIR/db' is past its NextUpdate ('$next_update') -- the scheduled refresh workflow has not kept this cache-dir current (unreachable host, not yet promoted to master, or genuinely behind); falling back to a locked refresh for this job, same as before this design existed."
+          echo "::notice::The scheduled refresh workflow has not kept '$CACHE_DIR' current (unreachable host, not yet promoted to master, or genuinely behind) -- falling back to a locked refresh for this job, same as before this design existed."
           echo "present=false" >> "$GITHUB_OUTPUT"
         fi
 
@@ -161,6 +184,10 @@ runs:
         echo "::notice::Holding Trivy DB refresh lock on '$lock_dir' -- '$CACHE_DIR' has no fresh DB (missing, or past NextUpdate), downloading once so every other caller can read it unlocked from now on."
         trivy image --download-db-only --cache-dir "$CACHE_DIR"
 
+    # What: re-runs the SAME freshness check, not presence.
+    # Why: a failed/timed-out refresh can leave a stale file
+    # behind; presence alone would wrongly read that as fine.
+    # From: Issue #1780
     - name: Determine whether a fresh DB is present after this action ran
       id: check
       if: always()
@@ -171,9 +198,9 @@ runs:
       run: |
         set -euo pipefail
         : "${CACHE_DIR:?cache-dir is required}"
-        if [ "$PRECHECK_PRESENT" = "true" ] || [ -s "$CACHE_DIR/db/trivy.db" ]; then
+        if [ "$PRECHECK_PRESENT" = "true" ] || bash "${{ steps.freshness-script.outputs.path }}" "$CACHE_DIR"; then
           echo "db-present=true" >> "$GITHUB_OUTPUT"
         else
-          echo "::warning::No trivy.db present in '$CACHE_DIR' after the refresh attempt (lock timeout, or the download itself failed) -- the next scan step will run WITHOUT skip-db-update so Trivy can still attempt its own unlocked download, exactly as it would have before this action existed."
+          echo "::warning::No currently-fresh trivy.db in '$CACHE_DIR' after the refresh attempt (lock timeout, the download itself failed, or it left a stale file behind) -- the next scan step will run WITHOUT skip-db-update so Trivy can still attempt its own unlocked download, exactly as it would have before this action existed."
           echo "db-present=false" >> "$GITHUB_OUTPUT"
         fi
