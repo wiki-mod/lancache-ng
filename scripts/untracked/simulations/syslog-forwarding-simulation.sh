@@ -668,6 +668,13 @@ if [[ "$failed" -eq 1 ]]; then
     "${compose[@]}" exec -T nats sh -c 'cat /var/log/lancache-nats/nats.log 2>/dev/null | tail -n 200' || true
     echo "::endgroup::"
 
+    echo "::group::Failure diagnostics: dhcp's own Kea log"
+    # What: dhcp emitted nothing at all in a real failing run.
+    # Why: reads Kea's own log file directly in case stdout is empty.
+    # From: PR #1775
+    "${compose[@]}" exec -T dhcp sh -c 'cat /var/log/kea/kea-dhcp4.log 2>/dev/null | tail -n 200' || true
+    echo "::endgroup::"
+
     echo "::group::Logs from all services (failure diagnostics)"
     "${compose[@]}" logs --no-color
     echo "::endgroup::"
