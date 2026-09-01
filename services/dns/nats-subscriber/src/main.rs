@@ -769,7 +769,10 @@ async fn notify_zone_secondaries(
             false
         }
         Err(e) => {
-            eprintln!("Error sending PDNS notify request (will retry) for zone={}: {}", zone, e);
+            eprintln!(
+                "Error sending PDNS notify request (will retry) for zone={}: {}",
+                zone, e
+            );
             false
         }
     }

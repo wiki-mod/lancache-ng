@@ -383,7 +383,11 @@ STUB
     export PROXY_TOUCHED="false" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
     run bash "$script"
     [ "$status" -eq 0 ]
-    [ "$(wc -l < "$backfill_log")" -eq 5 ]
+    # All nine full-setup services back-fill (see the full_setup_services
+    # array in ensure-pr-staging-images.sh: proxy/dns/watchdog/ui/build-tools
+    # plus dhcp/dhcp-proxy/ntp/syslog, matching the "untouched services are
+    # all back-filled" test above).
+    [ "$(wc -l < "$backfill_log")" -eq 9 ]
     grep -qF "build-tools:pr-715-sha-abcdef0" "$backfill_log"
 }
 
@@ -401,8 +405,9 @@ STUB
     export DHCP_TOUCHED="false" DHCP_PROXY_TOUCHED="false" NTP_TOUCHED="false" SYSLOG_TOUCHED="false"
     run bash "$script"
     [ "$status" -eq 0 ]
-    # The untouched four still back-fill, including build-tools.
-    [ "$(wc -l < "$backfill_log")" -eq 4 ]
+    # The untouched eight (all nine full-setup services minus the touched
+    # proxy) still back-fill, including build-tools.
+    [ "$(wc -l < "$backfill_log")" -eq 8 ]
     grep -qF "build-tools:pr-715-sha-abcdef0" "$backfill_log"
 }
 

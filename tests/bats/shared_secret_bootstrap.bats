@@ -46,6 +46,20 @@ teardown() {
     [ "$output" = "operator-supplied-real-value" ]
 }
 
+@test "a real configured value still wins when the shared-secrets volume cannot be created" {
+    # What: unwritable parent -> mkdir -p/mktemp both fail for the secret dir
+    # Why: a configured value must never fail closed just because persisting
+    #      it opportunistically wasn't possible (regression: it briefly did)
+    # From: Issue #858
+    mkdir -p "$TEST_DIR/readonly"
+    chmod 0500 "$TEST_DIR/readonly"
+    export LANCACHE_SHARED_SECRET_DIR="$TEST_DIR/readonly/secrets"
+    run resolve_shared_secret nats-ui-password "operator-supplied-real-value" lancache_gen_hex32
+    chmod 0700 "$TEST_DIR/readonly"
+    [ "$status" -eq 0 ]
+    [ "$output" = "operator-supplied-real-value" ]
+}
+
 @test "an empty value on first boot generates a strong hex value and persists it" {
     run resolve_shared_secret pdns-api-key "" lancache_gen_hex32
     [ "$status" -eq 0 ]

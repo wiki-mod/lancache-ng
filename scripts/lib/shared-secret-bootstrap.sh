@@ -164,7 +164,13 @@ resolve_shared_secret() {
         fi
     fi
 
-    _rss_tmp="$(mktemp "${_rss_dir}/.secret.XXXXXX" 2>/dev/null)" || return 1
+    _rss_tmp="$(mktemp "${_rss_dir}/.secret.XXXXXX" 2>/dev/null)" || {
+        if [ -n "$_rss_cur" ]; then
+            printf '%s' "$_rss_cur"
+            return 0
+        fi
+        return 1
+    }
     printf '%s' "$_rss_val" > "$_rss_tmp"
     chmod 0640 "$_rss_tmp" 2>/dev/null || true
     chgrp "$(lancache_shared_secret_gid)" "$_rss_tmp" 2>/dev/null || true
