@@ -272,12 +272,17 @@ above this table states curl "has no apk-db SBOM component at all" because it us
 be compiled from source in `services/utilities/Dockerfile`'s `curl-builder` stage. That
 stage is gone: curl is now `apk add`'d in `services/utilities/Dockerfile` like the
 image's other 9 tools, so it now *does* have a real apk-db SBOM component. This still
-needed no allowlist-entry change in `merge-utilities-sbom-components.sh` for a
-different reason than before: Issue #1781 also stopped every one of the 7 consumers
-from `COPY --from=utilities-tools`-ing curl at all (each now installs its own curl
-directly via its own `apk add`), so the script's Dockerfile-COPY-line-derived allowlist
-still correctly omits curl for all 7 -- confirmed by re-running
-`bats tests/bats/merge_utilities_sbom_components.bats` after the change.
+needed no change in `merge-utilities-sbom-components.sh` for a different reason than
+before -- and also corrects this entry's own description of that script's mechanism:
+the allowlist is a hardcoded per-service `case` statement in the script itself (`proxy
+| dhcp | dhcp-proxy | dns` / `ntp` / `watchdog` / `ui`, each listing fixed package
+names), not derived from each Dockerfile's `COPY --from=utilities-tools` lines as
+stated above. It never listed `curl` for any service, before or after #1781. Issue
+#1781 also stopped every one of the 7 consumers from `COPY --from=utilities-tools`-ing
+curl at all (each now installs its own curl directly via its own `apk add`), which
+matches that hardcoded allowlist's own long-standing omission of curl -- confirmed by
+re-running `bats tests/bats/merge_utilities_sbom_components.bats` after the change (all
+8 of its cases still pass unmodified).
 
 ---
 

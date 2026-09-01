@@ -62,8 +62,9 @@ RUN set -euo pipefail; \
     printf '%s' '$FOO' | FOO=bar envsubst >/dev/null
 
 # What: ca-certificates package enables curl's CA bundle.
-# Why: apk-installed curl has ca-certificates as a dependency
-#      anyway; kept explicit here for clarity.
+# Why: curl's own apk dependency chain (libcurl/libz/musl only,
+#      confirmed via `apk info -R curl`) does not pull in a CA
+#      bundle, so it stays an explicit package here.
 # From: Issue #1556; curl itself moved into this list by #1781.
 # What: APT_CACHE_BUST invalidates BuildKit's upgrade cache.
 # Why: without this, BuildKit replays stale cache forever.
