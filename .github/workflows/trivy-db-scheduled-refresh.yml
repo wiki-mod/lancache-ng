@@ -12,10 +12,14 @@
 # though `trivy image --download-db-only` itself already no-ops once
 # metadata.json's NextUpdate has not yet passed. With this workflow as
 # the sole writer, every regular scan job now reads the shared DB with
-# --skip-db-update unconditionally (via trivy-db-ensure-fresh's reduced,
-# stat-only common path) -- no lock, no per-job freshness check. See
-# trivy-db-ensure-fresh/action.yml for the narrow bootstrap-only
-# exception that remains lock-guarded (a genuine cold cache).
+# --skip-db-update whenever trivy-db-ensure-fresh's own cheap
+# metadata.json freshness check (a JSON read + date compare, no lock,
+# no trivy call) finds a DB that has not yet passed its NextUpdate.
+# trivy-db-ensure-fresh's own locked path is reached both on a genuine
+# cold cache AND whenever this workflow has fallen behind or cannot
+# reach a given host's cache-dir (see that action's own file for why
+# a bare presence check would be unsafe: `--skip-db-update` never
+# re-validates staleness on its own).
 #
 # CADENCE (6 hours, cron "0 */6 * * *"): matches
 # aquasecurity/trivy-db's own publish cadence (that repo's

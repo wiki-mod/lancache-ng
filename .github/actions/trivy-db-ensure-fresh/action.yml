@@ -1,21 +1,30 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-name: Ensure the shared Trivy DB exists (bootstrap-only lock)
+name: Ensure the shared Trivy DB is fresh (locks only when stale)
 description: >-
-  Cheap presence check for the shared, persistent Trivy DB cache-dir.
-  trivy-db-scheduled-refresh.yml is now the sole regular writer to this
-  shared path on its own cron, so every regular scan job only needs to
-  know whether a DB file exists at all (a stat, no lock, no per-job
-  trivy --download-db-only freshness check) before passing
-  skip-db-update unconditionally. The only remaining lock-guarded path
-  is the genuine first-time-ever bootstrap case (no trivy.db anywhere
-  yet on a cold shared cache), where a real concurrent-write race
-  between two callers is still possible until the scheduled workflow's
-  first successful run creates the file this action then finds.
+  Cheap freshness check for the shared, persistent Trivy DB cache-dir.
+  trivy-db-scheduled-refresh.yml is now the intended sole regular
+  writer to this shared path on its own cron, so in the common case
+  every regular scan job only needs to read cache-dir/db/metadata.json's
+  own NextUpdate field (a JSON read plus a date compare) -- no lock,
+  no trivy --download-db-only call -- to know it can pass
+  skip-db-update unconditionally. This is a freshness check, not a
+  bare presence check: a metadata.json past its NextUpdate is treated
+  exactly like a missing DB, not a false "fine" -- trivy's own
+  --skip-db-update only validates schema version, never staleness
+  (confirmed against trivy's pkg/db/db.go NeedsUpdate/validate), so a
+  stale DB read as "present" would silently scan against expired
+  vulnerability data with a green check, never a loud failure. This
+  also self-heals a host trivy-cache-dir ever resolves to a
+  local-only fallback cache-dir the scheduled workflow cannot reach
+  (single-host writer, see trivy-db-scheduled-refresh.yml): once that
+  host's own local DB goes stale, every job on it falls back to this
+  same locked path and refreshes it itself, exactly as it always did
+  before this design existed.
 
-# What: stat-only in the common case; locks only bootstrap
-# Why: scheduled workflow is now the sole regular writer
+# What: freshness check, not bare presence; locks if stale
+# Why: skip-db-update never re-validates staleness itself
 # From: Issue #1780 | Issue #1095
 
 inputs:
@@ -24,10 +33,10 @@ inputs:
     required: true
   lock-timeout-seconds:
     description: >-
-      Maximum time to wait for the bootstrap lock before giving up and
-      letting the downstream scan step run its own unlocked bootstrap
-      attempt (db-present stays "false") rather than blocking the whole
-      pipeline indefinitely.
+      Maximum time to wait for the refresh lock before giving up and
+      letting the downstream scan step run its own unlocked download
+      attempt (db-present stays "false") rather than blocking the
+      whole pipeline indefinitely.
     required: false
     default: "900"
   stale-lock-seconds:
@@ -40,23 +49,24 @@ inputs:
 outputs:
   db-present:
     description: >-
-      "true" once a real trivy.db file exists in cache-dir after this
-      action runs (whether it already existed, or this action's own
-      bootstrap download just created it). "false" only when no DB
-      exists at all yet AND the bootstrap download itself failed,
-      timed out waiting for the lock, or lost a stale-lock race -- the
-      sole case where a downstream scan step must NOT pass
-      skip-db-update, so Trivy's own unlocked bootstrap can still run,
-      exactly as it would have before this action existed.
+      "true" once a real, currently-fresh (NextUpdate not yet passed)
+      trivy.db file exists in cache-dir after this action runs (whether
+      it was already fresh, or this action's own locked download just
+      made it so). "false" when no DB exists, its metadata is missing
+      or unparsable, its NextUpdate has already passed, or a locked
+      refresh attempt failed/timed out -- every such case is a signal a
+      downstream scan step must NOT pass skip-db-update, so Trivy's own
+      unlocked download can still run, exactly as it would have before
+      this action existed.
     value: ${{ steps.check.outputs.db-present }}
 
 runs:
   using: composite
   steps:
-    # What: stats for a DB file; no lock, no trivy call.
-    # Why: scheduled workflow already keeps this fresh.
+    # What: reads NextUpdate; no lock, no trivy call.
+    # Why: a stale DB must never read as "fine" (see above).
     # From: Issue #1780
-    - name: Check for an already-present Trivy DB
+    - name: Check whether the Trivy DB is present and still fresh
       id: precheck
       shell: bash
       env:
@@ -64,22 +74,46 @@ runs:
       run: |
         set -euo pipefail
         : "${CACHE_DIR:?cache-dir is required}"
-        if [ -s "$CACHE_DIR/db/trivy.db" ]; then
-          echo "::notice::Trivy DB already present in '$CACHE_DIR/db' -- trusting trivy-db-scheduled-refresh.yml as sole writer, no lock and no per-job freshness check needed."
+        db_file="$CACHE_DIR/db/trivy.db"
+        meta_file="$CACHE_DIR/db/metadata.json"
+
+        if [ ! -s "$db_file" ]; then
+          echo "present=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        next_update="$(jq -r '.NextUpdate // empty' "$meta_file" 2>/dev/null || true)"
+        if [ -z "$next_update" ]; then
+          echo "::notice::'$meta_file' missing or unreadable -- treating the DB as stale rather than trusting trivy.db's mere presence."
+          echo "present=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        next_update_epoch="$(date -d "$next_update" +%s 2>/dev/null || true)"
+        if [ -z "$next_update_epoch" ]; then
+          echo "::warning::Could not parse NextUpdate '$next_update' from '$meta_file' -- treating the DB as stale rather than trusting an unparsable date."
+          echo "present=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        now_epoch="$(date +%s)"
+        if [ "$now_epoch" -lt "$next_update_epoch" ]; then
+          echo "::notice::Trivy DB in '$CACHE_DIR/db' is fresh (NextUpdate '$next_update' not yet passed) -- trusting trivy-db-scheduled-refresh.yml as sole writer, no lock and no per-job trivy call needed."
           echo "present=true" >> "$GITHUB_OUTPUT"
         else
+          echo "::notice::Trivy DB in '$CACHE_DIR/db' is past its NextUpdate ('$next_update') -- the scheduled refresh workflow has not kept this cache-dir current (unreachable host, not yet promoted to master, or genuinely behind); falling back to a locked refresh for this job, same as before this design existed."
           echo "present=false" >> "$GITHUB_OUTPUT"
         fi
 
-    - name: Install trivy CLI for the bootstrap-only DB download
+    - name: Install trivy CLI for the locked DB refresh
       if: steps.precheck.outputs.present != 'true'
       uses: ./.github/actions/aquasecurity-setup-trivy-centralized-version
 
-    # What: locked download, reached only on a cold cache.
+    # What: locked download, reached on a cold/stale cache.
     # Why: sole case two callers could still race a write.
     # From: Issue #1780 | Issue #1095
-    - name: Bootstrap-download the DB under lock (cold cache only)
-      id: bootstrap
+    - name: Refresh the DB under lock (cold or stale cache only)
+      id: refresh
       if: steps.precheck.outputs.present != 'true'
       shell: bash
       env:
@@ -106,13 +140,13 @@ runs:
             now="$(date +%s)"
             age=$(( now - lock_mtime ))
             if [ "$age" -gt "$STALE_AFTER" ]; then
-              echo "::warning::Reclaiming stale Trivy DB bootstrap lock '$lock_dir' (age ${age}s > ${STALE_AFTER}s) -- previous holder almost certainly crashed or was cancelled mid-download."
+              echo "::warning::Reclaiming stale Trivy DB refresh lock '$lock_dir' (age ${age}s > ${STALE_AFTER}s) -- previous holder almost certainly crashed or was cancelled mid-download."
               rm -rf -- "$lock_dir"
               continue
             fi
           fi
           if [ "$waited" -ge "$LOCK_TIMEOUT" ]; then
-            echo "::warning::Timed out after ${LOCK_TIMEOUT}s waiting for the Trivy DB bootstrap lock held by another concurrent cold-cache caller -- leaving db-present=false so the caller's own scan step attempts an unlocked bootstrap download itself."
+            echo "::warning::Timed out after ${LOCK_TIMEOUT}s waiting for the Trivy DB refresh lock held by another concurrent caller -- leaving db-present=false so the caller's own scan step attempts an unlocked download itself."
             exit 0
           fi
           sleep "$poll_interval"
@@ -124,10 +158,10 @@ runs:
         # From: Issue #1780 | Issue #1095
         trap 'rm -rf -- "$lock_dir"' EXIT
 
-        echo "::notice::Holding Trivy DB bootstrap lock on '$lock_dir' -- no DB exists yet in '$CACHE_DIR' (first-time-ever cold cache), downloading once so every other caller can read it unlocked from now on."
+        echo "::notice::Holding Trivy DB refresh lock on '$lock_dir' -- '$CACHE_DIR' has no fresh DB (missing, or past NextUpdate), downloading once so every other caller can read it unlocked from now on."
         trivy image --download-db-only --cache-dir "$CACHE_DIR"
 
-    - name: Determine whether a DB is present after this action ran
+    - name: Determine whether a fresh DB is present after this action ran
       id: check
       if: always()
       shell: bash
@@ -140,6 +174,6 @@ runs:
         if [ "$PRECHECK_PRESENT" = "true" ] || [ -s "$CACHE_DIR/db/trivy.db" ]; then
           echo "db-present=true" >> "$GITHUB_OUTPUT"
         else
-          echo "::warning::No trivy.db present in '$CACHE_DIR' after the bootstrap attempt (lock timeout on a cold cache, or the download itself failed) -- the next scan step will run WITHOUT skip-db-update so Trivy can still attempt its own unlocked bootstrap download, exactly as it would have before this action existed."
+          echo "::warning::No trivy.db present in '$CACHE_DIR' after the refresh attempt (lock timeout, or the download itself failed) -- the next scan step will run WITHOUT skip-db-update so Trivy can still attempt its own unlocked download, exactly as it would have before this action existed."
           echo "db-present=false" >> "$GITHUB_OUTPUT"
         fi
