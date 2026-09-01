@@ -4596,7 +4596,13 @@ jobs:
     # the tag-scoped build-tools image fresh; the same reasoning applies to
     # every other service here). Release tags always get a full, fresh
     # build/scan -- no reuse path at all.
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
+    # What: runs for any non-tag ref, plus pull_request always.
+    # Why: reuse must apply to every trigger, not push/PR only.
+    # From: Issue #1683 | PR #1778
+    if: >-
+      ${{
+        github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/')
+      }}
     runs-on: [self-hosted, linux, lancache, lancache-light]
     # Real cost here is a handful of registry reads (docker buildx imagetools
     # inspect, twice per allowlisted service) plus one classify-image-impact.sh
@@ -4670,7 +4676,10 @@ jobs:
       - name: Decide per-service push reuse
         id: decide
         env:
-          REF_NAME: ${{ github.ref_name }}
+          # What: resolves REF_NAME via base_ref on pull_request.
+          # Why: ref_name is the merge ref, not the target branch.
+          # From: Issue #1683 | PR #1778
+          REF_NAME: ${{ github.base_ref || github.ref_name }}
           COMMIT_SHA: ${{ github.sha }}
           PROXY_CHANGED: ${{ needs['detect-changes'].outputs.proxy }}
           DNS_CHANGED: ${{ needs['detect-changes'].outputs.dns_image }}
@@ -4737,7 +4746,10 @@ jobs:
             local classify_key="$1" matrix_service="$2" before_sha_changed="$3" dep_keys="${4:-}"
             local output_key="${matrix_service//-/_}"
 
-            if [ "$before_sha_changed" != "false" ]; then
+            # What: fast-path skip fires only on a proven 'true'.
+            # Why: detect-changes is skipped (empty) off push/PR.
+            # From: Issue #1683 | PR #1778
+            if [ "$before_sha_changed" = "true" ]; then
               echo "::notice::$matrix_service: detect-changes reports this service changed since the immediately preceding push; not attempting reuse (a real rebuild is needed regardless of channel state)." >&2
               printf 'false\n'
               return
@@ -5033,10 +5045,9 @@ jobs:
           MATRIX_SERVICE: ${{ matrix.service }}
           DETECT_CHANGES_RESULT: ${{ needs['detect-changes'].result }}
           SUPERSEDED: ${{ needs['push-supersession-check'].outputs.superseded }}
-          # What: determine-push-reuse-scope only fires on `push` to a
-          # branch ref; its `result` is legitimately 'skipped' otherwise.
-          # Why: checked explicitly below (fail-safe to a real build).
-          # From: Issue #1095 | PR #1532
+          # What: reuse scope now also runs on pull_request events.
+          # Why: still 'skipped' for a non-branch push (e.g. a tag).
+          # From: Issue #1683 | PR #1778
           REUSE_JOB_RESULT: ${{ needs['determine-push-reuse-scope'].result }}
           REUSE_PROXY: ${{ needs['determine-push-reuse-scope'].outputs.reuse_proxy }}
           REUSE_DNS: ${{ needs['determine-push-reuse-scope'].outputs.reuse_dns }}
@@ -5051,7 +5062,27 @@ jobs:
         run: |
           set -euo pipefail
 
+          # What: maps a service to its reuse output (per-step helper).
+          # Why: no GH Actions expression indexes outputs dynamically.
+          # From: Issue #1683 | PR #1778
+          reuse_for_service() {
+            case "$1" in
+              proxy) printf '%s' "$REUSE_PROXY" ;;
+              dns) printf '%s' "$REUSE_DNS" ;;
+              watchdog) printf '%s' "$REUSE_WATCHDOG" ;;
+              dhcp) printf '%s' "$REUSE_DHCP" ;;
+              dhcp-proxy) printf '%s' "$REUSE_DHCP_PROXY" ;;
+              ntp) printf '%s' "$REUSE_NTP" ;;
+              ui) printf '%s' "$REUSE_UI" ;;
+              build-tools) printf '%s' "$REUSE_BUILD_TOOLS" ;;
+              syslog) printf '%s' "$REUSE_SYSLOG" ;;
+              utilities) printf '%s' "$REUSE_UTILITIES" ;;
+              *) printf 'false' ;;
+            esac
+          }
+
           should_build=true
+          reuse_eligible=false
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
             if [ "$DETECT_CHANGES_RESULT" != "success" ]; then
               echo "::error::Pull request build scoping requires detect-changes to succeed, got '$DETECT_CHANGES_RESULT'."
@@ -5073,25 +5104,27 @@ jobs:
                 exit 1
                 ;;
             esac
+
+            # What: PR-untouched services also consult the reuse check.
+            # Why: lets the retag step publish a PR tag, no rebuild.
+            # From: Issue #1683 | PR #1778
+            if [ "$should_build" = "false" ] && [ "$REUSE_JOB_RESULT" = "success" ]; then
+              reuse="$(reuse_for_service "$MATRIX_SERVICE")"
+              if [ "$reuse" = "true" ]; then
+                reuse_eligible=true
+                echo "::notice::$MATRIX_SERVICE is unchanged since the PR base AND content-diff-verified reusable; the retag step below will publish this PR's staging tag without a rebuild."
+              else
+                echo "::notice::$MATRIX_SERVICE is unchanged since the PR base but not (yet) content-diff-verified reusable (reuse job result='$REUSE_JOB_RESULT', reuse='${reuse:-<unset>}'); its PR staging tag stays absent pending a later ancestor-fallback backfill."
+              fi
+            fi
           elif [ "$REUSE_JOB_RESULT" = "success" ]; then
             # What: determine-push-reuse-scope's check covers all 10 services.
             # Why: full reasoning on the linked issue.
             # From: Issue #1095 | PR #1532
-            case "$MATRIX_SERVICE" in
-              proxy) reuse="$REUSE_PROXY" ;;
-              dns) reuse="$REUSE_DNS" ;;
-              watchdog) reuse="$REUSE_WATCHDOG" ;;
-              dhcp) reuse="$REUSE_DHCP" ;;
-              dhcp-proxy) reuse="$REUSE_DHCP_PROXY" ;;
-              ntp) reuse="$REUSE_NTP" ;;
-              ui) reuse="$REUSE_UI" ;;
-              build-tools) reuse="$REUSE_BUILD_TOOLS" ;;
-              syslog) reuse="$REUSE_SYSLOG" ;;
-              utilities) reuse="$REUSE_UTILITIES" ;;
-              *) reuse="false" ;;
-            esac
+            reuse="$(reuse_for_service "$MATRIX_SERVICE")"
             if [ "$reuse" = "true" ]; then
               should_build=false
+              reuse_eligible=true
             fi
           fi
 
@@ -5101,6 +5134,7 @@ jobs:
           if [ "$GITHUB_EVENT_NAME" != "pull_request" ] && [ "$SUPERSEDED" = "true" ]; then
             echo "::notice::A newer push to $GITHUB_REF has already superseded this run; skipping $MATRIX_SERVICE's build so only the run already targeting the current tip does the heavy work."
             should_build=false
+            reuse_eligible=false
           fi
 
           case "$should_build" in
@@ -5118,6 +5152,7 @@ jobs:
             echo "::notice::$MATRIX_SERVICE inputs did not change in this pull request; skipping routine image rebuild."
           fi
           echo "should-build=$should_build" >> "$GITHUB_OUTPUT"
+          echo "reuse-eligible=$reuse_eligible" >> "$GITHUB_OUTPUT"
 
       # Widened to also cover a Step 4 push-reuse-only path (should-build
       # == 'false' but matrix.service is a push-reusable service on a push
@@ -5126,6 +5161,9 @@ jobs:
       # build/push would, even though it never invokes `docker buildx
       # build`. Mirrors issue #1290's identical widening for build-tools's
       # own retag-only path.
+      # What: also covers a trusted PR reuse-eligible retag path.
+      # Why: reuse-eligible is now computed for pull_request too.
+      # From: Issue #1683 | PR #1778
 
       - name: Clean up stale Buildx builder containers (self-hosted reuse hardening)
         run: bash scripts/tracked/cleanup-stale-buildx-builders.sh
@@ -5133,7 +5171,7 @@ jobs:
         if: >-
           ${{
             steps.should-build.outputs.should-build == 'true' ||
-            (github.event_name == 'push' && steps.should-build.outputs.should-build == 'false')
+            steps.should-build.outputs.reuse-eligible == 'true'
           }}
         id: buildx
         uses: *docker_setup_buildx_centraliced_versioning # v4.3.0
@@ -5148,7 +5186,7 @@ jobs:
           ${{
             (
               steps.should-build.outputs.should-build == 'true' ||
-              (github.event_name == 'push' && steps.should-build.outputs.should-build == 'false')
+              steps.should-build.outputs.reuse-eligible == 'true'
             ) &&
             (
               github.event_name != 'pull_request' ||
@@ -5168,10 +5206,25 @@ jobs:
       # Why: full digest-race reasoning on the linked issue.
       # From: Issue #1095 | PR #1532
       - name: Retag unchanged service image for this commit (linux/amd64, no rebuild)
-        if: github.event_name == 'push' && steps.should-build.outputs.should-build == 'false' && needs['push-supersession-check'].outputs.superseded != 'true'
+        # What: also fires for a trusted, reuse-eligible pull_request.
+        # Why: fork/Dependabot never reach reuse-eligible (no login).
+        # From: Issue #1683 | PR #1778
+        if: >-
+          ${{
+            steps.should-build.outputs.reuse-eligible == 'true' &&
+            needs['push-supersession-check'].outputs.superseded != 'true' &&
+            (
+              github.event_name != 'pull_request' ||
+              (
+                github.actor != 'dependabot[bot]' &&
+                github.event.pull_request.head.repo.full_name == github.repository
+              )
+            )
+          }}
         env:
           COMMIT_SHA: ${{ github.sha }}
           MATRIX_SERVICE: ${{ matrix.service }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
           DIGEST_PROXY: ${{ needs['determine-push-reuse-scope'].outputs.digest_proxy }}
@@ -5221,10 +5274,18 @@ jobs:
           fi
           pinned_ref="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}@${pinned_digest}"
 
-          # What: uses the full commit SHA directly, no local truncation.
-          # Why: short-SHA tags are banned; a local slice risks collisions.
-          # From: Issue #1095 (G2) | PR #1503
-          target="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}:sha-${COMMIT_SHA}-amd64"
+          # What: PR events retag under the PR's own staging tag.
+          # Why: matches "Compute PR staging tag"'s exact tag shape.
+          # From: Issue #1683 | PR #1778
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            : "${PR_NUMBER:?PR_NUMBER (github.event.pull_request.number) is required}"
+            target="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}:pr-${PR_NUMBER}-sha-${COMMIT_SHA}-amd64"
+          else
+            # What: uses the full commit SHA directly, no local truncation.
+            # Why: short-SHA tags are banned; a local slice risks collisions.
+            # From: Issue #1095 (G2) | PR #1503
+            target="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}:sha-${COMMIT_SHA}-amd64"
+          fi
 
           manifest_json="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$pinned_ref" --raw)"
           amd64_digest="$(printf '%s' "$manifest_json" | jq -r '[.manifests[]? | select(.platform.architecture == "amd64" and .platform.os == "linux")][0].digest // empty')"
@@ -5234,7 +5295,7 @@ jobs:
           fi
 
           source_ref="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}@${amd64_digest}"
-          echo "::notice::$MATRIX_SERVICE is unchanged on this push (Step 4, verified via scripts/lib/push-reuse.sh); retagging $source_ref (from the pinned digest $pinned_ref) as $target instead of rebuilding."
+          echo "::notice::$MATRIX_SERVICE is unchanged (Step 4, verified via scripts/lib/push-reuse.sh); retagging $source_ref (from the pinned digest $pinned_ref) as $target instead of rebuilding."
           ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
             docker buildx imagetools create --tag "$target" "$source_ref"
 
@@ -5700,12 +5761,15 @@ jobs:
       # local Buildx cache" below only manipulates the local cache directory on disk, not
       # the builder itself.
       - name: Remove buildx builder
+        # What: mirrors "Set up Docker Buildx"'s own widened condition.
+        # Why: whatever step creates the builder must also remove it.
+        # From: Issue #1683 | PR #1778
         if: >-
           ${{
             always() &&
             (
               steps.should-build.outputs.should-build == 'true' ||
-              (github.event_name == 'push' && steps.should-build.outputs.should-build == 'false')
+              steps.should-build.outputs.reuse-eligible == 'true'
             )
           }}
         run: |
@@ -6049,7 +6113,27 @@ jobs:
         run: |
           set -euo pipefail
 
+          # What: maps a service to its reuse output (per-step helper).
+          # Why: no GH Actions expression indexes outputs dynamically.
+          # From: Issue #1683 | PR #1778
+          reuse_for_service() {
+            case "$1" in
+              proxy) printf '%s' "$REUSE_PROXY" ;;
+              dns) printf '%s' "$REUSE_DNS" ;;
+              watchdog) printf '%s' "$REUSE_WATCHDOG" ;;
+              dhcp) printf '%s' "$REUSE_DHCP" ;;
+              dhcp-proxy) printf '%s' "$REUSE_DHCP_PROXY" ;;
+              ntp) printf '%s' "$REUSE_NTP" ;;
+              ui) printf '%s' "$REUSE_UI" ;;
+              build-tools) printf '%s' "$REUSE_BUILD_TOOLS" ;;
+              syslog) printf '%s' "$REUSE_SYSLOG" ;;
+              utilities) printf '%s' "$REUSE_UTILITIES" ;;
+              *) printf 'false' ;;
+            esac
+          }
+
           should_build=true
+          reuse_eligible=false
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
             if [ "$DETECT_CHANGES_RESULT" != "success" ]; then
               echo "::error::Pull request build scoping requires detect-changes to succeed, got '$DETECT_CHANGES_RESULT'."
@@ -6071,25 +6155,27 @@ jobs:
                 exit 1
                 ;;
             esac
+
+            # What: PR-untouched services also consult the reuse check.
+            # Why: lets the retag step publish a PR tag, no rebuild.
+            # From: Issue #1683 | PR #1778
+            if [ "$should_build" = "false" ] && [ "$REUSE_JOB_RESULT" = "success" ]; then
+              reuse="$(reuse_for_service "$MATRIX_SERVICE")"
+              if [ "$reuse" = "true" ]; then
+                reuse_eligible=true
+                echo "::notice::$MATRIX_SERVICE is unchanged since the PR base AND content-diff-verified reusable; the retag step below will publish this PR's staging tag without a rebuild."
+              else
+                echo "::notice::$MATRIX_SERVICE is unchanged since the PR base but not (yet) content-diff-verified reusable (reuse job result='$REUSE_JOB_RESULT', reuse='${reuse:-<unset>}'); its PR staging tag stays absent pending a later ancestor-fallback backfill."
+              fi
+            fi
           elif [ "$REUSE_JOB_RESULT" = "success" ]; then
             # What: mirrors build's own (amd64) identical Step 4 branch.
             # Why: full reasoning on the linked issue.
             # From: Issue #1095 | PR #1532
-            case "$MATRIX_SERVICE" in
-              proxy) reuse="$REUSE_PROXY" ;;
-              dns) reuse="$REUSE_DNS" ;;
-              watchdog) reuse="$REUSE_WATCHDOG" ;;
-              dhcp) reuse="$REUSE_DHCP" ;;
-              dhcp-proxy) reuse="$REUSE_DHCP_PROXY" ;;
-              ntp) reuse="$REUSE_NTP" ;;
-              ui) reuse="$REUSE_UI" ;;
-              build-tools) reuse="$REUSE_BUILD_TOOLS" ;;
-              syslog) reuse="$REUSE_SYSLOG" ;;
-              utilities) reuse="$REUSE_UTILITIES" ;;
-              *) reuse="false" ;;
-            esac
+            reuse="$(reuse_for_service "$MATRIX_SERVICE")"
             if [ "$reuse" = "true" ]; then
               should_build=false
+              reuse_eligible=true
             fi
           fi
 
@@ -6099,6 +6185,7 @@ jobs:
           if [ "$GITHUB_EVENT_NAME" != "pull_request" ] && [ "$SUPERSEDED" = "true" ]; then
             echo "::notice::A newer push to $GITHUB_REF has already superseded this run; skipping $MATRIX_SERVICE's build so only the run already targeting the current tip does the heavy work."
             should_build=false
+            reuse_eligible=false
           fi
 
           case "$should_build" in
@@ -6116,6 +6203,7 @@ jobs:
             echo "::notice::$MATRIX_SERVICE inputs did not change in this pull request; skipping routine image rebuild."
           fi
           echo "should-build=$should_build" >> "$GITHUB_OUTPUT"
+          echo "reuse-eligible=$reuse_eligible" >> "$GITHUB_OUTPUT"
 
       # Widened to also cover a Step 4 push-reuse-only path -- same
       # reasoning as build's own (the amd64 leg) identical widening.
@@ -6130,7 +6218,7 @@ jobs:
         if: >-
           ${{
             steps.should-build.outputs.should-build == 'true' ||
-            (github.event_name == 'push' && steps.should-build.outputs.should-build == 'false')
+            steps.should-build.outputs.reuse-eligible == 'true'
           }}
         id: buildx
         uses: ./.github/actions/buildx-setup-retry
@@ -6144,7 +6232,7 @@ jobs:
           ${{
             (
               steps.should-build.outputs.should-build == 'true' ||
-              (github.event_name == 'push' && steps.should-build.outputs.should-build == 'false')
+              steps.should-build.outputs.reuse-eligible == 'true'
             ) &&
             (
               github.event_name != 'pull_request' ||
@@ -6166,10 +6254,25 @@ jobs:
       # determine-push-reuse-scope exported, so they always agree.
       # From: Issue #1095 | PR #1532
       - name: Retag unchanged service image for this commit (linux/arm64, no rebuild)
-        if: github.event_name == 'push' && steps.should-build.outputs.should-build == 'false' && needs['push-supersession-check'].outputs.superseded != 'true'
+        # What: also fires for a trusted, reuse-eligible pull_request.
+        # Why: fork/Dependabot never reach reuse-eligible (no login).
+        # From: Issue #1683 | PR #1778
+        if: >-
+          ${{
+            steps.should-build.outputs.reuse-eligible == 'true' &&
+            needs['push-supersession-check'].outputs.superseded != 'true' &&
+            (
+              github.event_name != 'pull_request' ||
+              (
+                github.actor != 'dependabot[bot]' &&
+                github.event.pull_request.head.repo.full_name == github.repository
+              )
+            )
+          }}
         env:
           COMMIT_SHA: ${{ github.sha }}
           MATRIX_SERVICE: ${{ matrix.service }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
           DIGEST_PROXY: ${{ needs['determine-push-reuse-scope'].outputs.digest_proxy }}
@@ -6219,10 +6322,18 @@ jobs:
           fi
           pinned_ref="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}@${pinned_digest}"
 
-          # What: uses the full commit SHA directly, no local truncation.
-          # Why: short-SHA tags are banned; a local slice risks collisions.
-          # From: Issue #1095 (G2) | PR #1503
-          target="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}:sha-${COMMIT_SHA}-arm64"
+          # What: PR events retag under the PR's own staging tag.
+          # Why: matches "Compute PR staging tag"'s exact tag shape.
+          # From: Issue #1683 | PR #1778
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            : "${PR_NUMBER:?PR_NUMBER (github.event.pull_request.number) is required}"
+            target="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}:pr-${PR_NUMBER}-sha-${COMMIT_SHA}-arm64"
+          else
+            # What: uses the full commit SHA directly, no local truncation.
+            # Why: short-SHA tags are banned; a local slice risks collisions.
+            # From: Issue #1095 (G2) | PR #1503
+            target="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}:sha-${COMMIT_SHA}-arm64"
+          fi
 
           manifest_json="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$pinned_ref" --raw)"
           arm64_digest="$(printf '%s' "$manifest_json" | jq -r '[.manifests[]? | select(.platform.architecture == "arm64" and .platform.os == "linux")][0].digest // empty')"
@@ -6232,7 +6343,7 @@ jobs:
           fi
 
           source_ref="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}@${arm64_digest}"
-          echo "::notice::$MATRIX_SERVICE is unchanged on this push (Step 4, verified via scripts/lib/push-reuse.sh); retagging $source_ref (from the pinned digest $pinned_ref) as $target instead of rebuilding."
+          echo "::notice::$MATRIX_SERVICE is unchanged (Step 4, verified via scripts/lib/push-reuse.sh); retagging $source_ref (from the pinned digest $pinned_ref) as $target instead of rebuilding."
           ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
             docker buildx imagetools create --tag "$target" "$source_ref"
 
@@ -6387,12 +6498,15 @@ jobs:
       # case this job is ever moved to a persistent runner. Widened the same way as build's
       # own equivalent step to also cover a Step 4 retag-only path.
       - name: Remove buildx builder
+        # What: mirrors "Set up Docker Buildx"'s own widened condition.
+        # Why: whatever step creates the builder must also remove it.
+        # From: Issue #1683 | PR #1778
         if: >-
           ${{
             always() &&
             (
               steps.should-build.outputs.should-build == 'true' ||
-              (github.event_name == 'push' && steps.should-build.outputs.should-build == 'false')
+              steps.should-build.outputs.reuse-eligible == 'true'
             )
           }}
         run: |
