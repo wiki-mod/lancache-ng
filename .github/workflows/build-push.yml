@@ -4596,12 +4596,14 @@ jobs:
     # the tag-scoped build-tools image fresh; the same reasoning applies to
     # every other service here). Release tags always get a full, fresh
     # build/scan -- no reuse path at all.
-    # What: runs for any non-tag ref, plus pull_request always.
-    # Why: reuse must apply to every trigger, not push/PR only.
+    # What: always() plus explicit skipped-tolerant detect-changes check.
+    # Why: detect-changes skips off push/PR; bare `if:` implies success().
     # From: Issue #1683 | PR #1778
     if: >-
       ${{
-        github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/')
+        always() &&
+        (github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/')) &&
+        (needs['detect-changes'].result == 'success' || needs['detect-changes'].result == 'skipped')
       }}
     runs-on: [self-hosted, linux, lancache, lancache-light]
     # Real cost here is a handful of registry reads (docker buildx imagetools
