@@ -257,6 +257,38 @@ runs:
         ATTEMPT4_FLAGS: ${{ steps.attempt4.outputs.flags }}
       run: |
         set -euo pipefail
+        dump_attempt_diagnostics() {
+          local attempt="$1"
+          local outcome="$2"
+          local name="$3"
+          local driver="$4"
+          local platforms="$5"
+          local nodes="$6"
+          local endpoint="$7"
+          local status="$8"
+          local flags="$9"
+
+          printf 'attempt%s.outcome=%s\n' "$attempt" "$outcome"
+          printf 'attempt%s.name=%s\n' "$attempt" "$name"
+          printf 'attempt%s.driver=%s\n' "$attempt" "$driver"
+          printf 'attempt%s.platforms=%s\n' "$attempt" "$platforms"
+          printf 'attempt%s.endpoint=%s\n' "$attempt" "$endpoint"
+          printf 'attempt%s.status=%s\n' "$attempt" "$status"
+          printf 'attempt%s.flags=%s\n' "$attempt" "$flags"
+          printf 'attempt%s.nodes<<BUILDX_NODES\n' "$attempt"
+          printf '%s\n' "$nodes"
+          printf 'BUILDX_NODES\n'
+        }
+
+        dump_retry_diagnostics() {
+          echo "::group::Buildx retry diagnostics"
+          dump_attempt_diagnostics 1 "$ATTEMPT1_OUTCOME" "$ATTEMPT1_NAME" "$ATTEMPT1_DRIVER" "$ATTEMPT1_PLATFORMS" "$ATTEMPT1_NODES" "$ATTEMPT1_ENDPOINT" "$ATTEMPT1_STATUS" "$ATTEMPT1_FLAGS"
+          dump_attempt_diagnostics 2 "$ATTEMPT2_OUTCOME" "$ATTEMPT2_NAME" "$ATTEMPT2_DRIVER" "$ATTEMPT2_PLATFORMS" "$ATTEMPT2_NODES" "$ATTEMPT2_ENDPOINT" "$ATTEMPT2_STATUS" "$ATTEMPT2_FLAGS"
+          dump_attempt_diagnostics 3 "$ATTEMPT3_OUTCOME" "$ATTEMPT3_NAME" "$ATTEMPT3_DRIVER" "$ATTEMPT3_PLATFORMS" "$ATTEMPT3_NODES" "$ATTEMPT3_ENDPOINT" "$ATTEMPT3_STATUS" "$ATTEMPT3_FLAGS"
+          dump_attempt_diagnostics 4 "$ATTEMPT4_OUTCOME" "$ATTEMPT4_NAME" "$ATTEMPT4_DRIVER" "$ATTEMPT4_PLATFORMS" "$ATTEMPT4_NODES" "$ATTEMPT4_ENDPOINT" "$ATTEMPT4_STATUS" "$ATTEMPT4_FLAGS"
+          echo "::endgroup::"
+        }
+
         if [[ "$ATTEMPT1_OUTCOME" == "success" ]]; then
           name="$ATTEMPT1_NAME"
           driver="$ATTEMPT1_DRIVER"
@@ -290,6 +322,7 @@ runs:
           status="$ATTEMPT4_STATUS"
           flags="$ATTEMPT4_FLAGS"
         else
+          dump_retry_diagnostics
           echo "::error::All Docker Buildx setup attempts failed." >&2
           exit 1
         fi

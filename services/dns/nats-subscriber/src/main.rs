@@ -733,6 +733,48 @@ fn dns_record_patch_url(zone: &str) -> String {
     )
 }
 
+// dns_zone_notify_url <zone>
+// PowerDNS exposes zone notification as a separate HTTP endpoint from the
+// RRset PATCH itself. Keeping the URL construction alongside
+// dns_record_patch_url() makes the primary-side "write then notify
+// secondaries" contract explicit and unit-testable under the same
+// zone-id-normalization rules.
+fn dns_zone_notify_url(zone: &str) -> String {
+    format!(
+        "http://127.0.0.1:8081/api/v1/servers/localhost/zones/{}/notify",
+        zone_snapshots::zone_api_id(zone)
+    )
+}
+
+async fn notify_zone_secondaries(
+    zone: &str,
+    pdns_api_key: &str,
+    http_client: &Arc<Client>,
+) -> bool {
+    let url = dns_zone_notify_url(zone);
+    match http_client
+        .put(&url)
+        .header("X-API-Key", pdns_api_key)
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => true,
+        Ok(resp) => {
+            eprintln!(
+                "PDNS notify error (will retry): {} {} for zone={}",
+                resp.status(),
+                resp.status().canonical_reason().unwrap_or(""),
+                zone
+            );
+            false
+        }
+        Err(e) => {
+            eprintln!("Error sending PDNS notify request (will retry) for zone={}: {}", zone, e);
+            false
+        }
+    }
+}
+
 async fn handle_dns_record(
     msg: &async_nats::jetstream::Message,
     pdns_api_key: &str,
@@ -849,6 +891,13 @@ async fn handle_dns_record(
                     "Updated DNS record: zone={} name={} type={} action={}",
                     record.zone, record.name, record.record_type, record.action
                 );
+                // Local primary writes are not enough on their own for the
+                // dns-ssl/remote-secondary topology: AXFR consumers need a
+                // real zone notify so they pull the new state promptly
+                // instead of staying stale until some later periodic check.
+                if !notify_zone_secondaries(&record.zone, pdns_api_key, http_client).await {
+                    return false;
+                }
                 // Post-PATCH known-good snapshot trigger (#628). Validated
                 // by construction: this only runs after PowerDNS's own
                 // PATCH already returned 2xx, so there is no separate
@@ -1081,6 +1130,22 @@ mod tests {
         assert_eq!(
             dns_record_patch_url("1.168.192.in-addr.arpa."),
             "http://127.0.0.1:8081/api/v1/servers/localhost/zones/1.168.192.in-addr.arpa"
+        );
+    }
+
+    #[test]
+    fn dns_zone_notify_url_strips_trailing_dot_regardless_of_input_form() {
+        assert_eq!(
+            dns_zone_notify_url("lan"),
+            "http://127.0.0.1:8081/api/v1/servers/localhost/zones/lan/notify"
+        );
+        assert_eq!(
+            dns_zone_notify_url("lan."),
+            "http://127.0.0.1:8081/api/v1/servers/localhost/zones/lan/notify"
+        );
+        assert_eq!(
+            dns_zone_notify_url("1.168.192.in-addr.arpa."),
+            "http://127.0.0.1:8081/api/v1/servers/localhost/zones/1.168.192.in-addr.arpa/notify"
         );
     }
 

@@ -431,13 +431,46 @@ runs:
     - name: Resolve outcome across all attempts
       if: always()
       shell: bash
+      env:
+        ATTEMPT1_OUTCOME: ${{ steps.attempt1.outcome }}
+        ATTEMPT1_RETRYABLE: ${{ steps.classify1.outputs.retryable }}
+        ATTEMPT1_ERROR_KIND: ${{ steps.classify1.outputs.error-kind }}
+        ATTEMPT2_OUTCOME: ${{ steps.attempt2.outcome }}
+        ATTEMPT2_RETRYABLE: ${{ steps.classify2.outputs.retryable }}
+        ATTEMPT2_ERROR_KIND: ${{ steps.classify2.outputs.error-kind }}
+        ATTEMPT3_OUTCOME: ${{ steps.attempt3.outcome }}
+        ATTEMPT3_RETRYABLE: ${{ steps.classify3.outputs.retryable }}
+        ATTEMPT3_ERROR_KIND: ${{ steps.classify3.outputs.error-kind }}
+        ATTEMPT4_OUTCOME: ${{ steps.attempt4.outcome }}
+        ATTEMPT4_RETRYABLE: ${{ steps.classify4.outputs.retryable }}
+        ATTEMPT4_ERROR_KIND: ${{ steps.classify4.outputs.error-kind }}
+        REPORT_PATH: ${{ steps.outpath.outputs.path }}
       run: |
         set -euo pipefail
+        dump_retry_diagnostics() {
+          echo "::group::Trivy retry diagnostics"
+          printf 'image-ref=%s\n' "${{ inputs.image-ref }}"
+          printf 'report-path=%s\n' "$REPORT_PATH"
+          printf 'attempt1.outcome=%s\n' "$ATTEMPT1_OUTCOME"
+          printf 'attempt1.retryable=%s\n' "$ATTEMPT1_RETRYABLE"
+          printf 'attempt1.error-kind=%s\n' "$ATTEMPT1_ERROR_KIND"
+          printf 'attempt2.outcome=%s\n' "$ATTEMPT2_OUTCOME"
+          printf 'attempt2.retryable=%s\n' "$ATTEMPT2_RETRYABLE"
+          printf 'attempt2.error-kind=%s\n' "$ATTEMPT2_ERROR_KIND"
+          printf 'attempt3.outcome=%s\n' "$ATTEMPT3_OUTCOME"
+          printf 'attempt3.retryable=%s\n' "$ATTEMPT3_RETRYABLE"
+          printf 'attempt3.error-kind=%s\n' "$ATTEMPT3_ERROR_KIND"
+          printf 'attempt4.outcome=%s\n' "$ATTEMPT4_OUTCOME"
+          printf 'attempt4.retryable=%s\n' "$ATTEMPT4_RETRYABLE"
+          printf 'attempt4.error-kind=%s\n' "$ATTEMPT4_ERROR_KIND"
+          echo "::endgroup::"
+        }
         for outcome in "${{ steps.attempt1.outcome }}" "${{ steps.attempt2.outcome }}" "${{ steps.attempt3.outcome }}" "${{ steps.attempt4.outcome }}"; do
           if [[ "$outcome" == "success" ]]; then
             exit 0
           fi
         done
+        dump_retry_diagnostics
         echo "::error::All Trivy scan attempts for image-ref '${{ inputs.image-ref }}' failed." >&2
         exit 1
 

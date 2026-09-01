@@ -110,10 +110,21 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
+        dump_retry_diagnostics() {
+          echo "::group::GHCR attest retry diagnostics"
+          printf 'subject-name=%s\n' "${{ inputs.subject-name }}"
+          printf 'subject-digest=%s\n' "${{ inputs.subject-digest }}"
+          printf 'attempt1.outcome=%s\n' "${{ steps.attempt1.outcome }}"
+          printf 'attempt2.outcome=%s\n' "${{ steps.attempt2.outcome }}"
+          printf 'attempt3.outcome=%s\n' "${{ steps.attempt3.outcome }}"
+          printf 'attempt4.outcome=%s\n' "${{ steps.attempt4.outcome }}"
+          echo "::endgroup::"
+        }
         for outcome in "${{ steps.attempt1.outcome }}" "${{ steps.attempt2.outcome }}" "${{ steps.attempt3.outcome }}" "${{ steps.attempt4.outcome }}"; do
           if [[ "$outcome" == "success" ]]; then
             exit 0
           fi
         done
+        dump_retry_diagnostics
         echo "::error::All attestation attempts for ${{ inputs.subject-name }}@${{ inputs.subject-digest }} failed." >&2
         exit 1

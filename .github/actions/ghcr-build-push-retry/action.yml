@@ -238,6 +238,18 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
+        dump_retry_diagnostics() {
+          echo "::group::GHCR build/push retry diagnostics"
+          printf 'attempt1.outcome=%s\n' "${{ steps.attempt1.outcome }}"
+          printf 'attempt1.digest=%s\n' "${{ steps.attempt1.outputs.digest }}"
+          printf 'attempt2.outcome=%s\n' "${{ steps.attempt2.outcome }}"
+          printf 'attempt2.digest=%s\n' "${{ steps.attempt2.outputs.digest }}"
+          printf 'attempt3.outcome=%s\n' "${{ steps.attempt3.outcome }}"
+          printf 'attempt3.digest=%s\n' "${{ steps.attempt3.outputs.digest }}"
+          printf 'attempt4.outcome=%s\n' "${{ steps.attempt4.outcome }}"
+          printf 'attempt4.digest=%s\n' "${{ steps.attempt4.outputs.digest }}"
+          echo "::endgroup::"
+        }
         if [[ "${{ steps.attempt1.outcome }}" == "success" ]]; then
           digest="${{ steps.attempt1.outputs.digest }}"
         elif [[ "${{ steps.attempt2.outcome }}" == "success" ]]; then
@@ -247,6 +259,7 @@ runs:
         elif [[ "${{ steps.attempt4.outcome }}" == "success" ]]; then
           digest="${{ steps.attempt4.outputs.digest }}"
         else
+          dump_retry_diagnostics
           echo "::error::All build/push attempts against ${{ inputs.registry }} failed." >&2
           exit 1
         fi
