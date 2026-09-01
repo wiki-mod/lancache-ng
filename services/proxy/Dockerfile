@@ -84,16 +84,16 @@ LABEL org.opencontainers.image.description="nginx-based lancache-ng caching prox
 #     (`local -n`), and `${var,,}` lowercasing all require real bash --
 #     Alpine's base image has no bash by default, unlike Debian's.
 #
-# What: Binaries from shared utilities-tools image.
+# What: Binaries from shared utilities-tools image; curl comes
+#       from this service's own apk install below instead.
 # Why: Avoids rebuilding; pins identical alpine:3.24 digest.
-# From: Issue #1556
+# From: Issue #1556; curl split out by Issue #1781.
 
 # What: Remove BusyBox symlinks before binary COPY.
 # Why: COPY through symlink corrupts /bin/busybox and /bin/sh.
 # From: Issue #1556
 RUN rm -f /usr/bin/find /usr/bin/xargs /usr/bin/lsof
 
-COPY --from=utilities-tools /usr/local/bin/curl /usr/local/bin/curl
 COPY --from=utilities-tools /usr/bin/find /usr/bin/find
 COPY --from=utilities-tools /usr/bin/xargs /usr/bin/xargs
 COPY --from=utilities-tools /usr/bin/envsubst /usr/bin/envsubst
@@ -119,7 +119,7 @@ RUN set -euo pipefail; \
 ARG APT_CACHE_BUST=""
 RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
     apk upgrade --no-cache && \
-    apk add --no-cache ca-certificates openssl && \
+    apk add --no-cache ca-certificates openssl curl && \
     curl -fsSL -o /etc/apk/keys/nginx_signing.rsa.pub https://nginx.org/keys/nginx_signing.rsa.pub && \
     printf '%s\n' "@nginx https://nginx.org/packages/mainline/alpine/v$(cut -d. -f1,2 /etc/alpine-release)/main" >> /etc/apk/repositories && \
     apk update && \
@@ -137,10 +137,10 @@ RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
 # itself needs) -- same rationale as the prior Debian stage, no gnupg-style
 # purge-after-use step is needed here since Alpine's apk signing-key
 # mechanism (a plain RSA public key file) never pulls in a temporary
-# package the way apt's gpg-based key import did. ca-certificates itself
-# stays apk-installed (not copied from utilities): it is a certificate-data
-# package, not a binary, and this build needs its trust store before the
-# COPY'd curl's first HTTPS call above even runs.
+# package the way apt's gpg-based key import did. ca-certificates and curl
+# are both apk-installed in the same RUN (Issue #1781: curl is no longer
+# COPY'd from utilities), so the trust store is already in place before
+# this build's own first HTTPS call (the nginx signing-key fetch) below.
 # nano: in-container troubleshooting tool -- see services/dns/Dockerfile's
 # identical comment for the full rationale; lsof/ripgrep are COPY'd above
 # but serve the same troubleshooting purpose.

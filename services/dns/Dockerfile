@@ -552,16 +552,16 @@ LABEL org.opencontainers.image.description="PowerDNS recursor, authoritative DNS
 # advisory affects a version still shipping in v3.24 stable at that time --
 # do not treat this resolution as a promise that `pdns`/`pdns-backend-sqlite3`
 # will never need pinning again.
-# What: curl/findutils/envsubst/lsof/ripgrep from utilities image.
+# What: findutils/envsubst/lsof/ripgrep from utilities image;
+#       curl comes from this service's own apk install below.
 # Why: same alpine:3.24 digest as services/proxy/Dockerfile.
-# From: Issue #1556
+# From: Issue #1556; curl split out by Issue #1781.
 
 # What: removes BusyBox symlinks before real binaries land.
 # Why: see services/proxy/Dockerfile's identical comment.
 # From: Issue #1556
 RUN rm -f /usr/bin/find /usr/bin/xargs /usr/bin/lsof
 
-COPY --from=utilities-tools /usr/local/bin/curl /usr/local/bin/curl
 COPY --from=utilities-tools /usr/bin/find /usr/bin/find
 COPY --from=utilities-tools /usr/bin/xargs /usr/bin/xargs
 COPY --from=utilities-tools /usr/bin/envsubst /usr/bin/envsubst
@@ -579,7 +579,6 @@ RUN set -euo pipefail; \
     find . -maxdepth 0 -printf '%f\n' >/dev/null; \
     printf '%s' '$FOO' | FOO=bar envsubst >/dev/null; \
     rg --version >/dev/null; \
-    curl --version >/dev/null; \
     sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
 
 # What: declares APT_CACHE_BUST right before the RUN it busts.
@@ -596,9 +595,15 @@ RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
     sqlite \
     iproute2 \
     grep \
+    curl \
     coreutils \
     bash \
     nano
+
+# What: verifies the locally apk-installed curl actually runs.
+# Why: catches a broken/missing shared-lib chain at build time.
+# From: Issue #1781
+RUN curl --version >/dev/null
 
 # nano: in-container troubleshooting tool -- see services/proxy/Dockerfile's
 # identical comment for the full rationale; lsof/ripgrep are COPY'd above

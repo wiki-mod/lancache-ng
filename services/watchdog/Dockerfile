@@ -323,13 +323,19 @@ RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
     ca-certificates \
     coreutils \
     util-linux \
+    curl \
     nano \
     zstd
-# What: bash/coreutils/util-linux/zstd/ca-certificates+nano.
+# What: bash/coreutils/util-linux/zstd/ca-certificates+nano+curl.
 # Why: retention.sh/-entrypoint.sh need these; jq is unused.
-# From: Issue #1556
+# From: Issue #1556; curl moved into this list by Issue #1781.
+
+# What: verifies the locally apk-installed curl actually runs.
+# Why: catches a broken/missing shared-lib chain at build time.
+# From: Issue #1781
+RUN curl --version >/dev/null
 #
-# What: curl/findutils/lsof/ripgrep from shared utilities.
+# What: findutils/lsof/ripgrep from shared utilities image.
 # Why: same digest as utilities; avoid duplicate installs.
 # From: Issue #1556
 #
@@ -338,7 +344,6 @@ RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
 # From: Issue #1556
 RUN rm -f /usr/bin/find /usr/bin/xargs /usr/bin/lsof
 
-COPY --from=utilities-tools /usr/local/bin/curl /usr/local/bin/curl
 COPY --from=utilities-tools /usr/bin/find /usr/bin/find
 COPY --from=utilities-tools /usr/bin/xargs /usr/bin/xargs
 COPY --from=utilities-tools /usr/bin/lsof /usr/bin/lsof
@@ -353,7 +358,6 @@ COPY --from=utilities-tools /usr/local/bin/verify-version-banner.sh /usr/local/b
 RUN set -euo pipefail; \
     find . -maxdepth 0 -printf '%f\n' >/dev/null; \
     rg --version >/dev/null; \
-    curl --version >/dev/null; \
     sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
 
 # nano/lsof/ripgrep/curl: in-container troubleshooting tools -- see

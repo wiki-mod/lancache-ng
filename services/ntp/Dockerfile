@@ -48,10 +48,10 @@ LABEL org.opencontainers.image.description="LanCache-NG-NTP: chrony-based NTP se
 # services/dhcp-proxy/Dockerfile's matching comment for the fuller
 # rationale and live verification of this behavior.
 
-# What: curl/envsubst binaries from shared utilities image.
+# What: envsubst binary from shared utilities image; curl comes
+#       from this service's own apk install below instead.
 # Why: same Alpine base digest ensures binary compatibility.
-# From: Issue #1556
-COPY --from=utilities-tools /usr/local/bin/curl /usr/local/bin/curl
+# From: Issue #1556; curl split out by Issue #1781.
 COPY --from=utilities-tools /usr/bin/envsubst /usr/bin/envsubst
 COPY --from=utilities-tools /usr/lib/libintl.so.8 /usr/lib/libintl.so.8
 
@@ -59,12 +59,12 @@ COPY --from=utilities-tools /usr/lib/libintl.so.8 /usr/lib/libintl.so.8
 # Why: shared libraries fail at runtime, not copy time.
 # From: Issue #1556
 RUN set -euo pipefail; \
-    printf '%s' '$FOO' | FOO=bar envsubst >/dev/null; \
-    curl --version >/dev/null
+    printf '%s' '$FOO' | FOO=bar envsubst >/dev/null
 
 # What: ca-certificates package enables curl's CA bundle.
-# Why: copied curl has fixed CA path; package generates it.
-# From: Issue #1556
+# Why: apk-installed curl has ca-certificates as a dependency
+#      anyway; kept explicit here for clarity.
+# From: Issue #1556; curl itself moved into this list by #1781.
 # What: APT_CACHE_BUST invalidates BuildKit's upgrade cache.
 # Why: without this, BuildKit replays stale cache forever.
 # From: Issue #1095
@@ -74,7 +74,13 @@ RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
     apk add --no-cache \
     bash \
     ca-certificates \
-    chrony-nts
+    chrony-nts \
+    curl
+
+# What: verifies the locally apk-installed curl actually runs.
+# Why: catches a broken/missing shared-lib chain at build time.
+# From: Issue #1781
+RUN curl --version >/dev/null
 
 COPY chrony.conf /etc/chrony/chrony.conf.template
 COPY entrypoint.sh /entrypoint.sh

@@ -5010,17 +5010,15 @@ jobs:
             context: services/utilities
             build_contexts: ""
             description: "Shared lancache-ng utilities image (curl, nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd) for COPY --from= consumption by eight first-party images (issue #1556)."
-            # Heavy, not light, despite being a small/fast build in practice
-            # (curl's own C compile is ~20s): AG-CI-002's light-tier exception
-            # requires "no real compile/link step of its own AT ALL", verified
-            # by inspecting the Dockerfile's own build graph, not assumed --
-            # services/utilities/Dockerfile's curl-builder stage genuinely
-            # compiles/links curl from source (gcc/make), so it does not meet
-            # that carve-out's literal precondition the way proxy/dhcp-proxy/
-            # watchdog/dhcp/syslog/ntp (pure package-install or COPY --from,
-            # no compiler invoked at all) do. Revisit if a future change
-            # removes the from-source curl build.
-            runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
+            # Moved to light (Issue #1781, re-evaluating AG-CI-002's own
+            # exception as its text anticipates): the curl-builder stage
+            # that used to compile/link curl from source (gcc/make) is
+            # gone -- curl is now `apk add`'d like the image's other 9
+            # tools. This Dockerfile now has no compiler invocation and no
+            # ${BUILD_TOOLS_IMAGE} builder stage at all, same shape as
+            # proxy/dhcp-proxy/dhcp/syslog/ntp below. Revisit again if a
+            # future change reintroduces a real compile/link step here.
+            runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
 
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev

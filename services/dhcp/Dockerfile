@@ -78,16 +78,16 @@ FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe
 
 LABEL org.opencontainers.image.description="Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks."
 
-# What: COPY shared binaries from utilities image.
+# What: COPY shared binaries from utilities image; curl comes
+#       from this service's own apk install below instead.
 # Why: binary-compatible with utilities digest; jq stays local.
-# From: Issue #1556
+# From: Issue #1556; curl split out by Issue #1781.
 
 # What: remove BusyBox symlinks before real binaries land.
 # Why: prevent shadowing of utilities image binaries.
 # From: Issue #1556
 RUN rm -f /usr/bin/find /usr/bin/xargs /usr/bin/lsof
 
-COPY --from=utilities-tools /usr/local/bin/curl /usr/local/bin/curl
 COPY --from=utilities-tools /usr/bin/find /usr/bin/find
 COPY --from=utilities-tools /usr/bin/xargs /usr/bin/xargs
 COPY --from=utilities-tools /usr/bin/envsubst /usr/bin/envsubst
@@ -105,7 +105,6 @@ RUN set -euo pipefail; \
     find . -maxdepth 0 -printf '%f\n' >/dev/null; \
     printf '%s' '$FOO' | FOO=bar envsubst >/dev/null; \
     rg --version >/dev/null; \
-    curl --version >/dev/null; \
     sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
 
 # What: declare APT_CACHE_BUST before RUN for cache busting.
@@ -119,11 +118,17 @@ RUN : "apt-cache-bust=${APT_CACHE_BUST}" && apk update --no-cache && apk upgrade
     kea-admin \
     kea-hook-lease-cmds \
     bash \
+    curl \
     nmap \
     openssl \
     jq \
     iptables \
     nano
+
+# What: verifies the locally apk-installed curl actually runs.
+# Why: catches a broken/missing shared-lib chain at build time.
+# From: Issue #1781
+RUN curl --version >/dev/null
 
 # nano: in-container troubleshooting tool -- see services/proxy/Dockerfile's
 # identical comment for the full rationale; lsof/ripgrep are COPY'd above

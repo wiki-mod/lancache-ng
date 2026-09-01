@@ -588,18 +588,24 @@ RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
     ca-certificates \
     coreutils \
     util-linux \
+    curl \
     nano
 
-# What: curl/lsof/ripgrep come from shared utilities image
+# What: verifies the locally apk-installed curl actually runs.
+# Why: catches a broken/missing shared-lib chain at build time.
+# From: Issue #1781
+RUN curl --version >/dev/null
+
+# What: lsof/ripgrep come from shared utilities image; curl comes
+#       from this service's own apk install above instead.
 # Why: same alpine:3.24 digest as utilities for consistency
-# From: Issue #1556
+# From: Issue #1556; curl split out by Issue #1781.
 
 # What: removes BusyBox symlink before real binary lands
 # Why: see services/proxy/Dockerfile's identical comment for reason
 # From: Issue #1556
 RUN rm -f /usr/bin/lsof
 
-COPY --from=utilities-tools /usr/local/bin/curl /usr/local/bin/curl
 COPY --from=utilities-tools /usr/bin/lsof /usr/bin/lsof
 COPY --from=utilities-tools /usr/bin/rg /usr/bin/rg
 COPY --from=utilities-tools /usr/lib/libgcc_s.so.1 /usr/lib/libgcc_s.so.1
@@ -611,7 +617,6 @@ COPY --from=utilities-tools /usr/local/bin/verify-version-banner.sh /usr/local/b
 # From: Issue #1613
 RUN set -euo pipefail; \
     rg --version >/dev/null; \
-    curl --version >/dev/null; \
     sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
 
 # nano: in-container troubleshooting tool -- see services/proxy/Dockerfile's
