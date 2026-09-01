@@ -1,19 +1,22 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-name: Ensure the shared Trivy DB is current (lock-guarded)
+name: Ensure the shared Trivy DB exists (bootstrap-only lock)
 description: >-
-  Runs Trivy's own --download-db-only freshness check against a shared,
-  persistent cache-dir, serialized by a real cross-job lock so that
-  concurrent scan jobs (e.g. build-tools' amd64+arm64, or build+build-arm64+
-  container-scan+release-sbom in the same push) never write to the same
-  BoltDB file at once. Every scan step downstream of this action must pass
-  skip-db-update: true so it never writes to the DB itself -- only this
-  action's single, lock-held invocation ever does.
+  Cheap presence check for the shared, persistent Trivy DB cache-dir.
+  trivy-db-scheduled-refresh.yml is now the sole regular writer to this
+  shared path on its own cron, so every regular scan job only needs to
+  know whether a DB file exists at all (a stat, no lock, no per-job
+  trivy --download-db-only freshness check) before passing
+  skip-db-update unconditionally. The only remaining lock-guarded path
+  is the genuine first-time-ever bootstrap case (no trivy.db anywhere
+  yet on a cold shared cache), where a real concurrent-write race
+  between two callers is still possible until the scheduled workflow's
+  first successful run creates the file this action then finds.
 
-# What: serializes DB refresh with lock to prevent races
-# Why: concurrent jobs need exclusive write access to DB
-# From: Issue #1095 | PR #1747
+# What: stat-only in the common case; locks only bootstrap
+# Why: scheduled workflow is now the sole regular writer
+# From: Issue #1780 | Issue #1095
 
 inputs:
   cache-dir:
@@ -21,9 +24,10 @@ inputs:
     required: true
   lock-timeout-seconds:
     description: >-
-      Maximum time to wait for the lock before giving up and scanning with
-      whatever DB is already present (possibly one refresh cycle stale)
-      rather than blocking the whole pipeline indefinitely.
+      Maximum time to wait for the bootstrap lock before giving up and
+      letting the downstream scan step run its own unlocked bootstrap
+      attempt (db-present stays "false") rather than blocking the whole
+      pipeline indefinitely.
     required: false
     default: "900"
   stale-lock-seconds:
@@ -37,22 +41,46 @@ outputs:
   db-present:
     description: >-
       "true" once a real trivy.db file exists in cache-dir after this
-      action runs (whether it was already fresh, was just refreshed, or is
-      merely what a prior generation left behind after a lock timeout).
-      "false" only when no DB exists at all yet -- the sole case where a
-      downstream scan step must NOT pass skip-db-update, so Trivy's own
-      first-time bootstrap download can still happen (unlocked, same as
-      before this action existed, since there is nothing yet to race over).
+      action runs (whether it already existed, or this action's own
+      bootstrap download just created it). "false" only when no DB
+      exists at all yet AND the bootstrap download itself failed,
+      timed out waiting for the lock, or lost a stale-lock race -- the
+      sole case where a downstream scan step must NOT pass
+      skip-db-update, so Trivy's own unlocked bootstrap can still run,
+      exactly as it would have before this action existed.
     value: ${{ steps.check.outputs.db-present }}
 
 runs:
   using: composite
   steps:
-    - name: Install trivy CLI for the DB-refresh check
+    # What: stats for a DB file; no lock, no trivy call.
+    # Why: scheduled workflow already keeps this fresh.
+    # From: Issue #1780
+    - name: Check for an already-present Trivy DB
+      id: precheck
+      shell: bash
+      env:
+        CACHE_DIR: ${{ inputs.cache-dir }}
+      run: |
+        set -euo pipefail
+        : "${CACHE_DIR:?cache-dir is required}"
+        if [ -s "$CACHE_DIR/db/trivy.db" ]; then
+          echo "::notice::Trivy DB already present in '$CACHE_DIR/db' -- trusting trivy-db-scheduled-refresh.yml as sole writer, no lock and no per-job freshness check needed."
+          echo "present=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "present=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Install trivy CLI for the bootstrap-only DB download
+      if: steps.precheck.outputs.present != 'true'
       uses: ./.github/actions/aquasecurity-setup-trivy-centralized-version
 
-    - name: Acquire lock, run Trivy's own DB-freshness check, release lock
-      id: refresh
+    # What: locked download, reached only on a cold cache.
+    # Why: sole case two callers could still race a write.
+    # From: Issue #1780 | Issue #1095
+    - name: Bootstrap-download the DB under lock (cold cache only)
+      id: bootstrap
+      if: steps.precheck.outputs.present != 'true'
       shell: bash
       env:
         CACHE_DIR: ${{ inputs.cache-dir }}
@@ -67,7 +95,7 @@ runs:
 
         # What: uses atomic mkdir for lock, not flock
         # Why: soft NFS mount cannot reliably support flock
-        # From: Issue #1095 | PR #1747
+        # From: Issue #1780 | Issue #1095
         acquire() {
           mkdir "$lock_dir" 2>/dev/null
         }
@@ -78,14 +106,13 @@ runs:
             now="$(date +%s)"
             age=$(( now - lock_mtime ))
             if [ "$age" -gt "$STALE_AFTER" ]; then
-              echo "::warning::Reclaiming stale Trivy DB-update lock '$lock_dir' (age ${age}s > ${STALE_AFTER}s) -- previous holder almost certainly crashed or was cancelled mid-download."
+              echo "::warning::Reclaiming stale Trivy DB bootstrap lock '$lock_dir' (age ${age}s > ${STALE_AFTER}s) -- previous holder almost certainly crashed or was cancelled mid-download."
               rm -rf -- "$lock_dir"
               continue
             fi
           fi
           if [ "$waited" -ge "$LOCK_TIMEOUT" ]; then
-            echo "::warning::Timed out after ${LOCK_TIMEOUT}s waiting for the Trivy DB-update lock held by another concurrent job -- proceeding WITHOUT refreshing the DB this run. The scan below will use whatever DB is already present (possibly one refresh cycle stale), never a corrupted concurrent write."
-            echo "refreshed=timeout" >> "$GITHUB_OUTPUT"
+            echo "::warning::Timed out after ${LOCK_TIMEOUT}s waiting for the Trivy DB bootstrap lock held by another concurrent cold-cache caller -- leaving db-present=false so the caller's own scan step attempts an unlocked bootstrap download itself."
             exit 0
           fi
           sleep "$poll_interval"
@@ -93,25 +120,26 @@ runs:
         done
 
         # What: trap ensures lock release even on failure
-        # Why: unreleased lock would wedge later jobs
-        # From: Issue #1095 | PR #1747
+        # Why: unreleased lock wedges every later caller.
+        # From: Issue #1780 | Issue #1095
         trap 'rm -rf -- "$lock_dir"' EXIT
 
-        echo "::notice::Holding Trivy DB-update lock on '$lock_dir' -- running trivy's own --download-db-only freshness check (real download only if metadata.json's NextUpdate has actually passed)."
+        echo "::notice::Holding Trivy DB bootstrap lock on '$lock_dir' -- no DB exists yet in '$CACHE_DIR' (first-time-ever cold cache), downloading once so every other caller can read it unlocked from now on."
         trivy image --download-db-only --cache-dir "$CACHE_DIR"
-        echo "refreshed=checked" >> "$GITHUB_OUTPUT"
 
-    - name: Determine whether a DB is present after the check
+    - name: Determine whether a DB is present after this action ran
       id: check
       if: always()
       shell: bash
       env:
         CACHE_DIR: ${{ inputs.cache-dir }}
+        PRECHECK_PRESENT: ${{ steps.precheck.outputs.present }}
       run: |
         set -euo pipefail
-        if [ -s "$CACHE_DIR/db/trivy.db" ]; then
+        : "${CACHE_DIR:?cache-dir is required}"
+        if [ "$PRECHECK_PRESENT" = "true" ] || [ -s "$CACHE_DIR/db/trivy.db" ]; then
           echo "db-present=true" >> "$GITHUB_OUTPUT"
         else
-          echo "::warning::No trivy.db present in '$CACHE_DIR' after the freshness check (lock timeout on a cold cache, or the download itself failed) -- the next scan step will run WITHOUT skip-db-update so Trivy can still attempt its own unlocked bootstrap download, exactly as it would have before this action existed."
+          echo "::warning::No trivy.db present in '$CACHE_DIR' after the bootstrap attempt (lock timeout on a cold cache, or the download itself failed) -- the next scan step will run WITHOUT skip-db-update so Trivy can still attempt its own unlocked bootstrap download, exactly as it would have before this action existed."
           echo "db-present=false" >> "$GITHUB_OUTPUT"
         fi
