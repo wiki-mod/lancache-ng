@@ -449,10 +449,20 @@ EOF
 # see the correction on the watchdog override's comment above), so the
 # remaining optional variables (DHCP_PROXY_* PXE options, DDNS_TSIG_KEY,
 # KEA_CTRL_TOKEN, etc.) fall through to whatever setup.sh's own fresh
-# install left them as in $install_dir/.env -- unset/blank for a fresh
-# install with DHCP left at its wizard default, which entrypoint.sh already
-# handles gracefully (non-fatal warnings, no PXE options rendered), and this
-# narrow logging-path proof does not exercise PXE options at all regardless.
+# install left them as in $install_dir/.env. This is a real, generated
+# secret (setup.sh's install flow does not leave these blank -- correcting
+# an earlier, wrong belief here), the same one `ui` already reads from
+# that same .env with no override of its own; DDNS_TSIG_KEY/KEA_CTRL_TOKEN
+# must NOT be force-blanked in dhcp's own block below, or dhcp takes the
+# empty-value auto-generate path in resolve_shared_secret() while ui keeps
+# the real .env value, and the "real value always wins" refresh silently
+# rewrites the shared file out from under dhcp's already-rendered config --
+# confirmed live: a real, reproducible token split-brain, not a
+# hypothetical. PXE options are the only thing this override still
+# leaves genuinely unset/blank by omission, which entrypoint.sh already
+# handles gracefully (non-fatal warnings, no PXE options rendered), and
+# this narrow logging-path proof does not exercise PXE options at all
+# regardless.
 # cap_add is re-declared explicitly in both blocks for clarity/
 # self-documentation (it matches the base file's own values verbatim, so
 # this is not asserted to change anything either way -- not independently
@@ -474,8 +484,6 @@ services:
       - DHCP_DNS_SECONDARY=${dhcp_gateway}
       - DHCP_DNS_SERVER_IP=${ip_standard}
       - DHCP_DNS_SERVER_IP_SSL=${ip_ssl}
-      - DDNS_TSIG_KEY=
-      - KEA_CTRL_TOKEN=
       - DHCP_MODE=kea
       - DHCP_SUBNET=172.29.${octet}.0/25
       - DHCP_GATEWAY=${dhcp_gateway}
