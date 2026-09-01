@@ -54,22 +54,26 @@
 # is a manual escape hatch for that gap, not proof the schedule itself
 # fires (AG-CI-012).
 #
-# PERMISSION DIAGNOSTICS: added after a maintainer-reported live
+# PERMISSION/MOUNT DIAGNOSTICS: added after a maintainer-reported live
 # failure on the real shared mount ("mkdir /mnt/trivy-db/db: permission
-# denied"), and independently reproduced during this PR's own live
-# verification (build-push.yml run 33537310760, job "build (ui, ...)",
-# 2026-09-01 ~17:49-17:51 UTC: trivy-cache-dir resolved the real NFS
-# mount, trivy-db-ensure-fresh's own lock succeeded, yet
-# `trivy image --download-db-only` itself failed this exact way on all
-# 4 retry attempts) -- SAME self-hosted runner uid ("codex") as every
-# other successful write against this mount that same run, so this is
-# not a stray differently-owned entry from another uid; root cause is
-# unconfirmed without host/SSH access (see PR body). "Diagnose Trivy DB
-# directory permissions before download" below fails loudly with the
-# actual uid/ownership state attached instead of trivy's own opaque
-# FATAL error, and this workflow never swallows that failure
-# (AG-INT-002) -- see this change's own PR body for the live evidence
-# and the operator-side remediation this cannot perform from CI.
+# denied"), independently reproduced during this PR's own live
+# verification, then further narrowed by this same verification pass:
+# one dispatch run (heavy tier) showed /mnt/trivy-db itself as an
+# EMPTY, root:root 0755 directory at the exact moment this failed, no
+# more than ~30s after this same path had just resolved as the real,
+# writable NFS mount in an earlier step of the SAME job, same uid. A
+# later dispatch on the same tier showed the real mount fully present
+# (nfs4, populated, world-writable 1777/0777 entries, download
+# succeeded end to end) -- two genuinely different states of the
+# identical path, not a static ownership defect. Leading hypothesis:
+# an intermittently unavailable/expiring mount, not a stray
+# differently-owned leftover entry. Root cause remains unconfirmed
+# without host/SSH access (see PR body for full evidence). "Diagnose
+# Trivy DB directory permissions before download" below captures
+# uid/mount-table/ownership state and fails loudly instead of trivy's
+# own opaque FATAL error, and this workflow never swallows that
+# failure (AG-INT-002) -- see the PR body for the operator-side
+# remediation this cannot perform from CI.
 name: Trivy DB Scheduled Refresh
 
 on:
