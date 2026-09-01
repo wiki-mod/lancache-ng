@@ -691,6 +691,29 @@ if [[ "$failed" -eq 1 ]]; then
     fi
     echo "::endgroup::"
 
+    echo "::group::Failure diagnostics: dhcp healthcheck request re-run verbose"
+    # What: -sf swallows the real HTTP status/body on failure.
+    # Why: same request, but without hiding the real HTTP error.
+    # From: PR #1775
+    "${compose[@]}" exec -T dhcp sh -c '
+        host="${KEA_CTRL_HOST:-127.0.0.1}"
+        [ "$host" = "0.0.0.0" ] && host=127.0.0.1
+        token="${KEA_CTRL_TOKEN:-}"
+        norm="$(printf "%s" "$token" | tr "[:upper:]" "[:lower:]" | tr "-" "_")"
+        case "$norm" in ""|change_me*|changeme*|your_*|*_here) token="" ;; esac
+        [ -n "$token" ] || token="$(cat /var/lib/lancache-secrets/kea-ctrl-token 2>/dev/null)"
+        echo "token source: $([ -n "${KEA_CTRL_TOKEN:-}" ] && echo env || echo file), length=${#token}"
+        esc_token="$(printf "%s" "$token" | sed "s/\\\\/\\\\\\\\/g; s/\"/\\\\\"/g")"
+        printf "user = \"admin:%s\"\n" "$esc_token" | curl -sS -o /tmp/hc-body.$$ -w "HTTP status: %{http_code}\n" -K - \
+            -H "Content-Type: application/json" \
+            -d "{\"command\":\"config-get\",\"service\":[\"dhcp4\"]}" \
+            "http://$host:8000/"
+        echo "response body:"
+        cat /tmp/hc-body.$$ 2>/dev/null
+        rm -f /tmp/hc-body.$$
+    ' || true
+    echo "::endgroup::"
+
     echo "::group::Logs from all services (failure diagnostics)"
     "${compose[@]}" logs --no-color
     echo "::endgroup::"
