@@ -189,6 +189,13 @@ verify_record_resolves() {
     # Why: teardown runs before logs would otherwise be seen.
     # From: PR #1775
     "${compose[@]}" logs --no-color --tail=200 dns-standard dns-ssl nats >&2 || true
+    # What: proves whether ALSO-NOTIFY reached dns-ssl's real IP.
+    # Why: a notify-call success doesn't prove a real target.
+    # From: PR #1775
+    "${compose[@]}" exec -T dns-standard sh -c \
+        'pdnsutil --config-dir=/etc/pdns/auth get-meta lan ALSO-NOTIFY' >&2 || true
+    "${compose[@]}" exec -T dns-ssl sh -c \
+        'echo "dns-ssl own address:"; ip -4 -o addr show scope global 2>/dev/null' >&2 || true
     return 1
 }
 
