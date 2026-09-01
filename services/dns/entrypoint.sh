@@ -102,44 +102,45 @@ secret_is_placeholder() {
 
 # resolve_shared_secret <name> <current_value_or_empty> <gen_func>
 # Resolves a shared secret and prints it on stdout with no trailing newline.
-#   - If <current_value_or_empty> is non-empty, prints it and returns 0: an
-#     operator/setup.sh-supplied real value always wins and is never persisted
-#     to the shared volume (all containers share one .env, so they all already
-#     agree on it). The CALLER is responsible for passing empty here when the
+#   - If <current_value_or_empty> is non-empty, that real value seeds the shared
+#     volume when the file is absent, and refreshes it when a stale/different
+#     file already exists, so every consumer can read the same secret from disk
+#     as well as env. The caller is responsible for passing empty here when the
 #     configured value is a known placeholder for that specific secret.
 #   - Otherwise reads $dir/<name> if it already exists (some container generated
 #     it first), else atomically creates it with a freshly generated value.
-# Atomicity/race: the value is written to a temp file on the shared volume FIRST,
-# then the final name is claimed with `ln` (a hardlink, atomic and failing if the
-# target already exists). Because the temp already holds the full value before
-# the link, a concurrent reader in another container never observes a partial or
-# empty file, and a container that loses the create race falls back to reading
-# the winner's value instead of erroring. Returns non-zero (and prints nothing)
-# only if the shared volume is unwritable, so the caller can fail closed rather
-# than silently diverge.
+# Atomicity/race: empty-value first boot keeps the original first-writer-wins
+# hardlink claim (`ln` onto a fully-written temp file) so concurrent generators
+# still converge on one shared value with no partial-file window. The
+# non-empty-value refresh path only uses an overwrite rename when the caller has
+# already supplied the authoritative value and the on-disk file is stale or
+# missing. Returns non-zero (and prints nothing) only if a generated value could
+# not be persisted/read back, so the caller can fail closed rather than silently
+# diverge.
 resolve_shared_secret() {
     _rss_name="$1"
     _rss_cur="$2"
     _rss_gen="$3"
 
-    if [ -n "$_rss_cur" ]; then
-        printf '%s' "$_rss_cur"
-        return 0
-    fi
-
     _rss_dir="$(lancache_shared_secret_dir)"
     _rss_file="${_rss_dir}/${_rss_name}"
 
     if [ -s "$_rss_file" ]; then
-        tr -d '\n' < "$_rss_file"
-        return 0
+        if [ -z "$_rss_cur" ] || [ "$(tr -d '\n' < "$_rss_file")" = "$_rss_cur" ]; then
+            tr -d '\n' < "$_rss_file"
+            return 0
+        fi
     fi
 
     mkdir -p "$_rss_dir" 2>/dev/null || true
 
-    _rss_val="$($_rss_gen)"
-    if [ -z "$_rss_val" ]; then
-        return 1
+    if [ -n "$_rss_cur" ]; then
+        _rss_val="$_rss_cur"
+    else
+        _rss_val="$($_rss_gen)"
+        if [ -z "$_rss_val" ]; then
+            return 1
+        fi
     fi
 
     _rss_tmp="$(mktemp "${_rss_dir}/.secret.XXXXXX" 2>/dev/null)" || return 1
@@ -147,7 +148,12 @@ resolve_shared_secret() {
     chmod 0640 "$_rss_tmp" 2>/dev/null || true
     chgrp "$(lancache_shared_secret_gid)" "$_rss_tmp" 2>/dev/null || true
 
-    if ln "$_rss_tmp" "$_rss_file" 2>/dev/null; then
+    if [ -n "$_rss_cur" ]; then
+        if mv -f "$_rss_tmp" "$_rss_file" 2>/dev/null; then
+            printf '%s' "$_rss_val"
+            return 0
+        fi
+    elif ln "$_rss_tmp" "$_rss_file" 2>/dev/null; then
         rm -f "$_rss_tmp"
         printf '%s' "$_rss_val"
         return 0
@@ -155,7 +161,11 @@ resolve_shared_secret() {
 
     rm -f "$_rss_tmp"
     if [ -s "$_rss_file" ]; then
-        tr -d '\n' < "$_rss_file"
+        if [ -z "$_rss_cur" ]; then
+            tr -d '\n' < "$_rss_file"
+        else
+            printf '%s' "$_rss_cur"
+        fi
         return 0
     fi
     return 1

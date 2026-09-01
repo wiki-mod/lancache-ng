@@ -3,9 +3,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Behavior tests for the shared-secret bootstrap library (issue #858):
-# operator-value-wins, first-boot generate, read-existing, and -- the property
-# the issue explicitly asks to prove -- that concurrent first-writers converge
-# on ONE shared value instead of each generating its own (split-brain).
+# configured-value seeds the shared file, first-boot generate, read-existing,
+# and -- the property the issue explicitly asks to prove -- that concurrent
+# first-writers converge on ONE shared value instead of each generating its own
+# (split-brain).
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -26,11 +27,23 @@ teardown() {
     rm -rf "$TEST_DIR"
 }
 
-@test "a real configured value wins untouched and never writes the shared file" {
+@test "a real configured value seeds the shared file and returns untouched" {
     run resolve_shared_secret pdns-api-key "operator-supplied-real-value" lancache_gen_hex32
     [ "$status" -eq 0 ]
     [ "$output" = "operator-supplied-real-value" ]
-    [ ! -e "$LANCACHE_SHARED_SECRET_DIR/pdns-api-key" ]
+    [ -s "$LANCACHE_SHARED_SECRET_DIR/pdns-api-key" ]
+    file_content="$(cat "$LANCACHE_SHARED_SECRET_DIR/pdns-api-key")"
+    [ "$file_content" = "$output" ]
+}
+
+@test "a seeded real value is readable later through the file-backed path" {
+    run resolve_shared_secret pdns-api-key "operator-supplied-real-value" lancache_gen_hex32
+    [ "$status" -eq 0 ]
+    [ "$output" = "operator-supplied-real-value" ]
+
+    run resolve_shared_secret pdns-api-key "" lancache_gen_hex32
+    [ "$status" -eq 0 ]
+    [ "$output" = "operator-supplied-real-value" ]
 }
 
 @test "an empty value on first boot generates a strong hex value and persists it" {
