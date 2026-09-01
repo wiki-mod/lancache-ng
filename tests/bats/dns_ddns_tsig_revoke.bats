@@ -135,6 +135,26 @@ getent() {
     [ "$(grep -cF -- "--config-dir=/etc/pdns/auth set-meta lan ALSO-NOTIFY" "$pdnsutil_calls")" -eq 1 ]
 }
 
+# What: getent fails twice, resolves on the third attempt.
+# Why: proves the retry loop, not just the happy path.
+# From: PR #1775
+@test "dns_xfr_primary_endpoint retries a sibling that isn't resolvable yet" {
+    getent_attempts="$BATS_TEST_TMPDIR/getent-attempts"
+    : > "$getent_attempts"
+    getent() {
+        echo x >> "$getent_attempts"
+        if [ "$(wc -l < "$getent_attempts")" -lt 3 ]; then
+            return 1
+        fi
+        echo "10.0.0.5 STREAM dns-ssl"
+    }
+
+    run dns_xfr_primary_endpoint "dns-ssl:5300" DNS_XFR_NOTIFY_TARGETS
+    [ "$status" -eq 0 ]
+    [ "$output" = "10.0.0.5:5300" ]
+    [ "$(wc -l < "$getent_attempts")" -eq 3 ]
+}
+
 @test "_dns_ensure_secondary_zone creates a secondary without granting local DDNS writes" {
     run _dns_ensure_secondary_zone lan 192.0.2.10:5300
 
