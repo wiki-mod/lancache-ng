@@ -137,10 +137,13 @@ RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
 # itself needs) -- same rationale as the prior Debian stage, no gnupg-style
 # purge-after-use step is needed here since Alpine's apk signing-key
 # mechanism (a plain RSA public key file) never pulls in a temporary
-# package the way apt's gpg-based key import did. ca-certificates and curl
-# are both apk-installed in the same RUN (Issue #1781: curl is no longer
-# COPY'd from utilities), so the trust store is already in place before
-# this build's own first HTTPS call (the nginx signing-key fetch) below.
+# package the way apt's gpg-based key import did.
+#
+# What: ca-certificates and curl are both apk-installed in this RUN.
+# Why: curl is no longer COPY'd from utilities, so the trust store
+#      must already be in place before this build's own first HTTPS
+#      call (the nginx signing-key fetch below).
+# From: Issue #1781
 # nano: in-container troubleshooting tool -- see services/dns/Dockerfile's
 # identical comment for the full rationale; lsof/ripgrep are COPY'd above
 # but serve the same troubleshooting purpose.
