@@ -107,6 +107,17 @@ pdnsutil() {
     ! grep -qF "TSIG-ALLOW-DNSUPDATE" "$pdnsutil_calls"
 }
 
+# What: stubs getent so dns-ssl resolves to a real IP.
+# Why: dns_xfr_primary_endpoint needs an IP, not a name.
+# From: PR #1775
+getent() {
+    if [ "$1" = "ahostsv4" ] && [ "$2" = "dns-ssl" ]; then
+        echo "10.0.0.5 STREAM dns-ssl"
+        return 0
+    fi
+    return 1
+}
+
 @test "_dns_configure_primary_zone_replication sets serial and notify metadata for a primary zone" {
     export DNS_XFR_NOTIFY_TARGETS="dns-ssl:5300,192.0.2.53:5300"
     run _dns_configure_primary_zone_replication lan
@@ -117,7 +128,10 @@ pdnsutil() {
     grep -qF -- "--config-dir=/etc/pdns/auth set-meta lan SOA-EDIT-API INCREASE" "$pdnsutil_calls"
     grep -qF -- "--config-dir=/etc/pdns/auth set-meta lan NOTIFY-DNSUPDATE 1" "$pdnsutil_calls"
     grep -qF -- "--config-dir=/etc/pdns/auth tsigkey activate lan lancache-ddns-key primary" "$pdnsutil_calls"
-    grep -qF -- "--config-dir=/etc/pdns/auth set-meta lan ALSO-NOTIFY dns-ssl:5300 192.0.2.53:5300" "$pdnsutil_calls"
+    # What: ALSO-NOTIFY receives resolved IPs, not hostnames.
+    # Why: matches the fake IP the getent stub returns.
+    # From: PR #1775
+    grep -qF -- "--config-dir=/etc/pdns/auth set-meta lan ALSO-NOTIFY 10.0.0.5:5300 192.0.2.53:5300" "$pdnsutil_calls"
     [ "$(grep -cF -- "--config-dir=/etc/pdns/auth set-meta lan ALSO-NOTIFY" "$pdnsutil_calls")" -eq 1 ]
 }
 

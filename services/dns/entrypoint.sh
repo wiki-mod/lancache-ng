@@ -1339,7 +1339,10 @@ _dns_configure_primary_zone_replication() {
     if [ -n "$DNS_XFR_NOTIFY_TARGETS" ]; then
         for target in ${DNS_XFR_NOTIFY_TARGETS//,/ }; do
             [ -n "$target" ] || continue
-            notify_targets+=("$target")
+            # What: resolves each ALSO-NOTIFY target to an IP first.
+            # Why: PowerDNS needs IP[:port] here, not a hostname.
+            # From: PR #1775
+            notify_targets+=("$(dns_xfr_primary_endpoint "$target" DNS_XFR_NOTIFY_TARGETS)")
         done
         _dns_set_zone_metadata "$zone" ALSO-NOTIFY "${notify_targets[@]}"
     fi
