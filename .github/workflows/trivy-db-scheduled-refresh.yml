@@ -129,8 +129,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # What: unconditional, like the GHCR login step above.
+      # Why: secrets is invalid in a step's if: condition.
+      # From: Issue #1780
       - name: Log in to Docker Hub for the third DB-source tier
-        if: secrets.DOCKERHUB_USERNAME != ''
         continue-on-error: true
         uses: ./.github/actions/docker-login-action-centralized-version
         with:
