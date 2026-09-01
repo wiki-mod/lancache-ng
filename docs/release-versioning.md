@@ -24,8 +24,10 @@ The first-party tooling package is:
 
 - `build-tools`
 - `utilities` (issue #1556; shared non-compiler CLI-tools image, consumed via
-  `COPY --from=` by eight first-party images -- see `release/stack-images.yml`'s
-  own entry for the current `consumers:` list)
+  `COPY --from=` by seven first-party images -- see `release/stack-images.yml`'s
+  own entry for the current `consumers:` list; curl moved from being one of
+  those COPY'd tools to being apk-installed directly by each consumer,
+  issue #1781)
 
 The first-party metadata package is:
 

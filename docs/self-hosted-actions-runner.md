@@ -226,7 +226,7 @@ When `SCCACHE_REDIS_MODE=required`, the runner must have `sccache` available in
 `PATH`. Install it from source and keep the installed binary on the runner
 service account's `PATH`.
 
-### ccache reuse for services/dns's, services/ui's, services/watchdog's, and build-tools's C-dependency compiles
+### ccache reuse for services/dns's, services/ui's, and services/watchdog's C-dependency compiles
 
 `services/dns/Dockerfile`'s, `services/ui/Dockerfile`'s, and
 `services/watchdog/Dockerfile`'s C-dependency compile paths (`ring`, via

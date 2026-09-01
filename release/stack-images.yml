@@ -154,10 +154,13 @@ tooling:
       - linux/amd64
       - linux/arm64
     description: >-
-      Shared non-compiler CLI-tools image (curl, nano, lsof, ripgrep,
-      findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd),
-      consumed via COPY --from= by eight first-party images (issue #1556)
-      instead of each one independently installing/building its own copy.
+      Shared non-compiler CLI-tools image (nano, lsof, ripgrep, findutils,
+      coreutils, gettext-envsubst, jq, ca-certificates, zstd, curl), whose
+      non-curl tools are consumed via COPY --from= by seven first-party
+      images (issue #1556) instead of each one independently
+      installing/building its own copy. curl itself is apk-installed here
+      but, since issue #1781, is no longer COPY'd cross-image by any
+      consumer -- each installs its own curl directly instead.
     consumers:
       - services/proxy/Dockerfile
       - services/dns/Dockerfile
@@ -166,7 +169,6 @@ tooling:
       - services/dhcp-proxy/Dockerfile
       - services/ntp/Dockerfile
       - services/watchdog/Dockerfile
-      - tools/build-tools/Dockerfile
 metadata:
   - name: stack
     image: ghcr.io/wiki-mod/lancache-ng/stack
