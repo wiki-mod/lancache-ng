@@ -97,10 +97,10 @@ concurrency:
 jobs:
   refresh-trivy-db:
     name: refresh shared Trivy vulnerability DB
-    # What: network/IO-bound DB pull, not CPU/memory heavy.
-    # Why: AG-CI-002 routes light jobs to a light runner.
+    # What: heavy tier, not the usual light default here.
+    # Why: live-confirmed NFS mount gap on a light host.
     # From: Issue #1780
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
     # A real ~1.3 GB DB download over a home-lab link plus retries can
     # legitimately take several minutes (trivy-db-ensure-fresh's own
     # stale-lock-seconds default documents the same real-world figure);
