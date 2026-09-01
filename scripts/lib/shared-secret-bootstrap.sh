@@ -156,6 +156,11 @@ resolve_shared_secret() {
         # Why: a later write failure must fail closed, not split-brain.
         # From: PR #1775
         _rss_had_conflict=1
+    elif [ -e "$_rss_file" ] && [ -n "$_rss_cur" ]; then
+        # What: an existing empty file also counts as a conflict.
+        # Why: consumers treat empty as absent, not a real value.
+        # From: PR #1775
+        _rss_had_conflict=1
     fi
 
     mkdir -p "$_rss_dir" 2>/dev/null || true

@@ -69,6 +69,17 @@ teardown() {
     [ "$(cat "$LANCACHE_SHARED_SECRET_DIR/nats-ui-password")" = "old-value" ]
 }
 
+@test "a present but empty secret file also fails closed when it cannot be replaced" {
+    # What: an existing zero-byte file, not merely a missing one.
+    # Why: consumers treat empty as absent; must not silently succeed.
+    # From: PR #1775
+    mkdir -p "$LANCACHE_SHARED_SECRET_DIR"
+    : > "$LANCACHE_SHARED_SECRET_DIR/nats-ui-password"
+    mktemp() { return 1; }
+    run resolve_shared_secret nats-ui-password "new-operator-value" lancache_gen_hex32
+    [ "$status" -ne 0 ]
+}
+
 @test "the operator-value fallback survives a real set -euo pipefail caller" {
     # What: reproduces the entrypoints' VAR="$(resolve_shared_secret ...)".
     # Why: proves the || fallback works under the callers' own shell opts.
