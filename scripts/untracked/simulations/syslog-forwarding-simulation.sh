@@ -675,6 +675,13 @@ if [[ "$failed" -eq 1 ]]; then
     "${compose[@]}" exec -T dhcp sh -c 'cat /var/log/kea/kea-dhcp4.log 2>/dev/null | tail -n 200' || true
     echo "::endgroup::"
 
+    echo "::group::Failure diagnostics: dhcp's own Kea Control Agent log"
+    # What: the healthcheck queries port 8000, kea-dhcp4.log can't show why.
+    # Why: kea-ctrl-agent logs to its own file, not kea-dhcp4.log.
+    # From: PR #1775
+    "${compose[@]}" exec -T dhcp sh -c 'cat /var/log/kea/kea-ctrl-agent.log 2>/dev/null | tail -n 200' || true
+    echo "::endgroup::"
+
     echo "::group::Logs from all services (failure diagnostics)"
     "${compose[@]}" logs --no-color
     echo "::endgroup::"
