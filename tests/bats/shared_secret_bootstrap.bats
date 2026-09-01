@@ -47,14 +47,42 @@ teardown() {
 }
 
 @test "a real configured value still wins when the shared-secrets volume cannot be created" {
-    # What: unwritable parent -> mkdir -p/mktemp both fail for the secret dir
-    # Why: a configured value must never fail closed just because persisting
-    #      it opportunistically wasn't possible (regression: it briefly did)
-    mkdir -p "$TEST_DIR/readonly"
-    chmod 0500 "$TEST_DIR/readonly"
-    export LANCACHE_SHARED_SECRET_DIR="$TEST_DIR/readonly/secrets"
+    # What: a regular file as parent -> mkdir -p fails for any uid.
+    # Why: immune to root/CAP_DAC_OVERRIDE, unlike a chmod-based test.
+    # From: PR #1775
+    : > "$TEST_DIR/not-a-directory"
+    export LANCACHE_SHARED_SECRET_DIR="$TEST_DIR/not-a-directory/secrets"
     run resolve_shared_secret nats-ui-password "operator-supplied-real-value" lancache_gen_hex32
-    chmod 0700 "$TEST_DIR/readonly"
+    [ "$status" -eq 0 ]
+    [ "$output" = "operator-supplied-real-value" ]
+}
+
+@test "a stale conflicting value fails closed when it cannot be refreshed" {
+    # What: stubs mktemp to fail deterministically, for any uid.
+    # Why: a stale on-disk value must not split-brain other readers.
+    # From: PR #1775
+    mkdir -p "$LANCACHE_SHARED_SECRET_DIR"
+    printf '%s' "old-value" > "$LANCACHE_SHARED_SECRET_DIR/nats-ui-password"
+    mktemp() { return 1; }
+    run resolve_shared_secret nats-ui-password "new-operator-value" lancache_gen_hex32
+    [ "$status" -ne 0 ]
+    [ "$(cat "$LANCACHE_SHARED_SECRET_DIR/nats-ui-password")" = "old-value" ]
+}
+
+@test "the operator-value fallback survives a real set -euo pipefail caller" {
+    # What: reproduces the entrypoints' VAR="$(resolve_shared_secret ...)".
+    # Why: proves the || fallback works under the callers' own shell opts.
+    # From: PR #1775
+    : > "$TEST_DIR/not-a-directory"
+    export LANCACHE_SHARED_SECRET_DIR="$TEST_DIR/not-a-directory/secrets"
+    run bash -c '
+        set -euo pipefail
+        . "$1/scripts/lib/shared-secret-bootstrap.sh"
+        if ! val="$(resolve_shared_secret nats-ui-password "operator-supplied-real-value" lancache_gen_hex32)"; then
+            val="FAILED"
+        fi
+        printf "%s" "$val"
+    ' _ "$repo_root"
     [ "$status" -eq 0 ]
     [ "$output" = "operator-supplied-real-value" ]
 }

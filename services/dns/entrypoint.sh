@@ -125,11 +125,16 @@ resolve_shared_secret() {
     _rss_dir="$(lancache_shared_secret_dir)"
     _rss_file="${_rss_dir}/${_rss_name}"
 
+    _rss_had_conflict=0
     if [ -s "$_rss_file" ]; then
         if [ -z "$_rss_cur" ] || [ "$(tr -d '\n' < "$_rss_file")" = "$_rss_cur" ]; then
             tr -d '\n' < "$_rss_file"
             return 0
         fi
+        # What: this secret's disk value differs from the caller's.
+        # Why: a later write failure must fail closed, not split-brain.
+        # From: PR #1775
+        _rss_had_conflict=1
     fi
 
     mkdir -p "$_rss_dir" 2>/dev/null || true
@@ -144,7 +149,7 @@ resolve_shared_secret() {
     fi
 
     _rss_tmp="$(mktemp "${_rss_dir}/.secret.XXXXXX" 2>/dev/null)" || {
-        if [ -n "$_rss_cur" ]; then
+        if [ -n "$_rss_cur" ] && [ "$_rss_had_conflict" -eq 0 ]; then
             printf '%s' "$_rss_cur"
             return 0
         fi
@@ -166,12 +171,12 @@ resolve_shared_secret() {
     fi
 
     rm -f "$_rss_tmp"
-    if [ -s "$_rss_file" ]; then
-        if [ -z "$_rss_cur" ]; then
-            tr -d '\n' < "$_rss_file"
-        else
-            printf '%s' "$_rss_cur"
-        fi
+    if [ -z "$_rss_cur" ] && [ -s "$_rss_file" ]; then
+        tr -d '\n' < "$_rss_file"
+        return 0
+    fi
+    if [ -n "$_rss_cur" ] && [ "$_rss_had_conflict" -eq 0 ]; then
+        printf '%s' "$_rss_cur"
         return 0
     fi
     return 1
