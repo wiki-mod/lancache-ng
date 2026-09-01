@@ -115,6 +115,15 @@ jobs:
         id: trivy-cache
         uses: ./.github/actions/trivy-cache-dir
 
+      # What: fails when this host lacks the real NFS mount.
+      # Why: a local-only refresh helps no other runner.
+      # From: Issue #1780
+      - name: Require the real shared NFS mount, not a local fallback
+        if: steps.trivy-cache.outputs.source != 'nfs-shared'
+        run: |
+          echo "::error::trivy-cache-dir resolved 'local-fallback' (source=${{ steps.trivy-cache.outputs.source }}) on this runner instance instead of the shared '/mnt/trivy-db' NFS mount -- refreshing that local-only path would report success while doing nothing for every other runner in the pool that actually reads the shared mount. This runner host's own NFS mount needs an operator fix (confirmed live: at least one self-hosted runner instance currently lacks a working /mnt/trivy-db mount)." >&2
+          exit 1
+
       - name: Install trivy CLI
         uses: ./.github/actions/aquasecurity-setup-trivy-centralized-version
 
