@@ -714,6 +714,20 @@ if [[ "$failed" -eq 1 ]]; then
     ' || true
     echo "::endgroup::"
 
+    echo "::group::Failure diagnostics: kea-ctrl-token file vs rendered conf"
+    # What: proves whether the file and daemon conf agree.
+    # Why: a 401 with a real token implies split-brain, not curl.
+    # From: PR #1775
+    "${compose[@]}" exec -T dhcp sh -c '
+        file_sum="$(md5sum /var/lib/lancache-secrets/kea-ctrl-token 2>/dev/null | cut -d" " -f1)"
+        conf_tok="$(sed -n "s/.*\"password\": \"\([^\"]*\)\".*/\1/p" /var/lib/kea/kea-ctrl-agent.conf 2>/dev/null)"
+        conf_sum="$(printf "%s" "$conf_tok" | md5sum | cut -d" " -f1)"
+        echo "shared-secrets file md5: $file_sum"
+        echo "rendered conf token md5: $conf_sum (len=${#conf_tok})"
+        [ "$file_sum" = "$conf_sum" ] && echo "MATCH" || echo "MISMATCH"
+    ' || true
+    echo "::endgroup::"
+
     echo "::group::Logs from all services (failure diagnostics)"
     "${compose[@]}" logs --no-color
     echo "::endgroup::"
