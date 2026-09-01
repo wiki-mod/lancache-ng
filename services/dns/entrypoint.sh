@@ -390,11 +390,11 @@ prepare_log_dir_for_shared_reader "$PDNS_LOG_DIR"
 # so the sibling container's own network attachment can genuinely still be
 # in progress the first few times this runs) instead of failing on the
 # very first attempt. A single-shot getent here previously crash-looped
-# this container until the sibling happened to win the race on its own
-# (PR #1775, confirmed live: DNS_XFR_NOTIFY_TARGETS FATAL-exited on a
-# solo start with no secondary present at all).
+# this container until the sibling happened to win the race on its own --
+# confirmed live: a solo start with no secondary present at all
+# FATAL-exited on this exact check.
 dns_xfr_primary_endpoint() {
-    local endpoint="$1" var_name="${2:-DNS_XFR_PRIMARY}" host port resolved attempt
+    local endpoint="$1" var_name="${2:-DNS_XFR_PRIMARY}" host port resolved
 
     host="${endpoint%%:*}"
     port="${endpoint#*:}"
@@ -403,7 +403,7 @@ dns_xfr_primary_endpoint() {
         exit 1
     fi
     resolved=""
-    for attempt in $(seq 1 30); do
+    for _ in $(seq 1 30); do
         resolved="$(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1; exit}')"
         [ -n "$resolved" ] && break
         sleep 1
