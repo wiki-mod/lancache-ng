@@ -549,3 +549,52 @@ EOF
     [[ "$log_output" == *"enable lancache-converge.timer"* ]]
     [[ "$log_output" == *"start lancache-converge.timer"* ]]
 }
+
+# What: proves a mid-backup docker failure restarts the stack.
+# Why: a trap cannot see locals once set -e unwinds the frame.
+# From: PR #1775
+@test "backup_cleanup restarts a running stack after a mid-backup docker failure instead of crashing unbound" {
+    src_install="$BATS_TEST_TMPDIR/source-install"
+    backup_root="$BATS_TEST_TMPDIR/backups"
+    volume_store="$BATS_TEST_TMPDIR/volume-store"
+    mkdir -p "$src_install/certs" "$backup_root" "$volume_store/lancache-ng_pdns-data"
+
+    cat > "$src_install/docker-compose.yml" <<'EOF'
+name: lancache-ng
+
+services:
+  proxy:
+    image: foo
+EOF
+    printf 'LANCACHE_STATE_DIR=%s/state\n' "$src_install" > "$src_install/.env"
+    printf 'cert-data\n' > "$src_install/certs/ca.crt"
+    printf 'volume-v1\n' > "$volume_store/lancache-ng_pdns-data/data.txt"
+
+    install_missing_tools() { :; }
+    compose_volume_names() { printf '%s\n' "lancache-ng_pdns-data"; }
+    stack_running_file="$BATS_TEST_TMPDIR/stack-running"
+    : > "$stack_running_file"
+    export volume_store stack_running_file
+
+    docker() {
+        case "$1" in
+            ps) return 0 ;;
+            compose)
+                shift
+                [[ "$1" = "--env-file" ]] && shift 2
+                case "$1" in
+                    ps) [[ "${2:-}" = "-q" && -f "$stack_running_file" ]] && printf 'abc123\n' ;;
+                    stop) rm -f "$stack_running_file" ;;
+                    up) : > "$stack_running_file" ;;
+                    version) return 0 ;;
+                esac
+                ;;
+            run) return 1 ;;
+        esac
+    }
+
+    run cmd_backup --config --dest "$backup_root" "$src_install"
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"unbound variable"* ]]
+    [ -f "$stack_running_file" ]
+}

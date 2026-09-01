@@ -3568,7 +3568,13 @@ cmd_backup() {
         || die_no_stack_found "$install_dir"
     install_missing_tools tar rsync
 
-    local stamp dest archive rel path old_umask stack_stopped=0 stack_was_running=0 backup_paused_convergence=0
+    local stamp dest archive rel path old_umask
+    # What: script-global, not local -- EXIT trap reads it.
+    # Why: EXIT-trap locals vanish once set -e unwinds the frame.
+    # From: PR #1775
+    stack_stopped=0
+    stack_was_running=0
+    backup_paused_convergence=0
     stamp=$(date -u +%Y%m%dT%H%M%SZ)
     dest="$backup_root/$stamp"
     archive="$backup_root/lancache-ng-${mode}-${stamp}.tar.gz"
@@ -3738,7 +3744,12 @@ cmd_restore() {
     # instead of after files/volumes are already restored.
     install_missing_tools tar rsync openssl
 
-    local tmp root backup_dir archived_install archived_repo_root new_repo_root rel_install stack_stopped=0 stack_was_running=0 archived_project path rel target
+    local tmp root backup_dir archived_install archived_repo_root new_repo_root rel_install archived_project path rel target
+    # What: script-global, not local -- EXIT trap reads it.
+    # Why: EXIT-trap locals vanish once set -e unwinds the frame.
+    # From: PR #1775
+    stack_stopped=0
+    stack_was_running=0
     tmp=$(mktemp -d)
     restore_cleanup() {
         local status=$?
@@ -5477,7 +5488,13 @@ cmd_create_logs_for_issue() {
     local -a env_files=("$env_file")
     [[ "$cache_env_file" != "$env_file" && -f "$cache_env_file" ]] && env_files+=("$cache_env_file")
 
-    local stamp dest ext archive old_umask secrets_file
+    local stamp ext archive
+    # What: script-global, not local -- EXIT trap reads it.
+    # Why: EXIT-trap locals vanish once set -e unwinds the frame.
+    # From: PR #1775
+    dest=""
+    old_umask=""
+    secrets_file=""
     stamp=$(date -u +%Y%m%dT%H%M%SZ)
     dest="$dest_root/.create-logs-for-issue-$stamp"
     old_umask=$(umask)
