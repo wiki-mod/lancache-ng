@@ -5,34 +5,10 @@
 # What: mkdir-based mutex around a Trivy DB cache-dir write
 # Why: two writers must never race on the shared BoltDB file
 # From: Issue #1780 | Issue #1095
-#
-# Extracted out of trivy-db-ensure-fresh/action.yml's own inline lock loop
-# so trivy-db-scheduled-refresh.yml's cold-cache download can acquire the
-# identical lock instead of a second, divergent implementation (AG-CODE-011)
-# -- both a bootstrap caller (trivy-db-ensure-fresh, reached on a cold or
-# stale cache) and the scheduled writer's own first-ever run can otherwise
-# both observe an empty cache-dir and race to write it at the same time.
-#
-# mkdir, not flock: this repo's shared cache-dir is commonly a soft-mounted
-# NFS path, which does not reliably support flock's byte-range locking; an
-# atomic mkdir against the same directory does not depend on that guarantee.
-#
-# Pure functions, no top-level executable code, sourced directly by
-# `run:` steps -- same convention as ghcr-retry.sh/promote-lock.sh in this
-# same directory.
 
-# trivy_db_locked_run <cache_dir> <lock_timeout_seconds> <stale_after_seconds> -- <command...>
-# Runs <command...> with the lock held. MUST be called as an `if`/`&&`/`||`
-# condition (never as a bare statement) by a caller running under
-# `set -e`: bash suppresses errexit for the entire duration of a function
-# invoked as such a condition, which is what lets this function's own
-# internal `"$@"` failure reach its `trap ... RETURN` cleanup below instead
-# of the whole calling script being torn down mid-function by errexit
-# before that trap can fire, leaking the lock directory forever.
-# Return codes:
-#   0        = lock acquired, wrapped command exited 0
-#   2        = could not acquire the lock before <lock_timeout_seconds>
-#   anything else = lock acquired, wrapped command's own real exit code
+# What: runs cmd under the lock; call as if/&&/|| condition
+# Why: keeps errexit off so the RETURN trap always fires
+# From: Issue #1780 | Issue #1095
 trivy_db_locked_run() {
     local cache_dir="$1" lock_timeout="$2" stale_after="$3"
     shift 3

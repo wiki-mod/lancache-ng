@@ -135,24 +135,49 @@ jobs:
           # shellcheck source=scripts/lib/trivy-db-lock.sh
           source "$GITHUB_WORKSPACE/scripts/lib/trivy-db-lock.sh"
 
-          # What: removes DB files so a download always runs
-          # Why: NextUpdate alone would skip most runs
+          # What: downloads to temp, atomically swaps in
+          # Why: live db/ must never go through empty state
           # From: Issue #1780
           # shellcheck disable=SC2329 # invoked indirectly via "$@" below
           refresh_and_pull() {
-            rm -f -- "$CACHE_DIR/db/trivy.db" "$CACHE_DIR/db/metadata.json"
+            local tmp_dir="$CACHE_DIR/.trivy-db-refresh-tmp.$$"
+            local dl_status mv1_status mv2_status
+            rm -rf -- "$tmp_dir"
+            mkdir -p -- "$tmp_dir"
             ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
-              trivy image --download-db-only --cache-dir "$CACHE_DIR" \
+              trivy image --download-db-only --cache-dir "$tmp_dir" \
                 --config .github/actions/trivy-scan-retry/trivy-config.yaml
+            dl_status=$?
+            if [ "$dl_status" -ne 0 ]; then
+              rm -rf -- "$tmp_dir"
+              return "$dl_status"
+            fi
+            mkdir -p -- "$CACHE_DIR/db"
+            mv -f -- "$tmp_dir/db/trivy.db" "$CACHE_DIR/db/trivy.db"
+            mv1_status=$?
+            mv -f -- "$tmp_dir/db/metadata.json" "$CACHE_DIR/db/metadata.json"
+            mv2_status=$?
+            rm -rf -- "$tmp_dir"
+            if [ "$mv1_status" -ne 0 ] || [ "$mv2_status" -ne 0 ]; then
+              return 1
+            fi
+            return 0
           }
 
+          # What: captures $? via else, not after a bare fi
+          # Why: bare "if cond; then x; fi" resets $? to 0
+          # From: Issue #1780
           if trivy_db_locked_run "$CACHE_DIR" "$LOCK_TIMEOUT_SECONDS" "$STALE_LOCK_SECONDS" -- \
                refresh_and_pull; then
-            exit 0
+            status=0
+          else
+            status=$?
           fi
-          status=$?
-          echo "::error::Could not refresh '$CACHE_DIR' (lock timeout or a real download failure, exit $status) -- this workflow is the shared DB's sole regular writer, so unlike a per-job caller it must fail loudly here rather than silently leaving the cache stale." >&2
-          exit "$status"
+          if [ "$status" -ne 0 ]; then
+            echo "::error::Could not refresh '$CACHE_DIR' (lock timeout or a real download failure, exit $status) -- this workflow is the shared DB's sole regular writer, so unlike a per-job caller it must fail loudly here rather than silently leaving the cache stale." >&2
+            exit "$status"
+          fi
+          exit 0
 
       # What: fails the job when no DB exists after refresh.
       # Why: an empty shared DB must never read as success.

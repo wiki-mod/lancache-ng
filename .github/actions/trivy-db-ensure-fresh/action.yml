@@ -149,11 +149,18 @@ runs:
         # shellcheck source=scripts/lib/trivy-db-lock.sh
         source "$GITHUB_WORKSPACE/scripts/lib/trivy-db-lock.sh"
 
+        # What: captures $? via else, not after a bare fi
+        # Why: "if cond; then x; fi" resets $? to 0 on false
+        # From: Issue #1780
         if trivy_db_locked_run "$CACHE_DIR" "$LOCK_TIMEOUT" "$STALE_AFTER" -- \
              trivy image --download-db-only --cache-dir "$CACHE_DIR"; then
+          status=0
+        else
+          status=$?
+        fi
+        if [ "$status" -eq 0 ]; then
           exit 0
         fi
-        status=$?
         if [ "$status" -eq 2 ]; then
           echo "::warning::Leaving db-present=false so the caller's own scan step attempts an unlocked download itself."
           exit 0
