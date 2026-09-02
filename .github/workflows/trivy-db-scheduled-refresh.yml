@@ -135,11 +135,11 @@ jobs:
           # shellcheck source=scripts/lib/trivy-db-lock.sh
           source "$GITHUB_WORKSPACE/scripts/lib/trivy-db-lock.sh"
 
-          # What: clears DB so a download always runs
+          # What: removes DB files so a download always runs
           # Why: NextUpdate alone would skip most runs
           # From: Issue #1780
           refresh_and_pull() {
-            trivy clean --vuln-db --cache-dir "$CACHE_DIR"
+            rm -f -- "$CACHE_DIR/db/trivy.db" "$CACHE_DIR/db/metadata.json"
             ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
               trivy image --download-db-only --cache-dir "$CACHE_DIR" \
                 --config .github/actions/trivy-scan-retry/trivy-config.yaml
