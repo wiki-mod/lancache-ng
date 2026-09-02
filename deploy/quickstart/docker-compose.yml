@@ -499,13 +499,7 @@ services:
       # From: Issue #633
       - dns-logs-ssl:/var/log/lancache-dns
     depends_on:
-      nats:
-        condition: service_started
-      # What: waits for the primary's port 5300 before this starts.
-      # Why: an early SOA check against a dead port wedges xfr.
-      # From: PR #1775
-      dns-standard:
-        condition: service_healthy
+      - nats
     ports:
       - "${IP_SSL}:53:53/udp"
       - "${IP_SSL}:53:53/tcp"

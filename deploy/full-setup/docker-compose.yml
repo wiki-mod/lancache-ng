@@ -133,13 +133,7 @@ services:
       validation:
         ipv4_address: ${VALIDATION_DNS_SSL_IP:-172.30.99.5}
     depends_on:
-      nats:
-        condition: service_started
-      # What: waits for the primary's port 5300 before this starts.
-      # Why: an early SOA check against a dead port wedges xfr.
-      # From: PR #1775
-      dns-standard:
-        condition: service_healthy
+      - nats
     restart: unless-stopped
     healthcheck:
       # What: real query/response probe matching quickstart's check.
