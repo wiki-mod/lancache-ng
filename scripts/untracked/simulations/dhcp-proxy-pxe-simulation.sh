@@ -298,12 +298,15 @@ echo "== Compiling the synthetic PXE client probe (tools/pxe-client-probe) with 
 # are root-owned 0755). Only the single finished binary is copied out to
 # $work_dir -- a top-level file whose 0777 parent makes it removable during
 # cleanup regardless of its root ownership.
+# What: mounts the whole repo, not just the crate dir.
+# Why: cargo workspace resolution needs the root Cargo.lock too.
+# From: Issue #1095
 docker run --rm \
-    -v "$repo_root/tools/pxe-client-probe:/crate:ro" \
+    -v "$repo_root:/repo:ro" \
     -v "$work_dir:/out" \
     -e CARGO_TARGET_DIR=/build-target \
     "$client_tool_image" \
-    bash -c 'set -euo pipefail; cargo build --release --locked --manifest-path /crate/Cargo.toml; cp /build-target/release/pxe-client-probe /out/pxe-client-probe'
+    bash -c 'set -euo pipefail; cargo build --release --locked --manifest-path /repo/tools/pxe-client-probe/Cargo.toml -p pxe-client-probe; cp /build-target/release/pxe-client-probe /out/pxe-client-probe'
 
 echo "== Starting the synthetic PXE client container =="
 # NET_RAW/NET_ADMIN: the probe needs a raw socket to craft and send an

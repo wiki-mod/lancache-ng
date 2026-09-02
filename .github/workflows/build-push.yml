@@ -3913,7 +3913,7 @@ jobs:
             bash -c 'set -euo pipefail
               audit_log="$(mktemp)"
               trap '"'"'rm -f "$audit_log"'"'"' EXIT
-              if ! cargo audit --deny warnings --file services/dns/nats-subscriber/Cargo.lock >"$audit_log" 2>&1; then
+              if ! cargo audit --deny warnings --file Cargo.lock >"$audit_log" 2>&1; then
                 cat "$audit_log"
                 exit 1
               fi
@@ -3986,7 +3986,7 @@ jobs:
             bash -c 'set -euo pipefail
               audit_log="$(mktemp)"
               trap '"'"'rm -f "$audit_log"'"'"' EXIT
-              if ! cargo audit --deny warnings --file services/ui/Cargo.lock >"$audit_log" 2>&1; then
+              if ! cargo audit --deny warnings --file Cargo.lock >"$audit_log" 2>&1; then
                 cat "$audit_log"
                 exit 1
               fi
@@ -4062,7 +4062,7 @@ jobs:
             bash -c 'set -euo pipefail
               audit_log="$(mktemp)"
               trap '"'"'rm -f "$audit_log"'"'"' EXIT
-              if ! cargo audit --deny warnings --file services/watchdog/Cargo.lock >"$audit_log" 2>&1; then
+              if ! cargo audit --deny warnings --file Cargo.lock >"$audit_log" 2>&1; then
                 cat "$audit_log"
                 exit 1
               fi
@@ -4984,13 +4984,21 @@ jobs:
             description: &ci-description-proxy "nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic."
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: dns
-            context: services/dns
+            # What: repo-root context; dockerfile set below.
+            # Why: workspace needs all 5 member manifests.
+            # From: Issue #1095
+            context: .
+            dockerfile: services/dns/Dockerfile
             build_contexts: ""
             description: &ci-description-dns "PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing."
             rust: true
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
           - service: watchdog
-            context: services/watchdog
+            # What: repo-root context; dockerfile set below.
+            # Why: workspace needs all 5 member manifests.
+            # From: Issue #1095
+            context: .
+            dockerfile: services/watchdog/Dockerfile
             build_contexts: ""
             description: &ci-description-watchdog "lancache-ng watchdog helper for runtime health checks and recovery hooks."
             # Re-evaluation triggered (the Rust rewrite is now
@@ -5023,7 +5031,11 @@ jobs:
             description: &ci-description-syslog "Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428)."
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: ui
-            context: services/ui
+            # What: repo-root context; dockerfile set below.
+            # Why: workspace needs all 5 member manifests.
+            # From: Issue #1095
+            context: .
+            dockerfile: services/ui/Dockerfile
             build_contexts: ""
             description: &ci-description-ui "lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
             rust: true
@@ -5739,6 +5751,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
           builder: ${{ steps.buildx.outputs.name }}
           context: ${{ matrix.context }}
+          dockerfile: ${{ matrix.dockerfile }}
           build-contexts: ${{ matrix.build_contexts }}
           secret-files: ${{ steps['combined-secret-files'].outputs['secret-files'] }}
           build-args: |
@@ -6481,6 +6494,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
           builder: ${{ steps.buildx.outputs.name }}
           context: ${{ matrix.context }}
+          dockerfile: ${{ matrix.dockerfile }}
           build-contexts: ${{ matrix.build_contexts }}
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}

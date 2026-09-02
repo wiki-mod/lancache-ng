@@ -30,11 +30,12 @@ updates:
   # Rust (Cargo) -- all three crates (Admin UI + DNS NATS subscriber +
   # watchdog) collapse into ONE grouped PR per target branch via the
   # multi-`directories` form, instead of a separate PR per crate directory.
+  # What: one workspace root, not 3 member directories.
+  # Why: Dependabot resolves the workspace root's lockfile.
+  # From: Issue #1095
   - package-ecosystem: cargo
     directories:
-      - /services/ui
-      - /services/dns/nats-subscriber
-      - /services/watchdog
+      - /
     target-branch: current_dev
     schedule:
       interval: weekly

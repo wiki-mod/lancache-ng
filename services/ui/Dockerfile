@@ -338,7 +338,7 @@ cat > /usr/local/lib/lancache-ui-build-accel.sh <<'LANCACHE_UI_HELPERS_EOF'
     run_cargo_build() { \
       cargo_log="$(mktemp)"; \
       cargo_status_file="$(mktemp)"; \
-      { set +e; cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" 2>&1; echo "$?" >"$cargo_status_file"; set -e; } | tee "$cargo_log"; \
+      { set +e; cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" -p lancache-ui 2>&1; echo "$?" >"$cargo_status_file"; set -e; } | tee "$cargo_log"; \
       cargo_status="$(cat "$cargo_status_file")"; \
       rm -f "$cargo_status_file"; \
       if [ "$cargo_status" = "0" ]; then rm -f "$cargo_log"; return 0; fi; \
@@ -346,7 +346,7 @@ cat > /usr/local/lib/lancache-ui-build-accel.sh <<'LANCACHE_UI_HELPERS_EOF'
         disable_ccache; \
         echo "[INFO] ccache build path unavailable; retrying with plain distcc (no cache layer)." >&2; \
         ccache_retry_status_file="$(mktemp)"; \
-        { set +e; cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" 2>&1; echo "$?" >"$ccache_retry_status_file"; set -e; } | tee -a "$cargo_log"; \
+        { set +e; cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" -p lancache-ui 2>&1; echo "$?" >"$ccache_retry_status_file"; set -e; } | tee -a "$cargo_log"; \
         cargo_status="$(cat "$ccache_retry_status_file")"; \
         rm -f "$ccache_retry_status_file"; \
         if [ "$cargo_status" = "0" ]; then \
@@ -372,7 +372,7 @@ cat > /usr/local/lib/lancache-ui-build-accel.sh <<'LANCACHE_UI_HELPERS_EOF'
         disable_distcc; \
         unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
         echo "[INFO] distcc build path unavailable; retrying with normal local C compiler." >&2; \
-        if cargo build -j "$cargo_jobs" --release --locked --target "$musl_target"; then \
+        if cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" -p lancache-ui; then \
           echo "[INFO] normal local C compiler fallback completed." >&2; \
           rm -f "$cargo_log"; \
           return 0; \
@@ -384,7 +384,7 @@ cat > /usr/local/lib/lancache-ui-build-accel.sh <<'LANCACHE_UI_HELPERS_EOF'
         unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
         echo "[INFO] sccache build path unavailable; retrying with sccache disabled." >&2; \
         rm -f "$cargo_log"; \
-        if cargo build -j "$cargo_jobs" --release --locked --target "$musl_target"; then \
+        if cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" -p lancache-ui; then \
           echo "[INFO] sccache-disabled fallback completed." >&2; \
           return 0; \
         fi; \
@@ -405,6 +405,23 @@ ARG BUILD_TOOLS_IMAGE
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
+COPY services/ui/Cargo.toml services/ui/Cargo.toml
+COPY services/watchdog/Cargo.toml services/watchdog/Cargo.toml
+COPY services/warmer/Cargo.toml services/warmer/Cargo.toml
+COPY services/dns/nats-subscriber/Cargo.toml services/dns/nats-subscriber/Cargo.toml
+COPY tools/pxe-client-probe/Cargo.toml tools/pxe-client-probe/Cargo.toml
+# What: stub targets for workspace members not built here.
+# Why: cargo loads every member manifest to resolve deps.
+# From: Issue #1095
+RUN mkdir -p services/watchdog/src services/warmer/src \
+      services/dns/nats-subscriber/src tools/pxe-client-probe/src \
+    && printf 'fn main() {}\n' > services/watchdog/src/main.rs \
+    && : > services/watchdog/src/lib.rs \
+    && printf 'fn main() {}\n' > services/warmer/src/main.rs \
+    && : > services/warmer/src/lib.rs \
+    && printf 'fn main() {}\n' > services/dns/nats-subscriber/src/main.rs \
+    && : > services/dns/nats-subscriber/src/lib.rs \
+    && printf 'fn main() {}\n' > tools/pxe-client-probe/src/main.rs
 # Pre-cache dependencies. Acceleration is opt-in through BuildKit secrets.
 # The shell functions sourced from /usr/local/lib/lancache-ui-build-accel.sh
 # (written by the RUN block above; call order):
@@ -452,7 +469,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     configure_distcc; \
     configure_ccache; \
     cargo_jobs="$(resolve_cargo_jobs)"; \
-    mkdir -p src && echo 'fn main() {}' > src/main.rs && echo '' > src/lib.rs \
+    mkdir -p services/ui/src && echo 'fn main() {}' > services/ui/src/main.rs && echo '' > services/ui/src/lib.rs \
     && run_cargo_build \
     && if [ "${ccache_enabled:-0}" = "1" ]; then \
          ccache -s; \
@@ -464,7 +481,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
          fi; \
          rm -f "$ccache_final_stats"; \
        fi \
-    && rm -rf src
+    && rm -rf services/ui/src
 
 # This first build only had a throwaway `fn main() {}`/empty `lib.rs`, so it
 # compiled every dependency crate (and a stub `liblancache_ui.rlib`) but
@@ -475,7 +492,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
 # app code changes. The sccache/distcc setup, wrapper checks, and fallback
 # logic in the RUN block below are otherwise identical to the one above for
 # the same acceleration to apply to both builds.
-COPY src ./src
+COPY services/ui/src ./services/ui/src
 # Sources the same /usr/local/lib/lancache-ui-build-accel.sh helper functions as the
 # pre-cache RUN above (configure_sccache, configure_distcc, disable_distcc,
 # resolve_distcc_wrapper_dir, extract_remote_toolchain_id, configure_ccache, disable_ccache,
@@ -621,8 +638,8 @@ ENV EDITOR=nano
 ENV VISUAL=$EDITOR
 
 COPY --from=builder /build/lancache-ui-out /usr/local/bin/lancache-ui
-COPY src/templates /templates
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY services/ui/src/templates /templates
+COPY services/ui/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 # The former dhcp-probe.sh (nmap + isc-dhcp-client) is retired by issue
 # #1288 -- the dhcp-probe container now runs this same lancache-ui binary
 # with `--dhcp-probe` (see deploy/*/docker-compose.yml's dhcp-probe

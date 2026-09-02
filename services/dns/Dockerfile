@@ -64,7 +64,25 @@ ARG CARGO_BUILD_JOBS=
 ARG BUILD_TOOLS_IMAGE
 
 WORKDIR /build
-COPY nats-subscriber/ .
+COPY Cargo.toml Cargo.lock ./
+COPY services/dns/nats-subscriber/Cargo.toml services/dns/nats-subscriber/Cargo.toml
+COPY services/ui/Cargo.toml services/ui/Cargo.toml
+COPY services/warmer/Cargo.toml services/warmer/Cargo.toml
+COPY services/watchdog/Cargo.toml services/watchdog/Cargo.toml
+COPY tools/pxe-client-probe/Cargo.toml tools/pxe-client-probe/Cargo.toml
+# What: stub targets for workspace members not built here.
+# Why: cargo loads every member manifest to resolve deps.
+# From: Issue #1095
+RUN mkdir -p services/ui/src services/warmer/src \
+      services/watchdog/src tools/pxe-client-probe/src \
+    && printf 'fn main() {}\n' > services/ui/src/main.rs \
+    && : > services/ui/src/lib.rs \
+    && printf 'fn main() {}\n' > services/warmer/src/main.rs \
+    && : > services/warmer/src/lib.rs \
+    && printf 'fn main() {}\n' > services/watchdog/src/main.rs \
+    && : > services/watchdog/src/lib.rs \
+    && printf 'fn main() {}\n' > tools/pxe-client-probe/src/main.rs
+COPY services/dns/nats-subscriber/src services/dns/nats-subscriber/src
 # The shell functions defined inside this RUN (in call order):
 #   configure_sccache      - opt-in cache wrapper, only if a sccache secret was mounted.
 #   configure_distcc       - opt-in distributed compile, only if a distcc hosts secret was
@@ -286,7 +304,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     run_cargo_build() { \
       cargo_log="$(mktemp)"; \
       cargo_status_file="$(mktemp)"; \
-      { set +e; cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" 2>&1; echo "$?" >"$cargo_status_file"; set -e; } | tee "$cargo_log"; \
+      { set +e; cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" -p nats-subscriber 2>&1; echo "$?" >"$cargo_status_file"; set -e; } | tee "$cargo_log"; \
       cargo_status="$(cat "$cargo_status_file")"; \
       rm -f "$cargo_status_file"; \
       if [ "$cargo_status" = "0" ]; then rm -f "$cargo_log"; return 0; fi; \
@@ -294,7 +312,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
         disable_ccache; \
         echo "[INFO] ccache build path unavailable; retrying with plain distcc (no cache layer)." >&2; \
         ccache_retry_status_file="$(mktemp)"; \
-        { set +e; cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" 2>&1; echo "$?" >"$ccache_retry_status_file"; set -e; } | tee -a "$cargo_log"; \
+        { set +e; cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" -p nats-subscriber 2>&1; echo "$?" >"$ccache_retry_status_file"; set -e; } | tee -a "$cargo_log"; \
         cargo_status="$(cat "$ccache_retry_status_file")"; \
         rm -f "$ccache_retry_status_file"; \
         if [ "$cargo_status" = "0" ]; then \
@@ -308,7 +326,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
         disable_distcc; \
         unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
         echo "[INFO] distcc build path unavailable; retrying with normal local C compiler." >&2; \
-        if cargo build -j "$cargo_jobs" --release --locked --target "$musl_target"; then \
+        if cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" -p nats-subscriber; then \
           echo "[INFO] normal local C compiler fallback completed." >&2; \
           rm -f "$cargo_log"; \
           return 0; \
@@ -320,7 +338,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
         unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
         echo "[INFO] sccache build path unavailable; retrying with sccache disabled." >&2; \
         rm -f "$cargo_log"; \
-        if cargo build -j "$cargo_jobs" --release --locked --target "$musl_target"; then \
+        if cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" -p nats-subscriber; then \
           echo "[INFO] sccache-disabled fallback completed." >&2; \
           return 0; \
         fi; \
@@ -622,15 +640,15 @@ RUN mkdir -p /etc/pdns/auth /var/lib/powerdns /var/run/pdns \
 
 COPY --from=subscriber-builder /build/nats-subscriber-out /usr/local/bin/nats-subscriber
 
-COPY recursor.conf.template /etc/pdns/recursor.conf.template
-COPY pdns.conf.template /etc/pdns/auth/pdns.conf.template
-COPY recursor.lua /etc/pdns/recursor.lua
-COPY filter-aaaa.lua /etc/pdns/filter-aaaa.lua
-COPY cdn-domains.txt /etc/pdns/cdn-domains.txt
+COPY services/dns/recursor.conf.template /etc/pdns/recursor.conf.template
+COPY services/dns/pdns.conf.template /etc/pdns/auth/pdns.conf.template
+COPY services/dns/recursor.lua /etc/pdns/recursor.lua
+COPY services/dns/filter-aaaa.lua /etc/pdns/filter-aaaa.lua
+COPY services/dns/cdn-domains.txt /etc/pdns/cdn-domains.txt
 # Vendored gsqlite3 schema (see this file's own header comment for why
 # Alpine's pdns-backend-sqlite3 package needs it where Debian's didn't).
-COPY schema.sqlite3.sql /usr/share/lancache-ng/schema.sqlite3.sql
-COPY entrypoint.sh /entrypoint.sh
+COPY services/dns/schema.sqlite3.sql /usr/share/lancache-ng/schema.sqlite3.sql
+COPY services/dns/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 EXPOSE 53/udp 53/tcp 8081 8082 8083
