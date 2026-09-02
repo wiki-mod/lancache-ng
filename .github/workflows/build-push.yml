@@ -1846,7 +1846,7 @@ jobs:
             || { echo "::error::Acceleration infrastructure network must be selected per job from generated secret files."; exit 1; }
           grep -E '^[[:space:]]+redis-file:[[:space:]]+\$\{\{[[:space:]]*steps\.sccache-secret\.outputs\.redis-file[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
             && grep -E '^[[:space:]]+dist-config-file:[[:space:]]+\$\{\{[[:space:]]*steps\.sccache-secret\.outputs\.dist-config-file[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
-            && grep -E '^[[:space:]]+distcc-hosts-file:[[:space:]]+\$\{\{[[:space:]]*matrix\.service[[:space:]]*==[[:space:]]*.build-tools.[[:space:]]*&&[[:space:]]*steps\[.distcc-hosts-secret.\]\.outputs\[.hosts-file.\][[:space:]]*\|\|[[:space:]]*steps\.sccache-secret\.outputs\.distcc-hosts-file[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
+            && grep -E '^[[:space:]]+distcc-hosts-file:[[:space:]]+\$\{\{[[:space:]]*steps\.sccache-secret\.outputs\.distcc-hosts-file[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
             && grep -E '^[[:space:]]+build-tools-image:[[:space:]]+\$\{\{[[:space:]]*env\.BUILD_TOOLS_IMAGE[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
             && grep -E '^[[:space:]]+build-network:[[:space:]]+\$\{\{[[:space:]]*env\.RUST_ACCELERATION_NETWORK[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
             && grep -E '^[[:space:]]+platform:[[:space:]]+linux/amd64[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
@@ -1856,8 +1856,8 @@ jobs:
           #   before; checking its declaration in the action file alone
           #   already missed that regression once.
           # From: Issue #1095
-          grep -E '^[[:space:]]+ccache-redis-file:[[:space:]]+\$\{\{[[:space:]]*matrix\.service[[:space:]]*==[[:space:]]*.build-tools.[[:space:]]*&&[[:space:]]*steps\[.ccache-redis-secret.\]\.outputs\[.redis-file.\][[:space:]]*\|\|[[:space:]]*steps\.sccache-secret\.outputs\['\''ccache-redis-file'\''\][[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
-            || { echo "::error::Acceleration preflight must receive ccache-redis-file from steps.sccache-secret's own output (or build-tools' own ccache-redis-secret)."; exit 1; }
+          grep -E '^[[:space:]]+ccache-redis-file:[[:space:]]+\$\{\{[[:space:]]*steps\.sccache-secret\.outputs\['\''ccache-redis-file'\''\][[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::Acceleration preflight must receive ccache-redis-file from steps.sccache-secret's own output."; exit 1; }
           grep -F 'sccache rustc' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'sccache --dist-status' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'run_logged()' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
@@ -5010,14 +5010,16 @@ jobs:
             context: services/utilities
             build_contexts: ""
             description: "Shared lancache-ng utilities image (nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd, curl) for COPY --from= consumption of its non-curl tools by seven first-party images (issue #1556); curl itself is apk-installed here but no longer COPY'd cross-image by any consumer (issue #1781)."
-            # Moved to light (Issue #1781, re-evaluating AG-CI-002's own
-            # exception as its text anticipates): the curl-builder stage
-            # that used to compile/link curl from source (gcc/make) is
-            # gone -- curl is now `apk add`'d like the image's other 9
-            # tools. This Dockerfile now has no compiler invocation and no
-            # ${BUILD_TOOLS_IMAGE} builder stage at all, same shape as
-            # proxy/dhcp-proxy/dhcp/syslog/ntp below. Revisit again if a
-            # future change reintroduces a real compile/link step here.
+            # What: moved to light, re-evaluating AG-CI-002's own
+            #   exception as its text anticipates.
+            # Why: the curl-builder stage that used to compile/link curl
+            #   from source (gcc/make) is gone -- curl is now `apk add`'d
+            #   like the image's other 9 tools. This Dockerfile now has no
+            #   compiler invocation and no ${BUILD_TOOLS_IMAGE} builder
+            #   stage at all, same shape as proxy/dhcp-proxy/dhcp/syslog/
+            #   ntp below. Revisit again if a future change reintroduces a
+            #   real compile/link step here.
+            # From: Issue #1781
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
 
     steps:
@@ -5501,77 +5503,10 @@ jobs:
             echo "SECRET_FILES"
           } >> "$GITHUB_OUTPUT"
 
-      # What: produces ccache_redis_url for utilities and build-tools.
-      # Why: dns/ui/watchdog already get it from the generic secret-file
-      #   step above; only these two lack a matrix.rust step for it.
-      # From: Issue #1095 (G15 | #1556) | PR #1661
-      - name: Prepare ccache Redis endpoint (utilities + build-tools C-dependency cache)
-        if: >-
-          ${{
-            steps.should-build.outputs.should-build == 'true' &&
-            (matrix.service == 'utilities' || matrix.service == 'build-tools') &&
-            github.actor != 'dependabot[bot]' &&
-            github.event_name != 'pull_request'
-          }}
-        id: ccache-redis-secret
-        env:
-          SCCACHE_REDIS_URL: ${{ secrets.SCCACHE_REDIS_URL }}
-          SCCACHE_REDIS_MODE: ${{ vars.SCCACHE_REDIS_MODE }}
-        run: |
-          set -euo pipefail
-          if [ "${SCCACHE_REDIS_MODE:-}" = "off" ]; then
-            echo "::notice::SCCACHE_REDIS_MODE=off; ${{ matrix.service }}'s ccache layer stays disabled."
-          elif [ -n "$SCCACHE_REDIS_URL" ]; then
-            umask 077
-            redis_file="${{ runner.temp }}/ccache-redis-url-${{ matrix.service }}"
-            printf '%s' "$SCCACHE_REDIS_URL" > "$redis_file"
-            echo "redis-file=$redis_file" >> "$GITHUB_OUTPUT"
-            echo "secret-files=ccache_redis_url=$redis_file" >> "$GITHUB_OUTPUT"
-          else
-            echo "::notice::No SCCACHE_REDIS_URL configured; ${{ matrix.service }}'s ccache layer stays disabled (fails closed to a plain compile)."
-          fi
-
-      # What: produces the distcc_potential_hosts secret for build-tools.
-      # Why: build-tools' curl/git build is C, not Rust -- it never sets
-      #   matrix.rust, so it misses the DISTCC_POTENTIAL_HOSTS wiring the
-      #   sccache-secret step above gives dns/ui/watchdog.
-      # From: PR #1661
-      - name: Prepare distcc hosts (build-tools C-dependency distribution)
-        if: >-
-          ${{
-            steps.should-build.outputs.should-build == 'true' &&
-            matrix.service == 'build-tools' &&
-            github.actor != 'dependabot[bot]' &&
-            github.event_name != 'pull_request'
-          }}
-        id: distcc-hosts-secret
-        env:
-          DISTCC_POTENTIAL_HOSTS: ${{ vars.DISTCC_POTENTIAL_HOSTS }}
-        run: |
-          set -euo pipefail
-          if [ -z "$DISTCC_POTENTIAL_HOSTS" ]; then
-            echo "::notice::No DISTCC_POTENTIAL_HOSTS configured; build-tools' distcc layer stays disabled (fails closed to a plain compile)."
-            exit 0
-          fi
-          if ! grep -q ',cpp' <<<"$DISTCC_POTENTIAL_HOSTS"; then
-            echo "::error::DISTCC_POTENTIAL_HOSTS must include at least one pump-capable host with the ',cpp' option."
-            exit 1
-          fi
-          umask 077
-          hosts_file="${{ runner.temp }}/distcc-potential-hosts-${{ matrix.service }}"
-          printf '%s' "$DISTCC_POTENTIAL_HOSTS" > "$hosts_file"
-          echo "hosts-file=$hosts_file" >> "$GITHUB_OUTPUT"
-          echo "secret-files=distcc_potential_hosts=$hosts_file" >> "$GITHUB_OUTPUT"
-
       - name: Select Rust acceleration network
-        if: matrix.rust == true || matrix.service == 'build-tools'
+        if: matrix.rust == true
         env:
-          SECRET_FILES: >-
-            ${{
-              steps.sccache-secret.outputs.secret-files ||
-              steps['ccache-redis-secret'].outputs['secret-files'] ||
-              steps['distcc-hosts-secret'].outputs['secret-files']
-            }}
+          SECRET_FILES: ${{ steps.sccache-secret.outputs.secret-files }}
         run: |
           set -euo pipefail
 
@@ -5586,63 +5521,44 @@ jobs:
           printf 'RUST_ACCELERATION_NETWORK=%s\n' "$rust_network" >> "$GITHUB_ENV"
           printf 'RUST_BUILDX_NETWORK=%s\n' "$buildx_network" >> "$GITHUB_ENV"
 
-      # What: also runs for build-tools (no matrix.rust) so a broken Redis/
-      #   distcc endpoint can't hide behind a cached curl/git Docker layer.
-      # Why: the action itself is compiler-agnostic (validates via `cc`,
-      #   not rustc) and already gates each check on its own file input.
+      # What: only runs for matrix.rust services now.
+      # Why: this used to also run for build-tools so a broken Redis/distcc
+      #   endpoint couldn't hide behind a cached curl/git Docker layer --
+      #   build-tools never actually had that C compile (curl was a
+      #   `COPY --from=utilities-tools`, git a plain package in every
+      #   stage), so every input this preflight checks was always empty
+      #   for build-tools regardless; the whole step was a guaranteed
+      #   no-op there. The action itself stays compiler-agnostic
+      #   (validates via `cc`, not rustc) and gates each check on its own
+      #   file input, for the services that do use it.
       # From: PR #1661
       - name: Validate acceleration infrastructure outside BuildKit cache
-        if: matrix.rust == true || matrix.service == 'build-tools'
+        if: matrix.rust == true
         uses: ./.github/actions/rust-acceleration-preflight
         with:
           service: ${{ matrix.service }}
           redis-file: ${{ steps.sccache-secret.outputs.redis-file }}
           dist-config-file: ${{ steps.sccache-secret.outputs.dist-config-file }}
-          distcc-hosts-file: ${{ matrix.service == 'build-tools' && steps['distcc-hosts-secret'].outputs['hosts-file'] || steps.sccache-secret.outputs.distcc-hosts-file }}
-          # What: wired via ccache-redis-secret for build-tools only now.
-          # Why: dns/ui/watchdog already get ccache-redis-file from the
-          #   generic sccache-secret step above; avoids a duplicate read.
-          # From: Issue #1095 (G15) | PR #1661
-          ccache-redis-file: ${{ matrix.service == 'build-tools' && steps['ccache-redis-secret'].outputs['redis-file'] || steps.sccache-secret.outputs['ccache-redis-file'] }}
+          distcc-hosts-file: ${{ steps.sccache-secret.outputs.distcc-hosts-file }}
+          ccache-redis-file: ${{ steps.sccache-secret.outputs['ccache-redis-file'] }}
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
           build-network: ${{ env.RUST_ACCELERATION_NETWORK }}
           platform: linux/amd64
 
-      # What: merges sccache-secret, ccache-redis-secret, and distcc-hosts-secret.
-      # Why: a block-scalar interpolation of all three outputs would add blank
-      #   lines wherever one is empty; this reproduces the prior single-source
-      #   input byte-for-byte instead.
+      # What: merges sccache-secret's own generated secret files.
+      # Why: kept as its own step (not inlined) so a future second secret
+      #   source can be added the same way sccache-secret was originally.
       # From: Issue #1095 (G15) | PR #1661
       - name: Combine sccache/ccache secret files
         id: combined-secret-files
         env:
           SCCACHE_FILES: ${{ steps.sccache-secret.outputs.secret-files }}
-          CCACHE_FILES: ${{ steps['ccache-redis-secret'].outputs['secret-files'] }}
-          DISTCC_FILES: ${{ steps['distcc-hosts-secret'].outputs['secret-files'] }}
         run: |
           set -euo pipefail
-          combined=""
-          if [ -n "$SCCACHE_FILES" ]; then
-            combined="$SCCACHE_FILES"
-          fi
-          if [ -n "$CCACHE_FILES" ]; then
-            if [ -n "$combined" ]; then
-              combined="$combined"$'\n'"$CCACHE_FILES"
-            else
-              combined="$CCACHE_FILES"
-            fi
-          fi
-          if [ -n "$DISTCC_FILES" ]; then
-            if [ -n "$combined" ]; then
-              combined="$combined"$'\n'"$DISTCC_FILES"
-            else
-              combined="$DISTCC_FILES"
-            fi
-          fi
           {
             echo "secret-files<<SECRET_FILES"
-            if [ -n "$combined" ]; then
-              printf '%s\n' "$combined"
+            if [ -n "$SCCACHE_FILES" ]; then
+              printf '%s\n' "$SCCACHE_FILES"
             fi
             echo "SECRET_FILES"
           } >> "$GITHUB_OUTPUT"

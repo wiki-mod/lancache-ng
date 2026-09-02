@@ -222,79 +222,25 @@ jobs:
             printf 'golang=%s\n' "$(digest_for_image golang:latest)"
           } >> "$GITHUB_OUTPUT"
 
-      # What: writes ccache/distcc secret files for Dockerfile build.
-      # Why: PR runs lack LAN access; build succeeds without cache.
-      # From: Issue #1304 | PR #1661
-      - name: Prepare ccache/distcc secrets for git build
-        if: github.event_name != 'pull_request'
-        id: ccache-distcc-secret
-        env:
-          SCCACHE_REDIS_MODE: ${{ vars.SCCACHE_REDIS_MODE }}
-          SCCACHE_REDIS_URL: ${{ secrets.SCCACHE_REDIS_URL }}
-          DISTCC_POTENTIAL_HOSTS: ${{ vars.DISTCC_POTENTIAL_HOSTS }}
-        run: |
-          set -euo pipefail
-          umask 077
-          if [ "${SCCACHE_REDIS_MODE:-required}" != "off" ] && [ -n "$SCCACHE_REDIS_URL" ]; then
-            redis_file="${{ runner.temp }}/build-tools-ccache-redis-url"
-            printf '%s' "$SCCACHE_REDIS_URL" > "$redis_file"
-            echo "ccache-redis-file=$redis_file" >> "$GITHUB_OUTPUT"
-          else
-            echo "::notice::No ccache Redis secret prepared for the git build (mode=off or secret unset)."
-          fi
-          if [ -n "$DISTCC_POTENTIAL_HOSTS" ]; then
-            if ! grep -q ',cpp' <<<"$DISTCC_POTENTIAL_HOSTS"; then
-              echo "::error::DISTCC_POTENTIAL_HOSTS must include at least one pump-capable host with the ',cpp' option."
-              exit 1
-            fi
-            distcc_hosts_file="${{ runner.temp }}/build-tools-distcc-potential-hosts"
-            printf '%s' "$DISTCC_POTENTIAL_HOSTS" > "$distcc_hosts_file"
-            echo "distcc-hosts-file=$distcc_hosts_file" >> "$GITHUB_OUTPUT"
-          else
-            echo "::notice::No distcc hosts secret prepared for the git build (DISTCC_POTENTIAL_HOSTS unset)."
-          fi
-
-      # What: selects host or bridge network per accel availability.
-      # Why: prevents silent fallback to uncached compile on no endpoint.
-      # From: Issue #1304 | PR #1661
+      # What: acceleration network, always plain bridge/default now.
+      # Why: this used to switch to host networking when a ccache/distcc
+      #   endpoint was configured for what this comment called "the git
+      #   build" -- tools/build-tools/Dockerfile never actually had one:
+      #   curl was a `COPY --from=utilities-tools` (now a plain package
+      #   install instead), and git has always been a plain apk/apt
+      #   package here, confirmed by a repo-wide grep for `./configure`/
+      #   `make install`/`make -j` finding zero hits anywhere in this
+      #   repo. There is nothing here that a Redis/distcc endpoint could
+      #   ever accelerate, so the two secret-preparation and preflight
+      #   steps that used to sit here (and the resulting host-network
+      #   switch) were removed rather than kept as permanent no-ops.
+      # From: Issue #1304 | PR #1661 | Issue #1781
       - name: Select acceleration network for the standalone build
         if: github.event_name != 'pull_request'
         run: |
           set -euo pipefail
-          rust_network=bridge
-          buildx_network=default
-          if [ -n "${{ steps.ccache-distcc-secret.outputs.ccache-redis-file }}" ] || \
-             [ -n "${{ steps.ccache-distcc-secret.outputs.distcc-hosts-file }}" ]; then
-            rust_network=host
-            buildx_network=host
-          fi
-          printf 'RUST_ACCELERATION_NETWORK=%s\n' "$rust_network" >> "$GITHUB_ENV"
-          printf 'RUST_BUILDX_NETWORK=%s\n' "$buildx_network" >> "$GITHUB_ENV"
-
-      # What: resolve immutable published build-tools image for preflight.
-      # Why: preflight's default :latest is mutable; needs immutable.
-      # From: Issue #1304 | PR #1661
-      - name: Select immutable build-tools image for preflight
-        if: github.event_name != 'pull_request'
-        id: preflight-image
-        run: |
-          set -euo pipefail
-          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
-          printf 'image=%s\n' "$build_tools_image" >> "$GITHUB_OUTPUT"
-
-      # What: validates acceleration infra; also in build-push.yml.
-      # Why: surfaces broken Redis/distcc instead of hiding via fallback.
-      # From: Issue #1304 | PR #1661
-      - name: Validate acceleration infrastructure outside BuildKit cache
-        if: github.event_name != 'pull_request'
-        uses: ./.github/actions/rust-acceleration-preflight
-        with:
-          service: build-tools
-          distcc-hosts-file: ${{ steps.ccache-distcc-secret.outputs.distcc-hosts-file }}
-          ccache-redis-file: ${{ steps.ccache-distcc-secret.outputs.ccache-redis-file }}
-          build-tools-image: ${{ steps.preflight-image.outputs.image }}
-          build-network: ${{ env.RUST_ACCELERATION_NETWORK }}
-          platform: linux/amd64
+          printf 'RUST_ACCELERATION_NETWORK=%s\n' "bridge" >> "$GITHUB_ENV"
+          printf 'RUST_BUILDX_NETWORK=%s\n' "default" >> "$GITHUB_ENV"
 
       # What: build local amd64 candidate for fork PRs.
       # Why: fork PRs can't publish; still need candidate for smoke/vuln.
@@ -346,11 +292,10 @@ jobs:
           build-args: |
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
             UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
-          secret-files: |
-            ${{ steps.ccache-distcc-secret.outputs.ccache-redis-file != '' && format('ccache_redis_url={0}', steps.ccache-distcc-secret.outputs.ccache-redis-file) || '' }}
-            ${{ steps.ccache-distcc-secret.outputs.distcc-hosts-file != '' && format('distcc_potential_hosts={0}', steps.ccache-distcc-secret.outputs.distcc-hosts-file) || '' }}
-          # What: wire validated network from preflight into real build.
-          # Why: prevent silent uncached fallback when host network needed.
+          # What: network stays whatever "Select acceleration network for
+          #   the standalone build" set (always bridge/default now).
+          # Why: kept as an explicit wire, not a hardcoded literal, so a
+          #   real accelerator can be reintroduced by changing one step.
           # From: Issue #1304 | PR #1661
           network: ${{ env.RUST_BUILDX_NETWORK }}
           allow: ${{ env.RUST_BUILDX_NETWORK == 'host' && 'network.host' || '' }}
