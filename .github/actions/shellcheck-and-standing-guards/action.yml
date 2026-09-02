@@ -83,7 +83,7 @@ runs:
 
     - name: Check registry-login coverage on docker.io-pulling jobs
       # What: Ensures docker.io-pulling jobs log in to registries.
-      # Why: A job move can silently drop the login (see #1095).
+      # Why: A job move can silently drop the login step again.
       # From: Issue #1095
       shell: bash
       run: |

@@ -2,17 +2,17 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Standing guard for issue #1095: when the ten shared full-setup jobs were
-# extracted from full-setup-validate.yml/full-setup-deep-validate.yml into
-# the reusable full-setup-sims.yml (issue #1014), the GHCR-then-Docker-Hub
-# login step PR #1757/#1760 had added to full-setup-deep-validate.yml's
+# Standing guard: when the ten shared full-setup jobs were extracted from
+# full-setup-validate.yml/full-setup-deep-validate.yml into the reusable
+# full-setup-sims.yml (issue #1014), the GHCR-then-Docker-Hub login step
+# PR #1757/#1760 had added to full-setup-deep-validate.yml's
 # ensure-pr-staging-images job was never carried into any of the extracted
 # jobs -- full-setup-sims.yml pulled deploy/full-setup's and
 # deploy/quickstart's third-party docker.io images (nats:2-alpine,
 # tecnativa/docker-socket-proxy, netdata/netdata) fully anonymously from the
-# day it was created until a later fix (same issue #1095) restored it. That
-# fix also found three MORE jobs outside full-setup-sims.yml with the exact
-# same gap (dns-zone-rollback-simulation, dhcp-kea-ui-rollback-simulation in
+# day it was created until a later fix restored it. That fix also found
+# three MORE jobs outside full-setup-sims.yml with the exact same gap
+# (dns-zone-rollback-simulation, dhcp-kea-ui-rollback-simulation in
 # full-setup-deep-validate.yml; dhcp-kea-ctrl-agent-mutation-simulation in
 # full-setup-validate.yml) -- confirming this is a real, recurring class of
 # regression (a job move/extraction silently dropping the login), not a
@@ -48,8 +48,9 @@
 # REAL stack by driving the actual `setup.sh` CLI end-to-end (fresh install)
 # rather than invoking `docker compose` themselves -- which services setup.sh
 # chooses to start is its own runtime logic, not a static, grep-able command
-# line in either script. Manually verified (issue #1095) that both jobs'
-# fresh installs do pull the docker.io-backed services. Listed here as an
+# line in either script. Manually verified (see the PR/commit this file was
+# introduced under) that both jobs' fresh installs do pull the docker.io-
+# backed services. Listed here as an
 # explicit, named exception rather than pretended to be covered by the
 # generic mechanical signal above (see NAMED_OPAQUE_SCRIPT_TRIGGERS below).
 #
