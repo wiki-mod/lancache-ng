@@ -10,6 +10,11 @@
 # documents below mirror real Trivy output shape (bare apk package names
 # in `components[].name`).
 
+# Required for `run !` (used below to correctly fail a test on a negated
+# assertion, see the SC2314 comment inline) -- same requirement as
+# dns_zone_generation.bats.
+bats_require_minimum_version 1.5.0
+
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     script="$repo_root/scripts/untracked/merge-utilities-sbom-components.sh"
@@ -98,11 +103,16 @@ component_names() {
 @test "dhcp-proxy keeps the same 7-package set as dhcp/dns/proxy but WITHOUT curl (never copies it)" {
     run bash "$script" dhcp-proxy "$workdir/service.cdx.json" "$workdir/utilities.cdx.json"
     [ "$status" -eq 0 ]
-    got="$(component_names "$output")"
+    merged_output="$output"
+    got="$(component_names "$merged_output")"
     expected=$'findutils\ngettext-envsubst\nlibintl\nlsof\nripgrep\nlibgcc\npcre2\nsvc-own-pkg'
     [ "$got" = "$(sort <<<"$expected")" ]
-    ! grep -q '"curl"' <<<"$output"
-    ! grep -q '"libcurl"' <<<"$output"
+
+    # SC2314: a bare `! cmd` mid-test never fails the test (see the fuller
+    # explanation in dhcp_lease_flow_parsing.bats). `run !` (Bats >= 1.5.0)
+    # makes Bats assert the wrapped command's exit status itself.
+    run ! grep -q '"curl"' <<<"$merged_output"
+    run ! grep -q '"libcurl"' <<<"$merged_output"
 }
 
 @test "nano and coreutils never survive the filter for any consumer service" {
