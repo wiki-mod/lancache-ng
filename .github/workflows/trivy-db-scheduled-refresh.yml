@@ -138,6 +138,7 @@ jobs:
           # What: removes DB files so a download always runs
           # Why: NextUpdate alone would skip most runs
           # From: Issue #1780
+          # shellcheck disable=SC2329 # invoked indirectly via "$@" below
           refresh_and_pull() {
             rm -f -- "$CACHE_DIR/db/trivy.db" "$CACHE_DIR/db/metadata.json"
             ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
