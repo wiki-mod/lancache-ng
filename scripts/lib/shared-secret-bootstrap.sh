@@ -121,7 +121,10 @@ secret_is_placeholder() {
     return 1
 }
 
-# resolve_shared_secret <name> <current_value_or_empty> <gen_func>
+# resolve_shared_secret <name> <current_value_or_empty> <gen_func> [require_persist]
+# What: 4th arg require_persist enforces a durable write.
+# Why: some secrets (ddns-tsig-key) have file-only readers.
+# From: PR #1775
 # Resolves a shared secret and prints it on stdout with no trailing newline.
 #   - If <current_value_or_empty> is non-empty, that real value seeds the shared
 #     volume when the file is absent, and refreshes it when a stale/different
@@ -142,15 +145,26 @@ resolve_shared_secret() {
     _rss_name="$1"
     _rss_cur="$2"
     _rss_gen="$3"
+    _rss_require_persist="${4:-}"
 
     _rss_dir="$(lancache_shared_secret_dir)"
     _rss_file="${_rss_dir}/${_rss_name}"
 
-    if [ -s "$_rss_file" ]; then
-        if [ -z "$_rss_cur" ] || [ "$(tr -d '\n' < "$_rss_file")" = "$_rss_cur" ]; then
-            tr -d '\n' < "$_rss_file"
-            return 0
+    # What: re-checks for a conflict right before returning.
+    # Why: closes the TOCTOU window a concurrent writer opens.
+    # From: PR #1775
+    _rss_conflict_now() {
+        [ -n "$_rss_cur" ] || return 1
+        if [ -s "$_rss_file" ]; then
+            [ "$(tr -d '\n' < "$_rss_file")" != "$_rss_cur" ]
+        else
+            [ -e "$_rss_file" ]
         fi
+    }
+
+    if [ -s "$_rss_file" ] && { [ -z "$_rss_cur" ] || [ "$(tr -d '\n' < "$_rss_file")" = "$_rss_cur" ]; }; then
+        tr -d '\n' < "$_rss_file"
+        return 0
     fi
 
     mkdir -p "$_rss_dir" 2>/dev/null || true
@@ -164,7 +178,16 @@ resolve_shared_secret() {
         fi
     fi
 
-    _rss_tmp="$(mktemp "${_rss_dir}/.secret.XXXXXX" 2>/dev/null)" || return 1
+    # What: returns the caller's value unpersisted on write fail.
+    # Why: safe only because no on-disk value could disagree yet.
+    # From: PR #1775
+    _rss_tmp="$(mktemp "${_rss_dir}/.secret.XXXXXX" 2>/dev/null)" || {
+        if [ -n "$_rss_cur" ] && [ -z "$_rss_require_persist" ] && ! _rss_conflict_now; then
+            printf '%s' "$_rss_cur"
+            return 0
+        fi
+        return 1
+    }
     printf '%s' "$_rss_val" > "$_rss_tmp"
     chmod 0640 "$_rss_tmp" 2>/dev/null || true
     chgrp "$(lancache_shared_secret_gid)" "$_rss_tmp" 2>/dev/null || true
@@ -181,12 +204,12 @@ resolve_shared_secret() {
     fi
 
     rm -f "$_rss_tmp"
-    if [ -s "$_rss_file" ]; then
-        if [ -z "$_rss_cur" ]; then
-            tr -d '\n' < "$_rss_file"
-        else
-            printf '%s' "$_rss_cur"
-        fi
+    if [ -z "$_rss_cur" ] && [ -s "$_rss_file" ]; then
+        tr -d '\n' < "$_rss_file"
+        return 0
+    fi
+    if [ -n "$_rss_cur" ] && [ -z "$_rss_require_persist" ] && ! _rss_conflict_now; then
+        printf '%s' "$_rss_cur"
         return 0
     fi
     return 1

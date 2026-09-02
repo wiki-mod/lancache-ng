@@ -46,6 +46,81 @@ teardown() {
     [ "$output" = "operator-supplied-real-value" ]
 }
 
+@test "a real configured value still wins when the shared-secrets volume cannot be created" {
+    # What: a regular file as parent; mkdir -p fails for any uid.
+    # Why: immune to root/CAP_DAC_OVERRIDE, unlike chmod-based.
+    # From: PR #1775
+    : > "$TEST_DIR/not-a-directory"
+    export LANCACHE_SHARED_SECRET_DIR="$TEST_DIR/not-a-directory/secrets"
+    run resolve_shared_secret nats-ui-password "operator-supplied-real-value" lancache_gen_hex32
+    [ "$status" -eq 0 ]
+    [ "$output" = "operator-supplied-real-value" ]
+}
+
+@test "a stale conflicting value fails closed when it cannot be refreshed" {
+    # What: stubs mktemp to fail deterministically, any uid.
+    # Why: a stale value must not split-brain other readers.
+    # From: PR #1775
+    mkdir -p "$LANCACHE_SHARED_SECRET_DIR"
+    printf '%s' "old-value" > "$LANCACHE_SHARED_SECRET_DIR/nats-ui-password"
+    mktemp() { return 1; }
+    run resolve_shared_secret nats-ui-password "new-operator-value" lancache_gen_hex32
+    [ "$status" -ne 0 ]
+    [ "$(cat "$LANCACHE_SHARED_SECRET_DIR/nats-ui-password")" = "old-value" ]
+}
+
+@test "a winner appearing between the check and mktemp still fails closed" {
+    # What: mktemp itself races a concurrent winner, then fails.
+    # Why: closes the TOCTOU gap between the check and the write.
+    # From: PR #1775
+    mktemp() {
+        printf '%s' "old-winner" > "$LANCACHE_SHARED_SECRET_DIR/nats-ui-password"
+        return 1
+    }
+    run resolve_shared_secret nats-ui-password "operator-value" lancache_gen_hex32
+    [ "$status" -ne 0 ]
+    [ "$(cat "$LANCACHE_SHARED_SECRET_DIR/nats-ui-password")" = "old-winner" ]
+}
+
+@test "a present but empty secret file also fails closed when it cannot be replaced" {
+    # What: an existing zero-byte file, not just a missing one.
+    # Why: consumers treat empty as absent, not a real value.
+    # From: PR #1775
+    mkdir -p "$LANCACHE_SHARED_SECRET_DIR"
+    : > "$LANCACHE_SHARED_SECRET_DIR/nats-ui-password"
+    mktemp() { return 1; }
+    run resolve_shared_secret nats-ui-password "new-operator-value" lancache_gen_hex32
+    [ "$status" -ne 0 ]
+}
+
+@test "a require-persist secret fails closed even without a prior conflict" {
+    # What: require-persist ignores the no-conflict fallback too.
+    # Why: ddns-tsig-key has a file-only reader, the Admin UI.
+    # From: PR #1775
+    : > "$TEST_DIR/not-a-directory"
+    export LANCACHE_SHARED_SECRET_DIR="$TEST_DIR/not-a-directory/secrets"
+    run resolve_shared_secret ddns-tsig-key "operator-supplied-real-value" lancache_gen_base64_32 require-persist
+    [ "$status" -ne 0 ]
+}
+
+@test "the operator-value fallback survives a real set -euo pipefail caller" {
+    # What: reproduces the entrypoints' own command substitution.
+    # Why: proves the fallback survives the caller's shell opts.
+    # From: PR #1775
+    : > "$TEST_DIR/not-a-directory"
+    export LANCACHE_SHARED_SECRET_DIR="$TEST_DIR/not-a-directory/secrets"
+    run bash -c '
+        set -euo pipefail
+        . "$1/scripts/lib/shared-secret-bootstrap.sh"
+        if ! val="$(resolve_shared_secret nats-ui-password "operator-supplied-real-value" lancache_gen_hex32)"; then
+            val="FAILED"
+        fi
+        printf "%s" "$val"
+    ' _ "$repo_root"
+    [ "$status" -eq 0 ]
+    [ "$output" = "operator-supplied-real-value" ]
+}
+
 @test "an empty value on first boot generates a strong hex value and persists it" {
     run resolve_shared_secret pdns-api-key "" lancache_gen_hex32
     [ "$status" -eq 0 ]

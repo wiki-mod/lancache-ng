@@ -383,7 +383,10 @@ STUB
     export PROXY_TOUCHED="false" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
     run bash "$script"
     [ "$status" -eq 0 ]
-    [ "$(wc -l < "$backfill_log")" -eq 5 ]
+    # What: expects all nine full-setup services to back-fill.
+    # Why: full_setup_services now has 9 entries, not the old 5.
+    # From: PR #1775
+    [ "$(wc -l < "$backfill_log")" -eq 9 ]
     grep -qF "build-tools:pr-715-sha-abcdef0" "$backfill_log"
 }
 
@@ -401,8 +404,10 @@ STUB
     export DHCP_TOUCHED="false" DHCP_PROXY_TOUCHED="false" NTP_TOUCHED="false" SYSLOG_TOUCHED="false"
     run bash "$script"
     [ "$status" -eq 0 ]
-    # The untouched four still back-fill, including build-tools.
-    [ "$(wc -l < "$backfill_log")" -eq 4 ]
+    # What: expects the eight untouched services to back-fill.
+    # Why: nine total minus the one touched service, proxy.
+    # From: PR #1775
+    [ "$(wc -l < "$backfill_log")" -eq 8 ]
     grep -qF "build-tools:pr-715-sha-abcdef0" "$backfill_log"
 }
 
