@@ -4,9 +4,11 @@
 as a scaffold.** The maintainer has decided the engine: stream-and-discard,
 no SteamCMD (see the "Overlap with #871" section below). All three
 originally-open decisions are now resolved (see "Open decisions" below);
-`services/warmer` exists with real credential-store and stream-fetch code,
-but not yet the Steam control-plane/depot integration that would make it
-functional end-to-end. This is the written design plan issue
+`services/cachehamster` (named `services/warmer` at scaffold time, renamed
+during its infra integration, issue #871) exists with real credential-store
+and stream-fetch code, but not yet the Steam control-plane/depot
+integration that would make it functional end-to-end. This is the written
+design plan issue
 [#816](https://github.com/wiki-mod/lancache-ng/issues/816) asked for. Most
 of the research below was already captured directly in #816's own issue
 body and its 2026-07-14 self-correction comment; this document
@@ -238,10 +240,10 @@ authors could resolve unilaterally.** Two honest framings were possible:
    project's decision to make at all: whether an operator's own
    lancache-ng instance persists a Steam credential across restarts, or
    never writes it to disk (re-entered every run), is that operator's own
-   choice, configurable per instance (`services/warmer`'s
-   `WARMER_CREDENTIAL_PERSISTENCE=none|persistent`). If an operator
+   choice, configurable per instance (`services/cachehamster`'s
+   `CACHEHAMSTER_CREDENTIAL_PERSISTENCE=none|persistent`). If an operator
    chooses persistence, the credential is never stored in a
-   plaintext-readable form: `services/warmer/src/credential_store.rs`
+   plaintext-readable form: `services/cachehamster/src/credential_store.rs`
    derives a symmetric key from a locally-generated master secret via
    Argon2id (already an established project dependency, issue #680 —
    reused here as a raw KDF rather than its one-way password-hash form)
@@ -252,8 +254,10 @@ authors could resolve unilaterally.** Two honest framings were possible:
    never returned by any Admin-UI/API surface (mirrors how
    `UI_AUTH_PASSWORD` is compared but never echoed back).
 2. ~~**Which service houses the engine**~~ — resolved 2026-08-29: a new
-   `services/warmer` service (not a `services/ui` module). Maintainer's
-   stated reasoning: the warmer must be independently, separately
+   `services/cachehamster` service (named `services/warmer` at scaffold
+   time, renamed during its infra integration, issue #871), not a
+   `services/ui` module. Maintainer's stated reasoning: the service must
+   be independently, separately
    switchable off without affecting the rest of the stack, which favors a
    clearly-bounded standalone service over an embedded module. The
    `services/ui` `reqwest`-streaming precedent named in the earlier

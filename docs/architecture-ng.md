@@ -9,9 +9,11 @@ would not actually differentiate anything -- every real row would read the
 same "v0.1.0" regardless of which service is genuinely older or newer
 (verified against each service directory's first commit in git history, not
 assumed). The one row below that a version field genuinely would
-differentiate is Cache Warmer, which is called out explicitly instead: it is
-not shipped in any tagged version, current or planned, only a design
-document.
+differentiate is CacheHamster (the Cache-Prefill feature's service, named
+`services/warmer` at scaffold time, renamed during its infra integration,
+issue #871), which is called out explicitly instead: it is not shipped in
+any tagged version, current or planned, and does not yet have real
+Steam depot-fetch capability.
 
 | Service | Default | Replaces | Notes |
 |---|---|---|---|
@@ -22,7 +24,7 @@ document.
 | Watchdog | on | — | Health checks, auto-restart, purge cron |
 | syslog (fluent-bit + syslog-ng, combined) | on (`logging` Compose profile, default-enabled since #1343; real opt-out via `LOGGING_ENABLED=0`) | — | Central log receiver; fluent-bit forwards logs from every wired service to syslog-ng inside the same container (#453, combined into one image 2026-08) — see the syslog-ng section's full logging matrix below, not just proxy access logs |
 | Admin UI | on | — | Axum/Rust, Tera, Tailwind, separate port |
-| Cache Warmer | not implemented | — | **Scaffold only, not shipped**: `services/warmer` exists (credential-store + stream-fetch primitives, issue #871), but has no Compose service and no real Steam depot-fetch capability yet. Mechanism decided: stream-and-discard prefill, not SteamCMD; new independently-switchable service (not a `services/ui` module). See [docs/design-steam-prefill.md](design-steam-prefill.md) (issue #816, issue #871) for the current design plan and its one remaining open decision (credential strategy). Do not treat this row as a runnable feature until Steam control-plane/depot integration lands. |
+| CacheHamster (Cache-Prefill) | off (`cachehamster` Compose profile) | — | **Infra-wired, functionally still a scaffold**: `services/cachehamster` (named `services/warmer` at scaffold time, issue #871) has a CI-built/published multi-arch image and an opt-in Compose profile since its infra integration (issue #871), but no real Steam depot-fetch capability yet -- credential-store + stream-fetch primitives only. Mechanism decided: stream-and-discard prefill, not SteamCMD; independently-switchable service (not a `services/ui` module). See [docs/design-steam-prefill.md](design-steam-prefill.md) (issue #816, issue #871) for the current design plan and its one remaining open decision (credential strategy). Do not treat this row as a runnable feature until Steam control-plane/depot integration lands. |
 
 ## nginx
 
@@ -622,25 +624,35 @@ design discussion and its still-open implementation decisions (credential strate
 unresolved; which-service-houses-the-engine is resolved below) before relying on any detail
 here.
 
-**Updated 2026-08-29 (issue #871, scaffold PR): `services/warmer` now exists as a Rust crate**
-(maintainer decision: a new, independently-switchable service, not a `services/ui` module —
-the operator must be able to turn Cache Warming off without affecting the rest of the stack).
-Implemented so far: the credential-store (Argon2id-as-KDF + XChaCha20-Poly1305 AEAD encryption
-of an operator-supplied Steam credential, with optional persistence — see "Credential handling"
-below) and the stream-fetch primitive (bounded-concurrency streaming GET into a discard sink,
-with throughput logging — see "Throughput display" below). **Not yet implemented**: the Steam
-control-plane login (`steam-vent`) and depot/manifest parsing (`steamroom`) that would resolve a
-real app ID into real CDN chunk URLs — this needs a real Steam account to test safely against
-and is deliberately deferred (see `services/warmer/src/main.rs`'s own module doc comment). Not
-yet wired into any `deploy/*/docker-compose.yml` or into full-stack CI validation (AG-VAL-027)
-for the same reason: an inert scaffold with no real depot-fetch behavior would add CI surface
-without a testable claim to validate. Do not treat this row as a runnable feature until that
-integration lands.
+**Updated 2026-08-29 (issue #871, scaffold PR): `services/cachehamster` (named
+`services/warmer` at scaffold time, renamed during its infra integration) now exists as a
+Rust crate** (maintainer decision: a new, independently-switchable service, not a
+`services/ui` module — the operator must be able to turn CacheHamster off without affecting
+the rest of the stack). Implemented so far: the credential-store (Argon2id-as-KDF +
+XChaCha20-Poly1305 AEAD encryption of an operator-supplied Steam credential, with optional
+persistence — see "Credential handling" below) and the stream-fetch primitive
+(bounded-concurrency streaming GET into a discard sink, with throughput logging — see
+"Throughput display" below). **Not yet implemented**: the Steam control-plane login
+(`steam-vent`) and depot/manifest parsing (`steamroom`) that would resolve a real app ID into
+real CDN chunk URLs — this needs a real Steam account to test safely against and is
+deliberately deferred (see `services/cachehamster/src/main.rs`'s own module doc comment).
+
+**Infra integration (issue #871): CI-built/published, opt-in Compose profile, functionally
+still inert.** As of this integration pass, `services/cachehamster` is built, Trivy-scanned,
+and published multi-arch (amd64+arm64) by CI like every other service, and
+`deploy/{prod,quickstart}/docker-compose.yml` gate its container behind an opt-in
+`cachehamster` Compose profile (default off — the operator must set `COMPOSE_PROFILES` to
+include it and supply Steam credentials). It is intentionally excluded from full-stack CI
+deep-validation (AG-VAL-027) for the same reason it was excluded from Compose before: an
+inert scaffold with no real depot-fetch behavior and no CI-available Steam credential would
+add CI surface without a testable claim to validate. Do not treat this row as a runnable
+feature until the Steam control-plane/depot integration above lands.
 
 **Decision: stream-and-discard prefill, no SteamCMD.** `steamcmd` was rejected because
 `steamcmd app_update` performs a real local install — it downloads, verifies, decompresses, and
 writes the full depot content to disk on whatever host runs it, which is exactly the
-disk-space/SSD-wear cost this project does not want to impose on an operator's warmer host. The
+disk-space/SSD-wear cost this project does not want to impose on an operator's cachehamster
+host. The
 selected mechanism instead talks to Steam's CDN directly and streams each depot chunk's HTTP
 response body straight into a discard sink — the bytes exist only long enough to pass through
 lancache-ng's proxy (which is what actually caches them) and are never buffered to a file or
@@ -815,5 +827,5 @@ Runs on its own Axum webserver (port 8080) — independent from nginx. If nginx 
 3. Kea DHCP
 4. Watchdog
 5. syslog-ng
-6. Cache warmer
+6. CacheHamster (Cache-Prefill)
 7. Admin UI

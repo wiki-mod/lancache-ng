@@ -575,7 +575,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lancache-warmer"
+name = "lancache-cachehamster"
 version = "0.1.0"
 dependencies = [
  "anyhow",

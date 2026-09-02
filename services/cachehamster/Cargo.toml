@@ -1,9 +1,9 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Manifest for lancache-warmer, the Steam cache-warming prefill daemon
-# (issue #871): stream-and-discard depot chunk fetch through the proxy,
-# never a full local game install (issue #816's non-negotiable
+# Manifest for lancache-cachehamster, the Steam cache-warming prefill
+# daemon (issue #871): stream-and-discard depot chunk fetch through the
+# proxy, never a full local game install (issue #816's non-negotiable
 # requirement). Scope of this crate as of this PR: the credential-store
 # and stream-fetch primitives only -- NOT yet the Steam control-plane/
 # depot-manifest integration (steam-vent/steamroom), which needs a real
@@ -11,7 +11,7 @@
 # (see this PR's own body / issue #871 for the full scope note).
 
 [package]
-name = "lancache-warmer"
+name = "lancache-cachehamster"
 version = "0.1.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
@@ -21,11 +21,11 @@ license = "AGPL-3.0-or-later"
 # stream_fetch byte-counting logic) so unit tests can exercise them
 # without a live Steam account or a real HTTP server -- mirrors
 # services/ui's and services/watchdog's own lib.rs pure-module split.
-name = "lancache_warmer"
+name = "lancache_cachehamster"
 path = "src/lib.rs"
 
 [[bin]]
-name = "lancache-warmer"
+name = "lancache-cachehamster"
 path = "src/main.rs"
 
 [dependencies]
@@ -50,7 +50,7 @@ futures-util = "0.3"
 argon2 = "0.5"
 # AEAD encryption for the operator-supplied Steam credential at rest: no
 # existing project dependency does this (Argon2id above is one-way and
-# cannot recover a login-usable plaintext; see services/warmer/src/
+# cannot recover a login-usable plaintext; see services/cachehamster/src/
 # credential_store.rs's own module doc for the full research trail this
 # combination followed). XChaCha20Poly1305 specifically (192-bit nonce),
 # not the 96-bit ChaCha20Poly1305 variant, because nonces here are

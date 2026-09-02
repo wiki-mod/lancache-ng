@@ -40,13 +40,14 @@
 #     secondary_registration_token_is_placeholder_matches_shared_parity_fixture
 #     test, which checks the "rust" column against
 #     secondary_registration_token_is_placeholder().
-#   - services/warmer/src/main.rs's own
+#   - services/cachehamster/src/main.rs's own (services/warmer at the time
+#     of its introduction, renamed during this service's infra integration)
 #     credential_is_placeholder_matches_shared_parity_fixture test (added
 #     issue #871), which also checks the "rust" column -- NOT a fourth
 #     independent pattern set, this is a deliberate byte-for-byte copy of
 #     implementation 3 above (see that function's own doc comment for why
 #     it is duplicated rather than shared: no crate boundary currently
-#     exists between services/ui and services/warmer). Checked against the
+#     exists between services/ui and services/cachehamster). Checked against the
 #     same "rust" column as implementation 3 so a future edit to either
 #     copy that silently drifts from the other fails a test instead of
 #     going unnoticed, even though this is not the #967 Option B

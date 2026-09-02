@@ -106,7 +106,7 @@ allowed_types=(feat fix docs refactor perf test build ci chore style revert secu
 # Allowed scopes: optional, lowercase, drawn from docs/naming-conventions.md's
 # real service names plus the non-service project areas the #850 audit found
 # already in use (ci, governance, docs, scripts, tests, build-tools).
-allowed_scopes=(proxy dns dhcp dhcp-proxy ntp ui nats watchdog netdata syslog warmer setup ci governance docs scripts tests build-tools)
+allowed_scopes=(proxy dns dhcp dhcp-proxy ntp ui nats watchdog netdata syslog cachehamster setup ci governance docs scripts tests build-tools)
 
 array_contains() {
     local needle="$1"
