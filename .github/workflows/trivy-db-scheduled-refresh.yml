@@ -135,12 +135,23 @@ jobs:
           # shellcheck source=scripts/lib/trivy-db-lock.sh
           source "$GITHUB_WORKSPACE/scripts/lib/trivy-db-lock.sh"
 
+          # What: sweeps staging dirs a killed run left
+          # Why: a trap alone can miss a hard SIGKILL
+          # From: Issue #1780
+          find "$CACHE_DIR" -maxdepth 1 -name '.trivy-db-refresh-tmp.*' \
+            -mmin +60 -exec rm -rf -- {} + 2>/dev/null || true
+
+          tmp_dir="$CACHE_DIR/.trivy-db-refresh-tmp.$$"
+          # What: removes this run's own staging dir on exit
+          # Why: a cancelled/timed-out job would leak it
+          # From: Issue #1780
+          trap 'rm -rf -- "$tmp_dir"' EXIT
+
           # What: downloads to temp, atomically swaps in
           # Why: live db/ must never go through empty state
           # From: Issue #1780
           # shellcheck disable=SC2329 # invoked indirectly via "$@" below
           refresh_and_pull() {
-            local tmp_dir="$CACHE_DIR/.trivy-db-refresh-tmp.$$"
             local dl_status mv1_status mv2_status
             rm -rf -- "$tmp_dir"
             mkdir -p -- "$tmp_dir"
@@ -149,7 +160,6 @@ jobs:
                 --config .github/actions/trivy-scan-retry/trivy-config.yaml
             dl_status=$?
             if [ "$dl_status" -ne 0 ]; then
-              rm -rf -- "$tmp_dir"
               return "$dl_status"
             fi
             mkdir -p -- "$CACHE_DIR/db"
@@ -157,7 +167,6 @@ jobs:
             mv1_status=$?
             mv -f -- "$tmp_dir/db/metadata.json" "$CACHE_DIR/db/metadata.json"
             mv2_status=$?
-            rm -rf -- "$tmp_dir"
             if [ "$mv1_status" -ne 0 ] || [ "$mv2_status" -ne 0 ]; then
               return 1
             fi

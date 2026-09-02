@@ -161,9 +161,11 @@ runs:
         if [ "$status" -eq 0 ]; then
           exit 0
         fi
+        # What: hard-fails on lock timeout too, not download
+        # Why: another holder may still be writing
+        # From: Issue #1780
         if [ "$status" -eq 2 ]; then
-          echo "::warning::Leaving db-present=false so the caller's own scan step attempts an unlocked download itself."
-          exit 0
+          echo "::error::Timed out waiting for the Trivy DB refresh lock -- another caller most likely still holds it and is still writing. Falling through to an unlocked download here would risk two writers on the same BoltDB file at once, exactly what this lock exists to prevent, so this fails closed instead." >&2
         fi
         exit "$status"
 
