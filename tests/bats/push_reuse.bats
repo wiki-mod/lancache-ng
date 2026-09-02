@@ -313,3 +313,98 @@ STUB
     run push_reuse_decide "ntp" "ghcr.io/example/ntp:nightly"
     [ "$status" -ne 0 ]
 }
+
+# --- decide_one() (build-push.yml, inline) manual-dispatch override ---
+#
+# decide_one() lives inline in build-push.yml's "Decide per-service push
+# reuse" step, not in a sourced library, so it has no unit coverage of its
+# own today (only push_reuse_decide, which it calls, is unit-tested above).
+# extract_decide_one() below pulls allowlist=(...)/is_allowlisted()/
+# decide_one() out of the real workflow file VERBATIM (dedenting the
+# fixed 10-space YAML indent) so these tests exercise the exact text the
+# real workflow runs, never a reimplementation that could silently drift
+# from it. push_reuse_decide and ghcr_retry are stubbed at the shell
+# level -- their own real behavior is covered by the tests above and by
+# tests/bats/ghcr_retry.bats respectively.
+
+extract_decide_one() {
+    local wf="$repo_root/.github/workflows/build-push.yml"
+    local out="$BATS_TEST_TMPDIR/decide_one.sh"
+    awk '
+        /^          allowlist=\(/ { printing = 1 }
+        printing {
+            print
+            if ($0 == "          }") {
+                closes++
+                if (closes == 2) exit
+            }
+        }
+    ' "$wf" | sed 's/^ \{10\}//' > "$out"
+    printf '%s\n' "$out"
+}
+
+setup_decide_one() {
+    source "$(extract_decide_one)"
+    REPOSITORY="wiki-mod/lancache-ng"
+    channel="nightly"
+    GITHUB_OUTPUT="$BATS_TEST_TMPDIR/github_output"
+    : > "$GITHUB_OUTPUT"
+}
+
+@test "decide_one: workflow_dispatch forces a real build for build-tools despite ignore_workflow_gate=true, never calling push_reuse_decide" {
+    setup_decide_one
+    push_reuse_decide() { echo "MUST NOT BE CALLED" >&2; printf 'true\n'; }
+    GITHUB_EVENT_NAME="workflow_dispatch"
+
+    run decide_one build_tools build-tools "" "" "true"
+
+    [ "$status" -eq 0 ]
+    [ "$output" = "false" ]
+}
+
+@test "decide_one: workflow_dispatch forces a real build for utilities despite ignore_workflow_gate=true" {
+    setup_decide_one
+    push_reuse_decide() { printf 'true\n'; }
+    GITHUB_EVENT_NAME="workflow_dispatch"
+
+    run decide_one utilities utilities "" "" "true"
+
+    [ "$status" -eq 0 ]
+    [ "$output" = "false" ]
+}
+
+@test "decide_one: a push event still lets build-tools reuse via ignore_workflow_gate=true (dispatch override does not leak into push)" {
+    setup_decide_one
+    ghcr_retry() { printf '"sha256:deadbeef"\n'; }
+    push_reuse_decide() { printf 'true\n'; }
+    GITHUB_EVENT_NAME="push"
+
+    run decide_one build_tools build-tools "" "" "true"
+
+    [ "$status" -eq 0 ]
+    [ "$output" = "true" ]
+}
+
+@test "decide_one: workflow_dispatch does NOT force a rebuild for one of the other 8 services (no ignore_workflow_gate)" {
+    setup_decide_one
+    ghcr_retry() { printf '"sha256:deadbeef"\n'; }
+    push_reuse_decide() { printf 'true\n'; }
+    GITHUB_EVENT_NAME="workflow_dispatch"
+
+    run decide_one proxy proxy "" "utilities"
+
+    [ "$status" -eq 0 ]
+    [ "$output" = "true" ]
+}
+
+@test "decide_one: a pull_request event still lets utilities reuse via ignore_workflow_gate=true" {
+    setup_decide_one
+    ghcr_retry() { printf '"sha256:deadbeef"\n'; }
+    push_reuse_decide() { printf 'true\n'; }
+    GITHUB_EVENT_NAME="pull_request"
+
+    run decide_one utilities utilities "" "" "true"
+
+    [ "$status" -eq 0 ]
+    [ "$output" = "true" ]
+}

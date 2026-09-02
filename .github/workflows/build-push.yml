@@ -4763,6 +4763,15 @@ jobs:
               return
             fi
 
+            # What: a manual dispatch beats the workflow-gate exemption.
+            # Why: "build everything now" must also reach these two.
+            # From: Issue #1095
+            if [ "$ignore_workflow_gate" = "true" ] && [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+              echo "::notice::$matrix_service: workflow_dispatch requested; building for real instead of attempting reuse (the workflow-gate exemption applies only to push/pull_request)." >&2
+              printf 'false\n'
+              return
+            fi
+
             local channel_image="ghcr.io/${REPOSITORY}/${matrix_service}:${channel}"
 
             # Resolve the channel tag to its immutable manifest-list digest ONCE, right here,
