@@ -93,8 +93,7 @@ RUN set -eu; \
     /out/docker-buildx version
 
 # What: builds sccache once as a musl-static binary.
-# Why: prebuilt lacks redis+dist-client; one build serves
-#   both finals (static musl runs on glibc too).
+# Why: prebuilt sccache lacks redis+dist-client.
 # From: Issue #1095
 FROM rust:alpine3.24 AS sccache-builder
 
