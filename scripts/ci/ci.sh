@@ -1672,6 +1672,151 @@ ci_cmd_resolve_compose_validation_image() {
 }
 
 # ============================================================
+# FULL-SETUP VALIDATION
+# ============================================================
+#
+# What: the full-setup stack's own channel/tag + compose/simulation
+#   steps, formerly inline run-blocks in build-push.yml.
+# Why: §5 -- decision and orchestration shell moved out of YAML.
+# From: Refs #1683
+
+ci_cmd_resolve_validation_channel() {
+    # What: resolves this run's validation image channel/tag.
+    # Why: §5 -- decides which images this run validates against.
+    # From: Issue #1095 | PR #1619 | Refs #1683
+    cd "$CI_REPO_ROOT"
+    local event="${EVENT_NAME:?EVENT_NAME is required}"
+    local base_ref="${BASE_REF:?BASE_REF is required}"
+    local pr_number="${PR_NUMBER:-}"
+    local build_sha="${BUILD_SHA:?BUILD_SHA is required}"
+    local pr_head_sha="${PR_HEAD_SHA:-}"
+    local actor="${ACTOR:?ACTOR is required}"
+    local head_repo="${HEAD_REPO:-}"
+
+    # shellcheck source=scripts/lib/docker-metadata.sh
+    source "$CI_REPO_ROOT/scripts/lib/docker-metadata.sh"
+    # What: reads the single declared, lowercased GHCR owner/repo.
+    # Why: github.repository may be mixed-case; GHCR needs lowercase.
+    # From: Issue #1095 (G1) | PR #1503
+    local repository
+    repository="$(dmeta_ghcr_repo)"
+
+    # What: calls validation-image-tag.sh's channel/tag/available funcs.
+    # Why: keeps exactly one implementation of this decision logic.
+    # From: Issue #1095 | PR #1619
+    # shellcheck source=scripts/lib/validation-image-tag.sh
+    source "$CI_REPO_ROOT/scripts/lib/validation-image-tag.sh"
+
+    local base_channel_tag
+    base_channel_tag="$(vit_base_channel_tag "$base_ref")"
+    ci_emit_output base-channel-tag "$base_channel_tag"
+
+    local pr_staging_available
+    pr_staging_available="$(vit_pr_staging_available "$event" "$actor" "$head_repo" "$repository")"
+    ci_emit_output pr-staging-available "$pr_staging_available"
+
+    # vit_resolve_tag's workflow_dispatch branch never applies here --
+    # this job only ever runs from push/pull_request -- so the empty
+    # dispatch_tag argument is never read.
+    local tag
+    tag="$(vit_resolve_tag "$event" "$base_ref" "$pr_number" "$build_sha" "$actor" "$head_repo" "$repository" "")"
+
+    # CI 1.1: a trusted push validates the immutable commit candidate
+    # before public promotion. PRs keep their unique staging tag and
+    # immediately pin every service behind it to a digest below.
+    if [[ "$event" != "pull_request" ]]; then
+        tag="sha-${build_sha}"
+        echo "Validating pre-promotion candidate set '$tag'."
+    fi
+
+    if [[ "$pr_staging_available" == "true" ]]; then
+        # What: an untouched service backfills from its base commit.
+        # Why: base_channel_tag is only computed on the
+        # pr_staging_available == false fallback branch.
+        # From: Issue #1095 | PR #1619
+        echo "Validating against this PR's own staging tag '$tag' (built commit $build_sha, PR head $pr_head_sha; untouched services are backfilled from this PR's own base commit's per-commit image, see the next step)."
+    else
+        if [[ "$event" == "pull_request" ]]; then
+            ci_annotate notice "$actor's pull_request runs get a read-only GITHUB_TOKEN (Dependabot, or a fork PR), so build/build-arm64 could not push a PR staging tag. Validating against the '$tag' base channel instead -- the same behavior this job always had before #626."
+        fi
+        echo "Validating against the '$tag' channel (base ref: $base_ref)."
+    fi
+    ci_emit_output tag "$tag"
+}
+
+ci_cmd_validate_full_setup_compose_config() {
+    # What: validates full-setup's rendered compose config.
+    # Why: §5 -- reuses validate-compose's smoke-tested toolchain.
+    # From: Issue #1095 | PR #1532 | Refs #1683
+    cd "$CI_REPO_ROOT"
+    local override="${FULL_SETUP_COMPOSE_OVERRIDE:?FULL_SETUP_COMPOSE_OVERRIDE is required}"
+
+    # Reuse validate-compose's already smoke-tested, digest-qualified CI toolchain.
+    docker run --rm \
+        -v "$PWD/deploy/full-setup:/validation:ro" \
+        -w /validation \
+        --env LANCACHE_IMAGE_REGISTRY \
+        --env LANCACHE_IMAGE_PREFIX \
+        --env LANCACHE_IMAGE_TAG \
+        "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+        timeout --kill-after=30 --signal=KILL 300 \
+        docker compose -f docker-compose.yml -f "$override" config >/dev/null
+}
+
+ci_cmd_run_full_setup_client_simulation() {
+    # What: runs the full-setup stack's client simulation script.
+    # Why: §5 -- was inline image-ref-building shell in YAML.
+    # From: Refs #1683
+    cd "$CI_REPO_ROOT"
+    local channel_tag="${CHANNEL_TAG:?CHANNEL_TAG is required}"
+
+    # shellcheck source=scripts/lib/docker-metadata.sh
+    source "$CI_REPO_ROOT/scripts/lib/docker-metadata.sh"
+    # What: builds the image ref from the single declared GHCR owner/repo.
+    # Why: github.repository may be mixed-case; GHCR needs lowercase.
+    # From: Issue #1095 (G1) | PR #1503
+    FULL_SETUP_CLIENT_TOOLS_IMAGE="ghcr.io/$(dmeta_ghcr_repo)/build-tools:${channel_tag}"
+    export FULL_SETUP_CLIENT_TOOLS_IMAGE
+    scripts/untracked/simulations/full-setup-client-simulation.sh
+}
+
+ci_cmd_teardown_full_setup_stack() {
+    # What: tears down the full-setup validation stack, always.
+    # Why: §5 -- was inline `if: always()` teardown shell in YAML.
+    # From: Issue #1095 | PR #1532 | Refs #1683
+    cd "$CI_REPO_ROOT/deploy/full-setup"
+    docker compose down --volumes --remove-orphans || true
+
+    # `down` above can lose Docker's own "has active endpoints" race (a container-removal
+    # API call can return before its network endpoint is actually unwired -- confirmed for
+    # real in CI, see validation_project_networks_teardown's own comment in
+    # reserve-validation-subnet.sh) and silently leave this project's network(s) non-empty,
+    # poisoning them for whichever run reserves this slot next. Wait for and force a real
+    # removal instead of trusting `down`'s own exit code.
+    # shellcheck source=scripts/lib/reserve-validation-subnet.sh
+    source "$CI_REPO_ROOT/scripts/lib/reserve-validation-subnet.sh"
+    # This step runs unconditionally (`if: always()`), including when
+    # the "Reserve a validation subnet and start the stack" step above
+    # failed before ever setting COMPOSE_PROJECT_NAME -- under
+    # `set -u`, a bare "$COMPOSE_PROJECT_NAME" would abort this whole
+    # step with "unbound variable" in exactly that case (confirmed in
+    # CI). The safe-default form skips teardown when there is nothing
+    # to tear down instead.
+    if [[ -n "${COMPOSE_PROJECT_NAME:-}" ]]; then
+        validation_project_networks_teardown "$COMPOSE_PROJECT_NAME" || true
+    fi
+
+    # Release the host-local subnet lock the "Reserve a validation subnet and start the
+    # stack" step above acquired, so the slot becomes available to the next run
+    # immediately rather than waiting for this whole job's process tree to exit.
+    # $VALIDATION_LOCK_HOLDER_PID is only set once that step actually reserved a lock -- if
+    # it failed before reaching that point, there is nothing to release.
+    if [[ -n "${VALIDATION_LOCK_HOLDER_PID:-}" ]]; then
+        kill "$VALIDATION_LOCK_HOLDER_PID" 2>/dev/null || true
+    fi
+}
+
+# ============================================================
 # REPO CONTRACT VALIDATION
 # ============================================================
 #
@@ -3149,6 +3294,10 @@ Commands:
   changelog-direct-edit-warn   Warn (never fail) on a direct CHANGELOG.md edit.
   resolve-utilities-digest     Resolve utilities:latest digest, fallback :nightly.
   resolve-compose-validation-image Resolve validate-compose's published build-tools image.
+  resolve-validation-channel   Resolve this run's validation image channel/tag.
+  validate-full-setup-compose-config Validate full-setup's rendered compose config.
+  run-full-setup-client-simulation Run the full-setup client simulation script.
+  teardown-full-setup-stack    Tear down the full-setup validation stack.
   file-header-checks           Run file-headers/-hosted's 6 repo-wide checks.
   diff-checks <sha> <ref>      Run the PR-diff-scoped header/chronology checks.
   compose-healthchecks         Run compose-healthchecks/-hosted's own check.
@@ -3204,6 +3353,10 @@ ci_main() {
         changelog-direct-edit-warn) ci_cmd_changelog_direct_edit_warn ;;
         resolve-utilities-digest) ci_cmd_resolve_utilities_digest ;;
         resolve-compose-validation-image) ci_cmd_resolve_compose_validation_image ;;
+        resolve-validation-channel) ci_cmd_resolve_validation_channel ;;
+        validate-full-setup-compose-config) ci_cmd_validate_full_setup_compose_config ;;
+        run-full-setup-client-simulation) ci_cmd_run_full_setup_client_simulation ;;
+        teardown-full-setup-stack) ci_cmd_teardown_full_setup_stack ;;
         file-header-checks) ci_cmd_file_header_checks ;;
         diff-checks) ci_cmd_diff_checks "${1:?diff-checks: base sha required}" "${2:?diff-checks: base ref required}" ;;
         compose-healthchecks) ci_cmd_compose_healthchecks ;;

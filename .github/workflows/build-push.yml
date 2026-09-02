@@ -1282,7 +1282,10 @@ jobs:
       # What: resolves the image channel to validate against.
       # Why: full channel/fallback reasoning on the linked issue.
       # From: Issue #1095 | PR #1532
-      - name: Determine validation image channel
+      - name: Determine validation image channel (ci.sh resolve-validation-channel)
+        # What: this run's validation image channel/tag, now in ci.sh.
+        # Why: §5 -- was inline decision shell in YAML.
+        # From: PR #1742 | Refs #1683
         id: channel
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -1299,54 +1302,7 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           ACTOR: ${{ github.actor }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-        run: |
-          set -euo pipefail
-          # shellcheck source=scripts/lib/docker-metadata.sh
-          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
-
-          # What: reads the single declared, lowercased GHCR owner/repo.
-          # Why: github.repository may be mixed-case; GHCR needs lowercase.
-          # From: Issue #1095 (G1) | PR #1503
-          REPOSITORY="$(dmeta_ghcr_repo)"
-
-          # What: calls validation-image-tag.sh's channel/tag/available funcs.
-          # Why: keeps exactly one implementation of this decision logic.
-          # From: Issue #1095 | PR #1619
-          # shellcheck source=scripts/lib/validation-image-tag.sh
-          source "$GITHUB_WORKSPACE/scripts/lib/validation-image-tag.sh"
-
-          base_channel_tag="$(vit_base_channel_tag "$BASE_REF")"
-          echo "base-channel-tag=$base_channel_tag" >> "$GITHUB_OUTPUT"
-
-          pr_staging_available="$(vit_pr_staging_available "$EVENT_NAME" "$ACTOR" "$HEAD_REPO" "$REPOSITORY")"
-          echo "pr-staging-available=$pr_staging_available" >> "$GITHUB_OUTPUT"
-
-          # vit_resolve_tag's workflow_dispatch branch never applies here --
-          # this job only ever runs from push/pull_request -- so the empty
-          # dispatch_tag argument is never read.
-          tag="$(vit_resolve_tag "$EVENT_NAME" "$BASE_REF" "$PR_NUMBER" "$BUILD_SHA" "$ACTOR" "$HEAD_REPO" "$REPOSITORY" "")"
-
-          # CI 1.1: a trusted push validates the immutable commit candidate
-          # before public promotion. PRs keep their unique staging tag and
-          # immediately pin every service behind it to a digest below.
-          if [[ "$EVENT_NAME" != "pull_request" ]]; then
-            tag="sha-${BUILD_SHA}"
-            echo "Validating pre-promotion candidate set '$tag'."
-          fi
-
-          if [[ "$pr_staging_available" == "true" ]]; then
-            # What: an untouched service backfills from its base commit.
-            # Why: base_channel_tag is only computed on the
-            # pr_staging_available == false fallback branch.
-            # From: Issue #1095 | PR #1619
-            echo "Validating against this PR's own staging tag '$tag' (built commit $BUILD_SHA, PR head $PR_HEAD_SHA; untouched services are backfilled from this PR's own base commit's per-commit image, see the next step)."
-          else
-            if [[ "$EVENT_NAME" == "pull_request" ]]; then
-              echo "::notice::$ACTOR's pull_request runs get a read-only GITHUB_TOKEN (Dependabot, or a fork PR), so build/build-arm64 could not push a PR staging tag. Validating against the '$tag' base channel instead -- the same behavior this job always had before #626."
-            fi
-            echo "Validating against the '$tag' channel (base ref: $BASE_REF)."
-          fi
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+        run: bash scripts/ci/ci.sh resolve-validation-channel
 
       # What: backfills an untouched service from the base channel image.
       # Why: full reasoning on the linked issue (LANCACHE_IMAGE_TAG contract).
@@ -1591,27 +1547,17 @@ jobs:
         run: |
           docker buildx rm "${{ steps.buildx.outputs.name }}" || true
 
-      - name: Validate compose configuration
+      - name: Validate compose configuration (ci.sh validate-full-setup-compose-config)
+        # What: full-setup's rendered compose config check, now in ci.sh.
+        # Why: §5 -- was an inline docker-run validation step in YAML.
+        # From: PR #1742 | Refs #1683
         env:
           BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
           LANCACHE_IMAGE_REGISTRY: ghcr.io
           LANCACHE_IMAGE_PREFIX: wiki-mod/lancache-ng
           LANCACHE_IMAGE_TAG: ${{ steps.channel.outputs.tag }}
           FULL_SETUP_COMPOSE_OVERRIDE: ${{ env.FULL_SETUP_COMPOSE_OVERRIDE }}
-        run: |
-          set -euo pipefail
-          : "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
-
-          # Reuse validate-compose's already smoke-tested, digest-qualified CI toolchain.
-          docker run --rm \
-            -v "$PWD/deploy/full-setup:/validation:ro" \
-            -w /validation \
-            --env LANCACHE_IMAGE_REGISTRY \
-            --env LANCACHE_IMAGE_PREFIX \
-            --env LANCACHE_IMAGE_TAG \
-            "$BUILD_TOOLS_IMAGE" \
-            timeout --kill-after=30 --signal=KILL 300 \
-            docker compose -f docker-compose.yml -f "${FULL_SETUP_COMPOSE_OVERRIDE:?FULL_SETUP_COMPOSE_OVERRIDE is required}" config >/dev/null
+        run: bash scripts/ci/ci.sh validate-full-setup-compose-config
 
       # What: reserves the validation subnet via a host-local flock.
       # Why: closes a check-then-create race; see the linked issue.
@@ -1639,55 +1585,20 @@ jobs:
           docker compose logs --no-color || true
           echo "::endgroup::"
 
-      - name: Run client simulation against the full-setup stack
+      - name: Run client simulation against the full-setup stack (ci.sh run-full-setup-client-simulation)
+        # What: full-setup's client simulation script, now in ci.sh.
+        # Why: §5 -- was inline image-ref-building shell in YAML.
+        # From: PR #1742 | Refs #1683
         env:
           CHANNEL_TAG: ${{ steps.channel.outputs.tag }}
-        run: |
-          set -euo pipefail
-          # shellcheck source=scripts/lib/docker-metadata.sh
-          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+        run: bash scripts/ci/ci.sh run-full-setup-client-simulation
 
-          # What: builds the image ref from the single declared GHCR owner/repo.
-          # Why: github.repository may be mixed-case; GHCR needs lowercase.
-          # From: Issue #1095 (G1) | PR #1503
-          FULL_SETUP_CLIENT_TOOLS_IMAGE="ghcr.io/$(dmeta_ghcr_repo)/build-tools:${CHANNEL_TAG}"
-          export FULL_SETUP_CLIENT_TOOLS_IMAGE
-          scripts/untracked/simulations/full-setup-client-simulation.sh
-
-      - name: Tear down full-setup validation stack
+      - name: Tear down full-setup validation stack (ci.sh teardown-full-setup-stack)
+        # What: unconditional stack/network/lock teardown, now in ci.sh.
+        # Why: §5 -- was inline `if: always()` teardown shell in YAML.
+        # From: PR #1742 | Refs #1683
         if: always()
-        working-directory: deploy/full-setup
-        run: |
-          set -euo pipefail
-          docker compose down --volumes --remove-orphans || true
-
-          # `down` above can lose Docker's own "has active endpoints" race (a container-removal
-          # API call can return before its network endpoint is actually unwired -- confirmed for
-          # real in CI, see validation_project_networks_teardown's own comment in
-          # reserve-validation-subnet.sh) and silently leave this project's network(s) non-empty,
-          # poisoning them for whichever run reserves this slot next. Wait for and force a real
-          # removal instead of trusting `down`'s own exit code.
-          # shellcheck source=scripts/lib/reserve-validation-subnet.sh
-          source "$GITHUB_WORKSPACE/scripts/lib/reserve-validation-subnet.sh"
-          # This step runs unconditionally (`if: always()`), including when
-          # the "Reserve a validation subnet and start the stack" step above
-          # failed before ever setting COMPOSE_PROJECT_NAME -- under
-          # `set -u`, a bare "$COMPOSE_PROJECT_NAME" would abort this whole
-          # step with "unbound variable" in exactly that case (confirmed in
-          # CI). The safe-default form skips teardown when there is nothing
-          # to tear down instead.
-          if [[ -n "${COMPOSE_PROJECT_NAME:-}" ]]; then
-            validation_project_networks_teardown "$COMPOSE_PROJECT_NAME" || true
-          fi
-
-          # Release the host-local subnet lock the "Reserve a validation subnet and start the
-          # stack" step above acquired, so the slot becomes available to the next run
-          # immediately rather than waiting for this whole job's process tree to exit.
-          # $VALIDATION_LOCK_HOLDER_PID is only set once that step actually reserved a lock -- if
-          # it failed before reaching that point, there is nothing to release.
-          if [[ -n "${VALIDATION_LOCK_HOLDER_PID:-}" ]]; then
-            kill "$VALIDATION_LOCK_HOLDER_PID" 2>/dev/null || true
-          fi
+        run: bash scripts/ci/ci.sh teardown-full-setup-stack
 
       - name: Clean up exact-digest override
         if: always()

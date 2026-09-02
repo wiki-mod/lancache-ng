@@ -1385,6 +1385,52 @@ setup() {
     [ "$status" -ne 0 ]
 }
 
+# What: resolve-validation-channel needs its 4 always-present inputs.
+# Why: a silently-empty event/ref/sha/actor is not "no run to plan".
+# From: Refs #1683
+@test "resolve-validation-channel: fails fast when EVENT_NAME is missing" {
+    run ci_cmd_resolve_validation_channel
+    [ "$status" -ne 0 ]
+}
+
+@test "resolve-validation-channel: fails fast when BASE_REF is missing" {
+    EVENT_NAME=push run ci_cmd_resolve_validation_channel
+    [ "$status" -ne 0 ]
+}
+
+@test "resolve-validation-channel: fails fast when BUILD_SHA is missing" {
+    EVENT_NAME=push BASE_REF=current_dev run ci_cmd_resolve_validation_channel
+    [ "$status" -ne 0 ]
+}
+
+@test "resolve-validation-channel: fails fast when ACTOR is missing" {
+    EVENT_NAME=push BASE_REF=current_dev \
+        BUILD_SHA=569022c2fba37618c6bb41aa4927753af0f762d3 \
+        run ci_cmd_resolve_validation_channel
+    [ "$status" -ne 0 ]
+}
+
+# What: validate-full-setup-compose-config needs its 2 required inputs.
+# Why: a silently-empty override/image is not "nothing to validate".
+# From: Refs #1683
+@test "validate-full-setup-compose-config: fails fast when FULL_SETUP_COMPOSE_OVERRIDE is missing" {
+    run ci_cmd_validate_full_setup_compose_config
+    [ "$status" -ne 0 ]
+}
+
+@test "validate-full-setup-compose-config: fails fast when BUILD_TOOLS_IMAGE is missing" {
+    FULL_SETUP_COMPOSE_OVERRIDE=.ci-exact-digests.yml run ci_cmd_validate_full_setup_compose_config
+    [ "$status" -ne 0 ]
+}
+
+# What: run-full-setup-client-simulation needs its channel tag input.
+# Why: a silently-empty tag is not "no simulation to run".
+# From: Refs #1683
+@test "run-full-setup-client-simulation: fails fast when CHANNEL_TAG is missing" {
+    run ci_cmd_run_full_setup_client_simulation
+    [ "$status" -ne 0 ]
+}
+
 # What: compose-healthchecks runs clean on this repo's tree.
 # Why: this repo's own compose files are the check's fixture.
 # From: Issue #1683
