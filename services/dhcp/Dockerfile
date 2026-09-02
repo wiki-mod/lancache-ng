@@ -78,10 +78,9 @@ FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe
 
 LABEL org.opencontainers.image.description="Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks."
 
-# What: COPY shared binaries from utilities image; curl comes
-#       from this service's own apk install below instead.
-# Why: binary-compatible with utilities digest; jq stays local.
-# From: Issue #1556; curl split out by Issue #1781.
+# What: curl now apk-installed, not COPY'd from utilities
+# Why: binary-compatible with utilities digest; jq stays local
+# From: Issue #1781 | PR #1783
 
 # What: remove BusyBox symlinks before real binaries land.
 # Why: prevent shadowing of utilities image binaries.

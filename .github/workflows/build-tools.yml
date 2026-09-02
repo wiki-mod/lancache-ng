@@ -55,7 +55,6 @@ jobs:
       contents: read
     outputs:
       should-publish: ${{ steps.should-publish.outputs.should-publish }}
-      utilities-image: ${{ steps['resolve-utilities-image'].outputs['utilities-image'] }}
     steps:
       - name: Confirm standalone route
         run: |
@@ -64,29 +63,6 @@ jobs:
 
       - name: Checkout
         uses: &checkout_centraliced_versioning actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      # What: resolves utilities:latest, falls back to :nightly.
-      # Why: Dockerfile lacks UTILITIES_IMAGE arg; needs resolved ref.
-      # From: Issue #1095 | PR #1706
-      - name: Resolve utilities image digest
-        id: resolve-utilities-image
-        env:
-          GHCR_RETRY_USERNAME: ${{ github.actor }}
-          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          # shellcheck source=scripts/lib/ghcr-retry.sh
-          source scripts/lib/ghcr-retry.sh
-
-          utilities_digest="$(resolve_manifest_digest ghcr.io/wiki-mod/lancache-ng/utilities:latest "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")" \
-            || utilities_digest="$(resolve_manifest_digest ghcr.io/wiki-mod/lancache-ng/utilities:nightly "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")" \
-            || utilities_digest=""
-          if [[ -z "$utilities_digest" ]]; then
-            echo "::error::Could not resolve digest for ghcr.io/wiki-mod/lancache-ng/utilities:latest or :nightly." >&2
-            exit 1
-          fi
-
-          printf 'utilities-image=ghcr.io/wiki-mod/lancache-ng/utilities@%s\n' "$utilities_digest" >> "$GITHUB_OUTPUT"
 
       # What: compute should-publish once for both architecture jobs.
       # Why: skip rebuild on unchanged inputs; manual triggers override.
@@ -136,8 +112,6 @@ jobs:
     concurrency:
       group: build-tools-amd64-image-build
       cancel-in-progress: false
-    env:
-      UTILITIES_IMAGE: ${{ needs['determine-publish-scope'].outputs['utilities-image'] }}
     # What: add issues:write to job permissions; others unchanged.
     # Why: job perms replace workflow level; issues:write for Trivy.
     # From: Issue #1095
@@ -222,19 +196,9 @@ jobs:
             printf 'golang=%s\n' "$(digest_for_image golang:latest)"
           } >> "$GITHUB_OUTPUT"
 
-      # What: acceleration network, always plain bridge/default now.
-      # Why: this used to switch to host networking when a ccache/distcc
-      #   endpoint was configured for what this comment called "the git
-      #   build" -- tools/build-tools/Dockerfile never actually had one:
-      #   curl was a `COPY --from=utilities-tools` (now a plain package
-      #   install instead), and git has always been a plain apk/apt
-      #   package here, confirmed by a repo-wide grep for `./configure`/
-      #   `make install`/`make -j` finding zero hits anywhere in this
-      #   repo. There is nothing here that a Redis/distcc endpoint could
-      #   ever accelerate, so the two secret-preparation and preflight
-      #   steps that used to sit here (and the resulting host-network
-      #   switch) were removed rather than kept as permanent no-ops.
-      # From: Issue #1304 | PR #1661 | Issue #1781
+      # What: acceleration network, always bridge/default now
+      # Why: no C compile here ever needed Redis/distcc
+      # From: Issue #1781 | PR #1783
       - name: Select acceleration network for the standalone build
         if: github.event_name != 'pull_request'
         run: |
@@ -265,7 +229,6 @@ jobs:
             --platform linux/amd64 \
             --provenance=false \
             --build-arg "APT_CACHE_BUST=$APT_CACHE_BUST" \
-            --build-arg "UTILITIES_IMAGE=$UTILITIES_IMAGE" \
             --cache-from "type=local,src=$BUILDX_CACHE_FROM_DIR" \
             --cache-to "type=local,dest=$BUILDX_CACHE_TO_DIR,mode=max" \
             tools/build-tools
@@ -291,12 +254,9 @@ jobs:
             org.opencontainers.image.base.golang.digest=${{ steps.build-tools-base-digests.outputs.golang }}
           build-args: |
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
-            UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
-          # What: network stays whatever "Select acceleration network for
-          #   the standalone build" set (always bridge/default now).
-          # Why: kept as an explicit wire, not a hardcoded literal, so a
-          #   real accelerator can be reintroduced by changing one step.
-          # From: Issue #1304 | PR #1661
+          # What: network wire, set by the step above
+          # Why: keeps a real accelerator easy to reintroduce later
+          # From: Issue #1781 | PR #1783
           network: ${{ env.RUST_BUILDX_NETWORK }}
           allow: ${{ env.RUST_BUILDX_NETWORK == 'host' && 'network.host' || '' }}
           outputs: type=image,oci-mediatypes=true
@@ -497,8 +457,6 @@ jobs:
     needs: determine-publish-scope
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 150
-    env:
-      UTILITIES_IMAGE: ${{ needs['determine-publish-scope'].outputs['utilities-image'] }}
     # What: add issues:write; others unchanged (same as amd64 job).
     # Why: needed for self-closing Trivy report in this job.
     # From: Issue #1095
@@ -576,7 +534,6 @@ jobs:
           platforms: linux/arm64
           build-args: |
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
-            UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
           provenance: false
           cache-from: type=gha,scope=build-tools-arm64
           cache-to: type=gha,scope=build-tools-arm64,mode=max
@@ -599,7 +556,6 @@ jobs:
             org.opencontainers.image.base.golang.digest=${{ steps.build-tools-base-digests.outputs.golang }}
           build-args: |
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
-            UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
           outputs: type=image,oci-mediatypes=true
           platforms: linux/arm64
           provenance: false

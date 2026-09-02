@@ -237,12 +237,9 @@ RUN set -euo pipefail; \
     mkdir -p /usr/local/lib/distcc; \
     for wrapper in cc gcc c++ g++; do ln -sf "$distcc_bin" "/usr/local/lib/distcc/$wrapper"; done
 
-# What: verifies the apk-installed curl actually runs.
-# Why: catches a broken/missing shared-lib chain at build time.
-# From: Issue #1556 | PR #1691; curl moved from the shared
-#      utilities static binary to this stage's own `apk add`
-#      by Issue #1781 -- see this file's Debian stage for the
-#      equivalent `apt-get install curl`.
+# What: verifies the apk-installed curl actually runs
+# Why: catches a missing shared-lib chain at build time
+# From: Issue #1781 | PR #1783
 RUN curl --version >/dev/null
 
 # What: switches SHELL to bash for every RUN step below.
@@ -542,17 +539,9 @@ RUN set -euo pipefail; \
     apt-get autoremove -y; \
     rm -rf /var/lib/apt/lists/*
 
-# What: verifies the apt-installed curl actually runs.
-# Why: catches a broken/missing shared-lib chain at build time.
-# From: Issue #1556 | PR #1661; curl moved from the shared
-#      utilities static binary to this stage's own
-#      `apt-get install curl` by Issue #1781 -- the original
-#      "shared static binary, not Debian's own" rationale
-#      existed specifically because a static binary worked on
-#      both this glibc stage and the Alpine stage above without
-#      caring which libc it linked against; that stopped being
-#      true the moment utilities' curl became a musl-linked
-#      dynamic binary, so each stage now installs its own.
+# What: verifies the apt-installed curl actually runs
+# Why: catches a missing shared-lib chain at build time
+# From: Issue #1781 | PR #1783
 RUN curl --version >/dev/null
 
 # What: COPY --from before heavy RUN serializes build

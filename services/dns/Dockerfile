@@ -552,10 +552,9 @@ LABEL org.opencontainers.image.description="PowerDNS recursor, authoritative DNS
 # advisory affects a version still shipping in v3.24 stable at that time --
 # do not treat this resolution as a promise that `pdns`/`pdns-backend-sqlite3`
 # will never need pinning again.
-# What: findutils/envsubst/lsof/ripgrep from utilities image;
-#       curl comes from this service's own apk install below.
-# Why: same alpine:3.24 digest as services/proxy/Dockerfile.
-# From: Issue #1556; curl split out by Issue #1781.
+# What: curl now apk-installed, not COPY'd from utilities
+# Why: same alpine:3.24 digest as services/proxy/Dockerfile
+# From: Issue #1781 | PR #1783
 
 # What: removes BusyBox symlinks before real binaries land.
 # Why: see services/proxy/Dockerfile's identical comment.

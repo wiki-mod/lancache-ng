@@ -48,10 +48,9 @@ LABEL org.opencontainers.image.description="LanCache-NG-NTP: chrony-based NTP se
 # services/dhcp-proxy/Dockerfile's matching comment for the fuller
 # rationale and live verification of this behavior.
 
-# What: envsubst binary from shared utilities image; curl comes
-#       from this service's own apk install below instead.
-# Why: same Alpine base digest ensures binary compatibility.
-# From: Issue #1556; curl split out by Issue #1781.
+# What: curl now apk-installed, not COPY'd from utilities
+# Why: same Alpine base digest ensures binary compatibility
+# From: Issue #1781 | PR #1783
 COPY --from=utilities-tools /usr/bin/envsubst /usr/bin/envsubst
 COPY --from=utilities-tools /usr/lib/libintl.so.8 /usr/lib/libintl.so.8
 
@@ -61,11 +60,9 @@ COPY --from=utilities-tools /usr/lib/libintl.so.8 /usr/lib/libintl.so.8
 RUN set -euo pipefail; \
     printf '%s' '$FOO' | FOO=bar envsubst >/dev/null
 
-# What: ca-certificates package enables curl's CA bundle.
-# Why: curl's own apk dependency chain (libcurl/libz/musl only,
-#      confirmed via `apk info -R curl`) does not pull in a CA
-#      bundle, so it stays an explicit package here.
-# From: Issue #1556; curl itself moved into this list by #1781.
+# What: ca-certificates package enables curl's CA bundle
+# Why: curl's own apk deps exclude a CA bundle
+# From: Issue #1781 | PR #1783
 # What: APT_CACHE_BUST invalidates BuildKit's upgrade cache.
 # Why: without this, BuildKit replays stale cache forever.
 # From: Issue #1095

@@ -596,10 +596,9 @@ RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
 # From: Issue #1781
 RUN curl --version >/dev/null
 
-# What: lsof/ripgrep come from shared utilities image; curl comes
-#       from this service's own apk install above instead.
+# What: curl now apk-installed, not COPY'd from utilities
 # Why: same alpine:3.24 digest as utilities for consistency
-# From: Issue #1556; curl split out by Issue #1781.
+# From: Issue #1781 | PR #1783
 
 # What: removes BusyBox symlink before real binary lands
 # Why: see services/proxy/Dockerfile's identical comment for reason

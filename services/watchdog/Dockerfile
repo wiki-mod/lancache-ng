@@ -326,9 +326,9 @@ RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
     curl \
     nano \
     zstd
-# What: bash/coreutils/util-linux/zstd/ca-certificates+nano+curl.
-# Why: retention.sh/-entrypoint.sh need these; jq is unused.
-# From: Issue #1556; curl moved into this list by Issue #1781.
+# What: bash/coreutils/util-linux/zstd/ca-certificates+nano+curl
+# Why: retention.sh/-entrypoint.sh need these; jq is unused
+# From: Issue #1781 | PR #1783
 
 # What: verifies the locally apk-installed curl actually runs.
 # Why: catches a broken/missing shared-lib chain at build time.

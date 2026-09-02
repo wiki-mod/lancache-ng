@@ -84,10 +84,9 @@ LABEL org.opencontainers.image.description="nginx-based lancache-ng caching prox
 #     (`local -n`), and `${var,,}` lowercasing all require real bash --
 #     Alpine's base image has no bash by default, unlike Debian's.
 #
-# What: Binaries from shared utilities-tools image; curl comes
-#       from this service's own apk install below instead.
-# Why: Avoids rebuilding; pins identical alpine:3.24 digest.
-# From: Issue #1556; curl split out by Issue #1781.
+# What: curl now apk-installed, not COPY'd from utilities
+# Why: avoids rebuilding; pins identical alpine:3.24 digest
+# From: Issue #1781 | PR #1783
 
 # What: Remove BusyBox symlinks before binary COPY.
 # Why: COPY through symlink corrupts /bin/busybox and /bin/sh.
@@ -139,11 +138,9 @@ RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
 # mechanism (a plain RSA public key file) never pulls in a temporary
 # package the way apt's gpg-based key import did.
 #
-# What: ca-certificates and curl are both apk-installed in this RUN.
-# Why: curl is no longer COPY'd from utilities, so the trust store
-#      must already be in place before this build's own first HTTPS
-#      call (the nginx signing-key fetch below).
-# From: Issue #1781
+# What: ca-certificates and curl are apk-installed together
+# Why: trust store must exist before the first HTTPS call
+# From: Issue #1781 | PR #1783
 # nano: in-container troubleshooting tool -- see services/dns/Dockerfile's
 # identical comment for the full rationale; lsof/ripgrep are COPY'd above
 # but serve the same troubleshooting purpose.

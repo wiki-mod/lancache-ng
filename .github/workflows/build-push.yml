@@ -5010,15 +5010,8 @@ jobs:
             context: services/utilities
             build_contexts: ""
             description: "Shared lancache-ng utilities image (nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd, curl) for COPY --from= consumption of its non-curl tools by seven first-party images (issue #1556); curl itself is apk-installed here but no longer COPY'd cross-image by any consumer (issue #1781)."
-            # What: moved to light, re-evaluating AG-CI-002's own
-            #   exception as its text anticipates.
-            # Why: the curl-builder stage that used to compile/link curl
-            #   from source (gcc/make) is gone -- curl is now `apk add`'d
-            #   like the image's other 9 tools. This Dockerfile now has no
-            #   compiler invocation and no ${BUILD_TOOLS_IMAGE} builder
-            #   stage at all, same shape as proxy/dhcp-proxy/dhcp/syslog/
-            #   ntp below. Revisit again if a future change reintroduces a
-            #   real compile/link step here.
+            # What: moved to light -- no compile step remains
+            # Why: matches proxy/dhcp/ntp's own light-tier reasoning
             # From: Issue #1781
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
 
@@ -5521,17 +5514,9 @@ jobs:
           printf 'RUST_ACCELERATION_NETWORK=%s\n' "$rust_network" >> "$GITHUB_ENV"
           printf 'RUST_BUILDX_NETWORK=%s\n' "$buildx_network" >> "$GITHUB_ENV"
 
-      # What: only runs for matrix.rust services now.
-      # Why: this used to also run for build-tools so a broken Redis/distcc
-      #   endpoint couldn't hide behind a cached curl/git Docker layer --
-      #   build-tools never actually had that C compile (curl was a
-      #   `COPY --from=utilities-tools`, git a plain package in every
-      #   stage), so every input this preflight checks was always empty
-      #   for build-tools regardless; the whole step was a guaranteed
-      #   no-op there. The action itself stays compiler-agnostic
-      #   (validates via `cc`, not rustc) and gates each check on its own
-      #   file input, for the services that do use it.
-      # From: PR #1661
+      # What: only runs for matrix.rust services now
+      # Why: build-tools never had a real compile to validate here
+      # From: Issue #1781 | PR #1783
       - name: Validate acceleration infrastructure outside BuildKit cache
         if: matrix.rust == true
         uses: ./.github/actions/rust-acceleration-preflight
@@ -5545,10 +5530,9 @@ jobs:
           build-network: ${{ env.RUST_ACCELERATION_NETWORK }}
           platform: linux/amd64
 
-      # What: merges sccache-secret's own generated secret files.
-      # Why: kept as its own step (not inlined) so a future second secret
-      #   source can be added the same way sccache-secret was originally.
-      # From: Issue #1095 (G15) | PR #1661
+      # What: merges sccache-secret's own generated secret files
+      # Why: keeps room for a future second secret source
+      # From: Issue #1781 | PR #1783
       - name: Combine sccache/ccache secret files
         id: combined-secret-files
         env:
