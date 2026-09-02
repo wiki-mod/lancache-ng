@@ -34,8 +34,8 @@ FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe
 LABEL org.opencontainers.image.description="nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic."
 
 # What: explicit proxy build-args, no default value set
-# Why: self-hosted builds route apk/downloads via a LAN proxy
-# From: Issue #1637 | Issue #1781
+# Why: routes self-hosted downloads via the LAN proxy
+# From: Issue #1781 | PR #1783
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG NO_PROXY

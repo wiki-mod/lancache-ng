@@ -309,8 +309,8 @@ FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe
 LABEL org.opencontainers.image.description="lancache-ng watchdog: compiled Rust health-check/restart daemon plus the separate file-retention sidecar entrypoint."
 
 # What: explicit proxy build-args, no default value set
-# Why: self-hosted builds route apk/downloads via a LAN proxy
-# From: Issue #1637 | Issue #1781
+# Why: routes self-hosted downloads via the LAN proxy
+# From: Issue #1781 | PR #1783
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG NO_PROXY
@@ -318,30 +318,9 @@ ARG http_proxy
 ARG https_proxy
 ARG no_proxy
 
-# `apk upgrade --no-cache` (before the package install, same layer) upgrades
-# packages already baked into the alpine:3.24 base layer itself -- see
-# services/dhcp-proxy/Dockerfile's identical comment/block for the full
-# rationale and the real verification behind it.
-# What: declares APT_CACHE_BUST right before the RUN it busts.
-# Why: without this, BuildKit cache has no wall-clock expiry.
-# From: Issue #1095
-ARG APT_CACHE_BUST=""
-RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
-    apk upgrade --no-cache && \
-    apk add --no-cache \
-    bash \
-    ca-certificates \
-    coreutils \
-    util-linux \
-    nano \
-    zstd
-# What: bash/coreutils/util-linux/zstd/ca-certificates+nano.
-# Why: retention.sh/-entrypoint.sh need these; jq is unused.
-# From: Issue #1556
-#
 # What: curl/findutils/lsof/ripgrep from shared utilities.
-# Why: same digest as utilities; avoid duplicate installs.
-# From: Issue #1556
+# Why: copied before any apk upgrade touches the same libs
+# From: Issue #1556 | Issue #1781
 #
 # What: removes BusyBox symlinks before real binaries land.
 # Why: COPY follows symlinks, would overwrite /bin/busybox.
@@ -377,6 +356,27 @@ RUN set -euo pipefail; \
     rg --version >/dev/null; \
     curl --version >/dev/null; \
     sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
+
+# `apk upgrade --no-cache` (before the package install, same layer) upgrades
+# packages already baked into the alpine:3.24 base layer itself -- see
+# services/dhcp-proxy/Dockerfile's identical comment/block for the full
+# rationale and the real verification behind it.
+# What: declares APT_CACHE_BUST right before the RUN it busts.
+# Why: without this, BuildKit cache has no wall-clock expiry.
+# From: Issue #1095
+ARG APT_CACHE_BUST=""
+RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
+    apk upgrade --no-cache && \
+    apk add --no-cache \
+    bash \
+    ca-certificates \
+    coreutils \
+    util-linux \
+    nano \
+    zstd
+# What: bash/coreutils/util-linux/zstd/ca-certificates+nano.
+# Why: retention.sh/-entrypoint.sh need these; jq is unused.
+# From: Issue #1556
 
 # nano/lsof/ripgrep/curl: in-container troubleshooting tools -- see
 # services/proxy/Dockerfile's identical comment for the full rationale.

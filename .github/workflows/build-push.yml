@@ -972,29 +972,33 @@ jobs:
           printf 'BUILD_TOOLS_IMAGE=%s\n' "$validation_build_tools_image" >> "$GITHUB_ENV"
           printf 'build_tools_image=%s\n' "$downstream_build_tools_image" >> "$GITHUB_OUTPUT"
 
-      # What: resolves utilities:latest, falls back to :nightly.
-      # Why: latest has never been published; nightly exists and works.
-      # From: Issue #1095 | PR #1706
+      # What: resolves utilities image, smoke-tested with fallback
+      # Why: avoids a stale utilities digest; see script header
+      # From: Issue #1781 | PR #1783
       - name: Resolve utilities image digest
         id: resolve-utilities-image
         env:
+          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          # shellcheck source=scripts/lib/ghcr-retry.sh
-          source scripts/lib/ghcr-retry.sh
 
-          utilities_digest="$(resolve_manifest_digest ghcr.io/wiki-mod/lancache-ng/utilities:latest "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")" \
-            || utilities_digest="$(resolve_manifest_digest ghcr.io/wiki-mod/lancache-ng/utilities:nightly "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")" \
-            || utilities_digest=""
-          if [[ -z "$utilities_digest" ]]; then
-            echo "::error::Could not resolve digest for ghcr.io/wiki-mod/lancache-ng/utilities:latest or :nightly." >&2
-            exit 1
-          fi
+          utilities_image="$(bash scripts/untracked/select-utilities-image.sh)"
 
-          printf 'utilities_image=ghcr.io/wiki-mod/lancache-ng/utilities@%s\n' "$utilities_digest" >> "$GITHUB_OUTPUT"
-          printf 'utilities_digest=%s\n' "$utilities_digest" >> "$GITHUB_OUTPUT"
+          case "$utilities_image" in
+            *@sha256:*)
+              printf 'utilities_image=%s\n' "$utilities_image" >> "$GITHUB_OUTPUT"
+              printf 'utilities_digest=%s\n' "${utilities_image#*@}" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              # What: a branch-local fallback tag has no digest to expose.
+              # Why: consumers still key off `utilities_image` alone here.
+              # From: Issue #1781 | PR #1783
+              printf 'utilities_image=%s\n' "$utilities_image" >> "$GITHUB_OUTPUT"
+              printf 'utilities_digest=\n' >> "$GITHUB_OUTPUT"
+              ;;
+          esac
 
       # What: removes the buildx builder right after its only consumer step.
       # Why: the fallback path uses plain docker build, not buildx.
@@ -5025,7 +5029,7 @@ jobs:
           - service: utilities
             context: services/utilities
             build_contexts: ""
-            description: "Shared lancache-ng utilities image (nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd, curl) for COPY --from= consumption of its non-curl tools by seven first-party images (issue #1556); curl itself is apk-installed here but no longer COPY'd cross-image by any consumer (issue #1781)."
+            description: "Shared lancache-ng utilities image (curl, nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd) for COPY --from= consumption by seven first-party images (issue #1556); curl itself moved from a self-compiled static binary to an apk-installed package (issue #1781), but is still COPY'd cross-image the same way as every other tool here."
             # What: moved to light -- no compile step remains
             # Why: matches proxy/dhcp/ntp's own light-tier reasoning
             # From: Issue #1781
@@ -6744,7 +6748,7 @@ jobs:
             [ui]="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
             [build-tools]="Prebuilt lancache-ng CI and developer validation toolchain image."
             [syslog]="Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428)."
-            [utilities]="Shared lancache-ng utilities image (nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd, curl) for COPY --from= consumption of its non-curl tools by seven first-party images (issue #1556); curl itself is apk-installed here but no longer COPY'd cross-image by any consumer (issue #1781)."
+            [utilities]="Shared lancache-ng utilities image (curl, nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd) for COPY --from= consumption by seven first-party images (issue #1556); curl itself moved from a self-compiled static binary to an apk-installed package (issue #1781), but is still COPY'd cross-image the same way as every other tool here."
           )
 
           # Duplicated rather than factored into a shared script/action: GitHub Actions

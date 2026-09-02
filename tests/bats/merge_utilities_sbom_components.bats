@@ -27,8 +27,10 @@ EOF
     # Mirrors the real utilities image's full apk package set: some packages
     # every consumer that copies from utilities-tools should keep (ripgrep,
     # lsof, libgcc, pcre2), some only specific services copy (findutils,
-    # gettext-envsubst, libintl), and some no consumer ever copies at all
-    # (nano, coreutils) -- the over-reporting bug this script fixes.
+    # gettext-envsubst, libintl), curl's own 12-package apk dependency set
+    # (Issue #1781 -- confirmed live via `apk info --who-owns` against a
+    # real alpine:3.24 + apk add curl), and some no consumer ever copies at
+    # all (nano, coreutils) -- the over-reporting bug this script fixes.
     cat >"$workdir/utilities.cdx.json" <<'EOF'
 {
   "bomFormat": "CycloneDX",
@@ -40,12 +42,26 @@ EOF
     {"name": "findutils", "type": "library", "purl": "pkg:apk/alpine/findutils@4.10.0-r1"},
     {"name": "gettext-envsubst", "type": "library", "purl": "pkg:apk/alpine/gettext-envsubst@1.0-r0"},
     {"name": "libintl", "type": "library", "purl": "pkg:apk/alpine/libintl@1.0-r0"},
+    {"name": "curl", "type": "library", "purl": "pkg:apk/alpine/curl@8.21.0-r0"},
+    {"name": "libcurl", "type": "library", "purl": "pkg:apk/alpine/libcurl@8.21.0-r0"},
+    {"name": "zlib", "type": "library", "purl": "pkg:apk/alpine/zlib@1.3.2-r0"},
+    {"name": "c-ares", "type": "library", "purl": "pkg:apk/alpine/c-ares@1.34.8-r0"},
+    {"name": "nghttp2-libs", "type": "library", "purl": "pkg:apk/alpine/nghttp2-libs@1.69.0-r0"},
+    {"name": "libidn2", "type": "library", "purl": "pkg:apk/alpine/libidn2@2.3.8-r0"},
+    {"name": "libpsl", "type": "library", "purl": "pkg:apk/alpine/libpsl@0.21.5-r3"},
+    {"name": "libssl3", "type": "library", "purl": "pkg:apk/alpine/libssl3@3.5.7-r0"},
+    {"name": "libcrypto3", "type": "library", "purl": "pkg:apk/alpine/libcrypto3@3.5.7-r0"},
+    {"name": "zstd-libs", "type": "library", "purl": "pkg:apk/alpine/zstd-libs@1.5.7-r2"},
+    {"name": "brotli-libs", "type": "library", "purl": "pkg:apk/alpine/brotli-libs@1.2.0-r1"},
+    {"name": "libunistring", "type": "library", "purl": "pkg:apk/alpine/libunistring@1.4.2-r0"},
     {"name": "nano", "type": "library", "purl": "pkg:apk/alpine/nano@8.5-r0"},
     {"name": "coreutils", "type": "library", "purl": "pkg:apk/alpine/coreutils@9.11-r0"}
   ]
 }
 EOF
 }
+
+curl_packages="curl libcurl zlib c-ares nghttp2-libs libidn2 libpsl libssl3 libcrypto3 zstd-libs brotli-libs libunistring"
 
 teardown() {
     rm -rf "$workdir"
@@ -55,28 +71,38 @@ component_names() {
     jq -r '.components[].name' <<<"$1" | sort
 }
 
-@test "ui keeps only lsof/ripgrep/libgcc/pcre2 from utilities, drops the rest" {
+@test "ui keeps lsof/ripgrep/libgcc/pcre2 plus curl's own package set from utilities" {
     run bash "$script" ui "$workdir/service.cdx.json" "$workdir/utilities.cdx.json"
     [ "$status" -eq 0 ]
     got="$(component_names "$output")"
-    expected=$'lsof\nlibgcc\npcre2\nripgrep\nsvc-own-pkg'
-    [ "$got" = "$(sort <<<"$expected")" ]
+    expected="lsof libgcc pcre2 ripgrep svc-own-pkg $curl_packages"
+    [ "$got" = "$(tr ' ' '\n' <<<"$expected" | sort)" ]
 }
 
-@test "ntp keeps only gettext-envsubst/libintl, drops lsof/ripgrep/findutils" {
+@test "ntp keeps gettext-envsubst/libintl plus curl's own package set, drops lsof/ripgrep/findutils" {
     run bash "$script" ntp "$workdir/service.cdx.json" "$workdir/utilities.cdx.json"
     [ "$status" -eq 0 ]
     got="$(component_names "$output")"
-    expected=$'gettext-envsubst\nlibintl\nsvc-own-pkg'
-    [ "$got" = "$(sort <<<"$expected")" ]
+    expected="gettext-envsubst libintl svc-own-pkg $curl_packages"
+    [ "$got" = "$(tr ' ' '\n' <<<"$expected" | sort)" ]
 }
 
-@test "dhcp keeps the 7-package findutils/gettext-envsubst/libintl/lsof/ripgrep/libgcc/pcre2 set" {
+@test "dhcp keeps the findutils/gettext-envsubst/libintl/lsof/ripgrep/libgcc/pcre2 set plus curl's own package set" {
     run bash "$script" dhcp "$workdir/service.cdx.json" "$workdir/utilities.cdx.json"
+    [ "$status" -eq 0 ]
+    got="$(component_names "$output")"
+    expected="findutils gettext-envsubst libintl lsof ripgrep libgcc pcre2 svc-own-pkg $curl_packages"
+    [ "$got" = "$(tr ' ' '\n' <<<"$expected" | sort)" ]
+}
+
+@test "dhcp-proxy keeps the same 7-package set as dhcp/dns/proxy but WITHOUT curl (never copies it)" {
+    run bash "$script" dhcp-proxy "$workdir/service.cdx.json" "$workdir/utilities.cdx.json"
     [ "$status" -eq 0 ]
     got="$(component_names "$output")"
     expected=$'findutils\ngettext-envsubst\nlibintl\nlsof\nripgrep\nlibgcc\npcre2\nsvc-own-pkg'
     [ "$got" = "$(sort <<<"$expected")" ]
+    ! grep -q '"curl"' <<<"$output"
+    ! grep -q '"libcurl"' <<<"$output"
 }
 
 @test "nano and coreutils never survive the filter for any consumer service" {

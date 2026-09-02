@@ -27,19 +27,29 @@ command -v jq >/dev/null 2>&1 || {
 [ -s "$service_sbom" ] || { echo "error: missing or empty $service_sbom." >&2; exit 1; }
 [ -s "$utilities_sbom" ] || { echo "error: missing or empty $utilities_sbom." >&2; exit 1; }
 
+# What: apk package names curl's shared libraries belong to.
+# Why: verified live via `apk info --who-owns` per package.
+# From: Issue #1781 | PR #1783
+curl_packages="curl libcurl zlib c-ares nghttp2-libs libidn2 libpsl libssl3 libcrypto3 zstd-libs brotli-libs libunistring"
+
 # apk package names each service's Dockerfile COPY's from utilities-tools.
+# dhcp-proxy is deliberately excluded from $curl_packages: confirmed (grep)
+# it never COPYs curl at all, unlike the other six real consumers.
 case "$service" in
-  proxy | dhcp | dhcp-proxy | dns)
+  proxy | dhcp | dns)
+    allowed_packages="findutils gettext-envsubst libintl lsof ripgrep libgcc pcre2 $curl_packages"
+    ;;
+  dhcp-proxy)
     allowed_packages="findutils gettext-envsubst libintl lsof ripgrep libgcc pcre2"
     ;;
   ntp)
-    allowed_packages="gettext-envsubst libintl"
+    allowed_packages="gettext-envsubst libintl $curl_packages"
     ;;
   watchdog)
-    allowed_packages="findutils lsof ripgrep libgcc pcre2"
+    allowed_packages="findutils lsof ripgrep libgcc pcre2 $curl_packages"
     ;;
   ui)
-    allowed_packages="lsof ripgrep libgcc pcre2"
+    allowed_packages="lsof ripgrep libgcc pcre2 $curl_packages"
     ;;
   *)
     echo "error: no utilities-package allowlist defined for service '$service'." >&2

@@ -12,8 +12,8 @@
 FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 # What: explicit proxy build-args, no default value set
-# Why: self-hosted builds route apk/downloads via a LAN proxy
-# From: Issue #1637 | Issue #1781
+# Why: routes self-hosted downloads via the LAN proxy
+# From: Issue #1781 | PR #1783
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG NO_PROXY
@@ -56,6 +56,6 @@ RUN set -euo pipefail; \
 COPY verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
 
 # What: verifies the apk-packaged curl actually runs.
-# Why: catches a broken/missing shared-lib chain at build time.
+# Why: catches broken shared libs at build, not runtime exec.
 # From: Issue #1781
 RUN curl --version >/dev/null

@@ -79,8 +79,8 @@ FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe
 LABEL org.opencontainers.image.description="Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks."
 
 # What: explicit proxy build-args, no default value set
-# Why: self-hosted builds route apk/downloads via a LAN proxy
-# From: Issue #1637 | Issue #1781
+# Why: routes self-hosted downloads via the LAN proxy
+# From: Issue #1781 | PR #1783
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG NO_PROXY
@@ -148,7 +148,7 @@ RUN : "apt-cache-bust=${APT_CACHE_BUST}" && apk update --no-cache && apk upgrade
     nano
 
 # What: verifies the locally apk-installed curl actually runs.
-# Why: catches a broken/missing shared-lib chain at build time.
+# Why: catches broken shared libs at build, not runtime exec.
 # From: Issue #1781
 RUN curl --version >/dev/null
 

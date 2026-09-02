@@ -277,12 +277,28 @@ before -- and also corrects this entry's own description of that script's mechan
 the allowlist is a hardcoded per-service `case` statement in the script itself (`proxy
 | dhcp | dhcp-proxy | dns` / `ntp` / `watchdog` / `ui`, each listing fixed package
 names), not derived from each Dockerfile's `COPY --from=utilities-tools` lines as
-stated above. It never listed `curl` for any service, before or after #1781. Issue
-#1781 also stopped every one of the 7 consumers from `COPY --from=utilities-tools`-ing
-curl at all (each now installs its own curl directly via its own `apk add`), which
-matches that hardcoded allowlist's own long-standing omission of curl -- confirmed by
-re-running `bats tests/bats/merge_utilities_sbom_components.bats` after the change (all
-8 of its cases still pass unmodified).
+stated above. It never listed `curl` for any service, before or after #1781.
+
+**Second correction (2026-09-02, Issue #1781):** the paragraph directly above this one
+was itself wrong about the end state -- a mid-PR revision had briefly made every
+consumer install curl locally via its own `apk add` instead of continuing to `COPY` it
+from `utilities`, which the maintainer then reverted as architecturally incorrect (six
+of the seven real consumers -- all but `dhcp-proxy`, which never consumed curl at all --
+still `COPY --from=utilities-tools` curl, exactly like every other shared tool in that
+image). Since curl now really does have a real apk-db SBOM component (confirmed above)
+*and* is still genuinely `COPY`'d into six consumers, the hardcoded allowlist's
+long-standing omission of `curl` became a real under-reporting gap: those six consumers
+ship curl's package plus its now-dynamic-linking dependency closure (`libcurl`, `zlib`,
+`c-ares`, `nghttp2-libs`, `libidn2`, `libpsl`, `libssl3`, `libcrypto3`, `zstd-libs`,
+`brotli-libs`, `libunistring` -- confirmed live per-file via `apk info --who-owns`
+against a real `alpine:3.24` + `apk add curl`), none of which the allowlist surfaced.
+Fixed: `merge-utilities-sbom-components.sh`'s allowlist now includes that full package
+set for `proxy`/`dhcp`/`dns`/`ntp`/`watchdog`/`ui`, and explicitly excludes it for
+`dhcp-proxy` (its own case branch, split out from the `proxy | dhcp | dhcp-proxy | dns`
+group it used to share, since it alone among that group never copies curl) --
+re-verified live: `bats tests/bats/merge_utilities_sbom_components.bats` (15 cases,
+including a new `dhcp-proxy`-specific regression test asserting curl is absent there)
+and `bats tests/bats/select_utilities_image.bats` both pass.
 
 ---
 

@@ -88,8 +88,8 @@ BUILD_GO_TOOLS_EOF
 FROM golang:latest AS go-tools-builder
 
 # What: explicit proxy build-args, no default value set
-# Why: self-hosted builds route go/apt downloads via a LAN proxy
-# From: Issue #1637 | Issue #1781
+# Why: routes self-hosted go/apt downloads via the LAN proxy
+# From: Issue #1781 | PR #1783
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG NO_PROXY
@@ -120,8 +120,8 @@ RUN chmod +x /build-go-tools.sh && /build-go-tools.sh
 FROM golang:alpine AS go-tools-builder-alpine
 
 # What: explicit proxy build-args, no default value set
-# Why: self-hosted builds route go/apk downloads via a LAN proxy
-# From: Issue #1637 | Issue #1781
+# Why: routes self-hosted go/apk downloads via the LAN proxy
+# From: Issue #1781 | PR #1783
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG NO_PROXY
@@ -165,8 +165,8 @@ FROM rust:alpine3.24 AS alpine-final
 LABEL org.opencontainers.image.description="Prebuilt lancache-ng CI and developer validation toolchain image (Alpine candidate)."
 
 # What: explicit proxy build-args, no default value set
-# Why: self-hosted builds route apk/cargo/curl via a LAN proxy
-# From: Issue #1637 | Issue #1781
+# Why: routes self-hosted apk/cargo pulls via the LAN proxy
+# From: Issue #1781 | PR #1783
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG NO_PROXY
@@ -470,8 +470,8 @@ FROM rust:latest
 LABEL org.opencontainers.image.description="Prebuilt lancache-ng CI and developer validation toolchain image."
 
 # What: explicit proxy build-args, no default value set
-# Why: self-hosted builds route apt/cargo/curl via a LAN proxy
-# From: Issue #1637 | Issue #1781
+# Why: routes self-hosted apt/cargo pulls via the LAN proxy
+# From: Issue #1781 | PR #1783
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG NO_PROXY

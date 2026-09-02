@@ -559,8 +559,8 @@ FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe
 LABEL org.opencontainers.image.description="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
 
 # What: explicit proxy build-args, no default value set
-# Why: self-hosted builds route apk/downloads via a LAN proxy
-# From: Issue #1637 | Issue #1781
+# Why: routes self-hosted downloads via the LAN proxy
+# From: Issue #1781 | PR #1783
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG NO_PROXY
@@ -588,21 +588,9 @@ ARG no_proxy
 #   - ca-certificates, coreutils: unchanged package names, confirmed present
 #     on Alpine, kept apk-installed (excluded from the utilities migration --
 #     see services/proxy/Dockerfile's comment for ca-certificates' reason).
-# What: declares APT_CACHE_BUST right before RUN that uses it
-# Why: prevents BuildKit cache replaying stale apk index forever
-# From: Issue #1095
-ARG APT_CACHE_BUST=""
-RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
-    apk upgrade --no-cache && \
-    apk add --no-cache \
-    ca-certificates \
-    coreutils \
-    util-linux \
-    nano
-
 # What: curl/lsof/ripgrep come from shared utilities image
-# Why: same alpine:3.24 digest as utilities for consistency
-# From: Issue #1556
+# Why: copied before any apk upgrade touches the same libs
+# From: Issue #1556 | Issue #1781
 
 # What: removes BusyBox symlink before real binary lands
 # Why: see services/proxy/Dockerfile's identical comment for reason
@@ -635,6 +623,18 @@ RUN set -euo pipefail; \
     rg --version >/dev/null; \
     curl --version >/dev/null; \
     sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
+
+# What: declares APT_CACHE_BUST right before RUN that uses it
+# Why: prevents cache from replaying a stale apk index forever
+# From: Issue #1095
+ARG APT_CACHE_BUST=""
+RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
+    apk upgrade --no-cache && \
+    apk add --no-cache \
+    ca-certificates \
+    coreutils \
+    util-linux \
+    nano
 
 # nano: in-container troubleshooting tool -- see services/proxy/Dockerfile's
 # identical comment for the full rationale; lsof/ripgrep are COPY'd above

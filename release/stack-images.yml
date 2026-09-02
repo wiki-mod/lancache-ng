@@ -154,13 +154,13 @@ tooling:
       - linux/amd64
       - linux/arm64
     description: >-
-      Shared non-compiler CLI-tools image (nano, lsof, ripgrep, findutils,
-      coreutils, gettext-envsubst, jq, ca-certificates, zstd, curl), whose
-      non-curl tools are consumed via COPY --from= by seven first-party
-      images (issue #1556) instead of each one independently
-      installing/building its own copy. curl itself is apk-installed here
-      but, since issue #1781, is no longer COPY'd cross-image by any
-      consumer -- each installs its own curl directly instead.
+      Shared non-compiler CLI-tools image (curl, nano, lsof, ripgrep,
+      findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd),
+      consumed via COPY --from= by seven first-party images (issue #1556)
+      instead of each one independently installing/building its own copy.
+      curl itself moved from a self-compiled static binary to an
+      apk-installed package (issue #1781), but is still COPY'd cross-image
+      the same way as every other tool here.
     consumers:
       - services/proxy/Dockerfile
       - services/dns/Dockerfile
