@@ -356,10 +356,12 @@ setup_decide_one() {
     push_reuse_decide() { echo "MUST NOT BE CALLED" >&2; printf 'true\n'; }
     GITHUB_EVENT_NAME="workflow_dispatch"
 
-    run decide_one build_tools build-tools "" "" "true"
+    # decide_one's own "::notice::" line goes to stderr on this path (matching
+    # push_reuse_decide's diagnostic convention above) -- captured directly,
+    # not via `run`, which would merge it into stdout's single "false" line.
+    result="$(decide_one build_tools build-tools "" "" "true" 2>/dev/null)"
 
-    [ "$status" -eq 0 ]
-    [ "$output" = "false" ]
+    [ "$result" = "false" ]
 }
 
 @test "decide_one: workflow_dispatch forces a real build for utilities despite ignore_workflow_gate=true" {
@@ -367,10 +369,9 @@ setup_decide_one() {
     push_reuse_decide() { printf 'true\n'; }
     GITHUB_EVENT_NAME="workflow_dispatch"
 
-    run decide_one utilities utilities "" "" "true"
+    result="$(decide_one utilities utilities "" "" "true" 2>/dev/null)"
 
-    [ "$status" -eq 0 ]
-    [ "$output" = "false" ]
+    [ "$result" = "false" ]
 }
 
 @test "decide_one: a push event still lets build-tools reuse via ignore_workflow_gate=true (dispatch override does not leak into push)" {
