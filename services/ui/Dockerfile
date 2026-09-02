@@ -558,6 +558,16 @@ FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe
 
 LABEL org.opencontainers.image.description="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
 
+# What: explicit proxy build-args, no default value set
+# Why: self-hosted builds route apk/downloads via a LAN proxy
+# From: Issue #1637 | Issue #1781
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
+
 # Package translations from the prior debian:trixie-slim stage (verified live
 # against a real alpine:3.24 container, per issue #815's own instruction to
 # check rather than assume a substitute is needed):
@@ -588,23 +598,30 @@ RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
     ca-certificates \
     coreutils \
     util-linux \
-    curl \
     nano
 
-# What: verifies the locally apk-installed curl actually runs.
-# Why: catches a broken/missing shared-lib chain at build time.
-# From: Issue #1781
-RUN curl --version >/dev/null
-
-# What: curl now apk-installed, not COPY'd from utilities
+# What: curl/lsof/ripgrep come from shared utilities image
 # Why: same alpine:3.24 digest as utilities for consistency
-# From: Issue #1781 | PR #1783
+# From: Issue #1556
 
 # What: removes BusyBox symlink before real binary lands
 # Why: see services/proxy/Dockerfile's identical comment for reason
 # From: Issue #1556
 RUN rm -f /usr/bin/lsof
 
+COPY --from=utilities-tools /usr/bin/curl /usr/bin/curl
+COPY --from=utilities-tools /usr/lib/libcurl.so.4 /usr/lib/libcurl.so.4
+COPY --from=utilities-tools /usr/lib/libz.so.1 /usr/lib/libz.so.1
+COPY --from=utilities-tools /usr/lib/libcares.so.2 /usr/lib/libcares.so.2
+COPY --from=utilities-tools /usr/lib/libnghttp2.so.14 /usr/lib/libnghttp2.so.14
+COPY --from=utilities-tools /usr/lib/libidn2.so.0 /usr/lib/libidn2.so.0
+COPY --from=utilities-tools /usr/lib/libpsl.so.5 /usr/lib/libpsl.so.5
+COPY --from=utilities-tools /usr/lib/libssl.so.3 /usr/lib/libssl.so.3
+COPY --from=utilities-tools /usr/lib/libcrypto.so.3 /usr/lib/libcrypto.so.3
+COPY --from=utilities-tools /usr/lib/libzstd.so.1 /usr/lib/libzstd.so.1
+COPY --from=utilities-tools /usr/lib/libbrotlidec.so.1 /usr/lib/libbrotlidec.so.1
+COPY --from=utilities-tools /usr/lib/libunistring.so.5 /usr/lib/libunistring.so.5
+COPY --from=utilities-tools /usr/lib/libbrotlicommon.so.1 /usr/lib/libbrotlicommon.so.1
 COPY --from=utilities-tools /usr/bin/lsof /usr/bin/lsof
 COPY --from=utilities-tools /usr/bin/rg /usr/bin/rg
 COPY --from=utilities-tools /usr/lib/libgcc_s.so.1 /usr/lib/libgcc_s.so.1
@@ -616,6 +633,7 @@ COPY --from=utilities-tools /usr/local/bin/verify-version-banner.sh /usr/local/b
 # From: Issue #1613
 RUN set -euo pipefail; \
     rg --version >/dev/null; \
+    curl --version >/dev/null; \
     sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
 
 # nano: in-container troubleshooting tool -- see services/proxy/Dockerfile's

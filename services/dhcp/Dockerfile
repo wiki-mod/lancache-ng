@@ -78,15 +78,38 @@ FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe
 
 LABEL org.opencontainers.image.description="Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks."
 
-# What: curl now apk-installed, not COPY'd from utilities
+# What: explicit proxy build-args, no default value set
+# Why: self-hosted builds route apk/downloads via a LAN proxy
+# From: Issue #1637 | Issue #1781
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
+
+# What: COPY shared binaries from utilities image
 # Why: binary-compatible with utilities digest; jq stays local
-# From: Issue #1781 | PR #1783
+# From: Issue #1556
 
 # What: remove BusyBox symlinks before real binaries land.
 # Why: prevent shadowing of utilities image binaries.
 # From: Issue #1556
 RUN rm -f /usr/bin/find /usr/bin/xargs /usr/bin/lsof
 
+COPY --from=utilities-tools /usr/bin/curl /usr/bin/curl
+COPY --from=utilities-tools /usr/lib/libcurl.so.4 /usr/lib/libcurl.so.4
+COPY --from=utilities-tools /usr/lib/libz.so.1 /usr/lib/libz.so.1
+COPY --from=utilities-tools /usr/lib/libcares.so.2 /usr/lib/libcares.so.2
+COPY --from=utilities-tools /usr/lib/libnghttp2.so.14 /usr/lib/libnghttp2.so.14
+COPY --from=utilities-tools /usr/lib/libidn2.so.0 /usr/lib/libidn2.so.0
+COPY --from=utilities-tools /usr/lib/libpsl.so.5 /usr/lib/libpsl.so.5
+COPY --from=utilities-tools /usr/lib/libssl.so.3 /usr/lib/libssl.so.3
+COPY --from=utilities-tools /usr/lib/libcrypto.so.3 /usr/lib/libcrypto.so.3
+COPY --from=utilities-tools /usr/lib/libzstd.so.1 /usr/lib/libzstd.so.1
+COPY --from=utilities-tools /usr/lib/libbrotlidec.so.1 /usr/lib/libbrotlidec.so.1
+COPY --from=utilities-tools /usr/lib/libunistring.so.5 /usr/lib/libunistring.so.5
+COPY --from=utilities-tools /usr/lib/libbrotlicommon.so.1 /usr/lib/libbrotlicommon.so.1
 COPY --from=utilities-tools /usr/bin/find /usr/bin/find
 COPY --from=utilities-tools /usr/bin/xargs /usr/bin/xargs
 COPY --from=utilities-tools /usr/bin/envsubst /usr/bin/envsubst
@@ -104,6 +127,7 @@ RUN set -euo pipefail; \
     find . -maxdepth 0 -printf '%f\n' >/dev/null; \
     printf '%s' '$FOO' | FOO=bar envsubst >/dev/null; \
     rg --version >/dev/null; \
+    curl --version >/dev/null; \
     sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
 
 # What: declare APT_CACHE_BUST before RUN for cache busting.
@@ -117,7 +141,6 @@ RUN : "apt-cache-bust=${APT_CACHE_BUST}" && apk update --no-cache && apk upgrade
     kea-admin \
     kea-hook-lease-cmds \
     bash \
-    curl \
     nmap \
     openssl \
     jq \

@@ -308,6 +308,16 @@ FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe
 
 LABEL org.opencontainers.image.description="lancache-ng watchdog: compiled Rust health-check/restart daemon plus the separate file-retention sidecar entrypoint."
 
+# What: explicit proxy build-args, no default value set
+# Why: self-hosted builds route apk/downloads via a LAN proxy
+# From: Issue #1637 | Issue #1781
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
+
 # `apk upgrade --no-cache` (before the package install, same layer) upgrades
 # packages already baked into the alpine:3.24 base layer itself -- see
 # services/dhcp-proxy/Dockerfile's identical comment/block for the full
@@ -323,19 +333,13 @@ RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
     ca-certificates \
     coreutils \
     util-linux \
-    curl \
     nano \
     zstd
-# What: bash/coreutils/util-linux/zstd/ca-certificates+nano+curl
-# Why: retention.sh/-entrypoint.sh need these; jq is unused
-# From: Issue #1781 | PR #1783
-
-# What: verifies the locally apk-installed curl actually runs.
-# Why: catches a broken/missing shared-lib chain at build time.
-# From: Issue #1781
-RUN curl --version >/dev/null
+# What: bash/coreutils/util-linux/zstd/ca-certificates+nano.
+# Why: retention.sh/-entrypoint.sh need these; jq is unused.
+# From: Issue #1556
 #
-# What: findutils/lsof/ripgrep from shared utilities image.
+# What: curl/findutils/lsof/ripgrep from shared utilities.
 # Why: same digest as utilities; avoid duplicate installs.
 # From: Issue #1556
 #
@@ -344,6 +348,19 @@ RUN curl --version >/dev/null
 # From: Issue #1556
 RUN rm -f /usr/bin/find /usr/bin/xargs /usr/bin/lsof
 
+COPY --from=utilities-tools /usr/bin/curl /usr/bin/curl
+COPY --from=utilities-tools /usr/lib/libcurl.so.4 /usr/lib/libcurl.so.4
+COPY --from=utilities-tools /usr/lib/libz.so.1 /usr/lib/libz.so.1
+COPY --from=utilities-tools /usr/lib/libcares.so.2 /usr/lib/libcares.so.2
+COPY --from=utilities-tools /usr/lib/libnghttp2.so.14 /usr/lib/libnghttp2.so.14
+COPY --from=utilities-tools /usr/lib/libidn2.so.0 /usr/lib/libidn2.so.0
+COPY --from=utilities-tools /usr/lib/libpsl.so.5 /usr/lib/libpsl.so.5
+COPY --from=utilities-tools /usr/lib/libssl.so.3 /usr/lib/libssl.so.3
+COPY --from=utilities-tools /usr/lib/libcrypto.so.3 /usr/lib/libcrypto.so.3
+COPY --from=utilities-tools /usr/lib/libzstd.so.1 /usr/lib/libzstd.so.1
+COPY --from=utilities-tools /usr/lib/libbrotlidec.so.1 /usr/lib/libbrotlidec.so.1
+COPY --from=utilities-tools /usr/lib/libunistring.so.5 /usr/lib/libunistring.so.5
+COPY --from=utilities-tools /usr/lib/libbrotlicommon.so.1 /usr/lib/libbrotlicommon.so.1
 COPY --from=utilities-tools /usr/bin/find /usr/bin/find
 COPY --from=utilities-tools /usr/bin/xargs /usr/bin/xargs
 COPY --from=utilities-tools /usr/bin/lsof /usr/bin/lsof
@@ -358,6 +375,7 @@ COPY --from=utilities-tools /usr/local/bin/verify-version-banner.sh /usr/local/b
 RUN set -euo pipefail; \
     find . -maxdepth 0 -printf '%f\n' >/dev/null; \
     rg --version >/dev/null; \
+    curl --version >/dev/null; \
     sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
 
 # nano/lsof/ripgrep/curl: in-container troubleshooting tools -- see

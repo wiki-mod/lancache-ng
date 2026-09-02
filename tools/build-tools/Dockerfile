@@ -87,6 +87,16 @@ BUILD_GO_TOOLS_EOF
 
 FROM golang:latest AS go-tools-builder
 
+# What: explicit proxy build-args, no default value set
+# Why: self-hosted builds route go/apt downloads via a LAN proxy
+# From: Issue #1637 | Issue #1781
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
+
 ARG DOCKER_CLI_VERSION
 ARG DOCKER_COMPOSE_VERSION
 ARG DOCKER_BUILDX_VERSION
@@ -108,6 +118,16 @@ RUN chmod +x /build-go-tools.sh && /build-go-tools.sh
 # Why: kept separate so the Debian stage stays unchanged.
 # From: Issue #1095 | PR #1743
 FROM golang:alpine AS go-tools-builder-alpine
+
+# What: explicit proxy build-args, no default value set
+# Why: self-hosted builds route go/apk downloads via a LAN proxy
+# From: Issue #1637 | Issue #1781
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
 
 ARG DOCKER_CLI_VERSION
 ARG DOCKER_COMPOSE_VERSION
@@ -143,6 +163,16 @@ RUN set -euo pipefail; \
 FROM rust:alpine3.24 AS alpine-final
 
 LABEL org.opencontainers.image.description="Prebuilt lancache-ng CI and developer validation toolchain image (Alpine candidate)."
+
+# What: explicit proxy build-args, no default value set
+# Why: self-hosted builds route apk/cargo/curl via a LAN proxy
+# From: Issue #1637 | Issue #1781
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
 
 # What: inherits shared version pins from top-level ARGs
 # Why: avoids re-declaring the same literal per stage
@@ -438,6 +468,16 @@ CMD ["bash"]
 FROM rust:latest
 
 LABEL org.opencontainers.image.description="Prebuilt lancache-ng CI and developer validation toolchain image."
+
+# What: explicit proxy build-args, no default value set
+# Why: self-hosted builds route apt/cargo/curl via a LAN proxy
+# From: Issue #1637 | Issue #1781
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
 
 # What: inherits shared version pins from top-level ARGs
 # Why: avoids re-declaring the same literal per stage

@@ -218,6 +218,9 @@ jobs:
           BUILDX_BUILDER: ${{ steps.buildx.outputs.name }}
           BUILDX_CACHE_FROM_DIR: ${{ steps.buildx-cache.outputs.cache-from }}
           BUILDX_CACHE_TO_DIR: ${{ steps.buildx-cache.outputs.cache-to }}
+          HTTP_PROXY: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
+          HTTPS_PROXY: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
+          NO_PROXY: ${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
         run: |
           set -euo pipefail
           source "$GITHUB_WORKSPACE/scripts/lib/build-retry.sh"
@@ -229,6 +232,12 @@ jobs:
             --platform linux/amd64 \
             --provenance=false \
             --build-arg "APT_CACHE_BUST=$APT_CACHE_BUST" \
+            --build-arg "HTTP_PROXY=$HTTP_PROXY" \
+            --build-arg "HTTPS_PROXY=$HTTPS_PROXY" \
+            --build-arg "NO_PROXY=$NO_PROXY" \
+            --build-arg "http_proxy=$HTTP_PROXY" \
+            --build-arg "https_proxy=$HTTPS_PROXY" \
+            --build-arg "no_proxy=$NO_PROXY" \
             --cache-from "type=local,src=$BUILDX_CACHE_FROM_DIR" \
             --cache-to "type=local,dest=$BUILDX_CACHE_TO_DIR,mode=max" \
             tools/build-tools
@@ -254,6 +263,12 @@ jobs:
             org.opencontainers.image.base.golang.digest=${{ steps.build-tools-base-digests.outputs.golang }}
           build-args: |
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
+            HTTP_PROXY=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
+            HTTPS_PROXY=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
+            NO_PROXY=${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
+            http_proxy=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
+            https_proxy=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
+            no_proxy=${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
           # What: network wire, set by the step above
           # Why: keeps a real accelerator easy to reintroduce later
           # From: Issue #1781 | PR #1783

@@ -33,6 +33,16 @@ FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe
 
 LABEL org.opencontainers.image.description="nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic."
 
+# What: explicit proxy build-args, no default value set
+# Why: self-hosted builds route apk/downloads via a LAN proxy
+# From: Issue #1637 | Issue #1781
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
+
 # `apk upgrade --no-cache` (before the package installs, same layer)
 # upgrades packages already baked into the alpine:3.24 base layer itself --
 # see services/dhcp-proxy/Dockerfile's matching comment for the fuller
@@ -84,15 +94,28 @@ LABEL org.opencontainers.image.description="nginx-based lancache-ng caching prox
 #     (`local -n`), and `${var,,}` lowercasing all require real bash --
 #     Alpine's base image has no bash by default, unlike Debian's.
 #
-# What: curl now apk-installed, not COPY'd from utilities
-# Why: avoids rebuilding; pins identical alpine:3.24 digest
-# From: Issue #1781 | PR #1783
+# What: Binaries from shared utilities-tools image.
+# Why: Avoids rebuilding; pins identical alpine:3.24 digest.
+# From: Issue #1556
 
 # What: Remove BusyBox symlinks before binary COPY.
 # Why: COPY through symlink corrupts /bin/busybox and /bin/sh.
 # From: Issue #1556
 RUN rm -f /usr/bin/find /usr/bin/xargs /usr/bin/lsof
 
+COPY --from=utilities-tools /usr/bin/curl /usr/bin/curl
+COPY --from=utilities-tools /usr/lib/libcurl.so.4 /usr/lib/libcurl.so.4
+COPY --from=utilities-tools /usr/lib/libz.so.1 /usr/lib/libz.so.1
+COPY --from=utilities-tools /usr/lib/libcares.so.2 /usr/lib/libcares.so.2
+COPY --from=utilities-tools /usr/lib/libnghttp2.so.14 /usr/lib/libnghttp2.so.14
+COPY --from=utilities-tools /usr/lib/libidn2.so.0 /usr/lib/libidn2.so.0
+COPY --from=utilities-tools /usr/lib/libpsl.so.5 /usr/lib/libpsl.so.5
+COPY --from=utilities-tools /usr/lib/libssl.so.3 /usr/lib/libssl.so.3
+COPY --from=utilities-tools /usr/lib/libcrypto.so.3 /usr/lib/libcrypto.so.3
+COPY --from=utilities-tools /usr/lib/libzstd.so.1 /usr/lib/libzstd.so.1
+COPY --from=utilities-tools /usr/lib/libbrotlidec.so.1 /usr/lib/libbrotlidec.so.1
+COPY --from=utilities-tools /usr/lib/libunistring.so.5 /usr/lib/libunistring.so.5
+COPY --from=utilities-tools /usr/lib/libbrotlicommon.so.1 /usr/lib/libbrotlicommon.so.1
 COPY --from=utilities-tools /usr/bin/find /usr/bin/find
 COPY --from=utilities-tools /usr/bin/xargs /usr/bin/xargs
 COPY --from=utilities-tools /usr/bin/envsubst /usr/bin/envsubst
@@ -110,6 +133,7 @@ RUN set -euo pipefail; \
     find . -maxdepth 0 -printf '%f\n' >/dev/null; \
     printf '%s' '$FOO' | FOO=bar envsubst >/dev/null; \
     rg --version >/dev/null; \
+    curl --version >/dev/null; \
     sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
 
 # What: Declare APT_CACHE_BUST to expire BuildKit cache.
@@ -118,7 +142,7 @@ RUN set -euo pipefail; \
 ARG APT_CACHE_BUST=""
 RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
     apk upgrade --no-cache && \
-    apk add --no-cache ca-certificates openssl curl && \
+    apk add --no-cache ca-certificates openssl && \
     curl -fsSL -o /etc/apk/keys/nginx_signing.rsa.pub https://nginx.org/keys/nginx_signing.rsa.pub && \
     printf '%s\n' "@nginx https://nginx.org/packages/mainline/alpine/v$(cut -d. -f1,2 /etc/alpine-release)/main" >> /etc/apk/repositories && \
     apk update && \
@@ -136,11 +160,10 @@ RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
 # itself needs) -- same rationale as the prior Debian stage, no gnupg-style
 # purge-after-use step is needed here since Alpine's apk signing-key
 # mechanism (a plain RSA public key file) never pulls in a temporary
-# package the way apt's gpg-based key import did.
-#
-# What: ca-certificates and curl are apk-installed together
-# Why: trust store must exist before the first HTTPS call
-# From: Issue #1781 | PR #1783
+# package the way apt's gpg-based key import did. ca-certificates is
+# apk-installed (not copied from utilities): it is a certificate-data
+# package, not a binary, and this build needs its trust store before the
+# COPY'd curl's first HTTPS call above even runs.
 # nano: in-container troubleshooting tool -- see services/dns/Dockerfile's
 # identical comment for the full rationale; lsof/ripgrep are COPY'd above
 # but serve the same troubleshooting purpose.

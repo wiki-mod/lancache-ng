@@ -41,6 +41,16 @@ FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe
 
 LABEL org.opencontainers.image.description="LanCache-NG-NTP: chrony-based NTP server, disciplined against public NTP servers, serving LAN clients on UDP/123."
 
+# What: explicit proxy build-args, no default value set
+# Why: self-hosted builds route apk/downloads via a LAN proxy
+# From: Issue #1637 | Issue #1781
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
+
 # `apk upgrade --no-cache` (before the package install, same layer) upgrades
 # packages already baked into the alpine:3.24 base layer itself -- `apk add
 # --no-cache` only fetches a fresh index for the packages it is asked to
@@ -48,9 +58,22 @@ LABEL org.opencontainers.image.description="LanCache-NG-NTP: chrony-based NTP se
 # services/dhcp-proxy/Dockerfile's matching comment for the fuller
 # rationale and live verification of this behavior.
 
-# What: curl now apk-installed, not COPY'd from utilities
+# What: curl/envsubst binaries from shared utilities image
 # Why: same Alpine base digest ensures binary compatibility
-# From: Issue #1781 | PR #1783
+# From: Issue #1556
+COPY --from=utilities-tools /usr/bin/curl /usr/bin/curl
+COPY --from=utilities-tools /usr/lib/libcurl.so.4 /usr/lib/libcurl.so.4
+COPY --from=utilities-tools /usr/lib/libz.so.1 /usr/lib/libz.so.1
+COPY --from=utilities-tools /usr/lib/libcares.so.2 /usr/lib/libcares.so.2
+COPY --from=utilities-tools /usr/lib/libnghttp2.so.14 /usr/lib/libnghttp2.so.14
+COPY --from=utilities-tools /usr/lib/libidn2.so.0 /usr/lib/libidn2.so.0
+COPY --from=utilities-tools /usr/lib/libpsl.so.5 /usr/lib/libpsl.so.5
+COPY --from=utilities-tools /usr/lib/libssl.so.3 /usr/lib/libssl.so.3
+COPY --from=utilities-tools /usr/lib/libcrypto.so.3 /usr/lib/libcrypto.so.3
+COPY --from=utilities-tools /usr/lib/libzstd.so.1 /usr/lib/libzstd.so.1
+COPY --from=utilities-tools /usr/lib/libbrotlidec.so.1 /usr/lib/libbrotlidec.so.1
+COPY --from=utilities-tools /usr/lib/libunistring.so.5 /usr/lib/libunistring.so.5
+COPY --from=utilities-tools /usr/lib/libbrotlicommon.so.1 /usr/lib/libbrotlicommon.so.1
 COPY --from=utilities-tools /usr/bin/envsubst /usr/bin/envsubst
 COPY --from=utilities-tools /usr/lib/libintl.so.8 /usr/lib/libintl.so.8
 
@@ -58,11 +81,12 @@ COPY --from=utilities-tools /usr/lib/libintl.so.8 /usr/lib/libintl.so.8
 # Why: shared libraries fail at runtime, not copy time.
 # From: Issue #1556
 RUN set -euo pipefail; \
-    printf '%s' '$FOO' | FOO=bar envsubst >/dev/null
+    printf '%s' '$FOO' | FOO=bar envsubst >/dev/null; \
+    curl --version >/dev/null
 
-# What: ca-certificates package enables curl's CA bundle
-# Why: curl's own apk deps exclude a CA bundle
-# From: Issue #1781 | PR #1783
+# What: ca-certificates package enables curl's CA bundle.
+# Why: copied curl has fixed CA path; package generates it.
+# From: Issue #1556
 # What: APT_CACHE_BUST invalidates BuildKit's upgrade cache.
 # Why: without this, BuildKit replays stale cache forever.
 # From: Issue #1095
@@ -72,13 +96,7 @@ RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
     apk add --no-cache \
     bash \
     ca-certificates \
-    chrony-nts \
-    curl
-
-# What: verifies the locally apk-installed curl actually runs.
-# Why: catches a broken/missing shared-lib chain at build time.
-# From: Issue #1781
-RUN curl --version >/dev/null
+    chrony-nts
 
 COPY chrony.conf /etc/chrony/chrony.conf.template
 COPY entrypoint.sh /entrypoint.sh

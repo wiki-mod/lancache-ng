@@ -5568,6 +5568,12 @@ jobs:
             UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
+            HTTP_PROXY=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
+            HTTPS_PROXY=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
+            NO_PROXY=${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
+            http_proxy=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
+            https_proxy=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
+            no_proxy=${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
           network: ${{ env.RUST_BUILDX_NETWORK }}
           allow: ${{ env.RUST_BUILDX_NETWORK == 'host' && 'network.host' || '' }}
           push: ${{ github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) }}
