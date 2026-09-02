@@ -380,19 +380,9 @@ DDNS_ALLOW_UNSIGNED_MARKER="${DNS_STATE_DIR}/ddns-allow-unsigned-updates"
 PDNS_LOG_DIR="/var/log/lancache-dns"
 prepare_log_dir_for_shared_reader "$PDNS_LOG_DIR"
 
-# What: normalizes a transfer primary endpoint before rendering pdns.conf.
-# Why: PowerDNS's allow-notify-from setting needs an address, while Compose
-#   and setup.sh naturally hand the container a host:port endpoint.
-# From: Issue #1164
-#
-# Retries the hostname lookup for up to 30s (Compose starts a zone's
-# primary and its secondaries concurrently with no ordering between them,
-# so the sibling container's own network attachment can genuinely still be
-# in progress the first few times this runs) instead of failing on the
-# very first attempt. A single-shot getent here previously crash-looped
-# this container until the sibling happened to win the race on its own --
-# confirmed live: a solo start with no secondary present at all
-# FATAL-exited on this exact check.
+# What: resolves a transfer endpoint, retries host lookup 30s.
+# Why: siblings start concurrently; getent crash-looped this.
+# From: Issue #1164 | PR #1775
 dns_xfr_primary_endpoint() {
     local endpoint="$1" var_name="${2:-DNS_XFR_PRIMARY}" host port resolved
 
@@ -402,6 +392,15 @@ dns_xfr_primary_endpoint() {
         echo "[lancache-dns] FATAL: ${var_name} must use host:port form (got: ${endpoint})." >&2
         exit 1
     fi
+
+    case "$host" in
+        *[!0-9.]* | *.*.*.*.* | .* | *.) ;;
+        *)
+            printf '%s:%s' "$host" "$port"
+            return 0
+            ;;
+    esac
+
     resolved=""
     for _ in $(seq 1 30); do
         resolved="$(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1; exit}')"
@@ -409,15 +408,8 @@ dns_xfr_primary_endpoint() {
         sleep 1
     done
     if [ -z "$resolved" ]; then
-        case "$host" in
-            *[!0-9.]* | *.*.*.*.* | .* | *.)
-                echo "[lancache-dns] FATAL: ${var_name} host '${host}' did not resolve to an IPv4 address after 30s." >&2
-                exit 1
-                ;;
-            *)
-                resolved="$host"
-                ;;
-        esac
+        echo "[lancache-dns] FATAL: ${var_name} host '${host}' did not resolve to an IPv4 address after 30s." >&2
+        exit 1
     fi
     printf '%s:%s' "$resolved" "$port"
 }
