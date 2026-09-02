@@ -3553,7 +3553,11 @@ record_image_revisions() {
 # Config backups are the update rollback path. Full backups additionally include
 # cache payloads and may be huge, so they stay an explicit operator choice.
 cmd_backup() {
-    local mode="config" install_dir="/opt/lancache-ng" backup_root="/var/backups/lancache-ng"
+    local mode="config" backup_root="/var/backups/lancache-ng"
+    # What: script-global, not local -- EXIT trap reads it.
+    # Why: EXIT-trap locals vanish once set -e unwinds the frame.
+    # From: PR #1775
+    install_dir="/opt/lancache-ng"
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --full) mode="full"; shift ;;
@@ -3568,7 +3572,12 @@ cmd_backup() {
         || die_no_stack_found "$install_dir"
     install_missing_tools tar rsync
 
-    local stamp dest archive rel path old_umask stack_stopped=0 stack_was_running=0 backup_paused_convergence=0
+    local stamp archive rel path
+    stack_stopped=0
+    stack_was_running=0
+    backup_paused_convergence=0
+    dest=""
+    old_umask=""
     stamp=$(date -u +%Y%m%dT%H%M%SZ)
     dest="$backup_root/$stamp"
     archive="$backup_root/lancache-ng-${mode}-${stamp}.tar.gz"
@@ -3726,7 +3735,11 @@ restore_clear_stale_env_local_if_unarchived() {
 }
 
 cmd_restore() {
-    local archive="${1:-}" install_dir="${2:-/opt/lancache-ng}"
+    local archive="${1:-}"
+    # What: script-global, not local -- EXIT trap reads it.
+    # Why: EXIT-trap locals vanish once set -e unwinds the frame.
+    # From: PR #1775
+    install_dir="${2:-/opt/lancache-ng}"
     install_dir=$(realpath -m "$install_dir")
     [[ -n "$archive" ]] || die "Usage: $0 restore <backup.tar.gz> [install-dir]"
     [[ -f "$archive" ]] || die "Backup archive not found: $archive"
@@ -3738,7 +3751,9 @@ cmd_restore() {
     # instead of after files/volumes are already restored.
     install_missing_tools tar rsync openssl
 
-    local tmp root backup_dir archived_install archived_repo_root new_repo_root rel_install stack_stopped=0 stack_was_running=0 archived_project path rel target
+    local root backup_dir archived_install archived_repo_root new_repo_root rel_install archived_project path rel target
+    stack_stopped=0
+    stack_was_running=0
     tmp=$(mktemp -d)
     restore_cleanup() {
         local status=$?
@@ -5477,7 +5492,13 @@ cmd_create_logs_for_issue() {
     local -a env_files=("$env_file")
     [[ "$cache_env_file" != "$env_file" && -f "$cache_env_file" ]] && env_files+=("$cache_env_file")
 
-    local stamp dest ext archive old_umask secrets_file
+    local stamp ext archive
+    # What: script-global, not local -- EXIT trap reads it.
+    # Why: EXIT-trap locals vanish once set -e unwinds the frame.
+    # From: PR #1775
+    dest=""
+    old_umask=""
+    secrets_file=""
     stamp=$(date -u +%Y%m%dT%H%M%SZ)
     dest="$dest_root/.create-logs-for-issue-$stamp"
     old_umask=$(umask)
