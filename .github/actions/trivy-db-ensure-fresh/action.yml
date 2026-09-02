@@ -74,9 +74,9 @@ runs:
         script="${{ runner.temp }}/trivy-db-freshness.sh"
         cat > "$script" <<'FRESHNESS'
         #!/usr/bin/env bash
-        # Exit 0 = a currently-fresh trivy.db exists in cache_dir/db.
-        # Exit 1 = missing DB, missing/unparsable metadata, or NextUpdate
-        # has already passed -- caller must treat all three identically.
+        # What: exit 0 = fresh db, exit 1 = anything else
+        # Why: missing/unparsable/expired all mean "stale"
+        # From: Issue #1780
         set -euo pipefail
         cache_dir="$1"
         db_file="$cache_dir/db/trivy.db"
@@ -146,47 +146,22 @@ runs:
       run: |
         set -euo pipefail
         : "${CACHE_DIR:?cache-dir is required}"
-        lock_dir="$CACHE_DIR/.trivy-db-update.lock"
-        poll_interval=5
-        waited=0
+        # shellcheck source=scripts/lib/trivy-db-lock.sh
+        source "$GITHUB_WORKSPACE/scripts/lib/trivy-db-lock.sh"
 
-        # What: uses atomic mkdir for lock, not flock
-        # Why: soft NFS mount cannot reliably support flock
-        # From: Issue #1780 | Issue #1095
-        acquire() {
-          mkdir "$lock_dir" 2>/dev/null
-        }
+        if trivy_db_locked_run "$CACHE_DIR" "$LOCK_TIMEOUT" "$STALE_AFTER" -- \
+             trivy image --download-db-only --cache-dir "$CACHE_DIR"; then
+          exit 0
+        fi
+        status=$?
+        if [ "$status" -eq 2 ]; then
+          echo "::warning::Leaving db-present=false so the caller's own scan step attempts an unlocked download itself."
+          exit 0
+        fi
+        exit "$status"
 
-        while ! acquire; do
-          if [ -d "$lock_dir" ]; then
-            lock_mtime="$(stat -c %Y "$lock_dir" 2>/dev/null || echo 0)"
-            now="$(date +%s)"
-            age=$(( now - lock_mtime ))
-            if [ "$age" -gt "$STALE_AFTER" ]; then
-              echo "::warning::Reclaiming stale Trivy DB refresh lock '$lock_dir' (age ${age}s > ${STALE_AFTER}s) -- previous holder almost certainly crashed or was cancelled mid-download."
-              rm -rf -- "$lock_dir"
-              continue
-            fi
-          fi
-          if [ "$waited" -ge "$LOCK_TIMEOUT" ]; then
-            echo "::warning::Timed out after ${LOCK_TIMEOUT}s waiting for the Trivy DB refresh lock held by another concurrent caller -- leaving db-present=false so the caller's own scan step attempts an unlocked download itself."
-            exit 0
-          fi
-          sleep "$poll_interval"
-          waited=$(( waited + poll_interval ))
-        done
-
-        # What: trap ensures lock release even on failure
-        # Why: unreleased lock wedges every later caller.
-        # From: Issue #1780 | Issue #1095
-        trap 'rm -rf -- "$lock_dir"' EXIT
-
-        echo "::notice::Holding Trivy DB refresh lock on '$lock_dir' -- '$CACHE_DIR' has no fresh DB (missing, or past NextUpdate), downloading once so every other caller can read it unlocked from now on."
-        trivy image --download-db-only --cache-dir "$CACHE_DIR"
-
-    # What: re-runs the SAME freshness check, not presence.
-    # Why: a failed/timed-out refresh can leave a stale file
-    # behind; presence alone would wrongly read that as fine.
+    # What: re-runs the SAME freshness check, not presence
+    # Why: a failed refresh can leave a stale file behind
     # From: Issue #1780
     - name: Determine whether a fresh DB is present after this action ran
       id: check

@@ -2,96 +2,22 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Refreshes the shared, NFS-mounted Trivy vulnerability-DB cache
-# (/mnt/trivy-db by default, resolved via trivy-cache-dir) on its own
-# fixed cron, as the sole regular writer to that shared path. Replaces
-# the previous design where trivy-db-ensure-fresh unconditionally took
-# a cross-job mkdir-lock on every build/scan job before even checking
-# whether a refresh was needed (Issue #1095 | PR #1747) -- serializing
-# every concurrent matrix.service job on a push behind one lock even
-# though `trivy image --download-db-only` itself already no-ops once
-# metadata.json's NextUpdate has not yet passed. With this workflow as
-# the sole writer, every regular scan job now reads the shared DB with
-# --skip-db-update whenever trivy-db-ensure-fresh's own cheap
-# metadata.json freshness check (a JSON read + date compare, no lock,
-# no trivy call) finds a DB that has not yet passed its NextUpdate.
-# trivy-db-ensure-fresh's own locked path is reached both on a genuine
-# cold cache AND whenever this workflow has fallen behind or cannot
-# reach a given host's cache-dir (see that action's own file for why
-# a bare presence check would be unsafe: `--skip-db-update` never
-# re-validates staleness on its own).
-#
-# CADENCE (6 hours, cron "0 */6 * * *"): matches
-# aquasecurity/trivy-db's own publish cadence (that repo's
-# .github/workflows/cron.yml runs "0 */6 * * *", confirmed via the
-# GitHub API against the real upstream repo). trivy-db's own DB build
-# sets metadata.json's NextUpdate 24h out (`trivy-db build
-# --update-interval 24h`, confirmed in that repo's Makefile), so a
-# client only strictly needs to re-check once a day to honor that
-# window -- but running on the SAME 6h cadence upstream actually
-# publishes on keeps this shared DB close to the freshest available
-# build rather than the up-to-24h-stale worst case a slower cron would
-# risk, at the cost of extra runs that are cheap no-ops most of the
-# time (trivy's own --download-db-only skips the real download whenever
-# the locally cached NextUpdate has not passed yet).
-#
-# WHY A SEPARATE WORKFLOW FILE, NOT A JOB IN build-push.yml/
-# build-tools.yml: this is a new, independent responsibility (its own
-# schedule trigger, its own single-writer concurrency group, no shared
-# job dependencies with either build workflow) -- exactly the case for
-# a new file per AG-CODE-013's decision tree, not an addition to an
-# existing one; mirrors vex-regenerate.yml's identical reasoning for
-# the same rule. AG-CODE-011/013 search: no existing workflow or
-# composite action owns "refresh the shared Trivy DB on a timer"
-# (nightly-refresh.yml only dispatches build-push.yml's own pipeline
-# for an unrelated channel-promotion purpose); the maintainer directed
-# this exact design (a dedicated scheduled-refresh workflow as the
-# shared DB's sole writer) before implementation began, which is this
-# new file's maintainer ACK.
-#
-# AG-CI-018/019 note: a `schedule:` trigger only ever fires from this
-# file's copy on the repository's DEFAULT branch (master), never from
-# current_dev, regardless of which branch authored/merged it -- same
-# gap nightly-refresh.yml and vex-regenerate.yml already document for
-# themselves. This workflow will not actually run on its own cron until
-# promoted to master at the next release cut; workflow_dispatch below
-# is a manual escape hatch for that gap, not proof the schedule itself
-# fires (AG-CI-012).
-#
-# PERMISSION/MOUNT DIAGNOSTICS: added after a maintainer-reported live
-# failure on the real shared mount ("mkdir /mnt/trivy-db/db: permission
-# denied"), independently reproduced during this PR's own live
-# verification, then further narrowed by this same verification pass:
-# one dispatch run (heavy tier) showed /mnt/trivy-db itself as an
-# EMPTY, root:root 0755 directory at the exact moment this failed, no
-# more than ~30s after this same path had just resolved as the real,
-# writable NFS mount in an earlier step of the SAME job, same uid. A
-# later dispatch on the same tier showed the real mount fully present
-# (nfs4, populated, world-writable 1777/0777 entries, download
-# succeeded end to end) -- two genuinely different states of the
-# identical path, not a static ownership defect. Leading hypothesis:
-# an intermittently unavailable/expiring mount, not a stray
-# differently-owned leftover entry. Root cause remains unconfirmed
-# without host/SSH access (see PR body for full evidence). "Diagnose
-# Trivy DB directory permissions before download" below captures
-# uid/mount-table/ownership state and fails loudly instead of trivy's
-# own opaque FATAL error, and this workflow never swallows that
-# failure (AG-INT-002) -- see the PR body for the operator-side
-# remediation this cannot perform from CI.
+# What: refreshes shared NFS Trivy DB on a fixed cron
+# Why: sole writer removes need for per-job locking
+# From: Issue #1780 | Issue #1095
 name: Trivy DB Scheduled Refresh
 
 on:
   schedule:
     - cron: "0 */6 * * *"
-  # Manual escape hatch, same rationale as nightly-refresh.yml's own
-  # workflow_dispatch: exercises the refresh logic without waiting for
-  # the next tick, and without itself proving the cron trigger fires
-  # (AG-CI-012, AG-CI-018 note above).
+  # What: manual escape hatch alongside the cron trigger
+  # Why: schedule: only fires from master, not this branch
+  # From: Issue #1780
   workflow_dispatch: {}
 
-# Scoped to exactly what this job needs: read the repo for its composite
-# actions/scripts, log in to GHCR/Docker Hub for the DB pull. No
-# package-write, issue, or PR permissions.
+# What: read-only checkout; no write/issue/PR scopes
+# Why: this job never mutates anything outside cache-dir
+# From: Issue #1780
 permissions:
   contents: read
 
@@ -109,11 +35,9 @@ jobs:
     # Why: live-confirmed NFS mount gap on a light host.
     # From: Issue #1780
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    # A real ~1.3 GB DB download over a home-lab link plus retries can
-    # legitimately take several minutes (trivy-db-ensure-fresh's own
-    # stale-lock-seconds default documents the same real-world figure);
-    # generous headroom over that rather than GitHub's 360-minute
-    # default (AG-CI-016).
+    # What: 30-minute cap, not GitHub's 360-minute default
+    # Why: a real DB download plus retries takes minutes
+    # From: Issue #1780
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -167,14 +91,20 @@ jobs:
           : "${CACHE_DIR:?cache-dir is required}"
           echo "::group::Trivy DB permission diagnostics"
           echo "Running as: $(id)"
-          # What: shows if this is a live mount right now.
-          # Why: an autofs mount can expire between steps.
-          # From: Issue #1780
-          mountpoint "$CACHE_DIR" 2>&1 || true
+          mountpoint_status=0
+          mountpoint "$CACHE_DIR" 2>&1 || mountpoint_status=$?
           mount | grep -F "$CACHE_DIR" || echo "(no mount-table entry for $CACHE_DIR)"
           ls -la "$CACHE_DIR" || true
           [ -d "$CACHE_DIR/db" ] && ls -ld "$CACHE_DIR/db"
           echo "::endgroup::"
+
+          # What: hard-fails on a since-expired NFS mount.
+          # Why: an autofs mount can expire between steps.
+          # From: Issue #1780
+          if [ "$mountpoint_status" -ne 0 ]; then
+            echo "::error::'$CACHE_DIR' is not currently a live mount point (mountpoint exited $mountpoint_status), even though trivy-cache-dir resolved source=nfs-shared earlier in this same job -- the NFS mount most likely expired in between, leaving a bare local directory in its place. Refusing to write there instead of the real shared filesystem." >&2
+            exit 1
+          fi
 
           db_dir="$CACHE_DIR/db"
           if ! mkdir -p "$db_dir" 2>/tmp/trivy-db-mkdir-err.txt; then
@@ -187,22 +117,41 @@ jobs:
             exit 1
           fi
 
-      # What: retries a flaky pull, GHCR-first mirror order.
-      # Why: AG-CI-013 -- reuse the shared retry wrapper.
-      # From: Issue #1780 | Issue #1535
+      # What: forces a real download, under the same lock.
+      # Why: NextUpdate alone would make most runs a no-op.
+      # From: Issue #1780
       - name: Refresh the shared Trivy DB
         env:
           CACHE_DIR: ${{ steps.trivy-cache.outputs.dir }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          LOCK_TIMEOUT_SECONDS: "900"
+          STALE_LOCK_SECONDS: "1200"
         run: |
           set -euo pipefail
           : "${CACHE_DIR:?cache-dir is required}"
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
-          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
-            trivy image --download-db-only --cache-dir "$CACHE_DIR" \
-              --config .github/actions/trivy-scan-retry/trivy-config.yaml
+          # shellcheck source=scripts/lib/trivy-db-lock.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/trivy-db-lock.sh"
+
+          # What: clears DB so a download always runs
+          # Why: NextUpdate alone would skip most runs
+          # From: Issue #1780
+          refresh_and_pull() {
+            trivy clean --vuln-db --cache-dir "$CACHE_DIR"
+            ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
+              trivy image --download-db-only --cache-dir "$CACHE_DIR" \
+                --config .github/actions/trivy-scan-retry/trivy-config.yaml
+          }
+
+          if trivy_db_locked_run "$CACHE_DIR" "$LOCK_TIMEOUT_SECONDS" "$STALE_LOCK_SECONDS" -- \
+               refresh_and_pull; then
+            exit 0
+          fi
+          status=$?
+          echo "::error::Could not refresh '$CACHE_DIR' (lock timeout or a real download failure, exit $status) -- this workflow is the shared DB's sole regular writer, so unlike a per-job caller it must fail loudly here rather than silently leaving the cache stale." >&2
+          exit "$status"
 
       # What: fails the job when no DB exists after refresh.
       # Why: an empty shared DB must never read as success.
