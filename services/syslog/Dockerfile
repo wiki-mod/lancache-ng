@@ -26,6 +26,11 @@ LABEL org.opencontainers.image.description="Combined fluent-bit + syslog-ng firs
 # What: pins the Alpine base to 3.24 (was 3.20).
 # Why: unintentional inconsistency; other services pin 3.24.
 # From: Issue #1554 | PR #1555
+# What: switches apk's own repositories to plain http.
+# Why: Squid caches http; signed indices keep integrity.
+# From: Issue #1095
+RUN sed -i 's|^https://|http://|' /etc/apk/repositories
+
 # What: declares APT_CACHE_BUST right before the RUN it busts.
 # Why: prevents stale apk-index replay; see build-tools/Dockerfile.
 # From: Issue #1095

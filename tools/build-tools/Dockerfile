@@ -132,6 +132,11 @@ COPY --from=go-tools-script /build-go-tools.sh /build-go-tools.sh
 # From: Issue #1095
 ARG APK_CACHE_BUST=""
 
+# What: switches apk's own repositories to plain http.
+# Why: Squid caches http; signed indices keep integrity.
+# From: Issue #1095
+RUN sed -i 's|^https://|http://|' /etc/apk/repositories
+
 # What: builds the same three Go tools as go-tools-builder.
 # Why: none needs a cgo dependency; musl needs no build-tag.
 # From: Issue #1095 | PR #1743
@@ -186,6 +191,11 @@ ENV PATH="/usr/local/cargo/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin
 # Why: bust layer cache on rotation; matches APT pattern
 # From: Issue #1095
 ARG APK_CACHE_BUST=""
+
+# What: switches apk's own repositories to plain http.
+# Why: Squid caches http; signed indices keep integrity.
+# From: Issue #1095
+RUN sed -i 's|^https://|http://|' /etc/apk/repositories
 
 # What: installs bash, coreutils, github-cli, sqlite, etc
 # Why: GNU coreutils differ from BusyBox (AG-VAL-034)
@@ -469,27 +479,11 @@ ARG SHELLSPEC_VERSION
 ARG SHELLSPEC_SHA256
 ARG DEBIAN_FRONTEND=noninteractive
 
-# What: LAN apt-cache proxy host:port; empty disables it.
-# Why: empty must reproduce today's direct-internet build.
-# From: Issue #1095
-ARG APT_CACHE_PROXY=""
-
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ENV PATH="/usr/local/cargo/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin" \
     CARGO_INSTALL_ROOT="/usr/local" \
     RUST_BACKTRACE=1
-
-# What: probes proxy; writes apt config only if it answers.
-# Why: unreachable/unset proxy must never break the build.
-# From: Issue #1095
-RUN set -euo pipefail; \
-    if [ -n "$APT_CACHE_PROXY" ] && curl -sf --max-time 3 "http://${APT_CACHE_PROXY}/acng-report.html" >/dev/null 2>&1; then \
-      echo "Acquire::http::Proxy \"http://${APT_CACHE_PROXY}\";" > /etc/apt/apt.conf.d/00-lancache-apt-cache-proxy; \
-      echo "[INFO] Using apt-cache proxy at ${APT_CACHE_PROXY}." >&2; \
-    else \
-      echo "[INFO] apt-cache proxy unset or unreachable -- using direct internet access (unchanged from before this ARG existed)." >&2; \
-    fi
 
 # What: add trixie-backports source and apt pin; upgrade
 # Why: get all patches; pin uses a= suite not codename

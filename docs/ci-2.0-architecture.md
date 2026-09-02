@@ -1375,26 +1375,42 @@ Internet
 
 Possible contents: APT, APK, Cargo, Go, npm, pip, Maven, Gradle, OCI pulls.
 
-### 40.1 APT half (implemented precedent)
+### 40.1 APT/APK half (implemented precedent)
 
-A concrete instance of this section's shape now exists for APT
-specifically: `apt-cacher-ng`, backed by the NFS-shared
-`/srv/runner-hosting/apt-cache` (real local-disk fallback, never tmpfs,
-resolved via the same write+subdirectory probe as §41.1's Trivy example),
-reachable over the LAN the same way the public internet already is from
-inside a build -- no BuildKit mount-type involved, unlike a filesystem
-cache (see §41.1 and the ccache discussion it links). The build side is a
-single, empty-by-default build-arg plus a short reachability probe: unset
-or unreachable falls through to direct internet, identical to behavior
-before the arg existed. The proxy side is the `apt-proxy-*` modes of
-`tools/runner-host/lancache-ci-docker-daemon-config.sh` (folded in as an
-AG-CODE-013 file consolidation rather than kept as its own file),
-following the same safe-by-default / maintainer-scheduled-install split
-as that script's original daemon-config modes. ccache is deliberately
-not extended the same way here -- it is a
-filesystem cache written from inside a BuildKit build stage, which this
-pattern cannot reach; see §41.1's own text for why that is a materially
-different problem.
+The "LAN package proxy" in this section's diagram is not repo-managed
+tooling -- it is Squid, already-existing shared infrastructure reachable
+via the org-level `PROJECT_SELFHOSTED_PROXY_HTTP`/
+`PROJECT_SELFHOSTED_PROXY_HTTPS`/`PROJECT_SELFHOSTED_PROXY_EXCLUSION`
+variables (also used elsewhere for outbound LAN egress). An earlier
+version of this PR invented a second, repo-managed caching daemon
+(`apt-cacher-ng`, its own NFS-backed cache directory, and
+`apt-proxy-*` install/lifecycle modes in
+`tools/runner-host/lancache-ci-docker-daemon-config.sh`) instead of
+reusing this -- reverted on explicit maintainer instruction: apt and
+apk already fetch over deterministic HTTP(S) paths that a generic
+forward proxy already caches, so standing up a second, apt-specific
+caching service alongside Squid is redundant infrastructure with its
+own install/lifecycle burden for no additional benefit.
+
+The real shape: `.github/actions/lan-proxy-probe` makes one real
+proxied request through `PROJECT_SELFHOSTED_PROXY_HTTP` (a bare GET to
+Squid's own listener answers HTTP 400 and is not a valid reachability
+check -- confirmed live against the real proxy) and outputs the real
+proxy/no_proxy values on success or three empty strings on failure or
+when the variable is unset, so callers can pass its outputs straight
+through as build-args with no extra fail-open logic of their own.
+`tools/build-tools/Dockerfile` turns those build-args into
+`http_proxy`/`https_proxy`/`no_proxy` (and their uppercase forms) for
+its own later `RUN` steps, plus an explicit `Acquire::http::Proxy`/
+`Acquire::https::Proxy` apt configuration file. Empty values reproduce
+today's direct-internet build exactly, identical to before this build-
+arg wiring existed. Since Squid only caches plain `http`, this is
+paired with a repo-wide audit switching apt/apk package-source URLs to
+`http` wherever the upstream doesn't force `https` (tracked in this
+PR's own body, not restated here). ccache is deliberately not extended
+the same way -- it is a filesystem cache written from inside a
+BuildKit build stage, which a network proxy cannot reach; see §41.1's
+own text for why that is a materially different problem.
 
 ## 41. No universal NFS cache
 
