@@ -193,7 +193,6 @@ jobs:
           }
           {
             printf 'rust=%s\n' "$(digest_for_image rust:latest)"
-            printf 'golang=%s\n' "$(digest_for_image golang:latest)"
           } >> "$GITHUB_OUTPUT"
 
       # What: acceleration network, always bridge/default now
@@ -260,7 +259,6 @@ jobs:
           labels: |
             ${{ steps.meta.outputs.labels }}
             org.opencontainers.image.base.rust.digest=${{ steps.build-tools-base-digests.outputs.rust }}
-            org.opencontainers.image.base.golang.digest=${{ steps.build-tools-base-digests.outputs.golang }}
           build-args: |
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
             HTTP_PROXY=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
@@ -529,7 +527,6 @@ jobs:
           }
           {
             printf 'rust=%s\n' "$(digest_for_image rust:latest)"
-            printf 'golang=%s\n' "$(digest_for_image golang:latest)"
           } >> "$GITHUB_OUTPUT"
 
       # What: build local arm64 candidate for fork PRs.
@@ -568,7 +565,6 @@ jobs:
           labels: |
             ${{ steps.meta.outputs.labels }}
             org.opencontainers.image.base.rust.digest=${{ steps.build-tools-base-digests.outputs.rust }}
-            org.opencontainers.image.base.golang.digest=${{ steps.build-tools-base-digests.outputs.golang }}
           build-args: |
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
           outputs: type=image,oci-mediatypes=true
