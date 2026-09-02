@@ -886,7 +886,10 @@ jobs:
         id: buildx
         uses: &docker_setup_buildx_centraliced_versioning docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
-      - name: Resolve compose validation image
+      - name: Resolve compose validation image (ci.sh resolve-compose-validation-image)
+        # What: published-image resolution for validate-compose, in ci.sh.
+        # Why: §5 -- was inline fallback-avoidance decision shell in YAML.
+        # From: PR #1742 | Refs #1683
         id: select-compose-validation-image
         env:
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
@@ -895,30 +898,7 @@ jobs:
           # From: PR #1237
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          # What: resolves the required published image before any fallback.
-          # Why: exits before the local fallback build, so nothing to clean up.
-          # From: PR #365
-          downstream_build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
-
-          case "$downstream_build_tools_image" in
-            *@sha256:*)
-              ;;
-            *)
-              echo "::error::Expected a digest-qualified build-tools image from the published build-tools selector, got '$downstream_build_tools_image'."
-              exit 1
-              ;;
-          esac
-
-          # What: reuses the already smoke-tested published digest.
-          # Why: this light-tier job must not trigger a local fallback build.
-          # From: PR #575
-          validation_build_tools_image="$downstream_build_tools_image"
-
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$validation_build_tools_image" >> "$GITHUB_ENV"
-          printf 'build_tools_image=%s\n' "$downstream_build_tools_image" >> "$GITHUB_OUTPUT"
+        run: bash scripts/ci/ci.sh resolve-compose-validation-image
 
       # What: resolves utilities:latest, falls back to :nightly.
       # Why: latest has never been published; nightly exists and works.

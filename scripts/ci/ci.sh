@@ -1641,6 +1641,36 @@ ci_cmd_resolve_utilities_digest() {
     ci_emit_output utilities_digest "$digest"
 }
 
+ci_cmd_resolve_compose_validation_image() {
+    # What: resolves the smoke-tested published build-tools image.
+    # Why: §5 -- validate-compose (light tier) must not build a
+    #   local fallback image; it reuses the published digest.
+    # From: PR #365 | PR #575 | Refs #1683
+    cd "$CI_REPO_ROOT"
+
+    # What: resolves the required published image before any fallback.
+    # Why: exits before the local fallback build, so nothing to clean up.
+    # From: PR #365
+    local downstream_build_tools_image
+    downstream_build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+
+    case "$downstream_build_tools_image" in
+        *@sha256:*) ;;
+        *)
+            ci_annotate error "Expected a digest-qualified build-tools image from the published build-tools selector, got '$downstream_build_tools_image'."
+            exit 1
+            ;;
+    esac
+
+    # What: reuses the already smoke-tested published digest.
+    # Why: this light-tier job must not trigger a local fallback build.
+    # From: PR #575
+    local validation_build_tools_image="$downstream_build_tools_image"
+
+    ci_emit_env BUILD_TOOLS_IMAGE "$validation_build_tools_image"
+    ci_emit_output build_tools_image "$downstream_build_tools_image"
+}
+
 # ============================================================
 # REPO CONTRACT VALIDATION
 # ============================================================
@@ -2388,12 +2418,16 @@ ci_cmd_validate_rust_preflight_chain() {
       || { echo "::error::Docker Rust builds must expose the selected build-tools image as a job output."; exit 1; }
     grep -F "printf 'build_tools_image=ghcr.io/%s/build-tools:latest\\n' \"\$GITHUB_REPOSITORY\" >> \"\$GITHUB_OUTPUT\"" .github/workflows/build-push.yml >/dev/null \
       && { echo "::error::The exported build-tools job output must not be hardcoded without validating that exact pullable image."; exit 1; }
-    grep -F 'BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh' .github/workflows/build-push.yml >/dev/null \
+    # What: this and the next check target ci.sh, not build-push.yml.
+    # Why: the text they assert now lives in ci_cmd_resolve_compose_
+    #   validation_image, not in an inline workflow step.
+    # From: PR #1742 | Refs #1683
+    grep -F 'BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh' scripts/ci/ci.sh >/dev/null \
       || { echo "::error::Downstream build-tools job output must validate the exact pullable GHCR image before exporting it."; exit 1; }
     # What: a positive grep, not a negative "must not contain X" check.
     # Why: the old form quoted X as its own arg, self-matching always.
     # From: Issue #1095 | PR #1532
-    grep -F 'validation_build_tools_image="$downstream_build_tools_image"' .github/workflows/build-push.yml >/dev/null \
+    grep -F 'validation_build_tools_image="$downstream_build_tools_image"' scripts/ci/ci.sh >/dev/null \
       || { echo "::error::validate-compose runs on the light tier and must reuse the already-resolved downstream_build_tools_image instead of building a local fallback."; exit 1; }
     # What: verifies published_image_reference() uses the shared helper.
     # Why: dedups a now-removed identical copy (AG-CODE-013).
@@ -2403,12 +2437,16 @@ ci_cmd_validate_rust_preflight_chain() {
       && grep -F 'docker buildx imagetools inspect "$image"' scripts/lib/ghcr-retry.sh >/dev/null \
       && grep -F 'published_image_reference "$published_image"' scripts/untracked/select-build-tools-image.sh >/dev/null \
       || { echo "::error::Build-tools selector must export the smoke-validated published image by multi-arch manifest digest."; exit 1; }
+    # What: this ordered-sequence check now targets ci.sh, whose emit
+    #   call is ci_emit_output, not a raw printf-to-GITHUB_OUTPUT line.
+    # Why: same text-moved-with-the-code reason as the 2 checks above.
+    # From: PR #1742 | Refs #1683
     if awk '
       index($0, "downstream_build_tools_image=\"$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)\"") { in_resolve = 1 }
-      in_resolve && index($0, "printf '\''build_tools_image=%s\\n'\'' \"$downstream_build_tools_image\"") { exit found ? 0 : 1 }
+      in_resolve && index($0, "ci_emit_output build_tools_image \"$downstream_build_tools_image\"") { exit found ? 0 : 1 }
       in_resolve && index($0, "docker pull \"$downstream_build_tools_image\"") { found = 1 }
       END { exit found ? 0 : 1 }
-    ' .github/workflows/build-push.yml; then
+    ' scripts/ci/ci.sh; then
       echo "::error::validate-compose must not re-pull mutable build-tools tags after selector smoke validation."
       exit 1
     fi
@@ -2932,6 +2970,18 @@ ci_emit_output() {
     fi
 }
 
+ci_emit_env() {
+    # What: writes name=value to GITHUB_ENV, else stdout.
+    # Why: ci_emit_output's own counterpart for step-env exports.
+    # From: PR #1742 | Refs #1683
+    local name="$1" value="$2"
+    if [[ -n "${GITHUB_ENV:-}" ]]; then
+        printf '%s=%s\n' "$name" "$value" >> "$GITHUB_ENV"
+    else
+        printf '%s=%s\n' "$name" "$value"
+    fi
+}
+
 ci_remote_ref_tip() {
     # What: prints the remote's current tip SHA for ref $1.
     # Why: one seam for a live tip, so a test can substitute it.
@@ -3098,6 +3148,7 @@ Commands:
   governance-guardrails        Run check-governance-guards.sh over this PR diff.
   changelog-direct-edit-warn   Warn (never fail) on a direct CHANGELOG.md edit.
   resolve-utilities-digest     Resolve utilities:latest digest, fallback :nightly.
+  resolve-compose-validation-image Resolve validate-compose's published build-tools image.
   file-header-checks           Run file-headers/-hosted's 6 repo-wide checks.
   diff-checks <sha> <ref>      Run the PR-diff-scoped header/chronology checks.
   compose-healthchecks         Run compose-healthchecks/-hosted's own check.
@@ -3152,6 +3203,7 @@ ci_main() {
         governance-guardrails) ci_cmd_governance_guardrails ;;
         changelog-direct-edit-warn) ci_cmd_changelog_direct_edit_warn ;;
         resolve-utilities-digest) ci_cmd_resolve_utilities_digest ;;
+        resolve-compose-validation-image) ci_cmd_resolve_compose_validation_image ;;
         file-header-checks) ci_cmd_file_header_checks ;;
         diff-checks) ci_cmd_diff_checks "${1:?diff-checks: base sha required}" "${2:?diff-checks: base ref required}" ;;
         compose-healthchecks) ci_cmd_compose_healthchecks ;;
