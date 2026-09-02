@@ -199,6 +199,17 @@ jobs:
     steps:
       - uses: *checkout_centraliced_versioning # v7.0.1
 
+      # What: authenticates registry pulls before compose up.
+      # Why: pulls nats/docker-socket-proxy from docker.io.
+      # From: Issue #1095
+      - name: Log in to registries (GHCR + optional Docker Hub)
+        uses: ./.github/actions/ghcr-then-dockerhub-login
+        with:
+          ghcr-username: ${{ github.actor }}
+          ghcr-password: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Resolve build-tools image
         # Deliberately not BUILD_TOOLS_REQUIRE_PUBLISHED=true, matching
         # dhcp-kea-lease-flow-simulation's own reasoning: confirmed directly
