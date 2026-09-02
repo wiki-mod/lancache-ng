@@ -100,7 +100,10 @@ secret_is_placeholder() {
     return 1
 }
 
-# resolve_shared_secret <name> <current_value_or_empty> <gen_func>
+# resolve_shared_secret <name> <current_value_or_empty> <gen_func> [require_persist]
+# What: 4th arg require_persist enforces a durable write.
+# Why: some secrets (ddns-tsig-key) have file-only readers.
+# From: PR #1775
 # Resolves a shared secret and prints it on stdout with no trailing newline.
 #   - If <current_value_or_empty> is non-empty, that real value seeds the shared
 #     volume when the file is absent, and refreshes it when a stale/different
@@ -121,15 +124,26 @@ resolve_shared_secret() {
     _rss_name="$1"
     _rss_cur="$2"
     _rss_gen="$3"
+    _rss_require_persist="${4:-}"
 
     _rss_dir="$(lancache_shared_secret_dir)"
     _rss_file="${_rss_dir}/${_rss_name}"
 
-    if [ -s "$_rss_file" ]; then
-        if [ -z "$_rss_cur" ] || [ "$(tr -d '\n' < "$_rss_file")" = "$_rss_cur" ]; then
-            tr -d '\n' < "$_rss_file"
-            return 0
+    # What: re-checks for a conflict right before returning.
+    # Why: closes the TOCTOU window a concurrent writer opens.
+    # From: PR #1775
+    _rss_conflict_now() {
+        [ -n "$_rss_cur" ] || return 1
+        if [ -s "$_rss_file" ]; then
+            [ "$(tr -d '\n' < "$_rss_file")" != "$_rss_cur" ]
+        else
+            [ -e "$_rss_file" ]
         fi
+    }
+
+    if [ -s "$_rss_file" ] && { [ -z "$_rss_cur" ] || [ "$(tr -d '\n' < "$_rss_file")" = "$_rss_cur" ]; }; then
+        tr -d '\n' < "$_rss_file"
+        return 0
     fi
 
     mkdir -p "$_rss_dir" 2>/dev/null || true
@@ -143,7 +157,16 @@ resolve_shared_secret() {
         fi
     fi
 
-    _rss_tmp="$(mktemp "${_rss_dir}/.secret.XXXXXX" 2>/dev/null)" || return 1
+    # What: returns the caller's value unpersisted on write fail.
+    # Why: safe only because no on-disk value could disagree yet.
+    # From: PR #1775
+    _rss_tmp="$(mktemp "${_rss_dir}/.secret.XXXXXX" 2>/dev/null)" || {
+        if [ -n "$_rss_cur" ] && [ -z "$_rss_require_persist" ] && ! _rss_conflict_now; then
+            printf '%s' "$_rss_cur"
+            return 0
+        fi
+        return 1
+    }
     printf '%s' "$_rss_val" > "$_rss_tmp"
     chmod 0640 "$_rss_tmp" 2>/dev/null || true
     chgrp "$(lancache_shared_secret_gid)" "$_rss_tmp" 2>/dev/null || true
@@ -160,12 +183,12 @@ resolve_shared_secret() {
     fi
 
     rm -f "$_rss_tmp"
-    if [ -s "$_rss_file" ]; then
-        if [ -z "$_rss_cur" ]; then
-            tr -d '\n' < "$_rss_file"
-        else
-            printf '%s' "$_rss_cur"
-        fi
+    if [ -z "$_rss_cur" ] && [ -s "$_rss_file" ]; then
+        tr -d '\n' < "$_rss_file"
+        return 0
+    fi
+    if [ -n "$_rss_cur" ] && [ -z "$_rss_require_persist" ] && ! _rss_conflict_now; then
+        printf '%s' "$_rss_cur"
         return 0
     fi
     return 1
@@ -213,7 +236,7 @@ DDNS_ALLOW_FROM="${DDNS_ALLOW_FROM:-127.0.0.1}"
 # rather than crash-looping.
 _ddns_tsig_key_cfg="${DDNS_TSIG_KEY:-}"
 if secret_is_placeholder "$_ddns_tsig_key_cfg"; then _ddns_tsig_key_cfg=""; fi
-DDNS_TSIG_KEY="$(resolve_shared_secret ddns-tsig-key "$_ddns_tsig_key_cfg" lancache_gen_base64_32)" || DDNS_TSIG_KEY=""
+DDNS_TSIG_KEY="$(resolve_shared_secret ddns-tsig-key "$_ddns_tsig_key_cfg" lancache_gen_base64_32 require-persist)" || DDNS_TSIG_KEY=""
 DDNS_TSIG_NAME="${DDNS_TSIG_NAME:-lancache-ddns-key}"
 DDNS_TSIG_ALGORITHM="${DDNS_TSIG_ALGORITHM:-hmac-sha256}"
 
@@ -357,10 +380,9 @@ DDNS_ALLOW_UNSIGNED_MARKER="${DNS_STATE_DIR}/ddns-allow-unsigned-updates"
 PDNS_LOG_DIR="/var/log/lancache-dns"
 prepare_log_dir_for_shared_reader "$PDNS_LOG_DIR"
 
-# What: normalizes a transfer primary endpoint before rendering pdns.conf.
-# Why: PowerDNS's allow-notify-from setting needs an address, while Compose
-#   and setup.sh naturally hand the container a host:port endpoint.
-# From: Issue #1164
+# What: resolves a transfer endpoint, retries host lookup 30s.
+# Why: siblings start concurrently; getent crash-looped this.
+# From: Issue #1164 | PR #1775
 dns_xfr_primary_endpoint() {
     local endpoint="$1" var_name="${2:-DNS_XFR_PRIMARY}" host port resolved
 
@@ -370,17 +392,24 @@ dns_xfr_primary_endpoint() {
         echo "[lancache-dns] FATAL: ${var_name} must use host:port form (got: ${endpoint})." >&2
         exit 1
     fi
-    resolved="$(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1; exit}')"
+
+    case "$host" in
+        *[!0-9.]* | *.*.*.*.* | .* | *.) ;;
+        *)
+            printf '%s:%s' "$host" "$port"
+            return 0
+            ;;
+    esac
+
+    resolved=""
+    for _ in $(seq 1 30); do
+        resolved="$(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1; exit}')"
+        [ -n "$resolved" ] && break
+        sleep 1
+    done
     if [ -z "$resolved" ]; then
-        case "$host" in
-            *[!0-9.]* | *.*.*.*.* | .* | *.)
-                echo "[lancache-dns] FATAL: ${var_name} host '${host}' did not resolve to an IPv4 address." >&2
-                exit 1
-                ;;
-            *)
-                resolved="$host"
-                ;;
-        esac
+        echo "[lancache-dns] FATAL: ${var_name} host '${host}' did not resolve to an IPv4 address after 30s." >&2
+        exit 1
     fi
     printf '%s:%s' "$resolved" "$port"
 }
@@ -1333,7 +1362,10 @@ _dns_configure_primary_zone_replication() {
     if [ -n "$DNS_XFR_NOTIFY_TARGETS" ]; then
         for target in ${DNS_XFR_NOTIFY_TARGETS//,/ }; do
             [ -n "$target" ] || continue
-            notify_targets+=("$target")
+            # What: resolves each ALSO-NOTIFY target to an IP first.
+            # Why: PowerDNS needs IP[:port] here, not a hostname.
+            # From: PR #1775
+            notify_targets+=("$(dns_xfr_primary_endpoint "$target" DNS_XFR_NOTIFY_TARGETS)")
         done
         _dns_set_zone_metadata "$zone" ALSO-NOTIFY "${notify_targets[@]}"
     fi

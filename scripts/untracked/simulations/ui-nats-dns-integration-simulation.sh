@@ -185,6 +185,17 @@ verify_record_resolves() {
         sleep 1
     done
     echo "::error::$label never resolved $test_fqdn to $test_content after $max_attempts attempts (last saw: '${resolved:-<empty>}')." >&2
+    # What: dumps dns-standard/dns-ssl/nats logs on failure.
+    # Why: teardown runs before logs would otherwise be seen.
+    # From: PR #1775
+    "${compose[@]}" logs --no-color --tail=200 dns-standard dns-ssl nats >&2 || true
+    # What: proves whether ALSO-NOTIFY reached dns-ssl's real IP.
+    # Why: a notify-call success doesn't prove a real target.
+    # From: PR #1775
+    "${compose[@]}" exec -T dns-standard sh -c \
+        'pdnsutil --config-dir=/etc/pdns/auth get-meta lan ALSO-NOTIFY' >&2 || true
+    "${compose[@]}" exec -T dns-ssl sh -c \
+        'echo "dns-ssl own address:"; ip -4 -o addr show scope global 2>/dev/null' >&2 || true
     return 1
 }
 
@@ -215,8 +226,9 @@ echo "== Verifying the record actually disappeared from PowerDNS =="
 verify_record_gone() {
     local label="$1"
     local dns_ip="$2"
+    local max_attempts="${3:-10}"
     local attempt
-    for attempt in $(seq 1 10); do
+    for attempt in $(seq 1 "$max_attempts"); do
         # Same pipefail hazard as verify_record_resolves above: wrap so a
         # failed dig/run_client invocation against this specific $dns_ip is
         # reported explicitly instead of silently aborting the script.
@@ -227,11 +239,12 @@ verify_record_gone() {
         [[ -z "$resolved" ]] && { echo "$label no longer resolves $test_fqdn (attempt $attempt)."; return 0; }
         sleep 1
     done
-    echo "::error::$label still resolves $test_fqdn to '$resolved' after 10 attempts; removal did not take effect." >&2
+    echo "::error::$label still resolves $test_fqdn to '$resolved' after $max_attempts attempts; removal did not take effect." >&2
+    "${compose[@]}" logs --no-color --tail=200 dns-standard dns-ssl nats >&2 || true
     return 1
 }
 
 verify_record_gone "dns-standard" "$dns_standard_ip"
-verify_record_gone "dns-ssl" "$dns_ssl_ip"
+verify_record_gone "dns-ssl" "$dns_ssl_ip" 25
 
 echo "ui-nats-dns-integration-simulation passed: UI -> NATS -> nats-subscriber -> PowerDNS add and remove both verified end-to-end via real DNS queries."

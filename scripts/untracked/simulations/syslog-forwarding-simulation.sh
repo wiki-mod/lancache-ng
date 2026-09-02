@@ -449,10 +449,20 @@ EOF
 # see the correction on the watchdog override's comment above), so the
 # remaining optional variables (DHCP_PROXY_* PXE options, DDNS_TSIG_KEY,
 # KEA_CTRL_TOKEN, etc.) fall through to whatever setup.sh's own fresh
-# install left them as in $install_dir/.env -- unset/blank for a fresh
-# install with DHCP left at its wizard default, which entrypoint.sh already
-# handles gracefully (non-fatal warnings, no PXE options rendered), and this
-# narrow logging-path proof does not exercise PXE options at all regardless.
+# install left them as in $install_dir/.env. This is a real, generated
+# secret (setup.sh's install flow does not leave these blank -- correcting
+# an earlier, wrong belief here), the same one `ui` already reads from
+# that same .env with no override of its own; DDNS_TSIG_KEY/KEA_CTRL_TOKEN
+# must NOT be force-blanked in dhcp's own block below, or dhcp takes the
+# empty-value auto-generate path in resolve_shared_secret() while ui keeps
+# the real .env value, and the "real value always wins" refresh silently
+# rewrites the shared file out from under dhcp's already-rendered config --
+# confirmed live: a real, reproducible token split-brain, not a
+# hypothetical. PXE options are the only thing this override still
+# leaves genuinely unset/blank by omission, which entrypoint.sh already
+# handles gracefully (non-fatal warnings, no PXE options rendered), and
+# this narrow logging-path proof does not exercise PXE options at all
+# regardless.
 # cap_add is re-declared explicitly in both blocks for clarity/
 # self-documentation (it matches the base file's own values verbatim, so
 # this is not asserted to change anything either way -- not independently
@@ -474,8 +484,6 @@ services:
       - DHCP_DNS_SECONDARY=${dhcp_gateway}
       - DHCP_DNS_SERVER_IP=${ip_standard}
       - DHCP_DNS_SERVER_IP_SSL=${ip_ssl}
-      - DDNS_TSIG_KEY=
-      - KEA_CTRL_TOKEN=
       - DHCP_MODE=kea
       - DHCP_SUBNET=172.29.${octet}.0/25
       - DHCP_GATEWAY=${dhcp_gateway}
@@ -666,6 +674,66 @@ if [[ "$failed" -eq 1 ]]; then
     # unexpected second restart would otherwise be completely invisible in
     # this diagnostics dump.
     "${compose[@]}" exec -T nats sh -c 'cat /var/log/lancache-nats/nats.log 2>/dev/null | tail -n 200' || true
+    echo "::endgroup::"
+
+    echo "::group::Failure diagnostics: dhcp's own Kea log"
+    # What: dhcp emitted nothing at all in a real failing run.
+    # Why: reads Kea's own log in case stdout stays empty.
+    # From: PR #1775
+    "${compose[@]}" exec -T dhcp sh -c 'cat /var/log/kea/kea-dhcp4.log 2>/dev/null | tail -n 200' || true
+    echo "::endgroup::"
+
+    echo "::group::Failure diagnostics: dhcp's own Kea Control Agent log"
+    # What: healthcheck hits port 8000, a separate Kea process.
+    # Why: kea-ctrl-agent logs to its own file, not kea-dhcp4.log.
+    # From: PR #1775
+    "${compose[@]}" exec -T dhcp sh -c 'cat /var/log/kea/kea-ctrl-agent.log 2>/dev/null | tail -n 200' || true
+    echo "::endgroup::"
+
+    echo "::group::Failure diagnostics: dhcp's Docker healthcheck output"
+    # What: neither Kea log shows the healthcheck's own result.
+    # Why: Docker keeps the real stdout/stderr of recent attempts.
+    # From: PR #1775
+    if dhcp_cid="$("${compose[@]}" ps -q dhcp)" && [[ -n "$dhcp_cid" ]]; then
+        docker inspect --format '{{json .State.Health}}' "$dhcp_cid" | jq . || true
+    fi
+    echo "::endgroup::"
+
+    echo "::group::Failure diagnostics: dhcp healthcheck request re-run verbose"
+    # What: -sf swallows the real HTTP status/body on failure.
+    # Why: same request, but without hiding the real HTTP error.
+    # From: PR #1775
+    "${compose[@]}" exec -T dhcp sh -c '
+        host="${KEA_CTRL_HOST:-127.0.0.1}"
+        [ "$host" = "0.0.0.0" ] && host=127.0.0.1
+        token="${KEA_CTRL_TOKEN:-}"
+        norm="$(printf "%s" "$token" | tr "[:upper:]" "[:lower:]" | tr "-" "_")"
+        case "$norm" in ""|change_me*|changeme*|your_*|*_here) token="" ;; esac
+        [ -n "$token" ] || token="$(cat /var/lib/lancache-secrets/kea-ctrl-token 2>/dev/null)"
+        echo "token source: $([ -n "${KEA_CTRL_TOKEN:-}" ] && echo env || echo file), length=${#token}"
+        esc_token="$(printf "%s" "$token" | sed "s/\\\\/\\\\\\\\/g; s/\"/\\\\\"/g")"
+        printf "user = \"admin:%s\"\n" "$esc_token" | curl -sS -o /tmp/hc-body.$$ -w "HTTP status: %{http_code}\n" -K - \
+            -H "Content-Type: application/json" \
+            -d "{\"command\":\"config-get\",\"service\":[\"dhcp4\"]}" \
+            "http://$host:8000/"
+        echo "response body:"
+        cat /tmp/hc-body.$$ 2>/dev/null
+        rm -f /tmp/hc-body.$$
+    ' || true
+    echo "::endgroup::"
+
+    echo "::group::Failure diagnostics: kea-ctrl-token file vs rendered conf"
+    # What: proves whether the file and daemon conf agree.
+    # Why: a 401 with a real token implies split-brain, not curl.
+    # From: PR #1775
+    "${compose[@]}" exec -T dhcp sh -c '
+        file_sum="$(md5sum /var/lib/lancache-secrets/kea-ctrl-token 2>/dev/null | cut -d" " -f1)"
+        conf_tok="$(sed -n "s/.*\"password\": \"\([^\"]*\)\".*/\1/p" /var/lib/kea/kea-ctrl-agent.conf 2>/dev/null)"
+        conf_sum="$(printf "%s" "$conf_tok" | md5sum | cut -d" " -f1)"
+        echo "shared-secrets file md5: $file_sum"
+        echo "rendered conf token md5: $conf_sum (len=${#conf_tok})"
+        [ "$file_sum" = "$conf_sum" ] && echo "MATCH" || echo "MISMATCH"
+    ' || true
     echo "::endgroup::"
 
     echo "::group::Logs from all services (failure diagnostics)"
