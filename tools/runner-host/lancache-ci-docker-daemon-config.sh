@@ -126,12 +126,7 @@ print_usage() {
     cat <<'EOF'
 Usage: bash lancache-ci-docker-daemon-config.sh <mode>
 
-This script covers two independent CI runner-host maintenance subsystems
-that share the same safe-by-default / confirm-gated-disruptive-step shape:
-dockerd's daemon.json (bare mode names, backward compatible) and the
-LAN-shared apt-cacher-ng download proxy (apt-proxy-* mode names).
-
-Dockerd daemon.json modes:
+Modes:
   check    (default) Read-only. Prints the current daemon.json (or "(none)"),
            the computed merged result, and a diff. Writes nothing.
   stage    Writes the merged config to <DAEMON_JSON>.staged next to the live
@@ -148,30 +143,9 @@ Dockerd daemon.json modes:
            one-liner without a deliberate extra step. Run this only during a
            pre-agreed quiet window, one host at a time (see README.md).
 
-Dockerd env overrides: DAEMON_JSON (default /etc/docker/daemon.json),
+Env overrides: DAEMON_JSON (default /etc/docker/daemon.json),
 BUILDER_GC_RESERVED_SPACE (default 20GB), LOG_MAX_SIZE (default 10m),
 LOG_MAX_FILE (default 3).
-
-Apt-cache proxy modes:
-  apt-proxy-check    Read-only. Verifies the NFS export mounts and is
-                     genuinely writable (real write+subdirectory probe,
-                     matching this repo's .github/actions/trivy-cache-dir
-                     convention), falls back to a real local directory
-                     otherwise, and confirms the pinned image is pullable.
-                     Writes nothing persistent, starts no container.
-  apt-proxy-test     Runs the proxy container in --rm mode (auto-removed on
-                     exit), does a real HTTP smoke request against its
-                     status page and a real apt-get update through it, then
-                     removes it. Leaves no persistent state.
-  apt-proxy-install  THE DISRUPTIVE STEP. Starts the proxy container with
-                     --restart=always: a permanent addition to this host's
-                     running services. Maintainer-scheduled per this
-                     directory's own convention -- requires
-                     CONFIRM_APT_CACHE_PROXY_INSTALL=yes.
-
-Apt-cache proxy env overrides: APT_CACHE_NFS_EXPORT, APT_CACHE_MOUNT,
-APT_CACHE_FALLBACK_DIR, APT_CACHE_PROXY_PORT, APT_CACHE_PROXY_IMAGE,
-APT_CACHE_CONTAINER_NAME.
 EOF
 }
 
@@ -203,7 +177,7 @@ validate_with_dockerd() {
     return 0
 }
 
-cmd_daemon_check() {
+cmd_check() {
     echo "--- Current $DAEMON_JSON ---"
     if [[ -f "$DAEMON_JSON" ]]; then
         cat "$DAEMON_JSON"
@@ -234,14 +208,14 @@ cmd_daemon_check() {
     echo "No files were written (check mode). Re-run with 'stage' or 'apply' to write."
 }
 
-cmd_daemon_stage() {
+cmd_stage() {
     local staged="${DAEMON_JSON}.staged"
     merge_daemon_config "$DAEMON_JSON" | jq '.' > "$staged"
     echo "Staged merged config at: $staged"
     echo "Review it, then run 'apply' when ready. Nothing else was changed."
 }
 
-cmd_daemon_apply() {
+cmd_apply() {
     local merged
     merged="$(merge_daemon_config "$DAEMON_JSON")"
     # Validate before touching anything live -- fail closed rather than
@@ -286,7 +260,7 @@ cmd_daemon_apply() {
     echo "'restart' mode during an agreed quiet window when ready."
 }
 
-cmd_daemon_restart() {
+cmd_restart() {
     if [[ "${CONFIRM_DOCKERD_RESTART:-}" != "yes" ]]; then
         echo "ERROR: refusing to restart dockerd without CONFIRM_DOCKERD_RESTART=yes." >&2
         echo "This stops every container currently running on this host, including" >&2
@@ -343,133 +317,13 @@ cmd_daemon_restart() {
     echo "moving on to the next host (one host at a time, per README.md)."
 }
 
-# What: LAN apt-cache proxy; NFS-backed, local fallback.
-# Why: apt is network-based -- no BuildKit mount needed.
-# From: Issue #1095
-APT_CACHE_NFS_EXPORT="${APT_CACHE_NFS_EXPORT:-192.168.1.10:/srv/runner-hosting/apt-cache}"
-APT_CACHE_MOUNT="${APT_CACHE_MOUNT:-/mnt/apt-cache-nfs}"
-APT_CACHE_FALLBACK_DIR="${APT_CACHE_FALLBACK_DIR:-/var/tmp/lancache-ng-apt-cache-fallback}"
-APT_CACHE_PROXY_PORT="${APT_CACHE_PROXY_PORT:-3142}"
-APT_CACHE_PROXY_IMAGE="${APT_CACHE_PROXY_IMAGE:-sameersbn/apt-cacher-ng@sha256:82f55f9c8f627cee8ef5f710c1745388d79d3a3f2f3150353e6500021bec11b4}"
-APT_CACHE_CONTAINER_NAME="${APT_CACHE_CONTAINER_NAME:-lancache-ci-apt-cache-proxy}"
-
-# What: probes real write+mkdir; never trusts existence.
-# Why: a prior outage came from silently using tmpfs.
-# From: Issue #1095
-resolve_apt_cache_dir() {
-    local probe subdir
-    probe="$APT_CACHE_MOUNT/.apt-cache-proxy-write-probe.$$.${RANDOM}"
-    subdir="$APT_CACHE_MOUNT/.apt-cache-proxy-write-probe-dir.$$.${RANDOM}"
-    if [[ -d "$APT_CACHE_MOUNT" ]] && (
-        set -e
-        printf 'probe' >"$probe"
-        [[ "$(cat "$probe")" == "probe" ]]
-        rm -f "$probe"
-        mkdir "$subdir"
-        printf 'probe' >"$subdir/probe"
-        [[ "$(cat "$subdir/probe")" == "probe" ]]
-        rm -rf "$subdir"
-    ) 2>/dev/null; then
-        echo "$APT_CACHE_MOUNT"
-        return 0
-    fi
-    echo "WARNING: '$APT_CACHE_MOUNT' is not mounted or not writable -- falling back to a real local-disk directory ('$APT_CACHE_FALLBACK_DIR'), never tmpfs/OS-default /tmp. This host will not share the apt cache with any other runner host until the mount recovers." >&2
-    mkdir -p "$APT_CACHE_FALLBACK_DIR"
-    echo "$APT_CACHE_FALLBACK_DIR"
-}
-
-cmd_apt_proxy_check() {
-    echo "== NFS mount status =="
-    if mountpoint -q "$APT_CACHE_MOUNT" 2>/dev/null; then
-        echo "  $APT_CACHE_MOUNT: mounted"
-    else
-        echo "  $APT_CACHE_MOUNT: NOT mounted (expected export: $APT_CACHE_NFS_EXPORT)"
-        echo "  To mount it: sudo mkdir -p $APT_CACHE_MOUNT && sudo mount -t nfs -o rw,soft,timeo=30 $APT_CACHE_NFS_EXPORT $APT_CACHE_MOUNT"
-    fi
-    local chosen_dir
-    chosen_dir="$(resolve_apt_cache_dir)"
-    echo "== Resolved cache directory =="
-    echo "  $chosen_dir"
-    echo "== Pinned image =="
-    echo "  $APT_CACHE_PROXY_IMAGE"
-    if docker image inspect "$APT_CACHE_PROXY_IMAGE" >/dev/null 2>&1; then
-        echo "  already present locally"
-    else
-        echo "  not present locally -- pulling now to verify it resolves (read-only check, no container started)"
-        docker pull "$APT_CACHE_PROXY_IMAGE"
-    fi
-    echo "== check complete -- no container started, no persistent state changed =="
-}
-
-cmd_apt_proxy_test() {
-    local chosen_dir
-    chosen_dir="$(resolve_apt_cache_dir)"
-    echo "Starting a --rm smoke-test container (auto-removed on exit) using cache dir: $chosen_dir"
-    docker run --rm -d \
-        --name "${APT_CACHE_CONTAINER_NAME}-smoketest" \
-        -p "${APT_CACHE_PROXY_PORT}:3142" \
-        -v "${chosen_dir}:/var/cache/apt-cacher-ng" \
-        "$APT_CACHE_PROXY_IMAGE" >/dev/null
-    trap 'docker rm -f "${APT_CACHE_CONTAINER_NAME}-smoketest" >/dev/null 2>&1 || true' EXIT
-
-    echo "Waiting for the proxy's own status page to answer..."
-    local waited=0
-    until curl -sf --max-time 2 "http://127.0.0.1:${APT_CACHE_PROXY_PORT}/acng-report.html" >/dev/null 2>&1; do
-        waited=$((waited + 1))
-        if [[ "$waited" -ge 15 ]]; then
-            echo "ERROR: proxy did not answer its status page within 15s." >&2
-            docker logs "${APT_CACHE_CONTAINER_NAME}-smoketest" >&2 || true
-            exit 1
-        fi
-        sleep 1
-    done
-    echo "OK: apt-cacher-ng answered its status page."
-
-    echo "Fetching one real package index through the proxy to populate the cache..."
-    docker run --rm --network container:"${APT_CACHE_CONTAINER_NAME}-smoketest" \
-        debian:trixie-slim bash -c "set -euo pipefail; printf 'Acquire::http::Proxy \"http://127.0.0.1:3142\";\n' > /etc/apt/apt.conf.d/00proxy; apt-get update"
-    echo "OK: apt-get update through the proxy succeeded."
-    echo "Cache directory now contains:"
-    # What: captures find's output before piping into head.
-    # Why: early exit under pipefail risks a false SIGPIPE.
-    # From: Issue #1095
-    local found_files
-    found_files="$(find "$chosen_dir" -maxdepth 4 -type f 2>/dev/null || true)"
-    head -5 <<<"$found_files"
-    echo "== test complete -- smoke-test container removed, no persistent state left running =="
-}
-
-cmd_apt_proxy_install() {
-    if [[ "${CONFIRM_APT_CACHE_PROXY_INSTALL:-}" != "yes" ]]; then
-        echo "ERROR: refusing to install without CONFIRM_APT_CACHE_PROXY_INSTALL=yes." >&2
-        echo "This starts a --restart=always container -- a permanent change to this" >&2
-        echo "host's running services. Maintainer-scheduled, one host at a time," >&2
-        echo "per tools/runner-host/README.md's own established convention." >&2
-        exit 1
-    fi
-    local chosen_dir
-    chosen_dir="$(resolve_apt_cache_dir)"
-    echo "Installing persistent apt-cache proxy container '${APT_CACHE_CONTAINER_NAME}' using cache dir: $chosen_dir"
-    docker rm -f "$APT_CACHE_CONTAINER_NAME" >/dev/null 2>&1 || true
-    docker run -d \
-        --name "$APT_CACHE_CONTAINER_NAME" \
-        --restart=always \
-        -p "${APT_CACHE_PROXY_PORT}:3142" \
-        -v "${chosen_dir}:/var/cache/apt-cacher-ng" \
-        "$APT_CACHE_PROXY_IMAGE"
-    echo "Installed. Verify with: curl http://127.0.0.1:${APT_CACHE_PROXY_PORT}/acng-report.html"
-}
-
 main() {
     local mode="${1:-check}"
     case "$mode" in
-        check) cmd_daemon_check ;;
-        stage) cmd_daemon_stage ;;
-        apply) cmd_daemon_apply ;;
-        restart) cmd_daemon_restart ;;
-        apt-proxy-check) cmd_apt_proxy_check ;;
-        apt-proxy-test) cmd_apt_proxy_test ;;
-        apt-proxy-install) cmd_apt_proxy_install ;;
+        check) cmd_check ;;
+        stage) cmd_stage ;;
+        apply) cmd_apply ;;
+        restart) cmd_restart ;;
         -h|--help) print_usage ;;
         *)
             echo "ERROR: unknown mode '$mode'" >&2
