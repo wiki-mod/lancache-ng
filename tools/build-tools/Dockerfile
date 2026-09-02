@@ -92,6 +92,41 @@ RUN set -eu; \
     /out/docker-compose version; \
     /out/docker-buildx version
 
+# What: builds sccache once as a musl-static binary.
+# Why: prebuilt lacks redis+dist-client; one build serves
+#   both finals (static musl runs on glibc too).
+# From: Issue #1095
+FROM rust:alpine3.24 AS sccache-builder
+
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
+ARG SCCACHE_VERSION
+
+SHELL ["/bin/sh", "-c"]
+
+# What: installs C deps, builds sccache into /out.
+# Why: redis feature needs openssl/zlib static libs.
+# From: Issue #1095
+RUN set -eu; \
+    apk add --no-cache \
+      build-base \
+      musl-dev \
+      openssl-dev \
+      openssl-libs-static \
+      pkgconf \
+      zlib-dev \
+      zlib-static; \
+    cargo install sccache \
+      --version "${SCCACHE_VERSION}" \
+      --no-default-features \
+      --features redis,dist-client \
+      --root /out; \
+    /out/bin/sccache --version
+
 # What: Alpine 3.24 candidate build-tools stage
 # Why: Debian default; pin avoids clang22/lld22 breakage
 # From: Issue #1095
@@ -223,12 +258,16 @@ RUN docker --version; \
     docker compose version; \
     docker buildx version
 
-# What: builds sccache from source, like the Debian stage.
-# Why: prebuilt release lacks Redis+dist-client feature
+# What: copies the once-built musl-static sccache binary.
+# Why: no per-stage source build; static runs on musl here.
+# From: Issue #1095
+COPY --from=sccache-builder /out/bin/sccache /usr/local/bin/sccache
+
+# What: adds rustfmt/clippy, symlinks cargo tools to PATH.
+# Why: toolchain setup only; sccache now comes via COPY.
 # From: Issue #1095
 RUN set -euo pipefail; \
     rustup component add rustfmt clippy; \
-    cargo install sccache --version "${SCCACHE_VERSION}" --no-default-features --features redis,dist-client --root /usr/local; \
     for tool in cargo cargo-clippy cargo-fmt clippy-driver rustc rustdoc rustfmt rustup; do \
       ln -sf "/usr/local/cargo/bin/${tool}" "/usr/local/bin/${tool}"; \
     done; \
@@ -530,12 +569,16 @@ RUN docker --version; \
     docker compose version; \
     docker buildx version
 
-# What: build sccache with redis/dist-client only
-# Why: excludes unused backends; smaller binary
-# From: Issue #1570 | PR #1571
+# What: copies the once-built musl-static sccache binary.
+# Why: static musl binary runs on this glibc stage too.
+# From: Issue #1095
+COPY --from=sccache-builder /out/bin/sccache /usr/local/bin/sccache
+
+# What: adds rustfmt/clippy, symlinks cargo tools to PATH.
+# Why: toolchain setup only; sccache now comes via COPY.
+# From: Issue #1095
 RUN set -euo pipefail; \
     rustup component add rustfmt clippy; \
-    cargo install sccache --version "${SCCACHE_VERSION}" --no-default-features --features redis,dist-client --root /usr/local; \
     for tool in cargo cargo-clippy cargo-fmt clippy-driver rustc rustdoc rustfmt rustup; do \
       ln -sf "/usr/local/cargo/bin/${tool}" "/usr/local/bin/${tool}"; \
     done; \
