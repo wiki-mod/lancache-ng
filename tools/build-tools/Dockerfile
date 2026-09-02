@@ -9,26 +9,15 @@
 ARG DOCKER_CLI_VERSION=29.7.2
 ARG DOCKER_COMPOSE_VERSION=5.5.0
 ARG DOCKER_BUILDX_VERSION=0.36.1
-# What: pins buildx's vendored containerd/v2 dependency.
-# Why: buildx v0.36.1 floors at v2.3.3; 2.3.4 stays ahead.
-# From: Issue #1570 | PR #1571
-ARG DOCKER_BUILDX_CONTAINERD_VERSION=2.3.4
-# What: pins buildx/compose/cli's vendored grpc-go floor.
-# Why: all three floor at v1.82.1; 1.83.1 stays current.
-# From: Issue #1598
-ARG GRPC_GO_VERSION=1.83.1
-# What: pins buildx/compose/cli's vendored x/text floor.
-# Why: all three floor at v0.40.0; 0.41.0 stays current.
-# From: Issue #1570 | PR #1571
-ARG GOLANG_X_TEXT_VERSION=0.41.0
-# What: pins buildx's vendored moby/go-archive dependency.
-# Why: buildx v0.36.1 floors at the CVE-affected v0.2.1.
-# From: Issue #1598
-ARG MOBY_GO_ARCHIVE_VERSION=0.3.3
-# What: pins buildx/compose/cli's vendored x/mod floor.
-# Why: all three floor at v0.38.0; 0.40.0 is the fix.
-# From: Issue #1598
-ARG GOLANG_X_MOD_VERSION=0.40.0
+# What: sha256 pins for official docker tool binaries.
+# Why: tool self-compiles dropped; prebuilts only now.
+# From: Issue #1095
+ARG DOCKER_CLI_SHA256_AMD64=803d433f226db4776e1768fd319fc6c6e4935a456acf84fcc0080818b854bc8f
+ARG DOCKER_CLI_SHA256_ARM64=43d143448adf2c2787704e7d7704fd6d62d367a54c5edaef0a3f75509cb0938d
+ARG DOCKER_COMPOSE_SHA256_AMD64=c57ab918abd5b05ca7e7d0f275875dd1330a695074f309dc9eab1b49efafcd4b
+ARG DOCKER_COMPOSE_SHA256_ARM64=ff42489f5a9b879d5d117c5ffea6defc27390b3286da8ad52cbc9c6ab5df590e
+ARG DOCKER_BUILDX_SHA256_AMD64=48af8a397ebd60178778bf63611dbcebe5f5e7a9be90eb9147b24b9587455778
+ARG DOCKER_BUILDX_SHA256_ARM64=5d0cafd9d16afe1a0f0d9529885344ace2cc99efdd531b6c783c5455a6001569
 # What: hoists sccache/audit/tarpaulin/actionlint pins
 # Why: alpine-final and final stage had duplicate values
 # From: Issue #1671 | PR #1750
@@ -41,54 +30,13 @@ ARG ACTIONLINT_SHA256_ARM64=325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7
 ARG SHELLSPEC_VERSION=0.28.1
 ARG SHELLSPEC_SHA256=350d3de04ba61505c54eda31a3c2ee912700f1758b1a80a284bc08fd8b6c5992
 
-# What: builds the Go-tool script once for both stages
-# Why: Debian/Alpine RUN bodies were byte-identical
+# What: fetches checksum-verified docker CLI tools.
+# Why: official release binaries replace source builds.
 # From: Issue #1095
-FROM scratch AS go-tools-script
-COPY <<'BUILD_GO_TOOLS_EOF' /build-go-tools.sh
-#!/bin/sh
-set -eu
-buildx_src="$(mktemp -d)"
-git clone --depth 1 --branch "v${DOCKER_BUILDX_VERSION}" https://github.com/docker/buildx.git "$buildx_src"
-( cd "$buildx_src" \
-  && go get "github.com/containerd/containerd/v2@v${DOCKER_BUILDX_CONTAINERD_VERSION}" \
-  && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
-  && go get "golang.org/x/text@v${GOLANG_X_TEXT_VERSION}" \
-  && go get "github.com/moby/go-archive@v${MOBY_GO_ARCHIVE_VERSION}" \
-  && go get "golang.org/x/mod@v${GOLANG_X_MOD_VERSION}" \
-  && go mod vendor \
-  && go build -ldflags "-X github.com/docker/buildx/version.Version=v${DOCKER_BUILDX_VERSION}" -o /out/docker-buildx ./cmd/buildx )
-rm -rf "$buildx_src"
-/out/docker-buildx version
-docker_cli_src="$(go env GOPATH)/src/github.com/docker/cli"
-install -d "$(dirname "$docker_cli_src")"
-git clone --depth 1 --branch "v${DOCKER_CLI_VERSION}" https://github.com/docker/cli.git "$docker_cli_src"
-( cd "$docker_cli_src" \
-  && ln -s vendor.mod go.mod && ln -s vendor.sum go.sum \
-  && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
-  && go get "golang.org/x/text@v${GOLANG_X_TEXT_VERSION}" \
-  && go get "golang.org/x/mod@v${GOLANG_X_MOD_VERSION}" \
-  && go mod vendor \
-  && rm go.mod go.sum \
-  && VERSION="${DOCKER_CLI_VERSION}" sh ./scripts/build/binary )
-install -m 0755 "$docker_cli_src/build/docker-$(go env GOOS)-$(go env GOARCH)" /out/docker
-rm -rf "$(go env GOPATH)/src/github.com"
-/out/docker --version
-compose_src="$(mktemp -d)"
-git clone --depth 1 --branch "v${DOCKER_COMPOSE_VERSION}" https://github.com/docker/compose.git "$compose_src"
-( cd "$compose_src" \
-  && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
-  && go get "golang.org/x/text@v${GOLANG_X_TEXT_VERSION}" \
-  && go get "golang.org/x/mod@v${GOLANG_X_MOD_VERSION}" \
-  && go build -ldflags "-X github.com/docker/compose/v5/internal.Version=${DOCKER_COMPOSE_VERSION}" -o /out/docker-compose ./cmd )
-rm -rf "$compose_src"
-/out/docker-compose version
-BUILD_GO_TOOLS_EOF
-
-FROM golang:latest AS go-tools-builder
+FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS docker-tools-fetch
 
 # What: explicit proxy build-args, no default value set
-# Why: routes self-hosted go/apt downloads via the LAN proxy
+# Why: routes self-hosted downloads via the LAN proxy
 # From: Issue #1781 | PR #1783
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
@@ -100,62 +48,49 @@ ARG no_proxy
 ARG DOCKER_CLI_VERSION
 ARG DOCKER_COMPOSE_VERSION
 ARG DOCKER_BUILDX_VERSION
-ARG DOCKER_BUILDX_CONTAINERD_VERSION
-ARG GRPC_GO_VERSION
-ARG GOLANG_X_TEXT_VERSION
-ARG MOBY_GO_ARCHIVE_VERSION
-ARG GOLANG_X_MOD_VERSION
-
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-COPY --from=go-tools-script /build-go-tools.sh /build-go-tools.sh
-
-# What: builds CLI/compose/buildx from source (Go tools).
-# Why: needs current Go stdlib; vendor bump forces a build.
-# From: Issue #1095 | PR #1743
-RUN chmod +x /build-go-tools.sh && /build-go-tools.sh
-
-# What: Alpine equivalent of go-tools-builder above.
-# Why: kept separate so the Debian stage stays unchanged.
-# From: Issue #1095 | PR #1743
-FROM golang:alpine AS go-tools-builder-alpine
-
-# What: explicit proxy build-args, no default value set
-# Why: routes self-hosted go/apk downloads via the LAN proxy
-# From: Issue #1781 | PR #1783
-ARG HTTP_PROXY
-ARG HTTPS_PROXY
-ARG NO_PROXY
-ARG http_proxy
-ARG https_proxy
-ARG no_proxy
-
-ARG DOCKER_CLI_VERSION
-ARG DOCKER_COMPOSE_VERSION
-ARG DOCKER_BUILDX_VERSION
-ARG DOCKER_BUILDX_CONTAINERD_VERSION
-ARG GRPC_GO_VERSION
-ARG GOLANG_X_TEXT_VERSION
-ARG MOBY_GO_ARCHIVE_VERSION
-ARG GOLANG_X_MOD_VERSION
+ARG DOCKER_CLI_SHA256_AMD64
+ARG DOCKER_CLI_SHA256_ARM64
+ARG DOCKER_COMPOSE_SHA256_AMD64
+ARG DOCKER_COMPOSE_SHA256_ARM64
+ARG DOCKER_BUILDX_SHA256_AMD64
+ARG DOCKER_BUILDX_SHA256_ARM64
 
 SHELL ["/bin/sh", "-o", "pipefail", "-c"]
-COPY --from=go-tools-script /build-go-tools.sh /build-go-tools.sh
 
-# What: declares APK_CACHE_BUST before this stage's RUN
-# Why: matches the other Alpine stage's cache-bust knob
+# What: downloads three binaries, verifies sha256 pins.
+# Why: per-arch pins fail closed on tampered artifacts.
 # From: Issue #1095
-ARG APK_CACHE_BUST=""
-
-# What: builds the same three Go tools as go-tools-builder.
-# Why: none needs a cgo dependency; musl needs no build-tag.
-# From: Issue #1095 | PR #1743
-RUN set -euo pipefail; \
-    : "apk-cache-bust=${APK_CACHE_BUST}"; \
-    apk update; \
-    apk upgrade --no-cache; \
-    apk add --no-cache git build-base; \
-    chmod +x /build-go-tools.sh; \
-    /build-go-tools.sh
+RUN set -eu; \
+    apk add --no-cache curl ca-certificates; \
+    case "$(apk --print-arch)" in \
+      x86_64) dl_arch="x86_64"; bx_arch="amd64"; \
+        cli_sha="${DOCKER_CLI_SHA256_AMD64}"; \
+        compose_sha="${DOCKER_COMPOSE_SHA256_AMD64}"; \
+        buildx_sha="${DOCKER_BUILDX_SHA256_AMD64}" ;; \
+      aarch64) dl_arch="aarch64"; bx_arch="arm64"; \
+        cli_sha="${DOCKER_CLI_SHA256_ARM64}"; \
+        compose_sha="${DOCKER_COMPOSE_SHA256_ARM64}"; \
+        buildx_sha="${DOCKER_BUILDX_SHA256_ARM64}" ;; \
+      *) echo "unsupported arch: $(apk --print-arch)" >&2; exit 1 ;; \
+    esac; \
+    mkdir -p /out; \
+    cli_url="https://download.docker.com/linux/static/stable/${dl_arch}/docker-${DOCKER_CLI_VERSION}.tgz"; \
+    curl -fsSL "$cli_url" -o /tmp/docker.tgz; \
+    echo "${cli_sha}  /tmp/docker.tgz" | sha256sum -c -; \
+    tar -xzf /tmp/docker.tgz -C /tmp docker/docker; \
+    install -m 0755 /tmp/docker/docker /out/docker; \
+    compose_url="https://github.com/docker/compose/releases/download/v${DOCKER_COMPOSE_VERSION}/docker-compose-linux-${dl_arch}"; \
+    curl -fsSL "$compose_url" -o /out/docker-compose; \
+    echo "${compose_sha}  /out/docker-compose" | sha256sum -c -; \
+    chmod 0755 /out/docker-compose; \
+    buildx_url="https://github.com/docker/buildx/releases/download/v${DOCKER_BUILDX_VERSION}/buildx-v${DOCKER_BUILDX_VERSION}.linux-${bx_arch}"; \
+    curl -fsSL "$buildx_url" -o /out/docker-buildx; \
+    echo "${buildx_sha}  /out/docker-buildx" | sha256sum -c -; \
+    chmod 0755 /out/docker-buildx; \
+    rm -rf /tmp/docker /tmp/docker.tgz; \
+    /out/docker --version; \
+    /out/docker-compose version; \
+    /out/docker-buildx version
 
 # What: Alpine 3.24 candidate build-tools stage
 # Why: Debian default; pin avoids clang22/lld22 breakage
@@ -281,9 +216,9 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # Why: dependency blocks compile; prevents corruption
 # From: Issue #1671 | PR #1750
 RUN install -d /usr/local/lib/docker/cli-plugins
-COPY --from=go-tools-builder-alpine /out/docker /usr/local/bin/docker
-COPY --from=go-tools-builder-alpine /out/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
-COPY --from=go-tools-builder-alpine /out/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx
+COPY --from=docker-tools-fetch /out/docker /usr/local/bin/docker
+COPY --from=docker-tools-fetch /out/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
+COPY --from=docker-tools-fetch /out/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx
 RUN docker --version; \
     docker compose version; \
     docker buildx version
@@ -588,9 +523,9 @@ RUN curl --version >/dev/null
 # Why: dependency blocks compile; prevents corruption
 # From: Issue #1671 | PR #1750
 RUN install -d /usr/local/lib/docker/cli-plugins
-COPY --from=go-tools-builder /out/docker /usr/local/bin/docker
-COPY --from=go-tools-builder /out/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
-COPY --from=go-tools-builder /out/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx
+COPY --from=docker-tools-fetch /out/docker /usr/local/bin/docker
+COPY --from=docker-tools-fetch /out/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
+COPY --from=docker-tools-fetch /out/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx
 RUN docker --version; \
     docker compose version; \
     docker buildx version
