@@ -115,6 +115,17 @@ jobs:
     steps:
       - uses: *checkout_centraliced_versioning # v7.0.1
 
+      # What: authenticates registry pulls before stack start.
+      # Why: stack pulls docker.io images anonymously otherwise.
+      # From: Issue #1095
+      - name: Log in to registries (GHCR + optional Docker Hub)
+        uses: ./.github/actions/ghcr-then-dockerhub-login
+        with:
+          ghcr-username: ${{ github.actor }}
+          ghcr-password: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Resolve immutable build-tools image
         id: build-tools
         run: |
@@ -243,6 +254,18 @@ jobs:
       VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
       - uses: *checkout_centraliced_versioning # v7.0.1
+
+      # What: authenticates registry pulls before compose up.
+      # Why: this job's compose up pulls nats from docker.io.
+      # From: Issue #1095
+      - name: Log in to registries (GHCR + optional Docker Hub)
+        uses: ./.github/actions/ghcr-then-dockerhub-login
+        with:
+          ghcr-username: ${{ github.actor }}
+          ghcr-password: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Resolve build-tools image
         # BUILD_TOOLS_REQUIRE_PUBLISHED=true: this job's dig/curl client checks
         # only need tools already in every published build-tools image, so it
@@ -468,6 +491,18 @@ jobs:
       VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
       - uses: *checkout_centraliced_versioning # v7.0.1
+
+      # What: authenticates registry pulls before compose up.
+      # Why: pulls nats/docker-socket-proxy from docker.io.
+      # From: Issue #1095
+      - name: Log in to registries (GHCR + optional Docker Hub)
+        uses: ./.github/actions/ghcr-then-dockerhub-login
+        with:
+          ghcr-username: ${{ github.actor }}
+          ghcr-password: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Resolve build-tools image
         # What: same build-tools resolution as ssl-mitm-cache-sim above.
         # Why: prefers PR staging tag for same-PR build-tools change.
@@ -545,6 +580,18 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: *checkout_centraliced_versioning # v7.0.1
+
+      # What: authenticates registry pulls before setup.sh runs.
+      # Why: nested container inherits config via mount below.
+      # From: Issue #1095
+      - name: Log in to registries (GHCR + optional Docker Hub)
+        uses: ./.github/actions/ghcr-then-dockerhub-login
+        with:
+          ghcr-username: ${{ github.actor }}
+          ghcr-password: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Resolve build-tools image
         # No BUILD_TOOLS_REQUIRE_PUBLISHED: setup-cli-simulation.sh needs
         # `expect` from build-tools. On a PR that touched tools/build-tools,
@@ -634,6 +681,9 @@ jobs:
           source "scripts/lib/quickstart-compose-lock.sh"
           quickstart_compose_lock_acquire
 
+          # What: mounts this step's docker login into the container.
+          # Why: setup.sh's compose calls run via mounted host socket.
+          # From: Issue #1095
           docker run --rm \
             --network host \
             -v /var/run/docker.sock:/var/run/docker.sock \
@@ -641,6 +691,7 @@ jobs:
             -w "$PWD" \
             -e SETUP_SIM_IMAGE_CHANNEL \
             -e SETUP_SIM_IMAGE_TAG \
+            -v "$HOME/.docker:/root/.docker:ro" \
             "$BUILD_TOOLS_IMAGE" \
             timeout --kill-after=30 --signal=KILL 1800 \
             bash scripts/untracked/simulations/setup-cli-simulation.sh
@@ -736,6 +787,18 @@ jobs:
       VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
       - uses: *checkout_centraliced_versioning # v7.0.1
+
+      # What: authenticates registry pulls before compose up.
+      # Why: pulls nats/docker-socket-proxy from docker.io.
+      # From: Issue #1095
+      - name: Log in to registries (GHCR + optional Docker Hub)
+        uses: ./.github/actions/ghcr-then-dockerhub-login
+        with:
+          ghcr-username: ${{ github.actor }}
+          ghcr-password: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Resolve build-tools image
         # What: same build-tools resolution as ssl-mitm-cache-sim above.
         # Why: prefers PR staging tag for same-PR build-tools change.
@@ -807,6 +870,18 @@ jobs:
       VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
       - uses: *checkout_centraliced_versioning # v7.0.1
+
+      # What: authenticates registry pulls before compose up.
+      # Why: ui's deps pull nats/docker-socket-proxy anonymously.
+      # From: Issue #1095
+      - name: Log in to registries (GHCR + optional Docker Hub)
+        uses: ./.github/actions/ghcr-then-dockerhub-login
+        with:
+          ghcr-username: ${{ github.actor }}
+          ghcr-password: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Resolve build-tools image
         # No BUILD_TOOLS_REQUIRE_PUBLISHED: this job's curl check only needs
         # tools already in every published build-tools image, matching
@@ -883,6 +958,18 @@ jobs:
       VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
       - uses: *checkout_centraliced_versioning # v7.0.1
+
+      # What: authenticates registry pulls before compose up.
+      # Why: pulls nats/docker-socket-proxy from docker.io.
+      # From: Issue #1095
+      - name: Log in to registries (GHCR + optional Docker Hub)
+        uses: ./.github/actions/ghcr-then-dockerhub-login
+        with:
+          ghcr-username: ${{ github.actor }}
+          ghcr-password: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Resolve build-tools image
         # No BUILD_TOOLS_REQUIRE_PUBLISHED: same-PR tools/build-tools override
         # preference, matching every other job in this suite.
@@ -961,6 +1048,18 @@ jobs:
       VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
       - uses: *checkout_centraliced_versioning # v7.0.1
+
+      # What: authenticates registry pulls before compose up.
+      # Why: pulls nats/docker-socket-proxy from docker.io.
+      # From: Issue #1095
+      - name: Log in to registries (GHCR + optional Docker Hub)
+        uses: ./.github/actions/ghcr-then-dockerhub-login
+        with:
+          ghcr-username: ${{ github.actor }}
+          ghcr-password: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Resolve build-tools image
         # No BUILD_TOOLS_REQUIRE_PUBLISHED: same-PR tools/build-tools override
         # preference, matching every other job in this suite. Read via env: +
