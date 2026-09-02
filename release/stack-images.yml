@@ -136,6 +136,21 @@ runtime:
     compose:
       - deploy/prod/docker-compose.yml
       - deploy/quickstart/docker-compose.yml
+  - name: cachehamster
+    image: ghcr.io/wiki-mod/lancache-ng/cachehamster
+    source: services/cachehamster/Dockerfile
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    description: >-
+      CacheHamster: Steam cache-warming prefill daemon (scaffold, issue
+      #871). Opt-in via the `cachehamster` Compose profile (default off);
+      not yet functional end-to-end (no Steam control-plane/depot
+      integration -- see docs/architecture-ng.md's "Cache Warming"
+      section).
+    compose:
+      - deploy/prod/docker-compose.yml
+      - deploy/quickstart/docker-compose.yml
 tooling:
   - name: build-tools
     image: ghcr.io/wiki-mod/lancache-ng/build-tools

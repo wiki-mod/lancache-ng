@@ -110,7 +110,7 @@ tooling_names=$(collect_names tooling)
 metadata_names=$(collect_names metadata)
 external_names=$(collect_names external)
 
-runtime_images=(proxy dns watchdog dhcp dhcp-proxy ntp ui syslog)
+runtime_images=(proxy dns watchdog dhcp dhcp-proxy ntp ui syslog cachehamster)
 # runtime_images is a hand-maintained copy of the manifest's own runtime:
 # section (collected into runtime_names above) -- nothing keeps the two in
 # sync mechanically otherwise. A service present in the manifest but missing
@@ -152,7 +152,8 @@ for dockerfile in \
   services/ui/Dockerfile \
   services/syslog/Dockerfile \
   tools/build-tools/Dockerfile \
-  services/utilities/Dockerfile
+  services/utilities/Dockerfile \
+  services/cachehamster/Dockerfile
 do
   require_file "$dockerfile"
 done
@@ -191,6 +192,14 @@ require_grep "image: ${first_party_ref}/ntp:\\$\\{LANCACHE_IMAGE_TAG:-latest\\}"
 require_grep "image: ${first_party_ref}/syslog:\\$\\{LANCACHE_IMAGE_TAG:-latest\\}" \
   deploy/quickstart/docker-compose.yml \
   'quickstart compose must use registry/prefix/tag variables for syslog'
+# What: explicitly checks cachehamster in quickstart, same shape as
+#   dhcp/dhcp-proxy/ntp/syslog above.
+# Why: opt-in (`cachehamster` Compose profile), added alongside its infra
+#   integration.
+# From: Issue #871
+require_grep "image: ${first_party_ref}/cachehamster:\\$\\{LANCACHE_IMAGE_TAG:-latest\\}" \
+  deploy/quickstart/docker-compose.yml \
+  'quickstart compose must use registry/prefix/tag variables for cachehamster'
 require_grep "image: ${first_party_ref}/dns:\\$\\{LANCACHE_IMAGE_TAG:-latest\\}" \
   deploy/secondary/docker-compose.yml \
   'secondary compose must use registry/prefix/tag variables for dns'
@@ -218,7 +227,8 @@ for dockerfile in \
   services/ntp/Dockerfile \
   services/ui/Dockerfile \
   services/syslog/Dockerfile \
-  tools/build-tools/Dockerfile
+  tools/build-tools/Dockerfile \
+  services/cachehamster/Dockerfile
 do
   require_grep 'LABEL org\.opencontainers\.image\.description=' \
     "$dockerfile" \
@@ -253,7 +263,7 @@ require_grep 'annotation "index:org\.opencontainers\.image\.description=' \
 # longer contains. #1428 (syslog) and #1556 (utilities) both joined the
 # first-party service set after this consolidation landed; both are covered
 # here because CI_BUILD_SERVICES already carries them.
-require_grep 'CI_BUILD_SERVICES: "proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities"' \
+require_grep 'CI_BUILD_SERVICES: "proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities cachehamster"' \
   .github/workflows/build-push.yml \
   'promotion and release jobs must share the full first-party service set'
 # release-sbom's own `service: [...]` flow-sequence matrix is a fourth,
@@ -266,7 +276,7 @@ require_grep 'CI_BUILD_SERVICES: "proxy dns watchdog dhcp dhcp-proxy ntp syslog 
 # CycloneDX SBOM) is exactly the drift shape this narrower literal check
 # exists to catch mechanically instead of relying on manual review to
 # notice a fifth recurrence.
-require_grep 'service: \[proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, syslog, ui, build-tools, utilities\]' \
+require_grep 'service: \[proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, syslog, ui, build-tools, utilities, cachehamster\]' \
   .github/workflows/build-push.yml \
   'release-sbom must cover every Trivy-scanned first-party image (mirrors container-scan matrix)'
 
@@ -446,7 +456,7 @@ require_grep 'uses: \./\.github/actions/trivy-db-ensure-fresh' \
 # set plus the immutable stack pointer (#1428 added syslog, #1556 added
 # utilities, both for the same reason the runtime_images/Dockerfile loops
 # above cover them).
-require_grep 'SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities stack' \
+require_grep 'SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities cachehamster stack' \
   .github/workflows/build-push.yml \
   'release workflow must verify the stack pointer platform coverage too'
 require_grep 'assert_prebuilt_image_platform_supported' \

@@ -57,7 +57,7 @@ env:
   # What: one runtime service list for manifest, promotion, and release loops.
   # Why: check-workflow-service-lists.sh fails CI on any matrix drift.
   # From: PR #1523
-  CI_BUILD_SERVICES: "proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities"
+  CI_BUILD_SERVICES: "proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities cachehamster"
   RELEASE_PLATFORMS: linux/amd64,linux/arm64
   RUST_ACCELERATION_NETWORK: bridge
 
@@ -4389,6 +4389,9 @@ jobs:
           - service: utilities
             platform_tag: amd64
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
+          - service: cachehamster
+            platform_tag: amd64
+            runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
           - service: proxy
             platform_tag: arm64
             runner: '"ubuntu-24.04-arm"'
@@ -4417,6 +4420,9 @@ jobs:
             platform_tag: arm64
             runner: '"ubuntu-24.04-arm"'
           - service: utilities
+            platform_tag: arm64
+            runner: '"ubuntu-24.04-arm"'
+          - service: cachehamster
             platform_tag: arm64
             runner: '"ubuntu-24.04-arm"'
     steps:
@@ -5047,6 +5053,21 @@ jobs:
             # watchdog/dhcp/syslog/ntp (pure package-install or COPY --from,
             # no compiler invoked at all) do. Revisit if a future change
             # removes the from-source curl build.
+            runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
+          - service: cachehamster
+            context: services/cachehamster
+            build_contexts: ""
+            description: &ci-description-cachehamster "lancache-ng CacheHamster: Steam cache-warming prefill daemon (scaffold, issue #871)."
+            # rust:true (real cargo build/link step, same class as
+            # dns/ui/watchdog) -- but see services/cachehamster/Dockerfile's
+            # own comment: sccache/distcc/ccache acceleration is
+            # deliberately NOT wired into that Dockerfile yet, so this
+            # service's acceleration secret files are generated but unused
+            # by BuildKit (harmless; matches the light-tier-vs-heavy-tier
+            # non-grandfathering reasoning documented on utilities above --
+            # it is classified by whether a real compile exists, not by
+            # whether acceleration is wired for it yet).
+            rust: true
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
 
     steps:
@@ -7845,7 +7866,7 @@ jobs:
           # Why: check-workflow-service-lists.sh's regex guard can only
           # see a space-separated scalar here, not a bash array.
           # From: Issue #1428 | PR #1433 | Issue #1556 | PR #1574
-          SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities stack
+          SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities cachehamster stack
           REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
@@ -8204,7 +8225,7 @@ jobs:
         # (an unscanned channel-pointer image).
         # Why: a hand-kept copy risks drifting out of sync.
         # From: Issue #1095 | PR #1619
-        service: [proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, syslog, ui, build-tools, utilities]
+        service: [proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, syslog, ui, build-tools, utilities, cachehamster]
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - name: Checkout

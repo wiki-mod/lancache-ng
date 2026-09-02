@@ -108,6 +108,14 @@ fi
 # unmonitored services (dhcp-probe above, netdata). A lightweight heartbeat
 # check is a reasonable future follow-up, tracked as such in PR #1360, not
 # built speculatively here.
+#
+# cachehamster (deploy/prod, deploy/quickstart; issue #871): same one-shot
+# shape as dhcp-probe/syslog-logs-permissions above -- the scaffold's
+# current main.rs runs its configured fetch list once and exits (no
+# steam-vent/steamroom control-plane loop yet, `restart: "no"`), so there
+# is no "healthy vs. degraded" state between "just started" and "already
+# exited" for a liveness check to distinguish. Revisit once a real,
+# long-running control-plane loop exists.
 declare -A EXCLUDED_SERVICES=(
     ["deploy/prod/docker-compose.yml:dhcp-probe"]=1
     ["deploy/quickstart/docker-compose.yml:dhcp-probe"]=1
@@ -116,6 +124,8 @@ declare -A EXCLUDED_SERVICES=(
     ["deploy/prod/docker-compose.yml:retention"]=1
     ["deploy/quickstart/docker-compose.yml:retention"]=1
     ["deploy/full-setup/docker-compose.yml:retention"]=1
+    ["deploy/prod/docker-compose.yml:cachehamster"]=1
+    ["deploy/quickstart/docker-compose.yml:cachehamster"]=1
 )
 
 if [[ -t 1 ]]; then

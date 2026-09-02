@@ -32,7 +32,7 @@ manifest="${GC_RETENTION_MANIFEST:-$repo_root/release/stack-images.yml}"
 # What: build/build-arm64 jobs push PR staging tags per service.
 # Why: must match check-workflow-service-lists.sh service matrix.
 # From: Issue #626 | PR #627
-services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities)
+services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities cachehamster)
 
 # What: keeps per-package deletion cap at default 40.
 # Why: one backlog cannot starve other packages in same sweep.

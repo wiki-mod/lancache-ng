@@ -541,6 +541,33 @@ services:
         max-size: "5m"
         max-file: "2"
 
+  # ── CacheHamster (Steam cache-warming prefill scaffold) ─────────────────────
+  # What: opt-in, credential-gated Steam cache-warming prefill daemon.
+  # Why: scaffold only (issue #871) -- credential-store + stream-fetch
+  #   primitives exist, but no real Steam depot-fetch capability yet; see
+  #   docs/design-steam-prefill.md. One-shot: runs its configured fetch
+  #   list once, then exits (no `steam-vent`/`steamroom` control-plane loop
+  #   yet), so `restart: "no"` and no healthcheck (same class as
+  #   dhcp-probe/syslog-logs-permissions below -- see
+  #   scripts/tracked/check-compose-healthchecks.sh's own EXCLUDED_SERVICES
+  #   comment for that precedent).
+  # From: Issue #871
+  cachehamster:
+    container_name: lancache-cachehamster
+    image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/cachehamster:${LANCACHE_IMAGE_TAG:-latest}
+    profiles:
+      - cachehamster
+    env_file:
+      - ../../config/prod/cachehamster.env
+    volumes:
+      - ${CACHEHAMSTER_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/cachehamster}:/data
+    restart: "no"
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
   # ── DHCP conflict probe ────────────────────────────────────────────────────
   # What: predeclared start/stop/wait helper for the Admin UI's "check for other DHCP servers" feature; runs the UI image in `--dhcp-probe` mode (services/ui/src/dhcp_probe_native.rs), a native DHCPv4 client.
   # Why: the Admin UI only ever starts/stops this container and reads its output, never creates or removes it, so docker-socket-proxy needs only the start/restart capability class, not generic container creation.

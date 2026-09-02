@@ -303,7 +303,18 @@ declare -A FULL_SETUP_EXACT_EXCLUSIONS=(
     # so no deep-validation simulation needs a staging image for it. Mirrors
     # the reasoning that already excludes build-tools from this same file's
     # full_setup_services=(...) array (see that array's own comment).
-    ["ensure-pr-staging-images.sh"]="utilities"
+    #
+    # cachehamster (issue #871): excluded for a DIFFERENT reason than
+    # utilities/build-tools above -- it IS a real runtime product-stack
+    # service (unlike those two), but is opt-in (`cachehamster` Compose
+    # profile, default off) and requires an operator-supplied Steam
+    # credential to do anything, which CI has no way to provide. No
+    # full-setup-deep-validate simulation starts/health-checks it, mirroring
+    # the pre-#1296 dhcp/dhcp-proxy/ntp exclusion shape above (see that
+    # completion note) rather than the utilities shape. Move it out of this
+    # exclusion set the same way #1296 did for dhcp/dhcp-proxy/ntp, once a
+    # real simulation exercises it without requiring live Steam credentials.
+    ["ensure-pr-staging-images.sh"]=$'utilities\ncachehamster'
 )
 
 # Checks every `full_setup_services=(...)` array in $1. For files listed in
