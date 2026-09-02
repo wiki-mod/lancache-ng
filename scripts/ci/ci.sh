@@ -1628,15 +1628,16 @@ ci_cmd_resolve_utilities_digest() {
     # What: resolves utilities:latest, falls back to :nightly.
     # Why: latest has never been published; nightly exists and works.
     # From: Issue #1095 | PR #1706
-    local digest
-    digest="$(ci_registry_digest ghcr.io/wiki-mod/lancache-ng/utilities:latest)" \
-        || digest="$(ci_registry_digest ghcr.io/wiki-mod/lancache-ng/utilities:nightly)" \
+    local ref digest
+    ref="$(ci_image_ref utilities)"
+    digest="$(ci_registry_digest "${ref}:latest")" \
+        || digest="$(ci_registry_digest "${ref}:nightly")" \
         || digest=""
     if [[ -z "$digest" ]]; then
-        ci_annotate error "Could not resolve digest for ghcr.io/wiki-mod/lancache-ng/utilities:latest or :nightly."
+        ci_annotate error "Could not resolve digest for ${ref}:latest or :nightly."
         exit 1
     fi
-    ci_emit_output utilities_image "ghcr.io/wiki-mod/lancache-ng/utilities@$digest"
+    ci_emit_output utilities_image "${ref}@$digest"
     ci_emit_output utilities_digest "$digest"
 }
 

@@ -1363,8 +1363,9 @@ setup() {
         [[ "$1" == *:latest ]] && { printf 'sha256:%064d\n' 1; return 0; }
         return 1
     }
-    GITHUB_OUTPUT="" run ci_cmd_resolve_utilities_digest
+    CI_IMAGE_REPO="owner/repo" GITHUB_OUTPUT="" run ci_cmd_resolve_utilities_digest
     [ "$status" -eq 0 ]
+    [[ "$output" == *"utilities_image=ghcr.io/owner/repo/utilities@sha256:$(printf '%064d' 1)"* ]]
     [[ "$output" == *"utilities_digest=sha256:$(printf '%064d' 1)"* ]]
 }
 
@@ -1373,14 +1374,14 @@ setup() {
         [[ "$1" == *:nightly ]] && { printf 'sha256:%064d\n' 2; return 0; }
         return 1
     }
-    GITHUB_OUTPUT="" run ci_cmd_resolve_utilities_digest
+    CI_IMAGE_REPO="owner/repo" GITHUB_OUTPUT="" run ci_cmd_resolve_utilities_digest
     [ "$status" -eq 0 ]
     [[ "$output" == *"utilities_digest=sha256:$(printf '%064d' 2)"* ]]
 }
 
 @test "resolve-utilities-digest: fails when both latest and nightly fail" {
     ci_registry_digest() { return 1; }
-    run ci_cmd_resolve_utilities_digest
+    CI_IMAGE_REPO="owner/repo" run ci_cmd_resolve_utilities_digest
     [ "$status" -ne 0 ]
 }
 
