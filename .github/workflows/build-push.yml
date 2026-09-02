@@ -913,6 +913,14 @@ jobs:
     # Why: can fall back to a local build-tools Docker build if smoke fails.
     # From: PR #1218
     timeout-minutes: 30
+    # What: adds packages: write to this job's own permissions.
+    # Why: job perms replace, not merge, the workflow-level ones;
+    #   select-utilities-image.sh's fallback build now pushes here.
+    # From: Issue #1781 | PR #1783
+    permissions:
+      contents: read
+      pull-requests: read
+      packages: write
     # What: job-level concurrency; cancel-in-progress pull_request-only.
     # Why: on push this must survive to completion; on a PR, cancel is free.
     # From: PR #926
@@ -986,23 +994,19 @@ jobs:
 
           utilities_image="$(bash scripts/untracked/select-utilities-image.sh)"
 
+          # What: every exit path now returns a digest-qualified ref.
+          # Why: fallback also pushes and resolves a digest now.
+          # From: Issue #1781 | PR #1783
           case "$utilities_image" in
-            *@sha256:*)
-              printf 'utilities_image=%s\n' "$utilities_image" >> "$GITHUB_OUTPUT"
-              printf 'utilities_digest=%s\n' "${utilities_image#*@}" >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              # What: a branch-local fallback tag has no digest to expose.
-              # Why: consumers still key off `utilities_image` alone here.
-              # From: Issue #1781 | PR #1783
-              printf 'utilities_image=%s\n' "$utilities_image" >> "$GITHUB_OUTPUT"
-              printf 'utilities_digest=\n' >> "$GITHUB_OUTPUT"
-              ;;
+            *@sha256:*) ;;
+            *) echo "::error::select-utilities-image.sh returned a non-digest-qualified reference: $utilities_image" >&2; exit 1 ;;
           esac
+          printf 'utilities_image=%s\n' "$utilities_image" >> "$GITHUB_OUTPUT"
+          printf 'utilities_digest=%s\n' "${utilities_image#*@}" >> "$GITHUB_OUTPUT"
 
-      # What: removes the buildx builder right after its only consumer step.
-      # Why: the fallback path uses plain docker build, not buildx.
-      # From: PR #1241
+      # What: removes the buildx builder after its last use.
+      # Why: nothing later in this job needs a builder instance.
+      # From: PR #1783
       - name: Remove buildx builder
         if: always()
         run: |
