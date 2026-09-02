@@ -247,6 +247,62 @@ STUB
     [ "$output" = "true" ]
 }
 
+@test "push_reuse_decide: ignore_workflow_gate=true reuses build_tools despite workflow_reuse_scope=true" {
+    revision_stub "$c1"
+    classify_stub $'build_tools=false\nworkflow_reuse_scope=true'
+
+    run push_reuse_decide "build_tools" "ghcr.io/example/build-tools:nightly" "$c2" "" "true"
+
+    [ "$status" -eq 0 ]
+    [ "$output" = "true" ]
+}
+
+@test "push_reuse_decide: ignore_workflow_gate=true still fails closed when build_tools' own key changed" {
+    revision_stub "$c1"
+    classify_stub $'build_tools=true\nworkflow_reuse_scope=false'
+
+    result="$(push_reuse_decide "build_tools" "ghcr.io/example/build-tools:nightly" "$c2" "" "true" 2>/dev/null)"
+
+    [ "$result" = "false" ]
+}
+
+@test "push_reuse_decide: ignore_workflow_gate=true reuses utilities despite workflow_reuse_scope=true" {
+    revision_stub "$c1"
+    classify_stub $'utilities=false\nworkflow_reuse_scope=true'
+
+    run push_reuse_decide "utilities" "ghcr.io/example/utilities:nightly" "$c2" "" "true"
+
+    [ "$status" -eq 0 ]
+    [ "$output" = "true" ]
+}
+
+@test "push_reuse_decide: omitting ignore_workflow_gate still fails closed on workflow_reuse_scope=true (other 8 services unchanged)" {
+    revision_stub "$c1"
+    classify_stub $'proxy=false\nworkflow_reuse_scope=true'
+
+    result="$(push_reuse_decide "proxy" "ghcr.io/example/proxy:nightly" "$c2" "utilities" 2>/dev/null)"
+
+    [ "$result" = "false" ]
+}
+
+@test "push_reuse_decide: ignore_workflow_gate=true still fails closed when a dep_key changed" {
+    revision_stub "$c1"
+    classify_stub $'dns_image=false\nworkflow_reuse_scope=true\nutilities=true\nbuild_tools=false'
+
+    result="$(push_reuse_decide "dns_image" "ghcr.io/example/dns:nightly" "$c2" "utilities build_tools" "true" 2>/dev/null)"
+
+    [ "$result" = "false" ]
+}
+
+@test "push_reuse_decide: any value other than the literal 'true' for ignore_workflow_gate is treated as unset" {
+    revision_stub "$c1"
+    classify_stub $'build_tools=false\nworkflow_reuse_scope=true'
+
+    result="$(push_reuse_decide "build_tools" "ghcr.io/example/build-tools:nightly" "$c2" "" "false" 2>/dev/null)"
+
+    [ "$result" = "false" ]
+}
+
 @test "push_reuse_decide: requires all three positional arguments" {
     run push_reuse_decide
     [ "$status" -ne 0 ]
