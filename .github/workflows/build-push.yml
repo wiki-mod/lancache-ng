@@ -5741,14 +5741,16 @@ jobs:
           context: ${{ matrix.context }}
           build-contexts: ${{ matrix.build_contexts }}
           secret-files: ${{ steps['combined-secret-files'].outputs['secret-files'] }}
+          # What: LAN-proxy http_proxy/no_proxy, build-tools only.
+          # Why: https omitted; Squid SSL-bumps it, breaking TLS.
+          # From: Issue #1095
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
             UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
-            http_proxy=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
-            https_proxy=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
-            no_proxy=${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
+            http_proxy=${{ matrix.service == 'build-tools' && vars.PROJECT_SELFHOSTED_PROXY_HTTP || '' }}
+            no_proxy=${{ matrix.service == 'build-tools' && vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION || '' }}
           network: ${{ env.RUST_BUILDX_NETWORK }}
           allow: ${{ env.RUST_BUILDX_NETWORK == 'host' && 'network.host' || '' }}
           push: ${{ github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) }}

@@ -306,10 +306,9 @@ jobs:
         env:
           APT_CACHE_BUST: ${{ vars.APT_CACHE_BUST }}
           # What: LAN proxy vars; self-hosted runner has a route.
-          # Why: static self-hosted-only split, no runtime probe.
+          # Why: https omitted; Squid SSL-bumps it, breaking TLS.
           # From: Issue #1095
           LAN_PROXY_HTTP: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
-          LAN_PROXY_HTTPS: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
           LAN_PROXY_NO_PROXY: ${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
           BUILDX_BUILDER: ${{ steps.buildx.outputs.name }}
           BUILDX_CACHE_FROM_DIR: ${{ steps.buildx-cache.outputs.cache-from }}
@@ -326,7 +325,6 @@ jobs:
             --provenance=false \
             --build-arg "APT_CACHE_BUST=$APT_CACHE_BUST" \
             --build-arg "http_proxy=$LAN_PROXY_HTTP" \
-            --build-arg "https_proxy=$LAN_PROXY_HTTPS" \
             --build-arg "no_proxy=$LAN_PROXY_NO_PROXY" \
             --build-arg "UTILITIES_IMAGE=$UTILITIES_IMAGE" \
             --cache-from "type=local,src=$BUILDX_CACHE_FROM_DIR" \
@@ -352,10 +350,12 @@ jobs:
             ${{ steps.meta.outputs.labels }}
             org.opencontainers.image.base.rust.digest=${{ steps.build-tools-base-digests.outputs.rust }}
             org.opencontainers.image.base.golang.digest=${{ steps.build-tools-base-digests.outputs.golang }}
+          # What: https_proxy omitted deliberately; see amd64 step.
+          # Why: Squid SSL-bumps https, breaking git/cargo TLS.
+          # From: Issue #1095
           build-args: |
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
             http_proxy=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
-            https_proxy=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
             no_proxy=${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
             UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
           secret-files: |
