@@ -329,6 +329,11 @@ LABEL org.opencontainers.image.description="lancache-ng watchdog: compiled Rust 
 # packages already baked into the alpine:3.24 base layer itself -- see
 # services/dhcp-proxy/Dockerfile's identical comment/block for the full
 # rationale and the real verification behind it.
+# What: switches apk's own repositories to plain http.
+# Why: Squid caches http; signed indices keep integrity.
+# From: Issue #1095
+RUN sed -i 's|^https://|http://|' /etc/apk/repositories
+
 # What: declares APT_CACHE_BUST right before the RUN it busts.
 # Why: without this, BuildKit cache has no wall-clock expiry.
 # From: Issue #1095

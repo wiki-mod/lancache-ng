@@ -5546,6 +5546,25 @@ jobs:
           build-network: ${{ env.RUST_ACCELERATION_NETWORK }}
           platform: linux/amd64
 
+      # What: writes the LAN proxy CA to a secret file.
+      # Why: only build-tools' https fetches need it.
+      # From: Issue #1095
+      - name: Prepare LAN proxy CA secret
+        id: lan-proxy-ca
+        if: matrix.service == 'build-tools'
+        env:
+          PROJECT_SELFHOSTED_PROXY_CA: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
+        run: |
+          set -euo pipefail
+          umask 077
+          if [ -n "$PROJECT_SELFHOSTED_PROXY_CA" ]; then
+            ca_file="${{ runner.temp }}/build-push-proxy-ca.crt"
+            printf '%s' "$PROJECT_SELFHOSTED_PROXY_CA" > "$ca_file"
+            echo "ca-file=$ca_file" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No LAN proxy CA secret prepared (PROJECT_SELFHOSTED_PROXY_CA unset)."
+          fi
+
       # What: merges sccache-secret, ccache-redis-secret, and distcc-hosts-secret.
       # Why: a block-scalar interpolation of all three outputs would add blank
       #   lines wherever one is empty; this reproduces the prior single-source
@@ -5601,12 +5620,20 @@ jobs:
           context: ${{ matrix.context }}
           dockerfile: ${{ matrix.dockerfile }}
           build-contexts: ${{ matrix.build_contexts }}
-          secret-files: ${{ steps['combined-secret-files'].outputs['secret-files'] }}
+          secret-files: |
+            ${{ steps['combined-secret-files'].outputs['secret-files'] }}
+            ${{ steps['lan-proxy-ca'].outputs['ca-file'] != '' && format('project_selfhosted_proxy_ca={0}', steps['lan-proxy-ca'].outputs['ca-file']) || '' }}
+          # What: LAN-proxy build-args, build-tools only.
+          # Why: https trusted via the proxy CA secret above.
+          # From: Issue #1095
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
             UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
+            http_proxy=${{ matrix.service == 'build-tools' && vars.PROJECT_SELFHOSTED_PROXY_HTTP || '' }}
+            https_proxy=${{ matrix.service == 'build-tools' && vars.PROJECT_SELFHOSTED_PROXY_HTTPS || '' }}
+            no_proxy=${{ matrix.service == 'build-tools' && vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION || '' }}
           network: ${{ env.RUST_BUILDX_NETWORK }}
           allow: ${{ env.RUST_BUILDX_NETWORK == 'host' && 'network.host' || '' }}
           push: ${{ github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) }}
@@ -6344,6 +6371,9 @@ jobs:
           context: ${{ matrix.context }}
           dockerfile: ${{ matrix.dockerfile }}
           build-contexts: ${{ matrix.build_contexts }}
+          # What: omits the LAN-proxy build-arg on this arm64 job.
+          # Why: no route to the self-hosted-only proxy; static split.
+          # From: Issue #1095
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
             UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
