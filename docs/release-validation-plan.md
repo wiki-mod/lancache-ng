@@ -1223,6 +1223,34 @@ grep -E "legacy_rank=[0-9]" <logfile> | grep -v "decision=protect"
   already uses the `! cmd || fail "..."` idiom, both of which correctly
   propagate regardless of loop position.
 
+- **A merge-conflict resolution left an orphaned `FROM ${UTILITIES_IMAGE}`
+  stage in `tools/build-tools/Dockerfile` with no matching top-level `ARG
+  UTILITIES_IMAGE` declaration** (PR #1783, fixed in that PR). Docker only
+  expands a `FROM` line's `${VAR}`/`$VAR` tokens using an `ARG` declared
+  before the file's first `FROM` ("global scope"); the stale stage left the
+  image name blank, and the real build failed with a "base name blank"
+  error in CI. Fixed by deleting the orphaned stage. **New standing check:
+  none** -- `scripts/tracked/check-dependabot-docker-base-consistency.sh`
+  already implements exactly this ARG-resolution logic (its
+  `resolve_final_image()` walks global `ARG`s and expands a `FROM` line's
+  `${VAR}`/`$VAR` tokens the same way), but only ever runs it against the
+  Dockerfiles `.github/dependabot.yml`'s `docker` ecosystem block lists for
+  an unrelated purpose (base-image consistency across a grouped PR) --
+  `tools/build-tools/Dockerfile` is not one of them. A first attempt in
+  this PR wrote a second, repo-wide script that duplicated that same
+  parsing logic under a new name instead of reusing or extending it, which
+  is itself the exact violation Rule-Ref: AG-CODE-011 (search for and reuse
+  an existing implementation before writing a new one) prohibits -- caught
+  before being committed and reverted rather than shipped. The correct fix
+  (extracting `resolve_final_image()`'s ARG-resolution walk into a shared
+  `scripts/lib/*.sh` helper both this check and a new repo-wide,
+  dependabot-independent check could call) is a real refactor of an
+  existing, working, tested script and was judged out of scope for a PR
+  whose primary subject is unrelated (reverting `curl` to a distro
+  package); recorded here per AG-VAL-029 as a genuine, reasoned deferral
+  rather than a silent omission, tracked as follow-up work rather than
+  fixed in this PR.
+
 ## Coverage Assessment (from this survey — be honest about gaps)
 
 **Well-covered, reusable, real proofs already exist for:**

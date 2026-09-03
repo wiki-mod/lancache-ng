@@ -1406,13 +1406,20 @@ matrix-driven) simply omit those three build-arg lines, since a
 GitHub-hosted runner structurally never has a route to the private LAN
 address -- known statically at authoring time, not something a live
 reachability check would add information to. Because these are
-Docker's own predefined build-args rather than a Dockerfile `ARG`/`ENV`
-pair, BuildKit injects them into every `RUN` step's environment without
-`tools/build-tools/Dockerfile` declaring anything at all, and -- unlike
+Docker's own predefined build-args rather than a hand-rolled `ARG`/
+`ENV` pair, BuildKit injects them into a `RUN` step's environment
+without a value default ever being baked into the image.
+`tools/build-tools/Dockerfile` and the service Dockerfiles that gained
+the same Squid CA-trust wiring (`ui`, `watchdog`, `dns`) do each
+declare a bare `ARG HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` (plus
+lowercase) per stage -- required by BuildKit's per-stage ARG scoping so
+the value is visible in stages that don't inherit global scope -- but a
+bare `ARG` with no default is never written into that stage's
+`Config.Env` or history regardless of the declaration. This is unlike
 a hand-rolled `ARG`+`ENV` pair confirmed live to leak into the pushed
-image's `Config.Env` -- they never appear in the built image, since
-Docker excludes its predefined proxy args from both the final image
-config and the layer cache key.
+image's `Config.Env`: Docker excludes its predefined proxy args from
+both the final image config and the layer cache key no matter how many
+stages declare the bare `ARG`.
 
 An earlier version of this change added a live reachability probe (and,
 before that, a dedicated composite-action file for it) to fail open on
