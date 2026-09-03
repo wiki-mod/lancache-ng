@@ -247,6 +247,62 @@ STUB
     [ "$output" = "true" ]
 }
 
+@test "push_reuse_decide: ignore_workflow_gate=true reuses build_tools despite workflow_reuse_scope=true" {
+    revision_stub "$c1"
+    classify_stub $'build_tools=false\nworkflow_reuse_scope=true'
+
+    run push_reuse_decide "build_tools" "ghcr.io/example/build-tools:nightly" "$c2" "" "true"
+
+    [ "$status" -eq 0 ]
+    [ "$output" = "true" ]
+}
+
+@test "push_reuse_decide: ignore_workflow_gate=true still fails closed when build_tools' own key changed" {
+    revision_stub "$c1"
+    classify_stub $'build_tools=true\nworkflow_reuse_scope=false'
+
+    result="$(push_reuse_decide "build_tools" "ghcr.io/example/build-tools:nightly" "$c2" "" "true" 2>/dev/null)"
+
+    [ "$result" = "false" ]
+}
+
+@test "push_reuse_decide: ignore_workflow_gate=true reuses utilities despite workflow_reuse_scope=true" {
+    revision_stub "$c1"
+    classify_stub $'utilities=false\nworkflow_reuse_scope=true'
+
+    run push_reuse_decide "utilities" "ghcr.io/example/utilities:nightly" "$c2" "" "true"
+
+    [ "$status" -eq 0 ]
+    [ "$output" = "true" ]
+}
+
+@test "push_reuse_decide: omitting ignore_workflow_gate still fails closed on workflow_reuse_scope=true (other 8 services unchanged)" {
+    revision_stub "$c1"
+    classify_stub $'proxy=false\nworkflow_reuse_scope=true'
+
+    result="$(push_reuse_decide "proxy" "ghcr.io/example/proxy:nightly" "$c2" "utilities" 2>/dev/null)"
+
+    [ "$result" = "false" ]
+}
+
+@test "push_reuse_decide: ignore_workflow_gate=true still fails closed when a dep_key changed" {
+    revision_stub "$c1"
+    classify_stub $'dns_image=false\nworkflow_reuse_scope=true\nutilities=true\nbuild_tools=false'
+
+    result="$(push_reuse_decide "dns_image" "ghcr.io/example/dns:nightly" "$c2" "utilities build_tools" "true" 2>/dev/null)"
+
+    [ "$result" = "false" ]
+}
+
+@test "push_reuse_decide: any value other than the literal 'true' for ignore_workflow_gate is treated as unset" {
+    revision_stub "$c1"
+    classify_stub $'build_tools=false\nworkflow_reuse_scope=true'
+
+    result="$(push_reuse_decide "build_tools" "ghcr.io/example/build-tools:nightly" "$c2" "" "false" 2>/dev/null)"
+
+    [ "$result" = "false" ]
+}
+
 @test "push_reuse_decide: requires all three positional arguments" {
     run push_reuse_decide
     [ "$status" -ne 0 ]
@@ -256,4 +312,100 @@ STUB
 
     run push_reuse_decide "ntp" "ghcr.io/example/ntp:nightly"
     [ "$status" -ne 0 ]
+}
+
+# --- decide_one() (build-push.yml, inline) manual-dispatch override ---
+#
+# decide_one() lives inline in build-push.yml's "Decide per-service push
+# reuse" step, not in a sourced library, so it has no unit coverage of its
+# own today (only push_reuse_decide, which it calls, is unit-tested above).
+# extract_decide_one() below pulls allowlist=(...)/is_allowlisted()/
+# decide_one() out of the real workflow file VERBATIM (dedenting the
+# fixed 10-space YAML indent) so these tests exercise the exact text the
+# real workflow runs, never a reimplementation that could silently drift
+# from it. push_reuse_decide and ghcr_retry are stubbed at the shell
+# level -- their own real behavior is covered by the tests above and by
+# tests/bats/ghcr_retry.bats respectively.
+
+extract_decide_one() {
+    local wf="$repo_root/.github/workflows/build-push.yml"
+    local out="$BATS_TEST_TMPDIR/decide_one.sh"
+    awk '
+        /^          allowlist=\(/ { printing = 1 }
+        printing {
+            print
+            if ($0 == "          }") {
+                closes++
+                if (closes == 2) exit
+            }
+        }
+    ' "$wf" | sed 's/^ \{10\}//' > "$out"
+    printf '%s\n' "$out"
+}
+
+setup_decide_one() {
+    source "$(extract_decide_one)"
+    REPOSITORY="wiki-mod/lancache-ng"
+    channel="nightly"
+    GITHUB_OUTPUT="$BATS_TEST_TMPDIR/github_output"
+    : > "$GITHUB_OUTPUT"
+}
+
+@test "decide_one: workflow_dispatch forces a real build for build-tools despite ignore_workflow_gate=true, never calling push_reuse_decide" {
+    setup_decide_one
+    push_reuse_decide() { echo "MUST NOT BE CALLED" >&2; printf 'true\n'; }
+    GITHUB_EVENT_NAME="workflow_dispatch"
+
+    # decide_one's own "::notice::" line goes to stderr on this path (matching
+    # push_reuse_decide's diagnostic convention above) -- captured directly,
+    # not via `run`, which would merge it into stdout's single "false" line.
+    result="$(decide_one build_tools build-tools "" "" "true" 2>/dev/null)"
+
+    [ "$result" = "false" ]
+}
+
+@test "decide_one: workflow_dispatch forces a real build for utilities despite ignore_workflow_gate=true" {
+    setup_decide_one
+    push_reuse_decide() { printf 'true\n'; }
+    GITHUB_EVENT_NAME="workflow_dispatch"
+
+    result="$(decide_one utilities utilities "" "" "true" 2>/dev/null)"
+
+    [ "$result" = "false" ]
+}
+
+@test "decide_one: a push event still lets build-tools reuse via ignore_workflow_gate=true (dispatch override does not leak into push)" {
+    setup_decide_one
+    ghcr_retry() { printf '"sha256:deadbeef"\n'; }
+    push_reuse_decide() { printf 'true\n'; }
+    GITHUB_EVENT_NAME="push"
+
+    run decide_one build_tools build-tools "" "" "true"
+
+    [ "$status" -eq 0 ]
+    [ "$output" = "true" ]
+}
+
+@test "decide_one: workflow_dispatch does NOT force a rebuild for one of the other 8 services (no ignore_workflow_gate)" {
+    setup_decide_one
+    ghcr_retry() { printf '"sha256:deadbeef"\n'; }
+    push_reuse_decide() { printf 'true\n'; }
+    GITHUB_EVENT_NAME="workflow_dispatch"
+
+    run decide_one proxy proxy "" "utilities"
+
+    [ "$status" -eq 0 ]
+    [ "$output" = "true" ]
+}
+
+@test "decide_one: a pull_request event still lets utilities reuse via ignore_workflow_gate=true" {
+    setup_decide_one
+    ghcr_retry() { printf '"sha256:deadbeef"\n'; }
+    push_reuse_decide() { printf 'true\n'; }
+    GITHUB_EVENT_NAME="pull_request"
+
+    run decide_one utilities utilities "" "" "true"
+
+    [ "$status" -eq 0 ]
+    [ "$output" = "true" ]
 }

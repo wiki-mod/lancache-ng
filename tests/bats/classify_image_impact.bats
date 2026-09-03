@@ -221,6 +221,28 @@ val() {
     [ "$(val workflow)" = "true" ]
 }
 
+# A change to the login wrapper's own directory (e.g. a future version
+# bump) has no image-content effect: a login failure fails the job loudly,
+# it never produces a silently-bad image. Was previously unmapped, forcing
+# workflow=true and workflow_reuse_scope=true for all 10 services.
+@test "docker-login-action-centralized-version change sets neither workflow nor workflow_reuse_scope" {
+    run_classify ".github/actions/docker-login-action-centralized-version/action.yml"
+    [ "$(val workflow)" = "false" ]
+    [ "$(val workflow_reuse_scope)" = "false" ]
+    [ "$(val build_tools)" = "false" ]
+    [ "$(val utilities)" = "false" ]
+}
+
+# Negative control for the entry above: a sibling wrapper action that IS the
+# actual build/push mechanism (wrapped by the globally-triggering
+# ghcr-build-push-retry) must still fail closed as unmapped -- this rule
+# narrows one specific action, not the catch-all itself.
+@test "docker-build-push-action-centralized-version change still fails closed to workflow true" {
+    run_classify ".github/actions/docker-build-push-action-centralized-version/action.yml"
+    [ "$(val workflow)" = "true" ]
+    [ "$(val workflow_reuse_scope)" = "true" ]
+}
+
 @test "docs flags: docs true, docs_only true for a pure docs diff" {
     run_classify "docs/install-ca-cert.md" "README.md"
     [ "$(val docs)" = "true" ]

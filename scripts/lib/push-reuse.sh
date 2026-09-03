@@ -83,7 +83,7 @@
 # own convention: this file only defines functions for a caller to invoke
 # under the caller's own shell options.
 
-# push_reuse_decide <service_key> <channel_image> <github_sha> [dep_keys]
+# push_reuse_decide <service_key> <channel_image> <github_sha> [dep_keys] [ignore_workflow_gate]
 #
 # <service_key> is the exact key.classify-image-impact.sh emits for this
 # service on stdout (e.g. "ntp", "watchdog", "dhcp_proxy", "dns_image" for
@@ -108,6 +108,19 @@
 # now-outdated image forever after its dependency moved on, silently, with
 # no bound on how long. Empty/omitted preserves this function's prior
 # behavior exactly (no extra keys checked).
+#
+# [ignore_workflow_gate], when the literal string "true", skips ONLY the
+# workflow_reuse_scope disqualifier below -- <service_key>'s own change
+# check and every dep_key still apply in full. Empty/omitted (any other
+# value) preserves this function's prior behavior exactly. Scoped to
+# build-tools/utilities by their one caller (build-push.yml's decide_one()):
+# both publish a shared CI-tooling/base-layer image, not a product-stack
+# service, so a workflow/composite-action edit that never touches their own
+# path or dependencies has no way to change what either image contains --
+# unlike the other eight services, where the SAME workflow file also
+# contains their own build/push/scan steps. See Issue #1095 for the real
+# volume this addresses (build-tools: 30 rebuilds in 5 days, ~2700 GHCR
+# versions, from workflow-only diffs).
 #
 # Always prints exactly "true" or "false" to stdout and returns 0 -- a
 # non-zero return means a genuine usage error (missing argument), never an
@@ -135,6 +148,7 @@ push_reuse_decide() {
   local channel_image="${2:?push_reuse_decide: channel_image is required}"
   local github_sha="${3:?push_reuse_decide: github_sha is required}"
   local dep_keys="${4:-}"
+  local ignore_workflow_gate="${5:-}"
 
   local revision
   if ! revision="$(sif_image_revision "$channel_image")"; then
@@ -189,12 +203,14 @@ push_reuse_decide() {
   # What: workflow_reuse_scope covers revision..github_sha span.
   # Why: closes a prior before..sha-only gap.
   # From: Issue #1095 | PR #1378
-  local workflow_flag
-  workflow_flag="$(grep -m1 '^workflow_reuse_scope=' <<<"$classify_output" | cut -d= -f2)"
-  if [[ "$workflow_flag" != "false" ]]; then
-    echo "push_reuse_decide: classify-image-impact.sh reported 'workflow_reuse_scope=${workflow_flag:-<missing>}' for ${revision}..${github_sha} -- a build-affecting workflow/composite-action file changed somewhere in the full revision span (not just the immediately preceding push) -- failing closed to a real rebuild." >&2
-    printf 'false\n'
-    return 0
+  if [[ "$ignore_workflow_gate" != "true" ]]; then
+    local workflow_flag
+    workflow_flag="$(grep -m1 '^workflow_reuse_scope=' <<<"$classify_output" | cut -d= -f2)"
+    if [[ "$workflow_flag" != "false" ]]; then
+      echo "push_reuse_decide: classify-image-impact.sh reported 'workflow_reuse_scope=${workflow_flag:-<missing>}' for ${revision}..${github_sha} -- a build-affecting workflow/composite-action file changed somewhere in the full revision span (not just the immediately preceding push) -- failing closed to a real rebuild." >&2
+      printf 'false\n'
+      return 0
+    fi
   fi
 
   # What: also fails closed if any declared dependency key changed.
