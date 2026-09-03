@@ -442,8 +442,7 @@ by configuring which DNS server IP they point to:
   retired in v0.3.0 (#766). That split was never something the maintainer actually asked
   for: the original, much simpler intent behind "dev" was just "the branch I currently
   develop on" (`current_dev`, see `docs/release-versioning.md` and #825/#1141's branch
-  model), not a second live deployment environment. An earlier AI session misread that as
-  a request to build a whole parallel profile, and it grew from there. Do not reintroduce
+  model), not a second live deployment environment. *(Removed incident history preserved verbatim → PR #1798: https://github.com/wiki-mod/lancache-ng/pull/1798#issuecomment-5527939440.)* Do not reintroduce
   a separate dev deployment profile — local iteration and real validation both use
   `deploy/prod/docker-compose.yml` directly (`docker compose -f deploy/prod/docker-compose.yml up -d`);
   the difference between "developing" and "deploying" is which git ref is checked out
