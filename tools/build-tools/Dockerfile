@@ -128,11 +128,6 @@ COPY --from=go-tools-script /install-ca-cert.sh /install-ca-cert.sh
 RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
     sh /install-ca-cert.sh && chmod +x /build-go-tools.sh && /build-go-tools.sh
 
-# What: source stage for shared static curl binary
-# Why: portable across glibc/musl; reuses single build
-# From: Issue #1556
-FROM ${UTILITIES_IMAGE} AS utilities-tools
-
 # What: Alpine equivalent of go-tools-builder above.
 # Why: kept separate so the Debian stage stays unchanged.
 # From: Issue #1095 | PR #1743
