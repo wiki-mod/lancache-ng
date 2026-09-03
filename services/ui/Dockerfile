@@ -578,6 +578,11 @@ LABEL org.opencontainers.image.description="lancache-ng Admin UI and control-pla
 #   - ca-certificates, coreutils: unchanged package names, confirmed present
 #     on Alpine, kept apk-installed (excluded from the utilities migration --
 #     see services/proxy/Dockerfile's comment for ca-certificates' reason).
+# What: switches apk's own repositories to plain http.
+# Why: Squid caches http; signed indices keep integrity.
+# From: Issue #1095
+RUN sed -i 's|^https://|http://|' /etc/apk/repositories
+
 # What: declares APT_CACHE_BUST right before RUN that uses it
 # Why: prevents BuildKit cache replaying stale apk index forever
 # From: Issue #1095

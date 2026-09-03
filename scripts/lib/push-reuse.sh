@@ -118,9 +118,7 @@
 # service, so a workflow/composite-action edit that never touches their own
 # path or dependencies has no way to change what either image contains --
 # unlike the other eight services, where the SAME workflow file also
-# contains their own build/push/scan steps. See Issue #1095 for the real
-# volume this addresses (build-tools: 30 rebuilds in 5 days, ~2700 GHCR
-# versions, from workflow-only diffs).
+# contains their own build/push/scan steps.
 #
 # Always prints exactly "true" or "false" to stdout and returns 0 -- a
 # non-zero return means a genuine usage error (missing argument), never an
