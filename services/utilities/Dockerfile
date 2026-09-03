@@ -32,14 +32,9 @@ ARG APT_CACHE_BUST=""
 # Why: a secret mount never persists; bundle restored below.
 # From: Issue #1781 | PR #1783
 RUN --mount=type=secret,id=proxy_ca \
-    echo "TEMP-DEBUG: proxy_ca file check" >&2; \
-    ls -la /run/secrets/ >&2 || echo "TEMP-DEBUG: no /run/secrets dir" >&2; \
-    (wc -c /run/secrets/proxy_ca >&2 || echo "TEMP-DEBUG: no proxy_ca file" >&2); \
     if [ -s /run/secrets/proxy_ca ]; then \
       cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig && \
       cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
-      apk add --no-cache openssl >&2 || echo "TEMP-DEBUG: apk add openssl failed" >&2; \
-      openssl x509 -in /run/secrets/proxy_ca -noout -subject -issuer -dates >&2 || echo "TEMP-DEBUG: openssl parse failed" >&2; \
     fi && \
     : "apt-cache-bust=${APT_CACHE_BUST}" && \
     apk upgrade --no-cache && \
