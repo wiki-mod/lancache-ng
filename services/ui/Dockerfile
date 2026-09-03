@@ -628,13 +628,22 @@ RUN set -euo pipefail; \
 # Why: prevents cache from replaying a stale apk index forever
 # From: Issue #1095
 ARG APT_CACHE_BUST=""
-RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
+# What: trusts the proxy's CA for this RUN, never in a layer.
+# Why: a secret mount never persists; bundle restored below.
+# From: Issue #1781 | PR #1783
+RUN --mount=type=secret,id=proxy_ca \
+    if [ -s /run/secrets/proxy_ca ]; then \
+      cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig && \
+      cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+    fi && \
+    : "apt-cache-bust=${APT_CACHE_BUST}" && \
     apk upgrade --no-cache && \
     apk add --no-cache \
     ca-certificates \
     coreutils \
     util-linux \
-    nano
+    nano && \
+    if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
 # nano: in-container troubleshooting tool -- see services/proxy/Dockerfile's
 # identical comment for the full rationale; lsof/ripgrep are COPY'd above

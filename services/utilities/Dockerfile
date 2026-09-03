@@ -28,7 +28,15 @@ ARG no_proxy
 # Why: without this, BuildKit cache has no wall-clock expiry.
 # From: Issue #1095
 ARG APT_CACHE_BUST=""
-RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
+# What: trusts the proxy's CA for this RUN, never in a layer.
+# Why: a secret mount never persists; bundle restored below.
+# From: Issue #1781 | PR #1783
+RUN --mount=type=secret,id=proxy_ca \
+    if [ -s /run/secrets/proxy_ca ]; then \
+      cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig && \
+      cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+    fi && \
+    : "apt-cache-bust=${APT_CACHE_BUST}" && \
     apk upgrade --no-cache && \
     apk add --no-cache \
       curl \
@@ -40,7 +48,8 @@ RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
       gettext-envsubst \
       jq \
       zstd \
-      ca-certificates
+      ca-certificates && \
+    if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
 # What: verifies coreutils/findutils commands still resolve.
 # Why: coreutils overwrites some BusyBox symlinks.

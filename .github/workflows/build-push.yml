@@ -5614,19 +5614,48 @@ jobs:
           build-network: ${{ env.RUST_ACCELERATION_NETWORK }}
           platform: linux/amd64
 
-      # What: merges sccache-secret's own generated secret files
-      # Why: keeps room for a future second secret source
+      # What: writes the proxy CA to a temp file for a secret mount.
+      # Why: apk/git must trust the LAN proxy's TLS cert.
+      # From: Issue #1781 | PR #1783
+      - name: Prepare proxy CA secret file
+        id: proxy-ca-secret
+        env:
+          PROXY_CA: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
+        run: |
+          set -euo pipefail
+          if [ -n "$PROXY_CA" ]; then
+            umask 077
+            proxy_ca_file="${{ runner.temp }}/proxy-ca.pem"
+            printf '%s' "$PROXY_CA" > "$proxy_ca_file"
+            {
+              echo "secret-files<<SECRET_FILES"
+              printf 'proxy_ca=%s\n' "$proxy_ca_file"
+              echo "SECRET_FILES"
+            } >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo "secret-files<<SECRET_FILES"
+              echo "SECRET_FILES"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      # What: merges sccache-secret's and proxy-ca-secret's files.
+      # Why: docker/build-push-action takes one secret-files input.
       # From: Issue #1781 | PR #1783
       - name: Combine sccache/ccache secret files
         id: combined-secret-files
         env:
           SCCACHE_FILES: ${{ steps.sccache-secret.outputs.secret-files }}
+          PROXY_CA_FILES: ${{ steps['proxy-ca-secret'].outputs['secret-files'] }}
         run: |
           set -euo pipefail
           {
             echo "secret-files<<SECRET_FILES"
             if [ -n "$SCCACHE_FILES" ]; then
               printf '%s\n' "$SCCACHE_FILES"
+            fi
+            if [ -n "$PROXY_CA_FILES" ]; then
+              printf '%s\n' "$PROXY_CA_FILES"
             fi
             echo "SECRET_FILES"
           } >> "$GITHUB_OUTPUT"

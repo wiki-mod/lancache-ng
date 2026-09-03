@@ -140,9 +140,20 @@ RUN set -euo pipefail; \
 # Why: Without it, BuildKit replays stale apk upgrade forever.
 # From: Issue #1095
 ARG APT_CACHE_BUST=""
-RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
+# What: trusts the proxy CA for this RUN, re-applied below.
+# Why: ca-certificates install resets the bundle mid-RUN.
+# From: Issue #1781 | PR #1783
+RUN --mount=type=secret,id=proxy_ca \
+    if [ -s /run/secrets/proxy_ca ]; then \
+      cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig && \
+      cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+    fi && \
+    : "apt-cache-bust=${APT_CACHE_BUST}" && \
     apk upgrade --no-cache && \
     apk add --no-cache ca-certificates openssl && \
+    if [ -s /run/secrets/proxy_ca ]; then \
+      cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+    fi && \
     curl -fsSL -o /etc/apk/keys/nginx_signing.rsa.pub https://nginx.org/keys/nginx_signing.rsa.pub && \
     printf '%s\n' "@nginx https://nginx.org/packages/mainline/alpine/v$(cut -d. -f1,2 /etc/alpine-release)/main" >> /etc/apk/repositories && \
     apk update && \
@@ -150,7 +161,8 @@ RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
     nginx@nginx \
     coreutils \
     bash \
-    nano
+    nano && \
+    if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 # curl/ca-certificates/openssl are kept at runtime (not purged): curl is
 # genuinely shelled out to by deploy/{prod,quickstart,full-setup}'s proxy
 # container healthcheck (`deploy/prod/docker-compose.yml`'s `curl -sf
