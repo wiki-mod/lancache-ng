@@ -17,7 +17,7 @@
 # watchdog had already landed). Confirmed live (2026-08-06) against a real
 # alpine:3.24 container: nginx.org publishes a full apk repository at
 # http://nginx.org/packages/{mainline,stable}/alpine/v<ver>/main (plain
-# http since Issue #1095's LAN-proxy caching pass -- nginx.org itself
+# http since a later LAN-proxy caching pass -- nginx.org itself
 # also serves this same repo over https, but the plain-http form is
 # used here so the LAN Squid proxy can cache it; the signing-key fetch
 # below stays https, since that is the trust anchor) with identical
