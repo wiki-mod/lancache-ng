@@ -1,0 +1,204 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# What: refreshes shared NFS Trivy DB on a fixed cron
+# Why: sole writer removes need for per-job locking
+# From: Issue #1780 | Issue #1095
+name: Trivy DB Scheduled Refresh
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  # What: manual escape hatch alongside the cron trigger
+  # Why: schedule: only fires from master, not this branch
+  # From: Issue #1780
+  workflow_dispatch: {}
+
+# What: read-only checkout; no write/issue/PR scopes
+# Why: this job never mutates anything outside cache-dir
+# From: Issue #1780
+permissions:
+  contents: read
+
+concurrency:
+  # What: single group, never cancelled mid-run.
+  # Why: sole writer; two writers must never overlap.
+  # From: Issue #1780
+  group: trivy-db-scheduled-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh-trivy-db:
+    name: refresh shared Trivy vulnerability DB
+    # What: heavy tier, not the usual light default here.
+    # Why: live-confirmed NFS mount gap on a light host.
+    # From: Issue #1780
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # What: 30-minute cap, not GitHub's 360-minute default
+    # Why: a real DB download plus retries takes minutes
+    # From: Issue #1780
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Resolve shared Trivy DB cache directory
+        id: trivy-cache
+        uses: ./.github/actions/trivy-cache-dir
+
+      # What: fails when this host lacks the real NFS mount.
+      # Why: a local-only refresh helps no other runner.
+      # From: Issue #1780
+      - name: Require the real shared NFS mount, not a local fallback
+        if: steps.trivy-cache.outputs.source != 'nfs-shared'
+        run: |
+          echo "::error::trivy-cache-dir resolved 'local-fallback' (source=${{ steps.trivy-cache.outputs.source }}) on this runner instance instead of the shared '/mnt/trivy-db' NFS mount -- refreshing that local-only path would report success while doing nothing for every other runner in the pool that actually reads the shared mount. This runner host's own NFS mount needs an operator fix (confirmed live: at least one self-hosted runner instance currently lacks a working /mnt/trivy-db mount)." >&2
+          exit 1
+
+      - name: Install trivy CLI
+        uses: ./.github/actions/aquasecurity-setup-trivy-centralized-version
+
+      # What: logs in for authenticated, rate-limited pulls.
+      # Why: a cron pull every 6h risks a rate limit.
+      # From: Issue #1780 | Issue #1535
+      - name: Log in to GHCR for authenticated Trivy DB pull
+        continue-on-error: true
+        uses: ./.github/actions/docker-login-action-centralized-version
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # What: unconditional, like the GHCR login step above.
+      # Why: secrets is invalid in a step's if: condition.
+      # From: Issue #1780
+      - name: Log in to Docker Hub for the third DB-source tier
+        continue-on-error: true
+        uses: ./.github/actions/docker-login-action-centralized-version
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # What: fails loudly with real uid/ownership shown.
+      # Why: names the permission cause, never hides it.
+      # From: Issue #1780
+      - name: Diagnose Trivy DB directory permissions before download
+        env:
+          CACHE_DIR: ${{ steps.trivy-cache.outputs.dir }}
+        run: |
+          set -euo pipefail
+          : "${CACHE_DIR:?cache-dir is required}"
+          echo "::group::Trivy DB permission diagnostics"
+          echo "Running as: $(id)"
+          mountpoint_status=0
+          mountpoint "$CACHE_DIR" 2>&1 || mountpoint_status=$?
+          mount | grep -F "$CACHE_DIR" || echo "(no mount-table entry for $CACHE_DIR)"
+          ls -la "$CACHE_DIR" || true
+          [ -d "$CACHE_DIR/db" ] && ls -ld "$CACHE_DIR/db"
+          echo "::endgroup::"
+
+          # What: hard-fails on a since-expired NFS mount.
+          # Why: an autofs mount can expire between steps.
+          # From: Issue #1780
+          if [ "$mountpoint_status" -ne 0 ]; then
+            echo "::error::'$CACHE_DIR' is not currently a live mount point (mountpoint exited $mountpoint_status), even though trivy-cache-dir resolved source=nfs-shared earlier in this same job -- the NFS mount most likely expired in between, leaving a bare local directory in its place. Refusing to write there instead of the real shared filesystem." >&2
+            exit 1
+          fi
+
+          db_dir="$CACHE_DIR/db"
+          if ! mkdir -p "$db_dir" 2>/tmp/trivy-db-mkdir-err.txt; then
+            echo "::error::Cannot create/use '$db_dir' as $(id -un) ($(id -u):$(id -g)): $(cat /tmp/trivy-db-mkdir-err.txt). trivy-cache-dir's own write-probe against the parent directory already succeeded as this same uid, so this is scoped to the 'db' entry specifically -- needs an operator fix on the runner host, root cause not yet confirmed without host access (see this change's PR body)." >&2
+            exit 1
+          fi
+          probe="$db_dir/.trivy-db-scheduled-refresh-write-probe.$$"
+          if ! { printf 'probe' > "$probe" && rm -f "$probe"; }; then
+            echo "::error::'$db_dir' exists but is not writable as $(id -un) ($(id -u):$(id -g)) -- same operator-side ownership/permission fix needed as above." >&2
+            exit 1
+          fi
+
+      # What: forces a real download, under the same lock.
+      # Why: NextUpdate alone would make most runs a no-op.
+      # From: Issue #1780
+      - name: Refresh the shared Trivy DB
+        env:
+          CACHE_DIR: ${{ steps.trivy-cache.outputs.dir }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          LOCK_TIMEOUT_SECONDS: "900"
+          STALE_LOCK_SECONDS: "1200"
+        run: |
+          set -euo pipefail
+          : "${CACHE_DIR:?cache-dir is required}"
+          # shellcheck source=scripts/lib/ghcr-retry.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          # shellcheck source=scripts/lib/trivy-db-lock.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/trivy-db-lock.sh"
+
+          # What: sweeps staging dirs a killed run left
+          # Why: a trap alone can miss a hard SIGKILL
+          # From: Issue #1780
+          find "$CACHE_DIR" -maxdepth 1 -name '.trivy-db-refresh-tmp.*' \
+            -mmin +60 -exec rm -rf -- {} + 2>/dev/null || true
+
+          tmp_dir="$CACHE_DIR/.trivy-db-refresh-tmp.$$"
+          # What: removes this run's own staging dir on exit
+          # Why: a cancelled/timed-out job would leak it
+          # From: Issue #1780
+          trap 'rm -rf -- "$tmp_dir"' EXIT
+
+          # What: downloads to temp, atomically swaps in
+          # Why: live db/ must never go through empty state
+          # From: Issue #1780
+          # shellcheck disable=SC2329 # invoked indirectly via "$@" below
+          refresh_and_pull() {
+            local dl_status mv1_status mv2_status
+            rm -rf -- "$tmp_dir"
+            mkdir -p -- "$tmp_dir"
+            ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
+              trivy image --download-db-only --cache-dir "$tmp_dir" \
+                --config .github/actions/trivy-scan-retry/trivy-config.yaml
+            dl_status=$?
+            if [ "$dl_status" -ne 0 ]; then
+              return "$dl_status"
+            fi
+            mkdir -p -- "$CACHE_DIR/db"
+            mv -f -- "$tmp_dir/db/trivy.db" "$CACHE_DIR/db/trivy.db"
+            mv1_status=$?
+            mv -f -- "$tmp_dir/db/metadata.json" "$CACHE_DIR/db/metadata.json"
+            mv2_status=$?
+            if [ "$mv1_status" -ne 0 ] || [ "$mv2_status" -ne 0 ]; then
+              return 1
+            fi
+            return 0
+          }
+
+          # What: captures $? via else, not after a bare fi
+          # Why: bare "if cond; then x; fi" resets $? to 0
+          # From: Issue #1780
+          if trivy_db_locked_run "$CACHE_DIR" "$LOCK_TIMEOUT_SECONDS" "$STALE_LOCK_SECONDS" -- \
+               refresh_and_pull; then
+            status=0
+          else
+            status=$?
+          fi
+          if [ "$status" -ne 0 ]; then
+            echo "::error::Could not refresh '$CACHE_DIR' (lock timeout or a real download failure, exit $status) -- this workflow is the shared DB's sole regular writer, so unlike a per-job caller it must fail loudly here rather than silently leaving the cache stale." >&2
+            exit "$status"
+          fi
+          exit 0
+
+      # What: fails the job when no DB exists after refresh.
+      # Why: an empty shared DB must never read as success.
+      # From: Issue #1780
+      - name: Require a real Trivy DB file after refresh
+        env:
+          CACHE_DIR: ${{ steps.trivy-cache.outputs.dir }}
+        run: |
+          set -euo pipefail
+          : "${CACHE_DIR:?cache-dir is required}"
+          if [ ! -s "$CACHE_DIR/db/trivy.db" ]; then
+            echo "::error::No trivy.db present in '$CACHE_DIR/db' after a reported-successful refresh -- every downstream scan job's --skip-db-update assumption depends on this file existing, so this must fail loudly rather than report success." >&2
+            exit 1
+          fi
+          echo "::notice::Shared Trivy DB refreshed and present at '$CACHE_DIR/db/trivy.db'."
