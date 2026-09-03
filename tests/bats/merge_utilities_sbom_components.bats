@@ -10,6 +10,12 @@
 # documents below mirror real Trivy output shape (bare apk package names
 # in `components[].name`).
 
+# `run !` (used below to correctly fail a test on a negated assertion, see
+# the SC2314 comment at its use site) requires Bats >= 1.5.0. Declaring this
+# turns a silent BW02 runtime warning into a clear version-mismatch failure
+# if this suite ever runs under an older Bats.
+bats_require_minimum_version 1.5.0
+
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     script="$repo_root/scripts/untracked/merge-utilities-sbom-components.sh"
@@ -83,8 +89,12 @@ component_names() {
     for svc in proxy dhcp dhcp-proxy dns ntp ui watchdog; do
         run bash "$script" "$svc" "$workdir/service.cdx.json" "$workdir/utilities.cdx.json"
         [ "$status" -eq 0 ]
-        ! grep -q '"nano"' <<<"$output"
-        ! grep -q '"coreutils"' <<<"$output"
+        sbom="$output"
+        # A bare `!` here is exempt from Bats' error trap (same carve-out as
+        # bash's own set -e), so a leak on any non-last iteration would pass
+        # silently; `run !` (see file header) correctly fails the test.
+        run ! grep -q '"nano"' <<<"$sbom"
+        run ! grep -q '"coreutils"' <<<"$sbom"
     done
 }
 

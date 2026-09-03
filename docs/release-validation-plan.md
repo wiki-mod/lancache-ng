@@ -1194,6 +1194,26 @@ grep -E "legacy_rank=[0-9]" <logfile> | grep -v "decision=protect"
   default-branch-only evaluation (AG-CI-018) would be a real, reusable check
   for this whole failure class; not built in this pass -- recorded here per
   AG-VAL-028 rather than left silently unautomated.
+- **`tests/bats/merge_utilities_sbom_components.bats`'s nano/coreutils-leak loop
+  assertion used bare `!` instead of `run !`** (Refs #1095, fixed by PR #1799) --
+  Bash/Bats exempt `!`-negated commands from the error trap, so a leak on any
+  non-last loop iteration passed silently; only the last iteration's
+  (`watchdog`) result was ever actually observed by the test's own exit
+  status. Confirmed live (self-hosted runner, pinned build-tools image): with
+  an identical forced leak injected into both versions, the bare-`!` version
+  reports `ok` (the bug -- silently passes), the `run !` version correctly
+  reports `not ok`. **New standing check: none yet** -- shellcheck's SC2314
+  does NOT catch this specific loop-body variant (confirmed: `shellcheck
+  --severity=warning` reports clean, exit 0, against the pre-fix version
+  too); a mechanical loop-aware guard (tracking `for`/`while`/`until` ...
+  `done` nesting, flagging a bare `! <cmd>` with no `|| fail`/`|| exit`
+  inside one) is plausible but was not built in this pass -- recorded here
+  per AG-VAL-028 rather than left silently unautomated. A repo-wide spot
+  check of every other bare-`!` occurrence in `tests/bats/*.bats` (done as
+  part of this same pass) found no further instance of this exact
+  shape -- every other one is either the last statement in its function or
+  already uses the `! cmd || fail "..."` idiom, both of which correctly
+  propagate regardless of loop position.
 
 ## Coverage Assessment (from this survey — be honest about gaps)
 
