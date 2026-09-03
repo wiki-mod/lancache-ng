@@ -19,27 +19,9 @@ members = [
 # Why: scope is lockfile unification, not a dep refactor.
 # From: Issue #1095
 
-# What: moved from 4 identical per-crate [profile.release].
-# Why: cargo ignores a member's own profile in a workspace.
+# What: workspace-wide release profile: fat LTO, 2 CGUs.
+# Why: cargo ignores a member's own [profile.release].
 # From: Issue #1095
-#
-# Deliberate release-profile tuning: fat LTO (not thin) for maximum
-# cross-crate inlining, and codegen-units=2 (down from Cargo's default 16)
-# to trade some build parallelism for better whole-program optimization.
-# Builds run on the project's own sccache/distcc build farm, which has
-# spare capacity for the extra link-time cost this adds.
-#
-# Deliberately NOT set here, each considered and rejected for a concrete
-# reason rather than omitted by oversight:
-# - `strip`: current unstripped binary sizes are not large enough to force
-#   the issue, and stripping would remove symbol names needed for a real
-#   crash backtrace.
-# - `panic = "abort"`: these are long-running Tokio services; abort-on-panic
-#   changes per-task panic isolation behavior and has not been evaluated
-#   deeply enough to adopt casually.
-# - `target-cpu=native`: these binaries ship in Docker images to end-users'
-#   arbitrary hardware, so baking in host-specific CPU instructions would
-#   risk "illegal instruction" crashes on different silicon.
 [profile.release]
 lto = "fat"
 codegen-units = 2
