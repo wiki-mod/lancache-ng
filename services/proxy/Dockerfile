@@ -16,8 +16,12 @@
 # proxy/ntp/watchdog/ui -- proxy picked up after ntp/dhcp/dhcp-proxy/dns/
 # watchdog had already landed). Confirmed live (2026-08-06) against a real
 # alpine:3.24 container: nginx.org publishes a full apk repository at
-# https://nginx.org/packages/{mainline,stable}/alpine/v<ver>/main with
-# identical version currency to its Debian apt repo (both mainline 1.31.3
+# http://nginx.org/packages/{mainline,stable}/alpine/v<ver>/main (plain
+# http since a later LAN-proxy caching pass -- nginx.org itself
+# also serves this same repo over https, but the plain-http form is
+# used here so the LAN Squid proxy can cache it; the signing-key fetch
+# below stays https, since that is the trust anchor) with identical
+# version currency to its Debian apt repo (both mainline 1.31.3
 # at the time of this migration) -- `apk add nginx` after adding that repo
 # and its signing key resolves to `nginx/1.31.3-r1`, and `nginx -V` shows
 # `--with-stream --with-stream_ssl_preread_module` compiled in statically,
@@ -116,12 +120,17 @@ RUN set -euo pipefail; \
 # What: Declare APT_CACHE_BUST to expire BuildKit cache.
 # Why: Without it, BuildKit replays stale apk upgrade forever.
 # From: Issue #1095
+# What: switches apk's own repositories to plain http.
+# Why: Squid caches http; signed indices keep integrity.
+# From: Issue #1095
+RUN sed -i 's|^https://|http://|' /etc/apk/repositories
+
 ARG APT_CACHE_BUST=""
 RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
     apk upgrade --no-cache && \
     apk add --no-cache ca-certificates openssl && \
     curl -fsSL -o /etc/apk/keys/nginx_signing.rsa.pub https://nginx.org/keys/nginx_signing.rsa.pub && \
-    printf '%s\n' "@nginx https://nginx.org/packages/mainline/alpine/v$(cut -d. -f1,2 /etc/alpine-release)/main" >> /etc/apk/repositories && \
+    printf '%s\n' "@nginx http://nginx.org/packages/mainline/alpine/v$(cut -d. -f1,2 /etc/alpine-release)/main" >> /etc/apk/repositories && \
     apk update && \
     apk add --no-cache \
     nginx@nginx \
