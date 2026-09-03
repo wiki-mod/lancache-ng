@@ -296,6 +296,10 @@ COPY --from=go-tools-script /install-ca-cert.sh /install-ca-cert.sh
 # Why: prebuilt release lacks Redis+dist-client feature
 # From: Issue #1095
 RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
+    # What: drop CI proxy CA before layer commit
+    # Why: CA must never persist in published image
+    # From: PR #1752 regression | Issue #1095
+    trap 'rm -f /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; update-ca-certificates >/dev/null 2>&1 || true' EXIT; \
     sh /install-ca-cert.sh; \
     rustup component add rustfmt clippy; \
     cargo install sccache --version "${SCCACHE_VERSION}" --no-default-features --features redis,dist-client --root /usr/local; \
@@ -466,6 +470,13 @@ RUN set -euo pipefail; \
     grep -qE '^host: .*-musl$' <<<"${rustc_host_line}"; \
     musl-gcc --version
 
+# What: fail build if CI proxy CA leaked into image
+# Why: CA must never persist in published build-tools
+# From: PR #1752 regression | Issue #1095
+RUN if [ -e /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt ]; then \
+      echo "SECURITY: CI proxy CA persisted in final image" >&2; exit 1; \
+    fi
+
 WORKDIR /workspace
 
 CMD ["bash"]
@@ -596,6 +607,10 @@ COPY --from=go-tools-script /install-ca-cert.sh /install-ca-cert.sh
 # Why: excludes unused backends; smaller binary
 # From: Issue #1570 | PR #1571
 RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
+    # What: drop CI proxy CA before layer commit
+    # Why: CA must never persist in published image
+    # From: PR #1752 regression | Issue #1095
+    trap 'rm -f /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; update-ca-certificates >/dev/null 2>&1 || true' EXIT; \
     sh /install-ca-cert.sh; \
     rustup component add rustfmt clippy; \
     cargo install sccache --version "${SCCACHE_VERSION}" --no-default-features --features redis,dist-client --root /usr/local; \
@@ -868,6 +883,13 @@ RUN set -euo pipefail; \
     grep -qx "${musl_target_check}" <<<"${installed_targets}"; \
     rustc_host_line="$(rustc -vV)"; \
     grep -qE '^host: .*-gnu$' <<<"${rustc_host_line}"
+
+# What: fail build if CI proxy CA leaked into image
+# Why: CA must never persist in published build-tools
+# From: PR #1752 regression | Issue #1095
+RUN if [ -e /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt ]; then \
+      echo "SECURITY: CI proxy CA persisted in final image" >&2; exit 1; \
+    fi
 
 # What: default WORKDIR for interactive/manual container use
 # Why: CI always bind-mounts /work; not a real default here
