@@ -543,7 +543,7 @@ services:
 
   # ── CacheHamster (Steam cache-warming prefill scaffold) ─────────────────────
   # What: opt-in, credential-gated Steam cache-warming prefill daemon.
-  # Why: scaffold only (issue #871) -- credential-store + stream-fetch
+  # Why: scaffold only -- credential-store + stream-fetch
   #   primitives exist, but no real Steam depot-fetch capability yet; see
   #   docs/design-steam-prefill.md. One-shot: runs its configured fetch
   #   list once, then exits (no `steam-vent`/`steamroom` control-plane loop

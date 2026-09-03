@@ -851,7 +851,7 @@ services:
 
   # ── CacheHamster (Steam cache-warming prefill scaffold) ─────────────────────
   # What: opt-in, credential-gated Steam cache-warming prefill daemon.
-  # Why: scaffold only (issue #871), same "not yet functional end-to-end"
+  # Why: scaffold only, same "not yet functional end-to-end"
   #   status as deploy/prod's own cachehamster service -- see that
   #   service's comment for the full rationale (one-shot, restart: "no",
   #   no healthcheck).

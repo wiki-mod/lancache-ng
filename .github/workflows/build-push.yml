@@ -6831,6 +6831,7 @@ jobs:
           DESCRIPTION_SYSLOG: *ci-description-syslog
           DESCRIPTION_UI: *ci-description-ui
           DESCRIPTION_BUILD_TOOLS: *ci-description-build-tools
+          DESCRIPTION_CACHEHAMSTER: *ci-description-cachehamster
         run: |
           set -euo pipefail
 
@@ -6873,6 +6874,7 @@ jobs:
             [build-tools]="Prebuilt lancache-ng CI and developer validation toolchain image."
             [syslog]="Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428)."
             [utilities]="Shared lancache-ng utilities image (curl, nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd) for COPY --from= consumption by eight first-party images (issue #1556)."
+            [cachehamster]="lancache-ng CacheHamster: Steam cache-warming prefill daemon (scaffold, issue #871)."
           )
 
           # Duplicated rather than factored into a shared script/action: GitHub Actions
