@@ -475,7 +475,12 @@ fn emit_reply_fields(payload: &[u8]) {
         // Option 6 packs one or more 4-byte servers into a single TLV. Emit
         // every 4-byte chunk, comma-joined -- dropping all but the first is
         // exactly the bug issue #705's DNS check exists to catch.
-        let servers: Vec<String> = dns.as_chunks::<4>().0.iter().map(|c| format_ipv4(c)).collect();
+        let servers: Vec<String> = dns
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| format_ipv4(c))
+            .collect();
         if !servers.is_empty() {
             emit("dns_servers", &servers.join(","));
         }
@@ -599,7 +604,12 @@ mod tests {
         let payload = sample_reply(0x11223344);
         let options = &payload[BOOTP_HEADER_LEN + 4..];
         let dns = dhcp_option(options, 6).expect("option 6 present");
-        let servers: Vec<String> = dns.as_chunks::<4>().0.iter().map(|c| format_ipv4(c)).collect();
+        let servers: Vec<String> = dns
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| format_ipv4(c))
+            .collect();
         assert_eq!(servers.join(","), "172.29.5.10,172.29.5.11");
     }
 
