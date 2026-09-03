@@ -222,11 +222,6 @@ jobs:
       # endpoint requires this scope either way, since the job already
       # narrows permissions below the repository default.
       actions: read
-    # What: mirrors secret into env for a later if: to read.
-    # Why: actionlint bans secrets.* inside a step if: expr.
-    # From: Issue #1095
-    env:
-      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
     steps:
       # #808: fetch-depth: 0 (not the default shallow depth-1 clone) so
       # scripts/untracked/ensure-pr-staging-images.sh can prove real git ancestry
@@ -266,23 +261,16 @@ jobs:
         id: buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
-      - name: Log in to GHCR
-        uses: ./.github/actions/docker-login-action-centralized-version
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      # What: authenticates Docker Hub pulls for this workflow.
+      # What: authenticates registry pulls before this job runs.
       # Why: shared egress IP hits Docker Hub pull-rate limit.
       # From: Issue #1095
-      - name: Log in to Docker Hub
-        if: ${{ env.DOCKERHUB_USERNAME != '' }}
-        continue-on-error: true
-        uses: ./.github/actions/docker-login-action-centralized-version
+      - name: Log in to registries (GHCR + optional Docker Hub)
+        uses: ./.github/actions/ghcr-then-dockerhub-login
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          ghcr-username: ${{ github.actor }}
+          ghcr-password: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Wait for and ensure PR staging images
         env:
@@ -496,6 +484,18 @@ jobs:
           fi
 
       - uses: *checkout_centraliced_versioning # v7.0.1
+
+      # What: authenticates registry pulls before compose up.
+      # Why: pulls nats/docker-socket-proxy from docker.io.
+      # From: Issue #1095
+      - name: Log in to registries (GHCR + optional Docker Hub)
+        uses: ./.github/actions/ghcr-then-dockerhub-login
+        with:
+          ghcr-username: ${{ github.actor }}
+          ghcr-password: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Resolve build-tools image
         # See ssl-mitm-cache-simulation's identical step above for why a
         # same-PR build-tools change prefers the confirmed PR staging tag.
@@ -598,6 +598,18 @@ jobs:
           fi
 
       - uses: *checkout_centraliced_versioning # v7.0.1
+
+      # What: authenticates registry pulls before compose up.
+      # Why: pulls nats/docker-socket-proxy from docker.io.
+      # From: Issue #1095
+      - name: Log in to registries (GHCR + optional Docker Hub)
+        uses: ./.github/actions/ghcr-then-dockerhub-login
+        with:
+          ghcr-username: ${{ github.actor }}
+          ghcr-password: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Resolve build-tools image
         # No BUILD_TOOLS_REQUIRE_PUBLISHED: same-PR tools/build-tools override
         # preference, matching every other job in this suite.
@@ -689,6 +701,18 @@ jobs:
           fi
 
       - uses: *checkout_centraliced_versioning # v7.0.1
+
+      # What: authenticates registry pulls before setup.sh runs.
+      # Why: nested container inherits config via mount below.
+      # From: Issue #1095
+      - name: Log in to registries (GHCR + optional Docker Hub)
+        uses: ./.github/actions/ghcr-then-dockerhub-login
+        with:
+          ghcr-username: ${{ github.actor }}
+          ghcr-password: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Resolve build-tools image
         # No BUILD_TOOLS_REQUIRE_PUBLISHED: this script needs `expect` (real
         # setup.sh CLI fresh install, same reason setup-cli-simulation.sh
@@ -793,6 +817,9 @@ jobs:
           source "scripts/lib/quickstart-compose-lock.sh"
           quickstart_compose_lock_acquire
 
+          # What: mounts this step's docker login into the container.
+          # Why: setup.sh's compose calls run via mounted host socket.
+          # From: Issue #1095
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$PWD:$PWD" \
@@ -802,6 +829,7 @@ jobs:
             -e SETUP_SIM_IMAGE_TAG \
             -e GITHUB_RUN_ID \
             -e GITHUB_RUN_ATTEMPT \
+            -v "$HOME/.docker:/root/.docker:ro" \
             "$BUILD_TOOLS_IMAGE" \
             timeout --kill-after=30 --signal=KILL 2400 \
             bash scripts/untracked/simulations/syslog-forwarding-simulation.sh
