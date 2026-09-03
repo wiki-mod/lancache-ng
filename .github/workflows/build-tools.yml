@@ -199,6 +199,24 @@ jobs:
       # What: acceleration network, always bridge/default now
       # Why: no C compile here ever needed Redis/distcc
       # From: Issue #1781 | PR #1783
+
+      # What: writes the LAN proxy CA to a secret file.
+      # Why: PR and push builds both need https via Squid.
+      # From: Issue #1095
+      - name: Prepare LAN proxy CA secret for git/cargo build
+        id: lan-proxy-ca
+        env:
+          PROJECT_SELFHOSTED_PROXY_CA: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
+        run: |
+          set -euo pipefail
+          umask 077
+          if [ -n "$PROJECT_SELFHOSTED_PROXY_CA" ]; then
+            ca_file="${{ runner.temp }}/build-tools-proxy-ca.crt"
+            printf '%s' "$PROJECT_SELFHOSTED_PROXY_CA" > "$ca_file"
+            echo "ca-file=$ca_file" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No LAN proxy CA secret prepared (PROJECT_SELFHOSTED_PROXY_CA unset)."
+          fi
       - name: Select acceleration network for the standalone build
         if: github.event_name != 'pull_request'
         run: |
@@ -215,6 +233,13 @@ jobs:
         timeout-minutes: 60
         env:
           APT_CACHE_BUST: ${{ vars.APT_CACHE_BUST }}
+          # What: LAN proxy vars; self-hosted runner has a route.
+          # Why: https trusted via the Squid re-signing CA secret.
+          # From: Issue #1095
+          LAN_PROXY_HTTP: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
+          LAN_PROXY_HTTPS: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
+          LAN_PROXY_NO_PROXY: ${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
+          LAN_PROXY_CA_FILE: ${{ steps.lan-proxy-ca.outputs.ca-file }}
           BUILDX_BUILDER: ${{ steps.buildx.outputs.name }}
           BUILDX_CACHE_FROM_DIR: ${{ steps.buildx-cache.outputs.cache-from }}
           BUILDX_CACHE_TO_DIR: ${{ steps.buildx-cache.outputs.cache-to }}
@@ -224,6 +249,10 @@ jobs:
         run: |
           set -euo pipefail
           source "$GITHUB_WORKSPACE/scripts/lib/build-retry.sh"
+          secret_args=()
+          if [ -n "$LAN_PROXY_CA_FILE" ]; then
+            secret_args+=(--secret "id=project_selfhosted_proxy_ca,src=$LAN_PROXY_CA_FILE")
+          fi
           build_retry -- docker buildx build \
             --builder "$BUILDX_BUILDER" \
             --load \
@@ -238,6 +267,8 @@ jobs:
             --build-arg "http_proxy=$HTTP_PROXY" \
             --build-arg "https_proxy=$HTTPS_PROXY" \
             --build-arg "no_proxy=$NO_PROXY" \
+            --build-arg "UTILITIES_IMAGE=$UTILITIES_IMAGE" \
+            "${secret_args[@]}" \
             --cache-from "type=local,src=$BUILDX_CACHE_FROM_DIR" \
             --cache-to "type=local,dest=$BUILDX_CACHE_TO_DIR,mode=max" \
             tools/build-tools
@@ -261,6 +292,9 @@ jobs:
             ${{ steps.meta.outputs.labels }}
             org.opencontainers.image.base.rust.digest=${{ steps.build-tools-base-digests.outputs.rust }}
             org.opencontainers.image.base.golang.digest=${{ steps.build-tools-base-digests.outputs.golang }}
+          # What: https_proxy trusted via the proxy CA secret file.
+          # Why: Squid re-signs https; the CA makes it verifiable.
+          # From: Issue #1095
           build-args: |
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
             HTTP_PROXY=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
@@ -269,6 +303,12 @@ jobs:
             http_proxy=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
             https_proxy=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
             no_proxy=${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
+            UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
+          # What: supplies the CA the Dockerfile's install-ca-cert.sh needs.
+          # Why: no distcc/ccache secret is prepared on this branch.
+          # From: Issue #1095
+          secret-files: |
+            ${{ steps['lan-proxy-ca'].outputs['ca-file'] != '' && format('project_selfhosted_proxy_ca={0}', steps['lan-proxy-ca'].outputs['ca-file']) || '' }}
           # What: network wire, set by the step above
           # Why: keeps a real accelerator easy to reintroduce later
           # From: Issue #1781 | PR #1783
@@ -547,6 +587,9 @@ jobs:
           pull: true
           tags: ${{ env.BUILD_TOOLS_SCAN_IMAGE_ARM64 }}
           platforms: linux/arm64
+          # What: omits the LAN-proxy build-arg on this arm64 job.
+          # Why: no route to the self-hosted-only proxy; static split.
+          # From: Issue #1095
           build-args: |
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
           provenance: false
@@ -569,6 +612,9 @@ jobs:
             ${{ steps.meta.outputs.labels }}
             org.opencontainers.image.base.rust.digest=${{ steps.build-tools-base-digests.outputs.rust }}
             org.opencontainers.image.base.golang.digest=${{ steps.build-tools-base-digests.outputs.golang }}
+          # What: omits the LAN-proxy build-arg on this arm64 job.
+          # Why: no route to the self-hosted-only proxy; static split.
+          # From: Issue #1095
           build-args: |
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
           outputs: type=image,oci-mediatypes=true

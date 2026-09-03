@@ -5639,9 +5639,30 @@ jobs:
             } >> "$GITHUB_OUTPUT"
           fi
 
-      # What: merges sccache-secret's and proxy-ca-secret's files.
-      # Why: docker/build-push-action takes one secret-files input.
-      # From: Issue #1781 | PR #1783
+      # What: also writes the LAN proxy CA for build-tools' own
+      # Why: its go-tools/sccache steps use a separate secret ID
+      # From: Issue #1095
+      - name: Prepare LAN proxy CA secret
+        id: lan-proxy-ca
+        if: matrix.service == 'build-tools'
+        env:
+          PROJECT_SELFHOSTED_PROXY_CA: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
+        run: |
+          set -euo pipefail
+          umask 077
+          if [ -n "$PROJECT_SELFHOSTED_PROXY_CA" ]; then
+            ca_file="${{ runner.temp }}/build-push-proxy-ca.crt"
+            printf '%s' "$PROJECT_SELFHOSTED_PROXY_CA" > "$ca_file"
+            echo "ca-file=$ca_file" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No LAN proxy CA secret prepared (PROJECT_SELFHOSTED_PROXY_CA unset)."
+          fi
+
+      # What: merges sccache-secret, ccache-redis-secret, and distcc-hosts-secret.
+      # Why: a block-scalar interpolation of all three outputs would add blank
+      #   lines wherever one is empty; this reproduces the prior single-source
+      #   input byte-for-byte instead.
+      # From: Issue #1095 (G15) | PR #1661
       - name: Combine sccache/ccache secret files
         id: combined-secret-files
         env:
@@ -5675,7 +5696,12 @@ jobs:
           builder: ${{ steps.buildx.outputs.name }}
           context: ${{ matrix.context }}
           build-contexts: ${{ matrix.build_contexts }}
-          secret-files: ${{ steps['combined-secret-files'].outputs['secret-files'] }}
+          secret-files: |
+            ${{ steps['combined-secret-files'].outputs['secret-files'] }}
+            ${{ steps['lan-proxy-ca'].outputs['ca-file'] != '' && format('project_selfhosted_proxy_ca={0}', steps['lan-proxy-ca'].outputs['ca-file']) || '' }}
+          # What: LAN-proxy build-args, every matrix service.
+          # Why: https trusted via the proxy CA secret above.
+          # From: Issue #1781 | PR #1783
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
             UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
@@ -6423,6 +6449,9 @@ jobs:
           builder: ${{ steps.buildx.outputs.name }}
           context: ${{ matrix.context }}
           build-contexts: ${{ matrix.build_contexts }}
+          # What: omits the LAN-proxy build-arg on this arm64 job.
+          # Why: no route to the self-hosted-only proxy; static split.
+          # From: Issue #1095
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
             UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}

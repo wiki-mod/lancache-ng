@@ -1375,6 +1375,60 @@ Internet
 
 Possible contents: APT, APK, Cargo, Go, npm, pip, Maven, Gradle, OCI pulls.
 
+### 40.1 APT/APK half (implemented precedent)
+
+The "LAN package proxy" in this section's diagram is not repo-managed
+tooling -- it is Squid, already-existing shared infrastructure reachable
+via the org-level `PROJECT_SELFHOSTED_PROXY_HTTP`/
+`PROJECT_SELFHOSTED_PROXY_HTTPS`/`PROJECT_SELFHOSTED_PROXY_EXCLUSION`
+variables (also used elsewhere for outbound LAN egress). An earlier
+version of this PR invented a second, repo-managed caching daemon
+(`apt-cacher-ng`, its own NFS-backed cache directory, and
+`apt-proxy-*` install/lifecycle modes in
+`tools/runner-host/lancache-ci-docker-daemon-config.sh`) instead of
+reusing this -- reverted on explicit maintainer instruction: apt and
+apk already fetch over deterministic HTTP(S) paths that a generic
+forward proxy already caches, so standing up a second, apt-specific
+caching service alongside Squid is redundant infrastructure with its
+own install/lifecycle burden for no additional benefit.
+
+The real shape is deliberately static, not probed at runtime: the CI
+workflows (`build-tools.yml`, `build-push.yml`) pass
+`PROJECT_SELFHOSTED_PROXY_HTTP`/`HTTPS`/`EXCLUSION` straight through as
+Docker's own native `http_proxy`/`https_proxy`/`no_proxy` predefined
+build-args -- config plumbing, the same way `APT_CACHE_BUST` and
+`UTILITIES_IMAGE` are already passed today -- but only on the
+self-hosted build steps (`build-tools:` in `build-tools.yml`, `build:`
+in `build-push.yml`), which have a network route to the proxy by
+construction. The GitHub-hosted arm64 steps (`build-tools-arm64:`,
+`build-arm64:`, both fixed to `runs-on: ubuntu-24.04-arm`, never
+matrix-driven) simply omit those three build-arg lines, since a
+GitHub-hosted runner structurally never has a route to the private LAN
+address -- known statically at authoring time, not something a live
+reachability check would add information to. Because these are
+Docker's own predefined build-args rather than a Dockerfile `ARG`/`ENV`
+pair, BuildKit injects them into every `RUN` step's environment without
+`tools/build-tools/Dockerfile` declaring anything at all, and -- unlike
+a hand-rolled `ARG`+`ENV` pair confirmed live to leak into the pushed
+image's `Config.Env` -- they never appear in the built image, since
+Docker excludes its predefined proxy args from both the final image
+config and the layer cache key.
+
+An earlier version of this change added a live reachability probe (and,
+before that, a dedicated composite-action file for it) to fail open on
+an unreachable proxy. Reverted on explicit maintainer instruction: the
+only concrete failure mode ever demonstrated was the arm64 runners'
+permanent lack of a LAN route (static, not worth probing); a
+temporarily-down self-hosted Squid is treated as a real infrastructure
+problem to fix, not a condition to silently code around. Since Squid
+only caches plain `http`, this is paired with a repo-wide audit
+switching apt/apk package-source URLs to `http` wherever the upstream
+doesn't force `https` (tracked in this PR's own body, not restated
+here). ccache is deliberately not extended the same way -- it is a
+filesystem cache written from inside a BuildKit build stage, which a
+network proxy cannot reach; see §41.1's own text for why that is a
+materially different problem.
+
 ## 41. No universal NFS cache
 
 Not:

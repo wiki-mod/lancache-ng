@@ -624,6 +624,11 @@ RUN set -euo pipefail; \
     curl --version >/dev/null; \
     sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
 
+# What: switches apk's own repositories to plain http.
+# Why: Squid caches http; signed indices keep integrity.
+# From: Issue #1095
+RUN sed -i 's|^https://|http://|' /etc/apk/repositories
+
 # What: declares APT_CACHE_BUST right before RUN that uses it
 # Why: prevents cache from replaying a stale apk index forever
 # From: Issue #1095

@@ -344,11 +344,11 @@ extract_decide_one() {
 }
 
 setup_decide_one() {
-    # shellcheck disable=SC1090
+    # shellcheck disable=SC1090 # extracted decide_one source, path only known at runtime
     source "$(extract_decide_one)"
-    # shellcheck disable=SC2034 # read by decide_one(), sourced above
+    # shellcheck disable=SC2034 # read by decide_one/push_reuse_decide once sourced above
     REPOSITORY="wiki-mod/lancache-ng"
-    # shellcheck disable=SC2034 # read by decide_one(), sourced above
+    # shellcheck disable=SC2034 # read by decide_one/push_reuse_decide once sourced above
     channel="nightly"
     GITHUB_OUTPUT="$BATS_TEST_TMPDIR/github_output"
     : > "$GITHUB_OUTPUT"
@@ -357,7 +357,6 @@ setup_decide_one() {
 @test "decide_one: workflow_dispatch forces a real build for build-tools despite ignore_workflow_gate=true, never calling push_reuse_decide" {
     setup_decide_one
     push_reuse_decide() { echo "MUST NOT BE CALLED" >&2; printf 'true\n'; }
-    # shellcheck disable=SC2034 # read by decide_one(), sourced in setup_decide_one
     GITHUB_EVENT_NAME="workflow_dispatch"
 
     # decide_one's own "::notice::" line goes to stderr on this path (matching
@@ -371,7 +370,6 @@ setup_decide_one() {
 @test "decide_one: workflow_dispatch forces a real build for utilities despite ignore_workflow_gate=true" {
     setup_decide_one
     push_reuse_decide() { printf 'true\n'; }
-    # shellcheck disable=SC2034 # read by decide_one(), sourced in setup_decide_one
     GITHUB_EVENT_NAME="workflow_dispatch"
 
     result="$(decide_one utilities utilities "" "" "true" 2>/dev/null)"
@@ -383,7 +381,6 @@ setup_decide_one() {
     setup_decide_one
     ghcr_retry() { printf '"sha256:deadbeef"\n'; }
     push_reuse_decide() { printf 'true\n'; }
-    # shellcheck disable=SC2034 # read by decide_one(), sourced in setup_decide_one
     GITHUB_EVENT_NAME="push"
 
     run decide_one build_tools build-tools "" "" "true"
@@ -396,7 +393,6 @@ setup_decide_one() {
     setup_decide_one
     ghcr_retry() { printf '"sha256:deadbeef"\n'; }
     push_reuse_decide() { printf 'true\n'; }
-    # shellcheck disable=SC2034 # read by decide_one(), sourced in setup_decide_one
     GITHUB_EVENT_NAME="workflow_dispatch"
 
     run decide_one proxy proxy "" "utilities"
@@ -409,7 +405,7 @@ setup_decide_one() {
     setup_decide_one
     ghcr_retry() { printf '"sha256:deadbeef"\n'; }
     push_reuse_decide() { printf 'true\n'; }
-    # shellcheck disable=SC2034 # read by decide_one(), sourced in setup_decide_one
+    # shellcheck disable=SC2034 # read by decide_one once sourced in setup_decide_one
     GITHUB_EVENT_NAME="pull_request"
 
     run decide_one utilities utilities "" "" "true"
