@@ -1,0 +1,51 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# What: bundles the GHCR-then-Docker-Hub login pattern.
+# Why: avoids repeating this 2-step pattern per caller job.
+# From: Issue #1095
+name: GHCR then optional Docker Hub login
+description: >-
+  Logs in to GHCR unconditionally, then logs in to Docker Hub only when
+  credentials are supplied (best-effort, continue-on-error) -- for jobs that
+  pull third-party docker.io images and would otherwise hit the anonymous
+  Docker Hub pull-rate limit on a shared runner egress IP.
+
+inputs:
+  ghcr-username:
+    description: GHCR login username (typically github.actor).
+    required: true
+  ghcr-password:
+    description: GHCR login password/token (typically secrets.GITHUB_TOKEN).
+    required: true
+  dockerhub-username:
+    description: >-
+      Optional Docker Hub username. Empty skips the Docker Hub login step
+      entirely (e.g. the secret is unset, or a fork PR where it is withheld).
+    required: false
+    default: ""
+  dockerhub-password:
+    description: Docker Hub password/token, paired with dockerhub-username.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Log in to GHCR
+      uses: ./.github/actions/docker-login-action-centralized-version
+      with:
+        registry: ghcr.io
+        username: ${{ inputs.ghcr-username }}
+        password: ${{ inputs.ghcr-password }}
+
+    # What: authenticates Docker Hub pulls for this workflow.
+    # Why: shared egress IP hits Docker Hub pull-rate limit.
+    # From: Issue #1095
+    - name: Log in to Docker Hub
+      if: ${{ inputs.dockerhub-username != '' }}
+      continue-on-error: true
+      uses: ./.github/actions/docker-login-action-centralized-version
+      with:
+        username: ${{ inputs.dockerhub-username }}
+        password: ${{ inputs.dockerhub-password }}

@@ -81,6 +81,20 @@ runs:
           "${{ inputs.build-tools-image }}" \
           timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-validation-subnet-wrapper-coverage.sh
 
+    - name: Check registry-login coverage on docker.io-pulling jobs
+      # What: Ensures docker.io-pulling jobs log in to registries.
+      # Why: A job move can silently drop the login step again.
+      # From: Issue #1095
+      shell: bash
+      run: |
+        set -euo pipefail
+        docker run --rm \
+          --user "$(id -u):$(id -g)" \
+          -v "$PWD:/work:ro" \
+          -w /work \
+          "${{ inputs.build-tools-image }}" \
+          timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-registry-login-coverage.sh
+
     - name: Check executable bits on bare-path script invocations
       # What: Asserts bare-path scripts have executable bits.
       # Why: Exit 126 if script lacks execute bit (AG-VAL-024).
