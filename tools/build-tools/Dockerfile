@@ -296,6 +296,10 @@ COPY --from=go-tools-script /install-ca-cert.sh /install-ca-cert.sh
 # Why: prebuilt release lacks Redis+dist-client feature
 # From: Issue #1095
 RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
+    # What: drop CI proxy CA before layer commit
+    # Why: CA must never persist in published image
+    # From: PR #1752 regression | Issue #1095
+    trap 'rm -f /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; update-ca-certificates >/dev/null 2>&1 || true' EXIT; \
     sh /install-ca-cert.sh; \
     rustup component add rustfmt clippy; \
     cargo install sccache --version "${SCCACHE_VERSION}" --no-default-features --features redis,dist-client --root /usr/local; \
@@ -596,6 +600,10 @@ COPY --from=go-tools-script /install-ca-cert.sh /install-ca-cert.sh
 # Why: excludes unused backends; smaller binary
 # From: Issue #1570 | PR #1571
 RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
+    # What: drop CI proxy CA before layer commit
+    # Why: CA must never persist in published image
+    # From: PR #1752 regression | Issue #1095
+    trap 'rm -f /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; update-ca-certificates >/dev/null 2>&1 || true' EXIT; \
     sh /install-ca-cert.sh; \
     rustup component add rustfmt clippy; \
     cargo install sccache --version "${SCCACHE_VERSION}" --no-default-features --features redis,dist-client --root /usr/local; \
