@@ -65,6 +65,11 @@ RUN set -euo pipefail; \
 # What: ca-certificates package enables curl's CA bundle.
 # Why: copied curl has fixed CA path; package generates it.
 # From: Issue #1556
+# What: switches apk's own repositories to plain http.
+# Why: Squid caches http; signed indices keep integrity.
+# From: Issue #1095
+RUN sed -i 's|^https://|http://|' /etc/apk/repositories
+
 # What: APT_CACHE_BUST invalidates BuildKit's upgrade cache.
 # Why: without this, BuildKit replays stale cache forever.
 # From: Issue #1095

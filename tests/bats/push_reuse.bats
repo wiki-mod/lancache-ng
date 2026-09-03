@@ -344,8 +344,11 @@ extract_decide_one() {
 }
 
 setup_decide_one() {
+    # shellcheck disable=SC1090 # extracted decide_one source, path only known at runtime
     source "$(extract_decide_one)"
+    # shellcheck disable=SC2034 # read by decide_one/push_reuse_decide once sourced above
     REPOSITORY="wiki-mod/lancache-ng"
+    # shellcheck disable=SC2034 # read by decide_one/push_reuse_decide once sourced above
     channel="nightly"
     GITHUB_OUTPUT="$BATS_TEST_TMPDIR/github_output"
     : > "$GITHUB_OUTPUT"
@@ -402,6 +405,7 @@ setup_decide_one() {
     setup_decide_one
     ghcr_retry() { printf '"sha256:deadbeef"\n'; }
     push_reuse_decide() { printf 'true\n'; }
+    # shellcheck disable=SC2034 # read by decide_one once sourced in setup_decide_one
     GITHUB_EVENT_NAME="pull_request"
 
     run decide_one utilities utilities "" "" "true"

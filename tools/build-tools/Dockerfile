@@ -86,6 +86,18 @@ rm -rf "$compose_src"
 /out/docker-compose version
 BUILD_GO_TOOLS_EOF
 
+# What: trusts the LAN proxy's re-signing CA when set.
+# Why: shared by every stage fetching https via Squid.
+# From: Issue #1095
+COPY <<'INSTALL_CA_CERT_EOF' /install-ca-cert.sh
+#!/bin/sh
+set -eu
+if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then
+  cp /run/secrets/project_selfhosted_proxy_ca /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt
+  update-ca-certificates
+fi
+INSTALL_CA_CERT_EOF
+
 FROM golang:latest AS go-tools-builder
 
 ARG DOCKER_CLI_VERSION
@@ -99,11 +111,13 @@ ARG GOLANG_X_MOD_VERSION
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 COPY --from=go-tools-script /build-go-tools.sh /build-go-tools.sh
+COPY --from=go-tools-script /install-ca-cert.sh /install-ca-cert.sh
 
 # What: builds CLI/compose/buildx from source (Go tools).
 # Why: needs current Go stdlib; vendor bump forces a build.
 # From: Issue #1095 | PR #1743
-RUN chmod +x /build-go-tools.sh && /build-go-tools.sh
+RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
+    sh /install-ca-cert.sh && chmod +x /build-go-tools.sh && /build-go-tools.sh
 
 # What: source stage for shared static curl binary
 # Why: portable across glibc/musl; reuses single build
@@ -126,20 +140,27 @@ ARG GOLANG_X_MOD_VERSION
 
 SHELL ["/bin/sh", "-o", "pipefail", "-c"]
 COPY --from=go-tools-script /build-go-tools.sh /build-go-tools.sh
+COPY --from=go-tools-script /install-ca-cert.sh /install-ca-cert.sh
 
 # What: declares APK_CACHE_BUST before this stage's RUN
 # Why: matches the other Alpine stage's cache-bust knob
 # From: Issue #1095
 ARG APK_CACHE_BUST=""
 
+# What: switches apk's own repositories to plain http.
+# Why: Squid caches http; signed indices keep integrity.
+# From: Issue #1095
+RUN sed -i 's|^https://|http://|' /etc/apk/repositories
+
 # What: builds the same three Go tools as go-tools-builder.
 # Why: none needs a cgo dependency; musl needs no build-tag.
 # From: Issue #1095 | PR #1743
-RUN set -euo pipefail; \
+RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
     : "apk-cache-bust=${APK_CACHE_BUST}"; \
     apk update; \
     apk upgrade --no-cache; \
-    apk add --no-cache git build-base; \
+    apk add --no-cache ca-certificates git build-base; \
+    sh /install-ca-cert.sh; \
     chmod +x /build-go-tools.sh; \
     /build-go-tools.sh
 
@@ -186,6 +207,11 @@ ENV PATH="/usr/local/cargo/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin
 # Why: bust layer cache on rotation; matches APT pattern
 # From: Issue #1095
 ARG APK_CACHE_BUST=""
+
+# What: switches apk's own repositories to plain http.
+# Why: Squid caches http; signed indices keep integrity.
+# From: Issue #1095
+RUN sed -i 's|^https://|http://|' /etc/apk/repositories
 
 # What: installs bash, coreutils, github-cli, sqlite, etc
 # Why: GNU coreutils differ from BusyBox (AG-VAL-034)
@@ -264,10 +290,17 @@ RUN docker --version; \
     docker compose version; \
     docker buildx version
 
+COPY --from=go-tools-script /install-ca-cert.sh /install-ca-cert.sh
+
 # What: builds sccache from source, like the Debian stage.
 # Why: prebuilt release lacks Redis+dist-client feature
 # From: Issue #1095
-RUN set -euo pipefail; \
+RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
+    # What: drop CI proxy CA before layer commit
+    # Why: CA must never persist in published image
+    # From: PR #1752 regression | Issue #1095
+    trap 'rm -f /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; update-ca-certificates >/dev/null 2>&1 || true' EXIT; \
+    sh /install-ca-cert.sh; \
     rustup component add rustfmt clippy; \
     cargo install sccache --version "${SCCACHE_VERSION}" --no-default-features --features redis,dist-client --root /usr/local; \
     for tool in cargo cargo-clippy cargo-fmt clippy-driver rustc rustdoc rustfmt rustup; do \
@@ -437,6 +470,13 @@ RUN set -euo pipefail; \
     grep -qE '^host: .*-musl$' <<<"${rustc_host_line}"; \
     musl-gcc --version
 
+# What: fail build if CI proxy CA leaked into image
+# Why: CA must never persist in published build-tools
+# From: PR #1752 regression | Issue #1095
+RUN if [ -e /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt ]; then \
+      echo "SECURITY: CI proxy CA persisted in final image" >&2; exit 1; \
+    fi
+
 WORKDIR /workspace
 
 CMD ["bash"]
@@ -561,10 +601,17 @@ RUN docker --version; \
     docker compose version; \
     docker buildx version
 
+COPY --from=go-tools-script /install-ca-cert.sh /install-ca-cert.sh
+
 # What: build sccache with redis/dist-client only
 # Why: excludes unused backends; smaller binary
 # From: Issue #1570 | PR #1571
-RUN set -euo pipefail; \
+RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
+    # What: drop CI proxy CA before layer commit
+    # Why: CA must never persist in published image
+    # From: PR #1752 regression | Issue #1095
+    trap 'rm -f /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; update-ca-certificates >/dev/null 2>&1 || true' EXIT; \
+    sh /install-ca-cert.sh; \
     rustup component add rustfmt clippy; \
     cargo install sccache --version "${SCCACHE_VERSION}" --no-default-features --features redis,dist-client --root /usr/local; \
     for tool in cargo cargo-clippy cargo-fmt clippy-driver rustc rustdoc rustfmt rustup; do \
@@ -836,6 +883,13 @@ RUN set -euo pipefail; \
     grep -qx "${musl_target_check}" <<<"${installed_targets}"; \
     rustc_host_line="$(rustc -vV)"; \
     grep -qE '^host: .*-gnu$' <<<"${rustc_host_line}"
+
+# What: fail build if CI proxy CA leaked into image
+# Why: CA must never persist in published build-tools
+# From: PR #1752 regression | Issue #1095
+RUN if [ -e /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt ]; then \
+      echo "SECURITY: CI proxy CA persisted in final image" >&2; exit 1; \
+    fi
 
 # What: default WORKDIR for interactive/manual container use
 # Why: CI always bind-mounts /work; not a real default here

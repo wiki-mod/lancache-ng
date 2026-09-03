@@ -50,6 +50,11 @@ ARG NETDATA_X86_64_SHA256=b42d9937807f28812502a967906d370cff9ab443453813656b99ff
 # deployment leaves NETDATA_CERT_MODE at the installer's "check" default,
 # which validates against the real system trust store rather than
 # skipping validation.
+# What: switches apk's own repositories to plain http.
+# Why: Squid caches http; signed indices keep integrity.
+# From: Issue #1095
+RUN sed -i 's|^https://|http://|' /etc/apk/repositories
+
 RUN set -eu; \
     apk add --no-cache bash ca-certificates; \
     wget -q -O /tmp/netdata.gz.run \
