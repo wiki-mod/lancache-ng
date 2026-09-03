@@ -254,6 +254,24 @@ jobs:
             echo "::notice::No distcc hosts secret prepared for the git build (DISTCC_POTENTIAL_HOSTS unset)."
           fi
 
+      # What: writes the LAN proxy CA to a secret file.
+      # Why: PR and push builds both need https via Squid.
+      # From: Issue #1095
+      - name: Prepare LAN proxy CA secret for git/cargo build
+        id: lan-proxy-ca
+        env:
+          PROJECT_SELFHOSTED_PROXY_CA: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
+        run: |
+          set -euo pipefail
+          umask 077
+          if [ -n "$PROJECT_SELFHOSTED_PROXY_CA" ]; then
+            ca_file="${{ runner.temp }}/build-tools-proxy-ca.crt"
+            printf '%s' "$PROJECT_SELFHOSTED_PROXY_CA" > "$ca_file"
+            echo "ca-file=$ca_file" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No LAN proxy CA secret prepared (PROJECT_SELFHOSTED_PROXY_CA unset)."
+          fi
+
       # What: selects host or bridge network per accel availability.
       # Why: prevents silent fallback to uncached compile on no endpoint.
       # From: Issue #1304 | PR #1661
@@ -306,16 +324,22 @@ jobs:
         env:
           APT_CACHE_BUST: ${{ vars.APT_CACHE_BUST }}
           # What: LAN proxy vars; self-hosted runner has a route.
-          # Why: https omitted; Squid SSL-bumps it, breaking TLS.
+          # Why: https trusted via the Squid re-signing CA secret.
           # From: Issue #1095
           LAN_PROXY_HTTP: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
+          LAN_PROXY_HTTPS: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
           LAN_PROXY_NO_PROXY: ${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
+          LAN_PROXY_CA_FILE: ${{ steps.lan-proxy-ca.outputs.ca-file }}
           BUILDX_BUILDER: ${{ steps.buildx.outputs.name }}
           BUILDX_CACHE_FROM_DIR: ${{ steps.buildx-cache.outputs.cache-from }}
           BUILDX_CACHE_TO_DIR: ${{ steps.buildx-cache.outputs.cache-to }}
         run: |
           set -euo pipefail
           source "$GITHUB_WORKSPACE/scripts/lib/build-retry.sh"
+          secret_args=()
+          if [ -n "$LAN_PROXY_CA_FILE" ]; then
+            secret_args+=(--secret "id=project_selfhosted_proxy_ca,src=$LAN_PROXY_CA_FILE")
+          fi
           build_retry -- docker buildx build \
             --builder "$BUILDX_BUILDER" \
             --load \
@@ -325,8 +349,10 @@ jobs:
             --provenance=false \
             --build-arg "APT_CACHE_BUST=$APT_CACHE_BUST" \
             --build-arg "http_proxy=$LAN_PROXY_HTTP" \
+            --build-arg "https_proxy=$LAN_PROXY_HTTPS" \
             --build-arg "no_proxy=$LAN_PROXY_NO_PROXY" \
             --build-arg "UTILITIES_IMAGE=$UTILITIES_IMAGE" \
+            "${secret_args[@]}" \
             --cache-from "type=local,src=$BUILDX_CACHE_FROM_DIR" \
             --cache-to "type=local,dest=$BUILDX_CACHE_TO_DIR,mode=max" \
             tools/build-tools
@@ -350,17 +376,19 @@ jobs:
             ${{ steps.meta.outputs.labels }}
             org.opencontainers.image.base.rust.digest=${{ steps.build-tools-base-digests.outputs.rust }}
             org.opencontainers.image.base.golang.digest=${{ steps.build-tools-base-digests.outputs.golang }}
-          # What: https_proxy omitted deliberately; see amd64 step.
-          # Why: Squid SSL-bumps https, breaking git/cargo TLS.
+          # What: https_proxy trusted via the proxy CA secret file.
+          # Why: Squid re-signs https; the CA makes it verifiable.
           # From: Issue #1095
           build-args: |
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
             http_proxy=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
+            https_proxy=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
             no_proxy=${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
             UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
           secret-files: |
             ${{ steps.ccache-distcc-secret.outputs.ccache-redis-file != '' && format('ccache_redis_url={0}', steps.ccache-distcc-secret.outputs.ccache-redis-file) || '' }}
             ${{ steps.ccache-distcc-secret.outputs.distcc-hosts-file != '' && format('distcc_potential_hosts={0}', steps.ccache-distcc-secret.outputs.distcc-hosts-file) || '' }}
+            ${{ steps['lan-proxy-ca'].outputs['ca-file'] != '' && format('project_selfhosted_proxy_ca={0}', steps['lan-proxy-ca'].outputs['ca-file']) || '' }}
           # What: wire validated network from preflight into real build.
           # Why: prevent silent uncached fallback when host network needed.
           # From: Issue #1304 | PR #1661
