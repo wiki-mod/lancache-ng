@@ -109,18 +109,12 @@
 # no bound on how long. Empty/omitted preserves this function's prior
 # behavior exactly (no extra keys checked).
 #
-# [ignore_workflow_gate], when the literal string "true", skips ONLY the
-# workflow_reuse_scope disqualifier below -- <service_key>'s own change
-# check and every dep_key still apply in full. Empty/omitted (any other
-# value) preserves this function's prior behavior exactly. Scoped to
-# build-tools/utilities by their one caller (build-push.yml's decide_one()):
-# both publish a shared CI-tooling/base-layer image, not a product-stack
-# service, so a workflow/composite-action edit that never touches their own
-# path or dependencies has no way to change what either image contains --
-# unlike the other eight services, where the SAME workflow file also
-# contains their own build/push/scan steps. See Issue #1095 for the real
-# volume this addresses (build-tools: 30 rebuilds in 5 days, ~2700 GHCR
-# versions, from workflow-only diffs).
+# [ignore_workflow_gate]="true" skips ONLY the workflow_reuse_scope check
+# below; every other value keeps this function's prior behavior.
+#
+# What: ignore_workflow_gate=true skips one disqualifier only
+# Why: neither publishes its own build/push/scan steps
+# From: Issue #1095
 #
 # Always prints exactly "true" or "false" to stdout and returns 0 -- a
 # non-zero return means a genuine usage error (missing argument), never an
@@ -213,7 +207,7 @@ push_reuse_decide() {
     fi
   fi
 
-  # What: also fails closed if any declared dependency key changed.
+  # What: fails closed if a declared dependency key changed.
   # Why: consumer's key can't see first-party base image change.
   # From: Issue #1095
   local dep_key dep_flag
