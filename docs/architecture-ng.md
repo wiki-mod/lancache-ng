@@ -9,11 +9,10 @@ would not actually differentiate anything -- every real row would read the
 same "v0.1.0" regardless of which service is genuinely older or newer
 (verified against each service directory's first commit in git history, not
 assumed). The one row below that a version field genuinely would
-differentiate is CacheHamster (the Cache-Prefill feature's service, named
-`services/warmer` at scaffold time, renamed during its infra integration,
-issue #871), which is called out explicitly instead: it is not shipped in
-any tagged version, current or planned, and does not yet have real
-Steam depot-fetch capability.
+differentiate is CacheHamster (the Cache-Prefill feature's service, issue
+#871), which is called out explicitly instead: it is not shipped in any
+tagged version, current or planned, and does not yet have real Steam
+depot-fetch capability.
 
 | Service | Default | Replaces | Notes |
 |---|---|---|---|
@@ -24,7 +23,7 @@ Steam depot-fetch capability.
 | Watchdog | on | — | Health checks, auto-restart, purge cron |
 | syslog (fluent-bit + syslog-ng, combined) | on (`logging` Compose profile, default-enabled since #1343; real opt-out via `LOGGING_ENABLED=0`) | — | Central log receiver; fluent-bit forwards logs from every wired service to syslog-ng inside the same container (#453, combined into one image 2026-08) — see the syslog-ng section's full logging matrix below, not just proxy access logs |
 | Admin UI | on | — | Axum/Rust, Tera, Tailwind, separate port |
-| CacheHamster (Cache-Prefill) | off (`cachehamster` Compose profile) | — | **Infra-wired, functionally still a scaffold**: `services/cachehamster` (named `services/warmer` at scaffold time, issue #871) has a CI-built/published multi-arch image and an opt-in Compose profile since its infra integration (issue #871), but no real Steam depot-fetch capability yet -- credential-store + stream-fetch primitives only. Mechanism decided: stream-and-discard prefill, not SteamCMD; independently-switchable service (not a `services/ui` module). See [docs/design-steam-prefill.md](design-steam-prefill.md) (issue #816, issue #871) for the current design plan and its one remaining open decision (credential strategy). Do not treat this row as a runnable feature until Steam control-plane/depot integration lands. |
+| CacheHamster (Cache-Prefill) | off (`cachehamster` Compose profile) | — | **Infra-wired, functionally still a scaffold**: `services/cachehamster` (issue #871) has a CI-built/published multi-arch image and an opt-in Compose profile since its infra integration (issue #871), but no real Steam depot-fetch capability yet -- credential-store + stream-fetch primitives only. Mechanism decided: stream-and-discard prefill, not SteamCMD; independently-switchable service (not a `services/ui` module). See [docs/design-steam-prefill.md](design-steam-prefill.md) (issue #816, issue #871) for the current design plan and its one remaining open decision (credential strategy). Do not treat this row as a runnable feature until Steam control-plane/depot integration lands. |
 
 ## nginx
 
@@ -625,9 +624,8 @@ design discussion and its still-open implementation decisions (credential strate
 unresolved; which-service-houses-the-engine is resolved below) before relying on any detail
 here.
 
-**Updated 2026-08-29 (issue #871, scaffold PR): `services/cachehamster` (named
-`services/warmer` at scaffold time, renamed during its infra integration) now exists as a
-Rust crate** (maintainer decision: a new, independently-switchable service, not a
+**Updated 2026-08-29 (issue #871, scaffold PR): `services/cachehamster` now
+exists as a Rust crate** (maintainer decision: a new, independently-switchable service, not a
 `services/ui` module — the operator must be able to turn CacheHamster off without affecting
 the rest of the stack). Implemented so far: the credential-store (Argon2id-as-KDF +
 XChaCha20-Poly1305 AEAD encryption of an operator-supplied Steam credential, with optional

@@ -4,11 +4,9 @@
 as a scaffold.** The maintainer has decided the engine: stream-and-discard,
 no SteamCMD (see the "Overlap with #871" section below). All three
 originally-open decisions are now resolved (see "Open decisions" below);
-`services/cachehamster` (named `services/warmer` at scaffold time, renamed
-during its infra integration, issue #871) exists with real credential-store
-and stream-fetch code, but not yet the Steam control-plane/depot
-integration that would make it functional end-to-end. This is the written
-design plan issue
+`services/cachehamster` exists with real credential-store and stream-fetch
+code, but not yet the Steam control-plane/depot integration that would
+make it functional end-to-end. This is the written design plan issue
 [#816](https://github.com/wiki-mod/lancache-ng/issues/816) asked for. Most
 of the research below was already captured directly in #816's own issue
 body and its 2026-07-14 self-correction comment; this document
@@ -158,7 +156,7 @@ satisfied for any future non-Steam prefill work. Net takeaway: no single
 generic detection pattern across CDNs; each storefront's client has its own
 quirk.
 
-## Overlap with #871 (Cache Warmer) — resolved 2026-08-29
+## Overlap with #871 (CacheHamster) — resolved 2026-08-29
 
 **Decision (recorded on issue #871): this document's stream-and-discard
 mechanism is the selected engine. SteamCMD is retired as a candidate.**
@@ -178,11 +176,12 @@ proposed mechanisms for the same underlying need, and the mechanisms
 actively conflicted.**
 
 [#871](https://github.com/wiki-mod/lancache-ng/issues/871) found that
-`docs/architecture-ng.md` documents an entire "Cache Warmer" subsystem
-(top-of-file service table plus a `## Cache Warming` section) that does not
-exist in the codebase anywhere. As currently documented, that subsystem is:
+`docs/architecture-ng.md` documented an entire "CacheHamster" subsystem
+(top-of-file service table plus a `## Cache Warming` section) that did not
+exist in the codebase anywhere at the time. As then documented, that
+subsystem was:
 
-- a separate `services/warmer` container running **`steamcmd`**
+- a separate `services/cachehamster` container running **`steamcmd`**
 - the operator enters a Steam app ID
 - `steamcmd` fetches the depot manifest and chunk URLs through the local
   proxy (so lancache-ng's cache does observe and store the traffic — same
@@ -198,15 +197,15 @@ and writes the full depot content to a local app directory on whatever host
 runs it. That is precisely what this issue's non-negotiable requirement
 forbids. `steamcmd`'s own normal operation is not a "download to a
 throwaway buffer and discard" step — it is a real install, with real
-disk-space and SSD-wear cost on the warmer host, which is exactly the
+disk-space and SSD-wear cost on the cachehamster host, which is exactly the
 downside `tpill90`'s C# reference tool (and this issue's whole design)
 exists to avoid. The two documents are not "two options for the same easy
 thing" — they trade off real operational costs against each other:
 
 | | #871 (steamcmd container) | #816 (this document) |
 |---|---|---|
-| Depot bytes touch local disk on the warmer host | Yes (real install) | No (streamed + discarded by design) |
-| Disk/SSD footprint on warmer host | Full library size, repeatedly | None |
+| Depot bytes touch local disk on the cachehamster host | Yes (real install) | No (streamed + discarded by design) |
+| Disk/SSD footprint on cachehamster host | Full library size, repeatedly | None |
 | Implementation effort | Wraps an existing, mature Valve tool | Custom Rust control/depot/data-plane split across two young-to-mature crates |
 | Admin UI integration (progress, app-ID input) | Already specified in the doc | Not designed here; would need its own work |
 | Targeted-purge tracking (app ID → CDN URLs) | Already specified in the doc | Not designed here; would need its own work |
@@ -227,7 +226,7 @@ authors could resolve unilaterally.** Two honest framings were possible:
 2. **Both stay, serving different operators.** *(Not selected.)* An
    operator who doesn't mind the disk/SSD cost and wants the simplicity
    and maturity of wrapping Valve's own official tool might have preferred
-   a `steamcmd`-based warmer; an operator who cares about warmer-host disk
+   a `steamcmd`-based CacheHamster; an operator who cares about cachehamster-host disk
    wear wants this issue's approach. This would have meant building and
    maintaining two separate engines for the same job — real ongoing cost
    the maintainer chose not to take on.
@@ -254,10 +253,9 @@ authors could resolve unilaterally.** Two honest framings were possible:
    never returned by any Admin-UI/API surface (mirrors how
    `UI_AUTH_PASSWORD` is compared but never echoed back).
 2. ~~**Which service houses the engine**~~ — resolved 2026-08-29: a new
-   `services/cachehamster` service (named `services/warmer` at scaffold
-   time, renamed during its infra integration, issue #871), not a
-   `services/ui` module. Maintainer's stated reasoning: the service must
-   be independently, separately
+   `services/cachehamster` service, not a `services/ui` module.
+   Maintainer's stated reasoning: the service must be independently,
+   separately
    switchable off without affecting the rest of the stack, which favors a
    clearly-bounded standalone service over an embedded module. The
    `services/ui` `reqwest`-streaming precedent named in the earlier
