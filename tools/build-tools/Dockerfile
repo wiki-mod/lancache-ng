@@ -470,6 +470,13 @@ RUN set -euo pipefail; \
     grep -qE '^host: .*-musl$' <<<"${rustc_host_line}"; \
     musl-gcc --version
 
+# What: fail build if CI proxy CA leaked into image
+# Why: CA must never persist in published build-tools
+# From: PR #1752 regression | Issue #1095
+RUN if [ -e /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt ]; then \
+      echo "SECURITY: CI proxy CA persisted in final image" >&2; exit 1; \
+    fi
+
 WORKDIR /workspace
 
 CMD ["bash"]
@@ -876,6 +883,13 @@ RUN set -euo pipefail; \
     grep -qx "${musl_target_check}" <<<"${installed_targets}"; \
     rustc_host_line="$(rustc -vV)"; \
     grep -qE '^host: .*-gnu$' <<<"${rustc_host_line}"
+
+# What: fail build if CI proxy CA leaked into image
+# Why: CA must never persist in published build-tools
+# From: PR #1752 regression | Issue #1095
+RUN if [ -e /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt ]; then \
+      echo "SECURITY: CI proxy CA persisted in final image" >&2; exit 1; \
+    fi
 
 # What: default WORKDIR for interactive/manual container use
 # Why: CI always bind-mounts /work; not a real default here
