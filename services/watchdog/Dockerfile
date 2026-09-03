@@ -80,11 +80,21 @@ COPY src/ ./src/
 # ending in "\" would swallow every following continuation line as
 # commented-out text instead of executable shell (verified empirically on
 # services/dns/Dockerfile's identical block).
+#
+# What: trusts proxy CA so cargo's crates.io fetch verifies.
+# Why: trap removes it before this stage's layer commits.
+# From: Issue #1781 | PR #1783
 RUN --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_dist_config \
     --mount=type=secret,id=distcc_potential_hosts \
     --mount=type=secret,id=ccache_redis_url \
+    --mount=type=secret,id=proxy_ca \
     set -eu; \
+    if [ -s /run/secrets/proxy_ca ]; then \
+      cp /run/secrets/proxy_ca /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; \
+      update-ca-certificates >/dev/null; \
+      trap 'rm -f /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; update-ca-certificates >/dev/null 2>&1 || true' EXIT; \
+    fi; \
     musl_target="$(cat /tmp/musl-target)"; \
     distcc_enabled=0; \
     ccache_enabled=0; \
@@ -413,6 +423,13 @@ RUN addgroup -g 10001 lancache && \
     adduser -D -H -u 10001 -G lancache -s /sbin/nologin lancache && \
     mkdir -p /var/lib/lancache-retention-state && \
     chown lancache:lancache /var/lib/lancache-retention-state
+
+# What: fail build if CI proxy CA leaked into image
+# Why: CA must never persist in a published service image
+# From: Issue #1781 | PR #1783
+RUN if [ -e /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt ]; then \
+      echo "SECURITY: CI proxy CA persisted in final image" >&2; exit 1; \
+    fi
 
 # What: default ENTRYPOINT is the compiled Rust binary now.
 # Why: maintainer decision authorized the ENTRYPOINT swap.

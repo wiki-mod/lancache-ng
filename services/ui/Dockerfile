@@ -434,11 +434,21 @@ COPY Cargo.toml Cargo.lock ./
 # strips the backslash-newline entirely (no newline is inserted), so a "#" comment ending
 # in "\" would swallow every following continuation line as commented-out text instead of
 # executable shell, silently dropping the rest of the build. Verified empirically.
+#
+# What: trusts proxy CA so cargo's crates.io fetch verifies.
+# Why: trap removes it before this stage's layer commits.
+# From: Issue #1781 | PR #1783
 RUN --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_dist_config \
     --mount=type=secret,id=distcc_potential_hosts \
     --mount=type=secret,id=ccache_redis_url \
+    --mount=type=secret,id=proxy_ca \
     set -eu; \
+    if [ -s /run/secrets/proxy_ca ]; then \
+      cp /run/secrets/proxy_ca /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; \
+      update-ca-certificates >/dev/null; \
+      trap 'rm -f /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; update-ca-certificates >/dev/null 2>&1 || true' EXIT; \
+    fi; \
     musl_target="$(cat /tmp/musl-target)"; \
     distcc_enabled=0; \
     ccache_enabled=0; \
@@ -512,11 +522,21 @@ COPY src ./src
 # the clean to this package only, leaving every dependency's cached rlib in
 # `target/${musl_target}/release/deps/` untouched, so the pre-cache stage's
 # whole point (skip recompiling third-party crates) is preserved.
+#
+# What: trusts proxy CA so a cache-miss cargo fetch verifies.
+# Why: trap removes it before this stage's layer commits.
+# From: Issue #1781 | PR #1783
 RUN --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_dist_config \
     --mount=type=secret,id=distcc_potential_hosts \
     --mount=type=secret,id=ccache_redis_url \
+    --mount=type=secret,id=proxy_ca \
     set -eu; \
+    if [ -s /run/secrets/proxy_ca ]; then \
+      cp /run/secrets/proxy_ca /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; \
+      update-ca-certificates >/dev/null; \
+      trap 'rm -f /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; update-ca-certificates >/dev/null 2>&1 || true' EXIT; \
+    fi; \
     musl_target="$(cat /tmp/musl-target)"; \
     distcc_enabled=0; \
     ccache_enabled=0; \
@@ -673,6 +693,12 @@ RUN addgroup -g 10001 lancache \
     && chown -R lancache:lancache /data /etc/nats \
     && chmod +x /usr/local/bin/docker-entrypoint.sh
 
+# What: fail build if CI proxy CA leaked into image
+# Why: CA must never persist in a published service image
+# From: Issue #1781 | PR #1783
+RUN if [ -e /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt ]; then \
+      echo "SECURITY: CI proxy CA persisted in final image" >&2; exit 1; \
+    fi
 
 EXPOSE 8080
 
