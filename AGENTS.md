@@ -462,25 +462,19 @@ by configuring which DNS server IP they point to:
   (`distcc`/`distcc-pump` as a Debian `.deb`, `isc-dhcp-client`, `tcpdump`, `bind9-dnsutils`,
   `cmake`/`clang`/`lld`, `python3` for `distcc-pump`'s include-server) — largely glibc/`apt`-
   idiomatic tooling with no clean musl equivalent, and no attack-surface argument in this image's
-  favor the way there is for a network-facing runtime service. Issue #1095's evaluation checked
-  that specific tool list against Alpine's own real package availability rather than assuming it
-  still held, and found every tool has either a direct `apk` equivalent or a working source-build
-  path (see `tools/build-tools/README.md` for the full, phase-by-phase record): `distcc`/
-  `distcc-pump` ship as native Alpine packages (no Debian-style Python regex patch needed);
-  `cargo-audit`/`cargo-tarpaulin` (Debian: prebuilt glibc release binaries) fail on Alpine even
-  with `gcompat` (missing glibc-2.38+ symbol versions) but build cleanly from source via `cargo
-  install`, the same mechanism already used for `sccache`; all four Go-built tools
-  (`actionlint`/`docker`/`docker-buildx`/`docker-compose`) build clean against `golang:alpine`
-  with no musl-specific change. The one confirmed, unresolved gap: no Alpine package provides
+  favor the way there is for a network-facing runtime service. Every tool in that CI/dev toolchain
+  has either a direct `apk` equivalent or a working source-build path (see
+  `tools/build-tools/README.md` for the full record). *(Removed tool-by-tool investigation detail
+  preserved verbatim → PR #1798: https://github.com/wiki-mod/lancache-ng/pull/1798#issuecomment-5527442625.)*
+  The one confirmed, unresolved gap: no Alpine package provides
   `dhclient`/`isc-dhcp-client` (only BusyBox's unrelated `udhcpc` exists), affecting three
   CI simulation scripts that invoke dhclient against Kea; `dhclient` was moved from a
   baseline to an opt-in (`EXTRA_REQUIRED_TOOLS`) smoke-test requirement so this gap fails closed
-  only for those three real consumers, not for every other caller of this image. A real Trivy scan
-  (`--severity HIGH,CRITICAL`, matching `build-tools.yml`'s own scan parameters) found Alpine's
-  `os-pkgs` (apk-installed package) surface at 0 HIGH/CRITICAL — the same result as a real,
-  same-base-commit Debian scan — meaning this is **CVE-surface parity with the current Debian
+  only for those three real consumers, not for every other caller of this image. This is
+  **CVE-surface parity with the current Debian
   branch, not an improvement**; do not assume or state elsewhere that switching to Alpine would by
-  itself resolve any currently-tracked Debian CVE finding. The result of this evaluation is a new
+  itself resolve any currently-tracked Debian CVE finding. *(Removed Trivy-scan investigation detail
+  preserved verbatim → same PR #1798 comment.)* The result of this evaluation is a new
   `alpine-final` stage added to `tools/build-tools/Dockerfile`, placed before the existing unnamed
   Debian stage so Debian remains the implicit `docker build` default with zero behavior change for
   every existing consumer; the Alpine candidate is reachable only via `docker build --target
@@ -501,7 +495,7 @@ by configuring which DNS server IP they point to:
   remains: actually switching the default base-OS/image-tag still needs the maintainer's explicit
   sign-off, regardless of what this evaluation found.
 
-- **[AG-KD-010]** **First-party consumers reference the shared `utilities` image via the mutable `:latest` tag, not a pinned digest — a deliberate maintainer override, not an oversight.** `services/proxy`, `dns`, `dhcp`, `dhcp-proxy`, `ntp`, `ui`, `watchdog`, and `tools/build-tools` must all use `FROM ghcr.io/wiki-mod/lancache-ng/utilities:latest`. This reverses the digest-pin approach issue #1556 originally introduced (`FROM ...utilities@sha256:<digest>`, one identical hardcoded digest copy-pasted across every consumer): that approach had no CI-side freshness or staleness check of any kind (confirmed during issue #1095's CI-health pass — no dependabot/renovate config references `utilities`, and `BUILD_TOOLS_IMAGE`'s own `scripts/untracked/select-build-tools-image.sh` resolution mechanism, the one precedent for automated digest resolution in this repo, was never extended to it) and required every consumer Dockerfile to be hand-edited in lockstep on the rare occasion a maintainer did bump it by hand — confirmed exactly once in this project's history, across the then-seven consumers (`5c02fc53...` → `718af4cf...`, commit `194c44d7` and its two sibling commits touching every consumer at once). `tools/build-tools/Dockerfile` did not consume the `utilities` image at all when this rule was first written; issue #1304's shared-curl work later added it as the eighth consumer, using `:latest` from the start rather than reintroducing the digest-pin pattern this rule already rejects. `:latest` trades the digest pin's reproducibility guarantee for zero-maintenance currency: every consumer image always builds against whatever `utilities` build most recently published that tag, with no separate update step, no drift between consumers (a mutable tag can't itself fork into inconsistent copies the way hand-edited digest literals can), and no possibility of a consumer silently running stale, unpatched `utilities` tooling (`curl`, `ripgrep`, `jq`, `ca-certificates`, etc.) for months because nobody remembered to re-pin it. The accepted tradeoff: a `utilities` image regression is no longer scoped to the deliberate bump that introduces it — it reaches every consumer's next build immediately, so `services/utilities/Dockerfile` changes need the same build/smoke-test scrutiny before merge that any other first-party base-layer change gets. Do not silently reintroduce digest-pinning here as a "safer" default in a future edit; it was tried, evaluated, and explicitly reversed for this specific image.
+- **[AG-KD-010]** **First-party consumers reference the shared `utilities` image via the mutable `:latest` tag, not a pinned digest — a deliberate maintainer override, not an oversight.** `services/proxy`, `dns`, `dhcp`, `dhcp-proxy`, `ntp`, `ui`, `watchdog`, and `tools/build-tools` must all use `FROM ghcr.io/wiki-mod/lancache-ng/utilities:latest`. This reverses the digest-pin approach issue #1556 originally introduced (`FROM ...utilities@sha256:<digest>`, one identical hardcoded digest copy-pasted across every consumer): that approach had no CI-side freshness or staleness check of any kind *(removed verification detail preserved verbatim → PR #1798: https://github.com/wiki-mod/lancache-ng/pull/1798#issuecomment-5527491779)* and required every consumer Dockerfile to be hand-edited in lockstep on the rare occasion a maintainer did bump it by hand. *(Removed commit-hash verification detail and rule-evolution history preserved verbatim → PR #1798: https://github.com/wiki-mod/lancache-ng/pull/1798#issuecomment-5527491779.)* `:latest` trades the digest pin's reproducibility guarantee for zero-maintenance currency: every consumer image always builds against whatever `utilities` build most recently published that tag, with no separate update step, no drift between consumers (a mutable tag can't itself fork into inconsistent copies the way hand-edited digest literals can), and no possibility of a consumer silently running stale, unpatched `utilities` tooling (`curl`, `ripgrep`, `jq`, `ca-certificates`, etc.) for months because nobody remembered to re-pin it. The accepted tradeoff: a `utilities` image regression is no longer scoped to the deliberate bump that introduces it — it reaches every consumer's next build immediately, so `services/utilities/Dockerfile` changes need the same build/smoke-test scrutiny before merge that any other first-party base-layer change gets. Do not silently reintroduce digest-pinning here as a "safer" default in a future edit; it was tried, evaluated, and explicitly reversed for this specific image.
 
 ## CDN Domains, First-time Setup, IPv6
 
