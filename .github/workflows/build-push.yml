@@ -4736,10 +4736,8 @@ jobs:
           channel="$(resolve_build_tools_channel "$REF_NAME")"
           echo "::notice::Resolved channel '$channel' for ref '$REF_NAME'."
 
-          # What: all 10 first-party services share the identical
-          # decide_one() call below, with no per-service branching.
-          # Why: one implementation of the three-part verification for
-          # every allowlisted service, instead of a drifting copy.
+          # What: decide_one is shared; two services skip one check.
+          # Why: build-tools/utilities skip the workflow gate below.
           # From: Issue #1095
           allowlist=(proxy dns ui watchdog dhcp dhcp-proxy ntp build-tools syslog utilities)
 
@@ -4750,12 +4748,13 @@ jobs:
             esac
           }
 
-          # decide_one <classify_key> <matrix_service> <before_sha_changed> [dep_keys]
+          # decide_one <classify_key> <matrix_service> <before_sha_changed> [dep_keys] [ignore_workflow_gate]
           # What: dep_keys are extra classify keys that must also show unchanged.
           # Why: push_reuse_decide needs them to check base-image dependencies.
           # From: Issue #1095 | PR #1532
           decide_one() {
             local classify_key="$1" matrix_service="$2" before_sha_changed="$3" dep_keys="${4:-}"
+            local ignore_workflow_gate="${5:-}"
             local output_key="${matrix_service//-/_}"
 
             # What: fast-path skip fires only on a proven 'true'.
@@ -4768,6 +4767,15 @@ jobs:
             fi
             if ! is_allowlisted "$matrix_service"; then
               echo "::notice::$matrix_service: not yet in the Step 4 allowlist; building normally." >&2
+              printf 'false\n'
+              return
+            fi
+
+            # What: a manual dispatch beats the workflow-gate exemption.
+            # Why: "build everything now" must also reach these two.
+            # From: Issue #1095
+            if [ "$ignore_workflow_gate" = "true" ] && [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+              echo "::notice::$matrix_service: workflow_dispatch requested; building for real instead of attempting reuse (the workflow-gate exemption applies only to push/pull_request)." >&2
               printf 'false\n'
               return
             fi
@@ -4792,7 +4800,7 @@ jobs:
 
             local pinned_ref="ghcr.io/${REPOSITORY}/${matrix_service}@${digest}"
             local reuse
-            reuse="$(push_reuse_decide "$classify_key" "$pinned_ref" "$COMMIT_SHA" "$dep_keys")"
+            reuse="$(push_reuse_decide "$classify_key" "$pinned_ref" "$COMMIT_SHA" "$dep_keys" "$ignore_workflow_gate")"
             if [ "$reuse" = "true" ]; then
               printf 'digest_%s=%s\n' "$output_key" "$digest" >> "$GITHUB_OUTPUT"
             fi
@@ -4810,9 +4818,12 @@ jobs:
             printf 'reuse_dhcp=%s\n' "$(decide_one dhcp dhcp "$DHCP_CHANGED" utilities)"
             printf 'reuse_dhcp_proxy=%s\n' "$(decide_one dhcp_proxy dhcp-proxy "$DHCP_PROXY_CHANGED" utilities)"
             printf 'reuse_ntp=%s\n' "$(decide_one ntp ntp "$NTP_CHANGED" utilities)"
-            printf 'reuse_build_tools=%s\n' "$(decide_one build_tools build-tools "$BUILD_TOOLS_CHANGED")"
             printf 'reuse_syslog=%s\n' "$(decide_one syslog syslog "$SYSLOG_CHANGED")"
-            printf 'reuse_utilities=%s\n' "$(decide_one utilities utilities "$UTILITIES_CHANGED")"
+            # What: these two alone ignore the workflow gate (last arg).
+            # Why: shared tooling/base image; own path fully gates them.
+            # From: Issue #1095
+            printf 'reuse_build_tools=%s\n' "$(decide_one build_tools build-tools "$BUILD_TOOLS_CHANGED" "" true)"
+            printf 'reuse_utilities=%s\n' "$(decide_one utilities utilities "$UTILITIES_CHANGED" "" true)"
           } >> "$GITHUB_OUTPUT"
 
   # What: computes build/build-arm64's shared should-build admission once,

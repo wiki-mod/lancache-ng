@@ -136,6 +136,10 @@ known_actions=(
     pr-tracking-metadata-fetch-and-validate
     pr-title-convention-check
     shellcheck-and-standing-guards
+    # What: pure registry-auth wrapper, no image-content effect.
+    # Why: it fails the job loudly, never produces a bad image.
+    # From: Issue #1095
+    docker-login-action-centralized-version
 )
 
 _cii_array_contains() {
