@@ -2077,6 +2077,27 @@ jobs:
             echo "::error::Rust service Dockerfiles must not use scheduler-only args or hardcoded CARGO_BUILD_JOBS values."
             exit 1
           fi
+          # What: PROJECT_CARGO_LTO/PROJECT_CARGO_CODEGENUNIT must reach every
+          # Cargo release build as a build-arg from the org variable, and
+          # must never be reintroduced as a hardcoded default anywhere.
+          # Why: djdomi (maintainer review 5109560874, PR #1796) rejected
+          # hardcoding lto/codegen-units in Cargo.toml; this mirrors the
+          # CARGO_BUILD_JOBS guard above for the same failure class.
+          # From: Issue #1095
+          for workflow in .github/workflows/build-push.yml .github/workflows/build-push-hosted-fallback.yml; do
+            grep -F 'PROJECT_CARGO_LTO=${{ vars.PROJECT_CARGO_LTO }}' "$workflow" >/dev/null \
+              || { echo "::error::$workflow must expose the PROJECT_CARGO_LTO repository variable as a build-arg to Cargo release builds."; exit 1; }
+            grep -F 'PROJECT_CARGO_CODEGENUNIT=${{ vars.PROJECT_CARGO_CODEGENUNIT }}' "$workflow" >/dev/null \
+              || { echo "::error::$workflow must expose the PROJECT_CARGO_CODEGENUNIT repository variable as a build-arg to Cargo release builds."; exit 1; }
+          done
+          if grep -RInE '^(ARG PROJECT_CARGO_LTO=.+|ARG PROJECT_CARGO_CODEGENUNIT=.+|ENV PROJECT_CARGO_LTO=|ENV PROJECT_CARGO_CODEGENUNIT=)' services/*/Dockerfile; then
+            echo "::error::Rust service Dockerfiles must not hardcode a PROJECT_CARGO_LTO/PROJECT_CARGO_CODEGENUNIT default; both must fail closed when unset, mirroring CARGO_BUILD_JOBS."
+            exit 1
+          fi
+          if grep -RInE '^[[:space:]]*(lto|codegen-units)[[:space:]]*=' Cargo.toml services/dns/nats-subscriber/Cargo.toml services/ui/Cargo.toml services/warmer/Cargo.toml services/watchdog/Cargo.toml tools/pxe-client-probe/Cargo.toml; then
+            echo "::error::[profile.release] lto/codegen-units must not be hardcoded in any workspace Cargo.toml; source them from CARGO_PROFILE_RELEASE_LTO/CARGO_PROFILE_RELEASE_CODEGEN_UNITS env overrides (PROJECT_CARGO_LTO/PROJECT_CARGO_CODEGENUNIT)."
+            exit 1
+          fi
           if grep -RInE 'cargo install sccache .*--locked|cargo install .*--locked .*sccache' services/*/Dockerfile tools/build-tools/Dockerfile scripts; then
             echo "::error::sccache source installs must stay version-pinned but not use --locked while the pinned upstream lockfile emits yanked-crate warnings."
             exit 1
@@ -5630,6 +5651,8 @@ jobs:
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
             UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
+            PROJECT_CARGO_LTO=${{ vars.PROJECT_CARGO_LTO }}
+            PROJECT_CARGO_CODEGENUNIT=${{ vars.PROJECT_CARGO_CODEGENUNIT }}
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
             http_proxy=${{ matrix.service == 'build-tools' && vars.PROJECT_SELFHOSTED_PROXY_HTTP || '' }}
             https_proxy=${{ matrix.service == 'build-tools' && vars.PROJECT_SELFHOSTED_PROXY_HTTPS || '' }}
@@ -6378,6 +6401,8 @@ jobs:
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
             UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
+            PROJECT_CARGO_LTO=${{ vars.PROJECT_CARGO_LTO }}
+            PROJECT_CARGO_CODEGENUNIT=${{ vars.PROJECT_CARGO_CODEGENUNIT }}
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
           push: ${{ github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) }}
           tags: ${{ steps.pr-tag.outputs.image || steps.meta.outputs.tags }}
