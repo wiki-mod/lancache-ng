@@ -301,17 +301,7 @@ services:
       options: {max-size: "5m", max-file: "2"}
 
   # ── Central logging: syslog + fluent-bit combined container ───────────────
-  # What: ONE container running both fluent-bit (collector/forwarder) and syslog-ng (central receiver), replacing the previous two separate services; see services/syslog/Dockerfile's own header for the real-vs-POC comparison.
-  # Why: a deliberate maintainer decision to accept crash-coupling and a single Docker HEALTHCHECK slot (mitigated by a real dual-process check below) in exchange for one image to build/scan/patch instead of two.
-  # From: Issue #1428 | PR #1431
-  #
-  # What: `logs-syslog-ng` below is a NAMED volume, unlike prod's bind-mounted SYSLOG_NG_LOG_DIR.
-  # Why: a fresh named volume inherits this Dockerfile's build-time chown to uid 10001, so quickstart never hits the root:root ownership problem prod's bind mount needs setup.sh/the data-loss detector to guard against.
-  # From: Issue #1428 | PR #1431
-  #
-  # What: this short-lived least-privilege initializer chowns the `logs` volume before the non-root syslog service opens it.
-  # Why: named volumes keep existing ownership across image upgrades, so the image-layer chown alone cannot migrate an already-populated volume.
-  # From: Issue #1428 | PR #1431
+
   syslog-logs-permissions:
     container_name: lancache-syslog-logs-permissions${LANCACHE_CONTAINER_SUFFIX:-}
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/syslog:${LANCACHE_IMAGE_TAG:-latest}
@@ -491,9 +481,7 @@ services:
       options: {max-size: "5m", max-file: "2"}
 
   # ── Watchdog (health monitoring, auto-restart, purge cron) ──────────────────
-  # What: docker-socket-proxy gives UI and watchdog scoped Docker API access via a custom HAProxy allowlist, isolated on docker-api.
-  # Why: replaces Tecnativa's broad CONTAINERS/POST toggles with a deny-by-default allowlist for named lancache-ng containers.
-  # From: PR #635
+
   docker-socket-proxy:
     container_name: lancache-docker-socket-proxy${LANCACHE_CONTAINER_SUFFIX:-}
     image: tecnativa/docker-socket-proxy@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
@@ -527,28 +515,15 @@ services:
   watchdog:
     container_name: lancache-watchdog${LANCACHE_CONTAINER_SUFFIX:-}
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}
-    # What: entrypoint tees the compiled watchdog binary's stdout into a file in addition to the container's normal stdout via process substitution (bash-only; `exec` still replaces this shell so the binary stays PID 1).
-    # Why: the binary's log()/log_err() only write stdout/stderr and are never themselves changed here; fluent-bit needs a file to tail, `docker logs` must keep working unchanged.
-    # From: Issue #633 | Issue #842 (ENTRYPOINT swap: bash watchdog.sh -> compiled lancache-watchdog binary)
-    #
-    # What: calls the compiled binary directly; no longer also launches retention.sh as a backgrounded process inside this container.
-    # Why: retention.sh now runs as its own `retention` service below -- see deploy/prod/docker-compose.yml's identical watchdog comment.
-    # From: Issue #842 | PR #1360
+
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
-        # What: prepares the shared watchdog log directory as gid 10001 + setgid.
-        # Why: watchdog.log is created by root via tee here, and upgraded
-        #   volumes may already contain older files that still need repairing.
-        # From: Issue #1427
+
         mkdir -p /var/log/lancache-watchdog
         chgrp 10001 /var/log/lancache-watchdog
         chmod 2775 /var/log/lancache-watchdog
         find /var/log/lancache-watchdog -maxdepth 1 -type f -exec chgrp 10001 {} + -exec chmod g+r {} +
-        # What: constrains the tee-created watchdog.log mode to 0640.
-        # Why: gid 10001 keeps the collector read path working, while world
-        #   read permission is no longer needed once the shared group exists.
-        # From: Issue #1427
         umask 0027
         exec /usr/local/bin/lancache-watchdog > >(tee -a /var/log/lancache-watchdog/watchdog.log) 2>&1
     environment:
@@ -558,26 +533,17 @@ services:
       - DISK_WARN_PCT=85
       - DISK_ALARM_PCT=95
       - CACHE_DIR=/var/cache/lancache
-      # What: CONTAINER_PROXY/CONTAINER_DNS_STANDARD/CONTAINER_DNS_SSL/CONTAINER_NATS/LANCACHE_CONTAINER_SUFFIX, passed to the watchdog binary's own fail-closed guard (config::resolve_container_names).
-      # Why: recomputes the container names it expects using the same suffix this project started its containers with; left unset, byte-identical to the binary's own literal default, a no-op for a real install.
-      # From: Issue #1415 | PR #1456
       - CONTAINER_PROXY=lancache-proxy${LANCACHE_CONTAINER_SUFFIX:-}
       - CONTAINER_DNS_STANDARD=lancache-dns-standard${LANCACHE_CONTAINER_SUFFIX:-}
       - CONTAINER_DNS_SSL=lancache-dns-ssl${LANCACHE_CONTAINER_SUFFIX:-}
       - CONTAINER_NATS=lancache-nats${LANCACHE_CONTAINER_SUFFIX:-}
       - LANCACHE_CONTAINER_SUFFIX=${LANCACHE_CONTAINER_SUFFIX:-}
       - SSL_ENABLED=${SSL_ENABLED:-0}
-      # What: passes LOGGING_ENABLED/SYSLOG_ENABLED/DHCP_MODE/NTP_ENABLED as runtime presence gates.
-      # Why: quickstart has no static watchdog.env interpolation layer for these per-install gates.
-      # From: PR #1489
       - DHCP_MODE=${DHCP_MODE:-disabled}
       - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
       - LOGGING_ENABLED=${LOGGING_ENABLED:-0}
       - NTP_ENABLED=${NTP_ENABLED:-0}
     volumes:
-      # What: read-only mount; the watchdog binary only reads this tree (status::disk_info() for the dashboard's disk-usage card).
-      # Why: the destructive purge that needed read-write access here moved to the `retention` service below -- see deploy/prod/docker-compose.yml.
-      # From: Issue #842 | PR #1360
       - ${CACHE_DIR:?CACHE_DIR is required}:/var/cache/lancache:ro
       - watchdog-status:/var/run/watchdog
       - watchdog-logs:/var/log/lancache-watchdog
@@ -609,9 +575,7 @@ services:
       options: {max-size: "5m", max-file: "2"}
 
   # ── Retention (file-retention daemon) ─────────────────────────────────────
-  # What: dedicated sidecar for services/watchdog/retention.sh, isolated from `watchdog` above by real container-level boundaries.
-  # Why: see deploy/prod/docker-compose.yml's identical `retention:` service for the full cap_drop/DAC_OVERRIDE/read_only/network_mode rationale -- the mechanism and evidence are identical across every profile.
-  # From: Issue #842 | PR #1360
+
   retention:
     container_name: lancache-retention${LANCACHE_CONTAINER_SUFFIX:-}
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}
@@ -634,9 +598,6 @@ services:
       - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
       - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:-10}
       - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:-30}
-      # What: SYSLOG_PRUNE_RETRY_COOLDOWN, explicitly listed.
-      # Why: Compose only passes explicitly listed host/.env variables into this container; an operator override must reach retention.sh instead of silently falling back to its 3600s default.
-      # From: Issue #842 | PR #1360
       - SYSLOG_PRUNE_RETRY_COOLDOWN=${SYSLOG_PRUNE_RETRY_COOLDOWN:-3600}
       - FLUENT_BIT_SELFLOG_MAX_MB=${FLUENT_BIT_SELFLOG_MAX_MB:-20}
       - FLUENT_BIT_SELFLOG_MAX_ROTATIONS=${FLUENT_BIT_SELFLOG_MAX_ROTATIONS:-5}
@@ -646,9 +607,7 @@ services:
       - syslog-data:/var/lib/lancache-syslog-data
       - watchdog-logs:/var/log/lancache-watchdog
       - retention-state:/var/lib/lancache-retention-state
-    # What: no healthcheck; `restart: always` recovers a crashed container, the same as this file's other unmonitored services.
-    # Why: this container's liveness was deliberately kept out of the health-check/restart state machine -- see deploy/prod's identical comment.
-    # From: Issue #842 | PR #1360
+
     restart: always
     logging:
       driver: json-file
@@ -685,9 +644,7 @@ services:
     cap_add:
       - NET_BIND_SERVICE
       - NET_ADMIN
-    # What: healthcheck resolves KEA_CTRL_TOKEN via the entrypoint's own placeholder-fallback logic, then sends Basic-Auth to curl via -K stdin (escaped), not -u; kept identical to deploy/prod/docker-compose.yml's dhcp healthcheck, covered by tests/bats/dhcp_healthcheck_placeholder_parity.bats.
-    # Why: this CMD-SHELL only sees the compose environment, not the entrypoint's generated token; -u exposed the secret in argv and allowed flag injection from a leading-dash token.
-    # From: Issue #858, Issue #1304 | PR #1550
+
     healthcheck:
       test:
         - CMD-SHELL
@@ -752,14 +709,9 @@ services:
     network_mode: host
     cap_add:
       - NET_BIND_SERVICE
-      # What: NET_ADMIN, needed by dnsmasq's ProxyDHCP/PXE reply path for a raw broadcast socket.
-      # Why: without it, dnsmasq passes its config self-test but fails to start ("process is missing required capability NET_ADMIN"); matches the dhcp (Kea) service's identical cap_add.
-      # From: Issue #450
       - NET_ADMIN
     healthcheck:
-      # What: liveness + config-integrity probe (PID 1 is `dnsmasq`, and `dnsmasq --test` re-parses the on-disk config without binding sockets), not a functional DHCP probe.
-      # Why: dnsmasq has no REST/control-socket API, DNS is disabled in this config, and a real DHCPDISCOVER every interval would inject genuine broadcast traffic onto the LAN.
-      # From: Issue #450
+
       test: ["CMD-SHELL", "[ \"$$(cat /proc/1/comm 2>/dev/null)\" = dnsmasq ] && dnsmasq --test -C /etc/dnsmasq.conf >/dev/null 2>&1"]
       interval: 30s
       timeout: 5s
@@ -771,8 +723,7 @@ services:
       options: {max-size: "5m", max-file: "2"}
 
   # ── LanCache-NG-NTP (chrony) ──────────────────────────────────────────────
-  # Disciplines its own clock against public NTP servers and serves LAN
-  # clients on UDP/123. Opt-in like dhcp/dhcp-proxy above.
+
   ntp:
     profiles: [ntp]
     container_name: lancache-ntp${LANCACHE_CONTAINER_SUFFIX:-}
@@ -812,9 +763,7 @@ services:
       # /var/lib/chrony before the privilege drop.
       - CHOWN
     healthcheck:
-      # What: `chronyc tracking` round-trip probe, not requiring a synced stratum; also echoes a DEGRADED marker (still exit 0) when entrypoint.sh recorded a CAP_SYS_TIME startup denial.
-      # Why: a live-but-unsynced daemon is not crashed and must not flap unhealthy; watchdog's docker_client.rs reads the DEGRADED marker from Docker's Health.Log for an amber dashboard state.
-      # From: Issue #1169, Issue #1296
+
       test: ["CMD-SHELL", "chronyc tracking | grep -q 'Reference ID' || exit 1; if [ -f /run/ntp-cap-sys-time-degraded ]; then printf 'DEGRADED: %s\n' \"$(cat /run/ntp-cap-sys-time-degraded)\"; fi"]
       interval: 30s
       timeout: 5s
@@ -826,12 +775,7 @@ services:
       options: {max-size: "5m", max-file: "2"}
 
   # ── CacheHamster (Steam cache-warming prefill scaffold) ─────────────────────
-  # What: opt-in, credential-gated Steam cache-warming prefill daemon.
-  # Why: scaffold only, same "not yet functional end-to-end"
-  #   status as deploy/prod's own cachehamster service -- see that
-  #   service's comment for the full rationale (one-shot, restart: "no",
-  #   no healthcheck).
-  # From: Issue #871
+
   cachehamster:
     profiles: [cachehamster]
     container_name: lancache-cachehamster${LANCACHE_CONTAINER_SUFFIX:-}
@@ -849,9 +793,7 @@ services:
       options: {max-size: "5m", max-file: "2"}
 
   # ── DHCP conflict probe ────────────────────────────────────────────────────
-  # What: predeclared start/stop/wait helper for the Admin UI's "check for other DHCP servers" feature; runs the UI image in `--dhcp-probe` mode (services/ui/src/dhcp_probe_native.rs), a native DHCPv4 client.
-  # Why: the Admin UI only ever starts/stops this container and reads its output, never creates or removes it, so docker-socket-proxy needs only the start/restart capability class, not generic container creation.
-  # From: Issue #1288 | PR #1336
+
   dhcp-probe:
     container_name: lancache-dhcp-probe${LANCACHE_CONTAINER_SUFFIX:-}
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}
@@ -860,10 +802,7 @@ services:
     restart: "no"
 
   # ── Admin UI ───────────────────────────────────────────────────────────────
-  # UI is LAN-reachable by default for the quickstart workflow. Password protection
-  # remains optional, but is recommended on shared or untrusted networks. Set
-  # UI_BIND_IP=127.0.0.1 to restrict access to the host. Direct Docker socket mount
-  # removed; Docker operations are proxied through the isolated docker-api network.
+
   ui:
     container_name: lancache-ui${LANCACHE_CONTAINER_SUFFIX:-}
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}
@@ -914,9 +853,6 @@ services:
       - SSL_LOG=/var/log/nginx/access.log
       - CACHE_DIR=/var/cache/proxy
       - NETDATA_URL=http://netdata:19999
-      # What: NETDATA_ALARM_TOKEN, passed through from the operator .env.
-      # Why: Netdata and the UI independently resolve the same shared token so forwarded alarms authenticate without hardcoding a credential.
-      # From: Issue #858
       - NETDATA_ALARM_TOKEN=${NETDATA_ALARM_TOKEN:-}
       - STANDARD_IP=${IP_STANDARD}
       - SSL_IP=${IP_SSL}
@@ -941,25 +877,16 @@ services:
       - NATS_DNS_REPLICA_PASSWORD=${NATS_DNS_REPLICA_PASSWORD:-}
       - NATS_CALLOUT_USER=${NATS_CALLOUT_USER:?NATS_CALLOUT_USER is required}
       - NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD:-}
-      # What: NATS_SYS_USER/PASSWORD, lets nats_kick.rs connect as the NATS system account to CONNZ/KICK a removed/rotated secondary.
-      # Why: MUST match the nats service's identical pair.
-      # From: Issue #681
       - NATS_SYS_USER=${NATS_SYS_USER:?NATS_SYS_USER is required}
       - NATS_SYS_PASSWORD=${NATS_SYS_PASSWORD:-}
       - SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN:-}
       - PDNS_AUTH_URL=http://dns-standard:8081
       - PDNS_REC_URL=http://dns-standard:8082
-      # What: DNS_ROLLBACK_URL, scoped to dns-standard only.
-      # Why: same single-primary convention PDNS_AUTH_URL/PDNS_REC_URL use; see dns_snapshots.rs's module doc comment for why dns-ssl isn't wired up.
-      # From: Issue #628
       - DNS_ROLLBACK_URL=http://dns-standard:8083
       - PDNS_API_KEY=${PDNS_API_KEY:-}
       - DHCP_API_URL=http://host.docker.internal:8000
       - DHCP_API_TOKEN=${DHCP_API_TOKEN:-${KEA_CTRL_TOKEN:-}}
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-3}
-      # What: same 4 SYSLOG_* vars/defaults as the watchdog retention engine.
-      # Why: the UI's "enabled" toggle and budget display must agree with what watchdog is enforcing.
-      # From: Issue #633 | PR #757
       - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
       - SYSLOG_LOG_ROOT=/var/log/lancache-syslog-ng
       - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:-10}
@@ -967,17 +894,12 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
-      # What: shallow liveness probe against main.rs's own /health route.
-      # Why: proves the HTTP server is accepting connections, not that NATS/Docker/DNS are reachable.
-      # From: services/ui/src/main.rs
       test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8080/health >/dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 20s
-    # What: `service_started` on docker-socket-proxy/proxy/netdata/nats, not `service_healthy`.
-    # Why: the dashboard and recovery surface must remain startable even if the Docker API proxy is unhealthy; Docker-backed actions surface their own degraded state instead.
-    # From: PR #1489
+
     depends_on:
       docker-socket-proxy:
         condition: service_started
@@ -990,9 +912,6 @@ services:
     networks:
       - default
       - docker-api
-      # What: netdata-net, in addition to the application and Docker API networks.
-      # Why: NETDATA_URL points at the isolated Netdata service.
-      # From: Issue #849 | PR #1462
       - netdata-net
     restart: always
     logging:
@@ -1010,9 +929,7 @@ services:
     pid: host
     cap_add: [SYS_PTRACE]
     security_opt: [apparmor:unconfined]
-    # What: entrypoint override writes a netdata.conf redirecting daemon/health logs to real files, then writes the web_log job and alarm notification override before execing the image's own entrypoint; collector/access/debug stay on stdout, uncollected.
-    # Why: this third-party image's own log paths are symlinks to /dev/stdout|stderr, nothing for fluent-bit to tail; quickstart has no services/ checkout to bind-mount a config from, unlike syslog.
-    # From: Issue #453
+
     entrypoint: ["/usr/bin/bash", "-c"]
     command:
       - |
