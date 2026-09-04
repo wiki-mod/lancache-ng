@@ -1016,38 +1016,9 @@ vulnerabilities:
       From: Issue #1095, PR #1743
     status: not_affected
 
-
-  - id: CVE-2026-32316
-    statement: >-
-      What: Accepts CVE-2026-32316 (jq HIGH) as a tracked interim risk
-      for the `jq` os-pkg in the `utilities` image. No `paths:` scoping
-      applies -- Trivy's Alpine os-pkgs finding class carries no PkgPath.
-
-      Why: Fixed upstream in jq 1.8.2-r0, but the reused `utilities`
-      image still carries 1.8.1-r0 -- an unchanged image is retagged, not
-      rebuilt, so the package fix never propagates. PR #1783 removes the
-      `utilities` image entirely (each service `apk add`s jq directly and
-      gets a fresh 1.8.2-r0 on every build), resolving this at the root.
-      Interim CI-unblock only.
-
-      Accepted with NO `expired_at` -- event-based, not calendar-based:
-      remove once PR #1783 lands and its rebuilds propagate.
-
-      From: Issue #1802, Issue #1803
-
-  - id: CVE-2026-40164
-    statement: >-
-      What: Accepts CVE-2026-40164 (jq HIGH) as a tracked interim risk
-      for the `jq` os-pkg in the `utilities` image. No `paths:` scoping
-      applies -- Trivy's Alpine os-pkgs finding class carries no PkgPath.
-
-      Why: Same jq disposition as CVE-2026-32316 above -- fixed in jq
-      1.8.2-r0, not yet propagated because the unchanged `utilities`
-      image is retagged, not rebuilt. PR #1783 removes the `utilities`
-      image entirely (services `apk add` jq directly, fresh 1.8.2-r0 per
-      build), resolving this at the root. Interim CI-unblock only.
-
-      Accepted with NO `expired_at` -- event-based: remove once PR #1783
-      lands and its rebuilds propagate.
-
-      From: Issue #1802, Issue #1803
+  # CVE-2026-32316/CVE-2026-40164 (jq, utilities image) removed here per
+  # their own accepting entries' explicit self-description ("remove once
+  # PR #1783 lands and its rebuilds propagate", Issue #1802/#1803,
+  # commit 6e3db411): PR #1783 has now removed services/utilities/Dockerfile
+  # entirely, so there is no more `utilities` image for these two interim,
+  # event-based (no expired_at) exceptions to apply to.

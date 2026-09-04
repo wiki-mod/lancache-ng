@@ -7,10 +7,6 @@
 # Intentional ARG default (overridable at build time via --build-arg).
 # Actual digest pinning for release builds is tracked in issue #508.
 ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
-# What: declared pre-FROM so utilities-tools' FROM can see it.
-# Why: same override contract as BUILD_TOOLS_IMAGE above.
-# From: Issue #1095
-ARG UTILITIES_IMAGE=ghcr.io/wiki-mod/lancache-ng/utilities:latest
 FROM ${BUILD_TOOLS_IMAGE} AS watchdog-builder
 
 # What: verifies the build-tools contract is present first.
@@ -104,11 +100,21 @@ COPY services/watchdog/src/ ./services/watchdog/src/
 # ending in "\" would swallow every following continuation line as
 # commented-out text instead of executable shell (verified empirically on
 # services/dns/Dockerfile's identical block).
+#
+# What: trusts proxy CA so cargo's crates.io fetch verifies.
+# Why: trap removes it before this stage's layer commits.
+# From: Issue #1781 | PR #1783
 RUN --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_dist_config \
     --mount=type=secret,id=distcc_potential_hosts \
     --mount=type=secret,id=ccache_redis_url \
+    --mount=type=secret,id=proxy_ca \
     set -eu; \
+    if [ -s /run/secrets/proxy_ca ]; then \
+      cp /run/secrets/proxy_ca /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; \
+      update-ca-certificates >/dev/null; \
+      trap 'rm -f /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; update-ca-certificates >/dev/null 2>&1 || true' EXIT; \
+    fi; \
     musl_target="$(cat /tmp/musl-target)"; \
     distcc_enabled=0; \
     ccache_enabled=0; \
@@ -336,14 +342,24 @@ RUN --mount=type=secret,id=sccache_redis_url \
     fi; \
     cp "target/${musl_target}/release/lancache-watchdog" /build/lancache-watchdog-out
 
-# What: source stage for tools copied into final image.
-# Why: uses the mutable :latest tag (see AG-KD-010).
-# From: Issue #1095
-FROM ${UTILITIES_IMAGE} AS utilities-tools
-
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 LABEL org.opencontainers.image.description="lancache-ng watchdog: compiled Rust health-check/restart daemon plus the separate file-retention sidecar entrypoint."
+
+# What: explicit proxy build-args, no default value set
+# Why: routes self-hosted downloads via the LAN proxy
+# From: Issue #1781 | PR #1783
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
+
+# What: shared version-banner script, not a per-service copy.
+# Why: named build context avoids duplicating it per service.
+# From: Issue #1781 | PR #1783
+COPY --from=shared-scripts verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
 
 # `apk upgrade --no-cache` (before the package install, same layer) upgrades
 # packages already baked into the alpine:3.24 base layer itself -- see
@@ -358,7 +374,15 @@ RUN sed -i 's|^https://|http://|' /etc/apk/repositories
 # Why: without this, BuildKit cache has no wall-clock expiry.
 # From: Issue #1095
 ARG APT_CACHE_BUST=""
-RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
+# What: trusts the proxy's CA for this RUN, never in a layer.
+# Why: a secret mount never persists; bundle restored below.
+# From: Issue #1781 | PR #1783
+RUN --mount=type=secret,id=proxy_ca \
+    if [ -s /run/secrets/proxy_ca ]; then \
+      cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig && \
+      cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+    fi && \
+    : "apt-cache-bust=${APT_CACHE_BUST}" && \
     apk upgrade --no-cache && \
     apk add --no-cache \
     bash \
@@ -366,37 +390,25 @@ RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
     coreutils \
     util-linux \
     nano \
-    zstd
-# What: bash/coreutils/util-linux/zstd/ca-certificates+nano.
-# Why: retention.sh/-entrypoint.sh need these; jq is unused.
-# From: Issue #1556
-#
-# What: curl/findutils/lsof/ripgrep from shared utilities.
-# Why: same digest as utilities; avoid duplicate installs.
-# From: Issue #1556
-#
-# What: removes BusyBox symlinks before real binaries land.
-# Why: COPY follows symlinks, would overwrite /bin/busybox.
-# From: Issue #1556
-RUN rm -f /usr/bin/find /usr/bin/xargs /usr/bin/lsof
+    zstd \
+    curl \
+    findutils \
+    lsof \
+    ripgrep && \
+    if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
-COPY --from=utilities-tools /usr/local/bin/curl /usr/local/bin/curl
-COPY --from=utilities-tools /usr/bin/find /usr/bin/find
-COPY --from=utilities-tools /usr/bin/xargs /usr/bin/xargs
-COPY --from=utilities-tools /usr/bin/lsof /usr/bin/lsof
-COPY --from=utilities-tools /usr/bin/rg /usr/bin/rg
-COPY --from=utilities-tools /usr/lib/libgcc_s.so.1 /usr/lib/libgcc_s.so.1
-COPY --from=utilities-tools /usr/lib/libpcre2-8.so.0* /usr/lib/
-COPY --from=utilities-tools /usr/local/bin/verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
-
-# What: verifies the copied binaries actually run.
-# Why: a missing shared lib fails at exec, not at COPY.
-# From: Issue #1556
+# What: verifies apk-installed binaries execute, not just exist.
+# Why: missing library dependencies fail at runtime, not apk add.
+# From: Issue #1613 | Issue #1781 | PR #1783
 RUN set -euo pipefail; \
     find . -maxdepth 0 -printf '%f\n' >/dev/null; \
     rg --version >/dev/null; \
     curl --version >/dev/null; \
     sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
+
+# What: bash/coreutils/util-linux/zstd/ca-certificates+nano.
+# Why: retention.sh/-entrypoint.sh need these; jq is unused.
+# From: Issue #1556
 
 # nano/lsof/ripgrep/curl: in-container troubleshooting tools -- see
 # services/proxy/Dockerfile's identical comment for the full rationale.
@@ -419,6 +431,18 @@ RUN addgroup -g 10001 lancache && \
     adduser -D -H -u 10001 -G lancache -s /sbin/nologin lancache && \
     mkdir -p /var/lib/lancache-retention-state && \
     chown lancache:lancache /var/lib/lancache-retention-state
+
+# What: fail build if CI proxy CA leaked into image
+# Why: CA must never persist in a published service image
+# From: Issue #1781 | PR #1783
+RUN if [ -e /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt ]; then \
+      echo "SECURITY: CI proxy CA persisted in final image" >&2; exit 1; \
+    fi
+
+# What: final apk upgrade pass, no packages added.
+# Why: patches CVEs fixed after this file's package installs.
+# From: Issue #1781 | PR #1783
+RUN apk upgrade --no-cache
 
 # What: default ENTRYPOINT is the compiled Rust binary now.
 # Why: maintainer decision authorized the ENTRYPOINT swap.

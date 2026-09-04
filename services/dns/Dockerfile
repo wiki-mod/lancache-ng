@@ -6,10 +6,6 @@
 # Intentional ARG default (overridable at build time via --build-arg).
 # Actual digest pinning for release builds is tracked in issue #508.
 ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
-# What: declared pre-FROM for use in later FROM lines.
-# Why: same override contract as BUILD_TOOLS_IMAGE (AG-KD-010).
-# From: Issue #1095
-ARG UTILITIES_IMAGE=ghcr.io/wiki-mod/lancache-ng/utilities:latest
 FROM ${BUILD_TOOLS_IMAGE} AS subscriber-builder
 
 # The shared build-tools image already carries the Rust toolchain, sccache,
@@ -154,11 +150,21 @@ COPY services/dns/nats-subscriber/src services/dns/nats-subscriber/src
 # strips the backslash-newline entirely (no newline is inserted), so a "#" comment ending
 # in "\" would swallow every following continuation line as commented-out text instead of
 # executable shell, silently dropping the rest of the build. Verified empirically.
+#
+# What: trusts proxy CA so cargo's crates.io fetch verifies.
+# Why: trap removes it before this stage's layer commits.
+# From: Issue #1781 | PR #1783
 RUN --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_dist_config \
     --mount=type=secret,id=distcc_potential_hosts \
     --mount=type=secret,id=ccache_redis_url \
+    --mount=type=secret,id=proxy_ca \
     set -eu; \
+    if [ -s /run/secrets/proxy_ca ]; then \
+      cp /run/secrets/proxy_ca /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; \
+      update-ca-certificates >/dev/null; \
+      trap 'rm -f /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; update-ca-certificates >/dev/null 2>&1 || true' EXIT; \
+    fi; \
     musl_target="$(cat /tmp/musl-target)"; \
     distcc_enabled=0; \
     ccache_enabled=0; \
@@ -389,14 +395,19 @@ RUN --mount=type=secret,id=sccache_redis_url \
     fi; \
     cp "target/${musl_target}/release/nats-subscriber" /build/nats-subscriber-out
 
-# What: source stage for tools copied into the final image below.
-# Why: uses mutable `:latest` tag; see AG-KD-010 for rationale.
-# From: Issue #1095
-FROM ${UTILITIES_IMAGE} AS utilities-tools
-
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 LABEL org.opencontainers.image.description="PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing."
+
+# What: explicit proxy build-args, no default value set
+# Why: routes self-hosted downloads via the LAN proxy
+# From: Issue #1781 | PR #1783
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
 
 # Alpine base (issue #815, services/dns Alpine migration -- the last of the
 # three original Part A services, done after dhcp/dhcp-proxy per #815's own
@@ -591,35 +602,10 @@ LABEL org.opencontainers.image.description="PowerDNS recursor, authoritative DNS
 # advisory affects a version still shipping in v3.24 stable at that time --
 # do not treat this resolution as a promise that `pdns`/`pdns-backend-sqlite3`
 # will never need pinning again.
-# What: curl/findutils/envsubst/lsof/ripgrep from utilities image.
-# Why: same alpine:3.24 digest as services/proxy/Dockerfile.
-# From: Issue #1556
-
-# What: removes BusyBox symlinks before real binaries land.
-# Why: see services/proxy/Dockerfile's identical comment.
-# From: Issue #1556
-RUN rm -f /usr/bin/find /usr/bin/xargs /usr/bin/lsof
-
-COPY --from=utilities-tools /usr/local/bin/curl /usr/local/bin/curl
-COPY --from=utilities-tools /usr/bin/find /usr/bin/find
-COPY --from=utilities-tools /usr/bin/xargs /usr/bin/xargs
-COPY --from=utilities-tools /usr/bin/envsubst /usr/bin/envsubst
-COPY --from=utilities-tools /usr/lib/libintl.so.8 /usr/lib/libintl.so.8
-COPY --from=utilities-tools /usr/bin/lsof /usr/bin/lsof
-COPY --from=utilities-tools /usr/bin/rg /usr/bin/rg
-COPY --from=utilities-tools /usr/lib/libgcc_s.so.1 /usr/lib/libgcc_s.so.1
-COPY --from=utilities-tools /usr/lib/libpcre2-8.so.0* /usr/lib/
-COPY --from=utilities-tools /usr/local/bin/verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
-
-# What: verifies copied binaries actually run, not just exist.
-# Why: missing shared-lib dep fails at exec time, not at COPY.
-# From: Issue #1613
-RUN set -euo pipefail; \
-    find . -maxdepth 0 -printf '%f\n' >/dev/null; \
-    printf '%s' '$FOO' | FOO=bar envsubst >/dev/null; \
-    rg --version >/dev/null; \
-    curl --version >/dev/null; \
-    sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
+# What: shared version-banner script, not a per-service copy.
+# Why: named build context avoids duplicating it per service.
+# From: Issue #1781 | PR #1783
+COPY --from=shared-scripts verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
 
 # What: switches apk's own repositories to plain http.
 # Why: Squid caches http; signed indices keep integrity.
@@ -630,7 +616,15 @@ RUN sed -i 's|^https://|http://|' /etc/apk/repositories
 # Why: BuildKit cache has no wall-clock expiry without this ARG.
 # From: Issue #1095
 ARG APT_CACHE_BUST=""
-RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
+# What: trusts the proxy's CA for this RUN, never in a layer.
+# Why: a secret mount never persists; bundle restored below.
+# From: Issue #1781 | PR #1783
+RUN --mount=type=secret,id=proxy_ca \
+    if [ -s /run/secrets/proxy_ca ]; then \
+      cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig && \
+      cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+    fi && \
+    : "apt-cache-bust=${APT_CACHE_BUST}" && \
     apk upgrade --no-cache && \
     apk add --no-cache \
     pdns \
@@ -642,11 +636,17 @@ RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
     grep \
     coreutils \
     bash \
-    nano
+    nano \
+    curl \
+    findutils \
+    gettext-envsubst \
+    lsof \
+    ripgrep && \
+    if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
 # nano: in-container troubleshooting tool -- see services/proxy/Dockerfile's
-# identical comment for the full rationale; lsof/ripgrep are COPY'd above
-# but serve the same troubleshooting purpose. curl: unlike Kea's Control
+# identical comment for the full rationale; lsof/ripgrep are apk-installed
+# above but serve the same troubleshooting purpose. curl: unlike Kea's Control
 # Agent (reachable from the host directly via network_mode: host),
 # nats-subscriber's zone-rollback listener (port 8083, see
 # rollback_listener.rs) is only `expose`d to the Compose network, never
@@ -655,6 +655,17 @@ RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
 # rather than calling it directly from the host. dhcp/proxy/ui/watchdog
 # already carry curl for comparable internal/operational HTTP calls; this
 # is the same justification, not a new pattern.
+
+# What: verifies apk-installed binaries execute, not just exist.
+# Why: missing library dependencies fail at runtime, not apk add.
+# From: Issue #1613 | Issue #1781 | PR #1783
+RUN set -euo pipefail; \
+    find . -maxdepth 0 -printf '%f\n' >/dev/null; \
+    printf '%s' '$FOO' | FOO=bar envsubst >/dev/null; \
+    rg --version >/dev/null; \
+    curl --version >/dev/null; \
+    sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
+
 ENV EDITOR=nano
 ENV VISUAL=$EDITOR
 
@@ -676,6 +687,18 @@ COPY services/dns/cdn-domains.txt /etc/pdns/cdn-domains.txt
 COPY services/dns/schema.sqlite3.sql /usr/share/lancache-ng/schema.sqlite3.sql
 COPY services/dns/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
+
+# What: fail build if CI proxy CA leaked into image
+# Why: CA must never persist in a published service image
+# From: Issue #1781 | PR #1783
+RUN if [ -e /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt ]; then \
+      echo "SECURITY: CI proxy CA persisted in final image" >&2; exit 1; \
+    fi
+
+# What: final apk upgrade pass, no packages added.
+# Why: patches CVEs fixed after this file's package installs.
+# From: Issue #1781 | PR #1783
+RUN apk upgrade --no-cache
 
 EXPOSE 53/udp 53/tcp 8081 8082 8083
 

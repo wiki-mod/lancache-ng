@@ -19,7 +19,10 @@
 # the one path where all three checks pass and reuse is declared safe. Also
 # covers the optional dep_keys parameter (issue #1095): a service whose own
 # key is unchanged must still fail closed if a declared base-image
-# dependency (e.g. utilities, build_tools) changed in the same span.
+# dependency (e.g. build_tools) changed in the same span. push_reuse_decide
+# itself is generic and never hardcodes a real service name; "utilities"
+# below is used purely as an illustrative example key, unrelated to the
+# now-removed shared utilities image (issue #1781).
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -367,16 +370,6 @@ setup_decide_one() {
     [ "$result" = "false" ]
 }
 
-@test "decide_one: workflow_dispatch forces a real build for utilities despite ignore_workflow_gate=true" {
-    setup_decide_one
-    push_reuse_decide() { printf 'true\n'; }
-    GITHUB_EVENT_NAME="workflow_dispatch"
-
-    result="$(decide_one utilities utilities "" "" "true" 2>/dev/null)"
-
-    [ "$result" = "false" ]
-}
-
 @test "decide_one: a push event still lets build-tools reuse via ignore_workflow_gate=true (dispatch override does not leak into push)" {
     setup_decide_one
     ghcr_retry() { printf '"sha256:deadbeef"\n'; }
@@ -401,14 +394,14 @@ setup_decide_one() {
     [ "$output" = "true" ]
 }
 
-@test "decide_one: a pull_request event still lets utilities reuse via ignore_workflow_gate=true" {
+@test "decide_one: a pull_request event still lets build-tools reuse via ignore_workflow_gate=true" {
     setup_decide_one
     ghcr_retry() { printf '"sha256:deadbeef"\n'; }
     push_reuse_decide() { printf 'true\n'; }
     # shellcheck disable=SC2034 # read by decide_one once sourced in setup_decide_one
     GITHUB_EVENT_NAME="pull_request"
 
-    run decide_one utilities utilities "" "" "true"
+    run decide_one build_tools build-tools "" "" "true"
 
     [ "$status" -eq 0 ]
     [ "$output" = "true" ]
