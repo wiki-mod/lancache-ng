@@ -13,10 +13,6 @@
 # Intentional ARG default (overridable at build time via --build-arg).
 # Actual digest pinning for release builds is tracked in issue #508.
 ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
-# What: ARG declared before first FROM, usable by later stages
-# Why: maintains override contract like BUILD_TOOLS_IMAGE above
-# From: Issue #1095
-ARG UTILITIES_IMAGE=ghcr.io/wiki-mod/lancache-ng/utilities:latest
 FROM ${BUILD_TOOLS_IMAGE} AS builder
 
 # The shared build-tools image already carries the Rust toolchain, sccache,
@@ -569,11 +565,6 @@ RUN --mount=type=secret,id=sccache_redis_url \
 # stage. Same pinned alpine:3.24 digest already used by services/dhcp,
 # services/dhcp-proxy, services/watchdog, services/ntp, and services/dns.
 
-# What: source stage for tools copied into final image
-# Why: uses mutable :latest tag for shared utilities image
-# From: Issue #1095
-FROM ${UTILITIES_IMAGE} AS utilities-tools
-
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 LABEL org.opencontainers.image.description="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
@@ -606,43 +597,14 @@ ARG no_proxy
 #     --init-groups`) -- confirmed live that Alpine's util-linux package ships
 #     setpriv with identical --init-groups behavior to Debian's.
 #   - ca-certificates, coreutils: unchanged package names, confirmed present
-#     on Alpine, kept apk-installed (excluded from the utilities migration --
-#     see services/proxy/Dockerfile's comment for ca-certificates' reason).
-# What: curl/lsof/ripgrep come from shared utilities image
-# Why: copied before any apk upgrade touches the same libs
-# From: Issue #1556 | Issue #1781
+#     on Alpine, kept apk-installed. curl/lsof/ripgrep are also apk-installed
+#     now (issue #1781 dropped the shared utilities image every service used
+#     to COPY them from).
 
-# What: removes BusyBox symlink before real binary lands
-# Why: see services/proxy/Dockerfile's identical comment for reason
-# From: Issue #1556
-RUN rm -f /usr/bin/lsof
-
-COPY --from=utilities-tools /usr/bin/curl /usr/bin/curl
-COPY --from=utilities-tools /usr/lib/libcurl.so.4 /usr/lib/libcurl.so.4
-COPY --from=utilities-tools /usr/lib/libz.so.1 /usr/lib/libz.so.1
-COPY --from=utilities-tools /usr/lib/libcares.so.2 /usr/lib/libcares.so.2
-COPY --from=utilities-tools /usr/lib/libnghttp2.so.14 /usr/lib/libnghttp2.so.14
-COPY --from=utilities-tools /usr/lib/libidn2.so.0 /usr/lib/libidn2.so.0
-COPY --from=utilities-tools /usr/lib/libpsl.so.5 /usr/lib/libpsl.so.5
-COPY --from=utilities-tools /usr/lib/libssl.so.3 /usr/lib/libssl.so.3
-COPY --from=utilities-tools /usr/lib/libcrypto.so.3 /usr/lib/libcrypto.so.3
-COPY --from=utilities-tools /usr/lib/libzstd.so.1 /usr/lib/libzstd.so.1
-COPY --from=utilities-tools /usr/lib/libbrotlidec.so.1 /usr/lib/libbrotlidec.so.1
-COPY --from=utilities-tools /usr/lib/libunistring.so.5 /usr/lib/libunistring.so.5
-COPY --from=utilities-tools /usr/lib/libbrotlicommon.so.1 /usr/lib/libbrotlicommon.so.1
-COPY --from=utilities-tools /usr/bin/lsof /usr/bin/lsof
-COPY --from=utilities-tools /usr/bin/rg /usr/bin/rg
-COPY --from=utilities-tools /usr/lib/libgcc_s.so.1 /usr/lib/libgcc_s.so.1
-COPY --from=utilities-tools /usr/lib/libpcre2-8.so.0* /usr/lib/
-COPY --from=utilities-tools /usr/local/bin/verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
-
-# What: verifies copied binaries run with dependencies present
-# Why: shared-library dependency failures happen at exec time only
-# From: Issue #1613
-RUN set -euo pipefail; \
-    rg --version >/dev/null; \
-    curl --version >/dev/null; \
-    sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
+# What: shared version-banner check script, not a service-local file.
+# Why: named build context avoids duplicating it into every service.
+# From: Issue #1781 | PR #1783
+COPY --from=shared-scripts verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
 
 # What: switches apk's own repositories to plain http.
 # Why: Squid caches http; signed indices keep integrity.
@@ -667,12 +629,24 @@ RUN --mount=type=secret,id=proxy_ca \
     ca-certificates \
     coreutils \
     util-linux \
-    nano && \
+    nano \
+    curl \
+    lsof \
+    ripgrep && \
     if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
 # nano: in-container troubleshooting tool -- see services/proxy/Dockerfile's
-# identical comment for the full rationale; lsof/ripgrep are COPY'd above
-# but serve the same troubleshooting purpose.
+# identical comment for the full rationale; lsof/ripgrep are apk-installed
+# above but serve the same troubleshooting purpose.
+
+# What: verifies apk-installed binaries execute, not just exist.
+# Why: missing library dependencies fail at runtime, not apk add.
+# From: Issue #1613 | Issue #1781 | PR #1783
+RUN set -euo pipefail; \
+    rg --version >/dev/null; \
+    curl --version >/dev/null; \
+    sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
+
 ENV EDITOR=nano
 ENV VISUAL=$EDITOR
 
@@ -699,6 +673,11 @@ RUN addgroup -g 10001 lancache \
 RUN if [ -e /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt ]; then \
       echo "SECURITY: CI proxy CA persisted in final image" >&2; exit 1; \
     fi
+
+# What: final apk upgrade pass, no packages added.
+# Why: patches any CVE fixed after this file's earlier package installs.
+# From: Issue #1781 | PR #1783
+RUN apk upgrade --no-cache
 
 EXPOSE 8080
 

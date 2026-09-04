@@ -19,7 +19,10 @@
 # the one path where all three checks pass and reuse is declared safe. Also
 # covers the optional dep_keys parameter (issue #1095): a service whose own
 # key is unchanged must still fail closed if a declared base-image
-# dependency (e.g. utilities, build_tools) changed in the same span.
+# dependency (e.g. build_tools) changed in the same span. push_reuse_decide
+# itself is generic and never hardcodes a real service name; "utilities"
+# below is used purely as an illustrative example key, unrelated to the
+# now-removed shared utilities image (issue #1781).
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"

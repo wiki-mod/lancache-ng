@@ -203,12 +203,13 @@ canonical_minus() {
 # comment explaining the intentional exclusion (see backfill-stack-latest.yml's
 # "Product stack latest backfill intentionally excludes build-tools" comment).
 declare -A SUBSET_SERVICES_FILES=(
-    # utilities (issue #1556) added alongside the pre-existing build-tools
-    # exclusion for the identical reason: this is a shared, non-runtime
-    # CI/tooling image (like build-tools), never part of the product stack
-    # `latest`-channel backfill loop rebuilds. See that workflow's own
-    # inline comment for the full rationale this mirrors.
-    ["backfill-stack-latest.yml"]=$'build-tools\nutilities'
+    # build-tools is a shared, non-runtime CI/tooling image, never part of
+    # the product stack `latest`-channel backfill loop rebuilds. See that
+    # workflow's own inline comment for the full rationale. utilities used
+    # to carry the identical exclusion (issue #1556) for the same reason,
+    # but issue #1781 removed the shared utilities image entirely -- there
+    # is no longer a canonical member to exclude.
+    ["backfill-stack-latest.yml"]="build-tools"
 )
 
 # Checks every `services=(...)` array in $1. Equal-to-canonical by default;
@@ -296,14 +297,15 @@ declare -A FULL_SETUP_EXACT_EXCLUSIONS=(
     # comment for why a key-EXISTENCE test, not a non-empty-VALUE test, is
     # what makes an empty exclusion set actually behave as "equals canonical
     # exactly" rather than silently degrading to the weaker check.
-    # utilities (issue #1556): not part of the full-setup/deploy product
-    # stack (AG-VAL-027 Scope-Boundaries exception -- it is a shared,
-    # non-runtime CI/tooling image other services may COPY --from= later,
-    # not a service full-setup-deep-validate itself starts/health-checks),
-    # so no deep-validation simulation needs a staging image for it. Mirrors
-    # the reasoning that already excludes build-tools from this same file's
-    # full_setup_services=(...) array (see that array's own comment).
-    ["ensure-pr-staging-images.sh"]="utilities"
+    # utilities (issue #1556) was added here after the above (AG-VAL-027
+    # Scope-Boundaries exception -- it was a shared, non-runtime CI/tooling
+    # image other services COPY --from=, not a service full-setup-deep-
+    # validate itself starts/health-checks) -- but issue #1781 removed the
+    # shared utilities image entirely, so there is no longer a canonical
+    # member to exclude, and this key is back to the empty-value state the
+    # comment immediately above already explains (kept PRESENT, not
+    # deleted, for the exact same exact-equality-branch-routing reason).
+    ["ensure-pr-staging-images.sh"]=""
 )
 
 # Checks every `full_setup_services=(...)` array in $1. For files listed in

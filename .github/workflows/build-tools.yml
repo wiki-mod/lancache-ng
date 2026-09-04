@@ -267,7 +267,6 @@ jobs:
             --build-arg "http_proxy=$HTTP_PROXY" \
             --build-arg "https_proxy=$HTTPS_PROXY" \
             --build-arg "no_proxy=$NO_PROXY" \
-            --build-arg "UTILITIES_IMAGE=$UTILITIES_IMAGE" \
             "${secret_args[@]}" \
             --cache-from "type=local,src=$BUILDX_CACHE_FROM_DIR" \
             --cache-to "type=local,dest=$BUILDX_CACHE_TO_DIR,mode=max" \
@@ -303,7 +302,6 @@ jobs:
             http_proxy=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
             https_proxy=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
             no_proxy=${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
-            UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
           # What: supplies the CA the Dockerfile's install-ca-cert.sh needs.
           # Why: no distcc/ccache secret is prepared on this branch.
           # From: Issue #1095

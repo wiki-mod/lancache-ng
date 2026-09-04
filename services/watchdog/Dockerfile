@@ -7,10 +7,6 @@
 # Intentional ARG default (overridable at build time via --build-arg).
 # Actual digest pinning for release builds is tracked in issue #508.
 ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
-# What: declared pre-FROM so utilities-tools' FROM can see it.
-# Why: same override contract as BUILD_TOOLS_IMAGE above.
-# From: Issue #1095
-ARG UTILITIES_IMAGE=ghcr.io/wiki-mod/lancache-ng/utilities:latest
 FROM ${BUILD_TOOLS_IMAGE} AS watchdog-builder
 
 # What: verifies the build-tools contract is present first.
@@ -309,11 +305,6 @@ RUN --mount=type=secret,id=sccache_redis_url \
     fi; \
     cp "target/${musl_target}/release/lancache-watchdog" /build/lancache-watchdog-out
 
-# What: source stage for tools copied into final image.
-# Why: uses the mutable :latest tag (see AG-KD-010).
-# From: Issue #1095
-FROM ${UTILITIES_IMAGE} AS utilities-tools
-
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 LABEL org.opencontainers.image.description="lancache-ng watchdog: compiled Rust health-check/restart daemon plus the separate file-retention sidecar entrypoint."
@@ -328,44 +319,10 @@ ARG http_proxy
 ARG https_proxy
 ARG no_proxy
 
-# What: curl/findutils/lsof/ripgrep from shared utilities.
-# Why: copied before any apk upgrade touches the same libs
-# From: Issue #1556 | Issue #1781
-#
-# What: removes BusyBox symlinks before real binaries land.
-# Why: COPY follows symlinks, would overwrite /bin/busybox.
-# From: Issue #1556
-RUN rm -f /usr/bin/find /usr/bin/xargs /usr/bin/lsof
-
-COPY --from=utilities-tools /usr/bin/curl /usr/bin/curl
-COPY --from=utilities-tools /usr/lib/libcurl.so.4 /usr/lib/libcurl.so.4
-COPY --from=utilities-tools /usr/lib/libz.so.1 /usr/lib/libz.so.1
-COPY --from=utilities-tools /usr/lib/libcares.so.2 /usr/lib/libcares.so.2
-COPY --from=utilities-tools /usr/lib/libnghttp2.so.14 /usr/lib/libnghttp2.so.14
-COPY --from=utilities-tools /usr/lib/libidn2.so.0 /usr/lib/libidn2.so.0
-COPY --from=utilities-tools /usr/lib/libpsl.so.5 /usr/lib/libpsl.so.5
-COPY --from=utilities-tools /usr/lib/libssl.so.3 /usr/lib/libssl.so.3
-COPY --from=utilities-tools /usr/lib/libcrypto.so.3 /usr/lib/libcrypto.so.3
-COPY --from=utilities-tools /usr/lib/libzstd.so.1 /usr/lib/libzstd.so.1
-COPY --from=utilities-tools /usr/lib/libbrotlidec.so.1 /usr/lib/libbrotlidec.so.1
-COPY --from=utilities-tools /usr/lib/libunistring.so.5 /usr/lib/libunistring.so.5
-COPY --from=utilities-tools /usr/lib/libbrotlicommon.so.1 /usr/lib/libbrotlicommon.so.1
-COPY --from=utilities-tools /usr/bin/find /usr/bin/find
-COPY --from=utilities-tools /usr/bin/xargs /usr/bin/xargs
-COPY --from=utilities-tools /usr/bin/lsof /usr/bin/lsof
-COPY --from=utilities-tools /usr/bin/rg /usr/bin/rg
-COPY --from=utilities-tools /usr/lib/libgcc_s.so.1 /usr/lib/libgcc_s.so.1
-COPY --from=utilities-tools /usr/lib/libpcre2-8.so.0* /usr/lib/
-COPY --from=utilities-tools /usr/local/bin/verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
-
-# What: verifies the copied binaries actually run.
-# Why: a missing shared lib fails at exec, not at COPY.
-# From: Issue #1556
-RUN set -euo pipefail; \
-    find . -maxdepth 0 -printf '%f\n' >/dev/null; \
-    rg --version >/dev/null; \
-    curl --version >/dev/null; \
-    sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
+# What: shared version-banner check script, not a service-local file.
+# Why: named build context avoids duplicating it into every service.
+# From: Issue #1781 | PR #1783
+COPY --from=shared-scripts verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
 
 # `apk upgrade --no-cache` (before the package install, same layer) upgrades
 # packages already baked into the alpine:3.24 base layer itself -- see
@@ -396,8 +353,22 @@ RUN --mount=type=secret,id=proxy_ca \
     coreutils \
     util-linux \
     nano \
-    zstd && \
+    zstd \
+    curl \
+    findutils \
+    lsof \
+    ripgrep && \
     if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
+
+# What: verifies apk-installed binaries execute, not just exist.
+# Why: missing library dependencies fail at runtime, not apk add.
+# From: Issue #1613 | Issue #1781 | PR #1783
+RUN set -euo pipefail; \
+    find . -maxdepth 0 -printf '%f\n' >/dev/null; \
+    rg --version >/dev/null; \
+    curl --version >/dev/null; \
+    sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
+
 # What: bash/coreutils/util-linux/zstd/ca-certificates+nano.
 # Why: retention.sh/-entrypoint.sh need these; jq is unused.
 # From: Issue #1556
@@ -430,6 +401,11 @@ RUN addgroup -g 10001 lancache && \
 RUN if [ -e /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt ]; then \
       echo "SECURITY: CI proxy CA persisted in final image" >&2; exit 1; \
     fi
+
+# What: final apk upgrade pass, no packages added.
+# Why: patches any CVE fixed after this file's earlier package installs.
+# From: Issue #1781 | PR #1783
+RUN apk upgrade --no-cache
 
 # What: default ENTRYPOINT is the compiled Rust binary now.
 # Why: maintainer decision authorized the ENTRYPOINT swap.

@@ -57,7 +57,7 @@ env:
   # What: one runtime service list for manifest, promotion, and release loops.
   # Why: check-workflow-service-lists.sh fails CI on any matrix drift.
   # From: PR #1523
-  CI_BUILD_SERVICES: "proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities"
+  CI_BUILD_SERVICES: "proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools"
   RELEASE_PLATFORMS: linux/amd64,linux/arm64
   RUST_ACCELERATION_NETWORK: bridge
 
@@ -86,7 +86,6 @@ jobs:
       dhcp_proxy: ${{ steps.filter.outputs.dhcp_proxy }}
       ntp: ${{ steps.filter.outputs.ntp }}
       syslog: ${{ steps.filter.outputs.syslog }}
-      utilities: ${{ steps.filter.outputs.utilities }}
       proxy: ${{ steps.filter.outputs.proxy }}
       build_tools: ${{ steps.filter.outputs.build_tools }}
       # What: true when a full-setup-validate-only action changed.
@@ -913,14 +912,9 @@ jobs:
     # Why: can fall back to a local build-tools Docker build if smoke fails.
     # From: PR #1218
     timeout-minutes: 30
-    # What: adds packages: write to this job's own permissions.
-    # Why: job perms replace, not merge, the workflow-level ones;
-    #   select-utilities-image.sh's fallback build now pushes here.
-    # From: Issue #1781 | PR #1783
     permissions:
       contents: read
       pull-requests: read
-      packages: write
     # What: job-level concurrency; cancel-in-progress pull_request-only.
     # Why: on push this must survive to completion; on a PR, cancel is free.
     # From: PR #926
@@ -934,8 +928,6 @@ jobs:
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     outputs:
       build_tools_image: ${{ steps.select-compose-validation-image.outputs.build_tools_image }}
-      utilities_image: ${{ steps.resolve-utilities-image.outputs.utilities_image }}
-      utilities_digest: ${{ steps.resolve-utilities-image.outputs.utilities_digest }}
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - uses: *checkout_centraliced_versioning # v7.0.1
@@ -979,30 +971,6 @@ jobs:
 
           printf 'BUILD_TOOLS_IMAGE=%s\n' "$validation_build_tools_image" >> "$GITHUB_ENV"
           printf 'build_tools_image=%s\n' "$downstream_build_tools_image" >> "$GITHUB_OUTPUT"
-
-      # What: resolves utilities image, smoke-tested with fallback
-      # Why: avoids a stale utilities digest; see script header
-      # From: Issue #1781 | PR #1783
-      - name: Resolve utilities image digest
-        id: resolve-utilities-image
-        env:
-          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
-          GHCR_RETRY_USERNAME: ${{ github.actor }}
-          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          utilities_image="$(bash scripts/untracked/select-utilities-image.sh)"
-
-          # What: every exit path now returns a digest-qualified ref.
-          # Why: fallback also pushes and resolves a digest now.
-          # From: Issue #1781 | PR #1783
-          case "$utilities_image" in
-            *@sha256:*) ;;
-            *) echo "::error::select-utilities-image.sh returned a non-digest-qualified reference: $utilities_image" >&2; exit 1 ;;
-          esac
-          printf 'utilities_image=%s\n' "$utilities_image" >> "$GITHUB_OUTPUT"
-          printf 'utilities_digest=%s\n' "${utilities_image#*@}" >> "$GITHUB_OUTPUT"
 
       # What: removes the buildx builder after its last use.
       # Why: nothing later in this job needs a builder instance.
@@ -4394,9 +4362,6 @@ jobs:
           - service: build-tools
             platform_tag: amd64
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
-          - service: utilities
-            platform_tag: amd64
-            runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
           - service: proxy
             platform_tag: arm64
             runner: '"ubuntu-24.04-arm"'
@@ -4424,9 +4389,6 @@ jobs:
           - service: build-tools
             platform_tag: arm64
             runner: '"ubuntu-24.04-arm"'
-          - service: utilities
-            platform_tag: arm64
-            runner: '"ubuntu-24.04-arm"'
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
         if: contains(matrix.runner, 'self-hosted')
@@ -4449,7 +4411,6 @@ jobs:
           REUSE_UI: ${{ needs['determine-push-reuse-scope'].outputs.reuse_ui }}
           REUSE_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.reuse_build_tools }}
           REUSE_SYSLOG: ${{ needs['determine-push-reuse-scope'].outputs.reuse_syslog }}
-          REUSE_UTILITIES: ${{ needs['determine-push-reuse-scope'].outputs.reuse_utilities }}
         run: |
           set -euo pipefail
 
@@ -4467,7 +4428,6 @@ jobs:
             ui) reuse="$REUSE_UI" ;;
             build-tools) reuse="$REUSE_BUILD_TOOLS" ;;
             syslog) reuse="$REUSE_SYSLOG" ;;
-            utilities) reuse="$REUSE_UTILITIES" ;;
             *) reuse="false" ;;
           esac
 
@@ -4524,7 +4484,6 @@ jobs:
           DIGEST_UI: ${{ needs['determine-push-reuse-scope'].outputs.digest_ui }}
           DIGEST_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.digest_build_tools }}
           DIGEST_SYSLOG: ${{ needs['determine-push-reuse-scope'].outputs.digest_syslog }}
-          DIGEST_UTILITIES: ${{ needs['determine-push-reuse-scope'].outputs.digest_utilities }}
         run: |
           set -euo pipefail
 
@@ -4545,7 +4504,6 @@ jobs:
             ui) digest="$DIGEST_UI" ;;
             build-tools) digest="$DIGEST_BUILD_TOOLS" ;;
             syslog) digest="$DIGEST_SYSLOG" ;;
-            utilities) digest="$DIGEST_UTILITIES" ;;
             *) digest="" ;;
           esac
 
@@ -4640,13 +4598,12 @@ jobs:
       reuse_dhcp_proxy: ${{ steps.decide.outputs.reuse_dhcp_proxy }}
       reuse_ntp: ${{ steps.decide.outputs.reuse_ntp }}
       reuse_build_tools: ${{ steps.decide.outputs.reuse_build_tools }}
-      # What: syslog/utilities reuse-decision outputs, alongside the
-      # other 8 allowlisted services.
+      # What: syslog's reuse-decision output, alongside the other
+      # 7 allowlisted services.
       # Why: same three-part verification as every other allowlisted
-      # service; no new logic, only these two additional outputs.
+      # service; no new logic, only this one additional output.
       # From: Issue #1095
       reuse_syslog: ${{ steps.decide.outputs.reuse_syslog }}
-      reuse_utilities: ${{ steps.decide.outputs.reuse_utilities }}
       # What: the pinned digest reuse=true services verified against.
       # Why: closes a digest TOCTOU race; see the linked issue.
       # From: Issue #1095 | PR #1532
@@ -4659,7 +4616,6 @@ jobs:
       digest_ntp: ${{ steps.decide.outputs.digest_ntp }}
       digest_build_tools: ${{ steps.decide.outputs.digest_build_tools }}
       digest_syslog: ${{ steps.decide.outputs.digest_syslog }}
-      digest_utilities: ${{ steps.decide.outputs.digest_utilities }}
     steps:
       # fetch-depth: 0 (not the default shallow depth-1 clone) so
       # sif_is_ancestor_or_equal below can prove real git ancestry between a
@@ -4702,7 +4658,6 @@ jobs:
           NTP_CHANGED: ${{ needs['detect-changes'].outputs.ntp }}
           BUILD_TOOLS_CHANGED: ${{ needs['detect-changes'].outputs.build_tools }}
           SYSLOG_CHANGED: ${{ needs['detect-changes'].outputs.syslog }}
-          UTILITIES_CHANGED: ${{ needs['detect-changes'].outputs.utilities }}
           # What: needed for push_reuse_decide's sif_image_revision call
           # and this step's own digest-pinning read below.
           # Why: sif_image_revision is now ghcr_retry-wrapped (see
@@ -4736,10 +4691,10 @@ jobs:
           channel="$(resolve_build_tools_channel "$REF_NAME")"
           echo "::notice::Resolved channel '$channel' for ref '$REF_NAME'."
 
-          # What: decide_one is shared; two services skip one check.
-          # Why: build-tools/utilities skip the workflow gate below.
+          # What: decide_one is shared; one service skips one check.
+          # Why: build-tools skips the workflow gate below.
           # From: Issue #1095
-          allowlist=(proxy dns ui watchdog dhcp dhcp-proxy ntp build-tools syslog utilities)
+          allowlist=(proxy dns ui watchdog dhcp dhcp-proxy ntp build-tools syslog)
 
           is_allowlisted() {
             case " ${allowlist[*]} " in
@@ -4807,23 +4762,22 @@ jobs:
             printf '%s\n' "$reuse"
           }
 
-          # What: 7 services depend on utilities; dns/ui/watchdog also on build-tools.
+          # What: dns/ui/watchdog also depend on build-tools.
           # Why: matches each Dockerfile's real FROM/COPY --from= dependency graph.
-          # From: Issue #1095
+          # From: Issue #1781 | PR #1783
           {
-            printf 'reuse_proxy=%s\n' "$(decide_one proxy proxy "$PROXY_CHANGED" utilities)"
-            printf 'reuse_dns=%s\n' "$(decide_one dns_image dns "$DNS_CHANGED" "utilities build_tools")"
-            printf 'reuse_ui=%s\n' "$(decide_one ui ui "$UI_CHANGED" "utilities build_tools")"
-            printf 'reuse_watchdog=%s\n' "$(decide_one watchdog watchdog "$WATCHDOG_CHANGED" "utilities build_tools")"
-            printf 'reuse_dhcp=%s\n' "$(decide_one dhcp dhcp "$DHCP_CHANGED" utilities)"
-            printf 'reuse_dhcp_proxy=%s\n' "$(decide_one dhcp_proxy dhcp-proxy "$DHCP_PROXY_CHANGED" utilities)"
-            printf 'reuse_ntp=%s\n' "$(decide_one ntp ntp "$NTP_CHANGED" utilities)"
+            printf 'reuse_proxy=%s\n' "$(decide_one proxy proxy "$PROXY_CHANGED")"
+            printf 'reuse_dns=%s\n' "$(decide_one dns_image dns "$DNS_CHANGED" build_tools)"
+            printf 'reuse_ui=%s\n' "$(decide_one ui ui "$UI_CHANGED" build_tools)"
+            printf 'reuse_watchdog=%s\n' "$(decide_one watchdog watchdog "$WATCHDOG_CHANGED" build_tools)"
+            printf 'reuse_dhcp=%s\n' "$(decide_one dhcp dhcp "$DHCP_CHANGED")"
+            printf 'reuse_dhcp_proxy=%s\n' "$(decide_one dhcp_proxy dhcp-proxy "$DHCP_PROXY_CHANGED")"
+            printf 'reuse_ntp=%s\n' "$(decide_one ntp ntp "$NTP_CHANGED")"
             printf 'reuse_syslog=%s\n' "$(decide_one syslog syslog "$SYSLOG_CHANGED")"
-            # What: these two alone ignore the workflow gate (last arg).
-            # Why: shared tooling/base image; own path fully gates them.
+            # What: this one alone ignores the workflow gate (last arg).
+            # Why: shared tooling image; its own path fully gates it.
             # From: Issue #1095
             printf 'reuse_build_tools=%s\n' "$(decide_one build_tools build-tools "$BUILD_TOOLS_CHANGED" "" true)"
-            printf 'reuse_utilities=%s\n' "$(decide_one utilities utilities "$UTILITIES_CHANGED" "" true)"
           } >> "$GITHUB_OUTPUT"
 
   # What: computes build/build-arm64's shared should-build admission once,
@@ -4968,8 +4922,6 @@ jobs:
     #   workflow-level block; issues:write is for the self-closing
     #   Trivy report added to this job.
     # From: Issue #1095
-      UTILITIES_IMAGE: ${{ needs['validate-compose'].outputs.utilities_image }}
-      UTILITIES_DIGEST: ${{ needs['validate-compose'].outputs.utilities_digest }}
     permissions:
       contents: read
       packages: write
@@ -4987,19 +4939,28 @@ jobs:
 
           - service: proxy
             context: services/proxy
-            # Proxy needs DNS domain data that lives outside its own build context.
-            build_contexts: dns-domains=services/dns
+            # Proxy needs DNS domain data plus the shared verify-version-banner.sh,
+            # both of which live outside its own build context.
+            build_contexts: |
+              dns-domains=services/dns
+              shared-scripts=scripts/lib
             description: &ci-description-proxy "nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic."
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: dns
             context: services/dns
-            build_contexts: ""
+            # What: shared verify-version-banner.sh lives outside this context.
+            # Why: issue #1781 dropped the utilities image that used to COPY it.
+            # From: Issue #1781 | PR #1783
+            build_contexts: shared-scripts=scripts/lib
             description: &ci-description-dns "PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing."
             rust: true
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
           - service: watchdog
             context: services/watchdog
-            build_contexts: ""
+            # What: shared verify-version-banner.sh lives outside this context.
+            # Why: issue #1781 dropped the utilities image that used to COPY it.
+            # From: Issue #1781 | PR #1783
+            build_contexts: shared-scripts=scripts/lib
             description: &ci-description-watchdog "lancache-ng watchdog helper for runtime health checks and recovery hooks."
             # Re-evaluation triggered (the Rust rewrite is now
             # wired into this Dockerfile's own builder stage): watchdog no
@@ -5012,16 +4973,25 @@ jobs:
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
           - service: dhcp
             context: services/dhcp
-            build_contexts: ""
+            # What: shared verify-version-banner.sh lives outside this context.
+            # Why: issue #1781 dropped the utilities image that used to COPY it.
+            # From: Issue #1781 | PR #1783
+            build_contexts: shared-scripts=scripts/lib
             description: &ci-description-dhcp "Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks."
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: dhcp-proxy
             context: services/dhcp-proxy
-            build_contexts: ""
+            # What: shared verify-version-banner.sh lives outside this context.
+            # Why: issue #1781 dropped the utilities image that used to COPY it.
+            # From: Issue #1781 | PR #1783
+            build_contexts: shared-scripts=scripts/lib
             description: &ci-description-dhcp-proxy "dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments."
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: ntp
             context: services/ntp
+            # What: no shared-scripts context -- ntp never used verify-version-banner.sh.
+            # Why: its only ex-utilities tools (curl, envsubst) have no banner check.
+            # From: Issue #1781 | PR #1783
             build_contexts: ""
             description: &ci-description-ntp "chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123."
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
@@ -5032,7 +5002,10 @@ jobs:
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: ui
             context: services/ui
-            build_contexts: ""
+            # What: shared verify-version-banner.sh lives outside this context.
+            # Why: issue #1781 dropped the utilities image that used to COPY it.
+            # From: Issue #1781 | PR #1783
+            build_contexts: shared-scripts=scripts/lib
             description: &ci-description-ui "lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
             rust: true
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
@@ -5041,14 +5014,6 @@ jobs:
             build_contexts: ""
             description: &ci-description-build-tools "Prebuilt lancache-ng CI and developer validation toolchain image."
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
-          - service: utilities
-            context: services/utilities
-            build_contexts: ""
-            description: "Shared lancache-ng utilities image (curl, nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd) for COPY --from= consumption by seven first-party images (issue #1556); curl itself moved from a self-compiled static binary to an apk-installed package (issue #1781), but is still COPY'd cross-image the same way as every other tool here."
-            # What: moved to light -- no compile step remains
-            # Why: matches proxy/dhcp/ntp's own light-tier reasoning
-            # From: Issue #1781
-            runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
 
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
@@ -5074,7 +5039,6 @@ jobs:
           REUSE_UI: ${{ needs['determine-push-reuse-scope'].outputs.reuse_ui }}
           REUSE_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.reuse_build_tools }}
           REUSE_SYSLOG: ${{ needs['determine-push-reuse-scope'].outputs.reuse_syslog }}
-          REUSE_UTILITIES: ${{ needs['determine-push-reuse-scope'].outputs.reuse_utilities }}
         run: |
           set -euo pipefail
 
@@ -5092,7 +5056,6 @@ jobs:
               ui) printf '%s' "$REUSE_UI" ;;
               build-tools) printf '%s' "$REUSE_BUILD_TOOLS" ;;
               syslog) printf '%s' "$REUSE_SYSLOG" ;;
-              utilities) printf '%s' "$REUSE_UTILITIES" ;;
               *) printf 'false' ;;
             esac
           }
@@ -5112,7 +5075,6 @@ jobs:
               dhcp-proxy) should_build="${{ needs['detect-changes'].outputs.dhcp_proxy }}" ;;
               ntp) should_build="${{ needs['detect-changes'].outputs.ntp }}" ;;
               syslog) should_build="${{ needs['detect-changes'].outputs.syslog }}" ;;
-              utilities) should_build="${{ needs['detect-changes'].outputs.utilities }}" ;;
               ui) should_build="${{ needs['detect-changes'].outputs.ui }}" ;;
               build-tools) should_build="${{ needs['detect-changes'].outputs.build_tools }}" ;;
               *)
@@ -5134,7 +5096,7 @@ jobs:
               fi
             fi
           elif [ "$REUSE_JOB_RESULT" = "success" ]; then
-            # What: determine-push-reuse-scope's check covers all 10 services.
+            # What: determine-push-reuse-scope's check covers all 9 services.
             # Why: full reasoning on the linked issue.
             # From: Issue #1095 | PR #1532
             reuse="$(reuse_for_service "$MATRIX_SERVICE")"
@@ -5252,7 +5214,6 @@ jobs:
           DIGEST_UI: ${{ needs['determine-push-reuse-scope'].outputs.digest_ui }}
           DIGEST_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.digest_build_tools }}
           DIGEST_SYSLOG: ${{ needs['determine-push-reuse-scope'].outputs.digest_syslog }}
-          DIGEST_UTILITIES: ${{ needs['determine-push-reuse-scope'].outputs.digest_utilities }}
         run: |
           set -euo pipefail
 
@@ -5281,7 +5242,6 @@ jobs:
             ui) pinned_digest="$DIGEST_UI" ;;
             build-tools) pinned_digest="$DIGEST_BUILD_TOOLS" ;;
             syslog) pinned_digest="$DIGEST_SYSLOG" ;;
-            utilities) pinned_digest="$DIGEST_UTILITIES" ;;
             *) pinned_digest="" ;;
           esac
           if [ -z "$pinned_digest" ]; then
@@ -5704,7 +5664,6 @@ jobs:
           # From: Issue #1781 | PR #1783
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
-            UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
             HTTP_PROXY=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
@@ -5722,7 +5681,6 @@ jobs:
             org.opencontainers.image.description=${{ matrix.description }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
-            ${{ contains(fromJSON('["proxy","dns","dhcp","dhcp-proxy","ntp","ui","watchdog"]'), matrix.service) && format('org.opencontainers.image.base.utilities.digest={0}', env.UTILITIES_DIGEST) || '' }}
           # What: no `annotations:` input on this single-platform push.
           # Why: no index exists here for `--annotation` to attach to.
           # From: Issue #1095 | PR #1619
@@ -6053,8 +6011,6 @@ jobs:
     #   workflow-level block; issues:write is for the self-closing
     #   Trivy report added to this job.
     # From: Issue #1095
-      UTILITIES_IMAGE: ${{ needs['validate-compose'].outputs.utilities_image }}
-      UTILITIES_DIGEST: ${{ needs['validate-compose'].outputs.utilities_digest }}
     permissions:
       contents: read
       packages: write
@@ -6091,7 +6047,6 @@ jobs:
           REUSE_UI: ${{ needs['determine-push-reuse-scope'].outputs.reuse_ui }}
           REUSE_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.reuse_build_tools }}
           REUSE_SYSLOG: ${{ needs['determine-push-reuse-scope'].outputs.reuse_syslog }}
-          REUSE_UTILITIES: ${{ needs['determine-push-reuse-scope'].outputs.reuse_utilities }}
         run: |
           set -euo pipefail
 
@@ -6109,7 +6064,6 @@ jobs:
               ui) printf '%s' "$REUSE_UI" ;;
               build-tools) printf '%s' "$REUSE_BUILD_TOOLS" ;;
               syslog) printf '%s' "$REUSE_SYSLOG" ;;
-              utilities) printf '%s' "$REUSE_UTILITIES" ;;
               *) printf 'false' ;;
             esac
           }
@@ -6129,7 +6083,6 @@ jobs:
               dhcp-proxy) should_build="${{ needs['detect-changes'].outputs.dhcp_proxy }}" ;;
               ntp) should_build="${{ needs['detect-changes'].outputs.ntp }}" ;;
               syslog) should_build="${{ needs['detect-changes'].outputs.syslog }}" ;;
-              utilities) should_build="${{ needs['detect-changes'].outputs.utilities }}" ;;
               ui) should_build="${{ needs['detect-changes'].outputs.ui }}" ;;
               build-tools) should_build="${{ needs['detect-changes'].outputs.build_tools }}" ;;
               *)
@@ -6266,7 +6219,6 @@ jobs:
           DIGEST_UI: ${{ needs['determine-push-reuse-scope'].outputs.digest_ui }}
           DIGEST_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.digest_build_tools }}
           DIGEST_SYSLOG: ${{ needs['determine-push-reuse-scope'].outputs.digest_syslog }}
-          DIGEST_UTILITIES: ${{ needs['determine-push-reuse-scope'].outputs.digest_utilities }}
         run: |
           set -euo pipefail
 
@@ -6295,7 +6247,6 @@ jobs:
             ui) pinned_digest="$DIGEST_UI" ;;
             build-tools) pinned_digest="$DIGEST_BUILD_TOOLS" ;;
             syslog) pinned_digest="$DIGEST_SYSLOG" ;;
-            utilities) pinned_digest="$DIGEST_UTILITIES" ;;
             *) pinned_digest="" ;;
           esac
           if [ -z "$pinned_digest" ]; then
@@ -6454,7 +6405,6 @@ jobs:
           # From: Issue #1095
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
-            UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
           push: ${{ github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) }}
@@ -6464,7 +6414,6 @@ jobs:
             org.opencontainers.image.description=${{ matrix.description }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
-            ${{ contains(fromJSON('["proxy","dns","dhcp","dhcp-proxy","ntp","ui","watchdog"]'), matrix.service) && format('org.opencontainers.image.base.utilities.digest={0}', env.UTILITIES_DIGEST) || '' }}
           # What: no `annotations:` input here, mirroring build's step.
           # Why: no index exists here for `--annotation` to attach to.
           # From: Issue #1095 | PR #1619
@@ -6733,7 +6682,6 @@ jobs:
       syslog_digest: ${{ steps.create-trusted-manifests.outputs.syslog_digest || steps.create-pr-staging-manifests.outputs.syslog_digest }}
       ui_digest: ${{ steps.create-trusted-manifests.outputs.ui_digest || steps.create-pr-staging-manifests.outputs.ui_digest }}
       build_tools_digest: ${{ steps.create-trusted-manifests.outputs.build_tools_digest || steps.create-pr-staging-manifests.outputs.build_tools_digest }}
-      utilities_digest: ${{ steps.create-trusted-manifests.outputs.utilities_digest || steps.create-pr-staging-manifests.outputs.utilities_digest }}
       stack_digest: ${{ steps.create-trusted-manifests.outputs.stack_digest }}
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
@@ -6821,7 +6769,6 @@ jobs:
             [ui]="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
             [build-tools]="Prebuilt lancache-ng CI and developer validation toolchain image."
             [syslog]="Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428)."
-            [utilities]="Shared lancache-ng utilities image (curl, nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd) for COPY --from= consumption by seven first-party images (issue #1556); curl itself moved from a self-compiled static binary to an apk-installed package (issue #1781), but is still COPY'd cross-image the same way as every other tool here."
           )
 
           # Duplicated rather than factored into a shared script/action: GitHub Actions
@@ -7416,7 +7363,6 @@ jobs:
           SYSLOG_DIGEST: ${{ needs['merge-manifests'].outputs.syslog_digest }}
           UI_DIGEST: ${{ needs['merge-manifests'].outputs.ui_digest }}
           BUILD_TOOLS_DIGEST: ${{ needs['merge-manifests'].outputs.build_tools_digest }}
-          UTILITIES_DIGEST: ${{ needs['merge-manifests'].outputs.utilities_digest }}
           STACK_DIGEST: ${{ needs['merge-manifests'].outputs.stack_digest }}
         run: |
           set -euo pipefail
@@ -7448,7 +7394,6 @@ jobs:
             [syslog]="$SYSLOG_DIGEST"
             [ui]="$UI_DIGEST"
             [build-tools]="$BUILD_TOOLS_DIGEST"
-            [utilities]="$UTILITIES_DIGEST"
           )
           declare -A previous_refs=()
           promoted_targets=()
@@ -7811,11 +7756,11 @@ jobs:
         shell: bash
         env:
           TAG_NAME: ${{ github.ref_name }}
-          # What: syslog/utilities are explicit in this SERVICES scalar.
+          # What: syslog is explicit in this SERVICES scalar.
           # Why: check-workflow-service-lists.sh's regex guard can only
           # see a space-separated scalar here, not a bash array.
-          # From: Issue #1428 | PR #1433 | Issue #1556 | PR #1574
-          SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities stack
+          # From: Issue #1428 | PR #1433
+          SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools stack
           REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
@@ -8174,7 +8119,7 @@ jobs:
         # (an unscanned channel-pointer image).
         # Why: a hand-kept copy risks drifting out of sync.
         # From: Issue #1095 | PR #1619
-        service: [proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, syslog, ui, build-tools, utilities]
+        service: [proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, syslog, ui, build-tools]
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - name: Checkout
@@ -8226,24 +8171,6 @@ jobs:
           fi
           echo "image-ref=ghcr.io/${REPOSITORY}/${SERVICE}@${digest}" >> "$GITHUB_OUTPUT"
 
-          # What: reads utilities' digest from the released image's own
-          #   build-time label via the digest-qualified ref resolved above.
-          # Why: utilities:latest can move between builds; the label+digest
-          #   keep this bound to what the scan above actually covers (AG-VAL-026).
-          # From: Issue #1613 | Issue #1095
-          case "$SERVICE" in
-            proxy|dhcp|dhcp-proxy|dns|ntp|ui|watchdog)
-              released_image="ghcr.io/${REPOSITORY}/${SERVICE}@${digest}"
-              ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker pull "$released_image" >/dev/null
-              utilities_digest="$(docker image inspect "$released_image" --format '{{ index .Config.Labels "org.opencontainers.image.base.utilities.digest" }}')"
-              if [[ ! "$utilities_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-                echo "::error::$released_image is missing its build-time utilities base-digest label (org.opencontainers.image.base.utilities.digest)." >&2
-                exit 1
-              fi
-              echo "utilities-image-ref=ghcr.io/${REPOSITORY}/utilities@${utilities_digest}" >> "$GITHUB_OUTPUT"
-              ;;
-          esac
-
       # "Resolve released image digest" above is the only step in this job
       # that uses the builder set up above -- the Trivy scan and release
       # upload steps below don't touch buildx.
@@ -8275,40 +8202,6 @@ jobs:
           hide-progress: true
           cache: "false"
           timeout: 10m
-
-      - name: Generate utilities image SBOM for component merge
-        # Consumer-only: scans the same released utilities digest resolved
-        # above so its components can be merged below.
-        if: contains(fromJSON('["proxy", "dhcp", "dhcp-proxy", "dns", "ntp", "ui", "watchdog"]'), matrix.service)
-        timeout-minutes: 50
-        uses: ./.github/actions/trivy-scan-retry
-        with:
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-          scan-type: image
-          image-ref: ${{ steps.digest.outputs.utilities-image-ref }}
-          format: cyclonedx
-          output: utilities-for-merge.cdx.json
-          hide-progress: true
-          cache: "false"
-          timeout: 10m
-
-      - name: Merge utilities components into this service's SBOM
-        # What: merges only the utilities apk packages this service COPY's.
-        # Why: those packages aren't apk-installed here so this image's own
-        # scan can't see them; merging the FULL utilities SBOM over-reports.
-        # From: Issue #1613 | Issue #1095
-        if: contains(fromJSON('["proxy", "dhcp", "dhcp-proxy", "dns", "ntp", "ui", "watchdog"]'), matrix.service)
-        env:
-          SERVICE: ${{ matrix.service }}
-        run: |
-          set -euo pipefail
-          asset="${SERVICE}.cdx.json"
-          bash scripts/untracked/merge-utilities-sbom-components.sh \
-            "$SERVICE" "$asset" utilities-for-merge.cdx.json > "${asset}.merged"
-          mv "${asset}.merged" "$asset"
 
       - name: Attach SBOM to the release
         # Idempotent same-named-asset replace, curl/jq in the tag-scoped

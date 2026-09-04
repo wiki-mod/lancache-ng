@@ -287,7 +287,6 @@ CI_SERVICES=(
     syslog
     ui
     build-tools
-    utilities
 )
 ```
 
@@ -340,8 +339,8 @@ dns:
     runner = heavy
     rust = true
 
-utilities:
-    context = services/utilities
+build-tools:
+    context = tools/build-tools
     platforms = amd64,arm64
     runner = heavy
     c-compile = true
@@ -1604,10 +1603,9 @@ ntp         ACCEPTED
 syslog      ACCEPTED
 ui          ACCEPTED
 build-tools ACCEPTED
-utilities   ACCEPTED
 ```
 
-Result: watchdog's candidate failed; the other nine results stay valid,
+Result: watchdog's candidate failed; the other eight results stay valid,
 stay ACCEPTED, and may be reused on the next run.
 
 ## 47. Stack assembly
@@ -1624,7 +1622,6 @@ ntp digest
 syslog digest
 ui digest
 build-tools digest
-utilities digest
         |
         v
 STACK CANDIDATE

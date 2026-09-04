@@ -19,12 +19,6 @@
 # Alpine version, not the base `gettext` package (verified: `apk info
 # gettext-envsubst` on alpine:3.24).
 
-# What: source stage for tools copied into the final image below.
-# Why: uses the mutable `:latest` tag -- see proxy/Dockerfile
-# From: Issue #1095
-ARG UTILITIES_IMAGE=ghcr.io/wiki-mod/lancache-ng/utilities:latest
-FROM ${UTILITIES_IMAGE} AS utilities-tools
-
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 LABEL org.opencontainers.image.description="dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments."
@@ -82,33 +76,10 @@ LABEL org.opencontainers.image.description="dnsmasq-based DHCP proxy and relay h
 #    "no snapshot validates, restore the original live file" backup path)
 #    was run end-to-end against a real `dnsmasq --test` validator and
 #    behaved identically to the pre-migration Debian image.
-# What: shared utilities image provides find/xargs/envsubst/lsof/rg
-# Why: alpine:3.24 digest matches utilities; coreutils excluded
-# From: Issue #1556
-
-# What: remove BusyBox symlinks before copying real binaries
-# Why: prevents loader from using wrong binary version
-# From: Issue #1556
-RUN rm -f /usr/bin/find /usr/bin/xargs /usr/bin/lsof
-
-COPY --from=utilities-tools /usr/bin/find /usr/bin/find
-COPY --from=utilities-tools /usr/bin/xargs /usr/bin/xargs
-COPY --from=utilities-tools /usr/bin/envsubst /usr/bin/envsubst
-COPY --from=utilities-tools /usr/lib/libintl.so.8 /usr/lib/libintl.so.8
-COPY --from=utilities-tools /usr/bin/lsof /usr/bin/lsof
-COPY --from=utilities-tools /usr/bin/rg /usr/bin/rg
-COPY --from=utilities-tools /usr/lib/libgcc_s.so.1 /usr/lib/libgcc_s.so.1
-COPY --from=utilities-tools /usr/lib/libpcre2-8.so.0* /usr/lib/
-COPY --from=utilities-tools /usr/local/bin/verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
-
-# What: verify copied binaries can run, not just exist
-# Why: missing shared libraries fail at exec time, not COPY
-# From: Issue #1613
-RUN set -euo pipefail; \
-    find . -maxdepth 0 -printf '%f\n' >/dev/null; \
-    printf '%s' '$FOO' | FOO=bar envsubst >/dev/null; \
-    rg --version >/dev/null; \
-    sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
+# What: shared version-banner check script, not a service-local file.
+# Why: named build context avoids duplicating it into every service.
+# From: Issue #1781 | PR #1783
+COPY --from=shared-scripts verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
 
 # What: switches apk's own repositories to plain http.
 # Why: Squid caches http; signed indices keep integrity.
@@ -125,11 +96,25 @@ RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
     bash \
     dnsmasq \
     coreutils \
-    nano
+    nano \
+    findutils \
+    gettext-envsubst \
+    lsof \
+    ripgrep
 
 # nano: in-container troubleshooting tool -- see services/proxy/Dockerfile's
-# identical comment for the full rationale; lsof/ripgrep are COPY'd above
-# but serve the same troubleshooting purpose.
+# identical comment for the full rationale; lsof/ripgrep are apk-installed
+# above but serve the same troubleshooting purpose.
+
+# What: verifies apk-installed binaries execute, not just exist.
+# Why: missing library dependencies fail at runtime, not apk add.
+# From: Issue #1613 | Issue #1781 | PR #1783
+RUN set -euo pipefail; \
+    find . -maxdepth 0 -printf '%f\n' >/dev/null; \
+    printf '%s' '$FOO' | FOO=bar envsubst >/dev/null; \
+    rg --version >/dev/null; \
+    sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
+
 ENV EDITOR=nano
 ENV VISUAL=$EDITOR
 
@@ -137,6 +122,11 @@ COPY dnsmasq.conf.template /etc/dnsmasq.conf.template
 COPY dnsmasq-relay.conf.template /etc/dnsmasq-relay.conf.template
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
+
+# What: final apk upgrade pass, no packages added.
+# Why: patches any CVE fixed after this file's earlier package installs.
+# From: Issue #1781 | PR #1783
+RUN apk upgrade --no-cache
 
 EXPOSE 67/udp
 

@@ -6,10 +6,6 @@
 # Intentional ARG default (overridable at build time via --build-arg).
 # Actual digest pinning for release builds is tracked in issue #508.
 ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
-# What: declared pre-FROM for use in later FROM lines.
-# Why: same override contract as BUILD_TOOLS_IMAGE (AG-KD-010).
-# From: Issue #1095
-ARG UTILITIES_IMAGE=ghcr.io/wiki-mod/lancache-ng/utilities:latest
 FROM ${BUILD_TOOLS_IMAGE} AS subscriber-builder
 
 # The shared build-tools image already carries the Rust toolchain, sccache,
@@ -360,11 +356,6 @@ RUN --mount=type=secret,id=sccache_redis_url \
     fi; \
     cp "target/${musl_target}/release/nats-subscriber" /build/nats-subscriber-out
 
-# What: source stage for tools copied into the final image below.
-# Why: uses mutable `:latest` tag; see AG-KD-010 for rationale.
-# From: Issue #1095
-FROM ${UTILITIES_IMAGE} AS utilities-tools
-
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 LABEL org.opencontainers.image.description="PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing."
@@ -572,47 +563,10 @@ ARG no_proxy
 # advisory affects a version still shipping in v3.24 stable at that time --
 # do not treat this resolution as a promise that `pdns`/`pdns-backend-sqlite3`
 # will never need pinning again.
-# What: findutils/envsubst/lsof/ripgrep from utilities image
-# Why: same alpine:3.24 digest as services/proxy/Dockerfile
-# From: Issue #1556
-
-# What: removes BusyBox symlinks before real binaries land.
-# Why: see services/proxy/Dockerfile's identical comment.
-# From: Issue #1556
-RUN rm -f /usr/bin/find /usr/bin/xargs /usr/bin/lsof
-
-COPY --from=utilities-tools /usr/bin/curl /usr/bin/curl
-COPY --from=utilities-tools /usr/lib/libcurl.so.4 /usr/lib/libcurl.so.4
-COPY --from=utilities-tools /usr/lib/libz.so.1 /usr/lib/libz.so.1
-COPY --from=utilities-tools /usr/lib/libcares.so.2 /usr/lib/libcares.so.2
-COPY --from=utilities-tools /usr/lib/libnghttp2.so.14 /usr/lib/libnghttp2.so.14
-COPY --from=utilities-tools /usr/lib/libidn2.so.0 /usr/lib/libidn2.so.0
-COPY --from=utilities-tools /usr/lib/libpsl.so.5 /usr/lib/libpsl.so.5
-COPY --from=utilities-tools /usr/lib/libssl.so.3 /usr/lib/libssl.so.3
-COPY --from=utilities-tools /usr/lib/libcrypto.so.3 /usr/lib/libcrypto.so.3
-COPY --from=utilities-tools /usr/lib/libzstd.so.1 /usr/lib/libzstd.so.1
-COPY --from=utilities-tools /usr/lib/libbrotlidec.so.1 /usr/lib/libbrotlidec.so.1
-COPY --from=utilities-tools /usr/lib/libunistring.so.5 /usr/lib/libunistring.so.5
-COPY --from=utilities-tools /usr/lib/libbrotlicommon.so.1 /usr/lib/libbrotlicommon.so.1
-COPY --from=utilities-tools /usr/bin/find /usr/bin/find
-COPY --from=utilities-tools /usr/bin/xargs /usr/bin/xargs
-COPY --from=utilities-tools /usr/bin/envsubst /usr/bin/envsubst
-COPY --from=utilities-tools /usr/lib/libintl.so.8 /usr/lib/libintl.so.8
-COPY --from=utilities-tools /usr/bin/lsof /usr/bin/lsof
-COPY --from=utilities-tools /usr/bin/rg /usr/bin/rg
-COPY --from=utilities-tools /usr/lib/libgcc_s.so.1 /usr/lib/libgcc_s.so.1
-COPY --from=utilities-tools /usr/lib/libpcre2-8.so.0* /usr/lib/
-COPY --from=utilities-tools /usr/local/bin/verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
-
-# What: verifies copied binaries actually run, not just exist.
-# Why: missing shared-lib dep fails at exec time, not at COPY.
-# From: Issue #1613
-RUN set -euo pipefail; \
-    find . -maxdepth 0 -printf '%f\n' >/dev/null; \
-    printf '%s' '$FOO' | FOO=bar envsubst >/dev/null; \
-    rg --version >/dev/null; \
-    curl --version >/dev/null; \
-    sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
+# What: shared version-banner check script, not a service-local file.
+# Why: named build context avoids duplicating it into every service.
+# From: Issue #1781 | PR #1783
+COPY --from=shared-scripts verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
 
 # What: switches apk's own repositories to plain http.
 # Why: Squid caches http; signed indices keep integrity.
@@ -643,12 +597,17 @@ RUN --mount=type=secret,id=proxy_ca \
     grep \
     coreutils \
     bash \
-    nano && \
+    nano \
+    curl \
+    findutils \
+    gettext-envsubst \
+    lsof \
+    ripgrep && \
     if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
 # nano: in-container troubleshooting tool -- see services/proxy/Dockerfile's
-# identical comment for the full rationale; lsof/ripgrep are COPY'd above
-# but serve the same troubleshooting purpose. curl: unlike Kea's Control
+# identical comment for the full rationale; lsof/ripgrep are apk-installed
+# above but serve the same troubleshooting purpose. curl: unlike Kea's Control
 # Agent (reachable from the host directly via network_mode: host),
 # nats-subscriber's zone-rollback listener (port 8083, see
 # rollback_listener.rs) is only `expose`d to the Compose network, never
@@ -657,6 +616,17 @@ RUN --mount=type=secret,id=proxy_ca \
 # rather than calling it directly from the host. dhcp/proxy/ui/watchdog
 # already carry curl for comparable internal/operational HTTP calls; this
 # is the same justification, not a new pattern.
+
+# What: verifies apk-installed binaries execute, not just exist.
+# Why: missing library dependencies fail at runtime, not apk add.
+# From: Issue #1613 | Issue #1781 | PR #1783
+RUN set -euo pipefail; \
+    find . -maxdepth 0 -printf '%f\n' >/dev/null; \
+    printf '%s' '$FOO' | FOO=bar envsubst >/dev/null; \
+    rg --version >/dev/null; \
+    curl --version >/dev/null; \
+    sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
+
 ENV EDITOR=nano
 ENV VISUAL=$EDITOR
 
@@ -685,6 +655,11 @@ RUN chmod +x /entrypoint.sh
 RUN if [ -e /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt ]; then \
       echo "SECURITY: CI proxy CA persisted in final image" >&2; exit 1; \
     fi
+
+# What: final apk upgrade pass, no packages added.
+# Why: patches any CVE fixed after this file's earlier package installs.
+# From: Issue #1781 | PR #1783
+RUN apk upgrade --no-cache
 
 EXPOSE 53/udp 53/tcp 8081 8082 8083
 

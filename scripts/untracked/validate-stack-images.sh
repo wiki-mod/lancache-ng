@@ -129,9 +129,6 @@ done
 require_name "$tooling_names" build-tools tooling
 require_manifest_platform build-tools linux/amd64
 require_manifest_platform build-tools linux/arm64
-require_name "$tooling_names" utilities tooling
-require_manifest_platform utilities linux/amd64
-require_manifest_platform utilities linux/arm64
 require_name "$metadata_names" stack metadata
 require_manifest_platform stack linux/amd64
 require_manifest_platform stack linux/arm64
@@ -151,8 +148,7 @@ for dockerfile in \
   services/ntp/Dockerfile \
   services/ui/Dockerfile \
   services/syslog/Dockerfile \
-  tools/build-tools/Dockerfile \
-  services/utilities/Dockerfile
+  tools/build-tools/Dockerfile
 do
   require_file "$dockerfile"
 done
@@ -250,10 +246,12 @@ require_grep 'annotation "index:org\.opencontainers\.image\.description=' \
 # carrying its own hand-duplicated services=(...) literal -- this check was
 # updated in lockstep with that consolidation so it keeps verifying a real,
 # still-present pattern instead of a literal array shape build-push.yml no
-# longer contains. #1428 (syslog) and #1556 (utilities) both joined the
-# first-party service set after this consolidation landed; both are covered
-# here because CI_BUILD_SERVICES already carries them.
-require_grep 'CI_BUILD_SERVICES: "proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities"' \
+# longer contains. #1428 (syslog) joined the first-party service set after
+# this consolidation landed and is covered here because CI_BUILD_SERVICES
+# already carries it; #1556 (utilities) also joined it and was later removed
+# again by #1781, which dropped the shared utilities image entirely in favor
+# of each consumer apk-installing its own copy of what it used to COPY.
+require_grep 'CI_BUILD_SERVICES: "proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools"' \
   .github/workflows/build-push.yml \
   'promotion and release jobs must share the full first-party service set'
 # release-sbom's own `service: [...]` flow-sequence matrix is a fourth,
@@ -266,7 +264,7 @@ require_grep 'CI_BUILD_SERVICES: "proxy dns watchdog dhcp dhcp-proxy ntp syslog 
 # CycloneDX SBOM) is exactly the drift shape this narrower literal check
 # exists to catch mechanically instead of relying on manual review to
 # notice a fifth recurrence.
-require_grep 'service: \[proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, syslog, ui, build-tools, utilities\]' \
+require_grep 'service: \[proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, syslog, ui, build-tools\]' \
   .github/workflows/build-push.yml \
   'release-sbom must cover every Trivy-scanned first-party image (mirrors container-scan matrix)'
 
@@ -443,10 +441,11 @@ require_grep 'uses: \./\.github/actions/trivy-db-ensure-fresh' \
   .github/workflows/build-push.yml \
   'the pushed per-service digest scan must refresh its shared Trivy DB via the lock-guarded trivy-db-ensure-fresh action, the mechanism that now provides #904s concurrent-writer safety'
 # Keep release verification aligned with the canonical first-party service
-# set plus the immutable stack pointer (#1428 added syslog, #1556 added
-# utilities, both for the same reason the runtime_images/Dockerfile loops
-# above cover them).
-require_grep 'SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities stack' \
+# set plus the immutable stack pointer (#1428 added syslog, for the same
+# reason the runtime_images/Dockerfile loops above cover it; #1556 added
+# utilities the same way, but #1781 later removed it again -- see this
+# file's own comment near the CI_BUILD_SERVICES check above).
+require_grep 'SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools stack' \
   .github/workflows/build-push.yml \
   'release workflow must verify the stack pointer platform coverage too'
 require_grep 'assert_prebuilt_image_platform_supported' \

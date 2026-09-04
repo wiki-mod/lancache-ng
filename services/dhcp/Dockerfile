@@ -68,12 +68,6 @@
 # change: confirmed on the real built image that it still resolves the
 # real hook path with GNU `find` now ahead of BusyBox's own in `$PATH`.
 
-# What: source stage for tools copied into final image.
-# Why: utilities:latest tag ensures fresh binaries without drift.
-# From: Issue #1095
-ARG UTILITIES_IMAGE=ghcr.io/wiki-mod/lancache-ng/utilities:latest
-FROM ${UTILITIES_IMAGE} AS utilities-tools
-
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 LABEL org.opencontainers.image.description="Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks."
@@ -88,47 +82,10 @@ ARG http_proxy
 ARG https_proxy
 ARG no_proxy
 
-# What: COPY shared binaries from utilities image
-# Why: binary-compatible with utilities digest; jq stays local
-# From: Issue #1556
-
-# What: remove BusyBox symlinks before real binaries land.
-# Why: prevent shadowing of utilities image binaries.
-# From: Issue #1556
-RUN rm -f /usr/bin/find /usr/bin/xargs /usr/bin/lsof
-
-COPY --from=utilities-tools /usr/bin/curl /usr/bin/curl
-COPY --from=utilities-tools /usr/lib/libcurl.so.4 /usr/lib/libcurl.so.4
-COPY --from=utilities-tools /usr/lib/libz.so.1 /usr/lib/libz.so.1
-COPY --from=utilities-tools /usr/lib/libcares.so.2 /usr/lib/libcares.so.2
-COPY --from=utilities-tools /usr/lib/libnghttp2.so.14 /usr/lib/libnghttp2.so.14
-COPY --from=utilities-tools /usr/lib/libidn2.so.0 /usr/lib/libidn2.so.0
-COPY --from=utilities-tools /usr/lib/libpsl.so.5 /usr/lib/libpsl.so.5
-COPY --from=utilities-tools /usr/lib/libssl.so.3 /usr/lib/libssl.so.3
-COPY --from=utilities-tools /usr/lib/libcrypto.so.3 /usr/lib/libcrypto.so.3
-COPY --from=utilities-tools /usr/lib/libzstd.so.1 /usr/lib/libzstd.so.1
-COPY --from=utilities-tools /usr/lib/libbrotlidec.so.1 /usr/lib/libbrotlidec.so.1
-COPY --from=utilities-tools /usr/lib/libunistring.so.5 /usr/lib/libunistring.so.5
-COPY --from=utilities-tools /usr/lib/libbrotlicommon.so.1 /usr/lib/libbrotlicommon.so.1
-COPY --from=utilities-tools /usr/bin/find /usr/bin/find
-COPY --from=utilities-tools /usr/bin/xargs /usr/bin/xargs
-COPY --from=utilities-tools /usr/bin/envsubst /usr/bin/envsubst
-COPY --from=utilities-tools /usr/lib/libintl.so.8 /usr/lib/libintl.so.8
-COPY --from=utilities-tools /usr/bin/lsof /usr/bin/lsof
-COPY --from=utilities-tools /usr/bin/rg /usr/bin/rg
-COPY --from=utilities-tools /usr/lib/libgcc_s.so.1 /usr/lib/libgcc_s.so.1
-COPY --from=utilities-tools /usr/lib/libpcre2-8.so.0* /usr/lib/
-COPY --from=utilities-tools /usr/local/bin/verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
-
-# What: verify copied binaries run, not just exist.
-# Why: missing shared libs fail at exec, not COPY; lsof via script.
-# From: Issue #1613
-RUN set -euo pipefail; \
-    find . -maxdepth 0 -printf '%f\n' >/dev/null; \
-    printf '%s' '$FOO' | FOO=bar envsubst >/dev/null; \
-    rg --version >/dev/null; \
-    curl --version >/dev/null; \
-    sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
+# What: shared version-banner check script, not a service-local file.
+# Why: named build context avoids duplicating it into every service.
+# From: Issue #1781 | PR #1783
+COPY --from=shared-scripts verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
 
 # What: switches apk's own repositories to plain http.
 # Why: Squid caches http; signed indices keep integrity.
@@ -158,17 +115,28 @@ RUN --mount=type=secret,id=proxy_ca \
     openssl \
     jq \
     iptables \
-    nano && \
+    nano \
+    curl \
+    findutils \
+    gettext-envsubst \
+    lsof \
+    ripgrep && \
     if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
-# What: verifies the locally apk-installed curl actually runs.
-# Why: catches broken shared libs at build, not runtime exec.
-# From: Issue #1781
-RUN curl --version >/dev/null
-
 # nano: in-container troubleshooting tool -- see services/proxy/Dockerfile's
-# identical comment for the full rationale; lsof/ripgrep are COPY'd above
-# but serve the same troubleshooting purpose.
+# identical comment for the full rationale; lsof/ripgrep are apk-installed
+# above but serve the same troubleshooting purpose.
+
+# What: verifies apk-installed binaries execute, not just exist.
+# Why: missing library dependencies fail at runtime, not apk add.
+# From: Issue #1613 | Issue #1781 | PR #1783
+RUN set -euo pipefail; \
+    find . -maxdepth 0 -printf '%f\n' >/dev/null; \
+    printf '%s' '$FOO' | FOO=bar envsubst >/dev/null; \
+    rg --version >/dev/null; \
+    curl --version >/dev/null; \
+    sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
+
 ENV EDITOR=nano
 ENV VISUAL=$EDITOR
 
@@ -184,6 +152,11 @@ COPY entrypoint.sh /entrypoint.sh
 # to root and its own group, since these sockets are container-internal
 # control channels, not something any other local user needs to reach.
 RUN chmod +x /entrypoint.sh && mkdir -p /var/lib/kea && install -d -m 750 /run/kea
+
+# What: final apk upgrade pass, no packages added.
+# Why: patches any CVE fixed after this file's earlier package installs.
+# From: Issue #1781 | PR #1783
+RUN apk upgrade --no-cache
 
 EXPOSE 67/udp 8000
 

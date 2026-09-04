@@ -31,12 +31,6 @@
 # package, matching the same finding already made for the other three
 # already-migrated/being-migrated services in this project.
 
-# What: source stage for tools copied into final image.
-# Why: mutable `:latest` tag for build flexibility.
-# From: Issue #1095
-ARG UTILITIES_IMAGE=ghcr.io/wiki-mod/lancache-ng/utilities:latest
-FROM ${UTILITIES_IMAGE} AS utilities-tools
-
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 LABEL org.opencontainers.image.description="LanCache-NG-NTP: chrony-based NTP server, disciplined against public NTP servers, serving LAN clients on UDP/123."
@@ -58,35 +52,6 @@ ARG no_proxy
 # services/dhcp-proxy/Dockerfile's matching comment for the fuller
 # rationale and live verification of this behavior.
 
-# What: curl/envsubst binaries from shared utilities image
-# Why: same Alpine base digest ensures binary compatibility
-# From: Issue #1556
-COPY --from=utilities-tools /usr/bin/curl /usr/bin/curl
-COPY --from=utilities-tools /usr/lib/libcurl.so.4 /usr/lib/libcurl.so.4
-COPY --from=utilities-tools /usr/lib/libz.so.1 /usr/lib/libz.so.1
-COPY --from=utilities-tools /usr/lib/libcares.so.2 /usr/lib/libcares.so.2
-COPY --from=utilities-tools /usr/lib/libnghttp2.so.14 /usr/lib/libnghttp2.so.14
-COPY --from=utilities-tools /usr/lib/libidn2.so.0 /usr/lib/libidn2.so.0
-COPY --from=utilities-tools /usr/lib/libpsl.so.5 /usr/lib/libpsl.so.5
-COPY --from=utilities-tools /usr/lib/libssl.so.3 /usr/lib/libssl.so.3
-COPY --from=utilities-tools /usr/lib/libcrypto.so.3 /usr/lib/libcrypto.so.3
-COPY --from=utilities-tools /usr/lib/libzstd.so.1 /usr/lib/libzstd.so.1
-COPY --from=utilities-tools /usr/lib/libbrotlidec.so.1 /usr/lib/libbrotlidec.so.1
-COPY --from=utilities-tools /usr/lib/libunistring.so.5 /usr/lib/libunistring.so.5
-COPY --from=utilities-tools /usr/lib/libbrotlicommon.so.1 /usr/lib/libbrotlicommon.so.1
-COPY --from=utilities-tools /usr/bin/envsubst /usr/bin/envsubst
-COPY --from=utilities-tools /usr/lib/libintl.so.8 /usr/lib/libintl.so.8
-
-# What: verifies copied binaries work on target system.
-# Why: shared libraries fail at runtime, not copy time.
-# From: Issue #1556
-RUN set -euo pipefail; \
-    printf '%s' '$FOO' | FOO=bar envsubst >/dev/null; \
-    curl --version >/dev/null
-
-# What: ca-certificates package enables curl's CA bundle.
-# Why: copied curl has fixed CA path; package generates it.
-# From: Issue #1556
 # What: switches apk's own repositories to plain http.
 # Why: Squid caches http; signed indices keep integrity.
 # From: Issue #1095
@@ -109,8 +74,17 @@ RUN --mount=type=secret,id=proxy_ca \
     apk add --no-cache \
     bash \
     ca-certificates \
-    chrony-nts && \
+    chrony-nts \
+    curl \
+    gettext-envsubst && \
     if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
+
+# What: verifies apk-installed binaries execute, not just exist.
+# Why: missing library dependencies fail at runtime, not apk add.
+# From: Issue #1613 | Issue #1781 | PR #1783
+RUN set -euo pipefail; \
+    printf '%s' '$FOO' | FOO=bar envsubst >/dev/null; \
+    curl --version >/dev/null
 
 COPY chrony.conf /etc/chrony/chrony.conf.template
 COPY entrypoint.sh /entrypoint.sh
@@ -163,6 +137,11 @@ COPY entrypoint.sh /entrypoint.sh
 # ever needs to become an explicit package instead.
 RUN chmod +x /entrypoint.sh \
     && mkdir -p /var/lib/chrony /var/log/chrony
+
+# What: final apk upgrade pass, no packages added.
+# Why: patches any CVE fixed after this file's earlier package installs.
+# From: Issue #1781 | PR #1783
+RUN apk upgrade --no-cache
 
 EXPOSE 123/udp
 
