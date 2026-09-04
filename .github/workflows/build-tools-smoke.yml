@@ -286,12 +286,28 @@ jobs:
           # What: runs with init process as container PID 1
           # Why: without PID-1 reaper, zombie processes remain alive
           # From: Issue #1522 | PR #1523
+          #
+          # What: kill-timeout guards a signal-deaf in-container hang.
+          # Why: SIGTERM to docker run alone cannot reach it (AG-CI-016).
+          # From: Issue #1781 | PR #1783
+          #
+          # What: exit code captured explicitly, not left to set -e.
+          # Why: surfaces the real code (AG-INT-002), not a generic message.
+          # From: Issue #1781 | PR #1783
+          set +e
           docker run --rm --init \
             --user "$(id -u):$(id -g)" \
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 1000 \
             bash -lc 'set -euo pipefail; bats tests/bats'
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            echo "::error::docker run (bats tests/bats) exited $status. 124/137 means the AG-CI-016 kill-timeout fired (a hung/signal-deaf process); any other code with no preceding 'not ok' line means the failure is in the wrapper/container lifecycle itself, not an individual test -- see the streamed output above for whatever bats/the shell did print."
+            exit "$status"
+          fi
 
       # What: mirrors identically-named ShellSpec step
       # Why: keeps light-tier job pull-only and consistent
@@ -304,9 +320,25 @@ jobs:
           # What: uses init-as-PID-1 container like Bats step
           # Why: keeps fixture runners on same lifecycle contract
           # From: Issue #1522 | PR #1523
+          #
+          # What: kill-timeout guards a signal-deaf in-container hang.
+          # Why: SIGTERM to docker run alone cannot reach it (AG-CI-016).
+          # From: Issue #1781 | PR #1783
+          #
+          # What: exit code captured explicitly, not left to set -e.
+          # Why: surfaces the real code (AG-INT-002), not a generic message.
+          # From: Issue #1781 | PR #1783
+          set +e
           docker run --rm --init \
             --user "$(id -u):$(id -g)" \
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 1000 \
             bash -lc 'set -euo pipefail; shellspec --shell bash tests/shellspec'
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            echo "::error::docker run (shellspec) exited $status. 124/137 means the AG-CI-016 kill-timeout fired (a hung/signal-deaf process); any other code with no preceding failing-example line means the failure is in the wrapper/container lifecycle itself -- see the streamed output above for whatever shellspec/the shell did print."
+            exit "$status"
+          fi
