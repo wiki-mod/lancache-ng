@@ -58,6 +58,14 @@ RUN set -eu; \
     chmod +x /usr/local/bin/lancache-rustc-wrapper
 
 ARG CARGO_BUILD_JOBS=
+# What: no in-file default; empty ARG fails resolve_cargo_profile_overrides
+# closed below, same contract as CARGO_BUILD_JOBS above.
+# Why: djdomi (maintainer review 5109560874, PR #1796) rejected hardcoding
+# lto/codegen-units in Cargo.toml -- a Dockerfile ARG default would just
+# relocate the same hardcode one file over.
+# From: Issue #1095
+ARG PROJECT_CARGO_LTO=
+ARG PROJECT_CARGO_CODEGENUNIT=
 # What: redeclares BUILD_TOOLS_IMAGE for RUN stage visibility.
 # Why: configure_ccache() folds it into the cache key.
 # From: Issue #887
@@ -133,6 +141,12 @@ COPY services/dns/nats-subscriber/src services/dns/nats-subscriber/src
 #     legitimately hits instead of writing; without this, the probe misclassifies a genuine
 #     cache hit as a write failure and disables ccache for the whole build.
 #     From: Issue #887
+#   resolve_cargo_profile_overrides - requires PROJECT_CARGO_LTO/PROJECT_CARGO_CODEGENUNIT
+#                            (no fallback default -- fails the build closed if either is
+#                            unset/invalid) and exports them as CARGO_PROFILE_RELEASE_LTO/
+#                            CARGO_PROFILE_RELEASE_CODEGEN_UNITS *before* run_cargo_build is
+#                            called, so every one of its retry tiers inherits the override,
+#                            not just the first attempt. From: Issue #1095 | PR #1796.
 #   resolve_cargo_jobs     - CARGO_BUILD_JOBS if set, else nproc-2 floored at 4; now also
 #                            echoes the resolved value and its source (explicit vs.
 #                            auto-detected) to the build log.
@@ -286,6 +300,18 @@ RUN --mount=type=secret,id=sccache_redis_url \
         fi; \
       fi; \
     }; \
+    resolve_cargo_profile_overrides() { \
+      lto="${PROJECT_CARGO_LTO:-}"; \
+      cgu="${PROJECT_CARGO_CODEGENUNIT:-}"; \
+      if [ -z "$lto" ]; then echo "PROJECT_CARGO_LTO is required (no in-file/build-arg default; Issue #1095, PR #1796 review 5109560874)" >&2; exit 1; fi; \
+      case "$lto" in off|thin|fat|true|false) ;; *) echo "PROJECT_CARGO_LTO must be one of: off, thin, fat, true, false (got '$lto')" >&2; exit 1;; esac; \
+      if [ -z "$cgu" ]; then echo "PROJECT_CARGO_CODEGENUNIT is required (no in-file/build-arg default; Issue #1095, PR #1796 review 5109560874)" >&2; exit 1; fi; \
+      case "$cgu" in ''|*[!0-9]*) echo "PROJECT_CARGO_CODEGENUNIT must be a positive integer (got '$cgu')" >&2; exit 1;; esac; \
+      if [ "$cgu" -le 0 ]; then echo "PROJECT_CARGO_CODEGENUNIT must be greater than zero" >&2; exit 1; fi; \
+      export CARGO_PROFILE_RELEASE_LTO="$lto"; \
+      export CARGO_PROFILE_RELEASE_CODEGEN_UNITS="$cgu"; \
+      echo "[INFO] using CARGO_PROFILE_RELEASE_LTO=$lto CARGO_PROFILE_RELEASE_CODEGEN_UNITS=$cgu (from PROJECT_CARGO_LTO/PROJECT_CARGO_CODEGENUNIT)." >&2; \
+    }; \
     resolve_cargo_jobs() { \
       jobs="${CARGO_BUILD_JOBS:-}"; \
       if [ -z "$jobs" ]; then \
@@ -351,6 +377,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     configure_sccache; \
     configure_distcc; \
     configure_ccache; \
+    resolve_cargo_profile_overrides; \
     cargo_jobs="$(resolve_cargo_jobs)"; \
     run_cargo_build; \
     # What: dumps ccache-s, checks for mid-build Redis errors.

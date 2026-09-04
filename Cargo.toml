@@ -19,9 +19,18 @@ members = [
 # Why: scope is lockfile unification, not a dep refactor.
 # From: Issue #1095
 
-# What: workspace-wide release profile: fat LTO, 2 CGUs.
-# Why: cargo ignores a member's own [profile.release].
+# What: no `lto`/`codegen-units` keys in [profile.release] here.
+# Why: djdomi (maintainer review 5109560874, PR #1796) rejected hardcoding
+# these performance-affecting values in-file. Cargo natively honors
+# CARGO_PROFILE_RELEASE_LTO / CARGO_PROFILE_RELEASE_CODEGEN_UNITS as
+# environment overrides of the exact same profile keys, so the org
+# variables PROJECT_CARGO_LTO / PROJECT_CARGO_CODEGENUNIT are threaded
+# into every `cargo build --release` invocation (Docker builder stages
+# in services/{dns,ui,watchdog}/Dockerfile, build-push.yml,
+# build-push-hosted-fallback.yml, and
+# scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh) instead of
+# being set here. Deliberately no fallback default anywhere in that
+# chain: an unset var fails the build closed rather than silently
+# reintroducing a different hardcoded value one file over.
 # From: Issue #1095
 [profile.release]
-lto = "fat"
-codegen-units = 2

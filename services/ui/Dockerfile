@@ -320,6 +320,18 @@ cat > /usr/local/lib/lancache-ui-build-accel.sh <<'LANCACHE_UI_HELPERS_EOF'
         rm -rf "$ccache_probe_dir"; \
       fi; \
     }; \
+    resolve_cargo_profile_overrides() { \
+      lto="${PROJECT_CARGO_LTO:-}"; \
+      cgu="${PROJECT_CARGO_CODEGENUNIT:-}"; \
+      if [ -z "$lto" ]; then echo "PROJECT_CARGO_LTO is required (no in-file/build-arg default; Issue #1095, PR #1796 review 5109560874)" >&2; exit 1; fi; \
+      case "$lto" in off|thin|fat|true|false) ;; *) echo "PROJECT_CARGO_LTO must be one of: off, thin, fat, true, false (got '$lto')" >&2; exit 1;; esac; \
+      if [ -z "$cgu" ]; then echo "PROJECT_CARGO_CODEGENUNIT is required (no in-file/build-arg default; Issue #1095, PR #1796 review 5109560874)" >&2; exit 1; fi; \
+      case "$cgu" in ''|*[!0-9]*) echo "PROJECT_CARGO_CODEGENUNIT must be a positive integer (got '$cgu')" >&2; exit 1;; esac; \
+      if [ "$cgu" -le 0 ]; then echo "PROJECT_CARGO_CODEGENUNIT must be greater than zero" >&2; exit 1; fi; \
+      export CARGO_PROFILE_RELEASE_LTO="$lto"; \
+      export CARGO_PROFILE_RELEASE_CODEGEN_UNITS="$cgu"; \
+      echo "[INFO] using CARGO_PROFILE_RELEASE_LTO=$lto CARGO_PROFILE_RELEASE_CODEGEN_UNITS=$cgu (from PROJECT_CARGO_LTO/PROJECT_CARGO_CODEGENUNIT)." >&2; \
+    }; \
     resolve_cargo_jobs() { \
       jobs="${CARGO_BUILD_JOBS:-}"; \
       if [ -z "$jobs" ]; then \
@@ -398,6 +410,15 @@ LANCACHE_UI_HELPERS_EOF
 LANCACHE_UI_BUILD_ACCEL_EOF
 
 ARG CARGO_BUILD_JOBS=
+# What: no in-file default; empty ARG fails resolve_cargo_profile_overrides
+# closed below, same contract as CARGO_BUILD_JOBS above. Declared once here
+# (before both RUN blocks in this stage), so both inherit it.
+# Why: djdomi (maintainer review 5109560874, PR #1796) rejected hardcoding
+# lto/codegen-units in Cargo.toml -- a Dockerfile ARG default would just
+# relocate the same hardcode one file over.
+# From: Issue #1095
+ARG PROJECT_CARGO_LTO=
+ARG PROJECT_CARGO_CODEGENUNIT=
 # What: redeclares BUILD_TOOLS_IMAGE for RUN blocks visibility
 # Why: Docker ARG scoping requires post-FROM redeclaration for use
 # From: Issue #1533
@@ -443,6 +464,12 @@ RUN mkdir -p services/watchdog/src services/warmer/src \
 #   configure_ccache/disable_ccache - opt-in cache layer in front of distcc, only once
 #                            distcc is already enabled and a ccache Redis secret is
 #                            mounted; mirrors services/dns/Dockerfile's AG-CI-022 layer.
+#   resolve_cargo_profile_overrides - requires PROJECT_CARGO_LTO/PROJECT_CARGO_CODEGENUNIT
+#                            (no fallback default) and exports them as
+#                            CARGO_PROFILE_RELEASE_LTO/CARGO_PROFILE_RELEASE_CODEGEN_UNITS
+#                            before run_cargo_build is called in EITHER RUN block below, so
+#                            every retry tier of both the pre-cache and the real-source build
+#                            inherits the override. Issue #1095 | PR #1796 review 5109560874.
 #   resolve_cargo_jobs     - CARGO_BUILD_JOBS if set, else nproc-2 floored at 4.
 #   run_cargo_build        - builds with ccache+distcc if both enabled, retrying with
 #                            plain distcc first on failure, then a normal local compiler
@@ -468,6 +495,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     configure_sccache; \
     configure_distcc; \
     configure_ccache; \
+    resolve_cargo_profile_overrides; \
     cargo_jobs="$(resolve_cargo_jobs)"; \
     mkdir -p services/ui/src && echo 'fn main() {}' > services/ui/src/main.rs && echo '' > services/ui/src/lib.rs \
     && run_cargo_build \
@@ -546,6 +574,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     configure_sccache; \
     configure_distcc; \
     configure_ccache; \
+    resolve_cargo_profile_overrides; \
     cargo_jobs="$(resolve_cargo_jobs)"; \
     cargo clean -p lancache-ui --release --target "$musl_target" \
     && run_cargo_build \
