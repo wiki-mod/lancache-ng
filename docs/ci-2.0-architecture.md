@@ -1218,7 +1218,7 @@ validation identity changed
 ## 31. Security revalidation separate from normal commit CI
 
 Newly published CVEs are not a reason to scan every unchanged image on
-every commit. Instead of every push scanning 10 services across 2
+every commit. Instead of every push scanning 9 services across 2
 platforms, security refresh is handled separately:
 
 ```text
@@ -1669,7 +1669,7 @@ STACK ACCEPTED
 Builds are per-service independent. Promotion is stack-atomic.
 
 ```text
-10/10 service digests ACCEPTED
+9/9 service digests ACCEPTED
 +
 stack validation SUCCESS
         |
@@ -1677,7 +1677,7 @@ stack validation SUCCESS
 PROMOTE
 ```
 
-At `9/10`: `NO PROMOTION`. The nine successful artifacts stay ACCEPTED
+At `8/9`: `NO PROMOTION`. The eight successful artifacts stay ACCEPTED
 regardless.
 
 ## 51. Promotion never builds
