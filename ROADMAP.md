@@ -62,8 +62,10 @@ duplicate, their acceptance criteria):
   proxy/ntp/watchdog/ui services to Alpine base images for fresher packages.
 - **Undocumented-vs-real-capability audits** (#843, #871): reconcile
   documentation that describes capabilities against what actually exists in
-  the codebase today — e.g. the Cache Warmer, whose mechanism is now decided
-  (stream-and-discard prefill, not steamcmd, per #871) but not yet built.
+  the codebase today — e.g. CacheHamster (Cache-Prefill), whose mechanism is
+  now decided (stream-and-discard prefill, not steamcmd, per #871) and
+  infra-integrated (CI build/publish, opt-in Compose profile), but whose
+  Steam control-plane/depot integration is not yet built.
 - **CI/tooling health**: several open `ci`/`tooling`-labeled issues (e.g.
   #1014 consolidating workflow files, #1065's runner-pool saturation,
   #1253/#1290 narrowing build-tools rebuild triggers) reduce CI cost and

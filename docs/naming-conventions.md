@@ -96,7 +96,8 @@ Documented exceptions:
 
 Rule: lowercase, hyphen-separated, one word per logical responsibility —
 `proxy`, `dns-standard`, `dns-ssl`, `dhcp`, `dhcp-proxy`, `dhcp-probe`,
-`ntp`, `nats`, `docker-socket-proxy`, `watchdog`, `ui`, `netdata`, `syslog`.
+`ntp`, `nats`, `docker-socket-proxy`, `watchdog`, `ui`, `netdata`, `syslog`,
+`cachehamster`.
 This list never carried a separate `syslog-ng` entry even while a real
 `syslog-ng` Compose service existed (issue #453/#633 through the
 syslog+fluent-bit consolidation PR) -- a pre-existing documentation gap this
@@ -263,7 +264,7 @@ state directories must follow the same naming shape.
 Rule: `ghcr.io/wiki-mod/lancache-ng/<service>` for every first-party image,
 where `<service>` is the same lowercase-hyphenated name as the Compose
 service (`proxy`, `dns`, `watchdog`, `dhcp`, `dhcp-proxy`, `ntp`, `ui`,
-`build-tools`, `stack`). This is already fully governed by
+`build-tools`, `cachehamster`, `stack`). This is already fully governed by
 `release/stack-images.yml` (the machine-readable inventory) and
 `docs/release-versioning.md` — this document does not duplicate that
 contract, it only asserts that the image name always matches the service

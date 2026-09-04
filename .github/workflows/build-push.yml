@@ -35,7 +35,7 @@ concurrency:
   cancel-in-progress: false
 env:
   CARGO_BUILD_JOBS: ${{ vars.CARGO_BUILD_JOBS }}
-  CI_BUILD_SERVICES: "proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools"
+  CI_BUILD_SERVICES: "proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools cachehamster"
   RELEASE_PLATFORMS: linux/amd64,linux/arm64
   RUST_ACCELERATION_NETWORK: bridge
 defaults:
@@ -1628,7 +1628,7 @@ jobs:
             echo "::error::Rust service Dockerfiles must not hardcode a PROJECT_CARGO_LTO/PROJECT_CARGO_CODEGENUNIT default; both must fail closed when unset, mirroring CARGO_BUILD_JOBS."
             exit 1
           fi
-          if grep -RInE '^[[:space:]]*(lto|codegen-units)[[:space:]]*=' Cargo.toml services/dns/nats-subscriber/Cargo.toml services/ui/Cargo.toml services/warmer/Cargo.toml services/watchdog/Cargo.toml tools/pxe-client-probe/Cargo.toml; then
+          if grep -RInE '^[[:space:]]*(lto|codegen-units)[[:space:]]*=' Cargo.toml services/dns/nats-subscriber/Cargo.toml services/ui/Cargo.toml services/cachehamster/Cargo.toml services/watchdog/Cargo.toml tools/pxe-client-probe/Cargo.toml; then
             echo "::error::[profile.release] lto/codegen-units must not be hardcoded in any workspace Cargo.toml; source them from CARGO_PROFILE_RELEASE_LTO/CARGO_PROFILE_RELEASE_CODEGEN_UNITS env overrides (PROJECT_CARGO_LTO/PROJECT_CARGO_CODEGENUNIT)."
             exit 1
           fi
@@ -3232,6 +3232,9 @@ jobs:
           - service: build-tools
             platform_tag: amd64
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
+          - service: cachehamster
+            platform_tag: amd64
+            runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
           - service: proxy
             platform_tag: arm64
             runner: '"ubuntu-24.04-arm"'
@@ -3257,6 +3260,9 @@ jobs:
             platform_tag: arm64
             runner: '"ubuntu-24.04-arm"'
           - service: build-tools
+            platform_tag: arm64
+            runner: '"ubuntu-24.04-arm"'
+          - service: cachehamster
             platform_tag: arm64
             runner: '"ubuntu-24.04-arm"'
     steps:
@@ -3641,6 +3647,12 @@ jobs:
             context: tools/build-tools
             build_contexts: ""
             description: &ci-description-build-tools "Prebuilt lancache-ng CI and developer validation toolchain image."
+            runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
+          - service: cachehamster
+            context: services/cachehamster
+            build_contexts: ""
+            description: &ci-description-cachehamster "lancache-ng CacheHamster: Steam cache-warming prefill daemon (scaffold, issue #871)."
+            rust: true
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
@@ -4972,6 +4984,7 @@ jobs:
           DESCRIPTION_SYSLOG: *ci-description-syslog
           DESCRIPTION_UI: *ci-description-ui
           DESCRIPTION_BUILD_TOOLS: *ci-description-build-tools
+          DESCRIPTION_CACHEHAMSTER: *ci-description-cachehamster
         run: |
           set -euo pipefail
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
@@ -4991,6 +5004,7 @@ jobs:
             [ui]="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
             [build-tools]="Prebuilt lancache-ng CI and developer validation toolchain image."
             [syslog]="Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428)."
+            [cachehamster]="lancache-ng CacheHamster: Steam cache-warming prefill daemon (scaffold, issue #871)."
           )
           digest_for_image() {
             local image=$1
@@ -5623,7 +5637,7 @@ jobs:
         shell: bash
         env:
           TAG_NAME: ${{ github.ref_name }}
-          SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools stack
+          SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools cachehamster stack
           REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
@@ -5876,7 +5890,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, syslog, ui, build-tools]
+        service: [proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, syslog, ui, build-tools, cachehamster]
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - name: Checkout

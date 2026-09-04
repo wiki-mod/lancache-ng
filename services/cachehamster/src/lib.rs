@@ -1,7 +1,7 @@
 //!
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
-//! Pure, no-network logic for the warmer daemon (issue #871): the
+//! Pure, no-network logic for the cachehamster daemon (issue #871): the
 //! credential-store (Argon2id-as-KDF + XChaCha20-Poly1305 AEAD) and the
 //! stream-fetch byte-counting primitive. Exposed as a library so unit
 //! tests can exercise both without a live Steam account or network

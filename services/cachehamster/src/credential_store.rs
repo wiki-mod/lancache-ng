@@ -281,7 +281,7 @@ mod tests {
     #[test]
     fn load_or_create_master_secret_persists_and_reloads_same_value() {
         let dir = std::env::temp_dir().join(format!(
-            "lancache-warmer-master-secret-test-{}",
+            "lancache-cachehamster-master-secret-test-{}",
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).expect("temp dir should be creatable");
@@ -302,7 +302,7 @@ mod tests {
     #[test]
     fn save_and_load_encrypted_credential_round_trips() {
         let dir = std::env::temp_dir().join(format!(
-            "lancache-warmer-credential-test-{}",
+            "lancache-cachehamster-credential-test-{}",
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).expect("temp dir should be creatable");
@@ -329,7 +329,7 @@ mod tests {
     #[test]
     fn load_encrypted_credential_returns_none_when_absent() {
         let path = std::env::temp_dir().join(format!(
-            "lancache-warmer-absent-credential-{}.json",
+            "lancache-cachehamster-absent-credential-{}.json",
             std::process::id()
         ));
         let result =

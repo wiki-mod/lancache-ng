@@ -420,18 +420,18 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY services/ui/Cargo.toml services/ui/Cargo.toml
 COPY services/watchdog/Cargo.toml services/watchdog/Cargo.toml
-COPY services/warmer/Cargo.toml services/warmer/Cargo.toml
+COPY services/cachehamster/Cargo.toml services/cachehamster/Cargo.toml
 COPY services/dns/nats-subscriber/Cargo.toml services/dns/nats-subscriber/Cargo.toml
 COPY tools/pxe-client-probe/Cargo.toml tools/pxe-client-probe/Cargo.toml
 # What: stub targets for workspace members not built here.
 # Why: cargo loads every member manifest to resolve deps.
 # From: Issue #1095
-RUN mkdir -p services/watchdog/src services/warmer/src \
+RUN mkdir -p services/watchdog/src services/cachehamster/src \
       services/dns/nats-subscriber/src tools/pxe-client-probe/src \
     && printf 'fn main() {}\n' > services/watchdog/src/main.rs \
     && : > services/watchdog/src/lib.rs \
-    && printf 'fn main() {}\n' > services/warmer/src/main.rs \
-    && : > services/warmer/src/lib.rs \
+    && printf 'fn main() {}\n' > services/cachehamster/src/main.rs \
+    && : > services/cachehamster/src/lib.rs \
     && printf 'fn main() {}\n' > services/dns/nats-subscriber/src/main.rs \
     && : > services/dns/nats-subscriber/src/lib.rs \
     && printf 'fn main() {}\n' > tools/pxe-client-probe/src/main.rs

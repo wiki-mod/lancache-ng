@@ -1,16 +1,16 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Runtime for lancache-warmer, the Steam cache-warming prefill daemon.
-# Scaffold stage: builds and runs the credential-store and stream-fetch
-# primitives only -- see services/warmer/src/main.rs's own module doc
-# comment for what is deliberately not yet implemented.
+# Runtime for lancache-cachehamster, the Steam cache-warming prefill
+# daemon. Scaffold stage: builds and runs the credential-store and
+# stream-fetch primitives only -- see services/cachehamster/src/main.rs's
+# own module doc comment for what is deliberately not yet implemented.
 
 # Intentional ARG default (overridable at build time via --build-arg).
 # Actual digest pinning for release builds is tracked in issue #508 (same
 # convention every other Rust service Dockerfile in this repo follows).
 ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
-FROM ${BUILD_TOOLS_IMAGE} AS warmer-builder
+FROM ${BUILD_TOOLS_IMAGE} AS cachehamster-builder
 
 # What: verifies the build-tools contract (Rust toolchain, musl cross
 #   target) is present before relying on any of it.
@@ -67,11 +67,11 @@ RUN set -eu; \
     export CC=cc GCC=gcc CXX=c++ GXX=g++; \
     musl_target="$(cat /tmp/musl-target)"; \
     cargo build --release --locked --target "$musl_target"; \
-    cp "target/${musl_target}/release/lancache-warmer" /build/lancache-warmer-out
+    cp "target/${musl_target}/release/lancache-cachehamster" /build/lancache-cachehamster-out
 
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
-LABEL org.opencontainers.image.description="lancache-ng warmer: Steam cache-warming prefill daemon (scaffold, issue #871)."
+LABEL org.opencontainers.image.description="lancache-ng cachehamster: Steam cache-warming prefill daemon (scaffold, issue #871)."
 
 # `apk upgrade --no-cache` (before the package install, same layer)
 # upgrades packages already baked into the alpine:3.24 base layer itself
@@ -95,10 +95,11 @@ RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
 # ca-certificates: this crate's reqwest client uses plain rustls-tls
 # (public webpki roots layered on top of this image's OS trust store is
 # not needed the way services/watchdog's rustls-tls-native-roots choice
-# is -- see services/warmer/Cargo.toml's own comment on that distinction),
-# talking to Steam's public CDN over the public Internet CA chain.
+# is -- see services/cachehamster/Cargo.toml's own comment on that
+# distinction), talking to Steam's public CDN over the public Internet CA
+# chain.
 
-COPY --from=warmer-builder /build/lancache-warmer-out /usr/local/bin/lancache-warmer
+COPY --from=cachehamster-builder /build/lancache-cachehamster-out /usr/local/bin/lancache-cachehamster
 
 # Fixed uid/gid 10001, matching services/ui/Dockerfile's and
 # services/watchdog/Dockerfile's existing `lancache` account of the same
@@ -111,4 +112,4 @@ RUN addgroup -g 10001 lancache && \
 VOLUME ["/data"]
 USER lancache
 
-ENTRYPOINT ["/usr/local/bin/lancache-warmer"]
+ENTRYPOINT ["/usr/local/bin/lancache-cachehamster"]
