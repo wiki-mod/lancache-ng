@@ -119,20 +119,32 @@ jobs:
         run: |
           set -euo pipefail
 
-          # What: Service context/build-context/description tables.
+          # What: Service context/dockerfile/build-ctx/desc maps.
           # Why: Hand-synced with build-push.yml; no YAML include.
-          # From: Issue #686
+          # From: Issue #1095 | PR #1815
           declare -A contexts=(
             [proxy]=services/proxy
-            [dns]=services/dns
-            [watchdog]=services/watchdog
+            [dns]=.
+            [watchdog]=.
             [dhcp]=services/dhcp
             [dhcp-proxy]=services/dhcp-proxy
             [ntp]=services/ntp
             [syslog]=services/syslog
-            [ui]=services/ui
+            [ui]=.
             [build-tools]=tools/build-tools
             [utilities]=services/utilities
+          )
+          declare -A dockerfiles=(
+            [proxy]=""
+            [dns]=services/dns/Dockerfile
+            [watchdog]=services/watchdog/Dockerfile
+            [dhcp]=""
+            [dhcp-proxy]=""
+            [ntp]=""
+            [syslog]=""
+            [ui]=services/ui/Dockerfile
+            [build-tools]=""
+            [utilities]=""
           )
           declare -A build_contexts=(
             [proxy]="dns-domains=services/dns"
@@ -176,9 +188,10 @@ jobs:
             row="$(jq -n \
               --arg service "$svc" \
               --arg context "${contexts[$svc]}" \
+              --arg dockerfile "${dockerfiles[$svc]}" \
               --arg build_contexts "${build_contexts[$svc]}" \
               --arg description "${descriptions[$svc]}" \
-              '{service: $service, context: $context, build_contexts: $build_contexts, description: $description}')"
+              '{service: $service, context: $context, dockerfile: $dockerfile, build_contexts: $build_contexts, description: $description}')"
             rows="$(printf '%s' "$rows" | jq --argjson row "$row" '. + [$row]')"
           done
 
@@ -290,6 +303,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
           builder: ${{ steps.buildx.outputs.name }}
           context: ${{ matrix.context }}
+          dockerfile: ${{ matrix.dockerfile }}
           build-contexts: ${{ matrix.build_contexts }}
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
