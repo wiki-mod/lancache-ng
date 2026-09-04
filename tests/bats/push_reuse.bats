@@ -370,16 +370,6 @@ setup_decide_one() {
     [ "$result" = "false" ]
 }
 
-@test "decide_one: workflow_dispatch forces a real build for utilities despite ignore_workflow_gate=true" {
-    setup_decide_one
-    push_reuse_decide() { printf 'true\n'; }
-    GITHUB_EVENT_NAME="workflow_dispatch"
-
-    result="$(decide_one utilities utilities "" "" "true" 2>/dev/null)"
-
-    [ "$result" = "false" ]
-}
-
 @test "decide_one: a push event still lets build-tools reuse via ignore_workflow_gate=true (dispatch override does not leak into push)" {
     setup_decide_one
     ghcr_retry() { printf '"sha256:deadbeef"\n'; }
@@ -404,14 +394,14 @@ setup_decide_one() {
     [ "$output" = "true" ]
 }
 
-@test "decide_one: a pull_request event still lets utilities reuse via ignore_workflow_gate=true" {
+@test "decide_one: a pull_request event still lets build-tools reuse via ignore_workflow_gate=true" {
     setup_decide_one
     ghcr_retry() { printf '"sha256:deadbeef"\n'; }
     push_reuse_decide() { printf 'true\n'; }
     # shellcheck disable=SC2034 # read by decide_one once sourced in setup_decide_one
     GITHUB_EVENT_NAME="pull_request"
 
-    run decide_one utilities utilities "" "" "true"
+    run decide_one build_tools build-tools "" "" "true"
 
     [ "$status" -eq 0 ]
     [ "$output" = "true" ]
