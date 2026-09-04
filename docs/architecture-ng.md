@@ -9,9 +9,10 @@ would not actually differentiate anything -- every real row would read the
 same "v0.1.0" regardless of which service is genuinely older or newer
 (verified against each service directory's first commit in git history, not
 assumed). The one row below that a version field genuinely would
-differentiate is Cache Warmer, which is called out explicitly instead: it is
-not shipped in any tagged version, current or planned, only a design
-document.
+differentiate is CacheHamster (the Cache-Prefill feature's service, issue
+#871), which is called out explicitly instead: it is not shipped in any
+tagged version, current or planned, and does not yet have real Steam
+depot-fetch capability.
 
 | Service | Default | Replaces | Notes |
 |---|---|---|---|
@@ -22,7 +23,7 @@ document.
 | Watchdog | on | — | Health checks, auto-restart, purge cron |
 | syslog (fluent-bit + syslog-ng, combined) | on (`logging` Compose profile, default-enabled since #1343; real opt-out via `LOGGING_ENABLED=0`) | — | Central log receiver; fluent-bit forwards logs from every wired service to syslog-ng inside the same container (#453, combined into one image 2026-08) — see the syslog-ng section's full logging matrix below, not just proxy access logs |
 | Admin UI | on | — | Axum/Rust, Tera, Tailwind, separate port |
-| Cache Warmer | not implemented | — | **Scaffold only, not shipped**: `services/warmer` exists (credential-store + stream-fetch primitives, issue #871), but has no Compose service and no real Steam depot-fetch capability yet. Mechanism decided: stream-and-discard prefill, not SteamCMD; new independently-switchable service (not a `services/ui` module). See [docs/design-steam-prefill.md](design-steam-prefill.md) (issue #816, issue #871) for the current design plan and its one remaining open decision (credential strategy). Do not treat this row as a runnable feature until Steam control-plane/depot integration lands. |
+| CacheHamster (Cache-Prefill) | off (`cachehamster` Compose profile) | — | **Infra-wired, functionally still a scaffold**: `services/cachehamster` (issue #871) has a CI-built/published multi-arch image and an opt-in Compose profile since its infra integration (issue #871), but no real Steam depot-fetch capability yet -- credential-store + stream-fetch primitives only. Mechanism decided: stream-and-discard prefill, not SteamCMD; independently-switchable service (not a `services/ui` module). See [docs/design-steam-prefill.md](design-steam-prefill.md) (issue #816, issue #871) for the current design plan and its one remaining open decision (credential strategy). Do not treat this row as a runnable feature until Steam control-plane/depot integration lands. |
 
 ## nginx
 
@@ -607,6 +608,7 @@ Central log receiver for the stack (#453), opt-in via `docker compose --profile 
 | dhcp-probe | Not applicable | One-shot diagnostic helper (`restart: "no"`), started and stopped on demand by the Admin UI for a single probe run — no persistent process or log stream to route |
 | syslog-logs-permissions | Not applicable | One-shot `logs` volume ownership migration init container (`restart: "no"`, see the "Existing `logs` volume ownership migration" bullet above), runs `chown` to completion and exits — no persistent process or log stream to route |
 | ntp | Not yet wired (local container stdout + `/var/log/chrony` file only) | chronyd's own `log` directive (see `services/ntp/chrony.conf`) writes `tracking`/`measurements`/`statistics` to `/var/log/chrony` alongside its normal stdout, but the `ntp-logs` volume is not yet tailed by fluent-bit into the central pipeline — a known, deliberately deferred follow-up, same class as the two "Not implemented yet" items above |
+| cachehamster | Not applicable | Scaffold's `tracing-subscriber` writes to stdout only (`docker logs`); one-shot container (`restart: "no"`, opt-in `cachehamster` Compose profile, default off, issue #871), same "no persistent process to route" class as `dhcp-probe`/`syslog-logs-permissions` above -- see docs/design-steam-prefill.md for current implementation status |
 | fluent-bit + syslog-ng (`syslog`, combined container since the consolidation PR) | Via fluent-bit → syslog-ng (self-log, #864) | `Log_File /data/fluent-bit.log` (static `services/syslog/fluent-bit.conf`, not a CLI flag since the consolidation) redirects fluent-bit's own operational log (startup, tail-input errors, forwarding failures) into a file instead of `docker logs`, which a dedicated tail input (`tag=fluent-bit.selflog`) re-ingests and forwards — same single-destination trade-off already documented for dnsmasq/nats-server (`docker logs` on this container goes quiet while the `logging` profile is active). **Fixed (#1236)**: during a real syslog-ng outage, fluent-bit's own retry logging (roughly one line/second at the default 5s flush interval) used to feed back into the very tail input forwarding it, growing this file unboundedly for the outage's duration — neither syslog-ng's own rotation nor watchdog's `maybe_prune_syslog` covered it (both operate on the syslog-ng output tree, not this container's own `/data` volume). `services/watchdog/retention.sh`'s `maybe_rotate_fluent_bit_selflog()` (moved out of `watchdog.sh` by #842) now bounds it directly (see the "syslog-ng" section above for the full mechanism); see `services/syslog/entrypoint.sh`'s own comment for the in-place detail. syslog-ng itself has no self-log forwarding of its own (would be redundant, since it lives in the same container and its own stdout is already `docker logs` on this same container). A NEW pipeline stage since the consolidation: the silent-data-loss detector's own alert log (`data-loss-detector.syslog` tag) IS forwarded through fluent-bit, surfacing a detected silent-write-failure condition through the same Admin UI `/logs` view as every other source (with one caveat: if syslog-ng's own destination write is what's actually broken, the alert message itself can be lost the same way -- the structured healthcheck status file's `data_loss_alert_active` field is the cause-independent channel for that specific case). |
 | docker-socket-proxy | Not applicable | Third-party pinned image (`tecnativa/docker-socket-proxy`); only Docker's own stdout logging driver applies, there is no application log stream of our own to forward |
 
@@ -622,25 +624,34 @@ design discussion and its still-open implementation decisions (credential strate
 unresolved; which-service-houses-the-engine is resolved below) before relying on any detail
 here.
 
-**Updated 2026-08-29 (issue #871, scaffold PR): `services/warmer` now exists as a Rust crate**
-(maintainer decision: a new, independently-switchable service, not a `services/ui` module —
-the operator must be able to turn Cache Warming off without affecting the rest of the stack).
-Implemented so far: the credential-store (Argon2id-as-KDF + XChaCha20-Poly1305 AEAD encryption
-of an operator-supplied Steam credential, with optional persistence — see "Credential handling"
-below) and the stream-fetch primitive (bounded-concurrency streaming GET into a discard sink,
-with throughput logging — see "Throughput display" below). **Not yet implemented**: the Steam
-control-plane login (`steam-vent`) and depot/manifest parsing (`steamroom`) that would resolve a
-real app ID into real CDN chunk URLs — this needs a real Steam account to test safely against
-and is deliberately deferred (see `services/warmer/src/main.rs`'s own module doc comment). Not
-yet wired into any `deploy/*/docker-compose.yml` or into full-stack CI validation (AG-VAL-027)
-for the same reason: an inert scaffold with no real depot-fetch behavior would add CI surface
-without a testable claim to validate. Do not treat this row as a runnable feature until that
-integration lands.
+**Updated 2026-08-29 (issue #871, scaffold PR): `services/cachehamster` now
+exists as a Rust crate** (maintainer decision: a new, independently-switchable service, not a
+`services/ui` module — the operator must be able to turn CacheHamster off without affecting
+the rest of the stack). Implemented so far: the credential-store (Argon2id-as-KDF +
+XChaCha20-Poly1305 AEAD encryption of an operator-supplied Steam credential, with optional
+persistence — see "Credential handling" below) and the stream-fetch primitive
+(bounded-concurrency streaming GET into a discard sink, with throughput logging — see
+"Throughput display" below). **Not yet implemented**: the Steam control-plane login
+(`steam-vent`) and depot/manifest parsing (`steamroom`) that would resolve a real app ID into
+real CDN chunk URLs — this needs a real Steam account to test safely against and is
+deliberately deferred (see `services/cachehamster/src/main.rs`'s own module doc comment).
+
+**Infra integration (issue #871): CI-built/published, opt-in Compose profile, functionally
+still inert.** As of this integration pass, `services/cachehamster` is built, Trivy-scanned,
+and published multi-arch (amd64+arm64) by CI like every other service, and
+`deploy/{prod,quickstart}/docker-compose.yml` gate its container behind an opt-in
+`cachehamster` Compose profile (default off — the operator must set `COMPOSE_PROFILES` to
+include it and supply Steam credentials). It is intentionally excluded from full-stack CI
+deep-validation (AG-VAL-027) for the same reason it was excluded from Compose before: an
+inert scaffold with no real depot-fetch behavior and no CI-available Steam credential would
+add CI surface without a testable claim to validate. Do not treat this row as a runnable
+feature until the Steam control-plane/depot integration above lands.
 
 **Decision: stream-and-discard prefill, no SteamCMD.** `steamcmd` was rejected because
 `steamcmd app_update` performs a real local install — it downloads, verifies, decompresses, and
 writes the full depot content to disk on whatever host runs it, which is exactly the
-disk-space/SSD-wear cost this project does not want to impose on an operator's warmer host. The
+disk-space/SSD-wear cost this project does not want to impose on an operator's cachehamster
+host. The
 selected mechanism instead talks to Steam's CDN directly and streams each depot chunk's HTTP
 response body straight into a discard sink — the bytes exist only long enough to pass through
 lancache-ng's proxy (which is what actually caches them) and are never buffered to a file or
@@ -815,5 +826,5 @@ Runs on its own Axum webserver (port 8080) — independent from nginx. If nginx 
 3. Kea DHCP
 4. Watchdog
 5. syslog-ng
-6. Cache warmer
+6. CacheHamster (Cache-Prefill)
 7. Admin UI

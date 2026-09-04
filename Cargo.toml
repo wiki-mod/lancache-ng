@@ -10,7 +10,7 @@ resolver = "3"
 members = [
     "services/dns/nats-subscriber",
     "services/ui",
-    "services/warmer",
+    "services/cachehamster",
     "services/watchdog",
     "tools/pxe-client-probe",
 ]

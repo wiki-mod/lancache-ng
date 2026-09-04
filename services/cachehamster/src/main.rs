@@ -1,8 +1,8 @@
 //!
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
-//! lancache-warmer entry point: wires the credential-store and
-//! stream-fetch primitives (see lib.rs) together into a runnable binary. This is a scaffold, not the finished Cache Warmer: it does not
+//! lancache-cachehamster entry point: wires the credential-store and
+//! stream-fetch primitives (see lib.rs) together into a runnable binary. This is a scaffold, not the finished CacheHamster: it does not
 //! yet log into Steam, resolve an app ID to depots, or parse a manifest.
 //! What it does prove end-to-end: an operator-supplied credential can be
 //! encrypted at rest (or held only in memory, operator's choice) and
@@ -14,17 +14,17 @@
 //! issue for the full scope note): the steam-vent login flow, steamroom depot/
 //! manifest parsing, and therefore any real Steam CDN URL resolution --
 //! integrating those needs a real Steam account to test safely against,
-//! which this session could not do. `WARMER_URLS` below is this
+//! which this session could not do. `CACHEHAMSTER_URLS` below is this
 //! scaffold's stand-in for "the list of chunk URLs a real depot-manifest
 //! resolution step would produce."
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use lancache_warmer::credential_store::{
+use lancache_cachehamster::credential_store::{
     self, CredentialPersistence, load_or_create_master_secret,
 };
-use lancache_warmer::stream_fetch::{ByteCounter, fetch_many_and_discard, spawn_throughput_logger};
+use lancache_cachehamster::stream_fetch::{ByteCounter, fetch_many_and_discard, spawn_throughput_logger};
 
 /// What: default location for this service's own persisted secrets.
 /// Why: matches the `/data` volume convention services/ui/src/main.rs's
@@ -38,7 +38,7 @@ const DEFAULT_DATA_DIR: &str = "/data";
 /// real Steam credential (AG-SEC-002). Mirrors
 /// services/ui/src/main.rs's secondary_registration_token_is_placeholder
 /// byte-for-byte -- duplicated rather than shared because no crate
-/// boundary currently exists between services/ui and services/warmer;
+/// boundary currently exists between services/ui and services/cachehamster;
 /// worth extracting to a shared crate if a third consumer ever needs the
 /// same check.
 fn credential_is_placeholder(value: &str) -> bool {
@@ -55,16 +55,16 @@ fn credential_is_placeholder(value: &str) -> bool {
 }
 
 /// Resolves the operator's chosen credential-persistence mode from
-/// `WARMER_CREDENTIAL_PERSISTENCE`. Fails closed on an unrecognized value
+/// `CACHEHAMSTER_CREDENTIAL_PERSISTENCE`. Fails closed on an unrecognized value
 /// rather than silently defaulting either way -- persistence is the
 /// operator's own decision (maintainer directive), not something this
 /// binary should guess.
 fn resolve_credential_persistence() -> anyhow::Result<CredentialPersistence> {
-    match std::env::var("WARMER_CREDENTIAL_PERSISTENCE").as_deref() {
+    match std::env::var("CACHEHAMSTER_CREDENTIAL_PERSISTENCE").as_deref() {
         Ok("none") | Err(_) => Ok(CredentialPersistence::None),
         Ok("persistent") => Ok(CredentialPersistence::Persistent),
         Ok(other) => anyhow::bail!(
-            "WARMER_CREDENTIAL_PERSISTENCE must be \"none\" or \"persistent\" (or unset, defaulting \
+            "CACHEHAMSTER_CREDENTIAL_PERSISTENCE must be \"none\" or \"persistent\" (or unset, defaulting \
              to \"none\"); got {other:?}"
         ),
     }
@@ -82,7 +82,7 @@ fn reject_placeholder_credential(value: Option<String>) -> anyhow::Result<Option
         && credential_is_placeholder(inner)
     {
         anyhow::bail!(
-            "WARMER_STEAM_CREDENTIAL is set to a default placeholder value -- refusing to start. \
+            "CACHEHAMSTER_STEAM_CREDENTIAL is set to a default placeholder value -- refusing to start. \
              Set it to a real Steam credential, or unset it entirely to run without one."
         );
     }
@@ -91,7 +91,7 @@ fn reject_placeholder_credential(value: Option<String>) -> anyhow::Result<Option
 
 /// Resolves the Steam credential to hold for this run, honoring the
 /// operator's persistence choice:
-/// - `None`: the plaintext from `WARMER_STEAM_CREDENTIAL` (if any) is
+/// - `None`: the plaintext from `CACHEHAMSTER_STEAM_CREDENTIAL` (if any) is
 ///   used for this process only and never touches disk.
 /// - `Persistent`: an env-supplied credential is encrypted and saved on
 ///   first use; on a later run with no env value set, the previously
@@ -103,13 +103,13 @@ fn resolve_steam_credential(
     persistence: CredentialPersistence,
     data_dir: &str,
 ) -> anyhow::Result<Option<String>> {
-    let env_value = reject_placeholder_credential(std::env::var("WARMER_STEAM_CREDENTIAL").ok())?;
+    let env_value = reject_placeholder_credential(std::env::var("CACHEHAMSTER_STEAM_CREDENTIAL").ok())?;
 
     match persistence {
         CredentialPersistence::None => Ok(env_value),
         CredentialPersistence::Persistent => {
-            let master_secret_path = format!("{data_dir}/lancache-warmer-master.secret");
-            let credential_path = format!("{data_dir}/lancache-warmer-credential.json");
+            let master_secret_path = format!("{data_dir}/lancache-cachehamster-master.secret");
+            let credential_path = format!("{data_dir}/lancache-cachehamster-credential.json");
             let master_secret = load_or_create_master_secret(&master_secret_path)?;
 
             if let Some(plaintext) = env_value {
@@ -137,11 +137,11 @@ fn resolve_steam_credential(
     }
 }
 
-/// Parses `WARMER_URLS` (comma-separated) into the fetch list. Stand-in
+/// Parses `CACHEHAMSTER_URLS` (comma-separated) into the fetch list. Stand-in
 /// for a real depot-manifest resolution step -- see this file's own
 /// module doc comment.
 fn resolve_urls() -> Vec<String> {
-    std::env::var("WARMER_URLS")
+    std::env::var("CACHEHAMSTER_URLS")
         .unwrap_or_default()
         .split(',')
         .map(str::trim)
@@ -150,12 +150,12 @@ fn resolve_urls() -> Vec<String> {
         .collect()
 }
 
-/// Parses `WARMER_CONCURRENCY`, defaulting to 4 in-flight fetches when
+/// Parses `CACHEHAMSTER_CONCURRENCY`, defaulting to 4 in-flight fetches when
 /// unset or invalid rather than failing closed -- unlike the credential
 /// checks above, an out-of-range concurrency value has no security
 /// consequence, only a performance one.
 fn resolve_concurrency() -> usize {
-    std::env::var("WARMER_CONCURRENCY")
+    std::env::var("CACHEHAMSTER_CONCURRENCY")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
@@ -169,13 +169,13 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     tracing::warn!(
-        "lancache-warmer is a scaffold (issue #871): it does not yet resolve a Steam app ID to \
+        "lancache-cachehamster is a scaffold (issue #871): it does not yet resolve a Steam app ID to \
          real depot chunk URLs. See docs/design-steam-prefill.md for the current implementation \
          plan and open decisions."
     );
 
     let data_dir =
-        std::env::var("WARMER_DATA_DIR").unwrap_or_else(|_| DEFAULT_DATA_DIR.to_string());
+        std::env::var("CACHEHAMSTER_DATA_DIR").unwrap_or_else(|_| DEFAULT_DATA_DIR.to_string());
     let persistence = resolve_credential_persistence()?;
     let credential = resolve_steam_credential(persistence, &data_dir)?;
 
@@ -188,7 +188,7 @@ async fn main() -> anyhow::Result<()> {
     let urls = resolve_urls();
     if urls.is_empty() {
         tracing::warn!(
-            "WARMER_URLS is empty; nothing to fetch. This scaffold has no real depot-manifest \
+            "CACHEHAMSTER_URLS is empty; nothing to fetch. This scaffold has no real depot-manifest \
              resolution yet, so it can only warm a directly-configured URL list."
         );
         return Ok(());

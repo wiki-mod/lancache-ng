@@ -20,7 +20,7 @@ on:
         default: "no"
       services:
         description: >-
-          Comma-separated subset of proxy,dns,watchdog,dhcp,dhcp-proxy,ntp,syslog,ui,build-tools
+          Comma-separated subset of proxy,dns,watchdog,dhcp,dhcp-proxy,ntp,syslog,ui,build-tools,cachehamster
           to build, or "all".
         required: false
         default: all
@@ -108,6 +108,7 @@ jobs:
             [syslog]=services/syslog
             [ui]=.
             [build-tools]=tools/build-tools
+            [cachehamster]=services/cachehamster
           )
           declare -A dockerfiles=(
             [proxy]=""
@@ -119,6 +120,7 @@ jobs:
             [syslog]=""
             [ui]=services/ui/Dockerfile
             [build-tools]=""
+            [cachehamster]=""
             [utilities]=""
           )
           declare -A build_contexts=(
@@ -131,6 +133,7 @@ jobs:
             [syslog]=""
             [ui]="shared-scripts=scripts/lib"
             [build-tools]=""
+            [cachehamster]=""
           )
           declare -A descriptions=(
             [proxy]="nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic."
@@ -142,10 +145,11 @@ jobs:
             [syslog]="Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428)."
             [ui]="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
             [build-tools]="Prebuilt lancache-ng CI and developer validation toolchain image."
+            [cachehamster]="lancache-ng CacheHamster: Steam cache-warming prefill daemon (scaffold, issue #871)."
           )
 
           if [ "$SERVICES_INPUT" = "all" ] || [ -z "$SERVICES_INPUT" ]; then
-            selected=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)
+            selected=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools cachehamster)
           else
             IFS=',' read -ra selected <<< "$SERVICES_INPUT"
           fi
