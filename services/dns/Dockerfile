@@ -60,7 +60,7 @@ RUN set -eu; \
 ARG CARGO_BUILD_JOBS=
 # What: no in-file default; empty ARG fails resolve_cargo_profile_overrides
 # closed below, same contract as CARGO_BUILD_JOBS above.
-# Why: djdomi (maintainer review 5109560874, PR #1796) rejected hardcoding
+# Why: djdomi (maintainer review 5109560874) rejected hardcoding
 # lto/codegen-units in Cargo.toml -- a Dockerfile ARG default would just
 # relocate the same hardcode one file over.
 # From: Issue #1095

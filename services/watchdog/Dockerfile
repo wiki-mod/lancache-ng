@@ -55,7 +55,7 @@ RUN set -eu; \
 ARG CARGO_BUILD_JOBS=
 # What: no in-file default; empty ARG fails resolve_cargo_profile_overrides
 # closed below, same contract as CARGO_BUILD_JOBS above.
-# Why: djdomi (maintainer review 5109560874, PR #1796) rejected hardcoding
+# Why: djdomi (maintainer review 5109560874) rejected hardcoding
 # lto/codegen-units in Cargo.toml -- a Dockerfile ARG default would just
 # relocate the same hardcode one file over.
 # From: Issue #1095
@@ -92,8 +92,8 @@ COPY services/watchdog/src/ ./services/watchdog/src/
 # resolve_cargo_jobs/run_cargo_build) are byte-identical in structure and
 # intent to services/dns/Dockerfile's own nats-subscriber builder stage
 # (the ccache-over-distcc pattern, AG-CI-022; resolve_cargo_profile_overrides
-# is Issue #1095 | PR #1796 review 5109560874) -- see that file's own
-# extensive inline documentation for the
+# mirrors that file's own function of the same name, per maintainer review
+# 5109560874) -- see that file's own extensive inline documentation for the
 # full reasoning behind each step (probe-then-commit accelerator selection,
 # three-tier fallback, remote-toolchain-identity verification). Only the
 # per-crate identifiers differ: SCCACHE_REDIS_KEY_PREFIX/CCACHE_DIR use

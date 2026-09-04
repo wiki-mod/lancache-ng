@@ -2084,10 +2084,22 @@ jobs:
           # hardcoding lto/codegen-units in Cargo.toml; this mirrors the
           # CARGO_BUILD_JOBS guard above for the same failure class.
           # From: Issue #1095
+          # What: matches on the bare "vars.NAME" substring, never a
+          # complete double-curly-brace expression, in the grep pattern.
+          # Why: a full double-curly-brace vars-lookup expression embedded
+          # in this very run script would itself be interpolated by the
+          # Actions runner before the shell ever executes it, comparing
+          # against the resolved value instead of the file's literal text
+          # -- confirmed live (this exact guard failed on itself, closed
+          # over the resolved variable value, until split this way,
+          # mirroring the CARGO_BUILD_JOBS guard above which was already
+          # written this same safe way for the same reason).
           for workflow in .github/workflows/build-push.yml .github/workflows/build-push-hosted-fallback.yml; do
-            grep -F 'PROJECT_CARGO_LTO=${{ vars.PROJECT_CARGO_LTO }}' "$workflow" >/dev/null \
+            grep -F 'PROJECT_CARGO_LTO=' "$workflow" >/dev/null \
+              && grep -F 'vars.PROJECT_CARGO_LTO' "$workflow" >/dev/null \
               || { echo "::error::$workflow must expose the PROJECT_CARGO_LTO repository variable as a build-arg to Cargo release builds."; exit 1; }
-            grep -F 'PROJECT_CARGO_CODEGENUNIT=${{ vars.PROJECT_CARGO_CODEGENUNIT }}' "$workflow" >/dev/null \
+            grep -F 'PROJECT_CARGO_CODEGENUNIT=' "$workflow" >/dev/null \
+              && grep -F 'vars.PROJECT_CARGO_CODEGENUNIT' "$workflow" >/dev/null \
               || { echo "::error::$workflow must expose the PROJECT_CARGO_CODEGENUNIT repository variable as a build-arg to Cargo release builds."; exit 1; }
           done
           if grep -RInE '^(ARG PROJECT_CARGO_LTO=.+|ARG PROJECT_CARGO_CODEGENUNIT=.+|ENV PROJECT_CARGO_LTO=|ENV PROJECT_CARGO_CODEGENUNIT=)' services/*/Dockerfile; then

@@ -115,7 +115,7 @@ jobs:
         env:
           DHCP_PXE_SIMULATION_CLIENT_IMAGE: ${{ steps.build-tools-image.outputs.image }}
           # What: script also runs `cargo build --release` (pxe-client-probe).
-          # Why: Issue #1095, PR #1796 review 5109560874 -- same
+          # Why: maintainer review 5109560874 -- same
           # PROJECT_CARGO_LTO/PROJECT_CARGO_CODEGENUNIT sourcing as every
           # other Cargo release build in this repo, no in-file default.
           # From: Issue #1095

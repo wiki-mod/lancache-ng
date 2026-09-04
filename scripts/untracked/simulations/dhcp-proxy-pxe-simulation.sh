@@ -72,7 +72,7 @@ source "$repo_root/scripts/lib/reserve-validation-subnet.sh"
 client_tool_image="${DHCP_PXE_SIMULATION_CLIENT_IMAGE:?DHCP_PXE_SIMULATION_CLIENT_IMAGE is required (an image providing the Rust toolchain to compile tools/pxe-client-probe and tcpdump to capture the reply, e.g. the build-tools image)}"
 # What: no in-file/script default for either -- same fail-closed contract as
 # services/{dns,ui,watchdog}/Dockerfile's resolve_cargo_profile_overrides().
-# Why: djdomi (maintainer review 5109560874, PR #1796) rejected hardcoding
+# Why: djdomi (maintainer review 5109560874) rejected hardcoding
 # lto/codegen-units anywhere; this script also runs `cargo build --release`
 # (below) and is therefore in scope for the same failure class.
 # From: Issue #1095
@@ -315,8 +315,8 @@ echo "== Compiling the synthetic PXE client probe (tools/pxe-client-probe) with 
 # What: threads PROJECT_CARGO_LTO/PROJECT_CARGO_CODEGENUNIT into this
 # container as CARGO_PROFILE_RELEASE_LTO/CARGO_PROFILE_RELEASE_CODEGEN_UNITS.
 # Why: Cargo.toml no longer hardcodes [profile.release] lto/codegen-units
-# (Issue #1095, PR #1796 review 5109560874); every `cargo build --release`
-# in this repo, this one included, must source them the same way.
+# (maintainer review 5109560874); every `cargo build --release` in this
+# repo, this one included, must source them the same way.
 # From: Issue #1095
 docker run --rm \
     -v "$repo_root:/repo:ro" \

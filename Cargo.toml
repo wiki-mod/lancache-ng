@@ -20,7 +20,7 @@ members = [
 # From: Issue #1095
 
 # What: no `lto`/`codegen-units` keys in [profile.release] here.
-# Why: djdomi (maintainer review 5109560874, PR #1796) rejected hardcoding
+# Why: djdomi (maintainer review 5109560874) rejected hardcoding
 # these performance-affecting values in-file. Cargo natively honors
 # CARGO_PROFILE_RELEASE_LTO / CARGO_PROFILE_RELEASE_CODEGEN_UNITS as
 # environment overrides of the exact same profile keys, so the org

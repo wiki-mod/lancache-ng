@@ -413,7 +413,7 @@ ARG CARGO_BUILD_JOBS=
 # What: no in-file default; empty ARG fails resolve_cargo_profile_overrides
 # closed below, same contract as CARGO_BUILD_JOBS above. Declared once here
 # (before both RUN blocks in this stage), so both inherit it.
-# Why: djdomi (maintainer review 5109560874, PR #1796) rejected hardcoding
+# Why: djdomi (maintainer review 5109560874) rejected hardcoding
 # lto/codegen-units in Cargo.toml -- a Dockerfile ARG default would just
 # relocate the same hardcode one file over.
 # From: Issue #1095
@@ -469,7 +469,7 @@ RUN mkdir -p services/watchdog/src services/warmer/src \
 #                            CARGO_PROFILE_RELEASE_LTO/CARGO_PROFILE_RELEASE_CODEGEN_UNITS
 #                            before run_cargo_build is called in EITHER RUN block below, so
 #                            every retry tier of both the pre-cache and the real-source build
-#                            inherits the override. Issue #1095 | PR #1796 review 5109560874.
+#                            inherits the override (maintainer review 5109560874).
 #   resolve_cargo_jobs     - CARGO_BUILD_JOBS if set, else nproc-2 floored at 4.
 #   run_cargo_build        - builds with ccache+distcc if both enabled, retrying with
 #                            plain distcc first on failure, then a normal local compiler
