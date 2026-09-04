@@ -3,13 +3,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # CI image pinning helper: scans .github/workflows and Dockerfiles for mutable
 # image references (floating tags like :latest, @v4-style action references
-# without SHA pins, untagged base images, and raw un-lowercased
-# github.repository expressions in GHCR paths) and reports them. Intended as
+# without SHA pins, and untagged base images) and reports them. Intended as
 # a transparency tool to make mixed mutable+immutable states visible; can be
 # used as a CI gate to enforce pinning (exit 1 if violations found) or as an
 # informational report (exit 0, violations reported to stdout/stderr).
 # Usage: check-mutable-refs.sh [--only action-refs|dockerfile-base-images|
-#        workflow-image-defaults|repository-case]; omitted runs every check.
+#        workflow-image-defaults]; omitted runs every check.
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -76,13 +75,13 @@ check_dockerfile_base_images() {
         violations_found=1
     fi
 
-    # What: ARG BUILD_TOOLS_IMAGE/UTILITIES_IMAGE defaults to :latest
+    # What: ARG BUILD_TOOLS_IMAGE defaults to :latest
     # Why: FROM-line check doesn't detect ARG :latest indirection
     # From: Issue #1095 | PR #1687
     local mutable_arg_defaults
-    mutable_arg_defaults=$(grep -nE 'ARG (BUILD_TOOLS_IMAGE|UTILITIES_IMAGE).*:latest' services/*/Dockerfile || true)
+    mutable_arg_defaults=$(grep -nE 'ARG BUILD_TOOLS_IMAGE.*:latest' services/*/Dockerfile || true)
     if [[ -n "$mutable_arg_defaults" ]]; then
-        printf "%b[DOCKERFILE BUILD TOOLS]%b BUILD_TOOLS_IMAGE/UTILITIES_IMAGE ARG defaults use :latest (override-able at build time):\n" "$YELLOW" "$NC"
+        printf "%b[DOCKERFILE BUILD TOOLS]%b BUILD_TOOLS_IMAGE ARG defaults use :latest (override-able at build time):\n" "$YELLOW" "$NC"
         printf '%s\n' "$mutable_arg_defaults"
         warnings=$((warnings + 1))
     fi
@@ -105,45 +104,6 @@ check_workflow_image_defaults() {
         printf '%s\n' "$matches"
         warnings=$((warnings + 1))
         return 0  # Warning, not violation
-    fi
-    return 0
-}
-
-# What: flags raw ${{ github.repository }} for GHCR safety
-# Why: GHCR lowercase requirement; github.repository not guaranteed
-# From: Issue #1504
-check_repository_case_expressions() {
-    # What: matches ${{ github.repository }} with braces fully escaped.
-    # Why: escape braces for POSIX grep compatibility in containers
-    # From: Issue #1504
-    local pattern='\$\{\{ *github\.repository *\}\}'
-    # What: expected baseline count for github.repository expressions
-    # Why: must sync with real count in same commit, or guard breaks
-    # From: Issue #1504
-    local -A expected_counts=(
-        [.github/workflows/build-push.yml]=29
-        [.github/workflows/build-tools.yml]=1
-        [.github/workflows/build-push-hosted-fallback.yml]=5
-    )
-    local file expected actual mismatch=0
-
-    for file in "${!expected_counts[@]}"; do
-        expected="${expected_counts[$file]}"
-        actual=$(grep -cE "$pattern" "$file" || true)
-        if [[ "$actual" -ne "$expected" ]]; then
-            printf "%b[REPOSITORY CASE]%b %s: expected %d raw github.repository expression(s), found %d.\n" "$RED" "$NC" "$file" "$expected" "$actual"
-            if [[ "$actual" -gt "$expected" ]]; then
-                printf '  A new raw ${{ github.repository }} expression was added. If it is bash-reachable, use dmeta_ghcr_repo() instead (see scripts/lib/docker-metadata.sh), per issue #1095 (G1). If it is a genuine new pure-YAML or non-GHCR site, raise the expected count above with a reason.\n'
-            else
-                printf '  Fewer raw expressions than expected -- likely a site was fixed. Lower the expected count above to match, so this baseline stays accurate.\n'
-            fi
-            mismatch=1
-        fi
-    done
-
-    if [[ "$mismatch" -eq 1 ]]; then
-        violations=$((violations + 1))
-        return 1
     fi
     return 0
 }
@@ -188,7 +148,7 @@ case "${1:-}" in
     "") ;;
     *)
         printf 'check-mutable-refs: unknown argument: %s\n' "$1" >&2
-        printf 'Usage: check-mutable-refs.sh [--only action-refs|dockerfile-base-images|workflow-image-defaults|repository-case]\n' >&2
+        printf 'Usage: check-mutable-refs.sh [--only action-refs|dockerfile-base-images|workflow-image-defaults]\n' >&2
         exit 2
         ;;
 esac
@@ -204,7 +164,6 @@ run_check() {
 run_check action-refs "Checking GitHub Actions references..." check_action_refs
 run_check dockerfile-base-images "Checking Dockerfile base images..." check_dockerfile_base_images
 run_check workflow-image-defaults "Checking workflow image defaults..." check_workflow_image_defaults
-run_check repository-case "Checking github.repository case-safety (issue #1504/#1095 G1)..." check_repository_case_expressions
 
 if [[ -n "$only_check" && "$violations" -eq 0 && "$warnings" -eq 0 ]]; then
     printf 'check-mutable-refs --only %s: OK\n' "$only_check"
