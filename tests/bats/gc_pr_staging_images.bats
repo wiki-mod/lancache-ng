@@ -1164,7 +1164,7 @@ VERSIONS_JSON
     [ "$deleted" -eq 1 ]
     [ "$(wc -l <"$delete_log")" -eq 1 ]
     grep -F '/versions/51' "$delete_log"
-    ! grep -F '/versions/53' "$delete_log"
+    run ! grep -F '/versions/53' "$delete_log"
 }
 
 
@@ -1500,8 +1500,8 @@ VERSIONS_JSON
     [ "$deleted" -eq 1 ]
     [ "$kept" -eq 2 ]
     grep -q "/versions/301$" "$delete_log"
-    ! grep -q "/versions/302$" "$delete_log"
-    ! grep -q "/versions/303$" "$delete_log"
+    run ! grep -q "/versions/302$" "$delete_log"
+    run ! grep -q "/versions/303$" "$delete_log"
 }
 
 # What: a cap-deferred root must not leak into Pass 1.5.
@@ -1564,7 +1564,7 @@ VERSIONS_JSON
 
     [ "$deleted" -eq 1 ]
     grep -q "/versions/501$" "$delete_log"
-    ! grep -q "/versions/502$" "$delete_log"
+    run ! grep -q "/versions/502$" "$delete_log"
 }
 
 # What: exercises the real quota -> worker -> Pass 1/2 path.
@@ -1642,12 +1642,12 @@ VERSIONS_JSON
         grep -q "/versions/${i}$" "$delete_log"
     done
     for i in 105 106; do
-        ! grep -q "/versions/${i}$" "$delete_log"
+        run ! grep -q "/versions/${i}$" "$delete_log"
     done
     # Pass 2 gets 2 reserved slots, then hits the cap.
     grep -q "/versions/201$" "$delete_log"
     grep -q "/versions/202$" "$delete_log"
-    ! grep -q "/versions/203$" "$delete_log"
+    run ! grep -q "/versions/203$" "$delete_log"
     [ "$(grep -c 'untagged, unreferenced orphan digest' "$run_log")" -eq 2 ]
     [ "$(grep -c 'only closed-PR staging tags' "$run_log")" -eq 4 ]
 }
