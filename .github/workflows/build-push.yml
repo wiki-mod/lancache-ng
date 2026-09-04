@@ -2083,6 +2083,26 @@ jobs:
             echo "::error::Rust service Dockerfiles must not use scheduler-only args or hardcoded CARGO_BUILD_JOBS values."
             exit 1
           fi
+          # What: PROJECT_CARGO_LTO/PROJECT_CARGO_CODEGENUNIT build-arg guard.
+          # Why: bare "vars.NAME" substring only -- a full expression here
+          # self-interpolates before the shell runs the grep pattern.
+          # From: Issue #1095
+          for workflow in .github/workflows/build-push.yml .github/workflows/build-push-hosted-fallback.yml; do
+            grep -F 'PROJECT_CARGO_LTO=' "$workflow" >/dev/null \
+              && grep -F 'vars.PROJECT_CARGO_LTO' "$workflow" >/dev/null \
+              || { echo "::error::$workflow must expose the PROJECT_CARGO_LTO repository variable as a build-arg to Cargo release builds."; exit 1; }
+            grep -F 'PROJECT_CARGO_CODEGENUNIT=' "$workflow" >/dev/null \
+              && grep -F 'vars.PROJECT_CARGO_CODEGENUNIT' "$workflow" >/dev/null \
+              || { echo "::error::$workflow must expose the PROJECT_CARGO_CODEGENUNIT repository variable as a build-arg to Cargo release builds."; exit 1; }
+          done
+          if grep -RInE '^(ARG PROJECT_CARGO_LTO=.+|ARG PROJECT_CARGO_CODEGENUNIT=.+|ENV PROJECT_CARGO_LTO=|ENV PROJECT_CARGO_CODEGENUNIT=)' services/*/Dockerfile; then
+            echo "::error::Rust service Dockerfiles must not hardcode a PROJECT_CARGO_LTO/PROJECT_CARGO_CODEGENUNIT default; both must fail closed when unset, mirroring CARGO_BUILD_JOBS."
+            exit 1
+          fi
+          if grep -RInE '^[[:space:]]*(lto|codegen-units)[[:space:]]*=' Cargo.toml services/dns/nats-subscriber/Cargo.toml services/ui/Cargo.toml services/warmer/Cargo.toml services/watchdog/Cargo.toml tools/pxe-client-probe/Cargo.toml; then
+            echo "::error::[profile.release] lto/codegen-units must not be hardcoded in any workspace Cargo.toml; source them from CARGO_PROFILE_RELEASE_LTO/CARGO_PROFILE_RELEASE_CODEGEN_UNITS env overrides (PROJECT_CARGO_LTO/PROJECT_CARGO_CODEGENUNIT)."
+            exit 1
+          fi
           if grep -RInE 'cargo install sccache .*--locked|cargo install .*--locked .*sccache' services/*/Dockerfile tools/build-tools/Dockerfile scripts; then
             echo "::error::sccache source installs must stay version-pinned but not use --locked while the pinned upstream lockfile emits yanked-crate warnings."
             exit 1
@@ -3467,7 +3487,7 @@ jobs:
       # This job resolves its own build-tools image rather than reusing validate-compose's
       # exported build_tools_image output. That output is deliberately locked to the
       # published, digest-qualified image (never a branch-local fallback) because
-      # dns_cargo_audit/ui_cargo_audit need a reproducible, previously-audited image.
+      # cargo_audit needs a reproducible, previously-audited image.
       # Coverage measurement has no such reproducibility requirement, so it can accept a
       # branch-local rebuild when a PR's own Dockerfile change (like adding tarpaulin) has
       # not been published to ghcr.io yet.
@@ -3481,7 +3501,7 @@ jobs:
           printf 'BUILD_TOOLS_IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
       # Coverage output must land on a writable host path: the repo checkout
       # itself is bind-mounted read-only into the build-tools container below,
-      # matching the dns_cargo_audit/ui_cargo_audit pattern.
+      # matching the cargo_audit job's pattern.
       - name: Prepare writable coverage output directories
         run: |
           set -euo pipefail
@@ -3855,18 +3875,18 @@ jobs:
           bash -n services/watchdog/watchdog.sh
           test -x services/watchdog/watchdog.sh
 
-  dns_cargo_audit:
-    # Dependency audits remain crate-specific. They are skipped only when path
-    # filtering proves the crate and workflow contract did not change.
+  cargo_audit:
+    # What: one workspace audit, not 3 per-service jobs.
+    # Why: 3 jobs audited the identical shared lockfile.
+    # From: Issue #1095
     #
-    # Also skipped on a metadata-only pull_request event -- see
-    # dns_rust_quality's comment above for the full reasoning (Cargo.lock is
-    # unchanged, so a prior run's audit result already stands).
-    name: cargo-audit (dns/nats-subscriber)
+    # Also skipped on a metadata-only PR event -- see
+    # dns_rust_quality's comment above for the reasoning.
+    name: cargo-audit (workspace)
     needs: [validate-compose, detect-changes]
-    # What: path-scoped same as dns_test; identical if: condition.
-    # Why: reuses dns_test's known-good-result/AG-WF-004 tolerance.
-    # From: Issue #1095 | PR #1532
+    # What: fires if any Rust member/workflow changed.
+    # Why: all 5 share the one audited root lock now.
+    # From: Issue #1095
     if: >-
       ${{
         always() &&
@@ -3878,174 +3898,25 @@ jobs:
         (
           needs['detect-changes'].result != 'success' ||
           needs['detect-changes'].outputs.dns_rust == 'true' ||
-          needs['detect-changes'].outputs.workflow == 'true'
-        )
-      }}
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    # Real runs: 10-14s. cargo-audit checks Cargo.lock against the advisory
-    # database using a prebuilt binary (AG-KD-003) -- it does not compile
-    # the crate, so it does not share dns_test's cold-compile risk. 20
-    # minutes covers a slow advisory-database fetch with real headroom.
-    timeout-minutes: 20
-    # What: job-level concurrency, cancel-in-progress: true -- same
-    # pattern as dns_test above.
-    # Why: no consumer besides ci_scope_policy, which tolerates cancelled.
-    # From: PR #926
-    concurrency:
-      group: >-
-        ${{
-          (github.event_name == 'workflow_dispatch' || github.run_attempt != '1') &&
-          format('{0}-dns-cargo-audit-{1}-{2}', github.workflow, github.ref, github.run_id) ||
-          format('{0}-dns-cargo-audit-{1}', github.workflow, github.ref)
-        }}
-      cancel-in-progress: true
-    env:
-      BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
-    steps:
-      - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
-      - uses: *checkout_centraliced_versioning # v7.0.1
-      - name: Audit Rust dependencies (dns/nats-subscriber)
-        run: |
-          set -euo pipefail
-
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -e HOME=/tmp \
-            -e CARGO_HOME=/tmp/cargo-home \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            timeout --kill-after=30 --signal=KILL 900 \
-            bash -c 'set -euo pipefail
-              audit_log="$(mktemp)"
-              trap '"'"'rm -f "$audit_log"'"'"' EXIT
-              if ! cargo audit --deny warnings --file services/dns/nats-subscriber/Cargo.lock >"$audit_log" 2>&1; then
-                cat "$audit_log"
-                exit 1
-              fi
-              cat "$audit_log"
-              if grep -Eiq '"'"'(^|[[:space:]])warning:'"'"' "$audit_log"; then
-                echo "::error::cargo-audit emitted warnings."
-                exit 1
-              fi'
-
-      - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
-        if: always()
-  ui_cargo_audit:
-    # UI dependency audit mirrors the DNS audit and stays parallel to avoid
-    # serializing independent Rust checks.
-    #
-    # Also skipped on a metadata-only pull_request event -- see
-    # dns_rust_quality's comment above for the full reasoning.
-    name: cargo-audit (ui)
-    needs: [validate-compose, detect-changes]
-    # What: path-scoped same as dns_test; identical if: condition.
-    # Why: reuses dns_test's known-good-result/AG-WF-004 tolerance.
-    # From: Issue #1095 | PR #1532
-    if: >-
-      ${{
-        always() &&
-        needs['validate-compose'].result == 'success' &&
-        (
-          github.event_name != 'pull_request' ||
-          !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
-        ) &&
-        (
-          needs['detect-changes'].result != 'success' ||
           needs['detect-changes'].outputs.ui == 'true' ||
-          needs['detect-changes'].outputs.workflow == 'true'
-        )
-      }}
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    # Same reasoning and value as dns_cargo_audit above (prebuilt cargo-audit
-    # binary, no crate compilation). Real runs: 10-18s.
-    timeout-minutes: 20
-    # What: job-level concurrency, cancel-in-progress: true -- same
-    # pattern as dns_cargo_audit above.
-    # Why: no consumer besides ci_scope_policy, which tolerates cancelled.
-    # From: PR #926
-    concurrency:
-      group: >-
-        ${{
-          (github.event_name == 'workflow_dispatch' || github.run_attempt != '1') &&
-          format('{0}-ui-cargo-audit-{1}-{2}', github.workflow, github.ref, github.run_id) ||
-          format('{0}-ui-cargo-audit-{1}', github.workflow, github.ref)
-        }}
-      cancel-in-progress: true
-    env:
-      BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
-    steps:
-      - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
-      - uses: *checkout_centraliced_versioning # v7.0.1
-      - name: Audit Rust dependencies (ui)
-        run: |
-          set -euo pipefail
-
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -e HOME=/tmp \
-            -e CARGO_HOME=/tmp/cargo-home \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            timeout --kill-after=30 --signal=KILL 900 \
-            bash -c 'set -euo pipefail
-              audit_log="$(mktemp)"
-              trap '"'"'rm -f "$audit_log"'"'"' EXIT
-              if ! cargo audit --deny warnings --file services/ui/Cargo.lock >"$audit_log" 2>&1; then
-                cat "$audit_log"
-                exit 1
-              fi
-              cat "$audit_log"
-              if grep -Eiq '"'"'(^|[[:space:]])warning:'"'"' "$audit_log"; then
-                echo "::error::cargo-audit emitted warnings."
-                exit 1
-              fi'
-
-      - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
-        if: always()
-  watchdog_cargo_audit:
-    # What: watchdog dependency audit mirrors the DNS/UI audits, staying
-    # parallel to avoid serializing independent Rust checks.
-    # Why: added alongside watchdog_rust_quality/watchdog_test now that
-    # services/watchdog/Cargo.toml exists.
-    # From: PR #1355
-    #
-    # Also skipped on a metadata-only pull_request event -- see
-    # dns_rust_quality's comment above for the full reasoning.
-    name: cargo-audit (watchdog)
-    needs: [validate-compose, detect-changes]
-    # What: path-scoped same as dns_test; identical if: condition.
-    # Why: reuses dns_test's known-good-result/AG-WF-004 tolerance.
-    # From: Issue #1095 | PR #1532
-    if: >-
-      ${{
-        always() &&
-        needs['validate-compose'].result == 'success' &&
-        (
-          github.event_name != 'pull_request' ||
-          !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
-        ) &&
-        (
-          needs['detect-changes'].result != 'success' ||
           needs['detect-changes'].outputs.watchdog == 'true' ||
           needs['detect-changes'].outputs.workflow == 'true'
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    # Same reasoning and value as dns_cargo_audit/ui_cargo_audit above
-    # (prebuilt cargo-audit binary, no crate compilation).
+    # What: 10-18s; audits Cargo.lock via a prebuilt binary.
+    # Why: no crate compile, so no cold-compile risk exists.
+    # From: Issue #1095
     timeout-minutes: 20
-    # What: job-level concurrency, cancel-in-progress: true -- mirrors
-    # dns_cargo_audit/ui_cargo_audit's own pattern.
-    # Why: no consumer besides ci_scope_policy, which tolerates cancelled.
-    # From: PR #1355
+    # What: job-level concurrency, cancel-in-progress true.
+    # Why: no consumer but ci_scope_policy; tolerates skip.
+    # From: Issue #1095
     concurrency:
       group: >-
         ${{
           (github.event_name == 'workflow_dispatch' || github.run_attempt != '1') &&
-          format('{0}-watchdog-cargo-audit-{1}-{2}', github.workflow, github.ref, github.run_id) ||
-          format('{0}-watchdog-cargo-audit-{1}', github.workflow, github.ref)
+          format('{0}-cargo-audit-{1}-{2}', github.workflow, github.ref, github.run_id) ||
+          format('{0}-cargo-audit-{1}', github.workflow, github.ref)
         }}
       cancel-in-progress: true
     env:
@@ -4053,7 +3924,7 @@ jobs:
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - uses: *checkout_centraliced_versioning # v7.0.1
-      - name: Audit Rust dependencies (watchdog)
+      - name: Audit Rust dependencies (workspace)
         run: |
           set -euo pipefail
 
@@ -4068,7 +3939,7 @@ jobs:
             bash -c 'set -euo pipefail
               audit_log="$(mktemp)"
               trap '"'"'rm -f "$audit_log"'"'"' EXIT
-              if ! cargo audit --deny warnings --file services/watchdog/Cargo.lock >"$audit_log" 2>&1; then
+              if ! cargo audit --deny warnings --file Cargo.lock >"$audit_log" 2>&1; then
                 cat "$audit_log"
                 exit 1
               fi
@@ -4093,9 +3964,7 @@ jobs:
       - dns_test
       - ui_test
       - watchdog_test
-      - dns_cargo_audit
-      - ui_cargo_audit
-      - watchdog_cargo_audit
+      - cargo_audit
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
     # What: 15-minute timeout floor, well above the real 7-14s runtime
@@ -4142,9 +4011,7 @@ jobs:
           DNS_TEST_RESULT: ${{ needs.dns_test.result }}
           UI_TEST_RESULT: ${{ needs.ui_test.result }}
           WATCHDOG_TEST_RESULT: ${{ needs.watchdog_test.result }}
-          DNS_CARGO_AUDIT_RESULT: ${{ needs.dns_cargo_audit.result }}
-          UI_CARGO_AUDIT_RESULT: ${{ needs.ui_cargo_audit.result }}
-          WATCHDOG_CARGO_AUDIT_RESULT: ${{ needs.watchdog_cargo_audit.result }}
+          CARGO_AUDIT_RESULT: ${{ needs.cargo_audit.result }}
         run: |
           set -euo pipefail
 
@@ -4210,9 +4077,7 @@ jobs:
             require_success_or_intentional_cancellation "test (dns/nats-subscriber)" "$DNS_TEST_RESULT"
             require_success_or_intentional_cancellation "test (ui)" "$UI_TEST_RESULT"
             require_success_or_intentional_cancellation "test (watchdog)" "$WATCHDOG_TEST_RESULT"
-            require_success_or_intentional_cancellation "cargo-audit (dns/nats-subscriber)" "$DNS_CARGO_AUDIT_RESULT"
-            require_success_or_intentional_cancellation "cargo-audit (ui)" "$UI_CARGO_AUDIT_RESULT"
-            require_success_or_intentional_cancellation "cargo-audit (watchdog)" "$WATCHDOG_CARGO_AUDIT_RESULT"
+            require_success_or_intentional_cancellation "cargo-audit (workspace)" "$CARGO_AUDIT_RESULT"
             exit 0
           fi
 
@@ -4270,31 +4135,34 @@ jobs:
           if [ "$dns_rust_required" = "true" ]; then
             require_success "rust-quality (dns/nats-subscriber)" "$DNS_RUST_QUALITY_RESULT"
             require_success "test (dns/nats-subscriber)" "$DNS_TEST_RESULT"
-            require_success "cargo-audit (dns/nats-subscriber)" "$DNS_CARGO_AUDIT_RESULT"
           else
             require_success_or_intentional_skip "rust-quality (dns/nats-subscriber)" "$DNS_RUST_QUALITY_RESULT"
             require_success_or_intentional_skip "test (dns/nats-subscriber)" "$DNS_TEST_RESULT"
-            require_success_or_intentional_skip "cargo-audit (dns/nats-subscriber)" "$DNS_CARGO_AUDIT_RESULT"
           fi
 
           if [ "$ui_required" = "true" ]; then
             require_success "rust-quality (ui)" "$UI_RUST_QUALITY_RESULT"
             require_success "test (ui)" "$UI_TEST_RESULT"
-            require_success "cargo-audit (ui)" "$UI_CARGO_AUDIT_RESULT"
           else
             require_success_or_intentional_skip "rust-quality (ui)" "$UI_RUST_QUALITY_RESULT"
             require_success_or_intentional_skip "test (ui)" "$UI_TEST_RESULT"
-            require_success_or_intentional_skip "cargo-audit (ui)" "$UI_CARGO_AUDIT_RESULT"
           fi
 
           if [ "$watchdog_required" = "true" ]; then
             require_success "rust-quality (watchdog)" "$WATCHDOG_RUST_QUALITY_RESULT"
             require_success "test (watchdog)" "$WATCHDOG_TEST_RESULT"
-            require_success "cargo-audit (watchdog)" "$WATCHDOG_CARGO_AUDIT_RESULT"
           else
             require_success_or_intentional_skip "rust-quality (watchdog)" "$WATCHDOG_RUST_QUALITY_RESULT"
             require_success_or_intentional_skip "test (watchdog)" "$WATCHDOG_TEST_RESULT"
-            require_success_or_intentional_skip "cargo-audit (watchdog)" "$WATCHDOG_CARGO_AUDIT_RESULT"
+          fi
+
+          # What: one audit gate, not 3 per-service copies.
+          # Why: dns/ui/watchdog share one Cargo.lock now.
+          # From: Issue #1095
+          if [ "$dns_rust_required" = "true" ] || [ "$ui_required" = "true" ] || [ "$watchdog_required" = "true" ]; then
+            require_success "cargo-audit (workspace)" "$CARGO_AUDIT_RESULT"
+          else
+            require_success_or_intentional_skip "cargo-audit (workspace)" "$CARGO_AUDIT_RESULT"
           fi
 
           if [ "$DOCS_ONLY" = "true" ]; then
@@ -4987,13 +4855,21 @@ jobs:
             description: &ci-description-proxy "nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic."
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: dns
-            context: services/dns
+            # What: repo-root context; dockerfile set below.
+            # Why: workspace needs all 5 member manifests.
+            # From: Issue #1095
+            context: .
+            dockerfile: services/dns/Dockerfile
             build_contexts: ""
             description: &ci-description-dns "PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing."
             rust: true
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
           - service: watchdog
-            context: services/watchdog
+            # What: repo-root context; dockerfile set below.
+            # Why: workspace needs all 5 member manifests.
+            # From: Issue #1095
+            context: .
+            dockerfile: services/watchdog/Dockerfile
             build_contexts: ""
             description: &ci-description-watchdog "lancache-ng watchdog helper for runtime health checks and recovery hooks."
             # Re-evaluation triggered (the Rust rewrite is now
@@ -5026,7 +4902,11 @@ jobs:
             description: &ci-description-syslog "Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428)."
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: ui
-            context: services/ui
+            # What: repo-root context; dockerfile set below.
+            # Why: workspace needs all 5 member manifests.
+            # From: Issue #1095
+            context: .
+            dockerfile: services/ui/Dockerfile
             build_contexts: ""
             description: &ci-description-ui "lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
             rust: true
@@ -5761,6 +5641,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
           builder: ${{ steps.buildx.outputs.name }}
           context: ${{ matrix.context }}
+          dockerfile: ${{ matrix.dockerfile }}
           build-contexts: ${{ matrix.build_contexts }}
           secret-files: |
             ${{ steps['combined-secret-files'].outputs['secret-files'] }}
@@ -5772,6 +5653,8 @@ jobs:
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
             UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
+            PROJECT_CARGO_LTO=${{ vars.PROJECT_CARGO_LTO }}
+            PROJECT_CARGO_CODEGENUNIT=${{ vars.PROJECT_CARGO_CODEGENUNIT }}
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
             http_proxy=${{ matrix.service == 'build-tools' && vars.PROJECT_SELFHOSTED_PROXY_HTTP || '' }}
             https_proxy=${{ matrix.service == 'build-tools' && vars.PROJECT_SELFHOSTED_PROXY_HTTPS || '' }}
@@ -6368,6 +6251,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
           builder: ${{ steps.buildx.outputs.name }}
           context: ${{ matrix.context }}
+          dockerfile: ${{ matrix.dockerfile }}
           build-contexts: ${{ matrix.build_contexts }}
           # What: omits the LAN-proxy build-arg on this arm64 job.
           # Why: no route to the self-hosted-only proxy; static split.
@@ -6376,6 +6260,8 @@ jobs:
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
             UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
+            PROJECT_CARGO_LTO=${{ vars.PROJECT_CARGO_LTO }}
+            PROJECT_CARGO_CODEGENUNIT=${{ vars.PROJECT_CARGO_CODEGENUNIT }}
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
           push: ${{ github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) }}
           tags: ${{ steps.pr-tag.outputs.image || steps.meta.outputs.tags }}

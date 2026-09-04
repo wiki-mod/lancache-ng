@@ -1,0 +1,35 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# What: root build-context ignore for Rust service builds.
+# Why: dns/ui/watchdog now build from repo root context.
+# From: Issue #1095
+
+# Keep Docker build contexts small and deterministic.
+.git
+.gitignore
+.github
+
+# Local build output and caches.
+target
+**/target
+.cache
+.tmp
+tmp
+.claude
+
+# Editor and OS files.
+.vscode
+.idea
+*.swp
+*.swo
+.DS_Store
+
+# Logs, local runtime files, and secrets that must never enter a build context.
+*.log
+*.pid
+.env
+.env.*
+deploy/*/.env
+deploy/*/.env.*
+certs
