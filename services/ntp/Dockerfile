@@ -31,15 +31,19 @@
 # package, matching the same finding already made for the other three
 # already-migrated/being-migrated services in this project.
 
-# What: source stage for tools copied into final image.
-# Why: mutable `:latest` tag for build flexibility.
-# From: Issue #1095
-ARG UTILITIES_IMAGE=ghcr.io/wiki-mod/lancache-ng/utilities:latest
-FROM ${UTILITIES_IMAGE} AS utilities-tools
-
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 LABEL org.opencontainers.image.description="LanCache-NG-NTP: chrony-based NTP server, disciplined against public NTP servers, serving LAN clients on UDP/123."
+
+# What: explicit proxy build-args, no default value set
+# Why: routes self-hosted downloads via the LAN proxy
+# From: Issue #1781 | PR #1783
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
 
 # `apk upgrade --no-cache` (before the package install, same layer) upgrades
 # packages already baked into the alpine:3.24 base layer itself -- `apk add
@@ -48,33 +52,39 @@ LABEL org.opencontainers.image.description="LanCache-NG-NTP: chrony-based NTP se
 # services/dhcp-proxy/Dockerfile's matching comment for the fuller
 # rationale and live verification of this behavior.
 
-# What: curl/envsubst binaries from shared utilities image.
-# Why: same Alpine base digest ensures binary compatibility.
-# From: Issue #1556
-COPY --from=utilities-tools /usr/local/bin/curl /usr/local/bin/curl
-COPY --from=utilities-tools /usr/bin/envsubst /usr/bin/envsubst
-COPY --from=utilities-tools /usr/lib/libintl.so.8 /usr/lib/libintl.so.8
+# What: switches apk's own repositories to plain http.
+# Why: Squid caches http; signed indices keep integrity.
+# From: Issue #1095
+RUN sed -i 's|^https://|http://|' /etc/apk/repositories
 
-# What: verifies copied binaries work on target system.
-# Why: shared libraries fail at runtime, not copy time.
-# From: Issue #1556
-RUN set -euo pipefail; \
-    printf '%s' '$FOO' | FOO=bar envsubst >/dev/null; \
-    curl --version >/dev/null
-
-# What: ca-certificates package enables curl's CA bundle.
-# Why: copied curl has fixed CA path; package generates it.
-# From: Issue #1556
 # What: APT_CACHE_BUST invalidates BuildKit's upgrade cache.
 # Why: without this, BuildKit replays stale cache forever.
 # From: Issue #1095
 ARG APT_CACHE_BUST=""
-RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
+# What: trusts the proxy's CA for this RUN, never in a layer.
+# Why: a secret mount never persists; bundle restored below.
+# From: Issue #1781 | PR #1783
+RUN --mount=type=secret,id=proxy_ca \
+    if [ -s /run/secrets/proxy_ca ]; then \
+      cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig && \
+      cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+    fi && \
+    : "apt-cache-bust=${APT_CACHE_BUST}" && \
     apk upgrade --no-cache && \
     apk add --no-cache \
     bash \
     ca-certificates \
-    chrony-nts
+    chrony-nts \
+    curl \
+    gettext-envsubst && \
+    if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
+
+# What: verifies apk-installed binaries execute, not just exist.
+# Why: missing library dependencies fail at runtime, not apk add.
+# From: Issue #1613 | Issue #1781 | PR #1783
+RUN set -euo pipefail; \
+    printf '%s' '$FOO' | FOO=bar envsubst >/dev/null; \
+    curl --version >/dev/null
 
 COPY chrony.conf /etc/chrony/chrony.conf.template
 COPY entrypoint.sh /entrypoint.sh
@@ -127,6 +137,11 @@ COPY entrypoint.sh /entrypoint.sh
 # ever needs to become an explicit package instead.
 RUN chmod +x /entrypoint.sh \
     && mkdir -p /var/lib/chrony /var/log/chrony
+
+# What: final apk upgrade pass, no packages added.
+# Why: patches CVEs fixed after this file's package installs.
+# From: Issue #1781 | PR #1783
+RUN apk upgrade --no-cache
 
 EXPOSE 123/udp
 

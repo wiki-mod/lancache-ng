@@ -65,11 +65,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# Deliberate release-profile tuning, matching services/ui's/
-# services/watchdog's identical [profile.release] block -- see either
-# crate's own comment for the full reasoning (fat LTO for cross-crate
-# inlining; codegen-units=2 traded against the project's own sccache/
-# distcc build-farm capacity).
-[profile.release]
-lto = "fat"
-codegen-units = 2
+# What: release profile now lives at the workspace root.
+# Why: cargo ignores a member profile in a workspace.
+# From: Issue #1095

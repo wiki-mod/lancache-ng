@@ -162,26 +162,6 @@ tooling:
       - .github/workflows/build-push.yml
       - docs/self-hosted-actions-runner.md
       - docs/ui-rust-dev-checks.md
-  - name: utilities
-    image: ghcr.io/wiki-mod/lancache-ng/utilities
-    source: services/utilities/Dockerfile
-    platforms:
-      - linux/amd64
-      - linux/arm64
-    description: >-
-      Shared non-compiler CLI-tools image (curl, nano, lsof, ripgrep,
-      findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd),
-      consumed via COPY --from= by eight first-party images (issue #1556)
-      instead of each one independently installing/building its own copy.
-    consumers:
-      - services/proxy/Dockerfile
-      - services/dns/Dockerfile
-      - services/ui/Dockerfile
-      - services/dhcp/Dockerfile
-      - services/dhcp-proxy/Dockerfile
-      - services/ntp/Dockerfile
-      - services/watchdog/Dockerfile
-      - tools/build-tools/Dockerfile
 metadata:
   - name: stack
     image: ghcr.io/wiki-mod/lancache-ng/stack

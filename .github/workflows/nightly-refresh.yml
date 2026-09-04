@@ -7,19 +7,40 @@
 # Nightly, instead of being republished on every current_dev push).
 #
 # This workflow does NOT build, scan, or promote anything itself -- it is a
-# thin dispatcher that triggers build-push.yml's own full pipeline (build,
-# test, container-scan, then `promote`) against current_dev's current tip
-# with the existing `channel: nightly` workflow_dispatch input, exactly the
-# ad-hoc "spot-check a branch as nightly" path a human operator already had
-# available (see build-push.yml's `inputs.channel` description). Because
-# build-push.yml's `promote` job only runs `needs: merge-manifests` and after
-# `!cancelled() && needs['merge-manifests'].result == 'success'`, nightly is
-# green-gated and fail-closed by construction: if current_dev's tip fails to
-# build, test, or scan clean, promote never runs and `nightly` keeps
-# pointing at its last good state instead of being force-moved onto a red
-# commit. See build-push.yml's own "Branch-to-channel mapping" comment in the
-# `promote` job for the other half of this decision (current_dev push no
-# longer auto-adds `nightly` to channel_tags).
+# thin dispatcher that triggers other workflows' own real pipelines against
+# current_dev's current tip via workflow_dispatch, exactly the ad-hoc
+# "spot-check a branch as nightly" path a human operator already had
+# available manually. Two independent dispatch targets, each on its own
+# cadence (see `on.schedule` below), both distinguished at the job level by
+# `github.event.schedule` (the specific cron expression that fired) so one
+# workflow file can serve two different refresh cadences without a second,
+# near-duplicate file (AG-CODE-013):
+#
+# - build-push.yml (daily, `channel: nightly` input): the main stack images.
+#   `promote` only runs `needs: merge-manifests` and after
+#   `!cancelled() && needs['merge-manifests'].result == 'success'`, so this
+#   is green-gated and fail-closed by construction -- a red current_dev tip
+#   leaves `nightly` pointing at its last good state instead of being
+#   force-moved onto a broken commit. See build-push.yml's own
+#   "Branch-to-channel mapping" comment in the `promote` job for the other
+#   half of this decision (current_dev push no longer auto-adds `nightly`
+#   to channel_tags).
+#
+# - build-tools.yml (weekly, no input needed): the separate CI/dev toolchain
+#   image. Its own `schedule:` trigger (`cron: "23 3 * * 0"`) always
+#   resolves `github.ref_name` to the default branch (AG-CI-018), so its
+#   `:nightly` tag promotion branch (`elif REF_NAME = current_dev`, see that
+#   file's "Promote mutable tags from the attested digest" step) was
+#   structurally unreachable except by a manual, current_dev-targeted
+#   dispatch -- confirmed dead code, not merely untested, before this
+#   addition. A real `workflow_dispatch` against `--ref current_dev` sets
+#   `github.ref_name` to `current_dev` correctly for that run, reaching the
+#   same already-fail-closed digest/attest/promote chain build-tools.yml
+#   already runs for its master-side weekly build. Kept on the SAME weekly
+#   cadence as build-tools.yml's own schedule (not the daily one) because
+#   that image is this project's heaviest, most capacity-sensitive CI job
+#   (AG-CI-002); a daily dispatch here would silently change that already
+#   deliberate cost tradeoff.
 #
 # TWO THINGS TO KNOW ABOUT THIS SCHEDULE, BOTH DELIBERATELY ACCEPTED:
 #
@@ -63,10 +84,16 @@ name: Nightly Refresh
 on:
   schedule:
     - cron: "0 1 * * *"
+    # Weekly, matching build-tools.yml's own schedule day (Sunday) -- offset
+    # 7 minutes later so the two don't contend for the same runner slot at
+    # the exact same instant.
+    - cron: "30 3 * * 0"
   # Manual escape hatch: an operator or maintainer can force an immediate
   # nightly refresh (e.g. to unblock the default-branch-only gap in (b)
   # above, or just to pick up a current_dev fix sooner) without waiting for
-  # the next scheduled tick.
+  # the next scheduled tick. Dispatches both targets regardless of the
+  # weekly/daily split above -- a manual run is a deliberate, one-off
+  # action, not the recurring cost that split exists to bound.
   workflow_dispatch: {}
 
 # Only needs to call the Actions API to dispatch a different workflow file in
@@ -97,7 +124,11 @@ jobs:
     # default (AG-CI-016).
     timeout-minutes: 10
     steps:
+      # What: skips on the weekly tick; that one is build-tools-only.
+      # Why: keeps build-push's nightly refresh strictly daily.
+      # From: Issue #1095
       - name: Dispatch build-push.yml against current_dev with channel=nightly
+        if: github.event_name != 'schedule' || github.event.schedule == '0 1 * * *'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -107,3 +138,17 @@ jobs:
             --repo "${{ github.repository }}" \
             --ref current_dev \
             -f channel=nightly
+
+      # What: skips on the daily tick; that one is build-push-only.
+      # Why: matches build-tools.yml's own weekly cadence (AG-CI-002).
+      # From: Issue #1095
+      - name: Dispatch build-tools.yml against current_dev (weekly)
+        if: github.event_name != 'schedule' || github.event.schedule == '30 3 * * 0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          gh workflow run build-tools.yml \
+            --repo "${{ github.repository }}" \
+            --ref current_dev

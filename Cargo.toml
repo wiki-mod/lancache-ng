@@ -1,0 +1,25 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# What: root Cargo workspace for 5 first-party crates.
+# Why: unifies lockfiles; ends cross-service version drift.
+# From: Issue #1095
+
+[workspace]
+resolver = "3"
+members = [
+    "services/dns/nats-subscriber",
+    "services/ui",
+    "services/cachehamster",
+    "services/watchdog",
+    "tools/pxe-client-probe",
+]
+
+# What: no [workspace.dependencies] table added here.
+# Why: scope is lockfile unification, not a dep refactor.
+# From: Issue #1095
+
+# What: no lto/codegen-units keys in [profile.release] here.
+# Why: sourced from CARGO_PROFILE_RELEASE_LTO/_CODEGEN_UNITS env vars.
+# From: Issue #1095
+[profile.release]

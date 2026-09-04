@@ -83,6 +83,12 @@ LABEL org.opencontainers.image.description="lancache-ng cachehamster: Steam cach
 #   identical ARG for the full rationale.
 # From: Issue #871
 ARG APT_CACHE_BUST=""
+
+# What: switches apk's own repositories to plain http.
+# Why: Squid caches http; signed indices keep integrity.
+# From: Issue #1095
+RUN sed -i 's|^https://|http://|' /etc/apk/repositories
+
 RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
     apk upgrade --no-cache && \
     apk add --no-cache ca-certificates

@@ -1016,3 +1016,9 @@ vulnerabilities:
       From: Issue #1095, PR #1743
     status: not_affected
 
+  # CVE-2026-32316/CVE-2026-40164 (jq, utilities image) removed here per
+  # their own accepting entries' explicit self-description ("remove once
+  # PR #1783 lands and its rebuilds propagate", Issue #1802/#1803,
+  # commit 6e3db411): PR #1783 has now removed services/utilities/Dockerfile
+  # entirely, so there is no more `utilities` image for these two interim,
+  # event-based (no expired_at) exceptions to apply to.

@@ -267,6 +267,54 @@ as proof of it:**
 |---|---|---|---|
 | **release-sbom utilities-component merge** | Each consumer's merged SBOM only ever gains the utilities apk packages that service's Dockerfile actually COPY's from `utilities-tools`, never the full utilities package set | `bats tests/bats/merge_utilities_sbom_components.bats` in the pinned build-tools container; ad hoc: `bash scripts/untracked/merge-utilities-sbom-components.sh <service> <service.cdx.json> <utilities.cdx.json>` for any of the 7 consumer service names | Fail if a package absent from a given service's `COPY --from=utilities-tools` lines (e.g. `nano`, `coreutils`) appears in that service's merged SBOM, if a package the service does copy is missing from the merged SBOM, or if the script does not fail closed for an unrecognized service name |
 
+**Correction to this entry's own curl claim (2026-09-01, Issue #1781):** the paragraph
+above this table states curl "has no apk-db SBOM component at all" because it used to
+be compiled from source in `services/utilities/Dockerfile`'s `curl-builder` stage. That
+stage is gone: curl is now `apk add`'d in `services/utilities/Dockerfile` like the
+image's other 9 tools, so it now *does* have a real apk-db SBOM component. This still
+needed no change in `merge-utilities-sbom-components.sh` for a different reason than
+before -- and also corrects this entry's own description of that script's mechanism:
+the allowlist is a hardcoded per-service `case` statement in the script itself (`proxy
+| dhcp | dhcp-proxy | dns` / `ntp` / `watchdog` / `ui`, each listing fixed package
+names), not derived from each Dockerfile's `COPY --from=utilities-tools` lines as
+stated above. It never listed `curl` for any service, before or after #1781.
+
+**Second correction (2026-09-02, Issue #1781):** the paragraph directly above this one
+was itself wrong about the end state -- a mid-PR revision had briefly made every
+consumer install curl locally via its own `apk add` instead of continuing to `COPY` it
+from `utilities`, which the maintainer then reverted as architecturally incorrect (six
+of the seven real consumers -- all but `dhcp-proxy`, which never consumed curl at all --
+still `COPY --from=utilities-tools` curl, exactly like every other shared tool in that
+image). Since curl now really does have a real apk-db SBOM component (confirmed above)
+*and* is still genuinely `COPY`'d into six consumers, the hardcoded allowlist's
+long-standing omission of `curl` became a real under-reporting gap: those six consumers
+ship curl's package plus its now-dynamic-linking dependency closure (`libcurl`, `zlib`,
+`c-ares`, `nghttp2-libs`, `libidn2`, `libpsl`, `libssl3`, `libcrypto3`, `zstd-libs`,
+`brotli-libs`, `libunistring` -- confirmed live per-file via `apk info --who-owns`
+against a real `alpine:3.24` + `apk add curl`), none of which the allowlist surfaced.
+Fixed: `merge-utilities-sbom-components.sh`'s allowlist now includes that full package
+set for `proxy`/`dhcp`/`dns`/`ntp`/`watchdog`/`ui`, and explicitly excludes it for
+`dhcp-proxy` (its own case branch, split out from the `proxy | dhcp | dhcp-proxy | dns`
+group it used to share, since it alone among that group never copies curl) --
+re-verified live: `bats tests/bats/merge_utilities_sbom_components.bats` (15 cases,
+including a new `dhcp-proxy`-specific regression test asserting curl is absent there)
+and `bats tests/bats/select_utilities_image.bats` both pass.
+
+**Third correction (2026-09-04, Issue #1781/PR #1783) -- this entire standing
+check is retired, not merely corrected again:** PR #1783 removed the shared
+`utilities` image and `services/utilities/Dockerfile` entirely. Every former
+consumer now `apk add`s its own copy of what it used to `COPY --from=
+utilities-tools`, so each service's own Trivy SBOM scan already sees exactly
+the packages that service actually installs -- there is no longer a second,
+separate `utilities` SBOM to merge a filtered subset of, and no more
+over/under-reporting class for a merge step to get wrong. `release-sbom`'s
+"Merge utilities components"/"Generate utilities image SBOM for component
+merge" steps, `scripts/untracked/merge-utilities-sbom-components.sh`, and
+`tests/bats/merge_utilities_sbom_components.bats` were all deleted in the
+same PR. The table row below and this section's two prior corrections stay
+in place as the historical record of the incident and its fixes; the
+`bats`/script paths they name no longer exist on disk as of this PR.
+
 ---
 
 ## Part B — Stack Test Plan
@@ -1167,6 +1215,82 @@ grep -E "legacy_rank=[0-9]" <logfile> | grep -v "decision=protect"
   into any CI job; recorded as an open gap below rather than left
   unautomated silently.
 
+### Additions dated 2026-09-03 (real incident since the 2026-08-25 survey above)
+
+- **`build-tools.yml`'s `:nightly` tag promotion was structurally
+  unreachable** (Refs #1095, fixed by PR #1800) -- its own `schedule:`
+  trigger always resolves `github.ref_name` to the default branch
+  (AG-CI-018), so the promote step's `elif REF_NAME = current_dev` branch
+  could only ever be reached by a manual, current_dev-targeted
+  `workflow_dispatch` an operator would have to know to run themselves --
+  confirmed dead code, not merely untested. Fixed by extending
+  `nightly-refresh.yml`'s existing dispatcher (already used for
+  build-push.yml's own daily nightly refresh) with a second, weekly cron
+  entry matching build-tools.yml's own cadence. This is the SECOND confirmed
+  instance of this exact failure shape in this repo --
+  `nightly-refresh.yml`'s own header comment already documents the first
+  (build-push.yml, #1254/#1255) -- meeting AG-WF-011's failure-class
+  threshold. A repo-wide sweep of every `.github/workflows/*.yml` file with
+  both a `schedule:` trigger and a `current_dev` reference (done as part of
+  this same pass) found no third instance: `vex-regenerate.yml` discusses a
+  related but distinct concern (its main automatic path is `push`-triggered,
+  which does NOT have this bug; only its manual `workflow_dispatch` escape
+  hatch has an already-honestly-documented open question, not a dead
+  branch). **New standing check: none yet** -- a mechanical guard that greps
+  every workflow's `schedule:`-gated conditional branches for a ref
+  comparison that can never be satisfied given `schedule:`'s own
+  default-branch-only evaluation (AG-CI-018) would be a real, reusable check
+  for this whole failure class; not built in this pass -- recorded here per
+  AG-VAL-028 rather than left silently unautomated.
+- **`tests/bats/merge_utilities_sbom_components.bats`'s nano/coreutils-leak loop
+  assertion used bare `!` instead of `run !`** (Refs #1095, fixed by PR #1799) --
+  Bash/Bats exempt `!`-negated commands from the error trap, so a leak on any
+  non-last loop iteration passed silently; only the last iteration's
+  (`watchdog`) result was ever actually observed by the test's own exit
+  status. Confirmed live (self-hosted runner, pinned build-tools image): with
+  an identical forced leak injected into both versions, the bare-`!` version
+  reports `ok` (the bug -- silently passes), the `run !` version correctly
+  reports `not ok`. **New standing check: none yet** -- shellcheck's SC2314
+  does NOT catch this specific loop-body variant (confirmed: `shellcheck
+  --severity=warning` reports clean, exit 0, against the pre-fix version
+  too); a mechanical loop-aware guard (tracking `for`/`while`/`until` ...
+  `done` nesting, flagging a bare `! <cmd>` with no `|| fail`/`|| exit`
+  inside one) is plausible but was not built in this pass -- recorded here
+  per AG-VAL-028 rather than left silently unautomated. A repo-wide spot
+  check of every other bare-`!` occurrence in `tests/bats/*.bats` (done as
+  part of this same pass) found no further instance of this exact
+  shape -- every other one is either the last statement in its function or
+  already uses the `! cmd || fail "..."` idiom, both of which correctly
+  propagate regardless of loop position.
+
+- **A merge-conflict resolution left an orphaned `FROM ${UTILITIES_IMAGE}`
+  stage in `tools/build-tools/Dockerfile` with no matching top-level `ARG
+  UTILITIES_IMAGE` declaration** (PR #1783, fixed in that PR). Docker only
+  expands a `FROM` line's `${VAR}`/`$VAR` tokens using an `ARG` declared
+  before the file's first `FROM` ("global scope"); the stale stage left the
+  image name blank, and the real build failed with a "base name blank"
+  error in CI. Fixed by deleting the orphaned stage. **New standing check:
+  none** -- `scripts/tracked/check-dependabot-docker-base-consistency.sh`
+  already implements exactly this ARG-resolution logic (its
+  `resolve_final_image()` walks global `ARG`s and expands a `FROM` line's
+  `${VAR}`/`$VAR` tokens the same way), but only ever runs it against the
+  Dockerfiles `.github/dependabot.yml`'s `docker` ecosystem block lists for
+  an unrelated purpose (base-image consistency across a grouped PR) --
+  `tools/build-tools/Dockerfile` is not one of them. A first attempt in
+  this PR wrote a second, repo-wide script that duplicated that same
+  parsing logic under a new name instead of reusing or extending it, which
+  is itself the exact violation Rule-Ref: AG-CODE-011 (search for and reuse
+  an existing implementation before writing a new one) prohibits -- caught
+  before being committed and reverted rather than shipped. The correct fix
+  (extracting `resolve_final_image()`'s ARG-resolution walk into a shared
+  `scripts/lib/*.sh` helper both this check and a new repo-wide,
+  dependabot-independent check could call) is a real refactor of an
+  existing, working, tested script and was judged out of scope for a PR
+  whose primary subject is unrelated (reverting `curl` to a distro
+  package); recorded here per AG-VAL-029 as a genuine, reasoned deferral
+  rather than a silent omission, tracked as follow-up work rather than
+  fixed in this PR.
+
 ## Coverage Assessment (from this survey — be honest about gaps)
 
 **Well-covered, reusable, real proofs already exist for:**
@@ -1738,7 +1862,6 @@ omitted):**
 | `scripts/untracked/simulations/setup-reset-dns-config-simulation.sh` | Real CLI-driven PowerDNS zone rollback (PR #1152) |
 | `scripts/untracked/simulations/setup-reset-kea-config-simulation.sh` | Real CLI-driven Kea config rollback |
 | `scripts/untracked/generate-vex.sh` / `scripts/tracked/check-vex-drift.sh` | OpenVEX document reproducibility and drift detection (PR #1194) |
-| `scripts/untracked/merge-utilities-sbom-components.sh` / `tests/bats/merge_utilities_sbom_components.bats` | Per-service utilities apk-package allowlist for `release-sbom`'s component merge stays scoped to what each consumer's Dockerfile actually COPY's (Issue #1613/#1095) |
 | `tests/bats/setup_update_idempotence.bats` (first `@test`) | `.env` key-drift guard (PR #1199) |
 | `scripts/tracked/check-idempotence-test-coverage.sh` | Every stateful config-writer has repeat-run/idempotence test coverage |
 | `scripts/tracked/check-bats-path-filter-coverage.sh` | Every real bats dependency is covered by `build-tools.yml`'s path filters |

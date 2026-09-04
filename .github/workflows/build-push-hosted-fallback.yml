@@ -20,7 +20,7 @@ on:
         default: "no"
       services:
         description: >-
-          Comma-separated subset of proxy,dns,watchdog,dhcp,dhcp-proxy,ntp,syslog,ui,build-tools,utilities,cachehamster
+          Comma-separated subset of proxy,dns,watchdog,dhcp,dhcp-proxy,ntp,syslog,ui,build-tools,cachehamster
           to build, or "all".
         required: false
         default: all
@@ -47,8 +47,6 @@ jobs:
     timeout-minutes: 30
     outputs:
       build_tools_image: ${{ steps.select-image.outputs.build_tools_image }}
-      utilities_image: ${{ steps.resolve-utilities-image.outputs.utilities_image }}
-      utilities_digest: ${{ steps.resolve-utilities-image.outputs.utilities_digest }}
       matrix: ${{ steps.services.outputs.matrix }}
     steps:
       - name: Require explicit opt-in
@@ -86,28 +84,6 @@ jobs:
           esac
           printf 'build_tools_image=%s\n' "$build_tools_image" >> "$GITHUB_OUTPUT"
 
-      # What: Resolve utilities:latest to immutable digest per run.
-      # Why: Consumer Dockerfiles need immutable digest for labels.
-      # From: Issue #1095 | PR #1687
-      - name: Resolve utilities image digest
-        id: resolve-utilities-image
-        env:
-          GHCR_RETRY_USERNAME: ${{ github.actor }}
-          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          # shellcheck source=scripts/lib/ghcr-retry.sh
-          source scripts/lib/ghcr-retry.sh
-
-          utilities_digest="$(resolve_manifest_digest ghcr.io/wiki-mod/lancache-ng/utilities:latest "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")"
-          if [[ -z "$utilities_digest" ]]; then
-            echo "::error::Could not resolve digest for ghcr.io/wiki-mod/lancache-ng/utilities:latest." >&2
-            exit 1
-          fi
-
-          printf 'utilities_image=ghcr.io/wiki-mod/lancache-ng/utilities@%s\n' "$utilities_digest" >> "$GITHUB_OUTPUT"
-          printf 'utilities_digest=%s\n' "$utilities_digest" >> "$GITHUB_OUTPUT"
-
       - name: Remove buildx builder
         if: always()
         run: docker buildx rm "${{ steps.buildx.outputs.name }}" || true
@@ -132,20 +108,18 @@ jobs:
             [syslog]=services/syslog
             [ui]=services/ui
             [build-tools]=tools/build-tools
-            [utilities]=services/utilities
             [cachehamster]=services/cachehamster
           )
           declare -A build_contexts=(
-            [proxy]="dns-domains=services/dns"
-            [dns]=""
-            [watchdog]=""
-            [dhcp]=""
-            [dhcp-proxy]=""
+            [proxy]=$'dns-domains=services/dns\nshared-scripts=scripts/lib'
+            [dns]="shared-scripts=scripts/lib"
+            [watchdog]="shared-scripts=scripts/lib"
+            [dhcp]="shared-scripts=scripts/lib"
+            [dhcp-proxy]="shared-scripts=scripts/lib"
             [ntp]=""
             [syslog]=""
-            [ui]=""
+            [ui]="shared-scripts=scripts/lib"
             [build-tools]=""
-            [utilities]=""
             [cachehamster]=""
           )
           declare -A descriptions=(
@@ -158,12 +132,11 @@ jobs:
             [syslog]="Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428)."
             [ui]="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
             [build-tools]="Prebuilt lancache-ng CI and developer validation toolchain image."
-            [utilities]="Shared lancache-ng utilities image (curl, nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd) for COPY --from= consumption by seven first-party images (issue #1556)."
             [cachehamster]="lancache-ng CacheHamster: Steam cache-warming prefill daemon (scaffold, issue #871)."
           )
 
           if [ "$SERVICES_INPUT" = "all" ] || [ -z "$SERVICES_INPUT" ]; then
-            selected=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities cachehamster)
+            selected=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools cachehamster)
           else
             IFS=',' read -ra selected <<< "$SERVICES_INPUT"
           fi
@@ -211,8 +184,6 @@ jobs:
       matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}
     env:
       BUILD_TOOLS_IMAGE: ${{ needs.preflight.outputs.build_tools_image }}
-      UTILITIES_IMAGE: ${{ needs.preflight.outputs.utilities_image }}
-      UTILITIES_DIGEST: ${{ needs.preflight.outputs.utilities_digest }}
     steps:
       - uses: *checkout_centraliced_versioning # v7.0.1
 
@@ -296,8 +267,9 @@ jobs:
           build-contexts: ${{ matrix.build_contexts }}
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
-            UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
+            PROJECT_CARGO_LTO=${{ vars.PROJECT_CARGO_LTO }}
+            PROJECT_CARGO_CODEGENUNIT=${{ vars.PROJECT_CARGO_CODEGENUNIT }}
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
           push: "true"
           tags: ${{ steps.meta.outputs.tags }}
@@ -306,7 +278,6 @@ jobs:
             org.opencontainers.image.description=${{ matrix.description }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
-            ${{ contains(fromJSON('["proxy","dns","dhcp","dhcp-proxy","ntp","ui","watchdog"]'), matrix.service) && format('org.opencontainers.image.base.utilities.digest={0}', env.UTILITIES_DIGEST) || '' }}
           outputs: type=image,oci-mediatypes=true
           platforms: linux/amd64
           provenance: false

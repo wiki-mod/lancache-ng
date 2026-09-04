@@ -226,17 +226,32 @@ When `SCCACHE_REDIS_MODE=required`, the runner must have `sccache` available in
 `PATH`. Install it from source and keep the installed binary on the runner
 service account's `PATH`.
 
-### ccache reuse for services/dns's, services/ui's, services/watchdog's, and build-tools's C-dependency compiles
+### ccache reuse for services/dns's, services/ui's, and services/watchdog's C-dependency compiles
 
 `services/dns/Dockerfile`'s, `services/ui/Dockerfile`'s, and
 `services/watchdog/Dockerfile`'s C-dependency compile paths (`ring`, via
 distcc) can layer `ccache` in front of distcc when
-both a distcc host list and a ccache Redis endpoint are configured. Since
-issue #1304/PR #1661, `tools/build-tools/Dockerfile`'s from-source curl/git
-compile inherits the same mechanism, the same secrets, and the same
-single-probed-host limitation described below. This is
-not a separate secret: it automatically reuses the same `SCCACHE_REDIS_URL`
-value already configured for `sccache` above, on the same Redis instance,
+both a distcc host list and a ccache Redis endpoint are configured.
+
+**Correction (2026-09-01, Issue #1781):** this paragraph used to also claim
+`tools/build-tools/Dockerfile`'s "from-source curl/git compile" inherited
+this same ccache-over-distcc mechanism since issue #1304/PR #1661.
+`tools/build-tools/Dockerfile` has no such compile and never wired
+`CC=distcc`/`CC="ccache ..."` for one -- curl and git are both plain
+`apk add`/`apt-get install` packages there (curl was `COPY`'d from the
+shared `services/utilities` image's own from-source build, not compiled
+in `tools/build-tools/Dockerfile` itself, until Issue #1781 replaced that
+`COPY` with this stage's own `apk add`/`apt-get install curl` too). The
+ccache/distcc-accelerated from-source build this correction refers to only
+ever existed in `services/utilities/Dockerfile`'s now-removed
+`curl-builder` stage; whether the `ccache_redis_url`/`distcc_potential_hosts`
+CI wiring still conditionally provisioned for the `build-tools` matrix
+entry is now dead as a result has not been investigated as part of #1781
+and is flagged separately, not resolved here.
+
+This is not a separate secret: it automatically reuses the same
+`SCCACHE_REDIS_URL` value already configured for `sccache` above, on the
+same Redis instance,
 whenever `DISTCC_POTENTIAL_HOSTS` is also set — `ccache`'s own fixed `ccache:`
 key namespace never collides with `sccache`'s distinct
 `SCCACHE_REDIS_KEY_PREFIX`-based one. There is no separate `CCACHE_REDIS_MODE`

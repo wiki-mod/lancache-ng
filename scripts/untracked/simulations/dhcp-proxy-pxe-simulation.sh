@@ -70,6 +70,15 @@ source "$repo_root/scripts/lib/dhcp-lease-parse.sh"
 source "$repo_root/scripts/lib/reserve-validation-subnet.sh"
 
 client_tool_image="${DHCP_PXE_SIMULATION_CLIENT_IMAGE:?DHCP_PXE_SIMULATION_CLIENT_IMAGE is required (an image providing the Rust toolchain to compile tools/pxe-client-probe and tcpdump to capture the reply, e.g. the build-tools image)}"
+# What: no in-file/script default for either; fails closed if unset.
+# Why: this script also runs `cargo build --release`, same as the
+# Dockerfiles' resolve_cargo_profile_overrides().
+# From: Issue #1095
+project_cargo_lto="${PROJECT_CARGO_LTO:?PROJECT_CARGO_LTO is required (no in-file/script default; Issue #1095, PR #1796 review 5109560874)}"
+case "$project_cargo_lto" in off|thin|fat|true|false) ;; *) echo "PROJECT_CARGO_LTO must be one of: off, thin, fat, true, false (got '$project_cargo_lto')" >&2; exit 1;; esac
+project_cargo_codegenunit="${PROJECT_CARGO_CODEGENUNIT:?PROJECT_CARGO_CODEGENUNIT is required (no in-file/script default; Issue #1095, PR #1796 review 5109560874)}"
+case "$project_cargo_codegenunit" in ''|*[!0-9]*) echo "PROJECT_CARGO_CODEGENUNIT must be a positive integer (got '$project_cargo_codegenunit')" >&2; exit 1;; esac
+[ "$project_cargo_codegenunit" -gt 0 ] || { echo "PROJECT_CARGO_CODEGENUNIT must be greater than zero" >&2; exit 1; }
 
 work_dir="$repo_root/.dhcp-proxy-pxe-simulation-tmp"
 rm -rf "$work_dir"
@@ -298,12 +307,17 @@ echo "== Compiling the synthetic PXE client probe (tools/pxe-client-probe) with 
 # are root-owned 0755). Only the single finished binary is copied out to
 # $work_dir -- a top-level file whose 0777 parent makes it removable during
 # cleanup regardless of its root ownership.
+# What: mounts the whole repo; threads PROJECT_CARGO_LTO/CODEGENUNIT in.
+# Why: workspace resolution needs root Cargo.lock; cargo reads those envs.
+# From: Issue #1095
 docker run --rm \
-    -v "$repo_root/tools/pxe-client-probe:/crate:ro" \
+    -v "$repo_root:/repo:ro" \
     -v "$work_dir:/out" \
     -e CARGO_TARGET_DIR=/build-target \
+    -e CARGO_PROFILE_RELEASE_LTO="$project_cargo_lto" \
+    -e CARGO_PROFILE_RELEASE_CODEGEN_UNITS="$project_cargo_codegenunit" \
     "$client_tool_image" \
-    bash -c 'set -euo pipefail; cargo build --release --locked --manifest-path /crate/Cargo.toml; cp /build-target/release/pxe-client-probe /out/pxe-client-probe'
+    bash -c 'set -euo pipefail; cargo build --release --locked --manifest-path /repo/tools/pxe-client-probe/Cargo.toml -p pxe-client-probe; cp /build-target/release/pxe-client-probe /out/pxe-client-probe'
 
 echo "== Starting the synthetic PXE client container =="
 # NET_RAW/NET_ADMIN: the probe needs a raw socket to craft and send an

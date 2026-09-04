@@ -41,20 +41,10 @@ deploy/prod/.env.local
 Thumbs.db
 
 # Rust build artifacts
-services/ui/target/
-services/dns/nats-subscriber/target/
-# Issue #1415: found missing while running a local, non-authoritative
-# `cargo check`/`test`/`clippy` sanity pass against services/watchdog's
-# Rust crate (the real, CI-authoritative validation still runs inside the
-# build-tools container per AG-VAL-016) -- this entry was simply never
-# added when watchdog gained its own Cargo.toml.
-services/watchdog/target/
-# Issue #871: added when services/cachehamster gained its own Cargo.toml,
-# same gap #1415's comment above already describes for watchdog -- added
-# immediately this time rather than discovered missing later, after this
-# session's own local cargo build/test/clippy/fmt sanity pass (real
-# commands/output in this PR's own body) against services/cachehamster.
-services/cachehamster/target/
+# What: one root /target/, replacing 4 per-crate entries.
+# Why: a real workspace builds into one shared target dir.
+# From: Issue #1095
+/target/
 
 # Editor
 *.swp

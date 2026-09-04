@@ -13,10 +13,6 @@
 # Intentional ARG default (overridable at build time via --build-arg).
 # Actual digest pinning for release builds is tracked in issue #508.
 ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
-# What: ARG declared before first FROM, usable by later stages
-# Why: maintains override contract like BUILD_TOOLS_IMAGE above
-# From: Issue #1095
-ARG UTILITIES_IMAGE=ghcr.io/wiki-mod/lancache-ng/utilities:latest
 FROM ${BUILD_TOOLS_IMAGE} AS builder
 
 # The shared build-tools image already carries the Rust toolchain, sccache,
@@ -320,6 +316,18 @@ cat > /usr/local/lib/lancache-ui-build-accel.sh <<'LANCACHE_UI_HELPERS_EOF'
         rm -rf "$ccache_probe_dir"; \
       fi; \
     }; \
+    resolve_cargo_profile_overrides() { \
+      lto="${PROJECT_CARGO_LTO:-}"; \
+      cgu="${PROJECT_CARGO_CODEGENUNIT:-}"; \
+      if [ -z "$lto" ]; then echo "PROJECT_CARGO_LTO is required (no in-file/build-arg default; Issue #1095, PR #1796 review 5109560874)" >&2; exit 1; fi; \
+      case "$lto" in off|thin|fat|true|false) ;; *) echo "PROJECT_CARGO_LTO must be one of: off, thin, fat, true, false (got '$lto')" >&2; exit 1;; esac; \
+      if [ -z "$cgu" ]; then echo "PROJECT_CARGO_CODEGENUNIT is required (no in-file/build-arg default; Issue #1095, PR #1796 review 5109560874)" >&2; exit 1; fi; \
+      case "$cgu" in ''|*[!0-9]*) echo "PROJECT_CARGO_CODEGENUNIT must be a positive integer (got '$cgu')" >&2; exit 1;; esac; \
+      if [ "$cgu" -le 0 ]; then echo "PROJECT_CARGO_CODEGENUNIT must be greater than zero" >&2; exit 1; fi; \
+      export CARGO_PROFILE_RELEASE_LTO="$lto"; \
+      export CARGO_PROFILE_RELEASE_CODEGEN_UNITS="$cgu"; \
+      echo "[INFO] using CARGO_PROFILE_RELEASE_LTO=$lto CARGO_PROFILE_RELEASE_CODEGEN_UNITS=$cgu (from PROJECT_CARGO_LTO/PROJECT_CARGO_CODEGENUNIT)." >&2; \
+    }; \
     resolve_cargo_jobs() { \
       jobs="${CARGO_BUILD_JOBS:-}"; \
       if [ -z "$jobs" ]; then \
@@ -338,7 +346,7 @@ cat > /usr/local/lib/lancache-ui-build-accel.sh <<'LANCACHE_UI_HELPERS_EOF'
     run_cargo_build() { \
       cargo_log="$(mktemp)"; \
       cargo_status_file="$(mktemp)"; \
-      { set +e; cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" 2>&1; echo "$?" >"$cargo_status_file"; set -e; } | tee "$cargo_log"; \
+      { set +e; cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" -p lancache-ui 2>&1; echo "$?" >"$cargo_status_file"; set -e; } | tee "$cargo_log"; \
       cargo_status="$(cat "$cargo_status_file")"; \
       rm -f "$cargo_status_file"; \
       if [ "$cargo_status" = "0" ]; then rm -f "$cargo_log"; return 0; fi; \
@@ -346,7 +354,7 @@ cat > /usr/local/lib/lancache-ui-build-accel.sh <<'LANCACHE_UI_HELPERS_EOF'
         disable_ccache; \
         echo "[INFO] ccache build path unavailable; retrying with plain distcc (no cache layer)." >&2; \
         ccache_retry_status_file="$(mktemp)"; \
-        { set +e; cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" 2>&1; echo "$?" >"$ccache_retry_status_file"; set -e; } | tee -a "$cargo_log"; \
+        { set +e; cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" -p lancache-ui 2>&1; echo "$?" >"$ccache_retry_status_file"; set -e; } | tee -a "$cargo_log"; \
         cargo_status="$(cat "$ccache_retry_status_file")"; \
         rm -f "$ccache_retry_status_file"; \
         if [ "$cargo_status" = "0" ]; then \
@@ -372,7 +380,7 @@ cat > /usr/local/lib/lancache-ui-build-accel.sh <<'LANCACHE_UI_HELPERS_EOF'
         disable_distcc; \
         unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
         echo "[INFO] distcc build path unavailable; retrying with normal local C compiler." >&2; \
-        if cargo build -j "$cargo_jobs" --release --locked --target "$musl_target"; then \
+        if cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" -p lancache-ui; then \
           echo "[INFO] normal local C compiler fallback completed." >&2; \
           rm -f "$cargo_log"; \
           return 0; \
@@ -384,7 +392,7 @@ cat > /usr/local/lib/lancache-ui-build-accel.sh <<'LANCACHE_UI_HELPERS_EOF'
         unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
         echo "[INFO] sccache build path unavailable; retrying with sccache disabled." >&2; \
         rm -f "$cargo_log"; \
-        if cargo build -j "$cargo_jobs" --release --locked --target "$musl_target"; then \
+        if cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" -p lancache-ui; then \
           echo "[INFO] sccache-disabled fallback completed." >&2; \
           return 0; \
         fi; \
@@ -398,6 +406,11 @@ LANCACHE_UI_HELPERS_EOF
 LANCACHE_UI_BUILD_ACCEL_EOF
 
 ARG CARGO_BUILD_JOBS=
+# What: empty default; declared once here so both RUN blocks inherit it.
+# Why: no fallback value, same contract as CARGO_BUILD_JOBS above.
+# From: Issue #1095
+ARG PROJECT_CARGO_LTO=
+ARG PROJECT_CARGO_CODEGENUNIT=
 # What: redeclares BUILD_TOOLS_IMAGE for RUN blocks visibility
 # Why: Docker ARG scoping requires post-FROM redeclaration for use
 # From: Issue #1533
@@ -405,6 +418,23 @@ ARG BUILD_TOOLS_IMAGE
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
+COPY services/ui/Cargo.toml services/ui/Cargo.toml
+COPY services/watchdog/Cargo.toml services/watchdog/Cargo.toml
+COPY services/cachehamster/Cargo.toml services/cachehamster/Cargo.toml
+COPY services/dns/nats-subscriber/Cargo.toml services/dns/nats-subscriber/Cargo.toml
+COPY tools/pxe-client-probe/Cargo.toml tools/pxe-client-probe/Cargo.toml
+# What: stub targets for workspace members not built here.
+# Why: cargo loads every member manifest to resolve deps.
+# From: Issue #1095
+RUN mkdir -p services/watchdog/src services/cachehamster/src \
+      services/dns/nats-subscriber/src tools/pxe-client-probe/src \
+    && printf 'fn main() {}\n' > services/watchdog/src/main.rs \
+    && : > services/watchdog/src/lib.rs \
+    && printf 'fn main() {}\n' > services/cachehamster/src/main.rs \
+    && : > services/cachehamster/src/lib.rs \
+    && printf 'fn main() {}\n' > services/dns/nats-subscriber/src/main.rs \
+    && : > services/dns/nats-subscriber/src/lib.rs \
+    && printf 'fn main() {}\n' > tools/pxe-client-probe/src/main.rs
 # Pre-cache dependencies. Acceleration is opt-in through BuildKit secrets.
 # The shell functions sourced from /usr/local/lib/lancache-ui-build-accel.sh
 # (written by the RUN block above; call order):
@@ -426,6 +456,9 @@ COPY Cargo.toml Cargo.lock ./
 #   configure_ccache/disable_ccache - opt-in cache layer in front of distcc, only once
 #                            distcc is already enabled and a ccache Redis secret is
 #                            mounted; mirrors services/dns/Dockerfile's AG-CI-022 layer.
+#   resolve_cargo_profile_overrides - fails closed if PROJECT_CARGO_LTO/
+#                            PROJECT_CARGO_CODEGENUNIT is unset; exports both as
+#                            CARGO_PROFILE_RELEASE_* before run_cargo_build is called.
 #   resolve_cargo_jobs     - CARGO_BUILD_JOBS if set, else nproc-2 floored at 4.
 #   run_cargo_build        - builds with ccache+distcc if both enabled, retrying with
 #                            plain distcc first on failure, then a normal local compiler
@@ -434,11 +467,21 @@ COPY Cargo.toml Cargo.lock ./
 # strips the backslash-newline entirely (no newline is inserted), so a "#" comment ending
 # in "\" would swallow every following continuation line as commented-out text instead of
 # executable shell, silently dropping the rest of the build. Verified empirically.
+#
+# What: trusts proxy CA so cargo's crates.io fetch verifies.
+# Why: trap removes it before this stage's layer commits.
+# From: Issue #1781 | PR #1783
 RUN --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_dist_config \
     --mount=type=secret,id=distcc_potential_hosts \
     --mount=type=secret,id=ccache_redis_url \
+    --mount=type=secret,id=proxy_ca \
     set -eu; \
+    if [ -s /run/secrets/proxy_ca ]; then \
+      cp /run/secrets/proxy_ca /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; \
+      update-ca-certificates >/dev/null; \
+      trap 'rm -f /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; update-ca-certificates >/dev/null 2>&1 || true' EXIT; \
+    fi; \
     musl_target="$(cat /tmp/musl-target)"; \
     distcc_enabled=0; \
     ccache_enabled=0; \
@@ -451,8 +494,9 @@ RUN --mount=type=secret,id=sccache_redis_url \
     configure_sccache; \
     configure_distcc; \
     configure_ccache; \
+    resolve_cargo_profile_overrides; \
     cargo_jobs="$(resolve_cargo_jobs)"; \
-    mkdir -p src && echo 'fn main() {}' > src/main.rs && echo '' > src/lib.rs \
+    mkdir -p services/ui/src && echo 'fn main() {}' > services/ui/src/main.rs && echo '' > services/ui/src/lib.rs \
     && run_cargo_build \
     && if [ "${ccache_enabled:-0}" = "1" ]; then \
          ccache -s; \
@@ -464,7 +508,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
          fi; \
          rm -f "$ccache_final_stats"; \
        fi \
-    && rm -rf src
+    && rm -rf services/ui/src
 
 # This first build only had a throwaway `fn main() {}`/empty `lib.rs`, so it
 # compiled every dependency crate (and a stub `liblancache_ui.rlib`) but
@@ -475,7 +519,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
 # app code changes. The sccache/distcc setup, wrapper checks, and fallback
 # logic in the RUN block below are otherwise identical to the one above for
 # the same acceleration to apply to both builds.
-COPY src ./src
+COPY services/ui/src ./services/ui/src
 # Sources the same /usr/local/lib/lancache-ui-build-accel.sh helper functions as the
 # pre-cache RUN above (configure_sccache, configure_distcc, disable_distcc,
 # resolve_distcc_wrapper_dir, extract_remote_toolchain_id, configure_ccache, disable_ccache,
@@ -512,11 +556,21 @@ COPY src ./src
 # the clean to this package only, leaving every dependency's cached rlib in
 # `target/${musl_target}/release/deps/` untouched, so the pre-cache stage's
 # whole point (skip recompiling third-party crates) is preserved.
+#
+# What: trusts proxy CA so a cache-miss cargo fetch verifies.
+# Why: trap removes it before this stage's layer commits.
+# From: Issue #1781 | PR #1783
 RUN --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_dist_config \
     --mount=type=secret,id=distcc_potential_hosts \
     --mount=type=secret,id=ccache_redis_url \
+    --mount=type=secret,id=proxy_ca \
     set -eu; \
+    if [ -s /run/secrets/proxy_ca ]; then \
+      cp /run/secrets/proxy_ca /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; \
+      update-ca-certificates >/dev/null; \
+      trap 'rm -f /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; update-ca-certificates >/dev/null 2>&1 || true' EXIT; \
+    fi; \
     musl_target="$(cat /tmp/musl-target)"; \
     distcc_enabled=0; \
     ccache_enabled=0; \
@@ -529,6 +583,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     configure_sccache; \
     configure_distcc; \
     configure_ccache; \
+    resolve_cargo_profile_overrides; \
     cargo_jobs="$(resolve_cargo_jobs)"; \
     cargo clean -p lancache-ui --release --target "$musl_target" \
     && run_cargo_build \
@@ -549,14 +604,19 @@ RUN --mount=type=secret,id=sccache_redis_url \
 # stage. Same pinned alpine:3.24 digest already used by services/dhcp,
 # services/dhcp-proxy, services/watchdog, services/ntp, and services/dns.
 
-# What: source stage for tools copied into final image
-# Why: uses mutable :latest tag for shared utilities image
-# From: Issue #1095
-FROM ${UTILITIES_IMAGE} AS utilities-tools
-
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 LABEL org.opencontainers.image.description="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
+
+# What: explicit proxy build-args, no default value set
+# Why: routes self-hosted downloads via the LAN proxy
+# From: Issue #1781 | PR #1783
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
 
 # Package translations from the prior debian:trixie-slim stage (verified live
 # against a real alpine:3.24 container, per issue #815's own instruction to
@@ -576,53 +636,62 @@ LABEL org.opencontainers.image.description="lancache-ng Admin UI and control-pla
 #     --init-groups`) -- confirmed live that Alpine's util-linux package ships
 #     setpriv with identical --init-groups behavior to Debian's.
 #   - ca-certificates, coreutils: unchanged package names, confirmed present
-#     on Alpine, kept apk-installed (excluded from the utilities migration --
-#     see services/proxy/Dockerfile's comment for ca-certificates' reason).
+#     on Alpine, kept apk-installed. curl/lsof/ripgrep are also apk-installed
+#     now (the shared utilities image every service used to COPY them from
+#     is gone).
+
+# What: shared version-banner script, not a per-service copy.
+# Why: named build context avoids duplicating it per service.
+# From: Issue #1781 | PR #1783
+COPY --from=shared-scripts verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
+
+# What: switches apk's own repositories to plain http.
+# Why: Squid caches http; signed indices keep integrity.
+# From: Issue #1095
+RUN sed -i 's|^https://|http://|' /etc/apk/repositories
+
 # What: declares APT_CACHE_BUST right before RUN that uses it
-# Why: prevents BuildKit cache replaying stale apk index forever
+# Why: prevents cache from replaying a stale apk index forever
 # From: Issue #1095
 ARG APT_CACHE_BUST=""
-RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
+# What: trusts the proxy's CA for this RUN, never in a layer.
+# Why: a secret mount never persists; bundle restored below.
+# From: Issue #1781 | PR #1783
+RUN --mount=type=secret,id=proxy_ca \
+    if [ -s /run/secrets/proxy_ca ]; then \
+      cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig && \
+      cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+    fi && \
+    : "apt-cache-bust=${APT_CACHE_BUST}" && \
     apk upgrade --no-cache && \
     apk add --no-cache \
     ca-certificates \
     coreutils \
     util-linux \
-    nano
+    nano \
+    curl \
+    lsof \
+    ripgrep && \
+    if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
-# What: curl/lsof/ripgrep come from shared utilities image
-# Why: same alpine:3.24 digest as utilities for consistency
-# From: Issue #1556
+# nano: in-container troubleshooting tool -- see services/proxy/Dockerfile's
+# identical comment for the full rationale; lsof/ripgrep are apk-installed
+# above but serve the same troubleshooting purpose.
 
-# What: removes BusyBox symlink before real binary lands
-# Why: see services/proxy/Dockerfile's identical comment for reason
-# From: Issue #1556
-RUN rm -f /usr/bin/lsof
-
-COPY --from=utilities-tools /usr/local/bin/curl /usr/local/bin/curl
-COPY --from=utilities-tools /usr/bin/lsof /usr/bin/lsof
-COPY --from=utilities-tools /usr/bin/rg /usr/bin/rg
-COPY --from=utilities-tools /usr/lib/libgcc_s.so.1 /usr/lib/libgcc_s.so.1
-COPY --from=utilities-tools /usr/lib/libpcre2-8.so.0* /usr/lib/
-COPY --from=utilities-tools /usr/local/bin/verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
-
-# What: verifies copied binaries run with dependencies present
-# Why: shared-library dependency failures happen at exec time only
-# From: Issue #1613
+# What: verifies apk-installed binaries execute, not just exist.
+# Why: missing library dependencies fail at runtime, not apk add.
+# From: Issue #1613 | Issue #1781 | PR #1783
 RUN set -euo pipefail; \
     rg --version >/dev/null; \
     curl --version >/dev/null; \
     sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
 
-# nano: in-container troubleshooting tool -- see services/proxy/Dockerfile's
-# identical comment for the full rationale; lsof/ripgrep are COPY'd above
-# but serve the same troubleshooting purpose.
 ENV EDITOR=nano
 ENV VISUAL=$EDITOR
 
 COPY --from=builder /build/lancache-ui-out /usr/local/bin/lancache-ui
-COPY src/templates /templates
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY services/ui/src/templates /templates
+COPY services/ui/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 # The former dhcp-probe.sh (nmap + isc-dhcp-client) is retired by issue
 # #1288 -- the dhcp-probe container now runs this same lancache-ui binary
 # with `--dhcp-probe` (see deploy/*/docker-compose.yml's dhcp-probe
@@ -637,6 +706,17 @@ RUN addgroup -g 10001 lancache \
     && chown -R lancache:lancache /data /etc/nats \
     && chmod +x /usr/local/bin/docker-entrypoint.sh
 
+# What: fail build if CI proxy CA leaked into image
+# Why: CA must never persist in a published service image
+# From: Issue #1781 | PR #1783
+RUN if [ -e /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt ]; then \
+      echo "SECURITY: CI proxy CA persisted in final image" >&2; exit 1; \
+    fi
+
+# What: final apk upgrade pass, no packages added.
+# Why: patches CVEs fixed after this file's package installs.
+# From: Issue #1781 | PR #1783
+RUN apk upgrade --no-cache
 
 EXPOSE 8080
 
