@@ -351,15 +351,8 @@ EOF
   [ "$output" = $'0\t2\t0' ]
 }
 
-# What: sra_tag_kind() itself had no direct test anywhere in this
-# suite before this fix -- every prior assertion went through
-# sra_version_tag_facts's aggregate counts instead. The -standalone
-# infix (build-tools.yml's fork-PR-only per-arch scan images,
-# sha-<hex>-standalone-amd64/-arm64) is added by this fix.
-# Why: every downstream root/child/other decision in this file (and
-# in scripts/untracked/gc-pr-staging-images.sh's closure/orphan
-# passes) depends on this one classifier; the new infix needs a
-# direct case, not just an indirect assertion via tag facts.
+# What: covers sra_tag_kind() directly, incl. -standalone.
+# Why: root/child/other decisions depend on this fn.
 # From: Issue #1095
 @test "tag kind classifies root, plain child, standalone child, and other shapes" {
   run sra_tag_kind "sha-abcdef1"
@@ -383,15 +376,8 @@ EOF
   [ "$output" = $'other\tpr-5-sha-abcdef1' ]
 }
 
-# What: tag facts count build-tools.yml's fork-PR standalone per-arch
-# scan tags (sha-<hex>-standalone-amd64/-arm64) as child, not other.
-# Why: before this fix these fell into the generic "other"-tag bucket
-# and competed for the much smaller channel_buffer_versions budget
-# instead of the age-gated artifact-child-closure path meant for
-# exactly this shape (root_count == 0 && child_count > 0 in
-# scripts/untracked/gc-sha-retention-audit.sh) -- these images are
-# never merged into a multi-arch root, so there is no live-root case
-# to protect against here.
+# What: counts -standalone per-arch tags as child.
+# Why: routes to closure-age cleanup, not tiny buffer.
 # From: Issue #1095
 @test "tag facts classify standalone per-arch build-tools tags as child" {
   version='{"metadata":{"container":{"tags":["sha-abcdef1-standalone-amd64","sha-abcdef1-standalone-arm64"]}}}'

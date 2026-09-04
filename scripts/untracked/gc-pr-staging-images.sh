@@ -39,26 +39,13 @@ services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities
 # From: Issue #1095
 max_deletions_per_service="${GC_MAX_DELETIONS_PER_SERVICE:-40}"
 
-# What: reserves per-service slots for Pass 1.5/2 orphan cleanup.
-# Why: Pass 1's own root-budget/PR backlog can otherwise exhaust the
-#   whole per-run cap every run, so untagged/closed-PR orphans never
-#   get evaluated (observed live for ui/build-tools: Pass 1 alone hit
-#   the cap in every sampled run, 0 orphan deletions both times).
+# What: reserves Pass 1.5/2 slots from the per-run cap.
+# Why: Pass 1 backlog can otherwise exhaust the cap first.
 # From: Issue #1095
 orphan_reserve_per_service="${GC_ORPHAN_RESERVE_PER_SERVICE:-20}"
 
-# gc_compute_pass1_deletion_cap <effective-per-service-cap> <reserve>
-#
-# What: splits one service's effective per-run cap into a Pass 1
-#   sub-cap (pass1_deletion_cap) and an orphan-cleanup reserve
-#   (effective_orphan_reserve), clamped to at most half the effective
-#   cap. Sets both as globals (no `local`), same output-slot pattern
-#   as gcps_delete_result/gc_delete_result elsewhere in this file.
-# Why: shared by the top-level default below and by
-#   gc_run_package_worker()'s per-quota recompute -- a fixed reserve
-#   above a dynamically-shrunk effective cap (many discovered
-#   packages -> small per-service quota) must degrade gracefully by
-#   halving, not silently zero out Pass 1 (closed-PR reaping).
+# What: splits a per-run cap into Pass 1 + orphan reserve.
+# Why: shared by the default init and per-worker recompute.
 # From: Issue #1095
 gc_compute_pass1_deletion_cap() {
   local effective_cap="$1" reserve="$2"
@@ -69,11 +56,8 @@ gc_compute_pass1_deletion_cap() {
   fi
   pass1_deletion_cap=$(( effective_cap - effective_orphan_reserve ))
 }
-# What: script-scope default so process_service() has a valid
-#   pass1_deletion_cap even when a bats test sources this file and
-#   calls process_service() directly, bypassing gc_run_package_worker.
-# Why: process_service()'s Pass 1 cap check reads pass1_deletion_cap
-#   unconditionally; an unset variable would abort under `set -u`.
+# What: gives process_service() a valid cap pre-worker.
+# Why: Pass 1's cap check reads it unconditionally.
 # From: Issue #1095
 gc_compute_pass1_deletion_cap "$max_deletions_per_service" "$orphan_reserve_per_service"
 
@@ -382,14 +366,8 @@ process_service() {
   local -A retained_root_prefixes=() live_subject_digests=()
   local revalidate_status delete_description kind prefix
 
-  # What: recomputes the Pass 1/orphan-reserve split from whatever
-  #   max_deletions_per_service/orphan_reserve_per_service currently
-  #   hold, every call.
-  # Why: the caller (gc_run_package_worker, a bats test overriding
-  #   max_deletions_per_service directly, ...) may have changed either
-  #   value after the script-scope default was computed; recomputing
-  #   here instead of trusting a stale caller-side value keeps this
-  #   function correct regardless of call site.
+  # What: recomputes the Pass 1/reserve split on every call.
+  # Why: a caller may change the cap after script-source time.
   # From: Issue #1095
   gc_compute_pass1_deletion_cap "$max_deletions_per_service" "$orphan_reserve_per_service"
 
@@ -472,24 +450,8 @@ process_service() {
     fi
   fi
 
-  # What: Pass 0.5 pre-collects every tagged version's forward
-  #   manifest children, uncapped -- before Pass 1's own deletion cap
-  #   applies to anything.
-  # Why: Pass 1.5/2's live-child protection (protected_children_digests,
-  #   built below from manifest_children_by_version) must be complete
-  #   regardless of where Pass 1 itself stops deleting. Before this
-  #   fix, this collection ran inline inside Pass 1's own capped loop,
-  #   so a version_list sorted oldest-first meant Pass 1 hitting its
-  #   cap left every NEWER still-tagged parent's children uncollected
-  #   -- Pass 2 could then misclassify a live per-arch/attestation
-  #   child of one of those skipped parents as a true orphan and
-  #   delete it. Splitting "observe" (this loop) from "decide" (Pass 1
-  #   below) removes that gap without reordering Pass 1/1.5/2 relative
-  #   to each other. Cost: one extra GHCR registry GET per tagged
-  #   version now runs even past the old cap -- this uses
-  #   ghcr_retry/gcps_fetch_manifest (the GHCR registry, anonymous
-  #   token) exclusively, never `gh api` (the rate-limited GitHub API
-  #   PR-lookup/revalidation calls stay capped exactly as before).
+  # What: pre-collects manifest children, uncapped, first.
+  # Why: Pass 2 needs a complete children map, not partial.
   # From: Issue #1095
   if [[ "$orphan_phase_ok" == "1" ]]; then
     local precollect_version_id precollect_tag_list precollect_digest precollect_manifest_json
@@ -536,16 +498,8 @@ process_service() {
     done <<< "$version_list"
   fi
 
-  # What: Pass 1 classifies closed-PR/retention-budget versions for
-  #   deletion, gated by pass1_deletion_cap. Once reached, remaining
-  #   tagged candidates are counted as kept (truthful summary,
-  #   AG-INT-002) without further candidate-specific API work
-  #   (PR-state lookups, revalidation) -- the loop still runs to
-  #   completion instead of returning early, so Pass 1.5/2 below
-  #   always get their turn even when Pass 1 alone would have filled
-  #   the whole per-run cap.
-  # Why: Pass 2 needs children digests (collected above) for true
-  #   orphan check.
+  # What: Pass 1 deletes up to pass1_deletion_cap, then keeps.
+  # Why: Pass 1.5/2 must still run after Pass 1's own cap.
   # From: Issue #1095 | PR #1443
   local version_id tag_list planned_identity planned_digest planned_tags current_digest current_tags retention_candidate
   local pass1_cap_reached=0
@@ -635,11 +589,8 @@ process_service() {
       fi
     done <<< "$tag_list"
 
-    # What: manifest-children collection for this version happened in
-    #   the uncapped Pass 0.5 loop above, not here.
-    # Why: keeps Pass 1's own deletion-decision loop free of GHCR
-    #   registry calls, so a mocked/degenerate manifest_children_by_version
-    #   entry is never silently re-derived at a different cap position.
+    # What: children were pre-collected in the pass above.
+    # Why: keeps this loop free of GHCR registry calls.
     # From: Issue #1095
 
     if [[ "$protected" == "1" || ( "$has_closed_pr_tag" == "0" && "$retention_candidate" == "0" ) ]]; then
@@ -939,11 +890,8 @@ process_service() {
 # From: Issue #1095
 gc_run_package_worker() {
   local service="$1" result_file="$2" package_deletion_cap="$3"
-  # What: quota override only; process_service() itself recomputes
-  #   the Pass 1/orphan-reserve split against this new value on every
-  #   call, so it stays correct against THIS worker's actual quota
-  #   (dynamic package discovery can shrink quota_base well below the
-  #   configured reserve) without a second call here.
+  # What: overrides the per-service cap for this worker only.
+  # Why: process_service() itself recomputes the Pass 1 split.
   # From: Issue #1095
   max_deletions_per_service="$package_deletion_cap"
   had_errors=0
@@ -999,10 +947,8 @@ main() {
     echo "::error::GC_MAX_DELETIONS_PER_SERVICE must be a non-negative integer."
     exit 1
   }
-  # What: format-only check; the real per-worker clamp against the
-  #   effective (post-quota) cap lives in gc_compute_pass1_deletion_cap.
-  # Why: this global default's relationship to max_deletions_per_service
-  #   is meaningless before per-service quota division below.
+  # What: format-only guard for GC_ORPHAN_RESERVE_PER_SERVICE.
+  # Why: the real clamp needs the post-quota effective cap.
   # From: Issue #1095
   [[ "$orphan_reserve_per_service" =~ ^[0-9]+$ ]] || {
     echo "::error::GC_ORPHAN_RESERVE_PER_SERVICE must be a non-negative integer."

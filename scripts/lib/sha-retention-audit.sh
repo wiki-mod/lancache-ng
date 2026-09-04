@@ -195,15 +195,8 @@ sra_validate_version_page() {
   ' "$page_file" >/dev/null
 }
 
-# What: classifies tag as root, per-platform child, other. The
-#   optional `-standalone` infix matches build-tools.yml's fork-PR-only
-#   per-arch scan images (sha-<hex>-standalone-amd64/-arm64), which are
-#   never merged into a multi-arch root (Issue #1095).
-# Why: Centralized classification drives all downstream decisions.
-#   Before this fix, a `-standalone` child fell into the generic
-#   "other"-tag bucket and competed for the much smaller
-#   channel_buffer_versions budget instead of the age-gated
-#   artifact-child-closure path meant for exactly this shape.
+# What: classifies tag as root/child, incl. -standalone.
+# Why: centralizes tag-shape logic for every decision.
 # From: Issue #1095 | PR #1586
 sra_tag_kind() {
   local tag="${1:?sra_tag_kind: tag is required}"

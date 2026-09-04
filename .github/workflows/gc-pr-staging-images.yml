@@ -220,8 +220,8 @@ jobs:
           GC_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
           GC_CONCURRENCY: ${{ github.event.inputs.concurrency || vars.GC_CONCURRENCY || '1' }}
           GC_MAX_DELETIONS_PER_SERVICE: ${{ github.event.inputs.max_deletions_per_service || vars.GC_MAX_DELETIONS_PER_SERVICE || '40' }}
-          # What: reserves Pass 1.5/2 orphan-cleanup slots out of the cap above.
-          # Why: Pass 1's own backlog can otherwise starve orphan reaping every run.
+          # What: reserves orphan-cleanup slots from the cap above.
+          # Why: Pass 1's backlog can starve Pass 1.5/2 otherwise.
           # From: Issue #1095
           GC_ORPHAN_RESERVE_PER_SERVICE: ${{ vars.GC_ORPHAN_RESERVE_PER_SERVICE || '20' }}
           GC_MAX_DELETIONS_TOTAL: ${{ github.event.inputs.max_deletions_total || vars.GC_MAX_DELETIONS_TOTAL || '1500' }}
