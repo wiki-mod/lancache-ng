@@ -139,7 +139,7 @@ RUN chmod +x /entrypoint.sh \
     && mkdir -p /var/lib/chrony /var/log/chrony
 
 # What: final apk upgrade pass, no packages added.
-# Why: patches any CVE fixed after this file's earlier package installs.
+# Why: patches CVEs fixed after this file's package installs.
 # From: Issue #1781 | PR #1783
 RUN apk upgrade --no-cache
 

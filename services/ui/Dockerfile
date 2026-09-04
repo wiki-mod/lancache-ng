@@ -601,8 +601,8 @@ ARG no_proxy
 #     now (issue #1781 dropped the shared utilities image every service used
 #     to COPY them from).
 
-# What: shared version-banner check script, not a service-local file.
-# Why: named build context avoids duplicating it into every service.
+# What: shared version-banner script, not a per-service copy.
+# Why: named build context avoids duplicating it per service.
 # From: Issue #1781 | PR #1783
 COPY --from=shared-scripts verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
 
@@ -675,7 +675,7 @@ RUN if [ -e /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt ]; then \
     fi
 
 # What: final apk upgrade pass, no packages added.
-# Why: patches any CVE fixed after this file's earlier package installs.
+# Why: patches CVEs fixed after this file's package installs.
 # From: Issue #1781 | PR #1783
 RUN apk upgrade --no-cache
 

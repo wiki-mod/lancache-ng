@@ -76,8 +76,8 @@ LABEL org.opencontainers.image.description="dnsmasq-based DHCP proxy and relay h
 #    "no snapshot validates, restore the original live file" backup path)
 #    was run end-to-end against a real `dnsmasq --test` validator and
 #    behaved identically to the pre-migration Debian image.
-# What: shared version-banner check script, not a service-local file.
-# Why: named build context avoids duplicating it into every service.
+# What: shared version-banner script, not a per-service copy.
+# Why: named build context avoids duplicating it per service.
 # From: Issue #1781 | PR #1783
 COPY --from=shared-scripts verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
 
@@ -124,7 +124,7 @@ COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 # What: final apk upgrade pass, no packages added.
-# Why: patches any CVE fixed after this file's earlier package installs.
+# Why: patches CVEs fixed after this file's package installs.
 # From: Issue #1781 | PR #1783
 RUN apk upgrade --no-cache
 

@@ -92,8 +92,8 @@ ARG no_proxy
 #     (`local -n`), and `${var,,}` lowercasing all require real bash --
 #     Alpine's base image has no bash by default, unlike Debian's.
 #
-# What: shared version-banner check script, not a service-local file.
-# Why: named build context avoids duplicating it into every service.
+# What: shared version-banner script, not a per-service copy.
+# Why: named build context avoids duplicating it per service.
 # From: Issue #1781 | PR #1783
 COPY --from=shared-scripts verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
 
@@ -195,7 +195,7 @@ RUN chmod +x /entrypoint.sh
 VOLUME ["/etc/nginx/ssl", "/var/cache/nginx/lancache"]
 
 # What: final apk upgrade pass, no packages added.
-# Why: patches any CVE fixed after this file's earlier package installs.
+# Why: patches CVEs fixed after this file's package installs.
 # From: Issue #1781 | PR #1783
 RUN apk upgrade --no-cache
 

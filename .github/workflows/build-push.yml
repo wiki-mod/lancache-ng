@@ -4598,10 +4598,8 @@ jobs:
       reuse_dhcp_proxy: ${{ steps.decide.outputs.reuse_dhcp_proxy }}
       reuse_ntp: ${{ steps.decide.outputs.reuse_ntp }}
       reuse_build_tools: ${{ steps.decide.outputs.reuse_build_tools }}
-      # What: syslog's reuse-decision output, alongside the other
-      # 7 allowlisted services.
-      # Why: same three-part verification as every other allowlisted
-      # service; no new logic, only this one additional output.
+      # What: syslog reuse-decision output, alongside 7 other services.
+      # Why: same three-part check every allowlisted service gets.
       # From: Issue #1095
       reuse_syslog: ${{ steps.decide.outputs.reuse_syslog }}
       # What: the pinned digest reuse=true services verified against.
@@ -4949,7 +4947,7 @@ jobs:
           - service: dns
             context: services/dns
             # What: shared verify-version-banner.sh lives outside this context.
-            # Why: issue #1781 dropped the utilities image that used to COPY it.
+            # Why: issue #1781 dropped the utilities image it used to COPY.
             # From: Issue #1781 | PR #1783
             build_contexts: shared-scripts=scripts/lib
             description: &ci-description-dns "PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing."
@@ -4958,7 +4956,7 @@ jobs:
           - service: watchdog
             context: services/watchdog
             # What: shared verify-version-banner.sh lives outside this context.
-            # Why: issue #1781 dropped the utilities image that used to COPY it.
+            # Why: issue #1781 dropped the utilities image it used to COPY.
             # From: Issue #1781 | PR #1783
             build_contexts: shared-scripts=scripts/lib
             description: &ci-description-watchdog "lancache-ng watchdog helper for runtime health checks and recovery hooks."
@@ -4974,7 +4972,7 @@ jobs:
           - service: dhcp
             context: services/dhcp
             # What: shared verify-version-banner.sh lives outside this context.
-            # Why: issue #1781 dropped the utilities image that used to COPY it.
+            # Why: issue #1781 dropped the utilities image it used to COPY.
             # From: Issue #1781 | PR #1783
             build_contexts: shared-scripts=scripts/lib
             description: &ci-description-dhcp "Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks."
@@ -4982,15 +4980,15 @@ jobs:
           - service: dhcp-proxy
             context: services/dhcp-proxy
             # What: shared verify-version-banner.sh lives outside this context.
-            # Why: issue #1781 dropped the utilities image that used to COPY it.
+            # Why: issue #1781 dropped the utilities image it used to COPY.
             # From: Issue #1781 | PR #1783
             build_contexts: shared-scripts=scripts/lib
             description: &ci-description-dhcp-proxy "dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments."
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: ntp
             context: services/ntp
-            # What: no shared-scripts context -- ntp never used verify-version-banner.sh.
-            # Why: its only ex-utilities tools (curl, envsubst) have no banner check.
+            # What: no shared-scripts context; unlike the other 6 consumers.
+            # Why: curl/envsubst here need no lsof-banner check at all.
             # From: Issue #1781 | PR #1783
             build_contexts: ""
             description: &ci-description-ntp "chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123."
@@ -5003,7 +5001,7 @@ jobs:
           - service: ui
             context: services/ui
             # What: shared verify-version-banner.sh lives outside this context.
-            # Why: issue #1781 dropped the utilities image that used to COPY it.
+            # Why: issue #1781 dropped the utilities image it used to COPY.
             # From: Issue #1781 | PR #1783
             build_contexts: shared-scripts=scripts/lib
             description: &ci-description-ui "lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
@@ -7757,8 +7755,7 @@ jobs:
         env:
           TAG_NAME: ${{ github.ref_name }}
           # What: syslog is explicit in this SERVICES scalar.
-          # Why: check-workflow-service-lists.sh's regex guard can only
-          # see a space-separated scalar here, not a bash array.
+          # Why: check-workflow-service-lists.sh needs a plain scalar here.
           # From: Issue #1428 | PR #1433
           SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools stack
           REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}

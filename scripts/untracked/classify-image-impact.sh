@@ -418,12 +418,7 @@ touches_dns_rust() {
         || touches_action "cargo-with-sccache-fallback"
 }
 # What: true when the shared-scripts named build context changed.
-# Why: issue #1781 removed the utilities image; proxy/dns/dhcp/dhcp-proxy/
-#   ui/watchdog now COPY scripts/lib/verify-version-banner.sh from this
-#   named build context instead (ntp never used it, so it is excluded from
-#   every caller below), mirroring the pre-existing dns-domains rule below
-#   for the same "named build context lives outside the service's own path
-#   prefix" reason.
+# Why: 6 consumers COPY from it; mirrors the dns-domains rule.
 # From: Issue #1781 | PR #1783
 touches_shared_scripts() {
     touches_exact "scripts/lib/verify-version-banner.sh"
@@ -469,8 +464,10 @@ output_bool "syslog" touches_prefix "services/syslog/"
 # must also rebuild the proxy image or its baked-in /etc/nginx/cdn-domains.txt
 # goes stale until some unrelated services/proxy/ change next fires (#771).
 # Independent of (not a replacement for) the services/proxy/ prefix rule and the
-# separate dns_image rule above. Also rebuilds on a shared-scripts change (see
-# touches_shared_scripts above) since proxy COPYs from that named context too.
+# separate dns_image rule above.
+# What: also rebuilds proxy on a shared-scripts change.
+# Why: proxy COPYs from that named context too.
+# From: Issue #1781 | PR #1783
 if touches_prefix "services/proxy/" \
     || touches_exact "services/dns/cdn-domains.txt" \
     || touches_shared_scripts; then
