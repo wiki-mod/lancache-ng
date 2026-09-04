@@ -143,8 +143,8 @@ RUN --mount=type=secret,id=proxy_ca \
 # purge-after-use step is needed here since Alpine's apk signing-key
 # mechanism (a plain RSA public key file) never pulls in a temporary
 # package the way apt's gpg-based key import did. ca-certificates and curl
-# are apk-installed in the same early call (issue #1781 dropped the shared
-# utilities image every service used to COPY them from): this build needs
+# are apk-installed in the same early call (the shared utilities image
+# every service used to COPY them from is gone): this build needs
 # the trust store and curl itself before the signing-key fetch a few lines
 # below runs.
 # nano: in-container troubleshooting tool -- see services/dns/Dockerfile's

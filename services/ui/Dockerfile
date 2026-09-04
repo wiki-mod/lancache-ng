@@ -598,8 +598,8 @@ ARG no_proxy
 #     setpriv with identical --init-groups behavior to Debian's.
 #   - ca-certificates, coreutils: unchanged package names, confirmed present
 #     on Alpine, kept apk-installed. curl/lsof/ripgrep are also apk-installed
-#     now (issue #1781 dropped the shared utilities image every service used
-#     to COPY them from).
+#     now (the shared utilities image every service used to COPY them from
+#     is gone).
 
 # What: shared version-banner script, not a per-service copy.
 # Why: named build context avoids duplicating it per service.

@@ -4947,7 +4947,7 @@ jobs:
           - service: dns
             context: services/dns
             # What: shared verify-version-banner.sh lives outside this context.
-            # Why: issue #1781 dropped the utilities image it used to COPY.
+            # Why: the shared utilities image it used to COPY from is gone.
             # From: Issue #1781 | PR #1783
             build_contexts: shared-scripts=scripts/lib
             description: &ci-description-dns "PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing."
@@ -4956,7 +4956,7 @@ jobs:
           - service: watchdog
             context: services/watchdog
             # What: shared verify-version-banner.sh lives outside this context.
-            # Why: issue #1781 dropped the utilities image it used to COPY.
+            # Why: the shared utilities image it used to COPY from is gone.
             # From: Issue #1781 | PR #1783
             build_contexts: shared-scripts=scripts/lib
             description: &ci-description-watchdog "lancache-ng watchdog helper for runtime health checks and recovery hooks."
@@ -4972,7 +4972,7 @@ jobs:
           - service: dhcp
             context: services/dhcp
             # What: shared verify-version-banner.sh lives outside this context.
-            # Why: issue #1781 dropped the utilities image it used to COPY.
+            # Why: the shared utilities image it used to COPY from is gone.
             # From: Issue #1781 | PR #1783
             build_contexts: shared-scripts=scripts/lib
             description: &ci-description-dhcp "Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks."
@@ -4980,7 +4980,7 @@ jobs:
           - service: dhcp-proxy
             context: services/dhcp-proxy
             # What: shared verify-version-banner.sh lives outside this context.
-            # Why: issue #1781 dropped the utilities image it used to COPY.
+            # Why: the shared utilities image it used to COPY from is gone.
             # From: Issue #1781 | PR #1783
             build_contexts: shared-scripts=scripts/lib
             description: &ci-description-dhcp-proxy "dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments."
@@ -5001,7 +5001,7 @@ jobs:
           - service: ui
             context: services/ui
             # What: shared verify-version-banner.sh lives outside this context.
-            # Why: issue #1781 dropped the utilities image it used to COPY.
+            # Why: the shared utilities image it used to COPY from is gone.
             # From: Issue #1781 | PR #1783
             build_contexts: shared-scripts=scripts/lib
             description: &ci-description-ui "lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
