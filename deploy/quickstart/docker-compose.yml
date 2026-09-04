@@ -4,33 +4,9 @@
 #
 # LanCache-NG — Quickstart (no repo clone needed)
 #
-# Prerequisites:
-#   1. Run setup.sh — configures .env and starts everything automatically
-#      Or manually:
-#   2. Edit .env: adjust IPs and the shared cache path
-#   3. Create the cache directory:
-#        mkdir -p /opt/lancache-ng/cache
-#   4. (optional) Add second LAN IP:
-#        ip addr add 192.168.234.11/24 dev eth0
-#   5. Start:
-#        docker compose pull && docker compose up -d
-#   6. Get CA certificate for SSL mode (after first start):
-#        ./certs/ca.crt → install on clients (docs: github.com/wiki-mod/lancache-ng)
-#
-# Customize domain lists: via Admin UI (port 8080) or
-# mount custom files (see deploy/prod/docker-compose.yml in repo).
 
 name: lancache-ng
 
-# What: the Docker socket proxy's HAProxy allowlist lives in exactly one
-# place, scripts/untracked/docker-socket-proxy.sh (mounted read-only below).
-# Why: docs/naming-conventions.md names this the canonical source -- do not
-# duplicate the allowlist as a YAML anchor in this file.
-# From: PR #635
-#
-# What: LANCACHE_CONTAINER_SUFFIX, appended to every container_name: below (`lancache-<service>${LANCACHE_CONTAINER_SUFFIX:-}`); left unset for a real install, matching the fixed names docs/naming-conventions.md documents.
-# Why: an explicit container_name: overrides Compose's own project-name isolation entirely, so two concurrent CI runs on one runner host collided on the identical fixed name despite distinct project names; this lets CI derive a per-run unique suffix instead.
-# From: Issue #1415 | PR #1456
 
 services:
 
