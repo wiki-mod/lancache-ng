@@ -195,15 +195,22 @@ sra_validate_version_page() {
   ' "$page_file" >/dev/null
 }
 
-# What: classifies tag as root, per-platform child, other.
+# What: classifies tag as root, per-platform child, other. The
+#   optional `-standalone` infix matches build-tools.yml's fork-PR-only
+#   per-arch scan images (sha-<hex>-standalone-amd64/-arm64), which are
+#   never merged into a multi-arch root (Issue #1095).
 # Why: Centralized classification drives all downstream decisions.
+#   Before this fix, a `-standalone` child fell into the generic
+#   "other"-tag bucket and competed for the much smaller
+#   channel_buffer_versions budget instead of the age-gated
+#   artifact-child-closure path meant for exactly this shape.
 # From: Issue #1095 | PR #1586
 sra_tag_kind() {
   local tag="${1:?sra_tag_kind: tag is required}"
   if [[ "$tag" =~ ^sha-([0-9a-f]{7,40})$ ]]; then
     printf 'root\t%s\n' "${BASH_REMATCH[1]}"
-  elif [[ "$tag" =~ ^sha-([0-9a-f]{7,40})-(amd64|arm64)$ ]]; then
-    printf 'child\t%s\t%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+  elif [[ "$tag" =~ ^sha-([0-9a-f]{7,40})-(standalone-)?(amd64|arm64)$ ]]; then
+    printf 'child\t%s\t%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[3]}"
   else
     printf 'other\t%s\n' "$tag"
   fi

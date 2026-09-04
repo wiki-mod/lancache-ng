@@ -1436,8 +1436,179 @@ VERSIONS_JSON
 
     [ "$deleted" -eq 1 ]
     [ "$(wc -l <"$pull_log")" -eq 2 ]
-    [ "$(grep -c 'reached its per-run deletion cap' "$run_log")" -eq 1 ]
+    # What: this fix (Issue #1095) renamed Pass 1's own cap notice from
+    # "reached its per-run deletion cap" to "reached its Pass 1
+    # sub-cap" -- Pass 1's cap check no longer returns from
+    # process_service() early (Pass 1.5/2 must still run), so the
+    # message now names which sub-budget was hit.
+    [ "$(grep -c 'reached its Pass 1 sub-cap' "$run_log")" -eq 1 ]
     [ "$(wc -l <"$delete_log")" -eq 1 ]
+}
+
+# What: a tagged parent Pass 1 skips due to its own sub-cap (not
+# deleted, merely deferred/kept) must still protect its forward
+# manifest child from Pass 2's orphan reap.
+# Why: this is the exact hazard a naive fix (just lowering Pass 1's
+# cap threshold, or returning/breaking out of Pass 1's loop early)
+# would introduce: version_list is sorted oldest-first, so the
+# tagged versions Pass 1 never reaches once capped are the NEWEST
+# ones -- if their manifests are never fetched, Pass 2 cannot know
+# they still have a live forward child, and would delete it as a
+# false orphan. This fix collects every tagged version's manifest
+# children in an uncapped pre-pass specifically so this case is safe.
+# From: Issue #1095
+@test "process_service: Pass 1 pre-collects manifest children even for a version deferred by its own cap" {
+    max_deletions_per_service=1
+    parent_kept_digest="sha256:$(printf '2%.0s' {1..64})"
+    child_digest="sha256:$(printf '3%.0s' {1..64})"
+    deleted_digest="sha256:$(printf '1%.0s' {1..64})"
+    delete_log="$BATS_TEST_TMPDIR/hazard-deletes"
+    : >"$delete_log"
+    export delete_log parent_kept_digest child_digest deleted_digest
+
+    gh() {
+        if [[ "$1" == "api" && "$2" == "--paginate" ]]; then
+            printf '[
+  {"id":301,"name":"%s","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["pr-901-sha-aaaaaaa"]}}},
+  {"id":302,"name":"%s","created_at":"2020-01-02T00:00:00Z","metadata":{"container":{"tags":["pr-902-sha-bbbbbbb"]}}},
+  {"id":303,"name":"%s","created_at":"2020-01-03T00:00:00Z","metadata":{"container":{"tags":[]}}}
+]\n' "$deleted_digest" "$parent_kept_digest" "$child_digest"
+            return 0
+        fi
+        if [[ "$1" == "api" && "$2" == repos/*/pulls/* ]]; then
+            printf '{"state":"closed"}\n'
+            return 0
+        fi
+        if [[ "$1" == "api" && "$2" == "-X" && "$3" == "DELETE" ]]; then
+            echo "$4" >>"$delete_log"
+            return 0
+        fi
+        echo "unexpected gh call: $*" >&2
+        return 1
+    }
+    export -f gh
+    curl() {
+        [[ "$*" == *"ghcr.io/token"* ]] && { printf '{"token":"faketoken"}\n'; return 0; }
+        if [[ "$*" == *"$parent_kept_digest"* ]]; then
+            printf '{"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"digest":"%s"}]}\n' "$child_digest"
+            return 0
+        fi
+        printf '{"mediaType":"application/vnd.oci.image.manifest.v1+json"}\n'
+    }
+    export -f curl
+    github_api_get_with_retry() {
+        if [[ "$1" == *"/versions/301"* ]]; then
+            printf '{"id":301,"name":"%s","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["pr-901-sha-aaaaaaa"]}}}\n' "$deleted_digest" >"$2"
+            return 0
+        fi
+        echo "unexpected revalidation call: $1" >&2
+        return 1
+    }
+
+    process_service proxy
+
+    [ "$deleted" -eq 1 ]
+    [ "$kept" -eq 2 ]
+    grep -q "/versions/301$" "$delete_log"
+    ! grep -q "/versions/302$" "$delete_log"
+    ! grep -q "/versions/303$" "$delete_log"
+}
+
+# What: exercises gc_run_package_worker() itself (the real quota
+# override + per-worker recompute), not process_service() with a
+# hand-set cap -- proves the orphan reserve survives the actual
+# main() -> quota -> worker call path, and that Pass 2 gets its
+# reserved share instead of being starved by a large Pass 1 backlog.
+# Why: reproduces live behavior observed for ui/build-tools: across
+# 2 sampled real GHCR GC runs both services hit their per-run cap
+# entirely inside Pass 1 (closed-PR/retention-budget candidates),
+# with zero "untagged, unreferenced orphan digest" deletions either
+# time, despite ~70% of both services' live inventory being untagged.
+# From: Issue #1095
+@test "gc_run_package_worker: orphan reserve survives the quota override, Pass 2 gets its reserved share" {
+    orphan_reserve_per_service=2
+    result_file="$BATS_TEST_TMPDIR/worker-result"
+    run_log="$BATS_TEST_TMPDIR/worker-run.log"
+    delete_log="$BATS_TEST_TMPDIR/worker-deletes"
+    : >"$delete_log"
+    export delete_log
+
+    # What: stubs the read-only retention-audit subprocess call.
+    # Why: gc_build_service_retention_plan() normally shells out to
+    # gc-sha-retention-audit.sh; this fixture has no ordinary-root
+    # candidates, so an empty plan (pure closed-PR/orphan coverage)
+    # is the correct stub, not a live subprocess invocation.
+    # From: Issue #1095
+    gc_build_service_retention_plan() {
+        retention_delete_candidates=()
+        retention_package_absent=0
+        retention_versions_snapshot=""
+        return 0
+    }
+
+    versions_json='['
+    for i in 1 2 3 4 5 6; do
+        pr=$((900 + i))
+        digest="sha256:$(printf 'a%.0s' {1..63})${i}"
+        versions_json+="{\"id\":$((100 + i)),\"name\":\"$digest\",\"created_at\":\"2020-01-0${i}T00:00:00Z\",\"metadata\":{\"container\":{\"tags\":[\"pr-${pr}-sha-abcdef${i}\"]}}},"
+    done
+    for i in 1 2 3; do
+        digest="sha256:$(printf 'b%.0s' {1..63})${i}"
+        versions_json+="{\"id\":$((200 + i)),\"name\":\"$digest\",\"created_at\":\"2020-02-0${i}T00:00:00Z\",\"metadata\":{\"container\":{\"tags\":[]}}},"
+    done
+    versions_json="${versions_json%,}]"
+    export versions_json
+
+    gh() {
+        if [[ "$1" == "api" && "$2" == "--paginate" ]]; then
+            printf '%s\n' "$versions_json"
+            return 0
+        fi
+        if [[ "$1" == "api" && "$2" == repos/*/pulls/* ]]; then
+            printf '{"state":"closed"}\n'
+            return 0
+        fi
+        if [[ "$1" == "api" && "$2" == "-X" && "$3" == "DELETE" ]]; then
+            echo "$4" >>"$delete_log"
+            return 0
+        fi
+        echo "unexpected gh call: $*" >&2
+        return 1
+    }
+    export -f gh
+    curl() {
+        [[ "$*" == *"ghcr.io/token"* ]] && { printf '{"token":"faketoken"}\n'; return 0; }
+        printf '{"mediaType":"application/vnd.oci.image.manifest.v1+json"}\n'
+    }
+    export -f curl
+    github_api_get_with_retry() {
+        local id
+        [[ "$1" =~ /versions/([0-9]+)$ ]] || return 1
+        id="${BASH_REMATCH[1]}"
+        printf '%s' "$versions_json" | jq --argjson id "$id" '.[] | select(.id == $id)' >"$2"
+    }
+
+    gc_run_package_worker proxy "$result_file" 6 >"$run_log"
+
+    [ -s "$result_file" ]
+    IFS=$'\t' read -r worker_had_errors worker_deleted worker_kept worker_would_delete worker_pr_failures worker_not_found <"$result_file"
+    [ "$worker_had_errors" -eq 0 ]
+    [ "$worker_deleted" -eq 6 ]
+    [ "$(wc -l <"$delete_log")" -eq 6 ]
+    # Pass 1 (closed-PR) stops at its own sub-cap: 6 - 2 reserved = 4.
+    for i in 101 102 103 104; do
+        grep -q "/versions/${i}$" "$delete_log"
+    done
+    for i in 105 106; do
+        ! grep -q "/versions/${i}$" "$delete_log"
+    done
+    # Pass 2 (untagged orphans) gets its 2 reserved slots, then hits
+    # the shared total cap -- the 3rd untagged candidate is deferred.
+    grep -q "/versions/201$" "$delete_log"
+    grep -q "/versions/202$" "$delete_log"
+    ! grep -q "/versions/203$" "$delete_log"
+    [ "$(grep -c 'untagged, unreferenced orphan digest' "$run_log")" -eq 2 ]
+    [ "$(grep -c 'only closed-PR staging tags' "$run_log")" -eq 4 ]
 }
 
 # What: dry-run performs the same fresh validation but issues zero DELETEs.
