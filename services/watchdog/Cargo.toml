@@ -74,12 +74,6 @@ tokio = { version = "1", features = ["full"] }
 # parsing.
 time = { version = "0.3", features = ["formatting", "macros"] }
 
-# Deliberate release-profile tuning, matching services/ui's and
-# services/dns/nats-subscriber's identical [profile.release] block -- see
-# either crate's own comment for the full reasoning (fat LTO for
-# cross-crate inlining; codegen-units=2 traded against the project's own
-# sccache/distcc build-farm capacity; strip/panic=abort/target-cpu=native
-# each considered and rejected there for the same reasons that apply here).
-[profile.release]
-lto = "fat"
-codegen-units = 2
+# What: release profile now lives at the workspace root.
+# Why: cargo ignores a member profile in a workspace.
+# From: Issue #1095

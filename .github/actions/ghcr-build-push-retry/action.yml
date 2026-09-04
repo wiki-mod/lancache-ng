@@ -45,6 +45,10 @@ inputs:
   context:
     required: false
     default: "."
+  dockerfile:
+    description: Path to the Dockerfile (default "{context}/Dockerfile").
+    required: false
+    default: ""
   build-contexts:
     required: false
     default: ""
@@ -103,6 +107,7 @@ runs:
       with:
         builder: ${{ inputs.builder }}
         context: ${{ inputs.context }}
+        dockerfile: ${{ inputs.dockerfile }}
         build-contexts: ${{ inputs.build-contexts }}
         secret-files: ${{ inputs.secret-files }}
         build-args: ${{ inputs.build-args }}
@@ -139,6 +144,7 @@ runs:
       with:
         builder: ${{ inputs.builder }}
         context: ${{ inputs.context }}
+        dockerfile: ${{ inputs.dockerfile }}
         build-contexts: ${{ inputs.build-contexts }}
         secret-files: ${{ inputs.secret-files }}
         build-args: ${{ inputs.build-args }}
@@ -175,6 +181,7 @@ runs:
       with:
         builder: ${{ inputs.builder }}
         context: ${{ inputs.context }}
+        dockerfile: ${{ inputs.dockerfile }}
         build-contexts: ${{ inputs.build-contexts }}
         secret-files: ${{ inputs.secret-files }}
         build-args: ${{ inputs.build-args }}
@@ -211,6 +218,7 @@ runs:
       with:
         builder: ${{ inputs.builder }}
         context: ${{ inputs.context }}
+        dockerfile: ${{ inputs.dockerfile }}
         build-contexts: ${{ inputs.build-contexts }}
         secret-files: ${{ inputs.secret-files }}
         build-args: ${{ inputs.build-args }}

@@ -149,19 +149,19 @@ write_smoke() {
     [[ "$output" == *"OK"* ]]
 }
 
-# --- services/utilities/verify-version-banner.sh ---------------------------
+# --- scripts/lib/verify-version-banner.sh -----------------------------------
 #
 # What: coverage for the shared version-banner smoke check.
 # Why: colocated here per maintainer decision (AG-CODE-013).
-# From: Issue #1613
+# From: Issue #1613 | Issue #1781 | PR #1783
 
 @test "verify-version-banner.sh passes when the tool's output contains the expected banner" {
-    run sh "$repo_root/services/utilities/verify-version-banner.sh" "hello banner" printf "hello banner\n"
+    run sh "$repo_root/scripts/lib/verify-version-banner.sh" "hello banner" printf "hello banner\n"
     [ "$status" -eq 0 ]
 }
 
 @test "verify-version-banner.sh fails when the tool's output lacks the expected banner" {
-    run sh "$repo_root/services/utilities/verify-version-banner.sh" "hello banner" printf "goodnight\n"
+    run sh "$repo_root/scripts/lib/verify-version-banner.sh" "hello banner" printf "goodnight\n"
     [ "$status" -ne 0 ]
     [[ "$output" == *"ERROR"* ]]
     [[ "$output" == *"goodnight"* ]]
@@ -178,29 +178,30 @@ write_smoke() {
         printf 'exit 1\n'
     } > "$fixture_bin"
     chmod +x "$fixture_bin"
-    run sh "$repo_root/services/utilities/verify-version-banner.sh" "lsof version information" "$fixture_bin" -v
+    run sh "$repo_root/scripts/lib/verify-version-banner.sh" "lsof version information" "$fixture_bin" -v
     [ "$status" -eq 0 ]
 }
 
 @test "verify-version-banner.sh fails closed when called with fewer than 2 arguments" {
-    run sh "$repo_root/services/utilities/verify-version-banner.sh" "only-one-arg"
+    run sh "$repo_root/scripts/lib/verify-version-banner.sh" "only-one-arg"
     [ "$status" -ne 0 ]
     [[ "$output" == *"usage:"* ]]
 }
 
-@test "the utilities image itself ships and COPYs verify-version-banner.sh into the final stage" {
-    grep -qF 'COPY verify-version-banner.sh /usr/local/bin/verify-version-banner.sh' \
-        "$repo_root/services/utilities/Dockerfile"
+@test "the shared verify-version-banner.sh file itself exists in its new scripts/lib home" {
+    [ -f "$repo_root/scripts/lib/verify-version-banner.sh" ]
 }
 
-@test "each of the six lsof-copying consumers invokes the shared verify-version-banner.sh, not an inline banner check" {
+@test "each of the six lsof-copying consumers invokes the shared verify-version-banner.sh via the shared-scripts build context, not an inline banner check" {
     for f in dhcp-proxy dhcp dns proxy ui watchdog; do
         consumer_dockerfile="$repo_root/services/$f/Dockerfile"
-        grep -qF 'COPY --from=utilities-tools /usr/local/bin/verify-version-banner.sh /usr/local/bin/verify-version-banner.sh' "$consumer_dockerfile" \
-            || fail "services/$f/Dockerfile does not COPY the shared verify-version-banner.sh"
+        grep -qF 'COPY --from=shared-scripts verify-version-banner.sh /usr/local/bin/verify-version-banner.sh' "$consumer_dockerfile" \
+            || fail "services/$f/Dockerfile does not COPY the shared verify-version-banner.sh from the shared-scripts build context"
         grep -qF 'sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v' "$consumer_dockerfile" \
             || fail "services/$f/Dockerfile does not invoke the shared lsof banner check"
         ! grep -qF 'lsof_out="$(lsof -v 2>&1)"' "$consumer_dockerfile" \
             || fail "services/$f/Dockerfile still has the old inline lsof banner check"
+        ! grep -qF 'utilities-tools' "$consumer_dockerfile" \
+            || fail "services/$f/Dockerfile still references the removed utilities-tools stage"
     done
 }

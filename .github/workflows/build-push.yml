@@ -57,7 +57,7 @@ env:
   # What: one runtime service list for manifest, promotion, and release loops.
   # Why: check-workflow-service-lists.sh fails CI on any matrix drift.
   # From: PR #1523
-  CI_BUILD_SERVICES: "proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities"
+  CI_BUILD_SERVICES: "proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools"
   RELEASE_PLATFORMS: linux/amd64,linux/arm64
   RUST_ACCELERATION_NETWORK: bridge
 
@@ -86,7 +86,6 @@ jobs:
       dhcp_proxy: ${{ steps.filter.outputs.dhcp_proxy }}
       ntp: ${{ steps.filter.outputs.ntp }}
       syslog: ${{ steps.filter.outputs.syslog }}
-      utilities: ${{ steps.filter.outputs.utilities }}
       proxy: ${{ steps.filter.outputs.proxy }}
       build_tools: ${{ steps.filter.outputs.build_tools }}
       # What: true when a full-setup-validate-only action changed.
@@ -221,6 +220,12 @@ jobs:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Select immutable build-tools image
+        env:
+          # What: authenticate the GHCR pull (github.actor/TOKEN).
+          # Why: strict published pull needs creds, not anon.
+          # From: Issue #1095
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           # What: assigns the resolved image to a local before printf.
@@ -913,6 +918,9 @@ jobs:
     # Why: can fall back to a local build-tools Docker build if smoke fails.
     # From: PR #1218
     timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: read
     # What: job-level concurrency; cancel-in-progress pull_request-only.
     # Why: on push this must survive to completion; on a PR, cancel is free.
     # From: PR #926
@@ -926,8 +934,6 @@ jobs:
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     outputs:
       build_tools_image: ${{ steps.select-compose-validation-image.outputs.build_tools_image }}
-      utilities_image: ${{ steps.resolve-utilities-image.outputs.utilities_image }}
-      utilities_digest: ${{ steps.resolve-utilities-image.outputs.utilities_digest }}
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - uses: *checkout_centraliced_versioning # v7.0.1
@@ -972,33 +978,9 @@ jobs:
           printf 'BUILD_TOOLS_IMAGE=%s\n' "$validation_build_tools_image" >> "$GITHUB_ENV"
           printf 'build_tools_image=%s\n' "$downstream_build_tools_image" >> "$GITHUB_OUTPUT"
 
-      # What: resolves utilities:latest, falls back to :nightly.
-      # Why: latest has never been published; nightly exists and works.
-      # From: Issue #1095 | PR #1706
-      - name: Resolve utilities image digest
-        id: resolve-utilities-image
-        env:
-          GHCR_RETRY_USERNAME: ${{ github.actor }}
-          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          # shellcheck source=scripts/lib/ghcr-retry.sh
-          source scripts/lib/ghcr-retry.sh
-
-          utilities_digest="$(resolve_manifest_digest ghcr.io/wiki-mod/lancache-ng/utilities:latest "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")" \
-            || utilities_digest="$(resolve_manifest_digest ghcr.io/wiki-mod/lancache-ng/utilities:nightly "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")" \
-            || utilities_digest=""
-          if [[ -z "$utilities_digest" ]]; then
-            echo "::error::Could not resolve digest for ghcr.io/wiki-mod/lancache-ng/utilities:latest or :nightly." >&2
-            exit 1
-          fi
-
-          printf 'utilities_image=ghcr.io/wiki-mod/lancache-ng/utilities@%s\n' "$utilities_digest" >> "$GITHUB_OUTPUT"
-          printf 'utilities_digest=%s\n' "$utilities_digest" >> "$GITHUB_OUTPUT"
-
-      # What: removes the buildx builder right after its only consumer step.
-      # Why: the fallback path uses plain docker build, not buildx.
-      # From: PR #1241
+      # What: removes the buildx builder after its last use.
+      # Why: nothing later in this job needs a builder instance.
+      # From: PR #1783
       - name: Remove buildx builder
         if: always()
         run: |
@@ -1846,7 +1828,7 @@ jobs:
             || { echo "::error::Acceleration infrastructure network must be selected per job from generated secret files."; exit 1; }
           grep -E '^[[:space:]]+redis-file:[[:space:]]+\$\{\{[[:space:]]*steps\.sccache-secret\.outputs\.redis-file[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
             && grep -E '^[[:space:]]+dist-config-file:[[:space:]]+\$\{\{[[:space:]]*steps\.sccache-secret\.outputs\.dist-config-file[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
-            && grep -E '^[[:space:]]+distcc-hosts-file:[[:space:]]+\$\{\{[[:space:]]*matrix\.service[[:space:]]*==[[:space:]]*.build-tools.[[:space:]]*&&[[:space:]]*steps\[.distcc-hosts-secret.\]\.outputs\[.hosts-file.\][[:space:]]*\|\|[[:space:]]*steps\.sccache-secret\.outputs\.distcc-hosts-file[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
+            && grep -E '^[[:space:]]+distcc-hosts-file:[[:space:]]+\$\{\{[[:space:]]*steps\.sccache-secret\.outputs\.distcc-hosts-file[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
             && grep -E '^[[:space:]]+build-tools-image:[[:space:]]+\$\{\{[[:space:]]*env\.BUILD_TOOLS_IMAGE[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
             && grep -E '^[[:space:]]+build-network:[[:space:]]+\$\{\{[[:space:]]*env\.RUST_ACCELERATION_NETWORK[[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
             && grep -E '^[[:space:]]+platform:[[:space:]]+linux/amd64[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
@@ -1856,8 +1838,8 @@ jobs:
           #   before; checking its declaration in the action file alone
           #   already missed that regression once.
           # From: Issue #1095
-          grep -E '^[[:space:]]+ccache-redis-file:[[:space:]]+\$\{\{[[:space:]]*matrix\.service[[:space:]]*==[[:space:]]*.build-tools.[[:space:]]*&&[[:space:]]*steps\[.ccache-redis-secret.\]\.outputs\[.redis-file.\][[:space:]]*\|\|[[:space:]]*steps\.sccache-secret\.outputs\['\''ccache-redis-file'\''\][[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
-            || { echo "::error::Acceleration preflight must receive ccache-redis-file from steps.sccache-secret's own output (or build-tools' own ccache-redis-secret)."; exit 1; }
+          grep -E '^[[:space:]]+ccache-redis-file:[[:space:]]+\$\{\{[[:space:]]*steps\.sccache-secret\.outputs\['\''ccache-redis-file'\''\][[:space:]]*\}\}[[:space:]]*$' .github/workflows/build-push.yml >/dev/null \
+            || { echo "::error::Acceleration preflight must receive ccache-redis-file from steps.sccache-secret's own output."; exit 1; }
           grep -F 'sccache rustc' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'sccache --dist-status' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'run_logged()' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
@@ -2075,6 +2057,26 @@ jobs:
           done
           if grep -RInE '^(ARG SCCACHE_DIST_SCHEDULER_URL|ENV CARGO_BUILD_JOBS=)' services/*/Dockerfile; then
             echo "::error::Rust service Dockerfiles must not use scheduler-only args or hardcoded CARGO_BUILD_JOBS values."
+            exit 1
+          fi
+          # What: PROJECT_CARGO_LTO/PROJECT_CARGO_CODEGENUNIT build-arg guard.
+          # Why: bare "vars.NAME" substring only -- a full expression here
+          # self-interpolates before the shell runs the grep pattern.
+          # From: Issue #1095
+          for workflow in .github/workflows/build-push.yml .github/workflows/build-push-hosted-fallback.yml; do
+            grep -F 'PROJECT_CARGO_LTO=' "$workflow" >/dev/null \
+              && grep -F 'vars.PROJECT_CARGO_LTO' "$workflow" >/dev/null \
+              || { echo "::error::$workflow must expose the PROJECT_CARGO_LTO repository variable as a build-arg to Cargo release builds."; exit 1; }
+            grep -F 'PROJECT_CARGO_CODEGENUNIT=' "$workflow" >/dev/null \
+              && grep -F 'vars.PROJECT_CARGO_CODEGENUNIT' "$workflow" >/dev/null \
+              || { echo "::error::$workflow must expose the PROJECT_CARGO_CODEGENUNIT repository variable as a build-arg to Cargo release builds."; exit 1; }
+          done
+          if grep -RInE '^(ARG PROJECT_CARGO_LTO=.+|ARG PROJECT_CARGO_CODEGENUNIT=.+|ENV PROJECT_CARGO_LTO=|ENV PROJECT_CARGO_CODEGENUNIT=)' services/*/Dockerfile; then
+            echo "::error::Rust service Dockerfiles must not hardcode a PROJECT_CARGO_LTO/PROJECT_CARGO_CODEGENUNIT default; both must fail closed when unset, mirroring CARGO_BUILD_JOBS."
+            exit 1
+          fi
+          if grep -RInE '^[[:space:]]*(lto|codegen-units)[[:space:]]*=' Cargo.toml services/dns/nats-subscriber/Cargo.toml services/ui/Cargo.toml services/warmer/Cargo.toml services/watchdog/Cargo.toml tools/pxe-client-probe/Cargo.toml; then
+            echo "::error::[profile.release] lto/codegen-units must not be hardcoded in any workspace Cargo.toml; source them from CARGO_PROFILE_RELEASE_LTO/CARGO_PROFILE_RELEASE_CODEGEN_UNITS env overrides (PROJECT_CARGO_LTO/PROJECT_CARGO_CODEGENUNIT)."
             exit 1
           fi
           if grep -RInE 'cargo install sccache .*--locked|cargo install .*--locked .*sccache' services/*/Dockerfile tools/build-tools/Dockerfile scripts; then
@@ -3461,7 +3463,7 @@ jobs:
       # This job resolves its own build-tools image rather than reusing validate-compose's
       # exported build_tools_image output. That output is deliberately locked to the
       # published, digest-qualified image (never a branch-local fallback) because
-      # dns_cargo_audit/ui_cargo_audit need a reproducible, previously-audited image.
+      # cargo_audit needs a reproducible, previously-audited image.
       # Coverage measurement has no such reproducibility requirement, so it can accept a
       # branch-local rebuild when a PR's own Dockerfile change (like adding tarpaulin) has
       # not been published to ghcr.io yet.
@@ -3475,7 +3477,7 @@ jobs:
           printf 'BUILD_TOOLS_IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
       # Coverage output must land on a writable host path: the repo checkout
       # itself is bind-mounted read-only into the build-tools container below,
-      # matching the dns_cargo_audit/ui_cargo_audit pattern.
+      # matching the cargo_audit job's pattern.
       - name: Prepare writable coverage output directories
         run: |
           set -euo pipefail
@@ -3654,7 +3656,7 @@ jobs:
       - name: Checkout
         uses: *checkout_centraliced_versioning # v7.0.1
       - name: Download coverage badge data
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (v4.3.0 still declared deprecated Node 20 runtime, see #802)
+        uses: &actions_download_artifact_centraliced_versioning actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (v4.3.0 still declared deprecated Node 20 runtime, see #802)
         with:
           name: rust-coverage-badge
           path: coverage-badge
@@ -3849,18 +3851,18 @@ jobs:
           bash -n services/watchdog/watchdog.sh
           test -x services/watchdog/watchdog.sh
 
-  dns_cargo_audit:
-    # Dependency audits remain crate-specific. They are skipped only when path
-    # filtering proves the crate and workflow contract did not change.
+  cargo_audit:
+    # What: one workspace audit, not 3 per-service jobs.
+    # Why: 3 jobs audited the identical shared lockfile.
+    # From: Issue #1095
     #
-    # Also skipped on a metadata-only pull_request event -- see
-    # dns_rust_quality's comment above for the full reasoning (Cargo.lock is
-    # unchanged, so a prior run's audit result already stands).
-    name: cargo-audit (dns/nats-subscriber)
+    # Also skipped on a metadata-only PR event -- see
+    # dns_rust_quality's comment above for the reasoning.
+    name: cargo-audit (workspace)
     needs: [validate-compose, detect-changes]
-    # What: path-scoped same as dns_test; identical if: condition.
-    # Why: reuses dns_test's known-good-result/AG-WF-004 tolerance.
-    # From: Issue #1095 | PR #1532
+    # What: fires if any Rust member/workflow changed.
+    # Why: all 5 share the one audited root lock now.
+    # From: Issue #1095
     if: >-
       ${{
         always() &&
@@ -3872,174 +3874,25 @@ jobs:
         (
           needs['detect-changes'].result != 'success' ||
           needs['detect-changes'].outputs.dns_rust == 'true' ||
-          needs['detect-changes'].outputs.workflow == 'true'
-        )
-      }}
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    # Real runs: 10-14s. cargo-audit checks Cargo.lock against the advisory
-    # database using a prebuilt binary (AG-KD-003) -- it does not compile
-    # the crate, so it does not share dns_test's cold-compile risk. 20
-    # minutes covers a slow advisory-database fetch with real headroom.
-    timeout-minutes: 20
-    # What: job-level concurrency, cancel-in-progress: true -- same
-    # pattern as dns_test above.
-    # Why: no consumer besides ci_scope_policy, which tolerates cancelled.
-    # From: PR #926
-    concurrency:
-      group: >-
-        ${{
-          (github.event_name == 'workflow_dispatch' || github.run_attempt != '1') &&
-          format('{0}-dns-cargo-audit-{1}-{2}', github.workflow, github.ref, github.run_id) ||
-          format('{0}-dns-cargo-audit-{1}', github.workflow, github.ref)
-        }}
-      cancel-in-progress: true
-    env:
-      BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
-    steps:
-      - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
-      - uses: *checkout_centraliced_versioning # v7.0.1
-      - name: Audit Rust dependencies (dns/nats-subscriber)
-        run: |
-          set -euo pipefail
-
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -e HOME=/tmp \
-            -e CARGO_HOME=/tmp/cargo-home \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            timeout --kill-after=30 --signal=KILL 900 \
-            bash -c 'set -euo pipefail
-              audit_log="$(mktemp)"
-              trap '"'"'rm -f "$audit_log"'"'"' EXIT
-              if ! cargo audit --deny warnings --file services/dns/nats-subscriber/Cargo.lock >"$audit_log" 2>&1; then
-                cat "$audit_log"
-                exit 1
-              fi
-              cat "$audit_log"
-              if grep -Eiq '"'"'(^|[[:space:]])warning:'"'"' "$audit_log"; then
-                echo "::error::cargo-audit emitted warnings."
-                exit 1
-              fi'
-
-      - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
-        if: always()
-  ui_cargo_audit:
-    # UI dependency audit mirrors the DNS audit and stays parallel to avoid
-    # serializing independent Rust checks.
-    #
-    # Also skipped on a metadata-only pull_request event -- see
-    # dns_rust_quality's comment above for the full reasoning.
-    name: cargo-audit (ui)
-    needs: [validate-compose, detect-changes]
-    # What: path-scoped same as dns_test; identical if: condition.
-    # Why: reuses dns_test's known-good-result/AG-WF-004 tolerance.
-    # From: Issue #1095 | PR #1532
-    if: >-
-      ${{
-        always() &&
-        needs['validate-compose'].result == 'success' &&
-        (
-          github.event_name != 'pull_request' ||
-          !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
-        ) &&
-        (
-          needs['detect-changes'].result != 'success' ||
           needs['detect-changes'].outputs.ui == 'true' ||
-          needs['detect-changes'].outputs.workflow == 'true'
-        )
-      }}
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    # Same reasoning and value as dns_cargo_audit above (prebuilt cargo-audit
-    # binary, no crate compilation). Real runs: 10-18s.
-    timeout-minutes: 20
-    # What: job-level concurrency, cancel-in-progress: true -- same
-    # pattern as dns_cargo_audit above.
-    # Why: no consumer besides ci_scope_policy, which tolerates cancelled.
-    # From: PR #926
-    concurrency:
-      group: >-
-        ${{
-          (github.event_name == 'workflow_dispatch' || github.run_attempt != '1') &&
-          format('{0}-ui-cargo-audit-{1}-{2}', github.workflow, github.ref, github.run_id) ||
-          format('{0}-ui-cargo-audit-{1}', github.workflow, github.ref)
-        }}
-      cancel-in-progress: true
-    env:
-      BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
-    steps:
-      - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
-      - uses: *checkout_centraliced_versioning # v7.0.1
-      - name: Audit Rust dependencies (ui)
-        run: |
-          set -euo pipefail
-
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -e HOME=/tmp \
-            -e CARGO_HOME=/tmp/cargo-home \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            timeout --kill-after=30 --signal=KILL 900 \
-            bash -c 'set -euo pipefail
-              audit_log="$(mktemp)"
-              trap '"'"'rm -f "$audit_log"'"'"' EXIT
-              if ! cargo audit --deny warnings --file services/ui/Cargo.lock >"$audit_log" 2>&1; then
-                cat "$audit_log"
-                exit 1
-              fi
-              cat "$audit_log"
-              if grep -Eiq '"'"'(^|[[:space:]])warning:'"'"' "$audit_log"; then
-                echo "::error::cargo-audit emitted warnings."
-                exit 1
-              fi'
-
-      - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
-        if: always()
-  watchdog_cargo_audit:
-    # What: watchdog dependency audit mirrors the DNS/UI audits, staying
-    # parallel to avoid serializing independent Rust checks.
-    # Why: added alongside watchdog_rust_quality/watchdog_test now that
-    # services/watchdog/Cargo.toml exists.
-    # From: PR #1355
-    #
-    # Also skipped on a metadata-only pull_request event -- see
-    # dns_rust_quality's comment above for the full reasoning.
-    name: cargo-audit (watchdog)
-    needs: [validate-compose, detect-changes]
-    # What: path-scoped same as dns_test; identical if: condition.
-    # Why: reuses dns_test's known-good-result/AG-WF-004 tolerance.
-    # From: Issue #1095 | PR #1532
-    if: >-
-      ${{
-        always() &&
-        needs['validate-compose'].result == 'success' &&
-        (
-          github.event_name != 'pull_request' ||
-          !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
-        ) &&
-        (
-          needs['detect-changes'].result != 'success' ||
           needs['detect-changes'].outputs.watchdog == 'true' ||
           needs['detect-changes'].outputs.workflow == 'true'
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    # Same reasoning and value as dns_cargo_audit/ui_cargo_audit above
-    # (prebuilt cargo-audit binary, no crate compilation).
+    # What: 10-18s; audits Cargo.lock via a prebuilt binary.
+    # Why: no crate compile, so no cold-compile risk exists.
+    # From: Issue #1095
     timeout-minutes: 20
-    # What: job-level concurrency, cancel-in-progress: true -- mirrors
-    # dns_cargo_audit/ui_cargo_audit's own pattern.
-    # Why: no consumer besides ci_scope_policy, which tolerates cancelled.
-    # From: PR #1355
+    # What: job-level concurrency, cancel-in-progress true.
+    # Why: no consumer but ci_scope_policy; tolerates skip.
+    # From: Issue #1095
     concurrency:
       group: >-
         ${{
           (github.event_name == 'workflow_dispatch' || github.run_attempt != '1') &&
-          format('{0}-watchdog-cargo-audit-{1}-{2}', github.workflow, github.ref, github.run_id) ||
-          format('{0}-watchdog-cargo-audit-{1}', github.workflow, github.ref)
+          format('{0}-cargo-audit-{1}-{2}', github.workflow, github.ref, github.run_id) ||
+          format('{0}-cargo-audit-{1}', github.workflow, github.ref)
         }}
       cancel-in-progress: true
     env:
@@ -4047,7 +3900,7 @@ jobs:
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - uses: *checkout_centraliced_versioning # v7.0.1
-      - name: Audit Rust dependencies (watchdog)
+      - name: Audit Rust dependencies (workspace)
         run: |
           set -euo pipefail
 
@@ -4062,7 +3915,7 @@ jobs:
             bash -c 'set -euo pipefail
               audit_log="$(mktemp)"
               trap '"'"'rm -f "$audit_log"'"'"' EXIT
-              if ! cargo audit --deny warnings --file services/watchdog/Cargo.lock >"$audit_log" 2>&1; then
+              if ! cargo audit --deny warnings --file Cargo.lock >"$audit_log" 2>&1; then
                 cat "$audit_log"
                 exit 1
               fi
@@ -4087,9 +3940,7 @@ jobs:
       - dns_test
       - ui_test
       - watchdog_test
-      - dns_cargo_audit
-      - ui_cargo_audit
-      - watchdog_cargo_audit
+      - cargo_audit
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
     # What: 15-minute timeout floor, well above the real 7-14s runtime
@@ -4136,9 +3987,7 @@ jobs:
           DNS_TEST_RESULT: ${{ needs.dns_test.result }}
           UI_TEST_RESULT: ${{ needs.ui_test.result }}
           WATCHDOG_TEST_RESULT: ${{ needs.watchdog_test.result }}
-          DNS_CARGO_AUDIT_RESULT: ${{ needs.dns_cargo_audit.result }}
-          UI_CARGO_AUDIT_RESULT: ${{ needs.ui_cargo_audit.result }}
-          WATCHDOG_CARGO_AUDIT_RESULT: ${{ needs.watchdog_cargo_audit.result }}
+          CARGO_AUDIT_RESULT: ${{ needs.cargo_audit.result }}
         run: |
           set -euo pipefail
 
@@ -4204,9 +4053,7 @@ jobs:
             require_success_or_intentional_cancellation "test (dns/nats-subscriber)" "$DNS_TEST_RESULT"
             require_success_or_intentional_cancellation "test (ui)" "$UI_TEST_RESULT"
             require_success_or_intentional_cancellation "test (watchdog)" "$WATCHDOG_TEST_RESULT"
-            require_success_or_intentional_cancellation "cargo-audit (dns/nats-subscriber)" "$DNS_CARGO_AUDIT_RESULT"
-            require_success_or_intentional_cancellation "cargo-audit (ui)" "$UI_CARGO_AUDIT_RESULT"
-            require_success_or_intentional_cancellation "cargo-audit (watchdog)" "$WATCHDOG_CARGO_AUDIT_RESULT"
+            require_success_or_intentional_cancellation "cargo-audit (workspace)" "$CARGO_AUDIT_RESULT"
             exit 0
           fi
 
@@ -4264,31 +4111,34 @@ jobs:
           if [ "$dns_rust_required" = "true" ]; then
             require_success "rust-quality (dns/nats-subscriber)" "$DNS_RUST_QUALITY_RESULT"
             require_success "test (dns/nats-subscriber)" "$DNS_TEST_RESULT"
-            require_success "cargo-audit (dns/nats-subscriber)" "$DNS_CARGO_AUDIT_RESULT"
           else
             require_success_or_intentional_skip "rust-quality (dns/nats-subscriber)" "$DNS_RUST_QUALITY_RESULT"
             require_success_or_intentional_skip "test (dns/nats-subscriber)" "$DNS_TEST_RESULT"
-            require_success_or_intentional_skip "cargo-audit (dns/nats-subscriber)" "$DNS_CARGO_AUDIT_RESULT"
           fi
 
           if [ "$ui_required" = "true" ]; then
             require_success "rust-quality (ui)" "$UI_RUST_QUALITY_RESULT"
             require_success "test (ui)" "$UI_TEST_RESULT"
-            require_success "cargo-audit (ui)" "$UI_CARGO_AUDIT_RESULT"
           else
             require_success_or_intentional_skip "rust-quality (ui)" "$UI_RUST_QUALITY_RESULT"
             require_success_or_intentional_skip "test (ui)" "$UI_TEST_RESULT"
-            require_success_or_intentional_skip "cargo-audit (ui)" "$UI_CARGO_AUDIT_RESULT"
           fi
 
           if [ "$watchdog_required" = "true" ]; then
             require_success "rust-quality (watchdog)" "$WATCHDOG_RUST_QUALITY_RESULT"
             require_success "test (watchdog)" "$WATCHDOG_TEST_RESULT"
-            require_success "cargo-audit (watchdog)" "$WATCHDOG_CARGO_AUDIT_RESULT"
           else
             require_success_or_intentional_skip "rust-quality (watchdog)" "$WATCHDOG_RUST_QUALITY_RESULT"
             require_success_or_intentional_skip "test (watchdog)" "$WATCHDOG_TEST_RESULT"
-            require_success_or_intentional_skip "cargo-audit (watchdog)" "$WATCHDOG_CARGO_AUDIT_RESULT"
+          fi
+
+          # What: one audit gate, not 3 per-service copies.
+          # Why: dns/ui/watchdog share one Cargo.lock now.
+          # From: Issue #1095
+          if [ "$dns_rust_required" = "true" ] || [ "$ui_required" = "true" ] || [ "$watchdog_required" = "true" ]; then
+            require_success "cargo-audit (workspace)" "$CARGO_AUDIT_RESULT"
+          else
+            require_success_or_intentional_skip "cargo-audit (workspace)" "$CARGO_AUDIT_RESULT"
           fi
 
           if [ "$DOCS_ONLY" = "true" ]; then
@@ -4386,9 +4236,6 @@ jobs:
           - service: build-tools
             platform_tag: amd64
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
-          - service: utilities
-            platform_tag: amd64
-            runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
           - service: proxy
             platform_tag: arm64
             runner: '"ubuntu-24.04-arm"'
@@ -4416,9 +4263,6 @@ jobs:
           - service: build-tools
             platform_tag: arm64
             runner: '"ubuntu-24.04-arm"'
-          - service: utilities
-            platform_tag: arm64
-            runner: '"ubuntu-24.04-arm"'
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
         if: contains(matrix.runner, 'self-hosted')
@@ -4441,7 +4285,6 @@ jobs:
           REUSE_UI: ${{ needs['determine-push-reuse-scope'].outputs.reuse_ui }}
           REUSE_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.reuse_build_tools }}
           REUSE_SYSLOG: ${{ needs['determine-push-reuse-scope'].outputs.reuse_syslog }}
-          REUSE_UTILITIES: ${{ needs['determine-push-reuse-scope'].outputs.reuse_utilities }}
         run: |
           set -euo pipefail
 
@@ -4459,7 +4302,6 @@ jobs:
             ui) reuse="$REUSE_UI" ;;
             build-tools) reuse="$REUSE_BUILD_TOOLS" ;;
             syslog) reuse="$REUSE_SYSLOG" ;;
-            utilities) reuse="$REUSE_UTILITIES" ;;
             *) reuse="false" ;;
           esac
 
@@ -4516,7 +4358,6 @@ jobs:
           DIGEST_UI: ${{ needs['determine-push-reuse-scope'].outputs.digest_ui }}
           DIGEST_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.digest_build_tools }}
           DIGEST_SYSLOG: ${{ needs['determine-push-reuse-scope'].outputs.digest_syslog }}
-          DIGEST_UTILITIES: ${{ needs['determine-push-reuse-scope'].outputs.digest_utilities }}
         run: |
           set -euo pipefail
 
@@ -4537,7 +4378,6 @@ jobs:
             ui) digest="$DIGEST_UI" ;;
             build-tools) digest="$DIGEST_BUILD_TOOLS" ;;
             syslog) digest="$DIGEST_SYSLOG" ;;
-            utilities) digest="$DIGEST_UTILITIES" ;;
             *) digest="" ;;
           esac
 
@@ -4632,13 +4472,10 @@ jobs:
       reuse_dhcp_proxy: ${{ steps.decide.outputs.reuse_dhcp_proxy }}
       reuse_ntp: ${{ steps.decide.outputs.reuse_ntp }}
       reuse_build_tools: ${{ steps.decide.outputs.reuse_build_tools }}
-      # What: syslog/utilities reuse-decision outputs, alongside the
-      # other 8 allowlisted services.
-      # Why: same three-part verification as every other allowlisted
-      # service; no new logic, only these two additional outputs.
+      # What: syslog reuse-decision output, alongside 7 other services.
+      # Why: same three-part check every allowlisted service gets.
       # From: Issue #1095
       reuse_syslog: ${{ steps.decide.outputs.reuse_syslog }}
-      reuse_utilities: ${{ steps.decide.outputs.reuse_utilities }}
       # What: the pinned digest reuse=true services verified against.
       # Why: closes a digest TOCTOU race; see the linked issue.
       # From: Issue #1095 | PR #1532
@@ -4651,7 +4488,6 @@ jobs:
       digest_ntp: ${{ steps.decide.outputs.digest_ntp }}
       digest_build_tools: ${{ steps.decide.outputs.digest_build_tools }}
       digest_syslog: ${{ steps.decide.outputs.digest_syslog }}
-      digest_utilities: ${{ steps.decide.outputs.digest_utilities }}
     steps:
       # fetch-depth: 0 (not the default shallow depth-1 clone) so
       # sif_is_ancestor_or_equal below can prove real git ancestry between a
@@ -4694,7 +4530,6 @@ jobs:
           NTP_CHANGED: ${{ needs['detect-changes'].outputs.ntp }}
           BUILD_TOOLS_CHANGED: ${{ needs['detect-changes'].outputs.build_tools }}
           SYSLOG_CHANGED: ${{ needs['detect-changes'].outputs.syslog }}
-          UTILITIES_CHANGED: ${{ needs['detect-changes'].outputs.utilities }}
           # What: needed for push_reuse_decide's sif_image_revision call
           # and this step's own digest-pinning read below.
           # Why: sif_image_revision is now ghcr_retry-wrapped (see
@@ -4728,10 +4563,10 @@ jobs:
           channel="$(resolve_build_tools_channel "$REF_NAME")"
           echo "::notice::Resolved channel '$channel' for ref '$REF_NAME'."
 
-          # What: decide_one is shared; two services skip one check.
-          # Why: build-tools/utilities skip the workflow gate below.
+          # What: decide_one is shared; one service skips one check.
+          # Why: build-tools skips the workflow gate below.
           # From: Issue #1095
-          allowlist=(proxy dns ui watchdog dhcp dhcp-proxy ntp build-tools syslog utilities)
+          allowlist=(proxy dns ui watchdog dhcp dhcp-proxy ntp build-tools syslog)
 
           is_allowlisted() {
             case " ${allowlist[*]} " in
@@ -4799,23 +4634,22 @@ jobs:
             printf '%s\n' "$reuse"
           }
 
-          # What: 7 services depend on utilities; dns/ui/watchdog also on build-tools.
+          # What: dns/ui/watchdog also depend on build-tools.
           # Why: matches each Dockerfile's real FROM/COPY --from= dependency graph.
-          # From: Issue #1095
+          # From: Issue #1781 | PR #1783
           {
-            printf 'reuse_proxy=%s\n' "$(decide_one proxy proxy "$PROXY_CHANGED" utilities)"
-            printf 'reuse_dns=%s\n' "$(decide_one dns_image dns "$DNS_CHANGED" "utilities build_tools")"
-            printf 'reuse_ui=%s\n' "$(decide_one ui ui "$UI_CHANGED" "utilities build_tools")"
-            printf 'reuse_watchdog=%s\n' "$(decide_one watchdog watchdog "$WATCHDOG_CHANGED" "utilities build_tools")"
-            printf 'reuse_dhcp=%s\n' "$(decide_one dhcp dhcp "$DHCP_CHANGED" utilities)"
-            printf 'reuse_dhcp_proxy=%s\n' "$(decide_one dhcp_proxy dhcp-proxy "$DHCP_PROXY_CHANGED" utilities)"
-            printf 'reuse_ntp=%s\n' "$(decide_one ntp ntp "$NTP_CHANGED" utilities)"
+            printf 'reuse_proxy=%s\n' "$(decide_one proxy proxy "$PROXY_CHANGED")"
+            printf 'reuse_dns=%s\n' "$(decide_one dns_image dns "$DNS_CHANGED" build_tools)"
+            printf 'reuse_ui=%s\n' "$(decide_one ui ui "$UI_CHANGED" build_tools)"
+            printf 'reuse_watchdog=%s\n' "$(decide_one watchdog watchdog "$WATCHDOG_CHANGED" build_tools)"
+            printf 'reuse_dhcp=%s\n' "$(decide_one dhcp dhcp "$DHCP_CHANGED")"
+            printf 'reuse_dhcp_proxy=%s\n' "$(decide_one dhcp_proxy dhcp-proxy "$DHCP_PROXY_CHANGED")"
+            printf 'reuse_ntp=%s\n' "$(decide_one ntp ntp "$NTP_CHANGED")"
             printf 'reuse_syslog=%s\n' "$(decide_one syslog syslog "$SYSLOG_CHANGED")"
-            # What: these two alone ignore the workflow gate (last arg).
-            # Why: shared tooling/base image; own path fully gates them.
+            # What: this one alone ignores the workflow gate (last arg).
+            # Why: shared tooling image; its own path fully gates it.
             # From: Issue #1095
             printf 'reuse_build_tools=%s\n' "$(decide_one build_tools build-tools "$BUILD_TOOLS_CHANGED" "" true)"
-            printf 'reuse_utilities=%s\n' "$(decide_one utilities utilities "$UTILITIES_CHANGED" "" true)"
           } >> "$GITHUB_OUTPUT"
 
   # What: computes build/build-arm64's shared should-build admission once,
@@ -4955,20 +4789,15 @@ jobs:
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
-    # What: adds issues:write; other scopes below stay unchanged.
-    # Why: job-level permissions: replaces, not merges, the
-    #   workflow-level block; issues:write is for the self-closing
-    #   Trivy report added to this job.
+    # What: replaces, not merges, workflow permissions.
+    # Why: issues:write moved out to trivy-scan-amd64.
     # From: Issue #1095
-      UTILITIES_IMAGE: ${{ needs['validate-compose'].outputs.utilities_image }}
-      UTILITIES_DIGEST: ${{ needs['validate-compose'].outputs.utilities_digest }}
     permissions:
       contents: read
       packages: write
       id-token: write
       attestations: write
       artifact-metadata: write
-      issues: write
     strategy:
       fail-fast: false
       matrix:
@@ -4979,19 +4808,36 @@ jobs:
 
           - service: proxy
             context: services/proxy
-            # Proxy needs DNS domain data that lives outside its own build context.
-            build_contexts: dns-domains=services/dns
+            # Proxy needs DNS domain data plus the shared verify-version-banner.sh,
+            # both of which live outside its own build context.
+            build_contexts: |
+              dns-domains=services/dns
+              shared-scripts=scripts/lib
             description: &ci-description-proxy "nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic."
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: dns
-            context: services/dns
-            build_contexts: ""
+            # What: repo-root context; dockerfile set below.
+            # Why: workspace needs all 5 member manifests.
+            # From: Issue #1095
+            context: .
+            dockerfile: services/dns/Dockerfile
+            # What: shared verify-version-banner.sh lives outside this context.
+            # Why: the shared utilities image it used to COPY from is gone.
+            # From: Issue #1781 | PR #1783
+            build_contexts: shared-scripts=scripts/lib
             description: &ci-description-dns "PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing."
             rust: true
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
           - service: watchdog
-            context: services/watchdog
-            build_contexts: ""
+            # What: repo-root context; dockerfile set below.
+            # Why: workspace needs all 5 member manifests.
+            # From: Issue #1095
+            context: .
+            dockerfile: services/watchdog/Dockerfile
+            # What: shared verify-version-banner.sh lives outside this context.
+            # Why: the shared utilities image it used to COPY from is gone.
+            # From: Issue #1781 | PR #1783
+            build_contexts: shared-scripts=scripts/lib
             description: &ci-description-watchdog "lancache-ng watchdog helper for runtime health checks and recovery hooks."
             # Re-evaluation triggered (the Rust rewrite is now
             # wired into this Dockerfile's own builder stage): watchdog no
@@ -5004,16 +4850,25 @@ jobs:
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
           - service: dhcp
             context: services/dhcp
-            build_contexts: ""
+            # What: shared verify-version-banner.sh lives outside this context.
+            # Why: the shared utilities image it used to COPY from is gone.
+            # From: Issue #1781 | PR #1783
+            build_contexts: shared-scripts=scripts/lib
             description: &ci-description-dhcp "Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks."
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: dhcp-proxy
             context: services/dhcp-proxy
-            build_contexts: ""
+            # What: shared verify-version-banner.sh lives outside this context.
+            # Why: the shared utilities image it used to COPY from is gone.
+            # From: Issue #1781 | PR #1783
+            build_contexts: shared-scripts=scripts/lib
             description: &ci-description-dhcp-proxy "dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments."
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: ntp
             context: services/ntp
+            # What: no shared-scripts context; unlike the other 6 consumers.
+            # Why: curl/envsubst here need no lsof-banner check at all.
+            # From: Issue #1781 | PR #1783
             build_contexts: ""
             description: &ci-description-ntp "chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123."
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
@@ -5023,8 +4878,15 @@ jobs:
             description: &ci-description-syslog "Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428)."
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: ui
-            context: services/ui
-            build_contexts: ""
+            # What: repo-root context; dockerfile set below.
+            # Why: workspace needs all 5 member manifests.
+            # From: Issue #1095
+            context: .
+            dockerfile: services/ui/Dockerfile
+            # What: shared verify-version-banner.sh lives outside this context.
+            # Why: the shared utilities image it used to COPY from is gone.
+            # From: Issue #1781 | PR #1783
+            build_contexts: shared-scripts=scripts/lib
             description: &ci-description-ui "lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
             rust: true
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
@@ -5032,21 +4894,6 @@ jobs:
             context: tools/build-tools
             build_contexts: ""
             description: &ci-description-build-tools "Prebuilt lancache-ng CI and developer validation toolchain image."
-            runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
-          - service: utilities
-            context: services/utilities
-            build_contexts: ""
-            description: "Shared lancache-ng utilities image (curl, nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd) for COPY --from= consumption by eight first-party images (issue #1556)."
-            # Heavy, not light, despite being a small/fast build in practice
-            # (curl's own C compile is ~20s): AG-CI-002's light-tier exception
-            # requires "no real compile/link step of its own AT ALL", verified
-            # by inspecting the Dockerfile's own build graph, not assumed --
-            # services/utilities/Dockerfile's curl-builder stage genuinely
-            # compiles/links curl from source (gcc/make), so it does not meet
-            # that carve-out's literal precondition the way proxy/dhcp-proxy/
-            # watchdog/dhcp/syslog/ntp (pure package-install or COPY --from,
-            # no compiler invoked at all) do. Revisit if a future change
-            # removes the from-source curl build.
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
 
     steps:
@@ -5073,7 +4920,6 @@ jobs:
           REUSE_UI: ${{ needs['determine-push-reuse-scope'].outputs.reuse_ui }}
           REUSE_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.reuse_build_tools }}
           REUSE_SYSLOG: ${{ needs['determine-push-reuse-scope'].outputs.reuse_syslog }}
-          REUSE_UTILITIES: ${{ needs['determine-push-reuse-scope'].outputs.reuse_utilities }}
         run: |
           set -euo pipefail
 
@@ -5091,7 +4937,6 @@ jobs:
               ui) printf '%s' "$REUSE_UI" ;;
               build-tools) printf '%s' "$REUSE_BUILD_TOOLS" ;;
               syslog) printf '%s' "$REUSE_SYSLOG" ;;
-              utilities) printf '%s' "$REUSE_UTILITIES" ;;
               *) printf 'false' ;;
             esac
           }
@@ -5111,7 +4956,6 @@ jobs:
               dhcp-proxy) should_build="${{ needs['detect-changes'].outputs.dhcp_proxy }}" ;;
               ntp) should_build="${{ needs['detect-changes'].outputs.ntp }}" ;;
               syslog) should_build="${{ needs['detect-changes'].outputs.syslog }}" ;;
-              utilities) should_build="${{ needs['detect-changes'].outputs.utilities }}" ;;
               ui) should_build="${{ needs['detect-changes'].outputs.ui }}" ;;
               build-tools) should_build="${{ needs['detect-changes'].outputs.build_tools }}" ;;
               *)
@@ -5133,7 +4977,7 @@ jobs:
               fi
             fi
           elif [ "$REUSE_JOB_RESULT" = "success" ]; then
-            # What: determine-push-reuse-scope's check covers all 10 services.
+            # What: determine-push-reuse-scope's check covers all 9 services.
             # Why: full reasoning on the linked issue.
             # From: Issue #1095 | PR #1532
             reuse="$(reuse_for_service "$MATRIX_SERVICE")"
@@ -5251,7 +5095,6 @@ jobs:
           DIGEST_UI: ${{ needs['determine-push-reuse-scope'].outputs.digest_ui }}
           DIGEST_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.digest_build_tools }}
           DIGEST_SYSLOG: ${{ needs['determine-push-reuse-scope'].outputs.digest_syslog }}
-          DIGEST_UTILITIES: ${{ needs['determine-push-reuse-scope'].outputs.digest_utilities }}
         run: |
           set -euo pipefail
 
@@ -5280,7 +5123,6 @@ jobs:
             ui) pinned_digest="$DIGEST_UI" ;;
             build-tools) pinned_digest="$DIGEST_BUILD_TOOLS" ;;
             syslog) pinned_digest="$DIGEST_SYSLOG" ;;
-            utilities) pinned_digest="$DIGEST_UTILITIES" ;;
             *) pinned_digest="" ;;
           esac
           if [ -z "$pinned_digest" ]; then
@@ -5579,77 +5421,10 @@ jobs:
             echo "SECRET_FILES"
           } >> "$GITHUB_OUTPUT"
 
-      # What: produces ccache_redis_url for utilities and build-tools.
-      # Why: dns/ui/watchdog already get it from the generic secret-file
-      #   step above; only these two lack a matrix.rust step for it.
-      # From: Issue #1095 (G15 | #1556) | PR #1661
-      - name: Prepare ccache Redis endpoint (utilities + build-tools C-dependency cache)
-        if: >-
-          ${{
-            steps.should-build.outputs.should-build == 'true' &&
-            (matrix.service == 'utilities' || matrix.service == 'build-tools') &&
-            github.actor != 'dependabot[bot]' &&
-            github.event_name != 'pull_request'
-          }}
-        id: ccache-redis-secret
-        env:
-          SCCACHE_REDIS_URL: ${{ secrets.SCCACHE_REDIS_URL }}
-          SCCACHE_REDIS_MODE: ${{ vars.SCCACHE_REDIS_MODE }}
-        run: |
-          set -euo pipefail
-          if [ "${SCCACHE_REDIS_MODE:-}" = "off" ]; then
-            echo "::notice::SCCACHE_REDIS_MODE=off; ${{ matrix.service }}'s ccache layer stays disabled."
-          elif [ -n "$SCCACHE_REDIS_URL" ]; then
-            umask 077
-            redis_file="${{ runner.temp }}/ccache-redis-url-${{ matrix.service }}"
-            printf '%s' "$SCCACHE_REDIS_URL" > "$redis_file"
-            echo "redis-file=$redis_file" >> "$GITHUB_OUTPUT"
-            echo "secret-files=ccache_redis_url=$redis_file" >> "$GITHUB_OUTPUT"
-          else
-            echo "::notice::No SCCACHE_REDIS_URL configured; ${{ matrix.service }}'s ccache layer stays disabled (fails closed to a plain compile)."
-          fi
-
-      # What: produces the distcc_potential_hosts secret for build-tools.
-      # Why: build-tools' curl/git build is C, not Rust -- it never sets
-      #   matrix.rust, so it misses the DISTCC_POTENTIAL_HOSTS wiring the
-      #   sccache-secret step above gives dns/ui/watchdog.
-      # From: PR #1661
-      - name: Prepare distcc hosts (build-tools C-dependency distribution)
-        if: >-
-          ${{
-            steps.should-build.outputs.should-build == 'true' &&
-            matrix.service == 'build-tools' &&
-            github.actor != 'dependabot[bot]' &&
-            github.event_name != 'pull_request'
-          }}
-        id: distcc-hosts-secret
-        env:
-          DISTCC_POTENTIAL_HOSTS: ${{ vars.DISTCC_POTENTIAL_HOSTS }}
-        run: |
-          set -euo pipefail
-          if [ -z "$DISTCC_POTENTIAL_HOSTS" ]; then
-            echo "::notice::No DISTCC_POTENTIAL_HOSTS configured; build-tools' distcc layer stays disabled (fails closed to a plain compile)."
-            exit 0
-          fi
-          if ! grep -q ',cpp' <<<"$DISTCC_POTENTIAL_HOSTS"; then
-            echo "::error::DISTCC_POTENTIAL_HOSTS must include at least one pump-capable host with the ',cpp' option."
-            exit 1
-          fi
-          umask 077
-          hosts_file="${{ runner.temp }}/distcc-potential-hosts-${{ matrix.service }}"
-          printf '%s' "$DISTCC_POTENTIAL_HOSTS" > "$hosts_file"
-          echo "hosts-file=$hosts_file" >> "$GITHUB_OUTPUT"
-          echo "secret-files=distcc_potential_hosts=$hosts_file" >> "$GITHUB_OUTPUT"
-
       - name: Select Rust acceleration network
-        if: matrix.rust == true || matrix.service == 'build-tools'
+        if: matrix.rust == true
         env:
-          SECRET_FILES: >-
-            ${{
-              steps.sccache-secret.outputs.secret-files ||
-              steps['ccache-redis-secret'].outputs['secret-files'] ||
-              steps['distcc-hosts-secret'].outputs['secret-files']
-            }}
+          SECRET_FILES: ${{ steps.sccache-secret.outputs.secret-files }}
         run: |
           set -euo pipefail
 
@@ -5664,30 +5439,49 @@ jobs:
           printf 'RUST_ACCELERATION_NETWORK=%s\n' "$rust_network" >> "$GITHUB_ENV"
           printf 'RUST_BUILDX_NETWORK=%s\n' "$buildx_network" >> "$GITHUB_ENV"
 
-      # What: also runs for build-tools (no matrix.rust) so a broken Redis/
-      #   distcc endpoint can't hide behind a cached curl/git Docker layer.
-      # Why: the action itself is compiler-agnostic (validates via `cc`,
-      #   not rustc) and already gates each check on its own file input.
-      # From: PR #1661
+      # What: only runs for matrix.rust services now
+      # Why: build-tools never had a real compile to validate here
+      # From: Issue #1781 | PR #1783
       - name: Validate acceleration infrastructure outside BuildKit cache
-        if: matrix.rust == true || matrix.service == 'build-tools'
+        if: matrix.rust == true
         uses: ./.github/actions/rust-acceleration-preflight
         with:
           service: ${{ matrix.service }}
           redis-file: ${{ steps.sccache-secret.outputs.redis-file }}
           dist-config-file: ${{ steps.sccache-secret.outputs.dist-config-file }}
-          distcc-hosts-file: ${{ matrix.service == 'build-tools' && steps['distcc-hosts-secret'].outputs['hosts-file'] || steps.sccache-secret.outputs.distcc-hosts-file }}
-          # What: wired via ccache-redis-secret for build-tools only now.
-          # Why: dns/ui/watchdog already get ccache-redis-file from the
-          #   generic sccache-secret step above; avoids a duplicate read.
-          # From: Issue #1095 (G15) | PR #1661
-          ccache-redis-file: ${{ matrix.service == 'build-tools' && steps['ccache-redis-secret'].outputs['redis-file'] || steps.sccache-secret.outputs['ccache-redis-file'] }}
+          distcc-hosts-file: ${{ steps.sccache-secret.outputs.distcc-hosts-file }}
+          ccache-redis-file: ${{ steps.sccache-secret.outputs['ccache-redis-file'] }}
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
           build-network: ${{ env.RUST_ACCELERATION_NETWORK }}
           platform: linux/amd64
 
-      # What: writes the LAN proxy CA to a secret file.
-      # Why: only build-tools' https fetches need it.
+      # What: writes the proxy CA to a temp file for a secret mount.
+      # Why: apk/git must trust the LAN proxy's TLS cert.
+      # From: Issue #1781 | PR #1783
+      - name: Prepare proxy CA secret file
+        id: proxy-ca-secret
+        env:
+          PROXY_CA: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
+        run: |
+          set -euo pipefail
+          if [ -n "$PROXY_CA" ]; then
+            umask 077
+            proxy_ca_file="${{ runner.temp }}/proxy-ca.pem"
+            printf '%s' "$PROXY_CA" > "$proxy_ca_file"
+            {
+              echo "secret-files<<SECRET_FILES"
+              printf 'proxy_ca=%s\n' "$proxy_ca_file"
+              echo "SECRET_FILES"
+            } >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo "secret-files<<SECRET_FILES"
+              echo "SECRET_FILES"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      # What: also writes the LAN proxy CA for build-tools' own
+      # Why: its go-tools/sccache steps use a separate secret ID
       # From: Issue #1095
       - name: Prepare LAN proxy CA secret
         id: lan-proxy-ca
@@ -5714,32 +5508,16 @@ jobs:
         id: combined-secret-files
         env:
           SCCACHE_FILES: ${{ steps.sccache-secret.outputs.secret-files }}
-          CCACHE_FILES: ${{ steps['ccache-redis-secret'].outputs['secret-files'] }}
-          DISTCC_FILES: ${{ steps['distcc-hosts-secret'].outputs['secret-files'] }}
+          PROXY_CA_FILES: ${{ steps['proxy-ca-secret'].outputs['secret-files'] }}
         run: |
           set -euo pipefail
-          combined=""
-          if [ -n "$SCCACHE_FILES" ]; then
-            combined="$SCCACHE_FILES"
-          fi
-          if [ -n "$CCACHE_FILES" ]; then
-            if [ -n "$combined" ]; then
-              combined="$combined"$'\n'"$CCACHE_FILES"
-            else
-              combined="$CCACHE_FILES"
-            fi
-          fi
-          if [ -n "$DISTCC_FILES" ]; then
-            if [ -n "$combined" ]; then
-              combined="$combined"$'\n'"$DISTCC_FILES"
-            else
-              combined="$DISTCC_FILES"
-            fi
-          fi
           {
             echo "secret-files<<SECRET_FILES"
-            if [ -n "$combined" ]; then
-              printf '%s\n' "$combined"
+            if [ -n "$SCCACHE_FILES" ]; then
+              printf '%s\n' "$SCCACHE_FILES"
+            fi
+            if [ -n "$PROXY_CA_FILES" ]; then
+              printf '%s\n' "$PROXY_CA_FILES"
             fi
             echo "SECRET_FILES"
           } >> "$GITHUB_OUTPUT"
@@ -5758,21 +5536,26 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
           builder: ${{ steps.buildx.outputs.name }}
           context: ${{ matrix.context }}
+          dockerfile: ${{ matrix.dockerfile }}
           build-contexts: ${{ matrix.build_contexts }}
           secret-files: |
             ${{ steps['combined-secret-files'].outputs['secret-files'] }}
             ${{ steps['lan-proxy-ca'].outputs['ca-file'] != '' && format('project_selfhosted_proxy_ca={0}', steps['lan-proxy-ca'].outputs['ca-file']) || '' }}
-          # What: LAN-proxy build-args, build-tools only.
+          # What: LAN-proxy build-args, every matrix service.
           # Why: https trusted via the proxy CA secret above.
-          # From: Issue #1095
+          # From: Issue #1781 | PR #1783
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
-            UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
+            PROJECT_CARGO_LTO=${{ vars.PROJECT_CARGO_LTO }}
+            PROJECT_CARGO_CODEGENUNIT=${{ vars.PROJECT_CARGO_CODEGENUNIT }}
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
-            http_proxy=${{ matrix.service == 'build-tools' && vars.PROJECT_SELFHOSTED_PROXY_HTTP || '' }}
-            https_proxy=${{ matrix.service == 'build-tools' && vars.PROJECT_SELFHOSTED_PROXY_HTTPS || '' }}
-            no_proxy=${{ matrix.service == 'build-tools' && vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION || '' }}
+            HTTP_PROXY=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
+            HTTPS_PROXY=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
+            NO_PROXY=${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
+            http_proxy=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
+            https_proxy=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
+            no_proxy=${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
           network: ${{ env.RUST_BUILDX_NETWORK }}
           allow: ${{ env.RUST_BUILDX_NETWORK == 'host' && 'network.host' || '' }}
           push: ${{ github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) }}
@@ -5782,7 +5565,6 @@ jobs:
             org.opencontainers.image.description=${{ matrix.description }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
-            ${{ contains(fromJSON('["proxy","dns","dhcp","dhcp-proxy","ntp","ui","watchdog"]'), matrix.service) && format('org.opencontainers.image.base.utilities.digest={0}', env.UTILITIES_DIGEST) || '' }}
           # What: no `annotations:` input on this single-platform push.
           # Why: no index exists here for `--annotation` to attach to.
           # From: Issue #1095 | PR #1619
@@ -5791,6 +5573,46 @@ jobs:
           provenance: false
           cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
           cache-to: type=local,dest=${{ steps.buildx-cache.outputs.cache-to }},mode=max
+
+      # What: hands digest to hosted scan job explicitly.
+      # Why: matrix outputs don't cross jobs; state is explicit.
+      # From: Issue #1095
+      - name: Write Trivy scan input (amd64)
+        id: trivy-scan-input
+        if: "!cancelled()"
+        env:
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IS_ELIGIBLE: >-
+            ${{
+              github.event_name != 'pull_request' ||
+              (
+                github.actor != 'dependabot[bot]' &&
+                github.event.pull_request.head.repo.id == github.event.repository.id
+              )
+            }}
+        run: |
+          set -euo pipefail
+          input_file="${RUNNER_TEMP}/trivy-scan-input-${{ matrix.service }}-amd64.txt"
+          if [ "$BUILD_OUTCOME" = "success" ] && [ "$IS_ELIGIBLE" = "true" ]; then
+            : "${DIGEST:?steps.build reported success but exported no digest}"
+            {
+              echo "scan_required=true"
+              echo "digest=$DIGEST"
+            } > "$input_file"
+          else
+            # What: build didn't run/failed, or a fork/Dependabot PR.
+            # Why: nothing was pushed for this commit; not an error.
+            echo "scan_required=false" > "$input_file"
+          fi
+
+      - name: Upload Trivy scan input (amd64)
+        if: "!cancelled() && steps.trivy-scan-input.outcome == 'success'"
+        uses: *actions_upload_artifact_centraliced_versioning
+        with:
+          name: trivy-scan-input-${{ matrix.service }}-amd64
+          path: ${{ runner.temp }}/trivy-scan-input-${{ matrix.service }}-amd64.txt
+          retention-days: 1
 
       # This job never `--load`s a local image (push-only), so unlike container-scan it
       # had no existing final cleanup step to piggyback on -- but "Set up Docker Buildx"
@@ -5845,189 +5667,6 @@ jobs:
             rm -rf "$BUILDX_CACHE_ROOT/${{ matrix.service }}"
             mv "$BUILDX_CACHE_DEST" "$cache_dir"
           ) 9>"$lock_file"
-
-      # What: resolves the shared, persistent NFS-backed Trivy DB directory
-      #   (real local-disk fallback if the mount is unavailable), then
-      #   refreshes it under a lock using Trivy's own --download-db-only
-      #   freshness check. This job builds linux/amd64 only (see
-      #   build-arm64 for the native arm64 leg, a separate GitHub-hosted
-      #   job with no route to this NFS mount -- its own step below stays
-      #   on its prior runner.temp design for that reason).
-      # Why: skip-db-update below (steps.trivy-db-fresh.outputs.db-present)
-      #   is what keeps every matrix.service instance's concurrent read
-      #   safe against the shared directory's single writer -- the actual
-      #   fix for the redundant-download outage a per-run-wiped directory
-      #   used to cause on pull_request/workflow_dispatch/retry/tag-push.
-      # From: Issue #1095 | Issue #912 | PR #927 | PR #1532
-      - name: Resolve shared Trivy DB cache directory
-        id: trivy-cache
-        if: >-
-          ${{
-                      steps.build.outcome == 'success' &&
-                      (
-                        github.event_name != 'pull_request' ||
-                        (
-                          github.actor != 'dependabot[bot]' &&
-                          github.event.pull_request.head.repo.id == github.event.repository.id
-                        )
-                      )
-                    }}
-        uses: ./.github/actions/trivy-cache-dir
-
-      - name: Ensure shared Trivy DB is current
-        id: trivy-db-fresh
-        if: ${{ steps.trivy-cache.outcome == 'success' }}
-        uses: ./.github/actions/trivy-db-ensure-fresh
-        with:
-          cache-dir: ${{ steps.trivy-cache.outputs.dir }}
-
-      - name: Scan pushed service digest with Trivy
-        # What: Step 3 -- scans the exact pushed digest before promotion.
-        # Why: now the only scan for a changed service; see the linked issue.
-        # From: Issue #1095 | PR #1532
-        id: trivy-scan-pushed
-        if: >-
-          ${{
-            steps.build.outcome == 'success' &&
-            (
-              github.event_name != 'pull_request' ||
-              (
-                github.actor != 'dependabot[bot]' &&
-                github.event.pull_request.head.repo.id == github.event.repository.id
-              )
-            )
-          }}
-        # What: soft-fails only on a PR; push stays hard-failing.
-        # Why: a PR-context finding reports via the step below instead
-        #   (release-gate decision -- still tracked, not hidden).
-        # From: Issue #1095
-        continue-on-error: ${{ github.event_name == 'pull_request' }}
-        # What: 50-minute timeout for this Trivy scan step.
-        # Why: The wrapped trivy-scan-retry action can attempt up to 4 scans.
-        # From: Issue #1095 | PR #1619
-        timeout-minutes: 50
-        uses: ./.github/actions/trivy-scan-exact-digest
-        with:
-          registry-username: ${{ github.actor }}
-          registry-password: ${{ secrets.GITHUB_TOKEN }}
-          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-          image-ref: ghcr.io/${{ github.repository }}/${{ matrix.service }}@${{ steps.build.outputs.digest }}
-          cache-dir: ${{ steps.trivy-cache.outputs.dir }}
-          # What: never cleaned up now -- it's the shared/fallback dir, not
-          #   a per-run throwaway.
-          # Why: cleanup-cache "true" here would delete the shared DB out
-          #   from under every other concurrent matrix.service job.
-          # From: Issue #1095 | Issue #912
-          cleanup-cache: "false"
-          skip-db-update: ${{ steps.trivy-db-fresh.outputs.db-present == 'true' }}
-
-      # What: fails when db-status is undetermined, scan ran.
-      # Why: an unknown status must never be read as a clean scan.
-      # From: Issue #1095 | PR #1741
-      - name: Require a determined Trivy DB status (amd64)
-        if: >-
-          always() && steps.build.outcome == 'success' &&
-          steps.trivy-scan-pushed.outcome != 'skipped' &&
-          steps.trivy-scan-pushed.outputs.db-status != 'unavailable' &&
-          steps.trivy-scan-pushed.outputs.db-status != 'available'
-        run: |
-          echo "::error::Trivy db-status for ${{ matrix.service }} (amd64) is '${{ steps.trivy-scan-pushed.outputs.db-status }}' -- the scan never reached its own determination step (timeout, cancellation, or output-propagation failure). Treating this as NOT-RUN: no status report is filed and no image is deleted, because nothing was established either way." >&2
-          exit 1
-
-      # What: reports DB-unavailability as a separate issue.
-      # Why: a distinct label keeps this visible without closing a
-      #   real open vulnerability finding on a mere DB miss.
-      # From: Issue #1095
-      - name: Report Trivy DB-unavailable status (amd64, separate issue)
-        if: >-
-          always() && steps.build.outcome == 'success' &&
-          (github.event_name == 'pull_request' || github.ref == 'refs/heads/current_dev' || github.ref == 'refs/heads/master') &&
-          (steps.trivy-scan-pushed.outputs.db-status == 'unavailable' ||
-           steps.trivy-scan-pushed.outputs.db-status == 'available')
-        uses: ./.github/actions/nightly-status
-        with:
-          outcome: ${{ steps.trivy-scan-pushed.outputs.db-status == 'unavailable' && 'failure' || 'success' }}
-          label: trivy-db-unavailable-buildpush-${{ matrix.service }}-amd64
-          scope: >-
-            Trivy vulnerability DB never downloaded for
-            ${{ matrix.service }} (amd64) across all retry attempts
-          fork-check-step-name: Scan pushed service digest with Trivy
-          project_pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
-
-      # What: reports a pre-report scan error, not a finding.
-      # Why: no report exists to evaluate as a finding here.
-      # From: Issue #1095 | PR #1735
-      - name: Report Trivy scan-error status (amd64, separate issue)
-        if: >-
-          always() && steps.build.outcome == 'success' &&
-          (github.event_name == 'pull_request' || github.ref == 'refs/heads/current_dev' || github.ref == 'refs/heads/master') &&
-          steps.trivy-scan-pushed.outputs.db-status == 'available'
-        uses: ./.github/actions/nightly-status
-        with:
-          outcome: ${{ steps.trivy-scan-pushed.outputs.scan-error == 'true' && 'failure' || 'success' }}
-          label: trivy-scan-error-buildpush-${{ matrix.service }}-amd64
-          scope: >-
-            Trivy scan of ${{ matrix.service }} (amd64) failed before
-            producing a report while its DB was present (pull/auth/
-            config/scanner error, not a DB outage and not a finding)
-          fork-check-step-name: Scan pushed service digest with Trivy
-          project_pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
-
-      # What: reports the scan outcome as a self-closing issue.
-      # Why: PR or canonical-ref runs only; avoids a stale non-
-      #   canonical ref opening/closing a shared standing issue.
-      # From: Issue #1095 | PR #1741
-      - name: Report Trivy scan status (self-closing issue)
-        if: >-
-          always() && steps.build.outcome == 'success' &&
-          (github.event_name == 'pull_request' || github.ref == 'refs/heads/current_dev' || github.ref == 'refs/heads/master') &&
-          steps.trivy-scan-pushed.outputs.db-status == 'available' &&
-          steps.trivy-scan-pushed.outputs.scan-error != 'true'
-        uses: ./.github/actions/nightly-status
-        with:
-          outcome: ${{ steps.trivy-scan-pushed.outcome == 'failure' && 'failure' || 'success' }}
-          label: trivy-finding-${{ matrix.service }}-amd64
-          scope: >-
-            Trivy HIGH/CRITICAL finding in ${{ matrix.service }} (amd64),
-            not covered by .trivyignore.yaml
-          fork-check-step-name: Scan pushed service digest with Trivy
-          project_pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
-
-      - name: Delete GHCR package version pushed by a failed scan
-        # What: deletes the just-pushed digest on a genuine finding.
-        # Why: only an actual report proves the image unsafe.
-        # From: Issue #1095 | PR #1735
-        if: >-
-          ${{
-            always() && steps.build.outcome == 'success' &&
-            steps.trivy-scan-pushed.outcome == 'failure' &&
-            steps.trivy-scan-pushed.outputs.db-status == 'available' &&
-            steps.trivy-scan-pushed.outputs.scan-error != 'true'
-          }}
-        env:
-          GH_TOKEN: ${{ secrets.GHCR_PACKAGE_DELETE_PAT }}
-          SERVICE: ${{ matrix.service }}
-          DIGEST: ${{ steps.build.outputs.digest }}
-        run: |
-          set -euo pipefail
-          # shellcheck source=scripts/lib/ghcr-retry.sh
-          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
-          : "${GH_TOKEN:?GHCR_PACKAGE_DELETE_PAT secret is required to delete a scan-failed package version -- see issue #626. Without it, this scan-failed image cannot be removed automatically and needs immediate manual deletion in GHCR.}"
-          org="wiki-mod"
-          package="lancache-ng%2F${SERVICE}"
-          fetch_versions() { gh api --paginate "orgs/${org}/packages/container/${package}/versions" > "$versions_file"; }
-          versions_file="$(mktemp)"
-          trap 'rm -f "$versions_file"' EXIT
-          ghcr_retry ghcr.io "" "" -- fetch_versions
-          version_id="$(jq -r --arg digest "$DIGEST" '[.[] | select(.name == $digest)][0].id // empty' "$versions_file")"
-          if [ -z "$version_id" ]; then
-            echo "::error::Trivy scan failed for the just-pushed lancache-ng/${SERVICE}@${DIGEST}, but no matching GHCR package version was found to delete. Manual verification in GHCR is required."
-            exit 1
-          fi
-          echo "::notice::Trivy scan failed for lancache-ng/${SERVICE}@${DIGEST} (GHCR package version ${version_id}) -- deleting it immediately (issue #1095 G8): a scan-failed image must never remain reachable."
-          ghcr_retry ghcr.io "" "" -- gh api -X DELETE "orgs/${org}/packages/container/${package}/versions/${version_id}"
-          echo "::notice::Deleted GHCR package version ${version_id} (lancache-ng/${SERVICE}@${DIGEST}) after its Trivy scan failed."
 
       - name: Smoke-test exact build-tools candidate
         if: >-
@@ -6113,8 +5752,6 @@ jobs:
     #   workflow-level block; issues:write is for the self-closing
     #   Trivy report added to this job.
     # From: Issue #1095
-      UTILITIES_IMAGE: ${{ needs['validate-compose'].outputs.utilities_image }}
-      UTILITIES_DIGEST: ${{ needs['validate-compose'].outputs.utilities_digest }}
     permissions:
       contents: read
       packages: write
@@ -6151,7 +5788,6 @@ jobs:
           REUSE_UI: ${{ needs['determine-push-reuse-scope'].outputs.reuse_ui }}
           REUSE_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.reuse_build_tools }}
           REUSE_SYSLOG: ${{ needs['determine-push-reuse-scope'].outputs.reuse_syslog }}
-          REUSE_UTILITIES: ${{ needs['determine-push-reuse-scope'].outputs.reuse_utilities }}
         run: |
           set -euo pipefail
 
@@ -6169,7 +5805,6 @@ jobs:
               ui) printf '%s' "$REUSE_UI" ;;
               build-tools) printf '%s' "$REUSE_BUILD_TOOLS" ;;
               syslog) printf '%s' "$REUSE_SYSLOG" ;;
-              utilities) printf '%s' "$REUSE_UTILITIES" ;;
               *) printf 'false' ;;
             esac
           }
@@ -6189,7 +5824,6 @@ jobs:
               dhcp-proxy) should_build="${{ needs['detect-changes'].outputs.dhcp_proxy }}" ;;
               ntp) should_build="${{ needs['detect-changes'].outputs.ntp }}" ;;
               syslog) should_build="${{ needs['detect-changes'].outputs.syslog }}" ;;
-              utilities) should_build="${{ needs['detect-changes'].outputs.utilities }}" ;;
               ui) should_build="${{ needs['detect-changes'].outputs.ui }}" ;;
               build-tools) should_build="${{ needs['detect-changes'].outputs.build_tools }}" ;;
               *)
@@ -6326,7 +5960,6 @@ jobs:
           DIGEST_UI: ${{ needs['determine-push-reuse-scope'].outputs.digest_ui }}
           DIGEST_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.digest_build_tools }}
           DIGEST_SYSLOG: ${{ needs['determine-push-reuse-scope'].outputs.digest_syslog }}
-          DIGEST_UTILITIES: ${{ needs['determine-push-reuse-scope'].outputs.digest_utilities }}
         run: |
           set -euo pipefail
 
@@ -6355,7 +5988,6 @@ jobs:
             ui) pinned_digest="$DIGEST_UI" ;;
             build-tools) pinned_digest="$DIGEST_BUILD_TOOLS" ;;
             syslog) pinned_digest="$DIGEST_SYSLOG" ;;
-            utilities) pinned_digest="$DIGEST_UTILITIES" ;;
             *) pinned_digest="" ;;
           esac
           if [ -z "$pinned_digest" ]; then
@@ -6508,14 +6140,16 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
           builder: ${{ steps.buildx.outputs.name }}
           context: ${{ matrix.context }}
+          dockerfile: ${{ matrix.dockerfile }}
           build-contexts: ${{ matrix.build_contexts }}
           # What: omits the LAN-proxy build-arg on this arm64 job.
           # Why: no route to the self-hosted-only proxy; static split.
           # From: Issue #1095
           build-args: |
             BUILD_TOOLS_IMAGE=${{ env.BUILD_TOOLS_IMAGE }}
-            UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
+            PROJECT_CARGO_LTO=${{ vars.PROJECT_CARGO_LTO }}
+            PROJECT_CARGO_CODEGENUNIT=${{ vars.PROJECT_CARGO_CODEGENUNIT }}
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
           push: ${{ github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) }}
           tags: ${{ steps.pr-tag.outputs.image || steps.meta.outputs.tags }}
@@ -6524,7 +6158,6 @@ jobs:
             org.opencontainers.image.description=${{ matrix.description }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
-            ${{ contains(fromJSON('["proxy","dns","dhcp","dhcp-proxy","ntp","ui","watchdog"]'), matrix.service) && format('org.opencontainers.image.base.utilities.digest={0}', env.UTILITIES_DIGEST) || '' }}
           # What: no `annotations:` input here, mirroring build's step.
           # Why: no index exists here for `--annotation` to attach to.
           # From: Issue #1095 | PR #1619
@@ -6744,6 +6377,221 @@ jobs:
           subject-name: ghcr.io/${{ github.repository }}/${{ matrix.service }}
           subject-digest: ${{ steps.build.outputs.digest }}
 
+  trivy-scan-amd64:
+    # What: GitHub-hosted Trivy scan of build's amd64 digest.
+    # Why: self-hosted DB downloads were unreliable (amd64).
+    # From: Issue #1095
+    name: Trivy scan (amd64, hosted)
+    needs: [determine-build-admission, build]
+    # What: requires admission open; skip only if cancelled.
+    # Why: mirrors build's own admission/cancellation gate.
+    # From: Issue #1095
+    if: >-
+      !cancelled() &&
+      needs['determine-build-admission'].result == 'success' &&
+      needs['determine-build-admission'].outputs.admitted == 'true' &&
+      needs.build.result != 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: read
+      issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: *normal-build-services
+    steps:
+      - name: Checkout
+        uses: *checkout_centraliced_versioning # v7.0.1
+
+      # What: downloads the digest build wrote, if any.
+      # Why: absence is legit only if build was cancelled.
+      # From: Issue #1095
+      - name: Download Trivy scan input (amd64)
+        id: download-scan-input
+        continue-on-error: true
+        uses: *actions_download_artifact_centraliced_versioning # v8.0.1
+        with:
+          name: trivy-scan-input-${{ matrix.service }}-amd64
+          path: ${{ runner.temp }}/trivy-scan-input
+
+      - name: Read Trivy scan input (amd64)
+        id: scan-input
+        env:
+          BUILD_JOB_RESULT: ${{ needs.build.result }}
+        run: |
+          set -euo pipefail
+          input_file="${RUNNER_TEMP}/trivy-scan-input/trivy-scan-input-${{ matrix.service }}-amd64.txt"
+          if [ ! -s "$input_file" ]; then
+            if [ "$BUILD_JOB_RESULT" = "cancelled" ]; then
+              echo "::notice::build was cancelled; no Trivy scan input for ${{ matrix.service }} (amd64) -- legitimate skip."
+              echo "available=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::No Trivy scan input artifact found for ${{ matrix.service }} (amd64), and build's own result was '$BUILD_JOB_RESULT' (not cancelled). build's 'Write Trivy scan input' step runs unconditionally, so this file should always exist -- treating this as an unexplained gap (upload/download failure), never as nothing-to-scan." >&2
+            exit 1
+          fi
+
+          scan_required="$(grep -m1 '^scan_required=' "$input_file" | cut -d= -f2-)"
+          case "$scan_required" in
+            true)
+              digest="$(grep -m1 '^digest=' "$input_file" | cut -d= -f2-)"
+              : "${digest:?scan input declared scan_required=true but carried no digest}"
+              printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+              echo "available=true" >> "$GITHUB_OUTPUT"
+              ;;
+            false)
+              echo "::notice::No Trivy scan input for ${{ matrix.service }} (amd64) this run (should-build was false, build/push failed, or this is a fork/Dependabot PR); nothing to scan."
+              echo "available=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::Malformed Trivy scan input for ${{ matrix.service }} (amd64): scan_required='${scan_required:-<unset>}'." >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Log in to GHCR
+        if: steps.scan-input.outputs.available == 'true'
+        uses: *docker_login_centraliced_versioning
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Scan pushed service digest with Trivy
+        # What: Step 3 -- scans the exact pushed digest before promotion.
+        # Why: now the only scan for a changed service; see the linked issue.
+        # From: Issue #1095 | PR #1532
+        id: trivy-scan-pushed
+        if: steps.scan-input.outputs.available == 'true'
+        # What: soft-fails only on a PR; push stays hard-failing.
+        # Why: a PR finding reports via the step below.
+        # From: Issue #1095
+        continue-on-error: ${{ github.event_name == 'pull_request' }}
+        # What: 50-minute timeout for this Trivy scan step.
+        # Why: The wrapped trivy-scan-retry action can attempt up to 4 scans.
+        # From: Issue #1095 | PR #1619
+        timeout-minutes: 50
+        uses: ./.github/actions/trivy-scan-exact-digest
+        with:
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+          image-ref: ghcr.io/${{ github.repository }}/${{ matrix.service }}@${{ steps.scan-input.outputs.digest }}
+          # What: ephemeral per-run cache dir, no shared NFS mount here.
+          # Why: no NFS route on a hosted runner; ephemeral.
+          # From: Issue #1095
+          cache-dir: ${{ runner.temp }}/trivy-${{ matrix.service }}-amd64-${{ github.run_id }}-${{ github.run_attempt }}
+          cleanup-cache: "true"
+
+      # What: fails when db-status is undetermined, scan ran.
+      # Why: an unknown status must never be read as a clean scan.
+      # From: Issue #1095 | PR #1741
+      - name: Require a determined Trivy DB status (amd64)
+        if: >-
+          always() && steps.scan-input.outputs.available == 'true' &&
+          steps.trivy-scan-pushed.outcome != 'skipped' &&
+          steps.trivy-scan-pushed.outputs.db-status != 'unavailable' &&
+          steps.trivy-scan-pushed.outputs.db-status != 'available'
+        run: |
+          echo "::error::Trivy db-status for ${{ matrix.service }} (amd64) is '${{ steps.trivy-scan-pushed.outputs.db-status }}' -- the scan never reached its own determination step (timeout, cancellation, or output-propagation failure). Treating this as NOT-RUN: no status report is filed and no image is deleted, because nothing was established either way." >&2
+          exit 1
+
+      # What: reports DB-unavailability as a separate issue.
+      # Why: a distinct label keeps this visible without closing a
+      #   real open vulnerability finding on a mere DB miss.
+      # From: Issue #1095
+      - name: Report Trivy DB-unavailable status (amd64, separate issue)
+        if: >-
+          always() && steps.scan-input.outputs.available == 'true' &&
+          (github.event_name == 'pull_request' || github.ref == 'refs/heads/current_dev' || github.ref == 'refs/heads/master') &&
+          (steps.trivy-scan-pushed.outputs.db-status == 'unavailable' ||
+           steps.trivy-scan-pushed.outputs.db-status == 'available')
+        uses: ./.github/actions/nightly-status
+        with:
+          outcome: ${{ steps.trivy-scan-pushed.outputs.db-status == 'unavailable' && 'failure' || 'success' }}
+          label: trivy-db-unavailable-buildpush-${{ matrix.service }}-amd64
+          scope: >-
+            Trivy vulnerability DB never downloaded for
+            ${{ matrix.service }} (amd64) across all retry attempts
+          fork-check-step-name: Scan pushed service digest with Trivy
+          project_pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+
+      # What: reports a pre-report scan error, not a finding.
+      # Why: no report exists to evaluate as a finding here.
+      # From: Issue #1095 | PR #1735
+      - name: Report Trivy scan-error status (amd64, separate issue)
+        if: >-
+          always() && steps.scan-input.outputs.available == 'true' &&
+          (github.event_name == 'pull_request' || github.ref == 'refs/heads/current_dev' || github.ref == 'refs/heads/master') &&
+          steps.trivy-scan-pushed.outputs.db-status == 'available'
+        uses: ./.github/actions/nightly-status
+        with:
+          outcome: ${{ steps.trivy-scan-pushed.outputs.scan-error == 'true' && 'failure' || 'success' }}
+          label: trivy-scan-error-buildpush-${{ matrix.service }}-amd64
+          scope: >-
+            Trivy scan of ${{ matrix.service }} (amd64) failed before
+            producing a report while its DB was present (pull/auth/
+            config/scanner error, not a DB outage and not a finding)
+          fork-check-step-name: Scan pushed service digest with Trivy
+          project_pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+
+      # What: reports the scan outcome as a self-closing issue.
+      # Why: PR/canonical-ref only; avoids stale-ref churn.
+      # From: Issue #1095 | PR #1741
+      - name: Report Trivy scan status (self-closing issue)
+        if: >-
+          always() && steps.scan-input.outputs.available == 'true' &&
+          (github.event_name == 'pull_request' || github.ref == 'refs/heads/current_dev' || github.ref == 'refs/heads/master') &&
+          steps.trivy-scan-pushed.outputs.db-status == 'available' &&
+          steps.trivy-scan-pushed.outputs.scan-error != 'true'
+        uses: ./.github/actions/nightly-status
+        with:
+          outcome: ${{ steps.trivy-scan-pushed.outcome == 'failure' && 'failure' || 'success' }}
+          label: trivy-finding-${{ matrix.service }}-amd64
+          scope: >-
+            Trivy HIGH/CRITICAL finding in ${{ matrix.service }} (amd64),
+            not covered by .trivyignore.yaml
+          fork-check-step-name: Scan pushed service digest with Trivy
+          project_pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+
+      - name: Delete GHCR package version pushed by a failed scan
+        # What: deletes the just-pushed digest on a genuine finding.
+        # Why: only an actual report proves the image unsafe.
+        # From: Issue #1095 | PR #1735
+        if: >-
+          ${{
+            always() && steps.scan-input.outputs.available == 'true' &&
+            steps.trivy-scan-pushed.outcome == 'failure' &&
+            steps.trivy-scan-pushed.outputs.db-status == 'available' &&
+            steps.trivy-scan-pushed.outputs.scan-error != 'true'
+          }}
+        env:
+          GH_TOKEN: ${{ secrets.GHCR_PACKAGE_DELETE_PAT }}
+          SERVICE: ${{ matrix.service }}
+          DIGEST: ${{ steps.scan-input.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # shellcheck source=scripts/lib/ghcr-retry.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          : "${GH_TOKEN:?GHCR_PACKAGE_DELETE_PAT secret is required to delete a scan-failed package version -- see issue #626. Without it, this scan-failed image cannot be removed automatically and needs immediate manual deletion in GHCR.}"
+          org="wiki-mod"
+          package="lancache-ng%2F${SERVICE}"
+          fetch_versions() { gh api --paginate "orgs/${org}/packages/container/${package}/versions" > "$versions_file"; }
+          versions_file="$(mktemp)"
+          trap 'rm -f "$versions_file"' EXIT
+          ghcr_retry ghcr.io "" "" -- fetch_versions
+          version_id="$(jq -r --arg digest "$DIGEST" '[.[] | select(.name == $digest)][0].id // empty' "$versions_file")"
+          if [ -z "$version_id" ]; then
+            echo "::error::Trivy scan failed for the just-pushed lancache-ng/${SERVICE}@${DIGEST}, but no matching GHCR package version was found to delete. Manual verification in GHCR is required."
+            exit 1
+          fi
+          echo "::notice::Trivy scan failed for lancache-ng/${SERVICE}@${DIGEST} (GHCR package version ${version_id}) -- deleting it immediately (issue #1095 G8): a scan-failed image must never remain reachable."
+          ghcr_retry ghcr.io "" "" -- gh api -X DELETE "orgs/${org}/packages/container/${package}/versions/${version_id}"
+          echo "::notice::Deleted GHCR package version ${version_id} (lancache-ng/${SERVICE}@${DIGEST}) after its Trivy scan failed."
+
   merge-manifests:
     # Combines build's linux/amd64 per-service tag with build-arm64's linux/arm64
     # per-service tag into the real sha-<commit> multi-platform tag that
@@ -6759,11 +6607,11 @@ jobs:
     # PR would just loop through seven harmless "no linux/amd64 image" skips for no
     # reason.
     name: merge multi-platform manifests
-    needs: [determine-build-admission, build, build-arm64, push-supersession-check]
+    needs: [determine-build-admission, build, build-arm64, trivy-scan-amd64, push-supersession-check]
     # What: merges manifests only after build admission opens.
     # Why: skipped image jobs leave no valid manifest inputs.
     # From: Issue #1095
-    if: "!cancelled() && needs['determine-build-admission'].result == 'success' && needs['determine-build-admission'].outputs.admitted == 'true' && needs.build.result != 'cancelled' && needs['build-arm64'].result != 'cancelled'"
+    if: "!cancelled() && needs['determine-build-admission'].result == 'success' && needs['determine-build-admission'].outputs.admitted == 'true' && needs.build.result != 'cancelled' && needs['build-arm64'].result != 'cancelled' && needs['trivy-scan-amd64'].result != 'cancelled'"
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     # Real runs: 17s-4.1min (per this job's own comment, it only assembles a
     # manifest list from two already-pushed digests -- no image rebuild).
@@ -6793,7 +6641,6 @@ jobs:
       syslog_digest: ${{ steps.create-trusted-manifests.outputs.syslog_digest || steps.create-pr-staging-manifests.outputs.syslog_digest }}
       ui_digest: ${{ steps.create-trusted-manifests.outputs.ui_digest || steps.create-pr-staging-manifests.outputs.ui_digest }}
       build_tools_digest: ${{ steps.create-trusted-manifests.outputs.build_tools_digest || steps.create-pr-staging-manifests.outputs.build_tools_digest }}
-      utilities_digest: ${{ steps.create-trusted-manifests.outputs.utilities_digest || steps.create-pr-staging-manifests.outputs.utilities_digest }}
       stack_digest: ${{ steps.create-trusted-manifests.outputs.stack_digest }}
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
@@ -6881,7 +6728,6 @@ jobs:
             [ui]="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
             [build-tools]="Prebuilt lancache-ng CI and developer validation toolchain image."
             [syslog]="Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428)."
-            [utilities]="Shared lancache-ng utilities image (curl, nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd) for COPY --from= consumption by eight first-party images (issue #1556)."
           )
 
           # Duplicated rather than factored into a shared script/action: GitHub Actions
@@ -7476,7 +7322,6 @@ jobs:
           SYSLOG_DIGEST: ${{ needs['merge-manifests'].outputs.syslog_digest }}
           UI_DIGEST: ${{ needs['merge-manifests'].outputs.ui_digest }}
           BUILD_TOOLS_DIGEST: ${{ needs['merge-manifests'].outputs.build_tools_digest }}
-          UTILITIES_DIGEST: ${{ needs['merge-manifests'].outputs.utilities_digest }}
           STACK_DIGEST: ${{ needs['merge-manifests'].outputs.stack_digest }}
         run: |
           set -euo pipefail
@@ -7508,7 +7353,6 @@ jobs:
             [syslog]="$SYSLOG_DIGEST"
             [ui]="$UI_DIGEST"
             [build-tools]="$BUILD_TOOLS_DIGEST"
-            [utilities]="$UTILITIES_DIGEST"
           )
           declare -A previous_refs=()
           promoted_targets=()
@@ -7871,11 +7715,10 @@ jobs:
         shell: bash
         env:
           TAG_NAME: ${{ github.ref_name }}
-          # What: syslog/utilities are explicit in this SERVICES scalar.
-          # Why: check-workflow-service-lists.sh's regex guard can only
-          # see a space-separated scalar here, not a bash array.
-          # From: Issue #1428 | PR #1433 | Issue #1556 | PR #1574
-          SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities stack
+          # What: syslog is explicit in this SERVICES scalar.
+          # Why: check-workflow-service-lists.sh needs a plain scalar here.
+          # From: Issue #1428 | PR #1433
+          SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools stack
           REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
@@ -8234,7 +8077,7 @@ jobs:
         # (an unscanned channel-pointer image).
         # Why: a hand-kept copy risks drifting out of sync.
         # From: Issue #1095 | PR #1619
-        service: [proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, syslog, ui, build-tools, utilities]
+        service: [proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, syslog, ui, build-tools]
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - name: Checkout
@@ -8286,24 +8129,6 @@ jobs:
           fi
           echo "image-ref=ghcr.io/${REPOSITORY}/${SERVICE}@${digest}" >> "$GITHUB_OUTPUT"
 
-          # What: reads utilities' digest from the released image's own
-          #   build-time label via the digest-qualified ref resolved above.
-          # Why: utilities:latest can move between builds; the label+digest
-          #   keep this bound to what the scan above actually covers (AG-VAL-026).
-          # From: Issue #1613 | Issue #1095
-          case "$SERVICE" in
-            proxy|dhcp|dhcp-proxy|dns|ntp|ui|watchdog)
-              released_image="ghcr.io/${REPOSITORY}/${SERVICE}@${digest}"
-              ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker pull "$released_image" >/dev/null
-              utilities_digest="$(docker image inspect "$released_image" --format '{{ index .Config.Labels "org.opencontainers.image.base.utilities.digest" }}')"
-              if [[ ! "$utilities_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-                echo "::error::$released_image is missing its build-time utilities base-digest label (org.opencontainers.image.base.utilities.digest)." >&2
-                exit 1
-              fi
-              echo "utilities-image-ref=ghcr.io/${REPOSITORY}/utilities@${utilities_digest}" >> "$GITHUB_OUTPUT"
-              ;;
-          esac
-
       # "Resolve released image digest" above is the only step in this job
       # that uses the builder set up above -- the Trivy scan and release
       # upload steps below don't touch buildx.
@@ -8335,40 +8160,6 @@ jobs:
           hide-progress: true
           cache: "false"
           timeout: 10m
-
-      - name: Generate utilities image SBOM for component merge
-        # Consumer-only: scans the same released utilities digest resolved
-        # above so its components can be merged below.
-        if: contains(fromJSON('["proxy", "dhcp", "dhcp-proxy", "dns", "ntp", "ui", "watchdog"]'), matrix.service)
-        timeout-minutes: 50
-        uses: ./.github/actions/trivy-scan-retry
-        with:
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-          scan-type: image
-          image-ref: ${{ steps.digest.outputs.utilities-image-ref }}
-          format: cyclonedx
-          output: utilities-for-merge.cdx.json
-          hide-progress: true
-          cache: "false"
-          timeout: 10m
-
-      - name: Merge utilities components into this service's SBOM
-        # What: merges only the utilities apk packages this service COPY's.
-        # Why: those packages aren't apk-installed here so this image's own
-        # scan can't see them; merging the FULL utilities SBOM over-reports.
-        # From: Issue #1613 | Issue #1095
-        if: contains(fromJSON('["proxy", "dhcp", "dhcp-proxy", "dns", "ntp", "ui", "watchdog"]'), matrix.service)
-        env:
-          SERVICE: ${{ matrix.service }}
-        run: |
-          set -euo pipefail
-          asset="${SERVICE}.cdx.json"
-          bash scripts/untracked/merge-utilities-sbom-components.sh \
-            "$SERVICE" "$asset" utilities-for-merge.cdx.json > "${asset}.merged"
-          mv "${asset}.merged" "$asset"
 
       - name: Attach SBOM to the release
         # Idempotent same-named-asset replace, curl/jq in the tag-scoped
@@ -8448,7 +8239,7 @@ jobs:
   report-nightly-status:
     name: report nightly channel status
     if: "always() && !cancelled() && github.event_name == 'workflow_dispatch' && inputs.channel == 'nightly'"
-    needs: [build, build-arm64, merge-manifests, full-setup-validate, promote]
+    needs: [build, build-arm64, trivy-scan-amd64, merge-manifests, full-setup-validate, promote]
     runs-on: [self-hosted, linux, lancache, lancache-light]
     timeout-minutes: 10
     permissions:
@@ -8462,6 +8253,10 @@ jobs:
         env:
           BUILD: ${{ needs.build.result }}
           BUILD_ARM64: ${{ needs['build-arm64'].result }}
+          # What: amd64 Trivy scan now runs as its own job.
+          # Why: a scan failure no longer surfaces via build alone.
+          # From: Issue #1095
+          TRIVY_SCAN_AMD64: ${{ needs['trivy-scan-amd64'].result }}
           MERGE_MANIFESTS: ${{ needs['merge-manifests'].result }}
           FULL_SETUP_VALIDATE: ${{ needs['full-setup-validate'].result }}
           PROMOTE: ${{ needs.promote.result }}
@@ -8470,6 +8265,7 @@ jobs:
           declare -A results=(
             [build]="$BUILD"
             [build-arm64]="$BUILD_ARM64"
+            [trivy-scan-amd64]="$TRIVY_SCAN_AMD64"
             [merge-manifests]="$MERGE_MANIFESTS"
             [full-setup-validate]="$FULL_SETUP_VALIDATE"
             [promote]="$PROMOTE"

@@ -329,7 +329,7 @@ The musl cross-compilation support already provided by the Debian build-tools st
 
 Issue #1095 remains the tracking context for the build-tools base-OS decision. The completed evaluation in Issue #815 and related implementation work establish candidate feasibility but MUST NOT be treated as authorization to switch the default. Any change to the default build-tools base OS, active CI image, or corresponding image channel MUST receive explicit maintainer approval.
 
-- **[AG-KD-010]** *Retired.* This rule governed first-party consumers of the shared `utilities` image (the mutable `utilities:latest`-tag exception to digest pinning). Issue #1781 removed that image entirely — each former consumer now installs its own copy of what it used to `COPY --from=` — so the rule no longer applies. The ID is retained as a historical marker and MUST NOT be reused.
+- **[AG-KD-010]** Retired by Issue #1781 and PR #1783. The shared `utilities` image and `services/utilities/Dockerfile` no longer exist, and former consumers now install their required packages independently. This rule therefore has no active consumer scope. If a shared `utilities` image is introduced again and used by first-party consumers, those consumers MUST reference the mutable `:latest` tag and MUST NOT pin the image by digest. The historical rule text remains available through Git history. This rule ID MUST NOT be reused. Rule-Ref: AG-WF-016.
 
 ## CDN Domains, First-time Setup, IPv6
 

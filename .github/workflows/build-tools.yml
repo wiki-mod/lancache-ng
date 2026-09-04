@@ -55,7 +55,6 @@ jobs:
       contents: read
     outputs:
       should-publish: ${{ steps.should-publish.outputs.should-publish }}
-      utilities-image: ${{ steps['resolve-utilities-image'].outputs['utilities-image'] }}
     steps:
       - name: Confirm standalone route
         run: |
@@ -64,29 +63,6 @@ jobs:
 
       - name: Checkout
         uses: &checkout_centraliced_versioning actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      # What: resolves utilities:latest, falls back to :nightly.
-      # Why: Dockerfile lacks UTILITIES_IMAGE arg; needs resolved ref.
-      # From: Issue #1095 | PR #1706
-      - name: Resolve utilities image digest
-        id: resolve-utilities-image
-        env:
-          GHCR_RETRY_USERNAME: ${{ github.actor }}
-          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          # shellcheck source=scripts/lib/ghcr-retry.sh
-          source scripts/lib/ghcr-retry.sh
-
-          utilities_digest="$(resolve_manifest_digest ghcr.io/wiki-mod/lancache-ng/utilities:latest "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")" \
-            || utilities_digest="$(resolve_manifest_digest ghcr.io/wiki-mod/lancache-ng/utilities:nightly "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD")" \
-            || utilities_digest=""
-          if [[ -z "$utilities_digest" ]]; then
-            echo "::error::Could not resolve digest for ghcr.io/wiki-mod/lancache-ng/utilities:latest or :nightly." >&2
-            exit 1
-          fi
-
-          printf 'utilities-image=ghcr.io/wiki-mod/lancache-ng/utilities@%s\n' "$utilities_digest" >> "$GITHUB_OUTPUT"
 
       # What: compute should-publish once for both architecture jobs.
       # Why: skip rebuild on unchanged inputs; manual triggers override.
@@ -136,8 +112,6 @@ jobs:
     concurrency:
       group: build-tools-amd64-image-build
       cancel-in-progress: false
-    env:
-      UTILITIES_IMAGE: ${{ needs['determine-publish-scope'].outputs['utilities-image'] }}
     # What: add issues:write to job permissions; others unchanged.
     # Why: job perms replace workflow level; issues:write for Trivy.
     # From: Issue #1095
@@ -222,37 +196,9 @@ jobs:
             printf 'golang=%s\n' "$(digest_for_image golang:latest)"
           } >> "$GITHUB_OUTPUT"
 
-      # What: writes ccache/distcc secret files for Dockerfile build.
-      # Why: PR runs lack LAN access; build succeeds without cache.
-      # From: Issue #1304 | PR #1661
-      - name: Prepare ccache/distcc secrets for git build
-        if: github.event_name != 'pull_request'
-        id: ccache-distcc-secret
-        env:
-          SCCACHE_REDIS_MODE: ${{ vars.SCCACHE_REDIS_MODE }}
-          SCCACHE_REDIS_URL: ${{ secrets.SCCACHE_REDIS_URL }}
-          DISTCC_POTENTIAL_HOSTS: ${{ vars.DISTCC_POTENTIAL_HOSTS }}
-        run: |
-          set -euo pipefail
-          umask 077
-          if [ "${SCCACHE_REDIS_MODE:-required}" != "off" ] && [ -n "$SCCACHE_REDIS_URL" ]; then
-            redis_file="${{ runner.temp }}/build-tools-ccache-redis-url"
-            printf '%s' "$SCCACHE_REDIS_URL" > "$redis_file"
-            echo "ccache-redis-file=$redis_file" >> "$GITHUB_OUTPUT"
-          else
-            echo "::notice::No ccache Redis secret prepared for the git build (mode=off or secret unset)."
-          fi
-          if [ -n "$DISTCC_POTENTIAL_HOSTS" ]; then
-            if ! grep -q ',cpp' <<<"$DISTCC_POTENTIAL_HOSTS"; then
-              echo "::error::DISTCC_POTENTIAL_HOSTS must include at least one pump-capable host with the ',cpp' option."
-              exit 1
-            fi
-            distcc_hosts_file="${{ runner.temp }}/build-tools-distcc-potential-hosts"
-            printf '%s' "$DISTCC_POTENTIAL_HOSTS" > "$distcc_hosts_file"
-            echo "distcc-hosts-file=$distcc_hosts_file" >> "$GITHUB_OUTPUT"
-          else
-            echo "::notice::No distcc hosts secret prepared for the git build (DISTCC_POTENTIAL_HOSTS unset)."
-          fi
+      # What: acceleration network, always bridge/default now
+      # Why: no C compile here ever needed Redis/distcc
+      # From: Issue #1781 | PR #1783
 
       # What: writes the LAN proxy CA to a secret file.
       # Why: PR and push builds both need https via Squid.
@@ -271,48 +217,12 @@ jobs:
           else
             echo "::notice::No LAN proxy CA secret prepared (PROJECT_SELFHOSTED_PROXY_CA unset)."
           fi
-
-      # What: selects host or bridge network per accel availability.
-      # Why: prevents silent fallback to uncached compile on no endpoint.
-      # From: Issue #1304 | PR #1661
       - name: Select acceleration network for the standalone build
         if: github.event_name != 'pull_request'
         run: |
           set -euo pipefail
-          rust_network=bridge
-          buildx_network=default
-          if [ -n "${{ steps.ccache-distcc-secret.outputs.ccache-redis-file }}" ] || \
-             [ -n "${{ steps.ccache-distcc-secret.outputs.distcc-hosts-file }}" ]; then
-            rust_network=host
-            buildx_network=host
-          fi
-          printf 'RUST_ACCELERATION_NETWORK=%s\n' "$rust_network" >> "$GITHUB_ENV"
-          printf 'RUST_BUILDX_NETWORK=%s\n' "$buildx_network" >> "$GITHUB_ENV"
-
-      # What: resolve immutable published build-tools image for preflight.
-      # Why: preflight's default :latest is mutable; needs immutable.
-      # From: Issue #1304 | PR #1661
-      - name: Select immutable build-tools image for preflight
-        if: github.event_name != 'pull_request'
-        id: preflight-image
-        run: |
-          set -euo pipefail
-          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
-          printf 'image=%s\n' "$build_tools_image" >> "$GITHUB_OUTPUT"
-
-      # What: validates acceleration infra; also in build-push.yml.
-      # Why: surfaces broken Redis/distcc instead of hiding via fallback.
-      # From: Issue #1304 | PR #1661
-      - name: Validate acceleration infrastructure outside BuildKit cache
-        if: github.event_name != 'pull_request'
-        uses: ./.github/actions/rust-acceleration-preflight
-        with:
-          service: build-tools
-          distcc-hosts-file: ${{ steps.ccache-distcc-secret.outputs.distcc-hosts-file }}
-          ccache-redis-file: ${{ steps.ccache-distcc-secret.outputs.ccache-redis-file }}
-          build-tools-image: ${{ steps.preflight-image.outputs.image }}
-          build-network: ${{ env.RUST_ACCELERATION_NETWORK }}
-          platform: linux/amd64
+          printf 'RUST_ACCELERATION_NETWORK=%s\n' "bridge" >> "$GITHUB_ENV"
+          printf 'RUST_BUILDX_NETWORK=%s\n' "default" >> "$GITHUB_ENV"
 
       # What: build local amd64 candidate for fork PRs.
       # Why: fork PRs can't publish; still need candidate for smoke/vuln.
@@ -333,6 +243,9 @@ jobs:
           BUILDX_BUILDER: ${{ steps.buildx.outputs.name }}
           BUILDX_CACHE_FROM_DIR: ${{ steps.buildx-cache.outputs.cache-from }}
           BUILDX_CACHE_TO_DIR: ${{ steps.buildx-cache.outputs.cache-to }}
+          HTTP_PROXY: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
+          HTTPS_PROXY: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
+          NO_PROXY: ${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
         run: |
           set -euo pipefail
           source "$GITHUB_WORKSPACE/scripts/lib/build-retry.sh"
@@ -348,10 +261,12 @@ jobs:
             --platform linux/amd64 \
             --provenance=false \
             --build-arg "APT_CACHE_BUST=$APT_CACHE_BUST" \
-            --build-arg "http_proxy=$LAN_PROXY_HTTP" \
-            --build-arg "https_proxy=$LAN_PROXY_HTTPS" \
-            --build-arg "no_proxy=$LAN_PROXY_NO_PROXY" \
-            --build-arg "UTILITIES_IMAGE=$UTILITIES_IMAGE" \
+            --build-arg "HTTP_PROXY=$HTTP_PROXY" \
+            --build-arg "HTTPS_PROXY=$HTTPS_PROXY" \
+            --build-arg "NO_PROXY=$NO_PROXY" \
+            --build-arg "http_proxy=$HTTP_PROXY" \
+            --build-arg "https_proxy=$HTTPS_PROXY" \
+            --build-arg "no_proxy=$NO_PROXY" \
             "${secret_args[@]}" \
             --cache-from "type=local,src=$BUILDX_CACHE_FROM_DIR" \
             --cache-to "type=local,dest=$BUILDX_CACHE_TO_DIR,mode=max" \
@@ -381,17 +296,20 @@ jobs:
           # From: Issue #1095
           build-args: |
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
+            HTTP_PROXY=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
+            HTTPS_PROXY=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
+            NO_PROXY=${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
             http_proxy=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
             https_proxy=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
             no_proxy=${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
-            UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
+          # What: supplies the CA the Dockerfile's install-ca-cert.sh needs.
+          # Why: no distcc/ccache secret is prepared on this branch.
+          # From: Issue #1095
           secret-files: |
-            ${{ steps.ccache-distcc-secret.outputs.ccache-redis-file != '' && format('ccache_redis_url={0}', steps.ccache-distcc-secret.outputs.ccache-redis-file) || '' }}
-            ${{ steps.ccache-distcc-secret.outputs.distcc-hosts-file != '' && format('distcc_potential_hosts={0}', steps.ccache-distcc-secret.outputs.distcc-hosts-file) || '' }}
             ${{ steps['lan-proxy-ca'].outputs['ca-file'] != '' && format('project_selfhosted_proxy_ca={0}', steps['lan-proxy-ca'].outputs['ca-file']) || '' }}
-          # What: wire validated network from preflight into real build.
-          # Why: prevent silent uncached fallback when host network needed.
-          # From: Issue #1304 | PR #1661
+          # What: network wire, set by the step above
+          # Why: keeps a real accelerator easy to reintroduce later
+          # From: Issue #1781 | PR #1783
           network: ${{ env.RUST_BUILDX_NETWORK }}
           allow: ${{ env.RUST_BUILDX_NETWORK == 'host' && 'network.host' || '' }}
           outputs: type=image,oci-mediatypes=true
@@ -592,8 +510,6 @@ jobs:
     needs: determine-publish-scope
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 150
-    env:
-      UTILITIES_IMAGE: ${{ needs['determine-publish-scope'].outputs['utilities-image'] }}
     # What: add issues:write; others unchanged (same as amd64 job).
     # Why: needed for self-closing Trivy report in this job.
     # From: Issue #1095
@@ -674,7 +590,6 @@ jobs:
           # From: Issue #1095
           build-args: |
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
-            UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
           provenance: false
           cache-from: type=gha,scope=build-tools-arm64
           cache-to: type=gha,scope=build-tools-arm64,mode=max
@@ -700,7 +615,6 @@ jobs:
           # From: Issue #1095
           build-args: |
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
-            UTILITIES_IMAGE=${{ env.UTILITIES_IMAGE }}
           outputs: type=image,oci-mediatypes=true
           platforms: linux/arm64
           provenance: false

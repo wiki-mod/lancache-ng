@@ -409,8 +409,8 @@ jobs:
           threads: ${{ vars.CODEQL_THREADS || '4' }}
 
       - name: Cache Cargo registry and target dirs for CodeQL's Rust build
-        # What: Caches ~/.cargo and targets; key: 3 Cargo.lock files
-        # Why: LAN sccache unreachable; prevents full recompilation
+        # What: caches cargo registry and workspace target.
+        # Why: one lockfile now covers every member crate.
         # From: Issue #1095
         if: steps.admission.outputs.superseded != 'true' && matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -418,10 +418,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            services/dns/nats-subscriber/target
-            services/ui/target
-            services/watchdog/target
-          key: cargo-codeql-${{ runner.os }}-${{ hashFiles('services/dns/nats-subscriber/Cargo.lock', 'services/ui/Cargo.lock', 'services/watchdog/Cargo.lock') }}
+            target
+          key: cargo-codeql-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             cargo-codeql-${{ runner.os }}-
 

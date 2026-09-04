@@ -220,6 +220,10 @@ jobs:
           GC_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
           GC_CONCURRENCY: ${{ github.event.inputs.concurrency || vars.GC_CONCURRENCY || '1' }}
           GC_MAX_DELETIONS_PER_SERVICE: ${{ github.event.inputs.max_deletions_per_service || vars.GC_MAX_DELETIONS_PER_SERVICE || '40' }}
+          # What: reserves orphan-cleanup slots from the cap above.
+          # Why: Pass 1's backlog can starve Pass 1.5/2 otherwise.
+          # From: Issue #1095
+          GC_ORPHAN_RESERVE_PER_SERVICE: ${{ vars.GC_ORPHAN_RESERVE_PER_SERVICE || '20' }}
           GC_MAX_DELETIONS_TOTAL: ${{ github.event.inputs.max_deletions_total || vars.GC_MAX_DELETIONS_TOTAL || '1500' }}
           GC_MIN_AGE_SECONDS: ${{ github.event.inputs.minimum_age_seconds || vars.GC_MIN_AGE_SECONDS || '604800' }}
           GC_MAX_PR_LOOKUP_FAILURES: ${{ vars.GC_MAX_PR_LOOKUP_FAILURES || '10' }}
@@ -232,6 +236,7 @@ jobs:
             -e GC_DRY_RUN \
             -e GC_CONCURRENCY \
             -e GC_MAX_DELETIONS_PER_SERVICE \
+            -e GC_ORPHAN_RESERVE_PER_SERVICE \
             -e GC_MAX_DELETIONS_TOTAL \
             -e GC_MIN_AGE_SECONDS \
             -e GC_MAX_PR_LOOKUP_FAILURES \
