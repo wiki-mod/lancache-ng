@@ -85,14 +85,22 @@ val() {
     [ "$(val IMAGE_IMPACT)" = "true" ]
 }
 
-# #1556: utilities is the shared non-compiler CLI-tools image
-# (curl/nano/lsof/ripgrep/findutils/coreutils/gettext-envsubst/jq/
-# ca-certificates/zstd) wired into the build matrix. Mirrors the
-# independence check above for the other per-service booleans.
-@test "utilities change: utilities true, other service flags stay false" {
-    run_classify "services/utilities/Dockerfile"
-    [ "$(val utilities)" = "true" ]
-    [ "$(val proxy)" = "false" ]
+# Issue #1781: proxy/dns/dhcp/dhcp-proxy/ui/watchdog now COPY
+# scripts/lib/verify-version-banner.sh from the "shared-scripts" named
+# build context (replacing the removed shared utilities image); a change
+# to that one shared file must rebuild all six consumers, mirroring the
+# pre-existing dns/cdn-domains.txt-affects-proxy rule for the same
+# named-build-context-lives-outside-the-service's-own-path reason.
+@test "shared verify-version-banner.sh change touches its six real consumers, not ntp/syslog/build-tools" {
+    run_classify "scripts/lib/verify-version-banner.sh"
+    [ "$(val proxy)" = "true" ]
+    [ "$(val dns_image)" = "true" ]
+    [ "$(val ui)" = "true" ]
+    [ "$(val watchdog)" = "true" ]
+    [ "$(val dhcp)" = "true" ]
+    [ "$(val dhcp_proxy)" = "true" ]
+    [ "$(val ntp)" = "false" ]
+    [ "$(val syslog)" = "false" ]
     [ "$(val build_tools)" = "false" ]
     [ "$(val IMAGE_IMPACT)" = "true" ]
 }
@@ -224,13 +232,12 @@ val() {
 # A change to the login wrapper's own directory (e.g. a future version
 # bump) has no image-content effect: a login failure fails the job loudly,
 # it never produces a silently-bad image. Was previously unmapped, forcing
-# workflow=true and workflow_reuse_scope=true for all 10 services.
+# workflow=true and workflow_reuse_scope=true for all 9 services.
 @test "docker-login-action-centralized-version change sets neither workflow nor workflow_reuse_scope" {
     run_classify ".github/actions/docker-login-action-centralized-version/action.yml"
     [ "$(val workflow)" = "false" ]
     [ "$(val workflow_reuse_scope)" = "false" ]
     [ "$(val build_tools)" = "false" ]
-    [ "$(val utilities)" = "false" ]
 }
 
 # Negative control for the entry above: a sibling wrapper action that IS the
@@ -359,7 +366,6 @@ val() {
     [ "$(val dhcp_proxy)" = "true" ]
     [ "$(val build_tools)" = "true" ]
     [ "$(val syslog)" = "true" ]
-    [ "$(val utilities)" = "true" ]
     [ "$(val validation_infra)" = "true" ]
     [ "$(val workflow)" = "true" ]
     [ "$(val IMAGE_IMPACT)" = "true" ]

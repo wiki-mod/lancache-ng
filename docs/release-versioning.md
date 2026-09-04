@@ -23,9 +23,11 @@ The first-party runtime package set is:
 The first-party tooling package is:
 
 - `build-tools`
-- `utilities` (issue #1556; shared non-compiler CLI-tools image, consumed via
-  `COPY --from=` by eight first-party images -- see `release/stack-images.yml`'s
-  own entry for the current `consumers:` list)
+
+(issue #1556 added a second tooling package, `utilities`, a shared
+non-compiler CLI-tools image consumed via `COPY --from=` by seven
+first-party images; issue #1781 removed it again -- each former consumer
+now `apk add`s its own copy of what it used to `COPY` instead.)
 
 The first-party metadata package is:
 

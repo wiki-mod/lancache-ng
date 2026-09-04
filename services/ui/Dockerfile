@@ -13,10 +13,6 @@
 # Intentional ARG default (overridable at build time via --build-arg).
 # Actual digest pinning for release builds is tracked in issue #508.
 ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
-# What: ARG declared before first FROM, usable by later stages
-# Why: maintains override contract like BUILD_TOOLS_IMAGE above
-# From: Issue #1095
-ARG UTILITIES_IMAGE=ghcr.io/wiki-mod/lancache-ng/utilities:latest
 FROM ${BUILD_TOOLS_IMAGE} AS builder
 
 # The shared build-tools image already carries the Rust toolchain, sccache,
@@ -471,11 +467,21 @@ RUN mkdir -p services/watchdog/src services/warmer/src \
 # strips the backslash-newline entirely (no newline is inserted), so a "#" comment ending
 # in "\" would swallow every following continuation line as commented-out text instead of
 # executable shell, silently dropping the rest of the build. Verified empirically.
+#
+# What: trusts proxy CA so cargo's crates.io fetch verifies.
+# Why: trap removes it before this stage's layer commits.
+# From: Issue #1781 | PR #1783
 RUN --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_dist_config \
     --mount=type=secret,id=distcc_potential_hosts \
     --mount=type=secret,id=ccache_redis_url \
+    --mount=type=secret,id=proxy_ca \
     set -eu; \
+    if [ -s /run/secrets/proxy_ca ]; then \
+      cp /run/secrets/proxy_ca /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; \
+      update-ca-certificates >/dev/null; \
+      trap 'rm -f /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; update-ca-certificates >/dev/null 2>&1 || true' EXIT; \
+    fi; \
     musl_target="$(cat /tmp/musl-target)"; \
     distcc_enabled=0; \
     ccache_enabled=0; \
@@ -550,11 +556,21 @@ COPY services/ui/src ./services/ui/src
 # the clean to this package only, leaving every dependency's cached rlib in
 # `target/${musl_target}/release/deps/` untouched, so the pre-cache stage's
 # whole point (skip recompiling third-party crates) is preserved.
+#
+# What: trusts proxy CA so a cache-miss cargo fetch verifies.
+# Why: trap removes it before this stage's layer commits.
+# From: Issue #1781 | PR #1783
 RUN --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_dist_config \
     --mount=type=secret,id=distcc_potential_hosts \
     --mount=type=secret,id=ccache_redis_url \
+    --mount=type=secret,id=proxy_ca \
     set -eu; \
+    if [ -s /run/secrets/proxy_ca ]; then \
+      cp /run/secrets/proxy_ca /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; \
+      update-ca-certificates >/dev/null; \
+      trap 'rm -f /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; update-ca-certificates >/dev/null 2>&1 || true' EXIT; \
+    fi; \
     musl_target="$(cat /tmp/musl-target)"; \
     distcc_enabled=0; \
     ccache_enabled=0; \
@@ -588,14 +604,19 @@ RUN --mount=type=secret,id=sccache_redis_url \
 # stage. Same pinned alpine:3.24 digest already used by services/dhcp,
 # services/dhcp-proxy, services/watchdog, services/ntp, and services/dns.
 
-# What: source stage for tools copied into final image
-# Why: uses mutable :latest tag for shared utilities image
-# From: Issue #1095
-FROM ${UTILITIES_IMAGE} AS utilities-tools
-
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 LABEL org.opencontainers.image.description="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
+
+# What: explicit proxy build-args, no default value set
+# Why: routes self-hosted downloads via the LAN proxy
+# From: Issue #1781 | PR #1783
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
 
 # Package translations from the prior debian:trixie-slim stage (verified live
 # against a real alpine:3.24 container, per issue #815's own instruction to
@@ -615,52 +636,56 @@ LABEL org.opencontainers.image.description="lancache-ng Admin UI and control-pla
 #     --init-groups`) -- confirmed live that Alpine's util-linux package ships
 #     setpriv with identical --init-groups behavior to Debian's.
 #   - ca-certificates, coreutils: unchanged package names, confirmed present
-#     on Alpine, kept apk-installed (excluded from the utilities migration --
-#     see services/proxy/Dockerfile's comment for ca-certificates' reason).
+#     on Alpine, kept apk-installed. curl/lsof/ripgrep are also apk-installed
+#     now (the shared utilities image every service used to COPY them from
+#     is gone).
+
+# What: shared version-banner script, not a per-service copy.
+# Why: named build context avoids duplicating it per service.
+# From: Issue #1781 | PR #1783
+COPY --from=shared-scripts verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
+
 # What: switches apk's own repositories to plain http.
 # Why: Squid caches http; signed indices keep integrity.
 # From: Issue #1095
 RUN sed -i 's|^https://|http://|' /etc/apk/repositories
 
 # What: declares APT_CACHE_BUST right before RUN that uses it
-# Why: prevents BuildKit cache replaying stale apk index forever
+# Why: prevents cache from replaying a stale apk index forever
 # From: Issue #1095
 ARG APT_CACHE_BUST=""
-RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
+# What: trusts the proxy's CA for this RUN, never in a layer.
+# Why: a secret mount never persists; bundle restored below.
+# From: Issue #1781 | PR #1783
+RUN --mount=type=secret,id=proxy_ca \
+    if [ -s /run/secrets/proxy_ca ]; then \
+      cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig && \
+      cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+    fi && \
+    : "apt-cache-bust=${APT_CACHE_BUST}" && \
     apk upgrade --no-cache && \
     apk add --no-cache \
     ca-certificates \
     coreutils \
     util-linux \
-    nano
+    nano \
+    curl \
+    lsof \
+    ripgrep && \
+    if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
-# What: curl/lsof/ripgrep come from shared utilities image
-# Why: same alpine:3.24 digest as utilities for consistency
-# From: Issue #1556
+# nano: in-container troubleshooting tool -- see services/proxy/Dockerfile's
+# identical comment for the full rationale; lsof/ripgrep are apk-installed
+# above but serve the same troubleshooting purpose.
 
-# What: removes BusyBox symlink before real binary lands
-# Why: see services/proxy/Dockerfile's identical comment for reason
-# From: Issue #1556
-RUN rm -f /usr/bin/lsof
-
-COPY --from=utilities-tools /usr/local/bin/curl /usr/local/bin/curl
-COPY --from=utilities-tools /usr/bin/lsof /usr/bin/lsof
-COPY --from=utilities-tools /usr/bin/rg /usr/bin/rg
-COPY --from=utilities-tools /usr/lib/libgcc_s.so.1 /usr/lib/libgcc_s.so.1
-COPY --from=utilities-tools /usr/lib/libpcre2-8.so.0* /usr/lib/
-COPY --from=utilities-tools /usr/local/bin/verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
-
-# What: verifies copied binaries run with dependencies present
-# Why: shared-library dependency failures happen at exec time only
-# From: Issue #1613
+# What: verifies apk-installed binaries execute, not just exist.
+# Why: missing library dependencies fail at runtime, not apk add.
+# From: Issue #1613 | Issue #1781 | PR #1783
 RUN set -euo pipefail; \
     rg --version >/dev/null; \
     curl --version >/dev/null; \
     sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
 
-# nano: in-container troubleshooting tool -- see services/proxy/Dockerfile's
-# identical comment for the full rationale; lsof/ripgrep are COPY'd above
-# but serve the same troubleshooting purpose.
 ENV EDITOR=nano
 ENV VISUAL=$EDITOR
 
@@ -681,6 +706,17 @@ RUN addgroup -g 10001 lancache \
     && chown -R lancache:lancache /data /etc/nats \
     && chmod +x /usr/local/bin/docker-entrypoint.sh
 
+# What: fail build if CI proxy CA leaked into image
+# Why: CA must never persist in a published service image
+# From: Issue #1781 | PR #1783
+RUN if [ -e /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt ]; then \
+      echo "SECURITY: CI proxy CA persisted in final image" >&2; exit 1; \
+    fi
+
+# What: final apk upgrade pass, no packages added.
+# Why: patches CVEs fixed after this file's package installs.
+# From: Issue #1781 | PR #1783
+RUN apk upgrade --no-cache
 
 EXPOSE 8080
 

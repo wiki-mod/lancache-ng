@@ -6,7 +6,6 @@
 # What: Rust/Go latest base with ARG placement
 # Why: latest for CI; ARGs precede FROM; stages in sync
 # From: PR #1706
-ARG UTILITIES_IMAGE=ghcr.io/wiki-mod/lancache-ng/utilities:latest
 ARG DOCKER_CLI_VERSION=29.7.2
 ARG DOCKER_COMPOSE_VERSION=5.5.0
 ARG DOCKER_BUILDX_VERSION=0.36.1
@@ -100,6 +99,16 @@ INSTALL_CA_CERT_EOF
 
 FROM golang:latest AS go-tools-builder
 
+# What: explicit proxy build-args, no default value set
+# Why: routes self-hosted go/apt downloads via the LAN proxy
+# From: Issue #1781 | PR #1783
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
+
 ARG DOCKER_CLI_VERSION
 ARG DOCKER_COMPOSE_VERSION
 ARG DOCKER_BUILDX_VERSION
@@ -119,15 +128,20 @@ COPY --from=go-tools-script /install-ca-cert.sh /install-ca-cert.sh
 RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
     sh /install-ca-cert.sh && chmod +x /build-go-tools.sh && /build-go-tools.sh
 
-# What: source stage for shared static curl binary
-# Why: portable across glibc/musl; reuses single build
-# From: Issue #1556
-FROM ${UTILITIES_IMAGE} AS utilities-tools
-
 # What: Alpine equivalent of go-tools-builder above.
 # Why: kept separate so the Debian stage stays unchanged.
 # From: Issue #1095 | PR #1743
 FROM golang:alpine AS go-tools-builder-alpine
+
+# What: explicit proxy build-args, no default value set
+# Why: routes self-hosted go/apk downloads via the LAN proxy
+# From: Issue #1781 | PR #1783
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
 
 ARG DOCKER_CLI_VERSION
 ARG DOCKER_COMPOSE_VERSION
@@ -170,6 +184,16 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
 FROM rust:alpine3.24 AS alpine-final
 
 LABEL org.opencontainers.image.description="Prebuilt lancache-ng CI and developer validation toolchain image (Alpine candidate)."
+
+# What: explicit proxy build-args, no default value set
+# Why: routes self-hosted apk/cargo pulls via the LAN proxy
+# From: Issue #1781 | PR #1783
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
 
 # What: inherits shared version pins from top-level ARGs
 # Why: avoids re-declaring the same literal per stage
@@ -216,7 +240,14 @@ RUN sed -i 's|^https://|http://|' /etc/apk/repositories
 # What: installs bash, coreutils, github-cli, sqlite, etc
 # Why: GNU coreutils differ from BusyBox (AG-VAL-034)
 # From: Issue #1095
-RUN set -euo pipefail; \
+# What: trusts the proxy CA for this RUN, re-applied below.
+# Why: ca-certificates install resets the bundle mid-RUN.
+# From: Issue #1781 | PR #1783
+RUN --mount=type=secret,id=proxy_ca set -euo pipefail; \
+    if [ -s /run/secrets/proxy_ca ]; then \
+      cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig; \
+      cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+    fi; \
     : "apk-cache-bust=${APK_CACHE_BUST}"; \
     apk update; \
     apk upgrade --no-cache; \
@@ -231,6 +262,7 @@ RUN set -euo pipefail; \
       clang22 \
       cmake \
       coreutils \
+      curl \
       distcc \
       distcc-pump \
       expect \
@@ -266,12 +298,12 @@ RUN set -euo pipefail; \
     ln -sf /usr/bin/pump /usr/bin/distcc-pump; \
     distcc_bin="$(command -v distcc)"; \
     mkdir -p /usr/local/lib/distcc; \
-    for wrapper in cc gcc c++ g++; do ln -sf "$distcc_bin" "/usr/local/lib/distcc/$wrapper"; done
+    for wrapper in cc gcc c++ g++; do ln -sf "$distcc_bin" "/usr/local/lib/distcc/$wrapper"; done; \
+    if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
-# What: curl from shared utilities image (static binary)
-# Why: no libc dependency; portable across glibc and musl
-# From: Issue #1556 | PR #1691
-COPY --from=utilities-tools /usr/local/bin/curl /usr/local/bin/curl
+# What: verifies the apk-installed curl actually runs
+# Why: catches a missing shared-lib chain at build time
+# From: Issue #1781 | PR #1783
 RUN curl --version >/dev/null
 
 # What: switches SHELL to bash for every RUN step below.
@@ -311,7 +343,14 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
 # What: fetches cargo-audit/tarpaulin musl release bins.
 # Why: native musl assets exist; matches AG-KD-003 policy.
 # From: Issue #1095 | PR #1743
-RUN set -euo pipefail; \
+# What: trusts the proxy's CA for this RUN, never in a layer.
+# Why: a secret mount never persists; bundle restored below.
+# From: Issue #1781 | PR #1783
+RUN --mount=type=secret,id=proxy_ca set -euo pipefail; \
+    if [ -s /run/secrets/proxy_ca ]; then \
+      cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig; \
+      cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+    fi; \
     case "$(apk --print-arch)" in \
       x86_64) ;; \
       *) echo "alpine-final is amd64-only: no aarch64-musl cargo-audit release exists" >&2; exit 1 ;; \
@@ -329,12 +368,20 @@ RUN set -euo pipefail; \
     tar -xzf "$prebuilt_tmp/cargo-tarpaulin.tar.gz" -C "$prebuilt_tmp" cargo-tarpaulin; \
     install -m 0755 "$prebuilt_tmp/cargo-tarpaulin" /usr/local/cargo/bin/cargo-tarpaulin; \
     ln -sf /usr/local/cargo/bin/cargo-audit /usr/local/bin/cargo-audit; \
-    ln -sf /usr/local/cargo/bin/cargo-tarpaulin /usr/local/bin/cargo-tarpaulin
+    ln -sf /usr/local/cargo/bin/cargo-tarpaulin /usr/local/bin/cargo-tarpaulin; \
+    if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
 # What: fetches actionlint checksum-verified binary
 # Why: static Go binary; no reachable stdlib CVE exposure
 # From: Issue #1095 | PR #1743
-RUN set -euo pipefail; \
+# What: trusts the proxy's CA for this RUN, never in a layer.
+# Why: a secret mount never persists; bundle restored below.
+# From: Issue #1781 | PR #1783
+RUN --mount=type=secret,id=proxy_ca set -euo pipefail; \
+    if [ -s /run/secrets/proxy_ca ]; then \
+      cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig; \
+      cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+    fi; \
     case "$(apk --print-arch)" in \
       x86_64) actionlint_arch="amd64"; actionlint_sha256="${ACTIONLINT_SHA256_AMD64}" ;; \
       aarch64) actionlint_arch="arm64"; actionlint_sha256="${ACTIONLINT_SHA256_ARM64}" ;; \
@@ -347,9 +394,17 @@ RUN set -euo pipefail; \
     printf '%s  %s\n' "$actionlint_sha256" "$actionlint_tmp/actionlint.tar.gz" | sha256sum -c -; \
     tar -xzf "$actionlint_tmp/actionlint.tar.gz" -C "$actionlint_tmp" actionlint; \
     install -m 0755 "$actionlint_tmp/actionlint" /usr/local/bin/actionlint; \
-    actionlint --version
+    actionlint --version; \
+    if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
-RUN set -euo pipefail; \
+# What: trusts the proxy's CA for this RUN, never in a layer.
+# Why: a secret mount never persists; bundle restored below.
+# From: Issue #1781 | PR #1783
+RUN --mount=type=secret,id=proxy_ca set -euo pipefail; \
+    if [ -s /run/secrets/proxy_ca ]; then \
+      cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig; \
+      cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+    fi; \
     shellspec_tmp="$(mktemp -d)"; \
     trap 'rm -rf "$shellspec_tmp"' EXIT; \
     curl -fsSL "https://github.com/shellspec/shellspec/releases/download/${SHELLSPEC_VERSION}/shellspec-dist.tar.gz" \
@@ -357,7 +412,8 @@ RUN set -euo pipefail; \
     printf '%s  %s\n' "${SHELLSPEC_SHA256}" "$shellspec_tmp/shellspec-dist.tar.gz" | sha256sum -c -; \
     tar -xzf "$shellspec_tmp/shellspec-dist.tar.gz" -C /opt; \
     ln -sf /opt/shellspec/shellspec /usr/local/bin/shellspec; \
-    shellspec --version
+    shellspec --version; \
+    if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
 # What: Alpine 3.24 lacks dhclient; uses busybox udhcpc
 # Why: udhcpc ships in busybox base, nothing to install
@@ -485,6 +541,16 @@ FROM rust:latest
 
 LABEL org.opencontainers.image.description="Prebuilt lancache-ng CI and developer validation toolchain image."
 
+# What: explicit proxy build-args, no default value set
+# Why: routes self-hosted apt/cargo pulls via the LAN proxy
+# From: Issue #1781 | PR #1783
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
+
 # What: inherits shared version pins from top-level ARGs
 # Why: avoids re-declaring the same literal per stage
 # From: Issue #1671 | PR #1750
@@ -518,17 +584,33 @@ ENV PATH="/usr/local/cargo/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin
 # What: add trixie-backports source and apt pin; upgrade
 # Why: get all patches; pin uses a= suite not codename
 # From: Issue #1570 | PR #1571
-RUN echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sources.list.d/backports.list \
+# What: trusts the proxy's CA for this RUN, never in a layer.
+# Why: a secret mount never persists; bundle restored below.
+# From: Issue #1781 | PR #1783
+RUN --mount=type=secret,id=proxy_ca \
+    if [ -s /run/secrets/proxy_ca ]; then \
+      cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig; \
+    fi \
+    && if [ -s /run/secrets/proxy_ca ]; then cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; fi \
+    && echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sources.list.d/backports.list \
     && printf 'Package: *\nPin: release a=stable-backports\nPin-Priority: 500\n' > /etc/apt/preferences.d/backports \
     && apt-get update \
     && apt-get dist-upgrade -y \
     && apt-get full-upgrade -y \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
 # What: install ccache, sqlite3, git, and other tools
 # Why: ccache for C-deps; sqlite3 for audit; git for CI
 # From: Issue #1585
-RUN set -euo pipefail; \
+# What: trusts the proxy's CA for this RUN, never in a layer.
+# Why: a secret mount never persists; bundle restored below.
+# From: Issue #1781 | PR #1783
+RUN --mount=type=secret,id=proxy_ca set -euo pipefail; \
+      if [ -s /run/secrets/proxy_ca ]; then \
+        cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig; \
+        cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+      fi; \
       apt-get update; \
       apt-get install -y --no-install-recommends \
       bash \
@@ -539,6 +621,7 @@ RUN set -euo pipefail; \
       ccache \
       clang \
       cmake \
+      curl \
       expect \
       gh \
       git \
@@ -551,7 +634,8 @@ RUN set -euo pipefail; \
       xz-utils; \
       apt-get dist-upgrade -yy; \
       apt-get autoremove -y; \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/*; \
+    if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
 # What: purges Cairo/GLib/ImageMagick/MariaDB dev bloat.
 # Why: self-build's purge cascaded this away; now separate.
@@ -584,10 +668,9 @@ RUN set -euo pipefail; \
     apt-get autoremove -y; \
     rm -rf /var/lib/apt/lists/*
 
-# What: curl comes from the shared utilities image.
-# Why: reuses the shared static binary, not Debian's own.
-# From: Issue #1556 | PR #1661
-COPY --from=utilities-tools /usr/local/bin/curl /usr/local/bin/curl
+# What: verifies the apt-installed curl actually runs
+# Why: catches a missing shared-lib chain at build time
+# From: Issue #1781 | PR #1783
 RUN curl --version >/dev/null
 
 # What: COPY --from before heavy RUN serializes build
@@ -631,13 +714,21 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
 # Why: declaration affects cache-key; busts on rotation
 # From: Issue #1570 | PR #1571
 ARG APT_CACHE_BUST=""
-RUN set -euo pipefail; \
+# What: trusts the proxy's CA for this RUN, never in a layer.
+# Why: a secret mount never persists; bundle restored below.
+# From: Issue #1781 | PR #1783
+RUN --mount=type=secret,id=proxy_ca set -euo pipefail; \
+    if [ -s /run/secrets/proxy_ca ]; then \
+      cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig; \
+      cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+    fi; \
     : "apt-cache-bust=${APT_CACHE_BUST}"; \
     distcc_pump_tmp=""; \
     cleanup_build_tools_apt() { \
         if [ -n "${distcc_pump_tmp}" ]; then rm -rf "${distcc_pump_tmp}"; fi; \
         rm -f /usr/sbin/invoke-rc.d; \
         if [ -x /usr/sbin/invoke-rc.d.real ]; then mv /usr/sbin/invoke-rc.d.real /usr/sbin/invoke-rc.d; fi; \
+        if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi; \
     }; \
     trap cleanup_build_tools_apt EXIT; \
     # What: replace invoke-rc.d with no-op; restore via trap
@@ -700,7 +791,14 @@ RUN set -euo pipefail; \
 # What: fetches cargo-audit/tarpaulin prebuilt binaries.
 # Why: no behavioral diff building Rust tools from source.
 # From: Issue #1095 | PR #1743
-RUN set -euo pipefail; \
+# What: trusts the proxy's CA for this RUN, never in a layer.
+# Why: a secret mount never persists; bundle restored below.
+# From: Issue #1781 | PR #1783
+RUN --mount=type=secret,id=proxy_ca set -euo pipefail; \
+    if [ -s /run/secrets/proxy_ca ]; then \
+      cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig; \
+      cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+    fi; \
     case "$(dpkg --print-architecture)" in \
       amd64) \
         cargo_audit_arch="x86_64-unknown-linux-gnu"; cargo_audit_sha256="${CARGO_AUDIT_SHA256_AMD64}"; \
@@ -725,12 +823,20 @@ RUN set -euo pipefail; \
     tar -xzf "$prebuilt_tmp/cargo-tarpaulin.tar.gz" -C "$prebuilt_tmp" cargo-tarpaulin; \
     install -m 0755 "$prebuilt_tmp/cargo-tarpaulin" /usr/local/cargo/bin/cargo-tarpaulin; \
     ln -sf /usr/local/cargo/bin/cargo-audit /usr/local/bin/cargo-audit; \
-    ln -sf /usr/local/cargo/bin/cargo-tarpaulin /usr/local/bin/cargo-tarpaulin
+    ln -sf /usr/local/cargo/bin/cargo-tarpaulin /usr/local/bin/cargo-tarpaulin; \
+    if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
 # What: fetches actionlint checksum-verified binary
 # Why: static Go binary; no reachable stdlib CVE exposure
 # From: Issue #1095 | PR #1743
-RUN set -euo pipefail; \
+# What: trusts the proxy's CA for this RUN, never in a layer.
+# Why: a secret mount never persists; bundle restored below.
+# From: Issue #1781 | PR #1783
+RUN --mount=type=secret,id=proxy_ca set -euo pipefail; \
+    if [ -s /run/secrets/proxy_ca ]; then \
+      cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig; \
+      cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+    fi; \
     case "$(dpkg --print-architecture)" in \
       amd64) actionlint_arch="amd64"; actionlint_sha256="${ACTIONLINT_SHA256_AMD64}" ;; \
       arm64) actionlint_arch="arm64"; actionlint_sha256="${ACTIONLINT_SHA256_ARM64}" ;; \
@@ -743,9 +849,17 @@ RUN set -euo pipefail; \
     printf '%s  %s\n' "$actionlint_sha256" "$actionlint_tmp/actionlint.tar.gz" | sha256sum -c -; \
     tar -xzf "$actionlint_tmp/actionlint.tar.gz" -C "$actionlint_tmp" actionlint; \
     install -m 0755 "$actionlint_tmp/actionlint" /usr/local/bin/actionlint; \
-    actionlint --version
+    actionlint --version; \
+    if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
-RUN set -euo pipefail; \
+# What: trusts the proxy's CA for this RUN, never in a layer.
+# Why: a secret mount never persists; bundle restored below.
+# From: Issue #1781 | PR #1783
+RUN --mount=type=secret,id=proxy_ca set -euo pipefail; \
+    if [ -s /run/secrets/proxy_ca ]; then \
+      cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig; \
+      cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+    fi; \
     shellspec_tmp="$(mktemp -d)"; \
     trap 'rm -rf "$shellspec_tmp"' EXIT; \
     curl -fsSL "https://github.com/shellspec/shellspec/releases/download/${SHELLSPEC_VERSION}/shellspec-dist.tar.gz" \
@@ -753,12 +867,20 @@ RUN set -euo pipefail; \
     printf '%s  %s\n' "${SHELLSPEC_SHA256}" "$shellspec_tmp/shellspec-dist.tar.gz" | sha256sum -c -; \
     tar -xzf "$shellspec_tmp/shellspec-dist.tar.gz" -C /opt; \
     ln -sf /opt/shellspec/shellspec /usr/local/bin/shellspec; \
-    shellspec --version
+    shellspec --version; \
+    if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
 # What: add musl-libc for cross-compilation static builds
 # Why: services/ui/dns need static PIE; native-arch only
 # From: Issue #1570 | PR #1571
-RUN set -euo pipefail; \
+# What: trusts the proxy's CA for this RUN, never in a layer.
+# Why: a secret mount never persists; bundle restored below.
+# From: Issue #1781 | PR #1783
+RUN --mount=type=secret,id=proxy_ca set -euo pipefail; \
+    if [ -s /run/secrets/proxy_ca ]; then \
+      cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig; \
+      cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+    fi; \
     case "$(dpkg --print-architecture)" in \
       amd64) musl_target="x86_64-unknown-linux-musl" ;; \
       arm64) musl_target="aarch64-unknown-linux-musl" ;; \
@@ -769,7 +891,8 @@ RUN set -euo pipefail; \
       musl-dev \
       musl-tools; \
     rustup target add "${musl_target}"; \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/*; \
+    if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
 # What: capture tool output to variables before grepping
 # Why: prevents SIGPIPE when grep -q exits early

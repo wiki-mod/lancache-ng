@@ -185,19 +185,32 @@ Important:
 distcc for their C-dependency compile paths (`ring`/`aws-lc-sys`, via
 `rustls`), so a rebuild against unchanged C sources reuses a previous
 compile's result from Redis instead of recompiling and redistributing it
-every time. Since issue #1304/PR #1661, `tools/build-tools/Dockerfile`
-layers the same ccache-over-distcc mechanism in front of its own
-from-source curl/git C compiles, with its own `ccache_redis_url`/
-`distcc_potential_hosts` secrets populated by both `build-tools.yml`'s
-standalone schedule/workflow_dispatch route and `build-push.yml`'s matrix
-entry. `services/ui/Dockerfile`'s custom `lancache-distcc-wrapper` now
-understands both distcc calling conventions -- the original `$0`-basename
-masquerade dispatch, and ccache's `CCACHE_PREFIX` convention (invoked as
-`distcc <real-compiler-path> <args>`, real compiler is `$1`) --
-disambiguated by checking `$0` first. `build-push.yml`'s real CI pipeline
-populates the `ccache_redis_url` secret and the preflight action's
-`ccache-redis-file` input for all four services (confirmed live, issue
-#1095) -- see `AGENTS.md`'s `AG-CI-022` note for the wiring history.
+every time.
+
+**Correction (2026-09-01, Issue #1781):** this paragraph used to also claim
+that, since issue #1304/PR #1661, `tools/build-tools/Dockerfile` layered
+this same ccache-over-distcc mechanism in front of its own "from-source
+curl/git C compiles." `tools/build-tools/Dockerfile` has no such compile:
+curl and git are both plain `apk add`/`apt-get install` packages there
+(curl was `COPY`'d from the shared `services/utilities` image's own
+from-source build until Issue #1781 replaced that `COPY` with this
+stage's own `apk add`/`apt-get install curl`), and this file never wires
+`CC=distcc`/`CC="ccache ..."` for either. The ccache/distcc-accelerated
+from-source build this correction refers to only ever existed in
+`services/utilities/Dockerfile`'s now-removed `curl-builder` stage. It is
+unclear from this PR's scope whether `build-tools.yml`'s and
+`build-push.yml`'s own `ccache_redis_url`/`distcc_potential_hosts` secret
+provisioning for the `build-tools` matrix entry, and the "for all four
+services" claim below, were ever accurate or are simply dead as a result
+-- flagged separately, not resolved here. `services/ui/Dockerfile`'s
+custom `lancache-distcc-wrapper` now understands both distcc calling
+conventions -- the original `$0`-basename masquerade dispatch, and
+ccache's `CCACHE_PREFIX` convention (invoked as `distcc
+<real-compiler-path> <args>`, real compiler is `$1`) -- disambiguated by
+checking `$0` first. `build-push.yml`'s real CI pipeline populates the
+`ccache_redis_url` secret and the preflight action's `ccache-redis-file`
+input for all four services (confirmed live, issue #1095, prior to this
+correction) -- see `AGENTS.md`'s `AG-CI-022` note for the wiring history.
 
 Important rules:
 

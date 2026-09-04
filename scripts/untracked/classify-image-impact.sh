@@ -417,40 +417,47 @@ touches_dns_rust() {
         || touches_action "configure-rust-sccache" \
         || touches_action "cargo-with-sccache-fallback"
 }
+# What: true when the shared-scripts named build context changed.
+# Why: 6 consumers COPY from it; mirrors the dns-domains rule.
+# From: Issue #1781 | PR #1783
+touches_shared_scripts() {
+    touches_exact "scripts/lib/verify-version-banner.sh"
+}
+
 touches_dns_image() {
     touches_prefix "services/dns/" \
-        || touches_action "rust-acceleration-preflight"
+        || touches_action "rust-acceleration-preflight" \
+        || touches_shared_scripts
 }
 touches_ui() {
     touches_prefix "services/ui/" \
         || touches_action "rust-acceleration-preflight" \
         || touches_action "configure-rust-sccache" \
-        || touches_action "cargo-with-sccache-fallback"
+        || touches_action "cargo-with-sccache-fallback" \
+        || touches_shared_scripts
 }
 touches_watchdog() {
     touches_prefix "services/watchdog/" \
         || touches_action "rust-acceleration-preflight" \
         || touches_action "configure-rust-sccache" \
-        || touches_action "cargo-with-sccache-fallback"
+        || touches_action "cargo-with-sccache-fallback" \
+        || touches_shared_scripts
+}
+touches_dhcp() {
+    touches_prefix "services/dhcp/" || touches_shared_scripts
+}
+touches_dhcp_proxy() {
+    touches_prefix "services/dhcp-proxy/" || touches_shared_scripts
 }
 
 output_bool "dns_rust" touches_dns_rust
 output_bool "dns_image" touches_dns_image
 output_bool "ui" touches_ui
 output_bool "watchdog" touches_watchdog
-output_bool "dhcp" touches_prefix "services/dhcp/"
-output_bool "dhcp_proxy" touches_prefix "services/dhcp-proxy/"
+output_bool "dhcp" touches_dhcp
+output_bool "dhcp_proxy" touches_dhcp_proxy
 output_bool "ntp" touches_prefix "services/ntp/"
 output_bool "syslog" touches_prefix "services/syslog/"
-
-# utilities (issue #1556): the shared non-compiler CLI-tools image
-# (curl/nano/lsof/ripgrep/findutils/coreutils/gettext-envsubst/jq/
-# ca-certificates/zstd), wired into the build matrix below. Path-scoped the
-# same way every other service is -- a change under services/utilities/
-# rebuilds it; a change elsewhere in the repo (including an unrelated part
-# of this workflow file) does not, beyond the existing workflow=true
-# fallback every non-build-tools service already gets.
-output_bool "utilities" touches_prefix "services/utilities/"
 
 # services/proxy/Dockerfile COPYs services/dns/cdn-domains.txt into the image at
 # build time (the dns-domains named build context), so a domain-list-only change
@@ -458,8 +465,12 @@ output_bool "utilities" touches_prefix "services/utilities/"
 # goes stale until some unrelated services/proxy/ change next fires (#771).
 # Independent of (not a replacement for) the services/proxy/ prefix rule and the
 # separate dns_image rule above.
+# What: also rebuilds proxy on a shared-scripts change.
+# Why: proxy COPYs from that named context too.
+# From: Issue #1781 | PR #1783
 if touches_prefix "services/proxy/" \
-    || touches_exact "services/dns/cdn-domains.txt"; then
+    || touches_exact "services/dns/cdn-domains.txt" \
+    || touches_shared_scripts; then
     printf 'proxy=true\n'
 else
     printf 'proxy=false\n'
