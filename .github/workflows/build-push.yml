@@ -56,6 +56,7 @@ jobs:
       dhcp_proxy: ${{ steps.filter.outputs.dhcp_proxy }}
       ntp: ${{ steps.filter.outputs.ntp }}
       syslog: ${{ steps.filter.outputs.syslog }}
+      cachehamster: ${{ steps.filter.outputs.cachehamster }}
       proxy: ${{ steps.filter.outputs.proxy }}
       build_tools: ${{ steps.filter.outputs.build_tools }}
       validation_infra: ${{ steps.filter.outputs.validation_infra }}
@@ -3283,6 +3284,7 @@ jobs:
           REUSE_UI: ${{ needs['determine-push-reuse-scope'].outputs.reuse_ui }}
           REUSE_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.reuse_build_tools }}
           REUSE_SYSLOG: ${{ needs['determine-push-reuse-scope'].outputs.reuse_syslog }}
+          REUSE_CACHEHAMSTER: ${{ needs['determine-push-reuse-scope'].outputs.reuse_cachehamster }}
         run: |
           set -euo pipefail
           case "$MATRIX_SERVICE" in
@@ -3295,6 +3297,7 @@ jobs:
             ui) reuse="$REUSE_UI" ;;
             build-tools) reuse="$REUSE_BUILD_TOOLS" ;;
             syslog) reuse="$REUSE_SYSLOG" ;;
+            cachehamster) reuse="$REUSE_CACHEHAMSTER" ;;
             *) reuse="false" ;;
           esac
           if [ "$REUSE_JOB_RESULT" = "success" ] && [ "$reuse" = "true" ]; then
@@ -3327,6 +3330,7 @@ jobs:
           DIGEST_UI: ${{ needs['determine-push-reuse-scope'].outputs.digest_ui }}
           DIGEST_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.digest_build_tools }}
           DIGEST_SYSLOG: ${{ needs['determine-push-reuse-scope'].outputs.digest_syslog }}
+          DIGEST_CACHEHAMSTER: ${{ needs['determine-push-reuse-scope'].outputs.digest_cachehamster }}
         run: |
           set -euo pipefail
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
@@ -3341,6 +3345,7 @@ jobs:
             ui) digest="$DIGEST_UI" ;;
             build-tools) digest="$DIGEST_BUILD_TOOLS" ;;
             syslog) digest="$DIGEST_SYSLOG" ;;
+            cachehamster) digest="$DIGEST_CACHEHAMSTER" ;;
             *) digest="" ;;
           esac
           if [[ -z "$digest" || "$digest" == "null" ]]; then
@@ -3395,6 +3400,7 @@ jobs:
       reuse_ntp: ${{ steps.decide.outputs.reuse_ntp }}
       reuse_build_tools: ${{ steps.decide.outputs.reuse_build_tools }}
       reuse_syslog: ${{ steps.decide.outputs.reuse_syslog }}
+      reuse_cachehamster: ${{ steps.decide.outputs.reuse_cachehamster }}
       digest_proxy: ${{ steps.decide.outputs.digest_proxy }}
       digest_dns: ${{ steps.decide.outputs.digest_dns }}
       digest_ui: ${{ steps.decide.outputs.digest_ui }}
@@ -3404,6 +3410,7 @@ jobs:
       digest_ntp: ${{ steps.decide.outputs.digest_ntp }}
       digest_build_tools: ${{ steps.decide.outputs.digest_build_tools }}
       digest_syslog: ${{ steps.decide.outputs.digest_syslog }}
+      digest_cachehamster: ${{ steps.decide.outputs.digest_cachehamster }}
     steps:
       - uses: *checkout_centraliced_versioning # v7.0.1
         with:
@@ -3428,6 +3435,7 @@ jobs:
           NTP_CHANGED: ${{ needs['detect-changes'].outputs.ntp }}
           BUILD_TOOLS_CHANGED: ${{ needs['detect-changes'].outputs.build_tools }}
           SYSLOG_CHANGED: ${{ needs['detect-changes'].outputs.syslog }}
+          CACHEHAMSTER_CHANGED: ${{ needs['detect-changes'].outputs.cachehamster }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -3493,6 +3501,7 @@ jobs:
             printf 'reuse_dhcp_proxy=%s\n' "$(decide_one dhcp_proxy dhcp-proxy "$DHCP_PROXY_CHANGED")"
             printf 'reuse_ntp=%s\n' "$(decide_one ntp ntp "$NTP_CHANGED")"
             printf 'reuse_syslog=%s\n' "$(decide_one syslog syslog "$SYSLOG_CHANGED")"
+            printf 'reuse_cachehamster=%s\n' "$(decide_one cachehamster cachehamster "$CACHEHAMSTER_CHANGED")"
             printf 'reuse_build_tools=%s\n' "$(decide_one build_tools build-tools "$BUILD_TOOLS_CHANGED" "" true)"
           } >> "$GITHUB_OUTPUT"
   determine-build-admission:
@@ -3674,6 +3683,7 @@ jobs:
           REUSE_UI: ${{ needs['determine-push-reuse-scope'].outputs.reuse_ui }}
           REUSE_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.reuse_build_tools }}
           REUSE_SYSLOG: ${{ needs['determine-push-reuse-scope'].outputs.reuse_syslog }}
+          REUSE_CACHEHAMSTER: ${{ needs['determine-push-reuse-scope'].outputs.reuse_cachehamster }}
         run: |
           set -euo pipefail
           reuse_for_service() {
@@ -3687,6 +3697,7 @@ jobs:
               ui) printf '%s' "$REUSE_UI" ;;
               build-tools) printf '%s' "$REUSE_BUILD_TOOLS" ;;
               syslog) printf '%s' "$REUSE_SYSLOG" ;;
+              cachehamster) printf '%s' "$REUSE_CACHEHAMSTER" ;;
               *) printf 'false' ;;
             esac
           }
@@ -3705,6 +3716,7 @@ jobs:
               dhcp-proxy) should_build="${{ needs['detect-changes'].outputs.dhcp_proxy }}" ;;
               ntp) should_build="${{ needs['detect-changes'].outputs.ntp }}" ;;
               syslog) should_build="${{ needs['detect-changes'].outputs.syslog }}" ;;
+              cachehamster) should_build="${{ needs['detect-changes'].outputs.cachehamster }}" ;;
               ui) should_build="${{ needs['detect-changes'].outputs.ui }}" ;;
               build-tools) should_build="${{ needs['detect-changes'].outputs.build_tools }}" ;;
               *)
@@ -3806,6 +3818,7 @@ jobs:
           DIGEST_UI: ${{ needs['determine-push-reuse-scope'].outputs.digest_ui }}
           DIGEST_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.digest_build_tools }}
           DIGEST_SYSLOG: ${{ needs['determine-push-reuse-scope'].outputs.digest_syslog }}
+          DIGEST_CACHEHAMSTER: ${{ needs['determine-push-reuse-scope'].outputs.digest_cachehamster }}
         run: |
           set -euo pipefail
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
@@ -3825,6 +3838,7 @@ jobs:
             ui) pinned_digest="$DIGEST_UI" ;;
             build-tools) pinned_digest="$DIGEST_BUILD_TOOLS" ;;
             syslog) pinned_digest="$DIGEST_SYSLOG" ;;
+            cachehamster) pinned_digest="$DIGEST_CACHEHAMSTER" ;;
             *) pinned_digest="" ;;
           esac
           if [ -z "$pinned_digest" ]; then
@@ -4331,6 +4345,7 @@ jobs:
           REUSE_UI: ${{ needs['determine-push-reuse-scope'].outputs.reuse_ui }}
           REUSE_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.reuse_build_tools }}
           REUSE_SYSLOG: ${{ needs['determine-push-reuse-scope'].outputs.reuse_syslog }}
+          REUSE_CACHEHAMSTER: ${{ needs['determine-push-reuse-scope'].outputs.reuse_cachehamster }}
         run: |
           set -euo pipefail
           reuse_for_service() {
@@ -4344,6 +4359,7 @@ jobs:
               ui) printf '%s' "$REUSE_UI" ;;
               build-tools) printf '%s' "$REUSE_BUILD_TOOLS" ;;
               syslog) printf '%s' "$REUSE_SYSLOG" ;;
+              cachehamster) printf '%s' "$REUSE_CACHEHAMSTER" ;;
               *) printf 'false' ;;
             esac
           }
@@ -4362,6 +4378,7 @@ jobs:
               dhcp-proxy) should_build="${{ needs['detect-changes'].outputs.dhcp_proxy }}" ;;
               ntp) should_build="${{ needs['detect-changes'].outputs.ntp }}" ;;
               syslog) should_build="${{ needs['detect-changes'].outputs.syslog }}" ;;
+              cachehamster) should_build="${{ needs['detect-changes'].outputs.cachehamster }}" ;;
               ui) should_build="${{ needs['detect-changes'].outputs.ui }}" ;;
               build-tools) should_build="${{ needs['detect-changes'].outputs.build_tools }}" ;;
               *)
@@ -4461,6 +4478,7 @@ jobs:
           DIGEST_UI: ${{ needs['determine-push-reuse-scope'].outputs.digest_ui }}
           DIGEST_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.digest_build_tools }}
           DIGEST_SYSLOG: ${{ needs['determine-push-reuse-scope'].outputs.digest_syslog }}
+          DIGEST_CACHEHAMSTER: ${{ needs['determine-push-reuse-scope'].outputs.digest_cachehamster }}
         run: |
           set -euo pipefail
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
@@ -4480,6 +4498,7 @@ jobs:
             ui) pinned_digest="$DIGEST_UI" ;;
             build-tools) pinned_digest="$DIGEST_BUILD_TOOLS" ;;
             syslog) pinned_digest="$DIGEST_SYSLOG" ;;
+            cachehamster) pinned_digest="$DIGEST_CACHEHAMSTER" ;;
             *) pinned_digest="" ;;
           esac
           if [ -z "$pinned_digest" ]; then
@@ -4948,6 +4967,7 @@ jobs:
       dhcp_proxy_digest: ${{ steps.create-trusted-manifests.outputs.dhcp_proxy_digest || steps.create-pr-staging-manifests.outputs.dhcp_proxy_digest }}
       ntp_digest: ${{ steps.create-trusted-manifests.outputs.ntp_digest || steps.create-pr-staging-manifests.outputs.ntp_digest }}
       syslog_digest: ${{ steps.create-trusted-manifests.outputs.syslog_digest || steps.create-pr-staging-manifests.outputs.syslog_digest }}
+      cachehamster_digest: ${{ steps.create-trusted-manifests.outputs.cachehamster_digest || steps.create-pr-staging-manifests.outputs.cachehamster_digest }}
       ui_digest: ${{ steps.create-trusted-manifests.outputs.ui_digest || steps.create-pr-staging-manifests.outputs.ui_digest }}
       build_tools_digest: ${{ steps.create-trusted-manifests.outputs.build_tools_digest || steps.create-pr-staging-manifests.outputs.build_tools_digest }}
       stack_digest: ${{ steps.create-trusted-manifests.outputs.stack_digest }}
@@ -5268,6 +5288,15 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
           subject-name: ghcr.io/${{ github.repository }}/syslog
           subject-digest: ${{ steps.create-trusted-manifests.outputs.syslog_digest }}
+
+      - name: Attest cachehamster merged manifest provenance
+        if: steps.create-trusted-manifests.outputs.cachehamster_digest != ''
+        uses: ./.github/actions/ghcr-attest-with-cache
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          subject-name: ghcr.io/${{ github.repository }}/cachehamster
+          subject-digest: ${{ steps.create-trusted-manifests.outputs.cachehamster_digest }}
       - name: Attest proxy PR staging manifest provenance
         if: steps.create-pr-staging-manifests.outputs.proxy_digest != ''
         uses: ./.github/actions/ghcr-attest-retry
@@ -5340,6 +5369,15 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
           subject-name: ghcr.io/${{ github.repository }}/syslog
           subject-digest: ${{ steps.create-pr-staging-manifests.outputs.syslog_digest }}
+
+      - name: Attest cachehamster PR staging manifest provenance
+        if: steps.create-pr-staging-manifests.outputs.cachehamster_digest != ''
+        uses: ./.github/actions/ghcr-attest-retry
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          subject-name: ghcr.io/${{ github.repository }}/cachehamster
+          subject-digest: ${{ steps.create-pr-staging-manifests.outputs.cachehamster_digest }}
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
   promote:
@@ -5398,6 +5436,7 @@ jobs:
           DHCP_PROXY_DIGEST: ${{ needs['merge-manifests'].outputs.dhcp_proxy_digest }}
           NTP_DIGEST: ${{ needs['merge-manifests'].outputs.ntp_digest }}
           SYSLOG_DIGEST: ${{ needs['merge-manifests'].outputs.syslog_digest }}
+          CACHEHAMSTER_DIGEST: ${{ needs['merge-manifests'].outputs.cachehamster_digest }}
           UI_DIGEST: ${{ needs['merge-manifests'].outputs.ui_digest }}
           BUILD_TOOLS_DIGEST: ${{ needs['merge-manifests'].outputs.build_tools_digest }}
           STACK_DIGEST: ${{ needs['merge-manifests'].outputs.stack_digest }}
@@ -5418,6 +5457,7 @@ jobs:
             [dhcp-proxy]="$DHCP_PROXY_DIGEST"
             [ntp]="$NTP_DIGEST"
             [syslog]="$SYSLOG_DIGEST"
+            [cachehamster]="$CACHEHAMSTER_DIGEST"
             [ui]="$UI_DIGEST"
             [build-tools]="$BUILD_TOOLS_DIGEST"
           )

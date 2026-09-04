@@ -458,6 +458,7 @@ output_bool "dhcp" touches_dhcp
 output_bool "dhcp_proxy" touches_dhcp_proxy
 output_bool "ntp" touches_prefix "services/ntp/"
 output_bool "syslog" touches_prefix "services/syslog/"
+output_bool "cachehamster" touches_prefix "services/cachehamster/"
 
 # services/proxy/Dockerfile COPYs services/dns/cdn-domains.txt into the image at
 # build time (the dns-domains named build context), so a domain-list-only change
