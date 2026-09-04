@@ -429,15 +429,14 @@ require_grep 'bash scripts/untracked/require-image-platforms\.sh "\$image" "\$RE
 require_grep 'is missing required platform' \
   scripts/untracked/require-image-platforms.sh \
   'the shared platform coverage guard must fail closed when a release image misses a required platform'
-# What: checks pushed-digest scans use the shared exact-digest action.
-# Why: container-scan no longer scans locally; Trivy enforces it.
+# What: checks pushed scans use the exact-digest action.
+# Why: container-scan no longer scans locally.
 # From: Issue #1095
 require_grep 'uses: \./\.github/actions/trivy-scan-exact-digest' \
   .github/workflows/build-push.yml \
   'the pushed per-service digest scan must use the shared trivy-scan-exact-digest action, not a bespoke scan invocation'
-# What: checks the amd64 scan runs in its own GitHub-hosted job.
-# Why: self-hosted Trivy DB downloads failed unreliably; no self-
-#   hosted job in this file may own that scan again silently.
+# What: checks the amd64 scan is its own hosted job.
+# Why: no self-hosted job may own that scan again.
 # From: Issue #1095
 require_grep '^  trivy-scan-amd64:' \
   .github/workflows/build-push.yml \

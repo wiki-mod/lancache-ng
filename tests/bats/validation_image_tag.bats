@@ -162,7 +162,7 @@ setup() {
     workflow_file="$repo_root/.github/workflows/build-push.yml"
     [ -f "$workflow_file" ] || fail "build-push.yml not found"
 
-    grep -qF "needs: [determine-build-admission, build, build-arm64, push-supersession-check]" "$workflow_file" \
+    grep -qF "needs: [determine-build-admission, build, build-arm64, trivy-scan-amd64, push-supersession-check]" "$workflow_file" \
         || fail "merge-manifests must depend on determine-build-admission, otherwise skipped build jobs can still trigger missing-image noise"
     grep -qF "needs['determine-build-admission'].outputs.admitted == 'true' && needs.build.result" "$workflow_file" \
         || fail "merge-manifests must require admitted=true before inspecting sha-* image inputs"
@@ -170,4 +170,14 @@ setup() {
         || fail "full-setup-validate must depend on determine-build-admission"
     grep -qF "needs['determine-build-admission'].outputs.admitted == 'true' &&" "$workflow_file" \
         || fail "full-setup-validate must require admitted=true before pulling validation images"
+
+    # trivy-scan-amd64 runs after build: it must not run when
+    # admission was closed either, the same way build itself does
+    # not -- otherwise a closed-admission run still spins up 10 hosted
+    # scan legs against nothing.
+    grep -qF "needs: [determine-build-admission, build]" "$workflow_file" \
+        || fail "trivy-scan-amd64 must depend on determine-build-admission"
+    grep -qF "needs['determine-build-admission'].outputs.admitted == 'true' &&
+      needs.build.result != 'cancelled'" "$workflow_file" \
+        || fail "trivy-scan-amd64 must require admitted=true before scanning build's pushed digests"
 }
