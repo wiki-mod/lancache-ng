@@ -2077,23 +2077,10 @@ jobs:
             echo "::error::Rust service Dockerfiles must not use scheduler-only args or hardcoded CARGO_BUILD_JOBS values."
             exit 1
           fi
-          # What: PROJECT_CARGO_LTO/PROJECT_CARGO_CODEGENUNIT must reach every
-          # Cargo release build as a build-arg from the org variable, and
-          # must never be reintroduced as a hardcoded default anywhere.
-          # Why: djdomi (maintainer review 5109560874, PR #1796) rejected
-          # hardcoding lto/codegen-units in Cargo.toml; this mirrors the
-          # CARGO_BUILD_JOBS guard above for the same failure class.
+          # What: PROJECT_CARGO_LTO/PROJECT_CARGO_CODEGENUNIT build-arg guard.
+          # Why: bare "vars.NAME" substring only -- a full expression here
+          # self-interpolates before the shell runs the grep pattern.
           # From: Issue #1095
-          # What: matches on the bare "vars.NAME" substring, never a
-          # complete double-curly-brace expression, in the grep pattern.
-          # Why: a full double-curly-brace vars-lookup expression embedded
-          # in this very run script would itself be interpolated by the
-          # Actions runner before the shell ever executes it, comparing
-          # against the resolved value instead of the file's literal text
-          # -- confirmed live (this exact guard failed on itself, closed
-          # over the resolved variable value, until split this way,
-          # mirroring the CARGO_BUILD_JOBS guard above which was already
-          # written this same safe way for the same reason).
           for workflow in .github/workflows/build-push.yml .github/workflows/build-push-hosted-fallback.yml; do
             grep -F 'PROJECT_CARGO_LTO=' "$workflow" >/dev/null \
               && grep -F 'vars.PROJECT_CARGO_LTO' "$workflow" >/dev/null \

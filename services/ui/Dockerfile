@@ -410,12 +410,8 @@ LANCACHE_UI_HELPERS_EOF
 LANCACHE_UI_BUILD_ACCEL_EOF
 
 ARG CARGO_BUILD_JOBS=
-# What: no in-file default; empty ARG fails resolve_cargo_profile_overrides
-# closed below, same contract as CARGO_BUILD_JOBS above. Declared once here
-# (before both RUN blocks in this stage), so both inherit it.
-# Why: djdomi (maintainer review 5109560874) rejected hardcoding
-# lto/codegen-units in Cargo.toml -- a Dockerfile ARG default would just
-# relocate the same hardcode one file over.
+# What: empty default; declared once here so both RUN blocks inherit it.
+# Why: no fallback value, same contract as CARGO_BUILD_JOBS above.
 # From: Issue #1095
 ARG PROJECT_CARGO_LTO=
 ARG PROJECT_CARGO_CODEGENUNIT=
@@ -464,12 +460,9 @@ RUN mkdir -p services/watchdog/src services/warmer/src \
 #   configure_ccache/disable_ccache - opt-in cache layer in front of distcc, only once
 #                            distcc is already enabled and a ccache Redis secret is
 #                            mounted; mirrors services/dns/Dockerfile's AG-CI-022 layer.
-#   resolve_cargo_profile_overrides - requires PROJECT_CARGO_LTO/PROJECT_CARGO_CODEGENUNIT
-#                            (no fallback default) and exports them as
-#                            CARGO_PROFILE_RELEASE_LTO/CARGO_PROFILE_RELEASE_CODEGEN_UNITS
-#                            before run_cargo_build is called in EITHER RUN block below, so
-#                            every retry tier of both the pre-cache and the real-source build
-#                            inherits the override (maintainer review 5109560874).
+#   resolve_cargo_profile_overrides - fails closed if PROJECT_CARGO_LTO/
+#                            PROJECT_CARGO_CODEGENUNIT is unset; exports both as
+#                            CARGO_PROFILE_RELEASE_* before run_cargo_build is called.
 #   resolve_cargo_jobs     - CARGO_BUILD_JOBS if set, else nproc-2 floored at 4.
 #   run_cargo_build        - builds with ccache+distcc if both enabled, retrying with
 #                            plain distcc first on failure, then a normal local compiler

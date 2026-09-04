@@ -58,11 +58,8 @@ RUN set -eu; \
     chmod +x /usr/local/bin/lancache-rustc-wrapper
 
 ARG CARGO_BUILD_JOBS=
-# What: no in-file default; empty ARG fails resolve_cargo_profile_overrides
-# closed below, same contract as CARGO_BUILD_JOBS above.
-# Why: djdomi (maintainer review 5109560874) rejected hardcoding
-# lto/codegen-units in Cargo.toml -- a Dockerfile ARG default would just
-# relocate the same hardcode one file over.
+# What: empty default; resolve_cargo_profile_overrides fails closed.
+# Why: no fallback value, same contract as CARGO_BUILD_JOBS above.
 # From: Issue #1095
 ARG PROJECT_CARGO_LTO=
 ARG PROJECT_CARGO_CODEGENUNIT=
@@ -141,12 +138,9 @@ COPY services/dns/nats-subscriber/src services/dns/nats-subscriber/src
 #     legitimately hits instead of writing; without this, the probe misclassifies a genuine
 #     cache hit as a write failure and disables ccache for the whole build.
 #     From: Issue #887
-#   resolve_cargo_profile_overrides - requires PROJECT_CARGO_LTO/PROJECT_CARGO_CODEGENUNIT
-#                            (no fallback default -- fails the build closed if either is
-#                            unset/invalid) and exports them as CARGO_PROFILE_RELEASE_LTO/
-#                            CARGO_PROFILE_RELEASE_CODEGEN_UNITS *before* run_cargo_build is
-#                            called, so every one of its retry tiers inherits the override,
-#                            not just the first attempt. From: Issue #1095 | PR #1796.
+#   resolve_cargo_profile_overrides - fails closed if PROJECT_CARGO_LTO/
+#                            PROJECT_CARGO_CODEGENUNIT is unset; exports both as
+#                            CARGO_PROFILE_RELEASE_* before run_cargo_build is called.
 #   resolve_cargo_jobs     - CARGO_BUILD_JOBS if set, else nproc-2 floored at 4; now also
 #                            echoes the resolved value and its source (explicit vs.
 #                            auto-detected) to the build log.

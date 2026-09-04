@@ -53,11 +53,8 @@ RUN set -eu; \
     chmod +x /usr/local/bin/lancache-rustc-wrapper
 
 ARG CARGO_BUILD_JOBS=
-# What: no in-file default; empty ARG fails resolve_cargo_profile_overrides
-# closed below, same contract as CARGO_BUILD_JOBS above.
-# Why: djdomi (maintainer review 5109560874) rejected hardcoding
-# lto/codegen-units in Cargo.toml -- a Dockerfile ARG default would just
-# relocate the same hardcode one file over.
+# What: empty default; resolve_cargo_profile_overrides fails closed.
+# Why: no fallback value, same contract as CARGO_BUILD_JOBS above.
 # From: Issue #1095
 ARG PROJECT_CARGO_LTO=
 ARG PROJECT_CARGO_CODEGENUNIT=

@@ -70,11 +70,9 @@ source "$repo_root/scripts/lib/dhcp-lease-parse.sh"
 source "$repo_root/scripts/lib/reserve-validation-subnet.sh"
 
 client_tool_image="${DHCP_PXE_SIMULATION_CLIENT_IMAGE:?DHCP_PXE_SIMULATION_CLIENT_IMAGE is required (an image providing the Rust toolchain to compile tools/pxe-client-probe and tcpdump to capture the reply, e.g. the build-tools image)}"
-# What: no in-file/script default for either -- same fail-closed contract as
-# services/{dns,ui,watchdog}/Dockerfile's resolve_cargo_profile_overrides().
-# Why: djdomi (maintainer review 5109560874) rejected hardcoding
-# lto/codegen-units anywhere; this script also runs `cargo build --release`
-# (below) and is therefore in scope for the same failure class.
+# What: no in-file/script default for either; fails closed if unset.
+# Why: this script also runs `cargo build --release`, same as the
+# Dockerfiles' resolve_cargo_profile_overrides().
 # From: Issue #1095
 project_cargo_lto="${PROJECT_CARGO_LTO:?PROJECT_CARGO_LTO is required (no in-file/script default; Issue #1095, PR #1796 review 5109560874)}"
 case "$project_cargo_lto" in off|thin|fat|true|false) ;; *) echo "PROJECT_CARGO_LTO must be one of: off, thin, fat, true, false (got '$project_cargo_lto')" >&2; exit 1;; esac
@@ -309,14 +307,8 @@ echo "== Compiling the synthetic PXE client probe (tools/pxe-client-probe) with 
 # are root-owned 0755). Only the single finished binary is copied out to
 # $work_dir -- a top-level file whose 0777 parent makes it removable during
 # cleanup regardless of its root ownership.
-# What: mounts the whole repo, not just the crate dir.
-# Why: cargo workspace resolution needs the root Cargo.lock too.
-# From: Issue #1095
-# What: threads PROJECT_CARGO_LTO/PROJECT_CARGO_CODEGENUNIT into this
-# container as CARGO_PROFILE_RELEASE_LTO/CARGO_PROFILE_RELEASE_CODEGEN_UNITS.
-# Why: Cargo.toml no longer hardcodes [profile.release] lto/codegen-units
-# (maintainer review 5109560874); every `cargo build --release` in this
-# repo, this one included, must source them the same way.
+# What: mounts the whole repo; threads PROJECT_CARGO_LTO/CODEGENUNIT in.
+# Why: workspace resolution needs root Cargo.lock; cargo reads those envs.
 # From: Issue #1095
 docker run --rm \
     -v "$repo_root:/repo:ro" \
