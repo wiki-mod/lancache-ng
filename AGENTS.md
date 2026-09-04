@@ -279,7 +279,70 @@ A legitimate skip MUST apply only when the check is genuinely inapplicable under
 Was unrelated and moved to: https://github.com/wiki-mod/lancache-ng/pull/1811#issuecomment-5538817993
 
 ### Key Design Decisions
-Was unrelated and moved to: https://github.com/wiki-mod/lancache-ng/pull/1811#issuecomment-5538838176
+
+- **[AG-KD-004]** DNS-spoof proxying MUST use nginx instead of Squid `intercept` mode. Squid `intercept` mode depends on real DNAT and `SO_ORIGINAL_DST` to determine the upstream destination; without DNAT, it can resolve the proxy itself as the destination and create a loop. nginx MUST derive the upstream destination from the client-provided `Host` header or `$ssl_server_name`, which is compatible with DNS-spoof proxying.
+
+- **[AG-KD-005]** At startup, `entrypoint.sh` MUST pre-generate CA-signed 2048-bit wildcard certificates for CDN domains. Each root CDN domain MUST receive a certificate covering `*.<root>`. Additional certificates MUST be generated for `cdn-domains.txt` entries that cannot be covered by that root wildcard.
+
+For a leading-dot wildcard-only entry such as `.cdn.example.com`, a dedicated certificate covering `*.cdn.example.com` MUST be generated whenever the entry differs from the root domain by any additional label, including exactly one label, because the hosts matched by the entry are one label deeper than the entry text.
+
+For a bare exact-host entry such as `tlu.dl.delivery.mp.microsoft.com`, a dedicated certificate MUST be generated only when the host is more than one label below the root domain. A bare host exactly one label below the root MUST use the root certificate because `*.<root>` already covers it.
+
+Generated certificates MUST use the fixed subject CN `lancache-ng`; real CDN hostnames MUST NOT be placed in the CN. The actual hostname or wildcard identity MUST be carried in the SAN used for TLS hostname validation. This avoids the OpenSSL CN length limit for long domain entries.
+
+Certificates and keys for deeper entries MUST use a namespaced SHA-256 hash of the hostname as their filename and MUST NOT use the hostname directly, preventing violations of the Linux filename-length limit.
+
+nginx MUST select the applicable certificate through `map $ssl_server_name $ssl_cert_name` in `conf.d/00-ssl-map.conf`. The `00-` ordering MUST be preserved so the map is defined before server blocks that consume it.
+
+- **[AG-KD-006]** nginx cache configurations for large cacheable assets MUST enable `proxy_cache_lock on` so concurrent requests for the same uncached object do not trigger parallel upstream fetches. While the first request populates the cache, equivalent concurrent requests MUST wait for that cache fill instead of independently downloading the same object. This behavior is required for large game files and other objects likely to be requested concurrently by multiple clients.
+
+- **[AG-KD-007]** `services/proxy/Dockerfile` MUST install nginx from nginx.org's official mainline package repository and MUST NOT use the base operating system's distro-provided `nginx` package. This applies to both the former Debian apt path and the current Alpine apk path, which MUST resolve the intended nginx mainline release.
+
+Standard-mode SNI passthrough MUST use nginx's built-in stream capability from the nginx.org package. The required stream features MUST be provided by the compiled nginx binary itself, including `--with-stream` and `--with-stream_ssl_preread_module`, as verifiable through `nginx -V`.
+
+A separate stream module package MUST NOT be installed for this nginx.org package, and `services/proxy/nginx.conf` MUST NOT add a `load_module` directive for stream support. Configuration or documentation that assumes Debian distro nginx behavior such as `libnginx-mod-stream` plus explicit `load_module` MUST be treated as incorrect for this project.
+
+- **[AG-KD-008]** The repository MUST maintain exactly one deployment profile under `deploy/prod/` with its corresponding production configuration. A separate `deploy/dev/`, `config/dev/`, or equivalent parallel development deployment profile MUST NOT be introduced.
+
+Development, local iteration, and real deployment validation MUST use `deploy/prod/docker-compose.yml` directly. The distinction between development, stable deployment, and release validation MUST be determined by the checked-out Git ref, such as `current_dev`, `master`, or a `vX.Y.Z` release ref, and MUST NOT be represented through separate Compose files, configuration directories, LAN addressing schemes, or duplicated deployment profiles.
+
+Any implementation that requires a second deployment tree to remain manually synchronized with `deploy/prod/` MUST be treated as a violation of this rule.
+
+Real validation MAY run on Linux self-hosted runners or other applicable Linux infrastructure instead of the Windows authoring host. Validation MUST NOT require or assume a separate development deployment profile merely because the authoring environment cannot execute the complete runtime stack locally.
+
+- **[AG-KD-009]** `tools/build-tools` MUST remain Debian-based by default unless the maintainer explicitly approves a base-OS switch. The existing `alpine-final` stage in `tools/build-tools/Dockerfile` is an opt-in candidate only and MUST NOT become the implicit Docker build default, active CI build-tools image, or published default image without that explicit decision.
+
+The unnamed Debian stage MUST remain the implicit `docker build` default. The Alpine candidate MAY be built explicitly with `docker build --target alpine-final` for evaluation. Existing CI workflows MUST continue using the Debian build-tools image until a maintainer-approved switch is implemented.
+
+The Alpine candidate has verified package or source-build paths for the existing build-tools toolchain, including native Alpine `distcc` and `distcc-pump`, source-built `cargo-audit`, `cargo-tarpaulin`, and `sccache`, and Alpine-compatible builds of `actionlint`, Docker CLI, Buildx, and Compose. This evaluation MUST NOT be represented as proof that Alpine is already an approved replacement.
+
+Alpine does not provide the required `dhclient`/`isc-dhcp-client` capability used by the three CI simulations that invoke `dhclient` against Kea. `dhclient` MUST therefore remain an `EXTRA_REQUIRED_TOOLS` requirement for those actual consumers so they fail closed when it is unavailable, while callers that do not require `dhclient` MUST NOT fail solely because the Alpine candidate lacks it.
+
+The verified Trivy `os-pkgs` result for both the Alpine candidate and the corresponding Debian base is zero HIGH or CRITICAL findings under the build-tools scan policy. This establishes CVE-surface parity only. Documentation, reviews, issues, or implementation decisions MUST NOT claim that switching build-tools to Alpine inherently improves the currently measured HIGH/CRITICAL OS-package CVE surface or resolves tracked Debian CVE findings without new evidence. A complete post-fix rescan remains required before any stronger security conclusion is made.
+
+The Debian stage MUST retain the project-wide `trixie-backports` configuration while Debian remains the default so its packaged tools remain current under the established Debian policy.
+
+If Debian package availability or currency becomes a verified blocker for `build-tools`, Ubuntu or another current Debian derivative MAY be evaluated as an alternative. Such a fallback MUST be evaluated against the actual build-tools requirements and MUST NOT be selected solely from prior results obtained for another service.
+
+The musl cross-compilation support already provided by the Debian build-tools stage for Rust builders such as `services/ui` and `services/dns` is independent of the build-tools base-OS decision. An Alpine build-tools image does not require an equivalent host-to-musl cross-compilation setup where its Rust host toolchain already targets musl natively.
+
+Issue #1095 remains the tracking context for the build-tools base-OS decision. The completed evaluation in Issue #815 and related implementation work establish candidate feasibility but MUST NOT be treated as authorization to switch the default. Any change to the default build-tools base OS, active CI image, or corresponding image channel MUST receive explicit maintainer approval.
+
+- **[AG-KD-010]** First-party consumers of the shared `utilities` image MUST use the mutable tag `ghcr.io/wiki-mod/lancache-ng/utilities:latest` and MUST NOT pin that image by digest. This is an explicit maintainer-approved exception to immutable-image pinning, not an omission or temporary fallback.
+
+The required consumers are `services/proxy`, `services/dns`, `services/dhcp`, `services/dhcp-proxy`, `services/ntp`, `services/ui`, `services/watchdog`, and `tools/build-tools`. Each MUST use:
+
+`FROM ghcr.io/wiki-mod/lancache-ng/utilities:latest`
+
+A hardcoded `utilities@sha256:<digest>`, per-consumer digest variable, parallel pinning mechanism, or equivalent immutable reference MUST NOT be introduced unless the maintainer explicitly changes this policy.
+
+The mutable tag is intentional because no repository mechanism currently maintains or validates synchronized `utilities` digest pins across all consumers. Consumers MUST therefore receive the most recently published `utilities:latest` image on their next build without requiring coordinated Dockerfile edits or a separate repinning step.
+
+This policy explicitly accepts reduced build reproducibility for automatic shared-tool currency and synchronized consumption across all first-party consumers. The mutable tag MUST NOT be described or "fixed" as accidental staleness or missing digest hardening.
+
+Because a regression in `utilities:latest` can affect every consumer on its next build, changes to `services/utilities/Dockerfile` MUST receive the same applicable build, smoke-test, validation, and review scrutiny as any other shared first-party base-layer change before merge.
+
+Digest pinning for `utilities` MUST NOT be silently reintroduced as a safer default. Any change away from `:latest` requires an explicit maintainer decision.
 
 ## CDN Domains, First-time Setup, IPv6
 
@@ -288,7 +351,8 @@ Was unrelated and moved to: https://github.com/wiki-mod/lancache-ng/pull/1811#is
 - **[AG-IPV6-001]** Production Docker daemon needs `"ipv6": true` in `/etc/docker/daemon.json` for full IPv6 dual-stack support. Docker Desktop on Windows has limited IPv6 support; a Linux production host does not have this limitation.
 
 ## Naming Convention
-Was moved to https://github.com/wiki-mod/lancache-ng/pull/1811#issuecomment-5538847031
+
+- **[AG-CODE-014]** docs/naming-conventions.md is the single, authoritative naming contract for every runtime object this project creates: Compose project/service names, Docker container_name values, Docker volumes, host bind-mount directories, GHCR image/package names, environment variables that refer to services or containers, the Docker socket proxy's security allowlist, and backup/restore paths that depend on those names. Any change that adds a new service, volume, environment variable, or socket-proxy allowlist entry must follow that document's rule for its category, not invent a new naming shape inline. scripts/tracked/check-naming-consistency.sh (run in CI as part of validate-compose in .github/workflows/build-push.yml) enforces the mechanically-checkable parts of that contract — the allowlist in scripts/untracked/docker-socket-proxy.sh must stay a superset of the container names the Admin UI (services/ui/src/docker_client.rs) and watchdog (services/watchdog/watchdog.sh) can act on, and the Admin UI's *_SERVICE defaults must match a real Compose service name — but does not replace reading the document for anything that needs human judgment.
 
 ## Coding Patterns
 
@@ -526,7 +590,7 @@ Implementations MUST share a mechanism when a bug fix or behavior change to one 
 
 - **[AG-VAL-020]** `ss` is not an acceptable DNS health check by itself because it only proves that a socket is listening.
 
--**[AG-VAL-024]** Creation of any new shell script remains subject to the formal DISACK and approval requirements of Rule-Ref: AG-CODE-013. When creation is authorized, the script's committed executable state MUST NOT be inferred from local filesystem permissions, `chmod +x`, or successful local execution on Windows or any environment where Git uses `core.filemode=false`, because those environments may not expose or modify the executable bit stored in the Git index.
+- **[AG-VAL-024]** Creation of any new shell script remains subject to the formal DISACK and approval requirements of Rule-Ref: AG-CODE-013. When creation is authorized, the script's committed executable state MUST NOT be inferred from local filesystem permissions, `chmod +x`, or successful local execution on Windows or any environment where Git uses `core.filemode=false`, because those environments may not expose or modify the executable bit stored in the Git index.
 New shell scripts SHOULD be invoked through an explicit interpreter, such as `bash "$script"`, at every call site, including test harnesses, instead of through `"$script"` or `./script.sh`. This SHOULD be preferred whenever direct execution is not technically required because it removes the executable-bit dependency. If any call site requires direct execution, the committed Git mode MUST be verified explicitly with `git ls-files -s <path>` and MUST report mode `100755`. Local `chmod`, filesystem mode inspection, local execution, or other host-local observations MUST NOT substitute for this Git-index verification. A script committed as `100644` MUST be treated as non-executable even if its contents and logic otherwise validate correctly; direct execution on Linux can fail with `Permission denied` and exit status `126`. Any shell failure path whose behavior depends on `set -e`, `set -u`, `pipefail`, pipelines, or command exit status MUST be verified by executing the actual failure condition under the same shell-option semantics used by the real caller. In particular, commands such as `grep` or pipelines that legitimately return a non-zero status for an expected condition MUST NOT be allowed to terminate execution through `errexit` before the intended fail-closed diagnostic or handling branch is reached.A fail-closed branch MUST therefore be exercised with actual failing input in real applicable CI, not only inspected or reasoned about statically. Verification MUST demonstrate that execution reaches the intended failure-handling path, emits the intended diagnostic, and returns the intended non-zero status. Static walkthroughs or successful-path tests alone MUST NOT be accepted as proof of fail-closed behavior.
 
 
@@ -567,7 +631,26 @@ This is a separate case from Rule-Ref: AG-VAL-022 above, not an unreconciled res
 - **Non-Expansion**: This exception applies only to CodeQL Rust analysis. It does not cover other languages, other security checks (e.g., cargo-audit, SAST linters), or changes to non-generated Rust code. It also does not extend the plain-extraction-warning exception in Rule-Ref: AG-VAL-022, which covers warnings on ordinary macro invocations needing no test-coverage evidence since they are a confirmed tooling artifact unrelated to actual code behavior.
 
 ## Agent Closing-Report Contract
-Still Active, related moved to https://github.com/wiki-mod/lancache-ng/pull/1811#issuecomment-5539439917
+
+- **[AG-WF-041]** Finishing any nontrivial task, including any PR, issue fix, or multi-step verification, MUST include a closing report that demonstrates understanding of the work and its context, not merely execution of instructions. The report MUST be recorded in the applicable PR body, closing Issue or PR comment, or final task output. Its location MAY vary by context, but the required content MUST NOT.
+
+The closing report MUST explicitly identify every Issue, PR, design document, relevant existing code area, threat model, governance document, or other source actually read to understand the task scope. Sources MUST be named specifically enough to show what context was reviewed. Generic statements such as I read the issue, reviewed the documentation, or equivalent acknowledgements MUST NOT satisfy this requirement.
+
+The closing report MUST identify the exact files, paths, components, or subsystems modified and describe the affected areas specifically enough for a reviewer to determine what was changed.
+
+If the task description, Issue or PR context, investigation, or surrounding implementation identifies related work or areas that could reasonably require corresponding changes but were deliberately left unchanged, the closing report MUST identify each such area and state why it was not changed. This requirement applies whether the exclusion results from scope, separate ownership, another tracking item, an intentional technical decision, or another justified boundary. Related work MUST NOT be silently omitted in a way that makes it impossible to distinguish a deliberate boundary from work that was overlooked.
+
+Every validation command actually executed MUST be reproduced exactly in the closing report together with its real observed result. The report MUST include the applicable exit status and relevant findings, warnings, failures, corrections, or other material output needed to understand the result. Generic statements such as ran tests, tests pass, validation succeeded, or equivalent summaries without the actual command and result MUST NOT satisfy this requirement.
+
+Every validation check that would normally apply but could not be executed MUST be identified explicitly together with the reason it was not run, including conditions such as unavailable Docker, unavailable toolchains, environment limitations, or CI-only validation. The closing report MUST distinguish unambiguously between checks that passed, checks that failed, and checks that were not run. A skipped, unavailable, blocked, or unexecuted check MUST NOT be reported or implied as passed.
+
+The closing report MUST explicitly identify every known open risk, incomplete or partial implementation, outstanding dependency, unresolved limitation, accepted exception, pending verification, or follow-up condition known at task completion. Known outstanding work MUST be disclosed rather than omitted in a way that implies the task is fully shipped or fully verified.
+
+Relevant documentation MUST be checked for drift against the resulting implementation under Rule-Ref: AG-DOC-001. This review MUST include all documentation relevant to the changed behavior, including applicable README.md, threat models, architecture documentation, setup documentation, release documentation, and other behavior-defining documentation. The closing report MUST identify what documentation was checked, whether it remained correct, what was updated when drift was found, and whether any known drift remains. If relevant documentation was not checked or was deliberately not updated, the closing report MUST state that explicitly and provide the reason, including the applicable tracking reference when the work is intentionally handled elsewhere.
+
+The closing report MUST identify every follow-up Issue, PR, dependency, or task created by or required for the completed work. If no follow-up work is required, the report MUST explicitly state no follow-up required. Absence of a follow-up reference or statement MUST NOT be treated as equivalent to confirming that no follow-up exists.
+
+This contract is stricter than the overlapping sections of .github/pull_request_template.md. Existing template headings MAY be used to carry the required information, but completing those headings with vague, generic, incomplete, assumed, or placeholder content MUST NOT satisfy this rule. Closing-report content MUST be real, specific, current, and honest, including all validation gaps, failed or skipped checks, deliberate scope exclusions, documentation drift, known risks, unresolved work, and follow-up requirements.
 
 ## Agent Autonomy and User-Context Rule
 
