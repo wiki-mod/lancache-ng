@@ -4955,10 +4955,10 @@ jobs:
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
-    # What: adds issues:write; other scopes below stay unchanged.
-    # Why: job-level permissions: replaces, not merges, the
-    #   workflow-level block; issues:write is for the self-closing
-    #   Trivy report added to this job.
+    # What: job-level permissions replace, not merge, the workflow-level
+    #   block.
+    # Why: issues:write moved to trivy-scan-amd64 with the Trivy report
+    #   steps; this job no longer writes issues.
     # From: Issue #1095
       UTILITIES_IMAGE: ${{ needs['validate-compose'].outputs.utilities_image }}
       UTILITIES_DIGEST: ${{ needs['validate-compose'].outputs.utilities_digest }}
@@ -4968,7 +4968,6 @@ jobs:
       id-token: write
       attestations: write
       artifact-metadata: write
-      issues: write
     strategy:
       fail-fast: false
       matrix:
@@ -5792,6 +5791,39 @@ jobs:
           cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
           cache-to: type=local,dest=${{ steps.buildx-cache.outputs.cache-to }},mode=max
 
+      # What: hands the pushed amd64 digest to the hosted scan job below.
+      # Why: a matrix job's own outputs can't propagate per-instance
+      #   across a job boundary; an artifact avoids re-deriving should-
+      #   build/reuse eligibility a second time (AG-CODE-011).
+      # From: Issue #1095
+      - name: Write Trivy scan input (amd64)
+        id: trivy-scan-input
+        if: >-
+          ${{
+            steps.build.outcome == 'success' &&
+            (
+              github.event_name != 'pull_request' ||
+              (
+                github.actor != 'dependabot[bot]' &&
+                github.event.pull_request.head.repo.id == github.event.repository.id
+              )
+            )
+          }}
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          : "${DIGEST:?steps.build did not export a digest to hand off to the hosted Trivy scan job}"
+          printf '%s' "$DIGEST" > "${RUNNER_TEMP}/trivy-scan-input-${{ matrix.service }}-amd64.txt"
+
+      - name: Upload Trivy scan input (amd64)
+        if: steps.trivy-scan-input.outcome == 'success'
+        uses: *actions_upload_artifact_centraliced_versioning
+        with:
+          name: trivy-scan-input-${{ matrix.service }}-amd64
+          path: ${{ runner.temp }}/trivy-scan-input-${{ matrix.service }}-amd64.txt
+          retention-days: 1
+
       # This job never `--load`s a local image (push-only), so unlike container-scan it
       # had no existing final cleanup step to piggyback on -- but "Set up Docker Buildx"
       # above still creates a real docker-container builder + state volume on this
@@ -5845,189 +5877,6 @@ jobs:
             rm -rf "$BUILDX_CACHE_ROOT/${{ matrix.service }}"
             mv "$BUILDX_CACHE_DEST" "$cache_dir"
           ) 9>"$lock_file"
-
-      # What: resolves the shared, persistent NFS-backed Trivy DB directory
-      #   (real local-disk fallback if the mount is unavailable), then
-      #   refreshes it under a lock using Trivy's own --download-db-only
-      #   freshness check. This job builds linux/amd64 only (see
-      #   build-arm64 for the native arm64 leg, a separate GitHub-hosted
-      #   job with no route to this NFS mount -- its own step below stays
-      #   on its prior runner.temp design for that reason).
-      # Why: skip-db-update below (steps.trivy-db-fresh.outputs.db-present)
-      #   is what keeps every matrix.service instance's concurrent read
-      #   safe against the shared directory's single writer -- the actual
-      #   fix for the redundant-download outage a per-run-wiped directory
-      #   used to cause on pull_request/workflow_dispatch/retry/tag-push.
-      # From: Issue #1095 | Issue #912 | PR #927 | PR #1532
-      - name: Resolve shared Trivy DB cache directory
-        id: trivy-cache
-        if: >-
-          ${{
-                      steps.build.outcome == 'success' &&
-                      (
-                        github.event_name != 'pull_request' ||
-                        (
-                          github.actor != 'dependabot[bot]' &&
-                          github.event.pull_request.head.repo.id == github.event.repository.id
-                        )
-                      )
-                    }}
-        uses: ./.github/actions/trivy-cache-dir
-
-      - name: Ensure shared Trivy DB is current
-        id: trivy-db-fresh
-        if: ${{ steps.trivy-cache.outcome == 'success' }}
-        uses: ./.github/actions/trivy-db-ensure-fresh
-        with:
-          cache-dir: ${{ steps.trivy-cache.outputs.dir }}
-
-      - name: Scan pushed service digest with Trivy
-        # What: Step 3 -- scans the exact pushed digest before promotion.
-        # Why: now the only scan for a changed service; see the linked issue.
-        # From: Issue #1095 | PR #1532
-        id: trivy-scan-pushed
-        if: >-
-          ${{
-            steps.build.outcome == 'success' &&
-            (
-              github.event_name != 'pull_request' ||
-              (
-                github.actor != 'dependabot[bot]' &&
-                github.event.pull_request.head.repo.id == github.event.repository.id
-              )
-            )
-          }}
-        # What: soft-fails only on a PR; push stays hard-failing.
-        # Why: a PR-context finding reports via the step below instead
-        #   (release-gate decision -- still tracked, not hidden).
-        # From: Issue #1095
-        continue-on-error: ${{ github.event_name == 'pull_request' }}
-        # What: 50-minute timeout for this Trivy scan step.
-        # Why: The wrapped trivy-scan-retry action can attempt up to 4 scans.
-        # From: Issue #1095 | PR #1619
-        timeout-minutes: 50
-        uses: ./.github/actions/trivy-scan-exact-digest
-        with:
-          registry-username: ${{ github.actor }}
-          registry-password: ${{ secrets.GITHUB_TOKEN }}
-          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-          image-ref: ghcr.io/${{ github.repository }}/${{ matrix.service }}@${{ steps.build.outputs.digest }}
-          cache-dir: ${{ steps.trivy-cache.outputs.dir }}
-          # What: never cleaned up now -- it's the shared/fallback dir, not
-          #   a per-run throwaway.
-          # Why: cleanup-cache "true" here would delete the shared DB out
-          #   from under every other concurrent matrix.service job.
-          # From: Issue #1095 | Issue #912
-          cleanup-cache: "false"
-          skip-db-update: ${{ steps.trivy-db-fresh.outputs.db-present == 'true' }}
-
-      # What: fails when db-status is undetermined, scan ran.
-      # Why: an unknown status must never be read as a clean scan.
-      # From: Issue #1095 | PR #1741
-      - name: Require a determined Trivy DB status (amd64)
-        if: >-
-          always() && steps.build.outcome == 'success' &&
-          steps.trivy-scan-pushed.outcome != 'skipped' &&
-          steps.trivy-scan-pushed.outputs.db-status != 'unavailable' &&
-          steps.trivy-scan-pushed.outputs.db-status != 'available'
-        run: |
-          echo "::error::Trivy db-status for ${{ matrix.service }} (amd64) is '${{ steps.trivy-scan-pushed.outputs.db-status }}' -- the scan never reached its own determination step (timeout, cancellation, or output-propagation failure). Treating this as NOT-RUN: no status report is filed and no image is deleted, because nothing was established either way." >&2
-          exit 1
-
-      # What: reports DB-unavailability as a separate issue.
-      # Why: a distinct label keeps this visible without closing a
-      #   real open vulnerability finding on a mere DB miss.
-      # From: Issue #1095
-      - name: Report Trivy DB-unavailable status (amd64, separate issue)
-        if: >-
-          always() && steps.build.outcome == 'success' &&
-          (github.event_name == 'pull_request' || github.ref == 'refs/heads/current_dev' || github.ref == 'refs/heads/master') &&
-          (steps.trivy-scan-pushed.outputs.db-status == 'unavailable' ||
-           steps.trivy-scan-pushed.outputs.db-status == 'available')
-        uses: ./.github/actions/nightly-status
-        with:
-          outcome: ${{ steps.trivy-scan-pushed.outputs.db-status == 'unavailable' && 'failure' || 'success' }}
-          label: trivy-db-unavailable-buildpush-${{ matrix.service }}-amd64
-          scope: >-
-            Trivy vulnerability DB never downloaded for
-            ${{ matrix.service }} (amd64) across all retry attempts
-          fork-check-step-name: Scan pushed service digest with Trivy
-          project_pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
-
-      # What: reports a pre-report scan error, not a finding.
-      # Why: no report exists to evaluate as a finding here.
-      # From: Issue #1095 | PR #1735
-      - name: Report Trivy scan-error status (amd64, separate issue)
-        if: >-
-          always() && steps.build.outcome == 'success' &&
-          (github.event_name == 'pull_request' || github.ref == 'refs/heads/current_dev' || github.ref == 'refs/heads/master') &&
-          steps.trivy-scan-pushed.outputs.db-status == 'available'
-        uses: ./.github/actions/nightly-status
-        with:
-          outcome: ${{ steps.trivy-scan-pushed.outputs.scan-error == 'true' && 'failure' || 'success' }}
-          label: trivy-scan-error-buildpush-${{ matrix.service }}-amd64
-          scope: >-
-            Trivy scan of ${{ matrix.service }} (amd64) failed before
-            producing a report while its DB was present (pull/auth/
-            config/scanner error, not a DB outage and not a finding)
-          fork-check-step-name: Scan pushed service digest with Trivy
-          project_pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
-
-      # What: reports the scan outcome as a self-closing issue.
-      # Why: PR or canonical-ref runs only; avoids a stale non-
-      #   canonical ref opening/closing a shared standing issue.
-      # From: Issue #1095 | PR #1741
-      - name: Report Trivy scan status (self-closing issue)
-        if: >-
-          always() && steps.build.outcome == 'success' &&
-          (github.event_name == 'pull_request' || github.ref == 'refs/heads/current_dev' || github.ref == 'refs/heads/master') &&
-          steps.trivy-scan-pushed.outputs.db-status == 'available' &&
-          steps.trivy-scan-pushed.outputs.scan-error != 'true'
-        uses: ./.github/actions/nightly-status
-        with:
-          outcome: ${{ steps.trivy-scan-pushed.outcome == 'failure' && 'failure' || 'success' }}
-          label: trivy-finding-${{ matrix.service }}-amd64
-          scope: >-
-            Trivy HIGH/CRITICAL finding in ${{ matrix.service }} (amd64),
-            not covered by .trivyignore.yaml
-          fork-check-step-name: Scan pushed service digest with Trivy
-          project_pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
-
-      - name: Delete GHCR package version pushed by a failed scan
-        # What: deletes the just-pushed digest on a genuine finding.
-        # Why: only an actual report proves the image unsafe.
-        # From: Issue #1095 | PR #1735
-        if: >-
-          ${{
-            always() && steps.build.outcome == 'success' &&
-            steps.trivy-scan-pushed.outcome == 'failure' &&
-            steps.trivy-scan-pushed.outputs.db-status == 'available' &&
-            steps.trivy-scan-pushed.outputs.scan-error != 'true'
-          }}
-        env:
-          GH_TOKEN: ${{ secrets.GHCR_PACKAGE_DELETE_PAT }}
-          SERVICE: ${{ matrix.service }}
-          DIGEST: ${{ steps.build.outputs.digest }}
-        run: |
-          set -euo pipefail
-          # shellcheck source=scripts/lib/ghcr-retry.sh
-          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
-          : "${GH_TOKEN:?GHCR_PACKAGE_DELETE_PAT secret is required to delete a scan-failed package version -- see issue #626. Without it, this scan-failed image cannot be removed automatically and needs immediate manual deletion in GHCR.}"
-          org="wiki-mod"
-          package="lancache-ng%2F${SERVICE}"
-          fetch_versions() { gh api --paginate "orgs/${org}/packages/container/${package}/versions" > "$versions_file"; }
-          versions_file="$(mktemp)"
-          trap 'rm -f "$versions_file"' EXIT
-          ghcr_retry ghcr.io "" "" -- fetch_versions
-          version_id="$(jq -r --arg digest "$DIGEST" '[.[] | select(.name == $digest)][0].id // empty' "$versions_file")"
-          if [ -z "$version_id" ]; then
-            echo "::error::Trivy scan failed for the just-pushed lancache-ng/${SERVICE}@${DIGEST}, but no matching GHCR package version was found to delete. Manual verification in GHCR is required."
-            exit 1
-          fi
-          echo "::notice::Trivy scan failed for lancache-ng/${SERVICE}@${DIGEST} (GHCR package version ${version_id}) -- deleting it immediately (issue #1095 G8): a scan-failed image must never remain reachable."
-          ghcr_retry ghcr.io "" "" -- gh api -X DELETE "orgs/${org}/packages/container/${package}/versions/${version_id}"
-          echo "::notice::Deleted GHCR package version ${version_id} (lancache-ng/${SERVICE}@${DIGEST}) after its Trivy scan failed."
 
       - name: Smoke-test exact build-tools candidate
         if: >-
@@ -6744,6 +6593,205 @@ jobs:
           subject-name: ghcr.io/${{ github.repository }}/${{ matrix.service }}
           subject-digest: ${{ steps.build.outputs.digest }}
 
+  trivy-scan-amd64:
+    # What: GitHub-hosted Trivy scan of build's pushed amd64 digest.
+    # Why: self-hosted DB downloads failed (issues #1806, #1807);
+    #   ubuntu-latest reaches the real Trivy DB mirrors reliably. The
+    #   arm64 leg already scans on ubuntu-24.04-arm inside build-arm64
+    #   (Issue #592) and needs no change here.
+    # From: Issue #1095
+    name: Trivy scan (amd64, hosted)
+    needs: build
+    # What: skips only when build itself was cancelled.
+    # Why: mirrors merge-manifests' own build-cancellation gate; a
+    #   per-service build/scan failure must not stop other services'
+    #   legs (Rule-Ref: AG-CI-015 -- each matrix leg is independent).
+    # From: Issue #1095
+    if: "!cancelled() && needs.build.result != 'cancelled'"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: read
+      issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: *normal-build-services
+    steps:
+      - name: Checkout
+        uses: *checkout_centraliced_versioning # v7.0.1
+
+      # What: downloads the digest build wrote for this service, if any.
+      # Why: absent means should-build was false, or a fork/Dependabot
+      #   PR that never pushed anything scannable -- not a failure.
+      # From: Issue #1095
+      - name: Download Trivy scan input (amd64)
+        id: download-scan-input
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (v4.3.0 still declared deprecated Node 20 runtime, see #802)
+        with:
+          name: trivy-scan-input-${{ matrix.service }}-amd64
+          path: ${{ runner.temp }}/trivy-scan-input
+
+      - name: Read Trivy scan input (amd64)
+        id: scan-input
+        run: |
+          set -euo pipefail
+          input_file="${RUNNER_TEMP}/trivy-scan-input/trivy-scan-input-${{ matrix.service }}-amd64.txt"
+          if [ -s "$input_file" ]; then
+            printf 'digest=%s\n' "$(cat "$input_file")" >> "$GITHUB_OUTPUT"
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No Trivy scan input for ${{ matrix.service }} (amd64) this run (should-build was false, or a fork/Dependabot PR); nothing to scan."
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Log in to GHCR
+        if: steps.scan-input.outputs.available == 'true'
+        uses: *docker_login_centraliced_versioning
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Scan pushed service digest with Trivy
+        # What: Step 3 -- scans the exact pushed digest before promotion.
+        # Why: now the only scan for a changed service; see the linked issue.
+        # From: Issue #1095 | PR #1532
+        id: trivy-scan-pushed
+        if: steps.scan-input.outputs.available == 'true'
+        # What: soft-fails only on a PR; push stays hard-failing.
+        # Why: a PR-context finding reports via the step below instead
+        #   (release-gate decision -- still tracked, not hidden).
+        # From: Issue #1095
+        continue-on-error: ${{ github.event_name == 'pull_request' }}
+        # What: 50-minute timeout for this Trivy scan step.
+        # Why: The wrapped trivy-scan-retry action can attempt up to 4 scans.
+        # From: Issue #1095 | PR #1619
+        timeout-minutes: 50
+        uses: ./.github/actions/trivy-scan-exact-digest
+        with:
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+          image-ref: ghcr.io/${{ github.repository }}/${{ matrix.service }}@${{ steps.scan-input.outputs.digest }}
+          # What: ephemeral per-run cache dir, no shared NFS mount here.
+          # Why: mirrors build-arm64/build-push-hosted-fallback.yml -- a
+          #   GitHub-hosted runner has no route to the self-hosted NFS
+          #   mount build's own (now-removed) amd64 scan step used.
+          # From: Issue #1095
+          cache-dir: ${{ runner.temp }}/trivy-${{ matrix.service }}-amd64-${{ github.run_id }}-${{ github.run_attempt }}
+          cleanup-cache: "true"
+
+      # What: fails when db-status is undetermined, scan ran.
+      # Why: an unknown status must never be read as a clean scan.
+      # From: Issue #1095 | PR #1741
+      - name: Require a determined Trivy DB status (amd64)
+        if: >-
+          always() && steps.scan-input.outputs.available == 'true' &&
+          steps.trivy-scan-pushed.outcome != 'skipped' &&
+          steps.trivy-scan-pushed.outputs.db-status != 'unavailable' &&
+          steps.trivy-scan-pushed.outputs.db-status != 'available'
+        run: |
+          echo "::error::Trivy db-status for ${{ matrix.service }} (amd64) is '${{ steps.trivy-scan-pushed.outputs.db-status }}' -- the scan never reached its own determination step (timeout, cancellation, or output-propagation failure). Treating this as NOT-RUN: no status report is filed and no image is deleted, because nothing was established either way." >&2
+          exit 1
+
+      # What: reports DB-unavailability as a separate issue.
+      # Why: a distinct label keeps this visible without closing a
+      #   real open vulnerability finding on a mere DB miss.
+      # From: Issue #1095
+      - name: Report Trivy DB-unavailable status (amd64, separate issue)
+        if: >-
+          always() && steps.scan-input.outputs.available == 'true' &&
+          (github.event_name == 'pull_request' || github.ref == 'refs/heads/current_dev' || github.ref == 'refs/heads/master') &&
+          (steps.trivy-scan-pushed.outputs.db-status == 'unavailable' ||
+           steps.trivy-scan-pushed.outputs.db-status == 'available')
+        uses: ./.github/actions/nightly-status
+        with:
+          outcome: ${{ steps.trivy-scan-pushed.outputs.db-status == 'unavailable' && 'failure' || 'success' }}
+          label: trivy-db-unavailable-buildpush-${{ matrix.service }}-amd64
+          scope: >-
+            Trivy vulnerability DB never downloaded for
+            ${{ matrix.service }} (amd64) across all retry attempts
+          fork-check-step-name: Scan pushed service digest with Trivy
+          project_pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+
+      # What: reports a pre-report scan error, not a finding.
+      # Why: no report exists to evaluate as a finding here.
+      # From: Issue #1095 | PR #1735
+      - name: Report Trivy scan-error status (amd64, separate issue)
+        if: >-
+          always() && steps.scan-input.outputs.available == 'true' &&
+          (github.event_name == 'pull_request' || github.ref == 'refs/heads/current_dev' || github.ref == 'refs/heads/master') &&
+          steps.trivy-scan-pushed.outputs.db-status == 'available'
+        uses: ./.github/actions/nightly-status
+        with:
+          outcome: ${{ steps.trivy-scan-pushed.outputs.scan-error == 'true' && 'failure' || 'success' }}
+          label: trivy-scan-error-buildpush-${{ matrix.service }}-amd64
+          scope: >-
+            Trivy scan of ${{ matrix.service }} (amd64) failed before
+            producing a report while its DB was present (pull/auth/
+            config/scanner error, not a DB outage and not a finding)
+          fork-check-step-name: Scan pushed service digest with Trivy
+          project_pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+
+      # What: reports the scan outcome as a self-closing issue.
+      # Why: PR or canonical-ref runs only; avoids a stale non-
+      #   canonical ref opening/closing a shared standing issue.
+      # From: Issue #1095 | PR #1741
+      - name: Report Trivy scan status (self-closing issue)
+        if: >-
+          always() && steps.scan-input.outputs.available == 'true' &&
+          (github.event_name == 'pull_request' || github.ref == 'refs/heads/current_dev' || github.ref == 'refs/heads/master') &&
+          steps.trivy-scan-pushed.outputs.db-status == 'available' &&
+          steps.trivy-scan-pushed.outputs.scan-error != 'true'
+        uses: ./.github/actions/nightly-status
+        with:
+          outcome: ${{ steps.trivy-scan-pushed.outcome == 'failure' && 'failure' || 'success' }}
+          label: trivy-finding-${{ matrix.service }}-amd64
+          scope: >-
+            Trivy HIGH/CRITICAL finding in ${{ matrix.service }} (amd64),
+            not covered by .trivyignore.yaml
+          fork-check-step-name: Scan pushed service digest with Trivy
+          project_pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+
+      - name: Delete GHCR package version pushed by a failed scan
+        # What: deletes the just-pushed digest on a genuine finding.
+        # Why: only an actual report proves the image unsafe.
+        # From: Issue #1095 | PR #1735
+        if: >-
+          ${{
+            always() && steps.scan-input.outputs.available == 'true' &&
+            steps.trivy-scan-pushed.outcome == 'failure' &&
+            steps.trivy-scan-pushed.outputs.db-status == 'available' &&
+            steps.trivy-scan-pushed.outputs.scan-error != 'true'
+          }}
+        env:
+          GH_TOKEN: ${{ secrets.GHCR_PACKAGE_DELETE_PAT }}
+          SERVICE: ${{ matrix.service }}
+          DIGEST: ${{ steps.scan-input.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # shellcheck source=scripts/lib/ghcr-retry.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          : "${GH_TOKEN:?GHCR_PACKAGE_DELETE_PAT secret is required to delete a scan-failed package version -- see issue #626. Without it, this scan-failed image cannot be removed automatically and needs immediate manual deletion in GHCR.}"
+          org="wiki-mod"
+          package="lancache-ng%2F${SERVICE}"
+          fetch_versions() { gh api --paginate "orgs/${org}/packages/container/${package}/versions" > "$versions_file"; }
+          versions_file="$(mktemp)"
+          trap 'rm -f "$versions_file"' EXIT
+          ghcr_retry ghcr.io "" "" -- fetch_versions
+          version_id="$(jq -r --arg digest "$DIGEST" '[.[] | select(.name == $digest)][0].id // empty' "$versions_file")"
+          if [ -z "$version_id" ]; then
+            echo "::error::Trivy scan failed for the just-pushed lancache-ng/${SERVICE}@${DIGEST}, but no matching GHCR package version was found to delete. Manual verification in GHCR is required."
+            exit 1
+          fi
+          echo "::notice::Trivy scan failed for lancache-ng/${SERVICE}@${DIGEST} (GHCR package version ${version_id}) -- deleting it immediately (issue #1095 G8): a scan-failed image must never remain reachable."
+          ghcr_retry ghcr.io "" "" -- gh api -X DELETE "orgs/${org}/packages/container/${package}/versions/${version_id}"
+          echo "::notice::Deleted GHCR package version ${version_id} (lancache-ng/${SERVICE}@${DIGEST}) after its Trivy scan failed."
+
   merge-manifests:
     # Combines build's linux/amd64 per-service tag with build-arm64's linux/arm64
     # per-service tag into the real sha-<commit> multi-platform tag that
@@ -6759,11 +6807,14 @@ jobs:
     # PR would just loop through seven harmless "no linux/amd64 image" skips for no
     # reason.
     name: merge multi-platform manifests
-    needs: [determine-build-admission, build, build-arm64, push-supersession-check]
+    needs: [determine-build-admission, build, build-arm64, trivy-scan-amd64, push-supersession-check]
     # What: merges manifests only after build admission opens.
-    # Why: skipped image jobs leave no valid manifest inputs.
+    # Why: skipped image jobs leave no valid manifest inputs. Also waits
+    #   on trivy-scan-amd64: that job now owns the delete-on-scan-failure
+    #   step build's own amd64 leg used to run inline, and this merge
+    #   must never assemble a digest that step is about to remove.
     # From: Issue #1095
-    if: "!cancelled() && needs['determine-build-admission'].result == 'success' && needs['determine-build-admission'].outputs.admitted == 'true' && needs.build.result != 'cancelled' && needs['build-arm64'].result != 'cancelled'"
+    if: "!cancelled() && needs['determine-build-admission'].result == 'success' && needs['determine-build-admission'].outputs.admitted == 'true' && needs.build.result != 'cancelled' && needs['build-arm64'].result != 'cancelled' && needs['trivy-scan-amd64'].result != 'cancelled'"
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     # Real runs: 17s-4.1min (per this job's own comment, it only assembles a
     # manifest list from two already-pushed digests -- no image rebuild).
@@ -8448,7 +8499,7 @@ jobs:
   report-nightly-status:
     name: report nightly channel status
     if: "always() && !cancelled() && github.event_name == 'workflow_dispatch' && inputs.channel == 'nightly'"
-    needs: [build, build-arm64, merge-manifests, full-setup-validate, promote]
+    needs: [build, build-arm64, trivy-scan-amd64, merge-manifests, full-setup-validate, promote]
     runs-on: [self-hosted, linux, lancache, lancache-light]
     timeout-minutes: 10
     permissions:
@@ -8462,6 +8513,10 @@ jobs:
         env:
           BUILD: ${{ needs.build.result }}
           BUILD_ARM64: ${{ needs['build-arm64'].result }}
+          # What: amd64 Trivy scan now runs as its own job.
+          # Why: a scan failure no longer surfaces via needs.build alone.
+          # From: Issue #1095
+          TRIVY_SCAN_AMD64: ${{ needs['trivy-scan-amd64'].result }}
           MERGE_MANIFESTS: ${{ needs['merge-manifests'].result }}
           FULL_SETUP_VALIDATE: ${{ needs['full-setup-validate'].result }}
           PROMOTE: ${{ needs.promote.result }}
@@ -8470,6 +8525,7 @@ jobs:
           declare -A results=(
             [build]="$BUILD"
             [build-arm64]="$BUILD_ARM64"
+            [trivy-scan-amd64]="$TRIVY_SCAN_AMD64"
             [merge-manifests]="$MERGE_MANIFESTS"
             [full-setup-validate]="$FULL_SETUP_VALIDATE"
             [promote]="$PROMOTE"
