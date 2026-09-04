@@ -1202,6 +1202,31 @@ grep -E "legacy_rank=[0-9]" <logfile> | grep -v "decision=protect"
 
 ### Additions dated 2026-09-03 (real incident since the 2026-08-25 survey above)
 
+- **`build-tools.yml`'s `:nightly` tag promotion was structurally
+  unreachable** (Refs #1095, fixed by PR #1800) -- its own `schedule:`
+  trigger always resolves `github.ref_name` to the default branch
+  (AG-CI-018), so the promote step's `elif REF_NAME = current_dev` branch
+  could only ever be reached by a manual, current_dev-targeted
+  `workflow_dispatch` an operator would have to know to run themselves --
+  confirmed dead code, not merely untested. Fixed by extending
+  `nightly-refresh.yml`'s existing dispatcher (already used for
+  build-push.yml's own daily nightly refresh) with a second, weekly cron
+  entry matching build-tools.yml's own cadence. This is the SECOND confirmed
+  instance of this exact failure shape in this repo --
+  `nightly-refresh.yml`'s own header comment already documents the first
+  (build-push.yml, #1254/#1255) -- meeting AG-WF-011's failure-class
+  threshold. A repo-wide sweep of every `.github/workflows/*.yml` file with
+  both a `schedule:` trigger and a `current_dev` reference (done as part of
+  this same pass) found no third instance: `vex-regenerate.yml` discusses a
+  related but distinct concern (its main automatic path is `push`-triggered,
+  which does NOT have this bug; only its manual `workflow_dispatch` escape
+  hatch has an already-honestly-documented open question, not a dead
+  branch). **New standing check: none yet** -- a mechanical guard that greps
+  every workflow's `schedule:`-gated conditional branches for a ref
+  comparison that can never be satisfied given `schedule:`'s own
+  default-branch-only evaluation (AG-CI-018) would be a real, reusable check
+  for this whole failure class; not built in this pass -- recorded here per
+  AG-VAL-028 rather than left silently unautomated.
 - **`tests/bats/merge_utilities_sbom_components.bats`'s nano/coreutils-leak loop
   assertion used bare `!` instead of `run !`** (Refs #1095, fixed by PR #1799) --
   Bash/Bats exempt `!`-negated commands from the error trap, so a leak on any
