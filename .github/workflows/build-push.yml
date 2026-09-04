@@ -6595,10 +6595,9 @@ jobs:
 
   trivy-scan-amd64:
     # What: GitHub-hosted Trivy scan of build's pushed amd64 digest.
-    # Why: self-hosted DB downloads failed (issues #1806, #1807);
-    #   ubuntu-latest reaches the real Trivy DB mirrors reliably. The
-    #   arm64 leg already scans on ubuntu-24.04-arm inside build-arm64
-    #   (Issue #592) and needs no change here.
+    # Why: self-hosted DB downloads failed unreliably; ubuntu-latest
+    #   reaches the real Trivy DB mirrors reliably. build-arm64's own
+    #   scan already runs GitHub-hosted and needs no change here.
     # From: Issue #1095
     name: Trivy scan (amd64, hosted)
     needs: build

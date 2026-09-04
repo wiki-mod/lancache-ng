@@ -429,19 +429,19 @@ require_grep 'bash scripts/untracked/require-image-platforms\.sh "\$image" "\$RE
 require_grep 'is missing required platform' \
   scripts/untracked/require-image-platforms.sh \
   'the shared platform coverage guard must fail closed when a release image misses a required platform'
-# What: checks pushed-digest scan cache on build-arm64.
+# What: checks pushed-digest scans use the shared exact-digest action.
 # Why: container-scan no longer scans locally; Trivy enforces it.
-# From: Issue #1095 | PR #1501.
-#
-# What: old per-job cache-dir isolation replaced by shared dir+lock.
-# Why: shared NFS DB fixes the redundant re-download outage.
-# From: Issue #1095 | PR #1747
-require_grep 'uses: \./\.github/actions/trivy-cache-dir' \
+# From: Issue #1095
+require_grep 'uses: \./\.github/actions/trivy-scan-exact-digest' \
   .github/workflows/build-push.yml \
-  'the pushed per-service digest scan must resolve its Trivy DB cache directory via trivy-cache-dir (shared NFS + real local-disk fallback, never tmpfs; see #904, superseded by Issue #1095/#912)'
-require_grep 'uses: \./\.github/actions/trivy-db-ensure-fresh' \
+  'the pushed per-service digest scan must use the shared trivy-scan-exact-digest action, not a bespoke scan invocation'
+# What: checks the amd64 scan runs in its own GitHub-hosted job.
+# Why: self-hosted Trivy DB downloads failed unreliably; no self-
+#   hosted job in this file may own that scan again silently.
+# From: Issue #1095
+require_grep '^  trivy-scan-amd64:' \
   .github/workflows/build-push.yml \
-  'the pushed per-service digest scan must refresh its shared Trivy DB via the lock-guarded trivy-db-ensure-fresh action, the mechanism that now provides #904s concurrent-writer safety'
+  'the amd64 pushed-digest scan must run in its own GitHub-hosted job (trivy-scan-amd64), not inline inside the self-hosted build job'
 # Keep release verification aligned with the canonical first-party service
 # set plus the immutable stack pointer (#1428 added syslog, #1556 added
 # utilities, both for the same reason the runtime_images/Dockerfile loops
