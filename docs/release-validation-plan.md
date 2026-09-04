@@ -300,6 +300,21 @@ re-verified live: `bats tests/bats/merge_utilities_sbom_components.bats` (15 cas
 including a new `dhcp-proxy`-specific regression test asserting curl is absent there)
 and `bats tests/bats/select_utilities_image.bats` both pass.
 
+**Third correction (2026-09-04, Issue #1781/PR #1783) -- this entire standing
+check is retired, not merely corrected again:** PR #1783 removed the shared
+`utilities` image and `services/utilities/Dockerfile` entirely. Every former
+consumer now `apk add`s its own copy of what it used to `COPY --from=
+utilities-tools`, so each service's own Trivy SBOM scan already sees exactly
+the packages that service actually installs -- there is no longer a second,
+separate `utilities` SBOM to merge a filtered subset of, and no more
+over/under-reporting class for a merge step to get wrong. `release-sbom`'s
+"Merge utilities components"/"Generate utilities image SBOM for component
+merge" steps, `scripts/untracked/merge-utilities-sbom-components.sh`, and
+`tests/bats/merge_utilities_sbom_components.bats` were all deleted in the
+same PR. The table row below and this section's two prior corrections stay
+in place as the historical record of the incident and its fixes; the
+`bats`/script paths they name no longer exist on disk as of this PR.
+
 ---
 
 ## Part B — Stack Test Plan
@@ -1847,7 +1862,6 @@ omitted):**
 | `scripts/untracked/simulations/setup-reset-dns-config-simulation.sh` | Real CLI-driven PowerDNS zone rollback (PR #1152) |
 | `scripts/untracked/simulations/setup-reset-kea-config-simulation.sh` | Real CLI-driven Kea config rollback |
 | `scripts/untracked/generate-vex.sh` / `scripts/tracked/check-vex-drift.sh` | OpenVEX document reproducibility and drift detection (PR #1194) |
-| `scripts/untracked/merge-utilities-sbom-components.sh` / `tests/bats/merge_utilities_sbom_components.bats` | Per-service utilities apk-package allowlist for `release-sbom`'s component merge stays scoped to what each consumer's Dockerfile actually COPY's (Issue #1613/#1095) |
 | `tests/bats/setup_update_idempotence.bats` (first `@test`) | `.env` key-drift guard (PR #1199) |
 | `scripts/tracked/check-idempotence-test-coverage.sh` | Every stateful config-writer has repeat-run/idempotence test coverage |
 | `scripts/tracked/check-bats-path-filter-coverage.sh` | Every real bats dependency is covered by `build-tools.yml`'s path filters |
