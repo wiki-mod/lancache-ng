@@ -957,6 +957,9 @@ jobs:
           subject-name: ${{ env.BUILD_TOOLS_IMAGE }}
           subject-digest: ${{ steps.merged-digest.outputs.digest }}
 
+      # What: :nightly only reachable via a real current_dev-ref run.
+      # Why: schedule always resolves REF_NAME to the default branch.
+      # From: Issue #1095
       - name: Promote mutable tags from the attested digest
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
