@@ -329,21 +329,7 @@ The musl cross-compilation support already provided by the Debian build-tools st
 
 Issue #1095 remains the tracking context for the build-tools base-OS decision. The completed evaluation in Issue #815 and related implementation work establish candidate feasibility but MUST NOT be treated as authorization to switch the default. Any change to the default build-tools base OS, active CI image, or corresponding image channel MUST receive explicit maintainer approval.
 
-- **[AG-KD-010]** First-party consumers of the shared `utilities` image MUST use the mutable tag `ghcr.io/wiki-mod/lancache-ng/utilities:latest` and MUST NOT pin that image by digest. This is an explicit maintainer-approved exception to immutable-image pinning, not an omission or temporary fallback.
-
-The required consumers are `services/proxy`, `services/dns`, `services/dhcp`, `services/dhcp-proxy`, `services/ntp`, `services/ui`, `services/watchdog`, and `tools/build-tools`. Each MUST use:
-
-`FROM ghcr.io/wiki-mod/lancache-ng/utilities:latest`
-
-A hardcoded `utilities@sha256:<digest>`, per-consumer digest variable, parallel pinning mechanism, or equivalent immutable reference MUST NOT be introduced unless the maintainer explicitly changes this policy.
-
-The mutable tag is intentional because no repository mechanism currently maintains or validates synchronized `utilities` digest pins across all consumers. Consumers MUST therefore receive the most recently published `utilities:latest` image on their next build without requiring coordinated Dockerfile edits or a separate repinning step.
-
-This policy explicitly accepts reduced build reproducibility for automatic shared-tool currency and synchronized consumption across all first-party consumers. The mutable tag MUST NOT be described or "fixed" as accidental staleness or missing digest hardening.
-
-Because a regression in `utilities:latest` can affect every consumer on its next build, changes to `services/utilities/Dockerfile` MUST receive the same applicable build, smoke-test, validation, and review scrutiny as any other shared first-party base-layer change before merge.
-
-Digest pinning for `utilities` MUST NOT be silently reintroduced as a safer default. Any change away from `:latest` requires an explicit maintainer decision.
+- **[AG-KD-010]** *Retired.* This rule governed first-party consumers of the shared `utilities` image (the mutable `utilities:latest`-tag exception to digest pinning). Issue #1781 removed that image entirely — each former consumer now installs its own copy of what it used to `COPY --from=` — so the rule no longer applies. The ID is retained as a historical marker and MUST NOT be reused.
 
 ## CDN Domains, First-time Setup, IPv6
 
