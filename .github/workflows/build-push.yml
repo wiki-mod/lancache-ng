@@ -221,6 +221,12 @@ jobs:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Select immutable build-tools image
+        env:
+          # What: authenticate the GHCR pull (github.actor/TOKEN).
+          # Why: strict published pull needs creds, not anon.
+          # From: Issue #1095
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           # What: assigns the resolved image to a local before printf.
