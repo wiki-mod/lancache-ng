@@ -54,13 +54,36 @@ RUN set -eu; \
     chmod +x /usr/local/bin/lancache-rustc-wrapper
 
 ARG CARGO_BUILD_JOBS=
+# What: empty default; resolve_cargo_profile_overrides fails closed.
+# Why: no fallback value, same contract as CARGO_BUILD_JOBS above.
+# From: Issue #1095
+ARG PROJECT_CARGO_LTO=
+ARG PROJECT_CARGO_CODEGENUNIT=
 # What: redeclares BUILD_TOOLS_IMAGE for RUN stage visibility.
 # Why: configure_ccache() folds it into the cache key.
 # From: Issue #887
 ARG BUILD_TOOLS_IMAGE
 
 WORKDIR /build
-COPY nats-subscriber/ .
+COPY Cargo.toml Cargo.lock ./
+COPY services/dns/nats-subscriber/Cargo.toml services/dns/nats-subscriber/Cargo.toml
+COPY services/ui/Cargo.toml services/ui/Cargo.toml
+COPY services/warmer/Cargo.toml services/warmer/Cargo.toml
+COPY services/watchdog/Cargo.toml services/watchdog/Cargo.toml
+COPY tools/pxe-client-probe/Cargo.toml tools/pxe-client-probe/Cargo.toml
+# What: stub targets for workspace members not built here.
+# Why: cargo loads every member manifest to resolve deps.
+# From: Issue #1095
+RUN mkdir -p services/ui/src services/warmer/src \
+      services/watchdog/src tools/pxe-client-probe/src \
+    && printf 'fn main() {}\n' > services/ui/src/main.rs \
+    && : > services/ui/src/lib.rs \
+    && printf 'fn main() {}\n' > services/warmer/src/main.rs \
+    && : > services/warmer/src/lib.rs \
+    && printf 'fn main() {}\n' > services/watchdog/src/main.rs \
+    && : > services/watchdog/src/lib.rs \
+    && printf 'fn main() {}\n' > tools/pxe-client-probe/src/main.rs
+COPY services/dns/nats-subscriber/src services/dns/nats-subscriber/src
 # The shell functions defined inside this RUN (in call order):
 #   configure_sccache      - opt-in cache wrapper, only if a sccache secret was mounted.
 #   configure_distcc       - opt-in distributed compile, only if a distcc hosts secret was
@@ -111,6 +134,9 @@ COPY nats-subscriber/ .
 #     legitimately hits instead of writing; without this, the probe misclassifies a genuine
 #     cache hit as a write failure and disables ccache for the whole build.
 #     From: Issue #887
+#   resolve_cargo_profile_overrides - fails closed if PROJECT_CARGO_LTO/
+#                            PROJECT_CARGO_CODEGENUNIT is unset; exports both as
+#                            CARGO_PROFILE_RELEASE_* before run_cargo_build is called.
 #   resolve_cargo_jobs     - CARGO_BUILD_JOBS if set, else nproc-2 floored at 4; now also
 #                            echoes the resolved value and its source (explicit vs.
 #                            auto-detected) to the build log.
@@ -274,6 +300,18 @@ RUN --mount=type=secret,id=sccache_redis_url \
         fi; \
       fi; \
     }; \
+    resolve_cargo_profile_overrides() { \
+      lto="${PROJECT_CARGO_LTO:-}"; \
+      cgu="${PROJECT_CARGO_CODEGENUNIT:-}"; \
+      if [ -z "$lto" ]; then echo "PROJECT_CARGO_LTO is required (no in-file/build-arg default; Issue #1095, PR #1796 review 5109560874)" >&2; exit 1; fi; \
+      case "$lto" in off|thin|fat|true|false) ;; *) echo "PROJECT_CARGO_LTO must be one of: off, thin, fat, true, false (got '$lto')" >&2; exit 1;; esac; \
+      if [ -z "$cgu" ]; then echo "PROJECT_CARGO_CODEGENUNIT is required (no in-file/build-arg default; Issue #1095, PR #1796 review 5109560874)" >&2; exit 1; fi; \
+      case "$cgu" in ''|*[!0-9]*) echo "PROJECT_CARGO_CODEGENUNIT must be a positive integer (got '$cgu')" >&2; exit 1;; esac; \
+      if [ "$cgu" -le 0 ]; then echo "PROJECT_CARGO_CODEGENUNIT must be greater than zero" >&2; exit 1; fi; \
+      export CARGO_PROFILE_RELEASE_LTO="$lto"; \
+      export CARGO_PROFILE_RELEASE_CODEGEN_UNITS="$cgu"; \
+      echo "[INFO] using CARGO_PROFILE_RELEASE_LTO=$lto CARGO_PROFILE_RELEASE_CODEGEN_UNITS=$cgu (from PROJECT_CARGO_LTO/PROJECT_CARGO_CODEGENUNIT)." >&2; \
+    }; \
     resolve_cargo_jobs() { \
       jobs="${CARGO_BUILD_JOBS:-}"; \
       if [ -z "$jobs" ]; then \
@@ -292,7 +330,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     run_cargo_build() { \
       cargo_log="$(mktemp)"; \
       cargo_status_file="$(mktemp)"; \
-      { set +e; cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" 2>&1; echo "$?" >"$cargo_status_file"; set -e; } | tee "$cargo_log"; \
+      { set +e; cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" -p nats-subscriber 2>&1; echo "$?" >"$cargo_status_file"; set -e; } | tee "$cargo_log"; \
       cargo_status="$(cat "$cargo_status_file")"; \
       rm -f "$cargo_status_file"; \
       if [ "$cargo_status" = "0" ]; then rm -f "$cargo_log"; return 0; fi; \
@@ -300,7 +338,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
         disable_ccache; \
         echo "[INFO] ccache build path unavailable; retrying with plain distcc (no cache layer)." >&2; \
         ccache_retry_status_file="$(mktemp)"; \
-        { set +e; cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" 2>&1; echo "$?" >"$ccache_retry_status_file"; set -e; } | tee -a "$cargo_log"; \
+        { set +e; cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" -p nats-subscriber 2>&1; echo "$?" >"$ccache_retry_status_file"; set -e; } | tee -a "$cargo_log"; \
         cargo_status="$(cat "$ccache_retry_status_file")"; \
         rm -f "$ccache_retry_status_file"; \
         if [ "$cargo_status" = "0" ]; then \
@@ -314,7 +352,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
         disable_distcc; \
         unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
         echo "[INFO] distcc build path unavailable; retrying with normal local C compiler." >&2; \
-        if cargo build -j "$cargo_jobs" --release --locked --target "$musl_target"; then \
+        if cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" -p nats-subscriber; then \
           echo "[INFO] normal local C compiler fallback completed." >&2; \
           rm -f "$cargo_log"; \
           return 0; \
@@ -326,7 +364,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
         unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
         echo "[INFO] sccache build path unavailable; retrying with sccache disabled." >&2; \
         rm -f "$cargo_log"; \
-        if cargo build -j "$cargo_jobs" --release --locked --target "$musl_target"; then \
+        if cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" -p nats-subscriber; then \
           echo "[INFO] sccache-disabled fallback completed." >&2; \
           return 0; \
         fi; \
@@ -339,6 +377,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     configure_sccache; \
     configure_distcc; \
     configure_ccache; \
+    resolve_cargo_profile_overrides; \
     cargo_jobs="$(resolve_cargo_jobs)"; \
     run_cargo_build; \
     # What: dumps ccache-s, checks for mid-build Redis errors.
@@ -638,15 +677,15 @@ RUN mkdir -p /etc/pdns/auth /var/lib/powerdns /var/run/pdns \
 
 COPY --from=subscriber-builder /build/nats-subscriber-out /usr/local/bin/nats-subscriber
 
-COPY recursor.conf.template /etc/pdns/recursor.conf.template
-COPY pdns.conf.template /etc/pdns/auth/pdns.conf.template
-COPY recursor.lua /etc/pdns/recursor.lua
-COPY filter-aaaa.lua /etc/pdns/filter-aaaa.lua
-COPY cdn-domains.txt /etc/pdns/cdn-domains.txt
+COPY services/dns/recursor.conf.template /etc/pdns/recursor.conf.template
+COPY services/dns/pdns.conf.template /etc/pdns/auth/pdns.conf.template
+COPY services/dns/recursor.lua /etc/pdns/recursor.lua
+COPY services/dns/filter-aaaa.lua /etc/pdns/filter-aaaa.lua
+COPY services/dns/cdn-domains.txt /etc/pdns/cdn-domains.txt
 # Vendored gsqlite3 schema (see this file's own header comment for why
 # Alpine's pdns-backend-sqlite3 package needs it where Debian's didn't).
-COPY schema.sqlite3.sql /usr/share/lancache-ng/schema.sqlite3.sql
-COPY entrypoint.sh /entrypoint.sh
+COPY services/dns/schema.sqlite3.sql /usr/share/lancache-ng/schema.sqlite3.sql
+COPY services/dns/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 # What: fail build if CI proxy CA leaked into image

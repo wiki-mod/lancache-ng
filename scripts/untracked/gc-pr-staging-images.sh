@@ -39,6 +39,28 @@ services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)
 # From: Issue #1095
 max_deletions_per_service="${GC_MAX_DELETIONS_PER_SERVICE:-40}"
 
+# What: reserves Pass 1.5/2 slots from the per-run cap.
+# Why: Pass 1 backlog can otherwise exhaust the cap first.
+# From: Issue #1095
+orphan_reserve_per_service="${GC_ORPHAN_RESERVE_PER_SERVICE:-20}"
+
+# What: splits a per-run cap into Pass 1 + orphan reserve.
+# Why: shared by the default init and per-worker recompute.
+# From: Issue #1095
+gc_compute_pass1_deletion_cap() {
+  local effective_cap="$1" reserve="$2"
+  effective_orphan_reserve="$reserve"
+  if (( effective_orphan_reserve >= effective_cap )); then
+    effective_orphan_reserve=$(( effective_cap / 2 ))
+    echo "::notice::Effective per-run cap ($effective_cap) is too small for the configured GC_ORPHAN_RESERVE_PER_SERVICE ($reserve); using $effective_orphan_reserve instead so Pass 1 keeps at least half its own cap." >&2
+  fi
+  pass1_deletion_cap=$(( effective_cap - effective_orphan_reserve ))
+}
+# What: gives process_service() a valid cap pre-worker.
+# Why: Pass 1's cap check reads it unconditionally.
+# From: Issue #1095
+gc_compute_pass1_deletion_cap "$max_deletions_per_service" "$orphan_reserve_per_service"
+
 # What: caps destructive work across entire run.
 # Why: per-package cap must not multiply into unbounded API drain.
 # From: Issue #1095
@@ -344,6 +366,11 @@ process_service() {
   local -A retained_root_prefixes=() live_subject_digests=()
   local revalidate_status delete_description kind prefix
 
+  # What: recomputes the Pass 1/reserve split on every call.
+  # Why: a caller may change the cap after script-source time.
+  # From: Issue #1095
+  gc_compute_pass1_deletion_cap "$max_deletions_per_service" "$orphan_reserve_per_service"
+
   # What: production reuses JSONL inventory from filtered audit.
   # Why: avoids fetching multi-thousand-version packages twice.
   # From: Issue #1585 | PR #1586
@@ -423,16 +450,65 @@ process_service() {
     fi
   fi
 
-  # What: Pass 1 classifies closed-PR versions, collects children.
-  # Why: Pass 2 needs children digests for true orphan check.
+  # What: pre-collects manifest children, uncapped, first.
+  # Why: Pass 2 needs a complete children map, not partial.
+  # From: Issue #1095
+  if [[ "$orphan_phase_ok" == "1" ]]; then
+    local precollect_version_id precollect_tag_list precollect_digest precollect_manifest_json
+    local precollect_child_digest precollect_children_output
+    while IFS= read -r version_entry; do
+      [[ -z "$version_entry" ]] && continue
+      [[ "$orphan_phase_ok" == "1" ]] || break
+      if ! precollect_version_id="$(printf '%s' "$version_entry" | jq -r '.id' 2>&1)"; then
+        echo "::error::Failed to read a package version's id for $service via jq: $precollect_version_id"
+        had_errors=1
+        continue
+      fi
+      [[ -z "$precollect_version_id" || "$precollect_version_id" == "null" ]] && continue
+      if ! precollect_tag_list="$(printf '%s' "$version_entry" | jq -r '(.metadata.container.tags // [])[]' 2>&1)"; then
+        echo "::error::Failed to enumerate tags for $service version $precollect_version_id via jq: $precollect_tag_list"
+        had_errors=1
+        continue
+      fi
+      [[ -z "$precollect_tag_list" ]] && continue # untagged has no forward children to pre-collect
+
+      if ! precollect_digest="$(printf '%s' "$version_entry" | jq -r '.name' 2>&1)"; then
+        echo "::error::Failed to read $service version $precollect_version_id's own digest via jq: $precollect_digest"
+        had_errors=1
+        orphan_phase_ok=0
+        continue
+      fi
+      if ! precollect_manifest_json="$(ghcr_retry ghcr.io "" "" -- gcps_fetch_manifest "$service" "$precollect_digest" "$repo" "$registry_token")" \
+          || [[ -z "$precollect_manifest_json" ]] || ! gcps_manifest_looks_valid "$precollect_manifest_json"; then
+        echo "::error::Failed to fetch (or received an unrecognizable body for) $service digest $precollect_digest's own manifest -- disabling orphan classification for this service this run, since a partially-populated protected-digest set is more dangerous than none."
+        had_errors=1
+        orphan_phase_ok=0
+        continue
+      fi
+      if ! precollect_children_output="$(gcps_extract_manifest_children "$precollect_manifest_json")"; then
+        echo "::error::Failed to extract manifest children for $service digest $precollect_digest -- disabling orphan classification for this service this run."
+        had_errors=1
+        orphan_phase_ok=0
+        continue
+      fi
+      while IFS= read -r precollect_child_digest; do
+        [[ -z "$precollect_child_digest" ]] && continue
+        manifest_children_by_version["$precollect_version_id"]+="${precollect_child_digest}"$'\n'
+      done <<< "$precollect_children_output"
+    done <<< "$version_list"
+  fi
+
+  # What: Pass 1 deletes up to pass1_deletion_cap, then keeps.
+  # Why: Pass 1.5/2 must still run after Pass 1's own cap.
   # From: Issue #1095 | PR #1443
   local version_id tag_list planned_identity planned_digest planned_tags current_digest current_tags retention_candidate
+  local pass1_cap_reached=0
+  # What: tracks retention roots the Pass 1 sub-cap deferred.
+  # Why: stops Pass 1 backlog from spending the reserve.
+  # From: Issue #1095
+  local -A pass1_deferred_ids=()
   while IFS= read -r version_entry; do
     [[ -z "$version_entry" ]] && continue
-    if (( service_deletions >= max_deletions_per_service )); then
-      echo "::notice::$service reached its per-run deletion cap ($max_deletions_per_service); remaining versions are deferred without further candidate-specific API work."
-      return 0
-    fi
     if ! version_id="$(printf '%s' "$version_entry" | jq -r '.id' 2>&1)"; then
       echo "::error::Failed to read a package version's id for $service via jq: $version_id"
       had_errors=1
@@ -448,6 +524,19 @@ process_service() {
 
     if [[ -z "$tag_list" ]]; then
       continue # untagged -- classified in Pass 2 below, not here
+    fi
+
+    if (( pass1_cap_reached == 0 && service_deletions >= pass1_deletion_cap )); then
+      pass1_cap_reached=1
+      echo "::notice::$service reached its Pass 1 sub-cap ($pass1_deletion_cap of $max_deletions_per_service; $effective_orphan_reserve reserved for Pass 1.5/2 orphan cleanup); remaining closed-PR/retention-budget candidates are kept this run without further candidate-specific API work (their manifest children were already collected above, uncapped)."
+    fi
+    if (( pass1_cap_reached == 1 )); then
+      # What: marks a deferred retention root, not a PR tag.
+      # Why: only these can also match Pass 1.5's own delete test.
+      # From: Issue #1095
+      [[ -n "${retention_delete_candidates[$version_id]:-}" ]] && pass1_deferred_ids["$version_id"]=1
+      kept=$((kept + 1))
+      continue
     fi
 
     # What: sha256-<subject> tags excluded from forward child set.
@@ -508,42 +597,9 @@ process_service() {
       fi
     done <<< "$tag_list"
 
-
-    if [[ "$orphan_phase_ok" == "1" ]]; then
-      local version_digest manifest_json
-      # What: guarded assignment: `if ! version_digest=...`.
-      # Why: unguarded failure exits script under pipefail.
-      # From: Issue #1095 | PR #1443
-      if ! version_digest="$(printf '%s' "$version_entry" | jq -r '.name' 2>&1)"; then
-        echo "::error::Failed to read $service version $version_id's own digest via jq: $version_digest"
-        had_errors=1
-        orphan_phase_ok=0
-        version_digest=""
-      fi
-      if [[ -n "$version_digest" ]]; then
-        if ! manifest_json="$(ghcr_retry ghcr.io "" "" -- gcps_fetch_manifest "$service" "$version_digest" "$repo" "$registry_token")" \
-            || [[ -z "$manifest_json" ]] || ! gcps_manifest_looks_valid "$manifest_json"; then
-          echo "::error::Failed to fetch (or received an unrecognizable body for) $service digest $version_digest's own manifest -- disabling orphan classification for this service this run, since a partially-populated protected-digest set is more dangerous than none."
-          had_errors=1
-          orphan_phase_ok=0
-        else
-          local child_digest children_output
-          # What: extract_manifest_children failure treated as fetch fail.
-          # Why: incomplete set misclassifies manifests as orphaned.
-          # From: Issue #1095 | PR #1443
-          if ! children_output="$(gcps_extract_manifest_children "$manifest_json")"; then
-            echo "::error::Failed to extract manifest children for $service digest $version_digest -- disabling orphan classification for this service this run."
-            had_errors=1
-            orphan_phase_ok=0
-          else
-            while IFS= read -r child_digest; do
-              [[ -z "$child_digest" ]] && continue
-              manifest_children_by_version["$version_id"]+="${child_digest}"$'\n'
-            done <<< "$children_output"
-          fi
-        fi
-      fi
-    fi
+    # What: children were pre-collected in the pass above.
+    # Why: keeps this loop free of GHCR registry calls.
+    # From: Issue #1095
 
     if [[ "$protected" == "1" || ( "$has_closed_pr_tag" == "0" && "$retention_candidate" == "0" ) ]]; then
       kept=$((kept + 1))
@@ -672,6 +728,10 @@ process_service() {
       fi
       version_id="$(jq -r '.id' <<<"$version_entry")" || { had_errors=1; continue; }
       [[ -n "${deleted_version_ids[$version_id]:-}" ]] && continue
+      # What: skips a retention root Pass 1's own cap deferred.
+      # Why: keeps the Pass 1.5/2 reserve for its own candidates.
+      # From: Issue #1095
+      [[ -n "${pass1_deferred_ids[$version_id]:-}" ]] && continue
       tag_list="$(jq -r '.metadata.container.tags[]? // empty' <<<"$version_entry")" || { had_errors=1; continue; }
       [[ -n "$tag_list" ]] || continue
       candidate_digest="$(jq -r '.name' <<<"$version_entry")" || { had_errors=1; continue; }
@@ -842,6 +902,9 @@ process_service() {
 # From: Issue #1095
 gc_run_package_worker() {
   local service="$1" result_file="$2" package_deletion_cap="$3"
+  # What: overrides the per-service cap for this worker only.
+  # Why: process_service() itself recomputes the Pass 1 split.
+  # From: Issue #1095
   max_deletions_per_service="$package_deletion_cap"
   had_errors=0
   deleted=0
@@ -894,6 +957,13 @@ main() {
 
   [[ "$max_deletions_per_service" =~ ^[0-9]+$ ]] || {
     echo "::error::GC_MAX_DELETIONS_PER_SERVICE must be a non-negative integer."
+    exit 1
+  }
+  # What: format-only guard for GC_ORPHAN_RESERVE_PER_SERVICE.
+  # Why: the real clamp needs the post-quota effective cap.
+  # From: Issue #1095
+  [[ "$orphan_reserve_per_service" =~ ^[0-9]+$ ]] || {
+    echo "::error::GC_ORPHAN_RESERVE_PER_SERVICE must be a non-negative integer."
     exit 1
   }
   [[ "$max_deletions_total" =~ ^[0-9]+$ ]] || {

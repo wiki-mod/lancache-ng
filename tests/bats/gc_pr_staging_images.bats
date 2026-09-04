@@ -1164,7 +1164,7 @@ VERSIONS_JSON
     [ "$deleted" -eq 1 ]
     [ "$(wc -l <"$delete_log")" -eq 1 ]
     grep -F '/versions/51' "$delete_log"
-    ! grep -F '/versions/53' "$delete_log"
+    run ! grep -F '/versions/53' "$delete_log"
 }
 
 
@@ -1436,8 +1436,220 @@ VERSIONS_JSON
 
     [ "$deleted" -eq 1 ]
     [ "$(wc -l <"$pull_log")" -eq 2 ]
-    [ "$(grep -c 'reached its per-run deletion cap' "$run_log")" -eq 1 ]
+    # What: Pass 1 cap notice now names its sub-budget.
+    # Why: Pass 1 cap check no longer returns early.
+    # From: Issue #1095
+    [ "$(grep -c 'reached its Pass 1 sub-cap' "$run_log")" -eq 1 ]
     [ "$(wc -l <"$delete_log")" -eq 1 ]
+}
+
+# What: a Pass-1-deferred parent protects its own child.
+# Why: guards a false-orphan delete of that child.
+# From: Issue #1095
+@test "process_service: Pass 1 pre-collects manifest children even for a version deferred by its own cap" {
+    max_deletions_per_service=2
+    orphan_reserve_per_service=1
+    parent_kept_digest="sha256:$(printf '2%.0s' {1..64})"
+    child_digest="sha256:$(printf '3%.0s' {1..64})"
+    deleted_digest="sha256:$(printf '1%.0s' {1..64})"
+    delete_log="$BATS_TEST_TMPDIR/hazard-deletes"
+    : >"$delete_log"
+    export delete_log parent_kept_digest child_digest deleted_digest
+
+    gh() {
+        if [[ "$1" == "api" && "$2" == "--paginate" ]]; then
+            printf '[
+  {"id":301,"name":"%s","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["pr-901-sha-aaaaaaa"]}}},
+  {"id":302,"name":"%s","created_at":"2020-01-02T00:00:00Z","metadata":{"container":{"tags":["pr-902-sha-bbbbbbb"]}}},
+  {"id":303,"name":"%s","created_at":"2020-01-03T00:00:00Z","metadata":{"container":{"tags":[]}}}
+]\n' "$deleted_digest" "$parent_kept_digest" "$child_digest"
+            return 0
+        fi
+        if [[ "$1" == "api" && "$2" == repos/*/pulls/* ]]; then
+            printf '{"state":"closed"}\n'
+            return 0
+        fi
+        if [[ "$1" == "api" && "$2" == "-X" && "$3" == "DELETE" ]]; then
+            echo "$4" >>"$delete_log"
+            return 0
+        fi
+        echo "unexpected gh call: $*" >&2
+        return 1
+    }
+    export -f gh
+    curl() {
+        [[ "$*" == *"ghcr.io/token"* ]] && { printf '{"token":"faketoken"}\n'; return 0; }
+        if [[ "$*" == *"$parent_kept_digest"* ]]; then
+            printf '{"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"digest":"%s"}]}\n' "$child_digest"
+            return 0
+        fi
+        printf '{"mediaType":"application/vnd.oci.image.manifest.v1+json"}\n'
+    }
+    export -f curl
+    github_api_get_with_retry() {
+        if [[ "$1" == *"/versions/301"* ]]; then
+            printf '{"id":301,"name":"%s","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["pr-901-sha-aaaaaaa"]}}}\n' "$deleted_digest" >"$2"
+            return 0
+        fi
+        echo "unexpected revalidation call: $1" >&2
+        return 1
+    }
+
+    process_service proxy
+
+    [ "$deleted" -eq 1 ]
+    [ "$kept" -eq 2 ]
+    grep -q "/versions/301$" "$delete_log"
+    run ! grep -q "/versions/302$" "$delete_log"
+    run ! grep -q "/versions/303$" "$delete_log"
+}
+
+# What: a cap-deferred root must not leak into Pass 1.5.
+# Why: an attestation tag can also pass Pass 1.5's own test.
+# From: Issue #1095
+@test "process_service: a retention root deferred by the Pass 1 cap is not also spent by Pass 1.5" {
+    max_deletions_per_service=2
+    orphan_reserve_per_service=1
+    deleted_digest="sha256:$(printf '5%.0s' {1..64})"
+    deferred_digest="sha256:$(printf '6%.0s' {1..64})"
+    subject_hex="$(printf 'e%.0s' {1..64})"
+    delete_log="$BATS_TEST_TMPDIR/reserve-leak-deletes"
+    : >"$delete_log"
+    export delete_log deleted_digest deferred_digest subject_hex
+
+    retention_delete_candidates[502]="${deferred_digest}"$'\t'"sha256-${subject_hex}"
+
+    gh() {
+        if [[ "$1" == "api" && "$2" == "--paginate" ]]; then
+            printf '[
+  {"id":501,"name":"%s","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["pr-501-sha-aaaaaaa"]}}},
+  {"id":502,"name":"%s","created_at":"2020-01-02T00:00:00Z","metadata":{"container":{"tags":["sha256-%s"]}}}
+]\n' "$deleted_digest" "$deferred_digest" "$subject_hex"
+            return 0
+        fi
+        if [[ "$1" == "api" && "$2" == repos/*/pulls/* ]]; then
+            printf '{"state":"closed"}\n'
+            return 0
+        fi
+        if [[ "$1" == "api" && "$2" == "-X" && "$3" == "DELETE" ]]; then
+            echo "$4" >>"$delete_log"
+            return 0
+        fi
+        echo "unexpected gh call: $*" >&2
+        return 1
+    }
+    export -f gh
+    curl() {
+        [[ "$*" == *"ghcr.io/token"* ]] && { printf '{"token":"faketoken"}\n'; return 0; }
+        printf '{"mediaType":"application/vnd.oci.image.manifest.v1+json"}\n'
+    }
+    export -f curl
+    github_api_get_with_retry() {
+        if [[ "$1" == *"/versions/501"* ]]; then
+            printf '{"id":501,"name":"%s","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["pr-501-sha-aaaaaaa"]}}}\n' "$deleted_digest" >"$2"
+            return 0
+        fi
+        # What: matching revalidation, so a regression really deletes.
+        # Why: id 502 must survive by never being asked, not by luck.
+        # From: Issue #1095
+        if [[ "$1" == *"/versions/502"* ]]; then
+            printf '{"id":502,"name":"%s","created_at":"2020-01-02T00:00:00Z","metadata":{"container":{"tags":["sha256-%s"]}}}\n' "$deferred_digest" "$subject_hex" >"$2"
+            return 0
+        fi
+        echo "unexpected revalidation call: $1" >&2
+        return 1
+    }
+
+    process_service proxy
+
+    [ "$deleted" -eq 1 ]
+    grep -q "/versions/501$" "$delete_log"
+    run ! grep -q "/versions/502$" "$delete_log"
+}
+
+# What: exercises the real quota -> worker -> Pass 1/2 path.
+# Why: proves reserve survives main()'s own override.
+# From: Issue #1095
+@test "gc_run_package_worker: orphan reserve survives the quota override, Pass 2 gets its reserved share" {
+    orphan_reserve_per_service=2
+    result_file="$BATS_TEST_TMPDIR/worker-result"
+    run_log="$BATS_TEST_TMPDIR/worker-run.log"
+    delete_log="$BATS_TEST_TMPDIR/worker-deletes"
+    : >"$delete_log"
+    export delete_log
+
+    # What: stubs the read-only retention-audit subprocess.
+    # Why: this fixture has no ordinary-root-budget candidates.
+    # From: Issue #1095
+    gc_build_service_retention_plan() {
+        retention_delete_candidates=()
+        retention_package_absent=0
+        retention_versions_snapshot=""
+        return 0
+    }
+
+    fixture_versions_json='['
+    for i in 1 2 3 4 5 6; do
+        pr=$((900 + i))
+        digest="sha256:$(printf 'a%.0s' {1..63})${i}"
+        fixture_versions_json+="{\"id\":$((100 + i)),\"name\":\"$digest\",\"created_at\":\"2020-01-0${i}T00:00:00Z\",\"metadata\":{\"container\":{\"tags\":[\"pr-${pr}-sha-abcdef${i}\"]}}},"
+    done
+    for i in 1 2 3; do
+        digest="sha256:$(printf 'b%.0s' {1..63})${i}"
+        fixture_versions_json+="{\"id\":$((200 + i)),\"name\":\"$digest\",\"created_at\":\"2020-02-0${i}T00:00:00Z\",\"metadata\":{\"container\":{\"tags\":[]}}},"
+    done
+    fixture_versions_json="${fixture_versions_json%,}]"
+    export fixture_versions_json
+
+    gh() {
+        if [[ "$1" == "api" && "$2" == "--paginate" ]]; then
+            printf '%s\n' "$fixture_versions_json"
+            return 0
+        fi
+        if [[ "$1" == "api" && "$2" == repos/*/pulls/* ]]; then
+            printf '{"state":"closed"}\n'
+            return 0
+        fi
+        if [[ "$1" == "api" && "$2" == "-X" && "$3" == "DELETE" ]]; then
+            echo "$4" >>"$delete_log"
+            return 0
+        fi
+        echo "unexpected gh call: $*" >&2
+        return 1
+    }
+    export -f gh
+    curl() {
+        [[ "$*" == *"ghcr.io/token"* ]] && { printf '{"token":"faketoken"}\n'; return 0; }
+        printf '{"mediaType":"application/vnd.oci.image.manifest.v1+json"}\n'
+    }
+    export -f curl
+    github_api_get_with_retry() {
+        local id
+        [[ "$1" =~ /versions/([0-9]+)$ ]] || return 1
+        id="${BASH_REMATCH[1]}"
+        printf '%s' "$fixture_versions_json" | jq --argjson id "$id" '.[] | select(.id == $id)' >"$2"
+    }
+
+    gc_run_package_worker proxy "$result_file" 6 >"$run_log"
+
+    [ -s "$result_file" ]
+    IFS=$'\t' read -r worker_had_errors worker_deleted worker_kept worker_would_delete worker_pr_failures worker_not_found <"$result_file"
+    [ "$worker_had_errors" -eq 0 ]
+    [ "$worker_deleted" -eq 6 ]
+    [ "$(wc -l <"$delete_log")" -eq 6 ]
+    # Pass 1 sub-cap: 6 - 2 reserved = 4.
+    for i in 101 102 103 104; do
+        grep -q "/versions/${i}$" "$delete_log"
+    done
+    for i in 105 106; do
+        run ! grep -q "/versions/${i}$" "$delete_log"
+    done
+    # Pass 2 gets 2 reserved slots, then hits the cap.
+    grep -q "/versions/201$" "$delete_log"
+    grep -q "/versions/202$" "$delete_log"
+    run ! grep -q "/versions/203$" "$delete_log"
+    [ "$(grep -c 'untagged, unreferenced orphan digest' "$run_log")" -eq 2 ]
+    [ "$(grep -c 'only closed-PR staging tags' "$run_log")" -eq 4 ]
 }
 
 # What: dry-run performs the same fresh validation but issues zero DELETEs.

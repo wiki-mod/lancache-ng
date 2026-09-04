@@ -127,11 +127,14 @@ fn parse_args() -> Result<Args> {
 // then complemented. A trailing odd byte is padded with a zero low byte.
 fn internet_checksum(data: &[u8]) -> u16 {
     let mut sum: u32 = 0;
-    let mut chunks = data.chunks_exact(2);
-    for pair in &mut chunks {
-        sum += u16::from_be_bytes([pair[0], pair[1]]) as u32;
+    // What: as_chunks, not chunks_exact, for constant size.
+    // Why: clippy::chunks_exact_to_as_chunks lint (1.98).
+    // From: Issue #1095
+    let (chunks, remainder) = data.as_chunks::<2>();
+    for pair in chunks {
+        sum += u16::from_be_bytes(*pair) as u32;
     }
-    if let [last] = chunks.remainder() {
+    if let [last] = remainder {
         sum += (*last as u32) << 8;
     }
     while (sum >> 16) != 0 {
@@ -472,7 +475,12 @@ fn emit_reply_fields(payload: &[u8]) {
         // Option 6 packs one or more 4-byte servers into a single TLV. Emit
         // every 4-byte chunk, comma-joined -- dropping all but the first is
         // exactly the bug issue #705's DNS check exists to catch.
-        let servers: Vec<String> = dns.chunks_exact(4).map(format_ipv4).collect();
+        let servers: Vec<String> = dns
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| format_ipv4(c))
+            .collect();
         if !servers.is_empty() {
             emit("dns_servers", &servers.join(","));
         }
@@ -596,7 +604,12 @@ mod tests {
         let payload = sample_reply(0x11223344);
         let options = &payload[BOOTP_HEADER_LEN + 4..];
         let dns = dhcp_option(options, 6).expect("option 6 present");
-        let servers: Vec<String> = dns.chunks_exact(4).map(format_ipv4).collect();
+        let servers: Vec<String> = dns
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| format_ipv4(c))
+            .collect();
         assert_eq!(servers.join(","), "172.29.5.10,172.29.5.11");
     }
 
