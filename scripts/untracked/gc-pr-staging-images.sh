@@ -503,6 +503,10 @@ process_service() {
   # From: Issue #1095 | PR #1443
   local version_id tag_list planned_identity planned_digest planned_tags current_digest current_tags retention_candidate
   local pass1_cap_reached=0
+  # What: tracks retention roots the Pass 1 sub-cap deferred.
+  # Why: stops Pass 1 backlog from spending the reserve.
+  # From: Issue #1095
+  local -A pass1_deferred_ids=()
   while IFS= read -r version_entry; do
     [[ -z "$version_entry" ]] && continue
     if ! version_id="$(printf '%s' "$version_entry" | jq -r '.id' 2>&1)"; then
@@ -527,6 +531,10 @@ process_service() {
       echo "::notice::$service reached its Pass 1 sub-cap ($pass1_deletion_cap of $max_deletions_per_service; $effective_orphan_reserve reserved for Pass 1.5/2 orphan cleanup); remaining closed-PR/retention-budget candidates are kept this run without further candidate-specific API work (their manifest children were already collected above, uncapped)."
     fi
     if (( pass1_cap_reached == 1 )); then
+      # What: marks a deferred retention root, not a PR tag.
+      # Why: only these can also match Pass 1.5's own delete test.
+      # From: Issue #1095
+      [[ -n "${retention_delete_candidates[$version_id]:-}" ]] && pass1_deferred_ids["$version_id"]=1
       kept=$((kept + 1))
       continue
     fi
@@ -720,6 +728,10 @@ process_service() {
       fi
       version_id="$(jq -r '.id' <<<"$version_entry")" || { had_errors=1; continue; }
       [[ -n "${deleted_version_ids[$version_id]:-}" ]] && continue
+      # What: skips a retention root Pass 1's own cap deferred.
+      # Why: keeps the Pass 1.5/2 reserve for its own candidates.
+      # From: Issue #1095
+      [[ -n "${pass1_deferred_ids[$version_id]:-}" ]] && continue
       tag_list="$(jq -r '.metadata.container.tags[]? // empty' <<<"$version_entry")" || { had_errors=1; continue; }
       [[ -n "$tag_list" ]] || continue
       candidate_digest="$(jq -r '.name' <<<"$version_entry")" || { had_errors=1; continue; }

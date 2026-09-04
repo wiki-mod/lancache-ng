@@ -1504,6 +1504,69 @@ VERSIONS_JSON
     ! grep -q "/versions/303$" "$delete_log"
 }
 
+# What: a cap-deferred root must not leak into Pass 1.5.
+# Why: an attestation tag can also pass Pass 1.5's own test.
+# From: Issue #1095
+@test "process_service: a retention root deferred by the Pass 1 cap is not also spent by Pass 1.5" {
+    max_deletions_per_service=2
+    orphan_reserve_per_service=1
+    deleted_digest="sha256:$(printf '5%.0s' {1..64})"
+    deferred_digest="sha256:$(printf '6%.0s' {1..64})"
+    subject_hex="$(printf 'e%.0s' {1..64})"
+    delete_log="$BATS_TEST_TMPDIR/reserve-leak-deletes"
+    : >"$delete_log"
+    export delete_log deleted_digest deferred_digest subject_hex
+
+    retention_delete_candidates[502]="${deferred_digest}"$'\t'"sha256-${subject_hex}"
+
+    gh() {
+        if [[ "$1" == "api" && "$2" == "--paginate" ]]; then
+            printf '[
+  {"id":501,"name":"%s","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["pr-501-sha-aaaaaaa"]}}},
+  {"id":502,"name":"%s","created_at":"2020-01-02T00:00:00Z","metadata":{"container":{"tags":["sha256-%s"]}}}
+]\n' "$deleted_digest" "$deferred_digest" "$subject_hex"
+            return 0
+        fi
+        if [[ "$1" == "api" && "$2" == repos/*/pulls/* ]]; then
+            printf '{"state":"closed"}\n'
+            return 0
+        fi
+        if [[ "$1" == "api" && "$2" == "-X" && "$3" == "DELETE" ]]; then
+            echo "$4" >>"$delete_log"
+            return 0
+        fi
+        echo "unexpected gh call: $*" >&2
+        return 1
+    }
+    export -f gh
+    curl() {
+        [[ "$*" == *"ghcr.io/token"* ]] && { printf '{"token":"faketoken"}\n'; return 0; }
+        printf '{"mediaType":"application/vnd.oci.image.manifest.v1+json"}\n'
+    }
+    export -f curl
+    github_api_get_with_retry() {
+        if [[ "$1" == *"/versions/501"* ]]; then
+            printf '{"id":501,"name":"%s","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["pr-501-sha-aaaaaaa"]}}}\n' "$deleted_digest" >"$2"
+            return 0
+        fi
+        # What: matching revalidation, so a regression really deletes.
+        # Why: id 502 must survive by never being asked, not by luck.
+        # From: Issue #1095
+        if [[ "$1" == *"/versions/502"* ]]; then
+            printf '{"id":502,"name":"%s","created_at":"2020-01-02T00:00:00Z","metadata":{"container":{"tags":["sha256-%s"]}}}\n' "$deferred_digest" "$subject_hex" >"$2"
+            return 0
+        fi
+        echo "unexpected revalidation call: $1" >&2
+        return 1
+    }
+
+    process_service proxy
+
+    [ "$deleted" -eq 1 ]
+    grep -q "/versions/501$" "$delete_log"
+    ! grep -q "/versions/502$" "$delete_log"
+}
+
 # What: exercises the real quota -> worker -> Pass 1/2 path.
 # Why: proves reserve survives main()'s own override.
 # From: Issue #1095
