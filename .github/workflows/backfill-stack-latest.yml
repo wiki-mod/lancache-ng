@@ -26,26 +26,8 @@ on:
         required: true
 
 permissions:
-  # contents: write (widened from read, #897): scripts/lib/promote-lock.sh's
-  # acquire/release steps push/delete a dedicated refs/promote-lock/global
-  # ref to implement the cross-workflow mutex below -- see that file's own
-  # header comment and build-push.yml's `promote` job for the full
-  # reasoning. This ref is outside refs/heads/* and refs/tags/*, so it
-  # cannot touch protected branches or release tags.
   contents: write
   packages: write
-
-# REMOVED (#897): `latest` writes used to serialize with build-push.yml's
-# `promote` job via a shared workflow/job-level `concurrency:` group name
-# ("Build & Push-promote", #777). That primitive can silently cancel
-# whichever of the two workflows' runs is still queued (not yet running) the
-# moment the other one also requests the same group -- a real, confirmed gap
-# once #892 let multiple `promote`-reaching runs build in parallel. Real
-# mutual exclusion, still global across BOTH workflows (re-scoping either one
-# per-ref would reopen #777 -- a backfill racing a promotion for a different
-# ref), now comes from the SAME scripts/lib/promote-lock.sh git-ref lock
-# build-push.yml's `promote` job uses, acquired/released as explicit steps
-# below instead of relying on GitHub's own concurrency admission.
 defaults:
   run:
     shell: bash
@@ -54,13 +36,6 @@ jobs:
   backfill-latest:
     name: backfill latest from existing stack pointer
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    # AG-CI-016: every job needs an explicit bound, never GitHub's 360-minute
-    # default -- this job does real GHCR registry work (pull, multiple
-    # `docker buildx imagetools` calls per service) on a scarce self-hosted
-    # heavy runner, and holds the cross-workflow promote-lock ref for as
-    # long as it runs. 60 minutes matches gc-pr-staging-images.yml's own
-    # tuned budget for a comparably GHCR-heavy job (see that workflow's own
-    # comment on why 150 minutes was too permissive in practice).
     timeout-minutes: 60
     steps:
       - name: Require default branch dispatch
@@ -92,12 +67,6 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      # See build-push.yml's `promote` job for the full #897 rationale: this
-      # acquires the SAME global refs/promote-lock/global ref that job uses,
-      # so a manual backfill and an automatic promotion still can never move
-      # tags at the same time (the #777 property), without relying on
-      # GitHub's own concurrency admission (which can drop a queued run).
       - name: Acquire the cross-workflow promote lock
         env:
           GITHUB_RUN_ID: ${{ github.run_id }}
@@ -133,11 +102,6 @@ jobs:
           SOURCE_RELEASE_TAG: ${{ inputs.source_release_tag }}
           EXPECTED_SOURCE_TAG: ${{ inputs.expected_source_tag }}
           EXPECTED_SOURCE_COMMIT: ${{ inputs.expected_source_commit }}
-          # release/stack-images.yml declares every runtime service's "latest"
-          # channel (and the stack pointer) as linux/amd64 + linux/arm64; keep
-          # this in sync with that manifest so a backfill from an older
-          # amd64-only release tag cannot silently reset latest to an
-          # amd64-only stack and break arm64 installs on the default channel (#665).
           REQUIRED_PLATFORMS: linux/amd64,linux/arm64
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
@@ -147,11 +111,7 @@ jobs:
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
-          # Product stack latest backfill intentionally excludes build-tools:
-          # that tooling image has its own build/publish workflow and mutable
-          # channel, so mixing it here would make a stable product backfill race
-          # with normal toolchain refreshes.
-          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui)
+          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui cachehamster)
           source_stack="ghcr.io/${REPOSITORY}/stack:${SOURCE_RELEASE_TAG}"
           container_id=""
           stack_env=""
@@ -161,13 +121,6 @@ jobs:
           declare -A previous_refs=()
           promoted_targets=()
 
-          # Wrapped in ghcr_retry (#822): every caller of this helper in this
-          # workflow expects the image to actually exist (this is a manual,
-          # operator-confirmed recovery run against already-published
-          # releases, never a "might not be built yet" probe), so a transient
-          # 401 here is a pure retry candidate. The `|| true` callers below
-          # (previous_refs) tolerate genuine absence the same way
-          # promote/backfill's build-push.yml counterparts do.
           digest_for_image() {
             local image=$1 digest
 
@@ -286,22 +239,11 @@ jobs:
             printf -- '- Target channel: latest\n'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # #1241: this job's buildx builder is only ever used for the
-      # `docker buildx imagetools inspect/create` calls inside the
-      # "Backfill latest channel" step above -- torn down immediately after
-      # its one use, same pattern build-push.yml/build-tools.yml/
-      # build-push-hosted-fallback.yml already apply, so this manual
-      # recovery workflow stops leaving an orphaned buildx_buildkit_*
-      # builder container/volume behind on every dispatch.
       - name: Remove buildx builder
         if: always()
         run: |
           docker buildx rm "${{ steps.buildx.outputs.name }}" || true
 
-      # `if: always()` (issue #897): release regardless of whether the
-      # backfill above succeeded or failed, so a real backfill failure
-      # cannot ALSO wedge every other queued promote/backfill run behind
-      # this job's own stale_after timeout for no reason.
       - name: Release the cross-workflow promote lock
         if: always()
         env:
@@ -315,9 +257,5 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/promote-lock.sh"
 
           holder_note="$(promote_lock_holder_note "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$RUNNER_NAME")"
-          # See build-push.yml's `promote` job for why `|| true` here is the
-          # documented AG-VAL-004 exception: release is best-effort cleanup,
-          # not correctness-critical (the stale_after takeover recovers a
-          # skipped/failed release), and must never flip an otherwise
-          # successful backfill to a failed job status.
+
           promote_lock_release origin "$holder_note" || true

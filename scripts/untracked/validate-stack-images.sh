@@ -110,14 +110,7 @@ tooling_names=$(collect_names tooling)
 metadata_names=$(collect_names metadata)
 external_names=$(collect_names external)
 
-runtime_images=(proxy dns watchdog dhcp dhcp-proxy ntp ui syslog)
-# runtime_images is a hand-maintained copy of the manifest's own runtime:
-# section (collected into runtime_names above) -- nothing keeps the two in
-# sync mechanically otherwise. A service present in the manifest but missing
-# from this array would silently never get checked against the manifest,
-# compose files, or the build matrix below, so assert the two sets are
-# identical rather than only ever iterating over this array's own (possibly
-# incomplete) contents.
+runtime_images=(proxy dns watchdog dhcp dhcp-proxy ntp ui syslog cachehamster)
 runtime_images_sorted="$(printf '%s\n' "${runtime_images[@]}" | sort)"
 runtime_names_sorted="$(sort <<<"$runtime_names")"
 [[ "$runtime_images_sorted" == "$runtime_names_sorted" ]] || fail "runtime_images must match every runtime image declared by release/stack-images.yml"
@@ -148,7 +141,8 @@ for dockerfile in \
   services/ntp/Dockerfile \
   services/ui/Dockerfile \
   services/syslog/Dockerfile \
-  tools/build-tools/Dockerfile
+  tools/build-tools/Dockerfile \
+  services/cachehamster/Dockerfile
 do
   require_file "$dockerfile"
 done
@@ -187,6 +181,14 @@ require_grep "image: ${first_party_ref}/ntp:\\$\\{LANCACHE_IMAGE_TAG:-latest\\}"
 require_grep "image: ${first_party_ref}/syslog:\\$\\{LANCACHE_IMAGE_TAG:-latest\\}" \
   deploy/quickstart/docker-compose.yml \
   'quickstart compose must use registry/prefix/tag variables for syslog'
+# What: explicitly checks cachehamster in quickstart, same shape as
+#   dhcp/dhcp-proxy/ntp/syslog above.
+# Why: opt-in (`cachehamster` Compose profile), added alongside its infra
+#   integration.
+# From: Issue #871
+require_grep "image: ${first_party_ref}/cachehamster:\\$\\{LANCACHE_IMAGE_TAG:-latest\\}" \
+  deploy/quickstart/docker-compose.yml \
+  'quickstart compose must use registry/prefix/tag variables for cachehamster'
 require_grep "image: ${first_party_ref}/dns:\\$\\{LANCACHE_IMAGE_TAG:-latest\\}" \
   deploy/secondary/docker-compose.yml \
   'secondary compose must use registry/prefix/tag variables for dns'
@@ -214,7 +216,8 @@ for dockerfile in \
   services/ntp/Dockerfile \
   services/ui/Dockerfile \
   services/syslog/Dockerfile \
-  tools/build-tools/Dockerfile
+  tools/build-tools/Dockerfile \
+  services/cachehamster/Dockerfile
 do
   require_grep 'LABEL org\.opencontainers\.image\.description=' \
     "$dockerfile" \
@@ -241,30 +244,11 @@ require_grep 'outputs: type=image,oci-mediatypes=true' \
 require_grep 'annotation "index:org\.opencontainers\.image\.description=' \
   .github/workflows/build-tools.yml \
   'build-tools.yml must publish an OCI image description index annotation on its merged multi-platform manifest'
-# Promotion and release jobs now all read the shared CI_BUILD_SERVICES env
-# scalar (read -ra services <<< "$CI_BUILD_SERVICES") rather than each
-# carrying its own hand-duplicated services=(...) literal -- this check was
-# updated in lockstep with that consolidation so it keeps verifying a real,
-# still-present pattern instead of a literal array shape build-push.yml no
-# longer contains. #1428 (syslog) joined the first-party service set after
-# this consolidation landed and is covered here because CI_BUILD_SERVICES
-# already carries it; #1556 (utilities) also joined it and was later removed
-# again by #1781, which dropped the shared utilities image entirely in favor
-# of each consumer apk-installing its own copy of what it used to COPY.
-require_grep 'CI_BUILD_SERVICES: "proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools"' \
+require_grep 'CI_BUILD_SERVICES: "proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools cachehamster"' \
   .github/workflows/build-push.yml \
   'promotion and release jobs must share the full first-party service set'
-# release-sbom's own `service: [...]` flow-sequence matrix is a fourth,
-# independent copy of the same service-list class: it is neither a `-
-# service:` build-matrix entry (so scripts/tracked/check-workflow-service-lists.sh's
-# canonical extraction never sees it) nor a `services=(...)`/
-# `full_setup_services=(...)` bash array (so that same guard's own array
-# checks don't reach it either) -- syslog silently missing from just this
-# one copy (while every other released first-party image already got a
-# CycloneDX SBOM) is exactly the drift shape this narrower literal check
-# exists to catch mechanically instead of relying on manual review to
-# notice a fifth recurrence.
-require_grep 'service: \[proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, syslog, ui, build-tools\]' \
+
+require_grep 'service: \[proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, syslog, ui, build-tools, cachehamster\]' \
   .github/workflows/build-push.yml \
   'release-sbom must cover every Trivy-scanned first-party image (mirrors container-scan matrix)'
 
@@ -321,11 +305,7 @@ require_grep 'imagetools inspect "\$image" --format' \
 if awk '!/^[[:space:]]*#/ && /(^|[^[:alnum:]_])jq([[:space:]]|$)/ { found=1 } END { exit found ? 0 : 1 }' "$repo_root/scripts/untracked/require-image-platforms.sh"; then
   fail 'the shared platform coverage guard must not require host jq'
 fi
-# CI 1.1: the promotion step verifies platform coverage against the exact
-# same-repo PR image digest (`@${expected_digest}`) it is about to promote,
-# not a moving `:${source_tag}` tag reference -- scanning the tag would risk
-# checking a different image than the one actually promoted if the tag moved
-# between the scan and the promotion step.
+
 require_grep 'bash scripts/untracked/require-image-platforms\.sh "ghcr\.io/\$\{REPOSITORY\}/\$\{service\}@\$\{expected_digest\}" "\$REQUIRED_PLATFORMS"' \
   .github/workflows/build-push.yml \
   'promotion must verify every exact service digest platform before moving public tags'
@@ -338,11 +318,7 @@ require_grep 'previous_refs\["\$target_image"\]' \
 require_grep 'stack_pointer_image="ghcr\.io/\$\{REPOSITORY\}/stack@\$\{STACK_DIGEST\}"' \
   .github/workflows/build-push.yml \
   'promotion must consume the immutable stack pointer digest created before validation'
-# CI 1.1 deliberately keeps the existing immutable stack pointer/stack.env
-# contract rather than introducing a separate stack-bom.json artifact (that
-# BOM/Stack-Lock design is out of scope here, tracked under the broader V2
-# work) -- so this validator only asserts stack.env's own presence
-# below, not a stack-bom.json file build-push.yml no longer builds.
+
 require_grep 'LANCACHE_IMAGE_TAG=%s\\n' \
   .github/workflows/build-push.yml \
   'stack pointer image must contain the resolved immutable service image tag'
@@ -439,12 +415,8 @@ require_grep 'uses: \./\.github/actions/trivy-scan-exact-digest' \
 require_grep '^  trivy-scan-amd64:' \
   .github/workflows/build-push.yml \
   'the amd64 pushed-digest scan must run in its own GitHub-hosted job (trivy-scan-amd64), not inline inside the self-hosted build job'
-# Keep release verification aligned with the canonical first-party service
-# set plus the immutable stack pointer (#1428 added syslog, for the same
-# reason the runtime_images/Dockerfile loops above cover it; #1556 added
-# utilities the same way, but #1781 later removed it again -- see this
-# file's own comment near the CI_BUILD_SERVICES check above).
-require_grep 'SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools stack' \
+
+require_grep 'SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools cachehamster stack' \
   .github/workflows/build-push.yml \
   'release workflow must verify the stack pointer platform coverage too'
 require_grep 'assert_prebuilt_image_platform_supported' \

@@ -57,7 +57,7 @@ env:
   # What: one runtime service list for manifest, promotion, and release loops.
   # Why: check-workflow-service-lists.sh fails CI on any matrix drift.
   # From: PR #1523
-  CI_BUILD_SERVICES: "proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools"
+  CI_BUILD_SERVICES: "proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools cachehamster"
   RELEASE_PLATFORMS: linux/amd64,linux/arm64
   RUST_ACCELERATION_NETWORK: bridge
 
@@ -2075,7 +2075,7 @@ jobs:
             echo "::error::Rust service Dockerfiles must not hardcode a PROJECT_CARGO_LTO/PROJECT_CARGO_CODEGENUNIT default; both must fail closed when unset, mirroring CARGO_BUILD_JOBS."
             exit 1
           fi
-          if grep -RInE '^[[:space:]]*(lto|codegen-units)[[:space:]]*=' Cargo.toml services/dns/nats-subscriber/Cargo.toml services/ui/Cargo.toml services/warmer/Cargo.toml services/watchdog/Cargo.toml tools/pxe-client-probe/Cargo.toml; then
+          if grep -RInE '^[[:space:]]*(lto|codegen-units)[[:space:]]*=' Cargo.toml services/dns/nats-subscriber/Cargo.toml services/ui/Cargo.toml services/cachehamster/Cargo.toml services/watchdog/Cargo.toml tools/pxe-client-probe/Cargo.toml; then
             echo "::error::[profile.release] lto/codegen-units must not be hardcoded in any workspace Cargo.toml; source them from CARGO_PROFILE_RELEASE_LTO/CARGO_PROFILE_RELEASE_CODEGEN_UNITS env overrides (PROJECT_CARGO_LTO/PROJECT_CARGO_CODEGENUNIT)."
             exit 1
           fi
@@ -4236,6 +4236,9 @@ jobs:
           - service: build-tools
             platform_tag: amd64
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
+          - service: cachehamster
+            platform_tag: amd64
+            runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
           - service: proxy
             platform_tag: arm64
             runner: '"ubuntu-24.04-arm"'
@@ -4261,6 +4264,9 @@ jobs:
             platform_tag: arm64
             runner: '"ubuntu-24.04-arm"'
           - service: build-tools
+            platform_tag: arm64
+            runner: '"ubuntu-24.04-arm"'
+          - service: cachehamster
             platform_tag: arm64
             runner: '"ubuntu-24.04-arm"'
     steps:
@@ -4894,6 +4900,34 @@ jobs:
             context: tools/build-tools
             build_contexts: ""
             description: &ci-description-build-tools "Prebuilt lancache-ng CI and developer validation toolchain image."
+            runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
+          - service: cachehamster
+            context: services/cachehamster
+            build_contexts: ""
+            description: &ci-description-cachehamster "lancache-ng CacheHamster: Steam cache-warming prefill daemon (scaffold, issue #871)."
+            # rust:true (real cargo build/link step, same class as
+            # dns/ui/watchdog) -- but see services/cachehamster/Dockerfile's
+            # own comment: sccache/distcc/ccache acceleration is
+            # deliberately NOT wired into that Dockerfile yet, so this
+            # service's acceleration secret files are generated but unused
+            # by BuildKit (harmless; matches the light-tier-vs-heavy-tier
+            # non-grandfathering reasoning documented on utilities above --
+            # it is classified by whether a real compile exists, not by
+            # whether acceleration is wired for it yet).
+            #
+            # context: services/cachehamster (the crate's own directory as
+            # build context), deliberately NOT the workspace `context: .` +
+            # `dockerfile:` shape #1796 gave dns/ui/watchdog. lancache-cachehamster
+            # IS a member of the #1096/#1796 root Cargo workspace (see the root
+            # Cargo.toml members list) -- so it shares the root Cargo.lock for
+            # workspace resolution, and the root cargo-audit covers its deps --
+            # but its IMAGE is built standalone from its own directory: under
+            # that context no workspace root is visible, so cargo builds it as a
+            # single crate against its own services/cachehamster/Cargo.lock.
+            # Both build paths are independently `--locked`-consistent; this is
+            # the one deliberate deviation from the pure-workspace build shape
+            # (issue #871, PR #1793), carrying two lockfiles by design.
+            rust: true
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
 
     steps:
@@ -6687,6 +6721,7 @@ jobs:
           DESCRIPTION_SYSLOG: *ci-description-syslog
           DESCRIPTION_UI: *ci-description-ui
           DESCRIPTION_BUILD_TOOLS: *ci-description-build-tools
+          DESCRIPTION_CACHEHAMSTER: *ci-description-cachehamster
         run: |
           set -euo pipefail
 
@@ -6728,6 +6763,7 @@ jobs:
             [ui]="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
             [build-tools]="Prebuilt lancache-ng CI and developer validation toolchain image."
             [syslog]="Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428)."
+            [cachehamster]="lancache-ng CacheHamster: Steam cache-warming prefill daemon (scaffold, issue #871)."
           )
 
           # Duplicated rather than factored into a shared script/action: GitHub Actions
@@ -7715,10 +7751,11 @@ jobs:
         shell: bash
         env:
           TAG_NAME: ${{ github.ref_name }}
-          # What: syslog is explicit in this SERVICES scalar.
-          # Why: check-workflow-service-lists.sh needs a plain scalar here.
-          # From: Issue #1428 | PR #1433
-          SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools stack
+          # What: syslog/cachehamster are explicit in this SERVICES scalar.
+          # Why: check-workflow-service-lists.sh's regex guard can only
+          # see a space-separated scalar here, not a bash array.
+          # From: Issue #1428 | PR #1433 | Issue #871 | PR #1793
+          SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools cachehamster stack
           REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
@@ -8077,7 +8114,7 @@ jobs:
         # (an unscanned channel-pointer image).
         # Why: a hand-kept copy risks drifting out of sync.
         # From: Issue #1095 | PR #1619
-        service: [proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, syslog, ui, build-tools]
+        service: [proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, syslog, ui, build-tools, cachehamster]
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - name: Checkout

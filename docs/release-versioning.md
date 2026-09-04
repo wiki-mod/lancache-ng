@@ -19,6 +19,9 @@ The first-party runtime package set is:
 - `ntp`
 - `ui`
 - `syslog`
+- `cachehamster` (issue #871; Steam cache-warming prefill scaffold, opt-in via
+  the `cachehamster` Compose profile, default off -- not yet functional
+  end-to-end)
 
 The first-party tooling package is:
 
