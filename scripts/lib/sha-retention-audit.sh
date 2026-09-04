@@ -195,15 +195,15 @@ sra_validate_version_page() {
   ' "$page_file" >/dev/null
 }
 
-# What: classifies tag as root/child, incl. -standalone.
-# Why: centralizes tag-shape logic for every decision.
+# What: classifies tag as root, per-platform child, other.
+# Why: Centralized classification drives all downstream decisions.
 # From: Issue #1095 | PR #1586
 sra_tag_kind() {
   local tag="${1:?sra_tag_kind: tag is required}"
   if [[ "$tag" =~ ^sha-([0-9a-f]{7,40})$ ]]; then
     printf 'root\t%s\n' "${BASH_REMATCH[1]}"
-  elif [[ "$tag" =~ ^sha-([0-9a-f]{7,40})-(standalone-)?(amd64|arm64)$ ]]; then
-    printf 'child\t%s\t%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[3]}"
+  elif [[ "$tag" =~ ^sha-([0-9a-f]{7,40})-(amd64|arm64)$ ]]; then
+    printf 'child\t%s\t%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
   else
     printf 'other\t%s\n' "$tag"
   fi

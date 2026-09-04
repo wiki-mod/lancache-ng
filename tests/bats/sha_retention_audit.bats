@@ -351,41 +351,6 @@ EOF
   [ "$output" = $'0\t2\t0' ]
 }
 
-# What: covers sra_tag_kind() directly, incl. -standalone.
-# Why: root/child/other decisions depend on this fn.
-# From: Issue #1095
-@test "tag kind classifies root, plain child, standalone child, and other shapes" {
-  run sra_tag_kind "sha-abcdef1"
-  [ "$status" -eq 0 ]
-  [ "$output" = $'root\tabcdef1' ]
-
-  run sra_tag_kind "sha-abcdef1-amd64"
-  [ "$status" -eq 0 ]
-  [ "$output" = $'child\tabcdef1\tamd64' ]
-
-  run sra_tag_kind "sha-abcdef1-standalone-amd64"
-  [ "$status" -eq 0 ]
-  [ "$output" = $'child\tabcdef1\tamd64' ]
-
-  run sra_tag_kind "sha-abcdef1-standalone-arm64"
-  [ "$status" -eq 0 ]
-  [ "$output" = $'child\tabcdef1\tarm64' ]
-
-  run sra_tag_kind "pr-5-sha-abcdef1"
-  [ "$status" -eq 0 ]
-  [ "$output" = $'other\tpr-5-sha-abcdef1' ]
-}
-
-# What: counts -standalone per-arch tags as child.
-# Why: routes to closure-age cleanup, not tiny buffer.
-# From: Issue #1095
-@test "tag facts classify standalone per-arch build-tools tags as child" {
-  version='{"metadata":{"container":{"tags":["sha-abcdef1-standalone-amd64","sha-abcdef1-standalone-arm64"]}}}'
-  run sra_version_tag_facts "$version"
-  [ "$status" -eq 0 ]
-  [ "$output" = $'0\t2\t0' ]
-}
-
 # What: GitHub REST retry treats 404 as a hard unknown failu
 # Why: an ambiguous or absent REST resource is not positive
 # absence, so it must not be silently treated as an empty result.

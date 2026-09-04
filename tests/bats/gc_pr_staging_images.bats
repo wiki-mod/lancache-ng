@@ -1447,7 +1447,8 @@ VERSIONS_JSON
 # Why: guards a false-orphan delete of that child.
 # From: Issue #1095
 @test "process_service: Pass 1 pre-collects manifest children even for a version deferred by its own cap" {
-    max_deletions_per_service=1
+    max_deletions_per_service=2
+    orphan_reserve_per_service=1
     parent_kept_digest="sha256:$(printf '2%.0s' {1..64})"
     child_digest="sha256:$(printf '3%.0s' {1..64})"
     deleted_digest="sha256:$(printf '1%.0s' {1..64})"
@@ -1524,22 +1525,22 @@ VERSIONS_JSON
         return 0
     }
 
-    versions_json='['
+    fixture_versions_json='['
     for i in 1 2 3 4 5 6; do
         pr=$((900 + i))
         digest="sha256:$(printf 'a%.0s' {1..63})${i}"
-        versions_json+="{\"id\":$((100 + i)),\"name\":\"$digest\",\"created_at\":\"2020-01-0${i}T00:00:00Z\",\"metadata\":{\"container\":{\"tags\":[\"pr-${pr}-sha-abcdef${i}\"]}}},"
+        fixture_versions_json+="{\"id\":$((100 + i)),\"name\":\"$digest\",\"created_at\":\"2020-01-0${i}T00:00:00Z\",\"metadata\":{\"container\":{\"tags\":[\"pr-${pr}-sha-abcdef${i}\"]}}},"
     done
     for i in 1 2 3; do
         digest="sha256:$(printf 'b%.0s' {1..63})${i}"
-        versions_json+="{\"id\":$((200 + i)),\"name\":\"$digest\",\"created_at\":\"2020-02-0${i}T00:00:00Z\",\"metadata\":{\"container\":{\"tags\":[]}}},"
+        fixture_versions_json+="{\"id\":$((200 + i)),\"name\":\"$digest\",\"created_at\":\"2020-02-0${i}T00:00:00Z\",\"metadata\":{\"container\":{\"tags\":[]}}},"
     done
-    versions_json="${versions_json%,}]"
-    export versions_json
+    fixture_versions_json="${fixture_versions_json%,}]"
+    export fixture_versions_json
 
     gh() {
         if [[ "$1" == "api" && "$2" == "--paginate" ]]; then
-            printf '%s\n' "$versions_json"
+            printf '%s\n' "$fixture_versions_json"
             return 0
         fi
         if [[ "$1" == "api" && "$2" == repos/*/pulls/* ]]; then
@@ -1563,7 +1564,7 @@ VERSIONS_JSON
         local id
         [[ "$1" =~ /versions/([0-9]+)$ ]] || return 1
         id="${BASH_REMATCH[1]}"
-        printf '%s' "$versions_json" | jq --argjson id "$id" '.[] | select(.id == $id)' >"$2"
+        printf '%s' "$fixture_versions_json" | jq --argjson id "$id" '.[] | select(.id == $id)' >"$2"
     }
 
     gc_run_package_worker proxy "$result_file" 6 >"$run_log"
