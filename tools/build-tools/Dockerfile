@@ -125,7 +125,9 @@ COPY --from=go-tools-script /install-ca-cert.sh /install-ca-cert.sh
 # What: builds CLI/compose/buildx from source (Go tools).
 # Why: needs current Go stdlib; vendor bump forces a build.
 # From: Issue #1095 | PR #1743
-RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
+    --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
+    --mount=type=secret,id=project_selfhosted_proxy_ca \
     sh /install-ca-cert.sh && chmod +x /build-go-tools.sh && /build-go-tools.sh
 
 # What: Alpine equivalent of go-tools-builder above.
@@ -169,7 +171,9 @@ RUN sed -i 's|^https://|http://|' /etc/apk/repositories
 # What: builds the same three Go tools as go-tools-builder.
 # Why: none needs a cgo dependency; musl needs no build-tag.
 # From: Issue #1095 | PR #1743
-RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
+    --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
+    --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
     : "apk-cache-bust=${APK_CACHE_BUST}"; \
     apk update; \
     apk upgrade --no-cache; \
