@@ -267,6 +267,9 @@ jobs:
             --build-arg "http_proxy=$HTTP_PROXY" \
             --build-arg "https_proxy=$HTTPS_PROXY" \
             --build-arg "no_proxy=$NO_PROXY" \
+            --build-arg "PROJECT_SELFHOSTED_GOMODCACHE=${{ vars.PROJECT_SELFHOSTED_GOMODCACHE }}" \
+            --build-arg "PROJECT_SELFHOSTED_GOCACHE=${{ vars.PROJECT_SELFHOSTED_GOCACHE }}" \
+            --build-arg "PROJECT_SELFHOSTED_GOPROXY=${{ vars.PROJECT_SELFHOSTED_GOPROXY }}" \
             "${secret_args[@]}" \
             --cache-from "type=local,src=$BUILDX_CACHE_FROM_DIR" \
             --cache-to "type=local,dest=$BUILDX_CACHE_TO_DIR,mode=max" \
@@ -302,6 +305,9 @@ jobs:
             http_proxy=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
             https_proxy=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
             no_proxy=${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
+            PROJECT_SELFHOSTED_GOMODCACHE=${{ vars.PROJECT_SELFHOSTED_GOMODCACHE }}
+            PROJECT_SELFHOSTED_GOCACHE=${{ vars.PROJECT_SELFHOSTED_GOCACHE }}
+            PROJECT_SELFHOSTED_GOPROXY=${{ vars.PROJECT_SELFHOSTED_GOPROXY }}
           # What: supplies the CA the Dockerfile's install-ca-cert.sh needs.
           # Why: no distcc/ccache secret is prepared on this branch.
           # From: Issue #1095
