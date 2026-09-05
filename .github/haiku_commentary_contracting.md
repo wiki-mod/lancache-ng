@@ -1,161 +1,160 @@
-# Auftrag: AG-CODE-012 Kommentarbereinigung
+# Task: AG-CODE-012 Comment Cleanup
 
-## Ziel
+## Goal
 
-Du bist ausschließlich mit der Bereinigung von Code Kommentaren nach
-`AG-CODE-012` beauftragt.
+You are commissioned exclusively with cleaning up code comments per
+`AG-CODE-012`.
 
-Die bestehende Codebasis ist der Prüfbereich.
+The existing codebase is the audit scope.
 
-Deine Änderungsbefugnis ist strikt auf Kommentare beschränkt.
+Your change authority is strictly limited to comments.
 
-Du darfst keinen produktiven Code, keine Logik, keine Konfiguration,
-keine Datenstrukturen und kein Laufzeitverhalten verändern.
+You must not change any production code, logic, configuration, data
+structures, or runtime behavior.
 
-## Verbindliche Quellen
+## Binding Sources
 
-Vor jeder Arbeit MUSST du vollständig lesen:
+Before any work you MUST read in full:
 
-1. `AGENTS.md` aus dem aktuellen Stand von `current_dev`
-2. `.github/agent-dispatch-checklist.md` aus `current_dev`
+1. `AGENTS.md` from the current state of `current_dev`
+2. `.github/agent-dispatch-checklist.md` from `current_dev`
 
-`AGENTS.md` ist vollständig anzuwenden.
+`AGENTS.md` applies in full.
 
-Insbesondere MUSST du `AG-CODE-012` im aktuell gültigen Wortlaut
-anwenden und darfst die Regel nicht aus Erinnerung rekonstruieren.
+In particular you MUST apply `AG-CODE-012` in its currently valid
+wording and must not reconstruct the rule from memory.
 
-Die aktuelle Version von `current_dev` ist maßgeblich.
+The current version on `current_dev` is authoritative.
 
-## Pflichtblock für Dispatch
+## Mandatory Dispatch Block
 
-Vor Versand dieses Auftrags MUSS der Dispatcher an dieser Stelle den
-vollständigen aktuellen Inhalt von
+Before sending this task, the dispatcher MUST insert at this point the
+full current content of
 
 `.github/agent-dispatch-checklist.md`
 
-aus `current_dev` unverändert einfügen.
+from `current_dev`, unchanged.
 
-Die Checkliste darf NICHT zusammengefasst, verkürzt, umformuliert oder
-durch eine eigene Interpretation ersetzt werden.
+The checklist MUST NOT be summarized, shortened, reworded, or replaced
+by an own interpretation.
 
 <PASTE CURRENT agent-dispatch-checklist.md VERBATIM HERE>
 
-## Für den Dispatcher: Haiku ist ein schwaches Modell, Pflicht-Nachkontrolle
+## For the Dispatcher: Haiku Is a Weak Model, Mandatory Re-check
 
-Haiku ist ein deutlich schwächeres, rein mechanisches Modell, kein
-billiger Sonnet-Ersatz.
+Haiku is a markedly weaker, purely mechanical model, not a cheaper
+Sonnet substitute.
 
-Beauftrage Haiku nur mit engen, eindeutigen Teilaufträgen ohne
-Interpretationsspielraum.
+Commission Haiku only with narrow, unambiguous sub-tasks that leave no
+room for interpretation.
 
-Bei Mehrdeutigkeit lieber weiter zerteilen als Spielraum lassen.
+On ambiguity, split further rather than leave latitude.
 
-Haiku-Selbstberichte sind NICHT vertrauenswürdig. Der Dispatcher MUSS
-jede "fertig"-Behauptung real gegenkontrollieren, nicht übernehmen:
+Haiku self-reports are NOT trustworthy. The dispatcher MUST real-check
+every "done" claim instead of adopting it:
 
-1. Grep nach verbliebenen Kommentaren über dem Zeichenlimit, außerhalb
-   erlaubter Ausnahmen wie Section-Divider oder eingebettete Daten.
-2. Verifiziere, dass KEINE Nicht-Kommentar-Zeile geändert wurde: der
-   resolved-config beziehungsweise Build muss unverändert bleiben
-   (echter Paritätsbeweis), nicht nur der Datei-Diff optisch.
-3. Prüfe jede `From:`-Referenz auf erfundene oder falsche Issue/PR.
+1. Grep for remaining comments over the character limit, outside
+   permitted exceptions such as section dividers or embedded data.
+2. Verify that NO non-comment line changed: the resolved config,
+   respectively the build, must stay unchanged (a real parity proof),
+   not just the file diff by eye.
+3. Check every `From:` reference for an invented or wrong Issue/PR.
 
-Nach JEDER Haiku-Runde MUSST du zusätzlich `git log` und `git status`
-auf UNERWARTETE Commits prüfen.
+After EVERY Haiku round you MUST additionally check `git log` and
+`git status` for UNEXPECTED commits.
 
-Haiku hat eine explizite "nicht committen / nicht pushen"-Anweisung
-bereits ignoriert und trotzdem committed, einmal sogar gepusht, und
-dabei acht Format-Verstöße plus eine falsche PR-Referenz hinterlassen,
-obwohl es "fertig" meldete.
+Haiku has already ignored an explicit "do not commit / do not push"
+instruction and committed anyway, once even pushed, leaving eight
+format violations plus a wrong PR reference, although it reported
+"done".
 
-Eine "fertig, nicht committed"-Selbstauskunft von Haiku ersetzt diese
-Nachkontrolle NICHT.
+A "done, not committed" self-report from Haiku does NOT replace this
+re-check.
 
-Paritäts- und Build-Verifikation laufen im verifizierten build-tools-
-Container, nicht lokal angenommen.
+Parity and build verification run in the verified build-tools
+container, not assumed local.
 
-## Erlaubter Änderungsbereich
+## Permitted Change Scope
 
-Du DARFST ausschließlich syntaktisch echte Code Kommentare bearbeiten.
+You MAY edit only syntactically real code comments.
 
-Dazu gehören nur Konstrukte, die die jeweilige Sprache tatsächlich als
-Kommentar behandelt.
+This includes only constructs that the respective language actually
+treats as a comment.
 
-Beispiele sind:
+Examples are:
 
 `#`
 `//`
 `/* ... */`
 `<!-- ... -->`
 
-wenn diese an der jeweiligen Stelle tatsächlich Kommentare darstellen.
+when these actually represent comments at the given location.
 
-Du DARFST vorhandene Kommentarblöcke ersetzen oder zusammenführen.
+You MAY replace or merge existing comment blocks.
 
-Du DARFST einen fehlenden Kommentar nur ergänzen, wenn eine anwendbare
-Regel aus `AGENTS.md` diesen Kommentar ausdrücklich verlangt.
+You MAY add a missing comment only when an applicable rule from
+`AGENTS.md` explicitly requires that comment.
 
-## Strikt verboten
+## Strictly Forbidden
 
-Du DARFST NICHT:
+You MUST NOT:
 
-* produktiven Code verändern
-* Programmlogik verändern
-* Bedingungen verändern
-* Variablen verändern
-* Funktionsaufrufe verändern
-* Befehle verändern
-* Konfigurationswerte verändern
-* Strings verändern
-* Heredocs verändern
-* Ausgaben oder Meldungen verändern
-* Daten oder Fixtures verändern
-* Dateien umformatieren
-* reine Whitespace Änderungen außerhalb von Kommentaren durchführen
-* neue Dateien anlegen
-* bestehende Dateien löschen
-* Dateien umbenennen
-* Code verschieben
-* Kommentare in Code umwandeln
-* Code in Kommentare umwandeln
-* Skripte erstellen
-* Skripte zur Bearbeitung verwenden
-* eigene Hilfsprogramme zur Bearbeitung erstellen
-* automatisierte Massenersetzungen durchführen
-* Kommentare blind abschneiden
-* Text lediglich auf 60 Zeichen kürzen
-* Informationen erfinden
-* Issue oder PR Referenzen raten
-* historische Referenzen ansammeln
+* change production code
+* change program logic
+* change conditions
+* change variables
+* change function calls
+* change commands
+* change configuration values
+* change strings
+* change heredocs
+* change outputs or messages
+* change data or fixtures
+* reformat files
+* make pure whitespace changes outside comments
+* create new files
+* delete existing files
+* rename files
+* move code
+* turn comments into code
+* turn code into comments
+* create scripts
+* use scripts for editing
+* create your own helper programs for editing
+* perform automated bulk replacements
+* blindly truncate comments
+* merely shorten text to 60 characters
+* invent information
+* guess Issue or PR references
+* accumulate historical references
 
-Wenn eine notwendige Korrektur produktiven Code berühren würde,
-MUSST du stoppen und an den Coordinator eskalieren.
+If a necessary correction would touch production code, you MUST stop
+and escalate to the coordinator.
 
-Du darfst diese Grenze nicht selbst erweitern.
+You must not widen this boundary yourself.
 
-## Keine Skriptbearbeitung
+## No Script-Based Editing
 
-Skripte und automatisierte Transformationsprogramme sind für diese
-Aufgabe verboten.
+Scripts and automated transformation programs are forbidden for this
+task.
 
-Kommentarblöcke müssen semantisch einzeln beurteilt werden.
+Comment blocks must be judged semantically, one at a time.
 
-Eine mechanische Kürzung anhand von Zeichenanzahl ist ausdrücklich
-verboten.
+A mechanical shortening by character count is explicitly forbidden.
 
-Eine Ersetzung ist nur zulässig, nachdem du verstanden hast:
+A replacement is permitted only after you have understood:
 
-1. was der zugehörige Code aktuell tut
-2. warum der Kommentar an dieser Stelle erforderlich ist
-3. welche Aussage nach aktuellem Codezustand sachlich korrekt ist
-4. welche Referenz für die aktuelle Version tatsächlich gilt
+1. what the associated code currently does
+2. why the comment is required at this location
+3. which statement is factually correct for the current code state
+4. which reference actually applies to the current version
 
-## AG-CODE-012 Zielformat
+## AG-CODE-012 Target Format
 
-Jeder bearbeitete Kommentar MUSS sober, dry und ausschließlich auf den
-aktuellen Zustand bezogen sein.
+Every edited comment MUST be sober, dry, and relate exclusively to the
+current state.
 
-Zulässig ist genau ein Block pro Code Stelle:
+Exactly one block per code location is permitted:
 
 ```text
 What: <current behavior>
@@ -163,71 +162,69 @@ Why: <actual reason>
 From: Issue #N | PR #N
 ```
 
-Wenn keine gültige Referenz bekannt und verifiziert ist:
+If no valid reference is known and verified:
 
 ```text
 What: <current behavior>
 Why: <actual reason>
 ```
 
-`From:` darf niemals erfunden werden.
+`From:` must never be invented.
 
 ## What
 
-`What:` ist verpflichtend.
+`What:` is mandatory.
 
-Es MUSS genau eine physische Zeile sein.
+It MUST be exactly one physical line.
 
-Die vollständige Zeile inklusive `What:` und Leerzeichen darf maximal
-60 Zeichen enthalten.
+The full line including `What:` and the space may contain at most
+60 characters.
 
-60 Zeichen sind KEIN Zielwert.
+60 characters are NOT a target.
 
-Kürzer ist ausdrücklich vorzuziehen, wenn die Aussage vollständig und
-präzise bleibt.
+Shorter is explicitly preferred when the statement stays complete and
+precise.
 
-`What:` beschreibt ausschließlich, was der aktuelle Code tatsächlich
-macht.
+`What:` describes exclusively what the current code actually does.
 
-Es darf keine Historie oder Änderungsgeschichte enthalten.
+It must not contain history or change history.
 
 ## Why
 
-`Why:` ist verpflichtend.
+`Why:` is mandatory.
 
-Es MUSS genau eine physische Zeile sein.
+It MUST be exactly one physical line.
 
-Die vollständige Zeile inklusive `Why:` und Leerzeichen darf maximal
-60 Zeichen enthalten.
+The full line including `Why:` and the space may contain at most
+60 characters.
 
-60 Zeichen sind KEIN Zielwert.
+60 characters are NOT a target.
 
-Kürzer ist ausdrücklich vorzuziehen, wenn die tatsächliche Begründung
-erhalten bleibt.
+Shorter is explicitly preferred when the actual reason is preserved.
 
-`Why:` MUSS den realen nicht offensichtlichen Grund nennen.
+`Why:` MUST state the real, non-obvious reason.
 
-Zulässige Inhalte sind beispielsweise:
+Permitted contents are for example:
 
 * Constraint
 * Invariant
-* Sicherheitsgrund
+* Security reason
 * Workaround
-* technische Anforderung
-* nicht offensichtliche Nebenwirkung
+* technical requirement
+* non-obvious side effect
 
-`Why:` darf nicht einfach `What:` mit anderen Worten wiederholen.
+`Why:` must not simply repeat `What:` in other words.
 
 ## From
 
-`From:` ist nur zulässig, wenn die Referenz tatsächlich verifiziert
-wurde.
+`From:` is permitted only when the reference has actually been
+verified.
 
-Die Zeile darf maximal eine Issue und eine PR Referenz enthalten.
+The line may contain at most one Issue and one PR reference.
 
-Sie darf keinerlei Erklärung enthalten.
+It must not contain any explanation.
 
-Zulässige Formen sind ausschließlich:
+Permitted forms are exclusively:
 
 ```text
 From: Issue #123
@@ -235,61 +232,60 @@ From: PR #456
 From: Issue #123 | PR #456
 ```
 
-Die Referenz MUSS zur aktuellen Version des kommentierten Codes gehören.
+The reference MUST belong to the current version of the commented code.
 
-Historische oder ersetzte Referenzen dürfen nicht gesammelt werden.
+Historical or superseded references must not be accumulated.
 
-Wenn eine Referenz nicht sicher feststellbar ist, darf sie nicht geraten
-werden.
+If a reference cannot be reliably determined, it must not be guessed.
 
-Nutze bei Bedarf die vorhandene Git Historie sowie Issue und PR Historie
-zur Verifikation.
+Use the existing Git history as well as Issue and PR history to verify
+when needed.
 
 ## Sober and Dry
 
-Der Kommentar MUSS ausschließlich den aktuellen Zustand dokumentieren.
+The comment MUST document exclusively the current state.
 
-Nicht zulässig sind insbesondere:
+Not permitted are in particular:
 
 * Storytelling
-* Untersuchungsgeschichte
-* Review Geschichte
-* Änderungsgeschichte
-* zeitliche Abläufe
-* frühere Implementierungen
-* aufgegebene Ansätze
-* Begründungen des Bearbeitungsprozesses
-* Aussagen darüber, was vorher falsch war
-* Aussagen darüber, was gerade repariert wurde
-* Aussagen darüber, wie etwas festgestellt wurde
-* Test oder Verifikationsnarrative
+* investigation history
+* review history
+* change history
+* time sequences
+* earlier implementations
+* abandoned approaches
+* justifications of the editing process
+* statements about what was wrong before
+* statements about what was just fixed
+* statements about how something was determined
+* test or verification narratives
 
-Der Kommentar ist Dokumentation des aktuellen Codes und kein
-Arbeitsprotokoll.
+The comment is documentation of the current code, not a work log.
 
-## Keine blinde Kürzung
+## No Blind Truncation
 
-Ein bestehender Kommentar darf NICHT einfach abgeschnitten werden, bis
-er unter das Zeichenlimit passt.
+An existing comment MUST NOT simply be cut off until it fits under the
+character limit.
 
-Du MUSST zuerst seine fachliche Aussage bestimmen.
+You MUST first determine its technical statement.
 
-Danach MUSST du diese Aussage neu und möglichst knapp formulieren.
+Then you MUST reformulate that statement anew and as concisely as
+possible.
 
-Wenn relevante historische oder investigative Informationen nicht in
-das zulässige Format gehören, dürfen sie nicht durch längere Kommentare,
-Fortsetzungszeilen oder zusätzliche Kommentarblöcke erhalten werden.
+If relevant historical or investigative information does not belong in
+the permitted format, it must not be preserved through longer comments,
+continuation lines, or additional comment blocks.
 
-Sie gehören in den dafür vorgesehenen dauerhaften Arbeitsnachweis.
+It belongs in the designated durable work record.
 
-## Ein Block pro Stelle
+## One Block per Location
 
-Eine Code Stelle darf genau einen zugehörigen
-`What:` / `Why:` / `From:` Block besitzen.
+A code location may have exactly one associated
+`What:` / `Why:` / `From:` block.
 
-Du DARFST NICHT mehrere Blöcke stapeln, um das Zeichenlimit zu umgehen.
+You MUST NOT stack multiple blocks to circumvent the character limit.
 
-Du DARFST NICHT:
+You MUST NOT use:
 
 ```text
 What: ...
@@ -298,115 +294,114 @@ Why: ...
 Why: ...
 ```
 
-verwenden.
+You MUST likewise not create continuation lines.
 
-Du DARFST ebenfalls keine Fortsetzungszeilen erzeugen.
+## Semantic Check
 
-## Semantische Prüfung
+Before every change you MUST read the immediately associated code.
 
-Vor jeder Änderung MUSST du den unmittelbar zugehörigen Code lesen.
+You may change a comment only when its new statement is supported by
+the existing code.
 
-Du darfst einen Kommentar nur ändern, wenn seine neue Aussage durch den
-vorhandenen Code belegt ist.
-
-Wenn du die Bedeutung des Codes nicht sicher bestimmen kannst:
+If you cannot reliably determine the meaning of the code:
 
 STOP.
 
-Nicht raten.
+Do not guess.
 
-Nicht vereinfachen.
+Do not simplify.
 
-Nicht löschen.
+Do not delete.
 
-Nicht blind umformulieren.
+Do not blindly reword.
 
-Melde die konkrete Stelle an den Coordinator.
+Report the specific location to the coordinator.
 
-## Bestehende korrekte Kommentare
+## Existing Correct Comments
 
-Ein bereits regelkonformer Kommentar MUSS nicht künstlich verändert
-werden.
+An already rule-compliant comment MUST NOT be changed artificially.
 
-Insbesondere darf ein kurzer korrekter Kommentar nicht verlängert
-werden, nur um näher an 60 Zeichen zu kommen.
+In particular, a short correct comment must not be lengthened only to
+come closer to 60 characters.
 
-Minimale, präzise Formulierungen sind erwünscht.
+Minimal, precise wording is desired.
 
-## Änderungsdisziplin
+## Change Discipline
 
-Vor jeder Datei MUSST du ihren Inhalt lesen.
+Before each file you MUST read its content.
 
-Nach der Bearbeitung MUSST du den Diff der Datei prüfen.
+After editing you MUST inspect the file's diff.
 
-Im Diff dürfen ausschließlich Kommentaränderungen erscheinen.
+Only comment changes may appear in the diff.
 
-Sobald eine Änderung außerhalb eines Kommentars erscheint:
+As soon as a change outside a comment appears:
 
 STOP.
 
-Setze die unbeabsichtigte Änderung zurück.
+Revert the unintended change.
 
-Fahre erst fort, wenn der Diff wieder ausschließlich Kommentare enthält.
+Continue only when the diff again contains exclusively comments.
 
-## Keine Nebenarbeiten
+## No Side Work
 
-Diese Aufgabe autorisiert keine opportunistischen Verbesserungen.
--> Literally DISACK
-Auch wenn du während der Arbeit andere Probleme findest, darfst du
-produktiven Code nicht verändern.
--> Hinweis an den Koordinator oder Main, jenach dem  wer dein Vorgesetzer ist.
+This task authorizes no opportunistic improvements. This is literally a
+DISACK.
 
-Probleme außerhalb des erlaubten Kommentarbereichs MUSST du melden,
-aber nicht selbst beheben.
--> Hinweis an den Koordinator oder Main, jenach dem  wer dein Vorgesetzer ist.
+Even if you find other problems during the work, you must not change
+production code. Notify the coordinator or main thread, whichever is
+your supervisor.
 
-Eine Regel aus `AGENTS.md` darf nicht als Begründung verwendet werden,
-um diese explizite Änderungsgrenze eigenständig auf produktiven Code zu
-erweitern.
--Literally DISACK
+Problems outside the permitted comment scope you MUST report but not
+fix yourself. Notify the coordinator or main thread, whichever is your
+supervisor.
 
-Bei einem Konflikt MUSST melden UND die arbeit bis zur klärung EINSTELLEN.
--> Hinweis an den Koordinator oder Main, jenach dem  wer dein Vorgesetzer ist.
--> Du Solltest du eine andere DAtei haben, an der du Fortsetzen kannst, dann arbeite an dieser weiter, jedoch darfst du die ein Konflikt hat bis zur klärung NICHT weiter bearbeiten.
+A rule from `AGENTS.md` must not be used as justification to widen this
+explicit change boundary onto production code yourself. This is
+literally a DISACK.
 
-## Abschlussprüfung
+On a conflict you MUST report AND halt the work until it is clarified.
+Notify the coordinator or main thread, whichever is your supervisor.
+If you have another file to continue on, work on that one further, but
+you MUST NOT keep editing the file that has a conflict until it is
+clarified.
 
-Vor Beginn MUSST du bestätigen:
+## Final Check
 
-* aktuelle `AGENTS.md` aus `current_dev` vollständig gelesen UND verstanden zu haben.
-* aktuelle Dispatch Checkliste vollständig gelesen und akzeptiert
-* `AG-CODE-012` anhand des aktuellen Wortlauts geprüft
-* ausschließlich Kommentare verändert
-* keine produktive Logik verändert
-* keine Skripte erstellt oder zur Transformation verwendet
-* keine blinde Kürzung durchgeführt
-* jede geänderte Aussage gegen den zugehörigen Code geprüft
-* `What:` maximal 60 Zeichen
-* `Why:` maximal 60 Zeichen
-* 60 Zeichen nicht als Zielwert behandelt
-* `From:` nur mit verifizierten Referenzen verwendet
-* keine gestapelten Kommentarblöcke erzeugt
-* keine Fortsetzungszeilen erzeugt
-* finalen Diff vollständig geprüft
+Before starting you MUST confirm:
 
-Wenn auch nur ein Punkt nicht bestätigt werden kann, darf die Aufgabe
-nicht als abgeschlossen gemeldet werden.
+* read AND understood the current `AGENTS.md` from `current_dev` in full
+* read and accepted the current dispatch checklist in full
+* checked `AG-CODE-012` against the current wording
+* changed comments only
+* changed no production logic
+* created or used no scripts for transformation
+* performed no blind truncation
+* checked every changed statement against the associated code
+* `What:` at most 60 characters
+* `Why:` at most 60 characters
+* did not treat 60 characters as a target
+* used `From:` only with verified references
+* created no stacked comment blocks
+* created no continuation lines
+* inspected the final diff in full
 
-## Abschlussbericht
+If even one point cannot be confirmed, the task must not be reported as
+complete.
 
-Der Abschlussbericht MUSS knapp bleiben.
+## Final Report
 
-Berichte ausschließlich:
+The final report MUST stay concise.
 
-1. welche Dateien geprüft wurden
-2. welche Dateien Kommentaränderungen erhielten
-3. Anzahl geänderter Kommentarblöcke
-4. ob ausschließlich Kommentare verändert wurden
-5. ob alle Zeichenlimits geprüft wurden
-6. ob ungeklärte Stellen verbleiben
+Report exclusively:
 
-DISACK: Keine zusätzliche Implementierungsarbeit durchführen.
+1. which files were checked
+2. which files received comment changes
+3. number of changed comment blocks
+4. whether only comments were changed
+5. whether all character limits were checked
+6. whether any unresolved locations remain
+
+DISACK: Do not perform any additional implementation work.
 
 Agent Dispatch Checklist
 This file is the fixed, mandatory minimum standard baseline for every Agent()/SendMessage()/Workflow agent() call in this repository — both an initial dispatch and every later continuation message to an already-running or paused agent, always, regardless of reason. A specific dispatch may always add more or stricter requirements on top of this list — it may never satisfy less than what is listed here. It exists because relying on the dispatcher to recall the relevant subset of AGENTS.md from memory, per task, has repeatedly failed in practice (see AG-WF-035's own incident note). This file turns that recall problem into a fixed list to paste and check off, not a thing to remember.
