@@ -1649,7 +1649,7 @@ compose_file_args_for_install_dir() {
 install_deploy_prod_compose_assets() {
     local install_dir="$1" socket_proxy_target helper_target config_prod_template
 
-    # What: refuses a pre-#1095 named-volume install here.
+    # What: refuses a legacy named-volume install here.
     # Why: no automatic migration to host-bind paths yet.
     # From: Issue #1095
     if [[ -f "$install_dir/docker-compose.yml" ]] \
@@ -1835,22 +1835,31 @@ config_prod_dir_for_install_dir() {
 }
 
 # Resolves the config files cmd_update_ip must edit for a given install_dir.
-# Prints exactly three lines: deploy_env, dns_standard_env, dns_ssl_env.
-# Both install shapes now run deploy/prod/docker-compose.yml, so both have
-# a config/prod/dns-standard.env and dns-ssl.env (see
-# config_prod_dir_for_install_dir()) -- the latter two print empty only if
-# those files are genuinely absent (e.g. this install predates Issue #1095
-# and has not been through an update yet).
+# Prints exactly three lines: deploy_env, dns_standard_env, dns_ssl_env. A
+# deploy/prod checkout returns its two config/prod paths unconditionally
+# (matching its pre-existing behavior); a no-clone install returns them only
+# once install_deploy_prod_compose_assets() has actually provisioned them,
+# else empty (see config_prod_dir_for_install_dir()).
 resolve_update_ip_config_paths() {
     local install_dir="$1"
     local deploy_env config_prod_dir dns_standard_env dns_ssl_env
 
     deploy_env=$(runtime_env_file_for_install_dir "$install_dir")
     config_prod_dir=$(config_prod_dir_for_install_dir "$install_dir")
-    dns_standard_env="$config_prod_dir/dns-standard.env"
-    dns_ssl_env="$config_prod_dir/dns-ssl.env"
-    [[ -f "$dns_standard_env" ]] || dns_standard_env=""
-    [[ -f "$dns_ssl_env" ]] || dns_ssl_env=""
+    dns_standard_env=""
+    dns_ssl_env=""
+    if is_deploy_prod_install_dir "$install_dir"; then
+        # What: returns both paths unconditionally, existing or not.
+        # Why: matches its pre-#1095 behavior; cmd_update_ip's own
+        #   die() already catches a genuinely missing file.
+        dns_standard_env="$config_prod_dir/dns-standard.env"
+        dns_ssl_env="$config_prod_dir/dns-ssl.env"
+    elif [[ -f "$config_prod_dir/dns-standard.env" ]]; then
+        # What: a no-clone install, once actually provisioned.
+        # Why: an install predating #1095 has no such file yet.
+        dns_standard_env="$config_prod_dir/dns-standard.env"
+        dns_ssl_env="$config_prod_dir/dns-ssl.env"
+    fi
 
     printf '%s\n%s\n%s\n' "$deploy_env" "$dns_standard_env" "$dns_ssl_env"
 }

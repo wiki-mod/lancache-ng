@@ -548,9 +548,17 @@ services:
               password: "__NATS_DNS_REPLICA_PASSWORD__"
               permissions = {
                 publish = [
-
+                  # What: publish permission on lancache.dns.flush, same as the writer identity above.
+                  # Why: dns-ssl's own nats-subscriber runs the same rollback listener and needs the post-rollback cache-flush too.
+                  # From: services/dns/nats-subscriber/src/rollback_listener.rs
                   "lancache.dns.flush",
+                  # What: publish permission on lancache.dns.record, needed if publish_rollback_records ever runs under this identity (DNS_ROLLBACK_URL currently always targets dns-standard, not dns-ssl).
+                  # Why: deliberate maintainer tradeoff -- widens what a compromised dns-ssl credential could publish, rather than adding a fail-closed guard in the listener itself.
+                  # From: services/dns/nats-subscriber/src/rollback_listener.rs
                   "lancache.dns.record",
+                  # What: STREAM.CREATE.LANCACHE_DNS, matching the writer identity's grant of the same subject.
+                  # Why: nats-subscriber's main() falls back to js.create_stream() if get_stream() fails at startup, and exits on a denied create -- needed if this identity is ever first to connect, before the stream exists.
+                  # From: Issue #849
                   "$$JS.API.STREAM.INFO.LANCACHE_DNS",
                   "$$JS.API.STREAM.CREATE.LANCACHE_DNS",
                   "$$JS.API.CONSUMER.INFO.LANCACHE_DNS.>",
@@ -563,15 +571,21 @@ services:
               }
             }
             {
-   
+              # What: the Admin UI's static auth-callout responder identity (services/ui/src/nats_auth_callout.rs), no subject permissions, only answers auth-callout requests.
+              # Why: listed in the UI's auth_users fragment, so nats-server checks its password against this static list; must stay in lockstep with the ui service's NATS_CALLOUT_USER/PASSWORD or the callout silently fails.
+              # From: Issue #583 | PR #621
               user: "__NATS_CALLOUT_USER__"
               password: "__NATS_CALLOUT_PASSWORD__"
             }
           ]
-
+          # What: `include`s auth_callout.conf, a separate file only the Admin UI writes, rather than embedding the stanza here.
+          # Why: the UI's runtime-generated issuer public key is unknown to this container, and this split is what lets this entrypoint regenerate its static subset every restart without clobbering the UI's fragment; a missing include target is a FATAL boot error, an empty one is valid.
+          # From: Issue #811 | PR #817
           include "auth_callout.conf"
         }
-
+        # What: a minimal `SYS` account, additive alongside the `authorization {}` block above; the only account this process is a member of, with no application subject permissions of its own.
+        # Why: lets the Admin UI reach the $$SYS.REQ.SERVER.* system-services API (CONNZ/KICK on a secondary's connection), which nats-server does not expose to the default $$G account every other static role uses.
+        # From: Issue #681
         accounts {
           SYS: {
             users: [
