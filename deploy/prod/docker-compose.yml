@@ -62,7 +62,10 @@ services:
       - NATS_CONSUMER=dns-standard
       - NATS_RECONCILER=1
       - DNS_REPLICATION_ROLE=primary
-      - DNS_XFR_NOTIFY_TARGETS=dns-ssl:5300
+      # What: empty if SSL off, else dns-ssl:5300.
+      # Why: dns-ssl has no container when SSL is off.
+      # From: Issue #1095
+      - DNS_XFR_NOTIFY_TARGETS=${DNS_XFR_NOTIFY_TARGETS:-}
     volumes:
       - shared-secrets:/var/lib/lancache-secrets
       - ${LANCACHE_REPO_ROOT:-../..}/services/dns/cdn-domains.txt:/etc/pdns/cdn-domains.txt
@@ -198,6 +201,10 @@ services:
       - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
       - LOGGING_ENABLED=${LOGGING_ENABLED:-0}
       - NTP_ENABLED=${NTP_ENABLED:-0}
+      # What: overrides watchdog.env's static SSL_ENABLED=1.
+      # Why: else monitors a dns-ssl container that doesn't exist.
+      # From: Issue #1095
+      - SSL_ENABLED=${SSL_ENABLED:-1}
     volumes:
       - proxy-cache:/var/cache/lancache:ro
       - watchdog-status:/var/run/watchdog
