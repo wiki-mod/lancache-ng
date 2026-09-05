@@ -243,10 +243,10 @@ RUN sed -i 's|^https://|http://|' /etc/apk/repositories
 # What: trusts the proxy CA for this RUN, re-applied below.
 # Why: ca-certificates install resets the bundle mid-RUN.
 # From: Issue #1781 | PR #1783
-RUN --mount=type=secret,id=proxy_ca set -euo pipefail; \
-    if [ -s /run/secrets/proxy_ca ]; then \
+RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
       cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig; \
-      cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+      cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
     fi; \
     : "apk-cache-bust=${APK_CACHE_BUST}"; \
     apk update; \
@@ -299,7 +299,7 @@ RUN --mount=type=secret,id=proxy_ca set -euo pipefail; \
     distcc_bin="$(command -v distcc)"; \
     mkdir -p /usr/local/lib/distcc; \
     for wrapper in cc gcc c++ g++; do ln -sf "$distcc_bin" "/usr/local/lib/distcc/$wrapper"; done; \
-    if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
 # What: verifies the apk-installed curl actually runs
 # Why: catches a missing shared-lib chain at build time
@@ -346,10 +346,10 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
 # What: trusts the proxy's CA for this RUN, never in a layer.
 # Why: a secret mount never persists; bundle restored below.
 # From: Issue #1781 | PR #1783
-RUN --mount=type=secret,id=proxy_ca set -euo pipefail; \
-    if [ -s /run/secrets/proxy_ca ]; then \
+RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
       cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig; \
-      cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+      cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
     fi; \
     case "$(apk --print-arch)" in \
       x86_64) ;; \
@@ -369,7 +369,7 @@ RUN --mount=type=secret,id=proxy_ca set -euo pipefail; \
     install -m 0755 "$prebuilt_tmp/cargo-tarpaulin" /usr/local/cargo/bin/cargo-tarpaulin; \
     ln -sf /usr/local/cargo/bin/cargo-audit /usr/local/bin/cargo-audit; \
     ln -sf /usr/local/cargo/bin/cargo-tarpaulin /usr/local/bin/cargo-tarpaulin; \
-    if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
 # What: fetches actionlint checksum-verified binary
 # Why: static Go binary; no reachable stdlib CVE exposure
@@ -377,10 +377,10 @@ RUN --mount=type=secret,id=proxy_ca set -euo pipefail; \
 # What: trusts the proxy's CA for this RUN, never in a layer.
 # Why: a secret mount never persists; bundle restored below.
 # From: Issue #1781 | PR #1783
-RUN --mount=type=secret,id=proxy_ca set -euo pipefail; \
-    if [ -s /run/secrets/proxy_ca ]; then \
+RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
       cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig; \
-      cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+      cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
     fi; \
     case "$(apk --print-arch)" in \
       x86_64) actionlint_arch="amd64"; actionlint_sha256="${ACTIONLINT_SHA256_AMD64}" ;; \
@@ -395,15 +395,15 @@ RUN --mount=type=secret,id=proxy_ca set -euo pipefail; \
     tar -xzf "$actionlint_tmp/actionlint.tar.gz" -C "$actionlint_tmp" actionlint; \
     install -m 0755 "$actionlint_tmp/actionlint" /usr/local/bin/actionlint; \
     actionlint --version; \
-    if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
 # What: trusts the proxy's CA for this RUN, never in a layer.
 # Why: a secret mount never persists; bundle restored below.
 # From: Issue #1781 | PR #1783
-RUN --mount=type=secret,id=proxy_ca set -euo pipefail; \
-    if [ -s /run/secrets/proxy_ca ]; then \
+RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
       cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig; \
-      cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+      cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
     fi; \
     shellspec_tmp="$(mktemp -d)"; \
     trap 'rm -rf "$shellspec_tmp"' EXIT; \
@@ -413,7 +413,7 @@ RUN --mount=type=secret,id=proxy_ca set -euo pipefail; \
     tar -xzf "$shellspec_tmp/shellspec-dist.tar.gz" -C /opt; \
     ln -sf /opt/shellspec/shellspec /usr/local/bin/shellspec; \
     shellspec --version; \
-    if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
 # What: Alpine 3.24 lacks dhclient; uses busybox udhcpc
 # Why: udhcpc ships in busybox base, nothing to install
@@ -587,18 +587,18 @@ ENV PATH="/usr/local/cargo/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin
 # What: trusts the proxy's CA for this RUN, never in a layer.
 # Why: a secret mount never persists; bundle restored below.
 # From: Issue #1781 | PR #1783
-RUN --mount=type=secret,id=proxy_ca \
-    if [ -s /run/secrets/proxy_ca ]; then \
+RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
       cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig; \
     fi \
-    && if [ -s /run/secrets/proxy_ca ]; then cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; fi \
+    && if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; fi \
     && echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sources.list.d/backports.list \
     && printf 'Package: *\nPin: release a=stable-backports\nPin-Priority: 500\n' > /etc/apt/preferences.d/backports \
     && apt-get update \
     && apt-get dist-upgrade -y \
     && apt-get full-upgrade -y \
     && rm -rf /var/lib/apt/lists/* \
-    && if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
+    && if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
 # What: install ccache, sqlite3, git, and other tools
 # Why: ccache for C-deps; sqlite3 for audit; git for CI
@@ -606,10 +606,10 @@ RUN --mount=type=secret,id=proxy_ca \
 # What: trusts the proxy's CA for this RUN, never in a layer.
 # Why: a secret mount never persists; bundle restored below.
 # From: Issue #1781 | PR #1783
-RUN --mount=type=secret,id=proxy_ca set -euo pipefail; \
-      if [ -s /run/secrets/proxy_ca ]; then \
+RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
+      if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
         cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig; \
-        cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+        cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
       fi; \
       apt-get update; \
       apt-get install -y --no-install-recommends \
@@ -635,7 +635,7 @@ RUN --mount=type=secret,id=proxy_ca set -euo pipefail; \
       apt-get dist-upgrade -yy; \
       apt-get autoremove -y; \
     rm -rf /var/lib/apt/lists/*; \
-    if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
 # What: purges Cairo/GLib/ImageMagick/MariaDB dev bloat.
 # Why: self-build's purge cascaded this away; now separate.
@@ -717,10 +717,10 @@ ARG APT_CACHE_BUST=""
 # What: trusts the proxy's CA for this RUN, never in a layer.
 # Why: a secret mount never persists; bundle restored below.
 # From: Issue #1781 | PR #1783
-RUN --mount=type=secret,id=proxy_ca set -euo pipefail; \
-    if [ -s /run/secrets/proxy_ca ]; then \
+RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
       cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig; \
-      cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+      cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
     fi; \
     : "apt-cache-bust=${APT_CACHE_BUST}"; \
     distcc_pump_tmp=""; \
@@ -728,7 +728,7 @@ RUN --mount=type=secret,id=proxy_ca set -euo pipefail; \
         if [ -n "${distcc_pump_tmp}" ]; then rm -rf "${distcc_pump_tmp}"; fi; \
         rm -f /usr/sbin/invoke-rc.d; \
         if [ -x /usr/sbin/invoke-rc.d.real ]; then mv /usr/sbin/invoke-rc.d.real /usr/sbin/invoke-rc.d; fi; \
-        if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi; \
+        if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi; \
     }; \
     trap cleanup_build_tools_apt EXIT; \
     # What: replace invoke-rc.d with no-op; restore via trap
@@ -794,10 +794,10 @@ RUN --mount=type=secret,id=proxy_ca set -euo pipefail; \
 # What: trusts the proxy's CA for this RUN, never in a layer.
 # Why: a secret mount never persists; bundle restored below.
 # From: Issue #1781 | PR #1783
-RUN --mount=type=secret,id=proxy_ca set -euo pipefail; \
-    if [ -s /run/secrets/proxy_ca ]; then \
+RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
       cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig; \
-      cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+      cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
     fi; \
     case "$(dpkg --print-architecture)" in \
       amd64) \
@@ -824,7 +824,7 @@ RUN --mount=type=secret,id=proxy_ca set -euo pipefail; \
     install -m 0755 "$prebuilt_tmp/cargo-tarpaulin" /usr/local/cargo/bin/cargo-tarpaulin; \
     ln -sf /usr/local/cargo/bin/cargo-audit /usr/local/bin/cargo-audit; \
     ln -sf /usr/local/cargo/bin/cargo-tarpaulin /usr/local/bin/cargo-tarpaulin; \
-    if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
 # What: fetches actionlint checksum-verified binary
 # Why: static Go binary; no reachable stdlib CVE exposure
@@ -832,10 +832,10 @@ RUN --mount=type=secret,id=proxy_ca set -euo pipefail; \
 # What: trusts the proxy's CA for this RUN, never in a layer.
 # Why: a secret mount never persists; bundle restored below.
 # From: Issue #1781 | PR #1783
-RUN --mount=type=secret,id=proxy_ca set -euo pipefail; \
-    if [ -s /run/secrets/proxy_ca ]; then \
+RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
       cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig; \
-      cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+      cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
     fi; \
     case "$(dpkg --print-architecture)" in \
       amd64) actionlint_arch="amd64"; actionlint_sha256="${ACTIONLINT_SHA256_AMD64}" ;; \
@@ -850,15 +850,15 @@ RUN --mount=type=secret,id=proxy_ca set -euo pipefail; \
     tar -xzf "$actionlint_tmp/actionlint.tar.gz" -C "$actionlint_tmp" actionlint; \
     install -m 0755 "$actionlint_tmp/actionlint" /usr/local/bin/actionlint; \
     actionlint --version; \
-    if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
 # What: trusts the proxy's CA for this RUN, never in a layer.
 # Why: a secret mount never persists; bundle restored below.
 # From: Issue #1781 | PR #1783
-RUN --mount=type=secret,id=proxy_ca set -euo pipefail; \
-    if [ -s /run/secrets/proxy_ca ]; then \
+RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
       cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig; \
-      cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+      cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
     fi; \
     shellspec_tmp="$(mktemp -d)"; \
     trap 'rm -rf "$shellspec_tmp"' EXIT; \
@@ -868,7 +868,7 @@ RUN --mount=type=secret,id=proxy_ca set -euo pipefail; \
     tar -xzf "$shellspec_tmp/shellspec-dist.tar.gz" -C /opt; \
     ln -sf /opt/shellspec/shellspec /usr/local/bin/shellspec; \
     shellspec --version; \
-    if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
 # What: add musl-libc for cross-compilation static builds
 # Why: services/ui/dns need static PIE; native-arch only
@@ -876,10 +876,10 @@ RUN --mount=type=secret,id=proxy_ca set -euo pipefail; \
 # What: trusts the proxy's CA for this RUN, never in a layer.
 # Why: a secret mount never persists; bundle restored below.
 # From: Issue #1781 | PR #1783
-RUN --mount=type=secret,id=proxy_ca set -euo pipefail; \
-    if [ -s /run/secrets/proxy_ca ]; then \
+RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
       cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig; \
-      cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+      cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
     fi; \
     case "$(dpkg --print-architecture)" in \
       amd64) musl_target="x86_64-unknown-linux-musl" ;; \
@@ -892,7 +892,7 @@ RUN --mount=type=secret,id=proxy_ca set -euo pipefail; \
       musl-tools; \
     rustup target add "${musl_target}"; \
     rm -rf /var/lib/apt/lists/*; \
-    if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
 # What: capture tool output to variables before grepping
 # Why: prevents SIGPIPE when grep -q exits early
