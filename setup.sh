@@ -1849,14 +1849,13 @@ resolve_update_ip_config_paths() {
     dns_standard_env=""
     dns_ssl_env=""
     if is_deploy_prod_install_dir "$install_dir"; then
-        # What: returns both paths unconditionally, existing or not.
-        # Why: matches its pre-#1095 behavior; cmd_update_ip's own
-        #   die() already catches a genuinely missing file.
+        # What: returns both paths unconditionally.
+        # Why: cmd_update_ip's own die() catches a miss.
         dns_standard_env="$config_prod_dir/dns-standard.env"
         dns_ssl_env="$config_prod_dir/dns-ssl.env"
     elif [[ -f "$config_prod_dir/dns-standard.env" ]]; then
-        # What: a no-clone install, once actually provisioned.
-        # Why: an install predating #1095 has no such file yet.
+        # What: a no-clone install, once provisioned.
+        # Why: an older install may lack this file.
         dns_standard_env="$config_prod_dir/dns-standard.env"
         dns_ssl_env="$config_prod_dir/dns-ssl.env"
     fi
