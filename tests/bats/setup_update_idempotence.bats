@@ -32,6 +32,7 @@ write_converged_env_fixture() {
         'SSL_ENABLED=1' \
         'DNS_XFR_NOTIFY_TARGETS=dns-ssl:5300' \
         'UI_SESSION_TTL_SECONDS=86400' \
+        'LANCACHE_REPO_ROOT=/opt/lancache-ng' \
         'LANCACHE_STATE_DIR=/opt/lancache-ng/state' \
         'CACHE_DIR=/opt/lancache-ng/cache' \
         'CACHE_MAX_SIZE=50g' \
