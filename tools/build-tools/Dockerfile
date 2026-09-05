@@ -78,6 +78,13 @@ ARG DOCKER_COMPOSE_SHA256_ARM64
 ARG DOCKER_BUILDX_SHA256_AMD64
 ARG DOCKER_BUILDX_SHA256_ARM64
 
+# What: Go cache-mount + GOPROXY targets from self-hosted vars.
+# Why: single source of truth; ready when a Go build returns.
+# From: Issue #1671
+ARG PROJECT_SELFHOSTED_GOMODCACHE=/go/pkg/mod
+ARG PROJECT_SELFHOSTED_GOCACHE=/root/.cache/go-build
+ARG PROJECT_SELFHOSTED_GOPROXY=
+
 COPY --from=go-tools-script /install-ca-cert.sh /install-ca-cert.sh
 
 # What: switches apk's own repositories to plain http.
@@ -88,8 +95,8 @@ RUN sed -i 's|^https://|http://|' /etc/apk/repositories
 # What: downloads+verifies the three prebuilt docker tools.
 # Why: official static binaries replace the from-source build.
 # From: Issue #1671
-RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
-    --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
+RUN --mount=type=cache,target=${PROJECT_SELFHOSTED_GOMODCACHE},sharing=locked \
+    --mount=type=cache,target=${PROJECT_SELFHOSTED_GOCACHE},sharing=locked \
     --mount=type=secret,id=project_selfhosted_proxy_ca set -eu; \
     apk update; \
     apk add --no-cache ca-certificates curl tar; \
