@@ -630,7 +630,7 @@ vulnerabilities:
       image invokes `mount` at all, and neither container runs with the
       `CAP_SYS_ADMIN` capability `mount` requires.
 
-      From: Issue #815, PR #__PRNUM__
+      From: Issue #815, PR #1831
     status: not_affected
 
   - id: CVE-2026-78408
@@ -643,7 +643,7 @@ vulnerabilities:
       image invokes `nsenter` at all, and neither container runs with the
       capabilities `nsenter` requires.
 
-      From: Issue #815, PR #__PRNUM__
+      From: Issue #815, PR #1831
     status: not_affected
 
   - id: CVE-2026-78409
@@ -655,7 +655,7 @@ vulnerabilities:
       Why: Same util-linux finding group and non-reachability as
       CVE-2026-76642 above (neither image invokes `mount` at all).
 
-      From: Issue #815, PR #__PRNUM__
+      From: Issue #815, PR #1831
     status: not_affected
 
   - id: CVE-2026-78410
@@ -667,7 +667,7 @@ vulnerabilities:
       Why: Same util-linux finding group and non-reachability as
       CVE-2026-76642 above (neither image invokes `mount` at all).
 
-      From: Issue #815, PR #__PRNUM__
+      From: Issue #815, PR #1831
     status: not_affected
 
   - id: CVE-2025-6141
