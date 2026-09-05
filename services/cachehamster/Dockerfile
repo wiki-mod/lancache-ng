@@ -63,11 +63,19 @@ COPY src/ ./src/
 #   never relying on an implicit default for the C compiler a Rust build
 #   script will invoke.
 # From: Issue #871
-RUN set -eu; \
+# What: trusts the LAN proxy CA for this build RUN only.
+# Why: cargo fetches crates.io via the intercepting proxy.
+# From: Issue #1671
+RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -eu; \
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
+      cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig; \
+      cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+    fi; \
     export CC=cc GCC=gcc CXX=c++ GXX=g++; \
     musl_target="$(cat /tmp/musl-target)"; \
     cargo build --release --locked --target "$musl_target"; \
-    cp "target/${musl_target}/release/lancache-cachehamster" /build/lancache-cachehamster-out
+    cp "target/${musl_target}/release/lancache-cachehamster" /build/lancache-cachehamster-out; \
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
