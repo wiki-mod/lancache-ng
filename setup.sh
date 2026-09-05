@@ -3027,11 +3027,11 @@ migrate_env_for_update() {
     # sync_dhcp_proxy_config_prod_env() (called near the end of this function)
     # treats config/prod/dhcp-proxy.env as this install's permanent authority
     # (both install shapes have one, see config_prod_dir_for_install_dir()).
-    # Seed each of the ten append_env_key_if_missing calls below from
-    # config/prod/dhcp-proxy.env's own current value instead of an
-    # unconditional "" default. Backfilling with "" would make $env_file
-    # carry an explicit empty for that key from this point on, and every LATER
-    # `setup.sh update` run -- not just the first one after a key's
+    # Seed each of the ten append_env_key_if_missing
+    # invocations below from config/prod/dhcp-proxy.env's own current value
+    # instead of an unconditional "" default. Backfilling with "" would make
+    # $env_file carry an explicit empty for that key from this point on, and
+    # every LATER `setup.sh update` run -- not just the first one after a key's
     # introduction -- would then read that backfilled empty back as "operator
     # cleared it" and use it to wipe a real, already-configured
     # config/prod/dhcp-proxy.env value: a one-time snapshot of $env_file taken
