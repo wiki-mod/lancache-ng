@@ -27,6 +27,11 @@ You are commissioned exclusively with cleaning up code comments per
 The audit scope is exactly the file or files named in the Dispatch
 Parameters block above, and nothing else.
 
+Within each listed file the ENTIRE file is the audit scope. EVERY
+comment in the file MUST be reviewed and brought into compliance,
+including comments in untouched or unrelated sections, not only the
+comments that sit next to code you might otherwise look at.
+
 Your change authority is strictly limited to comments.
 
 You must not change any production code, logic, configuration, data
@@ -113,6 +118,25 @@ You MAY replace or merge existing comment blocks.
 You MAY add a missing comment only when an applicable rule from
 `AGENTS.md` explicitly requires that comment.
 
+## Comments Not in Scope
+
+Some comment-like lines are NOT code-location comments and MUST be left
+exactly as they are:
+
+* Section dividers, for example a `# ----`, `# ====`, or box-drawing
+  banner line. They may exceed 60 characters and MUST NOT be forced
+  into a `What:`/`Why:`/`From:` block.
+* File license or SPDX headers.
+* Any `#`, `//`, or similar line that sits inside a heredoc, a
+  multi-line command string, a config template, or any other block
+  whose text is DATA: it becomes part of the program output, a
+  generated config file, or the resolved runtime value. Changing it
+  alters runtime behavior or breaks build/config parity, so treat it as
+  data, not as a comment to clean.
+
+When in doubt whether a line is a real code comment or embedded data,
+treat it as data, leave it, and report the location.
+
 ## Strictly Forbidden
 
 You MUST NOT:
@@ -195,8 +219,9 @@ Why: <actual reason>
 
 It MUST be exactly one physical line.
 
-The full line including `What:` and the space may contain at most
-60 characters.
+The complete physical line, including any leading indentation, the
+`What:` tag, the colon and separator, and the content, may contain at
+most 60 characters.
 
 60 characters are NOT a target.
 
@@ -213,8 +238,9 @@ It must not contain history or change history.
 
 It MUST be exactly one physical line.
 
-The full line including `Why:` and the space may contain at most
-60 characters.
+The complete physical line, including any leading indentation, the
+`Why:` tag, the colon and separator, and the content, may contain at
+most 60 characters.
 
 60 characters are NOT a target.
 
@@ -294,7 +320,10 @@ If relevant historical or investigative information does not belong in
 the permitted format, it must not be preserved through longer comments,
 continuation lines, or additional comment blocks.
 
-It belongs in the designated durable work record.
+It belongs in the applicable durable work record. During active work
+that means a GitHub commit comment on the commit that introduces the
+change, unless a more authoritative location such as the Issue or PR
+already holds it. It MUST NOT be kept in the comment.
 
 ## One Block per Location
 
@@ -343,6 +372,11 @@ In particular, a short correct comment must not be lengthened only to
 come closer to 60 characters.
 
 Minimal, precise wording is desired.
+
+Syntactic compliance alone is not sufficient. A block that already
+looks like a valid `What:`/`Why:`/`From:` block MUST still be corrected
+when its meaning, its reference, or the behavior it states no longer
+matches the current code.
 
 ## Change Discipline
 
@@ -402,6 +436,8 @@ Before starting you MUST confirm:
 * created no stacked comment blocks
 * created no continuation lines
 * inspected the final diff in full
+* confirmed that no comment violation remains anywhere in the audited
+  file, including sections you did not otherwise touch
 
 If even one point cannot be confirmed, the task must not be reported as
 complete.
