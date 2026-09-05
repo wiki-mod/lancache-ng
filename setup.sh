@@ -1937,10 +1937,16 @@ sync_dns_config_prod_env() {
     dns_standard_env="$config_prod_dir/dns-standard.env"
     dns_ssl_env="$config_prod_dir/dns-ssl.env"
 
-    [[ -f "$dns_standard_env" ]] && sync_config_prod_env_key_from_template \
-        "$dns_standard_env" PROXY_IP "$ip_standard" "192.168.234.10"
-    [[ -n "$ip_ssl" && -f "$dns_ssl_env" ]] && sync_config_prod_env_key_from_template \
-        "$dns_ssl_env" PROXY_IP "$ip_ssl" "192.168.234.11"
+    # What: both guards are plain `if`, never a bare `[[ ]] &&`.
+    # Why: SSL declined makes the 2nd test false, else abort here.
+    if [[ -f "$dns_standard_env" ]]; then
+        sync_config_prod_env_key_from_template \
+            "$dns_standard_env" PROXY_IP "$ip_standard" "192.168.234.10"
+    fi
+    if [[ -n "$ip_ssl" && -f "$dns_ssl_env" ]]; then
+        sync_config_prod_env_key_from_template \
+            "$dns_ssl_env" PROXY_IP "$ip_ssl" "192.168.234.11"
+    fi
 }
 
 # proxy's cache-sizing/security keys have no environment: override in
