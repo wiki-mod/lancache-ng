@@ -4,11 +4,13 @@
 #
 # Bats helper that loads setup.sh's REAL sync_dhcp_proxy_config_prod_env()
 # and its full real dependency chain (is_deploy_prod_install_dir,
-# deploy_prod_repo_root, get_env_var/_compose_parse_env_value, set_env_key/
-# validate_env_value/env_key_exists/write_env_file, die) via awk extraction,
-# mirroring tests/bats/helpers/setup-dhcp-helpers.sh's established
-# technique for this file. print_ok is intentionally NOT extracted (its
-# single-line function-body shape does not fit this extraction technique's
+# deploy_prod_repo_root, config_prod_dir_for_install_dir,
+# sync_config_prod_env_key_from_template, get_env_var/
+# _compose_parse_env_value, set_env_key/validate_env_value/env_key_exists/
+# write_env_file, die) via awk extraction, mirroring
+# tests/bats/helpers/setup-dhcp-helpers.sh's established technique for this
+# file. print_ok is intentionally NOT extracted (its single-line
+# function-body shape does not fit this extraction technique's
 # one-closing-brace-per-line assumption) and is stubbed as a no-op instead,
 # since it only affects human-readable output, not the function's actual
 # file-write behavior under test.
@@ -20,6 +22,8 @@ load_setup_dhcp_proxy_config_prod_sync_helpers() {
         function want(name) {
             return name == "is_deploy_prod_install_dir" \
                 || name == "deploy_prod_repo_root" \
+                || name == "config_prod_dir_for_install_dir" \
+                || name == "sync_config_prod_env_key_from_template" \
                 || name == "sync_dhcp_proxy_config_prod_env" \
                 || name == "get_env_var" \
                 || name == "_compose_parse_env_value" \

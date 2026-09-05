@@ -41,7 +41,7 @@ DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=real-pxelinux.0
 DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=
 EOF
 
-    sync_dhcp_proxy_config_prod_env "$install_dir" "$source_env_file" "" "" "" "" "" "" "" "" "" ""
+    sync_dhcp_proxy_config_prod_env "$install_dir" "$source_env_file" "" "" "" "" "" "" "" "" "" "" "" "" "" ""
 
     run get_env_var DHCP_PROXY_PXE_BOOT_SERVER "$config_prod_env"
     [ "$output" = "10.9.9.9" ]
@@ -54,7 +54,7 @@ EOF
 DHCP_PROXY_PXE_BOOT_SERVER=
 EOF
 
-    sync_dhcp_proxy_config_prod_env "$install_dir" "$source_env_file" "" "" "" "" "" "" "" "" "" "fallback-uefi.efi"
+    sync_dhcp_proxy_config_prod_env "$install_dir" "$source_env_file" "" "" "" "" "" "" "" "" "" "fallback-uefi.efi" "" "" "" ""
 
     run get_env_var DHCP_PROXY_PXE_BOOT_FILENAME_UEFI "$config_prod_env"
     [ "$output" = "fallback-uefi.efi" ]
@@ -68,7 +68,7 @@ EOF
     source_env_with_clear="$BATS_TEST_TMPDIR/dot-env-explicit-clear"
     printf 'DHCP_PROXY_PXE_BOOT_SERVER=\n' > "$source_env_with_clear"
 
-    sync_dhcp_proxy_config_prod_env "$install_dir" "$source_env_with_clear" "" "" "" "" "" "" "" "" "" ""
+    sync_dhcp_proxy_config_prod_env "$install_dir" "$source_env_with_clear" "" "" "" "" "" "" "" "" "" "" "" "" "" ""
 
     run get_env_var DHCP_PROXY_PXE_BOOT_SERVER "$config_prod_env"
     [ "$output" = "10.9.9.9" ]
@@ -81,25 +81,29 @@ EOF
     source_env_with_new_value="$BATS_TEST_TMPDIR/dot-env-new-value"
     printf 'DHCP_PROXY_PXE_BOOT_SERVER=10.5.5.5\n' > "$source_env_with_new_value"
 
-    sync_dhcp_proxy_config_prod_env "$install_dir" "$source_env_with_new_value" "" "" "" "" "" "" "" "10.5.5.5" "" ""
+    sync_dhcp_proxy_config_prod_env "$install_dir" "$source_env_with_new_value" "" "" "" "" "" "" "" "10.5.5.5" "" "" "" "" "" ""
 
     run get_env_var DHCP_PROXY_PXE_BOOT_SERVER "$config_prod_env"
     [ "$output" = "10.9.9.9" ]
 }
 
-@test "a non-deploy/prod install_dir is a true no-op (quickstart has no config/prod/dhcp-proxy.env to sync)" {
+@test "a non-deploy/prod install_dir with no provisioned config/prod is a true no-op" {
     quickstart_dir="$BATS_TEST_TMPDIR/opt-lancache-ng"
     mkdir -p "$quickstart_dir"
 
-    run sync_dhcp_proxy_config_prod_env "$quickstart_dir" "$source_env_file" "" "" "" "" "" "" "" "10.1.1.1" "" ""
+    # Issue #1095: a no-clone install_dir now resolves config/prod under
+    # itself (config_prod_dir_for_install_dir()), not two levels up -- this
+    # fixture never provisions it, so the file-existence guard still no-ops.
+    run sync_dhcp_proxy_config_prod_env "$quickstart_dir" "$source_env_file" "" "" "" "" "" "" "" "10.1.1.1" "" "" "" "" "" ""
     [ "$status" -eq 0 ]
+    [ ! -e "$quickstart_dir/config" ]
     [ ! -e "$quickstart_dir/../config" ]
 }
 
 @test "a missing config/prod/dhcp-proxy.env file (e.g. an unusual checkout) is a no-op, not a hard failure" {
     rm -f "$config_prod_env"
 
-    run sync_dhcp_proxy_config_prod_env "$install_dir" "$source_env_file" "" "" "" "" "" "" "" "10.1.1.1" "" ""
+    run sync_dhcp_proxy_config_prod_env "$install_dir" "$source_env_file" "" "" "" "" "" "" "" "10.1.1.1" "" "" "" "" "" ""
     [ "$status" -eq 0 ]
     [ ! -e "$config_prod_env" ]
 }

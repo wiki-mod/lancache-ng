@@ -2,11 +2,11 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Regression tests for setup.sh's install_quickstart_compose_assets(), which
-# copies deploy/quickstart/docker-compose.yml plus the scripts it
+# Regression tests for setup.sh's install_deploy_prod_compose_assets(), which
+# copies deploy/prod/docker-compose.yml (Issue #1095) plus the scripts it
 # bind-mounts (docker-socket-proxy.sh, shared-secret-bootstrap.sh) into a
 # real install directory. Guards issue #538 (dhcp-probe.sh was never
-# copied, breaking every quickstart install) and its PR #539 follow-up (a
+# copied, breaking every no-clone install) and its PR #539 follow-up (a
 # prior install that already hit #538 left the bind-mount target behind as
 # an empty directory; GNU install(1) copies INTO an existing directory
 # rather than replacing it, so a naive fix would silently fail to recover
@@ -32,7 +32,7 @@ setup() {
 }
 
 @test "fresh install copies docker-compose.yml and both scripts as real executable files" {
-    run install_quickstart_compose_assets "$install_dir"
+    run install_deploy_prod_compose_assets "$install_dir"
     [ "$status" -eq 0 ]
 
     [ -f "$install_dir/docker-compose.yml" ]
@@ -58,7 +58,7 @@ setup() {
     mkdir -p "$install_dir/scripts/untracked/docker-socket-proxy.sh"
     mkdir -p "$install_dir/scripts/shared-secret-bootstrap.sh"
 
-    run install_quickstart_compose_assets "$install_dir"
+    run install_deploy_prod_compose_assets "$install_dir"
     [ "$status" -eq 0 ]
 
     [ -f "$install_dir/scripts/untracked/docker-socket-proxy.sh" ]
@@ -76,9 +76,9 @@ setup() {
 }
 
 @test "running install twice on an already-correct install stays idempotent" {
-    install_quickstart_compose_assets "$install_dir"
+    install_deploy_prod_compose_assets "$install_dir"
 
-    run install_quickstart_compose_assets "$install_dir"
+    run install_deploy_prod_compose_assets "$install_dir"
     [ "$status" -eq 0 ]
 
     [ -f "$install_dir/scripts/untracked/docker-socket-proxy.sh" ]

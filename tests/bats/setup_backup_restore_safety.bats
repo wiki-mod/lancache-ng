@@ -307,7 +307,7 @@ EOF
 
     install_missing_tools() { :; }
     compose_volume_names() { printf '%s\n' "lancache-ng_pdns-data"; }
-    install_quickstart_compose_assets() { :; }
+    install_deploy_prod_compose_assets() { :; }
     migrate_env_for_update() { :; }
     validate_compose_config() { :; }
     stack_running_file="$BATS_TEST_TMPDIR/stack-running"
