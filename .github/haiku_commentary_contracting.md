@@ -134,8 +134,19 @@ exactly as they are:
   alters runtime behavior or breaks build/config parity, so treat it as
   data, not as a comment to clean.
 
-When in doubt whether a line is a real code comment or embedded data,
-treat it as data, leave it, and report the location.
+This exemption list is exhaustive and narrow. A multi-line explanatory
+or narrative comment above a code, config, or step line is a normal
+code-location comment and IS in scope — it is NOT a "doc-block", no
+matter how many prose lines it spans (three or more lines of prose does
+not make it exempt). It MUST become one `What:`/`Why:`/`From:` block,
+with any overflow rationale moved to a durable record.
+
+When in doubt whether a line is one of the three narrow exemptions above
+or a real code comment, it IS a real code comment and in scope. Conform
+it; if you genuinely cannot, flag it to the coordinator by exact file
+and line. You MUST NOT silently skip a comment by classifying it as
+"data" or a "doc-block" — silently skipping in-scope comments is the
+exact failure this task exists to prevent.
 
 ## Strictly Forbidden
 
@@ -289,6 +300,34 @@ If a reference cannot be reliably determined, it must not be guessed.
 
 Use the existing Git history as well as Issue and PR history to verify
 when needed.
+
+## Examples
+
+Compliant — each physical line at most 60 characters:
+
+```text
+# What: dispatches build-push for the nightly channel
+# Why: nightly must rebuild the stack images daily
+```
+
+Non-compliant — a line over 60 characters. The `# What:` / `# Why:`
+tag and every character on the physical line are counted:
+
+```text
+# What: this line runs well past sixty characters since the tag counts
+# Why: every character on the physical line counts, so this one is too long
+```
+
+Non-compliant — three or more lines of free prose with no
+`What:`/`Why:`/`From:` structure. This is a normal in-scope comment, not
+a doc-block; it MUST become one What/Why/From block, with any overflow
+rationale moved to a durable record:
+
+```text
+# this is a long explanatory paragraph that rambles across
+# several comment lines with no What or Why or From structure
+# and therefore must not be left as it is
+```
 
 ## Sober and Dry
 
