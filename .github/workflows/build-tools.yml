@@ -193,7 +193,6 @@ jobs:
           }
           {
             printf 'rust=%s\n' "$(digest_for_image rust:latest)"
-            printf 'golang=%s\n' "$(digest_for_image golang:latest)"
           } >> "$GITHUB_OUTPUT"
 
       # What: acceleration network, always bridge/default now
@@ -293,7 +292,6 @@ jobs:
           labels: |
             ${{ steps.meta.outputs.labels }}
             org.opencontainers.image.base.rust.digest=${{ steps.build-tools-base-digests.outputs.rust }}
-            org.opencontainers.image.base.golang.digest=${{ steps.build-tools-base-digests.outputs.golang }}
           # What: https_proxy trusted via the proxy CA secret file.
           # Why: Squid re-signs https; the CA makes it verifiable.
           # From: Issue #1095
@@ -573,7 +571,6 @@ jobs:
           }
           {
             printf 'rust=%s\n' "$(digest_for_image rust:latest)"
-            printf 'golang=%s\n' "$(digest_for_image golang:latest)"
           } >> "$GITHUB_OUTPUT"
 
       # What: build local arm64 candidate for fork PRs.
@@ -615,7 +612,6 @@ jobs:
           labels: |
             ${{ steps.meta.outputs.labels }}
             org.opencontainers.image.base.rust.digest=${{ steps.build-tools-base-digests.outputs.rust }}
-            org.opencontainers.image.base.golang.digest=${{ steps.build-tools-base-digests.outputs.golang }}
           # What: omits the LAN-proxy build-arg on this arm64 job.
           # Why: no route to the self-hosted-only proxy; static split.
           # From: Issue #1095

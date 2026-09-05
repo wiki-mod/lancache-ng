@@ -382,9 +382,6 @@ require_grep 'An OpenVEX document generated from .trivyignore.yaml is attached t
 require_grep 'rust:latest ->' \
   .github/workflows/build-push.yml \
   'release notes must include the resolved rust:latest base digest for build-tools'
-require_grep 'golang:latest ->' \
-  .github/workflows/build-push.yml \
-  'release notes must include the resolved golang:latest base digest for build-tools'
 require_grep 'stable releases require external images in supported profiles to be pinned by digest, mirrored, or explicitly removed from the stable profile' \
   scripts/tracked/check-stable-external-images.sh \
   'stable release promotion must fail closed while release-relevant external images are floating'

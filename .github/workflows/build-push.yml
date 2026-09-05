@@ -3911,7 +3911,6 @@ jobs:
           }
           {
             printf 'rust=%s\n' "$(digest_for_image rust:latest)"
-            printf 'golang=%s\n' "$(digest_for_image golang:latest)"
           } >> "$GITHUB_OUTPUT"
       - name: Prepare local Buildx cache
         if: steps.should-build.outputs.should-build == 'true'
@@ -4177,7 +4176,6 @@ jobs:
             ${{ steps.meta.outputs.labels }}
             org.opencontainers.image.description=${{ matrix.description }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
-            ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
           outputs: type=image,oci-mediatypes=true
           platforms: linux/amd64
           provenance: false
@@ -4571,7 +4569,6 @@ jobs:
           }
           {
             printf 'rust=%s\n' "$(digest_for_image rust:latest)"
-            printf 'golang=%s\n' "$(digest_for_image golang:latest)"
           } >> "$GITHUB_OUTPUT"
       - name: Compute Docker build parallelism
         if: steps.should-build.outputs.should-build == 'true'
@@ -4624,7 +4621,6 @@ jobs:
             ${{ steps.meta.outputs.labels }}
             org.opencontainers.image.description=${{ matrix.description }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
-            ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
           outputs: type=image,oci-mediatypes=true
           platforms: linux/arm64
           provenance: false
@@ -5733,9 +5729,8 @@ jobs:
           ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$stack_pointer_image" >/dev/null
           ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker pull "$build_tools_image" >/dev/null
           rust_base_digest="$(docker image inspect "$build_tools_image" --format '{{ index .Config.Labels "org.opencontainers.image.base.rust.digest" }}')"
-          golang_base_digest="$(docker image inspect "$build_tools_image" --format '{{ index .Config.Labels "org.opencontainers.image.base.golang.digest" }}')"
-          if [[ ! "$rust_base_digest" =~ ^sha256:[0-9a-f]{64}$ || ! "$golang_base_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "::error::build-tools image is missing build-time base digest labels."
+          if [[ ! "$rust_base_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::build-tools image is missing its build-time base digest label."
             exit 1
           fi
           image_notes_start='<!-- lancache-ng-image-tags:start -->'
@@ -5768,7 +5763,6 @@ jobs:
             printf -- '- ghcr.io/%s/stack:%s -> %s\n' "$REPOSITORY" "$source_tag" "$(digest_for_image "ghcr.io/${REPOSITORY}/stack:${source_tag}")"
             printf '\nResolved build-tools base image digests:\n\n'
             printf -- '- rust:latest -> %s\n' "$rust_base_digest"
-            printf -- '- golang:latest -> %s\n' "$golang_base_digest"
             printf '\nProvenance and SBOM status:\n\n'
             printf -- '- Provenance attestations are pushed to GHCR for every first-party service image digest and the stack channel-pointer digest.\n'
             printf -- '- CycloneDX SBOMs are generated per released first-party image digest (via Trivy) and attached to this GitHub release as <service>.cdx.json assets by the release-sbom job.\n'
