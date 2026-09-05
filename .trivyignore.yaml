@@ -65,15 +65,18 @@ vulnerabilities:
       share this background).
 
       Why: Vulnerable code not present -- the fix is daemon-side
-      pkg/authorization middleware; these binaries embed
+      pkg/authorization middleware; docker-buildx embeds
       github.com/docker/docker only as an API client library and never
-      compile it. No fixed release exists at the pinned
-      v28.5.2+incompatible module path (verified 2026-08-14 against both
-      projects' vendored modules; re-checked 2026-08-27 that
-      DOCKER_COMPOSE_VERSION/DOCKER_BUILDX_VERSION in
-      tools/build-tools/Dockerfile are unchanged since that
-      verification -- the vendored-module content itself was not
-      re-derived this pass, since that requires a build).
+      compiles it. Re-verified 2026-09-05 for the prebuilt binaries:
+      docker/buildx v0.37.0's vendor/modules.txt lists only
+      github.com/docker/docker/pkg/namesgenerator, so the middleware is
+      absent, while docker/compose v5.5.1 no longer vendors
+      github.com/docker/docker at all (migrated to
+      github.com/moby/moby/api), so the docker-compose path is retained
+      only as a harmless obsolete anchor. This advisory affects
+      moby/moby < 29.3.1 rather than docker/docker; whether Trivy still
+      reports it against docker-buildx MUST be re-checked on the
+      post-switch image's live scan.
 
       From: Issue #1304, PR #1548
     status: not_affected
@@ -88,9 +91,11 @@ vulnerabilities:
 
       Why: Same docker/docker client-library-only disposition as
       CVE-2026-34040 above. This is server-side request-handling code in
-      the daemon's archive handler; docker/buildx's vendor/modules.txt
-      vendors only pkg/namesgenerator, confirming the handler is absent
-      (verified 2026-08-14).
+      the daemon's archive handler; docker/buildx v0.37.0's
+      vendor/modules.txt vendors only pkg/namesgenerator, confirming the
+      handler is absent (re-verified 2026-09-05 for the prebuilt v0.37.0
+      binary, which still vendors docker/docker v28.5.2 with no fixed
+      release; docker/compose v5.5.1 no longer vendors docker/docker).
 
       From: Issue #1304, PR #1548
     status: not_affected
@@ -106,7 +111,9 @@ vulnerabilities:
       Why: Same docker/docker client-library-only disposition as
       CVE-2026-34040 above. This is a race condition in the daemon's own
       `docker cp` implementation; confirmed absent by the same
-      vendor/modules.txt check (verified 2026-08-14).
+      vendor/modules.txt check (re-verified 2026-09-05 for the prebuilt
+      docker/buildx v0.37.0 binary; docker/compose v5.5.1 no longer
+      vendors docker/docker).
 
       From: Issue #1304, PR #1548
     status: not_affected
