@@ -1,11 +1,31 @@
 # Task: AG-CODE-012 Comment Cleanup
 
+## Dispatch Parameters
+
+The dispatcher MUST fill in every slot below before sending. Any slot
+left as a `<...>` placeholder means this dispatch is incomplete and MUST
+NOT be sent.
+
+* Worktree, absolute path: `<WORKTREE_PATH>` on branch `<BRANCH>`
+* Your relayed task/session ID: `<TASK_ID>`
+* Audit scope, exactly the following file or files and nothing else:
+
+  * `<FILE_1>`
+  * `<FILE_2>`
+
+The list above is the complete and only audit scope. Do not touch any
+file that is not listed. Keep the scope narrow: this is a purely
+mechanical task and MUST NOT be given codebase-wide latitude. If the
+overall cleanup spans many files, split them across several narrow
+dispatches instead of widening one.
+
 ## Goal
 
 You are commissioned exclusively with cleaning up code comments per
 `AG-CODE-012`.
 
-The existing codebase is the audit scope.
+The audit scope is exactly the file or files named in the Dispatch
+Parameters block above, and nothing else.
 
 Your change authority is strictly limited to comments.
 
@@ -28,17 +48,15 @@ The current version on `current_dev` is authoritative.
 
 ## Mandatory Dispatch Block
 
-Before sending this task, the dispatcher MUST insert at this point the
-full current content of
+The mandatory `.github/agent-dispatch-checklist.md` is embedded verbatim
+at the end of this document, under "Agent Dispatch Checklist". It is a
+binding part of this contract and applies in full.
 
-`.github/agent-dispatch-checklist.md`
-
-from `current_dev`, unchanged.
-
-The checklist MUST NOT be summarized, shortened, reworded, or replaced
-by an own interpretation.
-
-<PASTE CURRENT agent-dispatch-checklist.md VERBATIM HERE>
+Before sending, the dispatcher MUST confirm the embedded checklist still
+matches the current `.github/agent-dispatch-checklist.md` on
+`current_dev`, and refresh it if `current_dev` has changed. The checklist
+MUST NOT be summarized, shortened, reworded, or replaced by an own
+interpretation.
 
 ## For the Dispatcher: Haiku Is a Weak Model, Mandatory Re-check
 
@@ -403,7 +421,8 @@ Report exclusively:
 
 DISACK: Do not perform any additional implementation work.
 
-Agent Dispatch Checklist
+## Agent Dispatch Checklist
+
 This file is the fixed, mandatory minimum standard baseline for every Agent()/SendMessage()/Workflow agent() call in this repository — both an initial dispatch and every later continuation message to an already-running or paused agent, always, regardless of reason. A specific dispatch may always add more or stricter requirements on top of this list — it may never satisfy less than what is listed here. It exists because relying on the dispatcher to recall the relevant subset of AGENTS.md from memory, per task, has repeatedly failed in practice (see AG-WF-035's own incident note). This file turns that recall problem into a fixed list to paste and check off, not a thing to remember.
 
 How to use this file: Paste this entire checklist verbatim into every dispatch/continuation prompt. If any item is deliberately omitted for a specific dispatch, the prompt must say so explicitly and state why — a silent omission is a compliance gap, not a judgment call the dispatcher gets to make invisibly.
