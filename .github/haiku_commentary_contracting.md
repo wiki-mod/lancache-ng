@@ -213,6 +213,11 @@ Why: <actual reason>
 
 `From:` must never be invented.
 
+The whole block is a hard ceiling of at most 3 physical lines when a
+`From:` line applies, or 2 physical lines when it does not. Nothing may
+expand it past that: no extra field, no wrapped `What:`/`Why:` text, no
+continuation line, and no second block for the same location.
+
 ## What
 
 `What:` is mandatory.
