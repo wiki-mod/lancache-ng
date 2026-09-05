@@ -620,6 +620,56 @@ vulnerabilities:
       From: Issue #815, PR #1454
     status: not_affected
 
+  - id: CVE-2026-76642
+    statement: >-
+      What: Marks CVE-2026-76642 (a `mount(8)` flaw where a failed
+      external mount helper still leaves the target partly mounted) as
+      not exploitable in `services/ui` and `tools/build-tools`.
+
+      Why: Same util-linux finding group as CVE-2022-0563 above. Neither
+      image invokes `mount` at all, and neither container runs with the
+      `CAP_SYS_ADMIN` capability `mount` requires.
+
+      From: Issue #815, PR #__PRNUM__
+    status: not_affected
+
+  - id: CVE-2026-78408
+    statement: >-
+      What: Marks CVE-2026-78408 (a `nsenter --join-cgroup` flaw that can
+      leak a root-owned cgroup file descriptor) as not exploitable in
+      `services/ui` and `tools/build-tools`.
+
+      Why: Same util-linux finding group as CVE-2022-0563 above. Neither
+      image invokes `nsenter` at all, and neither container runs with the
+      capabilities `nsenter` requires.
+
+      From: Issue #815, PR #__PRNUM__
+    status: not_affected
+
+  - id: CVE-2026-78409
+    statement: >-
+      What: Marks CVE-2026-78409 (a `mount(8)` `X-mount.subdir`
+      detached-tree TOCTOU redirection) as not exploitable in
+      `services/ui` and `tools/build-tools`.
+
+      Why: Same util-linux finding group and non-reachability as
+      CVE-2026-76642 above (neither image invokes `mount` at all).
+
+      From: Issue #815, PR #__PRNUM__
+    status: not_affected
+
+  - id: CVE-2026-78410
+    statement: >-
+      What: Marks CVE-2026-78410 (a `mount(8)` flaw where restricted bind
+      mounts do not pin their source, allowing redirection) as not
+      exploitable in `services/ui` and `tools/build-tools`.
+
+      Why: Same util-linux finding group and non-reachability as
+      CVE-2026-76642 above (neither image invokes `mount` at all).
+
+      From: Issue #815, PR #__PRNUM__
+    status: not_affected
+
   - id: CVE-2025-6141
     statement: >-
       What: Marks CVE-2025-6141 (an ncurses stack-buffer-overflow
