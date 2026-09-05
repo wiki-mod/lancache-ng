@@ -88,7 +88,9 @@ RUN sed -i 's|^https://|http://|' /etc/apk/repositories
 # What: downloads+verifies the three prebuilt docker tools.
 # Why: official static binaries replace the from-source build.
 # From: Issue #1671
-RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -eu; \
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
+    --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
+    --mount=type=secret,id=project_selfhosted_proxy_ca set -eu; \
     apk update; \
     apk add --no-cache ca-certificates curl tar; \
     sh /install-ca-cert.sh; \
