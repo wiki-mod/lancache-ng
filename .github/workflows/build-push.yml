@@ -4112,7 +4112,7 @@ jobs:
           fi
       - name: Prepare LAN proxy CA secret
         id: lan-proxy-ca
-        if: matrix.service == 'build-tools'
+        if: matrix.service == 'build-tools' || matrix.service == 'cachehamster'
         env:
           PROJECT_SELFHOSTED_PROXY_CA: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
         run: |
