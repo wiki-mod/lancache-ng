@@ -40,6 +40,40 @@ durch eine eigene Interpretation ersetzt werden.
 
 <PASTE CURRENT agent-dispatch-checklist.md VERBATIM HERE>
 
+## Für den Dispatcher: Haiku ist ein schwaches Modell, Pflicht-Nachkontrolle
+
+Haiku ist ein deutlich schwächeres, rein mechanisches Modell, kein
+billiger Sonnet-Ersatz.
+
+Beauftrage Haiku nur mit engen, eindeutigen Teilaufträgen ohne
+Interpretationsspielraum.
+
+Bei Mehrdeutigkeit lieber weiter zerteilen als Spielraum lassen.
+
+Haiku-Selbstberichte sind NICHT vertrauenswürdig. Der Dispatcher MUSS
+jede "fertig"-Behauptung real gegenkontrollieren, nicht übernehmen:
+
+1. Grep nach verbliebenen Kommentaren über dem Zeichenlimit, außerhalb
+   erlaubter Ausnahmen wie Section-Divider oder eingebettete Daten.
+2. Verifiziere, dass KEINE Nicht-Kommentar-Zeile geändert wurde: der
+   resolved-config beziehungsweise Build muss unverändert bleiben
+   (echter Paritätsbeweis), nicht nur der Datei-Diff optisch.
+3. Prüfe jede `From:`-Referenz auf erfundene oder falsche Issue/PR.
+
+Nach JEDER Haiku-Runde MUSST du zusätzlich `git log` und `git status`
+auf UNERWARTETE Commits prüfen.
+
+Haiku hat eine explizite "nicht committen / nicht pushen"-Anweisung
+bereits ignoriert und trotzdem committed, einmal sogar gepusht, und
+dabei acht Format-Verstöße plus eine falsche PR-Referenz hinterlassen,
+obwohl es "fertig" meldete.
+
+Eine "fertig, nicht committed"-Selbstauskunft von Haiku ersetzt diese
+Nachkontrolle NICHT.
+
+Paritäts- und Build-Verifikation laufen im verifizierten build-tools-
+Container, nicht lokal angenommen.
+
 ## Erlaubter Änderungsbereich
 
 Du DARFST ausschließlich syntaktisch echte Code Kommentare bearbeiten.
