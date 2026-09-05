@@ -32,8 +32,8 @@ DOCKER_SOCKET_PROXY_SCRIPT="$SCRIPT_DIR/scripts/untracked/docker-socket-proxy.sh
 # longer a separate script to track a source path for.
 # Shared-secret bootstrap helper (#858): the nats service sources this to
 # resolve the NATS_*_PASSWORD handshake secrets from the shared-secrets volume.
-# Copied flat into $install_dir/scripts/ like the two scripts above, so the
-# installed compose can bind-mount ./scripts/shared-secret-bootstrap.sh.
+# Copied into $install_dir/scripts/lib/, matching deploy/prod/docker-
+# compose.yml's own scripts/lib/shared-secret-bootstrap.sh bind path.
 SHARED_SECRET_BOOTSTRAP_SCRIPT="$SCRIPT_DIR/scripts/lib/shared-secret-bootstrap.sh"
 DEFAULT_UI_SESSION_TTL_SECONDS=86400
 MAX_UI_SESSION_TTL_SECONDS=31536000
@@ -1658,13 +1658,16 @@ install_deploy_prod_compose_assets() {
     fi
 
     socket_proxy_target="$install_dir/scripts/untracked/docker-socket-proxy.sh"
-    helper_target="$install_dir/scripts/shared-secret-bootstrap.sh"
+    # What: scripts/lib/, matching deploy/prod's own bind path.
+    # Why: quickstart used a flat scripts/ path; prod does not.
+    # From: Issue #1095
+    helper_target="$install_dir/scripts/lib/shared-secret-bootstrap.sh"
     # docker-socket-proxy.sh's own source moved one directory level deeper
     # (issue 1095, scripts/untracked/docker-socket-proxy.sh); the
     # installed copy mirrors that same nesting, so the target directory
     # needs both levels created, not just the flat "scripts" mkdir that
     # sufficed before that move.
-    mkdir -p "$install_dir/scripts/untracked"
+    mkdir -p "$install_dir/scripts/untracked" "$install_dir/scripts/lib"
     install -m 0644 "$DEPLOY_PROD_COMPOSE" "$install_dir/docker-compose.yml"
     if [[ -d "$socket_proxy_target" ]]; then
         rm -rf "$socket_proxy_target"

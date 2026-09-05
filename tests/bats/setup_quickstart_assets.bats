@@ -38,13 +38,13 @@ setup() {
     [ -f "$install_dir/docker-compose.yml" ]
     [ -f "$install_dir/scripts/untracked/docker-socket-proxy.sh" ]
     [ -x "$install_dir/scripts/untracked/docker-socket-proxy.sh" ]
-    # #858: the shared-secret bootstrap helper the quickstart nats service
-    # bind-mounts (./scripts/shared-secret-bootstrap.sh) must be installed too.
-    [ -f "$install_dir/scripts/shared-secret-bootstrap.sh" ]
+    # #858: the shared-secret bootstrap helper the nats service
+    # bind-mounts (scripts/lib/shared-secret-bootstrap.sh) must be installed too.
+    [ -f "$install_dir/scripts/lib/shared-secret-bootstrap.sh" ]
 
     # Content must match the real shipped sources, not a stub or partial copy.
     diff "$repo_root/scripts/untracked/docker-socket-proxy.sh" "$install_dir/scripts/untracked/docker-socket-proxy.sh"
-    diff "$repo_root/scripts/lib/shared-secret-bootstrap.sh" "$install_dir/scripts/shared-secret-bootstrap.sh"
+    diff "$repo_root/scripts/lib/shared-secret-bootstrap.sh" "$install_dir/scripts/lib/shared-secret-bootstrap.sh"
 }
 
 # The exact scenario #539/#538 describe: an install that already
@@ -56,23 +56,23 @@ setup() {
 # mount source a directory.
 @test "recovers when the target paths already exist as stale directories" {
     mkdir -p "$install_dir/scripts/untracked/docker-socket-proxy.sh"
-    mkdir -p "$install_dir/scripts/shared-secret-bootstrap.sh"
+    mkdir -p "$install_dir/scripts/lib/shared-secret-bootstrap.sh"
 
     run install_deploy_prod_compose_assets "$install_dir"
     [ "$status" -eq 0 ]
 
     [ -f "$install_dir/scripts/untracked/docker-socket-proxy.sh" ]
     [ ! -d "$install_dir/scripts/untracked/docker-socket-proxy.sh" ]
-    [ -f "$install_dir/scripts/shared-secret-bootstrap.sh" ]
-    [ ! -d "$install_dir/scripts/shared-secret-bootstrap.sh" ]
+    [ -f "$install_dir/scripts/lib/shared-secret-bootstrap.sh" ]
+    [ ! -d "$install_dir/scripts/lib/shared-secret-bootstrap.sh" ]
 
     # The bug this guards against would nest the real file one level deeper
     # instead of replacing the stale directory.
     [ ! -e "$install_dir/scripts/untracked/docker-socket-proxy.sh/docker-socket-proxy.sh" ]
-    [ ! -e "$install_dir/scripts/shared-secret-bootstrap.sh/shared-secret-bootstrap.sh" ]
+    [ ! -e "$install_dir/scripts/lib/shared-secret-bootstrap.sh/shared-secret-bootstrap.sh" ]
 
     diff "$repo_root/scripts/untracked/docker-socket-proxy.sh" "$install_dir/scripts/untracked/docker-socket-proxy.sh"
-    diff "$repo_root/scripts/lib/shared-secret-bootstrap.sh" "$install_dir/scripts/shared-secret-bootstrap.sh"
+    diff "$repo_root/scripts/lib/shared-secret-bootstrap.sh" "$install_dir/scripts/lib/shared-secret-bootstrap.sh"
 }
 
 @test "running install twice on an already-correct install stays idempotent" {
