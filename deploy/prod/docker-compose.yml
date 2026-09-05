@@ -28,8 +28,11 @@ services:
     ports:
       - "${IP_STANDARD}:80:80"
       - "${IP_STANDARD}:443:8443"
-      - "${IP_SSL}:80:80"
-      - "${IP_SSL}:443:443"
+      # What: falls back to 127.0.0.1 if IP_SSL is empty.
+      # Why: bare IP_SSL else binds all interfaces when off.
+      # From: Issue #1095 | Issue #1415
+      - "${IP_SSL:-${IP_SSL_BIND_FALLBACK:-127.0.0.1}}:80:80"
+      - "${IP_SSL:-${IP_SSL_BIND_FALLBACK:-127.0.0.1}}:443:443"
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://127.0.0.1/healthz >/dev/null && { [ \"$${SSL_ENABLED:-0}\" != \"1\" ] || curl -ksf https://127.0.0.1:8445/healthz >/dev/null; }"]
       interval: 30s
@@ -93,6 +96,10 @@ services:
 
   dns-ssl:
     container_name: lancache-dns-ssl
+    # What: only starts under the "ssl" Compose profile.
+    # Why: else crash-loops on an empty IP_SSL when off.
+    # From: Issue #1095
+    profiles: [ssl]
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${LANCACHE_IMAGE_TAG:-latest}
     env_file:
       - ${LANCACHE_REPO_ROOT:-../..}/config/prod/dns-ssl.env

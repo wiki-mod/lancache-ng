@@ -31,6 +31,13 @@ services/dhcp/keys/
 /.env.prod
 deploy/prod/.env.local
 
+# What: setup.sh's redundant copies under a real checkout.
+# Why: install_dir IS deploy/prod; ../.. works there.
+# From: Issue #1095
+deploy/prod/scripts/
+deploy/prod/config/
+deploy/prod/services/
+
 # config/*.env files are committed (no secrets, just operational config)
 
 # Claude Code project settings

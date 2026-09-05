@@ -21,16 +21,19 @@ export LANG=C LC_ALL=C
 # prebuilt images, and start the stack. Development-only behavior belongs behind
 # an explicit future opt-in path, not inside the default first-user flow.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)"
-QUICKSTART_COMPOSE="$SCRIPT_DIR/deploy/quickstart/docker-compose.yml"
+# What: single compose source for both install shapes.
+# Why: AG-KD-008 -- one deploy/prod/ profile, no fork.
+# From: Issue #1095
+DEPLOY_PROD_COMPOSE="$SCRIPT_DIR/deploy/prod/docker-compose.yml"
 DOCKER_SOCKET_PROXY_SCRIPT="$SCRIPT_DIR/scripts/untracked/docker-socket-proxy.sh"
 # dhcp-probe.sh (formerly copied the same way as the two scripts below) was
 # retired by issue #1288 -- the dhcp-probe container now runs the ui
 # image's own `lancache-ui --dhcp-probe` native CLI mode, so there is no
 # longer a separate script to track a source path for.
-# Shared-secret bootstrap helper (#858): the quickstart nats service sources this
-# to resolve the NATS_*_PASSWORD handshake secrets from the shared-secrets volume.
+# Shared-secret bootstrap helper (#858): the nats service sources this to
+# resolve the NATS_*_PASSWORD handshake secrets from the shared-secrets volume.
 # Copied flat into $install_dir/scripts/ like the two scripts above, so the
-# quickstart compose can bind-mount ./scripts/shared-secret-bootstrap.sh.
+# installed compose can bind-mount ./scripts/shared-secret-bootstrap.sh.
 SHARED_SECRET_BOOTSTRAP_SCRIPT="$SCRIPT_DIR/scripts/lib/shared-secret-bootstrap.sh"
 DEFAULT_UI_SESSION_TTL_SECONDS=86400
 MAX_UI_SESSION_TTL_SECONDS=31536000
@@ -483,7 +486,7 @@ run_kea_dhcp_activation_preflight() {
     # services/ui) and flagged explicitly rather than silently left as
     # unfinished parity. `services/dhcp/Dockerfile` still installs nmap for
     # exactly this call site.
-    if ! output=$(docker compose --env-file "$env_file" -f "$QUICKSTART_COMPOSE" --profile dhcp-kea run --rm --no-deps dhcp \
+    if ! output=$(docker compose --env-file "$env_file" -f "$DEPLOY_PROD_COMPOSE" --profile dhcp-kea run --rm --no-deps dhcp \
         nmap --script broadcast-dhcp-discover --script-args broadcast-dhcp-discover.timeout=5 2>&1); then
         print_warn "DHCP discovery preflight could not be executed inside the Kea image."
         print_warn "Kea activation will require an explicit confirmation because the safety check did not complete."
@@ -1628,11 +1631,14 @@ compose_file_args_for_install_dir() {
     printf '%s\n' "${args[@]}"
 }
 
-# Copies the quickstart compose file and helper scripts into install_dir (used
-# on both first install and every update, so copied installs always run the
-# current container wiring). See the inline comment for the #538 workaround
-# that force-removes a stale auto-vivified directory before reinstalling
-# docker-socket-proxy.sh.
+# Copies the compose file, helper scripts, and every other deploy/prod/
+# docker-compose.yml ../.. bind input into install_dir (used on both first
+# install and every update, so a no-clone install always runs the current
+# container wiring -- see the inline comment for the #538 workaround that
+# force-removes a stale auto-vivified directory before reinstalling
+# docker-socket-proxy.sh, and config_prod_dir_for_install_dir()'s own
+# comment for why config/prod ends up directly under install_dir here
+# rather than two levels up as it does for a real deploy/prod checkout).
 #
 # dhcp-probe.sh is no longer one of these copied assets (issue #1288): the
 # dhcp-probe container now runs the same lancache-ui image's own
@@ -1640,8 +1646,16 @@ compose_file_args_for_install_dir() {
 # services/ui/src/dhcp_probe_native.rs) instead of a bind-mounted external
 # script, so there is nothing left to install/copy for it -- the compose
 # file's dhcp-probe service no longer declares a `volumes:` entry at all.
-install_quickstart_compose_assets() {
-    local install_dir="$1" socket_proxy_target helper_target
+install_deploy_prod_compose_assets() {
+    local install_dir="$1" socket_proxy_target helper_target config_prod_template
+
+    # What: refuses a pre-#1095 named-volume install here.
+    # Why: no automatic migration to host-bind paths yet.
+    # From: Issue #1095
+    if [[ -f "$install_dir/docker-compose.yml" ]] \
+        && ! grep -q '^[[:space:]]*env_file:' "$install_dir/docker-compose.yml"; then
+        die "$install_dir still runs the pre-#1095 compose file, whose PowerDNS/NATS/syslog state lives in named Docker volumes deploy/prod/docker-compose.yml's host-bind layout cannot see. Automatic migration is not yet implemented -- back up this install, migrate its named-volume data to LANCACHE_STATE_DIR by hand, then rerun setup.sh update."
+    fi
 
     socket_proxy_target="$install_dir/scripts/untracked/docker-socket-proxy.sh"
     helper_target="$install_dir/scripts/shared-secret-bootstrap.sh"
@@ -1651,7 +1665,7 @@ install_quickstart_compose_assets() {
     # needs both levels created, not just the flat "scripts" mkdir that
     # sufficed before that move.
     mkdir -p "$install_dir/scripts/untracked"
-    install -m 0644 "$QUICKSTART_COMPOSE" "$install_dir/docker-compose.yml"
+    install -m 0644 "$DEPLOY_PROD_COMPOSE" "$install_dir/docker-compose.yml"
     if [[ -d "$socket_proxy_target" ]]; then
         rm -rf "$socket_proxy_target"
     fi
@@ -1671,6 +1685,29 @@ install_quickstart_compose_assets() {
     else
         chmod 0644 "$helper_target"
     fi
+
+    # What: config/prod/*.env, copied only if missing.
+    # Why: sync_*_config_prod_env() converges these later.
+    # From: Issue #1095
+    mkdir -p "$install_dir/config/prod"
+    for config_prod_template in "$SCRIPT_DIR"/config/prod/*.env; do
+        [[ -f "$install_dir/config/prod/$(basename "$config_prod_template")" ]] \
+            || install -m 0644 "$config_prod_template" "$install_dir/config/prod/$(basename "$config_prod_template")"
+    done
+
+    # What: cdn-domains.txt, copied only if missing.
+    # Why: the Admin UI writes here live; never re-copy.
+    # From: Issue #1095
+    mkdir -p "$install_dir/services/dns"
+    [[ -f "$install_dir/services/dns/cdn-domains.txt" ]] \
+        || install -m 0644 "$SCRIPT_DIR/services/dns/cdn-domains.txt" "$install_dir/services/dns/cdn-domains.txt"
+
+    # What: netdata-web_log.conf, a static template.
+    # Why: never operator-edited; always refreshed.
+    # From: Issue #1095
+    mkdir -p "$install_dir/services/syslog"
+    install -m 0644 "$SCRIPT_DIR/services/syslog/netdata-web_log.conf" \
+        "$install_dir/services/syslog/netdata-web_log.conf"
 }
 
 # Determines origin's default branch (e.g. master) via the cheap local
@@ -1782,81 +1819,158 @@ deploy_prod_repo_input_paths() {
     [[ -f "$repo_root/scripts/lib/shared-secret-bootstrap.sh" ]] && printf '%s\n' "$repo_root/scripts/lib/shared-secret-bootstrap.sh"
 }
 
+# Resolves where install_dir's config/prod/*.env files live: repo_root/
+# config/prod two levels up for a real git checkout, else install_dir/
+# config/prod (a no-clone install has these copied flat, see
+# install_deploy_prod_compose_assets()) -- both now serve the same
+# deploy/prod/docker-compose.yml, so both need this directory resolved.
+config_prod_dir_for_install_dir() {
+    local install_dir="$1"
+
+    if is_deploy_prod_install_dir "$install_dir"; then
+        printf '%s/config/prod\n' "$(deploy_prod_repo_root "$install_dir")"
+    else
+        printf '%s/config/prod\n' "$install_dir"
+    fi
+}
+
 # Resolves the config files cmd_update_ip must edit for a given install_dir.
-# Prints exactly three lines: deploy_env, dns_standard_env, dns_ssl_env. The
-# latter two are empty for quickstart installs (the default /opt/lancache-ng
-# tree and any other directory install_quickstart_compose_assets populated):
-# deploy/quickstart/docker-compose.yml wires PROXY_IP straight from
-# ${IP_STANDARD}/${IP_SSL} in deploy_env, so there is no separate
-# dns-standard.env/dns-ssl.env to edit. Only a manual deploy/prod checkout
-# (identified the same way runtime_env_file_for_install_dir already does, via
-# is_deploy_prod_install_dir) has those files, two levels up from install_dir
-# at repo_root/config/prod -- see deploy/prod/docker-compose.yml's env_file
-# references and deploy_prod_repo_root().
+# Prints exactly three lines: deploy_env, dns_standard_env, dns_ssl_env.
+# Both install shapes now run deploy/prod/docker-compose.yml, so both have
+# a config/prod/dns-standard.env and dns-ssl.env (see
+# config_prod_dir_for_install_dir()) -- the latter two print empty only if
+# those files are genuinely absent (e.g. this install predates Issue #1095
+# and has not been through an update yet).
 resolve_update_ip_config_paths() {
     local install_dir="$1"
-    local deploy_env dns_standard_env="" dns_ssl_env=""
+    local deploy_env config_prod_dir dns_standard_env dns_ssl_env
 
     deploy_env=$(runtime_env_file_for_install_dir "$install_dir")
-    if is_deploy_prod_install_dir "$install_dir"; then
-        local repo_root
-        repo_root=$(deploy_prod_repo_root "$install_dir")
-        dns_standard_env="$repo_root/config/prod/dns-standard.env"
-        dns_ssl_env="$repo_root/config/prod/dns-ssl.env"
-    fi
+    config_prod_dir=$(config_prod_dir_for_install_dir "$install_dir")
+    dns_standard_env="$config_prod_dir/dns-standard.env"
+    dns_ssl_env="$config_prod_dir/dns-ssl.env"
+    [[ -f "$dns_standard_env" ]] || dns_standard_env=""
+    [[ -f "$dns_ssl_env" ]] || dns_ssl_env=""
 
     printf '%s\n%s\n%s\n' "$deploy_env" "$dns_standard_env" "$dns_ssl_env"
 }
 
+# Sets key in config_prod_env when it is empty, absent, or still exactly the
+# checked-in template_default -- so a freshly-copied config/prod/*.env
+# (install_deploy_prod_compose_assets' verbatim template copy) converges to
+# the real per-install value on the run that provisions it, while a later
+# operator edit (which no longer matches template_default) is preserved on
+# every subsequent run, matching AG-OP-009. Shared by every
+# sync_*_config_prod_env function below (AG-CODE-011: one implementation).
+sync_config_prod_env_key_from_template() {
+    local config_prod_env="$1" key="$2" value="$3" template_default="$4" current
+
+    current=$(get_env_var "$key" "$config_prod_env")
+    if [[ -z "$current" || "$current" = "$template_default" ]]; then
+        set_env_key "$key" "$value" "$config_prod_env"
+    fi
+}
+
 # deploy/prod's dhcp-proxy service (deploy/prod/docker-compose.yml) loads its
-# runtime values via `env_file: ../../config/prod/dhcp-proxy.env` -- a static
-# file Compose reads directly, with no `${VAR}` interpolation from
-# .env/.env.local at all (unlike deploy/quickstart's dhcp-proxy service,
-# which wires each value through `environment: - KEY=${KEY:-}`). Every value
-# migrate_env_for_update()/the fresh-install writer resolve for DHCP_PROXY_*
-# and DHCP_RELAY_LOCAL_ADDR therefore never reaches a real deploy/prod
-# container unless it is also written here -- a no-op for a quickstart
-# install (or any other non-deploy/prod install_dir), which has no separate
-# file to sync.
+# runtime values via `env_file: config/prod/dhcp-proxy.env` -- a static file
+# Compose reads directly, with no `${VAR}` interpolation from .env/.env.local
+# at all (unlike Compose's `environment:` blocks, which do interpolate).
+# Every value migrate_env_for_update()/the fresh-install writer resolve for
+# DHCP_PROXY_*, DHCP_RELAY_LOCAL_ADDR, and the four dnsmasq-proxy uplink
+# keys below therefore never reaches the real dhcp-proxy container unless it
+# is also written here -- a no-op only when config/prod/dhcp-proxy.env is
+# genuinely absent for this install_dir.
 sync_dhcp_proxy_config_prod_env() {
     local install_dir="$1" source_env_file="$2"
     local dhcp_relay_local_addr="$3" dhcp_proxy_interface="$4" dhcp_proxy_router="$5"
     local dhcp_ntp_servers="$6" dhcp_proxy_domain="$7" dhcp_proxy_boot_filename="$8"
     local dhcp_proxy_boot_server="$9" dhcp_proxy_pxe_boot_server="${10}" dhcp_proxy_pxe_boot_filename_bios="${11}"
-    local dhcp_proxy_pxe_boot_filename_uefi="${12}"
-    local repo_root config_prod_env key fallback kv
+    local dhcp_proxy_pxe_boot_filename_uefi="${12}" dhcp_subnet_start="${13}" dhcp_dns_primary="${14}"
+    local dhcp_dns_secondary="${15}" upstream_dhcp_ip="${16}"
+    local config_prod_env
 
-    is_deploy_prod_install_dir "$install_dir" || return 0
-    repo_root=$(deploy_prod_repo_root "$install_dir")
-    config_prod_env="$repo_root/config/prod/dhcp-proxy.env"
+    config_prod_env="$(config_prod_dir_for_install_dir "$install_dir")/dhcp-proxy.env"
     [[ -f "$config_prod_env" ]] || return 0
 
-    # config_prod_env, not $source_env_file (.env/.env.local), is what
-    # deploy/prod's real dhcp-proxy container reads, so it is the permanent
-    # authority for every key below. Key presence (including an explicit
-    # empty value) must win here: migrate_env_for_update() permanently adds
-    # these keys to .env, which means .env presence cannot distinguish a later
-    # operator edit from an old migration value. The resolved .env fallback is
-    # used only to initialize a key that config_prod_env does not have yet.
-    for kv in \
-        "DHCP_RELAY_LOCAL_ADDR:$dhcp_relay_local_addr" \
-        "DHCP_PROXY_INTERFACE:$dhcp_proxy_interface" \
-        "DHCP_PROXY_ROUTER:$dhcp_proxy_router" \
-        "DHCP_NTP_SERVERS:$dhcp_ntp_servers" \
-        "DHCP_PROXY_DOMAIN:$dhcp_proxy_domain" \
-        "DHCP_PROXY_BOOT_FILENAME:$dhcp_proxy_boot_filename" \
-        "DHCP_PROXY_BOOT_SERVER:$dhcp_proxy_boot_server" \
-        "DHCP_PROXY_PXE_BOOT_SERVER:$dhcp_proxy_pxe_boot_server" \
-        "DHCP_PROXY_PXE_BOOT_FILENAME_BIOS:$dhcp_proxy_pxe_boot_filename_bios" \
-        "DHCP_PROXY_PXE_BOOT_FILENAME_UEFI:$dhcp_proxy_pxe_boot_filename_uefi"
-    do
-        key="${kv%%:*}"
-        fallback="${kv#*:}"
-        if ! env_key_exists "$key" "$config_prod_env"; then
-            set_env_key "$key" "$fallback" "$config_prod_env"
-        fi
-    done
+    # config_prod_env, not $source_env_file (.env/.env.local), is what the
+    # real dhcp-proxy container reads, so it is the permanent authority for
+    # every key below; every template_default here is "" because
+    # config/prod/dhcp-proxy.env ships every one of these fields empty.
+    sync_config_prod_env_key_from_template "$config_prod_env" DHCP_RELAY_LOCAL_ADDR "$dhcp_relay_local_addr" ""
+    sync_config_prod_env_key_from_template "$config_prod_env" DHCP_PROXY_INTERFACE "$dhcp_proxy_interface" ""
+    sync_config_prod_env_key_from_template "$config_prod_env" DHCP_PROXY_ROUTER "$dhcp_proxy_router" ""
+    sync_config_prod_env_key_from_template "$config_prod_env" DHCP_NTP_SERVERS "$dhcp_ntp_servers" ""
+    sync_config_prod_env_key_from_template "$config_prod_env" DHCP_PROXY_DOMAIN "$dhcp_proxy_domain" ""
+    sync_config_prod_env_key_from_template "$config_prod_env" DHCP_PROXY_BOOT_FILENAME "$dhcp_proxy_boot_filename" ""
+    sync_config_prod_env_key_from_template "$config_prod_env" DHCP_PROXY_BOOT_SERVER "$dhcp_proxy_boot_server" ""
+    sync_config_prod_env_key_from_template "$config_prod_env" DHCP_PROXY_PXE_BOOT_SERVER "$dhcp_proxy_pxe_boot_server" ""
+    sync_config_prod_env_key_from_template "$config_prod_env" DHCP_PROXY_PXE_BOOT_FILENAME_BIOS "$dhcp_proxy_pxe_boot_filename_bios" ""
+    sync_config_prod_env_key_from_template "$config_prod_env" DHCP_PROXY_PXE_BOOT_FILENAME_UEFI "$dhcp_proxy_pxe_boot_filename_uefi" ""
+    # What: dnsmasq subnet/DNS-primary/secondary/uplink too.
+    # Why: dhcp-proxy has no env override for these too.
+    # From: Issue #1095
+    sync_config_prod_env_key_from_template "$config_prod_env" DHCP_SUBNET_START "$dhcp_subnet_start" ""
+    sync_config_prod_env_key_from_template "$config_prod_env" DHCP_DNS_PRIMARY "$dhcp_dns_primary" ""
+    sync_config_prod_env_key_from_template "$config_prod_env" DHCP_DNS_SECONDARY "$dhcp_dns_secondary" ""
+    sync_config_prod_env_key_from_template "$config_prod_env" UPSTREAM_DHCP_IP "$upstream_dhcp_ip" ""
     print_ok "Converged missing dnsmasq-proxy/PXE keys in $config_prod_env from $source_env_file; existing deploy/prod values were preserved because this runtime file is authoritative."
+}
+
+# dns-standard/dns-ssl's PROXY_IP has no environment: override in
+# deploy/prod/docker-compose.yml (unlike PDNS_API_KEY/DDNS_ALLOW_FROM, which
+# that block already supplies from .env) -- config/prod/dns-{standard,ssl}.env
+# ships it as an example placeholder (192.168.234.1{0,1}), so it must be
+# converged to the real IP_STANDARD/IP_SSL for the stack to actually work.
+sync_dns_config_prod_env() {
+    local install_dir="$1" ip_standard="$2" ip_ssl="$3"
+    local config_prod_dir dns_standard_env dns_ssl_env
+
+    config_prod_dir=$(config_prod_dir_for_install_dir "$install_dir")
+    dns_standard_env="$config_prod_dir/dns-standard.env"
+    dns_ssl_env="$config_prod_dir/dns-ssl.env"
+
+    [[ -f "$dns_standard_env" ]] && sync_config_prod_env_key_from_template \
+        "$dns_standard_env" PROXY_IP "$ip_standard" "192.168.234.10"
+    [[ -n "$ip_ssl" && -f "$dns_ssl_env" ]] && sync_config_prod_env_key_from_template \
+        "$dns_ssl_env" PROXY_IP "$ip_ssl" "192.168.234.11"
+}
+
+# proxy's cache-sizing/security keys have no environment: override in
+# deploy/prod/docker-compose.yml (unlike IP_STANDARD/IP_SSL/SSL_ENABLED,
+# which that block already supplies from .env) -- the wizard's cache-size
+# and security-mode answers must reach config/prod/proxy.env directly.
+sync_proxy_config_prod_env() {
+    local install_dir="$1" cache_max_size="$2" cache_mem_mb="$3"
+    local nginx_upstream_resolver="$4" proxy_security_mode="$5"
+    local config_prod_env
+
+    config_prod_env="$(config_prod_dir_for_install_dir "$install_dir")/proxy.env"
+    [[ -f "$config_prod_env" ]] || return 0
+
+    sync_config_prod_env_key_from_template "$config_prod_env" CACHE_MAX_SIZE "$cache_max_size" "50g"
+    sync_config_prod_env_key_from_template "$config_prod_env" CACHE_MEM_MB "$cache_mem_mb" "512"
+    sync_config_prod_env_key_from_template "$config_prod_env" NGINX_UPSTREAM_RESOLVER "$nginx_upstream_resolver" \
+        "8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]"
+    sync_config_prod_env_key_from_template "$config_prod_env" PROXY_SECURITY_MODE "$proxy_security_mode" "lazy"
+}
+
+# Kea's DHCP_SUBNET/GATEWAY/RANGE_START/RANGE_END have no environment:
+# override in deploy/prod/docker-compose.yml (unlike DHCP_DNS_PRIMARY/
+# SECONDARY/SERVER_IP, DDNS_TSIG_KEY, KEA_CTRL_TOKEN, DHCP_MODE, which that
+# block already supplies from .env) -- the wizard's Kea subnet answers must
+# reach config/prod/dhcp.env directly.
+sync_dhcp_config_prod_env() {
+    local install_dir="$1" dhcp_subnet="$2" dhcp_gateway="$3"
+    local dhcp_range_start="$4" dhcp_range_end="$5"
+    local config_prod_env
+
+    config_prod_env="$(config_prod_dir_for_install_dir "$install_dir")/dhcp.env"
+    [[ -f "$config_prod_env" ]] || return 0
+
+    sync_config_prod_env_key_from_template "$config_prod_env" DHCP_SUBNET "$dhcp_subnet" "10.0.0.0/24"
+    sync_config_prod_env_key_from_template "$config_prod_env" DHCP_GATEWAY "$dhcp_gateway" "10.0.0.1"
+    sync_config_prod_env_key_from_template "$config_prod_env" DHCP_RANGE_START "$dhcp_range_start" "10.0.0.128"
+    sync_config_prod_env_key_from_template "$config_prod_env" DHCP_RANGE_END "$dhcp_range_end" "10.0.0.254"
 }
 
 # Full .env rewrites keep the original owner/mode because the file contains
@@ -2663,17 +2777,17 @@ migrate_env_for_update() {
     local dhcp_proxy_pxe_boot_server dhcp_proxy_pxe_boot_filename_bios dhcp_proxy_pxe_boot_filename_uefi
     # Every one of these must be initialized here, not left to plain `local
     # name` (which leaves it unset, not empty): setup.sh runs under `set -u`,
-    # and on a quickstart install (is_deploy_prod_install_dir false below) none
-    # of them are ever assigned before their unconditional expansion in the
+    # and when config/prod/dhcp-proxy.env is missing below none of them are
+    # ever assigned before their unconditional expansion in the
     # append_env_key_if_missing() invocations that follow -- an unset
-    # expansion there would abort the far more common quickstart install
-    # path entirely.
+    # expansion there would abort the update entirely.
     local prodsync_config_env="" prodsync_default_relay_local_addr="" prodsync_default_proxy_interface=""
     local prodsync_default_proxy_router="" prodsync_default_ntp_servers="" prodsync_default_proxy_domain=""
     local prodsync_default_boot_filename="" prodsync_default_boot_server="" prodsync_default_pxe_boot_server=""
     local prodsync_default_pxe_boot_filename_bios="" prodsync_default_pxe_boot_filename_uefi=""
     local allow_insecure_ui cache_dir cache_max_gb cache_max_size cache_gb cache_mem_mb ip_ssl ssl_enabled dns_xfr_notify_targets ui_generated_password ui_password ui_user
     local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_subnet_start ip_standard upstream_dhcp_ip
+    local dhcp_subnet dhcp_gateway dhcp_range_start dhcp_range_end nginx_upstream_resolver proxy_security_mode
     local kea_data_default kea_data_dir nats_conf_default nats_conf_dir nats_data_default nats_data_dir
     local ntp_data_default ntp_data_dir ntp_enabled logging_enabled
     local pdns_filter_state_default pdns_filter_state_dir pdns_ssl_default pdns_ssl_dir pdns_standard_default pdns_standard_dir
@@ -2763,6 +2877,12 @@ migrate_env_for_update() {
     state_dir="${state_dir:-$(legacy_state_root_or_default "$state_root_default")}"
     set_env_key_if_empty_or_missing LANCACHE_STATE_DIR "$state_dir" "$env_file"
 
+    # What: anchors compose's ../.. binds for install_dir.
+    # Why: a real checkout keeps compose's own default.
+    # From: Issue #1095
+    is_deploy_prod_install_dir "$install_dir" \
+        || set_env_key_if_empty_or_missing LANCACHE_REPO_ROOT "$install_dir" "$env_file"
+
     # CACHE_DIR is the canonical install-time cache path.
     # Legacy split cache keys can still be present on disk, but they must
     # collapse to one shared directory before update continues. Fall back to the
@@ -2825,6 +2945,8 @@ migrate_env_for_update() {
     set_env_key_if_empty_or_missing NGINX_UPSTREAM_RESOLVER "8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]" "$env_file"
     migrate_proxy_security_mode_for_update "$env_file"
     set_env_key_if_empty_or_missing PROXY_SECURITY_MODE "lazy" "$env_file"
+    nginx_upstream_resolver=$(get_env_var NGINX_UPSTREAM_RESOLVER "$env_file")
+    proxy_security_mode=$(get_env_var PROXY_SECURITY_MODE "$env_file")
     # LANCACHE_IMAGE_REGISTRY/PREFIX/CHANNEL/TAG (including the #731
     # preserve_image_tag restore-rollback exception) were already resolved,
     # verified, and written near the top of this function, before any of the
@@ -2843,6 +2965,10 @@ migrate_env_for_update() {
     append_env_key_if_missing DHCP_GATEWAY "" "$env_file"
     append_env_key_if_missing DHCP_RANGE_START "" "$env_file"
     append_env_key_if_missing DHCP_RANGE_END "" "$env_file"
+    dhcp_subnet=$(get_env_var DHCP_SUBNET "$env_file")
+    dhcp_gateway=$(get_env_var DHCP_GATEWAY "$env_file")
+    dhcp_range_start=$(get_env_var DHCP_RANGE_START "$env_file")
+    dhcp_range_end=$(get_env_var DHCP_RANGE_END "$env_file")
 
     # LanCache-NG-NTP can stay disabled too; same "keys must exist" reasoning
     # as DHCP_ENABLED/KEA_DATA_DIR above. No legacy path to migrate from (this
@@ -2899,10 +3025,11 @@ migrate_env_for_update() {
     dhcp_dns_secondary=$(get_env_var DHCP_DNS_SECONDARY "$env_file")
     upstream_dhcp_ip=$(get_env_var UPSTREAM_DHCP_IP "$env_file")
     # sync_dhcp_proxy_config_prod_env() (called near the end of this function)
-    # treats config/prod/dhcp-proxy.env as deploy/prod's permanent authority.
-    # For a deploy/prod install, seed each of the ten append_env_key_if_missing
-    # calls below from config/prod/dhcp-proxy.env's own current value instead
-    # of an unconditional "" default. Backfilling with "" would make $env_file
+    # treats config/prod/dhcp-proxy.env as this install's permanent authority
+    # (both install shapes have one, see config_prod_dir_for_install_dir()).
+    # Seed each of the ten append_env_key_if_missing calls below from
+    # config/prod/dhcp-proxy.env's own current value instead of an
+    # unconditional "" default. Backfilling with "" would make $env_file
     # carry an explicit empty for that key from this point on, and every LATER
     # `setup.sh update` run -- not just the first one after a key's
     # introduction -- would then read that backfilled empty back as "operator
@@ -2914,60 +3041,58 @@ migrate_env_for_update() {
     # instead makes $env_file converge to match it immediately, so every
     # later run reads back the same real value from both files and is a
     # genuine no-op, exactly like every other key in this function.
-    if is_deploy_prod_install_dir "$install_dir"; then
-        prodsync_config_env="$(deploy_prod_repo_root "$install_dir")/config/prod/dhcp-proxy.env"
-        if [[ -f "$prodsync_config_env" ]]; then
-            # config/prod/dhcp-proxy.env is a hand-edited file that has never
-            # passed through this function's own dnsmasq-proxy validation
-            # block further below (it is normally only edited directly, or
-            # converged via this exact seeding path) -- validate each
-            # candidate default the same way the read-back further down does
-            # before using it, falling back to the pre-existing "" default
-            # and a warning otherwise. Without this, a value that
-            # entrypoint.sh's own container-side rendering tolerates (e.g. a
-            # PXE boot server with no filename yet -- no pxe-service
-            # directive, a startup warning, not fatal) could newly abort a
-            # `setup.sh update` that previously worked, since this function's
-            # own dnsmasq-proxy validation block requires stricter
-            # completeness/well-formedness than the container does.
-            prodsync_default_relay_local_addr=$(get_env_var DHCP_RELAY_LOCAL_ADDR "$prodsync_config_env")
-            is_valid_ipv4 "$prodsync_default_relay_local_addr" || prodsync_default_relay_local_addr=""
-            prodsync_default_proxy_interface=$(get_env_var DHCP_PROXY_INTERFACE "$prodsync_config_env")
-            is_valid_dhcp_proxy_interface "$prodsync_default_proxy_interface" || prodsync_default_proxy_interface=""
-            prodsync_default_proxy_router=$(get_env_var DHCP_PROXY_ROUTER "$prodsync_config_env")
-            is_valid_ipv4 "$prodsync_default_proxy_router" || prodsync_default_proxy_router=""
-            prodsync_default_ntp_servers=$(get_env_var DHCP_NTP_SERVERS "$prodsync_config_env")
-            if [[ -n "$prodsync_default_ntp_servers" ]]; then
-                IFS=',' read -r -a _dhcp_ntp_check <<< "$prodsync_default_ntp_servers"
-                for _dhcp_ntp_ip in "${_dhcp_ntp_check[@]}"; do
-                    _dhcp_ntp_ip="${_dhcp_ntp_ip//[[:space:]]/}"
-                    [[ -z "$_dhcp_ntp_ip" ]] || is_valid_ipv4 "$_dhcp_ntp_ip" || prodsync_default_ntp_servers=""
-                done
-            fi
-            prodsync_default_proxy_domain=$(get_env_var DHCP_PROXY_DOMAIN "$prodsync_config_env")
-            is_valid_dhcp_proxy_domain "$prodsync_default_proxy_domain" || prodsync_default_proxy_domain=""
-            prodsync_default_boot_filename=$(get_env_var DHCP_PROXY_BOOT_FILENAME "$prodsync_config_env")
-            is_valid_dhcp_proxy_boot_filename "$prodsync_default_boot_filename" || prodsync_default_boot_filename=""
-            prodsync_default_boot_server=$(get_env_var DHCP_PROXY_BOOT_SERVER "$prodsync_config_env")
-            is_valid_ipv4 "$prodsync_default_boot_server" || prodsync_default_boot_server=""
-            prodsync_default_pxe_boot_server=$(get_env_var DHCP_PROXY_PXE_BOOT_SERVER "$prodsync_config_env")
-            is_valid_ipv4 "$prodsync_default_pxe_boot_server" || prodsync_default_pxe_boot_server=""
-            prodsync_default_pxe_boot_filename_bios=$(get_env_var DHCP_PROXY_PXE_BOOT_FILENAME_BIOS "$prodsync_config_env")
-            is_valid_dhcp_proxy_boot_filename "$prodsync_default_pxe_boot_filename_bios" || prodsync_default_pxe_boot_filename_bios=""
-            prodsync_default_pxe_boot_filename_uefi=$(get_env_var DHCP_PROXY_PXE_BOOT_FILENAME_UEFI "$prodsync_config_env")
-            is_valid_dhcp_proxy_boot_filename "$prodsync_default_pxe_boot_filename_uefi" || prodsync_default_pxe_boot_filename_uefi=""
-            # The PXE trio must be complete (server + at least one filename)
-            # or entirely empty together -- entrypoint.sh tolerates an
-            # incomplete pair by rendering no pxe-service directive, but this
-            # function's own dnsmasq-proxy validation block below requires
-            # completeness and would die on a hand-edited config/prod file
-            # caught mid-incomplete-configuration.
-            if [[ -n "$prodsync_default_pxe_boot_server$prodsync_default_pxe_boot_filename_bios$prodsync_default_pxe_boot_filename_uefi" ]] \
-                && ! pxe_boot_pointer_answers_are_complete "$prodsync_default_pxe_boot_server" "$prodsync_default_pxe_boot_filename_bios" "$prodsync_default_pxe_boot_filename_uefi"; then
-                prodsync_default_pxe_boot_server=""
-                prodsync_default_pxe_boot_filename_bios=""
-                prodsync_default_pxe_boot_filename_uefi=""
-            fi
+    prodsync_config_env="$(config_prod_dir_for_install_dir "$install_dir")/dhcp-proxy.env"
+    if [[ -f "$prodsync_config_env" ]]; then
+        # config/prod/dhcp-proxy.env is a hand-edited file that has never
+        # passed through this function's own dnsmasq-proxy validation
+        # block further below (it is normally only edited directly, or
+        # converged via this exact seeding path) -- validate each
+        # candidate default the same way the read-back further down does
+        # before using it, falling back to the pre-existing "" default
+        # and a warning otherwise. Without this, a value that
+        # entrypoint.sh's own container-side rendering tolerates (e.g. a
+        # PXE boot server with no filename yet -- no pxe-service
+        # directive, a startup warning, not fatal) could newly abort a
+        # `setup.sh update` that previously worked, since this function's
+        # own dnsmasq-proxy validation block requires stricter
+        # completeness/well-formedness than the container does.
+        prodsync_default_relay_local_addr=$(get_env_var DHCP_RELAY_LOCAL_ADDR "$prodsync_config_env")
+        is_valid_ipv4 "$prodsync_default_relay_local_addr" || prodsync_default_relay_local_addr=""
+        prodsync_default_proxy_interface=$(get_env_var DHCP_PROXY_INTERFACE "$prodsync_config_env")
+        is_valid_dhcp_proxy_interface "$prodsync_default_proxy_interface" || prodsync_default_proxy_interface=""
+        prodsync_default_proxy_router=$(get_env_var DHCP_PROXY_ROUTER "$prodsync_config_env")
+        is_valid_ipv4 "$prodsync_default_proxy_router" || prodsync_default_proxy_router=""
+        prodsync_default_ntp_servers=$(get_env_var DHCP_NTP_SERVERS "$prodsync_config_env")
+        if [[ -n "$prodsync_default_ntp_servers" ]]; then
+            IFS=',' read -r -a _dhcp_ntp_check <<< "$prodsync_default_ntp_servers"
+            for _dhcp_ntp_ip in "${_dhcp_ntp_check[@]}"; do
+                _dhcp_ntp_ip="${_dhcp_ntp_ip//[[:space:]]/}"
+                [[ -z "$_dhcp_ntp_ip" ]] || is_valid_ipv4 "$_dhcp_ntp_ip" || prodsync_default_ntp_servers=""
+            done
+        fi
+        prodsync_default_proxy_domain=$(get_env_var DHCP_PROXY_DOMAIN "$prodsync_config_env")
+        is_valid_dhcp_proxy_domain "$prodsync_default_proxy_domain" || prodsync_default_proxy_domain=""
+        prodsync_default_boot_filename=$(get_env_var DHCP_PROXY_BOOT_FILENAME "$prodsync_config_env")
+        is_valid_dhcp_proxy_boot_filename "$prodsync_default_boot_filename" || prodsync_default_boot_filename=""
+        prodsync_default_boot_server=$(get_env_var DHCP_PROXY_BOOT_SERVER "$prodsync_config_env")
+        is_valid_ipv4 "$prodsync_default_boot_server" || prodsync_default_boot_server=""
+        prodsync_default_pxe_boot_server=$(get_env_var DHCP_PROXY_PXE_BOOT_SERVER "$prodsync_config_env")
+        is_valid_ipv4 "$prodsync_default_pxe_boot_server" || prodsync_default_pxe_boot_server=""
+        prodsync_default_pxe_boot_filename_bios=$(get_env_var DHCP_PROXY_PXE_BOOT_FILENAME_BIOS "$prodsync_config_env")
+        is_valid_dhcp_proxy_boot_filename "$prodsync_default_pxe_boot_filename_bios" || prodsync_default_pxe_boot_filename_bios=""
+        prodsync_default_pxe_boot_filename_uefi=$(get_env_var DHCP_PROXY_PXE_BOOT_FILENAME_UEFI "$prodsync_config_env")
+        is_valid_dhcp_proxy_boot_filename "$prodsync_default_pxe_boot_filename_uefi" || prodsync_default_pxe_boot_filename_uefi=""
+        # The PXE trio must be complete (server + at least one filename)
+        # or entirely empty together -- entrypoint.sh tolerates an
+        # incomplete pair by rendering no pxe-service directive, but this
+        # function's own dnsmasq-proxy validation block below requires
+        # completeness and would die on a hand-edited config/prod file
+        # caught mid-incomplete-configuration.
+        if [[ -n "$prodsync_default_pxe_boot_server$prodsync_default_pxe_boot_filename_bios$prodsync_default_pxe_boot_filename_uefi" ]] \
+            && ! pxe_boot_pointer_answers_are_complete "$prodsync_default_pxe_boot_server" "$prodsync_default_pxe_boot_filename_bios" "$prodsync_default_pxe_boot_filename_uefi"; then
+            prodsync_default_pxe_boot_server=""
+            prodsync_default_pxe_boot_filename_bios=""
+            prodsync_default_pxe_boot_filename_uefi=""
         fi
     fi
     # Issue #844: DHCP-relay-mode local address (this relay's client-facing IP,
@@ -3172,9 +3297,18 @@ migrate_env_for_update() {
         "$dhcp_relay_local_addr" "$dhcp_proxy_interface" "$dhcp_proxy_router" \
         "$dhcp_ntp_servers" "$dhcp_proxy_domain" "$dhcp_proxy_boot_filename" \
         "$dhcp_proxy_boot_server" "$dhcp_proxy_pxe_boot_server" "$dhcp_proxy_pxe_boot_filename_bios" \
-        "$dhcp_proxy_pxe_boot_filename_uefi"
+        "$dhcp_proxy_pxe_boot_filename_uefi" "$dhcp_subnet_start" "$dhcp_dns_primary" \
+        "$dhcp_dns_secondary" "$upstream_dhcp_ip"
+    # What: converges dns/proxy/dhcp env_file-only keys.
+    # Why: deploy/prod's environment: never overrides these.
+    # From: Issue #1095
+    sync_dns_config_prod_env "$install_dir" "$ip_standard" "$ip_ssl"
+    sync_proxy_config_prod_env "$install_dir" "$cache_max_size" "$cache_mem_mb" \
+        "$nginx_upstream_resolver" "$proxy_security_mode"
+    sync_dhcp_config_prod_env "$install_dir" "$dhcp_subnet" "$dhcp_gateway" \
+        "$dhcp_range_start" "$dhcp_range_end"
 
-    print_ok ".env is complete for the current quickstart template"
+    print_ok ".env is complete for the current install template"
 }
 
 # The apt package that provides a binary sometimes has a different name than
@@ -3259,6 +3393,11 @@ backup_manifest() {
     printf '%s\n' "$cache_env_file"
     [[ "$env_file" != "$cache_env_file" ]] && printf '%s\n' "$env_file"
     printf '%s\n' "$install_dir/docker-compose.yml" "$install_dir/certs" "$install_dir/scripts"
+    # What: no-clone copies of prod's ../.. bind inputs.
+    # Why: install_deploy_prod_compose_assets() writes them.
+    # From: Issue #1095
+    [[ -d "$install_dir/config/prod" ]] && printf '%s\n' "$install_dir/config/prod"
+    [[ -f "$install_dir/services/dns/cdn-domains.txt" ]] && printf '%s\n' "$install_dir/services/dns/cdn-domains.txt"
     deploy_prod_repo_input_paths "$install_dir"
     [[ -n "${pdns_standard_dir:-}" && -d "$pdns_standard_dir" ]] && printf '%s\n' "$pdns_standard_dir"
     [[ -n "${pdns_ssl_dir:-}" && -d "$pdns_ssl_dir" ]] && printf '%s\n' "$pdns_ssl_dir"
@@ -3889,8 +4028,8 @@ cmd_restore() {
     # that compose file is managed by the checkout itself, not this bundle,
     # and restore deliberately does not run a git sync (unlike update).
     if ! is_deploy_prod_install_dir "$install_dir"; then
-        install_quickstart_compose_assets "$install_dir"
-        print_ok "quickstart compose assets refreshed"
+        install_deploy_prod_compose_assets "$install_dir"
+        print_ok "compose assets refreshed"
     fi
 
     # Run in a subshell so a die() inside either helper is caught here instead
@@ -4204,7 +4343,7 @@ _UPDATE_COMPOSE_FILES=()
 # Pre-update per-service health snapshot (service name -> "1" healthy / "0"
 # unhealthy), populated once by capture_stack_health_baseline near the very
 # top of perform_stack_update_flow -- before sync_repo_to_default_branch,
-# install_quickstart_compose_assets, or cmd_backup run, since all three can
+# install_deploy_prod_compose_assets, or cmd_backup run, since all three can
 # already mutate a running container before apply_stack_update_ordered is
 # ever reached (see capture_stack_health_baseline's own header comment for
 # why that specific placement matters) -- and read by wait_for_stack_health
@@ -4781,15 +4920,15 @@ perform_stack_update_flow() {
     fi
 
     # Must run here -- before sync_repo_to_default_branch,
-    # install_quickstart_compose_assets, or cmd_backup do anything -- not
+    # install_deploy_prod_compose_assets, or cmd_backup do anything -- not
     # merely before apply_stack_update_ordered recreates a container, which
     # is where an earlier version of this baseline capture lived. Real,
     # live reproduction on issue #1391 (2026-08-05) found that placement too
     # late: cmd_backup --config's own "stop the stack for a consistent
     # backup, then restart it" cycle (a few steps below) already restarts
     # every container using whatever compose/script content
-    # sync_repo_to_default_branch/install_quickstart_compose_assets just
-    # refreshed -- by design, per install_quickstart_compose_assets' own
+    # sync_repo_to_default_branch/install_deploy_prod_compose_assets just
+    # refreshed -- by design, per install_deploy_prod_compose_assets' own
     # comment ("so even copied installs use the current container wiring
     # during the whole update"). A compose-level regression (a changed
     # healthcheck, env var, volume, etc.) therefore already gets baked into
@@ -4805,7 +4944,7 @@ perform_stack_update_flow() {
     # dc_update config --services is safe to call this early: it only reads
     # whichever compose files already exist on disk right now (which is
     # exactly the pre-update set this baseline needs), and does not depend
-    # on anything sync_repo_to_default_branch/install_quickstart_compose_assets
+    # on anything sync_repo_to_default_branch/install_deploy_prod_compose_assets
     # might add or change later.
     print_step "Capturing pre-update health baseline"
     local -a _update_baseline_services
@@ -4826,8 +4965,8 @@ perform_stack_update_flow() {
     # Quickstart installs keep a copied compose bundle under the install tree.
     # Refresh those assets before any backup-driven restart so even copied
     # installs use the current container wiring during the whole update.
-    install_quickstart_compose_assets "$install_dir"
-    print_ok "quickstart compose assets updated"
+    install_deploy_prod_compose_assets "$install_dir"
+    print_ok "compose assets updated"
 
     print_step "Creating pre-update rollback backup"
     if ! ( cmd_backup --config "$install_dir" ); then
@@ -6894,7 +7033,7 @@ if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
 
     ensure_stack_requirements_installed
 
-    if [[ ! -f "$QUICKSTART_COMPOSE" ]]; then
+    if [[ ! -f "$DEPLOY_PROD_COMPOSE" ]]; then
         print_warn "No local repo found — cloning to /opt/lancache-ng..."
         if ! command -v git >/dev/null 2>&1; then
             install_git
@@ -7037,8 +7176,8 @@ fi
 
 if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
     mkdir -p "$INSTALL_DIR" "$INSTALL_DIR/certs"
-    install_quickstart_compose_assets "$INSTALL_DIR"
-    print_ok "quickstart compose assets copied to $INSTALL_DIR"
+    install_deploy_prod_compose_assets "$INSTALL_DIR"
+    print_ok "compose assets copied to $INSTALL_DIR"
 fi
 
 # ── 4. Cache configuration ───────────────────────────────────────────────────
@@ -7703,6 +7842,11 @@ validate_env_values_for_initial_write \
     "UI_BIND_IP=${IP_STANDARD}"
 
 write_env_file "$INSTALL_DIR/.env" <<EOF
+# ── Install location ────────────────────────────────────────────────────────────
+# Anchors deploy/prod/docker-compose.yml's ../.. bind defaults to this
+# directory: a no-clone install has no adjacent repo checkout to default to.
+LANCACHE_REPO_ROOT=${INSTALL_DIR}
+
 # ── LAN IPs ────────────────────────────────────────────────────────────────────
 # Standard mode (no CA certificate needed): HTTP cached, HTTPS passthrough
 IP_STANDARD=${IP_STANDARD}
@@ -7879,6 +8023,21 @@ ALLOW_INSECURE_UI=${ALLOW_INSECURE_UI}
 UI_BIND_IP=${IP_STANDARD}
 EOF
 print_ok ".env written: $INSTALL_DIR/.env"
+
+# What: converges config/prod/*.env's env_file-only keys.
+# Why: same machinery migrate_env_for_update() reuses.
+# From: Issue #1095
+sync_dns_config_prod_env "$INSTALL_DIR" "$IP_STANDARD" "$IP_SSL"
+sync_proxy_config_prod_env "$INSTALL_DIR" "${cache_gb}g" "$CACHE_MEM_MB" \
+    "8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]" "lazy"
+sync_dhcp_config_prod_env "$INSTALL_DIR" "$DHCP_SUBNET" "$DHCP_GATEWAY" \
+    "$DHCP_RANGE_START" "$DHCP_RANGE_END"
+sync_dhcp_proxy_config_prod_env "$INSTALL_DIR" "$INSTALL_DIR/.env" \
+    "$DHCP_RELAY_LOCAL_ADDR" "$DHCP_PROXY_INTERFACE" "$DHCP_PROXY_ROUTER" \
+    "$DHCP_NTP_SERVERS" "$DHCP_PROXY_DOMAIN" "$DHCP_PROXY_BOOT_FILENAME" \
+    "$DHCP_PROXY_BOOT_SERVER" "$DHCP_PROXY_PXE_BOOT_SERVER" "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS" \
+    "$DHCP_PROXY_PXE_BOOT_FILENAME_UEFI" "$DHCP_SUBNET_START" "$DHCP_DNS_PRIMARY" \
+    "$DHCP_DNS_SECONDARY" "$UPSTREAM_DHCP_IP"
 
 # ── 10. Creating directories ───────────────────────────────────────────────────
 print_step "Creating directories"
