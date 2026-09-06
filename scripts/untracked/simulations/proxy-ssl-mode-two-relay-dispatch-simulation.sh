@@ -107,7 +107,9 @@ docker run --rm -v "$work_dir:/certs" -w /certs "$build_tools_image" bash -c \
     "openssl req -x509 -newkey rsa:2048 -nodes -keyout two.key -out two.crt -days 1 -subj '/CN=backend-two-real' 2>/dev/null" >/dev/null
 
 echo "== Building the real proxy image (this fix applied) =="
-docker build -q -t "$proxy_image" --build-context "dns-domains=$work_dir/fixture" services/proxy >/dev/null
+# What: passes shared-scripts as a named build context.
+# Why: else COPY --from=shared-scripts triggers a bad pull.
+docker build -q -t "$proxy_image" --build-context "dns-domains=$work_dir/fixture" --build-context "shared-scripts=$repo_root/scripts/lib" services/proxy >/dev/null
 
 docker network create --subnet 172.29.77.0/24 "$network_name" >/dev/null
 

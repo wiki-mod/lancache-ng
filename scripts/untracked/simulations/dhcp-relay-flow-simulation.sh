@@ -60,7 +60,9 @@ cleanup() {
 trap cleanup EXIT
 
 echo "== Building the dhcp-proxy image (relay mode) from this checkout =="
-docker build -q -t "$relay_image" services/dhcp-proxy >/dev/null
+# What: passes shared-scripts as a named build context.
+# Why: else COPY --from=shared-scripts triggers a bad pull.
+docker build -q -t "$relay_image" --build-context "shared-scripts=$repo_root/scripts/lib" services/dhcp-proxy >/dev/null
 
 echo "== Creating two isolated bridge networks =="
 docker network create --subnet "$client_subnet" "$client_net" >/dev/null
