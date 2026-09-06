@@ -86,9 +86,9 @@ touches_exact() {
 # anything full-setup-deep-validate.yml/full-setup-sims.yml/
 # full-setup-validate.yml or the simulation scripts they run exercises) have
 # since actually moved into scripts/tracked/ (git mv, not a fresh file) and
-# been dropped from the array below, which is now empty by design: ANY path
-# under the scripts/tracked/ prefix is recognized as CI-tooling-only,
-# exactly as an exact-match array entry used to be -- this is the one
+# been dropped from the array below. ANY path under the scripts/tracked/
+# prefix is recognized as CI-tooling-only, exactly as an exact-match array
+# entry used to be -- this is the one
 # deliberate, narrow exception to "never widen should_run's narrowing by
 # directory/prefix" below, because scripts/tracked/ is itself defined to
 # contain only already-individually-verified scripts (the verification
@@ -96,17 +96,20 @@ touches_exact() {
 # script gets this same treatment by being placed directly into
 # scripts/tracked/ at creation, not by adding a new array entry here.
 #
-# Fail-closed by construction: this array (now empty, kept as a named,
-# still-iterated variable rather than deleted outright, so a future
-# individually-verified script that for some reason cannot move into
-# scripts/tracked/ has a documented, tested fallback path) may only ever be
-# used to NARROW should_run for a script that has been individually
-# re-verified this way -- never to widen it by directory/prefix. Any
-# scripts/ path that is neither under scripts/tracked/ nor listed here (a
-# brand-new script, an unclassified one, anything under scripts/untracked/,
-# or anything under scripts/lib/) still counts as should_run-relevant,
-# exactly as touches_prefix "scripts/" did before this allowlist existed.
-ci_tooling_only_scripts=()
+# Fail-closed by construction: this array may only ever be used to NARROW
+# should_run for a script that has been individually re-verified this way --
+# never to widen it by directory/prefix. Any scripts/ path that is neither
+# under scripts/tracked/ nor listed here (a brand-new script, an
+# unclassified one, anything under scripts/untracked/, or anything under
+# scripts/lib/) still counts as should_run-relevant, exactly as
+# touches_prefix "scripts/" did before this allowlist existed.
+#
+# What: scripts/ci/ci.sh only, no scripts/ci/ prefix.
+# Why: ci.sh may become a real build/publish driver.
+# From: Issue #1095
+ci_tooling_only_scripts=(
+    "scripts/ci/ci.sh"
+)
 
 touches_scripts_beyond_ci_tooling_allowlist() {
     local path allowed known

@@ -142,16 +142,41 @@ value_from() {
     [ "$(val should_run)" = "false" ]
 }
 
-# Follow-up (post-v0.3.0-release execution, issue #1095): once every
-# individually-verified CI-tooling-only script actually moved into
-# scripts/tracked/ (git mv, not a fresh add), the by-name
-# ci_tooling_only_scripts array became redundant -- scripts/tracked/'s own
-# directory-prefix match (exercised above and by the dedicated prefix test
-# below) covers every one of them already. Asserts the array is genuinely
-# empty, not merely unused, so a future accidental re-population (e.g. a
-# careless revert) is caught here rather than silently reintroducing
-# by-name maintenance the directory-prefix design was meant to retire.
-@test "ci_tooling_only_scripts array is empty now that scripts/tracked/ is populated" {
+# Issue #1095 (PR #1844 real over-triggering, ci/1095-overtrigger-scope):
+# scripts/ci/ci.sh is new, individually verified (repo-wide grep: not yet
+# invoked by any workflow, only referenced in build-tools-smoke.yml's own
+# paths trigger and in docs/ci-2.0-architecture.md's forward-looking plan)
+# and cannot move into scripts/tracked/ because it is not a CI-tooling
+# guard script -- it is planned to become the future build/publish driver
+# per that architecture doc, which is exactly why this uses the exact-file
+# array entry rather than a scripts/ci/ prefix rule: a prefix would keep
+# silently narrowing should_run even after ci.sh starts driving real
+# builds, which is under-triggering (AG-INT-002). The array entry must be
+# removed once ci.sh is wired into an actual build/publish/promote call.
+@test "scripts/ci/ci.sh alone does not force should_run (exact-file allowlist)" {
+    run_detect "scripts/ci/ci.sh"
+    [ "$(val scripts)" = "true" ]
+    [ "$(val should_run)" = "false" ]
+}
+
+# A mixed diff must not benefit from the exact-file entry: should_run stays
+# true as soon as any other scripts/ path is not individually allowlisted,
+# mirroring the existing scripts/tracked/ mixed-diff test below.
+@test "a mix of scripts/ci/ci.sh and an unclassified script still runs the suite" {
+    run_detect "scripts/ci/ci.sh" "scripts/some-brand-new-script-not-yet-classified.sh"
+    [ "$(val should_run)" = "true" ]
+}
+
+# Was: "ci_tooling_only_scripts array is empty now that scripts/tracked/ is
+# populated" (post-v0.3.0-release, issue #1095) -- the array was genuinely
+# empty at that point because every previously allowlisted script had
+# already moved into scripts/tracked/. Changed here (issue #1095, PR #1844
+# over-triggering fix): the array is intentionally non-empty again, holding
+# exactly the one individually-verified scripts/ci/ci.sh entry documented
+# above. Asserts both the count AND the exact content, so an accidental
+# widening (an extra entry, a prefix-style value, or a typo'd path) is
+# caught here rather than silently changing what should_run narrows for.
+@test "ci_tooling_only_scripts array holds exactly the verified scripts/ci/ci.sh entry" {
     # The script has no "am I sourced" guard -- it always runs emit() at the
     # bottom -- so source it (rather than exec it) inside a subshell with a
     # real CHANGED_FILES fixture, redirecting emit()'s own stdout away, then
@@ -159,13 +184,15 @@ value_from() {
     # grepping the script's source text for array entries: it reads the
     # variable's real runtime state after the script's own declaration ran.
     : > "$files"
-    array_count="$(CHANGED_FILES="$files" bash -c '
+    array_contents="$(CHANGED_FILES="$files" bash -c '
         set -euo pipefail
         # shellcheck disable=SC1090
         source "'"$script"'" >/dev/null
-        printf "%d" "${#ci_tooling_only_scripts[@]}"
+        printf "%d\n" "${#ci_tooling_only_scripts[@]}"
+        printf "%s\n" "${ci_tooling_only_scripts[@]}"
     ')"
-    [ "$array_count" = "0" ]
+    [ "$(printf '%s' "$array_contents" | sed -n 1p)" = "1" ]
+    [ "$(printf '%s' "$array_contents" | sed -n 2p)" = "scripts/ci/ci.sh" ]
 }
 
 @test "a mix of an allowlisted CI-tooling script and a real simulation script still runs the suite" {
