@@ -163,6 +163,135 @@ ci_resolve_ref_state() {
   return "$CI_STATE_AMBIGUOUS"
 }
 
+# === CLUSTER 2: SOURCE FINGERPRINT (Issue #1095) ===
+
+# ci_normalize <file>
+#
+# What: Drops comment/blank lines, CRLF->LF, canon bytes.
+# Why: v1 semantic scope only (doc 12.5), not full AST.
+# From: Issue #1095
+ci_normalize() {
+  local file="${1:?ci_normalize: file is required}"
+  if [[ ! -f "$file" ]]; then
+    printf 'ci_normalize: file not found: %s\n' "$file" >&2
+    return 1
+  fi
+  # What: Markdown carries no v1 semantic identity here.
+  # Why: doc 12.4 treats .md as NOOP until a real input.
+  # From: Issue #1095
+  case "$file" in
+    *.md) return 0 ;;
+  esac
+  local content
+  # What: A '#'-led heredoc body line is stripped too.
+  # Why: v1 has no parser context; doc 12.5 known gap.
+  # From: Issue #1095
+  content="$(sed -e 's/\r$//' -e '/^[[:space:]]*$/d' \
+    -e '/^[[:space:]]*#/d' "$file")"
+  if [[ -n "$content" ]]; then
+    printf '%s\n' "$content"
+  fi
+  return 0
+}
+
+# ci_build_identity <platform> <file...>
+#
+# What: sha256 over platform + each file's canon bytes.
+# Why: doc 16 identity; branch/PR/run/time stay excluded.
+# From: Issue #1095
+ci_build_identity() {
+  local platform="${1:?ci_build_identity: platform is required}"
+  shift || true
+  case "$platform" in
+    linux/amd64|linux/arm64) : ;;
+    *)
+      printf 'ci_build_identity: bad platform: %s\n' \
+        "$platform" >&2
+      return 1
+      ;;
+  esac
+  if (( $# == 0 )); then
+    printf 'ci_build_identity: at least one file required\n' >&2
+    return 1
+  fi
+  # What: Sort input paths so caller order can't matter.
+  # Why: doc 16 identity must be a pure content function.
+  # From: Issue #1095
+  local sorted_files
+  sorted_files="$(printf '%s\n' "$@" | LC_ALL=C sort)"
+  local combined="platform=$platform"
+  local f normalized file_hash
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    normalized="$(ci_normalize "$f")" || return 1
+    # What: Hash content first; bind a fixed-width token.
+    # Why: Raw content could forge a fake 'file=' boundary.
+    # From: Issue #1095
+    file_hash="$(printf '%s' "$normalized" | sha256sum | awk '{print $1}')"
+    combined+=$'\n'"file=$f sha256:$file_hash"
+  done <<< "$sorted_files"
+  local -a ext_digests=()
+  if [[ -n "${CI_EXTERNAL_PINNED_DIGESTS:-}" ]]; then
+    # What: Newlines become spaces; read stops at first.
+    # Why: A newline list must not silently get truncated.
+    # From: Issue #1095
+    read -ra ext_digests <<< "${CI_EXTERNAL_PINNED_DIGESTS//$'\n'/ }"
+  fi
+  if (( ${#ext_digests[@]} > 0 )); then
+    local d sorted_ext
+    for d in "${ext_digests[@]}"; do
+      # What: Rejects a malformed external digest input.
+      # Why: doc 17 resolves it elsewhere, not here.
+      # From: Issue #1095
+      ci_require_digest "$d" || return 1
+    done
+    sorted_ext="$(printf '%s\n' "${ext_digests[@]}" | LC_ALL=C sort)"
+    combined+=$'\n'"external="$'\n'"$sorted_ext"
+  fi
+  local digest
+  digest="sha256:$(printf '%s' "$combined" | sha256sum | awk '{print $1}')"
+  ci_require_digest "$digest" || return 1
+  printf '%s\n' "$digest"
+}
+
+# ci_build_admission <impact> <resolver_state>
+#
+# What: Pure decision: impact+resolver -> NOOP/REUSE/etc.
+# Why: doc 19/2.3; UNKNOWN must never become BUILD.
+# From: Issue #1095
+ci_build_admission() {
+  local impact="${1:?ci_build_admission: impact is required}"
+  local resolver="${2:?ci_build_admission: resolver_state is required}"
+  # What: impact=none never reaches resolution at all.
+  # Why: doc 19 diagram routes NOOP before RESOLVE.
+  # From: Issue #1095
+  if [[ "$impact" == "none" ]]; then
+    printf 'NOOP\n'
+    return 0
+  fi
+  if [[ "$impact" != "yes" ]]; then
+    printf 'BLOCK\n'
+    return 1
+  fi
+  case "$resolver" in
+    present)
+      printf 'REUSE\n'
+      return 0
+      ;;
+    absent)
+      printf 'BUILD\n'
+      return 0
+      ;;
+    *)
+      # What: ambiguous/unknown resolver fails closed here.
+      # Why: doc 2.3 UNKNOWN must never become BUILD.
+      # From: Issue #1095
+      printf 'BLOCK\n'
+      return 1
+      ;;
+  esac
+}
+
 ci_usage() {
   cat >&2 <<'EOF'
 usage: ci.sh <command> [args]
@@ -172,6 +301,9 @@ commands:
   validate-platform-record <file> <amd64|arm64>
   validate-index-record <file>
   resolve-ref-state <image-ref>
+  normalize <file>
+  build-identity <platform> <file...>
+  admission <impact> <resolver_state>
 EOF
 }
 
@@ -190,6 +322,9 @@ ci_main() {
     validate-platform-record) ci_validate_platform_record "$@" ;;
     validate-index-record) ci_validate_index_record "$@" ;;
     resolve-ref-state) ci_resolve_ref_state "$@" ;;
+    normalize) ci_normalize "$@" ;;
+    build-identity) ci_build_identity "$@" ;;
+    admission) ci_build_admission "$@" ;;
     ""|-h|--help) ci_usage; return 2 ;;
     *)
       printf 'ci.sh: unknown command: %s\n' "$cmd" >&2
