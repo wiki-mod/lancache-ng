@@ -2,8 +2,8 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: PowerDNS entrypoint with RPZ, config, and replication
-# Why: Aligns DNS with Admin UI changes via single container
+# What: PowerDNS entrypoint with RPZ and config
+# Why: Aligns DNS with Admin UI via single container
 set -euo pipefail
 
 # ── Shared-secret bootstrap (issue #858) ─────────────────────────────────────
@@ -120,8 +120,8 @@ resolve_shared_secret() {
     _rss_dir="$(lancache_shared_secret_dir)"
     _rss_file="${_rss_dir}/${_rss_name}"
 
-    # What: re-checks for a conflict right before returning.
-    # Why: closes the TOCTOU window a concurrent writer opens.
+    # What: Re-check for conflicts at return point
+    # Why: Reduce TOCTOU race window with writers
     # From: PR #1775
     _rss_conflict_now() {
         [ -n "$_rss_cur" ] || return 1
@@ -148,8 +148,8 @@ resolve_shared_secret() {
         fi
     fi
 
-    # What: returns the caller's value unpersisted on write fail.
-    # Why: safe only because no on-disk value could disagree yet.
+    # What: Return value unpersisted on write failure
+    # Why: No on-disk value can disagree at this point
     # From: PR #1775
     _rss_tmp="$(mktemp "${_rss_dir}/.secret.XXXXXX" 2>/dev/null)" || {
         if [ -n "$_rss_cur" ] && [ -z "$_rss_require_persist" ] && ! _rss_conflict_now; then
@@ -186,8 +186,8 @@ resolve_shared_secret() {
 }
 # END shared-secret-bootstrap library
 
-# What: helper for producer log directories that must stay readable to gid 10001.
-# Why: root-created files on persistent volumes otherwise drift back to
+# What: Helper for producer log dir readability
+# Why: Keep gid 10001 readable on persistent volumes
 #   root-only readability after reopen or recreation. dns/dhcp-only (not part
 #   of the shared-secret-bootstrap contract ui also embeds), so it lives after
 #   the sync-guarded block instead of inside it.
@@ -381,8 +381,8 @@ DDNS_ALLOW_UNSIGNED_MARKER="${DNS_STATE_DIR}/ddns-allow-unsigned-updates"
 PDNS_LOG_DIR="/var/log/lancache-dns"
 prepare_log_dir_for_shared_reader "$PDNS_LOG_DIR"
 
-# What: resolves a transfer endpoint, retries host lookup 30s.
-# Why: siblings start concurrently; getent crash-looped this.
+# What: Resolve transfer endpoint with 30s retry
+# Why: Prevent getent crash-loops during startup
 # From: Issue #1164 | PR #1775
 dns_xfr_primary_endpoint() {
     local endpoint="$1" var_name="${2:-DNS_XFR_PRIMARY}" host port resolved
@@ -475,12 +475,10 @@ PDNS_ALLOW_AXFR_IPS=127.0.0.0/8,::1
 case "$DNS_REPLICATION_ROLE" in
     primary)
         PDNS_PRIMARY_ENABLED=yes
-        # What: resolves each DNS_XFR_NOTIFY_TARGETS host to an IP for
-        #   allow-axfr-ips (PowerDNS's default is loopback-only, and TSIG
-        #   alone does not bypass it).
-        # Why: confirmed empirically (2026-08-24, lancache-229): a
-        #   correctly-TSIG-signed AXFR from a real secondary IP still got
-        #   REFUSED with no allow-axfr-ips entry for that IP.
+        # What: Resolve notify targets to IPs
+        #   (default loopback-only, TSIG insufficient)
+        # Why: TSIG needs allow-axfr-ips entries
+        #   for secondary IPs
         # From: Issue #1164
         if [ -n "$DNS_XFR_NOTIFY_TARGETS" ]; then
             for target in ${DNS_XFR_NOTIFY_TARGETS//,/ }; do
@@ -981,9 +979,9 @@ configure_ddns_tsig() {
     fi
 }
 
-# What: imports the shared TSIG key without changing DDNS update metadata.
-# Why: secondaries need the key for AXFR authentication but must not grant
-#   themselves TSIG-ALLOW-DNSUPDATE as an additional local write path.
+# What: Import TSIG key without changing DDNS metadata
+# Why: Secondaries need key for AXFR but not
+#   TSIG-ALLOW-DNSUPDATE write access
 # From: Issue #1164
 import_ddns_tsig_key() {
     if [ -z "$DDNS_TSIG_KEY" ]; then
@@ -1383,8 +1381,8 @@ _dns_set_zone_metadata() {
     pdnsutil --config-dir=/etc/pdns/auth set-meta "$zone" "$kind" "$@" >/dev/null
 }
 
-# What: marks a zone as the authoritative primary and enables transfer hints.
-# Why: every DDNS/API write must bump SOA serials and notify secondaries so
+# What: Mark zone as primary with transfer hints
+# Why: DDNS/API writes must bump SOA and notify
 #   NOTIFY and refresh polling converge to the same single-writer state.
 # From: Issue #1164
 _dns_configure_primary_zone_replication() {
@@ -1398,8 +1396,8 @@ _dns_configure_primary_zone_replication() {
     if [ -n "$DNS_XFR_NOTIFY_TARGETS" ]; then
         for target in ${DNS_XFR_NOTIFY_TARGETS//,/ }; do
             [ -n "$target" ] || continue
-            # What: resolves each ALSO-NOTIFY target to an IP first.
-            # Why: PowerDNS needs IP[:port] here, not a hostname.
+            # What: Resolve notify targets to IPs
+            # Why: PowerDNS requires IP[:port], not hostname
             # From: PR #1775
             notify_targets+=("$(dns_xfr_primary_endpoint "$target" DNS_XFR_NOTIFY_TARGETS)")
         done
@@ -1407,8 +1405,8 @@ _dns_configure_primary_zone_replication() {
     fi
 }
 
-# What: creates or repairs a zone as a PowerDNS secondary of the primary.
-# Why: local dns-ssl and remote nodes must consume the primary's zone state
+# What: Create/repair secondary zone from primary
+# Why: Nodes must consume primary state via AXFR
 #   through AXFR instead of applying independent NATS record writes.
 # From: Issue #1164
 _dns_ensure_secondary_zone() {
@@ -1551,8 +1549,8 @@ echo "[lancache-dns] Starting PowerDNS Authoritative and Recursor..."
 
 run_auth() {
     while true; do
-        # What: constrains the tee-created pdns-auth.log mode to 0640.
-        # Why: gid 10001 keeps the collector read path working, while world
+        # What: Set pdns-auth.log mode to 0640
+        # Why: Keep gid 10001 readable for collector
         #   read permission is no longer needed once the shared group exists.
         # From: Issue #1427
         umask 0027
@@ -1566,8 +1564,8 @@ run_auth() {
 run_recursor() {
     mkdir -p /var/run/pdns-recursor
     while true; do
-        # What: constrains the tee-created pdns-recursor.log mode to 0640.
-        # Why: gid 10001 keeps the collector read path working, while world
+        # What: Set pdns-recursor.log mode to 0640
+        # Why: Keep gid 10001 readable for collector
         #   read permission is no longer needed once the shared group exists.
         # From: Issue #1427
         umask 0027
@@ -1603,8 +1601,8 @@ REC_PID=$!
 # ── 9. Start NATS Subscriber ────────────────────────────────────────────────
 run_nats_subscriber() {
     while true; do
-        # What: keeps nats-subscriber's stderr/stdout mirrored into the shared log dir.
-        # Why: syslog must keep seeing subscriber failures, but the file mode
+        # What: Mirror subscriber output to shared log dir
+        # Why: Syslog must see failures and log mode 0640
         #   now also has to stay 0640 for the gid-10001 read contract.
         # From: Issue #633 | Issue #1427
         umask 0027
@@ -1682,8 +1680,8 @@ run_soa_maintainer() {
         for zone in "${DDNS_UPDATE_ZONES[@]}"; do
             if _dns_soa_maintain_zone "$zone"; then ok=$((ok + 1)); fi
         done
-        # What: retries soon when no zone was writable yet.
-        # Why: a cold auth listener must not defer migration an hour.
+        # What: Retry soon if no zones writable
+        # Why: Don't defer cold auth migration
         # From: Issue #1095
         if [ "$ok" -eq 0 ]; then sleep 5; else sleep "$PDNS_SOA_RESYNC_INTERVAL"; fi
     done
