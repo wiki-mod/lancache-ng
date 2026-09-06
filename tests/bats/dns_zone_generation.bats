@@ -12,18 +12,13 @@ bats_require_minimum_version 1.5.0
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
 
-    # generate_rpz_zone() calls _is_valid_domain/_normalize_domain (#822
-    # pattern audit fix); source the canonical library first so the helper
-    # has them available, matching how services/dns/entrypoint.sh's real
-    # embedded copy is available to its own call site.
+    # What: Source domain-validation library for _is_valid_domain
+    # Why: Generate_rpz_zone needs it for pattern audit (#822)
     # shellcheck source=scripts/lib/domain-validation.sh
     source "$repo_root/scripts/lib/domain-validation.sh"
 
-    # Load generate_rpz_zone() -- a thin wrapper around the real
-    # _dns_generate_rpz_zone extracted live from services/dns/entrypoint.sh
-    # (bug-hunt finding #8, docs/bug-hunt/dns.md: this used to be an
-    # independently hand-maintained copy with no guard against drifting from
-    # the real entrypoint logic; now it's the same code, sourced).
+    # What: Extract real _dns_generate_rpz_zone from entrypoint.sh
+    # Why: Eliminate drift vs. independently-maintained copy (bug-hunt #8)
     # shellcheck source=tests/bats/helpers/dns-zone-helpers.sh
     source "$BATS_TEST_DIRNAME/helpers/dns-zone-helpers.sh"
     load_dns_zone_helpers "$repo_root" "$BATS_TEST_TMPDIR/dns-zone-helpers-extracted.sh"
@@ -57,9 +52,8 @@ count_record_type() {
     grep -q '^\s*@\s\+NS\s\+localhost\.' "$zone_file"
 }
 
-# The SOA serial format (10 digits derived from unix timestamp) is critical because PowerDNS
-# and downstream secondaries use it to detect zone changes; this test checks the format itself,
-# separately from the monotonic-increase invariant (tested in later tests).
+# What: Verify SOA serial is 10-digit unix timestamp format
+# Why: PowerDNS detects zone changes via serial
 @test "zone SOA record contains valid serial number" {
     domains_file="$BATS_TEST_TMPDIR/domains.txt"
     zone_file="$BATS_TEST_TMPDIR/rpz.zone"
@@ -75,9 +69,8 @@ count_record_type() {
     [[ "$serial" =~ ^[0-9]{10}$ ]]
 }
 
-# This is the core case (#1072 semantics): a bare entry (no leading dot) is an exact-match
-# entry only -- it must generate a base domain record and MUST NOT also generate a wildcard
-# record for what's underneath it. Before #1072 this same input silently generated both.
+# What: Bare entry = exact match, not wildcard
+# Why: Fixes #1072 — prevents unintended redirects
 @test "zone generates only an exact A record for each bare domain entry" {
     domains_file="$BATS_TEST_TMPDIR/domains.txt"
     zone_file="$BATS_TEST_TMPDIR/rpz.zone"
@@ -305,11 +298,8 @@ count_record_type() {
     [ -r "$zone_file" ]
 }
 
-# Keeps the generated zone file easy to read and diff: entries appear in the same order
-# as cdn-domains.txt, not reordered or interleaved. (Before #1072's fix, this test used a
-# single bare domain and checked its base record appeared before its own wildcard record;
-# that no longer applies since a bare entry emits only one record. It now checks ordering
-# across distinct entries instead.)
+# What: Zone entries appear in same order as input file
+# Why: Makes diffs readable and maintains domain list order
 @test "zone preserves record order (entries appear in file order)" {
     domains_file="$BATS_TEST_TMPDIR/domains.txt"
     zone_file="$BATS_TEST_TMPDIR/rpz.zone"
