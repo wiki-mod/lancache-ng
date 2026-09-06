@@ -54,6 +54,29 @@
 # explicit, named exception rather than pretended to be covered by the
 # generic mechanical signal above (see NAMED_OPAQUE_SCRIPT_TRIGGERS below).
 #
+# --- Second, unrelated coverage folded into this same file (AG-CODE-013) --
+# scripts/untracked/simulations/*.sh also `docker build`/`docker buildx
+# build` services/*/Dockerfile directly, independent of build-push.yml's own
+# `build_contexts:` matrix wiring. Those Dockerfiles `COPY --from=<name>` a
+# named build context (e.g. `shared-scripts`, PR #1783); an invocation
+# missing the matching `--build-context <name>=<path>` doesn't fail at
+# review, `bash -n`, or shellcheck time -- buildx instead treats the bare
+# name as a registry image reference and fails at BUILD time with "pull
+# access denied ... repository does not exist" deep inside a CI job. 11 such
+# invocations across 9 files had this exact gap until fixed. A required
+# named build context is every `COPY --from=<name>` value in a
+# services/*/Dockerfile that is NEITHER a numeric build-stage index NOR a
+# name already declared by an earlier `FROM ... AS <name>` line in the same
+# file NOR a real external image reference (containing "/" or ":"). Every
+# `docker build`/`docker buildx build` invocation under $SIMULATIONS_DIR
+# (backslash-continuation-joined first) must supply a matching
+# `--build-context` for each one its resolved target Dockerfile requires.
+# This was originally proposed as its own new file; the maintainer DISACKed
+# that under AG-CODE-013 (this repository already has enough build-*.sh
+# coverage scripts) and required it be folded into an existing one instead
+# -- this file's own "compose call must carry required companion flag"
+# shape for docker-io-pull login coverage is the closest existing sibling.
+#
 # Usage:
 #   scripts/tracked/check-registry-login-coverage.sh [repo_root]
 set -euo pipefail
@@ -288,6 +311,111 @@ check_workflow_file() {
     check_job_body "$file" "$current_job" "$body"
 }
 
+# --- Build-context coverage (see header's "Second, unrelated coverage") ---
+build_context_invocations_examined=0
+
+# bcc_required_contexts_for_dockerfile <dockerfile>
+# Prints one required named-build-context name per line.
+bcc_required_contexts_for_dockerfile() {
+    local dockerfile="$1"
+    awk '
+        BEGIN { IGNORECASE = 1 }
+        /^FROM[ \t]/ {
+            for (i = 1; i <= NF; i++) {
+                if (toupper($i) == "AS" && (i + 1) <= NF) { stages[$(i + 1)] = 1 }
+            }
+        }
+        /--from=/ {
+            line = $0
+            n = split(line, parts, "--from=")
+            for (i = 2; i <= n; i++) {
+                rest = parts[i]
+                sub(/[ \t].*/, "", rest)
+                name = rest
+                if (name ~ /^[0-9]+$/) continue
+                if (name in stages) continue
+                if (name ~ /\//) continue
+                if (name ~ /:/) continue
+                if (name == "") continue
+                print name
+            }
+        }
+    ' "$dockerfile" | sort -u
+}
+
+# bcc_join_continued_lines <file>
+# Prints <file> with every `\`-continued line joined onto one logical line,
+# so a multi-line docker build invocation is scanned whole.
+bcc_join_continued_lines() {
+    local file="$1" line logical=""
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" == *\\ ]]; then
+            logical+="${line%\\} "
+            continue
+        fi
+        printf '%s\n' "${logical}${line}"
+        logical=""
+    done < "$file"
+}
+
+# bcc_target_dockerfile_for_invocation <invocation-line>
+# Prints the services/*/Dockerfile path this invocation targets, or nothing
+# if none can be resolved.
+bcc_target_dockerfile_for_invocation() {
+    local invocation="$1" explicit="" ctx=""
+    # What: `|| true` on each grep|tail; a no-match is not an error.
+    # Why: pipefail would otherwise abort the caller under set -e.
+    explicit=$(grep -oE '(^|[[:space:]])(-f|--file)[[:space:]]+"?services/[A-Za-z0-9_-]+/Dockerfile"?' <<<"$invocation" | tail -1) || true
+    if [[ -n "$explicit" ]]; then
+        explicit="${explicit#*services/}"
+        explicit="${explicit%\"}"
+        printf 'services/%s\n' "$explicit"
+        return 0
+    fi
+    if [[ "$invocation" == *"-f "* || "$invocation" == *"--file "* ]]; then
+        # An explicit -f/--file pointing outside services/*/Dockerfile
+        # (e.g. a synthetic fixture) is out of this check's scope.
+        return 0
+    fi
+    ctx=$(grep -oE 'services/[A-Za-z0-9_-]+' <<<"$invocation" | tail -1) || true
+    if [[ -n "$ctx" ]]; then
+        printf '%s/Dockerfile\n' "$ctx"
+    fi
+    return 0
+}
+
+# bcc_supplied_build_contexts <invocation-line>
+# Prints one --build-context name (the part before its "=") per line.
+bcc_supplied_build_contexts() {
+    local invocation="$1"
+    grep -oE -- '--build-context[[:space:]]+"?[A-Za-z0-9_.-]+=' <<<"$invocation" \
+        | sed -E 's/--build-context[[:space:]]+"?//; s/=$//' || true
+}
+
+bcc_check_invocation() {
+    local file="$1" invocation="$2" dockerfile required supplied name missing=()
+
+    dockerfile=$(bcc_target_dockerfile_for_invocation "$invocation")
+    [[ -z "$dockerfile" || ! -f "$dockerfile" ]] && return 0
+    build_context_invocations_examined=$((build_context_invocations_examined + 1))
+
+    mapfile -t required < <(bcc_required_contexts_for_dockerfile "$dockerfile")
+    [[ ${#required[@]} -eq 0 ]] && return 0
+
+    mapfile -t supplied < <(bcc_supplied_build_contexts "$invocation")
+    for name in "${required[@]}"; do
+        local found=0 s
+        for s in "${supplied[@]}"; do
+            [[ "$s" == "$name" ]] && { found=1; break; }
+        done
+        [[ "$found" -eq 0 ]] && missing+=("$name")
+    done
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        fail "check-registry-login-coverage (build-context): $file builds $dockerfile without --build-context for: ${missing[*]} -- buildx resolves the bare name as a registry image and fails at build time with 'pull access denied'. Add --build-context <name>=<path> for each. Invocation: $invocation"
+    fi
+}
+
 for file in "${WORKFLOW_FILES[@]}"; do
     if [[ ! -f "$file" ]]; then
         fail "check-registry-login-coverage: '$file' no longer exists; update WORKFLOW_FILES in scripts/tracked/check-registry-login-coverage.sh."
@@ -300,9 +428,28 @@ if [[ "$jobs_examined" -eq 0 ]]; then
     fail "check-registry-login-coverage: examined zero jobs across ${WORKFLOW_FILES[*]} -- expected several (this guard's own parsing likely broke, or all three workflow files changed shape; update this script rather than silently passing)."
 fi
 
+shopt -s nullglob
+for file in "$SIMULATIONS_DIR"/*.sh; do
+    while IFS= read -r logical_line; do
+        case "$logical_line" in
+            *'docker build '*|*'docker buildx build '*)
+                # Skip a comment line naming docker build in prose.
+                stripped="${logical_line#"${logical_line%%[! ]*}"}"
+                [[ "$stripped" == \#* ]] && continue
+                bcc_check_invocation "$file" "$logical_line"
+                ;;
+        esac
+    done < <(bcc_join_continued_lines "$file")
+done
+shopt -u nullglob
+
+# What: no "examined zero" self-diagnostic for this half.
+# Why: synthetic per-test fixtures legitimately have zero docker
+# build invocations; unlike jobs_examined, zero here is not a
+# parsing-broke signal in this shared, multi-purpose script.
 if [[ "$failures" -gt 0 ]]; then
     printf '::error::check-registry-login-coverage: %d violation(s) found (see scripts/tracked/check-registry-login-coverage.sh).\n' "$failures" >&2
     exit 1
 fi
 
-printf 'check-registry-login-coverage: OK (%d job(s) examined across %d workflow file(s), every docker.io-pulling job has the registry-login step).\n' "$jobs_examined" "${#WORKFLOW_FILES[@]}"
+printf 'check-registry-login-coverage: OK (%d job(s) examined across %d workflow file(s), every docker.io-pulling job has the registry-login step; %d docker build invocation(s) examined, every required named build context is supplied).\n' "$jobs_examined" "${#WORKFLOW_FILES[@]}" "$build_context_invocations_examined"
