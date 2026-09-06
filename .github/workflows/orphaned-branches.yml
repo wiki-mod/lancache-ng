@@ -88,7 +88,7 @@ jobs:
         # Dockerfile changes would need a branch-local rebuild to validate
         # against -- so there is no reason to pay a local `docker build` on
         # every scheduled run the way a trusted-ref PR/push job would. Same
-        # pattern as pr-tracking-metadata-check-hosted in build-push.yml.
+        # pattern as pr-tracking-metadata-check in build-push.yml.
         run: |
           set -euo pipefail
           printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)" >> "$GITHUB_ENV"

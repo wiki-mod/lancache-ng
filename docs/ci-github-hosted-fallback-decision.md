@@ -11,6 +11,47 @@ than only as inline workflow comments, and to give issue #491 ("Add
 GitHub-hosted CI fallback for non-LAN self-hosted assumptions") a real
 per-class status instead of a single yes/no answer.
 
+## Update (issue #1095): cheap-lint class inverted -- GitHub-hosted is now primary, twins removed
+
+The "cheap lint" model described below has been inverted. Previously each
+cheap-lint check ran twice on every event: once on a self-hosted
+`lancache-light` job and once on an always-on GitHub-hosted
+"(GitHub-hosted fallback)" twin. That double execution was pure waste.
+
+As of issue #1095 the cheap-lint checks run on GitHub-hosted runners
+(`ubuntu-latest`) as their primary and only source by default. The
+self-hosted `lancache-light` tier is used for them ONLY when the repository
+variable `PROJECT_SELFHOSTED_RUNNER_USAGE_CI` is exactly the string `true`
+(unset, empty, or any other value means GitHub-hosted). Runner selection is
+expressed once, as the `&runs_on_ci_light` anchor in `build-push.yml`, and
+reused by every cheap-lint job, so runner policy has a single source. The
+separate `*-hosted` twin jobs (`file-headers-hosted`,
+`compose-healthchecks-hosted`, `line-endings-hosted`, `shellcheck-hosted`,
+`language-policy-hosted`, `pr-template-check-hosted`,
+`pr-tracking-metadata-check-hosted`, `pr-title-convention-check-hosted`,
+`watchdog_test-hosted`) have been deleted, so each check runs exactly once.
+This is governed by AGENTS.md Rule-Ref: AG-CI-002.
+
+`watchdog_test` is deliberately NOT inverted: it runs `cargo test` for the
+watchdog crate, which AGENTS.md Rule-Ref: AG-CI-002 mandates on the
+self-hosted `lancache-heavy` tier. Its old `watchdog_test-hosted` twin only
+re-ran the lightweight `bash -n` shell-syntax step (a strict subset of the
+surviving job's first step), so deleting the twin removed the duplicate
+execution without losing any coverage. The `cargo test` half still has no
+always-on hosted path -- see "Rust build/test class" below.
+
+Residual limitation (Rule-Ref: AG-CI-003): the cheap-lint jobs still
+`needs:` the self-hosted `validate-compose` / `detect-changes` jobs, and
+`validate-compose` is itself a required status check with no GitHub-hosted
+path. CI therefore still depends on the self-hosted farm being available;
+running with self-hosted fully disabled is out of scope for issue #1095.
+
+The sections below are retained for their per-class history and reasoning.
+Where they describe the cheap-lint checks as having an "always-on parallel
+hosted fallback" job, that framing is superseded by this section: those
+twins no longer exist and GitHub-hosted is now the primary runner for the
+whole class.
+
 ## Background
 
 - PR #499 added the first GitHub-hosted fallback job, `file-headers-hosted`,
@@ -46,13 +87,13 @@ per-class status instead of a single yes/no answer.
 
 | Job | Class | Hosted fallback |
 |---|---|---|
-| `file-headers` | cheap lint | `file-headers-hosted` (PR #499) |
-| `compose-healthchecks` | cheap lint | `compose-healthchecks-hosted` (issue #1169) |
-| `line-endings` | cheap lint | `line-endings-hosted` (issue #601) |
-| `shellcheck` | cheap lint | `shellcheck-hosted` (PR #591) |
-| `pr-template-check` | cheap lint | `pr-template-check-hosted` (this change) |
-| `watchdog_test` | hybrid: cheap lint (shell script) + Rust build/test (crate, 2026-08) | `watchdog_test-hosted` covers the shell-script half only -- see "Rust build/test class" below |
-| `pr-title-convention-check` | cheap lint | `pr-title-convention-check-hosted` (#850/AG-GH-018) |
+| `file-headers` | cheap lint | GitHub-hosted primary; twin removed (issue #1095) |
+| `compose-healthchecks` | cheap lint | GitHub-hosted primary; twin removed (issue #1095) |
+| `line-endings` | cheap lint | GitHub-hosted primary; twin removed (issue #1095) |
+| `shellcheck` | cheap lint | GitHub-hosted primary; twin removed (issue #1095) |
+| `pr-template-check` | cheap lint | GitHub-hosted primary; twin removed (issue #1095) |
+| `watchdog_test` | hybrid: cheap lint (shell script) + Rust build/test (crate, 2026-08) | twin removed (issue #1095); survivor stays self-hosted heavy -- see "Rust build/test class" below |
+| `pr-title-convention-check` | cheap lint | GitHub-hosted primary; twin removed (issue #1095) |
 | `ci_scope_policy` | policy gate over Rust job results | none -- decided not feasible, see below |
 | `detect-changes`, `validate-compose`, `compute-validation-network`, `full-setup-validate` | build-tools image / full Docker Compose stack | none -- see "Other self-hosted-only jobs" below |
 | `dns_rust_quality`, `ui_rust_quality`, `watchdog_rust_quality`, `dns_test`, `ui_test`, `rust_coverage`, `dns_cargo_audit`, `ui_cargo_audit`, `watchdog_cargo_audit` | Rust build/test/audit | none -- see "Rust build/test class" below |
@@ -70,9 +111,10 @@ on its own dependencies -- not a real fallback. This is the same
 transitively-skippable-dependency trap documented for `build`'s and
 `promote`'s own `if:` conditions (issues #532/#677): a fallback job must
 never gate on a self-hosted-only job's result, or it inherits that job's
-availability, defeating the point of the fallback. `pr-template-check-hosted`
-and `watchdog_test-hosted` avoid this trap by not using `needs:` on any
-self-hosted job at all (see their own comments in the workflow file).
+availability, defeating the point of the fallback. (The former
+`pr-template-check-hosted` and `watchdog_test-hosted` twins avoided this
+trap by not using `needs:` on any self-hosted job at all; both were removed
+under issue #1095, but the principle stands for any future fallback job.)
 
 ### Other self-hosted-only jobs (`detect-changes`, `validate-compose`, `compute-validation-network`, `full-setup-validate`)
 
@@ -235,7 +277,7 @@ alongside this increment.
 
 | Class | Status | Fallback path |
 |---|---|---|
-| Cheap lint (file-headers, compose-healthchecks, line-endings, shellcheck, pr-template-check, watchdog_test's shell-script half) | done | Always-on parallel hosted job |
+| Cheap lint (file-headers, compose-healthchecks, line-endings, shellcheck, language-policy, pr-template-check, pr-tracking-metadata-check, pr-title-convention-check, watchdog_test's shell-script half) | done | GitHub-hosted primary; self-hosted only if `PROJECT_SELFHOSTED_RUNNER_USAGE_CI=true`; twins removed (issue #1095) |
 | `ci_scope_policy` | decided: not feasible | None -- inherits Rust jobs' own unavailability |
 | Rust build/test/audit (incl. watchdog_test's `cargo test` half, 2026-08) | acceptable-but-slow | Not implemented; needs opt-in scoping, not always-on. Follow-up issue tracks prototyping (#685). |
 | Image build/scan/merge (amd64/publish) | done (opt-in overflow) | `.github/workflows/build-push-hosted-fallback.yml`, `workflow_dispatch`-gated (issue #686) |

@@ -378,7 +378,7 @@ bash scripts/tracked/check-action-node-versions.sh
 
 #### Optional: a local pre-push hook for this same check
 
-`.githooks/pre-push` runs `scripts/tracked/check-action-node-versions.sh` automatically before a push that touches any `.github/workflows/*.yml`/`*.yaml` file, so a deprecated-runtime pin surfaces before you push, not only after CI comes back red. This is an **optional, best-effort local convenience layer only** -- the build-push.yml `shellcheck`/`shellcheck-hosted` jobs are the actual, non-bypassable enforcement (they run the same script inside the pinned build-tools container). The hook degrades cleanly (never blocks a push) if it can't run in your environment at all (e.g. no `curl` on `PATH`), but does block the push if it actually runs and finds a real deprecated-runtime pin -- bypass with `git push --no-verify` if needed, same as any other pre-push hook.
+`.githooks/pre-push` runs `scripts/tracked/check-action-node-versions.sh` automatically before a push that touches any `.github/workflows/*.yml`/`*.yaml` file, so a deprecated-runtime pin surfaces before you push, not only after CI comes back red. This is an **optional, best-effort local convenience layer only** -- the build-push.yml `shellcheck` job is the actual, non-bypassable enforcement (it runs the same script inside the pinned build-tools container). The hook degrades cleanly (never blocks a push) if it can't run in your environment at all (e.g. no `curl` on `PATH`), but does block the push if it actually runs and finds a real deprecated-runtime pin -- bypass with `git push --no-verify` if needed, same as any other pre-push hook.
 
 Enable it once per checkout:
 

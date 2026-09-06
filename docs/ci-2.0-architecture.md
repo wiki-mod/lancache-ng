@@ -2890,12 +2890,16 @@ as concrete evidence rather than a hypothetical:
 -> find . \( -name "*.sh" -o -name "*.bats" \) | xargs shellcheck
 -> unconditional, repository-wide, no diff-scoping at all
 
-build-push.yml's shellcheck-hosted job
--> no `if:` condition whatsoever, not even the docs_only check
-   its self-hosted twin has
+build-push.yml's former shellcheck-hosted twin (removed, issue #1095)
+-> had no `if:` condition whatsoever, not even the docs_only check
+   the surviving shellcheck job has
 -> verified live against PR #1648 (a single-file AGENTS.md-only PR):
-   self-hosted shellcheck correctly reported "skipping",
-   the hosted fallback still ran a full 3m7s repo-wide scan anyway
+   the primary shellcheck correctly reported "skipping",
+   the always-on hosted twin still ran a full 3m7s repo-wide scan
+-> the twin was deleted under issue #1095 (single-source runner
+   selection); shellcheck now runs once, GitHub-hosted by default,
+   and still honours the docs_only skip -- but the shared action's
+   own scan above remains repo-wide with no diff-scoping
 ```
 
 Migrating a check like this into CI 2.0 is not just "move the shell script
