@@ -2,8 +2,8 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: Loads real function bodies from entrypoint.sh at test time
-# Why: Eliminates drift risk vs. independently-maintained copy
+# What: Loads real functions from entrypoint.sh at test time
+# Why: Eliminates drift vs. independent copy
 
 load_dns_zone_helpers() {
     local repo_root="$1" helper_file="$2"
@@ -21,8 +21,8 @@ load_dns_zone_helpers() {
 }
 
 # generate_rpz_zone <domains_file> <output_file> <proxy_ip> [proxy_ipv6]
-# What: Wrapper around the real _dns_generate_rpz_zone implementation
-# Why: Stable interface keeps existing callers unchanged
+# What: Wrapper for _dns_generate_rpz_zone function
+# Why: Stable interface for existing callers
 generate_rpz_zone() {
     _dns_generate_rpz_zone "$@"
 }

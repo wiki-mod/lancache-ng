@@ -2,14 +2,11 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Regression tests for RPZ zone file generation (services/dns/entrypoint.sh).
-# Tests zone format validity, serial monotonicity, and domain/record handling
-# without requiring a running PowerDNS daemon.
+# What: Test RPZ: format, serials, domain handling
+# Why: Validates DNS without live PowerDNS
 
-# `run !` (used below to correctly fail a test on a negated assertion, see
-# the SC2314 comments at each use site) requires Bats >= 1.5.0. Declaring
-# this turns a silent BW02 runtime warning into a clear version-mismatch
-# failure if this suite ever runs under an older Bats.
+# What: Negated assertions (run !) require Bats >= 1.5.0
+# Why: Prevents silent test failures
 bats_require_minimum_version 1.5.0
 
 setup() {
@@ -43,9 +40,8 @@ count_record_type() {
     grep -c "^\S\+\s\+60\s\+IN\s\+${record_type}\s\+" "$zone_file" || true
 }
 
-# PowerDNS's RPZ (Response Policy Zone) mechanism requires a specific SOA and NS header structure
-# to load the zone file at all; a malformed header results in silent DNS resolution failure,
-# not an obvious parse error.
+# What: RPZ needs SOA and NS headers to load
+# Why: Malformed header fails DNS silently
 @test "zone file has required RPZ header structure" {
     domains_file="$BATS_TEST_TMPDIR/domains.txt"
     zone_file="$BATS_TEST_TMPDIR/rpz.zone"
