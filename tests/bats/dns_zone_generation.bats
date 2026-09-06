@@ -2,31 +2,23 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Regression tests for RPZ zone file generation (services/dns/entrypoint.sh).
-# Tests zone format validity, serial monotonicity, and domain/record handling
-# without requiring a running PowerDNS daemon.
+# What: Test RPZ: format, serials, domain handling
+# Why: Validates DNS without live PowerDNS
 
-# `run !` (used below to correctly fail a test on a negated assertion, see
-# the SC2314 comments at each use site) requires Bats >= 1.5.0. Declaring
-# this turns a silent BW02 runtime warning into a clear version-mismatch
-# failure if this suite ever runs under an older Bats.
+# What: Negated assertions (run !) require Bats >= 1.5.0
+# Why: Prevents silent test failures
 bats_require_minimum_version 1.5.0
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
 
-    # generate_rpz_zone() calls _is_valid_domain/_normalize_domain (#822
-    # pattern audit fix); source the canonical library first so the helper
-    # has them available, matching how services/dns/entrypoint.sh's real
-    # embedded copy is available to its own call site.
+    # What: Load domain-validation library
+    # Why: Required for pattern audit (#822)
     # shellcheck source=scripts/lib/domain-validation.sh
     source "$repo_root/scripts/lib/domain-validation.sh"
 
-    # Load generate_rpz_zone() -- a thin wrapper around the real
-    # _dns_generate_rpz_zone extracted live from services/dns/entrypoint.sh
-    # (bug-hunt finding #8, docs/bug-hunt/dns.md: this used to be an
-    # independently hand-maintained copy with no guard against drifting from
-    # the real entrypoint logic; now it's the same code, sourced).
+    # What: Extract _dns_generate_rpz_zone function
+    # Why: Eliminate drift vs. independent copy
     # shellcheck source=tests/bats/helpers/dns-zone-helpers.sh
     source "$BATS_TEST_DIRNAME/helpers/dns-zone-helpers.sh"
     load_dns_zone_helpers "$repo_root" "$BATS_TEST_TMPDIR/dns-zone-helpers-extracted.sh"
@@ -43,9 +35,8 @@ count_record_type() {
     grep -c "^\S\+\s\+60\s\+IN\s\+${record_type}\s\+" "$zone_file" || true
 }
 
-# PowerDNS's RPZ (Response Policy Zone) mechanism requires a specific SOA and NS header structure
-# to load the zone file at all; a malformed header results in silent DNS resolution failure,
-# not an obvious parse error.
+# What: RPZ needs SOA and NS headers to load
+# Why: Malformed header fails DNS silently
 @test "zone file has required RPZ header structure" {
     domains_file="$BATS_TEST_TMPDIR/domains.txt"
     zone_file="$BATS_TEST_TMPDIR/rpz.zone"
@@ -61,9 +52,8 @@ count_record_type() {
     grep -q '^\s*@\s\+NS\s\+localhost\.' "$zone_file"
 }
 
-# The SOA serial format (10 digits derived from unix timestamp) is critical because PowerDNS
-# and downstream secondaries use it to detect zone changes; this test checks the format itself,
-# separately from the monotonic-increase invariant (tested in later tests).
+# What: Verify SOA serial is 10-digit unix timestamp format
+# Why: PowerDNS detects zone changes via serial
 @test "zone SOA record contains valid serial number" {
     domains_file="$BATS_TEST_TMPDIR/domains.txt"
     zone_file="$BATS_TEST_TMPDIR/rpz.zone"
@@ -79,9 +69,8 @@ count_record_type() {
     [[ "$serial" =~ ^[0-9]{10}$ ]]
 }
 
-# This is the core case (#1072 semantics): a bare entry (no leading dot) is an exact-match
-# entry only -- it must generate a base domain record and MUST NOT also generate a wildcard
-# record for what's underneath it. Before #1072 this same input silently generated both.
+# What: Bare entry = exact match, not wildcard
+# Why: Fixes #1072 — prevents unintended redirects
 @test "zone generates only an exact A record for each bare domain entry" {
     domains_file="$BATS_TEST_TMPDIR/domains.txt"
     zone_file="$BATS_TEST_TMPDIR/rpz.zone"
@@ -309,11 +298,8 @@ count_record_type() {
     [ -r "$zone_file" ]
 }
 
-# Keeps the generated zone file easy to read and diff: entries appear in the same order
-# as cdn-domains.txt, not reordered or interleaved. (Before #1072's fix, this test used a
-# single bare domain and checked its base record appeared before its own wildcard record;
-# that no longer applies since a bare entry emits only one record. It now checks ordering
-# across distinct entries instead.)
+# What: Zone entries appear in same order as input file
+# Why: Makes diffs readable and maintains domain list order
 @test "zone preserves record order (entries appear in file order)" {
     domains_file="$BATS_TEST_TMPDIR/domains.txt"
     zone_file="$BATS_TEST_TMPDIR/rpz.zone"
@@ -438,4 +424,104 @@ count_record_type() {
     [ "$status" -eq 0 ]
     run ! grep -q 'disabled-wild' "$zone_file"
     grep -qx '\*\.still-enabled\.example\.com 60 IN A 192\.0\.2\.1' "$zone_file"
+}
+
+# ── SOA serial maintainer (_dns_soa_maintain_zone) ──────────────────────────
+# The maintainer rewrites each primary zone's SOA to a date-anchored,
+# RFC1982-safe serial plus the configured short refresh so secondaries
+# converge sub-minute after a lost NOTIFY. dig (SOA read) and curl (API
+# write) are mocked so the serial arithmetic, the <2^31 SNA-safety invariant,
+# the refresh migration, and the trailing-dot zone-name normalisation are all
+# covered without a running PowerDNS.
+
+# What: mocks dig/curl/date and sets the maintainer's env.
+# Why: makes serial arithmetic deterministic (fixed date).
+# From: Issue #1095
+_soa_setup_mocks() {
+    local cur="$1"
+    export MOCK_BIN="$BATS_TEST_TMPDIR/soa-mockbin"
+    export SOA_CURL_ARGS="$BATS_TEST_TMPDIR/soa-curl-args.log"
+    export SOA_CURL_BODY="$BATS_TEST_TMPDIR/soa-curl-body.log"
+    mkdir -p "$MOCK_BIN"; : > "$SOA_CURL_ARGS"; : > "$SOA_CURL_BODY"
+
+    cat > "$MOCK_BIN/dig" <<MOCK
+#!/usr/bin/env bash
+printf 'localhost. admin.z. %s 10800 3600 604800 3600\n' "${cur}"
+MOCK
+    cat > "$MOCK_BIN/curl" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${SOA_CURL_ARGS:?}"
+prev=""
+for a in "$@"; do
+    [[ "$prev" == "-d" ]] && printf '%s\n' "$a" >> "${SOA_CURL_BODY:?}"
+    prev="$a"
+done
+[[ "$*" == *"%{http_code}"* ]] && printf '204'
+exit 0
+MOCK
+    cat > "$MOCK_BIN/date" <<'MOCK'
+#!/usr/bin/env bash
+[[ "$1" == "+%y%m%d" ]] && { printf '260906\n'; exit 0; }
+exec /bin/date "$@"
+MOCK
+    chmod +x "$MOCK_BIN"/dig "$MOCK_BIN"/curl "$MOCK_BIN"/date
+    export PATH="$MOCK_BIN:$PATH"
+    export PDNS_API_KEY=test-key PDNS_SOA_REFRESH=30 PDNS_SOA_RETRY=10
+}
+
+# What: extracts the SOA content the maintainer PATCHed.
+# Why: shared parser for the serial/refresh checks.
+# From: Issue #1095
+_soa_patched_content() {
+    grep -oE 'localhost\. admin\.z\. [0-9]+ [0-9]+ [0-9]+ [0-9]+ [0-9]+' "$SOA_CURL_BODY" | head -1
+}
+
+# A serial older than today (the migration case: existing zones sit at tiny
+# SOA-EDIT-API=INCREASE serials) must jump to today's YYMMDD000 anchor.
+@test "soa maintainer anchors an older serial to today's date" {
+    _soa_setup_mocks 5
+    run _dns_soa_maintain_zone lan
+    [ "$status" -eq 0 ]
+    [ "$(_soa_patched_content | awk '{print $3}')" = "260906000" ]
+}
+
+# A serial already at/after today's anchor must only increment by one, so
+# same-day writes stay monotone without re-anchoring backwards.
+@test "soa maintainer bumps a same-day serial by exactly one" {
+    _soa_setup_mocks 260906500
+    run _dns_soa_maintain_zone lan
+    [ "$status" -eq 0 ]
+    [ "$(_soa_patched_content | awk '{print $3}')" = "260906501" ]
+}
+
+# The date serial MUST stay below 2^31 or RFC1982 serial arithmetic reads the
+# migration jump as a decrease and the secondary never transfers (the live
+# regression this whole change fixes).
+@test "soa maintainer date serial stays below the 2^31 RFC1982 boundary" {
+    _soa_setup_mocks 5
+    run _dns_soa_maintain_zone lan
+    [ "$status" -eq 0 ]
+    [ "$(_soa_patched_content | awk '{print $3}')" -lt 2147483648 ]
+}
+
+# The SOA the maintainer writes must carry the configured refresh/retry, so an
+# existing zone stuck on the old refresh=10800 (3h) is migrated to the short
+# value on the first pass.
+@test "soa maintainer migrates refresh/retry to the configured values" {
+    _soa_setup_mocks 5
+    run _dns_soa_maintain_zone lan
+    [ "$status" -eq 0 ]
+    [ "$(_soa_patched_content | awk '{print $4}')" = "30" ]
+    [ "$(_soa_patched_content | awk '{print $5}')" = "10" ]
+}
+
+# DDNS_UPDATE_ZONES mixes dotted and undotted names; a reverse zone arriving
+# with a trailing dot must not produce a "..zone.." double-dot API path (the
+# HTTP 422 the live full-stack run caught).
+@test "soa maintainer normalises a trailing-dot zone without doubling it" {
+    _soa_setup_mocks 5
+    run _dns_soa_maintain_zone "30.172.in-addr.arpa."
+    [ "$status" -eq 0 ]
+    grep -q 'zones/30\.172\.in-addr\.arpa\.' "$SOA_CURL_ARGS"
+    run ! grep -q '30\.172\.in-addr\.arpa\.\.' "$SOA_CURL_ARGS"
 }
