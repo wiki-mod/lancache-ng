@@ -284,9 +284,12 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" == *"OK"* ]]
     # What: asserts a non-zero real-tree build-context count.
-    # Why: AG-INT-002 -- a broken parser must stay detectable; a
-    # silent "0 examined" would still print OK without this.
-    [[ "$output" != *"0 docker build invocation(s) examined"* ]]
+    # Why: AG-INT-002 -- a broken parser (or a vanished count
+    # line) must stay detectable; a substring match on "0 ..."
+    # false-positives once the real count is e.g. 10 or 20.
+    bcc_count=$(sed -n 's/.*; \([0-9][0-9]*\) docker build invocation(s) examined.*/\1/p' <<<"$output")
+    [ -n "$bcc_count" ]
+    [ "$bcc_count" -gt 0 ]
 }
 
 # --- Build-context coverage (folded into this same guard, AG-CODE-013) ----
