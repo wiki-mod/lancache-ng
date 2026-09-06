@@ -76,8 +76,13 @@ On ambiguity, split further rather than leave latitude.
 Haiku self-reports are NOT trustworthy. The dispatcher MUST real-check
 every "done" claim instead of adopting it:
 
-1. Grep for remaining comments over the character limit, outside
-   permitted exceptions such as section dividers or embedded data.
+1. Run `scripts/tracked/check-comment-length.sh` on every edited file
+   and require exit 0. It mechanically enforces the 60-character and
+   3-line-block limits, which a weak model self-counts wrongly --
+   especially on indented lines (verified in the #1830 re-test: a "≤60
+   verified" self-report stood next to indented lines at 65-74 chars).
+   A manual grep or the agent's own count is NOT a substitute for this
+   check.
 2. Verify that NO non-comment line changed: the resolved config,
    respectively the build, must stay unchanged (a real parity proof),
    not just the file diff by eye.
@@ -391,6 +396,14 @@ After editing you MUST inspect the file's diff.
 
 Only comment changes may appear in the diff.
 
+After EVERY edit you MUST also run
+`scripts/tracked/check-comment-length.sh <file>` on that file as an
+immediate counter-proof and fix any reported line before continuing.
+Your own character count does not satisfy this -- the tool counts the
+full physical line including indentation, which is exactly the blind
+spot a weak model has. Do not batch many edits and check once at the
+end; check after each edit.
+
 As soon as a change outside a comment appears:
 
 STOP.
@@ -436,6 +449,10 @@ Before starting you MUST confirm:
 * checked every changed statement against the associated code
 * `What:` at most 60 characters
 * `Why:` at most 60 characters
+* ran `scripts/tracked/check-comment-length.sh` on every edited file and
+  got exit 0 (the mechanical proof of the two lines above -- your own
+  count does not satisfy this, it counts the full physical line including
+  indentation)
 * did not treat 60 characters as a target
 * used `From:` only with verified references
 * created no stacked comment blocks
