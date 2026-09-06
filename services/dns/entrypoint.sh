@@ -1631,7 +1631,7 @@ _dns_soa_maintain_zone() {
     soa=$(dig +short +time=2 +tries=1 @127.0.0.1 -p 5300 "$zone" SOA 2>/dev/null)
     # shellcheck disable=SC2086 # deliberate word-split of the 7 SOA fields.
     set -- $soa
-    if [ "$#" -ne 7 ] || ! printf '%s' "$3" | grep -qE '^[0-9]+$'; then
+    if [ "$#" -ne 7 ] || [[ ! "$3" =~ ^[0-9]+$ ]]; then
         echo "[lancache-dns][soa] '$zone' SOA not readable yet: '$soa'" >&2
         return 1
     fi
