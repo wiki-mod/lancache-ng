@@ -191,8 +191,8 @@ resolve_shared_secret() {
 }
 # END shared-secret-bootstrap library
 
-# What: keep log dirs readable to gid 10001 across volume reopen.
-# Why: root-created files on volumes revert to root-only readable.
+# What: keeps log dirs readable by gid 10001 on reopen.
+# Why: root-created files revert to root-only on volumes.
 # From: Issue #1427 | PR #1670
 prepare_log_dir_for_shared_reader() {
     local dir="$1"
@@ -278,7 +278,7 @@ DDNS_TSIG_KEY="$(resolve_shared_secret ddns-tsig-key "$_ddns_tsig_key_cfg" lanca
 # (confirmed empirically) with no error on either side.
 : "${DHCP_DDNS_PORT:=5300}"
 # What: validate JSON port before rendering Kea D2 config.
-# Why: typo produces invalid JSON; DDNS daemon fails silently.
+# Why: a typo yields invalid JSON; DDNS daemon fails silent.
 # From: Issue #1164 | PR #1667
 case "$DHCP_DDNS_PORT" in
     "" | *[!0-9]*)
@@ -892,8 +892,8 @@ if [ "$SNAPSHOT_FOUND" -eq 0 ] && ! _kea_validate_dhcp4_config "$KEAD_CONF_FILE"
     # DHCP_PID is intentionally not set so the trap below doesn't try to kill it
     # and the final `wait` at the bottom keeps the container alive
 else
-    # What: constrains daemon-created Kea log files to 0640 mode.
-    # Why: gid 10001 can read; world-readable no longer needed.
+    # What: constrains daemon Kea logs to 0640 mode.
+    # Why: gid 10001 can read; world-readable not needed.
     # From: Issue #1427 | PR #1670
     umask 0027
     kea-dhcp4 -c /var/lib/kea/kea-dhcp4.conf &
@@ -901,7 +901,7 @@ else
 fi
 
 echo "Starting Kea Control Agent on $KEA_CTRL_HOST:8000..."
-# What: constrains daemon-created control-agent log files to 0640.
+# What: constrains control-agent log files to mode 0640.
 # Why: gid 10001 can read; world-readable no longer needed.
 # From: Issue #1427 | PR #1670
 umask 0027
@@ -910,8 +910,8 @@ AGENT_PID=$!
 
 if command -v kea-dhcp-ddns &> /dev/null; then
     echo "Starting Kea DHCP DDNS server..."
-    # What: constrains daemon-created Kea DDNS log files to 0640.
-    # Why: gid 10001 can read; world-readable no longer needed.
+    # What: constrains Kea DDNS log files to mode 0640.
+    # Why: gid 10001 can read; world-readable not needed.
     # From: Issue #1427 | PR #1670
     umask 0027
     kea-dhcp-ddns -c /var/lib/kea/kea-dhcp-ddns.conf &
