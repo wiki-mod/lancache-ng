@@ -208,6 +208,48 @@ run_ci() {
   [ "$status" -ne 0 ]
 }
 
+# What: Exercise validators via the executed dispatcher.
+# Why: Proves fail-closed under ci_main's set -euo pipefail.
+# From: Issue #1095
+@test "dispatch require-digest via executed ci.sh accepts and rejects" {
+  run_ci require-digest "sha256:$a64"
+  [ "$status" -eq 0 ]
+  run_ci require-digest "nightly"
+  [ "$status" -ne 0 ]
+}
+
+@test "dispatch require-source-sha via executed ci.sh accepts and rejects" {
+  run_ci require-source-sha "$sha40"
+  [ "$status" -eq 0 ]
+  run_ci require-source-sha "zzzz"
+  [ "$status" -ne 0 ]
+}
+
+@test "dispatch validate-platform-record via executed ci.sh fails closed" {
+  write_platform_record "$BATS_TEST_TMPDIR/p.json" amd64
+  run_ci validate-platform-record "$BATS_TEST_TMPDIR/p.json" amd64
+  [ "$status" -eq 0 ]
+  printf '{not json' > "$BATS_TEST_TMPDIR/bad.json"
+  run_ci validate-platform-record "$BATS_TEST_TMPDIR/bad.json" amd64
+  [ "$status" -ne 0 ]
+}
+
+@test "dispatch validate-index-record via executed ci.sh fails closed" {
+  write_index_record "$BATS_TEST_TMPDIR/idx.json"
+  run_ci validate-index-record "$BATS_TEST_TMPDIR/idx.json"
+  [ "$status" -eq 0 ]
+  printf '{not json' > "$BATS_TEST_TMPDIR/bad.json"
+  run_ci validate-index-record "$BATS_TEST_TMPDIR/bad.json"
+  [ "$status" -ne 0 ]
+}
+
+@test "dispatch rejects an empty and an unknown command with usage code 2" {
+  run_ci
+  [ "$status" -eq 2 ]
+  run_ci bogus-command
+  [ "$status" -eq 2 ]
+}
+
 @test "resolve-ref-state returns present and prints the digest" {
   STUB_MODE=present STUB_DIGEST="sha256:$a64" run_ci resolve-ref-state "$image:tag"
   [ "$status" -eq 0 ]
