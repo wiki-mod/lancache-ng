@@ -32,7 +32,7 @@ permissions:
   pull-requests: read
 concurrency:
   group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.ref) || format('{0}-publish-{1}', github.workflow, github.run_id) }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 env:
   CARGO_BUILD_JOBS: ${{ vars.CARGO_BUILD_JOBS }}
   CI_BUILD_SERVICES: "proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools cachehamster"
