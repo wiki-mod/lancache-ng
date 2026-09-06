@@ -2,25 +2,16 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# PowerDNS container entrypoint. Generates RPZ zones from cdn-domains.txt
-# (with monotonic serial handling), renders the recursor/authoritative config
-# templates, validates them and keeps a known-good configuration snapshot
-# history (#615, see docs/known-good-config-snapshots.md), configures DDNS
-# TSIG auth (configure_ddns_tsig), and starts the authoritative server,
-# recursor, and NATS subscriber in one container so DNS records stay aligned
-# with Admin UI changes.
+# What: PowerDNS entrypoint with RPZ, config, and replication
+# Why: Aligns DNS with Admin UI changes via single container
 set -euo pipefail
 
 # ── Shared-secret bootstrap (issue #858) ─────────────────────────────────────
-# Embedded byte-identical copy of scripts/lib/shared-secret-bootstrap.sh's
-# function definitions (guarded by tests/bats/shared_secret_bootstrap_sync.bats),
-# for the same reason as the known-good-snapshot library below: this image
-# builds from services/dns/ alone with no shared-file build context.
+# What: Embedded shared-secret-bootstrap functions
+# Why: Image builds from dns/ alone, no shared build context
 # BEGIN shared-secret-bootstrap library (scripts/lib/shared-secret-bootstrap.sh)
-# lancache_shared_secret_dir
-# Directory holding the cross-container shared secrets, mounted from the
-# `shared-secrets` named volume into every container that must agree on a
-# generated value. Overridable for tests via LANCACHE_SHARED_SECRET_DIR.
+# What: lancache_shared_secret_dir — shared secret location
+# Why: Cross-container alignment via shared-secrets volume
 lancache_shared_secret_dir() {
     printf '%s' "${LANCACHE_SHARED_SECRET_DIR:-/var/lib/lancache-secrets}"
 }
