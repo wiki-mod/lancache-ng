@@ -328,6 +328,16 @@ DNS_REPLICATION_ROLE="${DNS_REPLICATION_ROLE:-native}"
 DNS_XFR_PRIMARY="${DNS_XFR_PRIMARY:-}"
 DNS_XFR_NOTIFY_TARGETS="${DNS_XFR_NOTIFY_TARGETS:-}"
 PDNS_XFR_CYCLE_INTERVAL="${PDNS_XFR_CYCLE_INTERVAL:-15}"
+# What: SOA convergence knobs + today's date seed serial.
+# Why: short refresh bounds drift if NOTIFY (UDP) lost.
+# From: Issue #1095
+PDNS_SOA_REFRESH="${PDNS_SOA_REFRESH:-30}"
+PDNS_SOA_RETRY="${PDNS_SOA_RETRY:-10}"
+PDNS_SOA_SEED_SERIAL="$(date +%y%m%d)000"
+# What: primary-only generic force-resync cadence.
+# Why: belt-and-suspenders re-sync beyond refresh polling.
+# From: Issue #1095
+PDNS_SOA_RESYNC_INTERVAL="${PDNS_SOA_RESYNC_INTERVAL:-3600}"
 DNS_CONFIG_SNAPSHOT_DIR="${DNS_CONFIG_SNAPSHOT_DIR:-/var/lib/lancache-dns/config-snapshots}"
 # Zone/record rollback listener (#628, nats-subscriber's own process -- see
 # services/dns/nats-subscriber/src/rollback_listener.rs). Bound to 0.0.0.0,
@@ -430,6 +440,40 @@ case "$PDNS_XFR_CYCLE_INTERVAL" in
 esac
 if [ "$PDNS_XFR_CYCLE_INTERVAL" -lt 1 ] || [ "$PDNS_XFR_CYCLE_INTERVAL" -gt 60 ]; then
     echo "[lancache-dns] FATAL: PDNS_XFR_CYCLE_INTERVAL must stay between 1 and 60 seconds so secondary refresh polling cannot drift beyond the #1164 bound." >&2
+    exit 1
+fi
+
+# What: hard-fails on malformed SOA refresh/retry/resync.
+# Why: bad values render invalid SOA, later rescue-mode.
+# From: Issue #1095
+case "$PDNS_SOA_REFRESH" in
+    "" | *[!0-9]*)
+        echo "[lancache-dns] FATAL: PDNS_SOA_REFRESH must be a positive integer (got: ${PDNS_SOA_REFRESH})." >&2
+        exit 1
+        ;;
+esac
+if [ "$PDNS_SOA_REFRESH" -lt 10 ] || [ "$PDNS_SOA_REFRESH" -gt 86400 ]; then
+    echo "[lancache-dns] FATAL: PDNS_SOA_REFRESH must stay between 10 and 86400 seconds (short enough for sub-minute convergence, not so short it hammers the primary)." >&2
+    exit 1
+fi
+case "$PDNS_SOA_RETRY" in
+    "" | *[!0-9]*)
+        echo "[lancache-dns] FATAL: PDNS_SOA_RETRY must be a positive integer (got: ${PDNS_SOA_RETRY})." >&2
+        exit 1
+        ;;
+esac
+if [ "$PDNS_SOA_RETRY" -lt 1 ] || [ "$PDNS_SOA_RETRY" -ge "$PDNS_SOA_REFRESH" ]; then
+    echo "[lancache-dns] FATAL: PDNS_SOA_RETRY must be >= 1 and strictly less than PDNS_SOA_REFRESH (RFC 1912), got retry=${PDNS_SOA_RETRY} refresh=${PDNS_SOA_REFRESH}." >&2
+    exit 1
+fi
+case "$PDNS_SOA_RESYNC_INTERVAL" in
+    "" | *[!0-9]*)
+        echo "[lancache-dns] FATAL: PDNS_SOA_RESYNC_INTERVAL must be a positive integer (got: ${PDNS_SOA_RESYNC_INTERVAL})." >&2
+        exit 1
+        ;;
+esac
+if [ "$PDNS_SOA_RESYNC_INTERVAL" -lt 60 ] || [ "$PDNS_SOA_RESYNC_INTERVAL" -gt 86400 ]; then
+    echo "[lancache-dns] FATAL: PDNS_SOA_RESYNC_INTERVAL must stay between 60 and 86400 seconds." >&2
     exit 1
 fi
 
@@ -541,6 +585,7 @@ echo "[lancache-dns] pdns_server will bind local-address=127.0.0.1,${PDNS_LOCAL_
 
 export PDNS_API_KEY DDNS_ALLOW_FROM PDNS_LOCAL_ADDRESS ROOT_ZONE_MIRROR NATS_URL NATS_USER NATS_PASSWORD NATS_TOKEN NATS_CONSUMER NATS_RECONCILER
 export PDNS_PRIMARY_ENABLED PDNS_SECONDARY_ENABLED PDNS_XFR_CYCLE_INTERVAL PDNS_ALLOW_NOTIFY_FROM PDNS_ALLOW_AXFR_IPS
+export PDNS_SOA_REFRESH PDNS_SOA_RETRY PDNS_SOA_SEED_SERIAL PDNS_SOA_RESYNC_INTERVAL
 # #628: nats-subscriber (the child process started below by
 # run_nats_subscriber) reads these three directly -- KEEP_KNOWN_GOOD_CONFIGS
 # and DNS_CONFIG_SNAPSHOT_DIR are shared with the recursor.conf/pdns.conf
@@ -1219,7 +1264,7 @@ echo "[lancache-dns] Generating pdns.conf..."
 # by configure_ddns_tsig() below based on DDNS_ALLOW_UNSIGNED_MARKER -- so
 # this line is passed no extra_sed and always renders the template's own
 # static "no" value.
-render_template_atomic '${PDNS_API_KEY}:${DDNS_ALLOW_FROM}:${PDNS_LOCAL_ADDRESS}:${PDNS_PRIMARY_ENABLED}:${PDNS_SECONDARY_ENABLED}:${PDNS_XFR_CYCLE_INTERVAL}:${PDNS_ALLOW_NOTIFY_FROM}:${PDNS_ALLOW_AXFR_IPS}' /etc/pdns/auth/pdns.conf.template "$PDNS_AUTH_CONF_FILE" ""
+render_template_atomic '${PDNS_API_KEY}:${DDNS_ALLOW_FROM}:${PDNS_LOCAL_ADDRESS}:${PDNS_PRIMARY_ENABLED}:${PDNS_SECONDARY_ENABLED}:${PDNS_XFR_CYCLE_INTERVAL}:${PDNS_ALLOW_NOTIFY_FROM}:${PDNS_ALLOW_AXFR_IPS}:${PDNS_SOA_SEED_SERIAL}:${PDNS_SOA_REFRESH}:${PDNS_SOA_RETRY}' /etc/pdns/auth/pdns.conf.template "$PDNS_AUTH_CONF_FILE" ""
 
 # ── 3. Initialize SQLite Database ────────────────────────────────────────────
 if [ ! -f /var/lib/powerdns/pdns.sqlite3 ]; then
@@ -1582,8 +1627,88 @@ run_nats_subscriber() {
 run_nats_subscriber &
 NATS_PID=$!
 
+# ── 10. SOA Serial Maintainer (primary only) ────────────────────────────────
+# What: rewrites a zone's SOA: date serial + refresh.
+# Why: migrates refresh; resyncs if a NOTIFY was lost.
+# From: Issue #1095
+_dns_soa_maintain_zone() {
+    local zone="$1"
+    local api="http://127.0.0.1:8081/api/v1/servers/localhost/zones"
+    local soa mname rname cur expire minttl want target content body code
+    # What: canonical FQDN with exactly one trailing dot.
+    # Why: DDNS_UPDATE_ZONES mixes dotted/undotted names.
+    # From: Issue #1095
+    local zone_fqdn="${zone%.}."
+    soa=$(dig +short +time=2 +tries=1 @127.0.0.1 -p 5300 "$zone" SOA 2>/dev/null)
+    # shellcheck disable=SC2086 # deliberate word-split of the 7 SOA fields.
+    set -- $soa
+    if [ "$#" -ne 7 ] || ! printf '%s' "$3" | grep -qE '^[0-9]+$'; then
+        echo "[lancache-dns][soa] '$zone' SOA not readable yet: '$soa'" >&2
+        return 1
+    fi
+    mname="$1"; rname="$2"; cur="$3"; expire="$6"; minttl="$7"
+    # What: anchors to today's YYMMDD000, else bumps prev+1.
+    # Why: date serial stays <2^31 (RFC1982-safe), 1000/day.
+    # From: Issue #1095
+    want="$(date +%y%m%d)000"
+    if [ "$cur" -lt "$want" ]; then
+        target="$want"
+    else
+        target=$((cur + 1))
+    fi
+    content="$mname $rname $target $PDNS_SOA_REFRESH $PDNS_SOA_RETRY $expire $minttl"
+    body="{\"rrsets\":[{\"name\":\"${zone_fqdn}\",\"type\":\"SOA\",\"ttl\":${minttl},\"changetype\":\"REPLACE\",\"records\":[{\"content\":\"${content}\",\"disabled\":false}]}]}"
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X PATCH \
+        -H "X-API-Key: $PDNS_API_KEY" -H "Content-Type: application/json" \
+        "$api/${zone_fqdn}" -d "$body" 2>/dev/null)
+    if [ "$code" != "204" ]; then
+        echo "[lancache-dns][soa] '$zone' SOA PATCH failed: HTTP ${code:-none}" >&2
+        return 1
+    fi
+    curl -s -o /dev/null --max-time 5 -X PUT \
+        -H "X-API-Key: $PDNS_API_KEY" "$api/${zone_fqdn}/notify" 2>/dev/null || true
+    return 0
+}
+
+# What: waits for the API, then maintains each SOA.
+# Why: refresh migration/resync need the API up.
+# From: Issue #1095
+run_soa_maintainer() {
+    # What: exits promptly on stop, not blocking the sleep.
+    # Why: default 3600s sleep would force SIGKILL on stop.
+    # From: Issue #1095
+    trap 'exit 0' TERM INT
+    local i code ok
+    for i in $(seq 1 30); do
+        code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 \
+            -H "X-API-Key: $PDNS_API_KEY" \
+            "http://127.0.0.1:8081/api/v1/servers/localhost/zones" 2>/dev/null)
+        [ "$code" = "200" ] && break
+        sleep 2
+    done
+    while true; do
+        ok=0
+        for zone in "${DDNS_UPDATE_ZONES[@]}"; do
+            if _dns_soa_maintain_zone "$zone"; then ok=$((ok + 1)); fi
+        done
+        # What: retries soon when no zone was writable yet.
+        # Why: a cold auth listener must not defer migration an hour.
+        # From: Issue #1095
+        if [ "$ok" -eq 0 ]; then sleep 5; else sleep "$PDNS_SOA_RESYNC_INTERVAL"; fi
+    done
+}
+
+# What: runs the SOA maintainer on the primary role only.
+# Why: secondaries own their SOA via AXFR; native has none.
+# From: Issue #1095
+SOA_PID=
+if [ "$DNS_REPLICATION_ROLE" = "primary" ]; then
+    run_soa_maintainer &
+    SOA_PID=$!
+fi
+
 # Handle termination
-trap 'kill $AUTH_PID $REC_PID $NATS_PID 2>/dev/null || true' EXIT TERM INT
+trap 'kill $AUTH_PID $REC_PID $NATS_PID ${SOA_PID:-} 2>/dev/null || true' EXIT TERM INT
 
 # Wait indefinitely
 wait

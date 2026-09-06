@@ -439,3 +439,103 @@ count_record_type() {
     run ! grep -q 'disabled-wild' "$zone_file"
     grep -qx '\*\.still-enabled\.example\.com 60 IN A 192\.0\.2\.1' "$zone_file"
 }
+
+# ── SOA serial maintainer (_dns_soa_maintain_zone) ──────────────────────────
+# The maintainer rewrites each primary zone's SOA to a date-anchored,
+# RFC1982-safe serial plus the configured short refresh so secondaries
+# converge sub-minute after a lost NOTIFY. dig (SOA read) and curl (API
+# write) are mocked so the serial arithmetic, the <2^31 SNA-safety invariant,
+# the refresh migration, and the trailing-dot zone-name normalisation are all
+# covered without a running PowerDNS.
+
+# What: mocks dig/curl/date and sets the maintainer's env.
+# Why: makes serial arithmetic deterministic (fixed date).
+# From: Issue #1095
+_soa_setup_mocks() {
+    local cur="$1"
+    export MOCK_BIN="$BATS_TEST_TMPDIR/soa-mockbin"
+    export SOA_CURL_ARGS="$BATS_TEST_TMPDIR/soa-curl-args.log"
+    export SOA_CURL_BODY="$BATS_TEST_TMPDIR/soa-curl-body.log"
+    mkdir -p "$MOCK_BIN"; : > "$SOA_CURL_ARGS"; : > "$SOA_CURL_BODY"
+
+    cat > "$MOCK_BIN/dig" <<MOCK
+#!/usr/bin/env bash
+printf 'localhost. admin.z. %s 10800 3600 604800 3600\n' "${cur}"
+MOCK
+    cat > "$MOCK_BIN/curl" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${SOA_CURL_ARGS:?}"
+prev=""
+for a in "$@"; do
+    [[ "$prev" == "-d" ]] && printf '%s\n' "$a" >> "${SOA_CURL_BODY:?}"
+    prev="$a"
+done
+[[ "$*" == *"%{http_code}"* ]] && printf '204'
+exit 0
+MOCK
+    cat > "$MOCK_BIN/date" <<'MOCK'
+#!/usr/bin/env bash
+[[ "$1" == "+%y%m%d" ]] && { printf '260906\n'; exit 0; }
+exec /bin/date "$@"
+MOCK
+    chmod +x "$MOCK_BIN"/dig "$MOCK_BIN"/curl "$MOCK_BIN"/date
+    export PATH="$MOCK_BIN:$PATH"
+    export PDNS_API_KEY=test-key PDNS_SOA_REFRESH=30 PDNS_SOA_RETRY=10
+}
+
+# What: extracts the SOA content the maintainer PATCHed.
+# Why: shared parser for the serial/refresh checks.
+# From: Issue #1095
+_soa_patched_content() {
+    grep -oE 'localhost\. admin\.z\. [0-9]+ [0-9]+ [0-9]+ [0-9]+ [0-9]+' "$SOA_CURL_BODY" | head -1
+}
+
+# A serial older than today (the migration case: existing zones sit at tiny
+# SOA-EDIT-API=INCREASE serials) must jump to today's YYMMDD000 anchor.
+@test "soa maintainer anchors an older serial to today's date" {
+    _soa_setup_mocks 5
+    run _dns_soa_maintain_zone lan
+    [ "$status" -eq 0 ]
+    [ "$(_soa_patched_content | awk '{print $3}')" = "260906000" ]
+}
+
+# A serial already at/after today's anchor must only increment by one, so
+# same-day writes stay monotone without re-anchoring backwards.
+@test "soa maintainer bumps a same-day serial by exactly one" {
+    _soa_setup_mocks 260906500
+    run _dns_soa_maintain_zone lan
+    [ "$status" -eq 0 ]
+    [ "$(_soa_patched_content | awk '{print $3}')" = "260906501" ]
+}
+
+# The date serial MUST stay below 2^31 or RFC1982 serial arithmetic reads the
+# migration jump as a decrease and the secondary never transfers (the live
+# regression this whole change fixes).
+@test "soa maintainer date serial stays below the 2^31 RFC1982 boundary" {
+    _soa_setup_mocks 5
+    run _dns_soa_maintain_zone lan
+    [ "$status" -eq 0 ]
+    [ "$(_soa_patched_content | awk '{print $3}')" -lt 2147483648 ]
+}
+
+# The SOA the maintainer writes must carry the configured refresh/retry, so an
+# existing zone stuck on the old refresh=10800 (3h) is migrated to the short
+# value on the first pass.
+@test "soa maintainer migrates refresh/retry to the configured values" {
+    _soa_setup_mocks 5
+    run _dns_soa_maintain_zone lan
+    [ "$status" -eq 0 ]
+    [ "$(_soa_patched_content | awk '{print $4}')" = "30" ]
+    [ "$(_soa_patched_content | awk '{print $5}')" = "10" ]
+}
+
+# DDNS_UPDATE_ZONES mixes dotted and undotted names; a reverse zone arriving
+# with a trailing dot must not produce a "..zone.." double-dot API path (the
+# HTTP 422 the live full-stack run caught).
+@test "soa maintainer normalises a trailing-dot zone without doubling it" {
+    _soa_setup_mocks 5
+    run _dns_soa_maintain_zone "30.172.in-addr.arpa."
+    [ "$status" -eq 0 ]
+    grep -q 'zones/30\.172\.in-addr\.arpa\.' "$SOA_CURL_ARGS"
+    run ! grep -q '30\.172\.in-addr\.arpa\.\.' "$SOA_CURL_ARGS"
+}

@@ -3,9 +3,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Bats helper that loads services/dns/entrypoint.sh's real
-# "_dns_generate_rpz_zone" and "_dns_ensure_zone_exists" functions without
-# executing the full entrypoint (PDNS_API_KEY placeholder checks, daemon
-# startup, etc.).
+# "_dns_generate_rpz_zone", "_dns_ensure_zone_exists" and
+# "_dns_soa_maintain_zone" functions without executing the full entrypoint
+# (PDNS_API_KEY placeholder checks, daemon startup, etc.).
 #
 # Bug-hunt finding #8 (docs/bug-hunt/dns.md, re-verified 2026-08-06): this
 # used to be a hand-extracted, independently-maintained copy of the RPZ
@@ -26,6 +26,7 @@ load_dns_zone_helpers() {
     awk '
         /^_dns_generate_rpz_zone\(\) \{/ { in_fn = 1 }
         /^_dns_ensure_zone_exists\(\) \{/ { in_fn = 1 }
+        /^_dns_soa_maintain_zone\(\) \{/ { in_fn = 1 }
         in_fn { print }
         in_fn && /^\}$/ { in_fn = 0 }
     ' "$repo_root/services/dns/entrypoint.sh" > "$helper_file"
