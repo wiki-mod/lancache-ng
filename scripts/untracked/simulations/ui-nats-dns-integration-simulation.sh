@@ -162,7 +162,7 @@ echo "UI accepted the record add (303 redirect)."
 echo "== Verifying the record reached PowerDNS via NATS -> nats-subscriber =="
 
 # What: polls up to $3 times (default 10) instead of a fixed sleep.
-# Why: AXFR secondary polling takes ~15-20s (not real-time NOTIFY)
+# Why: secondary AXFR bounded by SOA refresh (~30s, #1837)
 # From: Issue #1164 | PR #1667
 verify_record_resolves() {
     local label="$1"
@@ -200,7 +200,7 @@ verify_record_resolves() {
 }
 
 verify_record_resolves "dns-standard" "$dns_standard_ip"
-verify_record_resolves "dns-ssl" "$dns_ssl_ip" 25
+verify_record_resolves "dns-ssl" "$dns_ssl_ip" 60
 
 echo "== UI: removing the LAN record via POST /domains/lan/remove =="
 
@@ -245,6 +245,6 @@ verify_record_gone() {
 }
 
 verify_record_gone "dns-standard" "$dns_standard_ip"
-verify_record_gone "dns-ssl" "$dns_ssl_ip" 25
+verify_record_gone "dns-ssl" "$dns_ssl_ip" 60
 
 echo "ui-nats-dns-integration-simulation passed: UI -> NATS -> nats-subscriber -> PowerDNS add and remove both verified end-to-end via real DNS queries."
