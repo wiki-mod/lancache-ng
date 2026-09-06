@@ -283,8 +283,8 @@ EOF
     run "$script" "$real_repo_root"
     [ "$status" -eq 0 ]
     [[ "$output" == *"OK"* ]]
-    # What: asserts a non-zero real-tree build-context count.
-    # Why: AG-INT-002 -- a broken parser (or a vanished count
+    # What: asserts non-zero real-tree build-context count.
+    # Why: AG-INT-002 -- a broken parser (or vanished count
     # line) must stay detectable; a substring match on "0 ..."
     # false-positives once the real count is e.g. 10 or 20.
     bcc_count=$(sed -n 's/.*; \([0-9][0-9]*\) docker build invocation(s) examined.*/\1/p' <<<"$output")
@@ -319,7 +319,7 @@ EOF
 bcc_write_widget_sim() {
     local build_line="$1"
     # What: also writes a trivial full-setup-validate.yml.
-    # Why: WORKFLOW_FILES requires it to exist; these tests don't
+    # Why: WORKFLOW_FILES requires it; these tests don't
     # exercise the login-coverage half, which write_validate_yml
     # (called per test elsewhere in this file) normally provides.
     write_validate_yml '  noop:

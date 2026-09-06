@@ -363,8 +363,8 @@ bcc_join_continued_lines() {
 # if none can be resolved.
 bcc_target_dockerfile_for_invocation() {
     local invocation="$1" explicit="" ctx=""
-    # What: `|| true` on each grep|tail; a no-match is not an error.
-    # Why: pipefail would otherwise abort the caller under set -e.
+    # What: `|| true` per grep|tail; no match isn't error.
+    # Why: pipefail would else abort caller under set -e.
     explicit=$(grep -oE '(^|[[:space:]])(-f|--file)[[:space:]]+"?services/[A-Za-z0-9_-]+/Dockerfile"?' <<<"$invocation" | tail -1) || true
     if [[ -n "$explicit" ]]; then
         explicit="${explicit#*services/}"
@@ -444,9 +444,9 @@ done
 shopt -u nullglob
 
 # What: no "examined zero" self-diagnostic for this half.
-# Why: synthetic per-test fixtures legitimately have zero docker
-# build invocations; unlike jobs_examined, zero here is not a
-# parsing-broke signal in this shared, multi-purpose script.
+# Why: synthetic per-test fixtures legitimately have zero
+# docker build invocations; unlike jobs_examined, zero here is
+# not a parsing-broke signal in this shared, multi-purpose script.
 if [[ "$failures" -gt 0 ]]; then
     printf '::error::check-registry-login-coverage: %d violation(s) found (see scripts/tracked/check-registry-login-coverage.sh).\n' "$failures" >&2
     exit 1
