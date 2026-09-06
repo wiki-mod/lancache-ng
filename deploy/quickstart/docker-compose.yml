@@ -75,13 +75,9 @@ services:
     command:
       - |
         set -e
-        # What: resolves the four NATS_*_PASSWORD handshake secrets from the shared-secrets volume, via the same helper the dns/dhcp/ui entrypoints embed (mounted read-only below).
-        # Why: nats-server and its clients (Admin UI, dns writer/replica) must agree on the same value even when .env left it empty/placeholder.
-        # From: Issue #858
+
         . /usr/local/lib/shared-secret-bootstrap.sh
-        # What: exits non-zero (fail closed) when resolve_shared_secret cannot write the shared-secrets volume, instead of booting with an empty static-user password.
-        # Why: matches the same guard in deploy/prod/docker-compose.yml's nats service.
-        # From: PR #886
+
         if secret_is_placeholder "$$NATS_UI_PASSWORD"; then NATS_UI_PASSWORD=""; fi
         if ! NATS_UI_PASSWORD="$$(resolve_shared_secret nats-ui-password "$$NATS_UI_PASSWORD" lancache_gen_hex32)"; then
           echo "[lancache-nats] FATAL: NATS_UI_PASSWORD is unset/placeholder and the shared-secrets volume is not writable, so no shared password could be generated." >&2
@@ -106,9 +102,7 @@ services:
           echo "[lancache-nats] Mount the shared-secrets volume, or set NATS_CALLOUT_PASSWORD to a real value (openssl rand -hex 32)." >&2
           exit 1
         fi
-        # What: NATS_SYS_PASSWORD, the Admin UI's system-account identity.
-        # Why: used only to CONNZ/KICK ($$SYS.REQ.SERVER.<id>.*) a removed/rotated secondary's live connection; nats-server exposes that API only to system-account clients, so this role is the sole member of the `SYS` account below, not the default $$G account every other static role uses.
-        # From: Issue #681, services/ui/src/nats_kick.rs
+
         if secret_is_placeholder "$$NATS_SYS_PASSWORD"; then NATS_SYS_PASSWORD=""; fi
         if ! NATS_SYS_PASSWORD="$$(resolve_shared_secret nats-sys-password "$$NATS_SYS_PASSWORD" lancache_gen_hex32)"; then
           echo "[lancache-nats] FATAL: NATS_SYS_PASSWORD is unset/placeholder and the shared-secrets volume is not writable, so no shared password could be generated." >&2
@@ -116,18 +110,12 @@ services:
           exit 1
         fi
         mkdir -p /etc/nats
-        # What: prepares nats-server's log directory as gid 10001 + setgid.
-        # Why: nats.log is created by the daemon itself, and upgraded
-        #   volumes may already contain older files that still need repairing.
-        # From: Issue #1427
+
         mkdir -p /var/log/lancache-nats
         chgrp 10001 /var/log/lancache-nats
         chmod 2775 /var/log/lancache-nats
         find /var/log/lancache-nats -maxdepth 1 -type f -exec chgrp 10001 {} + -exec chmod g+r {} +
-        # What: constrains the daemon-created nats.log mode to 0640.
-        # Why: gid 10001 keeps the collector read path working, while world
-        #   read permission is no longer needed once the shared group exists.
-        # From: Issue #1427
+
         umask 0027
         escape_sed() {
           printf '%s' "$$1" | sed 's/[\/&|]/\\&/g'
@@ -182,17 +170,9 @@ services:
               password: "__NATS_DNS_REPLICA_PASSWORD__"
               permissions = {
                 publish = [
-                  # What: publish permission on lancache.dns.flush, same as the writer identity above.
-                  # Why: dns-ssl's own nats-subscriber runs the same rollback listener and needs the post-rollback cache-flush too.
-                  # From: services/dns/nats-subscriber/src/rollback_listener.rs
+
                   "lancache.dns.flush",
-                  # What: publish permission on lancache.dns.record, needed if publish_rollback_records ever runs under this identity (DNS_ROLLBACK_URL currently always targets dns-standard, not dns-ssl).
-                  # Why: deliberate maintainer tradeoff -- widens what a compromised dns-ssl credential could publish, rather than adding a fail-closed guard in the listener itself.
-                  # From: services/dns/nats-subscriber/src/rollback_listener.rs
                   "lancache.dns.record",
-                  # What: STREAM.CREATE.LANCACHE_DNS, matching the writer identity's grant of the same subject.
-                  # Why: nats-subscriber's main() falls back to js.create_stream() if get_stream() fails at startup, and exits on a denied create -- needed if this identity is ever first to connect, before the stream exists.
-                  # From: Issue #849
                   "$$JS.API.STREAM.INFO.LANCACHE_DNS",
                   "$$JS.API.STREAM.CREATE.LANCACHE_DNS",
                   "$$JS.API.CONSUMER.INFO.LANCACHE_DNS.>",
@@ -205,21 +185,15 @@ services:
               }
             }
             {
-              # What: the Admin UI's static auth-callout responder identity (services/ui/src/nats_auth_callout.rs), no subject permissions, only answers auth-callout requests.
-              # Why: listed in the UI's auth_users fragment, so nats-server checks its password against this static list; must stay in lockstep with the ui service's NATS_CALLOUT_USER/PASSWORD or the callout silently fails.
-              # From: Issue #583 | PR #621
+   
               user: "__NATS_CALLOUT_USER__"
               password: "__NATS_CALLOUT_PASSWORD__"
             }
           ]
-          # What: `include`s auth_callout.conf, a separate file only the Admin UI writes, rather than embedding the stanza here.
-          # Why: the UI's runtime-generated issuer public key is unknown to this container, and this split is what lets this entrypoint regenerate its static subset every restart without clobbering the UI's fragment; a missing include target is a FATAL boot error, an empty one is valid.
-          # From: Issue #811 | PR #817
+
           include "auth_callout.conf"
         }
-        # What: a minimal `SYS` account, additive alongside the `authorization {}` block above; the only account this process is a member of, with no application subject permissions of its own.
-        # Why: lets the Admin UI reach the $$SYS.REQ.SERVER.* system-services API (CONNZ/KICK on a secondary's connection), which nats-server does not expose to the default $$G account every other static role uses.
-        # From: Issue #681
+
         accounts {
           SYS: {
             users: [

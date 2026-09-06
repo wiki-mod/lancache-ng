@@ -761,7 +761,7 @@ services:
       # From: Issue #1165
       - watchdog-status:/var/run/watchdog:ro
     ports:
-      - "127.0.0.1:8080:8080"
+      - "${UI_BIND_IP:-${IP_STANDARD}}:8080:8080"
     environment:
       - DOCKER_PROXY_URL=http://docker-socket-proxy:2375
       - DNS_STANDARD_SERVICE=dns-standard
