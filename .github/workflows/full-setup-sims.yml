@@ -750,6 +750,12 @@ jobs:
       - name: Run DHCP Kea lease-flow simulation
         env:
           DHCP_LEASE_FLOW_CLIENT_IMAGE: ${{ steps.build-tools-image.outputs.image }}
+          # What: script now builds services/dns (a Cargo release build).
+          # Why: same PROJECT_CARGO_LTO/PROJECT_CARGO_CODEGENUNIT sourcing
+          # as every other Cargo release build in this repo.
+          # From: Issue #1095
+          PROJECT_CARGO_LTO: ${{ vars.PROJECT_CARGO_LTO }}
+          PROJECT_CARGO_CODEGENUNIT: ${{ vars.PROJECT_CARGO_CODEGENUNIT }}
         run: |
           set -euo pipefail
           bash scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh

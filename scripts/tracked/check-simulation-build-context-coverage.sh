@@ -2,8 +2,8 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Standing guard for the shared-scripts build-context regression: 9
-# `docker build`/`docker buildx build` invocations across 7
+# Standing guard for the shared-scripts build-context regression: 11
+# `docker build`/`docker buildx build` invocations across 9
 # scripts/untracked/simulations/*.sh files built services/{proxy,dhcp,
 # dhcp-proxy,dns}/Dockerfile directly, independent of
 # .github/workflows/build-push.yml's own `build_contexts:` matrix wiring,
