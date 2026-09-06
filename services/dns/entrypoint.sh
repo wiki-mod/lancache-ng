@@ -2,25 +2,16 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# PowerDNS container entrypoint. Generates RPZ zones from cdn-domains.txt
-# (with monotonic serial handling), renders the recursor/authoritative config
-# templates, validates them and keeps a known-good configuration snapshot
-# history (#615, see docs/known-good-config-snapshots.md), configures DDNS
-# TSIG auth (configure_ddns_tsig), and starts the authoritative server,
-# recursor, and NATS subscriber in one container so DNS records stay aligned
-# with Admin UI changes.
+# What: PowerDNS entrypoint with RPZ and config
+# Why: Aligns DNS with Admin UI via single container
 set -euo pipefail
 
 # ── Shared-secret bootstrap (issue #858) ─────────────────────────────────────
-# Embedded byte-identical copy of scripts/lib/shared-secret-bootstrap.sh's
-# function definitions (guarded by tests/bats/shared_secret_bootstrap_sync.bats),
-# for the same reason as the known-good-snapshot library below: this image
-# builds from services/dns/ alone with no shared-file build context.
+# What: Embedded shared-secret-bootstrap functions
+# Why: Image builds from dns/ alone, no shared build context
 # BEGIN shared-secret-bootstrap library (scripts/lib/shared-secret-bootstrap.sh)
-# lancache_shared_secret_dir
-# Directory holding the cross-container shared secrets, mounted from the
-# `shared-secrets` named volume into every container that must agree on a
-# generated value. Overridable for tests via LANCACHE_SHARED_SECRET_DIR.
+# What: lancache_shared_secret_dir — shared secret location
+# Why: Cross-container alignment via shared-secrets volume
 lancache_shared_secret_dir() {
     printf '%s' "${LANCACHE_SHARED_SECRET_DIR:-/var/lib/lancache-secrets}"
 }
@@ -129,8 +120,8 @@ resolve_shared_secret() {
     _rss_dir="$(lancache_shared_secret_dir)"
     _rss_file="${_rss_dir}/${_rss_name}"
 
-    # What: re-checks for a conflict right before returning.
-    # Why: closes the TOCTOU window a concurrent writer opens.
+    # What: Re-check for conflicts at return point
+    # Why: Reduce TOCTOU race window with writers
     # From: PR #1775
     _rss_conflict_now() {
         [ -n "$_rss_cur" ] || return 1
@@ -157,8 +148,8 @@ resolve_shared_secret() {
         fi
     fi
 
-    # What: returns the caller's value unpersisted on write fail.
-    # Why: safe only because no on-disk value could disagree yet.
+    # What: Return value unpersisted on write failure
+    # Why: No on-disk value can disagree at this point
     # From: PR #1775
     _rss_tmp="$(mktemp "${_rss_dir}/.secret.XXXXXX" 2>/dev/null)" || {
         if [ -n "$_rss_cur" ] && [ -z "$_rss_require_persist" ] && ! _rss_conflict_now; then
@@ -195,8 +186,8 @@ resolve_shared_secret() {
 }
 # END shared-secret-bootstrap library
 
-# What: helper for producer log directories that must stay readable to gid 10001.
-# Why: root-created files on persistent volumes otherwise drift back to
+# What: Helper for producer log dir readability
+# Why: Keep gid 10001 readable on persistent volumes
 #   root-only readability after reopen or recreation. dns/dhcp-only (not part
 #   of the shared-secret-bootstrap contract ui also embeds), so it lives after
 #   the sync-guarded block instead of inside it.
@@ -328,6 +319,16 @@ DNS_REPLICATION_ROLE="${DNS_REPLICATION_ROLE:-native}"
 DNS_XFR_PRIMARY="${DNS_XFR_PRIMARY:-}"
 DNS_XFR_NOTIFY_TARGETS="${DNS_XFR_NOTIFY_TARGETS:-}"
 PDNS_XFR_CYCLE_INTERVAL="${PDNS_XFR_CYCLE_INTERVAL:-15}"
+# What: SOA convergence knobs + today's date seed serial.
+# Why: short refresh bounds drift if NOTIFY (UDP) lost.
+# From: Issue #1095
+PDNS_SOA_REFRESH="${PDNS_SOA_REFRESH:-30}"
+PDNS_SOA_RETRY="${PDNS_SOA_RETRY:-10}"
+PDNS_SOA_SEED_SERIAL="$(date +%y%m%d)000"
+# What: primary-only generic force-resync cadence.
+# Why: belt-and-suspenders re-sync beyond refresh polling.
+# From: Issue #1095
+PDNS_SOA_RESYNC_INTERVAL="${PDNS_SOA_RESYNC_INTERVAL:-3600}"
 DNS_CONFIG_SNAPSHOT_DIR="${DNS_CONFIG_SNAPSHOT_DIR:-/var/lib/lancache-dns/config-snapshots}"
 # Zone/record rollback listener (#628, nats-subscriber's own process -- see
 # services/dns/nats-subscriber/src/rollback_listener.rs). Bound to 0.0.0.0,
@@ -380,8 +381,8 @@ DDNS_ALLOW_UNSIGNED_MARKER="${DNS_STATE_DIR}/ddns-allow-unsigned-updates"
 PDNS_LOG_DIR="/var/log/lancache-dns"
 prepare_log_dir_for_shared_reader "$PDNS_LOG_DIR"
 
-# What: resolves a transfer endpoint, retries host lookup 30s.
-# Why: siblings start concurrently; getent crash-looped this.
+# What: Resolve transfer endpoint with 30s retry
+# Why: Prevent getent crash-loops during startup
 # From: Issue #1164 | PR #1775
 dns_xfr_primary_endpoint() {
     local endpoint="$1" var_name="${2:-DNS_XFR_PRIMARY}" host port resolved
@@ -433,6 +434,40 @@ if [ "$PDNS_XFR_CYCLE_INTERVAL" -lt 1 ] || [ "$PDNS_XFR_CYCLE_INTERVAL" -gt 60 ]
     exit 1
 fi
 
+# What: hard-fails on malformed SOA refresh/retry/resync.
+# Why: bad values render invalid SOA, later rescue-mode.
+# From: Issue #1095
+case "$PDNS_SOA_REFRESH" in
+    "" | *[!0-9]*)
+        echo "[lancache-dns] FATAL: PDNS_SOA_REFRESH must be a positive integer (got: ${PDNS_SOA_REFRESH})." >&2
+        exit 1
+        ;;
+esac
+if [ "$PDNS_SOA_REFRESH" -lt 10 ] || [ "$PDNS_SOA_REFRESH" -gt 86400 ]; then
+    echo "[lancache-dns] FATAL: PDNS_SOA_REFRESH must stay between 10 and 86400 seconds (short enough for sub-minute convergence, not so short it hammers the primary)." >&2
+    exit 1
+fi
+case "$PDNS_SOA_RETRY" in
+    "" | *[!0-9]*)
+        echo "[lancache-dns] FATAL: PDNS_SOA_RETRY must be a positive integer (got: ${PDNS_SOA_RETRY})." >&2
+        exit 1
+        ;;
+esac
+if [ "$PDNS_SOA_RETRY" -lt 1 ] || [ "$PDNS_SOA_RETRY" -ge "$PDNS_SOA_REFRESH" ]; then
+    echo "[lancache-dns] FATAL: PDNS_SOA_RETRY must be >= 1 and strictly less than PDNS_SOA_REFRESH (RFC 1912), got retry=${PDNS_SOA_RETRY} refresh=${PDNS_SOA_REFRESH}." >&2
+    exit 1
+fi
+case "$PDNS_SOA_RESYNC_INTERVAL" in
+    "" | *[!0-9]*)
+        echo "[lancache-dns] FATAL: PDNS_SOA_RESYNC_INTERVAL must be a positive integer (got: ${PDNS_SOA_RESYNC_INTERVAL})." >&2
+        exit 1
+        ;;
+esac
+if [ "$PDNS_SOA_RESYNC_INTERVAL" -lt 60 ] || [ "$PDNS_SOA_RESYNC_INTERVAL" -gt 86400 ]; then
+    echo "[lancache-dns] FATAL: PDNS_SOA_RESYNC_INTERVAL must stay between 60 and 86400 seconds." >&2
+    exit 1
+fi
+
 PDNS_PRIMARY_ENABLED=no
 PDNS_SECONDARY_ENABLED=no
 PDNS_ALLOW_NOTIFY_FROM=
@@ -440,12 +475,10 @@ PDNS_ALLOW_AXFR_IPS=127.0.0.0/8,::1
 case "$DNS_REPLICATION_ROLE" in
     primary)
         PDNS_PRIMARY_ENABLED=yes
-        # What: resolves each DNS_XFR_NOTIFY_TARGETS host to an IP for
-        #   allow-axfr-ips (PowerDNS's default is loopback-only, and TSIG
-        #   alone does not bypass it).
-        # Why: confirmed empirically (2026-08-24, lancache-229): a
-        #   correctly-TSIG-signed AXFR from a real secondary IP still got
-        #   REFUSED with no allow-axfr-ips entry for that IP.
+        # What: Resolve notify targets to IPs
+        #   (default loopback-only, TSIG insufficient)
+        # Why: TSIG needs allow-axfr-ips entries
+        #   for secondary IPs
         # From: Issue #1164
         if [ -n "$DNS_XFR_NOTIFY_TARGETS" ]; then
             for target in ${DNS_XFR_NOTIFY_TARGETS//,/ }; do
@@ -541,6 +574,7 @@ echo "[lancache-dns] pdns_server will bind local-address=127.0.0.1,${PDNS_LOCAL_
 
 export PDNS_API_KEY DDNS_ALLOW_FROM PDNS_LOCAL_ADDRESS ROOT_ZONE_MIRROR NATS_URL NATS_USER NATS_PASSWORD NATS_TOKEN NATS_CONSUMER NATS_RECONCILER
 export PDNS_PRIMARY_ENABLED PDNS_SECONDARY_ENABLED PDNS_XFR_CYCLE_INTERVAL PDNS_ALLOW_NOTIFY_FROM PDNS_ALLOW_AXFR_IPS
+export PDNS_SOA_REFRESH PDNS_SOA_RETRY PDNS_SOA_SEED_SERIAL PDNS_SOA_RESYNC_INTERVAL
 # #628: nats-subscriber (the child process started below by
 # run_nats_subscriber) reads these three directly -- KEEP_KNOWN_GOOD_CONFIGS
 # and DNS_CONFIG_SNAPSHOT_DIR are shared with the recursor.conf/pdns.conf
@@ -945,9 +979,9 @@ configure_ddns_tsig() {
     fi
 }
 
-# What: imports the shared TSIG key without changing DDNS update metadata.
-# Why: secondaries need the key for AXFR authentication but must not grant
-#   themselves TSIG-ALLOW-DNSUPDATE as an additional local write path.
+# What: Import TSIG key without changing DDNS metadata
+# Why: Secondaries need key for AXFR but not
+#   TSIG-ALLOW-DNSUPDATE write access
 # From: Issue #1164
 import_ddns_tsig_key() {
     if [ -z "$DDNS_TSIG_KEY" ]; then
@@ -1219,7 +1253,7 @@ echo "[lancache-dns] Generating pdns.conf..."
 # by configure_ddns_tsig() below based on DDNS_ALLOW_UNSIGNED_MARKER -- so
 # this line is passed no extra_sed and always renders the template's own
 # static "no" value.
-render_template_atomic '${PDNS_API_KEY}:${DDNS_ALLOW_FROM}:${PDNS_LOCAL_ADDRESS}:${PDNS_PRIMARY_ENABLED}:${PDNS_SECONDARY_ENABLED}:${PDNS_XFR_CYCLE_INTERVAL}:${PDNS_ALLOW_NOTIFY_FROM}:${PDNS_ALLOW_AXFR_IPS}' /etc/pdns/auth/pdns.conf.template "$PDNS_AUTH_CONF_FILE" ""
+render_template_atomic '${PDNS_API_KEY}:${DDNS_ALLOW_FROM}:${PDNS_LOCAL_ADDRESS}:${PDNS_PRIMARY_ENABLED}:${PDNS_SECONDARY_ENABLED}:${PDNS_XFR_CYCLE_INTERVAL}:${PDNS_ALLOW_NOTIFY_FROM}:${PDNS_ALLOW_AXFR_IPS}:${PDNS_SOA_SEED_SERIAL}:${PDNS_SOA_REFRESH}:${PDNS_SOA_RETRY}' /etc/pdns/auth/pdns.conf.template "$PDNS_AUTH_CONF_FILE" ""
 
 # ── 3. Initialize SQLite Database ────────────────────────────────────────────
 if [ ! -f /var/lib/powerdns/pdns.sqlite3 ]; then
@@ -1347,8 +1381,8 @@ _dns_set_zone_metadata() {
     pdnsutil --config-dir=/etc/pdns/auth set-meta "$zone" "$kind" "$@" >/dev/null
 }
 
-# What: marks a zone as the authoritative primary and enables transfer hints.
-# Why: every DDNS/API write must bump SOA serials and notify secondaries so
+# What: Mark zone as primary with transfer hints
+# Why: DDNS/API writes must bump SOA and notify
 #   NOTIFY and refresh polling converge to the same single-writer state.
 # From: Issue #1164
 _dns_configure_primary_zone_replication() {
@@ -1362,8 +1396,8 @@ _dns_configure_primary_zone_replication() {
     if [ -n "$DNS_XFR_NOTIFY_TARGETS" ]; then
         for target in ${DNS_XFR_NOTIFY_TARGETS//,/ }; do
             [ -n "$target" ] || continue
-            # What: resolves each ALSO-NOTIFY target to an IP first.
-            # Why: PowerDNS needs IP[:port] here, not a hostname.
+            # What: Resolve notify targets to IPs
+            # Why: PowerDNS requires IP[:port], not hostname
             # From: PR #1775
             notify_targets+=("$(dns_xfr_primary_endpoint "$target" DNS_XFR_NOTIFY_TARGETS)")
         done
@@ -1371,8 +1405,8 @@ _dns_configure_primary_zone_replication() {
     fi
 }
 
-# What: creates or repairs a zone as a PowerDNS secondary of the primary.
-# Why: local dns-ssl and remote nodes must consume the primary's zone state
+# What: Create/repair secondary zone from primary
+# Why: Nodes must consume primary state via AXFR
 #   through AXFR instead of applying independent NATS record writes.
 # From: Issue #1164
 _dns_ensure_secondary_zone() {
@@ -1515,8 +1549,8 @@ echo "[lancache-dns] Starting PowerDNS Authoritative and Recursor..."
 
 run_auth() {
     while true; do
-        # What: constrains the tee-created pdns-auth.log mode to 0640.
-        # Why: gid 10001 keeps the collector read path working, while world
+        # What: Set pdns-auth.log mode to 0640
+        # Why: Keep gid 10001 readable for collector
         #   read permission is no longer needed once the shared group exists.
         # From: Issue #1427
         umask 0027
@@ -1530,8 +1564,8 @@ run_auth() {
 run_recursor() {
     mkdir -p /var/run/pdns-recursor
     while true; do
-        # What: constrains the tee-created pdns-recursor.log mode to 0640.
-        # Why: gid 10001 keeps the collector read path working, while world
+        # What: Set pdns-recursor.log mode to 0640
+        # Why: Keep gid 10001 readable for collector
         #   read permission is no longer needed once the shared group exists.
         # From: Issue #1427
         umask 0027
@@ -1567,8 +1601,8 @@ REC_PID=$!
 # ── 9. Start NATS Subscriber ────────────────────────────────────────────────
 run_nats_subscriber() {
     while true; do
-        # What: keeps nats-subscriber's stderr/stdout mirrored into the shared log dir.
-        # Why: syslog must keep seeing subscriber failures, but the file mode
+        # What: Mirror subscriber output to shared log dir
+        # Why: Syslog must see failures and log mode 0640
         #   now also has to stay 0640 for the gid-10001 read contract.
         # From: Issue #633 | Issue #1427
         umask 0027
@@ -1582,8 +1616,88 @@ run_nats_subscriber() {
 run_nats_subscriber &
 NATS_PID=$!
 
+# ── 10. SOA Serial Maintainer (primary only) ────────────────────────────────
+# What: rewrites a zone's SOA: date serial + refresh.
+# Why: migrates refresh; resyncs if a NOTIFY was lost.
+# From: Issue #1095
+_dns_soa_maintain_zone() {
+    local zone="$1"
+    local api="http://127.0.0.1:8081/api/v1/servers/localhost/zones"
+    local soa mname rname cur expire minttl want target content body code
+    # What: canonical FQDN with exactly one trailing dot.
+    # Why: DDNS_UPDATE_ZONES mixes dotted/undotted names.
+    # From: Issue #1095
+    local zone_fqdn="${zone%.}."
+    soa=$(dig +short +time=2 +tries=1 @127.0.0.1 -p 5300 "$zone" SOA 2>/dev/null)
+    # shellcheck disable=SC2086 # deliberate word-split of the 7 SOA fields.
+    set -- $soa
+    if [ "$#" -ne 7 ] || ! printf '%s' "$3" | grep -qE '^[0-9]+$'; then
+        echo "[lancache-dns][soa] '$zone' SOA not readable yet: '$soa'" >&2
+        return 1
+    fi
+    mname="$1"; rname="$2"; cur="$3"; expire="$6"; minttl="$7"
+    # What: anchors to today's YYMMDD000, else bumps prev+1.
+    # Why: date serial stays <2^31 (RFC1982-safe), 1000/day.
+    # From: Issue #1095
+    want="$(date +%y%m%d)000"
+    if [ "$cur" -lt "$want" ]; then
+        target="$want"
+    else
+        target=$((cur + 1))
+    fi
+    content="$mname $rname $target $PDNS_SOA_REFRESH $PDNS_SOA_RETRY $expire $minttl"
+    body="{\"rrsets\":[{\"name\":\"${zone_fqdn}\",\"type\":\"SOA\",\"ttl\":${minttl},\"changetype\":\"REPLACE\",\"records\":[{\"content\":\"${content}\",\"disabled\":false}]}]}"
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X PATCH \
+        -H "X-API-Key: $PDNS_API_KEY" -H "Content-Type: application/json" \
+        "$api/${zone_fqdn}" -d "$body" 2>/dev/null)
+    if [ "$code" != "204" ]; then
+        echo "[lancache-dns][soa] '$zone' SOA PATCH failed: HTTP ${code:-none}" >&2
+        return 1
+    fi
+    curl -s -o /dev/null --max-time 5 -X PUT \
+        -H "X-API-Key: $PDNS_API_KEY" "$api/${zone_fqdn}/notify" 2>/dev/null || true
+    return 0
+}
+
+# What: waits for the API, then maintains each SOA.
+# Why: refresh migration/resync need the API up.
+# From: Issue #1095
+run_soa_maintainer() {
+    # What: exits promptly on stop, not blocking the sleep.
+    # Why: default 3600s sleep would force SIGKILL on stop.
+    # From: Issue #1095
+    trap 'exit 0' TERM INT
+    local i code ok
+    for i in $(seq 1 30); do
+        code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 \
+            -H "X-API-Key: $PDNS_API_KEY" \
+            "http://127.0.0.1:8081/api/v1/servers/localhost/zones" 2>/dev/null)
+        [ "$code" = "200" ] && break
+        sleep 2
+    done
+    while true; do
+        ok=0
+        for zone in "${DDNS_UPDATE_ZONES[@]}"; do
+            if _dns_soa_maintain_zone "$zone"; then ok=$((ok + 1)); fi
+        done
+        # What: Retry soon if no zones writable
+        # Why: Don't defer cold auth migration
+        # From: Issue #1095
+        if [ "$ok" -eq 0 ]; then sleep 5; else sleep "$PDNS_SOA_RESYNC_INTERVAL"; fi
+    done
+}
+
+# What: runs the SOA maintainer on the primary role only.
+# Why: secondaries own their SOA via AXFR; native has none.
+# From: Issue #1095
+SOA_PID=
+if [ "$DNS_REPLICATION_ROLE" = "primary" ]; then
+    run_soa_maintainer &
+    SOA_PID=$!
+fi
+
 # Handle termination
-trap 'kill $AUTH_PID $REC_PID $NATS_PID 2>/dev/null || true' EXIT TERM INT
+trap 'kill $AUTH_PID $REC_PID $NATS_PID ${SOA_PID:-} 2>/dev/null || true' EXIT TERM INT
 
 # Wait indefinitely
 wait
