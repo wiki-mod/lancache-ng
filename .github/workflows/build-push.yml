@@ -2,8 +2,8 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: single CI/CD pipeline: lint, test, validate, build, scan, promote.
-# Why: enforces single-artifact: built once, digest reused everywhere.
+# What: single CI/CD pipeline for build+release
+# Why: built once, digest reused everywhere
 # From: PR #1523
 
 name: Build & Push
@@ -136,7 +136,10 @@ jobs:
         if: always()
   file-headers:
     name: file purpose headers
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    # What: GH-hosted runner; self-hosted only if var true
+    # Why: stop double CI runs; single anchor, no twins
+    # From: Issue #1095
+    runs-on: &runs_on_ci_light ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-light"]') || 'ubuntu-latest' }}
     timeout-minutes: 15
     concurrency:
       group: >-
@@ -183,7 +186,7 @@ jobs:
         if: always()
   compose-healthchecks:
     name: compose healthchecks
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: *runs_on_ci_light
     timeout-minutes: 15
     concurrency:
       group: >-
@@ -202,7 +205,7 @@ jobs:
   pr-template-check:
     name: PR template validation
     if: github.event_name == 'pull_request'
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: *runs_on_ci_light
     timeout-minutes: 15
     permissions:
       contents: read
@@ -227,34 +230,11 @@ jobs:
           bash scripts/tracked/validate-pr-template.sh /tmp/pr-body-live.txt
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
-  pr-template-check-hosted:
-    name: PR template validation (GitHub-hosted fallback)
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: read
-      pull-requests: read
-    steps:
-      - uses: *checkout_centraliced_versioning # v7.0.1
-      - name: GitHub-hosted fallback notice
-        run: |
-          echo "::notice::Running PR template validation on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      - name: Validate PR template completeness
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_DRAFT: ${{ github.event.pull_request.draft }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-        run: |
-          set -euo pipefail
-          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body -q .body > /tmp/pr-body-live.txt
-          bash scripts/tracked/validate-pr-template.sh /tmp/pr-body-live.txt
   pr-tracking-metadata-check:
     name: PR tracking metadata (labels/milestone/project)
     if: github.event_name == 'pull_request'
     needs: validate-compose
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: *runs_on_ci_light
     timeout-minutes: 15
     permissions:
       contents: read
@@ -293,58 +273,11 @@ jobs:
           project-automation-pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
-  pr-tracking-metadata-check-hosted:
-    name: PR tracking metadata (labels/milestone/project) (GitHub-hosted fallback)
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: read
-      pull-requests: read
-    steps:
-      - uses: *checkout_centraliced_versioning # v7.0.1
-      - name: Select build-tools image
-        env:
-          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
-        run: |
-          set -euo pipefail
-          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
-      - name: GitHub-hosted fallback notice
-        run: |
-          echo "::notice::Running PR tracking metadata check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      - name: Auto-assign Dependabot PR milestone
-        if: github.event.pull_request.user.login == 'dependabot[bot]'
-        env:
-          GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPO: ${{ github.repository }}
-          DEPENDABOT_MILESTONE_NUMBER: 11
-        run: |
-          set -euo pipefail
-          if [ -z "$GH_TOKEN" ]; then
-            echo "::warning::PROJECT_AUTOMATION_PAT is not configured -- cannot auto-assign a milestone to this Dependabot PR. pr-tracking-metadata-check-hosted will fail below (No milestone set) until a maintainer sets one by hand."
-            exit 0
-          fi
-          current_milestone="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json milestone -q '.milestone.number // empty')"
-          if [ -n "$current_milestone" ]; then
-            echo "Milestone already set (#$current_milestone) -- leaving it as-is."
-            exit 0
-          fi
-          if ! gh api -X PATCH "repos/$REPO/issues/$PR_NUMBER" -F milestone="$DEPENDABOT_MILESTONE_NUMBER"; then
-            echo "::warning::Failed to auto-assign milestone #$DEPENDABOT_MILESTONE_NUMBER to PR #$PR_NUMBER via the GitHub API."
-            exit 0
-          fi
-          echo "Assigned milestone #$DEPENDABOT_MILESTONE_NUMBER (LanCache-NG Roadmap) to PR #$PR_NUMBER."
-      - uses: ./.github/actions/pr-tracking-metadata-fetch-and-validate
-        with:
-          build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
-          project-automation-pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
   pr-title-convention-check:
     name: PR title Conventional-Commit lint
     if: github.event_name == 'pull_request'
     needs: validate-compose
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: *runs_on_ci_light
     timeout-minutes: 15
     permissions:
       contents: read
@@ -360,80 +293,10 @@ jobs:
           pr-title-lint-mode: ${{ vars.PR_TITLE_LINT_MODE }}
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
-  pr-title-convention-check-hosted:
-    name: PR title Conventional-Commit lint (GitHub-hosted fallback)
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: read
-      pull-requests: read
-    steps:
-      - uses: *checkout_centraliced_versioning # v7.0.1
-      - name: Select build-tools image
-        env:
-          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
-        run: |
-          set -euo pipefail
-          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
-      - name: GitHub-hosted fallback notice
-        run: |
-          echo "::notice::Running PR title convention check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      - uses: ./.github/actions/pr-title-convention-check
-        with:
-          build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
-          pr-title-lint-mode: ${{ vars.PR_TITLE_LINT_MODE }}
-  file-headers-hosted:
-    name: file purpose headers (GitHub-hosted fallback)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: *checkout_centraliced_versioning # v7.0.1
-      - name: Select immutable build-tools image
-        run: |
-          set -euo pipefail
-          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
-      - name: GitHub-hosted fallback notice
-        run: |
-          echo "::notice::Running file-headers check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      - uses: ./.github/actions/file-headers-check
-        with:
-          build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
-          diff-base-sha: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
-          diff-base-ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || '' }}
-      - name: Check SPDX header on this PR's changed files (AG-HDR-008)
-        if: github.event_name == 'pull_request'
-        env:
-          SPDX_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          SPDX_BASE_REF: ${{ github.event.pull_request.base.ref }}
-        run: |
-          set -euo pipefail
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/source:ro" \
-            -w /tmp \
-            -e SPDX_BASE_SHA \
-            -e SPDX_BASE_REF \
-            -e GITHUB_SHA \
-            "$BUILD_TOOLS_IMAGE" \
-            timeout --kill-after=30 --signal=KILL 300 bash -c \
-              'cp -a /source /tmp/work && cd /tmp/work && bash scripts/tracked/check-pr-diff-file-headers.sh'
-  compose-healthchecks-hosted:
-    name: compose healthchecks (GitHub-hosted fallback)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: *checkout_centraliced_versioning # v7.0.1
-      - name: GitHub-hosted fallback notice
-        run: |
-          echo "::notice::Running compose-healthchecks check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      - uses: ./.github/actions/compose-healthchecks-check
   line-endings:
     name: line endings
     needs: validate-compose
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: *runs_on_ci_light
     timeout-minutes: 25
     concurrency:
       group: >-
@@ -521,21 +384,10 @@ jobs:
           || true
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
-  line-endings-hosted:
-    name: line endings (GitHub-hosted fallback)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: *checkout_centraliced_versioning # v7.0.1
-      - name: GitHub-hosted fallback notice
-        run: |
-          echo "::notice::Running line-endings check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      - name: Check tracked files use Unix (LF) line endings
-        run: bash scripts/tracked/check-line-endings.sh
   language-policy:
     name: language policy
     needs: validate-compose
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: *runs_on_ci_light
     timeout-minutes: 15
     concurrency:
       group: >-
@@ -562,17 +414,6 @@ jobs:
             bash -lc 'set -euo pipefail; bash scripts/tracked/check-language-policy.sh'
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
-  language-policy-hosted:
-    name: language policy (GitHub-hosted fallback)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: *checkout_centraliced_versioning # v7.0.1
-      - name: GitHub-hosted fallback notice
-        run: |
-          echo "::notice::Running language-policy check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      - name: Check for banned-language source files (AG-REL-001)
-        run: bash scripts/tracked/check-language-policy.sh
   shellcheck:
     needs: [validate-compose, detect-changes]
     if: >-
@@ -584,7 +425,7 @@ jobs:
           needs['detect-changes'].outputs.docs_only != 'true'
         )
       }}
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: *runs_on_ci_light
     timeout-minutes: 25
     concurrency:
       group: >-
@@ -607,26 +448,6 @@ jobs:
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
-  shellcheck-hosted:
-    name: shellcheck (GitHub-hosted fallback)
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    steps:
-      - uses: *checkout_centraliced_versioning # v7.0.1
-      - name: Select build-tools image
-        env:
-          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
-        run: |
-          set -euo pipefail
-          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
-      - name: GitHub-hosted fallback notice
-        run: |
-          echo "::notice::Running ShellCheck and ActionLint on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      - uses: ./.github/actions/shellcheck-and-standing-guards
-        timeout-minutes: 15
-        with:
-          build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
   validate-compose:
     runs-on: [self-hosted, linux, lancache, lancache-light]
     timeout-minutes: 30
@@ -2861,6 +2682,9 @@ jobs:
         if: always()
   watchdog_test:
     name: test (watchdog)
+    # What: watchdog test on self-hosted heavy tier
+    # Why: runs cargo test (AG-CI-002), not cheap lint
+    # From: Issue #1095
     needs: [validate-compose, watchdog_rust_quality, detect-changes]
     if: >-
       ${{
@@ -2926,19 +2750,6 @@ jobs:
           command: cargo test --locked --manifest-path services/watchdog/Cargo.toml
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
-  watchdog_test-hosted:
-    name: test (watchdog) (GitHub-hosted fallback)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: *checkout_centraliced_versioning # v7.0.1
-      - name: GitHub-hosted fallback notice
-        run: |
-          echo "::notice::Running watchdog syntax check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      - name: test (watchdog)
-        run: |
-          bash -n services/watchdog/watchdog.sh
-          test -x services/watchdog/watchdog.sh
   cargo_audit:
     name: cargo-audit (workspace)
     needs: [validate-compose, detect-changes]
