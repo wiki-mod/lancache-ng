@@ -161,7 +161,7 @@ echo "UI accepted the record add (303 redirect)."
 
 echo "== Verifying the record reached PowerDNS via NATS -> nats-subscriber =="
 
-# What: polls up to $3 times (default 10) instead of a fixed sleep.
+# What: polls $3 times (default 10), not a fixed sleep
 # Why: secondary AXFR bounded by SOA refresh (~30s, #1837)
 # From: Issue #1164 | PR #1667
 verify_record_resolves() {
@@ -186,11 +186,11 @@ verify_record_resolves() {
     done
     echo "::error::$label never resolved $test_fqdn to $test_content after $max_attempts attempts (last saw: '${resolved:-<empty>}')." >&2
     # What: dumps dns-standard/dns-ssl/nats logs on failure.
-    # Why: teardown runs before logs would otherwise be seen.
+    # Why: teardown runs before logs would be seen.
     # From: PR #1775
     "${compose[@]}" logs --no-color --tail=200 dns-standard dns-ssl nats >&2 || true
-    # What: proves whether ALSO-NOTIFY reached dns-ssl's real IP.
-    # Why: a notify-call success doesn't prove a real target.
+    # What: proves ALSO-NOTIFY reached dns-ssl's IP.
+    # Why: notify success doesn't prove a real target.
     # From: PR #1775
     "${compose[@]}" exec -T dns-standard sh -c \
         'pdnsutil --config-dir=/etc/pdns/auth get-meta lan ALSO-NOTIFY' >&2 || true
