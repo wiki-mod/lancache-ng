@@ -11,7 +11,7 @@
 # This is an ADDITIONAL, OPTIONAL local convenience layer, not the actual
 # enforcement -- the real, non-bypassable gate is the "Check pinned GitHub
 # Actions for deprecated Node runtimes (#801)" step wired into
-# build-push.yml's shellcheck/shellcheck-hosted jobs, which run the exact
+# build-push.yml's shellcheck job, which runs the exact
 # same script inside the pinned build-tools container (per AG-VAL-016). This
 # hook deliberately calls the script with whatever curl/bash happen to be on
 # the local machine instead of the containerized toolchain: it is an opt-in

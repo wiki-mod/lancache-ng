@@ -2,14 +2,13 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Runs the diff-scoped half of the file-headers/file-headers-hosted jobs'
+# Runs the diff-scoped half of the file-headers job's
 # SPDX check (AG-HDR-008): fetches the PR's base branch and exact base SHA,
 # computes the PR's own changed-file list against HEAD, and runs
 # scripts/tracked/check-file-headers.sh against exactly that list. Factored out of
-# build-push.yml's own inline `run:` block (previously duplicated verbatim
-# across the self-hosted and GitHub-hosted-fallback jobs) so both mirrors
-# call one real, bats-testable script instead of two copies of the same
-# multi-line shell drifting apart, and so this logic runs inside the pinned
+# build-push.yml's own inline `run:` block into one real, bats-testable
+# script instead of an inline copy that could drift, and so this logic runs
+# inside the pinned
 # build-tools image rather than depending on runner-local git/Bash/grep --
 # a self-hosted runner with missing or stale host tooling could otherwise
 # fail this check or silently disagree with the project's own toolchain.
