@@ -12,13 +12,13 @@ bats_require_minimum_version 1.5.0
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
 
-    # What: Source domain-validation library for _is_valid_domain
-    # Why: Generate_rpz_zone needs it for pattern audit (#822)
+    # What: Load domain-validation library
+    # Why: Required for pattern audit (#822)
     # shellcheck source=scripts/lib/domain-validation.sh
     source "$repo_root/scripts/lib/domain-validation.sh"
 
-    # What: Extract real _dns_generate_rpz_zone from entrypoint.sh
-    # Why: Eliminate drift vs. independently-maintained copy (bug-hunt #8)
+    # What: Extract _dns_generate_rpz_zone function
+    # Why: Eliminate drift vs. independent copy
     # shellcheck source=tests/bats/helpers/dns-zone-helpers.sh
     source "$BATS_TEST_DIRNAME/helpers/dns-zone-helpers.sh"
     load_dns_zone_helpers "$repo_root" "$BATS_TEST_TMPDIR/dns-zone-helpers-extracted.sh"
