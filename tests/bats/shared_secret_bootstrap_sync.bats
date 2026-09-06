@@ -23,9 +23,14 @@ setup() {
 # extract_canonical_functions
 # Prints scripts/lib/shared-secret-bootstrap.sh from its first function's doc
 # comment to EOF, stripping the file-level header -- the same content each
-# entrypoint embeds between its BEGIN/END markers.
+# entrypoint embeds between its BEGIN/END markers. The anchor matches the
+# function name anywhere on a comment line (not only right after "# ") so an
+# AG-CODE-012 "What:"/"Why:" reformat of that specific doc comment does not
+# silently break the anchor and start capturing zero lines (issue #858: this
+# happened for real when 620c982f reformatted exactly this line in dns's
+# embedded copy without updating this anchor).
 extract_canonical_functions() {
-    awk '/^# lancache_shared_secret_dir/ { capture = 1 } capture { print }' "$canonical_file"
+    awk '/^#.*lancache_shared_secret_dir/ { capture = 1 } capture { print }' "$canonical_file"
 }
 
 # extract_embedded_block <entrypoint_file>

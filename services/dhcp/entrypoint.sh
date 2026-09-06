@@ -15,10 +15,8 @@ set -e
 # function definitions (guarded by tests/bats/shared_secret_bootstrap_sync.bats):
 # this image builds from services/dhcp/ alone with no shared-file build context.
 # BEGIN shared-secret-bootstrap library (scripts/lib/shared-secret-bootstrap.sh)
-# lancache_shared_secret_dir
-# Directory holding the cross-container shared secrets, mounted from the
-# `shared-secrets` named volume into every container that must agree on a
-# generated value. Overridable for tests via LANCACHE_SHARED_SECRET_DIR.
+# What: lancache_shared_secret_dir — shared secret location
+# Why: Cross-container alignment via shared-secrets volume
 lancache_shared_secret_dir() {
     printf '%s' "${LANCACHE_SHARED_SECRET_DIR:-/var/lib/lancache-secrets}"
 }
@@ -127,8 +125,8 @@ resolve_shared_secret() {
     _rss_dir="$(lancache_shared_secret_dir)"
     _rss_file="${_rss_dir}/${_rss_name}"
 
-    # What: re-checks for a conflict right before returning.
-    # Why: closes the TOCTOU window a concurrent writer opens.
+    # What: Re-check for conflicts at return point
+    # Why: Reduce TOCTOU race window with writers
     # From: PR #1775
     _rss_conflict_now() {
         [ -n "$_rss_cur" ] || return 1
@@ -155,8 +153,8 @@ resolve_shared_secret() {
         fi
     fi
 
-    # What: returns the caller's value unpersisted on write fail.
-    # Why: safe only because no on-disk value could disagree yet.
+    # What: Return value unpersisted on write failure
+    # Why: No on-disk value can disagree at this point
     # From: PR #1775
     _rss_tmp="$(mktemp "${_rss_dir}/.secret.XXXXXX" 2>/dev/null)" || {
         if [ -n "$_rss_cur" ] && [ -z "$_rss_require_persist" ] && ! _rss_conflict_now; then
@@ -193,8 +191,8 @@ resolve_shared_secret() {
 }
 # END shared-secret-bootstrap library
 
-# What: keep log dirs readable to gid 10001 across volume reopen.
-# Why: root-created files on volumes revert to root-only readable.
+# What: keeps log dirs readable by gid 10001 on reopen.
+# Why: root-created files revert to root-only on volumes.
 # From: Issue #1427 | PR #1670
 prepare_log_dir_for_shared_reader() {
     local dir="$1"
@@ -280,7 +278,7 @@ DDNS_TSIG_KEY="$(resolve_shared_secret ddns-tsig-key "$_ddns_tsig_key_cfg" lanca
 # (confirmed empirically) with no error on either side.
 : "${DHCP_DDNS_PORT:=5300}"
 # What: validate JSON port before rendering Kea D2 config.
-# Why: typo produces invalid JSON; DDNS daemon fails silently.
+# Why: a typo yields invalid JSON; DDNS daemon fails silent.
 # From: Issue #1164 | PR #1667
 case "$DHCP_DDNS_PORT" in
     "" | *[!0-9]*)
@@ -894,8 +892,8 @@ if [ "$SNAPSHOT_FOUND" -eq 0 ] && ! _kea_validate_dhcp4_config "$KEAD_CONF_FILE"
     # DHCP_PID is intentionally not set so the trap below doesn't try to kill it
     # and the final `wait` at the bottom keeps the container alive
 else
-    # What: constrains daemon-created Kea log files to 0640 mode.
-    # Why: gid 10001 can read; world-readable no longer needed.
+    # What: constrains daemon Kea logs to 0640 mode.
+    # Why: gid 10001 can read; world-readable not needed.
     # From: Issue #1427 | PR #1670
     umask 0027
     kea-dhcp4 -c /var/lib/kea/kea-dhcp4.conf &
@@ -903,7 +901,7 @@ else
 fi
 
 echo "Starting Kea Control Agent on $KEA_CTRL_HOST:8000..."
-# What: constrains daemon-created control-agent log files to 0640.
+# What: constrains control-agent log files to mode 0640.
 # Why: gid 10001 can read; world-readable no longer needed.
 # From: Issue #1427 | PR #1670
 umask 0027
@@ -912,8 +910,8 @@ AGENT_PID=$!
 
 if command -v kea-dhcp-ddns &> /dev/null; then
     echo "Starting Kea DHCP DDNS server..."
-    # What: constrains daemon-created Kea DDNS log files to 0640.
-    # Why: gid 10001 can read; world-readable no longer needed.
+    # What: constrains Kea DDNS log files to mode 0640.
+    # Why: gid 10001 can read; world-readable not needed.
     # From: Issue #1427 | PR #1670
     umask 0027
     kea-dhcp-ddns -c /var/lib/kea/kea-dhcp-ddns.conf &

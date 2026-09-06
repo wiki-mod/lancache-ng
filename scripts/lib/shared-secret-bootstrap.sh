@@ -38,10 +38,8 @@
 # compose command (it has no service image/entrypoint of its own, and its
 # BusyBox shell escapes `$` as `$$` in YAML, so it cannot be byte-identical).
 
-# lancache_shared_secret_dir
-# Directory holding the cross-container shared secrets, mounted from the
-# `shared-secrets` named volume into every container that must agree on a
-# generated value. Overridable for tests via LANCACHE_SHARED_SECRET_DIR.
+# What: lancache_shared_secret_dir — shared secret location
+# Why: Cross-container alignment via shared-secrets volume
 lancache_shared_secret_dir() {
     printf '%s' "${LANCACHE_SHARED_SECRET_DIR:-/var/lib/lancache-secrets}"
 }
@@ -150,8 +148,8 @@ resolve_shared_secret() {
     _rss_dir="$(lancache_shared_secret_dir)"
     _rss_file="${_rss_dir}/${_rss_name}"
 
-    # What: re-checks for a conflict right before returning.
-    # Why: closes the TOCTOU window a concurrent writer opens.
+    # What: Re-check for conflicts at return point
+    # Why: Reduce TOCTOU race window with writers
     # From: PR #1775
     _rss_conflict_now() {
         [ -n "$_rss_cur" ] || return 1
@@ -178,8 +176,8 @@ resolve_shared_secret() {
         fi
     fi
 
-    # What: returns the caller's value unpersisted on write fail.
-    # Why: safe only because no on-disk value could disagree yet.
+    # What: Return value unpersisted on write failure
+    # Why: No on-disk value can disagree at this point
     # From: PR #1775
     _rss_tmp="$(mktemp "${_rss_dir}/.secret.XXXXXX" 2>/dev/null)" || {
         if [ -n "$_rss_cur" ] && [ -z "$_rss_require_persist" ] && ! _rss_conflict_now; then
