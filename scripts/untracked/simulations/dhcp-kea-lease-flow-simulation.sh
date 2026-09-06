@@ -143,6 +143,14 @@ source "$repo_root/scripts/lib/dhcp-lease-parse.sh"
 source "$repo_root/scripts/lib/reserve-validation-subnet.sh"
 
 client_tool_image="${DHCP_LEASE_FLOW_CLIENT_IMAGE:?DHCP_LEASE_FLOW_CLIENT_IMAGE is required (an image providing dhclient or udhcpc/busybox, e.g. the build-tools image)}"
+# What: requires PROJECT_CARGO_LTO/CODEGENUNIT, no default.
+# Why: mirrors Dockerfile's fail-closed cargo profile check.
+# From: Issue #1095
+project_cargo_lto="${PROJECT_CARGO_LTO:?PROJECT_CARGO_LTO is required (no in-file/script default; Issue #1095, PR #1796 review 5109560874)}"
+case "$project_cargo_lto" in off|thin|fat|true|false) ;; *) echo "PROJECT_CARGO_LTO must be one of: off, thin, fat, true, false (got '$project_cargo_lto')" >&2; exit 1;; esac
+project_cargo_codegenunit="${PROJECT_CARGO_CODEGENUNIT:?PROJECT_CARGO_CODEGENUNIT is required (no in-file/script default; Issue #1095, PR #1796 review 5109560874)}"
+case "$project_cargo_codegenunit" in ''|*[!0-9]*) echo "PROJECT_CARGO_CODEGENUNIT must be a positive integer (got '$project_cargo_codegenunit')" >&2; exit 1;; esac
+[ "$project_cargo_codegenunit" -gt 0 ] || { echo "PROJECT_CARGO_CODEGENUNIT must be greater than zero" >&2; exit 1; }
 
 work_dir="$repo_root/.dhcp-kea-lease-flow-simulation-tmp"
 rm -rf "$work_dir"
@@ -502,7 +510,13 @@ echo "== Building the PowerDNS image from this checkout's services/dns (issue #7
 # because it already IS the resolved build-tools image -- its name reflects
 # only its original (client-container) use above, from before this DDNS
 # verification block existed.
-docker build -q -t "$dns_image_tag" --build-arg "BUILD_TOOLS_IMAGE=${client_tool_image}" --build-context "shared-scripts=$repo_root/scripts/lib" services/dns >/dev/null
+# What: builds from repo root, not services/dns, via -f.
+# Why: Dockerfile COPYs cross-service workspace Cargo files.
+docker build -q -t "$dns_image_tag" -f services/dns/Dockerfile \
+    --build-arg "BUILD_TOOLS_IMAGE=${client_tool_image}" \
+    --build-arg "PROJECT_CARGO_LTO=${project_cargo_lto}" \
+    --build-arg "PROJECT_CARGO_CODEGENUNIT=${project_cargo_codegenunit}" \
+    --build-context "shared-scripts=$repo_root/scripts/lib" "$repo_root" >/dev/null
 
 echo "== Starting a real PowerDNS container on the isolated network (issue #706) =="
 # No extra --cap-add here: unlike the Kea container below, services/dns/
