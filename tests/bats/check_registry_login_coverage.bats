@@ -283,6 +283,10 @@ EOF
     run "$script" "$real_repo_root"
     [ "$status" -eq 0 ]
     [[ "$output" == *"OK"* ]]
+    # What: asserts a non-zero real-tree build-context count.
+    # Why: AG-INT-002 -- a broken parser must stay detectable; a
+    # silent "0 examined" would still print OK without this.
+    [[ "$output" != *"0 docker build invocation(s) examined"* ]]
 }
 
 # --- Build-context coverage (folded into this same guard, AG-CODE-013) ----
