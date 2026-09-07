@@ -564,6 +564,276 @@ ci_impact() {
   done
 }
 
+# === CLUSTER 4: ACCEPTANCE LEDGER + ATTESTATION BOUNDARY (Issue #1095) ===
+
+# What: Named readback verdict codes, idempotent re-source.
+# Why: readonly re-declaration would error on a re-source.
+# From: Issue #1095
+if [[ -z "${CI_ARTIFACT_READBACK_SUCCESS:-}" ]]; then
+  readonly CI_ARTIFACT_READBACK_SUCCESS=0
+  readonly CI_ARTIFACT_READBACK_MISMATCH=1
+  readonly CI_ARTIFACT_READBACK_NOT_FOUND=2
+  readonly CI_ARTIFACT_READBACK_UNKNOWN=3
+fi
+
+# What: Named ledger query codes, idempotent on re-source.
+# Why: readonly re-declaration would error on a re-source.
+# From: Issue #1095
+if [[ -z "${CI_LEDGER_PRESENT:-}" ]]; then
+  readonly CI_LEDGER_PRESENT=0
+  readonly CI_LEDGER_ABSENT=1
+  readonly CI_LEDGER_UNKNOWN=2
+fi
+
+# ci_post_build_readback <expected_digest> <ref>
+#
+# What: doc 23 readback; digest vs expected value.
+# Why: every non-match outcome fails closed, no rebuild.
+# From: Issue #1095
+ci_post_build_readback() {
+  local expected="${1:?ci_post_build_readback: expected_digest is required}"
+  local ref="${2:?ci_post_build_readback: ref is required}"
+  if ! ci_require_digest "$expected"; then
+    printf 'ci_post_build_readback: bad expected_digest: %s\n' \
+      "$expected" >&2
+    return "$CI_ARTIFACT_READBACK_UNKNOWN"
+  fi
+  local observed status
+  # What: Capture status via if, not a bare assignment.
+  # Why: set -e would abort before we read a nonzero code.
+  # From: Issue #1095
+  if observed="$(ci_resolve_ref_state "$ref")"; then
+    status="$CI_STATE_PRESENT"
+  else
+    status=$?
+  fi
+  case "$status" in
+    "$CI_STATE_PRESENT")
+      if [[ "$observed" == "$expected" ]]; then
+        printf 'SUCCESS\n'
+        return "$CI_ARTIFACT_READBACK_SUCCESS"
+      fi
+      # What: doc 23.3; wrong digest is MISMATCH.
+      # Why: a rebuild could paper over real corruption.
+      # From: Issue #1095
+      printf 'MISMATCH\n'
+      return "$CI_ARTIFACT_READBACK_MISMATCH"
+      ;;
+    "$CI_STATE_ABSENT")
+      # What: doc 23.2; missing publish, no rebuild.
+      # Why: a publish/index failure, not a build failure.
+      # From: Issue #1095
+      printf 'NOT_FOUND\n'
+      return "$CI_ARTIFACT_READBACK_NOT_FOUND"
+      ;;
+    *)
+      printf 'UNKNOWN\n'
+      return "$CI_ARTIFACT_READBACK_UNKNOWN"
+      ;;
+  esac
+}
+
+# ci_attestation_state
+#
+# What: v1 attestation probe; always reports unverifiable.
+# Why: pinned gh 2.46.0 has no `attestation` subcommand yet.
+# From: Issue #1095
+ci_attestation_state() {
+  printf 'unverifiable\n'
+  return 0
+}
+
+# ci_artifact_admission <readback_verdict> <attestation_state>
+#
+# What: doc 24.2 ARTIFACT ACK; digest gate only, v1.
+# Why: ACCEPTED here means digest-verified, NOT attested.
+# From: Issue #1095
+ci_artifact_admission() {
+  local readback="${1:?ci_artifact_admission: readback_verdict is required}"
+  local attestation="${2:?ci_artifact_admission: attestation_state is required}"
+  case "$attestation" in
+    verified|absent_confirmed|unverifiable) : ;;
+    *)
+      # What: unrecognized attestation fails closed.
+      # Why: doc 2.3; garbage input is never ACCEPTED.
+      # From: Issue #1095
+      printf 'verdict=BLOCK attestation=%s\n' "$attestation"
+      return 1
+      ;;
+  esac
+  case "$readback" in
+    SUCCESS)
+      printf 'verdict=ACCEPTED attestation=%s\n' "$attestation"
+      return 0
+      ;;
+    MISMATCH)
+      # What: doc 25; REJECTED never becomes reusable.
+      # Why: a wrong digest is permanent, not retryable.
+      # From: Issue #1095
+      printf 'verdict=REJECTED attestation=%s\n' "$attestation"
+      return 1
+      ;;
+    NOT_FOUND|UNKNOWN)
+      printf 'verdict=BLOCK attestation=%s\n' "$attestation"
+      return 1
+      ;;
+    *)
+      # What: unrecognized readback verdict fails closed.
+      # Why: doc 2.3; garbage must never reach ACCEPTED.
+      # From: Issue #1095
+      printf 'verdict=BLOCK attestation=%s\n' "$attestation"
+      return 1
+      ;;
+  esac
+}
+
+# ci_ledger_encode_digest <digest>
+#
+# What: sha256:<hex> -> sha256-<hex> ref path form.
+# Why: git refs forbid ':'; keeps full 64 hex (doc 15).
+# From: Issue #1095
+ci_ledger_encode_digest() {
+  local digest="${1:?ci_ledger_encode_digest: digest is required}"
+  ci_require_digest "$digest" || return 1
+  printf 'sha256-%s\n' "${digest#sha256:}"
+}
+
+# ci_ledger_decode_digest <encoded>
+#
+# What: Inverse of ci_ledger_encode_digest; round-trip.
+# Why: A malformed encoded form fails closed, no guess.
+# From: Issue #1095
+ci_ledger_decode_digest() {
+  local encoded="${1:?ci_ledger_decode_digest: encoded is required}"
+  if [[ ! "$encoded" =~ ^sha256-[0-9a-f]{64}$ ]]; then
+    printf 'ci_ledger_decode_digest: not sha256-<64hex>: %s\n' \
+      "$encoded" >&2
+    return 1
+  fi
+  printf 'sha256:%s\n' "${encoded#sha256-}"
+}
+
+# ci_ledger_ref <service> <platform> <build_identity>
+#
+# What: doc 26.1 ledger key -> one git-ref-CAS ref path.
+# Why: One ref per (service,platform,build_identity) triple.
+# From: Issue #1095
+ci_ledger_ref() {
+  local service="${1:?ci_ledger_ref: service is required}"
+  local platform="${2:?ci_ledger_ref: platform is required}"
+  local build_identity="${3:?ci_ledger_ref: build_identity is required}"
+  ci_known_service "$service" || {
+    printf 'ci_ledger_ref: unknown service: %s\n' "$service" >&2
+    return 1
+  }
+  local arch
+  case "$platform" in
+    linux/amd64) arch=amd64 ;;
+    linux/arm64) arch=arm64 ;;
+    *)
+      printf 'ci_ledger_ref: bad platform: %s\n' "$platform" >&2
+      return 1
+      ;;
+  esac
+  local encoded
+  encoded="$(ci_ledger_encode_digest "$build_identity")" || return 1
+  printf 'refs/ci-acceptance-ledger/%s/%s/%s\n' \
+    "$service" "$arch" "$encoded"
+}
+
+# ci_validate_ledger_record <file>
+#
+# What: Fail-closed jq gate for a ledger record.
+# Why: verdict/attestation always explicit, never BUILD.
+# From: Issue #1095
+ci_validate_ledger_record() {
+  local file="${1:?ci_validate_ledger_record: file is required}"
+  jq -e '
+    try (
+      .schema == "ci-acceptance-ledger-record/v1"
+      and (.service | type == "string" and length > 0)
+      and (.platform == "linux/amd64" or .platform == "linux/arm64")
+      and (.build_identity | test("^sha256:[0-9a-f]{64}$"))
+      and (.artifact_digest | test("^sha256:[0-9a-f]{64}$"))
+      and (.source_sha | test("^[0-9a-f]{40}$"))
+      and (
+        .verdict == "ACCEPTED" or .verdict == "REJECTED"
+        or .verdict == "BLOCK"
+      )
+      and (
+        .attestation == "verified" or .attestation == "absent_confirmed"
+        or .attestation == "unverifiable"
+      )
+      and (.recorded_at | type == "number" and . > 0)
+    ) catch false
+  ' "$file" >/dev/null
+}
+
+# ci_ensure_ledger_lib
+#
+# What: Sources the shared git-ref-CAS lock primitives.
+# Why: Reuse promote_lock_remote_sha; no CAS rebuild.
+# From: Issue #1095
+ci_ensure_ledger_lib() {
+  declare -F promote_lock_remote_sha >/dev/null && return 0
+  local dir
+  dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  # shellcheck source=scripts/lib/promote-lock.sh
+  source "$dir/../lib/promote-lock.sh"
+}
+
+# ci_ledger_read <remote> <service> <platform> <build_identity>
+#
+# What: doc 26.1 read-only ledger query; no writer yet.
+# Why: unqueryable is never absent (doc 26).
+# From: Issue #1095
+ci_ledger_read() {
+  local remote="${1:?ci_ledger_read: remote is required}"
+  local service="${2:?ci_ledger_read: service is required}"
+  local platform="${3:?ci_ledger_read: platform is required}"
+  local build_identity="${4:?ci_ledger_read: build_identity is required}"
+  ci_ensure_ledger_lib
+  local ref
+  ref="$(ci_ledger_ref "$service" "$platform" "$build_identity")" \
+    || return "$CI_LEDGER_UNKNOWN"
+  local status
+  # What: Discards the SHA; only presence matters here.
+  # Why: A read-only v1 never needs it for a lease/takeover.
+  # From: Issue #1095
+  if promote_lock_remote_sha "$remote" "$ref" >/dev/null; then
+    status=0
+  else
+    status=$?
+  fi
+  if (( status == 1 )); then
+    return "$CI_LEDGER_ABSENT"
+  fi
+  if (( status != 0 )); then
+    # What: a query failure is UNKNOWN, not absence.
+    # Why: doc 26; unknown must never become BUILD=ACK.
+    # From: Issue #1095
+    return "$CI_LEDGER_UNKNOWN"
+  fi
+  if ! git fetch --quiet --depth=1 "$remote" "$ref" >/dev/null 2>&1; then
+    return "$CI_LEDGER_UNKNOWN"
+  fi
+  local payload tmp_file
+  payload="$(git log -1 --format=%s FETCH_HEAD 2>/dev/null)"
+  tmp_file="$(mktemp)" || return "$CI_LEDGER_UNKNOWN"
+  printf '%s' "$payload" > "$tmp_file"
+  # What: fetches, then validates before trusting it.
+  # Why: a corrupted ref must never read as ACCEPTED.
+  # From: Issue #1095
+  if ! ci_validate_ledger_record "$tmp_file"; then
+    rm -f "$tmp_file"
+    printf 'ci_ledger_read: malformed record at %s\n' "$ref" >&2
+    return "$CI_LEDGER_UNKNOWN"
+  fi
+  rm -f "$tmp_file"
+  printf '%s\n' "$payload"
+  return "$CI_LEDGER_PRESENT"
+}
+
 ci_usage() {
   cat >&2 <<'EOF'
 usage: ci.sh <command> [args]
@@ -583,6 +853,17 @@ commands:
     aborts on the (non-error) unchanged case -- guard the call
   service-impact <base_sha> <service> [<path>...]
   impact <base_sha> [<path>...]
+  post-build-readback <expected_digest> <ref>
+    exit 0=SUCCESS 1=MISMATCH 2=NOT_FOUND 3=UNKNOWN; all 4 fail
+    closed, none of them may ever trigger a rebuild
+  attestation-state
+  artifact-admission <readback_verdict> <attestation_state>
+  ledger-encode-digest <digest>
+  ledger-decode-digest <encoded>
+  ledger-ref <service> <platform> <build_identity>
+  validate-ledger-record <file>
+  ledger-read <remote> <service> <platform> <build_identity>
+    exit 0=PRESENT 1=ABSENT 2=UNKNOWN; read-only, v1 has no write
 EOF
 }
 
@@ -609,6 +890,14 @@ ci_main() {
     semantic-changed) ci_semantic_changed "$@" ;;
     service-impact) ci_service_impact "$@" ;;
     impact) ci_impact "$@" ;;
+    post-build-readback) ci_post_build_readback "$@" ;;
+    attestation-state) ci_attestation_state "$@" ;;
+    artifact-admission) ci_artifact_admission "$@" ;;
+    ledger-encode-digest) ci_ledger_encode_digest "$@" ;;
+    ledger-decode-digest) ci_ledger_decode_digest "$@" ;;
+    ledger-ref) ci_ledger_ref "$@" ;;
+    validate-ledger-record) ci_validate_ledger_record "$@" ;;
+    ledger-read) ci_ledger_read "$@" ;;
     ""|-h|--help) ci_usage; return 2 ;;
     *)
       printf 'ci.sh: unknown command: %s\n' "$cmd" >&2

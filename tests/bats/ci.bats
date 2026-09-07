@@ -12,6 +12,11 @@ setup() {
   repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
   # shellcheck source=scripts/ci/ci.sh
   source "$repo_root/scripts/ci/ci.sh"
+  # What: Ledger tests write fixture records directly.
+  # Why: ci_ledger_read only lazy-loads it on demand.
+  # From: Issue #1095
+  # shellcheck source=scripts/lib/promote-lock.sh
+  source "$repo_root/scripts/lib/promote-lock.sh"
 
   sha40="0123456789abcdef0123456789abcdef01234567"
   a64="$(printf 'a%.0s' {1..64})"
@@ -994,4 +999,359 @@ init_impact_repo() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"proxy=NOOP"* ]]
   [[ "$output" == *"netdata=NOOP"* ]]
+}
+
+# === CLUSTER 4: ACCEPTANCE LEDGER + ATTESTATION BOUNDARY (Issue #1095) ===
+
+# What: A bare repo + clone, promote_lock.bats topology.
+# Why: only plain git calls; a bare repo is faithful.
+# From: Issue #1095
+init_ledger_repo() {
+  local bare="$BATS_TEST_TMPDIR/ledger-bare-$RANDOM.git"
+  local clone="$BATS_TEST_TMPDIR/ledger-clone-$RANDOM"
+  git init --quiet --bare "$bare" >/dev/null
+  git clone --quiet "$bare" "$clone" >/dev/null
+  printf '%s' "$clone"
+}
+
+# What: Builds one compact, single-line record fixture.
+# Why: A commit message payload must have no embedded LF.
+# From: Issue #1095
+ledger_record_json() {
+  local service="$1" platform="$2" build_identity="$3"
+  local artifact_digest="$4" verdict="$5" attestation="$6"
+  jq -nc --arg svc "$service" --arg plat "$platform" \
+    --arg bid "$build_identity" --arg adg "$artifact_digest" \
+    --arg sha "$sha40" --arg verdict "$verdict" --arg att "$attestation" '{
+      schema: "ci-acceptance-ledger-record/v1", service: $svc,
+      platform: $plat, build_identity: $bid, artifact_digest: $adg,
+      source_sha: $sha, verdict: $verdict, attestation: $att,
+      recorded_at: 1700000000
+    }'
+}
+
+# What: Pushes one raw ledger fixture record by hand.
+# Why: v1 has no writer; tests forge CAS state directly.
+# From: Issue #1095
+push_ledger_fixture() {
+  local clone="$1" ref="$2" message="$3"
+  local commit_sha
+  commit_sha="$(cd "$clone" && promote_lock_create_commit "$message")"
+  (cd "$clone" && git push --quiet origin "${commit_sha}:${ref}")
+}
+
+@test "ci_post_build_readback: SUCCESS when the registry digest matches expected" {
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" \
+  STUB_MODE=present STUB_DIGEST="sha256:$a64" \
+    run --separate-stderr ci_post_build_readback "sha256:$a64" "$image:tag"
+  [ "$status" -eq "$CI_ARTIFACT_READBACK_SUCCESS" ]
+  [ "$output" = "SUCCESS" ]
+}
+
+@test "ci_post_build_readback: MISMATCH when the registry digest differs" {
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" \
+  STUB_MODE=present STUB_DIGEST="sha256:$b64" \
+    run --separate-stderr ci_post_build_readback "sha256:$a64" "$image:tag"
+  [ "$status" -eq "$CI_ARTIFACT_READBACK_MISMATCH" ]
+  [ "$output" = "MISMATCH" ]
+}
+
+# What: ghcr_retry logs its own error on a 404.
+# Why: --separate-stderr keeps stdout NOT_FOUND clean.
+# From: Issue #1095
+@test "ci_post_build_readback: NOT_FOUND on a confirmed registry absence, never a rebuild" {
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" \
+  STUB_MODE=absent \
+    run --separate-stderr ci_post_build_readback "sha256:$a64" "$image:tag"
+  [ "$status" -eq "$CI_ARTIFACT_READBACK_NOT_FOUND" ]
+  [ "$output" = "NOT_FOUND" ]
+}
+
+@test "ci_post_build_readback: UNKNOWN on registry ambiguity, never a rebuild" {
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" \
+  STUB_MODE=ambiguous \
+    run --separate-stderr ci_post_build_readback "sha256:$a64" "$image:tag"
+  [ "$status" -eq "$CI_ARTIFACT_READBACK_UNKNOWN" ]
+  [ "$output" = "UNKNOWN" ]
+}
+
+@test "ci_post_build_readback fails closed to UNKNOWN on a malformed expected_digest" {
+  run --separate-stderr ci_post_build_readback "not-a-digest" "$image:tag"
+  [ "$status" -eq "$CI_ARTIFACT_READBACK_UNKNOWN" ]
+  [ -z "$output" ]
+}
+
+# What: Real executed proof of every readback outcome.
+# Why: Coordinator-required evidence, not only a unit call.
+# From: Issue #1095
+@test "dispatch post-build-readback via executed ci.sh proves all 4 terminal exit codes" {
+  STUB_MODE=present STUB_DIGEST="sha256:$a64" \
+    run_ci post-build-readback "sha256:$a64" "$image:tag"
+  [ "$status" -eq 0 ]
+  [ "$output" = "SUCCESS" ]
+
+  STUB_MODE=present STUB_DIGEST="sha256:$b64" \
+    run_ci post-build-readback "sha256:$a64" "$image:tag"
+  [ "$status" -eq 1 ]
+  [ "$output" = "MISMATCH" ]
+
+  STUB_MODE=absent run_ci post-build-readback "sha256:$a64" "$image:tag"
+  [ "$status" -eq 2 ]
+  [ "$output" = "NOT_FOUND" ]
+
+  STUB_MODE=ambiguous run_ci post-build-readback "sha256:$a64" "$image:tag"
+  [ "$status" -eq 3 ]
+  [ "$output" = "UNKNOWN" ]
+}
+
+@test "ci_attestation_state always reports unverifiable in v1" {
+  run ci_attestation_state
+  [ "$status" -eq 0 ]
+  [ "$output" = "unverifiable" ]
+}
+
+@test "ci_artifact_admission: ACCEPTED only for readback=SUCCESS, any attestation state" {
+  local att
+  for att in verified absent_confirmed unverifiable; do
+    run ci_artifact_admission SUCCESS "$att"
+    [ "$status" -eq 0 ]
+    [ "$output" = "verdict=ACCEPTED attestation=$att" ]
+  done
+}
+
+# What: Proves REJECTED (doc 25) never gets reused.
+# Why: A wrong digest stays permanently rejected.
+# From: Issue #1095
+@test "ci_artifact_admission: MISMATCH is always REJECTED, never ACCEPTED" {
+  local att
+  for att in verified absent_confirmed unverifiable; do
+    run --separate-stderr ci_artifact_admission MISMATCH "$att"
+    [ "$status" -ne 0 ]
+    [ "$output" = "verdict=REJECTED attestation=$att" ]
+  done
+}
+
+@test "ci_artifact_admission: NOT_FOUND and UNKNOWN are BLOCK, never ACCEPTED" {
+  local readback att
+  for readback in NOT_FOUND UNKNOWN; do
+    for att in verified absent_confirmed unverifiable; do
+      run --separate-stderr ci_artifact_admission "$readback" "$att"
+      [ "$status" -ne 0 ]
+      [ "$output" = "verdict=BLOCK attestation=$att" ]
+    done
+  done
+}
+
+@test "ci_artifact_admission fails closed to BLOCK on an unrecognized attestation state" {
+  run --separate-stderr ci_artifact_admission SUCCESS "totally-bogus"
+  [ "$status" -ne 0 ]
+  [ "$output" = "verdict=BLOCK attestation=totally-bogus" ]
+}
+
+@test "ci_artifact_admission fails closed to BLOCK on an unrecognized readback verdict" {
+  run --separate-stderr ci_artifact_admission "totally-bogus" verified
+  [ "$status" -ne 0 ]
+  [ "$output" = "verdict=BLOCK attestation=verified" ]
+}
+
+# What: Proof that no input combination yields BUILD.
+# Why: doc 24; build never auto-grants ARTIFACT ACK.
+# From: Issue #1095
+@test "ci_artifact_admission: no readback/attestation combination ever yields BUILD" {
+  local readback att
+  for readback in SUCCESS MISMATCH NOT_FOUND UNKNOWN garbage-readback; do
+    for att in verified absent_confirmed unverifiable garbage-attestation; do
+      run ci_artifact_admission "$readback" "$att"
+      [[ "$output" != *"verdict=BUILD"* ]]
+      [ "$status" -eq 0 ] || [ "$status" -eq 1 ]
+    done
+  done
+}
+
+# What: unverifiable must never print as verified.
+# Why: Overclaiming is worse than an honest open gap.
+# From: Issue #1095
+@test "ci_artifact_admission never overclaims: unverifiable never renders as verified" {
+  run ci_artifact_admission SUCCESS unverifiable
+  [[ "$output" != *"attestation=verified"* ]]
+  [[ "$output" == *"attestation=unverifiable"* ]]
+}
+
+@test "dispatch artifact-admission via executed ci.sh fails closed under real strict mode" {
+  run_ci artifact-admission MISMATCH unverifiable
+  [ "$status" -ne 0 ]
+  [ "$output" = "verdict=REJECTED attestation=unverifiable" ]
+
+  run_ci artifact-admission SUCCESS unverifiable
+  [ "$status" -eq 0 ]
+  [ "$output" = "verdict=ACCEPTED attestation=unverifiable" ]
+}
+
+@test "ci_ledger_encode_digest / ci_ledger_decode_digest round-trip losslessly" {
+  run ci_ledger_encode_digest "sha256:$a64"
+  [ "$status" -eq 0 ]
+  local encoded="$output"
+  [ "$encoded" = "sha256-$a64" ]
+  run ci_ledger_decode_digest "$encoded"
+  [ "$status" -eq 0 ]
+  [ "$output" = "sha256:$a64" ]
+}
+
+@test "ci_ledger_encode_digest fails closed on a non-digest input" {
+  run --separate-stderr ci_ledger_encode_digest "not-a-digest"
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+}
+
+@test "ci_ledger_decode_digest fails closed on every malformed encoded form" {
+  local bad
+  for bad in "sha256:$a64" "sha256-${a64:0:63}" "sha256-${a64}a" \
+      "SHA256-$a64" "${a64}" "sha256-$(printf 'A%.0s' {1..64})"; do
+    run --separate-stderr ci_ledger_decode_digest "$bad"
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+  done
+}
+
+@test "ci_ledger_ref builds the expected git-ref-CAS path for a known key" {
+  run ci_ledger_ref dns linux/amd64 "sha256:$a64"
+  [ "$status" -eq 0 ]
+  [ "$output" = "refs/ci-acceptance-ledger/dns/amd64/sha256-$a64" ]
+  run ci_ledger_ref ui linux/arm64 "sha256:$b64"
+  [ "$output" = "refs/ci-acceptance-ledger/ui/arm64/sha256-$b64" ]
+}
+
+@test "ci_ledger_ref fails closed on an unknown service, bad platform, or bad digest" {
+  run --separate-stderr ci_ledger_ref bogus-service linux/amd64 "sha256:$a64"
+  [ "$status" -ne 0 ]
+  run --separate-stderr ci_ledger_ref dns linux/x86 "sha256:$a64"
+  [ "$status" -ne 0 ]
+  run --separate-stderr ci_ledger_ref dns linux/amd64 "not-a-digest"
+  [ "$status" -ne 0 ]
+}
+
+write_ledger_fixture_file() {
+  local file="$1"
+  ledger_record_json dns linux/amd64 "sha256:$a64" "sha256:$b64" \
+    ACCEPTED unverifiable > "$file"
+}
+
+@test "ci_validate_ledger_record accepts every legal verdict/attestation pair" {
+  local verdict att
+  for verdict in ACCEPTED REJECTED BLOCK; do
+    for att in verified absent_confirmed unverifiable; do
+      ledger_record_json dns linux/amd64 "sha256:$a64" "sha256:$b64" \
+        "$verdict" "$att" > "$BATS_TEST_TMPDIR/rec.json"
+      run ci_validate_ledger_record "$BATS_TEST_TMPDIR/rec.json"
+      [ "$status" -eq 0 ]
+    done
+  done
+}
+
+# What: Defense-in-depth: BUILD is never a verdict.
+# Why: doc 24; a ledger record can never hide BUILD.
+# From: Issue #1095
+@test "ci_validate_ledger_record rejects a BUILD verdict outright" {
+  ledger_record_json dns linux/amd64 "sha256:$a64" "sha256:$b64" \
+    BUILD unverifiable > "$BATS_TEST_TMPDIR/rec.json"
+  run ci_validate_ledger_record "$BATS_TEST_TMPDIR/rec.json"
+  [ "$status" -ne 0 ]
+}
+
+@test "ci_validate_ledger_record rejects a missing attestation field" {
+  write_ledger_fixture_file "$BATS_TEST_TMPDIR/base.json"
+  jq 'del(.attestation)' "$BATS_TEST_TMPDIR/base.json" \
+    > "$BATS_TEST_TMPDIR/missing.json"
+  run ci_validate_ledger_record "$BATS_TEST_TMPDIR/missing.json"
+  [ "$status" -ne 0 ]
+}
+
+@test "ci_validate_ledger_record rejects wrong schema and malformed json" {
+  write_ledger_fixture_file "$BATS_TEST_TMPDIR/base.json"
+  jq '.schema = "ci-acceptance-ledger-record/v2"' \
+    "$BATS_TEST_TMPDIR/base.json" > "$BATS_TEST_TMPDIR/s.json"
+  run ci_validate_ledger_record "$BATS_TEST_TMPDIR/s.json"
+  [ "$status" -ne 0 ]
+  printf '{not json' > "$BATS_TEST_TMPDIR/bad.json"
+  run ci_validate_ledger_record "$BATS_TEST_TMPDIR/bad.json"
+  [ "$status" -ne 0 ]
+}
+
+@test "dispatch validate-ledger-record via executed ci.sh fails closed" {
+  write_ledger_fixture_file "$BATS_TEST_TMPDIR/ok.json"
+  run_ci validate-ledger-record "$BATS_TEST_TMPDIR/ok.json"
+  [ "$status" -eq 0 ]
+  printf '{not json' > "$BATS_TEST_TMPDIR/bad.json"
+  run_ci validate-ledger-record "$BATS_TEST_TMPDIR/bad.json"
+  [ "$status" -ne 0 ]
+}
+
+@test "ci_ledger_read: ABSENT when no record exists for the key, v1 has no writer" {
+  local clone; clone="$(init_ledger_repo)"
+  cd "$clone"
+  run ci_ledger_read origin dns linux/amd64 "sha256:$a64"
+  [ "$status" -eq "$CI_LEDGER_ABSENT" ]
+  [ -z "$output" ]
+}
+
+@test "ci_ledger_read: PRESENT returns the exact validated record for a real fixture" {
+  local clone; clone="$(init_ledger_repo)"
+  local ref; ref="$(ci_ledger_ref dns linux/amd64 "sha256:$a64")"
+  local json
+  json="$(ledger_record_json dns linux/amd64 "sha256:$a64" "sha256:$b64" \
+    ACCEPTED unverifiable)"
+  push_ledger_fixture "$clone" "$ref" "$json"
+
+  cd "$clone"
+  run ci_ledger_read origin dns linux/amd64 "sha256:$a64"
+  [ "$status" -eq "$CI_LEDGER_PRESENT" ]
+  [ "$output" = "$json" ]
+}
+
+# What: A corrupted/foreign ref never reads as accepted.
+# Why: doc 26; unreadable state never becomes BUILD=ACK.
+# From: Issue #1095
+@test "ci_ledger_read: UNKNOWN on a malformed record, never PRESENT nor ABSENT" {
+  local clone; clone="$(init_ledger_repo)"
+  local ref; ref="$(ci_ledger_ref dns linux/amd64 "sha256:$a64")"
+  push_ledger_fixture "$clone" "$ref" "not valid json at all"
+
+  cd "$clone"
+  run --separate-stderr ci_ledger_read origin dns linux/amd64 "sha256:$a64"
+  [ "$status" -eq "$CI_LEDGER_UNKNOWN" ]
+  [ -z "$output" ]
+}
+
+@test "ci_ledger_read fails closed to UNKNOWN on bad input, never claims ABSENT" {
+  local clone; clone="$(init_ledger_repo)"
+  cd "$clone"
+  run --separate-stderr ci_ledger_read origin bogus-service linux/amd64 "sha256:$a64"
+  [ "$status" -eq "$CI_LEDGER_UNKNOWN" ]
+  run --separate-stderr ci_ledger_read origin dns linux/amd64 "not-a-digest"
+  [ "$status" -eq "$CI_LEDGER_UNKNOWN" ]
+}
+
+# What: Real executed proof under strict mode, both states.
+# Why: Coordinator-required evidence, not only a unit call.
+# From: Issue #1095
+@test "dispatch ledger-read via executed ci.sh proves ABSENT and PRESENT under real strict mode" {
+  local clone; clone="$(init_ledger_repo)"
+  cd "$clone"
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" \
+  run --separate-stderr bash "$repo_root/scripts/ci/ci.sh" \
+    ledger-read origin dns linux/amd64 "sha256:$a64"
+  [ "$status" -eq 1 ]
+  [ -z "$output" ]
+
+  local ref; ref="$(ci_ledger_ref dns linux/amd64 "sha256:$a64")"
+  local json
+  json="$(ledger_record_json dns linux/amd64 "sha256:$a64" "sha256:$b64" \
+    ACCEPTED unverifiable)"
+  push_ledger_fixture "$clone" "$ref" "$json"
+
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" \
+  run --separate-stderr bash "$repo_root/scripts/ci/ci.sh" \
+    ledger-read origin dns linux/amd64 "sha256:$a64"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$json" ]
 }
