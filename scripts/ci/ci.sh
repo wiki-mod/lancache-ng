@@ -887,8 +887,9 @@ commands:
   ledger-ref <service> <platform> <build_identity>
   validate-ledger-record <file>
   ledger-read <remote> <service> <platform> <build_identity>
-    exit 0=PRESENT 1=ABSENT 2=UNKNOWN 3=REJECTED; only PRESENT is
-    an ACCEPTED record; read-only, v1 has no write path
+    exit 0=PRESENT 1=ABSENT 2=UNKNOWN 3=not accepted (matching
+    key, verdict REJECTED or BLOCK); only PRESENT is an ACCEPTED
+    record; read-only, v1 has no write path
 EOF
 }
 
