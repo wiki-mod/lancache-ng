@@ -2,10 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Plans whether the full-setup deep validation needs to run for a PR diff.
-# Shared service/build path classification comes from classify-image-impact.sh;
-# only the full-setup-specific should_run policy remains here so the staging
-# guard and the build pipeline cannot drift on which service a path affects.
+
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,9 +15,7 @@ shared_classifier="$script_dir/classify-image-impact.sh"
 
 changed_files=""
 cleanup() {
-    # CHANGED_FILES-driven callers create no temporary file. The explicit
-    # branch prevents a false guard result from becoming the EXIT-trap status
-    # under errexit.
+
     if [[ -n "${_vit_tmp:-}" ]]; then
         rm -f "$_vit_tmp"
     fi
@@ -45,8 +40,6 @@ fi
     exit 1
 }
 
-# should_run is intentionally broader than the shared service/build verdicts,
-# so it still needs the raw path list for full-setup-only policy decisions.
 touches_prefix() {
     local prefix="$1" path
     while IFS= read -r path; do
@@ -63,46 +56,6 @@ touches_exact() {
     return 1
 }
 
-# Issue #1095 (2026-07-31): scripts/ originally had no subdirectory
-# structure to path-filter against, so before this allowlist existed ANY
-# change under scripts/ -- including a pure CI/governance-lint script with
-# zero product or stack dependency -- forced should_run=true below, running
-# this suite's entire ~15-job real Docker-Compose deep validation (DNS/DHCP/
-# NATS/proxy TLS/syslog/Admin UI). Confirmed for real against PR #1333
-# (changed only AGENTS.md + the then-flat scripts/check-pr-title-convention.sh):
-# run 30616274721 ran the full simulation suite end to end. PR #1341 (this
-# same day) fixed it with a by-name array allowlist as an interim measure,
-# since the real subdirectory move it should have been was blocked by
-# concurrent in-flight PRs and an explicit "nothing happens before the
-# v0.3.0 release" maintainer instruction (per issue #1095).
-#
-# scripts/tracked/ (issue #1095, executed post-v0.3.0-release): the 24
-# scripts PR #1341 individually verified (full-repo grep sweep -- every
-# .github/workflows/*.yml, every other scripts/** file, setup.sh, and every
-# services/**/Dockerfile -- confirming each is invoked only from
-# build-push.yml's own PR-gate jobs, build-tools-smoke.yml,
-# backfill-stack-latest.yml, or orphaned-branches.yml, none of which are
-# part of this suite's job graph, and is never sourced/invoked/COPYed by
-# anything full-setup-deep-validate.yml/full-setup-sims.yml/
-# full-setup-validate.yml or the simulation scripts they run exercises) have
-# since actually moved into scripts/tracked/ (git mv, not a fresh file) and
-# been dropped from the array below. ANY path under the scripts/tracked/
-# prefix is recognized as CI-tooling-only, exactly as an exact-match array
-# entry used to be -- this is the one
-# deliberate, narrow exception to "never widen should_run's narrowing by
-# directory/prefix" below, because scripts/tracked/ is itself defined to
-# contain only already-individually-verified scripts (the verification
-# happens at move time, not at check time). A brand-new CI-tooling-only
-# script gets this same treatment by being placed directly into
-# scripts/tracked/ at creation, not by adding a new array entry here.
-#
-# Fail-closed by construction: this array may only ever be used to NARROW
-# should_run for a script that has been individually re-verified this way --
-# never to widen it by directory/prefix. Any scripts/ path that is neither
-# under scripts/tracked/ nor listed here (a brand-new script, an
-# unclassified one, anything under scripts/untracked/, or anything under
-# scripts/lib/) still counts as should_run-relevant, exactly as
-# touches_prefix "scripts/" did before this allowlist existed.
 #
 # What: scripts/ci/ci.sh only, no scripts/ci/ prefix.
 # Why: ci.sh may become a real build/publish driver.
@@ -131,9 +84,7 @@ touches_scripts_beyond_ci_tooling_allowlist() {
     return 1
 }
 
-# The shared classifier is the single source for every verdict that must agree
-# with build-push. It writes diagnostics to stderr and machine-readable values
-# to stdout, so command substitution retains only the key=value contract.
+
 classifier_output="$(CHANGED_FILES="$changed_files" bash "$shared_classifier")"
 declare -A shared=()
 while IFS='=' read -r key value; do
@@ -155,8 +106,7 @@ for key in "${shared_keys[@]}"; do
     esac
 done
 
-# Empty and docs-only diffs are both cheap no-op cases, but they are distinct:
-# the shared classifier intentionally reports docs_only=false for an empty diff.
+
 any_changed=false
 while IFS= read -r path; do
     [[ -n "$path" ]] || continue
@@ -169,11 +119,6 @@ full_setup_should_run() {
         return 1
     fi
 
-    # The deep suite is broader than service rebuild admission. Workflow files
-    # can change the validation itself, deploy files change stack assembly, and
-    # runtime-facing scripts can change behavior without changing an image path.
-    # The scripts allowlist above is the one deliberate narrowing of this broad
-    # fail-closed policy.
     if touches_prefix "services/" \
         || touches_prefix "deploy/" \
         || touches_scripts_beyond_ci_tooling_allowlist \
@@ -189,8 +134,7 @@ full_setup_should_run() {
 
 emit() {
     local key
-    # Preserve the detector's existing public output contract and order while
-    # sourcing every shared value from one classifier implementation.
+
     for key in "${shared_keys[@]}"; do
         printf '%s=%s\n' "$key" "${shared[$key]}"
     done
