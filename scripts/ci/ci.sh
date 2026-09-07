@@ -421,6 +421,18 @@ ci_impact_classify() {
     # From: Issue #1095
     Cargo.toml | Cargo.lock)
       printf 'dns watchdog ui\n' ;;
+    # What: rust-accel actions shared by dns/ui/watchdog.
+    # Why: matches classify-image-impact.sh's service map.
+    # From: Issue #1095
+    .github/actions/rust-acceleration-preflight/* \
+      | .github/actions/configure-rust-sccache/* \
+      | .github/actions/cargo-with-sccache-fallback/*)
+      printf 'dns watchdog ui\n' ;;
+    # What: smoke-tests a build-tools image candidate.
+    # Why: matches classify-image-impact.sh's own rule.
+    # From: Issue #1095
+    .github/actions/build-tools-candidate-smoke/*)
+      printf 'build-tools\n' ;;
     # What: markdown has no build/runtime identity here.
     # Why: doc 12.4: docs are NOOP unless a build input.
     # From: Issue #1095
@@ -460,25 +472,29 @@ ci_semantic_changed() {
   if [[ ! -f "$path" ]]; then
     return 0
   fi
-  local old_tmp
-  old_tmp="$(mktemp)" || return 2
+  local old_dir old_tmp
+  old_dir="$(mktemp -d)" || return 2
+  # What: keeps $path's real basename for the baseline copy.
+  # Why: a bare mktemp file has no ext, breaking *.md rule.
+  # From: Issue #1095
+  old_tmp="$old_dir/$(basename -- "$path")"
   # What: reads $path as of base_sha, if it existed there.
   # Why: a brand-new path has no prior baseline to compare.
   # From: Issue #1095
   if ! git show "${base_sha}:${path}" >"$old_tmp" 2>/dev/null; then
-    rm -f "$old_tmp"
+    rm -rf "$old_dir"
     return 0
   fi
   local new_norm old_norm
   if ! new_norm="$(ci_normalize "$path")"; then
-    rm -f "$old_tmp"
+    rm -rf "$old_dir"
     return 2
   fi
   if ! old_norm="$(ci_normalize "$old_tmp")"; then
-    rm -f "$old_tmp"
+    rm -rf "$old_dir"
     return 2
   fi
-  rm -f "$old_tmp"
+  rm -rf "$old_dir"
   [[ "$new_norm" != "$old_norm" ]]
 }
 
@@ -497,10 +513,17 @@ ci_service_impact() {
     return 1
   }
   local -a paths=("$@")
-  # What: falls back to CHANGED_FILES when no args given.
-  # Why: doc 9; caller may pass args or the env list.
-  # From: Issue #1095
-  if (( ${#paths[@]} == 0 )) && [[ -n "${CHANGED_FILES:-}" ]]; then
+  if (( ${#paths[@]} == 0 )); then
+    # What: no args, CHANGED_FILES unset: no diff was given.
+    # Why: doc 2.3; UNKNOWN must never become a silent NOOP.
+    # From: Issue #1095
+    if [[ -z "${CHANGED_FILES+x}" ]]; then
+      printf 'IMPACTED\n'
+      return 0
+    fi
+    # What: falls back to CHANGED_FILES when no args given.
+    # Why: doc 9; caller may pass args or the env list.
+    # From: Issue #1095
     read -ra paths <<< "${CHANGED_FILES//$'\n'/ }"
   fi
   local p classes cls

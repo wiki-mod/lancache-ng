@@ -677,6 +677,20 @@ init_impact_repo() {
   [ "$output" = "ALL" ]
 }
 
+# What: cross-checked against classify-image-impact.sh.
+# Why: narrows ALL to the 3 real Rust-builder consumers.
+# From: Issue #1095
+@test "ci_impact_classify maps the shared rust-acceleration actions" {
+  run ci_impact_classify .github/actions/rust-acceleration-preflight/action.yml
+  [ "$output" = "dns watchdog ui" ]
+  run ci_impact_classify .github/actions/configure-rust-sccache/action.yml
+  [ "$output" = "dns watchdog ui" ]
+  run ci_impact_classify .github/actions/cargo-with-sccache-fallback/action.yml
+  [ "$output" = "dns watchdog ui" ]
+  run ci_impact_classify .github/actions/build-tools-candidate-smoke/action.yml
+  [ "$output" = "build-tools" ]
+}
+
 @test "ci_semantic_changed is false for a comment-only change and true for a real change" {
   local repo; repo="$(init_impact_repo)"
   mkdir -p "$repo/services/dns"
@@ -694,6 +708,30 @@ init_impact_repo() {
   printf 'cmd1\ncmd3\n' > services/dns/entrypoint.sh
   run ci_semantic_changed "$base" services/dns/entrypoint.sh
   [ "$status" -eq 0 ]
+}
+
+# What: regression for a real reviewed defect: an unextended
+#   mktemp baseline broke ci_normalize's *.md short-circuit.
+# Why: the baseline copy must keep $path's real basename.
+# From: Issue #1095
+@test "ci_semantic_changed applies the markdown NOOP rule to the baseline copy too" {
+  local repo; repo="$(init_impact_repo)"
+  printf '# Heading\nSome text\n' > "$repo/README.md"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m base
+  local base; base="$(git -C "$repo" rev-parse HEAD)"
+  cd "$repo"
+
+  # What: byte-identical markdown reports no change.
+  # Why: proves the baseline normalizes as markdown too.
+  # From: Issue #1095
+  printf '# Heading\nSome text\n' > README.md
+  run ci_semantic_changed "$base" README.md
+  [ "$status" -eq 1 ]
+
+  printf '# Heading\nCompletely different prose\n' > README.md
+  run ci_semantic_changed "$base" README.md
+  [ "$status" -eq 1 ]
 }
 
 @test "ci_semantic_changed is true when the path is new or was removed" {
@@ -831,6 +869,24 @@ init_impact_repo() {
     [ "$status" -eq 0 ]
     [ "$output" = "IMPACTED" ]
   done
+}
+
+# What: distinguishes no diff info at all from empty diff.
+# Why: doc 2.3; unset is UNKNOWN, fails closed, not NOOP.
+# From: Issue #1095
+@test "ci_service_impact: unset CHANGED_FILES fails closed, empty CHANGED_FILES is a real NOOP" {
+  local repo; repo="$(init_impact_repo)"
+  git -C "$repo" commit -q -m base --allow-empty
+  local base; base="$(git -C "$repo" rev-parse HEAD)"
+  cd "$repo"
+
+  unset CHANGED_FILES
+  run ci_service_impact "$base" ntp
+  [ "$status" -eq 0 ]
+  [ "$output" = "IMPACTED" ]
+
+  CHANGED_FILES="" run ci_service_impact "$base" ntp
+  [ "$output" = "NOOP" ]
 }
 
 @test "ci_service_impact fails closed on an unknown service name" {

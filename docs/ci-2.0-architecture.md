@@ -309,8 +309,9 @@ job contains a second list. No full-setup job contains a second list.
 > a Rust/C compile like `dns` or `ui`. It is not yet wired into
 > `build-push.yml`'s `CI_BUILD_SERVICES` matrix, and `deploy/prod/` and
 > `deploy/full-setup/` still run the third-party `netdata/netdata` image —
-> that matrix/compose cutover is a separate, tracked follow-up, not part
-> of this service-list freeze.
+> that matrix/compose cutover has been escalated to the maintainer and is
+> **not yet tracked by a dedicated issue**; it is out of scope for this
+> service-list freeze, not resolved by it.
 >
 > `services/nats` is **out**: it has no Dockerfile (only `nats.conf`), and
 > `deploy/prod/docker-compose.yml` pins the official upstream
