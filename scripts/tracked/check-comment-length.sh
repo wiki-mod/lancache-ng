@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # What: enforces AG-CODE-012 comment length/block limits.
 # Why: mechanical size check only, no semantic judgment.
-# From: Issue #1830
+# From: PR #1853
 set -euo pipefail
 
 # usage: check-comment-length.sh <file> [<file> ...]
@@ -51,7 +51,7 @@ for file in "$@"; do
 
     # What: story-telling scan v1 covers only "#".
     # Why: v1 scoped to bash/bats/yaml only, not Rust/JS.
-    # From: Issue #1830
+    # From: PR #1853
     case "$file" in
         *.yml|*.yaml) heredoc_on=0; yaml_on=1 ;;
         *)            heredoc_on=1; yaml_on=0 ;;
