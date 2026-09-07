@@ -163,7 +163,7 @@ ci_resolve_ref_state() {
   return "$CI_STATE_AMBIGUOUS"
 }
 
-# === CLUSTER 2: SOURCE FINGERPRINT (Issue #1095) ===
+# === CLUSTER 2: SOURCE FINGERPRINT ===
 
 # ci_normalize <file>
 #
@@ -292,7 +292,7 @@ ci_build_admission() {
   esac
 }
 
-# === CLUSTER 3: SERVICE INVENTORY + IMPACT DETECTION (Issue #1095) ===
+# === CLUSTER 3: SERVICE INVENTORY + IMPACT DETECTION ===
 
 # What: Frozen CI_SERVICES + metadata tables (doc 7/8).
 # Why: guards readonly re-declaration on a re-source.
@@ -564,7 +564,7 @@ ci_impact() {
   done
 }
 
-# === CLUSTER 4: ACCEPTANCE LEDGER + ATTESTATION BOUNDARY (Issue #1095) ===
+# === CLUSTER 4: ACCEPTANCE LEDGER + ATTESTATION BOUNDARY ===
 
 # What: Named readback verdict codes, idempotent re-source.
 # Why: readonly re-declaration would error on a re-source.

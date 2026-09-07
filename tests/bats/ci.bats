@@ -279,7 +279,7 @@ run_ci() {
   [ -z "$output" ]
 }
 
-# === CLUSTER 2: SOURCE FINGERPRINT (Issue #1095) ===
+# === CLUSTER 2: SOURCE FINGERPRINT ===
 
 @test "ci_normalize produces identical output for a comment/blank/CRLF-only change" {
   local f1="$BATS_TEST_TMPDIR/a1.sh"
@@ -576,7 +576,7 @@ FIXTURE
   [ "$output" = "NOOP" ]
 }
 
-# === CLUSTER 3: SERVICE INVENTORY + IMPACT DETECTION (Issue #1095) ===
+# === CLUSTER 3: SERVICE INVENTORY + IMPACT DETECTION ===
 
 # What: A throw-away git repo for real base_sha comparisons.
 # Why: ci_semantic_changed runs real git, not a stub.
@@ -1001,7 +1001,7 @@ init_impact_repo() {
   [[ "$output" == *"netdata=NOOP"* ]]
 }
 
-# === CLUSTER 4: ACCEPTANCE LEDGER + ATTESTATION BOUNDARY (Issue #1095) ===
+# === CLUSTER 4: ACCEPTANCE LEDGER + ATTESTATION BOUNDARY ===
 
 # What: A bare repo + clone, promote_lock.bats topology.
 # Why: only plain git calls; a bare repo is faithful.
