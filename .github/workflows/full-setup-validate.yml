@@ -156,7 +156,9 @@ jobs:
       - name: Run DHCP relay flow simulation
         run: |
           set -euo pipefail
-          bash scripts/untracked/simulations/dhcp-relay-flow-simulation.sh
+          # Reserve a collision-free subnet (flock + retry, #820) and run the
+          # sim inside it rather than a hardcoded literal subnet pair (#822).
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/untracked/simulations/dhcp-relay-flow-simulation.sh
 
   dhcp-kea-ctrl-agent-mutation-simulation:
     # Real Kea Control Agent mutation round-trip (issue #634): the sibling

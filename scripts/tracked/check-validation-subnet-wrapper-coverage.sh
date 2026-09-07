@@ -68,6 +68,23 @@
 # string/glob matching (already required by this script's own bash shebang)
 # does not depend on any such external engine.
 #
+# SECOND CHECK, added for issue #822: the job-level check above can only ever
+# flag a job that references compute-validation-network's raw output --
+# but proxy-ssl-mode-two-relay-dispatch-simulation.sh and dhcp-relay-flow-
+# simulation.sh both hardcoded a literal Docker subnet with NO job anywhere
+# ever referencing that raw output at all (no VALIDATION_SUBNET env, no
+# `needs.compute-validation-network...`), so the check above could never see
+# them no matter how thoroughly it ran -- that was WHY the #822 gap slipped
+# past this guard. check_simulation_script (below) closes that blind spot by
+# scanning the simulation SCRIPTS themselves (not just the workflow files)
+# for a Docker network created with an explicit --subnet that has neither
+# established protection form: sourcing scripts/lib/reserve-validation-
+# subnet.sh directly (dhcp-proxy-pxe-simulation.sh, dhcp-kea-lease-flow-
+# simulation.sh), or reading $VALIDATION_SUBNET because its calling workflow
+# job wraps it in scripts/lib/run-in-validation-subnet.sh (proxy-ssl-mode-
+# two-relay-dispatch-simulation.sh, dhcp-relay-flow-simulation.sh, and every
+# job-level-wrapped sibling this file's own job-level check already covers).
+#
 # Usage:
 #   scripts/tracked/check-validation-subnet-wrapper-coverage.sh [repo_root]
 set -euo pipefail
@@ -104,8 +121,15 @@ INLINE_RESERVATION_MARKER='validation_subnet_reserve_slot "'
 # validation_subnet_reserve_slot. So this is an equally valid protection form.
 COMPOSITE_RESERVATION_MARKER='uses: ./.github/actions/reserve-validation-subnet-stack'
 
+# Where check_simulation_script (below) looks for a script that pins its own
+# Docker subnet -- see the "SECOND CHECK" header paragraph above.
+SIMULATION_SCRIPTS_DIR="scripts/untracked/simulations"
+NETWORK_CREATE_MARKER='docker network create'
+SUBNET_FLAG_MARKER='--subnet'
+
 failures=0
 jobs_examined_with_raw_output=0
+scripts_examined_with_subnet_creation=0
 
 fail() {
     printf '::error::%s\n' "$1" >&2
@@ -253,6 +277,90 @@ for file in "${WORKFLOW_FILES[@]}"; do
     check_workflow_file "$file"
 done
 
+# script_sources_reserve_lib <file>
+# True if <file> contains a real (non-comment) `source "...reserve-
+# validation-subnet.sh"` line -- not merely a `# shellcheck source=...`
+# directive comment, which every real caller of this line ALSO carries one
+# line above it (same false-positive-avoidance shape as WRAPPER_INVOCATION_
+# MARKER above: a bare filename mention must not count as protection).
+#
+# Trims leading whitespace inline via parameter expansion (the same formula
+# strip_leading_whitespace uses internally) rather than calling it through a
+# `$(...)` command substitution per line: that forks a subshell per line,
+# and this function's caller runs it across every line of every simulation
+# script -- on this project's actual self-hosted (and this change's own
+# Windows-Git-Bash verification) hosts, per-line forking made this check
+# take minutes instead of seconds. No functional difference, only speed.
+script_sources_reserve_lib() {
+    local file="$1" line leading_ws stripped
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        leading_ws="${line%%[^[:space:]]*}"
+        stripped="${line#"$leading_ws"}"
+        case "$stripped" in
+            '#'*) continue ;;
+            'source "'*'/reserve-validation-subnet.sh"'*) return 0 ;;
+        esac
+    done < "$file"
+    return 1
+}
+
+# script_reads_validation_subnet_env <file>
+# True if <file> contains a real (non-comment) `${VALIDATION_SUBNET`
+# parameter expansion -- the signal that this script expects its caller's
+# workflow job to have wrapped it in scripts/lib/run-in-validation-subnet.sh,
+# which exports VALIDATION_SUBNET before invoking it. See
+# script_sources_reserve_lib's own comment for why whitespace is trimmed
+# inline instead of via a per-line subshell call.
+script_reads_validation_subnet_env() {
+    local file="$1" line leading_ws stripped
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        leading_ws="${line%%[^[:space:]]*}"
+        stripped="${line#"$leading_ws"}"
+        case "$stripped" in
+            '#'*) continue ;;
+            *'${VALIDATION_SUBNET'*) return 0 ;;
+        esac
+    done < "$file"
+    return 1
+}
+
+# check_simulation_script <file>
+# The #822 gap check_job_body above cannot see: a script that creates a
+# Docker network with an explicit --subnet, but whose CALLING job never has
+# to reference compute-validation-network's raw output at all if the script
+# pins its own literal subnet -- exactly how proxy-ssl-mode-two-relay-
+# dispatch-simulation.sh and dhcp-relay-flow-simulation.sh both slipped past
+# the job-level check above before #822. Skips any script that never creates
+# a subnet-pinned network at all (e.g. proxy-standard-mode-sni-routing-
+# simulation.sh, which lets Docker auto-assign) -- nothing to protect there.
+check_simulation_script() {
+    local file="$1" content
+
+    content="$(cat "$file")"
+    if [[ "$content" != *"$NETWORK_CREATE_MARKER"* || "$content" != *"$SUBNET_FLAG_MARKER"* ]]; then
+        return 0
+    fi
+    scripts_examined_with_subnet_creation=$((scripts_examined_with_subnet_creation + 1))
+
+    if script_sources_reserve_lib "$file"; then
+        return 0
+    fi
+    if script_reads_validation_subnet_env "$file"; then
+        return 0
+    fi
+
+    fail "check-validation-subnet-wrapper-coverage: $file creates a Docker network with an explicit --subnet but has neither protection form: sourcing scripts/lib/reserve-validation-subnet.sh directly (see dhcp-proxy-pxe-simulation.sh), or reading \$VALIDATION_SUBNET because its calling workflow job wraps it in scripts/lib/run-in-validation-subnet.sh (see proxy-ssl-mode-two-relay-dispatch-simulation.sh) -- this is the #822 collision class: a hardcoded literal subnet collides deterministically with any other concurrent run on the same host that creates the identical subnet."
+}
+
+if [[ ! -d "$SIMULATION_SCRIPTS_DIR" ]]; then
+    fail "check-validation-subnet-wrapper-coverage: '$SIMULATION_SCRIPTS_DIR' no longer exists; update SIMULATION_SCRIPTS_DIR in scripts/tracked/check-validation-subnet-wrapper-coverage.sh."
+else
+    for file in "$SIMULATION_SCRIPTS_DIR"/*.sh; do
+        [[ -f "$file" ]] || continue
+        check_simulation_script "$file"
+    done
+fi
+
 # A parsing bug that silently walks past every job (e.g. a future rename of
 # `jobs:` itself, or of compute-validation-network) must not be
 # indistinguishable from "no violations found" -- both workflow files have
@@ -264,9 +372,15 @@ if [[ "$jobs_examined_with_raw_output" -eq 0 ]]; then
     fail "check-validation-subnet-wrapper-coverage: found zero jobs referencing compute-validation-network's raw outputs (in any accepted syntactic form) across ${WORKFLOW_FILES[*]} -- expected several (this guard's own parsing likely broke, or both workflow files changed shape; update this script rather than silently passing)."
 fi
 
+# Same "zero is itself a guard failure" principle as above, applied to the
+# second (script-level) check: several such scripts exist today (#822).
+if [[ "$scripts_examined_with_subnet_creation" -eq 0 ]]; then
+    fail "check-validation-subnet-wrapper-coverage: found zero scripts under $SIMULATION_SCRIPTS_DIR creating a Docker network with an explicit --subnet -- expected several (this guard's own parsing likely broke, or every such script changed shape; update this script rather than silently passing)."
+fi
+
 if [[ "$failures" -gt 0 ]]; then
     printf '::error::check-validation-subnet-wrapper-coverage: %d violation(s) found (see scripts/tracked/check-validation-subnet-wrapper-coverage.sh).\n' "$failures" >&2
     exit 1
 fi
 
-printf 'check-validation-subnet-wrapper-coverage: OK (%d job(s) referencing compute-validation-network raw output, all protected by the wrapper or an inline reservation).\n' "$jobs_examined_with_raw_output"
+printf 'check-validation-subnet-wrapper-coverage: OK (%d job(s) referencing compute-validation-network raw output, %d simulation script(s) pinning a subnet, all protected).\n' "$jobs_examined_with_raw_output" "$scripts_examined_with_subnet_creation"

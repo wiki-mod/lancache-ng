@@ -455,7 +455,9 @@ jobs:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
         run: |
           set -euo pipefail
-          bash scripts/untracked/simulations/proxy-ssl-mode-two-relay-dispatch-simulation.sh
+          # Reserve a collision-free subnet (flock + retry, #820) and run the
+          # sim inside it rather than a hardcoded literal subnet (#822).
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/untracked/simulations/proxy-ssl-mode-two-relay-dispatch-simulation.sh
 
   ui-nats-dns-integration-simulation:
     # Real UI -> NATS -> nats-subscriber -> PowerDNS integration test. Wiring
