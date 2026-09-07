@@ -1488,15 +1488,17 @@ HOOK
   STUB_MODE=present STUB_DIGEST="sha256:$a64" \
     run --separate-stderr ci_plan_resolver_state ntp linux/amd64 "sha256:$a64"
   [ "$output" = "present" ]
+  [ -z "$stderr" ]
 
   # What: absent is a confirmed 404, logging to stderr too.
-  # Why: --separate-stderr keeps it out of $output.
+  # Why: --separate-stderr splits it, must not drop it.
   # From: Issue #1095
   PATH="$BATS_TEST_TMPDIR/bin:$PATH" CI_PLAN_RESOLVE_REF_CMD="$hook" \
   GHCR_RETRY_BACKOFF_SECONDS=0 GHCR_RETRY_MAX_ATTEMPTS=1 \
   STUB_MODE=absent \
     run --separate-stderr ci_plan_resolver_state ntp linux/amd64 "sha256:$a64"
   [ "$output" = "absent" ]
+  [[ "$stderr" == *"GHCR operation failed"* ]]
 }
 
 @test "ci_plan_platform_state attaches reason only for a BLOCK verdict" {
@@ -1614,9 +1616,10 @@ HOOK
   [ "$status" -eq 0 ]
   [ "$(jq -r '.services.ntp.state' <<< "$output")" = "REUSE" ]
   [ "$(jq -r '.services.ntp.build_ack' <<< "$output")" = "false" ]
+  [ -z "$stderr" ]
 
   # What: absent is a confirmed 404, logging to stderr too.
-  # Why: --separate-stderr keeps $output valid JSON only.
+  # Why: split it out, don't drop it (checked below too).
   # From: Issue #1095
   PATH="$BATS_TEST_TMPDIR/bin:$PATH" CI_PLAN_RESOLVE_REF_CMD="$hook" \
   GHCR_RETRY_BACKOFF_SECONDS=0 GHCR_RETRY_MAX_ATTEMPTS=1 \
@@ -1625,6 +1628,7 @@ HOOK
   [ "$status" -eq 0 ]
   [ "$(jq -r '.services.ntp.state' <<< "$output")" = "BUILD" ]
   [ "$(jq -r '.services.ntp.build_ack' <<< "$output")" = "true" ]
+  [[ "$stderr" == *"GHCR operation failed"* ]]
 }
 
 # What: doc 46; a platform verdict is never flattened away.
@@ -1662,6 +1666,7 @@ STUB
   [ "$(jq -r '.services.ntp.platforms."linux/amd64".state' <<< "$output")" = "REUSE" ]
   [ "$(jq -r '.services.ntp.platforms."linux/arm64".state' <<< "$output")" = "BUILD" ]
   [ "$(jq -r '.services.ntp.state' <<< "$output")" = "BUILD" ]
+  [[ "$stderr" == *"GHCR operation failed"* ]]
 
   # What: amd64 present, arm64 network trouble (ambiguous).
   # Why: a real BLOCK on one platform beats REUSE too.
@@ -1684,6 +1689,7 @@ STUB
   [ "$(jq -r '.services.ntp.platforms."linux/amd64".state' <<< "$output")" = "REUSE" ]
   [ "$(jq -r '.services.ntp.platforms."linux/arm64".state' <<< "$output")" = "BLOCK" ]
   [ "$(jq -r '.services.ntp.state' <<< "$output")" = "BLOCK" ]
+  [[ "$stderr" == *"GHCR operation failed"* ]]
 }
 
 # What: doc 2.3; unset diff info must never read as NOOP.
