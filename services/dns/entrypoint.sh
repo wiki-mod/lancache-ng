@@ -1235,8 +1235,16 @@ recursor_extra_sed=""
 if [ "$LOG_QUERIES" = "1" ]; then
     recursor_extra_sed='s/^  loglevel: 3$/  loglevel: 6/'
 fi
+# What: shortens packetcache negative_ttl on a secondary.
+# Why: a pre-AXFR miss outlives 120s vs ~1s propagation.
+# From: Issue #1095
+PDNS_RECURSOR_NEGATIVE_TTL=120
+if [ "$DNS_REPLICATION_ROLE" = "secondary" ]; then
+    PDNS_RECURSOR_NEGATIVE_TTL="$PDNS_XFR_CYCLE_INTERVAL"
+fi
+export PDNS_RECURSOR_NEGATIVE_TTL
 # shellcheck disable=SC2016 # render_template_atomic needs literal envsubst variable names.
-render_template_atomic '${PDNS_API_KEY}' /etc/pdns/recursor.conf.template "$RECURSOR_CONF_FILE" "$recursor_extra_sed"
+render_template_atomic '${PDNS_API_KEY}:${PDNS_RECURSOR_NEGATIVE_TTL}' /etc/pdns/recursor.conf.template "$RECURSOR_CONF_FILE" "$recursor_extra_sed"
 _dns_recursor_validate_snapshot_or_rollback "$RECURSOR_CONF_FILE" || _dns_enter_rescue_mode "recursor"
 
 # ── 2. Generate Authoritative Config ─────────────────────────────────────────

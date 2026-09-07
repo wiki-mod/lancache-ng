@@ -85,6 +85,10 @@ recordcache:
   # the record's original TTL, capped at 1 day per extension).
   # This keeps DNS working during brief upstream outages.
   serve_stale_extensions: 120
+  # What: caps how long a negative RRset stays cached here.
+  # Why: this cache, not packetcache, held the stale miss.
+  # From: Issue #1095
+  max_negative_ttl: ${PDNS_RECURSOR_NEGATIVE_TTL}
 
 # ── Packet Cache ─────────────────────────────────────────────────────────────
 packetcache:
@@ -94,10 +98,10 @@ packetcache:
   # ttl: how long a successful (NOERROR) response is cached as-is.
   # Clients asking the exact same question within this window get an instant reply.
   ttl: 3600
-  # negative_ttl: TTL for NXDOMAIN / NODATA responses.
-  # Keeps "this host doesn't exist" answers cached so upstream isn't hammered
-  # for typos or non-existent names.
-  negative_ttl: 120
+  # What: TTL for NXDOMAIN/NODATA; low on a secondary.
+  # Why: caps a pre-AXFR miss to this zone's refresh window.
+  # From: Issue #1095
+  negative_ttl: ${PDNS_RECURSOR_NEGATIVE_TTL}
   # servfail_ttl: TTL for SERVFAIL responses.
   # Short on purpose — upstreams recover quickly and we don't want to cache
   # failures for long.
