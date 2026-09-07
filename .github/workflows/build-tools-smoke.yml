@@ -284,18 +284,6 @@ jobs:
         timeout-minutes: 20
         run: |
           set -euo pipefail
-
-          # What: init process reaps zombies as PID 1
-          # Why: prevents zombie accumulation on termination
-          # From: Issue #1522 | PR #1523
-          #
-          # What: kill-timeout guards signal-deaf hangs
-          # Why: SIGTERM alone cannot reach hung process
-          # From: Issue #1781 | PR #1783
-          #
-          # What: exit code captured, not left to set -e
-          # Why: surfaces real code, not generic error
-          # From: Issue #1781 | PR #1783
           set +e
           docker run --rm --init \
             --user "$(id -u):$(id -g)" \
@@ -318,18 +306,6 @@ jobs:
         timeout-minutes: 20
         run: |
           set -euo pipefail
-
-          # What: init process reaps zombies as PID 1
-          # Why: prevents zombie accumulation on termination
-          # From: Issue #1522 | PR #1523
-          #
-          # What: kill-timeout guards signal-deaf hangs
-          # Why: SIGTERM alone cannot reach hung process
-          # From: Issue #1781 | PR #1783
-          #
-          # What: exit code captured, not left to set -e
-          # Why: surfaces real code, not generic error
-          # From: Issue #1781 | PR #1783
           set +e
           docker run --rm --init \
             --user "$(id -u):$(id -g)" \
