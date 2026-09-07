@@ -1851,6 +1851,20 @@ omitted):**
     does not exempt a Dockerfile author from checking their own edits by
     hand in the meantime.
 
+- **Recorded exception (2026-09-07, PR #1836, Rule-Ref: AG-VAL-029): `build-tools-smoke.yml`'s two new path-filter entries have no dedicated regression test.**
+  - **Scope**: the `scripts/untracked/simulations/**` and `services/*/Dockerfile` entries added to `build-tools-smoke.yml`'s `on.push.paths`/`on.pull_request.paths` (PR #1836, fixing the `check-registry-login-coverage.sh` build-context guard not being exercised by CI when only a simulation script or a Dockerfile changed).
+  - **Reason**: `scripts/tracked/check-bats-path-filter-coverage.sh` (issue #879's guard) derives its coverage set from bats string references, not from arbitrary glob path-filter entries; it re-confirmed 112/112 known bats dependencies still covered after this addition, but that guard has no mechanism to notice if either of these two new, non-bats-derived glob entries were later silently removed.
+  - **Tracking**: PR #1836.
+  - **Validation**: manual — before removing or narrowing either path-filter entry, confirm `scripts/tracked/check-registry-login-coverage.sh` (and any future guard reading `scripts/untracked/simulations/**` or `services/*/Dockerfile`) still gets exercised by `build-tools-smoke.yml` on the relevant change.
+  - **Non-Expansion**: this exception covers only these two specific path-filter entries in `build-tools-smoke.yml`. It does not exempt other path-filter changes from `check-bats-path-filter-coverage.sh`'s existing bats-derived coverage.
+
+- **Recorded exception (2026-09-07, PR #1836, issue #1850, Rule-Ref: AG-VAL-029): the `proxy-ssl-mode-two-relay-dispatch-simulation.sh` IP-offset fix has a real end-to-end run but no standing regression guard against a future simulation reintroducing the same class.**
+  - **Scope**: `scripts/untracked/simulations/proxy-ssl-mode-two-relay-dispatch-simulation.sh`'s `backend_one`/`backend_two`/`proxy_container` `--ip` pins, and any future simulation script that mixes fixed-IP and auto-IPAM containers on its own throwaway Docker network.
+  - **Reason**: this is the 4th recurrence of the same underlying IP/subnet-collision failure class (#703, #820, #832, #1850); the fix itself (pin the three previously-unpinned containers) was verified with one real, full simulation run on the validation host (all 8 assertions passed), but nothing in this repository's test suite would catch a *future* simulation script reintroducing the same unpinned-before-pinned ordering bug under a different script name.
+  - **Tracking**: issue #1850 (this fix); an `AG-WF-025` rule proposal generalizing this failure class (English canonical text + German translation) was sent to the coordinator for maintainer review per Rule-Ref: AG-WF-025's second-occurrence requirement — pending maintainer decision, not yet landed as an `AGENTS.md` rule or as mechanical CI enforcement.
+  - **Validation**: manual — until the proposed rule (or an equivalent mechanical guard) lands, a new simulation script that mixes `--ip`-pinned and un-pinned containers on the same throwaway network must be reviewed by hand for this ordering hazard.
+  - **Non-Expansion**: this exception covers only the absence of a *standing, mechanical* regression guard for this specific IP-ordering hazard. It does not exempt this PR's own fix from its real, already-performed live verification, and it does not cover the shared validation-subnet reservation pool `#703`/`#820`/`#832` already fixed and guarded elsewhere.
+
 ---
 
 ## Appendix — Reusable Scripts/Commands Index
