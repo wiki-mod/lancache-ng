@@ -2,8 +2,8 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: Unit coverage for scripts/ci/ci.sh (Cluster 1).
-# Why: Prove digest identity and fail-closed 3-state read.
+# What: Unit coverage for scripts/ci/ci.sh (Clusters 1-5).
+# Why: Prove identity, impact, ledger, and plan composition.
 # From: Issue #1095
 
 bats_require_minimum_version 1.5.0
@@ -1415,4 +1415,360 @@ write_ledger_fixture_file() {
     ledger-read origin dns linux/amd64 "sha256:$a64"
   [ "$status" -eq 0 ]
   [ "$output" = "$json" ]
+}
+
+# === CLUSTER 5: PLANNER (Issue #1095) ===
+
+# What: A ref-resolve hook keyed only on service/platform.
+# Why: Lets a docker stub discriminate per platform by name.
+# From: Issue #1095
+write_plan_refhook() {
+  local file="$BATS_TEST_TMPDIR/refhook.sh"
+  cat > "$file" <<'HOOK'
+#!/usr/bin/env bash
+service="$1"; platform="$2"
+tag="${platform//\//-}"
+printf 'ghcr.io/wiki-mod/lancache-ng/%s:%s\n' "$service" "$tag"
+HOOK
+  chmod +x "$file"
+  printf '%s' "$file"
+}
+
+@test "ci_plan_service_files combines a service's own and external context dirs" {
+  local repo; repo="$(init_impact_repo)"
+  mkdir -p "$repo/services/proxy" "$repo/services/dns" "$repo/scripts/lib"
+  printf 'a\n' > "$repo/services/proxy/nginx.conf"
+  printf 'b\n' > "$repo/services/dns/cdn-domains.txt"
+  printf 'c\n' > "$repo/scripts/lib/verify-version-banner.sh"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m base
+  cd "$repo"
+
+  run ci_plan_service_files proxy
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"services/proxy/nginx.conf"* ]]
+  [[ "$output" == *"services/dns/cdn-domains.txt"* ]]
+  [[ "$output" == *"scripts/lib/verify-version-banner.sh"* ]]
+}
+
+@test "ci_plan_service_files fails closed when no files are tracked under any context" {
+  local repo; repo="$(init_impact_repo)"
+  git -C "$repo" commit -q -m base --allow-empty
+  cd "$repo"
+  run --separate-stderr ci_plan_service_files ntp
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+}
+
+@test "ci_plan_resolve_ref returns nothing when the hook is unset" {
+  unset CI_PLAN_RESOLVE_REF_CMD
+  run --separate-stderr ci_plan_resolve_ref ntp linux/amd64 "sha256:$a64"
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+}
+
+@test "ci_plan_resolve_ref returns the hook's ref when it succeeds" {
+  local hook; hook="$(write_plan_refhook)"
+  CI_PLAN_RESOLVE_REF_CMD="$hook" run ci_plan_resolve_ref ntp linux/amd64 "sha256:$a64"
+  [ "$status" -eq 0 ]
+  [ "$output" = "ghcr.io/wiki-mod/lancache-ng/ntp:linux-amd64" ]
+}
+
+# What: Proves the doc 19 pairing: resolver -> admission.
+# Why: An unresolvable ref fails to ambiguous, not a crash.
+# From: Issue #1095
+@test "ci_plan_resolver_state: unresolvable ref, present, and absent map correctly" {
+  unset CI_PLAN_RESOLVE_REF_CMD
+  run --separate-stderr ci_plan_resolver_state ntp linux/amd64 "sha256:$a64"
+  [ "$output" = "ambiguous" ]
+
+  local hook; hook="$(write_plan_refhook)"
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" CI_PLAN_RESOLVE_REF_CMD="$hook" \
+  GHCR_RETRY_BACKOFF_SECONDS=0 GHCR_RETRY_MAX_ATTEMPTS=1 \
+  STUB_MODE=present STUB_DIGEST="sha256:$a64" \
+    run --separate-stderr ci_plan_resolver_state ntp linux/amd64 "sha256:$a64"
+  [ "$output" = "present" ]
+
+  # What: absent is a confirmed 404, logging to stderr too.
+  # Why: --separate-stderr keeps it out of $output.
+  # From: Issue #1095
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" CI_PLAN_RESOLVE_REF_CMD="$hook" \
+  GHCR_RETRY_BACKOFF_SECONDS=0 GHCR_RETRY_MAX_ATTEMPTS=1 \
+  STUB_MODE=absent \
+    run --separate-stderr ci_plan_resolver_state ntp linux/amd64 "sha256:$a64"
+  [ "$output" = "absent" ]
+}
+
+@test "ci_plan_platform_state attaches reason only for a BLOCK verdict" {
+  unset CI_PLAN_RESOLVE_REF_CMD
+  run ci_plan_platform_state ntp linux/amd64 "sha256:$a64"
+  [ "$(jq -r '.state' <<< "$output")" = "BLOCK" ]
+  [ "$(jq -r '.reason' <<< "$output")" = "resolver_ambiguous" ]
+
+  local hook; hook="$(write_plan_refhook)"
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" CI_PLAN_RESOLVE_REF_CMD="$hook" \
+  GHCR_RETRY_BACKOFF_SECONDS=0 GHCR_RETRY_MAX_ATTEMPTS=1 \
+  STUB_MODE=present STUB_DIGEST="sha256:$a64" \
+    run ci_plan_platform_state ntp linux/amd64 "sha256:$a64"
+  [ "$(jq -r '.state' <<< "$output")" = "REUSE" ]
+  [ "$(jq -r 'has("reason")' <<< "$output")" = "false" ]
+}
+
+@test "ci_plan: a docs-only change is global NOOP with every service NOOP" {
+  local repo; repo="$(init_impact_repo)"
+  printf '# old\n' > "$repo/README.md"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m base
+  local base; base="$(git -C "$repo" rev-parse HEAD)"
+  cd "$repo"
+  printf '# completely rewritten\nmore text\n' > README.md
+
+  run ci_plan "$base" README.md
+  [ "$status" -eq 0 ]
+  run jq -e '.' <<< "$output"
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.global.state' <<< "$output")" = "NOOP" ]
+  local svc
+  for svc in "${CI_SERVICES[@]}"; do
+    [ "$(jq -r --arg s "$svc" '.services[$s].state' <<< "$output")" = "NOOP" ]
+  done
+}
+
+# What: doc 10; changed=true must never collapse to NOOP.
+# Why: Proof: a real dns change, ntp stays untouched.
+# From: Issue #1095
+@test "ci_plan: a real dns logic change makes dns non-NOOP, other services stay NOOP" {
+  local repo; repo="$(init_impact_repo)"
+  mkdir -p "$repo/services/dns"
+  printf 'cmd1\n# old\ncmd2\n' > "$repo/services/dns/entrypoint.sh"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m base
+  local base; base="$(git -C "$repo" rev-parse HEAD)"
+  cd "$repo"
+  printf 'cmd1\ncmd_changed\n' > services/dns/entrypoint.sh
+
+  unset CI_PLAN_RESOLVE_REF_CMD
+  run ci_plan "$base" services/dns/entrypoint.sh
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.services.dns.state' <<< "$output")" != "NOOP" ]
+  [ "$(jq -r '.services.ntp.state' <<< "$output")" = "NOOP" ]
+}
+
+@test "ci_plan: cdn-domains.txt impacts both dns and proxy, not an unrelated service" {
+  local repo; repo="$(init_impact_repo)"
+  mkdir -p "$repo/services/dns"
+  printf 'cdn.example.com\n' > "$repo/services/dns/cdn-domains.txt"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m base
+  local base; base="$(git -C "$repo" rev-parse HEAD)"
+  cd "$repo"
+  printf 'cdn.example.com\nnew.example.com\n' > services/dns/cdn-domains.txt
+
+  unset CI_PLAN_RESOLVE_REF_CMD
+  run ci_plan "$base" services/dns/cdn-domains.txt
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.services.dns.state' <<< "$output")" != "NOOP" ]
+  [ "$(jq -r '.services.proxy.state' <<< "$output")" != "NOOP" ]
+  [ "$(jq -r '.services.ntp.state' <<< "$output")" = "NOOP" ]
+}
+
+# What: Proves doc 2.3 via the composed planner directly.
+# Why: An ambiguous resolver must never read as BUILD.
+# From: Issue #1095
+@test "ci_plan: an ambiguous resolver (no hook wired) never produces BUILD, fails closed to BLOCK" {
+  local repo; repo="$(init_impact_repo)"
+  mkdir -p "$repo/services/ntp"
+  printf 'old\n' > "$repo/services/ntp/chrony.conf"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m base
+  local base; base="$(git -C "$repo" rev-parse HEAD)"
+  cd "$repo"
+  printf 'new\n' > services/ntp/chrony.conf
+
+  unset CI_PLAN_RESOLVE_REF_CMD
+  run ci_plan "$base" services/ntp/chrony.conf
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.services.ntp.state' <<< "$output")" = "BLOCK" ]
+  [ "$(jq -r '.services.ntp.state' <<< "$output")" != "BUILD" ]
+  [ "$(jq -r '.services.ntp.platforms."linux/amd64".resolver' <<< "$output")" = "ambiguous" ]
+}
+
+# What: doc 2.2; an existing artifact reuses, not rebuilds.
+# Why: Proof changed=true never collapses into build=true.
+# From: Issue #1095
+@test "ci_plan: resolver present maps to REUSE, resolver absent maps to BUILD" {
+  local repo; repo="$(init_impact_repo)"
+  mkdir -p "$repo/services/ntp"
+  printf 'old\n' > "$repo/services/ntp/chrony.conf"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m base
+  local base; base="$(git -C "$repo" rev-parse HEAD)"
+  cd "$repo"
+  printf 'new\n' > services/ntp/chrony.conf
+  local hook; hook="$(write_plan_refhook)"
+
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" CI_PLAN_RESOLVE_REF_CMD="$hook" \
+  GHCR_RETRY_BACKOFF_SECONDS=0 GHCR_RETRY_MAX_ATTEMPTS=1 \
+  STUB_MODE=present STUB_DIGEST="sha256:$a64" \
+    run --separate-stderr ci_plan "$base" services/ntp/chrony.conf
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.services.ntp.state' <<< "$output")" = "REUSE" ]
+  [ "$(jq -r '.services.ntp.build_ack' <<< "$output")" = "false" ]
+
+  # What: absent is a confirmed 404, logging to stderr too.
+  # Why: --separate-stderr keeps $output valid JSON only.
+  # From: Issue #1095
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" CI_PLAN_RESOLVE_REF_CMD="$hook" \
+  GHCR_RETRY_BACKOFF_SECONDS=0 GHCR_RETRY_MAX_ATTEMPTS=1 \
+  STUB_MODE=absent \
+    run --separate-stderr ci_plan "$base" services/ntp/chrony.conf
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.services.ntp.state' <<< "$output")" = "BUILD" ]
+  [ "$(jq -r '.services.ntp.build_ack' <<< "$output")" = "true" ]
+}
+
+# What: doc 46; a platform verdict is never flattened away.
+# Why: BUILD/BLOCK on one platform must survive aggregation.
+# From: Issue #1095
+@test "ci_plan: platform aggregation - any BUILD beats REUSE, any BLOCK beats BUILD" {
+  local repo; repo="$(init_impact_repo)"
+  mkdir -p "$repo/services/ntp"
+  printf 'old\n' > "$repo/services/ntp/chrony.conf"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m base
+  local base; base="$(git -C "$repo" rev-parse HEAD)"
+  cd "$repo"
+  printf 'new\n' > services/ntp/chrony.conf
+  local hook; hook="$(write_plan_refhook)"
+
+  # What: amd64 present (REUSE), arm64 absent (BUILD).
+  # Why: proves BUILD is never silently averaged into REUSE.
+  # From: Issue #1095
+  cat > "$BATS_TEST_TMPDIR/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+for a in "$@"; do
+  case "$a" in
+    *linux-arm64*) echo "ERROR: x: not found" >&2; exit 1 ;;
+  esac
+done
+printf '"sha256:%s"\n' "$(printf 'a%.0s' {1..64})"
+STUB
+  chmod +x "$BATS_TEST_TMPDIR/bin/docker"
+
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" CI_PLAN_RESOLVE_REF_CMD="$hook" \
+  GHCR_RETRY_BACKOFF_SECONDS=0 GHCR_RETRY_MAX_ATTEMPTS=1 \
+    run --separate-stderr ci_plan "$base" services/ntp/chrony.conf
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.services.ntp.platforms."linux/amd64".state' <<< "$output")" = "REUSE" ]
+  [ "$(jq -r '.services.ntp.platforms."linux/arm64".state' <<< "$output")" = "BUILD" ]
+  [ "$(jq -r '.services.ntp.state' <<< "$output")" = "BUILD" ]
+
+  # What: amd64 present, arm64 network trouble (ambiguous).
+  # Why: a real BLOCK on one platform beats REUSE too.
+  # From: Issue #1095
+  cat > "$BATS_TEST_TMPDIR/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+for a in "$@"; do
+  case "$a" in
+    *linux-arm64*) echo "dial tcp: i/o timeout" >&2; exit 1 ;;
+  esac
+done
+printf '"sha256:%s"\n' "$(printf 'a%.0s' {1..64})"
+STUB
+  chmod +x "$BATS_TEST_TMPDIR/bin/docker"
+
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" CI_PLAN_RESOLVE_REF_CMD="$hook" \
+  GHCR_RETRY_BACKOFF_SECONDS=0 GHCR_RETRY_MAX_ATTEMPTS=1 \
+    run --separate-stderr ci_plan "$base" services/ntp/chrony.conf
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.services.ntp.platforms."linux/amd64".state' <<< "$output")" = "REUSE" ]
+  [ "$(jq -r '.services.ntp.platforms."linux/arm64".state' <<< "$output")" = "BLOCK" ]
+  [ "$(jq -r '.services.ntp.state' <<< "$output")" = "BLOCK" ]
+}
+
+# What: doc 2.3; unset diff info must never read as NOOP.
+# Why: mirrors service_impact's own CHANGED_FILES floor.
+# From: Issue #1095
+@test "ci_plan: no changed-files info at all fails closed, never silently all-NOOP" {
+  local repo; repo="$(init_impact_repo)"
+  git -C "$repo" commit -q -m base --allow-empty
+  local base; base="$(git -C "$repo" rev-parse HEAD)"
+  cd "$repo"
+  unset CHANGED_FILES CI_PLAN_RESOLVE_REF_CMD
+
+  run ci_plan "$base"
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.global.state' <<< "$output")" != "NOOP" ]
+}
+
+@test "ci_plan output has exactly the 11 CI_SERVICES keys and is valid JSON" {
+  local repo; repo="$(init_impact_repo)"
+  printf '# old\n' > "$repo/README.md"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m base
+  local base; base="$(git -C "$repo" rev-parse HEAD)"
+  cd "$repo"
+
+  run ci_plan "$base" README.md
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.services | keys | length' <<< "$output")" -eq 11 ]
+  local has
+  has="$(jq -r '.services | has("dns") and has("netdata") and (has("nats") | not)' <<< "$output")"
+  [ "$has" = "true" ]
+}
+
+# What: --json is a no-op, same output either way.
+# Why: doc 9 shows both "plan" and "plan --json" forms.
+# From: Issue #1095
+@test "ci_plan accepts a leading --json no-op flag with identical output" {
+  local repo; repo="$(init_impact_repo)"
+  printf '# old\n' > "$repo/README.md"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m base
+  local base; base="$(git -C "$repo" rev-parse HEAD)"
+  cd "$repo"
+
+  run ci_plan "$base" README.md
+  [ "$status" -eq 0 ]
+  local plain="$output"
+  run ci_plan --json "$base" README.md
+  [ "$status" -eq 0 ]
+  [ "$output" = "$plain" ]
+}
+
+# What: Real proof of byte-identical output, not a claim.
+# Why: Two real runs, diffed here, not eyeballed as equal.
+# From: Issue #1095
+@test "dispatch plan via executed ci.sh produces valid, deterministic JSON under real strict mode" {
+  local repo; repo="$(init_impact_repo)"
+  mkdir -p "$repo/services/dns"
+  printf 'cmd1\n# old\ncmd2\n' > "$repo/services/dns/entrypoint.sh"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m base
+  local base; base="$(git -C "$repo" rev-parse HEAD)"
+  cd "$repo"
+  printf 'cmd1\ncmd_changed\n' > services/dns/entrypoint.sh
+
+  run_ci plan "$base" services/dns/entrypoint.sh
+  [ "$status" -eq 0 ]
+  local first="$output"
+  run jq -e '.' <<< "$first"
+  [ "$status" -eq 0 ]
+
+  run_ci plan "$base" services/dns/entrypoint.sh
+  [ "$status" -eq 0 ]
+  [ "$output" = "$first" ]
+}
+
+# What: Real executed proof of plan's own fail-closed floor.
+# Why: Coordinator-required evidence, not only a unit call.
+# From: Issue #1095
+@test "dispatch plan via executed ci.sh rejects an abbreviated base_sha, fails closed" {
+  run_ci plan "abcdef1"
+  [ "$status" -ne 0 ]
+}
+
+@test "dispatch plan via executed ci.sh fails closed when base_sha is missing" {
+  run_ci plan
+  [ "$status" -ne 0 ]
 }

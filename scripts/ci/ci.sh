@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: One authoritative CI image-identity helper.
+# What: One authoritative CI decision helper (doc 4.1).
 # Why: Workflows call this, not per-runner duplicated logic.
 # From: Issue #1095
 
@@ -858,6 +858,237 @@ ci_ledger_read() {
   return "$CI_LEDGER_PRESENT"
 }
 
+# === CLUSTER 5: PLANNER (Issue #1095) ===
+
+# ci_plan_service_files <service>
+#
+# What: Deterministic tracked files for one build context.
+# Why: Bridges doc 8 tables into ci_build_identity's inputs.
+# From: Issue #1095
+ci_plan_service_files() {
+  local service="${1:?ci_plan_service_files: service is required}"
+  local ctx ext pair path
+  ctx="$(ci_service_meta "$service" context)" || return 1
+  ext="$(ci_service_meta "$service" external-context)" || return 1
+  local -a dirs=("$ctx")
+  # What: parses "name=path name2=path2" from doc 8's table.
+  # Why: only the path half is a real build-context input.
+  # From: Issue #1095
+  for pair in $ext; do
+    path="${pair#*=}"
+    [[ -n "$path" ]] && dirs+=("$path")
+  done
+  local -a files=()
+  local d f
+  for d in "${dirs[@]}"; do
+    while IFS= read -r f; do
+      [[ -n "$f" ]] && files+=("$f")
+    done < <(git ls-files -- "$d")
+  done
+  # What: zero tracked files across every context dir fails.
+  # Why: never guess an ID; identity needs >=1 real file.
+  # From: Issue #1095
+  if (( ${#files[@]} == 0 )); then
+    printf 'ci_plan_service_files: no tracked files for %s\n' \
+      "$service" >&2
+    return 1
+  fi
+  printf '%s\n' "${files[@]}"
+}
+
+# ci_plan_resolve_ref <service> <platform> <build_identity>
+#
+# What: Optional hook resolving a build identity to a ref.
+# Why: AG-REL-015 owns tag-naming, not this v1 planner.
+# From: Issue #1095
+ci_plan_resolve_ref() {
+  local service="${1:?ci_plan_resolve_ref: service is required}"
+  local platform="${2:?ci_plan_resolve_ref: platform is required}"
+  local build_identity="${3:?ci_plan_resolve_ref: build_identity is required}"
+  [[ -n "${CI_PLAN_RESOLVE_REF_CMD:-}" ]] || return 1
+  local ref status
+  # What: Capture status via if, not a bare assignment.
+  # Why: set -e would abort before we read a nonzero code.
+  # From: Issue #1095
+  if ref="$("$CI_PLAN_RESOLVE_REF_CMD" "$service" "$platform" "$build_identity")"; then
+    status=0
+  else
+    status=$?
+  fi
+  if (( status != 0 )) || [[ -z "$ref" ]]; then
+    return 1
+  fi
+  printf '%s\n' "$ref"
+}
+
+# ci_plan_resolver_state <service> <platform> <build_identity>
+#
+# What: present/absent/ambiguous for ci_build_admission.
+# Why: doc 2.3; an unresolvable ref must fail to ambiguous.
+# From: Issue #1095
+ci_plan_resolver_state() {
+  local service="${1:?ci_plan_resolver_state: service is required}"
+  local platform="${2:?ci_plan_resolver_state: platform is required}"
+  local build_identity="${3:?ci_plan_resolver_state: build_identity is required}"
+  local ref
+  if ! ref="$(ci_plan_resolve_ref "$service" "$platform" "$build_identity")"; then
+    # What: no hook, or the hook itself failed/empty output.
+    # Why: doc 2.3 UNKNOWN must never become BUILD.
+    # From: Issue #1095
+    printf 'ambiguous\n'
+    return 0
+  fi
+  local status
+  if ci_resolve_ref_state "$ref" >/dev/null; then
+    status=0
+  else
+    status=$?
+  fi
+  case "$status" in
+    "$CI_STATE_PRESENT") printf 'present\n' ;;
+    "$CI_STATE_ABSENT") printf 'absent\n' ;;
+    *) printf 'ambiguous\n' ;;
+  esac
+}
+
+# ci_plan_platform_state <service> <platform> <build_identity>
+#
+# What: One platform's state/build_identity/resolver/reason.
+# Why: doc 71; keeps each platform's verdict visible.
+# From: Issue #1095
+ci_plan_platform_state() {
+  local service="${1:?ci_plan_platform_state: service is required}"
+  local platform="${2:?ci_plan_platform_state: platform is required}"
+  local build_identity="${3:?ci_plan_platform_state: build_identity is required}"
+  local resolver state
+  resolver="$(ci_plan_resolver_state "$service" "$platform" "$build_identity")"
+  # What: BLOCK is a real verdict, not a script error.
+  # Why: the guarded if keeps set -e from aborting on it.
+  # From: Issue #1095
+  if state="$(ci_build_admission yes "$resolver")"; then :; fi
+  local reason=""
+  [[ "$state" == "BLOCK" ]] && reason="resolver_ambiguous"
+  jq -nc --arg state "$state" --arg bid "$build_identity" \
+    --arg res "$resolver" --arg reason "$reason" '
+    {state: $state, build_identity: $bid, resolver: $res}
+    + (if $reason != "" then {reason: $reason} else {} end)
+  '
+}
+
+# ci_plan_service <base_sha> <service> [<path>...]
+#
+# What: One service's full verdict object (doc 10.2 shape).
+# Why: NOOP short-circuits; IMPACTED composes per platform.
+# From: Issue #1095
+ci_plan_service() {
+  local base_sha="${1:?ci_plan_service: base_sha is required}"
+  local service="${2:?ci_plan_service: service is required}"
+  shift 2 || true
+  local impact
+  impact="$(ci_service_impact "$base_sha" "$service" "$@")" || return 1
+  if [[ "$impact" == "NOOP" ]]; then
+    printf '%s\n' '{"state":"NOOP"}'
+    return 0
+  fi
+  local platforms_csv
+  platforms_csv="$(ci_service_meta "$service" platforms)" || return 1
+  local -a platforms=()
+  IFS=',' read -ra platforms <<< "$platforms_csv"
+
+  local -a files=()
+  # What: process substitution never propagates exit codes.
+  # Why: check array length, not mapfile's own status.
+  # From: Issue #1095
+  mapfile -t files < <(ci_plan_service_files "$service" 2>/dev/null)
+
+  local -a plat_pairs=()
+  local -a plat_states=()
+  local plat build_identity plat_json state
+  for plat in "${platforms[@]}"; do
+    if (( ${#files[@]} == 0 )); then
+      plat_json='{"state":"BLOCK","reason":"build_identity_unavailable"}'
+      state=BLOCK
+    else
+      if build_identity="$(ci_build_identity "$plat" "${files[@]}")"; then :; fi
+      if [[ -z "$build_identity" ]]; then
+        plat_json='{"state":"BLOCK","reason":"build_identity_unavailable"}'
+        state=BLOCK
+      else
+        plat_json="$(ci_plan_platform_state "$service" "$plat" "$build_identity")"
+        state="$(jq -r '.state' <<< "$plat_json")"
+      fi
+    fi
+    plat_states+=("$state")
+    plat_pairs+=("$(jq -nc --arg p "$plat" --argjson b "$plat_json" '{($p): $b}')")
+  done
+
+  # What: any BLOCK wins, else any BUILD, else all REUSE.
+  # Why: doc 46; a platform verdict is never flattened away.
+  # From: Issue #1095
+  local overall=REUSE s
+  for s in "${plat_states[@]}"; do
+    [[ "$s" == "BLOCK" ]] && { overall=BLOCK; break; }
+  done
+  if [[ "$overall" != "BLOCK" ]]; then
+    for s in "${plat_states[@]}"; do
+      [[ "$s" == "BUILD" ]] && { overall=BUILD; break; }
+    done
+  fi
+
+  local platforms_obj
+  platforms_obj="$(printf '%s\n' "${plat_pairs[@]}" | jq -sc 'add')"
+  local build_ack=false
+  [[ "$overall" == "BUILD" ]] && build_ack=true
+  jq -nc --arg state "$overall" --argjson ack "$build_ack" \
+    --argjson plats "$platforms_obj" \
+    '{state: $state, build_ack: $ack, platforms: $plats}'
+}
+
+# ci_plan [--json] <base_sha> [<path>...]
+#
+# What: doc 9/10 planner JSON, composed from prior clusters.
+# Why: doc 10; changed never automatically implies build.
+# From: Issue #1095
+ci_plan() {
+  # What: --json is a no-op; it's the only v1 output shape.
+  # Why: doc 9 shows both "plan" and "plan --json" as valid.
+  # From: Issue #1095
+  if [[ "${1:-}" == "--json" ]]; then
+    shift
+  fi
+  local base_sha="${1:?ci_plan: base_sha is required}"
+  shift || true
+  ci_require_source_sha "$base_sha" || return 1
+
+  local -a pairs=()
+  local -a states=()
+  local svc body
+  # What: CI_SERVICES is the one frozen, stable order.
+  # Why: doc 16; determinism can't depend on hash order.
+  # From: Issue #1095
+  for svc in "${CI_SERVICES[@]}"; do
+    body="$(ci_plan_service "$base_sha" "$svc" "$@")" || return 1
+    states+=("$(jq -r '.state' <<< "$body")")
+    pairs+=("$(jq -nc --arg s "$svc" --argjson b "$body" '{($s): $b}')")
+  done
+
+  # What: all-NOOP stays NOOP; BLOCK beats WORK_REQUIRED.
+  # Why: doc 2.3; BLOCK must never read as plain NOOP.
+  # From: Issue #1095
+  local global=NOOP s
+  for s in "${states[@]}"; do
+    [[ "$s" != "NOOP" ]] && { global=WORK_REQUIRED; break; }
+  done
+  for s in "${states[@]}"; do
+    [[ "$s" == "BLOCK" ]] && { global=BLOCK; break; }
+  done
+
+  local services_obj
+  services_obj="$(printf '%s\n' "${pairs[@]}" | jq -sc 'add')"
+  jq -nc --arg g "$global" --argjson svcs "$services_obj" \
+    '{global: {state: $g}, services: $svcs}'
+}
+
 ci_usage() {
   cat >&2 <<'EOF'
 usage: ci.sh <command> [args]
@@ -890,6 +1121,15 @@ commands:
     exit 0=PRESENT 1=ABSENT 2=UNKNOWN 3=not accepted (matching
     key, verdict REJECTED or BLOCK); only PRESENT is an ACCEPTED
     record; read-only, v1 has no write path
+  plan [--json] <base_sha> [<path>...]
+    prints doc 9/10 planner JSON: {global:{state}, services:{...}};
+    --json is accepted as a no-op, JSON is the only v1 output;
+    paths default to CHANGED_FILES like service-impact; changed
+    never becomes build (doc 10) -- CI_PLAN_RESOLVE_REF_CMD unset
+    makes every IMPACTED platform resolve to BLOCK, fail-closed,
+    since a registry tag-naming scheme is AG-REL-015's decision,
+    not this planner's; always exits 0 once a verdict is emitted,
+    even when a service's state is BLOCK
 EOF
 }
 
@@ -924,6 +1164,7 @@ ci_main() {
     ledger-ref) ci_ledger_ref "$@" ;;
     validate-ledger-record) ci_validate_ledger_record "$@" ;;
     ledger-read) ci_ledger_read "$@" ;;
+    plan) ci_plan "$@" ;;
     ""|-h|--help) ci_usage; return 2 ;;
     *)
       printf 'ci.sh: unknown command: %s\n' "$cmd" >&2
