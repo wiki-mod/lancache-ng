@@ -128,8 +128,8 @@ docker network create --subnet "$validation_subnet" "$network_name" >/dev/null
 allow_ip="${subnet_prefix}.$((subnet_base_octet + 2))"
 deny_ip="${subnet_prefix}.$((subnet_base_octet + 3))"
 
-# What: pins backend/proxy IPs instead of relying on auto-IPAM.
-# Why: unpinned alloc starts at gw+1, colliding with allow/deny.
+# What: pins backend/proxy IPs, not auto-IPAM.
+# Why: unpinned alloc starts at gw+1, hits allow/deny.
 # From: Issue #1850
 backend_one_ip="${subnet_prefix}.$((subnet_base_octet + 4))"
 backend_two_ip="${subnet_prefix}.$((subnet_base_octet + 5))"
