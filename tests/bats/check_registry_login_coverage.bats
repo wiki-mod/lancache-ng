@@ -469,3 +469,120 @@ EOF
     [[ "$output" == *"widget-two-simulation.sh"* ]]
     [[ "$output" == *"2 violation(s)"* ]]
 }
+
+@test "build-context: does not treat a --from= inside a RUN instruction as a required context" {
+    mkdir -p "$fixture_root/services/widget"
+    cat > "$fixture_root/services/widget/Dockerfile" <<'EOF'
+FROM alpine:3.24
+RUN echo --from=phantom
+COPY --from=shared-scripts verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
+EOF
+    bcc_write_widget_sim 'docker build -q -t widget --build-context "shared-scripts=$repo_root/scripts/lib" services/widget >/dev/null'
+
+    run "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+}
+
+@test "build-context: a --from= inside RUN never masks a genuinely missing required context" {
+    mkdir -p "$fixture_root/services/widget"
+    cat > "$fixture_root/services/widget/Dockerfile" <<'EOF'
+FROM alpine:3.24
+RUN echo --from=phantom
+COPY --from=shared-scripts verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
+EOF
+    bcc_write_widget_sim 'docker build -q -t widget services/widget >/dev/null'
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"shared-scripts"* ]]
+    [[ "$output" != *"phantom"* ]]
+}
+
+@test "build-context: does not treat a bare external image name as a required named context" {
+    mkdir -p "$fixture_root/services/widget"
+    cat > "$fixture_root/services/widget/Dockerfile" <<'EOF'
+FROM alpine:3.24
+COPY --from=alpine /etc/os-release /etc/os-release-donor
+COPY --from=shared-scripts verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
+EOF
+    bcc_write_widget_sim 'docker build -q -t widget --build-context "shared-scripts=$repo_root/scripts/lib" services/widget >/dev/null'
+
+    run "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+}
+
+@test "build-context: a bare external image name never masks a genuinely missing required context" {
+    mkdir -p "$fixture_root/services/widget"
+    cat > "$fixture_root/services/widget/Dockerfile" <<'EOF'
+FROM alpine:3.24
+COPY --from=alpine /etc/os-release /etc/os-release-donor
+COPY --from=shared-scripts verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
+EOF
+    bcc_write_widget_sim 'docker build -q -t widget services/widget >/dev/null'
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"shared-scripts"* ]]
+    [[ "$output" != *"alpine -- this"* ]]
+}
+
+@test "build-context: resolves a -f path with a leading ./ prefix" {
+    bcc_write_widget_dockerfile
+    bcc_write_widget_sim 'docker build -q -t widget -f ./services/widget/Dockerfile "$repo_root" >/dev/null'
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"services/widget/Dockerfile"* ]]
+}
+
+@test "build-context: resolves a quoted -f path with a variable prefix" {
+    bcc_write_widget_dockerfile
+    bcc_write_widget_sim 'docker build -q -t widget -f "$repo_root/services/widget/Dockerfile" "$repo_root" >/dev/null'
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"services/widget/Dockerfile"* ]]
+}
+
+@test "build-context: a prefixed -f path still passes once the context is supplied" {
+    bcc_write_widget_dockerfile
+    bcc_write_widget_sim 'docker build -q -t widget -f "$repo_root/services/widget/Dockerfile" --build-context "shared-scripts=$repo_root/scripts/lib" "$repo_root" >/dev/null'
+
+    run "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+}
+
+@test "build-context: accepts the --build-context=name=val equals form" {
+    bcc_write_widget_dockerfile
+    bcc_write_widget_sim 'docker build -q -t widget --build-context=shared-scripts=$repo_root/scripts/lib services/widget >/dev/null'
+
+    run "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+}
+
+@test "build-context: the equals form never masks a genuinely missing required context" {
+    bcc_write_widget_dockerfile
+    bcc_write_widget_sim 'docker build -q -t widget --build-context=dns-domains=$repo_root/scripts/lib services/widget >/dev/null'
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"shared-scripts"* ]]
+}
+
+@test "build-context: does not count docker build inside an echo argument as an invocation" {
+    bcc_write_widget_dockerfile
+    bcc_write_widget_sim 'echo "docker build services/widget"'
+
+    run "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"0 docker build invocation(s) examined"* ]]
+}
+
+@test "build-context: still catches a real invocation chained after &&" {
+    bcc_write_widget_dockerfile
+    bcc_write_widget_sim 'true && docker build -q -t widget services/widget >/dev/null'
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"shared-scripts"* ]]
+}

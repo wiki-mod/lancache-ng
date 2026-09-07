@@ -314,18 +314,51 @@ check_workflow_file() {
 # --- Build-context coverage (see header's "Second, unrelated coverage") ---
 build_context_invocations_examined=0
 
+# bcc_is_known_named_context <name>
+# True if <name> is a named build context this repo's own Dockerfiles are
+# known to rely on (kept in sync with `grep -h 'COPY --from=' services/*/
+# Dockerfile`: shared-scripts, PR #1783; dns-domains, services/proxy's
+# synthetic cdn-domains.txt fixture context).
+#
+# What: distinguishes a required named context from a bare image ref.
+# Why: buildx itself can't -- an unmatched bare `--from=NAME` resolves
+# against a supplied `--build-context NAME=...` first, falling back to
+# pulling NAME as an image only if none was supplied (see
+# https://docs.docker.com/reference/cli/docker/buildx/build/#build-context).
+# Dockerfile syntax alone cannot tell "alpine" (a real bare-name official
+# image) from "shared-scripts" (a required local context) apart -- both are
+# an unqualified name that is neither a numeric stage index nor an earlier
+# `FROM ... AS <name>` stage. This is an authorial-intent question, not a
+# grammar one, so it is resolved via this explicit, documented allowlist
+# rather than a heuristic guess (e.g. "contains no '/' or ':'", which
+# misclassifies every bare official image name as a required context).
+# From: Issue #1095
+BCC_KNOWN_NAMED_CONTEXTS=(
+    "shared-scripts"
+    "dns-domains"
+)
+
+bcc_is_known_named_context() {
+    local name="$1" known
+    for known in "${BCC_KNOWN_NAMED_CONTEXTS[@]}"; do
+        [[ "$name" == "$known" ]] && return 0
+    done
+    return 1
+}
+
 # bcc_required_contexts_for_dockerfile <dockerfile>
 # Prints one required named-build-context name per line.
 bcc_required_contexts_for_dockerfile() {
     local dockerfile="$1"
     awk '
         BEGIN { IGNORECASE = 1 }
+        /^[ \t]*#/ { next }
         /^FROM[ \t]/ {
             for (i = 1; i <= NF; i++) {
                 if (toupper($i) == "AS" && (i + 1) <= NF) { stages[$(i + 1)] = 1 }
             }
         }
-        /--from=/ {
+        /^[ \t]*COPY[ \t]/ && /--from=/ {
             line = $0
             n = split(line, parts, "--from=")
             for (i = 2; i <= n; i++) {
@@ -340,7 +373,9 @@ bcc_required_contexts_for_dockerfile() {
                 print name
             }
         }
-    ' "$dockerfile" | sort -u
+    ' "$dockerfile" | sort -u | { while IFS= read -r name; do
+        bcc_is_known_named_context "$name" && printf '%s\n' "$name"
+    done; }
 }
 
 # bcc_join_continued_lines <file>
@@ -361,18 +396,23 @@ bcc_join_continued_lines() {
 # bcc_target_dockerfile_for_invocation <invocation-line>
 # Prints the services/*/Dockerfile path this invocation targets, or nothing
 # if none can be resolved.
+#
+# What: resolves -f/--file's argument regardless of path prefix.
+# Why: `./services/x/Dockerfile`, `"$repo_root/services/x/Dockerfile"` too.
+# From: Issue #1095
 bcc_target_dockerfile_for_invocation() {
-    local invocation="$1" explicit="" ctx=""
-    # What: `|| true` per grep|tail; no match isn't error.
+    local invocation="$1" explicit_arg="" resolved="" ctx=""
+    # What: `|| true` per sed|grep|tail; no match isn't error.
     # Why: pipefail would else abort caller under set -e.
-    explicit=$(grep -oE '(^|[[:space:]])(-f|--file)[[:space:]]+"?services/[A-Za-z0-9_-]+/Dockerfile"?' <<<"$invocation" | tail -1) || true
-    if [[ -n "$explicit" ]]; then
-        explicit="${explicit#*services/}"
-        explicit="${explicit%\"}"
-        printf 'services/%s\n' "$explicit"
-        return 0
-    fi
-    if [[ "$invocation" == *"-f "* || "$invocation" == *"--file "* ]]; then
+    explicit_arg=$(sed -nE 's/.*(^|[[:space:]])(-f|--file)[[:space:]]+("[^"]*"|[^[:space:]]+).*/\3/p' <<<"$invocation" | tail -1) || true
+    if [[ -n "$explicit_arg" ]]; then
+        explicit_arg="${explicit_arg%\"}"
+        explicit_arg="${explicit_arg#\"}"
+        resolved=$(grep -oE 'services/[A-Za-z0-9_-]+/Dockerfile$' <<<"$explicit_arg") || true
+        if [[ -n "$resolved" ]]; then
+            printf '%s\n' "$resolved"
+            return 0
+        fi
         # An explicit -f/--file pointing outside services/*/Dockerfile
         # (e.g. a synthetic fixture) is out of this check's scope.
         return 0
@@ -386,10 +426,14 @@ bcc_target_dockerfile_for_invocation() {
 
 # bcc_supplied_build_contexts <invocation-line>
 # Prints one --build-context name (the part before its "=") per line.
+#
+# What: accepts both `--build-context name=val` and `=name=val` forms.
+# Why: docker's long-option `=` separator is valid alongside a space.
+# From: Issue #1095
 bcc_supplied_build_contexts() {
     local invocation="$1"
-    grep -oE -- '--build-context[[:space:]]+"?[A-Za-z0-9_.-]+=' <<<"$invocation" \
-        | sed -E 's/--build-context[[:space:]]+"?//; s/=$//' || true
+    grep -oE -- '--build-context(=|[[:space:]]+)"?[A-Za-z0-9_.-]+=' <<<"$invocation" \
+        | sed -E 's/--build-context(=|[[:space:]]+)"?//; s/=$//' || true
 }
 
 bcc_check_invocation() {
@@ -428,14 +472,16 @@ if [[ "$jobs_examined" -eq 0 ]]; then
     fail "check-registry-login-coverage: examined zero jobs across ${WORKFLOW_FILES[*]} -- expected several (this guard's own parsing likely broke, or all three workflow files changed shape; update this script rather than silently passing)."
 fi
 
+# What: requires docker build in command position, not any substring.
+# Why: rejects data/prose (e.g. echo "docker build ...") as non-invocation.
+# From: Issue #1095
 shopt -s nullglob
 for file in "$SIMULATIONS_DIR"/*.sh; do
     while IFS= read -r logical_line; do
-        case "$logical_line" in
-            *'docker build '*|*'docker buildx build '*)
-                # Skip a comment line naming docker build in prose.
-                stripped="${logical_line#"${logical_line%%[! ]*}"}"
-                [[ "$stripped" == \#* ]] && continue
+        stripped="${logical_line#"${logical_line%%[! ]*}"}"
+        [[ "$stripped" == \#* ]] && continue
+        case "$stripped" in
+            'docker build '*|'docker buildx build '*|*'&& docker build '*|*'&& docker buildx build '*|*'; docker build '*|*'; docker buildx build '*|*'|| docker build '*|*'|| docker buildx build '*)
                 bcc_check_invocation "$file" "$logical_line"
                 ;;
         esac
