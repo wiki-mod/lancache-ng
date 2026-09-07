@@ -58,7 +58,7 @@ serde_json = "1"
 # and this crate's reqwest client reject it, if left on plain webpki roots.
 # "-native-roots" is still 100% rustls (no openssl-sys, Rule-Ref: AG-REL-003 intact),
 # it only changes which root store rustls consults.
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 tokio = { version = "1", features = ["full"] }
 # Only pulled in for one purpose: rendering the same UTC RFC3339-ish
 # timestamp shape watchdog.sh's `date -u +%Y-%m-%dT%H:%M:%SZ` produces for
