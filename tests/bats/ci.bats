@@ -948,6 +948,26 @@ init_impact_repo() {
   [ "$output" = "dns proxy" ]
 }
 
+# What: pins the tri-state exit contract via real dispatch.
+# Why: exit 1 (unchanged) under set -e aborts a bare caller.
+# From: Issue #1095
+@test "dispatch semantic-changed via executed ci.sh returns 0=changed, 1=unchanged" {
+  local repo; repo="$(init_impact_repo)"
+  printf 'cmd1\n# old\n' > "$repo/f.sh"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m base
+  local base; base="$(git -C "$repo" rev-parse HEAD)"
+  cd "$repo"
+
+  printf 'cmd1\n# new wording only\n' > f.sh
+  run_ci semantic-changed "$base" f.sh
+  [ "$status" -eq 1 ]
+
+  printf 'cmd_changed\n' > f.sh
+  run_ci semantic-changed "$base" f.sh
+  [ "$status" -eq 0 ]
+}
+
 # What: Real executed proof of the fail-closed floor.
 # Why: Coordinator-required evidence, not only a unit call.
 # From: Issue #1095

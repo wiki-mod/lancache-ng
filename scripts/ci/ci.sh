@@ -579,6 +579,8 @@ commands:
   service-meta <service> <context|platforms|runner|external-context>
   impact-classify <path>
   semantic-changed <base_sha> <path>
+    exit 0=changed 1=unchanged 2=error; a bare call under set -e
+    aborts on the (non-error) unchanged case -- guard the call
   service-impact <base_sha> <service> [<path>...]
   impact <base_sha> [<path>...]
 EOF
