@@ -1154,6 +1154,15 @@ push_ledger_fixture() {
   [ "$output" = "verdict=BLOCK attestation=verified" ]
 }
 
+# What: A bad attestation must never mask a real MISMATCH.
+# Why: REJECTED is the stronger, more honest finding here.
+# From: Issue #1095
+@test "ci_artifact_admission: MISMATCH stays REJECTED even with a garbage attestation input" {
+  run --separate-stderr ci_artifact_admission MISMATCH "totally-bogus"
+  [ "$status" -ne 0 ]
+  [ "$output" = "verdict=REJECTED attestation=totally-bogus" ]
+}
+
 # What: Proof that no input combination yields BUILD.
 # Why: doc 24; build never auto-grants ARTIFACT ACK.
 # From: Issue #1095
@@ -1328,6 +1337,58 @@ write_ledger_fixture_file() {
   run --separate-stderr ci_ledger_read origin bogus-service linux/amd64 "sha256:$a64"
   [ "$status" -eq "$CI_LEDGER_UNKNOWN" ]
   run --separate-stderr ci_ledger_read origin dns linux/amd64 "not-a-digest"
+  [ "$status" -eq "$CI_LEDGER_UNKNOWN" ]
+}
+
+# What: A record at the right ref path, wrong payload key.
+# Why: A misplaced record must never leak a wrong digest.
+# From: Issue #1095
+@test "ci_ledger_read: UNKNOWN when the record's own key differs from the one queried" {
+  local clone; clone="$(init_ledger_repo)"
+  local ref; ref="$(ci_ledger_ref dns linux/amd64 "sha256:$a64")"
+  # What: a valid ui/arm64 record at dns/amd64's ref.
+  # Why: proves the key cross-check, not only schema shape.
+  # From: Issue #1095
+  local json
+  json="$(ledger_record_json ui linux/arm64 "sha256:$b64" "sha256:$c64" \
+    ACCEPTED unverifiable)"
+  push_ledger_fixture "$clone" "$ref" "$json"
+
+  cd "$clone"
+  run --separate-stderr ci_ledger_read origin dns linux/amd64 "sha256:$a64"
+  [ "$status" -eq "$CI_LEDGER_UNKNOWN" ]
+  [ -z "$output" ]
+}
+
+# What: A REJECTED record must never read back as reusable.
+# Why: doc 25; a permanent finding is not "no record found".
+# From: Issue #1095
+@test "ci_ledger_read: a matching-key REJECTED record is CI_LEDGER_REJECTED, never PRESENT" {
+  local clone; clone="$(init_ledger_repo)"
+  local ref; ref="$(ci_ledger_ref dns linux/amd64 "sha256:$a64")"
+  local json
+  json="$(ledger_record_json dns linux/amd64 "sha256:$a64" "sha256:$b64" \
+    REJECTED unverifiable)"
+  push_ledger_fixture "$clone" "$ref" "$json"
+
+  cd "$clone"
+  run ci_ledger_read origin dns linux/amd64 "sha256:$a64"
+  [ "$status" -eq "$CI_LEDGER_REJECTED" ]
+  [ "$status" -ne "$CI_LEDGER_PRESENT" ]
+  [ "$output" = "$json" ]
+}
+
+# What: A missing CAS library must never read as ABSENT.
+# Why: an infra gap is not proof no record exists (doc 26).
+# From: Issue #1095
+@test "ci_ledger_read fails closed to UNKNOWN when promote-lock.sh cannot be sourced" {
+  local isolated="$BATS_TEST_TMPDIR/isolated-ci/scripts/ci"
+  mkdir -p "$isolated"
+  cp "$repo_root/scripts/ci/ci.sh" "$isolated/ci.sh"
+  local clone; clone="$(init_ledger_repo)"
+  cd "$clone"
+  run --separate-stderr bash "$isolated/ci.sh" \
+    ledger-read origin dns linux/amd64 "sha256:$a64"
   [ "$status" -eq "$CI_LEDGER_UNKNOWN" ]
 }
 

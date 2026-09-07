@@ -583,6 +583,7 @@ if [[ -z "${CI_LEDGER_PRESENT:-}" ]]; then
   readonly CI_LEDGER_PRESENT=0
   readonly CI_LEDGER_ABSENT=1
   readonly CI_LEDGER_UNKNOWN=2
+  readonly CI_LEDGER_REJECTED=3
 fi
 
 # ci_post_build_readback <expected_digest> <ref>
@@ -651,6 +652,13 @@ ci_attestation_state() {
 ci_artifact_admission() {
   local readback="${1:?ci_artifact_admission: readback_verdict is required}"
   local attestation="${2:?ci_artifact_admission: attestation_state is required}"
+  # What: doc 25 REJECTED, before attestation checks.
+  # Why: a bad attestation input must not mask a MISMATCH.
+  # From: Issue #1095
+  if [[ "$readback" == "MISMATCH" ]]; then
+    printf 'verdict=REJECTED attestation=%s\n' "$attestation"
+    return 1
+  fi
   case "$attestation" in
     verified|absent_confirmed|unverifiable) : ;;
     *)
@@ -665,13 +673,6 @@ ci_artifact_admission() {
     SUCCESS)
       printf 'verdict=ACCEPTED attestation=%s\n' "$attestation"
       return 0
-      ;;
-    MISMATCH)
-      # What: doc 25; REJECTED never becomes reusable.
-      # Why: a wrong digest is permanent, not retryable.
-      # From: Issue #1095
-      printf 'verdict=REJECTED attestation=%s\n' "$attestation"
-      return 1
       ;;
     NOT_FOUND|UNKNOWN)
       printf 'verdict=BLOCK attestation=%s\n' "$attestation"
@@ -792,7 +793,10 @@ ci_ledger_read() {
   local service="${2:?ci_ledger_read: service is required}"
   local platform="${3:?ci_ledger_read: platform is required}"
   local build_identity="${4:?ci_ledger_read: build_identity is required}"
-  ci_ensure_ledger_lib
+  # What: a lib load failure must not fall through.
+  # Why: an unguarded exit must never read as ABSENT.
+  # From: Issue #1095
+  ci_ensure_ledger_lib || return "$CI_LEDGER_UNKNOWN"
   local ref
   ref="$(ci_ledger_ref "$service" "$platform" "$build_identity")" \
     || return "$CI_LEDGER_UNKNOWN"
@@ -829,8 +833,28 @@ ci_ledger_read() {
     printf 'ci_ledger_read: malformed record at %s\n' "$ref" >&2
     return "$CI_LEDGER_UNKNOWN"
   fi
+  # What: the record must describe the exact key queried.
+  # Why: a misplaced record must never leak a wrong digest.
+  # From: Issue #1095
+  if ! jq -e --arg svc "$service" --arg plat "$platform" \
+      --arg bid "$build_identity" \
+      '.service == $svc and .platform == $plat
+        and .build_identity == $bid' \
+      "$tmp_file" >/dev/null; then
+    rm -f "$tmp_file"
+    printf 'ci_ledger_read: key mismatch at %s\n' "$ref" >&2
+    return "$CI_LEDGER_UNKNOWN"
+  fi
+  local verdict
+  verdict="$(jq -r '.verdict' "$tmp_file")"
   rm -f "$tmp_file"
   printf '%s\n' "$payload"
+  # What: only an ACCEPTED record may ever count PRESENT.
+  # Why: doc 25; REJECTED/BLOCK must never look reusable.
+  # From: Issue #1095
+  if [[ "$verdict" != "ACCEPTED" ]]; then
+    return "$CI_LEDGER_REJECTED"
+  fi
   return "$CI_LEDGER_PRESENT"
 }
 
@@ -863,7 +887,8 @@ commands:
   ledger-ref <service> <platform> <build_identity>
   validate-ledger-record <file>
   ledger-read <remote> <service> <platform> <build_identity>
-    exit 0=PRESENT 1=ABSENT 2=UNKNOWN; read-only, v1 has no write
+    exit 0=PRESENT 1=ABSENT 2=UNKNOWN 3=REJECTED; only PRESENT is
+    an ACCEPTED record; read-only, v1 has no write path
 EOF
 }
 
