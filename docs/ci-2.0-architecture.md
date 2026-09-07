@@ -274,7 +274,7 @@ unreferenced artifacts -> cache lifecycle -> safe deletion.
 
 There is exactly one authoritative service list.
 
-Current members:
+Current members (frozen, 11 total — `scripts/ci/ci.sh`'s `CI_SERVICES`):
 
 ```bash
 CI_SERVICES=(
@@ -287,6 +287,8 @@ CI_SERVICES=(
     syslog
     ui
     build-tools
+    cachehamster
+    netdata
 )
 ```
 
@@ -294,14 +296,25 @@ No workflow contains a second list. No scan contains a second list. No
 release contains a second list. No GC contains a second list. No multi-arch
 job contains a second list. No full-setup job contains a second list.
 
-> **Open decision (found during review, not yet resolved):** `services/netdata/Dockerfile`
-> exists as a first-party Dockerfile but is currently **not** in
-> `CI_BUILD_SERVICES` on `current_dev`. This must be decided deliberately
-> before the service list is frozen for CI 2.0 — either "netdata is part of
-> the CI 2.0 artifact pipeline" or "netdata is explicitly out of scope" —
-> and recorded here. It must not stay missing by accident, which is exactly
-> the drift class this single-authoritative-list mechanism exists to
-> prevent.
+> **Resolved (was an open decision):** the 9-member list this section
+> previously showed predated `cachehamster` joining `build-push.yml`'s
+> `CI_BUILD_SERVICES` and never recorded `netdata` at all — both are now
+> in the frozen 11.
+>
+> `netdata` is **in**: `services/netdata/Dockerfile` is a real first-party
+> Dockerfile that installs netdata's own official prebuilt static-musl
+> release asset (pinned by `NETDATA_VERSION` + a checksum), never compiled
+> from source — this is deliberately a NOOP-first build identity (version
+> pin + checksum + base-image digest + Dockerfile/entrypoint content), not
+> a Rust/C compile like `dns` or `ui`. It is not yet wired into
+> `build-push.yml`'s `CI_BUILD_SERVICES` matrix, and `deploy/prod/` and
+> `deploy/full-setup/` still run the third-party `netdata/netdata` image —
+> that matrix/compose cutover is a separate, tracked follow-up, not part
+> of this service-list freeze.
+>
+> `services/nats` is **out**: it has no Dockerfile (only `nats.conf`), and
+> `deploy/prod/docker-compose.yml` pins the official upstream
+> `nats:2-alpine` image — there is no first-party build to track.
 
 ## 8. Central service metadata
 
