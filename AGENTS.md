@@ -14,6 +14,8 @@ This file contains repository-wide agent rules. It applies to all paths in this 
 
 - **[AG-LAW-003]** Every rule in this document MUST express binding requirements and prohibitions with RFC 2119 keywords. Binding requirements MUST use `MUST`, `REQUIRED`, or `SHALL`. Binding prohibitions MUST use `MUST NOT` or `SHALL NOT`. `SHOULD`, `SHOULD NOT`, and `MAY` MUST be used only for genuine recommendations or optional behavior and MUST NOT substitute for mandatory requirements or prohibitions. Bare imperatives, negated `MAY` constructions, or other ambiguous wording MUST NOT be used in place of the applicable RFC 2119 keyword.
 
+- **[AG-LAW-003]** Every rule reference MUST use the rule identifier in the form [XX-XX-XXX]. References to rules by AGENTS.md line numbers, including references such as AGENTS.md:Lxxx-Lxxx, MUST NOT be used. Rule identifiers MUST be treated as the stable reference mechanism. Line based references MUST NOT be treated as authoritative because their meaning can become invalid when AGENTS.md is modified. This requirement applies universally at all times to every person, automated reviewer, AI, KI, bot, agent, tool, integration, or any other party that creates, evaluates, cites, reports, or otherwise uses rule references. 
+
 ## Known Gaps and Planned Improvements
 
 - **AG-CI-022 Info has been moved to https://github.com/wiki-mod/lancache-ng/pull/1811#issuecomment-5537833400
