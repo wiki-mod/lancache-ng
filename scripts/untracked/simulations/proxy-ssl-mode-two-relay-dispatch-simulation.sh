@@ -67,6 +67,14 @@ cd "$repo_root"
 
 build_tools_image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
 
+# What: derives this run's subnet from the reserved slot.
+# Why: reuses the shared pool, not a new hardcoded range.
+# From: Issue #822
+validation_subnet="${VALIDATION_SUBNET:-172.30.99.0/27}"
+subnet_no_prefixlen="${validation_subnet%/*}"      # e.g. 172.30.147.64
+subnet_prefix="${subnet_no_prefixlen%.*}"          # e.g. 172.30.147
+subnet_base_octet="${subnet_no_prefixlen##*.}"     # e.g. 64
+
 run_id="$(date +%s)-$$"
 network_name="proxy-two-relay-sim-${run_id}"
 proxy_image="proxy-two-relay-sim:fixture-${run_id}"
@@ -111,13 +119,13 @@ echo "== Building the real proxy image (this fix applied) =="
 # Why: else COPY --from=shared-scripts triggers a bad pull.
 docker build -q -t "$proxy_image" --build-context "dns-domains=$work_dir/fixture" --build-context "shared-scripts=$repo_root/scripts/lib" services/proxy >/dev/null
 
-docker network create --subnet 172.29.77.0/24 "$network_name" >/dev/null
+docker network create --subnet "$validation_subnet" "$network_name" >/dev/null
 
-# Fixed IPs so PROXY_ALLOWED_CLIENT_CIDRS can be scoped to exactly one of
-# these two clients below -- addresses are this script's own throwaway
-# network's own subnet, not a real LAN.
-allow_ip="172.29.77.10"
-deny_ip="172.29.77.20"
+# What: fixed client IPs, base+2/+3 of the reserved slot.
+# Why: own throwaway net, not the big stack; free to reuse.
+# From: Issue #822
+allow_ip="${subnet_prefix}.$((subnet_base_octet + 2))"
+deny_ip="${subnet_prefix}.$((subnet_base_octet + 3))"
 
 echo "== Starting fake origin backends (real openssl s_server, one per hostname alias) =="
 docker run -d --name "$backend_one_container" --network "$network_name" --network-alias one.example.net \

@@ -23,6 +23,27 @@ setup() {
     # Default to a trivial stub with no raw-output job; tests exercising the
     # reusable-workflow's own shape overwrite it.
     write_trivial_sims_yml
+    # Same reasoning, for the script-level check (#822): a fixture with zero
+    # subnet-pinning scripts would trip the guard's own "found zero scripts"
+    # self-check exactly like a missing workflow file would. Every test gets
+    # one always-compliant baseline script by default; only the test
+    # exercising that self-check removes it.
+    mkdir -p "$fixture_root/scripts/untracked/simulations"
+    write_baseline_protected_simulation_script
+}
+
+# write_baseline_protected_simulation_script
+# A trivial always-compliant fixture script (sources reserve-validation-
+# subnet.sh directly, one of the two accepted protection forms) that keeps
+# scripts_examined_with_subnet_creation non-zero by default, the same role
+# write_trivial_sims_yml plays for jobs_examined_with_raw_output.
+write_baseline_protected_simulation_script() {
+    cat > "$fixture_root/scripts/untracked/simulations/baseline-protected-simulation.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$repo_root/scripts/lib/reserve-validation-subnet.sh"
+docker network create --subnet "172.30.5.0/24" baseline-net
+EOF
 }
 
 write_trivial_sims_yml() {
@@ -476,4 +497,144 @@ EOF
     run "$script" "$real_repo_root"
     [ "$status" -eq 0 ]
     [[ "$output" == *"OK"* ]]
+}
+
+@test "fails when a simulation script hardcodes a subnet with no reservation protection" {
+    # The actual #822 bug shape: proxy-ssl-mode-two-relay-dispatch-
+    # simulation.sh used to do exactly this -- a literal --subnet, no
+    # source of reserve-validation-subnet.sh, no $VALIDATION_SUBNET read --
+    # and no job anywhere ever referenced compute-validation-network's raw
+    # output, so the job-level check above could never have caught it.
+    cat > "$fixture_root/scripts/untracked/simulations/rogue-hardcoded-subnet-simulation.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+docker network create --subnet 172.29.77.0/24 "rogue-net"
+EOF
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"rogue-hardcoded-subnet-simulation.sh"* ]]
+    [[ "$output" == *"neither protection form"* ]]
+}
+
+@test "passes when a simulation script sources reserve-validation-subnet.sh directly" {
+    # Same reasoning as write_trivial_sims_yml/write_baseline_protected_
+    # simulation_script: both required workflow files must exist and the
+    # job-level check needs its own non-zero raw-output job, or unrelated
+    # "file no longer exists"/"found zero jobs" failures from THAT check
+    # would mask what this test actually verifies.
+    write_trivial_deep_validate_yml
+    write_validate_yml '  compute-validation-network:
+    runs-on: ubuntu-latest
+    outputs:
+      subnet: ${{ steps.derive.outputs.subnet }}
+    steps:
+      - run: echo derive
+
+  ssl-mitm-cache-simulation:
+    needs: compute-validation-network
+    runs-on: ubuntu-latest
+    env:
+      VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
+    steps:
+      - run: |
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/untracked/simulations/ssl-mitm-cache-simulation.sh
+'
+    cat > "$fixture_root/scripts/untracked/simulations/dhcp-style-simulation.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+# shellcheck source=scripts/lib/reserve-validation-subnet.sh
+source "$repo_root/scripts/lib/reserve-validation-subnet.sh"
+docker network create --subnet "172.29.5.0/24" dhcp-style-net
+EOF
+
+    run "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+}
+
+@test "passes when a simulation script reads \$VALIDATION_SUBNET from its wrapping job" {
+    write_trivial_deep_validate_yml
+    write_validate_yml '  compute-validation-network:
+    runs-on: ubuntu-latest
+    outputs:
+      subnet: ${{ steps.derive.outputs.subnet }}
+    steps:
+      - run: echo derive
+
+  ssl-mitm-cache-simulation:
+    needs: compute-validation-network
+    runs-on: ubuntu-latest
+    env:
+      VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
+    steps:
+      - run: |
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/untracked/simulations/ssl-mitm-cache-simulation.sh
+'
+    cat > "$fixture_root/scripts/untracked/simulations/wrapped-style-simulation.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+validation_subnet="${VALIDATION_SUBNET:-172.30.99.0/27}"
+docker network create --subnet "$validation_subnet" wrapped-style-net
+EOF
+
+    run "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+}
+
+@test "does not flag a simulation script that never pins an explicit subnet" {
+    write_trivial_deep_validate_yml
+    write_validate_yml '  compute-validation-network:
+    runs-on: ubuntu-latest
+    outputs:
+      subnet: ${{ steps.derive.outputs.subnet }}
+    steps:
+      - run: echo derive
+
+  ssl-mitm-cache-simulation:
+    needs: compute-validation-network
+    runs-on: ubuntu-latest
+    env:
+      VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
+    steps:
+      - run: |
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/untracked/simulations/ssl-mitm-cache-simulation.sh
+'
+    cat > "$fixture_root/scripts/untracked/simulations/auto-assigned-simulation.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+docker network create "auto-net-$$"
+EOF
+
+    run "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+    [[ "$output" != *"auto-assigned-simulation.sh"* ]]
+}
+
+@test "does not count a shellcheck source= directive comment alone as protection" {
+    # Mirrors "does not count a comment merely mentioning the wrapper
+    # filename as protection" above, at the script level: several real
+    # protected scripts carry a `# shellcheck source=...` directive
+    # immediately above their real `source "..."` line -- the directive
+    # comment alone, with no real source line, must not count.
+    cat > "$fixture_root/scripts/untracked/simulations/fake-sourced-simulation.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+# shellcheck source=scripts/lib/reserve-validation-subnet.sh
+docker network create --subnet 172.29.88.0/24 "fake-sourced-net"
+EOF
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"fake-sourced-simulation.sh"* ]]
+}
+
+@test "fails with a self-diagnostic when zero simulation scripts pin a subnet" {
+    rm "$fixture_root/scripts/untracked/simulations/baseline-protected-simulation.sh"
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"found zero scripts"* ]]
 }

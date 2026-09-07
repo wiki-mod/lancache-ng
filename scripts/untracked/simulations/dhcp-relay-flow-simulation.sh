@@ -9,18 +9,21 @@
 #
 # Topology (two isolated bridge networks, deliberately -- if the client and
 # the upstream server shared one segment, the server could answer the client
-# directly and the relay would be bypassed, proving nothing):
+# directly and the relay would be bypassed, proving nothing). The two /28s
+# below are carved out of ONE reserved /27 validation-subnet slot (see the
+# VALIDATION_SUBNET parsing further down), not a dedicated pool of their own:
 #
-#     client-net (192.168.60.0/24)        server-net (192.168.70.0/24)
+#     client-net (client_base/28)      server-net (server_base/28)
 #     ┌──────────┐   ┌───────────────────────────┐   ┌───────────────┐
 #     │  client  │──▶│ relay (dhcp-proxy image)   │──▶│ upstream dnsmasq DHCP │
-#     │ (no route│   │ .60.2 (giaddr) / .70.3     │   │ .70.2, pool for  │
-#     │ to server)│  │ DHCP_MODE=dnsmasq-relay    │   │ the CLIENT subnet│
-#     └──────────┘   └───────────────────────────┘   └───────────────┘
+#     │ (no route│   │ client_base+2 (giaddr) /   │   │ server_base+2,   │
+#     │ to server)│  │ server_base+3, DHCP_MODE=  │   │ pool for CLIENT  │
+#     └──────────┘   │ dnsmasq-relay              │   │ subnet           │
+#                     └───────────────────────────┘   └───────────────┘
 #
 # The client can ONLY reach the upstream through the relay. The upstream's
-# `dhcp-range` is for the client subnet (192.168.60.x), which the server
-# selects by the giaddr the relay stamps in (DHCP_RELAY_LOCAL_ADDR=192.168.60.2)
+# `dhcp-range` is for the client subnet, which the server selects by the
+# giaddr the relay stamps in (DHCP_RELAY_LOCAL_ADDR=<client-subnet relay IP>)
 # -- the #1 thing that silently breaks a relay test if the pool is on the
 # server's own subnet instead. Success = the client is OFFERED an address from
 # the client-subnet pool, which is only possible if the relay forwarded the
@@ -36,17 +39,6 @@ relay_image="lancache-ng-relay-dhcp:$$"
 relay_container="lancache-ng-relay-relay-$$"
 upstream_container="lancache-ng-relay-upstream-$$"
 client_container="lancache-ng-relay-client-$$"
-
-# Client subnet (where the client and the relay's client-facing NIC live) and
-# the disjoint server subnet (where the upstream server and the relay's
-# server-facing NIC live).
-client_subnet="192.168.60.0/24"
-relay_client_ip="192.168.60.2"
-pool_start="192.168.60.50"
-pool_end="192.168.60.60"
-server_subnet="192.168.70.0/24"
-upstream_ip="192.168.70.2"
-relay_server_ip="192.168.70.3"
 
 # The client runs a real ISC dhclient DORA (DISCOVER/OFFER/REQUEST/ACK) on the
 # client segment. A full lease acquisition -- not just an OFFER -- is the
@@ -64,15 +56,40 @@ echo "== Building the dhcp-proxy image (relay mode) from this checkout =="
 # Why: else COPY --from=shared-scripts triggers a bad pull.
 docker build -q -t "$relay_image" --build-context "shared-scripts=$repo_root/scripts/lib" services/dhcp-proxy >/dev/null
 
+# What: derives two /28s from the reserved /27 slot.
+# Why: reuses the shared pool, not a new hardcoded range.
+# From: Issue #822
+validation_subnet="${VALIDATION_SUBNET:-172.30.99.0/27}"
+subnet_no_prefixlen="${validation_subnet%/*}"      # e.g. 172.30.147.64
+subnet_prefix="${subnet_no_prefixlen%.*}"          # e.g. 172.30.147
+subnet_base_octet="${subnet_no_prefixlen##*.}"     # e.g. 64
+
+# base+0..+15 (client) and base+16..+31 (server): both aligned /28s within
+# the reserved /27, since base is always a multiple of 32 (see
+# scripts/lib/reserve-validation-subnet.sh's validation_subnet_export_env).
+client_base=$(( subnet_base_octet + 0 ))
+server_base=$(( subnet_base_octet + 16 ))
+
 echo "== Creating two isolated bridge networks =="
-docker network create --subnet "$client_subnet" "$client_net" >/dev/null
-docker network create --subnet "$server_subnet" "$server_net" >/dev/null
+docker network create --subnet "${subnet_prefix}.${client_base}/28" "$client_net" >/dev/null
+docker network create --subnet "${subnet_prefix}.${server_base}/28" "$server_net" >/dev/null
+
+# Client subnet (where the client and the relay's client-facing NIC live) and
+# the disjoint server subnet (where the upstream server and the relay's
+# server-facing NIC live). Each /28 has 14 usable hosts (base+1..base+14);
+# the pool below (base+5..base+10, 6 addresses) stays well within that.
+client_subnet="${subnet_prefix}.${client_base}/28"
+relay_client_ip="${subnet_prefix}.$((client_base + 2))"
+pool_start="${subnet_prefix}.$((client_base + 5))"
+pool_end="${subnet_prefix}.$((client_base + 10))"
+upstream_ip="${subnet_prefix}.$((server_base + 2))"
+relay_server_ip="${subnet_prefix}.$((server_base + 3))"
 
 echo "== Starting the upstream DHCP server on server-net (pool is for the CLIENT subnet) =="
 # The upstream dnsmasq owns the real lease. Its dhcp-range is the CLIENT
-# subnet: a relayed request arrives tagged with giaddr=192.168.60.2, and the
-# server matches that giaddr to this range. `interface=eth0` binds it to its
-# server-net NIC; dhcp-authoritative makes it answer immediately.
+# subnet: a relayed request arrives tagged with giaddr=$relay_client_ip, and
+# the server matches that giaddr to this range. `interface=eth0` binds it to
+# its server-net NIC; dhcp-authoritative makes it answer immediately.
 docker run -d --name "$upstream_container" \
     --network "$server_net" --ip "$upstream_ip" \
     --cap-add NET_ADMIN \
@@ -95,7 +112,7 @@ no-poll
 interface=eth0
 bind-interfaces
 dhcp-authoritative
-dhcp-range='"$pool_start"','"$pool_end"',255.255.255.0,12h
+dhcp-range='"$pool_start"','"$pool_end"',255.255.255.240,12h
 log-dhcp
 no-daemon
 EOF
@@ -233,7 +250,7 @@ fi
 # the giaddr the relay stamped selected the correct, client-subnet pool.
 offered_last="${offered_ip##*.}"
 offered_prefix="${offered_ip%.*}"
-if [[ "$offered_prefix" != "192.168.60" || "$offered_last" -lt 50 || "$offered_last" -gt 60 ]]; then
+if [[ "$offered_prefix" != "$subnet_prefix" || "$offered_last" -lt $((client_base + 5)) || "$offered_last" -gt $((client_base + 10)) ]]; then
     echo "::error::Offered IP $offered_ip is not in the client-subnet pool ${pool_start}-${pool_end} -- the relay's giaddr did not select the client subnet." >&2
     exit 1
 fi
