@@ -85,6 +85,10 @@ recordcache:
   # the record's original TTL, capped at 1 day per extension).
   # This keeps DNS working during brief upstream outages.
   serve_stale_extensions: 120
+  # What: caps how long a negative RRset stays cached here.
+  # Why: this cache, not packetcache, held the stale miss.
+  # From: Issue #1095
+  max_negative_ttl: ${PDNS_RECURSOR_NEGATIVE_TTL}
 
 # ── Packet Cache ─────────────────────────────────────────────────────────────
 packetcache:
