@@ -1434,6 +1434,23 @@ HOOK
   printf '%s' "$file"
 }
 
+# What: One arm64-only-failure docker stub, parameterized.
+# Why: dedup: only the arm64 stderr text ever differs.
+# From: Issue #1095
+write_arm64_failure_docker_stub() {
+  local stderr_text="$1"
+  cat > "$BATS_TEST_TMPDIR/bin/docker" <<STUB
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in
+    *linux-arm64*) echo "$stderr_text" >&2; exit 1 ;;
+  esac
+done
+printf '"sha256:%s"\n' "\$(printf 'a%.0s' {1..64})"
+STUB
+  chmod +x "$BATS_TEST_TMPDIR/bin/docker"
+}
+
 @test "ci_plan_service_files combines a service's own and external context dirs" {
   local repo; repo="$(init_impact_repo)"
   mkdir -p "$repo/services/proxy" "$repo/services/dns" "$repo/scripts/lib"
@@ -1648,16 +1665,7 @@ HOOK
   # What: amd64 present (REUSE), arm64 absent (BUILD).
   # Why: proves BUILD is never silently averaged into REUSE.
   # From: Issue #1095
-  cat > "$BATS_TEST_TMPDIR/bin/docker" <<'STUB'
-#!/usr/bin/env bash
-for a in "$@"; do
-  case "$a" in
-    *linux-arm64*) echo "ERROR: x: not found" >&2; exit 1 ;;
-  esac
-done
-printf '"sha256:%s"\n' "$(printf 'a%.0s' {1..64})"
-STUB
-  chmod +x "$BATS_TEST_TMPDIR/bin/docker"
+  write_arm64_failure_docker_stub "ERROR: x: not found"
 
   PATH="$BATS_TEST_TMPDIR/bin:$PATH" CI_PLAN_RESOLVE_REF_CMD="$hook" \
   GHCR_RETRY_BACKOFF_SECONDS=0 GHCR_RETRY_MAX_ATTEMPTS=1 \
@@ -1671,16 +1679,7 @@ STUB
   # What: amd64 present, arm64 network trouble (ambiguous).
   # Why: a real BLOCK on one platform beats REUSE too.
   # From: Issue #1095
-  cat > "$BATS_TEST_TMPDIR/bin/docker" <<'STUB'
-#!/usr/bin/env bash
-for a in "$@"; do
-  case "$a" in
-    *linux-arm64*) echo "dial tcp: i/o timeout" >&2; exit 1 ;;
-  esac
-done
-printf '"sha256:%s"\n' "$(printf 'a%.0s' {1..64})"
-STUB
-  chmod +x "$BATS_TEST_TMPDIR/bin/docker"
+  write_arm64_failure_docker_stub "dial tcp: i/o timeout"
 
   PATH="$BATS_TEST_TMPDIR/bin:$PATH" CI_PLAN_RESOLVE_REF_CMD="$hook" \
   GHCR_RETRY_BACKOFF_SECONDS=0 GHCR_RETRY_MAX_ATTEMPTS=1 \
@@ -1776,5 +1775,77 @@ STUB
 
 @test "dispatch plan via executed ci.sh fails closed when base_sha is missing" {
   run_ci plan
+  [ "$status" -ne 0 ]
+}
+
+# What: doc 10.1 lists head SHA as a planner input.
+# Why: full-SHA-only (doc 15) applies to it too.
+# From: Issue #1095
+@test "ci_plan: --head is validated as a full sha but never changes output" {
+  local repo; repo="$(init_impact_repo)"
+  printf '# old\n' > "$repo/README.md"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m base
+  local base; base="$(git -C "$repo" rev-parse HEAD)"
+  cd "$repo"
+
+  run ci_plan "$base" README.md
+  [ "$status" -eq 0 ]
+  local plain="$output"
+  run ci_plan --head "$base" "$base" README.md
+  [ "$status" -eq 0 ]
+  [ "$output" = "$plain" ]
+
+  run --separate-stderr ci_plan --head abcdef1 "$base" README.md
+  [ "$status" -ne 0 ]
+}
+
+# What: doc 16; branch/event are accepted but never decide.
+# Why: proves accepted without entering the core.
+# From: Issue #1095
+@test "ci_plan: --branch and --event are accepted and validated, never used in the decision" {
+  local repo; repo="$(init_impact_repo)"
+  printf '# old\n' > "$repo/README.md"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m base
+  local base; base="$(git -C "$repo" rev-parse HEAD)"
+  cd "$repo"
+
+  run ci_plan "$base" README.md
+  [ "$status" -eq 0 ]
+  local plain="$output"
+  run ci_plan --branch feat/x --event push "$base" README.md
+  [ "$status" -eq 0 ]
+  [ "$output" = "$plain" ]
+
+  run --separate-stderr ci_plan --branch
+  [ "$status" -ne 0 ]
+}
+
+# What: a stray "--*" must reject, not fall into impact ALL.
+# Why: a misparsed flag must never look like a real BLOCK.
+# From: Issue #1095
+@test "ci_plan: an unrecognized option after base_sha fails closed instead of matching ALL" {
+  local repo; repo="$(init_impact_repo)"
+  git -C "$repo" commit -q -m base --allow-empty
+  local base; base="$(git -C "$repo" rev-parse HEAD)"
+  cd "$repo"
+
+  run --separate-stderr ci_plan "$base" --json
+  [ "$status" -ne 0 ]
+
+  run --separate-stderr ci_plan --bogus-option "$base"
+  [ "$status" -ne 0 ]
+}
+
+# What: Real executed proof of the --head full-sha floor.
+# Why: Coordinator-required evidence, not only a unit call.
+# From: Issue #1095
+@test "dispatch plan via executed ci.sh rejects an abbreviated --head under real strict mode" {
+  local repo; repo="$(init_impact_repo)"
+  git -C "$repo" commit -q -m base --allow-empty
+  local base; base="$(git -C "$repo" rev-parse HEAD)"
+  cd "$repo"
+  run_ci plan --head abcdef1 "$base"
   [ "$status" -ne 0 ]
 }

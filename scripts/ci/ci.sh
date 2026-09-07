@@ -987,7 +987,12 @@ ci_plan_service() {
   local impact
   impact="$(ci_service_impact "$base_sha" "$service" "$@")" || return 1
   if [[ "$impact" == "NOOP" ]]; then
-    printf '%s\n' '{"state":"NOOP"}'
+    # What: reuses admission's own impact=none->NOOP branch.
+    # Why: AG-CODE-011; the NOOP rule lives in one place.
+    # From: Issue #1095
+    local noop_state
+    if noop_state="$(ci_build_admission none n/a)"; then :; fi
+    jq -nc --arg state "$noop_state" '{state: $state}'
     return 0
   fi
   local platforms_csv
@@ -1005,18 +1010,22 @@ ci_plan_service() {
   local -a plat_states=()
   local plat build_identity plat_json state
   for plat in "${platforms[@]}"; do
-    if (( ${#files[@]} == 0 )); then
+    build_identity=""
+    # What: skip the call entirely when there are no files.
+    # Why: ci_build_identity already requires >=1 file.
+    # From: Issue #1095
+    if (( ${#files[@]} > 0 )); then
+      if build_identity="$(ci_build_identity "$plat" "${files[@]}")"; then :; fi
+    fi
+    # What: one BLOCK fallback, reached by either failure.
+    # Why: AG-CODE-011; the fallback JSON must exist once.
+    # From: Issue #1095
+    if [[ -z "$build_identity" ]]; then
       plat_json='{"state":"BLOCK","reason":"build_identity_unavailable"}'
       state=BLOCK
     else
-      if build_identity="$(ci_build_identity "$plat" "${files[@]}")"; then :; fi
-      if [[ -z "$build_identity" ]]; then
-        plat_json='{"state":"BLOCK","reason":"build_identity_unavailable"}'
-        state=BLOCK
-      else
-        plat_json="$(ci_plan_platform_state "$service" "$plat" "$build_identity")"
-        state="$(jq -r '.state' <<< "$plat_json")"
-      fi
+      plat_json="$(ci_plan_platform_state "$service" "$plat" "$build_identity")"
+      state="$(jq -r '.state' <<< "$plat_json")"
     fi
     plat_states+=("$state")
     plat_pairs+=("$(jq -nc --arg p "$plat" --argjson b "$plat_json" '{($p): $b}')")
@@ -1044,21 +1053,65 @@ ci_plan_service() {
     '{state: $state, build_ack: $ack, platforms: $plats}'
 }
 
-# ci_plan [--json] <base_sha> [<path>...]
+# ci_plan [--json] [--head <sha>] [--branch <name>] [--event <name>]
+#         <base_sha> [<path>...]
 #
 # What: doc 9/10 planner JSON, composed from prior clusters.
 # Why: doc 10; changed never automatically implies build.
 # From: Issue #1095
 ci_plan() {
-  # What: --json is a no-op; it's the only v1 output shape.
-  # Why: doc 9 shows both "plan" and "plan --json" as valid.
+  local head_sha=""
+  # What: consumes doc 10.1's non-deciding leading options.
+  # Why: accepted+validated, never silently ignored.
   # From: Issue #1095
-  if [[ "${1:-}" == "--json" ]]; then
-    shift
-  fi
+  while [[ "${1:-}" == --* ]]; do
+    case "$1" in
+      --json)
+        # What: --json is a no-op; it's the only v1 shape.
+        # Why: doc 9 shows both "plan" and "plan --json".
+        # From: Issue #1095
+        shift
+        ;;
+      --head)
+        head_sha="${2:?ci_plan: --head requires a value}"
+        shift 2
+        ;;
+      --branch)
+        # What: accepted, validated presence, never emitted.
+        # Why: doc 16; a branch name never enters the core.
+        # From: Issue #1095
+        : "${2:?ci_plan: --branch requires a value}"
+        shift 2
+        ;;
+      --event)
+        : "${2:?ci_plan: --event requires a value}"
+        shift 2
+        ;;
+      *)
+        printf 'ci_plan: unknown option: %s\n' "$1" >&2
+        return 1
+        ;;
+    esac
+  done
   local base_sha="${1:?ci_plan: base_sha is required}"
   shift || true
   ci_require_source_sha "$base_sha" || return 1
+  if [[ -n "$head_sha" ]]; then
+    ci_require_source_sha "$head_sha" || return 1
+  fi
+  local p
+  # What: a stray "--*" after base_sha is a usage error.
+  # Why: must never fall through to impact-classify's ALL.
+  # From: Issue #1095
+  for p in "$@"; do
+    case "$p" in
+      --*)
+        printf 'ci_plan: unrecognized option after base_sha: %s\n' \
+          "$p" >&2
+        return 1
+        ;;
+    esac
+  done
 
   local -a pairs=()
   local -a states=()
@@ -1121,9 +1174,13 @@ commands:
     exit 0=PRESENT 1=ABSENT 2=UNKNOWN 3=not accepted (matching
     key, verdict REJECTED or BLOCK); only PRESENT is an ACCEPTED
     record; read-only, v1 has no write path
-  plan [--json] <base_sha> [<path>...]
+  plan [--json] [--head <sha>] [--branch <n>] [--event <n>]
+       <base_sha> [<path>...]
     prints doc 9/10 planner JSON: {global:{state}, services:{...}};
     --json is accepted as a no-op, JSON is the only v1 output;
+    --head is validated as a full sha (doc 15) but never emitted;
+    --branch/--event are accepted+validated present, never used in
+    the decision (doc 16: no branch name in the verdict core);
     paths default to CHANGED_FILES like service-impact; changed
     never becomes build (doc 10) -- CI_PLAN_RESOLVE_REF_CMD unset
     makes every IMPACTED platform resolve to BLOCK, fail-closed,
