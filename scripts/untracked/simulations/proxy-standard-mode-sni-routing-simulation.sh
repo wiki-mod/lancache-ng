@@ -134,6 +134,7 @@ docker run --rm -v "$work_dir:/certs" -w /certs "$build_tools_image" bash -c \
 echo "== Building throwaway proxy image with synthetic cdn-domains.txt fixture (sub.example.com) =="
 # What: passes shared-scripts as a named build context.
 # Why: else COPY --from=shared-scripts triggers a bad pull.
+# From: Issue #1095
 docker build -q -t "$proxy_image" --build-context "dns-domains=$work_dir/fixture" --build-context "shared-scripts=$repo_root/scripts/lib" services/proxy >/dev/null
 
 docker network create "$network_name" >/dev/null

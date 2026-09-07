@@ -54,6 +54,7 @@ trap cleanup EXIT
 echo "== Building the dhcp-proxy image (relay mode) from this checkout =="
 # What: passes shared-scripts as a named build context.
 # Why: else COPY --from=shared-scripts triggers a bad pull.
+# From: Issue #1095
 docker build -q -t "$relay_image" --build-context "shared-scripts=$repo_root/scripts/lib" services/dhcp-proxy >/dev/null
 
 # What: derives two /28s from the reserved /27 slot.

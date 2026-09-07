@@ -117,18 +117,19 @@ docker run --rm -v "$work_dir:/certs" -w /certs "$build_tools_image" bash -c \
 echo "== Building the real proxy image (this fix applied) =="
 # What: passes shared-scripts as a named build context.
 # Why: else COPY --from=shared-scripts triggers a bad pull.
+# From: Issue #1095
 docker build -q -t "$proxy_image" --build-context "dns-domains=$work_dir/fixture" --build-context "shared-scripts=$repo_root/scripts/lib" services/proxy >/dev/null
 
 docker network create --subnet "$validation_subnet" "$network_name" >/dev/null
 
 # What: fixed client IPs, base+2/+3 of the reserved slot.
-# Why: distinct from the pinned backend/proxy IPs below (#1850).
+# Why: distinct from the pinned backend/proxy IPs below.
 # From: Issue #822
 allow_ip="${subnet_prefix}.$((subnet_base_octet + 2))"
 deny_ip="${subnet_prefix}.$((subnet_base_octet + 3))"
 
 # What: pins backend/proxy IPs instead of relying on auto-IPAM.
-# Why: unpinned alloc starts at gw+1, colliding with allow/deny (#1850).
+# Why: unpinned alloc starts at gw+1, colliding with allow/deny.
 # From: Issue #1850
 backend_one_ip="${subnet_prefix}.$((subnet_base_octet + 4))"
 backend_two_ip="${subnet_prefix}.$((subnet_base_octet + 5))"

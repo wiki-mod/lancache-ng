@@ -171,6 +171,7 @@ trap cleanup EXIT
 echo "== Building the Kea DHCP image from this checkout's services/dhcp =="
 # What: passes shared-scripts as a named build context.
 # Why: else COPY --from=shared-scripts triggers a bad pull.
+# From: Issue #1095
 docker build -q -t "$kea_image_tag" --build-context "shared-scripts=$repo_root/scripts/lib" services/dhcp >/dev/null
 
 echo "== Starting docker-socket-proxy/proxy/nats from the published $image_tag images =="
