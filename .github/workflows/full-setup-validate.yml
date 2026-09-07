@@ -2,12 +2,8 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Standalone, manually-triggered end-to-end check for the full-setup
-# validation stack (deploy/full-setup/docker-compose.yml). Actually starts
-# the stack with real published images and fails if any service is
-# unhealthy or crash-looping. Deliberately separate from Build & Push: it
-# has no build/push/promote/release jobs, so it can be re-run on demand
-# without any risk of touching production images.
+# What: E2E workflow validates full-setup stack health.
+# Why: Separate from Build & Push; no risk to prod images.
 
 name: Full-Setup Validate
 
@@ -15,13 +11,9 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        # latest is intentionally not the default: this project has not cut
-        # a stable release yet, so every first-party service's :latest tag
-        # is an untouched leftover from before the promote/versioning
-        # contract existed (confirmed directly: ui/proxy/dns/watchdog/dhcp/
-        # dhcp-proxy:latest are all 1-2 weeks stale, and stack:latest --
-        # the coherent multi-service pointer -- does not exist at all). nightly
-        # is the channel actually promoted daily from master.
+        # What: Defaults to nightly, not latest.
+        # Why: :latest stale; nightly promoted daily.
+        # From: Issue #1056
         description: Stack image tag to validate against.
         required: false
         default: nightly
@@ -31,80 +23,36 @@ permissions:
 
 jobs:
 
-  # The ten simulation/validation jobs this suite shares with the per-PR
-  # full-setup-deep-validate.yml now live in one reusable workflow (issue
-  # #1014); this manual suite invokes them in dispatch mode -- a published
-  # channel tag, no PR staging. The two DHCP-proxy/Kea-mutation jobs below are
-  # manual-only and stay here.
+  # What: Invokes shared reusable workflow.
+  # Why: Single source for all validation jobs.
+  # From: Issue #1014
   full-setup-sims:
     uses: ./.github/workflows/full-setup-sims.yml
     with:
       image_tag: ${{ inputs.image_tag }}
-      # should_run / pr_staging_available / build_tools_touched are intentionally
-      # omitted: the reusable workflow's own string defaults (true / false /
-      # false) already express this dispatch-mode intent (run the suite against a
-      # published channel tag, no PR staging). Passing the literal booleans here
-      # is rejected by actionlint against those string-typed inputs, and the
-      # defaults are byte-identical in effect.
+      # What: Omits optional reusable inputs.
+      # Why: Defaults already match dispatch intent.
+      # From: Issue #1014
     secrets: inherit
 
   dhcp-proxy-pxe-simulation:
-    # Real DHCP behavior test for our own dnsmasq-proxy ProxyDHCP/PXE mode
-    # (issue #705) -- the dnsmasq-proxy service is explicitly called out as
-    # out of scope by dhcp-kea-lease-flow-simulation.sh's own header comment
-    # above ("The dnsmasq-proxy DHCP mode ... entirely different code path,
-    # out of scope for this script"), and no other check in this repo drives
-    # it with a real PXE-tagged client either: the Admin UI's own dhcp-probe
-    # container's #377 check (services/ui/src/dhcp_probe_native.rs as of
-    # issue #1288) never sets DHCP option 60 (vendor class = "PXEClient"),
-    # so it can never exercise dnsmasq's ProxyDHCP reply path at all. Builds a
-    # throwaway dnsmasq-proxy container from THIS checkout's
-    # services/dhcp-proxy on a dedicated, isolated Docker bridge network it
-    # creates and destroys itself (never the full-setup-validate compose
-    # project's network, and never a host interface), then drives a real,
-    # synthetically-crafted PXE client (the Rust tools/pxe-client-probe
-    # binary, since no off-the-shelf DHCP client can send a real PXE-tagged
-    # DHCPDISCOVER) against it for legacy
-    # BIOS and both covered UEFI architecture codes, asserting each receives
-    # a DHCPOFFER carrying the operator-configured external PXE boot server
-    # address, the architecture-appropriate boot filename, and the LanCache
-    # NG DNS servers -- plus a negative case confirming an ordinary,
-    # non-PXE-tagged DISCOVER still receives no reply at all. See
-    # scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh's own header comment and
-    # docs/dhcp-modes.md for exactly what is and is not verified (PXE menu
-    # behavior and a real TFTP/HTTP transfer against the external boot
-    # server are both explicitly out of scope -- this project only ever
-    # hands out a pointer to an operator's own existing infrastructure, per
-    # the maintainer-confirmed #705 scope decision).
-    #
-    # Independent of the full-setup-validate compose project (its own
-    # network/containers, not deploy/full-setup's), so it does not need to
-    # chain after those jobs for IP-collision reasons -- chained after
-    # dhcp-kea-lease-flow-simulation anyway simply to keep this workflow's
-    # jobs running one at a time on the shared self-hosted runner tier
-    # rather than introducing new concurrency here, matching that job's own
-    # rationale for being chained rather than parallel.
+    # What: Tests DHCP proxy PXE mode.
+    # Why: Not covered by other checks; out of scope.
+    # From: Issue #705
     name: DHCP proxy PXE simulation
     needs: full-setup-sims
     if: always()
-    # heavy, not light: this job builds and runs a real throwaway
-    # dnsmasq-proxy container plus a synthetic PXE client, not just planning.
+    # What: Heavy runner; builds and runs containers.
+    # Why: Requires dedicated self-hosted resources.
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 45
     steps:
       - uses: &checkout_centraliced_versioning actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Resolve build-tools image
-        # Deliberately not BUILD_TOOLS_REQUIRE_PUBLISHED=true, matching
-        # dhcp-kea-lease-flow-simulation's own reasoning above: this job runs
-        # this checkout's tools/build-tools/Dockerfile, which can differ from
-        # any already-published image (e.g. this branch dropped python3-scapy
-        # once the PXE probe was rewritten to Rust), so a fresh branch-local
-        # image reflects the Dockerfile actually under test. This workflow
-        # only ever runs via workflow_dispatch (event_name != pull_request),
-        # so select-build-tools-image.sh's trusted-ref path already always
-        # builds a fresh branch-local image instead of trying the published
-        # tag first.
+        # What: Does not require published image.
+        # Why: Dockerfile differs; needs fresh build.
+        # From: Issue #705
         id: build-tools-image
         run: |
           set -euo pipefail
@@ -114,9 +62,8 @@ jobs:
       - name: Run DHCP proxy PXE simulation
         env:
           DHCP_PXE_SIMULATION_CLIENT_IMAGE: ${{ steps.build-tools-image.outputs.image }}
-          # What: script also runs `cargo build --release` (pxe-client-probe).
-          # Why: same PROJECT_CARGO_LTO/PROJECT_CARGO_CODEGENUNIT sourcing
-          # as every other Cargo release build in this repo.
+          # What: Builds the pxe-client-probe.
+          # Why: Matches repo's cargo build settings.
           # From: Issue #1095
           PROJECT_CARGO_LTO: ${{ vars.PROJECT_CARGO_LTO }}
           PROJECT_CARGO_CODEGENUNIT: ${{ vars.PROJECT_CARGO_CODEGENUNIT }}
@@ -125,30 +72,14 @@ jobs:
           bash scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh
 
   dhcp-relay-flow-simulation:
-    # Real DHCP-relay behavior test for our own dnsmasq-relay mode (issue
-    # #844). Builds a throwaway relay container from THIS checkout's
-    # services/dhcp-proxy (DHCP_MODE=dnsmasq-relay), a throwaway upstream
-    # dnsmasq DHCP server, and a throwaway dhclient client, across TWO
-    # dedicated, isolated Docker bridge networks it creates and destroys
-    # itself (never the full-setup-validate compose project's network, never a
-    # host interface). The two-segment topology is deliberate: the client has
-    # no direct path to the upstream, so the upstream receiving the client's
-    # DISCOVER and offering an address from the CLIENT subnet pool is only
-    # possible if the relay genuinely forwarded the request across the segment
-    # boundary with the correct giaddr. See scripts/dhcp-relay-flow-
-    # simulation.sh's own header and docs/dhcp-modes.md for exactly what is and
-    # is not verified (the offer's return leg to the client, which depends on
-    # inter-bridge routing, is deliberately not what the assertion rests on).
-    #
-    # Self-contained (its own networks/containers, needs no published image
-    # and no build-tools image); chained after dhcp-proxy-pxe-simulation only
-    # to keep this workflow's jobs running one at a time on the shared runner,
-    # matching the sibling DHCP sims' own rationale.
+    # What: Tests dnsmasq-relay two-segment topology.
+    # Why: Validates relay forwards across segments.
+    # From: Issue #844
     name: DHCP relay flow simulation
     needs: dhcp-proxy-pxe-simulation
     if: always()
-    # heavy, not light: this job builds and runs throwaway relay/upstream/
-    # client containers across two dedicated bridge networks, not just planning.
+    # What: Heavy runner; builds relay/client containers.
+    # Why: Requires dedicated self-hosted resources.
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 45
     steps:
@@ -156,58 +87,26 @@ jobs:
       - name: Run DHCP relay flow simulation
         run: |
           set -euo pipefail
-          # Reserve a collision-free subnet (flock + retry, #820) and run the
-          # sim inside it rather than a hardcoded literal subnet pair (#822).
+          # What: Runs sim in collision-free subnet.
+          # Why: Avoids hardcoded subnet conflicts.
+          # From: Issue #822
           bash scripts/lib/run-in-validation-subnet.sh bash scripts/untracked/simulations/dhcp-relay-flow-simulation.sh
 
   dhcp-kea-ctrl-agent-mutation-simulation:
-    # Real Kea Control Agent mutation round-trip (issue #634): the sibling
-    # dhcp-kea-lease-flow-simulation job above proves our Kea service hands
-    # out correct DHCP options, but never mutates Kea's config, so it never
-    # exercises the Admin UI's kea_config_modify() code path (the function
-    # whose config-get/config-test/config-set/config-write sequence had a
-    # real, previously-undetected bug because every existing `cargo test` for
-    # it mocks Kea's response instead of hitting a real Control Agent). This
-    # job adds and removes a real static host reservation through the actual
-    # Admin UI HTTP route (POST /dhcp/static/add and /dhcp/static/remove),
-    # against a real Kea container built from this checkout's services/dhcp,
-    # and asserts a SUBSEQUENT real DHCP lease request actually reflects each
-    # change -- not just that the API call returned success or that the
-    # config file was written. See
-    # scripts/untracked/simulations/dhcp-kea-ctrl-agent-mutation-simulation.sh's own header comment
-    # and docs/dhcp-modes.md for exactly what is and is not verified.
-    # Independent of the full-setup-validate compose project's own running
-    # containers (it starts docker-socket-proxy/proxy/nats/ui and a
-    # standalone Kea container itself, tearing all of them down again), so
-    # like dhcp-kea-lease-flow-simulation it does not need to chain after the
-    # earlier jobs for IP-collision reasons -- chained after
-    # dhcp-relay-flow-simulation (the current last job in this workflow's
-    # serial chain) anyway simply to keep every job running one at a time on
-    # the shared self-hosted runner tier rather than introducing new
-    # concurrency here.
-    # Wrapped in run-in-validation-subnet.sh (issue #820): this job's own
-    # script used to hardcode 172.30.99.0/27 unconditionally, with no per-run
-    # derivation and no retry at all -- worse than the birthday-paradox-odds
-    # bug its siblings had, since EVERY invocation of this exact script, from
-    # ANY concurrent run, requested the identical literal subnet (a
-    # deterministic collision, not a rare one). Confirmed for real: this
-    # exact job died on "Pool overlaps" for lancache-ng-validation-69_
-    # validation in the run that surfaced this gap. The script itself
-    # (scripts/untracked/simulations/dhcp-kea-ctrl-agent-mutation-simulation.sh) now reads
-    # VALIDATION_SUBNET/GATEWAY/UI_IP with the same fallback-default pattern
-    # its siblings use, so wrapping it here is sufficient -- no separate
-    # per-job env threading is needed, the wrapper supplies the complete set.
+    # What: proves Kea mutation via real Admin UI call.
+    # Why: avoids subnet collision on concurrent runs.
+    # From: Issue #820
     name: DHCP Kea Control Agent mutation simulation
     needs: [full-setup-sims, dhcp-relay-flow-simulation]
     if: always()
-    # heavy, not light: this job starts docker-socket-proxy/proxy/nats/ui plus
-    # a standalone Kea container, not just planning.
+    # What: Heavy runner; starts multiple containers.
+    # Why: Requires dedicated self-hosted resources.
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 45
     steps:
       - uses: *checkout_centraliced_versioning # v7.0.1
 
-      # What: authenticates registry pulls before compose up.
+      # What: Authenticates pulls from both registries.
       # Why: pulls nats/docker-socket-proxy from docker.io.
       # From: Issue #1095
       - name: Log in to registries (GHCR + optional Docker Hub)
@@ -219,16 +118,8 @@ jobs:
           dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Resolve build-tools image
-        # Deliberately not BUILD_TOOLS_REQUIRE_PUBLISHED=true, matching
-        # dhcp-kea-lease-flow-simulation's own reasoning: confirmed directly
-        # (both the published :latest and :nightly build-tools images) that
-        # isc-dhcp-client (dhclient) is not yet present in any published
-        # build-tools image, only in this checkout's
-        # tools/build-tools/Dockerfile. This workflow only ever runs via
-        # workflow_dispatch (event_name != pull_request), so
-        # select-build-tools-image.sh's trusted-ref path already always
-        # builds a fresh branch-local image instead of trying the published
-        # tag first.
+        # What: Does not require published image.
+        # Why: Needs dhclient; not in published image yet.
         id: build-tools-image
         env:
           # What: requires dhclient in the smoke-test check.
