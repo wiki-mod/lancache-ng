@@ -292,6 +292,255 @@ ci_build_admission() {
   esac
 }
 
+# === CLUSTER 3: SERVICE INVENTORY + IMPACT DETECTION (Issue #1095) ===
+
+# What: Frozen CI_SERVICES + metadata tables (doc 7/8).
+# Why: guards readonly re-declaration on a re-source.
+# From: Issue #1095
+if [[ -z "${CI_SERVICE_TABLE_LOADED:-}" ]]; then
+  readonly CI_SERVICE_TABLE_LOADED=1
+
+  # What: The 10 build-push.yml services, plus netdata.
+  # Why: netdata has a real first-party Dockerfile (doc 7).
+  # From: Issue #1095
+  readonly -a CI_SERVICES=(
+    proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools
+    cachehamster netdata
+  )
+
+  # What: each service's own build-context directory.
+  # Why: "-g" makes this global; setup() sources ci.sh.
+  # From: Issue #1095
+  declare -gA CI_SERVICE_CONTEXT=(
+    [proxy]="services/proxy" [dns]="services/dns"
+    [watchdog]="services/watchdog" [dhcp]="services/dhcp"
+    [dhcp-proxy]="services/dhcp-proxy" [ntp]="services/ntp"
+    [syslog]="services/syslog" [ui]="services/ui"
+    [build-tools]="tools/build-tools"
+    [cachehamster]="services/cachehamster" [netdata]="services/netdata"
+  )
+  readonly -A CI_SERVICE_CONTEXT
+
+  # What: linux/ platforms actually built per service.
+  # Why: netdata pins amd64 only, no arm64 build.
+  # From: Issue #1095
+  declare -gA CI_SERVICE_PLATFORMS=(
+    [proxy]="linux/amd64,linux/arm64" [dns]="linux/amd64,linux/arm64"
+    [watchdog]="linux/amd64,linux/arm64" [dhcp]="linux/amd64,linux/arm64"
+    [dhcp-proxy]="linux/amd64,linux/arm64" [ntp]="linux/amd64,linux/arm64"
+    [syslog]="linux/amd64,linux/arm64" [ui]="linux/amd64,linux/arm64"
+    [build-tools]="linux/amd64,linux/arm64"
+    [cachehamster]="linux/amd64,linux/arm64" [netdata]="linux/amd64"
+  )
+  readonly -A CI_SERVICE_PLATFORMS
+
+  # What: AG-CI-002 tier, from each Dockerfile compile step.
+  # Why: only a real BUILD_TOOLS_IMAGE stage earns heavy.
+  # From: Issue #1095
+  declare -gA CI_SERVICE_RUNNER=(
+    [proxy]="light" [dns]="heavy" [watchdog]="heavy" [dhcp]="light"
+    [dhcp-proxy]="light" [ntp]="light" [syslog]="light" [ui]="heavy"
+    [build-tools]="heavy" [cachehamster]="heavy" [netdata]="light"
+  )
+  readonly -A CI_SERVICE_RUNNER
+
+  # What: named external context(s) this service consumes.
+  # Why: empty string means no external context (doc 8).
+  # From: Issue #1095
+  declare -gA CI_SERVICE_EXTERNAL_CONTEXT=(
+    [proxy]="dns-domains=services/dns shared-scripts=scripts/lib"
+    [dns]="shared-scripts=scripts/lib"
+    [watchdog]="shared-scripts=scripts/lib"
+    [dhcp]="shared-scripts=scripts/lib"
+    [dhcp-proxy]="shared-scripts=scripts/lib"
+    [ntp]="" [syslog]=""
+    [ui]="shared-scripts=scripts/lib"
+    [build-tools]="" [cachehamster]="" [netdata]=""
+  )
+  readonly -A CI_SERVICE_EXTERNAL_CONTEXT
+fi
+
+# ci_known_service <name>
+#
+# What: True only for a name present in CI_SERVICES.
+# Why: A typo must fail closed, never report a silent NOOP.
+# From: Issue #1095
+ci_known_service() {
+  local name="${1:?ci_known_service: name is required}" s
+  for s in "${CI_SERVICES[@]}"; do
+    [[ "$s" == "$name" ]] && return 0
+  done
+  return 1
+}
+
+# ci_service_meta <service> <context|platforms|runner|external-context>
+#
+# What: One central service-metadata lookup (doc 8).
+# Why: One table, not duplicated per workflow/matrix job.
+# From: Issue #1095
+ci_service_meta() {
+  local service="${1:?ci_service_meta: service is required}"
+  local field="${2:?ci_service_meta: field is required}"
+  ci_known_service "$service" || {
+    printf 'ci_service_meta: unknown service: %s\n' "$service" >&2
+    return 1
+  }
+  case "$field" in
+    context) printf '%s\n' "${CI_SERVICE_CONTEXT[$service]}" ;;
+    platforms) printf '%s\n' "${CI_SERVICE_PLATFORMS[$service]}" ;;
+    runner) printf '%s\n' "${CI_SERVICE_RUNNER[$service]}" ;;
+    external-context)
+      printf '%s\n' "${CI_SERVICE_EXTERNAL_CONTEXT[$service]}" ;;
+    *)
+      printf 'ci_service_meta: unknown field: %s\n' "$field" >&2
+      return 1
+      ;;
+  esac
+}
+
+# ci_impact_classify <path>
+#
+# What: Maps one changed path to its impacted service(s).
+# Why: doc 13; a file path is never the service boundary.
+# From: Issue #1095
+ci_impact_classify() {
+  local path="${1:?ci_impact_classify: path is required}"
+  case "$path" in
+    # What: proxy's dns-domains context copies this file.
+    # Why: doc 13's own cross-service dependency example.
+    # From: Issue #1095
+    services/dns/cdn-domains.txt)
+      printf 'dns proxy\n' ;;
+    # What: the only file any shared-scripts consumer COPYs.
+    # Why: grep-verified; no other scripts/lib file is used.
+    # From: Issue #1095
+    scripts/lib/verify-version-banner.sh)
+      printf 'proxy dns watchdog dhcp dhcp-proxy ui\n' ;;
+    # What: root Cargo.lock shared by dns/watchdog/ui.
+    # Why: --locked needs one consistent workspace lockfile.
+    # From: Issue #1095
+    Cargo.toml | Cargo.lock)
+      printf 'dns watchdog ui\n' ;;
+    # What: markdown has no build/runtime identity here.
+    # Why: doc 12.4: docs are NOOP unless a build input.
+    # From: Issue #1095
+    *.md)
+      printf 'NONE\n' ;;
+    services/proxy/*) printf 'proxy\n' ;;
+    services/dns/*) printf 'dns\n' ;;
+    services/watchdog/*) printf 'watchdog\n' ;;
+    services/dhcp-proxy/*) printf 'dhcp-proxy\n' ;;
+    services/dhcp/*) printf 'dhcp\n' ;;
+    services/ntp/*) printf 'ntp\n' ;;
+    services/syslog/*) printf 'syslog\n' ;;
+    services/ui/*) printf 'ui\n' ;;
+    services/cachehamster/*) printf 'cachehamster\n' ;;
+    services/netdata/*) printf 'netdata\n' ;;
+    tools/build-tools/*) printf 'build-tools\n' ;;
+    *)
+      # What: unclassified path, service impact unproven.
+      # Why: AG-INT-002 floor: never silent-NOOP on doubt.
+      # From: Issue #1095
+      printf 'ALL\n' ;;
+  esac
+}
+
+# ci_semantic_changed <base_sha> <path>
+#
+# What: True if $path's content changed vs base_sha.
+# Why: doc 12.5 normalization; comment-only skips a build.
+# From: Issue #1095
+ci_semantic_changed() {
+  local base_sha="${1:?ci_semantic_changed: base_sha is required}"
+  local path="${2:?ci_semantic_changed: path is required}"
+  ci_require_source_sha "$base_sha" || return 2
+  # What: a missing working-tree file is a real change.
+  # Why: a removed build input is never a silent NOOP.
+  # From: Issue #1095
+  if [[ ! -f "$path" ]]; then
+    return 0
+  fi
+  local old_tmp
+  old_tmp="$(mktemp)" || return 2
+  # What: reads $path as of base_sha, if it existed there.
+  # Why: a brand-new path has no prior baseline to compare.
+  # From: Issue #1095
+  if ! git show "${base_sha}:${path}" >"$old_tmp" 2>/dev/null; then
+    rm -f "$old_tmp"
+    return 0
+  fi
+  local new_norm old_norm
+  if ! new_norm="$(ci_normalize "$path")"; then
+    rm -f "$old_tmp"
+    return 2
+  fi
+  if ! old_norm="$(ci_normalize "$old_tmp")"; then
+    rm -f "$old_tmp"
+    return 2
+  fi
+  rm -f "$old_tmp"
+  [[ "$new_norm" != "$old_norm" ]]
+}
+
+# ci_service_impact <base_sha> <service> [<path>...]
+#
+# What: NOOP/IMPACTED for one service over changed paths.
+# Why: doc 11 front-sieve; NOOP by default, no silent skip.
+# From: Issue #1095
+ci_service_impact() {
+  local base_sha="${1:?ci_service_impact: base_sha is required}"
+  local service="${2:?ci_service_impact: service is required}"
+  shift 2 || true
+  ci_require_source_sha "$base_sha" || return 1
+  ci_known_service "$service" || {
+    printf 'ci_service_impact: unknown service: %s\n' "$service" >&2
+    return 1
+  }
+  local -a paths=("$@")
+  # What: falls back to CHANGED_FILES when no args given.
+  # Why: doc 9; caller may pass args or the env list.
+  # From: Issue #1095
+  if (( ${#paths[@]} == 0 )) && [[ -n "${CHANGED_FILES:-}" ]]; then
+    read -ra paths <<< "${CHANGED_FILES//$'\n'/ }"
+  fi
+  local p classes cls
+  for p in "${paths[@]}"; do
+    [[ -n "$p" ]] || continue
+    classes="$(ci_impact_classify "$p")"
+    [[ "$classes" == "NONE" ]] && continue
+    if [[ "$classes" == "ALL" ]]; then
+      # What: fail-closed ALL skips the semantic check.
+      # Why: an unclassified path is never "just a comment".
+      # From: Issue #1095
+      printf 'IMPACTED\n'
+      return 0
+    fi
+    for cls in $classes; do
+      if [[ "$cls" == "$service" ]] \
+          && ci_semantic_changed "$base_sha" "$p"; then
+        printf 'IMPACTED\n'
+        return 0
+      fi
+    done
+  done
+  printf 'NOOP\n'
+}
+
+# ci_impact <base_sha> [<path>...]
+#
+# What: per-service NOOP/IMPACTED over CI_SERVICES.
+# Why: doc 9/10; one machine-readable line per service.
+# From: Issue #1095
+ci_impact() {
+  local base_sha="${1:?ci_impact: base_sha is required}"
+  shift || true
+  local svc state
+  for svc in "${CI_SERVICES[@]}"; do
+    state="$(ci_service_impact "$base_sha" "$svc" "$@")" || return 1
+    printf '%s=%s\n' "$svc" "$state"
+  done
+}
+
 ci_usage() {
   cat >&2 <<'EOF'
 usage: ci.sh <command> [args]
@@ -304,6 +553,11 @@ commands:
   normalize <file>
   build-identity <platform> <file...>
   admission <impact> <resolver_state>
+  service-meta <service> <context|platforms|runner|external-context>
+  impact-classify <path>
+  semantic-changed <base_sha> <path>
+  service-impact <base_sha> <service> [<path>...]
+  impact <base_sha> [<path>...]
 EOF
 }
 
@@ -325,6 +579,11 @@ ci_main() {
     normalize) ci_normalize "$@" ;;
     build-identity) ci_build_identity "$@" ;;
     admission) ci_build_admission "$@" ;;
+    service-meta) ci_service_meta "$@" ;;
+    impact-classify) ci_impact_classify "$@" ;;
+    semantic-changed) ci_semantic_changed "$@" ;;
+    service-impact) ci_service_impact "$@" ;;
+    impact) ci_impact "$@" ;;
     ""|-h|--help) ci_usage; return 2 ;;
     *)
       printf 'ci.sh: unknown command: %s\n' "$cmd" >&2

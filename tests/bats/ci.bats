@@ -570,3 +570,352 @@ FIXTURE
   [ "$status" -eq 0 ]
   [ "$output" = "NOOP" ]
 }
+
+# === CLUSTER 3: SERVICE INVENTORY + IMPACT DETECTION (Issue #1095) ===
+
+# What: A throw-away git repo for real base_sha comparisons.
+# Why: ci_semantic_changed runs real git, not a stub.
+# From: Issue #1095
+init_impact_repo() {
+  local dir="$BATS_TEST_TMPDIR/repo"
+  mkdir -p "$dir"
+  git -C "$dir" init -q
+  git -C "$dir" config user.email "ci@lancache-ng.test"
+  git -C "$dir" config user.name "lancache-ng ci"
+  printf '%s' "$dir"
+}
+
+@test "CI_SERVICES is the frozen 11-service inventory (10 + netdata, nats excluded)" {
+  [ "${#CI_SERVICES[@]}" -eq 11 ]
+  local svc found_netdata=0 found_nats=0
+  for svc in "${CI_SERVICES[@]}"; do
+    [ "$svc" = "netdata" ] && found_netdata=1
+    [ "$svc" = "nats" ] && found_nats=1
+  done
+  [ "$found_netdata" -eq 1 ]
+  [ "$found_nats" -eq 0 ]
+}
+
+@test "ci_known_service accepts every CI_SERVICES member and rejects an unknown name" {
+  local svc
+  for svc in "${CI_SERVICES[@]}"; do
+    run ci_known_service "$svc"
+    [ "$status" -eq 0 ]
+  done
+  run ci_known_service "bogus-service"
+  [ "$status" -ne 0 ]
+}
+
+@test "ci_service_meta returns the recorded context/platforms/runner/external-context" {
+  run ci_service_meta proxy context
+  [ "$output" = "services/proxy" ]
+  run ci_service_meta proxy external-context
+  [ "$output" = "dns-domains=services/dns shared-scripts=scripts/lib" ]
+  run ci_service_meta netdata platforms
+  # What: netdata pins amd64 only, no arm64 build.
+  # Why: doc 8 metadata must match the real Dockerfile.
+  # From: Issue #1095
+  [ "$output" = "linux/amd64" ]
+  run ci_service_meta netdata runner
+  [ "$output" = "light" ]
+  run ci_service_meta dns runner
+  [ "$output" = "heavy" ]
+  run ci_service_meta cachehamster external-context
+  [ "$output" = "" ]
+}
+
+@test "ci_service_meta fails closed on an unknown service and an unknown field" {
+  run --separate-stderr ci_service_meta bogus context
+  [ "$status" -ne 0 ]
+  run --separate-stderr ci_service_meta proxy bogus-field
+  [ "$status" -ne 0 ]
+}
+
+@test "ci_impact_classify maps the verified cross-service dependency edges" {
+  run ci_impact_classify services/dns/cdn-domains.txt
+  [ "$output" = "dns proxy" ]
+  run ci_impact_classify scripts/lib/verify-version-banner.sh
+  [ "$output" = "proxy dns watchdog dhcp dhcp-proxy ui" ]
+  run ci_impact_classify Cargo.toml
+  [ "$output" = "dns watchdog ui" ]
+  run ci_impact_classify Cargo.lock
+  [ "$output" = "dns watchdog ui" ]
+}
+
+# What: cachehamster builds from its own isolated context.
+# Why: its Dockerfile never copies the workspace lockfile.
+# From: Issue #1095
+@test "ci_impact_classify excludes cachehamster from the root workspace lockfile edge" {
+  run ci_impact_classify Cargo.lock
+  [[ "$output" != *cachehamster* ]]
+  run ci_impact_classify services/cachehamster/Cargo.toml
+  [ "$output" = "cachehamster" ]
+}
+
+@test "ci_impact_classify treats every markdown path as NONE regardless of location" {
+  run ci_impact_classify README.md
+  [ "$output" = "NONE" ]
+  run ci_impact_classify docs/ci-2.0-architecture.md
+  [ "$output" = "NONE" ]
+  run ci_impact_classify services/dns/README.md
+  [ "$output" = "NONE" ]
+}
+
+@test "ci_impact_classify maps each service's own context prefix to itself only" {
+  run ci_impact_classify services/ntp/chrony.conf
+  [ "$output" = "ntp" ]
+  run ci_impact_classify tools/build-tools/Dockerfile
+  [ "$output" = "build-tools" ]
+  run ci_impact_classify services/netdata/entrypoint.sh
+  [ "$output" = "netdata" ]
+}
+
+@test "ci_impact_classify fails closed to ALL for an unclassified path" {
+  run ci_impact_classify some/unknown/new-top-level-file.sh
+  [ "$output" = "ALL" ]
+  run ci_impact_classify deploy/prod/docker-compose.yml
+  [ "$output" = "ALL" ]
+}
+
+@test "ci_semantic_changed is false for a comment-only change and true for a real change" {
+  local repo; repo="$(init_impact_repo)"
+  mkdir -p "$repo/services/dns"
+  printf 'cmd1\n# old comment\ncmd2\n' > "$repo/services/dns/entrypoint.sh"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m base
+  local base; base="$(git -C "$repo" rev-parse HEAD)"
+
+  cd "$repo"
+  printf 'cmd1\n# a totally different comment\ncmd2\n\n' \
+    > services/dns/entrypoint.sh
+  run ci_semantic_changed "$base" services/dns/entrypoint.sh
+  [ "$status" -eq 1 ]
+
+  printf 'cmd1\ncmd3\n' > services/dns/entrypoint.sh
+  run ci_semantic_changed "$base" services/dns/entrypoint.sh
+  [ "$status" -eq 0 ]
+}
+
+@test "ci_semantic_changed is true when the path is new or was removed" {
+  local repo; repo="$(init_impact_repo)"
+  printf 'unrelated\n' > "$repo/keep.sh"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m base
+  local base; base="$(git -C "$repo" rev-parse HEAD)"
+
+  cd "$repo"
+  # What: a path absent from base_sha has no baseline.
+  # Why: a brand-new build input is never a silent NOOP.
+  # From: Issue #1095
+  printf 'new\n' > brand-new.sh
+  run ci_semantic_changed "$base" brand-new.sh
+  [ "$status" -eq 0 ]
+
+  # What: a missing working-tree file is a real change too.
+  # Why: a removed build input is never a silent NOOP.
+  # From: Issue #1095
+  run ci_semantic_changed "$base" keep.sh
+  [ "$status" -eq 1 ]
+  rm -f keep.sh
+  run ci_semantic_changed "$base" keep.sh
+  [ "$status" -eq 0 ]
+}
+
+@test "ci_service_impact: comment-only dns change is NOOP, real dns change is IMPACTED" {
+  local repo; repo="$(init_impact_repo)"
+  mkdir -p "$repo/services/dns"
+  printf 'cmd1\n# old\ncmd2\n' > "$repo/services/dns/entrypoint.sh"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m base
+  local base; base="$(git -C "$repo" rev-parse HEAD)"
+  cd "$repo"
+
+  printf 'cmd1\n# new wording only\ncmd2\n' > services/dns/entrypoint.sh
+  run ci_service_impact "$base" dns services/dns/entrypoint.sh
+  [ "$status" -eq 0 ]
+  [ "$output" = "NOOP" ]
+
+  printf 'cmd1\ncmd_changed\n' > services/dns/entrypoint.sh
+  run ci_service_impact "$base" dns services/dns/entrypoint.sh
+  [ "$status" -eq 0 ]
+  [ "$output" = "IMPACTED" ]
+}
+
+@test "ci_service_impact: cdn-domains.txt change impacts dns and proxy, not an unrelated service" {
+  local repo; repo="$(init_impact_repo)"
+  mkdir -p "$repo/services/dns"
+  printf 'cdn.example.com\n' > "$repo/services/dns/cdn-domains.txt"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m base
+  local base; base="$(git -C "$repo" rev-parse HEAD)"
+  cd "$repo"
+  printf 'cdn.example.com\nnew.example.com\n' > services/dns/cdn-domains.txt
+
+  run ci_service_impact "$base" dns services/dns/cdn-domains.txt
+  [ "$output" = "IMPACTED" ]
+  run ci_service_impact "$base" proxy services/dns/cdn-domains.txt
+  [ "$output" = "IMPACTED" ]
+  run ci_service_impact "$base" ntp services/dns/cdn-domains.txt
+  [ "$output" = "NOOP" ]
+}
+
+@test "ci_service_impact: shared-scripts change impacts all 6 consumers, not a non-consumer" {
+  local repo; repo="$(init_impact_repo)"
+  mkdir -p "$repo/scripts/lib"
+  printf 'echo v1\n' > "$repo/scripts/lib/verify-version-banner.sh"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m base
+  local base; base="$(git -C "$repo" rev-parse HEAD)"
+  cd "$repo"
+  printf 'echo v2 changed\n' > scripts/lib/verify-version-banner.sh
+
+  local svc
+  for svc in proxy dns watchdog dhcp dhcp-proxy ui; do
+    run ci_service_impact "$base" "$svc" scripts/lib/verify-version-banner.sh
+    [ "$output" = "IMPACTED" ]
+  done
+  for svc in ntp syslog build-tools cachehamster netdata; do
+    run ci_service_impact "$base" "$svc" scripts/lib/verify-version-banner.sh
+    [ "$output" = "NOOP" ]
+  done
+}
+
+@test "ci_service_impact: root Cargo.lock change excludes cachehamster" {
+  local repo; repo="$(init_impact_repo)"
+  printf 'lockfile v1\n' > "$repo/Cargo.lock"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m base
+  local base; base="$(git -C "$repo" rev-parse HEAD)"
+  cd "$repo"
+  printf 'lockfile v2\n' > Cargo.lock
+
+  local svc
+  for svc in dns watchdog ui; do
+    run ci_service_impact "$base" "$svc" Cargo.lock
+    [ "$output" = "IMPACTED" ]
+  done
+  run ci_service_impact "$base" cachehamster Cargo.lock
+  [ "$output" = "NOOP" ]
+}
+
+@test "ci_service_impact: a pure documentation path is NOOP for every service" {
+  local repo; repo="$(init_impact_repo)"
+  printf '# old\n' > "$repo/README.md"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m base
+  local base; base="$(git -C "$repo" rev-parse HEAD)"
+  cd "$repo"
+  printf '# completely rewritten heading\nmore text\n' > README.md
+
+  local svc
+  for svc in "${CI_SERVICES[@]}"; do
+    run ci_service_impact "$base" "$svc" README.md
+    [ "$output" = "NOOP" ]
+  done
+}
+
+# What: Proves the AG-INT-002 fail-closed floor per service.
+# Why: An unmapped path must never silently NOOP anywhere.
+# From: Issue #1095
+@test "ci_service_impact: an unknown path fails closed to IMPACTED for every service" {
+  local repo; repo="$(init_impact_repo)"
+  printf 'x\n' > "$repo/keep.sh"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m base
+  local base; base="$(git -C "$repo" rev-parse HEAD)"
+  cd "$repo"
+
+  local svc
+  for svc in "${CI_SERVICES[@]}"; do
+    run ci_service_impact "$base" "$svc" some/unmapped/new-path.sh
+    [ "$status" -eq 0 ]
+    [ "$output" = "IMPACTED" ]
+  done
+}
+
+@test "ci_service_impact fails closed on an unknown service name" {
+  local repo; repo="$(init_impact_repo)"
+  git -C "$repo" commit -q -m base --allow-empty
+  local base; base="$(git -C "$repo" rev-parse HEAD)"
+  cd "$repo"
+  run --separate-stderr ci_service_impact "$base" bogus-service some/path.sh
+  [ "$status" -ne 0 ]
+}
+
+@test "ci_service_impact reads CHANGED_FILES from the environment when no paths are given" {
+  local repo; repo="$(init_impact_repo)"
+  mkdir -p "$repo/services/proxy" "$repo/services/ntp"
+  printf 'old\n' > "$repo/services/proxy/nginx.conf"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m base
+  local base; base="$(git -C "$repo" rev-parse HEAD)"
+  cd "$repo"
+  printf 'new content\n' > services/proxy/nginx.conf
+
+  CHANGED_FILES=$'services/proxy/nginx.conf\nservices/ntp/missing.conf' \
+    run ci_service_impact "$base" proxy
+  [ "$output" = "IMPACTED" ]
+  CHANGED_FILES="services/proxy/nginx.conf" \
+    run ci_service_impact "$base" ntp
+  [ "$output" = "NOOP" ]
+}
+
+@test "ci_impact prints one NOOP/IMPACTED line per service for the full CI_SERVICES set" {
+  local repo; repo="$(init_impact_repo)"
+  mkdir -p "$repo/services/dns"
+  printf 'x\n' > "$repo/services/dns/cdn-domains.txt"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m base
+  local base; base="$(git -C "$repo" rev-parse HEAD)"
+  cd "$repo"
+  printf 'x\ny\n' > services/dns/cdn-domains.txt
+
+  run ci_impact "$base" services/dns/cdn-domains.txt
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"dns=IMPACTED"* ]]
+  [[ "$output" == *"proxy=IMPACTED"* ]]
+  [[ "$output" == *"ntp=NOOP"* ]]
+  [ "$(printf '%s\n' "$output" | wc -l)" -eq 11 ]
+}
+
+@test "dispatch service-meta via executed ci.sh" {
+  run_ci service-meta dns runner
+  [ "$status" -eq 0 ]
+  [ "$output" = "heavy" ]
+  run_ci service-meta bogus context
+  [ "$status" -ne 0 ]
+}
+
+@test "dispatch impact-classify via executed ci.sh" {
+  run_ci impact-classify services/dns/cdn-domains.txt
+  [ "$status" -eq 0 ]
+  [ "$output" = "dns proxy" ]
+}
+
+# What: Real executed proof of the fail-closed floor.
+# Why: Coordinator-required evidence, not only a unit call.
+# From: Issue #1095
+@test "dispatch service-impact via executed ci.sh fails closed to IMPACTED on an unknown path under real strict mode" {
+  local repo; repo="$(init_impact_repo)"
+  git -C "$repo" commit -q -m base --allow-empty
+  local base; base="$(git -C "$repo" rev-parse HEAD)"
+  cd "$repo"
+  run_ci service-impact "$base" ntp some/unmapped/path.sh
+  [ "$status" -eq 0 ]
+  [ "$output" = "IMPACTED" ]
+}
+
+@test "dispatch impact via executed ci.sh reports every service under real strict mode" {
+  local repo; repo="$(init_impact_repo)"
+  printf 'x\n' > "$repo/README.md"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m base
+  local base; base="$(git -C "$repo" rev-parse HEAD)"
+  cd "$repo"
+  printf 'y\n' >> README.md
+
+  run_ci impact "$base" README.md
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"proxy=NOOP"* ]]
+  [[ "$output" == *"netdata=NOOP"* ]]
+}
