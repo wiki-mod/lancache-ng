@@ -2,11 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Docker-free, git-free unit coverage for scripts/untracked/detect-full-setup-changes.sh
-# (#715). Feeds canned changed-file lists (via CHANGED_FILES) and asserts the
-# per-service flags + should_run gate + docs_only handling, so the deep gate's
-# "run or skip, and which services need a staging image" decisions stay
-# correct as paths are added. Mirrors build-push.yml's detect-changes rules.
+
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -86,19 +82,14 @@ value_from() {
 }
 
 @test "this deep workflow itself runs the suite but does NOT force the staging guard" {
-    # A change to this file must run the suite (should_run) yet leave workflow
-    # false: build-push does not rebuild services for it, so forcing the
-    # staging guard would fail closed on tags that were never pushed.
+
     run_detect ".github/workflows/full-setup-deep-validate.yml"
     [ "$(val workflow)" = "false" ]
     [ "$(val workflow_reuse_scope)" = "false" ]
     [ "$(val should_run)" = "true" ]
 }
 
-# G15: a full-setup-validate-only action has no build-image consumer, so it
-# must not force workflow true (which would also force the staging guard to
-# expect fresh per-commit tags for services this action never rebuilds) --
-# only should_run, via this script's own unconditional .github/actions/ check.
+
 @test "full-setup-validate-only composite action runs the suite but does not force workflow" {
     run_detect ".github/actions/derive-validation-network/action.yml"
     [ "$(val workflow)" = "false" ]
@@ -126,63 +117,28 @@ value_from() {
     [ "$(val should_run)" = "true" ]
 }
 
-# Issue #1095: a CI-tooling-only script (verified zero stack
-# dependency, now living under scripts/tracked/ -- see that directory's own
-# README and detect-full-setup-changes.sh's header comment for the full
-# history) must no longer force the deep suite to run on its own. Reproduces
-# the real, confirmed regression (PR #1333, run 30616274721: touching only
-# AGENTS.md + the then-flat scripts/check-pr-title-convention.sh ran the
-# full ~15-job simulation suite) so this test fails again if the narrowing
-# regresses. This now exercises the scripts/tracked/ prefix match, not the
-# (now-empty) ci_tooling_only_scripts array -- see the dedicated array-is-
-# empty test below for that.
+
 @test "CI-tooling-only script change alone does not force should_run" {
     run_detect "AGENTS.md" "scripts/tracked/check-pr-title-convention.sh"
     [ "$(val scripts)" = "true" ]
     [ "$(val should_run)" = "false" ]
 }
 
-# Issue #1095 (PR #1844 real over-triggering, ci/1095-overtrigger-scope):
-# scripts/ci/ci.sh is new, individually verified (repo-wide grep: not yet
-# invoked by any workflow, only referenced in build-tools-smoke.yml's own
-# paths trigger and in docs/ci-2.0-architecture.md's forward-looking plan)
-# and cannot move into scripts/tracked/ because it is not a CI-tooling
-# guard script -- it is planned to become the future build/publish driver
-# per that architecture doc, which is exactly why this uses the exact-file
-# array entry rather than a scripts/ci/ prefix rule: a prefix would keep
-# silently narrowing should_run even after ci.sh starts driving real
-# builds, which is under-triggering (AG-INT-002). The array entry must be
-# removed once ci.sh is wired into an actual build/publish/promote call.
+
 @test "scripts/ci/ci.sh alone does not force should_run (exact-file allowlist)" {
     run_detect "scripts/ci/ci.sh"
     [ "$(val scripts)" = "true" ]
     [ "$(val should_run)" = "false" ]
 }
 
-# A mixed diff must not benefit from the exact-file entry: should_run stays
-# true as soon as any other scripts/ path is not individually allowlisted,
-# mirroring the existing scripts/tracked/ mixed-diff test below.
+
 @test "a mix of scripts/ci/ci.sh and an unclassified script still runs the suite" {
     run_detect "scripts/ci/ci.sh" "scripts/some-brand-new-script-not-yet-classified.sh"
     [ "$(val should_run)" = "true" ]
 }
 
-# Was: "ci_tooling_only_scripts array is empty now that scripts/tracked/ is
-# populated" (post-v0.3.0-release, issue #1095) -- the array was genuinely
-# empty at that point because every previously allowlisted script had
-# already moved into scripts/tracked/. Changed here (issue #1095, PR #1844
-# over-triggering fix): the array is intentionally non-empty again, holding
-# exactly the one individually-verified scripts/ci/ci.sh entry documented
-# above. Asserts both the count AND the exact content, so an accidental
-# widening (an extra entry, a prefix-style value, or a typo'd path) is
-# caught here rather than silently changing what should_run narrows for.
+
 @test "ci_tooling_only_scripts array holds exactly the verified scripts/ci/ci.sh entry" {
-    # The script has no "am I sourced" guard -- it always runs emit() at the
-    # bottom -- so source it (rather than exec it) inside a subshell with a
-    # real CHANGED_FILES fixture, redirecting emit()'s own stdout away, then
-    # read the array variable back directly. This is a stronger check than
-    # grepping the script's source text for array entries: it reads the
-    # variable's real runtime state after the script's own declaration ran.
     : > "$files"
     array_contents="$(CHANGED_FILES="$files" bash -c '
         set -euo pipefail
@@ -196,9 +152,7 @@ value_from() {
 }
 
 @test "a mix of an allowlisted CI-tooling script and a real simulation script still runs the suite" {
-    # Not every touched scripts/ path is on the allowlist here, so should_run
-    # must stay true -- the allowlist only narrows the all-safe case, never a
-    # mixed diff.
+
     run_detect "scripts/tracked/check-pr-title-convention.sh" "scripts/untracked/simulations/ssl-mitm-cache-simulation.sh"
     [ "$(val should_run)" = "true" ]
 }
@@ -239,11 +193,7 @@ value_from() {
 }
 
 @test "ntp change: ntp touched, should_run true (#1296)" {
-    # Mirrors the dhcp/dhcp-proxy test above: a services/ntp/ change must set
-    # ntp=true (and only ntp, not the unrelated dhcp flags) so
-    # ensure-pr-staging-images.sh's fail-closed guard treats a PR that
-    # actually changes the ntp container as touched, instead of silently
-    # backfilling it from the base commit.
+
     run_detect "services/ntp/entrypoint.sh"
     [ "$(val ntp)" = "true" ]
     [ "$(val dhcp)" = "false" ]
@@ -272,10 +222,7 @@ value_from() {
 }
 
 @test "cdn-domains.txt-only change also sets proxy=true (#771)" {
-    # services/proxy/Dockerfile COPYs this exact file into the proxy image
-    # (the dns-domains named build context), so a domain-list-only change
-    # must force a proxy rebuild too, not just dns_image -- otherwise the
-    # proxy image's baked-in /etc/nginx/cdn-domains.txt goes stale.
+
     run_detect "services/dns/cdn-domains.txt"
     [ "$(val proxy)" = "true" ]
     [ "$(val dns_image)" = "true" ]
@@ -283,15 +230,7 @@ value_from() {
 }
 
 # --- Parity with the shared classify-image-impact.sh (AG-CODE-013
-# consolidation, PR #1523; previously
-# tests/bats/detect_full_setup_classifier_parity.bats, a separate file) ---
-#
-# Locks this detector's shared output contract to the authoritative
-# image-impact classifier so future path additions cannot silently drift.
 
-# This mixed diff exercises the special DNS-domain proxy dependency, a second
-# service, build-tools, a shared action, setup runtime, and deploy assembly in
-# one fixture. Every overlapping verdict must be byte-for-byte identical.
 @test "full-setup shared verdicts exactly match the common classifier" {
     cat > "$files" <<'EOF'
 services/dns/cdn-domains.txt
@@ -320,7 +259,5 @@ EOF
         [ "$detector_value" = "$classifier_value" ]
     done
 
-    # The full-setup-only policy remains deliberately local and must still run
-    # for this runtime/build/deploy-affecting mixed diff.
     [ "$(value_from "$detector_output" should_run)" = "true" ]
 }
