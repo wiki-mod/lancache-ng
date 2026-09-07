@@ -791,7 +791,7 @@ echo "Session established, CSRF token extracted."
 # all" apart from "reached syslog-ng but the UI didn't show it" -- the
 # precise distinction #453's last comment asked this test to make).
 assert_marker_reaches_ui() {
-    local marker="$1" description="$2" timeout="${3:-90}"
+    local marker="$1" description="$2" timeout="${3:-90}" source_container="${4:-}"
     local deadline=$((SECONDS + timeout)) body=""
     while (( SECONDS < deadline )); do
         if ! body="$(run_client "curl -sS 'http://$ip_standard:8080/logs'")"; then
@@ -811,6 +811,14 @@ assert_marker_reaches_ui() {
     echo "::group::Forwarded syslog-ng files (diagnosing UI-visibility vs. forwarding-pipeline failure)"
     "${compose[@]}" exec -T ui sh -c 'grep -r "" /var/log/lancache-syslog-ng/ 2>/dev/null | tail -n 200' || true
     echo "::endgroup::"
+    if [[ -n "$source_container" ]]; then
+        # What: dumps the source container's own raw logs on failure.
+        # Why: distinguishes never-logged from logged-but-not-forwarded.
+        # From: Issue #1095
+        echo "::group::$source_container's own raw container logs (diagnosing whether it ever emitted the marker at all)"
+        "${compose[@]}" logs --no-color --tail=100 "$source_container" 2>&1 || true
+        echo "::endgroup::"
+    fi
     return 1
 }
 
@@ -859,17 +867,25 @@ if grep -qF "$marker_nats" <<<"$body"; then
     exit 1
 fi
 
-docker run --rm --network "$network_name" \
+# What: reports the raw CONNECT probe's own failure, not just the
+# eventual /logs timeout it would otherwise cause with no visible cause.
+# Why: AG-INT-002 -- a swallowed connect/DNS failure here looked
+# identical to a real forwarding-pipeline bug in CI.
+# From: Issue #1095
+if ! nats_probe_out="$(docker run --rm --network "$network_name" \
     -e "NATS_AUTH_MARKER=$marker_nats" \
     "$BUILD_TOOLS_IMAGE" bash -c '
-        set +e
-        exec 3<>/dev/tcp/nats/4222
-        read -r -t 5 _ <&3
+        exec 3<>/dev/tcp/nats/4222 || { echo "CONNECT_FAILED: cannot open /dev/tcp/nats/4222"; exit 1; }
+        read -r -t 5 info <&3
         printf "CONNECT {\"user\":\"%s\",\"pass\":\"wrong\",\"verbose\":false,\"pedantic\":false}\r\n" "$NATS_AUTH_MARKER" >&3
-        read -r -t 3 _ <&3
+        read -r -t 3 err <&3
         sleep 1
-    ' >/dev/null 2>&1 || true
-assert_marker_reaches_ui "$marker_nats" "nats (static-user authentication-error log line carrying the attempted username)"
+        printf "server-info: %s\nserver-reply: %s\n" "$info" "$err"
+    ' 2>&1)"; then
+    echo "::warning::NATS raw-TCP auth probe itself failed (exit $?); the marker below is not expected to appear. Probe output:" >&2
+    printf '%s\n' "$nats_probe_out" >&2
+fi
+assert_marker_reaches_ui "$marker_nats" "nats (static-user authentication-error log line carrying the attempted username)" 90 nats
 
 echo "== Trigger 4/8 and 5/8: dns-standard + dns-ssl -- one real DNS record add via the Admin UI =="
 # Both dns-standard's and dns-ssl's own nats-subscriber processes durably
