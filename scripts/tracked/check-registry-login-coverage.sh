@@ -2,80 +2,6 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Standing guard: when the ten shared full-setup jobs were extracted from
-# full-setup-validate.yml/full-setup-deep-validate.yml into the reusable
-# full-setup-sims.yml (issue #1014), the GHCR-then-Docker-Hub login step
-# PR #1757/#1760 had added to full-setup-deep-validate.yml's
-# ensure-pr-staging-images job was never carried into any of the extracted
-# jobs -- full-setup-sims.yml pulled deploy/full-setup's and
-# deploy/quickstart's third-party docker.io images (nats:2-alpine,
-# tecnativa/docker-socket-proxy, netdata/netdata) fully anonymously from the
-# day it was created until a later fix restored it. That fix also found
-# three MORE jobs outside full-setup-sims.yml with the exact same gap
-# (dns-zone-rollback-simulation, dhcp-kea-ui-rollback-simulation in
-# full-setup-deep-validate.yml; dhcp-kea-ctrl-agent-mutation-simulation in
-# full-setup-validate.yml) -- confirming this is a real, recurring class of
-# regression (a job move/extraction silently dropping the login), not a
-# one-off. This script is the standing rule that stops a future job move or
-# new job from silently reintroducing an anonymous pull, mirroring
-# check-validation-subnet-wrapper-coverage.sh's own "trigger marker requires
-# a protection marker" shape for the sibling #896/#907 collision class.
-#
-# --- What counts as "pulls a docker.io image" -----------------------------
-# The set of docker.io-backed (third-party, rate-limited) services is derived
-# mechanically from each compose file's own `image:` values, not
-# hardcoded: a service is docker.io-backed unless its image starts with
-# `ghcr.io/`, `mirror.gcr.io/`, or `${LANCACHE_IMAGE_REGISTRY` (this repo's
-# own images, always ghcr.io by default). This adapts automatically if a
-# currently-docker.io-backed service (nats, docker-socket-proxy, netdata as
-# of this writing) is ever migrated to a mirror registry, or a new
-# docker.io-backed service is added to either compose file.
-#
-# --- What counts as "a job pulls one of those services" -------------------
-# A job's own YAML body, or a scripts/untracked/simulations/*.sh file it
-# names, contains a real (non-comment) `docker compose ... up -d <args>`,
-# `... pull --quiet <args>`, or `... run -d --name ... <args>` invocation
-# whose argument list includes one of the docker.io-backed service names --
-# not just any compose command (e.g. `docker compose config` never pulls
-# anything and must not trigger this). A job using the
-# reserve-validation-subnet-stack composite action (full-setup-validate) is
-# also a trigger unconditionally: that action's own `docker compose ... up
-# -d` has no service filter, so it always pulls the whole stack regardless
-# of which services this script's static scan would otherwise name.
-#
-# --- The two jobs this mechanical signal cannot see ------------------------
-# setup-cli-simulation.sh and syslog-forwarding-simulation.sh both install a
-# REAL stack by driving the actual `setup.sh` CLI end-to-end (fresh install)
-# rather than invoking `docker compose` themselves -- which services setup.sh
-# chooses to start is its own runtime logic, not a static, grep-able command
-# line in either script. Manually verified (see the PR/commit this file was
-# introduced under) that both jobs' fresh installs do pull the docker.io-
-# backed services. Listed here as an
-# explicit, named exception rather than pretended to be covered by the
-# generic mechanical signal above (see NAMED_OPAQUE_SCRIPT_TRIGGERS below).
-#
-# --- Second, unrelated coverage folded into this same file (AG-CODE-013) --
-# scripts/untracked/simulations/*.sh also `docker build`/`docker buildx
-# build` services/*/Dockerfile directly, independent of build-push.yml's own
-# `build_contexts:` matrix wiring. Those Dockerfiles `COPY --from=<name>` a
-# named build context (e.g. `shared-scripts`, PR #1783); an invocation
-# missing the matching `--build-context <name>=<path>` doesn't fail at
-# review, `bash -n`, or shellcheck time -- buildx instead treats the bare
-# name as a registry image reference and fails at BUILD time with "pull
-# access denied ... repository does not exist" deep inside a CI job. 11 such
-# invocations across 9 files had this exact gap until fixed. A required
-# named build context is every `COPY --from=<name>` value in a
-# services/*/Dockerfile that is NEITHER a numeric build-stage index NOR a
-# name already declared by an earlier `FROM ... AS <name>` line in the same
-# file NOR a real external image reference (containing "/" or ":"). Every
-# `docker build`/`docker buildx build` invocation under $SIMULATIONS_DIR
-# (backslash-continuation-joined first) must supply a matching
-# `--build-context` for each one its resolved target Dockerfile requires.
-# This was originally proposed as its own new file; the maintainer DISACKed
-# that under AG-CODE-013 (this repository already has enough build-*.sh
-# coverage scripts) and required it be folded into an existing one instead
-# -- this file's own "compose call must carry required companion flag"
-# shape for docker-io-pull login coverage is the closest existing sibling.
 #
 # Usage:
 #   scripts/tracked/check-registry-login-coverage.sh [repo_root]
@@ -122,13 +48,7 @@ fail() {
 }
 
 # extract_dockerhub_services <compose_file>
-# Prints one service name per line for every service in <compose_file> whose
-# `image:` is NOT ghcr.io/mirror.gcr.io/${LANCACHE_IMAGE_REGISTRY...}-backed
-# (see header comment). Anchored to this repo's own fixed compose-file
-# indentation (services: at column 0, service names at 2 spaces, image: at 4
-# spaces), matching check-bats-path-filter-coverage.sh's own tradeoff of a
-# tightly-coupled-to-current-layout awk scan over pulling in a real YAML
-# parser this project has never depended on.
+
 extract_dockerhub_services() {
     local file="$1"
     awk '
@@ -223,12 +143,7 @@ job_triggers_login_requirement() {
     return 1
 }
 
-# strip_leading_whitespace / indent_width / is_job_name_line / check_job_body
-# / check_workflow_file below reuse check-validation-subnet-wrapper-
-# coverage.sh's own job-body-extraction shape verbatim (same fixed
-# 2-space-indented job-name-key layout, same reasoning for plain
-# bash string/glob matching over awk/PCRE) rather than re-deriving an
-# equivalent parser -- see that script's header for the full rationale.
+# strip_leading_whitespace / indent_width / is_job_name_line / check_job_body / check_workflow_file
 strip_leading_whitespace() {
     local line="$1" leading_ws
     leading_ws="${line%%[^[:space:]]*}"
@@ -315,23 +230,6 @@ check_workflow_file() {
 build_context_invocations_examined=0
 
 # bcc_is_known_named_context <name>
-# True if <name> is a named build context this repo's own Dockerfiles are
-# known to rely on (kept in sync with `grep -h 'COPY --from=' services/*/
-# Dockerfile`: shared-scripts, PR #1783; dns-domains, services/proxy's
-# synthetic cdn-domains.txt fixture context).
-#
-# What: distinguishes a required named context from a bare image ref.
-# Why: buildx itself can't -- an unmatched bare `--from=NAME` resolves
-# against a supplied `--build-context NAME=...` first, falling back to
-# pulling NAME as an image only if none was supplied (see
-# https://docs.docker.com/reference/cli/docker/buildx/build/#build-context).
-# Dockerfile syntax alone cannot tell "alpine" (a real bare-name official
-# image) from "shared-scripts" (a required local context) apart -- both are
-# an unqualified name that is neither a numeric stage index nor an earlier
-# `FROM ... AS <name>` stage. This is an authorial-intent question, not a
-# grammar one, so it is resolved via this explicit, documented allowlist
-# rather than a heuristic guess (e.g. "contains no '/' or ':'", which
-# misclassifies every bare official image name as a required context).
 # From: Issue #1095
 BCC_KNOWN_NAMED_CONTEXTS=(
     "shared-scripts"
