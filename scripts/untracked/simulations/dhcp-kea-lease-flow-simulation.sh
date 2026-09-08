@@ -2,133 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Real DHCP behavior test for our own Kea service (issue #448) -- distinct
-# from the Admin UI's own dhcp-probe container's #377 conflict-discovery
-# check (services/ui/src/dhcp_probe_native.rs as of issue #1288, formerly
-# services/ui/dhcp-probe.sh's nmap+dhclient invocations before that
-# rewrite). That check answers "does any DHCP server answer on the LAN
-# segment, and does a client dry-run also succeed" and is intentionally
-# left unchanged by this script. This script answers a different question: does
-# OUR Kea service, when driven by a completely real DHCP client, actually
-# complete Discover/Offer/Request/Ack and hand out the address range,
-# router, DNS, NTP, and lease-time options the operator configured?
-#
-# Safety model (see the issue's acceptance criteria: "must not modify the
-# host's active network configuration" by default):
-#   - Both the Kea server and the DHCP client run as ordinary Docker
-#     containers on a throwaway bridge network created and destroyed by
-#     this script. Every container already gets its own network namespace
-#     from Docker, and this network is never bridged to any host interface
-#     or attached to the runner's real LAN -- it is exactly the "isolated
-#     network namespace ... or veth pair" approach the issue asks for, not
-#     a stretch reading of it.
-#   - The client's own veth/eth0 is left exactly as Docker's IPAM
-#     configured it: dhclient runs with `-sf /bin/true` (a no-op "apply
-#     the lease" script) -- this script deliberately still uses a real
-#     DHCP client here (a controlled, isolated-network CI test of Kea's
-#     own server behavior, not a rewrite target of issue #1288, which only
-#     replaced the Admin UI's own dhcp-probe container) -- a real lease is
-#     negotiated over the wire, but nothing ever calls `ip addr add`/
-#     `ip route` to actually apply it. Since issue #1095 (Alpine's
-#     `alpine-final` build stage ships no ISC dhclient package at all --
-#     confirmed via a real `apk search` -- see AGENTS.md's own "AG-VAL-028
-#     family assessment" entry), this script detects at container runtime
-#     whether `$client_tool_image` provides `dhclient` or BusyBox `udhcpc`
-#     (`dhcp_client_capture_script`, defined near `client_tool_image`
-#     below) and uses whichever is present; udhcpc's own equivalent to
-#     `-sf /bin/true` is a capture-only `-s` hook script that never calls
-#     `ip`/`ifconfig`/`route` either, confirmed empirically to leave the
-#     container's interface/routes untouched exactly like dhclient's own
-#     no-op script does.
-#   - Docker's own container-address allocation is confined to a small
-#     sub-range (see --ip-range below) that never overlaps the Kea pool,
-#     so there is no possibility of the test's own plumbing colliding with
-#     the addresses under test.
-#   - This script has no invasive/host-interface mode at all -- there was
-#     nothing to gate behind an opt-in flag. It only ever runs via
-#     workflow_dispatch (full-setup-validate.yml), never on every PR.
-#
-# Static host reservations (issue #707): after the base Discover/Offer/
-# Request/Ack scenario above, this script also configures a real static
-# reservation directly through Kea's own Control Agent API -- the same
-# config-get (strip "hash") -> config-test -> config-set -> config-write
-# sequence services/ui/src/routes/dhcp.rs's kea_config_modify() drives for
-# the Admin UI's /dhcp/static/add route, just called here without going
-# through the Admin UI HTTP layer -- and then runs a SECOND and THIRD real
-# DHCP client (assert_static_reservation_honored below) to prove Kea's
-# own runtime actually honors it: the reserved MAC receives the reserved,
-# out-of-pool address, and a second, unrelated MAC still receives a normal
-# pool address rather than leaking the reservation. This is a different
-# layer than issue #634's Kea Control Agent mutation test (which proves the
-# Admin UI's own Rust code path applies a reservation correctly against a
-# real Kea, through a full Admin UI + compose stack): this script proves Kea
-# itself, given that exact API surface, honors the reservation for the right
-# client and only the right client, using the lightweight single-container
-# setup already established above.
-#
-# What this script does NOT verify (documented per the issue's "must
-# document what is verified and what is not verified" criterion):
-#   - The dnsmasq-proxy DHCP mode (services/dhcp-proxy) -- entirely
-#     different code path, out of scope for this script.
-#
-# Reverse (PTR) DHCP-DDNS lease-event follow-through (issue #768) IS verified
-# below, alongside forward DDNS. It used to be BROKEN in production,
-# discovered incidentally while empirically verifying forward DDNS: Kea's D2
-# sent every reverse update's on-wire zone as the literal string
-# "in-addr.arpa." (services/dhcp/kea-dhcp-ddns.conf's reverse-ddns "name"),
-# but services/dns/entrypoint.sh never creates a zone with that exact name --
-# only narrower private-range subzones (e.g. "31.172.in-addr.arpa.") -- so
-# PowerDNS rejected every PTR update with "Can't determine backend for domain
-# 'in-addr.arpa'" (RCODE 9, NOTAUTH), for any octet, unconditionally. #768
-# fixed this by giving reverse-ddns one ddns-domains entry per private
-# reverse zone PowerDNS actually hosts (mirroring PRIVATE_REVERSE_ZONES),
-# instead of one non-existent catch-all -- see that fix's own comment in
-# services/dhcp/entrypoint.sh for the full explanation. This script's own
-# subnet ($subnet below, always 172.31.<octet>.0/24) always falls inside the
-# "31.172.in-addr.arpa." zone regardless of <octet> (that zone spans the
-# whole 172.16.0.0/12-through-172.31.0.0/16 second-octet range
-# PRIVATE_REVERSE_ZONES lists one entry per, so no test-only zone-bootstrap
-# shim is needed here the way forward DDNS's non-"lan" test domain needed
-# one above -- the real zone already exists, created unconditionally by
-# services/dns/entrypoint.sh on every start, exactly like production.
-#
-# Forward (A-record) DHCP-DDNS lease-event follow-through (issue #706, the
-# DDNS half of #557's scenario 2) IS verified below: after the lease above
-# is confirmed, this script also starts a real PowerDNS container built
-# from THIS checkout's services/dns, set as the Kea container's
-# DHCP_DNS_SERVER_IP -- the exact same variable
-# services/dhcp/kea-dhcp-ddns.conf's forward-ddns section targets for real
-# Kea DDNS updates in production -- and sharing the same DDNS_TSIG_KEY
-# secret both containers' entrypoints already validate independently in
-# production (services/dhcp/entrypoint.sh's DDNS_TSIG_KEY check,
-# services/dns/entrypoint.sh's configure_ddns_tsig). It then queries the
-# PowerDNS authoritative server directly -- dig against 127.0.0.1:5300
-# inside that container, the exact loopback address/port
-# services/dns/pdns.conf.template binds pdns_server to -- for the A record
-# Kea's kea-dhcp-ddns daemon should have created via a TSIG-signed nsupdate,
-# and asserts it matches the leased address. One piece of this setup is a
-# test-only shim, not production wiring: this script deliberately uses a
-# distinctive, run-unique DHCP_DOMAIN (see $dhcp_test_domain below, kept
-# for an unrelated pre-existing assertion) rather than production's fixed
-# "lan", so it also creates and TSIG-authorizes that one extra zone via
-# pdnsutil before Kea starts -- a step production never needs, because
-# production's real DHCP_DOMAIN ("lan") already matches the "lan." zone
-# services/dns/entrypoint.sh creates unconditionally on every start. The
-# DDNS transport/config path this exercises (TSIG key, port, bind address,
-# allow-list) is the real one; only that one zone's existence is bootstrapped
-# by this script instead of by the production entrypoint.
-#
-# This script also does not exercise the full production network topology
-# for DHCP-DDNS: in prod, the `dhcp` container runs with network_mode: host
-# and reaches PowerDNS through a published host port (see
-# deploy/prod/docker-compose.yml's dns-standard/dns-ssl "5300:5300/udp"
-# entries and config/prod/dns-*.env's DDNS_ALLOW_FROM comment), not a
-# shared Docker bridge network the way this script's throwaway Kea and
-# PowerDNS containers are. That specific host-network-mode ->
-# published-port path (and which source IP PowerDNS actually observes
-# there) was verified separately, by hand, on a real host -- not by this
-# script, which instead proves the DDNS transport/config itself is correct
-# on an isolated bridge network.
+
 set -euo pipefail
 
 if ! repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd); then
@@ -155,47 +29,7 @@ work_dir="$repo_root/.dhcp-kea-lease-flow-simulation-tmp"
 rm -rf "$work_dir"
 mkdir -p "$work_dir/client-state"
 
-# dhcp_client_capture_script (issue #1095's Alpine dhcp-client research --
-# see AGENTS.md's own "AG-VAL-028 family assessment" entry for the full
-# comparison this codifies): the in-container command run for every real
-# DHCP client negotiation in this file. Detects at container runtime which
-# client $client_tool_image actually provides -- ISC dhclient (the Debian
-# build-tools image, still the default today) or BusyBox udhcpc (the
-# Alpine build-tools candidate stage, issue #1691, which ships no ISC
-# dhclient package at all -- confirmed via a real `apk search`) -- and
-# always leaves a dhclient-compatible `lease { ... }` block at
-# /dhcp-test/dhclient.leases, so every caller below (the polling loop,
-# dhcp_lease_parse_latest) stays client-agnostic and needs no changes of
-# its own regardless of which binary actually ran.
-#
-# Neither branch ever applies the negotiated lease to the container's own
-# interface. dhclient's own -sf /bin/true (unchanged from before this
-# dispatch existed) is a real no-op apply-script. udhcpc's -s hook below
-# only ever appends the lease's option values to a file -- no ip/ifconfig/
-# route invocation anywhere in it -- which is a real, literal equivalent
-# by construction, confirmed empirically (issue #1095): unlike dhclient,
-# BusyBox delegates 100% of interface configuration to this external
-# hook script rather than doing it internally, so a hook that never calls
-# ip/ifconfig/route can never mutate interface/route state. (dhcpcd, also
-# investigated and rejected for this file, has no equivalent: its only
-# non-applying mode, -T/--test, never completes the handshake past
-# DHCPOFFER -- confirmed against this same Kea image via Kea's own
-# server-side packet log and an empty kea-leases4.csv -- and its normal
-# mode configures the interface itself via internal netlink calls with no
-# flag to suppress that.)
-#
-# The udhcpc branch also sends an explicit client hostname
-# (-x hostname:"$(hostname)"): confirmed empirically (issue #1095) that
-# Kea's DDNS (DHCP_DDNS_ENABLED=true, exercised further below) only fires
-# when the client supplies some hostname/Option 12 value for
-# ddns-replace-client-name's "when-present" default to act on -- exactly
-# what dhclient already does unconditionally via Debian's default
-# dhclient.conf (`host-name = gethostname()`, see this file's own header
-# comment on ddns_expected_fqdn below), but which udhcpc does not send on
-# its own. Without this flag, a real run showed a clean DHCPACK but no
-# DHCP_DDNS_ADD_SUCCEEDED log line and no A/PTR record at all; with it,
-# both the forward and reverse records were created exactly as with
-# dhclient.
+
 read -r -d '' dhcp_client_capture_script <<'CLIENT_SCRIPT' || true
 set -u
 if command -v dhclient >/dev/null 2>&1; then
@@ -249,77 +83,14 @@ echo DONE >> /dhcp-test/dhclient.out
 CLIENT_SCRIPT
 readonly dhcp_client_capture_script
 
-# ISC dhclient (4.4.x, the Debian isc-dhcp-client package) binds the raw DHCP
-# socket as root, then permanently drops privileges to an unprivileged,
-# package-hardcoded system account before opening this script's own -pf/-lf
-# paths or exec'ing the -sf lease-apply script below. dhclient.out keeps
-# being written fine regardless (its fd was already open, inherited from
-# this script's own shell redirect, before that privilege drop happens --
-# writing through an already-open fd needs no further permission check), but
-# any *new* file dhclient itself tries to create afterward in
-# client-state/ gets EACCES from that unprivileged identity. Confirmed
-# directly (issue #712): a real run showed "can't create
-# .../dhclient.leases: Permission denied" and "Can't create
-# .../dhclient.pid: Permission denied" interleaved with a fully successful
-# DHCPACK/bound-to exchange -- the lease negotiation itself was never the
-# problem, dhclient just couldn't persist it to disk. Making this directory
-# world-writable is safe here: it is a throwaway, per-run temp directory
-# scoped to this one script invocation, not a shared or security-sensitive
-# path, and this is what lets dhclient's post-privilege-drop identity
-# actually write the lease file the rest of this script depends on. This
-# applies only to the dhclient branch above -- BusyBox udhcpc runs as root
-# throughout (no privilege drop) and needs no such workaround, but the
-# directory is made world-writable unconditionally regardless of which
-# client ends up running, since that is determined only once the container
-# below actually starts.
+
 chmod 0777 "$work_dir/client-state"
-
-# dhcp_test_domain: a distinctive, run-unique DHCP_DOMAIN value (not the
-# production default "lan") so the domain-name-option assertion further
-# below can tell a correctly-applied DHCP_DOMAIN config apart from Kea
-# silently falling back to some internal default -- a fixed value like
-# "lan" could pass that assertion even if Kea ignored the configured
-# option entirely. Named once here (both the Kea container's DHCP_DOMAIN
-# env var and the PowerDNS test zone created for it, further below, must
-# use exactly the same value). Does not depend on the subnet octet, so it is
-# safe to fix here regardless of how the network-reservation retry below
-# resolves.
 dhcp_test_domain="lancache-dhcp448-test.lan"
-
-# $work_dir above needs no per-run uniqueness of its own: $repo_root is
-# already GitHub Actions' own per-run workspace checkout (or, run locally,
-# just this one operator's own checkout), so a fixed subdirectory name under
-# it can never collide with another run. Docker OBJECT NAMES are different:
-# the daemon on a shared self-hosted runner host is one process serving
-# every concurrent workflow run and every operator's local invocation, so
-# names need their own collision avoidance, independent of the subnet octet
-# below -- this shell's own PID ($$) is what guarantees that (two
-# concurrently-running processes on the same host can never share a PID),
-# so these names are fixed up front and never need to change across a
-# subnet-reservation retry.
 network_name="lancache-ng-dhcp448-$$"
 kea_container="lancache-ng-dhcp448-kea-$$"
 image_tag="lancache-ng-dhcp448-kea:$$"
-# dns_container/dns_image_tag (issue #706): the real PowerDNS container the
-# DDNS verification section further below builds and queries. Named
-# alongside the Kea names above for the same collision-avoidance reason.
 dns_container="lancache-ng-dhcp448-dns-$$"
 dns_image_tag="lancache-ng-dhcp448-dns:$$"
-
-# services/dhcp/entrypoint.sh refuses to start Kea at all if KEA_CTRL_TOKEN
-# or DDNS_TSIG_KEY is empty or one of its known placeholder defaults (it
-# exists to catch a real deployment left on a default secret). This is a
-# disposable, per-run test instance torn down at the end of this script, so
-# there is no need to persist these values anywhere -- generating a fresh
-# random one each run only has to satisfy that startup check and match what
-# this script itself sends back to the Control Agent API below. ddns_tsig_key
-# is shared, unmodified, with the PowerDNS container started further below
-# (issue #706) -- the same shared secret both containers' entrypoints
-# already validate independently in production, not a test-only shortcut.
-# pdns_api_key is this run's disposable equivalent for the PowerDNS
-# container's own required secret (services/dns/entrypoint.sh's
-# PDNS_API_KEY check); nothing in this script's own DDNS verification uses
-# the PowerDNS HTTP API, but the entrypoint refuses to start without it.
 if ! kea_ctrl_token="$(openssl rand -hex 32)"; then
     echo "::error::Could not generate a random KEA_CTRL_TOKEN via openssl rand." >&2
     exit 1
@@ -332,47 +103,14 @@ if ! pdns_api_key="$(openssl rand -hex 32)"; then
     echo "::error::Could not generate a random PDNS_API_KEY via openssl rand." >&2
     exit 1
 fi
-
-# `local status=$?` captures the script's real exit code before any cleanup
-# command below can overwrite $? with its own (success or failure), so
-# `exit "$status"` at the end still reports the original pass/fail result to
-# the caller (e.g. GitHub Actions) instead of whatever the last cleanup
-# command happened to return. The three docker teardown commands are also
-# ordered deliberately, not just alphabetically: the network can't be
-# removed while $kea_container is still attached to it, and the image can't
-# be removed while $kea_container still exists and references it -- doing
-# it in the reverse order would leave a dangling network or image behind on
-# every run. Each is still `|| true` regardless, so a problem tearing down
-# one of them never masks the script's real result or skips the others.
 cleanup() {
     local status=$?
     docker rm -f "$kea_container" >/dev/null 2>&1 || true
-    # dns_container/dns_image_tag (issue #706, the PowerDNS side of the DDNS
-    # verification below) are torn down here too, for the same reason: the
-    # network can't be removed while either container is still attached to
-    # it, and dns_image_tag can't be removed while dns_container still
-    # references it. Referencing these two variables is still safe even if
-    # the script exits before they are assigned below (e.g. a failure while
-    # building the Kea image) -- `docker rm -f ""`/`docker rmi ""` just fail
-    # harmlessly and get swallowed by `|| true`, same as every other
-    # teardown command here.
     docker rm -f "${dns_container:-}" >/dev/null 2>&1 || true
-    # A blind `docker network rm` right after `docker rm -f` can still lose
-    # the "has active endpoints" race (see validation_network_teardown's own
-    # comment in reserve-validation-subnet.sh): the daemon can report a
-    # container removed before its network endpoint is actually unwired.
-    # This network's name is unique per run ($$-suffixed), so a lost race
-    # here only leaks one orphaned network on the runner host rather than
-    # poisoning a sibling job -- but it still needs a real wait+retry
-    # instead of silently swallowing the failure and leaking it forever.
     validation_network_teardown "$network_name" || true
     docker rmi "$image_tag" >/dev/null 2>&1 || true
     docker rmi "${dns_image_tag:-}" >/dev/null 2>&1 || true
     rm -rf "$work_dir"
-    # Release the host-local subnet-octet lock the reservation loop below
-    # acquired (issue #820), so a concurrent run can reuse the octet
-    # immediately. Safe no-op if the loop never got as far as locking one
-    # (e.g. a failure while building the Kea image, before the loop runs).
     validation_subnet_release "${subnet_lock_holder_pid:-}"
     exit "$status"
 }
@@ -383,25 +121,6 @@ echo "== Building the Kea DHCP image from this checkout's services/dhcp =="
 # Why: else COPY --from=shared-scripts triggers a bad pull.
 docker build -q -t "$image_tag" --build-context "shared-scripts=$repo_root/scripts/lib" services/dhcp >/dev/null
 
-# A fixed subnet would collide across concurrent runs sharing one of this
-# project's self-hosted runner hosts, exactly like the full-setup validation
-# network did before #623's per-run derivation, and a bare per-run hash
-# derivation with no lock/retry still collides under real concurrency
-# exactly like full-setup-deep-validate.yml's own jobs did before #820 --
-# two concurrent runs of THIS script deriving the same octet (only 252
-# buckets) would both attempt `docker network create --subnet
-# 172.31.<octet>.0/24`, and only one can win; the loser previously died
-# outright with "Pool overlaps". This adopts the exact same host-local
-# flock-plus-retry primitives full-setup-deep-validate.yml's stack-starting
-# jobs use (scripts/lib/reserve-validation-subnet.sh), on a dedicated
-# 172.31.0.0/16 range (unused by the now-retired deploy/dev's 172.28.0.0/16,
-# v0.3.0 #766, and full-setup-validate's 172.30.0.0/16) and its OWN lock namespace
-# (/tmp/lancache-validation-locks-dhcp-kea) so this pool's octet contention
-# never unnecessarily serializes against the unrelated 172.30 pool.
-#
-# run_id/run_attempt fold in this shell's own PID and $RANDOM so a local,
-# non-CI invocation (no GITHUB_RUN_ID) still gets fresh entropy per run,
-# mirroring this script's pre-#820 fallback.
 subnet_lock_root="/tmp/lancache-validation-locks-dhcp-kea"
 subnet_max_attempts=10
 subnet_run_id="${GITHUB_RUN_ID:-local}-$$-${RANDOM:-0}"
@@ -474,43 +193,15 @@ if [[ -z "$octet" ]]; then
     exit 1
 fi
 
-# Every other address in this /24 is only knowable once the octet above is
-# actually locked in (a failed candidate is simply abandoned, never used) --
-# computed here, immediately after the winning `docker network create`,
-# rather than up front the way a single-shot derivation would.
 subnet="172.31.${octet}.0/24"
 gateway="172.31.${octet}.1"
 kea_ip="172.31.${octet}.2"
-# pdns_ip (issue #706): the real PowerDNS container the DDNS verification
-# section further below stands up. Reserved here, alongside the other fixed
-# addresses in this /24, so it stays visibly outside both the DHCP pool
-# ($pool_start-$pool_end) and $kea_ip.
 pdns_ip="172.31.${octet}.3"
 pool_start="172.31.${octet}.128"
 pool_end="172.31.${octet}.200"
 echo "Validation network is up on subnet $subnet (lock held by PID $subnet_lock_holder_pid)."
 
 echo "== Building the PowerDNS image from this checkout's services/dns (issue #706) =="
-# --build-arg BUILD_TOOLS_IMAGE=$client_tool_image (PR #769 review follow-up):
-# services/dns/Dockerfile compiles the Rust nats-subscriber binary FROM
-# whatever BUILD_TOOLS_IMAGE resolves to, defaulting to the mutable
-# ghcr.io/wiki-mod/lancache-ng/build-tools:latest tag when no --build-arg is
-# given. Without this flag, this build would silently use that moving
-# `:latest` tag instead of $client_tool_image -- the same build-tools image
-# scripts/untracked/select-build-tools-image.sh already resolved for this workflow run
-# (and, on branches that add a tool to tools/build-tools/Dockerfile, a fresh
-# branch-local build of it, per full-setup-validate.yml's own "Resolve
-# build-tools image" step for this job). That mismatch would let this DNS
-# image's Rust build silently diverge from the toolchain contract this run
-# actually resolved -- compiling against whatever `:latest` happens to
-# contain can mask a real toolchain regression on this branch (false pass)
-# or fail on an unrelated `:latest` change this branch never touched (false
-# fail). $client_tool_image is reused here rather than a second env var
-# because it already IS the resolved build-tools image -- its name reflects
-# only its original (client-container) use above, from before this DDNS
-# verification block existed.
-# What: builds from repo root, not services/dns, via -f.
-# Why: Dockerfile COPYs cross-service workspace Cargo files.
 docker build -q -t "$dns_image_tag" -f services/dns/Dockerfile \
     --build-arg "BUILD_TOOLS_IMAGE=${client_tool_image}" \
     --build-arg "PROJECT_CARGO_LTO=${project_cargo_lto}" \
@@ -518,29 +209,6 @@ docker build -q -t "$dns_image_tag" -f services/dns/Dockerfile \
     --build-context "shared-scripts=$repo_root/scripts/lib" "$repo_root" >/dev/null
 
 echo "== Starting a real PowerDNS container on the isolated network (issue #706) =="
-# No extra --cap-add here: unlike the Kea container below, services/dns/
-# entrypoint.sh never touches iptables.
-#
-# DDNS_ALLOW_FROM=$kea_ip: kea-dhcp-ddns (started inside $kea_container
-# below) sends its TSIG-signed nsupdate from that container's own network
-# identity -- there is no separate D2 container in this project's
-# architecture, matching production (services/dhcp runs kea-dhcp4,
-# kea-ctrl-agent, and kea-dhcp-ddns as sibling processes in one container).
-# PowerDNS's own allow-dnsupdate-from (services/dns/pdns.conf.template) must
-# therefore allow exactly that source address, the same relationship
-# config/*/dns-*.env's DDNS_ALLOW_FROM has to config/*/dhcp.env's container
-# IP in every real deployment.
-#
-# DDNS_TSIG_KEY/(unset DDNS_TSIG_NAME/DDNS_TSIG_ALGORITHM, left at their
-# services/dns/entrypoint.sh defaults of "lancache-ddns-key"/"hmac-sha256"):
-# deliberately the exact same values services/dhcp/kea-dhcp-ddns.conf
-# hardcodes for its own TSIG key name/algorithm, so this is the real
-# production key exchange, not a test-only substitute.
-#
-# PROXY_IP is a required variable this entrypoint uses only to populate the
-# unrelated CDN RPZ zone (see services/dns/entrypoint.sh's step 7); an
-# RFC 5737 documentation address is used here since no real proxy exists in
-# this throwaway network and nothing in the DDNS path below depends on it.
 docker run -d --name "$dns_container" \
     --network "$network_name" --ip "$pdns_ip" \
     -e PROXY_IP="203.0.113.1" \
@@ -550,26 +218,9 @@ docker run -d --name "$dns_container" \
     "$dns_image_tag" >/dev/null
 
 echo "== Waiting for PowerDNS to finish TSIG/zone setup and start serving (issue #706) =="
-# Two conditions, not one: the log line confirms configure_ddns_tsig actually
-# ran (TSIG key imported, TSIG-ALLOW-DNSUPDATE set on the LAN zones), and the
-# dig probe confirms pdns_server itself is actually up and answering on its
-# real listening address (127.0.0.1:5300 per services/dns/pdns.conf.template)
-# -- the log line alone would not catch a case where TSIG setup succeeded but
-# the authoritative server then failed to start (e.g. config validation
-# rollback, see services/dns/entrypoint.sh's _dns_auth_validate_snapshot_or_rollback).
 dns_ready_deadline=$((SECONDS + 60))
 dns_ready=0
 while (( SECONDS < dns_ready_deadline )); do
-    # `docker logs` runs to completion into a variable first, then grep -q
-    # reads it via a here-string -- a live `docker logs ... | grep -q` pipe
-    # can SIGPIPE `docker logs` the moment the log already contains the
-    # matched line plus more (issue #1377's repo-wide pipefail/SIGPIPE
-    # audit; this is the exact shape that failed real CI in PR #1374).
-    # `|| true` matters under `set -e`: this used to sit directly inside the
-    # `if` condition below (exempt from errexit on its own); pulled out into
-    # its own assignment, a transient `docker logs` failure would otherwise
-    # abort this polling loop instead of just letting this iteration's check
-    # come back false and retry (caught by advisor review).
     dns_log="$(docker logs "$dns_container" 2>&1 || true)"
     if grep -q "Configured TSIG-authenticated DDNS updates for LAN zones." <<<"$dns_log" \
         && docker exec "$dns_container" dig +short +time=2 +tries=1 @127.0.0.1 -p 5300 lan. SOA >/dev/null 2>&1; then
@@ -586,49 +237,11 @@ fi
 echo "PowerDNS authoritative is up and TSIG-authenticated DDNS updates are configured for zone lan. (source: $kea_ip)."
 
 echo "== Creating this run's forward test zone in PowerDNS (issue #706) =="
-# services/dns/entrypoint.sh only ever creates its own fixed LAN_ZONES (lan.,
-# local.lan.) -- every shipped config (config/{dev,prod}/dhcp.env) always
-# sets DHCP_DOMAIN=lan, exactly matching the "lan." zone, so this gap never
-# surfaces in a real deployment. This script deliberately uses a
-# distinctive, run-unique $dhcp_test_domain instead of "lan" (see its
-# definition above for why), which does NOT correspond to any zone
-# PowerDNS actually serves -- a DDNS update's on-wire "zone" field is
-# whatever kea-dhcp-ddns.conf's forward-ddns "name" is configured to
-# (literally $dhcp_test_domain here), and PowerDNS rejects updates
-# targeting a zone it has no SOA for ("Can't determine backend for
-# domain"), confirmed empirically. This grants exactly what
-# configure_ddns_tsig() already grants the real LAN zones -- create-zone,
-# then the same TSIG-ALLOW-DNSUPDATE metadata key -- for this one
-# additional test-only zone, so the DDNS verification below exercises a
-# real accept path instead of a zone-name mismatch this script introduced
-# for itself.
 docker exec "$dns_container" pdnsutil --config-dir=/etc/pdns/auth create-zone "${dhcp_test_domain}." >/dev/null
 docker exec "$dns_container" pdnsutil --config-dir=/etc/pdns/auth set-meta "${dhcp_test_domain}." TSIG-ALLOW-DNSUPDATE lancache-ddns-key >/dev/null
-# pdns_control rediscover (confirmed empirically, issue #706): pdnsutil
-# creates this zone through its own short-lived DB connection, separate
-# from the already-running pdns_server process -- without this, the first
-# query against the new zone (the DDNS verification polling loop below,
-# whose first attempt normally lands *before* kea-dhcp-ddns's async update
-# completes and is expected to see NXDOMAIN at that point) gets answered
-# using the still-stale "lan." zone instead of the new one, and that wrong
-# NXDOMAIN then sits in PowerDNS's own packet cache for its full negative-
-# TTL (the "lan." zone's SOA minimum, 3600s) -- long enough to make every
-# later poll in this same run see the same stale wrong answer even after
-# the real record exists. Forcing pdns_server to pick up the new zone here,
-# before anything ever queries it, avoids the race entirely.
 docker exec "$dns_container" pdns_control rediscover >/dev/null
 
 echo "== Starting a real Kea container on the isolated network =="
-# --cap-add NET_ADMIN: services/dhcp/entrypoint.sh runs iptables on every
-# start to restrict the Control Agent API to Docker-internal networks (see
-# that file's own comment). Without NET_ADMIN those iptables calls fail and
-# the entrypoint would not behave the same way it does in a real deployment.
-#
-# DHCP_DDNS_ENABLED=true: DDNS is opt-in and defaults to OFF for a fresh Kea
-# render (issue #1076). This simulation's entire purpose is to prove the
-# forward-A + reverse-PTR DDNS follow-through, so it must explicitly turn DDNS
-# on; without this the first-boot render would set dhcp-ddns.enable-updates to
-# false and the DDNS verification below would fail by design.
 docker run -d --name "$kea_container" \
     --network "$network_name" --ip "$kea_ip" \
     --cap-add NET_ADMIN \
@@ -673,53 +286,7 @@ fi
 echo "Kea DHCPv4 server is up (Subnet: $subnet, Pool: $pool_start - $pool_end)."
 
 echo "== Running a real DHCP client (dhclient or udhcpc, whichever \$client_tool_image provides) against Kea: Discover/Offer/Request/Ack =="
-# dhcp_client_capture_script (defined above, near client_tool_image) picks
-# the right client at container runtime and negotiates a real lease over
-# the wire without ever applying it to this container's own interface (see
-# that variable's own comment, and the safety-model comment near the top of
-# this file). Neither client reliably exits on its own once bound on every
-# distro build (confirmed directly for dhclient during development of this
-# script; udhcpc's -q does exit promptly in practice but this script does
-# not rely on that), so this polls for the lease file instead of trusting
-# either client's own exit code, and force-kills the container once a lease
-# has actually been written.
 client_container="lancache-ng-dhcp448-client-${octet}-$$"
-
-# No custom -cf/dhclient.conf for the dhclient branch (issue #706) --
-# deliberately, after an earlier version of this section that added one
-# regressed the pre-existing NTP-servers assertion below (a custom -cf file
-# entirely replaces dhclient's system default /etc/dhcp/dhclient.conf,
-# including its `request ... ntp-servers;` line, so a minimal custom file
-# that only `send`s a hostname silently stops requesting NTP servers at
-# all) without even achieving its own goal: Debian's default dhclient.conf
-# already sends `host-name = gethostname()` (the container's own
-# Docker-assigned hostname) on every run, with or without a custom -cf --
-# and dhcp_client_capture_script's udhcpc branch sends the equivalent
-# explicit `-x hostname:"$(hostname)"` for the same reason (see that
-# variable's own comment: udhcpc does not send a hostname on its own, and
-# without one, Kea never triggers DDNS for the lease at all -- confirmed
-# empirically, issue #1095). Kea's own ddns-replace-client-name default,
-# "when-present" (services/dhcp/entrypoint.sh's migrate_dhcp4_config), does
-# NOT mean "use the client's name when present" -- verified empirically
-# against a real Kea 2.6.3 D2 instance -- it means the opposite: Kea
-# REPLACES whatever hostname the client sent with its own
-# ddns-generated-prefix-based name (confirmed: Kea's own DHCPOFFER/DHCPACK
-# echo back Option 12 as "dhcp-<dashed-ip>.<domain>", not the client-sent
-# value) precisely because a name WAS present to trigger the replacement.
-# So the DDNS record Kea will actually create is deterministic from the
-# offered address alone, with no client-side cooperation needed beyond
-# sending *some* hostname -- see assert_ddns_record_matches_lease's caller
-# below.
-#
-# NET_RAW: before a lease is granted this container has no IP of its own,
-# so the DHCP client must send/receive DHCP over a raw broadcast socket
-# rather than a normal bound UDP socket -- that needs CAP_NET_RAW
-# regardless of which client runs or its own no-op lease-apply mechanism.
-# NET_ADMIN is added alongside it because dhclient also touches
-# interface-level state (e.g. ARP) while negotiating, before it ever gets
-# to the point of calling -sf; harmless if the udhcpc branch runs instead,
-# since that branch's own hook never uses either capability to mutate
-# anything (see dhcp_client_capture_script's own comment).
 docker run -d --name "$client_container" \
     --network "$network_name" \
     --cap-add NET_ADMIN --cap-add NET_RAW \
@@ -727,25 +294,11 @@ docker run -d --name "$client_container" \
     "$client_tool_image" \
     bash -c "$dhcp_client_capture_script" \
     >/dev/null
-
-# lease_timeout_seconds is kept separate from lease_deadline (an absolute
-# SECONDS-based cutoff) so the error message below can report the actual
-# wait duration instead of a shifting absolute value -- $lease_deadline
-# itself is meaningless to a reader, since $SECONDS keeps advancing for the
-# rest of the script's own runtime.
 lease_timeout_seconds=30
 lease_deadline=$((SECONDS + lease_timeout_seconds))
 lease_obtained=0
 while (( SECONDS < lease_deadline )); do
-    # `-s` alone is not enough: the lease file appears the moment the DHCP
-    # client starts writing it, well before the record is complete. The trailing
-    # `^}` (a closing brace at column 0) is what ISC dhclient writes only
-    # (and what dhcp_client_capture_script's udhcpc branch replicates)
-    # once a lease record is fully committed to the file, so checking for it
-    # is what actually distinguishes "lease negotiation still in progress,
-    # file exists but is partially written" from "lease obtained and safe to
-    # parse" -- reading the file one poll iteration too early would hand
-    # dhcp_lease_parse_latest below a truncated record.
+
     if [[ -s "$work_dir/client-state/dhclient.leases" ]] && grep -q '^}' "$work_dir/client-state/dhclient.leases" 2>/dev/null; then
         lease_obtained=1
         break
@@ -825,27 +378,11 @@ fi
 
 echo "== Verifying Kea's DDNS update produced a matching PowerDNS A record (issue #706) =="
 
-# assert_ddns_record_matches_lease <fqdn> <expected_ip>
-# Queries the real PowerDNS authoritative server ($dns_container, started
-# above) directly on its actual listening address (127.0.0.1:5300 inside
-# that container, per services/dns/pdns.conf.template) for <fqdn>'s A
-# record, and checks it equals <expected_ip>. Kea's kea-dhcp-ddns daemon
-# (running inside $kea_container, driven by the real lease just obtained
-# above) is the only thing that can have created this record: DDNS is
-# asynchronous (kea-dhcp-ddns processes its NCR queue and sends the
-# TSIG-signed nsupdate after the DHCPACK has already gone out to the
-# client), so the record is not guaranteed to exist the instant the
-# client's lease file appeared -- this polls rather than checking once.
 assert_ddns_record_matches_lease() {
     local fqdn="$1" expected_ip="$2" resolved_ip=""
     local ddns_deadline=$((SECONDS + 30))
     while (( SECONDS < ddns_deadline )); do
-        # A transient dig failure/timeout here is deliberately NOT wrapped in
-        # an `if !`/exit-1 guard the way a one-shot assignment elsewhere in
-        # this script is: this line runs inside a retry loop, so a failed dig
-        # should just leave $resolved_ip empty for this iteration (the `[[ ==
-        # ]]` check below then falls through to `sleep 2` and tries again),
-        # not abort the whole script on the first flaky attempt.
+
         resolved_ip="$(docker exec "$dns_container" dig +short +time=2 +tries=1 @127.0.0.1 -p 5300 "$fqdn" A 2>/dev/null | tail -n1)"
         if [[ "$resolved_ip" == "$expected_ip" ]]; then
             echo "DDNS verification passed: PowerDNS authoritative has an A record for $fqdn -> $resolved_ip, matching the lease Kea just granted."
@@ -861,22 +398,6 @@ assert_ddns_record_matches_lease() {
     return 1
 }
 
-# ddns_expected_fqdn is NOT the client's own hostname (see the DHCP client
-# invocation's comment above for why): it is Kea's own auto-generated name
-# for this lease, "<ddns-generated-prefix>-<dashed-ip>.<ddns-qualifying-
-# suffix>." -- ddns-generated-prefix is hardcoded "dhcp" (services/dhcp/
-# entrypoint.sh's migrate_dhcp4_config), confirmed live against a real Kea
-# 2.6.3 instance to be exactly what it substitutes whenever
-# ddns-replace-client-name is "when-present" (the project default) and the
-# client sent any hostname at all -- which dhclient does by default (send
-# host-name = gethostname()), and which dhcp_client_capture_script's udhcpc
-# branch replicates via an explicit -x hostname flag (confirmed empirically,
-# issue #1095: without it, udhcpc's DHCPACK is clean but Kea never triggers
-# DDNS for that lease at all). $domain_name is not hardcoded a second
-# time here -- it is the exact domain-name option value already parsed from
-# the granted lease above (confirmed by the assertion just before this
-# section), which is the same value Kea's ddns-qualifying-suffix was
-# configured to (DHCP_DOMAIN).
 ddns_expected_fqdn="dhcp-${offered_address//./-}.${domain_name}."
 ddns_status="FAILED (see ::error above)"
 if assert_ddns_record_matches_lease "$ddns_expected_fqdn" "$offered_address"; then
@@ -887,12 +408,6 @@ fi
 
 echo "== Verifying Kea's DDNS update produced a matching PowerDNS PTR record (issue #768) =="
 
-# assert_ptr_record_matches_lease <ip> <expected_fqdn>
-# Reverse counterpart of assert_ddns_record_matches_lease above: queries the
-# same real PowerDNS authoritative server for <ip>'s PTR record via `dig -x`
-# and checks it equals <expected_fqdn>. Same polling rationale as the
-# forward check -- DDNS is asynchronous, so the PTR record is not guaranteed
-# to exist the instant the A record above was confirmed.
 assert_ptr_record_matches_lease() {
     local ip="$1" expected_fqdn="$2" resolved_fqdn=""
     local ptr_deadline=$((SECONDS + 30))
@@ -916,15 +431,6 @@ assert_ptr_record_matches_lease() {
     return 1
 }
 
-# The expected PTR target is the exact same FQDN the A-record check above
-# just confirmed ($ddns_expected_fqdn) -- Kea's D2 daemon derives both the
-# forward and reverse DDNS updates from the same lease event, so a correct
-# reverse update must point back at the identical name, not a second
-# independently-derived value that could coincidentally match. $offered_address
-# always falls inside "31.172.in-addr.arpa." (see this script's header
-# comment on why), which services/dns/entrypoint.sh creates unconditionally,
-# needing no test-only zone-bootstrap shim the way forward DDNS's non-"lan"
-# domain did above.
 ptr_status="FAILED (see ::error above)"
 if assert_ptr_record_matches_lease "$offered_address" "$ddns_expected_fqdn"; then
     ptr_status="verified: ${offered_address} -> ${ddns_expected_fqdn} (TSIG-signed nsupdate from kea-dhcp-ddns)"
@@ -933,20 +439,7 @@ else
 fi
 
 # ─── Static host reservation scenario (issue #707) ───
-#
-# Appended as its own self-contained step rather than interleaved into the
-# base scenario above, on purpose: issue #706 (DHCP-DDNS follow-through) is
-# being added to this same script independently and in parallel, and keeping
-# each new scenario as an isolated block minimizes merge conflicts between
-# the two.
-#
-# Two fixed, locally-administered (0x02 high nibble, never a real vendor
-# OUI) test MACs -- one that gets the reservation, one that deliberately does
-# not. Both incorporate this shell's own PID so concurrent local runs of
-# this script never collide on the same MAC, mirroring the run-identity
-# uniqueness already used for $network_name/$kea_container above. Their
-# fourth/fifth octets are fixed and distinct from each other so the two MACs
-# themselves can never collide even if $$ happens to match across runs.
+
 if ! reserved_mac="$(printf '02:07:07:aa:bb:%02x' "$(( $$ % 256 ))")"; then
     echo "::error::Could not format the reserved test MAC address." >&2
     exit 1
@@ -955,35 +448,16 @@ if ! other_mac="$(printf '02:07:07:cc:dd:%02x' "$(( $$ % 256 ))")"; then
     echo "::error::Could not format the unrelated test MAC address." >&2
     exit 1
 fi
-# Deliberately outside both the dynamic pool ($pool_start-$pool_end, the
-# second half of the /24) and Docker's own --ip-range for this network
-# (172.31.${octet}.0/25, the first half) -- the whole point of a static
-# reservation is that Kea must hand out this exact address even though
-# ordinary dynamic allocation never would, and it must never collide with
-# Docker's own container-address bookkeeping either.
+
 reserved_ip="172.31.${octet}.210"
 
-# kea_ctrl_command <json_command_body>
-# POSTs a raw, already-valid Kea Control Agent JSON command body (read from
-# stdin, via -d @-, rather than interpolated into a shell string) to the real
-# Control Agent inside $kea_container, printing its raw JSON response on
-# stdout. Kept as a single thin transport primitive -- reading/writing the
-# JSON itself is done with python3 on the host below (already a dependency
-# of this script, see the address-in-pool check above), not jq inside the
-# container, specifically to avoid nesting a jq filter's own double-quoted
-# JSON keys inside this function's already single-quoted `sh -c` string,
-# which is exactly the unreadable, error-prone quoting-inside-quoting this
-# function exists to sidestep.
 kea_ctrl_command() {
     docker exec -i "$kea_container" sh -c '
         curl -sf -u "admin:$1" -H "Content-Type: application/json" -d @- "http://127.0.0.1:8000/"
     ' -- "$kea_ctrl_token" <<<"$1"
 }
 
-# kea_ctrl_result_ok <response_json>
-# True (exit 0) if a Kea Control Agent response's top-level result code is 0
-# (success). Kea's own convention, matching kea_result() in
-# services/ui/src/routes/dhcp.rs.
+
 kea_ctrl_result_ok() {
     python3 -c '
 import json, sys
@@ -992,20 +466,6 @@ sys.exit(0 if d and d[0].get("result") == 0 else 1)
 ' "$1"
 }
 
-# kea_ctrl_add_reservation <mac> <ip>
-# Adds a real static host reservation for <mac> -> <ip> directly through
-# Kea's own Control Agent API, driving the exact config-get (strip "hash")
-# -> config-test -> config-set -> config-write sequence
-# services/ui/src/routes/dhcp.rs's kea_config_modify() uses for the Admin
-# UI's /dhcp/static/add route (see that file's own comment on why "hash"
-# must be stripped: Kea 2.6.3's config-get response embeds a server-computed
-# digest that config-test/config-set reject outright if fed straight back) --
-# just called here directly against the Control Agent instead of through the
-# Admin UI HTTP layer. Kea's compiled-in global host-reservation-identifiers
-# default already includes "hw-address" (services/dhcp/kea-dhcp4.conf sets no
-# override, and issue #693 removed the subnet-scope write that used to break
-# this), so no extra identifiers config is needed here for the reservation to
-# actually match on subsequent lease requests.
 kea_ctrl_add_reservation() {
     local mac="$1" ip="$2" get_resp modified_args resp
 
@@ -1045,10 +505,7 @@ PYEOF
 
 # kea_ctrl_reservation_present <mac> <ip>
 # Prints "yes"/"no": whether Kea's OWN config-get (not this script's local
-# copy of the config it sent) currently shows a reservation matching <mac>
-# and <ip> -- the same "ideally reflected in a follow-up config-get"
-# assertion issue #634's Control Agent mutation test makes for the Admin-UI
-# route, done here directly against the Control Agent instead.
+
 kea_ctrl_reservation_present() {
     local mac="$1" ip="$2" get_resp
     get_resp="$(kea_ctrl_command '{"command":"config-get","service":["dhcp4"]}')"
@@ -1070,18 +527,7 @@ print("yes" if found else "no")
 # Runs one fresh, one-shot DHCP client container for <mac> (a distinct
 # --mac-address per call, unlike the base scenario's client above which
 # relies on Docker's own auto-assigned MAC) and prints the offered IPv4
-# address, using the same dhcp_client_capture_script dispatch / poll-for-
-# "^}" / force-kill technique as the base scenario above -- see that
-# section's own comments for why each of those choices is safe and
-# necessary. Both branches of dhcp_client_capture_script identify the
-# client to Kea via the container's own interface MAC (Docker's
-# --mac-address here), not a separate client-id flag, so this works
-# unchanged for either dhclient or udhcpc -- confirmed empirically
-# (issue #1095): a real udhcpc run with --mac-address set to a
-# Kea-reserved MAC received exactly the reserved address, the same way
-# dhclient already does. Kept as its own function (not inlined) so it can
-# be called once for the reserved MAC and once for the unrelated MAC below
-# without duplicating this logic.
+
 assert_static_reservation_honored() {
     local label="$1" mac="$2" state_subdir="$3" client_container
     client_container="lancache-ng-dhcp448-client-${state_subdir}-${octet}-$$"
@@ -1205,24 +651,7 @@ Unrelated-MAC lease:   ${other_offered:-<none>} $( [[ "$reservation_isolated" -e
 
 Verified: a real Discover/Offer/Request/Ack flow completed against our own
 Kea service on an isolated Docker bridge network, and the address/server-
-identifier/router/DNS/NTP/lease-time/domain-name options above matched what
-this run configured Kea with. Also verified: a static host reservation added
-directly through Kea's own Control Agent API (the same config-get/
-config-test/config-set/config-write sequence the Admin UI's
-kea_config_modify() drives) was honored by a real, subsequent DHCP lease
-request for the reserved MAC, and a second, unrelated MAC still received an
-ordinary dynamic-pool address rather than the reservation. Also verified:
-the granted lease produced a matching PowerDNS A record via a real
-TSIG-authenticated DDNS update from kea-dhcp-ddns to a real PowerDNS
-authoritative server, using this project's real DDNS transport/config
-wiring (see the header comment above for the one test-only zone-bootstrap
-shim this run needed and why). Also verified (issue #768): the same lease
-produced a matching PowerDNS PTR record, proving Kea's reverse-ddns fix
-(one ddns-domains entry per real private reverse zone, instead of the old
-non-existent "in-addr.arpa." catch-all) actually resolves against a real
-PowerDNS instance -- no test-only zone-bootstrap shim needed for this half,
-since this script's subnet always falls inside a zone
-services/dns/entrypoint.sh creates unconditionally.
+identifier/router/DNS/NTP/lease-time/domain-name options 
 
 NOT verified by this script (see header comment / docs/dhcp-modes.md):
 the dnsmasq-proxy DHCP mode (out of scope here).
