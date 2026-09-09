@@ -100,8 +100,8 @@ proxy_env=(
 )
 
 echo "== Building throwaway proxy images with synthetic cdn-domains.txt fixtures =="
-docker build -q -t "$image_a" --build-context "dns-domains=$work_dir/fixture-a" services/proxy >/dev/null
-docker build -q -t "$image_b" --build-context "dns-domains=$work_dir/fixture-b" services/proxy >/dev/null
+docker build -q -t "$image_a" --build-context "dns-domains=$work_dir/fixture-a" --build-context "shared-scripts=$repo_root/scripts/lib" services/proxy >/dev/null
+docker build -q -t "$image_b" --build-context "dns-domains=$work_dir/fixture-b" --build-context "shared-scripts=$repo_root/scripts/lib" services/proxy >/dev/null
 
 docker network create "$network_name" >/dev/null
 

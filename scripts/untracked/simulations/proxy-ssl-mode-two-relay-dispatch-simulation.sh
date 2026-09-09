@@ -115,7 +115,7 @@ docker run --rm -v "$work_dir:/certs" -w /certs "$build_tools_image" bash -c \
     "openssl req -x509 -newkey rsa:2048 -nodes -keyout two.key -out two.crt -days 1 -subj '/CN=backend-two-real' 2>/dev/null" >/dev/null
 
 echo "== Building the real proxy image (this fix applied) =="
-docker build -q -t "$proxy_image" --build-context "dns-domains=$work_dir/fixture" services/proxy >/dev/null
+docker build -q -t "$proxy_image" --build-context "dns-domains=$work_dir/fixture" --build-context "shared-scripts=$repo_root/scripts/lib" services/proxy >/dev/null
 
 docker network create --subnet "$validation_subnet" "$network_name" >/dev/null
 
