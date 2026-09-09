@@ -280,7 +280,7 @@ echo "== UI: rolling back to snapshot $snapshot_after_a via POST /dhcp/snapshot/
 # services/ui/src/routes/dhcp.rs) runs the SAME config-test -> config-set ->
 # config-write chain against Kea's real Control Agent that the CLI fallback
 # does, but reached over real HTTP with the session's CSRF token -- the exact
-# path setup-reset-kea-config-simulation.sh does NOT cover (issue #837). The
+# path setup-reset-kea-config-simulation.sh does not cover. The
 # route validates snapshot_id against the on-disk known-good snapshots, reads
 # that snapshot, and applies it as the whole new Kea config.
 if ! rollback_code="$(run_client "curl -sS -b /shared/cookiejar -o /shared/rollback-response -w '%{http_code}' \
