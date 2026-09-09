@@ -81,7 +81,7 @@ docker run -d --name "$backend_sub_container" --network "$network_name" --networ
 
 # handshake_cn <target_host> <target_port> <sni>
 # What: Perform TLS handshake and return CN of cert.
-# Why: Identifies which backend SNI routing actually reaches.
+# Why: Identifies which backend SNI routing reaches.
 handshake_cn() {
     local target="$1" port="$2" sni="$3"
     docker run --rm --network "$network_name" "$build_tools_image" bash -c \

@@ -27,7 +27,7 @@ subnet_prefix="${subnet_no_prefixlen%.*}"        # e.g. 172.30.147
 subnet_base_octet="${subnet_no_prefixlen##*.}"   # e.g. 96
 ui_ip="${VALIDATION_UI_IP:-${subnet_prefix}.$((subnet_base_octet + 9))}"
 gateway_ip="${VALIDATION_GATEWAY:-${subnet_prefix}.$((subnet_base_octet + 1))}"
-# What: Reserve base+21..base+29 to avoid ctrl-agent-mutation.
+# What: Reserve base+21..base+29; avoid mutation script.
 # Why: Allows concurrent runs without IP collision.
 kea_ip="${subnet_prefix}.$((subnet_base_octet + 21))"
 dhcp_pool_start="${subnet_prefix}.$((subnet_base_octet + 22))"
