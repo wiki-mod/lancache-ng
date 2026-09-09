@@ -1,34 +1,9 @@
 #!/usr/bin/env bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-#
-# Real TLS-handshake simulation for services/proxy/entrypoint.sh's deep
-# leading-dot wildcard cert path (_collect_domain_rows' _EXTRA_WILDCARD_BASES/
-# _bounded_cert_name/_sign_cert machinery). Everything else covering this
-# path (tests/bats/proxy_collect_domain_rows.bats,
-# tests/bats/proxy_sign_cert.bats) stops at bash-level unit coverage of the
-# collection/naming/signing logic in isolation -- none of it ever builds a
-# real proxy image, starts real nginx, or performs a real TLS handshake
-# through the generated cert-selection map. That gap matters here
-# specifically because the failure modes this path guards against are all
-# runtime-only: an nginx map that selects the wrong cert, a cert whose SAN
-# doesn't validate for the SNI it was meant to cover, or a startup crash from
-# an over-length CN/filename -- none of which a stubbed bash function call
-# can reproduce.
-#
-# Deliberately a standalone script rather than an extension of
-# scripts/untracked/simulations/ssl-mitm-cache-simulation.sh: that script intentionally never
-# builds a custom image (it pulls the real published proxy/dns images and
-# relies on a CDN hostname -- deb.debian.org -- already baked into
-# services/dns/cdn-domains.txt at image-build time, see its own header
-# comment for why an earlier custom-build attempt was abandoned). This
-# path needs specific, synthetic multi-label domains that do NOT exist in
-# the real cdn-domains.txt, so it needs its own locally-built proxy image
-# using a throwaway cdn-domains.txt via the "dns-domains" named build
-# context (see services/proxy/Dockerfile's own comment on that context).
-# It also does not need the full docker-compose stack (DNS/NATS/UI) at all:
-# a TLS handshake against the proxy's own :443 listener needs nothing but
-# the proxy container itself.
+# What: Test deep wildcard cert TLS handshake.
+# Why: Runtime-only failures not covered by unit tests.
+# From: Issue #1065
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)

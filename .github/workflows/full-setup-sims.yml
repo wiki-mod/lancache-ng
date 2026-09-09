@@ -1,8 +1,8 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: consolidates full-setup validate/sim jobs.
-# Why: single source; env leaks broke reserve retries.
+# What: Consolidate validate/sim jobs.
+# Why: Single source; avoid env leaks.
 # From: Issue #1014
 name: Full-Setup Simulations (reusable)
 

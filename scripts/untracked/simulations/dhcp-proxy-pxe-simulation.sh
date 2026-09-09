@@ -1,64 +1,9 @@
 #!/usr/bin/env bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-#
-# Real DHCP behavior test for services/dhcp-proxy's ProxyDHCP/PXE mode
-# (issue #705) -- the dnsmasq-proxy DHCP mode that
-# scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh's own header comment
-# explicitly calls out as "entirely different code path, out of scope
-# for this script." This script is that missing coverage.
-#
-# What this proves, end to end, against a real dnsmasq container built
-# from this checkout (not a mock or a unit test of entrypoint.sh alone):
-#   - A synthetic PXE client sending a DHCPDISCOVER with DHCP option 60
-#     (vendor class) = "PXEClient" and option 93 (client-system-
-#     architecture) = 0 (legacy BIOS) receives a real DHCPOFFER carrying
-#     the operator-configured external PXE boot server address and
-#     BIOS-specific boot filename, plus the base LanCache NG DNS servers
-#     (option 6) -- the original ask of issue #705.
-#   - The same, for architecture 7 (x86-64 UEFI) and architecture 11
-#     (ARM64 UEFI), each receiving the UEFI-specific boot filename.
-#   - An ordinary DHCPDISCOVER carrying neither option (no PXE tag at
-#     all) receives NO reply whatsoever -- confirming dnsmasq's ProxyDHCP
-#     mode still answers only PXE-tagged clients, exactly as
-#     docs/dhcp-modes.md documents, and does not somehow start replying
-#     to every DHCP client on the segment once PXE support is enabled.
-#
-# This is also, unavoidably, the regression test for the root-cause bug
-# issue #705 found and services/dhcp-proxy/entrypoint.sh now fixes:
-# without a `pxe-service` directive present, dnsmasq's ProxyDHCP mode
-# does not reply to ANY DHCPDISCOVER, PXE-tagged or not (confirmed
-# directly during this issue's investigation, and the reason every
-# scenario above -- including the architecture-specific ones, which are
-# actually delivered via dhcp-boot/dhcp-match, not pxe-service itself --
-# depends on the opt-in DHCP_PROXY_PXE_BOOT_SERVER/_FILENAME_* variables
-# this script sets being present at all).
-#
-# See tools/pxe-client-probe/ for how the synthetic PXE client itself is
-# built (a small Rust binary using a raw layer-2 send, since no off-the-shelf
-# DHCP client can be made to send a real PXE-tagged DISCOVER) and why reply
-# capture goes through a tcpdump-written pcap file rather than any live
-# in-process sniff. The probe is compiled once below with the build-tools
-# image and mounted into the client container.
-#
-# Safety model, mirroring scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh's own
-# (see that script's header comment for the fuller rationale): both the
-# dnsmasq-proxy server and the synthetic PXE client run as ordinary
-# Docker containers on a throwaway, per-run bridge network this script
-# creates and destroys itself, never bridged to any host interface or the
-# runner's real LAN. Nothing here ever calls `ip addr add`/`ip route` on
-# any interface; the synthetic client only ever sends/receives via the
-# probe's raw socket on its own container's already-Docker-assigned
-# interface.
-#
-# What this script does NOT verify: PXE boot menu behavior (this project
-# deliberately implements none -- dnsmasq's role is only to point a PXE
-# client at an operator's own external boot server, never to serve boot
-# files or menus itself, see docs/dhcp-modes.md) and an actual TFTP/HTTP
-# boot-file transfer against that external server (out of scope by
-# design -- the external server is entirely outside this project and, in
-# this script, is never even a real listening service, just a
-# configured address the DHCPOFFER is asserted to point at).
+# What: Test dhcp-proxy ProxyDHCP/PXE mode.
+# Why: Missing coverage for issue #705 root cause.
+# From: Issue #705
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
@@ -70,9 +15,8 @@ source "$repo_root/scripts/lib/dhcp-lease-parse.sh"
 source "$repo_root/scripts/lib/reserve-validation-subnet.sh"
 
 client_tool_image="${DHCP_PXE_SIMULATION_CLIENT_IMAGE:?DHCP_PXE_SIMULATION_CLIENT_IMAGE is required (an image providing the Rust toolchain to compile tools/pxe-client-probe and tcpdump to capture the reply, e.g. the build-tools image)}"
-# What: no in-file/script default for either; fails closed if unset.
-# Why: this script also runs `cargo build --release`, same as the
-# Dockerfiles' resolve_cargo_profile_overrides().
+# What: Validate cargo build env vars.
+# Why: script runs cargo build like Dockerfile.
 # From: Issue #1095
 project_cargo_lto="${PROJECT_CARGO_LTO:?PROJECT_CARGO_LTO is required (no in-file/script default; Issue #1095, PR #1796 review 5109560874)}"
 case "$project_cargo_lto" in off|thin|fat|true|false) ;; *) echo "PROJECT_CARGO_LTO must be one of: off, thin, fat, true, false (got '$project_cargo_lto')" >&2; exit 1;; esac
@@ -307,8 +251,8 @@ echo "== Compiling the synthetic PXE client probe (tools/pxe-client-probe) with 
 # are root-owned 0755). Only the single finished binary is copied out to
 # $work_dir -- a top-level file whose 0777 parent makes it removable during
 # cleanup regardless of its root ownership.
-# What: mounts the whole repo; threads PROJECT_CARGO_LTO/CODEGENUNIT in.
-# Why: workspace resolution needs root Cargo.lock; cargo reads those envs.
+# What: Mount repo; pass cargo build env vars.
+# Why: Workspace needs root Cargo.lock.
 # From: Issue #1095
 docker run --rm \
     -v "$repo_root:/repo:ro" \

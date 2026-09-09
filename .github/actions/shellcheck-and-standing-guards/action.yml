@@ -13,8 +13,8 @@ inputs:
 runs:
   using: composite
   steps:
-    # What: Nested timeouts guard against actionlint deadlock.
-    # Why: Embedded shellcheck can hang in Go deadlock state.
+    # What: Nested timeouts guard vs actionlint.
+    # Why: Shellcheck can hang in Go deadlock.
     # From: Issue #1255 | PR #1258
     - name: Run ShellCheck and ActionLint
       shell: bash
@@ -33,7 +33,7 @@ runs:
       run: |
         set -euo pipefail
         # What: Mount repo read-only for test.
-        # Why: Script only reads setup.sh, writes to /tmp via mktemp.
+        # Why: Reads setup.sh; writes via mktemp.
         # From: PR #1467
         docker run --rm \
           --user "$(id -u):$(id -g)" \
@@ -43,22 +43,15 @@ runs:
           timeout --kill-after=30 --signal=KILL 300 bash tests/setup-migration-semantics.sh
 
     - name: Check pinned GitHub Actions for runtime / drift / duplication guardrails
-      # What: Validates Actions versions in build-tools container.
-      # Why: Calls api.github.com; avoid host tools (AG-VAL-016).
+      # What: Validate Actions versions.
+      # Why: Calls api.github.com; needs container.
       # From: Issue #801 | PR #804
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
-        # 600s, not the 300s used for this file's other (pure text-scan)
-        # steps: this script makes real curl calls to api.github.com per
-        # pinned action and has its own rate-limit retry/backoff path
-        # (tests/bats/check_action_node_versions.bats covers a transient
-        # rate-limit response that recovers on a later attempt) that can
-        # legitimately need more time than a text scan under real GitHub API
-        # backoff -- still well inside the calling step's own 900s
-        # (timeout-minutes: 15) budget for this whole composite action.
+        # 600s timeout for rate-limit retry on api.github.com calls.
         docker run --rm \
           --user "$(id -u):$(id -g)" \
           -v "$PWD:/work:ro" \
@@ -68,8 +61,8 @@ runs:
           timeout --kill-after=30 --signal=KILL 600 bash scripts/tracked/check-action-node-versions.sh
 
     - name: Check validation-subnet wrapper coverage
-      # What: Ensures compose jobs use collision-safe subnet.
-      # Why: Late-added jobs weren't connected to subnet wiring.
+      # What: Validate subnet coverage.
+      # Why: Late jobs may lack subnet wiring.
       # From: Issue #896 | PR #917
       shell: bash
       run: |
@@ -96,8 +89,8 @@ runs:
           timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-registry-login-coverage.sh
 
     - name: Check executable bits on bare-path script invocations
-      # What: Asserts bare-path scripts have executable bits.
-      # Why: Exit 126 if script lacks execute bit (AG-VAL-024).
+      # What: Check script executable bits.
+      # Why: Exit 126 without execute bit.
       # From: Issue #1019 | PR #1021
       shell: bash
       run: |
@@ -110,8 +103,8 @@ runs:
           timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-executable-bits.sh
 
     - name: Check build-tools smoke-test coverage
-      # What: Verifies build-tools image tools vs. Dockerfile.
-      # Why: Tools drift silently without smoke-test coverage.
+      # What: Verify build-tools image.
+      # Why: Detect tool drift vs Dockerfile.
       # From: Issue #822 | PR #1022
       shell: bash
       run: |
@@ -124,8 +117,8 @@ runs:
           timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-build-tools-smoke-coverage.sh
 
     - name: Check for pipefail/SIGPIPE early-exit-consumer pattern (AG-VAL-029)
-      # What: Detects live producer piped to early-exiting consumer.
-      # Why: Early exit closes pipe; SIGPIPE becomes pipefail error.
+      # What: Check producer-consumer SIGPIPE.
+      # Why: Early exit closes pipe on error.
       # From: Issue #815 | PR #1374
       shell: bash
       run: |
@@ -138,8 +131,8 @@ runs:
           timeout --kill-after=30 --signal=KILL 300 bash scripts/untracked/check-pipefail-early-exit-grep.sh
 
     - name: Check pipefail guard's own scope coverage
-      # What: Ensures bats fixture covers all scan_files paths.
-      # Why: Narrower scan scope than documented can hide real gaps.
+      # What: Check pipefail scope coverage.
+      # Why: Narrow scan scope hides gaps.
       # From: PR #1500
       shell: bash
       run: |
@@ -152,8 +145,8 @@ runs:
           timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-pipefail-scope-coverage.sh
 
     - name: Check github.repository case-safety in GHCR paths
-      # What: Checks repository case for GHCR lowercase requirement.
-      # Why: github.repository is not guaranteed lowercase for GHCR.
+      # What: Check repo case for GHCR.
+      # Why: github.repository may not be lowercase.
       # From: Issue #1095 | PR #1597
       shell: bash
       run: |

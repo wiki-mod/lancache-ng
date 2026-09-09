@@ -1,33 +1,9 @@
 #!/usr/bin/env bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-#
-# Real end-to-end proof for issue #844's dnsmasq DHCP-RELAY mode: the
-# `dhcp-proxy` container, run with DHCP_MODE=dnsmasq-relay, must genuinely
-# forward a client's DHCP exchange to an UPSTREAM DHCP server on a DIFFERENT
-# network segment and relay the reply back -- not just render a config.
-#
-# Topology (two isolated bridge networks, deliberately -- if the client and
-# the upstream server shared one segment, the server could answer the client
-# directly and the relay would be bypassed, proving nothing). The two /28s
-# below are carved out of ONE reserved /27 validation-subnet slot (see the
-# VALIDATION_SUBNET parsing further down), not a dedicated pool of their own:
-#
-#     client-net (client_base/28)      server-net (server_base/28)
-#     ┌──────────┐   ┌───────────────────────────┐   ┌───────────────┐
-#     │  client  │──▶│ relay (dhcp-proxy image)   │──▶│ upstream dnsmasq DHCP │
-#     │ (no route│   │ client_base+2 (giaddr) /   │   │ server_base+2,   │
-#     │ to server)│  │ server_base+3, DHCP_MODE=  │   │ pool for CLIENT  │
-#     └──────────┘   │ dnsmasq-relay              │   │ subnet           │
-#                     └───────────────────────────┘   └───────────────┘
-#
-# The client can ONLY reach the upstream through the relay. The upstream's
-# `dhcp-range` is for the client subnet, which the server selects by the
-# giaddr the relay stamps in (DHCP_RELAY_LOCAL_ADDR=<client-subnet relay IP>)
-# -- the #1 thing that silently breaks a relay test if the pool is on the
-# server's own subnet instead. Success = the client is OFFERED an address from
-# the client-subnet pool, which is only possible if the relay forwarded the
-# request across the segment boundary and relayed the reply back.
+# What: Test dhcp-proxy DHCP-RELAY mode.
+# Why: Proof relay forwards across segments.
+# From: Issue #844
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
