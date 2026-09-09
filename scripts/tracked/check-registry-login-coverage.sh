@@ -2,8 +2,8 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: ensure docker.io login in all jobs, shared-scripts build-context.
-# Why: prevent silent anonymous pulls on job moves or new jobs.
+# What: ensure docker.io login and build-context coverage.
+# Why: prevent silent anonymous pulls on job moves.
 # From: Issue #1014 | Issue #1757 | Issue #1760
 #
 # --- Second, related responsibility: shared-scripts build-context coverage -

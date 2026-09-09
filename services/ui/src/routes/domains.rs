@@ -142,13 +142,13 @@ pub async fn domains_page(
     let dns_domains = read_domain_entries(&state.config.cdn_domains_file);
 
     let lan_records = fetch_lan_records(&state).await;
-    // #1077: all PTR rows across the provisioned reverse zones (manual +
+    // all PTR rows across the provisioned reverse zones (manual +
     // Kea-DDNS-auto-created; they are indistinguishable in PowerDNS).
     let ptr_records = fetch_ptr_records(&state).await;
     let aaaa_filter_enabled = is_aaaa_filter_enabled(&state).await;
     let ddns_unsigned_updates_allowed = is_ddns_unsigned_updates_allowed(&state).await;
     let ddns_tsig_key_configured = real_ddns_tsig_key_configured(&state);
-    // #628: zone/record known-good snapshot rollback -- see
+    // zone/record known-good snapshot rollback -- see
     // routes/dns_snapshots.rs's module doc comment for why this is a thin
     // HTTP call to nats-subscriber's own listener, not logic living here.
     let zone_snapshot_groups =
@@ -267,7 +267,7 @@ pub async fn remove_dns(
 }
 
 // Enable/disable a pre-shipped "Default CDN" cdn-domains.txt entry in place,
-// without removing it from the file (#1073). Deliberately a separate route
+// without removing it from the file [state]. Deliberately a separate route
 // from add_dns/remove_dns: the custom-domain add/remove flow always writes a
 // fully add/removed line, whereas this route only ever flips the leading
 // "!" disabled marker on an existing line -- it can never create or delete a
@@ -437,7 +437,7 @@ pub async fn toggle_aaaa_filter(
 
 // What: toggle to relax DDNS TSIG per-zone enforcement.
 // Why: global setting ineffective; per-zone default enforced.
-// From: Issue #815
+// From: Issue DDNS
 pub async fn toggle_ddns_allow_unsigned_updates(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -544,7 +544,7 @@ async fn flush_recursor_cache(
 ) {
     // PowerDNS Recursor's cache/flush endpoint requires a `domain` query
     // parameter and only flushes an exact name match, not a subtree --
-    // confirmed live while building issue #400's integration test:
+    // confirmed live while building AXFR's integration test:
     // `?type=packet` (the previous call) always returned 422 Unprocessable
     // Entity, and even `?domain=.` or `?domain=lan.` leave a just-deleted
     // leaf record (e.g. `host.lan.`) resolving from cache until its TTL
@@ -676,7 +676,7 @@ fn ddns_allow_unsigned_marker_paths(state: &AppState) -> [PathBuf; 2] {
 // real value's existence without the UI needing the plaintext secret at
 // all. Deliberately does not attempt full placeholder-string detection
 // (Rule-Ref: secret_is_placeholder's three independently-maintained
-// copies, issue #967): resolve_shared_secret only ever persists a real,
+// copies, persist): resolve_shared_secret only ever persists a real,
 // generated-or-operator-supplied value to this file, never a checked-in
 // placeholder literal, so a non-empty file here is already a strong enough
 // signal for this specific gate.
@@ -912,7 +912,7 @@ struct DomainSpec {
 
 // Marks the boundary between the pre-shipped "Default CDN" section of
 // cdn-domains.txt and entries an operator has added themselves via the
-// Admin UI's Add form (#1073). Everything above this exact line (trimmed)
+// Admin UI's Add form [state]. Everything above this exact line (trimmed)
 // is treated as a default entry (toggle-able but never removable from the
 // UI); everything below it is a custom entry (add/remove-able, never
 // toggle-able). It is an ordinary "#"-prefixed comment as far as every
@@ -928,7 +928,7 @@ const CUSTOM_DOMAINS_MARKER: &str =
 
 // A single cdn-domains.txt line's full on-disk envelope: the validated
 // domain/wildcard-scope pair (DomainSpec) plus the enabled/disabled bit
-// encoded by an optional leading "!" (#1073). Kept as a separate type from
+// encoded by an optional leading "!" [state]. Kept as a separate type from
 // DomainSpec on purpose -- DomainSpec's derived Eq is load-bearing for
 // dedup (append_domain) and delete matching (line_matches_domain_delete),
 // and folding `enabled` into that equality would make a disabled entry stop
@@ -968,7 +968,7 @@ fn stored_line_to_storage(entry: &StoredDomainLine) -> String {
     }
 }
 
-// One row of the CDN domain list as rendered by the Admin UI (#1073).
+// One row of the CDN domain list as rendered by the Admin UI [state].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct DomainListEntry {
     // The exact trimmed on-disk line. Used verbatim as the hidden form value
@@ -1058,7 +1058,7 @@ fn is_valid_domain_label(label: &str) -> bool {
 }
 
 // Reads cdn-domains.txt into the Admin UI's row-level representation
-// (#1073): each line's enabled state (leading "!") and whether it belongs to
+// [state]: each line's enabled state (leading "!") and whether it belongs to
 // the pre-shipped "Default CDN" section or the operator-managed "custom"
 // section below CUSTOM_DOMAINS_MARKER. A file with no marker at all (an
 // older mount predating this feature, or a bare test fixture) is treated as
@@ -1156,7 +1156,7 @@ fn append_domain(path: &str, domain: &DomainSpec) -> anyhow::Result<()> {
         new_content.push('\n');
     }
     // Converge older/pre-migration files (and bare test fixtures) that
-    // predate the default-vs-custom split (#1073): insert
+    // predate the default-vs-custom split [state]: insert
     // CUSTOM_DOMAINS_MARKER once, before appending, so this entry (and every
     // future one) is correctly classified as operator-added by
     // read_domain_entries instead of silently being counted as a pre-shipped
@@ -1181,7 +1181,7 @@ fn append_domain(path: &str, domain: &DomainSpec) -> anyhow::Result<()> {
 // (see appending_root_and_wildcard_only_domains_keeps_semantics), so `target`
 // must match on the full DomainSpec, not just the domain string. Uses the
 // same terminator-preserving rewrite as remove_domain so surviving lines
-// never get silently normalized to a different line ending (#656).
+// never get silently normalized to a different line ending (line-ending).
 fn set_domain_enabled(path: &str, target: &DomainSpec, enable: bool) -> anyhow::Result<()> {
     let content = fs::read_to_string(path)?;
     let mut changed = false;
@@ -1223,7 +1223,7 @@ fn remove_domain(path: &str, domain: &DomainDeleteTarget) -> anyhow::Result<()> 
     // container) would then have every surviving LF line rewritten with a
     // spurious trailing \r. $domain is read verbatim by the proxy/DNS
     // entrypoints, so that stray \r leaked into generated nginx map/cert
-    // names and stream targets (#656). Preserving each line's own original
+    // names and stream targets (line-ending). Preserving each line's own original
     // terminator instead avoids rewriting any line that wasn't removed.
     let new: String = split_lines_preserve_terminators(&content)
         .into_iter()
@@ -1248,7 +1248,7 @@ fn remove_domain(path: &str, domain: &DomainDeleteTarget) -> anyhow::Result<()> 
 // endings, so a caller that drops some lines and rejoins the rest reproduces
 // each surviving line's own original terminator ("\r\n", "\n", or "" for a
 // final line with no trailing newline at all) instead of forcing one
-// separator across the whole file. See remove_domain's comment (#656) for why
+// separator across the whole file. See remove_domain's comment (line-ending) for why
 // that distinction matters here.
 fn split_lines_preserve_terminators(content: &str) -> Vec<(&str, &str)> {
     let mut lines = Vec::new();
@@ -1450,7 +1450,7 @@ fn normalize_lan_name(name: &str) -> String {
 // the maintainer confirmed for #1077, with NATS-based replication of manual
 // PTR edits to the other DNS instances (the primary's dns-ssl, and the
 // secondaries) deliberately left as a follow-up pending the still-open
-// reverse-zone replication decision (see #770). The reverse zones themselves
+// reverse-zone replication decision (see replication). The reverse zones themselves
 // are provisioned identically on every instance and Kea writes its automatic
 // PTRs to each directly, so this only affects manual edits.
 
@@ -1733,7 +1733,7 @@ async fn fetch_ptr_records(state: &AppState) -> Vec<PtrRecordView> {
 mod tests {
     use super::*;
 
-    // #1077: a valid PTR add resolves to the correct reverse zone id, the
+    // a valid PTR add resolves to the correct reverse zone id, the
     // reversed dot-terminated PTR name, and a normalized dot-terminated target.
     // This is the exact tuple the handler feeds into the PowerDNS PATCH, so a
     // wrong mapping here would write to the wrong zone/name.
@@ -1758,7 +1758,7 @@ mod tests {
         );
     }
 
-    // #1077: inputs that must be rejected (soft-fail) rather than PATCHed --
+    // inputs that must be rejected (soft-fail) rather than PATCHed --
     // a public IP has no provisioned reverse zone; TTL 0 is out of range; a
     // wildcard or empty target is not a valid concrete PTR host. Each would
     // otherwise cause a bad or nonsensical PowerDNS write.
@@ -1771,7 +1771,7 @@ mod tests {
         assert_eq!(validate_ptr_add("192.168.1.50", "", 300), None);
     }
 
-    // #1077: delete validation keys off the IP alone and applies the same
+    // delete validation keys off the IP alone and applies the same
     // provisioned-range gate as add, so a delete for an unprovisioned IP is
     // rejected instead of issuing a PATCH that would 404.
     #[test]
@@ -1786,7 +1786,7 @@ mod tests {
         assert_eq!(validate_ptr_ip("203.0.113.1"), None);
     }
 
-    // #1077: the generated reverse-zone list must be exactly the 18 IPv4
+    // the generated reverse-zone list must be exactly the 18 IPv4
     // private zones PowerDNS provisions (10, 168.192, and 16..=31.172), so the
     // display view GETs the right zones and never an unprovisioned one.
     #[test]
@@ -1801,7 +1801,7 @@ mod tests {
         assert!(!zones.contains(&"32.172.in-addr.arpa".to_string()));
     }
 
-    // #1077: the display parser must turn a real PowerDNS zone export into IP
+    // the display parser must turn a real PowerDNS zone export into IP
     // rows -- keeping PTR rrsets, resolving the reversed name back to an IP,
     // and skipping non-PTR rrsets (SOA/NS), disabled records, and any name that
     // is not a four-label IPv4 in-addr.arpa name -- so the table shows exactly
@@ -2173,7 +2173,7 @@ mod tests {
     }
 
     // Covers the three cases that matter for the dnsupdate-require-tsig
-    // fail-closed gate (issue #815 follow-up, real-tested via a live
+    // fail-closed gate (issue DDNS follow-up, real-tested via a live
     // container in the accompanying PR): no file at all (the common case --
     // shared-secrets volume freshly created), a present-but-empty file (not
     // something resolve_shared_secret itself ever writes, but a defensive
@@ -2367,7 +2367,7 @@ mod tests {
 
     #[test]
     fn remove_domain_preserves_each_surviving_lines_own_terminator_on_mixed_endings() {
-        // Reproduces #656: a CRLF header/comment followed by LF domain
+        // Reproduces line-ending: a CRLF header/comment followed by LF domain
         // entries plus one CRLF domain entry (the realistic "hand-edited on
         // Windows, then appended to from Linux/the container" scenario).
         // Removing one LF entry must not rewrite the OTHER surviving LF/CRLF
@@ -2715,7 +2715,7 @@ mod tests {
 
     #[test]
     fn set_domain_enabled_preserves_mixed_line_terminators_on_untouched_lines() {
-        // Same #656 concern remove_domain's own terminator test guards
+        // Same line-ending concern remove_domain's own terminator test guards
         // against: rewriting one matched line must not normalize every
         // other surviving line to a single separator.
         let base = temp_dir("set-domain-enabled-mixed-endings");

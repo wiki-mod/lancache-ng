@@ -373,8 +373,8 @@ async fn main() {
         match fetch_result {
             Ok(mut messages) => {
                 let mut had_stream_error = false;
-                // What: fetch() no_wait mode returns immediately when available.
-                // Why: prevents pacing; must use explicit backoff guard.
+                // What: fetch() no_wait returns immediately.
+                // Why: must use explicit backoff to avoid busy-spin.
                 // From: PR #738
                 let mut had_retryable_batch_stop = false;
 
@@ -401,8 +401,8 @@ async fn main() {
                                     }
                                 }
                                 MsgDecision::NakAndContinue => {
-                                    // What: flush failures continue batch processing.
-                                    // Why: flush has no ordering hazard unlike updates.
+                                    // What: flush failures continue batch.
+                                    // Why: flush has no ordering hazard.
                                     // From: PR #738
                                     if let Err(e) = msg
                                         .ack_with(jetstream::AckKind::Nak(Some(
@@ -414,8 +414,8 @@ async fn main() {
                                     }
                                 }
                                 MsgDecision::NakAndStopBatch => {
-                                    // What: NAK failed message and stop batch processing.
-                                    // Why: prevent stale write clobbering via batch ordering.
+                                    // What: NAK and stop batch on failure.
+                                    // Why: prevent stale-write batch race.
                                     // From: PR #738 | Issue #653
                                     if let Err(e) = msg
                                         .ack_with(jetstream::AckKind::Nak(Some(
@@ -441,8 +441,8 @@ async fn main() {
                     }
                 }
 
-                // What: apply backoff on stream/batch errors or reset on clean.
-                // Why: prevents busy-spin in fetch() no_wait mode.
+                // What: apply backoff on stream/batch errors.
+                // Why: prevents busy-spin in fetch() no_wait.
                 // From: PR #738
                 if had_stream_error {
                     eprintln!(
@@ -477,8 +477,8 @@ async fn main() {
     }
 }
 
-/// What: distinguish retryable failures with/without ordering hazards.
-/// Why: flush failures have no order hazard; record updates do.
+/// What: retryable outcomes (ordering hazard vs. none).
+/// Why: flush safe to continue; records need batch stop.
 /// From: PR #738 | Issue #653
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HandleOutcome {
@@ -547,8 +547,8 @@ fn record_key(zone: &str, name: &str, record_type: &str) -> RecordKey {
     )
 }
 
-/// What: per-key watermark of highest applied JetStream sequence.
-/// Why: prevents stale messages reapplying across batches.
+/// What: per-key highest applied JetStream sequence.
+/// Why: prevent stale reapplication across batches.
 /// From: Issue #772
 #[derive(Default)]
 struct AppliedSequences {
