@@ -2,69 +2,10 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Real Kea Control Agent mutation round-trip test (issue #634, the "static
-# host reservations" gap explicitly left open by
-# scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh -- see docs/dhcp-modes.md). That
-# script drives a real DHCP client against our Kea service, but never mutates
-# Kea's config; this script drives a real mutation THROUGH the Admin UI's
-# actual HTTP route (POST /dhcp/static/add, the same route
-# services/ui/src/routes/dhcp.rs's `add_reservation` handler serves, which
-# calls `kea_config_modify()` -- the exact function whose
-# config-get/config-test/config-set/config-write sequence had a real,
-# previously-undetected bug: Kea 2.6.3's config-get response includes a
-# `hash` field that config-test/config-set reject outright, and every
-# `cargo test` for that function mocked Kea's response without ever including
-# that field, so the mismatch went unnoticed until it broke every DHCP
-# mutation route in production (fixed in the same change as the regression
-# test `kea_config_modify_strips_hash_from_config_get_before_reuse`, which is
-# still mock-based). This script is the real, no-mocks equivalent: it proves
-# the Rust code's understanding of Kea's actual response shape is still
-# correct, and -- per the issue's own acceptance criteria -- that the
-# mutation is not just "the API call returned 200" but genuinely changes what
-# a SUBSEQUENT real DHCP lease request receives.
+# What: Tests static reservation add/remove via Admin UI.
+# Why: Verifies kea_config_modify() Rust code against Kea.
+# From: Issue #634
 #
-# What this script does:
-#   1. Starts a real Kea container from this checkout's services/dhcp, and a
-#      real Admin UI container from the already-published stack image (this
-#      change does not touch services/ui, so the published image already has
-#      whatever Rust code is under test), both on the same Docker network
-#      deploy/full-setup/docker-compose.yml already defines -- the identical
-#      project/network/fixed-IP pattern scripts/untracked/simulations/ui-nats-dns-integration-simulation.sh
-#      already established for driving the Admin UI from a sibling
-#      container. docker-socket-proxy/proxy/nats are started too because the
-#      Admin UI blocks ALL requests (even /health) until it can reach NATS
-#      (see connect_nats_with_retry in services/ui/src/main.rs) -- dns-standard
-#      /dns-ssl are deliberately NOT started, since nothing on the DHCP pages
-#      touches DNS.
-#   2. Establishes a real Admin UI session and CSRF token (GET /dhcp), then
-#      requests a baseline DHCP lease for a fixed test MAC address BEFORE any
-#      mutation, confirming it lands in the ordinary dynamic pool.
-#   3. POSTs a real static host reservation for that same MAC to a fixed,
-#      out-of-pool address via /dhcp/static/add, and confirms Kea's own
-#      config-get afterward shows the reservation (the issue's "ideally...
-#      reflected in a follow-up config-get" criterion).
-#   4. Requests a SECOND lease for the same MAC and asserts the offered
-#      address is now the reserved one, not just any pool address -- this is
-#      the actual round-trip proof the issue asks for.
-#   5. Removes the reservation via /dhcp/static/remove, confirms config-get no
-#      longer shows it, and requests a THIRD lease for the same MAC, asserting
-#      it is back in the ordinary dynamic pool (proving the removal also
-#      really took effect on a subsequent request, not just in the file).
-#
-# Safety model, matching dhcp-kea-lease-flow-simulation.sh's own: every DHCP
-# client run uses `dhclient -sf /bin/true` (negotiates a real lease over the
-# wire, never applies it to any interface), and every container here lives on
-# the throwaway compose project's own bridge network, never a host interface.
-#
-# What this script does NOT verify:
-#   - Subnet-level or custom-option mutations (only the reservation add/remove
-#     round trip); those routes share the same kea_config_modify() code path,
-#     so this script's coverage of that function is representative, not
-#     route-by-route exhaustive.
-#   - DHCP-DDNS lease-event follow-through -- Refs #557, same scope carve-out
-#     as dhcp-kea-lease-flow-simulation.sh.
-#   - The dnsmasq-proxy DHCP mode -- entirely different code path, no
-#     Kea/Admin-UI Control Agent interaction at all.
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)

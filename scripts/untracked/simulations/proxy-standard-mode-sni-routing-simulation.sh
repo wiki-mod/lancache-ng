@@ -2,56 +2,9 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Real TLS-handshake simulation for services/proxy/entrypoint.sh's standard-
-# mode (SNI-passthrough) stream-target map generation loop over
-# _UNIQUE_DOMAINS (the "$stream_backend" map written to
-# stream.d/00-stream-targets.conf). Everything else covering this file's
-# map-generation logic (tests/bats/proxy_collect_domain_rows.bats) stops at
-# bash-level unit coverage of which domains land in which array -- none of
-# it starts a real proxy image, real nginx, or performs a real TLS handshake
-# through the generated map, which is exactly where this bug (issue #1297,
-# folded into #1276) lived: the map's *values*, not which domains it lists.
-#
-# The bug: a matched registrable-root wildcard key (e.g. "*.example.com")
-# forwarded to "${domain}:443" -- the literal derived root -- instead of
-# "$ssl_preread_server_name:443" (the actual requested SNI). A listed
-# "sub.example.com" (root "example.com") would forward standard-mode
-# passthrough traffic to "example.com:443", not "sub.example.com:443", even
-# though DNS correctly spoofed "sub.example.com" to the proxy in the first
-# place. This is silent and undetectable from config-generation review alone
-# unless the real target host actually serves *different* content than the
-# root -- which is exactly what this script proves with two distinguishable
-# backends.
-#
-# Deliberately a standalone script rather than an extension of
-# scripts/untracked/simulations/proxy-deep-wildcard-tls-simulation.sh: that script validates
-# SSL-mode certificate *selection* (which cert nginx presents for a given
-# SNI, terminated by nginx itself). This script validates standard-mode SNI
-# *passthrough routing* (which real backend nginx's stream module forwards
-# the raw TLS bytes to, with nginx never terminating the connection at all)
-# -- a different nginx context (stream's own listener on :8443, not the
-# http block's :443) and a different failure mode (wrong destination host,
-# not wrong certificate). It also needs two independently-addressable fake
-# origins, which the deep-wildcard script's single-image setup has no
-# reason to provide.
-#
-# Fake-origin mechanism: two backend containers on the same throwaway
-# Docker network, each given a Docker "--network-alias" equal to the
-# hostname under test ("example.com" / "sub.example.com" -- both reserved,
-# non-routable per RFC 2606, never the real internet domain). Docker's
-# embedded per-network DNS resolver (127.0.0.11, confirmed live on a real
-# Debian-based container to resolve a multi-label alias correctly) answers
-# for these aliases inside the network; the proxy container's
-# NGINX_UPSTREAM_RESOLVER is pointed at that same embedded resolver instead
-# of a real public DNS server, so nginx's own dynamic proxy_pass resolution
-# reaches our fake origins instead of the real internet -- this mirrors how
-# NGINX_UPSTREAM_RESOLVER is a real, documented override point in
-# production (see AG-OP-002), just aimed at a throwaway network instead of
-# 8.8.8.8. Each backend runs a real "openssl s_server" presenting a
-# distinct, self-signed certificate (CN=backend-root / CN=backend-sub) --
-# the CN that comes back from a real TLS handshake through the proxy is
-# the only reliable, real proof of which backend the passthrough actually
-# reached.
+# What: Tests proxy standard-mode SNI passthrough routing.
+# Why: Verify wildcard domain routes to SNI, not derived root.
+# From: Issue #1297
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)

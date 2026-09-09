@@ -2,44 +2,9 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Real end-to-end proof for issue #837: the Admin UI's OWN Kea rollback route
-# (`POST /dhcp/snapshot/rollback`, rollback_kea_snapshot in
-# services/ui/src/routes/dhcp.rs) must genuinely roll a real, running Kea
-# server back to an earlier known-good config -- not just return an HTTP
-# redirect. This is the UI-reachable path; the CLI fallback
-# (`setup.sh reset-to-last-known-good-config kea`) is separately proven by
-# scripts/untracked/simulations/setup-reset-kea-config-simulation.sh, which this script deliberately
-# mirrors (same real-Kea-container/real-Admin-UI topology, same bind-mounted
-# kea-data volume, same session/CSRF technique) rather than inventing a second
-# way to stand up Kea+the Admin UI. Both drive the identical config-test ->
-# config-set -> config-write chain against Kea's real Control Agent; the only
-# difference is which entry point triggers it.
-#
-# What this script does:
-#   1. Starts a real Kea container (this checkout's services/dhcp) and a real
-#      Admin UI container (published stack image; this change does not touch
-#      services/ui) sharing one bind-mounted kea-data directory, exactly like
-#      docker-compose.yml shares that volume between the two services in
-#      every real deployment.
-#   2. Through the Admin UI's real HTTP routes, adds reservation A (creating
-#      known-good snapshot S_A, the Admin UI's own post-config-write side
-#      effect -- see services/ui/src/kea_snapshots.rs), then adds a SECOND,
-#      unrelated reservation B (creating snapshot S_AB, since Kea's config
-#      now holds both).
-#   3. Calls the Admin UI's real `POST /dhcp/snapshot/rollback` route over HTTP
-#      (with the session's CSRF token and snapshot_id = the snapshot captured
-#      right after reservation A) -- the UI's own config-test -> config-set ->
-#      config-write chain against Kea's real Control Agent.
-#   4. Confirms via a fresh `config-get` against the real Kea server that
-#      reservation A is still present and reservation B is GONE -- proof the
-#      route genuinely rolled Kea's live config back, not just that the HTTP
-#      request returned a success redirect.
-#
-# What this script does NOT verify:
-#   - The CLI fallback path (covered by setup-reset-kea-config-simulation.sh).
-#   - The 'dns'/'pdns' rollback target -- not yet implemented (depends on
-#     issue #628's rollback listener); see rollback_kea_snapshot / the DNS
-#     rollback listener notes.
+# What: Tests Admin UI Kea snapshot rollback route.
+# Why: Verify POST /dhcp/snapshot/rollback changes Kea config.
+# From: Issue #837
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)

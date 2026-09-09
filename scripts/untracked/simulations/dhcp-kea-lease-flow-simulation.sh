@@ -61,19 +61,8 @@ csv() { printf '%s' "$1" | tr ' ' ','; }
 } >> /dhcp-test/dhclient.leases
 HOOK_SCRIPT
     chmod +x /tmp/udhcpc-lease-capture.sh
-    # Two separate command lines, not one built from a dynamically-quoted
-    # variable: `udhcpc_bin="busybox udhcpc"` followed by `"$udhcpc_bin" ...`
-    # would quote the whole two-word string into a single argv[0], which
-    # exec(2) would then look for as one literal (and nonexistent) binary
-    # named "busybox udhcpc" -- a real bug caught before this shipped, not
-    # a hypothetical one; word-splitting an unquoted variable would dodge
-    # it too, but at the cost of shellcheck's SC2086 flagging the very
-    # thing this comment would then have to justify. Alpine's own busybox
-    # package always symlinks each enabled applet (udhcpc included) to a
-    # standalone binary, so the `command -v udhcpc` branch is what actually
-    # runs on the alpine-final image this dispatch exists for; the bare
-    # `busybox udhcpc` fallback below only matters for a hypothetical image
-    # that ships busybox without that symlink.
+    # What: Uses separate commands, not quoted variable.
+    # Why: exec() would fail on quoted multi-word argv[0].
     if command -v udhcpc >/dev/null 2>&1; then
         udhcpc -i eth0 -s /tmp/udhcpc-lease-capture.sh -x hostname:"$(hostname)" -q -n -f >/dhcp-test/dhclient.out 2>&1
     else
@@ -101,9 +90,9 @@ dhcp_test_domain="lancache-dhcp448-test.lan"
 network_name="lancache-ng-dhcp448-$$"
 kea_container="lancache-ng-dhcp448-kea-$$"
 image_tag="lancache-ng-dhcp448-kea:$$"
-# dns_container/dns_image_tag (issue #706): the real PowerDNS container the
-# DDNS verification section further below builds and queries. Named
-# alongside the Kea names above for the same collision-avoidance reason.
+# What: DNS container names for PowerDNS instance.
+# Why: Unique names prevent collision with concurrent runs.
+# From: Issue #706
 dns_container="lancache-ng-dhcp448-dns-$$"
 dns_image_tag="lancache-ng-dhcp448-dns:$$"
 
@@ -166,7 +155,7 @@ while [[ -z "$octet" && "$subnet_next_attempt" -le "$subnet_max_attempts" ]]; do
         exit 1
     }
     # What: Uses here-strings to avoid second writer.
-    # Why: Consistent with pipefail; see issue #1377.
+    # Why: Consistent with pipefail and errexit.
     if ! attempt="$(sed -n 's/^attempt=//p' <<<"$reservation")"; then
         echo "::error::Could not parse the 'attempt=' field out of validation_subnet_reserve's output." >&2
         exit 1

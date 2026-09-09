@@ -2,44 +2,9 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Real end-to-end proof for #763's CLI-fallback item: `setup.sh
-# reset-to-last-known-good-config kea` must actually roll a real, running Kea
-# server back to an earlier config -- not just return success. Reuses the
-# same real-Kea-container/real-Admin-UI topology
-# scripts/untracked/simulations/dhcp-kea-ctrl-agent-mutation-simulation.sh already established for
-# issue #634 (same image build, same bind-mounted kea-data volume, same
-# session/CSRF technique), rather than inventing a second way to stand up
-# Kea+the Admin UI for a test.
-#
-# What this script does:
-#   1. Starts a real Kea container (this checkout's services/dhcp) and a real
-#      Admin UI container (published stack image; this change does not touch
-#      services/ui) sharing one bind-mounted kea-data directory, exactly like
-#      docker-compose.yml shares that volume between the two services in
-#      every real deployment.
-#   2. Through the Admin UI's real HTTP routes, adds reservation A (creating
-#      known-good snapshot S_A, the Admin UI's own post-config-write side
-#      effect -- see services/ui/src/kea_snapshots.rs), then adds a SECOND,
-#      unrelated reservation B (creating snapshot S_AB, since Kea's config
-#      now holds both).
-#   3. Runs the real `setup.sh reset-to-last-known-good-config kea` command
-#      (--yes, so this runs non-interactively; the confirmation prompt itself
-#      is a separate, deliberately interactive safety feature not under test
-#      here) against S_A -- the CLI's config-test -> config-set ->
-#      config-write chain against Kea's real Control Agent.
-#   4. Confirms via a fresh `config-get` against the real Kea server that
-#      reservation A is still present and reservation B is GONE -- proof the
-#      command genuinely rolled Kea's live config back, not just that the API
-#      calls returned success.
-#
-# What this script does NOT verify:
-#   - The interactive confirmation prompt itself (ask()/confirm() read
-#     /dev/tty, which setup-cli-simulation.sh already covers for other
-#     subcommands via `expect`; --yes exists so this command can be driven
-#     the same way scripted/automated recovery would use it).
-#   - The 'dns'/'pdns' service target -- not yet implemented (depends on
-#     issue #628's rollback listener); see cmd_reset_to_last_known_good_config
-#     in setup.sh.
+# What: Tests CLI setup.sh reset-to-last-known-good-config Kea.
+# Why: Verify CLI command actually rolls back Kea config.
+# From: Issue #763
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
