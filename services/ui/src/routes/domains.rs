@@ -51,11 +51,8 @@ pub struct DdnsAllowUnsignedForm {
 #[derive(Deserialize)]
 pub struct ToggleDomainForm {
     pub csrf_token: String,
-    // The canonical (envelope-free) domain form, e.g. "steamcontent.com" or
-    // ".steamcontent.com" -- the same shape add_dns/remove_dns already
-    // accept, deliberately never the raw on-disk "!"-prefixed line. Reusing
-    // parse_domain_entry here means an operator/forged request can never
-    // smuggle a "!" through this field.
+    // What: Canonical form (no ! prefix); matches add/remove format
+    // Why: Prevents operator/forged requests smuggling ! through field
     pub domain: String,
     #[serde(default)]
     pub enabled: Option<String>,
@@ -76,20 +73,16 @@ pub struct Record {
     pub disabled: bool,
 }
 
-// Query: error code from add_dns form validation failures
-// Why: Flash-message system not implemented; this page handles only errors
+// What: Query param carries error code from form validation
+// Why: No flash-message system; errors routed through URL param
 #[derive(Deserialize)]
 pub struct DomainsPageQuery {
     #[serde(default)]
     pub error: Option<String>,
 }
 
-// Maps a known `?error=` code to the exact, safe, human-readable banner text
-// -- never renders the query parameter's raw value directly. This keeps the
-// set of possible messages fixed and reviewable instead of turning an
-// operator-controlled (or link-shared) URL parameter into arbitrary page
-// text. An unrecognized code (a stale bookmark from a future/older version,
-// or a manually-edited URL) is treated as no error rather than guessed at.
+// What: Maps error code to fixed safe human-readable banner text
+// Why: Prevents untrusted URL param from becoming arbitrary page text
 fn domains_page_error_message(code: &str) -> Option<&'static str> {
     match code {
         "invalid_domain" => Some(
