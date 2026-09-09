@@ -793,12 +793,9 @@ struct DomainSpec {
     domain: String,
 }
 
-// Marks the boundary between the pre-shipped "Default CDN" section of
-// cdn-domains.txt and entries an operator has added themselves via the
-// Admin UI's Add form [state]. Everything above this exact line (trimmed)
-// is treated as a default entry (toggle-able but never removable from the
-// What: Marker separates shipped default domains from operator entries
-// Why: Allows Add/Remove without toggle; formatting distinct from vendors
+// What: Marker separates shipped default domains from operator entries.
+// Why: Allows Add/Remove without toggle; formatting distinct from vendors.
+// From: Issue #1073
 const CUSTOM_DOMAINS_MARKER: &str =
     "# ==== lancache-ng: entries added via the Admin UI are appended below this exact line ====";
 

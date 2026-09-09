@@ -1122,6 +1122,9 @@ mod tests {
         assert_eq!(req.expected_content, None);
     }
 
+    // What: FlushRequest deserializes the new optional fields.
+    // Why: zone/record_type/expected_content drive confirmation.
+    // From: Issue #1095
     #[test]
     fn flush_request_deserializes_with_the_new_optional_fields() {
         let req: FlushRequest = serde_json::from_str(
@@ -1153,18 +1156,27 @@ mod tests {
         assert!(rrset_matches_expected(None, None));
     }
 
+    // What: a still-present RRset fails an expected-absent check.
+    // Why: delete not yet propagated -- must not flush early.
+    // From: Issue #1095
     #[test]
     fn rrset_matches_expected_rejects_still_present_when_absence_expected() {
         let rrset = rrset_with_content("10.0.0.5");
         assert!(!rrset_matches_expected(Some(&rrset), None));
     }
 
+    // What: an absent RRset fails an expected-content check.
+    // Why: add not yet propagated -- must not flush early.
+    // From: Issue #1095
     #[test]
     fn rrset_matches_expected_rejects_still_absent_when_content_expected() {
         let expected = vec!["10.0.0.5".to_string()];
         assert!(!rrset_matches_expected(None, Some(&expected)));
     }
 
+    // What: matching content passes regardless of record order.
+    // Why: AXFR may reorder records; order must not matter.
+    // From: Issue #1095
     #[test]
     fn rrset_matches_expected_accepts_matching_content_regardless_of_order() {
         let mut record_a = HashMap::new();
@@ -1182,6 +1194,9 @@ mod tests {
         assert!(rrset_matches_expected(Some(&rrset), Some(&expected)));
     }
 
+    // What: stale content fails an expected-content check.
+    // Why: an old RRset must not satisfy new-content confirmation.
+    // From: Issue #1095
     #[test]
     fn rrset_matches_expected_rejects_stale_content() {
         let rrset = rrset_with_content("10.0.0.5");
