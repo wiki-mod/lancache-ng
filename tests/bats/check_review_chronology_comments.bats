@@ -306,7 +306,7 @@ EOF
 # What: Why: line repeating same #N as file's own From:
 # Why: baseline positive case for
 # From: PR #1546
-@test "fails when a comment repeats a number already declared by this file's own From: pointer" {
+@test "warns but does not block when a comment repeats a number already declared by this file's own From: pointer" {
     cat > "$fixture_root/example.dockerfile" <<'EOF'
 # What: ccache preprocesses locally instead of shelling.
 # Why: crashes the same distcc host list noted in #887.
@@ -315,9 +315,9 @@ RUN true
 EOF
 
     run bash "$script" "$fixture_root"
-    [ "$status" -eq 1 ]
+    [ "$status" -eq 0 ]
     [[ "$output" == *"example.dockerfile:2"* ]] || fail "did not name the offending line: $output"
-    [[ "$output" == *"AG-CODE-012"* ]] || fail "did not cite the governing rule: $output"
+    [[ "$output" == *"warn-only"* ]] || fail "duplicate ref must be reported as warn-only, not fatal: $output"
 }
 
 # What: From: line, which necessarily contains number.
@@ -396,7 +396,7 @@ EOF
 # What: string-literal mention followed by real duplicate
 # Why: string match must not swallow rest of line & hide
 # From: PR #1546
-@test "fails when a line has both a string-literal mention AND a real trailing comment repeating the number" {
+@test "warns but does not block when a line has both a string-literal mention AND a real trailing comment repeating the number" {
     cat > "$fixture_root/example.sh" <<'EOF'
 #!/usr/bin/env bash
 # From: Issue #887
@@ -404,8 +404,9 @@ echo "some string with #887 inside" # duplicate real comment ref to issue #887
 EOF
 
     run bash "$script" "$fixture_root"
-    [ "$status" -eq 1 ]
+    [ "$status" -eq 0 ]
     [[ "$output" == *"example.sh:3"* ]] || fail "did not name the offending line (first occurrence in a string must not swallow a later real comment on the same line): $output"
+    [[ "$output" == *"warn-only"* ]] || fail "duplicate ref must be reported as warn-only, not fatal: $output"
 }
 
 # What: single-quote variant of double-quote test above.
@@ -425,7 +426,7 @@ EOF
 # What: contraction (fluent-bit's) before real duplicate
 # Why: bare apostrophe must only open string when not
 # From: PR #1546
-@test "fails on a real comment duplicate even when an earlier English contraction/possessive apostrophe appears on the same line" {
+@test "warns but does not block on a real comment duplicate even when an earlier English contraction/possessive apostrophe appears on the same line" {
     cat > "$fixture_root/example.yml" <<'EOF'
 volumes:
   # From: Issue #453
@@ -434,8 +435,9 @@ volumes:
 EOF
 
     run bash "$script" "$fixture_root"
-    [ "$status" -eq 1 ]
+    [ "$status" -eq 0 ]
     [[ "$output" == *"example.yml:4"* ]] || fail "a contraction apostrophe ('fluent-bit's') must not be misread as an unterminated string that swallows the real duplicate later on the line: $output"
+    [[ "$output" == *"warn-only"* ]] || fail "duplicate ref must be reported as warn-only, not fatal: $output"
 }
 
 # What: contraction with no duplicate number anywhere on
