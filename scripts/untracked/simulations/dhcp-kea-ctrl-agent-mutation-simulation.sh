@@ -17,32 +17,13 @@ source "$repo_root/scripts/lib/dhcp-lease-parse.sh"
 client_tool_image="${DHCP_CTRL_AGENT_CLIENT_IMAGE:?DHCP_CTRL_AGENT_CLIENT_IMAGE is required (an image providing dhclient/curl/jq, e.g. the build-tools image)}"
 image_tag="${LANCACHE_IMAGE_TAG:-nightly}"
 
-# COMPOSE_PROJECT_NAME/VALIDATION_SUBNET/VALIDATION_GATEWAY/VALIDATION_UI_IP
-# are exported by scripts/lib/run-in-validation-subnet.sh (issue #820),
-# which full-setup-validate.yml's own job wraps this script's invocation in
-# -- it reserves a host-locked, overlap-checked /27 subnet within
-# 172.30.0.0/16 (issue #832; a whole /24 per octet before) per attempt and
-# retries on a genuine collision, exactly like this script's siblings
-# (ssl-mitm-cache-simulation.sh, ui-nats-dns-integration-simulation.sh)
-# already consume. This used to hardcode a fixed 172.30.99.0/24
-# unconditionally, with NO per-run derivation and NO retry at all -- worse
-# than the birthday-paradox-odds bug those siblings had before #820, since
-# EVERY invocation of this exact script, from ANY concurrent run, requested
-# the identical literal subnet: not a rare collision, a deterministic one
-# the moment two such networks existed on the same host at once (confirmed
-# for real: this job died on "Pool overlaps" for
-# lancache-ng-validation-69_validation in the run that surfaced this gap).
-# The fallback default below only matters for a local, outside-CI invocation.
+# What: Load validation subnet from CI environment.
+# Why: Per-run /27 subnet avoids collision.
+# From: Issue #820
 validation_subnet="${VALIDATION_SUBNET:-172.30.99.0/27}"
-# #832: a /27 only has 30 usable host addresses, and this script needs a few
-# MORE than the 10 (.1-.10, base-relative) deploy/full-setup/docker-
-# compose.yml's own services already claim inside the SAME reserved subnet
-# -- so, unlike before, this can no longer assume the subnet's fourth octet
-# starts at 0 (a /27's base is base_octet = subblock*32, one of
-# 0/32/64/.../224, see scripts/lib/reserve-validation-subnet.sh's own
-# validation_subnet_export_env). Parse the network prefix and base octet out
-# of $validation_subnet directly instead of the old "%.0/24" string-strip,
-# which only worked because the pre-#832 base was always literally 0.
+# What: Parse subnet prefix and base octet dynamically.
+# Why: /27 base varies; /24 assumption no longer valid.
+# From: Issue #832
 subnet_no_prefixlen="${validation_subnet%/*}"      # e.g. 172.30.147.64
 subnet_prefix="${subnet_no_prefixlen%.*}"          # e.g. 172.30.147
 subnet_base_octet="${subnet_no_prefixlen##*.}"     # e.g. 64
@@ -50,24 +31,16 @@ gateway_ip="${VALIDATION_GATEWAY:-172.30.99.1}"
 compose_project="${COMPOSE_PROJECT_NAME:-lancache-ng-validation}"
 network_name="${compose_project}_validation"
 ui_ip="${VALIDATION_UI_IP:-172.30.99.9}"
-# base+2..base+10 are already claimed by proxy/dns-standard/dns-ssl/watchdog/
-# netdata/nats/ui in deploy/full-setup/docker-compose.yml (base+1 is the
-# gateway); base+11..base+30 are this script's own to use, sized to fit
-# comfortably within what's left of the /27 (30 usable hosts total) alongside
-# setup-reset-kea-config-simulation.sh's own base+21..base+29, which the two
-# scripts deliberately keep non-overlapping (see that script's own comment)
-# so both could run concurrently on a shared runner without colliding even
-# if they somehow ever landed on the same reserved subnet.
+# What: Reserve IP range base+11..base+30 for this script.
+# Why: Allows concurrent runs with setup-reset script.
 kea_ip="${subnet_prefix}.$((subnet_base_octet + 11))"
 pool_start="${subnet_prefix}.$((subnet_base_octet + 12))"
 pool_end="${subnet_prefix}.$((subnet_base_octet + 19))"
-# Deliberately outside the dynamic pool above: the whole point of a static
-# reservation is that Kea must hand it out even though ordinary dynamic
-# allocation never would.
+# What: Reserve static IP outside dynamic pool.
+# Why: Tests Kea static reservation functionality.
 reserved_ip="${subnet_prefix}.$((subnet_base_octet + 20))"
-# A fixed, locally-administered (0x02 high nibble) test MAC -- never a real
-# vendor OUI, and unique enough per run (low bits from this run's PID) that
-# concurrent local runs of this script don't collide on the same reservation.
+# What: Generate test MAC from PID for uniqueness.
+# Why: Prevents concurrent runs from colliding.
 test_mac="$(printf '02:11:22:33:44:%02x' "$(( $$ % 256 ))")"
 reserved_hostname="ctrl-agent-mutation-test"
 
@@ -93,25 +66,12 @@ cleanup() {
     local status=$?
     docker rm -f "$ui_container" "$kea_container" >/dev/null 2>&1 || true
     LANCACHE_IMAGE_TAG="$image_tag" "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
-    # services/dhcp/entrypoint.sh runs as root inside the Kea container and
-    # chowns kea-data/config-snapshots/ to the Admin UI's fixed unprivileged
-    # uid (10001, see that entrypoint's own comment, and this script's
-    # identical comment on its own kea-data mount above). A plain
-    # `rm -rf "$work_dir"` as this (non-root, non-10001) process would fail to
-    # remove those files, leaving the tree behind. Since work_dir now lives
-    # under $TMPDIR (outside the checked-out repo -- see its definition
-    # above), a leftover there is already harmless to other CI jobs; this
-    # ownership reset is kept purely so THIS run tidies up after itself
-    # instead of accumulating undeletable uid-10001 dirs in $TMPDIR. Reset
-    # ownership back to this process's own uid/gid via the already-built (no
-    # extra pull) Kea image -- unconditionally, in this EXIT trap, so it runs
-    # whether the simulation above succeeded or failed -- before rm -rf.
+    # What: Reset uid-10001 dirs to current user.
+    # Why: Kea entrypoint creates uid-10001 files; rm fails.
+    # From: Issue #1123
     if [[ -d "$work_dir" ]]; then
-        # Reported explicitly (not just silently `|| true`-d) so the
-        # ownership reset's own success is a directly visible fact in every
-        # run's log, success or failure, instead of something a future
-        # reviewer would have to infer from the absence of a later
-        # "Permission denied" line.
+        # What: Report chown result explicitly to stdout.
+        # Why: Absence of error doesn't prove success.
         if docker run --rm --entrypoint chown \
             -v "$work_dir:/reset-owner" \
             "$kea_image_tag" -R "$(id -u):$(id -g)" /reset-owner >/dev/null 2>&1; then
@@ -121,15 +81,8 @@ cleanup() {
         fi
     fi
     docker rmi "$kea_image_tag" >/dev/null 2>&1 || true
-    # `|| true`: an unguarded `rm -rf` here would still exit non-zero on a
-    # permission-denied removal (the chown step above should prevent that
-    # now, but this is the second, independent layer) and, under
-    # `set -euo pipefail`, would then override this trap's own
-    # `exit "$status"` below with a spurious cleanup failure instead of the
-    # test's real outcome. Its own stderr is deliberately left unredirected
-    # (unlike the chown step above) so a leftover permission-denied file
-    # still shows up verbatim in the log even though it can no longer flip
-    # the job red.
+    # What: Remove work dir with explicit error reporting.
+    # Why: Avoid spurious failures from cleanup errors.
     if rm -rf "$work_dir"; then
         echo "cleanup: removed $work_dir -- ok"
     else
@@ -143,23 +96,16 @@ echo "== Building the Kea DHCP image from this checkout's services/dhcp =="
 docker build -q -t "$kea_image_tag" --build-context "shared-scripts=$repo_root/scripts/lib" services/dhcp >/dev/null
 
 echo "== Starting docker-socket-proxy/proxy/nats from the published $image_tag images =="
-# ui's own /health does not answer at all until NATS is reachable (see
-# connect_nats_with_retry in services/ui/src/main.rs); docker-socket-proxy and
-# proxy are started to mirror ui-nats-dns-integration-simulation.sh's own
-# dependency set even though neither is on the /dhcp code path, keeping this
-# script's stack topology recognizable/consistent with that sibling job.
+# What: Start docker-socket-proxy, proxy, nats services.
+# Why: UI health requires NATS; mirrors sibling scripts.
 LANCACHE_IMAGE_TAG="$image_tag" "${compose[@]}" up -d docker-socket-proxy proxy nats
 
 deadline=$((SECONDS + 90))
 while (( SECONDS < deadline )); do
     all_ready=1
     for service in proxy nats; do
-        # Under `set -euo pipefail`, a bare `cid="$(cmd)"` with no adjacent
-        # check aborts the whole script silently the instant `cmd` fails --
-        # errexit fires right at this assignment, before any diagnostic ever
-        # prints. Wrap it so a broken `compose ps` invocation (e.g. wrong
-        # project name, daemon down) reports its own cause instead of a bare
-        # "Process completed with exit code 1".
+        # What: Wrap to capture and report errors.
+        # Why: Bare assignments abort; check shows cause.
         if ! cid="$("${compose[@]}" ps -q "$service")"; then
             echo "::error::Could not query the compose container id for service '$service'." >&2
             exit 1
@@ -225,12 +171,8 @@ fi
 echo "Kea DHCPv4 server and Control Agent are up (Subnet: $validation_subnet, Pool: $pool_start - $pool_end)."
 
 echo "== Starting the real Admin UI (published $image_tag image) pointed at this Kea Control Agent =="
-# `compose run` (not `up`) so this one-off container's DHCP_MODE/DHCP_API_URL/
-# DHCP_API_TOKEN overrides don't require editing the shared
-# deploy/full-setup/docker-compose.yml (which hardcodes DHCP_MODE=disabled
-# for every other job that reuses this same file). No --service-ports: the
-# curl client below reaches it over the compose network directly, exactly
-# like ui-nats-dns-integration-simulation.sh already does for $ui_ip:8080.
+# What: Use 'compose run' not 'up' for one-off container.
+# Why: Allows per-call env overrides without editing yaml.
 LANCACHE_IMAGE_TAG="$image_tag" "${compose[@]}" run -d --name "$ui_container" \
     -v "$work_dir/kea-data:/var/lib/kea" \
     -e DHCP_MODE=kea \
@@ -263,10 +205,8 @@ run_client() {
 }
 
 echo "== UI: establishing a session and extracting its CSRF token =="
-# Same technique as ui-nats-dns-integration-simulation.sh: a plain GET against
-# a protected route establishes the session cookie
-# (v1.<expires>.<csrf_token>.<signature>), whose third dot-separated field is
-# the CSRF token every mutating request must echo back.
+# What: Extract CSRF token from session cookie field 3.
+# Why: Required for all Admin UI mutating POST requests.
 run_client "curl -sS -c /shared/cookiejar -o /dev/null 'http://$ui_ip:8080/dhcp'"
 if ! cookie_value="$(awk -F'\t' '$6 == "lancache_ui_session" {print $7}' "$work_dir/shared/cookiejar")"; then
     echo "::error::Could not read the session cookie back from $work_dir/shared/cookiejar." >&2
@@ -284,11 +224,8 @@ fi
 echo "Session established, CSRF token extracted."
 
 # request_lease <label> <state_subdir>
-# Runs one fresh, one-shot dhclient container for $test_mac and prints the
-# offered IPv4 address (empty if none was obtained within the deadline). A
-# fresh container/state dir per call, matching
-# dhcp-kea-lease-flow-simulation.sh's own established technique, so each call
-# is a genuinely new DISCOVER, never a stale renewal of a previous attempt.
+# What: Request fresh DHCP lease in isolated container.
+# Why: Ensures fresh DISCOVER, not stale renewal.
 request_lease() {
     local label="$1" state_subdir="$2" client_container
     client_container="lancache-ng-dhcp634-client-${state_subdir}-$$"
@@ -312,10 +249,8 @@ request_lease() {
     done
     docker rm -f "$client_container" >/dev/null 2>&1 || true
 
-    # Redirected to stderr, not stdout: this function's stdout is captured
-    # via command substitution by every caller (the offered address is the
-    # only thing that must appear there) -- diagnostic output on stdout would
-    # silently corrupt that capture with multiple lines instead of one.
+    # What: Send diagnostics to stderr; stdout is IP only.
+    # Why: stdout substitution must contain single address.
     {
         echo "::group::$label: raw dhclient output"
         cat "$work_dir/$state_subdir/dhclient.out" 2>/dev/null || echo "(no client output captured)"
@@ -440,21 +375,9 @@ if [[ "$reservation_gone" != "yes" ]]; then
 fi
 echo "Kea's live config-get confirms the reservation for $test_mac is gone."
 
-# Removing the reservation from Kea's config above (verified by config-get
-# just now) does not expire or delete the ALREADY-ACTIVE lease for
-# $reserved_ip that the "post-add" lease request created earlier -- that's a
-# separate, real entry in Kea's lease database, not part of the reservation
-# config that was just removed. Kea prefers renewing a client's own
-# still-valid lease, so without deleting it here the THIRD request below
-# could still be offered $reserved_ip straight out of the lease database,
-# failing the assertion that removal took effect even though the Admin UI's
-# remove mutation and the config-get check above both genuinely succeeded.
-# Uses Kea's own lease4-del control command directly against the Control
-# Agent (matching this script's existing direct config-get calls above), not
-# the Admin UI's /dhcp/lease/release route (release_lease() in
-# services/ui/src/routes/dhcp.rs) -- that route is a distinct code path this
-# script isn't exercising, this is just cleanup to make the next assertion
-# valid.
+# What: Delete orphaned lease before verifying removal.
+# Why: Removed reservations don't auto-expire active leases.
+# From: Issue #634
 echo "== Clearing the now-orphaned active Kea lease for $reserved_ip before the next request =="
 if ! lease_del_result="$(docker exec "$kea_container" sh -c '
     curl -sf -u "admin:$1" -H "Content-Type: application/json" \
@@ -464,11 +387,8 @@ if ! lease_del_result="$(docker exec "$kea_container" sh -c '
     echo "::error::Could not run lease4-del for $reserved_ip against Kea's Control Agent ($kea_container)." >&2
     exit 1
 fi
-# 0 = deleted, 3 = Kea's CONTROL_RESULT_EMPTY (no matching lease -- e.g. it
-# already expired on its own) -- both leave $reserved_ip with no active
-# lease, which is all the next assertion actually requires. Anything else is
-# a genuine Control Agent failure, matching kea_lease_del_result()'s own
-# result-code handling in services/ui/src/routes/dhcp.rs.
+# What: Accept codes 0 (deleted) and 3 (empty lease).
+# Why: Both mean no active lease; others indicate failure.
 if [[ "$lease_del_result" != "0" && "$lease_del_result" != "3" ]]; then
     echo "::error::lease4-del for $reserved_ip returned unexpected Kea result code '$lease_del_result'." >&2
     exit 1
