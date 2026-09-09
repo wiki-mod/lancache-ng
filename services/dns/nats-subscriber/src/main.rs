@@ -373,18 +373,9 @@ async fn main() {
         match fetch_result {
             Ok(mut messages) => {
                 let mut had_stream_error = false;
-                // Codex review (PR #738) finding 1: `consumer.fetch()` uses
-                // async-nats's `no_wait: true` batch mode (confirmed in
-                // async-nats 0.49.1's `FetchBuilder::messages()`), so it
-                // returns immediately with whatever is already available
-                // instead of waiting up to `expires` for new messages. If a
-                // retryable PDNS failure stops a batch below, the NAK'd
-                // message (and, during a real outage, likely more backlog
-                // behind it) can be immediately available again on the very
-                // next iteration of this outer `loop`, with nothing pacing
-                // the fetch/HTTP-call rate. Track that here so we can apply
-                // the same backoff used for stream/fetch errors instead of
-                // busy-spinning HTTP calls at a down PDNS.
+                // What: consumer.fetch() uses no_wait mode returning immediately.
+                // Why: prevents pacing of retried messages; need explicit backoff.
+                // From: PR #738
                 let mut had_retryable_batch_stop = false;
 
                 while let Some(msg_result) = messages.next().await {
@@ -410,18 +401,9 @@ async fn main() {
                                     }
                                 }
                                 MsgDecision::NakAndContinue => {
-                                    // Codex review (PR #738) finding 3: a retryable
-                                    // `lancache.dns.flush` failure (recursor cache-flush
-                                    // endpoint down/erroring) does NOT create the same
-                                    // stale-record-clobber hazard that a `lancache.dns.record`
-                                    // failure does -- flush order relative to other flushes
-                                    // isn't safety-critical the way record-update order is.
-                                    // Stopping the whole batch behind a flush failure would
-                                    // needlessly delay unrelated, healthy record updates later
-                                    // in the same batch. So: NAK with a short delay (still
-                                    // better than the pre-#653 "just don't ack" approach) but
-                                    // keep consuming the rest of the batch, matching the
-                                    // pre-#653 behavior for this message class.
+                                    // What: flush failures have no ordering hazard, continue batch.
+                                    // Why: flush order is not safety-critical unlike record updates.
+                                    // From: PR #738
                                     if let Err(e) = msg
                                         .ack_with(jetstream::AckKind::Nak(Some(
                                             Duration::from_millis(100),
@@ -432,43 +414,9 @@ async fn main() {
                                     }
                                 }
                                 MsgDecision::NakAndStopBatch => {
-                                    // A retryable (5xx) failure must not let a LATER message
-                                    // in this SAME fetched batch get acked ahead of it. Example
-                                    // race this closes: message A (older update for
-                                    // zone/name/type X) fails transiently here; message B (a
-                                    // newer update for that same X) is later in the batch and
-                                    // would otherwise succeed and get acked. A then sits unacked
-                                    // until AckWait, gets redelivered, and reapplies --
-                                    // clobbering B's newer state with stale data. The previous
-                                    // fix only added a 100ms sleep before the *next fetch loop
-                                    // iteration*, which did nothing to stop the rest of the
-                                    // *current* batch (already pulled via messages.next()) from
-                                    // being processed and acked.
-                                    //
-                                    // Fix: NAK this message with an explicit delay (a precise
-                                    // server-side "retry me later" signal, rather than relying
-                                    // on implicit AckWait timeout) and immediately stop
-                                    // consuming the rest of the batch. Messages left unconsumed
-                                    // here were already pulled from the server but never
-                                    // acked/nakked, so JetStream simply redelivers them on its
-                                    // own after AckWait -- no message is lost, they're just
-                                    // deferred to a later fetch cycle where ordering relative
-                                    // to this retry is no longer at risk.
-                                    //
-                                    // NOTE (Codex review, PR #738, finding 2): a narrower,
-                                    // *cross-batch* version of this same race is still
-                                    // possible -- an even-newer update for the same key could
-                                    // arrive in the *next* fetch (issued immediately after this
-                                    // `break`, since `fetch()` is `no_wait`) and get acked
-                                    // before this abandoned tail redelivers via AckWait. Closing
-                                    // that fully requires either strict single-message
-                                    // processing or key-aware/sequence-aware writes and is out
-                                    // of scope for this targeted fix; see the reply on that
-                                    // review thread for why NAK-ing the tail to a short delay
-                                    // (which looks like an obvious fix) would actually make
-                                    // ordering *worse*, not better, by racing this abandoned
-                                    // message's redelivery against the same short delay used by
-                                    // the message that triggered the stop.
+                                    // What: NAK failed message and stop batch processing.
+                                    // Why: prevent stale write clobbering via batch ordering.
+                                    // From: PR #738 | Issue #653
                                     if let Err(e) = msg
                                         .ack_with(jetstream::AckKind::Nak(Some(
                                             Duration::from_millis(100),
@@ -493,15 +441,9 @@ async fn main() {
                     }
                 }
 
-                // Apply backoff on stream errors or a retryable-failure batch
-                // stop, or reset on a fully clean batch. Stream errors surface
-                // via messages.next(), not fetch(), so we must handle them
-                // here rather than in the Err(fetch) arm. The batch-stop case
-                // is handled the same way (Codex review, PR #738, finding 1):
-                // without this, a PDNS outage with backlogged messages causes
-                // an immediate re-fetch (see the `had_retryable_batch_stop`
-                // comment above on why `fetch()` doesn't wait on its own) and
-                // this loop busy-spins HTTP calls at a service that's down.
+                // What: apply backoff on stream/batch errors or reset on clean.
+                // Why: prevents busy-spin in fetch() no_wait mode.
+                // From: PR #738
                 if had_stream_error {
                     eprintln!(
                         "Stream error(s); backing off for {} second(s)",
@@ -535,18 +477,9 @@ async fn main() {
     }
 }
 
-/// Outcome of handling a single fetched message, distinguishing WHICH kind
-/// of retry is needed. Codex review (PR #738) finding 3: the original #653
-/// fix mapped every `handle_message` failure to a full batch-stop, but the
-/// stale-record-clobber hazard that justifies stopping the batch (see
-/// `MsgDecision::NakAndStopBatch` below) is specific to `lancache.dns.record`
-/// updates, which are keyed by zone/name/type and can race against a newer
-/// update for that same key. `lancache.dns.flush` (PDNS Recursor cache
-/// flush) has no such key-ordering hazard -- flushing late doesn't clobber a
-/// newer flush -- so a flush failure blocking unrelated, healthy record
-/// updates later in the same batch would be an unnecessary regression versus
-/// the pre-#653 behavior (which never stopped the batch for ANY failure
-/// type).
+/// What: distinguish retryable failures with/without ordering hazards.
+/// Why: flush failures have no order hazard; record updates do.
+/// From: PR #738 | Issue #653
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HandleOutcome {
     /// Succeeded (or was an unrecoverable/malformed message already logged
@@ -614,35 +547,9 @@ fn record_key(zone: &str, name: &str, record_type: &str) -> RecordKey {
     )
 }
 
-/// Per-key watermark of the highest JetStream stream sequence already
-/// successfully applied to PowerDNS, so a redelivered older-sequence message
-/// can be recognized as stale and skipped rather than clobbering newer state.
-///
-/// This closes the cross-batch stale-record clobber race documented in issue
-/// #772, which the within-batch `NakAndStopBatch` fix (#653/#738) does not
-/// reach. Sequence of events that race closes: a retryable PDNS failure NAKs
-/// message A (older update for key X, stream seq N) with a short delay and
-/// stops the rest of that batch; the outer loop's very next `fetch()` is
-/// `no_wait`, so it immediately pulls batch N+1, which can contain message B (a
-/// newer update for the SAME key X, seq > N) and apply+ack it before A's ~100ms
-/// NAK redelivers. Without this guard, A's redelivery then reapplies its stale
-/// state over B. With it, once B is applied at seq > N, A's redelivery at seq N
-/// is `<= ` the recorded watermark for X and is dropped.
-///
-/// STATUS (as of 2026-07-23, issue #772): this watermark is in-memory only and
-/// is intentionally NOT persisted across process restarts. A restart while an
-/// older message is still NAK'd/unacked would lose the watermark, letting that
-/// message reapply stale state after restart with no newer message left to
-/// correct it. Persisting it is not cheap -- PowerDNS stores no per-record
-/// sequence number, so the watermark cannot be reconstructed from PDNS on
-/// restart -- and is deliberately out of scope for this fix; the in-process
-/// window closed here is the common one #772 describes, and this is a strict
-/// improvement over leaving the race open in steady state. The map is also
-/// never pruned: it holds one `(zone,name,type) -> u64` entry per distinct
-/// record ever applied, bounded by the LAN's DNS record count (hundreds to low
-/// thousands), a negligible footprint. Pruning on `delete` was rejected on
-/// purpose -- evicting a key would reopen the race for a stale `replace` that
-/// redelivers after a `delete` + evict.
+/// What: per-key watermark of highest applied JetStream sequence.
+/// Why: prevents stale messages reapplying across batches.
+/// From: Issue #772 | PR #738 | PR #653
 #[derive(Default)]
 struct AppliedSequences {
     last_applied: HashMap<RecordKey, u64>,
@@ -713,19 +620,9 @@ async fn handle_message(
     HandleOutcome::Ack
 }
 
-// dns_record_patch_url <zone>
-// Bug-hunt finding N1 (docs/bug-hunt/dns.md, re-verified 2026-08-06):
-// handle_dns_record() used to interpolate a DNS record's zone name into
-// this URL path raw. It happened to work in practice because every real
-// caller today always sends the zone without a trailing dot already, but
-// nothing enforced that -- a future producer of this NATS message (or a
-// malformed/redelivered message) sending the zone-file form with a
-// trailing dot (e.g. "lan.") would silently 404 against PowerDNS's API,
-// which drops that dot in its own zone-id convention (see
-// zone_snapshots::zone_api_id()'s own doc comment, already relied on by
-// maybe_snapshot_zone() above and rollback_listener.rs's known-good-
-// snapshot code). Split into its own pure function so this contract is
-// directly unit-testable without needing a real HTTP call.
+// What: construct PowerDNS API URL stripping trailing zone dot.
+// Why: prevents silent 404 when zone sent with trailing dot.
+// From: Issue #1164 | Issue #1095
 fn dns_record_patch_url(zone: &str) -> String {
     format!(
         "http://127.0.0.1:8081/api/v1/servers/localhost/zones/{}",
@@ -854,26 +751,9 @@ async fn handle_dns_record(
 
     let url = dns_record_patch_url(&record.zone);
 
-    // Bug-hunt finding #5 (docs/bug-hunt/dns.md, re-verified 2026-08-06):
-    // `snapshot_ctx.lock` was already held around every snapshot-taking
-    // operation (this file's `maybe_snapshot_zone` above, and
-    // `rollback_listener.rs`'s rollback handler) specifically so those two
-    // never interleave with each other -- but this live NATS-driven write
-    // path never participated in that same lock at all. That left a real
-    // TOCTOU window: `rollback_listener.rs`'s rollback handler reads the
-    // zone's current state, computes a revert-to-known-good PATCH from it,
-    // and only *then* takes the lock to apply that PATCH -- if this live
-    // write landed in between the read and the lock, the rollback's patch
-    // was computed from data that was already stale, and applying it could
-    // silently undo this concurrent legitimate write without either side
-    // ever knowing. Taking the same lock here for the live PATCH itself
-    // closes that window: a rollback in progress (which now also holds
-    // this lock across its own read+diff+apply, see rollback_listener.rs)
-    // and a live write can no longer interleave in either direction.
-    // Scoped tightly around just the PATCH send: `maybe_snapshot_zone`
-    // below re-acquires this same non-reentrant tokio::sync::Mutex itself,
-    // so the guard must be dropped before reaching that call or every
-    // successful write would deadlock against its own post-write snapshot.
+    // What: hold snapshot lock across PATCH to prevent TOCTOU.
+    // Why: rollback TOCTOU: computed from stale, applies over live write.
+    // From: Issue #1164 | Issue #1095
     let result = {
         let _snapshot_guard = snapshot_ctx.lock.lock().await;
 
@@ -1311,11 +1191,9 @@ mod tests {
         assert!(!rrset_matches_expected(Some(&rrset), Some(&expected)));
     }
 
-    // Bug-hunt finding N1 (docs/bug-hunt/dns.md, re-verified 2026-08-06):
-    // the PATCH URL must always use PowerDNS's dot-stripped zone-id
-    // convention, regardless of which form the zone name arrives in on the
-    // NATS message -- a regression here would silently 404 every DNS write
-    // for any zone sent with a trailing dot.
+    // What: PATCH URL always strips zone trailing dot.
+    // Why: prevents silent 404 when zone sent with trailing dot.
+    // From: Issue #1164
     #[test]
     fn dns_record_patch_url_strips_trailing_dot_regardless_of_input_form() {
         assert_eq!(
@@ -1502,20 +1380,9 @@ mod tests {
         assert!(result.err().unwrap().contains("unknown action"));
     }
 
-    // Bug-hunt finding #7 (docs/bug-hunt/dns.md, re-verified 2026-08-06):
-    // this test's own previous comment claimed a REPLACE with no TTL
-    // "allows PowerDNS to preserve the existing record's TTL when updating
-    // only its content" and asserted `rrset.ttl.is_none()` -- but PowerDNS's
-    // own Authoritative HTTP API docs (doc.powerdns.com/authoritative/
-    // http-api/zone.html) list `ttl` as a *required* rrset member, with the
-    // only documented exception being DELETE, not REPLACE. That prior claim
-    // was never verified against PowerDNS's real documented contract
-    // (AG-VAL-023) and was a live landmine: `RRset.ttl` is
-    // `skip_serializing_if = "Option::is_none"`, so a `None` ttl here used
-    // to produce a PATCH body PowerDNS would very likely reject for a
-    // required field. REPLACE must still succeed when the caller omits TTL
-    // (that part of the original intent was fine), but it must now fall
-    // back to a real default rather than omitting the field outright.
+    // What: REPLACE with no TTL must default, not omit field.
+    // Why: PowerDNS requires TTL for REPLACE, unlike DELETE.
+    // From: Issue #1164 | Issue #1095
     #[test]
     fn dns_record_to_zone_update_replace_without_ttl_defaults_instead_of_omitting() {
         let record = DNSRecord {
@@ -1621,9 +1488,9 @@ mod tests {
         );
     }
 
-    // Codex review (PR #738) finding 3: a retryable failure with no
-    // ordering hazard (flush) must NAK but keep the batch going, unlike a
-    // record-update failure.
+    // What: flush failures NAK but keep batch going.
+    // Why: flush has no ordering hazard unlike record updates.
+    // From: PR #738
     #[test]
     fn decide_msg_naks_and_continues_on_no_hazard_failure() {
         assert_eq!(
@@ -1710,10 +1577,9 @@ mod tests {
         );
     }
 
-    // Codex review (PR #738) finding 3 regression test: a flush failure
-    // must NOT stop the batch -- a later, unrelated record update in the
-    // same batch must still be processed and acked, unlike the record-
-    // failure case above.
+    // What: flush failure continues batch, record failure stops it.
+    // Why: only record updates have ordering hazard.
+    // From: PR #738
     #[test]
     fn batch_processing_continues_past_flush_failure_but_stops_on_record_failure() {
         // Index 0: flush fails transiently (e.g. recursor 5xx) -- has no

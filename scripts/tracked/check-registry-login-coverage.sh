@@ -2,24 +2,9 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Standing guard: when the ten shared full-setup jobs were extracted from
-# full-setup-validate.yml/full-setup-deep-validate.yml into the reusable
-# full-setup-sims.yml (issue #1014), the GHCR-then-Docker-Hub login step
-# PR #1757/#1760 had added to full-setup-deep-validate.yml's
-# ensure-pr-staging-images job was never carried into any of the extracted
-# jobs -- full-setup-sims.yml pulled deploy/full-setup's and
-# deploy/quickstart's third-party docker.io images (nats:2-alpine,
-# tecnativa/docker-socket-proxy, netdata/netdata) fully anonymously from the
-# day it was created until a later fix restored it. That fix also found
-# three MORE jobs outside full-setup-sims.yml with the exact same gap
-# (dns-zone-rollback-simulation, dhcp-kea-ui-rollback-simulation in
-# full-setup-deep-validate.yml; dhcp-kea-ctrl-agent-mutation-simulation in
-# full-setup-validate.yml) -- confirming this is a real, recurring class of
-# regression (a job move/extraction silently dropping the login), not a
-# one-off. This script is the standing rule that stops a future job move or
-# new job from silently reintroducing an anonymous pull, mirroring
-# check-validation-subnet-wrapper-coverage.sh's own "trigger marker requires
-# a protection marker" shape for the sibling #896/#907 collision class.
+# What: ensure docker.io login in all jobs, shared-scripts build-context.
+# Why: prevent silent anonymous pulls on job moves or new jobs.
+# From: Issue #1014 | Issue #1757 | Issue #1760
 #
 # --- Second, related responsibility: shared-scripts build-context coverage -
 # A `docker build` invocation in scripts/untracked/simulations/*.sh must

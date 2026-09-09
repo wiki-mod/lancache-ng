@@ -41,16 +41,8 @@ pub struct AaaaFilterForm {
     pub enabled: Option<String>,
 }
 
-// Superseded design note: this used to be DnsupdateRequireTsigForm, driving
-// a toggle that turned PowerDNS's global `dnsupdate-require-tsig` setting
-// ON. Real nsupdate testing proved that toggle a no-op in the common case
-// (see services/dns/pdns.conf.template's header comment for the full
-// history) -- PowerDNS already enforces TSIG per-zone via
-// TSIG-ALLOW-DNSUPDATE metadata whenever a real DDNS_TSIG_KEY exists, which
-// is essentially always. Maintainer correction: invert the toggle so it has
-// a real, observable effect -- let an operator explicitly relax that
-// already-active enforcement instead of switching on a setting that was
-// never the actual enforcement point.
+// What: toggle to relax per-zone TSIG enforcement.
+// Why: global setting was no-op; invert per-zone override.
 #[derive(Deserialize)]
 pub struct DdnsAllowUnsignedForm {
     pub csrf_token: String,
@@ -443,24 +435,9 @@ pub async fn toggle_aaaa_filter(
     Ok(Redirect::to("/domains"))
 }
 
-// toggle_ddns_allow_unsigned_updates (issue #815 follow-up, SUPERSEDES an
-// earlier design named toggle_dnsupdate_require_tsig): that earlier toggle
-// turned PowerDNS's global `dnsupdate-require-tsig` setting ON, framed as
-// closing an open hole. Real nsupdate testing then proved that framing
-// wrong -- configure_ddns_tsig() in services/dns/entrypoint.sh already sets
-// per-zone TSIG-ALLOW-DNSUPDATE metadata whenever a real DDNS_TSIG_KEY
-// exists (essentially always), and PowerDNS enforces TSIG for those zones
-// off that metadata alone, independent of the global setting. So the old
-// toggle changed nothing observable in the common case (see
-// services/dns/pdns.conf.template's header comment for the full history).
-// Maintainer correction: invert the toggle so it has a real, observable
-// effect. TSIG enforcement is ALREADY ACTIVE BY DEFAULT (today, unchanged);
-// this toggle lets an operator explicitly RELAX it -- accept unsigned DNS
-// UPDATE packets for the LAN/reverse zones this project manages. Unlike
-// toggle_aaaa_filter above, this is still a static pdns.conf-adjacent
-// startup action (configure_ddns_tsig() runs its pdnsutil set-meta calls
-// once at process start, not on a live hook), so this handler must still
-// actually restart both DNS instances for the change to take effect.
+// What: toggle to relax DDNS TSIG per-zone enforcement.
+// Why: global setting ineffective; per-zone default enforced.
+// From: Issue #815 | Issue #1095
 pub async fn toggle_ddns_allow_unsigned_updates(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
