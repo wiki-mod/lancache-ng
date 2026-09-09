@@ -536,9 +536,9 @@ ENV PATH="/usr/local/cargo/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin
     CARGO_INSTALL_ROOT="/usr/local" \
     RUST_BACKTRACE=1
 
-# What: add trixie-backports source and apt pin; upgrade
-# Why: get all patches; pin uses a= suite not codename
-# From: Issue #1570 | PR #1571
+# What: add backports and hold Linux UAPI headers.
+# Why: header churn creates non-portable whiteouts.
+# From: Issue #1095
 # What: trusts the proxy's CA for this RUN, never in a layer.
 # Why: a secret mount never persists; bundle restored below.
 # From: Issue #1781 | PR #1783
@@ -549,6 +549,7 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
     && if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; fi \
     && echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sources.list.d/backports.list \
     && printf 'Package: *\nPin: release a=stable-backports\nPin-Priority: 500\n' > /etc/apt/preferences.d/backports \
+    && apt-mark hold linux-libc-dev \
     && apt-get update \
     && apt-get dist-upgrade -y \
     && apt-get full-upgrade -y \
@@ -713,7 +714,8 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
     # What: force-upgrade jq/libjq1/libpq for known CVEs
     # Why: jq/libpq pulled transitively with CVE exposure
     # From: Issue #1570 | PR #1571
-    apt-get install -y --no-install-recommends --only-upgrade linux-libc-dev jq libjq1 libpq-dev libpq5; \
+    apt-get install -y --no-install-recommends --only-upgrade jq libjq1 libpq-dev libpq5; \
+    test -f /usr/include/linux/baycom.h; \
     distcc_pump_tmp="$(mktemp -d)"; \
     chmod 0755 "${distcc_pump_tmp}"; \
     # What: chown temp dir to _apt:root for apt-get
