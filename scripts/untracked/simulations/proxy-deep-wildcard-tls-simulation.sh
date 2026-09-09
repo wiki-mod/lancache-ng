@@ -116,12 +116,9 @@ dispatch_routes_to_passthrough() {
         echo "$map" >&2
         return 1
     fi
-    echo "OK: SNI '$sni' routes to the passthrough relay (127.0.0.1:9446) in the generated dispatch map -- no static cert covers this depth, so it correctly no longer reaches this MITM path at all (fixed depth>1 connectivity gap, #1276/#1322)."
+    echo "OK: SNI '$sni' routes to the passthrough relay (127.0.0.1:9446) in the generated dispatch map."
 }
 
-# wait_for_tls <container>
-# nginx's proxy Dockerfile has no built-in HEALTHCHECK for a standalone
-# (non-Compose) run -- retries the handshake itself rather than requiring a
 # What: Poll until TLS port reachable.
 # Why: Cert gen/nginx startup may be slow.
 wait_for_tls() {

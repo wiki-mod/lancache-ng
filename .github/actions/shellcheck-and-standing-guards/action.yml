@@ -51,8 +51,8 @@ runs:
         GH_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
-        # What: Allow 600s for api.github.com rate-limit retry.
-        # Why: Slower than 300s text-scan steps (real HTTP calls).
+        # What: 600s timeout for GitHub API retry.
+        # Why: Slower than text-scan steps (HTTP).
         # From: PR #1856
         docker run --rm \
           --user "$(id -u):$(id -g)" \
