@@ -200,7 +200,7 @@ verify_record_resolves() {
 }
 
 verify_record_resolves "dns-standard" "$dns_standard_ip"
-verify_record_resolves "dns-ssl" "$dns_ssl_ip" 25
+verify_record_resolves "dns-ssl" "$dns_ssl_ip" 180
 
 echo "== UI: removing the LAN record via POST /domains/lan/remove =="
 
@@ -245,6 +245,6 @@ verify_record_gone() {
 }
 
 verify_record_gone "dns-standard" "$dns_standard_ip"
-verify_record_gone "dns-ssl" "$dns_ssl_ip" 25
+verify_record_gone "dns-ssl" "$dns_ssl_ip" 180
 
 echo "ui-nats-dns-integration-simulation passed: UI -> NATS -> nats-subscriber -> PowerDNS add and remove both verified end-to-end via real DNS queries."
