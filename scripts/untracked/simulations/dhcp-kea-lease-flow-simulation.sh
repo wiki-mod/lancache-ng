@@ -29,7 +29,7 @@
 #     own server behavior, not a rewrite target of issue #1288, which only
 #     replaced the Admin UI's own dhcp-probe container) -- a real lease is
 #     negotiated over the wire, but nothing ever calls `ip addr add`/
-#     `ip route` to actually apply it. Since issue #1095 (Alpine's
+#     `ip route` to actually apply it. Since Alpine's
 #     `alpine-final` build stage ships no ISC dhclient package at all --
 #     confirmed via a real `apk search` -- see AGENTS.md's own "AG-VAL-028
 #     family assessment" entry), this script detects at container runtime
@@ -144,10 +144,9 @@ source "$repo_root/scripts/lib/reserve-validation-subnet.sh"
 
 client_tool_image="${DHCP_LEASE_FLOW_CLIENT_IMAGE:?DHCP_LEASE_FLOW_CLIENT_IMAGE is required (an image providing dhclient or udhcpc/busybox, e.g. the build-tools image)}"
 
-# What: fails closed if unset, mirroring CARGO_BUILD_JOBS; required by the
-#   services/dns Rust builder stage this script builds below.
-# Why: services/dns/Dockerfile has no in-file/build-arg default for either.
-# From: Issue #1095, PR #1796 review 5109560874
+# What: fails closed if PROJECT_CARGO_LTO/CODEGENUNIT unset.
+# Why: services/dns/Dockerfile defines no in-file default.
+# From: Issue #1095 | PR #1796
 project_cargo_lto="${PROJECT_CARGO_LTO:?PROJECT_CARGO_LTO is required (no in-file/script default; Issue #1095, PR #1796 review 5109560874)}"
 case "$project_cargo_lto" in off|thin|fat|true|false) ;; *) echo "PROJECT_CARGO_LTO must be one of: off, thin, fat, true, false (got '$project_cargo_lto')" >&2; exit 1;; esac
 project_cargo_codegenunit="${PROJECT_CARGO_CODEGENUNIT:?PROJECT_CARGO_CODEGENUNIT is required (no in-file/script default; Issue #1095, PR #1796 review 5109560874)}"
@@ -158,7 +157,7 @@ work_dir="$repo_root/.dhcp-kea-lease-flow-simulation-tmp"
 rm -rf "$work_dir"
 mkdir -p "$work_dir/client-state"
 
-# dhcp_client_capture_script (issue #1095's Alpine dhcp-client research --
+# dhcp_client_capture_script (Alpine dhcp-client research --
 # see AGENTS.md's own "AG-VAL-028 family assessment" entry for the full
 # comparison this codifies): the in-container command run for every real
 # DHCP client negotiation in this file. Detects at container runtime which
@@ -176,7 +175,7 @@ mkdir -p "$work_dir/client-state"
 # dispatch existed) is a real no-op apply-script. udhcpc's -s hook below
 # only ever appends the lease's option values to a file -- no ip/ifconfig/
 # route invocation anywhere in it -- which is a real, literal equivalent
-# by construction, confirmed empirically (issue #1095): unlike dhclient,
+# by construction, confirmed empirically: unlike dhclient,
 # BusyBox delegates 100% of interface configuration to this external
 # hook script rather than doing it internally, so a hook that never calls
 # ip/ifconfig/route can never mutate interface/route state. (dhcpcd, also
@@ -188,7 +187,7 @@ mkdir -p "$work_dir/client-state"
 # flag to suppress that.)
 #
 # The udhcpc branch also sends an explicit client hostname
-# (-x hostname:"$(hostname)"): confirmed empirically (issue #1095) that
+# (-x hostname:"$(hostname)"): confirmed empirically that
 # Kea's DDNS (DHCP_DDNS_ENABLED=true, exercised further below) only fires
 # when the client supplies some hostname/Option 12 value for
 # ddns-replace-client-name's "when-present" default to act on -- exactly
@@ -697,7 +696,7 @@ client_container="lancache-ng-dhcp448-client-${octet}-$$"
 # explicit `-x hostname:"$(hostname)"` for the same reason (see that
 # variable's own comment: udhcpc does not send a hostname on its own, and
 # without one, Kea never triggers DDNS for the lease at all -- confirmed
-# empirically, issue #1095). Kea's own ddns-replace-client-name default,
+# empirically). Kea's own ddns-replace-client-name default,
 # "when-present" (services/dhcp/entrypoint.sh's migrate_dhcp4_config), does
 # NOT mean "use the client's name when present" -- verified empirically
 # against a real Kea 2.6.3 D2 instance -- it means the opposite: Kea
@@ -869,9 +868,9 @@ assert_ddns_record_matches_lease() {
 # ddns-replace-client-name is "when-present" (the project default) and the
 # client sent any hostname at all -- which dhclient does by default (send
 # host-name = gethostname()), and which dhcp_client_capture_script's udhcpc
-# branch replicates via an explicit -x hostname flag (confirmed empirically,
-# issue #1095: without it, udhcpc's DHCPACK is clean but Kea never triggers
-# DDNS for that lease at all). $domain_name is not hardcoded a second
+# branch replicates via an explicit -x hostname flag; confirmed empirically:
+# without it, udhcpc's DHCPACK is clean but Kea never triggers
+# DDNS for that lease at all. $domain_name is not hardcoded a second
 # time here -- it is the exact domain-name option value already parsed from
 # the granted lease above (confirmed by the assertion just before this
 # section), which is the same value Kea's ddns-qualifying-suffix was
@@ -1075,8 +1074,8 @@ print("yes" if found else "no")
 # necessary. Both branches of dhcp_client_capture_script identify the
 # client to Kea via the container's own interface MAC (Docker's
 # --mac-address here), not a separate client-id flag, so this works
-# unchanged for either dhclient or udhcpc -- confirmed empirically
-# (issue #1095): a real udhcpc run with --mac-address set to a
+# unchanged for either dhclient or udhcpc -- confirmed empirically:
+# a real udhcpc run with --mac-address set to a
 # Kea-reserved MAC received exactly the reserved address, the same way
 # dhclient already does. Kept as its own function (not inlined) so it can
 # be called once for the reserved MAC and once for the unrelated MAC below

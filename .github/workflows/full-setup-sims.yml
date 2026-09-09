@@ -572,8 +572,8 @@ jobs:
       - name: Run DHCP Kea lease-flow simulation
         env:
           DHCP_LEASE_FLOW_CLIENT_IMAGE: ${{ steps.build-tools-image.outputs.image }}
-          # What: this sim also builds services/dns (Rust nats-subscriber).
-          # Why: matches repo's cargo build settings (issue #1095, PR #1856).
+          # What: builds services/dns Rust subscriber.
+          # Why: matches repo's cargo build settings.
           PROJECT_CARGO_LTO: ${{ vars.PROJECT_CARGO_LTO }}
           PROJECT_CARGO_CODEGENUNIT: ${{ vars.PROJECT_CARGO_CODEGENUNIT }}
         run: |
