@@ -39,6 +39,8 @@ jobs:
   compute-validation-network:
     name: derive per-run validation subnet
     if: inputs.should_run == 'true'
+    # What: pure subnet/IP composite action; no compose.
+    # Why: not stack-driving; light runner tier is enough.
     runs-on: [self-hosted, linux, lancache, lancache-light]
     timeout-minutes: 45
     outputs:
@@ -144,8 +146,12 @@ jobs:
           set -euo pipefail
           docker compose down --volumes --remove-orphans || true
 
-
+          # What: forces real network removal after `down`.
+          # Why: down's own exit code can lie here.
+          # shellcheck source=scripts/lib/reserve-validation-subnet.sh
           source "$GITHUB_WORKSPACE/scripts/lib/reserve-validation-subnet.sh"
+          # What: skips teardown when nothing was reserved.
+          # Why: set -u; unset COMPOSE_PROJECT_NAME aborts.
           if [[ -n "${COMPOSE_PROJECT_NAME:-}" ]]; then
             validation_project_networks_teardown "$COMPOSE_PROJECT_NAME" || true
           fi
@@ -565,6 +571,8 @@ jobs:
           bash scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh
 
   nats-auth-callout-simulation:
+    # What: real per-secondary NATS auth-callout test.
+    # Why: pulls PRs own dns/ui/nats images/staging tag.
     name: NATS auth-callout simulation
     needs: [compute-validation-network, dhcp-kea-lease-flow-simulation]
     if: >-
