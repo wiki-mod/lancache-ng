@@ -124,8 +124,7 @@ docker network create --subnet "$validation_subnet" "$network_name" >/dev/null
 # From: Issue #1850
 allocated_ips=()
 allocate_ip() {
-    local -n target="$1"
-    local role="$2"
+    local role="$1"
     local used_ips candidate reserved
     used_ips="$(docker network inspect "$network_name" \
         --format '{{range .Containers}}{{.IPv4Address}}{{"\n"}}{{end}}' |
@@ -143,8 +142,7 @@ allocate_ip() {
             fi
         done
         if [[ "$reserved" == false ]]; then
-            allocated_ips+=("$candidate")
-            target="$candidate"
+            printf '%s\n' "$candidate"
             return 0
         fi
     done
@@ -152,11 +150,16 @@ allocate_ip() {
     return 1
 }
 
-allocate_ip allow_ip allow-client
-allocate_ip deny_ip deny-client
-allocate_ip backend_one_ip backend-one
-allocate_ip backend_two_ip backend-two
-allocate_ip proxy_ip_fixed proxy
+allow_ip="$(allocate_ip allow-client)"
+allocated_ips+=("$allow_ip")
+deny_ip="$(allocate_ip deny-client)"
+allocated_ips+=("$deny_ip")
+backend_one_ip="$(allocate_ip backend-one)"
+allocated_ips+=("$backend_one_ip")
+backend_two_ip="$(allocate_ip backend-two)"
+allocated_ips+=("$backend_two_ip")
+proxy_ip_fixed="$(allocate_ip proxy)"
+allocated_ips+=("$proxy_ip_fixed")
 
 echo "== Starting fake origin backends (real openssl s_server, one per hostname alias) =="
 docker run -d --name "$backend_one_container" --network "$network_name" --ip "$backend_one_ip" --network-alias one.example.net \
