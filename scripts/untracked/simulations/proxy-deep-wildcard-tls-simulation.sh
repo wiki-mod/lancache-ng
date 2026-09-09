@@ -10,11 +10,8 @@ cd "$repo_root"
 
 build_tools_image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
 
-# Unique per-invocation suffix for every Docker resource this script creates
-# (network, images, containers) -- avoids name collisions with a concurrent
-# run of this same script on a shared self-hosted runner host. $$ (this
-# script's own PID) is combined with the current time so two runs started in
-# the same second by two different wrapper processes still can't collide.
+# What: Unique ID per invocation: timestamp + PID.
+# Why: Avoids collisions on concurrent runs on shared host.
 run_id="$(date +%s)-$$"
 network_name="proxy-deep-wc-sim-${run_id}"
 image_a="proxy-deep-wc-sim:fixture-a-${run_id}"
@@ -36,7 +33,7 @@ trap cleanup EXIT
 mkdir -p "$work_dir/fixture-a" "$work_dir/fixture-b"
 
 # What: Create synthetic domain fixtures for test.
-# Why: Test deep wildcard without affecting real cdn-domains.txt.
+# Why: Test deep wildcard; don't affect real domains.
 printf '%s\n' '.deep.example.com' > "$work_dir/fixture-a/cdn-domains.txt"
 printf '%s\n%s\n' '.deep.example.com' '.b.deep.example.com' > "$work_dir/fixture-b/cdn-domains.txt"
 
@@ -95,7 +92,8 @@ dispatch_routes_to_passthrough() {
     # Why: IFS="" would leave port empty on read.
     while read -r pattern port; do
         [[ -z "$pattern" ]] && continue
-        # Strip the map's own quoting/anchoring to get a plain grep -P regex.
+        # What: Strip quoting/anchoring from pattern.
+        # Why: Convert to plain grep -P regex for matching.
         local bare="${pattern#\"}"
         bare="${bare%\"}"
         bare="${bare#\~}"

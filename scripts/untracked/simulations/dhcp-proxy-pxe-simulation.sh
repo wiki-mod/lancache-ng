@@ -240,13 +240,8 @@ if ! negative_result="$(run_probe negative-no-pxe --no-pxe)"; then
 fi
 echo "$negative_result"
 
-# assert_pxe_reply <label> <parsed_result> <expected_filename>
-# Shared assertion for the three positive (PXE-tagged) scenarios: a reply
-# was received at all, it carries both configured LanCache NG DNS
-# servers (option 6), it points at the
-# operator-configured external PXE boot server address (not dnsmasq's own
-# address), and it carries the
-# architecture-appropriate boot filename.
+# What: Assert PXE reply with DNS, boot server, filename.
+# Why: Validate all three positive test scenarios.
 assert_pxe_reply() {
     local label="$1" parsed="$2" expected_filename="$3"
     local got_reply dns_servers siaddr file

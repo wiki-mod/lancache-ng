@@ -16,10 +16,8 @@ relay_container="lancache-ng-relay-relay-$$"
 upstream_container="lancache-ng-relay-upstream-$$"
 client_container="lancache-ng-relay-client-$$"
 
-# The client runs a real ISC dhclient DORA (DISCOVER/OFFER/REQUEST/ACK) on the
-# client segment. A full lease acquisition -- not just an OFFER -- is the
-# strongest proof the whole relay round-trip works in both directions.
-
+# What: Full lease acquisition (DORA).
+# Why: Strongest proof relay works both directions.
 cleanup() {
     docker rm -f "$client_container" "$relay_container" "$upstream_container" >/dev/null 2>&1 || true
     docker network rm "$client_net" "$server_net" >/dev/null 2>&1 || true
@@ -38,9 +36,8 @@ subnet_no_prefixlen="${validation_subnet%/*}"      # e.g. 172.30.147.64
 subnet_prefix="${subnet_no_prefixlen%.*}"          # e.g. 172.30.147
 subnet_base_octet="${subnet_no_prefixlen##*.}"     # e.g. 64
 
-# base+0..+15 (client) and base+16..+31 (server): both aligned /28s within
-# the reserved /27, since base is always a multiple of 32 (see
-# scripts/lib/reserve-validation-subnet.sh's validation_subnet_export_env).
+# What: Split /27 into two /28s within reserved range.
+# Why: Base always multiple of 32; allocation is natural.
 client_base=$(( subnet_base_octet + 0 ))
 server_base=$(( subnet_base_octet + 16 ))
 
@@ -124,7 +121,8 @@ if [[ "$relay_ready" -ne 1 ]]; then
     docker logs "$relay_container" >&2 || true
     exit 1
 fi
-# Give the upstream apt-install+start a moment; it logs when ready.
+# What: Wait for upstream DHCP to start.
+# Why: Apt install + boot async; logs when ready.
 deadline=$((SECONDS + 90))
 while (( SECONDS < deadline )); do
     # What: Capture logs to variable before grep.
@@ -136,42 +134,26 @@ done
 echo "Relay and upstream are up."
 
 echo "== Client (client-net only, no route to server-net): send real DHCPDISCOVERs =="
-# The client attaches ONLY to client-net, so its only path to any DHCP server
-# is through the relay. A real ISC dhclient emits genuine broadcast
-# DHCPDISCOVERs on the segment; the relay is the only thing that can carry them
-# anywhere. It is run best-effort (the authoritative assertion is on the
-# upstream side below, which is deterministic and not subject to the return-leg
-# routing quirks of a two-Docker-bridge test bed -- see the note under
-# verification). NET_ADMIN/NET_RAW are needed for its raw DHCP socket.
+# What: Emit real DHCP DISCOVERs from isolated client.
+# Why: Only relay can carry them; proves real forwarding.
 docker run --rm --name "$client_container" \
     --network "$client_net" \
     --cap-add NET_ADMIN --cap-add NET_RAW \
     --entrypoint sh debian:trixie-slim -c '
         apt-get update -qq >/dev/null 2>&1
         apt-get install -y -qq isc-dhcp-client >/dev/null 2>&1
-        # Emit several DISCOVERs over ~25s so the relay+upstream (which install
-        # dnsmasq on first boot) are certainly up for at least one of them.
+        # What: Emit DISCOVERs over ~25s.
+        # Why: Async startup; cover race window.
         timeout 25 dhclient -4 -d -v eth0 2>&1 || true
     ' >/dev/null 2>&1 || true
 
 echo "== Verifying the upstream received the RELAYED request and offered a client-pool address =="
-# The deterministic proof: the upstream DHCP server -- on server-net, with NO
-# path to the client except back through the relay -- logs a DHCPDISCOVER it
-# could only have received via the relay (the client cannot reach it directly),
-# and answers with a DHCPOFFER of an address from the CLIENT subnet pool. That
-# offer is only possible if the relay stamped the correct giaddr
-# (DHCP_RELAY_LOCAL_ADDR) so the upstream selected the client-subnet range.
-# Reaching the upstream across the segment boundary requires the relay to
-# forward "actual lease/relay traffic to a real upstream DHCP server".
-# (The offer's return leg to the client relies on the upstream
-# routing back to giaddr across two Docker bridges, which is environment-
-# specific and deliberately NOT what this assertion depends on.)
+# What: Check upstream logs for DISCOVER+OFFER.
+# Why: Proves relay forwarded; giaddr selected pool.
 upstream_log="$(docker logs "$upstream_container" 2>&1)"
 echo "----- upstream DHCP transaction lines -----"
-# A real DHCP transaction can contain several DISCOVER/OFFER rounds -- grep's
-# own matches are captured into a variable first, and `head -6` reads that
-# via a here-string instead of a live pipe from grep, which could otherwise
-# SIGPIPE grep the moment there are more than 6 matching lines (issue #1377).
+# What: Capture grep output to variable before head.
+# Why: Avoid SIGPIPE when >6 lines match.
 upstream_dhcp_lines="$(grep -E "DHCPDISCOVER|DHCPOFFER" <<<"$upstream_log" || true)"
 head -6 <<<"$upstream_dhcp_lines" || true
 echo "-------------------------------------------"
@@ -192,8 +174,8 @@ if [[ -z "$offered_ip" ]]; then
     printf '%s\n' "$upstream_log" >&2
     exit 1
 fi
-# Assert the offered IP is within pool_start..pool_end (client subnet), proving
-# the giaddr the relay stamped selected the correct, client-subnet pool.
+# What: Verify offered IP is in client-subnet pool range.
+# Why: Proves relay's giaddr selected correct subnet.
 offered_last="${offered_ip##*.}"
 offered_prefix="${offered_ip%.*}"
 if [[ "$offered_prefix" != "$subnet_prefix" || "$offered_last" -lt $((client_base + 5)) || "$offered_last" -gt $((client_base + 10)) ]]; then
