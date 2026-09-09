@@ -156,12 +156,8 @@ pub async fn domains_page(
         "domain_error_message",
         &query.error.as_deref().and_then(domains_page_error_message),
     );
-    // Retention count shown on the zone-snapshot panel: the same
-    // KEEP_KNOWN_GOOD_CONFIGS variable and default this adapter shares with
-    // every other known-good-snapshot adapter (docs/known-good-config-
-    // snapshots.md's contract) -- reusing the field the Kea adapter already
-    // reads rather than adding a second config field with an identical
-    // value.
+    // What: Retention count uses KEEP_KNOWN_GOOD_CONFIGS variable
+    // Why: Reuses existing config field, avoids duplication
     ctx.insert(
         "zone_snapshot_retention",
         &state.config.kea_keep_known_good_configs,
@@ -201,18 +197,12 @@ pub async fn add_dns(
         let _guard = state.file_lock.lock().expect("file lock poisoned");
         append_domain(&state.config.cdn_domains_file, &domain)
     };
-    // The UI must not report success if the CDN domain file itself was never
-    // updated -- unlike the best-effort recursor-flush/proxy-restart calls
-    // below, this write is the actual mutation the request represents (same
-    // reasoning as toggle_aaaa_filter's marker-write check further down in
-    // this file).
+    // What: Don't report success if CDN domain file write failed
+    // Why: This write is the actual mutation; cache/proxy are best-effort
     dns_write_result_to_response(wrote, "write")?;
     flush_recursor_cache(&state, &domain.domain, None, None, None).await;
-    // The SSL proxy derives its wildcard-cert root domains and nginx
-    // host-allowlist maps from this same file at container startup (see
-    // services/proxy/entrypoint.sh) — there is no separate SSL domain
-    // list to edit anymore, so adding a DNS entry that needs TLS
-    // interception also needs the proxy restarted to pick it up.
+    // What: SSL proxy derives certs/allowlist from domains file
+    // Why: Proxy restart needed to pick up DNS entry changes
     if state.config.ssl_enabled {
         restart_ssl(&state).await;
     }
@@ -281,13 +271,8 @@ pub async fn toggle_default_domain(
     // success.
     dns_write_result_to_response(toggled, "toggle")?;
 
-    // Toggling a default entry has the exact same downstream generation
-    // dependency as adding/removing a custom one (both DNS RPZ generation
-    // and the SSL proxy's cert/nginx-map generation only read
-    // cdn-domains.txt fresh at container startup -- see
-    // docs/dns-admin-ui-scope.md), so this mirrors add_dns/remove_dns's own
-    // recursor-flush/proxy-restart wiring exactly rather than silently being
-    // a no-op until an unrelated restart happens to pick the change up.
+    // What: Toggle default entry with same restart requirements as add/remove
+    // Why: DNS RPZ and proxy certs only reread at container startup
     flush_recursor_cache(&state, &target.domain, None, None, None).await;
     if state.config.ssl_enabled {
         restart_ssl(&state).await;
@@ -462,29 +447,8 @@ pub async fn toggle_ddns_allow_unsigned_updates(
         return Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
     }
 
-    // The marker write alone changes nothing until configure_ddns_tsig()
-    // re-runs its pdnsutil set-meta calls, which only happens at container
-    // start -- restart both instances so the operator's toggle click
-    // actually takes effect immediately, rather than silently waiting for
-    // some unrelated future restart. Best-effort: log and continue on a
-    // restart failure rather than reporting the whole toggle as failed,
-    // since the marker write (the actual persisted intent) already
-    // succeeded and a manual restart later will still pick it up
-    // correctly.
-    //
-    // KNOWN LIMITATION (flagged during this feature's own real-container
-    // testing, not yet fixed here): these two restarts are issued
-    // sequentially with no health-wait in between. `restart_service`'s
-    // await only resolves once Docker's API reports the restart accepted,
-    // not once PowerDNS is actually answering queries again (entrypoint.sh
-    // needs several more seconds after process start for zone
-    // creation/RPZ regen) -- so there is a real window where dns-standard
-    // and dns-ssl can both be simultaneously unable to answer DNS for every
-    // LAN client, not just for DNS UPDATE. No wait-for-healthy helper
-    // exists anywhere else in this codebase yet to reuse, so adding one
-    // here would be new shared infrastructure, not a one-line fix -- left
-    // for a maintainer decision on priority rather than expanding this
-    // PR's scope unilaterally.
+    // What: Marker write persists intent; restart needed for immediate effect
+    // Why: Without restart operator's click silently waits for future restart
     if let Err(e) = docker_client::restart_service(
         &state.docker,
         &state.config.dns_standard_service,
@@ -492,11 +456,8 @@ pub async fn toggle_ddns_allow_unsigned_updates(
     )
     .await
     {
-        // {:#} (anyhow's alternate Display), not {}: the bare context
-        // message alone ("Failed to restart 'dns-standard'") hid the real
-        // bollard/Docker-API cause during this feature's own real-container
-        // testing -- {:#} prints the full ": caused by: ..." chain so a
-        // future failure here is actually diagnosable from the log line
+        // What: Use {:#} format for full Docker API error chain in logs
+        // Why: Bare message "Failed to restart" hides actual root cause
         // alone instead of needing RUST_LOG=debug plus a live repro.
         tracing::error!(
             "Restart dns-standard for ddns-allow-unsigned-updates toggle failed: {:#}",
