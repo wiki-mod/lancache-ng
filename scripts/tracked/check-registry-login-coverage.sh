@@ -313,17 +313,29 @@ fi
 
 # ============================================================================
 # Second responsibility: shared-scripts build-context coverage (see header).
+# Applicable only when this repo_root actually has a services/ or tools/
+# tree -- a bats fixture_root built to exercise only the login-coverage
+# checks above (no services/tools directory at all) is not missing
+# anything; it is simply not a target for this second check.
 # ============================================================================
 
 build_context_dirs=()
-while IFS= read -r dockerfile; do
-    if grep -Eq '^[[:space:]]*COPY[[:space:]]+--from=shared-scripts' "$dockerfile"; then
-        build_context_dirs+=("$(dirname "$dockerfile")")
-    fi
-done < <(find services tools -maxdepth 2 -name Dockerfile 2>/dev/null | sort)
+build_context_invocations_examined=0
+build_context_check_applicable=0
+if [[ -d services || -d tools ]]; then
+    build_context_check_applicable=1
+fi
 
-if [[ ${#build_context_dirs[@]} -eq 0 ]]; then
-    fail "check-registry-login-coverage: found zero Dockerfiles using 'COPY --from=shared-scripts' under services/*/Dockerfile or tools/*/Dockerfile -- expected at least dhcp/dhcp-proxy/dns/proxy/ui/watchdog (this check's own parsing likely broke, or the shared-scripts pattern has genuinely been retired, in which case this check can be removed)."
+if [[ "$build_context_check_applicable" -eq 1 ]]; then
+    while IFS= read -r dockerfile; do
+        if grep -Eq '^[[:space:]]*COPY[[:space:]]+--from=shared-scripts' "$dockerfile"; then
+            build_context_dirs+=("$(dirname "$dockerfile")")
+        fi
+    done < <(find services tools -maxdepth 2 -name Dockerfile 2>/dev/null | sort)
+
+    if [[ ${#build_context_dirs[@]} -eq 0 ]]; then
+        fail "check-registry-login-coverage: found zero Dockerfiles using 'COPY --from=shared-scripts' under services/*/Dockerfile or tools/*/Dockerfile, even though a services/ or tools/ directory exists -- expected at least dhcp/dhcp-proxy/dns/proxy/ui/watchdog (this check's own parsing likely broke, or the shared-scripts pattern has genuinely been retired, in which case this check can be removed)."
+    fi
 fi
 
 # logical_command_references_dir <blob> <dir>
@@ -386,13 +398,14 @@ check_shared_scripts_build_context() {
     done < "$file"
 }
 
-build_context_invocations_examined=0
-while IFS= read -r -d '' file; do
-    check_shared_scripts_build_context "$file"
-done < <(find . -name '*.sh' -not -path './.git/*' -not -path '*/target/*' -print0 | sort -z)
+if [[ "$build_context_check_applicable" -eq 1 ]]; then
+    while IFS= read -r -d '' file; do
+        check_shared_scripts_build_context "$file"
+    done < <(find . -name '*.sh' -not -path './.git/*' -not -path '*/target/*' -print0 | sort -z)
 
-if [[ "$build_context_invocations_examined" -eq 0 ]]; then
-    fail "check-registry-login-coverage: examined zero 'docker build' invocations repo-wide for shared-scripts build-context coverage -- expected several (this check's own parsing likely broke, or every relevant build has moved to a form this text scan cannot see, in which case this check needs a redesign rather than silently passing)."
+    if [[ "$build_context_invocations_examined" -eq 0 ]]; then
+        fail "check-registry-login-coverage: examined zero 'docker build' invocations repo-wide for shared-scripts build-context coverage -- expected several (this check's own parsing likely broke, or every relevant build has moved to a form this text scan cannot see, in which case this check needs a redesign rather than silently passing)."
+    fi
 fi
 
 if [[ "$failures" -gt 0 ]]; then
