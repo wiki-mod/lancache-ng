@@ -81,25 +81,9 @@ runs:
           "${{ inputs.build-tools-image }}" \
           timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-validation-subnet-wrapper-coverage.sh
 
-    - name: Check registry-login coverage on docker.io-pulling jobs
-      # What: Ensures docker.io-pulling jobs log in to registries.
-      # Why: A job move can silently drop the login step again.
-      # From: Issue #1095
-      shell: bash
-      run: |
-        set -euo pipefail
-        docker run --rm \
-          --user "$(id -u):$(id -g)" \
-          -v "$PWD:/work:ro" \
-          -w /work \
-          "${{ inputs.build-tools-image }}" \
-          timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-registry-login-coverage.sh
-
-    - name: Check shared-scripts build-context coverage on docker build invocations
-      # What: Ensures docker build calls pass --build-context shared-scripts=...
-      #   for every service whose Dockerfile uses COPY --from=shared-scripts.
-      # Why: A script move/add can silently drop the required flag again,
-      #   exactly like PR #1856's 7-site regression (Refs #1095).
+    - name: Check registry-login and shared-scripts build-context coverage
+      # What: Registry-login + shared-scripts context check.
+      # Why: A job/script move can drop the required flag.
       # From: Issue #1095 | PR #1856
       shell: bash
       run: |
@@ -109,7 +93,7 @@ runs:
           -v "$PWD:/work:ro" \
           -w /work \
           "${{ inputs.build-tools-image }}" \
-          timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-shared-scripts-build-context-coverage.sh
+          timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-registry-login-coverage.sh
 
     - name: Check executable bits on bare-path script invocations
       # What: Asserts bare-path scripts have executable bits.

@@ -21,6 +21,17 @@
 # check-validation-subnet-wrapper-coverage.sh's own "trigger marker requires
 # a protection marker" shape for the sibling #896/#907 collision class.
 #
+# --- Second, related responsibility: shared-scripts build-context coverage -
+# A `docker build` invocation in scripts/untracked/simulations/*.sh must
+# pass `--build-context shared-scripts=<path>` whenever its target
+# `services/*/Dockerfile` or `tools/*/Dockerfile` contains a real
+# `COPY --from=shared-scripts` line (mechanically derived, not hardcoded).
+# Same conceptual class as the login-coverage check above: a sim script's
+# docker invocation carries the companion flag its target requires. Scoped
+# to `*.sh`, not `*.bats`, because `*.bats` files hold fixture strings for
+# other guards' own tests rather than real invocations. See
+# check_shared_scripts_build_context() below.
+#
 # --- What counts as "pulls a docker.io image" -----------------------------
 # The set of docker.io-backed (third-party, rate-limited) services is derived
 # mechanically from each compose file's own `image:` values, not
@@ -300,9 +311,94 @@ if [[ "$jobs_examined" -eq 0 ]]; then
     fail "check-registry-login-coverage: examined zero jobs across ${WORKFLOW_FILES[*]} -- expected several (this guard's own parsing likely broke, or all three workflow files changed shape; update this script rather than silently passing)."
 fi
 
+# ============================================================================
+# Second responsibility: shared-scripts build-context coverage (see header).
+# ============================================================================
+
+build_context_dirs=()
+while IFS= read -r dockerfile; do
+    if grep -Eq '^[[:space:]]*COPY[[:space:]]+--from=shared-scripts' "$dockerfile"; then
+        build_context_dirs+=("$(dirname "$dockerfile")")
+    fi
+done < <(find services tools -maxdepth 2 -name Dockerfile 2>/dev/null | sort)
+
+if [[ ${#build_context_dirs[@]} -eq 0 ]]; then
+    fail "check-registry-login-coverage: found zero Dockerfiles using 'COPY --from=shared-scripts' under services/*/Dockerfile or tools/*/Dockerfile -- expected at least dhcp/dhcp-proxy/dns/proxy/ui/watchdog (this check's own parsing likely broke, or the shared-scripts pattern has genuinely been retired, in which case this check can be removed)."
+fi
+
+# logical_command_references_dir <blob> <dir>
+logical_command_references_dir() {
+    local blob="$1" dir="$2"
+    case "$blob" in
+        *"-f $dir/Dockerfile"*|*"-f \"$dir/Dockerfile\""*) return 0 ;;
+    esac
+    case " $blob " in
+        *" $dir "*|*" \"$dir\" "*|*" '$dir' "*) return 0 ;;
+    esac
+    return 1
+}
+
+# logical_command_has_shared_scripts_context <blob>
+logical_command_has_shared_scripts_context() {
+    local blob="$1"
+    case "$blob" in
+        *'--build-context'*'shared-scripts='*) return 0 ;;
+    esac
+    return 1
+}
+
+check_shared_scripts_build_context() {
+    local file="$1" line stripped blob="" in_command=0
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$in_command" -eq 1 ]]; then
+            blob+=" $line"
+            if [[ "$line" != *'\' ]]; then
+                in_command=0
+                build_context_invocations_examined=$((build_context_invocations_examined + 1))
+                for dir in "${build_context_dirs[@]}"; do
+                    if logical_command_references_dir "$blob" "$dir" \
+                        && ! logical_command_has_shared_scripts_context "$blob"; then
+                        fail "check-registry-login-coverage: $file builds '$dir' (Dockerfile uses COPY --from=shared-scripts) without passing --build-context shared-scripts=<path>. Command: ${blob# }"
+                    fi
+                done
+                blob=""
+            fi
+            continue
+        fi
+        stripped="${line#"${line%%[! ]*}"}"
+        [[ "$stripped" == \#* ]] && continue
+        if [[ "$stripped" == *'docker build'* ]]; then
+            blob="$line"
+            if [[ "$line" == *'\' ]]; then
+                in_command=1
+            else
+                build_context_invocations_examined=$((build_context_invocations_examined + 1))
+                for dir in "${build_context_dirs[@]}"; do
+                    if logical_command_references_dir "$blob" "$dir" \
+                        && ! logical_command_has_shared_scripts_context "$blob"; then
+                        fail "check-registry-login-coverage: $file builds '$dir' (Dockerfile uses COPY --from=shared-scripts) without passing --build-context shared-scripts=<path>. Command: ${blob# }"
+                    fi
+                done
+                blob=""
+            fi
+        fi
+    done < "$file"
+}
+
+build_context_invocations_examined=0
+while IFS= read -r -d '' file; do
+    check_shared_scripts_build_context "$file"
+done < <(find . -name '*.sh' -not -path './.git/*' -not -path '*/target/*' -print0 | sort -z)
+
+if [[ "$build_context_invocations_examined" -eq 0 ]]; then
+    fail "check-registry-login-coverage: examined zero 'docker build' invocations repo-wide for shared-scripts build-context coverage -- expected several (this check's own parsing likely broke, or every relevant build has moved to a form this text scan cannot see, in which case this check needs a redesign rather than silently passing)."
+fi
+
 if [[ "$failures" -gt 0 ]]; then
     printf '::error::check-registry-login-coverage: %d violation(s) found (see scripts/tracked/check-registry-login-coverage.sh).\n' "$failures" >&2
     exit 1
 fi
 
-printf 'check-registry-login-coverage: OK (%d job(s) examined across %d workflow file(s), every docker.io-pulling job has the registry-login step).\n' "$jobs_examined" "${#WORKFLOW_FILES[@]}"
+printf 'check-registry-login-coverage: OK (%d job(s) examined across %d workflow file(s), every docker.io-pulling job has the registry-login step; %d docker build invocation(s) examined across %d flagged Dockerfile(s), every one has shared-scripts build-context coverage).\n' \
+    "$jobs_examined" "${#WORKFLOW_FILES[@]}" "$build_context_invocations_examined" "${#build_context_dirs[@]}"
