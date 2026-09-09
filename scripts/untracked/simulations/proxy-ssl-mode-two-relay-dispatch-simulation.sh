@@ -119,17 +119,50 @@ docker build -q -t "$proxy_image" --build-context "dns-domains=$work_dir/fixture
 
 docker network create --subnet "$validation_subnet" "$network_name" >/dev/null
 
-# What: fixed client IPs, base+2/+3 of the reserved slot.
-# Why: own throwaway net, not the big stack; free to reuse.
-# From: Issue #822
-allow_ip="${subnet_prefix}.$((subnet_base_octet + 2))"
-deny_ip="${subnet_prefix}.$((subnet_base_octet + 3))"
+# What: allocates explicit IPs from Docker's live net.
+# Why: avoids auto-IPAM and static offset collisions.
+# From: Issue #1850
+allocated_ips=()
+allocate_ip() {
+    local -n target="$1"
+    local role="$2"
+    local used_ips candidate reserved
+    used_ips="$(docker network inspect "$network_name" \
+        --format '{{range .Containers}}{{.IPv4Address}}{{"\n"}}{{end}}' |
+        cut -d/ -f1)"
+    for candidate_octet in $(seq "$((subnet_base_octet + 2))" "$((subnet_base_octet + 30))"); do
+        candidate="${subnet_prefix}.${candidate_octet}"
+        if grep -qxF "$candidate" <<<"$used_ips"; then
+            continue
+        fi
+        reserved=false
+        for reserved_ip in "${allocated_ips[@]}"; do
+            if [[ "$reserved_ip" == "$candidate" ]]; then
+                reserved=true
+                break
+            fi
+        done
+        if [[ "$reserved" == false ]]; then
+            allocated_ips+=("$candidate")
+            target="$candidate"
+            return 0
+        fi
+    done
+    echo "::error::No free IP left in $validation_subnet for $role." >&2
+    return 1
+}
+
+allocate_ip allow_ip allow-client
+allocate_ip deny_ip deny-client
+allocate_ip backend_one_ip backend-one
+allocate_ip backend_two_ip backend-two
+allocate_ip proxy_ip_fixed proxy
 
 echo "== Starting fake origin backends (real openssl s_server, one per hostname alias) =="
-docker run -d --name "$backend_one_container" --network "$network_name" --network-alias one.example.net \
+docker run -d --name "$backend_one_container" --network "$network_name" --ip "$backend_one_ip" --network-alias one.example.net \
     -v "$work_dir:/certs:ro" "$build_tools_image" bash -c \
     "openssl s_server -accept 443 -cert /certs/one.crt -key /certs/one.key -naccept 200 -quiet -www" >/dev/null
-docker run -d --name "$backend_two_container" --network "$network_name" --network-alias two.levels.example.net \
+docker run -d --name "$backend_two_container" --network "$network_name" --ip "$backend_two_ip" --network-alias two.levels.example.net \
     -v "$work_dir:/certs:ro" "$build_tools_image" bash -c \
     "openssl s_server -accept 443 -cert /certs/two.crt -key /certs/two.key -naccept 200 -quiet -www" >/dev/null
 
@@ -165,7 +198,7 @@ wait_for_tcp "$backend_one_container" 443
 wait_for_tcp "$backend_two_container" 443
 
 echo "== Starting the real proxy container (this fix applied), PROXY_ALLOWED_CLIENT_CIDRS scoped to ${allow_ip}/32 =="
-docker run -d --name "$proxy_container" --network "$network_name" \
+docker run -d --name "$proxy_container" --network "$network_name" --ip "$proxy_ip_fixed" \
     -e IP_STANDARD=10.10.10.10 -e IP_SSL=10.10.10.11 -e SSL_ENABLED=1 -e PROXY_SECURITY_MODE=strict \
     -e NGINX_UPSTREAM_RESOLVER="127.0.0.11:53" \
     -e "PROXY_ALLOWED_CLIENT_CIDRS=${allow_ip}/32" \
