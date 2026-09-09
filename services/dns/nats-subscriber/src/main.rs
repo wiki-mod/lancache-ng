@@ -549,7 +549,7 @@ fn record_key(zone: &str, name: &str, record_type: &str) -> RecordKey {
 
 /// What: per-key watermark of highest applied JetStream sequence.
 /// Why: prevents stale messages reapplying across batches.
-/// From: Issue #772 | PR #738 | PR #653
+/// From: Issue #772
 #[derive(Default)]
 struct AppliedSequences {
     last_applied: HashMap<RecordKey, u64>,
@@ -622,7 +622,6 @@ async fn handle_message(
 
 // What: construct PowerDNS API URL stripping trailing zone dot.
 // Why: prevents silent 404 when zone sent with trailing dot.
-// From: Issue #1164 | Issue #1095
 fn dns_record_patch_url(zone: &str) -> String {
     format!(
         "http://127.0.0.1:8081/api/v1/servers/localhost/zones/{}",
@@ -753,7 +752,6 @@ async fn handle_dns_record(
 
     // What: hold snapshot lock across PATCH to prevent TOCTOU.
     // Why: rollback TOCTOU: computed from stale, applies over live write.
-    // From: Issue #1164 | Issue #1095
     let result = {
         let _snapshot_guard = snapshot_ctx.lock.lock().await;
 
@@ -1193,7 +1191,6 @@ mod tests {
 
     // What: PATCH URL always strips zone trailing dot.
     // Why: prevents silent 404 when zone sent with trailing dot.
-    // From: Issue #1164
     #[test]
     fn dns_record_patch_url_strips_trailing_dot_regardless_of_input_form() {
         assert_eq!(
@@ -1291,7 +1288,6 @@ mod tests {
 
     // What: covers the secondary-node NATS record-write gate.
     // Why: AXFR is authoritative for secondaries; gate controls writes
-    // From: Issue #1164
     #[test]
     fn record_write_mode_disables_common_false_spellings() {
         for value in ["0", "false", "no", "off"] {
@@ -1382,7 +1378,6 @@ mod tests {
 
     // What: REPLACE with no TTL must default, not omit field.
     // Why: PowerDNS requires TTL for REPLACE, unlike DELETE.
-    // From: Issue #1164 | Issue #1095
     #[test]
     fn dns_record_to_zone_update_replace_without_ttl_defaults_instead_of_omitting() {
         let record = DNSRecord {

@@ -437,7 +437,7 @@ pub async fn toggle_aaaa_filter(
 
 // What: toggle to relax DDNS TSIG per-zone enforcement.
 // Why: global setting ineffective; per-zone default enforced.
-// From: Issue #815 | Issue #1095
+// From: Issue #815
 pub async fn toggle_ddns_allow_unsigned_updates(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
