@@ -168,8 +168,8 @@ while (( SECONDS < deadline )); do
     fi
     # `--filter name=<exact>$` anchors on the one container name this
     # script itself created, so `docker ps -q` can only ever produce 0 or 1
-    # lines here (issue #1377's repo-wide pipefail/SIGPIPE audit).
-    if ! docker ps -q --filter "name=${dhcp_container}$" | grep -q .; then # pipefail-safe: --filter name=<exact>$ bounds docker ps -q to 0 or 1 lines
+    # lines here (pipefail-safe construct).
+    if ! docker ps -q --filter "name=${dhcp_container}$" | grep -q .; then
         echo "::error::dhcp-proxy container exited before it started serving. Logs:" >&2
         docker logs "$dhcp_container" >&2 || true
         exit 1
