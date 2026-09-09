@@ -41,8 +41,6 @@ pub struct AaaaFilterForm {
     pub enabled: Option<String>,
 }
 
-// What: toggle to relax per-zone TSIG enforcement.
-// Why: global setting was no-op; invert per-zone override.
 #[derive(Deserialize)]
 pub struct DdnsAllowUnsignedForm {
     pub csrf_token: String,
@@ -437,7 +435,7 @@ pub async fn toggle_aaaa_filter(
 
 // What: toggle to relax DDNS TSIG per-zone enforcement.
 // Why: global setting ineffective; per-zone default enforced.
-// From: Issue DDNS
+// From: Issue #815
 pub async fn toggle_ddns_allow_unsigned_updates(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
