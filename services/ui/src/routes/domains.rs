@@ -721,54 +721,8 @@ fn is_valid_lan_name_for_delete(name: &str) -> bool {
     is_valid_dns_fqdn_allow_underscore(name) && is_lan_zone_name(name)
 }
 
-// This must have an upper bound: without one, an operator could submit a
-// TXT value with no real ceiling at all. Confirmed against PowerDNS's own
-// documented TXT behavior (doc.powerdns.com/authoritative/appendices/types.html): "Text is
-// stored plainly, PowerDNS understands content not enclosed in quotes,"
-// and "When a TXT record is longer than 255 characters/bytes ... PowerDNS
-// will cut up the content into 255 character/byte chunks for transmission"
-// -- i.e. PowerDNS itself has no 255-byte content limit at the API layer
-// (that 255-byte figure is a wire-format <character-string> limit PowerDNS
-// already handles by auto-chunking, not a limit this validator needs to
-// enforce), and its own zone API docs state no separate content-length cap.
-//
-// The real, protocol-level ceiling is not RDLENGTH alone: it is the DNS
-// message itself, since RFC 1035 SS4.2.2 (TCP) carries each message behind
-// its own 16-bit length prefix, capping any single DNS message -- header,
-// question, and every answer's RDATA included -- at 65535 bytes total. A
-// TXT record's wire RDATA is one or more <character-string>s (RFC 1035
-// SS3.3/3.3.14), each a 1-byte length prefix followed by up to 255 content
-// bytes, so a C-byte content value costs C content bytes PLUS
-// ceil(C / 255) length-prefix bytes on the wire -- but that RDATA does not
-// travel alone. A response carrying this record also needs, at minimum:
-// a 12-byte header (RFC 1035 SS4.1.1); the question section that produced
-// this answer, whose QNAME can be as long as this validator's own
-// `is_valid_dns_fqdn`/`is_lan_zone_name` name-length ceiling allows
-// (253 presentation-form characters, i.e. up to 255 wire-format bytes per
-// RFC 1035 SS3.1/3.3.14 -- this file's own `is_valid_dns_fqdn_impl`'s
-// `name.len() > 253` check), plus 2-byte QTYPE and 2-byte QCLASS; and the
-// answer's own resource-record framing -- a compressed NAME pointer
-// (RFC 1035 SS4.1.4, 2 bytes, the normal case whenever the answer name
-// matches the question name), 2-byte TYPE, 2-byte CLASS, 4-byte TTL, and
-// the 2-byte RDLENGTH field itself; and the 11-byte, option-free OPT record
-// that RFC 6891 requires an EDNS responder to include when the request
-// contains one. Conservatively for the longest name
-// this validator allows (not per-request name-dependent, so this stays a
-// compile-time constant): 12 (header) + (255 + 2 + 2) (question) +
-// (2 + 2 + 2 + 4 + 2) (answer frame) + 11 (OPT) = 294 bytes of non-RDATA
-// overhead, leaving 65535 - 294 = 65241 bytes for RDATA. Solving
-// C + ceil(C / 255) <= 65241 for the largest integer C gives 64986
-// (64986 + ceil(64986 / 255) = 64986 + 255 = 65241, and one byte more,
-// 64987, needs the same 255 prefixes for 65242 -- one over). 64986 is
-// therefore the real maximum content length this validator can accept for
-// any allowed record name, rather than the 65279-byte content bound that
-// accounts only for RDLENGTH and its TXT chunk prefixes while omitting the
-// surrounding message that must also carry this record home. Deliberately
-// not the 255-byte figure some callers might expect: this module's own
-// existing test
-// (validates_supported_lan_record_edge_cases) already asserts a 512-byte
-// TXT content is valid, which is correct given PowerDNS's own documented
-// auto-chunking behavior above.
+// What: MAX_TXT_CONTENT_BYTES = 64986 (RFC 1035/6891 DNS message limit)
+// Why: Message size 65535 minus 294-byte frame/header overhead
 const MAX_TXT_CONTENT_BYTES: usize = 64_986;
 
 fn is_valid_txt_content(content: &str) -> bool {
@@ -843,40 +797,21 @@ struct DomainSpec {
 // cdn-domains.txt and entries an operator has added themselves via the
 // Admin UI's Add form [state]. Everything above this exact line (trimmed)
 // is treated as a default entry (toggle-able but never removable from the
-// UI); everything below it is a custom entry (add/remove-able, never
-// toggle-able). It is an ordinary "#"-prefixed comment as far as every
-// existing consumer of this file is concerned (DNS RPZ generation, proxy
-// cert generation, the Rust domain-add dedup check) -- only
-// read_domain_entries()/append_domain() below give it special meaning.
-// Deliberately distinct wording/formatting from the vendor section headers
-// already in the shipped file (e.g. "# ---- Steam ----") so it can never be
-// mistaken for one of those by the exact-match comparison in
-// read_domain_entries().
+// What: Marker separates shipped default domains from operator entries
+// Why: Allows Add/Remove without toggle; formatting distinct from vendors
 const CUSTOM_DOMAINS_MARKER: &str =
     "# ==== lancache-ng: entries added via the Admin UI are appended below this exact line ====";
 
-// A single cdn-domains.txt line's full on-disk envelope: the validated
-// domain/wildcard-scope pair (DomainSpec) plus the enabled/disabled bit
-// encoded by an optional leading "!" [state]. Kept as a separate type from
-// DomainSpec on purpose -- DomainSpec's derived Eq is load-bearing for
-// dedup (append_domain) and delete matching (line_matches_domain_delete),
-// and folding `enabled` into that equality would make a disabled entry stop
-// matching its own enabled counterpart there.
+// What: StoredDomainLine = DomainSpec + enabled flag (! prefix)
+// Why: Separate type keeps Eq load-bearing for dedup/delete matching
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StoredDomainLine {
     spec: DomainSpec,
     enabled: bool,
 }
 
-// Parses one raw cdn-domains.txt line's stored form: an optional leading
-// "!" (disabled marker) wrapping the same "optional '.' + domain" syntax
-// parse_domain_entry already validates. This is intentionally a distinct
-// function from parse_domain_entry rather than folding "!" support into it:
-// parse_domain_entry also validates fresh operator input typed into the Add
-// form, which must never be allowed to smuggle a "!" through as if it were
-// part of the hostname -- keeping the two parsers separate makes that
-// impossible by construction instead of relying on a caller to remember not
-// to pass user input through the disabled-aware path.
+// What: Parse cdn-domains.txt line with ! disabled marker
+// Why: Separate from parse_domain_entry to prevent ! smuggling in Add
 fn parse_stored_domain_line(line: &str) -> Option<StoredDomainLine> {
     let trimmed = line.trim();
     let (enabled, rest) = match trimmed.strip_prefix('!') {
