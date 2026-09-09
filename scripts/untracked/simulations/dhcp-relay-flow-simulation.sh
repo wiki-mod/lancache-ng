@@ -52,7 +52,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "== Building the dhcp-proxy image (relay mode) from this checkout =="
-docker build -q -t "$relay_image" services/dhcp-proxy >/dev/null
+docker build -q -t "$relay_image" --build-context "shared-scripts=$repo_root/scripts/lib" services/dhcp-proxy >/dev/null
 
 # What: derives two /28s from the reserved /27 slot.
 # Why: reuses the shared pool, not a new hardcoded range.

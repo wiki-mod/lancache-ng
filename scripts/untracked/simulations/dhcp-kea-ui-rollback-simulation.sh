@@ -169,7 +169,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "== Building the Kea DHCP image from this checkout's services/dhcp =="
-docker build -q -t "$kea_image_tag" services/dhcp >/dev/null
+docker build -q -t "$kea_image_tag" --build-context "shared-scripts=$repo_root/scripts/lib" services/dhcp >/dev/null
 
 echo "== Starting docker-socket-proxy/proxy/nats from the published $image_tag images =="
 LANCACHE_IMAGE_TAG="$image_tag" "${compose[@]}" up -d docker-socket-proxy proxy nats

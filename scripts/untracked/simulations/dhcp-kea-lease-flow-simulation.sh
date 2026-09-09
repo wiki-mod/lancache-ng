@@ -372,7 +372,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "== Building the Kea DHCP image from this checkout's services/dhcp =="
-docker build -q -t "$image_tag" services/dhcp >/dev/null
+docker build -q -t "$image_tag" --build-context "shared-scripts=$repo_root/scripts/lib" services/dhcp >/dev/null
 
 # A fixed subnet would collide across concurrent runs sharing one of this
 # project's self-hosted runner hosts, exactly like the full-setup validation
@@ -500,7 +500,9 @@ echo "== Building the PowerDNS image from this checkout's services/dns (issue #7
 # because it already IS the resolved build-tools image -- its name reflects
 # only its original (client-container) use above, from before this DDNS
 # verification block existed.
-docker build -q -t "$dns_image_tag" --build-arg "BUILD_TOOLS_IMAGE=${client_tool_image}" services/dns >/dev/null
+docker build -q -t "$dns_image_tag" --build-arg "BUILD_TOOLS_IMAGE=${client_tool_image}" \
+    --build-context "shared-scripts=$repo_root/scripts/lib" \
+    -f services/dns/Dockerfile "$repo_root" >/dev/null
 
 echo "== Starting a real PowerDNS container on the isolated network (issue #706) =="
 # No extra --cap-add here: unlike the Kea container below, services/dns/

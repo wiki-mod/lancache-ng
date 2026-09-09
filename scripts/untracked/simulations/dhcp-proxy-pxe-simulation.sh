@@ -129,7 +129,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "== Building the dhcp-proxy image from this checkout's services/dhcp-proxy =="
-docker build -q -t "$image_tag" services/dhcp-proxy >/dev/null
+docker build -q -t "$image_tag" --build-context "shared-scripts=$repo_root/scripts/lib" services/dhcp-proxy >/dev/null
 
 # A fixed subnet would collide across concurrent runs sharing one of this
 # project's self-hosted runner hosts, and a bare per-run hash derivation
