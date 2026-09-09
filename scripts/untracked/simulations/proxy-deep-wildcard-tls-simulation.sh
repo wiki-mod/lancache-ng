@@ -36,30 +36,13 @@ trap cleanup EXIT
 
 mkdir -p "$work_dir/fixture-a" "$work_dir/fixture-b"
 
-# Synthetic, non-production domains rooted at "example.com" (IANA-reserved
-# for documentation/testing, RFC 2606) -- never touches the real
-# services/dns/cdn-domains.txt, so this can't accidentally affect real CDN
-# coverage or collide with a real operator's domain list.
-#
-# fixture-a: only the depth-1 leading-dot entry. Exercises the base case
-# (_EXTRA_WILDCARD_BASES' "*.deep.example.com" cert, one label of coverage)
-# and the documented residual gap one level deeper (any SNI two labels below
-# "deep.example.com", e.g. "a.b.deep.example.com", cannot validate against a
-# single-label X.509 wildcard SAN -- RFC 6125 -- even though nginx's own
-# "hostnames" map matching selects that cert for it regardless of depth).
+# What: Create synthetic domain fixtures for test.
+# Why: Test deep wildcard without affecting real cdn-domains.txt.
 printf '%s\n' '.deep.example.com' > "$work_dir/fixture-a/cdn-domains.txt"
-# fixture-b: the SAME base entry, plus the mitigation an operator can apply
-# today for a SPECIFIC deeper subdomain that actually needs coverage: list
-# that one extra level explicitly. nginx's hostnames map picks the more
-# specific of two matching wildcard keys (see entrypoint.sh's own comment on
-# the map-generation loop), so once ".b.deep.example.com" is also listed,
-# "a.b.deep.example.com" resolves to ITS cert instead of the shallower one.
 printf '%s\n%s\n' '.deep.example.com' '.b.deep.example.com' > "$work_dir/fixture-b/cdn-domains.txt"
 
-# Minimal but complete env for a standalone (non-Compose) proxy container --
-# matches config/prod/proxy.env's defaults, scaled down since this never
-# serves real traffic. IP_STANDARD/IP_SSL are placeholders (only used for
-# the default cert's SAN and startup validation, never dialed here).
+# What: Set up standalone proxy env variables.
+# Why: Placeholders only; never serve real traffic.
 proxy_env=(
     -e IP_STANDARD=10.10.10.10
     -e IP_SSL=10.10.10.11
@@ -80,15 +63,8 @@ docker build -q -t "$image_b" --build-context "dns-domains=$work_dir/fixture-b" 
 
 docker network create "$network_name" >/dev/null
 
-# handshake <container> <sni> <expect: ok|mismatch>
-# Runs a real TLS handshake from a build-tools client container against
-# <container>:443 with SNI <sni>, verifying the presented cert chains to
-# that proxy's own CA AND that <sni> itself validates against the
-# presented cert's SAN (via -verify_hostname, which openssl's plain chain
-# verification does NOT check on its own -- a cert can chain-verify fine
-# while still not covering the requested hostname at all). Fails loudly
-# (non-zero exit, printing what actually happened) if the observed result
-# doesn't match <expect>.
+# What: Run TLS handshake with hostname verify.
+# Why: Check both cert chain AND SAN match SNI.
 handshake() {
     local container="$1" sni="$2" expect="$3" ca_path="$4"
     local out
@@ -109,28 +85,15 @@ handshake() {
     echo "OK: SNI '$sni' against $container handshakes and verifies cleanly (chain + hostname)."
 }
 
-# dispatch_routes_to_passthrough <container> <sni>
-# Since #1276/#1322's stream-level SNI depth-dispatch fix, a depth>1 SNI
-# below a leading-dot entry is no longer expected to reach this MITM cert
-# path at all (previously this script asserted a live "hostname mismatch"
-# handshake here, documenting the pre-fix behavior). It's now routed to the
-# passthrough relay instead (services/proxy/entrypoint.sh's "2a."), which
-# has no live backend in THIS script's synthetic fixtures -- verified here
-# via the generated dispatch map's own content instead of a live handshake
-# (a live, real-backend proof of the passthrough path itself lives in
-# scripts/untracked/simulations/proxy-ssl-mode-two-relay-dispatch-simulation.sh). Fails loudly if
-# the map does not route <sni> to the passthrough relay port (9446).
+# What: Check SNI routes to passthrough relay.
+# Why: Depth>1 SNI no longer reaches MITM cert path.
 dispatch_routes_to_passthrough() {
     local container="$1" sni="$2"
     local map
     map="$(docker exec "$container" cat /etc/nginx/stream.d/01-ssl-dispatch.conf)"
     local matched_port=""
-    # Deliberately default IFS here (word-splitting into "pattern port"),
-    # NOT "IFS= read" -- this reads two whitespace-separated fields per
-    # line, not one whole-line value; "IFS=" would leave $port always empty
-    # (confirmed live: an earlier version of this helper used "IFS= read"
-    # copied from a different read idiom elsewhere in this codebase, and
-    # silently never matched anything as a result).
+    # What: Use default IFS for two-field reads.
+    # Why: IFS="" would leave port empty on read.
     while read -r pattern port; do
         [[ -z "$pattern" ]] && continue
         # Strip the map's own quoting/anchoring to get a plain grep -P regex.
@@ -159,8 +122,8 @@ dispatch_routes_to_passthrough() {
 # wait_for_tls <container>
 # nginx's proxy Dockerfile has no built-in HEALTHCHECK for a standalone
 # (non-Compose) run -- retries the handshake itself rather than requiring a
-# separate readiness probe, so a slow cert-generation/nginx-start window on a
-# loaded runner doesn't produce a spurious failure.
+# What: Poll until TLS port reachable.
+# Why: Cert gen/nginx startup may be slow.
 wait_for_tls() {
     local container="$1"
     local deadline=$((SECONDS + 60))

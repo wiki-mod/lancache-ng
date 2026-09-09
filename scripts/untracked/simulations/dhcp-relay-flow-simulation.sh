@@ -48,10 +48,8 @@ echo "== Creating two isolated bridge networks =="
 docker network create --subnet "${subnet_prefix}.${client_base}/28" "$client_net" >/dev/null
 docker network create --subnet "${subnet_prefix}.${server_base}/28" "$server_net" >/dev/null
 
-# Client subnet (where the client and the relay's client-facing NIC live) and
-# the disjoint server subnet (where the upstream server and the relay's
-# server-facing NIC live). Each /28 has 14 usable hosts (base+1..base+14);
-# the pool below (base+5..base+10, 6 addresses) stays well within that.
+# What: Define client/server subnets from /28s.
+# Why: Pool (base+5..+10) stays within 14-host /28.
 client_subnet="${subnet_prefix}.${client_base}/28"
 relay_client_ip="${subnet_prefix}.$((client_base + 2))"
 pool_start="${subnet_prefix}.$((client_base + 5))"
@@ -60,10 +58,8 @@ upstream_ip="${subnet_prefix}.$((server_base + 2))"
 relay_server_ip="${subnet_prefix}.$((server_base + 3))"
 
 echo "== Starting the upstream DHCP server on server-net (pool is for the CLIENT subnet) =="
-# The upstream dnsmasq owns the real lease. Its dhcp-range is the CLIENT
-# subnet: a relayed request arrives tagged with giaddr=$relay_client_ip, and
-# the server matches that giaddr to this range. `interface=eth0` binds it to
-# its server-net NIC; dhcp-authoritative makes it answer immediately.
+# What: Configure upstream DHCP server.
+# Why: Pool matched by giaddr; range for client subnet.
 docker run -d --name "$upstream_container" \
     --network "$server_net" --ip "$upstream_ip" \
     --cap-add NET_ADMIN \
@@ -72,12 +68,8 @@ docker run -d --name "$upstream_container" \
         set -e
         apt-get update -qq >/dev/null 2>&1
         apt-get install -y -qq dnsmasq iproute2 >/dev/null 2>&1
-        # The upstream is on server-net only, but it must reply (unicast) to
-        # the relay agent'"'"'s giaddr on the CLIENT subnet. Add the return route
-        # to the client subnet via the relay'"'"'s server-net address -- without
-        # this the OFFER has nowhere to go and the client re-DISCOVERs forever.
-        # (This route is exactly what a real deployment configures on the DHCP
-        # server for a relayed subnet.)
+        # What: Add return route to client subnet.
+        # Why: Upstream must route replies back via relay.
         ip route add '"${client_subnet}"' via '"$relay_server_ip"'
         cat > /etc/dnsmasq-upstream.conf <<EOF
 port=0
@@ -94,10 +86,8 @@ EOF
     ' >/dev/null
 
 echo "== Starting the relay (dhcp-proxy image, DHCP_MODE=dnsmasq-relay) on BOTH networks =="
-# Attach to client-net first (its client-facing NIC / giaddr address), then
-# also to server-net so it can reach the upstream. DHCP_MODE + the two relay
-# values are passed as env (no Admin UI in this test); the entrypoint reads
-# DHCP_MODE the same way whether it comes from the env or the UI settings file.
+# What: Attach relay to both client and server nets.
+# Why: giaddr on client; reach upstream on server net.
 docker run -d --name "$relay_container" \
     --network "$client_net" --ip "$relay_client_ip" \
     --cap-add NET_ADMIN \
@@ -114,20 +104,8 @@ echo "== Waiting for the relay and upstream to come up =="
 deadline=$((SECONDS + 60))
 relay_ready=0
 while (( SECONDS < deadline )); do
-    # `docker logs`/`docker ps` each captured into a variable first, then
-    # grep -q reads via a here-string -- a live pipe here can SIGPIPE the
-    # docker CLI once its output already has the matched line plus more
-    # (issue #1377's repo-wide pipefail/SIGPIPE audit; `docker ps` with no
-    # `--filter` here lists every container on the host, not just this
-    # script's own, so it is not bounded to one line the way a filtered
-    # `docker ps -q --filter name=^X$` would be).
-    # `|| true` on both matters under `set -e`: each used to sit directly
-    # inside its own `if` (exempt from errexit on its own); pulled into
-    # their own assignments, a transient `docker logs`/`docker ps` failure
-    # would otherwise abort this polling loop instead of retrying, or (for
-    # the `docker ps` case) instead of falling through to this script's own
-    # controlled "container exited early" error path (caught by advisor
-    # review).
+    # What: Capture logs/ps to variable before grep.
+    # Why: Avoids docker CLI SIGPIPE on match.
     relay_log="$(docker logs "$relay_container" 2>&1 || true)"
     if grep -q "DHCP-relay mode" <<<"$relay_log"; then
         relay_ready=1
