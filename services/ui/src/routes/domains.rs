@@ -76,12 +76,8 @@ pub struct Record {
     pub disabled: bool,
 }
 
-// Query params this page reads back after a redirect from one of its own
-// forms (add_dns's validation-failure path below). Deliberately just this
-// one optional field, not a general flash-message mechanism: this UI has no
-// site-wide flash/banner system today (see routes/dns_snapshots.rs's own
-// doc comment on that gap), and building one is a bigger change than this
-// one page's error display needs.
+// Query: error code from add_dns form validation failures
+// Why: Flash-message system not implemented; this page handles only errors
 #[derive(Deserialize)]
 pub struct DomainsPageQuery {
     #[serde(default)]
@@ -540,16 +536,9 @@ async fn flush_recursor_cache(
     record_type: Option<&str>,
     expected_content: Option<Vec<String>>,
 ) {
-    // PowerDNS Recursor's cache/flush endpoint requires a `domain` query
-    // parameter and only flushes an exact name match, not a subtree --
-    // confirmed live while building AXFR's integration test:
-    // `?type=packet` (the previous call) always returned 422 Unprocessable
-    // Entity, and even `?domain=.` or `?domain=lan.` leave a just-deleted
-    // leaf record (e.g. `host.lan.`) resolving from cache until its TTL
-    // naturally expires. The caller must pass the exact name that changed.
-    // PowerDNS also requires canonical (dot-terminated) form, or the flush
-    // itself is rejected outright ("DNS Name '' is not canonical") --
-    // ensure that here so callers don't all need to remember it themselves.
+    // What: PowerDNS cache/flush requires `domain` parameter
+    // Why: Exact match only, not subtree; needs canonical form
+    // From: Issue #400
     let canonical_domain = if domain.ends_with('.') {
         domain.to_string()
     } else {
