@@ -51,8 +51,8 @@ pub struct DdnsAllowUnsignedForm {
 #[derive(Deserialize)]
 pub struct ToggleDomainForm {
     pub csrf_token: String,
-    // What: Canonical form (no ! prefix); matches add/remove format
-    // Why: Prevents operator/forged requests smuggling ! through field
+    // What: Canonical form (no ! prefix) for add/remove operations
+    // Why: Prevents operator/forged requests from smuggling !
     pub domain: String,
     #[serde(default)]
     pub enabled: Option<String>,
@@ -81,8 +81,8 @@ pub struct DomainsPageQuery {
     pub error: Option<String>,
 }
 
-// What: Maps error code to fixed safe human-readable banner text
-// Why: Prevents untrusted URL param from becoming arbitrary page text
+// What: Maps error code to safe human-readable banner text
+// Why: Prevents untrusted URL param becoming arbitrary page text
 fn domains_page_error_message(code: &str) -> Option<&'static str> {
     match code {
         "invalid_domain" => Some(
@@ -197,8 +197,8 @@ pub async fn add_dns(
         let _guard = state.file_lock.lock().expect("file lock poisoned");
         append_domain(&state.config.cdn_domains_file, &domain)
     };
-    // What: Don't report success if CDN domain file write failed
-    // Why: This write is the actual mutation; cache/proxy are best-effort
+    // What: Fail if CDN domain file write fails
+    // Why: File write is actual mutation; cache/proxy are best-effort
     dns_write_result_to_response(wrote, "write")?;
     flush_recursor_cache(&state, &domain.domain, None, None, None).await;
     // What: SSL proxy derives certs/allowlist from domains file
@@ -545,13 +545,8 @@ async fn restart_ssl(state: &AppState) {
     }
 }
 
-// Maps the CDN domain file write's own Result to the operator-facing
-// response. `action` names the operation in the log line ("write"/"remove")
-// so add_dns/remove_dns keep their own distinct log message while sharing
-// this decision: on failure, log and report 500 instead of the success
-// redirect the caller would otherwise send -- the write is the actual
-// mutation the request represents, so a failure here can never look like a
-// success to the operator, same as toggle_aaaa_filter's marker-write check.
+// What: Map domain file write result to operator-facing response
+// Why: Write is the actual mutation; failure can't appear as success
 fn dns_write_result_to_response(
     result: anyhow::Result<()>,
     action: &str,
@@ -591,15 +586,8 @@ async fn is_ddns_unsigned_updates_allowed(state: &AppState) -> bool {
         .any(|path| aaaa_filter_enabled_at(&path))
 }
 
-// Deliberately a NEW marker filename ("ddns-allow-unsigned-updates"), not a
-// repurposed "dnsupdate-require-tsig-enabled" -- see
-// services/dns/entrypoint.sh's DDNS_ALLOW_UNSIGNED_MARKER comment for why:
-// reusing the old filename with inverted meaning would silently flip any
-// pre-existing deployment that had the old (harmless, no-op) toggle turned
-// on into one that now accepts unsigned updates after an image upgrade, a
-// real, silent security regression. A new filename guarantees every
-// deployment starts this feature at its safe default (marker absent -> TSIG
-// still enforced, unchanged from today's actual behavior).
+// What: Use NEW marker filename, not repurposed old filename
+// Why: Inverted semantics would silently regress security on upgrade
 fn ddns_allow_unsigned_marker_paths(state: &AppState) -> [PathBuf; 2] {
     [
         Path::new(&state.config.dns_standard_state_dir).join("ddns-allow-unsigned-updates"),
