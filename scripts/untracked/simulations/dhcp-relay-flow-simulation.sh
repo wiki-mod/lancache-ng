@@ -188,9 +188,9 @@ echo "== Verifying the upstream received the RELAYED request and offered a clien
 # and answers with a DHCPOFFER of an address from the CLIENT subnet pool. That
 # offer is only possible if the relay stamped the correct giaddr
 # (DHCP_RELAY_LOCAL_ADDR) so the upstream selected the client-subnet range.
-# Reaching the upstream at all across the segment boundary is exactly issue
-# #844's requirement ("actual lease/relay traffic reaches a real upstream DHCP
-# server"). (The offer's return leg to the client relies on the upstream
+# Reaching the upstream across the segment boundary requires the relay to
+# forward "actual lease/relay traffic to a real upstream DHCP server".
+# (The offer's return leg to the client relies on the upstream
 # routing back to giaddr across two Docker bridges, which is environment-
 # specific and deliberately NOT what this assertion depends on.)
 upstream_log="$(docker logs "$upstream_container" 2>&1)"
@@ -229,4 +229,4 @@ if [[ "$offered_prefix" != "$subnet_prefix" || "$offered_last" -lt $((client_bas
     exit 1
 fi
 
-echo "dhcp-relay-flow-simulation passed: a client on an isolated segment with no direct path to the upstream DHCP server had its DHCPDISCOVER relayed across the segment boundary to the real upstream, which offered $offered_ip from the client-subnet pool -- proof the dnsmasq-relay-mode dhcp-proxy container genuinely forwards real DHCP traffic to a real upstream DHCP server with the correct giaddr (issue #844)."
+echo "dhcp-relay-flow-simulation passed: relayed DHCPDISCOVER across segment boundary to upstream server, received $offered_ip from client-subnet pool with correct giaddr."

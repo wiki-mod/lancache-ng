@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # What: Test dhcp-proxy ProxyDHCP/PXE mode.
-# Why: Missing coverage for issue #705 root cause.
+# Why: Missing test coverage for root cause.
 # From: Issue #705
 set -euo pipefail
 
@@ -175,7 +175,7 @@ dns_primary="172.29.${octet}.10"
 dns_secondary="172.29.${octet}.11"
 # The external PXE boot server this run's DHCPOFFERs are asserted to
 # point at. Deliberately never started as a real listening service
-# anywhere -- per this project's #705 scope, lancache-ng only ever hands
+# anywhere -- lancache-ng only ever hands
 # out a pointer to an operator's own existing PXE/TFTP infrastructure, it
 # never hosts boot files itself, so this script only needs to prove the
 # pointer's address/filename are correct, not that a real TFTP transfer
@@ -185,7 +185,7 @@ bios_boot_filename="lancache-pxe705-bios.0"
 uefi_boot_filename="lancache-pxe705-uefi.efi"
 echo "Validation network is up on subnet $subnet (lock held by PID $subnet_lock_holder_pid)."
 
-echo "== Starting a real dhcp-proxy container on the isolated network, PXE boot-pointer configured for both BIOS and UEFI (issue #705) =="
+echo "== Starting a real dhcp-proxy container, PXE boot-pointer configured =="
 # --cap-add NET_ADMIN/NET_RAW: dnsmasq's ProxyDHCP mode binds a raw DHCP
 # socket, matching the same capability requirement
 # dhcp-kea-lease-flow-simulation.sh already documents for its own Kea
@@ -321,10 +321,9 @@ echo "$negative_result"
 # assert_pxe_reply <label> <parsed_result> <expected_filename>
 # Shared assertion for the three positive (PXE-tagged) scenarios: a reply
 # was received at all, it carries both configured LanCache NG DNS
-# servers (option 6 -- the original issue #705 ask), it points at the
+# servers (option 6), it points at the
 # operator-configured external PXE boot server address (not dnsmasq's own
-# address -- the specific wire-level pitfall this issue's investigation
-# found and documented in entrypoint.sh), and it carries the
+# address), and it carries the
 # architecture-appropriate boot filename.
 assert_pxe_reply() {
     local label="$1" parsed="$2" expected_filename="$3"
@@ -386,7 +385,7 @@ summarize_probe() {
 }
 
 report=$(cat <<REPORT
-== DHCP proxy PXE simulation result (issue #705) ==
+== DHCP proxy PXE simulation result ==
 BIOS (arch 0):        $(summarize_probe "$bios_result")
 UEFI x86-64 (arch 7):  $(summarize_probe "$uefi_x8664_result")
 UEFI ARM64 (arch 11):  $(summarize_probe "$uefi_arm64_result")
