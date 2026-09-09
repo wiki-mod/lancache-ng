@@ -39,8 +39,6 @@ jobs:
   compute-validation-network:
     name: derive per-run validation subnet
     if: inputs.should_run == 'true'
-    # Stays light (not a stack-driving job): pure subnet/IP derivation via a
-    # composite action, no Docker/compose stack of its own.
     runs-on: [self-hosted, linux, lancache, lancache-light]
     timeout-minutes: 45
     outputs:
@@ -146,22 +144,8 @@ jobs:
           set -euo pipefail
           docker compose down --volumes --remove-orphans || true
 
-          # `down` above can lose Docker's own "has active endpoints" race
-          # (a container-removal API call can return before its network
-          # endpoint is actually unwired -- confirmed for real in CI, see
-          # validation_project_networks_teardown's own comment in
-          # reserve-validation-subnet.sh) and silently leave this project's
-          # network(s) non-empty, poisoning them for whichever job/run
-          # reserves this slot next. Wait for and force a real removal
-          # instead of trusting `down`'s own exit code.
-          # shellcheck source=scripts/lib/reserve-validation-subnet.sh
+
           source "$GITHUB_WORKSPACE/scripts/lib/reserve-validation-subnet.sh"
-          # This step runs unconditionally (`if: always()`), including when
-          # the reserve composite failed before ever setting
-          # COMPOSE_PROJECT_NAME -- under `set -u`, a bare "$COMPOSE_PROJECT_NAME"
-          # would abort this whole step with "unbound variable" in exactly that
-          # case. The safe-default form skips teardown when there is nothing to
-          # tear down instead.
           if [[ -n "${COMPOSE_PROJECT_NAME:-}" ]]; then
             validation_project_networks_teardown "$COMPOSE_PROJECT_NAME" || true
           fi
@@ -581,9 +565,6 @@ jobs:
           bash scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh
 
   nats-auth-callout-simulation:
-    # Real per-secondary NATS auth-callout integration test. Pulls the real
-    # dns/ui/nats images (via the script), so it threads the PR staging tag to
-    # test the PR's own secondary credentialing code.
     name: NATS auth-callout simulation
     needs: [compute-validation-network, dhcp-kea-lease-flow-simulation]
     if: >-
