@@ -168,7 +168,7 @@ while (( SECONDS < deadline )); do
     fi
     # What: Filter by exact container name.
     # Why: Bounds docker ps output to 0 or 1 line.
-    if ! docker ps -q --filter "name=${dhcp_container}$" | grep -q .; then
+    if ! docker ps -q --filter "name=${dhcp_container}$" | grep -q .; then # pipefail-safe: --filter name=<exact>$ bounds docker ps -q to 0 or 1 lines
         echo "::error::dhcp-proxy container exited before it started serving. Logs:" >&2
         docker logs "$dhcp_container" >&2 || true
         exit 1
