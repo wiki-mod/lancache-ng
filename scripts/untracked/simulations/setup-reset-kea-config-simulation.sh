@@ -2,8 +2,8 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: Tests CLI setup.sh reset-to-last-known-good-config Kea.
-# Why: Verify CLI command actually rolls back Kea config.
+# What: Tests CLI reset-to-last-known-good-config Kea.
+# Why: Verify CLI command rolls back Kea live config.
 # From: Issue #763
 set -euo pipefail
 

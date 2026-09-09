@@ -2,8 +2,8 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: Tests Admin UI Kea snapshot rollback route.
-# Why: Verify POST /dhcp/snapshot/rollback changes Kea config.
+# What: Tests Kea snapshot rollback via Admin UI.
+# Why: Verify rollback route changes Kea live config.
 # From: Issue #837
 set -euo pipefail
 

@@ -495,7 +495,7 @@ else
     fail=1
 fi
 
-# ─── Static host reservation scenario (issue #707) ───
+# ─── Static host reservation scenario ───
 #
 # What: Uses fixed locally-admin MACs.
 # Why: PID-suffixed to avoid collisions.

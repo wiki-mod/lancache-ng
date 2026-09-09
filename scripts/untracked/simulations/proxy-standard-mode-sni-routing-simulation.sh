@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # What: Tests proxy standard-mode SNI passthrough routing.
-# Why: Verify wildcard domain routes to SNI, not derived root.
+# Why: Verify wildcard routes to SNI, not derived root.
 # From: Issue #1297
 set -euo pipefail
 
