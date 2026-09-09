@@ -77,45 +77,14 @@ kea_image_tag="lancache-ng-dhcp634-kea:$$"
 kea_container="lancache-ng-dhcp634-kea-$$"
 ui_container="lancache-ng-dhcp634-ui-$$"
 
-# Deliberately OUTSIDE the git working tree (not under $repo_root): once the
-# test runs, kea-data/config-snapshots/ below ends up owned by the Admin UI's
-# fixed unprivileged uid (10001) on the HOST -- services/dhcp/entrypoint.sh
-# (root inside the Kea container) creates and chowns config-snapshots/ on
-# every start, and a bind mount does not remap that uid back on the host.
-# If this lived inside the checked-out repo, a cleanup miss from ANY cause --
-# the EXIT trap not running because the job was cancelled/SIGKILLed, the
-# throwaway chown image no longer existing, or simply an OLDER branch whose
-# copy of this script predates the cleanup fix being dispatched onto the same
-# shared self-hosted runner -- would leave that uid-10001 directory in the
-# repo workspace, and the NEXT job's actions/checkout on that same runner
-# slot would then fail outright trying to clean it (EACCES: permission
-# denied, rmdir ...), blocking an unrelated PR's CI run. Putting work_dir
-# under $TMPDIR/tmp -- which actions/checkout never touches, is not wiped
-# per-job the way the runner's own $RUNNER_TEMP/_work is, and whose sticky
-# bit keeps a stray dir harmless to other processes -- means a leftover can
-# never poison another job's checkout no matter why cleanup was skipped. The
-# cleanup() chown+rm below is still kept, now purely to tidy this run's own
-# temp dir on a normal exit rather than as the cross-job safety net it used
-# to be. Confirmed for real (issue #1123): a uid-10001 config-snapshots dir
-# left in the repo workspace by an earlier, pre-cleanup-fix run poisoned
-# every later job scheduled onto that runner. Unique per run ($$) because
-# $TMPDIR is shared host-wide, unlike the per-checkout worktree this used to
-# sit in, so two concurrent runs on one host never collide on it.
+# What: Work directory outside git worktree.
+# Why: Prevents uid-10001 dirs from poisoning future CI.
+# From: Issue #1123
 work_dir="${TMPDIR:-/tmp}/lancache-ng-dhcp-kea-ctrl-agent-mutation.$$"
 rm -rf "$work_dir"
 mkdir -p "$work_dir/shared"
-# Bind-mounted onto BOTH the Kea and Admin UI containers below at
-# /var/lib/kea, exactly like deploy/prod/docker-compose.yml shares its own
-# kea-data volume between those two services. Needed so the Admin UI's known-good-config-snapshot
-# write (services/ui/src/kea_snapshots.rs, #614) after each successful
-# mutation actually succeeds here instead of only in those two compose
-# stacks: services/dhcp/entrypoint.sh (run as root, see the Kea container
-# below) creates and chowns config-snapshots/ under /var/lib/kea to the
-# Admin UI's fixed unprivileged uid (10001) on every start -- without this
-# shared mount the Admin UI's own default KEA_CONFIG_SNAPSHOT_DIR
-# (/var/lib/kea/config-snapshots) does not exist at all in its own
-# container and its write fails, silently logging a warning rather than
-# failing this test outright.
+# What: Shared kea-data volume for snapshots.
+# Why: Admin UI needs to persist known-good config.
 mkdir -p "$work_dir/kea-data"
 
 compose=(docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml)
