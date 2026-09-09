@@ -127,13 +127,8 @@ fi
 # Give the upstream apt-install+start a moment; it logs when ready.
 deadline=$((SECONDS + 90))
 while (( SECONDS < deadline )); do
-    # Captured into a variable first, not a live `docker logs | grep -q`
-    # pipe (issue #1377). `|| true` matters under `set -e`: this used to be
-    # part of the same `... | grep -q ... && break` statement, where the
-    # whole pipe sat on the non-last side of `&&` (exempt from errexit);
-    # pulled into its own assignment, a transient `docker logs` failure
-    # would otherwise abort the loop instead of retrying (caught by advisor
-    # review).
+    # What: Capture logs to variable before grep.
+    # Why: Avoid SIGPIPE if grep exits early on match.
     upstream_boot_log="$(docker logs "$upstream_container" 2>&1 || true)"
     grep -q "dnsmasq-dhcp" <<<"$upstream_boot_log" && break
     sleep 3
@@ -187,9 +182,8 @@ if ! grep -q "DHCPDISCOVER" <<<"$upstream_log"; then
     docker logs "$relay_container" >&2 || true
     exit 1
 fi
-# Same reasoning as upstream_dhcp_lines above: sed's matches (there can be
-# more than one DHCPOFFER line) are captured first, `head -n1` reads them
-# via a here-string (issue #1377).
+# What: Extract offered IP via sed into here-string.
+# Why: Avoids piping issues with early grep exit.
 offered_lines="$(sed -n 's/.*DHCPOFFER(eth0) \([0-9.]*\).*/\1/p' <<<"$upstream_log")"
 offered_ip="$(head -n1 <<<"$offered_lines")"
 if [[ -z "$offered_ip" ]]; then

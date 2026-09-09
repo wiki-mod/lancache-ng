@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # What: Test deep wildcard cert TLS handshake.
 # Why: Runtime-only failures not covered by unit tests.
-# From: Issue #1065
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
@@ -100,11 +99,8 @@ dispatch_routes_to_passthrough() {
         local bare="${pattern#\"}"
         bare="${bare%\"}"
         bare="${bare#\~}"
-        # Here-string, not `echo "$sni" | grep -Pq ...`: eliminates the live
-        # producer/early-exiting-consumer pipe entirely (issue #1377's
-        # repo-wide pipefail/SIGPIPE audit, AG-VAL-032 -- caught as a fresh
-        # instance after this script itself landed via PR #1411, later than
-        # the original audit pass).
+        # What: Use here-string instead of pipe.
+        # Why: Avoid producer/consumer SIGPIPE early exit.
         if grep -Pq "$bare" <<<"$sni"; then
             matched_port="$port"
             break

@@ -53,7 +53,6 @@ runs:
         set -euo pipefail
         # What: 600s timeout for GitHub API retry.
         # Why: Slower than text-scan steps (HTTP).
-        # From: PR #1856
         docker run --rm \
           --user "$(id -u):$(id -g)" \
           -v "$PWD:/work:ro" \
