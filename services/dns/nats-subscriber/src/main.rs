@@ -373,8 +373,8 @@ async fn main() {
         match fetch_result {
             Ok(mut messages) => {
                 let mut had_stream_error = false;
-                // What: consumer.fetch() uses no_wait mode returning immediately.
-                // Why: prevents pacing of retried messages; need explicit backoff.
+                // What: fetch() no_wait mode returns immediately when available.
+                // Why: prevents pacing; must use explicit backoff guard.
                 // From: PR #738
                 let mut had_retryable_batch_stop = false;
 
@@ -401,8 +401,8 @@ async fn main() {
                                     }
                                 }
                                 MsgDecision::NakAndContinue => {
-                                    // What: flush failures have no ordering hazard, continue batch.
-                                    // Why: flush order is not safety-critical unlike record updates.
+                                    // What: flush failures continue batch processing.
+                                    // Why: flush has no ordering hazard unlike updates.
                                     // From: PR #738
                                     if let Err(e) = msg
                                         .ack_with(jetstream::AckKind::Nak(Some(
