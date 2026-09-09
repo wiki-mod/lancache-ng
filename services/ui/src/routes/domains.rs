@@ -228,7 +228,7 @@ pub async fn add_dns(
     // reasoning as toggle_aaaa_filter's marker-write check further down in
     // this file).
     dns_write_result_to_response(wrote, "write")?;
-    flush_recursor_cache(&state, &domain.domain).await;
+    flush_recursor_cache(&state, &domain.domain, None, None, None).await;
     // The SSL proxy derives its wildcard-cert root domains and nginx
     // host-allowlist maps from this same file at container startup (see
     // services/proxy/entrypoint.sh) — there is no separate SSL domain
@@ -262,7 +262,7 @@ pub async fn remove_dns(
         DomainDeleteTarget::Canonical(spec) => spec.domain.clone(),
         DomainDeleteTarget::Raw(raw) => raw.clone(),
     };
-    flush_recursor_cache(&state, &flushed_domain).await;
+    flush_recursor_cache(&state, &flushed_domain, None, None, None).await;
     // The SSL proxy derives its wildcard-cert root domains and nginx
     // host-allowlist maps from this same file at container startup (see
     // services/proxy/entrypoint.sh) — removing a domain here means the
@@ -309,7 +309,7 @@ pub async fn toggle_default_domain(
     // docs/dns-admin-ui-scope.md), so this mirrors add_dns/remove_dns's own
     // recursor-flush/proxy-restart wiring exactly rather than silently being
     // a no-op until an unrelated restart happens to pick the change up.
-    flush_recursor_cache(&state, &target.domain).await;
+    flush_recursor_cache(&state, &target.domain, None, None, None).await;
     if state.config.ssl_enabled {
         restart_ssl(&state).await;
     }
@@ -354,7 +354,14 @@ pub async fn add_lan_record(
     {
         tracing::error!("NATS publish failed: {}", e);
     }
-    flush_recursor_cache(&state, &name).await;
+    flush_recursor_cache(
+        &state,
+        &name,
+        Some("lan"),
+        Some(record_type),
+        Some(vec![content.clone()]),
+    )
+    .await;
 
     Ok(Redirect::to("/domains"))
 }
@@ -401,7 +408,7 @@ pub async fn remove_lan_record(
     {
         tracing::error!("NATS publish failed: {}", e);
     }
-    flush_recursor_cache(&state, &name).await;
+    flush_recursor_cache(&state, &name, Some("lan"), Some(record_type.as_str()), None).await;
 
     Ok(Redirect::to("/domains"))
 }
@@ -548,7 +555,16 @@ pub async fn toggle_ddns_allow_unsigned_updates(
     Ok(Redirect::to("/domains"))
 }
 
-async fn flush_recursor_cache(state: &AppState, domain: &str) {
+// What: zone/type/content let a caller confirm AXFR first.
+// Why: closes the dns-ssl removal race, no new protocol.
+// From: Issue #1095
+async fn flush_recursor_cache(
+    state: &AppState,
+    domain: &str,
+    zone: Option<&str>,
+    record_type: Option<&str>,
+    expected_content: Option<Vec<String>>,
+) {
     // PowerDNS Recursor's cache/flush endpoint requires a `domain` query
     // parameter and only flushes an exact name match, not a subtree --
     // confirmed live while building issue #400's integration test:
@@ -578,12 +594,17 @@ async fn flush_recursor_cache(state: &AppState, domain: &str) {
 
     // Also publish flush event so all recursor instances clear their cache
     // for this same domain, not just the one this UI instance talks to.
+    let mut payload = json!({"domain": canonical_domain});
+    if let (Some(zone), Some(record_type)) = (zone, record_type) {
+        payload["zone"] = json!(zone);
+        payload["record_type"] = json!(record_type);
+        if let Some(expected_content) = expected_content {
+            payload["expected_content"] = json!(expected_content);
+        }
+    }
     state
         .nats
-        .publish(
-            "lancache.dns.flush",
-            json!({"domain": canonical_domain}).to_string().into(),
-        )
+        .publish("lancache.dns.flush", payload.to_string().into())
         .await
         .ok();
 }
@@ -1606,7 +1627,14 @@ pub async fn add_ptr_record(
     // Only flush the recursor cache once PowerDNS actually accepted the write,
     // so a failed PATCH doesn't advertise a change that never happened.
     if patch_reverse_zone(&state, &zone, body).await {
-        flush_recursor_cache(&state, &ptr_name).await;
+        flush_recursor_cache(
+            &state,
+            &ptr_name,
+            Some(&zone),
+            Some("PTR"),
+            Some(vec![target.clone()]),
+        )
+        .await;
     } else {
         tracing::error!(ip = %form.ip, "PowerDNS rejected PTR add");
     }
@@ -1638,7 +1666,7 @@ pub async fn remove_ptr_record(
     .to_string();
 
     if patch_reverse_zone(&state, &zone, body).await {
-        flush_recursor_cache(&state, &ptr_name).await;
+        flush_recursor_cache(&state, &ptr_name, Some(&zone), Some("PTR"), None).await;
     } else {
         tracing::error!(ip = %form.ip, "PowerDNS rejected PTR delete");
     }

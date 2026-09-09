@@ -961,6 +961,83 @@ async fn handle_dns_record(
 #[derive(Debug, Deserialize)]
 struct FlushRequest {
     domain: String,
+    #[serde(default)]
+    zone: Option<String>,
+    #[serde(default)]
+    record_type: Option<String>,
+    #[serde(default)]
+    expected_content: Option<Vec<String>>,
+}
+
+// What: bounds in-process wait before Nak-redelivery.
+// Why: a longer sleep holds the message, risks ack_wait.
+// From: Issue #1095
+const FLUSH_CONFIRM_FAST_PATH_ATTEMPTS: u32 = 3;
+const FLUSH_CONFIRM_FAST_PATH_DELAY: Duration = Duration::from_millis(100);
+// What: caps delivery attempts before flushing unconfirmed.
+// Why: bounds an unlimited max_deliver retry loop.
+// From: Issue #1095
+const FLUSH_CONFIRM_MAX_DELIVERIES: i64 = 100;
+
+// What: pure comparison, no network -- unit-testable in isolation.
+// Why: separates the HTTP fetch from the state-matching logic.
+// From: Issue #1095
+fn rrset_matches_expected(
+    found: Option<&nats_subscriber::RRset>,
+    expected_content: Option<&[String]>,
+) -> bool {
+    match (found, expected_content) {
+        (None, None) => true,
+        (Some(_), None) | (None, Some(_)) => false,
+        (Some(rrset), Some(expected)) => {
+            let mut actual: Vec<String> = rrset
+                .records
+                .as_ref()
+                .map(|recs| {
+                    recs.iter()
+                        .filter_map(|r| r.get("content").and_then(|c| c.as_str()))
+                        .map(|s| s.to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            actual.sort();
+            let mut expected_sorted = expected.to_vec();
+            expected_sorted.sort();
+            actual == expected_sorted
+        }
+    }
+}
+
+// What: checks if the local zone matches the expected state.
+// Why: proves AXFR landed here before trusting a flush.
+// From: Issue #1095
+async fn local_rrset_matches_expected(
+    zone: &str,
+    name: &str,
+    record_type: &str,
+    expected_content: Option<&[String]>,
+    pdns_api_key: &str,
+    http_client: &Client,
+) -> bool {
+    let url = dns_record_patch_url(zone);
+    let resp = match http_client
+        .get(&url)
+        .header("X-API-Key", pdns_api_key)
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => r,
+        _ => return false,
+    };
+    let zone_info: ZoneInfo = match resp.json().await {
+        Ok(zi) => zi,
+        Err(_) => return false,
+    };
+    let found = zone_info
+        .rrsets
+        .iter()
+        .find(|rr| rr.name == name && rr.record_type == record_type);
+    rrset_matches_expected(found, expected_content)
 }
 
 async fn handle_dns_flush(
@@ -978,10 +1055,50 @@ async fn handle_dns_flush(
     // the exact domain that changed; fall back to "." only for messages
     // published by a publisher version that predates the `domain` field, or
     // from any other future publisher that doesn't include one.
-    let domain = match serde_json::from_slice::<FlushRequest>(&msg.payload) {
-        Ok(req) => req.domain,
-        Err(_) => ".".to_string(),
-    };
+    let req = serde_json::from_slice::<FlushRequest>(&msg.payload).ok();
+    let domain = req
+        .as_ref()
+        .map(|r| r.domain.clone())
+        .unwrap_or_else(|| ".".to_string());
+
+    // What: confirms the local zone before flushing, when known.
+    // Why: else a lost AXFR race re-caches the stale answer at TTL.
+    // From: Issue #1095
+    if let Some(req) = req.as_ref()
+        && let (Some(zone), Some(record_type)) = (req.zone.as_deref(), req.record_type.as_deref())
+    {
+        let mut confirmed = false;
+        for _ in 0..FLUSH_CONFIRM_FAST_PATH_ATTEMPTS {
+            if local_rrset_matches_expected(
+                zone,
+                &domain,
+                record_type,
+                req.expected_content.as_deref(),
+                pdns_api_key,
+                http_client,
+            )
+            .await
+            {
+                confirmed = true;
+                break;
+            }
+            tokio::time::sleep(FLUSH_CONFIRM_FAST_PATH_DELAY).await;
+        }
+
+        if !confirmed {
+            let delivered = msg.info().map(|info| info.delivered).unwrap_or(0);
+            if delivered < FLUSH_CONFIRM_MAX_DELIVERIES {
+                println!(
+                    "Deferring recursor flush for {domain} ({record_type}): local zone not yet confirmed (delivery {delivered}); retrying via redelivery"
+                );
+                return false;
+            }
+            eprintln!(
+                "Recursor flush for {domain} ({record_type}): local zone still unconfirmed after {delivered} deliveries; flushing anyway"
+            );
+        }
+    }
+
     let url = format!("http://127.0.0.1:8082/api/v1/servers/localhost/cache/flush?domain={domain}");
 
     // #68 fix: use shared client instead of creating new one
@@ -1114,6 +1231,85 @@ mod tests {
     // type inference in these tests (never named directly), so it does not
     // need the same treatment.
     use nats_subscriber::RRset;
+
+    // What: old publishers omit the new fields entirely.
+    // Why: proves the flush still fires unconditionally then.
+    // From: Issue #1095
+    #[test]
+    fn flush_request_deserializes_without_the_new_optional_fields() {
+        let req: FlushRequest = serde_json::from_str(r#"{"domain": "host.lan."}"#).unwrap();
+        assert_eq!(req.domain, "host.lan.");
+        assert_eq!(req.zone, None);
+        assert_eq!(req.record_type, None);
+        assert_eq!(req.expected_content, None);
+    }
+
+    #[test]
+    fn flush_request_deserializes_with_the_new_optional_fields() {
+        let req: FlushRequest = serde_json::from_str(
+            r#"{"domain": "host.lan.", "zone": "lan", "record_type": "A", "expected_content": ["10.0.0.5"]}"#,
+        )
+        .unwrap();
+        assert_eq!(req.zone, Some("lan".to_string()));
+        assert_eq!(req.record_type, Some("A".to_string()));
+        assert_eq!(req.expected_content, Some(vec!["10.0.0.5".to_string()]));
+    }
+
+    fn rrset_with_content(content: &str) -> RRset {
+        let mut record = HashMap::new();
+        record.insert("content".to_string(), json!(content));
+        RRset {
+            name: "host.lan.".to_string(),
+            record_type: "A".to_string(),
+            ttl: Some(60),
+            changetype: None,
+            records: Some(vec![record]),
+        }
+    }
+
+    // What: absent name/type and "expect absent" is a match.
+    // Why: the delete case -- AXFR already caught up locally.
+    // From: Issue #1095
+    #[test]
+    fn rrset_matches_expected_when_absent_and_absence_expected() {
+        assert!(rrset_matches_expected(None, None));
+    }
+
+    #[test]
+    fn rrset_matches_expected_rejects_still_present_when_absence_expected() {
+        let rrset = rrset_with_content("10.0.0.5");
+        assert!(!rrset_matches_expected(Some(&rrset), None));
+    }
+
+    #[test]
+    fn rrset_matches_expected_rejects_still_absent_when_content_expected() {
+        let expected = vec!["10.0.0.5".to_string()];
+        assert!(!rrset_matches_expected(None, Some(&expected)));
+    }
+
+    #[test]
+    fn rrset_matches_expected_accepts_matching_content_regardless_of_order() {
+        let mut record_a = HashMap::new();
+        record_a.insert("content".to_string(), json!("10.0.0.5"));
+        let mut record_b = HashMap::new();
+        record_b.insert("content".to_string(), json!("10.0.0.6"));
+        let rrset = RRset {
+            name: "host.lan.".to_string(),
+            record_type: "A".to_string(),
+            ttl: Some(60),
+            changetype: None,
+            records: Some(vec![record_b, record_a]),
+        };
+        let expected = vec!["10.0.0.5".to_string(), "10.0.0.6".to_string()];
+        assert!(rrset_matches_expected(Some(&rrset), Some(&expected)));
+    }
+
+    #[test]
+    fn rrset_matches_expected_rejects_stale_content() {
+        let rrset = rrset_with_content("10.0.0.5");
+        let expected = vec!["10.0.0.9".to_string()];
+        assert!(!rrset_matches_expected(Some(&rrset), Some(&expected)));
+    }
 
     // Bug-hunt finding N1 (docs/bug-hunt/dns.md, re-verified 2026-08-06):
     // the PATCH URL must always use PowerDNS's dot-stripped zone-id
