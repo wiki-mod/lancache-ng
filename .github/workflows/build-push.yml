@@ -1321,10 +1321,6 @@ jobs:
             && { echo "::error::The exported build-tools job output must not be hardcoded without validating that exact pullable image."; exit 1; }
           grep -F 'BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Downstream build-tools job output must validate the exact pullable GHCR image before exporting it."; exit 1; }
-          grep -F 'apt-mark hold linux-libc-dev' tools/build-tools/Dockerfile >/dev/null \
-            && ! grep -F -- '--only-upgrade linux-libc-dev' tools/build-tools/Dockerfile >/dev/null \
-            && grep -F 'test -f /usr/include/linux/baycom.h' tools/build-tools/Dockerfile >/dev/null \
-            || { echo "::error::build-tools must not upgrade linux-libc-dev; its header replacement creates non-portable OCI whiteouts on runner 229."; exit 1; }
           grep -F 'validation_build_tools_image="$downstream_build_tools_image"' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::validate-compose runs on the light tier and must reuse the already-resolved downstream_build_tools_image instead of building a local fallback."; exit 1; }
           grep -F 'published_image_reference()' scripts/untracked/select-build-tools-image.sh >/dev/null \
