@@ -564,7 +564,7 @@ ci_impact() {
   done
 }
 
-# === CLUSTER 5: PUSH-REUSE DECISION (NOOP-first bridge) ===
+# === PUSH-REUSE DECISION (NOOP-first bridge) ===
 
 # What: Named reuse verdict codes, idempotent re-source.
 # Why: readonly re-declaration would error on a re-source.
@@ -679,6 +679,44 @@ ci_push_reuse_decide() {
 
   printf 'true\n'
   return "$CI_REUSE_VERIFIED"
+}
+
+# === BUILD-TOOLS IMAGE SELECTION ===
+
+# ci_build_tools_channel <channel_ref>
+#
+# What: build-tools tooling-image channel for a ref.
+# Why: master ships 'latest'; all else tracks 'nightly'.
+# From: Issue #1095 | Issue #1153
+ci_build_tools_channel() {
+  # What: empty ref is a real input, maps to nightly.
+  # Why: caller's GITHUB_BASE_REF/REF_NAME can be empty.
+  # From: Issue #1095 | Issue #1153
+  local channel_ref="${1-}"
+  case "$channel_ref" in
+    master) printf 'latest\n' ;;
+    *) printf 'nightly\n' ;;
+  esac
+}
+
+# ci_build_tools_fallback_allowed <event> <head_repo> <base_repo>
+#
+# What: may this ref build a branch-local build-tools image?
+# Why: only trusted refs; a fork PR must never build it.
+# From: Issue #1095 | Issue #842
+ci_build_tools_fallback_allowed() {
+  local event_name="${1:?ci_build_tools_fallback_allowed: event is required}"
+  local head_repository="${2-}"
+  local base_repository="${3-}"
+  if [[ "$event_name" == "pull_request" ]]; then
+    # What: case-insensitive; same-repo PR stays trusted.
+    # Why: a repo rename can make head/base casing disagree.
+    # From: Issue #1095 | Issue #842
+    [[ -n "$head_repository" \
+      && "${head_repository,,}" == "${base_repository,,}" ]]
+  else
+    return 0
+  fi
 }
 
 # === CLUSTER 4: ACCEPTANCE LEDGER + ATTESTATION BOUNDARY ===
@@ -998,6 +1036,10 @@ commands:
     [<dep_keys>] [<ignore_workflow_gate>]
     exit 0=reuse verified 1=real rebuild verdict 2=UNKNOWN (no
     verdict); stdout 'true' only on 0, else 'false' fail-closed
+  build-tools-channel <channel_ref>
+  build-tools-fallback-allowed <event> <head_repo> <base_repo>
+    exit 0=allowed 1=denied; a bare call under set -e aborts on
+    the (non-error) denied case -- guard the call
   post-build-readback <expected_digest> <ref>
     exit 0=SUCCESS 1=MISMATCH 2=NOT_FOUND 3=UNKNOWN; all 4 fail
     closed, none of them may ever trigger a rebuild
@@ -1038,6 +1080,8 @@ ci_main() {
     service-impact) ci_service_impact "$@" ;;
     impact) ci_impact "$@" ;;
     push-reuse-decide) ci_push_reuse_decide "$@" ;;
+    build-tools-channel) ci_build_tools_channel "$@" ;;
+    build-tools-fallback-allowed) ci_build_tools_fallback_allowed "$@" ;;
     post-build-readback) ci_post_build_readback "$@" ;;
     attestation-state) ci_attestation_state "$@" ;;
     artifact-admission) ci_artifact_admission "$@" ;;

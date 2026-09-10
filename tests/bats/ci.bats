@@ -1417,7 +1417,7 @@ write_ledger_fixture_file() {
   [ "$output" = "$json" ]
 }
 
-# === CLUSTER 5: ci_push_reuse_decide (NOOP-first reuse) ===
+# === ci_push_reuse_decide (NOOP-first reuse) ===
 
 # What: Stubs the sif_* + classify inject seams only.
 # Why: unit-tests the verdict logic, not the real registry.
@@ -1542,4 +1542,80 @@ reuse_stubs() {
   run_ci push-reuse-decide
   [ "$status" -ne 0 ]
   [[ "$stderr" == *"service_key is required"* ]]
+}
+
+# === build-tools image selection (channel + trust) ===
+
+@test "build-tools-channel maps master to latest, every other ref to nightly" {
+  [ "$(ci_build_tools_channel master)" = "latest" ]
+  local ref
+  for ref in v0.2.0 current_dev claude/issue1035-x ""; do
+    [ "$(ci_build_tools_channel "$ref")" = "nightly" ]
+  done
+}
+
+@test "build-tools-channel equals resolve_build_tools_channel across refs (no drift)" {
+  # What: pins the ci.sh port to the live lib it replaces.
+  # Why: a transitional copy must not drift until dedup.
+  # From: Issue #1095 | Issue #1153
+  source "$repo_root/scripts/lib/build-tools-channel.sh"
+  local ref
+  for ref in master v0.2.0 current_dev claude/issue1035-x ""; do
+    [ "$(ci_build_tools_channel "$ref")" = "$(resolve_build_tools_channel "$ref")" ]
+  done
+}
+
+@test "dispatch build-tools-channel via executed ci.sh prints latest and nightly" {
+  run_ci build-tools-channel master
+  [ "$status" -eq 0 ]
+  [ "$output" = "latest" ]
+  run_ci build-tools-channel current_dev
+  [ "$status" -eq 0 ]
+  [ "$output" = "nightly" ]
+}
+
+@test "build-tools-fallback-allowed: same-repo PR trusted, fork/empty denied, push trusted" {
+  run ci_build_tools_fallback_allowed pull_request wiki-mod/lancache-ng wiki-mod/lancache-ng
+  [ "$status" -eq 0 ]
+  run ci_build_tools_fallback_allowed pull_request fork/lancache-ng wiki-mod/lancache-ng
+  [ "$status" -ne 0 ]
+  run ci_build_tools_fallback_allowed pull_request "" wiki-mod/lancache-ng
+  [ "$status" -ne 0 ]
+  run ci_build_tools_fallback_allowed push "" wiki-mod/lancache-ng
+  [ "$status" -eq 0 ]
+}
+
+@test "build-tools-fallback-allowed: case-insensitive same-repo trusted, fork not laundered" {
+  run ci_build_tools_fallback_allowed pull_request wiki-mod/LanCache-NG wiki-mod/lancache-ng
+  [ "$status" -eq 0 ]
+  run ci_build_tools_fallback_allowed pull_request fork/LanCache-NG wiki-mod/lancache-ng
+  [ "$status" -ne 0 ]
+}
+
+@test "build-tools-fallback-allowed equals select_build_tools_trusted_fallback_allowed (no drift)" {
+  source "$repo_root/tests/bats/helpers/select-build-tools-image-helpers.sh"
+  load_select_build_tools_image_functions "$repo_root" \
+    "$BATS_TEST_TMPDIR/sbti-fns.sh"
+  local c ev hd bs a b
+  local cases=(
+    "pull_request|wiki-mod/lancache-ng|wiki-mod/lancache-ng"
+    "pull_request|fork/lancache-ng|wiki-mod/lancache-ng"
+    "pull_request||wiki-mod/lancache-ng"
+    "push||wiki-mod/lancache-ng"
+    "pull_request|wiki-mod/LanCache-NG|wiki-mod/lancache-ng"
+    "pull_request|fork/LanCache-NG|wiki-mod/lancache-ng"
+  )
+  for c in "${cases[@]}"; do
+    IFS='|' read -r ev hd bs <<<"$c"
+    a=0; ci_build_tools_fallback_allowed "$ev" "$hd" "$bs" || a=$?
+    b=0; select_build_tools_trusted_fallback_allowed "$ev" "$hd" "$bs" || b=$?
+    [ "$a" -eq "$b" ]
+  done
+}
+
+@test "dispatch build-tools-fallback-allowed via executed ci.sh: trusted 0, fork non-zero" {
+  run_ci build-tools-fallback-allowed pull_request wiki-mod/lancache-ng wiki-mod/lancache-ng
+  [ "$status" -eq 0 ]
+  run_ci build-tools-fallback-allowed pull_request fork/lancache-ng wiki-mod/lancache-ng
+  [ "$status" -ne 0 ]
 }
