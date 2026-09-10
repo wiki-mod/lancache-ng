@@ -1,64 +1,9 @@
 #!/usr/bin/env bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-#
-# Real DHCP behavior test for services/dhcp-proxy's ProxyDHCP/PXE mode
-# (issue #705) -- the dnsmasq-proxy DHCP mode that
-# scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh's own header comment
-# explicitly calls out as "entirely different code path, out of scope
-# for this script." This script is that missing coverage.
-#
-# What this proves, end to end, against a real dnsmasq container built
-# from this checkout (not a mock or a unit test of entrypoint.sh alone):
-#   - A synthetic PXE client sending a DHCPDISCOVER with DHCP option 60
-#     (vendor class) = "PXEClient" and option 93 (client-system-
-#     architecture) = 0 (legacy BIOS) receives a real DHCPOFFER carrying
-#     the operator-configured external PXE boot server address and
-#     BIOS-specific boot filename, plus the base LanCache NG DNS servers
-#     (option 6) -- the original ask of issue #705.
-#   - The same, for architecture 7 (x86-64 UEFI) and architecture 11
-#     (ARM64 UEFI), each receiving the UEFI-specific boot filename.
-#   - An ordinary DHCPDISCOVER carrying neither option (no PXE tag at
-#     all) receives NO reply whatsoever -- confirming dnsmasq's ProxyDHCP
-#     mode still answers only PXE-tagged clients, exactly as
-#     docs/dhcp-modes.md documents, and does not somehow start replying
-#     to every DHCP client on the segment once PXE support is enabled.
-#
-# This is also, unavoidably, the regression test for the root-cause bug
-# issue #705 found and services/dhcp-proxy/entrypoint.sh now fixes:
-# without a `pxe-service` directive present, dnsmasq's ProxyDHCP mode
-# does not reply to ANY DHCPDISCOVER, PXE-tagged or not (confirmed
-# directly during this issue's investigation, and the reason every
-# scenario above -- including the architecture-specific ones, which are
-# actually delivered via dhcp-boot/dhcp-match, not pxe-service itself --
-# depends on the opt-in DHCP_PROXY_PXE_BOOT_SERVER/_FILENAME_* variables
-# this script sets being present at all).
-#
-# See tools/pxe-client-probe/ for how the synthetic PXE client itself is
-# built (a small Rust binary using a raw layer-2 send, since no off-the-shelf
-# DHCP client can be made to send a real PXE-tagged DISCOVER) and why reply
-# capture goes through a tcpdump-written pcap file rather than any live
-# in-process sniff. The probe is compiled once below with the build-tools
-# image and mounted into the client container.
-#
-# Safety model, mirroring scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh's own
-# (see that script's header comment for the fuller rationale): both the
-# dnsmasq-proxy server and the synthetic PXE client run as ordinary
-# Docker containers on a throwaway, per-run bridge network this script
-# creates and destroys itself, never bridged to any host interface or the
-# runner's real LAN. Nothing here ever calls `ip addr add`/`ip route` on
-# any interface; the synthetic client only ever sends/receives via the
-# probe's raw socket on its own container's already-Docker-assigned
-# interface.
-#
-# What this script does NOT verify: PXE boot menu behavior (this project
-# deliberately implements none -- dnsmasq's role is only to point a PXE
-# client at an operator's own external boot server, never to serve boot
-# files or menus itself, see docs/dhcp-modes.md) and an actual TFTP/HTTP
-# boot-file transfer against that external server (out of scope by
-# design -- the external server is entirely outside this project and, in
-# this script, is never even a real listening service, just a
-# configured address the DHCPOFFER is asserted to point at).
+# What: Test dhcp-proxy ProxyDHCP/PXE mode.
+# Why: Missing test coverage for root cause.
+# From: Issue #705
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
@@ -70,8 +15,8 @@ source "$repo_root/scripts/lib/dhcp-lease-parse.sh"
 source "$repo_root/scripts/lib/reserve-validation-subnet.sh"
 
 client_tool_image="${DHCP_PXE_SIMULATION_CLIENT_IMAGE:?DHCP_PXE_SIMULATION_CLIENT_IMAGE is required (an image providing the Rust toolchain to compile tools/pxe-client-probe and tcpdump to capture the reply, e.g. the build-tools image)}"
-# What: requires PROJECT_CARGO_LTO/CODEGENUNIT, no default.
-# Why: mirrors Dockerfiles' fail-closed cargo profile check.
+# What: Validate cargo build env vars.
+# Why: script runs cargo build like Dockerfile.
 # From: Issue #1095
 project_cargo_lto="${PROJECT_CARGO_LTO:?PROJECT_CARGO_LTO is required (no in-file/script default; Issue #1095, PR #1796 review 5109560874)}"
 case "$project_cargo_lto" in off|thin|fat|true|false) ;; *) echo "PROJECT_CARGO_LTO must be one of: off, thin, fat, true, false (got '$project_cargo_lto')" >&2; exit 1;; esac
@@ -82,46 +27,29 @@ case "$project_cargo_codegenunit" in ''|*[!0-9]*) echo "PROJECT_CARGO_CODEGENUNI
 work_dir="$repo_root/.dhcp-proxy-pxe-simulation-tmp"
 rm -rf "$work_dir"
 mkdir -p "$work_dir"
-# world-writable for the same reason
-# dhcp-kea-lease-flow-simulation.sh's own client-state directory is:
-# a throwaway, per-run temp directory scoped to this one invocation, not
-# a shared or security-sensitive path, and the client container's own
-# unprivileged runtime user needs to write the compiled probe binary and
-# the pcap files tcpdump produces into it.
+# What: Make work dir world-writable.
+# Why: Container needs write for binary/pcap.
 chmod 0777 "$work_dir"
 
-# Docker OBJECT NAMES need collision avoidance independent of the subnet
-# octet below: the daemon on a shared self-hosted runner host is one process
-# serving every concurrent workflow run, and this shell's own PID ($$) is
-# what guarantees that (two concurrently-running processes on the same host
-# can never share a PID) -- fixed up front, never needing to change across a
-# subnet-reservation retry. Mirrors
-# dhcp-kea-lease-flow-simulation.sh's own naming (issue #820).
+# What: Use $$ for collision-free names.
+# Why: Shared runner may run multiple tests.
 network_name="lancache-ng-dhcp705-$$"
 dhcp_container="lancache-ng-dhcp705-proxy-$$"
 client_container="lancache-ng-dhcp705-client-$$"
 image_tag="lancache-ng-dhcp705-proxy:$$"
 
-# See dhcp-kea-lease-flow-simulation.sh's own cleanup() comment for why
-# `local status=$?` is captured first and the docker teardown commands
-# are ordered deliberately (containers before the network they're
-# attached to, before the image they reference) -- identical reasoning
-# applies here.
+# What: Capture status; order teardown carefully.
+# Why: Sequence matters for network/image cleanup.
 cleanup() {
     local status=$?
     docker rm -f "$dhcp_container" "$client_container" >/dev/null 2>&1 || true
-    # A blind `docker network rm` right after `docker rm -f` can still lose
-    # the "has active endpoints" race (see validation_project_networks_
-    # teardown's own comment in reserve-validation-subnet.sh); this
-    # network's name is unique per run ($$-suffixed), so a lost race here
-    # only leaks one orphaned network on the runner host, but it still
-    # needs a real wait+retry instead of silently leaking it forever.
+    # What: Retry network rm vs active endpoint race.
+    # Why: Cleanup must handle timing/race conditions.
     validation_network_teardown "$network_name" || true
     docker rmi "$image_tag" >/dev/null 2>&1 || true
     rm -rf "$work_dir"
-    # Release the host-local subnet-octet lock the reservation loop below
-    # acquired (issue #820); safe no-op if the loop never got as far as
-    # locking one.
+    # What: Release subnet-octet lock holder.
+    # Why: Safe no-op if reservation never locked.
     validation_subnet_release "${subnet_lock_holder_pid:-}"
     exit "$status"
 }
@@ -133,22 +61,8 @@ echo "== Building the dhcp-proxy image from this checkout's services/dhcp-proxy 
 # From: Issue #1095
 docker build -q -t "$image_tag" --build-context "shared-scripts=$repo_root/scripts/lib" services/dhcp-proxy >/dev/null
 
-# A fixed subnet would collide across concurrent runs sharing one of this
-# project's self-hosted runner hosts, and a bare per-run hash derivation
-# with no lock/retry still collides under real concurrency -- the exact bug
-# class full-setup-deep-validate.yml's stack-starting jobs had before #820.
-# Adopts the same host-local flock-plus-retry primitives
-# (scripts/lib/reserve-validation-subnet.sh) on a dedicated 172.29.0.0/16
-# range (unused by the now-retired deploy/dev's 172.28.0.0/16 (v0.3.0, #766),
-# full-setup-validate's 172.30.0.0/16, and dhcp-kea-lease-flow-simulation's
-# own 172.31.0.0/16;
-# deliberately NOT 172.32.0.0/16 -- RFC 1918's 172.16.0.0/12 private block
-# ends at 172.31.255.255, so 172.32.0.0/16 is public address space and a
-# Docker bridge route there could hijack traffic to a real public
-# destination, found in PR #765 review), in its OWN lock namespace
-# (/tmp/lancache-validation-locks-dhcp-proxy-pxe) so this pool's octet
-# contention never unnecessarily serializes against the unrelated 172.30/
-# 172.31 pools.
+# What: Use 172.29.0.0/16 with flock+retry.
+# Why: Avoid collision on shared runner; RFC1918.
 subnet_lock_root="/tmp/lancache-validation-locks-dhcp-proxy-pxe"
 subnet_max_attempts=10
 subnet_run_id="${GITHUB_RUN_ID:-local}-$$-${RANDOM:-0}-pxe"
@@ -162,15 +76,8 @@ while [[ -z "$octet" && "$subnet_next_attempt" -le "$subnet_max_attempts" ]]; do
         echo "::error::Could not lock a free validation subnet octet after $subnet_max_attempts attempts." >&2
         exit 1
     }
-    # Under `set -euo pipefail`, each bare `var="$(cmd1 | cmd2)"` below would abort
-    # the whole script silently the instant either stage failed -- pipefail makes the
-    # pipeline's exit status reflect a failed `printf`/`sed` even though the other
-    # stage might still succeed, and errexit would fire right at the assignment,
-    # before any of the [[ -n ]] checks a later line might have had a chance to run.
-    # Wrap each so a broken parse of $reservation reports its own cause instead of a
-    # bare "Process completed with exit code 1".
-    # Here-strings, not `printf ... | sed -n` pipes (issue #1377's repo-wide
-    # pipefail/SIGPIPE audit -- a here-string has no second writer process).
+    # What: Parse output via here-string, not pipe.
+    # Why: Avoids pipefail/SIGPIPE silent failure.
     if ! attempt="$(sed -n 's/^attempt=//p' <<<"$reservation")"; then
         echo "::error::Could not parse 'attempt' out of the subnet reservation output." >&2
         exit 1
@@ -222,32 +129,23 @@ if [[ -z "$octet" ]]; then
     exit 1
 fi
 
-# Every other address in this /24 is only knowable once the octet above is
-# actually locked in -- computed here, immediately after the winning
-# `docker network create`, rather than up front the way a single-shot
-# derivation would.
+# What: Compute addrs after octet is locked.
+# Why: Octet only known after network create.
 subnet="172.29.${octet}.0/24"
 gateway="172.29.${octet}.1"
 dhcp_proxy_ip="172.29.${octet}.2"
 dns_primary="172.29.${octet}.10"
 dns_secondary="172.29.${octet}.11"
-# The external PXE boot server this run's DHCPOFFERs are asserted to
-# point at. Deliberately never started as a real listening service
-# anywhere -- per this project's #705 scope, lancache-ng only ever hands
-# out a pointer to an operator's own existing PXE/TFTP infrastructure, it
-# never hosts boot files itself, so this script only needs to prove the
-# pointer's address/filename are correct, not that a real TFTP transfer
-# against it would succeed.
+# What: Point to external PXE boot server.
+# Why: Never start real server; only test pointer.
 pxe_boot_server="172.29.${octet}.50"
 bios_boot_filename="lancache-pxe705-bios.0"
 uefi_boot_filename="lancache-pxe705-uefi.efi"
 echo "Validation network is up on subnet $subnet (lock held by PID $subnet_lock_holder_pid)."
 
-echo "== Starting a real dhcp-proxy container on the isolated network, PXE boot-pointer configured for both BIOS and UEFI (issue #705) =="
-# --cap-add NET_ADMIN/NET_RAW: dnsmasq's ProxyDHCP mode binds a raw DHCP
-# socket, matching the same capability requirement
-# dhcp-kea-lease-flow-simulation.sh already documents for its own Kea
-# container.
+echo "== Starting a real dhcp-proxy container, PXE boot-pointer configured =="
+# What: Add NET_ADMIN/NET_RAW capabilities.
+# Why: ProxyDHCP needs raw socket for DHCP.
 docker run -d --name "$dhcp_container" \
     --network "$network_name" --ip "$dhcp_proxy_ip" \
     --cap-add NET_ADMIN --cap-add NET_RAW \
@@ -264,21 +162,15 @@ echo "== Waiting for dnsmasq to report it is serving the proxy subnet =="
 deadline=$((SECONDS + 30))
 dhcp_ready=0
 while (( SECONDS < deadline )); do
-    # `docker logs` captured into a variable first, then grep -q reads it
-    # via a here-string -- a live pipe here can SIGPIPE `docker logs` once
-    # the log already has the matched line plus more (issue #1377). `|| true`
-    # matters under `set -e`: this used to sit directly inside the `if`
-    # below (exempt on its own); pulled into its own assignment, a
-    # transient failure would otherwise abort the loop instead of retrying
-    # (caught by advisor review).
+    # What: Capture logs via here-string, not pipe.
+    # Why: Avoid SIGPIPE early-exit on grep match.
     dhcp_log="$(docker logs "$dhcp_container" 2>&1 || true)"
     if grep -q 'DHCP, proxy on subnet' <<<"$dhcp_log"; then
         dhcp_ready=1
         break
     fi
-    # `--filter name=<exact>$` anchors on the one container name this
-    # script itself created, so `docker ps -q` can only ever produce 0 or 1
-    # lines here (issue #1377's repo-wide pipefail/SIGPIPE audit).
+    # What: Filter by exact container name.
+    # Why: Bounds docker ps output to 0 or 1 line.
     if ! docker ps -q --filter "name=${dhcp_container}$" | grep -q .; then # pipefail-safe: --filter name=<exact>$ bounds docker ps -q to 0 or 1 lines
         echo "::error::dhcp-proxy container exited before it started serving. Logs:" >&2
         docker logs "$dhcp_container" >&2 || true
@@ -294,23 +186,8 @@ fi
 echo "dhcp-proxy is up (subnet: 172.29.${octet}.0, PXE boot server: $pxe_boot_server)."
 
 echo "== Compiling the synthetic PXE client probe (tools/pxe-client-probe) with the build-tools image =="
-# Build the Rust probe once, up front, with the SAME image that will run it
-# so the resulting binary's glibc/ABI matches the client container exactly.
-# The crate is mounted read-only; this runs on the default Docker bridge
-# (crates.io access needed) rather than the isolated per-run test network
-# below. --locked builds against the committed Cargo.lock, matching how the
-# Rust service images build.
-#
-# CARGO_TARGET_DIR points at a container-internal path, NOT a host bind
-# mount: the build container runs as root, so a host-mounted target tree
-# would leave root-owned nested build directories in $work_dir that the
-# non-root user running cleanup()'s `rm -rf "$work_dir"` cannot delete
-# (removing a file needs write on its parent dir, and cargo's nested dirs
-# are root-owned 0755). Only the single finished binary is copied out to
-# $work_dir -- a top-level file whose 0777 parent makes it removable during
-# cleanup regardless of its root ownership.
-# What: mounts repo; threads LTO/CODEGEN envs for cargo.
-# Why: workspace needs Cargo.lock at repo root to build.
+# What: Mount repo; pass cargo build env vars.
+# Why: Workspace needs root Cargo.lock.
 # From: Issue #1095
 docker run --rm \
     -v "$repo_root:/repo:ro" \
@@ -322,11 +199,8 @@ docker run --rm \
     bash -c 'set -euo pipefail; cargo build --release --locked --manifest-path /repo/tools/pxe-client-probe/Cargo.toml -p pxe-client-probe; cp /build-target/release/pxe-client-probe /out/pxe-client-probe'
 
 echo "== Starting the synthetic PXE client container =="
-# NET_RAW/NET_ADMIN: the probe needs a raw socket to craft and send an
-# arbitrary Ethernet/IP/UDP/BOOTP frame, and tcpdump needs to capture on the
-# interface -- matching dhcp-kea-lease-flow-simulation.sh's own dhclient
-# client container capability rationale. The compiled probe is reached at
-# /work/pxe-client-probe via the shared work-dir mount below.
+# What: Add NET_RAW/NET_ADMIN capabilities.
+# Why: Probe needs raw socket; tcpdump needs capture.
 docker run -d --name "$client_container" \
     --network "$network_name" \
     --cap-add NET_ADMIN --cap-add NET_RAW \
@@ -334,12 +208,8 @@ docker run -d --name "$client_container" \
     "$client_tool_image" \
     sleep 300 >/dev/null
 
-# run_probe <label> <extra pxe-client-probe args...>
-# Runs one synthetic-client probe inside $client_container and prints its
-# raw KEY='value' output to stdout, capturing nothing else -- callers
-# parse the result with dhcp_lease_field (sourced above), which works
-# against any KEY='value' text, not just a real DHCP lease file, since it
-# only ever scans for "${key}=" line prefixes.
+# What: Run synthetic PXE probe in container.
+# Why: Execute probe; output KEY='value' pairs.
 run_probe() {
     local label="$1"
     shift
@@ -350,11 +220,8 @@ run_probe() {
 
 fail=0
 
-# Under `set -euo pipefail`, a bare `result="$(run_probe ...)"` with no adjacent check
-# would abort the whole script silently the instant the underlying `docker exec`/probe
-# invocation failed -- errexit fires right at the assignment, before any diagnostic ever
-# prints. Wrap each so a broken probe invocation reports its own cause instead of a
-# bare "Process completed with exit code 1".
+# What: Check probe result before proceeding.
+# Why: Catch early exit failures with diagnostics.
 if ! bios_result="$(run_probe bios --arch 0)"; then
     echo "::error::PXE probe 'bios' (arch 0) failed to run inside the client container." >&2
     exit 1
@@ -376,14 +243,8 @@ if ! negative_result="$(run_probe negative-no-pxe --no-pxe)"; then
 fi
 echo "$negative_result"
 
-# assert_pxe_reply <label> <parsed_result> <expected_filename>
-# Shared assertion for the three positive (PXE-tagged) scenarios: a reply
-# was received at all, it carries both configured LanCache NG DNS
-# servers (option 6 -- the original issue #705 ask), it points at the
-# operator-configured external PXE boot server address (not dnsmasq's own
-# address -- the specific wire-level pitfall this issue's investigation
-# found and documented in entrypoint.sh), and it carries the
-# architecture-appropriate boot filename.
+# What: Assert PXE reply with DNS, boot server, filename.
+# Why: Validate all three positive test scenarios.
 assert_pxe_reply() {
     local label="$1" parsed="$2" expected_filename="$3"
     local got_reply dns_servers siaddr file
@@ -424,14 +285,8 @@ if [[ "$negative_got_reply" != "0" ]]; then
     fail=1
 fi
 
-# summarize_probe <parsed_result>
-# Formats one probe's result for the human-readable report below. Checks
-# the got_reply field's actual VALUE ("1" vs "0"), not merely whether the
-# field is present -- got_reply is always emitted by the probe
-# (tools/pxe-client-probe, unlike file/siaddr, which are only
-# printed when non-empty), so testing for presence alone would always be
-# true and never report "<no reply>" even when a probe correctly found
-# none.
+# What: Format probe result for readability.
+# Why: got_reply always emitted; check value not presence.
 summarize_probe() {
     local parsed="$1"
     if [[ "$(dhcp_lease_field "$parsed" got_reply || true)" == "1" ]]; then
@@ -444,7 +299,7 @@ summarize_probe() {
 }
 
 report=$(cat <<REPORT
-== DHCP proxy PXE simulation result (issue #705) ==
+== DHCP proxy PXE simulation result ==
 BIOS (arch 0):        $(summarize_probe "$bios_result")
 UEFI x86-64 (arch 7):  $(summarize_probe "$uefi_x8664_result")
 UEFI ARM64 (arch 11):  $(summarize_probe "$uefi_arm64_result")

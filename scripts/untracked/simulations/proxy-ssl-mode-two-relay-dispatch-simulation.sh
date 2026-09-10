@@ -115,25 +115,51 @@ docker run --rm -v "$work_dir:/certs" -w /certs "$build_tools_image" bash -c \
     "openssl req -x509 -newkey rsa:2048 -nodes -keyout two.key -out two.crt -days 1 -subj '/CN=backend-two-real' 2>/dev/null" >/dev/null
 
 echo "== Building the real proxy image (this fix applied) =="
-# What: passes shared-scripts as a named build context.
-# Why: else COPY --from=shared-scripts triggers a bad pull.
-# From: Issue #1095
 docker build -q -t "$proxy_image" --build-context "dns-domains=$work_dir/fixture" --build-context "shared-scripts=$repo_root/scripts/lib" services/proxy >/dev/null
 
 docker network create --subnet "$validation_subnet" "$network_name" >/dev/null
 
-# What: fixed client IPs, base+2/+3 of the reserved slot.
-# Why: distinct from the pinned backend/proxy IPs below.
-# From: Issue #822
-allow_ip="${subnet_prefix}.$((subnet_base_octet + 2))"
-deny_ip="${subnet_prefix}.$((subnet_base_octet + 3))"
-
-# What: pins backend/proxy IPs, not auto-IPAM.
-# Why: unpinned alloc starts at gw+1, hits allow/deny.
+# What: allocates explicit IPs from Docker's live net.
+# Why: avoids auto-IPAM and static offset collisions.
 # From: Issue #1850
-backend_one_ip="${subnet_prefix}.$((subnet_base_octet + 4))"
-backend_two_ip="${subnet_prefix}.$((subnet_base_octet + 5))"
-proxy_ip_fixed="${subnet_prefix}.$((subnet_base_octet + 6))"
+allocated_ips=()
+allocate_ip() {
+    local role="$1"
+    local used_ips candidate reserved
+    used_ips="$(docker network inspect "$network_name" \
+        --format '{{range .Containers}}{{.IPv4Address}}{{"\n"}}{{end}}' |
+        cut -d/ -f1)"
+    for candidate_octet in $(seq "$((subnet_base_octet + 2))" "$((subnet_base_octet + 30))"); do
+        candidate="${subnet_prefix}.${candidate_octet}"
+        if grep -qxF "$candidate" <<<"$used_ips"; then
+            continue
+        fi
+        reserved=false
+        for reserved_ip in "${allocated_ips[@]}"; do
+            if [[ "$reserved_ip" == "$candidate" ]]; then
+                reserved=true
+                break
+            fi
+        done
+        if [[ "$reserved" == false ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    echo "::error::No free IP left in $validation_subnet for $role." >&2
+    return 1
+}
+
+allow_ip="$(allocate_ip allow-client)"
+allocated_ips+=("$allow_ip")
+deny_ip="$(allocate_ip deny-client)"
+allocated_ips+=("$deny_ip")
+backend_one_ip="$(allocate_ip backend-one)"
+allocated_ips+=("$backend_one_ip")
+backend_two_ip="$(allocate_ip backend-two)"
+allocated_ips+=("$backend_two_ip")
+proxy_ip_fixed="$(allocate_ip proxy)"
+allocated_ips+=("$proxy_ip_fixed")
 
 echo "== Starting fake origin backends (real openssl s_server, one per hostname alias) =="
 docker run -d --name "$backend_one_container" --network "$network_name" --ip "$backend_one_ip" --network-alias one.example.net \

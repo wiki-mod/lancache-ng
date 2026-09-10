@@ -41,16 +41,6 @@ pub struct AaaaFilterForm {
     pub enabled: Option<String>,
 }
 
-// Superseded design note: this used to be DnsupdateRequireTsigForm, driving
-// a toggle that turned PowerDNS's global `dnsupdate-require-tsig` setting
-// ON. Real nsupdate testing proved that toggle a no-op in the common case
-// (see services/dns/pdns.conf.template's header comment for the full
-// history) -- PowerDNS already enforces TSIG per-zone via
-// TSIG-ALLOW-DNSUPDATE metadata whenever a real DDNS_TSIG_KEY exists, which
-// is essentially always. Maintainer correction: invert the toggle so it has
-// a real, observable effect -- let an operator explicitly relax that
-// already-active enforcement instead of switching on a setting that was
-// never the actual enforcement point.
 #[derive(Deserialize)]
 pub struct DdnsAllowUnsignedForm {
     pub csrf_token: String,
@@ -61,11 +51,8 @@ pub struct DdnsAllowUnsignedForm {
 #[derive(Deserialize)]
 pub struct ToggleDomainForm {
     pub csrf_token: String,
-    // The canonical (envelope-free) domain form, e.g. "steamcontent.com" or
-    // ".steamcontent.com" -- the same shape add_dns/remove_dns already
-    // accept, deliberately never the raw on-disk "!"-prefixed line. Reusing
-    // parse_domain_entry here means an operator/forged request can never
-    // smuggle a "!" through this field.
+    // What: Canonical form (no ! prefix) for add/remove operations
+    // Why: Prevents operator/forged requests from smuggling !
     pub domain: String,
     #[serde(default)]
     pub enabled: Option<String>,
@@ -86,24 +73,16 @@ pub struct Record {
     pub disabled: bool,
 }
 
-// Query params this page reads back after a redirect from one of its own
-// forms (add_dns's validation-failure path below). Deliberately just this
-// one optional field, not a general flash-message mechanism: this UI has no
-// site-wide flash/banner system today (see routes/dns_snapshots.rs's own
-// doc comment on that gap), and building one is a bigger change than this
-// one page's error display needs.
+// What: Query param carries error code from form validation
+// Why: No flash-message system; errors routed through URL param
 #[derive(Deserialize)]
 pub struct DomainsPageQuery {
     #[serde(default)]
     pub error: Option<String>,
 }
 
-// Maps a known `?error=` code to the exact, safe, human-readable banner text
-// -- never renders the query parameter's raw value directly. This keeps the
-// set of possible messages fixed and reviewable instead of turning an
-// operator-controlled (or link-shared) URL parameter into arbitrary page
-// text. An unrecognized code (a stale bookmark from a future/older version,
-// or a manually-edited URL) is treated as no error rather than guessed at.
+// What: Maps error code to safe human-readable banner text
+// Why: Prevents untrusted URL param becoming arbitrary page text
 fn domains_page_error_message(code: &str) -> Option<&'static str> {
     match code {
         "invalid_domain" => Some(
@@ -150,13 +129,13 @@ pub async fn domains_page(
     let dns_domains = read_domain_entries(&state.config.cdn_domains_file);
 
     let lan_records = fetch_lan_records(&state).await;
-    // #1077: all PTR rows across the provisioned reverse zones (manual +
+    // all PTR rows across the provisioned reverse zones (manual +
     // Kea-DDNS-auto-created; they are indistinguishable in PowerDNS).
     let ptr_records = fetch_ptr_records(&state).await;
     let aaaa_filter_enabled = is_aaaa_filter_enabled(&state).await;
     let ddns_unsigned_updates_allowed = is_ddns_unsigned_updates_allowed(&state).await;
     let ddns_tsig_key_configured = real_ddns_tsig_key_configured(&state);
-    // #628: zone/record known-good snapshot rollback -- see
+    // zone/record known-good snapshot rollback -- see
     // routes/dns_snapshots.rs's module doc comment for why this is a thin
     // HTTP call to nats-subscriber's own listener, not logic living here.
     let zone_snapshot_groups =
@@ -177,12 +156,8 @@ pub async fn domains_page(
         "domain_error_message",
         &query.error.as_deref().and_then(domains_page_error_message),
     );
-    // Retention count shown on the zone-snapshot panel: the same
-    // KEEP_KNOWN_GOOD_CONFIGS variable and default this adapter shares with
-    // every other known-good-snapshot adapter (docs/known-good-config-
-    // snapshots.md's contract) -- reusing the field the Kea adapter already
-    // reads rather than adding a second config field with an identical
-    // value.
+    // What: Retention count uses KEEP_KNOWN_GOOD_CONFIGS variable
+    // Why: Reuses existing config field, avoids duplication
     ctx.insert(
         "zone_snapshot_retention",
         &state.config.kea_keep_known_good_configs,
@@ -222,18 +197,12 @@ pub async fn add_dns(
         let _guard = state.file_lock.lock().expect("file lock poisoned");
         append_domain(&state.config.cdn_domains_file, &domain)
     };
-    // The UI must not report success if the CDN domain file itself was never
-    // updated -- unlike the best-effort recursor-flush/proxy-restart calls
-    // below, this write is the actual mutation the request represents (same
-    // reasoning as toggle_aaaa_filter's marker-write check further down in
-    // this file).
+    // What: Fail if CDN domain file write fails
+    // Why: File write is actual mutation; cache/proxy are best-effort
     dns_write_result_to_response(wrote, "write")?;
-    flush_recursor_cache(&state, &domain.domain).await;
-    // The SSL proxy derives its wildcard-cert root domains and nginx
-    // host-allowlist maps from this same file at container startup (see
-    // services/proxy/entrypoint.sh) — there is no separate SSL domain
-    // list to edit anymore, so adding a DNS entry that needs TLS
-    // interception also needs the proxy restarted to pick it up.
+    flush_recursor_cache(&state, &domain.domain, None, None, None, None).await;
+    // What: SSL proxy derives certs/allowlist from domains file
+    // Why: Proxy restart needed to pick up DNS entry changes
     if state.config.ssl_enabled {
         restart_ssl(&state).await;
     }
@@ -262,7 +231,7 @@ pub async fn remove_dns(
         DomainDeleteTarget::Canonical(spec) => spec.domain.clone(),
         DomainDeleteTarget::Raw(raw) => raw.clone(),
     };
-    flush_recursor_cache(&state, &flushed_domain).await;
+    flush_recursor_cache(&state, &flushed_domain, None, None, None, None).await;
     // The SSL proxy derives its wildcard-cert root domains and nginx
     // host-allowlist maps from this same file at container startup (see
     // services/proxy/entrypoint.sh) — removing a domain here means the
@@ -275,7 +244,7 @@ pub async fn remove_dns(
 }
 
 // Enable/disable a pre-shipped "Default CDN" cdn-domains.txt entry in place,
-// without removing it from the file (#1073). Deliberately a separate route
+// without removing it from the file [state]. Deliberately a separate route
 // from add_dns/remove_dns: the custom-domain add/remove flow always writes a
 // fully add/removed line, whereas this route only ever flips the leading
 // "!" disabled marker on an existing line -- it can never create or delete a
@@ -302,14 +271,9 @@ pub async fn toggle_default_domain(
     // success.
     dns_write_result_to_response(toggled, "toggle")?;
 
-    // Toggling a default entry has the exact same downstream generation
-    // dependency as adding/removing a custom one (both DNS RPZ generation
-    // and the SSL proxy's cert/nginx-map generation only read
-    // cdn-domains.txt fresh at container startup -- see
-    // docs/dns-admin-ui-scope.md), so this mirrors add_dns/remove_dns's own
-    // recursor-flush/proxy-restart wiring exactly rather than silently being
-    // a no-op until an unrelated restart happens to pick the change up.
-    flush_recursor_cache(&state, &target.domain).await;
+    // What: Toggle default entry with same restart requirements as add/remove
+    // Why: DNS RPZ and proxy certs only reread at container startup
+    flush_recursor_cache(&state, &target.domain, None, None, None, None).await;
     if state.config.ssl_enabled {
         restart_ssl(&state).await;
     }
@@ -354,7 +318,15 @@ pub async fn add_lan_record(
     {
         tracing::error!("NATS publish failed: {}", e);
     }
-    flush_recursor_cache(&state, &name).await;
+    flush_recursor_cache(
+        &state,
+        &name,
+        Some("lan"),
+        Some(record_type),
+        Some(vec![content.clone()]),
+        Some(ttl as i32),
+    )
+    .await;
 
     Ok(Redirect::to("/domains"))
 }
@@ -401,7 +373,15 @@ pub async fn remove_lan_record(
     {
         tracing::error!("NATS publish failed: {}", e);
     }
-    flush_recursor_cache(&state, &name).await;
+    flush_recursor_cache(
+        &state,
+        &name,
+        Some("lan"),
+        Some(record_type.as_str()),
+        None,
+        None,
+    )
+    .await;
 
     Ok(Redirect::to("/domains"))
 }
@@ -436,24 +416,9 @@ pub async fn toggle_aaaa_filter(
     Ok(Redirect::to("/domains"))
 }
 
-// toggle_ddns_allow_unsigned_updates (issue #815 follow-up, SUPERSEDES an
-// earlier design named toggle_dnsupdate_require_tsig): that earlier toggle
-// turned PowerDNS's global `dnsupdate-require-tsig` setting ON, framed as
-// closing an open hole. Real nsupdate testing then proved that framing
-// wrong -- configure_ddns_tsig() in services/dns/entrypoint.sh already sets
-// per-zone TSIG-ALLOW-DNSUPDATE metadata whenever a real DDNS_TSIG_KEY
-// exists (essentially always), and PowerDNS enforces TSIG for those zones
-// off that metadata alone, independent of the global setting. So the old
-// toggle changed nothing observable in the common case (see
-// services/dns/pdns.conf.template's header comment for the full history).
-// Maintainer correction: invert the toggle so it has a real, observable
-// effect. TSIG enforcement is ALREADY ACTIVE BY DEFAULT (today, unchanged);
-// this toggle lets an operator explicitly RELAX it -- accept unsigned DNS
-// UPDATE packets for the LAN/reverse zones this project manages. Unlike
-// toggle_aaaa_filter above, this is still a static pdns.conf-adjacent
-// startup action (configure_ddns_tsig() runs its pdnsutil set-meta calls
-// once at process start, not on a live hook), so this handler must still
-// actually restart both DNS instances for the change to take effect.
+// What: toggle to relax DDNS TSIG per-zone enforcement.
+// Why: global setting ineffective; per-zone default enforced.
+// From: Issue #815
 pub async fn toggle_ddns_allow_unsigned_updates(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -491,29 +456,8 @@ pub async fn toggle_ddns_allow_unsigned_updates(
         return Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
     }
 
-    // The marker write alone changes nothing until configure_ddns_tsig()
-    // re-runs its pdnsutil set-meta calls, which only happens at container
-    // start -- restart both instances so the operator's toggle click
-    // actually takes effect immediately, rather than silently waiting for
-    // some unrelated future restart. Best-effort: log and continue on a
-    // restart failure rather than reporting the whole toggle as failed,
-    // since the marker write (the actual persisted intent) already
-    // succeeded and a manual restart later will still pick it up
-    // correctly.
-    //
-    // KNOWN LIMITATION (flagged during this feature's own real-container
-    // testing, not yet fixed here): these two restarts are issued
-    // sequentially with no health-wait in between. `restart_service`'s
-    // await only resolves once Docker's API reports the restart accepted,
-    // not once PowerDNS is actually answering queries again (entrypoint.sh
-    // needs several more seconds after process start for zone
-    // creation/RPZ regen) -- so there is a real window where dns-standard
-    // and dns-ssl can both be simultaneously unable to answer DNS for every
-    // LAN client, not just for DNS UPDATE. No wait-for-healthy helper
-    // exists anywhere else in this codebase yet to reuse, so adding one
-    // here would be new shared infrastructure, not a one-line fix -- left
-    // for a maintainer decision on priority rather than expanding this
-    // PR's scope unilaterally.
+    // What: Marker write persists intent; restart needed for immediate effect
+    // Why: Without restart operator's click silently waits for future restart
     if let Err(e) = docker_client::restart_service(
         &state.docker,
         &state.config.dns_standard_service,
@@ -521,11 +465,8 @@ pub async fn toggle_ddns_allow_unsigned_updates(
     )
     .await
     {
-        // {:#} (anyhow's alternate Display), not {}: the bare context
-        // message alone ("Failed to restart 'dns-standard'") hid the real
-        // bollard/Docker-API cause during this feature's own real-container
-        // testing -- {:#} prints the full ": caused by: ..." chain so a
-        // future failure here is actually diagnosable from the log line
+        // What: Use {:#} format for full Docker API error chain in logs
+        // Why: Bare message "Failed to restart" hides actual root cause
         // alone instead of needing RUST_LOG=debug plus a live repro.
         tracing::error!(
             "Restart dns-standard for ddns-allow-unsigned-updates toggle failed: {:#}",
@@ -548,17 +489,20 @@ pub async fn toggle_ddns_allow_unsigned_updates(
     Ok(Redirect::to("/domains"))
 }
 
-async fn flush_recursor_cache(state: &AppState, domain: &str) {
-    // PowerDNS Recursor's cache/flush endpoint requires a `domain` query
-    // parameter and only flushes an exact name match, not a subtree --
-    // confirmed live while building issue #400's integration test:
-    // `?type=packet` (the previous call) always returned 422 Unprocessable
-    // Entity, and even `?domain=.` or `?domain=lan.` leave a just-deleted
-    // leaf record (e.g. `host.lan.`) resolving from cache until its TTL
-    // naturally expires. The caller must pass the exact name that changed.
-    // PowerDNS also requires canonical (dot-terminated) form, or the flush
-    // itself is rejected outright ("DNS Name '' is not canonical") --
-    // ensure that here so callers don't all need to remember it themselves.
+// What: zone/type/content let a caller confirm AXFR first.
+// Why: closes the dns-ssl removal race, no new protocol.
+// From: Issue #1095
+async fn flush_recursor_cache(
+    state: &AppState,
+    domain: &str,
+    zone: Option<&str>,
+    record_type: Option<&str>,
+    expected_content: Option<Vec<String>>,
+    expected_ttl: Option<i32>,
+) {
+    // What: PowerDNS cache/flush requires `domain` parameter
+    // Why: Exact match only, not subtree; needs canonical form
+    // From: Issue #400
     let canonical_domain = if domain.ends_with('.') {
         domain.to_string()
     } else {
@@ -578,12 +522,20 @@ async fn flush_recursor_cache(state: &AppState, domain: &str) {
 
     // Also publish flush event so all recursor instances clear their cache
     // for this same domain, not just the one this UI instance talks to.
+    let mut payload = json!({"domain": canonical_domain});
+    if let (Some(zone), Some(record_type)) = (zone, record_type) {
+        payload["zone"] = json!(zone);
+        payload["record_type"] = json!(record_type);
+        if let Some(expected_content) = expected_content {
+            payload["expected_content"] = json!(expected_content);
+        }
+        if let Some(expected_ttl) = expected_ttl {
+            payload["expected_ttl"] = json!(expected_ttl);
+        }
+    }
     state
         .nats
-        .publish(
-            "lancache.dns.flush",
-            json!({"domain": canonical_domain}).to_string().into(),
-        )
+        .publish("lancache.dns.flush", payload.to_string().into())
         .await
         .ok();
 }
@@ -606,13 +558,8 @@ async fn restart_ssl(state: &AppState) {
     }
 }
 
-// Maps the CDN domain file write's own Result to the operator-facing
-// response. `action` names the operation in the log line ("write"/"remove")
-// so add_dns/remove_dns keep their own distinct log message while sharing
-// this decision: on failure, log and report 500 instead of the success
-// redirect the caller would otherwise send -- the write is the actual
-// mutation the request represents, so a failure here can never look like a
-// success to the operator, same as toggle_aaaa_filter's marker-write check.
+// What: Map domain file write result to operator-facing response
+// Why: Write is the actual mutation; failure can't appear as success
 fn dns_write_result_to_response(
     result: anyhow::Result<()>,
     action: &str,
@@ -652,15 +599,8 @@ async fn is_ddns_unsigned_updates_allowed(state: &AppState) -> bool {
         .any(|path| aaaa_filter_enabled_at(&path))
 }
 
-// Deliberately a NEW marker filename ("ddns-allow-unsigned-updates"), not a
-// repurposed "dnsupdate-require-tsig-enabled" -- see
-// services/dns/entrypoint.sh's DDNS_ALLOW_UNSIGNED_MARKER comment for why:
-// reusing the old filename with inverted meaning would silently flip any
-// pre-existing deployment that had the old (harmless, no-op) toggle turned
-// on into one that now accepts unsigned updates after an image upgrade, a
-// real, silent security regression. A new filename guarantees every
-// deployment starts this feature at its safe default (marker absent -> TSIG
-// still enforced, unchanged from today's actual behavior).
+// What: Use NEW marker filename, not repurposed old filename
+// Why: Inverted semantics would silently regress security on upgrade
 fn ddns_allow_unsigned_marker_paths(state: &AppState) -> [PathBuf; 2] {
     [
         Path::new(&state.config.dns_standard_state_dir).join("ddns-allow-unsigned-updates"),
@@ -678,7 +618,7 @@ fn ddns_allow_unsigned_marker_paths(state: &AppState) -> [PathBuf; 2] {
 // real value's existence without the UI needing the plaintext secret at
 // all. Deliberately does not attempt full placeholder-string detection
 // (Rule-Ref: secret_is_placeholder's three independently-maintained
-// copies, issue #967): resolve_shared_secret only ever persists a real,
+// copies, persist): resolve_shared_secret only ever persists a real,
 // generated-or-operator-supplied value to this file, never a checked-in
 // placeholder literal, so a non-empty file here is already a strong enough
 // signal for this specific gate.
@@ -794,54 +734,8 @@ fn is_valid_lan_name_for_delete(name: &str) -> bool {
     is_valid_dns_fqdn_allow_underscore(name) && is_lan_zone_name(name)
 }
 
-// This must have an upper bound: without one, an operator could submit a
-// TXT value with no real ceiling at all. Confirmed against PowerDNS's own
-// documented TXT behavior (doc.powerdns.com/authoritative/appendices/types.html): "Text is
-// stored plainly, PowerDNS understands content not enclosed in quotes,"
-// and "When a TXT record is longer than 255 characters/bytes ... PowerDNS
-// will cut up the content into 255 character/byte chunks for transmission"
-// -- i.e. PowerDNS itself has no 255-byte content limit at the API layer
-// (that 255-byte figure is a wire-format <character-string> limit PowerDNS
-// already handles by auto-chunking, not a limit this validator needs to
-// enforce), and its own zone API docs state no separate content-length cap.
-//
-// The real, protocol-level ceiling is not RDLENGTH alone: it is the DNS
-// message itself, since RFC 1035 SS4.2.2 (TCP) carries each message behind
-// its own 16-bit length prefix, capping any single DNS message -- header,
-// question, and every answer's RDATA included -- at 65535 bytes total. A
-// TXT record's wire RDATA is one or more <character-string>s (RFC 1035
-// SS3.3/3.3.14), each a 1-byte length prefix followed by up to 255 content
-// bytes, so a C-byte content value costs C content bytes PLUS
-// ceil(C / 255) length-prefix bytes on the wire -- but that RDATA does not
-// travel alone. A response carrying this record also needs, at minimum:
-// a 12-byte header (RFC 1035 SS4.1.1); the question section that produced
-// this answer, whose QNAME can be as long as this validator's own
-// `is_valid_dns_fqdn`/`is_lan_zone_name` name-length ceiling allows
-// (253 presentation-form characters, i.e. up to 255 wire-format bytes per
-// RFC 1035 SS3.1/3.3.14 -- this file's own `is_valid_dns_fqdn_impl`'s
-// `name.len() > 253` check), plus 2-byte QTYPE and 2-byte QCLASS; and the
-// answer's own resource-record framing -- a compressed NAME pointer
-// (RFC 1035 SS4.1.4, 2 bytes, the normal case whenever the answer name
-// matches the question name), 2-byte TYPE, 2-byte CLASS, 4-byte TTL, and
-// the 2-byte RDLENGTH field itself; and the 11-byte, option-free OPT record
-// that RFC 6891 requires an EDNS responder to include when the request
-// contains one. Conservatively for the longest name
-// this validator allows (not per-request name-dependent, so this stays a
-// compile-time constant): 12 (header) + (255 + 2 + 2) (question) +
-// (2 + 2 + 2 + 4 + 2) (answer frame) + 11 (OPT) = 294 bytes of non-RDATA
-// overhead, leaving 65535 - 294 = 65241 bytes for RDATA. Solving
-// C + ceil(C / 255) <= 65241 for the largest integer C gives 64986
-// (64986 + ceil(64986 / 255) = 64986 + 255 = 65241, and one byte more,
-// 64987, needs the same 255 prefixes for 65242 -- one over). 64986 is
-// therefore the real maximum content length this validator can accept for
-// any allowed record name, rather than the 65279-byte content bound that
-// accounts only for RDLENGTH and its TXT chunk prefixes while omitting the
-// surrounding message that must also carry this record home. Deliberately
-// not the 255-byte figure some callers might expect: this module's own
-// existing test
-// (validates_supported_lan_record_edge_cases) already asserts a 512-byte
-// TXT content is valid, which is correct given PowerDNS's own documented
-// auto-chunking behavior above.
+// What: MAX_TXT_CONTENT_BYTES = 64986 (RFC 1035/6891 DNS message limit)
+// Why: Message size 65535 minus 294-byte frame/header overhead
 const MAX_TXT_CONTENT_BYTES: usize = 64_986;
 
 fn is_valid_txt_content(content: &str) -> bool {
@@ -912,44 +806,22 @@ struct DomainSpec {
     domain: String,
 }
 
-// Marks the boundary between the pre-shipped "Default CDN" section of
-// cdn-domains.txt and entries an operator has added themselves via the
-// Admin UI's Add form (#1073). Everything above this exact line (trimmed)
-// is treated as a default entry (toggle-able but never removable from the
-// UI); everything below it is a custom entry (add/remove-able, never
-// toggle-able). It is an ordinary "#"-prefixed comment as far as every
-// existing consumer of this file is concerned (DNS RPZ generation, proxy
-// cert generation, the Rust domain-add dedup check) -- only
-// read_domain_entries()/append_domain() below give it special meaning.
-// Deliberately distinct wording/formatting from the vendor section headers
-// already in the shipped file (e.g. "# ---- Steam ----") so it can never be
-// mistaken for one of those by the exact-match comparison in
-// read_domain_entries().
+// What: Marker separates shipped default domains from operator entries.
+// Why: Allows Add/Remove without toggle; formatting distinct from vendors.
+// From: Issue #1073
 const CUSTOM_DOMAINS_MARKER: &str =
     "# ==== lancache-ng: entries added via the Admin UI are appended below this exact line ====";
 
-// A single cdn-domains.txt line's full on-disk envelope: the validated
-// domain/wildcard-scope pair (DomainSpec) plus the enabled/disabled bit
-// encoded by an optional leading "!" (#1073). Kept as a separate type from
-// DomainSpec on purpose -- DomainSpec's derived Eq is load-bearing for
-// dedup (append_domain) and delete matching (line_matches_domain_delete),
-// and folding `enabled` into that equality would make a disabled entry stop
-// matching its own enabled counterpart there.
+// What: StoredDomainLine = DomainSpec + enabled flag (! prefix)
+// Why: Separate type keeps Eq load-bearing for dedup/delete matching
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StoredDomainLine {
     spec: DomainSpec,
     enabled: bool,
 }
 
-// Parses one raw cdn-domains.txt line's stored form: an optional leading
-// "!" (disabled marker) wrapping the same "optional '.' + domain" syntax
-// parse_domain_entry already validates. This is intentionally a distinct
-// function from parse_domain_entry rather than folding "!" support into it:
-// parse_domain_entry also validates fresh operator input typed into the Add
-// form, which must never be allowed to smuggle a "!" through as if it were
-// part of the hostname -- keeping the two parsers separate makes that
-// impossible by construction instead of relying on a caller to remember not
-// to pass user input through the disabled-aware path.
+// What: Parse cdn-domains.txt line with ! disabled marker
+// Why: Separate from parse_domain_entry to prevent ! smuggling in Add
 fn parse_stored_domain_line(line: &str) -> Option<StoredDomainLine> {
     let trimmed = line.trim();
     let (enabled, rest) = match trimmed.strip_prefix('!') {
@@ -970,7 +842,7 @@ fn stored_line_to_storage(entry: &StoredDomainLine) -> String {
     }
 }
 
-// One row of the CDN domain list as rendered by the Admin UI (#1073).
+// One row of the CDN domain list as rendered by the Admin UI [state].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct DomainListEntry {
     // The exact trimmed on-disk line. Used verbatim as the hidden form value
@@ -1060,7 +932,7 @@ fn is_valid_domain_label(label: &str) -> bool {
 }
 
 // Reads cdn-domains.txt into the Admin UI's row-level representation
-// (#1073): each line's enabled state (leading "!") and whether it belongs to
+// [state]: each line's enabled state (leading "!") and whether it belongs to
 // the pre-shipped "Default CDN" section or the operator-managed "custom"
 // section below CUSTOM_DOMAINS_MARKER. A file with no marker at all (an
 // older mount predating this feature, or a bare test fixture) is treated as
@@ -1158,7 +1030,7 @@ fn append_domain(path: &str, domain: &DomainSpec) -> anyhow::Result<()> {
         new_content.push('\n');
     }
     // Converge older/pre-migration files (and bare test fixtures) that
-    // predate the default-vs-custom split (#1073): insert
+    // predate the default-vs-custom split [state]: insert
     // CUSTOM_DOMAINS_MARKER once, before appending, so this entry (and every
     // future one) is correctly classified as operator-added by
     // read_domain_entries instead of silently being counted as a pre-shipped
@@ -1183,7 +1055,7 @@ fn append_domain(path: &str, domain: &DomainSpec) -> anyhow::Result<()> {
 // (see appending_root_and_wildcard_only_domains_keeps_semantics), so `target`
 // must match on the full DomainSpec, not just the domain string. Uses the
 // same terminator-preserving rewrite as remove_domain so surviving lines
-// never get silently normalized to a different line ending (#656).
+// never get silently normalized to a different line ending (line-ending).
 fn set_domain_enabled(path: &str, target: &DomainSpec, enable: bool) -> anyhow::Result<()> {
     let content = fs::read_to_string(path)?;
     let mut changed = false;
@@ -1225,7 +1097,7 @@ fn remove_domain(path: &str, domain: &DomainDeleteTarget) -> anyhow::Result<()> 
     // container) would then have every surviving LF line rewritten with a
     // spurious trailing \r. $domain is read verbatim by the proxy/DNS
     // entrypoints, so that stray \r leaked into generated nginx map/cert
-    // names and stream targets (#656). Preserving each line's own original
+    // names and stream targets (line-ending). Preserving each line's own original
     // terminator instead avoids rewriting any line that wasn't removed.
     let new: String = split_lines_preserve_terminators(&content)
         .into_iter()
@@ -1250,7 +1122,7 @@ fn remove_domain(path: &str, domain: &DomainDeleteTarget) -> anyhow::Result<()> 
 // endings, so a caller that drops some lines and rejoins the rest reproduces
 // each surviving line's own original terminator ("\r\n", "\n", or "" for a
 // final line with no trailing newline at all) instead of forcing one
-// separator across the whole file. See remove_domain's comment (#656) for why
+// separator across the whole file. See remove_domain's comment (line-ending) for why
 // that distinction matters here.
 fn split_lines_preserve_terminators(content: &str) -> Vec<(&str, &str)> {
     let mut lines = Vec::new();
@@ -1452,7 +1324,7 @@ fn normalize_lan_name(name: &str) -> String {
 // the maintainer confirmed for #1077, with NATS-based replication of manual
 // PTR edits to the other DNS instances (the primary's dns-ssl, and the
 // secondaries) deliberately left as a follow-up pending the still-open
-// reverse-zone replication decision (see #770). The reverse zones themselves
+// reverse-zone replication decision (see replication). The reverse zones themselves
 // are provisioned identically on every instance and Kea writes its automatic
 // PTRs to each directly, so this only affects manual edits.
 
@@ -1606,7 +1478,15 @@ pub async fn add_ptr_record(
     // Only flush the recursor cache once PowerDNS actually accepted the write,
     // so a failed PATCH doesn't advertise a change that never happened.
     if patch_reverse_zone(&state, &zone, body).await {
-        flush_recursor_cache(&state, &ptr_name).await;
+        flush_recursor_cache(
+            &state,
+            &ptr_name,
+            Some(&zone),
+            Some("PTR"),
+            Some(vec![target.clone()]),
+            Some(ttl as i32),
+        )
+        .await;
     } else {
         tracing::error!(ip = %form.ip, "PowerDNS rejected PTR add");
     }
@@ -1638,7 +1518,7 @@ pub async fn remove_ptr_record(
     .to_string();
 
     if patch_reverse_zone(&state, &zone, body).await {
-        flush_recursor_cache(&state, &ptr_name).await;
+        flush_recursor_cache(&state, &ptr_name, Some(&zone), Some("PTR"), None, None).await;
     } else {
         tracing::error!(ip = %form.ip, "PowerDNS rejected PTR delete");
     }
@@ -1728,7 +1608,7 @@ async fn fetch_ptr_records(state: &AppState) -> Vec<PtrRecordView> {
 mod tests {
     use super::*;
 
-    // #1077: a valid PTR add resolves to the correct reverse zone id, the
+    // a valid PTR add resolves to the correct reverse zone id, the
     // reversed dot-terminated PTR name, and a normalized dot-terminated target.
     // This is the exact tuple the handler feeds into the PowerDNS PATCH, so a
     // wrong mapping here would write to the wrong zone/name.
@@ -1753,7 +1633,7 @@ mod tests {
         );
     }
 
-    // #1077: inputs that must be rejected (soft-fail) rather than PATCHed --
+    // inputs that must be rejected (soft-fail) rather than PATCHed --
     // a public IP has no provisioned reverse zone; TTL 0 is out of range; a
     // wildcard or empty target is not a valid concrete PTR host. Each would
     // otherwise cause a bad or nonsensical PowerDNS write.
@@ -1766,7 +1646,7 @@ mod tests {
         assert_eq!(validate_ptr_add("192.168.1.50", "", 300), None);
     }
 
-    // #1077: delete validation keys off the IP alone and applies the same
+    // delete validation keys off the IP alone and applies the same
     // provisioned-range gate as add, so a delete for an unprovisioned IP is
     // rejected instead of issuing a PATCH that would 404.
     #[test]
@@ -1781,7 +1661,7 @@ mod tests {
         assert_eq!(validate_ptr_ip("203.0.113.1"), None);
     }
 
-    // #1077: the generated reverse-zone list must be exactly the 18 IPv4
+    // the generated reverse-zone list must be exactly the 18 IPv4
     // private zones PowerDNS provisions (10, 168.192, and 16..=31.172), so the
     // display view GETs the right zones and never an unprovisioned one.
     #[test]
@@ -1796,7 +1676,7 @@ mod tests {
         assert!(!zones.contains(&"32.172.in-addr.arpa".to_string()));
     }
 
-    // #1077: the display parser must turn a real PowerDNS zone export into IP
+    // the display parser must turn a real PowerDNS zone export into IP
     // rows -- keeping PTR rrsets, resolving the reversed name back to an IP,
     // and skipping non-PTR rrsets (SOA/NS), disabled records, and any name that
     // is not a four-label IPv4 in-addr.arpa name -- so the table shows exactly
@@ -2168,7 +2048,7 @@ mod tests {
     }
 
     // Covers the three cases that matter for the dnsupdate-require-tsig
-    // fail-closed gate (issue #815 follow-up, real-tested via a live
+    // fail-closed gate (issue DDNS follow-up, real-tested via a live
     // container in the accompanying PR): no file at all (the common case --
     // shared-secrets volume freshly created), a present-but-empty file (not
     // something resolve_shared_secret itself ever writes, but a defensive
@@ -2362,7 +2242,7 @@ mod tests {
 
     #[test]
     fn remove_domain_preserves_each_surviving_lines_own_terminator_on_mixed_endings() {
-        // Reproduces #656: a CRLF header/comment followed by LF domain
+        // Reproduces line-ending: a CRLF header/comment followed by LF domain
         // entries plus one CRLF domain entry (the realistic "hand-edited on
         // Windows, then appended to from Linux/the container" scenario).
         // Removing one LF entry must not rewrite the OTHER surviving LF/CRLF
@@ -2710,7 +2590,7 @@ mod tests {
 
     #[test]
     fn set_domain_enabled_preserves_mixed_line_terminators_on_untouched_lines() {
-        // Same #656 concern remove_domain's own terminator test guards
+        // Same line-ending concern remove_domain's own terminator test guards
         // against: rewriting one matched line must not normalize every
         // other surviving line to a single separator.
         let base = temp_dir("set-domain-enabled-mixed-endings");

@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-#
-#
-# Usage:
-#   scripts/tracked/check-registry-login-coverage.sh [repo_root]
+# What: ensure docker.io login and build-context coverage.
+# Why: prevent silent anonymous pulls on job moves.
+# From: Issue #1014
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -25,7 +24,9 @@ SIMULATIONS_DIR="scripts/untracked/simulations"
 LOGIN_ACTION_MARKER='uses: ./.github/actions/ghcr-then-dockerhub-login'
 RESERVE_STACK_MARKER='uses: ./.github/actions/reserve-validation-subnet-stack'
 
-# See the header comment's "two jobs this mechanical signal cannot see".
+# What: setup-cli/syslog sims pull via setup.sh CLI.
+# Why: not docker-compose invocations; verified by hand.
+# From: Issue #1014
 NAMED_OPAQUE_SCRIPT_TRIGGERS=(
     "setup-cli-simulation.sh"
     "syslog-forwarding-simulation.sh"
@@ -48,7 +49,8 @@ fail() {
 }
 
 # extract_dockerhub_services <compose_file>
-
+# What: image lacks ghcr.io/mirror.gcr.io prefix = pull.
+# Why: derived from compose, not a hardcoded service list.
 extract_dockerhub_services() {
     local file="$1"
     awk '
@@ -92,10 +94,8 @@ if [[ ${#dockerhub_services[@]} -eq 0 ]]; then
     fail "check-registry-login-coverage: found zero docker.io-backed services across ${COMPOSE_FILES[*]} -- expected at least nats/docker-socket-proxy/netdata (this guard's own parsing likely broke, or every third-party image has genuinely been migrated off docker.io, in which case this whole guard can be retired)."
 fi
 
-# body_pulls_dockerhub_service <body>
-# True if <body> contains a real, non-comment `up -d`/`pull --quiet`/`run -d
-# --name` compose invocation line whose argument list names at least one
-# docker.io-backed service.
+# What: matches a real compose line naming the service.
+# Why: a comment merely mentioning the name must not count.
 body_pulls_dockerhub_service() {
     local body="$1" line stripped svc
     while IFS= read -r line; do
@@ -114,11 +114,8 @@ body_pulls_dockerhub_service() {
     return 1
 }
 
-# job_triggers_login_requirement <body>
-# True if <body> (a job's own YAML text) or any scripts/untracked/simulations
-# script it names by filename pulls a docker.io-backed service, or the body
-# uses the reserve-validation-subnet-stack composite action, or the body
-# names one of NAMED_OPAQUE_SCRIPT_TRIGGERS.
+# What: true if the job pulls docker.io via any trigger.
+# Why: covers reserve-stack and named-opaque-script cases.
 job_triggers_login_requirement() {
     local body="$1" script_name script_path
 
@@ -191,8 +188,8 @@ check_workflow_file() {
     local in_jobs=0 current_job="" body="" line
 
     while IFS= read -r line || [[ -n "$line" ]]; do
-        # What: strips a trailing CR `read -r` would otherwise keep.
-        # Why: a CRLF input would silently defeat every match below.
+        # What: strips the trailing CR read -r would keep.
+        # Why: CRLF would silently defeat matches below.
         # From: Issue #1095
         line="${line%$'\r'}"
         if [[ "$in_jobs" -eq 0 ]]; then
@@ -226,7 +223,9 @@ check_workflow_file() {
     check_job_body "$file" "$current_job" "$body"
 }
 
-# --- Build-context coverage (see header's "Second, unrelated coverage") ---
+# What: build invocations need required --build-context.
+# Why: missing context = buildx pulls a bare image name.
+# From: Issue #1095
 build_context_invocations_examined=0
 
 # bcc_is_known_named_context <name>
@@ -291,16 +290,12 @@ bcc_join_continued_lines() {
     done < "$file"
 }
 
-# bcc_target_dockerfile_for_invocation <invocation-line>
-# Prints the services/*/Dockerfile path this invocation targets, or nothing
-# if none can be resolved.
-#
-# What: resolves -f/--file's argument regardless of path prefix.
-# Why: `./services/x/Dockerfile`, `"$repo_root/services/x/Dockerfile"` too.
+# What: resolves the Dockerfile path from -f or context.
+# Why: a path prefix like $repo_root/ must still resolve.
 # From: Issue #1095
 bcc_target_dockerfile_for_invocation() {
     local invocation="$1" explicit_arg="" resolved="" ctx=""
-    # What: `|| true` per sed|grep|tail; no match isn't error.
+    # What: no sed/grep/tail match is not an error here.
     # Why: pipefail would else abort caller under set -e.
     explicit_arg=$(sed -nE 's/.*(^|[[:space:]])(-f|--file)[[:space:]]+("[^"]*"|[^[:space:]]+).*/\3/p' <<<"$invocation" | tail -1) || true
     if [[ -n "$explicit_arg" ]]; then
@@ -322,11 +317,8 @@ bcc_target_dockerfile_for_invocation() {
     return 0
 }
 
-# bcc_supplied_build_contexts <invocation-line>
-# Prints one --build-context name (the part before its "=") per line.
-#
-# What: accepts both `--build-context name=val` and `=name=val` forms.
-# Why: docker's long-option `=` separator is valid alongside a space.
+# What: prints each --build-context name supplied.
+# Why: accepts both space and = long-option forms.
 # From: Issue #1095
 bcc_supplied_build_contexts() {
     local invocation="$1"
@@ -370,27 +362,26 @@ if [[ "$jobs_examined" -eq 0 ]]; then
     fail "check-registry-login-coverage: examined zero jobs across ${WORKFLOW_FILES[*]} -- expected several (this guard's own parsing likely broke, or all three workflow files changed shape; update this script rather than silently passing)."
 fi
 
-# What: requires docker build in command position, not any substring.
-# Why: rejects data/prose (e.g. echo "docker build ...") as non-invocation.
-# From: Issue #1095
+# What: requires docker build/buildx in command position.
+# Why: catches whitespace/chaining forms, rejects prose.
+# From: Issue #1095 | PR #1856
 shopt -s nullglob
+bcc_docker_build_re='(^|;|&&|\|\|)[[:space:]]*docker[[:space:]]+(buildx[[:space:]]+)?build([[:space:]]|$)'
 for file in "$SIMULATIONS_DIR"/*.sh; do
     while IFS= read -r logical_line; do
         stripped="${logical_line#"${logical_line%%[! ]*}"}"
         [[ "$stripped" == \#* ]] && continue
-        case "$stripped" in
-            'docker build '*|'docker buildx build '*|*'&& docker build '*|*'&& docker buildx build '*|*'; docker build '*|*'; docker buildx build '*|*'|| docker build '*|*'|| docker buildx build '*)
-                bcc_check_invocation "$file" "$logical_line"
-                ;;
-        esac
+        if [[ "$stripped" =~ $bcc_docker_build_re ]]; then
+            bcc_check_invocation "$file" "$logical_line"
+        fi
     done < <(bcc_join_continued_lines "$file")
 done
 shopt -u nullglob
 
-# What: no "examined zero" self-diagnostic for this half.
-# Why: synthetic per-test fixtures legitimately have zero
-# docker build invocations; unlike jobs_examined, zero here is
-# not a parsing-broke signal in this shared, multi-purpose script.
+# What: fixture trees legitimately examine zero invocations.
+# Why: zero fixtures isn't a broken-parse signal here.
+# ============================================================================
+
 if [[ "$failures" -gt 0 ]]; then
     printf '::error::check-registry-login-coverage: %d violation(s) found (see scripts/tracked/check-registry-login-coverage.sh).\n' "$failures" >&2
     exit 1

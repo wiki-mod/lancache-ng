@@ -1,45 +1,9 @@
 #!/usr/bin/env bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-#
-# Real end-to-end proof for #763's CLI-fallback item: `setup.sh
-# reset-to-last-known-good-config kea` must actually roll a real, running Kea
-# server back to an earlier config -- not just return success. Reuses the
-# same real-Kea-container/real-Admin-UI topology
-# scripts/untracked/simulations/dhcp-kea-ctrl-agent-mutation-simulation.sh already established for
-# issue #634 (same image build, same bind-mounted kea-data volume, same
-# session/CSRF technique), rather than inventing a second way to stand up
-# Kea+the Admin UI for a test.
-#
-# What this script does:
-#   1. Starts a real Kea container (this checkout's services/dhcp) and a real
-#      Admin UI container (published stack image; this change does not touch
-#      services/ui) sharing one bind-mounted kea-data directory, exactly like
-#      docker-compose.yml shares that volume between the two services in
-#      every real deployment.
-#   2. Through the Admin UI's real HTTP routes, adds reservation A (creating
-#      known-good snapshot S_A, the Admin UI's own post-config-write side
-#      effect -- see services/ui/src/kea_snapshots.rs), then adds a SECOND,
-#      unrelated reservation B (creating snapshot S_AB, since Kea's config
-#      now holds both).
-#   3. Runs the real `setup.sh reset-to-last-known-good-config kea` command
-#      (--yes, so this runs non-interactively; the confirmation prompt itself
-#      is a separate, deliberately interactive safety feature not under test
-#      here) against S_A -- the CLI's config-test -> config-set ->
-#      config-write chain against Kea's real Control Agent.
-#   4. Confirms via a fresh `config-get` against the real Kea server that
-#      reservation A is still present and reservation B is GONE -- proof the
-#      command genuinely rolled Kea's live config back, not just that the API
-#      calls returned success.
-#
-# What this script does NOT verify:
-#   - The interactive confirmation prompt itself (ask()/confirm() read
-#     /dev/tty, which setup-cli-simulation.sh already covers for other
-#     subcommands via `expect`; --yes exists so this command can be driven
-#     the same way scripted/automated recovery would use it).
-#   - The 'dns'/'pdns' service target -- not yet implemented (depends on
-#     issue #628's rollback listener); see cmd_reset_to_last_known_good_config
-#     in setup.sh.
+# What: Tests CLI reset-to-last-known-good-config Kea.
+# Why: Verify CLI command rolls back Kea live config.
+# From: Issue #763
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
@@ -50,49 +14,28 @@ network_name="${compose_project}_validation"
 image_tag="${LANCACHE_IMAGE_TAG:-nightly}"
 build_tools_image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required (an image providing curl, e.g. the build-tools image)}"
 
-# full-setup-deep-validate.yml's compute-validation-network job derives a
-# COLLISION-FREE per-run /27 subnet within 172.30.0.0/16 (issue #832; e.g.
-# 172.30.147.96/27), not always the fixed 172.30.99.0/27
-# dhcp-kea-ctrl-agent-mutation-simulation.sh's own comment describes -- that
-# sibling script only gets away with a hardcoded subnet because it is
-# manual-workflow-only (full-setup-validate.yml), where this job's env block
-# does not thread VALIDATION_SUBNET through at all (#703). THIS script's job
-# DOES thread it, so every address below must be derived from the real
-# subnet in effect this run, not assumed fixed -- confirmed the hard way: a
-# first version of this script hardcoded 172.30.99.x and failed with "no
-# configured subnet contains IP address 172.30.99.21" the first time it
-# actually ran against a per-run-derived, non-default subnet.
+# What: Load per-run VALIDATION_SUBNET from environment.
+# Why: Job threads subnet; addresses must be derived.
+# From: Issue #703
 subnet_cidr="${VALIDATION_SUBNET:-172.30.99.0/27}"
-# #832: a /27's base (the fourth octet the reserved block actually starts
-# at) is no longer always 0 -- it's one of 0/32/64/.../224 depending on
-# which of the 8 blocks within the octet this run's slot landed on (see
-# scripts/lib/reserve-validation-subnet.sh's own validation_subnet_export_env).
-# Parse the network prefix and base octet out of $subnet_cidr directly
-# instead of the old "%.*/*" string-strip, which only worked because the
-# pre-#832 base was always literally 0.
+# What: Parse subnet prefix and base octet dynamically.
+# Why: /27 base varies; /24 assumption no longer valid.
+# From: Issue #832
 subnet_no_prefixlen="${subnet_cidr%/*}"          # e.g. 172.30.147.96
 subnet_prefix="${subnet_no_prefixlen%.*}"        # e.g. 172.30.147
 subnet_base_octet="${subnet_no_prefixlen##*.}"   # e.g. 96
 ui_ip="${VALIDATION_UI_IP:-${subnet_prefix}.$((subnet_base_octet + 9))}"
 gateway_ip="${VALIDATION_GATEWAY:-${subnet_prefix}.$((subnet_base_octet + 1))}"
-# base+2..base+9 are already claimed by proxy/dns-standard/dns-ssl/watchdog/
-# netdata/nats/ui in deploy/full-setup/docker-compose.yml (see
-# compute-validation-network's derivation), base+21 avoids
-# dhcp-kea-ctrl-agent-mutation-simulation.sh's own base+11..base+20 so both
-# could run concurrently on a shared runner without colliding even if they
-# somehow ever landed on the same reserved subnet -- sized to fit comfortably
-# within the /27's 30 usable hosts alongside that sibling script's own range.
+# What: Reserve base+21..base+29; avoid mutation script.
+# Why: Allows concurrent runs without IP collision.
 kea_ip="${subnet_prefix}.$((subnet_base_octet + 21))"
 dhcp_pool_start="${subnet_prefix}.$((subnet_base_octet + 22))"
 dhcp_pool_end="${subnet_prefix}.$((subnet_base_octet + 27))"
 reservation_ip_a="${subnet_prefix}.$((subnet_base_octet + 28))"
 reservation_ip_b="${subnet_prefix}.$((subnet_base_octet + 29))"
 
-# Under `set -euo pipefail`, a bare `var="$(cmd)"` with no adjacent check
-# aborts the whole script silently the instant `cmd` fails -- errexit fires
-# right at this assignment, before any diagnostic ever prints. Wrap each of
-# these two secret-generation calls so a broken `openssl` invocation reports
-# its own cause instead of a bare "Process completed with exit code 1".
+# What: Wrap secret generation with error handling.
+# Why: Bare assignments abort silently; wrap shows errors.
 if ! kea_ctrl_token="$(openssl rand -hex 32)"; then
     echo "::error::Failed to generate the Kea Control Agent auth token (openssl rand -hex 32)." >&2
     exit 1
@@ -105,29 +48,9 @@ kea_image_tag="lancache-ng-resetkea:$$"
 kea_container="lancache-ng-resetkea-kea-$$"
 ui_container="lancache-ng-resetkea-ui-$$"
 
-# Deliberately OUTSIDE the git working tree (not under $repo_root): once the
-# test runs, kea-data/config-snapshots/ ends up owned by the Admin UI's fixed
-# unprivileged uid (10001) on the HOST -- services/dhcp/entrypoint.sh (root
-# inside the Kea container) creates and chowns config-snapshots/ on every
-# start, and a bind mount does not remap that uid back on the host. If this
-# lived inside the checked-out repo, a cleanup miss from ANY cause -- the EXIT
-# trap not running because the job was cancelled/SIGKILLed, the throwaway
-# chown image no longer existing, or simply an OLDER branch whose copy of this
-# script predates the cleanup fix being dispatched onto the same shared
-# self-hosted runner -- would leave that uid-10001 directory in the repo
-# workspace, and the NEXT job's actions/checkout on that same runner slot
-# would then fail outright trying to clean it (EACCES: permission denied,
-# rmdir ...), blocking an unrelated PR's CI run. Putting work_dir under
-# $TMPDIR/tmp -- which actions/checkout never touches, is not wiped per-job
-# the way the runner's own $RUNNER_TEMP/_work is, and whose sticky bit keeps
-# a stray dir harmless to other processes -- means a leftover can never
-# poison another job's checkout no matter why cleanup was skipped. The
-# cleanup() chown+rm below is still kept, now purely to tidy this run's own
-# temp dir on a normal exit rather than as the cross-job safety net it used
-# to be. See issue #1123 for the sibling
-# scripts/untracked/simulations/dhcp-kea-ctrl-agent-mutation-simulation.sh incident this same
-# failure class was confirmed in. Unique per run ($$) because $TMPDIR is
-# shared host-wide, unlike the per-checkout worktree this used to sit in.
+# What: Work directory outside git worktree.
+# Why: Prevents uid-10001 dirs from poisoning future CI.
+# From: Issue #1123
 work_dir="${TMPDIR:-/tmp}/lancache-ng-setup-reset-kea-config.$$"
 rm -rf "$work_dir"
 mkdir -p "$work_dir/shared" "$work_dir/kea-data" "$work_dir/install"
@@ -138,29 +61,12 @@ cleanup() {
     local status=$?
     docker rm -f "$ui_container" "$kea_container" >/dev/null 2>&1 || true
     LANCACHE_IMAGE_TAG="$image_tag" "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
-    # services/dhcp/entrypoint.sh runs as root inside the Kea container and
-    # chowns kea-data/config-snapshots/ to the Admin UI's fixed unprivileged
-    # uid (10001, see that entrypoint and dhcp-kea-ctrl-agent-mutation-
-    # simulation.sh's identical comment on its own kea-data mount). A plain
-    # `rm -rf "$work_dir"` as this (non-root, non-10001) process would fail
-    # to remove those files, leaving the tree behind. Since work_dir now
-    # lives under $TMPDIR (outside the checked-out repo -- see its definition
-    # above), a leftover there is already harmless to other CI jobs; this
-    # ownership reset is kept purely so THIS run tidies up after itself
-    # instead of accumulating undeletable uid-10001 dirs in $TMPDIR. Reset
-    # ownership back to this process's own uid/gid via the already-built (no
-    # extra pull) Kea image -- unconditionally, in this EXIT trap, so it runs
-    # whether the simulation above succeeded or failed -- before rm -rf.
+    # What: Reset uid-10001 dirs to current user.
+    # Why: Kea creates uid-10001 files; rm fails.
+    # From: Issue #1123
     if [[ -d "$work_dir" ]]; then
-        # Reported explicitly (not just silently `|| true`-d) because the
-        # first time this was fixed, the fix's own success was only ever
-        # confirmed by *inference* (grepping a later run's log for the
-        # absence of a "Permission denied" from the `rm -rf` below) --
-        # good enough after the fact, but not something a future reviewer
-        # of this same log could confirm at a glance without redoing that
-        # archaeology. Printing the chown's own exit code makes "did the
-        # ownership reset actually happen" a directly visible fact in
-        # every run's log, success or failure, instead of an inference.
+        # What: Report chown result explicitly to stdout.
+        # Why: Absence of error doesn't prove success.
         if docker run --rm --entrypoint chown \
             -v "$work_dir:/reset-owner" \
             "$kea_image_tag" -R "$(id -u):$(id -g)" /reset-owner >/dev/null 2>&1; then
@@ -170,16 +76,8 @@ cleanup() {
         fi
     fi
     docker rmi "$kea_image_tag" >/dev/null 2>&1 || true
-    # `|| true`: confirmed for real that this exact command, unguarded, is
-    # what turned a run where the simulation itself printed its own "passed:"
-    # success message into a job CI still reported as failed -- `rm -rf`
-    # still exits non-zero on a permission-denied removal (the chown step
-    # above should prevent that now, but this is the second, independent
-    # layer: this trap's whole point is to report the TEST's own outcome via
-    # `exit "$status"` below, never let an incidental cleanup hiccup
-    # overwrite that). Its own stderr is deliberately left unredirected (unlike
-    # the chown step above) so a leftover permission-denied file still shows
-    # up verbatim in the log even though it can no longer flip the job red.
+    # What: Remove work dir with explicit error reporting.
+    # Why: Avoid spurious failures from cleanup errors.
     if rm -rf "$work_dir"; then
         echo "cleanup: removed $work_dir -- ok"
     else
@@ -202,12 +100,8 @@ deadline=$((SECONDS + 90))
 while (( SECONDS < deadline )); do
     all_ready=1
     for service in proxy nats; do
-        # Under `set -euo pipefail`, a bare `cid="$(cmd)"` with no adjacent
-        # check aborts the whole script silently the instant `cmd` fails --
-        # errexit fires right at this assignment, before any diagnostic ever
-        # prints. Wrap it so a broken `compose ps` invocation (e.g. wrong
-        # project name, daemon down) reports its own cause instead of a bare
-        # "Process completed with exit code 1".
+        # What: Wrap assignment to catch cmd errors.
+        # Why: Bare assignment triggers errexit silently.
         if ! cid="$("${compose[@]}" ps -q "$service")"; then
             echo "::error::Could not query the compose container id for service '$service'." >&2
             exit 1
@@ -297,12 +191,8 @@ if [[ "$ui_ready" -ne 1 ]]; then
 fi
 echo "Admin UI is healthy."
 
-# Each call below is a brand new --rm container, so nothing written inside
-# it (other than under /shared) survives past that one call. /shared is
-# bind-mounted from work_dir (a real, persistent host directory) so the
-# cookiejar one run_client call writes is still there for a later run_client
-# call to send back, and so the awk/cut extraction below can read it directly
-# from the host without needing yet another container.
+# What: Reuse /shared for persistent cookiejar.
+# Why: /shared bind-mounts from host; survives.
 run_client() {
     docker run --rm --network "$network_name" \
         -v "$work_dir/shared:/shared" \
@@ -311,10 +201,8 @@ run_client() {
 
 echo "== UI: establishing a session and extracting its CSRF token =="
 run_client "curl -sS -c /shared/cookiejar -o /dev/null 'http://${ui_ip}:8080/dhcp'"
-# Under `set -euo pipefail`, a bare `var="$(cmd)"` with no adjacent check
-# aborts the whole script silently the instant `cmd` fails -- errexit fires
-# right at this assignment, before the `[[ -n ... ]]` check below (which only
-# catches an empty/absent cookie, not a broken awk invocation) ever runs.
+# What: Wrap awk assignment in error check.
+# Why: Bare assignment triggers errexit silently.
 if ! cookie_value="$(awk -F'\t' '$6 == "lancache_ui_session" {print $7}' "$work_dir/shared/cookiejar")"; then
     echo "::error::Failed to read the cookiejar file to extract the lancache_ui_session cookie." >&2
     exit 1
@@ -370,12 +258,8 @@ if [[ "$add_b_code" != "303" ]]; then
 fi
 echo "Reservation B added ($mac_b -> $ip_b). Kea's live config now holds both A and B."
 
-# Each successful config-write above records a fresh known-good snapshot
-# (services/ui/src/kea_snapshots.rs), so the OLDEST (lowest-id, i.e. first in
-# a plain sort of the fixed-width zero-padded nanosecond-timestamp directory
-# names) snapshot on disk is the one captured right after reservation A was
-# added -- before B ever existed. That is deliberately the id this test rolls
-# back to.
+# What: Use oldest snapshot for rollback test.
+# Why: Oldest is first after A, before B existed.
 snapshot_root="$work_dir/kea-data/config-snapshots"
 mapfile -t snapshot_ids < <(find "$snapshot_root" -mindepth 1 -maxdepth 1 -type d -name '[0-9]*' -exec basename {} \; | sort)
 if [[ ${#snapshot_ids[@]} -lt 2 ]]; then
@@ -387,12 +271,8 @@ echo "Snapshot ids on disk (oldest first): ${snapshot_ids[*]}"
 echo "Rolling back to the snapshot captured right after reservation A: $snapshot_after_a"
 
 echo "== Running the real 'setup.sh reset-to-last-known-good-config kea' CLI fallback =="
-# A throwaway install-dir: this command only needs docker-compose.yml to
-# exist (its own "is there a stack here" guard) and a .env carrying the same
-# KEA_CTRL_TOKEN/KEA_CTRL_HOST/KEA_DATA_DIR this test's real Kea container
-# and bind-mounted kea-data directory already use -- it does not need a real
-# running compose stack of its own, since it talks to Kea's Control Agent
-# directly over HTTP, exactly like a real operator's install would.
+# What: Create minimal install-dir stub.
+# Why: Only needs docker-compose.yml and .env.
 install_dir="$work_dir/install"
 : > "$install_dir/docker-compose.yml"
 cat > "$install_dir/.env" <<EOF
@@ -410,13 +290,8 @@ echo "$reset_output"
 echo "setup.sh reported success rolling back to snapshot $snapshot_after_a."
 
 echo "== Verifying via a fresh config-get against the real Kea server =="
-# Under `set -euo pipefail`, a bare `var="$(cmd)"` with no adjacent check
-# aborts the whole script silently the instant `cmd` fails -- errexit fires
-# right at this assignment. The `&& echo yes || echo no` below is INSIDE the
-# containerized sh -c script, so it only makes the config-get/jq check itself
-# always resolve to a yes/no answer -- it does not protect against `docker
-# exec` itself failing outright (e.g. $kea_container no longer running),
-# which would abort here with no diagnostic if left unwrapped.
+# What: Wrap docker exec to catch errors.
+# Why: Bare exec triggers errexit without diagnostic.
 if ! reservation_a_present="$(docker exec "$kea_container" sh -c '
     curl -sf -u "admin:$1" -H "Content-Type: application/json" \
         -d "{\"command\":\"config-get\",\"service\":[\"dhcp4\"]}" \

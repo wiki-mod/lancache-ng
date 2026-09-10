@@ -138,6 +138,14 @@ exactly as they are:
   generated config file, or the resolved runtime value. Changing it
   alters runtime behavior or breaks build/config parity, so treat it as
   data, not as a comment to clean.
+* Functional tool directives — machine-read markers that configure a
+  tool rather than narrate for a human: `# shellcheck disable=...`,
+  `# pipefail-safe:`, `# yamllint disable...`, `# nolint...`, a `#!`
+  shebang, a Rust `#[...]` attribute, and a Rust `///` doc comment.
+  They are active input to shellcheck, the pipefail guard, yamllint,
+  other linters, the shell/loader, or the compiler; rewriting,
+  shortening, or removing one changes lint/build/runtime behavior.
+  Leave them exactly as they are.
 
 This exemption list is exhaustive and narrow. A multi-line explanatory
 or narrative comment above a code, config, or step line is a normal

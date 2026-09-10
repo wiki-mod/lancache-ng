@@ -586,3 +586,37 @@ EOF
     [ "$status" -ne 0 ]
     [[ "$output" == *"shared-scripts"* ]]
 }
+
+@test "build-context: catches a missing context with extra whitespace between docker and build" {
+    bcc_write_widget_dockerfile
+    bcc_write_widget_sim 'docker  build -q -t widget services/widget >/dev/null'
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"shared-scripts"* ]]
+}
+
+@test "build-context: extra whitespace never masks a supplied context" {
+    bcc_write_widget_dockerfile
+    bcc_write_widget_sim 'docker  build -q -t widget --build-context "shared-scripts=$repo_root/scripts/lib" services/widget >/dev/null'
+
+    run "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+}
+
+@test "build-context: catches a missing context on docker buildx build" {
+    bcc_write_widget_dockerfile
+    bcc_write_widget_sim 'docker buildx build -q -t widget services/widget >/dev/null'
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"shared-scripts"* ]]
+}
+
+@test "build-context: docker buildx build never masks a supplied context" {
+    bcc_write_widget_dockerfile
+    bcc_write_widget_sim 'docker buildx build -q -t widget --build-context "shared-scripts=$repo_root/scripts/lib" services/widget >/dev/null'
+
+    run "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+}

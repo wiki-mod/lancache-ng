@@ -259,15 +259,16 @@ if [ "${#fragile_ref_violations[@]}" -gt 0 ]; then
     echo "" >&2
 fi
 
+# What: Reports duplicate #N as warn-only, no block.
+# Why: #N in output/here-doc lines is legal, not fatal.
+# From: PR #1856
 if [ "${#duplicate_ref_violations[@]}" -gt 0 ]; then
-    violations_found=1
-    echo "Issue/PR reference duplicated outside its own From: pointer (AG-CODE-012 violation):" >&2
+    echo "::warning::Issue/PR reference duplicated outside its own From: pointer (AG-CODE-012, warn-only):" >&2
     printf '  %s\n' "${duplicate_ref_violations[@]}" >&2
     echo "" >&2
-    echo "This file already declares this number via a structured \`From: Issue #N\`/\`From:" >&2
-    echo "PR #N\` pointer; AG-CODE-012 requires that pointer to be the sole place a comment" >&2
-    echo "names the number -- \"never a retelling of that context.\" Remove the duplicate inline" >&2
-    echo "mention (the From: pointer already carries it)." >&2
+    echo "The structured \`From:\` pointer is meant to be the sole place a comment names" >&2
+    echo "the number. Reported for awareness; this no longer blocks the run (warn-only" >&2
+    echo "since PR #1856). A genuine inline comment duplicate should still be cleaned up." >&2
     echo "" >&2
 fi
 
@@ -279,4 +280,4 @@ if [ "$violations_found" -eq 1 ]; then
     exit 1
 fi
 
-echo "No review-chronology comments, fragile line-number self-references, or From:-duplicate issue references found -- AG-CODE-002/003/012 (comment-content sub-patterns) hold."
+echo "No review-chronology comments or fragile line-number self-references found -- AG-CODE-002/003 (blocking comment-content sub-patterns) hold. From:-duplicate #N references are warn-only (see any warnings above)."
