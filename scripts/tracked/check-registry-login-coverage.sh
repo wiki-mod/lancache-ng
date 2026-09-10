@@ -2,24 +2,20 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Standing guard: when the ten shared full-setup jobs were extracted from
-# full-setup-validate.yml/full-setup-deep-validate.yml into the reusable
-# full-setup-sims.yml (issue #1014), the GHCR-then-Docker-Hub login step
-# PR #1757/#1760 had added to full-setup-deep-validate.yml's
-# ensure-pr-staging-images job was never carried into any of the extracted
-# jobs -- full-setup-sims.yml pulled deploy/full-setup's and
-# deploy/quickstart's third-party docker.io images (nats:2-alpine,
-# tecnativa/docker-socket-proxy, netdata/netdata) fully anonymously from the
-# day it was created until a later fix restored it. That fix also found
-# three MORE jobs outside full-setup-sims.yml with the exact same gap
-# (dns-zone-rollback-simulation, dhcp-kea-ui-rollback-simulation in
-# full-setup-deep-validate.yml; dhcp-kea-ctrl-agent-mutation-simulation in
-# full-setup-validate.yml) -- confirming this is a real, recurring class of
-# regression (a job move/extraction silently dropping the login), not a
-# one-off. This script is the standing rule that stops a future job move or
-# new job from silently reintroducing an anonymous pull, mirroring
-# check-validation-subnet-wrapper-coverage.sh's own "trigger marker requires
-# a protection marker" shape for the sibling #896/#907 collision class.
+# What: ensure docker.io login and build-context coverage.
+# Why: prevent silent anonymous pulls on job moves.
+# From: Issue #1014 | Issue #1757 | Issue #1760
+#
+# --- Second, related responsibility: shared-scripts build-context coverage -
+# A `docker build` invocation in scripts/untracked/simulations/*.sh must
+# pass `--build-context shared-scripts=<path>` whenever its target
+# `services/*/Dockerfile` or `tools/*/Dockerfile` contains a real
+# `COPY --from=shared-scripts` line (mechanically derived, not hardcoded).
+# Same conceptual class as the login-coverage check above: a sim script's
+# docker invocation carries the companion flag its target requires. Scoped
+# to `*.sh`, not `*.bats`, because `*.bats` files hold fixture strings for
+# other guards' own tests rather than real invocations. See
+# check_shared_scripts_build_context() below.
 #
 # --- What counts as "pulls a docker.io image" -----------------------------
 # The set of docker.io-backed (third-party, rate-limited) services is derived
@@ -300,9 +296,111 @@ if [[ "$jobs_examined" -eq 0 ]]; then
     fail "check-registry-login-coverage: examined zero jobs across ${WORKFLOW_FILES[*]} -- expected several (this guard's own parsing likely broke, or all three workflow files changed shape; update this script rather than silently passing)."
 fi
 
+# ============================================================================
+# Second responsibility: shared-scripts build-context coverage (see header).
+# Applicable only when this repo_root actually has a services/ or tools/
+# tree -- a bats fixture_root built to exercise only the login-coverage
+# checks above (no services/tools directory at all) is not missing
+# anything; it is simply not a target for this second check.
+# ============================================================================
+
+build_context_dirs=()
+build_context_invocations_examined=0
+build_context_check_applicable=0
+if [[ -d services || -d tools ]]; then
+    build_context_check_applicable=1
+fi
+
+if [[ "$build_context_check_applicable" -eq 1 ]]; then
+    while IFS= read -r dockerfile; do
+        if grep -Eq '^[[:space:]]*COPY[[:space:]]+--from=shared-scripts' "$dockerfile"; then
+            build_context_dirs+=("$(dirname "$dockerfile")")
+        fi
+    done < <(find services tools -maxdepth 2 -name Dockerfile 2>/dev/null | sort)
+
+    if [[ ${#build_context_dirs[@]} -eq 0 ]]; then
+        fail "check-registry-login-coverage: found zero Dockerfiles using 'COPY --from=shared-scripts' under services/*/Dockerfile or tools/*/Dockerfile, even though a services/ or tools/ directory exists -- expected at least dhcp/dhcp-proxy/dns/proxy/ui/watchdog (this check's own parsing likely broke, or the shared-scripts pattern has genuinely been retired, in which case this check can be removed)."
+    fi
+fi
+
+# logical_command_references_dir <blob> <dir>
+logical_command_references_dir() {
+    local blob="$1" dir="$2"
+    case "$blob" in
+        *"-f $dir/Dockerfile"*|*"-f \"$dir/Dockerfile\""*) return 0 ;;
+    esac
+    case " $blob " in
+        *" $dir "*|*" \"$dir\" "*|*" '$dir' "*) return 0 ;;
+    esac
+    return 1
+}
+
+# logical_command_has_shared_scripts_context <blob>
+logical_command_has_shared_scripts_context() {
+    local blob="$1"
+    case "$blob" in
+        *'--build-context'*'shared-scripts='*) return 0 ;;
+    esac
+    return 1
+}
+
+check_shared_scripts_build_context() {
+    local file="$1" line stripped blob="" in_command=0
+    # What: match docker build w/ any spacing + buildx form.
+    # Why: `docker  build`/buildx must not slip the guard.
+    # From: PR #1856
+    local docker_build_re='docker[[:space:]]+(buildx[[:space:]]+)?build([[:space:]]|$)'
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$in_command" -eq 1 ]]; then
+            blob+=" $line"
+            if [[ "$line" != *'\' ]]; then
+                in_command=0
+                build_context_invocations_examined=$((build_context_invocations_examined + 1))
+                for dir in "${build_context_dirs[@]}"; do
+                    if logical_command_references_dir "$blob" "$dir" \
+                        && ! logical_command_has_shared_scripts_context "$blob"; then
+                        fail "check-registry-login-coverage: $file builds '$dir' (Dockerfile uses COPY --from=shared-scripts) without passing --build-context shared-scripts=<path>. Command: ${blob# }"
+                    fi
+                done
+                blob=""
+            fi
+            continue
+        fi
+        stripped="${line#"${line%%[! ]*}"}"
+        [[ "$stripped" == \#* ]] && continue
+        if [[ "$stripped" =~ $docker_build_re ]]; then
+            blob="$line"
+            if [[ "$line" == *'\' ]]; then
+                in_command=1
+            else
+                build_context_invocations_examined=$((build_context_invocations_examined + 1))
+                for dir in "${build_context_dirs[@]}"; do
+                    if logical_command_references_dir "$blob" "$dir" \
+                        && ! logical_command_has_shared_scripts_context "$blob"; then
+                        fail "check-registry-login-coverage: $file builds '$dir' (Dockerfile uses COPY --from=shared-scripts) without passing --build-context shared-scripts=<path>. Command: ${blob# }"
+                    fi
+                done
+                blob=""
+            fi
+        fi
+    done < "$file"
+}
+
+if [[ "$build_context_check_applicable" -eq 1 ]]; then
+    while IFS= read -r -d '' file; do
+        check_shared_scripts_build_context "$file"
+    done < <(find . -name '*.sh' -not -path './.git/*' -not -path '*/target/*' -print0 | sort -z)
+
+    if [[ "$build_context_invocations_examined" -eq 0 ]]; then
+        fail "check-registry-login-coverage: examined zero 'docker build' invocations repo-wide for shared-scripts build-context coverage -- expected several (this check's own parsing likely broke, or every relevant build has moved to a form this text scan cannot see, in which case this check needs a redesign rather than silently passing)."
+    fi
+fi
+
 if [[ "$failures" -gt 0 ]]; then
     printf '::error::check-registry-login-coverage: %d violation(s) found (see scripts/tracked/check-registry-login-coverage.sh).\n' "$failures" >&2
     exit 1
 fi
 
-printf 'check-registry-login-coverage: OK (%d job(s) examined across %d workflow file(s), every docker.io-pulling job has the registry-login step).\n' "$jobs_examined" "${#WORKFLOW_FILES[@]}"
+printf 'check-registry-login-coverage: OK (%d job(s) examined across %d workflow file(s), every docker.io-pulling job has the registry-login step; %d docker build invocation(s) examined across %d flagged Dockerfile(s), every one has shared-scripts build-context coverage).\n' \
+    "$jobs_examined" "${#WORKFLOW_FILES[@]}" "$build_context_invocations_examined" "${#build_context_dirs[@]}"
