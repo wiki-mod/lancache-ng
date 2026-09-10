@@ -464,7 +464,9 @@ echo "Session established, CSRF token extracted."
 # What: polls /logs for the marker until it appears.
 # Why: distinguishes UI-visible from forwarding failure.
 assert_marker_reaches_ui() {
-    local marker="$1" description="$2" timeout="${3:-90}" source_container="${4:-}"
+    local marker="$1" description="$2" timeout="${3:-90}"
+    shift $(( $# < 3 ? $# : 3 ))
+    local -a source_containers=("$@")
     local deadline=$((SECONDS + timeout)) body=""
     while (( SECONDS < deadline )); do
         if ! body="$(run_client "curl -sS 'http://$ip_standard:8080/logs'")"; then
@@ -484,12 +486,12 @@ assert_marker_reaches_ui() {
     echo "::group::Forwarded syslog-ng files (diagnosing UI-visibility vs. forwarding-pipeline failure)"
     "${compose[@]}" exec -T ui sh -c 'grep -r "" /var/log/lancache-syslog-ng/ 2>/dev/null | tail -n 200' || true
     echo "::endgroup::"
-    if [[ -n "$source_container" ]]; then
-        # What: dumps source container raw logs on failure.
-        # Why: distinguishes not-logged from forwarded.
-        # From: Issue #1095
-        echo "::group::$source_container's own raw container logs (diagnosing whether it ever emitted the marker at all)"
-        "${compose[@]}" logs --no-color --tail=100 "$source_container" 2>&1 || true
+    if (( ${#source_containers[@]} > 0 )); then
+        # What: dumps each source container's raw logs.
+        # Why: not-logged vs. forwarded (AG-INT-002).
+        # From: Issue #1095 (PR #1836)
+        echo "::group::raw container logs (${source_containers[*]}): did any emit the marker?"
+        "${compose[@]}" logs --no-color --tail=100 "${source_containers[@]}" 2>&1 || true
         echo "::endgroup::"
     fi
     return 1
@@ -497,7 +499,7 @@ assert_marker_reaches_ui() {
 
 echo "== Trigger 1/8: proxy -- real HTTP GET with a unique request path =="
 run_client "curl -sS -o /dev/null 'http://$ip_standard/e2e-marker-$marker_proxy'" || true
-assert_marker_reaches_ui "$marker_proxy" "proxy (nginx access log)"
+assert_marker_reaches_ui "$marker_proxy" "proxy (nginx access log)" 90 proxy
 
 echo "== Trigger 2/8: ui -- real POST /domains/dns/add with an intentionally-invalid, marker-bearing domain =="
 # What: rejects a domain with no '.' before writing.
@@ -506,7 +508,7 @@ run_client "curl -sS -o /dev/null -b /shared/cookiejar \
     --data-urlencode 'csrf_token=$csrf_token' \
     --data-urlencode 'domain=$marker_ui' \
     'http://$ip_standard:8080/domains/dns/add'" || true
-assert_marker_reaches_ui "$marker_ui" "ui (Rejected invalid dns domain warning)"
+assert_marker_reaches_ui "$marker_ui" "ui (Rejected invalid dns domain warning)" 90 ui
 
 echo "== Trigger 3/8: nats -- real static-user authentication failure carrying the per-run username =="
 # What: NATS_CALLOUT_USER doubles as this trigger's marker.
@@ -558,12 +560,12 @@ run_client "curl -sS -o /dev/null -b /shared/cookiejar \
     --data-urlencode 'content=203.0.113.99' \
     --data-urlencode 'ttl=60' \
     'http://$ip_standard:8080/domains/lan/add'" || true
-assert_marker_reaches_ui "$marker_dns" "dns-standard AND dns-ssl (nats-subscriber's own record-applied log line)"
+assert_marker_reaches_ui "$marker_dns" "dns-standard AND dns-ssl (nats-subscriber's own record-applied log line)" 90 dns-standard dns-ssl
 
 echo "== Trigger 6/8: watchdog -- real startup banner carrying this run's overridden CHECK_INTERVAL =="
 # What: watchdog logs CHECK_INTERVAL once at startup.
 # Why: already triggered by Phase 3's container start.
-assert_marker_reaches_ui "$marker_watchdog" "watchdog (startup banner's CHECK_INTERVAL value)"
+assert_marker_reaches_ui "$marker_watchdog" "watchdog (startup banner's CHECK_INTERVAL value)" 90 watchdog
 
 echo "== Trigger 7/8: dhcp (Kea) -- a real DHCPDISCOVER/OFFER/REQUEST/ACK lease over the isolated dhcp-test-net =="
 # What: runs a real dhclient lease over dhcp-test-net.
@@ -613,7 +615,7 @@ echo "Real lease obtained: $dhcp_offered_address (Kea's own DHCP4_LEASE_ALLOC lo
 # What: matches the full DHCP4_LEASE_ALLOC wording.
 # Why: a bare IP substring-matches unrelated log lines.
 dhcp_lease_marker="lease ${dhcp_offered_address} has been allocated"
-assert_marker_reaches_ui "$dhcp_lease_marker" "dhcp/Kea (DHCP4_LEASE_ALLOC log line naming the real leased address)"
+assert_marker_reaches_ui "$dhcp_lease_marker" "dhcp/Kea (DHCP4_LEASE_ALLOC log line naming the real leased address)" 90 dhcp
 
 echo "== Trigger 8/8: dhcp-proxy (dnsmasq) -- real DHCPDISCOVER over the isolated dhcp-proxy-test-net; per-run-unique proxy-subnet startup marker =="
 # What: dnsmasq-proxy never completes a lease on its own.
@@ -627,7 +629,7 @@ docker run -d --name "$dhcp_proxy_client_container" \
     >/dev/null
 sleep 5
 docker rm -f "$dhcp_proxy_client_container" >/dev/null 2>&1 || true
-assert_marker_reaches_ui "$dhcp_proxy_subnet_start" "dhcp-proxy/dnsmasq (startup banner's DHCP_SUBNET_START value)"
+assert_marker_reaches_ui "$dhcp_proxy_subnet_start" "dhcp-proxy/dnsmasq (startup banner's DHCP_SUBNET_START value)" 90 dhcp-proxy
 
 echo "== netdata: non-blocking check (no operator-triggerable marker mechanism found) =="
 # What: polls for netdata log line, never fails the run.
