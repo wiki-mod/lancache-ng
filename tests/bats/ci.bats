@@ -1711,3 +1711,63 @@ reuse_stubs() {
   run_ci full-setup-should-run "$BATS_TEST_TMPDIR/does-not-exist.txt"
   [ "$status" -eq 2 ]
 }
+
+# === validation image tag (channel + pr-staging + resolve) ===
+
+@test "validation-* equal their validation-image-tag.sh originals (no drift)" {
+  source "$repo_root/scripts/lib/validation-image-tag.sh"
+  local r
+  for r in current_dev master v0.2.0 some-feature-branch ""; do
+    [ "$(ci_validation_channel "$r")" = "$(vit_base_channel_tag "$r")" ]
+  done
+  local c ev ac hd rp
+  local pcases=(
+    "pull_request|someuser|wiki-mod/lancache-ng|wiki-mod/lancache-ng"
+    "pull_request|dependabot[bot]|wiki-mod/lancache-ng|wiki-mod/lancache-ng"
+    "pull_request|someuser|fork/lancache-ng|wiki-mod/lancache-ng"
+    "pull_request|someuser|wiki-mod/LanCache-NG|wiki-mod/lancache-ng"
+    "pull_request|someuser|fork/LanCache-NG|wiki-mod/lancache-ng"
+    "workflow_dispatch|someuser||wiki-mod/lancache-ng"
+    "push|someuser||wiki-mod/lancache-ng"
+  )
+  for c in "${pcases[@]}"; do
+    IFS='|' read -r ev ac hd rp <<<"$c"
+    [ "$(ci_validation_pr_staging_available "$ev" "$ac" "$hd" "$rp")" \
+      = "$(vit_pr_staging_available "$ev" "$ac" "$hd" "$rp")" ]
+  done
+  local a1 a2 a3 a4 a5 a6 a7 a8
+  local rcases=(
+    "pull_request|master|715|abcdef0123456789abcdef0123456789abcdef01|someuser|wiki-mod/lancache-ng|wiki-mod/lancache-ng|"
+    "pull_request|master|715|abcdef0123456789|dependabot[bot]|wiki-mod/lancache-ng|wiki-mod/lancache-ng|"
+    "pull_request|v0.2.0|715|abcdef0123456789|someuser|fork/lancache-ng|wiki-mod/lancache-ng|"
+    "workflow_dispatch|||||||nightly"
+    "workflow_dispatch||||someuser||wiki-mod/lancache-ng|"
+  )
+  for c in "${rcases[@]}"; do
+    IFS='|' read -r a1 a2 a3 a4 a5 a6 a7 a8 <<<"$c"
+    [ "$(ci_validation_resolve_tag "$a1" "$a2" "$a3" "$a4" "$a5" "$a6" "$a7" "$a8")" \
+      = "$(vit_resolve_tag "$a1" "$a2" "$a3" "$a4" "$a5" "$a6" "$a7" "$a8")" ]
+  done
+  [ "$(ci_validation_service_staging_expected proxy true)" \
+    = "$(vit_service_should_have_staging_tag proxy true)" ]
+  [ "$(ci_validation_service_staging_expected dns false)" \
+    = "$(vit_service_should_have_staging_tag dns false)" ]
+}
+
+@test "validation-resolve-tag: eligible PR resolves to pr-<N>-sha-<full>" {
+  run ci_validation_resolve_tag pull_request master 715 \
+    abcdef0123456789abcdef0123456789abcdef01 someuser \
+    wiki-mod/lancache-ng wiki-mod/lancache-ng ""
+  [ "$status" -eq 0 ]
+  [ "$output" = "pr-715-sha-abcdef0123456789abcdef0123456789abcdef01" ]
+}
+
+@test "dispatch validation-channel and validation-resolve-tag via executed ci.sh" {
+  run_ci validation-channel current_dev
+  [ "$status" -eq 0 ]
+  [ "$output" = "nightly" ]
+  run_ci validation-resolve-tag workflow_dispatch "" "" "" someuser "" \
+    wiki-mod/lancache-ng nightly
+  [ "$status" -eq 0 ]
+  [ "$output" = "nightly" ]
+}

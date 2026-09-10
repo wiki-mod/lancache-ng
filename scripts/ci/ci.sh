@@ -851,6 +851,71 @@ ci_full_setup_should_run() {
   return 1
 }
 
+# === VALIDATION IMAGE TAG ===
+
+# ci_validation_channel <base_ref>
+#
+# What: base release channel a ref publishes to.
+# Why: current_dev=nightly; every other ref=latest.
+# From: Issue #1095 | Issue #715
+ci_validation_channel() {
+  local base_ref="$1"
+  if [[ "$base_ref" == "current_dev" ]]; then
+    printf 'nightly\n'
+  else
+    printf 'latest\n'
+  fi
+}
+
+# ci_validation_pr_staging_available <event> <actor> <head_repo> <repository>
+#
+# What: does this PR have its own pushed staging tag?
+# Why: only same-repo non-Dependabot PRs can push one.
+# From: Issue #1095 | Issue #842
+ci_validation_pr_staging_available() {
+  local event_name="$1" actor="$2" head_repo="$3" repository="$4"
+  # What: case-insensitive same-repo compare.
+  # Why: a repo rename can make the two casings disagree.
+  # From: Issue #1095 | Issue #842
+  if [[ "$event_name" == "pull_request" \
+      && "$actor" != "dependabot[bot]" \
+      && "${head_repo,,}" == "${repository,,}" ]]; then
+    printf 'true\n'
+  else
+    printf 'false\n'
+  fi
+}
+
+# ci_validation_resolve_tag <event> <base_ref> <pr_number> <build_sha>
+#                           <actor> <head_repo> <repository> <dispatch_tag>
+#
+# What: the single tag the deep suite should validate.
+# Why: dispatch input, else PR staging tag, else channel.
+# From: Issue #1095 | Issue #715
+ci_validation_resolve_tag() {
+  local event_name="$1" base_ref="$2" pr_number="$3" build_sha="$4"
+  local actor="$5" head_repo="$6" repository="$7" dispatch_tag="$8"
+  if [[ "$event_name" == "workflow_dispatch" ]]; then
+    printf '%s\n' "${dispatch_tag:-nightly}"
+    return 0
+  fi
+  if [[ "$(ci_validation_pr_staging_available "$event_name" "$actor" "$head_repo" "$repository")" == "true" ]]; then
+    printf 'pr-%s-sha-%s\n' "$pr_number" "$build_sha"
+    return 0
+  fi
+  ci_validation_channel "$base_ref"
+}
+
+# ci_validation_service_staging_expected <service> <touched>
+#
+# What: is this service expected to have a staging tag?
+# Why: mirrors the per-service touched verdict, no more.
+# From: Issue #1095
+ci_validation_service_staging_expected() {
+  local touched="$2"
+  printf '%s\n' "$touched"
+}
+
 # === CLUSTER 4: ACCEPTANCE LEDGER + ATTESTATION BOUNDARY ===
 
 # What: Named readback verdict codes, idempotent re-source.
@@ -1175,6 +1240,11 @@ commands:
   full-setup-should-run <changed_files>
     exit 0=run 1=no-run 2=error; a bare call under set -e aborts
     on the (non-error) no-run case -- guard the call
+  validation-channel <base_ref>
+  validation-pr-staging-available <event> <actor> <head_repo> <repository>
+  validation-resolve-tag <event> <base_ref> <pr_number> <build_sha> \
+    <actor> <head_repo> <repository> <dispatch_tag>
+  validation-service-staging-expected <service> <touched>
   post-build-readback <expected_digest> <ref>
     exit 0=SUCCESS 1=MISMATCH 2=NOT_FOUND 3=UNKNOWN; all 4 fail
     closed, none of them may ever trigger a rebuild
@@ -1218,6 +1288,10 @@ ci_main() {
     build-tools-channel) ci_build_tools_channel "$@" ;;
     build-tools-fallback-allowed) ci_build_tools_fallback_allowed "$@" ;;
     full-setup-should-run) ci_full_setup_should_run "$@" ;;
+    validation-channel) ci_validation_channel "$@" ;;
+    validation-pr-staging-available) ci_validation_pr_staging_available "$@" ;;
+    validation-resolve-tag) ci_validation_resolve_tag "$@" ;;
+    validation-service-staging-expected) ci_validation_service_staging_expected "$@" ;;
     post-build-readback) ci_post_build_readback "$@" ;;
     attestation-state) ci_attestation_state "$@" ;;
     artifact-admission) ci_artifact_admission "$@" ;;
