@@ -248,12 +248,9 @@ jobs:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
         run: |
           set -euo pipefail
-          # Reserve a collision-free /27 subnet within 172.30.0.0/16 (flock +
-          # retry, issue #820) and run the sim inside it, instead of racing the single
-          # job-level VALIDATION_SUBNET against every other concurrent run on
-          # this host. The wrapper exports the whole VALIDATION_* set (incl.
-          # VALIDATION_STANDARD_SHIM_IP, which compose reads to place the
-          # standard-passthrough-shim this sim relies on) for the slot it wins.
+          # What: reserves a free /27 slot via flock+retry.
+          # Why: avoids racing concurrent runs on this host.
+          # From: Issue #820
           bash scripts/lib/run-in-validation-subnet.sh bash scripts/untracked/simulations/ssl-mitm-cache-simulation.sh
 
   proxy-deep-wildcard-tls-simulation:
@@ -575,6 +572,11 @@ jobs:
       - name: Run DHCP Kea lease-flow simulation
         env:
           DHCP_LEASE_FLOW_CLIENT_IMAGE: ${{ steps.build-tools-image.outputs.image }}
+          # What: builds services/dns (Cargo release).
+          # Why: matches other Cargo release builds here.
+          # From: Issue #1095
+          PROJECT_CARGO_LTO: ${{ vars.PROJECT_CARGO_LTO }}
+          PROJECT_CARGO_CODEGENUNIT: ${{ vars.PROJECT_CARGO_CODEGENUNIT }}
         run: |
           set -euo pipefail
           bash scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh

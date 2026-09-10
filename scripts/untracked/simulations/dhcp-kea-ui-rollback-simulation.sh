@@ -1,45 +1,9 @@
 #!/usr/bin/env bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-#
-# Real end-to-end proof for issue #837: the Admin UI's OWN Kea rollback route
-# (`POST /dhcp/snapshot/rollback`, rollback_kea_snapshot in
-# services/ui/src/routes/dhcp.rs) must genuinely roll a real, running Kea
-# server back to an earlier known-good config -- not just return an HTTP
-# redirect. This is the UI-reachable path; the CLI fallback
-# (`setup.sh reset-to-last-known-good-config kea`) is separately proven by
-# scripts/untracked/simulations/setup-reset-kea-config-simulation.sh, which this script deliberately
-# mirrors (same real-Kea-container/real-Admin-UI topology, same bind-mounted
-# kea-data volume, same session/CSRF technique) rather than inventing a second
-# way to stand up Kea+the Admin UI. Both drive the identical config-test ->
-# config-set -> config-write chain against Kea's real Control Agent; the only
-# difference is which entry point triggers it.
-#
-# What this script does:
-#   1. Starts a real Kea container (this checkout's services/dhcp) and a real
-#      Admin UI container (published stack image; this change does not touch
-#      services/ui) sharing one bind-mounted kea-data directory, exactly like
-#      docker-compose.yml shares that volume between the two services in
-#      every real deployment.
-#   2. Through the Admin UI's real HTTP routes, adds reservation A (creating
-#      known-good snapshot S_A, the Admin UI's own post-config-write side
-#      effect -- see services/ui/src/kea_snapshots.rs), then adds a SECOND,
-#      unrelated reservation B (creating snapshot S_AB, since Kea's config
-#      now holds both).
-#   3. Calls the Admin UI's real `POST /dhcp/snapshot/rollback` route over HTTP
-#      (with the session's CSRF token and snapshot_id = the snapshot captured
-#      right after reservation A) -- the UI's own config-test -> config-set ->
-#      config-write chain against Kea's real Control Agent.
-#   4. Confirms via a fresh `config-get` against the real Kea server that
-#      reservation A is still present and reservation B is GONE -- proof the
-#      route genuinely rolled Kea's live config back, not just that the HTTP
-#      request returned a success redirect.
-#
-# What this script does NOT verify:
-#   - The CLI fallback path (covered by setup-reset-kea-config-simulation.sh).
-#   - The 'dns'/'pdns' rollback target -- not yet implemented (depends on
-#     issue #628's rollback listener); see rollback_kea_snapshot / the DNS
-#     rollback listener notes.
+# What: Tests Kea snapshot rollback via Admin UI.
+# Why: Verify rollback route changes Kea live config.
+# From: Issue #837
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
@@ -50,49 +14,28 @@ network_name="${compose_project}_validation"
 image_tag="${LANCACHE_IMAGE_TAG:-nightly}"
 build_tools_image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required (an image providing curl, e.g. the build-tools image)}"
 
-# full-setup-deep-validate.yml's compute-validation-network job derives a
-# COLLISION-FREE per-run /27 subnet within 172.30.0.0/16 (issue #832; e.g.
-# 172.30.147.96/27), not always the fixed 172.30.99.0/27
-# dhcp-kea-ctrl-agent-mutation-simulation.sh's own comment describes -- that
-# sibling script only gets away with a hardcoded subnet because it is
-# manual-workflow-only (full-setup-validate.yml), where this job's env block
-# does not thread VALIDATION_SUBNET through at all (#703). THIS script's job
-# DOES thread it, so every address below must be derived from the real
-# subnet in effect this run, not assumed fixed -- confirmed the hard way: a
-# first version of this script hardcoded 172.30.99.x and failed with "no
-# configured subnet contains IP address 172.30.99.21" the first time it
-# actually ran against a per-run-derived, non-default subnet.
+# What: Load per-run VALIDATION_SUBNET from environment.
+# Why: Job threads subnet; addresses must be derived.
+# From: Issue #703
 subnet_cidr="${VALIDATION_SUBNET:-172.30.99.0/27}"
-# #832: a /27's base (the fourth octet the reserved block actually starts
-# at) is no longer always 0 -- it's one of 0/32/64/.../224 depending on
-# which of the 8 blocks within the octet this run's slot landed on (see
-# scripts/lib/reserve-validation-subnet.sh's own validation_subnet_export_env).
-# Parse the network prefix and base octet out of $subnet_cidr directly
-# instead of the old "%.*/*" string-strip, which only worked because the
-# pre-#832 base was always literally 0.
+# What: Parse subnet prefix and base octet dynamically.
+# Why: /27 base varies; /24 assumption no longer valid.
+# From: Issue #832
 subnet_no_prefixlen="${subnet_cidr%/*}"          # e.g. 172.30.147.96
 subnet_prefix="${subnet_no_prefixlen%.*}"        # e.g. 172.30.147
 subnet_base_octet="${subnet_no_prefixlen##*.}"   # e.g. 96
 ui_ip="${VALIDATION_UI_IP:-${subnet_prefix}.$((subnet_base_octet + 9))}"
 gateway_ip="${VALIDATION_GATEWAY:-${subnet_prefix}.$((subnet_base_octet + 1))}"
-# base+2..base+9 are already claimed by proxy/dns-standard/dns-ssl/watchdog/
-# netdata/nats/ui in deploy/full-setup/docker-compose.yml (see
-# compute-validation-network's derivation), base+21 avoids
-# dhcp-kea-ctrl-agent-mutation-simulation.sh's own base+11..base+20 so both
-# could run concurrently on a shared runner without colliding even if they
-# somehow ever landed on the same reserved subnet -- sized to fit comfortably
-# within the /27's 30 usable hosts alongside that sibling script's own range.
+# What: Reserve base+21..base+29; avoid mutation script.
+# Why: Allows concurrent runs without IP collision.
 kea_ip="${subnet_prefix}.$((subnet_base_octet + 21))"
 dhcp_pool_start="${subnet_prefix}.$((subnet_base_octet + 22))"
 dhcp_pool_end="${subnet_prefix}.$((subnet_base_octet + 27))"
 reservation_ip_a="${subnet_prefix}.$((subnet_base_octet + 28))"
 reservation_ip_b="${subnet_prefix}.$((subnet_base_octet + 29))"
 
-# Under `set -euo pipefail`, a bare `var="$(cmd)"` with no adjacent check
-# aborts the whole script silently the instant `cmd` fails -- errexit fires
-# right at this assignment, before any diagnostic ever prints. Wrap each of
-# these two secret-generation calls so a broken `openssl` invocation reports
-# its own cause instead of a bare "Process completed with exit code 1".
+# What: Wrap secret generation with error handling.
+# Why: Bare assignments abort silently; wrap shows errors.
 if ! kea_ctrl_token="$(openssl rand -hex 32)"; then
     echo "::error::Failed to generate the Kea Control Agent auth token (openssl rand -hex 32)." >&2
     exit 1
@@ -115,31 +58,12 @@ cleanup() {
     local status=$?
     docker rm -f "$ui_container" "$kea_container" >/dev/null 2>&1 || true
     LANCACHE_IMAGE_TAG="$image_tag" "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
-    # Reported for real on a shared self-hosted runner (not hypothetical):
-    # services/dhcp/entrypoint.sh runs as root inside the Kea container and
-    # chowns kea-data/config-snapshots/ to the Admin UI's fixed unprivileged
-    # uid (10001, see that entrypoint and dhcp-kea-ctrl-agent-mutation-
-    # simulation.sh's identical comment on its own kea-data mount). Left
-    # as-is, the plain `rm -rf "$work_dir"` below silently fails to remove
-    # those now-root/10001-owned files, leaving them on disk under this
-    # runner's own actions-runner work directory -- which then made a LATER
-    # job's `actions/checkout` on the same runner slot fail outright trying
-    # to clean its workspace (EACCES: permission denied, rmdir ...),
-    # blocking an unrelated PR's CI run. Reset ownership back to this
-    # process's own uid/gid via the already-built (no extra pull) Kea image
-    # -- unconditionally, in this EXIT trap, so it runs whether the
-    # simulation above succeeded or failed, not just on the happy path --
-    # before ever touching rm -rf.
+    # What: Reset uid-10001 dirs to current user.
+    # Why: Kea creates uid-10001 files; rm fails.
+    # From: Issue #1123
     if [[ -d "$work_dir" ]]; then
-        # Reported explicitly (not just silently `|| true`-d) because the
-        # first time this was fixed, the fix's own success was only ever
-        # confirmed by *inference* (grepping a later run's log for the
-        # absence of a "Permission denied" from the `rm -rf` below) --
-        # good enough after the fact, but not something a future reviewer
-        # of this same log could confirm at a glance without redoing that
-        # archaeology. Printing the chown's own exit code makes "did the
-        # ownership reset actually happen" a directly visible fact in
-        # every run's log, success or failure, instead of an inference.
+        # What: Report chown result explicitly to stdout.
+        # Why: Absence of error doesn't prove success.
         if docker run --rm --entrypoint chown \
             -v "$work_dir:/reset-owner" \
             "$kea_image_tag" -R "$(id -u):$(id -g)" /reset-owner >/dev/null 2>&1; then
@@ -149,16 +73,8 @@ cleanup() {
         fi
     fi
     docker rmi "$kea_image_tag" >/dev/null 2>&1 || true
-    # `|| true`: confirmed for real that this exact command, unguarded, is
-    # what turned a run where the simulation itself printed its own "passed:"
-    # success message into a job CI still reported as failed -- `rm -rf`
-    # still exits non-zero on a permission-denied removal (the chown step
-    # above should prevent that now, but this is the second, independent
-    # layer: this trap's whole point is to report the TEST's own outcome via
-    # `exit "$status"` below, never let an incidental cleanup hiccup
-    # overwrite that). Its own stderr is deliberately left unredirected (unlike
-    # the chown step above) so a leftover permission-denied file still shows
-    # up verbatim in the log even though it can no longer flip the job red.
+    # What: Remove work dir with explicit error reporting.
+    # Why: Avoid spurious failures from cleanup errors.
     if rm -rf "$work_dir"; then
         echo "cleanup: removed $work_dir -- ok"
     else
@@ -169,7 +85,10 @@ cleanup() {
 trap cleanup EXIT
 
 echo "== Building the Kea DHCP image from this checkout's services/dhcp =="
-docker build -q -t "$kea_image_tag" services/dhcp >/dev/null
+# What: passes shared-scripts as a named build context.
+# Why: else COPY --from=shared-scripts triggers a bad pull.
+# From: Issue #1095
+docker build -q -t "$kea_image_tag" --build-context "shared-scripts=$repo_root/scripts/lib" services/dhcp >/dev/null
 
 echo "== Starting docker-socket-proxy/proxy/nats from the published $image_tag images =="
 LANCACHE_IMAGE_TAG="$image_tag" "${compose[@]}" up -d docker-socket-proxy proxy nats
@@ -178,12 +97,8 @@ deadline=$((SECONDS + 90))
 while (( SECONDS < deadline )); do
     all_ready=1
     for service in proxy nats; do
-        # Under `set -euo pipefail`, a bare `cid="$(cmd)"` with no adjacent
-        # check aborts the whole script silently the instant `cmd` fails --
-        # errexit fires right at this assignment, before any diagnostic ever
-        # prints. Wrap it so a broken `compose ps` invocation (e.g. wrong
-        # project name, daemon down) reports its own cause instead of a bare
-        # "Process completed with exit code 1".
+        # What: Wrap to capture and report errors.
+        # Why: Bare assignments abort; check shows cause.
         if ! cid="$("${compose[@]}" ps -q "$service")"; then
             echo "::error::Could not query the compose container id for service '$service'." >&2
             exit 1
@@ -273,12 +188,8 @@ if [[ "$ui_ready" -ne 1 ]]; then
 fi
 echo "Admin UI is healthy."
 
-# Each call below is a brand new --rm container, so nothing written inside
-# it (other than under /shared) survives past that one call. /shared is
-# bind-mounted from work_dir (a real, persistent host directory) so the
-# cookiejar one run_client call writes is still there for a later run_client
-# call to send back, and so the awk/cut extraction below can read it directly
-# from the host without needing yet another container.
+# What: --rm containers isolation with /shared bind-mount.
+# Why: Ephemeral containers; host dir persists cookiejar.
 run_client() {
     docker run --rm --network "$network_name" \
         -v "$work_dir/shared:/shared" \
@@ -287,10 +198,8 @@ run_client() {
 
 echo "== UI: establishing a session and extracting its CSRF token =="
 run_client "curl -sS -c /shared/cookiejar -o /dev/null 'http://${ui_ip}:8080/dhcp'"
-# Under `set -euo pipefail`, a bare `var="$(cmd)"` with no adjacent check
-# aborts the whole script silently the instant `cmd` fails -- errexit fires
-# right at this assignment, before the `[[ -n ... ]]` check below (which only
-# catches an empty/absent cookie, not a broken awk invocation) ever runs.
+# What: Wrap var assignment to catch cmd failures.
+# Why: errexit fires before downstream checks run.
 if ! cookie_value="$(awk -F'\t' '$6 == "lancache_ui_session" {print $7}' "$work_dir/shared/cookiejar")"; then
     echo "::error::Failed to read the cookiejar file to extract the lancache_ui_session cookie." >&2
     exit 1
@@ -304,9 +213,8 @@ fi
 echo "Session established, CSRF token extracted."
 
 echo "== UI: adding reservation A (creates known-good snapshot S_A) =="
-# A fixed, locally-administered (0x02 high nibble) test MAC -- never a real
-# vendor OUI, and unique enough per run (low bits from this run's PID) that
-# concurrent local runs of this script don't collide on the same reservation.
+# What: Fixed locally-administered test MAC per run.
+# Why: Avoids collisions between concurrent test runs.
 mac_a="02:11:22:33:55:$(printf '%02x' "$(( $$ % 256 ))")"
 ip_a="$reservation_ip_a"
 if ! add_a_code="$(run_client "curl -sS -b /shared/cookiejar -o /shared/add-a-response -w '%{http_code}' \
@@ -346,12 +254,8 @@ if [[ "$add_b_code" != "303" ]]; then
 fi
 echo "Reservation B added ($mac_b -> $ip_b). Kea's live config now holds both A and B."
 
-# Each successful config-write above records a fresh known-good snapshot
-# (services/ui/src/kea_snapshots.rs), so the OLDEST (lowest-id, i.e. first in
-# a plain sort of the fixed-width zero-padded nanosecond-timestamp directory
-# names) snapshot on disk is the one captured right after reservation A was
-# added -- before B ever existed. That is deliberately the id this test rolls
-# back to.
+# What: Roll back to oldest snapshot (after A added).
+# Why: Verify rollback removes B while preserving A.
 snapshot_root="$work_dir/kea-data/config-snapshots"
 mapfile -t snapshot_ids < <(find "$snapshot_root" -mindepth 1 -maxdepth 1 -type d -name '[0-9]*' -exec basename {} \; | sort)
 if [[ ${#snapshot_ids[@]} -lt 2 ]]; then
@@ -363,13 +267,8 @@ echo "Snapshot ids on disk (oldest first): ${snapshot_ids[*]}"
 echo "Rolling back to the snapshot captured right after reservation A: $snapshot_after_a"
 
 echo "== UI: rolling back to snapshot $snapshot_after_a via POST /dhcp/snapshot/rollback =="
-# The Admin UI's own rollback route (rollback_kea_snapshot in
-# services/ui/src/routes/dhcp.rs) runs the SAME config-test -> config-set ->
-# config-write chain against Kea's real Control Agent that the CLI fallback
-# does, but reached over real HTTP with the session's CSRF token -- the exact
-# path setup-reset-kea-config-simulation.sh does NOT cover (issue #837). The
-# route validates snapshot_id against the on-disk known-good snapshots, reads
-# that snapshot, and applies it as the whole new Kea config.
+# What: Admin UI rollback via real HTTP with CSRF token.
+# Why: Tests the UI path that CLI fallback doesn't cover.
 if ! rollback_code="$(run_client "curl -sS -b /shared/cookiejar -o /shared/rollback-response -w '%{http_code}' \
     --data-urlencode 'csrf_token=$csrf_token' \
     --data-urlencode 'snapshot_id=$snapshot_after_a' \
@@ -377,13 +276,8 @@ if ! rollback_code="$(run_client "curl -sS -b /shared/cookiejar -o /shared/rollb
     echo "::error::run_client/curl invocation for POST /dhcp/snapshot/rollback failed outright." >&2
     exit 1
 fi
-# A successful mutating Admin UI route returns a 303 redirect (axum
-# Redirect::to), exactly like the /dhcp/static/add calls above -- NOT 200. The
-# real proof is the config-get assertion below, not this status; but a non-303
-# here means the route itself rejected the request (e.g. 409 unknown snapshot,
-# 403 bad CSRF, 500 Kea rejected the config), so surface it early with the
-# response body rather than letting the assertion fail with a less specific
-# message.
+# What: Mutating routes return 303, not 200.
+# Why: Non-303 indicates route-level rejection error.
 if [[ "$rollback_code" != "303" ]]; then
     echo "::error::POST /dhcp/snapshot/rollback returned HTTP $rollback_code, expected 303." >&2
     run_client "cat /shared/rollback-response" || true
@@ -392,13 +286,8 @@ fi
 echo "Admin UI reported success rolling back to snapshot $snapshot_after_a."
 
 echo "== Verifying via a fresh config-get against the real Kea server =="
-# Under `set -euo pipefail`, a bare `var="$(cmd)"` with no adjacent check
-# aborts the whole script silently the instant `cmd` fails -- errexit fires
-# right at this assignment. The `&& echo yes || echo no` below is INSIDE the
-# containerized sh -c script, so it only makes the config-get/jq check itself
-# always resolve to a yes/no answer -- it does not protect against `docker
-# exec` itself failing outright (e.g. $kea_container no longer running),
-# which would abort here with no diagnostic if left unwrapped.
+# What: Wrap docker exec to catch container failures.
+# Why: Bare cmd failure aborts; wrapper shows errors.
 if ! reservation_a_present="$(docker exec "$kea_container" sh -c '
     curl -sf -u "admin:$1" -H "Content-Type: application/json" \
         -d "{\"command\":\"config-get\",\"service\":[\"dhcp4\"]}" \

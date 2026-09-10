@@ -25,6 +25,11 @@ on:
       - "scripts/tracked/check-idempotence-test-coverage.sh"
       - "scripts/tracked/check-validation-subnet-wrapper-coverage.sh"
       - "scripts/tracked/check-registry-login-coverage.sh"
+      # What: covers check-registry-login-coverage.sh's own scanned inputs.
+      # Why: guard scans these at runtime; #879's guard can't see that.
+      # From: Issue #1095
+      - "scripts/untracked/simulations/**"
+      - "services/*/Dockerfile"
       - "scripts/tracked/check-bats-path-filter-coverage.sh"
       - "scripts/tracked/check-build-tools-smoke-coverage.sh"
       - "scripts/untracked/check-pipefail-early-exit-grep.sh"
@@ -127,6 +132,11 @@ on:
       - "scripts/tracked/check-idempotence-test-coverage.sh"
       - "scripts/tracked/check-validation-subnet-wrapper-coverage.sh"
       - "scripts/tracked/check-registry-login-coverage.sh"
+      # What: covers check-registry-login-coverage.sh's own scanned inputs.
+      # Why: guard scans these at runtime; #879's guard can't see that.
+      # From: Issue #1095
+      - "scripts/untracked/simulations/**"
+      - "services/*/Dockerfile"
       - "scripts/tracked/check-bats-path-filter-coverage.sh"
       - "scripts/tracked/check-build-tools-smoke-coverage.sh"
       - "scripts/untracked/check-pipefail-early-exit-grep.sh"

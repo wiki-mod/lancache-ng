@@ -1,57 +1,9 @@
 #!/usr/bin/env bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-#
-# Real TLS-handshake simulation for services/proxy/entrypoint.sh's standard-
-# mode (SNI-passthrough) stream-target map generation loop over
-# _UNIQUE_DOMAINS (the "$stream_backend" map written to
-# stream.d/00-stream-targets.conf). Everything else covering this file's
-# map-generation logic (tests/bats/proxy_collect_domain_rows.bats) stops at
-# bash-level unit coverage of which domains land in which array -- none of
-# it starts a real proxy image, real nginx, or performs a real TLS handshake
-# through the generated map, which is exactly where this bug (issue #1297,
-# folded into #1276) lived: the map's *values*, not which domains it lists.
-#
-# The bug: a matched registrable-root wildcard key (e.g. "*.example.com")
-# forwarded to "${domain}:443" -- the literal derived root -- instead of
-# "$ssl_preread_server_name:443" (the actual requested SNI). A listed
-# "sub.example.com" (root "example.com") would forward standard-mode
-# passthrough traffic to "example.com:443", not "sub.example.com:443", even
-# though DNS correctly spoofed "sub.example.com" to the proxy in the first
-# place. This is silent and undetectable from config-generation review alone
-# unless the real target host actually serves *different* content than the
-# root -- which is exactly what this script proves with two distinguishable
-# backends.
-#
-# Deliberately a standalone script rather than an extension of
-# scripts/untracked/simulations/proxy-deep-wildcard-tls-simulation.sh: that script validates
-# SSL-mode certificate *selection* (which cert nginx presents for a given
-# SNI, terminated by nginx itself). This script validates standard-mode SNI
-# *passthrough routing* (which real backend nginx's stream module forwards
-# the raw TLS bytes to, with nginx never terminating the connection at all)
-# -- a different nginx context (stream's own listener on :8443, not the
-# http block's :443) and a different failure mode (wrong destination host,
-# not wrong certificate). It also needs two independently-addressable fake
-# origins, which the deep-wildcard script's single-image setup has no
-# reason to provide.
-#
-# Fake-origin mechanism: two backend containers on the same throwaway
-# Docker network, each given a Docker "--network-alias" equal to the
-# hostname under test ("example.com" / "sub.example.com" -- both reserved,
-# non-routable per RFC 2606, never the real internet domain). Docker's
-# embedded per-network DNS resolver (127.0.0.11, confirmed live on a real
-# Debian-based container to resolve a multi-label alias correctly) answers
-# for these aliases inside the network; the proxy container's
-# NGINX_UPSTREAM_RESOLVER is pointed at that same embedded resolver instead
-# of a real public DNS server, so nginx's own dynamic proxy_pass resolution
-# reaches our fake origins instead of the real internet -- this mirrors how
-# NGINX_UPSTREAM_RESOLVER is a real, documented override point in
-# production (see AG-OP-002), just aimed at a throwaway network instead of
-# 8.8.8.8. Each backend runs a real "openssl s_server" presenting a
-# distinct, self-signed certificate (CN=backend-root / CN=backend-sub) --
-# the CN that comes back from a real TLS handshake through the proxy is
-# the only reliable, real proof of which backend the passthrough actually
-# reached.
+# What: Tests proxy standard-mode SNI passthrough routing.
+# Why: Verify wildcard routes to SNI, not derived root.
+# From: Issue #1297
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
@@ -59,10 +11,8 @@ cd "$repo_root"
 
 build_tools_image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
 
-# Unique per-invocation suffix for every Docker resource this script creates
-# -- avoids name collisions with a concurrent run of this same script (or
-# the sibling deep-wildcard script) on a shared self-hosted runner host, the
-# same reasoning as that script's own header comment.
+# What: suffixes every Docker resource name with run_id.
+# Why: avoids collisions with a concurrent sibling-sim run.
 run_id="$(date +%s)-$$"
 network_name="proxy-sni-route-sim-${run_id}"
 proxy_image="proxy-sni-route-sim:fixture-${run_id}"
@@ -83,29 +33,12 @@ trap cleanup EXIT
 
 mkdir -p "$work_dir/fixture"
 
-# Synthetic, non-production, RFC 2606-reserved domain -- never touches the
-# real services/dns/cdn-domains.txt. A BARE entry (no leading dot) exactly
-# one label past its registrable root ("example.com") is the specific shape
-# that exercises the bug: services/proxy/entrypoint.sh's
-# _proxy_is_one_label_past excludes it from _EXTRA_EXACT_HOSTS (that array
-# is only for a bare entry MORE than one label past root), so its only
-# route through the generated map is the _UNIQUE_DOMAINS wildcard/root-exact
-# branch this fix targets -- the same branch the issue's own concrete
-# example ("drivers.amd.com", root "amd.com") falls into.
+# What: Use RFC 2606 reserved domain for test.
+# Why: Exercises one-label-past-root SNI routing bug.
 printf '%s\n' 'sub.example.com' > "$work_dir/fixture/cdn-domains.txt"
 
-# Minimal but complete env for a standalone (non-Compose) proxy container.
-# SSL_ENABLED=0: this bug lives entirely in standard-mode passthrough
-# (stream.d/00-stream-targets.conf), generated unconditionally regardless of
-# SSL_ENABLED (see entrypoint.sh's own comment on why _bounded_cert_name is
-# defined outside the SSL_ENABLED block) -- SSL_ENABLED=0 is the faithful
-# fixture for what this script actually tests and avoids needing CA/cert
-# generation at all. PROXY_SECURITY_MODE=strict is required: in the default
-# lazy mode the map is just "default $ssl_preread_server_name:443" for
-# every SNI and this bug cannot exist (there is no per-domain map entry to
-# get wrong). NGINX_UPSTREAM_RESOLVER points at Docker's own embedded
-# per-network DNS resolver (127.0.0.11:53) instead of a real public
-# resolver -- see this script's header comment for why.
+# What: Configure standalone proxy container env.
+# Why: Test SNI routing in standard-mode strict passthrough.
 proxy_env=(
     -e IP_STANDARD=10.10.10.10
     -e IP_SSL=10.10.10.11
@@ -121,37 +54,24 @@ proxy_env=(
 )
 
 echo "== Generating two distinguishable self-signed backend certs =="
-# Run through $build_tools_image, NOT a bare host "openssl" call -- self-
-# hosted runners (and any GitHub-hosted fallback) must be assumed not to
-# provide project validation tools at all (AG-CI-001); every other
-# openssl/cert operation in this file and its sibling script already goes
-# through the container for the same reason.
+# What: Use build-tools container for cert generation.
+# Why: Runners may lack project tools (AG-CI-001).
 docker run --rm -v "$work_dir:/certs" -w /certs "$build_tools_image" bash -c \
     "openssl req -x509 -newkey rsa:2048 -nodes -keyout root.key -out root.crt -days 1 -subj '/CN=backend-root' 2>/dev/null" >/dev/null
 docker run --rm -v "$work_dir:/certs" -w /certs "$build_tools_image" bash -c \
     "openssl req -x509 -newkey rsa:2048 -nodes -keyout sub.key -out sub.crt -days 1 -subj '/CN=backend-sub' 2>/dev/null" >/dev/null
 
 echo "== Building throwaway proxy image with synthetic cdn-domains.txt fixture (sub.example.com) =="
-docker build -q -t "$proxy_image" --build-context "dns-domains=$work_dir/fixture" services/proxy >/dev/null
+# What: passes shared-scripts as a named build context.
+# Why: else COPY --from=shared-scripts triggers a bad pull.
+# From: Issue #1095
+docker build -q -t "$proxy_image" --build-context "dns-domains=$work_dir/fixture" --build-context "shared-scripts=$repo_root/scripts/lib" services/proxy >/dev/null
 
 docker network create "$network_name" >/dev/null
 
 echo "== Starting fake origin backends (real openssl s_server, one per hostname alias) =="
-# --network-alias makes each backend independently resolvable within this
-# network under the EXACT hostname it fakes being the origin for --
-# "example.com" (the registrable root) and "sub.example.com" (the listed
-# CDN entry). -naccept bounds how many connections each server answers
-# before exiting on its own, rather than running forever as an unreaped
-# background process (AG-CI-016). Deliberately generous (200, not a tight
-# count matching this script's own handful of real handshakes): every
-# wait_for_tcp() /dev/tcp probe below against a backend ALSO consumes one
-# -naccept slot (a raw TCP connect is still an "accept" to s_server, even
-# though no TLS data follows), and a slow-starting backend on a loaded
-# runner can burn through several retries before the container is even
-# reachable -- a too-tight -naccept could exhaust itself on startup probing
-# alone and make the real handshake later fail with "no certificate at
-# all", which would misleadingly look like a #1297 regression rather than
-# what it actually is (a test-harness budget, not a proxy bug).
+# What: Start test backend servers with network aliases.
+# Why: Test SNI routing between root and subdomain origins.
 docker run -d --name "$backend_root_container" --network "$network_name" --network-alias example.com \
     -v "$work_dir:/certs:ro" "$build_tools_image" bash -c \
     "openssl s_server -accept 443 -cert /certs/root.crt -key /certs/root.key -naccept 200 -quiet" >/dev/null
@@ -160,26 +80,8 @@ docker run -d --name "$backend_sub_container" --network "$network_name" --networ
     "openssl s_server -accept 443 -cert /certs/sub.crt -key /certs/sub.key -naccept 200 -quiet" >/dev/null
 
 # handshake_cn <target_host> <target_port> <sni>
-# Performs a real TLS handshake from a build-tools client container against
-# <target_host>:<target_port> with SNI <sni> and prints the CN of whatever
-# certificate actually comes back, or an empty string if the handshake or
-# certificate parse failed for any reason (dead backend, connection
-# refused, no cert returned). Deliberately does NOT use
-# -verify_hostname/-CAfile (unlike the sibling deep-wildcard script): both
-# backend certs here are self-signed and untrusted on purpose -- the CN
-# itself is the only signal this script needs, since it identifies which
-# real backend the passthrough connection actually reached.
-#
-# The trailing "|| true" is required, not decorative: under this script's
-# own "set -e", a bare "var=\"\$(handshake_cn ...)\"" assignment aborts the
-# whole script immediately if "openssl x509" exits non-zero (e.g. because
-# "openssl s_client" produced no certificate at all) -- silently, with none
-# of this script's own ::error:: messages ever printed, since errexit fires
-# before the caller gets a chance to inspect the result. Every call site
-# below checks for an empty return explicitly instead, so a dead-backend
-# failure and an actual #1297-style wrong-backend failure produce two
-# distinguishable, readable error messages rather than one indistinguishable
-# silent abort.
+# What: Perform TLS handshake and return CN of cert.
+# Why: Identifies which backend SNI routing reaches.
 handshake_cn() {
     local target="$1" port="$2" sni="$3"
     docker run --rm --network "$network_name" "$build_tools_image" bash -c \
