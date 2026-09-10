@@ -564,6 +564,123 @@ ci_impact() {
   done
 }
 
+# === CLUSTER 5: PUSH-REUSE DECISION (NOOP-first bridge) ===
+
+# What: Named reuse verdict codes, idempotent re-source.
+# Why: readonly re-declaration would error on a re-source.
+# From: Issue #1095 | Issue #1835
+if [[ -z "${CI_REUSE_VERIFIED:-}" ]]; then
+  readonly CI_REUSE_VERIFIED=0
+  readonly CI_REUSE_REBUILD=1
+  readonly CI_REUSE_UNKNOWN=2
+fi
+
+# ci_push_reuse_decide <service_key> <channel_image> <github_sha>
+#                      [<dep_keys>] [<ignore_workflow_gate>]
+#
+# What: verified-reuse probe; NOOP unless change is proven.
+# Why: names the reuse path, never orders a build.
+# From: Issue #1095 | Issue #1835
+ci_push_reuse_decide() {
+  local service_key="${1:?ci_push_reuse_decide: service_key is required}"
+  local channel_image="${2:?ci_push_reuse_decide: channel_image is required}"
+  local github_sha="${3:?ci_push_reuse_decide: github_sha is required}"
+  local dep_keys="${4:-}"
+  local ignore_workflow_gate="${5:-}"
+
+  # What: event-agnostic; stdout bool, code splits why.
+  # Why: UNKNOWN (no verdict) must not become BUILD.
+  # From: Issue #1095 | Issue #1835
+  ci_ensure_registry_lib
+
+  # What: revision unreadable = no verdict, not a change.
+  # Why: absent/error collapse: UNKNOWN, never BUILD.
+  # From: Issue #1095 | Issue #1835
+  local revision
+  if ! revision="$(sif_image_revision "$channel_image")"; then
+    echo "ci_push_reuse_decide: $channel_image has no readable revision label (missing image, registry error, or absent label) -- no reuse verdict (UNKNOWN)." >&2
+    printf 'false\n'
+    return "$CI_REUSE_UNKNOWN"
+  fi
+
+  # What: keep real status: 1=rebuild, 2/3=UNKNOWN.
+  # Why: '! cmd' would invert $? to 0 and hide it.
+  # From: Issue #1095 | Issue #1835
+  local ancestor_status=0
+  sif_is_ancestor_or_equal "$revision" "$github_sha" || ancestor_status=$?
+  if [[ "$ancestor_status" == "1" ]]; then
+    echo "ci_push_reuse_decide: $revision is not a git ancestor of $github_sha -- real rebuild verdict." >&2
+    printf 'false\n'
+    return "$CI_REUSE_REBUILD"
+  fi
+  if [[ "$ancestor_status" != "0" ]]; then
+    echo "ci_push_reuse_decide: ancestry unprovable for $revision..$github_sha (status $ancestor_status; shallow/missing history) -- no reuse verdict (UNKNOWN)." >&2
+    printf 'false\n'
+    return "$CI_REUSE_UNKNOWN"
+  fi
+
+  # What: one classifier over the full revision..sha span.
+  # Why: inject seam reuses the script; never a 2nd copy.
+  # From: Issue #1095
+  local classify_output
+  if [[ -n "${PUSH_REUSE_CLASSIFY_CMD:-}" ]]; then
+    classify_output="$("$PUSH_REUSE_CLASSIFY_CMD" "$revision" "$github_sha" 2>/dev/null)" || {
+      echo "ci_push_reuse_decide: classify command failed for $revision..$github_sha -- no reuse verdict (UNKNOWN)." >&2
+      printf 'false\n'
+      return "$CI_REUSE_UNKNOWN"
+    }
+  else
+    local dir classify_script
+    dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    classify_script="${PUSH_REUSE_CLASSIFY_SCRIPT:-$dir/../untracked/classify-image-impact.sh}"
+    classify_output="$(bash "$classify_script" "$revision" "$github_sha" 2>/dev/null)" || {
+      echo "ci_push_reuse_decide: $classify_script failed for $revision..$github_sha -- no reuse verdict (UNKNOWN)." >&2
+      printf 'false\n'
+      return "$CI_REUSE_UNKNOWN"
+    }
+  fi
+
+  # What: this service's own path changed = real rebuild.
+  # Why: anything but 'false' fails closed to build.
+  # From: Issue #1095
+  local changed_flag
+  changed_flag="$(grep -m1 "^${service_key}=" <<<"$classify_output" | cut -d= -f2 || true)"
+  if [[ "$changed_flag" != "false" ]]; then
+    echo "ci_push_reuse_decide: classify reported '${service_key}=${changed_flag:-<missing>}' for $revision..$github_sha -- real rebuild verdict." >&2
+    printf 'false\n'
+    return "$CI_REUSE_REBUILD"
+  fi
+
+  # What: workflow-scope gate over the full revision span.
+  # Why: a build-affecting workflow change forces rebuild.
+  # From: Issue #1095 | PR #1378
+  if [[ "$ignore_workflow_gate" != "true" ]]; then
+    local workflow_flag
+    workflow_flag="$(grep -m1 '^workflow_reuse_scope=' <<<"$classify_output" | cut -d= -f2 || true)"
+    if [[ "$workflow_flag" != "false" ]]; then
+      echo "ci_push_reuse_decide: classify reported 'workflow_reuse_scope=${workflow_flag:-<missing>}' for $revision..$github_sha -- real rebuild verdict." >&2
+      printf 'false\n'
+      return "$CI_REUSE_REBUILD"
+    fi
+  fi
+
+  # What: a declared dependency key changed = real rebuild.
+  # Why: this key can't see a first-party base image bump.
+  # From: Issue #1095
+  local dep_key dep_flag
+  for dep_key in $dep_keys; do
+    dep_flag="$(grep -m1 "^${dep_key}=" <<<"$classify_output" | cut -d= -f2 || true)"
+    if [[ "$dep_flag" != "false" ]]; then
+      echo "ci_push_reuse_decide: classify reported '${dep_key}=${dep_flag:-<missing>}' for $revision..$github_sha -- real rebuild verdict." >&2
+      printf 'false\n'
+      return "$CI_REUSE_REBUILD"
+    fi
+  done
+
+  printf 'true\n'
+  return "$CI_REUSE_VERIFIED"
+}
+
 # === CLUSTER 4: ACCEPTANCE LEDGER + ATTESTATION BOUNDARY ===
 
 # What: Named readback verdict codes, idempotent re-source.
@@ -877,6 +994,10 @@ commands:
     aborts on the (non-error) unchanged case -- guard the call
   service-impact <base_sha> <service> [<path>...]
   impact <base_sha> [<path>...]
+  push-reuse-decide <service_key> <channel_image> <github_sha> \
+    [<dep_keys>] [<ignore_workflow_gate>]
+    exit 0=reuse verified 1=real rebuild verdict 2=UNKNOWN (no
+    verdict); stdout 'true' only on 0, else 'false' fail-closed
   post-build-readback <expected_digest> <ref>
     exit 0=SUCCESS 1=MISMATCH 2=NOT_FOUND 3=UNKNOWN; all 4 fail
     closed, none of them may ever trigger a rebuild
@@ -916,6 +1037,7 @@ ci_main() {
     semantic-changed) ci_semantic_changed "$@" ;;
     service-impact) ci_service_impact "$@" ;;
     impact) ci_impact "$@" ;;
+    push-reuse-decide) ci_push_reuse_decide "$@" ;;
     post-build-readback) ci_post_build_readback "$@" ;;
     attestation-state) ci_attestation_state "$@" ;;
     artifact-admission) ci_artifact_admission "$@" ;;

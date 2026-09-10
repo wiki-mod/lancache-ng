@@ -1416,3 +1416,130 @@ write_ledger_fixture_file() {
   [ "$status" -eq 0 ]
   [ "$output" = "$json" ]
 }
+
+# === CLUSTER 5: ci_push_reuse_decide (NOOP-first reuse) ===
+
+# What: Stubs the sif_* + classify inject seams only.
+# Why: unit-tests the verdict logic, not the real registry.
+# From: Issue #1095 | Issue #1835
+reuse_stubs() {
+  # What: a present _sif_inspect skips the lib source.
+  # Why: keeps our sif_* stubs; no real lib override.
+  # From: Issue #1095
+  _sif_inspect() { return 0; }
+  sif_image_revision() {
+    if [ -n "${STUB_REVISION:-}" ]; then
+      printf '%s\n' "$STUB_REVISION"
+      return 0
+    fi
+    return 1
+  }
+  sif_is_ancestor_or_equal() { return "${STUB_ANCESTOR_STATUS:-0}"; }
+  fake_classify() { printf '%s\n' "${STUB_CLASSIFY:-}"; }
+  fail_classify() { return 7; }
+  PUSH_REUSE_CLASSIFY_CMD=fake_classify
+}
+
+@test "push-reuse-decide reuses build-tools when tools/build-tools is unchanged (#1835 core property)" {
+  reuse_stubs
+  STUB_REVISION="$sha40"
+  STUB_ANCESTOR_STATUS=0
+  STUB_CLASSIFY=$'build_tools=false\nworkflow_reuse_scope=true'
+  # build-tools' real call: dep_keys empty, ignore_workflow_gate=true.
+  run --separate-stderr ci_push_reuse_decide build_tools \
+    "$image:trixie" "$sha40" "" true
+  [ "$status" -eq 0 ]
+  [ "$output" = "true" ]
+}
+
+@test "push-reuse-decide reports UNKNOWN (2) when the revision label is unreadable" {
+  reuse_stubs
+  STUB_REVISION=""
+  run --separate-stderr ci_push_reuse_decide build_tools "$image:trixie" "$sha40" "" true
+  [ "$status" -eq 2 ]
+  [ "$output" = "false" ]
+}
+
+@test "push-reuse-decide reports a real rebuild (1) when the revision is not an ancestor" {
+  reuse_stubs
+  STUB_REVISION="$sha40"
+  STUB_ANCESTOR_STATUS=1
+  run --separate-stderr ci_push_reuse_decide build_tools "$image:trixie" "$sha40" "" true
+  [ "$status" -eq 1 ]
+  [ "$output" = "false" ]
+}
+
+@test "push-reuse-decide reports UNKNOWN (2) when ancestry is unprovable (shallow history)" {
+  reuse_stubs
+  STUB_REVISION="$sha40"
+  STUB_ANCESTOR_STATUS=2
+  run --separate-stderr ci_push_reuse_decide build_tools "$image:trixie" "$sha40" "" true
+  [ "$status" -eq 2 ]
+  [ "$output" = "false" ]
+}
+
+@test "push-reuse-decide reports a real rebuild (1) when the service's own key changed" {
+  reuse_stubs
+  STUB_REVISION="$sha40"
+  STUB_ANCESTOR_STATUS=0
+  STUB_CLASSIFY=$'build_tools=true\nworkflow_reuse_scope=false'
+  run --separate-stderr ci_push_reuse_decide build_tools "$image:trixie" "$sha40" "" true
+  [ "$status" -eq 1 ]
+  [ "$output" = "false" ]
+}
+
+@test "push-reuse-decide reports UNKNOWN (2) when the classifier fails to run" {
+  reuse_stubs
+  STUB_REVISION="$sha40"
+  STUB_ANCESTOR_STATUS=0
+  PUSH_REUSE_CLASSIFY_CMD=fail_classify
+  run --separate-stderr ci_push_reuse_decide build_tools "$image:trixie" "$sha40" "" true
+  [ "$status" -eq 2 ]
+  [ "$output" = "false" ]
+}
+
+@test "push-reuse-decide honors the workflow gate when it is not ignored" {
+  reuse_stubs
+  STUB_REVISION="$sha40"
+  STUB_ANCESTOR_STATUS=0
+  STUB_CLASSIFY=$'dns_image=false\nworkflow_reuse_scope=true'
+  run --separate-stderr ci_push_reuse_decide dns_image "$image:trixie" "$sha40" "" ""
+  [ "$status" -eq 1 ]
+  [ "$output" = "false" ]
+}
+
+@test "push-reuse-decide skips the workflow gate when ignore_workflow_gate=true" {
+  reuse_stubs
+  STUB_REVISION="$sha40"
+  STUB_ANCESTOR_STATUS=0
+  STUB_CLASSIFY=$'build_tools=false\nworkflow_reuse_scope=true'
+  run --separate-stderr ci_push_reuse_decide build_tools "$image:trixie" "$sha40" "" true
+  [ "$status" -eq 0 ]
+  [ "$output" = "true" ]
+}
+
+@test "push-reuse-decide fails closed to rebuild (1) when a declared dependency changed" {
+  reuse_stubs
+  STUB_REVISION="$sha40"
+  STUB_ANCESTOR_STATUS=0
+  STUB_CLASSIFY=$'dns_image=false\nworkflow_reuse_scope=false\nbuild_tools=true'
+  run --separate-stderr ci_push_reuse_decide dns_image "$image:trixie" "$sha40" build_tools true
+  [ "$status" -eq 1 ]
+  [ "$output" = "false" ]
+}
+
+@test "push-reuse-decide reuses (0) when the service and its dependency are both unchanged" {
+  reuse_stubs
+  STUB_REVISION="$sha40"
+  STUB_ANCESTOR_STATUS=0
+  STUB_CLASSIFY=$'dns_image=false\nworkflow_reuse_scope=false\nbuild_tools=false'
+  run --separate-stderr ci_push_reuse_decide dns_image "$image:trixie" "$sha40" build_tools true
+  [ "$status" -eq 0 ]
+  [ "$output" = "true" ]
+}
+
+@test "dispatch push-reuse-decide via executed ci.sh requires a service_key" {
+  run_ci push-reuse-decide
+  [ "$status" -ne 0 ]
+  [[ "$stderr" == *"service_key is required"* ]]
+}
