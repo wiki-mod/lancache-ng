@@ -916,6 +916,30 @@ ci_validation_service_staging_expected() {
   printf '%s\n' "$touched"
 }
 
+# === RELEASE TAG ===
+
+# ci_next_release_tag <current_tag>
+#
+# What: the next patch release tag after <current_tag>.
+# Why: only patch auto-bumps; minor/major stay manual.
+# From: Issue #1095 | Issue #819
+ci_next_release_tag() {
+  local current_tag="${1:?ci_next_release_tag: current tag is required (e.g. v0.2.3)}"
+  if [[ ! "$current_tag" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+    printf 'ci_next_release_tag: %s is not a plain vX.Y.Z tag\n' \
+      "$current_tag" >&2
+    return 1
+  fi
+  local major="${BASH_REMATCH[1]}"
+  local minor="${BASH_REMATCH[2]}"
+  local patch="${BASH_REMATCH[3]}"
+  # What: 10# forces base-10; a leading zero is not octal.
+  # Why: '08' would be an invalid octal literal otherwise.
+  # From: Issue #1095 | Issue #819
+  local next_patch=$((10#$patch + 1))
+  printf 'v%s.%s.%s\n' "$major" "$minor" "$next_patch"
+}
+
 # === CLUSTER 4: ACCEPTANCE LEDGER + ATTESTATION BOUNDARY ===
 
 # What: Named readback verdict codes, idempotent re-source.
@@ -1245,6 +1269,8 @@ commands:
   validation-resolve-tag <event> <base_ref> <pr_number> <build_sha> \
     <actor> <head_repo> <repository> <dispatch_tag>
   validation-service-staging-expected <service> <touched>
+  next-release-tag <current_tag>
+    exit 0=printed next tag; 1=not a plain vX.Y.Z tag
   post-build-readback <expected_digest> <ref>
     exit 0=SUCCESS 1=MISMATCH 2=NOT_FOUND 3=UNKNOWN; all 4 fail
     closed, none of them may ever trigger a rebuild
@@ -1292,6 +1318,7 @@ ci_main() {
     validation-pr-staging-available) ci_validation_pr_staging_available "$@" ;;
     validation-resolve-tag) ci_validation_resolve_tag "$@" ;;
     validation-service-staging-expected) ci_validation_service_staging_expected "$@" ;;
+    next-release-tag) ci_next_release_tag "$@" ;;
     post-build-readback) ci_post_build_readback "$@" ;;
     attestation-state) ci_attestation_state "$@" ;;
     artifact-admission) ci_artifact_admission "$@" ;;

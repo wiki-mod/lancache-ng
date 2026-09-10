@@ -1771,3 +1771,45 @@ reuse_stubs() {
   [ "$status" -eq 0 ]
   [ "$output" = "nightly" ]
 }
+
+# === release tag (next patch bump) ===
+
+@test "next-release-tag bumps the patch and preserves major/minor" {
+  run ci_next_release_tag v10.20.3
+  [ "$status" -eq 0 ]
+  [ "$output" = "v10.20.4" ]
+  # leading-zero patch is base-10, not octal
+  run ci_next_release_tag v0.2.09
+  [ "$status" -eq 0 ]
+  [ "$output" = "v0.2.10" ]
+}
+
+@test "next-release-tag equals compute-next-release-tag.sh (no drift)" {
+  local script="$repo_root/scripts/untracked/compute-next-release-tag.sh"
+  local x a b
+  for x in v0.2.3 v0.1.0 v1.4.99 v0.2.08 v0.2.09 v10.20.3; do
+    run ci_next_release_tag "$x"
+    [ "$status" -eq 0 ]
+    a="$output"
+    run bash "$script" "$x"
+    [ "$status" -eq 0 ]
+    b="$output"
+    [ "$a" = "$b" ]
+  done
+  for x in v0.2.3-rc.1 0.2.3 v0.2 v0.x.3; do
+    run ci_next_release_tag "$x"
+    [ "$status" -ne 0 ]
+    run bash "$script" "$x"
+    [ "$status" -ne 0 ]
+  done
+}
+
+@test "dispatch next-release-tag via executed ci.sh: bump, reject malformed, require arg" {
+  run_ci next-release-tag v0.2.3
+  [ "$status" -eq 0 ]
+  [ "$output" = "v0.2.4" ]
+  run_ci next-release-tag v0.2.3-rc.1
+  [ "$status" -ne 0 ]
+  run_ci next-release-tag
+  [ "$status" -ne 0 ]
+}
