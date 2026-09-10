@@ -209,7 +209,42 @@ verify_record_gone() {
     return 1
 }
 
+# What: poll dns-ssl auth lan zone for the delete.
+# Why: prove AXFR convergence apart from recursor flush.
+# From: PR #1856
+verify_authoritative_record_gone() {
+    local service="$1"
+    local max_attempts="${2:-180}"
+    local attempt zone_dump
+    for attempt in $(seq 1 "$max_attempts"); do
+        if ! zone_dump="$("${compose[@]}" exec -T "$service" \
+            pdnsutil --config-dir=/etc/pdns/auth list-zone lan)"; then
+            echo "::error::Failed to list authoritative lan zone on $service (attempt $attempt)." >&2
+            exit 1
+        fi
+        # What: require an SOA-bearing dump before trusting absence.
+        # Why: an empty/not-ready dump must not read as record-gone.
+        # From: PR #1856
+        if ! grep -qw SOA <<<"$zone_dump"; then
+            sleep 1
+            continue
+        fi
+        if ! grep -qF "$test_fqdn" <<<"$zone_dump"; then
+            echo "$service authoritative lan zone (SOA present) no longer lists $test_fqdn (attempt $attempt)."
+            return 0
+        fi
+        sleep 1
+    done
+    echo "::error::$service authoritative lan zone still lists $test_fqdn after $max_attempts attempts; AXFR delete did not converge." >&2
+    "${compose[@]}" logs --no-color --tail=200 dns-standard dns-ssl nats >&2 || true
+    return 1
+}
+
 verify_record_gone "dns-standard" "$dns_standard_ip"
-verify_record_gone "dns-ssl" "$dns_ssl_ip" 180
+# What: auth-converge first, then recursor within TTL.
+# Why: a >TTL recursor poll can pass on expiry, not flush.
+# From: PR #1856
+verify_authoritative_record_gone "dns-ssl" 180
+verify_record_gone "dns-ssl" "$dns_ssl_ip" 20
 
 echo "ui-nats-dns-integration-simulation passed: UI -> NATS -> nats-subscriber -> PowerDNS add and remove both verified end-to-end via real DNS queries."

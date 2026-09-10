@@ -346,6 +346,10 @@ logical_command_has_shared_scripts_context() {
 
 check_shared_scripts_build_context() {
     local file="$1" line stripped blob="" in_command=0
+    # What: match docker build w/ any spacing + buildx form.
+    # Why: `docker  build`/buildx must not slip the guard.
+    # From: PR #1856
+    local docker_build_re='docker[[:space:]]+(buildx[[:space:]]+)?build([[:space:]]|$)'
 
     while IFS= read -r line || [[ -n "$line" ]]; do
         if [[ "$in_command" -eq 1 ]]; then
@@ -365,7 +369,7 @@ check_shared_scripts_build_context() {
         fi
         stripped="${line#"${line%%[! ]*}"}"
         [[ "$stripped" == \#* ]] && continue
-        if [[ "$stripped" == *'docker build'* ]]; then
+        if [[ "$stripped" =~ $docker_build_re ]]; then
             blob="$line"
             if [[ "$line" == *'\' ]]; then
                 in_command=1

@@ -1,8 +1,8 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: Consolidate validate/sim jobs.
-# Why: Single source; avoid env leaks.
+# What: consolidates full-setup validate/sim jobs.
+# Why: single source; env leaks broke reserve retries.
 # From: Issue #1014
 name: Full-Setup Simulations (reusable)
 
@@ -39,8 +39,8 @@ jobs:
   compute-validation-network:
     name: derive per-run validation subnet
     if: inputs.should_run == 'true'
-    # What: pure subnet/IP composite action; no compose.
-    # Why: not stack-driving; light runner tier is enough.
+    # Stays light (not a stack-driving job): pure subnet/IP derivation via a
+    # composite action, no Docker/compose stack of its own.
     runs-on: [self-hosted, linux, lancache, lancache-light]
     timeout-minutes: 45
     outputs:
@@ -146,12 +146,22 @@ jobs:
           set -euo pipefail
           docker compose down --volumes --remove-orphans || true
 
-          # What: forces real network removal after `down`.
-          # Why: down's own exit code can lie here.
+          # `down` above can lose Docker's own "has active endpoints" race
+          # (a container-removal API call can return before its network
+          # endpoint is actually unwired -- confirmed for real in CI, see
+          # validation_project_networks_teardown's own comment in
+          # reserve-validation-subnet.sh) and silently leave this project's
+          # network(s) non-empty, poisoning them for whichever job/run
+          # reserves this slot next. Wait for and force a real removal
+          # instead of trusting `down`'s own exit code.
           # shellcheck source=scripts/lib/reserve-validation-subnet.sh
           source "$GITHUB_WORKSPACE/scripts/lib/reserve-validation-subnet.sh"
-          # What: skips teardown when nothing was reserved.
-          # Why: set -u; unset COMPOSE_PROJECT_NAME aborts.
+          # This step runs unconditionally (`if: always()`), including when
+          # the reserve composite failed before ever setting
+          # COMPOSE_PROJECT_NAME -- under `set -u`, a bare "$COMPOSE_PROJECT_NAME"
+          # would abort this whole step with "unbound variable" in exactly that
+          # case. The safe-default form skips teardown when there is nothing to
+          # tear down instead.
           if [[ -n "${COMPOSE_PROJECT_NAME:-}" ]]; then
             validation_project_networks_teardown "$COMPOSE_PROJECT_NAME" || true
           fi
@@ -238,9 +248,12 @@ jobs:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
         run: |
           set -euo pipefail
-          # What: reserves a free /27 slot via flock+retry.
-          # Why: avoids racing concurrent runs on this host.
-          # From: Issue #820
+          # Reserve a collision-free /27 subnet within 172.30.0.0/16 (flock +
+          # retry, issue #820) and run the sim inside it, instead of racing the single
+          # job-level VALIDATION_SUBNET against every other concurrent run on
+          # this host. The wrapper exports the whole VALIDATION_* set (incl.
+          # VALIDATION_STANDARD_SHIM_IP, which compose reads to place the
+          # standard-passthrough-shim this sim relies on) for the slot it wins.
           bash scripts/lib/run-in-validation-subnet.sh bash scripts/untracked/simulations/ssl-mitm-cache-simulation.sh
 
   proxy-deep-wildcard-tls-simulation:
@@ -562,8 +575,6 @@ jobs:
       - name: Run DHCP Kea lease-flow simulation
         env:
           DHCP_LEASE_FLOW_CLIENT_IMAGE: ${{ steps.build-tools-image.outputs.image }}
-          # What: builds services/dns Rust subscriber.
-          # Why: matches repo's cargo build settings.
           PROJECT_CARGO_LTO: ${{ vars.PROJECT_CARGO_LTO }}
           PROJECT_CARGO_CODEGENUNIT: ${{ vars.PROJECT_CARGO_CODEGENUNIT }}
         run: |
@@ -571,8 +582,9 @@ jobs:
           bash scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh
 
   nats-auth-callout-simulation:
-    # What: real per-secondary NATS auth-callout test.
-    # Why: pulls PRs own dns/ui/nats images/staging tag.
+    # Real per-secondary NATS auth-callout integration test. Pulls the real
+    # dns/ui/nats images (via the script), so it threads the PR staging tag to
+    # test the PR's own secondary credentialing code.
     name: NATS auth-callout simulation
     needs: [compute-validation-network, dhcp-kea-lease-flow-simulation]
     if: >-
