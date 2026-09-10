@@ -2973,3 +2973,30 @@ These are explicitly open, not resolved by this document:
    own documentation in this review pass (the 10 GB/7-day figures were
    verified for the BuildKit `type=gha` backend specifically, not the
    general-purpose cache action).
+5. **`ci_service_impact`'s `ALL` catch-all blocks long-span reuse** (§11;
+   found while building `ci_push_reuse_decide`, PR #1844). `ci_impact_classify`
+   sends any unclassified path to `ALL`, and `ci_service_impact`
+   short-circuits to `IMPACTED` on the first `ALL` before the per-service
+   check runs. Over a reuse span of days (channel-image `revision`..head) an
+   unclassified path is always present, so ci.sh's own impact engine always
+   returns `IMPACTED` and can never decide reuse. This is why
+   `ci_push_reuse_decide` calls `classify-image-impact.sh` through the inject
+   seam instead of reusing `ci_service_impact`. The two engines are NOT
+   interchangeable: before the "everything into ci.sh" endgame can replace
+   `classify-image-impact.sh`, this catch-all gap must be closed (e.g. an
+   allow-listed set of reuse-irrelevant paths, or a precise per-service
+   long-span classifier).
+6. **`#1835` build-tools-always-rebuilds is a gate defect, not a reuse-logic
+   defect** (confirms §2 / Phase 2; verified in PR #1844). `push_reuse_decide`
+   already reuses build-tools correctly on unchanged `tools/build-tools`:
+   build-push.yml calls it as `decide_one build_tools build-tools
+   "$BUILD_TOOLS_CHANGED" "" true` (dep_keys empty, ignore_workflow_gate=true)
+   and `touches_build_tools` is precise. The whole remaining defect is the
+   gate above it: `determine-push-reuse-scope` is `if: github.event_name ==
+   'push' && startsWith(github.ref, 'refs/heads/')` and `runs-on:
+   [self-hosted, ...]`, so the reuse job never runs for `pull_request` (and
+   cannot confirm reuse when self-hosted is unavailable) and `should_build`
+   stays at its `true` default. The #1835 fix is therefore the wiring/gate
+   change (make the reuse decision event-agnostic at the call site, per #1683
+   Phase 2), NOT a change to the reuse function. Left open because it is
+   production-affecting workflow wiring — strategy owned by the maintainer.
