@@ -1619,3 +1619,95 @@ reuse_stubs() {
   run_ci build-tools-fallback-allowed pull_request fork/lancache-ng wiki-mod/lancache-ng
   [ "$status" -ne 0 ]
 }
+
+# === full-setup suite gate (should_run) ===
+
+@test "full-setup-should-run: services change runs, docs-only and ci.sh-only do not" {
+  local f="$BATS_TEST_TMPDIR/fs-dir.txt"
+  printf 'services/proxy/nginx.conf\n' > "$f"
+  run ci_full_setup_should_run "$f"
+  [ "$status" -eq 0 ]
+  printf '%s\n' "docs/x.md" "README.md" > "$f"
+  run ci_full_setup_should_run "$f"
+  [ "$status" -eq 1 ]
+  printf 'scripts/ci/ci.sh\n' > "$f"
+  run ci_full_setup_should_run "$f"
+  [ "$status" -eq 1 ]
+}
+
+@test "full-setup-should-run: an unclassified scripts/ path fails safe to run" {
+  local f="$BATS_TEST_TMPDIR/fs-unc.txt"
+  printf 'scripts/lib/ghcr-retry.sh\n' > "$f"
+  run ci_full_setup_should_run "$f"
+  [ "$status" -eq 0 ]
+}
+
+@test "full-setup-should-run: missing changed-files input is an error (2)" {
+  run ci_full_setup_should_run "$BATS_TEST_TMPDIR/does-not-exist.txt"
+  [ "$status" -eq 2 ]
+}
+
+@test "full-setup-should-run matches detect-full-setup-changes.sh should_run (no drift)" {
+  # What: pins the ci.sh gate to the live script.
+  # Why: GITHUB_OUTPUT='' or the original emits nothing.
+  # From: Issue #1095 | Issue #1153
+  local f="$BATS_TEST_TMPDIR/fs-eq.txt"
+  local detector="$repo_root/scripts/untracked/detect-full-setup-changes.sh"
+  local cases=(
+    "scripts/ci/ci.sh"
+    "scripts/tracked/some-guard.sh"
+    "scripts/lib/ghcr-retry.sh"
+    "scripts/ci/ci.sh|scripts/brand-new-unclassified.sh"
+    "docs/x.md|README.md"
+    "services/proxy/nginx.conf"
+    "setup.sh"
+    ".github/actions/derive-validation-network/action.yml"
+    "EMPTY"
+  )
+  local c orig a
+  for c in "${cases[@]}"; do
+    if [ "$c" = "EMPTY" ]; then
+      : > "$f"
+    else
+      # shellcheck disable=SC2086
+      printf '%s\n' ${c//|/ } > "$f"
+    fi
+    orig="$(CHANGED_FILES="$f" GITHUB_OUTPUT="" bash "$detector" 2>/dev/null \
+      | grep -m1 '^should_run=' | cut -d= -f2)"
+    a=0
+    ci_full_setup_should_run "$f" || a=$?
+    if [ "$orig" = "true" ]; then
+      [ "$a" -eq 0 ]
+    else
+      [ "$a" -eq 1 ]
+    fi
+  done
+}
+
+@test "full-setup tooling-script allowlist equals the detector's array (no drift)" {
+  [ "${#CI_FULL_SETUP_TOOLING_SCRIPTS[@]}" -eq 1 ]
+  [ "${CI_FULL_SETUP_TOOLING_SCRIPTS[0]}" = "scripts/ci/ci.sh" ]
+  local empty="$BATS_TEST_TMPDIR/empty-allow.txt"
+  local orig
+  orig="$(bash -c '
+    : > "$1"
+    # shellcheck disable=SC1090
+    CHANGED_FILES="$1" source "'"$repo_root"'/scripts/untracked/detect-full-setup-changes.sh" >/dev/null
+    printf "%d\n" "${#ci_tooling_only_scripts[@]}"
+    printf "%s\n" "${ci_tooling_only_scripts[@]}"
+  ' _ "$empty")"
+  [ "$(sed -n 1p <<<"$orig")" = "${#CI_FULL_SETUP_TOOLING_SCRIPTS[@]}" ]
+  [ "$(sed -n 2p <<<"$orig")" = "${CI_FULL_SETUP_TOOLING_SCRIPTS[0]}" ]
+}
+
+@test "dispatch full-setup-should-run via executed ci.sh: run 0, no-run 1, missing input 2" {
+  local f="$BATS_TEST_TMPDIR/fs-disp.txt"
+  printf 'services/proxy/nginx.conf\n' > "$f"
+  run_ci full-setup-should-run "$f"
+  [ "$status" -eq 0 ]
+  printf 'scripts/ci/ci.sh\n' > "$f"
+  run_ci full-setup-should-run "$f"
+  [ "$status" -eq 1 ]
+  run_ci full-setup-should-run "$BATS_TEST_TMPDIR/does-not-exist.txt"
+  [ "$status" -eq 2 ]
+}

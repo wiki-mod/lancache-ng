@@ -722,6 +722,135 @@ ci_build_tools_fallback_allowed() {
   fi
 }
 
+# === FULL-SETUP SUITE GATE ===
+
+# What: CI-tooling scripts that alone never run the suite.
+# Why: ci.sh may drive builds but stays tooling-only here.
+# From: Issue #1095
+if [[ -z "${CI_FULL_SETUP_TOOLING_SCRIPTS+x}" ]]; then
+  readonly -a CI_FULL_SETUP_TOOLING_SCRIPTS=(
+    "scripts/ci/ci.sh"
+  )
+fi
+
+# ci_full_setup_touches_prefix <changed_files> <prefix>
+#
+# What: true if any changed path starts with <prefix>.
+# Why: internal to the full-setup gate; not a public API.
+# From: Issue #1095
+ci_full_setup_touches_prefix() {
+  local changed_files="$1" prefix="$2" path
+  while IFS= read -r path; do
+    [[ "$path" == "$prefix"* ]] && return 0
+  done < "$changed_files"
+  return 1
+}
+
+# ci_full_setup_touches_exact <changed_files> <expected_path>
+#
+# What: true if any changed path equals <expected_path>.
+# Why: internal to the full-setup gate; not a public API.
+# From: Issue #1095
+ci_full_setup_touches_exact() {
+  local changed_files="$1" expected="$2" path
+  while IFS= read -r path; do
+    [[ "$path" == "$expected" ]] && return 0
+  done < "$changed_files"
+  return 1
+}
+
+# ci_full_setup_scripts_beyond_allowlist <changed_files>
+#
+# What: true if a scripts/ path is outside CI-tooling.
+# Why: such a change must run the suite (fail-safe to run).
+# From: Issue #1095
+ci_full_setup_scripts_beyond_allowlist() {
+  local changed_files="$1" path known allowed
+  while IFS= read -r path; do
+    [[ "$path" == "scripts/"* ]] || continue
+    allowed=false
+    if [[ "$path" == "scripts/tracked/"* ]]; then
+      allowed=true
+    else
+      for known in "${CI_FULL_SETUP_TOOLING_SCRIPTS[@]}"; do
+        if [[ "$path" == "$known" ]]; then
+          allowed=true
+          break
+        fi
+      done
+    fi
+    [[ "$allowed" == "false" ]] && return 0
+  done < "$changed_files"
+  return 1
+}
+
+# ci_full_setup_should_run <changed_files>
+#
+# What: run the full-setup suite for this change set?
+# Why: NOOP-first gate; uncertainty fails safe to running.
+# From: Issue #1095 | Issue #1153
+ci_full_setup_should_run() {
+  local changed_files="${1:?ci_full_setup_should_run: changed_files is required}"
+  [[ -f "$changed_files" ]] || {
+    printf 'ci_full_setup_should_run: no such file: %s\n' \
+      "$changed_files" >&2
+    return 2
+  }
+  # What: classifier via seam; CHANGED_FILES mode, no git.
+  # Why: dependency is called, never copied into ci.sh.
+  # From: Issue #1095
+  local dir classifier classifier_output
+  dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  classifier="${CI_FULL_SETUP_CLASSIFY_SCRIPT:-$dir/../untracked/classify-image-impact.sh}"
+  classifier_output="$(CHANGED_FILES="$changed_files" bash "$classifier" 2>/dev/null)" || {
+    printf 'ci_full_setup_should_run: classifier failed: %s\n' \
+      "$changed_files" >&2
+    return 2
+  }
+  # What: only the 2 verdicts this decision consumes.
+  # Why: should_run needs only docs_only + workflow.
+  # From: Issue #1095
+  local docs_only workflow
+  docs_only="$(grep -m1 '^docs_only=' <<<"$classifier_output" | cut -d= -f2 || true)"
+  workflow="$(grep -m1 '^workflow=' <<<"$classifier_output" | cut -d= -f2 || true)"
+  case "$docs_only" in true|false) ;; *)
+    printf 'ci_full_setup_should_run: bad docs_only: %s\n' \
+      "${docs_only:-<missing>}" >&2
+    return 2 ;;
+  esac
+  case "$workflow" in true|false) ;; *)
+    printf 'ci_full_setup_should_run: bad workflow: %s\n' \
+      "${workflow:-<missing>}" >&2
+    return 2 ;;
+  esac
+  # What: an empty change set never runs the suite.
+  # Why: nothing changed, nothing to validate.
+  # From: Issue #1095
+  local any_changed=false path
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    any_changed=true
+    break
+  done < "$changed_files"
+  if [[ "$docs_only" == "true" || "$any_changed" == "false" ]]; then
+    return 1
+  fi
+  # What: any real build-input surface runs the suite.
+  # Why: faithful to detect-full-setup-changes.sh's gate.
+  # From: Issue #1095
+  if ci_full_setup_touches_prefix "$changed_files" "services/" \
+    || ci_full_setup_touches_prefix "$changed_files" "deploy/" \
+    || ci_full_setup_scripts_beyond_allowlist "$changed_files" \
+    || ci_full_setup_touches_prefix "$changed_files" "tools/build-tools/" \
+    || ci_full_setup_touches_prefix "$changed_files" ".github/workflows/" \
+    || ci_full_setup_touches_prefix "$changed_files" ".github/actions/" \
+    || ci_full_setup_touches_exact "$changed_files" "setup.sh" \
+    || [[ "$workflow" == "true" ]]; then
+    return 0
+  fi
+  return 1
+}
+
 # === CLUSTER 4: ACCEPTANCE LEDGER + ATTESTATION BOUNDARY ===
 
 # What: Named readback verdict codes, idempotent re-source.
@@ -1043,6 +1172,9 @@ commands:
   build-tools-fallback-allowed <event> <head_repo> <base_repo>
     exit 0=allowed 1=denied; a bare call under set -e aborts on
     the (non-error) denied case -- guard the call
+  full-setup-should-run <changed_files>
+    exit 0=run 1=no-run 2=error; a bare call under set -e aborts
+    on the (non-error) no-run case -- guard the call
   post-build-readback <expected_digest> <ref>
     exit 0=SUCCESS 1=MISMATCH 2=NOT_FOUND 3=UNKNOWN; all 4 fail
     closed, none of them may ever trigger a rebuild
@@ -1085,6 +1217,7 @@ ci_main() {
     push-reuse-decide) ci_push_reuse_decide "$@" ;;
     build-tools-channel) ci_build_tools_channel "$@" ;;
     build-tools-fallback-allowed) ci_build_tools_fallback_allowed "$@" ;;
+    full-setup-should-run) ci_full_setup_should_run "$@" ;;
     post-build-readback) ci_post_build_readback "$@" ;;
     attestation-state) ci_attestation_state "$@" ;;
     artifact-admission) ci_artifact_admission "$@" ;;
