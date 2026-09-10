@@ -845,6 +845,8 @@ struct FlushRequest {
     record_type: Option<String>,
     #[serde(default)]
     expected_content: Option<Vec<String>>,
+    #[serde(default)]
+    expected_ttl: Option<i32>,
 }
 
 // What: bounds in-process wait before Nak-redelivery.
@@ -863,26 +865,55 @@ const FLUSH_CONFIRM_MAX_DELIVERIES: i64 = 100;
 fn rrset_matches_expected(
     found: Option<&nats_subscriber::RRset>,
     expected_content: Option<&[String]>,
+    record_type: &str,
+    expected_ttl: Option<i32>,
 ) -> bool {
     match (found, expected_content) {
         (None, None) => true,
         (Some(_), None) | (None, Some(_)) => false,
         (Some(rrset), Some(expected)) => {
+            // A TTL-only replace keeps identical content but a new TTL; the
+            // content check alone would confirm before AXFR propagates it.
+            if let Some(exp_ttl) = expected_ttl
+                && rrset.ttl != Some(exp_ttl)
+            {
+                return false;
+            }
             let mut actual: Vec<String> = rrset
                 .records
                 .as_ref()
                 .map(|recs| {
                     recs.iter()
                         .filter_map(|r| r.get("content").and_then(|c| c.as_str()))
-                        .map(|s| s.to_string())
+                        .map(|s| canonicalize_record_content(s, record_type))
                         .collect()
                 })
                 .unwrap_or_default();
             actual.sort();
-            let mut expected_sorted = expected.to_vec();
+            let mut expected_sorted: Vec<String> = expected
+                .iter()
+                .map(|s| canonicalize_record_content(s, record_type))
+                .collect();
             expected_sorted.sort();
             actual == expected_sorted
         }
+    }
+}
+
+// What: canonicalizes record content for presentation-insensitive compare.
+// Why: AXFR rebuilds canonical RDATA; the UI may publish noncanonical text.
+// From: Issue #1095
+fn canonicalize_record_content(content: &str, record_type: &str) -> String {
+    match record_type {
+        "AAAA" => content
+            .parse::<std::net::Ipv6Addr>()
+            .map(|addr| addr.to_string())
+            .unwrap_or_else(|_| content.to_string()),
+        "A" => content
+            .parse::<std::net::Ipv4Addr>()
+            .map(|addr| addr.to_string())
+            .unwrap_or_else(|_| content.to_string()),
+        _ => content.to_string(),
     }
 }
 
@@ -894,6 +925,7 @@ async fn local_rrset_matches_expected(
     name: &str,
     record_type: &str,
     expected_content: Option<&[String]>,
+    expected_ttl: Option<i32>,
     pdns_api_key: &str,
     http_client: &Client,
 ) -> bool {
@@ -915,7 +947,7 @@ async fn local_rrset_matches_expected(
         .rrsets
         .iter()
         .find(|rr| rr.name == name && rr.record_type == record_type);
-    rrset_matches_expected(found, expected_content)
+    rrset_matches_expected(found, expected_content, record_type, expected_ttl)
 }
 
 async fn handle_dns_flush(
@@ -952,6 +984,7 @@ async fn handle_dns_flush(
                 &domain,
                 record_type,
                 req.expected_content.as_deref(),
+                req.expected_ttl,
                 pdns_api_key,
                 http_client,
             )
@@ -1153,7 +1186,7 @@ mod tests {
     // From: Issue #1095
     #[test]
     fn rrset_matches_expected_when_absent_and_absence_expected() {
-        assert!(rrset_matches_expected(None, None));
+        assert!(rrset_matches_expected(None, None, "A", None));
     }
 
     // What: a still-present RRset fails an expected-absent check.
@@ -1162,7 +1195,7 @@ mod tests {
     #[test]
     fn rrset_matches_expected_rejects_still_present_when_absence_expected() {
         let rrset = rrset_with_content("10.0.0.5");
-        assert!(!rrset_matches_expected(Some(&rrset), None));
+        assert!(!rrset_matches_expected(Some(&rrset), None, "A", None));
     }
 
     // What: an absent RRset fails an expected-content check.
@@ -1171,7 +1204,7 @@ mod tests {
     #[test]
     fn rrset_matches_expected_rejects_still_absent_when_content_expected() {
         let expected = vec!["10.0.0.5".to_string()];
-        assert!(!rrset_matches_expected(None, Some(&expected)));
+        assert!(!rrset_matches_expected(None, Some(&expected), "A", None));
     }
 
     // What: matching content passes regardless of record order.
@@ -1191,7 +1224,12 @@ mod tests {
             records: Some(vec![record_b, record_a]),
         };
         let expected = vec!["10.0.0.5".to_string(), "10.0.0.6".to_string()];
-        assert!(rrset_matches_expected(Some(&rrset), Some(&expected)));
+        assert!(rrset_matches_expected(
+            Some(&rrset),
+            Some(&expected),
+            "A",
+            None
+        ));
     }
 
     // What: stale content fails an expected-content check.
@@ -1201,7 +1239,56 @@ mod tests {
     fn rrset_matches_expected_rejects_stale_content() {
         let rrset = rrset_with_content("10.0.0.5");
         let expected = vec!["10.0.0.9".to_string()];
-        assert!(!rrset_matches_expected(Some(&rrset), Some(&expected)));
+        assert!(!rrset_matches_expected(
+            Some(&rrset),
+            Some(&expected),
+            "A",
+            None
+        ));
+    }
+
+    // What: a noncanonical AAAA matches PowerDNS's canonical AXFR form.
+    // Why: expanded/uppercase IPv6 must not fail flush confirmation.
+    // From: Issue #1095
+    #[test]
+    fn rrset_matches_expected_canonicalizes_noncanonical_aaaa() {
+        let mut record = HashMap::new();
+        record.insert("content".to_string(), json!("2001:db8::1"));
+        let rrset = RRset {
+            name: "host.lan.".to_string(),
+            record_type: "AAAA".to_string(),
+            ttl: Some(60),
+            changetype: None,
+            records: Some(vec![record]),
+        };
+        let expected = vec!["2001:0DB8:0000:0000:0000:0000:0000:0001".to_string()];
+        assert!(rrset_matches_expected(
+            Some(&rrset),
+            Some(&expected),
+            "AAAA",
+            None
+        ));
+    }
+
+    // What: identical content with a different TTL fails confirmation.
+    // Why: a TTL-only replace must wait for AXFR, not flush early.
+    // From: Issue #1095
+    #[test]
+    fn rrset_matches_expected_rejects_ttl_only_change() {
+        let rrset = rrset_with_content("10.0.0.5");
+        let expected = vec!["10.0.0.5".to_string()];
+        assert!(!rrset_matches_expected(
+            Some(&rrset),
+            Some(&expected),
+            "A",
+            Some(300)
+        ));
+        assert!(rrset_matches_expected(
+            Some(&rrset),
+            Some(&expected),
+            "A",
+            Some(60)
+        ));
     }
 
     // What: PATCH URL always strips zone trailing dot.
