@@ -246,9 +246,7 @@ bcc_is_known_named_context() {
 # CI matrix declaring each service's named build contexts.
 BCC_BUILD_PUSH_YML=".github/workflows/build-push.yml"
 
-# bcc_assert_allowlist_covers_ci_contexts
-# What: every build_contexts name in build-push.yml is
-# in the allowlist, so no CI context escapes this guard.
+# What: allowlist covers every build-push.yml context.
 # Why: a new named context would else pass unverified.
 # From: Issue #1095 (PR #1836 review: #2)
 bcc_assert_allowlist_covers_ci_contexts() {
