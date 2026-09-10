@@ -246,6 +246,25 @@ bcc_is_known_named_context() {
 # CI matrix declaring each service's named build contexts.
 BCC_BUILD_PUSH_YML=".github/workflows/build-push.yml"
 
+# What: prints each build_contexts name in the CI matrix.
+# Why: read names value-independently, not just paths.
+# From: Issue #1095 (PR #1836 review: #2)
+bcc_ci_declared_contexts() {
+    awk '
+        /build_contexts:[[:space:]]*\|[[:space:]]*$/ { in_block = 1; next }
+        /build_contexts:[[:space:]]*[^|[:space:]]/ {
+            line = $0; sub(/.*build_contexts:[[:space:]]*/, "", line)
+            if (line ~ /=/) { split(line, a, "="); gsub(/[[:space:]]/, "", a[1]); print a[1] }
+            in_block = 0; next
+        }
+        in_block {
+            if ($0 ~ /^[[:space:]]+[a-z][a-z0-9_-]*=/) {
+                line = $0; sub(/^[[:space:]]+/, "", line); split(line, a, "="); print a[1]
+            } else if ($0 ~ /^[[:space:]]*[a-zA-Z_-]+:/ || $0 !~ /[^[:space:]]/) { in_block = 0 }
+        }
+    ' "$BCC_BUILD_PUSH_YML" | sort -u
+}
+
 # What: allowlist covers every build-push.yml context.
 # Why: a new named context would else pass unverified.
 # From: Issue #1095 (PR #1836 review: #2)
@@ -255,14 +274,17 @@ bcc_assert_allowlist_covers_ci_contexts() {
     while IFS= read -r name; do
         [[ -n "$name" ]] || continue
         bcc_is_known_named_context "$name" || fail "check-registry-login-coverage (build-context): $BCC_BUILD_PUSH_YML declares build context '$name' absent from BCC_KNOWN_NAMED_CONTEXTS -- add '$name' there so simulations are verified to supply it."
-    done < <(grep -oE '[a-z][a-z0-9-]*=(services|scripts|tools)/' "$BCC_BUILD_PUSH_YML" | sed 's/=.*//' | sort -u)
+    done < <(bcc_ci_declared_contexts)
 }
 
 # bcc_all_named_contexts_for_dockerfile <dockerfile>
 # Prints every external named build context (known or not), one per line.
 bcc_all_named_contexts_for_dockerfile() {
     local dockerfile="$1"
-    awk '
+    # What: join \-continued lines before matching COPY --from.
+    # Why: COPY and --from= can sit on separate physical lines.
+    # From: Issue #1095 (PR #1836 review: #3)
+    bcc_join_continued_lines "$dockerfile" | awk '
         BEGIN { IGNORECASE = 1 }
         /^[ \t]*#/ { next }
         /^FROM[ \t]/ {
@@ -285,7 +307,7 @@ bcc_all_named_contexts_for_dockerfile() {
                 print name
             }
         }
-    ' "$dockerfile" | sort -u
+    ' | sort -u
 }
 
 # bcc_required_contexts_for_dockerfile <dockerfile>
@@ -312,6 +334,30 @@ bcc_join_continued_lines() {
     done < "$file"
 }
 
+# What: prints the docker build positional PATH argument.
+# Why: last bare token skips flags and name=VALUE opts.
+# From: Issue #1095 (PR #1836 review: #5/#6)
+bcc_positional_context() {
+    local invocation
+    invocation=$(bcc_strip_inline_comment "$1")
+    awk 'BEGIN { dq = sprintf("%c", 34); sq = sprintf("%c", 39) }
+    {
+        inq = 0; qc = ""; tok = ""; last = ""; n = length($0)
+        for (i = 1; i <= n; i++) {
+            c = substr($0, i, 1)
+            if (inq) { tok = tok c; if (c == qc) inq = 0; continue }
+            if (c == dq || c == sq) { inq = 1; qc = c; continue }
+            if (c == " " || c == "\t") {
+                if (tok != "") { if (tok !~ /^-/ && tok !~ /=/ && tok !~ /[<>]/) last = tok; tok = "" }
+                continue
+            }
+            tok = tok c
+        }
+        if (tok != "") { if (tok !~ /^-/ && tok !~ /=/ && tok !~ /[<>]/) last = tok }
+        print last
+    }' <<<"$invocation"
+}
+
 # What: resolves the Dockerfile path from -f or context.
 # Why: a path prefix like $repo_root/ must still resolve.
 # From: Issue #1095
@@ -332,9 +378,13 @@ bcc_target_dockerfile_for_invocation() {
         # (e.g. a synthetic fixture) is out of this check's scope.
         return 0
     fi
-    ctx=$(grep -oE 'services/[A-Za-z0-9_-]+' <<<"$invocation" | tail -1) || true
-    if [[ -n "$ctx" ]]; then
-        printf '%s/Dockerfile\n' "$ctx"
+    # What: derive the Dockerfile from the positional context only.
+    # Why: a services/* value in --build-context is not the target.
+    # From: Issue #1095 (PR #1836 review: #5/#6)
+    ctx=$(bcc_positional_context "$invocation")
+    resolved=$(grep -oE 'services/[A-Za-z0-9_-]+/?$' <<<"$ctx") || true
+    if [[ -n "$resolved" ]]; then
+        printf '%s/Dockerfile\n' "${resolved%/}"
     fi
     return 0
 }

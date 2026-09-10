@@ -721,3 +721,37 @@ EOF
     run "$script" "$fixture_root"
     [ "$status" -eq 0 ]
 }
+
+@test "ip-pin: a comment mentioning services/dhcp does not exempt a non-DHCP mixed sim (#7)" {
+    write_ippin_context
+    cat > "$fixture_root/scripts/untracked/simulations/ippin-comment-simulation.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$repo_root/scripts/lib/reserve-validation-subnet.sh"
+# this sim references services/dhcp in a comment but never builds it
+docker network create --subnet "172.29.82.0/24" fake-net
+docker run -d --name server --network fake-net --ip 172.29.82.2 img
+docker run -d --name other --network fake-net img
+EOF
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"ippin-comment-simulation.sh"* ]]
+    [[ "$output" == *"#1850"* ]]
+}
+
+@test "ip-pin: an echo mentioning docker run --network is not counted as a container (#8)" {
+    write_ippin_context
+    cat > "$fixture_root/scripts/untracked/simulations/ippin-echo-simulation.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$repo_root/scripts/lib/reserve-validation-subnet.sh"
+docker network create --subnet "172.29.83.0/24" ippin-net
+docker run -d --name a --network ippin-net --ip 172.29.83.2 img
+docker run -d --name b --network ippin-net --ip 172.29.83.3 img
+echo "example: docker run -d --network review-net image-b"
+EOF
+
+    run "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+}

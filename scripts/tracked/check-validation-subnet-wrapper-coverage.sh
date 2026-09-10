@@ -324,37 +324,94 @@ script_reads_validation_subnet_env() {
     return 1
 }
 
-# What: flag a --subnet sim mixing pinned and unpinned IPs.
-# Why: auto-IPAM can reassign a pinned address (#1850).
-# From: Issue #1850
-check_simulation_ip_pinning() {
-    local file="$1" line logical="" leading_ws stripped
-    local pinned=0 unpinned=0 first_unpinned=""
+# What: split a line on top-level && || ; separators.
+# Why: each command on a line must be classified alone.
+# From: Issue #1850 (PR #1836 review: #8)
+svc_split_commands() {
+    awk 'BEGIN { dq = sprintf("%c", 34); sq = sprintf("%c", 39) }
+    {
+        inq = 0; qc = ""; seg = ""; n = length($0)
+        for (i = 1; i <= n; i++) {
+            c = substr($0, i, 1)
+            if (inq) { seg = seg c; if (c == qc) inq = 0; continue }
+            if (c == dq || c == sq) { inq = 1; qc = c; seg = seg c; continue }
+            two = substr($0, i, 2)
+            if (two == "&&" || two == "||") { print seg; seg = ""; i++; continue }
+            if (c == ";") { print seg; seg = ""; continue }
+            seg = seg c
+        }
+        print seg
+    }' <<<"$1"
+}
+
+# What: drops leading env-assignments and control keywords.
+# Why: leaves docker at command position for matching.
+# From: Issue #1850 (PR #1836 review: #8)
+# Note: mirrors check-registry-login-coverage.sh's bcc_* helpers;
+# hoisting to scripts/lib is a separate maintainer decision.
+svc_strip_command_prefix() {
+    SVC_STRIPPED="${1#"${1%%[![:space:]]*}"}"
+    while [[ "$SVC_STRIPPED" =~ ^(if|then|else|elif|while|until|do|!)[[:space:]]+ ]]; do
+        SVC_STRIPPED="${SVC_STRIPPED#"${BASH_REMATCH[0]}"}"
+    done
+    while [[ "$SVC_STRIPPED" =~ ^[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+ ]]; do
+        SVC_STRIPPED="${SVC_STRIPPED#"${BASH_REMATCH[0]}"}"
+    done
+}
+
+# svc_for_each_command <file> -- joins \-continuations, splits each
+# logical line into top-level commands, strips the command prefix, and
+# prints one command-position-normalized command per line (SVC_STRIPPED
+# form). Callers match `^docker ...` against real commands only.
+svc_for_each_command() {
+    local file="$1" line logical="" stripped segment
     while IFS= read -r line || [[ -n "$line" ]]; do
         if [[ "$line" == *\\ ]]; then
             logical+="${line%\\} "
             continue
         fi
         logical+="$line"
-        leading_ws="${logical%%[^[:space:]]*}"
-        stripped="${logical#"$leading_ws"}"
+        stripped="$logical"
         logical=""
-        case "$stripped" in
-            '#'* | '') continue ;;
-        esac
-        [[ "$stripped" == *"docker run"* ]] || continue
-        [[ "$stripped" == *"--network"* ]] || continue
-        [[ "$stripped" == *"--rm"* ]] && continue
-        if [[ "$stripped" == *"--ip "* || "$stripped" == *"--ip="* ]]; then
+        while IFS= read -r segment; do
+            svc_strip_command_prefix "$segment"
+            [[ -n "$SVC_STRIPPED" ]] && printf '%s\n' "$SVC_STRIPPED"
+        done < <(svc_split_commands "$stripped")
+    done < "$file"
+}
+
+# What: flag a --subnet sim mixing pinned and unpinned IPs.
+# Why: auto-IPAM can reassign a pinned address (#1850).
+# From: Issue #1850
+check_simulation_ip_pinning() {
+    local file="$1" cmd
+    local pinned=0 unpinned=0 first_unpinned=""
+    while IFS= read -r cmd; do
+        [[ "$cmd" =~ ^docker[[:space:]]+run([[:space:]]|$) ]] || continue
+        [[ "$cmd" == *"--network"* ]] || continue
+        [[ "$cmd" == *"--rm"* ]] && continue
+        if [[ "$cmd" == *"--ip "* || "$cmd" == *"--ip="* ]]; then
             pinned=$((pinned + 1))
         else
             unpinned=$((unpinned + 1))
-            [[ -z "$first_unpinned" ]] && first_unpinned="$stripped"
+            [[ -z "$first_unpinned" ]] && first_unpinned="$cmd"
         fi
-    done < "$file"
+    done < <(svc_for_each_command "$file")
     if [[ "$pinned" -gt 0 && "$unpinned" -gt 0 ]]; then
         fail "check-validation-subnet-wrapper-coverage: $file mixes an --ip-pinned and an unpinned --network container on its own --subnet network ($pinned pinned, $unpinned unpinned) -- the #1850 IP-collision class: Docker auto-IPAM can hand a pinned container's address to an unpinned one. Give every non-ephemeral (no --rm) --network container an explicit --ip (DHCP-client sims are exempted upstream). First unpinned: ${first_unpinned:0:120}"
     fi
+}
+
+# What: true when a real docker build targets services/dhcp*.
+# Why: a DHCP server-image build identifies a DHCP sim.
+# From: Issue #1850 (PR #1836 review: #7)
+svc_builds_dhcp_image() {
+    local file="$1" cmd
+    while IFS= read -r cmd; do
+        [[ "$cmd" =~ ^docker[[:space:]]+(buildx[[:space:]]+)?build([[:space:]]|$) ]] || continue
+        [[ "$cmd" == *"services/dhcp"* ]] && return 0
+    done < <(svc_for_each_command "$file")
+    return 1
 }
 
 # check_simulation_script <file>
@@ -375,10 +432,10 @@ check_simulation_script() {
     fi
     scripts_examined_with_subnet_creation=$((scripts_examined_with_subnet_creation + 1))
 
-    # What: run the #1850 IP-pin check on non-DHCP subnet sims.
-    # Why: DHCP sims mix pinned servers and lease clients.
-    # From: Issue #1850
-    if [[ "$content" != *"services/dhcp"* ]]; then
+    # What: exempt sims that build the DHCP server image.
+    # Why: a DHCP client leases its IP; no static --ip possible.
+    # From: Issue #1850 (PR #1836 review: #7)
+    if ! svc_builds_dhcp_image "$file"; then
         check_simulation_ip_pinning "$file"
     fi
 

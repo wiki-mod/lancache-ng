@@ -538,9 +538,9 @@ nats_probe_out="$(docker run --rm --network "$network_name" \
     -e "NATS_AUTH_MARKER=$marker_nats" \
     "$BUILD_TOOLS_IMAGE" bash -c '
         exec 3<>/dev/tcp/nats/4222 || { echo "CONNECT_FAILED: cannot open /dev/tcp/nats/4222"; exit 1; }
-        read -r -t 5 info <&3
+        read -r -t 5 info <&3 || { echo "READ_FAILED: no server INFO greeting within 5s"; exit 1; }
         printf "CONNECT {\"user\":\"%s\",\"pass\":\"wrong\",\"verbose\":false,\"pedantic\":false}\r\n" "$NATS_AUTH_MARKER" >&3
-        read -r -t 3 err <&3
+        read -r -t 3 err <&3 || { echo "READ_FAILED: no auth reply within 3s"; exit 1; }
         sleep 1
         printf "server-info: %s\nserver-reply: %s\n" "$info" "$err"
     ' 2>&1)" || nats_probe_status=$?
