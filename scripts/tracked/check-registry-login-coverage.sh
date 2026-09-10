@@ -287,7 +287,7 @@ bcc_all_named_contexts_for_dockerfile() {
     bcc_join_continued_lines "$dockerfile" | awk '
         BEGIN { IGNORECASE = 1 }
         /^[ \t]*#/ { next }
-        /^FROM[ \t]/ {
+        /^[ \t]*FROM[ \t]/ {
             for (i = 1; i <= NF; i++) {
                 if (toupper($i) == "AS" && (i + 1) <= NF) { stages[$(i + 1)] = 1 }
             }

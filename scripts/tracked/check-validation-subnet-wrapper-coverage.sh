@@ -380,26 +380,37 @@ svc_for_each_command() {
     done < "$file"
 }
 
+# What: prints the --network value of a docker run command.
+# Why: the #1850 collision is per-network, not per-file.
+# From: Issue #1850 (PR #1836 review: network scoping)
+svc_network_of() {
+    [[ "$1" =~ --network[[:space:]=]+([^[:space:]]+) ]] && printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
 # What: flag a --subnet sim mixing pinned and unpinned IPs.
 # Why: auto-IPAM can reassign a pinned address (#1850).
 # From: Issue #1850
 check_simulation_ip_pinning() {
-    local file="$1" cmd
-    local pinned=0 unpinned=0 first_unpinned=""
+    local file="$1" cmd net
+    local -A pinned=() unpinned=() first_unpinned=()
     while IFS= read -r cmd; do
         [[ "$cmd" =~ ^docker[[:space:]]+run([[:space:]]|$) ]] || continue
         [[ "$cmd" == *"--network"* ]] || continue
         [[ "$cmd" == *"--rm"* ]] && continue
+        net="$(svc_network_of "$cmd")"
+        [[ -n "$net" ]] || continue
         if [[ "$cmd" == *"--ip "* || "$cmd" == *"--ip="* ]]; then
-            pinned=$((pinned + 1))
+            pinned["$net"]=$(( ${pinned["$net"]:-0} + 1 ))
         else
-            unpinned=$((unpinned + 1))
-            [[ -z "$first_unpinned" ]] && first_unpinned="$cmd"
+            unpinned["$net"]=$(( ${unpinned["$net"]:-0} + 1 ))
+            [[ -n "${first_unpinned["$net"]:-}" ]] || first_unpinned["$net"]="$cmd"
         fi
     done < <(svc_for_each_command "$file")
-    if [[ "$pinned" -gt 0 && "$unpinned" -gt 0 ]]; then
-        fail "check-validation-subnet-wrapper-coverage: $file mixes an --ip-pinned and an unpinned --network container on its own --subnet network ($pinned pinned, $unpinned unpinned) -- the #1850 IP-collision class: Docker auto-IPAM can hand a pinned container's address to an unpinned one. Give every non-ephemeral (no --rm) --network container an explicit --ip (DHCP-client sims are exempted upstream). First unpinned: ${first_unpinned:0:120}"
-    fi
+    for net in "${!pinned[@]}"; do
+        if [[ ${pinned["$net"]:-0} -gt 0 && ${unpinned["$net"]:-0} -gt 0 ]]; then
+            fail "check-validation-subnet-wrapper-coverage: $file mixes an --ip-pinned and an unpinned --network container on network $net (${pinned[$net]} pinned, ${unpinned[$net]} unpinned) -- the #1850 IP-collision class: Docker auto-IPAM can hand a pinned container's address to an unpinned one. Give every non-ephemeral (no --rm) --network container on that network an explicit --ip (DHCP-client sims are exempted upstream). First unpinned: ${first_unpinned[$net]:0:120}"
+        fi
+    done
 }
 
 # What: true when a real docker build targets services/dhcp*.

@@ -487,12 +487,16 @@ assert_marker_reaches_ui() {
     "${compose[@]}" exec -T ui sh -c 'grep -r "" /var/log/lancache-syslog-ng/ 2>/dev/null | tail -n 200' || true
     echo "::endgroup::"
     if (( ${#source_containers[@]} > 0 )); then
-        # What: dumps each source container's raw logs.
-        # Why: not-logged vs. forwarded (AG-INT-002).
+        # What: dumps each source container's stdout and file logs.
+        # Why: some services log to a file, not stdout (AG-INT-002).
         # From: Issue #1095 (PR #1836)
-        echo "::group::raw container logs (${source_containers[*]}): did any emit the marker?"
-        "${compose[@]}" logs --no-color --tail=100 "${source_containers[@]}" 2>&1 || true
-        echo "::endgroup::"
+        local sc
+        for sc in "${source_containers[@]}"; do
+            echo "::group::raw logs for $sc (stdout + file-backed): did it emit the marker?"
+            "${compose[@]}" logs --no-color --tail=100 "$sc" 2>&1 || true
+            "${compose[@]}" exec -T "$sc" sh -c 'find /var/log -maxdepth 2 -name "*.log" -exec tail -n 100 {} + 2>/dev/null' 2>/dev/null || true
+            echo "::endgroup::"
+        done
     fi
     return 1
 }

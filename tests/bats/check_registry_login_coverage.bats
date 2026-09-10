@@ -749,3 +749,17 @@ EOF
     [ "$status" -ne 0 ]
     [[ "$output" == *"shared-scripts"* ]]
 }
+
+@test "build-context: an indented internal FROM ... AS stage is not a required context (#C)" {
+    bcc_write_widget_dockerfile
+    cat > "$fixture_root/services/widget/Dockerfile" <<'EOF'
+FROM alpine
+    FROM alpine AS shared-scripts
+FROM alpine
+COPY --from=shared-scripts x /x
+EOF
+    bcc_write_widget_sim 'docker build -q -t widget services/widget >/dev/null'
+
+    run "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+}

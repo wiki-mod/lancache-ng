@@ -755,3 +755,18 @@ EOF
     run "$script" "$fixture_root"
     [ "$status" -eq 0 ]
 }
+
+@test "ip-pin: does not combine a pinned and unpinned container on different networks (#A)" {
+    write_ippin_context
+    cat > "$fixture_root/scripts/untracked/simulations/ippin-multinet-simulation.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$repo_root/scripts/lib/reserve-validation-subnet.sh"
+docker network create --subnet "172.29.84.0/24" ippin-net
+docker run -d --name server --network ippin-net --ip 172.29.84.2 img
+docker run -d --name aux --network other-net img
+EOF
+
+    run "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+}
