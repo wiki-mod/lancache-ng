@@ -638,3 +638,135 @@ EOF
     [ "$status" -ne 0 ]
     [[ "$output" == *"found zero scripts"* ]]
 }
+
+write_ippin_context() {
+    write_trivial_deep_validate_yml
+    write_validate_yml '  compute-validation-network:
+    runs-on: ubuntu-latest
+    outputs:
+      subnet: ${{ steps.derive.outputs.subnet }}
+    steps:
+      - run: echo derive
+
+  ssl-mitm-cache-simulation:
+    needs: compute-validation-network
+    runs-on: ubuntu-latest
+    env:
+      VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
+    steps:
+      - run: |
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/untracked/simulations/ssl-mitm-cache-simulation.sh
+'
+}
+
+@test "ip-pin: fails when a non-DHCP subnet sim mixes a pinned and an unpinned container" {
+    write_ippin_context
+    cat > "$fixture_root/scripts/untracked/simulations/ippin-mix-simulation.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$repo_root/scripts/lib/reserve-validation-subnet.sh"
+docker network create --subnet "172.29.80.0/24" ippin-net
+docker run -d --name server --network ippin-net --ip 172.29.80.2 img
+docker run -d --name other --network ippin-net img
+EOF
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"ippin-mix-simulation.sh"* ]]
+    [[ "$output" == *"#1850"* ]]
+}
+
+@test "ip-pin: passes when a non-DHCP subnet sim pins every container" {
+    write_ippin_context
+    cat > "$fixture_root/scripts/untracked/simulations/ippin-allpinned-simulation.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$repo_root/scripts/lib/reserve-validation-subnet.sh"
+docker network create --subnet "172.29.80.0/24" ippin-net
+docker run -d --name a --network ippin-net --ip 172.29.80.2 img
+docker run -d --name b --network ippin-net --ip 172.29.80.3 img
+EOF
+
+    run "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+}
+
+@test "ip-pin: passes when a non-DHCP subnet sim pins no container" {
+    write_ippin_context
+    cat > "$fixture_root/scripts/untracked/simulations/ippin-allauto-simulation.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$repo_root/scripts/lib/reserve-validation-subnet.sh"
+docker network create --subnet "172.29.80.0/24" ippin-net
+docker run -d --name a --network ippin-net img
+docker run -d --name b --network ippin-net img
+EOF
+
+    run "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+}
+
+@test "ip-pin: exempts a DHCP simulation (building services/dhcp) from the mix rule" {
+    write_ippin_context
+    cat > "$fixture_root/scripts/untracked/simulations/ippin-dhcp-simulation.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$repo_root/scripts/lib/reserve-validation-subnet.sh"
+docker network create --subnet "172.29.81.0/24" dhcpmix-net
+docker build -q services/dhcp -t kea >/dev/null
+docker run -d --name kea --network dhcpmix-net --ip 172.29.81.2 kea
+docker run -d --name client --network dhcpmix-net kea
+EOF
+
+    run "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+}
+
+@test "ip-pin: a comment mentioning services/dhcp does not exempt a non-DHCP mixed sim (#7)" {
+    write_ippin_context
+    cat > "$fixture_root/scripts/untracked/simulations/ippin-comment-simulation.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$repo_root/scripts/lib/reserve-validation-subnet.sh"
+# this sim references services/dhcp in a comment but never builds it
+docker network create --subnet "172.29.82.0/24" fake-net
+docker run -d --name server --network fake-net --ip 172.29.82.2 img
+docker run -d --name other --network fake-net img
+EOF
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"ippin-comment-simulation.sh"* ]]
+    [[ "$output" == *"#1850"* ]]
+}
+
+@test "ip-pin: an echo mentioning docker run --network is not counted as a container (#8)" {
+    write_ippin_context
+    cat > "$fixture_root/scripts/untracked/simulations/ippin-echo-simulation.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$repo_root/scripts/lib/reserve-validation-subnet.sh"
+docker network create --subnet "172.29.83.0/24" ippin-net
+docker run -d --name a --network ippin-net --ip 172.29.83.2 img
+docker run -d --name b --network ippin-net --ip 172.29.83.3 img
+echo "example: docker run -d --network review-net image-b"
+EOF
+
+    run "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+}
+
+@test "ip-pin: does not combine a pinned and unpinned container on different networks (#A)" {
+    write_ippin_context
+    cat > "$fixture_root/scripts/untracked/simulations/ippin-multinet-simulation.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$repo_root/scripts/lib/reserve-validation-subnet.sh"
+docker network create --subnet "172.29.84.0/24" ippin-net
+docker run -d --name server --network ippin-net --ip 172.29.84.2 img
+docker run -d --name aux --network other-net img
+EOF
+
+    run "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+}

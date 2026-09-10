@@ -56,6 +56,9 @@ cleanup() {
 trap cleanup EXIT
 
 echo "== Building the dhcp-proxy image from this checkout's services/dhcp-proxy =="
+# What: passes shared-scripts as a named build context.
+# Why: else COPY --from=shared-scripts triggers a bad pull.
+# From: Issue #1095
 docker build -q -t "$image_tag" --build-context "shared-scripts=$repo_root/scripts/lib" services/dhcp-proxy >/dev/null
 
 # What: Use 172.29.0.0/16 with flock+retry.

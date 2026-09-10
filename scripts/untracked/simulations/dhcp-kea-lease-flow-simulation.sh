@@ -41,10 +41,9 @@ if command -v dhclient >/dev/null 2>&1; then
 elif command -v udhcpc >/dev/null 2>&1 || command -v busybox >/dev/null 2>&1; then
     cat > /tmp/udhcpc-lease-capture.sh <<'HOOK_SCRIPT'
 #!/bin/sh
-# See dhcp_client_capture_script's own comment in
-# dhcp-kea-lease-flow-simulation.sh for why this hook exists and why it
-# never mutates interface/route state: it contains no ip/ifconfig/route
-# call at all, only ever appending option values to a file.
+# What: appends only DHCP option values to a file.
+# Why: never mutates interface/route state (no ip/route).
+# From: Issue #448
 [ "$1" = "bound" ] || [ "$1" = "renew" ] || exit 0
 csv() { printf '%s' "$1" | tr ' ' ','; }
 {
@@ -136,6 +135,9 @@ cleanup() {
 trap cleanup EXIT
 
 echo "== Building the Kea DHCP image from this checkout's services/dhcp =="
+# What: passes shared-scripts as a named build context.
+# Why: else COPY --from=shared-scripts triggers a bad pull.
+# From: Issue #1095
 docker build -q -t "$image_tag" --build-context "shared-scripts=$repo_root/scripts/lib" services/dhcp >/dev/null
 
 # What: Uses flock+retry for dynamic subnet allocation.
@@ -725,8 +727,8 @@ ordinary dynamic-pool address rather than the reservation. Also verified:
 the granted lease produced a matching PowerDNS A record via a real
 TSIG-authenticated DDNS update from kea-dhcp-ddns to a real PowerDNS
 authoritative server, using this project's real DDNS transport/config
-wiring (see the header comment above for the one test-only zone-bootstrap
-shim this run needed and why). Also verified (issue #768): the same lease
+wiring; the only test-only step is bootstrapping this run's forward test
+zone (production zones already exist). Also verified (issue #768): the same lease
 produced a matching PowerDNS PTR record, proving Kea's reverse-ddns fix
 (one ddns-domains entry per real private reverse zone, instead of the old
 non-existent "in-addr.arpa." catch-all) actually resolves against a real
@@ -734,7 +736,7 @@ PowerDNS instance -- no test-only zone-bootstrap shim needed for this half,
 since this script's subnet always falls inside a zone
 services/dns/entrypoint.sh creates unconditionally.
 
-NOT verified by this script (see header comment / docs/dhcp-modes.md):
+NOT verified by this script (see docs/dhcp-modes.md):
 the dnsmasq-proxy DHCP mode (out of scope here).
 REPORT
 )

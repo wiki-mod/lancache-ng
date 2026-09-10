@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-#
 # What: Tests proxy standard-mode SNI passthrough routing.
 # Why: Verify wildcard routes to SNI, not derived root.
 # From: Issue #1297
@@ -12,10 +11,8 @@ cd "$repo_root"
 
 build_tools_image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
 
-# Unique per-invocation suffix for every Docker resource this script creates
-# -- avoids name collisions with a concurrent run of this same script (or
-# the sibling deep-wildcard script) on a shared self-hosted runner host, the
-# same reasoning as that script's own header comment.
+# What: suffixes every Docker resource name with run_id.
+# Why: avoids collisions with a concurrent sibling-sim run.
 run_id="$(date +%s)-$$"
 network_name="proxy-sni-route-sim-${run_id}"
 proxy_image="proxy-sni-route-sim:fixture-${run_id}"
@@ -65,6 +62,9 @@ docker run --rm -v "$work_dir:/certs" -w /certs "$build_tools_image" bash -c \
     "openssl req -x509 -newkey rsa:2048 -nodes -keyout sub.key -out sub.crt -days 1 -subj '/CN=backend-sub' 2>/dev/null" >/dev/null
 
 echo "== Building throwaway proxy image with synthetic cdn-domains.txt fixture (sub.example.com) =="
+# What: passes shared-scripts as a named build context.
+# Why: else COPY --from=shared-scripts triggers a bad pull.
+# From: Issue #1095
 docker build -q -t "$proxy_image" --build-context "dns-domains=$work_dir/fixture" --build-context "shared-scripts=$repo_root/scripts/lib" services/proxy >/dev/null
 
 docker network create "$network_name" >/dev/null

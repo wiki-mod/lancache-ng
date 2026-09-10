@@ -1851,6 +1851,19 @@ omitted):**
     does not exempt a Dockerfile author from checking their own edits by
     hand in the meantime.
 
+- **Recorded exception (2026-09-07, PR #1836, Rule-Ref: AG-VAL-029): `build-tools-smoke.yml`'s two new path-filter entries have no dedicated regression test.**
+  - **Scope**: the `scripts/untracked/simulations/**` and `services/*/Dockerfile` entries added to `build-tools-smoke.yml`'s `on.push.paths`/`on.pull_request.paths` (PR #1836, fixing the `check-registry-login-coverage.sh` build-context guard not being exercised by CI when only a simulation script or a Dockerfile changed).
+  - **Reason**: `scripts/tracked/check-bats-path-filter-coverage.sh` (issue #879's guard) derives its coverage set from bats string references, not from arbitrary glob path-filter entries; it re-confirmed 112/112 known bats dependencies still covered after this addition, but that guard has no mechanism to notice if either of these two new, non-bats-derived glob entries were later silently removed.
+  - **Tracking**: PR #1836.
+  - **Validation**: manual — before removing or narrowing either path-filter entry, confirm `scripts/tracked/check-registry-login-coverage.sh` (and any future guard reading `scripts/untracked/simulations/**` or `services/*/Dockerfile`) still gets exercised by `build-tools-smoke.yml` on the relevant change.
+  - **Non-Expansion**: this exception covers only these two specific path-filter entries in `build-tools-smoke.yml`. It does not exempt other path-filter changes from `check-bats-path-filter-coverage.sh`'s existing bats-derived coverage.
+
+- **Resolved (2026-09-07, updated PR #1836, issue #1850, Rule-Ref: AG-VAL-029): mixing fixed-IP and auto-IPAM containers on a simulation's own `--subnet` network is now caught by a mechanical guard for non-DHCP simulations; DHCP simulations remain manually reviewed for the technical reason below.**
+  - **Scope**: any simulation script that stands up its own `docker network create --subnet` network and mixes `--ip`-pinned and auto-IPAM (`docker run --network` without `--ip`, non-`--rm`) containers on it — the `#703`/`#820`/`#832`/`#1850` collision class the `proxy-ssl-mode-two-relay-dispatch-simulation.sh` IP-offset fix addressed.
+  - **Guard**: `scripts/tracked/check-validation-subnet-wrapper-coverage.sh`'s `check_simulation_ip_pinning` fails any such non-DHCP simulation that mixes pinned and unpinned containers; all-pinned and all-unpinned both pass, and ephemeral `--rm` probes are exempt. The mix, all-pinned, all-unpinned, and DHCP-exempt cases are covered by fixtures in `tests/bats/check_validation_subnet_wrapper_coverage.bats`.
+  - **DHCP exemption (technical reason)**: a DHCP simulation (one that builds `services/dhcp`/`services/dhcp-proxy`) legitimately mixes a pinned server with unpinned client containers — a DHCP client cannot take a Docker `--ip`, because its address must be acquired from the server via a lease and a static pin would defeat the test. The guard therefore skips DHCP simulations, which stay under manual review for a genuinely-forgotten (non-client) unpinned container.
+  - **Non-Expansion**: this covers only the `--ip`-pinning collision class on a simulation's own `--subnet` network. It does not affect this PR's own live verification of the #1850 fix, and it does not cover the shared validation-subnet reservation pool `#703`/`#820`/`#832`, guarded separately by this same script's `check_simulation_script`.
+
 ---
 
 ## Appendix — Reusable Scripts/Commands Index

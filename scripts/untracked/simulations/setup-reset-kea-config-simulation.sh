@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-#
 # What: Tests CLI reset-to-last-known-good-config Kea.
 # Why: Verify CLI command rolls back Kea live config.
 # From: Issue #763
@@ -89,6 +88,9 @@ cleanup() {
 trap cleanup EXIT
 
 echo "== Building the Kea DHCP image from this checkout's services/dhcp =="
+# What: passes shared-scripts as a named build context.
+# Why: else COPY --from=shared-scripts triggers a bad pull.
+# From: Issue #1095
 docker build -q -t "$kea_image_tag" --build-context "shared-scripts=$repo_root/scripts/lib" services/dhcp >/dev/null
 
 echo "== Starting docker-socket-proxy/proxy/nats from the published $image_tag images =="
@@ -98,12 +100,8 @@ deadline=$((SECONDS + 90))
 while (( SECONDS < deadline )); do
     all_ready=1
     for service in proxy nats; do
-        # Under `set -euo pipefail`, a bare `cid="$(cmd)"` with no adjacent
-        # check aborts the whole script silently the instant `cmd` fails --
-        # errexit fires right at this assignment, before any diagnostic ever
-        # prints. Wrap it so a broken `compose ps` invocation (e.g. wrong
-        # project name, daemon down) reports its own cause instead of a bare
-        # "Process completed with exit code 1".
+        # What: Wrap assignment to catch cmd errors.
+        # Why: Bare assignment triggers errexit silently.
         if ! cid="$("${compose[@]}" ps -q "$service")"; then
             echo "::error::Could not query the compose container id for service '$service'." >&2
             exit 1
@@ -193,12 +191,8 @@ if [[ "$ui_ready" -ne 1 ]]; then
 fi
 echo "Admin UI is healthy."
 
-# Each call below is a brand new --rm container, so nothing written inside
-# it (other than under /shared) survives past that one call. /shared is
-# bind-mounted from work_dir (a real, persistent host directory) so the
-# cookiejar one run_client call writes is still there for a later run_client
-# call to send back, and so the awk/cut extraction below can read it directly
-# from the host without needing yet another container.
+# What: Reuse /shared for persistent cookiejar.
+# Why: /shared bind-mounts from host; survives.
 run_client() {
     docker run --rm --network "$network_name" \
         -v "$work_dir/shared:/shared" \
@@ -207,10 +201,8 @@ run_client() {
 
 echo "== UI: establishing a session and extracting its CSRF token =="
 run_client "curl -sS -c /shared/cookiejar -o /dev/null 'http://${ui_ip}:8080/dhcp'"
-# Under `set -euo pipefail`, a bare `var="$(cmd)"` with no adjacent check
-# aborts the whole script silently the instant `cmd` fails -- errexit fires
-# right at this assignment, before the `[[ -n ... ]]` check below (which only
-# catches an empty/absent cookie, not a broken awk invocation) ever runs.
+# What: Wrap awk assignment in error check.
+# Why: Bare assignment triggers errexit silently.
 if ! cookie_value="$(awk -F'\t' '$6 == "lancache_ui_session" {print $7}' "$work_dir/shared/cookiejar")"; then
     echo "::error::Failed to read the cookiejar file to extract the lancache_ui_session cookie." >&2
     exit 1
@@ -266,12 +258,8 @@ if [[ "$add_b_code" != "303" ]]; then
 fi
 echo "Reservation B added ($mac_b -> $ip_b). Kea's live config now holds both A and B."
 
-# Each successful config-write above records a fresh known-good snapshot
-# (services/ui/src/kea_snapshots.rs), so the OLDEST (lowest-id, i.e. first in
-# a plain sort of the fixed-width zero-padded nanosecond-timestamp directory
-# names) snapshot on disk is the one captured right after reservation A was
-# added -- before B ever existed. That is deliberately the id this test rolls
-# back to.
+# What: Use oldest snapshot for rollback test.
+# Why: Oldest is first after A, before B existed.
 snapshot_root="$work_dir/kea-data/config-snapshots"
 mapfile -t snapshot_ids < <(find "$snapshot_root" -mindepth 1 -maxdepth 1 -type d -name '[0-9]*' -exec basename {} \; | sort)
 if [[ ${#snapshot_ids[@]} -lt 2 ]]; then
@@ -283,12 +271,8 @@ echo "Snapshot ids on disk (oldest first): ${snapshot_ids[*]}"
 echo "Rolling back to the snapshot captured right after reservation A: $snapshot_after_a"
 
 echo "== Running the real 'setup.sh reset-to-last-known-good-config kea' CLI fallback =="
-# A throwaway install-dir: this command only needs docker-compose.yml to
-# exist (its own "is there a stack here" guard) and a .env carrying the same
-# KEA_CTRL_TOKEN/KEA_CTRL_HOST/KEA_DATA_DIR this test's real Kea container
-# and bind-mounted kea-data directory already use -- it does not need a real
-# running compose stack of its own, since it talks to Kea's Control Agent
-# directly over HTTP, exactly like a real operator's install would.
+# What: Create minimal install-dir stub.
+# Why: Only needs docker-compose.yml and .env.
 install_dir="$work_dir/install"
 : > "$install_dir/docker-compose.yml"
 cat > "$install_dir/.env" <<EOF
@@ -306,13 +290,8 @@ echo "$reset_output"
 echo "setup.sh reported success rolling back to snapshot $snapshot_after_a."
 
 echo "== Verifying via a fresh config-get against the real Kea server =="
-# Under `set -euo pipefail`, a bare `var="$(cmd)"` with no adjacent check
-# aborts the whole script silently the instant `cmd` fails -- errexit fires
-# right at this assignment. The `&& echo yes || echo no` below is INSIDE the
-# containerized sh -c script, so it only makes the config-get/jq check itself
-# always resolve to a yes/no answer -- it does not protect against `docker
-# exec` itself failing outright (e.g. $kea_container no longer running),
-# which would abort here with no diagnostic if left unwrapped.
+# What: Wrap docker exec to catch errors.
+# Why: Bare exec triggers errexit without diagnostic.
 if ! reservation_a_present="$(docker exec "$kea_container" sh -c '
     curl -sf -u "admin:$1" -H "Content-Type: application/json" \
         -d "{\"command\":\"config-get\",\"service\":[\"dhcp4\"]}" \

@@ -324,6 +324,107 @@ script_reads_validation_subnet_env() {
     return 1
 }
 
+# What: split a line on top-level && || ; separators.
+# Why: each command on a line must be classified alone.
+# From: Issue #1850 (PR #1836 review: #8)
+svc_split_commands() {
+    awk 'BEGIN { dq = sprintf("%c", 34); sq = sprintf("%c", 39) }
+    {
+        inq = 0; qc = ""; seg = ""; n = length($0)
+        for (i = 1; i <= n; i++) {
+            c = substr($0, i, 1)
+            if (inq) { seg = seg c; if (c == qc) inq = 0; continue }
+            if (c == dq || c == sq) { inq = 1; qc = c; seg = seg c; continue }
+            two = substr($0, i, 2)
+            if (two == "&&" || two == "||") { print seg; seg = ""; i++; continue }
+            if (c == ";") { print seg; seg = ""; continue }
+            seg = seg c
+        }
+        print seg
+    }' <<<"$1"
+}
+
+# What: drops leading env-assignments and control keywords.
+# Why: leaves docker at command position for matching.
+# From: Issue #1850 (PR #1836 review: #8)
+# Note: mirrors check-registry-login-coverage.sh's bcc_* helpers;
+# hoisting to scripts/lib is a separate maintainer decision.
+svc_strip_command_prefix() {
+    SVC_STRIPPED="${1#"${1%%[![:space:]]*}"}"
+    while [[ "$SVC_STRIPPED" =~ ^(if|then|else|elif|while|until|do|!)[[:space:]]+ ]]; do
+        SVC_STRIPPED="${SVC_STRIPPED#"${BASH_REMATCH[0]}"}"
+    done
+    while [[ "$SVC_STRIPPED" =~ ^[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+ ]]; do
+        SVC_STRIPPED="${SVC_STRIPPED#"${BASH_REMATCH[0]}"}"
+    done
+}
+
+# svc_for_each_command <file> -- joins \-continuations, splits each
+# logical line into top-level commands, strips the command prefix, and
+# prints one command-position-normalized command per line (SVC_STRIPPED
+# form). Callers match `^docker ...` against real commands only.
+svc_for_each_command() {
+    local file="$1" line logical="" stripped segment
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" == *\\ ]]; then
+            logical+="${line%\\} "
+            continue
+        fi
+        logical+="$line"
+        stripped="$logical"
+        logical=""
+        while IFS= read -r segment; do
+            svc_strip_command_prefix "$segment"
+            [[ -n "$SVC_STRIPPED" ]] && printf '%s\n' "$SVC_STRIPPED"
+        done < <(svc_split_commands "$stripped")
+    done < "$file"
+}
+
+# What: prints the --network value of a docker run command.
+# Why: the #1850 collision is per-network, not per-file.
+# From: Issue #1850 (PR #1836 review: network scoping)
+svc_network_of() {
+    [[ "$1" =~ --network[[:space:]=]+([^[:space:]]+) ]] && printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+# What: flag a --subnet sim mixing pinned and unpinned IPs.
+# Why: auto-IPAM can reassign a pinned address (#1850).
+# From: Issue #1850
+check_simulation_ip_pinning() {
+    local file="$1" cmd net
+    local -A pinned=() unpinned=() first_unpinned=()
+    while IFS= read -r cmd; do
+        [[ "$cmd" =~ ^docker[[:space:]]+run([[:space:]]|$) ]] || continue
+        [[ "$cmd" == *"--network"* ]] || continue
+        [[ "$cmd" == *"--rm"* ]] && continue
+        net="$(svc_network_of "$cmd")"
+        [[ -n "$net" ]] || continue
+        if [[ "$cmd" == *"--ip "* || "$cmd" == *"--ip="* ]]; then
+            pinned["$net"]=$(( ${pinned["$net"]:-0} + 1 ))
+        else
+            unpinned["$net"]=$(( ${unpinned["$net"]:-0} + 1 ))
+            [[ -n "${first_unpinned["$net"]:-}" ]] || first_unpinned["$net"]="$cmd"
+        fi
+    done < <(svc_for_each_command "$file")
+    for net in "${!pinned[@]}"; do
+        if [[ ${pinned["$net"]:-0} -gt 0 && ${unpinned["$net"]:-0} -gt 0 ]]; then
+            fail "check-validation-subnet-wrapper-coverage: $file mixes an --ip-pinned and an unpinned --network container on network $net (${pinned[$net]} pinned, ${unpinned[$net]} unpinned) -- the #1850 IP-collision class: Docker auto-IPAM can hand a pinned container's address to an unpinned one. Give every non-ephemeral (no --rm) --network container on that network an explicit --ip (DHCP-client sims are exempted upstream). First unpinned: ${first_unpinned[$net]:0:120}"
+        fi
+    done
+}
+
+# What: true when a real docker build targets services/dhcp*.
+# Why: a DHCP server-image build identifies a DHCP sim.
+# From: Issue #1850 (PR #1836 review: #7)
+svc_builds_dhcp_image() {
+    local file="$1" cmd
+    while IFS= read -r cmd; do
+        [[ "$cmd" =~ ^docker[[:space:]]+(buildx[[:space:]]+)?build([[:space:]]|$) ]] || continue
+        [[ "$cmd" == *"services/dhcp"* ]] && return 0
+    done < <(svc_for_each_command "$file")
+    return 1
+}
+
 # check_simulation_script <file>
 # The #822 gap check_job_body above cannot see: a script that creates a
 # Docker network with an explicit --subnet, but whose CALLING job never has
@@ -341,6 +442,13 @@ check_simulation_script() {
         return 0
     fi
     scripts_examined_with_subnet_creation=$((scripts_examined_with_subnet_creation + 1))
+
+    # What: exempt sims that build the DHCP server image.
+    # Why: a DHCP client leases its IP; no static --ip possible.
+    # From: Issue #1850 (PR #1836 review: #7)
+    if ! svc_builds_dhcp_image "$file"; then
+        check_simulation_ip_pinning "$file"
+    fi
 
     if script_sources_reserve_lib "$file"; then
         return 0

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-#
 # What: Tests Kea snapshot rollback via Admin UI.
 # Why: Verify rollback route changes Kea live config.
 # From: Issue #837
@@ -86,6 +85,9 @@ cleanup() {
 trap cleanup EXIT
 
 echo "== Building the Kea DHCP image from this checkout's services/dhcp =="
+# What: passes shared-scripts as a named build context.
+# Why: else COPY --from=shared-scripts triggers a bad pull.
+# From: Issue #1095
 docker build -q -t "$kea_image_tag" --build-context "shared-scripts=$repo_root/scripts/lib" services/dhcp >/dev/null
 
 echo "== Starting docker-socket-proxy/proxy/nats from the published $image_tag images =="
@@ -186,12 +188,8 @@ if [[ "$ui_ready" -ne 1 ]]; then
 fi
 echo "Admin UI is healthy."
 
-# Each call below is a brand new --rm container, so nothing written inside
-# it (other than under /shared) survives past that one call. /shared is
-# bind-mounted from work_dir (a real, persistent host directory) so the
-# cookiejar one run_client call writes is still there for a later run_client
-# call to send back, and so the awk/cut extraction below can read it directly
-# from the host without needing yet another container.
+# What: --rm containers isolation with /shared bind-mount.
+# Why: Ephemeral containers; host dir persists cookiejar.
 run_client() {
     docker run --rm --network "$network_name" \
         -v "$work_dir/shared:/shared" \
@@ -200,10 +198,8 @@ run_client() {
 
 echo "== UI: establishing a session and extracting its CSRF token =="
 run_client "curl -sS -c /shared/cookiejar -o /dev/null 'http://${ui_ip}:8080/dhcp'"
-# Under `set -euo pipefail`, a bare `var="$(cmd)"` with no adjacent check
-# aborts the whole script silently the instant `cmd` fails -- errexit fires
-# right at this assignment, before the `[[ -n ... ]]` check below (which only
-# catches an empty/absent cookie, not a broken awk invocation) ever runs.
+# What: Wrap var assignment to catch cmd failures.
+# Why: errexit fires before downstream checks run.
 if ! cookie_value="$(awk -F'\t' '$6 == "lancache_ui_session" {print $7}' "$work_dir/shared/cookiejar")"; then
     echo "::error::Failed to read the cookiejar file to extract the lancache_ui_session cookie." >&2
     exit 1
@@ -217,9 +213,8 @@ fi
 echo "Session established, CSRF token extracted."
 
 echo "== UI: adding reservation A (creates known-good snapshot S_A) =="
-# A fixed, locally-administered (0x02 high nibble) test MAC -- never a real
-# vendor OUI, and unique enough per run (low bits from this run's PID) that
-# concurrent local runs of this script don't collide on the same reservation.
+# What: Fixed locally-administered test MAC per run.
+# Why: Avoids collisions between concurrent test runs.
 mac_a="02:11:22:33:55:$(printf '%02x' "$(( $$ % 256 ))")"
 ip_a="$reservation_ip_a"
 if ! add_a_code="$(run_client "curl -sS -b /shared/cookiejar -o /shared/add-a-response -w '%{http_code}' \
@@ -259,12 +254,8 @@ if [[ "$add_b_code" != "303" ]]; then
 fi
 echo "Reservation B added ($mac_b -> $ip_b). Kea's live config now holds both A and B."
 
-# Each successful config-write above records a fresh known-good snapshot
-# (services/ui/src/kea_snapshots.rs), so the OLDEST (lowest-id, i.e. first in
-# a plain sort of the fixed-width zero-padded nanosecond-timestamp directory
-# names) snapshot on disk is the one captured right after reservation A was
-# added -- before B ever existed. That is deliberately the id this test rolls
-# back to.
+# What: Roll back to oldest snapshot (after A added).
+# Why: Verify rollback removes B while preserving A.
 snapshot_root="$work_dir/kea-data/config-snapshots"
 mapfile -t snapshot_ids < <(find "$snapshot_root" -mindepth 1 -maxdepth 1 -type d -name '[0-9]*' -exec basename {} \; | sort)
 if [[ ${#snapshot_ids[@]} -lt 2 ]]; then
@@ -276,13 +267,8 @@ echo "Snapshot ids on disk (oldest first): ${snapshot_ids[*]}"
 echo "Rolling back to the snapshot captured right after reservation A: $snapshot_after_a"
 
 echo "== UI: rolling back to snapshot $snapshot_after_a via POST /dhcp/snapshot/rollback =="
-# The Admin UI's own rollback route (rollback_kea_snapshot in
-# services/ui/src/routes/dhcp.rs) runs the SAME config-test -> config-set ->
-# config-write chain against Kea's real Control Agent that the CLI fallback
-# does, but reached over real HTTP with the session's CSRF token -- the exact
-# path setup-reset-kea-config-simulation.sh does not cover. The
-# route validates snapshot_id against the on-disk known-good snapshots, reads
-# that snapshot, and applies it as the whole new Kea config.
+# What: Admin UI rollback via real HTTP with CSRF token.
+# Why: Tests the UI path that CLI fallback doesn't cover.
 if ! rollback_code="$(run_client "curl -sS -b /shared/cookiejar -o /shared/rollback-response -w '%{http_code}' \
     --data-urlencode 'csrf_token=$csrf_token' \
     --data-urlencode 'snapshot_id=$snapshot_after_a' \
@@ -290,13 +276,8 @@ if ! rollback_code="$(run_client "curl -sS -b /shared/cookiejar -o /shared/rollb
     echo "::error::run_client/curl invocation for POST /dhcp/snapshot/rollback failed outright." >&2
     exit 1
 fi
-# A successful mutating Admin UI route returns a 303 redirect (axum
-# Redirect::to), exactly like the /dhcp/static/add calls above -- NOT 200. The
-# real proof is the config-get assertion below, not this status; but a non-303
-# here means the route itself rejected the request (e.g. 409 unknown snapshot,
-# 403 bad CSRF, 500 Kea rejected the config), so surface it early with the
-# response body rather than letting the assertion fail with a less specific
-# message.
+# What: Mutating routes return 303, not 200.
+# Why: Non-303 indicates route-level rejection error.
 if [[ "$rollback_code" != "303" ]]; then
     echo "::error::POST /dhcp/snapshot/rollback returned HTTP $rollback_code, expected 303." >&2
     run_client "cat /shared/rollback-response" || true
@@ -305,13 +286,8 @@ fi
 echo "Admin UI reported success rolling back to snapshot $snapshot_after_a."
 
 echo "== Verifying via a fresh config-get against the real Kea server =="
-# Under `set -euo pipefail`, a bare `var="$(cmd)"` with no adjacent check
-# aborts the whole script silently the instant `cmd` fails -- errexit fires
-# right at this assignment. The `&& echo yes || echo no` below is INSIDE the
-# containerized sh -c script, so it only makes the config-get/jq check itself
-# always resolve to a yes/no answer -- it does not protect against `docker
-# exec` itself failing outright (e.g. $kea_container no longer running),
-# which would abort here with no diagnostic if left unwrapped.
+# What: Wrap docker exec to catch container failures.
+# Why: Bare cmd failure aborts; wrapper shows errors.
 if ! reservation_a_present="$(docker exec "$kea_container" sh -c '
     curl -sf -u "admin:$1" -H "Content-Type: application/json" \
         -d "{\"command\":\"config-get\",\"service\":[\"dhcp4\"]}" \
