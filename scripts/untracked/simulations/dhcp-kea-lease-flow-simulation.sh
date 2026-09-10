@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-#
-
+# What: Tests real Discover/Offer/Request/Ack flow for Kea.
+# Why: Verifies lease logic and Control Agent API behavior.
+# From: Issue #448
 set -euo pipefail
 
 if ! repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd); then
@@ -17,8 +18,10 @@ source "$repo_root/scripts/lib/dhcp-lease-parse.sh"
 source "$repo_root/scripts/lib/reserve-validation-subnet.sh"
 
 client_tool_image="${DHCP_LEASE_FLOW_CLIENT_IMAGE:?DHCP_LEASE_FLOW_CLIENT_IMAGE is required (an image providing dhclient or udhcpc/busybox, e.g. the build-tools image)}"
-# What: requires PROJECT_CARGO_LTO/CODEGENUNIT, no default.
-# Why: mirrors Dockerfile's fail-closed cargo profile check.
+
+# What: fails closed if PROJECT_CARGO_LTO/CODEGENUNIT unset.
+# Why: services/dns/Dockerfile defines no in-file default.
+# From: Issue #1095 | PR #1796
 project_cargo_lto="${PROJECT_CARGO_LTO:?PROJECT_CARGO_LTO is required (no in-file/script default; Issue #1095, PR #1796 review 5109560874)}"
 case "$project_cargo_lto" in off|thin|fat|true|false) ;; *) echo "PROJECT_CARGO_LTO must be one of: off, thin, fat, true, false (got '$project_cargo_lto')" >&2; exit 1;; esac
 project_cargo_codegenunit="${PROJECT_CARGO_CODEGENUNIT:?PROJECT_CARGO_CODEGENUNIT is required (no in-file/script default; Issue #1095, PR #1796 review 5109560874)}"
@@ -29,7 +32,8 @@ work_dir="$repo_root/.dhcp-kea-lease-flow-simulation-tmp"
 rm -rf "$work_dir"
 mkdir -p "$work_dir/client-state"
 
-
+# What: Runtime-selects dhclient or udhcpc for DHCP.
+# Why: Alpine lacks ISC dhclient; udhcpc needs -x hostname.
 read -r -d '' dhcp_client_capture_script <<'CLIENT_SCRIPT' || true
 set -u
 if command -v dhclient >/dev/null 2>&1; then
@@ -57,19 +61,8 @@ csv() { printf '%s' "$1" | tr ' ' ','; }
 } >> /dhcp-test/dhclient.leases
 HOOK_SCRIPT
     chmod +x /tmp/udhcpc-lease-capture.sh
-    # Two separate command lines, not one built from a dynamically-quoted
-    # variable: `udhcpc_bin="busybox udhcpc"` followed by `"$udhcpc_bin" ...`
-    # would quote the whole two-word string into a single argv[0], which
-    # exec(2) would then look for as one literal (and nonexistent) binary
-    # named "busybox udhcpc" -- a real bug caught before this shipped, not
-    # a hypothetical one; word-splitting an unquoted variable would dodge
-    # it too, but at the cost of shellcheck's SC2086 flagging the very
-    # thing this comment would then have to justify. Alpine's own busybox
-    # package always symlinks each enabled applet (udhcpc included) to a
-    # standalone binary, so the `command -v udhcpc` branch is what actually
-    # runs on the alpine-final image this dispatch exists for; the bare
-    # `busybox udhcpc` fallback below only matters for a hypothetical image
-    # that ships busybox without that symlink.
+    # What: Uses separate commands, not quoted variable.
+    # Why: exec() would fail on quoted multi-word argv[0].
     if command -v udhcpc >/dev/null 2>&1; then
         udhcpc -i eth0 -s /tmp/udhcpc-lease-capture.sh -x hostname:"$(hostname)" -q -n -f >/dhcp-test/dhclient.out 2>&1
     else
@@ -83,14 +76,29 @@ echo DONE >> /dhcp-test/dhclient.out
 CLIENT_SCRIPT
 readonly dhcp_client_capture_script
 
-
+# What: Makes client-state directory world-writable.
+# Why: dhclient drops privileges; needs write after drop.
+# From: Issue #712
 chmod 0777 "$work_dir/client-state"
+
+# What: Sets test domain distinct from production "lan".
+# Why: Assert detects if Kea applies configured value.
 dhcp_test_domain="lancache-dhcp448-test.lan"
+
+# What: Adds PID to Docker names for collision avoidance.
+# Why: Shared runners run concurrent jobs with one daemon.
 network_name="lancache-ng-dhcp448-$$"
 kea_container="lancache-ng-dhcp448-kea-$$"
 image_tag="lancache-ng-dhcp448-kea:$$"
+# What: DNS container names for PowerDNS instance.
+# Why: Unique names prevent collision with concurrent runs.
+# From: Issue #706
 dns_container="lancache-ng-dhcp448-dns-$$"
 dns_image_tag="lancache-ng-dhcp448-dns:$$"
+
+# What: Generates random ephemeral test run credentials.
+# Why: Kea and PowerDNS entrypoints reject default values.
+# From: Issue #706
 if ! kea_ctrl_token="$(openssl rand -hex 32)"; then
     echo "::error::Could not generate a random KEA_CTRL_TOKEN via openssl rand." >&2
     exit 1
@@ -103,14 +111,25 @@ if ! pdns_api_key="$(openssl rand -hex 32)"; then
     echo "::error::Could not generate a random PDNS_API_KEY via openssl rand." >&2
     exit 1
 fi
+
+# What: Captures exit code before teardown alters it.
+# Why: Cleanup must not mask the original result.
 cleanup() {
     local status=$?
     docker rm -f "$kea_container" >/dev/null 2>&1 || true
+    # What: Tears down PowerDNS container alongside Kea.
+    # Why: Network can't be removed while attached.
+    # From: Issue #706
     docker rm -f "${dns_container:-}" >/dev/null 2>&1 || true
+    # What: Uses wait+retry for teardown, not blind rm.
+    # Why: Daemon reports rm before unwiring endpoints.
     validation_network_teardown "$network_name" || true
     docker rmi "$image_tag" >/dev/null 2>&1 || true
     docker rmi "${dns_image_tag:-}" >/dev/null 2>&1 || true
     rm -rf "$work_dir"
+    # What: Releases subnet-octet lock for concurrent reuse.
+    # Why: Concurrent runs need collision-free subnets.
+    # From: Issue #820
     validation_subnet_release "${subnet_lock_holder_pid:-}"
     exit "$status"
 }
@@ -119,8 +138,12 @@ trap cleanup EXIT
 echo "== Building the Kea DHCP image from this checkout's services/dhcp =="
 # What: passes shared-scripts as a named build context.
 # Why: else COPY --from=shared-scripts triggers a bad pull.
+# From: Issue #1095
 docker build -q -t "$image_tag" --build-context "shared-scripts=$repo_root/scripts/lib" services/dhcp >/dev/null
 
+# What: Uses flock+retry for dynamic subnet allocation.
+# Why: Concurrent jobs collide; needs distributed lock.
+# From: Issue #820
 subnet_lock_root="/tmp/lancache-validation-locks-dhcp-kea"
 subnet_max_attempts=10
 subnet_run_id="${GITHUB_RUN_ID:-local}-$$-${RANDOM:-0}"
@@ -134,9 +157,8 @@ while [[ -z "$octet" && "$subnet_next_attempt" -le "$subnet_max_attempts" ]]; do
         echo "::error::Could not lock a free validation subnet octet after $subnet_max_attempts attempts." >&2
         exit 1
     }
-    # Here-strings, not `printf ... | sed -n` pipes -- consistent with this
-    # file's own pipefail setting and issue #1377's repo-wide audit (a
-    # here-string has no second writer process for pipefail to trip on).
+    # What: Uses here-strings to avoid second writer.
+    # Why: Consistent with pipefail and errexit.
     if ! attempt="$(sed -n 's/^attempt=//p' <<<"$reservation")"; then
         echo "::error::Could not parse the 'attempt=' field out of validation_subnet_reserve's output." >&2
         exit 1
@@ -163,10 +185,8 @@ while [[ -z "$octet" && "$subnet_next_attempt" -le "$subnet_max_attempts" ]]; do
     fi
 
     echo "== Creating isolated bridge network $network_name ($candidate_subnet, no host interface involved) (attempt $attempt) =="
-    # --ip-range confines Docker's OWN container-address bookkeeping to the
-    # first half of the subnet, so it can never overlap the Kea pool
-    # (computed below from the winning octet) that this script is actually
-    # testing.
+    # What: --ip-range confines Docker IPAM to first half.
+    # Why: Prevents DHCP pool overlap with container IPs.
     if create_output="$(docker network create \
         --driver bridge \
         --subnet "$candidate_subnet" \
@@ -193,22 +213,33 @@ if [[ -z "$octet" ]]; then
     exit 1
 fi
 
+# What: Computes /24 addresses after octet is locked in.
+# Why: Addresses unknown until subnet allocation succeeds.
 subnet="172.31.${octet}.0/24"
 gateway="172.31.${octet}.1"
 kea_ip="172.31.${octet}.2"
+# What: Reserves PowerDNS IP outside DHCP pool.
+# Why: Static address for DDNS server responses.
+# From: Issue #706
 pdns_ip="172.31.${octet}.3"
 pool_start="172.31.${octet}.128"
 pool_end="172.31.${octet}.200"
 echo "Validation network is up on subnet $subnet (lock held by PID $subnet_lock_holder_pid)."
 
 echo "== Building the PowerDNS image from this checkout's services/dns (issue #706) =="
-docker build -q -t "$dns_image_tag" -f services/dns/Dockerfile \
-    --build-arg "BUILD_TOOLS_IMAGE=${client_tool_image}" \
+# What: Pins DNS image build to resolved build-tools image.
+# Why: Prevents silent divergence from :latest moving tag.
+# From: PR #769
+docker build -q -t "$dns_image_tag" --build-arg "BUILD_TOOLS_IMAGE=${client_tool_image}" \
     --build-arg "PROJECT_CARGO_LTO=${project_cargo_lto}" \
     --build-arg "PROJECT_CARGO_CODEGENUNIT=${project_cargo_codegenunit}" \
-    --build-context "shared-scripts=$repo_root/scripts/lib" "$repo_root" >/dev/null
+    --build-context "shared-scripts=$repo_root/scripts/lib" \
+    -f services/dns/Dockerfile "$repo_root" >/dev/null
 
 echo "== Starting a real PowerDNS container on the isolated network (issue #706) =="
+# What: Configures PowerDNS with DDNS, TSIG, and proxy.
+# Why: Tests real DDNS flow; production-like key exchange.
+# From: Issue #706
 docker run -d --name "$dns_container" \
     --network "$network_name" --ip "$pdns_ip" \
     -e PROXY_IP="203.0.113.1" \
@@ -218,9 +249,14 @@ docker run -d --name "$dns_container" \
     "$dns_image_tag" >/dev/null
 
 echo "== Waiting for PowerDNS to finish TSIG/zone setup and start serving (issue #706) =="
+# What: Waits for both TSIG log and dig probe to succeed.
+# Why: TSIG setup ≠ ready; both needed for confidence.
 dns_ready_deadline=$((SECONDS + 60))
 dns_ready=0
 while (( SECONDS < dns_ready_deadline )); do
+    # What: Stores logs to var, then greps locally.
+    # Why: Avoids SIGPIPE when grep matches early.
+    # From: Issue #1377 | PR #1374
     dns_log="$(docker logs "$dns_container" 2>&1 || true)"
     if grep -q "Configured TSIG-authenticated DDNS updates for LAN zones." <<<"$dns_log" \
         && docker exec "$dns_container" dig +short +time=2 +tries=1 @127.0.0.1 -p 5300 lan. SOA >/dev/null 2>&1; then
@@ -237,11 +273,19 @@ fi
 echo "PowerDNS authoritative is up and TSIG-authenticated DDNS updates are configured for zone lan. (source: $kea_ip)."
 
 echo "== Creating this run's forward test zone in PowerDNS (issue #706) =="
+# What: Creates test zone for kea-dhcp-ddns.
+# Why: Prod zones exist; test needs bootstrap.
+# From: Issue #706
 docker exec "$dns_container" pdnsutil --config-dir=/etc/pdns/auth create-zone "${dhcp_test_domain}." >/dev/null
 docker exec "$dns_container" pdnsutil --config-dir=/etc/pdns/auth set-meta "${dhcp_test_domain}." TSIG-ALLOW-DNSUPDATE lancache-ddns-key >/dev/null
+# What: Runs pdns_control rediscover after zone creation.
+# Why: Reload clears cache; avoids stale race.
+# From: Issue #706
 docker exec "$dns_container" pdns_control rediscover >/dev/null
 
 echo "== Starting a real Kea container on the isolated network =="
+# What: Adds NET_ADMIN cap; sets DHCP_DDNS_ENABLED=true.
+# Why: NET_ADMIN for iptables; verify DDNS works.
 docker run -d --name "$kea_container" \
     --network "$network_name" --ip "$kea_ip" \
     --cap-add NET_ADMIN \
@@ -261,10 +305,8 @@ docker run -d --name "$kea_container" \
     "$image_tag" >/dev/null
 
 echo "== Waiting for the Kea Control Agent API to answer =="
-# config-get is used purely as the readiness probe because it is a
-# read-only Kea command: it cannot change anything Kea already loaded from
-# its own config file, so polling it repeatedly here has no side effects on
-# the DHCPv4 configuration this script later relies on being untouched.
+# What: Polls config-get as readiness probe for Kea API.
+# Why: Read-only; no side effects; safe to poll repeatedly.
 deadline=$((SECONDS + 60))
 kea_ready=0
 while (( SECONDS < deadline )); do
@@ -286,7 +328,13 @@ fi
 echo "Kea DHCPv4 server is up (Subnet: $subnet, Pool: $pool_start - $pool_end)."
 
 echo "== Running a real DHCP client (dhclient or udhcpc, whichever \$client_tool_image provides) against Kea: Discover/Offer/Request/Ack =="
+# What: Runs real DHCP client; polls for lease.
+# Why: Neither dhclient nor udhcpc reliably exits.
 client_container="lancache-ng-dhcp448-client-${octet}-$$"
+
+# What: Uses default -cf; adds NET_RAW/NET_ADMIN for DHCP.
+# Why: Default sends hostname; raw socket and ARP need caps.
+# From: Issue #706
 docker run -d --name "$client_container" \
     --network "$network_name" \
     --cap-add NET_ADMIN --cap-add NET_RAW \
@@ -294,11 +342,15 @@ docker run -d --name "$client_container" \
     "$client_tool_image" \
     bash -c "$dhcp_client_capture_script" \
     >/dev/null
+
+# What: Stores timeout apart from deadline.
+# Why: Error message reports actual wait time.
 lease_timeout_seconds=30
 lease_deadline=$((SECONDS + lease_timeout_seconds))
 lease_obtained=0
 while (( SECONDS < lease_deadline )); do
-
+    # What: Checks -s (exists) and } (complete).
+    # Why: File exists before write ends; } atomic.
     if [[ -s "$work_dir/client-state/dhclient.leases" ]] && grep -q '^}' "$work_dir/client-state/dhclient.leases" 2>/dev/null; then
         lease_obtained=1
         break
@@ -333,9 +385,8 @@ domain_name="$(dhcp_lease_field "$parsed" domain_name || true)"
 
 echo "== Verifying the granted lease matches the configured Kea subnet =="
 
-# Address-in-pool check done in Python (not bash arithmetic) for the same
-# reason build-push.yml's own subnet-collision check uses it: correct,
-# readable IPv4 range comparison without hand-rolled octet math.
+# What: Uses Python for IPv4 range check.
+# Why: Readable; avoids hand-rolled math.
 if ! address_in_pool="$(python3 - "$offered_address" "$pool_start" "$pool_end" <<'PYEOF'
 import ipaddress, sys
 addr, start, end = (ipaddress.ip_address(a) for a in sys.argv[1:4])
@@ -378,11 +429,15 @@ fi
 
 echo "== Verifying Kea's DDNS update produced a matching PowerDNS A record (issue #706) =="
 
+# assert_ddns_record_matches_lease <fqdn> <expected_ip>
+# What: Polls PowerDNS for A record matching leased IP.
+# Why: DDNS is async; record not guaranteed immediate.
 assert_ddns_record_matches_lease() {
     local fqdn="$1" expected_ip="$2" resolved_ip=""
     local ddns_deadline=$((SECONDS + 30))
     while (( SECONDS < ddns_deadline )); do
-
+        # What: Ignores dig failure; retries on empty.
+        # Why: Transient failures normal in polling; safe.
         resolved_ip="$(docker exec "$dns_container" dig +short +time=2 +tries=1 @127.0.0.1 -p 5300 "$fqdn" A 2>/dev/null | tail -n1)"
         if [[ "$resolved_ip" == "$expected_ip" ]]; then
             echo "DDNS verification passed: PowerDNS authoritative has an A record for $fqdn -> $resolved_ip, matching the lease Kea just granted."
@@ -398,6 +453,8 @@ assert_ddns_record_matches_lease() {
     return 1
 }
 
+# What: Kea generates FQDN as dhcp-<dashed-ip>.<domain>.
+# Why: "when-present" means REPLACE client name, not use it.
 ddns_expected_fqdn="dhcp-${offered_address//./-}.${domain_name}."
 ddns_status="FAILED (see ::error above)"
 if assert_ddns_record_matches_lease "$ddns_expected_fqdn" "$offered_address"; then
@@ -408,14 +465,15 @@ fi
 
 echo "== Verifying Kea's DDNS update produced a matching PowerDNS PTR record (issue #768) =="
 
+# assert_ptr_record_matches_lease <ip> <expected_fqdn>
+# What: Polls PowerDNS for PTR record matching FQDN.
+# Why: DDNS is async; PTR not guaranteed after A record.
 assert_ptr_record_matches_lease() {
     local ip="$1" expected_fqdn="$2" resolved_fqdn=""
     local ptr_deadline=$((SECONDS + 30))
     while (( SECONDS < ptr_deadline )); do
-        # Same intentional non-fatal handling as assert_ddns_record_matches_lease's
-        # own resolved_ip line above: a failed/timed-out dig here just leaves
-        # $resolved_fqdn empty for this iteration and gets retried, it does
-        # not abort the script.
+        # What: Ignores dig failure; retries on empty.
+        # Why: Transient failures normal in polling; safe.
         resolved_fqdn="$(docker exec "$dns_container" dig +short +time=2 +tries=1 @127.0.0.1 -p 5300 -x "$ip" 2>/dev/null | tail -n1)"
         if [[ "$resolved_fqdn" == "$expected_fqdn" ]]; then
             echo "Reverse DDNS verification passed: PowerDNS authoritative has a PTR record for $ip -> $resolved_fqdn, matching the lease Kea just granted."
@@ -431,6 +489,8 @@ assert_ptr_record_matches_lease() {
     return 1
 }
 
+# What: PTR points to same FQDN as A record.
+# Why: Forward/reverse from lease event.
 ptr_status="FAILED (see ::error above)"
 if assert_ptr_record_matches_lease "$offered_address" "$ddns_expected_fqdn"; then
     ptr_status="verified: ${offered_address} -> ${ddns_expected_fqdn} (TSIG-signed nsupdate from kea-dhcp-ddns)"
@@ -438,8 +498,10 @@ else
     fail=1
 fi
 
-# ─── Static host reservation scenario (issue #707) ───
-
+# ─── Static host reservation scenario ───
+#
+# What: Uses fixed locally-admin MACs.
+# Why: PID-suffixed to avoid collisions.
 if ! reserved_mac="$(printf '02:07:07:aa:bb:%02x' "$(( $$ % 256 ))")"; then
     echo "::error::Could not format the reserved test MAC address." >&2
     exit 1
@@ -448,16 +510,22 @@ if ! other_mac="$(printf '02:07:07:cc:dd:%02x' "$(( $$ % 256 ))")"; then
     echo "::error::Could not format the unrelated test MAC address." >&2
     exit 1
 fi
-
+# What: Reserved IP outside dynamic pool and Docker range.
+# Why: Static reservation needs unused address.
 reserved_ip="172.31.${octet}.210"
 
+# kea_ctrl_command <json_command_body>
+# What: POSTs JSON to Control Agent; prints response.
+# Why: Transport primitive; avoids quoting tangles.
 kea_ctrl_command() {
     docker exec -i "$kea_container" sh -c '
         curl -sf -u "admin:$1" -H "Content-Type: application/json" -d @- "http://127.0.0.1:8000/"
     ' -- "$kea_ctrl_token" <<<"$1"
 }
 
-
+# kea_ctrl_result_ok <response_json>
+# What: Returns 0 if response result field is 0 (success).
+# Why: Standard Kea Control Agent convention.
 kea_ctrl_result_ok() {
     python3 -c '
 import json, sys
@@ -466,6 +534,9 @@ sys.exit(0 if d and d[0].get("result") == 0 else 1)
 ' "$1"
 }
 
+# What: Adds reservation via Control Agent API.
+# Why: Same as Admin UI; tests Kea API directly.
+# From: Issue #693
 kea_ctrl_add_reservation() {
     local mac="$1" ip="$2" get_resp modified_args resp
 
@@ -503,9 +574,9 @@ PYEOF
     fi
 }
 
-# kea_ctrl_reservation_present <mac> <ip>
-# Prints "yes"/"no": whether Kea's OWN config-get (not this script's local
-
+# What: Prints yes/no for reservation status.
+# Why: Verifies reservation persisted.
+# From: Issue #634
 kea_ctrl_reservation_present() {
     local mac="$1" ip="$2" get_resp
     get_resp="$(kea_ctrl_command '{"command":"config-get","service":["dhcp4"]}')"
@@ -523,11 +594,8 @@ print("yes" if found else "no")
 ' "$get_resp"
 }
 
-# assert_static_reservation_honored <label> <mac> <state_subdir>
-# Runs one fresh, one-shot DHCP client container for <mac> (a distinct
-# --mac-address per call, unlike the base scenario's client above which
-# relies on Docker's own auto-assigned MAC) and prints the offered IPv4
-
+# What: Runs DHCP client; returns offered IP.
+# Why: Tests if Kea honors reservation.
 assert_static_reservation_honored() {
     local label="$1" mac="$2" state_subdir="$3" client_container
     client_container="lancache-ng-dhcp448-client-${state_subdir}-${octet}-$$"
@@ -552,9 +620,8 @@ assert_static_reservation_honored() {
     done
     docker rm -f "$client_container" >/dev/null 2>&1 || true
 
-    # Diagnostics go to stderr, not stdout: this function's stdout is
-    # captured via command substitution by every caller below (the offered
-    # address is the only thing that must appear there).
+    # What: Diagnostics to stderr via block redirect.
+    # Why: stdout captured for offered address.
     {
         echo "::group::$label: raw DHCP client output"
         cat "$work_dir/$state_subdir/dhclient.out" 2>/dev/null || echo "(no client output captured)"
@@ -651,7 +718,24 @@ Unrelated-MAC lease:   ${other_offered:-<none>} $( [[ "$reservation_isolated" -e
 
 Verified: a real Discover/Offer/Request/Ack flow completed against our own
 Kea service on an isolated Docker bridge network, and the address/server-
-identifier/router/DNS/NTP/lease-time/domain-name options 
+identifier/router/DNS/NTP/lease-time/domain-name options above matched what
+this run configured Kea with. Also verified: a static host reservation added
+directly through Kea's own Control Agent API (the same config-get/
+config-test/config-set/config-write sequence the Admin UI's
+kea_config_modify() drives) was honored by a real, subsequent DHCP lease
+request for the reserved MAC, and a second, unrelated MAC still received an
+ordinary dynamic-pool address rather than the reservation. Also verified:
+the granted lease produced a matching PowerDNS A record via a real
+TSIG-authenticated DDNS update from kea-dhcp-ddns to a real PowerDNS
+authoritative server, using this project's real DDNS transport/config
+wiring (see the header comment above for the one test-only zone-bootstrap
+shim this run needed and why). Also verified (issue #768): the same lease
+produced a matching PowerDNS PTR record, proving Kea's reverse-ddns fix
+(one ddns-domains entry per real private reverse zone, instead of the old
+non-existent "in-addr.arpa." catch-all) actually resolves against a real
+PowerDNS instance -- no test-only zone-bootstrap shim needed for this half,
+since this script's subnet always falls inside a zone
+services/dns/entrypoint.sh creates unconditionally.
 
 NOT verified by this script (see header comment / docs/dhcp-modes.md):
 the dnsmasq-proxy DHCP mode (out of scope here).
