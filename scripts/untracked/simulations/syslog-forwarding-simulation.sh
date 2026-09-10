@@ -69,12 +69,23 @@ marker_proxy="${marker_base}proxy"
 marker_ui="${marker_base}ui"
 marker_nats="${marker_base}nats"
 marker_dns="${marker_base}dns"
-# What: uses numeric watchdog marker for timeout.
-# Why: logged in startup banner before sleep called.
+# What: 8-digit numeric watchdog CHECK_INTERVAL marker.
+# Why: startup banner logs it; found later in /logs.
+# From: PR #1836
 if ! marker_watchdog="$(date +%s%N | tail -c 9)"; then
     echo "::error::Failed to generate the watchdog CHECK_INTERVAL marker via date +%s%N | tail." >&2
     exit 1
 fi
+# What: validates digits and lifts a leading zero to 9.
+# Why: watchdog logs it as int; 0-pad would mismatch.
+# From: PR #1836
+case "$marker_watchdog" in
+    ''|*[!0-9]*)
+        echo "::error::watchdog CHECK_INTERVAL marker is not all-digits: '$marker_watchdog'." >&2
+        exit 1
+        ;;
+    0*) marker_watchdog="9${marker_watchdog#?}" ;;
+esac
 
 # What: allocates isolated DHCP test subnets.
 # Why: avoids collision with production IP ranges.
