@@ -324,6 +324,39 @@ script_reads_validation_subnet_env() {
     return 1
 }
 
+# What: flag a --subnet sim mixing pinned and unpinned IPs.
+# Why: auto-IPAM can reassign a pinned address (#1850).
+# From: Issue #1850
+check_simulation_ip_pinning() {
+    local file="$1" line logical="" leading_ws stripped
+    local pinned=0 unpinned=0 first_unpinned=""
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" == *\\ ]]; then
+            logical+="${line%\\} "
+            continue
+        fi
+        logical+="$line"
+        leading_ws="${logical%%[^[:space:]]*}"
+        stripped="${logical#"$leading_ws"}"
+        logical=""
+        case "$stripped" in
+            '#'* | '') continue ;;
+        esac
+        [[ "$stripped" == *"docker run"* ]] || continue
+        [[ "$stripped" == *"--network"* ]] || continue
+        [[ "$stripped" == *"--rm"* ]] && continue
+        if [[ "$stripped" == *"--ip "* || "$stripped" == *"--ip="* ]]; then
+            pinned=$((pinned + 1))
+        else
+            unpinned=$((unpinned + 1))
+            [[ -z "$first_unpinned" ]] && first_unpinned="$stripped"
+        fi
+    done < "$file"
+    if [[ "$pinned" -gt 0 && "$unpinned" -gt 0 ]]; then
+        fail "check-validation-subnet-wrapper-coverage: $file mixes an --ip-pinned and an unpinned --network container on its own --subnet network ($pinned pinned, $unpinned unpinned) -- the #1850 IP-collision class: Docker auto-IPAM can hand a pinned container's address to an unpinned one. Give every non-ephemeral (no --rm) --network container an explicit --ip (DHCP-client sims are exempted upstream). First unpinned: ${first_unpinned:0:120}"
+    fi
+}
+
 # check_simulation_script <file>
 # The #822 gap check_job_body above cannot see: a script that creates a
 # Docker network with an explicit --subnet, but whose CALLING job never has
@@ -341,6 +374,13 @@ check_simulation_script() {
         return 0
     fi
     scripts_examined_with_subnet_creation=$((scripts_examined_with_subnet_creation + 1))
+
+    # What: run the #1850 IP-pin check on non-DHCP subnet sims.
+    # Why: DHCP sims mix pinned servers and lease clients.
+    # From: Issue #1850
+    if [[ "$content" != *"services/dhcp"* ]]; then
+        check_simulation_ip_pinning "$file"
+    fi
 
     if script_sources_reserve_lib "$file"; then
         return 0
