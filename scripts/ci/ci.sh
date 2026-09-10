@@ -705,9 +705,12 @@ ci_build_tools_channel() {
 # Why: only trusted refs; a fork PR must never build it.
 # From: Issue #1095 | Issue #842
 ci_build_tools_fallback_allowed() {
+  # What: bare $2/$3 = exact original 3-arg contract.
+  # Why: a faithful port; robustness is a separate change.
+  # From: Issue #1095 | Issue #842
   local event_name="${1:?ci_build_tools_fallback_allowed: event is required}"
-  local head_repository="${2-}"
-  local base_repository="${3-}"
+  local head_repository="$2"
+  local base_repository="$3"
   if [[ "$event_name" == "pull_request" ]]; then
     # What: case-insensitive; same-repo PR stays trusted.
     # Why: a repo rename can make head/base casing disagree.
