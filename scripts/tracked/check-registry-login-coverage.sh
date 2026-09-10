@@ -243,9 +243,26 @@ bcc_is_known_named_context() {
     return 1
 }
 
-# bcc_required_contexts_for_dockerfile <dockerfile>
-# Prints one required named-build-context name per line.
-bcc_required_contexts_for_dockerfile() {
+# CI matrix declaring each service's named build contexts.
+BCC_BUILD_PUSH_YML=".github/workflows/build-push.yml"
+
+# bcc_assert_allowlist_covers_ci_contexts
+# What: every build_contexts name in build-push.yml is
+# in the allowlist, so no CI context escapes this guard.
+# Why: a new named context would else pass unverified.
+# From: Issue #1095 (PR #1836 review: #2)
+bcc_assert_allowlist_covers_ci_contexts() {
+    local name
+    [[ -f "$BCC_BUILD_PUSH_YML" ]] || return 0
+    while IFS= read -r name; do
+        [[ -n "$name" ]] || continue
+        bcc_is_known_named_context "$name" || fail "check-registry-login-coverage (build-context): $BCC_BUILD_PUSH_YML declares build context '$name' absent from BCC_KNOWN_NAMED_CONTEXTS -- add '$name' there so simulations are verified to supply it."
+    done < <(grep -oE '[a-z][a-z0-9-]*=(services|scripts|tools)/' "$BCC_BUILD_PUSH_YML" | sed 's/=.*//' | sort -u)
+}
+
+# bcc_all_named_contexts_for_dockerfile <dockerfile>
+# Prints every external named build context (known or not), one per line.
+bcc_all_named_contexts_for_dockerfile() {
     local dockerfile="$1"
     awk '
         BEGIN { IGNORECASE = 1 }
@@ -270,7 +287,14 @@ bcc_required_contexts_for_dockerfile() {
                 print name
             }
         }
-    ' "$dockerfile" | sort -u | { while IFS= read -r name; do
+    ' "$dockerfile" | sort -u
+}
+
+# bcc_required_contexts_for_dockerfile <dockerfile>
+# Prints one required (known) named-build-context name per line.
+bcc_required_contexts_for_dockerfile() {
+    local dockerfile="$1" name
+    bcc_all_named_contexts_for_dockerfile "$dockerfile" | { while IFS= read -r name; do
         bcc_is_known_named_context "$name" && printf '%s\n' "$name"
     done; }
 }
@@ -317,13 +341,36 @@ bcc_target_dockerfile_for_invocation() {
     return 0
 }
 
+# bcc_strip_inline_comment <line>
+# Drops a trailing `#`-comment (a `#` starting a word outside quotes),
+# so a commented-out option is not read as an active argument.
+bcc_strip_inline_comment() {
+    awk 'BEGIN { dq = sprintf("%c", 34); sq = sprintf("%c", 39) }
+    {
+        inq = 0; qc = ""; out = ""
+        n = length($0)
+        for (i = 1; i <= n; i++) {
+            c = substr($0, i, 1)
+            if (inq) { out = out c; if (c == qc) inq = 0; continue }
+            if (c == dq || c == sq) { inq = 1; qc = c; out = out c; continue }
+            if (c == "#") {
+                p = (i > 1) ? substr($0, i - 1, 1) : " "
+                if (p == " " || p == "\t") break
+            }
+            out = out c
+        }
+        print out
+    }' <<<"$1"
+}
+
 # What: prints each --build-context name supplied.
-# Why: accepts both space and = long-option forms.
-# From: Issue #1095
+# Why: space/= forms, single/double quotes, no comments.
+# From: Issue #1095 (PR #1836 review: #4/#6)
 bcc_supplied_build_contexts() {
     local invocation="$1"
-    grep -oE -- '--build-context(=|[[:space:]]+)"?[A-Za-z0-9_.-]+=' <<<"$invocation" \
-        | sed -E 's/--build-context(=|[[:space:]]+)"?//; s/=$//' || true
+    invocation=$(bcc_strip_inline_comment "$invocation")
+    grep -oE -- '--build-context(=|[[:space:]]+)["'\'']?[A-Za-z0-9_.-]+=' <<<"$invocation" \
+        | sed -E 's/--build-context(=|[[:space:]]+)["'\'']?//; s/=$//' || true
 }
 
 bcc_check_invocation() {
@@ -377,6 +424,8 @@ for file in "$SIMULATIONS_DIR"/*.sh; do
     done < <(bcc_join_continued_lines "$file")
 done
 shopt -u nullglob
+
+bcc_assert_allowlist_covers_ci_contexts
 
 # What: fixture trees legitimately examine zero invocations.
 # Why: zero fixtures isn't a broken-parse signal here.

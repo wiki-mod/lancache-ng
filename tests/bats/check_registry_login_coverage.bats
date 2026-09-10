@@ -620,3 +620,42 @@ EOF
     run "$script" "$fixture_root"
     [ "$status" -eq 0 ]
 }
+
+@test "build-context: accepts a single-quoted --build-context argument" {
+    bcc_write_widget_dockerfile
+    bcc_write_widget_sim 'docker build -q -t widget --build-context '\''shared-scripts=$repo_root/scripts/lib'\'' services/widget >/dev/null'
+
+    run "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+}
+
+@test "build-context: a commented-out --build-context does not count as supplied" {
+    bcc_write_widget_dockerfile
+    bcc_write_widget_sim 'docker build -q -t widget services/widget >/dev/null # --build-context shared-scripts=/tmp/disabled'
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"shared-scripts"* ]]
+}
+
+@test "build-context: fails when build-push.yml declares a context not in the allowlist" {
+    bcc_write_widget_dockerfile
+    bcc_write_widget_sim 'docker build -q -t widget --build-context "shared-scripts=$repo_root/scripts/lib" services/widget >/dev/null'
+    cat > "$fixture_root/.github/workflows/build-push.yml" <<'EOF'
+name: Build & Push
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - service: widget
+            build_contexts: |
+              assets=services/assets
+              shared-scripts=scripts/lib
+EOF
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"assets"* ]]
+    [[ "$output" == *"BCC_KNOWN_NAMED_CONTEXTS"* ]]
+}

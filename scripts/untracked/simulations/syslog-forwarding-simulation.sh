@@ -520,7 +520,8 @@ fi
 # What: reports raw CONNECT probe failure.
 # Why: swallowed failure looked like real bug.
 # From: Issue #1095
-if ! nats_probe_out="$(docker run --rm --network "$network_name" \
+nats_probe_status=0
+nats_probe_out="$(docker run --rm --network "$network_name" \
     -e "NATS_AUTH_MARKER=$marker_nats" \
     "$BUILD_TOOLS_IMAGE" bash -c '
         exec 3<>/dev/tcp/nats/4222 || { echo "CONNECT_FAILED: cannot open /dev/tcp/nats/4222"; exit 1; }
@@ -529,8 +530,9 @@ if ! nats_probe_out="$(docker run --rm --network "$network_name" \
         read -r -t 3 err <&3
         sleep 1
         printf "server-info: %s\nserver-reply: %s\n" "$info" "$err"
-    ' 2>&1)"; then
-    echo "::warning::NATS raw-TCP auth probe itself failed (exit $?); the marker below is not expected to appear. Probe output:" >&2
+    ' 2>&1)" || nats_probe_status=$?
+if [ "$nats_probe_status" -ne 0 ]; then
+    echo "::warning::NATS raw-TCP auth probe itself failed (exit $nats_probe_status); the marker below is not expected to appear. Probe output:" >&2
     printf '%s\n' "$nats_probe_out" >&2
 fi
 assert_marker_reaches_ui "$marker_nats" "nats (static-user authentication-error log line carrying the attempted username)" 90 nats
