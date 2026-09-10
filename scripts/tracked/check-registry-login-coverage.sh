@@ -407,18 +407,55 @@ if [[ "$jobs_examined" -eq 0 ]]; then
     fail "check-registry-login-coverage: examined zero jobs across ${WORKFLOW_FILES[*]} -- expected several (this guard's own parsing likely broke, or all three workflow files changed shape; update this script rather than silently passing)."
 fi
 
-# What: requires docker build/buildx in command position.
-# Why: catches whitespace/chaining forms, rejects prose.
-# From: Issue #1095 | PR #1856
+# What: split a line on top-level && || ; separators.
+# Why: each build on a line must be checked, not only last.
+# From: Issue #1095 (PR #1836 review: #9)
+bcc_split_commands() {
+    awk 'BEGIN { dq = sprintf("%c", 34); sq = sprintf("%c", 39) }
+    {
+        inq = 0; qc = ""; seg = ""; n = length($0)
+        for (i = 1; i <= n; i++) {
+            c = substr($0, i, 1)
+            if (inq) { seg = seg c; if (c == qc) inq = 0; continue }
+            if (c == dq || c == sq) { inq = 1; qc = c; seg = seg c; continue }
+            two = substr($0, i, 2)
+            if (two == "&&" || two == "||") { print seg; seg = ""; i++; continue }
+            if (c == ";") { print seg; seg = ""; continue }
+            seg = seg c
+        }
+        print seg
+    }' <<<"$1"
+}
+
+# What: drops leading env-assignments and control keywords.
+# Why: env-prefix or if-keyword else hides the build.
+# From: Issue #1095 (PR #1836 review: #1)
+bcc_strip_command_prefix() {
+    BCC_STRIPPED="${1#"${1%%[![:space:]]*}"}"
+    while [[ "$BCC_STRIPPED" =~ ^(if|then|else|elif|while|until|do|!)[[:space:]]+ ]]; do
+        BCC_STRIPPED="${BCC_STRIPPED#"${BASH_REMATCH[0]}"}"
+    done
+    while [[ "$BCC_STRIPPED" =~ ^[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+ ]]; do
+        BCC_STRIPPED="${BCC_STRIPPED#"${BASH_REMATCH[0]}"}"
+    done
+}
+
 shopt -s nullglob
-bcc_docker_build_re='(^|;|&&|\|\|)[[:space:]]*docker[[:space:]]+(buildx[[:space:]]+)?build([[:space:]]|$)'
+bcc_docker_build_re='^docker[[:space:]]+(buildx[[:space:]]+)?build([[:space:]]|$)'
 for file in "$SIMULATIONS_DIR"/*.sh; do
     while IFS= read -r logical_line; do
         stripped="${logical_line#"${logical_line%%[! ]*}"}"
         [[ "$stripped" == \#* ]] && continue
-        if [[ "$stripped" =~ $bcc_docker_build_re ]]; then
-            bcc_check_invocation "$file" "$logical_line"
-        fi
+        # What: only split lines that hold a docker build.
+        # Why: splitting every line else costs minutes.
+        # From: Issue #1095 (PR #1836 review: #9)
+        [[ "$stripped" =~ docker[[:space:]]+(buildx[[:space:]]+)?build([[:space:]]|$) ]] || continue
+        while IFS= read -r segment; do
+            bcc_strip_command_prefix "$segment"
+            if [[ "$BCC_STRIPPED" =~ $bcc_docker_build_re ]]; then
+                bcc_check_invocation "$file" "$segment"
+            fi
+        done < <(bcc_split_commands "$logical_line")
     done < <(bcc_join_continued_lines "$file")
 done
 shopt -u nullglob

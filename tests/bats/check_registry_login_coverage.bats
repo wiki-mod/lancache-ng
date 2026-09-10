@@ -659,3 +659,40 @@ EOF
     [[ "$output" == *"assets"* ]]
     [[ "$output" == *"BCC_KNOWN_NAMED_CONTEXTS"* ]]
 }
+
+@test "build-context: catches a missing context behind an env-assignment prefix" {
+    bcc_write_widget_dockerfile
+    bcc_write_widget_sim 'DOCKER_BUILDKIT=1 docker build -q -t widget services/widget >/dev/null'
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"shared-scripts"* ]]
+}
+
+@test "build-context: catches a missing context behind an 'if' control keyword" {
+    bcc_write_widget_dockerfile
+    bcc_write_widget_sim 'if docker build -q -t widget services/widget >/dev/null; then echo ok; fi'
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"shared-scripts"* ]]
+}
+
+@test "build-context: checks each chained build so a compliant one cannot mask a missing context" {
+    bcc_write_widget_dockerfile
+    bcc_write_widget_sim 'docker build -q -t w1 services/widget >/dev/null && docker build -q -t w2 --build-context "shared-scripts=$repo_root/scripts/lib" services/widget >/dev/null'
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"shared-scripts"* ]]
+    [[ "$output" == *"w1"* || "$output" == *"widget-simulation.sh"* ]]
+}
+
+@test "build-context: counts each chained build separately when all are compliant" {
+    bcc_write_widget_dockerfile
+    bcc_write_widget_sim 'docker build -q -t w1 --build-context "shared-scripts=$repo_root/scripts/lib" services/widget >/dev/null && docker build -q -t w2 --build-context "shared-scripts=$repo_root/scripts/lib" services/widget >/dev/null'
+
+    run "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"2 docker build invocation"* ]]
+}
