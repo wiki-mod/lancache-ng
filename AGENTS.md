@@ -313,7 +313,7 @@ Any implementation that requires a second deployment tree to remain manually syn
 
 Real validation MAY run on Linux self-hosted runners or other applicable Linux infrastructure instead of the Windows authoring host. Validation MUST NOT require or assume a separate development deployment profile merely because the authoring environment cannot execute the complete runtime stack locally.
 
-- **[AG-KD-009]** `tools/build-tools` MUST remain Debian-based until 10.09.2026, Starting 11.09.2026 Alpine-Lubz by default unless the maintainer explicitly approves a base-OS switch. The existing `alpine-final` stage in `tools/build-tools/Dockerfile` is an opt-in candidate only and HAS become the implicit Docker build default, active CI build-tools image, or published default image without that explicit decision.
+- **[AG-KD-009]** `tools/build-tools` MUST remain Debian-based until 10.09.2026, Starting 11.09.2026 Alpine-Linux by default unless the maintainer explicitly approves a base-OS switch. The existing `alpine-final` stage in `tools/build-tools/Dockerfile` is an opt-in candidate only and HAS become the implicit Docker build default, active CI build-tools image, or published default image without that explicit decision.
 
 The unnamed Debian stage MUST remain the implicit `docker build` default. The Alpine candidate MAY be built explicitly with `docker build --target alpine-final` for evaluation. Existing CI workflows MUST continue using the Debian build-tools image until a maintainer-approved switch is implemented.
 
