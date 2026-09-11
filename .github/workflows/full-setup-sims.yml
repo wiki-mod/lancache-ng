@@ -33,14 +33,11 @@ permissions:
   contents: read
 
 jobs:
-  # What: derives a per-run subnet candidate + anchor.
-  # Why: per-job flock+retry still does real reservation.
-  # From: Issue #623
+
   compute-validation-network:
     name: derive per-run validation subnet
     if: inputs.should_run == 'true'
-    # Stays light (not a stack-driving job): pure subnet/IP derivation via a
-    # composite action, no Docker/compose stack of its own.
+
     runs-on: [self-hosted, linux, lancache, lancache-light]
     timeout-minutes: 45
     outputs:
@@ -63,8 +60,7 @@ jobs:
         id: derive
         uses: ./.github/actions/derive-validation-network
 
-  # What: superset of build-push.yml's shallow validate job.
-  # Why: adds stack bring-up, health checks, client sim.
+
   full-setup-validate:
     name: validate full-setup image
     needs: compute-validation-network
@@ -80,9 +76,7 @@ jobs:
     steps:
       - uses: *checkout_centraliced_versioning # v7.0.1
 
-      # What: authenticate registries before stack pull.
-      # Why: docker.io pulls anonymous without auth.
-      # From: Issue #1095
+
       - name: Log in to registries (GHCR + optional Docker Hub)
         uses: ./.github/actions/ghcr-then-dockerhub-login
         with:
@@ -146,22 +140,10 @@ jobs:
           set -euo pipefail
           docker compose down --volumes --remove-orphans || true
 
-          # `down` above can lose Docker's own "has active endpoints" race
-          # (a container-removal API call can return before its network
-          # endpoint is actually unwired -- confirmed for real in CI, see
-          # validation_project_networks_teardown's own comment in
-          # reserve-validation-subnet.sh) and silently leave this project's
-          # network(s) non-empty, poisoning them for whichever job/run
-          # reserves this slot next. Wait for and force a real removal
-          # instead of trusting `down`'s own exit code.
+
           # shellcheck source=scripts/lib/reserve-validation-subnet.sh
           source "$GITHUB_WORKSPACE/scripts/lib/reserve-validation-subnet.sh"
-          # This step runs unconditionally (`if: always()`), including when
-          # the reserve composite failed before ever setting
-          # COMPOSE_PROJECT_NAME -- under `set -u`, a bare "$COMPOSE_PROJECT_NAME"
-          # would abort this whole step with "unbound variable" in exactly that
-          # case. The safe-default form skips teardown when there is nothing to
-          # tear down instead.
+
           if [[ -n "${COMPOSE_PROJECT_NAME:-}" ]]; then
             validation_project_networks_teardown "$COMPOSE_PROJECT_NAME" || true
           fi
@@ -254,9 +236,7 @@ jobs:
           bash scripts/lib/run-in-validation-subnet.sh bash scripts/untracked/simulations/ssl-mitm-cache-simulation.sh
 
   proxy-deep-wildcard-tls-simulation:
-    # What: TLS-handshake test for deep wildcard certs.
-    # Why: chained to bound shared BuildKit contention.
-    # From: Issue #1065
+
     name: Proxy deep-wildcard TLS simulation
     needs: [compute-validation-network, ssl-mitm-cache-simulation]
     if: >-
@@ -267,11 +247,9 @@ jobs:
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 30
     steps:
-      - uses: *checkout_centraliced_versioning # v7.0.1
+      - uses: *checkout_centraliced_versioning 
       - name: Resolve build-tools image
-        # What: same build-tools resolution pattern.
-        # Why: prefer PR staging tag for same-PR.
-        # From: PR #1523
+
         id: build-tools-image
         env:
           PR_STAGING_AVAILABLE: ${{ inputs.pr_staging_available }}
