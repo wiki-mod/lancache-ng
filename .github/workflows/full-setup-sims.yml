@@ -284,7 +284,7 @@ jobs:
         run: |
           set -euo pipefail
           # Reserve a collision-free /27 subnet within 172.30.0.0/16 (flock +
-          # retry, issue #820) and run the sim inside it, instead of racing the single
+          # retry) and run the sim inside it, instead of racing the single
           # job-level VALIDATION_SUBNET against every other concurrent run on
           # this host. The wrapper exports the whole VALIDATION_* set (incl.
           # VALIDATION_STANDARD_SHIM_IP, which compose reads to place the
