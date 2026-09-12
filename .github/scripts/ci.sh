@@ -6,8 +6,8 @@
 # Why: All CI decisions live here, YAML only orchestrates.
 # From: Issue #1683
 #
-# Section layout follows docs/ci-2.0-architecture.md section 65.
-# Phase-1 scaffold: banners plus fail-closed stubs, no engine yet.
+# Sections follow docs/ci-2.0-architecture.md sec 65.
+# Phase-1 scaffold: banners + fail-closed stubs only.
 
 set -euo pipefail
 
@@ -16,7 +16,7 @@ set -euo pipefail
 # ============================================================
 
 # What: Absolute path of this script's directory.
-# Why: Locate the SOT manifest independent of the caller CWD.
+# Why: Find the SOT manifest regardless of caller CWD.
 # From: Issue #1683
 CI_SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -26,7 +26,7 @@ CI_SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 CI_MANIFEST="${CI_SCRIPT_DIR}/../yaml/build-manifest.yml"
 
 # What: The known ci.sh subcommands (docs section 9 CLI).
-# Why: One list drives dispatch and error text, no duplicate.
+# Why: One list drives dispatch and error text.
 # From: Issue #1683
 CI_COMMANDS="plan impact identity resolve test build publish verify assemble validate promote gc variables"
 
@@ -52,7 +52,7 @@ ci_error() {
     printf 'raw:\n%s\n' "${raw}" >&2
 }
 
-# What: Report a not-yet-implemented dispatch target and fail.
+# What: Report an unimplemented dispatch target.
 # Why: Scaffold must fail closed, never silently succeed.
 # From: Issue #1683
 ci_not_implemented() {
@@ -60,7 +60,7 @@ ci_not_implemented() {
     return 2
 }
 
-# What: Fail closed unless the SOT build manifest is present.
+# What: Fail closed unless the SOT manifest exists.
 # Why: Every real operation derives state from the manifest.
 # From: Issue #1683
 ci_require_manifest() {
