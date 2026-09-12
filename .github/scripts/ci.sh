@@ -1130,6 +1130,42 @@ ci_cmd_gc() {
 }
 
 # =========================================================
+# VARIABLES
+# =========================================================
+
+# What: Read a CI variable: env override or SOT default.
+# Why: One rule, no hardcode (AG-CI-006, CARGO_BUILD_JOBS).
+# From: Issue #1683
+_ci_variable() {
+    local name="$1" val
+    if [ -z "${name}" ]; then
+        ci_log "[CI-ERROR-VARIABLES-0003]" "reason=\"no variable name given\""
+        return 2
+    fi
+    val="${!name:-}"
+    if [ -n "${val}" ]; then printf '%s\n' "${val}"; return 0; fi
+    val="$(_ci_manifest_scalar "^  ${name}:[[:space:]]")"
+    if [ -n "${val}" ]; then printf '%s\n' "${val}"; return 0; fi
+    ci_log "[CI-ERROR-VARIABLES-0001]" "name=\"${name}\" reason=\"no env value and no SOT fallback\""
+    return 2
+}
+
+# What: Print one CI variable value for callers.
+# Why: Workflows read values via ci.sh, no second source.
+# From: Issue #1683
+ci_cmd_variables() {
+    local sub="${1:-}"
+    if [ "$#" -gt 0 ]; then shift; fi
+    case "${sub}" in
+        get) _ci_variable "${1:-}" ;;
+        *)
+            ci_log "[CI-ERROR-VARIABLES-0002]" "sub=\"${sub}\" reason=\"unknown variables subcommand\""
+            return 2
+            ;;
+    esac
+}
+
+# =========================================================
 # DISPATCH
 # =========================================================
 
@@ -1154,6 +1190,7 @@ ci_main() {
                 assemble) ci_cmd_assemble "$@" ;;
                 promote) ci_cmd_promote "$@" ;;
                 gc) ci_cmd_gc "$@" ;;
+                variables) ci_cmd_variables "$@" ;;
                 *) ci_not_implemented "${command}" "$@" ;;
             esac
             ;;

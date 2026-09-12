@@ -1001,5 +1001,55 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
 }
 
 # =========================================================
+# VARIABLES
+# =========================================================
+
+@test "variables get reads a value from the SOT fallback" {
+    # What: With no env override, the SOT default is used.
+    # Why: AG-CI-006 fallback, like CARGO_BUILD_JOBS.
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" variables get REPOSITORY_CI_LEDGER_RETENTION_DAYS
+    [ "${status}" -eq 0 ]
+    [ "${output}" = "30" ]
+}
+
+@test "variables get lets an env value override the SOT default" {
+    # What: A set env value wins over the SOT fallback.
+    # Why: AG-CI-006: use the variable when set.
+    # From: Issue #1683
+    REPOSITORY_CI_LEDGER_RETENTION_DAYS=45 \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" variables get REPOSITORY_CI_LEDGER_RETENTION_DAYS
+    [ "${status}" -eq 0 ]
+    [ "${output}" = "45" ]
+}
+
+@test "variables get fails closed with no env and no SOT default" {
+    # What: An unknown variable has no value anywhere.
+    # Why: Fail closed, never emit an empty value.
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" variables get NONEXISTENT_VAR_XYZ
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VARIABLES-0001"* ]]
+}
+
+@test "variables get fails closed with no variable name" {
+    # What: A missing name must fail, not read blank.
+    # Why: Fail-closed dispatch (AG-VAL-002).
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" variables get
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VARIABLES-0003"* ]]
+}
+
+@test "variables rejects an unknown subcommand" {
+    # What: Only known subcommands are routed.
+    # Why: Fail-closed dispatch (AG-VAL-002).
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" variables bogus
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VARIABLES-0002"* ]]
+}
+
+# =========================================================
 # HISTORICAL REGRESSIONS
 # =========================================================
