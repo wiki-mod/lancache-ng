@@ -8,25 +8,10 @@
 
 name: Build & Push
 on:
-  workflow_dispatch:
-    inputs:
-      channel:
-        description: Also promote this channel from the dispatched ref, in addition to the automatic branch/tag rule below (e.g. spot-check a feature branch as "nightly" without merging it first).
-        type: choice
-        options: [none, nightly]
-        default: none
-  schedule:
-    - cron: "0 1 * * *"
-  push:
-    branches: [master, current_dev, "v[0-9]*"]
-    tags: ["v*"]
-    paths-ignore:
-      - "**/*.md"
-      - "docs/**"
-      - "!CHANGELOG.md"
-  pull_request:
-    branches: [master, current_dev, "v[0-9]*"]
-    types: [opened, synchronize, reopened, labeled, unlabeled, milestoned, demilestoned, ready_for_review]
+  # What: legacy CI frozen on the #1683 rewrite branch.
+  # Why: stop the old pipeline building containers here.
+  # From: Issue #1683
+  workflow_dispatch: {}
 permissions:
   contents: read
   pull-requests: read

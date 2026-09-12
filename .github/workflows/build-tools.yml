@@ -8,17 +8,10 @@
 name: Build Tools Image
 
 on:
-  workflow_dispatch:
-  schedule:
-    - cron: "23 3 * * 0"
-  pull_request:
-    branches: [master, current_dev, v0.2.0]
-    paths:
-      - "tools/build-tools/**"
-      - ".github/workflows/build-tools.yml"
-      - ".github/actions/build-tools-candidate-smoke/**"
-      - ".github/actions/trivy-scan-exact-digest/**"
-
+  # What: legacy CI frozen on the #1683 rewrite branch.
+  # Why: stop the old pipeline building containers here.
+  # From: Issue #1683
+  workflow_dispatch: {}
 permissions:
   contents: read
   packages: write

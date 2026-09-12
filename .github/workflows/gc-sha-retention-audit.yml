@@ -7,22 +7,10 @@
 name: SHA Retention Audit
 
 on:
-  pull_request:
-    branches:
-      - current_dev
-    types: [opened, synchronize, reopened]
-    paths:
-      - .github/workflows/gc-sha-retention-audit.yml
-      - release/stack-images.yml
-      - docs/release-versioning.md
-      - scripts/untracked/select-build-tools-image.sh
-      - scripts/untracked/gc-sha-retention-audit.sh
-      - scripts/lib/github-api-retry.sh
-      - scripts/lib/sha-retention-audit.sh
-      - scripts/untracked/validate-stack-images.sh
-      - tests/bats/sha_retention_audit.bats
-  workflow_dispatch:
-
+  # What: legacy CI frozen on the #1683 rewrite branch.
+  # Why: stop the old pipeline building containers here.
+  # From: Issue #1683
+  workflow_dispatch: {}
 permissions: {}
 
 concurrency:
