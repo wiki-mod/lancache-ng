@@ -154,6 +154,68 @@ setup() {
 # RESOLVER STATES
 # ============================================================
 
+# What: A stub probe that returns a fixed state.
+# Why: Test the resolver logic without a live GHCR.
+# From: Issue #1683
+_probe_stub() {
+    printf '%s\n' "${STUB_STATE}" > "${BATS_TEST_TMPDIR}/probe.sh.state" 2>/dev/null || true
+    cat <<STUB > "${BATS_TEST_TMPDIR}/probe.sh"
+#!/usr/bin/env bash
+printf '%s\\n' "${STUB_STATE}"
+STUB
+    chmod +x "${BATS_TEST_TMPDIR}/probe.sh"
+    printf '%s\n' "${BATS_TEST_TMPDIR}/probe.sh"
+}
+
+@test "resolve maps PRESENT_ACCEPTED to noop (DEFAULT=NOOP)" {
+    # What: An accepted identity means no build.
+    # Why: NOOP/reuse before build is the core rule.
+    # From: Issue #1683
+    STUB_STATE=PRESENT_ACCEPTED
+    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${BATS_TEST_DIRNAME}/ci.sh" resolve ui
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"state=PRESENT_ACCEPTED"* ]]
+    [[ "${output}" == *"action=noop"* ]]
+}
+
+@test "resolve maps MISSING_CONFIRMED to build" {
+    # What: Only a confirmed-missing artifact builds.
+    # Why: Build is evidence-driven, not a cache miss.
+    # From: Issue #1683
+    STUB_STATE=MISSING_CONFIRMED
+    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${BATS_TEST_DIRNAME}/ci.sh" resolve ui
+    [[ "${output}" == *"action=build"* ]]
+}
+
+@test "resolve maps UNKNOWN to escalate, never build (UNKNOWN != BUILD)" {
+    # What: Infra uncertainty must not trigger a build.
+    # Why: UNKNOWN != BUILD (Contract section 4).
+    # From: Issue #1683
+    STUB_STATE=UNKNOWN
+    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${BATS_TEST_DIRNAME}/ci.sh" resolve ui
+    [[ "${output}" == *"state=UNKNOWN"* ]]
+    [[ "${output}" == *"action=escalate"* ]]
+    [[ "${output}" != *"action=build"* ]]
+}
+
+@test "resolve with no probe wired defaults to UNKNOWN, not missing" {
+    # What: No probe -> UNKNOWN, never assume missing.
+    # Why: Absence of evidence is not evidence of absence.
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" resolve ui
+    [[ "${output}" == *"state=UNKNOWN"* ]]
+    [[ "${output}" == *"action=escalate"* ]]
+}
+
+@test "resolve fails closed when no service is given" {
+    # What: Missing arg must fail with a stable id.
+    # Why: Fail-closed dispatch (AG-VAL-002).
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" resolve
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-RESOLVE-0001"* ]]
+}
+
 # ============================================================
 # RETRY CLASSIFICATION
 # ============================================================

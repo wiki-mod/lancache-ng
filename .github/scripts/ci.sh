@@ -289,6 +289,57 @@ ci_cmd_identity() {
 # ARTIFACT RESOLVER
 # ============================================================
 
+# What: Probe the acceptance/registry state for an identity.
+# Why: Injectable so logic tests need no live GHCR.
+# From: Issue #1683
+_ci_resolve_probe() {
+    local service="$1" identity="$2"
+    if [ -n "${CI_RESOLVE_PROBE_CMD:-}" ]; then
+        "${CI_RESOLVE_PROBE_CMD}" "${service}" "${identity}"
+        return 0
+    fi
+    # No probe wired yet: state is genuinely unknown, never
+    # assumed missing (UNKNOWN != BUILD, Contract section 4).
+    printf 'UNKNOWN\n'
+}
+
+# What: Map a resolver state to its one action.
+# Why: DEFAULT=NOOP; UNKNOWN escalates, never builds.
+# From: Issue #1683
+_ci_resolve_action() {
+    case "$1" in
+        PRESENT_ACCEPTED)   printf 'noop\n' ;;
+        MISSING_CONFIRMED)  printf 'build\n' ;;
+        MISMATCH)           printf 'build\n' ;;
+        PRODUCED_UNVERIFIED) printf 'verify\n' ;;
+        BUILD_IN_PROGRESS)  printf 'wait\n' ;;
+        *)                  printf 'escalate\n' ;;
+    esac
+}
+
+# What: Resolve one service to a state + action.
+# Why: NOOP/reuse decided before any build starts (§7).
+# From: Issue #1683
+ci_cmd_resolve() {
+    local service="${1:-}"
+    [ -n "${service}" ] || { ci_log "[CI-ERROR-RESOLVE-0001]" "reason=\"service arg required\""; return 2; }
+    local identity state action
+    identity="$(ci_cmd_identity "${service}")" || return "$?"
+    state="$(_ci_resolve_probe "${service}" "${identity}")"
+    case "${state}" in
+        PRESENT_ACCEPTED|MISSING_CONFIRMED|MISMATCH|PRODUCED_UNVERIFIED|BUILD_IN_PROGRESS|UNKNOWN) ;;
+        *)
+            ci_log "[CI-ERROR-RESOLVE-0002]" "service=\"${service}\" reason=\"probe returned unknown state\" got=\"${state}\""
+            state="UNKNOWN"
+            ;;
+    esac
+    action="$(_ci_resolve_action "${state}")"
+    printf 'service=%s state=%s action=%s identity=%s\n' "${service}" "${state}" "${action}" "${identity}"
+    if [ "${state}" = "UNKNOWN" ]; then
+        ci_log "[CI-INFO-RESOLVE-0003]" "service=\"${service}\" state=UNKNOWN note=\"escalate; UNKNOWN is never treated as build-needed\""
+    fi
+}
+
 # ============================================================
 # ACCEPTANCE INDEX
 # ============================================================
@@ -341,6 +392,7 @@ ci_main() {
             case "${command}" in
                 plan) ci_cmd_plan "$@" ;;
                 identity) ci_cmd_identity "$@" ;;
+                resolve) ci_cmd_resolve "$@" ;;
                 *) ci_not_implemented "${command}" "$@" ;;
             esac
             ;;
