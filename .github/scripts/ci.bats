@@ -119,6 +119,37 @@ setup() {
 # BUILD IDENTITIES
 # ============================================================
 
+@test "identity is deterministic for the same inputs" {
+    # What: Same content -> same id, every time.
+    # Why: NOOP/reuse depends on a stable identity.
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" identity ui
+    [ "${status}" -eq 0 ]
+    local first="${output}"
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" identity ui
+    [ "${output}" = "${first}" ]
+    [[ "${output}" =~ ^[0-9a-f]{64}$ ]]
+}
+
+@test "identity differs across services and build types" {
+    # What: proxy(apk), ui(rust), build-tools all differ.
+    # Why: An id must key on its own inputs, not collide.
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" identity proxy
+    local proxy="${output}"
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" identity build-tools
+    [ "${output}" != "${proxy}" ]
+}
+
+@test "identity fails closed with a stable id when no service is given" {
+    # What: Missing arg must not crash on set -u.
+    # Why: Fail-closed with our own message, not a trace.
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" identity
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-IDENTITY-0001"* ]]
+}
+
 # ============================================================
 # RESOLVER STATES
 # ============================================================
