@@ -216,6 +216,19 @@ setup() {
     [ "${arm_before}" != "${arm_after}" ]
 }
 
+@test "a target with no platforms in the SOT fails closed" {
+    # What: An empty platform set is an error, not rc0.
+    # Why: A masked rc0 fan-out would skip the target.
+    # From: Issue #1683
+    local m="${BATS_TEST_TMPDIR}/manifest.yml"
+    cp "${BATS_TEST_DIRNAME}/../yaml/build-manifest.yml" "${m}"
+    sed -i '/^  platforms: \[/d' "${m}"
+    CI_MANIFEST="${m}" run bash "${BATS_TEST_DIRNAME}/ci.sh" identity ui
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-IDENTITY-0003"* ]]
+    [[ "${output}" != *"identity="* ]]
+}
+
 @test "resolve rejects a platform not in the target set" {
     # What: A selected unknown platform fails closed.
     # Why: Fail-closed dispatch (AG-VAL-002).
