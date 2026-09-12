@@ -466,6 +466,52 @@ ci_cmd_build() {
 # VERIFY / TEST / SCAN
 # ============================================================
 
+# What: Push a built image to its per-identity GHCR ref.
+# Why: Publish is authenticated and injectable for tests.
+# From: Issue #1683
+ci_cmd_publish() {
+    local service="${1:-}"
+    [ -n "${service}" ] || { ci_log "[CI-ERROR-PUBLISH-0001]" "reason=\"service arg required\""; return 2; }
+    _ci_require_ghcr_auth || return "$?"
+    local identity digest
+    identity="$(ci_cmd_identity "${service}")" || return "$?"
+    if [ -n "${CI_PUBLISH_CMD:-}" ]; then
+        digest="$("${CI_PUBLISH_CMD}" "${service}" "${identity}")" || {
+            ci_log "[CI-ERROR-PUBLISH-0002]" "service=\"${service}\" reason=\"publish backend failed\""
+            return 2
+        }
+    else
+        ci_log "[CI-ERROR-PUBLISH-0003]" "service=\"${service}\" reason=\"no publish backend wired (CI_PUBLISH_CMD unset)\""
+        return 2
+    fi
+    printf 'service=%s published=%s identity=%s\n' "${service}" "${digest}" "${identity}"
+}
+
+# What: Read a published ref back and confirm its digest.
+# Why: BUILT != ACCEPTED; a MISMATCH must fail (§7).
+# From: Issue #1683
+ci_cmd_verify() {
+    local service="${1:-}" expected="${2:-}"
+    [ -n "${service}" ] || { ci_log "[CI-ERROR-VERIFY-0001]" "reason=\"service arg required\""; return 2; }
+    [ -n "${expected}" ] || { ci_log "[CI-ERROR-VERIFY-0002]" "reason=\"expected digest arg required\""; return 2; }
+    _ci_require_ghcr_auth || return "$?"
+    local seen
+    if [ -n "${CI_READBACK_CMD:-}" ]; then
+        seen="$("${CI_READBACK_CMD}" "${service}")" || {
+            ci_log "[CI-ERROR-VERIFY-0003]" "service=\"${service}\" reason=\"readback failed\""
+            return 2
+        }
+    else
+        ci_log "[CI-ERROR-VERIFY-0004]" "service=\"${service}\" reason=\"no readback backend wired (CI_READBACK_CMD unset)\""
+        return 2
+    fi
+    if [ "${seen}" != "${expected}" ]; then
+        ci_error "[CI-ERROR-VERIFY-0005]" "service=\"${service}\" reason=\"digest MISMATCH; produced != accepted\" expected=\"${expected}\"" "readback=${seen}"
+        return 2
+    fi
+    printf 'service=%s verified=%s\n' "${service}" "${seen}"
+}
+
 # ============================================================
 # ASSEMBLY
 # ============================================================
@@ -500,6 +546,8 @@ ci_main() {
                 identity) ci_cmd_identity "$@" ;;
                 resolve) ci_cmd_resolve "$@" ;;
                 build) ci_cmd_build "$@" ;;
+                publish) ci_cmd_publish "$@" ;;
+                verify) ci_cmd_verify "$@" ;;
                 *) ci_not_implemented "${command}" "$@" ;;
             esac
             ;;
