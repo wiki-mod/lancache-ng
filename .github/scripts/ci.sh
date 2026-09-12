@@ -69,13 +69,154 @@ ci_require_manifest() {
 # SERVICE INVENTORY
 # ============================================================
 
+# What: List direct child keys under a top-level block.
+# Why: One awk reader, no yq/python (AG-REL-001/006).
+# From: Issue #1683
+_ci_block_keys() {
+    local block="$1"
+    awk -v block="$block" '
+        $0 ~ ("^" block ":[[:space:]]*$") { inb = 1; next }
+        inb && /^[^[:space:]]/ { inb = 0 }
+        inb && /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ {
+            key = $1; sub(/:$/, "", key); print key
+        }
+    ' "${CI_MANIFEST}"
+}
+
+# What: Print the 10 product-stack service names.
+# Why: The one service list; everything derives from it.
+# From: Issue #1683
+ci_services() {
+    _ci_block_keys "services"
+}
+
+# What: Print every build target (services + toolchain).
+# Why: build-tools builds but is never a product service.
+# From: Issue #1683
+ci_build_targets() {
+    ci_services
+    _ci_block_keys "build_toolchain"
+}
+
 # ============================================================
 # SEMANTIC PARSERS
 # ============================================================
 
+# What: Print one scalar field of a service entry.
+# Why: Read build_type/runner/final_base without a copy.
+# From: Issue #1683
+ci_service_field() {
+    local service="$1" field="$2"
+    awk -v svc="$service" -v field="$field" '
+        /^services:[[:space:]]*$/ { ins = 1; next }
+        ins && /^[^[:space:]]/ { ins = 0 }
+        ins && /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ {
+            cur = $1; sub(/:$/, "", cur); insvc = (cur == svc)
+        }
+        ins && insvc && $1 == (field ":") {
+            val = $0; sub(/^[[:space:]]*[A-Za-z0-9_.-]+:[[:space:]]*/, "", val)
+            print val; exit
+        }
+    ' "${CI_MANIFEST}"
+}
+
+# What: Print the named contexts a service rebuilds on.
+# Why: dependency_graph is the SOT edge set (Finding 93).
+# From: Issue #1683
+ci_service_contexts() {
+    local service="$1"
+    awk -v svc="$service" '
+        /^dependency_graph:[[:space:]]*$/ { ind = 1; next }
+        ind && /^[^[:space:]]/ { ind = 0 }
+        ind && /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ {
+            cur = $1; sub(/:$/, "", cur); insvc = (cur == svc); incx = 0
+        }
+        ind && insvc && /^    contexts:[[:space:]]*\[/ {
+            line = $0; sub(/^[^[]*\[/, "", line); sub(/\].*$/, "", line)
+            gsub(/[[:space:],]+/, " ", line)
+            n = split(line, a, " ")
+            for (i = 1; i <= n; i++) if (a[i] != "") print a[i]
+            exit
+        }
+    ' "${CI_MANIFEST}"
+}
+
+# What: Print a named context's path from named_contexts.
+# Why: Map a context name to the repo path it covers.
+# From: Issue #1683
+ci_context_path() {
+    local context="$1"
+    awk -v ctx="$context" '
+        /^named_contexts:[[:space:]]*$/ { inc = 1; next }
+        inc && /^[^[:space:]]/ { inc = 0 }
+        inc && /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ {
+            cur = $1; sub(/:$/, "", cur); inctx = (cur == ctx)
+        }
+        inc && inctx && $1 == "path:" {
+            val = $0; sub(/^[[:space:]]*path:[[:space:]]*/, "", val)
+            print val; exit
+        }
+    ' "${CI_MANIFEST}"
+}
+
 # ============================================================
 # IMPACT ENGINE
 # ============================================================
+
+# What: Read the changed-path list for this run.
+# Why: CHANGED_FILES (file) or args; no hidden git walk.
+# From: Issue #1683
+_ci_changed_files() {
+    if [ -n "${CHANGED_FILES:-}" ] && [ -f "${CHANGED_FILES}" ]; then
+        cat -- "${CHANGED_FILES}"
+        return 0
+    fi
+    printf '%s\n' "$@"
+}
+
+# What: True if any changed path is under a prefix.
+# Why: Path membership only SELECTS a rebuild candidate.
+# From: Issue #1683
+_ci_paths_touch() {
+    local prefix="$1"; shift
+    local p
+    for p in "$@"; do
+        case "$p" in
+            "${prefix}"|"${prefix}"/*) return 0 ;;
+        esac
+    done
+    return 1
+}
+
+# What: Plan phase: pick rebuild CANDIDATES per service.
+# Why: Path picks candidates; identity/CAS decides build.
+# From: Issue #1683
+ci_cmd_plan() {
+    local -a changed=()
+    while IFS= read -r line; do
+        [ -n "${line}" ] && changed+=("${line}")
+    done < <(_ci_changed_files "$@")
+
+    local service context ctx_path candidate
+    for service in $(ci_build_targets); do
+        candidate="false"
+        context="$(ci_service_field "${service}" context)"
+        [ -z "${context}" ] && context="services/${service}"
+        if _ci_paths_touch "${context}" "${changed[@]}"; then
+            candidate="true"
+        else
+            for ctx in $(ci_service_contexts "${service}"); do
+                ctx_path="$(ci_context_path "${ctx}")"
+                [ -n "${ctx_path}" ] || continue
+                if _ci_paths_touch "${ctx_path}" "${changed[@]}"; then
+                    candidate="true"; break
+                fi
+            done
+        fi
+        printf '%s=%s\n' "${service}" "${candidate}"
+    done
+    ci_log "[CI-INFO-PLAN-0001]" "phase=plan changed=${#changed[@]} note=\"candidates only; identity/CAS decides build\""
+}
 
 # ============================================================
 # IDENTITY ENGINE
@@ -134,7 +275,10 @@ ci_main() {
     case " ${CI_COMMANDS} " in
         *" ${command} "*)
             ci_require_manifest || return "$?"
-            ci_not_implemented "${command}" "$@"
+            case "${command}" in
+                plan) ci_cmd_plan "$@" ;;
+                *) ci_not_implemented "${command}" "$@" ;;
+            esac
             ;;
         *)
             ci_log "[CI-ERROR-CORE-0002]" "command=\"${command}\" reason=\"unknown subcommand\" known=\"${CI_COMMANDS}\""
@@ -143,4 +287,9 @@ ci_main() {
     esac
 }
 
-ci_main "$@"
+# What: Run the dispatcher only on direct execution.
+# Why: Lets ci.bats source the functions to test them.
+# From: Issue #1683
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+    ci_main "$@"
+fi
