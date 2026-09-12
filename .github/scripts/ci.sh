@@ -21,6 +21,11 @@ CI_SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # From: Issue #1683
 CI_MANIFEST="${CI_SCRIPT_DIR}/../yaml/build-manifest.yml"
 
+# What: Repository root (.github/scripts/../..).
+# Why: Identity hashes git-tracked content from the root.
+# From: Issue #1683
+CI_REPO_ROOT="$(cd -- "${CI_SCRIPT_DIR}/../.." && pwd)"
+
 # What: The known ci.sh subcommands (docs section 9 CLI).
 # Why: One list drives dispatch and error text.
 # From: Issue #1683
@@ -222,6 +227,64 @@ ci_cmd_plan() {
 # IDENTITY ENGINE
 # ============================================================
 
+# What: Print a manifest top-level scalar (schema, etc.).
+# Why: Identity mixes in pinned SOT values, one reader.
+# From: Issue #1683
+_ci_manifest_scalar() {
+    local path_re="$1"
+    awk -v re="$path_re" '$0 ~ re { val=$0; sub(/^[^:]*:[[:space:]]*/, "", val); print val; exit }' "${CI_MANIFEST}"
+}
+
+# What: Emit content ids of git-tracked files under a path.
+# Why: Content hash, not path-touch, is the build input.
+# From: Issue #1683
+_ci_tracked_content_ids() {
+    local root="$1"
+    ( cd -- "${CI_REPO_ROOT}" && git ls-files -s -- "${root}" 2>/dev/null )
+}
+
+# What: Print the SOT value a build type keys on.
+# Why: apk keys base digest, install keys upstream digest.
+# From: Issue #1683
+_ci_identity_pins() {
+    local service="$1" build_type="$2"
+    case "${build_type}" in
+        rust|toolchain)
+            _ci_manifest_scalar "^  alpine:"
+            grep -E '^(  build-tools:|    tag:|    image:)' "${CI_MANIFEST}" | head -3
+            ;;
+        apk)
+            _ci_manifest_scalar "^  alpine:"
+            [ "${service}" = "syslog" ] && _ci_manifest_scalar "^  fluent_bit:"
+            ;;
+        install)
+            awk '/^  netdata:/{n=1} n&&/sha256/{print} n&&/^  [a-z]/&&!/netdata/{exit}' "${CI_MANIFEST}"
+            ;;
+    esac
+}
+
+# What: Print a deterministic content-identity for a target.
+# Why: Same inputs -> same id -> NOOP/reuse first.
+# From: Issue #1683
+ci_cmd_identity() {
+    local service="${1:-}"
+    [ -n "${service}" ] || { ci_log "[CI-ERROR-IDENTITY-0001]" "reason=\"service arg required\""; return 2; }
+    local build_type context ctx ctx_path
+    build_type="$(ci_service_field "${service}" build_type)"
+    [ -n "${build_type}" ] || build_type="toolchain"
+    context="$(ci_service_field "${service}" context)"
+    [ -z "${context}" ] && context="services/${service}"
+    {
+        printf 'service=%s\nbuild_type=%s\n' "${service}" "${build_type}"
+        _ci_tracked_content_ids "${context}"
+        for ctx in $(ci_service_contexts "${service}"); do
+            ctx_path="$(ci_context_path "${ctx}")"
+            [ -n "${ctx_path}" ] && _ci_tracked_content_ids "${ctx_path}"
+        done
+        _ci_identity_pins "${service}" "${build_type}"
+    } | sha256sum | cut -d' ' -f1
+}
+
 # ============================================================
 # ARTIFACT RESOLVER
 # ============================================================
@@ -277,6 +340,7 @@ ci_main() {
             ci_require_manifest || return "$?"
             case "${command}" in
                 plan) ci_cmd_plan "$@" ;;
+                identity) ci_cmd_identity "$@" ;;
                 *) ci_not_implemented "${command}" "$@" ;;
             esac
             ;;
