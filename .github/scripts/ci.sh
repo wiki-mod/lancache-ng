@@ -989,6 +989,134 @@ ci_cmd_promote() {
 # GC
 # =========================================================
 
+# What: Read the SOT artifact deletion policy value.
+# Why: Default is dry-run unless policy allows automation.
+# From: Issue #1683
+_ci_deletion_policy() {
+    _ci_manifest_scalar '^[[:space:]]+deletion_policy:[[:space:]]'
+}
+
+# What: List protected GC roots (injectable backend).
+# Why: Empty roots must fail, not mark all unreachable.
+# From: Issue #1683
+_ci_gc_roots() {
+    if [ -n "${CI_GC_ROOTS_CMD:-}" ]; then
+        "${CI_GC_ROOTS_CMD}"
+        return "$?"
+    fi
+    ci_log "[CI-ERROR-GC-0001]" "reason=\"no roots backend wired (CI_GC_ROOTS_CMD unset)\""
+    return 2
+}
+
+# What: List GC candidate artifacts (injectable backend).
+# Why: SQLite only suggests; it never deletes (§97).
+# From: Issue #1683
+_ci_gc_candidates() {
+    if [ -n "${CI_GC_CANDIDATES_CMD:-}" ]; then
+        "${CI_GC_CANDIDATES_CMD}"
+        return "$?"
+    fi
+    ci_log "[CI-ERROR-GC-0002]" "reason=\"no candidate source wired (CI_GC_CANDIDATES_CMD unset)\""
+    return 2
+}
+
+# What: Probe one candidate against the OCI ref graph.
+# Why: Registry truth, not SQLite, decides reachability.
+# From: Issue #1683
+_ci_gc_reachable() {
+    local candidate="$1"
+    if [ -n "${CI_GC_REACHABLE_CMD:-}" ]; then
+        "${CI_GC_REACHABLE_CMD}" "${candidate}"
+        return "$?"
+    fi
+    ci_log "[CI-ERROR-GC-0003]" "candidate=\"${candidate}\" reason=\"no reachability backend wired (CI_GC_REACHABLE_CMD unset)\""
+    return 2
+}
+
+# What: Classify one candidate KEEP / DELETE / fail.
+# Why: UNKNOWN never deletes and never silently keeps.
+# From: Issue #1683
+_ci_gc_classify() {
+    local candidate="$1" verdict
+    if ! verdict="$(_ci_gc_reachable "${candidate}")"; then
+        ci_log "[CI-ERROR-GC-0004]" "candidate=\"${candidate}\" reason=\"reachability probe failed\""
+        return 2
+    fi
+    case "${verdict}" in
+        referenced) printf 'KEEP\n' ;;
+        unreachable) printf 'DELETE\n' ;;
+        *)
+            ci_log "[CI-ERROR-GC-0005]" "candidate=\"${candidate}\" verdict=\"${verdict}\" reason=\"unknown reachability; fix probe, never delete or keep\""
+            return 2
+            ;;
+    esac
+}
+
+# What: Classify GC candidates; delete only when applied.
+# Why: Repo-wide reachability is the named §98 exception.
+# From: Issue #1683
+ci_cmd_gc() {
+    local mode="dry-run" arg roots cands line action policy
+    local del=0 keep=0 to_delete=""
+    for arg in "$@"; do
+        case "${arg}" in
+            --apply) mode="apply" ;;
+            *)
+                ci_log "[CI-ERROR-GC-0006]" "arg=\"${arg}\" reason=\"unknown gc argument\""
+                return 2
+                ;;
+        esac
+    done
+    if ! roots="$(_ci_gc_roots)"; then return 2; fi
+    if [ -z "${roots}" ]; then
+        ci_log "[CI-ERROR-GC-0007]" "reason=\"empty protected-roots set; refusing to treat all as unreachable\""
+        return 2
+    fi
+    if ! cands="$(_ci_gc_candidates)"; then return 2; fi
+    if [ -z "${cands}" ]; then
+        printf 'gc result=noop candidates=0 mode=%s\n' "${mode}"
+        return 0
+    fi
+    if [ "${mode}" = "apply" ]; then
+        policy="$(_ci_deletion_policy)"
+        case "${policy}" in
+            *automation*) : ;;
+            *)
+                ci_log "[CI-ERROR-GC-0008]" "policy=\"${policy}\" reason=\"deletion policy forbids automated delete\""
+                return 2
+                ;;
+        esac
+        _ci_require_ghcr_auth || return 2
+        if [ -z "${CI_GC_DELETE_CMD:-}" ]; then
+            ci_log "[CI-ERROR-GC-0010]" "reason=\"apply mode but no delete backend (CI_GC_DELETE_CMD unset)\""
+            return 2
+        fi
+    fi
+    while IFS= read -r line; do
+        [ -n "${line}" ] || continue
+        if ! action="$(_ci_gc_classify "${line}")"; then return 2; fi
+        if [ "${action}" = "DELETE" ]; then
+            del=$((del + 1))
+            to_delete="${to_delete}${line}"$'\n'
+            printf 'gc candidate=%s action=DELETE mode=%s\n' "${line}" "${mode}"
+        else
+            keep=$((keep + 1))
+            printf 'gc candidate=%s action=KEEP\n' "${line}"
+        fi
+    done <<< "${cands}"
+    if [ "${mode}" = "apply" ] && [ -n "${to_delete}" ]; then
+        while IFS= read -r line; do
+            [ -n "${line}" ] || continue
+            if ! "${CI_GC_DELETE_CMD}" "${line}"; then
+                ci_log "[CI-ERROR-GC-0009]" "candidate=\"${line}\" reason=\"delete backend failed\""
+                return 2
+            fi
+        done <<< "${to_delete}"
+    fi
+    printf 'gc result=classified keep=%s delete=%s mode=%s\n' "${keep}" "${del}" "${mode}"
+    return 0
+}
+
 # =========================================================
 # DISPATCH
 # =========================================================
@@ -1013,6 +1141,7 @@ ci_main() {
                 scan) ci_cmd_scan "$@" ;;
                 assemble) ci_cmd_assemble "$@" ;;
                 promote) ci_cmd_promote "$@" ;;
+                gc) ci_cmd_gc "$@" ;;
                 *) ci_not_implemented "${command}" "$@" ;;
             esac
             ;;
