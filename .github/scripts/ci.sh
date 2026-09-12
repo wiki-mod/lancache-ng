@@ -321,11 +321,28 @@ _ci_tracked_content_ids() {
     ( cd -- "${CI_REPO_ROOT}" && git ls-files -s -- "${root}" 2>/dev/null )
 }
 
+# What: Print netdata's digest for exactly this platform.
+# Why: Another arch's digest change must not shift this id.
+# From: Issue #1683
+_ci_install_digest_pin() {
+    local platform="$1" arch re=""
+    for arch in $(_ci_platform_arch_aliases "${platform}"); do
+        re="${re:+${re}|}sha256_${arch}"
+    done
+    awk -v re="${re}" '
+        /^external_versions:[[:space:]]*$/ { inev = 1; next }
+        inev && /^[A-Za-z]/ { inev = 0 }
+        inev && /^  netdata:[[:space:]]*$/ { nn = 1; next }
+        inev && nn && /^  [A-Za-z]/ { nn = 0 }
+        inev && nn && $1 ~ ("^(" re "):$") { print }
+    ' "${CI_MANIFEST}"
+}
+
 # What: Print the SOT value a build type keys on.
 # Why: apk keys base digest, install keys upstream digest.
 # From: Issue #1683
 _ci_identity_pins() {
-    local service="$1" build_type="$2" platform="$3" arch re
+    local service="$1" build_type="$2" platform="$3"
     case "${build_type}" in
         rust|toolchain)
             _ci_manifest_scalar "^  alpine:"
@@ -338,19 +355,7 @@ _ci_identity_pins() {
             fi
             ;;
         install)
-            # What: this platform's netdata digest only.
-            # Why: another arch's change must not move it.
-            re=""
-            for arch in $(_ci_platform_arch_aliases "${platform}"); do
-                re="${re:+${re}|}sha256_${arch}"
-            done
-            awk -v re="${re}" '
-                /^external_versions:[[:space:]]*$/ { inev = 1; next }
-                inev && /^[A-Za-z]/ { inev = 0 }
-                inev && /^  netdata:[[:space:]]*$/ { nn = 1; next }
-                inev && nn && /^  [A-Za-z]/ { nn = 0 }
-                inev && nn && $1 ~ ("^(" re "):$") { print }
-            ' "${CI_MANIFEST}"
+            _ci_install_digest_pin "${platform}"
             ;;
     esac
 }
@@ -767,17 +772,12 @@ _ci_index_lookup() {
     return 1
 }
 
-# What: Assemble accepted per-platform digests.
-# Why: Index only when every platform is ACCEPTED.
+# What: Collect a target's accepted per-platform digests.
+# Why: A non-accepted platform blocks assembly, no rebuild.
 # From: Issue #1683
-ci_cmd_assemble() {
-    local service="${1:-}"
-    [ -n "${service}" ] || { ci_log "[CI-ERROR-ASSEMBLE-0001]" "reason=\"service arg required\""; return 2; }
-    local plats p line state digest
+_ci_collect_accepted_digests() {
+    local service="$1" plats p line state digest
     plats="$(_ci_platforms "${service}")" || return "$?"
-    local -a inputs=()
-    # What: gate on resolver state per platform.
-    # Why: a non-accepted platform never rebuilds.
     while IFS= read -r p; do
         [ -n "${p}" ] || continue
         line="$(_ci_resolve_one "${service}" "${p}")" || return "$?"
@@ -790,35 +790,53 @@ ci_cmd_assemble() {
             ci_log "[CI-ERROR-ASSEMBLE-0003]" "service=\"${service}\" platform=\"${p}\" reason=\"no accepted digest for an ACCEPTED platform\""
             return 2
         fi
-        inputs+=("${p}=${digest}")
+        printf '%s=%s\n' "${p}" "${digest}"
     done <<< "${plats}"
+}
 
-    # What: reuse identical index, reject divergent.
-    # Why: idempotent retry; never overwrite.
-    local want existing ex_digest ex_have
-    want="$(printf '%s\n' "${inputs[@]}" | sort | tr '\n' ' ')"
-    if existing="$(_ci_index_lookup "${service}")"; then
-        ex_digest="${existing%% *}"
-        ex_have="$(printf '%s\n' ${existing#* } | sort | tr '\n' ' ')"
-        if [ "${want}" = "${ex_have}" ]; then
-            printf 'service=%s result=reuse-index assembled=%s platforms=%s\n' "${service}" "${ex_digest}" "${#inputs[@]}"
-            return 0
-        fi
-        ci_error "[CI-ERROR-ASSEMBLE-0004]" "service=\"${service}\" reason=\"existing index has different platform digests; refusing to overwrite\" existing=\"${ex_digest}\"" "existing: ${existing#* }"
+# What: Reuse an identical index or reject a divergent one.
+# Why: Idempotent retry; never overwrite an index.
+# From: Issue #1683
+_ci_reconcile_index() {
+    local service="$1" want="$2" existing ex_digest ex_have
+    existing="$(_ci_index_lookup "${service}")" || return 0
+    ex_digest="${existing%% *}"
+    ex_have="$(printf '%s\n' ${existing#* } | sort | tr '\n' ' ')"
+    if [ "${want}" = "${ex_have}" ]; then
+        printf '%s\n' "${ex_digest}"
+        return 0
+    fi
+    ci_error "[CI-ERROR-ASSEMBLE-0004]" "service=\"${service}\" reason=\"existing index has different platform digests; refusing to overwrite\" existing=\"${ex_digest}\"" "existing: ${existing#* }"
+    return 2
+}
+
+# What: Assemble accepted per-platform digests.
+# Why: Index only when every platform is ACCEPTED.
+# From: Issue #1683
+ci_cmd_assemble() {
+    local service="${1:-}"
+    [ -n "${service}" ] || { ci_log "[CI-ERROR-ASSEMBLE-0001]" "reason=\"service arg required\""; return 2; }
+    local inputs want count reused index
+    inputs="$(_ci_collect_accepted_digests "${service}")" || return "$?"
+    want="$(printf '%s\n' ${inputs} | sort | tr '\n' ' ')"
+    count="$(printf '%s\n' ${inputs} | grep -c '=')"
+    if ! reused="$(_ci_reconcile_index "${service}" "${want}")"; then
         return 2
     fi
-
+    if [ -n "${reused}" ]; then
+        printf 'service=%s result=reuse-index assembled=%s platforms=%s\n' "${service}" "${reused}" "${count}"
+        return 0
+    fi
     _ci_require_ghcr_auth || return "$?"
     if [ -z "${CI_ASSEMBLE_CMD:-}" ]; then
         ci_log "[CI-ERROR-ASSEMBLE-0006]" "service=\"${service}\" reason=\"no assemble backend wired (CI_ASSEMBLE_CMD unset)\""
         return 2
     fi
-    local index
-    if ! index="$("${CI_ASSEMBLE_CMD}" "${service}" "${inputs[@]}")"; then
+    if ! index="$("${CI_ASSEMBLE_CMD}" "${service}" ${inputs})"; then
         ci_log "[CI-ERROR-ASSEMBLE-0005]" "service=\"${service}\" reason=\"assemble backend failed\""
         return 2
     fi
-    printf 'service=%s result=assembled assembled=%s platforms=%s\n' "${service}" "${index}" "${#inputs[@]}"
+    printf 'service=%s result=assembled assembled=%s platforms=%s\n' "${service}" "${index}" "${count}"
 }
 
 # ============================================================
@@ -892,6 +910,34 @@ _ci_promote_move_all() {
     done <<< "${cand}"
 }
 
+# What: True if the candidate holds every product service.
+# Why: Promotion is stack-atomic; 8/9 does not promote.
+# From: Issue #1683
+_ci_promote_stack_complete() {
+    local channel="$1" cand="$2" svcs svc
+    svcs="$(ci_services)" || return "$?"
+    while IFS= read -r svc; do
+        [ -n "${svc}" ] || continue
+        if ! printf '%s\n' "${cand}" | grep -q "^${svc}="; then
+            ci_log "[CI-ERROR-PROMOTE-0004]" "channel=\"${channel}\" service=\"${svc}\" reason=\"incomplete stack; no promotion (docs section 50)\""
+            return 2
+        fi
+    done <<< "${svcs}"
+}
+
+# What: True if every ref already points at its digest.
+# Why: An idempotent re-run needs no lock or move.
+# From: Issue #1683
+_ci_promote_all_current() {
+    local channel="$1" cand="$2" line svc digest seen
+    while IFS= read -r line; do
+        [ -n "${line}" ] || continue
+        svc="${line%%=*}"; digest="${line#*=}"
+        seen="$("${CI_CHANNEL_READBACK_CMD}" "${svc}" "${channel}")" || seen=""
+        [ "${seen}" = "${digest}" ] || return 1
+    done <<< "${cand}"
+}
+
 # What: Atomically move a channel to an accepted stack.
 # Why: Stack-atomic; moves refs only, never builds.
 # From: Issue #1683
@@ -902,21 +948,12 @@ ci_cmd_promote() {
         ci_log "[CI-ERROR-PROMOTE-0002]" "channel=\"${channel}\" reason=\"not a known mutable release channel\""
         return 2
     fi
-    local cand svcs svc
+    local cand
     if ! cand="$(_ci_stack_candidate)"; then
         ci_log "[CI-ERROR-PROMOTE-0003]" "channel=\"${channel}\" reason=\"no accepted stack candidate\""
         return 2
     fi
-    # What: assert every product service is present.
-    # Why: promotion is stack-atomic; 8/9 does not promote.
-    svcs="$(ci_services)" || return "$?"
-    while IFS= read -r svc; do
-        [ -n "${svc}" ] || continue
-        if ! printf '%s\n' "${cand}" | grep -q "^${svc}="; then
-            ci_log "[CI-ERROR-PROMOTE-0004]" "channel=\"${channel}\" service=\"${svc}\" reason=\"incomplete stack; no promotion (docs section 50)\""
-            return 2
-        fi
-    done <<< "${svcs}"
+    _ci_promote_stack_complete "${channel}" "${cand}" || return "$?"
     if ! _ci_stack_validated; then
         ci_log "[CI-ERROR-PROMOTE-0005]" "channel=\"${channel}\" reason=\"stack not validated; promotion blocked\""
         return 2
@@ -927,16 +964,7 @@ ci_cmd_promote() {
         ci_log "[CI-ERROR-PROMOTE-0006]" "channel=\"${channel}\" reason=\"promote backends not wired\""
         return 2
     fi
-    # What: skip if every ref already points at its digest.
-    # Why: an idempotent re-run needs no lock or move.
-    local line svc2 digest seen all_match=1
-    while IFS= read -r line; do
-        [ -n "${line}" ] || continue
-        svc2="${line%%=*}"; digest="${line#*=}"
-        seen="$("${CI_CHANNEL_READBACK_CMD}" "${svc2}" "${channel}")" || seen=""
-        [ "${seen}" = "${digest}" ] || { all_match=0; break; }
-    done <<< "${cand}"
-    if [ "${all_match}" -eq 1 ]; then
+    if _ci_promote_all_current "${channel}" "${cand}"; then
         printf 'channel=%s result=already-promoted services=%s\n' "${channel}" "$(printf '%s\n' "${cand}" | grep -c '=')"
         return 0
     fi
