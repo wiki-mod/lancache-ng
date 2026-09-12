@@ -2,12 +2,12 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # What: Single source of truth for CI 2.0 build inputs.
-# Why: One service list + versions ends the 11x list drift.
+# Why: One list ends the copied-in-many-places drift.
 # From: Issue #1683
 schema: build-manifest/v1
 
-# What: The one authoritative service list plus metadata.
-# Why: Matrices, scans, release all derive from here.
+# What: The product stack: the 10 shipped services.
+# Why: One list; matrices/scans/release derive from it.
 # From: Issue #1683
 services:
   proxy:
@@ -17,42 +17,36 @@ services:
     final_base: alpine
     platforms: [linux/amd64, linux/arm64]
     runner: light
-    product_build: true
   dns:
     context: services/dns
     build_type: rust
     final_base: alpine
     platforms: [linux/amd64, linux/arm64]
     runner: heavy
-    product_build: true
   watchdog:
     context: services/watchdog
     build_type: rust
     final_base: alpine
     platforms: [linux/amd64, linux/arm64]
     runner: heavy
-    product_build: true
   dhcp:
     context: services/dhcp
     build_type: apk
     final_base: alpine
     platforms: [linux/amd64, linux/arm64]
     runner: light
-    product_build: true
   dhcp-proxy:
     context: services/dhcp-proxy
     build_type: apk
     final_base: alpine
     platforms: [linux/amd64, linux/arm64]
     runner: light
-    product_build: true
   ntp:
     context: services/ntp
     build_type: apk
     final_base: alpine
     platforms: [linux/amd64, linux/arm64]
     runner: light
-    product_build: true
   syslog:
     context: services/syslog
     # What: apk syslog-ng plus copied fluent-bit binary.
@@ -63,14 +57,12 @@ services:
     final_base: alpine
     platforms: [linux/amd64, linux/arm64]
     runner: light
-    product_build: true
   ui:
     context: services/ui
     build_type: rust
     final_base: alpine
     platforms: [linux/amd64, linux/arm64]
     runner: heavy
-    product_build: true
   cachehamster:
     context: services/cachehamster
     # What: Rust compile via BUILD_TOOLS_IMAGE stage.
@@ -80,7 +72,6 @@ services:
     final_base: alpine
     platforms: [linux/amd64, linux/arm64]
     runner: heavy
-    product_build: true
   netdata:
     context: services/netdata
     # What: First-party install of static netdata binary.
@@ -90,17 +81,17 @@ services:
     final_base: alpine
     platforms: [linux/amd64, linux/arm64]
     runner: light
-    product_build: true
+
+# What: The toolchain image that builds the product stack.
+# Why: NOT a product service; own workflow, never counted.
+# From: Issue #1683
+build_toolchain:
   build-tools:
     context: tools/build-tools
-    # What: Toolchain image built in its own workflow.
-    # Why: Decoupled from product build per Contract 111.2.
-    # From: Issue #1683
     build_type: toolchain
     final_base: alpine
     platforms: [linux/amd64, linux/arm64]
     runner: heavy
-    product_build: false
 
 # What: Runtime services not built by this project.
 # Why: Explicit out-of-build entry, no silent omission.
