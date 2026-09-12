@@ -159,6 +159,53 @@ external_versions:
 build_matrix:
   platforms: [linux/amd64, linux/arm64]
 
+# What: Named build contexts services COPY from at build.
+# Why: A change here rebuilds every consumer, not just self.
+# From: Issue #1683
+named_contexts:
+  shared-scripts:
+    path: scripts/lib
+  dns-domains:
+    path: services/dns/cdn-domains.txt
+
+# What: Build-identity inputs per build type (§7).
+# Why: Impact is content-identity, never path-touched alone.
+# From: Issue #1683
+build_identity:
+  rust:
+    inputs: [source_sha, toolchain_digest]
+  apk:
+    inputs: [package_versions, base_digest]
+  install:
+    inputs: [upstream_digest]
+  toolchain:
+    inputs: [toolchain_source_sha, base_digest]
+
+# What: Per-service rebuild edges beyond its own context.
+# Why: plan picks candidates, identity decides the build.
+# From: Issue #1683
+dependency_graph:
+  proxy:
+    contexts: [shared-scripts, dns-domains]
+  dns:
+    contexts: [shared-scripts]
+  watchdog:
+    contexts: [shared-scripts]
+  ui:
+    contexts: [shared-scripts]
+  dhcp:
+    contexts: [shared-scripts]
+  dhcp-proxy:
+    contexts: [shared-scripts]
+  ntp:
+    contexts: []
+  syslog:
+    contexts: []
+  cachehamster:
+    contexts: []
+  netdata:
+    contexts: []
+
 # What: Release channel and retention inventory.
 # Why: Consolidates release/stack-images.yml into the SOT.
 # From: Issue #1683
