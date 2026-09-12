@@ -1130,6 +1130,44 @@ ci_cmd_gc() {
 }
 
 # =========================================================
+# VALIDATION
+# =========================================================
+
+# What: Run the full-setup stack validation (injectable).
+# Why: Testable without a live compose stack or Docker.
+# From: Issue #1683
+_ci_validate_run() {
+    local cand="$1" raw status
+    if [ -z "${CI_VALIDATE_CMD:-}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0003]" "reason=\"no validation backend wired (CI_VALIDATE_CMD unset)\""
+        return 2
+    fi
+    if raw="$("${CI_VALIDATE_CMD}" "${cand}")"; then status=0; else status=$?; fi
+    if [ "${status}" -ne 0 ]; then
+        ci_error "[CI-ERROR-VALIDATE-0004]" "reason=\"stack validation failed\"" "${raw}"
+        return "${status}"
+    fi
+    printf 'validate result=STACK_ACCEPTED\n'
+}
+
+# What: Validate the accepted stack candidate end to end.
+# Why: promote needs a validated stack first (§49/§50).
+# From: Issue #1683
+ci_cmd_validate() {
+    local cand
+    if ! cand="$(_ci_stack_candidate)"; then
+        ci_log "[CI-ERROR-VALIDATE-0001]" "reason=\"no stack candidate (CI_STACK_CANDIDATE_CMD unset/failed)\""
+        return 2
+    fi
+    if [ -z "${cand}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0002]" "reason=\"empty stack candidate\""
+        return 2
+    fi
+    _ci_require_ghcr_auth || return 2
+    _ci_validate_run "${cand}"
+}
+
+# =========================================================
 # VARIABLES
 # =========================================================
 
@@ -1188,6 +1226,7 @@ ci_main() {
                 test) ci_cmd_test "$@" ;;
                 scan) ci_cmd_scan "$@" ;;
                 assemble) ci_cmd_assemble "$@" ;;
+                validate) ci_cmd_validate "$@" ;;
                 promote) ci_cmd_promote "$@" ;;
                 gc) ci_cmd_gc "$@" ;;
                 variables) ci_cmd_variables "$@" ;;

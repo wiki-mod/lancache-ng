@@ -1001,6 +1001,75 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
 }
 
 # =========================================================
+# VALIDATION
+# =========================================================
+
+@test "validate fails closed with no stack candidate" {
+    # What: No candidate source means nothing to validate.
+    # Why: Fail closed, never validate a phantom stack.
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" validate
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0001"* ]]
+}
+
+@test "validate fails closed on an empty stack candidate" {
+    # What: An empty candidate cannot be validated.
+    # Why: Fail closed, never accept an empty stack.
+    # From: Issue #1683
+    CI_STACK_CANDIDATE_CMD="$(_stub cand 'true')" \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" validate
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0002"* ]]
+}
+
+@test "validate fails closed without GHCR auth" {
+    # What: Deploying the stack pulls images; needs auth.
+    # Why: Never anonymous against GHCR (rate-limit).
+    # From: Issue #1683
+    CI_STACK_CANDIDATE_CMD="$(_stub cand 'echo proxy=sha256:x')" \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" validate
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-BUILD-0002"* ]]
+}
+
+@test "validate fails closed with no validation backend" {
+    # What: No backend means the stack cannot be started.
+    # Why: Fail closed, never fake a clean stack.
+    # From: Issue #1683
+    CI_STACK_CANDIDATE_CMD="$(_stub cand 'echo proxy=sha256:x')" \
+    GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" validate
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0003"* ]]
+}
+
+@test "validate fails with raw evidence when the stack is unhealthy" {
+    # What: A failed validation run surfaces its raw output.
+    # Why: Raw failure evidence is mandatory (AG-INT-002).
+    # From: Issue #1683
+    CI_STACK_CANDIDATE_CMD="$(_stub cand 'echo proxy=sha256:x')" \
+    CI_VALIDATE_CMD="$(_stub val 'echo STACK-UNHEALTHY; exit 1')" \
+    GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" validate
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0004"* ]]
+    [[ "${output}" == *"STACK-UNHEALTHY"* ]]
+}
+
+@test "validate accepts a healthy stack candidate" {
+    # What: A passing run yields STACK_ACCEPTED.
+    # Why: The one success path feeding promote (§49/§50).
+    # From: Issue #1683
+    CI_STACK_CANDIDATE_CMD="$(_stub cand 'echo proxy=sha256:x')" \
+    CI_VALIDATE_CMD="$(_stub val 'exit 0')" \
+    GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" validate
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"result=STACK_ACCEPTED"* ]]
+}
+
+# =========================================================
 # VARIABLES
 # =========================================================
 
