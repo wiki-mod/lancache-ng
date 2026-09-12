@@ -561,6 +561,114 @@ _stub() {
 # ASSEMBLY
 # ============================================================
 
+# What: Digest and index-lookup stubs share these constants.
+# Why: Idempotency compares assembled vs existing.
+# From: Issue #1683
+_asm_a() { printf 'sha256:%s' "$(printf 'a%.0s' {1..64})"; }
+_asm_b() { printf 'sha256:%s' "$(printf 'b%.0s' {1..64})"; }
+_asm_idx() { printf 'sha256:%s' "$(printf 'd%.0s' {1..64})"; }
+_asm_digest_stub() {
+    _stub dg "case \"\$2\" in */arm64) echo $(_asm_b);; *) echo $(_asm_a);; esac"
+}
+
+@test "assemble refuses a non-ACCEPTED platform and does not rebuild" {
+    # What: UNKNOWN blocks assembly, never rebuilds success.
+    # Why: A missing platform must not rebuild (docs §45).
+    # From: Issue #1683
+    STUB_STATE=UNKNOWN
+    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${BATS_TEST_DIRNAME}/ci.sh" assemble ui
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-ASSEMBLE-0002"* ]]
+    [[ "${output}" != *"result=assembled"* ]]
+}
+
+@test "assemble refuses PRODUCED_UNVERIFIED (fail-safe stays DISACK)" {
+    # What: Unverified is not ACCEPTED, so no assembly.
+    # Why: Fail-safe: unaccepted stays a GC candidate.
+    # From: Issue #1683
+    STUB_STATE=PRODUCED_UNVERIFIED
+    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${BATS_TEST_DIRNAME}/ci.sh" assemble ui
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-ASSEMBLE-0002"* ]]
+}
+
+@test "assemble creates an index when every platform is ACCEPTED" {
+    # What: All ACCEPTED + digests + authed -> one index.
+    # Why: The index is the accepted platform set.
+    # From: Issue #1683
+    STUB_STATE=PRESENT_ACCEPTED
+    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
+    CI_ACCEPTED_DIGEST_CMD="$(_asm_digest_stub)" \
+    CI_ASSEMBLE_CMD="$(_stub asm "echo $(_asm_idx)")" \
+    GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" assemble ui
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"result=assembled"* ]]
+    [[ "${output}" == *"assembled=$(_asm_idx)"* ]]
+    [[ "${output}" == *"platforms=2"* ]]
+}
+
+@test "assemble reuses an identical existing index (idempotent)" {
+    # What: A retry reuses the same index.
+    # Why: Same end state on retry; no backend.
+    # From: Issue #1683
+    STUB_STATE=PRESENT_ACCEPTED
+    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
+    CI_ACCEPTED_DIGEST_CMD="$(_asm_digest_stub)" \
+    CI_INDEX_LOOKUP_CMD="$(_stub idx "echo \"$(_asm_idx) linux/amd64=$(_asm_a) linux/arm64=$(_asm_b)\"")" \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" assemble ui
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"result=reuse-index"* ]]
+    [[ "${output}" == *"assembled=$(_asm_idx)"* ]]
+}
+
+@test "assemble refuses to overwrite a divergent existing index" {
+    # What: An index with different digests fails closed.
+    # Why: Never silently overwrite an accepted artifact.
+    # From: Issue #1683
+    STUB_STATE=PRESENT_ACCEPTED
+    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
+    CI_ACCEPTED_DIGEST_CMD="$(_asm_digest_stub)" \
+    CI_INDEX_LOOKUP_CMD="$(_stub idx "echo \"$(_asm_idx) linux/amd64=$(_asm_a) linux/arm64=$(_asm_a)\"")" \
+    GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" assemble ui
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-ASSEMBLE-0004"* ]]
+}
+
+@test "assemble fails closed without GHCR auth before creating" {
+    # What: Creating an index is authenticated.
+    # Why: Never anonymous (rate-limit).
+    # From: Issue #1683
+    STUB_STATE=PRESENT_ACCEPTED
+    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
+    CI_ACCEPTED_DIGEST_CMD="$(_asm_digest_stub)" \
+    CI_ASSEMBLE_CMD="$(_stub asm "echo $(_asm_idx)")" \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" assemble ui
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-BUILD-0002"* ]]
+}
+
+@test "assemble fails when an ACCEPTED platform has no digest" {
+    # What: ACCEPTED but no digest is an inconsistency.
+    # Why: Fail closed, never assemble a partial index.
+    # From: Issue #1683
+    STUB_STATE=PRESENT_ACCEPTED
+    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" assemble ui
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-ASSEMBLE-0003"* ]]
+}
+
+@test "assemble fails closed when no service is given" {
+    # What: Missing arg must fail with a stable id.
+    # Why: Fail-closed dispatch (AG-VAL-002).
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" assemble
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-ASSEMBLE-0001"* ]]
+}
+
 # ============================================================
 # PROMOTION
 # ============================================================
