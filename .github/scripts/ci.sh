@@ -7,8 +7,7 @@
 # From: Issue #1683
 #
 # Section layout follows docs/ci-2.0-architecture.md section 65.
-# This is a Phase-1 scaffold: sections are banners + stubs to be
-# filled by the implementation pass; no engine logic yet.
+# Phase-1 scaffold: banners plus fail-closed stubs, no engine yet.
 
 set -euo pipefail
 
@@ -27,7 +26,7 @@ CI_SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 CI_MANIFEST="${CI_SCRIPT_DIR}/../yaml/build-manifest.yml"
 
 # What: The known ci.sh subcommands (docs section 9 CLI).
-# Why: One list drives dispatch and error evidence, no dupes.
+# Why: One list drives dispatch and error text, no duplicate.
 # From: Issue #1683
 CI_COMMANDS="plan impact identity resolve test build publish verify assemble validate promote gc variables"
 
@@ -35,26 +34,21 @@ CI_COMMANDS="plan impact identity resolve test build publish verify assemble val
 # LOGGING
 # ============================================================
 
-# What: Emit one structured log line with a stable message id.
-# Why: Message ids must be unique and greppable (Contract 52).
+# What: Emit one structured log line with a stable id.
+# Why: Ids must be unique and greppable (Contract 52).
 # From: Issue #1683
 ci_log() {
-    # Arg 1 = message id [CI-<SEVERITY>-<AREA>-NNNN], rest = context.
     local message_id="$1"
     shift
     printf '%s %s\n' "${message_id}" "$*" >&2
 }
 
-# What: Emit an error together with its mandatory raw evidence.
-# Why: Raw output is always required, never exit-only (Contract 55).
+# What: Emit a command failure with its raw output.
+# Why: Command raw stderr MUST always show (Contract 55).
 # From: Issue #1683
 ci_error() {
-    # Arg 1=[CI-ERROR-<AREA>-NNNN], 2=context, 3=raw evidence (required).
     local message_id="$1" context="$2" raw="$3"
     ci_log "${message_id}" "${context}"
-    # What: Print the raw evidence verbatim, always.
-    # Why: A readable message must never replace it (Contract 55).
-    # From: Issue #1683
     printf 'raw:\n%s\n' "${raw}" >&2
 }
 
@@ -62,9 +56,7 @@ ci_error() {
 # Why: Scaffold must fail closed, never silently succeed.
 # From: Issue #1683
 ci_not_implemented() {
-    ci_error "[CI-ERROR-CORE-0001]" \
-        "command=$* state=SCAFFOLD reason=\"not yet implemented\"" \
-        "engine section for this command is still a scaffold stub"
+    ci_log "[CI-ERROR-CORE-0001]" "command=$* state=SCAFFOLD reason=\"not yet implemented\""
     return 2
 }
 
@@ -73,23 +65,13 @@ ci_not_implemented() {
 # From: Issue #1683
 ci_require_manifest() {
     [ -f "${CI_MANIFEST}" ] && return 0
-    # What: Capture the real directory contents plus any stderr.
-    # Why: Keep ls's own error as evidence, never a canned string.
-    # From: Issue #1683
-    local listing
-    if ! listing="$(ls -la -- "$(dirname -- "${CI_MANIFEST}")" 2>&1)"; then
-        : # listing already holds ls's own stderr as raw evidence
-    fi
-    ci_error "[CI-ERROR-CORE-0003]" \
-        "manifest=\"${CI_MANIFEST}\" reason=\"build manifest not found\"" \
-        "${listing}"
+    ci_log "[CI-ERROR-CORE-0003]" "manifest=\"${CI_MANIFEST}\" reason=\"build manifest not found\""
     return 2
 }
 
 # ============================================================
 # SERVICE INVENTORY
 # ============================================================
-# Loaded from CI_MANIFEST (services list + metadata). To be filled.
 
 # ============================================================
 # SEMANTIC PARSERS
@@ -148,29 +130,18 @@ ci_require_manifest() {
 # ============================================================
 
 # What: Route a subcommand to its engine function.
-# Why: The CLI contract in docs section 9 is the entry point.
+# Why: One-list membership avoids a duplicate list.
 # From: Issue #1683
 ci_main() {
     local command="${1:-}"
-    # What: Drop the subcommand so "$@" holds only its arguments.
-    # Why: Guard shift when no argument was passed (nounset-safe).
-    # From: Issue #1683
     if [ "$#" -gt 0 ]; then shift; fi
-    # What: Match against the one command list, not a second copy.
-    # Why: Membership check avoids a duplicate list (AG-CODE-011).
-    # From: Issue #1683
     case " ${CI_COMMANDS} " in
         *" ${command} "*)
-            # What: Guard every known op on the SOT being present.
-            # Why: No CI decision is valid without the manifest.
-            # From: Issue #1683
             ci_require_manifest || return "$?"
             ci_not_implemented "${command}" "$@"
             ;;
         *)
-            ci_error "[CI-ERROR-CORE-0002]" \
-                "command=\"${command}\" reason=\"unknown subcommand\"" \
-                "known commands: ${CI_COMMANDS}"
+            ci_log "[CI-ERROR-CORE-0002]" "command=\"${command}\" reason=\"unknown subcommand\" known=\"${CI_COMMANDS}\""
             return 2
             ;;
     esac
