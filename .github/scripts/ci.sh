@@ -313,12 +313,45 @@ _ci_manifest_scalar() {
     awk -v re="$path_re" '$0 ~ re { val=$0; sub(/^[^:]*:[[:space:]]*/, "", val); print val; exit }' "${CI_MANIFEST}"
 }
 
+# What: True only for compiled sources, not copied.
+# Why: Only compiled code has non-semantic comments.
+# From: Issue #1683
+_ci_source_is_normalizable() {
+    case "$1" in
+        *.rs) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# What: Hash a Rust source, comments and blanks cut.
+# Why: A comment-only edit must not shift identity.
+# From: Issue #1683
+_ci_rust_content_hash() {
+    tr -d '\r' \
+        | awk '/^[[:space:]]*\/\// { next } /^[[:space:]]*$/ { next } { print }' \
+        | sha256sum | cut -d' ' -f1
+}
+
 # What: Emit content ids of git-tracked files under a path.
-# Why: Content hash, not path-touch, is the build input.
+# Why: Content, not raw bytes, is the build input.
 # From: Issue #1683
 _ci_tracked_content_ids() {
-    local root="$1"
-    ( cd -- "${CI_REPO_ROOT}" && git ls-files -s -- "${root}" 2>/dev/null )
+    local root="$1" listing line path meta oid norm
+    listing="$( cd -- "${CI_REPO_ROOT}" && git ls-files -s -- "${root}" 2>/dev/null )" || return
+    [ -n "${listing}" ] || return 0
+    while IFS= read -r line; do
+        [ -n "${line}" ] || continue
+        path="${line#*$'\t'}"
+        if _ci_source_is_normalizable "${path}"; then
+            meta="${line%%$'\t'*}"
+            oid="${meta#* }"
+            oid="${oid%% *}"
+            norm="$( cd -- "${CI_REPO_ROOT}" && git cat-file blob "${oid}" 2>/dev/null | _ci_rust_content_hash )"
+            printf '%s\t%s\n' "${path}" "${norm}"
+        else
+            printf '%s\n' "${line}"
+        fi
+    done <<< "${listing}"
 }
 
 # What: Print netdata's digest for exactly this platform.

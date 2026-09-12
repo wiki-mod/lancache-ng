@@ -229,6 +229,41 @@ setup() {
     [[ "${output}" != *"identity="* ]]
 }
 
+@test "rust identity ignores comment-only and blank edits" {
+    # What: A comment-only .rs edit keeps the same id.
+    # Why: Comment churn must resolve to NOOP, not build.
+    # From: Issue #1683
+    local a b
+    a="$(printf 'fn main() {}\n' | _ci_rust_content_hash)"
+    b="$(printf '// note\nfn main() {}\n\n' | _ci_rust_content_hash)"
+    [ -n "${a}" ]
+    [ "${a}" = "${b}" ]
+}
+
+@test "rust identity keeps a // inside a string literal" {
+    # What: Only line-start // is a comment, not in code.
+    # Why: A naive strip would fuse distinct sources.
+    # From: Issue #1683
+    local a b
+    a="$(printf 'let u = "//x";\n' | _ci_rust_content_hash)"
+    b="$(printf 'let u = "//y";\n' | _ci_rust_content_hash)"
+    [ "${a}" != "${b}" ]
+}
+
+@test "only compiled sources are identity-normalized" {
+    # What: .rs normalizes; copied files stay raw-hashed.
+    # Why: A hash in a .conf is payload; strip misreuses.
+    # From: Issue #1683
+    run _ci_source_is_normalizable "services/ui/src/main.rs"
+    [ "${status}" -eq 0 ]
+    run _ci_source_is_normalizable "services/proxy/nginx.conf"
+    [ "${status}" -ne 0 ]
+    run _ci_source_is_normalizable "services/proxy/entrypoint.sh"
+    [ "${status}" -ne 0 ]
+    run _ci_source_is_normalizable "services/ui/Dockerfile"
+    [ "${status}" -ne 0 ]
+}
+
 @test "resolve rejects a platform not in the target set" {
     # What: A selected unknown platform fails closed.
     # Why: Fail-closed dispatch (AG-VAL-002).
