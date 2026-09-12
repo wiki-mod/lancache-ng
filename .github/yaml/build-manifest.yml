@@ -1,0 +1,197 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# What: Single source of truth for CI 2.0 build inputs.
+# Why: One service list + versions ends the 11x list drift.
+# From: Issue #1683
+schema: build-manifest/v1
+
+# What: The one authoritative service list plus metadata.
+# Why: Matrices/scans/release/full-setup all derive from here.
+# From: Issue #1683
+services:
+  proxy:
+    context: services/proxy
+    external_contexts: [services/dns]
+    build_type: apk
+    final_base: alpine
+    platforms: [linux/amd64, linux/arm64]
+    runner: light
+    product_build: true
+  dns:
+    context: services/dns
+    build_type: rust
+    final_base: alpine
+    platforms: [linux/amd64, linux/arm64]
+    runner: heavy
+    product_build: true
+  watchdog:
+    context: services/watchdog
+    build_type: rust
+    final_base: alpine
+    platforms: [linux/amd64, linux/arm64]
+    runner: heavy
+    product_build: true
+  dhcp:
+    context: services/dhcp
+    build_type: apk
+    final_base: alpine
+    platforms: [linux/amd64, linux/arm64]
+    runner: light
+    product_build: true
+  dhcp-proxy:
+    context: services/dhcp-proxy
+    build_type: apk
+    final_base: alpine
+    platforms: [linux/amd64, linux/arm64]
+    runner: light
+    product_build: true
+  ntp:
+    context: services/ntp
+    build_type: apk
+    final_base: alpine
+    platforms: [linux/amd64, linux/arm64]
+    runner: light
+    product_build: true
+  syslog:
+    context: services/syslog
+    # What: apk syslog-ng plus fluent-bit copied from its image.
+    # Why: Prebuilt fluent-bit binary, no compile -> light runner.
+    # From: Issue #1683
+    build_type: apk
+    external_image: fluent_bit
+    final_base: alpine
+    platforms: [linux/amd64, linux/arm64]
+    runner: light
+    product_build: true
+  ui:
+    context: services/ui
+    build_type: rust
+    final_base: alpine
+    platforms: [linux/amd64, linux/arm64]
+    runner: heavy
+    product_build: true
+  cachehamster:
+    context: services/cachehamster
+    # What: Rust compile via BUILD_TOOLS_IMAGE builder stage.
+    # Why: Real compile step -> heavy runner per AG-CI-002.
+    # From: Issue #1683
+    build_type: rust
+    final_base: alpine
+    platforms: [linux/amd64, linux/arm64]
+    runner: heavy
+    product_build: true
+  netdata:
+    context: services/netdata
+    # What: First-party install of static netdata binary.
+    # Why: No builder/compile stage -> light per AG-CI-002.
+    # From: Issue #1683
+    build_type: install
+    final_base: alpine
+    platforms: [linux/amd64, linux/arm64]
+    runner: light
+    product_build: true
+  build-tools:
+    context: tools/build-tools
+    # What: Toolchain image built in its own workflow.
+    # Why: Decoupled from product build per Contract 111.2.
+    # From: Issue #1683
+    build_type: toolchain
+    final_base: alpine
+    platforms: [linux/amd64, linux/arm64]
+    runner: heavy
+    product_build: false
+
+# What: Runtime services not built by this project.
+# Why: Explicit out-of-build entry, no silent omission.
+# From: Issue #1683
+external_services:
+  nats:
+    image: "nats:2-alpine"
+    role: runtime
+
+# What: Pinned external base images by full digest.
+# Why: Single owner of the alpine pin, no per-file copies.
+# From: Issue #1683
+base_images:
+  alpine: "mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"
+  fluent_bit: "cr.fluentbit.io/fluent/fluent-bit:3.2.10@sha256:d6dec000c4929a439562525728c708f6e99800d7ddc82efd6aa4f45f3a20b562"
+
+# What: Pinned external tool/asset versions and checksums.
+# Why: Central version owner; consumers never re-pin.
+# From: Issue #1683
+external_versions:
+  netdata:
+    version: v2.11.0
+    sha256_x86_64: b42d9937807f28812502a967906d370cff9ab443453813656b99ff6a9b3c5649
+    sha256_aarch64: 8cd056d64078c109409c08e30d55324c82e3855f9d8e4b304cacc7c612610e09
+  docker_cli:
+    version: 29.8.0
+    sha256_amd64: cc21815cf1e2efed867dc9c8b96b46ffed8ea176ffab32b0aacb54726ded8f25
+    sha256_arm64: 1462a696be6029bd478d7d60d7f3c31cdd15affd1178a4a278aaf4a1d1b7f8b5
+  docker_compose:
+    version: 5.5.1
+    sha256_amd64: db1889184726840f75c4f9c001048430d4f25b3be3cb084d3ddd762bc0aed576
+    sha256_arm64: 732e3a84c1a0f67256ce80bc2598a24546b10ca05f9faa97efceb1171ece2ef7
+  docker_buildx:
+    version: 0.37.0
+    sha256_amd64: ae43fa08c796b44efc86d7a63c55f73f7c35f3101188dea7bf93bcd6f99577ba
+    sha256_arm64: d263ce31bd2c9e9210aaa2c7537c67802bccabcd342e4c9fe4907085ddb41aa5
+  actionlint:
+    version: 1.7.12
+    sha256_amd64: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+    sha256_arm64: 325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6
+  # What: sccache today built from source at 0.17.0.
+  # Why: Rewrite moves to prebuilt sccache-ng, pin at migration.
+  # From: Issue #1683
+  sccache_ng:
+    version:
+    sha256_amd64:
+    sha256_arm64:
+  # What: cargo-audit checksums differ per final stage.
+  # Why: Resolve musl/glibc stage split at build-tools migration.
+  # From: Issue #1683
+  cargo_audit:
+    version: 0.22.2
+    sha256_amd64:
+    sha256_arm64:
+  cargo_tarpaulin:
+    version: 0.37.2
+    sha256_amd64:
+    sha256_arm64:
+
+# What: Platforms every build target is produced for.
+# Why: Platform is a parameter, never a twin implementation.
+# From: Issue #1683
+build_matrix:
+  platforms: [linux/amd64, linux/arm64]
+
+# What: Release channel and retention inventory.
+# Why: Consolidates release/stack-images.yml into the SOT.
+# From: Issue #1683
+release:
+  schema: stack-images/v1
+  registry: ghcr.io
+  image_prefix: wiki-mod/lancache-ng
+  channels:
+    sha:
+      tag: sha-<commit>
+      mutable: false
+    nightly:
+      mutable: true
+    latest:
+      mutable: true
+  retention:
+    minimum_stable_releases: 3
+    accepted_ordinary_roots_per_package: 30
+    channel_buffer_versions: 5
+    keep_mutable_channels: [latest, nightly]
+    keep_sha_tags_for_supported_releases: true
+    protect_release_and_rollback_digests: true
+    deletion_policy: manual-or-approved-automation-only
+
+# What: CI runtime variables with their fallback defaults.
+# Why: No hardcode; pattern like CARGO_BUILD_JOBS (AG-CI-006).
+# From: Issue #1683
+ci_variables:
+  REPOSITORY_CI_LEDGER_RETENTION_DAYS: 30
