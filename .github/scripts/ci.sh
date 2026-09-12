@@ -391,9 +391,12 @@ ci_cmd_identity() {
         printf 'platform=%s identity=%s\n' "${platform}" "$(_ci_identity_for "${service}" "${platform}")"
         return 0
     fi
+    local plats
+    plats="$(_ci_platforms "${service}")" || return "$?"
     while IFS= read -r p; do
+        [ -n "${p}" ] || continue
         printf 'platform=%s identity=%s\n' "${p}" "$(_ci_identity_for "${service}" "${p}")"
-    done < <(_ci_platforms "${service}") || return "$?"
+    done <<< "${plats}"
 }
 
 # ============================================================
@@ -465,9 +468,12 @@ ci_cmd_resolve() {
         _ci_resolve_one "${service}" "${platform}"
         return "$?"
     fi
+    local plats
+    plats="$(_ci_platforms "${service}")" || return "$?"
     while IFS= read -r p; do
+        [ -n "${p}" ] || continue
         _ci_resolve_one "${service}" "${p}" || return "$?"
-    done < <(_ci_platforms "${service}") || return "$?"
+    done <<< "${plats}"
 }
 
 # ============================================================
@@ -606,9 +612,12 @@ ci_cmd_build() {
         _ci_build_one "${service}" "${platform}"
         return "$?"
     fi
+    local plats
+    plats="$(_ci_platforms "${service}")" || return "$?"
     while IFS= read -r p; do
+        [ -n "${p}" ] || continue
         _ci_build_one "${service}" "${p}" || return "$?"
-    done < <(_ci_platforms "${service}") || return "$?"
+    done <<< "${plats}"
 }
 
 # ============================================================
@@ -649,9 +658,12 @@ ci_cmd_publish() {
         _ci_publish_one "${service}" "${platform}"
         return "$?"
     fi
+    local plats
+    plats="$(_ci_platforms "${service}")" || return "$?"
     while IFS= read -r p; do
+        [ -n "${p}" ] || continue
         _ci_publish_one "${service}" "${p}" || return "$?"
-    done < <(_ci_platforms "${service}") || return "$?"
+    done <<< "${plats}"
 }
 
 # What: Read a published ref back and confirm its digest.
