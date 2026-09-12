@@ -255,7 +255,9 @@ _ci_identity_pins() {
             ;;
         apk)
             _ci_manifest_scalar "^  alpine:"
-            [ "${service}" = "syslog" ] && _ci_manifest_scalar "^  fluent_bit:"
+            if [ "${service}" = "syslog" ]; then
+                _ci_manifest_scalar "^  fluent_bit:"
+            fi
             ;;
         install)
             awk '/^  netdata:/{n=1} n&&/sha256/{print} n&&/^  [a-z]/&&!/netdata/{exit}' "${CI_MANIFEST}"
