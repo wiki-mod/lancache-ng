@@ -34,17 +34,31 @@ CI_MANIFEST="${CI_SCRIPT_DIR}/../yaml/build-manifest.yml"
 # Why: Message ids must be unique and greppable (Contract 52).
 # From: Issue #1683
 ci_log() {
-    # Arg 1 = message id [CI-<AREA>-<SEVERITY>-NNNN], rest = context.
+    # Arg 1 = message id [CI-<SEVERITY>-<AREA>-NNNN], rest = context.
     local message_id="$1"
     shift
     printf '%s %s\n' "${message_id}" "$*" >&2
+}
+
+# What: Emit an error and echo any captured raw output.
+# Why: Errors MUST carry raw evidence, not generic (Contract 55).
+# From: Issue #1683
+ci_error() {
+    # Arg 1=[CI-ERROR-<AREA>-NNNN], 2=context, 3=raw output ("" if none).
+    local message_id="$1" context="$2" raw="${3:-}"
+    ci_log "${message_id}" "${context}"
+    # What: Surface the failed op's raw stderr/stdout verbatim.
+    # Why: A command failure MUST never be masked (Contract 55).
+    # From: Issue #1683
+    [ -n "${raw}" ] && printf '%s\n' "${raw}" >&2
+    return 0
 }
 
 # What: Report a not-yet-implemented dispatch target and fail.
 # Why: Scaffold must fail closed, never silently succeed.
 # From: Issue #1683
 ci_not_implemented() {
-    ci_log "[CI-CORE-ERROR-0001]" "command=$* state=SCAFFOLD reason=\"not yet implemented\""
+    ci_error "[CI-ERROR-CORE-0001]" "command=$* state=SCAFFOLD reason=\"not yet implemented\""
     return 2
 }
 
@@ -53,7 +67,7 @@ ci_not_implemented() {
 # From: Issue #1683
 ci_require_manifest() {
     [ -f "${CI_MANIFEST}" ] && return 0
-    ci_log "[CI-CORE-ERROR-0003]" "manifest=\"${CI_MANIFEST}\" reason=\"build manifest not found\""
+    ci_error "[CI-ERROR-CORE-0003]" "manifest=\"${CI_MANIFEST}\" reason=\"build manifest not found\""
     return 2
 }
 
@@ -133,7 +147,7 @@ ci_main() {
             ci_not_implemented "${command}" "$@"
             ;;
         *)
-            ci_log "[CI-CORE-ERROR-0002]" "command=\"${command}\" reason=\"unknown subcommand\""
+            ci_error "[CI-ERROR-CORE-0002]" "command=\"${command}\" reason=\"unknown subcommand\""
             return 2
             ;;
     esac
