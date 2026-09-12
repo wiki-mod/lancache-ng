@@ -7,7 +7,7 @@
 schema: build-manifest/v1
 
 # What: The one authoritative service list plus metadata.
-# Why: Matrices/scans/release/full-setup all derive from here.
+# Why: Matrices, scans, release all derive from here.
 # From: Issue #1683
 services:
   proxy:
@@ -55,8 +55,8 @@ services:
     product_build: true
   syslog:
     context: services/syslog
-    # What: apk syslog-ng plus fluent-bit copied from its image.
-    # Why: Prebuilt fluent-bit binary, no compile -> light runner.
+    # What: apk syslog-ng plus copied fluent-bit binary.
+    # Why: No compile, prebuilt binary -> light runner.
     # From: Issue #1683
     build_type: apk
     external_image: fluent_bit
@@ -73,7 +73,7 @@ services:
     product_build: true
   cachehamster:
     context: services/cachehamster
-    # What: Rust compile via BUILD_TOOLS_IMAGE builder stage.
+    # What: Rust compile via BUILD_TOOLS_IMAGE stage.
     # Why: Real compile step -> heavy runner per AG-CI-002.
     # From: Issue #1683
     build_type: rust
@@ -151,7 +151,7 @@ external_versions:
     image: ghcr.io/wiki-mod/ccache-ng
     tag: latest
   # What: cargo-audit checksums differ per final stage.
-  # Why: Resolve musl/glibc stage split at build-tools migration.
+  # Why: Resolve musl/glibc split at build-tools migration.
   # From: Issue #1683
   cargo_audit:
     version: 0.22.2
@@ -193,7 +193,7 @@ release:
     deletion_policy: manual-or-approved-automation-only
 
 # What: CI runtime variables with their fallback defaults.
-# Why: No hardcode; pattern like CARGO_BUILD_JOBS (AG-CI-006).
+# Why: No hardcode, like CARGO_BUILD_JOBS (AG-CI-006).
 # From: Issue #1683
 ci_variables:
   REPOSITORY_CI_LEDGER_RETENTION_DAYS: 30
