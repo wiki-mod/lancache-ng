@@ -332,25 +332,38 @@ _ci_rust_content_hash() {
         | sha256sum | cut -d' ' -f1
 }
 
-# What: Emit content ids of git-tracked files under a path.
-# Why: Content, not raw bytes, is the build input.
+# What: True if line-strip cannot touch string payload.
+# Why: Raw or multiline strings make //-strip unsafe.
+# From: Issue #1683
+_ci_rust_strip_is_safe() {
+    awk '
+        /r#*"/ { bad = 1; exit }
+        { if (gsub(/"/, "") % 2 == 1) { bad = 1; exit } }
+        END { exit bad }
+    '
+}
+
+# What: Emit path-keyed content ids of tracked files.
+# Why: Content, not raw bytes or order, is the input.
 # From: Issue #1683
 _ci_tracked_content_ids() {
-    local root="$1" listing line path meta oid norm
-    listing="$( cd -- "${CI_REPO_ROOT}" && git ls-files -s -- "${root}" 2>/dev/null )" || return
+    local root="$1" listing line path oid blob norm
+    listing="$( cd -- "${CI_REPO_ROOT}" && git ls-files -s -- "${root}" 2>/dev/null \
+        | awk -F'\t' '{ split($1, a, " "); print $2 "\t" a[2] }' | LC_ALL=C sort )" || return
     [ -n "${listing}" ] || return 0
     while IFS= read -r line; do
         [ -n "${line}" ] || continue
-        path="${line#*$'\t'}"
+        path="${line%%$'\t'*}"
+        oid="${line#*$'\t'}"
         if _ci_source_is_normalizable "${path}"; then
-            meta="${line%%$'\t'*}"
-            oid="${meta#* }"
-            oid="${oid%% *}"
-            norm="$( cd -- "${CI_REPO_ROOT}" && git cat-file blob "${oid}" 2>/dev/null | _ci_rust_content_hash )"
-            printf '%s\t%s\n' "${path}" "${norm}"
-        else
-            printf '%s\n' "${line}"
+            blob="$( cd -- "${CI_REPO_ROOT}" && git cat-file blob "${oid}" 2>/dev/null )"
+            if printf '%s' "${blob}" | _ci_rust_strip_is_safe; then
+                norm="$(printf '%s' "${blob}" | _ci_rust_content_hash)"
+                printf '%s\t%s\n' "${path}" "${norm}"
+                continue
+            fi
         fi
+        printf '%s\t%s\n' "${path}" "${oid}"
     done <<< "${listing}"
 }
 
