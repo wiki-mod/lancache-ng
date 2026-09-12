@@ -141,13 +141,15 @@ external_versions:
     version: 1.7.12
     sha256_amd64: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
     sha256_arm64: 325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6
-  # What: sccache today built from source at 0.17.0.
-  # Why: Rewrite moves to prebuilt sccache-ng, pin at migration.
+  # What: Maintainer cache accelerators, pulled as :latest.
+  # Why: Accelerators only; version does not change output.
   # From: Issue #1683
   sccache_ng:
-    version:
-    sha256_amd64:
-    sha256_arm64:
+    image: ghcr.io/wiki-mod/sccache-ng
+    tag: latest
+  ccache_ng:
+    image: ghcr.io/wiki-mod/ccache-ng
+    tag: latest
   # What: cargo-audit checksums differ per final stage.
   # Why: Resolve musl/glibc stage split at build-tools migration.
   # From: Issue #1683
