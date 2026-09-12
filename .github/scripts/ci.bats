@@ -264,6 +264,32 @@ setup() {
     [ "${status}" -ne 0 ]
 }
 
+@test "rust strip-safety rejects raw and multiline strings" {
+    # What: Strip is safe without string-spanning lines.
+    # Why: A raw or multiline string can carry a //-line.
+    # From: Issue #1683
+    run _ci_rust_strip_is_safe <<< $'fn main() {\n    let x = 1;\n}'
+    [ "${status}" -eq 0 ]
+    run _ci_rust_strip_is_safe <<< 'let j = r#"x"#;'
+    [ "${status}" -ne 0 ]
+    run _ci_rust_strip_is_safe <<< $'let s = "opens\nand runs on";'
+    [ "${status}" -ne 0 ]
+}
+
+@test "raw-string // line is protected from wrong reuse" {
+    # What: A // inside a raw string must not be stripped.
+    # Why: Normalizing it would reuse a wrong image.
+    # From: Issue #1683
+    local a b
+    a=$'let j = r#"\n// alpha\n"#;'
+    b=$'let j = r#"\n// beta\n"#;'
+    [ "$(printf '%s' "${a}" | _ci_rust_content_hash)" = "$(printf '%s' "${b}" | _ci_rust_content_hash)" ]
+    run _ci_rust_strip_is_safe <<< "${a}"
+    [ "${status}" -ne 0 ]
+    run _ci_rust_strip_is_safe <<< "${b}"
+    [ "${status}" -ne 0 ]
+}
+
 @test "resolve rejects a platform not in the target set" {
     # What: A selected unknown platform fails closed.
     # Why: Fail-closed dispatch (AG-VAL-002).
