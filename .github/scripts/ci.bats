@@ -290,6 +290,79 @@ setup() {
     [ "${status}" -ne 0 ]
 }
 
+@test "impact fails closed without a base ref" {
+    # What: impact needs an explicit base ref.
+    # Why: No base means no comparison; never guess.
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" impact
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-IMPACT-0001"* ]]
+}
+
+@test "impact of a ref against itself is all NOOP" {
+    # What: Identical refs rebuild nothing.
+    # Why: No diff means no build; no rebuild.
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" impact HEAD HEAD
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"impact=NOOP"* ]]
+    [[ "${output}" != *"impact=BUILD"* ]]
+    [[ "${output}" == *"build=0"* ]]
+}
+
+@test "content ids read a given ref and stay comment-invariant" {
+    # What: A ref reads that commit; comments do not count.
+    # Why: impact diffs base vs head by ref, not index.
+    # From: Issue #1683
+    local r="${BATS_TEST_TMPDIR}/refrepo"
+    mkdir -p "${r}/svc"
+    git -C "${r}" init -q
+    git -C "${r}" config user.email t@t
+    git -C "${r}" config user.name t
+    printf 'fn main() {}\n' > "${r}/svc/a.rs"
+    git -C "${r}" add -A && git -C "${r}" commit -qm base
+    local base; base="$(git -C "${r}" rev-parse HEAD)"
+    printf 'fn main() { let x = 1; }\n' > "${r}/svc/a.rs"
+    git -C "${r}" add -A && git -C "${r}" commit -qm head
+    local head; head="$(git -C "${r}" rev-parse HEAD)"
+    printf '// note\nfn main() {}\n' > "${r}/svc/a.rs"
+    git -C "${r}" add -A && git -C "${r}" commit -qm cmt
+    local cmt; cmt="$(git -C "${r}" rev-parse HEAD)"
+    local b h c
+    b="$(CI_REPO_ROOT="${r}" _ci_tracked_content_ids svc "${base}")"
+    h="$(CI_REPO_ROOT="${r}" _ci_tracked_content_ids svc "${head}")"
+    c="$(CI_REPO_ROOT="${r}" _ci_tracked_content_ids svc "${cmt}")"
+    [ -n "${b}" ]
+    [ "${b}" != "${h}" ]
+    [ "${b}" = "${c}" ]
+}
+
+@test "impact fails closed to BUILD when base has no SOT" {
+    # What: A base without the SOT marks all impacted.
+    # Why: No base truth must never resolve to NOOP.
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" impact 4b825dc642cb6eb9a060e54bf8d69288fbee4904
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"no SOT at base"* ]]
+    [[ "${output}" == *"impact=BUILD"* ]]
+    [[ "${output}" != *"impact=NOOP"* ]]
+}
+
+@test "identity pins are ref-relative via CI_MANIFEST" {
+    # What: A pin-only change shifts the id at a fixed ref.
+    # Why: impact base pins must reflect base, not head.
+    # From: Issue #1683
+    local m1="${BATS_TEST_TMPDIR}/m1.yml" m2="${BATS_TEST_TMPDIR}/m2.yml"
+    cp "${BATS_TEST_DIRNAME}/../yaml/build-manifest.yml" "${m1}"
+    cp "${m1}" "${m2}"
+    sed -i 's/sha256_x86_64: [0-9a-f]\{64\}/sha256_x86_64: deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/' "${m2}"
+    local a b
+    a="$(CI_MANIFEST="${m1}" _ci_identity_for netdata linux/amd64 HEAD)"
+    b="$(CI_MANIFEST="${m2}" _ci_identity_for netdata linux/amd64 HEAD)"
+    [ -n "${a}" ]
+    [ "${a}" != "${b}" ]
+}
+
 @test "resolve rejects a platform not in the target set" {
     # What: A selected unknown platform fails closed.
     # Why: Fail-closed dispatch (AG-VAL-002).
