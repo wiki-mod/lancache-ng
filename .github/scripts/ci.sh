@@ -7,9 +7,9 @@
 
 set -euo pipefail
 
-# ============================================================
+# =========================================================
 # CONSTANTS / EXIT HANDLING
-# ============================================================
+# =========================================================
 
 # What: Absolute path of this script's directory.
 # Why: Find the SOT manifest regardless of caller CWD.
@@ -31,9 +31,9 @@ CI_REPO_ROOT="$(cd -- "${CI_SCRIPT_DIR}/../.." && pwd)"
 # From: Issue #1683
 CI_COMMANDS="plan impact identity resolve build publish verify test scan assemble validate promote gc variables"
 
-# ============================================================
+# =========================================================
 # LOGGING
-# ============================================================
+# =========================================================
 
 # What: Emit one structured log line with a stable id.
 # Why: Ids must be unique and greppable (Contract 52).
@@ -70,9 +70,9 @@ ci_require_manifest() {
     return 2
 }
 
-# ============================================================
+# =========================================================
 # SERVICE INVENTORY
-# ============================================================
+# =========================================================
 
 # What: List direct child keys under a top-level block.
 # Why: One awk reader, no yq/python (AG-REL-001/006).
@@ -103,9 +103,9 @@ ci_build_targets() {
     _ci_block_keys "build_toolchain"
 }
 
-# ============================================================
+# =========================================================
 # SEMANTIC PARSERS
-# ============================================================
+# =========================================================
 
 # What: Print one scalar field of a service entry.
 # Why: Read build_type/runner/final_base without a copy.
@@ -164,9 +164,9 @@ ci_context_path() {
     ' "${CI_MANIFEST}"
 }
 
-# ============================================================
+# =========================================================
 # PLATFORMS
-# ============================================================
+# =========================================================
 
 # What: Print a target's own platforms override, if any.
 # Why: A target may narrow the one authoritative list.
@@ -242,9 +242,9 @@ _ci_platform_arch_aliases() {
     esac
 }
 
-# ============================================================
+# =========================================================
 # IMPACT ENGINE
-# ============================================================
+# =========================================================
 
 # What: Read the changed-path list for this run.
 # Why: CHANGED_FILES (file) or args; no hidden git walk.
@@ -301,9 +301,9 @@ ci_cmd_plan() {
     ci_log "[CI-INFO-PLAN-0001]" "phase=plan changed=${#changed[@]} note=\"candidates only; identity/CAS decides build\""
 }
 
-# ============================================================
+# =========================================================
 # IDENTITY ENGINE
-# ============================================================
+# =========================================================
 
 # What: Print a manifest top-level scalar (schema, etc.).
 # Why: Identity mixes in pinned SOT values, one reader.
@@ -404,9 +404,9 @@ ci_cmd_identity() {
     done <<< "${plats}"
 }
 
-# ============================================================
+# =========================================================
 # ARTIFACT RESOLVER
-# ============================================================
+# =========================================================
 
 # What: Probe the acceptance/registry state for an identity.
 # Why: Injectable so logic tests need no live GHCR.
@@ -481,13 +481,13 @@ ci_cmd_resolve() {
     done <<< "${plats}"
 }
 
-# ============================================================
+# =========================================================
 # ACCEPTANCE INDEX
-# ============================================================
+# =========================================================
 
-# ============================================================
+# =========================================================
 # RETRY CLASSIFIER
-# ============================================================
+# =========================================================
 
 # What: Classify a failure as transient or permanent (§67).
 # Why: One rule replaces 5+ retry wrappers' own splits.
@@ -514,9 +514,9 @@ _ci_classify_failure() {
     printf 'transient\n'
 }
 
-# ============================================================
+# =========================================================
 # CACHE CONFIGURATION
-# ============================================================
+# =========================================================
 
 # What: Print the reuse order, cheapest first (§7).
 # Why: Maximal caching never means build is preferred.
@@ -525,9 +525,9 @@ ci_reuse_order() {
     printf 'noop accepted binary_cas build_cache compiler_cache compile\n'
 }
 
-# ============================================================
+# =========================================================
 # BUILD ENGINE
-# ============================================================
+# =========================================================
 
 # What: Fail unless GHCR credentials are present.
 # Why: Every GHCR action authenticates, never anonymous.
@@ -626,9 +626,9 @@ ci_cmd_build() {
     done <<< "${plats}"
 }
 
-# ============================================================
+# =========================================================
 # VERIFY / TEST / SCAN
-# ============================================================
+# =========================================================
 
 # What: Publish one target+platform to its per-identity ref.
 # Why: Publish is authenticated and injectable for tests.
@@ -744,9 +744,9 @@ ci_cmd_scan() {
     printf 'service=%s scanned=clean digest=%s tmpdir=%s\n' "${service}" "${digest}" "${scan_tmp}"
 }
 
-# ============================================================
+# =========================================================
 # ASSEMBLY
-# ============================================================
+# =========================================================
 
 # What: Look up an ACCEPTED per-platform digest.
 # Why: The digest source is the ledger; testable without it.
@@ -839,9 +839,9 @@ ci_cmd_assemble() {
     printf 'service=%s result=assembled assembled=%s platforms=%s\n' "${service}" "${index}" "${count}"
 }
 
-# ============================================================
+# =========================================================
 # PROMOTION
-# ============================================================
+# =========================================================
 
 # What: Print the SOT's mutable release channels.
 # Why: One channel list; promote never invents a second.
@@ -981,17 +981,17 @@ ci_cmd_promote() {
     printf 'channel=%s result=promoted services=%s\n' "${channel}" "$(printf '%s\n' "${cand}" | grep -c '=')"
 }
 
-# ============================================================
+# =========================================================
 # NIGHTLY / RELEASE
-# ============================================================
+# =========================================================
 
-# ============================================================
+# =========================================================
 # GC
-# ============================================================
+# =========================================================
 
-# ============================================================
+# =========================================================
 # DISPATCH
-# ============================================================
+# =========================================================
 
 # What: Route a subcommand to its engine function.
 # Why: One-list membership avoids a duplicate list.
