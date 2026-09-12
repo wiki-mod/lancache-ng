@@ -12,47 +12,10 @@
 name: GHCR Retention GC
 
 on:
-  pull_request:
-    types: [closed]
-    # What: also matches current_dev, the active development branch
-    # Why: closed current_dev PR would miss prompt reap without it
-    # From: PR #1110
-    branches: [master, current_dev, "release/**", "v[0-9]*"]
-  schedule:
-    # What: sweep every 3 hours (8x/day) at :17 past the hour
-    # Why: capped deletion limits require 8x/day to clear backlog
-    # From: Issue #1585 | PR #1586
-    - cron: "17 */3 * * *"
-  workflow_dispatch:
-    inputs:
-      dry_run:
-        description: Classify and revalidate candidates without deleting them.
-        type: choice
-        options: ["false", "true"]
-        default: "false"
-      concurrency:
-        description: Packages processed in parallel.
-        type: string
-        # What: starts supervised/manual sweeps with one package worker
-        # Why: API fails at concurrency > 1; one worker is default
-        # From: Issue #1585 | PR #1586
-        default: "1"
-      max_deletions_per_service:
-        description: Maximum deletions per package for this manual run.
-        type: string
-        default: "500"
-      max_deletions_total:
-        description: Maximum deletions across all packages for this manual run.
-        type: string
-        default: "1500"
-      minimum_age_seconds:
-        description: Minimum version age before any deletion.
-        type: string
-        # What: manual dispatch default mirrors GC_MIN_AGE_SECONDS
-        # Why: raised from 24h to 7 days (604800s) per spec
-        # From: Issue #1585
-        default: "604800"
-
+  # What: legacy CI frozen on the #1683 rewrite branch.
+  # Why: stop the old pipeline building containers here.
+  # From: Issue #1683
+  workflow_dispatch: {}
 # What: no elevated permissions; deletion uses separate PAT
 # Why: package-delete API needs classic PAT, not GITHUB_TOKEN
 # From: PR #627
