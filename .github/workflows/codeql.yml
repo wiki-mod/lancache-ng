@@ -6,24 +6,10 @@
 name: CodeQL
 
 on:
-  push:
-    # current_dev is the active development branch today (v0.2.0 is frozen);
-    # without it, CodeQL silently stopped scanning the branch real work
-    # actually lands on (#709).
-    branches: [master, current_dev, v0.2.0]
-    paths-ignore:
-      - "**/*.md"
-  pull_request:
-    # current_dev is the active development branch today (v0.2.0 is frozen);
-    # without it, CodeQL silently stopped scanning the branch real work
-    # actually lands on (#709).
-    branches: [master, current_dev, v0.2.0]
-    paths-ignore:
-      - "**/*.md"
-  schedule:
-    - cron: "24 3 * * *"
-  workflow_dispatch:
-
+  # What: legacy CI frozen on the #1683 rewrite branch.
+  # Why: stop the old pipeline building containers here.
+  # From: Issue #1683
+  workflow_dispatch: {}
 permissions:
   contents: read
   security-events: write
