@@ -19,7 +19,7 @@ CI_SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # What: Path to the single source-of-truth build manifest.
 # Why: One machine-readable owner for services and versions.
 # From: Issue #1683
-CI_MANIFEST="${CI_SCRIPT_DIR}/../yaml/build-manifest.yml"
+CI_MANIFEST="${CI_MANIFEST:-${CI_SCRIPT_DIR}/../yaml/build-manifest.yml}"
 
 # What: Repository root (.github/scripts/../..).
 # Why: Identity hashes git-tracked content from the root.
@@ -165,6 +165,84 @@ ci_context_path() {
 }
 
 # ============================================================
+# PLATFORMS
+# ============================================================
+
+# What: Print a target's own platforms override, if any.
+# Why: A target may narrow the one authoritative list.
+# From: Issue #1683
+_ci_service_platforms_override() {
+    local service="$1"
+    awk -v svc="$service" '
+        /^(services|build_toolchain):[[:space:]]*$/ { inb = 1; next }
+        inb && /^[A-Za-z]/ { inb = 0 }
+        inb && /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ {
+            cur = $1; sub(/:$/, "", cur); insvc = (cur == svc)
+        }
+        inb && insvc && /^    platforms:[[:space:]]*\[/ {
+            line = $0; sub(/^[^[]*\[/, "", line); sub(/\].*$/, "", line)
+            gsub(/[[:space:],]+/, " ", line)
+            n = split(line, a, " ")
+            for (i = 1; i <= n; i++) if (a[i] != "") print a[i]
+            exit
+        }
+    ' "${CI_MANIFEST}"
+}
+
+# What: Print the authoritative build_matrix platform list.
+# Why: The one list every target defaults to.
+# From: Issue #1683
+_ci_build_matrix_platforms() {
+    awk '
+        /^build_matrix:[[:space:]]*$/ { inb = 1; next }
+        inb && /^[A-Za-z]/ { inb = 0 }
+        inb && /^  platforms:[[:space:]]*\[/ {
+            line = $0; sub(/^[^[]*\[/, "", line); sub(/\].*$/, "", line)
+            gsub(/[[:space:],]+/, " ", line)
+            n = split(line, a, " ")
+            for (i = 1; i <= n; i++) if (a[i] != "") print a[i]
+            exit
+        }
+    ' "${CI_MANIFEST}"
+}
+
+# What: Print a target's platforms, one per line.
+# Why: build_matrix is authoritative; a target may override.
+# From: Issue #1683
+_ci_platforms() {
+    local service="$1" out
+    out="$(_ci_service_platforms_override "${service}")"
+    [ -n "${out}" ] || out="$(_ci_build_matrix_platforms)"
+    if [ -z "${out}" ]; then
+        ci_log "[CI-ERROR-IDENTITY-0003]" "service=\"${service}\" reason=\"no platforms in SOT (override or build_matrix)\""
+        return 2
+    fi
+    printf '%s\n' "${out}"
+}
+
+# What: True if a platform is in a target's platform set.
+# Why: An unknown platform fails closed, never builds all.
+# From: Issue #1683
+_ci_valid_platform() {
+    local service="$1" platform="$2" p
+    while IFS= read -r p; do
+        [ "${p}" = "${platform}" ] && return 0
+    done < <(_ci_platforms "${service}")
+    return 1
+}
+
+# What: Print the known arch-suffix aliases of a platform.
+# Why: SOT mixes amd64/x86_64 and arm64/aarch64.
+# From: Issue #1683
+_ci_platform_arch_aliases() {
+    case "$1" in
+        */amd64|amd64) printf 'amd64 x86_64\n' ;;
+        */arm64|arm64) printf 'arm64 aarch64\n' ;;
+        *) printf '%s\n' "${1##*/}" ;;
+    esac
+}
+
+# ============================================================
 # IMPACT ENGINE
 # ============================================================
 
@@ -247,7 +325,7 @@ _ci_tracked_content_ids() {
 # Why: apk keys base digest, install keys upstream digest.
 # From: Issue #1683
 _ci_identity_pins() {
-    local service="$1" build_type="$2"
+    local service="$1" build_type="$2" platform="$3" arch re
     case "${build_type}" in
         rust|toolchain)
             _ci_manifest_scalar "^  alpine:"
@@ -260,31 +338,62 @@ _ci_identity_pins() {
             fi
             ;;
         install)
-            awk '/^  netdata:/{n=1} n&&/sha256/{print} n&&/^  [a-z]/&&!/netdata/{exit}' "${CI_MANIFEST}"
+            # Platform-matching digest only; another arch's
+            # change MUST NOT shift this id. netdata name recurs.
+            re=""
+            for arch in $(_ci_platform_arch_aliases "${platform}"); do
+                re="${re:+${re}|}sha256_${arch}"
+            done
+            awk -v re="${re}" '
+                /^external_versions:[[:space:]]*$/ { inev = 1; next }
+                inev && /^[A-Za-z]/ { inev = 0 }
+                inev && /^  netdata:[[:space:]]*$/ { nn = 1; next }
+                inev && nn && /^  [A-Za-z]/ { nn = 0 }
+                inev && nn && $1 ~ ("^(" re "):$") { print }
+            ' "${CI_MANIFEST}"
             ;;
     esac
 }
 
-# What: Print a deterministic content-identity for a target.
-# Why: Same inputs -> same id -> NOOP/reuse first.
+# What: Print the bare id of one target+platform.
+# Why: Platform mixed in so arches never collide.
 # From: Issue #1683
-ci_cmd_identity() {
-    local service="${1:-}"
-    [ -n "${service}" ] || { ci_log "[CI-ERROR-IDENTITY-0001]" "reason=\"service arg required\""; return 2; }
+_ci_identity_for() {
+    local service="$1" platform="$2"
     local build_type context ctx ctx_path
     build_type="$(ci_service_field "${service}" build_type)"
     [ -n "${build_type}" ] || build_type="toolchain"
     context="$(ci_service_field "${service}" context)"
     [ -z "${context}" ] && context="services/${service}"
     {
-        printf 'service=%s\nbuild_type=%s\n' "${service}" "${build_type}"
+        printf 'service=%s\nbuild_type=%s\nplatform=%s\n' "${service}" "${build_type}" "${platform}"
         _ci_tracked_content_ids "${context}"
         for ctx in $(ci_service_contexts "${service}"); do
             ctx_path="$(ci_context_path "${ctx}")"
             [ -n "${ctx_path}" ] && _ci_tracked_content_ids "${ctx_path}"
         done
-        _ci_identity_pins "${service}" "${build_type}"
+        _ci_identity_pins "${service}" "${build_type}" "${platform}"
     } | sha256sum | cut -d' ' -f1
+}
+
+# What: Print a target's id per platform, keyed.
+# Why: Default = all platforms; one selectable.
+# From: Issue #1683
+ci_cmd_identity() {
+    local service="${1:-}" platform="${2:-}"
+    [ -n "${service}" ] || { ci_log "[CI-ERROR-IDENTITY-0001]" "reason=\"service arg required\""; return 2; }
+    local p
+    if [ -n "${platform}" ]; then
+        if ! _ci_valid_platform "${service}" "${platform}"; then
+            ci_log "[CI-ERROR-IDENTITY-0002]" "service=\"${service}\" reason=\"platform not in target set\" got=\"${platform}\""
+            return 2
+        fi
+        printf 'platform=%s identity=%s\n' "${platform}" "$(_ci_identity_for "${service}" "${platform}")"
+        return 0
+    fi
+    while IFS= read -r p; do
+        printf 'platform=%s identity=%s\n' "${p}" "$(_ci_identity_for "${service}" "${p}")"
+    done < <(_ci_platforms "${service}") || return "$?"
 }
 
 # ============================================================
@@ -319,27 +428,46 @@ _ci_resolve_action() {
     esac
 }
 
-# What: Resolve one service to a state + action.
-# Why: NOOP/reuse decided before any build starts (§7).
+# What: Resolve one target+platform to a state + action.
+# Why: NOOP/reuse decided per platform first.
 # From: Issue #1683
-ci_cmd_resolve() {
-    local service="${1:-}"
-    [ -n "${service}" ] || { ci_log "[CI-ERROR-RESOLVE-0001]" "reason=\"service arg required\""; return 2; }
+_ci_resolve_one() {
+    local service="$1" platform="$2"
     local identity state action
-    identity="$(ci_cmd_identity "${service}")" || return "$?"
+    identity="$(_ci_identity_for "${service}" "${platform}")" || return "$?"
     state="$(_ci_resolve_probe "${service}" "${identity}")"
     case "${state}" in
         PRESENT_ACCEPTED|MISSING_CONFIRMED|MISMATCH|PRODUCED_UNVERIFIED|BUILD_IN_PROGRESS|UNKNOWN) ;;
         *)
-            ci_log "[CI-ERROR-RESOLVE-0002]" "service=\"${service}\" reason=\"probe returned unknown state\" got=\"${state}\""
+            ci_log "[CI-ERROR-RESOLVE-0002]" "service=\"${service}\" platform=\"${platform}\" reason=\"probe returned unknown state\" got=\"${state}\""
             state="UNKNOWN"
             ;;
     esac
     action="$(_ci_resolve_action "${state}")"
-    printf 'service=%s state=%s action=%s identity=%s\n' "${service}" "${state}" "${action}" "${identity}"
+    printf 'service=%s platform=%s state=%s action=%s identity=%s\n' "${service}" "${platform}" "${state}" "${action}" "${identity}"
     if [ "${state}" = "UNKNOWN" ]; then
-        ci_log "[CI-INFO-RESOLVE-0003]" "service=\"${service}\" state=UNKNOWN note=\"escalate; UNKNOWN is never treated as build-needed\""
+        ci_log "[CI-INFO-RESOLVE-0003]" "service=\"${service}\" platform=\"${platform}\" state=UNKNOWN note=\"escalate; UNKNOWN is never treated as build-needed\""
     fi
+}
+
+# What: Resolve a target per platform.
+# Why: Default = all platforms; one selectable.
+# From: Issue #1683
+ci_cmd_resolve() {
+    local service="${1:-}" platform="${2:-}"
+    [ -n "${service}" ] || { ci_log "[CI-ERROR-RESOLVE-0001]" "reason=\"service arg required\""; return 2; }
+    local p
+    if [ -n "${platform}" ]; then
+        if ! _ci_valid_platform "${service}" "${platform}"; then
+            ci_log "[CI-ERROR-RESOLVE-0004]" "service=\"${service}\" reason=\"platform not in target set\" got=\"${platform}\""
+            return 2
+        fi
+        _ci_resolve_one "${service}" "${platform}"
+        return "$?"
+    fi
+    while IFS= read -r p; do
+        _ci_resolve_one "${service}" "${p}" || return "$?"
+    done < <(_ci_platforms "${service}") || return "$?"
 }
 
 # ============================================================
@@ -414,40 +542,39 @@ _ci_cas_lookup() {
 # Why: Injectable so build logic tests without Docker.
 # From: Issue #1683
 _ci_do_build() {
-    local service="$1" identity="$2"
+    local service="$1" identity="$2" platform="$3"
     if [ -n "${CI_BUILD_CMD:-}" ]; then
-        "${CI_BUILD_CMD}" "${service}" "${identity}"
+        "${CI_BUILD_CMD}" "${service}" "${identity}" "${platform}"
         return "$?"
     fi
     ci_log "[CI-ERROR-BUILD-0003]" "service=\"${service}\" reason=\"no build backend wired (CI_BUILD_CMD unset)\""
     return 2
 }
 
-# What: Build one service, honoring resolve + reuse order.
+# What: Build one target+platform, honoring resolve + reuse.
 # Why: NOOP/reuse/CAS precede compile; UNKNOWN never builds.
 # From: Issue #1683
-ci_cmd_build() {
-    local service="${1:-}"
-    [ -n "${service}" ] || { ci_log "[CI-ERROR-BUILD-0001]" "reason=\"service arg required\""; return 2; }
+_ci_build_one() {
+    local service="$1" platform="$2"
     local resolved action identity build_type
-    resolved="$(ci_cmd_resolve "${service}")" || return "$?"
+    resolved="$(_ci_resolve_one "${service}" "${platform}")" || return "$?"
     action="${resolved#*action=}"; action="${action%% *}"
     identity="${resolved#*identity=}"; identity="${identity%% *}"
     build_type="$(ci_service_field "${service}" build_type)"
 
     case "${action}" in
         noop)
-            printf 'service=%s result=reuse-accepted identity=%s\n' "${service}" "${identity}"
+            printf 'service=%s platform=%s result=reuse-accepted identity=%s\n' "${service}" "${platform}" "${identity}"
             return 0
             ;;
         escalate|wait|verify)
-            ci_log "[CI-INFO-BUILD-0004]" "service=\"${service}\" action=\"${action}\" note=\"not building; resolve action is not build\""
-            printf 'service=%s result=%s identity=%s\n' "${service}" "${action}" "${identity}"
+            ci_log "[CI-INFO-BUILD-0004]" "service=\"${service}\" platform=\"${platform}\" action=\"${action}\" note=\"not building; resolve action is not build\""
+            printf 'service=%s platform=%s result=%s identity=%s\n' "${service}" "${platform}" "${action}" "${identity}"
             [ "${action}" = "escalate" ] && return 2 || return 0
             ;;
         build) ;;
         *)
-            ci_log "[CI-ERROR-BUILD-0005]" "service=\"${service}\" reason=\"unrecognized resolve action\" got=\"${action}\""
+            ci_log "[CI-ERROR-BUILD-0005]" "service=\"${service}\" platform=\"${platform}\" reason=\"unrecognized resolve action\" got=\"${action}\""
             return 2
             ;;
     esac
@@ -455,38 +582,76 @@ ci_cmd_build() {
     # Rust targets can reuse an identical compiled binary from
     # the CAS before compiling again (reuse order, §7).
     if [ "${build_type}" = "rust" ] && _ci_cas_lookup "${identity}" >/dev/null 2>&1; then
-        printf 'service=%s result=reuse-binary-cas identity=%s\n' "${service}" "${identity}"
+        printf 'service=%s platform=%s result=reuse-binary-cas identity=%s\n' "${service}" "${platform}" "${identity}"
         return 0
     fi
 
     _ci_require_ghcr_auth || return "$?"
-    _ci_do_build "${service}" "${identity}" || return "$?"
-    printf 'service=%s result=built identity=%s\n' "${service}" "${identity}"
+    _ci_do_build "${service}" "${identity}" "${platform}" || return "$?"
+    printf 'service=%s platform=%s result=built identity=%s\n' "${service}" "${platform}" "${identity}"
+}
+
+# What: Build a target per platform.
+# Why: Default = all platforms; one selectable.
+# From: Issue #1683
+ci_cmd_build() {
+    local service="${1:-}" platform="${2:-}"
+    [ -n "${service}" ] || { ci_log "[CI-ERROR-BUILD-0001]" "reason=\"service arg required\""; return 2; }
+    local p
+    if [ -n "${platform}" ]; then
+        if ! _ci_valid_platform "${service}" "${platform}"; then
+            ci_log "[CI-ERROR-BUILD-0006]" "service=\"${service}\" reason=\"platform not in target set\" got=\"${platform}\""
+            return 2
+        fi
+        _ci_build_one "${service}" "${platform}"
+        return "$?"
+    fi
+    while IFS= read -r p; do
+        _ci_build_one "${service}" "${p}" || return "$?"
+    done < <(_ci_platforms "${service}") || return "$?"
 }
 
 # ============================================================
 # VERIFY / TEST / SCAN
 # ============================================================
 
-# What: Push a built image to its per-identity GHCR ref.
+# What: Publish one target+platform to its per-identity ref.
 # Why: Publish is authenticated and injectable for tests.
 # From: Issue #1683
-ci_cmd_publish() {
-    local service="${1:-}"
-    [ -n "${service}" ] || { ci_log "[CI-ERROR-PUBLISH-0001]" "reason=\"service arg required\""; return 2; }
-    _ci_require_ghcr_auth || return "$?"
+_ci_publish_one() {
+    local service="$1" platform="$2"
     local identity digest
-    identity="$(ci_cmd_identity "${service}")" || return "$?"
-    if [ -n "${CI_PUBLISH_CMD:-}" ]; then
-        digest="$("${CI_PUBLISH_CMD}" "${service}" "${identity}")" || {
-            ci_log "[CI-ERROR-PUBLISH-0002]" "service=\"${service}\" reason=\"publish backend failed\""
-            return 2
-        }
-    else
+    identity="$(_ci_identity_for "${service}" "${platform}")" || return "$?"
+    if [ -z "${CI_PUBLISH_CMD:-}" ]; then
         ci_log "[CI-ERROR-PUBLISH-0003]" "service=\"${service}\" reason=\"no publish backend wired (CI_PUBLISH_CMD unset)\""
         return 2
     fi
-    printf 'service=%s published=%s identity=%s\n' "${service}" "${digest}" "${identity}"
+    if ! digest="$("${CI_PUBLISH_CMD}" "${service}" "${identity}" "${platform}")"; then
+        ci_log "[CI-ERROR-PUBLISH-0002]" "service=\"${service}\" platform=\"${platform}\" reason=\"publish backend failed\""
+        return 2
+    fi
+    printf 'service=%s platform=%s published=%s identity=%s\n' "${service}" "${platform}" "${digest}" "${identity}"
+}
+
+# What: Publish a target per platform.
+# Why: Default = all platforms; one selectable.
+# From: Issue #1683
+ci_cmd_publish() {
+    local service="${1:-}" platform="${2:-}"
+    [ -n "${service}" ] || { ci_log "[CI-ERROR-PUBLISH-0001]" "reason=\"service arg required\""; return 2; }
+    _ci_require_ghcr_auth || return "$?"
+    local p
+    if [ -n "${platform}" ]; then
+        if ! _ci_valid_platform "${service}" "${platform}"; then
+            ci_log "[CI-ERROR-PUBLISH-0004]" "service=\"${service}\" reason=\"platform not in target set\" got=\"${platform}\""
+            return 2
+        fi
+        _ci_publish_one "${service}" "${platform}"
+        return "$?"
+    fi
+    while IFS= read -r p; do
+        _ci_publish_one "${service}" "${p}" || return "$?"
+    done < <(_ci_platforms "${service}") || return "$?"
 }
 
 # What: Read a published ref back and confirm its digest.

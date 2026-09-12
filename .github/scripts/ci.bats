@@ -119,26 +119,26 @@ setup() {
 # BUILD IDENTITIES
 # ============================================================
 
-@test "identity is deterministic for the same inputs" {
-    # What: Same content -> same id, every time.
+@test "identity is deterministic for one target+platform, keyed" {
+    # What: Same content+platform -> same keyed id, always.
     # Why: NOOP/reuse depends on a stable identity.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" identity ui
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" identity ui linux/amd64
     [ "${status}" -eq 0 ]
     local first="${output}"
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" identity ui
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" identity ui linux/amd64
     [ "${output}" = "${first}" ]
-    [[ "${output}" =~ ^[0-9a-f]{64}$ ]]
+    [[ "${output}" =~ ^platform=linux/amd64\ identity=[0-9a-f]{64}$ ]]
 }
 
 @test "identity differs across services and build types" {
     # What: proxy(apk), ui(rust), build-tools all differ.
     # Why: An id must key on its own inputs, not collide.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" identity proxy
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" identity proxy linux/amd64
     [ "${status}" -eq 0 ]
     local proxy="${output}"
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" identity build-tools
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" identity build-tools linux/amd64
     [ "${status}" -eq 0 ]
     [ "${output}" != "${proxy}" ]
 }
@@ -147,10 +147,10 @@ setup() {
     # What: identity/resolve of an apk service must exit 0.
     # Why: A printed id with rc=1 masks a broken pipeline.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" identity ntp
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" identity ntp linux/amd64
     [ "${status}" -eq 0 ]
-    [[ "${output}" =~ ^[0-9a-f]{64}$ ]]
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" resolve ntp
+    [[ "${output}" =~ ^platform=linux/amd64\ identity=[0-9a-f]{64}$ ]]
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" resolve ntp linux/amd64
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"state=UNKNOWN"* ]]
 }
@@ -162,6 +162,105 @@ setup() {
     run bash "${BATS_TEST_DIRNAME}/ci.sh" identity
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-IDENTITY-0001"* ]]
+}
+
+# ============================================================
+# PLATFORMS
+# ============================================================
+
+@test "identity fan-out lists every platform, always keyed" {
+    # What: No platform arg -> one keyed line per platform.
+    # Why: Default = all; output never mixes bare and keyed.
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" identity ui
+    [ "${status}" -eq 0 ]
+    [ "${#lines[@]}" -eq 2 ]
+    [[ "${output}" == *"platform=linux/amd64 identity="* ]]
+    [[ "${output}" == *"platform=linux/arm64 identity="* ]]
+}
+
+@test "a selected platform yields one line; amd64 and arm64 differ" {
+    # What: Platform selects; each arch has its own id.
+    # Why: An amd64 binary must not reuse an arm64 id.
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" identity ui linux/amd64
+    [ "${status}" -eq 0 ]
+    [ "${#lines[@]}" -eq 1 ]
+    local a="${output}"
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" identity ui linux/arm64
+    [ "${output}" != "${a}" ]
+}
+
+@test "identity rejects a platform not in the target set" {
+    # What: An unknown platform fails closed.
+    # Why: Unknown input is an error, not a silent fan-out.
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" identity ui linux/riscv64
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-IDENTITY-0002"* ]]
+}
+
+@test "install identity isolates platforms across arches" {
+    # What: An arm64-only edit must not move amd64 id.
+    # Why: A platform-irrelevant change must not rebuild.
+    # From: Issue #1683
+    local m="${BATS_TEST_TMPDIR}/manifest.yml"
+    cp "${BATS_TEST_DIRNAME}/../yaml/build-manifest.yml" "${m}"
+    local amd_before arm_before amd_after arm_after
+    amd_before="$(CI_MANIFEST="${m}" bash "${BATS_TEST_DIRNAME}/ci.sh" identity netdata linux/amd64)"
+    arm_before="$(CI_MANIFEST="${m}" bash "${BATS_TEST_DIRNAME}/ci.sh" identity netdata linux/arm64)"
+    sed -i 's/sha256_aarch64: [0-9a-f]\{64\}/sha256_aarch64: deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/' "${m}"
+    amd_after="$(CI_MANIFEST="${m}" bash "${BATS_TEST_DIRNAME}/ci.sh" identity netdata linux/amd64)"
+    arm_after="$(CI_MANIFEST="${m}" bash "${BATS_TEST_DIRNAME}/ci.sh" identity netdata linux/arm64)"
+    [ "${amd_before}" = "${amd_after}" ]
+    [ "${arm_before}" != "${arm_after}" ]
+}
+
+@test "resolve rejects a platform not in the target set" {
+    # What: A selected unknown platform fails closed.
+    # Why: Fail-closed dispatch (AG-VAL-002).
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" resolve ui linux/riscv64
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-RESOLVE-0004"* ]]
+}
+
+@test "build rejects a platform not in the target set" {
+    # What: A selected unknown platform fails closed.
+    # Why: Fail-closed dispatch (AG-VAL-002).
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" build ui linux/riscv64
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-BUILD-0006"* ]]
+}
+
+@test "build tags its result line with the selected platform" {
+    # What: A selected build emits one platform-keyed line.
+    # Why: Downstream assembly keys per-platform digests.
+    # From: Issue #1683
+    STUB_STATE=PRESENT_ACCEPTED
+    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${BATS_TEST_DIRNAME}/ci.sh" build ui linux/arm64
+    [ "${status}" -eq 0 ]
+    [ "${#lines[@]}" -eq 1 ]
+    [[ "${output}" == *"platform=linux/arm64"* ]]
+    [[ "${output}" == *"result=reuse-accepted"* ]]
+}
+
+@test "per-service platform override is a strict subset of build_matrix" {
+    # What: An override must be a proper subset.
+    # Why: The global list bounds all; equal = drift.
+    # From: Issue #1683
+    local global svc ov p
+    global="$(_ci_build_matrix_platforms | sort | tr '\n' ' ')"
+    for svc in $(ci_build_targets); do
+        ov="$(_ci_service_platforms_override "${svc}")"
+        [ -n "${ov}" ] || continue
+        while IFS= read -r p; do
+            [ -z "${p}" ] && continue
+            printf '%s\n' ${global} | grep -qx "${p}"
+        done <<< "${ov}"
+        [ "$(printf '%s\n' ${ov} | sort | tr '\n' ' ')" != "${global}" ]
+    done
 }
 
 # ============================================================
