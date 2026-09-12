@@ -673,6 +673,115 @@ _asm_digest_stub() {
 # PROMOTION
 # ============================================================
 
+# What: A candidate holding all 10 product services.
+# Why: Stack-atomic promotion needs every service.
+# From: Issue #1683
+_promote_full_candidate() {
+    _stub cand "for s in proxy dns watchdog dhcp dhcp-proxy ntp syslog ui cachehamster netdata; do echo \"\$s=$1\"; done"
+}
+_promote_lock() { _stub lock 'echo "LOCK $1" >> "${BATS_TEST_TMPDIR}/lock.log"'; }
+_promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.log"'; }
+
+@test "promote fails closed when no channel is given" {
+    # What: Missing arg must fail with a stable id.
+    # Why: Fail-closed dispatch (AG-VAL-002).
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" promote
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-PROMOTE-0001"* ]]
+}
+
+@test "promote rejects a channel not in the mutable SOT set" {
+    # What: Only known mutable channels may be moved.
+    # Why: promote moves refs only; no invented list.
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" promote bogus
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-PROMOTE-0002"* ]]
+}
+
+@test "promote refuses an incomplete stack (no promote at 8/9)" {
+    # What: A missing service blocks the promotion.
+    # Why: Promotion is stack-atomic (docs section 50).
+    # From: Issue #1683
+    local dig="sha256:$(printf 'a%.0s' {1..64})"
+    CI_STACK_CANDIDATE_CMD="$(_stub cand "echo proxy=${dig}")" GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" promote nightly
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-PROMOTE-0004"* ]]
+}
+
+@test "promote blocks when the stack is not validated" {
+    # What: Stack validation is a precondition.
+    # Why: Fail-closed without validate (docs section 50).
+    # From: Issue #1683
+    local dig="sha256:$(printf 'a%.0s' {1..64})"
+    CI_STACK_CANDIDATE_CMD="$(_promote_full_candidate "${dig}")" GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" promote nightly
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-PROMOTE-0005"* ]]
+}
+
+@test "promote fails closed without GHCR auth" {
+    # What: Moving refs is an authenticated action.
+    # Why: Never anonymous (rate-limit).
+    # From: Issue #1683
+    local dig="sha256:$(printf 'a%.0s' {1..64})"
+    CI_STACK_CANDIDATE_CMD="$(_promote_full_candidate "${dig}")" CI_STACK_VALIDATED=SUCCESS \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" promote nightly
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-BUILD-0002"* ]]
+}
+
+@test "promote moves refs, confirms readback, releases lock" {
+    # What: Fresh promote: lock, move, readback, unlock.
+    # Why: The one success path (docs section 51/53).
+    # From: Issue #1683
+    local dig="sha256:$(printf 'a%.0s' {1..64})"
+    CI_STACK_CANDIDATE_CMD="$(_promote_full_candidate "${dig}")" CI_STACK_VALIDATED=SUCCESS \
+    CI_PROMOTE_LOCK_CMD="$(_promote_lock)" CI_PROMOTE_UNLOCK_CMD="$(_promote_unlock)" \
+    CI_PROMOTE_MOVE_CMD="$(_stub mv 'touch "${BATS_TEST_TMPDIR}/moved.$1"')" \
+    CI_CHANNEL_READBACK_CMD="$(_stub rb "[ -f \"\${BATS_TEST_TMPDIR}/moved.\$1\" ] && echo ${dig} || true")" \
+    GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" promote nightly
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"result=promoted"* ]]
+    [[ "$(cat "${BATS_TEST_TMPDIR}/lock.log")" == *"UNLOCK nightly"* ]]
+}
+
+@test "promote is idempotent: all refs current, no lock taken" {
+    # What: A re-run reuses the state, takes no lock.
+    # Why: Same end state on retry (docs section 26.4).
+    # From: Issue #1683
+    local dig="sha256:$(printf 'a%.0s' {1..64})"
+    CI_STACK_CANDIDATE_CMD="$(_promote_full_candidate "${dig}")" CI_STACK_VALIDATED=SUCCESS \
+    CI_PROMOTE_LOCK_CMD="$(_promote_lock)" CI_PROMOTE_UNLOCK_CMD="$(_promote_unlock)" \
+    CI_PROMOTE_MOVE_CMD="$(_stub mv 'true')" \
+    CI_CHANNEL_READBACK_CMD="$(_stub rb "echo ${dig}")" \
+    GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" promote nightly
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"result=already-promoted"* ]]
+    [ ! -f "${BATS_TEST_TMPDIR}/lock.log" ]
+}
+
+@test "promote fails on readback MISMATCH but frees the lock" {
+    # What: A mismatch fails closed, never leaks the lock.
+    # Why: A held lock blocks all future promotions.
+    # From: Issue #1683
+    local dig="sha256:$(printf 'a%.0s' {1..64})"
+    local other="sha256:$(printf 'b%.0s' {1..64})"
+    CI_STACK_CANDIDATE_CMD="$(_promote_full_candidate "${dig}")" CI_STACK_VALIDATED=SUCCESS \
+    CI_PROMOTE_LOCK_CMD="$(_promote_lock)" CI_PROMOTE_UNLOCK_CMD="$(_promote_unlock)" \
+    CI_PROMOTE_MOVE_CMD="$(_stub mv 'true')" \
+    CI_CHANNEL_READBACK_CMD="$(_stub rb "echo ${other}")" \
+    GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" promote nightly
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-PROMOTE-0009"* ]]
+    [[ "$(cat "${BATS_TEST_TMPDIR}/lock.log")" == *"UNLOCK nightly"* ]]
+}
+
 # ============================================================
 # GC
 # ============================================================
