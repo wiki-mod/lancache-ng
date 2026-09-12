@@ -387,6 +387,81 @@ ci_reuse_order() {
 # BUILD ENGINE
 # ============================================================
 
+# What: Fail unless GHCR credentials are present.
+# Why: Every GHCR action authenticates, never anonymous.
+# From: Issue #1683
+_ci_require_ghcr_auth() {
+    [ -n "${GHCR_USERNAME:-}" ] && [ -n "${GHCR_TOKEN:-}" ] && return 0
+    ci_log "[CI-ERROR-BUILD-0002]" "reason=\"GHCR credentials required; anonymous is rate-limited\""
+    return 2
+}
+
+# What: Look up a prebuilt binary in the compiled CAS.
+# Why: Reuse an identical binary before compiling (§7).
+# From: Issue #1683
+_ci_cas_lookup() {
+    local identity="$1"
+    if [ -n "${CI_CAS_LOOKUP_CMD:-}" ]; then
+        "${CI_CAS_LOOKUP_CMD}" "${identity}"
+        return "$?"
+    fi
+    return 1
+}
+
+# What: Run the real (or injected) image build+push.
+# Why: Injectable so build logic tests without Docker.
+# From: Issue #1683
+_ci_do_build() {
+    local service="$1" identity="$2"
+    if [ -n "${CI_BUILD_CMD:-}" ]; then
+        "${CI_BUILD_CMD}" "${service}" "${identity}"
+        return "$?"
+    fi
+    ci_log "[CI-ERROR-BUILD-0003]" "service=\"${service}\" reason=\"no build backend wired (CI_BUILD_CMD unset)\""
+    return 2
+}
+
+# What: Build one service, honoring resolve + reuse order.
+# Why: NOOP/reuse/CAS precede compile; UNKNOWN never builds.
+# From: Issue #1683
+ci_cmd_build() {
+    local service="${1:-}"
+    [ -n "${service}" ] || { ci_log "[CI-ERROR-BUILD-0001]" "reason=\"service arg required\""; return 2; }
+    local resolved action identity build_type
+    resolved="$(ci_cmd_resolve "${service}")" || return "$?"
+    action="${resolved#*action=}"; action="${action%% *}"
+    identity="${resolved#*identity=}"; identity="${identity%% *}"
+    build_type="$(ci_service_field "${service}" build_type)"
+
+    case "${action}" in
+        noop)
+            printf 'service=%s result=reuse-accepted identity=%s\n' "${service}" "${identity}"
+            return 0
+            ;;
+        escalate|wait|verify)
+            ci_log "[CI-INFO-BUILD-0004]" "service=\"${service}\" action=\"${action}\" note=\"not building; resolve action is not build\""
+            printf 'service=%s result=%s identity=%s\n' "${service}" "${action}" "${identity}"
+            [ "${action}" = "escalate" ] && return 2 || return 0
+            ;;
+        build) ;;
+        *)
+            ci_log "[CI-ERROR-BUILD-0005]" "service=\"${service}\" reason=\"unrecognized resolve action\" got=\"${action}\""
+            return 2
+            ;;
+    esac
+
+    # Rust targets can reuse an identical compiled binary from
+    # the CAS before compiling again (reuse order, §7).
+    if [ "${build_type}" = "rust" ] && _ci_cas_lookup "${identity}" >/dev/null 2>&1; then
+        printf 'service=%s result=reuse-binary-cas identity=%s\n' "${service}" "${identity}"
+        return 0
+    fi
+
+    _ci_require_ghcr_auth || return "$?"
+    _ci_do_build "${service}" "${identity}" || return "$?"
+    printf 'service=%s result=built identity=%s\n' "${service}" "${identity}"
+}
+
 # ============================================================
 # VERIFY / TEST / SCAN
 # ============================================================
@@ -424,6 +499,7 @@ ci_main() {
                 plan) ci_cmd_plan "$@" ;;
                 identity) ci_cmd_identity "$@" ;;
                 resolve) ci_cmd_resolve "$@" ;;
+                build) ci_cmd_build "$@" ;;
                 *) ci_not_implemented "${command}" "$@" ;;
             esac
             ;;
