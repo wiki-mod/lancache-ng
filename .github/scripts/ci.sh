@@ -742,6 +742,86 @@ ci_cmd_scan() {
 # ASSEMBLY
 # ============================================================
 
+# What: Look up an ACCEPTED per-platform digest.
+# Why: The digest source is the ledger; testable without it.
+# From: Issue #1683
+_ci_accepted_digest() {
+    local service="$1" platform="$2"
+    if [ -n "${CI_ACCEPTED_DIGEST_CMD:-}" ]; then
+        "${CI_ACCEPTED_DIGEST_CMD}" "${service}" "${platform}"
+        return "$?"
+    fi
+    return 1
+}
+
+# What: Look up an existing multi-arch index (injectable).
+# Why: Idempotency: reuse an identical index.
+# From: Issue #1683
+_ci_index_lookup() {
+    local service="$1"
+    if [ -n "${CI_INDEX_LOOKUP_CMD:-}" ]; then
+        "${CI_INDEX_LOOKUP_CMD}" "${service}"
+        return "$?"
+    fi
+    return 1
+}
+
+# What: Assemble accepted per-platform digests.
+# Why: Index only when every platform is ACCEPTED.
+# From: Issue #1683
+ci_cmd_assemble() {
+    local service="${1:-}"
+    [ -n "${service}" ] || { ci_log "[CI-ERROR-ASSEMBLE-0001]" "reason=\"service arg required\""; return 2; }
+    local plats p line state digest
+    plats="$(_ci_platforms "${service}")" || return "$?"
+    local -a inputs=()
+    # Gate on the resolver's own states (no second vocabulary): a
+    # non-ACCEPTED platform blocks assembly and MUST NOT rebuild
+    # the successful platform (docs section 45).
+    while IFS= read -r p; do
+        [ -n "${p}" ] || continue
+        line="$(_ci_resolve_one "${service}" "${p}")" || return "$?"
+        state="${line#*state=}"; state="${state%% *}"
+        if [ "${state}" != "PRESENT_ACCEPTED" ]; then
+            ci_error "[CI-ERROR-ASSEMBLE-0002]" "service=\"${service}\" platform=\"${p}\" reason=\"platform not ACCEPTED; not assembling, not rebuilding\" state=\"${state}\"" "resolve: ${line}"
+            return 2
+        fi
+        if ! digest="$(_ci_accepted_digest "${service}" "${p}")"; then
+            ci_log "[CI-ERROR-ASSEMBLE-0003]" "service=\"${service}\" platform=\"${p}\" reason=\"no accepted digest for an ACCEPTED platform\""
+            return 2
+        fi
+        inputs+=("${p}=${digest}")
+    done <<< "${plats}"
+
+    # Idempotency (docs section 26.4): an identical index is reused
+    # (same end state on a retry); a divergent one fails closed and
+    # is never overwritten; absence means create.
+    local want existing ex_digest ex_have
+    want="$(printf '%s\n' "${inputs[@]}" | sort | tr '\n' ' ')"
+    if existing="$(_ci_index_lookup "${service}")"; then
+        ex_digest="${existing%% *}"
+        ex_have="$(printf '%s\n' ${existing#* } | sort | tr '\n' ' ')"
+        if [ "${want}" = "${ex_have}" ]; then
+            printf 'service=%s result=reuse-index assembled=%s platforms=%s\n' "${service}" "${ex_digest}" "${#inputs[@]}"
+            return 0
+        fi
+        ci_error "[CI-ERROR-ASSEMBLE-0004]" "service=\"${service}\" reason=\"existing index has different platform digests; refusing to overwrite\" existing=\"${ex_digest}\"" "existing: ${existing#* }"
+        return 2
+    fi
+
+    _ci_require_ghcr_auth || return "$?"
+    if [ -z "${CI_ASSEMBLE_CMD:-}" ]; then
+        ci_log "[CI-ERROR-ASSEMBLE-0006]" "service=\"${service}\" reason=\"no assemble backend wired (CI_ASSEMBLE_CMD unset)\""
+        return 2
+    fi
+    local index
+    if ! index="$("${CI_ASSEMBLE_CMD}" "${service}" "${inputs[@]}")"; then
+        ci_log "[CI-ERROR-ASSEMBLE-0005]" "service=\"${service}\" reason=\"assemble backend failed\""
+        return 2
+    fi
+    printf 'service=%s result=assembled assembled=%s platforms=%s\n' "${service}" "${index}" "${#inputs[@]}"
+}
+
 # ============================================================
 # PROMOTION
 # ============================================================
@@ -776,6 +856,7 @@ ci_main() {
                 verify) ci_cmd_verify "$@" ;;
                 test) ci_cmd_test "$@" ;;
                 scan) ci_cmd_scan "$@" ;;
+                assemble) ci_cmd_assemble "$@" ;;
                 *) ci_not_implemented "${command}" "$@" ;;
             esac
             ;;
