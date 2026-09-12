@@ -330,6 +330,59 @@ _stub() {
 }
 
 # ============================================================
+# TEST / SCAN
+# ============================================================
+
+@test "test fails closed and shows raw output when tests fail" {
+    # What: A failed test run is a failed run (AG-VAL-002).
+    # Why: Never skip or swallow a real test failure.
+    # From: Issue #1683
+    CI_TEST_CMD="$(_stub t 'echo boom; exit 1')" run bash "${BATS_TEST_DIRNAME}/ci.sh" test ui
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-TEST-0003"* ]]
+    [[ "${output}" == *"boom"* ]]
+}
+
+@test "test passes when the backend succeeds" {
+    # What: Green backend -> tested=ok.
+    # Why: The one success path.
+    # From: Issue #1683
+    CI_TEST_CMD="$(_stub t 'exit 0')" run bash "${BATS_TEST_DIRNAME}/ci.sh" test ui
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"tested=ok"* ]]
+}
+
+@test "scan rejects a /tmp (tmpfs) TMPDIR, requires /var/tmp" {
+    # What: tmpfs /tmp risks OOM on image/db export.
+    # Why: All CI staging is /var/tmp (maintainer rule).
+    # From: Issue #1683
+    CI_TMPDIR=/tmp CI_SCAN_CMD="$(_stub s 'exit 0')" GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" scan ui sha256:x
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-SCAN-0003"* ]]
+}
+
+@test "scan is clean on /var/tmp with auth and a passing backend" {
+    # What: authed + /var/tmp + green scan -> clean.
+    # Why: The one success path for scan.
+    # From: Issue #1683
+    CI_SCAN_CMD="$(_stub s 'exit 0')" GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" scan ui sha256:x
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"scanned=clean"* ]]
+    [[ "${output}" == *"tmpdir=/var/tmp"* ]]
+}
+
+@test "scan fails closed without GHCR auth" {
+    # What: Scan pulls the image -> authenticated.
+    # Why: Never anonymous (rate-limit).
+    # From: Issue #1683
+    CI_SCAN_CMD="$(_stub s 'exit 0')" run bash "${BATS_TEST_DIRNAME}/ci.sh" scan ui sha256:x
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-BUILD-0002"* ]]
+}
+
+# ============================================================
 # CACHE FALLBACK
 # ============================================================
 

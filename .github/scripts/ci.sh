@@ -29,7 +29,7 @@ CI_REPO_ROOT="$(cd -- "${CI_SCRIPT_DIR}/../.." && pwd)"
 # What: The known ci.sh subcommands (docs section 9 CLI).
 # Why: One list drives dispatch and error text.
 # From: Issue #1683
-CI_COMMANDS="plan impact identity resolve test build publish verify assemble validate promote gc variables"
+CI_COMMANDS="plan impact identity resolve build publish verify test scan assemble validate promote gc variables"
 
 # ============================================================
 # LOGGING
@@ -512,6 +512,53 @@ ci_cmd_verify() {
     printf 'service=%s verified=%s\n' "${service}" "${seen}"
 }
 
+# What: Run a service's tests via an injectable backend.
+# Why: A failed test run is a failed run, never skipped.
+# From: Issue #1683
+ci_cmd_test() {
+    local service="${1:-}"
+    [ -n "${service}" ] || { ci_log "[CI-ERROR-TEST-0001]" "reason=\"service arg required\""; return 2; }
+    if [ -z "${CI_TEST_CMD:-}" ]; then
+        ci_log "[CI-ERROR-TEST-0002]" "service=\"${service}\" reason=\"no test backend wired (CI_TEST_CMD unset)\""
+        return 2
+    fi
+    local raw status
+    if raw="$("${CI_TEST_CMD}" "${service}" 2>&1)"; then status=0; else status=$?; fi
+    if [ "${status}" -ne 0 ]; then
+        ci_error "[CI-ERROR-TEST-0003]" "service=\"${service}\" reason=\"tests failed\" retry=$(_ci_classify_failure "${raw}")" "${raw}"
+        return 2
+    fi
+    printf 'service=%s tested=ok\n' "${service}"
+}
+
+# What: Scan a published digest for vulnerabilities.
+# Why: /var/tmp staging (no tmpfs OOM), authed, fail-closed.
+# From: Issue #1683
+ci_cmd_scan() {
+    local service="${1:-}" digest="${2:-}"
+    [ -n "${service}" ] || { ci_log "[CI-ERROR-SCAN-0001]" "reason=\"service arg required\""; return 2; }
+    [ -n "${digest}" ] || { ci_log "[CI-ERROR-SCAN-0002]" "reason=\"digest arg required\""; return 2; }
+    _ci_require_ghcr_auth || return "$?"
+    # Real disk, never tmpfs /tmp -- large image/db exports there
+    # risk filling RAM (OOM). Applies to the scanner's own TMPDIR.
+    local scan_tmp="${CI_TMPDIR:-/var/tmp}"
+    case "${scan_tmp}" in
+        /var/tmp|/var/tmp/*) ;;
+        *) ci_log "[CI-ERROR-SCAN-0003]" "reason=\"scan TMPDIR must be under /var/tmp, not tmpfs /tmp\" got=\"${scan_tmp}\""; return 2 ;;
+    esac
+    if [ -z "${CI_SCAN_CMD:-}" ]; then
+        ci_log "[CI-ERROR-SCAN-0004]" "service=\"${service}\" reason=\"no scan backend wired (CI_SCAN_CMD unset)\""
+        return 2
+    fi
+    local raw status
+    if raw="$(TMPDIR="${scan_tmp}" "${CI_SCAN_CMD}" "${service}" "${digest}" 2>&1)"; then status=0; else status=$?; fi
+    if [ "${status}" -ne 0 ]; then
+        ci_error "[CI-ERROR-SCAN-0005]" "service=\"${service}\" reason=\"scan reported findings or failed\" retry=$(_ci_classify_failure "${raw}")" "${raw}"
+        return 2
+    fi
+    printf 'service=%s scanned=clean digest=%s tmpdir=%s\n' "${service}" "${digest}" "${scan_tmp}"
+}
+
 # ============================================================
 # ASSEMBLY
 # ============================================================
@@ -548,6 +595,8 @@ ci_main() {
                 build) ci_cmd_build "$@" ;;
                 publish) ci_cmd_publish "$@" ;;
                 verify) ci_cmd_verify "$@" ;;
+                test) ci_cmd_test "$@" ;;
+                scan) ci_cmd_scan "$@" ;;
                 *) ci_not_implemented "${command}" "$@" ;;
             esac
             ;;
