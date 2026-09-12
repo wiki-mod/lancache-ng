@@ -260,6 +260,75 @@ STUB
 # BUILD ADMISSION
 # ============================================================
 
+# What: Write an executable stub that prints/exits fixed.
+# Why: Inject build/CAS/probe backends without real infra.
+# From: Issue #1683
+_stub() {
+    local name="$1" body="$2"
+    printf '#!/usr/bin/env bash\n%s\n' "${body}" > "${BATS_TEST_TMPDIR}/${name}"
+    chmod +x "${BATS_TEST_TMPDIR}/${name}"
+    printf '%s\n' "${BATS_TEST_TMPDIR}/${name}"
+}
+
+@test "build reuses (no build) when resolve says accepted" {
+    # What: PRESENT_ACCEPTED -> reuse, never build.
+    # Why: NOOP/reuse is the default outcome.
+    # From: Issue #1683
+    STUB_STATE=PRESENT_ACCEPTED
+    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${BATS_TEST_DIRNAME}/ci.sh" build ui
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"result=reuse-accepted"* ]]
+}
+
+@test "build refuses to build on UNKNOWN (escalate, not build)" {
+    # What: UNKNOWN must never trigger a build.
+    # Why: UNKNOWN != BUILD (Contract section 4).
+    # From: Issue #1683
+    STUB_STATE=UNKNOWN
+    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${BATS_TEST_DIRNAME}/ci.sh" build ui
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"result=escalate"* ]]
+    [[ "${output}" != *"result=built"* ]]
+}
+
+@test "build reuses a binary from the CAS before compiling (rust)" {
+    # What: A CAS hit skips compile (reuse order, §7).
+    # Why: Reuse an identical binary, do not rebuild.
+    # From: Issue #1683
+    STUB_STATE=MISSING_CONFIRMED
+    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
+    CI_CAS_LOOKUP_CMD="$(_stub cas 'exit 0')" \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" build ui
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"result=reuse-binary-cas"* ]]
+}
+
+@test "build fails closed when GHCR credentials are missing (never anonymous)" {
+    # What: A real build needs authenticated GHCR.
+    # Why: Anonymous GHCR is rate-limited (maintainer).
+    # From: Issue #1683
+    STUB_STATE=MISSING_CONFIRMED
+    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
+    CI_CAS_LOOKUP_CMD="$(_stub cas 'exit 1')" \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" build ui
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-BUILD-0002"* ]]
+}
+
+@test "build runs the backend when confirmed-missing, CAS-miss, authed" {
+    # What: The one real path: build + push, authed.
+    # Why: Only a confirmed-missing artifact compiles.
+    # From: Issue #1683
+    STUB_STATE=MISSING_CONFIRMED
+    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
+    CI_CAS_LOOKUP_CMD="$(_stub cas 'exit 1')" \
+    CI_BUILD_CMD="$(_stub build 'exit 0')" \
+    GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" build ui
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"result=built"* ]]
+}
+
 # ============================================================
 # CACHE FALLBACK
 # ============================================================
