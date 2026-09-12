@@ -337,6 +337,47 @@ _stub() {
 # REGISTRY / PUBLISH / READBACK
 # ============================================================
 
+@test "publish fails closed without GHCR credentials" {
+    # What: Publish is an authenticated GHCR action.
+    # Why: Never push anonymously (rate-limit).
+    # From: Issue #1683
+    CI_PUBLISH_CMD="$(_stub pub 'echo sha256:abc')" run bash "${BATS_TEST_DIRNAME}/ci.sh" publish ui
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-BUILD-0002"* ]]
+}
+
+@test "publish returns the backend digest when authed" {
+    # What: A successful push reports its digest.
+    # Why: The digest is the ref the next phase verifies.
+    # From: Issue #1683
+    CI_PUBLISH_CMD="$(_stub pub 'echo sha256:deadbeef')" GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" publish ui
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"published=sha256:deadbeef"* ]]
+}
+
+@test "verify passes when the readback digest matches" {
+    # What: readback == expected -> verified.
+    # Why: Confirms the accepted artifact is the real one.
+    # From: Issue #1683
+    CI_READBACK_CMD="$(_stub rb 'echo sha256:match')" GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" verify ui sha256:match
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"verified=sha256:match"* ]]
+}
+
+@test "verify fails with MISMATCH and shows raw readback (BUILT != ACCEPTED)" {
+    # What: readback != expected -> hard fail + raw.
+    # Why: A mismatch must never be accepted (§7).
+    # From: Issue #1683
+    CI_READBACK_CMD="$(_stub rb 'echo sha256:other')" GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" verify ui sha256:expected
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VERIFY-0005"* ]]
+    [[ "${output}" == *"MISMATCH"* ]]
+    [[ "${output}" == *"readback=sha256:other"* ]]
+}
+
 # ============================================================
 # ASSEMBLY
 # ============================================================
