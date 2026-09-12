@@ -15,37 +15,31 @@ services:
     external_contexts: [services/dns]
     build_type: apk
     final_base: alpine
-    platforms: [linux/amd64, linux/arm64]
     runner: light
   dns:
     context: services/dns
     build_type: rust
     final_base: alpine
-    platforms: [linux/amd64, linux/arm64]
     runner: heavy
   watchdog:
     context: services/watchdog
     build_type: rust
     final_base: alpine
-    platforms: [linux/amd64, linux/arm64]
     runner: heavy
   dhcp:
     context: services/dhcp
     build_type: apk
     final_base: alpine
-    platforms: [linux/amd64, linux/arm64]
     runner: light
   dhcp-proxy:
     context: services/dhcp-proxy
     build_type: apk
     final_base: alpine
-    platforms: [linux/amd64, linux/arm64]
     runner: light
   ntp:
     context: services/ntp
     build_type: apk
     final_base: alpine
-    platforms: [linux/amd64, linux/arm64]
     runner: light
   syslog:
     context: services/syslog
@@ -55,13 +49,11 @@ services:
     build_type: apk
     external_image: fluent_bit
     final_base: alpine
-    platforms: [linux/amd64, linux/arm64]
     runner: light
   ui:
     context: services/ui
     build_type: rust
     final_base: alpine
-    platforms: [linux/amd64, linux/arm64]
     runner: heavy
   cachehamster:
     context: services/cachehamster
@@ -70,7 +62,6 @@ services:
     # From: Issue #1683
     build_type: rust
     final_base: alpine
-    platforms: [linux/amd64, linux/arm64]
     runner: heavy
   netdata:
     context: services/netdata
@@ -79,7 +70,6 @@ services:
     # From: Issue #1683
     build_type: install
     final_base: alpine
-    platforms: [linux/amd64, linux/arm64]
     runner: light
 
 # What: The toolchain image that builds the product stack.
@@ -90,7 +80,6 @@ build_toolchain:
     context: tools/build-tools
     build_type: toolchain
     final_base: alpine
-    platforms: [linux/amd64, linux/arm64]
     runner: heavy
 
 # What: Runtime services not built by this project.
@@ -153,8 +142,8 @@ external_versions:
     sha256_amd64:
     sha256_arm64:
 
-# What: Platforms every build target is produced for.
-# Why: Platform is a parameter, never a twin implementation.
+# What: The one authoritative platform list for all targets.
+# Why: Platform is a parameter, never a twin; no second list.
 # From: Issue #1683
 build_matrix:
   platforms: [linux/amd64, linux/arm64]
