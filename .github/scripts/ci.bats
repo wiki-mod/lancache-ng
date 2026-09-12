@@ -786,6 +786,187 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
 # GC
 # =========================================================
 
+_gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
+
+@test "gc fails closed with no roots backend wired" {
+    # What: Missing roots backend must fail, not proceed.
+    # Why: No roots means every artifact looks unreachable.
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" gc
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-GC-0001"* ]]
+}
+
+@test "gc fails closed on an empty protected-roots set" {
+    # What: An empty roots set must stop the pass.
+    # Why: Empty roots would mark all artifacts unreachable.
+    # From: Issue #1683
+    CI_GC_ROOTS_CMD="$(_stub roots 'true')" \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" gc
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-GC-0007"* ]]
+}
+
+@test "gc fails closed with no candidate source wired" {
+    # What: Missing candidate source must fail closed.
+    # Why: SQLite is the only candidate source (§97).
+    # From: Issue #1683
+    CI_GC_ROOTS_CMD="$(_gc_roots)" \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" gc
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-GC-0002"* ]]
+}
+
+@test "gc is a NOOP when the candidate set is empty" {
+    # What: Zero candidates is a clean no-op, not a failure.
+    # Why: DEFAULT=NOOP; a clean repo must exit success.
+    # From: Issue #1683
+    CI_GC_ROOTS_CMD="$(_gc_roots)" CI_GC_CANDIDATES_CMD="$(_stub cands 'true')" \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" gc
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"result=noop candidates=0"* ]]
+}
+
+@test "gc keeps a candidate that is still referenced" {
+    # What: A referenced candidate is kept, not deleted.
+    # Why: SQLite may be stale; registry truth wins (§97).
+    # From: Issue #1683
+    CI_GC_ROOTS_CMD="$(_gc_roots)" \
+    CI_GC_CANDIDATES_CMD="$(_stub cands 'echo sha-abc')" \
+    CI_GC_REACHABLE_CMD="$(_stub reach 'echo referenced')" \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" gc
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"candidate=sha-abc action=KEEP"* ]]
+}
+
+@test "gc marks an unreachable candidate DELETE in dry-run" {
+    # What: Dry-run classifies but never deletes.
+    # Why: Default dry-run per SOT deletion_policy.
+    # From: Issue #1683
+    CI_GC_ROOTS_CMD="$(_gc_roots)" \
+    CI_GC_CANDIDATES_CMD="$(_stub cands 'echo sha-old')" \
+    CI_GC_REACHABLE_CMD="$(_stub reach 'echo unreachable')" \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" gc
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"candidate=sha-old action=DELETE mode=dry-run"* ]]
+}
+
+@test "gc fails closed on an UNKNOWN reachability verdict" {
+    # What: UNKNOWN neither deletes nor keeps.
+    # Why: UNKNOWN is a probe bug to fix, not a keep/delete.
+    # From: Issue #1683
+    CI_GC_ROOTS_CMD="$(_gc_roots)" \
+    CI_GC_CANDIDATES_CMD="$(_stub cands 'echo sha-x')" \
+    CI_GC_REACHABLE_CMD="$(_stub reach 'echo dunno')" \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" gc
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-GC-0005"* ]]
+}
+
+@test "gc fails closed with no reachability backend wired" {
+    # What: Missing reachability backend must fail closed.
+    # Why: No probe means no safe delete decision (§97).
+    # From: Issue #1683
+    CI_GC_ROOTS_CMD="$(_gc_roots)" \
+    CI_GC_CANDIDATES_CMD="$(_stub cands 'echo sha-x')" \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" gc
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-GC-0003"* ]]
+}
+
+@test "gc fails closed when the reachability probe itself fails" {
+    # What: A failed probe stops the pass.
+    # Why: No verdict means no delete decision is safe.
+    # From: Issue #1683
+    CI_GC_ROOTS_CMD="$(_gc_roots)" \
+    CI_GC_CANDIDATES_CMD="$(_stub cands 'echo sha-x')" \
+    CI_GC_REACHABLE_CMD="$(_stub reach 'exit 3')" \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" gc
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-GC-0004"* ]]
+}
+
+@test "gc rejects an unknown argument" {
+    # What: An unrecognized argument must fail closed.
+    # Why: Fail-closed dispatch (AG-VAL-002).
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" gc --bogus
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-GC-0006"* ]]
+}
+
+@test "gc apply fails closed without GHCR auth" {
+    # What: Deleting artifacts is an authenticated action.
+    # Why: Never anonymous against GHCR (rate-limit).
+    # From: Issue #1683
+    CI_GC_ROOTS_CMD="$(_gc_roots)" \
+    CI_GC_CANDIDATES_CMD="$(_stub cands 'echo sha-old')" \
+    CI_GC_REACHABLE_CMD="$(_stub reach 'echo unreachable')" \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" gc --apply
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-BUILD-0002"* ]]
+}
+
+@test "gc apply fails closed with no delete backend" {
+    # What: apply needs a delete backend to act.
+    # Why: apply must never no-op silently while deleting.
+    # From: Issue #1683
+    CI_GC_ROOTS_CMD="$(_gc_roots)" \
+    CI_GC_CANDIDATES_CMD="$(_stub cands 'echo sha-old')" \
+    CI_GC_REACHABLE_CMD="$(_stub reach 'echo unreachable')" \
+    GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" gc --apply
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-GC-0010"* ]]
+}
+
+@test "gc apply refuses when the SOT policy forbids automation" {
+    # What: apply obeys the SOT deletion_policy gate.
+    # Why: A manual-only policy must block automated delete.
+    # From: Issue #1683
+    printf 'retention:\n  deletion_policy: manual-only\n' > "${BATS_TEST_TMPDIR}/sot.yml"
+    CI_MANIFEST="${BATS_TEST_TMPDIR}/sot.yml" \
+    CI_GC_ROOTS_CMD="$(_gc_roots)" \
+    CI_GC_CANDIDATES_CMD="$(_stub cands 'echo sha-old')" \
+    CI_GC_REACHABLE_CMD="$(_stub reach 'echo unreachable')" \
+    CI_GC_DELETE_CMD="$(_stub del 'echo "$1" >> "${BATS_TEST_TMPDIR}/deleted.log"')" \
+    GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" gc --apply
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-GC-0008"* ]]
+    [ ! -f "${BATS_TEST_TMPDIR}/deleted.log" ]
+}
+
+@test "gc apply deletes nothing when any candidate is UNKNOWN" {
+    # What: One UNKNOWN aborts before the delete pass runs.
+    # Why: Two passes: classify all, then delete (safety).
+    # From: Issue #1683
+    CI_GC_ROOTS_CMD="$(_gc_roots)" \
+    CI_GC_CANDIDATES_CMD="$(_stub cands 'printf "sha-good\nsha-bad\n"')" \
+    CI_GC_REACHABLE_CMD="$(_stub reach 'case "$1" in *good*) echo unreachable;; *) echo dunno;; esac')" \
+    CI_GC_DELETE_CMD="$(_stub del 'echo "$1" >> "${BATS_TEST_TMPDIR}/deleted.log"')" \
+    GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" gc --apply
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-GC-0005"* ]]
+    [ ! -f "${BATS_TEST_TMPDIR}/deleted.log" ]
+}
+
+@test "gc apply deletes an unreachable candidate via the backend" {
+    # What: apply deletes verified-unreachable only.
+    # Why: The one destructive path, gated + authed.
+    # From: Issue #1683
+    CI_GC_ROOTS_CMD="$(_gc_roots)" \
+    CI_GC_CANDIDATES_CMD="$(_stub cands 'echo sha-old')" \
+    CI_GC_REACHABLE_CMD="$(_stub reach 'echo unreachable')" \
+    CI_GC_DELETE_CMD="$(_stub del 'echo "$1" >> "${BATS_TEST_TMPDIR}/deleted.log"')" \
+    GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" gc --apply
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"result=classified keep=0 delete=1 mode=apply"* ]]
+    [[ "$(cat "${BATS_TEST_TMPDIR}/deleted.log")" == *"sha-old"* ]]
+}
+
 # =========================================================
 # HISTORICAL REGRESSIONS
 # =========================================================
