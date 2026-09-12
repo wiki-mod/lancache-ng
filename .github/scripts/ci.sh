@@ -338,8 +338,8 @@ _ci_identity_pins() {
             fi
             ;;
         install)
-            # Platform-matching digest only; another arch's
-            # change MUST NOT shift this id. netdata name recurs.
+            # What: this platform's netdata digest only.
+            # Why: another arch's change must not move it.
             re=""
             for arch in $(_ci_platform_arch_aliases "${platform}"); do
                 re="${re:+${re}|}sha256_${arch}"
@@ -412,8 +412,8 @@ _ci_resolve_probe() {
         "${CI_RESOLVE_PROBE_CMD}" "${service}" "${identity}"
         return 0
     fi
-    # No probe wired yet: state is genuinely unknown, never
-    # assumed missing (UNKNOWN != BUILD, Contract section 4).
+    # What: no probe wired -> report UNKNOWN.
+    # Why: unknown is not missing; never assume built.
     printf 'UNKNOWN\n'
 }
 
@@ -489,22 +489,23 @@ ci_cmd_resolve() {
 # From: Issue #1683
 _ci_classify_failure() {
     local raw="$1"
-    # Permanent: auth/malformed/real compile errors. Retrying
-    # these only burns the backoff budget on a fixed outcome.
+    # What: auth/malformed/compile are permanent.
+    # Why: retrying a fixed outcome wastes budget.
     case "${raw}" in
         *"HTTP 401"*|*"unauthorized"*|*"denied: requested access"*) printf 'permanent\n'; return 0 ;;
         *"HTTP 400"*|*"HTTP 422"*|*"invalid reference format"*) printf 'permanent\n'; return 0 ;;
         *"pull access denied"*|*"manifest unknown"*|*"not found: manifest"*) printf 'permanent\n'; return 0 ;;
         *"error: could not compile"*|*"Dockerfile parse error"*|*"failed to solve"*"parse"*) printf 'permanent\n'; return 0 ;;
     esac
-    # Transient: rate-limit, 5xx, network, timeout. Retryable.
+    # What: rate-limit/5xx/network are transient.
+    # Why: these recover on a retry with backoff.
     case "${raw}" in
         *"HTTP 403"*|*"HTTP 429"*|*"toomanyrequests"*|*"rate limit"*) printf 'transient\n'; return 0 ;;
         *"HTTP 5"[0-9][0-9]*|*"i/o timeout"*|*"connection refused"*|*"TLS handshake timeout"*) printf 'transient\n'; return 0 ;;
         *"EOF"*|*"connection reset by peer"*|*"temporary failure"*) printf 'transient\n'; return 0 ;;
     esac
-    # Unclassified: transient is the safe default -- a few
-    # extra retries beat giving up on a real transient error.
+    # What: an unclassified failure is transient.
+    # Why: a missed transient is worse than a retry.
     printf 'transient\n'
 }
 
@@ -585,8 +586,8 @@ _ci_build_one() {
             ;;
     esac
 
-    # Rust targets can reuse an identical compiled binary from
-    # the CAS before compiling again (reuse order, §7).
+    # What: reuse a CAS binary before compiling.
+    # Why: an identical binary need not rebuild.
     if [ "${build_type}" = "rust" ] && _ci_cas_lookup "${identity}" >/dev/null 2>&1; then
         printf 'service=%s platform=%s result=reuse-binary-cas identity=%s\n' "${service}" "${platform}" "${identity}"
         return 0
@@ -718,8 +719,8 @@ ci_cmd_scan() {
     [ -n "${service}" ] || { ci_log "[CI-ERROR-SCAN-0001]" "reason=\"service arg required\""; return 2; }
     [ -n "${digest}" ] || { ci_log "[CI-ERROR-SCAN-0002]" "reason=\"digest arg required\""; return 2; }
     _ci_require_ghcr_auth || return "$?"
-    # Real disk, never tmpfs /tmp -- large image/db exports there
-    # risk filling RAM (OOM). Applies to the scanner's own TMPDIR.
+    # What: stage scans under /var/tmp.
+    # Why: /tmp is tmpfs; large exports risk OOM.
     local scan_tmp="${CI_TMPDIR:-/var/tmp}"
     case "${scan_tmp}" in
         /var/tmp|/var/tmp/*) ;;
@@ -775,9 +776,8 @@ ci_cmd_assemble() {
     local plats p line state digest
     plats="$(_ci_platforms "${service}")" || return "$?"
     local -a inputs=()
-    # Gate on the resolver's own states (no second vocabulary): a
-    # non-ACCEPTED platform blocks assembly and MUST NOT rebuild
-    # the successful platform (docs section 45).
+    # What: gate on resolver state per platform.
+    # Why: a non-accepted platform never rebuilds.
     while IFS= read -r p; do
         [ -n "${p}" ] || continue
         line="$(_ci_resolve_one "${service}" "${p}")" || return "$?"
@@ -793,9 +793,8 @@ ci_cmd_assemble() {
         inputs+=("${p}=${digest}")
     done <<< "${plats}"
 
-    # Idempotency (docs section 26.4): an identical index is reused
-    # (same end state on a retry); a divergent one fails closed and
-    # is never overwritten; absence means create.
+    # What: reuse identical index, reject divergent.
+    # Why: idempotent retry; never overwrite.
     local want existing ex_digest ex_have
     want="$(printf '%s\n' "${inputs[@]}" | sort | tr '\n' ' ')"
     if existing="$(_ci_index_lookup "${service}")"; then
@@ -825,6 +824,134 @@ ci_cmd_assemble() {
 # ============================================================
 # PROMOTION
 # ============================================================
+
+# What: Print the SOT's mutable release channels.
+# Why: One channel list; promote never invents a second.
+# From: Issue #1683
+_ci_mutable_channels() {
+    awk '
+        /^release:[[:space:]]*$/ { inr = 1; next }
+        inr && /^[A-Za-z]/ { inr = 0; inc = 0 }
+        inr && /^  channels:[[:space:]]*$/ { inc = 1; next }
+        inr && inc && /^  [A-Za-z]/ { inc = 0 }
+        inc && /^    [A-Za-z0-9_.-]+:[[:space:]]*$/ { ch = $1; sub(/:$/, "", ch); next }
+        inc && ch != "" && /^      mutable:[[:space:]]*true[[:space:]]*$/ { print ch; ch = "" }
+    ' "${CI_MANIFEST}"
+}
+
+# What: True if a channel is a known mutable channel.
+# Why: promote moves mutable refs only (docs section 51).
+# From: Issue #1683
+_ci_valid_channel() {
+    local channel="$1" c
+    while IFS= read -r c; do
+        [ "${c}" = "${channel}" ] && return 0
+    done < <(_ci_mutable_channels)
+    return 1
+}
+
+# What: Read the accepted stack candidate (injectable).
+# Why: consumes a candidate; no ledger to test it.
+# From: Issue #1683
+_ci_stack_candidate() {
+    if [ -n "${CI_STACK_CANDIDATE_CMD:-}" ]; then
+        "${CI_STACK_CANDIDATE_CMD}"
+        return "$?"
+    fi
+    return 1
+}
+
+# What: True only if the stack validated (docs section 50).
+# Why: Fail-closed without validate; never assume success.
+# From: Issue #1683
+_ci_stack_validated() {
+    [ "${CI_STACK_VALIDATED:-}" = "SUCCESS" ]
+}
+
+# What: Move every candidate ref and read each back.
+# Why: One locked section; the caller always unlocks.
+# From: Issue #1683
+_ci_promote_move_all() {
+    local channel="$1" cand="$2" line svc digest seen
+    while IFS= read -r line; do
+        [ -n "${line}" ] || continue
+        svc="${line%%=*}"; digest="${line#*=}"
+        if ! "${CI_PROMOTE_MOVE_CMD}" "${svc}" "${channel}" "${digest}"; then
+            ci_log "[CI-ERROR-PROMOTE-0007]" "service=\"${svc}\" channel=\"${channel}\" reason=\"channel ref move failed\""
+            return 2
+        fi
+        seen="$("${CI_CHANNEL_READBACK_CMD}" "${svc}" "${channel}")" || seen=""
+        if [ -z "${seen}" ]; then
+            ci_log "[CI-ERROR-PROMOTE-0008]" "service=\"${svc}\" channel=\"${channel}\" reason=\"readback unknown; blocking\""
+            return 2
+        fi
+        if [ "${seen}" != "${digest}" ]; then
+            ci_error "[CI-ERROR-PROMOTE-0009]" "service=\"${svc}\" channel=\"${channel}\" reason=\"readback MISMATCH; failing closed, not rolling back\" expected=\"${digest}\"" "readback=${seen}"
+            return 2
+        fi
+    done <<< "${cand}"
+}
+
+# What: Atomically move a channel to an accepted stack.
+# Why: Stack-atomic; moves refs only, never builds.
+# From: Issue #1683
+ci_cmd_promote() {
+    local channel="${1:-}"
+    [ -n "${channel}" ] || { ci_log "[CI-ERROR-PROMOTE-0001]" "reason=\"channel arg required\""; return 2; }
+    if ! _ci_valid_channel "${channel}"; then
+        ci_log "[CI-ERROR-PROMOTE-0002]" "channel=\"${channel}\" reason=\"not a known mutable release channel\""
+        return 2
+    fi
+    local cand svcs svc
+    if ! cand="$(_ci_stack_candidate)"; then
+        ci_log "[CI-ERROR-PROMOTE-0003]" "channel=\"${channel}\" reason=\"no accepted stack candidate\""
+        return 2
+    fi
+    # What: assert every product service is present.
+    # Why: promotion is stack-atomic; 8/9 does not promote.
+    svcs="$(ci_services)" || return "$?"
+    while IFS= read -r svc; do
+        [ -n "${svc}" ] || continue
+        if ! printf '%s\n' "${cand}" | grep -q "^${svc}="; then
+            ci_log "[CI-ERROR-PROMOTE-0004]" "channel=\"${channel}\" service=\"${svc}\" reason=\"incomplete stack; no promotion (docs section 50)\""
+            return 2
+        fi
+    done <<< "${svcs}"
+    if ! _ci_stack_validated; then
+        ci_log "[CI-ERROR-PROMOTE-0005]" "channel=\"${channel}\" reason=\"stack not validated; promotion blocked\""
+        return 2
+    fi
+    _ci_require_ghcr_auth || return "$?"
+    if [ -z "${CI_PROMOTE_LOCK_CMD:-}" ] || [ -z "${CI_PROMOTE_UNLOCK_CMD:-}" ] || \
+       [ -z "${CI_PROMOTE_MOVE_CMD:-}" ] || [ -z "${CI_CHANNEL_READBACK_CMD:-}" ]; then
+        ci_log "[CI-ERROR-PROMOTE-0006]" "channel=\"${channel}\" reason=\"promote backends not wired\""
+        return 2
+    fi
+    # What: skip if every ref already points at its digest.
+    # Why: an idempotent re-run needs no lock or move.
+    local line svc2 digest seen all_match=1
+    while IFS= read -r line; do
+        [ -n "${line}" ] || continue
+        svc2="${line%%=*}"; digest="${line#*=}"
+        seen="$("${CI_CHANNEL_READBACK_CMD}" "${svc2}" "${channel}")" || seen=""
+        [ "${seen}" = "${digest}" ] || { all_match=0; break; }
+    done <<< "${cand}"
+    if [ "${all_match}" -eq 1 ]; then
+        printf 'channel=%s result=already-promoted services=%s\n' "${channel}" "$(printf '%s\n' "${cand}" | grep -c '=')"
+        return 0
+    fi
+    if ! "${CI_PROMOTE_LOCK_CMD}" "${channel}"; then
+        ci_log "[CI-ERROR-PROMOTE-0010]" "channel=\"${channel}\" reason=\"could not acquire promotion lock\""
+        return 2
+    fi
+    # What: capture rc so the unlock still runs on failure.
+    # Why: a failed move must never leak the promotion lock.
+    local rc
+    if _ci_promote_move_all "${channel}" "${cand}"; then rc=0; else rc=$?; fi
+    "${CI_PROMOTE_UNLOCK_CMD}" "${channel}" || ci_log "[CI-WARN-PROMOTE-0011]" "channel=\"${channel}\" reason=\"lock release failed\""
+    [ "${rc}" -eq 0 ] || return "${rc}"
+    printf 'channel=%s result=promoted services=%s\n' "${channel}" "$(printf '%s\n' "${cand}" | grep -c '=')"
+}
 
 # ============================================================
 # NIGHTLY / RELEASE
@@ -857,6 +984,7 @@ ci_main() {
                 test) ci_cmd_test "$@" ;;
                 scan) ci_cmd_scan "$@" ;;
                 assemble) ci_cmd_assemble "$@" ;;
+                promote) ci_cmd_promote "$@" ;;
                 *) ci_not_implemented "${command}" "$@" ;;
             esac
             ;;
