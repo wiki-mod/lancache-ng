@@ -1057,7 +1057,7 @@ _ci_gc_classify() {
 # From: Issue #1683
 ci_cmd_gc() {
     local mode="dry-run" arg roots cands line action policy
-    local del=0 keep=0 to_delete=""
+    local del=0 keep=0 deleted=0 to_delete=""
     for arg in "$@"; do
         case "${arg}" in
             --apply) mode="apply" ;;
@@ -1080,7 +1080,10 @@ ci_cmd_gc() {
     if [ "${mode}" = "apply" ]; then
         policy="$(_ci_deletion_policy)"
         case "${policy}" in
-            *automation*) : ;;
+            # What: Exact allow-list, not substring match.
+            # Why: A negated policy must not pass the gate.
+            # From: Issue #1683
+            manual-or-approved-automation-only) : ;;
             *)
                 ci_log "[CI-ERROR-GC-0008]" "policy=\"${policy}\" reason=\"deletion policy forbids automated delete\""
                 return 2
@@ -1107,13 +1110,22 @@ ci_cmd_gc() {
     if [ "${mode}" = "apply" ] && [ -n "${to_delete}" ]; then
         while IFS= read -r line; do
             [ -n "${line}" ] || continue
+            # What: Re-check reachability before delete.
+            # Why: Re-check closes a TOCTOU delete gap.
+            # From: Issue #1683
+            if ! action="$(_ci_gc_classify "${line}")"; then return 2; fi
+            if [ "${action}" != "DELETE" ]; then
+                ci_log "[CI-INFO-GC-0011]" "candidate=\"${line}\" reason=\"referenced at delete time; skipped\""
+                continue
+            fi
             if ! "${CI_GC_DELETE_CMD}" "${line}"; then
                 ci_log "[CI-ERROR-GC-0009]" "candidate=\"${line}\" reason=\"delete backend failed\""
                 return 2
             fi
+            deleted=$((deleted + 1))
         done <<< "${to_delete}"
     fi
-    printf 'gc result=classified keep=%s delete=%s mode=%s\n' "${keep}" "${del}" "${mode}"
+    printf 'gc result=classified keep=%s delete=%s deleted=%s mode=%s\n' "${keep}" "${del}" "${deleted}" "${mode}"
     return 0
 }
 

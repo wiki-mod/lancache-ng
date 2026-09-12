@@ -937,6 +937,23 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     [ ! -f "${BATS_TEST_TMPDIR}/deleted.log" ]
 }
 
+@test "gc apply denies a policy that only contains 'automation'" {
+    # What: A negated automation policy must not delete.
+    # Why: The allow-list is exact, not a substring match.
+    # From: Issue #1683
+    printf 'retention:\n  deletion_policy: automation-forbidden\n' > "${BATS_TEST_TMPDIR}/sot.yml"
+    CI_MANIFEST="${BATS_TEST_TMPDIR}/sot.yml" \
+    CI_GC_ROOTS_CMD="$(_gc_roots)" \
+    CI_GC_CANDIDATES_CMD="$(_stub cands 'echo sha-old')" \
+    CI_GC_REACHABLE_CMD="$(_stub reach 'echo unreachable')" \
+    CI_GC_DELETE_CMD="$(_stub del 'echo "$1" >> "${BATS_TEST_TMPDIR}/deleted.log"')" \
+    GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" gc --apply
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-GC-0008"* ]]
+    [ ! -f "${BATS_TEST_TMPDIR}/deleted.log" ]
+}
+
 @test "gc apply deletes nothing when any candidate is UNKNOWN" {
     # What: One UNKNOWN aborts before the delete pass runs.
     # Why: Two passes: classify all, then delete (safety).
@@ -963,8 +980,24 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${BATS_TEST_DIRNAME}/ci.sh" gc --apply
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"result=classified keep=0 delete=1 mode=apply"* ]]
+    [[ "${output}" == *"result=classified keep=0 delete=1 deleted=1 mode=apply"* ]]
     [[ "$(cat "${BATS_TEST_TMPDIR}/deleted.log")" == *"sha-old"* ]]
+}
+
+@test "gc apply skips a candidate that becomes referenced before delete" {
+    # What: Skip a now-referenced id before delete.
+    # Why: Check-before-write closes the TOCTOU gap.
+    # From: Issue #1683
+    CI_GC_ROOTS_CMD="$(_gc_roots)" \
+    CI_GC_CANDIDATES_CMD="$(_stub cands 'echo sha-old')" \
+    CI_GC_REACHABLE_CMD="$(_stub reach 'f="${BATS_TEST_TMPDIR}/seen"; if [ -f "$f" ]; then echo referenced; else : > "$f"; echo unreachable; fi')" \
+    CI_GC_DELETE_CMD="$(_stub del 'echo "$1" >> "${BATS_TEST_TMPDIR}/deleted.log"')" \
+    GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" gc --apply
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"CI-INFO-GC-0011"* ]]
+    [[ "${output}" == *"deleted=0"* ]]
+    [ ! -f "${BATS_TEST_TMPDIR}/deleted.log" ]
 }
 
 # =========================================================
