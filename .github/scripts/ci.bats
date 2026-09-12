@@ -136,9 +136,23 @@ setup() {
     # Why: An id must key on its own inputs, not collide.
     # From: Issue #1683
     run bash "${BATS_TEST_DIRNAME}/ci.sh" identity proxy
+    [ "${status}" -eq 0 ]
     local proxy="${output}"
     run bash "${BATS_TEST_DIRNAME}/ci.sh" identity build-tools
+    [ "${status}" -eq 0 ]
     [ "${output}" != "${proxy}" ]
+}
+
+@test "an apk service resolves without a masked non-zero exit" {
+    # What: identity/resolve of an apk service must exit 0.
+    # Why: A printed id with rc=1 masks a broken pipeline.
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" identity ntp
+    [ "${status}" -eq 0 ]
+    [[ "${output}" =~ ^[0-9a-f]{64}$ ]]
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" resolve ntp
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"state=UNKNOWN"* ]]
 }
 
 @test "identity fails closed with a stable id when no service is given" {
