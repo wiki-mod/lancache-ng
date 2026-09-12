@@ -24,7 +24,7 @@ CI_MANIFEST="${CI_MANIFEST:-${CI_SCRIPT_DIR}/../yaml/build-manifest.yml}"
 # What: Repository root (.github/scripts/../..).
 # Why: Identity hashes git-tracked content from the root.
 # From: Issue #1683
-CI_REPO_ROOT="$(cd -- "${CI_SCRIPT_DIR}/../.." && pwd)"
+CI_REPO_ROOT="${CI_REPO_ROOT:-$(cd -- "${CI_SCRIPT_DIR}/../.." && pwd)}"
 
 # What: The known ci.sh subcommands (docs section 9 CLI).
 # Why: One list drives dispatch and error text.
@@ -347,9 +347,14 @@ _ci_rust_strip_is_safe() {
 # Why: Content, not raw bytes or order, is the input.
 # From: Issue #1683
 _ci_tracked_content_ids() {
-    local root="$1" listing line path oid blob norm
-    listing="$( cd -- "${CI_REPO_ROOT}" && git ls-files -s -- "${root}" 2>/dev/null \
-        | awk -F'\t' '{ split($1, a, " "); print $2 "\t" a[2] }' | LC_ALL=C sort )" || return
+    local root="$1" ref="${2:-}" listing line path oid blob norm
+    if [ -n "${ref}" ]; then
+        listing="$( cd -- "${CI_REPO_ROOT}" && git ls-tree -r "${ref}" -- "${root}" 2>/dev/null \
+            | awk -F'\t' '{ split($1, a, " "); print $2 "\t" a[3] }' | LC_ALL=C sort )" || return
+    else
+        listing="$( cd -- "${CI_REPO_ROOT}" && git ls-files -s -- "${root}" 2>/dev/null \
+            | awk -F'\t' '{ split($1, a, " "); print $2 "\t" a[2] }' | LC_ALL=C sort )" || return
+    fi
     [ -n "${listing}" ] || return 0
     while IFS= read -r line; do
         [ -n "${line}" ] || continue
@@ -410,7 +415,7 @@ _ci_identity_pins() {
 # Why: Platform mixed in so arches never collide.
 # From: Issue #1683
 _ci_identity_for() {
-    local service="$1" platform="$2"
+    local service="$1" platform="$2" ref="${3:-}"
     local build_type context ctx ctx_path
     build_type="$(ci_service_field "${service}" build_type)"
     [ -n "${build_type}" ] || build_type="toolchain"
@@ -418,10 +423,10 @@ _ci_identity_for() {
     [ -z "${context}" ] && context="services/${service}"
     {
         printf 'service=%s\nbuild_type=%s\nplatform=%s\n' "${service}" "${build_type}" "${platform}"
-        _ci_tracked_content_ids "${context}"
+        _ci_tracked_content_ids "${context}" "${ref}"
         for ctx in $(ci_service_contexts "${service}"); do
             ctx_path="$(ci_context_path "${ctx}")"
-            [ -n "${ctx_path}" ] && _ci_tracked_content_ids "${ctx_path}"
+            [ -n "${ctx_path}" ] && _ci_tracked_content_ids "${ctx_path}" "${ref}"
         done
         _ci_identity_pins "${service}" "${build_type}" "${platform}"
     } | sha256sum | cut -d' ' -f1
@@ -448,6 +453,66 @@ ci_cmd_identity() {
         [ -n "${p}" ] || continue
         printf 'platform=%s identity=%s\n' "${p}" "$(_ci_identity_for "${service}" "${p}")"
     done <<< "${plats}"
+}
+
+# =========================================================
+# IMPACT
+# =========================================================
+
+# What: Write the SOT as it stood at a git ref.
+# Why: Base pins must reflect base, not head.
+# From: Issue #1683
+_ci_manifest_at() {
+    local ref="$1" dest="$2"
+    ( cd -- "${CI_REPO_ROOT}" && git show "${ref}:.github/yaml/build-manifest.yml" ) > "${dest}" 2>/dev/null
+}
+
+# What: Emit NOOP or BUILD per target and platform.
+# Why: Equal identity base-vs-head is the no-build rule.
+# From: Issue #1683
+_ci_impact_run() {
+    local base="$1" head="$2" base_manifest="$3"
+    local base_missing=0 t p plats hid bid build=0 noop=0
+    if ! _ci_manifest_at "${base}" "${base_manifest}" || [ ! -s "${base_manifest}" ]; then
+        base_missing=1
+        ci_log "[CI-INFO-IMPACT-0002]" "base=\"${base}\" reason=\"no SOT at base; all targets impacted\""
+    fi
+    while IFS= read -r t; do
+        [ -n "${t}" ] || continue
+        plats="$(_ci_platforms "${t}")" || return "$?"
+        while IFS= read -r p; do
+            [ -n "${p}" ] || continue
+            hid="$(_ci_identity_for "${t}" "${p}" "${head}")"
+            if [ "${base_missing}" -eq 1 ]; then
+                bid="__no_base__"
+            else
+                bid="$(CI_MANIFEST="${base_manifest}" _ci_identity_for "${t}" "${p}" "${base}")"
+            fi
+            if [ "${hid}" = "${bid}" ]; then
+                printf 'target=%s platform=%s impact=NOOP\n' "${t}" "${p}"
+                noop=$((noop+1))
+            else
+                printf 'target=%s platform=%s impact=BUILD\n' "${t}" "${p}"
+                build=$((build+1))
+            fi
+        done <<< "${plats}"
+    done <<< "$(ci_build_targets)"
+    printf 'impact result=classified build=%s noop=%s base=%s\n' "${build}" "${noop}" "${base}"
+}
+
+# What: Compare base vs head; clean up the temp SOT.
+# Why: base is required; fail-closed if base has no SOT.
+# From: Issue #1683
+ci_cmd_impact() {
+    local base="${1:-}" head="${2:-HEAD}" base_manifest rc=0
+    if [ -z "${base}" ]; then
+        ci_log "[CI-ERROR-IMPACT-0001]" "reason=\"base ref arg required\""
+        return 2
+    fi
+    base_manifest="$(mktemp)"
+    _ci_impact_run "${base}" "${head}" "${base_manifest}" || rc=$?
+    rm -f "${base_manifest}"
+    return "${rc}"
 }
 
 # =========================================================
@@ -1264,6 +1329,7 @@ ci_main() {
             ci_require_manifest || return "$?"
             case "${command}" in
                 plan) ci_cmd_plan "$@" ;;
+                impact) ci_cmd_impact "$@" ;;
                 identity) ci_cmd_identity "$@" ;;
                 resolve) ci_cmd_resolve "$@" ;;
                 build) ci_cmd_build "$@" ;;
