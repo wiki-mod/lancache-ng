@@ -348,9 +348,40 @@ ci_cmd_resolve() {
 # RETRY CLASSIFIER
 # ============================================================
 
+# What: Classify a failure as transient or permanent (§67).
+# Why: One rule replaces 5+ retry wrappers' own splits.
+# From: Issue #1683
+_ci_classify_failure() {
+    local raw="$1"
+    # Permanent: auth/malformed/real compile errors. Retrying
+    # these only burns the backoff budget on a fixed outcome.
+    case "${raw}" in
+        *"HTTP 401"*|*"unauthorized"*|*"denied: requested access"*) printf 'permanent\n'; return 0 ;;
+        *"HTTP 400"*|*"HTTP 422"*|*"invalid reference format"*) printf 'permanent\n'; return 0 ;;
+        *"pull access denied"*|*"manifest unknown"*|*"not found: manifest"*) printf 'permanent\n'; return 0 ;;
+        *"error: could not compile"*|*"Dockerfile parse error"*|*"failed to solve"*"parse"*) printf 'permanent\n'; return 0 ;;
+    esac
+    # Transient: rate-limit, 5xx, network, timeout. Retryable.
+    case "${raw}" in
+        *"HTTP 403"*|*"HTTP 429"*|*"toomanyrequests"*|*"rate limit"*) printf 'transient\n'; return 0 ;;
+        *"HTTP 5"[0-9][0-9]*|*"i/o timeout"*|*"connection refused"*|*"TLS handshake timeout"*) printf 'transient\n'; return 0 ;;
+        *"EOF"*|*"connection reset by peer"*|*"temporary failure"*) printf 'transient\n'; return 0 ;;
+    esac
+    # Unclassified: transient is the safe default -- a few
+    # extra retries beat giving up on a real transient error.
+    printf 'transient\n'
+}
+
 # ============================================================
 # CACHE CONFIGURATION
 # ============================================================
+
+# What: Print the reuse order, cheapest first (§7).
+# Why: Maximal caching never means build is preferred.
+# From: Issue #1683
+ci_reuse_order() {
+    printf 'noop accepted binary_cas build_cache compiler_cache compile\n'
+}
 
 # ============================================================
 # BUILD ENGINE

@@ -220,6 +220,42 @@ STUB
 # RETRY CLASSIFICATION
 # ============================================================
 
+@test "retry classifier: rate-limit / 5xx / network are transient" {
+    # What: These recover on retry with backoff.
+    # Why: One rule replaces every wrapper's own split.
+    # From: Issue #1683
+    [ "$(_ci_classify_failure 'toomanyrequests: HTTP 429')" = "transient" ]
+    [ "$(_ci_classify_failure 'received HTTP 503 from registry')" = "transient" ]
+    [ "$(_ci_classify_failure 'dial tcp: i/o timeout')" = "transient" ]
+    [ "$(_ci_classify_failure 'connection refused')" = "transient" ]
+}
+
+@test "retry classifier: auth / malformed / compile are permanent" {
+    # What: Retrying these only burns the budget.
+    # Why: A fixed outcome must fail fast, not loop.
+    # From: Issue #1683
+    [ "$(_ci_classify_failure 'HTTP 401 unauthorized')" = "permanent" ]
+    [ "$(_ci_classify_failure 'error: could not compile lancache-ui')" = "permanent" ]
+    [ "$(_ci_classify_failure 'pull access denied for ghcr.io/x')" = "permanent" ]
+    [ "$(_ci_classify_failure 'manifest unknown')" = "permanent" ]
+}
+
+@test "retry classifier: an unclassified failure defaults to transient" {
+    # What: Unknown error -> retry, not give up.
+    # Why: A missed transient is worse than a few retries.
+    # From: Issue #1683
+    [ "$(_ci_classify_failure 'some novel error text')" = "transient" ]
+}
+
+@test "reuse order is cheapest-first and ends in compile" {
+    # What: noop..accepted..CAS..caches..compile order.
+    # Why: NOOP/reuse always precede build (§7).
+    # From: Issue #1683
+    local order; order="$(ci_reuse_order)"
+    [ "${order%% *}" = "noop" ]
+    [ "${order##* }" = "compile" ]
+}
+
 # ============================================================
 # BUILD ADMISSION
 # ============================================================
