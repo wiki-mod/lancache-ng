@@ -1365,6 +1365,116 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     done <<< "${ids}"
 }
 
+@test "set-runtime rejects an invalid redis mode" {
+    # What: SCCACHE_REDIS_MODE is a closed enum.
+    # Why: An unknown mode is an error, not a guess.
+    # From: Issue #1683
+    CI_RUNTIME_SECRET_DIR="${BATS_TEST_TMPDIR}/rt" SCCACHE_REDIS_MODE=bogus \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" variables set-runtime
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VARIABLES-0010"* ]]
+}
+
+@test "set-runtime errors on scheduler without auth token" {
+    # What: dist scheduler and token are both-or-neither.
+    # Why: A half config would build misauthenticated.
+    # From: Issue #1683
+    CI_RUNTIME_SECRET_DIR="${BATS_TEST_TMPDIR}/rt" SCCACHE_REDIS_URL='redis://h' \
+    SCCACHE_DIST_SCHEDULER_URL='https://s' \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" variables set-runtime
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VARIABLES-0011"* ]]
+}
+
+@test "set-runtime errors when required redis url is missing" {
+    # What: mode=required needs SCCACHE_REDIS_URL.
+    # Why: A trusted Rust build must have the cache.
+    # From: Issue #1683
+    CI_RUNTIME_SECRET_DIR="${BATS_TEST_TMPDIR}/rt" SCCACHE_REDIS_MODE=required \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" variables set-runtime
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VARIABLES-0012"* ]]
+}
+
+@test "set-runtime optional mode skips redis when url is empty" {
+    # What: mode=optional tolerates a missing redis url.
+    # Why: The cache is an optimization, not required.
+    # From: Issue #1683
+    CI_RUNTIME_SECRET_DIR="${BATS_TEST_TMPDIR}/rt" SCCACHE_REDIS_MODE=optional \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" variables set-runtime
+    [ "${status}" -eq 0 ]
+    [[ "${output}" != *"sccache_redis_url"* ]]
+}
+
+@test "set-runtime off mode emits no acceleration secrets" {
+    # What: mode=off disables sccache and its redis.
+    # Why: A build without the cache must still work.
+    # From: Issue #1683
+    CI_RUNTIME_SECRET_DIR="${BATS_TEST_TMPDIR}/rt" SCCACHE_REDIS_MODE=off \
+    SCCACHE_REDIS_URL='redis://h' \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" variables set-runtime
+    [ "${status}" -eq 0 ]
+    [[ "${output}" != *"sccache_redis_url"* ]]
+    [[ "${output}" != *"sccache_dist_config"* ]]
+}
+
+@test "set-runtime rejects distcc hosts without a pump host" {
+    # What: DISTCC_POTENTIAL_HOSTS needs a ,cpp host.
+    # Why: Pump mode needs a cpp-capable host present.
+    # From: Issue #1683
+    CI_RUNTIME_SECRET_DIR="${BATS_TEST_TMPDIR}/rt" SCCACHE_REDIS_MODE=off \
+    DISTCC_POTENTIAL_HOSTS='h1 h2' \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" variables set-runtime
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VARIABLES-0013"* ]]
+}
+
+@test "set-runtime writes 0600 files and hides secret values" {
+    # What: Each secret is a 0600 file + a --secret arg.
+    # Why: AG-SEC-007: values never reach stdout or args.
+    # From: Issue #1683
+    local d="${BATS_TEST_TMPDIR}/rt"
+    CI_RUNTIME_SECRET_DIR="${d}" SCCACHE_REDIS_MODE=required \
+    SCCACHE_REDIS_URL='redis://h:6379' PROJECT_SELFHOSTED_PROXY_CA='CADATA' \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" variables set-runtime
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"--secret id=sccache_redis_url,src=${d}/sccache_redis_url"* ]]
+    [[ "${output}" == *"--secret id=ccache_redis_url,src=${d}/ccache_redis_url"* ]]
+    [[ "${output}" == *"--secret id=project_selfhosted_proxy_ca,src=${d}/project_selfhosted_proxy_ca"* ]]
+    [[ "${output}" != *"redis://h:6379"* ]]
+    [[ "${output}" != *"CADATA"* ]]
+    [ "$(stat -c '%a' "${d}/project_selfhosted_proxy_ca")" = "600" ]
+    [ "$(cat "${d}/sccache_redis_url")" = "redis://h:6379" ]
+}
+
+@test "set-runtime assembles the sccache dist config toml" {
+    # What: The dist config carries scheduler and token.
+    # Why: sccache dist needs both to reach the scheduler.
+    # From: Issue #1683
+    local d="${BATS_TEST_TMPDIR}/rt"
+    CI_RUNTIME_SECRET_DIR="${d}" SCCACHE_REDIS_MODE=required \
+    SCCACHE_REDIS_URL='redis://h' SCCACHE_DIST_SCHEDULER_URL='https://sched' \
+    SCCACHE_DIST_AUTH_TOKEN='tok123' \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" variables set-runtime
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"--secret id=sccache_dist_config,src=${d}/sccache_dist_config"* ]]
+    grep -q 'scheduler_url = "https://sched"' "${d}/sccache_dist_config"
+    grep -q 'token = "tok123"' "${d}/sccache_dist_config"
+    [ "$(stat -c '%a' "${d}/sccache_dist_config")" = "600" ]
+}
+
+@test "clear-runtime removes the runtime secret dir" {
+    # What: clear-runtime deletes every secret file.
+    # Why: Secrets must not linger after the build.
+    # From: Issue #1683
+    local d="${BATS_TEST_TMPDIR}/rt"
+    mkdir -p "${d}"; printf 'x' > "${d}/project_selfhosted_proxy_ca"
+    CI_RUNTIME_SECRET_DIR="${d}" run bash "${BATS_TEST_DIRNAME}/ci.sh" variables clear-runtime
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"result=cleared"* ]]
+    [ ! -e "${d}/project_selfhosted_proxy_ca" ]
+}
+
 # =========================================================
 # HISTORICAL REGRESSIONS
 # =========================================================

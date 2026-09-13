@@ -1376,6 +1376,114 @@ _ci_bake_check() {
     printf 'bake-check result=clean image=%s\n' "${image}"
 }
 
+# What: Path of the dir holding runtime secret files.
+# Why: set-runtime writes here; clear-runtime removes it.
+# From: Issue #1683
+_ci_runtime_secret_dir() {
+    printf '%s\n' "${CI_RUNTIME_SECRET_DIR:-${RUNNER_TEMP:-/tmp}/ci-runtime-secrets}"
+}
+
+# What: Escape a value for a double-quoted TOML string.
+# Why: Scheduler URL and token go into the dist config.
+# From: Issue #1683
+_ci_toml_escape() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+# What: Write a secret value to a 0600 file.
+# Why: Secrets go via file mounts, never env or args.
+# From: Issue #1683
+_ci_write_secret() {
+    local path="$1" val="$2"
+    ( umask 077; printf '%s' "${val}" > "${path}" )
+}
+
+# What: Assemble the sccache dist config TOML file.
+# Why: One place builds it; token stays out of logs.
+# From: Issue #1683
+_ci_write_dist_config() {
+    local path="$1"
+    ( umask 077
+      {
+        printf '[dist]\n'
+        printf 'scheduler_url = "%s"\n' "$(_ci_toml_escape "${SCCACHE_DIST_SCHEDULER_URL:-}")"
+        printf 'toolchains = []\n'
+        printf 'toolchain_cache_size = 5368709120\n'
+        printf '\n[dist.auth]\n'
+        printf 'type = "token"\n'
+        printf 'token = "%s"\n' "$(_ci_toml_escape "${SCCACHE_DIST_AUTH_TOKEN:-}")"
+      } > "${path}" )
+}
+
+# What: Prepare build-time secret files + --secret args.
+# Why: One place provides all build-only secrets, leak-safe.
+# From: Issue #1683
+_ci_set_runtime() {
+    local dir mode sccache_enabled=1 redis_enabled=1
+    dir="$(_ci_runtime_secret_dir)"
+    mode="${SCCACHE_REDIS_MODE:-required}"
+    case "${mode}" in
+        required|optional|off) : ;;
+        *)
+            ci_log "[CI-ERROR-VARIABLES-0010]" "mode=\"${mode}\" reason=\"SCCACHE_REDIS_MODE must be required|optional|off\""
+            return 2
+            ;;
+    esac
+    if [ "${mode}" = "off" ]; then sccache_enabled=0; redis_enabled=0; fi
+    if [ "${sccache_enabled}" = "1" ] && [ -n "${SCCACHE_DIST_SCHEDULER_URL:-}" ] && [ -z "${SCCACHE_DIST_AUTH_TOKEN:-}" ]; then
+        ci_log "[CI-ERROR-VARIABLES-0011]" "reason=\"scheduler set without auth token\""
+        return 2
+    fi
+    if [ "${sccache_enabled}" = "1" ] && [ -z "${SCCACHE_DIST_SCHEDULER_URL:-}" ] && [ -n "${SCCACHE_DIST_AUTH_TOKEN:-}" ]; then
+        ci_log "[CI-ERROR-VARIABLES-0011]" "reason=\"auth token set without scheduler\""
+        return 2
+    fi
+    if [ "${sccache_enabled}" = "1" ] && [ -z "${SCCACHE_REDIS_URL:-}" ]; then
+        if [ "${mode}" = "optional" ]; then
+            redis_enabled=0
+        else
+            ci_log "[CI-ERROR-VARIABLES-0012]" "reason=\"SCCACHE_REDIS_URL required when mode=required\""
+            return 2
+        fi
+    fi
+    ( umask 077; mkdir -p "${dir}" )
+    if [ "${redis_enabled}" = "1" ]; then
+        _ci_write_secret "${dir}/sccache_redis_url" "${SCCACHE_REDIS_URL:-}"
+        _ci_write_secret "${dir}/ccache_redis_url" "${SCCACHE_REDIS_URL:-}"
+        printf -- '--secret id=sccache_redis_url,src=%s\n' "${dir}/sccache_redis_url"
+        printf -- '--secret id=ccache_redis_url,src=%s\n' "${dir}/ccache_redis_url"
+    fi
+    if [ "${sccache_enabled}" = "1" ] && [ -n "${SCCACHE_DIST_SCHEDULER_URL:-}" ]; then
+        _ci_write_dist_config "${dir}/sccache_dist_config"
+        printf -- '--secret id=sccache_dist_config,src=%s\n' "${dir}/sccache_dist_config"
+    fi
+    if [ -n "${DISTCC_POTENTIAL_HOSTS:-}" ]; then
+        case "${DISTCC_POTENTIAL_HOSTS}" in
+            *,cpp*) : ;;
+            *)
+                ci_log "[CI-ERROR-VARIABLES-0013]" "reason=\"DISTCC_POTENTIAL_HOSTS needs a pump host (,cpp)\""
+                return 2
+                ;;
+        esac
+        _ci_write_secret "${dir}/distcc_potential_hosts" "${DISTCC_POTENTIAL_HOSTS:-}"
+        printf -- '--secret id=distcc_potential_hosts,src=%s\n' "${dir}/distcc_potential_hosts"
+    fi
+    if [ -n "${PROJECT_SELFHOSTED_PROXY_CA:-}" ]; then
+        _ci_write_secret "${dir}/project_selfhosted_proxy_ca" "${PROJECT_SELFHOSTED_PROXY_CA:-}"
+        printf -- '--secret id=project_selfhosted_proxy_ca,src=%s\n' "${dir}/project_selfhosted_proxy_ca"
+    fi
+}
+
+# What: Remove all runtime secret files after the build.
+# Why: Secrets must not linger on the runner.
+# From: Issue #1683
+_ci_clear_runtime() {
+    local dir
+    dir="$(_ci_runtime_secret_dir)"
+    rm -rf "${dir}"
+    printf 'clear-runtime result=cleared dir=%s\n' "${dir}"
+}
+
 # What: Print one CI variable value for callers.
 # Why: Workflows read values via ci.sh, no second source.
 # From: Issue #1683
@@ -1384,6 +1492,8 @@ ci_cmd_variables() {
     if [ "$#" -gt 0 ]; then shift; fi
     case "${sub}" in
         get) _ci_variable "${1:-}" ;;
+        set-runtime) _ci_set_runtime ;;
+        clear-runtime) _ci_clear_runtime ;;
         bake-check) _ci_bake_check "${1:-}" ;;
         *)
             ci_log "[CI-ERROR-VARIABLES-0002]" "sub=\"${sub}\" reason=\"unknown variables subcommand\""
