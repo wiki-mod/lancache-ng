@@ -337,14 +337,15 @@ setup() {
     [ "${b}" = "${c}" ]
 }
 
-@test "impact fails closed to BUILD when base has no SOT" {
-    # What: A base without the SOT marks all impacted.
-    # Why: No base truth must never resolve to NOOP.
+@test "impact fails closed to UNKNOWN (escalate) when base has no SOT" {
+    # What: A base without the SOT is UNKNOWN, not BUILD.
+    # Why: No base truth MUST NOT authorize BUILD; escalate.
     # From: Issue #1683
     run bash "${BATS_TEST_DIRNAME}/ci.sh" impact 4b825dc642cb6eb9a060e54bf8d69288fbee4904
-    [ "${status}" -eq 0 ]
+    [ "${status}" -eq 3 ]
     [[ "${output}" == *"no SOT at base"* ]]
-    [[ "${output}" == *"impact=BUILD"* ]]
+    [[ "${output}" == *"impact=UNKNOWN"* ]]
+    [[ "${output}" != *"impact=BUILD"* ]]
     [[ "${output}" != *"impact=NOOP"* ]]
 }
 
@@ -439,8 +440,8 @@ STUB
 }
 
 @test "resolve maps MISSING_CONFIRMED to build" {
-    # What: Only a confirmed-missing artifact builds.
-    # Why: Build is evidence-driven, not a cache miss.
+    # What: MISSING_CONFIRMED maps to the build action.
+    # Why: resolver action; full BUILD_ACK gate is in build.
     # From: Issue #1683
     STUB_STATE=MISSING_CONFIRMED
     CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${BATS_TEST_DIRNAME}/ci.sh" resolve ui
@@ -557,6 +558,7 @@ _stub() {
     # From: Issue #1683
     STUB_STATE=MISSING_CONFIRMED
     CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
+    CI_IMPACT_CMD="$(_stub impact 'echo BUILD')" \
     CI_CAS_LOOKUP_CMD="$(_stub cas 'exit 0')" \
         run bash "${BATS_TEST_DIRNAME}/ci.sh" build ui
     [ "${status}" -eq 0 ]
@@ -569,24 +571,116 @@ _stub() {
     # From: Issue #1683
     STUB_STATE=MISSING_CONFIRMED
     CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
+    CI_IMPACT_CMD="$(_stub impact 'echo BUILD')" \
     CI_CAS_LOOKUP_CMD="$(_stub cas 'exit 1')" \
         run bash "${BATS_TEST_DIRNAME}/ci.sh" build ui
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-BUILD-0002"* ]]
 }
 
-@test "build runs the backend when confirmed-missing, CAS-miss, authed" {
-    # What: The one real path: build + push, authed.
-    # Why: Only a confirmed-missing artifact compiles.
+@test "build runs the backend only with full admission (impact+missing+auth)" {
+    # What: The one build path: full BUILD_ACK conjunction.
+    # Why: impact & MISSING_CONFIRMED & identity.
     # From: Issue #1683
     STUB_STATE=MISSING_CONFIRMED
     CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
+    CI_IMPACT_CMD="$(_stub impact 'echo BUILD')" \
     CI_CAS_LOOKUP_CMD="$(_stub cas 'exit 1')" \
     CI_BUILD_CMD="$(_stub build 'exit 0')" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${BATS_TEST_DIRNAME}/ci.sh" build ui
     [ "${status}" -eq 0 ]
+    [[ "${output}" == *"state=BUILD_ACK"* ]]
     [[ "${output}" == *"result=built"* ]]
+}
+
+@test "resolve maps MISMATCH to fail, never build" {
+    # What: MISMATCH is a detected contradiction.
+    # Why: MISMATCH MUST fail, never build (Contract 77 K).
+    # From: Issue #1683
+    STUB_STATE=MISMATCH
+    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${BATS_TEST_DIRNAME}/ci.sh" resolve ui
+    [[ "${output}" == *"state=MISMATCH"* ]]
+    [[ "${output}" == *"action=fail"* ]]
+    [[ "${output}" != *"action=build"* ]]
+}
+
+@test "build fails on MISMATCH: no build, no replacement build" {
+    # What: MISMATCH never reaches the build backend.
+    # Why: replacement build = 0 (Contract 77 Test K).
+    # From: Issue #1683
+    STUB_STATE=MISMATCH
+    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
+    CI_IMPACT_CMD="$(_stub impact 'echo BUILD')" \
+    CI_CAS_LOOKUP_CMD="$(_stub cas 'exit 1')" \
+    CI_BUILD_CMD="$(_stub build 'echo BUILD_BACKEND_INVOKED')" \
+    GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" build ui
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"result=fail-mismatch"* ]]
+    [[ "${output}" == *"CI-ERROR-BUILD-0010"* ]]
+    [[ "${output}" != *"BUILD_BACKEND_INVOKED"* ]]
+    [[ "${output}" != *"result=built"* ]]
+}
+
+@test "resolve treats a failed probe backend as UNKNOWN, not its stdout" {
+    # What: A non-zero probe is UNKNOWN, not its state.
+    # Why: A failed probe MUST NOT build (AG-VAL-030).
+    # From: Issue #1683
+    CI_RESOLVE_PROBE_CMD="$(_stub probe 'echo MISSING_CONFIRMED; exit 7')" \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" resolve ui
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"state=UNKNOWN"* ]]
+    [[ "${output}" == *"action=escalate"* ]]
+    [[ "${output}" != *"action=build"* ]]
+}
+
+@test "build with a failed probe backend escalates and never builds" {
+    # What: probe rc!=0 -> UNKNOWN -> escalate, no backend.
+    # Why: the exact committed regression this fix closes.
+    # From: Issue #1683
+    CI_RESOLVE_PROBE_CMD="$(_stub probe 'echo MISSING_CONFIRMED; exit 7')" \
+    CI_IMPACT_CMD="$(_stub impact 'echo BUILD')" \
+    CI_CAS_LOOKUP_CMD="$(_stub cas 'exit 1')" \
+    CI_BUILD_CMD="$(_stub build 'echo BUILD_BACKEND_INVOKED')" \
+    GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" build ui
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"result=escalate"* ]]
+    [[ "${output}" != *"BUILD_BACKEND_INVOKED"* ]]
+    [[ "${output}" != *"result=built"* ]]
+}
+
+@test "build refuses MISSING_CONFIRMED without proven semantic impact" {
+    # What: confirmed-missing + impact=NOOP -> no build.
+    # Why: MISSING_CONFIRMED alone MUST NOT build.
+    # From: Issue #1683
+    STUB_STATE=MISSING_CONFIRMED
+    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
+    CI_IMPACT_CMD="$(_stub impact 'echo NOOP')" \
+    CI_CAS_LOOKUP_CMD="$(_stub cas 'exit 1')" \
+    CI_BUILD_CMD="$(_stub build 'echo BUILD_BACKEND_INVOKED')" \
+    GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" build ui
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"result=no-build-no-impact"* ]]
+    [[ "${output}" != *"BUILD_BACKEND_INVOKED"* ]]
+    [[ "${output}" != *"result=built"* ]]
+}
+
+@test "build fails closed when semantic impact is not wired (escalate)" {
+    # What: no impact backend -> UNKNOWN -> escalate.
+    # Why: unproven impact MUST NOT authorize build.
+    # From: Issue #1683
+    STUB_STATE=MISSING_CONFIRMED
+    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
+    CI_CAS_LOOKUP_CMD="$(_stub cas 'exit 1')" \
+    CI_BUILD_CMD="$(_stub build 'echo BUILD_BACKEND_INVOKED')" \
+    GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" build ui
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"result=escalate"* ]]
+    [[ "${output}" != *"BUILD_BACKEND_INVOKED"* ]]
 }
 
 # =========================================================

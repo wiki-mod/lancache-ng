@@ -472,22 +472,26 @@ _ci_manifest_at() {
 # From: Issue #1683
 _ci_impact_run() {
     local base="$1" head="$2" base_manifest="$3"
-    local base_missing=0 t p plats hid bid build=0 noop=0
+    local base_missing=0 t p plats hid bid build=0 noop=0 unknown=0
     if ! _ci_manifest_at "${base}" "${base_manifest}" || [ ! -s "${base_manifest}" ]; then
         base_missing=1
-        ci_log "[CI-INFO-IMPACT-0002]" "base=\"${base}\" reason=\"no SOT at base; all targets impacted\""
+        ci_log "[CI-INFO-IMPACT-0002]" "base=\"${base}\" reason=\"no SOT at base; UNKNOWN, escalate, BUILD DISACK\""
     fi
     while IFS= read -r t; do
         [ -n "${t}" ] || continue
         plats="$(_ci_platforms "${t}")" || return "$?"
         while IFS= read -r p; do
             [ -n "${p}" ] || continue
-            hid="$(_ci_identity_for "${t}" "${p}" "${head}")"
             if [ "${base_missing}" -eq 1 ]; then
-                bid="__no_base__"
-            else
-                bid="$(CI_MANIFEST="${base_manifest}" _ci_identity_for "${t}" "${p}" "${base}")"
+                # What: no base SOT -> UNKNOWN, escalate.
+                # Why: no base truth -> no BUILD.
+                # From: Issue #1683
+                printf 'target=%s platform=%s impact=UNKNOWN\n' "${t}" "${p}"
+                unknown=$((unknown+1))
+                continue
             fi
+            hid="$(_ci_identity_for "${t}" "${p}" "${head}")"
+            bid="$(CI_MANIFEST="${base_manifest}" _ci_identity_for "${t}" "${p}" "${base}")"
             if [ "${hid}" = "${bid}" ]; then
                 printf 'target=%s platform=%s impact=NOOP\n' "${t}" "${p}"
                 noop=$((noop+1))
@@ -497,7 +501,12 @@ _ci_impact_run() {
             fi
         done <<< "${plats}"
     done <<< "$(ci_build_targets)"
-    printf 'impact result=classified build=%s noop=%s base=%s\n' "${build}" "${noop}" "${base}"
+    printf 'impact result=classified build=%s noop=%s unknown=%s base=%s\n' "${build}" "${noop}" "${unknown}" "${base}"
+    # What: base-missing escalates; UNKNOWN never builds.
+    # Why: base-SOT-unavailable stays DISACK, escalates.
+    # From: Issue #1683
+    [ "${base_missing}" -eq 1 ] && return 3
+    return 0
 }
 
 # What: Compare base vs head; clean up the temp SOT.
@@ -519,13 +528,23 @@ ci_cmd_impact() {
 # ARTIFACT RESOLVER
 # =========================================================
 
-# What: Probe the acceptance/registry state for an identity.
-# Why: Injectable so logic tests need no live GHCR.
+# What: Probe the acceptance/registry state, fail-closed.
+# Why: A failed probe is UNKNOWN, never a trusted state.
 # From: Issue #1683
 _ci_resolve_probe() {
     local service="$1" identity="$2"
     if [ -n "${CI_RESOLVE_PROBE_CMD:-}" ]; then
-        "${CI_RESOLVE_PROBE_CMD}" "${service}" "${identity}"
+        # What: Capture probe output; keep its exit code.
+        # Why: errexit must not skip rc check (AG-VAL-030).
+        # From: Issue #1683
+        local out rc=0
+        out="$("${CI_RESOLVE_PROBE_CMD}" "${service}" "${identity}")" || rc=$?
+        if [ "${rc}" -ne 0 ]; then
+            ci_log "[CI-INFO-RESOLVE-0005]" "service=\"${service}\" reason=\"probe backend failed; treating as UNKNOWN\" rc=${rc}"
+            printf 'UNKNOWN\n'
+            return 0
+        fi
+        printf '%s\n' "${out}"
         return 0
     fi
     # What: no probe wired -> report UNKNOWN.
@@ -534,13 +553,13 @@ _ci_resolve_probe() {
 }
 
 # What: Map a resolver state to its one action.
-# Why: DEFAULT=NOOP; UNKNOWN escalates, never builds.
+# Why: MISMATCH fails; UNKNOWN escalates; neither builds.
 # From: Issue #1683
 _ci_resolve_action() {
     case "$1" in
         PRESENT_ACCEPTED)   printf 'noop\n' ;;
         MISSING_CONFIRMED)  printf 'build\n' ;;
-        MISMATCH)           printf 'build\n' ;;
+        MISMATCH)           printf 'fail\n' ;;
         PRODUCED_UNVERIFIED) printf 'verify\n' ;;
         BUILD_IN_PROGRESS)  printf 'wait\n' ;;
         *)                  printf 'escalate\n' ;;
@@ -674,21 +693,62 @@ _ci_do_build() {
     return 2
 }
 
+# What: Read the semantic build-impact verdict, fail-closed.
+# Why: BUILD needs proven impact; unset/failed -> UNKNOWN.
+# From: Issue #1683
+_ci_semantic_impact() {
+    local service="$1" platform="$2" identity="$3"
+    if [ -n "${CI_IMPACT_CMD:-}" ]; then
+        # What: Capture impact output; keep its exit code.
+        # Why: errexit must not skip rc check (AG-VAL-030).
+        # From: Issue #1683
+        local out rc=0
+        out="$("${CI_IMPACT_CMD}" "${service}" "${platform}" "${identity}")" || rc=$?
+        if [ "${rc}" -ne 0 ]; then printf 'UNKNOWN\n'; return 0; fi
+        case "${out}" in
+            BUILD|NOOP|UNKNOWN) printf '%s\n' "${out}" ;;
+            *) printf 'UNKNOWN\n' ;;
+        esac
+        return 0
+    fi
+    printf 'UNKNOWN\n'
+}
+
+# What: Emit BUILD_ACK only for the full admission set.
+# Why: impact+MISSING_CONFIRMED+identity, bound to identity.
+# From: Issue #1683
+_ci_build_ack() {
+    local service="$1" platform="$2" identity="$3" state="$4" impact="$5"
+    [ "${impact}" = "BUILD" ] || return 1
+    [ "${state}" = "MISSING_CONFIRMED" ] || return 1
+    [ -n "${identity}" ] || return 1
+    printf 'state=BUILD_ACK service=%s platform=%s identity=%s reason="impact=BUILD & MISSING_CONFIRMED & identity-known"\n' "${service}" "${platform}" "${identity}"
+}
+
 # What: Build one target+platform, honoring resolve + reuse.
 # Why: NOOP/reuse/CAS precede compile; UNKNOWN never builds.
 # From: Issue #1683
 _ci_build_one() {
     local service="$1" platform="$2"
-    local resolved action identity build_type
+    local resolved action identity state build_type impact ack
     resolved="$(_ci_resolve_one "${service}" "${platform}")" || return "$?"
     action="${resolved#*action=}"; action="${action%% *}"
     identity="${resolved#*identity=}"; identity="${identity%% *}"
+    state="${resolved#*state=}"; state="${state%% *}"
     build_type="$(ci_service_field "${service}" build_type)"
 
     case "${action}" in
         noop)
             printf 'service=%s platform=%s result=reuse-accepted identity=%s\n' "${service}" "${platform}" "${identity}"
             return 0
+            ;;
+        fail)
+            # What: MISMATCH is a detected contradiction.
+            # Why: FAIL, no build, no replacement build.
+            # From: Issue #1683
+            ci_error "[CI-ERROR-BUILD-0010]" "service=\"${service}\" platform=\"${platform}\" state=\"${state}\" reason=\"MISMATCH: FAIL, no build, no replacement build\"" "${resolved}"
+            printf 'service=%s platform=%s result=fail-mismatch identity=%s\n' "${service}" "${platform}" "${identity}"
+            return 2
             ;;
         escalate|wait|verify)
             ci_log "[CI-INFO-BUILD-0004]" "service=\"${service}\" platform=\"${platform}\" action=\"${action}\" note=\"not building; resolve action is not build\""
@@ -702,8 +762,36 @@ _ci_build_one() {
             ;;
     esac
 
+    # What: Prove semantic build impact before admission.
+    # Why: MISSING_CONFIRMED alone MUST NOT build.
+    # From: Issue #1683
+    impact="$(_ci_semantic_impact "${service}" "${platform}" "${identity}")"
+    case "${impact}" in
+        NOOP)
+            ci_log "[CI-INFO-BUILD-0007]" "service=\"${service}\" platform=\"${platform}\" note=\"no semantic impact; not building despite MISSING_CONFIRMED\""
+            printf 'service=%s platform=%s result=no-build-no-impact identity=%s\n' "${service}" "${platform}" "${identity}"
+            return 0
+            ;;
+        BUILD) ;;
+        *)
+            ci_log "[CI-INFO-BUILD-0008]" "service=\"${service}\" platform=\"${platform}\" note=\"semantic impact UNKNOWN; escalate, no build\""
+            printf 'service=%s platform=%s result=escalate identity=%s\n' "${service}" "${platform}" "${identity}"
+            return 2
+            ;;
+    esac
+
+    # What: Derive BUILD_ACK bound to the exact identity.
+    # Why: Positive admission MUST precede any build.
+    # From: Issue #1683
+    ack="$(_ci_build_ack "${service}" "${platform}" "${identity}" "${state}" "${impact}")" || {
+        ci_log "[CI-ERROR-BUILD-0009]" "service=\"${service}\" platform=\"${platform}\" reason=\"admission conjunction incomplete; no BUILD_ACK\""
+        return 2
+    }
+    printf '%s\n' "${ack}"
+
     # What: reuse a CAS binary before compiling.
     # Why: an identical binary need not rebuild.
+    # From: Issue #1683
     if [ "${build_type}" = "rust" ] && _ci_cas_lookup "${identity}" >/dev/null 2>&1; then
         printf 'service=%s platform=%s result=reuse-binary-cas identity=%s\n' "${service}" "${platform}" "${identity}"
         return 0
