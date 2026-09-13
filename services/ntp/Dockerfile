@@ -64,10 +64,10 @@ ARG APT_CACHE_BUST=""
 # What: trusts the proxy's CA for this RUN, never in a layer.
 # Why: a secret mount never persists; bundle restored below.
 # From: Issue #1781 | PR #1783
-RUN --mount=type=secret,id=proxy_ca \
-    if [ -s /run/secrets/proxy_ca ]; then \
+RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
       cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig && \
-      cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+      cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
     fi && \
     : "apt-cache-bust=${APT_CACHE_BUST}" && \
     apk upgrade --no-cache && \
@@ -77,7 +77,7 @@ RUN --mount=type=secret,id=proxy_ca \
     chrony-nts \
     curl \
     gettext-envsubst && \
-    if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
 # What: verifies apk-installed binaries execute, not just exist.
 # Why: missing library dependencies fail at runtime, not apk add.
