@@ -1253,6 +1253,95 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     [[ "${output}" == *"CI-ERROR-VARIABLES-0002"* ]]
 }
 
+@test "bake-check fails closed without an image ref" {
+    # What: bake-check needs an explicit image ref.
+    # Why: No target means no proof; never pass blind.
+    # From: Issue #1683
+    GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" variables bake-check
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VARIABLES-0008"* ]]
+}
+
+@test "bake-check fails closed without GHCR auth" {
+    # What: Image inspect must be authenticated.
+    # Why: GHCR is never accessed anonymously.
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" variables bake-check img@sha256:d
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-BUILD-0002"* ]]
+}
+
+@test "bake-check fails closed with no inspect backend" {
+    # What: No inspect backend is a hard failure.
+    # Why: Unverifiable is not clean (AG-VAL-002).
+    # From: Issue #1683
+    GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" variables bake-check img@sha256:d
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VARIABLES-0004"* ]]
+}
+
+@test "bake-check passes on a clean image" {
+    # What: No forbidden var and no extra CA is clean.
+    # Why: A clean image must not be blocked.
+    # From: Issue #1683
+    CI_BAKE_INSPECT_CMD="$(_stub insp 'echo "env PATH=/usr/bin"; echo "env LANG=C"; echo "extra_ca 0"')" \
+    GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" variables bake-check img@sha256:d
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"result=clean"* ]]
+}
+
+@test "bake-check fails on a baked proxy and hides the value" {
+    # What: A baked HTTP_PROXY fails; log the key only.
+    # Why: AG-SEC-007: never emit the secret value.
+    # From: Issue #1683
+    CI_BAKE_INSPECT_CMD="$(_stub insp 'echo "env HTTP_PROXY=http://10.0.0.9:3128"; echo "extra_ca 0"')" \
+    GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" variables bake-check img@sha256:d
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VARIABLES-0006"* ]]
+    [[ "${output}" == *'key="HTTP_PROXY"'* ]]
+    [[ "${output}" != *"10.0.0.9"* ]]
+}
+
+@test "bake-check fails on a baked accel var by prefix" {
+    # What: An SCCACHE_/CCACHE_/DISTCC_ var is forbidden.
+    # Why: Accel endpoints are LAN-only, must not bake.
+    # From: Issue #1683
+    CI_BAKE_INSPECT_CMD="$(_stub insp 'echo "env SCCACHE_REDIS=redis://h:6379"; echo "extra_ca 0"')" \
+    GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" variables bake-check img@sha256:d
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VARIABLES-0006"* ]]
+    [[ "${output}" == *'key="SCCACHE_REDIS"'* ]]
+}
+
+@test "bake-check fails on a baked CA and shows only a count" {
+    # What: An extra CA in the store fails the guard.
+    # Why: Log the count, never the certificate bytes.
+    # From: Issue #1683
+    CI_BAKE_INSPECT_CMD="$(_stub insp 'echo "env PATH=/usr/bin"; echo "extra_ca 1"')" \
+    GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" variables bake-check img@sha256:d
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VARIABLES-0007"* ]]
+    [[ "${output}" == *'extra_ca="1"'* ]]
+    [[ "${output}" != *"BEGIN CERTIFICATE"* ]]
+}
+
+@test "bake-check fails closed on an unknown inspect line" {
+    # What: An unrecognized inspect line is not ignored.
+    # Why: Silent skip could hide a real leak (fail-closed).
+    # From: Issue #1683
+    CI_BAKE_INSPECT_CMD="$(_stub insp 'echo "env PATH=/usr/bin"; echo "mystery 1"; echo "extra_ca 0"')" \
+    GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" variables bake-check img@sha256:d
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VARIABLES-0009"* ]]
+}
+
 # =========================================================
 # HISTORICAL REGRESSIONS
 # =========================================================
