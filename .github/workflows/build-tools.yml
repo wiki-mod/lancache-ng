@@ -1,7 +1,6 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-#
 # What: builds, scans, and publishes multi-arch build-tools image.
 # Why: fork PRs: parallel arch builds; same-repo: build-push.yml
 # From: PR #1523
@@ -48,6 +47,7 @@ jobs:
       contents: read
     outputs:
       should-publish: ${{ steps.should-publish.outputs.should-publish }}
+      build-args-bare: ${{ steps.sot-build-args.outputs.bare }}
     steps:
       - name: Confirm standalone route
         run: |
@@ -56,6 +56,19 @@ jobs:
 
       - name: Checkout
         uses: &checkout_centraliced_versioning actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # What: resolve build-tools build-args from the SOT.
+      # Why: one owner feeds both build jobs; no re-pin.
+      # From: Issue #1683
+      - name: Resolve build-tools build-args from the version SOT
+        id: sot-build-args
+        run: |
+          set -euo pipefail
+          {
+            echo 'bare<<SOT_ARGS_EOF'
+            bash .github/scripts/ci.sh build-args build-tools --bare
+            echo 'SOT_ARGS_EOF'
+          } >> "$GITHUB_OUTPUT"
 
       # What: compute should-publish once for both architecture jobs.
       # Why: skip rebuild on unchanged inputs; manual triggers override.
@@ -224,7 +237,10 @@ jobs:
         if: github.event_name == 'pull_request'
         timeout-minutes: 60
         env:
-          APT_CACHE_BUST: ${{ vars.APT_CACHE_BUST }}
+          # What: SOT-resolved build-args, one per line.
+          # Why: single version owner feeds the scan build.
+          # From: Issue #1683
+          SOT_BARE_ARGS: ${{ needs['determine-publish-scope'].outputs['build-args-bare'] }}
           # What: LAN proxy vars; self-hosted runner has a route.
           # Why: https trusted via the Squid re-signing CA secret.
           # From: Issue #1095
@@ -245,6 +261,14 @@ jobs:
           if [ -n "$LAN_PROXY_CA_FILE" ]; then
             secret_args+=(--secret "id=project_selfhosted_proxy_ca,src=$LAN_PROXY_CA_FILE")
           fi
+          # What: turn SOT bare args into --build-arg flags.
+          # Why: the version SOT owns every value here.
+          # From: Issue #1683
+          sot_args=()
+          while IFS= read -r sot_line; do
+            [ -n "$sot_line" ] || continue
+            sot_args+=(--build-arg "$sot_line")
+          done <<< "$SOT_BARE_ARGS"
           build_retry -- docker buildx build \
             --builder "$BUILDX_BUILDER" \
             --load \
@@ -252,16 +276,13 @@ jobs:
             --tag "$BUILD_TOOLS_SCAN_IMAGE_AMD64" \
             --platform linux/amd64 \
             --provenance=false \
-            --build-arg "APT_CACHE_BUST=$APT_CACHE_BUST" \
+            "${sot_args[@]}" \
             --build-arg "HTTP_PROXY=$HTTP_PROXY" \
             --build-arg "HTTPS_PROXY=$HTTPS_PROXY" \
             --build-arg "NO_PROXY=$NO_PROXY" \
             --build-arg "http_proxy=$HTTP_PROXY" \
             --build-arg "https_proxy=$HTTPS_PROXY" \
             --build-arg "no_proxy=$NO_PROXY" \
-            --build-arg "PROJECT_SELFHOSTED_GOMODCACHE=${{ vars.PROJECT_SELFHOSTED_GOMODCACHE }}" \
-            --build-arg "PROJECT_SELFHOSTED_GOCACHE=${{ vars.PROJECT_SELFHOSTED_GOCACHE }}" \
-            --build-arg "PROJECT_SELFHOSTED_GOPROXY=${{ vars.PROJECT_SELFHOSTED_GOPROXY }}" \
             "${secret_args[@]}" \
             --cache-from "type=local,src=$BUILDX_CACHE_FROM_DIR" \
             --cache-to "type=local,dest=$BUILDX_CACHE_TO_DIR,mode=max" \
@@ -289,17 +310,14 @@ jobs:
           # Why: Squid re-signs https; the CA makes it verifiable.
           # From: Issue #1095
           build-args: |
-            APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
+            ${{ needs['determine-publish-scope'].outputs['build-args-bare'] }}
             HTTP_PROXY=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
             HTTPS_PROXY=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
             NO_PROXY=${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
             http_proxy=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
             https_proxy=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
             no_proxy=${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
-            PROJECT_SELFHOSTED_GOMODCACHE=${{ vars.PROJECT_SELFHOSTED_GOMODCACHE }}
-            PROJECT_SELFHOSTED_GOCACHE=${{ vars.PROJECT_SELFHOSTED_GOCACHE }}
-            PROJECT_SELFHOSTED_GOPROXY=${{ vars.PROJECT_SELFHOSTED_GOPROXY }}
-          # What: supplies the CA the Dockerfile's install-ca-cert.sh needs.
+          # What: supplies the CA the proxy CA secret needs.
           # Why: no distcc/ccache secret is prepared on this branch.
           # From: Issue #1095
           secret-files: |
@@ -345,13 +363,9 @@ jobs:
         with:
           cache-dir: ${{ steps.trivy-cache.outputs.dir }}
 
-      # What: scan via trivy-scan-retry for retry/GHCR-mirror/auth.
-      # Why: earlier step hit DB-download failure with no retry.
-      # From: Issue #1535 | PR #1542
-      #
-      # What: continue-on-error; finding reported by step below.
-      # Why: PR-context only; release/push scans fail hard (maintainer).
-      # From: Issue #1095
+      # What: retry-wrapped Trivy scan, non-blocking on PRs.
+      # Why: DB-download needs retry; push scans fail hard.
+      # From: Issue #1535 | Issue #1095
       - name: Scan local build-tools amd64 image with Trivy
         id: trivy-scan
         if: github.event_name == 'pull_request'
@@ -585,7 +599,7 @@ jobs:
           # Why: no route to the self-hosted-only proxy; static split.
           # From: Issue #1095
           build-args: |
-            APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
+            ${{ needs['determine-publish-scope'].outputs['build-args-bare'] }}
           provenance: false
           cache-from: type=gha,scope=build-tools-arm64
           cache-to: type=gha,scope=build-tools-arm64,mode=max
@@ -609,7 +623,7 @@ jobs:
           # Why: no route to the self-hosted-only proxy; static split.
           # From: Issue #1095
           build-args: |
-            APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
+            ${{ needs['determine-publish-scope'].outputs['build-args-bare'] }}
           outputs: type=image,oci-mediatypes=true
           platforms: linux/arm64
           provenance: false
@@ -631,13 +645,9 @@ jobs:
           image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
           platform: linux/arm64
 
-      # What: scan via trivy-scan-retry for retry/GHCR-mirror/auth.
-      # Why: same DB-download exposure as amd64 leg (identical step).
-      # From: Issue #1535
-      #
-      # What: continue-on-error; same non-blocking as amd64 leg.
-      # Why: PR-context only; see amd64 leg for full rationale.
-      # From: Issue #1095
+      # What: retry-wrapped Trivy scan, non-blocking on PRs.
+      # Why: same DB-download + non-blocking as amd64 leg.
+      # From: Issue #1535 | Issue #1095
       - name: Scan local build-tools arm64 image with Trivy
         id: trivy-scan
         if: github.event_name == 'pull_request'
