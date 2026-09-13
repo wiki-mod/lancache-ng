@@ -1299,6 +1299,73 @@ _ci_variable() {
     return 2
 }
 
+# What: Forbidden env-key prefixes for the bake guard.
+# Why: One source the guard and set-runtime both use.
+# From: Issue #1683
+_ci_bake_env_patterns() {
+    printf '%s\n' \
+        HTTP_PROXY HTTPS_PROXY http_proxy https_proxy \
+        GOPROXY SCCACHE_ CCACHE_ DISTCC_
+}
+
+# What: Fail if a build-only secret/var is baked in.
+# Why: A baked CA/proxy/accel var leaks and breaks runtime.
+# From: Issue #1683
+_ci_bake_check() {
+    local image="$1" raw status line kind rest key patt bad=0
+    if [ -z "${image}" ]; then
+        ci_log "[CI-ERROR-VARIABLES-0008]" "reason=\"no image ref given\""
+        return 2
+    fi
+    _ci_require_ghcr_auth || return 2
+    if [ -z "${CI_BAKE_INSPECT_CMD:-}" ]; then
+        ci_log "[CI-ERROR-VARIABLES-0004]" "reason=\"no image-inspect backend (CI_BAKE_INSPECT_CMD unset)\""
+        return 2
+    fi
+    if raw="$("${CI_BAKE_INSPECT_CMD}" "${image}")"; then status=0; else status=$?; fi
+    if [ "${status}" -ne 0 ]; then
+        ci_error "[CI-ERROR-VARIABLES-0005]" "image=\"${image}\" reason=\"image inspect failed\"" "${raw}"
+        return 2
+    fi
+    while IFS= read -r line; do
+        [ -n "${line}" ] || continue
+        kind="${line%% *}"
+        rest="${line#* }"
+        case "${kind}" in
+            env)
+                key="${rest%%=*}"
+                while IFS= read -r patt; do
+                    case "${key}" in
+                        "${patt}"*)
+                            ci_log "[CI-ERROR-VARIABLES-0006]" "image=\"${image}\" key=\"${key}\" reason=\"build-only var baked into image\""
+                            bad=1
+                            ;;
+                    esac
+                done <<< "$(_ci_bake_env_patterns)"
+                ;;
+            extra_ca)
+                case "${rest}" in
+                    0) : ;;
+                    ''|*[!0-9]*)
+                        ci_log "[CI-ERROR-VARIABLES-0007]" "image=\"${image}\" reason=\"malformed extra_ca from inspect\""
+                        bad=1
+                        ;;
+                    *)
+                        ci_log "[CI-ERROR-VARIABLES-0007]" "image=\"${image}\" extra_ca=\"${rest}\" reason=\"proxy CA baked into cert store\""
+                        bad=1
+                        ;;
+                esac
+                ;;
+            *)
+                ci_log "[CI-ERROR-VARIABLES-0009]" "image=\"${image}\" kind=\"${kind}\" reason=\"unrecognized inspect line; fail closed\""
+                bad=1
+                ;;
+        esac
+    done <<< "${raw}"
+    if [ "${bad}" -ne 0 ]; then return 2; fi
+    printf 'bake-check result=clean image=%s\n' "${image}"
+}
+
 # What: Print one CI variable value for callers.
 # Why: Workflows read values via ci.sh, no second source.
 # From: Issue #1683
@@ -1307,6 +1374,7 @@ ci_cmd_variables() {
     if [ "$#" -gt 0 ]; then shift; fi
     case "${sub}" in
         get) _ci_variable "${1:-}" ;;
+        bake-check) _ci_bake_check "${1:-}" ;;
         *)
             ci_log "[CI-ERROR-VARIABLES-0002]" "sub=\"${sub}\" reason=\"unknown variables subcommand\""
             return 2
