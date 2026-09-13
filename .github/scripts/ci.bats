@@ -1342,6 +1342,29 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     [[ "${output}" == *"CI-ERROR-VARIABLES-0009"* ]]
 }
 
+@test "no Dockerfile mounts the legacy proxy_ca secret id" {
+    # What: Every CA mount uses the canonical secret id.
+    # Why: A stray proxy_ca = a silently CA-less build.
+    # From: Issue #1683
+    local root="${BATS_TEST_DIRNAME}/../.."
+    run git -C "${root}" grep -nE '(^|[^_])proxy_ca([^a-z_]|$)' -- services tools
+    [ "${status}" -ne 0 ]
+}
+
+@test "every Dockerfile secret mount id is in the central list" {
+    # What: Mounted secret ids come from the one list.
+    # Why: No drift; one source drives provisioning.
+    # From: Issue #1683
+    local root="${BATS_TEST_DIRNAME}/../.." allow ids id
+    allow="$(_ci_runtime_secret_ids)"
+    ids="$(git -C "${root}" grep -hoE 'mount=type=secret,id=[a-z0-9_]+' -- services tools | sed 's/.*id=//' | sort -u)"
+    [ -n "${ids}" ]
+    while IFS= read -r id; do
+        [ -n "${id}" ] || continue
+        printf '%s\n' "${allow}" | grep -qx "${id}"
+    done <<< "${ids}"
+}
+
 # =========================================================
 # HISTORICAL REGRESSIONS
 # =========================================================

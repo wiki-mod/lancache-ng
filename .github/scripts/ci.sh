@@ -1299,6 +1299,16 @@ _ci_variable() {
     return 2
 }
 
+# What: The build-time secret mount ids (one source).
+# Why: set-runtime, mounts and the guard share one list.
+# From: Issue #1683
+_ci_runtime_secret_ids() {
+    printf '%s\n' \
+        project_selfhosted_proxy_ca \
+        sccache_redis_url ccache_redis_url \
+        sccache_dist_config distcc_potential_hosts
+}
+
 # What: Forbidden env-key prefixes for the bake guard.
 # Why: One source the guard and set-runtime both use.
 # From: Issue #1683
