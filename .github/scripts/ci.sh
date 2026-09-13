@@ -1623,7 +1623,8 @@ ci_cmd_variables() {
 # Why: SOT is sole owner; empty value fails closed.
 # From: Issue #1683
 _ci_build_tools_build_args() {
-    local out="" argname key val
+    local fmt="${1:-}" prefix="--build-arg " out="" argname key val
+    [ "${fmt}" = "--bare" ] && prefix=""
     # What: external_versions.<key>.version -> *_VERSION.
     # Why: apk takes the central version, not its own.
     # From: Issue #1683
@@ -1634,7 +1635,7 @@ _ci_build_tools_build_args() {
             ci_log "[CI-ERROR-BUILDARGS-0002]" "arg=\"${argname}\" key=\"external_versions.${key}.version\" reason=\"missing central version; FAIL CLOSED\""
             return 2
         fi
-        out="${out}--build-arg ${argname}=${val}"$'\n'
+        out="${out}${prefix}${argname}=${val}"$'\n'
     done <<'PAIRS'
 DOCKER_CLI_VERSION:docker_cli
 DOCKER_COMPOSE_VERSION:docker_compose
@@ -1655,7 +1656,7 @@ PAIRS
         ci_log "[CI-ERROR-BUILDARGS-0003]" "arg=\"RUST_ALPINE_IMAGE\" key=\"base_images.rust_alpine\" reason=\"missing central base image; FAIL CLOSED\""
         return 2
     fi
-    out="${out}--build-arg RUST_ALPINE_IMAGE=${val}"$'\n'
+    out="${out}${prefix}RUST_ALPINE_IMAGE=${val}"$'\n'
     # What: external_versions.dhclient.* -> DHCLIENT_*.
     # Why: The reused v3.20 apk pins version+digests.
     # From: Issue #1683
@@ -1666,7 +1667,7 @@ PAIRS
             ci_log "[CI-ERROR-BUILDARGS-0004]" "arg=\"${argname}\" key=\"external_versions.dhclient.${key}\" reason=\"missing central dhclient value; FAIL CLOSED\""
             return 2
         fi
-        out="${out}--build-arg ${argname}=${val}"$'\n'
+        out="${out}${prefix}${argname}=${val}"$'\n'
     done <<'DHPAIRS'
 DHCLIENT_VERSION:version
 DHCLIENT_ALPINE_BRANCH:alpine_branch
@@ -1680,10 +1681,14 @@ DHPAIRS
 # Why: One version owner; the Dockerfile pins nothing.
 # From: Issue #1683
 ci_cmd_build_args() {
-    local service="${1:-}"
+    local service="${1:-}" fmt="${2:-}"
     [ -n "${service}" ] || { ci_log "[CI-ERROR-BUILDARGS-0001]" "reason=\"service arg required\""; return 2; }
+    case "${fmt}" in
+        ""|--bare) : ;;
+        *) ci_log "[CI-ERROR-BUILDARGS-0005]" "fmt=\"${fmt}\" reason=\"format must be empty or --bare\""; return 2 ;;
+    esac
     case "${service}" in
-        build-tools) _ci_build_tools_build_args ;;
+        build-tools) _ci_build_tools_build_args "${fmt}" ;;
         # What: Non-toolchain targets carry no SOT arg.
         # Why: Only build-tools pins central versions now.
         # From: Issue #1683

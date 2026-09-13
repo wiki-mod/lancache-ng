@@ -1691,6 +1691,26 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     [[ "${output}" == *"CI-ERROR-BUILDARGS-0003"* ]]
 }
 
+@test "build-args --bare emits NAME=VALUE without the flag prefix" {
+    # What: bare form feeds docker/build-push-action.
+    # Why: that action wants NAME=VALUE, not --build-arg.
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" build-args build-tools --bare
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"DOCKER_CLI_VERSION="* ]]
+    [[ "${output}" == *"RUST_ALPINE_IMAGE=rust:alpine"* ]]
+    [[ "${output}" != *"--build-arg"* ]]
+}
+
+@test "build-args rejects an unknown format (fail closed)" {
+    # What: only empty or --bare are valid formats.
+    # Why: an unknown flag must not emit a silent default.
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" build-args build-tools --bogus
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-BUILDARGS-0005"* ]]
+}
+
 @test "build-args needs a service argument (fail closed)" {
     # What: No service arg must not emit a silent success.
     # Why: Fail-closed dispatch (AG-VAL-002).
