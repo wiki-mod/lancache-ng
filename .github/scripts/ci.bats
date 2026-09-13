@@ -917,6 +917,76 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
 }
 
 # =========================================================
+# RELEASE
+# =========================================================
+
+@test "release fails closed without a validation backend" {
+    # What: No freshness verdict must stop the release.
+    # Why: Unverified validation is not releasable.
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" release
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-RELEASE-0001"* ]]
+}
+
+@test "release fails closed when validation is not fresh" {
+    # What: A stale/failed verdict blocks the release.
+    # Why: AG-REL-011 requires still-valid validation.
+    # From: Issue #1683
+    CI_RELEASE_VALIDATION_CMD="$(_stub val 'exit 1')" \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" release
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-RELEASE-0001"* ]]
+}
+
+@test "release verifies freshness then promotes latest" {
+    # What: Fresh verdict promotes the exact candidate.
+    # Why: latest promote is the release success path.
+    # From: Issue #1683
+    local dig="sha256:$(printf 'a%.0s' {1..64})"
+    CI_RELEASE_VALIDATION_CMD="$(_stub val 'exit 0')" \
+    CI_STACK_CANDIDATE_CMD="$(_promote_full_candidate "${dig}")" CI_STACK_VALIDATED=SUCCESS \
+    CI_PROMOTE_LOCK_CMD="$(_promote_lock)" CI_PROMOTE_UNLOCK_CMD="$(_promote_unlock)" \
+    CI_PROMOTE_MOVE_CMD="$(_stub mv 'touch "${BATS_TEST_TMPDIR}/moved.$1"')" \
+    CI_CHANNEL_READBACK_CMD="$(_stub rb "[ -f \"\${BATS_TEST_TMPDIR}/moved.\$1\" ] && echo ${dig} || true")" \
+    GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" release
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"channel=latest"* ]]
+    [[ "${output}" == *"result=promoted"* ]]
+    [[ "$(cat "${BATS_TEST_TMPDIR}/lock.log")" == *"UNLOCK latest"* ]]
+}
+
+@test "release is idempotent when latest is already current" {
+    # What: A re-run promotes nothing, takes no lock.
+    # Why: Same end state on retry (docs section 26.4).
+    # From: Issue #1683
+    local dig="sha256:$(printf 'a%.0s' {1..64})"
+    CI_RELEASE_VALIDATION_CMD="$(_stub val 'exit 0')" \
+    CI_STACK_CANDIDATE_CMD="$(_promote_full_candidate "${dig}")" CI_STACK_VALIDATED=SUCCESS \
+    CI_PROMOTE_LOCK_CMD="$(_promote_lock)" CI_PROMOTE_UNLOCK_CMD="$(_promote_unlock)" \
+    CI_PROMOTE_MOVE_CMD="$(_stub mv 'true')" \
+    CI_CHANNEL_READBACK_CMD="$(_stub rb "echo ${dig}")" \
+    GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" release
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"result=already-promoted"* ]]
+    [ ! -f "${BATS_TEST_TMPDIR}/lock.log" ]
+}
+
+@test "release runs the promote gates, not a second model" {
+    # What: Fresh verdict still needs a complete stack.
+    # Why: One acceptance model; promote gates apply.
+    # From: Issue #1683
+    local dig="sha256:$(printf 'a%.0s' {1..64})"
+    CI_RELEASE_VALIDATION_CMD="$(_stub val 'exit 0')" \
+    CI_STACK_CANDIDATE_CMD="$(_stub cand "echo proxy=${dig}")" GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${BATS_TEST_DIRNAME}/ci.sh" release
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-PROMOTE-0004"* ]]
+}
+
+# =========================================================
 # GC
 # =========================================================
 

@@ -29,7 +29,7 @@ CI_REPO_ROOT="${CI_REPO_ROOT:-$(cd -- "${CI_SCRIPT_DIR}/../.." && pwd)}"
 # What: The known ci.sh subcommands (docs section 9 CLI).
 # Why: One list drives dispatch and error text.
 # From: Issue #1683
-CI_COMMANDS="plan impact identity resolve build publish verify test scan assemble validate promote gc variables"
+CI_COMMANDS="plan impact identity resolve build publish verify test scan assemble validate promote release gc variables"
 
 # =========================================================
 # LOGGING
@@ -1096,6 +1096,28 @@ ci_cmd_promote() {
 # NIGHTLY / RELEASE
 # =========================================================
 
+# What: Read the candidate validation-fresh verdict.
+# Why: AG-REL-011 verdict is read, never recomputed.
+# From: Issue #1683
+_ci_release_validation_valid() {
+    if [ -n "${CI_RELEASE_VALIDATION_CMD:-}" ]; then
+        "${CI_RELEASE_VALIDATION_CMD}"
+        return "$?"
+    fi
+    return 1
+}
+
+# What: Verify freshness, then promote latest for release.
+# Why: One acceptance model; latest plus AG-REL-011.
+# From: Issue #1683
+ci_cmd_release() {
+    if ! _ci_release_validation_valid; then
+        ci_log "[CI-ERROR-RELEASE-0001]" "reason=\"candidate validation not valid or unverified; not releasing\""
+        return 2
+    fi
+    ci_cmd_promote latest
+}
+
 # =========================================================
 # GC
 # =========================================================
@@ -1528,6 +1550,7 @@ ci_main() {
                 assemble) ci_cmd_assemble "$@" ;;
                 validate) ci_cmd_validate "$@" ;;
                 promote) ci_cmd_promote "$@" ;;
+                release) ci_cmd_release "$@" ;;
                 gc) ci_cmd_gc "$@" ;;
                 variables) ci_cmd_variables "$@" ;;
                 *) ci_not_implemented "${command}" "$@" ;;
