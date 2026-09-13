@@ -29,7 +29,7 @@ CI_REPO_ROOT="${CI_REPO_ROOT:-$(cd -- "${CI_SCRIPT_DIR}/../.." && pwd)}"
 # What: The known ci.sh subcommands (docs section 9 CLI).
 # Why: One list drives dispatch and error text.
 # From: Issue #1683
-CI_COMMANDS="plan impact identity resolve build publish verify test scan assemble validate promote release gc variables"
+CI_COMMANDS="plan impact identity resolve build build-args publish verify test scan assemble validate promote release gc variables"
 
 # =========================================================
 # LOGGING
@@ -107,22 +107,29 @@ ci_build_targets() {
 # SEMANTIC PARSERS
 # =========================================================
 
-# What: Print one scalar field of a service entry.
-# Why: Read build_type/runner/final_base without a copy.
+# What: Print one field of a block entry.
+# Why: One parser, no per-block duplicate.
 # From: Issue #1683
-ci_service_field() {
-    local service="$1" field="$2"
-    awk -v svc="$service" -v field="$field" '
-        /^services:[[:space:]]*$/ { ins = 1; next }
-        ins && /^[^[:space:]]/ { ins = 0 }
-        ins && /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ {
-            cur = $1; sub(/:$/, "", cur); insvc = (cur == svc)
+_ci_block_entry_field() {
+    local block="$1" entry="$2" field="$3"
+    awk -v block="$block" -v entry="$entry" -v field="$field" '
+        $0 ~ ("^" block ":[[:space:]]*$") { inb = 1; next }
+        inb && /^[^[:space:]]/ { inb = 0 }
+        inb && /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ {
+            cur = $1; sub(/:$/, "", cur); inentry = (cur == entry)
         }
-        ins && insvc && $1 == (field ":") {
+        inb && inentry && $1 == (field ":") {
             val = $0; sub(/^[[:space:]]*[A-Za-z0-9_.-]+:[[:space:]]*/, "", val)
             print val; exit
         }
     ' "${CI_MANIFEST}"
+}
+
+# What: Print one scalar field of a service entry.
+# Why: Read build_type/runner/final_base without a copy.
+# From: Issue #1683
+ci_service_field() {
+    _ci_block_entry_field "services" "$1" "$2"
 }
 
 # What: Print the named contexts a service rebuilds on.
@@ -1612,6 +1619,78 @@ ci_cmd_variables() {
     esac
 }
 
+# What: Emit build-tools version/base/dhclient args.
+# Why: SOT is sole owner; empty value fails closed.
+# From: Issue #1683
+_ci_build_tools_build_args() {
+    local out="" argname key val
+    # What: external_versions.<key>.version -> *_VERSION.
+    # Why: apk takes the central version, not its own.
+    # From: Issue #1683
+    while IFS=: read -r argname key; do
+        [ -n "${argname}" ] || continue
+        val="$(_ci_block_entry_field external_versions "${key}" version)"
+        if [ -z "${val}" ]; then
+            ci_log "[CI-ERROR-BUILDARGS-0002]" "arg=\"${argname}\" key=\"external_versions.${key}.version\" reason=\"missing central version; FAIL CLOSED\""
+            return 2
+        fi
+        out="${out}--build-arg ${argname}=${val}"$'\n'
+    done <<'PAIRS'
+DOCKER_CLI_VERSION:docker_cli
+DOCKER_COMPOSE_VERSION:docker_compose
+DOCKER_BUILDX_VERSION:docker_buildx
+ACTIONLINT_VERSION:actionlint
+SCCACHE_VERSION:sccache
+CCACHE_VERSION:ccache
+CARGO_AUDIT_VERSION:cargo_audit
+CARGO_TARPAULIN_VERSION:cargo_tarpaulin
+SHELLSPEC_VERSION:shellspec
+PAIRS
+    # What: base_images.rust_alpine -> RUST_ALPINE_IMAGE.
+    # Why: Final stage pins its base from the one owner.
+    # From: Issue #1683
+    val="$(_ci_manifest_scalar '^  rust_alpine:')"
+    val="${val%\"}"; val="${val#\"}"
+    if [ -z "${val}" ]; then
+        ci_log "[CI-ERROR-BUILDARGS-0003]" "arg=\"RUST_ALPINE_IMAGE\" key=\"base_images.rust_alpine\" reason=\"missing central base image; FAIL CLOSED\""
+        return 2
+    fi
+    out="${out}--build-arg RUST_ALPINE_IMAGE=${val}"$'\n'
+    # What: external_versions.dhclient.* -> DHCLIENT_*.
+    # Why: The reused v3.20 apk pins version+digests.
+    # From: Issue #1683
+    while IFS=: read -r argname key; do
+        [ -n "${argname}" ] || continue
+        val="$(_ci_block_entry_field external_versions dhclient "${key}")"
+        if [ -z "${val}" ]; then
+            ci_log "[CI-ERROR-BUILDARGS-0004]" "arg=\"${argname}\" key=\"external_versions.dhclient.${key}\" reason=\"missing central dhclient value; FAIL CLOSED\""
+            return 2
+        fi
+        out="${out}--build-arg ${argname}=${val}"$'\n'
+    done <<'DHPAIRS'
+DHCLIENT_VERSION:version
+DHCLIENT_ALPINE_BRANCH:alpine_branch
+DHCLIENT_SHA256_AMD64:sha256_amd64
+DHCLIENT_SHA256_ARM64:sha256_arm64
+DHPAIRS
+    printf '%s' "${out}"
+}
+
+# What: Emit SOT-owned docker build-args for a target.
+# Why: One version owner; the Dockerfile pins nothing.
+# From: Issue #1683
+ci_cmd_build_args() {
+    local service="${1:-}"
+    [ -n "${service}" ] || { ci_log "[CI-ERROR-BUILDARGS-0001]" "reason=\"service arg required\""; return 2; }
+    case "${service}" in
+        build-tools) _ci_build_tools_build_args ;;
+        # What: Non-toolchain targets carry no SOT arg.
+        # Why: Only build-tools pins central versions now.
+        # From: Issue #1683
+        *) : ;;
+    esac
+}
+
 # =========================================================
 # DISPATCH
 # =========================================================
@@ -1631,6 +1710,7 @@ ci_main() {
                 identity) ci_cmd_identity "$@" ;;
                 resolve) ci_cmd_resolve "$@" ;;
                 build) ci_cmd_build "$@" ;;
+                build-args) ci_cmd_build_args "$@" ;;
                 publish) ci_cmd_publish "$@" ;;
                 verify) ci_cmd_verify "$@" ;;
                 test) ci_cmd_test "$@" ;;
