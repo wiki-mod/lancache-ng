@@ -297,18 +297,21 @@ Any implementation that requires a second deployment tree to remain manually syn
 **[AG-KD-009]**
 * `tools/build-tools` MUST use Alpine Linux as its only supported base OS.
 * The Alpine stage MUST be the implicit `docker build` default, active CI build-tools image, and published default image. Debian-based stages, Debian fallback paths, `trixie-backports`, and other Debian-specific build-tools configuration MUST NOT be used.
-* Rust toolchain stages MUST use `rust:latest`.
-* Go toolchain stages MUST use `golang:latest`.
+* Rust toolchain stages MUST use `rust:latest`. Any deviation MUST receive explicit maintainer approval.
+* Go toolchain stages MUST use `golang:latest`. Any deviation MUST receive explicit maintainer approval.
 * Required project tooling MUST include `distcc`, `distcc-pump`, `cargo-audit`, `cargo-tarpaulin`, `sccache`, `actionlint`, Docker CLI, Buildx, and Compose.
 * Where `dhclient` is required, it MUST be obtained through `curl` from the Alpine 3.20 package repository and MUST remain an `EXTRA_REQUIRED_TOOLS` requirement for the applicable consumer.
 * Any change away from Alpine as the build-tools base OS MUST receive explicit maintainer approval.
+* Concrete image versions, tags, digests, package versions, and artifact checksums MUST be owned exclusively by the project-wide central version source of truth.
 
 - **[AG-KD-010]** Retired by Issue #1781 and PR #1783. The shared `utilities` image and `services/utilities/Dockerfile` no longer exist, and former consumers now install their required packages independently. This rule therefore has no active consumer scope. If a shared `utilities` image is introduced again and used by first-party consumers, those consumers MUST reference the mutable `:latest` tag and MUST NOT pin the image by digest. The historical rule text remains available through Git history. This rule ID MUST NOT be reused. Rule-Ref: AG-WF-016.
 
 ## CDN Domains, First-time Setup, IPv6
 
 - **[AG-CDN-001]** Add the hostname to `services/dns/cdn-domains.txt` (or via the Admin UI) — this is the only file to maintain. The proxy derives each entry's registrable root domain automatically at startup (using the vendored Mozilla Public Suffix List, see `services/proxy/entrypoint.sh`) and generates a wildcard cert for it. Restart the containers (or wait for the Admin UI to trigger it) so the proxy picks up the new domain.
+  
 - **[AG-SETUP-001]** **Prod deployment requires two LAN IPs** (`IP_STANDARD`, `IP_SSL`). First-time setup: add the second IP (e.g. `ip addr add 192.168.1.11/24 dev eth0`); edit `deploy/prod/.env` to set `IP_STANDARD` and `IP_SSL`; edit `config/prod/dns-standard.env` and `config/prod/dns-ssl.env` with the matching IPs; optionally run `certs/generate-ca.sh` to create a dedicated CA before first start; create the cache directory (`mkdir -p /opt/lancache-ng/cache`, or wherever `LANCACHE_STATE_DIR` points).
+  
 - **[AG-IPV6-001]** Production Docker daemon needs `"ipv6": true` in `/etc/docker/daemon.json` for full IPv6 dual-stack support. Docker Desktop on Windows has limited IPv6 support; a Linux production host does not have this limitation.
 
 ## Naming Convention
