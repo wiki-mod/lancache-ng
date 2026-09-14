@@ -58,52 +58,10 @@
 name: Full-Setup Deep Validate
 
 on:
-  # Branch-filtered to match build-push.yml's own pull_request trigger
-  # EXACTLY (see build-push.yml's `on.pull_request.branches`). This suite's
-  # whole pr_staging_available/ensure-pr-staging-images mechanism assumes
-  # build-push.yml ran for the same PR and pushed its pr-<N>-sha-<full>
-  # staging tags -- vit_pr_staging_available() (scripts/lib/
-  # validation-image-tag.sh) has no base-branch check of its own, so without
-  # this filter a PR opened against a base branch build-push.yml ignores
-  # would still be marked staging-available here, and
-  # ensure-pr-staging-images would poll for tags that no workflow will ever
-  # push until it times out and fails closed. Restricting the trigger the
-  # same way build-push.yml is restricted
-  # is the correct fix rather than teaching the planner a fallback: a PR
-  # against an unprotected branch isn't covered by branch-protection
-  # required-status-checks anyway (see the BRANCH PROTECTION NOTE above), so
-  # skipping this workflow entirely for it loses nothing.
-  #
-  # current_dev was missing here even though build-push.yml's own
-  # pull_request.branches already listed it -- found during #709's audit of
-  # hardcoded/drifted branch-trigger lists. Restored to match exactly, as
-  # this comment has always claimed it does.
-  pull_request:
-    branches: [master, current_dev, "v[0-9]*"]
-    # Issue #1203: same trigger-level docs-only skip as build-push.yml's own
-    # pull_request trigger (see that block's comment for the full
-    # rationale/evidence) -- this workflow's own job names (`plan deep
-    # validation`, `ensure PR staging images`, `full-setup simulations`,
-    # `DNS zone/record rollback simulation`,
-    # `Admin UI Kea rollback (POST /dhcp/snapshot/rollback) simulation`,
-    # `Syslog forwarding + Admin UI visibility simulation`,
-    # `deep full-setup validation`) do NOT appear in master's or v0.2.0's
-    # required-status-checks list at all (confirmed via the GitHub API), so
-    # unlike build-push.yml this carries no branch-protection risk on any
-    # branch this workflow triggers for.
-    paths-ignore:
-      - "**/*.md"
-      - "docs/**"
-  workflow_dispatch:
-    inputs:
-      image_tag:
-        # Same rationale as full-setup-validate.yml: nightly (not latest) is the
-        # channel actually promoted from master; latest is a stale pre-release
-        # leftover. Operators can point an ad-hoc run at any published tag.
-        description: Stack image tag to validate against (manual runs only).
-        required: false
-        default: nightly
-
+  # What: legacy CI frozen on the #1683 rewrite branch.
+  # Why: stop the old pipeline building containers here.
+  # From: Issue #1683
+  workflow_dispatch: {}
 # Cancel superseded runs for the same PR/ref: a new push makes an in-flight
 # deep run obsolete, and these are expensive serial suites on a shared runner
 # tier. Manual (publish) runs are never grouped together so two operators'
