@@ -1709,6 +1709,41 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     [ -z "${output}" ]
 }
 
+@test "build-tools packages lists the apk tools incl. AG-KD-009 set" {
+    # What: One source (Dockerfile) feeds the input check.
+    # Why: AG-KD-009 required tools must all be present.
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools packages
+    [ "${status}" -eq 0 ]
+    for pkg in rust cargo rust-clippy rustfmt actionlint cargo-audit \
+               cargo-tarpaulin sccache distcc distcc-pump docker-cli \
+               docker-cli-buildx docker-cli-compose; do
+        printf '%s\n' "${output}" | grep -qx "${pkg}"
+    done
+}
+
+@test "build-tools signature is deterministic and version-sensitive" {
+    # What: Same inputs -> same sig; a bump moves it.
+    # Why: Weekly check rebuilds only on a real change.
+    # From: Issue #1683
+    local a b c
+    a="$(bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools signature "sccache-0.15.0-r0")"
+    b="$(bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools signature "sccache-0.15.0-r0")"
+    c="$(bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools signature "sccache-0.16.0-r0")"
+    [ -n "${a}" ]
+    [ "${a}" = "${b}" ]
+    [ "${a}" != "${c}" ]
+}
+
+@test "build-tools rejects an unknown subcommand (fail closed)" {
+    # What: An unknown sub must not silently succeed.
+    # Why: Fail-closed dispatch (AG-VAL-002).
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools bogus
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-BUILDTOOLS-0003"* ]]
+}
+
 # =========================================================
 # HISTORICAL REGRESSIONS
 # =========================================================

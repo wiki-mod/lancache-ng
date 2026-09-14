@@ -29,7 +29,7 @@ CI_REPO_ROOT="${CI_REPO_ROOT:-$(cd -- "${CI_SCRIPT_DIR}/../.." && pwd)}"
 # What: The known ci.sh subcommands (docs section 9 CLI).
 # Why: One list drives dispatch and error text.
 # From: Issue #1683
-CI_COMMANDS="plan impact identity resolve build build-args publish verify test scan assemble validate promote release gc variables"
+CI_COMMANDS="plan impact identity resolve build build-args build-tools publish verify test scan assemble validate promote release gc variables"
 
 # =========================================================
 # LOGGING
@@ -1674,6 +1674,47 @@ ci_cmd_build_args() {
     esac
 }
 
+# What: Print the build-tools apk package list.
+# Why: One source (the Dockerfile) for the input check.
+# From: Issue #1683
+_ci_build_tools_packages() {
+    awk '
+        /apk add --no-cache \\/ { inpkg = 1; next }
+        inpkg {
+            pkg = $1; sub(/;$/, "", pkg)
+            if (pkg ~ /^[a-z0-9]/) print pkg
+            if ($0 ~ /;/) inpkg = 0
+        }
+    ' "${CI_REPO_ROOT}/tools/build-tools/Dockerfile" | LC_ALL=C sort -u
+}
+
+# What: Print the build-tools input signature.
+# Why: Weekly check rebuilds only on a changed input.
+# From: Issue #1683
+_ci_build_tools_signature() {
+    local versions="$1" base ids
+    base="$(_ci_manifest_scalar '^  alpine:')"; base="${base%\"}"; base="${base#\"}"
+    ids="$(_ci_tracked_content_ids tools/build-tools)"
+    printf 'base=%s\n%s\nversions=%s\n' "${base}" "${ids}" "${versions}" \
+        | sha256sum | cut -d' ' -f1
+}
+
+# What: build-tools lifecycle helpers for the check.
+# Why: Thin workflow reads packages + signature here.
+# From: Issue #1683
+ci_cmd_build_tools() {
+    local sub="${1:-}"
+    if [ "$#" -gt 0 ]; then shift; fi
+    case "${sub}" in
+        packages) _ci_build_tools_packages ;;
+        signature) _ci_build_tools_signature "${1:-}" ;;
+        *)
+            ci_log "[CI-ERROR-BUILDTOOLS-0003]" "sub=\"${sub}\" reason=\"unknown build-tools subcommand\""
+            return 2
+            ;;
+    esac
+}
+
 # =========================================================
 # DISPATCH
 # =========================================================
@@ -1694,6 +1735,7 @@ ci_main() {
                 resolve) ci_cmd_resolve "$@" ;;
                 build) ci_cmd_build "$@" ;;
                 build-args) ci_cmd_build_args "$@" ;;
+                build-tools) ci_cmd_build_tools "$@" ;;
                 publish) ci_cmd_publish "$@" ;;
                 verify) ci_cmd_verify "$@" ;;
                 test) ci_cmd_test "$@" ;;
