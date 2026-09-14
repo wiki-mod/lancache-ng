@@ -10,19 +10,6 @@
 # From: Issue #1683
 ARG RUST_ALPINE_IMAGE
 
-# What: apk tool versions, consumed from the version SOT.
-# Why: The Dockerfile owns no version; apk picks none.
-# From: Issue #1683
-ARG DOCKER_CLI_VERSION
-ARG DOCKER_COMPOSE_VERSION
-ARG DOCKER_BUILDX_VERSION
-ARG ACTIONLINT_VERSION
-ARG SCCACHE_VERSION
-ARG CCACHE_VERSION
-ARG CARGO_AUDIT_VERSION
-ARG CARGO_TARPAULIN_VERSION
-ARG SHELLSPEC_VERSION
-
 # What: Reused ISC dhclient pin, from the version SOT.
 # Why: Version, branch and per-arch digests owned centrally.
 # From: Issue #1683
@@ -51,15 +38,6 @@ ARG no_proxy
 # What: re-declare SOT build-args for use in this stage.
 # Why: pre-FROM ARGs are not visible after FROM in Docker.
 # From: Issue #1683
-ARG DOCKER_CLI_VERSION
-ARG DOCKER_COMPOSE_VERSION
-ARG DOCKER_BUILDX_VERSION
-ARG ACTIONLINT_VERSION
-ARG SCCACHE_VERSION
-ARG CCACHE_VERSION
-ARG CARGO_AUDIT_VERSION
-ARG CARGO_TARPAULIN_VERSION
-ARG SHELLSPEC_VERSION
 ARG DHCLIENT_VERSION
 ARG DHCLIENT_ALPINE_BRANCH
 ARG DHCLIENT_SHA256_AMD64
@@ -74,21 +52,12 @@ ENV PATH="/usr/local/cargo/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin
     CARGO_INSTALL_ROOT="/usr/local" \
     RUST_BACKTRACE=1
 
-# What: fail closed if any SOT build-arg is empty.
-# Why: a missing central value must never install loose.
+# What: fail closed if any dhclient build-arg is empty.
+# Why: the reused v3.20 apk is a pinned input, not loose.
 # From: Issue #1683
 RUN set -eu; \
     missing=""; \
     for kv in \
-      "DOCKER_CLI_VERSION=${DOCKER_CLI_VERSION}" \
-      "DOCKER_COMPOSE_VERSION=${DOCKER_COMPOSE_VERSION}" \
-      "DOCKER_BUILDX_VERSION=${DOCKER_BUILDX_VERSION}" \
-      "ACTIONLINT_VERSION=${ACTIONLINT_VERSION}" \
-      "SCCACHE_VERSION=${SCCACHE_VERSION}" \
-      "CCACHE_VERSION=${CCACHE_VERSION}" \
-      "CARGO_AUDIT_VERSION=${CARGO_AUDIT_VERSION}" \
-      "CARGO_TARPAULIN_VERSION=${CARGO_TARPAULIN_VERSION}" \
-      "SHELLSPEC_VERSION=${SHELLSPEC_VERSION}" \
       "DHCLIENT_VERSION=${DHCLIENT_VERSION}" \
       "DHCLIENT_ALPINE_BRANCH=${DHCLIENT_ALPINE_BRANCH}" \
       "DHCLIENT_SHA256_AMD64=${DHCLIENT_SHA256_AMD64}" \
@@ -121,25 +90,25 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
     : "apk-cache-bust=${APK_CACHE_BUST}"; \
     apk update; \
     apk add --no-cache \
-      actionlint=${ACTIONLINT_VERSION} \
+      actionlint \
       bash \
       bats \
       bc \
       bind-tools \
       build-base \
       ca-certificates \
-      cargo-audit=${CARGO_AUDIT_VERSION} \
-      cargo-tarpaulin=${CARGO_TARPAULIN_VERSION} \
-      ccache=${CCACHE_VERSION} \
+      cargo-audit \
+      cargo-tarpaulin \
+      ccache \
       clang22 \
       cmake \
       coreutils \
       curl \
       distcc \
       distcc-pump \
-      docker-cli=${DOCKER_CLI_VERSION} \
-      docker-cli-buildx=${DOCKER_BUILDX_VERSION} \
-      docker-cli-compose=${DOCKER_COMPOSE_VERSION} \
+      docker-cli \
+      docker-cli-buildx \
+      docker-cli-compose \
       expect \
       findutils \
       gawk \
@@ -162,10 +131,10 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
       python3 \
       rsync \
       run-parts \
-      sccache=${SCCACHE_VERSION} \
+      sccache \
       sed \
       shellcheck \
-      shellspec=${SHELLSPEC_VERSION} \
+      shellspec \
       sqlite \
       tcpdump \
       tzdata \

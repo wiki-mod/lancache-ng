@@ -1619,34 +1619,12 @@ ci_cmd_variables() {
     esac
 }
 
-# What: Emit build-tools version/base/dhclient args.
-# Why: SOT is sole owner; empty value fails closed.
+# What: Emit build-tools base + dhclient build-args.
+# Why: SOT owns base+dhclient; apk tools stay unpinned.
 # From: Issue #1683
 _ci_build_tools_build_args() {
     local fmt="${1:-}" prefix="--build-arg " out="" argname key val
     [ "${fmt}" = "--bare" ] && prefix=""
-    # What: external_versions.<key>.version -> *_VERSION.
-    # Why: apk takes the central version, not its own.
-    # From: Issue #1683
-    while IFS=: read -r argname key; do
-        [ -n "${argname}" ] || continue
-        val="$(_ci_block_entry_field external_versions "${key}" version)"
-        if [ -z "${val}" ]; then
-            ci_log "[CI-ERROR-BUILDARGS-0002]" "arg=\"${argname}\" key=\"external_versions.${key}.version\" reason=\"missing central version; FAIL CLOSED\""
-            return 2
-        fi
-        out="${out}${prefix}${argname}=${val}"$'\n'
-    done <<'PAIRS'
-DOCKER_CLI_VERSION:docker_cli
-DOCKER_COMPOSE_VERSION:docker_compose
-DOCKER_BUILDX_VERSION:docker_buildx
-ACTIONLINT_VERSION:actionlint
-SCCACHE_VERSION:sccache
-CCACHE_VERSION:ccache
-CARGO_AUDIT_VERSION:cargo_audit
-CARGO_TARPAULIN_VERSION:cargo_tarpaulin
-SHELLSPEC_VERSION:shellspec
-PAIRS
     # What: base_images.rust_alpine -> RUST_ALPINE_IMAGE.
     # Why: Final stage pins its base from the one owner.
     # From: Issue #1683

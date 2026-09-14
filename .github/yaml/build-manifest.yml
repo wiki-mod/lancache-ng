@@ -106,49 +106,7 @@ external_versions:
     version: v2.11.0
     sha256_x86_64: b42d9937807f28812502a967906d370cff9ab443453813656b99ff6a9b3c5649
     sha256_aarch64: 8cd056d64078c109409c08e30d55324c82e3855f9d8e4b304cacc7c612610e09
-  # What: Docker CLI + plugins + actionlint via Alpine apk.
-  # Why: exact package version owned here, not by apk.
-  # From: Issue #1683
-  docker_cli:
-    source: alpine-apk
-    package: docker-cli
-    version: 29.5.3-r1
-  docker_compose:
-    source: alpine-apk
-    package: docker-cli-compose
-    version: 5.1.4-r1
-  docker_buildx:
-    source: alpine-apk
-    package: docker-cli-buildx
-    version: 0.34.1-r1
-  actionlint:
-    source: alpine-apk
-    package: actionlint
-    version: 1.7.12-r2
-  # What: sccache/ccache/cargo-audit via Alpine apk.
-  # Why: exact package version owned here, not by apk.
-  # From: Issue #1683
-  sccache:
-    source: alpine-apk
-    package: sccache
-    version: 0.15.0-r0
-  ccache:
-    source: alpine-apk
-    package: ccache
-    version: 4.13.6-r0
-  cargo_audit:
-    source: alpine-apk
-    package: cargo-audit
-    version: 0.22.1-r0
-  cargo_tarpaulin:
-    source: alpine-apk
-    package: cargo-tarpaulin
-    version: 0.35.4-r0
-  shellspec:
-    source: alpine-apk
-    package: shellspec
-    version: 0.28.1-r0
-  # What: ISC dhclient reused from the last Alpine v3.20 pkg.
+  # What: ISC dhclient reused from Alpine v3.20 pkg.
   # Why: Alpine 3.21+ dropped it; musl build, both arches.
   # From: Issue #1683
   dhclient:
@@ -158,7 +116,7 @@ external_versions:
     sha256_arm64: f1bd3a42210768b049f3157db09d68a399521db16f63122e7b6af28bf16fbea2
 
 # What: The one authoritative platform list for all targets.
-# Why: Platform is a parameter, never a twin; no second list.
+# Why: Platform is a parameter, not a twin/list.
 # From: Issue #1683
 build_matrix:
   platforms: [linux/amd64, linux/arm64]
