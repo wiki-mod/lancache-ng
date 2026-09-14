@@ -1722,9 +1722,21 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     done
 }
 
-@test "build-tools signature is deterministic and version-sensitive" {
-    # What: Same inputs -> same sig; a bump moves it.
-    # Why: Weekly check rebuilds only on a real change.
+@test "build-tools packages fails closed on empty extraction" {
+    # What: no apk list in the Dockerfile must not pass.
+    # Why: an empty list would blind the input check.
+    # From: Issue #1683
+    local r="${BATS_TEST_TMPDIR}/emptyrepo"
+    mkdir -p "${r}/tools/build-tools"
+    printf 'FROM alpine\n' > "${r}/tools/build-tools/Dockerfile"
+    CI_REPO_ROOT="${r}" run bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools packages
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-BUILDTOOLS-0006"* ]]
+}
+
+@test "build-tools signature: same canonical apk state gives same sig" {
+    # What: same inputs -> same signature; a bump moves it.
+    # Why: weekly check rebuilds only on a real change.
     # From: Issue #1683
     local a b c
     a="$(bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools signature "sccache-0.15.0-r0")"
@@ -1733,6 +1745,31 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     [ -n "${a}" ]
     [ "${a}" = "${b}" ]
     [ "${a}" != "${c}" ]
+}
+
+@test "build-tools signature fails closed on empty apk state" {
+    # What: a blank apk version state must not sign.
+    # Why: a blank scan must never mint a stable signature.
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools signature ""
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-BUILDTOOLS-0004"* ]]
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools signature "   "
+    [ "${status}" -eq 2 ]
+}
+
+@test "build-tools signature moves on a dhclient value change" {
+    # What: a dhclient version/checksum bump moves the sig.
+    # Why: all emitted build-args must feed the signature.
+    # From: Issue #1683
+    local m="${BATS_TEST_TMPDIR}/dh.yml" base changed
+    base="$(bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools signature "sccache-0.15.0-r0")"
+    sed 's/sha256_amd64: 068c97e534e9c8f03db9064296b1d3c21d957f328e40309278559a92f9a74557/sha256_amd64: deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/' \
+        "${BATS_TEST_DIRNAME}/../yaml/build-manifest.yml" > "${m}"
+    changed="$(CI_MANIFEST="${m}" bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools signature "sccache-0.15.0-r0")"
+    [ -n "${base}" ]
+    [ -n "${changed}" ]
+    [ "${base}" != "${changed}" ]
 }
 
 @test "build-tools rejects an unknown subcommand (fail closed)" {
