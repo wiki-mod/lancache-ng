@@ -73,7 +73,7 @@ data-encoding = { version = "2", optional = true }
 # back to gzip only if zstd could not be installed at container start (see
 # deploy/*/docker-compose.yml's syslog-ng rotation loop) -- both crates are
 # needed so the Admin UI reader can transparently read either outcome.
-zstd = { version = "0.13", optional = true }
+zstd = { version = "0.14", optional = true }
 flate2 = { version = "1", optional = true }
 # DHCPv4 wire-format encode/decode for the native DHCP probe (issue #1288),
 # replacing the former dhcp-probe.sh's use of nmap (rogue-server detection)
