@@ -1678,24 +1678,48 @@ ci_cmd_build_args() {
 # Why: One source (the Dockerfile) for the input check.
 # From: Issue #1683
 _ci_build_tools_packages() {
-    awk '
+    local pkgs
+    pkgs="$(awk '
         /apk add --no-cache \\/ { inpkg = 1; next }
         inpkg {
             pkg = $1; sub(/;$/, "", pkg)
             if (pkg ~ /^[a-z0-9]/) print pkg
             if ($0 ~ /;/) inpkg = 0
         }
-    ' "${CI_REPO_ROOT}/tools/build-tools/Dockerfile" | LC_ALL=C sort -u
+    ' "${CI_REPO_ROOT}/tools/build-tools/Dockerfile" | LC_ALL=C sort -u)"
+    # What: fail closed if no package list is extracted.
+    # Why: an empty list would blind the input check.
+    # From: Issue #1683
+    if [ -z "${pkgs}" ]; then
+        ci_log "[CI-ERROR-BUILDTOOLS-0006]" "reason=\"no packages extracted from Dockerfile; FAIL CLOSED\""
+        return 2
+    fi
+    printf '%s\n' "${pkgs}"
 }
 
 # What: Print the build-tools input signature.
 # Why: Weekly check rebuilds only on a changed input.
 # From: Issue #1683
 _ci_build_tools_signature() {
-    local versions="$1" base ids
-    base="$(_ci_manifest_scalar '^  alpine:')"; base="${base%\"}"; base="${base#\"}"
+    local versions="$1" args ids trimmed
+    # What: fail closed on an empty apk version state.
+    # Why: a blank scan must never mint a stable signature.
+    # From: Issue #1683
+    trimmed="$(printf '%s' "${versions}" | tr -d '[:space:]')"
+    if [ -z "${trimmed}" ]; then
+        ci_log "[CI-ERROR-BUILDTOOLS-0004]" "reason=\"empty apk version state; FAIL CLOSED\""
+        return 2
+    fi
+    # What: every emitted build-arg feeds the signature.
+    # Why: a base/dhclient change must move the sig.
+    # From: Issue #1683
+    args="$(_ci_build_tools_build_args --bare)" || return 2
     ids="$(_ci_tracked_content_ids tools/build-tools)"
-    printf 'base=%s\n%s\nversions=%s\n' "${base}" "${ids}" "${versions}" \
+    if [ -z "${ids}" ]; then
+        ci_log "[CI-ERROR-BUILDTOOLS-0005]" "reason=\"no tracked build-tools source; FAIL CLOSED\""
+        return 2
+    fi
+    printf 'args<<\n%s\nids<<\n%s\nversions<<\n%s\n' "${args}" "${ids}" "${versions}" \
         | sha256sum | cut -d' ' -f1
 }
 
