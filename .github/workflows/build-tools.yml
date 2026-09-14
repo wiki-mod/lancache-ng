@@ -45,6 +45,7 @@ jobs:
     outputs:
       build-amd64: ${{ steps.decide.outputs.build-amd64 }}
       build-arm64: ${{ steps.decide.outputs.build-arm64 }}
+      matrix: ${{ steps.decide.outputs.matrix }}
       signature: ${{ steps.current.outputs.signature }}
       build-args-bare: ${{ steps.sot.outputs.bare }}
     steps:
@@ -71,8 +72,8 @@ jobs:
             echo 'SOT_ARGS_EOF'
           } >> "$GITHUB_OUTPUT"
 
-      # What: sign the effective build inputs from ci.sh.
-      # Why: rebuilds only when the signature moves.
+      # What: sign every arch's apk state + the build-args.
+      # Why: an arm64-only change must move the signature.
       # From: Issue #1683
       - name: Compute current build-tools input signature
         id: current
@@ -82,10 +83,18 @@ jobs:
             | sed -n 's/^ALPINE_IMAGE=//p')"
           [ -n "$base" ] || { echo "::error::No ALPINE_IMAGE from the SOT."; exit 1; }
           packages="$(bash .github/scripts/ci.sh build-tools packages | tr '\n' ' ')"
-          versions="$(docker run --rm "$base" sh -c \
-            "apk add --no-cache --simulate ${packages} 2>&1 \
-              | sed -n 's/^.*Installing \\([^ ]*\\) (\\([^)]*\\)).*/\\1-\\2/p' \
-              | LC_ALL=C sort | tr '\\n' ' '")"
+          arches="$(bash .github/scripts/ci.sh build-tools arches)"
+          versions=""
+          for arch in $arches; do
+            av="$(docker run --rm "$base" sh -c "
+              sed -i 's|^https://|http://|' /etc/apk/repositories
+              apk --arch '$arch' update >/dev/null 2>&1
+              apk --arch '$arch' add --no-cache --simulate $packages 2>&1 \
+                | sed -n 's/^.*Installing \([^ ]*\) (\([^)]*\)).*/\1-\2/p' \
+                | LC_ALL=C sort | tr '\n' ' '")"
+            [ -n "$av" ] || { echo "::error::No apk versions resolved for $arch."; exit 1; }
+            versions="${versions}${arch}:${av} "
+          done
           signature="$(bash .github/scripts/ci.sh build-tools signature "$versions")"
           echo "signature=${signature}" >> "$GITHUB_OUTPUT"
 
@@ -106,7 +115,7 @@ jobs:
           fi
           echo "signature=${published}" >> "$GITHUB_OUTPUT"
 
-      # What: decide arches from arch + signature.
+      # What: decide arches, emit a matrix of only those.
       # Why: build forces; a changed signature does too.
       # From: Issue #1683
       - name: Decide build need
@@ -133,24 +142,38 @@ jobs:
               *) echo "::error::Unknown arch '$ARCH'."; exit 1 ;;
             esac
           fi
-          echo "build-amd64=${amd}" >> "$GITHUB_OUTPUT"
-          echo "build-arm64=${arm}" >> "$GITHUB_OUTPUT"
-          printf '::notice::build-tools gate arch=%s mode=%s need=%s amd64=%s arm64=%s\n' \
+          include='[]'
+          if [ "$amd" = "true" ]; then
+            include="$(echo "$include" | jq -c '. + [{"arch":"amd64","runner":"ubuntu-latest","platform":"linux/amd64"}]')"
+          fi
+          if [ "$arm" = "true" ]; then
+            include="$(echo "$include" | jq -c '. + [{"arch":"arm64","runner":"ubuntu-24.04-arm","platform":"linux/arm64"}]')"
+          fi
+          {
+            echo "build-amd64=${amd}"
+            echo "build-arm64=${arm}"
+            echo "matrix={\"include\":${include}}"
+          } >> "$GITHUB_OUTPUT"
+          printf '::notice::gate arch=%s mode=%s need=%s amd64=%s arm64=%s\n' \
             "$ARCH" "$MODE" "$need" "$amd" "$arm"
 
-  build-amd64:
-    name: build amd64 build-tools image (native)
+  # What: one platform-parameterized build job, not a twin.
+  # Why: platform is a matrix parameter; logic exists once.
+  # From: Issue #1683
+  build:
+    name: build ${{ matrix.arch }} build-tools image (native)
     needs: determine-build-need
-    if: needs.determine-build-need.outputs.build-amd64 == 'true'
-    runs-on: ubuntu-latest
+    if: needs.determine-build-need.outputs.build-amd64 == 'true' || needs.determine-build-need.outputs.build-arm64 == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.determine-build-need.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     permissions:
       contents: read
       packages: write
       id-token: write
       attestations: write
-    outputs:
-      digest: ${{ steps.build.outputs.digest }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -172,19 +195,19 @@ jobs:
         with:
           images: ${{ env.BUILD_TOOLS_IMAGE }}
           tags: |
-            type=sha,prefix=sha-,format=long,suffix=-standalone-amd64
+            type=sha,prefix=sha-,format=long,suffix=-standalone-${{ matrix.arch }}
 
       - name: Compute immutable pushed source tag
         id: source-tag
         run: |
           set -euo pipefail
-          printf 'image=%s:sha-%s-standalone-amd64\n' \
-            "$BUILD_TOOLS_IMAGE" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          printf 'image=%s:sha-%s-standalone-%s\n' \
+            "$BUILD_TOOLS_IMAGE" "$GITHUB_SHA" "${{ matrix.arch }}" >> "$GITHUB_OUTPUT"
 
       # What: build+push, stamping the signature.
       # Why: the gate reads this label next time.
       # From: Issue #1683
-      - name: Build and push amd64 build-tools image
+      - name: Build and push build-tools image
         id: build
         timeout-minutes: 90
         uses: ./.github/actions/ghcr-build-push-retry
@@ -201,23 +224,23 @@ jobs:
           build-args: |
             ${{ needs.determine-build-need.outputs.build-args-bare }}
           outputs: type=image,oci-mediatypes=true
-          platforms: linux/amd64
+          platforms: ${{ matrix.platform }}
           provenance: false
           pull: true
-          cache-from: type=gha,scope=build-tools-amd64
-          cache-to: type=gha,scope=build-tools-amd64,mode=max
+          cache-from: type=gha,scope=build-tools-${{ matrix.arch }}
+          cache-to: type=gha,scope=build-tools-${{ matrix.arch }},mode=max
 
-      - name: Smoke-test pushed amd64 digest
+      - name: Smoke-test pushed digest
         uses: ./.github/actions/build-tools-candidate-smoke
         with:
           image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
-          platform: linux/amd64
+          platform: ${{ matrix.platform }}
           run-fixtures: "true"
 
       # What: retry-wrapped Trivy scan of the pushed image.
       # Why: HIGH/CRITICAL must fail a real publish.
       # From: Issue #1535
-      - name: Scan pushed amd64 image with Trivy
+      - name: Scan pushed image with Trivy
         timeout-minutes: 50
         uses: ./.github/actions/trivy-scan-retry
         with:
@@ -235,109 +258,7 @@ jobs:
           timeout: 10m
           exit-code: "1"
 
-      - name: Attest amd64 build-tools image provenance
-        uses: ./.github/actions/ghcr-attest-retry
-        with:
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-          subject-name: ${{ env.BUILD_TOOLS_IMAGE }}
-          subject-digest: ${{ steps.build.outputs.digest }}
-
-  build-arm64:
-    name: build arm64 build-tools image (native)
-    needs: determine-build-need
-    if: needs.determine-build-need.outputs.build-arm64 == 'true'
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 90
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-      attestations: write
-    outputs:
-      digest: ${{ steps.build.outputs.digest }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up Docker Buildx
-        id: buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
-
-      - name: Log in to GHCR
-        uses: ./.github/actions/docker-login-action-centralized-version
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
-        with:
-          images: ${{ env.BUILD_TOOLS_IMAGE }}
-          tags: |
-            type=sha,prefix=sha-,format=long,suffix=-standalone-arm64
-
-      - name: Compute immutable pushed source tag
-        id: source-tag
-        run: |
-          set -euo pipefail
-          printf 'image=%s:sha-%s-standalone-arm64\n' \
-            "$BUILD_TOOLS_IMAGE" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
-
-      # What: build+push, stamping the signature.
-      # Why: the gate reads this label next time.
-      # From: Issue #1683
-      - name: Build and push arm64 build-tools image
-        id: build
-        timeout-minutes: 90
-        uses: ./.github/actions/ghcr-build-push-retry
-        with:
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-          builder: ${{ steps.buildx.outputs.name }}
-          context: tools/build-tools
-          push: true
-          tags: ${{ steps.source-tag.outputs.image }}
-          labels: |
-            ${{ steps.meta.outputs.labels }}
-            org.lancache-ng.build-tools.signature=${{ needs.determine-build-need.outputs.signature }}
-          build-args: |
-            ${{ needs.determine-build-need.outputs.build-args-bare }}
-          outputs: type=image,oci-mediatypes=true
-          platforms: linux/arm64
-          provenance: false
-          pull: true
-          cache-from: type=gha,scope=build-tools-arm64
-          cache-to: type=gha,scope=build-tools-arm64,mode=max
-
-      - name: Smoke-test pushed arm64 digest
-        uses: ./.github/actions/build-tools-candidate-smoke
-        with:
-          image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
-          platform: linux/arm64
-          run-fixtures: "true"
-
-      - name: Scan pushed arm64 image with Trivy
-        timeout-minutes: 50
-        uses: ./.github/actions/trivy-scan-retry
-        with:
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-          image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
-          scanners: vuln,secret
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          trivyignores: .trivyignore.yaml
-          hide-progress: true
-          cache: "false"
-          timeout: 10m
-          exit-code: "1"
-
-      - name: Attest arm64 build-tools image provenance
+      - name: Attest build-tools image provenance
         uses: ./.github/actions/ghcr-attest-retry
         with:
           username: ${{ github.actor }}
@@ -347,7 +268,7 @@ jobs:
 
   merge-manifests:
     name: assemble multi-arch build-tools manifest
-    needs: [determine-build-need, build-amd64, build-arm64]
+    needs: [determine-build-need, build]
     if: needs.determine-build-need.outputs.build-amd64 == 'true' && needs.determine-build-need.outputs.build-arm64 == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -365,22 +286,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # What: merge the two arch digests into one tag.
+      # What: merge the per-arch tags into one image.
       # Why: consumers pull one multi-arch image.
       # From: Issue #1683
       - name: Create the multi-arch manifest
-        env:
-          AMD64_DIGEST: ${{ needs.build-amd64.outputs.digest }}
-          ARM64_DIGEST: ${{ needs.build-arm64.outputs.digest }}
         run: |
           set -euo pipefail
-          [ -n "$AMD64_DIGEST" ] && [ -n "$ARM64_DIGEST" ] || {
-            echo "::error::A per-arch digest is missing; not merging."
-            exit 1
-          }
+          amd64="${BUILD_TOOLS_IMAGE}:sha-${GITHUB_SHA}-standalone-amd64"
+          arm64="${BUILD_TOOLS_IMAGE}:sha-${GITHUB_SHA}-standalone-arm64"
           for tag in "sha-${GITHUB_SHA}" latest; do
             docker buildx imagetools create \
               --tag "${BUILD_TOOLS_IMAGE}:${tag}" \
-              "${BUILD_TOOLS_IMAGE}@${AMD64_DIGEST}" \
-              "${BUILD_TOOLS_IMAGE}@${ARM64_DIGEST}"
+              "$amd64" "$arm64"
           done

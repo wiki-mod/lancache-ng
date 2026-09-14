@@ -1723,6 +1723,29 @@ _ci_build_tools_signature() {
         | sha256sum | cut -d' ' -f1
 }
 
+# What: Print the apk arch for each build_matrix platform.
+# Why: the lifecycle signature must cover every arch.
+# From: Issue #1683
+_ci_build_tools_arches() {
+    local platform out=""
+    while IFS= read -r platform; do
+        [ -n "${platform}" ] || continue
+        case "${platform}" in
+            */amd64) out="${out}x86_64"$'\n' ;;
+            */arm64) out="${out}aarch64"$'\n' ;;
+            *)
+                ci_log "[CI-ERROR-BUILDTOOLS-0007]" "platform=\"${platform}\" reason=\"no apk arch mapping; FAIL CLOSED\""
+                return 2
+                ;;
+        esac
+    done <<< "$(_ci_build_matrix_platforms)"
+    if [ -z "${out}" ]; then
+        ci_log "[CI-ERROR-BUILDTOOLS-0008]" "reason=\"no build matrix platforms; FAIL CLOSED\""
+        return 2
+    fi
+    printf '%s' "${out}" | LC_ALL=C sort -u
+}
+
 # What: build-tools lifecycle helpers for the check.
 # Why: Thin workflow reads packages + signature here.
 # From: Issue #1683
@@ -1731,6 +1754,7 @@ ci_cmd_build_tools() {
     if [ "$#" -gt 0 ]; then shift; fi
     case "${sub}" in
         packages) _ci_build_tools_packages ;;
+        arches) _ci_build_tools_arches ;;
         signature) _ci_build_tools_signature "${1:-}" ;;
         *)
             ci_log "[CI-ERROR-BUILDTOOLS-0003]" "sub=\"${sub}\" reason=\"unknown build-tools subcommand\""
