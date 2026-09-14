@@ -8,7 +8,7 @@
 # What: Base image pin, consumed from the version SOT.
 # Why: build-manifest.yml is the sole owner of the pin.
 # From: Issue #1683
-ARG RUST_ALPINE_IMAGE
+ARG ALPINE_IMAGE
 
 # What: Reused ISC dhclient pin, from the version SOT.
 # Why: Version, branch and per-arch digests owned centrally.
@@ -19,9 +19,9 @@ ARG DHCLIENT_SHA256_AMD64
 ARG DHCLIENT_SHA256_ARM64
 
 # What: The single Alpine toolchain stage, base from SOT.
-# Why: No Debian stage; musl is the one rustc triple.
+# Why: apk installs Rust; musl-native, no rustup.
 # From: Issue #1683
-FROM ${RUST_ALPINE_IMAGE}
+FROM ${ALPINE_IMAGE}
 
 LABEL org.opencontainers.image.description="Prebuilt lancache-ng CI and developer validation toolchain image (Alpine)."
 
@@ -48,8 +48,7 @@ ARG DHCLIENT_SHA256_ARM64
 # From: Issue #1095
 SHELL ["/bin/sh", "-c"]
 
-ENV PATH="/usr/local/cargo/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin" \
-    CARGO_INSTALL_ROOT="/usr/local" \
+ENV PATH="/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin" \
     RUST_BACKTRACE=1
 
 # What: fail closed if any dhclient build-arg is empty.
@@ -97,6 +96,7 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
       bind-tools \
       build-base \
       ca-certificates \
+      cargo \
       cargo-audit \
       cargo-tarpaulin \
       ccache \
@@ -131,6 +131,9 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
       python3 \
       rsync \
       run-parts \
+      rust \
+      rust-clippy \
+      rustfmt \
       sccache \
       sed \
       shellcheck \
@@ -177,21 +180,6 @@ RUN set -euo pipefail; \
     rm -f /.PKGINFO /.SIGN.* /.pre-install /.post-install /.trigger; \
     dhclient --version
 
-# What: add rustfmt and clippy; trust proxy CA for this.
-# Why: rust:alpine ships neither; CA restored, never kept.
-# From: Issue #1683
-RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
-    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
-      cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig; \
-      cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
-    fi; \
-    rustup component add rustfmt clippy; \
-    for tool in cargo cargo-clippy cargo-fmt clippy-driver rustc rustdoc rustfmt rustup; do \
-      ln -sf "/usr/local/cargo/bin/${tool}" "/usr/local/bin/${tool}"; \
-    done; \
-    rm -rf /usr/local/cargo/registry /usr/local/cargo/git; \
-    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
-
 # What: symlink musl-gcc to gcc; gcc targets musl already
 # Why: required by dns/ui/watchdog; avoids duplicate binary
 # From: Issue #1095 | PR #1691
@@ -206,7 +194,6 @@ RUN set -euo pipefail; \
       bats \
       cargo \
       rustc \
-      rustup \
       rustfmt \
       clippy-driver \
       sccache \
@@ -293,10 +280,6 @@ RUN set -euo pipefail; \
     dhclient --version; \
     expect -v; \
     printf 'PATH=%s\n' "$PATH"; \
-    case ":$PATH:" in \
-      *:/usr/local/cargo/bin:*) ;; \
-      *) echo "/usr/local/cargo/bin is missing from PATH" >&2; exit 1 ;; \
-    esac; \
     rustc_host_line="$(rustc -vV)"; \
     grep -qE '^host: .*-musl$' <<<"${rustc_host_line}"; \
     musl-gcc --version

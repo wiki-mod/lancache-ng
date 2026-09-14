@@ -1625,16 +1625,16 @@ ci_cmd_variables() {
 _ci_build_tools_build_args() {
     local fmt="${1:-}" prefix="--build-arg " out="" argname key val
     [ "${fmt}" = "--bare" ] && prefix=""
-    # What: base_images.rust_alpine -> RUST_ALPINE_IMAGE.
+    # What: base_images.alpine -> ALPINE_IMAGE.
     # Why: Final stage pins its base from the one owner.
     # From: Issue #1683
-    val="$(_ci_manifest_scalar '^  rust_alpine:')"
+    val="$(_ci_manifest_scalar '^  alpine:')"
     val="${val%\"}"; val="${val#\"}"
     if [ -z "${val}" ]; then
-        ci_log "[CI-ERROR-BUILDARGS-0003]" "arg=\"RUST_ALPINE_IMAGE\" key=\"base_images.rust_alpine\" reason=\"missing central base image; FAIL CLOSED\""
+        ci_log "[CI-ERROR-BUILDARGS-0003]" "arg=\"ALPINE_IMAGE\" key=\"base_images.alpine\" reason=\"missing central base image; FAIL CLOSED\""
         return 2
     fi
-    out="${out}${prefix}RUST_ALPINE_IMAGE=${val}"$'\n'
+    out="${out}${prefix}ALPINE_IMAGE=${val}"$'\n'
     # What: external_versions.dhclient.* -> DHCLIENT_*.
     # Why: The reused v3.20 apk pins version+digests.
     # From: Issue #1683

@@ -1649,7 +1649,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # From: Issue #1683
     run bash "${BATS_TEST_DIRNAME}/ci.sh" build-args build-tools
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"--build-arg RUST_ALPINE_IMAGE=rust:alpine"* ]]
+    [[ "${output}" == *"--build-arg ALPINE_IMAGE=mirror.gcr.io"* ]]
     [[ "${output}" == *"--build-arg DHCLIENT_VERSION="* ]]
     [[ "${output}" == *"--build-arg DHCLIENT_SHA256_AMD64="* ]]
     [[ "${output}" == *"--build-arg DHCLIENT_SHA256_ARM64="* ]]
@@ -1665,7 +1665,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # Why: Empty value = FAIL CLOSED, no partial emit.
     # From: Issue #1683
     local m="${BATS_TEST_TMPDIR}/no-rust-alpine.yml"
-    grep -v '^  rust_alpine:' "${BATS_TEST_DIRNAME}/../yaml/build-manifest.yml" > "${m}"
+    grep -v '^  alpine:' "${BATS_TEST_DIRNAME}/../yaml/build-manifest.yml" > "${m}"
     CI_MANIFEST="${m}" run bash "${BATS_TEST_DIRNAME}/ci.sh" build-args build-tools
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-BUILDARGS-0003"* ]]
@@ -1678,7 +1678,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     run bash "${BATS_TEST_DIRNAME}/ci.sh" build-args build-tools --bare
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"DHCLIENT_VERSION="* ]]
-    [[ "${output}" == *"RUST_ALPINE_IMAGE=rust:alpine"* ]]
+    [[ "${output}" == *"ALPINE_IMAGE=mirror.gcr.io"* ]]
     [[ "${output}" != *"--build-arg"* ]]
 }
 
