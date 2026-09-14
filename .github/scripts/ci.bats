@@ -1772,6 +1772,27 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     [ "${base}" != "${changed}" ]
 }
 
+@test "build-tools arches lists every build_matrix apk arch" {
+    # What: the signature must cover every supported arch.
+    # Why: an arm64-only change must be representable.
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools arches
+    [ "${status}" -eq 0 ]
+    printf '%s\n' "${output}" | grep -qx "x86_64"
+    printf '%s\n' "${output}" | grep -qx "aarch64"
+}
+
+@test "build-tools signature moves on an arm64-only apk change" {
+    # What: an aarch64-only change moves the sig.
+    # Why: an arm64-only package bump must not be a NOOP.
+    # From: Issue #1683
+    local a b
+    a="$(bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools signature "x86_64:sccache-0.15.0-r0 aarch64:sccache-0.15.0-r0")"
+    b="$(bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools signature "x86_64:sccache-0.15.0-r0 aarch64:sccache-0.16.0-r0")"
+    [ -n "${a}" ]
+    [ "${a}" != "${b}" ]
+}
+
 @test "build-tools rejects an unknown subcommand (fail closed)" {
     # What: An unknown sub must not silently succeed.
     # Why: Fail-closed dispatch (AG-VAL-002).
