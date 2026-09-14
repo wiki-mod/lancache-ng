@@ -1643,41 +1643,21 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
 # BUILD-ARGS EMISSION (SOT -> --build-arg)
 # =========================================================
 
-@test "build-args emits every build-tools value from the SOT" {
-    # What: One owner feeds docker build via --build-arg.
-    # Why: The Dockerfile pins no version of its own.
+@test "build-args emits base + dhclient values from the SOT" {
+    # What: SOT owns base + dhclient; apk tools unpinned.
+    # Why: build-tools is a factory, not a version lock.
     # From: Issue #1683
     run bash "${BATS_TEST_DIRNAME}/ci.sh" build-args build-tools
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"--build-arg DOCKER_CLI_VERSION="* ]]
-    [[ "${output}" == *"--build-arg DOCKER_BUILDX_VERSION="* ]]
-    [[ "${output}" == *"--build-arg SCCACHE_VERSION="* ]]
-    [[ "${output}" == *"--build-arg CCACHE_VERSION="* ]]
-    [[ "${output}" == *"--build-arg CARGO_AUDIT_VERSION="* ]]
-    [[ "${output}" == *"--build-arg CARGO_TARPAULIN_VERSION="* ]]
-    [[ "${output}" == *"--build-arg ACTIONLINT_VERSION="* ]]
-    [[ "${output}" == *"--build-arg SHELLSPEC_VERSION="* ]]
     [[ "${output}" == *"--build-arg RUST_ALPINE_IMAGE=rust:alpine"* ]]
     [[ "${output}" == *"--build-arg DHCLIENT_VERSION="* ]]
     [[ "${output}" == *"--build-arg DHCLIENT_SHA256_AMD64="* ]]
     [[ "${output}" == *"--build-arg DHCLIENT_SHA256_ARM64="* ]]
-}
-
-@test "build-args fails closed on a missing central version" {
-    # What: A missing SOT version must never build unpinned.
-    # Why: Empty value = FAIL CLOSED, no partial emit.
+    # What: no apk tool version is emitted anymore.
+    # Why: normal apk pkgs must not be a version lock.
     # From: Issue #1683
-    local m="${BATS_TEST_TMPDIR}/no-sccache.yml"
-    awk '
-        /^  sccache:[[:space:]]*$/ { ins=1; print; next }
-        ins && $1=="version:" { ins=0; next }
-        ins && /^  [A-Za-z]/ { ins=0 }
-        { print }
-    ' "${BATS_TEST_DIRNAME}/../yaml/build-manifest.yml" > "${m}"
-    CI_MANIFEST="${m}" run bash "${BATS_TEST_DIRNAME}/ci.sh" build-args build-tools
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-BUILDARGS-0002"* ]]
-    [[ "${output}" != *"--build-arg"* ]]
+    [[ "${output}" != *"DOCKER_CLI_VERSION"* ]]
+    [[ "${output}" != *"SCCACHE_VERSION"* ]]
 }
 
 @test "build-args fails closed on a missing central base image" {
@@ -1697,7 +1677,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # From: Issue #1683
     run bash "${BATS_TEST_DIRNAME}/ci.sh" build-args build-tools --bare
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"DOCKER_CLI_VERSION="* ]]
+    [[ "${output}" == *"DHCLIENT_VERSION="* ]]
     [[ "${output}" == *"RUST_ALPINE_IMAGE=rust:alpine"* ]]
     [[ "${output}" != *"--build-arg"* ]]
 }
