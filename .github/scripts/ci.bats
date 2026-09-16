@@ -2343,6 +2343,69 @@ _cas_setup() {
     if [ "${sa}" = 0 ]; then [[ "${sb}" == 1 || "${sb}" == 2 ]]; else [[ "${sa}" == 1 || "${sa}" == 2 ]]; fi
 }
 
+@test "ledger read on an empty ledger reports the record absent" {
+    # What: no ledger ref yet means a record is absent.
+    # Why: empty ledger is absent (1), not UNKNOWN (2).
+    # From: Issue #1683
+    _cas_setup
+    cd "${CAS_A}"
+    run _ci_ledger_read origin some-identity
+    [ "${status}" -eq 1 ]
+}
+
+@test "ledger append then read returns state and digest" {
+    # What: a written record round-trips through the ref.
+    # Why: proves the write/read format agree.
+    # From: Issue #1683
+    _cas_setup
+    cd "${CAS_A}"
+    _ci_ledger_append origin id-1 dns linux/amd64 ACCEPTED sha256:aaa
+    run _ci_ledger_read origin id-1
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"ACCEPTED"* ]]
+    [[ "${output}" == *"sha256:aaa"* ]]
+}
+
+@test "ledger append upserts an identity to its latest record" {
+    # What: a second write replaces the same identity.
+    # Why: one current record per identity, no duplicates.
+    # From: Issue #1683
+    _cas_setup
+    cd "${CAS_A}"
+    _ci_ledger_append origin id-1 dns linux/amd64 PRODUCED_UNVERIFIED sha256:aaa
+    _ci_ledger_append origin id-1 dns linux/amd64 ACCEPTED sha256:aaa
+    run _ci_ledger_read origin id-1
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"ACCEPTED"* ]]
+    git fetch --quiet origin refs/ci/acceptance/ledger
+    [ "$(git cat-file -p FETCH_HEAD:records | grep -c '^id-1')" -eq 1 ]
+}
+
+@test "ledger keeps distinct identities independently" {
+    # What: two identities coexist in one ledger.
+    # Why: an append must not drop other records.
+    # From: Issue #1683
+    _cas_setup
+    cd "${CAS_A}"
+    _ci_ledger_append origin id-a dns linux/amd64 ACCEPTED sha256:aaa
+    _ci_ledger_append origin id-b dns linux/arm64 PRODUCED_UNVERIFIED sha256:bbb
+    run _ci_ledger_read origin id-a
+    [[ "${output}" == *"ACCEPTED"* ]]; [[ "${output}" == *"sha256:aaa"* ]]
+    run _ci_ledger_read origin id-b
+    [[ "${output}" == *"PRODUCED_UNVERIFIED"* ]]; [[ "${output}" == *"sha256:bbb"* ]]
+}
+
+@test "ledger read of an unknown identity is absent in a non-empty ledger" {
+    # What: an unlisted identity reads as absent.
+    # Why: absent (1) must not be confused with UNKNOWN.
+    # From: Issue #1683
+    _cas_setup
+    cd "${CAS_A}"
+    _ci_ledger_append origin id-a dns linux/amd64 ACCEPTED sha256:aaa
+    run _ci_ledger_read origin id-missing
+    [ "${status}" -eq 1 ]
+}
+
 # =========================================================
 # HISTORICAL REGRESSIONS
 # =========================================================

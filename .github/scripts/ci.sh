@@ -674,10 +674,6 @@ ci_cmd_resolve() {
 }
 
 # =========================================================
-# ACCEPTANCE INDEX
-# =========================================================
-
-# =========================================================
 # RETRY CLASSIFIER
 # =========================================================
 
@@ -726,14 +722,20 @@ _ci_cas_ref_sha() {
     return 2
 }
 
-# What: Build an empty-tree commit carrying a note.
-# Why: Synthetic identity; runners have no git user.
+# What: Run git under the synthetic CAS identity.
+# Why: Runners have no git user; one identity owner.
 # From: Issue #1683
-_ci_cas_note_commit() {
-    local note="$1"
+_ci_cas_git() {
     GIT_AUTHOR_NAME=ci-cas GIT_AUTHOR_EMAIL=ci-cas@lancache-ng.invalid \
     GIT_COMMITTER_NAME=ci-cas GIT_COMMITTER_EMAIL=ci-cas@lancache-ng.invalid \
-        git commit-tree "${CI_CAS_EMPTY_TREE}" -m "${note}" 2>/dev/null
+        git "$@"
+}
+
+# What: Build an empty-tree commit carrying a note.
+# Why: A lock head carries a note, not a real tree.
+# From: Issue #1683
+_ci_cas_note_commit() {
+    _ci_cas_git commit-tree "${CI_CAS_EMPTY_TREE}" -m "$1" 2>/dev/null
 }
 
 # What: Classify a failed CAS push: race vs real fail.
@@ -806,6 +808,92 @@ _ci_lock_release() {
     [ "${held}" = "${note}" ] || return 0
     git push --force-with-lease="${ref}:${cur}" "${remote}" ":${ref}" >/dev/null 2>&1 || return 1
     return 0
+}
+
+# =========================================================
+# ACCEPTANCE LEDGER (policy truth; §26)
+# =========================================================
+
+# What: The git ref holding the acceptance ledger.
+# Why: One ledger; §26 policy truth, not GHCR.
+# From: Issue #1683
+CI_LEDGER_REF="${CI_LEDGER_REF:-refs/ci/acceptance/ledger}"
+
+# What: The ledger blob path inside its tree.
+# Why: One tracked file holding the whole record set.
+# From: Issue #1683
+CI_LEDGER_FILE="records"
+
+# What: Print the ledger blob text; 1 empty, 2 unknown.
+# Why: A failed read is UNKNOWN, never "no records".
+# From: Issue #1683
+_ci_ledger_blob() {
+    local remote="$1" rc=0
+    _ci_cas_ref_sha "${remote}" "${CI_LEDGER_REF}" >/dev/null 2>&1 || rc=$?
+    [ "${rc}" -eq 1 ] && return 1
+    [ "${rc}" -eq 0 ] || return 2
+    git fetch --quiet --depth=1 "${remote}" "${CI_LEDGER_REF}" >/dev/null 2>&1 || return 2
+    git cat-file -p "FETCH_HEAD:${CI_LEDGER_FILE}" 2>/dev/null || return 2
+}
+
+# What: Read one identity's record: state + digest.
+# Why: One reader; resolve/digest/index share it (§26).
+# From: Issue #1683
+_ci_ledger_read() {
+    local remote="$1" identity="$2" blob rc=0 out
+    blob="$(_ci_ledger_blob "${remote}")" || rc=$?
+    [ "${rc}" -eq 1 ] && return 1
+    [ "${rc}" -eq 0 ] || return 2
+    out="$(printf '%s\n' "${blob}" | awk -F'\t' -v id="${identity}" '$1==id {print $4"\t"$5; exit}')"
+    [ -n "${out}" ] || return 1
+    printf '%s\n' "${out}"
+}
+
+# What: Build a ledger commit over a real tree.
+# Why: The ledger carries records, not an empty tree.
+# From: Issue #1683
+_ci_ledger_commit() {
+    local tree="$1" parent="$2" msg="$3"
+    local -a pa=()
+    [ -n "${parent}" ] && pa=(-p "${parent}")
+    _ci_cas_git commit-tree "${tree}" "${pa[@]}" -m "${msg}" 2>/dev/null
+}
+
+# What: Upsert one identity's record and CAS-push it.
+# Why: One aggregator write per workflow (§26.1).
+# From: Issue #1683
+_ci_ledger_append() {
+    local remote="$1" identity="$2" service="$3" platform="$4" state="$5" digest="$6"
+    local blob rc=0 parent="" merged newrec blobsha treesha commitsha raw
+    newrec="$(printf '%s\t%s\t%s\t%s\t%s' "${identity}" "${service}" "${platform}" "${state}" "${digest}")"
+    blob="$(_ci_ledger_blob "${remote}")" || rc=$?
+    if [ "${rc}" -eq 2 ]; then
+        ci_log "[CI-ERROR-LEDGER-0001]" "reason=\"ledger read UNKNOWN; refusing to write\""
+        return 3
+    fi
+    if [ "${rc}" -eq 1 ]; then
+        merged="${newrec}"
+    else
+        parent="$(git rev-parse FETCH_HEAD 2>/dev/null)" || return 3
+        merged="$(printf '%s\n' "${blob}" | awk -F'\t' -v id="${identity}" 'NF>0 && $1!=id')"
+        if [ -n "${merged}" ]; then
+            merged="$(printf '%s\n%s' "${merged}" "${newrec}")"
+        else
+            merged="${newrec}"
+        fi
+    fi
+    blobsha="$(printf '%s\n' "${merged}" | git hash-object -w --stdin)" || return 3
+    treesha="$(printf '100644 blob %s\t%s\n' "${blobsha}" "${CI_LEDGER_FILE}" | git mktree)" || return 3
+    commitsha="$(_ci_ledger_commit "${treesha}" "${parent}" "ledger ${identity} ${state}")" || return 3
+    rc=0
+    if [ -n "${parent}" ]; then
+        raw="$(git push --force-with-lease="${CI_LEDGER_REF}:${parent}" "${remote}" "${commitsha}:${CI_LEDGER_REF}" 2>&1)" || rc=$?
+    else
+        raw="$(git push "${remote}" "${commitsha}:${CI_LEDGER_REF}" 2>&1)" || rc=$?
+    fi
+    [ "${rc}" -eq 0 ] && return 0
+    [ "$(_ci_cas_push_class "${raw}")" = race ] && return 2
+    return 3
 }
 
 # =========================================================
