@@ -125,6 +125,32 @@ _ci_block_entry_field() {
     ' "${CI_MANIFEST}"
 }
 
+# What: Print a block->entry->field list, one item per line.
+# Why: One list reader; inline [..] and block - items alike.
+# From: Issue #1683
+_ci_block_entry_list() {
+    local block="$1" entry="$2" field="$3"
+    awk -v block="$block" -v entry="$entry" -v field="$field" '
+        $0 ~ ("^" block ":[[:space:]]*$") { inb = 1; next }
+        inb && /^[^[:space:]]/ { inb = 0 }
+        inb && /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ {
+            cur = $1; sub(/:$/, "", cur); inentry = (cur == entry); inlist = 0
+        }
+        inb && inentry && $0 ~ ("^    " field ":[[:space:]]*\\[") {
+            line = $0; sub(/^[^[]*\[/, "", line); sub(/\].*$/, "", line)
+            gsub(/[[:space:],]+/, " ", line)
+            n = split(line, a, " "); for (i = 1; i <= n; i++) if (a[i] != "") print a[i]
+            exit
+        }
+        inb && inentry && $0 ~ ("^    " field ":[[:space:]]*$") { inlist = 1; next }
+        inlist && /^      -[[:space:]]/ {
+            it = $0; sub(/^[[:space:]]*-[[:space:]]*/, "", it); print it; next
+        }
+        inlist && /^    [^[:space:]]/ { inlist = 0 }
+        inlist && /^  [^[:space:]]/ { inlist = 0 }
+    ' "${CI_MANIFEST}"
+}
+
 # What: Print one scalar field of a service entry.
 # Why: Read build_type/runner/final_base without a copy.
 # From: Issue #1683
@@ -136,21 +162,7 @@ ci_service_field() {
 # Why: dependency_graph is the SOT edge set (Finding 93).
 # From: Issue #1683
 ci_service_contexts() {
-    local service="$1"
-    awk -v svc="$service" '
-        /^dependency_graph:[[:space:]]*$/ { ind = 1; next }
-        ind && /^[^[:space:]]/ { ind = 0 }
-        ind && /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ {
-            cur = $1; sub(/:$/, "", cur); insvc = (cur == svc); incx = 0
-        }
-        ind && insvc && /^    contexts:[[:space:]]*\[/ {
-            line = $0; sub(/^[^[]*\[/, "", line); sub(/\].*$/, "", line)
-            gsub(/[[:space:],]+/, " ", line)
-            n = split(line, a, " ")
-            for (i = 1; i <= n; i++) if (a[i] != "") print a[i]
-            exit
-        }
-    ' "${CI_MANIFEST}"
+    _ci_block_entry_list dependency_graph "$1" contexts
 }
 
 # What: Print a named context's path from named_contexts.
@@ -1619,8 +1631,8 @@ ci_cmd_variables() {
     esac
 }
 
-# What: Emit build-tools base + dhclient build-args.
-# Why: SOT owns base+dhclient; apk tools stay unpinned.
+# What: Emit build-tools base + dhclient + apk build-args.
+# Why: SOT owns them; the Dockerfile pins nothing itself.
 # From: Issue #1683
 _ci_build_tools_build_args() {
     local fmt="${1:-}" prefix="--build-arg " out="" argname key val pkgs
@@ -1681,22 +1693,14 @@ ci_cmd_build_args() {
 }
 
 # What: Print the build-tools apk package list.
-# Why: One source (the Dockerfile) for the input check.
+# Why: One SOT source feeds the input check.
 # From: Issue #1683
 _ci_build_tools_packages() {
     local pkgs
-    # What: read the apk list from the SOT.
-    # Why: SOT is the owner; no Dockerfile parse-back.
+    # What: read the exact SOT apk list via the one reader.
+    # Why: SOT is the owner; no parse-back, no new parser.
     # From: Issue #1683
-    pkgs="$(awk '
-        /^build_toolchain:/ { inb = 1; next }
-        inb && /^[^[:space:]]/ { inb = 0; inp = 0 }
-        inb && /^    packages:[[:space:]]*$/ { inp = 1; next }
-        inp && /^      -[[:space:]]/ {
-            pkg = $0; sub(/^[[:space:]]*-[[:space:]]*/, "", pkg); print pkg; next
-        }
-        inp && /^  [^[:space:]]/ { inp = 0 }
-    ' "${CI_MANIFEST}" | LC_ALL=C sort -u)"
+    pkgs="$(_ci_block_entry_list build_toolchain build-tools packages | LC_ALL=C sort -u)"
     # What: fail closed if the SOT list is empty.
     # Why: an empty list would blind the input check.
     # From: Issue #1683

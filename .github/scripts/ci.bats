@@ -1722,6 +1722,18 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     done
 }
 
+@test "build-tools packages reads only build_toolchain.build-tools.packages" {
+    # What: same-named packages elsewhere must be ignored.
+    # Why: the reader must bind the exact block+entry path.
+    # From: Issue #1683
+    local m="${BATS_TEST_TMPDIR}/other.yml"
+    printf 'services:\n  proxy:\n    packages:\n      - WRONG_SVC\n' > "${m}"
+    printf 'build_toolchain:\n  build-tools:\n    packages:\n      - right-one\n  other-tool:\n    packages:\n      - WRONG_ENTRY\n' >> "${m}"
+    CI_MANIFEST="${m}" run bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools packages
+    [ "${status}" -eq 0 ]
+    [ "${output}" = "right-one" ]
+}
+
 @test "build-tools packages fails closed on an empty SOT list" {
     # What: no packages in the SOT must not pass.
     # Why: an empty list would blind the input check.
