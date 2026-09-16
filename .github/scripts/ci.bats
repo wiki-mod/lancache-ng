@@ -2017,6 +2017,19 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     [ "${status}" -ne 0 ]
 }
 
+@test "check deny-short-sha passes full SHA, fails a slice via ci.sh" {
+    # What: ci.sh owns the short-SHA ban; bats calls it.
+    # Why: guard logic lives once, tested through ci.sh.
+    # From: Issue #1683
+    printf 'x=${SHA}\n' > "${BATS_TEST_TMPDIR}/ok.sh"
+    run bash "${CI_SH}" check deny-short-sha "${BATS_TEST_TMPDIR}/ok.sh"
+    [ "${status}" -eq 0 ]
+    printf 'x=${SHA::7}\n' > "${BATS_TEST_TMPDIR}/bad.sh"
+    run bash "${CI_SH}" check deny-short-sha "${BATS_TEST_TMPDIR}/bad.sh"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0005"* ]]
+}
+
 # =========================================================
 # HISTORICAL REGRESSIONS
 # =========================================================

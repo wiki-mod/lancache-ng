@@ -2256,6 +2256,36 @@ _ci_check_comment_length() {
     return "${rc}"
 }
 
+# What: Fail on a short-SHA slice of a sha-named variable.
+# Why: bans collision-unsafe truncation (issue #1095 G2).
+# From: Issue #1683
+_ci_check_deny_short_sha() {
+    local pat='\$\{([A-Za-z_][A-Za-z0-9_]*)?([Ss][Hh][Aa]|[Cc][Oo][Mm][Mm][Ii][Tt]|[Cc][Aa][Nn][Dd][Ii][Dd][Aa][Tt][Ee]|[Rr][Ee][Vv][Ii][Ss][Ii][Oo][Nn])[A-Za-z0-9_]*[[:space:]]*(:[[:space:]]*:[[:space:]]*[A-Za-z0-9_]+|:[[:space:]]*0[[:space:]]*:[[:space:]]*[A-Za-z0-9_]+)\}'
+    local -a files=()
+    if [ "$#" -gt 0 ]; then files=("$@"); else
+        mapfile -t files < <(git ls-files -- '.github/scripts/*.sh' '.github/workflows/*.yml')
+    fi
+    local path out gs
+    local -a viol=()
+    for path in "${files[@]}"; do
+        [ -f "${path}" ] || continue
+        case "${path}" in */ci.sh|ci.sh) continue ;; esac
+        if ! out="$(grep -EnH "${pat}" "${path}")"; then
+            gs=$?
+            if [ "${gs}" -gt 1 ]; then
+                ci_log "[CI-ERROR-CHECK-0006]" "path=\"${path}\" reason=\"grep failed\""
+                return 2
+            fi
+        fi
+        [ -n "${out}" ] && viol+=("${out}")
+    done
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0005]" "reason=\"short-SHA slice banned (issue #1095)\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'deny-short-sha=clean files=%s\n' "${#files[@]}"
+}
+
 # What: Route a source-hygiene check to its function.
 # Why: One owner per guard invariant; ci.bats calls it.
 # From: Issue #1683
@@ -2266,6 +2296,7 @@ ci_cmd_check() {
         line-endings) _ci_check_line_endings "$@" ;;
         file-headers) _ci_check_file_headers "$@" ;;
         comment-length) _ci_check_comment_length "$@" ;;
+        deny-short-sha) _ci_check_deny_short_sha "$@" ;;
         *)
             ci_log "[CI-ERROR-CHECK-0001]" "sub=\"${sub}\" reason=\"unknown check\""
             return 2
