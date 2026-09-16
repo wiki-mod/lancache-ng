@@ -815,8 +815,8 @@ _ci_docker_publish() {
 # Why: HIGH/CRITICAL must fail; trivy stays a runner tool.
 # From: Issue #1683
 _ci_trivy_scan() {
-    local service="$1" digest="$2"
-    local ref="ghcr.io/$(_ci_repo)/${service}@${digest}"
+    local service="$1" digest="$2" ref
+    ref="ghcr.io/$(_ci_repo)/${service}@${digest}"
     _ci_retry trivy image --severity HIGH,CRITICAL --exit-code 1 --ignore-unfixed "${ref}"
 }
 
