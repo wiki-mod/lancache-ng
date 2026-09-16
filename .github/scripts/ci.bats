@@ -1146,15 +1146,154 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
 # GC
 # =========================================================
 
-_gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
+_gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
 
-@test "gc fails closed with no roots backend wired" {
-    # What: Missing roots backend must fail, not proceed.
-    # Why: No roots means every artifact looks unreachable.
+@test "default gc roots unions ledger, channel, and index-child digests" {
+    # What: Roots = ledger records + channels + children.
+    # Why: The transitive protected set, all states (§101).
     # From: Issue #1683
-    run bash "${CI_SH}" gc
+    GITHUB_REPOSITORY=wiki-mod/lancache-ng
+    _ci_ledger_blob() { printf 'id1\tproxy\tlinux/amd64\tPRODUCED_UNVERIFIED\tsha256:led\n'; }
+    ci_services() { printf 'proxy\n'; }
+    _ci_mutable_channels() { printf 'latest\n'; }
+    _ci_registry_probe() { printf 'sha256:chan\n'; }
+    _ci_index_raw() { printf '{"manifests":[{"platform":{"architecture":"amd64"},"digest":"sha256:child"}]}'; }
+    run _ci_default_gc_roots
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"sha256:led"* ]]
+    [[ "${output}" == *"sha256:chan"* ]]
+    [[ "${output}" == *"sha256:child"* ]]
+}
+
+@test "default gc roots refuses when the ledger read is UNKNOWN" {
+    # What: An unreadable ledger refuses; never empty roots.
+    # Why: UNKNOWN roots would delete live artifacts (§26).
+    # From: Issue #1683
+    GITHUB_REPOSITORY=wiki-mod/lancache-ng
+    _ci_ledger_blob() { return 2; }
+    run _ci_default_gc_roots
     [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-GC-0001"* ]]
+    [[ "${output}" == *"CI-ERROR-GC-0012"* ]]
+}
+
+@test "default gc roots refuses on a transient channel probe" {
+    # What: A flaky channel probe refuses the whole run.
+    # Why: A transient miss must not drop a live channel.
+    # From: Issue #1683
+    GITHUB_REPOSITORY=wiki-mod/lancache-ng
+    _ci_ledger_blob() { return 1; }
+    ci_services() { printf 'proxy\n'; }
+    _ci_mutable_channels() { printf 'latest\n'; }
+    _ci_registry_probe() { return 2; }
+    run _ci_default_gc_roots
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-GC-0013"* ]]
+}
+
+@test "default gc roots refuses on a transient index-child read" {
+    # What: A flaky child read refuses the whole run.
+    # Why: Missing children would orphan-delete live arches.
+    # From: Issue #1683
+    GITHUB_REPOSITORY=wiki-mod/lancache-ng
+    _ci_ledger_blob() { printf 'id1\tproxy\tlinux/amd64\tACCEPTED\tsha256:led\n'; }
+    ci_services() { printf '\n'; }
+    _ci_mutable_channels() { printf '\n'; }
+    _ci_index_raw() { return 2; }
+    run _ci_default_gc_roots
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-GC-0014"* ]]
+}
+
+@test "default gc roots skips a not-yet-promoted channel without failing" {
+    # What: A not-found channel is skipped, not a failure.
+    # Why: A service never promoted is legitimately absent.
+    # From: Issue #1683
+    GITHUB_REPOSITORY=wiki-mod/lancache-ng
+    _ci_ledger_blob() { printf 'id1\tproxy\tlinux/amd64\tACCEPTED\tsha256:led\n'; }
+    ci_services() { printf 'proxy\n'; }
+    _ci_mutable_channels() { printf 'latest\n'; }
+    _ci_registry_probe() { return 1; }
+    _ci_index_raw() { return 1; }
+    run _ci_default_gc_roots
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"sha256:led"* ]]
+}
+
+@test "default gc reachable keeps a candidate whose digest is a root" {
+    # What: A root-set member is referenced, kept.
+    # Why: Ledger and channel digests are protected (§101).
+    # From: Issue #1683
+    CI_GC_ROOTS_FILE="${BATS_TEST_TMPDIR}/roots"
+    printf 'sha256:aaa\nsha256:bbb\n' > "${CI_GC_ROOTS_FILE}"
+    run _ci_default_gc_reachable "$(printf 'sha256:aaa\t123\t2020-01-01T00:00:00Z')"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == "referenced" ]]
+}
+
+@test "default gc reachable keeps a freshly created candidate via the floor" {
+    # What: A recent unreferenced candidate is kept.
+    # Why: Protects in-flight tags before aggregation.
+    # From: Issue #1683
+    CI_GC_ROOTS_FILE="${BATS_TEST_TMPDIR}/roots"
+    printf 'sha256:root\n' > "${CI_GC_ROOTS_FILE}"
+    local now; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    run _ci_default_gc_reachable "$(printf 'sha256:fresh\t9\t%s' "${now}")"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == "referenced" ]]
+}
+
+@test "default gc reachable marks an old unreferenced candidate unreachable" {
+    # What: Old and unreferenced classifies as garbage.
+    # Why: Past the grace floor with no root is deletable.
+    # From: Issue #1683
+    CI_GC_ROOTS_FILE="${BATS_TEST_TMPDIR}/roots"
+    printf 'sha256:root\n' > "${CI_GC_ROOTS_FILE}"
+    run _ci_default_gc_reachable "$(printf 'sha256:old\t9\t2020-01-01T00:00:00Z')"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == "unreachable" ]]
+}
+
+@test "default gc reachable refuses without a materialized roots file" {
+    # What: No roots file means no safe judgment.
+    # Why: Guessing reachability could delete live images.
+    # From: Issue #1683
+    unset CI_GC_ROOTS_FILE
+    run _ci_default_gc_reachable "$(printf 'sha256:x\t9\t2020-01-01T00:00:00Z')"
+    [ "${status}" -eq 2 ]
+}
+
+@test "default gc reachable refuses a candidate with no created_at" {
+    # What: Missing created_at is UNKNOWN, never a delete.
+    # Why: The floor cannot judge without a timestamp.
+    # From: Issue #1683
+    CI_GC_ROOTS_FILE="${BATS_TEST_TMPDIR}/roots"
+    printf 'sha256:root\n' > "${CI_GC_ROOTS_FILE}"
+    run _ci_default_gc_reachable "sha256:notimestamp"
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-GC-0016"* ]]
+}
+
+@test "default gc reachable refuses an unparseable created_at" {
+    # What: A garbage timestamp is UNKNOWN, never a delete.
+    # Why: An unreadable date must not classify as garbage.
+    # From: Issue #1683
+    CI_GC_ROOTS_FILE="${BATS_TEST_TMPDIR}/roots"
+    printf 'sha256:root\n' > "${CI_GC_ROOTS_FILE}"
+    run _ci_default_gc_reachable "$(printf 'sha256:x\t9\tnot-a-date')"
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-GC-0016"* ]]
+}
+
+@test "default gc reachable refuses when the grace value is missing" {
+    # What: A missing grace value fails closed.
+    # Why: Empty grace makes the floor now and deletes all.
+    # From: Issue #1683
+    CI_GC_ROOTS_FILE="${BATS_TEST_TMPDIR}/roots"
+    printf 'sha256:root\n' > "${CI_GC_ROOTS_FILE}"
+    _ci_manifest_scalar() { printf ''; }
+    run _ci_default_gc_reachable "$(printf 'sha256:x\t9\t2020-01-01T00:00:00Z')"
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-GC-0015"* ]]
 }
 
 @test "gc fails closed on an empty protected-roots set" {
@@ -1221,17 +1360,6 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
         run bash "${CI_SH}" gc
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-GC-0005"* ]]
-}
-
-@test "gc fails closed with no reachability backend wired" {
-    # What: Missing reachability backend must fail closed.
-    # Why: No probe means no safe delete decision (§97).
-    # From: Issue #1683
-    CI_GC_ROOTS_CMD="$(_gc_roots)" \
-    CI_GC_CANDIDATES_CMD="$(_stub cands 'echo sha-x')" \
-        run bash "${CI_SH}" gc
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-GC-0003"* ]]
 }
 
 @test "gc fails closed when the reachability probe itself fails" {
@@ -1360,6 +1488,29 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     [[ "${output}" == *"CI-INFO-GC-0011"* ]]
     [[ "${output}" == *"deleted=0"* ]]
     [ ! -f "${BATS_TEST_TMPDIR}/deleted.log" ]
+}
+
+@test "gc keeps a candidate the default probe finds in the roots file" {
+    # What: Framework makes roots; default probe reads.
+    # Why: End-to-end membership KEEP via the roots file.
+    # From: Issue #1683
+    CI_GC_ROOTS_CMD="$(_stub roots 'printf "sha256:aaa\n"')" \
+    CI_GC_CANDIDATES_CMD="$(_stub cands 'printf "sha256:aaa\t7\t2020-01-01T00:00:00Z\n"')" \
+        run bash "${CI_SH}" gc
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"action=KEEP"* ]]
+}
+
+@test "gc keeps a fresh non-root candidate via the recency floor" {
+    # What: A recent non-root candidate is kept end-to-end.
+    # Why: In-flight artifacts survive GC (advisor case).
+    # From: Issue #1683
+    local now; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    CI_GC_ROOTS_CMD="$(_stub roots 'printf "sha256:root\n"')" \
+    CI_GC_CANDIDATES_CMD="$(_stub cands "printf 'sha256:fresh\t7\t${now}\n'")" \
+        run bash "${CI_SH}" gc
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"action=KEEP"* ]]
 }
 
 # =========================================================

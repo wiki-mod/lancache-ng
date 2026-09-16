@@ -251,6 +251,7 @@ release:
     keep_sha_tags_for_supported_releases: true
     protect_release_and_rollback_digests: true
     deletion_policy: manual-or-approved-automation-only
+    unaggregated_grace_minutes: 1440
 
 # What: CI runtime variables with their fallback defaults.
 # Why: No hardcode, like CARGO_BUILD_JOBS (AG-CI-006).

@@ -1386,6 +1386,19 @@ _ci_accepted_digest() {
     printf '%s' "${rec}" | cut -f2
 }
 
+# What: Inspect an index raw; 1 not-found, 2 unknown.
+# Why: One reader; transient must not read as absent.
+# From: Issue #1683
+_ci_index_raw() {
+    local ref="$1" raw rc=0
+    raw="$(docker buildx imagetools inspect "${ref}" --raw 2>&1)" || rc=$?
+    if [ "${rc}" -ne 0 ]; then
+        [ "$(_ci_classify_failure "${raw}")" = not_found ] && return 1
+        return 2
+    fi
+    printf '%s' "${raw}"
+}
+
 # What: Look up an existing multi-arch index (injectable).
 # Why: Idempotency: reuse an identical index.
 # From: Issue #1683
@@ -1401,7 +1414,7 @@ _ci_index_lookup() {
     tag="ghcr.io/${repo}/${service}:sha-${sha}"
     idx="$(_ci_registry_probe "${tag}")" || grc=$?
     [ "${grc}" -eq 0 ] || return 1
-    raw="$(docker buildx imagetools inspect "${tag}" --raw 2>/dev/null)" || return 1
+    raw="$(_ci_index_raw "${tag}")" || return 1
     plats="$(printf '%s' "${raw}" | jq -r '.manifests[]? | select(.platform.os=="linux" and .platform.architecture!="unknown") | "linux/\(.platform.architecture)=\(.digest)"' | tr '\n' ' ')"
     printf '%s %s\n' "${idx}" "${plats% }"
 }
@@ -1714,16 +1727,58 @@ _ci_deletion_policy() {
     _ci_manifest_scalar '^[[:space:]]+deletion_policy:[[:space:]]'
 }
 
+# What: Emit the transitive protected-root digest set.
+# Why: Ledger + channels + their index children (§101).
+# From: Issue #1683
+_ci_default_gc_roots() {
+    local remote repo blob rc=0 pairs="" out="" svc channel dig prc line s d raw
+    remote="$(_ci_ledger_remote)"
+    repo="$(_ci_repo)"
+    blob="$(_ci_ledger_blob "${remote}")" || rc=$?
+    # What: A failed ledger read refuses, never empties.
+    # Why: UNKNOWN roots would delete live artifacts.
+    # From: Issue #1683
+    if [ "${rc}" -eq 2 ]; then
+        ci_log "[CI-ERROR-GC-0012]" "reason=\"ledger read UNKNOWN; refusing empty roots\""
+        return 2
+    fi
+    # What: Every ledger record is a root, all states.
+    # Why: PRODUCED_UNVERIFIED is pending, not garbage.
+    # From: Issue #1683
+    [ "${rc}" -eq 0 ] && pairs="$(printf '%s\n' "${blob}" | awk -F'\t' 'NF>=5 && $2!="" && $5!="" {print $2"\t"$5}')"
+    while IFS= read -r svc; do
+        [ -n "${svc}" ] || continue
+        while IFS= read -r channel; do
+            [ -n "${channel}" ] || continue
+            prc=0
+            dig="$(_ci_registry_probe "ghcr.io/${repo}/${svc}:${channel}")" || prc=$?
+            # What: A transient probe refuses the run.
+            # Why: A flaky miss must not drop a channel.
+            # From: Issue #1683
+            [ "${prc}" -eq 2 ] && { ci_log "[CI-ERROR-GC-0013]" "service=\"${svc}\" channel=\"${channel}\" reason=\"channel probe UNKNOWN; refusing roots\""; return 2; }
+            [ "${prc}" -eq 0 ] && pairs="${pairs}"$'\n'"${svc}"$'\t'"${dig}"
+        done < <(_ci_mutable_channels)
+    done < <(ci_services)
+    pairs="$(printf '%s\n' "${pairs}" | awk 'NF>0' | LC_ALL=C sort -u)"
+    while IFS=$'\t' read -r s d; do
+        [ -n "${d}" ] || continue
+        out="${out}${d}"$'\n'
+        rc=0
+        raw="$(_ci_index_raw "ghcr.io/${repo}/${s}@${d}")" || rc=$?
+        # What: A transient child read refuses the run.
+        # Why: Dropping children orphan-deletes arches.
+        # From: Issue #1683
+        [ "${rc}" -eq 2 ] && { ci_log "[CI-ERROR-GC-0014]" "service=\"${s}\" digest=\"${d}\" reason=\"index child read UNKNOWN; refusing roots\""; return 2; }
+        [ "${rc}" -eq 0 ] && out="${out}$(printf '%s' "${raw}" | jq -r '.manifests[]? | select(.platform.architecture!="unknown") | .digest')"$'\n'
+    done <<< "${pairs}"
+    printf '%s\n' "${out}" | awk 'NF>0' | LC_ALL=C sort -u
+}
+
 # What: List protected GC roots (injectable backend).
 # Why: Empty roots must fail, not mark all unreachable.
 # From: Issue #1683
 _ci_gc_roots() {
-    if [ -n "${CI_GC_ROOTS_CMD:-}" ]; then
-        "${CI_GC_ROOTS_CMD}"
-        return "$?"
-    fi
-    ci_log "[CI-ERROR-GC-0001]" "reason=\"no roots backend wired (CI_GC_ROOTS_CMD unset)\""
-    return 2
+    "${CI_GC_ROOTS_CMD:-_ci_default_gc_roots}"
 }
 
 # What: List GC candidate artifacts (injectable backend).
@@ -1738,17 +1793,55 @@ _ci_gc_candidates() {
     return 2
 }
 
+# What: Classify a candidate against the root digest set.
+# Why: Membership or recency floor decides; else garbage.
+# From: Issue #1683
+_ci_default_gc_reachable() {
+    local candidate="$1" digest created window created_epoch now floor
+    digest="$(printf '%s' "${candidate}" | awk -F'\t' '{print $1}')"
+    created="$(printf '%s' "${candidate}" | awk -F'\t' '{print $3}')"
+    # What: Roots must be materialized by the caller.
+    # Why: No roots file means we cannot judge; refuse.
+    # From: Issue #1683
+    { [ -n "${CI_GC_ROOTS_FILE:-}" ] && [ -f "${CI_GC_ROOTS_FILE}" ]; } || return 2
+    if grep -qxF "${digest}" "${CI_GC_ROOTS_FILE}"; then
+        printf 'referenced\n'
+        return 0
+    fi
+    # What: Fail closed unless grace is a positive integer.
+    # Why: Empty grace makes floor=now and deletes all.
+    # From: Issue #1683
+    window="$(_ci_manifest_scalar '^[[:space:]]+unaggregated_grace_minutes:[[:space:]]')"
+    case "${window}" in
+        ''|*[!0-9]*)
+            ci_log "[CI-ERROR-GC-0015]" "value=\"${window}\" reason=\"unaggregated_grace_minutes not a positive integer\""
+            return 2
+            ;;
+    esac
+    [ "${window}" -gt 0 ] || { ci_log "[CI-ERROR-GC-0015]" "value=\"${window}\" reason=\"grace must be greater than zero\""; return 2; }
+    # What: A candidate needs created_at for the floor.
+    # Why: No timestamp is UNKNOWN, never a delete.
+    # From: Issue #1683
+    [ -n "${created}" ] || { ci_log "[CI-ERROR-GC-0016]" "digest=\"${digest}\" reason=\"missing created_at; cannot apply recency floor\""; return 2; }
+    created_epoch="$(date -d "${created}" +%s 2>/dev/null)" || created_epoch=""
+    case "${created_epoch}" in
+        ''|*[!0-9]*)
+            ci_log "[CI-ERROR-GC-0016]" "created=\"${created}\" reason=\"created_at unparseable\""
+            return 2
+            ;;
+    esac
+    now="$(date +%s)"
+    floor=$(( now - window * 60 ))
+    [ "${created_epoch}" -ge "${floor}" ] && { printf 'referenced\n'; return 0; }
+    printf 'unreachable\n'
+}
+
 # What: Probe one candidate against the OCI ref graph.
 # Why: Registry truth, not SQLite, decides reachability.
 # From: Issue #1683
 _ci_gc_reachable() {
     local candidate="$1"
-    if [ -n "${CI_GC_REACHABLE_CMD:-}" ]; then
-        "${CI_GC_REACHABLE_CMD}" "${candidate}"
-        return "$?"
-    fi
-    ci_log "[CI-ERROR-GC-0003]" "candidate=\"${candidate}\" reason=\"no reachability backend wired (CI_GC_REACHABLE_CMD unset)\""
-    return 2
+    "${CI_GC_REACHABLE_CMD:-_ci_default_gc_reachable}" "${candidate}"
 }
 
 # What: Classify one candidate KEEP / DELETE / fail.
@@ -1774,8 +1867,7 @@ _ci_gc_classify() {
 # Why: Repo-wide reachability is the named §98 exception.
 # From: Issue #1683
 ci_cmd_gc() {
-    local mode="dry-run" arg roots cands line action policy
-    local del=0 keep=0 deleted=0 to_delete=""
+    local mode="dry-run" arg roots rc=0
     for arg in "$@"; do
         case "${arg}" in
             --apply) mode="apply" ;;
@@ -1790,6 +1882,24 @@ ci_cmd_gc() {
         ci_log "[CI-ERROR-GC-0007]" "reason=\"empty protected-roots set; refusing to treat all as unreachable\""
         return 2
     fi
+    # What: Materialize roots once for the default probe.
+    # Why: One read; avoids re-deriving roots per candidate.
+    # From: Issue #1683
+    CI_GC_ROOTS_FILE="$(mktemp "${TMPDIR:-/var/tmp}/ci-gc-roots.XXXXXX")" || return 2
+    export CI_GC_ROOTS_FILE
+    printf '%s\n' "${roots}" | awk 'NF>0' > "${CI_GC_ROOTS_FILE}"
+    _ci_gc_run "${mode}" || rc=$?
+    rm -f "${CI_GC_ROOTS_FILE}"
+    unset CI_GC_ROOTS_FILE
+    return "${rc}"
+}
+
+# What: Classify and, in apply mode, delete candidates.
+# Why: Wrapper owns the roots file; this owns the policy.
+# From: Issue #1683
+_ci_gc_run() {
+    local mode="$1" cands line action policy
+    local del=0 keep=0 deleted=0 to_delete=""
     if ! cands="$(_ci_gc_candidates)"; then return 2; fi
     if [ -z "${cands}" ]; then
         printf 'gc result=noop candidates=0 mode=%s\n' "${mode}"
