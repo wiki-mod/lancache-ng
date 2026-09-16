@@ -2035,7 +2035,7 @@ ci_main() {
         ci_log "[CI-ERROR-CORE-0002]" "command=\"${command}\" reason=\"unknown subcommand\" known=\"${!CI_DISPATCH[*]}\""
         return 2
     fi
-    ci_require_manifest || return "$?"
+    case "${command}" in check) ;; *) ci_require_manifest || return "$?" ;; esac
     "${fn}" "$@"
 }
 
@@ -2346,6 +2346,29 @@ _ci_check_mutable_refs() {
     printf 'mutable-refs=clean files=%s\n' "${#files[@]}"
 }
 
+# What: Fail if a bare-path script is not committed 100755.
+# Why: bare-path exec needs the bit; core.filemode hides it.
+# From: Issue #1683
+_ci_check_executable_bits() {
+    local -a paths=("$@")
+    if [ "${#paths[@]}" -eq 0 ]; then
+        paths=(.github/scripts/ci.sh)
+        while IFS= read -r h; do [ -n "${h}" ] && paths+=("${h}"); done < <(git ls-files -- '.githooks/*')
+    fi
+    local path mode
+    local -a viol=()
+    for path in "${paths[@]}"; do
+        mode="$(git ls-files -s -- "${path}" | awk '{print $1; exit}')"
+        [ -z "${mode}" ] && continue
+        [ "${mode}" = "100755" ] || viol+=("${path}: mode ${mode} not 100755")
+    done
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0009]" "reason=\"bare-path script not committed 100755\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'executable-bits=clean paths=%s\n' "${#paths[@]}"
+}
+
 # What: Route a source-hygiene check to its function.
 # Why: One owner per guard invariant; ci.bats calls it.
 # From: Issue #1683
@@ -2359,6 +2382,7 @@ ci_cmd_check() {
         deny-short-sha) _ci_check_deny_short_sha "$@" ;;
         language-policy) _ci_check_language_policy "$@" ;;
         mutable-refs) _ci_check_mutable_refs "$@" ;;
+        executable-bits) _ci_check_executable_bits "$@" ;;
         *)
             ci_log "[CI-ERROR-CHECK-0001]" "sub=\"${sub}\" reason=\"unknown check\""
             return 2

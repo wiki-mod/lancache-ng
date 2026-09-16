@@ -2059,6 +2059,22 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     [[ "${output}" == *"CI-ERROR-CHECK-0008"* ]]
 }
 
+@test "check executable-bits fails a non-755 bare-path script via ci.sh" {
+    # What: ci.sh owns the mode check; bats calls it.
+    # Why: bare-path scripts must carry the exec bit.
+    # From: Issue #1683
+    local r="${BATS_TEST_TMPDIR}/exr"; mkdir -p "${r}"
+    git -C "${r}" init -q
+    printf '#!/usr/bin/env bash\n' > "${r}/s.sh"
+    git -C "${r}" add s.sh
+    run bash -c "cd '${r}' && bash '${CI_SH}' check executable-bits s.sh"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0009"* ]]
+    git -C "${r}" update-index --chmod=+x s.sh
+    run bash -c "cd '${r}' && bash '${CI_SH}' check executable-bits s.sh"
+    [ "${status}" -eq 0 ]
+}
+
 # =========================================================
 # HISTORICAL REGRESSIONS
 # =========================================================
