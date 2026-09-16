@@ -2369,6 +2369,64 @@ _ci_check_executable_bits() {
     printf 'executable-bits=clean paths=%s\n' "${#paths[@]}"
 }
 
+# What: Flag review-chronology and stale line-refs.
+# Why: AG-CODE-002/003 comments state current code only.
+# From: Issue #1683
+_ci_check_review_chronology() {
+    local verbs='(caught|found|flagged|spotted|identified|discovered|noticed)'
+    local rc="(\\b${verbs}\\b[[:space:]]+(in|during)[[:space:]]+((a|the|this)[[:space:]]+)?(code[[:space:]]+|pr[[:space:]]+|peer[[:space:]]+)?(self-)?review\\b)"
+    rc="${rc}|(\\breview\\b[^a-zA-Z.]{0,20}\\b${verbs}\\b)"
+    rc="${rc}|(\\b(before|prior to|until)[[:space:]]+this[[:space:]]+(fix|change|commit|patch)\\b)"
+    rc="${rc}|(\\breview[[:space:]]+finding\\b)"
+    local lr='\(([Ss]ee[[:space:]]+)?\bline\b[[:space:]]*~?[0-9]+'
+    local -a files=()
+    if [ "$#" -gt 0 ]; then files=("$@"); else
+        mapfile -t files < <(git ls-files)
+    fi
+    local path out ln joined fnums num
+    local -a viol=()
+    for path in "${files[@]}"; do
+        [ -f "${path}" ] || continue
+        case "${path}" in */ci.sh|ci.sh|*/ci.bats|ci.bats) continue ;; esac
+        out="$(grep -EinIH "${rc}" "${path}")" && viol+=("${out}")
+        out="$(grep -EinIH "${lr}" "${path}")" && viol+=("${out}")
+        while IFS=$'\t' read -r ln joined; do
+            [ -n "${ln}" ] || continue
+            shopt -s nocasematch
+            [[ "${joined}" =~ ${rc} ]] && viol+=("${path}:${ln}: ${joined}")
+            shopt -u nocasematch
+        done < <(awk '
+            function isc(l) { return l ~ /^[[:space:]]*(#|\/\/|--|\/\*|\*|<!--|\{#)/ }
+            function pl(l,  p) { p=l; sub(/^[[:space:]]*(#|\/\/|--|\/\*|\*|<!--|\{#)[[:space:]]*/, "", p); return p }
+            { c=isc($0); cur=(c?pl($0):""); if (pc && c) printf "%d\t%s %s\n", NR-1, pp, cur; pc=c; pp=cur }
+        ' "${path}")
+        grep -qEI 'From:' "${path}" 2>/dev/null || continue
+        fnums="$(grep -EI 'From:' "${path}" 2>/dev/null | grep -oEI '#[0-9]+' | tr -d '#' | sort -u || true)"
+        [ -z "${fnums}" ] && continue
+        while IFS= read -r num; do
+            [ -n "${num}" ] || continue
+            out="$(awk -v n="${num}" '
+                $0 ~ /From:/ { next }
+                { line=$0; inq=""; m=0; len=length(line)
+                  for (i=1;i<=len;i++) { ch=substr(line,i,1)
+                    if (inq=="") { if (ch=="\"") { inq=ch; continue }
+                      if (ch=="\x27") { pv=((i>1)?substr(line,i-1,1):""); if (pv !~ /[A-Za-z0-9_]/) { inq=ch; continue } } }
+                    else if (ch==inq) { inq=""; continue }
+                    if (inq=="" && ch=="#") { rest=substr(line,i+1,length(n))
+                      if (rest==n) { af=substr(line,i+1+length(n),1); bf=((i>1)?substr(line,i-1,1):"")
+                        if (af !~ /[0-9]/ && bf !~ /[0-9]/) m=1 } } }
+                  if (m) print FILENAME ":" FNR ": " line }
+            ' "${path}")"
+            [ -n "${out}" ] && viol+=("${out}")
+        done <<< "${fnums}"
+    done
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0010]" "reason=\"review-chronology / stale line-ref / bare #N\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'review-chronology=clean files=%s\n' "${#files[@]}"
+}
+
 # What: Route a source-hygiene check to its function.
 # Why: One owner per guard invariant; ci.bats calls it.
 # From: Issue #1683
@@ -2383,6 +2441,7 @@ ci_cmd_check() {
         language-policy) _ci_check_language_policy "$@" ;;
         mutable-refs) _ci_check_mutable_refs "$@" ;;
         executable-bits) _ci_check_executable_bits "$@" ;;
+        review-chronology) _ci_check_review_chronology "$@" ;;
         *)
             ci_log "[CI-ERROR-CHECK-0001]" "sub=\"${sub}\" reason=\"unknown check\""
             return 2

@@ -2075,6 +2075,22 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     [ "${status}" -eq 0 ]
 }
 
+@test "check review-chronology flags narration and stale line-ref" {
+    # What: ci.sh owns AG-CODE-002/003; bats calls it.
+    # Why: comments state current code, no chronology.
+    # From: Issue #1683
+    printf '# a normal current-state comment.\n' > "${BATS_TEST_TMPDIR}/okc.sh"
+    run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/okc.sh"
+    [ "${status}" -eq 0 ]
+    printf '# found during code review earlier.\n' > "${BATS_TEST_TMPDIR}/badc.sh"
+    run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/badc.sh"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0010"* ]]
+    printf '# the handler (line 42) does the work.\n' > "${BATS_TEST_TMPDIR}/badl.sh"
+    run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/badl.sh"
+    [ "${status}" -ne 0 ]
+}
+
 # =========================================================
 # HISTORICAL REGRESSIONS
 # =========================================================
