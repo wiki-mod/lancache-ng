@@ -460,7 +460,7 @@ _ci_identity_pins() {
     case "${build_type}" in
         rust|toolchain)
             _ci_manifest_scalar "^  alpine:"
-            grep -E '^(  build-tools:|    tag:|    image:)' "${CI_MANIFEST}" | head -3
+            awk '/^(  build-tools:|    tag:|    image:)/ { if (n < 3) { print; n++ } }' "${CI_MANIFEST}"
             ;;
         apk)
             _ci_manifest_scalar "^  alpine:"
@@ -1151,7 +1151,7 @@ _ci_promote_stack_complete() {
     svcs="$(ci_services)" || return "$?"
     while IFS= read -r svc; do
         [ -n "${svc}" ] || continue
-        if ! printf '%s\n' "${cand}" | grep -q "^${svc}="; then
+        if ! grep -q "^${svc}=" <<< "${cand}"; then
             ci_log "[CI-ERROR-PROMOTE-0004]" "channel=\"${channel}\" service=\"${svc}\" reason=\"incomplete stack; no promotion (docs section 50)\""
             return 2
         fi
@@ -2427,6 +2427,30 @@ _ci_check_review_chronology() {
     printf 'review-chronology=clean files=%s\n' "${#files[@]}"
 }
 
+# What: Fail on a live pipe into an early-exiting consumer.
+# Why: SIGPIPE under pipefail exits 141 (AG-VAL-029).
+# From: Issue #1683
+_ci_check_pipefail_early_exit() {
+    local pat='\|[[:space:]]*(grep[[:space:]]+[^|]*-[a-zA-Z]*q|grep[[:space:]]+[^|]*-[a-zA-Z]*m[0-9]|head([[:space:]]|$)|sed[^|]*([[:space:];{]|[0-9])q)'
+    local -a files=()
+    if [ "$#" -gt 0 ]; then files=("$@"); else
+        mapfile -t files < <(git ls-files -- '.github/scripts/*.sh' '*/Dockerfile' 'Dockerfile' 'services/*.sh')
+    fi
+    local path out
+    local -a viol=()
+    for path in "${files[@]}"; do
+        [ -f "${path}" ] || continue
+        case "${path}" in */ci.sh|ci.sh) continue ;; esac
+        grep -qE 'pipefail|build-tools|BUILD_TOOLS_IMAGE' "${path}" || continue
+        out="$(grep -nE "${pat}" "${path}")" && viol+=("${path}: ${out}")
+    done
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0011]" "reason=\"live pipe into early-exit consumer (SIGPIPE)\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'pipefail-early-exit=clean files=%s\n' "${#files[@]}"
+}
+
 # What: Route a source-hygiene check to its function.
 # Why: One owner per guard invariant; ci.bats calls it.
 # From: Issue #1683
@@ -2442,6 +2466,7 @@ ci_cmd_check() {
         mutable-refs) _ci_check_mutable_refs "$@" ;;
         executable-bits) _ci_check_executable_bits "$@" ;;
         review-chronology) _ci_check_review_chronology "$@" ;;
+        pipefail-early-exit) _ci_check_pipefail_early_exit "$@" ;;
         *)
             ci_log "[CI-ERROR-CHECK-0001]" "sub=\"${sub}\" reason=\"unknown check\""
             return 2

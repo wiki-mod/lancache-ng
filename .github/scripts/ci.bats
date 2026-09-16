@@ -2091,6 +2091,22 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     [ "${status}" -ne 0 ]
 }
 
+@test "check pipefail-early-exit flags grep -q, not plain sed -n" {
+    # What: ci.sh owns the SIGPIPE check; bats calls it.
+    # Why: only true early-exit consumers risk exit 141.
+    # From: Issue #1683
+    printf 'set -o pipefail\nx="$(seq 1 9)"\n' > "${BATS_TEST_TMPDIR}/okp.sh"
+    run bash "${CI_SH}" check pipefail-early-exit "${BATS_TEST_TMPDIR}/okp.sh"
+    [ "${status}" -eq 0 ]
+    printf 'set -o pipefail\nseq 1 9 | grep -q 3\n' > "${BATS_TEST_TMPDIR}/badp.sh"
+    run bash "${CI_SH}" check pipefail-early-exit "${BATS_TEST_TMPDIR}/badp.sh"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0011"* ]]
+    printf 'set -o pipefail\nseq 1 9 | sed -n "s/3/x/p"\n' > "${BATS_TEST_TMPDIR}/sedp.sh"
+    run bash "${CI_SH}" check pipefail-early-exit "${BATS_TEST_TMPDIR}/sedp.sh"
+    [ "${status}" -eq 0 ]
+}
+
 # =========================================================
 # HISTORICAL REGRESSIONS
 # =========================================================
