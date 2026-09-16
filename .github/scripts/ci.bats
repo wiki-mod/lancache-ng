@@ -2134,6 +2134,21 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     [ "${status}" -eq 0 ]
 }
 
+@test "docker-build builds a per-identity per-arch tag via buildx" {
+    # What: ci.sh executes the build; YAML only calls it.
+    # Why: engine owns execution, orchestrator just calls.
+    # From: Issue #1683
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    printf '#!/usr/bin/env bash\necho "docker $*"\n' > "${bin}/docker"
+    chmod +x "${bin}/docker"
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+        run _ci_docker_build proxy abc123 linux/amd64
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"buildx build --push"* ]]
+    [[ "${output}" == *"ghcr.io/wiki-mod/lancache-ng/proxy:sha-abc123-amd64"* ]]
+    [[ "${output}" == *"--platform linux/amd64"* ]]
+}
+
 # =========================================================
 # HISTORICAL REGRESSIONS
 # =========================================================

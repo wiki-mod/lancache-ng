@@ -742,8 +742,54 @@ _ci_cas_lookup() {
     return 1
 }
 
+# What: Lowercased owner/repo for GHCR image refs.
+# Why: GHCR paths are case-sensitive and must be lower.
+# From: Issue #1683
+_ci_repo() {
+    local r="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY required}"
+    printf '%s' "${r,,}"
+}
+
+# What: Run any command, retrying only a transient failure.
+# Why: RETRY OPERATION != REBUILD; classify before retry.
+# From: Issue #1683
+_ci_retry() {
+    local n=0 max=4 raw cls
+    while :; do
+        n=$((n + 1))
+        if raw="$("$@" 2>&1)"; then
+            printf '%s\n' "${raw}"
+            return 0
+        fi
+        cls="$(_ci_classify_failure "${raw}")"
+        if [ "${cls}" != "transient" ] || [ "${n}" -ge "${max}" ]; then
+            ci_error "[CI-ERROR-BUILD-0011]" "reason=\"command failed cls=${cls} attempt=${n}/${max}\"" "${raw}"
+            return 2
+        fi
+        sleep "$((n * n))"
+    done
+}
+
+# What: Build and push one service image via buildx.
+# Why: ci.sh owns execution; YAML only calls ci.sh.
+# From: Issue #1683
+_ci_docker_build() {
+    local service="$1" identity="$2" platform="$3"
+    local image context arch tag a
+    image="ghcr.io/$(_ci_repo)/${service}"
+    context="$(ci_service_field "${service}" context)"
+    [ -z "${context}" ] && context="services/${service}"
+    arch="${platform##*/}"
+    tag="${image}:sha-${identity}-${arch}"
+    local -a args=()
+    while IFS= read -r a; do
+        [ -n "${a}" ] && args+=(--build-arg "${a}")
+    done < <(ci_cmd_build_args "${service}" --bare "${platform}")
+    _ci_retry docker buildx build --push --platform "${platform}" --tag "${tag}" "${args[@]}" "${context}"
+}
+
 # What: Run the real (or injected) image build+push.
-# Why: Injectable so build logic tests without Docker.
+# Why: injected for tests; docker buildx is the default.
 # From: Issue #1683
 _ci_do_build() {
     local service="$1" identity="$2" platform="$3"
@@ -751,8 +797,7 @@ _ci_do_build() {
         "${CI_BUILD_CMD}" "${service}" "${identity}" "${platform}"
         return "$?"
     fi
-    ci_log "[CI-ERROR-BUILD-0003]" "service=\"${service}\" reason=\"no build backend wired (CI_BUILD_CMD unset)\""
-    return 2
+    _ci_docker_build "${service}" "${identity}" "${platform}"
 }
 
 # What: Read the semantic build-impact verdict, fail-closed.
