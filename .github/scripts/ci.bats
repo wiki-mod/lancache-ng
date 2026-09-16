@@ -1976,6 +1976,19 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     [[ "${output}" == *"CI-ERROR-BUILDTOOLS-0003"* ]]
 }
 
+@test "check line-endings passes LF, fails CRLF via ci.sh" {
+    # What: ci.sh owns the LF invariant; bats calls it.
+    # Why: guard logic lives once, tested through ci.sh.
+    # From: Issue #1683
+    printf 'a\nb\n' > "${BATS_TEST_TMPDIR}/lf.txt"
+    run bash "${CI_SH}" check line-endings "${BATS_TEST_TMPDIR}/lf.txt"
+    [ "${status}" -eq 0 ]
+    printf 'a\r\nb\r\n' > "${BATS_TEST_TMPDIR}/crlf.txt"
+    run bash "${CI_SH}" check line-endings "${BATS_TEST_TMPDIR}/crlf.txt"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0002"* ]]
+}
+
 # =========================================================
 # HISTORICAL REGRESSIONS
 # =========================================================

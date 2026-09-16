@@ -35,7 +35,7 @@ declare -A CI_DISPATCH=(
     [build-tools]=ci_cmd_build_tools [publish]=ci_cmd_publish [verify]=ci_cmd_verify
     [test]=ci_cmd_test [scan]=ci_cmd_scan [assemble]=ci_cmd_assemble
     [validate]=ci_cmd_validate [promote]=ci_cmd_promote [release]=ci_cmd_release
-    [gc]=ci_cmd_gc [variables]=ci_cmd_variables
+    [gc]=ci_cmd_gc [variables]=ci_cmd_variables [check]=ci_cmd_check
 )
 
 # =========================================================
@@ -2037,6 +2037,49 @@ ci_main() {
     fi
     ci_require_manifest || return "$?"
     "${fn}" "$@"
+}
+
+# =========================================================
+# SOURCE-HYGIENE CHECKS
+# =========================================================
+
+# What: Fail on any listed text file carrying CRLF.
+# Why: eol=lf can be bypassed (API write, pre-attr commit).
+# From: Issue #1683
+_ci_check_line_endings() {
+    local -a files=()
+    if [ "$#" -gt 0 ]; then files=("$@"); else
+        mapfile -t files < <(git ls-files)
+    fi
+    local path
+    local -a offenders=()
+    for path in "${files[@]}"; do
+        case "${path}" in
+            *.png|*.jpg|*.jpeg|*.gif|*.ico|*.woff|*.woff2|*.ttf|*.eot|*.crt|*.key|*.pem) continue ;;
+        esac
+        [ -f "${path}" ] || continue
+        grep -aq $'\r' "${path}" 2>/dev/null && offenders+=("${path}")
+    done
+    if [ "${#offenders[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0002]" "reason=\"CRLF found; repo requires LF\"" "$(printf '%s\n' "${offenders[@]}")"
+        return 1
+    fi
+    printf 'line-endings=clean files=%s\n' "${#files[@]}"
+}
+
+# What: Route a source-hygiene check to its function.
+# Why: One owner per guard invariant; ci.bats calls it.
+# From: Issue #1683
+ci_cmd_check() {
+    local sub="${1:-}"
+    if [ "$#" -gt 0 ]; then shift; fi
+    case "${sub}" in
+        line-endings) _ci_check_line_endings "$@" ;;
+        *)
+            ci_log "[CI-ERROR-CHECK-0001]" "sub=\"${sub}\" reason=\"unknown check\""
+            return 2
+            ;;
+    esac
 }
 
 # What: Run the dispatcher only on direct execution.
