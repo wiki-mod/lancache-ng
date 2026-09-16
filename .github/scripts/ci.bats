@@ -41,7 +41,7 @@ setup() {
     # What: An unknown command must never succeed.
     # Why: Fail-closed dispatch (AG-VAL-002).
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" bogus-command
+    run bash "${CI_SH}" bogus-command
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-CORE-0002"* ]]
 }
@@ -54,7 +54,7 @@ setup() {
     # What: A service's own context selects it alone.
     # Why: No unrelated service is a rebuild candidate.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" plan services/proxy/nginx.conf
+    run bash "${CI_SH}" plan services/proxy/nginx.conf
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"proxy=true"* ]]
     [[ "${output}" == *"ui=false"* ]]
@@ -65,7 +65,7 @@ setup() {
     # What: proxy COPYs cdn-domains.txt (named context).
     # Why: The dependency edge must select proxy too.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" plan services/dns/cdn-domains.txt
+    run bash "${CI_SH}" plan services/dns/cdn-domains.txt
     [[ "${output}" == *"proxy=true"* ]]
 }
 
@@ -73,7 +73,7 @@ setup() {
     # What: shared-scripts feeds 6 services (Finding 93).
     # Why: One shared context, exactly its consumers.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" plan scripts/lib/verify-version-banner.sh
+    run bash "${CI_SH}" plan scripts/lib/verify-version-banner.sh
     [[ "${output}" == *"proxy=true"* ]]
     [[ "${output}" == *"dns=true"* ]]
     [[ "${output}" == *"ui=true"* ]]
@@ -88,7 +88,7 @@ setup() {
     # What: plan selects candidates; identity decides build.
     # Why: Keep the §4/§7 separation explicit and visible.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" plan services/ui/src/main.rs
+    run bash "${CI_SH}" plan services/ui/src/main.rs
     [[ "${output}" == *"candidates only; identity/CAS decides build"* ]]
 }
 
@@ -123,10 +123,10 @@ setup() {
     # What: Same content+platform -> same keyed id, always.
     # Why: NOOP/reuse depends on a stable identity.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" identity ui linux/amd64
+    run bash "${CI_SH}" identity ui linux/amd64
     [ "${status}" -eq 0 ]
     local first="${output}"
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" identity ui linux/amd64
+    run bash "${CI_SH}" identity ui linux/amd64
     [ "${output}" = "${first}" ]
     [[ "${output}" =~ ^platform=linux/amd64\ identity=[0-9a-f]{64}$ ]]
 }
@@ -135,10 +135,10 @@ setup() {
     # What: proxy(apk), ui(rust), build-tools all differ.
     # Why: An id must key on its own inputs, not collide.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" identity proxy linux/amd64
+    run bash "${CI_SH}" identity proxy linux/amd64
     [ "${status}" -eq 0 ]
     local proxy="${output}"
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" identity build-tools linux/amd64
+    run bash "${CI_SH}" identity build-tools linux/amd64
     [ "${status}" -eq 0 ]
     [ "${output}" != "${proxy}" ]
 }
@@ -147,10 +147,10 @@ setup() {
     # What: identity/resolve of an apk service must exit 0.
     # Why: A printed id with rc=1 masks a broken pipeline.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" identity ntp linux/amd64
+    run bash "${CI_SH}" identity ntp linux/amd64
     [ "${status}" -eq 0 ]
     [[ "${output}" =~ ^platform=linux/amd64\ identity=[0-9a-f]{64}$ ]]
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" resolve ntp linux/amd64
+    run bash "${CI_SH}" resolve ntp linux/amd64
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"state=UNKNOWN"* ]]
 }
@@ -159,7 +159,7 @@ setup() {
     # What: Missing arg must not crash on set -u.
     # Why: Fail-closed with our own message, not a trace.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" identity
+    run bash "${CI_SH}" identity
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-IDENTITY-0001"* ]]
 }
@@ -172,7 +172,7 @@ setup() {
     # What: No platform arg -> one keyed line per platform.
     # Why: Default = all; output never mixes bare and keyed.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" identity ui
+    run bash "${CI_SH}" identity ui
     [ "${status}" -eq 0 ]
     [ "${#lines[@]}" -eq 2 ]
     [[ "${output}" == *"platform=linux/amd64 identity="* ]]
@@ -183,11 +183,11 @@ setup() {
     # What: Platform selects; each arch has its own id.
     # Why: An amd64 binary must not reuse an arm64 id.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" identity ui linux/amd64
+    run bash "${CI_SH}" identity ui linux/amd64
     [ "${status}" -eq 0 ]
     [ "${#lines[@]}" -eq 1 ]
     local a="${output}"
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" identity ui linux/arm64
+    run bash "${CI_SH}" identity ui linux/arm64
     [ "${output}" != "${a}" ]
 }
 
@@ -195,7 +195,7 @@ setup() {
     # What: An unknown platform fails closed.
     # Why: Unknown input is an error, not a silent fan-out.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" identity ui linux/riscv64
+    run bash "${CI_SH}" identity ui linux/riscv64
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-IDENTITY-0002"* ]]
 }
@@ -207,11 +207,11 @@ setup() {
     local m="${BATS_TEST_TMPDIR}/manifest.yml"
     cp "${BATS_TEST_DIRNAME}/../yaml/build-manifest.yml" "${m}"
     local amd_before arm_before amd_after arm_after
-    amd_before="$(CI_MANIFEST="${m}" bash "${BATS_TEST_DIRNAME}/ci.sh" identity netdata linux/amd64)"
-    arm_before="$(CI_MANIFEST="${m}" bash "${BATS_TEST_DIRNAME}/ci.sh" identity netdata linux/arm64)"
+    amd_before="$(CI_MANIFEST="${m}" bash "${CI_SH}" identity netdata linux/amd64)"
+    arm_before="$(CI_MANIFEST="${m}" bash "${CI_SH}" identity netdata linux/arm64)"
     sed -i 's/sha256_aarch64: [0-9a-f]\{64\}/sha256_aarch64: deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/' "${m}"
-    amd_after="$(CI_MANIFEST="${m}" bash "${BATS_TEST_DIRNAME}/ci.sh" identity netdata linux/amd64)"
-    arm_after="$(CI_MANIFEST="${m}" bash "${BATS_TEST_DIRNAME}/ci.sh" identity netdata linux/arm64)"
+    amd_after="$(CI_MANIFEST="${m}" bash "${CI_SH}" identity netdata linux/amd64)"
+    arm_after="$(CI_MANIFEST="${m}" bash "${CI_SH}" identity netdata linux/arm64)"
     [ "${amd_before}" = "${amd_after}" ]
     [ "${arm_before}" != "${arm_after}" ]
 }
@@ -223,7 +223,7 @@ setup() {
     local m="${BATS_TEST_TMPDIR}/manifest.yml"
     cp "${BATS_TEST_DIRNAME}/../yaml/build-manifest.yml" "${m}"
     sed -i '/^  platforms: \[/d' "${m}"
-    CI_MANIFEST="${m}" run bash "${BATS_TEST_DIRNAME}/ci.sh" identity ui
+    CI_MANIFEST="${m}" run bash "${CI_SH}" identity ui
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-IDENTITY-0003"* ]]
     [[ "${output}" != *"identity="* ]]
@@ -294,7 +294,7 @@ setup() {
     # What: impact needs an explicit base ref.
     # Why: No base means no comparison; never guess.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" impact
+    run bash "${CI_SH}" impact
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-IMPACT-0001"* ]]
 }
@@ -303,7 +303,7 @@ setup() {
     # What: Identical refs rebuild nothing.
     # Why: No diff means no build; no rebuild.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" impact HEAD HEAD
+    run bash "${CI_SH}" impact HEAD HEAD
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"impact=NOOP"* ]]
     [[ "${output}" != *"impact=BUILD"* ]]
@@ -341,7 +341,7 @@ setup() {
     # What: A base without the SOT is UNKNOWN, not BUILD.
     # Why: No base truth MUST NOT authorize BUILD; escalate.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" impact 4b825dc642cb6eb9a060e54bf8d69288fbee4904
+    run bash "${CI_SH}" impact 4b825dc642cb6eb9a060e54bf8d69288fbee4904
     [ "${status}" -eq 3 ]
     [[ "${output}" == *"no SOT at base"* ]]
     [[ "${output}" == *"impact=UNKNOWN"* ]]
@@ -368,7 +368,7 @@ setup() {
     # What: A selected unknown platform fails closed.
     # Why: Fail-closed dispatch (AG-VAL-002).
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" resolve ui linux/riscv64
+    run bash "${CI_SH}" resolve ui linux/riscv64
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-RESOLVE-0004"* ]]
 }
@@ -377,7 +377,7 @@ setup() {
     # What: A selected unknown platform fails closed.
     # Why: Fail-closed dispatch (AG-VAL-002).
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" build ui linux/riscv64
+    run bash "${CI_SH}" build ui linux/riscv64
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-BUILD-0006"* ]]
 }
@@ -387,7 +387,7 @@ setup() {
     # Why: Downstream assembly keys per-platform digests.
     # From: Issue #1683
     STUB_STATE=PRESENT_ACCEPTED
-    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${BATS_TEST_DIRNAME}/ci.sh" build ui linux/arm64
+    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${CI_SH}" build ui linux/arm64
     [ "${status}" -eq 0 ]
     [ "${#lines[@]}" -eq 1 ]
     [[ "${output}" == *"platform=linux/arm64"* ]]
@@ -419,13 +419,7 @@ setup() {
 # Why: Test the resolver logic without a live GHCR.
 # From: Issue #1683
 _probe_stub() {
-    printf '%s\n' "${STUB_STATE}" > "${BATS_TEST_TMPDIR}/probe.sh.state" 2>/dev/null || true
-    cat <<STUB > "${BATS_TEST_TMPDIR}/probe.sh"
-#!/usr/bin/env bash
-printf '%s\\n' "${STUB_STATE}"
-STUB
-    chmod +x "${BATS_TEST_TMPDIR}/probe.sh"
-    printf '%s\n' "${BATS_TEST_TMPDIR}/probe.sh"
+    _stub probe.sh "printf '%s\\n' \"${STUB_STATE}\""
 }
 
 @test "resolve maps PRESENT_ACCEPTED to noop (DEFAULT=NOOP)" {
@@ -433,7 +427,7 @@ STUB
     # Why: NOOP/reuse before build is the core rule.
     # From: Issue #1683
     STUB_STATE=PRESENT_ACCEPTED
-    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${BATS_TEST_DIRNAME}/ci.sh" resolve ui
+    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${CI_SH}" resolve ui
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"state=PRESENT_ACCEPTED"* ]]
     [[ "${output}" == *"action=noop"* ]]
@@ -444,7 +438,7 @@ STUB
     # Why: resolver action; full BUILD_ACK gate is in build.
     # From: Issue #1683
     STUB_STATE=MISSING_CONFIRMED
-    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${BATS_TEST_DIRNAME}/ci.sh" resolve ui
+    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${CI_SH}" resolve ui
     [[ "${output}" == *"action=build"* ]]
 }
 
@@ -453,7 +447,7 @@ STUB
     # Why: UNKNOWN != BUILD (Contract section 4).
     # From: Issue #1683
     STUB_STATE=UNKNOWN
-    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${BATS_TEST_DIRNAME}/ci.sh" resolve ui
+    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${CI_SH}" resolve ui
     [[ "${output}" == *"state=UNKNOWN"* ]]
     [[ "${output}" == *"action=escalate"* ]]
     [[ "${output}" != *"action=build"* ]]
@@ -463,7 +457,7 @@ STUB
     # What: No probe -> UNKNOWN, never assume missing.
     # Why: Absence of evidence is not evidence of absence.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" resolve ui
+    run bash "${CI_SH}" resolve ui
     [[ "${output}" == *"state=UNKNOWN"* ]]
     [[ "${output}" == *"action=escalate"* ]]
 }
@@ -472,7 +466,7 @@ STUB
     # What: Missing arg must fail with a stable id.
     # Why: Fail-closed dispatch (AG-VAL-002).
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" resolve
+    run bash "${CI_SH}" resolve
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-RESOLVE-0001"* ]]
 }
@@ -536,7 +530,7 @@ _stub() {
     # Why: NOOP/reuse is the default outcome.
     # From: Issue #1683
     STUB_STATE=PRESENT_ACCEPTED
-    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${BATS_TEST_DIRNAME}/ci.sh" build ui
+    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${CI_SH}" build ui
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"result=reuse-accepted"* ]]
 }
@@ -546,7 +540,7 @@ _stub() {
     # Why: UNKNOWN != BUILD (Contract section 4).
     # From: Issue #1683
     STUB_STATE=UNKNOWN
-    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${BATS_TEST_DIRNAME}/ci.sh" build ui
+    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${CI_SH}" build ui
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"result=escalate"* ]]
     [[ "${output}" != *"result=built"* ]]
@@ -560,7 +554,7 @@ _stub() {
     CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
     CI_IMPACT_CMD="$(_stub impact 'echo BUILD')" \
     CI_CAS_LOOKUP_CMD="$(_stub cas 'exit 0')" \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" build ui
+        run bash "${CI_SH}" build ui
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"result=reuse-binary-cas"* ]]
 }
@@ -573,7 +567,7 @@ _stub() {
     CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
     CI_IMPACT_CMD="$(_stub impact 'echo BUILD')" \
     CI_CAS_LOOKUP_CMD="$(_stub cas 'exit 1')" \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" build ui
+        run bash "${CI_SH}" build ui
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-BUILD-0002"* ]]
 }
@@ -588,7 +582,7 @@ _stub() {
     CI_CAS_LOOKUP_CMD="$(_stub cas 'exit 1')" \
     CI_BUILD_CMD="$(_stub build 'exit 0')" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" build ui
+        run bash "${CI_SH}" build ui
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"state=BUILD_ACK"* ]]
     [[ "${output}" == *"result=built"* ]]
@@ -599,7 +593,7 @@ _stub() {
     # Why: MISMATCH MUST fail, never build (Contract 77 K).
     # From: Issue #1683
     STUB_STATE=MISMATCH
-    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${BATS_TEST_DIRNAME}/ci.sh" resolve ui
+    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${CI_SH}" resolve ui
     [[ "${output}" == *"state=MISMATCH"* ]]
     [[ "${output}" == *"action=fail"* ]]
     [[ "${output}" != *"action=build"* ]]
@@ -615,7 +609,7 @@ _stub() {
     CI_CAS_LOOKUP_CMD="$(_stub cas 'exit 1')" \
     CI_BUILD_CMD="$(_stub build 'echo BUILD_BACKEND_INVOKED')" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" build ui
+        run bash "${CI_SH}" build ui
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"result=fail-mismatch"* ]]
     [[ "${output}" == *"CI-ERROR-BUILD-0010"* ]]
@@ -628,7 +622,7 @@ _stub() {
     # Why: A failed probe MUST NOT build (AG-VAL-030).
     # From: Issue #1683
     CI_RESOLVE_PROBE_CMD="$(_stub probe 'echo MISSING_CONFIRMED; exit 7')" \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" resolve ui
+        run bash "${CI_SH}" resolve ui
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"state=UNKNOWN"* ]]
     [[ "${output}" == *"action=escalate"* ]]
@@ -644,7 +638,7 @@ _stub() {
     CI_CAS_LOOKUP_CMD="$(_stub cas 'exit 1')" \
     CI_BUILD_CMD="$(_stub build 'echo BUILD_BACKEND_INVOKED')" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" build ui
+        run bash "${CI_SH}" build ui
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"result=escalate"* ]]
     [[ "${output}" != *"BUILD_BACKEND_INVOKED"* ]]
@@ -661,7 +655,7 @@ _stub() {
     CI_CAS_LOOKUP_CMD="$(_stub cas 'exit 1')" \
     CI_BUILD_CMD="$(_stub build 'echo BUILD_BACKEND_INVOKED')" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" build ui
+        run bash "${CI_SH}" build ui
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"result=no-build-no-impact"* ]]
     [[ "${output}" != *"BUILD_BACKEND_INVOKED"* ]]
@@ -677,7 +671,7 @@ _stub() {
     CI_CAS_LOOKUP_CMD="$(_stub cas 'exit 1')" \
     CI_BUILD_CMD="$(_stub build 'echo BUILD_BACKEND_INVOKED')" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" build ui
+        run bash "${CI_SH}" build ui
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"result=escalate"* ]]
     [[ "${output}" != *"BUILD_BACKEND_INVOKED"* ]]
@@ -691,7 +685,7 @@ _stub() {
     # What: A failed test run is a failed run (AG-VAL-002).
     # Why: Never skip or swallow a real test failure.
     # From: Issue #1683
-    CI_TEST_CMD="$(_stub t 'echo boom; exit 1')" run bash "${BATS_TEST_DIRNAME}/ci.sh" test ui
+    CI_TEST_CMD="$(_stub t 'echo boom; exit 1')" run bash "${CI_SH}" test ui
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-TEST-0003"* ]]
     [[ "${output}" == *"boom"* ]]
@@ -701,7 +695,7 @@ _stub() {
     # What: Green backend -> tested=ok.
     # Why: The one success path.
     # From: Issue #1683
-    CI_TEST_CMD="$(_stub t 'exit 0')" run bash "${BATS_TEST_DIRNAME}/ci.sh" test ui
+    CI_TEST_CMD="$(_stub t 'exit 0')" run bash "${CI_SH}" test ui
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"tested=ok"* ]]
 }
@@ -711,7 +705,7 @@ _stub() {
     # Why: All CI staging is /var/tmp (maintainer rule).
     # From: Issue #1683
     CI_TMPDIR=/tmp CI_SCAN_CMD="$(_stub s 'exit 0')" GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" scan ui sha256:x
+        run bash "${CI_SH}" scan ui sha256:x
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-SCAN-0003"* ]]
 }
@@ -721,7 +715,7 @@ _stub() {
     # Why: The one success path for scan.
     # From: Issue #1683
     CI_SCAN_CMD="$(_stub s 'exit 0')" GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" scan ui sha256:x
+        run bash "${CI_SH}" scan ui sha256:x
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"scanned=clean"* ]]
     [[ "${output}" == *"tmpdir=/var/tmp"* ]]
@@ -731,7 +725,7 @@ _stub() {
     # What: Scan pulls the image -> authenticated.
     # Why: Never anonymous (rate-limit).
     # From: Issue #1683
-    CI_SCAN_CMD="$(_stub s 'exit 0')" run bash "${BATS_TEST_DIRNAME}/ci.sh" scan ui sha256:x
+    CI_SCAN_CMD="$(_stub s 'exit 0')" run bash "${CI_SH}" scan ui sha256:x
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-BUILD-0002"* ]]
 }
@@ -748,7 +742,7 @@ _stub() {
     # What: Publish is an authenticated GHCR action.
     # Why: Never push anonymously (rate-limit).
     # From: Issue #1683
-    CI_PUBLISH_CMD="$(_stub pub 'echo sha256:abc')" run bash "${BATS_TEST_DIRNAME}/ci.sh" publish ui
+    CI_PUBLISH_CMD="$(_stub pub 'echo sha256:abc')" run bash "${CI_SH}" publish ui
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-BUILD-0002"* ]]
 }
@@ -758,7 +752,7 @@ _stub() {
     # Why: The digest is the ref the next phase verifies.
     # From: Issue #1683
     CI_PUBLISH_CMD="$(_stub pub 'echo sha256:deadbeef')" GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" publish ui
+        run bash "${CI_SH}" publish ui
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"published=sha256:deadbeef"* ]]
 }
@@ -768,7 +762,7 @@ _stub() {
     # Why: Confirms the accepted artifact is the real one.
     # From: Issue #1683
     CI_READBACK_CMD="$(_stub rb 'echo sha256:match')" GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" verify ui sha256:match
+        run bash "${CI_SH}" verify ui sha256:match
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"verified=sha256:match"* ]]
 }
@@ -778,7 +772,7 @@ _stub() {
     # Why: A mismatch must never be accepted (§7).
     # From: Issue #1683
     CI_READBACK_CMD="$(_stub rb 'echo sha256:other')" GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" verify ui sha256:expected
+        run bash "${CI_SH}" verify ui sha256:expected
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-VERIFY-0005"* ]]
     [[ "${output}" == *"MISMATCH"* ]]
@@ -804,7 +798,7 @@ _asm_digest_stub() {
     # Why: A missing platform must not rebuild (docs §45).
     # From: Issue #1683
     STUB_STATE=UNKNOWN
-    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${BATS_TEST_DIRNAME}/ci.sh" assemble ui
+    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${CI_SH}" assemble ui
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-ASSEMBLE-0002"* ]]
     [[ "${output}" != *"result=assembled"* ]]
@@ -815,7 +809,7 @@ _asm_digest_stub() {
     # Why: Fail-safe: unaccepted stays a GC candidate.
     # From: Issue #1683
     STUB_STATE=PRODUCED_UNVERIFIED
-    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${BATS_TEST_DIRNAME}/ci.sh" assemble ui
+    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${CI_SH}" assemble ui
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-ASSEMBLE-0002"* ]]
 }
@@ -829,7 +823,7 @@ _asm_digest_stub() {
     CI_ACCEPTED_DIGEST_CMD="$(_asm_digest_stub)" \
     CI_ASSEMBLE_CMD="$(_stub asm "echo $(_asm_idx)")" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" assemble ui
+        run bash "${CI_SH}" assemble ui
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"result=assembled"* ]]
     [[ "${output}" == *"assembled=$(_asm_idx)"* ]]
@@ -844,7 +838,7 @@ _asm_digest_stub() {
     CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
     CI_ACCEPTED_DIGEST_CMD="$(_asm_digest_stub)" \
     CI_INDEX_LOOKUP_CMD="$(_stub idx "echo \"$(_asm_idx) linux/amd64=$(_asm_a) linux/arm64=$(_asm_b)\"")" \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" assemble ui
+        run bash "${CI_SH}" assemble ui
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"result=reuse-index"* ]]
     [[ "${output}" == *"assembled=$(_asm_idx)"* ]]
@@ -859,7 +853,7 @@ _asm_digest_stub() {
     CI_ACCEPTED_DIGEST_CMD="$(_asm_digest_stub)" \
     CI_INDEX_LOOKUP_CMD="$(_stub idx "echo \"$(_asm_idx) linux/amd64=$(_asm_a) linux/arm64=$(_asm_a)\"")" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" assemble ui
+        run bash "${CI_SH}" assemble ui
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-ASSEMBLE-0004"* ]]
 }
@@ -872,7 +866,7 @@ _asm_digest_stub() {
     CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
     CI_ACCEPTED_DIGEST_CMD="$(_asm_digest_stub)" \
     CI_ASSEMBLE_CMD="$(_stub asm "echo $(_asm_idx)")" \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" assemble ui
+        run bash "${CI_SH}" assemble ui
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-BUILD-0002"* ]]
 }
@@ -883,7 +877,7 @@ _asm_digest_stub() {
     # From: Issue #1683
     STUB_STATE=PRESENT_ACCEPTED
     CI_RESOLVE_PROBE_CMD="$(_probe_stub)" GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" assemble ui
+        run bash "${CI_SH}" assemble ui
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-ASSEMBLE-0003"* ]]
 }
@@ -892,7 +886,7 @@ _asm_digest_stub() {
     # What: Missing arg must fail with a stable id.
     # Why: Fail-closed dispatch (AG-VAL-002).
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" assemble
+    run bash "${CI_SH}" assemble
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-ASSEMBLE-0001"* ]]
 }
@@ -914,7 +908,7 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     # What: Missing arg must fail with a stable id.
     # Why: Fail-closed dispatch (AG-VAL-002).
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" promote
+    run bash "${CI_SH}" promote
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-PROMOTE-0001"* ]]
 }
@@ -923,7 +917,7 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     # What: Only known mutable channels may be moved.
     # Why: promote moves refs only; no invented list.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" promote bogus
+    run bash "${CI_SH}" promote bogus
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-PROMOTE-0002"* ]]
 }
@@ -934,7 +928,7 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     # From: Issue #1683
     local dig="sha256:$(printf 'a%.0s' {1..64})"
     CI_STACK_CANDIDATE_CMD="$(_stub cand "echo proxy=${dig}")" GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" promote nightly
+        run bash "${CI_SH}" promote nightly
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-PROMOTE-0004"* ]]
 }
@@ -945,7 +939,7 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     # From: Issue #1683
     local dig="sha256:$(printf 'a%.0s' {1..64})"
     CI_STACK_CANDIDATE_CMD="$(_promote_full_candidate "${dig}")" GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" promote nightly
+        run bash "${CI_SH}" promote nightly
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-PROMOTE-0005"* ]]
 }
@@ -956,7 +950,7 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     # From: Issue #1683
     local dig="sha256:$(printf 'a%.0s' {1..64})"
     CI_STACK_CANDIDATE_CMD="$(_promote_full_candidate "${dig}")" CI_STACK_VALIDATED=SUCCESS \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" promote nightly
+        run bash "${CI_SH}" promote nightly
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-BUILD-0002"* ]]
 }
@@ -971,7 +965,7 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     CI_PROMOTE_MOVE_CMD="$(_stub mv 'touch "${BATS_TEST_TMPDIR}/moved.$1"')" \
     CI_CHANNEL_READBACK_CMD="$(_stub rb "[ -f \"\${BATS_TEST_TMPDIR}/moved.\$1\" ] && echo ${dig} || true")" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" promote nightly
+        run bash "${CI_SH}" promote nightly
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"result=promoted"* ]]
     [[ "$(cat "${BATS_TEST_TMPDIR}/lock.log")" == *"UNLOCK nightly"* ]]
@@ -987,7 +981,7 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     CI_PROMOTE_MOVE_CMD="$(_stub mv 'true')" \
     CI_CHANNEL_READBACK_CMD="$(_stub rb "echo ${dig}")" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" promote nightly
+        run bash "${CI_SH}" promote nightly
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"result=already-promoted"* ]]
     [ ! -f "${BATS_TEST_TMPDIR}/lock.log" ]
@@ -1004,7 +998,7 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     CI_PROMOTE_MOVE_CMD="$(_stub mv 'true')" \
     CI_CHANNEL_READBACK_CMD="$(_stub rb "echo ${other}")" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" promote nightly
+        run bash "${CI_SH}" promote nightly
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-PROMOTE-0009"* ]]
     [[ "$(cat "${BATS_TEST_TMPDIR}/lock.log")" == *"UNLOCK nightly"* ]]
@@ -1018,7 +1012,7 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     # What: No freshness verdict must stop the release.
     # Why: Unverified validation is not releasable.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" release
+    run bash "${CI_SH}" release
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-RELEASE-0001"* ]]
 }
@@ -1028,7 +1022,7 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     # Why: AG-REL-011 requires still-valid validation.
     # From: Issue #1683
     CI_RELEASE_VALIDATION_CMD="$(_stub val 'exit 1')" \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" release
+        run bash "${CI_SH}" release
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-RELEASE-0001"* ]]
 }
@@ -1044,7 +1038,7 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     CI_PROMOTE_MOVE_CMD="$(_stub mv 'touch "${BATS_TEST_TMPDIR}/moved.$1"')" \
     CI_CHANNEL_READBACK_CMD="$(_stub rb "[ -f \"\${BATS_TEST_TMPDIR}/moved.\$1\" ] && echo ${dig} || true")" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" release
+        run bash "${CI_SH}" release
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"channel=latest"* ]]
     [[ "${output}" == *"result=promoted"* ]]
@@ -1062,7 +1056,7 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     CI_PROMOTE_MOVE_CMD="$(_stub mv 'true')" \
     CI_CHANNEL_READBACK_CMD="$(_stub rb "echo ${dig}")" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" release
+        run bash "${CI_SH}" release
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"result=already-promoted"* ]]
     [ ! -f "${BATS_TEST_TMPDIR}/lock.log" ]
@@ -1075,7 +1069,7 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     local dig="sha256:$(printf 'a%.0s' {1..64})"
     CI_RELEASE_VALIDATION_CMD="$(_stub val 'exit 0')" \
     CI_STACK_CANDIDATE_CMD="$(_stub cand "echo proxy=${dig}")" GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" release
+        run bash "${CI_SH}" release
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-PROMOTE-0004"* ]]
 }
@@ -1090,7 +1084,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # What: Missing roots backend must fail, not proceed.
     # Why: No roots means every artifact looks unreachable.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" gc
+    run bash "${CI_SH}" gc
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-GC-0001"* ]]
 }
@@ -1100,7 +1094,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # Why: Empty roots would mark all artifacts unreachable.
     # From: Issue #1683
     CI_GC_ROOTS_CMD="$(_stub roots 'true')" \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" gc
+        run bash "${CI_SH}" gc
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-GC-0007"* ]]
 }
@@ -1110,7 +1104,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # Why: SQLite is the only candidate source (§97).
     # From: Issue #1683
     CI_GC_ROOTS_CMD="$(_gc_roots)" \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" gc
+        run bash "${CI_SH}" gc
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-GC-0002"* ]]
 }
@@ -1120,7 +1114,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # Why: DEFAULT=NOOP; a clean repo must exit success.
     # From: Issue #1683
     CI_GC_ROOTS_CMD="$(_gc_roots)" CI_GC_CANDIDATES_CMD="$(_stub cands 'true')" \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" gc
+        run bash "${CI_SH}" gc
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"result=noop candidates=0"* ]]
 }
@@ -1132,7 +1126,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     CI_GC_ROOTS_CMD="$(_gc_roots)" \
     CI_GC_CANDIDATES_CMD="$(_stub cands 'echo sha-abc')" \
     CI_GC_REACHABLE_CMD="$(_stub reach 'echo referenced')" \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" gc
+        run bash "${CI_SH}" gc
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"candidate=sha-abc action=KEEP"* ]]
 }
@@ -1144,7 +1138,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     CI_GC_ROOTS_CMD="$(_gc_roots)" \
     CI_GC_CANDIDATES_CMD="$(_stub cands 'echo sha-old')" \
     CI_GC_REACHABLE_CMD="$(_stub reach 'echo unreachable')" \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" gc
+        run bash "${CI_SH}" gc
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"candidate=sha-old action=DELETE mode=dry-run"* ]]
 }
@@ -1156,7 +1150,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     CI_GC_ROOTS_CMD="$(_gc_roots)" \
     CI_GC_CANDIDATES_CMD="$(_stub cands 'echo sha-x')" \
     CI_GC_REACHABLE_CMD="$(_stub reach 'echo dunno')" \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" gc
+        run bash "${CI_SH}" gc
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-GC-0005"* ]]
 }
@@ -1167,7 +1161,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # From: Issue #1683
     CI_GC_ROOTS_CMD="$(_gc_roots)" \
     CI_GC_CANDIDATES_CMD="$(_stub cands 'echo sha-x')" \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" gc
+        run bash "${CI_SH}" gc
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-GC-0003"* ]]
 }
@@ -1179,7 +1173,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     CI_GC_ROOTS_CMD="$(_gc_roots)" \
     CI_GC_CANDIDATES_CMD="$(_stub cands 'echo sha-x')" \
     CI_GC_REACHABLE_CMD="$(_stub reach 'exit 3')" \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" gc
+        run bash "${CI_SH}" gc
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-GC-0004"* ]]
 }
@@ -1188,7 +1182,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # What: An unrecognized argument must fail closed.
     # Why: Fail-closed dispatch (AG-VAL-002).
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" gc --bogus
+    run bash "${CI_SH}" gc --bogus
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-GC-0006"* ]]
 }
@@ -1200,7 +1194,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     CI_GC_ROOTS_CMD="$(_gc_roots)" \
     CI_GC_CANDIDATES_CMD="$(_stub cands 'echo sha-old')" \
     CI_GC_REACHABLE_CMD="$(_stub reach 'echo unreachable')" \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" gc --apply
+        run bash "${CI_SH}" gc --apply
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-BUILD-0002"* ]]
 }
@@ -1213,7 +1207,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     CI_GC_CANDIDATES_CMD="$(_stub cands 'echo sha-old')" \
     CI_GC_REACHABLE_CMD="$(_stub reach 'echo unreachable')" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" gc --apply
+        run bash "${CI_SH}" gc --apply
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-GC-0010"* ]]
 }
@@ -1229,7 +1223,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     CI_GC_REACHABLE_CMD="$(_stub reach 'echo unreachable')" \
     CI_GC_DELETE_CMD="$(_stub del 'echo "$1" >> "${BATS_TEST_TMPDIR}/deleted.log"')" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" gc --apply
+        run bash "${CI_SH}" gc --apply
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-GC-0008"* ]]
     [ ! -f "${BATS_TEST_TMPDIR}/deleted.log" ]
@@ -1246,7 +1240,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     CI_GC_REACHABLE_CMD="$(_stub reach 'echo unreachable')" \
     CI_GC_DELETE_CMD="$(_stub del 'echo "$1" >> "${BATS_TEST_TMPDIR}/deleted.log"')" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" gc --apply
+        run bash "${CI_SH}" gc --apply
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-GC-0008"* ]]
     [ ! -f "${BATS_TEST_TMPDIR}/deleted.log" ]
@@ -1261,7 +1255,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     CI_GC_REACHABLE_CMD="$(_stub reach 'case "$1" in *good*) echo unreachable;; *) echo dunno;; esac')" \
     CI_GC_DELETE_CMD="$(_stub del 'echo "$1" >> "${BATS_TEST_TMPDIR}/deleted.log"')" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" gc --apply
+        run bash "${CI_SH}" gc --apply
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-GC-0005"* ]]
     [ ! -f "${BATS_TEST_TMPDIR}/deleted.log" ]
@@ -1276,7 +1270,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     CI_GC_REACHABLE_CMD="$(_stub reach 'echo unreachable')" \
     CI_GC_DELETE_CMD="$(_stub del 'echo "$1" >> "${BATS_TEST_TMPDIR}/deleted.log"')" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" gc --apply
+        run bash "${CI_SH}" gc --apply
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"result=classified keep=0 delete=1 deleted=1 mode=apply"* ]]
     [[ "$(cat "${BATS_TEST_TMPDIR}/deleted.log")" == *"sha-old"* ]]
@@ -1291,7 +1285,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     CI_GC_REACHABLE_CMD="$(_stub reach 'f="${BATS_TEST_TMPDIR}/seen"; if [ -f "$f" ]; then echo referenced; else : > "$f"; echo unreachable; fi')" \
     CI_GC_DELETE_CMD="$(_stub del 'echo "$1" >> "${BATS_TEST_TMPDIR}/deleted.log"')" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" gc --apply
+        run bash "${CI_SH}" gc --apply
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"CI-INFO-GC-0011"* ]]
     [[ "${output}" == *"deleted=0"* ]]
@@ -1306,7 +1300,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # What: No candidate source means nothing to validate.
     # Why: Fail closed, never validate a phantom stack.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" validate
+    run bash "${CI_SH}" validate
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-VALIDATE-0001"* ]]
 }
@@ -1316,7 +1310,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # Why: Fail closed, never accept an empty stack.
     # From: Issue #1683
     CI_STACK_CANDIDATE_CMD="$(_stub cand 'true')" \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" validate
+        run bash "${CI_SH}" validate
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-VALIDATE-0002"* ]]
 }
@@ -1326,7 +1320,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # Why: Never anonymous against GHCR (rate-limit).
     # From: Issue #1683
     CI_STACK_CANDIDATE_CMD="$(_stub cand 'echo proxy=sha256:x')" \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" validate
+        run bash "${CI_SH}" validate
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-BUILD-0002"* ]]
 }
@@ -1337,7 +1331,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # From: Issue #1683
     CI_STACK_CANDIDATE_CMD="$(_stub cand 'echo proxy=sha256:x')" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" validate
+        run bash "${CI_SH}" validate
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-VALIDATE-0003"* ]]
 }
@@ -1349,7 +1343,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     CI_STACK_CANDIDATE_CMD="$(_stub cand 'echo proxy=sha256:x')" \
     CI_VALIDATE_CMD="$(_stub val 'echo STACK-UNHEALTHY; exit 1')" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" validate
+        run bash "${CI_SH}" validate
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-VALIDATE-0004"* ]]
     [[ "${output}" == *"STACK-UNHEALTHY"* ]]
@@ -1362,7 +1356,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     CI_STACK_CANDIDATE_CMD="$(_stub cand 'echo proxy=sha256:x')" \
     CI_VALIDATE_CMD="$(_stub val 'exit 0')" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" validate
+        run bash "${CI_SH}" validate
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"result=STACK_ACCEPTED"* ]]
 }
@@ -1375,7 +1369,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # What: With no env override, the SOT default is used.
     # Why: AG-CI-006 fallback, like CARGO_BUILD_JOBS.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" variables get REPOSITORY_CI_LEDGER_RETENTION_DAYS
+    run bash "${CI_SH}" variables get REPOSITORY_CI_LEDGER_RETENTION_DAYS
     [ "${status}" -eq 0 ]
     [ "${output}" = "30" ]
 }
@@ -1385,7 +1379,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # Why: AG-CI-006: use the variable when set.
     # From: Issue #1683
     REPOSITORY_CI_LEDGER_RETENTION_DAYS=45 \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" variables get REPOSITORY_CI_LEDGER_RETENTION_DAYS
+        run bash "${CI_SH}" variables get REPOSITORY_CI_LEDGER_RETENTION_DAYS
     [ "${status}" -eq 0 ]
     [ "${output}" = "45" ]
 }
@@ -1394,7 +1388,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # What: An unknown variable has no value anywhere.
     # Why: Fail closed, never emit an empty value.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" variables get NONEXISTENT_VAR_XYZ
+    run bash "${CI_SH}" variables get NONEXISTENT_VAR_XYZ
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-VARIABLES-0001"* ]]
 }
@@ -1403,7 +1397,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # What: A missing name must fail, not read blank.
     # Why: Fail-closed dispatch (AG-VAL-002).
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" variables get
+    run bash "${CI_SH}" variables get
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-VARIABLES-0003"* ]]
 }
@@ -1412,7 +1406,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # What: Only known subcommands are routed.
     # Why: Fail-closed dispatch (AG-VAL-002).
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" variables bogus
+    run bash "${CI_SH}" variables bogus
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-VARIABLES-0002"* ]]
 }
@@ -1422,7 +1416,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # Why: No target means no proof; never pass blind.
     # From: Issue #1683
     GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" variables bake-check
+        run bash "${CI_SH}" variables bake-check
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-VARIABLES-0008"* ]]
 }
@@ -1431,7 +1425,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # What: Image inspect must be authenticated.
     # Why: GHCR is never accessed anonymously.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" variables bake-check img@sha256:d
+    run bash "${CI_SH}" variables bake-check img@sha256:d
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-BUILD-0002"* ]]
 }
@@ -1441,7 +1435,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # Why: Unverifiable is not clean (AG-VAL-002).
     # From: Issue #1683
     GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" variables bake-check img@sha256:d
+        run bash "${CI_SH}" variables bake-check img@sha256:d
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-VARIABLES-0004"* ]]
 }
@@ -1452,7 +1446,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # From: Issue #1683
     CI_BAKE_INSPECT_CMD="$(_stub insp 'echo "env PATH=/usr/bin"; echo "env LANG=C"; echo "extra_ca 0"')" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" variables bake-check img@sha256:d
+        run bash "${CI_SH}" variables bake-check img@sha256:d
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"result=clean"* ]]
 }
@@ -1463,7 +1457,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # From: Issue #1683
     CI_BAKE_INSPECT_CMD="$(_stub insp 'echo "env HTTP_PROXY=http://10.0.0.9:3128"; echo "extra_ca 0"')" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" variables bake-check img@sha256:d
+        run bash "${CI_SH}" variables bake-check img@sha256:d
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-VARIABLES-0006"* ]]
     [[ "${output}" == *'key="HTTP_PROXY"'* ]]
@@ -1476,7 +1470,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # From: Issue #1683
     CI_BAKE_INSPECT_CMD="$(_stub insp 'echo "env SCCACHE_REDIS=redis://h:6379"; echo "extra_ca 0"')" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" variables bake-check img@sha256:d
+        run bash "${CI_SH}" variables bake-check img@sha256:d
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-VARIABLES-0006"* ]]
     [[ "${output}" == *'key="SCCACHE_REDIS"'* ]]
@@ -1488,7 +1482,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # From: Issue #1683
     CI_BAKE_INSPECT_CMD="$(_stub insp 'echo "env PATH=/usr/bin"; echo "extra_ca 1"')" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" variables bake-check img@sha256:d
+        run bash "${CI_SH}" variables bake-check img@sha256:d
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-VARIABLES-0007"* ]]
     [[ "${output}" == *'extra_ca="1"'* ]]
@@ -1501,7 +1495,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # From: Issue #1683
     CI_BAKE_INSPECT_CMD="$(_stub insp 'echo "env PATH=/usr/bin"; echo "mystery 1"; echo "extra_ca 0"')" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" variables bake-check img@sha256:d
+        run bash "${CI_SH}" variables bake-check img@sha256:d
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-VARIABLES-0009"* ]]
 }
@@ -1534,7 +1528,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # Why: An unknown mode is an error, not a guess.
     # From: Issue #1683
     CI_RUNTIME_SECRET_DIR="${BATS_TEST_TMPDIR}/rt" SCCACHE_REDIS_MODE=bogus \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" variables set-runtime
+        run bash "${CI_SH}" variables set-runtime
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-VARIABLES-0010"* ]]
 }
@@ -1545,7 +1539,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # From: Issue #1683
     CI_RUNTIME_SECRET_DIR="${BATS_TEST_TMPDIR}/rt" SCCACHE_REDIS_URL='redis://h' \
     SCCACHE_DIST_SCHEDULER_URL='https://s' \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" variables set-runtime
+        run bash "${CI_SH}" variables set-runtime
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-VARIABLES-0011"* ]]
 }
@@ -1555,7 +1549,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # Why: A trusted Rust build must have the cache.
     # From: Issue #1683
     CI_RUNTIME_SECRET_DIR="${BATS_TEST_TMPDIR}/rt" SCCACHE_REDIS_MODE=required \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" variables set-runtime
+        run bash "${CI_SH}" variables set-runtime
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-VARIABLES-0012"* ]]
 }
@@ -1565,7 +1559,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # Why: The cache is an optimization, not required.
     # From: Issue #1683
     CI_RUNTIME_SECRET_DIR="${BATS_TEST_TMPDIR}/rt" SCCACHE_REDIS_MODE=optional \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" variables set-runtime
+        run bash "${CI_SH}" variables set-runtime
     [ "${status}" -eq 0 ]
     [[ "${output}" != *"sccache_redis_url"* ]]
 }
@@ -1576,7 +1570,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # From: Issue #1683
     CI_RUNTIME_SECRET_DIR="${BATS_TEST_TMPDIR}/rt" SCCACHE_REDIS_MODE=off \
     SCCACHE_REDIS_URL='redis://h' \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" variables set-runtime
+        run bash "${CI_SH}" variables set-runtime
     [ "${status}" -eq 0 ]
     [[ "${output}" != *"sccache_redis_url"* ]]
     [[ "${output}" != *"sccache_dist_config"* ]]
@@ -1588,7 +1582,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # From: Issue #1683
     CI_RUNTIME_SECRET_DIR="${BATS_TEST_TMPDIR}/rt" SCCACHE_REDIS_MODE=off \
     DISTCC_POTENTIAL_HOSTS='h1 h2' \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" variables set-runtime
+        run bash "${CI_SH}" variables set-runtime
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-VARIABLES-0013"* ]]
 }
@@ -1600,7 +1594,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     local d="${BATS_TEST_TMPDIR}/rt"
     CI_RUNTIME_SECRET_DIR="${d}" SCCACHE_REDIS_MODE=required \
     SCCACHE_REDIS_URL='redis://h:6379' PROJECT_SELFHOSTED_PROXY_CA='CADATA' \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" variables set-runtime
+        run bash "${CI_SH}" variables set-runtime
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"--secret id=sccache_redis_url,src=${d}/sccache_redis_url"* ]]
     [[ "${output}" == *"--secret id=ccache_redis_url,src=${d}/ccache_redis_url"* ]]
@@ -1619,7 +1613,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     CI_RUNTIME_SECRET_DIR="${d}" SCCACHE_REDIS_MODE=required \
     SCCACHE_REDIS_URL='redis://h' SCCACHE_DIST_SCHEDULER_URL='https://sched' \
     SCCACHE_DIST_AUTH_TOKEN='tok123' \
-        run bash "${BATS_TEST_DIRNAME}/ci.sh" variables set-runtime
+        run bash "${CI_SH}" variables set-runtime
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"--secret id=sccache_dist_config,src=${d}/sccache_dist_config"* ]]
     grep -q 'scheduler_url = "https://sched"' "${d}/sccache_dist_config"
@@ -1633,7 +1627,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # From: Issue #1683
     local d="${BATS_TEST_TMPDIR}/rt"
     mkdir -p "${d}"; printf 'x' > "${d}/project_selfhosted_proxy_ca"
-    CI_RUNTIME_SECRET_DIR="${d}" run bash "${BATS_TEST_DIRNAME}/ci.sh" variables clear-runtime
+    CI_RUNTIME_SECRET_DIR="${d}" run bash "${CI_SH}" variables clear-runtime
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"result=cleared"* ]]
     [ ! -e "${d}/project_selfhosted_proxy_ca" ]
@@ -1647,7 +1641,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # What: SOT owns base + dhclient; apk tools unpinned.
     # Why: build-tools is a factory, not a version lock.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" build-args build-tools
+    run bash "${CI_SH}" build-args build-tools
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"--build-arg ALPINE_IMAGE=mirror.gcr.io"* ]]
     [[ "${output}" == *"--build-arg DHCLIENT_VERSION="* ]]
@@ -1666,7 +1660,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # From: Issue #1683
     local m="${BATS_TEST_TMPDIR}/no-rust-alpine.yml"
     grep -v '^  alpine:' "${BATS_TEST_DIRNAME}/../yaml/build-manifest.yml" > "${m}"
-    CI_MANIFEST="${m}" run bash "${BATS_TEST_DIRNAME}/ci.sh" build-args build-tools
+    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args build-tools
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-BUILDARGS-0003"* ]]
 }
@@ -1675,7 +1669,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # What: bare form feeds docker/build-push-action.
     # Why: that action wants NAME=VALUE, not --build-arg.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" build-args build-tools --bare
+    run bash "${CI_SH}" build-args build-tools --bare
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"DHCLIENT_VERSION="* ]]
     [[ "${output}" == *"ALPINE_IMAGE=mirror.gcr.io"* ]]
@@ -1686,7 +1680,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # What: only empty or --bare are valid formats.
     # Why: an unknown flag must not emit a silent default.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" build-args build-tools --bogus
+    run bash "${CI_SH}" build-args build-tools --bogus
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-BUILDARGS-0005"* ]]
 }
@@ -1695,7 +1689,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # What: No service arg must not emit a silent success.
     # Why: Fail-closed dispatch (AG-VAL-002).
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" build-args
+    run bash "${CI_SH}" build-args
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-BUILDARGS-0001"* ]]
 }
@@ -1704,7 +1698,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # What: Only build-tools owns SOT build-args today.
     # Why: An apk/rust service pins none centrally yet.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" build-args proxy
+    run bash "${CI_SH}" build-args proxy
     [ "${status}" -eq 0 ]
     [ -z "${output}" ]
 }
@@ -1713,7 +1707,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # What: The SOT feeds the apk input check.
     # Why: AG-KD-009 required tools must all be present.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools packages
+    run bash "${CI_SH}" build-tools packages
     [ "${status}" -eq 0 ]
     for pkg in rust cargo rust-clippy rustfmt actionlint cargo-audit \
                cargo-tarpaulin sccache distcc distcc-pump docker-cli \
@@ -1729,7 +1723,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     local m="${BATS_TEST_TMPDIR}/other.yml"
     printf 'services:\n  proxy:\n    packages:\n      - WRONG_SVC\n' > "${m}"
     printf 'build_toolchain:\n  build-tools:\n    packages:\n      - right-one\n  other-tool:\n    packages:\n      - WRONG_ENTRY\n' >> "${m}"
-    CI_MANIFEST="${m}" run bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools packages
+    CI_MANIFEST="${m}" run bash "${CI_SH}" build-tools packages
     [ "${status}" -eq 0 ]
     [ "${output}" = "right-one" ]
 }
@@ -1740,7 +1734,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # From: Issue #1683
     local m="${BATS_TEST_TMPDIR}/nopkgs.yml"
     printf 'build_toolchain:\n  build-tools:\n    context: tools/build-tools\n' > "${m}"
-    CI_MANIFEST="${m}" run bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools packages
+    CI_MANIFEST="${m}" run bash "${CI_SH}" build-tools packages
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-BUILDTOOLS-0006"* ]]
 }
@@ -1750,9 +1744,9 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # Why: weekly check rebuilds only on a real change.
     # From: Issue #1683
     local a b c
-    a="$(bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools signature "sccache-0.15.0-r0")"
-    b="$(bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools signature "sccache-0.15.0-r0")"
-    c="$(bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools signature "sccache-0.16.0-r0")"
+    a="$(bash "${CI_SH}" build-tools signature "sccache-0.15.0-r0")"
+    b="$(bash "${CI_SH}" build-tools signature "sccache-0.15.0-r0")"
+    c="$(bash "${CI_SH}" build-tools signature "sccache-0.16.0-r0")"
     [ -n "${a}" ]
     [ "${a}" = "${b}" ]
     [ "${a}" != "${c}" ]
@@ -1762,10 +1756,10 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # What: a blank apk version state must not sign.
     # Why: a blank scan must never mint a stable signature.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools signature ""
+    run bash "${CI_SH}" build-tools signature ""
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-BUILDTOOLS-0004"* ]]
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools signature "   "
+    run bash "${CI_SH}" build-tools signature "   "
     [ "${status}" -eq 2 ]
 }
 
@@ -1774,10 +1768,10 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # Why: all emitted build-args must feed the signature.
     # From: Issue #1683
     local m="${BATS_TEST_TMPDIR}/dh.yml" base changed
-    base="$(bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools signature "sccache-0.15.0-r0")"
+    base="$(bash "${CI_SH}" build-tools signature "sccache-0.15.0-r0")"
     sed 's/sha256_amd64: 068c97e534e9c8f03db9064296b1d3c21d957f328e40309278559a92f9a74557/sha256_amd64: deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/' \
         "${BATS_TEST_DIRNAME}/../yaml/build-manifest.yml" > "${m}"
-    changed="$(CI_MANIFEST="${m}" bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools signature "sccache-0.15.0-r0")"
+    changed="$(CI_MANIFEST="${m}" bash "${CI_SH}" build-tools signature "sccache-0.15.0-r0")"
     [ -n "${base}" ]
     [ -n "${changed}" ]
     [ "${base}" != "${changed}" ]
@@ -1787,7 +1781,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # What: the signature must cover every supported arch.
     # Why: an arm64-only change must be representable.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools arches
+    run bash "${CI_SH}" build-tools arches
     [ "${status}" -eq 0 ]
     printf '%s\n' "${output}" | grep -qx "x86_64"
     printf '%s\n' "${output}" | grep -qx "aarch64"
@@ -1798,8 +1792,8 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # Why: an arm64-only package bump must not be a NOOP.
     # From: Issue #1683
     local a b
-    a="$(bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools signature "x86_64:sccache-0.15.0-r0 aarch64:sccache-0.15.0-r0")"
-    b="$(bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools signature "x86_64:sccache-0.15.0-r0 aarch64:sccache-0.16.0-r0")"
+    a="$(bash "${CI_SH}" build-tools signature "x86_64:sccache-0.15.0-r0 aarch64:sccache-0.15.0-r0")"
+    b="$(bash "${CI_SH}" build-tools signature "x86_64:sccache-0.15.0-r0 aarch64:sccache-0.16.0-r0")"
     [ -n "${a}" ]
     [ "${a}" != "${b}" ]
 }
@@ -1808,7 +1802,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # What: same current/published sig builds nothing.
     # Why: unchanged inputs must not rebuild.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools gate both check SIG SIG
+    run bash "${CI_SH}" build-tools gate both check SIG SIG
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"build-amd64=false"* ]]
     [[ "${output}" == *"build-arm64=false"* ]]
@@ -1819,12 +1813,12 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # What: changed sig or mode=build selects arches.
     # Why: a real change or a forced build must build.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools gate both check SIG OLD
+    run bash "${CI_SH}" build-tools gate both check SIG OLD
     [[ "${output}" == *"build-amd64=true"* ]]
     [[ "${output}" == *"build-arm64=true"* ]]
     [[ "${output}" == *'"arch":"amd64"'* ]]
     [[ "${output}" == *'"arch":"arm64"'* ]]
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools gate amd64 build SIG SIG
+    run bash "${CI_SH}" build-tools gate amd64 build SIG SIG
     [[ "${output}" == *"build-amd64=true"* ]]
     [[ "${output}" == *"build-arm64=false"* ]]
 }
@@ -1833,7 +1827,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # What: no current signature must not decide.
     # Why: an empty gate input is fail-closed.
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools gate both check "" X
+    run bash "${CI_SH}" build-tools gate both check "" X
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-BUILDTOOLS-0013"* ]]
 }
@@ -1842,10 +1836,8 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # What: the apk resolver is injectable for tests.
     # Why: signature logic is proven without a container.
     # From: Issue #1683
-    local mock="${BATS_TEST_TMPDIR}/apk.sh"
-    printf '#!/bin/sh\necho "sccache-0.15.0-r0 fake-$2-1.0-r0"\n' > "${mock}"
-    chmod +x "${mock}"
-    run env CI_APK_RESOLVE_CMD="${mock}" bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools resolve-signature
+    local mock; mock="$(_stub apk.sh 'echo "sccache-0.15.0-r0 fake-$2-1.0-r0"')"
+    run env CI_APK_RESOLVE_CMD="${mock}" bash "${CI_SH}" build-tools resolve-signature
     [ "${status}" -eq 0 ]
     [ -n "${output}" ]
 }
@@ -1854,10 +1846,8 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # What: the registry read is injectable for tests.
     # Why: no live GHCR needed to prove the gate.
     # From: Issue #1683
-    local mock="${BATS_TEST_TMPDIR}/pub.sh"
-    printf '#!/bin/sh\necho PUB-123\n' > "${mock}"
-    chmod +x "${mock}"
-    run env CI_PUBLISHED_SIG_CMD="${mock}" bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools published-signature img:latest
+    local mock; mock="$(_stub pub.sh 'echo PUB-123')"
+    run env CI_PUBLISHED_SIG_CMD="${mock}" bash "${CI_SH}" build-tools published-signature img:latest
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"PUB-123"* ]]
 }
@@ -1866,10 +1856,8 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # What: the manifest assembly is injectable.
     # Why: no live registry needed to prove the call.
     # From: Issue #1683
-    local mock="${BATS_TEST_TMPDIR}/merge.sh"
-    printf '#!/bin/sh\necho "merged sha=$1"\n' > "${mock}"
-    chmod +x "${mock}"
-    run env CI_MERGE_CMD="${mock}" bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools merge abc123
+    local mock; mock="$(_stub merge.sh 'echo "merged sha=$1"')"
+    run env CI_MERGE_CMD="${mock}" bash "${CI_SH}" build-tools merge abc123
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"merged sha=abc123"* ]]
 }
@@ -1878,16 +1866,14 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # What: plan emits all outputs to $GITHUB_OUTPUT.
     # Why: the run-block stays a single pure ci.sh call.
     # From: Issue #1683
-    local apk="${BATS_TEST_TMPDIR}/apk.sh" pub="${BATS_TEST_TMPDIR}/pub.sh"
-    local gho="${BATS_TEST_TMPDIR}/out.txt"
-    printf '#!/bin/sh\necho "sccache-0.15.0-r0 fake-$2-1.0-r0"\n' > "${apk}"
-    printf '#!/bin/sh\necho OLD-SIG\n' > "${pub}"
-    chmod +x "${apk}" "${pub}"
-    : > "${gho}"
+    local apk pub gho
+    apk="$(_stub apk.sh 'echo "sccache-0.15.0-r0 fake-$2-1.0-r0"')"
+    pub="$(_stub pub.sh 'echo OLD-SIG')"
+    gho="${BATS_TEST_TMPDIR}/out.txt"; : > "${gho}"
     run env CI_APK_RESOLVE_CMD="${apk}" CI_PUBLISHED_SIG_CMD="${pub}" \
         BUILD_TOOLS_IMAGE=example/build-tools BT_ARCH=both BT_MODE=check \
         GITHUB_OUTPUT="${gho}" \
-        bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools plan
+        bash "${CI_SH}" build-tools plan
     [ "${status}" -eq 0 ]
     grep -q '^signature=' "${gho}"
     grep -q '^build-amd64=true$' "${gho}"
@@ -1901,7 +1887,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # What: An unknown sub must not silently succeed.
     # Why: Fail-closed dispatch (AG-VAL-002).
     # From: Issue #1683
-    run bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools bogus
+    run bash "${CI_SH}" build-tools bogus
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-BUILDTOOLS-0003"* ]]
 }
