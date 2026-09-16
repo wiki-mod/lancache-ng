@@ -2177,6 +2177,19 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     [[ "${output}" == *"HIGH,CRITICAL"* ]]
 }
 
+@test "verify default reads back the registry digest via imagetools" {
+    # What: default readback reads the registry digest.
+    # Why: expected == registry digest continues (§23).
+    # From: Issue #1683
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    printf '#!/usr/bin/env bash\necho sha256:match\n' > "${bin}/docker"
+    chmod +x "${bin}/docker"
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${CI_SH}" verify ui sha256:match linux/amd64
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"verified=sha256:match"* ]]
+}
+
 # =========================================================
 # HISTORICAL REGRESSIONS
 # =========================================================

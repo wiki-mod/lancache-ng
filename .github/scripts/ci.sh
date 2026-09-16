@@ -989,19 +989,24 @@ ci_cmd_publish() {
 # Why: BUILT != ACCEPTED; a MISMATCH must fail (§7).
 # From: Issue #1683
 ci_cmd_verify() {
-    local service="${1:-}" expected="${2:-}"
+    local service="${1:-}" expected="${2:-}" platform="${3:-}"
     [ -n "${service}" ] || { ci_log "[CI-ERROR-VERIFY-0001]" "reason=\"service arg required\""; return 2; }
     [ -n "${expected}" ] || { ci_log "[CI-ERROR-VERIFY-0002]" "reason=\"expected digest arg required\""; return 2; }
     _ci_require_ghcr_auth || return "$?"
-    local seen
+    local seen identity tag
     if [ -n "${CI_READBACK_CMD:-}" ]; then
         seen="$("${CI_READBACK_CMD}" "${service}")" || {
             ci_log "[CI-ERROR-VERIFY-0003]" "service=\"${service}\" reason=\"readback failed\""
             return 2
         }
     else
-        ci_log "[CI-ERROR-VERIFY-0004]" "service=\"${service}\" reason=\"no readback backend wired (CI_READBACK_CMD unset)\""
-        return 2
+        [ -n "${platform}" ] || { ci_log "[CI-ERROR-VERIFY-0004]" "service=\"${service}\" reason=\"platform arg required for default readback\""; return 2; }
+        identity="$(_ci_identity_for "${service}" "${platform}")" || return "$?"
+        tag="$(_ci_image_tag "${service}" "${platform}" "${identity}")"
+        seen="$(_ci_registry_digest "${tag}")" || {
+            ci_log "[CI-ERROR-VERIFY-0003]" "service=\"${service}\" reason=\"readback failed\""
+            return 2
+        }
     fi
     if [ "${seen}" != "${expected}" ]; then
         ci_error "[CI-ERROR-VERIFY-0005]" "service=\"${service}\" reason=\"digest MISMATCH; produced != accepted\" expected=\"${expected}\"" "readback=${seen}"
