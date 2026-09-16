@@ -2002,6 +2002,21 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     [[ "${output}" == *"CI-ERROR-CHECK-0003"* ]]
 }
 
+@test "check comment-length passes valid, fails oversize and story-run" {
+    # What: ci.sh owns AG-CODE-012 limits; bats calls it.
+    # Why: guard logic lives once, tested through ci.sh.
+    # From: Issue #1683
+    printf '# What: ok short line.\n# Why: also fine here.\n' > "${BATS_TEST_TMPDIR}/ok.sh"
+    run bash "${CI_SH}" check comment-length "${BATS_TEST_TMPDIR}/ok.sh"
+    [ "${status}" -eq 0 ]
+    printf '# What: %s\n' "$(printf 'x%.0s' $(seq 1 80))" > "${BATS_TEST_TMPDIR}/long.sh"
+    run bash "${CI_SH}" check comment-length "${BATS_TEST_TMPDIR}/long.sh"
+    [ "${status}" -ne 0 ]
+    printf '# one\n# two\n# three\n# four\n' > "${BATS_TEST_TMPDIR}/story.sh"
+    run bash "${CI_SH}" check comment-length "${BATS_TEST_TMPDIR}/story.sh"
+    [ "${status}" -ne 0 ]
+}
+
 # =========================================================
 # HISTORICAL REGRESSIONS
 # =========================================================

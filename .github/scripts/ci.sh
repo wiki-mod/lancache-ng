@@ -2159,6 +2159,103 @@ _ci_check_file_headers() {
     printf 'file-headers=clean files=%s\n' "${sc}"
 }
 
+# What: Enforce AG-CODE-012 comment size and block limits.
+# Why: Mechanical 1-1-1-60 plus story-telling-run size.
+# From: Issue #1683
+_ci_check_comment_length() {
+    local file heredoc_on yaml_on rc=0
+    for file in "$@"; do
+        if [ ! -f "${file}" ]; then
+            ci_log "[CI-ERROR-CHECK-0004]" "file=\"${file}\" reason=\"not a file\""
+            rc=2; continue
+        fi
+        awk '
+            function flush() {
+                if (blocklen > 3) { printf "%s:%d: block %d lines (max 3)\n", FILENAME, blockstart, blocklen; viol++ }
+                blocklen = 0
+            }
+            {
+                line = $0; sub(/\r$/, "", line)
+                if (line ~ /^[[:space:]]*#[[:space:]]*(What|Why|From):/) {
+                    if (blocklen == 0) blockstart = FNR
+                    blocklen++
+                    if (length(line) > 60) { printf "%s:%d: %d chars (max 60): %s\n", FILENAME, FNR, length(line), line; viol++ }
+                } else if (blocklen > 0) flush()
+            }
+            END { if (blocklen > 0) flush(); if (viol > 0) exit 1 }
+        ' "${file}" || rc=1
+        case "${file}" in
+            *.yml|*.yaml) heredoc_on=0; yaml_on=1 ;;
+            *) heredoc_on=1; yaml_on=0 ;;
+        esac
+        awk -v heredoc_on="${heredoc_on}" -v yaml_on="${yaml_on}" '
+            BEGIN {
+                sq = sprintf("%c", 39)
+                qclass = "[" sq "\"]"
+                heredoc_open_re = "<<-?[[:space:]]*" qclass "?[A-Za-z_][A-Za-z0-9_]*" qclass "?"
+                strip_lead_re = "^<<-?[[:space:]]*" qclass "?"
+                strip_trail_re = qclass "?$"
+            }
+            { lines[FNR] = $0 }
+            function flush_run() {
+                if (real_len > 3) { printf "%s:%d: story-telling block (%d lines)\n", FILENAME, block_start, real_len; viol++ }
+                block_start = 0; real_len = 0
+            }
+            END {
+                n = FNR; header_end = 0
+                if (n >= 3 \
+                    && lines[2] ~ /^#[[:space:]]*LanCache-NG \(https:\/\/github\.com\/wiki-mod\/lancache-ng\)[[:space:]]*$/ \
+                    && lines[3] ~ /^#[[:space:]]*SPDX-License-Identifier: AGPL-3\.0-or-later[[:space:]]*$/) header_end = 3
+                in_heredoc = 0; heredoc_delim = ""; heredoc_dash = 0
+                in_yaml = 0; yaml_indent = -1; block_start = 0; real_len = 0
+                for (i = 1; i <= n; i++) {
+                    line = lines[i]; sub(/\r$/, "", line)
+                    if (i <= header_end) { flush_run(); continue }
+                    if (heredoc_on && in_heredoc) {
+                        check_line = line
+                        if (heredoc_dash) sub(/^\t+/, "", check_line)
+                        if (check_line == heredoc_delim) in_heredoc = 0
+                        flush_run(); continue
+                    }
+                    if (yaml_on && in_yaml) {
+                        if (line ~ /^[[:space:]]*$/) { flush_run(); continue }
+                        match(line, /[^ ]/)
+                        if ((RSTART - 1) > yaml_indent) { flush_run(); continue }
+                        in_yaml = 0
+                    }
+                    if (line ~ /^[[:space:]]*#/) {
+                        stripped = line
+                        sub(/^[[:space:]]*#[[:space:]]*/, "", stripped); sub(/[[:space:]]+$/, "", stripped)
+                        is_divider = (stripped ~ /^[-=~_*]{4,}$/) || (stripped ~ /^(─|━|═|┄|┈|╌|╍)/)
+                        if (block_start == 0) block_start = i
+                        if (!is_divider) real_len++
+                        continue
+                    }
+                    flush_run()
+                    if (heredoc_on) {
+                        tmp = line
+                        while (match(tmp, heredoc_open_re)) {
+                            seg = substr(tmp, RSTART, RLENGTH)
+                            heredoc_dash = (seg ~ /^<<-/)
+                            d = seg; sub(strip_lead_re, "", d); sub(strip_trail_re, "", d)
+                            heredoc_delim = d; in_heredoc = 1
+                            tmp = substr(tmp, RSTART + RLENGTH)
+                        }
+                    }
+                    if (yaml_on && !in_heredoc) {
+                        if (match(line, /^[[:space:]]*(-[[:space:]]+)?[A-Za-z0-9_.-]+:[[:space:]]*[|>][+-]?[0-9]?[[:space:]]*$/)) {
+                            match(line, /[^ ]/); yaml_indent = RSTART - 1; in_yaml = 1
+                        }
+                    }
+                }
+                flush_run(); if (viol > 0) exit 1
+            }
+        ' "${file}" || rc=1
+    done
+    [ "${rc}" -eq 0 ] && printf 'comment-length=clean\n'
+    return "${rc}"
+}
+
 # What: Route a source-hygiene check to its function.
 # Why: One owner per guard invariant; ci.bats calls it.
 # From: Issue #1683
@@ -2168,6 +2265,7 @@ ci_cmd_check() {
     case "${sub}" in
         line-endings) _ci_check_line_endings "$@" ;;
         file-headers) _ci_check_file_headers "$@" ;;
+        comment-length) _ci_check_comment_length "$@" ;;
         *)
             ci_log "[CI-ERROR-CHECK-0001]" "sub=\"${sub}\" reason=\"unknown check\""
             return 2
