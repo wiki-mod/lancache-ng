@@ -2451,6 +2451,40 @@ _ci_check_pipefail_early_exit() {
     printf 'pipefail-early-exit=clean files=%s\n' "${#files[@]}"
 }
 
+# What: Check a PR title's Conventional-Commit form.
+# Why: types fixed; scopes derive from the SOT service list.
+# From: Issue #1683
+_ci_check_pr_title() {
+    local title="${1:-${PR_TITLE:-}}"
+    if [ "${PR_AUTHOR:-}" = "dependabot[bot]" ]; then
+        printf 'pr-title=skip-dependabot\n'; return 0
+    fi
+    if [ -z "${title}" ]; then
+        ci_log "[CI-ERROR-CHECK-0012]" "reason=\"no PR title given\""; return 2
+    fi
+    local types="feat fix docs refactor perf test build ci chore style revert security"
+    local scopes
+    scopes="$(ci_services) nats build-tools setup ci governance docs scripts"
+    scopes="${scopes//$'\n'/ }"
+    local pat='^([a-zA-Z]+)(\(([a-z0-9-]+)\))?(!)?:[[:space:]](.+)$'
+    local -a errs=()
+    if [[ "${title}" =~ ${pat} ]]; then
+        local ty="${BASH_REMATCH[1]}" sc="${BASH_REMATCH[3]}" subj="${BASH_REMATCH[5]}"
+        case " ${types} " in *" ${ty} "*) ;; *) errs+=("type '${ty}' not allowed") ;; esac
+        if [ -n "${sc}" ]; then
+            case " ${scopes} " in *" ${sc} "*) ;; *) errs+=("scope '${sc}' not allowed") ;; esac
+        fi
+        [ -n "${subj// /}" ] || errs+=("empty subject")
+    else
+        errs+=("not a Conventional-Commit title")
+    fi
+    if [ "${#errs[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0013]" "reason=\"PR title convention\"" "$(printf '%s\n' "${errs[@]}")"
+        return 1
+    fi
+    printf 'pr-title=ok\n'
+}
+
 # What: Route a source-hygiene check to its function.
 # Why: One owner per guard invariant; ci.bats calls it.
 # From: Issue #1683
@@ -2467,6 +2501,7 @@ ci_cmd_check() {
         executable-bits) _ci_check_executable_bits "$@" ;;
         review-chronology) _ci_check_review_chronology "$@" ;;
         pipefail-early-exit) _ci_check_pipefail_early_exit "$@" ;;
+        pr-title) _ci_check_pr_title "$@" ;;
         *)
             ci_log "[CI-ERROR-CHECK-0001]" "sub=\"${sub}\" reason=\"unknown check\""
             return 2

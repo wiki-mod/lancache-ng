@@ -2107,6 +2107,19 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     [ "${status}" -eq 0 ]
 }
 
+@test "check pr-title accepts valid conventional, rejects bad scope/format" {
+    # What: ci.sh owns the title taxonomy; bats calls it.
+    # Why: types fixed, scopes from the SOT service list.
+    # From: Issue #1683
+    run bash "${CI_SH}" check pr-title "feat(proxy): add ipv6 lease support"
+    [ "${status}" -eq 0 ]
+    run bash "${CI_SH}" check pr-title "feat(bogus): x"
+    [ "${status}" -ne 0 ]
+    run bash "${CI_SH}" check pr-title "not conventional at all"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0013"* ]]
+}
+
 # =========================================================
 # HISTORICAL REGRESSIONS
 # =========================================================
