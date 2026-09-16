@@ -707,6 +707,108 @@ _ci_classify_failure() {
 }
 
 # =========================================================
+# GIT-REF CAS (coordination lock; §20/§52)
+# =========================================================
+
+# What: Empty tree object a CAS head points at.
+# Why: A lock head carries a note, not tracked content.
+# From: Issue #1683
+CI_CAS_EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+# What: Print a ref's remote sha; 1 absent, 2 unknown.
+# Why: A failed query is UNKNOWN, never a free lock.
+# From: Issue #1683
+_ci_cas_ref_sha() {
+    local remote="$1" ref="$2" out rc=0
+    out="$(git ls-remote --exit-code "${remote}" "${ref}" 2>/dev/null)" || rc=$?
+    [ "${rc}" -eq 0 ] && { printf '%s\n' "${out%%$'\t'*}"; return 0; }
+    [ "${rc}" -eq 2 ] && return 1
+    return 2
+}
+
+# What: Build an empty-tree commit carrying a note.
+# Why: Synthetic identity; runners have no git user.
+# From: Issue #1683
+_ci_cas_note_commit() {
+    local note="$1"
+    GIT_AUTHOR_NAME=ci-cas GIT_AUTHOR_EMAIL=ci-cas@lancache-ng.invalid \
+    GIT_COMMITTER_NAME=ci-cas GIT_COMMITTER_EMAIL=ci-cas@lancache-ng.invalid \
+        git commit-tree "${CI_CAS_EMPTY_TREE}" -m "${note}" 2>/dev/null
+}
+
+# What: Classify a failed CAS push: race vs real fail.
+# Why: A moved ref means re-read, not a plain retry.
+# From: Issue #1683
+_ci_cas_push_class() {
+    case "$1" in
+        *non-fast-forward*|*"failed to push some refs"*|*"cannot lock ref"*|*"stale info"*|*"fetch first"*|*rejected*) printf 'race\n' ;;
+        *) _ci_classify_failure "$1" ;;
+    esac
+}
+
+# What: One non-blocking lock acquisition attempt.
+# Why: Create or stale-takeover, both atomic server-side.
+# From: Issue #1683
+_ci_lock_try() {
+    local remote="$1" ref="$2" note="$3" stale="$4"
+    local cur="" sha raw rc=0 committed prev now age
+    cur="$(_ci_cas_ref_sha "${remote}" "${ref}")" || rc=$?
+    if [ "${rc}" -eq 1 ]; then
+        sha="$(_ci_cas_note_commit "${note}")" || return 3
+        rc=0; raw="$(git push "${remote}" "${sha}:${ref}" 2>&1)" || rc=$?
+        [ "${rc}" -eq 0 ] && return 0
+        [ "$(_ci_cas_push_class "${raw}")" = race ] && return 2
+        return 3
+    fi
+    [ "${rc}" -eq 0 ] || return 3
+    git fetch --quiet --depth=1 "${remote}" "${ref}" >/dev/null 2>&1 || return 3
+    committed="$(git log -1 --format=%ct FETCH_HEAD 2>/dev/null)" || committed=0
+    committed="${committed:-0}"
+    prev="$(git log -1 --format=%s FETCH_HEAD 2>/dev/null)" || prev=""
+    now="$(date +%s)"; age=$(( now - committed ))
+    [ "${age}" -lt "${stale}" ] && return 1
+    sha="$(_ci_cas_note_commit "${note}")" || return 3
+    rc=0; raw="$(git push --force-with-lease="${ref}:${cur}" "${remote}" "${sha}:${ref}" 2>&1)" || rc=$?
+    if [ "${rc}" -eq 0 ]; then
+        ci_log "[CI-INFO-CAS-0001]" "ref=\"${ref}\" note=\"stale lock taken over\" age=\"${age}\" prev=\"${prev}\""
+        return 0
+    fi
+    [ "$(_ci_cas_push_class "${raw}")" = race ] && return 2
+    return 3
+}
+
+# What: Retry lock acquisition; fail closed at the end.
+# Why: Proceeding unlocked would race the guarded section.
+# From: Issue #1683
+_ci_lock_acquire() {
+    local remote="$1" ref="$2" note="$3" max="$4" backoff="$5" stale="$6"
+    local n=1 rc=0
+    while [ "${n}" -le "${max}" ]; do
+        rc=0; _ci_lock_try "${remote}" "${ref}" "${note}" "${stale}" || rc=$?
+        [ "${rc}" -eq 0 ] && return 0
+        [ "${n}" -ge "${max}" ] && break
+        if [ "${rc}" -eq 2 ]; then sleep 2; else sleep "${backoff}"; fi
+        n=$(( n + 1 ))
+    done
+    ci_error "[CI-ERROR-CAS-0002]" "ref=\"${ref}\" reason=\"lock not acquired in ${max} attempts; fail closed\"" "note=${note} last_rc=${rc}"
+    return 1
+}
+
+# What: Release a lock only if this note still holds it.
+# Why: Never delete a lock a takeover reassigned.
+# From: Issue #1683
+_ci_lock_release() {
+    local remote="$1" ref="$2" note="$3" cur="" held rc=0
+    cur="$(_ci_cas_ref_sha "${remote}" "${ref}")" || rc=$?
+    [ "${rc}" -eq 0 ] || return 0
+    git fetch --quiet --depth=1 "${remote}" "${ref}" >/dev/null 2>&1 || return 1
+    held="$(git log -1 --format=%s FETCH_HEAD 2>/dev/null)" || held=""
+    [ "${held}" = "${note}" ] || return 0
+    git push --force-with-lease="${ref}:${cur}" "${remote}" ":${ref}" >/dev/null 2>&1 || return 1
+    return 0
+}
+
+# =========================================================
 # CACHE CONFIGURATION
 # =========================================================
 

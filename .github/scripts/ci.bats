@@ -2225,6 +2225,124 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     [[ "${output}" == *"build-tools:sha-abc123-amd64"* ]]
 }
 
+# What: bare repo + two host clones for real CAS tests.
+# Why: real git CAS proof, no live remote (AG-VAL-030).
+_cas_setup() {
+    CAS_BARE="${BATS_TEST_TMPDIR}/bare.git"
+    CAS_A="${BATS_TEST_TMPDIR}/host-a"
+    CAS_B="${BATS_TEST_TMPDIR}/host-b"
+    git init --quiet --bare "${CAS_BARE}"
+    git clone --quiet "${CAS_BARE}" "${CAS_A}"
+    (
+        cd "${CAS_A}" || exit 1
+        git config user.email cas-bats@example.invalid
+        git config user.name cas-bats
+        git commit --quiet --allow-empty -m init
+        git push --quiet origin HEAD:refs/heads/master
+    )
+    git clone --quiet "${CAS_BARE}" "${CAS_B}"
+}
+
+@test "cas ref_sha reports an absent ref as free" {
+    # What: ls-remote miss maps to absent, not error.
+    # Why: a free lock must read as free, code 1.
+    # From: Issue #1683
+    _cas_setup
+    cd "${CAS_A}"
+    run _ci_cas_ref_sha origin refs/ci/lock/t
+    [ "${status}" -eq 1 ]
+    [ -z "${output}" ]
+}
+
+@test "cas lock_try creates the ref on a free lock" {
+    # What: a free lock is created atomically.
+    # Why: create-against-zero is the acquire path.
+    # From: Issue #1683
+    _cas_setup
+    cd "${CAS_A}"
+    run _ci_lock_try origin refs/ci/lock/t holder-a 600
+    [ "${status}" -eq 0 ]
+    run _ci_cas_ref_sha origin refs/ci/lock/t
+    [ "${status}" -eq 0 ]
+    [ -n "${output}" ]
+}
+
+@test "cas lock_try refuses a fresh lock held elsewhere" {
+    # What: a held, non-stale lock refuses a second host.
+    # Why: mutual exclusion across hosts (code 1).
+    # From: Issue #1683
+    _cas_setup
+    cd "${CAS_A}"; _ci_lock_try origin refs/ci/lock/t holder-a 600
+    cd "${CAS_B}"
+    run _ci_lock_try origin refs/ci/lock/t holder-b 600
+    [ "${status}" -eq 1 ]
+}
+
+@test "cas release lets another host acquire" {
+    # What: release frees the ref for the next host.
+    # Why: normal hand-off between two runs.
+    # From: Issue #1683
+    _cas_setup
+    cd "${CAS_A}"; _ci_lock_try origin refs/ci/lock/t holder-a 600
+    run _ci_lock_release origin refs/ci/lock/t holder-a
+    [ "${status}" -eq 0 ]
+    cd "${CAS_B}"
+    run _ci_lock_try origin refs/ci/lock/t holder-b 600
+    [ "${status}" -eq 0 ]
+}
+
+@test "cas release never deletes another holder's lock" {
+    # What: release checks ownership before deleting.
+    # Why: a takeover must not lose the new holder.
+    # From: Issue #1683
+    _cas_setup
+    cd "${CAS_A}"; _ci_lock_try origin refs/ci/lock/t holder-a 600
+    cd "${CAS_B}"
+    run _ci_lock_release origin refs/ci/lock/t not-holder
+    [ "${status}" -eq 0 ]
+    run _ci_cas_ref_sha origin refs/ci/lock/t
+    [ "${status}" -eq 0 ]; [ -n "${output}" ]
+}
+
+@test "cas lock_try takes over a stale lock" {
+    # What: an aged lock is taken over via lease swap.
+    # Why: a crashed holder must not block forever.
+    # From: Issue #1683
+    _cas_setup
+    cd "${CAS_A}"; _ci_lock_try origin refs/ci/lock/t holder-a 600
+    sleep 2
+    cd "${CAS_B}"
+    run _ci_lock_try origin refs/ci/lock/t holder-b 1
+    [ "${status}" -eq 0 ]
+    git fetch --quiet origin refs/ci/lock/t
+    [ "$(git log -1 --format=%s FETCH_HEAD)" = holder-b ]
+}
+
+@test "cas acquire fails closed after exhausting attempts" {
+    # What: an unbeatable lock exhausts retries and fails.
+    # Why: proceeding unlocked would race the section.
+    # From: Issue #1683
+    _cas_setup
+    cd "${CAS_A}"; _ci_lock_try origin refs/ci/lock/t holder-a 600
+    cd "${CAS_B}"
+    run _ci_lock_acquire origin refs/ci/lock/t holder-b 3 1 600
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"CI-ERROR-CAS-0002"* ]]
+}
+
+@test "cas concurrent create has exactly one winner" {
+    # What: two simultaneous creators; one wins atomically.
+    # Why: git ref create is compare-against-zero.
+    # From: Issue #1683
+    _cas_setup
+    local ra="${BATS_TEST_TMPDIR}/ra" rb="${BATS_TEST_TMPDIR}/rb"
+    ( set +e; cd "${CAS_A}"; _ci_lock_try origin refs/ci/lock/t race-a 600; echo "$?" > "${ra}" ) &
+    ( set +e; cd "${CAS_B}"; _ci_lock_try origin refs/ci/lock/t race-b 600; echo "$?" > "${rb}" ) &
+    wait || true
+    local sa sb; sa="$(cat "${ra}")"; sb="$(cat "${rb}")"
+    if [ "${sa}" = 0 ]; then [[ "${sb}" == 1 || "${sb}" == 2 ]]; else [[ "${sa}" == 1 || "${sa}" == 2 ]]; fi
+}
+
 # =========================================================
 # HISTORICAL REGRESSIONS
 # =========================================================
