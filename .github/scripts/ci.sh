@@ -26,10 +26,17 @@ CI_MANIFEST="${CI_MANIFEST:-${CI_SCRIPT_DIR}/../yaml/build-manifest.yml}"
 # From: Issue #1683
 CI_REPO_ROOT="${CI_REPO_ROOT:-$(cd -- "${CI_SCRIPT_DIR}/../.." && pwd)}"
 
-# What: The known ci.sh subcommands (docs section 9 CLI).
-# Why: One list drives dispatch and error text.
+# What: The ci.sh subcommand dispatch table.
+# Why: One table is membership, dispatch and error text.
 # From: Issue #1683
-CI_COMMANDS="plan impact identity resolve build build-args build-tools publish verify test scan assemble validate promote release gc variables"
+declare -A CI_DISPATCH=(
+    [plan]=ci_cmd_plan [impact]=ci_cmd_impact [identity]=ci_cmd_identity
+    [resolve]=ci_cmd_resolve [build]=ci_cmd_build [build-args]=ci_cmd_build_args
+    [build-tools]=ci_cmd_build_tools [publish]=ci_cmd_publish [verify]=ci_cmd_verify
+    [test]=ci_cmd_test [scan]=ci_cmd_scan [assemble]=ci_cmd_assemble
+    [validate]=ci_cmd_validate [promote]=ci_cmd_promote [release]=ci_cmd_release
+    [gc]=ci_cmd_gc [variables]=ci_cmd_variables
+)
 
 # =========================================================
 # LOGGING
@@ -53,13 +60,6 @@ ci_error() {
     printf 'raw:\n%s\n' "${raw}" >&2
 }
 
-# What: Report an unimplemented dispatch target.
-# Why: Scaffold must fail closed, never silently succeed.
-# From: Issue #1683
-ci_not_implemented() {
-    ci_log "[CI-ERROR-CORE-0001]" "command=$* state=SCAFFOLD reason=\"not yet implemented\""
-    return 2
-}
 
 # What: Fail closed unless the SOT manifest exists.
 # Why: Every real operation derives state from the manifest.
@@ -1958,40 +1958,18 @@ ci_cmd_build_tools() {
 # =========================================================
 
 # What: Route a subcommand to its engine function.
-# Why: One-list membership avoids a duplicate list.
+# Why: One table is membership and dispatch; no second list.
 # From: Issue #1683
 ci_main() {
-    local command="${1:-}"
+    local command="${1:-}" fn
     if [ "$#" -gt 0 ]; then shift; fi
-    case " ${CI_COMMANDS} " in
-        *" ${command} "*)
-            ci_require_manifest || return "$?"
-            case "${command}" in
-                plan) ci_cmd_plan "$@" ;;
-                impact) ci_cmd_impact "$@" ;;
-                identity) ci_cmd_identity "$@" ;;
-                resolve) ci_cmd_resolve "$@" ;;
-                build) ci_cmd_build "$@" ;;
-                build-args) ci_cmd_build_args "$@" ;;
-                build-tools) ci_cmd_build_tools "$@" ;;
-                publish) ci_cmd_publish "$@" ;;
-                verify) ci_cmd_verify "$@" ;;
-                test) ci_cmd_test "$@" ;;
-                scan) ci_cmd_scan "$@" ;;
-                assemble) ci_cmd_assemble "$@" ;;
-                validate) ci_cmd_validate "$@" ;;
-                promote) ci_cmd_promote "$@" ;;
-                release) ci_cmd_release "$@" ;;
-                gc) ci_cmd_gc "$@" ;;
-                variables) ci_cmd_variables "$@" ;;
-                *) ci_not_implemented "${command}" "$@" ;;
-            esac
-            ;;
-        *)
-            ci_log "[CI-ERROR-CORE-0002]" "command=\"${command}\" reason=\"unknown subcommand\" known=\"${CI_COMMANDS}\""
-            return 2
-            ;;
-    esac
+    fn="${CI_DISPATCH[${command}]:-}"
+    if [ -z "${fn}" ]; then
+        ci_log "[CI-ERROR-CORE-0002]" "command=\"${command}\" reason=\"unknown subcommand\" known=\"${!CI_DISPATCH[*]}\""
+        return 2
+    fi
+    ci_require_manifest || return "$?"
+    "${fn}" "$@"
 }
 
 # What: Run the dispatcher only on direct execution.
