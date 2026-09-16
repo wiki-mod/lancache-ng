@@ -1510,6 +1510,27 @@ _ci_write_dist_config() {
       } > "${path}" )
 }
 
+# What: Emit a --secret ref for an already-written file.
+# Why: One place formats the mount; id stays validated.
+# From: Issue #1683
+_ci_emit_secret_ref() {
+    local dir="$1" id="$2" ids
+    ids="$(_ci_runtime_secret_ids)"
+    if ! grep -qx "${id}" <<< "${ids}"; then
+        ci_log "[CI-ERROR-VARIABLES-0014]" "id=\"${id}\" reason=\"secret id not in the central list\""
+        return 2
+    fi
+    printf -- '--secret id=%s,src=%s\n' "${id}" "${dir}/${id}"
+}
+
+# What: Write a plain secret value then emit its ref.
+# Why: One place does write+mount for every plain secret.
+# From: Issue #1683
+_ci_emit_secret() {
+    _ci_write_secret "$1/$2" "$3"
+    _ci_emit_secret_ref "$1" "$2"
+}
+
 # What: Prepare build-time secret files + --secret args.
 # Why: One place provides all build-only secrets, leak-safe.
 # From: Issue #1683
@@ -1543,14 +1564,12 @@ _ci_set_runtime() {
     fi
     ( umask 077; mkdir -p "${dir}" )
     if [ "${redis_enabled}" = "1" ]; then
-        _ci_write_secret "${dir}/sccache_redis_url" "${SCCACHE_REDIS_URL:-}"
-        _ci_write_secret "${dir}/ccache_redis_url" "${SCCACHE_REDIS_URL:-}"
-        printf -- '--secret id=sccache_redis_url,src=%s\n' "${dir}/sccache_redis_url"
-        printf -- '--secret id=ccache_redis_url,src=%s\n' "${dir}/ccache_redis_url"
+        _ci_emit_secret "${dir}" sccache_redis_url "${SCCACHE_REDIS_URL:-}" || return "$?"
+        _ci_emit_secret "${dir}" ccache_redis_url "${SCCACHE_REDIS_URL:-}" || return "$?"
     fi
     if [ "${sccache_enabled}" = "1" ] && [ -n "${SCCACHE_DIST_SCHEDULER_URL:-}" ]; then
         _ci_write_dist_config "${dir}/sccache_dist_config"
-        printf -- '--secret id=sccache_dist_config,src=%s\n' "${dir}/sccache_dist_config"
+        _ci_emit_secret_ref "${dir}" sccache_dist_config || return "$?"
     fi
     if [ -n "${DISTCC_POTENTIAL_HOSTS:-}" ]; then
         case "${DISTCC_POTENTIAL_HOSTS}" in
@@ -1560,12 +1579,10 @@ _ci_set_runtime() {
                 return 2
                 ;;
         esac
-        _ci_write_secret "${dir}/distcc_potential_hosts" "${DISTCC_POTENTIAL_HOSTS:-}"
-        printf -- '--secret id=distcc_potential_hosts,src=%s\n' "${dir}/distcc_potential_hosts"
+        _ci_emit_secret "${dir}" distcc_potential_hosts "${DISTCC_POTENTIAL_HOSTS:-}" || return "$?"
     fi
     if [ -n "${PROJECT_SELFHOSTED_PROXY_CA:-}" ]; then
-        _ci_write_secret "${dir}/project_selfhosted_proxy_ca" "${PROJECT_SELFHOSTED_PROXY_CA:-}"
-        printf -- '--secret id=project_selfhosted_proxy_ca,src=%s\n' "${dir}/project_selfhosted_proxy_ca"
+        _ci_emit_secret "${dir}" project_selfhosted_proxy_ca "${PROJECT_SELFHOSTED_PROXY_CA:-}" || return "$?"
     fi
 }
 
