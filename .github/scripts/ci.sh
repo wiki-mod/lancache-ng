@@ -2067,6 +2067,98 @@ _ci_check_line_endings() {
     printf 'line-endings=clean files=%s\n' "${#files[@]}"
 }
 
+# What: True for a path exempt from the header contract.
+# Why: One exclusion owner (binaries, vendored, licenses).
+# From: Issue #1683
+_ci_header_excluded() {
+    case "$1" in
+        *.md|VERSION|LICENSE|COPYING) return 0 ;;
+        .env|.env.example|*/.env|*/.env.example) return 0 ;;
+        Cargo.lock|*/Cargo.lock|.gitkeep|*/.gitkeep) return 0 ;;
+        services/dhcp/kea-dhcp4.conf|services/dhcp/kea-ctrl-agent.conf|services/dhcp/kea-dhcp-ddns.conf) return 0 ;;
+        docs/validation-state.json|*/docs/validation-state.json) return 0 ;;
+        services/ui/src/static/chart.umd.min.js|services/ui/src/static/admin.css) return 0 ;;
+        services/proxy/public_suffix_list.dat|services/dns/schema.sqlite3.sql) return 0 ;;
+        */fuzz/corpus/*|fuzz/corpus/*) return 0 ;;
+        *.png|*.jpg|*.jpeg|*.gif|*.ico|*.svg|*.woff|*.woff2|*.ttf|*.eot|*.crt|*.key|*.pem) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# What: Print the native project+SPDX header for a path.
+# Why: Header uses the file format's own comment syntax.
+# From: Issue #1683
+_ci_header_expected() {
+    local h='LanCache-NG (https://github.com/wiki-mod/lancache-ng)'
+    local s='SPDX-License-Identifier: AGPL-3.0-or-later'
+    case "$1" in
+        services/ui/src/templates/*.html|*/services/ui/src/templates/*.html) printf '{# %s #}\n{# %s #}\n' "${h}" "${s}" ;;
+        *.html) printf '<!-- %s -->\n<!-- %s -->\n' "${h}" "${s}" ;;
+        *.rs) printf '//! %s\n//! %s\n' "${h}" "${s}" ;;
+        *.lua) printf -- '-- %s\n-- %s\n' "${h}" "${s}" ;;
+        *.js) printf '// %s\n// %s\n' "${h}" "${s}" ;;
+        *.css) printf '/* %s */\n/* %s */\n' "${h}" "${s}" ;;
+        *.sh|*.bats|*.yml|*.yaml|*.toml|*.conf|*.template|*.txt|*.env|*.service|*.timer|*.ps1|*.dockerignore|Dockerfile|*/Dockerfile|.gitattributes|.gitignore|*/.gitignore|.shellspec|*/.shellspec|CODEOWNERS|*/CODEOWNERS|.githooks/*|*/.githooks/*) printf '# %s\n# %s\n' "${h}" "${s}" ;;
+        *) return 1 ;;
+    esac
+}
+
+# What: True if line 1 is a valid marker for the path.
+# Why: shebang / Docker directive / Rust //! sit on line 1.
+# From: Issue #1683
+_ci_header_line1_ok() {
+    local path="$1" l1="$2"
+    case "${path}" in *.rs) [ "${l1}" = "//!" ]; return "$?" ;; esac
+    [ -z "${l1}" ] && return 0
+    case "${l1}" in '#!'*) return 0 ;; esac
+    case "${path}" in
+        Dockerfile|*/Dockerfile)
+            [[ "${l1,,}" =~ ^#[[:space:]]*(syntax|escape|check)[[:space:]]*=[[:space:]]*.+$ ]] && return 0 ;;
+    esac
+    return 1
+}
+
+# What: Fail on any file missing the canonical header.
+# Why: AGENTS.md header contract, native syntax, line 2/3.
+# From: Issue #1683
+_ci_check_file_headers() {
+    local -a files=()
+    if [ "$#" -gt 0 ]; then files=("$@"); else
+        mapfile -t files < <(git ls-files)
+    fi
+    local path exp p_line s_line legacy line pc sc scnt lc
+    local -a fails=() scan=()
+    for path in "${files[@]}"; do
+        [ -f "${path}" ] || continue
+        _ci_header_excluded "${path}" && continue
+        if ! exp="$(_ci_header_expected "${path}")"; then
+            fails+=("${path}: no native header syntax"); continue
+        fi
+        p_line="$(printf '%s' "${exp}" | sed -n 1p)"
+        s_line="$(printf '%s' "${exp}" | sed -n 2p)"
+        legacy="${p_line/LanCache-NG/lancache-ng}"
+        mapfile -t scan < <(head -n 20 -- "${path}")
+        _ci_header_line1_ok "${path}" "${scan[0]-}" || fails+=("${path}: bad line 1 marker")
+        [ "${scan[1]-}" = "${p_line}" ] || fails+=("${path}: line 2 must be: ${p_line}")
+        [ "${scan[2]-}" = "${s_line}" ] || fails+=("${path}: line 3 must be: ${s_line}")
+        pc=0; scnt=0; lc=0
+        for line in "${scan[@]}"; do
+            [ "${line}" = "${p_line}" ] && pc=$((pc + 1))
+            [ "${line}" = "${s_line}" ] && scnt=$((scnt + 1))
+            [ "${line}" = "${legacy}" ] && lc=$((lc + 1))
+        done
+        [ "${pc}" -eq 1 ] || fails+=("${path}: project header count ${pc} not 1")
+        [ "${scnt}" -eq 1 ] || fails+=("${path}: SPDX count ${scnt} not 1")
+        [ "${lc}" -eq 0 ] || fails+=("${path}: legacy lowercase header present")
+    done
+    if [ "${#fails[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0003]" "reason=\"invalid file header layout\"" "$(printf '%s\n' "${fails[@]}")"
+        return 1
+    fi
+    sc="${#files[@]}"
+    printf 'file-headers=clean files=%s\n' "${sc}"
+}
+
 # What: Route a source-hygiene check to its function.
 # Why: One owner per guard invariant; ci.bats calls it.
 # From: Issue #1683
@@ -2075,6 +2167,7 @@ ci_cmd_check() {
     if [ "$#" -gt 0 ]; then shift; fi
     case "${sub}" in
         line-endings) _ci_check_line_endings "$@" ;;
+        file-headers) _ci_check_file_headers "$@" ;;
         *)
             ci_log "[CI-ERROR-CHECK-0001]" "sub=\"${sub}\" reason=\"unknown check\""
             return 2

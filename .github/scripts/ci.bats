@@ -1989,6 +1989,19 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     [[ "${output}" == *"CI-ERROR-CHECK-0002"* ]]
 }
 
+@test "check file-headers passes canonical, fails missing via ci.sh" {
+    # What: ci.sh owns the header contract; bats calls it.
+    # Why: guard logic lives once, tested through ci.sh.
+    # From: Issue #1683
+    printf '#!/usr/bin/env bash\n# LanCache-NG (https://github.com/wiki-mod/lancache-ng)\n# SPDX-License-Identifier: AGPL-3.0-or-later\n' > "${BATS_TEST_TMPDIR}/good.sh"
+    run bash "${CI_SH}" check file-headers "${BATS_TEST_TMPDIR}/good.sh"
+    [ "${status}" -eq 0 ]
+    printf '#!/usr/bin/env bash\necho hi\n' > "${BATS_TEST_TMPDIR}/bad.sh"
+    run bash "${CI_SH}" check file-headers "${BATS_TEST_TMPDIR}/bad.sh"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0003"* ]]
+}
+
 # =========================================================
 # HISTORICAL REGRESSIONS
 # =========================================================
