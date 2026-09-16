@@ -125,6 +125,7 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
       openssl \
       openssl-dev \
       openssl-libs-static \
+      parallel \
       perl \
       pkgconf \
       procps-ng \
@@ -272,6 +273,7 @@ RUN set -euo pipefail; \
     cargo tarpaulin --version; \
     actionlint --version; \
     bats --version; \
+    parallel --version; \
     shellspec --version; \
     shellcheck --version; \
     docker --version; \

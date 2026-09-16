@@ -1746,8 +1746,167 @@ _ci_build_tools_arches() {
     printf '%s' "${out}" | LC_ALL=C sort -u
 }
 
-# What: build-tools lifecycle helpers for the check.
-# Why: Thin workflow reads packages + signature here.
+# What: Resolve one arch's apk versions (injectable).
+# Why: real apk runs in a container; tests inject it.
+# From: Issue #1683
+_ci_apk_resolve() {
+    local base="$1" arch="$2" packages="$3"
+    if [ -n "${CI_APK_RESOLVE_CMD:-}" ]; then
+        "${CI_APK_RESOLVE_CMD}" "${base}" "${arch}" "${packages}"
+        return "$?"
+    fi
+    docker run --rm "${base}" sh -c "
+        sed -i 's|^https://|http://|' /etc/apk/repositories
+        apk --arch '${arch}' update >/dev/null 2>&1
+        apk --arch '${arch}' add --no-cache --simulate ${packages} 2>&1 \
+          | sed -n 's/^.*Installing \([^ ]*\) (\([^)]*\)).*/\1-\2/p' \
+          | LC_ALL=C sort | tr '\n' ' '"
+}
+
+# What: Resolve every arch's apk state, then sign it.
+# Why: the whole signature is computed here, not in YAML.
+# From: Issue #1683
+_ci_build_tools_resolve_signature() {
+    local base packages arches arch av versions=""
+    base="$(_ci_build_tools_build_args --bare | sed -n 's/^ALPINE_IMAGE=//p')"
+    if [ -z "${base}" ]; then
+        ci_log "[CI-ERROR-BUILDTOOLS-0009]" "reason=\"no ALPINE_IMAGE from SOT; FAIL CLOSED\""
+        return 2
+    fi
+    packages="$(_ci_build_tools_packages | tr '\n' ' ')" || return 2
+    arches="$(_ci_build_tools_arches)" || return 2
+    for arch in ${arches}; do
+        av="$(_ci_apk_resolve "${base}" "${arch}" "${packages}")" || return 2
+        if [ -z "${av}" ]; then
+            ci_log "[CI-ERROR-BUILDTOOLS-0011]" "arch=\"${arch}\" reason=\"no apk versions; FAIL CLOSED\""
+            return 2
+        fi
+        versions="${versions}${arch}:${av} "
+    done
+    _ci_build_tools_signature "${versions}"
+}
+
+# What: Read the signature label off a published image.
+# Why: registry read lives here; tests inject the reader.
+# From: Issue #1683
+_ci_build_tools_published_signature() {
+    local image="$1" json
+    if [ -z "${image}" ]; then
+        ci_log "[CI-ERROR-BUILDTOOLS-0012]" "reason=\"image ref required\""
+        return 2
+    fi
+    if [ -n "${CI_PUBLISHED_SIG_CMD:-}" ]; then
+        "${CI_PUBLISHED_SIG_CMD}" "${image}"
+        return "$?"
+    fi
+    json="$(docker buildx imagetools inspect "${image}" --format '{{json .Image}}' 2>/dev/null)" || { printf ''; return 0; }
+    printf '%s' "${json}" | jq -r '
+        [.. | objects | .config?.Labels? // empty
+         | ."org.lancache-ng.build-tools.signature" // empty]
+        | map(select(. != "")) | first // ""'
+}
+
+# What: Append one arch entry to the build matrix JSON.
+# Why: the dynamic matrix is built here, not in YAML.
+# From: Issue #1683
+_ci_matrix_append() {
+    printf '%s' "$1" | jq -c --arg a "$2" --arg r "$3" --arg p "$4" \
+        '. + [{"arch":$a,"runner":$r,"platform":$p}]'
+}
+
+# What: Decide arches to build and emit the matrix.
+# Why: BUILD/NOOP + matrix logic lives here, not in YAML.
+# From: Issue #1683
+_ci_build_tools_gate() {
+    local arch="$1" mode="$2" current="$3" published="$4"
+    if [ -z "${current}" ]; then
+        ci_log "[CI-ERROR-BUILDTOOLS-0013]" "reason=\"empty current signature; FAIL CLOSED\""
+        return 2
+    fi
+    local need=false amd=false arm=false include='[]'
+    if [ "${mode}" = "build" ] || [ "${current}" != "${published}" ]; then
+        need=true
+    fi
+    if [ "${need}" = "true" ]; then
+        case "${arch}" in
+            amd64) amd=true ;;
+            arm64) arm=true ;;
+            both) amd=true; arm=true ;;
+            *) ci_log "[CI-ERROR-BUILDTOOLS-0014]" "arch=\"${arch}\" reason=\"unknown arch\""; return 2 ;;
+        esac
+    fi
+    [ "${amd}" = "true" ] && include="$(_ci_matrix_append "${include}" amd64 ubuntu-latest linux/amd64)"
+    [ "${arm}" = "true" ] && include="$(_ci_matrix_append "${include}" arm64 ubuntu-24.04-arm linux/arm64)"
+    printf 'build-amd64=%s\nbuild-arm64=%s\nmatrix={"include":%s}\n' "${amd}" "${arm}" "${include}"
+}
+
+# What: Assemble the multi-arch manifest (injectable).
+# Why: registry assembly lives here, not in YAML.
+# From: Issue #1683
+_ci_build_tools_merge() {
+    local sha="${1:-${GITHUB_SHA:-}}" image amd64 arm64 tag
+    if [ -z "${sha}" ]; then
+        ci_log "[CI-ERROR-BUILDTOOLS-0015]" "reason=\"commit sha required\""
+        return 2
+    fi
+    if [ -n "${CI_MERGE_CMD:-}" ]; then
+        "${CI_MERGE_CMD}" "${sha}"
+        return "$?"
+    fi
+    image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE required}"
+    # What: per-arch children use sha-<full>-<arch>.
+    # Why: AG-REL-015 bans the -standalone- form.
+    # From: Issue #1683
+    amd64="${image}:sha-${sha}-amd64"
+    arm64="${image}:sha-${sha}-arm64"
+    for tag in "sha-${sha}" latest; do
+        docker buildx imagetools create --tag "${image}:${tag}" "${amd64}" "${arm64}"
+    done
+}
+
+# What: Format a multiline value as a GITHUB_OUTPUT block.
+# Why: Actions multiline outputs need a heredoc delimiter.
+# From: Issue #1683
+_ci_emit_multiline() {
+    local key="$1" value="$2"
+    local delim="__CI_EOF_${key}__"
+    # What: fail closed if the value contains the delimiter.
+    # Why: a delimiter collision would corrupt the output.
+    # From: Issue #1683
+    case "${value}" in
+        *"${delim}"*)
+            ci_log "[CI-ERROR-CORE-0003]" "key=\"${key}\" reason=\"value contains output delimiter; FAIL CLOSED\""
+            return 2
+            ;;
+    esac
+    printf '%s<<%s\n%s\n%s' "${key}" "${delim}" "${value}" "${delim}"
+}
+
+# What: Resolve, decide, emit the determine outputs.
+# Why: One call keeps the YAML run-block pure per AG-CI-023.
+# From: Issue #1683
+_ci_build_tools_plan() {
+    local arch="${BT_ARCH:-both}" mode="${BT_MODE:-check}"
+    local image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE required}"
+    local out="${GITHUB_OUTPUT:?GITHUB_OUTPUT required}"
+    local bare current published gate_lines args_block
+    bare="$(_ci_build_tools_build_args --bare)" || return 2
+    current="$(_ci_build_tools_resolve_signature)" || return 2
+    published="$(_ci_build_tools_published_signature "${image}:latest")" || return 2
+    gate_lines="$(_ci_build_tools_gate "${arch}" "${mode}" "${current}" "${published}")" || return 2
+    args_block="$(_ci_emit_multiline build-args-bare "${bare}")" || return 2
+    # What: append resolved outputs to the step file.
+    # Why: build and merge jobs consume them as needs.
+    # From: Issue #1683
+    {
+        printf 'signature=%s\n' "${current}"
+        printf '%s\n' "${gate_lines}"
+        printf '%s\n' "${args_block}"
+    } >> "${out}"
+}
+
+# What: build-tools lifecycle helpers for the workflow.
+# Why: all gate logic lives here; YAML only orchestrates.
 # From: Issue #1683
 ci_cmd_build_tools() {
     local sub="${1:-}"
@@ -1756,6 +1915,11 @@ ci_cmd_build_tools() {
         packages) _ci_build_tools_packages ;;
         arches) _ci_build_tools_arches ;;
         signature) _ci_build_tools_signature "${1:-}" ;;
+        resolve-signature) _ci_build_tools_resolve_signature ;;
+        published-signature) _ci_build_tools_published_signature "${1:-}" ;;
+        gate) _ci_build_tools_gate "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
+        plan) _ci_build_tools_plan ;;
+        merge) _ci_build_tools_merge "${1:-}" ;;
         *)
             ci_log "[CI-ERROR-BUILDTOOLS-0003]" "sub=\"${sub}\" reason=\"unknown build-tools subcommand\""
             return 2

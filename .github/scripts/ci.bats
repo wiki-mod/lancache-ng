@@ -1793,6 +1793,99 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     [ "${a}" != "${b}" ]
 }
 
+@test "build-tools gate: an unchanged signature is a NOOP" {
+    # What: same current/published sig builds nothing.
+    # Why: unchanged inputs must not rebuild.
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools gate both check SIG SIG
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"build-amd64=false"* ]]
+    [[ "${output}" == *"build-arm64=false"* ]]
+    [[ "${output}" == *'"include":[]'* ]]
+}
+
+@test "build-tools gate: a changed signature builds the arches" {
+    # What: changed sig or mode=build selects arches.
+    # Why: a real change or a forced build must build.
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools gate both check SIG OLD
+    [[ "${output}" == *"build-amd64=true"* ]]
+    [[ "${output}" == *"build-arm64=true"* ]]
+    [[ "${output}" == *'"arch":"amd64"'* ]]
+    [[ "${output}" == *'"arch":"arm64"'* ]]
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools gate amd64 build SIG SIG
+    [[ "${output}" == *"build-amd64=true"* ]]
+    [[ "${output}" == *"build-arm64=false"* ]]
+}
+
+@test "build-tools gate fails closed on an empty current sig" {
+    # What: no current signature must not decide.
+    # Why: an empty gate input is fail-closed.
+    # From: Issue #1683
+    run bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools gate both check "" X
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-BUILDTOOLS-0013"* ]]
+}
+
+@test "build-tools resolve-signature uses the injected resolver" {
+    # What: the apk resolver is injectable for tests.
+    # Why: signature logic is proven without a container.
+    # From: Issue #1683
+    local mock="${BATS_TEST_TMPDIR}/apk.sh"
+    printf '#!/bin/sh\necho "sccache-0.15.0-r0 fake-$2-1.0-r0"\n' > "${mock}"
+    chmod +x "${mock}"
+    run env CI_APK_RESOLVE_CMD="${mock}" bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools resolve-signature
+    [ "${status}" -eq 0 ]
+    [ -n "${output}" ]
+}
+
+@test "build-tools published-signature uses the injected reader" {
+    # What: the registry read is injectable for tests.
+    # Why: no live GHCR needed to prove the gate.
+    # From: Issue #1683
+    local mock="${BATS_TEST_TMPDIR}/pub.sh"
+    printf '#!/bin/sh\necho PUB-123\n' > "${mock}"
+    chmod +x "${mock}"
+    run env CI_PUBLISHED_SIG_CMD="${mock}" bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools published-signature img:latest
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"PUB-123"* ]]
+}
+
+@test "build-tools merge uses the injected assembler" {
+    # What: the manifest assembly is injectable.
+    # Why: no live registry needed to prove the call.
+    # From: Issue #1683
+    local mock="${BATS_TEST_TMPDIR}/merge.sh"
+    printf '#!/bin/sh\necho "merged sha=$1"\n' > "${mock}"
+    chmod +x "${mock}"
+    run env CI_MERGE_CMD="${mock}" bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools merge abc123
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"merged sha=abc123"* ]]
+}
+
+@test "build-tools plan writes every determine-job output" {
+    # What: plan emits all outputs to $GITHUB_OUTPUT.
+    # Why: the run-block stays a single pure ci.sh call.
+    # From: Issue #1683
+    local apk="${BATS_TEST_TMPDIR}/apk.sh" pub="${BATS_TEST_TMPDIR}/pub.sh"
+    local gho="${BATS_TEST_TMPDIR}/out.txt"
+    printf '#!/bin/sh\necho "sccache-0.15.0-r0 fake-$2-1.0-r0"\n' > "${apk}"
+    printf '#!/bin/sh\necho OLD-SIG\n' > "${pub}"
+    chmod +x "${apk}" "${pub}"
+    : > "${gho}"
+    run env CI_APK_RESOLVE_CMD="${apk}" CI_PUBLISHED_SIG_CMD="${pub}" \
+        BUILD_TOOLS_IMAGE=example/build-tools BT_ARCH=both BT_MODE=check \
+        GITHUB_OUTPUT="${gho}" \
+        bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools plan
+    [ "${status}" -eq 0 ]
+    grep -q '^signature=' "${gho}"
+    grep -q '^build-amd64=true$' "${gho}"
+    grep -q '^build-arm64=true$' "${gho}"
+    grep -q '^matrix={"include":' "${gho}"
+    grep -q '^build-args-bare<<' "${gho}"
+    grep -q '^ALPINE_IMAGE=' "${gho}"
+}
+
 @test "build-tools rejects an unknown subcommand (fail closed)" {
     # What: An unknown sub must not silently succeed.
     # Why: Fail-closed dispatch (AG-VAL-002).

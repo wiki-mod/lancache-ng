@@ -43,11 +43,11 @@ jobs:
     name: input-change gate
     runs-on: ubuntu-latest
     outputs:
-      build-amd64: ${{ steps.decide.outputs.build-amd64 }}
-      build-arm64: ${{ steps.decide.outputs.build-arm64 }}
-      matrix: ${{ steps.decide.outputs.matrix }}
-      signature: ${{ steps.current.outputs.signature }}
-      build-args-bare: ${{ steps.sot.outputs.bare }}
+      build-amd64: ${{ steps.plan.outputs.build-amd64 }}
+      build-arm64: ${{ steps.plan.outputs.build-arm64 }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      signature: ${{ steps.plan.outputs.signature }}
+      build-args-bare: ${{ steps.plan.outputs.build-args-bare }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -59,103 +59,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # What: resolve SOT build-args for the jobs.
-      # Why: one owner feeds every consumer; no re-pin.
+      # What: resolve, decide, emit all outputs.
+      # Why: the gate lives in ci.sh; YAML only calls it.
       # From: Issue #1683
-      - name: Resolve build-tools build-args from the version SOT
-        id: sot
-        run: |
-          set -euo pipefail
-          {
-            echo 'bare<<SOT_ARGS_EOF'
-            bash .github/scripts/ci.sh build-args build-tools --bare
-            echo 'SOT_ARGS_EOF'
-          } >> "$GITHUB_OUTPUT"
-
-      # What: sign every arch's apk state + the build-args.
-      # Why: an arm64-only change must move the signature.
-      # From: Issue #1683
-      - name: Compute current build-tools input signature
-        id: current
-        run: |
-          set -euo pipefail
-          base="$(bash .github/scripts/ci.sh build-args build-tools --bare \
-            | sed -n 's/^ALPINE_IMAGE=//p')"
-          [ -n "$base" ] || { echo "::error::No ALPINE_IMAGE from the SOT."; exit 1; }
-          packages="$(bash .github/scripts/ci.sh build-tools packages | tr '\n' ' ')"
-          arches="$(bash .github/scripts/ci.sh build-tools arches)"
-          versions=""
-          for arch in $arches; do
-            av="$(docker run --rm "$base" sh -c "
-              sed -i 's|^https://|http://|' /etc/apk/repositories
-              apk --arch '$arch' update >/dev/null 2>&1
-              apk --arch '$arch' add --no-cache --simulate $packages 2>&1 \
-                | sed -n 's/^.*Installing \([^ ]*\) (\([^)]*\)).*/\1-\2/p' \
-                | LC_ALL=C sort | tr '\n' ' '")"
-            [ -n "$av" ] || { echo "::error::No apk versions resolved for $arch."; exit 1; }
-            versions="${versions}${arch}:${av} "
-          done
-          signature="$(bash .github/scripts/ci.sh build-tools signature "$versions")"
-          echo "signature=${signature}" >> "$GITHUB_OUTPUT"
-
-      # What: read the published signature label.
-      # Why: an unchanged signature means a NOOP rebuild.
-      # From: Issue #1683
-      - name: Read the published build-tools signature
-        id: published
-        run: |
-          set -euo pipefail
-          published=""
-          if docker buildx imagetools inspect "${BUILD_TOOLS_IMAGE}:latest" \
-              --format '{{json .Image}}' > /tmp/img.json 2>/dev/null; then
-            published="$(jq -r '
-              [.. | objects | .config?.Labels? // empty
-               | ."org.lancache-ng.build-tools.signature" // empty]
-              | map(select(. != "")) | first // ""' /tmp/img.json)"
-          fi
-          echo "signature=${published}" >> "$GITHUB_OUTPUT"
-
-      # What: decide arches, emit a matrix of only those.
-      # Why: build forces; a changed signature does too.
-      # From: Issue #1683
-      - name: Decide build need
-        id: decide
+      - name: Plan the build-tools refresh
+        id: plan
         env:
-          ARCH: ${{ github.event.inputs.arch || 'both' }}
-          MODE: ${{ github.event.inputs.mode || 'check' }}
-          CURRENT: ${{ steps.current.outputs.signature }}
-          PUBLISHED: ${{ steps.published.outputs.signature }}
-        run: |
-          set -euo pipefail
-          [ -n "$CURRENT" ] || { echo "::error::Empty current signature."; exit 1; }
-          need=false
-          if [ "$MODE" = "build" ] || [ "$CURRENT" != "$PUBLISHED" ]; then
-            need=true
-          fi
-          amd=false
-          arm=false
-          if [ "$need" = "true" ]; then
-            case "$ARCH" in
-              amd64) amd=true ;;
-              arm64) arm=true ;;
-              both)  amd=true; arm=true ;;
-              *) echo "::error::Unknown arch '$ARCH'."; exit 1 ;;
-            esac
-          fi
-          include='[]'
-          if [ "$amd" = "true" ]; then
-            include="$(echo "$include" | jq -c '. + [{"arch":"amd64","runner":"ubuntu-latest","platform":"linux/amd64"}]')"
-          fi
-          if [ "$arm" = "true" ]; then
-            include="$(echo "$include" | jq -c '. + [{"arch":"arm64","runner":"ubuntu-24.04-arm","platform":"linux/arm64"}]')"
-          fi
-          {
-            echo "build-amd64=${amd}"
-            echo "build-arm64=${arm}"
-            echo "matrix={\"include\":${include}}"
-          } >> "$GITHUB_OUTPUT"
-          printf '::notice::gate arch=%s mode=%s need=%s amd64=%s arm64=%s\n' \
-            "$ARCH" "$MODE" "$need" "$amd" "$arm"
+          BT_ARCH: ${{ github.event.inputs.arch || 'both' }}
+          BT_MODE: ${{ github.event.inputs.mode || 'check' }}
+        run: bash .github/scripts/ci.sh build-tools plan
 
   # What: one platform-parameterized build job, not a twin.
   # Why: platform is a matrix parameter; logic exists once.
@@ -194,15 +106,11 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.BUILD_TOOLS_IMAGE }}
+          # What: per-arch child tag sha-<full>-<arch>.
+          # Why: AG-REL-015 bans the -standalone- form.
+          # From: Issue #1683
           tags: |
-            type=sha,prefix=sha-,format=long,suffix=-standalone-${{ matrix.arch }}
-
-      - name: Compute immutable pushed source tag
-        id: source-tag
-        run: |
-          set -euo pipefail
-          printf 'image=%s:sha-%s-standalone-%s\n' \
-            "$BUILD_TOOLS_IMAGE" "$GITHUB_SHA" "${{ matrix.arch }}" >> "$GITHUB_OUTPUT"
+            type=sha,prefix=sha-,format=long,suffix=-${{ matrix.arch }}
 
       # What: build+push, stamping the signature.
       # Why: the gate reads this label next time.
@@ -217,7 +125,7 @@ jobs:
           builder: ${{ steps.buildx.outputs.name }}
           context: tools/build-tools
           push: true
-          tags: ${{ steps.source-tag.outputs.image }}
+          tags: ${{ steps.meta.outputs.tags }}
           labels: |
             ${{ steps.meta.outputs.labels }}
             org.lancache-ng.build-tools.signature=${{ needs.determine-build-need.outputs.signature }}
@@ -276,6 +184,9 @@ jobs:
       contents: read
       packages: write
     steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
@@ -286,16 +197,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # What: merge the per-arch tags into one image.
-      # Why: consumers pull one multi-arch image.
+      # What: assemble the multi-arch image via ci.sh.
+      # Why: registry assembly logic lives in ci.sh.
       # From: Issue #1683
-      - name: Create the multi-arch manifest
-        run: |
-          set -euo pipefail
-          amd64="${BUILD_TOOLS_IMAGE}:sha-${GITHUB_SHA}-standalone-amd64"
-          arm64="${BUILD_TOOLS_IMAGE}:sha-${GITHUB_SHA}-standalone-arm64"
-          for tag in "sha-${GITHUB_SHA}" latest; do
-            docker buildx imagetools create \
-              --tag "${BUILD_TOOLS_IMAGE}:${tag}" \
-              "$amd64" "$arm64"
-          done
+      - name: Assemble the multi-arch manifest
+        run: bash .github/scripts/ci.sh build-tools merge
