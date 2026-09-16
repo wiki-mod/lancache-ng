@@ -1618,7 +1618,7 @@ ci_cmd_variables() {
 # Why: SOT owns them; the Dockerfile pins nothing itself.
 # From: Issue #1683
 _ci_build_tools_build_args() {
-    local fmt="${1:-}" prefix="--build-arg " out="" argname key val pkgs
+    local fmt="${1:-}" platform="${2:-}" prefix="--build-arg " out="" argname key val pkgs apk_arch sha
     [ "${fmt}" = "--bare" ] && prefix=""
     # What: base_images.alpine -> ALPINE_IMAGE.
     # Why: Final stage pins its base from the one owner.
@@ -1630,8 +1630,8 @@ _ci_build_tools_build_args() {
         return 2
     fi
     out="${out}${prefix}ALPINE_IMAGE=${val}"$'\n'
-    # What: external_versions.dhclient.* -> DHCLIENT_*.
-    # Why: The reused v3.20 apk pins version+digests.
+    # What: platform-independent dhclient version+branch.
+    # Why: The reused v3.20 apk pins these for every arch.
     # From: Issue #1683
     while IFS=: read -r argname key; do
         [ -n "${argname}" ] || continue
@@ -1644,9 +1644,39 @@ _ci_build_tools_build_args() {
     done <<'DHPAIRS'
 DHCLIENT_VERSION:version
 DHCLIENT_ALPINE_BRANCH:alpine_branch
+DHPAIRS
+    if [ -n "${platform}" ]; then
+        # What: ci.sh resolves one apk-arch + its checksum.
+        # Why: the Dockerfile consumes them; no arch case.
+        # From: Issue #1683
+        apk_arch="$(_ci_platform_apk_arch "${platform}")" || {
+            ci_log "[CI-ERROR-BUILDARGS-0006]" "platform=\"${platform}\" reason=\"no apk arch mapping; FAIL CLOSED\""
+            return 2
+        }
+        sha="$(_ci_block_entry_field external_versions dhclient "sha256_${platform##*/}")"
+        if [ -z "${sha}" ]; then
+            ci_log "[CI-ERROR-BUILDARGS-0004]" "arg=\"DHCLIENT_SHA256\" key=\"external_versions.dhclient.sha256_${platform##*/}\" reason=\"missing central dhclient value; FAIL CLOSED\""
+            return 2
+        fi
+        out="${out}${prefix}DHCLIENT_APK_ARCH=${apk_arch}"$'\n'
+        out="${out}${prefix}DHCLIENT_SHA256=${sha}"$'\n'
+    else
+        # What: no platform -> both shas, for the signature.
+        # Why: the input signature covers every arch.
+        # From: Issue #1683
+        while IFS=: read -r argname key; do
+            [ -n "${argname}" ] || continue
+            val="$(_ci_block_entry_field external_versions dhclient "${key}")"
+            if [ -z "${val}" ]; then
+                ci_log "[CI-ERROR-BUILDARGS-0004]" "arg=\"${argname}\" key=\"external_versions.dhclient.${key}\" reason=\"missing central dhclient value; FAIL CLOSED\""
+                return 2
+            fi
+            out="${out}${prefix}${argname}=${val}"$'\n'
+        done <<'DHSHAS'
 DHCLIENT_SHA256_AMD64:sha256_amd64
 DHCLIENT_SHA256_ARM64:sha256_arm64
-DHPAIRS
+DHSHAS
+    fi
     # What: append the SOT apk list as a build-arg.
     # Why: Dockerfile consumes it; it never owns the list.
     # From: Issue #1683
@@ -1660,14 +1690,14 @@ DHPAIRS
 # Why: One version owner; the Dockerfile pins nothing.
 # From: Issue #1683
 ci_cmd_build_args() {
-    local service="${1:-}" fmt="${2:-}"
+    local service="${1:-}" fmt="${2:-}" platform="${3:-}"
     [ -n "${service}" ] || { ci_log "[CI-ERROR-BUILDARGS-0001]" "reason=\"service arg required\""; return 2; }
     case "${fmt}" in
         ""|--bare) : ;;
         *) ci_log "[CI-ERROR-BUILDARGS-0005]" "fmt=\"${fmt}\" reason=\"format must be empty or --bare\""; return 2 ;;
     esac
     case "${service}" in
-        build-tools) _ci_build_tools_build_args "${fmt}" ;;
+        build-tools) _ci_build_tools_build_args "${fmt}" "${platform}" ;;
         # What: Non-toolchain targets carry no SOT arg.
         # Why: Only build-tools pins central versions now.
         # From: Issue #1683
@@ -1886,20 +1916,32 @@ _ci_build_tools_plan() {
     local arch="${BT_ARCH:-both}" mode="${BT_MODE:-check}"
     local image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE required}"
     local out="${GITHUB_OUTPUT:?GITHUB_OUTPUT required}"
-    local bare current published gate_lines args_block
-    bare="$(_ci_build_tools_build_args --bare)" || return 2
+    local current published gate_lines
     current="$(_ci_build_tools_resolve_signature)" || return 2
     published="$(_ci_build_tools_published_signature "${image}:latest")" || return 2
     gate_lines="$(_ci_build_tools_gate "${arch}" "${mode}" "${current}" "${published}")" || return 2
-    args_block="$(_ci_emit_multiline build-args-bare "${bare}")" || return 2
     # What: append resolved outputs to the step file.
-    # Why: build and merge jobs consume them as needs.
+    # Why: each build job resolves its own platform args.
     # From: Issue #1683
     {
         printf 'signature=%s\n' "${current}"
         printf '%s\n' "${gate_lines}"
-        printf '%s\n' "${args_block}"
     } >> "${out}"
+}
+
+# What: Emit one platform's build-args to the step file.
+# Why: each build job resolves its own arch's args + sha.
+# From: Issue #1683
+_ci_build_tools_build_args_emit() {
+    local platform="${1:-}" bare block out
+    out="${GITHUB_OUTPUT:?GITHUB_OUTPUT required}"
+    if [ -z "${platform}" ]; then
+        ci_log "[CI-ERROR-BUILDTOOLS-0016]" "reason=\"platform arg required\""
+        return 2
+    fi
+    bare="$(_ci_build_tools_build_args --bare "${platform}")" || return 2
+    block="$(_ci_emit_multiline build-args-bare "${bare}")" || return 2
+    printf '%s\n' "${block}" >> "${out}"
 }
 
 # What: build-tools lifecycle helpers for the workflow.
@@ -1916,6 +1958,7 @@ ci_cmd_build_tools() {
         published-signature) _ci_build_tools_published_signature "${1:-}" ;;
         gate) _ci_build_tools_gate "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
         plan) _ci_build_tools_plan ;;
+        build-args-out) _ci_build_tools_build_args_emit "${1:-}" ;;
         merge) _ci_build_tools_merge "${1:-}" ;;
         *)
             ci_log "[CI-ERROR-BUILDTOOLS-0003]" "sub=\"${sub}\" reason=\"unknown build-tools subcommand\""

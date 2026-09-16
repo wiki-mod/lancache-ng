@@ -15,8 +15,8 @@ ARG ALPINE_IMAGE
 # From: Issue #1683
 ARG DHCLIENT_VERSION
 ARG DHCLIENT_ALPINE_BRANCH
-ARG DHCLIENT_SHA256_AMD64
-ARG DHCLIENT_SHA256_ARM64
+ARG DHCLIENT_APK_ARCH
+ARG DHCLIENT_SHA256
 
 # What: The single Alpine toolchain stage, base from SOT.
 # Why: apk installs Rust; musl-native, no rustup.
@@ -40,8 +40,8 @@ ARG no_proxy
 # From: Issue #1683
 ARG DHCLIENT_VERSION
 ARG DHCLIENT_ALPINE_BRANCH
-ARG DHCLIENT_SHA256_AMD64
-ARG DHCLIENT_SHA256_ARM64
+ARG DHCLIENT_APK_ARCH
+ARG DHCLIENT_SHA256
 
 # What: uses plain /bin/sh for the apk-install step only.
 # Why: rust:alpine has no bash until that step installs it.
@@ -59,8 +59,8 @@ RUN set -eu; \
     for kv in \
       "DHCLIENT_VERSION=${DHCLIENT_VERSION}" \
       "DHCLIENT_ALPINE_BRANCH=${DHCLIENT_ALPINE_BRANCH}" \
-      "DHCLIENT_SHA256_AMD64=${DHCLIENT_SHA256_AMD64}" \
-      "DHCLIENT_SHA256_ARM64=${DHCLIENT_SHA256_ARM64}"; do \
+      "DHCLIENT_APK_ARCH=${DHCLIENT_APK_ARCH}" \
+      "DHCLIENT_SHA256=${DHCLIENT_SHA256}"; do \
       case "$kv" in *=) missing="${missing} ${kv%=}" ;; esac; \
     done; \
     if [ -n "$missing" ]; then \
@@ -114,17 +114,12 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # Why: 3.21+ dropped it; musl build, real dhclient.
 # From: Issue #1683
 RUN set -euo pipefail; \
-    case "$(apk --print-arch)" in \
-      x86_64)  dh_arch=x86_64;  dh_sha="${DHCLIENT_SHA256_AMD64}" ;; \
-      aarch64) dh_arch=aarch64; dh_sha="${DHCLIENT_SHA256_ARM64}" ;; \
-      *) echo "[CI-ERROR-BUILDTOOLS-0002] unsupported arch $(apk --print-arch)" >&2; exit 1 ;; \
-    esac; \
     dh_tmp="$(mktemp -d)"; \
     trap 'rm -rf "$dh_tmp"' EXIT; \
     curl -fsSL \
-      "http://dl-cdn.alpinelinux.org/alpine/${DHCLIENT_ALPINE_BRANCH}/main/${dh_arch}/dhclient-${DHCLIENT_VERSION}.apk" \
+      "http://dl-cdn.alpinelinux.org/alpine/${DHCLIENT_ALPINE_BRANCH}/main/${DHCLIENT_APK_ARCH}/dhclient-${DHCLIENT_VERSION}.apk" \
       -o "$dh_tmp/dhclient.apk"; \
-    printf '%s  %s\n' "$dh_sha" "$dh_tmp/dhclient.apk" | sha256sum -c -; \
+    printf '%s  %s\n' "${DHCLIENT_SHA256}" "$dh_tmp/dhclient.apk" | sha256sum -c -; \
     tar -xzf "$dh_tmp/dhclient.apk" -C /; \
     rm -f /.PKGINFO /.SIGN.* /.pre-install /.post-install /.trigger; \
     dhclient --version

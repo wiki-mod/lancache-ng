@@ -47,7 +47,6 @@ jobs:
       build-arm64: ${{ steps.plan.outputs.build-arm64 }}
       matrix: ${{ steps.plan.outputs.matrix }}
       signature: ${{ steps.plan.outputs.signature }}
-      build-args-bare: ${{ steps.plan.outputs.build-args-bare }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -112,6 +111,13 @@ jobs:
           tags: |
             type=sha,prefix=sha-,format=long,suffix=-${{ matrix.arch }}
 
+      # What: resolve this platform's build-args via ci.sh.
+      # Why: ci.sh owns arch/dhclient resolution, not YAML.
+      # From: Issue #1683
+      - name: Resolve platform build-args
+        id: bargs
+        run: bash .github/scripts/ci.sh build-tools build-args-out ${{ matrix.platform }}
+
       # What: build+push, stamping the signature.
       # Why: the gate reads this label next time.
       # From: Issue #1683
@@ -130,7 +136,7 @@ jobs:
             ${{ steps.meta.outputs.labels }}
             org.lancache-ng.build-tools.signature=${{ needs.determine-build-need.outputs.signature }}
           build-args: |
-            ${{ needs.determine-build-need.outputs.build-args-bare }}
+            ${{ steps.bargs.outputs.build-args-bare }}
           outputs: type=image,oci-mediatypes=true
           platforms: ${{ matrix.platform }}
           provenance: false

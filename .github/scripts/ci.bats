@@ -1656,6 +1656,30 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     [[ "${output}" != *"SCCACHE_VERSION"* ]]
 }
 
+@test "build-args build-tools <platform> resolves one apk-arch + sha" {
+    # What: platform yields DHCLIENT_APK_ARCH + one SHA256.
+    # Why: ci.sh resolves the arch, not the Dockerfile.
+    # From: Issue #1683
+    run bash "${CI_SH}" build-args build-tools --bare linux/amd64
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"DHCLIENT_APK_ARCH=x86_64"* ]]
+    [[ "${output}" == *"DHCLIENT_SHA256="* ]]
+    [[ "${output}" != *"DHCLIENT_SHA256_AMD64="* ]]
+    run bash "${CI_SH}" build-args build-tools --bare linux/arm64
+    [[ "${output}" == *"DHCLIENT_APK_ARCH=aarch64"* ]]
+}
+
+@test "build-tools build-args-out emits one platform's args" {
+    # What: build-args-out writes per-platform args.
+    # Why: each build job resolves its own arch.
+    # From: Issue #1683
+    local gho="${BATS_TEST_TMPDIR}/out.txt"; : > "${gho}"
+    run env GITHUB_OUTPUT="${gho}" bash "${CI_SH}" build-tools build-args-out linux/arm64
+    [ "${status}" -eq 0 ]
+    grep -q '^build-args-bare<<' "${gho}"
+    grep -q '^DHCLIENT_APK_ARCH=aarch64' "${gho}"
+}
+
 @test "build-args fails closed on a missing central base image" {
     # What: A missing base pin must never build unpinned.
     # Why: Empty value = FAIL CLOSED, no partial emit.
@@ -1881,8 +1905,6 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     grep -q '^build-amd64=true$' "${gho}"
     grep -q '^build-arm64=true$' "${gho}"
     grep -q '^matrix={"include":' "${gho}"
-    grep -q '^build-args-bare<<' "${gho}"
-    grep -q '^ALPINE_IMAGE=' "${gho}"
 }
 
 @test "build-tools rejects an unknown subcommand (fail closed)" {
