@@ -244,6 +244,17 @@ _ci_platform_apk_arch() {
     esac
 }
 
+# What: Map a platform to its GitHub-hosted runner label.
+# Why: One owner; gate and Base-CI must not both hardcode.
+# From: Issue #1683
+_ci_platform_runner() {
+    case "$1" in
+        */amd64|amd64) printf 'ubuntu-latest\n' ;;
+        */arm64|arm64) printf 'ubuntu-24.04-arm\n' ;;
+        *) return 2 ;;
+    esac
+}
+
 # What: Print the known arch-suffix aliases of a platform.
 # Why: SOT mixes amd64/x86_64 and arm64/aarch64.
 # From: Issue #1683
@@ -285,6 +296,23 @@ _ci_paths_touch() {
     return 1
 }
 
+# What: True if a target's contexts touch changed paths.
+# Why: One candidate rule for plan and Base-CI matrix.
+# From: Issue #1683
+_ci_plan_candidate() {
+    local service="$1"; shift
+    local context ctx ctx_path
+    context="$(ci_service_field "${service}" context)"
+    [ -z "${context}" ] && context="services/${service}"
+    _ci_paths_touch "${context}" "$@" && return 0
+    for ctx in $(ci_service_contexts "${service}"); do
+        ctx_path="$(ci_context_path "${ctx}")"
+        [ -n "${ctx_path}" ] || continue
+        _ci_paths_touch "${ctx_path}" "$@" && return 0
+    done
+    return 1
+}
+
 # What: Plan phase: pick rebuild CANDIDATES per service.
 # Why: Path picks candidates; identity/CAS decides build.
 # From: Issue #1683
@@ -294,23 +322,13 @@ ci_cmd_plan() {
         [ -n "${line}" ] && changed+=("${line}")
     done < <(_ci_changed_files "$@")
 
-    local service context ctx_path candidate
+    local service
     for service in $(ci_build_targets); do
-        candidate="false"
-        context="$(ci_service_field "${service}" context)"
-        [ -z "${context}" ] && context="services/${service}"
-        if _ci_paths_touch "${context}" "${changed[@]}"; then
-            candidate="true"
+        if _ci_plan_candidate "${service}" "${changed[@]}"; then
+            printf '%s=true\n' "${service}"
         else
-            for ctx in $(ci_service_contexts "${service}"); do
-                ctx_path="$(ci_context_path "${ctx}")"
-                [ -n "${ctx_path}" ] || continue
-                if _ci_paths_touch "${ctx_path}" "${changed[@]}"; then
-                    candidate="true"; break
-                fi
-            done
+            printf '%s=false\n' "${service}"
         fi
-        printf '%s=%s\n' "${service}" "${candidate}"
     done
     ci_log "[CI-INFO-PLAN-0001]" "phase=plan changed=${#changed[@]} note=\"candidates only; identity/CAS decides build\""
 }
@@ -1833,12 +1851,16 @@ _ci_build_tools_published_signature() {
         | map(select(. != "")) | first // ""'
 }
 
-# What: Append one arch entry to the build matrix JSON.
-# Why: the dynamic matrix is built here, not in YAML.
+# What: Append one include object from key=value pairs.
+# Why: One JSON builder for every matrix, any field set.
 # From: Issue #1683
 _ci_matrix_append() {
-    printf '%s' "$1" | jq -c --arg a "$2" --arg r "$3" --arg p "$4" \
-        '. + [{"arch":$a,"runner":$r,"platform":$p}]'
+    local arr="$1"; shift
+    local obj='{}' kv
+    for kv in "$@"; do
+        obj="$(printf '%s' "${obj}" | jq -c --arg k "${kv%%=*}" --arg v "${kv#*=}" '. + {($k):$v}')" || return 2
+    done
+    printf '%s' "${arr}" | jq -c --argjson o "${obj}" '. + [$o]'
 }
 
 # What: Decide arches to build and emit the matrix.
@@ -1862,8 +1884,8 @@ _ci_build_tools_gate() {
             *) ci_log "[CI-ERROR-BUILDTOOLS-0014]" "arch=\"${arch}\" reason=\"unknown arch\""; return 2 ;;
         esac
     fi
-    [ "${amd}" = "true" ] && include="$(_ci_matrix_append "${include}" amd64 ubuntu-latest linux/amd64)"
-    [ "${arm}" = "true" ] && include="$(_ci_matrix_append "${include}" arm64 ubuntu-24.04-arm linux/arm64)"
+    [ "${amd}" = "true" ] && include="$(_ci_matrix_append "${include}" arch=amd64 runner="$(_ci_platform_runner linux/amd64)" platform=linux/amd64)"
+    [ "${arm}" = "true" ] && include="$(_ci_matrix_append "${include}" arch=arm64 runner="$(_ci_platform_runner linux/arm64)" platform=linux/arm64)"
     printf 'build-amd64=%s\nbuild-arm64=%s\nmatrix={"include":%s}\n' "${amd}" "${arm}" "${include}"
 }
 

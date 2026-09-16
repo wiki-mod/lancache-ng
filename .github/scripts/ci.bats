@@ -92,6 +92,38 @@ setup() {
     [[ "${output}" == *"candidates only; identity/CAS decides build"* ]]
 }
 
+@test "plan-candidate is true for a touched context, false otherwise" {
+    # What: One candidate rule shared by plan and Base-CI.
+    # Why: No second copy of the path-touch decision.
+    # From: Issue #1683
+    run _ci_plan_candidate proxy services/proxy/Dockerfile
+    [ "${status}" -eq 0 ]
+    run _ci_plan_candidate proxy services/ntp/Dockerfile
+    [ "${status}" -ne 0 ]
+}
+
+@test "platform-runner maps each platform to one runner, fail-closed" {
+    # What: One owner of platform to GitHub runner label.
+    # Why: gate and Base-CI must not both hardcode it.
+    # From: Issue #1683
+    run _ci_platform_runner linux/amd64
+    [ "${output}" = "ubuntu-latest" ]
+    run _ci_platform_runner linux/arm64
+    [ "${output}" = "ubuntu-24.04-arm" ]
+    run _ci_platform_runner linux/riscv64
+    [ "${status}" -ne 0 ]
+}
+
+@test "matrix-append builds one include object from key=value pairs" {
+    # What: One JSON builder from any key=value field set.
+    # Why: Base-CI needs a service field too.
+    # From: Issue #1683
+    run _ci_matrix_append '[]' service=ui arch=amd64 runner=ubuntu-latest platform=linux/amd64
+    [ "${status}" -eq 0 ]
+    [ "$(printf '%s' "${output}" | jq -r '.[0].service')" = "ui" ]
+    [ "$(printf '%s' "${output}" | jq -r '.[0].platform')" = "linux/amd64" ]
+}
+
 # =========================================================
 # SERVICE DEPENDENCIES
 # =========================================================
