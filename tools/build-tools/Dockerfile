@@ -73,6 +73,11 @@ RUN set -eu; \
 # From: Issue #1095
 ARG APK_CACHE_BUST=""
 
+# What: the apk package list, supplied from the SOT.
+# Why: the SOT owns the list; this stage only consumes it.
+# From: Issue #1683
+ARG APK_PACKAGES
+
 # What: switches apk's own repositories to plain http.
 # Why: Squid caches http; signed indices keep integrity.
 # From: Issue #1095
@@ -88,64 +93,7 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
     fi; \
     : "apk-cache-bust=${APK_CACHE_BUST}"; \
     apk update; \
-    apk add --no-cache \
-      actionlint \
-      bash \
-      bats \
-      bc \
-      bind-tools \
-      build-base \
-      ca-certificates \
-      cargo \
-      cargo-audit \
-      cargo-tarpaulin \
-      ccache \
-      clang22 \
-      cmake \
-      coreutils \
-      curl \
-      distcc \
-      distcc-pump \
-      docker-cli \
-      docker-cli-buildx \
-      docker-cli-compose \
-      expect \
-      findutils \
-      gawk \
-      gettext \
-      git \
-      github-cli \
-      gnupg \
-      grep \
-      iproute2 \
-      jq \
-      lld22 \
-      make \
-      musl-dev \
-      openssl \
-      openssl-dev \
-      openssl-libs-static \
-      parallel \
-      perl \
-      pkgconf \
-      procps-ng \
-      python3 \
-      rsync \
-      run-parts \
-      rust \
-      rust-clippy \
-      rustfmt \
-      sccache \
-      sed \
-      shellcheck \
-      shellspec \
-      sqlite \
-      tcpdump \
-      tzdata \
-      util-linux \
-      xz \
-      zlib-dev \
-      zlib-static; \
+    apk add --no-cache ${APK_PACKAGES}; \
     ln -sf /usr/bin/pump /usr/bin/distcc-pump; \
     distcc_bin="$(command -v distcc)"; \
     mkdir -p /usr/local/lib/distcc; \

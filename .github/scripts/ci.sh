@@ -1623,7 +1623,7 @@ ci_cmd_variables() {
 # Why: SOT owns base+dhclient; apk tools stay unpinned.
 # From: Issue #1683
 _ci_build_tools_build_args() {
-    local fmt="${1:-}" prefix="--build-arg " out="" argname key val
+    local fmt="${1:-}" prefix="--build-arg " out="" argname key val pkgs
     [ "${fmt}" = "--bare" ] && prefix=""
     # What: base_images.alpine -> ALPINE_IMAGE.
     # Why: Final stage pins its base from the one owner.
@@ -1652,6 +1652,12 @@ DHCLIENT_ALPINE_BRANCH:alpine_branch
 DHCLIENT_SHA256_AMD64:sha256_amd64
 DHCLIENT_SHA256_ARM64:sha256_arm64
 DHPAIRS
+    # What: append the SOT apk list as a build-arg.
+    # Why: Dockerfile consumes it; it never owns the list.
+    # From: Issue #1683
+    pkgs="$(_ci_build_tools_packages | tr '\n' ' ')" || return 2
+    pkgs="${pkgs% }"
+    out="${out}${prefix}APK_PACKAGES=${pkgs}"$'\n'
     printf '%s' "${out}"
 }
 
@@ -1679,19 +1685,23 @@ ci_cmd_build_args() {
 # From: Issue #1683
 _ci_build_tools_packages() {
     local pkgs
+    # What: read the apk list from the SOT.
+    # Why: SOT is the owner; no Dockerfile parse-back.
+    # From: Issue #1683
     pkgs="$(awk '
-        /apk add --no-cache \\/ { inpkg = 1; next }
-        inpkg {
-            pkg = $1; sub(/;$/, "", pkg)
-            if (pkg ~ /^[a-z0-9]/) print pkg
-            if ($0 ~ /;/) inpkg = 0
+        /^build_toolchain:/ { inb = 1; next }
+        inb && /^[^[:space:]]/ { inb = 0; inp = 0 }
+        inb && /^    packages:[[:space:]]*$/ { inp = 1; next }
+        inp && /^      -[[:space:]]/ {
+            pkg = $0; sub(/^[[:space:]]*-[[:space:]]*/, "", pkg); print pkg; next
         }
-    ' "${CI_REPO_ROOT}/tools/build-tools/Dockerfile" | LC_ALL=C sort -u)"
-    # What: fail closed if no package list is extracted.
+        inp && /^  [^[:space:]]/ { inp = 0 }
+    ' "${CI_MANIFEST}" | LC_ALL=C sort -u)"
+    # What: fail closed if the SOT list is empty.
     # Why: an empty list would blind the input check.
     # From: Issue #1683
     if [ -z "${pkgs}" ]; then
-        ci_log "[CI-ERROR-BUILDTOOLS-0006]" "reason=\"no packages extracted from Dockerfile; FAIL CLOSED\""
+        ci_log "[CI-ERROR-BUILDTOOLS-0006]" "reason=\"no packages in SOT build_toolchain.build-tools.packages; FAIL CLOSED\""
         return 2
     fi
     printf '%s\n' "${pkgs}"

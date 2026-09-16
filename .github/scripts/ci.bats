@@ -1710,7 +1710,7 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
 }
 
 @test "build-tools packages lists the apk tools incl. AG-KD-009 set" {
-    # What: One source (Dockerfile) feeds the input check.
+    # What: The SOT feeds the apk input check.
     # Why: AG-KD-009 required tools must all be present.
     # From: Issue #1683
     run bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools packages
@@ -1722,14 +1722,13 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     done
 }
 
-@test "build-tools packages fails closed on empty extraction" {
-    # What: no apk list in the Dockerfile must not pass.
+@test "build-tools packages fails closed on an empty SOT list" {
+    # What: no packages in the SOT must not pass.
     # Why: an empty list would blind the input check.
     # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/emptyrepo"
-    mkdir -p "${r}/tools/build-tools"
-    printf 'FROM alpine\n' > "${r}/tools/build-tools/Dockerfile"
-    CI_REPO_ROOT="${r}" run bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools packages
+    local m="${BATS_TEST_TMPDIR}/nopkgs.yml"
+    printf 'build_toolchain:\n  build-tools:\n    context: tools/build-tools\n' > "${m}"
+    CI_MANIFEST="${m}" run bash "${BATS_TEST_DIRNAME}/ci.sh" build-tools packages
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-BUILDTOOLS-0006"* ]]
 }

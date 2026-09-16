@@ -81,6 +81,67 @@ build_toolchain:
     build_type: toolchain
     final_base: alpine
     runner: light
+    # What: apk packages installed into the toolchain image.
+    # Why: SOT owns the one list; consumers read it.
+    # From: Issue #1683
+    packages:
+      - actionlint
+      - bash
+      - bats
+      - bc
+      - bind-tools
+      - build-base
+      - ca-certificates
+      - cargo
+      - cargo-audit
+      - cargo-tarpaulin
+      - ccache
+      - clang22
+      - cmake
+      - coreutils
+      - curl
+      - distcc
+      - distcc-pump
+      - docker-cli
+      - docker-cli-buildx
+      - docker-cli-compose
+      - expect
+      - findutils
+      - gawk
+      - gettext
+      - git
+      - github-cli
+      - gnupg
+      - grep
+      - iproute2
+      - jq
+      - lld22
+      - make
+      - musl-dev
+      - openssl
+      - openssl-dev
+      - openssl-libs-static
+      - parallel
+      - perl
+      - pkgconf
+      - procps-ng
+      - python3
+      - rsync
+      - run-parts
+      - rust
+      - rust-clippy
+      - rustfmt
+      - sccache
+      - sed
+      - shellcheck
+      - shellspec
+      - sqlite
+      - tcpdump
+      - tzdata
+      - util-linux
+      - xz
+      - zlib-dev
+      - zlib-static
 
 # What: Runtime services not built by this project.
 # Why: Explicit out-of-build entry, no silent omission.
