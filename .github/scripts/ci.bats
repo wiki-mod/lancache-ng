@@ -2610,6 +2610,82 @@ SH
     [ "${status}" -eq 1 ]
 }
 
+@test "ledger upsert writes many records in one commit" {
+    # What: a batch of records lands in one CAS commit.
+    # Why: §26.1 one write per workflow, not per record.
+    # From: Issue #1683
+    _cas_setup
+    cd "${CAS_A}"
+    printf 'id-a\tdns\tlinux/amd64\tACCEPTED\tsha256:a\nid-b\tui\tlinux/arm64\tACCEPTED\tsha256:b\n' \
+        | _ci_ledger_upsert origin
+    run _ci_ledger_read origin id-a
+    [[ "${output}" == *"sha256:a"* ]]
+    run _ci_ledger_read origin id-b
+    [[ "${output}" == *"sha256:b"* ]]
+    git fetch --quiet origin refs/ci/acceptance/ledger
+    [ "$(git cat-file -p FETCH_HEAD:records | grep -c .)" -eq 2 ]
+    [ "$(git rev-list --count FETCH_HEAD)" -eq 1 ]
+}
+
+@test "aggregate writes result.json files as one ledger write" {
+    # What: many result.json -> one aggregated ledger write.
+    # Why: §26.1 single aggregator, not per-job writes.
+    # From: Issue #1683
+    _cas_setup
+    cd "${CAS_A}"
+    local rd="${BATS_TEST_TMPDIR}/results"; mkdir -p "${rd}"
+    printf '{"service":"dns","platform":"linux/amd64","build_identity":"id-a","state":"ACCEPTED","digest":"sha256:a"}' > "${rd}/a.json"
+    printf '{"service":"ui","platform":"linux/arm64","build_identity":"id-b","state":"ACCEPTED","digest":"sha256:b"}' > "${rd}/b.json"
+    run ci_cmd_aggregate "${rd}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"result=written"* ]]
+    [[ "${output}" == *"records=2"* ]]
+    run _ci_ledger_read origin id-a
+    [[ "${output}" == *"ACCEPTED"* ]]
+}
+
+@test "aggregate re-run over the same results converges (idempotent)" {
+    # What: re-aggregating the same set is a no-op content.
+    # Why: §26.4 idempotency; same inputs -> same blob.
+    # From: Issue #1683
+    _cas_setup
+    cd "${CAS_A}"
+    local rd="${BATS_TEST_TMPDIR}/results"; mkdir -p "${rd}"
+    printf '{"service":"dns","platform":"linux/amd64","build_identity":"id-a","state":"ACCEPTED","digest":"sha256:a"}' > "${rd}/a.json"
+    ci_cmd_aggregate "${rd}"
+    git fetch --quiet origin refs/ci/acceptance/ledger
+    local first; first="$(git cat-file -p FETCH_HEAD:records)"
+    ci_cmd_aggregate "${rd}"
+    git fetch --quiet origin refs/ci/acceptance/ledger
+    local second; second="$(git cat-file -p FETCH_HEAD:records)"
+    [ "${first}" = "${second}" ]
+}
+
+@test "aggregate fails closed on a malformed result.json" {
+    # What: a partial result.json aborts the aggregation.
+    # Why: never record an incomplete acceptance.
+    # From: Issue #1683
+    _cas_setup
+    cd "${CAS_A}"
+    local rd="${BATS_TEST_TMPDIR}/results"; mkdir -p "${rd}"
+    printf '{"service":"dns","platform":"linux/amd64"}' > "${rd}/bad.json"
+    run ci_cmd_aggregate "${rd}"
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-AGGREGATE-0004"* ]]
+}
+
+@test "aggregate fails closed when the results dir is empty" {
+    # What: no result.json means nothing to write.
+    # Why: an empty run must not silently succeed.
+    # From: Issue #1683
+    _cas_setup
+    cd "${CAS_A}"
+    local rd="${BATS_TEST_TMPDIR}/results"; mkdir -p "${rd}"
+    run ci_cmd_aggregate "${rd}"
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-AGGREGATE-0003"* ]]
+}
+
 # =========================================================
 # HISTORICAL REGRESSIONS
 # =========================================================

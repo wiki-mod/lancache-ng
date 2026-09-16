@@ -34,6 +34,7 @@ declare -A CI_DISPATCH=(
     [resolve]=ci_cmd_resolve [build]=ci_cmd_build [build-args]=ci_cmd_build_args
     [build-tools]=ci_cmd_build_tools [publish]=ci_cmd_publish [verify]=ci_cmd_verify
     [test]=ci_cmd_test [scan]=ci_cmd_scan [assemble]=ci_cmd_assemble
+    [aggregate]=ci_cmd_aggregate
     [validate]=ci_cmd_validate [promote]=ci_cmd_promote [release]=ci_cmd_release
     [gc]=ci_cmd_gc [variables]=ci_cmd_variables [check]=ci_cmd_check
 )
@@ -901,32 +902,34 @@ _ci_ledger_commit() {
     _ci_cas_git commit-tree "${tree}" "${pa[@]}" -m "${msg}" 2>/dev/null
 }
 
-# What: Upsert one identity's record and CAS-push it.
-# Why: One aggregator write per workflow (§26.1).
+# What: Upsert record lines from stdin in one CAS write.
+# Why: §26.1 one atomic ledger write per workflow.
 # From: Issue #1683
-_ci_ledger_append() {
-    local remote="$1" identity="$2" service="$3" platform="$4" state="$5" digest="$6"
-    local blob rc=0 parent="" merged newrec blobsha treesha commitsha raw
-    newrec="$(printf '%s\t%s\t%s\t%s\t%s' "${identity}" "${service}" "${platform}" "${state}" "${digest}")"
+_ci_ledger_upsert() {
+    local remote="$1" new blob rc=0 parent="" ids kept merged blobsha treesha commitsha raw
+    new="$(cat)"
+    new="$(printf '%s\n' "${new}" | awk 'NF>0')"
+    [ -n "${new}" ] || return 0
     blob="$(_ci_ledger_blob "${remote}")" || rc=$?
     if [ "${rc}" -eq 2 ]; then
         ci_log "[CI-ERROR-LEDGER-0001]" "reason=\"ledger read UNKNOWN; refusing to write\""
         return 3
     fi
+    ids="$(printf '%s\n' "${new}" | awk -F'\t' '{print $1}')"
     if [ "${rc}" -eq 1 ]; then
-        merged="${newrec}"
+        kept=""
     else
         parent="$(git rev-parse FETCH_HEAD 2>/dev/null)" || return 3
-        merged="$(printf '%s\n' "${blob}" | awk -F'\t' -v id="${identity}" 'NF>0 && $1!=id')"
-        if [ -n "${merged}" ]; then
-            merged="$(printf '%s\n%s' "${merged}" "${newrec}")"
-        else
-            merged="${newrec}"
-        fi
+        kept="$(printf '%s\n' "${blob}" | awk -F'\t' -v ids="${ids}" '
+            BEGIN { n = split(ids, a, "\n"); for (i = 1; i <= n; i++) drop[a[i]] = 1 }
+            NF > 0 && !($1 in drop)')"
     fi
+    # What: sort the merged record set deterministically.
+    # Why: same inputs -> same blob; §26.4 idempotency.
+    merged="$(printf '%s\n%s\n' "${kept}" "${new}" | awk 'NF>0' | LC_ALL=C sort -u)"
     blobsha="$(printf '%s\n' "${merged}" | git hash-object -w --stdin)" || return 3
     treesha="$(printf '100644 blob %s\t%s\n' "${blobsha}" "${CI_LEDGER_FILE}" | git mktree)" || return 3
-    commitsha="$(_ci_ledger_commit "${treesha}" "${parent}" "ledger ${identity} ${state}")" || return 3
+    commitsha="$(_ci_ledger_commit "${treesha}" "${parent}" "ledger aggregate")" || return 3
     rc=0
     if [ -n "${parent}" ]; then
         raw="$(git push --force-with-lease="${CI_LEDGER_REF}:${parent}" "${remote}" "${commitsha}:${CI_LEDGER_REF}" 2>&1)" || rc=$?
@@ -936,6 +939,58 @@ _ci_ledger_append() {
     [ "${rc}" -eq 0 ] && return 0
     [ "$(_ci_cas_push_class "${raw}")" = race ] && return 2
     return 3
+}
+
+# What: Upsert a single record via the batch writer.
+# Why: One writer; convenience for one identity.
+# From: Issue #1683
+_ci_ledger_append() {
+    local remote="$1" identity="$2" service="$3" platform="$4" state="$5" digest="$6"
+    printf '%s\t%s\t%s\t%s\t%s\n' "${identity}" "${service}" "${platform}" "${state}" "${digest}" \
+        | _ci_ledger_upsert "${remote}"
+}
+
+# =========================================================
+# AGGREGATOR (single ledger write; §26.1)
+# =========================================================
+
+# What: Parse one result.json into a ledger record.
+# Why: fail closed on a malformed or partial result.
+# From: Issue #1683
+_ci_result_record() {
+    local f="$1" service platform identity state digest
+    service="$(jq -er '.service' "${f}")" || return 2
+    platform="$(jq -er '.platform' "${f}")" || return 2
+    identity="$(jq -er '.build_identity' "${f}")" || return 2
+    state="$(jq -er '.state' "${f}")" || return 2
+    digest="$(jq -er '.digest' "${f}")" || return 2
+    printf '%s\t%s\t%s\t%s\t%s\n' "${identity}" "${service}" "${platform}" "${state}" "${digest}"
+}
+
+# What: Merge matrix result.json files into one write.
+# Why: §26.1 aggregator: many jobs, one CAS ledger write.
+# From: Issue #1683
+ci_cmd_aggregate() {
+    local dir="${1:-}"
+    [ -n "${dir}" ] || { ci_log "[CI-ERROR-AGGREGATE-0001]" "reason=\"results dir arg required\""; return 2; }
+    [ -d "${dir}" ] || { ci_log "[CI-ERROR-AGGREGATE-0002]" "reason=\"results dir not found\" dir=\"${dir}\""; return 2; }
+    local f records="" line
+    for f in "${dir}"/*.json; do
+        [ -e "${f}" ] || continue
+        line="$(_ci_result_record "${f}")" || {
+            ci_log "[CI-ERROR-AGGREGATE-0004]" "file=\"${f}\" reason=\"malformed or incomplete result.json\""
+            return 2
+        }
+        records="${records}${line}"$'\n'
+    done
+    [ -n "${records}" ] || { ci_log "[CI-ERROR-AGGREGATE-0003]" "reason=\"no result.json in dir\" dir=\"${dir}\""; return 2; }
+    local rc=0
+    printf '%s' "${records}" | _ci_ledger_upsert "$(_ci_ledger_remote)" || rc=$?
+    if [ "${rc}" -eq 0 ]; then
+        printf 'aggregate result=written records=%s\n' "$(printf '%s' "${records}" | grep -c .)"
+        return 0
+    fi
+    return "${rc}"
 }
 
 # =========================================================
