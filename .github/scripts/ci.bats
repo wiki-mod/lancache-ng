@@ -2046,6 +2046,19 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     [[ "${output}" == *"CI-ERROR-CHECK-0007"* ]]
 }
 
+@test "check mutable-refs fails a floating action version via ci.sh" {
+    # What: ci.sh owns the pin invariant; bats calls it.
+    # Why: no :latest / @vN; SHA/digest-pinned only.
+    # From: Issue #1683
+    printf 'jobs:\n  x:\n    steps:\n      - uses: foo/bar@abc1234\n' > "${BATS_TEST_TMPDIR}/ok.yml"
+    run bash "${CI_SH}" check mutable-refs "${BATS_TEST_TMPDIR}/ok.yml"
+    [ "${status}" -eq 0 ]
+    printf 'jobs:\n  x:\n    steps:\n      - uses: foo/bar@v4\n' > "${BATS_TEST_TMPDIR}/bad.yml"
+    run bash "${CI_SH}" check mutable-refs "${BATS_TEST_TMPDIR}/bad.yml"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0008"* ]]
+}
+
 # =========================================================
 # HISTORICAL REGRESSIONS
 # =========================================================

@@ -2316,6 +2316,36 @@ _ci_check_language_policy() {
     printf 'language-policy=clean files=%s\n' "${#files[@]}"
 }
 
+# What: Fail on a mutable image or action reference.
+# Why: SHA/digest-pinned only, no :latest or @vN.
+# From: Issue #1683
+_ci_check_mutable_refs() {
+    local -a files=()
+    if [ "$#" -gt 0 ]; then files=("$@"); else
+        mapfile -t files < <(git ls-files -- '.github/workflows/*.yml' '*/Dockerfile' 'Dockerfile')
+    fi
+    local path out
+    local -a viol=()
+    for path in "${files[@]}"; do
+        [ -f "${path}" ] || continue
+        case "${path}" in
+            *.yml|*.yaml)
+                out="$(grep -nE 'uses:[^@]*@v[0-9]' "${path}")" && viol+=("${path} action-@vN: ${out}")
+                out="$(grep -nE 'BUILD_TOOLS_IMAGE=[^[:space:]]*:latest' "${path}")" && viol+=("${path} img-default-latest: ${out}")
+                ;;
+            */Dockerfile|Dockerfile)
+                out="$(grep -nE '^FROM .+:latest' "${path}" | grep -vE 'sccache-ng|ccache-ng')" && [ -n "${out}" ] && viol+=("${path} FROM-latest: ${out}")
+                out="$(grep -nE '^FROM [a-z0-9./:]*[a-z0-9/]$' "${path}")" && viol+=("${path} FROM-untagged: ${out}")
+                ;;
+        esac
+    done
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0008]" "reason=\"mutable image/action reference\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'mutable-refs=clean files=%s\n' "${#files[@]}"
+}
+
 # What: Route a source-hygiene check to its function.
 # Why: One owner per guard invariant; ci.bats calls it.
 # From: Issue #1683
@@ -2328,6 +2358,7 @@ ci_cmd_check() {
         comment-length) _ci_check_comment_length "$@" ;;
         deny-short-sha) _ci_check_deny_short_sha "$@" ;;
         language-policy) _ci_check_language_policy "$@" ;;
+        mutable-refs) _ci_check_mutable_refs "$@" ;;
         *)
             ci_log "[CI-ERROR-CHECK-0001]" "sub=\"${sub}\" reason=\"unknown check\""
             return 2
