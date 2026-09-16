@@ -2576,6 +2576,40 @@ _cas_setup() {
     [ "${output}" = UNKNOWN ]
 }
 
+@test "index_lookup default reads the multi-arch index and drops attestations" {
+    # What: default reads the index digest + arch children.
+    # Why: reconcile compares against the real registry.
+    # From: Issue #1683
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    cat > "${bin}/docker" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *--raw*) echo '{"manifests":[{"platform":{"os":"linux","architecture":"amd64"},"digest":"sha256:a"},{"platform":{"os":"linux","architecture":"arm64"},"digest":"sha256:b"},{"platform":{"os":"unknown","architecture":"unknown"},"digest":"sha256:att"}]}' ;;
+  *) echo sha256:idx ;;
+esac
+SH
+    chmod +x "${bin}/docker"
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng GITHUB_SHA=deadbeef \
+        run _ci_index_lookup ui
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"sha256:idx"* ]]
+    [[ "${output}" == *"linux/amd64=sha256:a"* ]]
+    [[ "${output}" == *"linux/arm64=sha256:b"* ]]
+    [[ "${output}" != *"sha256:att"* ]]
+}
+
+@test "index_lookup default returns nothing when no index exists" {
+    # What: a missing index is not a reusable index.
+    # Why: assemble then creates one from accepted digests.
+    # From: Issue #1683
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    printf '#!/usr/bin/env bash\necho "not found: manifest unknown" >&2\nexit 1\n' > "${bin}/docker"
+    chmod +x "${bin}/docker"
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng GITHUB_SHA=deadbeef \
+        run _ci_index_lookup ui
+    [ "${status}" -eq 1 ]
+}
+
 # =========================================================
 # HISTORICAL REGRESSIONS
 # =========================================================

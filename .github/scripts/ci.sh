@@ -1340,7 +1340,15 @@ _ci_index_lookup() {
         "${CI_INDEX_LOOKUP_CMD}" "${service}"
         return "$?"
     fi
-    return 1
+    local repo sha tag idx grc=0 raw plats
+    repo="$(_ci_repo)"
+    sha="${GITHUB_SHA:?GITHUB_SHA required}"
+    tag="ghcr.io/${repo}/${service}:sha-${sha}"
+    idx="$(_ci_registry_probe "${tag}")" || grc=$?
+    [ "${grc}" -eq 0 ] || return 1
+    raw="$(docker buildx imagetools inspect "${tag}" --raw 2>/dev/null)" || return 1
+    plats="$(printf '%s' "${raw}" | jq -r '.manifests[]? | select(.platform.os=="linux" and .platform.architecture!="unknown") | "linux/\(.platform.architecture)=\(.digest)"' | tr '\n' ' ')"
+    printf '%s %s\n' "${idx}" "${plats% }"
 }
 
 # What: Collect a target's accepted per-platform digests.
