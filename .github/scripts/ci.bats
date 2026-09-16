@@ -552,7 +552,15 @@ _probe_stub() {
     [ "$(_ci_classify_failure 'HTTP 401 unauthorized')" = "permanent" ]
     [ "$(_ci_classify_failure 'error: could not compile lancache-ui')" = "permanent" ]
     [ "$(_ci_classify_failure 'pull access denied for ghcr.io/x')" = "permanent" ]
-    [ "$(_ci_classify_failure 'manifest unknown')" = "permanent" ]
+}
+
+@test "retry classifier: a missing manifest is not_found, auth is not" {
+    # What: not_found is separate; auth stays permanent.
+    # Why: only not_found may build; auth must never build.
+    # From: Issue #1683
+    [ "$(_ci_classify_failure 'manifest unknown')" = "not_found" ]
+    [ "$(_ci_classify_failure 'ghcr.io/x: not found: manifest')" = "not_found" ]
+    [ "$(_ci_classify_failure 'denied: requested access to the resource')" = "permanent" ]
 }
 
 @test "retry classifier: an unclassified failure defaults to transient" {
@@ -2435,6 +2443,137 @@ _cas_setup() {
     _ci_ledger_read() { return 2; }
     run _ci_accepted_digest ui linux/amd64
     [ "${status}" -eq 2 ]
+}
+
+@test "registry_probe maps a missing manifest to not-found" {
+    # What: a genuine miss returns 1 (may build).
+    # Why: not-found is the only build-eligible miss.
+    # From: Issue #1683
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    printf '#!/usr/bin/env bash\necho "ghcr.io/x: not found: manifest unknown" >&2\nexit 1\n' > "${bin}/docker"
+    chmod +x "${bin}/docker"
+    PATH="${bin}:${PATH}" run _ci_registry_probe ghcr.io/x/y:z
+    [ "${status}" -eq 1 ]
+}
+
+@test "registry_probe maps an auth failure to unknown, not not-found" {
+    # What: an auth failure returns 2 (never build).
+    # Why: a credential problem is not a missing artifact.
+    # From: Issue #1683
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    printf '#!/usr/bin/env bash\necho "denied: requested access to the resource" >&2\nexit 1\n' > "${bin}/docker"
+    chmod +x "${bin}/docker"
+    PATH="${bin}:${PATH}" run _ci_registry_probe ghcr.io/x/y:z
+    [ "${status}" -eq 2 ]
+}
+
+@test "registry_probe returns the digest on success" {
+    # What: a present tag yields its digest, code 0.
+    # Why: the happy path feeds the resolver.
+    # From: Issue #1683
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    printf '#!/usr/bin/env bash\necho sha256:ok\n' > "${bin}/docker"
+    chmod +x "${bin}/docker"
+    PATH="${bin}:${PATH}" run _ci_registry_probe ghcr.io/x/y:z
+    [ "${status}" -eq 0 ]
+    [ "${output}" = sha256:ok ]
+}
+
+@test "resolve state: an unreadable ledger is UNKNOWN" {
+    # What: a failed policy read blocks resolution.
+    # Why: UNKNOWN never builds (§26).
+    # From: Issue #1683
+    _ci_ledger_read() { return 2; }
+    _ci_image_tag() { echo tag; }
+    _ci_registry_probe() { echo sha256:g; }
+    run _ci_resolve_state ui id-x linux/amd64
+    [ "${output}" = UNKNOWN ]
+}
+
+@test "resolve state: an unreadable registry is UNKNOWN" {
+    # What: a failed artifact read blocks resolution.
+    # Why: transient registry error is not a miss.
+    # From: Issue #1683
+    _ci_ledger_read() { return 1; }
+    _ci_image_tag() { echo tag; }
+    _ci_registry_probe() { return 2; }
+    run _ci_resolve_state ui id-x linux/amd64
+    [ "${output}" = UNKNOWN ]
+}
+
+@test "resolve state: no record and no artifact is MISSING_CONFIRMED" {
+    # What: nothing built yet -> build is warranted.
+    # Why: the only state that authorizes a build.
+    # From: Issue #1683
+    _ci_ledger_read() { return 1; }
+    _ci_image_tag() { echo tag; }
+    _ci_registry_probe() { return 1; }
+    run _ci_resolve_state ui id-x linux/amd64
+    [ "${output}" = MISSING_CONFIRMED ]
+}
+
+@test "resolve state: no record but artifact present is PRODUCED_UNVERIFIED" {
+    # What: built but unaccepted -> verify path.
+    # Why: an unverified artifact must not be reused.
+    # From: Issue #1683
+    _ci_ledger_read() { return 1; }
+    _ci_image_tag() { echo tag; }
+    _ci_registry_probe() { echo sha256:g; }
+    run _ci_resolve_state ui id-x linux/amd64
+    [ "${output}" = PRODUCED_UNVERIFIED ]
+}
+
+@test "resolve state: ACCEPTED with a matching digest is PRESENT_ACCEPTED" {
+    # What: policy and artifact agree -> reuse.
+    # Why: the noop path; no rebuild.
+    # From: Issue #1683
+    _ci_ledger_read() { printf 'ACCEPTED\tsha256:g\n'; }
+    _ci_image_tag() { echo tag; }
+    _ci_registry_probe() { echo sha256:g; }
+    run _ci_resolve_state ui id-x linux/amd64
+    [ "${output}" = PRESENT_ACCEPTED ]
+}
+
+@test "resolve state: ACCEPTED with a divergent digest is MISMATCH" {
+    # What: policy and artifact disagree -> fail.
+    # Why: never silently accept a different digest.
+    # From: Issue #1683
+    _ci_ledger_read() { printf 'ACCEPTED\tsha256:g\n'; }
+    _ci_image_tag() { echo tag; }
+    _ci_registry_probe() { echo sha256:other; }
+    run _ci_resolve_state ui id-x linux/amd64
+    [ "${output}" = MISMATCH ]
+}
+
+@test "resolve state: ACCEPTED but artifact gone is MISMATCH, never rebuild" {
+    # What: accepted yet missing -> fail, not rebuild.
+    # Why: §23.2; rebuild would discard test/scan evidence.
+    # From: Issue #1683
+    _ci_ledger_read() { printf 'ACCEPTED\tsha256:g\n'; }
+    _ci_image_tag() { echo tag; }
+    _ci_registry_probe() { return 1; }
+    run _ci_resolve_state ui id-x linux/amd64
+    [[ "${output}" == *MISMATCH* ]]
+    [[ "${output}" != *MISSING_CONFIRMED* ]]
+}
+
+@test "resolve state: a non-ACCEPTED record is PRODUCED_UNVERIFIED" {
+    # What: a recorded but unaccepted state verifies.
+    # Why: only ACCEPTED is reusable.
+    # From: Issue #1683
+    _ci_ledger_read() { printf 'PRODUCED_UNVERIFIED\tsha256:g\n'; }
+    _ci_image_tag() { echo tag; }
+    _ci_registry_probe() { echo sha256:g; }
+    run _ci_resolve_state ui id-x linux/amd64
+    [ "${output}" = PRODUCED_UNVERIFIED ]
+}
+
+@test "resolve state: a missing platform is UNKNOWN" {
+    # What: no platform means no registry probe.
+    # Why: fail closed rather than guess an artifact.
+    # From: Issue #1683
+    run _ci_resolve_state ui id-x ""
+    [ "${output}" = UNKNOWN ]
 }
 
 # =========================================================

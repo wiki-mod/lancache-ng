@@ -608,7 +608,7 @@ ci_cmd_impact() {
 # Why: A failed probe is UNKNOWN, never a trusted state.
 # From: Issue #1683
 _ci_resolve_probe() {
-    local service="$1" identity="$2"
+    local service="$1" identity="$2" platform="${3:-}"
     if [ -n "${CI_RESOLVE_PROBE_CMD:-}" ]; then
         # What: Capture probe output; keep its exit code.
         # Why: errexit must not skip rc check (AG-VAL-030).
@@ -623,9 +623,39 @@ _ci_resolve_probe() {
         printf '%s\n' "${out}"
         return 0
     fi
-    # What: no probe wired -> report UNKNOWN.
-    # Why: unknown is not missing; never assume built.
-    printf 'UNKNOWN\n'
+    _ci_resolve_state "${service}" "${identity}" "${platform}"
+}
+
+# What: Combine ledger policy + registry artifact truth.
+# Why: §26 three-truths; UNKNOWN on any unreadable truth.
+# From: Issue #1683
+_ci_resolve_state() {
+    local service="$1" identity="$2" platform="$3"
+    [ -n "${platform}" ] || { printf 'UNKNOWN\n'; return 0; }
+    local lrec lrc=0 grc=0 gdig tag lstate ldig
+    lrec="$(_ci_ledger_read "$(_ci_ledger_remote)" "${identity}")" || lrc=$?
+    [ "${lrc}" -eq 2 ] && { printf 'UNKNOWN\n'; return 0; }
+    tag="$(_ci_image_tag "${service}" "${platform}" "${identity}")"
+    gdig="$(_ci_registry_probe "${tag}")" || grc=$?
+    [ "${grc}" -eq 2 ] && { printf 'UNKNOWN\n'; return 0; }
+    if [ "${lrc}" -eq 1 ]; then
+        [ "${grc}" -eq 1 ] && { printf 'MISSING_CONFIRMED\n'; return 0; }
+        printf 'PRODUCED_UNVERIFIED\n'
+        return 0
+    fi
+    lstate="$(printf '%s' "${lrec}" | cut -f1)"
+    ldig="$(printf '%s' "${lrec}" | cut -f2)"
+    if [ "${lstate}" = ACCEPTED ]; then
+        if [ "${grc}" -eq 1 ]; then
+            ci_log "[CI-ERROR-RESOLVE-0006]" "service=\"${service}\" identity=\"${identity}\" reason=\"ACCEPTED in ledger but artifact missing in registry\" ledger_digest=\"${ldig}\""
+            printf 'MISMATCH\n'
+            return 0
+        fi
+        [ "${gdig}" = "${ldig}" ] && { printf 'PRESENT_ACCEPTED\n'; return 0; }
+        printf 'MISMATCH\n'
+        return 0
+    fi
+    printf 'PRODUCED_UNVERIFIED\n'
 }
 
 # What: Map a resolver state to its one action.
@@ -649,7 +679,7 @@ _ci_resolve_one() {
     local service="$1" platform="$2"
     local identity state action
     identity="$(_ci_identity_for "${service}" "${platform}")" || return "$?"
-    state="$(_ci_resolve_probe "${service}" "${identity}")"
+    state="$(_ci_resolve_probe "${service}" "${identity}" "${platform}")"
     case "${state}" in
         PRESENT_ACCEPTED|MISSING_CONFIRMED|MISMATCH|PRODUCED_UNVERIFIED|BUILD_IN_PROGRESS|UNKNOWN) ;;
         *)
@@ -677,17 +707,22 @@ ci_cmd_resolve() {
 # RETRY CLASSIFIER
 # =========================================================
 
-# What: Classify a failure as transient or permanent (§67).
-# Why: One rule replaces 5+ retry wrappers' own splits.
+# What: Classify a failure: transient, permanent, not_found.
+# Why: One rule; not_found may build, permanent may not.
 # From: Issue #1683
 _ci_classify_failure() {
     local raw="$1"
+    # What: a genuinely missing registry artifact.
+    # Why: only not_found may drive a build; auth may not.
+    case "${raw}" in
+        *"manifest unknown"*|*"not found: manifest"*|*MANIFEST_UNKNOWN*|*"not found: name unknown"*) printf 'not_found\n'; return 0 ;;
+    esac
     # What: auth/malformed/compile are permanent.
     # Why: retrying a fixed outcome wastes budget.
     case "${raw}" in
         *"HTTP 401"*|*"unauthorized"*|*"denied: requested access"*) printf 'permanent\n'; return 0 ;;
         *"HTTP 400"*|*"HTTP 422"*|*"invalid reference format"*) printf 'permanent\n'; return 0 ;;
-        *"pull access denied"*|*"manifest unknown"*|*"not found: manifest"*) printf 'permanent\n'; return 0 ;;
+        *"pull access denied"*) printf 'permanent\n'; return 0 ;;
         *"error: could not compile"*|*"Dockerfile parse error"*|*"failed to solve"*"parse"*) printf 'permanent\n'; return 0 ;;
     esac
     # What: rate-limit/5xx/network are transient.
@@ -996,6 +1031,17 @@ _ci_docker_build() {
 # From: Issue #1683
 _ci_registry_digest() {
     docker buildx imagetools inspect "$1" --format '{{.Manifest.Digest}}'
+}
+
+# What: Probe a tag's digest; 1 not-found, 2 unknown.
+# Why: only a real miss may build; auth stays UNKNOWN.
+# From: Issue #1683
+_ci_registry_probe() {
+    local tag="$1" raw rc=0
+    raw="$(docker buildx imagetools inspect "${tag}" --format '{{.Manifest.Digest}}' 2>&1)" || rc=$?
+    [ "${rc}" -eq 0 ] && { printf '%s\n' "${raw}"; return 0; }
+    [ "$(_ci_classify_failure "${raw}")" = not_found ] && return 1
+    return 2
 }
 
 # What: Create or update a multi-arch index from sources.
