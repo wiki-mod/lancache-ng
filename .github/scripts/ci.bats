@@ -2030,6 +2030,22 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     [[ "${output}" == *"CI-ERROR-CHECK-0005"* ]]
 }
 
+@test "check language-policy fails banned ext and inline interpreter" {
+    # What: ci.sh owns AG-REL-001; bats calls it.
+    # Why: extension ban plus the heredoc foreign-lang gap.
+    # From: Issue #1683
+    printf 'echo hi\n' > "${BATS_TEST_TMPDIR}/ok.sh"
+    run bash "${CI_SH}" check language-policy "${BATS_TEST_TMPDIR}/ok.sh"
+    [ "${status}" -eq 0 ]
+    printf 'x = 1\n' > "${BATS_TEST_TMPDIR}/mod.py"
+    run bash "${CI_SH}" check language-policy "${BATS_TEST_TMPDIR}/mod.py"
+    [ "${status}" -ne 0 ]
+    printf 'python3 -c "print(1)"\n' > "${BATS_TEST_TMPDIR}/inline.sh"
+    run bash "${CI_SH}" check language-policy "${BATS_TEST_TMPDIR}/inline.sh"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0007"* ]]
+}
+
 # =========================================================
 # HISTORICAL REGRESSIONS
 # =========================================================

@@ -2286,6 +2286,36 @@ _ci_check_deny_short_sha() {
     printf 'deny-short-sha=clean files=%s\n' "${#files[@]}"
 }
 
+# What: Fail on a banned-language file or interpreter.
+# Why: AG-REL-001 Rust+shell; catches heredoc lang too.
+# From: Issue #1683
+_ci_check_language_policy() {
+    local -a files=()
+    if [ "$#" -gt 0 ]; then files=("$@"); else
+        mapfile -t files < <(git ls-files)
+    fi
+    local path
+    local -a viol=()
+    for path in "${files[@]}"; do
+        [ -f "${path}" ] || continue
+        case "${path}" in
+            *.py|*.pyc|*.pyw|*.rb|*.php|*.pl|*.pm) viol+=("${path}: banned-language file"); continue ;;
+        esac
+        case "${path}" in */ci.sh|ci.sh|*/ci.bats|ci.bats) continue ;; esac
+        case "${path}" in
+            *.sh|*.bats|*.yml|*.yaml)
+                if grep -Eq '(python3?|perl|ruby|node)[[:space:]]+-[eEc]|<<-?[[:space:]]*"?(PY|PYEOF|PYTHON|PERL|RUBY)' "${path}"; then
+                    viol+=("${path}: inline foreign-language interpreter")
+                fi ;;
+        esac
+    done
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0007]" "reason=\"banned language (AG-REL-001)\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'language-policy=clean files=%s\n' "${#files[@]}"
+}
+
 # What: Route a source-hygiene check to its function.
 # Why: One owner per guard invariant; ci.bats calls it.
 # From: Issue #1683
@@ -2297,6 +2327,7 @@ ci_cmd_check() {
         file-headers) _ci_check_file_headers "$@" ;;
         comment-length) _ci_check_comment_length "$@" ;;
         deny-short-sha) _ci_check_deny_short_sha "$@" ;;
+        language-policy) _ci_check_language_policy "$@" ;;
         *)
             ci_log "[CI-ERROR-CHECK-0001]" "sub=\"${sub}\" reason=\"unknown check\""
             return 2
