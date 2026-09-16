@@ -1,8 +1,1 @@
-# CLAUDE.md
-
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
-## Governance
-
-**[AG-GOV-001]** **Mandatory at the start of every session/task in this repo**: read `AGENTS.md` (repo root) and `.github/AGENTS.md` in full, and follow them as the binding, authoritative rule-set for this repository — not optional background reading. This is the *only* rule that stays in this file rather than living in `AGENTS.md` itself, and it stays here deliberately: `AGENTS.md` is not auto-loaded into context the way this file is, so the instruction to go read it has to live somewhere that *is* auto-loaded, or nothing would ever prompt a session to discover `AGENTS.md` in the first place. **The authoritative, most current version of both files lives on `current_dev`** (the active development branch), not necessarily on whatever branch/worktree you happen to be checked out on — `master` only receives governance-doc updates when a release is cut from `current_dev`, so it can lag behind by however long it has been since the last release. If your working branch is not `current_dev` (e.g. you are on `master`, a `vX.Y.Z` release branch, or a stale local checkout), fetch and read the `current_dev` copy of these two files (e.g. `git show origin/current_dev:AGENTS.md`) rather than trusting your current branch's copy as current. If either file changes during a session (e.g. after a `git pull` or a merge), re-read it before continuing work that it governs.
-
+This file MUST remain pointer-only; the authoritative rulebook is the `current_dev` copy of `wiki-mod/lancache-ng/AGENTS.md` and MUST be read in full under `[AG-WF-035]`.
