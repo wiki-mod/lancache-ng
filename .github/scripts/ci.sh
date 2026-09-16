@@ -130,23 +130,27 @@ _ci_block_entry_field() {
 # From: Issue #1683
 _ci_block_entry_list() {
     local block="$1" entry="$2" field="$3"
+    # What: entry="" reads a 2-level block->field list.
+    # Why: build_matrix has no entry level; one reader.
+    # From: Issue #1683
     awk -v block="$block" -v entry="$entry" -v field="$field" '
-        $0 ~ ("^" block ":[[:space:]]*$") { inb = 1; next }
+        BEGIN { fi = (entry == "") ? "  " : "    "; ii = (entry == "") ? "    " : "      " }
+        $0 ~ ("^" block ":[[:space:]]*$") { inb = 1; inentry = (entry == ""); next }
         inb && /^[^[:space:]]/ { inb = 0 }
-        inb && /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ {
+        inb && entry != "" && /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ {
             cur = $1; sub(/:$/, "", cur); inentry = (cur == entry); inlist = 0
         }
-        inb && inentry && $0 ~ ("^    " field ":[[:space:]]*\\[") {
+        inb && inentry && $0 ~ ("^" fi field ":[[:space:]]*\\[") {
             line = $0; sub(/^[^[]*\[/, "", line); sub(/\].*$/, "", line)
             gsub(/[[:space:],]+/, " ", line)
             n = split(line, a, " "); for (i = 1; i <= n; i++) if (a[i] != "") print a[i]
             exit
         }
-        inb && inentry && $0 ~ ("^    " field ":[[:space:]]*$") { inlist = 1; next }
-        inlist && /^      -[[:space:]]/ {
+        inb && inentry && $0 ~ ("^" fi field ":[[:space:]]*$") { inlist = 1; next }
+        inlist && $0 ~ ("^" ii "-[[:space:]]") {
             it = $0; sub(/^[[:space:]]*-[[:space:]]*/, "", it); print it; next
         }
-        inlist && /^    [^[:space:]]/ { inlist = 0 }
+        inlist && $0 ~ ("^" fi "[^[:space:]]") { inlist = 0 }
         inlist && /^  [^[:space:]]/ { inlist = 0 }
     ' "${CI_MANIFEST}"
 }
@@ -191,38 +195,17 @@ ci_context_path() {
 # Why: A target may narrow the one authoritative list.
 # From: Issue #1683
 _ci_service_platforms_override() {
-    local service="$1"
-    awk -v svc="$service" '
-        /^(services|build_toolchain):[[:space:]]*$/ { inb = 1; next }
-        inb && /^[A-Za-z]/ { inb = 0 }
-        inb && /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ {
-            cur = $1; sub(/:$/, "", cur); insvc = (cur == svc)
-        }
-        inb && insvc && /^    platforms:[[:space:]]*\[/ {
-            line = $0; sub(/^[^[]*\[/, "", line); sub(/\].*$/, "", line)
-            gsub(/[[:space:],]+/, " ", line)
-            n = split(line, a, " ")
-            for (i = 1; i <= n; i++) if (a[i] != "") print a[i]
-            exit
-        }
-    ' "${CI_MANIFEST}"
+    local service="$1" out
+    out="$(_ci_block_entry_list services "${service}" platforms)"
+    [ -n "${out}" ] || out="$(_ci_block_entry_list build_toolchain "${service}" platforms)"
+    printf '%s' "${out}"
 }
 
 # What: Print the authoritative build_matrix platform list.
 # Why: The one list every target defaults to.
 # From: Issue #1683
 _ci_build_matrix_platforms() {
-    awk '
-        /^build_matrix:[[:space:]]*$/ { inb = 1; next }
-        inb && /^[A-Za-z]/ { inb = 0 }
-        inb && /^  platforms:[[:space:]]*\[/ {
-            line = $0; sub(/^[^[]*\[/, "", line); sub(/\].*$/, "", line)
-            gsub(/[[:space:],]+/, " ", line)
-            n = split(line, a, " ")
-            for (i = 1; i <= n; i++) if (a[i] != "") print a[i]
-            exit
-        }
-    ' "${CI_MANIFEST}"
+    _ci_block_entry_list build_matrix "" platforms
 }
 
 # What: Print a target's platforms, one per line.
