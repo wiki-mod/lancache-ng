@@ -1316,6 +1316,7 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"sha256:aaa"* ]]
     [[ "${output}" == *"111"* ]]
+    [[ "${output}" == *"proxy"* ]]
 }
 
 @test "default gc candidates skips a 404 package without failing" {
@@ -1429,17 +1430,24 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     [[ "${output}" == *"CI-ERROR-BUILD-0002"* ]]
 }
 
-@test "gc apply fails closed with no delete backend" {
-    # What: apply needs a delete backend to act.
-    # Why: apply must never no-op silently while deleting.
+@test "default gc delete calls the GHCR delete endpoint by version id" {
+    # What: Delete targets /versions/<id> for the service.
+    # Why: The one destructive call, package-scoped.
     # From: Issue #1683
-    CI_GC_ROOTS_CMD="$(_gc_roots)" \
-    CI_GC_CANDIDATES_CMD="$(_stub cands 'echo sha-old')" \
-    CI_GC_REACHABLE_CMD="$(_stub reach 'echo unreachable')" \
-    GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${CI_SH}" gc --apply
+    gh() { echo "$@" >> "${BATS_TEST_TMPDIR}/gh.log"; }
+    export -f gh
+    run _ci_default_gc_delete "$(printf 'sha256:old\t222\t2020-01-01T00:00:00Z\tproxy')"
+    [ "${status}" -eq 0 ]
+    [[ "$(cat "${BATS_TEST_TMPDIR}/gh.log")" == *"api -X DELETE /orgs/wiki-mod/packages/container/lancache-ng%2Fproxy/versions/222"* ]]
+}
+
+@test "default gc delete refuses a candidate with no numeric id" {
+    # What: A non-numeric id is refused, never guessed.
+    # Why: A bad id could delete the wrong version.
+    # From: Issue #1683
+    run _ci_default_gc_delete "$(printf 'sha256:old\tnotanid\t2020\tproxy')"
     [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-GC-0010"* ]]
+    [[ "${output}" == *"CI-ERROR-GC-0019"* ]]
 }
 
 @test "gc apply refuses when the SOT policy forbids automation" {

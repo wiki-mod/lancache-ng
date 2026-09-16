@@ -1813,8 +1813,32 @@ _ci_default_gc_candidates() {
         vers="$(_ci_gh_versions "${owner}" "${pkgbase}%2F${svc}")" || grc=$?
         [ "${grc}" -eq 2 ] && return 2
         [ "${grc}" -eq 1 ] && continue
-        [ -n "${vers}" ] && printf '%s\n' "${vers}"
+        # What: Append the service so delete can target it.
+        # Why: Delete path is package-scoped, not id-only.
+        # From: Issue #1683
+        [ -n "${vers}" ] && printf '%s\n' "${vers}" | awk -v s="${svc}" 'NF{print $0"\t"s}'
     done < <(ci_build_targets)
+}
+
+# What: Delete one GHCR version by id (destructive).
+# Why: The one delete surface; package-scoped by service.
+# From: Issue #1683
+_ci_default_gc_delete() {
+    local candidate="$1" id svc prefix owner pkgbase
+    id="$(printf '%s' "${candidate}" | awk -F'\t' '{print $2}')"
+    svc="$(printf '%s' "${candidate}" | awk -F'\t' '{print $4}')"
+    case "${id}" in
+        ''|*[!0-9]*)
+            ci_log "[CI-ERROR-GC-0019]" "candidate=\"${candidate}\" reason=\"no numeric version id\""
+            return 2
+            ;;
+    esac
+    [ -n "${svc}" ] || { ci_log "[CI-ERROR-GC-0019]" "candidate=\"${candidate}\" reason=\"no service for delete path\""; return 2; }
+    prefix="$(_ci_manifest_scalar '^  image_prefix:[[:space:]]')"
+    [ -n "${prefix}" ] || { ci_log "[CI-ERROR-GC-0017]" "reason=\"SOT image_prefix missing\""; return 2; }
+    owner="${prefix%%/*}"
+    pkgbase="${prefix#*/}"
+    gh api -X DELETE "/orgs/${owner}/packages/container/${pkgbase}%2F${svc}/versions/${id}" >/dev/null
 }
 
 # What: List GC candidate artifacts (injectable backend).
@@ -1949,10 +1973,6 @@ _ci_gc_run() {
                 ;;
         esac
         _ci_require_ghcr_auth || return 2
-        if [ -z "${CI_GC_DELETE_CMD:-}" ]; then
-            ci_log "[CI-ERROR-GC-0010]" "reason=\"apply mode but no delete backend (CI_GC_DELETE_CMD unset)\""
-            return 2
-        fi
     fi
     while IFS= read -r line; do
         [ -n "${line}" ] || continue
@@ -1977,7 +1997,7 @@ _ci_gc_run() {
                 ci_log "[CI-INFO-GC-0011]" "candidate=\"${line}\" reason=\"referenced at delete time; skipped\""
                 continue
             fi
-            if ! "${CI_GC_DELETE_CMD}" "${line}"; then
+            if ! "${CI_GC_DELETE_CMD:-_ci_default_gc_delete}" "${line}"; then
                 ci_log "[CI-ERROR-GC-0009]" "candidate=\"${line}\" reason=\"delete backend failed\""
                 return 2
             fi
