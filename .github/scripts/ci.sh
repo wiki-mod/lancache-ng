@@ -2485,6 +2485,36 @@ _ci_check_pr_title() {
     printf 'pr-title=ok\n'
 }
 
+# What: External deploy images must be digest-pinned + SOT.
+# Why: A floating external tag breaks reproducibility.
+# From: Issue #1683
+_ci_check_stable_external_images() {
+    local -a dirs=("$@")
+    [ "${#dirs[@]}" -gt 0 ] || dirs=(deploy/prod deploy/quickstart)
+    local d line img name
+    local -a viol=()
+    for d in "${dirs[@]}"; do
+        [ -d "${d}" ] || continue
+        while IFS= read -r line; do
+            img="${line#*image:}"; img="${img#"${img%%[![:space:]]*}"}"
+            case "${img}" in
+                *ghcr.io*|*'${LANCACHE'*|'') continue ;;
+            esac
+            case "${img}" in
+                *@sha256:*) ;;
+                *) viol+=("${d}: external not digest-pinned: ${img}"); continue ;;
+            esac
+            name="${img%%@*}"; name="${name%%:*}"
+            grep -qF "${name}" "${CI_MANIFEST}" || viol+=("${d}: external not in SOT: ${img}")
+        done < <(grep -rhE '^[[:space:]]+image:[[:space:]]' "${d}" 2>/dev/null)
+    done
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0014]" "reason=\"external image not digest-pinned or not in SOT\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'stable-external-images=clean\n'
+}
+
 # What: Route a source-hygiene check to its function.
 # Why: One owner per guard invariant; ci.bats calls it.
 # From: Issue #1683
@@ -2502,6 +2532,7 @@ ci_cmd_check() {
         review-chronology) _ci_check_review_chronology "$@" ;;
         pipefail-early-exit) _ci_check_pipefail_early_exit "$@" ;;
         pr-title) _ci_check_pr_title "$@" ;;
+        stable-external-images) _ci_check_stable_external_images "$@" ;;
         *)
             ci_log "[CI-ERROR-CHECK-0001]" "sub=\"${sub}\" reason=\"unknown check\""
             return 2

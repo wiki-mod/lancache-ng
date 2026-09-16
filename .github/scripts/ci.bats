@@ -2120,6 +2120,20 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     [[ "${output}" == *"CI-ERROR-CHECK-0013"* ]]
 }
 
+@test "check stable-external-images fails a non-digest external image" {
+    # What: ci.sh owns the pin gate; bats calls it.
+    # Why: floating external tag breaks reproducibility.
+    # From: Issue #1683
+    local r="${BATS_TEST_TMPDIR}/dep"; mkdir -p "${r}"
+    printf 'services:\n  x:\n    image: redis:7\n' > "${r}/docker-compose.yml"
+    run bash "${CI_SH}" check stable-external-images "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0014"* ]]
+    printf 'services:\n  x:\n    image: ghcr.io/wiki-mod/lancache-ng/proxy:latest\n' > "${r}/docker-compose.yml"
+    run bash "${CI_SH}" check stable-external-images "${r}"
+    [ "${status}" -eq 0 ]
+}
+
 # =========================================================
 # HISTORICAL REGRESSIONS
 # =========================================================
