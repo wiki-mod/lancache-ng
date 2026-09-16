@@ -124,6 +124,34 @@ setup() {
     [ "$(printf '%s' "${output}" | jq -r '.[0].platform')" = "linux/amd64" ]
 }
 
+@test "plan-matrix emits only resolve-build targets, one row per platform" {
+    # What: Matrix carries only what resolve says to build.
+    # Why: identity filters, not path-sledgehammer.
+    # From: Issue #1683
+    local gh="${BATS_TEST_TMPDIR}/out.txt"; : > "${gh}"
+    GITHUB_OUTPUT="${gh}" CI_RESOLVE_PROBE_CMD="$(_stub p 'echo MISSING_CONFIRMED')" \
+        run bash "${CI_SH}" plan-matrix services/proxy/Dockerfile
+    [ "${status}" -eq 0 ]
+    grep -q '^any-build=true$' "${gh}"
+    local m; m="$(grep '^matrix=' "${gh}" | sed 's/^matrix=//')"
+    [ "$(printf '%s' "${m}" | jq '.include | length')" -eq 2 ]
+    [ "$(printf '%s' "${m}" | jq -r '.include[0].service')" = "proxy" ]
+    [ "$(printf '%s' "${m}" | jq -r '[.include[].platform]|sort|join(",")')" = "linux/amd64,linux/arm64" ]
+}
+
+@test "plan-matrix omits an accepted target (NOOP), any-build=false" {
+    # What: An accepted identity is not rebuilt.
+    # Why: NOOP/reuse precedes build; a skip stays out.
+    # From: Issue #1683
+    local gh="${BATS_TEST_TMPDIR}/out.txt"; : > "${gh}"
+    GITHUB_OUTPUT="${gh}" CI_RESOLVE_PROBE_CMD="$(_stub p 'echo PRESENT_ACCEPTED')" \
+        run bash "${CI_SH}" plan-matrix services/proxy/Dockerfile
+    [ "${status}" -eq 0 ]
+    grep -q '^any-build=false$' "${gh}"
+    local m; m="$(grep '^matrix=' "${gh}" | sed 's/^matrix=//')"
+    [ "$(printf '%s' "${m}" | jq '.include | length')" -eq 0 ]
+}
+
 # =========================================================
 # SERVICE DEPENDENCIES
 # =========================================================

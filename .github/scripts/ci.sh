@@ -30,7 +30,7 @@ CI_REPO_ROOT="${CI_REPO_ROOT:-$(cd -- "${CI_SCRIPT_DIR}/../.." && pwd)}"
 # Why: One table is membership, dispatch and error text.
 # From: Issue #1683
 declare -A CI_DISPATCH=(
-    [plan]=ci_cmd_plan [impact]=ci_cmd_impact [identity]=ci_cmd_identity
+    [plan]=ci_cmd_plan [plan-matrix]=ci_cmd_plan_matrix [impact]=ci_cmd_impact [identity]=ci_cmd_identity
     [resolve]=ci_cmd_resolve [build]=ci_cmd_build [build-args]=ci_cmd_build_args
     [build-tools]=ci_cmd_build_tools [publish]=ci_cmd_publish [verify]=ci_cmd_verify
     [test]=ci_cmd_test [scan]=ci_cmd_scan [assemble]=ci_cmd_assemble
@@ -331,6 +331,37 @@ ci_cmd_plan() {
         fi
     done
     ci_log "[CI-INFO-PLAN-0001]" "phase=plan changed=${#changed[@]} note=\"candidates only; identity/CAS decides build\""
+}
+
+# What: Emit a resolve-filtered matrix to GITHUB_OUTPUT.
+# Why: Base-CI builds only what identity proves needs work.
+# From: Issue #1683
+ci_cmd_plan_matrix() {
+    local out="${GITHUB_OUTPUT:?GITHUB_OUTPUT required}"
+    local -a changed=()
+    while IFS= read -r line; do
+        [ -n "${line}" ] && changed+=("${line}")
+    done < <(_ci_changed_files "$@")
+    local service platform include='[]' any=false resolved paction runner
+    for service in $(ci_build_targets); do
+        _ci_plan_candidate "${service}" "${changed[@]}" || continue
+        while IFS= read -r platform; do
+            [ -n "${platform}" ] || continue
+            resolved="$(_ci_resolve_one "${service}" "${platform}")" || return "$?"
+            paction="${resolved#*action=}"; paction="${paction%% *}"
+            [ "${paction}" = "build" ] || continue
+            if ! runner="$(_ci_platform_runner "${platform}")"; then
+                ci_log "[CI-ERROR-PLAN-0002]" "platform=\"${platform}\" reason=\"no runner label for platform\""
+                return 2
+            fi
+            include="$(_ci_matrix_append "${include}" service="${service}" arch="${platform##*/}" runner="${runner}" platform="${platform}")" || return 2
+            any=true
+        done <<< "$(_ci_platforms "${service}")"
+    done
+    {
+        printf 'any-build=%s\n' "${any}"
+        printf 'matrix={"include":%s}\n' "${include}"
+    } >> "${out}"
 }
 
 # =========================================================
