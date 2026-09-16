@@ -2686,6 +2686,48 @@ SH
     [[ "${output}" == *"CI-ERROR-AGGREGATE-0003"* ]]
 }
 
+@test "default channel move points the channel tag at the digest" {
+    # What: default promote move retargets svc:channel.
+    # Why: shares the index writer; moves, not builds.
+    # From: Issue #1683
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    local log="${BATS_TEST_TMPDIR}/create.log"
+    printf '#!/usr/bin/env bash\ncase "$*" in *"imagetools create"*) echo "$*" >> "%s" ;; esac\n' "${log}" > "${bin}/docker"
+    chmod +x "${bin}/docker"
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+        run _ci_default_channel_move ui latest sha256:abc
+    [ "${status}" -eq 0 ]
+    run cat "${log}"
+    [[ "${output}" == *"--tag ghcr.io/wiki-mod/lancache-ng/ui:latest"* ]]
+    [[ "${output}" == *"ghcr.io/wiki-mod/lancache-ng/ui@sha256:abc"* ]]
+}
+
+@test "default channel readback reads the channel digest" {
+    # What: default readback returns the channel digest.
+    # Why: one digest reader confirms the promotion.
+    # From: Issue #1683
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    printf '#!/usr/bin/env bash\necho sha256:chan\n' > "${bin}/docker"
+    chmod +x "${bin}/docker"
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+        run _ci_default_channel_readback ui latest
+    [ "${status}" -eq 0 ]
+    [ "${output}" = sha256:chan ]
+}
+
+@test "default promote lock acquires the per-channel ref" {
+    # What: default promote lock takes refs/ci/promote-lock.
+    # Why: reuses the CAS mutex, scoped per channel.
+    # From: Issue #1683
+    _cas_setup
+    cd "${CAS_A}"
+    run _ci_default_promote_lock latest
+    [ "${status}" -eq 0 ]
+    run _ci_cas_ref_sha origin refs/ci/promote-lock/latest
+    [ "${status}" -eq 0 ]
+    [ -n "${output}" ]
+}
+
 # =========================================================
 # HISTORICAL REGRESSIONS
 # =========================================================

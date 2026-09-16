@@ -1534,6 +1534,59 @@ _ci_stack_validated() {
     [ "${CI_STACK_VALIDATED:-}" = "SUCCESS" ]
 }
 
+# What: The per-channel promotion lock ref.
+# Why: serialize movers of one channel (§52).
+# From: Issue #1683
+_ci_promote_lock_ref() {
+    printf 'refs/ci/promote-lock/%s' "$1"
+}
+
+# What: Default promote lock: take the channel lock.
+# Why: the cross-host CAS mutex, reused for promotion.
+# From: Issue #1683
+_ci_default_promote_lock() {
+    _ci_lock_acquire "$(_ci_ledger_remote)" "$(_ci_promote_lock_ref "$1")" "promote $1 run=${GITHUB_RUN_ID:-local}" 30 10 900
+}
+
+# What: Default promote unlock: free the channel lock.
+# Why: the same holder note the acquire path used.
+# From: Issue #1683
+_ci_default_promote_unlock() {
+    _ci_lock_release "$(_ci_ledger_remote)" "$(_ci_promote_lock_ref "$1")" "promote $1 run=${GITHUB_RUN_ID:-local}"
+}
+
+# What: Default channel move: point svc:channel at digest.
+# Why: shares the one index writer; moves, never builds.
+# From: Issue #1683
+_ci_default_channel_move() {
+    local svc="$1" channel="$2" digest="$3" repo
+    repo="$(_ci_repo)"
+    _ci_imagetools_create "ghcr.io/${repo}/${svc}:${channel}" "ghcr.io/${repo}/${svc}@${digest}" >/dev/null
+}
+
+# What: Default channel readback: the channel's digest.
+# Why: one digest reader; empty output means unknown.
+# From: Issue #1683
+_ci_default_channel_readback() {
+    local svc="$1" channel="$2" repo
+    repo="$(_ci_repo)"
+    _ci_registry_digest "ghcr.io/${repo}/${svc}:${channel}" 2>/dev/null
+}
+
+# What: Resolve the move backend, mock or default.
+# Why: one dispatch point for the channel move.
+# From: Issue #1683
+_ci_promote_move() {
+    "${CI_PROMOTE_MOVE_CMD:-_ci_default_channel_move}" "$@"
+}
+
+# What: Resolve the readback backend, mock or default.
+# Why: one dispatch point for the channel readback.
+# From: Issue #1683
+_ci_channel_readback() {
+    "${CI_CHANNEL_READBACK_CMD:-_ci_default_channel_readback}" "$@"
+}
+
 # What: Move every candidate ref and read each back.
 # Why: One locked section; the caller always unlocks.
 # From: Issue #1683
@@ -1542,11 +1595,11 @@ _ci_promote_move_all() {
     while IFS= read -r line; do
         [ -n "${line}" ] || continue
         svc="${line%%=*}"; digest="${line#*=}"
-        if ! "${CI_PROMOTE_MOVE_CMD}" "${svc}" "${channel}" "${digest}"; then
+        if ! _ci_promote_move "${svc}" "${channel}" "${digest}"; then
             ci_log "[CI-ERROR-PROMOTE-0007]" "service=\"${svc}\" channel=\"${channel}\" reason=\"channel ref move failed\""
             return 2
         fi
-        seen="$("${CI_CHANNEL_READBACK_CMD}" "${svc}" "${channel}")" || seen=""
+        seen="$(_ci_channel_readback "${svc}" "${channel}")" || seen=""
         if [ -z "${seen}" ]; then
             ci_log "[CI-ERROR-PROMOTE-0008]" "service=\"${svc}\" channel=\"${channel}\" reason=\"readback unknown; blocking\""
             return 2
@@ -1581,7 +1634,7 @@ _ci_promote_all_current() {
     while IFS= read -r line; do
         [ -n "${line}" ] || continue
         svc="${line%%=*}"; digest="${line#*=}"
-        seen="$("${CI_CHANNEL_READBACK_CMD}" "${svc}" "${channel}")" || seen=""
+        seen="$(_ci_channel_readback "${svc}" "${channel}")" || seen=""
         [ "${seen}" = "${digest}" ] || return 1
     done <<< "${cand}"
 }
@@ -1607,16 +1660,11 @@ ci_cmd_promote() {
         return 2
     fi
     _ci_require_ghcr_auth || return "$?"
-    if [ -z "${CI_PROMOTE_LOCK_CMD:-}" ] || [ -z "${CI_PROMOTE_UNLOCK_CMD:-}" ] || \
-       [ -z "${CI_PROMOTE_MOVE_CMD:-}" ] || [ -z "${CI_CHANNEL_READBACK_CMD:-}" ]; then
-        ci_log "[CI-ERROR-PROMOTE-0006]" "channel=\"${channel}\" reason=\"promote backends not wired\""
-        return 2
-    fi
     if _ci_promote_all_current "${channel}" "${cand}"; then
         printf 'channel=%s result=already-promoted services=%s\n' "${channel}" "$(printf '%s\n' "${cand}" | grep -c '=')"
         return 0
     fi
-    if ! "${CI_PROMOTE_LOCK_CMD}" "${channel}"; then
+    if ! "${CI_PROMOTE_LOCK_CMD:-_ci_default_promote_lock}" "${channel}"; then
         ci_log "[CI-ERROR-PROMOTE-0010]" "channel=\"${channel}\" reason=\"could not acquire promotion lock\""
         return 2
     fi
@@ -1624,7 +1672,7 @@ ci_cmd_promote() {
     # Why: a failed move must never leak the promotion lock.
     local rc
     if _ci_promote_move_all "${channel}" "${cand}"; then rc=0; else rc=$?; fi
-    "${CI_PROMOTE_UNLOCK_CMD}" "${channel}" || ci_log "[CI-WARN-PROMOTE-0011]" "channel=\"${channel}\" reason=\"lock release failed\""
+    "${CI_PROMOTE_UNLOCK_CMD:-_ci_default_promote_unlock}" "${channel}" || ci_log "[CI-WARN-PROMOTE-0011]" "channel=\"${channel}\" reason=\"lock release failed\""
     [ "${rc}" -eq 0 ] || return "${rc}"
     printf 'channel=%s result=promoted services=%s\n' "${channel}" "$(printf '%s\n' "${cand}" | grep -c '=')"
 }
