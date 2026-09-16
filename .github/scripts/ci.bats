@@ -1306,14 +1306,48 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     [[ "${output}" == *"CI-ERROR-GC-0007"* ]]
 }
 
-@test "gc fails closed with no candidate source wired" {
-    # What: Missing candidate source must fail closed.
-    # Why: SQLite is the only candidate source (§97).
+@test "default gc candidates emits the version tuple per package" {
+    # What: Each built package's versions become candidates.
+    # Why: The tuple feeds reachability and delete (§97).
     # From: Issue #1683
-    CI_GC_ROOTS_CMD="$(_gc_roots)" \
-        run bash "${CI_SH}" gc
+    _ci_gh_versions() { printf 'sha256:aaa\t111\t2020-01-01T00:00:00Z\n'; }
+    ci_build_targets() { printf 'proxy\n'; }
+    run _ci_default_gc_candidates
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"sha256:aaa"* ]]
+    [[ "${output}" == *"111"* ]]
+}
+
+@test "default gc candidates skips a 404 package without failing" {
+    # What: A not-found package is skipped, not fatal.
+    # Why: External services (netdata) have no GHCR package.
+    # From: Issue #1683
+    _ci_gh_versions() { case "$2" in *netdata*) return 1;; *) printf 'sha256:bbb\t222\t2020-01-01T00:00:00Z\n';; esac; }
+    ci_build_targets() { printf 'proxy\nnetdata\n'; }
+    run _ci_default_gc_candidates
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"sha256:bbb"* ]]
+    [[ "${output}" != *"netdata"* ]]
+}
+
+@test "default gc candidates fails closed on a transient listing error" {
+    # What: A transient GHCR error refuses the whole run.
+    # Why: A half-enumerated candidate set is unsafe.
+    # From: Issue #1683
+    _ci_gh_versions() { return 2; }
+    ci_build_targets() { printf 'proxy\n'; }
+    run _ci_default_gc_candidates
     [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-GC-0002"* ]]
+}
+
+@test "default gc candidates fails closed when image_prefix is missing" {
+    # What: No SOT image_prefix cannot scope candidates.
+    # Why: Guessing the owner could target foreign packages.
+    # From: Issue #1683
+    _ci_manifest_scalar() { printf ''; }
+    run _ci_default_gc_candidates
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-GC-0017"* ]]
 }
 
 @test "gc is a NOOP when the candidate set is empty" {

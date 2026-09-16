@@ -1781,16 +1781,47 @@ _ci_gc_roots() {
     "${CI_GC_ROOTS_CMD:-_ci_default_gc_roots}"
 }
 
+# What: List a package's versions; 1 not-found, 2 unknown.
+# Why: One discriminating GHCR reader; 404 is not transient.
+# From: Issue #1683
+_ci_gh_versions() {
+    local owner="$1" pkg="$2" out rc=0
+    out="$(gh api --paginate "/orgs/${owner}/packages/container/${pkg}/versions" --jq '.[] | [.name, .id, .created_at] | @tsv' 2>&1)" || rc=$?
+    if [ "${rc}" -ne 0 ]; then
+        printf '%s' "${out}" | grep -qiE 'HTTP 404|Not Found' && return 1
+        ci_error "[CI-ERROR-GC-0018]" "owner=\"${owner}\" pkg=\"${pkg}\" reason=\"GHCR version listing failed\"" "${out}"
+        return 2
+    fi
+    printf '%s\n' "${out}"
+}
+
+# What: Enumerate GHCR versions of every built package.
+# Why: SOT-scoped candidates; org-wide would delete others.
+# From: Issue #1683
+_ci_default_gc_candidates() {
+    local prefix owner pkgbase svc vers grc
+    prefix="$(_ci_manifest_scalar '^  image_prefix:[[:space:]]')"
+    [ -n "${prefix}" ] || { ci_log "[CI-ERROR-GC-0017]" "reason=\"SOT image_prefix missing\""; return 2; }
+    owner="${prefix%%/*}"
+    pkgbase="${prefix#*/}"
+    while IFS= read -r svc; do
+        [ -n "${svc}" ] || continue
+        grc=0
+        # What: A 404 package is skipped, not a failure.
+        # Why: External services (netdata) have no package.
+        # From: Issue #1683
+        vers="$(_ci_gh_versions "${owner}" "${pkgbase}%2F${svc}")" || grc=$?
+        [ "${grc}" -eq 2 ] && return 2
+        [ "${grc}" -eq 1 ] && continue
+        [ -n "${vers}" ] && printf '%s\n' "${vers}"
+    done < <(ci_build_targets)
+}
+
 # What: List GC candidate artifacts (injectable backend).
-# Why: SQLite only suggests; it never deletes (§97).
+# Why: GHCR enumeration is the candidate truth (§97).
 # From: Issue #1683
 _ci_gc_candidates() {
-    if [ -n "${CI_GC_CANDIDATES_CMD:-}" ]; then
-        "${CI_GC_CANDIDATES_CMD}"
-        return "$?"
-    fi
-    ci_log "[CI-ERROR-GC-0002]" "reason=\"no candidate source wired (CI_GC_CANDIDATES_CMD unset)\""
-    return 2
+    "${CI_GC_CANDIDATES_CMD:-_ci_default_gc_candidates}"
 }
 
 # What: Classify a candidate against the root digest set.
