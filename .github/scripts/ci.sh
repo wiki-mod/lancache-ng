@@ -770,22 +770,38 @@ _ci_retry() {
     done
 }
 
-# What: Build and push one service image via buildx.
-# Why: ci.sh owns execution; YAML only calls ci.sh.
+# What: The per-identity per-arch tag for a build.
+# Why: One tag owner; build/publish/verify must agree.
+# From: Issue #1683
+_ci_image_tag() {
+    printf 'ghcr.io/%s/%s:sha-%s-%s' "$(_ci_repo)" "$1" "$3" "${2##*/}"
+}
+
+# What: Build one service image once and load it locally.
+# Why: BUILD != PUBLISH; a push failure must not rebuild.
 # From: Issue #1683
 _ci_docker_build() {
     local service="$1" identity="$2" platform="$3"
-    local image context arch tag a
-    image="ghcr.io/$(_ci_repo)/${service}"
+    local context tag a
     context="$(ci_service_field "${service}" context)"
     [ -z "${context}" ] && context="services/${service}"
-    arch="${platform##*/}"
-    tag="${image}:sha-${identity}-${arch}"
+    tag="$(_ci_image_tag "${service}" "${platform}" "${identity}")"
     local -a args=()
     while IFS= read -r a; do
         [ -n "${a}" ] && args+=(--build-arg "${a}")
     done < <(ci_cmd_build_args "${service}" --bare "${platform}")
-    _ci_retry docker buildx build --push --platform "${platform}" --tag "${tag}" "${args[@]}" "${context}"
+    docker buildx build --load --platform "${platform}" --tag "${tag}" "${args[@]}" "${context}"
+    printf '%s\n' "${tag}"
+}
+
+# What: Push a built tag, retrying transient push failures.
+# Why: publish retries the same digest (§22), no rebuild.
+# From: Issue #1683
+_ci_docker_publish() {
+    local service="$1" identity="$2" platform="$3" tag
+    tag="$(_ci_image_tag "${service}" "${platform}" "${identity}")"
+    _ci_retry docker push "${tag}" >/dev/null || return "$?"
+    docker buildx imagetools inspect "${tag}" --format '{{.Manifest.Digest}}'
 }
 
 # What: Run the real (or injected) image build+push.
@@ -929,13 +945,16 @@ _ci_publish_one() {
     local service="$1" platform="$2"
     local identity digest
     identity="$(_ci_identity_for "${service}" "${platform}")" || return "$?"
-    if [ -z "${CI_PUBLISH_CMD:-}" ]; then
-        ci_log "[CI-ERROR-PUBLISH-0003]" "service=\"${service}\" reason=\"no publish backend wired (CI_PUBLISH_CMD unset)\""
-        return 2
-    fi
-    if ! digest="$("${CI_PUBLISH_CMD}" "${service}" "${identity}" "${platform}")"; then
-        ci_log "[CI-ERROR-PUBLISH-0002]" "service=\"${service}\" platform=\"${platform}\" reason=\"publish backend failed\""
-        return 2
+    if [ -n "${CI_PUBLISH_CMD:-}" ]; then
+        digest="$("${CI_PUBLISH_CMD}" "${service}" "${identity}" "${platform}")" || {
+            ci_log "[CI-ERROR-PUBLISH-0002]" "service=\"${service}\" platform=\"${platform}\" reason=\"publish backend failed\""
+            return 2
+        }
+    else
+        digest="$(_ci_docker_publish "${service}" "${identity}" "${platform}")" || {
+            ci_log "[CI-ERROR-PUBLISH-0002]" "service=\"${service}\" platform=\"${platform}\" reason=\"docker publish failed\""
+            return 2
+        }
     fi
     printf 'service=%s platform=%s published=%s identity=%s\n' "${service}" "${platform}" "${digest}" "${identity}"
 }

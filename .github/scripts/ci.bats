@@ -2144,9 +2144,22 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
         run _ci_docker_build proxy abc123 linux/amd64
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"buildx build --push"* ]]
+    [[ "${output}" == *"buildx build --load"* ]]
     [[ "${output}" == *"ghcr.io/wiki-mod/lancache-ng/proxy:sha-abc123-amd64"* ]]
     [[ "${output}" == *"--platform linux/amd64"* ]]
+}
+
+@test "docker-publish pushes then reads back the registry digest" {
+    # What: publish retries push, then reads the digest.
+    # Why: BUILD != PUBLISH; same digest, many retries.
+    # From: Issue #1683
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    printf '#!/usr/bin/env bash\ncase "$*" in *"imagetools inspect"*) echo sha256:deadbeef ;; *) : ;; esac\n' > "${bin}/docker"
+    chmod +x "${bin}/docker"
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+        run _ci_docker_publish proxy abc123 linux/amd64
+    [ "${status}" -eq 0 ]
+    [ "${output}" = "sha256:deadbeef" ]
 }
 
 # =========================================================
