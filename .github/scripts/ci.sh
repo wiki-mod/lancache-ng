@@ -463,27 +463,40 @@ _ci_identity_for() {
     } | sha256sum | cut -d' ' -f1
 }
 
+# What: Run one_fn per platform, or one selected platform.
+# Why: One fanout for identity/resolve/build/publish.
+# From: Issue #1683
+_ci_for_platforms() {
+    local service="$1" platform="$2" invalid_id="$3" one_fn="$4" p plats
+    if [ -n "${platform}" ]; then
+        if ! _ci_valid_platform "${service}" "${platform}"; then
+            ci_log "${invalid_id}" "service=\"${service}\" reason=\"platform not in target set\" got=\"${platform}\""
+            return 2
+        fi
+        "${one_fn}" "${service}" "${platform}"
+        return "$?"
+    fi
+    plats="$(_ci_platforms "${service}")" || return "$?"
+    while IFS= read -r p; do
+        [ -n "${p}" ] || continue
+        "${one_fn}" "${service}" "${p}" || return "$?"
+    done <<< "${plats}"
+}
+
+# What: Print one target+platform identity line.
+# Why: The per-platform unit the fanout calls.
+# From: Issue #1683
+_ci_identity_one() {
+    printf 'platform=%s identity=%s\n' "$2" "$(_ci_identity_for "$1" "$2")"
+}
+
 # What: Print a target's id per platform, keyed.
 # Why: Default = all platforms; one selectable.
 # From: Issue #1683
 ci_cmd_identity() {
     local service="${1:-}" platform="${2:-}"
     [ -n "${service}" ] || { ci_log "[CI-ERROR-IDENTITY-0001]" "reason=\"service arg required\""; return 2; }
-    local p
-    if [ -n "${platform}" ]; then
-        if ! _ci_valid_platform "${service}" "${platform}"; then
-            ci_log "[CI-ERROR-IDENTITY-0002]" "service=\"${service}\" reason=\"platform not in target set\" got=\"${platform}\""
-            return 2
-        fi
-        printf 'platform=%s identity=%s\n' "${platform}" "$(_ci_identity_for "${service}" "${platform}")"
-        return 0
-    fi
-    local plats
-    plats="$(_ci_platforms "${service}")" || return "$?"
-    while IFS= read -r p; do
-        [ -n "${p}" ] || continue
-        printf 'platform=%s identity=%s\n' "${p}" "$(_ci_identity_for "${service}" "${p}")"
-    done <<< "${plats}"
+    _ci_for_platforms "${service}" "${platform}" "[CI-ERROR-IDENTITY-0002]" _ci_identity_one
 }
 
 # =========================================================
@@ -625,21 +638,7 @@ _ci_resolve_one() {
 ci_cmd_resolve() {
     local service="${1:-}" platform="${2:-}"
     [ -n "${service}" ] || { ci_log "[CI-ERROR-RESOLVE-0001]" "reason=\"service arg required\""; return 2; }
-    local p
-    if [ -n "${platform}" ]; then
-        if ! _ci_valid_platform "${service}" "${platform}"; then
-            ci_log "[CI-ERROR-RESOLVE-0004]" "service=\"${service}\" reason=\"platform not in target set\" got=\"${platform}\""
-            return 2
-        fi
-        _ci_resolve_one "${service}" "${platform}"
-        return "$?"
-    fi
-    local plats
-    plats="$(_ci_platforms "${service}")" || return "$?"
-    while IFS= read -r p; do
-        [ -n "${p}" ] || continue
-        _ci_resolve_one "${service}" "${p}" || return "$?"
-    done <<< "${plats}"
+    _ci_for_platforms "${service}" "${platform}" "[CI-ERROR-RESOLVE-0004]" _ci_resolve_one
 }
 
 # =========================================================
@@ -839,21 +838,7 @@ _ci_build_one() {
 ci_cmd_build() {
     local service="${1:-}" platform="${2:-}"
     [ -n "${service}" ] || { ci_log "[CI-ERROR-BUILD-0001]" "reason=\"service arg required\""; return 2; }
-    local p
-    if [ -n "${platform}" ]; then
-        if ! _ci_valid_platform "${service}" "${platform}"; then
-            ci_log "[CI-ERROR-BUILD-0006]" "service=\"${service}\" reason=\"platform not in target set\" got=\"${platform}\""
-            return 2
-        fi
-        _ci_build_one "${service}" "${platform}"
-        return "$?"
-    fi
-    local plats
-    plats="$(_ci_platforms "${service}")" || return "$?"
-    while IFS= read -r p; do
-        [ -n "${p}" ] || continue
-        _ci_build_one "${service}" "${p}" || return "$?"
-    done <<< "${plats}"
+    _ci_for_platforms "${service}" "${platform}" "[CI-ERROR-BUILD-0006]" _ci_build_one
 }
 
 # =========================================================
@@ -885,21 +870,7 @@ ci_cmd_publish() {
     local service="${1:-}" platform="${2:-}"
     [ -n "${service}" ] || { ci_log "[CI-ERROR-PUBLISH-0001]" "reason=\"service arg required\""; return 2; }
     _ci_require_ghcr_auth || return "$?"
-    local p
-    if [ -n "${platform}" ]; then
-        if ! _ci_valid_platform "${service}" "${platform}"; then
-            ci_log "[CI-ERROR-PUBLISH-0004]" "service=\"${service}\" reason=\"platform not in target set\" got=\"${platform}\""
-            return 2
-        fi
-        _ci_publish_one "${service}" "${platform}"
-        return "$?"
-    fi
-    local plats
-    plats="$(_ci_platforms "${service}")" || return "$?"
-    while IFS= read -r p; do
-        [ -n "${p}" ] || continue
-        _ci_publish_one "${service}" "${p}" || return "$?"
-    done <<< "${plats}"
+    _ci_for_platforms "${service}" "${platform}" "[CI-ERROR-PUBLISH-0004]" _ci_publish_one
 }
 
 # What: Read a published ref back and confirm its digest.
