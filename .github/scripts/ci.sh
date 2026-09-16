@@ -824,6 +824,13 @@ CI_LEDGER_REF="${CI_LEDGER_REF:-refs/ci/acceptance/ledger}"
 # From: Issue #1683
 CI_LEDGER_FILE="records"
 
+# What: The remote holding the CAS lock and ledger.
+# Why: One remote name; a test overrides it.
+# From: Issue #1683
+_ci_ledger_remote() {
+    printf '%s' "${CI_LEDGER_REMOTE:-origin}"
+}
+
 # What: Print the ledger blob text; 1 empty, 2 unknown.
 # Why: A failed read is UNKNOWN, never "no records".
 # From: Issue #1683
@@ -1262,7 +1269,7 @@ ci_cmd_scan() {
 # =========================================================
 
 # What: Look up an ACCEPTED per-platform digest.
-# Why: The digest source is the ledger; testable without it.
+# Why: The digest source is the ledger; a mock swaps it.
 # From: Issue #1683
 _ci_accepted_digest() {
     local service="$1" platform="$2"
@@ -1270,7 +1277,12 @@ _ci_accepted_digest() {
         "${CI_ACCEPTED_DIGEST_CMD}" "${service}" "${platform}"
         return "$?"
     fi
-    return 1
+    local identity rec rc=0
+    identity="$(_ci_identity_for "${service}" "${platform}")" || return 2
+    rec="$(_ci_ledger_read "$(_ci_ledger_remote)" "${identity}")" || rc=$?
+    [ "${rc}" -eq 0 ] || return "${rc}"
+    [ "$(printf '%s' "${rec}" | cut -f1)" = ACCEPTED ] || return 1
+    printf '%s' "${rec}" | cut -f2
 }
 
 # What: Look up an existing multi-arch index (injectable).

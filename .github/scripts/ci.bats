@@ -2406,6 +2406,37 @@ _cas_setup() {
     [ "${status}" -eq 1 ]
 }
 
+@test "accepted_digest default returns the digest only when ACCEPTED" {
+    # What: default reads the ledger via the identity.
+    # Why: only an ACCEPTED record yields a digest.
+    # From: Issue #1683
+    _ci_identity_for() { echo fixed-id; }
+    _ci_ledger_read() { printf 'ACCEPTED\tsha256:xyz\n'; }
+    run _ci_accepted_digest ui linux/amd64
+    [ "${status}" -eq 0 ]
+    [ "${output}" = sha256:xyz ]
+}
+
+@test "accepted_digest default yields nothing for a non-ACCEPTED record" {
+    # What: an unverified record is not a reusable digest.
+    # Why: fail-safe; only ACCEPTED is reusable.
+    # From: Issue #1683
+    _ci_identity_for() { echo fixed-id; }
+    _ci_ledger_read() { printf 'PRODUCED_UNVERIFIED\tsha256:xyz\n'; }
+    run _ci_accepted_digest ui linux/amd64
+    [ "${status}" -eq 1 ]
+}
+
+@test "accepted_digest default propagates a ledger UNKNOWN read" {
+    # What: an unknown ledger read is not a missing digest.
+    # Why: UNKNOWN != absent; the caller must not reuse.
+    # From: Issue #1683
+    _ci_identity_for() { echo fixed-id; }
+    _ci_ledger_read() { return 2; }
+    run _ci_accepted_digest ui linux/amd64
+    [ "${status}" -eq 2 ]
+}
+
 # =========================================================
 # HISTORICAL REGRESSIONS
 # =========================================================
