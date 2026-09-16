@@ -1216,8 +1216,9 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # What: apply obeys the SOT deletion_policy gate.
     # Why: A manual-only policy must block automated delete.
     # From: Issue #1683
-    printf 'retention:\n  deletion_policy: manual-only\n' > "${BATS_TEST_TMPDIR}/sot.yml"
-    CI_MANIFEST="${BATS_TEST_TMPDIR}/sot.yml" \
+    local m="${BATS_TEST_TMPDIR}/sot.yml"
+    printf 'retention:\n  deletion_policy: manual-only\n' > "${m}"
+    CI_MANIFEST="${m}" \
     CI_GC_ROOTS_CMD="$(_gc_roots)" \
     CI_GC_CANDIDATES_CMD="$(_stub cands 'echo sha-old')" \
     CI_GC_REACHABLE_CMD="$(_stub reach 'echo unreachable')" \
@@ -1233,8 +1234,9 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     # What: A negated automation policy must not delete.
     # Why: The allow-list is exact, not a substring match.
     # From: Issue #1683
-    printf 'retention:\n  deletion_policy: automation-forbidden\n' > "${BATS_TEST_TMPDIR}/sot.yml"
-    CI_MANIFEST="${BATS_TEST_TMPDIR}/sot.yml" \
+    local m="${BATS_TEST_TMPDIR}/sot.yml"
+    printf 'retention:\n  deletion_policy: automation-forbidden\n' > "${m}"
+    CI_MANIFEST="${m}" \
     CI_GC_ROOTS_CMD="$(_gc_roots)" \
     CI_GC_CANDIDATES_CMD="$(_stub cands 'echo sha-old')" \
     CI_GC_REACHABLE_CMD="$(_stub reach 'echo unreachable')" \
