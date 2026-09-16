@@ -250,15 +250,27 @@ _ci_valid_platform() {
     return 1
 }
 
+# What: Map a platform to its apk arch, fail-closed.
+# Why: One owner of the platform->apk-arch fact.
+# From: Issue #1683
+_ci_platform_apk_arch() {
+    case "$1" in
+        */amd64|amd64) printf 'x86_64\n' ;;
+        */arm64|arm64) printf 'aarch64\n' ;;
+        *) return 2 ;;
+    esac
+}
+
 # What: Print the known arch-suffix aliases of a platform.
 # Why: SOT mixes amd64/x86_64 and arm64/aarch64.
 # From: Issue #1683
 _ci_platform_arch_aliases() {
-    case "$1" in
-        */amd64|amd64) printf 'amd64 x86_64\n' ;;
-        */arm64|arm64) printf 'arm64 aarch64\n' ;;
-        *) printf '%s\n' "${1##*/}" ;;
-    esac
+    local apk
+    if apk="$(_ci_platform_apk_arch "$1")"; then
+        printf '%s %s\n' "${1##*/}" "${apk}"
+    else
+        printf '%s\n' "${1##*/}"
+    fi
 }
 
 # =========================================================
@@ -1741,17 +1753,17 @@ _ci_build_tools_signature() {
 # Why: the lifecycle signature must cover every arch.
 # From: Issue #1683
 _ci_build_tools_arches() {
-    local platform out=""
+    local platform out="" apk
     while IFS= read -r platform; do
         [ -n "${platform}" ] || continue
-        case "${platform}" in
-            */amd64) out="${out}x86_64"$'\n' ;;
-            */arm64) out="${out}aarch64"$'\n' ;;
-            *)
-                ci_log "[CI-ERROR-BUILDTOOLS-0007]" "platform=\"${platform}\" reason=\"no apk arch mapping; FAIL CLOSED\""
-                return 2
-                ;;
-        esac
+        # What: map via the one platform->apk-arch owner.
+        # Why: no second arch table; fail-closed on unknown.
+        # From: Issue #1683
+        if ! apk="$(_ci_platform_apk_arch "${platform}")"; then
+            ci_log "[CI-ERROR-BUILDTOOLS-0007]" "platform=\"${platform}\" reason=\"no apk arch mapping; FAIL CLOSED\""
+            return 2
+        fi
+        out="${out}${apk}"$'\n'
     done <<< "$(_ci_build_matrix_platforms)"
     if [ -z "${out}" ]; then
         ci_log "[CI-ERROR-BUILDTOOLS-0008]" "reason=\"no build matrix platforms; FAIL CLOSED\""
@@ -1889,7 +1901,7 @@ _ci_emit_multiline() {
     # From: Issue #1683
     case "${value}" in
         *"${delim}"*)
-            ci_log "[CI-ERROR-CORE-0003]" "key=\"${key}\" reason=\"value contains output delimiter; FAIL CLOSED\""
+            ci_log "[CI-ERROR-CORE-0004]" "key=\"${key}\" reason=\"value contains output delimiter; FAIL CLOSED\""
             return 2
             ;;
     esac
