@@ -2190,6 +2190,41 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     [[ "${output}" == *"verified=sha256:match"* ]]
 }
 
+@test "assemble default merges digests into one sha index" {
+    # What: default assemble writes one multi-arch index.
+    # Why: shared writer; digest read back from registry.
+    # From: Issue #1683
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    local log="${BATS_TEST_TMPDIR}/create.log"
+    printf '#!/usr/bin/env bash\ncase "$*" in *"imagetools create"*) echo "$*" >> "%s" ;; *"imagetools inspect"*) echo sha256:idx ;; esac\n' "${log}" > "${bin}/docker"
+    chmod +x "${bin}/docker"
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng GITHUB_SHA=deadbeef \
+        run _ci_docker_assemble ui linux/amd64=sha256:aaa linux/arm64=sha256:bbb
+    [ "${status}" -eq 0 ]
+    [ "${output}" = "sha256:idx" ]
+    run cat "${log}"
+    [[ "${output}" == *"--tag ghcr.io/wiki-mod/lancache-ng/ui:sha-deadbeef"* ]]
+    [[ "${output}" == *"ghcr.io/wiki-mod/lancache-ng/ui@sha256:aaa"* ]]
+    [[ "${output}" == *"ghcr.io/wiki-mod/lancache-ng/ui@sha256:bbb"* ]]
+}
+
+@test "build-tools merge default shares the imagetools writer" {
+    # What: default merge writes sha and latest indexes.
+    # Why: one writer, no live registry; proves reuse.
+    # From: Issue #1683
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    local log="${BATS_TEST_TMPDIR}/create.log"
+    printf '#!/usr/bin/env bash\ncase "$*" in *"imagetools create"*) echo "$*" >> "%s" ;; esac\n' "${log}" > "${bin}/docker"
+    chmod +x "${bin}/docker"
+    PATH="${bin}:${PATH}" BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools \
+        run _ci_build_tools_merge abc123
+    [ "${status}" -eq 0 ]
+    run cat "${log}"
+    [[ "${output}" == *"--tag ghcr.io/wiki-mod/lancache-ng/build-tools:sha-abc123"* ]]
+    [[ "${output}" == *"--tag ghcr.io/wiki-mod/lancache-ng/build-tools:latest"* ]]
+    [[ "${output}" == *"build-tools:sha-abc123-amd64"* ]]
+}
+
 # =========================================================
 # HISTORICAL REGRESSIONS
 # =========================================================

@@ -801,6 +801,14 @@ _ci_registry_digest() {
     docker buildx imagetools inspect "$1" --format '{{.Manifest.Digest}}'
 }
 
+# What: Create or update a multi-arch index from sources.
+# Why: One imagetools writer for assemble and build-tools.
+# From: Issue #1683
+_ci_imagetools_create() {
+    local target="$1"; shift
+    _ci_retry docker buildx imagetools create --tag "${target}" "$@"
+}
+
 # What: Push a built tag, retrying transient push failures.
 # Why: publish retries the same digest (§22), no rebuild.
 # From: Issue #1683
@@ -1125,6 +1133,23 @@ _ci_reconcile_index() {
     return 2
 }
 
+# What: Merge accepted per-platform digests into an index.
+# Why: Default assemble backend; shares the index writer.
+# From: Issue #1683
+_ci_docker_assemble() {
+    local service="$1"; shift
+    local repo sha target kv
+    repo="$(_ci_repo)"
+    sha="${GITHUB_SHA:?GITHUB_SHA required}"
+    target="ghcr.io/${repo}/${service}:sha-${sha}"
+    local -a srcs=()
+    for kv; do
+        srcs+=("ghcr.io/${repo}/${service}@${kv#*=}")
+    done
+    _ci_imagetools_create "${target}" "${srcs[@]}" >/dev/null || return "$?"
+    _ci_registry_digest "${target}"
+}
+
 # What: Assemble accepted per-platform digests.
 # Why: Index only when every platform is ACCEPTED.
 # From: Issue #1683
@@ -1143,11 +1168,8 @@ ci_cmd_assemble() {
         return 0
     fi
     _ci_require_ghcr_auth || return "$?"
-    if [ -z "${CI_ASSEMBLE_CMD:-}" ]; then
-        ci_log "[CI-ERROR-ASSEMBLE-0006]" "service=\"${service}\" reason=\"no assemble backend wired (CI_ASSEMBLE_CMD unset)\""
-        return 2
-    fi
-    if ! index="$("${CI_ASSEMBLE_CMD}" "${service}" ${inputs})"; then
+    local asm_cmd="${CI_ASSEMBLE_CMD:-_ci_docker_assemble}"
+    if ! index="$("${asm_cmd}" "${service}" ${inputs})"; then
         ci_log "[CI-ERROR-ASSEMBLE-0005]" "service=\"${service}\" reason=\"assemble backend failed\""
         return 2
     fi
@@ -2022,7 +2044,7 @@ _ci_build_tools_merge() {
     amd64="${image}:sha-${sha}-amd64"
     arm64="${image}:sha-${sha}-arm64"
     for tag in "sha-${sha}" latest; do
-        docker buildx imagetools create --tag "${image}:${tag}" "${amd64}" "${arm64}"
+        _ci_imagetools_create "${image}:${tag}" "${amd64}" "${arm64}" >/dev/null || return "$?"
     done
 }
 
