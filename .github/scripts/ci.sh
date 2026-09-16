@@ -1786,7 +1786,7 @@ _ci_gc_roots() {
 # From: Issue #1683
 _ci_gh_versions() {
     local owner="$1" pkg="$2" out rc=0
-    out="$(gh api --paginate "/orgs/${owner}/packages/container/${pkg}/versions" --jq '.[] | [.name, .id, .created_at] | @tsv' 2>&1)" || rc=$?
+    out="$(gh api --paginate "/orgs/${owner}/packages/container/${pkg}/versions?per_page=100" --jq '.[] | [.name, .id, .created_at, ((.metadata.container.tags // []) | join(","))] | @tsv' 2>&1)" || rc=$?
     if [ "${rc}" -ne 0 ]; then
         printf '%s' "${out}" | grep -qiE 'HTTP 404|Not Found' && return 1
         ci_error "[CI-ERROR-GC-0018]" "owner=\"${owner}\" pkg=\"${pkg}\" reason=\"GHCR version listing failed\"" "${out}"
@@ -1799,7 +1799,7 @@ _ci_gh_versions() {
 # Why: SOT-scoped candidates; org-wide would delete others.
 # From: Issue #1683
 _ci_default_gc_candidates() {
-    local prefix owner pkgbase svc vers grc
+    local prefix owner pkgbase svc vers grc found=0
     prefix="$(_ci_manifest_scalar '^  image_prefix:[[:space:]]')"
     [ -n "${prefix}" ] || { ci_log "[CI-ERROR-GC-0017]" "reason=\"SOT image_prefix missing\""; return 2; }
     owner="${prefix%%/*}"
@@ -1813,11 +1813,16 @@ _ci_default_gc_candidates() {
         vers="$(_ci_gh_versions "${owner}" "${pkgbase}%2F${svc}")" || grc=$?
         [ "${grc}" -eq 2 ] && return 2
         [ "${grc}" -eq 1 ] && continue
+        found=$((found + 1))
         # What: Append the service so delete can target it.
         # Why: Delete path is package-scoped, not id-only.
         # From: Issue #1683
         [ -n "${vers}" ] && printf '%s\n' "${vers}" | awk -v s="${svc}" 'NF{print $0"\t"s}'
     done < <(ci_build_targets)
+    # What: No package found anywhere is a config error.
+    # Why: All-404 must refuse, not read as a clean noop.
+    # From: Issue #1683
+    [ "${found}" -gt 0 ] || { ci_log "[CI-ERROR-GC-0020]" "reason=\"no GHCR package for any target; check image_prefix/owner/token\""; return 2; }
 }
 
 # What: Delete one GHCR version by id (destructive).
@@ -1826,7 +1831,7 @@ _ci_default_gc_candidates() {
 _ci_default_gc_delete() {
     local candidate="$1" id svc prefix owner pkgbase
     id="$(printf '%s' "${candidate}" | awk -F'\t' '{print $2}')"
-    svc="$(printf '%s' "${candidate}" | awk -F'\t' '{print $4}')"
+    svc="$(printf '%s' "${candidate}" | awk -F'\t' '{print $5}')"
     case "${id}" in
         ''|*[!0-9]*)
             ci_log "[CI-ERROR-GC-0019]" "candidate=\"${candidate}\" reason=\"no numeric version id\""
@@ -1862,6 +1867,21 @@ _ci_default_gc_reachable() {
     if grep -qxF "${digest}" "${CI_GC_ROOTS_FILE}"; then
         printf 'referenced\n'
         return 0
+    fi
+    # What: An attestation is live iff its subject is.
+    # Why: sha256-<subj> referrers guard live provenance.
+    # From: Issue #1683
+    local tags tag subj
+    tags="$(printf '%s' "${candidate}" | awk -F'\t' '{print $4}')"
+    if [ -n "${tags}" ]; then
+        while IFS= read -r tag; do
+            case "${tag}" in
+                sha256-*)
+                    subj="sha256:${tag#sha256-}"; subj="${subj%%.*}"
+                    grep -qxF "${subj}" "${CI_GC_ROOTS_FILE}" && { printf 'referenced\n'; return 0; }
+                    ;;
+            esac
+        done <<< "$(printf '%s' "${tags}" | tr ',' '\n')"
     fi
     # What: Fail closed unless grace is a positive integer.
     # Why: Empty grace makes floor=now and deletes all.

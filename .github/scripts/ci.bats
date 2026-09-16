@@ -1296,6 +1296,28 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     [[ "${output}" == *"CI-ERROR-GC-0015"* ]]
 }
 
+@test "default gc reachable keeps an attestation whose subject is a root" {
+    # What: An attestation lives while its subject lives.
+    # Why: sha256-<subj> referrers guard live provenance.
+    # From: Issue #1683
+    CI_GC_ROOTS_FILE="${BATS_TEST_TMPDIR}/roots"
+    printf 'sha256:subj\n' > "${CI_GC_ROOTS_FILE}"
+    run _ci_default_gc_reachable "$(printf 'sha256:att\t9\t2020-01-01T00:00:00Z\tsha256-subj')"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == "referenced" ]]
+}
+
+@test "default gc reachable deletes an attestation of a gone subject" {
+    # What: An orphan attestation past grace is garbage.
+    # Why: No live subject means dead weight.
+    # From: Issue #1683
+    CI_GC_ROOTS_FILE="${BATS_TEST_TMPDIR}/roots"
+    printf 'sha256:other\n' > "${CI_GC_ROOTS_FILE}"
+    run _ci_default_gc_reachable "$(printf 'sha256:att\t9\t2020-01-01T00:00:00Z\tsha256-gone')"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == "unreachable" ]]
+}
+
 @test "gc fails closed on an empty protected-roots set" {
     # What: An empty roots set must stop the pass.
     # Why: Empty roots would mark all artifacts unreachable.
@@ -1310,7 +1332,7 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     # What: Each built package's versions become candidates.
     # Why: The tuple feeds reachability and delete (§97).
     # From: Issue #1683
-    _ci_gh_versions() { printf 'sha256:aaa\t111\t2020-01-01T00:00:00Z\n'; }
+    _ci_gh_versions() { printf 'sha256:aaa\t111\t2020-01-01T00:00:00Z\tsha-abc\n'; }
     ci_build_targets() { printf 'proxy\n'; }
     run _ci_default_gc_candidates
     [ "${status}" -eq 0 ]
@@ -1323,12 +1345,33 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     # What: A not-found package is skipped, not fatal.
     # Why: External services (netdata) have no GHCR package.
     # From: Issue #1683
-    _ci_gh_versions() { case "$2" in *netdata*) return 1;; *) printf 'sha256:bbb\t222\t2020-01-01T00:00:00Z\n';; esac; }
+    _ci_gh_versions() { case "$2" in *netdata*) return 1;; *) printf 'sha256:bbb\t222\t2020-01-01T00:00:00Z\tsha-b\n';; esac; }
     ci_build_targets() { printf 'proxy\nnetdata\n'; }
     run _ci_default_gc_candidates
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"sha256:bbb"* ]]
     [[ "${output}" != *"netdata"* ]]
+}
+
+@test "default gc candidates fails closed when every package 404s" {
+    # What: No package found anywhere refuses the run.
+    # Why: A bad prefix/owner/token must not read as noop.
+    # From: Issue #1683
+    _ci_gh_versions() { return 1; }
+    ci_build_targets() { printf 'proxy\ndns\n'; }
+    run _ci_default_gc_candidates
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-GC-0020"* ]]
+}
+
+@test "default gc candidates counts an existing empty package as found" {
+    # What: An existing package with zero versions is fine.
+    # Why: Empty is not 404; not the no-package case.
+    # From: Issue #1683
+    _ci_gh_versions() { return 0; }
+    ci_build_targets() { printf 'proxy\n'; }
+    run _ci_default_gc_candidates
+    [ "${status}" -eq 0 ]
 }
 
 @test "default gc candidates fails closed on a transient listing error" {
@@ -1436,7 +1479,7 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     # From: Issue #1683
     gh() { echo "$@" >> "${BATS_TEST_TMPDIR}/gh.log"; }
     export -f gh
-    run _ci_default_gc_delete "$(printf 'sha256:old\t222\t2020-01-01T00:00:00Z\tproxy')"
+    run _ci_default_gc_delete "$(printf 'sha256:old\t222\t2020-01-01T00:00:00Z\t\tproxy')"
     [ "${status}" -eq 0 ]
     [[ "$(cat "${BATS_TEST_TMPDIR}/gh.log")" == *"api -X DELETE /orgs/wiki-mod/packages/container/lancache-ng%2Fproxy/versions/222"* ]]
 }
@@ -1445,7 +1488,7 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     # What: A non-numeric id is refused, never guessed.
     # Why: A bad id could delete the wrong version.
     # From: Issue #1683
-    run _ci_default_gc_delete "$(printf 'sha256:old\tnotanid\t2020\tproxy')"
+    run _ci_default_gc_delete "$(printf 'sha256:old\tnotanid\t2020\t\tproxy')"
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-GC-0019"* ]]
 }
