@@ -794,6 +794,13 @@ _ci_docker_build() {
     printf '%s\n' "${tag}"
 }
 
+# What: Read a pushed tag's immutable registry digest.
+# Why: One digest reader for publish and verify readback.
+# From: Issue #1683
+_ci_registry_digest() {
+    docker buildx imagetools inspect "$1" --format '{{.Manifest.Digest}}'
+}
+
 # What: Push a built tag, retrying transient push failures.
 # Why: publish retries the same digest (§22), no rebuild.
 # From: Issue #1683
@@ -801,7 +808,16 @@ _ci_docker_publish() {
     local service="$1" identity="$2" platform="$3" tag
     tag="$(_ci_image_tag "${service}" "${platform}" "${identity}")"
     _ci_retry docker push "${tag}" >/dev/null || return "$?"
-    docker buildx imagetools inspect "${tag}" --format '{{.Manifest.Digest}}'
+    _ci_registry_digest "${tag}"
+}
+
+# What: Scan an image digest with Trivy on the runner.
+# Why: HIGH/CRITICAL must fail; trivy stays a runner tool.
+# From: Issue #1683
+_ci_trivy_scan() {
+    local service="$1" digest="$2"
+    local ref="ghcr.io/$(_ci_repo)/${service}@${digest}"
+    _ci_retry trivy image --severity HIGH,CRITICAL --exit-code 1 --ignore-unfixed "${ref}"
 }
 
 # What: Run the real (or injected) image build+push.
@@ -1028,12 +1044,9 @@ ci_cmd_scan() {
         /var/tmp|/var/tmp/*) ;;
         *) ci_log "[CI-ERROR-SCAN-0003]" "reason=\"scan TMPDIR must be under /var/tmp, not tmpfs /tmp\" got=\"${scan_tmp}\""; return 2 ;;
     esac
-    if [ -z "${CI_SCAN_CMD:-}" ]; then
-        ci_log "[CI-ERROR-SCAN-0004]" "service=\"${service}\" reason=\"no scan backend wired (CI_SCAN_CMD unset)\""
-        return 2
-    fi
+    local scan_cmd="${CI_SCAN_CMD:-_ci_trivy_scan}"
     local raw status
-    if raw="$(TMPDIR="${scan_tmp}" "${CI_SCAN_CMD}" "${service}" "${digest}" 2>&1)"; then status=0; else status=$?; fi
+    if raw="$(TMPDIR="${scan_tmp}" "${scan_cmd}" "${service}" "${digest}" 2>&1)"; then status=0; else status=$?; fi
     if [ "${status}" -ne 0 ]; then
         ci_error "[CI-ERROR-SCAN-0005]" "service=\"${service}\" reason=\"scan reported findings or failed\" retry=$(_ci_classify_failure "${raw}")" "${raw}"
         return 2

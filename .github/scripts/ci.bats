@@ -2162,6 +2162,21 @@ _gc_roots() { _stub roots 'printf "latest\nnightly\n"'; }
     [ "${output}" = "sha256:deadbeef" ]
 }
 
+@test "scan default runs trivy against the image digest" {
+    # What: ci.sh runs trivy; not a bundled scanner.
+    # Why: HIGH/CRITICAL fails; trivy is a runner tool.
+    # From: Issue #1683
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    printf '#!/usr/bin/env bash\necho "trivy $*"\n' > "${bin}/trivy"
+    chmod +x "${bin}/trivy"
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+        run _ci_trivy_scan proxy sha256:abc
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"trivy image"* ]]
+    [[ "${output}" == *"ghcr.io/wiki-mod/lancache-ng/proxy@sha256:abc"* ]]
+    [[ "${output}" == *"HIGH,CRITICAL"* ]]
+}
+
 # =========================================================
 # HISTORICAL REGRESSIONS
 # =========================================================
