@@ -3174,17 +3174,20 @@ netdata=sha256:n"
     [ "${status}" -eq 0 ]
 }
 
-@test "check pr-title accepts valid conventional, rejects bad scope/format" {
+@test "check pr-title accepts valid conventional, warns by default on bad scope/format" {
     # What: ci.sh owns the title taxonomy; bats calls it.
-    # Why: types fixed, scopes from the SOT service list.
-    # From: Issue #1683
+    # Why: AG-GH-018: warn is the default, not a hard fail.
+    # From: Issue #1683 | PR #1858
     run bash "${CI_SH}" check pr-title "feat(proxy): add ipv6 lease support"
     [ "${status}" -eq 0 ]
+    [[ "${output}" == *"pr-title=ok"* ]]
     run bash "${CI_SH}" check pr-title "feat(bogus): x"
-    [ "${status}" -ne 0 ]
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"pr-title=warn"* ]]
     run bash "${CI_SH}" check pr-title "not conventional at all"
-    [ "${status}" -ne 0 ]
+    [ "${status}" -eq 0 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0013"* ]]
+    [[ "${output}" == *"pr-title=warn"* ]]
 }
 
 @test "check pr-title skips dependabot and fails closed with none" {
@@ -3199,13 +3202,43 @@ netdata=sha256:n"
     [[ "${output}" == *"CI-ERROR-CHECK-0012"* ]]
 }
 
-@test "check pr-title rejects a disallowed type on an otherwise valid form" {
+@test "check pr-title warns (default mode) on a disallowed type" {
     # What: a title matching the pattern but a bad type.
     # Why: distinct from the not-conventional regex miss.
     # From: Issue #1683 | PR #1858
     run bash "${CI_SH}" check pr-title "bogus(proxy): x"
-    [ "${status}" -ne 0 ]
+    [ "${status}" -eq 0 ]
     [[ "${output}" == *"type 'bogus' not allowed"* ]]
+    [[ "${output}" == *"pr-title=warn"* ]]
+}
+
+@test "check pr-title block mode fails a non-compliant title" {
+    # What: LINT_MODE=block must hard-fail (AG-GH-018 gate).
+    # Why: this branch had zero coverage before this wave.
+    # From: Issue #1683 | PR #1858
+    PR_TITLE_LINT_MODE=block run bash "${CI_SH}" check pr-title "not conventional at all"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0013"* ]]
+    [[ "${output}" == *"reason=\"PR title convention\""* ]]
+}
+
+@test "check pr-title draft PR warns non-blocking even in block mode" {
+    # What: AG-GH-018: draft always overrides block mode.
+    # Why: draft titles are expected to settle before ready.
+    # From: Issue #1683 | PR #1858
+    PR_TITLE_LINT_MODE=block PR_DRAFT=true \
+        run bash "${CI_SH}" check pr-title "not conventional at all"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"pr-title=warn-draft"* ]]
+}
+
+@test "check pr-title allows the tests scope" {
+    # What: "tests" was missing from ci.sh's scope set.
+    # Why: the authoritative checker script allows it too.
+    # From: Issue #1683 | PR #1858
+    run bash "${CI_SH}" check pr-title "test(tests): add coverage"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"pr-title=ok"* ]]
 }
 
 @test "check stable-external-images fails a non-digest external image" {

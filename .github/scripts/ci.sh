@@ -4397,7 +4397,10 @@ _ci_check_pr_title() {
     fi
     local types="feat fix docs refactor perf test build ci chore style revert security"
     local scopes
-    scopes="$(ci_services) nats build-tools setup ci governance docs scripts"
+    # What: "tests" added -- the authoritative scope set.
+    # Why: AG-GH-018 requires matching the checker script.
+    # From: Issue #1683 | PR #1858
+    scopes="$(ci_services) nats build-tools setup ci governance docs scripts tests"
     scopes="${scopes//$'\n'/ }"
     local pat='^([a-zA-Z]+)(\(([a-z0-9-]+)\))?(!)?:[[:space:]](.+)$'
     local -a errs=()
@@ -4411,11 +4414,28 @@ _ci_check_pr_title() {
     else
         errs+=("not a Conventional-Commit title")
     fi
-    if [ "${#errs[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0013]" "reason=\"PR title convention\"" "$(printf '%s\n' "${errs[@]}")"
-        return 1
+    if [ "${#errs[@]}" -eq 0 ]; then
+        printf 'pr-title=ok\n'
+        return 0
     fi
-    printf 'pr-title=ok\n'
+    # What: AG-GH-018: draft PRs get only a soft warning.
+    # Why: draft titles are expected to settle before ready.
+    # From: Issue #1683 | PR #1858
+    if [ "${PR_DRAFT:-false}" = "true" ]; then
+        ci_log "[CI-ERROR-CHECK-0013]" "reason=\"draft, non-blocking\" detail=\"$(printf '%s; ' "${errs[@]}")\""
+        printf 'pr-title=warn-draft\n'
+        return 0
+    fi
+    # What: PR_TITLE_LINT_MODE picks warn vs block mode.
+    # Why: warn is the required default; block is opt-in.
+    # From: Issue #1683 | PR #1858
+    if [ "${PR_TITLE_LINT_MODE:-warn}" != "block" ]; then
+        ci_log "[CI-ERROR-CHECK-0013]" "reason=\"warn-mode, non-blocking; must fix before merge\" detail=\"$(printf '%s; ' "${errs[@]}")\""
+        printf 'pr-title=warn\n'
+        return 0
+    fi
+    ci_error "[CI-ERROR-CHECK-0013]" "reason=\"PR title convention\"" "$(printf '%s\n' "${errs[@]}")"
+    return 1
 }
 
 # What: External deploy images must be digest-pinned + SOT.
