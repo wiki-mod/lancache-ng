@@ -575,6 +575,63 @@ _probe_stub() {
     [ "$(_ci_classify_failure 'some novel error text')" = "transient" ]
 }
 
+@test "retry classifier: matching is case-insensitive (curl/git casing)" {
+    # What: 'Connection reset by peer' (curl/git casing) matches too.
+    # Why: Go tools lowercase; curl/git capitalize the same class.
+    # From: Issue #1683
+    [ "$(_ci_classify_failure 'Connection reset by peer')" = "transient" ]
+    [ "$(_ci_classify_failure 'HTTP 401 Unauthorized')" = "permanent" ]
+}
+
+@test "retry classifier: op=github-api 404 is permanent, never not_found" {
+    # What: An API 404 must never read as a safe absence.
+    # Why: A registry 404 may build; a GH-API 404 never should.
+    # From: Issue #1683
+    [ "$(_ci_classify_failure 'gh: Not Found (HTTP 404)' github-api)" = "permanent" ]
+    [ "$(_ci_classify_failure 'gh: Not Found (HTTP 404)' github-api)" != "not_found" ]
+}
+
+@test "retry classifier: op=registry (default) still returns not_found on 404-shaped text" {
+    # What: Default op keeps existing registry-probe behavior.
+    # Why: Backward compatibility for every unqualified caller.
+    # From: Issue #1683
+    [ "$(_ci_classify_failure 'ghcr.io/x: not found: manifest')" = "not_found" ]
+    [ "$(_ci_classify_failure 'ghcr.io/x: not found: manifest' registry)" = "not_found" ]
+}
+
+@test "retry classifier: op=buildx retries the layer-lock and go-panic signatures" {
+    # What: The two historical local-build transient signatures.
+    # Why: build-retry.sh/docker-buildx-retry.sh's exact evidence.
+    # From: Issue #1683
+    [ "$(_ci_classify_failure '(*service).Write failed: rpc error: code = Unavailable desc = ref layer-sha256:abc locked for 900ms (since t): unavailable' buildx)" = "transient" ]
+    [ "$(_ci_classify_failure 'panic: methodref has no signature' buildx)" = "transient" ]
+}
+
+@test "retry classifier: buildx signatures never leak into a real compile failure" {
+    # What: An unrelated buildx op never gains the transient tag.
+    # Why: op-gating must not accidentally widen matching.
+    # From: Issue #1683
+    [ "$(_ci_classify_failure 'error: could not compile lancache-ui' buildx)" = "permanent" ]
+}
+
+@test "retry classifier: git-fetch-retry.sh's transient signatures are covered" {
+    # What: DNS/RPC/disconnect signatures git_fetch_retry knew.
+    # Why: One classifier now owns what git-fetch-retry.sh owned.
+    # From: Issue #1683
+    [ "$(_ci_classify_failure 'unexpected disconnect while reading sideband packet')" = "transient" ]
+    [ "$(_ci_classify_failure 'The remote end hung up unexpectedly')" = "transient" ]
+    [ "$(_ci_classify_failure 'Could not resolve host: github.com')" = "transient" ]
+    [ "$(_ci_classify_failure 'RPC failed; curl 92 HTTP/2 stream 5 was not closed cleanly')" = "transient" ]
+    [ "$(_ci_classify_failure 'GnuTLS recv error (-9): A TLS packet with unexpected length was received.')" = "transient" ]
+}
+
+@test "retry classifier: a missing git ref is permanent, never retried" {
+    # What: resolve-remote-ref-with-retry.sh's own exit-2 case.
+    # Why: a genuinely absent ref cannot be fixed by retrying.
+    # From: Issue #1683
+    [ "$(_ci_classify_failure "fatal: couldn't find remote ref refs/x")" = "permanent" ]
+}
+
 @test "reuse order is cheapest-first and ends in compile" {
     # What: noop..accepted..CAS..caches..compile order.
     # Why: NOOP/reuse always precede build (§7).
@@ -1604,6 +1661,38 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     run _ci_default_gc_delete "$(printf 'sha256:old\tnotanid\t2020\t\tproxy')"
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-GC-0019"* ]]
+}
+
+@test "gh_versions retries a transient GH-API failure, then succeeds" {
+    # What: 2 transient GH-API failures then a 200-shaped success.
+    # Why: github-api-retry.sh's own retry-on-transient behavior.
+    # From: Issue #1683
+    local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
+    gh() {
+        local n; n="$(($(cat "${cnt}") + 1))"; printf '%s' "${n}" > "${cnt}"
+        if [ "${n}" -lt 3 ]; then echo "HTTP 503 Service Unavailable" >&2; return 1; fi
+        printf 'v1\t111\t2020-01-01T00:00:00Z\t\n'
+    }
+    export -f gh
+    CI_RETRY_BACKOFF_BASE_SECONDS=0 run _ci_gh_versions wiki-mod "lancache-ng%2Fproxy"
+    [ "${status}" -eq 0 ]
+    [ "$(cat "${cnt}")" -eq 3 ]
+    [[ "${output}" == *"v1"* ]]
+}
+
+@test "gh_versions fails immediately (no retry) on a 404, package skipped" {
+    # What: A 404 must not consume retry budget or hard-error.
+    # Why: github-api-retry.sh's own "fails 401/404 immediately".
+    # From: Issue #1683
+    local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
+    gh() {
+        printf '%s' "$(($(cat "${cnt}") + 1))" > "${cnt}"
+        echo "gh: Not Found (HTTP 404)" >&2; return 1
+    }
+    export -f gh
+    CI_RETRY_BACKOFF_BASE_SECONDS=0 run _ci_gh_versions wiki-mod "lancache-ng%2Fnetdata"
+    [ "${status}" -eq 1 ]
+    [ "$(cat "${cnt}")" -eq 1 ]
 }
 
 @test "gc apply refuses when the SOT policy forbids automation" {
@@ -2998,6 +3087,131 @@ EOF
     [ "${output}" = "sha256:deadbeef" ]
 }
 
+# =========================================================
+# RETRY ENGINE (_ci_retry) + BUILD != PUBLISH INVARIANT
+# =========================================================
+
+@test "_ci_retry retries a transient failure and returns on success" {
+    # What: 2 transient failures then success; 3 attempts total.
+    # Why: One engine now owns every wrapper's own retry loop.
+    # From: Issue #1683
+    local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
+    _flaky() {
+        local n; n="$(($(cat "${cnt}") + 1))"; printf '%s' "${n}" > "${cnt}"
+        if [ "${n}" -lt 3 ]; then echo "connection reset by peer" >&2; return 1; fi
+        echo ok
+    }
+    export -f _flaky
+    CI_RETRY_BACKOFF_BASE_SECONDS=0 run _ci_retry registry _flaky
+    [ "${status}" -eq 0 ]
+    [ "${output}" = "ok" ]
+    [ "$(cat "${cnt}")" -eq 3 ]
+}
+
+@test "_ci_retry fails on the first attempt for a permanent classification" {
+    # What: A 401-shaped failure must not consume retry budget.
+    # Why: Retrying a fixed outcome only wastes wall-clock time.
+    # From: Issue #1683
+    local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
+    _denied() {
+        printf '%s' "$(($(cat "${cnt}") + 1))" > "${cnt}"
+        echo "HTTP 401 unauthorized" >&2; return 1
+    }
+    export -f _denied
+    CI_RETRY_BACKOFF_BASE_SECONDS=0 run _ci_retry registry _denied
+    [ "${status}" -eq 2 ]
+    [ "$(cat "${cnt}")" -eq 1 ]
+}
+
+@test "_ci_retry exhausts after CI_RETRY_MAX_ATTEMPTS on a persistent transient failure" {
+    # What: An always-transient failure still stops at max.
+    # Why: A retry loop must be bounded, never infinite.
+    # From: Issue #1683
+    local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
+    _alwaysflaky() {
+        printf '%s' "$(($(cat "${cnt}") + 1))" > "${cnt}"
+        echo "connection refused" >&2; return 1
+    }
+    export -f _alwaysflaky
+    CI_RETRY_BACKOFF_BASE_SECONDS=0 CI_RETRY_MAX_ATTEMPTS=3 run _ci_retry registry _alwaysflaky
+    [ "${status}" -eq 2 ]
+    [ "$(cat "${cnt}")" -eq 3 ]
+}
+
+@test "publish retry-exhaustion never invokes build (RETRY OPERATION != REBUILD)" {
+    # What: A push that always fails transiently exhausts retries;
+    # the build backend's own invocation count stays exactly 0.
+    # Why: This is the hard invariant: a failed publish retry
+    # must never trigger a rebuild. Proven by real call counts,
+    # not by reading the code.
+    # From: Issue #1683
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    local buildmarker="${BATS_TEST_TMPDIR}/build-was-called"
+    cat > "${bin}/docker" <<EOF
+#!/usr/bin/env bash
+case "\$*" in
+    *"buildx build"*) printf 'called\n' >> "${buildmarker}"; exit 0 ;;
+    *"push "*) echo "connection reset by peer" >&2; exit 1 ;;
+    *) : ;;
+esac
+EOF
+    chmod +x "${bin}/docker"
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+    CI_RETRY_BACKOFF_BASE_SECONDS=0 CI_RETRY_MAX_ATTEMPTS=3 \
+        run _ci_docker_publish proxy abc123 linux/amd64
+    [ "${status}" -eq 2 ]
+    [ ! -e "${buildmarker}" ]
+}
+
+@test "docker-build retries only its own known transient buildx signature" {
+    # What: A layer-lock failure then success; build succeeds.
+    # Why: docker_buildx_retry.sh's exact historical signature.
+    # From: Issue #1683
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
+    cat > "${bin}/docker" <<EOF
+#!/usr/bin/env bash
+case "\$*" in
+    *"buildx build"*)
+        n="\$(( \$(cat "${cnt}") + 1 ))"; printf '%s' "\$n" > "${cnt}"
+        if [ "\$n" -lt 2 ]; then
+            echo "(*service).Write failed: rpc error: code = Unavailable desc = ref layer-sha256:abc locked for 900ms (since t): unavailable" >&2
+            exit 1
+        fi
+        exit 0
+        ;;
+    *) : ;;
+esac
+EOF
+    chmod +x "${bin}/docker"
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng CI_RETRY_BACKOFF_BASE_SECONDS=0 \
+        run _ci_docker_build proxy abc123 linux/amd64
+    [ "${status}" -eq 0 ]
+    [ "$(cat "${cnt}")" -eq 2 ]
+}
+
+@test "docker-build fails immediately on a real compile error (no retry)" {
+    # What: A Dockerfile/compile failure must never be retried.
+    # Why: Blind retry would only delay real feedback.
+    # From: Issue #1683
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
+    cat > "${bin}/docker" <<EOF
+#!/usr/bin/env bash
+case "\$*" in
+    *"buildx build"*)
+        printf '%s' "\$(( \$(cat "${cnt}") + 1 ))" > "${cnt}"
+        echo "error: could not compile lancache-ui" >&2; exit 1 ;;
+    *) : ;;
+esac
+EOF
+    chmod +x "${bin}/docker"
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng CI_RETRY_BACKOFF_BASE_SECONDS=0 \
+        run _ci_docker_build proxy abc123 linux/amd64
+    [ "${status}" -eq 2 ]
+    [ "$(cat "${cnt}")" -eq 1 ]
+}
+
 # What: PATH-shim trivy for a clean/finding/db outcome.
 # Why: One trivy mock; the scan tests share it.
 # From: Issue #1683
@@ -3202,6 +3416,82 @@ _cas_setup() {
     [ "${status}" -eq 0 ]
     run _ci_cas_ref_sha origin refs/ci/lock/t
     [ "${status}" -eq 0 ]; [ -n "${output}" ]
+}
+
+@test "lock_release retries a transient git-fetch failure, then succeeds" {
+    # What: 1 transient fetch failure then a real fetch succeeds.
+    # Why: this fetch had no retry at any level before op=git.
+    # From: Issue #1683
+    _cas_setup
+    cd "${CAS_A}"; _ci_lock_try origin refs/ci/lock/t holder-a 600
+    local realgit; realgit="$(command -v git)"
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
+    cat > "${bin}/git" <<EOF
+#!/usr/bin/env bash
+case "\$*" in
+    *"fetch --quiet"*)
+        n="\$(( \$(cat "${cnt}") + 1 ))"; printf '%s' "\$n" > "${cnt}"
+        if [ "\$n" -lt 2 ]; then echo "unexpected disconnect while reading sideband packet" >&2; exit 1; fi
+        ;;
+esac
+exec "${realgit}" "\$@"
+EOF
+    chmod +x "${bin}/git"
+    PATH="${bin}:${PATH}" CI_RETRY_BACKOFF_BASE_SECONDS=0 \
+        run _ci_lock_release origin refs/ci/lock/t holder-a
+    [ "${status}" -eq 0 ]
+    [ "$(cat "${cnt}")" -eq 2 ]
+}
+
+@test "lock_release fails fast (no retry) on a not_found-shaped git-fetch error" {
+    # What: a genuinely missing ref must not consume retry budget.
+    # Why: op=git shares the permanent cascade; retrying can't fix this.
+    # From: Issue #1683
+    _cas_setup
+    cd "${CAS_A}"; _ci_lock_try origin refs/ci/lock/t holder-a 600
+    local realgit; realgit="$(command -v git)"
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
+    cat > "${bin}/git" <<EOF
+#!/usr/bin/env bash
+case "\$*" in
+    *"fetch --quiet"*)
+        printf '%s' "\$(( \$(cat "${cnt}") + 1 ))" > "${cnt}"
+        echo "fatal: couldn't find remote ref refs/ci/lock/t" >&2; exit 1 ;;
+esac
+exec "${realgit}" "\$@"
+EOF
+    chmod +x "${bin}/git"
+    PATH="${bin}:${PATH}" CI_RETRY_BACKOFF_BASE_SECONDS=0 \
+        run _ci_lock_release origin refs/ci/lock/t holder-a
+    [ "${status}" -eq 1 ]
+    [ "$(cat "${cnt}")" -eq 1 ]
+}
+
+@test "lock_release exhausts after CI_RETRY_MAX_ATTEMPTS on a persistent transient fetch failure" {
+    # What: an always-transient fetch still stops at max, never loops forever.
+    # Why: a bounded retry is a hard requirement, not just a happy-path detail.
+    # From: Issue #1683
+    _cas_setup
+    cd "${CAS_A}"; _ci_lock_try origin refs/ci/lock/t holder-a 600
+    local realgit; realgit="$(command -v git)"
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
+    cat > "${bin}/git" <<EOF
+#!/usr/bin/env bash
+case "\$*" in
+    *"fetch --quiet"*)
+        printf '%s' "\$(( \$(cat "${cnt}") + 1 ))" > "${cnt}"
+        echo "connection refused" >&2; exit 1 ;;
+esac
+exec "${realgit}" "\$@"
+EOF
+    chmod +x "${bin}/git"
+    PATH="${bin}:${PATH}" CI_RETRY_BACKOFF_BASE_SECONDS=0 CI_RETRY_MAX_ATTEMPTS=3 \
+        run _ci_lock_release origin refs/ci/lock/t holder-a
+    [ "${status}" -eq 1 ]
+    [ "$(cat "${cnt}")" -eq 3 ]
 }
 
 @test "cas lock_try takes over a stale lock" {
