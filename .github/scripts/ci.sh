@@ -2109,19 +2109,254 @@ _ci_validate_pin_override() {
     _ci_validate_report_unpinned "${candidate}" "${matched}"
 }
 
-# What: Run the full-setup stack validation (injectable).
-# Why: Testable without a live compose stack or Docker.
-# From: Issue #1683
-_ci_validate_run() {
-    local cand="$1" raw status
-    if [ -z "${CI_VALIDATE_CMD:-}" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0003]" "reason=\"no validation backend wired (CI_VALIDATE_CMD unset)\""
+# What: Print the per-host validate lock path.
+# Why: /var/tmp not /tmp; avoids tmpfs OOM.
+# From: Issue #1683 | PR #1858
+_ci_validate_lock_path() {
+    printf '%s/ci-validate.lock' "${TMPDIR:-/var/tmp}"
+}
+
+# What: Acquire the per-host validate lock.
+# Why: One prod stack per host; kernel frees it.
+# From: Issue #1683 | PR #1858
+_ci_validate_lock() {
+    local lock_file holder
+    lock_file="$(_ci_validate_lock_path)"
+    (
+        exec >/dev/null 2>&1
+        exec 9>"${lock_file}"
+        flock -n 9 || exit 1
+        exec sleep infinity
+    ) &
+    holder=$!
+    sleep 0.3
+    if kill -0 "${holder}" 2>/dev/null; then
+        printf '%s\n' "${holder}"
+        return 0
+    fi
+    wait "${holder}" 2>/dev/null || true
+    return 1
+}
+
+# What: Release the validate lock holder.
+# Why: Frees the mutex; safe if already gone.
+# From: Issue #1683 | PR #1858
+_ci_validate_unlock() {
+    local holder="${1:-}"
+    [ -n "${holder}" ] || return 0
+    kill "${holder}" 2>/dev/null || true
+    wait "${holder}" 2>/dev/null || true
+}
+
+# What: The validation compose project name.
+# Why: One name; teardown finds nets by label.
+# From: Issue #1683 | PR #1858
+_ci_validate_project() {
+    printf 'lancache-ng-validate'
+}
+
+# What: Wait until a network has no containers.
+# Why: rm before detach hits 'active endpoints'.
+# From: Issue #1683 | PR #1858
+_ci_validate_await_detached() {
+    local name="$1" deadline count
+    deadline=$(( SECONDS + ${CI_VALIDATE_DETACH_TIMEOUT:-30} ))
+    while [ "${SECONDS}" -lt "${deadline}" ]; do
+        count="$(docker network inspect "${name}" --format '{{len .Containers}}' 2>/dev/null)" || return 0
+        [ "${count}" = "0" ] && return 0
+        sleep 1
+    done
+    return 1
+}
+
+# What: Remove one validation network safely.
+# Why: Await detach; a stale net poisons reruns.
+# From: Issue #1683 | PR #1858
+_ci_validate_network_teardown() {
+    local net_id="$1" name
+    name="$(docker network inspect "${net_id}" --format '{{.Name}}' 2>/dev/null)" || return 0
+    _ci_validate_await_detached "${name}" || true
+    docker network rm "${name}" >/dev/null 2>&1 || true
+}
+
+# What: True for a retryable subnet collision.
+# Why: Distinct from a real image/config fail.
+# From: Issue #1683 | PR #1858
+_ci_validate_is_collision() {
+    case "$1" in
+        *"Pool overlaps"*|*"already in use"*) return 0 ;;
+    esac
+    return 1
+}
+
+# What: Tear the stack down and free the lock.
+# Why: One cleanup point; runs on the fail path.
+# From: Issue #1683 | PR #1858
+_ci_validate_teardown() {
+    local holder="$1" project net_id
+    project="$(_ci_validate_project)"
+    docker compose -p "${project}" \
+        -f "${CI_COMPOSE_FILE:-deploy/prod/docker-compose.yml}" \
+        down -v --remove-orphans >/dev/null 2>&1 || true
+    while IFS= read -r net_id; do
+        [ -n "${net_id}" ] || continue
+        _ci_validate_network_teardown "${net_id}"
+    done < <(docker network ls --filter "label=com.docker.compose.project=${project}" -q 2>/dev/null)
+    _ci_validate_unlock "${holder}"
+}
+
+# What: Read one key from deploy/prod/.env.
+# Why: IP_STANDARD/IP_SSL are deployment config.
+# From: Issue #1683 | PR #1858
+_ci_validate_env() {
+    local key="$1" file="${CI_PROD_ENV:-deploy/prod/.env}"
+    awk -F= -v k="${key}" '$1==k{sub(/^[^=]*=/,"");print;exit}' "${file}"
+}
+
+# What: Bring the pinned prod stack up detached.
+# Why: One up; the override pins candidate digests.
+# From: Issue #1683 | PR #1858
+_ci_validate_up() {
+    local override="$1"
+    docker compose -p "$(_ci_validate_project)" \
+        -f "${CI_COMPOSE_FILE:-deploy/prod/docker-compose.yml}" \
+        -f "${override}" up -d
+}
+
+# What: Names of compose services with a healthcheck.
+# Why: Only these have a health status to poll.
+# From: Issue #1683 | PR #1858
+_ci_validate_health_services() {
+    if [ -n "${CI_COMPOSE_HEALTH_CMD:-}" ]; then
+        "${CI_COMPOSE_HEALTH_CMD}"
+        return "$?"
+    fi
+    docker compose -f "${CI_COMPOSE_FILE:-deploy/prod/docker-compose.yml}" config --format json \
+        | jq -r '.services|to_entries[]|select(.value.healthcheck!=null)|.key'
+}
+
+# What: Wait for one container to report healthy.
+# Why: A crash-loop only shows after up exits 0.
+# From: Issue #1683 | PR #1858
+_ci_validate_wait_one() {
+    local project="$1" svc="$2" deadline cid status
+    deadline=$(( SECONDS + ${CI_VALIDATE_HEALTH_TIMEOUT:-180} ))
+    while [ "${SECONDS}" -lt "${deadline}" ]; do
+        cid="$(docker compose -p "${project}" ps -q "${svc}" 2>/dev/null)"
+        if [ -n "${cid}" ]; then
+            status="$(docker inspect --format '{{.State.Health.Status}}' "${cid}" 2>/dev/null)" || status=""
+            [ "${status}" = "healthy" ] && return 0
+            [ "${status}" = "unhealthy" ] && return 1
+        fi
+        sleep 2
+    done
+    return 1
+}
+
+# What: Poll all healthcheck services in parallel.
+# Why: Independent waits; no serial wall-clock cost.
+# From: Issue #1683 | PR #1858
+_ci_validate_wait_healthy() {
+    local project="$1" services svc rc=0 i
+    services="$(_ci_validate_health_services)" || return 2
+    local -a pids=() names=()
+    while IFS= read -r svc; do
+        [ -n "${svc}" ] || continue
+        _ci_validate_wait_one "${project}" "${svc}" &
+        pids+=("$!"); names+=("${svc}")
+    done <<< "${services}"
+    for i in "${!pids[@]}"; do
+        if ! wait "${pids[$i]}"; then
+            ci_log "[CI-ERROR-VALIDATE-0009]" "service=\"${names[$i]}\" reason=\"not healthy within timeout\""
+            rc=1
+        fi
+    done
+    return "${rc}"
+}
+
+# What: Prove DNS resolves a CDN domain, both modes.
+# Why: Real dig query/response, not ping (AG-VAL-013).
+# From: Issue #1683 | PR #1858
+_ci_validate_dns() {
+    local ip_std ip_ssl domain ip
+    ip_std="$(_ci_validate_env IP_STANDARD)"
+    ip_ssl="$(_ci_validate_env IP_SSL)"
+    domain="$(_ci_validation_dns_domains | head -1)"
+    if [ -z "${ip_std}" ] || [ -z "${ip_ssl}" ] || [ -z "${domain}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0010]" "reason=\"missing IP_STANDARD/IP_SSL or dns test domain\""
         return 2
     fi
-    if raw="$("${CI_VALIDATE_CMD}" "${cand}")"; then status=0; else status=$?; fi
-    if [ "${status}" -ne 0 ]; then
-        ci_error "[CI-ERROR-VALIDATE-0004]" "reason=\"stack validation failed\"" "${raw}"
-        return "${status}"
+    for ip in "${ip_std}" "${ip_ssl}"; do
+        if ! dig +short "@${ip}" "${domain}" | grep -q .; then
+            ci_log "[CI-ERROR-VALIDATE-0011]" "resolver=\"${ip}\" domain=\"${domain}\" reason=\"no DNS answer\""
+            return 1
+        fi
+    done
+}
+
+# What: Prove the proxy caches: real MISS then HIT.
+# Why: Real cache behavior, not a port probe (AG-VAL-014).
+# From: Issue #1683 | PR #1858
+_ci_validate_proxy() {
+    local url ip_std host h
+    url="$(_ci_validation_proxy_probe_url)"
+    ip_std="$(_ci_validate_env IP_STANDARD)"
+    host="${url#http://}"; host="${host%%/*}"
+    if [ -z "${url}" ] || [ -z "${ip_std}" ] || [ -z "${host}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0012]" "reason=\"missing proxy probe url or IP_STANDARD\""
+        return 2
+    fi
+    if ! curl -fsS --resolve "${host}:80:${ip_std}" -o /dev/null "${url}"; then
+        ci_log "[CI-ERROR-VALIDATE-0013]" "url=\"${url}\" reason=\"proxy MISS request failed\""
+        return 1
+    fi
+    h="$(curl -fsS --resolve "${host}:80:${ip_std}" -D - -o /dev/null "${url}")" || h=""
+    if ! printf '%s' "${h}" | grep -qi 'X-Cache-Status:[[:space:]]*HIT'; then
+        ci_log "[CI-ERROR-VALIDATE-0014]" "url=\"${url}\" reason=\"second request not a cache HIT\""
+        return 1
+    fi
+}
+
+# What: Validate the candidate on one live prod stack.
+# Why: One up, all checks, one teardown (AG-VAL-027).
+# From: Issue #1683 | PR #1858
+_ci_default_validate() {
+    local candidate="$1" holder override project rc=0 up_out
+    project="$(_ci_validate_project)"
+    if ! holder="$(_ci_validate_lock)"; then
+        ci_log "[CI-ERROR-VALIDATE-0015]" "reason=\"another validate run holds the per-host lock\""
+        return 2
+    fi
+    override="$(mktemp "${TMPDIR:-/var/tmp}/ci-validate-override.XXXXXX.yml")"
+    if _ci_validate_pin_override "${candidate}" > "${override}"; then
+        if up_out="$(_ci_validate_up "${override}" 2>&1)"; then
+            _ci_validate_wait_healthy "${project}" || rc=$?
+            [ "${rc}" -eq 0 ] && { _ci_validate_dns || rc=$?; }
+            [ "${rc}" -eq 0 ] && { _ci_validate_proxy || rc=$?; }
+        elif _ci_validate_is_collision "${up_out}"; then
+            ci_error "[CI-ERROR-VALIDATE-0016]" "reason=\"subnet/port collision; lock bypassed or stale stack\"" "${up_out}"
+            rc=1
+        else
+            ci_error "[CI-ERROR-VALIDATE-0017]" "reason=\"stack up failed\"" "${up_out}"
+            rc=1
+        fi
+    else
+        rc=$?
+    fi
+    _ci_validate_teardown "${holder}"
+    rm -f "${override}"
+    return "${rc}"
+}
+
+# What: Run stack validation via the wired backend.
+# Why: Default runs the real stack; tests inject a stub.
+# From: Issue #1683 | PR #1858
+_ci_validate_run() {
+    local cand="$1" rc=0
+    "${CI_VALIDATE_CMD:-_ci_default_validate}" "${cand}" || rc=$?
+    if [ "${rc}" -ne 0 ]; then
+        ci_log "[CI-ERROR-VALIDATE-0004]" "reason=\"stack validation failed\""
+        return "${rc}"
     fi
     printf 'validate result=STACK_ACCEPTED\n'
 }

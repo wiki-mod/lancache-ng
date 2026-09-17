@@ -1631,15 +1631,16 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     [[ "${output}" == *"CI-ERROR-BUILD-0002"* ]]
 }
 
-@test "validate fails closed with no validation backend" {
-    # What: No backend means the stack cannot be started.
-    # Why: Fail closed, never fake a clean stack.
-    # From: Issue #1683
+@test "validate default backend fails closed when compose is unreadable" {
+    # What: The wired default refuses without compose data.
+    # Why: No stub = real backend, still fail-closed.
+    # From: Issue #1683 | PR #1858
     CI_STACK_CANDIDATE_CMD="$(_stub cand 'echo proxy=sha256:x')" \
-    GHCR_USERNAME=u GHCR_TOKEN=t \
+    CI_COMPOSE_IMAGES_CMD="$(_stub imgs 'exit 3')" \
+    TMPDIR="${BATS_TEST_TMPDIR}" GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${CI_SH}" validate
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VALIDATE-0003"* ]]
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0006"* ]]
 }
 
 @test "validate fails with raw evidence when the stack is unhealthy" {
@@ -1729,6 +1730,68 @@ netdata=sha256:n"
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"CI-WARN-VALIDATE-0008"* ]]
     [[ "${output}" == *'unpinned="netdata"'* ]]
+}
+
+@test "validate is_collision matches docker contention signatures" {
+    # What: Pool/address contention strings are retryable.
+    # Why: Distinct from a real image or config failure.
+    # From: Issue #1683 | PR #1858
+    run _ci_validate_is_collision "Error: Pool overlaps with other one"
+    [ "${status}" -eq 0 ]
+    run _ci_validate_is_collision "manifest unknown"
+    [ "${status}" -ne 0 ]
+}
+
+@test "validate default tears the stack down even when up fails" {
+    # What: Teardown runs on the failure path.
+    # Why: A leaked stack holds the lock, poisons reruns.
+    # From: Issue #1683 | PR #1858
+    _ci_validate_lock() { echo 1234; }
+    _ci_validate_pin_override() { echo "services:"; }
+    _ci_validate_up() { echo "boom"; return 1; }
+    _ci_validate_teardown() { echo "TEARDOWN-CALLED"; }
+    run _ci_default_validate "proxy=sha256:x"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"TEARDOWN-CALLED"* ]]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0017"* ]]
+}
+
+@test "validate default flags a subnet collision distinctly" {
+    # What: A pool-overlap up failure is a collision id.
+    # Why: Diagnosis points at the mutex, not the images.
+    # From: Issue #1683 | PR #1858
+    _ci_validate_lock() { echo 1234; }
+    _ci_validate_pin_override() { echo "services:"; }
+    _ci_validate_up() { echo "Pool overlaps with other one"; return 1; }
+    _ci_validate_teardown() { :; }
+    run _ci_default_validate "proxy=sha256:x"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0016"* ]]
+}
+
+@test "validate lock refuses a second concurrent holder" {
+    # What: One host-local flock; the second call fails.
+    # Why: Two prod stacks can't both bind IP_STANDARD.
+    # From: Issue #1683 | PR #1858
+    export TMPDIR="${BATS_TEST_TMPDIR}"
+    local first
+    first="$(_ci_validate_lock)"
+    [ -n "${first}" ]
+    run _ci_validate_lock
+    [ "${status}" -ne 0 ]
+    _ci_validate_unlock "${first}"
+}
+
+@test "validate wait_healthy reports every unhealthy service" {
+    # What: A failed wait names its service and fails.
+    # Why: Parallel waits still surface each failure.
+    # From: Issue #1683 | PR #1858
+    _ci_validate_health_services() { printf 'proxy\ndns-standard\n'; }
+    _ci_validate_wait_one() { [ "$2" = "dns-standard" ] && return 1; return 0; }
+    run _ci_validate_wait_healthy "proj"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0009"* ]]
+    [[ "${output}" == *'service="dns-standard"'* ]]
 }
 
 # =========================================================
