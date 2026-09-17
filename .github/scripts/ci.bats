@@ -28,8 +28,16 @@ setup() {
 # From: Issue #1683
 teardown() {
     local d
-    for d in "${CI_BATS_VAR_TMP_DIRS[@]:-}"; do
-        [ -n "${d}" ] && rm -rf -- "${d}"
+    # What: bare [@] (no :-) so a zero-length array yields
+    # Why: 0 iterations; ":-" would force one empty "d" pass
+    # From: Issue #1683
+    for d in "${CI_BATS_VAR_TMP_DIRS[@]}"; do
+        # What: if, not "&&", so set -e never sees a bare
+        # Why: false test as this loop body's own exit status.
+        # From: Issue #1683
+        if [ -n "${d}" ]; then
+            rm -rf -- "${d}"
+        fi
     done
 }
 
