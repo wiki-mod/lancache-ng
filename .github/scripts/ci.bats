@@ -910,6 +910,65 @@ _stub() {
     [[ "${output}" == *"tested=ok"* ]]
 }
 
+@test "test runs the real cargo pipeline for a rust fixture (no injection)" {
+    # What: The default rust path runs real fmt/check/clippy/test.
+    # Why: AG-VAL-008 must run for real, not only via injection.
+    # From: Issue #1683
+    local root="${BATS_TEST_TMPDIR}/repo-ok"
+    mkdir -p "${root}/crate/src"
+    cat > "${root}/crate/Cargo.toml" <<'TOML'
+[package]
+name = "ci-fixture-ok"
+version = "0.1.0"
+edition = "2021"
+TOML
+    cat > "${root}/crate/src/main.rs" <<'RS'
+fn main() {
+    println!("ci fixture ok");
+}
+
+#[test]
+fn real_cargo_test_runs() {
+    // What: Sanity check the real path executes cargo test.
+    // Why: Proves _ci_test_rust runs real cargo, not a stub.
+    assert_eq!(1 + 1, 2);
+}
+RS
+    local m="${BATS_TEST_TMPDIR}/manifest-ok.yml"
+    printf 'services:\n  fixture-ok:\n    context: crate\n    build_type: rust\n' > "${m}"
+    CI_MANIFEST="${m}" CI_REPO_ROOT="${root}" run bash "${CI_SH}" test fixture-ok
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"tested=ok"* ]]
+}
+
+@test "test propagates a real cargo clippy failure without injection" {
+    # What: A real clippy violation must fail test, unmocked.
+    # Why: AG-INT-002: a real failure must never be hidden.
+    # From: Issue #1683
+    local root="${BATS_TEST_TMPDIR}/repo-fail"
+    mkdir -p "${root}/crate/src"
+    cat > "${root}/crate/Cargo.toml" <<'TOML'
+[package]
+name = "ci-fixture-fail"
+version = "0.1.0"
+edition = "2021"
+TOML
+    cat > "${root}/crate/src/main.rs" <<'RS'
+fn main() {
+    let flag = true;
+    if flag == true {
+        println!("{flag}");
+    }
+}
+RS
+    local m="${BATS_TEST_TMPDIR}/manifest-fail.yml"
+    printf 'services:\n  fixture-fail:\n    context: crate\n    build_type: rust\n' > "${m}"
+    CI_MANIFEST="${m}" CI_REPO_ROOT="${root}" run bash "${CI_SH}" test fixture-fail
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-TEST-0003"* ]]
+    [[ "${output}" == *"equality checks against true"* ]]
+}
+
 @test "scan rejects a /tmp (tmpfs) TMPDIR, requires /var/tmp" {
     # What: tmpfs /tmp risks OOM on image/db export.
     # Why: All CI staging is /var/tmp (maintainer rule).
@@ -963,6 +1022,70 @@ _stub() {
 # =========================================================
 # CACHE FALLBACK
 # =========================================================
+
+@test "cache fallback: an unwired CAS lookup always misses, never a false hit" {
+    # What: No CI_CAS_LOOKUP_CMD -> _ci_cas_lookup misses.
+    # Why: Fallback must default to miss, never a silent hit.
+    # From: Issue #1683
+    run _ci_cas_lookup "deadbeef"
+    [ "${status}" -ne 0 ]
+}
+
+@test "cache fallback: a CAS hit skips the build backend entirely" {
+    # What: A CAS hit must never invoke the build backend.
+    # Why: Reuse means the compile step is truly skipped.
+    # From: Issue #1683
+    STUB_STATE=MISSING_CONFIRMED
+    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
+    CI_IMPACT_CMD="$(_stub impact 'echo BUILD')" \
+    CI_CAS_LOOKUP_CMD="$(_stub cas 'exit 0')" \
+    CI_BUILD_CMD="$(_stub build 'echo BUILD_BACKEND_INVOKED; exit 1')" \
+    GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${CI_SH}" build ui
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"result=reuse-binary-cas"* ]]
+    [[ "${output}" != *"BUILD_BACKEND_INVOKED"* ]]
+}
+
+@test "cache fallback: a crashing CAS backend still falls back to a real build" {
+    # What: Any nonzero CAS exit, even noisy, means fall back.
+    # Why: A broken CAS backend must not block the pipeline.
+    # From: Issue #1683
+    local marker="${BATS_TEST_TMPDIR}/cas-invoked-crash"
+    STUB_STATE=MISSING_CONFIRMED
+    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
+    CI_IMPACT_CMD="$(_stub impact 'echo BUILD')" \
+    CI_CAS_LOOKUP_CMD="$(_stub cas "touch '${marker}'; echo cas-backend-noise >&2; exit 137")" \
+    CI_BUILD_CMD="$(_stub build 'exit 0')" \
+    GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${CI_SH}" build ui
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"result=built"* ]]
+    # What: The marker proves the CAS backend truly ran.
+    # Why: A skipped stub would make the fallback claim empty.
+    # From: Issue #1683
+    [ -f "${marker}" ]
+}
+
+@test "cache fallback: an apk (non-rust) service never consults the CAS" {
+    # What: build_type=apk must not call the CAS at all.
+    # Why: CAS is a rust-binary reuse path (§7), apk has none.
+    # From: Issue #1683
+    local marker="${BATS_TEST_TMPDIR}/cas-invoked-apk"
+    STUB_STATE=MISSING_CONFIRMED
+    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
+    CI_IMPACT_CMD="$(_stub impact 'echo BUILD')" \
+    CI_CAS_LOOKUP_CMD="$(_stub cas "touch '${marker}'; exit 0")" \
+    CI_BUILD_CMD="$(_stub build 'exit 0')" \
+    GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${CI_SH}" build proxy
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"result=built"* ]]
+    # What: An absent marker proves the CAS was never invoked.
+    # Why: A no-op stub would pass with no proof of a skip.
+    # From: Issue #1683
+    [ ! -f "${marker}" ]
+}
 
 # =========================================================
 # REGISTRY / PUBLISH / READBACK
