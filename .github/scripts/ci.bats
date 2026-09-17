@@ -793,13 +793,64 @@ _stub() {
     [[ "${output}" != *"tested=ok"* ]]
 }
 
-@test "test build-tools fails closed until the toolchain smoke is wired" {
-    # What: build-tools test needs a wired smoke.
-    # Why: Dockerfile owns the inventory (AG-VAL-017).
-    # From: Issue #1683 | PR #1858
+@test "test build-tools fails closed without a toolchain image" {
+    # What: The smoke needs the candidate image ref.
+    # Why: No image means nothing to smoke; fail closed.
+    # From: Issue #1683
     run bash "${CI_SH}" test build-tools
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-TEST-0006"* ]]
+}
+
+@test "build-tools smoke_tools reads the SOT executable list" {
+    # What: The smoke list has one owner in the SOT.
+    # Why: No second tool list to drift from packages.
+    # From: Issue #1683
+    run _ci_build_tools_smoke_tools
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"cargo"* ]]
+    [[ "${output}" == *"sccache"* ]]
+    [[ "${output}" == *"actionlint"* ]]
+}
+
+@test "build-tools smoke_tools fails closed on an empty SOT list" {
+    # What: A blank smoke list must never pass silently.
+    # Why: Fail-closed; a missing list is a real error.
+    # From: Issue #1683
+    local m="${BATS_TEST_TMPDIR}/m.yml"
+    sed '/^    smoke_tools:/,/^$/d' "${CI_MANIFEST_SOURCE}" > "${m}"
+    CI_MANIFEST="${m}" run _ci_build_tools_smoke_tools
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-BUILDTOOLS-0013"* ]]
+}
+
+@test "toolchain smoke passes when every tool is present" {
+    # What: command -v every smoke tool in the image.
+    # Why: Presence of each accel tool is the contract.
+    # From: Issue #1683
+    docker() { while [ "${1:-}" != "sh" ] && [ $# -gt 0 ]; do shift; done; "$@"; }
+    run _ci_toolchain_smoke fake-img "$(printf 'bash\nsh\n')"
+    [ "${status}" -eq 0 ]
+}
+
+@test "toolchain smoke fails when a tool is missing" {
+    # What: A missing tool fails the smoke loudly.
+    # Why: A broken toolchain must not pass as ok.
+    # From: Issue #1683
+    docker() { while [ "${1:-}" != "sh" ] && [ $# -gt 0 ]; do shift; done; "$@"; }
+    run _ci_toolchain_smoke fake-img "$(printf 'bash\nnope-xyz-123\n')"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"missing nope-xyz-123"* ]]
+}
+
+@test "test build-tools reports ok via the wired smoke backend" {
+    # What: A green smoke yields tested=ok for build-tools.
+    # Why: The wired toolchain smoke is the real test.
+    # From: Issue #1683
+    CI_TOOLCHAIN_TEST_CMD="$(_stub tc 'echo "service=build-tools tested=ok"')" \
+        run bash "${CI_SH}" test build-tools
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"tested=ok"* ]]
 }
 
 @test "scan rejects a /tmp (tmpfs) TMPDIR, requires /var/tmp" {

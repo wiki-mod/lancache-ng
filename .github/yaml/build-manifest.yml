@@ -142,6 +142,29 @@ build_toolchain:
       - xz
       - zlib-dev
       - zlib-static
+    # What: Executables the toolchain smoke must find+run.
+    # Why: One owner of the smoke list; ci.sh reads it.
+    # From: Issue #1683
+    smoke_tools:
+      - actionlint
+      - bash
+      - bats
+      - cargo
+      - cargo-audit
+      - cargo-tarpaulin
+      - ccache
+      - clippy-driver
+      - dig
+      - distcc
+      - distcc-pump
+      - docker
+      - envsubst
+      - jq
+      - rustc
+      - rustfmt
+      - sccache
+      - shellcheck
+      - timeout
 
 # What: Runtime services not built by this project.
 # Why: Explicit out-of-build entry, no silent omission.

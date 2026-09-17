@@ -1349,17 +1349,37 @@ _ci_test_rust() {
     printf 'service=%s tested=ok\n' "${service}"
 }
 
+# What: Assert every smoke tool exists in the image.
+# Why: A missing accel tool must fail, not build broken.
+# From: Issue #1683
+_ci_toolchain_smoke() {
+    local image="$1" tools="$2"
+    local -a tl=()
+    local t
+    while IFS= read -r t; do
+        [ -n "${t}" ] && tl+=("${t}")
+    done <<< "${tools}"
+    docker run --rm "${image}" timeout --kill-after=30s --signal=TERM 14m \
+        sh -c 'for t in "$@"; do command -v "$t" >/dev/null || { echo "missing $t" >&2; exit 1; }; done' _ "${tl[@]}"
+}
+
 # What: Smoke the build-tools image tool inventory.
-# Why: The Dockerfile owns the list; ci.sh dispatches.
+# Why: The SOT owns the list; ci.sh runs it in the image.
 # From: Issue #1683 | PR #1858
 _ci_test_toolchain() {
-    local service="$1"
+    local service="$1" image tools
     if [ -n "${CI_TOOLCHAIN_TEST_CMD:-}" ]; then
         "${CI_TOOLCHAIN_TEST_CMD}" "${service}"
         return "$?"
     fi
-    ci_log "[CI-ERROR-TEST-0006]" "service=\"${service}\" reason=\"toolchain smoke not wired; provided by the build-tools workflow (AG-VAL-017)\""
-    return 2
+    image="${CI_TOOLCHAIN_IMAGE:-}"
+    if [ -z "${image}" ]; then
+        ci_log "[CI-ERROR-TEST-0006]" "service=\"${service}\" reason=\"CI_TOOLCHAIN_IMAGE required for the smoke\""
+        return 2
+    fi
+    tools="$(_ci_build_tools_smoke_tools)" || return 2
+    _ci_toolchain_smoke "${image}" "${tools}" || return 1
+    printf 'service=%s tested=ok\n' "${service}"
 }
 
 # What: Dispatch a service's test by its build type.
@@ -2779,6 +2799,19 @@ _ci_build_tools_packages() {
         return 2
     fi
     printf '%s\n' "${pkgs}"
+}
+
+# What: Print the toolchain smoke executables from SOT.
+# Why: One smoke list; test build-tools reads it here.
+# From: Issue #1683
+_ci_build_tools_smoke_tools() {
+    local tools
+    tools="$(_ci_block_entry_list build_toolchain build-tools smoke_tools)"
+    if [ -z "${tools}" ]; then
+        ci_log "[CI-ERROR-BUILDTOOLS-0013]" "reason=\"no smoke_tools in SOT; FAIL CLOSED\""
+        return 2
+    fi
+    printf '%s\n' "${tools}"
 }
 
 # What: Print the build-tools input signature.
