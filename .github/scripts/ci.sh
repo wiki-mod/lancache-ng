@@ -4268,7 +4268,7 @@ _ci_check_mutable_refs() {
                 ;;
             */Dockerfile|Dockerfile)
                 out="$(grep -nE '^FROM .+:latest' "${path}" | grep -vE 'sccache-ng|ccache-ng')" && [ -n "${out}" ] && viol+=("${path} FROM-latest: ${out}")
-                out="$(grep -nE '^FROM [a-z0-9./:]*[a-z0-9/]$' "${path}")" && viol+=("${path} FROM-untagged: ${out}")
+                out="$(grep -nE '^FROM [a-z0-9./]+$' "${path}")" && viol+=("${path} FROM-untagged: ${out}")
                 ;;
         esac
     done

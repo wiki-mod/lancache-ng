@@ -3115,6 +3115,17 @@ netdata=sha256:n"
     [[ "${output}" == *"FROM-untagged"* ]]
 }
 
+@test "check mutable-refs does not flag a real tag as untagged" {
+    # What: AG-WF-027: this found a real bug; fixed here.
+    # Why: ':' in the untagged charset false-matched 3.24.
+    # From: Issue #1683 | PR #1858
+    local d="${BATS_TEST_TMPDIR}/realtag"; mkdir -p "${d}"
+    printf 'FROM alpine:3.24\n' > "${d}/Dockerfile"
+    run bash "${CI_SH}" check mutable-refs "${d}/Dockerfile"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" != *"FROM-untagged"* ]]
+}
+
 @test "check executable-bits fails a non-755 bare-path script via ci.sh" {
     # What: ci.sh owns the mode check; bats calls it.
     # Why: bare-path scripts must carry the exec bit.
