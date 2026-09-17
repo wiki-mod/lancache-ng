@@ -715,29 +715,56 @@ ci_cmd_resolve() {
 # =========================================================
 
 # What: Classify a failure: transient, permanent, not_found.
-# Why: One rule; not_found may build, permanent may not.
+# Why: operation-typed; not_found may build, permanent may not.
 # From: Issue #1683
 _ci_classify_failure() {
-    local raw="$1"
+    local raw="$1" op="${2:-registry}" low
+    # What: lowercased match surface for the whole function.
+    # Why: Go/curl/gh vary "Connection reset"-style casing.
+    # From: Issue #1683
+    low="${raw,,}"
+    # What: a GitHub-API 404 is permanent, never not_found.
+    # Why: unlike a registry miss, an API 404 is fatal here.
+    # From: Issue #1683
+    if [ "${op}" = "github-api" ]; then
+        case "${low}" in
+            *"http 404"*|*"not found"*) printf 'permanent\n'; return 0 ;;
+        esac
+    fi
     # What: a genuinely missing registry artifact.
     # Why: only not_found may drive a build; auth may not.
-    case "${raw}" in
-        *"manifest unknown"*|*"not found: manifest"*|*MANIFEST_UNKNOWN*|*"not found: name unknown"*) printf 'not_found\n'; return 0 ;;
-    esac
+    if [ "${op}" = "registry" ]; then
+        case "${low}" in
+            *"manifest unknown"*|*"not found: manifest"*|*"manifest_unknown"*|*"not found: name unknown"*|*"name_unknown"*) printf 'not_found\n'; return 0 ;;
+        esac
+    fi
     # What: auth/malformed/compile are permanent.
     # Why: retrying a fixed outcome wastes budget.
-    case "${raw}" in
-        *"HTTP 401"*|*"unauthorized"*|*"denied: requested access"*) printf 'permanent\n'; return 0 ;;
-        *"HTTP 400"*|*"HTTP 422"*|*"invalid reference format"*) printf 'permanent\n'; return 0 ;;
+    case "${low}" in
+        *"http 401"*|*"unauthorized"*|*"denied: requested access"*) printf 'permanent\n'; return 0 ;;
+        *"http 400"*|*"http 422"*|*"invalid reference format"*) printf 'permanent\n'; return 0 ;;
         *"pull access denied"*) printf 'permanent\n'; return 0 ;;
-        *"error: could not compile"*|*"Dockerfile parse error"*|*"failed to solve"*"parse"*) printf 'permanent\n'; return 0 ;;
+        *"error: could not compile"*|*"dockerfile parse error"*|*"failed to solve"*"parse"*) printf 'permanent\n'; return 0 ;;
     esac
+    # What: buildx's own narrow known-transient signatures.
+    # Why: scoped like legacy wrappers; never a real compile fail.
+    # From: Issue #1683
+    if [ "${op}" = "buildx" ]; then
+        case "${low}" in
+            *"code = unavailable"*"locked for"*) printf 'transient\n'; return 0 ;;
+            *"panic: methodref has no signature"*) printf 'transient\n'; return 0 ;;
+        esac
+    fi
     # What: rate-limit/5xx/network are transient.
     # Why: these recover on a retry with backoff.
-    case "${raw}" in
-        *"HTTP 403"*|*"HTTP 429"*|*"toomanyrequests"*|*"rate limit"*) printf 'transient\n'; return 0 ;;
-        *"HTTP 5"[0-9][0-9]*|*"i/o timeout"*|*"connection refused"*|*"TLS handshake timeout"*) printf 'transient\n'; return 0 ;;
-        *"EOF"*|*"connection reset by peer"*|*"temporary failure"*) printf 'transient\n'; return 0 ;;
+    case "${low}" in
+        *"http 403"*|*"http 429"*|*"toomanyrequests"*|*"rate limit"*) printf 'transient\n'; return 0 ;;
+        *"http 5"[0-9][0-9]*|*"i/o timeout"*|*"connection refused"*|*"tls handshake timeout"*) printf 'transient\n'; return 0 ;;
+        *"eof"*|*"connection reset by peer"*|*"temporary failure"*) printf 'transient\n'; return 0 ;;
+        *"unexpected disconnect"*|*"remote end hung up"*|*"connection timed out"*) printf 'transient\n'; return 0 ;;
+        *"could not resolve host"*|*"could not connect to server"*) printf 'transient\n'; return 0 ;;
+        *"rpc failed; curl 92"*|*"rpc failed; curl 5"*) printf 'transient\n'; return 0 ;;
+        *"gnutls recv error"*|*"tls connection"*"closed"*) printf 'transient\n'; return 0 ;;
     esac
     # What: an unclassified failure is transient.
     # Why: a missed transient is worse than a retry.
@@ -805,6 +832,9 @@ _ci_lock_try() {
         return 3
     fi
     [ "${rc}" -eq 0 ] || return 3
+    # What: not routed through _ci_retry (deliberate).
+    # Why: _ci_lock_acquire already retries this whole attempt.
+    # From: Issue #1683
     git fetch --quiet --depth=1 "${remote}" "${ref}" >/dev/null 2>&1 || return 3
     committed="$(git log -1 --format=%ct FETCH_HEAD 2>/dev/null)" || committed=0
     committed="${committed:-0}"
@@ -845,7 +875,10 @@ _ci_lock_release() {
     local remote="$1" ref="$2" note="$3" cur="" held rc=0
     cur="$(_ci_cas_ref_sha "${remote}" "${ref}")" || rc=$?
     [ "${rc}" -eq 0 ] || return 0
-    git fetch --quiet --depth=1 "${remote}" "${ref}" >/dev/null 2>&1 || return 1
+    # What: this fetch had no retry at any level (unlike acquire).
+    # Why: op=git gives it the shared transient-signature truth.
+    # From: Issue #1683
+    _ci_retry git git fetch --quiet --depth=1 "${remote}" "${ref}" >/dev/null || return 1
     held="$(git log -1 --format=%s FETCH_HEAD 2>/dev/null)" || held=""
     [ "${held}" = "${note}" ] || return 0
     git push --force-with-lease="${ref}:${cur}" "${remote}" ":${ref}" >/dev/null 2>&1 || return 1
@@ -881,7 +914,10 @@ _ci_ledger_blob() {
     _ci_cas_ref_sha "${remote}" "${CI_LEDGER_REF}" >/dev/null 2>&1 || rc=$?
     [ "${rc}" -eq 1 ] && return 1
     [ "${rc}" -eq 0 ] || return 2
-    git fetch --quiet --depth=1 "${remote}" "${CI_LEDGER_REF}" >/dev/null 2>&1 || return 2
+    # What: this fetch had no retry at any level.
+    # Why: op=git gives it the shared transient-signature truth.
+    # From: Issue #1683
+    _ci_retry git git fetch --quiet --depth=1 "${remote}" "${CI_LEDGER_REF}" >/dev/null || return 2
     git cat-file -p "FETCH_HEAD:${CI_LEDGER_FILE}" 2>/dev/null || return 2
 }
 
@@ -1047,19 +1083,24 @@ _ci_repo() {
 # Why: RETRY OPERATION != REBUILD; classify before retry.
 # From: Issue #1683
 _ci_retry() {
-    local n=0 max=4 raw cls
+    local op="$1"; shift
+    local n=0 max="${CI_RETRY_MAX_ATTEMPTS:-4}" backoff="${CI_RETRY_BACKOFF_BASE_SECONDS:-1}" raw cls
     while :; do
         n=$((n + 1))
         if raw="$("$@" 2>&1)"; then
             printf '%s\n' "${raw}"
             return 0
         fi
-        cls="$(_ci_classify_failure "${raw}")"
+        cls="$(_ci_classify_failure "${raw}" "${op}")"
         if [ "${cls}" != "transient" ] || [ "${n}" -ge "${max}" ]; then
-            ci_error "[CI-ERROR-BUILD-0011]" "reason=\"command failed cls=${cls} attempt=${n}/${max}\"" "${raw}"
+            ci_error "[CI-ERROR-BUILD-0011]" "reason=\"command failed cls=${cls} attempt=${n}/${max} op=${op}\"" "${raw}"
+            # What: surface the raw failure to the caller too.
+            # Why: an op-specific reason may need caller interpretation.
+            # From: Issue #1683
+            printf '%s\n' "${raw}"
             return 2
         fi
-        sleep "$((n * n))"
+        sleep "$((n * n * backoff))"
     done
 }
 
@@ -1110,7 +1151,10 @@ _ci_docker_build() {
     while IFS= read -r a; do
         [ -n "${a}" ] && args+=(--build-arg "${a}")
     done < <(ci_cmd_build_args "${service}" --bare "${platform}")
-    docker buildx build --load --platform "${platform}" --tag "${tag}" "${args[@]}" "${context}"
+    # What: retry only the known transient buildx signature.
+    # Why: layer-lock/panic are infra, not a real compile fail.
+    # From: Issue #1683
+    _ci_retry buildx docker buildx build --load --platform "${platform}" --tag "${tag}" "${args[@]}" "${context}" >/dev/null || return "$?"
     printf '%s\n' "${tag}"
 }
 
@@ -1137,7 +1181,7 @@ _ci_registry_probe() {
 # From: Issue #1683
 _ci_imagetools_create() {
     local target="$1"; shift
-    _ci_retry docker buildx imagetools create --tag "${target}" "$@"
+    _ci_retry registry docker buildx imagetools create --tag "${target}" "$@"
 }
 
 # What: Push a built tag, retrying transient push failures.
@@ -1146,7 +1190,7 @@ _ci_imagetools_create() {
 _ci_docker_publish() {
     local service="$1" identity="$2" platform="$3" tag
     tag="$(_ci_image_tag "${service}" "${platform}" "${identity}")"
-    _ci_retry docker push "${tag}" >/dev/null || return "$?"
+    _ci_retry registry docker push "${tag}" >/dev/null || return "$?"
     _ci_registry_digest "${tag}"
 }
 
@@ -1932,7 +1976,10 @@ _ci_gc_roots() {
 # From: Issue #1683
 _ci_gh_versions() {
     local owner="$1" pkg="$2" out rc=0
-    out="$(gh api --paginate "/orgs/${owner}/packages/container/${pkg}/versions?per_page=100" --jq '.[] | [.name, .id, .created_at, ((.metadata.container.tags // []) | join(","))] | @tsv' 2>&1)" || rc=$?
+    # What: retry a transient GH-API read; 404 fails on attempt 1.
+    # Why: op=github-api classifies HTTP 404 permanent, not not_found.
+    # From: Issue #1683
+    out="$(_ci_retry github-api gh api --paginate "/orgs/${owner}/packages/container/${pkg}/versions?per_page=100" --jq '.[] | [.name, .id, .created_at, ((.metadata.container.tags // []) | join(","))] | @tsv')" || rc=$?
     if [ "${rc}" -ne 0 ]; then
         printf '%s' "${out}" | grep -qiE 'HTTP 404|Not Found' && return 1
         ci_error "[CI-ERROR-GC-0018]" "owner=\"${owner}\" pkg=\"${pkg}\" reason=\"GHCR version listing failed\"" "${out}"
@@ -1989,7 +2036,10 @@ _ci_default_gc_delete() {
     [ -n "${prefix}" ] || { ci_log "[CI-ERROR-GC-0017]" "reason=\"SOT image_prefix missing\""; return 2; }
     owner="${prefix%%/*}"
     pkgbase="${prefix#*/}"
-    gh api -X DELETE "/orgs/${owner}/packages/container/${pkgbase}%2F${svc}/versions/${id}" >/dev/null
+    # What: retry a transient GH-API delete.
+    # Why: a destructive op still deserves the shared classifier.
+    # From: Issue #1683
+    _ci_retry github-api gh api -X DELETE "/orgs/${owner}/packages/container/${pkgbase}%2F${svc}/versions/${id}" >/dev/null
 }
 
 # What: List GC candidate artifacts (injectable backend).
@@ -3272,7 +3322,10 @@ _ci_build_tools_build() {
         [ -n "${a}" ] && args+=(--build-arg "${a}")
     done < <(_ci_build_tools_build_args --bare "${platform}")
     args+=(tools/build-tools)
-    _ci_retry "${args[@]}" >/dev/null || return "$?"
+    # What: op=buildx only; call signature fix, not a behavior change.
+    # Why: exporter/build+push shape is cross-cutting; build-wave owns it.
+    # From: Issue #1683
+    _ci_retry buildx "${args[@]}" >/dev/null || return "$?"
     _ci_registry_digest "${tag}"
 }
 
