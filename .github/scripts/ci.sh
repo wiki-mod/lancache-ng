@@ -1070,6 +1070,30 @@ _ci_image_tag() {
     printf 'ghcr.io/%s/%s:sha-%s-%s' "$(_ci_repo)" "$1" "$3" "${2##*/}"
 }
 
+# What: OCI image labels from the SOT and env.
+# Why: Provenance labels set once, not per Dockerfile.
+# From: Issue #1683
+_ci_oci_labels() {
+    local service="$1" prefix source base created
+    prefix="$(_ci_manifest_scalar '^  image_prefix:')"
+    source="https://github.com/${prefix}"
+    base="$(_ci_manifest_scalar '^  alpine:')"
+    base="${base#\"}"; base="${base%\"}"
+    created="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'org.opencontainers.image.created=%s\n' "${created}"
+    [ -n "${GITHUB_SHA:-}" ] && printf 'org.opencontainers.image.revision=%s\n' "${GITHUB_SHA}"
+    printf 'org.opencontainers.image.source=%s\n' "${source}"
+    printf 'org.opencontainers.image.url=%s\n' "${source}"
+    printf 'org.opencontainers.image.documentation=%s\n' "${source}"
+    printf 'org.opencontainers.image.licenses=%s\n' 'AGPL-3.0-or-later'
+    printf 'org.opencontainers.image.vendor=%s\n' "${prefix%%/*}"
+    printf 'org.opencontainers.image.title=%s\n' "${service}"
+    if [ -n "${base}" ]; then
+        printf 'org.opencontainers.image.base.name=%s\n' "${base%@*}"
+        printf 'org.opencontainers.image.base.digest=%s\n' "${base#*@}"
+    fi
+}
+
 # What: Build one service image once and load it locally.
 # Why: BUILD != PUBLISH; a push failure must not rebuild.
 # From: Issue #1683
@@ -3107,6 +3131,9 @@ _ci_build_tools_build() {
     local -a args=(docker buildx build --push --provenance=false
         --platform "${platform}" --tag "${tag}"
         --output "type=image,oci-mediatypes=true")
+    while IFS= read -r a; do
+        [ -n "${a}" ] && args+=(--label "${a}")
+    done < <(_ci_oci_labels build-tools)
     [ -n "${sig}" ] && args+=(--label "org.lancache-ng.build-tools.signature=${sig}")
     [ -n "${CI_BUILD_CACHE_FROM:-}" ] && args+=(--cache-from "${CI_BUILD_CACHE_FROM}")
     [ -n "${CI_BUILD_CACHE_TO:-}" ] && args+=(--cache-to "${CI_BUILD_CACHE_TO}")

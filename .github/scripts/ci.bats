@@ -2485,6 +2485,20 @@ netdata=sha256:n"
     grep -q "sha-abc123-amd64" "${DLOG}"
     grep -q "signature=sig-xyz" "${DLOG}"
     grep -q "tools/build-tools" "${DLOG}"
+    grep -q "org.opencontainers.image.revision=abc123" "${DLOG}"
+}
+
+@test "oci labels emit provenance from the SOT and env" {
+    # What: revision/source/licenses/base from SOT+env.
+    # Why: Provenance labels have one owner (Plan §7).
+    # From: Issue #1683
+    GITHUB_SHA=abc123 run _ci_oci_labels build-tools
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"image.revision=abc123"* ]]
+    [[ "${output}" == *"image.source=https://github.com/wiki-mod/lancache-ng"* ]]
+    [[ "${output}" == *"image.licenses=AGPL-3.0-or-later"* ]]
+    [[ "${output}" == *"image.title=build-tools"* ]]
+    [[ "${output}" == *"image.base.digest=sha256:"* ]]
 }
 
 @test "check line-endings passes LF, fails CRLF via ci.sh" {
