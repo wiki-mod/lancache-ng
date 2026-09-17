@@ -1152,10 +1152,13 @@ _ci_docker_build() {
     while IFS= read -r a; do
         [ -n "${a}" ] && args+=(--build-arg "${a}")
     done < <(ci_cmd_build_args "${service}" --bare "${platform}")
-    # What: retries buildx; its own output goes to stderr.
-    # Why: layer-lock/panic retry; only the tag is this fn's stdout.
+    # What: retries buildx; captures its output, never doubles it.
+    # Why: on failure ci_error already shows raw; avoid a 2nd copy.
     # From: Issue #1683
-    _ci_retry buildx docker buildx build --load --platform "${platform}" --tag "${tag}" "${args[@]}" "${context}" >&2 || return "$?"
+    local buildlog rc=0
+    buildlog="$(_ci_retry buildx docker buildx build --load --platform "${platform}" --tag "${tag}" "${args[@]}" "${context}")" || rc=$?
+    [ "${rc}" -eq 0 ] || return "${rc}"
+    printf '%s\n' "${buildlog}" >&2
     printf '%s\n' "${tag}"
 }
 
