@@ -21,7 +21,7 @@ setup() {
 
 # What: Removes every dir a manifest file lists, one per line.
 # Why: A function (not inline teardown) lets a test prove it.
-# From: Issue #1683
+# From: Issue #1683 | PR #1858
 _trivy_cleanup_var_tmp_dirs() {
     local manifest="$1" d
     if [ -f "${manifest}" ]; then
@@ -35,7 +35,7 @@ _trivy_cleanup_var_tmp_dirs() {
 
 # What: Removes /var/tmp scratch dirs this test made.
 # Why: a "$(...)"-run helper can't set a var seen here.
-# From: Issue #1683
+# From: Issue #1683 | PR #1858
 teardown() {
     _trivy_cleanup_var_tmp_dirs "${BATS_TEST_TMPDIR}/.trivy-var-tmp-dirs"
 }
@@ -3584,7 +3584,7 @@ EOF
 
 # What: mktemp -d under /var/tmp, tracked for teardown.
 # Why: cache-dir tests must pass under any ambient TMPDIR.
-# From: Issue #1683
+# From: Issue #1683 | PR #1858
 _trivy_var_tmp_dir() {
     local d
     d="$(mktemp -d "/var/tmp/ci-bats-trivy.XXXXXX")" || return 1
@@ -3595,7 +3595,7 @@ _trivy_var_tmp_dir() {
 @test "trivy var-tmp-dir manifest survives its own subshell for cleanup" {
     # What: pins the fix for a real leak: an array append made
     # Why: inside "vt=\$(...)" never reached the caller's shell.
-    # From: Issue #1683
+    # From: Issue #1683 | PR #1858
     local vt; vt="$(_trivy_var_tmp_dir)"
     [ -d "${vt}" ]
     local manifest="${BATS_TEST_TMPDIR}/.trivy-var-tmp-dirs"
@@ -3820,14 +3820,14 @@ _trivy_stub() {
 @test "trivy db lock fails closed when stale-lock reclaim itself fails" {
     # What: rm -rf not removing the stale lock is SCAN-0015.
     # Why: e.g. NFS can leave it behind; must not spin forever.
-    # From: Issue #1683
+    # From: Issue #1683 | PR #1858
     local cache="${BATS_TEST_TMPDIR}/wedgeddb"; mkdir -p "${cache}"
     local lock="${cache}/.trivy-db-update.lock"
     mkdir -p "${lock}"
     touch -d '-1 hour' "${lock}"
     # What: PATH-shim rm that no-ops only on the lock path.
     # Why: portably simulates a reclaim rm -rf that fails.
-    # From: Issue #1683
+    # From: Issue #1683 | PR #1858
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     {
         printf '#!/usr/bin/env bash\n'
