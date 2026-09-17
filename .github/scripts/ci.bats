@@ -17,6 +17,20 @@ setup() {
     # Why: rust identity now keys the build-tools signature.
     # From: Issue #1683
     export CI_APK_RESOLVE_CMD="$(_stub apkres 'printf "pkg-1.0\n"')"
+    # What: dirs _trivy_var_tmp_dir made, for teardown.
+    # Why: ambient TMPDIR must not gate this array's scope.
+    # From: Issue #1683
+    CI_BATS_VAR_TMP_DIRS=()
+}
+
+# What: Removes /var/tmp scratch dirs this test made.
+# Why: /var/tmp dirs aren't bats-cleaned; must self-clean.
+# From: Issue #1683
+teardown() {
+    local d
+    for d in "${CI_BATS_VAR_TMP_DIRS[@]:-}"; do
+        [ -n "${d}" ] && rm -rf -- "${d}"
+    done
 }
 
 # =========================================================
@@ -3561,6 +3575,16 @@ EOF
     [ "$(cat "${cnt}")" -eq 1 ]
 }
 
+# What: mktemp -d under /var/tmp, tracked for teardown.
+# Why: cache-dir tests must pass under any ambient TMPDIR.
+# From: Issue #1683
+_trivy_var_tmp_dir() {
+    local d
+    d="$(mktemp -d "/var/tmp/ci-bats-trivy.XXXXXX")" || return 1
+    CI_BATS_VAR_TMP_DIRS+=("${d}")
+    printf '%s\n' "${d}"
+}
+
 # What: PATH-shim trivy for a clean/finding/db outcome.
 # Why: One trivy mock; the scan tests share it.
 # From: Issue #1683
@@ -3594,10 +3618,10 @@ _trivy_stub() {
     # What: A zero exit is a clean image, no retry.
     # Why: The success path returns clean directly.
     # From: Issue #1683
-    local bin; bin="$(_trivy_stub clean)"
+    local bin vt; bin="$(_trivy_stub clean)"; vt="$(_trivy_var_tmp_dir)"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
-    CI_TRIVY_SHARED_DIR="${BATS_TEST_TMPDIR}/no-shared" \
-    CI_TRIVY_FALLBACK_DIR="${BATS_TEST_TMPDIR}/trivy-cache" \
+    CI_TRIVY_SHARED_DIR="${vt}/no-shared" \
+    CI_TRIVY_FALLBACK_DIR="${vt}/trivy-cache" \
         run _ci_trivy_scan proxy sha256:abc
     [ "${status}" -eq 0 ]
 }
@@ -3606,10 +3630,10 @@ _trivy_stub() {
     # What: A written report is a deterministic finding.
     # Why: Findings fail once; retrying is wasted work.
     # From: Issue #1683
-    local bin; bin="$(_trivy_stub finding)"
+    local bin vt; bin="$(_trivy_stub finding)"; vt="$(_trivy_var_tmp_dir)"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
-    CI_TRIVY_SHARED_DIR="${BATS_TEST_TMPDIR}/no-shared" \
-    CI_TRIVY_FALLBACK_DIR="${BATS_TEST_TMPDIR}/trivy-cache" \
+    CI_TRIVY_SHARED_DIR="${vt}/no-shared" \
+    CI_TRIVY_FALLBACK_DIR="${vt}/trivy-cache" \
         run _ci_trivy_scan proxy sha256:abc
     [ "${status}" -eq 1 ]
     [[ "${output}" == *"HIGH vuln"* ]]
@@ -3619,10 +3643,10 @@ _trivy_stub() {
     # What: No report plus a DB miss retries, then exits 3.
     # Why: A DB outage escalates, never reads as a finding.
     # From: Issue #1683
-    local bin; bin="$(_trivy_stub db)"
+    local bin vt; bin="$(_trivy_stub db)"; vt="$(_trivy_var_tmp_dir)"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
-    CI_TRIVY_SHARED_DIR="${BATS_TEST_TMPDIR}/no-shared" \
-    CI_TRIVY_FALLBACK_DIR="${BATS_TEST_TMPDIR}/trivy-cache" \
+    CI_TRIVY_SHARED_DIR="${vt}/no-shared" \
+    CI_TRIVY_FALLBACK_DIR="${vt}/trivy-cache" \
         CI_TRIVY_MAX=2 CI_TRIVY_BACKOFF=0 run _ci_trivy_scan proxy sha256:abc
     [ "${status}" -eq 3 ]
 }
@@ -3631,6 +3655,7 @@ _trivy_stub() {
     # What: The scan covers vulnerabilities and secrets.
     # Why: Secret-scan parity with the retired action.
     # From: Issue #1683
+    local vt; vt="$(_trivy_var_tmp_dir)"
     export TLOG="${BATS_TEST_TMPDIR}/t.log"; : > "${TLOG}"
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     {
@@ -3641,12 +3666,12 @@ _trivy_stub() {
     } > "${bin}/trivy"
     chmod +x "${bin}/trivy"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
-    CI_TRIVY_SHARED_DIR="${BATS_TEST_TMPDIR}/no-shared" \
-    CI_TRIVY_FALLBACK_DIR="${BATS_TEST_TMPDIR}/trivy-cache" \
+    CI_TRIVY_SHARED_DIR="${vt}/no-shared" \
+    CI_TRIVY_FALLBACK_DIR="${vt}/trivy-cache" \
         run _ci_trivy_scan proxy sha256:abc
     [ "${status}" -eq 0 ]
     grep -q -- "--scanners vuln,secret" "${TLOG}"
-    grep -q -- "--cache-dir ${BATS_TEST_TMPDIR}/trivy-cache" "${TLOG}"
+    grep -q -- "--cache-dir ${vt}/trivy-cache" "${TLOG}"
 }
 
 @test "trivy dir writable proves a real file+subdir round-trip" {
@@ -3669,27 +3694,29 @@ _trivy_stub() {
     # What: A writable shared-dir wins over the fallback.
     # Why: The shared NFS DB is the intended common cache.
     # From: Issue #1683
-    mkdir -p "${BATS_TEST_TMPDIR}/shared"
-    CI_TRIVY_SHARED_DIR="${BATS_TEST_TMPDIR}/shared" \
-    CI_TRIVY_FALLBACK_DIR="${BATS_TEST_TMPDIR}/fallback" \
+    local vt; vt="$(_trivy_var_tmp_dir)"
+    mkdir -p "${vt}/shared"
+    CI_TRIVY_SHARED_DIR="${vt}/shared" \
+    CI_TRIVY_FALLBACK_DIR="${vt}/fallback" \
         run _ci_trivy_cache_dir
     [ "${status}" -eq 0 ]
-    [[ "${output}" == "dir=${BATS_TEST_TMPDIR}/shared source=nfs-shared" ]]
+    [[ "${output}" == "dir=${vt}/shared source=nfs-shared" ]]
 }
 
 @test "trivy cache-dir falls back to local disk when shared is absent" {
     # What: A missing shared-dir falls back to local disk.
     # Why: An unmounted NFS share must not block scanning.
     # From: Issue #1683
-    CI_TRIVY_SHARED_DIR="${BATS_TEST_TMPDIR}/no-such-share" \
-    CI_TRIVY_FALLBACK_DIR="${BATS_TEST_TMPDIR}/fallback" \
+    local vt; vt="$(_trivy_var_tmp_dir)"
+    CI_TRIVY_SHARED_DIR="${vt}/no-such-share" \
+    CI_TRIVY_FALLBACK_DIR="${vt}/fallback" \
         run _ci_trivy_cache_dir
     [ "${status}" -eq 0 ]
     # What: run merges the INFO notice into output too.
     # Why: a substring match tolerates that extra line.
     # From: Issue #1683
-    [[ "${output}" == *"dir=${BATS_TEST_TMPDIR}/fallback source=local-fallback"* ]]
-    [ -d "${BATS_TEST_TMPDIR}/fallback" ]
+    [[ "${output}" == *"dir=${vt}/fallback source=local-fallback"* ]]
+    [ -d "${vt}/fallback" ]
 }
 
 @test "trivy cache-dir refuses tmpfs /tmp for shared or fallback" {
@@ -3769,6 +3796,30 @@ _trivy_stub() {
     CI_TRIVY_LOCK_POLL=1 run _ci_trivy_db_lock_run "${cache}" 10 5 -- true
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"reclaiming stale trivy DB refresh lock"* ]]
+}
+
+@test "trivy db lock fails closed when stale-lock reclaim itself fails" {
+    # What: rm -rf not removing the stale lock is SCAN-0015.
+    # Why: e.g. NFS can leave it behind; must not spin forever.
+    # From: Issue #1683
+    local cache="${BATS_TEST_TMPDIR}/wedgeddb"; mkdir -p "${cache}"
+    local lock="${cache}/.trivy-db-update.lock"
+    mkdir -p "${lock}"
+    touch -d '-1 hour' "${lock}"
+    # What: PATH-shim rm that no-ops only on the lock path.
+    # Why: portably simulates a reclaim rm -rf that fails.
+    # From: Issue #1683
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    {
+        printf '#!/usr/bin/env bash\n'
+        printf 'for a; do [ "$a" = "%s" ] && exit 0; done\n' "${lock}"
+        printf 'exec /bin/rm "$@"\n'
+    } > "${bin}/rm"
+    chmod +x "${bin}/rm"
+    PATH="${bin}:${PATH}" CI_TRIVY_LOCK_POLL=1 \
+        run _ci_trivy_db_lock_run "${cache}" 10 5 -- true
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-SCAN-0015"* ]]
 }
 
 @test "trivy db lock fails closed when cache-dir cannot be created" {
