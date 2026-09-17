@@ -1857,23 +1857,27 @@ netdata=sha256:n"
 
 @test "validate default tears the stack down even when up fails" {
     # What: Teardown runs on the failure path.
-    # Why: A leaked stack holds the lock, poisons reruns.
-    # From: Issue #1683 | PR #1858
-    _ci_validate_lock() { echo 1234; }
+    # Why: A leaked stack holds the slot, poisons reruns.
+    # From: Issue #1683
+    export TMPDIR="${BATS_TEST_TMPDIR}"
+    _ci_validate_reserve() { echo "subnet=172.16.1.32/27 holder=1234"; }
+    _ci_validate_net_override() { echo "networks:"; }
     _ci_validate_pin_override() { echo "services:"; }
     _ci_validate_up() { echo "boom"; return 1; }
-    _ci_validate_teardown() { echo "TEARDOWN-CALLED"; }
+    _ci_validate_teardown() { echo "TEARDOWN holder=$1 project=$2"; }
     run _ci_default_validate "proxy=sha256:x"
     [ "${status}" -ne 0 ]
-    [[ "${output}" == *"TEARDOWN-CALLED"* ]]
+    [[ "${output}" == *"TEARDOWN holder=1234"* ]]
     [[ "${output}" == *"CI-ERROR-VALIDATE-0017"* ]]
 }
 
 @test "validate default flags a subnet collision distinctly" {
     # What: A pool-overlap up failure is a collision id.
-    # Why: Diagnosis points at the mutex, not the images.
-    # From: Issue #1683 | PR #1858
-    _ci_validate_lock() { echo 1234; }
+    # Why: Diagnosis points at the slot, not the images.
+    # From: Issue #1683
+    export TMPDIR="${BATS_TEST_TMPDIR}"
+    _ci_validate_reserve() { echo "subnet=172.16.1.32/27 holder=1234"; }
+    _ci_validate_net_override() { echo "networks:"; }
     _ci_validate_pin_override() { echo "services:"; }
     _ci_validate_up() { echo "Pool overlaps with other one"; return 1; }
     _ci_validate_teardown() { :; }
@@ -1882,17 +1886,17 @@ netdata=sha256:n"
     [[ "${output}" == *"CI-ERROR-VALIDATE-0016"* ]]
 }
 
-@test "validate lock refuses a second concurrent holder" {
-    # What: One host-local flock; the second call fails.
-    # Why: Two prod stacks can't both bind IP_STANDARD.
-    # From: Issue #1683 | PR #1858
+@test "validate slot lock refuses a second holder of one /27" {
+    # What: One flock per /27; the second call fails.
+    # Why: Two runs must never share a validation subnet.
+    # From: Issue #1683
     export TMPDIR="${BATS_TEST_TMPDIR}"
     local first
-    first="$(_ci_validate_lock)"
+    first="$(_ci_validate_slot_lock 172.16.1.32/27)"
     [ -n "${first}" ]
-    run _ci_validate_lock
+    run _ci_validate_slot_lock 172.16.1.32/27
     [ "${status}" -ne 0 ]
-    _ci_validate_unlock "${first}"
+    _ci_validate_release "${first}"
 }
 
 @test "validate wait_healthy reports every unhealthy service" {
@@ -1905,6 +1909,137 @@ netdata=sha256:n"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-VALIDATE-0009"* ]]
     [[ "${output}" == *'service="dns-standard"'* ]]
+}
+
+@test "ipv4 to int converts a dotted quad" {
+    # What: Dotted quad to a 32-bit integer.
+    # Why: Integer masking proves a /27 overlap.
+    # From: Issue #1683
+    run _ci_ipv4_to_int 172.16.1.32
+    [ "${status}" -eq 0 ]
+    [ "${output}" -eq 2886730016 ]
+}
+
+@test "validate subnet is deterministic and in 172.16/12" {
+    # What: Same seed yields the same /27 in 172.16/12.
+    # Why: Reproducible slot from the private B block.
+    # From: Issue #1683
+    local a b o2 host
+    a="$(_ci_validate_subnet seed-one)"
+    b="$(_ci_validate_subnet seed-one)"
+    [ "${a}" = "${b}" ]
+    [[ "${a}" == 172.*/27 ]]
+    o2="${a#172.}"; o2="${o2%%.*}"
+    [ "${o2}" -ge 16 ] && [ "${o2}" -le 31 ]
+    host="${a%/27}"; host="${host##*.}"
+    [ "$(( host % 32 ))" -eq 0 ]
+}
+
+@test "validate detects a /27 overlapping a live network" {
+    # What: An overlapping live subnet is reported.
+    # Why: Reserve must skip a colliding /27.
+    # From: Issue #1683
+    docker() {
+        case "$1 $2" in
+            "network ls") echo netid1 ;;
+            "network inspect") echo "172.16.1.0/24" ;;
+        esac
+    }
+    run _ci_validate_subnet_conflicts 172.16.1.32/27
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == "172.16.1.0/24" ]]
+}
+
+@test "validate passes a /27 that overlaps nothing live" {
+    # What: A /27 overlapping nothing is free.
+    # Why: Free slots must not be falsely skipped.
+    # From: Issue #1683
+    docker() {
+        case "$1 $2" in
+            "network ls") echo netid1 ;;
+            "network inspect") echo "10.0.0.0/24" ;;
+        esac
+    }
+    run _ci_validate_subnet_conflicts 172.16.1.32/27
+    [ "${status}" -ne 0 ]
+}
+
+@test "validate reserve prints subnet and holder" {
+    # What: Reserve yields a free /27 and lock pid.
+    # Why: default_validate reads both as fields.
+    # From: Issue #1683
+    _ci_validate_subnet_conflicts() { return 1; }
+    _ci_validate_slot_lock() { echo 4242; }
+    run _ci_validate_reserve
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == subnet=172.*"/27 holder=4242" ]]
+}
+
+@test "validate startable excludes host-mode services" {
+    # What: host-mode services are never started.
+    # Why: Host-port bindings cannot be isolated.
+    # From: Issue #1683
+    CI_COMPOSE_CONFIG_CMD="$(_stub cfg 'printf "%s" "{\"services\":{\"proxy\":{},\"dhcp\":{\"network_mode\":\"host\"},\"dns-standard\":{}}}"')" \
+        run _ci_validate_startable
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"proxy"* ]]
+    [[ "${output}" == *"dns-standard"* ]]
+    [[ "${output}" != *"dhcp"* ]]
+}
+
+@test "validate health list is started and healthchecked" {
+    # What: Health list is started AND healthchecked.
+    # Why: Polling an unstarted service hangs out.
+    # From: Issue #1683
+    CI_COMPOSE_CONFIG_CMD="$(_stub cfg 'printf "%s" "{\"services\":{\"proxy\":{\"healthcheck\":{}},\"dhcp\":{\"network_mode\":\"host\",\"healthcheck\":{}},\"cachehamster\":{}}}"')" \
+        run _ci_validate_health_services
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"proxy"* ]]
+    [[ "${output}" != *"dhcp"* ]]
+    [[ "${output}" != *"cachehamster"* ]]
+}
+
+@test "validate net override isolates and resets services" {
+    # What: Override sets /27, resets ports and names.
+    # Why: No fixed IPs, no port or name collisions.
+    # From: Issue #1683
+    CI_COMPOSE_CONFIG_CMD="$(_stub cfg 'printf "%s" "{\"services\":{\"proxy\":{},\"dhcp\":{\"network_mode\":\"host\"}}}"')" \
+        run _ci_validate_net_override 172.16.1.32/27
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"subnet: 172.16.1.32/27"* ]]
+    [[ "${output}" == *"proxy:"* ]]
+    [[ "${output}" == *"container_name: !reset null"* ]]
+    [[ "${output}" == *"ports: !reset []"* ]]
+    [[ "${output}" != *"dhcp:"* ]]
+}
+
+@test "validate container ip refuses a non-ipv4 result" {
+    # What: A non-IPv4 inspect result is refused.
+    # Why: Else a check digs a bogus resolver.
+    # From: Issue #1683
+    docker() {
+        case "$1" in
+            compose) echo "abc123" ;;
+            inspect) echo "<no value>" ;;
+        esac
+    }
+    run _ci_validate_container_ip proj proxy
+    [ "${status}" -ne 0 ]
+}
+
+@test "validate container ip returns the container ipv4" {
+    # What: A real IPv4 from inspect is returned.
+    # Why: Checks target the runtime /27 IP.
+    # From: Issue #1683
+    docker() {
+        case "$1" in
+            compose) echo "abc123" ;;
+            inspect) echo "172.16.1.35" ;;
+        esac
+    }
+    run _ci_validate_container_ip proj proxy
+    [ "${status}" -eq 0 ]
+    [ "${output}" = "172.16.1.35" ]
 }
 
 # =========================================================

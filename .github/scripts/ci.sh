@@ -2255,22 +2255,41 @@ _ci_validate_pin_override() {
     _ci_validate_report_unpinned "${candidate}" "${matched}"
 }
 
-# What: Print the per-host validate lock path.
-# Why: /var/tmp not /tmp; avoids tmpfs OOM.
-# From: Issue #1683 | PR #1858
-_ci_validate_lock_path() {
-    printf '%s/ci-validate.lock' "${TMPDIR:-/var/tmp}"
+# What: Seed a validate reservation attempt.
+# Why: attempt 1 unsalted; a retry re-slots.
+# From: Issue #1683
+_ci_validate_seed() {
+    local run_id="$1" run_attempt="$2" n="$3"
+    if [ "${n}" -le 1 ]; then
+        printf '%s-%s' "${run_id}" "${run_attempt}"
+    else
+        printf '%s-%s-retry%s' "${run_id}" "${run_attempt}" "${n}"
+    fi
 }
 
-# What: Acquire the per-host validate lock.
-# Why: One prod stack per host; kernel frees it.
-# From: Issue #1683 | PR #1858
-_ci_validate_lock() {
-    local lock_file holder
-    lock_file="$(_ci_validate_lock_path)"
+# What: Derive a collision-free /27 in 172.16/12.
+# Why: The full private B block gives ~32k /27 slots.
+# From: Issue #1683
+_ci_validate_subnet() {
+    local seed="$1" h o2 o3 sub
+    h="$(printf '%s' "${seed}" | sha256sum)"
+    o2=$(( 16 + (16#$(printf '%s' "${h}" | cut -c1-4) % 16) ))
+    o3=$(( 16#$(printf '%s' "${h}" | cut -c5-10) % 256 ))
+    sub=$(( 16#$(printf '%s' "${h}" | cut -c11-12) % 8 ))
+    printf '172.%s.%s.%s/27' "${o2}" "${o3}" "$(( sub * 32 ))"
+}
+
+# What: Host-lock one /27; print the holder pid.
+# Why: Per-slot flock; runs never share a /27.
+# From: Issue #1683
+_ci_validate_slot_lock() {
+    local subnet="$1" root key holder
+    root="${TMPDIR:-/var/tmp}/ci-validate-locks"
+    key="$(printf '%s' "${subnet}" | tr './' '__')"
+    mkdir -p "${root}"
     (
         exec >/dev/null 2>&1
-        exec 9>"${lock_file}"
+        exec 9>"${root}/${key}.lock"
         flock -n 9 || exit 1
         exec sleep infinity
     ) &
@@ -2284,21 +2303,130 @@ _ci_validate_lock() {
     return 1
 }
 
-# What: Release the validate lock holder.
+# What: Release a held validate slot lock.
 # Why: Frees the mutex; safe if already gone.
-# From: Issue #1683 | PR #1858
-_ci_validate_unlock() {
+# From: Issue #1683
+_ci_validate_release() {
     local holder="${1:-}"
     [ -n "${holder}" ] || return 0
     kill "${holder}" 2>/dev/null || true
     wait "${holder}" 2>/dev/null || true
 }
 
-# What: The validation compose project name.
-# Why: One name; teardown finds nets by label.
-# From: Issue #1683 | PR #1858
+# What: Convert an IPv4 address to an integer.
+# Why: Integer masking proves a /27 overlap.
+# From: Issue #1683
+_ci_ipv4_to_int() {
+    local a b c d
+    IFS=. read -r a b c d <<< "$1"
+    printf '%s' "$(( (10#$a << 24) + (10#$b << 16) + (10#$c << 8) + 10#$d ))"
+}
+
+# What: True if a /27 overlaps a live network.
+# Why: CIDR overlap by integer mask; no python.
+# From: Issue #1683
+_ci_validate_subnet_conflicts() {
+    local target="$1" tip tm net sub sip sm m
+    tip="$(_ci_ipv4_to_int "${target%/*}")"
+    tm="${target#*/}"
+    while IFS= read -r net; do
+        [ -n "${net}" ] || continue
+        while IFS= read -r sub; do
+            case "${sub}" in
+                *.*.*.*/*)
+                    sip="$(_ci_ipv4_to_int "${sub%/*}")"
+                    sm="${sub#*/}"
+                    m=$(( tm < sm ? tm : sm ))
+                    if [ "$(( tip >> (32 - m) ))" = "$(( sip >> (32 - m) ))" ]; then
+                        printf '%s\n' "${sub}"
+                        return 0
+                    fi
+                    ;;
+            esac
+        done < <(docker network inspect "${net}" --format '{{range .IPAM.Config}}{{.Subnet}}{{"\n"}}{{end}}' 2>/dev/null)
+    done < <(docker network ls -q 2>/dev/null)
+    return 1
+}
+
+# What: Reserve a free /27; print subnet + holder.
+# Why: Retry a fresh slot on a locked candidate.
+# From: Issue #1683
+_ci_validate_reserve() {
+    local run_id run_attempt max n seed subnet holder
+    run_id="${GITHUB_RUN_ID:-$$}"
+    run_attempt="${GITHUB_RUN_ATTEMPT:-1}"
+    max="${CI_VALIDATE_MAX_SLOTS:-10}"
+    for (( n=1; n<=max; n++ )); do
+        seed="$(_ci_validate_seed "${run_id}" "${run_attempt}" "${n}")"
+        subnet="$(_ci_validate_subnet "${seed}")"
+        _ci_validate_subnet_conflicts "${subnet}" >/dev/null 2>&1 && continue
+        if holder="$(_ci_validate_slot_lock "${subnet}")"; then
+            printf 'subnet=%s holder=%s\n' "${subnet}" "${holder}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# What: The per-run validation project name.
+# Why: A per-slot project isolates its /27 net.
+# From: Issue #1683
 _ci_validate_project() {
-    printf 'lancache-ng-validate'
+    printf 'lancache-ng-validate-%s' "$(printf '%s' "${1}" | tr './' '__')"
+}
+
+# What: The resolved compose config as JSON.
+# Why: One source; every service list derives from it.
+# From: Issue #1683
+_ci_validate_config_json() {
+    if [ -n "${CI_COMPOSE_CONFIG_CMD:-}" ]; then
+        "${CI_COMPOSE_CONFIG_CMD}"
+        return "$?"
+    fi
+    docker compose -f "${CI_COMPOSE_FILE:-deploy/prod/docker-compose.yml}" config --format json
+}
+
+# What: Compose service names passing one jq filter.
+# Why: One owner; startable + health lists share it.
+# From: Issue #1683
+_ci_validate_service_list() {
+    local filter="$1"
+    _ci_validate_config_json | jq -r ".services|to_entries[]|select(${filter})|.key"
+}
+
+# What: Services validate starts: bridge, never host-mode.
+# Why: host-mode host-port bindings cannot be isolated.
+# From: Issue #1683
+_ci_validate_startable() {
+    _ci_validate_service_list '.value.network_mode != "host"'
+}
+
+# What: Override that isolates the stack in one /27.
+# Why: Per-run subnet; reset host ports + fixed names.
+# From: Issue #1683
+_ci_validate_net_override() {
+    local subnet="$1" svc
+    printf 'networks:\n  default:\n    ipam:\n      config:\n        - subnet: %s\n' "${subnet}"
+    printf 'services:\n'
+    while IFS= read -r svc; do
+        [ -n "${svc}" ] || continue
+        printf '  %s:\n    container_name: !reset null\n    ports: !reset []\n' "${svc}"
+    done < <(_ci_validate_startable)
+}
+
+# What: The /27 IP of a compose service container.
+# Why: Checks target the runtime IP, never a fixed one.
+# From: Issue #1683
+_ci_validate_container_ip() {
+    local project="$1" svc="$2" net cid ip
+    net="${project}_default"
+    cid="$(docker compose -p "${project}" ps -q "${svc}" 2>/dev/null)"
+    [ -n "${cid}" ] || return 1
+    ip="$(docker inspect -f "{{(index .NetworkSettings.Networks \"${net}\").IPAddress}}" "${cid}" 2>/dev/null)"
+    case "${ip}" in
+        *.*.*.*) printf '%s' "${ip}" ;;
+        *) return 1 ;;
+    esac
 }
 
 # What: Wait until a network has no containers.
@@ -2335,12 +2463,11 @@ _ci_validate_is_collision() {
     return 1
 }
 
-# What: Tear the stack down and free the lock.
+# What: Tear the stack down and free the slot.
 # Why: One cleanup point; runs on the fail path.
 # From: Issue #1683 | PR #1858
 _ci_validate_teardown() {
-    local holder="$1" project net_id
-    project="$(_ci_validate_project)"
+    local holder="$1" project="$2" net_id
     docker compose -p "${project}" \
         -f "${CI_COMPOSE_FILE:-deploy/prod/docker-compose.yml}" \
         down -v --remove-orphans >/dev/null 2>&1 || true
@@ -2348,37 +2475,33 @@ _ci_validate_teardown() {
         [ -n "${net_id}" ] || continue
         _ci_validate_network_teardown "${net_id}"
     done < <(docker network ls --filter "label=com.docker.compose.project=${project}" -q 2>/dev/null)
-    _ci_validate_unlock "${holder}"
+    _ci_validate_release "${holder}"
 }
 
-# What: Read one key from deploy/prod/.env.
-# Why: IP_STANDARD/IP_SSL are deployment config.
-# From: Issue #1683 | PR #1858
-_ci_validate_env() {
-    local key="$1" file="${CI_PROD_ENV:-deploy/prod/.env}"
-    awk -F= -v k="${key}" '$1==k{sub(/^[^=]*=/,"");print;exit}' "${file}"
-}
-
-# What: Bring the pinned prod stack up detached.
-# Why: One up; the override pins candidate digests.
+# What: Bring the isolated prod stack up detached.
+# Why: net override /27-isolates; pin override pins.
 # From: Issue #1683 | PR #1858
 _ci_validate_up() {
-    local override="$1"
-    docker compose -p "$(_ci_validate_project)" \
+    local project="$1" net_override="$2" pin_override="$3" svc
+    local -a svcs=()
+    while IFS= read -r svc; do
+        [ -n "${svc}" ] && svcs+=("${svc}")
+    done < <(_ci_validate_startable)
+    if [ "${#svcs[@]}" -eq 0 ]; then
+        ci_log "[CI-ERROR-VALIDATE-0018]" "reason=\"no startable services from compose config\""
+        return 2
+    fi
+    docker compose -p "${project}" \
         -f "${CI_COMPOSE_FILE:-deploy/prod/docker-compose.yml}" \
-        -f "${override}" up -d
+        -f "${net_override}" -f "${pin_override}" up -d "${svcs[@]}"
 }
 
-# What: Names of compose services with a healthcheck.
-# Why: Only these have a health status to poll.
-# From: Issue #1683 | PR #1858
+# What: Started services that also have a healthcheck.
+# Why: Poll only what up started; skip host-mode.
+# From: Issue #1683
 _ci_validate_health_services() {
-    if [ -n "${CI_COMPOSE_HEALTH_CMD:-}" ]; then
-        "${CI_COMPOSE_HEALTH_CMD}"
-        return "$?"
-    fi
-    docker compose -f "${CI_COMPOSE_FILE:-deploy/prod/docker-compose.yml}" config --format json \
-        | jq -r '.services|to_entries[]|select(.value.healthcheck!=null)|.key'
+    _ci_validate_service_list \
+        '.value.network_mode != "host" and .value.healthcheck != null'
 }
 
 # What: Wait for one container to report healthy.
@@ -2424,12 +2547,12 @@ _ci_validate_wait_healthy() {
 # Why: Real dig query/response, not ping (AG-VAL-013).
 # From: Issue #1683 | PR #1858
 _ci_validate_dns() {
-    local ip_std ip_ssl domain ip
-    ip_std="$(_ci_validate_env IP_STANDARD)"
-    ip_ssl="$(_ci_validate_env IP_SSL)"
+    local project="$1" ip_std ip_ssl domain ip
+    ip_std="$(_ci_validate_container_ip "${project}" dns-standard)"
+    ip_ssl="$(_ci_validate_container_ip "${project}" dns-ssl)"
     domain="$(_ci_validation_dns_domains | head -1)"
     if [ -z "${ip_std}" ] || [ -z "${ip_ssl}" ] || [ -z "${domain}" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0010]" "reason=\"missing IP_STANDARD/IP_SSL or dns test domain\""
+        ci_log "[CI-ERROR-VALIDATE-0010]" "reason=\"missing dns container IP or test domain\""
         return 2
     fi
     for ip in "${ip_std}" "${ip_ssl}"; do
@@ -2444,12 +2567,12 @@ _ci_validate_dns() {
 # Why: Real cache behavior, not a port probe (AG-VAL-014).
 # From: Issue #1683 | PR #1858
 _ci_validate_proxy() {
-    local url ip_std host h
+    local project="$1" url ip_std host h
     url="$(_ci_validation_proxy_probe_url)"
-    ip_std="$(_ci_validate_env IP_STANDARD)"
+    ip_std="$(_ci_validate_container_ip "${project}" proxy)"
     host="${url#http://}"; host="${host%%/*}"
     if [ -z "${url}" ] || [ -z "${ip_std}" ] || [ -z "${host}" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0012]" "reason=\"missing proxy probe url or IP_STANDARD\""
+        ci_log "[CI-ERROR-VALIDATE-0012]" "reason=\"missing proxy probe url or proxy container IP\""
         return 2
     fi
     if ! curl -fsS --resolve "${host}:80:${ip_std}" -o /dev/null "${url}"; then
@@ -2467,20 +2590,25 @@ _ci_validate_proxy() {
 # Why: One up, all checks, one teardown (AG-VAL-027).
 # From: Issue #1683 | PR #1858
 _ci_default_validate() {
-    local candidate="$1" holder override project rc=0 up_out
-    project="$(_ci_validate_project)"
-    if ! holder="$(_ci_validate_lock)"; then
-        ci_log "[CI-ERROR-VALIDATE-0015]" "reason=\"another validate run holds the per-host lock\""
+    local candidate="$1" reservation subnet holder project rc=0 up_out
+    local net_ovr pin_ovr
+    if ! reservation="$(_ci_validate_reserve)"; then
+        ci_log "[CI-ERROR-VALIDATE-0015]" "reason=\"no free validation /27 after slot retries\""
         return 2
     fi
-    override="$(mktemp "${TMPDIR:-/var/tmp}/ci-validate-override.XXXXXX.yml")"
-    if _ci_validate_pin_override "${candidate}" > "${override}"; then
-        if up_out="$(_ci_validate_up "${override}" 2>&1)"; then
+    subnet="$(_ci_record_field "${reservation}" subnet)"
+    holder="$(_ci_record_field "${reservation}" holder)"
+    project="$(_ci_validate_project "${subnet}")"
+    net_ovr="$(mktemp "${TMPDIR:-/var/tmp}/ci-validate-net.XXXXXX.yml")"
+    pin_ovr="$(mktemp "${TMPDIR:-/var/tmp}/ci-validate-pin.XXXXXX.yml")"
+    if _ci_validate_net_override "${subnet}" > "${net_ovr}" \
+        && _ci_validate_pin_override "${candidate}" > "${pin_ovr}"; then
+        if up_out="$(_ci_validate_up "${project}" "${net_ovr}" "${pin_ovr}" 2>&1)"; then
             _ci_validate_wait_healthy "${project}" || rc=$?
-            [ "${rc}" -eq 0 ] && { _ci_validate_dns || rc=$?; }
-            [ "${rc}" -eq 0 ] && { _ci_validate_proxy || rc=$?; }
+            [ "${rc}" -eq 0 ] && { _ci_validate_dns "${project}" || rc=$?; }
+            [ "${rc}" -eq 0 ] && { _ci_validate_proxy "${project}" || rc=$?; }
         elif _ci_validate_is_collision "${up_out}"; then
-            ci_error "[CI-ERROR-VALIDATE-0016]" "reason=\"subnet/port collision; lock bypassed or stale stack\"" "${up_out}"
+            ci_error "[CI-ERROR-VALIDATE-0016]" "reason=\"subnet/port collision after slot reservation\"" "${up_out}"
             rc=1
         else
             ci_error "[CI-ERROR-VALIDATE-0017]" "reason=\"stack up failed\"" "${up_out}"
@@ -2489,8 +2617,8 @@ _ci_default_validate() {
     else
         rc=$?
     fi
-    _ci_validate_teardown "${holder}"
-    rm -f "${override}"
+    _ci_validate_teardown "${holder}" "${project}"
+    rm -f "${net_ovr}" "${pin_ovr}"
     return "${rc}"
 }
 
