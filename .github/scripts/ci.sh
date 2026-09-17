@@ -174,18 +174,7 @@ ci_service_contexts() {
 # Why: Map a context name to the repo path it covers.
 # From: Issue #1683
 ci_context_path() {
-    local context="$1"
-    awk -v ctx="$context" '
-        /^named_contexts:[[:space:]]*$/ { inc = 1; next }
-        inc && /^[^[:space:]]/ { inc = 0 }
-        inc && /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ {
-            cur = $1; sub(/:$/, "", cur); inctx = (cur == ctx)
-        }
-        inc && inctx && $1 == "path:" {
-            val = $0; sub(/^[[:space:]]*path:[[:space:]]*/, "", val)
-            print val; exit
-        }
-    ' "${CI_MANIFEST}"
+    _ci_block_entry_field named_contexts "$1" path
 }
 
 # =========================================================
@@ -283,6 +272,18 @@ _ci_changed_files() {
     printf '%s\n' "$@"
 }
 
+# What: Collect changed files into a named array.
+# Why: One owner; plan and plan-matrix share it.
+# From: Issue #1683
+_ci_collect_changed() {
+    local -n _arr="$1"; shift
+    _arr=()
+    local line
+    while IFS= read -r line; do
+        [ -n "${line}" ] && _arr+=("${line}")
+    done < <(_ci_changed_files "$@")
+}
+
 # What: True if any changed path is under a prefix.
 # Why: Path membership only SELECTS a rebuild candidate.
 # From: Issue #1683
@@ -319,9 +320,7 @@ _ci_plan_candidate() {
 # From: Issue #1683
 ci_cmd_plan() {
     local -a changed=()
-    while IFS= read -r line; do
-        [ -n "${line}" ] && changed+=("${line}")
-    done < <(_ci_changed_files "$@")
+    _ci_collect_changed changed "$@"
 
     local service
     for service in $(ci_build_targets); do
@@ -340,16 +339,14 @@ ci_cmd_plan() {
 ci_cmd_plan_matrix() {
     local out="${GITHUB_OUTPUT:?GITHUB_OUTPUT required}"
     local -a changed=()
-    while IFS= read -r line; do
-        [ -n "${line}" ] && changed+=("${line}")
-    done < <(_ci_changed_files "$@")
+    _ci_collect_changed changed "$@"
     local service platform include='[]' any=false resolved paction runner
     for service in $(ci_build_targets); do
         _ci_plan_candidate "${service}" "${changed[@]}" || continue
         while IFS= read -r platform; do
             [ -n "${platform}" ] || continue
             resolved="$(_ci_resolve_one "${service}" "${platform}")" || return "$?"
-            paction="${resolved#*action=}"; paction="${paction%% *}"
+            paction="$(_ci_record_field "${resolved}" action)"
             [ "${paction}" = "build" ] || continue
             if ! runner="$(_ci_platform_runner "${platform}")"; then
                 ci_log "[CI-ERROR-PLAN-0002]" "platform=\"${platform}\" reason=\"no runner label for platform\""
@@ -440,17 +437,11 @@ _ci_tracked_content_ids() {
 # Why: Another arch's digest change must not shift this id.
 # From: Issue #1683
 _ci_install_digest_pin() {
-    local platform="$1" arch re=""
+    local platform="$1" arch val
     for arch in $(_ci_platform_arch_aliases "${platform}"); do
-        re="${re:+${re}|}sha256_${arch}"
+        val="$(_ci_block_entry_field external_versions netdata "sha256_${arch}")"
+        [ -n "${val}" ] && printf 'sha256_%s: %s\n' "${arch}" "${val}"
     done
-    awk -v re="${re}" '
-        /^external_versions:[[:space:]]*$/ { inev = 1; next }
-        inev && /^[A-Za-z]/ { inev = 0 }
-        inev && /^  netdata:[[:space:]]*$/ { nn = 1; next }
-        inev && nn && /^  [A-Za-z]/ { nn = 0 }
-        inev && nn && $1 ~ ("^(" re "):$") { print }
-    ' "${CI_MANIFEST}"
 }
 
 # What: Print the SOT value a build type keys on.
@@ -671,6 +662,15 @@ _ci_resolve_action() {
         BUILD_IN_PROGRESS)  printf 'wait\n' ;;
         *)                  printf 'escalate\n' ;;
     esac
+}
+
+# What: Read one key=value field from a record line.
+# Why: One owner of the resolve record format.
+# From: Issue #1683
+_ci_record_field() {
+    local rec="$1" key="$2"
+    rec="${rec#*"${key}"=}"
+    printf '%s' "${rec%% *}"
 }
 
 # What: Resolve one target+platform to a state + action.
@@ -1177,9 +1177,9 @@ _ci_build_one() {
     local service="$1" platform="$2"
     local resolved action identity state build_type impact ack
     resolved="$(_ci_resolve_one "${service}" "${platform}")" || return "$?"
-    action="${resolved#*action=}"; action="${action%% *}"
-    identity="${resolved#*identity=}"; identity="${identity%% *}"
-    state="${resolved#*state=}"; state="${state%% *}"
+    action="$(_ci_record_field "${resolved}" action)"
+    identity="$(_ci_record_field "${resolved}" identity)"
+    state="$(_ci_record_field "${resolved}" state)"
     build_type="$(ci_service_field "${service}" build_type)"
 
     case "${action}" in

@@ -10,6 +10,7 @@
 # From: Issue #1683
 setup() {
     CI_SH="${BATS_TEST_DIRNAME}/ci.sh"
+    CI_MANIFEST_SOURCE="${BATS_TEST_DIRNAME}/../yaml/build-manifest.yml"
     # shellcheck source=.github/scripts/ci.sh
     source "${CI_SH}"
 }
@@ -265,7 +266,7 @@ setup() {
     # Why: A platform-irrelevant change must not rebuild.
     # From: Issue #1683
     local m="${BATS_TEST_TMPDIR}/manifest.yml"
-    cp "${BATS_TEST_DIRNAME}/../yaml/build-manifest.yml" "${m}"
+    cp "${CI_MANIFEST_SOURCE}" "${m}"
     local amd_before arm_before amd_after arm_after
     amd_before="$(CI_MANIFEST="${m}" bash "${CI_SH}" identity netdata linux/amd64)"
     arm_before="$(CI_MANIFEST="${m}" bash "${CI_SH}" identity netdata linux/arm64)"
@@ -281,7 +282,7 @@ setup() {
     # Why: A masked rc0 fan-out would skip the target.
     # From: Issue #1683
     local m="${BATS_TEST_TMPDIR}/manifest.yml"
-    cp "${BATS_TEST_DIRNAME}/../yaml/build-manifest.yml" "${m}"
+    cp "${CI_MANIFEST_SOURCE}" "${m}"
     sed -i '/^  platforms: \[/d' "${m}"
     CI_MANIFEST="${m}" run bash "${CI_SH}" identity ui
     [ "${status}" -eq 2 ]
@@ -414,7 +415,7 @@ setup() {
     # Why: impact base pins must reflect base, not head.
     # From: Issue #1683
     local m1="${BATS_TEST_TMPDIR}/m1.yml" m2="${BATS_TEST_TMPDIR}/m2.yml"
-    cp "${BATS_TEST_DIRNAME}/../yaml/build-manifest.yml" "${m1}"
+    cp "${CI_MANIFEST_SOURCE}" "${m1}"
     cp "${m1}" "${m2}"
     sed -i 's/sha256_x86_64: [0-9a-f]\{64\}/sha256_x86_64: deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/' "${m2}"
     local a b
@@ -880,12 +881,20 @@ _stub() {
 # ASSEMBLY
 # =========================================================
 
-# What: Digest and index-lookup stubs share these constants.
+# What: A valid 64-hex test digest from one char.
+# Why: One primitive; assembly/promote/release share it.
+# From: Issue #1683
+_test_digest() {
+    local c="$1" out=""
+    while [ "${#out}" -lt 64 ]; do out="${out}${c}"; done
+    printf 'sha256:%s' "${out}"
+}
+# What: Named digest constants built on _test_digest.
 # Why: Idempotency compares assembled vs existing.
 # From: Issue #1683
-_asm_a() { printf 'sha256:%s' "$(printf 'a%.0s' {1..64})"; }
-_asm_b() { printf 'sha256:%s' "$(printf 'b%.0s' {1..64})"; }
-_asm_idx() { printf 'sha256:%s' "$(printf 'd%.0s' {1..64})"; }
+_asm_a() { _test_digest a; }
+_asm_b() { _test_digest b; }
+_asm_idx() { _test_digest d; }
 _asm_digest_stub() {
     _stub dg "case \"\$2\" in */arm64) echo $(_asm_b);; *) echo $(_asm_a);; esac"
 }
@@ -1023,7 +1032,7 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     # What: A missing service blocks the promotion.
     # Why: Promotion is stack-atomic (docs section 50).
     # From: Issue #1683
-    local dig="sha256:$(printf 'a%.0s' {1..64})"
+    local dig="$(_test_digest a)"
     CI_STACK_CANDIDATE_CMD="$(_stub cand "echo proxy=${dig}")" GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${CI_SH}" promote nightly
     [ "${status}" -eq 2 ]
@@ -1034,7 +1043,7 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     # What: Stack validation is a precondition.
     # Why: Fail-closed without validate (docs section 50).
     # From: Issue #1683
-    local dig="sha256:$(printf 'a%.0s' {1..64})"
+    local dig="$(_test_digest a)"
     CI_STACK_CANDIDATE_CMD="$(_promote_full_candidate "${dig}")" GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${CI_SH}" promote nightly
     [ "${status}" -eq 2 ]
@@ -1045,7 +1054,7 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     # What: Moving refs is an authenticated action.
     # Why: Never anonymous (rate-limit).
     # From: Issue #1683
-    local dig="sha256:$(printf 'a%.0s' {1..64})"
+    local dig="$(_test_digest a)"
     CI_STACK_CANDIDATE_CMD="$(_promote_full_candidate "${dig}")" CI_STACK_VALIDATED=SUCCESS \
         run bash "${CI_SH}" promote nightly
     [ "${status}" -eq 2 ]
@@ -1056,7 +1065,7 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     # What: Fresh promote: lock, move, readback, unlock.
     # Why: The one success path (docs section 51/53).
     # From: Issue #1683
-    local dig="sha256:$(printf 'a%.0s' {1..64})"
+    local dig="$(_test_digest a)"
     CI_STACK_CANDIDATE_CMD="$(_promote_full_candidate "${dig}")" CI_STACK_VALIDATED=SUCCESS \
     CI_PROMOTE_LOCK_CMD="$(_promote_lock)" CI_PROMOTE_UNLOCK_CMD="$(_promote_unlock)" \
     CI_PROMOTE_MOVE_CMD="$(_stub mv 'touch "${BATS_TEST_TMPDIR}/moved.$1"')" \
@@ -1072,7 +1081,7 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     # What: A re-run reuses the state, takes no lock.
     # Why: Same end state on retry (docs section 26.4).
     # From: Issue #1683
-    local dig="sha256:$(printf 'a%.0s' {1..64})"
+    local dig="$(_test_digest a)"
     CI_STACK_CANDIDATE_CMD="$(_promote_full_candidate "${dig}")" CI_STACK_VALIDATED=SUCCESS \
     CI_PROMOTE_LOCK_CMD="$(_promote_lock)" CI_PROMOTE_UNLOCK_CMD="$(_promote_unlock)" \
     CI_PROMOTE_MOVE_CMD="$(_stub mv 'true')" \
@@ -1088,8 +1097,8 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     # What: A mismatch fails closed, never leaks the lock.
     # Why: A held lock blocks all future promotions.
     # From: Issue #1683
-    local dig="sha256:$(printf 'a%.0s' {1..64})"
-    local other="sha256:$(printf 'b%.0s' {1..64})"
+    local dig="$(_test_digest a)"
+    local other="$(_test_digest b)"
     CI_STACK_CANDIDATE_CMD="$(_promote_full_candidate "${dig}")" CI_STACK_VALIDATED=SUCCESS \
     CI_PROMOTE_LOCK_CMD="$(_promote_lock)" CI_PROMOTE_UNLOCK_CMD="$(_promote_unlock)" \
     CI_PROMOTE_MOVE_CMD="$(_stub mv 'true')" \
@@ -1128,7 +1137,7 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     # What: Fresh verdict promotes the exact candidate.
     # Why: latest promote is the release success path.
     # From: Issue #1683
-    local dig="sha256:$(printf 'a%.0s' {1..64})"
+    local dig="$(_test_digest a)"
     CI_RELEASE_VALIDATION_CMD="$(_stub val 'exit 0')" \
     CI_STACK_CANDIDATE_CMD="$(_promote_full_candidate "${dig}")" CI_STACK_VALIDATED=SUCCESS \
     CI_PROMOTE_LOCK_CMD="$(_promote_lock)" CI_PROMOTE_UNLOCK_CMD="$(_promote_unlock)" \
@@ -1146,7 +1155,7 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     # What: A re-run promotes nothing, takes no lock.
     # Why: Same end state on retry (docs section 26.4).
     # From: Issue #1683
-    local dig="sha256:$(printf 'a%.0s' {1..64})"
+    local dig="$(_test_digest a)"
     CI_RELEASE_VALIDATION_CMD="$(_stub val 'exit 0')" \
     CI_STACK_CANDIDATE_CMD="$(_promote_full_candidate "${dig}")" CI_STACK_VALIDATED=SUCCESS \
     CI_PROMOTE_LOCK_CMD="$(_promote_lock)" CI_PROMOTE_UNLOCK_CMD="$(_promote_unlock)" \
@@ -1163,7 +1172,7 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     # What: Fresh verdict still needs a complete stack.
     # Why: One acceptance model; promote gates apply.
     # From: Issue #1683
-    local dig="sha256:$(printf 'a%.0s' {1..64})"
+    local dig="$(_test_digest a)"
     CI_RELEASE_VALIDATION_CMD="$(_stub val 'exit 0')" \
     CI_STACK_CANDIDATE_CMD="$(_stub cand "echo proxy=${dig}")" GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${CI_SH}" release
@@ -2145,7 +2154,7 @@ netdata=sha256:n"
     # Why: Empty value = FAIL CLOSED, no partial emit.
     # From: Issue #1683
     local m="${BATS_TEST_TMPDIR}/no-rust-alpine.yml"
-    grep -v '^  alpine:' "${BATS_TEST_DIRNAME}/../yaml/build-manifest.yml" > "${m}"
+    grep -v '^  alpine:' "${CI_MANIFEST_SOURCE}" > "${m}"
     CI_MANIFEST="${m}" run bash "${CI_SH}" build-args build-tools
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-BUILDARGS-0003"* ]]
@@ -2256,7 +2265,7 @@ netdata=sha256:n"
     local m="${BATS_TEST_TMPDIR}/dh.yml" base changed
     base="$(bash "${CI_SH}" build-tools signature "sccache-0.15.0-r0")"
     sed 's/sha256_amd64: 068c97e534e9c8f03db9064296b1d3c21d957f328e40309278559a92f9a74557/sha256_amd64: deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/' \
-        "${BATS_TEST_DIRNAME}/../yaml/build-manifest.yml" > "${m}"
+        "${CI_MANIFEST_SOURCE}" > "${m}"
     changed="$(CI_MANIFEST="${m}" bash "${CI_SH}" build-tools signature "sccache-0.15.0-r0")"
     [ -n "${base}" ]
     [ -n "${changed}" ]
