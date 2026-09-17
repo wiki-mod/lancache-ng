@@ -19,11 +19,11 @@ setup() {
     export CI_APK_RESOLVE_CMD="$(_stub apkres 'printf "pkg-1.0\n"')"
 }
 
-# What: Removes /var/tmp scratch dirs this test made.
-# Why: a "$(...)"-run helper can't set a var seen here.
+# What: Removes every dir a manifest file lists, one per line.
+# Why: A function (not inline teardown) lets a test prove it.
 # From: Issue #1683
-teardown() {
-    local manifest="${BATS_TEST_TMPDIR}/.trivy-var-tmp-dirs" d
+_trivy_cleanup_var_tmp_dirs() {
+    local manifest="$1" d
     if [ -f "${manifest}" ]; then
         while IFS= read -r d; do
             if [ -n "${d}" ]; then
@@ -31,6 +31,13 @@ teardown() {
             fi
         done < "${manifest}"
     fi
+}
+
+# What: Removes /var/tmp scratch dirs this test made.
+# Why: a "$(...)"-run helper can't set a var seen here.
+# From: Issue #1683
+teardown() {
+    _trivy_cleanup_var_tmp_dirs "${BATS_TEST_TMPDIR}/.trivy-var-tmp-dirs"
 }
 
 # =========================================================
@@ -3583,6 +3590,18 @@ _trivy_var_tmp_dir() {
     d="$(mktemp -d "/var/tmp/ci-bats-trivy.XXXXXX")" || return 1
     printf '%s\n' "${d}" >> "${BATS_TEST_TMPDIR}/.trivy-var-tmp-dirs"
     printf '%s\n' "${d}"
+}
+
+@test "trivy var-tmp-dir manifest survives its own subshell for cleanup" {
+    # What: pins the fix for a real leak: an array append made
+    # Why: inside "vt=\$(...)" never reached the caller's shell.
+    # From: Issue #1683
+    local vt; vt="$(_trivy_var_tmp_dir)"
+    [ -d "${vt}" ]
+    local manifest="${BATS_TEST_TMPDIR}/.trivy-var-tmp-dirs"
+    grep -qxF -- "${vt}" "${manifest}"
+    _trivy_cleanup_var_tmp_dirs "${manifest}"
+    [ ! -d "${vt}" ]
 }
 
 # What: PATH-shim trivy for a clean/finding/db outcome.
