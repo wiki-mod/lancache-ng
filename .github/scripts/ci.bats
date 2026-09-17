@@ -2794,6 +2794,181 @@ netdata=sha256:n"
     [ "${status}" -eq 0 ]
 }
 
+@test "check pr-template requires every current template section filled" {
+    # What: ci.sh derives required sections from the real template.
+    # Why: a hardcoded section list drifts when the template gains one.
+    # From: Issue #1683
+    local body='## Summary
+Fixes the thing.
+
+## Linked Issues
+Refs #1
+
+## What This Actually Changes
+Before/after text.
+
+## What This PR Fixes / Adds
+The bug.
+
+## What Changed In Code
+Touched foo.sh.
+
+## Why This Matters For Users / Operators
+Operators see X.
+
+## Scope Boundaries
+Does not touch Y.
+
+## Risk / Rollback / Follow-up
+Low risk, revert commit.
+
+## Local Scope Evidence
+```text
+foo.sh
+```
+
+## Validation
+```bash
+bash foo.sh
+```
+
+## Type of change
+- [x] Bug fix
+
+## Changelog
+Fixed foo.'
+    printf '%s' "${body}" > "${BATS_TEST_TMPDIR}/full.md"
+    run bash "${CI_SH}" check pr-template "${BATS_TEST_TMPDIR}/full.md"
+    [ "${status}" -eq 0 ]
+}
+
+@test "check pr-template fails an unfilled section and an unchecked type-of-change" {
+    # What: an untouched heading or unchecked box must fail.
+    # Why: legacy only checked non-empty, missing the checkbox case.
+    # From: Issue #1683
+    local body='## Summary
+Fixes the thing.
+
+## Type of change
+- [ ] Bug fix
+- [ ] New feature
+'
+    printf '%s' "${body}" > "${BATS_TEST_TMPDIR}/bad.md"
+    run bash "${CI_SH}" check pr-template "${BATS_TEST_TMPDIR}/bad.md"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0015"* ]]
+    [[ "${output}" == *"Linked Issues: heading not found"* ]]
+    [[ "${output}" == *"Type of change: no checkbox marked"* ]]
+}
+
+@test "check workflow-line-limit fails a workflow file over the line ceiling" {
+    # What: ci.sh owns the GitHub-dispatch-cliff size ceiling.
+    # Why: GitHub silently drops runs for oversized workflow files.
+    # From: Issue #1683
+    local d="${BATS_TEST_TMPDIR}/wf"; mkdir -p "${d}"
+    printf 'name: ok\non: push\njobs:\n  x:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n' \
+        > "${d}/ok.yml"
+    run bash "${CI_SH}" check workflow-line-limit "${d}"
+    [ "${status}" -eq 0 ]
+    {
+        printf 'name: big\non: push\njobs:\n  x:\n    runs-on: ubuntu-latest\n    steps:\n'
+        local _i
+        for _i in $(seq 1 9000); do printf '      - run: echo hi\n'; done
+    } > "${d}/big.yml"
+    run bash "${CI_SH}" check workflow-line-limit "${d}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0016"* ]]
+}
+
+@test "check pr-tracking-metadata requires PR context, labels, and milestone" {
+    # What: ci.sh owns the AG-GH-008 metadata gate; bats calls it.
+    # Why: label/milestone gaps must fail before network is touched.
+    # From: Issue #1683
+    run bash "${CI_SH}" check pr-tracking-metadata
+    [ "${status}" -eq 2 ]
+    PR_NUMBER=12 REPO=wiki-mod/lancache-ng PR_LABELS_JSON='[]' \
+        run bash "${CI_SH}" check pr-tracking-metadata
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0017"* ]]
+    PR_NUMBER=12 REPO=wiki-mod/lancache-ng PR_LABELS_JSON='["bug"]' PR_MILESTONE_TITLE=v1 \
+        run bash "${CI_SH}" check pr-tracking-metadata
+    [ "${status}" -eq 0 ]
+}
+
+@test "check pr-tracking-metadata fails when the project-board token is rejected" {
+    # What: a rejected GH_TOKEN is a config problem, must fail loud.
+    # Why: distinguishes "no token" (warn) from "bad token" (fail).
+    # From: Issue #1683
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    cat > "${bin}/curl" <<'EOF'
+#!/usr/bin/env bash
+out="" prev=""
+for a in "$@"; do
+    [ "${prev}" = "-o" ] && out="${a}"
+    prev="${a}"
+done
+[ -n "${out}" ] && : > "${out}"
+printf '403'
+EOF
+    chmod +x "${bin}/curl"
+    PATH="${bin}:${PATH}" PR_NUMBER=12 REPO=wiki-mod/lancache-ng PR_LABELS_JSON='["bug"]' \
+        PR_MILESTONE_TITLE=v1 GH_TOKEN=badtoken \
+        run bash "${CI_SH}" check pr-tracking-metadata
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0017"* ]]
+    [[ "${output}" == *"rejected"* ]]
+}
+
+@test "check governance-guards flags a stale TODO on a closed issue" {
+    # What: ci.sh owns the governance scan; bats calls it.
+    # Why: a TODO(#N) on a closed issue is stale, must fail loud.
+    # From: Issue #1683
+    printf '# TODO(#42): revisit once fixed\n' > "${BATS_TEST_TMPDIR}/stale.sh"
+    CI_GOVERNANCE_ISSUE_STATE='42=closed' \
+        run bash "${CI_SH}" check governance-guards "${BATS_TEST_TMPDIR}/stale.sh"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0018"* ]]
+    CI_GOVERNANCE_ISSUE_STATE='42=open' \
+        run bash "${CI_SH}" check governance-guards "${BATS_TEST_TMPDIR}/stale.sh"
+    [ "${status}" -eq 0 ]
+}
+
+@test "check governance-guards requires an open Refs issue for partial-scope text" {
+    # What: partial-scope language needs a named open remainder.
+    # Why: prevents silently merging a known-incomplete change.
+    # From: Issue #1683
+    GOVERNANCE_PR_BODY='This is a partial fix, TODO later.' \
+        run bash "${CI_SH}" check governance-guards
+    [ "${status}" -ne 0 ]
+    GOVERNANCE_PR_BODY='This is a partial fix. Refs #7' CI_GOVERNANCE_ISSUE_STATE='7=open' \
+        run bash "${CI_SH}" check governance-guards
+    [ "${status}" -eq 0 ]
+    GOVERNANCE_PR_BODY='No TODO items left, nothing deferred here.' \
+        run bash "${CI_SH}" check governance-guards
+    [ "${status}" -eq 0 ]
+}
+
+@test "check naming-consistency requires every allowlist name as a real container_name" {
+    # What: ci.sh owns the cross-file name-consistency gate.
+    # Why: socket-proxy denies calls for names it never learned.
+    # From: Issue #1683
+    local r="${BATS_TEST_TMPDIR}/repo"
+    mkdir -p "${r}/deploy/prod" "${r}/deploy/quickstart" "${r}/scripts/untracked"
+    printf 'name: lancache-ng\nservices:\n  proxy:\n    container_name: lancache-proxy\n' \
+        > "${r}/deploy/prod/docker-compose.yml"
+    printf 'name: lancache-ng\nservices:\n  proxy:\n    container_name: lancache-proxy${LANCACHE_CONTAINER_SUFFIX:-}\n' \
+        > "${r}/deploy/quickstart/docker-compose.yml"
+    printf 'acl lancache_container path,url_dec -m reg ^/containers/(lancache-proxy)(/|$)\nacl lancache_lifecycle path,url_dec -m reg ^/containers/lancache-proxy/(start|stop|restart|wait)$\n' \
+        > "${r}/scripts/untracked/docker-socket-proxy.sh"
+    run _ci_check_naming_consistency "${r}"
+    [ "${status}" -eq 0 ]
+    printf 'name: lancache-ng\nservices:\n  proxy:\n    container_name: lancache-wrong\n' \
+        > "${r}/deploy/prod/docker-compose.yml"
+    run _ci_check_naming_consistency "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0019"* ]]
+}
+
 @test "docker-build builds a per-identity per-arch tag via buildx" {
     # What: ci.sh executes the build; YAML only calls it.
     # Why: engine owns execution, orchestrator just calls.
