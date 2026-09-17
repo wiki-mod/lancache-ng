@@ -4720,6 +4720,26 @@ _version_fixture_repo() {
     [ "${first}" = "${second}" ]
 }
 
+@test "version sync fails loud on a non-canonical ARG line" {
+    # What: a parseable but non-canonical ARG shape (lowercase).
+    # Why: the narrow write regex must never claim a fake write.
+    # From: Issue #1683 | PR #1858
+    local root; root="$(_version_fixture_repo)"
+    sed -i 's/^ARG NETDATA_VERSION=/arg NETDATA_VERSION=/' \
+        "${root}/services/netdata/Dockerfile"
+    local m="${BATS_TEST_TMPDIR}/nd-noncanon.yml"
+    sed 's/version: v2.11.0/version: v2.99.0/' \
+        "${CI_MANIFEST_SOURCE}" > "${m}"
+    local before; before="$(sha256sum "${root}/services/netdata/Dockerfile")"
+    CI_MANIFEST="${m}" CI_REPO_ROOT="${root}" \
+        run bash "${CI_SH}" version sync
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VERSION-0015"* ]]
+    [[ "${output}" != *"changed=1"* ]]
+    local after; after="$(sha256sum "${root}/services/netdata/Dockerfile")"
+    [ "${before}" = "${after}" ]
+}
+
 @test "version sync touches only the two netdata ARG lines" {
     # What: every other Dockerfile line must survive sync.
     # Why: sync owns two values, never a broader rewrite.

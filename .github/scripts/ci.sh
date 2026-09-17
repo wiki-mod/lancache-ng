@@ -3866,6 +3866,16 @@ _ci_version_sync_netdata() {
     ' "${dockerfile}" > "${tmp}"
     cp "${tmp}" "${dockerfile}"
     rm -f "${tmp}"
+    # What: readback proves the write, never trust the awk.
+    # Why: a shape the narrow rewrite misses must fail loud.
+    # From: Issue #1683 | PR #1858
+    local rb_version rb_sha
+    rb_version="$(_ci_dockerfile_arg_default "${dockerfile}" NETDATA_VERSION)" || return 2
+    rb_sha="$(_ci_dockerfile_arg_default "${dockerfile}" NETDATA_X86_64_SHA256)" || return 2
+    if [ "${rb_version}" != "FOUND:${sot_version}" ] || [ "${rb_sha}" != "FOUND:${sot_sha}" ]; then
+        ci_log "[CI-ERROR-VERSION-0015]" "path=\"${dockerfile}\" reason=\"write readback mismatch; canonical rewrite did not match the line shape\""
+        return 2
+    fi
     did_write=1
     printf 'key=netdata.version sot=%s written=%s changed=%s\n' "${sot_version}" "${sot_version}" "${did_write}"
     printf 'key=netdata.sha256_x86_64 sot=%s written=%s changed=%s\n' "${sot_sha}" "${sot_sha}" "${did_write}"
@@ -3887,7 +3897,7 @@ _ci_version_verify() {
     else
         rcd=$?
     fi
-    printf '%s' "${out}"
+    [ -n "${out}" ] && printf '%s\n' "${out}"
     if [ "${rcd}" -ne 0 ]; then
         [ "${rc}" -eq 0 ] && rc="${rcd}"
     fi
@@ -3900,10 +3910,10 @@ _ci_version_verify() {
 _ci_version_audit() {
     local rc=0 out rcn rcd
     if out="$(_ci_version_diff_netdata)"; then rcn=0; else rcn=$?; fi
-    printf '%s' "${out}"
+    [ -n "${out}" ] && printf '%s\n' "${out}"
     [ "${rcn}" -eq 2 ] && rc=2
     if out="$(_ci_version_diff_dhclient)"; then rcd=0; else rcd=$?; fi
-    printf '%s' "${out}"
+    [ -n "${out}" ] && printf '%s\n' "${out}"
     [ "${rcd}" -eq 2 ] && rc=2
     _ci_version_audit_netdata_aarch64_orphan
     _ci_version_audit_dhclient_branch_comment
@@ -3917,7 +3927,7 @@ _ci_version_sync() {
     local rc=0 out rcd
     _ci_version_sync_netdata || rc=2
     if out="$(_ci_version_diff_dhclient)"; then rcd=0; else rcd=$?; fi
-    printf '%s' "${out}"
+    [ -n "${out}" ] && printf '%s\n' "${out}"
     if [ "${rcd}" -eq 0 ]; then
         printf 'sync=dhclient changed=0 reason=nothing-to-write\n'
     else
