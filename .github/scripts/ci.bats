@@ -625,6 +625,13 @@ _probe_stub() {
     [ "$(_ci_classify_failure 'GnuTLS recv error (-9): A TLS packet with unexpected length was received.')" = "transient" ]
 }
 
+@test "retry classifier: a missing git ref is permanent, never retried" {
+    # What: resolve-remote-ref-with-retry.sh's own exit-2 case.
+    # Why: a genuinely absent ref cannot be fixed by retrying.
+    # From: Issue #1683
+    [ "$(_ci_classify_failure "fatal: couldn't find remote ref refs/x")" = "permanent" ]
+}
+
 @test "reuse order is cheapest-first and ends in compile" {
     # What: noop..accepted..CAS..caches..compile order.
     # Why: NOOP/reuse always precede build (§7).
@@ -3234,6 +3241,82 @@ _cas_setup() {
     [ "${status}" -eq 0 ]
     run _ci_cas_ref_sha origin refs/ci/lock/t
     [ "${status}" -eq 0 ]; [ -n "${output}" ]
+}
+
+@test "lock_release retries a transient git-fetch failure, then succeeds" {
+    # What: 1 transient fetch failure then a real fetch succeeds.
+    # Why: this fetch had no retry at any level before op=git.
+    # From: Issue #1683
+    _cas_setup
+    cd "${CAS_A}"; _ci_lock_try origin refs/ci/lock/t holder-a 600
+    local realgit; realgit="$(command -v git)"
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
+    cat > "${bin}/git" <<EOF
+#!/usr/bin/env bash
+case "\$*" in
+    *"fetch --quiet"*)
+        n="\$(( \$(cat "${cnt}") + 1 ))"; printf '%s' "\$n" > "${cnt}"
+        if [ "\$n" -lt 2 ]; then echo "unexpected disconnect while reading sideband packet" >&2; exit 1; fi
+        ;;
+esac
+exec "${realgit}" "\$@"
+EOF
+    chmod +x "${bin}/git"
+    PATH="${bin}:${PATH}" CI_RETRY_BACKOFF_BASE_SECONDS=0 \
+        run _ci_lock_release origin refs/ci/lock/t holder-a
+    [ "${status}" -eq 0 ]
+    [ "$(cat "${cnt}")" -eq 2 ]
+}
+
+@test "lock_release fails fast (no retry) on a not_found-shaped git-fetch error" {
+    # What: a genuinely missing ref must not consume retry budget.
+    # Why: op=git shares the permanent cascade; retrying can't fix this.
+    # From: Issue #1683
+    _cas_setup
+    cd "${CAS_A}"; _ci_lock_try origin refs/ci/lock/t holder-a 600
+    local realgit; realgit="$(command -v git)"
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
+    cat > "${bin}/git" <<EOF
+#!/usr/bin/env bash
+case "\$*" in
+    *"fetch --quiet"*)
+        printf '%s' "\$(( \$(cat "${cnt}") + 1 ))" > "${cnt}"
+        echo "fatal: couldn't find remote ref refs/ci/lock/t" >&2; exit 1 ;;
+esac
+exec "${realgit}" "\$@"
+EOF
+    chmod +x "${bin}/git"
+    PATH="${bin}:${PATH}" CI_RETRY_BACKOFF_BASE_SECONDS=0 \
+        run _ci_lock_release origin refs/ci/lock/t holder-a
+    [ "${status}" -eq 1 ]
+    [ "$(cat "${cnt}")" -eq 1 ]
+}
+
+@test "lock_release exhausts after CI_RETRY_MAX_ATTEMPTS on a persistent transient fetch failure" {
+    # What: an always-transient fetch still stops at max, never loops forever.
+    # Why: a bounded retry is a hard requirement, not just a happy-path detail.
+    # From: Issue #1683
+    _cas_setup
+    cd "${CAS_A}"; _ci_lock_try origin refs/ci/lock/t holder-a 600
+    local realgit; realgit="$(command -v git)"
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
+    cat > "${bin}/git" <<EOF
+#!/usr/bin/env bash
+case "\$*" in
+    *"fetch --quiet"*)
+        printf '%s' "\$(( \$(cat "${cnt}") + 1 ))" > "${cnt}"
+        echo "connection refused" >&2; exit 1 ;;
+esac
+exec "${realgit}" "\$@"
+EOF
+    chmod +x "${bin}/git"
+    PATH="${bin}:${PATH}" CI_RETRY_BACKOFF_BASE_SECONDS=0 CI_RETRY_MAX_ATTEMPTS=3 \
+        run _ci_lock_release origin refs/ci/lock/t holder-a
+    [ "${status}" -eq 1 ]
+    [ "$(cat "${cnt}")" -eq 3 ]
 }
 
 @test "cas lock_try takes over a stale lock" {

@@ -745,6 +745,7 @@ _ci_classify_failure() {
         *"http 400"*|*"http 422"*|*"invalid reference format"*) printf 'permanent\n'; return 0 ;;
         *"pull access denied"*) printf 'permanent\n'; return 0 ;;
         *"error: could not compile"*|*"dockerfile parse error"*|*"failed to solve"*"parse"*) printf 'permanent\n'; return 0 ;;
+        *"couldn't find remote ref"*|*"fatal: repository"*"not found"*) printf 'permanent\n'; return 0 ;;
     esac
     # What: buildx's own narrow known-transient signatures.
     # Why: scoped like legacy wrappers; never a real compile fail.
