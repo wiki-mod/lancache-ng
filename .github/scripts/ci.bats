@@ -17,28 +17,20 @@ setup() {
     # Why: rust identity now keys the build-tools signature.
     # From: Issue #1683
     export CI_APK_RESOLVE_CMD="$(_stub apkres 'printf "pkg-1.0\n"')"
-    # What: dirs _trivy_var_tmp_dir made, for teardown.
-    # Why: ambient TMPDIR must not gate this array's scope.
-    # From: Issue #1683
-    CI_BATS_VAR_TMP_DIRS=()
 }
 
 # What: Removes /var/tmp scratch dirs this test made.
-# Why: /var/tmp dirs aren't bats-cleaned; must self-clean.
+# Why: a "$(...)"-run helper can't set a var seen here.
 # From: Issue #1683
 teardown() {
-    local d
-    # What: bare [@] (no :-) so a zero-length array yields
-    # Why: 0 iterations; ":-" would force one empty "d" pass
-    # From: Issue #1683
-    for d in "${CI_BATS_VAR_TMP_DIRS[@]}"; do
-        # What: if, not "&&", so set -e never sees a bare
-        # Why: false test as this loop body's own exit status.
-        # From: Issue #1683
-        if [ -n "${d}" ]; then
-            rm -rf -- "${d}"
-        fi
-    done
+    local manifest="${BATS_TEST_TMPDIR}/.trivy-var-tmp-dirs" d
+    if [ -f "${manifest}" ]; then
+        while IFS= read -r d; do
+            if [ -n "${d}" ]; then
+                rm -rf -- "${d}"
+            fi
+        done < "${manifest}"
+    fi
 }
 
 # =========================================================
@@ -3589,7 +3581,7 @@ EOF
 _trivy_var_tmp_dir() {
     local d
     d="$(mktemp -d "/var/tmp/ci-bats-trivy.XXXXXX")" || return 1
-    CI_BATS_VAR_TMP_DIRS+=("${d}")
+    printf '%s\n' "${d}" >> "${BATS_TEST_TMPDIR}/.trivy-var-tmp-dirs"
     printf '%s\n' "${d}"
 }
 
