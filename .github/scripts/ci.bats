@@ -1051,7 +1051,7 @@ RS
     # What: Any nonzero CAS exit, even noisy, means fall back.
     # Why: A broken CAS backend must not block the pipeline.
     # From: Issue #1683
-    local marker="${BATS_TEST_TMPDIR}/cas-invoked"
+    local marker="${BATS_TEST_TMPDIR}/cas-invoked-crash"
     STUB_STATE=MISSING_CONFIRMED
     CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
     CI_IMPACT_CMD="$(_stub impact 'echo BUILD')" \
@@ -1071,7 +1071,7 @@ RS
     # What: build_type=apk must not call the CAS at all.
     # Why: CAS is a rust-binary reuse path (§7), apk has none.
     # From: Issue #1683
-    local marker="${BATS_TEST_TMPDIR}/cas-invoked"
+    local marker="${BATS_TEST_TMPDIR}/cas-invoked-apk"
     STUB_STATE=MISSING_CONFIRMED
     CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
     CI_IMPACT_CMD="$(_stub impact 'echo BUILD')" \
