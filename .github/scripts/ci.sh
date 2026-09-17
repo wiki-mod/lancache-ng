@@ -3080,6 +3080,39 @@ _ci_build_tools_build_args_emit() {
     printf '%s\n' "${block}" >> "${out}"
 }
 
+# What: The build-tools registry tag for a platform.
+# Why: sha-<full>-<arch>; AG-REL-015 bans -standalone-.
+# From: Issue #1683
+_ci_build_tools_tag() {
+    local platform="$1"
+    local image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE required}"
+    printf '%s:sha-%s-%s' "${image}" "${GITHUB_SHA:?GITHUB_SHA required}" "${platform##*/}"
+}
+
+# What: Build+push one arch's build-tools image.
+# Why: One build+push owner; digest via readback.
+# From: Issue #1683
+_ci_build_tools_build() {
+    local platform="${1:-}" sig="${2:-}" tag a
+    if [ -z "${platform}" ]; then
+        ci_log "[CI-ERROR-BUILDTOOLS-0017]" "reason=\"platform arg required\""
+        return 2
+    fi
+    tag="$(_ci_build_tools_tag "${platform}")" || return 2
+    local -a args=(docker buildx build --push --provenance=false
+        --platform "${platform}" --tag "${tag}"
+        --output "type=image,oci-mediatypes=true")
+    [ -n "${sig}" ] && args+=(--label "org.lancache-ng.build-tools.signature=${sig}")
+    [ -n "${CI_BUILD_CACHE_FROM:-}" ] && args+=(--cache-from "${CI_BUILD_CACHE_FROM}")
+    [ -n "${CI_BUILD_CACHE_TO:-}" ] && args+=(--cache-to "${CI_BUILD_CACHE_TO}")
+    while IFS= read -r a; do
+        [ -n "${a}" ] && args+=(--build-arg "${a}")
+    done < <(_ci_build_tools_build_args --bare "${platform}")
+    args+=(tools/build-tools)
+    _ci_retry "${args[@]}" >/dev/null || return "$?"
+    _ci_registry_digest "${tag}"
+}
+
 # What: build-tools lifecycle helpers for the workflow.
 # Why: all gate logic lives here; YAML only orchestrates.
 # From: Issue #1683
@@ -3095,6 +3128,7 @@ ci_cmd_build_tools() {
         gate) _ci_build_tools_gate "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
         plan) _ci_build_tools_plan ;;
         build-args-out) _ci_build_tools_build_args_emit "${1:-}" ;;
+        build) _ci_build_tools_build "${1:-}" "${2:-}" ;;
         merge) _ci_build_tools_merge "${1:-}" ;;
         *)
             ci_log "[CI-ERROR-BUILDTOOLS-0003]" "sub=\"${sub}\" reason=\"unknown build-tools subcommand\""

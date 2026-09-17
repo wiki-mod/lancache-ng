@@ -2460,6 +2460,33 @@ netdata=sha256:n"
     [[ "${output}" == *"CI-ERROR-BUILDTOOLS-0003"* ]]
 }
 
+@test "build-tools tag is sha-<full>-<arch> for a platform" {
+    # What: The tag binds the git sha and the arch.
+    # Why: sha-<full>-<arch>; AG-REL-015 form only.
+    # From: Issue #1683
+    BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools GITHUB_SHA=abc123 \
+        run _ci_build_tools_tag linux/arm64
+    [ "${status}" -eq 0 ]
+    [ "${output}" = "ghcr.io/wiki-mod/lancache-ng/build-tools:sha-abc123-arm64" ]
+}
+
+@test "build-tools build pushes the per-arch tag and returns the digest" {
+    # What: build+push then read back the pushed digest.
+    # Why: One build+push owner; no live registry in test.
+    # From: Issue #1683
+    export DLOG="${BATS_TEST_TMPDIR}/d.log"; : > "${DLOG}"
+    docker() { printf 'docker %s\n' "$*" >> "${DLOG}"; case "$*" in *"imagetools inspect"*) printf 'sha256:dead\n' ;; esac; return 0; }
+    export -f docker
+    BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools GITHUB_SHA=abc123 \
+        run _ci_build_tools_build linux/amd64 sig-xyz
+    [ "${status}" -eq 0 ]
+    [ "${output}" = "sha256:dead" ]
+    grep -q "buildx build --push" "${DLOG}"
+    grep -q "sha-abc123-amd64" "${DLOG}"
+    grep -q "signature=sig-xyz" "${DLOG}"
+    grep -q "tools/build-tools" "${DLOG}"
+}
+
 @test "check line-endings passes LF, fails CRLF via ci.sh" {
     # What: ci.sh owns the LF invariant; bats calls it.
     # Why: guard logic lives once, tested through ci.sh.
