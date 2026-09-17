@@ -37,6 +37,7 @@ declare -A CI_DISPATCH=(
     [aggregate]=ci_cmd_aggregate
     [validate]=ci_cmd_validate [promote]=ci_cmd_promote [release]=ci_cmd_release
     [gc]=ci_cmd_gc [variables]=ci_cmd_variables [check]=ci_cmd_check
+    [version]=ci_cmd_version
 )
 
 # =========================================================
@@ -3580,6 +3581,350 @@ ci_cmd_build_tools() {
         merge) _ci_build_tools_merge "${1:-}" ;;
         *)
             ci_log "[CI-ERROR-BUILDTOOLS-0003]" "sub=\"${sub}\" reason=\"unknown build-tools subcommand\""
+            return 2
+            ;;
+    esac
+}
+
+# =========================================================
+# VERSION MANAGEMENT
+# =========================================================
+
+# What: Parse one ARG NAME[=VALUE] Dockerfile declaration.
+# Why: AG-VAL-036: grammar reader, not ad-hoc regex guess.
+# From: Issue #1683 | PR #1858
+_ci_dockerfile_arg_default() {
+    local path="$1" name="$2"
+    if [ ! -f "${path}" ]; then
+        ci_log "[CI-ERROR-VERSION-0001]" "path=\"${path}\" reason=\"file not found\""
+        return 2
+    fi
+    local -a hits=()
+    local raw
+    while IFS= read -r raw; do
+        hits+=("${raw}")
+    done < <(awk -v n="${name}" '
+        {
+            line = $0
+            sub(/^[[:space:]]+/, "", line)
+            if (line !~ /^[Aa][Rr][Gg][[:space:]]+/) next
+            sub(/^[Aa][Rr][Gg][[:space:]]+/, "", line)
+            if (!match(line, /^[A-Za-z_][A-Za-z0-9_]*/)) next
+            decl = substr(line, RSTART, RLENGTH)
+            if (decl != n) next
+            rest = substr(line, RLENGTH + 1)
+            sub(/^[[:space:]]+/, "", rest)
+            sub(/[[:space:]]+$/, "", rest)
+            print rest
+        }
+    ' "${path}")
+    if [ "${#hits[@]}" -eq 0 ]; then
+        printf 'ABSENT\n'
+        return 0
+    fi
+    if [ "${#hits[@]}" -gt 1 ]; then
+        # What: Allow ARG re-declares only when identical.
+        # Why: Bare-after-valued would silently guess wrong.
+        # From: Issue #1683 | PR #1858
+        local h uniq="" mixed=0
+        for h in "${hits[@]}"; do
+            if [ -z "${uniq}" ]; then
+                uniq="${h}"
+            elif [ "${h}" != "${uniq}" ]; then
+                mixed=1
+            fi
+        done
+        if [ "${mixed}" -eq 1 ]; then
+            ci_log "[CI-ERROR-VERSION-0002]" "path=\"${path}\" name=\"${name}\" reason=\"conflicting ARG re-declarations; ambiguous default\""
+            return 2
+        fi
+    fi
+    local rest="${hits[0]}"
+    if [ -z "${rest}" ]; then
+        printf 'BARE\n'
+        return 0
+    fi
+    case "${rest}" in
+        =*)
+            local val="${rest#=}"
+            case "${val}" in
+                *\\)
+                    ci_log "[CI-ERROR-VERSION-0003]" "path=\"${path}\" name=\"${name}\" reason=\"line continuation unsupported\""
+                    return 2
+                    ;;
+            esac
+            case "${val}" in
+                \"*\")
+                    val="${val#\"}"; val="${val%\"}"
+                    case "${val}" in
+                        *\"*)
+                            ci_log "[CI-ERROR-VERSION-0004]" "path=\"${path}\" name=\"${name}\" reason=\"embedded double-quote unsupported\""
+                            return 2
+                            ;;
+                    esac
+                    ;;
+                \'*\')
+                    val="${val#\'}"; val="${val%\'}"
+                    case "${val}" in
+                        *\'*)
+                            ci_log "[CI-ERROR-VERSION-0004]" "path=\"${path}\" name=\"${name}\" reason=\"embedded single-quote unsupported\""
+                            return 2
+                            ;;
+                    esac
+                    ;;
+                *)
+                    case "${val}" in
+                        *[\ \"\']*)
+                            ci_log "[CI-ERROR-VERSION-0005]" "path=\"${path}\" name=\"${name}\" reason=\"unquoted value has space/quote\""
+                            return 2
+                            ;;
+                    esac
+                    ;;
+            esac
+            printf 'FOUND:%s\n' "${val}"
+            ;;
+        *)
+            ci_log "[CI-ERROR-VERSION-0006]" "path=\"${path}\" name=\"${name}\" reason=\"unexpected token after ARG name\""
+            return 2
+            ;;
+    esac
+}
+
+# What: Diff SOT netdata fields vs its Dockerfile default.
+# Why: netdata bakes its own ARG; nothing enforces it yet.
+# From: Issue #1683 | PR #1858
+_ci_version_diff_netdata() {
+    local dockerfile="${CI_REPO_ROOT}/services/netdata/Dockerfile"
+    local sot_version sot_sha df_version df_sha match=yes
+    sot_version="$(_ci_block_entry_field external_versions netdata version)"
+    sot_sha="$(_ci_block_entry_field external_versions netdata sha256_x86_64)"
+    if [ -z "${sot_version}" ] || [ -z "${sot_sha}" ]; then
+        ci_log "[CI-ERROR-VERSION-0007]" "reason=\"SOT external_versions.netdata missing version/sha256_x86_64\""
+        return 2
+    fi
+    df_version="$(_ci_dockerfile_arg_default "${dockerfile}" NETDATA_VERSION)" || return 2
+    df_sha="$(_ci_dockerfile_arg_default "${dockerfile}" NETDATA_X86_64_SHA256)" || return 2
+    case "${df_version}" in
+        ABSENT)
+            ci_log "[CI-ERROR-VERSION-0008]" "path=\"${dockerfile}\" name=\"NETDATA_VERSION\" reason=\"ARG not found\""
+            return 2
+            ;;
+        BARE)
+            ci_log "[CI-ERROR-VERSION-0009]" "path=\"${dockerfile}\" name=\"NETDATA_VERSION\" reason=\"ARG has no default\""
+            return 2
+            ;;
+        FOUND:*) df_version="${df_version#FOUND:}" ;;
+    esac
+    case "${df_sha}" in
+        ABSENT)
+            ci_log "[CI-ERROR-VERSION-0008]" "path=\"${dockerfile}\" name=\"NETDATA_X86_64_SHA256\" reason=\"ARG not found\""
+            return 2
+            ;;
+        BARE)
+            ci_log "[CI-ERROR-VERSION-0009]" "path=\"${dockerfile}\" name=\"NETDATA_X86_64_SHA256\" reason=\"ARG has no default\""
+            return 2
+            ;;
+        FOUND:*) df_sha="${df_sha#FOUND:}" ;;
+    esac
+    [ "${sot_version}" = "${df_version}" ] || match=no
+    [ "${sot_sha}" = "${df_sha}" ] || match=no
+    printf 'key=netdata.version sot=%s dockerfile=%s match=%s\n' \
+        "${sot_version}" "${df_version}" "$([ "${sot_version}" = "${df_version}" ] && echo yes || echo no)"
+    printf 'key=netdata.sha256_x86_64 sot=%s dockerfile=%s match=%s\n' \
+        "${sot_sha}" "${df_sha}" "$([ "${sot_sha}" = "${df_sha}" ] && echo yes || echo no)"
+    [ "${match}" = yes ]
+}
+
+# What: netdata verify: read-only, fails on real drift.
+# Why: verify is the enforced gate; audit only reports.
+# From: Issue #1683 | PR #1858
+_ci_version_verify_netdata() {
+    local out rc
+    out="$(_ci_version_diff_netdata)"; rc=$?
+    if [ "${rc}" -eq 1 ]; then
+        ci_error "[CI-ERROR-VERSION-0010]" "key=\"netdata\" reason=\"SOT vs Dockerfile default drifted\"" "${out}"
+        return 1
+    fi
+    [ "${rc}" -eq 0 ] && printf '%s\n' "${out}"
+    return "${rc}"
+}
+
+# What: Check SOT dhclient fields + Dockerfile ARG contract.
+# Why: dhclient must stay fully SOT-driven, no baked re-pin.
+# From: Issue #1683 | PR #1858
+_ci_version_diff_dhclient() {
+    local dockerfile="${CI_REPO_ROOT}/tools/build-tools/Dockerfile"
+    local key val out=""
+    for key in version alpine_branch sha256_amd64 sha256_arm64; do
+        val="$(_ci_block_entry_field external_versions dhclient "${key}")"
+        if [ -z "${val}" ]; then
+            ci_log "[CI-ERROR-VERSION-0011]" "reason=\"SOT external_versions.dhclient.${key} missing\""
+            return 2
+        fi
+        case "${key}" in
+            sha256_*)
+                if [[ ! "${val}" =~ ^[0-9a-f]{64}$ ]]; then
+                    ci_log "[CI-ERROR-VERSION-0011]" "reason=\"external_versions.dhclient.${key} not 64 hex chars\""
+                    return 2
+                fi
+                ;;
+        esac
+        out="${out}key=dhclient.${key} sot=${val} present=yes"$'\n'
+    done
+    local argname want
+    for argname in DHCLIENT_VERSION DHCLIENT_ALPINE_BRANCH DHCLIENT_APK_ARCH DHCLIENT_SHA256; do
+        want="$(_ci_dockerfile_arg_default "${dockerfile}" "${argname}")" || return 2
+        case "${want}" in
+            ABSENT)
+                ci_log "[CI-ERROR-VERSION-0012]" "path=\"${dockerfile}\" name=\"${argname}\" reason=\"expected ARG declaration missing\""
+                return 2
+                ;;
+            BARE)
+                out="${out}key=dhclient.consumer.${argname} shape=bare"$'\n'
+                ;;
+            FOUND:*)
+                ci_log "[CI-ERROR-VERSION-0013]" "path=\"${dockerfile}\" name=\"${argname}\" reason=\"unexpected baked default; must stay SOT-driven\""
+                return 2
+                ;;
+        esac
+    done
+    printf '%s' "${out}"
+}
+
+# What: Flag SOT netdata aarch64 sha with no Dockerfile use.
+# Why: multi-arch wiring is a separate maintainer decision.
+# From: Issue #1683 | PR #1858
+_ci_version_audit_netdata_aarch64_orphan() {
+    local sha res
+    sha="$(_ci_block_entry_field external_versions netdata sha256_aarch64)"
+    [ -n "${sha}" ] || return 0
+    res="$(_ci_dockerfile_arg_default \
+        "${CI_REPO_ROOT}/services/netdata/Dockerfile" \
+        NETDATA_AARCH64_SHA256)" || return 0
+    if [ "${res}" = "ABSENT" ]; then
+        ci_log "[CI-WARN-VERSION-0001]" "key=\"netdata.sha256_aarch64\" value=\"${sha}\" reason=\"no Dockerfile consumer; escalate, out of scope\""
+    fi
+}
+
+# What: Flag if dhclient's branch comment text has drifted.
+# Why: Prose restates the SOT value; sync never touches it.
+# From: Issue #1683 | PR #1858
+_ci_version_audit_dhclient_branch_comment() {
+    local branch dockerfile="${CI_REPO_ROOT}/tools/build-tools/Dockerfile"
+    branch="$(_ci_block_entry_field external_versions dhclient alpine_branch)"
+    [ -n "${branch}" ] || return 0
+    if ! grep -Fq "${branch}" "${dockerfile}" 2>/dev/null; then
+        ci_log "[CI-WARN-VERSION-0002]" "path=\"${dockerfile}\" key=\"dhclient.alpine_branch\" value=\"${branch}\" reason=\"no matching comment mention found\""
+    fi
+}
+
+# What: Idempotently write SOT netdata into its Dockerfile.
+# Why: sync repairs drift; verify/audit only ever report it.
+# From: Issue #1683 | PR #1858
+_ci_version_sync_netdata() {
+    local dockerfile="${CI_REPO_ROOT}/services/netdata/Dockerfile"
+    local sot_version sot_sha cur_version cur_sha tmp did_write=0
+    sot_version="$(_ci_block_entry_field external_versions netdata version)"
+    sot_sha="$(_ci_block_entry_field external_versions netdata sha256_x86_64)"
+    if [ -z "${sot_version}" ] || [ -z "${sot_sha}" ]; then
+        ci_log "[CI-ERROR-VERSION-0007]" "reason=\"SOT external_versions.netdata missing version/sha256_x86_64\""
+        return 2
+    fi
+    cur_version="$(_ci_dockerfile_arg_default "${dockerfile}" NETDATA_VERSION)" || return 2
+    cur_sha="$(_ci_dockerfile_arg_default "${dockerfile}" NETDATA_X86_64_SHA256)" || return 2
+    case "${cur_version}" in
+        FOUND:*) cur_version="${cur_version#FOUND:}" ;;
+        *)
+            ci_log "[CI-ERROR-VERSION-0008]" "path=\"${dockerfile}\" name=\"NETDATA_VERSION\" reason=\"no baked default to sync (${cur_version})\""
+            return 2
+            ;;
+    esac
+    case "${cur_sha}" in
+        FOUND:*) cur_sha="${cur_sha#FOUND:}" ;;
+        *)
+            ci_log "[CI-ERROR-VERSION-0008]" "path=\"${dockerfile}\" name=\"NETDATA_X86_64_SHA256\" reason=\"no baked default to sync (${cur_sha})\""
+            return 2
+            ;;
+    esac
+    if [ "${cur_version}" = "${sot_version}" ] && [ "${cur_sha}" = "${sot_sha}" ]; then
+        printf 'key=netdata.version sot=%s written=%s changed=0\n' "${sot_version}" "${sot_version}"
+        printf 'key=netdata.sha256_x86_64 sot=%s written=%s changed=0\n' "${sot_sha}" "${sot_sha}"
+        return 0
+    fi
+    tmp="$(mktemp)"
+    awk -v ver="${sot_version}" -v sha="${sot_sha}" '
+        /^ARG NETDATA_VERSION=/ { print "ARG NETDATA_VERSION=" ver; next }
+        /^ARG NETDATA_X86_64_SHA256=/ { print "ARG NETDATA_X86_64_SHA256=" sha; next }
+        { print }
+    ' "${dockerfile}" > "${tmp}"
+    cp "${tmp}" "${dockerfile}"
+    rm -f "${tmp}"
+    did_write=1
+    printf 'key=netdata.version sot=%s written=%s changed=%s\n' "${sot_version}" "${sot_version}" "${did_write}"
+    printf 'key=netdata.sha256_x86_64 sot=%s written=%s changed=%s\n' "${sot_sha}" "${sot_sha}" "${did_write}"
+}
+
+# What: version verify: default, read-only, fails on drift.
+# Why: The one CI gate for SOT-vs-repo version drift.
+# From: Issue #1683 | PR #1858
+_ci_version_verify() {
+    local rc=0 rcn rcd out
+    _ci_version_verify_netdata
+    rcn=$?
+    [ "${rcn}" -eq 0 ] || rc="${rcn}"
+    out="$(_ci_version_diff_dhclient)"
+    rcd=$?
+    printf '%s' "${out}"
+    if [ "${rcd}" -ne 0 ]; then
+        [ "${rc}" -eq 0 ] && rc="${rcd}"
+    fi
+    return "${rc}"
+}
+
+# What: version audit: full read-only report, drift is OK.
+# Why: A dashboard view; verify is the CI-failing gate.
+# From: Issue #1683 | PR #1858
+_ci_version_audit() {
+    local rc=0 out rcn rcd
+    out="$(_ci_version_diff_netdata)"; rcn=$?
+    printf '%s' "${out}"
+    [ "${rcn}" -eq 2 ] && rc=2
+    out="$(_ci_version_diff_dhclient)"; rcd=$?
+    printf '%s' "${out}"
+    [ "${rcd}" -eq 2 ] && rc=2
+    _ci_version_audit_netdata_aarch64_orphan
+    _ci_version_audit_dhclient_branch_comment
+    return "${rc}"
+}
+
+# What: version sync: writes netdata, re-checks dhclient.
+# Why: dhclient has nothing to write; contract-only, no-op.
+# From: Issue #1683 | PR #1858
+_ci_version_sync() {
+    local rc=0 out rcd
+    _ci_version_sync_netdata || rc=2
+    out="$(_ci_version_diff_dhclient)"; rcd=$?
+    printf '%s' "${out}"
+    if [ "${rcd}" -eq 0 ]; then
+        printf 'sync=dhclient changed=0 reason=nothing-to-write\n'
+    else
+        rc=2
+    fi
+    return "${rc}"
+}
+
+# What: version verify/audit/sync for SOT external_versions.
+# Why: netdata+dhclient must not silently drift from SOT.
+# From: Issue #1683 | PR #1858
+ci_cmd_version() {
+    local sub="${1:-verify}"
+    if [ "$#" -gt 0 ]; then shift; fi
+    case "${sub}" in
+        verify) _ci_version_verify ;;
+        audit)  _ci_version_audit ;;
+        sync)   _ci_version_sync ;;
+        *)
+            ci_log "[CI-ERROR-VERSION-0014]" "sub=\"${sub}\" reason=\"unknown version subcommand\""
             return 2
             ;;
     esac

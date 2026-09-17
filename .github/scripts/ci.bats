@@ -4554,5 +4554,263 @@ SH
 }
 
 # =========================================================
+# VERSION MANAGEMENT
+# =========================================================
+
+# What: Copies the two version-pinned Dockerfiles for sync.
+# Why: sync tests must never touch the real repo files.
+# From: Issue #1683 | PR #1858
+_version_fixture_repo() {
+    local root="${BATS_TEST_TMPDIR}/vrepo"
+    mkdir -p "${root}/services/netdata" "${root}/tools/build-tools"
+    cp "${BATS_TEST_DIRNAME}/../../services/netdata/Dockerfile" \
+        "${root}/services/netdata/Dockerfile"
+    cp "${BATS_TEST_DIRNAME}/../../tools/build-tools/Dockerfile" \
+        "${root}/tools/build-tools/Dockerfile"
+    printf '%s' "${root}"
+}
+
+@test "version verify (default) passes clean on the real repo" {
+    # What: default subcommand is verify, read-only.
+    # Why: netdata+dhclient must match today's real files.
+    # From: Issue #1683 | PR #1858
+    run bash "${CI_SH}" version
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"key=netdata.version"*"match=yes"* ]]
+    [[ "${output}" == *"key=dhclient.consumer.DHCLIENT_SHA256 shape=bare"* ]]
+}
+
+@test "version verify explicit subcommand matches the default" {
+    # What: 'version verify' behaves like bare 'version'.
+    # Why: the default-arg wiring must not silently diverge.
+    # From: Issue #1683 | PR #1858
+    run bash "${CI_SH}" version verify
+    [ "${status}" -eq 0 ]
+}
+
+@test "version verify fails closed on a netdata version drift" {
+    # What: SOT bumped, Dockerfile default left behind.
+    # Why: verify is the CI gate; drift must fail the run.
+    # From: Issue #1683 | PR #1858
+    local m="${BATS_TEST_TMPDIR}/nd-version.yml"
+    sed 's/version: v2.11.0/version: v2.99.0/' \
+        "${CI_MANIFEST_SOURCE}" > "${m}"
+    CI_MANIFEST="${m}" run bash "${CI_SH}" version verify
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"CI-ERROR-VERSION-0010"* ]]
+    [[ "${output}" == *"sot=v2.99.0"* ]]
+    [[ "${output}" == *"dockerfile=v2.11.0"* ]]
+}
+
+@test "version verify fails closed on a netdata sha256 drift" {
+    # What: SOT sha256_x86_64 changed, Dockerfile did not.
+    # Why: a silent hash drift must fail the run too.
+    # From: Issue #1683 | PR #1858
+    local m="${BATS_TEST_TMPDIR}/nd-sha.yml"
+    sed 's/sha256_x86_64: b42d9937807f28812502a967906d370cff9ab443453813656b99ff6a9b3c5649/sha256_x86_64: deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/' \
+        "${CI_MANIFEST_SOURCE}" > "${m}"
+    CI_MANIFEST="${m}" run bash "${CI_SH}" version verify
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"CI-ERROR-VERSION-0010"* ]]
+}
+
+@test "version verify fails closed on a missing SOT dhclient field" {
+    # What: SOT dhclient.sha256_arm64 line removed.
+    # Why: dhclient stays fail-closed on a blank field.
+    # From: Issue #1683 | PR #1858
+    local m="${BATS_TEST_TMPDIR}/dh-missing.yml"
+    grep -v 'sha256_arm64:' "${CI_MANIFEST_SOURCE}" > "${m}"
+    CI_MANIFEST="${m}" run bash "${CI_SH}" version verify
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VERSION-0011"* ]]
+}
+
+@test "version verify fails closed on a malformed dhclient sha256" {
+    # What: SOT sha256_amd64 shortened to non-hex64 text.
+    # Why: a truncated/garbled pin must never pass silently.
+    # From: Issue #1683 | PR #1858
+    local m="${BATS_TEST_TMPDIR}/dh-badsha.yml"
+    sed 's/sha256_amd64: 068c97e534e9c8f03db9064296b1d3c21d957f328e40309278559a92f9a74557/sha256_amd64: not-a-real-hash/' \
+        "${CI_MANIFEST_SOURCE}" > "${m}"
+    CI_MANIFEST="${m}" run bash "${CI_SH}" version verify
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VERSION-0011"* ]]
+}
+
+@test "version verify fails closed if a dhclient ARG is missing" {
+    # What: build-tools loses its DHCLIENT_SHA256 ARG line.
+    # Why: the SOT-to-consumer contract must not just break.
+    # From: Issue #1683 | PR #1858
+    local root; root="$(_version_fixture_repo)"
+    sed -i '/^ARG DHCLIENT_SHA256$/d' \
+        "${root}/tools/build-tools/Dockerfile"
+    CI_REPO_ROOT="${root}" run bash "${CI_SH}" version verify
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VERSION-0012"* ]]
+}
+
+@test "version verify fails closed on a baked-in dhclient default" {
+    # What: someone re-pins DHCLIENT_VERSION with a default.
+    # Why: dhclient stays SOT-driven, no local re-pin ever.
+    # From: Issue #1683 | PR #1858
+    local root; root="$(_version_fixture_repo)"
+    sed -i 's/^ARG DHCLIENT_VERSION$/ARG DHCLIENT_VERSION=4.4.3_p1-r4/' \
+        "${root}/tools/build-tools/Dockerfile"
+    CI_REPO_ROOT="${root}" run bash "${CI_SH}" version verify
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VERSION-0013"* ]]
+}
+
+@test "version audit reports the netdata aarch64 orphan" {
+    # What: SOT carries sha256_aarch64; no arm consumer.
+    # Why: AG-INT-002: the scope gap stays visible always.
+    # From: Issue #1683 | PR #1858
+    run bash "${CI_SH}" version audit
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"CI-WARN-VERSION-0001"* ]]
+    [[ "${output}" == *"netdata.sha256_aarch64"* ]]
+}
+
+@test "version audit reports drift but never fails on it" {
+    # What: audit is the report-only view of the same drift.
+    # Why: verify is the CI gate; audit must stay exit 0.
+    # From: Issue #1683 | PR #1858
+    local m="${BATS_TEST_TMPDIR}/nd-audit.yml"
+    sed 's/version: v2.11.0/version: v2.99.0/' \
+        "${CI_MANIFEST_SOURCE}" > "${m}"
+    CI_MANIFEST="${m}" run bash "${CI_SH}" version audit
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"match=no"* ]]
+}
+
+@test "version sync is a byte-identical no-op when already synced" {
+    # What: today's real files already match the SOT.
+    # Why: sync must never touch a file with nothing to fix.
+    # From: Issue #1683 | PR #1858
+    local root; root="$(_version_fixture_repo)"
+    local before; before="$(sha256sum "${root}/services/netdata/Dockerfile")"
+    CI_REPO_ROOT="${root}" run bash "${CI_SH}" version sync
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"changed=0"* ]]
+    [[ "${output}" == *"sync=dhclient changed=0"* ]]
+    local after; after="$(sha256sum "${root}/services/netdata/Dockerfile")"
+    [ "${before}" = "${after}" ]
+}
+
+@test "version sync writes a drifted netdata default, then no-ops" {
+    # What: SOT moves ahead; sync must repair the file.
+    # Why: sync is the only subcommand allowed to mutate.
+    # From: Issue #1683 | PR #1858
+    local root; root="$(_version_fixture_repo)"
+    local m="${BATS_TEST_TMPDIR}/nd-sync.yml"
+    sed 's/version: v2.11.0/version: v2.99.0/' \
+        "${CI_MANIFEST_SOURCE}" > "${m}"
+    CI_MANIFEST="${m}" CI_REPO_ROOT="${root}" \
+        run bash "${CI_SH}" version sync
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"changed=1"* ]]
+    grep -qx 'ARG NETDATA_VERSION=v2.99.0' \
+        "${root}/services/netdata/Dockerfile"
+    local first; first="$(sha256sum "${root}/services/netdata/Dockerfile")"
+    CI_MANIFEST="${m}" CI_REPO_ROOT="${root}" \
+        run bash "${CI_SH}" version sync
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"changed=0"* ]]
+    local second; second="$(sha256sum "${root}/services/netdata/Dockerfile")"
+    [ "${first}" = "${second}" ]
+}
+
+@test "version sync touches only the two netdata ARG lines" {
+    # What: every other Dockerfile line must survive sync.
+    # Why: sync owns two values, never a broader rewrite.
+    # From: Issue #1683 | PR #1858
+    local root; root="$(_version_fixture_repo)"
+    local m="${BATS_TEST_TMPDIR}/nd-scope.yml"
+    sed 's/version: v2.11.0/version: v2.99.0/' \
+        "${CI_MANIFEST_SOURCE}" > "${m}"
+    local strip='/^ARG NETDATA_VERSION=/d;/^ARG NETDATA_X86_64_SHA256=/d'
+    local before after
+    before="$(sed "${strip}" "${root}/services/netdata/Dockerfile")"
+    CI_MANIFEST="${m}" CI_REPO_ROOT="${root}" \
+        run bash "${CI_SH}" version sync
+    [ "${status}" -eq 0 ]
+    after="$(sed "${strip}" "${root}/services/netdata/Dockerfile")"
+    [ "${before}" = "${after}" ]
+}
+
+@test "unknown version subcommand fails closed" {
+    # What: an unrecognized 'version' verb must not succeed.
+    # Why: fail-closed dispatch, like every other command.
+    # From: Issue #1683 | PR #1858
+    run bash "${CI_SH}" version bogus
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VERSION-0014"* ]]
+}
+
+@test "_ci_dockerfile_arg_default reports ABSENT and BARE" {
+    # What: a missing name vs. a defaultless declaration.
+    # Why: the two must stay distinct, never conflated.
+    # From: Issue #1683 | PR #1858
+    local f="${BATS_TEST_TMPDIR}/Dockerfile.shapes"
+    printf 'FROM alpine\nARG BARE_ONE\n' > "${f}"
+    run _ci_dockerfile_arg_default "${f}" NOT_THERE
+    [ "${status}" -eq 0 ]
+    [ "${output}" = "ABSENT" ]
+    run _ci_dockerfile_arg_default "${f}" BARE_ONE
+    [ "${status}" -eq 0 ]
+    [ "${output}" = "BARE" ]
+}
+
+@test "_ci_dockerfile_arg_default reads quoted and bare values" {
+    # What: unquoted, double- and single-quoted defaults.
+    # Why: AG-VAL-036: the real ARG grammar has all three.
+    # From: Issue #1683 | PR #1858
+    local f="${BATS_TEST_TMPDIR}/Dockerfile.quotes"
+    printf 'FROM alpine\nARG A=1.2.3\nARG B="x y"\nARG C='"'"'q v'"'"'\n' > "${f}"
+    run _ci_dockerfile_arg_default "${f}" A
+    [ "${output}" = "FOUND:1.2.3" ]
+    run _ci_dockerfile_arg_default "${f}" B
+    [ "${output}" = "FOUND:x y" ]
+    run _ci_dockerfile_arg_default "${f}" C
+    [ "${output}" = "FOUND:q v" ]
+}
+
+@test "_ci_dockerfile_arg_default accepts real dhclient re-declares" {
+    # What: build-tools re-declares DHCLIENT_VERSION twice.
+    # Why: identical bare pre/post-FROM lines are valid.
+    # From: Issue #1683 | PR #1858
+    run _ci_dockerfile_arg_default \
+        "${BATS_TEST_DIRNAME}/../../tools/build-tools/Dockerfile" \
+        DHCLIENT_VERSION
+    [ "${status}" -eq 0 ]
+    [ "${output}" = "BARE" ]
+}
+
+@test "_ci_dockerfile_arg_default refuses conflicting re-declares" {
+    # What: two ARG lines, one name, different defaults.
+    # Why: AG-VAL-036: refuse to guess, escalate instead.
+    # From: Issue #1683 | PR #1858
+    local f="${BATS_TEST_TMPDIR}/Dockerfile.conflict"
+    printf 'FROM alpine\nARG X=1\nARG X=2\n' > "${f}"
+    run _ci_dockerfile_arg_default "${f}" X
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VERSION-0002"* ]]
+}
+
+@test "_ci_dockerfile_arg_default refuses unsupported shapes" {
+    # What: a line-continuation and an unquoted space value.
+    # Why: an unreadable shape must fail loud, never skip.
+    # From: Issue #1683 | PR #1858
+    local f="${BATS_TEST_TMPDIR}/Dockerfile.unsupported"
+    printf 'FROM alpine\nARG A=abc\\\nARG B=has space\n' > "${f}"
+    run _ci_dockerfile_arg_default "${f}" A
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VERSION-0003"* ]]
+    run _ci_dockerfile_arg_default "${f}" B
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VERSION-0005"* ]]
+}
+
+# =========================================================
 # HISTORICAL REGRESSIONS
 # =========================================================
