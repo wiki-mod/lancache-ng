@@ -1152,10 +1152,10 @@ _ci_docker_build() {
     while IFS= read -r a; do
         [ -n "${a}" ] && args+=(--build-arg "${a}")
     done < <(ci_cmd_build_args "${service}" --bare "${platform}")
-    # What: retry only the known transient buildx signature.
-    # Why: layer-lock/panic are infra, not a real compile fail.
+    # What: retries buildx; its own output goes to stderr.
+    # Why: layer-lock/panic retry; only the tag is this fn's stdout.
     # From: Issue #1683
-    _ci_retry buildx docker buildx build --load --platform "${platform}" --tag "${tag}" "${args[@]}" "${context}" >/dev/null || return "$?"
+    _ci_retry buildx docker buildx build --load --platform "${platform}" --tag "${tag}" "${args[@]}" "${context}" >&2 || return "$?"
     printf '%s\n' "${tag}"
 }
 
