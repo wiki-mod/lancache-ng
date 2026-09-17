@@ -3655,9 +3655,32 @@ _trivy_stub() {
     local cache="${BATS_TEST_TMPDIR}/staledb"; mkdir -p "${cache}"
     mkdir -p "${cache}/.trivy-db-update.lock"
     touch -d '-1 hour' "${cache}/.trivy-db-update.lock"
-    run _ci_trivy_db_lock_run "${cache}" 10 5 -- true
+    CI_TRIVY_LOCK_POLL=1 run _ci_trivy_db_lock_run "${cache}" 10 5 -- true
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"reclaiming stale trivy DB refresh lock"* ]]
+}
+
+@test "trivy db lock fails closed when cache-dir cannot be created" {
+    # What: A blocked cache-dir mkdir fails, never polls.
+    # Why: distinguishes a real error from a held lock.
+    # From: Issue #1683
+    local blocker="${BATS_TEST_TMPDIR}/blocker"; : > "${blocker}"
+    CI_TRIVY_LOCK_POLL=1 run _ci_trivy_db_lock_run "${blocker}/cache" 1 5 -- true
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-SCAN-0013"* ]]
+}
+
+@test "trivy db lock never polls a missing-parent failure forever" {
+    # What: A non-lock mkdir failure fails fast, not slow.
+    # Why: never spend the full lock-timeout poll budget.
+    # From: Issue #1683
+    local cache="${BATS_TEST_TMPDIR}/filelock"; mkdir -p "${cache}"
+    # What: a plain file at the lock path is not a lock.
+    # Why: mkdir fails there on every platform, portably.
+    : > "${cache}/.trivy-db-update.lock"
+    CI_TRIVY_LOCK_POLL=1 run _ci_trivy_db_lock_run "${cache}" 1 3600 -- true
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-SCAN-0014"* ]]
 }
 
 @test "trivy db lock times out on a genuinely held lock" {
@@ -3689,7 +3712,7 @@ _trivy_stub() {
     # What: A stale/missing DB triggers one locked download.
     # Why: The lock is required exactly for the cold path.
     # From: Issue #1683
-    local cache="${BATS_TEST_TMPDIR}/stale"
+    local cache="${BATS_TEST_TMPDIR}/stale"; mkdir -p "${cache}"
     local next; next="$(date -u -d '+1 day' '+%Y-%m-%dT%H:%M:%SZ')"
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     cat > "${bin}/dl" <<EOF
@@ -3700,6 +3723,7 @@ printf '{"NextUpdate":"%s"}' "${next}" > "${cache}/db/metadata.json"
 EOF
     chmod +x "${bin}/dl"
     CI_TRIVY_DB_DOWNLOAD_CMD="${bin}/dl" \
+    CI_TRIVY_LOCK_TIMEOUT=5 CI_TRIVY_LOCK_STALE=60 CI_TRIVY_LOCK_POLL=1 \
         run _ci_trivy_db_ensure_fresh "${cache}"
     [ "${status}" -eq 0 ]
     [[ "${output}" == "present=true" ]]
@@ -3711,6 +3735,7 @@ EOF
     # From: Issue #1683
     mkdir -p "${BATS_TEST_TMPDIR}/stillstale"
     CI_TRIVY_DB_DOWNLOAD_CMD="$(_stub dl 'exit 1')" \
+    CI_TRIVY_LOCK_TIMEOUT=5 CI_TRIVY_LOCK_STALE=60 CI_TRIVY_LOCK_POLL=1 \
         run _ci_trivy_db_ensure_fresh "${BATS_TEST_TMPDIR}/stillstale"
     [ "${status}" -eq 0 ]
     [[ "${output}" == "present=false" ]]

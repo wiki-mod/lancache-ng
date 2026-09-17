@@ -1282,23 +1282,44 @@ _ci_trivy_db_lock_run() {
     local cache_dir="$1" lock_timeout="$2" stale_after="$3"; shift 3
     [ "${1:-}" = "--" ] && shift
     local lock_dir="${cache_dir}/.trivy-db-update.lock"
-    local poll="${CI_TRIVY_LOCK_POLL:-5}" waited=0 lock_mtime age
-    while ! mkdir "${lock_dir}" 2>/dev/null; do
+    local poll="${CI_TRIVY_LOCK_POLL:-5}" waited=0 lock_mtime age mkerr
+    # What: cache-dir must exist before the lock mkdir.
+    # Why: a missing parent must not misread as "locked".
+    # From: Issue #1683
+    mkdir -p "${cache_dir}" 2>/dev/null || {
+        ci_log "[CI-ERROR-SCAN-0013]" "dir=\"${cache_dir}\" reason=\"could not create cache-dir for lock\""
+        return 2
+    }
+    while :; do
+        mkerr="$(mkdir "${lock_dir}" 2>&1)" && break
         if [ -d "${lock_dir}" ]; then
             lock_mtime="$(stat -c %Y "${lock_dir}" 2>/dev/null || echo 0)"
             age=$(( $(date +%s) - lock_mtime ))
             if [ "${age}" -gt "${stale_after}" ]; then
                 ci_log "[CI-WARN-SCAN-0010]" "lock=\"${lock_dir}\" age=${age} stale_after=${stale_after} reason=\"reclaiming stale trivy DB refresh lock\""
                 rm -rf -- "${lock_dir}"
+                # What: a failed reclaim must not spin.
+                # Why: e.g. NFS can leave it behind.
+                # From: Issue #1683
+                if [ -d "${lock_dir}" ]; then
+                    ci_log "[CI-ERROR-SCAN-0015]" "lock=\"${lock_dir}\" reason=\"stale lock reclaim did not remove it\""
+                    return 2
+                fi
                 continue
             fi
+            if [ "${waited}" -ge "${lock_timeout}" ]; then
+                ci_log "[CI-ERROR-SCAN-0011]" "lock=\"${lock_dir}\" timeout=${lock_timeout} reason=\"timed out waiting for trivy DB refresh lock\""
+                return 2
+            fi
+            sleep "${poll}"
+            waited=$(( waited + poll ))
+            continue
         fi
-        if [ "${waited}" -ge "${lock_timeout}" ]; then
-            ci_log "[CI-ERROR-SCAN-0011]" "lock=\"${lock_dir}\" timeout=${lock_timeout} reason=\"timed out waiting for trivy DB refresh lock\""
-            return 2
-        fi
-        sleep "${poll}"
-        waited=$(( waited + poll ))
+        # What: mkdir failed but no lock dir exists.
+        # Why: never poll blind; fail closed with evidence.
+        # From: Issue #1683
+        ci_error "[CI-ERROR-SCAN-0014]" "lock=\"${lock_dir}\" reason=\"lock mkdir failed; not a held lock\"" "${mkerr}"
+        return 2
     done
     # What: releases the lock on any return from this call.
     # Why: an unreleased lock wedges every later caller.
@@ -1321,7 +1342,7 @@ _ci_trivy_db_ensure_fresh() {
     _ci_trivy_db_lock_run "${cache_dir}" "${lock_timeout}" "${stale_after}" -- \
         "${CI_TRIVY_DB_DOWNLOAD_CMD:-trivy}" image --download-db-only --cache-dir "${cache_dir}" || rc=$?
     if [ "${rc}" -eq 2 ]; then
-        ci_log "[CI-ERROR-SCAN-0012]" "reason=\"lock timeout; refusing an unlocked concurrent DB write\""
+        ci_log "[CI-ERROR-SCAN-0012]" "reason=\"locked DB refresh failed; refusing an unlocked concurrent write\""
         return 2
     fi
     if _ci_trivy_db_fresh "${cache_dir}"; then
