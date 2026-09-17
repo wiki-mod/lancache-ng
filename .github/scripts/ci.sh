@@ -3740,7 +3740,14 @@ _ci_version_diff_netdata() {
 # From: Issue #1683 | PR #1858
 _ci_version_verify_netdata() {
     local out rc
-    out="$(_ci_version_diff_netdata)"; rc=$?
+    # What: $(...) exit status is lost in a bare assignment
+    # Why: under set -e; an if-guard is required to capture it.
+    # From: Issue #1683 | PR #1858
+    if out="$(_ci_version_diff_netdata)"; then
+        rc=0
+    else
+        rc=$?
+    fi
     if [ "${rc}" -eq 1 ]; then
         ci_error "[CI-ERROR-VERSION-0010]" "key=\"netdata\" reason=\"SOT vs Dockerfile default drifted\"" "${out}"
         return 1
@@ -3869,11 +3876,17 @@ _ci_version_sync_netdata() {
 # From: Issue #1683 | PR #1858
 _ci_version_verify() {
     local rc=0 rcn rcd out
-    _ci_version_verify_netdata
-    rcn=$?
+    if _ci_version_verify_netdata; then
+        rcn=0
+    else
+        rcn=$?
+    fi
     [ "${rcn}" -eq 0 ] || rc="${rcn}"
-    out="$(_ci_version_diff_dhclient)"
-    rcd=$?
+    if out="$(_ci_version_diff_dhclient)"; then
+        rcd=0
+    else
+        rcd=$?
+    fi
     printf '%s' "${out}"
     if [ "${rcd}" -ne 0 ]; then
         [ "${rc}" -eq 0 ] && rc="${rcd}"
@@ -3886,10 +3899,10 @@ _ci_version_verify() {
 # From: Issue #1683 | PR #1858
 _ci_version_audit() {
     local rc=0 out rcn rcd
-    out="$(_ci_version_diff_netdata)"; rcn=$?
+    if out="$(_ci_version_diff_netdata)"; then rcn=0; else rcn=$?; fi
     printf '%s' "${out}"
     [ "${rcn}" -eq 2 ] && rc=2
-    out="$(_ci_version_diff_dhclient)"; rcd=$?
+    if out="$(_ci_version_diff_dhclient)"; then rcd=0; else rcd=$?; fi
     printf '%s' "${out}"
     [ "${rcd}" -eq 2 ] && rc=2
     _ci_version_audit_netdata_aarch64_orphan
@@ -3903,7 +3916,7 @@ _ci_version_audit() {
 _ci_version_sync() {
     local rc=0 out rcd
     _ci_version_sync_netdata || rc=2
-    out="$(_ci_version_diff_dhclient)"; rcd=$?
+    if out="$(_ci_version_diff_dhclient)"; then rcd=0; else rcd=$?; fi
     printf '%s' "${out}"
     if [ "${rcd}" -eq 0 ]; then
         printf 'sync=dhclient changed=0 reason=nothing-to-write\n'
