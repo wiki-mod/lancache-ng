@@ -1123,13 +1123,48 @@ _ci_docker_publish() {
     _ci_registry_digest "${tag}"
 }
 
+# What: Classify a trivy failure with no report file.
+# Why: A DB-download miss retries; other errors do not.
+# From: Issue #1683
+_ci_trivy_error_kind() {
+    case "$1" in
+        *"failed to download vulnerability DB"*|*"database is not initialized"*|*"unable to initialize"*|*"failed to download artifact"*) printf 'db-missing\n' ;;
+        *) printf 'pre-report-error\n' ;;
+    esac
+}
+
 # What: Scan an image digest with Trivy on the runner.
-# Why: HIGH/CRITICAL must fail; trivy stays a runner tool.
+# Why: A written report is a finding; only DB miss retries.
 # From: Issue #1683
 _ci_trivy_scan() {
-    local service="$1" digest="$2" ref
+    local service="$1" digest="$2" ref report n=0 raw
+    local max="${CI_TRIVY_MAX:-4}"
     ref="ghcr.io/$(_ci_repo)/${service}@${digest}"
-    _ci_retry trivy image --severity HIGH,CRITICAL --exit-code 1 --ignore-unfixed "${ref}"
+    report="$(mktemp "${TMPDIR:-/var/tmp}/ci-trivy.XXXXXX")"
+    while :; do
+        n=$((n + 1))
+        : > "${report}"
+        if raw="$(trivy image --severity HIGH,CRITICAL --exit-code 1 \
+            --ignore-unfixed --output "${report}" "${ref}" 2>&1)"; then
+            rm -f "${report}"
+            return 0
+        fi
+        # What: A written report means trivy scanned.
+        # Why: A finding is deterministic; no retry.
+        # From: Issue #1683
+        if [ -s "${report}" ]; then
+            cat "${report}" >&2
+            rm -f "${report}"
+            return 1
+        fi
+        if [ "$(_ci_trivy_error_kind "${raw}")" = "db-missing" ] && [ "${n}" -lt "${max}" ]; then
+            sleep "${CI_TRIVY_BACKOFF:-$((n * n))}"
+            continue
+        fi
+        rm -f "${report}"
+        printf '%s\n' "${raw}" >&2
+        return 3
+    done
 }
 
 # What: Run the real (or injected) image build+push.
@@ -1430,8 +1465,15 @@ ci_cmd_scan() {
     local scan_cmd="${CI_SCAN_CMD:-_ci_trivy_scan}"
     local raw status
     if raw="$(TMPDIR="${scan_tmp}" "${scan_cmd}" "${service}" "${digest}" 2>&1)"; then status=0; else status=$?; fi
+    # What: DB-unavailable is not a finding; escalate it.
+    # Why: A DB outage must not read as a finding.
+    # From: Issue #1683
+    if [ "${status}" -eq 3 ]; then
+        ci_error "[CI-ERROR-SCAN-0006]" "service=\"${service}\" reason=\"scan DB unavailable after retries; not a finding, escalate\"" "${raw}"
+        return 3
+    fi
     if [ "${status}" -ne 0 ]; then
-        ci_error "[CI-ERROR-SCAN-0005]" "service=\"${service}\" reason=\"scan reported findings or failed\" retry=$(_ci_classify_failure "${raw}")" "${raw}"
+        ci_error "[CI-ERROR-SCAN-0005]" "service=\"${service}\" reason=\"scan reported findings\"" "${raw}"
         return 2
     fi
     printf 'service=%s scanned=clean digest=%s tmpdir=%s\n' "${service}" "${digest}" "${scan_tmp}"

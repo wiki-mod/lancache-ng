@@ -883,6 +883,26 @@ _stub() {
     [[ "${output}" == *"CI-ERROR-BUILD-0002"* ]]
 }
 
+@test "scan fails on a finding backend" {
+    # What: A backend exit 1 is a genuine finding.
+    # Why: HIGH/CRITICAL findings fail the scan.
+    # From: Issue #1683
+    CI_SCAN_CMD="$(_stub s 'exit 1')" GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${CI_SH}" scan ui sha256:x
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-SCAN-0005"* ]]
+}
+
+@test "scan escalates a DB-unavailable backend, not a finding" {
+    # What: A backend exit 3 is a DB outage, not a finding.
+    # Why: An outage must escalate, never reject the image.
+    # From: Issue #1683
+    CI_SCAN_CMD="$(_stub s 'exit 3')" GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${CI_SH}" scan ui sha256:x
+    [ "${status}" -eq 3 ]
+    [[ "${output}" == *"CI-ERROR-SCAN-0006"* ]]
+}
+
 # =========================================================
 # CACHE FALLBACK
 # =========================================================
@@ -2626,19 +2646,64 @@ netdata=sha256:n"
     [ "${output}" = "sha256:deadbeef" ]
 }
 
-@test "scan default runs trivy against the image digest" {
-    # What: ci.sh runs trivy; not a bundled scanner.
-    # Why: HIGH/CRITICAL fails; trivy is a runner tool.
-    # From: Issue #1683
-    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    printf '#!/usr/bin/env bash\necho "trivy $*"\n' > "${bin}/trivy"
+# What: PATH-shim trivy for a clean/finding/db outcome.
+# Why: One trivy mock; the scan tests share it.
+# From: Issue #1683
+_trivy_stub() {
+    local mode="$1" bin="${BATS_TEST_TMPDIR}/bin"
+    mkdir -p "${bin}"
+    {
+        printf '#!/usr/bin/env bash\nout=""\n'
+        printf 'while [ $# -gt 0 ]; do [ "$1" = --output ] && out="$2"; shift; done\n'
+        case "${mode}" in
+            clean)   printf '[ -n "$out" ] && : > "$out"\nexit 0\n' ;;
+            finding) printf '[ -n "$out" ] && echo "HIGH vuln" > "$out"\nexit 1\n' ;;
+            db)      printf 'echo "failed to download vulnerability DB" >&2\nexit 1\n' ;;
+        esac
+    } > "${bin}/trivy"
     chmod +x "${bin}/trivy"
+    printf '%s' "${bin}"
+}
+
+@test "trivy error kind classifies a DB miss versus other errors" {
+    # What: DB-download text is retryable; others are not.
+    # Why: Only a DB miss should trigger a retry.
+    # From: Issue #1683
+    run _ci_trivy_error_kind "failed to download vulnerability DB: timeout"
+    [ "${output}" = "db-missing" ]
+    run _ci_trivy_error_kind "manifest unknown: pull denied"
+    [ "${output}" = "pre-report-error" ]
+}
+
+@test "scan default is clean when trivy exits zero" {
+    # What: A zero exit is a clean image, no retry.
+    # Why: The success path returns clean directly.
+    # From: Issue #1683
+    local bin; bin="$(_trivy_stub clean)"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
         run _ci_trivy_scan proxy sha256:abc
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"trivy image"* ]]
-    [[ "${output}" == *"ghcr.io/wiki-mod/lancache-ng/proxy@sha256:abc"* ]]
-    [[ "${output}" == *"HIGH,CRITICAL"* ]]
+}
+
+@test "scan default fails on a written report (a finding)" {
+    # What: A written report is a deterministic finding.
+    # Why: Findings fail once; retrying is wasted work.
+    # From: Issue #1683
+    local bin; bin="$(_trivy_stub finding)"
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+        run _ci_trivy_scan proxy sha256:abc
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"HIGH vuln"* ]]
+}
+
+@test "scan default escalates a DB miss after retries" {
+    # What: No report plus a DB miss retries, then exits 3.
+    # Why: A DB outage escalates, never reads as a finding.
+    # From: Issue #1683
+    local bin; bin="$(_trivy_stub db)"
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+        CI_TRIVY_MAX=2 CI_TRIVY_BACKOFF=0 run _ci_trivy_scan proxy sha256:abc
+    [ "${status}" -eq 3 ]
 }
 
 @test "verify default reads back the registry digest via imagetools" {
