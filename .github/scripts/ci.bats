@@ -1993,11 +1993,126 @@ netdata=sha256:n"
     # Why: Parallel waits still surface each failure.
     # From: Issue #1683 | PR #1858
     _ci_validate_health_services() { printf 'proxy\ndns-standard\n'; }
+    _ci_validate_no_health_services() { :; }
     _ci_validate_wait_one() { [ "$2" = "dns-standard" ] && return 1; return 0; }
     run _ci_validate_wait_healthy "proj"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-VALIDATE-0009"* ]]
     [[ "${output}" == *'service="dns-standard"'* ]]
+    [[ "${output}" == *'check="healthcheck"'* ]]
+}
+
+@test "validate wait_healthy also covers no-healthcheck services" {
+    # What: A no-healthcheck service still fails crash-loop.
+    # Why: AG-VAL-027: coverage must not skip it.
+    # From: Issue #1683
+    _ci_validate_health_services() { :; }
+    _ci_validate_no_health_services() { printf 'cachehamster\n'; }
+    _ci_validate_wait_stable() { return 1; }
+    run _ci_validate_wait_healthy "proj"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0009"* ]]
+    [[ "${output}" == *'service="cachehamster"'* ]]
+    [[ "${output}" == *'check="stability"'* ]]
+}
+
+@test "validate health list excludes no-healthcheck services" {
+    # What: no-health list is disjoint from health list.
+    # Why: Each service polled by exactly one wait strategy.
+    # From: Issue #1683
+    CI_COMPOSE_CONFIG_CMD="$(_stub cfg 'printf "%s" "{\"services\":{\"proxy\":{\"healthcheck\":{}},\"dhcp\":{\"network_mode\":\"host\"},\"cachehamster\":{}}}"')" \
+        run _ci_validate_no_health_services
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"cachehamster"* ]]
+    [[ "${output}" != *"proxy"* ]]
+    [[ "${output}" != *"dhcp"* ]]
+}
+
+@test "validate wait_stable succeeds once StartedAt holds through the window" {
+    # What: A stable StartedAt across polls passes.
+    # Why: Proves the settle window actually waits.
+    # From: Issue #1683
+    docker() {
+        case "$1" in
+            compose) echo cid1 ;;
+            inspect) echo running ;;
+        esac
+    }
+    CI_VALIDATE_STABLE_WINDOW=1 CI_VALIDATE_HEALTH_TIMEOUT=10 \
+        run _ci_validate_wait_stable proj cachehamster
+    [ "${status}" -eq 0 ]
+}
+
+@test "validate wait_stable never settles across restarts (crash-loop)" {
+    # What: A StartedAt that keeps changing never settles.
+    # Why: This is the crash-loop signal, not a count.
+    # From: Issue #1683
+    local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
+    docker() {
+        case "$1" in
+            compose) echo cid1 ;;
+            inspect)
+                if [[ "$3" == *StartedAt* ]]; then
+                    printf '%s' "$(( $(cat "${cnt}") + 1 ))" > "${cnt}"
+                    cat "${cnt}"
+                else
+                    echo running
+                fi
+                ;;
+        esac
+    }
+    CI_VALIDATE_STABLE_WINDOW=1 CI_VALIDATE_HEALTH_TIMEOUT=3 \
+        run _ci_validate_wait_stable proj cachehamster
+    [ "${status}" -ne 0 ]
+}
+
+@test "validate wait_stable fails while the container is not running" {
+    # What: A non-running status never counts as stable.
+    # Why: Restarting/exited must never read as settled.
+    # From: Issue #1683
+    docker() {
+        case "$1" in
+            compose) echo cid1 ;;
+            inspect) echo restarting ;;
+        esac
+    }
+    CI_VALIDATE_STABLE_WINDOW=1 CI_VALIDATE_HEALTH_TIMEOUT=3 \
+        run _ci_validate_wait_stable proj cachehamster
+    [ "${status}" -ne 0 ]
+}
+
+@test "validate wait_stable passes a one-shot exit-0 service" {
+    # What: a restart:no service exits 0 by design.
+    # Why: A one-shot exit is success, not a crash-loop.
+    # From: Issue #1683
+    docker() {
+        case "$1" in
+            compose) echo cid1 ;;
+            inspect)
+                [[ "$3" == *ExitCode* ]] && echo 0 || echo exited
+                ;;
+        esac
+    }
+    CI_VALIDATE_STABLE_WINDOW=1 CI_VALIDATE_HEALTH_TIMEOUT=10 \
+        run _ci_validate_wait_stable proj cachehamster
+    [ "${status}" -eq 0 ]
+}
+
+@test "validate wait_stable fails a one-shot service exiting nonzero" {
+    # What: A nonzero exit on a one-shot service is a crash.
+    # Why: Success needs ExitCode 0, not just exited.
+    # From: Issue #1683
+    docker() {
+        case "$1" in
+            compose) echo cid1 ;;
+            inspect)
+                [[ "$3" == *ExitCode* ]] && echo 1 || echo exited
+                ;;
+        esac
+    }
+    CI_VALIDATE_STABLE_WINDOW=1 CI_VALIDATE_HEALTH_TIMEOUT=10 \
+        run _ci_validate_wait_stable proj cachehamster
+    [ "${status}" -ne 0 ]
 }
 
 @test "ipv4 to int converts a dotted quad" {
@@ -3247,6 +3362,8 @@ _trivy_stub() {
     # From: Issue #1683
     local bin; bin="$(_trivy_stub clean)"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+    CI_TRIVY_SHARED_DIR="${BATS_TEST_TMPDIR}/no-shared" \
+    CI_TRIVY_FALLBACK_DIR="${BATS_TEST_TMPDIR}/trivy-cache" \
         run _ci_trivy_scan proxy sha256:abc
     [ "${status}" -eq 0 ]
 }
@@ -3257,6 +3374,8 @@ _trivy_stub() {
     # From: Issue #1683
     local bin; bin="$(_trivy_stub finding)"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+    CI_TRIVY_SHARED_DIR="${BATS_TEST_TMPDIR}/no-shared" \
+    CI_TRIVY_FALLBACK_DIR="${BATS_TEST_TMPDIR}/trivy-cache" \
         run _ci_trivy_scan proxy sha256:abc
     [ "${status}" -eq 1 ]
     [[ "${output}" == *"HIGH vuln"* ]]
@@ -3268,6 +3387,8 @@ _trivy_stub() {
     # From: Issue #1683
     local bin; bin="$(_trivy_stub db)"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+    CI_TRIVY_SHARED_DIR="${BATS_TEST_TMPDIR}/no-shared" \
+    CI_TRIVY_FALLBACK_DIR="${BATS_TEST_TMPDIR}/trivy-cache" \
         CI_TRIVY_MAX=2 CI_TRIVY_BACKOFF=0 run _ci_trivy_scan proxy sha256:abc
     [ "${status}" -eq 3 ]
 }
@@ -3286,9 +3407,202 @@ _trivy_stub() {
     } > "${bin}/trivy"
     chmod +x "${bin}/trivy"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+    CI_TRIVY_SHARED_DIR="${BATS_TEST_TMPDIR}/no-shared" \
+    CI_TRIVY_FALLBACK_DIR="${BATS_TEST_TMPDIR}/trivy-cache" \
         run _ci_trivy_scan proxy sha256:abc
     [ "${status}" -eq 0 ]
     grep -q -- "--scanners vuln,secret" "${TLOG}"
+    grep -q -- "--cache-dir ${BATS_TEST_TMPDIR}/trivy-cache" "${TLOG}"
+}
+
+@test "trivy dir writable proves a real file+subdir round-trip" {
+    # What: A real dir passes the write+read+delete probe.
+    # Why: Proves the probe itself, not just its caller.
+    # From: Issue #1683
+    run _ci_trivy_dir_writable "${BATS_TEST_TMPDIR}"
+    [ "${status}" -eq 0 ]
+}
+
+@test "trivy dir writable refuses a missing directory" {
+    # What: A nonexistent dir fails the probe.
+    # Why: mkdir/write must never silently create the root.
+    # From: Issue #1683
+    run _ci_trivy_dir_writable "${BATS_TEST_TMPDIR}/does-not-exist"
+    [ "${status}" -ne 0 ]
+}
+
+@test "trivy cache-dir prefers a writable shared dir" {
+    # What: A writable shared-dir wins over the fallback.
+    # Why: The shared NFS DB is the intended common cache.
+    # From: Issue #1683
+    mkdir -p "${BATS_TEST_TMPDIR}/shared"
+    CI_TRIVY_SHARED_DIR="${BATS_TEST_TMPDIR}/shared" \
+    CI_TRIVY_FALLBACK_DIR="${BATS_TEST_TMPDIR}/fallback" \
+        run _ci_trivy_cache_dir
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == "dir=${BATS_TEST_TMPDIR}/shared source=nfs-shared" ]]
+}
+
+@test "trivy cache-dir falls back to local disk when shared is absent" {
+    # What: A missing shared-dir falls back to local disk.
+    # Why: An unmounted NFS share must not block scanning.
+    # From: Issue #1683
+    CI_TRIVY_SHARED_DIR="${BATS_TEST_TMPDIR}/no-such-share" \
+    CI_TRIVY_FALLBACK_DIR="${BATS_TEST_TMPDIR}/fallback" \
+        run _ci_trivy_cache_dir
+    [ "${status}" -eq 0 ]
+    # What: run merges the INFO notice into output too.
+    # Why: a substring match tolerates that extra line.
+    # From: Issue #1683
+    [[ "${output}" == *"dir=${BATS_TEST_TMPDIR}/fallback source=local-fallback"* ]]
+    [ -d "${BATS_TEST_TMPDIR}/fallback" ]
+}
+
+@test "trivy cache-dir refuses tmpfs /tmp for shared or fallback" {
+    # What: A /tmp shared or fallback dir is rejected.
+    # Why: /tmp is tmpfs; a prior outage was OOM there.
+    # From: Issue #1683
+    CI_TRIVY_SHARED_DIR="/tmp/whatever" CI_TRIVY_FALLBACK_DIR="${BATS_TEST_TMPDIR}/fallback" \
+        run _ci_trivy_cache_dir
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-SCAN-0007"* ]]
+    CI_TRIVY_SHARED_DIR="${BATS_TEST_TMPDIR}/no-such-share" CI_TRIVY_FALLBACK_DIR="/tmp/whatever" \
+        run _ci_trivy_cache_dir
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-SCAN-0007"* ]]
+}
+
+@test "trivy db fresh is false with no db file" {
+    # What: A missing trivy.db is stale, never fine.
+    # Why: Presence must never be assumed from an empty dir.
+    # From: Issue #1683
+    run _ci_trivy_db_fresh "${BATS_TEST_TMPDIR}/empty"
+    [ "${status}" -ne 0 ]
+}
+
+@test "trivy db fresh is true before NextUpdate" {
+    # What: A future NextUpdate reads as fresh.
+    # Why: This is the one true freshness signal.
+    # From: Issue #1683
+    mkdir -p "${BATS_TEST_TMPDIR}/db/db"
+    printf 'x' > "${BATS_TEST_TMPDIR}/db/db/trivy.db"
+    printf '{"NextUpdate":"%s"}' "$(date -u -d '+1 day' '+%Y-%m-%dT%H:%M:%SZ')" \
+        > "${BATS_TEST_TMPDIR}/db/db/metadata.json"
+    run _ci_trivy_db_fresh "${BATS_TEST_TMPDIR}/db"
+    [ "${status}" -eq 0 ]
+}
+
+@test "trivy db fresh is false past NextUpdate" {
+    # What: A past NextUpdate reads as stale, not present.
+    # Why: skip-db-update never re-checks staleness itself.
+    # From: Issue #1683
+    mkdir -p "${BATS_TEST_TMPDIR}/db/db"
+    printf 'x' > "${BATS_TEST_TMPDIR}/db/db/trivy.db"
+    printf '{"NextUpdate":"%s"}' "$(date -u -d '-1 day' '+%Y-%m-%dT%H:%M:%SZ')" \
+        > "${BATS_TEST_TMPDIR}/db/db/metadata.json"
+    run _ci_trivy_db_fresh "${BATS_TEST_TMPDIR}/db"
+    [ "${status}" -ne 0 ]
+}
+
+@test "trivy db lock serializes a second concurrent holder" {
+    # What: A second locked_run waits for the first to end.
+    # Why: Two writers must never race the same DB file.
+    # From: Issue #1683
+    local cache="${BATS_TEST_TMPDIR}/lockdb"; mkdir -p "${cache}"
+    local order="${BATS_TEST_TMPDIR}/order"; : > "${order}"
+    export CI_TRIVY_LOCK_POLL=1
+    (
+        _ci_trivy_db_lock_run "${cache}" 10 60 -- bash -c \
+            'echo first-start >> "'"${order}"'"; sleep 1; echo first-end >> "'"${order}"'"'
+    ) &
+    local p1=$!
+    sleep 0.3
+    _ci_trivy_db_lock_run "${cache}" 10 60 -- bash -c \
+        'echo second-start >> "'"${order}"'"'
+    wait "${p1}"
+    [ "$(sed -n 1p "${order}")" = "first-start" ]
+    [ "$(sed -n 2p "${order}")" = "first-end" ]
+    [ "$(sed -n 3p "${order}")" = "second-start" ]
+}
+
+@test "trivy db lock reclaims a stale lock directory" {
+    # What: An old lock dir is reclaimed, not waited out.
+    # Why: A crashed holder must never wedge later callers.
+    # From: Issue #1683
+    local cache="${BATS_TEST_TMPDIR}/staledb"; mkdir -p "${cache}"
+    mkdir -p "${cache}/.trivy-db-update.lock"
+    touch -d '-1 hour' "${cache}/.trivy-db-update.lock"
+    run _ci_trivy_db_lock_run "${cache}" 10 5 -- true
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"reclaiming stale trivy DB refresh lock"* ]]
+}
+
+@test "trivy db lock times out on a genuinely held lock" {
+    # What: A fresh, still-held lock is never bypassed.
+    # Why: Falling through risks two concurrent writers.
+    # From: Issue #1683
+    local cache="${BATS_TEST_TMPDIR}/heldlock"; mkdir -p "${cache}"
+    mkdir -p "${cache}/.trivy-db-update.lock"
+    CI_TRIVY_LOCK_POLL=1 run _ci_trivy_db_lock_run "${cache}" 1 3600 -- true
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-SCAN-0011"* ]]
+}
+
+@test "trivy ensure_fresh skips the download when already fresh" {
+    # What: An already-fresh DB skips lock and download.
+    # Why: This is the intended common no-op case.
+    # From: Issue #1683
+    mkdir -p "${BATS_TEST_TMPDIR}/fresh/db"
+    printf 'x' > "${BATS_TEST_TMPDIR}/fresh/db/trivy.db"
+    printf '{"NextUpdate":"%s"}' "$(date -u -d '+1 day' '+%Y-%m-%dT%H:%M:%SZ')" \
+        > "${BATS_TEST_TMPDIR}/fresh/db/metadata.json"
+    CI_TRIVY_DB_DOWNLOAD_CMD="$(_stub dl 'echo SHOULD-NOT-RUN; exit 1')" \
+        run _ci_trivy_db_ensure_fresh "${BATS_TEST_TMPDIR}/fresh"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == "present=true" ]]
+}
+
+@test "trivy ensure_fresh downloads under lock when stale" {
+    # What: A stale/missing DB triggers one locked download.
+    # Why: The lock is required exactly for the cold path.
+    # From: Issue #1683
+    local cache="${BATS_TEST_TMPDIR}/stale"
+    local next; next="$(date -u -d '+1 day' '+%Y-%m-%dT%H:%M:%SZ')"
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    cat > "${bin}/dl" <<EOF
+#!/usr/bin/env bash
+mkdir -p "${cache}/db"
+printf 'x' > "${cache}/db/trivy.db"
+printf '{"NextUpdate":"%s"}' "${next}" > "${cache}/db/metadata.json"
+EOF
+    chmod +x "${bin}/dl"
+    CI_TRIVY_DB_DOWNLOAD_CMD="${bin}/dl" \
+        run _ci_trivy_db_ensure_fresh "${cache}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == "present=true" ]]
+}
+
+@test "trivy ensure_fresh reports present=false after a failed download" {
+    # What: A plain download failure stays present=false.
+    # Why: Permissive; trivy's own retry can still run.
+    # From: Issue #1683
+    mkdir -p "${BATS_TEST_TMPDIR}/stillstale"
+    CI_TRIVY_DB_DOWNLOAD_CMD="$(_stub dl 'exit 1')" \
+        run _ci_trivy_db_ensure_fresh "${BATS_TEST_TMPDIR}/stillstale"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == "present=false" ]]
+}
+
+@test "trivy ensure_fresh hard-fails on a genuine lock timeout" {
+    # What: A held lock fails ensure_fresh, not degrades.
+    # Why: A silent downgrade risks a concurrent DB write.
+    # From: Issue #1683
+    local cache="${BATS_TEST_TMPDIR}/lockedstale"; mkdir -p "${cache}"
+    mkdir -p "${cache}/.trivy-db-update.lock"
+    CI_TRIVY_LOCK_TIMEOUT=1 CI_TRIVY_LOCK_STALE=3600 CI_TRIVY_LOCK_POLL=1 \
+        run _ci_trivy_db_ensure_fresh "${cache}"
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-SCAN-0012"* ]]
 }
 
 @test "verify default reads back the registry digest via imagetools" {
