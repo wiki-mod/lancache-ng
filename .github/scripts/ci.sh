@@ -1139,13 +1139,18 @@ _ci_trivy_error_kind() {
 _ci_trivy_scan() {
     local service="$1" digest="$2" ref report n=0 raw
     local max="${CI_TRIVY_MAX:-4}"
+    local scanners="${CI_TRIVY_SCANNERS:-vuln,secret}"
+    local ignore="${CI_TRIVY_IGNOREFILE:-.trivyignore.yaml}"
     ref="ghcr.io/$(_ci_repo)/${service}@${digest}"
     report="$(mktemp "${TMPDIR:-/var/tmp}/ci-trivy.XXXXXX")"
+    local -a targs=(trivy image --severity "HIGH,CRITICAL" --exit-code 1
+        --ignore-unfixed --scanners "${scanners}")
+    [ -f "${ignore}" ] && targs+=(--trivyignores "${ignore}")
+    [ -n "${CI_TRIVY_TIMEOUT:-}" ] && targs+=(--timeout "${CI_TRIVY_TIMEOUT}")
     while :; do
         n=$((n + 1))
         : > "${report}"
-        if raw="$(trivy image --severity HIGH,CRITICAL --exit-code 1 \
-            --ignore-unfixed --output "${report}" "${ref}" 2>&1)"; then
+        if raw="$("${targs[@]}" --output "${report}" "${ref}" 2>&1)"; then
             rm -f "${report}"
             return 0
         fi

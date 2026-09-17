@@ -2733,6 +2733,25 @@ _trivy_stub() {
     [ "${status}" -eq 3 ]
 }
 
+@test "scan runs trivy with the vuln+secret scanners" {
+    # What: The scan covers vulnerabilities and secrets.
+    # Why: Secret-scan parity with the retired action.
+    # From: Issue #1683
+    export TLOG="${BATS_TEST_TMPDIR}/t.log"; : > "${TLOG}"
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    {
+        printf '#!/usr/bin/env bash\n'
+        printf 'printf "%%s\\n" "$*" >> "%s"\n' "${TLOG}"
+        printf 'out=""\nwhile [ $# -gt 0 ]; do [ "$1" = --output ] && out="$2"; shift; done\n'
+        printf '[ -n "$out" ] && : > "$out"\nexit 0\n'
+    } > "${bin}/trivy"
+    chmod +x "${bin}/trivy"
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+        run _ci_trivy_scan proxy sha256:abc
+    [ "${status}" -eq 0 ]
+    grep -q -- "--scanners vuln,secret" "${TLOG}"
+}
+
 @test "verify default reads back the registry digest via imagetools" {
     # What: default readback reads the registry digest.
     # Why: expected == registry digest continues (§23).
