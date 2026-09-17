@@ -3795,6 +3795,394 @@ _ci_check_stable_external_images() {
     printf 'stable-external-images=clean\n'
 }
 
+# What: PR body fills every pull_request_template.md section.
+# Why: CONTRIBUTING.md requires each heading kept and completed.
+# From: Issue #1683
+_ci_check_pr_template() {
+    if [ "${PR_AUTHOR:-}" = "dependabot[bot]" ]; then
+        printf 'pr-template=skip-dependabot\n'; return 0
+    fi
+    local body_arg="${1:-}" body=""
+    if [ -n "${body_arg}" ] && [ -f "${body_arg}" ]; then
+        body="$(<"${body_arg}")"
+    elif [ -n "${body_arg}" ]; then
+        body="${body_arg}"
+    else
+        body="${PR_BODY:-}"
+    fi
+    body="${body//$'\r'/}"
+    local template="${CI_REPO_ROOT}/.github/pull_request_template.md"
+    local -a sections=()
+    if [ -f "${template}" ]; then
+        while IFS= read -r sec; do sections+=("${sec}"); done \
+            < <(grep -oE '^## .+' "${template}" | sed 's/^## //')
+    fi
+    if [ "${#sections[@]}" -eq 0 ]; then
+        ci_log "[CI-ERROR-CHECK-0015]" "reason=\"no sections found in pull_request_template.md\""
+        return 2
+    fi
+    local -a missing=()
+    local sec content stripped trimmed
+    for sec in "${sections[@]}"; do
+        if ! grep -qF "## ${sec}" <<<"${body}"; then
+            missing+=("${sec}: heading not found"); continue
+        fi
+        content="$(awk -v sec="${sec}" '
+            /^## / && $0 ~ ("^## " sec "$") {found=1; next}
+            found && /^## / {exit}
+            found {print}
+        ' <<<"${body}")"
+        # Strips <!-- ... --> (may span lines) and ``` fence markers so an
+        # untouched template placeholder counts as empty, not "non-empty".
+        stripped="$(awk '
+            { line=$0 }
+            !incm && line ~ /<!--/ && line ~ /-->/ { sub(/<!--.*-->/, "", line) }
+            !incm && line ~ /<!--/ && line !~ /-->/ { sub(/<!--.*/, "", line); incm=1 }
+            incm && line ~ /-->/ { sub(/.*-->/, "", line); incm=0 }
+            incm { next }
+            line ~ /^```/ { next }
+            { print line }
+        ' <<<"${content}")"
+        trimmed="$(tr -d '[:space:]' <<<"${stripped}")"
+        [ -n "${trimmed}" ] || { missing+=("${sec}: empty (only template placeholder left)"); continue; }
+        if [ "${sec}" = "Type of change" ] && ! grep -qE '^- \[[xX]\]' <<<"${content}"; then
+            missing+=("Type of change: no checkbox marked (- [x] ...)")
+        fi
+    done
+    if [ "${#missing[@]}" -gt 0 ]; then
+        if [ "${PR_DRAFT:-false}" = "true" ]; then
+            ci_log "[CI-ERROR-CHECK-0015]" "reason=\"draft, non-blocking\" detail=\"$(printf '%s; ' "${missing[@]}")\""
+            printf 'pr-template=warn-draft\n'; return 0
+        fi
+        ci_error "[CI-ERROR-CHECK-0015]" "reason=\"missing/empty required section(s)\"" "$(printf '%s\n' "${missing[@]}")"
+        return 1
+    fi
+    printf 'pr-template=ok\n'
+}
+
+# What: Enforce workflow file/byte and run-block byte ceilings.
+# Why: GitHub drops runs >~9000 lines; actionlint hangs >~75KB.
+# From: Issue #1683
+_ci_measure_run_blocks() {
+    local file="$1"
+    awk '
+        function leadspace(s) { match(s, /^[ \t]*/); return RLENGTH }
+        function flush_block() {
+            if (started) printf "%d\t%d\n", block_start, block_bytes
+            in_block = 0; started = 0
+        }
+        {
+            line = $0
+            if (in_block) {
+                tmp = line; sub(/^[ \t]*/, "", tmp)
+                if (length(tmp) == 0) { block_bytes += length(line) + 1; next }
+                ind = leadspace(line)
+                if (!started) {
+                    if (ind > key_indent) {
+                        started = 1; content_indent = ind
+                        block_bytes += length(line) + 1; next
+                    }
+                } else if (ind >= content_indent) {
+                    block_bytes += length(line) + 1; next
+                }
+                flush_block()
+            }
+            if (!in_block && match(line, /^[ ]*(- )?run:[ ]*[|>][+-]?[0-9]?[+-]?[ ]*(#.*)?$/)) {
+                match(line, /^[ ]*(- )?run:/); key_indent = RLENGTH - 4
+                match(line, /[|>][+-]?[0-9]?[+-]?/)
+                digit = substr(line, RSTART, RLENGTH); gsub(/[^0-9]/, "", digit)
+                in_block = 1; block_start = NR + 1; block_bytes = 0
+                if (digit != "") { started = 1; content_indent = key_indent + digit }
+                else { started = 0; content_indent = 0 }
+            }
+        }
+        END { flush_block() }
+    ' "${file}"
+}
+
+_ci_check_workflow_line_limit() {
+    local dir="${1:-${CI_REPO_ROOT}/.github/workflows}"
+    local max_lines="${MAX_WORKFLOW_LINES:-8999}"
+    local max_bytes="${MAX_WORKFLOW_BYTES:-512000}"
+    local max_block="${MAX_RUN_BLOCK_BYTES:-74000}"
+    if [ ! -d "${dir}" ]; then
+        ci_log "[CI-ERROR-CHECK-0016]" "dir=\"${dir}\" reason=\"not a directory\""
+        return 2
+    fi
+    local file lines bytes block_report block_line block_bytes
+    local -a viol=()
+    while IFS= read -r -d '' file; do
+        lines="$(wc -l < "${file}")"
+        bytes="$(wc -c < "${file}")"
+        [ "${lines}" -gt "${max_lines}" ] && viol+=("${file}: ${lines} lines > ${max_lines}")
+        [ "${bytes}" -gt "${max_bytes}" ] && viol+=("${file}: ${bytes} bytes > ${max_bytes}")
+        block_report="$(_ci_measure_run_blocks "${file}")"
+        while IFS=$'\t' read -r block_line block_bytes; do
+            [ -n "${block_line}" ] || continue
+            [ "${block_bytes}" -gt "${max_block}" ] && \
+                viol+=("${file}:${block_line}: run-block ${block_bytes} bytes > ${max_block}")
+        done <<<"${block_report}"
+    done < <(find "${dir}" -maxdepth 1 -name '*.yml' -print0)
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0016]" "reason=\"workflow size ceiling exceeded\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'workflow-line-limit=clean\n'
+}
+
+# What: PR must carry label+milestone+project-board (AG-GH-008).
+# Why: A 2026-07-13 sweep found the backlog missing all three.
+# From: Issue #1683
+_ci_check_pr_tracking_metadata() {
+    local pr_number="${PR_NUMBER:-}" repo="${REPO:-}"
+    local project_number="${PROJECT_NUMBER:-6}" project_owner="${PROJECT_OWNER:-wiki-mod}"
+    if [ -z "${pr_number}" ] || [ -z "${repo}" ]; then
+        ci_log "[CI-ERROR-CHECK-0017]" "reason=\"PR_NUMBER and REPO are required\""
+        return 2
+    fi
+    local -a errs=() warns=()
+    local label_count
+    label_count="$(jq -e 'length' <<<"${PR_LABELS_JSON:-[]}" 2>/dev/null)" || label_count=0
+    [ "${label_count}" -eq 0 ] && errs+=("No labels set (AG-GH-008).")
+    [ -z "${PR_MILESTONE_TITLE:-}" ] && errs+=("No milestone set (AG-GH-008).")
+    if [ -z "${GH_TOKEN:-}" ]; then
+        if [ "${PR_IS_FORK:-false}" = "true" ]; then
+            warns+=("Project-board not checked: fork PRs get no repo secrets.")
+        else
+            warns+=("Project-board not checked: no read:project token (GH_TOKEN unset).")
+        fi
+    else
+        local repo_name="${repo#*/}" query response_file status response project_item_count
+        query="$(jq -n --arg owner "${project_owner}" --arg repo "${repo_name}" --argjson pr "${pr_number}" \
+            '{query:"query($owner: String!, $pr: Int!, $repo: String!) { repository(owner: $owner, name: $repo) { pullRequest(number: $pr) { projectItems(first: 10) { nodes { project { number } } } } } }", variables:{owner:$owner, pr:$pr, repo:$repo}}')"
+        response_file="$(mktemp)"
+        status="$(curl -sS -o "${response_file}" -w '%{http_code}' \
+            -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" -d "${query}" \
+            "https://api.github.com/graphql")" || status="000"
+        response="$(<"${response_file}")"
+        rm -f "${response_file}"
+        if [ "${status}" = "401" ] || [ "${status}" = "403" ]; then
+            errs+=("Project-board lookup rejected (HTTP ${status}): token invalid/insufficient scope.")
+        elif [ "${status}" != "200" ]; then
+            warns+=("Could not query project-board membership (HTTP ${status}).")
+        elif jq -e 'has("errors")' <<<"${response}" >/dev/null 2>&1; then
+            errs+=("Project-board lookup failed: GraphQL error response (bad/expired token).")
+        else
+            project_item_count="$(jq -r --argjson pn "${project_number}" \
+                '[.data.repository.pullRequest.projectItems.nodes[]? | select(.project.number == $pn)] | length' \
+                <<<"${response}" 2>/dev/null)" || project_item_count=""
+            if [ -z "${project_item_count}" ]; then
+                warns+=("Could not parse project-board membership response.")
+            elif [ "${project_item_count}" -eq 0 ]; then
+                errs+=("Not on project board #${project_number} (${project_owner}).")
+            fi
+        fi
+    fi
+    local w
+    for w in "${warns[@]:-}"; do [ -n "${w}" ] && ci_log "[CI-ERROR-CHECK-0017]" "warn=\"${w}\""; done
+    if [ "${#errs[@]}" -gt 0 ]; then
+        if [ "${PR_DRAFT:-false}" = "true" ]; then
+            ci_log "[CI-ERROR-CHECK-0017]" "reason=\"draft, non-blocking\" detail=\"$(printf '%s; ' "${errs[@]}")\""
+            printf 'pr-tracking-metadata=warn-draft\n'; return 0
+        fi
+        ci_error "[CI-ERROR-CHECK-0017]" "reason=\"AG-GH-008 metadata incomplete\"" "$(printf '%s\n' "${errs[@]}")"
+        return 1
+    fi
+    printf 'pr-tracking-metadata=ok\n'
+}
+
+# What: Resolves one GitHub issue's state (open/closed/unknown).
+# Why: Shared by governance-guards for closed-issue TODO checks.
+# From: Issue #1683
+_ci_governance_issue_state() {
+    local issue="$1"
+    if [ -n "${CI_GOVERNANCE_ISSUE_STATE:-}" ]; then
+        local pair
+        IFS=';' read -ra _ci_gov_pairs <<<"${CI_GOVERNANCE_ISSUE_STATE}"
+        for pair in "${_ci_gov_pairs[@]}"; do
+            [ "${pair%%=*}" = "${issue}" ] && { printf '%s\n' "${pair#*=}"; return 0; }
+        done
+        printf 'unknown\n'; return 0
+    fi
+    if [ -z "${GITHUB_REPOSITORY:-}" ]; then
+        printf 'unknown\n'; return 0
+    fi
+    local -a token_hdr=()
+    if [ -n "${GITHUB_TOKEN:-}" ]; then
+        token_hdr=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+    elif [ -n "${GH_TOKEN:-}" ]; then
+        token_hdr=(-H "Authorization: Bearer ${GH_TOKEN}")
+    fi
+    local response
+    response="$(curl -fsS -H 'Accept: application/vnd.github+json' "${token_hdr[@]}" \
+        "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${issue}")" || { printf 'unknown\n'; return 0; }
+    jq -r '.state // "unknown"' <<<"${response}"
+}
+
+# What: Flags stale-issue TODOs, partial-scope text, bad uploads.
+# Why: Governance guard over changed files + PR title/body.
+# From: Issue #1683
+_ci_check_governance_guards() {
+    local -a changed=("$@")
+    local title="${GOVERNANCE_PR_TITLE:-${PR_TITLE:-}}" body="${GOVERNANCE_PR_BODY:-${PR_BODY:-}}"
+    local -a viol=()
+    local path line marker issue state
+    for path in "${changed[@]}"; do
+        case "${path}" in *.md|*.mdx|*.rst|*.txt) continue ;; esac
+        [ -f "${path}" ] || continue
+        while IFS= read -r marker; do
+            [ -n "${marker}" ] || continue
+            line="${marker%%:*}"; marker="${marker#*:}"
+            issue="${marker##*#}"; issue="${issue%)*}"
+            [[ "${issue}" =~ ^[0-9]+$ ]] || continue
+            state="$(_ci_governance_issue_state "${issue}")"
+            [ "${state}" = "closed" ] && viol+=("${path}:${line}: stale TODO/FIXME references closed #${issue}")
+        done < <(grep -nEo '(TODO|FIXME)\(#([0-9]+)\)' "${path}" || true)
+    done
+    local combined="${title}"
+    [ -n "${combined}" ] && [ -n "${body}" ] && combined+=$'\n'
+    combined+="${body}"
+    if [ -n "${combined}" ]; then
+        if grep -Eq '(^|[[:space:]])@/tmp/[^[:space:]]+' <<<"${combined}"; then
+            viol+=("PR title/body: looks like a literal @/tmp/... upload path, not real body text")
+        elif [[ "${combined}" == \"*\" && "${combined}" == *'\\n'* && "${combined}" != *$'\n'* ]]; then
+            viol+=("PR title/body: looks like JSON-quoted Markdown, not real body text")
+        fi
+        local stripped
+        stripped="$(sed -E 's/\b(no|not|none|nothing|without)\b([[:space:]]+[[:alnum:]-]+){0,3}[[:space:]]+(scaffold|TODO|deferred|not covered|not implemented|partial|follow-up required)\b//Ig' <<<"${combined}")"
+        if grep -Eiq '(^|[^[:alnum:]])(scaffold|TODO|deferred|not covered|not implemented|partial|follow-up required)([^[:alnum:]]|$)' <<<"${stripped}"; then
+            local open_found=0
+            while IFS= read -r issue; do
+                [ -n "${issue}" ] || continue
+                state="$(_ci_governance_issue_state "${issue}")"
+                [ "${state}" = "open" ] && { open_found=1; break; }
+            done < <(grep -oE 'Refs[[:space:]]+#[0-9]+' <<<"${combined}" | grep -oE '[0-9]+' || true)
+            [ "${open_found}" -eq 1 ] || \
+                viol+=("PR title/body: partial-scope language without an open Refs #... remainder issue")
+        fi
+    fi
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0018]" "reason=\"governance guard violation\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'governance-guards=clean\n'
+}
+
+# What: Container/service-name literals stay in lockstep repo-wide.
+# Why: Socket-proxy allowlist gates every layer's Docker-API call.
+# From: Issue #1683 | Issue #454 | Issue #377 | Issue #1486
+_ci_check_naming_consistency() {
+    local root="${1:-${CI_REPO_ROOT}}"
+    local -a compose_files=("${root}/deploy/prod/docker-compose.yml" "${root}/deploy/quickstart/docker-compose.yml")
+    local proxy_sh="${root}/scripts/untracked/docker-socket-proxy.sh"
+    local docker_client_rs="${root}/services/ui/src/docker_client.rs"
+    local watchdog_sh="${root}/services/watchdog/watchdog.sh"
+    local ui_config_rs="${root}/services/ui/src/config.rs"
+    local -a viol=()
+    local cf
+
+    for cf in "${compose_files[@]}"; do
+        [ -f "${cf}" ] || continue
+        grep -Eq '^name: lancache-ng$' "${cf}" || viol+=("${cf}: missing 'name: lancache-ng'")
+    done
+
+    if [ ! -f "${proxy_sh}" ]; then
+        ci_error "[CI-ERROR-CHECK-0019]" "reason=\"docker-socket-proxy.sh not found\"" "${proxy_sh}"
+        return 2
+    fi
+    local allowlist_line allowlist_group allowlist_names
+    allowlist_line="$(grep -F 'acl lancache_container' "${proxy_sh}" || true)"
+    if [ -z "${allowlist_line}" ]; then
+        viol+=("${proxy_sh}: missing 'acl lancache_container' allowlist line")
+        allowlist_names=""
+    else
+        allowlist_group="$(grep -oE '\(lancache-[a-z0-9-]+(\|lancache-[a-z0-9-]+)*\)' <<<"${allowlist_line}")"
+        allowlist_names="$(head -n1 <<<"${allowlist_group}" | tr -d '()' | tr '|' '\n' | sort -u)"
+    fi
+    [ -n "${allowlist_names}" ] || viol+=("${proxy_sh}: could not parse lancache-* allowlist names")
+
+    _ci_name_in_allowlist() { grep -qxF "$1" <<<"${allowlist_names}"; }
+
+    for cf in "${compose_files[@]}"; do
+        [ -f "${cf}" ] || continue
+        local name_suffix=''
+        case "${cf}" in *quickstart*) name_suffix='\$\{LANCACHE_CONTAINER_SUFFIX:-\}' ;; esac
+        while IFS= read -r name; do
+            [ -n "${name}" ] || continue
+            grep -Eq "^[[:space:]]+container_name: ${name}${name_suffix}\$" "${cf}" || \
+                viol+=("${cf}: no container_name: ${name}${name_suffix}")
+        done <<<"${allowlist_names}"
+    done
+
+    if [ -f "${docker_client_rs}" ]; then
+        local dc_names name
+        dc_names="$(grep -oE '=> "lancache-[a-z0-9-]+"' "${docker_client_rs}" | grep -oE 'lancache-[a-z0-9-]+' | sort -u)"
+        [ -n "${dc_names}" ] || viol+=("${docker_client_rs}: no '=> \"lancache-*\"' resolutions found")
+        while IFS= read -r name; do
+            [ -n "${name}" ] || continue
+            _ci_name_in_allowlist "${name}" || viol+=("${docker_client_rs}: resolves '${name}' not in allowlist")
+        done <<<"${dc_names}"
+    fi
+
+    if [ -f "${watchdog_sh}" ]; then
+        local wd_names name
+        wd_names="$(grep -oE '\$\{CONTAINER_[A-Z_]+:-lancache-[a-z0-9-]+\}' "${watchdog_sh}" | grep -oE 'lancache-[a-z0-9-]+' | sort -u)"
+        [ -n "${wd_names}" ] || viol+=("${watchdog_sh}: no CONTAINER_*:-lancache-* defaults found")
+        while IFS= read -r name; do
+            [ -n "${name}" ] || continue
+            _ci_name_in_allowlist "${name}" || viol+=("${watchdog_sh}: defaults '${name}' not in allowlist")
+        done <<<"${wd_names}"
+    fi
+
+    local watchdog_acl
+    watchdog_acl="$(grep -Ei '^[[:space:]]*(acl|http-request)[[:space:]].*lancache-watchdog' "${proxy_sh}" || true)"
+    [ -z "${watchdog_acl}" ] || viol+=("${proxy_sh}: lancache-watchdog referenced in acl/http-request (issue #1486)")
+
+    local verb_acls
+    verb_acls="$(grep -oE '^[[:space:]]*acl[[:space:]]+[a-z_]+[[:space:]]+path,url_dec.*/\(?(start|stop|restart|wait)(\|(start|stop|restart|wait))*\)?\$' "${proxy_sh}" \
+        | grep -oE 'acl [a-z_]+' | awk '{print $2}')"
+    [ -n "${verb_acls}" ] || viol+=("${proxy_sh}: no lifecycle-action (start/stop/restart/wait) acl found")
+    local verb_acl verb_acl_line
+    while IFS= read -r verb_acl; do
+        [ -n "${verb_acl}" ] || continue
+        verb_acl_line="$(grep -F "acl ${verb_acl} " "${proxy_sh}" || true)"
+        grep -qi 'lancache-\(watchdog\|syslog\)' <<<"${verb_acl_line}" && \
+            viol+=("${proxy_sh}: '${verb_acl}' grants lifecycle action to watchdog/syslog (issue #1486)")
+    done <<<"${verb_acls}"
+
+    if [ -f "${ui_config_rs}" ]; then
+        local -A service_defaults=(
+            [DNS_STANDARD_SERVICE]=dns-standard [DNS_SSL_SERVICE]=dns-ssl
+            [PROXY_SERVICE]=proxy [NATS_SERVICE]=nats
+        )
+        local var expected actual
+        for var in "${!service_defaults[@]}"; do
+            expected="${service_defaults[${var}]}"
+            actual="$(grep -oE "env_str\(\"${var}\", \"[a-z0-9-]+\"\)|env_or\(\"${var}\", \"[a-z0-9-]+\"" "${ui_config_rs}" \
+                | grep -oE '"[a-z0-9-]+"' | tail -n1 | tr -d '"')"
+            if [ -z "${actual}" ]; then
+                viol+=("${ui_config_rs}: no default found for \$${var}")
+            elif [ "${actual}" != "${expected}" ]; then
+                viol+=("${ui_config_rs}: \$${var} defaults to '${actual}', expected '${expected}'")
+            fi
+            for cf in "${compose_files[@]}"; do
+                [ -f "${cf}" ] || continue
+                grep -Eq "^  ${expected}:\$" "${cf}" || viol+=("${cf}: no '${expected}:' service for \$${var}")
+            done
+        done
+        grep -Fq 'env_or("PROXY_SSL_SERVICE", proxy_service.clone())' "${ui_config_rs}" || \
+            viol+=("${ui_config_rs}: \$PROXY_SSL_SERVICE must inherit from proxy_service.clone()")
+    fi
+
+    unset -f _ci_name_in_allowlist
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0019]" "reason=\"naming-consistency drift (docs/naming-conventions.md)\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'naming-consistency=clean\n'
+}
+
 # What: Route a source-hygiene check to its function.
 # Why: One owner per guard invariant; ci.bats calls it.
 # From: Issue #1683
@@ -3813,6 +4201,11 @@ ci_cmd_check() {
         pipefail-early-exit) _ci_check_pipefail_early_exit "$@" ;;
         pr-title) _ci_check_pr_title "$@" ;;
         stable-external-images) _ci_check_stable_external_images "$@" ;;
+        pr-template) _ci_check_pr_template "$@" ;;
+        workflow-line-limit) _ci_check_workflow_line_limit "$@" ;;
+        pr-tracking-metadata) _ci_check_pr_tracking_metadata "$@" ;;
+        governance-guards) _ci_check_governance_guards "$@" ;;
+        naming-consistency) _ci_check_naming_consistency "$@" ;;
         *)
             ci_log "[CI-ERROR-CHECK-0001]" "sub=\"${sub}\" reason=\"unknown check\""
             return 2
