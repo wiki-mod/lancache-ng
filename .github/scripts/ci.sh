@@ -1105,6 +1105,9 @@ _ci_docker_build() {
     tag="$(_ci_image_tag "${service}" "${platform}" "${identity}")"
     local -a args=()
     while IFS= read -r a; do
+        [ -n "${a}" ] && args+=(--label "${a}")
+    done < <(_ci_oci_labels "${service}")
+    while IFS= read -r a; do
         [ -n "${a}" ] && args+=(--build-arg "${a}")
     done < <(ci_cmd_build_args "${service}" --bare "${platform}")
     docker buildx build --load --platform "${platform}" --tag "${tag}" "${args[@]}" "${context}"

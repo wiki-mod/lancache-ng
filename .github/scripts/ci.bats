@@ -2672,6 +2672,7 @@ netdata=sha256:n"
     [[ "${output}" == *"buildx build --load"* ]]
     [[ "${output}" == *"ghcr.io/wiki-mod/lancache-ng/proxy:sha-abc123-amd64"* ]]
     [[ "${output}" == *"--platform linux/amd64"* ]]
+    [[ "${output}" == *"org.opencontainers.image.title=proxy"* ]]
 }
 
 @test "docker-publish pushes then reads back the registry digest" {
