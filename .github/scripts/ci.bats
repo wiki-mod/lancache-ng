@@ -3010,6 +3010,27 @@ netdata=sha256:n"
     [[ "${output}" == *"CI-ERROR-CHECK-0003"* ]]
 }
 
+@test "check file-headers fails an extension with no native syntax" {
+    # What: a file type _ci_header_expected has no case for.
+    # Why: distinct from a missing header on a known type.
+    # From: Issue #1683 | PR #1858
+    printf 'whatever\n' > "${BATS_TEST_TMPDIR}/weird.xyz"
+    run bash "${CI_SH}" check file-headers "${BATS_TEST_TMPDIR}/weird.xyz"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"no native header syntax"* ]]
+}
+
+@test "check file-headers fails a legacy lowercase header mention" {
+    # What: canonical header, plus a stray legacy mention.
+    # Why: the lc>0 branch had zero test coverage before.
+    # From: Issue #1683 | PR #1858
+    printf '#!/usr/bin/env bash\n# LanCache-NG (https://github.com/wiki-mod/lancache-ng)\n# SPDX-License-Identifier: AGPL-3.0-or-later\n# lancache-ng (https://github.com/wiki-mod/lancache-ng)\n' \
+        > "${BATS_TEST_TMPDIR}/legacy.sh"
+    run bash "${CI_SH}" check file-headers "${BATS_TEST_TMPDIR}/legacy.sh"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"legacy lowercase header present"* ]]
+}
+
 @test "check comment-length passes valid, fails oversize and story-run" {
     # What: ci.sh owns AG-CODE-012 limits; bats calls it.
     # Why: guard logic lives once, tested through ci.sh.
@@ -3065,6 +3086,33 @@ netdata=sha256:n"
     run bash "${CI_SH}" check mutable-refs "${BATS_TEST_TMPDIR}/bad.yml"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0008"* ]]
+}
+
+@test "check mutable-refs fails a floating BUILD_TOOLS_IMAGE default" {
+    # What: the img-default-latest yml sub-pattern, unseen.
+    # Why: a second violation kind in the same yml branch.
+    # From: Issue #1683 | PR #1858
+    printf 'env:\n  BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/build-tools:latest\n' \
+        > "${BATS_TEST_TMPDIR}/imglatest.yml"
+    run bash "${CI_SH}" check mutable-refs "${BATS_TEST_TMPDIR}/imglatest.yml"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"img-default-latest"* ]]
+}
+
+@test "check mutable-refs fails a Dockerfile FROM:latest and untagged FROM" {
+    # What: both Dockerfile-side sub-patterns, unseen still.
+    # Why: distinct from the yml-side action/@vN case above.
+    # From: Issue #1683 | PR #1858
+    local d1="${BATS_TEST_TMPDIR}/fromlatest"; mkdir -p "${d1}"
+    printf 'FROM alpine:latest\n' > "${d1}/Dockerfile"
+    run bash "${CI_SH}" check mutable-refs "${d1}/Dockerfile"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"FROM-latest"* ]]
+    local d2="${BATS_TEST_TMPDIR}/untagged"; mkdir -p "${d2}"
+    printf 'FROM someimage\n' > "${d2}/Dockerfile"
+    run bash "${CI_SH}" check mutable-refs "${d2}/Dockerfile"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"FROM-untagged"* ]]
 }
 
 @test "check executable-bits fails a non-755 bare-path script via ci.sh" {
@@ -3126,6 +3174,27 @@ netdata=sha256:n"
     run bash "${CI_SH}" check pr-title "not conventional at all"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0013"* ]]
+}
+
+@test "check pr-title skips dependabot and fails closed with none" {
+    # What: dependabot skip and the no-title-given branches.
+    # Why: both existed in code with no prior test coverage.
+    # From: Issue #1683 | PR #1858
+    PR_AUTHOR='dependabot[bot]' run bash "${CI_SH}" check pr-title "anything at all"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"pr-title=skip-dependabot"* ]]
+    run bash "${CI_SH}" check pr-title
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0012"* ]]
+}
+
+@test "check pr-title rejects a disallowed type on an otherwise valid form" {
+    # What: a title matching the pattern but a bad type.
+    # Why: distinct from the not-conventional regex miss.
+    # From: Issue #1683 | PR #1858
+    run bash "${CI_SH}" check pr-title "bogus(proxy): x"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"type 'bogus' not allowed"* ]]
 }
 
 @test "check stable-external-images fails a non-digest external image" {
@@ -3265,6 +3334,63 @@ EOF
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0017"* ]]
     [[ "${output}" == *"rejected"* ]]
+}
+
+@test "check pr-tracking-metadata warns fork-specific with no token" {
+    # What: PR_IS_FORK=true never reached by any prior test.
+    # Why: forks get no secrets; warn, don't pass silently.
+    # From: Issue #1683 | PR #1858
+    PR_NUMBER=12 REPO=wiki-mod/lancache-ng PR_LABELS_JSON='["bug"]' \
+        PR_MILESTONE_TITLE=v1 PR_IS_FORK=true \
+        run bash "${CI_SH}" check pr-tracking-metadata
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"fork PRs get no repo secrets"* ]]
+}
+
+@test "check pr-tracking-metadata passes on a real 200 board hit" {
+    # What: the GH_TOKEN-set 200-success path was untested.
+    # Why: only its 403-rejected sibling had any coverage.
+    # From: Issue #1683 | PR #1858
+    local bin="${BATS_TEST_TMPDIR}/bin2"; mkdir -p "${bin}"
+    cat > "${bin}/curl" <<'EOF'
+#!/usr/bin/env bash
+out="" prev=""
+for a in "$@"; do
+    [ "${prev}" = "-o" ] && out="${a}"
+    prev="${a}"
+done
+[ -n "${out}" ] && printf '{"data":{"repository":{"pullRequest":{"projectItems":{"nodes":[{"project":{"number":6}}]}}}}}' > "${out}"
+printf '200'
+EOF
+    chmod +x "${bin}/curl"
+    PATH="${bin}:${PATH}" PR_NUMBER=12 REPO=wiki-mod/lancache-ng PR_LABELS_JSON='["bug"]' \
+        PR_MILESTONE_TITLE=v1 GH_TOKEN=goodtoken \
+        run bash "${CI_SH}" check pr-tracking-metadata
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"pr-tracking-metadata=ok"* ]]
+}
+
+@test "check pr-tracking-metadata fails a real 200 board miss" {
+    # What: 200 response, PR on no matching project item.
+    # Why: the "not on project board" branch was untested.
+    # From: Issue #1683 | PR #1858
+    local bin="${BATS_TEST_TMPDIR}/bin3"; mkdir -p "${bin}"
+    cat > "${bin}/curl" <<'EOF'
+#!/usr/bin/env bash
+out="" prev=""
+for a in "$@"; do
+    [ "${prev}" = "-o" ] && out="${a}"
+    prev="${a}"
+done
+[ -n "${out}" ] && printf '{"data":{"repository":{"pullRequest":{"projectItems":{"nodes":[]}}}}}' > "${out}"
+printf '200'
+EOF
+    chmod +x "${bin}/curl"
+    PATH="${bin}:${PATH}" PR_NUMBER=12 REPO=wiki-mod/lancache-ng PR_LABELS_JSON='["bug"]' \
+        PR_MILESTONE_TITLE=v1 GH_TOKEN=goodtoken \
+        run bash "${CI_SH}" check pr-tracking-metadata
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"Not on project board"* ]]
 }
 
 @test "check governance-guards flags a stale TODO on a closed issue" {
