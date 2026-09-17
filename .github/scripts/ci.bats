@@ -3312,6 +3312,117 @@ EOF
     [[ "${output}" == *"org.opencontainers.image.title=proxy"* ]]
 }
 
+@test "docker-build omits cache-from/cache-to when unset (unchanged default)" {
+    # What: no CI_BUILD_CACHE_* means no cache flags at all.
+    # Why: unset vars must not change existing callers.
+    # From: Issue #1683
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    printf '#!/usr/bin/env bash\necho "docker $*"\n' > "${bin}/docker"
+    chmod +x "${bin}/docker"
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+        run _ci_docker_build proxy abc123 linux/amd64
+    [ "${status}" -eq 0 ]
+    [[ "${output}" != *"--cache-from"* ]]
+    [[ "${output}" != *"--cache-to"* ]]
+}
+
+@test "docker-build wires per-service cache-from/cache-to from CI_BUILD_CACHE_FROM/TO" {
+    # What: buildx gets a cache-from/cache-to per service.
+    # Why: needs one cache scope per service, not shared.
+    # From: Issue #1683
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    printf '#!/usr/bin/env bash\necho "docker $*"\n' > "${bin}/docker"
+    chmod +x "${bin}/docker"
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+        CI_BUILD_CACHE_FROM="type=registry,ref=ghcr.io/wiki-mod/lancache-ng/proxy:cache" \
+        CI_BUILD_CACHE_TO="type=registry,ref=ghcr.io/wiki-mod/lancache-ng/proxy:cache,mode=max" \
+        run _ci_docker_build proxy abc123 linux/amd64
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"--cache-from type=registry,ref=ghcr.io/wiki-mod/lancache-ng/proxy:cache"* ]]
+    [[ "${output}" == *"--cache-to type=registry,ref=ghcr.io/wiki-mod/lancache-ng/proxy:cache,mode=max,ignore-error=true"* ]]
+
+    # What: a 2nd service call gets its own cache ref.
+    # Why: proves scope is per-call, not one constant value.
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+        CI_BUILD_CACHE_FROM="type=registry,ref=ghcr.io/wiki-mod/lancache-ng/ui:cache" \
+        CI_BUILD_CACHE_TO="type=registry,ref=ghcr.io/wiki-mod/lancache-ng/ui:cache,mode=max" \
+        run _ci_docker_build ui def456 linux/amd64
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"--cache-from type=registry,ref=ghcr.io/wiki-mod/lancache-ng/ui:cache"* ]]
+    [[ "${output}" == *"--cache-to type=registry,ref=ghcr.io/wiki-mod/lancache-ng/ui:cache,mode=max,ignore-error=true"* ]]
+    [[ "${output}" != *"proxy:cache"* ]]
+}
+
+@test "docker-build cache-from miss fails cache import only, build still succeeds" {
+    # What: a bad cache-from ref must not fail the build.
+    # Why: §35: a cache miss must cost time, not the build.
+    # From: Issue #1683
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    cat > "${bin}/docker" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+    *"--cache-from"*)
+        echo "importing cache manifest from target" >&2
+        echo "ERROR: failed to configure registry cache import: not found" >&2
+        exit 0
+        ;;
+    *) echo "docker $*" ;;
+esac
+EOF
+    chmod +x "${bin}/docker"
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+        CI_BUILD_CACHE_FROM="type=registry,ref=ghcr.io/wiki-mod/lancache-ng/proxy:cache" \
+        run _ci_docker_build proxy abc123 linux/amd64
+    [ "${status}" -eq 0 ]
+    # What: raw evidence of the miss stays visible.
+    # Why: AG-INT-002 forbids hiding it.
+    [[ "${output}" == *"failed to configure registry cache import"* ]]
+}
+
+@test "docker-build cache-to already carrying ignore-error is untouched" {
+    # What: ignore-error is kept, never duplicated.
+    # Why: a repeated CSV key must not reach buildx.
+    # From: Issue #1683
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    printf '#!/usr/bin/env bash\necho "docker $*"\n' > "${bin}/docker"
+    chmod +x "${bin}/docker"
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+        CI_BUILD_CACHE_TO="type=registry,ref=ghcr.io/wiki-mod/lancache-ng/proxy:cache,ignore-error=false" \
+        run _ci_docker_build proxy abc123 linux/amd64
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"--cache-to type=registry,ref=ghcr.io/wiki-mod/lancache-ng/proxy:cache,ignore-error=false"* ]]
+    [[ "${output}" != *"ignore-error=false,ignore-error=true"* ]]
+}
+
+@test "docker-build cache-to shorthand is passed through with a warning" {
+    # What: a shorthand ref is forwarded unmodified.
+    # Why: appending CSV attrs would break its syntax.
+    # From: Issue #1683
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    printf '#!/usr/bin/env bash\necho "docker $*"\n' > "${bin}/docker"
+    chmod +x "${bin}/docker"
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+        CI_BUILD_CACHE_TO="ghcr.io/wiki-mod/lancache-ng/proxy:cache" \
+        run _ci_docker_build proxy abc123 linux/amd64
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"--cache-to ghcr.io/wiki-mod/lancache-ng/proxy:cache"* ]]
+    [[ "${output}" == *"CI-WARN-BUILD-0012"* ]]
+}
+
+@test "build-tools build cache-to carries ignore-error for §35 resilience" {
+    # What: build-tools cache-to also gets ignore-error.
+    # Why: same failure class as build (AG-WF-011).
+    # From: Issue #1683
+    export DLOG="${BATS_TEST_TMPDIR}/d.log"; : > "${DLOG}"
+    docker() { printf 'docker %s\n' "$*" >> "${DLOG}"; case "$*" in *"imagetools inspect"*) printf 'sha256:dead\n' ;; esac; return 0; }
+    export -f docker
+    BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools GITHUB_SHA=abc123 \
+        CI_BUILD_CACHE_TO="type=registry,ref=ghcr.io/wiki-mod/lancache-ng/build-tools:cache,mode=max" \
+        run _ci_build_tools_build linux/amd64 sig-xyz
+    [ "${status}" -eq 0 ]
+    grep -q -- "--cache-to type=registry,ref=ghcr.io/wiki-mod/lancache-ng/build-tools:cache,mode=max,ignore-error=true" "${DLOG}"
+}
+
 @test "docker-publish pushes then reads back the registry digest" {
     # What: publish retries push, then reads the digest.
     # Why: BUILD != PUBLISH; same digest, many retries.

@@ -1136,6 +1136,21 @@ _ci_oci_labels() {
     fi
 }
 
+# What: adds ignore-error to a cache-to spec (§35).
+# Why: never corrupt a bare shorthand ref; warn instead.
+# From: Issue #1683
+_ci_cache_to_spec() {
+    local val="$1"
+    case "${val}" in
+        *ignore-error=*) printf '%s\n' "${val}" ;;
+        type=*) printf '%s,ignore-error=true\n' "${val}" ;;
+        *)
+            ci_log "[CI-WARN-BUILD-0012]" "value=\"${val}\" reason=\"shorthand cache-to has no ignore-error; use type=registry,ref=...\""
+            printf '%s\n' "${val}"
+            ;;
+    esac
+}
+
 # What: Build one service image once and load it locally.
 # Why: BUILD != PUBLISH; a push failure must not rebuild.
 # From: Issue #1683
@@ -1152,6 +1167,11 @@ _ci_docker_build() {
     while IFS= read -r a; do
         [ -n "${a}" ] && args+=(--build-arg "${a}")
     done < <(ci_cmd_build_args "${service}" --bare "${platform}")
+    # What: per-service registry cache-from/to (§35).
+    # Why: caller scopes ref per service; a miss is fine.
+    # From: Issue #1683
+    [ -n "${CI_BUILD_CACHE_FROM:-}" ] && args+=(--cache-from "${CI_BUILD_CACHE_FROM}")
+    [ -n "${CI_BUILD_CACHE_TO:-}" ] && args+=(--cache-to "$(_ci_cache_to_spec "${CI_BUILD_CACHE_TO}")")
     # What: retries buildx; captures its output, never doubles it.
     # Why: on failure ci_error already shows raw; avoid a 2nd copy.
     # From: Issue #1683
@@ -3525,8 +3545,11 @@ _ci_build_tools_build() {
         [ -n "${a}" ] && args+=(--label "${a}")
     done < <(_ci_oci_labels build-tools)
     [ -n "${sig}" ] && args+=(--label "org.lancache-ng.build-tools.signature=${sig}")
+    # What: cache-to gains ignore-error (§35 resilience).
+    # Why: shares _ci_docker_build's safe cache-to helper.
+    # From: Issue #1683
     [ -n "${CI_BUILD_CACHE_FROM:-}" ] && args+=(--cache-from "${CI_BUILD_CACHE_FROM}")
-    [ -n "${CI_BUILD_CACHE_TO:-}" ] && args+=(--cache-to "${CI_BUILD_CACHE_TO}")
+    [ -n "${CI_BUILD_CACHE_TO:-}" ] && args+=(--cache-to "$(_ci_cache_to_spec "${CI_BUILD_CACHE_TO}")")
     while IFS= read -r a; do
         [ -n "${a}" ] && args+=(--build-arg "${a}")
     done < <(_ci_build_tools_build_args --bare "${platform}")
