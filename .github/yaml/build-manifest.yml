@@ -258,3 +258,16 @@ release:
 # From: Issue #1683
 ci_variables:
   REPOSITORY_CI_LEDGER_RETENTION_DAYS: 30
+
+# What: Stack-validation check parameters (data, not logic).
+# Why: One SOT for check inputs; logic stays in ci.sh.
+# From: Issue #1683 | PR #1858
+validation:
+  # What: CDN domains that resolve from validation hosts.
+  # Why: Real dig targets; some Steam domains fail.
+  # From: Issue #1683 | PR #1858
+  dns_test_domains: [deb.debian.org, download.epicgames.com]
+  # What: Cacheable HTTP URL for the proxy MISS/HIT probe.
+  # Why: Only HTTP is cached; a real HIT proves the path.
+  # From: Issue #1683 | PR #1858
+  proxy_cache_probe_url: http://deb.debian.org/debian/dists/stable/InRelease

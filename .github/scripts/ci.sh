@@ -2032,6 +2032,83 @@ _ci_gc_run() {
 # VALIDATION
 # =========================================================
 
+# What: Print the SOT DNS test domains, one per line.
+# Why: Real dig targets live in the SOT, not in code.
+# From: Issue #1683 | PR #1858
+_ci_validation_dns_domains() {
+    _ci_block_entry_list validation "" dns_test_domains
+}
+
+# What: Print the SOT proxy cache-probe URL.
+# Why: One cacheable HTTP target proves the HIT path.
+# From: Issue #1683 | PR #1858
+_ci_validation_proxy_probe_url() {
+    _ci_manifest_scalar '^  proxy_cache_probe_url:[[:space:]]'
+}
+
+# What: Emit "service<TAB>image" for each compose service.
+# Why: Injectable so pin/drift needs no daemon in tests.
+# From: Issue #1683 | PR #1858
+_ci_validate_compose_images() {
+    if [ -n "${CI_COMPOSE_IMAGES_CMD:-}" ]; then
+        "${CI_COMPOSE_IMAGES_CMD}"
+        return "$?"
+    fi
+    docker compose -f "${CI_COMPOSE_FILE:-deploy/prod/docker-compose.yml}" config --format json \
+        | jq -r '.services | to_entries[] | [.key, .value.image] | @tsv'
+}
+
+# What: Warn on candidates without a first-party image.
+# Why: Third-party images stay visible, never silent.
+# From: Issue #1683 | PR #1858
+_ci_validate_report_unpinned() {
+    local candidate="$1" matched="$2" slug _digest
+    while IFS='=' read -r slug _digest; do
+        [ -n "${slug}" ] || continue
+        case "${matched}" in
+            *" ${slug} "*) : ;;
+            *) ci_log "[CI-WARN-VALIDATE-0008]" "unpinned=\"${slug}\" reason=\"third-party-compose-image\"" ;;
+        esac
+    done <<< "${candidate}"
+}
+
+# What: Print a compose override pinning first-party images.
+# Why: Validate candidate digests, never a mutable :latest.
+# From: Issue #1683 | PR #1858
+_ci_validate_pin_override() {
+    local candidate="$1" prefix images svc image slug digest reg matched=" "
+    prefix="$(_ci_manifest_scalar '^  image_prefix:[[:space:]]')"
+    if [ -z "${prefix}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0005]" "reason=\"no image_prefix in SOT\""
+        return 2
+    fi
+    if ! images="$(_ci_validate_compose_images)"; then
+        ci_log "[CI-ERROR-VALIDATE-0006]" "reason=\"compose config read failed\""
+        return 2
+    fi
+    printf 'services:\n'
+    while IFS=$'\t' read -r svc image; do
+        [ -n "${svc}" ] && [ -n "${image}" ] || continue
+        case "${image}" in
+            *"/${prefix}/"*)
+                slug="${image##*/"${prefix}"/}"
+                slug="${slug%%:*}"
+                slug="${slug%%@*}"
+                digest="$(printf '%s\n' "${candidate}" | awk -F= -v s="${slug}" '$1==s{print $2; exit}')"
+                if [ -z "${digest}" ]; then
+                    ci_log "[CI-ERROR-VALIDATE-0007]" "service=\"${svc}\" slug=\"${slug}\" reason=\"first-party compose image without candidate digest; refusing mutable tag\""
+                    return 2
+                fi
+                reg="${image%%/"${prefix}"/*}"
+                printf '  %s:\n    image: %s/%s/%s@%s\n' "${svc}" "${reg}" "${prefix}" "${slug}" "${digest}"
+                matched="${matched}${slug} "
+                ;;
+            *) : ;;
+        esac
+    done <<< "${images}"
+    _ci_validate_report_unpinned "${candidate}" "${matched}"
+}
+
 # What: Run the full-setup stack validation (injectable).
 # Why: Testable without a live compose stack or Docker.
 # From: Issue #1683

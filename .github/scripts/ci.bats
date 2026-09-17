@@ -1667,6 +1667,70 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     [[ "${output}" == *"result=STACK_ACCEPTED"* ]]
 }
 
+@test "validation SOT lists both real dig target domains" {
+    # What: DNS test domains come from the SOT, not code.
+    # Why: One place owns the check inputs (AG-CI-006).
+    # From: Issue #1683 | PR #1858
+    run _ci_validation_dns_domains
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"deb.debian.org"* ]]
+    [[ "${output}" == *"download.epicgames.com"* ]]
+}
+
+@test "validation SOT proxy probe url is a cacheable HTTP target" {
+    # What: Only HTTP is cached; the probe URL must be HTTP.
+    # Why: No HIT proof exists against passthrough HTTPS.
+    # From: Issue #1683 | PR #1858
+    run _ci_validation_proxy_probe_url
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == http://* ]]
+}
+
+@test "validate pins one SOT service onto both its compose containers" {
+    # What: dns pins both dns-standard and dns-ssl.
+    # Why: Pin by image, not key (1 service, 2 containers).
+    # From: Issue #1683 | PR #1858
+    CI_COMPOSE_IMAGES_CMD="$(_stub imgs 'printf "dns-standard\tghcr.io/wiki-mod/lancache-ng/dns:latest\ndns-ssl\tghcr.io/wiki-mod/lancache-ng/dns:latest\n"')" \
+        run _ci_validate_pin_override "dns=sha256:aaa"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"dns-standard:"* ]]
+    [[ "${output}" == *"dns-ssl:"* ]]
+    [ "$(printf '%s\n' "${output}" | grep -c 'dns@sha256:aaa')" -eq 2 ]
+}
+
+@test "validate skips third-party compose images without pinning" {
+    # What: nats is third-party; it is never pinned.
+    # Why: No first-party digest exists for external images.
+    # From: Issue #1683 | PR #1858
+    CI_COMPOSE_IMAGES_CMD="$(_stub imgs 'printf "nats\tnats:2-alpine@sha256:c11\nproxy\tghcr.io/wiki-mod/lancache-ng/proxy:latest\n"')" \
+        run _ci_validate_pin_override "proxy=sha256:p"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"proxy@sha256:p"* ]]
+    [[ "${output}" != *"nats:"* ]]
+}
+
+@test "validate fails closed on a first-party image with no candidate digest" {
+    # What: First-party image not in the candidate.
+    # Why: Else :latest validates green (silent drift).
+    # From: Issue #1683 | PR #1858
+    CI_COMPOSE_IMAGES_CMD="$(_stub imgs 'printf "proxy\tghcr.io/wiki-mod/lancache-ng/proxy:latest\n"')" \
+        run _ci_validate_pin_override "watchdog=sha256:w"
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0007"* ]]
+}
+
+@test "validate reports (not fails) a candidate with no first-party image" {
+    # What: netdata first-party, compose uses upstream.
+    # Why: Deferred defect stays visible, never a hard fail.
+    # From: Issue #1683 | PR #1858
+    CI_COMPOSE_IMAGES_CMD="$(_stub imgs 'printf "netdata\tnetdata/netdata@sha256:a13\nproxy\tghcr.io/wiki-mod/lancache-ng/proxy:latest\n"')" \
+        run _ci_validate_pin_override "proxy=sha256:p
+netdata=sha256:n"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"CI-WARN-VALIDATE-0008"* ]]
+    [[ "${output}" == *'unpinned="netdata"'* ]]
+}
+
 # =========================================================
 # VARIABLES
 # =========================================================
