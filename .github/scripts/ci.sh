@@ -1208,6 +1208,129 @@ _ci_trivy_error_kind() {
     esac
 }
 
+# What: Probe a dir with a real file+subdir write/read.
+# Why: A stale/listable mount may still fail real I/O.
+# From: Issue #1683
+_ci_trivy_dir_writable() {
+    local dir="$1" probe subdir
+    [ -d "${dir}" ] || return 1
+    probe="${dir}/.trivy-cache-dir-write-probe.$$.${RANDOM}"
+    subdir="${dir}/.trivy-cache-dir-write-probe-dir.$$.${RANDOM}"
+    ( set -e
+      printf 'probe' > "${probe}"
+      [ "$(cat "${probe}")" = "probe" ]
+      rm -f "${probe}"
+      mkdir "${subdir}"
+      printf 'probe' > "${subdir}/probe"
+      [ "$(cat "${subdir}/probe")" = "probe" ]
+      rm -rf "${subdir}"
+    ) 2>/dev/null
+}
+
+# What: Resolve a persistent Trivy DB cache-dir.
+# Why: NFS-shared or real local disk, never tmpfs/tmp.
+# From: Issue #1683
+_ci_trivy_cache_dir() {
+    if [ -n "${CI_TRIVY_CACHE_DIR_CMD:-}" ]; then
+        "${CI_TRIVY_CACHE_DIR_CMD}"
+        return "$?"
+    fi
+    local shared="${CI_TRIVY_SHARED_DIR:-/mnt/trivy-db}"
+    local fallback="${CI_TRIVY_FALLBACK_DIR:-/var/tmp/lancache-ng-trivy-cache-fallback}"
+    case "${shared}" in
+        /tmp|/tmp/*) ci_log "[CI-ERROR-SCAN-0007]" "reason=\"shared trivy cache-dir must not be tmpfs /tmp\" got=\"${shared}\""; return 2 ;;
+    esac
+    case "${fallback}" in
+        /tmp|/tmp/*) ci_log "[CI-ERROR-SCAN-0007]" "reason=\"fallback trivy cache-dir must not be tmpfs /tmp\" got=\"${fallback}\""; return 2 ;;
+    esac
+    if _ci_trivy_dir_writable "${shared}"; then
+        printf 'dir=%s source=nfs-shared\n' "${shared}"
+        return 0
+    fi
+    ci_log "[CI-INFO-SCAN-0008]" "shared=\"${shared}\" reason=\"not mounted/writable; falling back to local disk\""
+    mkdir -p "${fallback}" 2>/dev/null || {
+        ci_log "[CI-ERROR-SCAN-0009]" "dir=\"${fallback}\" reason=\"could not create local fallback trivy cache-dir\""
+        return 2
+    }
+    if ! _ci_trivy_dir_writable "${fallback}"; then
+        ci_log "[CI-ERROR-SCAN-0009]" "dir=\"${fallback}\" reason=\"fallback trivy cache-dir failed write probe\""
+        return 2
+    fi
+    printf 'dir=%s source=local-fallback\n' "${fallback}"
+}
+
+# What: True if cache-dir's trivy.db is present and fresh.
+# Why: skip-db-update never re-validates staleness itself.
+# From: Issue #1683
+_ci_trivy_db_fresh() {
+    local cache_dir="$1" db_file meta next_update next_epoch now_epoch
+    db_file="${cache_dir}/db/trivy.db"
+    meta="${cache_dir}/db/metadata.json"
+    [ -s "${db_file}" ] || return 1
+    next_update="$(jq -r '.NextUpdate // empty' "${meta}" 2>/dev/null)" || return 1
+    [ -n "${next_update}" ] || return 1
+    next_epoch="$(date -d "${next_update}" +%s 2>/dev/null)" || return 1
+    [ -n "${next_epoch}" ] || return 1
+    now_epoch="$(date +%s)"
+    [ "${now_epoch}" -lt "${next_epoch}" ]
+}
+
+# What: mkdir-mutex around a Trivy DB cache-dir write.
+# Why: Two writers must never race the same BoltDB file.
+# From: Issue #1683
+_ci_trivy_db_lock_run() {
+    local cache_dir="$1" lock_timeout="$2" stale_after="$3"; shift 3
+    [ "${1:-}" = "--" ] && shift
+    local lock_dir="${cache_dir}/.trivy-db-update.lock"
+    local poll="${CI_TRIVY_LOCK_POLL:-5}" waited=0 lock_mtime age
+    while ! mkdir "${lock_dir}" 2>/dev/null; do
+        if [ -d "${lock_dir}" ]; then
+            lock_mtime="$(stat -c %Y "${lock_dir}" 2>/dev/null || echo 0)"
+            age=$(( $(date +%s) - lock_mtime ))
+            if [ "${age}" -gt "${stale_after}" ]; then
+                ci_log "[CI-WARN-SCAN-0010]" "lock=\"${lock_dir}\" age=${age} stale_after=${stale_after} reason=\"reclaiming stale trivy DB refresh lock\""
+                rm -rf -- "${lock_dir}"
+                continue
+            fi
+        fi
+        if [ "${waited}" -ge "${lock_timeout}" ]; then
+            ci_log "[CI-ERROR-SCAN-0011]" "lock=\"${lock_dir}\" timeout=${lock_timeout} reason=\"timed out waiting for trivy DB refresh lock\""
+            return 2
+        fi
+        sleep "${poll}"
+        waited=$(( waited + poll ))
+    done
+    # What: releases the lock on any return from this call.
+    # Why: an unreleased lock wedges every later caller.
+    # shellcheck disable=SC2064
+    trap "rm -rf -- '${lock_dir}'" RETURN
+    "$@"
+}
+
+# What: Ensure cache-dir's Trivy DB is present and fresh.
+# Why: Freshness != presence; skip-db-update needs proof.
+# From: Issue #1683
+_ci_trivy_db_ensure_fresh() {
+    local cache_dir="$1" rc=0
+    local lock_timeout="${CI_TRIVY_LOCK_TIMEOUT:-900}"
+    local stale_after="${CI_TRIVY_LOCK_STALE:-1200}"
+    if _ci_trivy_db_fresh "${cache_dir}"; then
+        printf 'present=true\n'
+        return 0
+    fi
+    _ci_trivy_db_lock_run "${cache_dir}" "${lock_timeout}" "${stale_after}" -- \
+        "${CI_TRIVY_DB_DOWNLOAD_CMD:-trivy}" image --download-db-only --cache-dir "${cache_dir}" || rc=$?
+    if [ "${rc}" -eq 2 ]; then
+        ci_log "[CI-ERROR-SCAN-0012]" "reason=\"lock timeout; refusing an unlocked concurrent DB write\""
+        return 2
+    fi
+    if _ci_trivy_db_fresh "${cache_dir}"; then
+        printf 'present=true\n'
+        return 0
+    fi
+    printf 'present=false\n'
+}
+
 # What: Scan an image digest with Trivy on the runner.
 # Why: A written report is a finding; only DB miss retries.
 # From: Issue #1683
@@ -1216,10 +1339,16 @@ _ci_trivy_scan() {
     local max="${CI_TRIVY_MAX:-4}"
     local scanners="${CI_TRIVY_SCANNERS:-vuln,secret}"
     local ignore="${CI_TRIVY_IGNOREFILE:-.trivyignore.yaml}"
+    local cache_rec cache_dir fresh_rec skip_db=0
+    cache_rec="$(_ci_trivy_cache_dir)" || return 3
+    cache_dir="$(_ci_record_field "${cache_rec}" dir)"
+    fresh_rec="$(_ci_trivy_db_ensure_fresh "${cache_dir}")" || return 3
+    [ "$(_ci_record_field "${fresh_rec}" present)" = "true" ] && skip_db=1
     ref="ghcr.io/$(_ci_repo)/${service}@${digest}"
     report="$(mktemp "${TMPDIR:-/var/tmp}/ci-trivy.XXXXXX")"
     local -a targs=(trivy image --severity "HIGH,CRITICAL" --exit-code 1
-        --ignore-unfixed --scanners "${scanners}")
+        --ignore-unfixed --scanners "${scanners}" --cache-dir "${cache_dir}")
+    [ "${skip_db}" -eq 1 ] && targs+=(--skip-db-update)
     [ -f "${ignore}" ] && targs+=(--trivyignores "${ignore}")
     [ -n "${CI_TRIVY_TIMEOUT:-}" ] && targs+=(--timeout "${CI_TRIVY_TIMEOUT}")
     while :; do
@@ -2558,6 +2687,14 @@ _ci_validate_health_services() {
         '.value.network_mode != "host" and .value.healthcheck != null'
 }
 
+# What: Started services with no healthcheck defined.
+# Why: These still need crash-loop coverage (AG-VAL-027).
+# From: Issue #1683
+_ci_validate_no_health_services() {
+    _ci_validate_service_list \
+        '.value.network_mode != "host" and .value.healthcheck == null'
+}
+
 # What: Wait for one container to report healthy.
 # Why: A crash-loop only shows after up exits 0.
 # From: Issue #1683 | PR #1858
@@ -2576,21 +2713,68 @@ _ci_validate_wait_one() {
     return 1
 }
 
-# What: Poll all healthcheck services in parallel.
-# Why: Independent waits; no serial wall-clock cost.
-# From: Issue #1683 | PR #1858
+# What: Wait for a no-healthcheck service to settle.
+# Why: Crash-loop signal is Status, never RestartCount.
+# From: Issue #1683
+_ci_validate_wait_stable() {
+    local project="$1" svc="$2" deadline cid status started exitcode
+    local prev_started="" stable_since=-1
+    local window="${CI_VALIDATE_STABLE_WINDOW:-20}"
+    deadline=$(( SECONDS + ${CI_VALIDATE_HEALTH_TIMEOUT:-180} ))
+    while [ "${SECONDS}" -lt "${deadline}" ]; do
+        cid="$(docker compose -p "${project}" ps -q "${svc}" 2>/dev/null)"
+        if [ -z "${cid}" ]; then
+            stable_since=-1
+            sleep 2
+            continue
+        fi
+        status="$(docker inspect --format '{{.State.Status}}' "${cid}" 2>/dev/null)" || status=""
+        # What: exit is terminal, not a crash-loop.
+        # Why: restart:no exits 0 by design (AG-VAL-027).
+        # From: Issue #1683
+        if [ "${status}" = "exited" ]; then
+            exitcode="$(docker inspect --format '{{.State.ExitCode}}' "${cid}" 2>/dev/null)" || exitcode=1
+            [ "${exitcode}" = "0" ] && return 0
+            return 1
+        fi
+        started="$(docker inspect --format '{{.State.StartedAt}}' "${cid}" 2>/dev/null)" || started=""
+        if [ "${status}" != "running" ]; then
+            stable_since=-1
+        elif [ "${started}" != "${prev_started}" ]; then
+            # What: StartedAt changed; it restarted.
+            # Why: the window must restart from this start.
+            # From: Issue #1683
+            stable_since="${SECONDS}"
+        elif [ "${stable_since}" -ge 0 ] && [ $(( SECONDS - stable_since )) -ge "${window}" ]; then
+            return 0
+        fi
+        prev_started="${started}"
+        sleep 2
+    done
+    return 1
+}
+
+# What: Poll healthcheck and no-healthcheck services.
+# Why: No-healthcheck services still need crash-loop proof.
+# From: Issue #1683
 _ci_validate_wait_healthy() {
-    local project="$1" services svc rc=0 i
+    local project="$1" services no_health svc rc=0 i
     services="$(_ci_validate_health_services)" || return 2
-    local -a pids=() names=()
+    no_health="$(_ci_validate_no_health_services)" || return 2
+    local -a pids=() names=() kinds=()
     while IFS= read -r svc; do
         [ -n "${svc}" ] || continue
         _ci_validate_wait_one "${project}" "${svc}" &
-        pids+=("$!"); names+=("${svc}")
+        pids+=("$!"); names+=("${svc}"); kinds+=("healthcheck")
     done <<< "${services}"
+    while IFS= read -r svc; do
+        [ -n "${svc}" ] || continue
+        _ci_validate_wait_stable "${project}" "${svc}" &
+        pids+=("$!"); names+=("${svc}"); kinds+=("stability")
+    done <<< "${no_health}"
     for i in "${!pids[@]}"; do
         if ! wait "${pids[$i]}"; then
-            ci_log "[CI-ERROR-VALIDATE-0009]" "service=\"${names[$i]}\" reason=\"not healthy within timeout\""
+            ci_log "[CI-ERROR-VALIDATE-0009]" "service=\"${names[$i]}\" check=\"${kinds[$i]}\" reason=\"not stable/healthy within timeout\""
             rc=1
         fi
     done
