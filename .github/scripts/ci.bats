@@ -13,6 +13,10 @@ setup() {
     CI_MANIFEST_SOURCE="${BATS_TEST_DIRNAME}/../yaml/build-manifest.yml"
     # shellcheck source=.github/scripts/ci.sh
     source "${CI_SH}"
+    # What: default apk resolver, rust ids docker-free.
+    # Why: rust identity now keys the build-tools signature.
+    # From: Issue #1683
+    export CI_APK_RESOLVE_CMD="$(_stub apkres 'printf "pkg-1.0\n"')"
 }
 
 # =========================================================

@@ -451,8 +451,10 @@ _ci_identity_pins() {
     local service="$1" build_type="$2" platform="$3"
     case "${build_type}" in
         rust|toolchain)
-            _ci_manifest_scalar "^  alpine:"
-            awk '/^(  build-tools:|    tag:|    image:)/ { if (n < 3) { print; n++ } }' "${CI_MANIFEST}"
+            # What: rust keys the whole build-tools sig.
+            # Why: one owner; input change moves the id.
+            # From: Issue #1683
+            _ci_build_tools_resolve_signature
             ;;
         apk)
             _ci_manifest_scalar "^  alpine:"
@@ -471,11 +473,15 @@ _ci_identity_pins() {
 # From: Issue #1683
 _ci_identity_for() {
     local service="$1" platform="$2" ref="${3:-}"
-    local build_type context ctx ctx_path
+    local build_type context ctx ctx_path pins
     build_type="$(ci_service_field "${service}" build_type)"
     [ -n "${build_type}" ] || build_type="toolchain"
     context="$(ci_service_field "${service}" context)"
     [ -z "${context}" ] && context="services/${service}"
+    # What: compute pins first so a failed pin fails the id.
+    # Why: a swallowed sig error must not mint an id.
+    # From: Issue #1683
+    pins="$(_ci_identity_pins "${service}" "${build_type}" "${platform}")" || return "$?"
     {
         printf 'service=%s\nbuild_type=%s\nplatform=%s\n' "${service}" "${build_type}" "${platform}"
         _ci_tracked_content_ids "${context}" "${ref}"
@@ -483,7 +489,7 @@ _ci_identity_for() {
             ctx_path="$(ci_context_path "${ctx}")"
             [ -n "${ctx_path}" ] && _ci_tracked_content_ids "${ctx_path}" "${ref}"
         done
-        _ci_identity_pins "${service}" "${build_type}" "${platform}"
+        printf '%s\n' "${pins}"
     } | sha256sum | cut -d' ' -f1
 }
 
