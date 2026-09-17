@@ -763,9 +763,38 @@ _stub() {
     # What: Green backend -> tested=ok.
     # Why: The one success path.
     # From: Issue #1683
-    CI_TEST_CMD="$(_stub t 'exit 0')" run bash "${CI_SH}" test ui
+    CI_TEST_CMD="$(_stub t 'echo "service=ui tested=ok"; exit 0')" run bash "${CI_SH}" test ui
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"tested=ok"* ]]
+}
+
+@test "test dispatches a rust service to the cargo checks" {
+    # What: A rust service runs the cargo checks.
+    # Why: fmt/check/clippy/test are AG-VAL-008.
+    # From: Issue #1683 | PR #1858
+    CI_RUST_TEST_CMD="$(_stub rt 'echo "service=$1 tested=ok"')" \
+        run bash "${CI_SH}" test dns
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"tested=ok"* ]]
+}
+
+@test "test skips an apk-install service without claiming pass" {
+    # What: An apk service reports SKIP, not ok.
+    # Why: No unit test; PASS would misrepresent.
+    # From: Issue #1683 | PR #1858
+    run bash "${CI_SH}" test proxy
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"tested=SKIP"* ]]
+    [[ "${output}" != *"tested=ok"* ]]
+}
+
+@test "test build-tools fails closed until the toolchain smoke is wired" {
+    # What: build-tools test needs a wired smoke.
+    # Why: Dockerfile owns the inventory (AG-VAL-017).
+    # From: Issue #1683 | PR #1858
+    run bash "${CI_SH}" test build-tools
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-TEST-0006"* ]]
 }
 
 @test "scan rejects a /tmp (tmpfs) TMPDIR, requires /var/tmp" {

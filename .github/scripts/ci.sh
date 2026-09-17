@@ -1321,23 +1321,69 @@ ci_cmd_verify() {
     printf 'service=%s verified=%s\n' "${service}" "${seen}"
 }
 
-# What: Run a service's tests via an injectable backend.
+# What: Run AG-VAL-008 cargo checks for a rust service.
+# Why: fmt/check/clippy/test run nowhere else in ci.sh.
+# From: Issue #1683 | PR #1858
+_ci_test_rust() {
+    local service="$1" ctx
+    if [ -n "${CI_RUST_TEST_CMD:-}" ]; then
+        "${CI_RUST_TEST_CMD}" "${service}"
+        return "$?"
+    fi
+    ctx="$(ci_service_field "${service}" context)"
+    if [ -z "${ctx}" ]; then
+        ci_log "[CI-ERROR-TEST-0005]" "service=\"${service}\" reason=\"no context in SOT\""
+        return 2
+    fi
+    ( cd "${CI_REPO_ROOT:-.}/${ctx}" \
+        && cargo fmt --check \
+        && cargo check \
+        && cargo clippy -- -D warnings \
+        && cargo test ) || return 1
+    printf 'service=%s tested=ok\n' "${service}"
+}
+
+# What: Smoke the build-tools image tool inventory.
+# Why: The Dockerfile owns the list; ci.sh dispatches.
+# From: Issue #1683 | PR #1858
+_ci_test_toolchain() {
+    local service="$1"
+    if [ -n "${CI_TOOLCHAIN_TEST_CMD:-}" ]; then
+        "${CI_TOOLCHAIN_TEST_CMD}" "${service}"
+        return "$?"
+    fi
+    ci_log "[CI-ERROR-TEST-0006]" "service=\"${service}\" reason=\"toolchain smoke not wired; provided by the build-tools workflow (AG-VAL-017)\""
+    return 2
+}
+
+# What: Dispatch a service's test by its build type.
+# Why: rust runs cargo; apk has no unit test to run.
+# From: Issue #1683 | PR #1858
+_ci_default_test() {
+    local service="$1" build_type
+    build_type="$(ci_service_field "${service}" build_type)"
+    [ -n "${build_type}" ] || build_type="toolchain"
+    case "${build_type}" in
+        rust) _ci_test_rust "${service}" ;;
+        apk|install) printf 'service=%s tested=SKIP build_type=%s reason=no unit test; runtime in validate\n' "${service}" "${build_type}" ;;
+        toolchain) _ci_test_toolchain "${service}" ;;
+        *) ci_log "[CI-ERROR-TEST-0004]" "service=\"${service}\" build_type=\"${build_type}\" reason=\"unknown build_type\""; return 2 ;;
+    esac
+}
+
+# What: Run a service's tests via the wired backend.
 # Why: A failed test run is a failed run, never skipped.
 # From: Issue #1683
 ci_cmd_test() {
     local service="${1:-}"
     [ -n "${service}" ] || { ci_log "[CI-ERROR-TEST-0001]" "reason=\"service arg required\""; return 2; }
-    if [ -z "${CI_TEST_CMD:-}" ]; then
-        ci_log "[CI-ERROR-TEST-0002]" "service=\"${service}\" reason=\"no test backend wired (CI_TEST_CMD unset)\""
-        return 2
-    fi
     local raw status
-    if raw="$("${CI_TEST_CMD}" "${service}" 2>&1)"; then status=0; else status=$?; fi
+    if raw="$("${CI_TEST_CMD:-_ci_default_test}" "${service}" 2>&1)"; then status=0; else status=$?; fi
     if [ "${status}" -ne 0 ]; then
         ci_error "[CI-ERROR-TEST-0003]" "service=\"${service}\" reason=\"tests failed\" retry=$(_ci_classify_failure "${raw}")" "${raw}"
         return 2
     fi
-    printf 'service=%s tested=ok\n' "${service}"
+    printf '%s\n' "${raw}"
 }
 
 # What: Scan a published digest for vulnerabilities.
