@@ -19,27 +19,6 @@ setup() {
     export CI_APK_RESOLVE_CMD="$(_stub apkres 'printf "pkg-1.0\n"')"
 }
 
-# What: Removes every dir a manifest file lists, one per line.
-# Why: A function (not inline teardown) lets a test prove it.
-# From: Issue #1683 | PR #1858
-_trivy_cleanup_var_tmp_dirs() {
-    local manifest="$1" d
-    if [ -f "${manifest}" ]; then
-        while IFS= read -r d; do
-            if [ -n "${d}" ]; then
-                rm -rf -- "${d}"
-            fi
-        done < "${manifest}"
-    fi
-}
-
-# What: Removes /var/tmp scratch dirs this test made.
-# Why: a "$(...)"-run helper can't set a var seen here.
-# From: Issue #1683 | PR #1858
-teardown() {
-    _trivy_cleanup_var_tmp_dirs "${BATS_TEST_TMPDIR}/.trivy-var-tmp-dirs"
-}
-
 # =========================================================
 # CORE INVARIANTS
 # =========================================================
@@ -70,15 +49,6 @@ teardown() {
     run bash "${CI_SH}" bogus-command
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-CORE-0002"* ]]
-}
-
-@test "_ci_repo lowercases a real mixed-case GITHUB_REPOSITORY" {
-    # What: a real mixed-case owner/repo, not pre-lowered.
-    # Why: GHCR needs lowercase; this transform was unseen.
-    # From: Issue #1683 | PR #1858
-    GITHUB_REPOSITORY='Wiki-Mod/LanCache-NG' run _ci_repo
-    [ "${status}" -eq 0 ]
-    [ "${output}" = "wiki-mod/lancache-ng" ]
 }
 
 # =========================================================
@@ -2582,18 +2552,6 @@ netdata=sha256:n"
     [[ "${output}" == *"CI-ERROR-VARIABLES-0011"* ]]
 }
 
-@test "set-runtime errors on auth token without scheduler" {
-    # What: the symmetric half of the both-or-neither pair.
-    # Why: only the scheduler-without-token side had a test.
-    # From: Issue #1683 | PR #1858
-    CI_RUNTIME_SECRET_DIR="${BATS_TEST_TMPDIR}/rt2" \
-    SCCACHE_DIST_AUTH_TOKEN='tok' \
-        run bash "${CI_SH}" variables set-runtime
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VARIABLES-0011"* ]]
-    [[ "${output}" == *"auth token set without scheduler"* ]]
-}
-
 @test "set-runtime errors when required redis url is missing" {
     # What: mode=required needs SCCACHE_REDIS_URL.
     # Why: A trusted Rust build must have the cache.
@@ -2768,91 +2726,13 @@ netdata=sha256:n"
     [[ "${output}" == *"CI-ERROR-BUILDARGS-0001"* ]]
 }
 
-@test "build-args emits nothing for an unrecognized target" {
-    # What: A name absent from the manifest's services block
-    #       still gets no args -- no guessed default.
-    # Why: build-tools + the 10 manifest services own args now;
-    #      anything else stays the prior silent no-op.
+@test "build-args emits nothing for a non-toolchain target" {
+    # What: Only build-tools owns SOT build-args today.
+    # Why: An apk/rust service pins none centrally yet.
     # From: Issue #1683
-    run bash "${CI_SH}" build-args not-a-real-service
+    run bash "${CI_SH}" build-args proxy
     [ "${status}" -eq 0 ]
     [ -z "${output}" ]
-}
-
-@test "build-args emits ALPINE_IMAGE for every plain product service" {
-    # What: proxy/dns/watchdog/dhcp/dhcp-proxy/ntp/ui/cachehamster
-    #       each get the shared ALPINE_IMAGE pin and nothing else.
-    # Why: One base-image owner (base_images.alpine); no service
-    #      Dockerfile pins its own alpine tag.
-    # From: Issue #1683
-    local svc
-    for svc in proxy dns watchdog dhcp dhcp-proxy ntp ui cachehamster; do
-        run bash "${CI_SH}" build-args "${svc}"
-        [ "${status}" -eq 0 ]
-        [[ "${output}" == *"--build-arg ALPINE_IMAGE=mirror.gcr.io"* ]]
-        [[ "${output}" != *"FLUENT_BIT_IMAGE"* ]]
-    done
-}
-
-@test "build-args emits ALPINE_IMAGE + FLUENT_BIT_IMAGE for syslog only" {
-    # What: syslog's external_image: fluent_bit manifest entry
-    #       adds FLUENT_BIT_IMAGE from base_images.fluent_bit.
-    # Why: syslog copies a prebuilt fluent-bit binary; no other
-    #      service declares an external_image today.
-    # From: Issue #1683
-    run bash "${CI_SH}" build-args syslog
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"--build-arg ALPINE_IMAGE=mirror.gcr.io"* ]]
-    [[ "${output}" == *"--build-arg FLUENT_BIT_IMAGE=cr.fluentbit.io"* ]]
-}
-
-@test "build-args --bare syslog emits FLUENT_BIT_IMAGE without the flag prefix" {
-    # What: --bare form drops --build-arg for the external image too.
-    # Why: docker/build-push-action's build-args wants NAME=VALUE.
-    # From: Issue #1683
-    run bash "${CI_SH}" build-args syslog --bare
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"FLUENT_BIT_IMAGE=cr.fluentbit.io"* ]]
-    [[ "${output}" != *"--build-arg"* ]]
-}
-
-@test "build-args emits only ALPINE_IMAGE for netdata (no version pin)" {
-    # What: netdata gets ALPINE_IMAGE like any product service, but
-    #       NEVER NETDATA_VERSION/NETDATA_X86_64_SHA256.
-    # Why: netdata keeps its own baked-in ARG defaults (SOT-Sync);
-    #      this function must not touch that separate ownership.
-    # From: Issue #1683
-    run bash "${CI_SH}" build-args netdata
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"--build-arg ALPINE_IMAGE=mirror.gcr.io"* ]]
-    [[ "${output}" != *"NETDATA_VERSION"* ]]
-    [[ "${output}" != *"NETDATA_X86_64_SHA256"* ]]
-}
-
-@test "build-args for a product service fails closed on a missing central base image" {
-    # What: A missing base_images.alpine pin must fail closed for
-    #       a product-service target too, not only build-tools.
-    # Why: FAIL CLOSED must cover every ALPINE_IMAGE emitter.
-    # From: Issue #1683
-    local m="${BATS_TEST_TMPDIR}/no-rust-alpine-proxy.yml"
-    grep -v '^  alpine:' "${CI_MANIFEST_SOURCE}" > "${m}"
-    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args proxy
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-BUILDARGS-0007"* ]]
-}
-
-@test "build-args fails closed on an unmapped external_image value" {
-    # What: an external_image the arg-name case doesn't know must
-    #       fail closed rather than guess a build-arg name.
-    # Why: AG-VAL-030 -- prove the failure path, not only the two
-    #      real cases (none today / fluent_bit for syslog).
-    # From: Issue #1683
-    local m="${BATS_TEST_TMPDIR}/bogus-external-image.yml"
-    sed 's/external_image: fluent_bit/external_image: bogus_thing/' \
-        "${CI_MANIFEST_SOURCE}" > "${m}"
-    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args syslog
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-BUILDARGS-0008"* ]]
 }
 
 @test "build-tools packages lists the apk tools incl. AG-KD-009 set" {
@@ -3109,27 +2989,6 @@ netdata=sha256:n"
     [[ "${output}" == *"CI-ERROR-CHECK-0003"* ]]
 }
 
-@test "check file-headers fails an extension with no native syntax" {
-    # What: a file type _ci_header_expected has no case for.
-    # Why: distinct from a missing header on a known type.
-    # From: Issue #1683 | PR #1858
-    printf 'whatever\n' > "${BATS_TEST_TMPDIR}/weird.xyz"
-    run bash "${CI_SH}" check file-headers "${BATS_TEST_TMPDIR}/weird.xyz"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"no native header syntax"* ]]
-}
-
-@test "check file-headers fails a legacy lowercase header mention" {
-    # What: canonical header, plus a stray legacy mention.
-    # Why: the lc>0 branch had zero test coverage before.
-    # From: Issue #1683 | PR #1858
-    printf '#!/usr/bin/env bash\n# LanCache-NG (https://github.com/wiki-mod/lancache-ng)\n# SPDX-License-Identifier: AGPL-3.0-or-later\n# lancache-ng (https://github.com/wiki-mod/lancache-ng)\n' \
-        > "${BATS_TEST_TMPDIR}/legacy.sh"
-    run bash "${CI_SH}" check file-headers "${BATS_TEST_TMPDIR}/legacy.sh"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"legacy lowercase header present"* ]]
-}
-
 @test "check comment-length passes valid, fails oversize and story-run" {
     # What: ci.sh owns AG-CODE-012 limits; bats calls it.
     # Why: guard logic lives once, tested through ci.sh.
@@ -3187,44 +3046,6 @@ netdata=sha256:n"
     [[ "${output}" == *"CI-ERROR-CHECK-0008"* ]]
 }
 
-@test "check mutable-refs fails a floating BUILD_TOOLS_IMAGE default" {
-    # What: the img-default-latest yml sub-pattern, unseen.
-    # Why: a second violation kind in the same yml branch.
-    # From: Issue #1683 | PR #1858
-    printf 'env:\n  BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/build-tools:latest\n' \
-        > "${BATS_TEST_TMPDIR}/imglatest.yml"
-    run bash "${CI_SH}" check mutable-refs "${BATS_TEST_TMPDIR}/imglatest.yml"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"img-default-latest"* ]]
-}
-
-@test "check mutable-refs fails a Dockerfile FROM:latest and untagged FROM" {
-    # What: both Dockerfile-side sub-patterns, unseen still.
-    # Why: distinct from the yml-side action/@vN case above.
-    # From: Issue #1683 | PR #1858
-    local d1="${BATS_TEST_TMPDIR}/fromlatest"; mkdir -p "${d1}"
-    printf 'FROM alpine:latest\n' > "${d1}/Dockerfile"
-    run bash "${CI_SH}" check mutable-refs "${d1}/Dockerfile"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"FROM-latest"* ]]
-    local d2="${BATS_TEST_TMPDIR}/untagged"; mkdir -p "${d2}"
-    printf 'FROM someimage\n' > "${d2}/Dockerfile"
-    run bash "${CI_SH}" check mutable-refs "${d2}/Dockerfile"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"FROM-untagged"* ]]
-}
-
-@test "check mutable-refs does not flag a real tag as untagged" {
-    # What: AG-WF-027: this found a real bug; fixed here.
-    # Why: ':' in the untagged charset false-matched 3.24.
-    # From: Issue #1683 | PR #1858
-    local d="${BATS_TEST_TMPDIR}/realtag"; mkdir -p "${d}"
-    printf 'FROM alpine:3.24\n' > "${d}/Dockerfile"
-    run bash "${CI_SH}" check mutable-refs "${d}/Dockerfile"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" != *"FROM-untagged"* ]]
-}
-
 @test "check executable-bits fails a non-755 bare-path script via ci.sh" {
     # What: ci.sh owns the mode check; bats calls it.
     # Why: bare-path scripts must carry the exec bit.
@@ -3257,111 +3078,6 @@ netdata=sha256:n"
     [ "${status}" -ne 0 ]
 }
 
-@test "check review-chronology exempts legacy-excluded file types" {
-    # What: *.md (and the rest of the legacy exclusion list) must not
-    #       trip the scan even when it quotes a banned phrase verbatim.
-    # Why: parity with the migrated-from script's is_excluded().
-    # From: Issue #1683
-    printf '# found during code review earlier.\n' > "${BATS_TEST_TMPDIR}/notes.md"
-    run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/notes.md"
-    [ "${status}" -eq 0 ]
-}
-
-@test "check review-chronology CHRONOLOGY_WARN_ONLY downgrades a real violation to exit 0" {
-    # What: repo-wide PR mode: a real narration hit still surfaces but
-    #       does not block, matching the legacy repo-wide/PR split.
-    # Why: AG-GH-018-style transitional warn path (Issue #1095 | PR #1546).
-    # From: Issue #1683
-    printf '# found during code review earlier.\n' > "${BATS_TEST_TMPDIR}/badc.sh"
-    run env CHRONOLOGY_WARN_ONLY=1 bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/badc.sh"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"review-chronology=warn"* ]]
-    [[ "${output}" == *"CI-ERROR-CHECK-0010"* ]]
-}
-
-@test "check review-chronology duplicate #N outside From: is always warn-only" {
-    # What: a bare #N repeated outside the file's own From: pointer
-    #       must never block, even without CHRONOLOGY_WARN_ONLY.
-    # Why: PR #1856 downgraded this specific sub-check to warn-only.
-    # From: Issue #1683
-    printf '# From: Issue #1683\n# see #1683 again here\n' > "${BATS_TEST_TMPDIR}/dupref.sh"
-    run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/dupref.sh"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0010"* ]]
-    [[ "${output}" == *"warn-only, PR #1856"* ]]
-}
-
-@test "check review-chronology diff-scoped mode scans only the PR's changed files" {
-    # What: CHRONOLOGY_DIFF_BASE_SHA(+REF) restricts the scan to files
-    #       changed between the base and GITHUB_SHA, not the whole tree.
-    # Why: Issue #1095 | PR #1686 parity -- a pre-existing violation in
-    #      an untouched file must not block an unrelated PR.
-    # From: Issue #1683
-    local bare="${BATS_TEST_TMPDIR}/chrono-origin.git" work="${BATS_TEST_TMPDIR}/chrono-work"
-    git init --quiet --bare "${bare}"
-    git clone --quiet "${bare}" "${work}"
-    (
-        cd "${work}" || exit 1
-        git config user.email chrono-bats@example.invalid
-        git config user.name chrono-bats
-        printf '# found during code review earlier.\n' > pre-existing.sh
-        git add pre-existing.sh
-        git commit --quiet -m base
-        git push --quiet origin HEAD:refs/heads/chrono-base
-    )
-    cd "${work}"
-    local base_sha; base_sha="$(git rev-parse HEAD)"
-    printf '# a normal current-state comment.\n' > touched.sh
-    git add touched.sh
-    git commit --quiet -m "touch an unrelated file"
-    local head_sha; head_sha="$(git rev-parse HEAD)"
-    run env CHRONOLOGY_DIFF_BASE_SHA="${base_sha}" CHRONOLOGY_DIFF_BASE_REF=chrono-base \
-        GITHUB_SHA="${head_sha}" bash "${CI_SH}" check review-chronology
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"review-chronology=clean"* ]]
-}
-
-@test "check review-chronology diff-scoped mode fails closed when git diff itself fails" {
-    # What: a real `git diff` failure (not "no changes") must return 2,
-    #       never an empty (clean) file list.
-    # Why: mapfile < <(git diff ...) loses exit status via process
-    #      substitution -- this proves the mktemp-file capture instead
-    #      actually propagates the failure (AG-INT-002/AG-VAL-030).
-    # From: Issue #1683
-    local bare="${BATS_TEST_TMPDIR}/chronofail-origin.git" work="${BATS_TEST_TMPDIR}/chronofail-work"
-    git init --quiet --bare "${bare}"
-    git clone --quiet "${bare}" "${work}"
-    (
-        cd "${work}" || exit 1
-        git config user.email chrono-bats@example.invalid
-        git config user.name chrono-bats
-        git commit --quiet --allow-empty -m base
-        git push --quiet origin HEAD:refs/heads/chrono-base
-    )
-    cd "${work}"
-    local base_sha; base_sha="$(git rev-parse HEAD)"
-    git commit --quiet --allow-empty -m "second commit"
-    local head_sha; head_sha="$(git rev-parse HEAD)"
-    local real_git; real_git="$(command -v git)"
-    local stub_bin="${BATS_TEST_TMPDIR}/stubbin"
-    mkdir -p "${stub_bin}"
-    cat > "${stub_bin}/git" <<STUBEOF
-#!/usr/bin/env bash
-if [ "\$1" = "diff" ]; then
-    echo "simulated git diff failure" >&2
-    exit 128
-fi
-exec "${real_git}" "\$@"
-STUBEOF
-    chmod +x "${stub_bin}/git"
-    run env PATH="${stub_bin}:${PATH}" CHRONOLOGY_DIFF_BASE_SHA="${base_sha}" \
-        CHRONOLOGY_DIFF_BASE_REF=chrono-base GITHUB_SHA="${head_sha}" \
-        bash "${CI_SH}" check review-chronology
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"git diff itself failed"* ]]
-    [[ "${output}" != *"review-chronology=clean"* ]]
-}
-
 @test "check pipefail-early-exit flags grep -q, not plain sed -n" {
     # What: ci.sh owns the SIGPIPE check; bats calls it.
     # Why: only true early-exit consumers risk exit 141.
@@ -3378,71 +3094,17 @@ STUBEOF
     [ "${status}" -eq 0 ]
 }
 
-@test "check pr-title accepts valid conventional, warns by default on bad scope/format" {
+@test "check pr-title accepts valid conventional, rejects bad scope/format" {
     # What: ci.sh owns the title taxonomy; bats calls it.
-    # Why: AG-GH-018: warn is the default, not a hard fail.
-    # From: Issue #1683 | PR #1858
+    # Why: types fixed, scopes from the SOT service list.
+    # From: Issue #1683
     run bash "${CI_SH}" check pr-title "feat(proxy): add ipv6 lease support"
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"pr-title=ok"* ]]
     run bash "${CI_SH}" check pr-title "feat(bogus): x"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"pr-title=warn"* ]]
+    [ "${status}" -ne 0 ]
     run bash "${CI_SH}" check pr-title "not conventional at all"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0013"* ]]
-    [[ "${output}" == *"pr-title=warn"* ]]
-}
-
-@test "check pr-title skips dependabot and fails closed with none" {
-    # What: dependabot skip and the no-title-given branches.
-    # Why: both existed in code with no prior test coverage.
-    # From: Issue #1683 | PR #1858
-    PR_AUTHOR='dependabot[bot]' run bash "${CI_SH}" check pr-title "anything at all"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"pr-title=skip-dependabot"* ]]
-    run bash "${CI_SH}" check pr-title
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0012"* ]]
-}
-
-@test "check pr-title warns (default mode) on a disallowed type" {
-    # What: a title matching the pattern but a bad type.
-    # Why: distinct from the not-conventional regex miss.
-    # From: Issue #1683 | PR #1858
-    run bash "${CI_SH}" check pr-title "bogus(proxy): x"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"type 'bogus' not allowed"* ]]
-    [[ "${output}" == *"pr-title=warn"* ]]
-}
-
-@test "check pr-title block mode fails a non-compliant title" {
-    # What: LINT_MODE=block must hard-fail (AG-GH-018 gate).
-    # Why: this branch had zero coverage before this wave.
-    # From: Issue #1683 | PR #1858
-    PR_TITLE_LINT_MODE=block run bash "${CI_SH}" check pr-title "not conventional at all"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0013"* ]]
-    [[ "${output}" == *"reason=\"PR title convention\""* ]]
-}
-
-@test "check pr-title draft PR warns non-blocking even in block mode" {
-    # What: AG-GH-018: draft always overrides block mode.
-    # Why: draft titles are expected to settle before ready.
-    # From: Issue #1683 | PR #1858
-    PR_TITLE_LINT_MODE=block PR_DRAFT=true \
-        run bash "${CI_SH}" check pr-title "not conventional at all"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"pr-title=warn-draft"* ]]
-}
-
-@test "check pr-title allows the tests scope" {
-    # What: "tests" was missing from ci.sh's scope set.
-    # Why: the authoritative checker script allows it too.
-    # From: Issue #1683 | PR #1858
-    run bash "${CI_SH}" check pr-title "test(tests): add coverage"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"pr-title=ok"* ]]
 }
 
 @test "check stable-external-images fails a non-digest external image" {
@@ -3584,63 +3246,6 @@ EOF
     [[ "${output}" == *"rejected"* ]]
 }
 
-@test "check pr-tracking-metadata warns fork-specific with no token" {
-    # What: PR_IS_FORK=true never reached by any prior test.
-    # Why: forks get no secrets; warn, don't pass silently.
-    # From: Issue #1683 | PR #1858
-    PR_NUMBER=12 REPO=wiki-mod/lancache-ng PR_LABELS_JSON='["bug"]' \
-        PR_MILESTONE_TITLE=v1 PR_IS_FORK=true \
-        run bash "${CI_SH}" check pr-tracking-metadata
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"fork PRs get no repo secrets"* ]]
-}
-
-@test "check pr-tracking-metadata passes on a real 200 board hit" {
-    # What: the GH_TOKEN-set 200-success path was untested.
-    # Why: only its 403-rejected sibling had any coverage.
-    # From: Issue #1683 | PR #1858
-    local bin="${BATS_TEST_TMPDIR}/bin2"; mkdir -p "${bin}"
-    cat > "${bin}/curl" <<'EOF'
-#!/usr/bin/env bash
-out="" prev=""
-for a in "$@"; do
-    [ "${prev}" = "-o" ] && out="${a}"
-    prev="${a}"
-done
-[ -n "${out}" ] && printf '{"data":{"repository":{"pullRequest":{"projectItems":{"nodes":[{"project":{"number":6}}]}}}}}' > "${out}"
-printf '200'
-EOF
-    chmod +x "${bin}/curl"
-    PATH="${bin}:${PATH}" PR_NUMBER=12 REPO=wiki-mod/lancache-ng PR_LABELS_JSON='["bug"]' \
-        PR_MILESTONE_TITLE=v1 GH_TOKEN=goodtoken \
-        run bash "${CI_SH}" check pr-tracking-metadata
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"pr-tracking-metadata=ok"* ]]
-}
-
-@test "check pr-tracking-metadata fails a real 200 board miss" {
-    # What: 200 response, PR on no matching project item.
-    # Why: the "not on project board" branch was untested.
-    # From: Issue #1683 | PR #1858
-    local bin="${BATS_TEST_TMPDIR}/bin3"; mkdir -p "${bin}"
-    cat > "${bin}/curl" <<'EOF'
-#!/usr/bin/env bash
-out="" prev=""
-for a in "$@"; do
-    [ "${prev}" = "-o" ] && out="${a}"
-    prev="${a}"
-done
-[ -n "${out}" ] && printf '{"data":{"repository":{"pullRequest":{"projectItems":{"nodes":[]}}}}}' > "${out}"
-printf '200'
-EOF
-    chmod +x "${bin}/curl"
-    PATH="${bin}:${PATH}" PR_NUMBER=12 REPO=wiki-mod/lancache-ng PR_LABELS_JSON='["bug"]' \
-        PR_MILESTONE_TITLE=v1 GH_TOKEN=goodtoken \
-        run bash "${CI_SH}" check pr-tracking-metadata
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"Not on project board"* ]]
-}
-
 @test "check governance-guards flags a stale TODO on a closed issue" {
     # What: ci.sh owns the governance scan; bats calls it.
     # Why: a TODO(#N) on a closed issue is stale, must fail loud.
@@ -3691,796 +3296,6 @@ EOF
     [[ "${output}" == *"CI-ERROR-CHECK-0019"* ]]
 }
 
-@test "check compose-healthchecks passes clean on the real repo" {
-    # What: migrated from check-compose-healthchecks.sh.
-    # Why: rewritten in ci.sh; real deploy/*/ must pass.
-    # From: Issue #1683 | PR #1858
-    run bash "${CI_SH}" check compose-healthchecks
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"compose-healthchecks=clean"* ]]
-}
-
-@test "check compose-healthchecks fails a service with no healthcheck" {
-    # What: a real, un-excluded service has no healthcheck.
-    # Why: issue #1169: every service needs one.
-    # From: Issue #1683 | PR #1858
-    local f="${BATS_TEST_TMPDIR}/nohc/docker-compose.yml"
-    mkdir -p "$(dirname "${f}")"
-    printf 'services:\n  good:\n    image: x\n    healthcheck:\n      test: ["CMD", "true"]\n  bad:\n    image: y\n' \
-        > "${f}"
-    run bash "${CI_SH}" check compose-healthchecks "${f}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0021"* ]]
-    [[ "${output}" == *"service 'bad' has no healthcheck"* ]]
-}
-
-@test "check compose-healthchecks honors the documented exclusion list" {
-    # What: dhcp-probe is documented as exempt, not a fail.
-    # Why: issue #1169's exclusion contract still applies.
-    # From: Issue #1683 | PR #1858
-    local f="${BATS_TEST_TMPDIR}/excl/deploy/prod/docker-compose.yml"
-    mkdir -p "$(dirname "${f}")"
-    printf 'services:\n  dhcp-probe:\n    image: x\n' > "${f}"
-    run bash "${CI_SH}" check compose-healthchecks "${f}"
-    [ "${status}" -eq 0 ]
-}
-
-@test "check compose-healthchecks fails closed with no compose files" {
-    # What: a vacuous scan (no matched files) must not pass.
-    # Why: mirrors the legacy script's anti-vacuous guard.
-    # From: Issue #1683 | PR #1858
-    run bash "${CI_SH}" check compose-healthchecks "${BATS_TEST_TMPDIR}/nope/docker-compose.yml"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0020"* ]]
-}
-
-@test "check proxy-cache-env-doc-drift passes clean on the real repo" {
-    # What: migrated from check-proxy-cache-env-doc-drift.
-    # Why: rewritten in ci.sh; real config/docs must agree.
-    # From: Issue #1683 | PR #1858
-    run bash "${CI_SH}" check proxy-cache-env-doc-drift
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"proxy-cache-env-doc-drift=clean"* ]]
-}
-
-@test "check proxy-cache-env-doc-drift fails a real default mismatch" {
-    # What: proxy.env's value disagrees with its doc row.
-    # Why: bug-hunt #1068: a copied default can go stale.
-    # From: Issue #1683 | PR #1858
-    local env="${BATS_TEST_TMPDIR}/proxy.env" doc="${BATS_TEST_TMPDIR}/arch.md"
-    printf 'CACHE_MEM_MB=999\n' > "${env}"
-    # shellcheck disable=SC2016
-    printf '| `CACHE_MEM_MB` | `512` | some description |\n' > "${doc}"
-    run bash "${CI_SH}" check proxy-cache-env-doc-drift "${env}" "${doc}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0023"* ]]
-    [[ "${output}" == *"proxy.env=999 vs doc=512"* ]]
-}
-
-@test "check proxy-cache-env-doc-drift ignores an undocumented CACHE_* var" {
-    # What: a CACHE_* var with no matching doc row is fine.
-    # Why: not every variable needs a table row.
-    # From: Issue #1683 | PR #1858
-    local env="${BATS_TEST_TMPDIR}/proxy2.env" doc="${BATS_TEST_TMPDIR}/arch2.md"
-    printf 'CACHE_UNDOCUMENTED=1\n' > "${env}"
-    printf '# no matching row here\n' > "${doc}"
-    run bash "${CI_SH}" check proxy-cache-env-doc-drift "${env}" "${doc}"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"scanned=1 checked=0"* ]]
-}
-
-@test "check dependabot-docker-base-consistency passes on the real repo" {
-    # What: migrated from the legacy dependabot check.
-    # Why: rewritten in ci.sh; the real group must agree.
-    # From: Issue #1683 | PR #1858
-    run bash "${CI_SH}" check dependabot-docker-base-consistency
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"dependabot-docker-base-consistency=clean"* ]]
-}
-
-@test "check dependabot-docker-base-consistency resolves a global ARG" {
-    # What: FROM \${BASE} resolves via its pre-FROM ARG.
-    # Why: AG-VAL-036: real ARG grammar, not a guess.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/argmatch"
-    mkdir -p "${r}/.github" "${r}/services/a" "${r}/services/b"
-    printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    directories:\n      - /services/a\n      - /services/b\n    schedule:\n      interval: weekly\n' \
-        > "${r}/.github/dependabot.yml"
-    # shellcheck disable=SC2016
-    printf 'ARG BASE=alpine:3.24\nFROM ${BASE}\n' > "${r}/services/a/Dockerfile"
-    printf 'FROM alpine:3.24\n' > "${r}/services/b/Dockerfile"
-    run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"
-    [ "${status}" -eq 0 ]
-}
-
-@test "check dependabot-docker-base-consistency resolves a bare SOT ARG with no default" {
-    # What: ARG ALPINE_IMAGE (no `=default`) + FROM ${ALPINE_IMAGE}
-    #       resolves from the manifest, not "unresolved".
-    # Why: regression found in-session: Agent A's Dockerfile
-    #      consolidation (services/*/Dockerfile now declaring a
-    #      bare ARG ALPINE_IMAGE per AG-CI-006/AG-CI-008 -- no
-    #      baked default, the value comes from ci.sh build-args)
-    #      broke this check's real-repo pass until
-    #      _ci_sot_base_image_arg closed the gap.
-    # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/barearg"
-    mkdir -p "${r}/.github" "${r}/services/a" "${r}/services/b"
-    printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    directories:\n      - /services/a\n      - /services/b\n    schedule:\n      interval: weekly\n' \
-        > "${r}/.github/dependabot.yml"
-    # shellcheck disable=SC2016
-    printf 'ARG ALPINE_IMAGE\nFROM ${ALPINE_IMAGE}\n' > "${r}/services/a/Dockerfile"
-    # shellcheck disable=SC2016
-    printf 'ARG ALPINE_IMAGE\nFROM ${ALPINE_IMAGE}\n' > "${r}/services/b/Dockerfile"
-    run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"dependabot-docker-base-consistency=clean"* ]]
-}
-
-@test "check dependabot-docker-base-consistency resolves a stage alias" {
-    # What: FROM builder resolves to its real origin image.
-    # Why: the alias text is never the compared value.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/alias"
-    mkdir -p "${r}/.github" "${r}/services/a" "${r}/services/b"
-    printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    directories:\n      - /services/a\n      - /services/b\n    schedule:\n      interval: weekly\n' \
-        > "${r}/.github/dependabot.yml"
-    printf 'FROM alpine:3.24 AS builder\nRUN true\nFROM builder\n' > "${r}/services/a/Dockerfile"
-    printf 'FROM alpine:3.24\n' > "${r}/services/b/Dockerfile"
-    run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"
-    [ "${status}" -eq 0 ]
-}
-
-@test "check dependabot-docker-base-consistency ignores a heredoc FROM" {
-    # What: a FROM inside a RUN heredoc body is not real.
-    # Why: only Docker instructions outside heredocs count.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/heredoc"
-    mkdir -p "${r}/.github" "${r}/services/a" "${r}/services/b"
-    printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    directories:\n      - /services/a\n      - /services/b\n    schedule:\n      interval: weekly\n' \
-        > "${r}/.github/dependabot.yml"
-    printf 'FROM alpine:3.24\nRUN <<EOT\nFROM should-be-ignored\nEOT\n' > "${r}/services/a/Dockerfile"
-    printf 'FROM alpine:3.24\n' > "${r}/services/b/Dockerfile"
-    run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"
-    [ "${status}" -eq 0 ]
-}
-
-@test "check dependabot-docker-base-consistency fails on real drift" {
-    # What: two grouped Dockerfiles, real different bases.
-    # Why: this is the guard's one real, enforced invariant.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/drift"
-    mkdir -p "${r}/.github" "${r}/services/a" "${r}/services/b"
-    printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    directories:\n      - /services/a\n      - /services/b\n    schedule:\n      interval: weekly\n' \
-        > "${r}/.github/dependabot.yml"
-    printf 'FROM alpine:3.24\n' > "${r}/services/a/Dockerfile"
-    printf 'FROM alpine:3.20\n' > "${r}/services/b/Dockerfile"
-    run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0032"* ]]
-    [[ "${output}" == *"diverges"* ]]
-}
-
-@test "check dependabot-docker-base-consistency distinguishes missing paths" {
-    # What: a declared, parseable dir, missing Dockerfile.
-    # Why: distinct from a block with zero directories.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/missingfile"
-    mkdir -p "${r}/.github"
-    printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    directory: /services/missing\n    schedule:\n      interval: weekly\n' \
-        > "${r}/.github/dependabot.yml"
-    run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0030"* ]]
-    local r2="${BATS_TEST_TMPDIR}/emptyblock"
-    mkdir -p "${r2}/.github"
-    printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    schedule:\n      interval: weekly\n' \
-        > "${r2}/.github/dependabot.yml"
-    run bash "${CI_SH}" check dependabot-docker-base-consistency "${r2}"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0029"* ]]
-}
-
-@test "check dependabot-docker-base-consistency fails on unresolved ARG" {
-    # What: a FROM \${VAR} with no matching global ARG.
-    # Why: unresolved must fail closed, never a guess.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/unresolved"
-    mkdir -p "${r}/.github" "${r}/services/a"
-    printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    directory: /services/a\n    schedule:\n      interval: weekly\n' \
-        > "${r}/.github/dependabot.yml"
-    # shellcheck disable=SC2016
-    printf 'FROM ${UNKNOWN_ARG}\n' > "${r}/services/a/Dockerfile"
-    run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0031"* ]]
-}
-
-@test "check dependabot-docker-base-consistency fails with no dependabot.yml" {
-    # What: a repo root with no .github/dependabot.yml.
-    # Why: a missing input file must never silently pass.
-    # From: Issue #1683 | PR #1858
-    run bash "${CI_SH}" check dependabot-docker-base-consistency "${BATS_TEST_TMPDIR}/nope"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0027"* ]]
-}
-
-# What: seeds every real WRITER_TEST_EVIDENCE pair.
-# Why: mirrors the legacy script's own fixture builder.
-# From: Issue #1683 | PR #1858
-_idempotence_fixture() {
-    local root="$1" at_test='@test'
-    mkdir -p "${root}/tests/bats" "${root}/services/dns" "${root}/services/watchdog" \
-        "${root}/services/ui/src/routes" "${root}/services/proxy" "${root}/services/dhcp-proxy" \
-        "${root}/services/dns/nats-subscriber/src" "${root}/deploy/prod" "${root}/deploy/quickstart"
-    printf '#!/usr/bin/env bash\n' > "${root}/setup.sh"
-    cat > "${root}/tests/bats/setup_update_idempotence.bats" <<EOF
-${at_test} "migrate_env_for_update repeats to the same result" {
-    true
-}
-EOF
-    printf '#!/usr/bin/env bash\n' > "${root}/services/dns/entrypoint.sh"
-    cat > "${root}/tests/bats/dns_config_snapshot_idempotence.bats" <<EOF
-${at_test} "rollback repeats to the same known-good config" {
-    true
-}
-EOF
-    printf '#!/usr/bin/env bash\n' > "${root}/services/watchdog/watchdog.sh"
-    cat > "${root}/tests/bats/watchdog_idempotence.bats" <<EOF
-${at_test} "write_status converges across repeated writes" {
-    true
-}
-EOF
-    printf '// fixture\n' > "${root}/services/ui/src/kea_snapshots.rs"
-    cat > "${root}/services/ui/src/routes/dhcp.rs" <<'EOF'
-#[test]
-fn kea_modify_repeat_rollback_converges() {
-    assert!(true);
-}
-EOF
-    cat > "${root}/services/dns/nats-subscriber/src/zone_snapshots.rs" <<'EOF'
-#[test]
-fn create_snapshot_repeat_writes_converge() {
-    assert!(true);
-}
-EOF
-    cat > "${root}/services/ui/src/routes/secondaries.rs" <<'EOF'
-#[tokio::test]
-async fn nats_conf_write_converges_across_repeated_writes() {
-    assert!(true);
-}
-EOF
-    printf '#!/usr/bin/env bash\n' > "${root}/services/proxy/entrypoint.sh"
-    cat > "${root}/tests/bats/proxy_known_good_snapshot.bats" <<EOF
-${at_test} "retention converges across repeated valid starts" {
-    true
-}
-EOF
-    printf '#!/usr/bin/env bash\n' > "${root}/services/dhcp-proxy/entrypoint.sh"
-    cat > "${root}/tests/bats/dhcp_proxy_known_good_snapshot.bats" <<EOF
-${at_test} "retention converges across repeated valid starts" {
-    true
-}
-EOF
-    printf 'services:\n  nats:\n    command: ["true"]\n' > "${root}/deploy/prod/docker-compose.yml"
-    printf 'services:\n  nats:\n    command: ["true"]\n' > "${root}/deploy/quickstart/docker-compose.yml"
-    cat > "${root}/tests/bats/nats_conf_entrypoint_idempotence.bats" <<EOF
-${at_test} "nats entrypoint regenerates a converged nats.conf" {
-    true
-}
-EOF
-    cat > "${root}/services/ui/src/netdata_alarms.rs" <<'EOF'
-#[test]
-fn append_is_idempotent_for_the_same_unique_id() {
-    assert!(true);
-}
-EOF
-}
-
-@test "check idempotence-test-coverage passes on the real repo" {
-    # What: migrated from the legacy idempotence check.
-    # Why: rewritten in ci.sh; writers must stay covered.
-    # From: Issue #1683 | PR #1858
-    run bash "${CI_SH}" check idempotence-test-coverage
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"idempotence-test-coverage=clean"* ]]
-}
-
-@test "check idempotence-test-coverage passes a full seeded fixture" {
-    # What: every real writer/evidence pair, freshly seeded.
-    # Why: proves the shared fixture below is itself valid.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/idem-ok"
-    _idempotence_fixture "${r}"
-    run bash "${CI_SH}" check idempotence-test-coverage "${r}"
-    [ "${status}" -eq 0 ]
-}
-
-@test "check idempotence-test-coverage fails a missing writer file" {
-    # What: a known config-writer source no longer exists.
-    # Why: distinct from a missing evidence file to fix.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/idem-nowriter"
-    _idempotence_fixture "${r}"
-    rm "${r}/services/watchdog/watchdog.sh"
-    run bash "${CI_SH}" check idempotence-test-coverage "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"no longer exists"* ]]
-}
-
-@test "check idempotence-test-coverage fails a missing evidence file" {
-    # What: the writer exists but its evidence file is gone.
-    # Why: no repeat-run proof left for that config-writer.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/idem-noevidence"
-    _idempotence_fixture "${r}"
-    rm "${r}/tests/bats/watchdog_idempotence.bats"
-    run bash "${CI_SH}" check idempotence-test-coverage "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"evidence file"* ]]
-    [[ "${output}" == *"missing"* ]]
-}
-
-@test "check idempotence-test-coverage rejects a commented-out bats test" {
-    # What: a disabled test bats never actually runs.
-    # Why: issue #732: must not silently satisfy the guard.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/idem-commented" at_test='@test'
-    _idempotence_fixture "${r}"
-    cat > "${r}/tests/bats/watchdog_idempotence.bats" <<EOF
-# ${at_test} "write_status converges across repeated writes" {
-#     true
-# }
-EOF
-    run bash "${CI_SH}" check idempotence-test-coverage "${r}"
-    [ "${status}" -ne 0 ]
-}
-
-@test "check idempotence-test-coverage rejects an #[ignore]d Rust test" {
-    # What: a disqualified test cargo never actually runs.
-    # Why: issue #732: must not silently satisfy the guard.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/idem-ignored"
-    _idempotence_fixture "${r}"
-    cat > "${r}/services/ui/src/netdata_alarms.rs" <<'EOF'
-#[test]
-#[ignore]
-fn append_is_idempotent_for_the_same_unique_id() {
-    assert!(true);
-}
-EOF
-    run bash "${CI_SH}" check idempotence-test-coverage "${r}"
-    [ "${status}" -ne 0 ]
-}
-
-@test "check idempotence-test-coverage rejects the NATS extra_marker evasion" {
-    # What: a repeat-named test unrelated to nats_conf.
-    # Why: secondaries.rs is its own evidence file here.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/idem-extramarker"
-    _idempotence_fixture "${r}"
-    cat > "${r}/services/ui/src/routes/secondaries.rs" <<'EOF'
-#[test]
-fn generate_nats_password_is_high_entropy_and_never_repeats() {
-    assert!(true);
-}
-EOF
-    run bash "${CI_SH}" check idempotence-test-coverage "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"secondaries.rs"* ]]
-}
-
-# What: builds a fixture doc + quickstart web_log copy.
-# Why: shared by the logging-matrix tests below.
-# From: Issue #1683 | PR #1858
-_logging_matrix_fixture() {
-    local root="$1" rows="${2:-svc-a}"
-    mkdir -p "${root}/docs" "${root}/services/syslog" "${root}/deploy/quickstart"
-    {
-        printf '**Logging matrix** (test):\n\n'
-        printf '| Service | Logging path | Notes |\n'
-        printf '| --- | --- | --- |\n'
-        local n
-        for n in ${rows}; do
-            printf '| %s | Via x | note |\n' "${n}"
-        done
-    } > "${root}/docs/architecture-ng.md"
-    printf 'header\njobs:\n  - name: real\n    path: /x\n' > "${root}/services/syslog/netdata-web_log.conf"
-    cat > "${root}/deploy/quickstart/docker-compose.yml" <<'EOF'
-services:
-  netdata:
-    command: |
-      cat > /etc/netdata/go.d/web_log.conf <<'CONF'
-        jobs:
-          - name: real
-            path: /x
-        CONF
-EOF
-}
-
-@test "check logging-matrix passes clean on the real repo" {
-    # What: migrated from check-logging-matrix.sh.
-    # Why: rewritten in ci.sh; real docs/compose must agree.
-    # From: Issue #1683 | PR #1858
-    run bash "${CI_SH}" check logging-matrix
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"logging-matrix=clean"* ]]
-}
-
-@test "_ci_logging_matrix_canonical is a single deterministic awk pass" {
-    # What: the flake this exists to prevent, at scale.
-    # Why: stress-tested at 80 rows, 30 repeated runs.
-    # From: Issue #1683 | PR #1858
-    local doc="${BATS_TEST_TMPDIR}/big.md" i first cur
-    {
-        printf '**Logging matrix** (test):\n\n'
-        printf '| Service | Logging path | Notes |\n'
-        printf '| --- | --- | --- |\n'
-        for i in $(seq 1 80); do
-            printf '| svc-%d (label) | Via x | note %d |\n' "${i}" "${i}"
-        done
-    } > "${doc}"
-    first="$(_ci_logging_matrix_canonical "${doc}")"
-    [[ "${first}" == *"##ROWS## 80 80"* ]]
-    for i in $(seq 1 30); do
-        cur="$(_ci_logging_matrix_canonical "${doc}")"
-        [ "${cur}" = "${first}" ]
-    done
-}
-
-@test "check logging-matrix fails a service with no matrix row" {
-    # What: a real Compose service, absent from the matrix.
-    # Why: issue #633: every service needs a declared row.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/lm-extra"
-    _logging_matrix_fixture "${r}" "svc-a"
-    CI_LOGGING_MATRIX_SERVICES_CMD="$(_stub svc 'printf "svc-a\nsvc-b\n"')" \
-        run bash "${CI_SH}" check logging-matrix "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0038"* ]]
-    [[ "${output}" == *"service 'svc-b' has no logging-matrix row"* ]]
-}
-
-@test "check logging-matrix fails a stale row with no real service" {
-    # What: a matrix row for a service no longer real.
-    # Why: a renamed service must not leave a stale row.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/lm-stale"
-    _logging_matrix_fixture "${r}" "svc-a svc-gone"
-    CI_LOGGING_MATRIX_SERVICES_CMD="$(_stub svc 'printf "svc-a\n"')" \
-        run bash "${CI_SH}" check logging-matrix "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"row 'svc-gone' is not a real Compose service"* ]]
-}
-
-@test "check logging-matrix fails a collapsed/duplicate row" {
-    # What: two rows whose names normalize to the same one.
-    # Why: a genuine row-parsing defense, distinct from #1.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/lm-dup"
-    mkdir -p "${r}/docs"
-    printf '**Logging matrix** (test):\n\n| Service | Logging path | Notes |\n| --- | --- | --- |\n| svc-a (nginx) | Via x | note |\n| svc-a (alias) | Via x | note |\n' \
-        > "${r}/docs/architecture-ng.md"
-    run bash "${CI_SH}" check logging-matrix "${r}"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0037"* ]]
-}
-
-@test "check logging-matrix fails closed on a missing architecture doc" {
-    # What: a repo root with no docs/architecture-ng.md.
-    # Why: a missing input must never silently pass.
-    # From: Issue #1683 | PR #1858
-    run bash "${CI_SH}" check logging-matrix "${BATS_TEST_TMPDIR}/nope"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0035"* ]]
-}
-
-@test "check logging-matrix fails closed with no matrix marker" {
-    # What: a doc with no logging-matrix marker at all.
-    # Why: a vacuous parse must never report clean.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/lm-nomarker"
-    mkdir -p "${r}/docs"
-    printf '# no marker here\n' > "${r}/docs/architecture-ng.md"
-    run bash "${CI_SH}" check logging-matrix "${r}"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0036"* ]]
-}
-
-@test "check logging-matrix fails closed when a compose lookup errors" {
-    # What: a while/process-sub loop once hid this failure.
-    # Why: a real docker-compose error must not vanish.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/lm-cmderr"
-    _logging_matrix_fixture "${r}" "svc-a"
-    CI_LOGGING_MATRIX_SERVICES_CMD="$(_stub svcfail 'exit 3')" \
-        run bash "${CI_SH}" check logging-matrix "${r}"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0034"* ]]
-}
-
-@test "check logging-matrix fails a drifted quickstart web_log job" {
-    # What: quickstart's inline job no longer matches it.
-    # Why: #849's own stated byte-identical promise.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/lm-weblog"
-    _logging_matrix_fixture "${r}" "svc-a"
-    cat > "${r}/deploy/quickstart/docker-compose.yml" <<'EOF'
-services:
-  netdata:
-    command: |
-      cat > /etc/netdata/go.d/web_log.conf <<'CONF'
-        jobs:
-          - name: different
-            path: /y
-        CONF
-EOF
-    CI_LOGGING_MATRIX_SERVICES_CMD="$(_stub svc 'printf "svc-a\n"')" \
-        run bash "${CI_SH}" check logging-matrix "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"quickstart's inline web_log job config has drifted"* ]]
-}
-
-@test "check trivy-action-direct-usage passes clean on the real repo" {
-    # What: real tree has no direct call site, all wired.
-    # Why: proves the rewrite against production state.
-    # From: Issue #1683
-    run bash "${CI_SH}" check trivy-action-direct-usage
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"trivy-action-direct-usage=clean"* ]]
-}
-
-@test "check trivy-action-direct-usage flags a direct call outside the wrapper" {
-    # What: a workflow bypassing the centralized wrapper.
-    # Why: AG-VAL-029: bypass loses retry/auth/mirror fixes.
-    # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/trivy-direct"
-    mkdir -p "${r}/.github/workflows" "${r}/.github/actions/aquasecurity-trivy-action-centralized-version"
-    printf 'runs:\n  using: composite\n  steps:\n    - uses: aquasecurity/trivy-action@deadbeef\n' \
-        > "${r}/.github/actions/aquasecurity-trivy-action-centralized-version/action.yml"
-    printf 'jobs:\n  scan:\n    steps:\n      - uses: aquasecurity/trivy-action@deadbeef\n' \
-        > "${r}/.github/workflows/scan.yml"
-    run bash "${CI_SH}" check trivy-action-direct-usage "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0039"* ]]
-    [[ "${output}" == *"scan.yml"* ]]
-}
-
-@test "check trivy-action-direct-usage flags a trivy-scan-retry call with no with: block" {
-    # What: a call site missing its whole with: block.
-    # Why: silently drops every credential a caller must pass.
-    # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/trivy-nowith"
-    mkdir -p "${r}/.github/workflows"
-    printf 'jobs:\n  scan:\n    steps:\n      - uses: ./.github/actions/trivy-scan-retry\n      - run: echo hi\n' \
-        > "${r}/.github/workflows/scan.yml"
-    run bash "${CI_SH}" check trivy-action-direct-usage "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0040"* ]]
-    [[ "${output}" == *"no with: block"* ]]
-}
-
-@test "check trivy-action-direct-usage flags an empty dockerhub-username value" {
-    # What: a present but empty credential value.
-    # Why: key-presence-only checking would wrongly pass this.
-    # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/trivy-empty"
-    mkdir -p "${r}/.github/workflows"
-    cat > "${r}/.github/workflows/scan.yml" <<'EOF'
-jobs:
-  scan:
-    steps:
-      - uses: ./.github/actions/trivy-scan-retry
-        with:
-          dockerhub-username: ""
-          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-EOF
-    run bash "${CI_SH}" check trivy-action-direct-usage "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"dockerhub-username not a real"* ]]
-}
-
-@test "check trivy-action-direct-usage flags a hardcoded dockerhub-password value" {
-    # What: a literal string instead of a secrets./inputs. ref.
-    # Why: same silent-fallback risk as an empty value.
-    # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/trivy-hardcoded"
-    mkdir -p "${r}/.github/workflows"
-    cat > "${r}/.github/workflows/scan.yml" <<'EOF'
-jobs:
-  scan:
-    steps:
-      - uses: ./.github/actions/trivy-scan-retry
-        with:
-          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-password: hunter2
-EOF
-    run bash "${CI_SH}" check trivy-action-direct-usage "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"dockerhub-password not a real"* ]]
-}
-
-@test "check trivy-action-direct-usage flags a secret name sharing the expected prefix" {
-    # What: secrets.DOCKERHUB_USERNAME_OLD is not secrets.DOCKERHUB_USERNAME.
-    # Why: an unanchored substring match would wrongly accept this.
-    # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/trivy-prefix"
-    mkdir -p "${r}/.github/workflows"
-    cat > "${r}/.github/workflows/scan.yml" <<'EOF'
-jobs:
-  scan:
-    steps:
-      - uses: ./.github/actions/trivy-scan-retry
-        with:
-          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME_OLD }}
-          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-EOF
-    run bash "${CI_SH}" check trivy-action-direct-usage "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"dockerhub-username not a real"* ]]
-}
-
-@test "check trivy-action-direct-usage passes a forwarded inputs.* reference" {
-    # What: a wrapper action forwarding its caller's own inputs.
-    # Why: nested-composite-action forwarding is a real, legal shape.
-    # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/trivy-inputs"
-    mkdir -p "${r}/.github/actions/some-wrapper"
-    cat > "${r}/.github/actions/some-wrapper/action.yml" <<'EOF'
-runs:
-  using: composite
-  steps:
-    - uses: ./.github/actions/trivy-scan-retry
-      with:
-        dockerhub-username: ${{ inputs.dockerhub-username }}
-        dockerhub-password: ${{ inputs.dockerhub-password }}
-EOF
-    run bash "${CI_SH}" check trivy-action-direct-usage "${r}"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"trivy-action-direct-usage=clean"* ]]
-}
-
-@test "check trivy-action-direct-usage handles a quoted uses: at deeper list nesting" {
-    # What: a quoted uses: scalar under a dash-only list item line.
-    # Why: indentation/quoting variation must not evade the scan.
-    # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/trivy-quoted"
-    mkdir -p "${r}/.github/workflows"
-    cat > "${r}/.github/workflows/scan.yml" <<'EOF'
-jobs:
-  scan:
-    steps:
-      -
-        uses: './.github/actions/trivy-scan-retry'
-        with:
-          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-EOF
-    run bash "${CI_SH}" check trivy-action-direct-usage "${r}"
-    [ "${status}" -eq 0 ]
-}
-
-@test "check changelog-direct-edit is clean when CHANGELOG.md is untouched" {
-    # What: migrated from check-changelog-direct-edit.sh.
-    # Why: rewritten in ci.sh; stays non-blocking always.
-    # From: Issue #1683 | PR #1858
-    run bash "${CI_SH}" check changelog-direct-edit "foo.txt" "bar.md"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"changelog-direct-edit=clean"* ]]
-}
-
-@test "check changelog-direct-edit warns without the release label" {
-    # What: a direct CHANGELOG.md edit, no exemption label.
-    # Why: issue #893: warn-only, never blocks the build.
-    # From: Issue #1683 | PR #1858
-    run bash "${CI_SH}" check changelog-direct-edit "CHANGELOG.md"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"CI-INFO-CHECK-0001"* ]]
-    [[ "${output}" == *"warn-only"* ]]
-    [[ "${output}" == *"changelog-direct-edit=warn"* ]]
-}
-
-@test "check changelog-direct-edit notices the release label exemption" {
-    # What: same edit, but the PR carries the release label.
-    # Why: the documented manual release-notes exemption.
-    # From: Issue #1683 | PR #1858
-    PR_LABELS_JSON='["release"]' \
-        run bash "${CI_SH}" check changelog-direct-edit "CHANGELOG.md"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"edited with release label; expected"* ]]
-}
-
-# What: builds a fixture Dockerfile + smoke script pair.
-# Why: shared by the build-tools-smoke-coverage tests below.
-# From: Issue #1683 | PR #1858
-_smoke_coverage_fixture() {
-    local root="$1" extra_dockerfile_tool="${2:-}"
-    mkdir -p "${root}/tools/build-tools" "${root}/scripts/untracked"
-    {
-        printf 'FROM alpine\n'
-        printf 'RUN true\n'
-        printf 'required_tools=(\n'
-        printf '  bash\n'
-        [ -n "${extra_dockerfile_tool}" ] && printf '  %s\n' "${extra_dockerfile_tool}"
-        printf ')\n'
-    } > "${root}/tools/build-tools/Dockerfile"
-    {
-        printf '#!/usr/bin/env bash\n'
-        printf 'smoke_test_image() {\n'
-        printf '  required_tools=(\n'
-        printf '    bash\n'
-        printf '  )\n'
-        printf '}\n'
-    } > "${root}/scripts/untracked/select-build-tools-image.sh"
-}
-
-@test "check build-tools-smoke-coverage passes clean on the real repo" {
-    # What: migrated from check-build-tools-smoke-coverage.
-    # Why: rewritten in ci.sh; the real files must pass.
-    # From: Issue #1683 | PR #1858
-    run bash "${CI_SH}" check build-tools-smoke-coverage
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"build-tools-smoke-coverage=clean"* ]]
-}
-
-@test "check build-tools-smoke-coverage fails an uncovered tool" {
-    # What: a Dockerfile tool, absent from smoke/exclusions.
-    # Why: issue #790/#791/#822's exact failure shape.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/uncovered"
-    _smoke_coverage_fixture "${r}" newtool
-    run bash "${CI_SH}" check build-tools-smoke-coverage "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0026"* ]]
-    [[ "${output}" == *"'newtool' verified by the Dockerfile"* ]]
-}
-
-@test "check build-tools-smoke-coverage allows an excluded tool" {
-    # What: a build tool on the reviewed exclusion list.
-    # Why: excluded tools must never trip the gap error.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/excluded"
-    _smoke_coverage_fixture "${r}" make
-    run bash "${CI_SH}" check build-tools-smoke-coverage "${r}"
-    [ "${status}" -eq 0 ]
-}
-
-@test "check build-tools-smoke-coverage fails an uncovered docker capability" {
-    # What: Dockerfile checks docker buildx, smoke does not.
-    # Why: array-only diffing can't see a subcommand check.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/cap"
-    mkdir -p "${r}/tools/build-tools" "${r}/scripts/untracked"
-    printf 'FROM alpine\nrequired_tools=(\n  bash\n)\ndocker buildx version\n' \
-        > "${r}/tools/build-tools/Dockerfile"
-    printf '#!/usr/bin/env bash\nsmoke_test_image() {\n  required_tools=(\n    bash\n  )\n}\n' \
-        > "${r}/scripts/untracked/select-build-tools-image.sh"
-    run bash "${CI_SH}" check build-tools-smoke-coverage "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"'docker buildx version' verified"* ]]
-}
-
-@test "check build-tools-smoke-coverage fails closed on a vacuous scan" {
-    # What: a Dockerfile with no required_tools array.
-    # Why: mirrors the legacy script's anti-vacuous guard.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/vacuous"
-    mkdir -p "${r}/tools/build-tools" "${r}/scripts/untracked"
-    printf 'FROM alpine\n' > "${r}/tools/build-tools/Dockerfile"
-    printf '#!/usr/bin/env bash\n' > "${r}/scripts/untracked/select-build-tools-image.sh"
-    run bash "${CI_SH}" check build-tools-smoke-coverage "${r}"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0025"* ]]
-}
-
-@test "check build-tools-smoke-coverage fails closed with no files" {
-    # What: neither expected file exists at the given root.
-    # Why: a missing input must never silently pass.
-    # From: Issue #1683 | PR #1858
-    run bash "${CI_SH}" check build-tools-smoke-coverage "${BATS_TEST_TMPDIR}/nope"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0024"* ]]
-}
-
 @test "docker-build builds a per-identity per-arch tag via buildx" {
     # What: ci.sh executes the build; YAML only calls it.
     # Why: engine owns execution, orchestrator just calls.
@@ -4499,7 +3314,7 @@ _smoke_coverage_fixture() {
 
 @test "docker-build omits cache-from/cache-to when unset (unchanged default)" {
     # What: no CI_BUILD_CACHE_* means no cache flags at all.
-    # Why: unset vars must not change existing callers.
+    # Why: unset cache vars must not change existing callers.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     printf '#!/usr/bin/env bash\necho "docker $*"\n' > "${bin}/docker"
@@ -4512,8 +3327,8 @@ _smoke_coverage_fixture() {
 }
 
 @test "docker-build wires per-service cache-from/cache-to from CI_BUILD_CACHE_FROM/TO" {
-    # What: buildx gets a cache-from/cache-to per service.
-    # Why: needs one cache scope per service, not shared.
+    # What: buildx gets cache-from/cache-to scoped per service.
+    # Why: §35 needs one cache scope per service, not shared.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     printf '#!/usr/bin/env bash\necho "docker $*"\n' > "${bin}/docker"
@@ -4526,7 +3341,7 @@ _smoke_coverage_fixture() {
     [[ "${output}" == *"--cache-from type=registry,ref=ghcr.io/wiki-mod/lancache-ng/proxy:cache"* ]]
     [[ "${output}" == *"--cache-to type=registry,ref=ghcr.io/wiki-mod/lancache-ng/proxy:cache,mode=max,ignore-error=true"* ]]
 
-    # What: a 2nd service call gets its own cache ref.
+    # What: a 2nd service call uses its own distinct cache ref.
     # Why: proves scope is per-call, not one constant value.
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
         CI_BUILD_CACHE_FROM="type=registry,ref=ghcr.io/wiki-mod/lancache-ng/ui:cache" \
@@ -4539,7 +3354,7 @@ _smoke_coverage_fixture() {
 }
 
 @test "docker-build cache-from miss fails cache import only, build still succeeds" {
-    # What: a bad cache-from ref must not fail the build.
+    # What: an unresolvable cache-from ref must not fail build.
     # Why: §35: a cache miss must cost time, not the build.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
@@ -4559,44 +3374,11 @@ EOF
         CI_BUILD_CACHE_FROM="type=registry,ref=ghcr.io/wiki-mod/lancache-ng/proxy:cache" \
         run _ci_docker_build proxy abc123 linux/amd64
     [ "${status}" -eq 0 ]
-    # What: raw evidence of the miss stays visible.
-    # Why: AG-INT-002 forbids hiding it.
-    [[ "${output}" == *"failed to configure registry cache import"* ]]
-}
-
-@test "docker-build cache-to already carrying ignore-error is untouched" {
-    # What: ignore-error is kept, never duplicated.
-    # Why: a repeated CSV key must not reach buildx.
-    # From: Issue #1683
-    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    printf '#!/usr/bin/env bash\necho "docker $*"\n' > "${bin}/docker"
-    chmod +x "${bin}/docker"
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
-        CI_BUILD_CACHE_TO="type=registry,ref=ghcr.io/wiki-mod/lancache-ng/proxy:cache,ignore-error=false" \
-        run _ci_docker_build proxy abc123 linux/amd64
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"--cache-to type=registry,ref=ghcr.io/wiki-mod/lancache-ng/proxy:cache,ignore-error=false"* ]]
-    [[ "${output}" != *"ignore-error=false,ignore-error=true"* ]]
-}
-
-@test "docker-build cache-to shorthand is passed through with a warning" {
-    # What: a shorthand ref is forwarded unmodified.
-    # Why: appending CSV attrs would break its syntax.
-    # From: Issue #1683
-    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    printf '#!/usr/bin/env bash\necho "docker $*"\n' > "${bin}/docker"
-    chmod +x "${bin}/docker"
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
-        CI_BUILD_CACHE_TO="ghcr.io/wiki-mod/lancache-ng/proxy:cache" \
-        run _ci_docker_build proxy abc123 linux/amd64
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"--cache-to ghcr.io/wiki-mod/lancache-ng/proxy:cache"* ]]
-    [[ "${output}" == *"CI-WARN-BUILD-0012"* ]]
 }
 
 @test "build-tools build cache-to carries ignore-error for §35 resilience" {
-    # What: build-tools cache-to also gets ignore-error.
-    # Why: same failure class as build (AG-WF-011).
+    # What: build-tools push also gets ignore-error on cache-to.
+    # Why: same failure class as _ci_docker_build (AG-WF-011).
     # From: Issue #1683
     export DLOG="${BATS_TEST_TMPDIR}/d.log"; : > "${DLOG}"
     docker() { printf 'docker %s\n' "$*" >> "${DLOG}"; case "$*" in *"imagetools inspect"*) printf 'sha256:dead\n' ;; esac; return 0; }
@@ -4746,28 +3528,6 @@ EOF
     [ "$(cat "${cnt}")" -eq 1 ]
 }
 
-# What: mktemp -d under /var/tmp, tracked for teardown.
-# Why: cache-dir tests must pass under any ambient TMPDIR.
-# From: Issue #1683 | PR #1858
-_trivy_var_tmp_dir() {
-    local d
-    d="$(mktemp -d "/var/tmp/ci-bats-trivy.XXXXXX")" || return 1
-    printf '%s\n' "${d}" >> "${BATS_TEST_TMPDIR}/.trivy-var-tmp-dirs"
-    printf '%s\n' "${d}"
-}
-
-@test "trivy var-tmp-dir manifest survives its own subshell for cleanup" {
-    # What: pins the fix for a real leak: an array append made
-    # Why: inside "vt=\$(...)" never reached the caller's shell.
-    # From: Issue #1683 | PR #1858
-    local vt; vt="$(_trivy_var_tmp_dir)"
-    [ -d "${vt}" ]
-    local manifest="${BATS_TEST_TMPDIR}/.trivy-var-tmp-dirs"
-    grep -qxF -- "${vt}" "${manifest}"
-    _trivy_cleanup_var_tmp_dirs "${manifest}"
-    [ ! -d "${vt}" ]
-}
-
 # What: PATH-shim trivy for a clean/finding/db outcome.
 # Why: One trivy mock; the scan tests share it.
 # From: Issue #1683
@@ -4801,10 +3561,10 @@ _trivy_stub() {
     # What: A zero exit is a clean image, no retry.
     # Why: The success path returns clean directly.
     # From: Issue #1683
-    local bin vt; bin="$(_trivy_stub clean)"; vt="$(_trivy_var_tmp_dir)"
+    local bin; bin="$(_trivy_stub clean)"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
-    CI_TRIVY_SHARED_DIR="${vt}/no-shared" \
-    CI_TRIVY_FALLBACK_DIR="${vt}/trivy-cache" \
+    CI_TRIVY_SHARED_DIR="${BATS_TEST_TMPDIR}/no-shared" \
+    CI_TRIVY_FALLBACK_DIR="${BATS_TEST_TMPDIR}/trivy-cache" \
         run _ci_trivy_scan proxy sha256:abc
     [ "${status}" -eq 0 ]
 }
@@ -4813,10 +3573,10 @@ _trivy_stub() {
     # What: A written report is a deterministic finding.
     # Why: Findings fail once; retrying is wasted work.
     # From: Issue #1683
-    local bin vt; bin="$(_trivy_stub finding)"; vt="$(_trivy_var_tmp_dir)"
+    local bin; bin="$(_trivy_stub finding)"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
-    CI_TRIVY_SHARED_DIR="${vt}/no-shared" \
-    CI_TRIVY_FALLBACK_DIR="${vt}/trivy-cache" \
+    CI_TRIVY_SHARED_DIR="${BATS_TEST_TMPDIR}/no-shared" \
+    CI_TRIVY_FALLBACK_DIR="${BATS_TEST_TMPDIR}/trivy-cache" \
         run _ci_trivy_scan proxy sha256:abc
     [ "${status}" -eq 1 ]
     [[ "${output}" == *"HIGH vuln"* ]]
@@ -4826,10 +3586,10 @@ _trivy_stub() {
     # What: No report plus a DB miss retries, then exits 3.
     # Why: A DB outage escalates, never reads as a finding.
     # From: Issue #1683
-    local bin vt; bin="$(_trivy_stub db)"; vt="$(_trivy_var_tmp_dir)"
+    local bin; bin="$(_trivy_stub db)"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
-    CI_TRIVY_SHARED_DIR="${vt}/no-shared" \
-    CI_TRIVY_FALLBACK_DIR="${vt}/trivy-cache" \
+    CI_TRIVY_SHARED_DIR="${BATS_TEST_TMPDIR}/no-shared" \
+    CI_TRIVY_FALLBACK_DIR="${BATS_TEST_TMPDIR}/trivy-cache" \
         CI_TRIVY_MAX=2 CI_TRIVY_BACKOFF=0 run _ci_trivy_scan proxy sha256:abc
     [ "${status}" -eq 3 ]
 }
@@ -4838,7 +3598,6 @@ _trivy_stub() {
     # What: The scan covers vulnerabilities and secrets.
     # Why: Secret-scan parity with the retired action.
     # From: Issue #1683
-    local vt; vt="$(_trivy_var_tmp_dir)"
     export TLOG="${BATS_TEST_TMPDIR}/t.log"; : > "${TLOG}"
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     {
@@ -4849,12 +3608,12 @@ _trivy_stub() {
     } > "${bin}/trivy"
     chmod +x "${bin}/trivy"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
-    CI_TRIVY_SHARED_DIR="${vt}/no-shared" \
-    CI_TRIVY_FALLBACK_DIR="${vt}/trivy-cache" \
+    CI_TRIVY_SHARED_DIR="${BATS_TEST_TMPDIR}/no-shared" \
+    CI_TRIVY_FALLBACK_DIR="${BATS_TEST_TMPDIR}/trivy-cache" \
         run _ci_trivy_scan proxy sha256:abc
     [ "${status}" -eq 0 ]
     grep -q -- "--scanners vuln,secret" "${TLOG}"
-    grep -q -- "--cache-dir ${vt}/trivy-cache" "${TLOG}"
+    grep -q -- "--cache-dir ${BATS_TEST_TMPDIR}/trivy-cache" "${TLOG}"
 }
 
 @test "trivy dir writable proves a real file+subdir round-trip" {
@@ -4877,29 +3636,27 @@ _trivy_stub() {
     # What: A writable shared-dir wins over the fallback.
     # Why: The shared NFS DB is the intended common cache.
     # From: Issue #1683
-    local vt; vt="$(_trivy_var_tmp_dir)"
-    mkdir -p "${vt}/shared"
-    CI_TRIVY_SHARED_DIR="${vt}/shared" \
-    CI_TRIVY_FALLBACK_DIR="${vt}/fallback" \
+    mkdir -p "${BATS_TEST_TMPDIR}/shared"
+    CI_TRIVY_SHARED_DIR="${BATS_TEST_TMPDIR}/shared" \
+    CI_TRIVY_FALLBACK_DIR="${BATS_TEST_TMPDIR}/fallback" \
         run _ci_trivy_cache_dir
     [ "${status}" -eq 0 ]
-    [[ "${output}" == "dir=${vt}/shared source=nfs-shared" ]]
+    [[ "${output}" == "dir=${BATS_TEST_TMPDIR}/shared source=nfs-shared" ]]
 }
 
 @test "trivy cache-dir falls back to local disk when shared is absent" {
     # What: A missing shared-dir falls back to local disk.
     # Why: An unmounted NFS share must not block scanning.
     # From: Issue #1683
-    local vt; vt="$(_trivy_var_tmp_dir)"
-    CI_TRIVY_SHARED_DIR="${vt}/no-such-share" \
-    CI_TRIVY_FALLBACK_DIR="${vt}/fallback" \
+    CI_TRIVY_SHARED_DIR="${BATS_TEST_TMPDIR}/no-such-share" \
+    CI_TRIVY_FALLBACK_DIR="${BATS_TEST_TMPDIR}/fallback" \
         run _ci_trivy_cache_dir
     [ "${status}" -eq 0 ]
     # What: run merges the INFO notice into output too.
     # Why: a substring match tolerates that extra line.
     # From: Issue #1683
-    [[ "${output}" == *"dir=${vt}/fallback source=local-fallback"* ]]
-    [ -d "${vt}/fallback" ]
+    [[ "${output}" == *"dir=${BATS_TEST_TMPDIR}/fallback source=local-fallback"* ]]
+    [ -d "${BATS_TEST_TMPDIR}/fallback" ]
 }
 
 @test "trivy cache-dir refuses tmpfs /tmp for shared or fallback" {
@@ -4979,30 +3736,6 @@ _trivy_stub() {
     CI_TRIVY_LOCK_POLL=1 run _ci_trivy_db_lock_run "${cache}" 10 5 -- true
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"reclaiming stale trivy DB refresh lock"* ]]
-}
-
-@test "trivy db lock fails closed when stale-lock reclaim itself fails" {
-    # What: rm -rf not removing the stale lock is SCAN-0015.
-    # Why: e.g. NFS can leave it behind; must not spin forever.
-    # From: Issue #1683 | PR #1858
-    local cache="${BATS_TEST_TMPDIR}/wedgeddb"; mkdir -p "${cache}"
-    local lock="${cache}/.trivy-db-update.lock"
-    mkdir -p "${lock}"
-    touch -d '-1 hour' "${lock}"
-    # What: PATH-shim rm that no-ops only on the lock path.
-    # Why: portably simulates a reclaim rm -rf that fails.
-    # From: Issue #1683 | PR #1858
-    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    {
-        printf '#!/usr/bin/env bash\n'
-        printf 'for a; do [ "$a" = "%s" ] && exit 0; done\n' "${lock}"
-        printf 'exec /bin/rm "$@"\n'
-    } > "${bin}/rm"
-    chmod +x "${bin}/rm"
-    PATH="${bin}:${PATH}" CI_TRIVY_LOCK_POLL=1 \
-        run _ci_trivy_db_lock_run "${cache}" 10 5 -- true
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-SCAN-0015"* ]]
 }
 
 @test "trivy db lock fails closed when cache-dir cannot be created" {
@@ -5715,304 +4448,6 @@ SH
     run _ci_cas_ref_sha origin refs/ci/promote-lock/latest
     [ "${status}" -eq 0 ]
     [ -n "${output}" ]
-}
-
-# =========================================================
-# VERSION MANAGEMENT
-# =========================================================
-
-# What: Copies the two version-pinned Dockerfiles for sync.
-# Why: sync tests must never touch the real repo files.
-# From: Issue #1683 | PR #1858
-_version_fixture_repo() {
-    local root="${BATS_TEST_TMPDIR}/vrepo"
-    mkdir -p "${root}/services/netdata" "${root}/tools/build-tools"
-    cp "${BATS_TEST_DIRNAME}/../../services/netdata/Dockerfile" \
-        "${root}/services/netdata/Dockerfile"
-    cp "${BATS_TEST_DIRNAME}/../../tools/build-tools/Dockerfile" \
-        "${root}/tools/build-tools/Dockerfile"
-    printf '%s' "${root}"
-}
-
-@test "version verify (default) passes clean on the real repo" {
-    # What: default subcommand is verify, read-only.
-    # Why: netdata+dhclient must match today's real files.
-    # From: Issue #1683 | PR #1858
-    run bash "${CI_SH}" version
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"key=netdata.version"*"match=yes"* ]]
-    [[ "${output}" == *"key=dhclient.consumer.DHCLIENT_SHA256 shape=bare"* ]]
-}
-
-@test "version verify explicit subcommand matches the default" {
-    # What: 'version verify' behaves like bare 'version'.
-    # Why: the default-arg wiring must not silently diverge.
-    # From: Issue #1683 | PR #1858
-    run bash "${CI_SH}" version verify
-    [ "${status}" -eq 0 ]
-}
-
-@test "version verify fails closed on a netdata version drift" {
-    # What: SOT bumped, Dockerfile default left behind.
-    # Why: verify is the CI gate; drift must fail the run.
-    # From: Issue #1683 | PR #1858
-    local m="${BATS_TEST_TMPDIR}/nd-version.yml"
-    sed 's/version: v2.11.0/version: v2.99.0/' \
-        "${CI_MANIFEST_SOURCE}" > "${m}"
-    CI_MANIFEST="${m}" run bash "${CI_SH}" version verify
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *"CI-ERROR-VERSION-0010"* ]]
-    [[ "${output}" == *"sot=v2.99.0"* ]]
-    [[ "${output}" == *"dockerfile=v2.11.0"* ]]
-}
-
-@test "version verify fails closed on a netdata sha256 drift" {
-    # What: SOT sha256_x86_64 changed, Dockerfile did not.
-    # Why: a silent hash drift must fail the run too.
-    # From: Issue #1683 | PR #1858
-    local m="${BATS_TEST_TMPDIR}/nd-sha.yml"
-    sed 's/sha256_x86_64: b42d9937807f28812502a967906d370cff9ab443453813656b99ff6a9b3c5649/sha256_x86_64: deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/' \
-        "${CI_MANIFEST_SOURCE}" > "${m}"
-    CI_MANIFEST="${m}" run bash "${CI_SH}" version verify
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *"CI-ERROR-VERSION-0010"* ]]
-}
-
-@test "version verify fails closed on a missing SOT dhclient field" {
-    # What: SOT dhclient.sha256_arm64 line removed.
-    # Why: dhclient stays fail-closed on a blank field.
-    # From: Issue #1683 | PR #1858
-    local m="${BATS_TEST_TMPDIR}/dh-missing.yml"
-    grep -v 'sha256_arm64:' "${CI_MANIFEST_SOURCE}" > "${m}"
-    CI_MANIFEST="${m}" run bash "${CI_SH}" version verify
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VERSION-0011"* ]]
-}
-
-@test "version verify fails closed on a malformed dhclient sha256" {
-    # What: SOT sha256_amd64 shortened to non-hex64 text.
-    # Why: a truncated/garbled pin must never pass silently.
-    # From: Issue #1683 | PR #1858
-    local m="${BATS_TEST_TMPDIR}/dh-badsha.yml"
-    sed 's/sha256_amd64: 068c97e534e9c8f03db9064296b1d3c21d957f328e40309278559a92f9a74557/sha256_amd64: not-a-real-hash/' \
-        "${CI_MANIFEST_SOURCE}" > "${m}"
-    CI_MANIFEST="${m}" run bash "${CI_SH}" version verify
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VERSION-0011"* ]]
-}
-
-@test "version verify fails closed if a dhclient ARG is missing" {
-    # What: build-tools loses its DHCLIENT_SHA256 ARG line.
-    # Why: the SOT-to-consumer contract must not just break.
-    # From: Issue #1683 | PR #1858
-    local root; root="$(_version_fixture_repo)"
-    sed -i '/^ARG DHCLIENT_SHA256$/d' \
-        "${root}/tools/build-tools/Dockerfile"
-    CI_REPO_ROOT="${root}" run bash "${CI_SH}" version verify
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VERSION-0012"* ]]
-}
-
-@test "version verify fails closed on a baked-in dhclient default" {
-    # What: someone re-pins DHCLIENT_VERSION with a default.
-    # Why: dhclient stays SOT-driven, no local re-pin ever.
-    # From: Issue #1683 | PR #1858
-    local root; root="$(_version_fixture_repo)"
-    sed -i 's/^ARG DHCLIENT_VERSION$/ARG DHCLIENT_VERSION=4.4.3_p1-r4/' \
-        "${root}/tools/build-tools/Dockerfile"
-    CI_REPO_ROOT="${root}" run bash "${CI_SH}" version verify
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VERSION-0013"* ]]
-}
-
-@test "version audit reports the netdata aarch64 orphan when no consumer exists" {
-    # What: SOT carries sha256_aarch64; a Dockerfile with no ARM
-    #       consumer must still surface the scope-gap warning.
-    # Why: AG-INT-002: the scope gap stays visible whenever it is
-    #      real. The real repo's services/netdata/Dockerfile now
-    #      HAS this consumer (ci/1683-dockerfile-consolidation
-    #      wired NETDATA_AARCH64_SHA256), so this uses a fixture
-    #      repo with that ARG stripped to keep exercising the
-    #      orphan-detection mechanism itself.
-    # From: Issue #1683
-    local root; root="$(_version_fixture_repo)"
-    sed -i '/^ARG NETDATA_AARCH64_SHA256=/d' "${root}/services/netdata/Dockerfile"
-    CI_REPO_ROOT="${root}" run bash "${CI_SH}" version audit
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"CI-WARN-VERSION-0001"* ]]
-    [[ "${output}" == *"netdata.sha256_aarch64"* ]]
-}
-
-@test "version audit no longer flags the netdata aarch64 orphan on the real repo" {
-    # What: the real repo's Dockerfile now consumes
-    #       NETDATA_AARCH64_SHA256; audit must NOT warn on it.
-    # Why: positive proof the ci/1683-dockerfile-consolidation
-    #      arm64 wiring actually resolved the scope gap the
-    #      previous (fixture-based) test still proves detectable.
-    # From: Issue #1683
-    run bash "${CI_SH}" version audit
-    [ "${status}" -eq 0 ]
-    [[ "${output}" != *"CI-WARN-VERSION-0001"* ]]
-}
-
-@test "version audit reports drift but never fails on it" {
-    # What: audit is the report-only view of the same drift.
-    # Why: verify is the CI gate; audit must stay exit 0.
-    # From: Issue #1683 | PR #1858
-    local m="${BATS_TEST_TMPDIR}/nd-audit.yml"
-    sed 's/version: v2.11.0/version: v2.99.0/' \
-        "${CI_MANIFEST_SOURCE}" > "${m}"
-    CI_MANIFEST="${m}" run bash "${CI_SH}" version audit
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"match=no"* ]]
-}
-
-@test "version sync is a byte-identical no-op when already synced" {
-    # What: today's real files already match the SOT.
-    # Why: sync must never touch a file with nothing to fix.
-    # From: Issue #1683 | PR #1858
-    local root; root="$(_version_fixture_repo)"
-    local before; before="$(sha256sum "${root}/services/netdata/Dockerfile")"
-    CI_REPO_ROOT="${root}" run bash "${CI_SH}" version sync
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"changed=0"* ]]
-    [[ "${output}" == *"sync=dhclient changed=0"* ]]
-    local after; after="$(sha256sum "${root}/services/netdata/Dockerfile")"
-    [ "${before}" = "${after}" ]
-}
-
-@test "version sync writes a drifted netdata default, then no-ops" {
-    # What: SOT moves ahead; sync must repair the file.
-    # Why: sync is the only subcommand allowed to mutate.
-    # From: Issue #1683 | PR #1858
-    local root; root="$(_version_fixture_repo)"
-    local m="${BATS_TEST_TMPDIR}/nd-sync.yml"
-    sed 's/version: v2.11.0/version: v2.99.0/' \
-        "${CI_MANIFEST_SOURCE}" > "${m}"
-    CI_MANIFEST="${m}" CI_REPO_ROOT="${root}" \
-        run bash "${CI_SH}" version sync
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"changed=1"* ]]
-    grep -qx 'ARG NETDATA_VERSION=v2.99.0' \
-        "${root}/services/netdata/Dockerfile"
-    local first; first="$(sha256sum "${root}/services/netdata/Dockerfile")"
-    CI_MANIFEST="${m}" CI_REPO_ROOT="${root}" \
-        run bash "${CI_SH}" version sync
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"changed=0"* ]]
-    local second; second="$(sha256sum "${root}/services/netdata/Dockerfile")"
-    [ "${first}" = "${second}" ]
-}
-
-@test "version sync fails loud on a non-canonical ARG line" {
-    # What: a parseable but non-canonical ARG shape (lowercase).
-    # Why: the narrow write regex must never claim a fake write.
-    # From: Issue #1683 | PR #1858
-    local root; root="$(_version_fixture_repo)"
-    sed -i 's/^ARG NETDATA_VERSION=/arg NETDATA_VERSION=/' \
-        "${root}/services/netdata/Dockerfile"
-    local m="${BATS_TEST_TMPDIR}/nd-noncanon.yml"
-    sed 's/version: v2.11.0/version: v2.99.0/' \
-        "${CI_MANIFEST_SOURCE}" > "${m}"
-    local before; before="$(sha256sum "${root}/services/netdata/Dockerfile")"
-    CI_MANIFEST="${m}" CI_REPO_ROOT="${root}" \
-        run bash "${CI_SH}" version sync
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VERSION-0015"* ]]
-    [[ "${output}" != *"changed=1"* ]]
-    local after; after="$(sha256sum "${root}/services/netdata/Dockerfile")"
-    [ "${before}" = "${after}" ]
-}
-
-@test "version sync touches only the two netdata ARG lines" {
-    # What: every other Dockerfile line must survive sync.
-    # Why: sync owns two values, never a broader rewrite.
-    # From: Issue #1683 | PR #1858
-    local root; root="$(_version_fixture_repo)"
-    local m="${BATS_TEST_TMPDIR}/nd-scope.yml"
-    sed 's/version: v2.11.0/version: v2.99.0/' \
-        "${CI_MANIFEST_SOURCE}" > "${m}"
-    local strip='/^ARG NETDATA_VERSION=/d;/^ARG NETDATA_X86_64_SHA256=/d'
-    local before after
-    before="$(sed "${strip}" "${root}/services/netdata/Dockerfile")"
-    CI_MANIFEST="${m}" CI_REPO_ROOT="${root}" \
-        run bash "${CI_SH}" version sync
-    [ "${status}" -eq 0 ]
-    after="$(sed "${strip}" "${root}/services/netdata/Dockerfile")"
-    [ "${before}" = "${after}" ]
-}
-
-@test "unknown version subcommand fails closed" {
-    # What: an unrecognized 'version' verb must not succeed.
-    # Why: fail-closed dispatch, like every other command.
-    # From: Issue #1683 | PR #1858
-    run bash "${CI_SH}" version bogus
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VERSION-0014"* ]]
-}
-
-@test "_ci_dockerfile_arg_default reports ABSENT and BARE" {
-    # What: a missing name vs. a defaultless declaration.
-    # Why: the two must stay distinct, never conflated.
-    # From: Issue #1683 | PR #1858
-    local f="${BATS_TEST_TMPDIR}/Dockerfile.shapes"
-    printf 'FROM alpine\nARG BARE_ONE\n' > "${f}"
-    run _ci_dockerfile_arg_default "${f}" NOT_THERE
-    [ "${status}" -eq 0 ]
-    [ "${output}" = "ABSENT" ]
-    run _ci_dockerfile_arg_default "${f}" BARE_ONE
-    [ "${status}" -eq 0 ]
-    [ "${output}" = "BARE" ]
-}
-
-@test "_ci_dockerfile_arg_default reads quoted and bare values" {
-    # What: unquoted, double- and single-quoted defaults.
-    # Why: AG-VAL-036: the real ARG grammar has all three.
-    # From: Issue #1683 | PR #1858
-    local f="${BATS_TEST_TMPDIR}/Dockerfile.quotes"
-    printf 'FROM alpine\nARG A=1.2.3\nARG B="x y"\nARG C='"'"'q v'"'"'\n' > "${f}"
-    run _ci_dockerfile_arg_default "${f}" A
-    [ "${output}" = "FOUND:1.2.3" ]
-    run _ci_dockerfile_arg_default "${f}" B
-    [ "${output}" = "FOUND:x y" ]
-    run _ci_dockerfile_arg_default "${f}" C
-    [ "${output}" = "FOUND:q v" ]
-}
-
-@test "_ci_dockerfile_arg_default accepts real dhclient re-declares" {
-    # What: build-tools re-declares DHCLIENT_VERSION twice.
-    # Why: identical bare pre/post-FROM lines are valid.
-    # From: Issue #1683 | PR #1858
-    run _ci_dockerfile_arg_default \
-        "${BATS_TEST_DIRNAME}/../../tools/build-tools/Dockerfile" \
-        DHCLIENT_VERSION
-    [ "${status}" -eq 0 ]
-    [ "${output}" = "BARE" ]
-}
-
-@test "_ci_dockerfile_arg_default refuses conflicting re-declares" {
-    # What: two ARG lines, one name, different defaults.
-    # Why: AG-VAL-036: refuse to guess, escalate instead.
-    # From: Issue #1683 | PR #1858
-    local f="${BATS_TEST_TMPDIR}/Dockerfile.conflict"
-    printf 'FROM alpine\nARG X=1\nARG X=2\n' > "${f}"
-    run _ci_dockerfile_arg_default "${f}" X
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VERSION-0002"* ]]
-}
-
-@test "_ci_dockerfile_arg_default refuses unsupported shapes" {
-    # What: a line-continuation and an unquoted space value.
-    # Why: an unreadable shape must fail loud, never skip.
-    # From: Issue #1683 | PR #1858
-    local f="${BATS_TEST_TMPDIR}/Dockerfile.unsupported"
-    printf 'FROM alpine\nARG A=abc\\\nARG B=has space\n' > "${f}"
-    run _ci_dockerfile_arg_default "${f}" A
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VERSION-0003"* ]]
-    run _ci_dockerfile_arg_default "${f}" B
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VERSION-0005"* ]]
 }
 
 # =========================================================
