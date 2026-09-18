@@ -3307,9 +3307,7 @@ netdata=sha256:n"
 
 @test "check review-chronology diff-scoped mode fails closed when git diff itself fails" {
     # What: git diff failure returns 2, not empty file list.
-    # Why: mapfile loses exit status via process
-    #      substitution -- this proves the mktemp-file capture instead
-    #      actually propagates the failure (AG-INT-002/AG-VAL-030).
+    # Why: Capture to file preserves exit; mapfile drops it.
     # From: Issue #1683
     local bare="${BATS_TEST_TMPDIR}/chronofail-origin.git" work="${BATS_TEST_TMPDIR}/chronofail-work"
     git init --quiet --bare "${bare}"
@@ -4408,8 +4406,7 @@ EOF
 
 @test "check entrypoint-lib-wiring requires no COPY when nothing is sourced" {
     # What: Entrypoint never sources absolute-path lib.
-    # Why: Guard constraint is one-directional (source implies
-    #      COPY, not the reverse) -- most Dockerfiles need no change.
+    # Why: Guard is one-directional: source implies COPY.
     # From: Issue #1683
     local r="${BATS_TEST_TMPDIR}/elw-nosource"
     mkdir -p "${r}/services/proxy"
@@ -4439,7 +4436,6 @@ EOF
 @test "check entrypoint-lib-wiring fails closed on a COPY --from an undeclared stage" {
     # What: COPY --from=oldbuilder stage doesn't exist.
     # Why: Renamed/typo'd stage must fail closed.
-    #      silently satisfy the destination check.
     # From: Issue #1683
     local r="${BATS_TEST_TMPDIR}/elw-badstage"
     mkdir -p "${r}/services/proxy"
@@ -4550,12 +4546,7 @@ _smoke_coverage_fixture() {
 
 @test "check build-tools-smoke-coverage currently fails on a real SOT/smoke divergence" {
     # What: Real repo gap: SOT omits netdata smoke_tools.
-    #       smoke_tools list names cargo-tarpaulin and timeout, but
-    #       smoke_test_image() does not actually verify either.
-    # Why: SOT-direction check catches real bugs.
-    #      instead of only synthetic fixtures; NOT a regression this
-    #      guard introduced -- select-build-tools-image.sh and
-    #      build-manifest.yml are out of this dispatch's write scope.
+    # Why: Catches real bugs, not just synthetic fixtures.
     # From: Issue #1683
     run bash "${CI_SH}" check build-tools-smoke-coverage
     [ "${status}" -ne 0 ]
@@ -4566,9 +4557,7 @@ _smoke_coverage_fixture() {
 
 @test "check build-tools-smoke-coverage passes clean when Dockerfile/smoke/SOT all agree" {
     # What: Fixture where Dockerfile, smoke, and SOT match.
-    #       smoke_tools all name exactly the same tool.
-    # Why: the positive baseline the real-repo test above no
-    #      longer can be, now that all three are cross-checked.
+    # Why: Positive baseline for cross-check validation.
     # From: Issue #1683
     local r="${BATS_TEST_TMPDIR}/allmatch"
     _smoke_coverage_fixture "${r}"
@@ -4843,11 +4832,8 @@ EOF
 }
 
 @test "publish retry-exhaustion never invokes build (RETRY OPERATION != REBUILD)" {
-    # What: A push that always fails transiently exhausts retries;
-    # the build backend's own invocation count stays exactly 0.
-    # Why: This is the hard invariant: a failed publish retry
-    # must never trigger a rebuild. Proven by real call counts,
-    # not by reading the code.
+    # What: Failed retry exhausts retries without rebuild.
+    # Why: Retry-fail must never trigger rebuild.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     local buildmarker="${BATS_TEST_TMPDIR}/build-was-called"
@@ -4868,8 +4854,8 @@ EOF
 }
 
 @test "docker-build retries only its own known transient buildx signature" {
-    # What: A layer-lock failure then success; build succeeds.
-    # Why: docker_buildx_retry.sh's exact historical signature.
+    # What: Layer-lock fail then success; build succeeds.
+    # Why: Historical buildx transient signature match.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
@@ -4895,7 +4881,7 @@ EOF
 }
 
 @test "docker-build fails immediately on a real compile error (no retry)" {
-    # What: A Dockerfile/compile failure must never be retried.
+    # What: Compile failure must never be retried.
     # Why: Blind retry would only delay real feedback.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
@@ -4927,8 +4913,8 @@ _trivy_var_tmp_dir() {
 }
 
 @test "trivy var-tmp-dir manifest survives its own subshell for cleanup" {
-    # What: pins the fix for a real leak: an array append made
-    # Why: inside "vt=\$(...)" never reached the caller's shell.
+    # What: Array append survives subshell for cleanup.
+    # Why: Process substitution loses exit status.
     # From: Issue #1683 | PR #1858
     local vt; vt="$(_trivy_var_tmp_dir)"
     [ -d "${vt}" ]
@@ -5153,7 +5139,7 @@ _trivy_stub() {
 
 @test "trivy db lock fails closed when stale-lock reclaim itself fails" {
     # What: rm -rf not removing the stale lock is SCAN-0015.
-    # Why: e.g. NFS can leave it behind; must not spin forever.
+    # Why: NFS can leave stale lock; must not spin.
     # From: Issue #1683 | PR #1858
     local cache="${BATS_TEST_TMPDIR}/wedgeddb"; mkdir -p "${cache}"
     local lock="${cache}/.trivy-db-update.lock"
@@ -5396,8 +5382,8 @@ _cas_setup() {
 }
 
 @test "lock_release retries a transient git-fetch failure, then succeeds" {
-    # What: 1 transient fetch failure then a real fetch succeeds.
-    # Why: this fetch had no retry at any level before op=git.
+    # What: Transient fail then success; retry works.
+    # Why: Fetch lacked retry until op=git was added.
     # From: Issue #1683
     _cas_setup
     cd "${CAS_A}"; _ci_lock_try origin refs/ci/lock/t holder-a 600
@@ -5422,8 +5408,8 @@ EOF
 }
 
 @test "lock_release fails fast (no retry) on a not_found-shaped git-fetch error" {
-    # What: a genuinely missing ref must not consume retry budget.
-    # Why: op=git shares the permanent cascade; retrying can't fix this.
+    # What: Missing ref must not consume retry budget.
+    # Why: Permanent cascade; retrying won't fix it.
     # From: Issue #1683
     _cas_setup
     cd "${CAS_A}"; _ci_lock_try origin refs/ci/lock/t holder-a 600
@@ -5447,8 +5433,8 @@ EOF
 }
 
 @test "lock_release exhausts after CI_RETRY_MAX_ATTEMPTS on a persistent transient fetch failure" {
-    # What: an always-transient fetch still stops at max, never loops forever.
-    # Why: a bounded retry is a hard requirement, not just a happy-path detail.
+    # What: Transient fail respects retry max limit.
+    # Why: Bounded retry is a hard requirement.
     # From: Issue #1683
     _cas_setup
     cd "${CAS_A}"; _ci_lock_try origin refs/ci/lock/t holder-a 600
@@ -5949,8 +5935,8 @@ _version_fixture_repo() {
 }
 
 @test "version verify fails closed on a netdata aarch64 sha256 drift" {
-    # What: SOT sha256_aarch64 changed, Dockerfile default did not.
-    # Why: arm64 must be verified like x86_64, not silently skipped.
+    # What: SOT aarch64 sha256 changed; Dockerfile didn't.
+    # Why: Verify arm64 as hard as x86_64.
     # From: Issue #1683
     local m="${BATS_TEST_TMPDIR}/nd-sha-arm.yml"
     sed 's/sha256_aarch64: 8cd056d64078c109409c08e30d55324c82e3855f9d8e4b304cacc7c612610e09/sha256_aarch64: deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/' \
@@ -6009,15 +5995,8 @@ _version_fixture_repo() {
 }
 
 @test "version audit reports the netdata aarch64 orphan when no consumer exists" {
-    # What: SOT carries sha256_aarch64; a Dockerfile with no ARM
-    #       consumer must still surface the scope-gap warning
-    #       (alongside the now-also-hard version-diff failure).
-    # Why: AG-INT-002: the scope gap stays visible whenever it is
-    #      real. _ci_version_diff_netdata now hard-requires this
-    #      ARG (matching x86_64), so a stripped ARG makes the
-    #      overall audit fail closed (status 2) too -- the orphan
-    #      message still fires in the same pass, giving full
-    #      context rather than being silently superseded.
+    # What: aarch64 ARG orphan still visible always.
+    # Why: Audit must fail closed when required ARG missing.
     # From: Issue #1683
     local root; root="$(_version_fixture_repo)"
     sed -i '/^ARG NETDATA_AARCH64_SHA256=/d' "${root}/services/netdata/Dockerfile"
@@ -6028,11 +6007,8 @@ _version_fixture_repo() {
 }
 
 @test "version audit no longer flags the netdata aarch64 orphan on the real repo" {
-    # What: the real repo's Dockerfile now consumes
-    #       NETDATA_AARCH64_SHA256; audit must NOT warn on it.
-    # Why: positive proof the ci/1683-dockerfile-consolidation
-    #      arm64 wiring actually resolved the scope gap the
-    #      previous (fixture-based) test still proves detectable.
+    # What: Real repo now consumes aarch64 ARG; no warning.
+    # Why: Proof consolidation resolved scope gap.
     # From: Issue #1683
     run bash "${CI_SH}" version audit
     [ "${status}" -eq 0 ]
@@ -6089,8 +6065,8 @@ _version_fixture_repo() {
 }
 
 @test "version sync fails loud on a non-canonical ARG line" {
-    # What: a parseable but non-canonical ARG shape (lowercase).
-    # Why: the narrow write regex must never claim a fake write.
+    # What: Non-canonical ARG shape must fail (lowercase).
+    # Why: Write regex must never claim false positive.
     # From: Issue #1683 | PR #1858
     local root; root="$(_version_fixture_repo)"
     sed -i 's/^ARG NETDATA_VERSION=/arg NETDATA_VERSION=/' \
