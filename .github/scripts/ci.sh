@@ -3299,9 +3299,13 @@ ci_cmd_build_args() {
         build-tools) _ci_build_tools_build_args "${fmt}" "${platform}" ;;
         # What: any manifest-listed product service gets args.
         # Why: services list is manifest-owned; no 2nd copy here.
+        #      Capture before grep -q: a live producer piped into
+        #      an early-exiting consumer is pipefail-unsafe.
         # From: Issue #1683
         *)
-            if printf '%s\n' "$(ci_services)" | grep -qxF -- "${service}"; then
+            local svc_list
+            svc_list="$(ci_services)" || return 2
+            if printf '%s\n' "${svc_list}" | grep -qxF -- "${service}"; then
                 _ci_service_build_args "${service}" "${fmt}"
             fi
             ;;

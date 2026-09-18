@@ -2841,6 +2841,20 @@ netdata=sha256:n"
     [[ "${output}" == *"CI-ERROR-BUILDARGS-0007"* ]]
 }
 
+@test "build-args fails closed on an unmapped external_image value" {
+    # What: an external_image the arg-name case doesn't know must
+    #       fail closed rather than guess a build-arg name.
+    # Why: AG-VAL-030 -- prove the failure path, not only the two
+    #      real cases (none today / fluent_bit for syslog).
+    # From: Issue #1683
+    local m="${BATS_TEST_TMPDIR}/bogus-external-image.yml"
+    sed 's/external_image: fluent_bit/external_image: bogus_thing/' \
+        "${CI_MANIFEST_SOURCE}" > "${m}"
+    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args syslog
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-BUILDARGS-0008"* ]]
+}
+
 @test "build-tools packages lists the apk tools incl. AG-KD-009 set" {
     # What: The SOT feeds the apk input check.
     # Why: AG-KD-009 required tools must all be present.
