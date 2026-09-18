@@ -4050,14 +4050,25 @@ ci_main() {
 # SOURCE-HYGIENE CHECKS
 # =========================================================
 
+# What: out[]=override if non-empty, else git ls-files spec.
+# Why: 7 checks repeated this override-or-scan boilerplate.
+# From: Issue #1683
+_ci_scan_files() {
+    local -n _ci_scan_out="$1" _ci_scan_override="$2"
+    shift 2
+    if [ "${#_ci_scan_override[@]}" -gt 0 ]; then
+        _ci_scan_out=("${_ci_scan_override[@]}")
+        return
+    fi
+    mapfile -t _ci_scan_out < <(git ls-files -- "$@")
+}
+
 # What: Fail on any listed text file carrying CRLF.
 # Why: eol=lf can be bypassed (API write, pre-attr commit).
 # From: Issue #1683
 _ci_check_line_endings() {
-    local -a files=()
-    if [ "$#" -gt 0 ]; then files=("$@"); else
-        mapfile -t files < <(git ls-files)
-    fi
+    local -a _ci_override=("$@") files=()
+    _ci_scan_files files _ci_override
     local path
     local -a offenders=()
     for path in "${files[@]}"; do
@@ -4074,10 +4085,10 @@ _ci_check_line_endings() {
     printf 'line-endings=clean files=%s\n' "${#files[@]}"
 }
 
-# What: True for a path exempt from the header contract.
-# Why: One exclusion owner (binaries, vendored, licenses).
+# What: True for a path exempt from prose-comment checks.
+# Why: One owner for header + review-chronology exclusions.
 # From: Issue #1683
-_ci_header_excluded() {
+_ci_prose_excluded() {
     case "$1" in
         *.md|VERSION|LICENSE|COPYING) return 0 ;;
         .env|.env.example|*/.env|*/.env.example) return 0 ;;
@@ -4129,15 +4140,13 @@ _ci_header_line1_ok() {
 # Why: AGENTS.md header contract, native syntax, line 2/3.
 # From: Issue #1683
 _ci_check_file_headers() {
-    local -a files=()
-    if [ "$#" -gt 0 ]; then files=("$@"); else
-        mapfile -t files < <(git ls-files)
-    fi
+    local -a _ci_override=("$@") files=()
+    _ci_scan_files files _ci_override
     local path exp p_line s_line legacy line pc sc scnt lc
     local -a fails=() scan=()
     for path in "${files[@]}"; do
         [ -f "${path}" ] || continue
-        _ci_header_excluded "${path}" && continue
+        _ci_prose_excluded "${path}" && continue
         if ! exp="$(_ci_header_expected "${path}")"; then
             fails+=("${path}: no native header syntax"); continue
         fi
@@ -4268,10 +4277,8 @@ _ci_check_comment_length() {
 # From: Issue #1683
 _ci_check_deny_short_sha() {
     local pat='\$\{([A-Za-z_][A-Za-z0-9_]*)?([Ss][Hh][Aa]|[Cc][Oo][Mm][Mm][Ii][Tt]|[Cc][Aa][Nn][Dd][Ii][Dd][Aa][Tt][Ee]|[Rr][Ee][Vv][Ii][Ss][Ii][Oo][Nn])[A-Za-z0-9_]*[[:space:]]*(:[[:space:]]*:[[:space:]]*[A-Za-z0-9_]+|:[[:space:]]*0[[:space:]]*:[[:space:]]*[A-Za-z0-9_]+)\}'
-    local -a files=()
-    if [ "$#" -gt 0 ]; then files=("$@"); else
-        mapfile -t files < <(git ls-files -- '.github/scripts/*.sh' '.github/workflows/*.yml')
-    fi
+    local -a _ci_override=("$@") files=()
+    _ci_scan_files files _ci_override '.github/scripts/*.sh' '.github/workflows/*.yml'
     local path out gs
     local -a viol=()
     for path in "${files[@]}"; do
@@ -4297,10 +4304,8 @@ _ci_check_deny_short_sha() {
 # Why: AG-REL-001 Rust+shell; catches heredoc lang too.
 # From: Issue #1683
 _ci_check_language_policy() {
-    local -a files=()
-    if [ "$#" -gt 0 ]; then files=("$@"); else
-        mapfile -t files < <(git ls-files)
-    fi
+    local -a _ci_override=("$@") files=()
+    _ci_scan_files files _ci_override
     local path
     local -a viol=()
     for path in "${files[@]}"; do
@@ -4327,10 +4332,8 @@ _ci_check_language_policy() {
 # Why: SHA/digest-pinned only, no :latest or @vN.
 # From: Issue #1683
 _ci_check_mutable_refs() {
-    local -a files=()
-    if [ "$#" -gt 0 ]; then files=("$@"); else
-        mapfile -t files < <(git ls-files -- '.github/workflows/*.yml' '*/Dockerfile' 'Dockerfile')
-    fi
+    local -a _ci_override=("$@") files=()
+    _ci_scan_files files _ci_override '.github/workflows/*.yml' '*/Dockerfile' 'Dockerfile'
     local path out
     local -a viol=()
     for path in "${files[@]}"; do
@@ -4376,27 +4379,6 @@ _ci_check_executable_bits() {
     printf 'executable-bits=clean paths=%s\n' "${#paths[@]}"
 }
 
-# What: Files exempt from every review-chronology sub-scan.
-# Why: legacy excluded docs/config/binary noise as well.
-# From: Issue #1683
-_ci_review_chronology_excluded() {
-    case "$1" in
-        *.md) return 0 ;;
-        .env|.env.example|*/.env|*/.env.example) return 0 ;;
-        Cargo.lock|*/Cargo.lock) return 0 ;;
-        .gitkeep|*/.gitkeep) return 0 ;;
-        VERSION) return 0 ;;
-        LICENSE|COPYING) return 0 ;;
-        services/dhcp/kea-dhcp4.conf|services/dhcp/kea-ctrl-agent.conf|services/dhcp/kea-dhcp-ddns.conf) return 0 ;;
-        docs/validation-state.json|*/docs/validation-state.json) return 0 ;;
-        services/ui/src/static/chart.umd.min.js|services/ui/src/static/admin.css) return 0 ;;
-        services/proxy/public_suffix_list.dat) return 0 ;;
-        */fuzz/corpus/*|fuzz/corpus/*) return 0 ;;
-        *.png|*.jpg|*.jpeg|*.gif|*.ico|*.svg|*.woff|*.woff2|*.ttf|*.eot|*.crt|*.key|*.pem) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
 # What: Sets caller's files array from a diff-scoped fetch.
 # Why: captures to a file; process subst. drops exit status.
 # From: Issue #1683 | PR #1686
@@ -4433,11 +4415,11 @@ _ci_check_review_chronology() {
     rc="${rc}|(\\b(before|prior to|until)[[:space:]]+this[[:space:]]+(fix|change|commit|patch)\\b)"
     rc="${rc}|(\\breview[[:space:]]+finding\\b)"
     local lr='\(([Ss]ee[[:space:]]+)?\bline\b[[:space:]]*~?[0-9]+'
-    local -a files=()
+    local -a _ci_override=("$@") files=()
     if [ -n "${CHRONOLOGY_DIFF_BASE_SHA:-}" ]; then
         _ci_review_chronology_diff_files || return 2
-    elif [ "$#" -gt 0 ]; then files=("$@"); else
-        mapfile -t files < <(git ls-files)
+    else
+        _ci_scan_files files _ci_override
     fi
     local path out ln joined fnums num
     local -a viol=() dup_viol=()
@@ -4448,7 +4430,7 @@ _ci_check_review_chronology() {
             */check-review-chronology-comments.sh|check-review-chronology-comments.sh) continue ;;
             */check_review_chronology_comments.bats|check_review_chronology_comments.bats) continue ;;
         esac
-        _ci_review_chronology_excluded "${path}" && continue
+        _ci_prose_excluded "${path}" && continue
         out="$(grep -EinIH "${rc}" "${path}")" && viol+=("${out}")
         out="$(grep -EinIH "${lr}" "${path}")" && viol+=("${out}")
         while IFS=$'\t' read -r ln joined; do
@@ -4504,10 +4486,8 @@ _ci_check_review_chronology() {
 # From: Issue #1683
 _ci_check_pipefail_early_exit() {
     local pat='\|[[:space:]]*(grep[[:space:]]+[^|]*-[a-zA-Z]*q|grep[[:space:]]+[^|]*-[a-zA-Z]*m[0-9]|head([[:space:]]|$)|sed[^|]*([[:space:];{]|[0-9])q)'
-    local -a files=()
-    if [ "$#" -gt 0 ]; then files=("$@"); else
-        mapfile -t files < <(git ls-files -- '.github/scripts/*.sh' '*/Dockerfile' 'Dockerfile' 'services/*.sh')
-    fi
+    local -a _ci_override=("$@") files=()
+    _ci_scan_files files _ci_override '.github/scripts/*.sh' '*/Dockerfile' 'Dockerfile' 'services/*.sh'
     local path out
     local -a viol=()
     for path in "${files[@]}"; do
