@@ -3863,6 +3863,157 @@ EOF
     [[ "${output}" == *"secondaries.rs"* ]]
 }
 
+# What: builds a fixture doc + quickstart web_log copy.
+# Why: shared by the logging-matrix tests below.
+# From: Issue #1683 | PR #1858
+_logging_matrix_fixture() {
+    local root="$1" rows="${2:-svc-a}"
+    mkdir -p "${root}/docs" "${root}/services/syslog" "${root}/deploy/quickstart"
+    {
+        printf '**Logging matrix** (test):\n\n'
+        printf '| Service | Logging path | Notes |\n'
+        printf '| --- | --- | --- |\n'
+        local n
+        for n in ${rows}; do
+            printf '| %s | Via x | note |\n' "${n}"
+        done
+    } > "${root}/docs/architecture-ng.md"
+    printf 'header\njobs:\n  - name: real\n    path: /x\n' > "${root}/services/syslog/netdata-web_log.conf"
+    cat > "${root}/deploy/quickstart/docker-compose.yml" <<'EOF'
+services:
+  netdata:
+    command: |
+      cat > /etc/netdata/go.d/web_log.conf <<'CONF'
+        jobs:
+          - name: real
+            path: /x
+        CONF
+EOF
+}
+
+@test "check logging-matrix passes clean on the real repo" {
+    # What: migrated from check-logging-matrix.sh.
+    # Why: rewritten in ci.sh; real docs/compose must agree.
+    # From: Issue #1683 | PR #1858
+    run bash "${CI_SH}" check logging-matrix
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"logging-matrix=clean"* ]]
+}
+
+@test "_ci_logging_matrix_canonical is a single deterministic awk pass" {
+    # What: the flake this exists to prevent, at scale.
+    # Why: stress-tested at 80 rows, 30 repeated runs.
+    # From: Issue #1683 | PR #1858
+    local doc="${BATS_TEST_TMPDIR}/big.md" i first cur
+    {
+        printf '**Logging matrix** (test):\n\n'
+        printf '| Service | Logging path | Notes |\n'
+        printf '| --- | --- | --- |\n'
+        for i in $(seq 1 80); do
+            printf '| svc-%d (label) | Via x | note %d |\n' "${i}" "${i}"
+        done
+    } > "${doc}"
+    first="$(_ci_logging_matrix_canonical "${doc}")"
+    [[ "${first}" == *"##ROWS## 80 80"* ]]
+    for i in $(seq 1 30); do
+        cur="$(_ci_logging_matrix_canonical "${doc}")"
+        [ "${cur}" = "${first}" ]
+    done
+}
+
+@test "check logging-matrix fails a service with no matrix row" {
+    # What: a real Compose service, absent from the matrix.
+    # Why: issue #633: every service needs a declared row.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/lm-extra"
+    _logging_matrix_fixture "${r}" "svc-a"
+    CI_LOGGING_MATRIX_SERVICES_CMD="$(_stub svc 'printf "svc-a\nsvc-b\n"')" \
+        run bash "${CI_SH}" check logging-matrix "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0038"* ]]
+    [[ "${output}" == *"service 'svc-b' has no logging-matrix row"* ]]
+}
+
+@test "check logging-matrix fails a stale row with no real service" {
+    # What: a matrix row for a service no longer real.
+    # Why: a renamed service must not leave a stale row.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/lm-stale"
+    _logging_matrix_fixture "${r}" "svc-a svc-gone"
+    CI_LOGGING_MATRIX_SERVICES_CMD="$(_stub svc 'printf "svc-a\n"')" \
+        run bash "${CI_SH}" check logging-matrix "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"row 'svc-gone' is not a real Compose service"* ]]
+}
+
+@test "check logging-matrix fails a collapsed/duplicate row" {
+    # What: two rows whose names normalize to the same one.
+    # Why: a genuine row-parsing defense, distinct from #1.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/lm-dup"
+    mkdir -p "${r}/docs"
+    printf '**Logging matrix** (test):\n\n| Service | Logging path | Notes |\n| --- | --- | --- |\n| svc-a (nginx) | Via x | note |\n| svc-a (alias) | Via x | note |\n' \
+        > "${r}/docs/architecture-ng.md"
+    run bash "${CI_SH}" check logging-matrix "${r}"
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0037"* ]]
+}
+
+@test "check logging-matrix fails closed on a missing architecture doc" {
+    # What: a repo root with no docs/architecture-ng.md.
+    # Why: a missing input must never silently pass.
+    # From: Issue #1683 | PR #1858
+    run bash "${CI_SH}" check logging-matrix "${BATS_TEST_TMPDIR}/nope"
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0035"* ]]
+}
+
+@test "check logging-matrix fails closed with no matrix marker" {
+    # What: a doc with no logging-matrix marker at all.
+    # Why: a vacuous parse must never report clean.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/lm-nomarker"
+    mkdir -p "${r}/docs"
+    printf '# no marker here\n' > "${r}/docs/architecture-ng.md"
+    run bash "${CI_SH}" check logging-matrix "${r}"
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0036"* ]]
+}
+
+@test "check logging-matrix fails closed when a compose lookup errors" {
+    # What: a while/process-sub loop once hid this failure.
+    # Why: a real docker-compose error must not vanish.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/lm-cmderr"
+    _logging_matrix_fixture "${r}" "svc-a"
+    CI_LOGGING_MATRIX_SERVICES_CMD="$(_stub svcfail 'exit 3')" \
+        run bash "${CI_SH}" check logging-matrix "${r}"
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0034"* ]]
+}
+
+@test "check logging-matrix fails a drifted quickstart web_log job" {
+    # What: quickstart's inline job no longer matches it.
+    # Why: #849's own stated byte-identical promise.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/lm-weblog"
+    _logging_matrix_fixture "${r}" "svc-a"
+    cat > "${r}/deploy/quickstart/docker-compose.yml" <<'EOF'
+services:
+  netdata:
+    command: |
+      cat > /etc/netdata/go.d/web_log.conf <<'CONF'
+        jobs:
+          - name: different
+            path: /y
+        CONF
+EOF
+    CI_LOGGING_MATRIX_SERVICES_CMD="$(_stub svc 'printf "svc-a\n"')" \
+        run bash "${CI_SH}" check logging-matrix "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"quickstart's inline web_log job config has drifted"* ]]
+}
+
 @test "check changelog-direct-edit is clean when CHANGELOG.md is untouched" {
     # What: migrated from check-changelog-direct-edit.sh.
     # Why: rewritten in ci.sh; stays non-blocking always.

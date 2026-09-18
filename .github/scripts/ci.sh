@@ -5459,6 +5459,156 @@ _ci_check_changelog_direct_edit() {
     printf 'changelog-direct-edit=warn\n'
 }
 
+# What: One awk pass over the logging-matrix table's rows.
+# Why: a per-row shell loop once fork-raced a real row away.
+# From: Issue #1683 | PR #1858
+_ci_logging_matrix_canonical() {
+    local doc="$1"
+    awk '
+        /\*\*Logging matrix\*\*/ { seen_marker = 1; next }
+        seen_marker && /^\|/ {
+            rows_seen = 1
+            if ($0 ~ /^\|[[:space:]]*Service[[:space:]]*\|/) next
+            if ($0 ~ /^\|[[:space:]]*-+[[:space:]]*\|/) next
+            line = $0
+            sub(/^\|[[:space:]]*/, "", line)
+            n = split(line, parts, "|")
+            cell = (n >= 1) ? parts[1] : ""
+            sub(/[[:space:]]+$/, "", cell)
+            name = cell
+            if (match(cell, /`[a-z0-9-]+`/)) {
+                name = substr(cell, RSTART + 1, RLENGTH - 2)
+            } else {
+                sub(/[[:space:]]*\([^)]*\)[[:space:]]*$/, "", name)
+            }
+            data_rows++
+            if (!(name in seen)) { seen[name] = 1; print name }
+            next
+        }
+        seen_marker && rows_seen && !/^\|/ { exit }
+        END {
+            unique_count = 0
+            for (k in seen) unique_count++
+            print "##ROWS## " data_rows " " unique_count
+        }
+    ' "${doc}"
+}
+
+# What: Print one real Compose service name per line.
+# Why: a profiled service needs `config --profiles` first.
+# From: Issue #1683 | PR #1858
+_ci_compose_service_names() {
+    local file="$1"
+    if [ -n "${CI_LOGGING_MATRIX_SERVICES_CMD:-}" ]; then
+        "${CI_LOGGING_MATRIX_SERVICES_CMD}" "${file}"
+        return "$?"
+    fi
+    local profiles
+    if profiles="$(docker compose -f "${file}" config --profiles 2>&1)"; then
+        :
+    else
+        ci_log "[CI-ERROR-CHECK-0034]" "path=\"${file}\" reason=\"docker compose config --profiles failed: ${profiles}\""
+        return 2
+    fi
+    local -a profile_flags=()
+    local profile
+    while IFS= read -r profile; do
+        [ -n "${profile}" ] && profile_flags+=(--profile "${profile}")
+    done <<<"${profiles}"
+    docker compose -f "${file}" "${profile_flags[@]}" config --services
+}
+
+# What: Fail if a logging-matrix row/service pair drifts.
+# Why: issue #633/#453: every service needs a declared row.
+# From: Issue #1683 | PR #1858
+_ci_check_logging_matrix() {
+    local repo_root="${1:-${CI_REPO_ROOT}}"
+    local doc="${repo_root}/docs/architecture-ng.md"
+    if [ ! -f "${doc}" ]; then
+        ci_log "[CI-ERROR-CHECK-0035]" "path=\"${doc}\" reason=\"architecture doc not found\""
+        return 2
+    fi
+    local canonical_raw
+    canonical_raw="$(_ci_logging_matrix_canonical "${doc}")"
+    local row_summary raw_row_count unique_row_count
+    row_summary="$(grep -E '^##ROWS## ' <<<"${canonical_raw}" || true)"
+    raw_row_count="$(awk '{print $2}' <<<"${row_summary}")"
+    unique_row_count="$(awk '{print $3}' <<<"${row_summary}")"
+    local -a canonical=()
+    local n
+    while IFS= read -r n; do
+        [ -n "${n}" ] && canonical+=("${n}")
+    done < <(grep -vE '^##ROWS## ' <<<"${canonical_raw}")
+    if [ "${#canonical[@]}" -eq 0 ]; then
+        ci_log "[CI-ERROR-CHECK-0036]" "path=\"${doc}\" reason=\"no logging-matrix rows parsed\""
+        return 2
+    fi
+    if [ -n "${raw_row_count}" ] && [ -n "${unique_row_count}" ] && [ "${unique_row_count}" -lt "${raw_row_count}" ]; then
+        ci_log "[CI-ERROR-CHECK-0037]" "reason=\"parsed ${unique_row_count} unique of ${raw_row_count} rows; a row was dropped or collapsed\""
+        return 2
+    fi
+    local -a compose_files=("${repo_root}/deploy/prod/docker-compose.yml" "${repo_root}/deploy/quickstart/docker-compose.yml")
+    local -a consumer=() viol=()
+    local cf svc
+    for cf in "${compose_files[@]}"; do
+        # What: capture the exit before splitting lines.
+        # Why: a while/process-sub loop can hide it.
+        local raw_services
+        if raw_services="$(_ci_compose_service_names "${cf}")"; then
+            :
+        else
+            return 2
+        fi
+        local -a file_services=()
+        while IFS= read -r svc; do
+            [ -n "${svc}" ] && file_services+=("${svc}")
+        done <<<"${raw_services}"
+        for svc in "${file_services[@]}"; do
+            case " ${canonical[*]} " in
+                *" ${svc} "*) ;;
+                *) viol+=("${cf}: service '${svc}' has no logging-matrix row") ;;
+            esac
+            consumer+=("${svc}")
+        done
+    done
+    for n in "${canonical[@]}"; do
+        case " ${consumer[*]:-} " in
+            *" ${n} "*) ;;
+            *) viol+=("${doc}: row '${n}' is not a real Compose service") ;;
+        esac
+    done
+    # What: quickstart's inline web_log job vs. real file.
+    # Why: no services/ dir there to bind-mount it from.
+    # From: Issue #1683 | PR #1858
+    local web_log_conf="${repo_root}/services/syslog/netdata-web_log.conf"
+    local quickstart_compose="${repo_root}/deploy/quickstart/docker-compose.yml"
+    if [ ! -f "${web_log_conf}" ]; then
+        viol+=("${web_log_conf}: not found")
+    elif [ ! -f "${quickstart_compose}" ]; then
+        viol+=("${quickstart_compose}: not found")
+    else
+        local real_jobs quick_jobs
+        real_jobs="$(awk '/^jobs:/{flag=1} flag{print}' "${web_log_conf}")"
+        quick_jobs="$(awk '
+            /cat > \/etc\/netdata\/go\.d\/web_log\.conf <<.CONF./ { capture = 1; next }
+            capture && /^        CONF$/ { capture = 0 }
+            capture { print }
+        ' "${quickstart_compose}" | sed 's/^        //')"
+        if [ -z "${real_jobs}" ]; then
+            viol+=("${web_log_conf}: no 'jobs:' section found")
+        elif [ -z "${quick_jobs}" ]; then
+            viol+=("${quickstart_compose}: no web_log.conf heredoc found")
+        elif [ "${real_jobs}" != "${quick_jobs}" ]; then
+            viol+=("quickstart's inline web_log job config has drifted from ${web_log_conf}")
+        fi
+    fi
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0038]" "reason=\"logging-matrix drift (issue #633)\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'logging-matrix=clean rows=%s services=%s\n' "${#canonical[@]}" "${#consumer[@]}"
+}
+
 # What: Route a source-hygiene check to its function.
 # Why: One owner per guard invariant; ci.bats calls it.
 # From: Issue #1683
@@ -5488,6 +5638,7 @@ ci_cmd_check() {
         build-tools-smoke-coverage) _ci_check_build_tools_smoke_coverage "$@" ;;
         dependabot-docker-base-consistency) _ci_check_dependabot_docker_base_consistency "$@" ;;
         idempotence-test-coverage) _ci_check_idempotence_test_coverage "$@" ;;
+        logging-matrix) _ci_check_logging_matrix "$@" ;;
         *)
             ci_log "[CI-ERROR-CHECK-0001]" "sub=\"${sub}\" reason=\"unknown check\""
             return 2
