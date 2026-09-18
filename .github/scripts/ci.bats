@@ -3314,7 +3314,7 @@ EOF
 
 @test "docker-build omits cache-from/cache-to when unset (unchanged default)" {
     # What: no CI_BUILD_CACHE_* means no cache flags at all.
-    # Why: unset cache vars must not change existing callers.
+    # Why: unset vars must not change existing callers.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     printf '#!/usr/bin/env bash\necho "docker $*"\n' > "${bin}/docker"
@@ -3327,8 +3327,8 @@ EOF
 }
 
 @test "docker-build wires per-service cache-from/cache-to from CI_BUILD_CACHE_FROM/TO" {
-    # What: buildx gets cache-from/cache-to scoped per service.
-    # Why: §35 needs one cache scope per service, not shared.
+    # What: buildx gets a cache-from/cache-to per service.
+    # Why: needs one cache scope per service, not shared.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     printf '#!/usr/bin/env bash\necho "docker $*"\n' > "${bin}/docker"
@@ -3341,7 +3341,7 @@ EOF
     [[ "${output}" == *"--cache-from type=registry,ref=ghcr.io/wiki-mod/lancache-ng/proxy:cache"* ]]
     [[ "${output}" == *"--cache-to type=registry,ref=ghcr.io/wiki-mod/lancache-ng/proxy:cache,mode=max,ignore-error=true"* ]]
 
-    # What: a 2nd service call uses its own distinct cache ref.
+    # What: a 2nd service call gets its own cache ref.
     # Why: proves scope is per-call, not one constant value.
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
         CI_BUILD_CACHE_FROM="type=registry,ref=ghcr.io/wiki-mod/lancache-ng/ui:cache" \
@@ -3354,7 +3354,7 @@ EOF
 }
 
 @test "docker-build cache-from miss fails cache import only, build still succeeds" {
-    # What: an unresolvable cache-from ref must not fail build.
+    # What: a bad cache-from ref must not fail the build.
     # Why: §35: a cache miss must cost time, not the build.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
@@ -3377,8 +3377,8 @@ EOF
 }
 
 @test "build-tools build cache-to carries ignore-error for §35 resilience" {
-    # What: build-tools push also gets ignore-error on cache-to.
-    # Why: same failure class as _ci_docker_build (AG-WF-011).
+    # What: build-tools cache-to also gets ignore-error.
+    # Why: same failure class as build (AG-WF-011).
     # From: Issue #1683
     export DLOG="${BATS_TEST_TMPDIR}/d.log"; : > "${DLOG}"
     docker() { printf 'docker %s\n' "$*" >> "${DLOG}"; case "$*" in *"imagetools inspect"*) printf 'sha256:dead\n' ;; esac; return 0; }
