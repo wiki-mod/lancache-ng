@@ -3758,7 +3758,7 @@ EOF
     printf 'services:\n  nats:\n    command: ["true"]\n' > "${root}/deploy/prod/docker-compose.yml"
     printf 'services:\n  nats:\n    command: ["true"]\n' > "${root}/deploy/quickstart/docker-compose.yml"
     cat > "${root}/tests/bats/nats_conf_entrypoint_idempotence.bats" <<EOF
-${at_test} "nats entrypoint regenerates a converging nats.conf" {
+${at_test} "nats entrypoint regenerates a converged nats.conf" {
     true
 }
 EOF
