@@ -3257,6 +3257,111 @@ netdata=sha256:n"
     [ "${status}" -ne 0 ]
 }
 
+@test "check review-chronology exempts legacy-excluded file types" {
+    # What: *.md (and the rest of the legacy exclusion list) must not
+    #       trip the scan even when it quotes a banned phrase verbatim.
+    # Why: parity with the migrated-from script's is_excluded().
+    # From: Issue #1683
+    printf '# found during code review earlier.\n' > "${BATS_TEST_TMPDIR}/notes.md"
+    run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/notes.md"
+    [ "${status}" -eq 0 ]
+}
+
+@test "check review-chronology CHRONOLOGY_WARN_ONLY downgrades a real violation to exit 0" {
+    # What: repo-wide PR mode: a real narration hit still surfaces but
+    #       does not block, matching the legacy repo-wide/PR split.
+    # Why: AG-GH-018-style transitional warn path (Issue #1095 | PR #1546).
+    # From: Issue #1683
+    printf '# found during code review earlier.\n' > "${BATS_TEST_TMPDIR}/badc.sh"
+    run env CHRONOLOGY_WARN_ONLY=1 bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/badc.sh"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"review-chronology=warn"* ]]
+    [[ "${output}" == *"CI-ERROR-CHECK-0010"* ]]
+}
+
+@test "check review-chronology duplicate #N outside From: is always warn-only" {
+    # What: a bare #N repeated outside the file's own From: pointer
+    #       must never block, even without CHRONOLOGY_WARN_ONLY.
+    # Why: PR #1856 downgraded this specific sub-check to warn-only.
+    # From: Issue #1683
+    printf '# From: Issue #1683\n# see #1683 again here\n' > "${BATS_TEST_TMPDIR}/dupref.sh"
+    run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/dupref.sh"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0010"* ]]
+    [[ "${output}" == *"warn-only, PR #1856"* ]]
+}
+
+@test "check review-chronology diff-scoped mode scans only the PR's changed files" {
+    # What: CHRONOLOGY_DIFF_BASE_SHA(+REF) restricts the scan to files
+    #       changed between the base and GITHUB_SHA, not the whole tree.
+    # Why: Issue #1095 | PR #1686 parity -- a pre-existing violation in
+    #      an untouched file must not block an unrelated PR.
+    # From: Issue #1683
+    local bare="${BATS_TEST_TMPDIR}/chrono-origin.git" work="${BATS_TEST_TMPDIR}/chrono-work"
+    git init --quiet --bare "${bare}"
+    git clone --quiet "${bare}" "${work}"
+    (
+        cd "${work}" || exit 1
+        git config user.email chrono-bats@example.invalid
+        git config user.name chrono-bats
+        printf '# found during code review earlier.\n' > pre-existing.sh
+        git add pre-existing.sh
+        git commit --quiet -m base
+        git push --quiet origin HEAD:refs/heads/chrono-base
+    )
+    cd "${work}"
+    local base_sha; base_sha="$(git rev-parse HEAD)"
+    printf '# a normal current-state comment.\n' > touched.sh
+    git add touched.sh
+    git commit --quiet -m "touch an unrelated file"
+    local head_sha; head_sha="$(git rev-parse HEAD)"
+    run env CHRONOLOGY_DIFF_BASE_SHA="${base_sha}" CHRONOLOGY_DIFF_BASE_REF=chrono-base \
+        GITHUB_SHA="${head_sha}" bash "${CI_SH}" check review-chronology
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"review-chronology=clean"* ]]
+}
+
+@test "check review-chronology diff-scoped mode fails closed when git diff itself fails" {
+    # What: a real `git diff` failure (not "no changes") must return 2,
+    #       never an empty (clean) file list.
+    # Why: mapfile < <(git diff ...) loses exit status via process
+    #      substitution -- this proves the mktemp-file capture instead
+    #      actually propagates the failure (AG-INT-002/AG-VAL-030).
+    # From: Issue #1683
+    local bare="${BATS_TEST_TMPDIR}/chronofail-origin.git" work="${BATS_TEST_TMPDIR}/chronofail-work"
+    git init --quiet --bare "${bare}"
+    git clone --quiet "${bare}" "${work}"
+    (
+        cd "${work}" || exit 1
+        git config user.email chrono-bats@example.invalid
+        git config user.name chrono-bats
+        git commit --quiet --allow-empty -m base
+        git push --quiet origin HEAD:refs/heads/chrono-base
+    )
+    cd "${work}"
+    local base_sha; base_sha="$(git rev-parse HEAD)"
+    git commit --quiet --allow-empty -m "second commit"
+    local head_sha; head_sha="$(git rev-parse HEAD)"
+    local real_git; real_git="$(command -v git)"
+    local stub_bin="${BATS_TEST_TMPDIR}/stubbin"
+    mkdir -p "${stub_bin}"
+    cat > "${stub_bin}/git" <<STUBEOF
+#!/usr/bin/env bash
+if [ "\$1" = "diff" ]; then
+    echo "simulated git diff failure" >&2
+    exit 128
+fi
+exec "${real_git}" "\$@"
+STUBEOF
+    chmod +x "${stub_bin}/git"
+    run env PATH="${stub_bin}:${PATH}" CHRONOLOGY_DIFF_BASE_SHA="${base_sha}" \
+        CHRONOLOGY_DIFF_BASE_REF=chrono-base GITHUB_SHA="${head_sha}" \
+        bash "${CI_SH}" check review-chronology
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"git diff itself failed"* ]]
+    [[ "${output}" != *"review-chronology=clean"* ]]
+}
+
 @test "check pipefail-early-exit flags grep -q, not plain sed -n" {
     # What: ci.sh owns the SIGPIPE check; bats calls it.
     # Why: only true early-exit consumers risk exit 141.
@@ -3686,6 +3791,29 @@ EOF
     printf 'FROM alpine:3.24\n' > "${r}/services/b/Dockerfile"
     run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"
     [ "${status}" -eq 0 ]
+}
+
+@test "check dependabot-docker-base-consistency resolves a bare SOT ARG with no default" {
+    # What: ARG ALPINE_IMAGE (no `=default`) + FROM ${ALPINE_IMAGE}
+    #       resolves from the manifest, not "unresolved".
+    # Why: regression found in-session: Agent A's Dockerfile
+    #      consolidation (services/*/Dockerfile now declaring a
+    #      bare ARG ALPINE_IMAGE per AG-CI-006/AG-CI-008 -- no
+    #      baked default, the value comes from ci.sh build-args)
+    #      broke this check's real-repo pass until
+    #      _ci_sot_base_image_arg closed the gap.
+    # From: Issue #1683
+    local r="${BATS_TEST_TMPDIR}/barearg"
+    mkdir -p "${r}/.github" "${r}/services/a" "${r}/services/b"
+    printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    directories:\n      - /services/a\n      - /services/b\n    schedule:\n      interval: weekly\n' \
+        > "${r}/.github/dependabot.yml"
+    # shellcheck disable=SC2016
+    printf 'ARG ALPINE_IMAGE\nFROM ${ALPINE_IMAGE}\n' > "${r}/services/a/Dockerfile"
+    # shellcheck disable=SC2016
+    printf 'ARG ALPINE_IMAGE\nFROM ${ALPINE_IMAGE}\n' > "${r}/services/b/Dockerfile"
+    run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"dependabot-docker-base-consistency=clean"* ]]
 }
 
 @test "check dependabot-docker-base-consistency resolves a stage alias" {
@@ -5558,14 +5686,34 @@ _version_fixture_repo() {
     [[ "${output}" == *"CI-ERROR-VERSION-0013"* ]]
 }
 
-@test "version audit reports the netdata aarch64 orphan" {
-    # What: SOT carries sha256_aarch64; no arm consumer.
-    # Why: AG-INT-002: the scope gap stays visible always.
-    # From: Issue #1683 | PR #1858
-    run bash "${CI_SH}" version audit
+@test "version audit reports the netdata aarch64 orphan when no consumer exists" {
+    # What: SOT carries sha256_aarch64; a Dockerfile with no ARM
+    #       consumer must still surface the scope-gap warning.
+    # Why: AG-INT-002: the scope gap stays visible whenever it is
+    #      real. The real repo's services/netdata/Dockerfile now
+    #      HAS this consumer (ci/1683-dockerfile-consolidation
+    #      wired NETDATA_AARCH64_SHA256), so this uses a fixture
+    #      repo with that ARG stripped to keep exercising the
+    #      orphan-detection mechanism itself.
+    # From: Issue #1683
+    local root; root="$(_version_fixture_repo)"
+    sed -i '/^ARG NETDATA_AARCH64_SHA256=/d' "${root}/services/netdata/Dockerfile"
+    CI_REPO_ROOT="${root}" run bash "${CI_SH}" version audit
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"CI-WARN-VERSION-0001"* ]]
     [[ "${output}" == *"netdata.sha256_aarch64"* ]]
+}
+
+@test "version audit no longer flags the netdata aarch64 orphan on the real repo" {
+    # What: the real repo's Dockerfile now consumes
+    #       NETDATA_AARCH64_SHA256; audit must NOT warn on it.
+    # Why: positive proof the ci/1683-dockerfile-consolidation
+    #      arm64 wiring actually resolved the scope gap the
+    #      previous (fixture-based) test still proves detectable.
+    # From: Issue #1683
+    run bash "${CI_SH}" version audit
+    [ "${status}" -eq 0 ]
+    [[ "${output}" != *"CI-WARN-VERSION-0001"* ]]
 }
 
 @test "version audit reports drift but never fails on it" {

@@ -4350,8 +4350,65 @@ _ci_check_executable_bits() {
     printf 'executable-bits=clean paths=%s\n' "${#paths[@]}"
 }
 
-# What: Flag review-chronology and stale line-refs.
-# Why: AG-CODE-002/003 comments state current code only.
+# What: Files exempt from every review-chronology sub-scan.
+# Why: docs/config/binary noise the legacy script also excluded.
+# From: Issue #1683
+_ci_review_chronology_excluded() {
+    case "$1" in
+        *.md) return 0 ;;
+        .env|.env.example|*/.env|*/.env.example) return 0 ;;
+        Cargo.lock|*/Cargo.lock) return 0 ;;
+        .gitkeep|*/.gitkeep) return 0 ;;
+        VERSION) return 0 ;;
+        LICENSE|COPYING) return 0 ;;
+        services/dhcp/kea-dhcp4.conf|services/dhcp/kea-ctrl-agent.conf|services/dhcp/kea-dhcp-ddns.conf) return 0 ;;
+        docs/validation-state.json|*/docs/validation-state.json) return 0 ;;
+        services/ui/src/static/chart.umd.min.js|services/ui/src/static/admin.css) return 0 ;;
+        services/proxy/public_suffix_list.dat) return 0 ;;
+        */fuzz/corpus/*|fuzz/corpus/*) return 0 ;;
+        *.png|*.jpg|*.jpeg|*.gif|*.ico|*.svg|*.woff|*.woff2|*.ttf|*.eot|*.crt|*.key|*.pem) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# What: Diff-scoped file list between CHRONOLOGY_DIFF_BASE_* and GITHUB_SHA.
+# Why: PR-changed-files mode (Issue #1095 | PR #1686 parity). Writes the
+#      caller's `files` array directly (dynamic scoping, not a return
+#      value) so the caller's own loop stays untouched either way.
+#      Diffs to a temp file first, not `mapfile < <(git diff ...)`:
+#      process substitution loses `git diff`'s exit status, which would
+#      silently turn a real `git diff` failure into an empty (clean)
+#      file list -- exactly the fail-open case the legacy script's own
+#      explicit exit-1 branch exists to prevent (AG-INT-002).
+# From: Issue #1683
+_ci_review_chronology_diff_files() {
+    : "${CHRONOLOGY_DIFF_BASE_REF:?CHRONOLOGY_DIFF_BASE_REF is required}"
+    : "${GITHUB_SHA:?GITHUB_SHA is required}"
+    _ci_retry "git-fetch-chronology-base-ref" git fetch --no-tags --depth=1 origin \
+        "+refs/heads/${CHRONOLOGY_DIFF_BASE_REF}:refs/remotes/origin/${CHRONOLOGY_DIFF_BASE_REF}" >/dev/null || return 2
+    _ci_retry "git-fetch-chronology-base-sha" git fetch --no-tags --depth=1 origin \
+        "${CHRONOLOGY_DIFF_BASE_SHA}" >/dev/null || return 2
+    git cat-file -e "${CHRONOLOGY_DIFF_BASE_SHA}^{commit}" || {
+        ci_log "[CI-ERROR-CHECK-0010]" "reason=\"diff base sha unreachable\""; return 2; }
+    git cat-file -e "${GITHUB_SHA}^{commit}" || {
+        ci_log "[CI-ERROR-CHECK-0010]" "reason=\"GITHUB_SHA unreachable\""; return 2; }
+    local diff_file
+    diff_file="$(mktemp)"
+    if ! git diff -z --name-only --diff-filter=ACMRTUXB \
+        "${CHRONOLOGY_DIFF_BASE_SHA}" "${GITHUB_SHA}" > "${diff_file}"; then
+        ci_log "[CI-ERROR-CHECK-0010]" "reason=\"git diff itself failed; not treating as a clean pass\""
+        rm -f "${diff_file}"
+        return 2
+    fi
+    mapfile -d '' files < "${diff_file}"
+    rm -f "${diff_file}"
+}
+
+# What: Flag review-chronology, stale line-refs, dup #N outside From:.
+# Why: AG-CODE-002/003/012 comments state current code only.
+#      CHRONOLOGY_WARN_ONLY / CHRONOLOGY_DIFF_BASE_SHA(+REF) match the
+#      legacy script's repo-wide-warn / diff-scoped-block split; dup #N
+#      stays warn-only in every mode (PR #1856 policy).
 # From: Issue #1683
 _ci_check_review_chronology() {
     local verbs='(caught|found|flagged|spotted|identified|discovered|noticed)'
@@ -4361,14 +4418,21 @@ _ci_check_review_chronology() {
     rc="${rc}|(\\breview[[:space:]]+finding\\b)"
     local lr='\(([Ss]ee[[:space:]]+)?\bline\b[[:space:]]*~?[0-9]+'
     local -a files=()
-    if [ "$#" -gt 0 ]; then files=("$@"); else
+    if [ -n "${CHRONOLOGY_DIFF_BASE_SHA:-}" ]; then
+        _ci_review_chronology_diff_files || return 2
+    elif [ "$#" -gt 0 ]; then files=("$@"); else
         mapfile -t files < <(git ls-files)
     fi
     local path out ln joined fnums num
-    local -a viol=()
+    local -a viol=() dup_viol=()
     for path in "${files[@]}"; do
         [ -f "${path}" ] || continue
-        case "${path}" in */ci.sh|ci.sh|*/ci.bats|ci.bats) continue ;; esac
+        case "${path}" in
+            */ci.sh|ci.sh|*/ci.bats|ci.bats) continue ;;
+            */check-review-chronology-comments.sh|check-review-chronology-comments.sh) continue ;;
+            */check_review_chronology_comments.bats|check_review_chronology_comments.bats) continue ;;
+        esac
+        _ci_review_chronology_excluded "${path}" && continue
         out="$(grep -EinIH "${rc}" "${path}")" && viol+=("${out}")
         out="$(grep -EinIH "${lr}" "${path}")" && viol+=("${out}")
         while IFS=$'\t' read -r ln joined; do
@@ -4398,11 +4462,22 @@ _ci_check_review_chronology() {
                         if (af !~ /[0-9]/ && bf !~ /[0-9]/) m=1 } } }
                   if (m) print FILENAME ":" FNR ": " line }
             ' "${path}")"
-            [ -n "${out}" ] && viol+=("${out}")
+            [ -n "${out}" ] && dup_viol+=("${out}")
         done <<< "${fnums}"
     done
+    # What: dup #N outside From: is warn-only in every mode.
+    # Why: PR #1856 downgraded it; a genuine duplicate never blocks.
+    # From: Issue #1683
+    if [ "${#dup_viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0010]" "reason=\"bare #N duplicated outside From: (warn-only, PR #1856)\"" "$(printf '%s\n' "${dup_viol[@]}")"
+    fi
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0010]" "reason=\"review-chronology / stale line-ref / bare #N\"" "$(printf '%s\n' "${viol[@]}")"
+        if [ "${CHRONOLOGY_WARN_ONLY:-0}" = "1" ]; then
+            ci_error "[CI-ERROR-CHECK-0010]" "reason=\"review-chronology / stale line-ref (warn-only)\"" "$(printf '%s\n' "${viol[@]}")"
+            printf 'review-chronology=warn files=%s\n' "${#files[@]}"
+            return 0
+        fi
+        ci_error "[CI-ERROR-CHECK-0010]" "reason=\"review-chronology / stale line-ref\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
     printf 'review-chronology=clean files=%s\n' "${#files[@]}"
@@ -5189,6 +5264,27 @@ _ci_dockerfile_logical_lines() {
 # What: Print a Dockerfile's final resolved FROM image.
 # Why: global ARG defaults + stage aliases change it.
 # From: Issue #1683 | PR #1858
+# What: Resolve a bare (no-default) SOT-owned ARG name to its value.
+# Why: ARG ALPINE_IMAGE/FLUENT_BIT_IMAGE are deliberately left
+#      without a Dockerfile default (AG-CI-006/AG-CI-008 -- the
+#      build-arg comes from ci.sh build-args, not a baked-in
+#      fallback), so a global-ARG-in-FROM resolver must know these
+#      two names resolve from the same single manifest owner
+#      _ci_service_build_args already uses, not treat them as an
+#      unresolved reference.
+# From: Issue #1683
+_ci_sot_base_image_arg() {
+    local name="$1" val
+    case "${name}" in
+        ALPINE_IMAGE) val="$(_ci_manifest_scalar '^  alpine:')" ;;
+        FLUENT_BIT_IMAGE) val="$(_ci_manifest_scalar '^  fluent_bit:')" ;;
+        *) return 1 ;;
+    esac
+    val="${val%\"}"; val="${val#\"}"
+    [ -n "${val}" ] || return 1
+    printf '%s' "${val}"
+}
+
 _ci_dockerfile_final_image() {
     local dockerfile="$1" line instruction remainder image alias name value token
     local seen_from=0 final_image=""
@@ -5216,8 +5312,13 @@ _ci_dockerfile_final_image() {
             token="${BASH_REMATCH[1]}"
             name="${BASH_REMATCH[2]:-${BASH_REMATCH[3]}}"
             if [[ ! -v "global_args[${name}]" ]]; then
-                ci_log "[CI-ERROR-CHECK-0031]" "path=\"${dockerfile}\" reason=\"unresolved global ARG ${name} in FROM\""
-                return 2
+                local sot_val
+                if sot_val="$(_ci_sot_base_image_arg "${name}")"; then
+                    global_args["${name}"]="${sot_val}"
+                else
+                    ci_log "[CI-ERROR-CHECK-0031]" "path=\"${dockerfile}\" reason=\"unresolved global ARG ${name} in FROM\""
+                    return 2
+                fi
             fi
             image="${image/"${token}"/${global_args[${name}]}}"
         done
