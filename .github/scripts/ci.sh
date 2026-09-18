@@ -3258,8 +3258,8 @@ _ci_service_build_args() {
         return 2
     fi
     out="${out}${prefix}ALPINE_IMAGE=${val}"$'\n'
-    # What: a manifest external_image gets its own build-arg.
-    # Why: netdata has none; keeps its own baked ARG defaults.
+    # What: external_image field adds one more build-arg.
+    # Why: netdata has none; its ARG defaults stay baked.
     # From: Issue #1683
     ext="$(_ci_block_entry_field services "${service}" external_image)"
     if [ -n "${ext}" ]; then
@@ -3293,10 +3293,8 @@ ci_cmd_build_args() {
     esac
     case "${service}" in
         build-tools) _ci_build_tools_build_args "${fmt}" "${platform}" ;;
-        # What: any manifest-listed product service gets args.
-        # Why: services list is manifest-owned; no 2nd copy here.
-        #      Capture before grep -q: a live producer piped into
-        #      an early-exiting consumer is pipefail-unsafe.
+        # What: known manifest service gets build-args.
+        # Why: capture-first avoids a pipefail-unsafe grep -q pipe.
         # From: Issue #1683
         *)
             local svc_list
@@ -3858,8 +3856,8 @@ _ci_version_diff_dhclient() {
     printf '%s' "${out}"
 }
 
-# What: Flag SOT netdata aarch64 sha with no Dockerfile consumer.
-# Why: catches a future SOT/Dockerfile arm64 wiring gap.
+# What: flags SOT netdata aarch64 sha with no ARG consumer.
+# Why: catches a future arm64 SOT/Dockerfile wiring gap.
 # From: Issue #1683 | PR #1858
 _ci_version_audit_netdata_aarch64_orphan() {
     local sha res
@@ -4422,11 +4420,8 @@ _ci_review_chronology_diff_files() {
     rm -f "${diff_file}"
 }
 
-# What: Flag review-chronology, stale line-refs, dup #N outside From:.
-# Why: AG-CODE-002/003/012 comments state current code only.
-#      CHRONOLOGY_WARN_ONLY / CHRONOLOGY_DIFF_BASE_SHA(+REF) match the
-#      legacy script's repo-wide-warn / diff-scoped-block split; dup #N
-#      stays warn-only in every mode (PR #1856 policy).
+# What: flags review-chronology, stale line-refs, dup #N.
+# Why: comments must state current code only (AG-CODE-012).
 # From: Issue #1683
 _ci_check_review_chronology() {
     local verbs='(caught|found|flagged|spotted|identified|discovered|noticed)'
@@ -4484,7 +4479,7 @@ _ci_check_review_chronology() {
         done <<< "${fnums}"
     done
     # What: dup #N outside From: is warn-only in every mode.
-    # Why: PR #1856 downgraded it; a genuine duplicate never blocks.
+    # Why: a genuine duplicate must warn, never block.
     # From: Issue #1683
     if [ "${#dup_viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0010]" "reason=\"bare #N duplicated outside From: (warn-only, PR #1856)\"" "$(printf '%s\n' "${dup_viol[@]}")"

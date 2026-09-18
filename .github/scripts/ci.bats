@@ -4653,7 +4653,8 @@ _smoke_coverage_fixture() {
     # From: Issue #1683
     local r="${BATS_TEST_TMPDIR}/nosot"
     _smoke_coverage_fixture "${r}"
-    printf 'build_toolchain:\n  build-tools: {}\n' > "${r}/build-manifest.yml"
+    printf 'build_toolchain:\n  build-tools:\n    packages:\n      - bash\n' \
+        > "${r}/build-manifest.yml"
     CI_MANIFEST="${r}/build-manifest.yml" run bash "${CI_SH}" check build-tools-smoke-coverage "${r}"
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0025"* ]]
@@ -6040,18 +6041,19 @@ _version_fixture_repo() {
 
 @test "version audit reports the netdata aarch64 orphan when no consumer exists" {
     # What: SOT carries sha256_aarch64; a Dockerfile with no ARM
-    #       consumer must still surface the scope-gap warning.
+    #       consumer must still surface the scope-gap warning
+    #       (alongside the now-also-hard version-diff failure).
     # Why: AG-INT-002: the scope gap stays visible whenever it is
-    #      real. The real repo's services/netdata/Dockerfile now
-    #      HAS this consumer (ci/1683-dockerfile-consolidation
-    #      wired NETDATA_AARCH64_SHA256), so this uses a fixture
-    #      repo with that ARG stripped to keep exercising the
-    #      orphan-detection mechanism itself.
+    #      real. _ci_version_diff_netdata now hard-requires this
+    #      ARG (matching x86_64), so a stripped ARG makes the
+    #      overall audit fail closed (status 2) too -- the orphan
+    #      message still fires in the same pass, giving full
+    #      context rather than being silently superseded.
     # From: Issue #1683
     local root; root="$(_version_fixture_repo)"
     sed -i '/^ARG NETDATA_AARCH64_SHA256=/d' "${root}/services/netdata/Dockerfile"
     CI_REPO_ROOT="${root}" run bash "${CI_SH}" version audit
-    [ "${status}" -eq 0 ]
+    [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-WARN-VERSION-0001"* ]]
     [[ "${output}" == *"netdata.sha256_aarch64"* ]]
 }
