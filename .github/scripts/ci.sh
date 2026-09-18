@@ -5264,6 +5264,27 @@ _ci_dockerfile_logical_lines() {
 # What: Print a Dockerfile's final resolved FROM image.
 # Why: global ARG defaults + stage aliases change it.
 # From: Issue #1683 | PR #1858
+# What: Resolve a bare (no-default) SOT-owned ARG name to its value.
+# Why: ARG ALPINE_IMAGE/FLUENT_BIT_IMAGE are deliberately left
+#      without a Dockerfile default (AG-CI-006/AG-CI-008 -- the
+#      build-arg comes from ci.sh build-args, not a baked-in
+#      fallback), so a global-ARG-in-FROM resolver must know these
+#      two names resolve from the same single manifest owner
+#      _ci_service_build_args already uses, not treat them as an
+#      unresolved reference.
+# From: Issue #1683
+_ci_sot_base_image_arg() {
+    local name="$1" val
+    case "${name}" in
+        ALPINE_IMAGE) val="$(_ci_manifest_scalar '^  alpine:')" ;;
+        FLUENT_BIT_IMAGE) val="$(_ci_manifest_scalar '^  fluent_bit:')" ;;
+        *) return 1 ;;
+    esac
+    val="${val%\"}"; val="${val#\"}"
+    [ -n "${val}" ] || return 1
+    printf '%s' "${val}"
+}
+
 _ci_dockerfile_final_image() {
     local dockerfile="$1" line instruction remainder image alias name value token
     local seen_from=0 final_image=""
@@ -5291,8 +5312,13 @@ _ci_dockerfile_final_image() {
             token="${BASH_REMATCH[1]}"
             name="${BASH_REMATCH[2]:-${BASH_REMATCH[3]}}"
             if [[ ! -v "global_args[${name}]" ]]; then
-                ci_log "[CI-ERROR-CHECK-0031]" "path=\"${dockerfile}\" reason=\"unresolved global ARG ${name} in FROM\""
-                return 2
+                local sot_val
+                if sot_val="$(_ci_sot_base_image_arg "${name}")"; then
+                    global_args["${name}"]="${sot_val}"
+                else
+                    ci_log "[CI-ERROR-CHECK-0031]" "path=\"${dockerfile}\" reason=\"unresolved global ARG ${name} in FROM\""
+                    return 2
+                fi
             fi
             image="${image/"${token}"/${global_args[${name}]}}"
         done

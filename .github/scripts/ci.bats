@@ -3793,6 +3793,29 @@ EOF
     [ "${status}" -eq 0 ]
 }
 
+@test "check dependabot-docker-base-consistency resolves a bare SOT ARG with no default" {
+    # What: ARG ALPINE_IMAGE (no `=default`) + FROM ${ALPINE_IMAGE}
+    #       resolves from the manifest, not "unresolved".
+    # Why: regression found in-session: Agent A's Dockerfile
+    #      consolidation (services/*/Dockerfile now declaring a
+    #      bare ARG ALPINE_IMAGE per AG-CI-006/AG-CI-008 -- no
+    #      baked default, the value comes from ci.sh build-args)
+    #      broke this check's real-repo pass until
+    #      _ci_sot_base_image_arg closed the gap.
+    # From: Issue #1683
+    local r="${BATS_TEST_TMPDIR}/barearg"
+    mkdir -p "${r}/.github" "${r}/services/a" "${r}/services/b"
+    printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    directories:\n      - /services/a\n      - /services/b\n    schedule:\n      interval: weekly\n' \
+        > "${r}/.github/dependabot.yml"
+    # shellcheck disable=SC2016
+    printf 'ARG ALPINE_IMAGE\nFROM ${ALPINE_IMAGE}\n' > "${r}/services/a/Dockerfile"
+    # shellcheck disable=SC2016
+    printf 'ARG ALPINE_IMAGE\nFROM ${ALPINE_IMAGE}\n' > "${r}/services/b/Dockerfile"
+    run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"dependabot-docker-base-consistency=clean"* ]]
+}
+
 @test "check dependabot-docker-base-consistency resolves a stage alias" {
     # What: FROM builder resolves to its real origin image.
     # Why: the alias text is never the compared value.
