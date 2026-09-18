@@ -3245,9 +3245,8 @@ DHSHAS
     printf '%s' "${out}"
 }
 
-# What: Emit ALPINE_IMAGE (+ per-service external_image pin)
-#       for one product-service target from build-manifest.yml.
-# Why: Single base-image owner; service Dockerfiles pin none.
+# What: Emit SOT build-args for one product service.
+# Why: single base-image owner; Dockerfiles pin none.
 # From: Issue #1683
 _ci_service_build_args() {
     local service="$1" fmt="${2:-}" prefix="--build-arg " out="" val ext ext_argname
@@ -3259,11 +3258,8 @@ _ci_service_build_args() {
         return 2
     fi
     out="${out}${prefix}ALPINE_IMAGE=${val}"$'\n'
-    # What: a manifest-declared external_image gets its own pin.
-    # Why: syslog needs FLUENT_BIT_IMAGE; netdata (no
-    #      external_image entry) keeps its own baked-in
-    #      NETDATA_VERSION/NETDATA_X86_64_SHA256 ARG defaults
-    #      untouched -- this only ever adds ALPINE_IMAGE for it.
+    # What: a manifest external_image gets its own build-arg.
+    # Why: netdata has none; keeps its own baked ARG defaults.
     # From: Issue #1683
     ext="$(_ci_block_entry_field services "${service}" external_image)"
     if [ -n "${ext}" ]; then
@@ -3846,8 +3842,8 @@ _ci_version_diff_dhclient() {
     printf '%s' "${out}"
 }
 
-# What: Flag SOT netdata aarch64 sha with no Dockerfile use.
-# Why: multi-arch wiring is a separate maintainer decision.
+# What: Flag SOT netdata aarch64 sha with no Dockerfile consumer.
+# Why: catches a future SOT/Dockerfile arm64 wiring gap.
 # From: Issue #1683 | PR #1858
 _ci_version_audit_netdata_aarch64_orphan() {
     local sha res
@@ -4371,16 +4367,9 @@ _ci_review_chronology_excluded() {
     esac
 }
 
-# What: Diff-scoped file list between CHRONOLOGY_DIFF_BASE_* and GITHUB_SHA.
-# Why: PR-changed-files mode (Issue #1095 | PR #1686 parity). Writes the
-#      caller's `files` array directly (dynamic scoping, not a return
-#      value) so the caller's own loop stays untouched either way.
-#      Diffs to a temp file first, not `mapfile < <(git diff ...)`:
-#      process substitution loses `git diff`'s exit status, which would
-#      silently turn a real `git diff` failure into an empty (clean)
-#      file list -- exactly the fail-open case the legacy script's own
-#      explicit exit-1 branch exists to prevent (AG-INT-002).
-# From: Issue #1683
+# What: Sets caller's files array from a diff-scoped fetch.
+# Why: captures to a file; process subst. drops exit status.
+# From: Issue #1683 | PR #1686
 _ci_review_chronology_diff_files() {
     : "${CHRONOLOGY_DIFF_BASE_REF:?CHRONOLOGY_DIFF_BASE_REF is required}"
     : "${GITHUB_SHA:?GITHUB_SHA is required}"
@@ -5261,17 +5250,8 @@ _ci_dockerfile_logical_lines() {
     ' "$1"
 }
 
-# What: Print a Dockerfile's final resolved FROM image.
-# Why: global ARG defaults + stage aliases change it.
-# From: Issue #1683 | PR #1858
-# What: Resolve a bare (no-default) SOT-owned ARG name to its value.
-# Why: ARG ALPINE_IMAGE/FLUENT_BIT_IMAGE are deliberately left
-#      without a Dockerfile default (AG-CI-006/AG-CI-008 -- the
-#      build-arg comes from ci.sh build-args, not a baked-in
-#      fallback), so a global-ARG-in-FROM resolver must know these
-#      two names resolve from the same single manifest owner
-#      _ci_service_build_args already uses, not treat them as an
-#      unresolved reference.
+# What: Resolves a bare (no-default) SOT-owned ARG to its value.
+# Why: ALPINE_IMAGE/FLUENT_BIT_IMAGE keep no baked-in fallback.
 # From: Issue #1683
 _ci_sot_base_image_arg() {
     local name="$1" val
@@ -5285,6 +5265,9 @@ _ci_sot_base_image_arg() {
     printf '%s' "${val}"
 }
 
+# What: Print a Dockerfile's final resolved FROM image.
+# Why: global ARG defaults + stage aliases change it.
+# From: Issue #1683 | PR #1858
 _ci_dockerfile_final_image() {
     local dockerfile="$1" line instruction remainder image alias name value token
     local seen_from=0 final_image=""
