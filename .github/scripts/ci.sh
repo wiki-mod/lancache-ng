@@ -716,7 +716,7 @@ ci_cmd_resolve() {
 # =========================================================
 
 # What: Classify a failure: transient, permanent, not_found.
-# Why: operation-typed; not_found may build, permanent may not.
+# Why: not_found enables build; other types stay final.
 # From: Issue #1683
 _ci_classify_failure() {
     local raw="$1" op="${2:-registry}" low
@@ -749,7 +749,7 @@ _ci_classify_failure() {
         *"couldn't find remote ref"*|*"fatal: repository"*"not found"*) printf 'permanent\n'; return 0 ;;
     esac
     # What: buildx's own narrow known-transient signatures.
-    # Why: scoped like legacy wrappers; never a real compile fail.
+    # Why: Never a real compile failure (scoped wrappers).
     # From: Issue #1683
     if [ "${op}" = "buildx" ]; then
         case "${low}" in
@@ -835,7 +835,7 @@ _ci_lock_try() {
     fi
     [ "${rc}" -eq 0 ] || return 3
     # What: not routed through _ci_retry (deliberate).
-    # Why: _ci_lock_acquire already retries this whole attempt.
+    # Why: _ci_lock_acquire already wraps retry logic.
     # From: Issue #1683
     git fetch --quiet --depth=1 "${remote}" "${ref}" >/dev/null 2>&1 || return 3
     committed="$(git log -1 --format=%ct FETCH_HEAD 2>/dev/null)" || committed=0
@@ -877,8 +877,8 @@ _ci_lock_release() {
     local remote="$1" ref="$2" note="$3" cur="" held rc=0
     cur="$(_ci_cas_ref_sha "${remote}" "${ref}")" || rc=$?
     [ "${rc}" -eq 0 ] || return 0
-    # What: this fetch had no retry at any level (unlike acquire).
-    # Why: op=git gives it the shared transient-signature truth.
+    # What: this fetch has no retry level (acquire differs).
+    # Why: op=git uses shared transient-signature truth.
     # From: Issue #1683
     _ci_retry git git fetch --quiet --depth=1 "${remote}" "${ref}" >/dev/null || return 1
     held="$(git log -1 --format=%s FETCH_HEAD 2>/dev/null)" || held=""
@@ -916,8 +916,8 @@ _ci_ledger_blob() {
     _ci_cas_ref_sha "${remote}" "${CI_LEDGER_REF}" >/dev/null 2>&1 || rc=$?
     [ "${rc}" -eq 1 ] && return 1
     [ "${rc}" -eq 0 ] || return 2
-    # What: this fetch had no retry at any level.
-    # Why: op=git gives it the shared transient-signature truth.
+    # What: this fetch has no retry level.
+    # Why: op=git uses shared transient-signature truth.
     # From: Issue #1683
     _ci_retry git git fetch --quiet --depth=1 "${remote}" "${CI_LEDGER_REF}" >/dev/null || return 2
     git cat-file -p "FETCH_HEAD:${CI_LEDGER_FILE}" 2>/dev/null || return 2
@@ -1096,8 +1096,8 @@ _ci_retry() {
         cls="$(_ci_classify_failure "${raw}" "${op}")"
         if [ "${cls}" != "transient" ] || [ "${n}" -ge "${max}" ]; then
             ci_error "[CI-ERROR-BUILD-0011]" "reason=\"command failed cls=${cls} attempt=${n}/${max} op=${op}\"" "${raw}"
-            # What: surface the raw failure to the caller too.
-            # Why: an op-specific reason may need caller interpretation.
+            # What: emit raw failure to the caller too.
+            # Why: caller may interpret op-specific reason.
             # From: Issue #1683
             printf '%s\n' "${raw}"
             return 2
@@ -1173,8 +1173,8 @@ _ci_docker_build() {
     # From: Issue #1683
     [ -n "${CI_BUILD_CACHE_FROM:-}" ] && args+=(--cache-from "${CI_BUILD_CACHE_FROM}")
     [ -n "${CI_BUILD_CACHE_TO:-}" ] && args+=(--cache-to "$(_ci_cache_to_spec "${CI_BUILD_CACHE_TO}")")
-    # What: retries buildx; captures its output, never doubles it.
-    # Why: on failure ci_error already shows raw; avoid a 2nd copy.
+    # What: retry buildx and capture its output once.
+    # Why: ci_error already shows raw; avoid double output.
     # From: Issue #1683
     local buildlog rc=0
     buildlog="$(_ci_retry buildx docker buildx build --load --platform "${platform}" --tag "${tag}" "${args[@]}" "${context}")" || rc=$?
@@ -2151,8 +2151,8 @@ _ci_gc_roots() {
 # From: Issue #1683
 _ci_gh_versions() {
     local owner="$1" pkg="$2" out rc=0
-    # What: retry a transient GH-API read; 404 fails on attempt 1.
-    # Why: op=github-api classifies HTTP 404 permanent, not not_found.
+    # What: retry transient GH-API reads; 404 permanent.
+    # Why: op=github-api treats 404 as permanent failure.
     # From: Issue #1683
     out="$(_ci_retry github-api gh api --paginate "/orgs/${owner}/packages/container/${pkg}/versions?per_page=100" --jq '.[] | [.name, .id, .created_at, ((.metadata.container.tags // []) | join(","))] | @tsv')" || rc=$?
     if [ "${rc}" -ne 0 ]; then
@@ -2212,7 +2212,7 @@ _ci_default_gc_delete() {
     owner="${prefix%%/*}"
     pkgbase="${prefix#*/}"
     # What: retry a transient GH-API delete.
-    # Why: a destructive op still deserves the shared classifier.
+    # Why: destructive ops use shared classifier.
     # From: Issue #1683
     _ci_retry github-api gh api -X DELETE "/orgs/${owner}/packages/container/${pkgbase}%2F${svc}/versions/${id}" >/dev/null
 }
@@ -3294,7 +3294,7 @@ ci_cmd_build_args() {
     case "${service}" in
         build-tools) _ci_build_tools_build_args "${fmt}" "${platform}" ;;
         # What: known manifest service gets build-args.
-        # Why: capture-first avoids a pipefail-unsafe grep -q pipe.
+        # Why: capture-first avoids unsafe grep pipe.
         # From: Issue #1683
         *)
             local svc_list
@@ -3597,8 +3597,8 @@ _ci_build_tools_build() {
         [ -n "${a}" ] && args+=(--build-arg "${a}")
     done < <(_ci_build_tools_build_args --bare "${platform}")
     args+=(tools/build-tools)
-    # What: op=buildx only; call signature fix, not a behavior change.
-    # Why: exporter/build+push shape is cross-cutting; build-wave owns it.
+    # What: op=buildx only; signature fix, behavior intact.
+    # Why: exporter/build+push shared; build-wave owns.
     # From: Issue #1683
     _ci_retry buildx "${args[@]}" >/dev/null || return "$?"
     _ci_registry_digest "${tag}"
@@ -3798,8 +3798,8 @@ _ci_version_diff_netdata() {
 # From: Issue #1683 | PR #1858
 _ci_version_verify_netdata() {
     local out rc
-    # What: $(...) exit status is lost in a bare assignment
-    # Why: under set -e; an if-guard is required to capture it.
+    # What: bare assignment loses subshell exit status.
+    # Why: set -e requires if-guard to capture return code.
     # From: Issue #1683 | PR #1858
     if out="$(_ci_version_diff_netdata)"; then
         rc=0
@@ -4374,7 +4374,7 @@ _ci_check_executable_bits() {
 }
 
 # What: Files exempt from every review-chronology sub-scan.
-# Why: docs/config/binary noise the legacy script also excluded.
+# Why: legacy excluded docs/config/binary noise as well.
 # From: Issue #1683
 _ci_review_chronology_excluded() {
     case "$1" in
@@ -4604,8 +4604,8 @@ _ci_check_stable_external_images() {
     printf 'stable-external-images=clean\n'
 }
 
-# What: PR body fills every pull_request_template.md section.
-# Why: CONTRIBUTING.md requires each heading kept and completed.
+# What: PR body must fill every template section.
+# Why: CONTRIBUTING.md requires all headings completed.
 # From: Issue #1683
 _ci_check_pr_template() {
     if [ "${PR_AUTHOR:-}" = "dependabot[bot]" ]; then
@@ -4669,8 +4669,8 @@ _ci_check_pr_template() {
     printf 'pr-template=ok\n'
 }
 
-# What: Enforce workflow file/byte and run-block byte ceilings.
-# Why: GitHub drops runs >~9000 lines; actionlint hangs >~75KB.
+# What: Enforce workflow file/byte and run-block limits.
+# Why: GitHub drops >~9000 lines; actionlint >~75KB.
 # From: Issue #1683
 _ci_measure_run_blocks() {
     local file="$1"
@@ -4739,8 +4739,8 @@ _ci_check_workflow_line_limit() {
     printf 'workflow-line-limit=clean\n'
 }
 
-# What: PR must carry label+milestone+project-board (AG-GH-008).
-# Why: A 2026-07-13 sweep found the backlog missing all three.
+# What: PR must carry label, milestone, project (AG-GH-008).
+# Why: 2026-07-13 sweep found all three missing.
 # From: Issue #1683
 _ci_check_pr_tracking_metadata() {
     local pr_number="${PR_NUMBER:-}" repo="${REPO:-}"
@@ -4801,8 +4801,8 @@ _ci_check_pr_tracking_metadata() {
     printf 'pr-tracking-metadata=ok\n'
 }
 
-# What: Resolves one GitHub issue's state (open/closed/unknown).
-# Why: Shared by governance-guards for closed-issue TODO checks.
+# What: Resolve GitHub issue state (open/closed/unknown).
+# Why: Shared by governance-guards for TODO checks.
 # From: Issue #1683
 _ci_governance_issue_state() {
     local issue="$1"
@@ -4829,8 +4829,8 @@ _ci_governance_issue_state() {
     jq -r '.state // "unknown"' <<<"${response}"
 }
 
-# What: Flags stale-issue TODOs, partial-scope text, bad uploads.
-# Why: Governance guard over changed files + PR title/body.
+# What: Flag stale TODOs, scope gaps, upload errors.
+# Why: Guard changed files against title/body governance.
 # From: Issue #1683
 _ci_check_governance_guards() {
     local -a changed=("$@")
@@ -4878,8 +4878,8 @@ _ci_check_governance_guards() {
     printf 'governance-guards=clean\n'
 }
 
-# What: Container/service-name literals stay in lockstep repo-wide.
-# Why: Socket-proxy allowlist gates every layer's Docker-API call.
+# What: Container names stay in lockstep repo-wide.
+# Why: Socket-proxy allowlist gates Docker-API access.
 # From: Issue #1683 | Issue #454 | Issue #377 | Issue #1486
 _ci_check_naming_consistency() {
     local root="${1:-${CI_REPO_ROOT}}"
@@ -5100,7 +5100,7 @@ _ci_check_proxy_cache_env_doc_drift() {
 }
 
 # What: Bare-word entries of a bash "name=(...)" array.
-# Why: shared by the Dockerfile + smoke-script tool-list readers.
+# Why: Shared by Dockerfile and smoke-script readers.
 # From: Issue #1683
 _ci_bash_array_entries() {
     local file="$1" name="$2" line in_arr=0 entry
@@ -5117,11 +5117,8 @@ _ci_bash_array_entries() {
     done < "${file}"
 }
 
-# What: Fail if a Dockerfile tool lacks smoke coverage, or the
-#       SOT smoke_tools owner lists a tool smoke_test_image()
-#       does not actually verify.
-# Why: an installed tool must be verified, not just built; the
-#      SOT's required list must be true, not aspirational.
+# What: Verify Dockerfile tools have smoke coverage.
+# Why: Tests and SOT list must align, never aspirational.
 # From: Issue #1683 | PR #1858
 _ci_check_build_tools_smoke_coverage() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
@@ -5163,8 +5160,8 @@ _ci_check_build_tools_smoke_coverage() {
             viol+=("'${cap} version' verified by the Dockerfile but not by smoke_test_image()")
         fi
     done
-    # What: every SOT smoke_tools entry must really be smoke-tested.
-    # Why: the SOT is the owner; an untested entry is a false claim.
+    # What: every SOT entry is actually smoke-tested.
+    # Why: SOT is owner; untested entry is false claim.
     # From: Issue #1683
     local sot_tools t
     sot_tools=" $(_ci_build_tools_smoke_tools 2>/dev/null | tr '\n' ' ') "
@@ -5284,8 +5281,8 @@ _ci_dockerfile_logical_lines() {
     ' "$1"
 }
 
-# What: Resolves a bare (no-default) SOT-owned ARG to its value.
-# Why: ALPINE_IMAGE/FLUENT_BIT_IMAGE keep no baked-in fallback.
+# What: Resolve bare SOT ARG to its value.
+# Why: No baked-in fallback for ALPINE/FLUENT_BIT.
 # From: Issue #1683
 _ci_sot_base_image_arg() {
     local name="$1" val
@@ -5776,8 +5773,8 @@ _ci_check_logging_matrix() {
     printf 'logging-matrix=clean rows=%s services=%s\n' "${#canonical[@]}" "${#consumer[@]}"
 }
 
-# What: True if a with:-block value is a real secret/input ref.
-# Why: bare literal or wrong secret must not pass silently.
+# What: True if value is a secret or input reference.
+# Why: bare literal or wrong secret must not pass.
 # From: Issue #1683
 _ci_trivy_value_ok() {
     local val="$1" expected="$2"
@@ -5816,8 +5813,8 @@ _ci_check_trivy_action_direct_usage() {
             col=$(( ${#raw} - ${#stripped} ))
             [ -z "${stripped}" ] && continue
             case "${stripped}" in '#'*) continue ;; esac
-            # What: a "- key:" dash shares its key's real column.
-            # Why: a sibling "key:" line aligns after the dash.
+            # What: dash and key share the real column.
+            # Why: sibling key: line aligns after dash.
             # From: Issue #1683
             if [[ "${stripped}" == "-"* ]]; then
                 local after_dash="${stripped#-}"
@@ -5877,13 +5874,8 @@ _ci_check_trivy_action_direct_usage() {
     printf 'trivy-action-direct-usage=clean\n'
 }
 
-# What: True if a Dockerfile's final stage COPYs anything to dest.
-# Why: only the runtime stage's files exist when entrypoint runs.
-#      A --from=<stage> naming an undeclared local alias, and not
-#      a SOT named_contexts entry either, is rejected (a renamed/
-#      typo'd source must fail closed, not silently pass the
-#      destination check); --from=<external image> or
-#      --from=<index> is accepted as-is, out of this check's scope.
+# What: True if final stage COPYs to destination.
+# Why: Only runtime stage files exist at run time.
 # From: Issue #1683
 _ci_dockerfile_copies_to() {
     local dockerfile="$1" want="$2" line lineno=0 last_from=0 dest from_val ctx_path
@@ -5934,8 +5926,8 @@ _ci_dockerfile_copies_to() {
     return 1
 }
 
-# What: A sourced absolute-path lib must match a real COPY dest.
-# Why: source-not-embed drifts silently break only at runtime.
+# What: Sourced lib path must match a COPY destination.
+# Why: source-drift breaks silently only at runtime.
 # From: Issue #1683
 _ci_check_entrypoint_lib_wiring() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
