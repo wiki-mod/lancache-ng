@@ -5782,6 +5782,16 @@ _ci_check_trivy_action_direct_usage() {
             col=$(( ${#raw} - ${#stripped} ))
             [ -z "${stripped}" ] && continue
             case "${stripped}" in '#'*) continue ;; esac
+            # What: a "- key:" dash shares its key's real column.
+            # Why: a sibling "key:" line aligns after the dash.
+            # From: Issue #1683
+            if [[ "${stripped}" == "-"* ]]; then
+                local after_dash="${stripped#-}"
+                local key_part="${after_dash#"${after_dash%%[![:space:]]*}"}"
+                col=$(( col + ${#after_dash} - ${#key_part} + 1 ))
+                stripped="${key_part}"
+                [ -z "${stripped}" ] && continue
+            fi
             if [ "${state}" -eq 2 ] && [ "${col}" -le "${with_col}" ]; then
                 if [ "${has_user}" -eq 0 ] || [ "${has_pass}" -eq 0 ]; then
                     wiring_viol+=("${file}:${uses_line}: missing dockerhub-username/dockerhub-password")
