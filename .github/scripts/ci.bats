@@ -2768,13 +2768,77 @@ netdata=sha256:n"
     [[ "${output}" == *"CI-ERROR-BUILDARGS-0001"* ]]
 }
 
-@test "build-args emits nothing for a non-toolchain target" {
-    # What: Only build-tools owns SOT build-args today.
-    # Why: An apk/rust service pins none centrally yet.
+@test "build-args emits nothing for an unrecognized target" {
+    # What: A name absent from the manifest's services block
+    #       still gets no args -- no guessed default.
+    # Why: build-tools + the 10 manifest services own args now;
+    #      anything else stays the prior silent no-op.
     # From: Issue #1683
-    run bash "${CI_SH}" build-args proxy
+    run bash "${CI_SH}" build-args not-a-real-service
     [ "${status}" -eq 0 ]
     [ -z "${output}" ]
+}
+
+@test "build-args emits ALPINE_IMAGE for every plain product service" {
+    # What: proxy/dns/watchdog/dhcp/dhcp-proxy/ntp/ui/cachehamster
+    #       each get the shared ALPINE_IMAGE pin and nothing else.
+    # Why: One base-image owner (base_images.alpine); no service
+    #      Dockerfile pins its own alpine tag.
+    # From: Issue #1683
+    local svc
+    for svc in proxy dns watchdog dhcp dhcp-proxy ntp ui cachehamster; do
+        run bash "${CI_SH}" build-args "${svc}"
+        [ "${status}" -eq 0 ]
+        [[ "${output}" == *"--build-arg ALPINE_IMAGE=mirror.gcr.io"* ]]
+        [[ "${output}" != *"FLUENT_BIT_IMAGE"* ]]
+    done
+}
+
+@test "build-args emits ALPINE_IMAGE + FLUENT_BIT_IMAGE for syslog only" {
+    # What: syslog's external_image: fluent_bit manifest entry
+    #       adds FLUENT_BIT_IMAGE from base_images.fluent_bit.
+    # Why: syslog copies a prebuilt fluent-bit binary; no other
+    #      service declares an external_image today.
+    # From: Issue #1683
+    run bash "${CI_SH}" build-args syslog
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"--build-arg ALPINE_IMAGE=mirror.gcr.io"* ]]
+    [[ "${output}" == *"--build-arg FLUENT_BIT_IMAGE=cr.fluentbit.io"* ]]
+}
+
+@test "build-args --bare syslog emits FLUENT_BIT_IMAGE without the flag prefix" {
+    # What: --bare form drops --build-arg for the external image too.
+    # Why: docker/build-push-action's build-args wants NAME=VALUE.
+    # From: Issue #1683
+    run bash "${CI_SH}" build-args syslog --bare
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"FLUENT_BIT_IMAGE=cr.fluentbit.io"* ]]
+    [[ "${output}" != *"--build-arg"* ]]
+}
+
+@test "build-args emits only ALPINE_IMAGE for netdata (no version pin)" {
+    # What: netdata gets ALPINE_IMAGE like any product service, but
+    #       NEVER NETDATA_VERSION/NETDATA_X86_64_SHA256.
+    # Why: netdata keeps its own baked-in ARG defaults (SOT-Sync);
+    #      this function must not touch that separate ownership.
+    # From: Issue #1683
+    run bash "${CI_SH}" build-args netdata
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"--build-arg ALPINE_IMAGE=mirror.gcr.io"* ]]
+    [[ "${output}" != *"NETDATA_VERSION"* ]]
+    [[ "${output}" != *"NETDATA_X86_64_SHA256"* ]]
+}
+
+@test "build-args for a product service fails closed on a missing central base image" {
+    # What: A missing base_images.alpine pin must fail closed for
+    #       a product-service target too, not only build-tools.
+    # Why: FAIL CLOSED must cover every ALPINE_IMAGE emitter.
+    # From: Issue #1683
+    local m="${BATS_TEST_TMPDIR}/no-rust-alpine-proxy.yml"
+    grep -v '^  alpine:' "${CI_MANIFEST_SOURCE}" > "${m}"
+    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args proxy
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-BUILDARGS-0007"* ]]
 }
 
 @test "build-tools packages lists the apk tools incl. AG-KD-009 set" {
