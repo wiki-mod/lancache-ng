@@ -5686,14 +5686,34 @@ _version_fixture_repo() {
     [[ "${output}" == *"CI-ERROR-VERSION-0013"* ]]
 }
 
-@test "version audit reports the netdata aarch64 orphan" {
-    # What: SOT carries sha256_aarch64; no arm consumer.
-    # Why: AG-INT-002: the scope gap stays visible always.
-    # From: Issue #1683 | PR #1858
-    run bash "${CI_SH}" version audit
+@test "version audit reports the netdata aarch64 orphan when no consumer exists" {
+    # What: SOT carries sha256_aarch64; a Dockerfile with no ARM
+    #       consumer must still surface the scope-gap warning.
+    # Why: AG-INT-002: the scope gap stays visible whenever it is
+    #      real. The real repo's services/netdata/Dockerfile now
+    #      HAS this consumer (ci/1683-dockerfile-consolidation
+    #      wired NETDATA_AARCH64_SHA256), so this uses a fixture
+    #      repo with that ARG stripped to keep exercising the
+    #      orphan-detection mechanism itself.
+    # From: Issue #1683
+    local root; root="$(_version_fixture_repo)"
+    sed -i '/^ARG NETDATA_AARCH64_SHA256=/d' "${root}/services/netdata/Dockerfile"
+    CI_REPO_ROOT="${root}" run bash "${CI_SH}" version audit
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"CI-WARN-VERSION-0001"* ]]
     [[ "${output}" == *"netdata.sha256_aarch64"* ]]
+}
+
+@test "version audit no longer flags the netdata aarch64 orphan on the real repo" {
+    # What: the real repo's Dockerfile now consumes
+    #       NETDATA_AARCH64_SHA256; audit must NOT warn on it.
+    # Why: positive proof the ci/1683-dockerfile-consolidation
+    #      arm64 wiring actually resolved the scope gap the
+    #      previous (fixture-based) test still proves detectable.
+    # From: Issue #1683
+    run bash "${CI_SH}" version audit
+    [ "${status}" -eq 0 ]
+    [[ "${output}" != *"CI-WARN-VERSION-0001"* ]]
 }
 
 @test "version audit reports drift but never fails on it" {
