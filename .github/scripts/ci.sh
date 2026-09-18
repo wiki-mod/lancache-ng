@@ -3739,15 +3739,17 @@ _ci_dockerfile_arg_default() {
 # From: Issue #1683 | PR #1858
 _ci_version_diff_netdata() {
     local dockerfile="${CI_REPO_ROOT}/services/netdata/Dockerfile"
-    local sot_version sot_sha df_version df_sha match=yes
+    local sot_version sot_sha sot_sha_arm df_version df_sha df_sha_arm match=yes
     sot_version="$(_ci_block_entry_field external_versions netdata version)"
     sot_sha="$(_ci_block_entry_field external_versions netdata sha256_x86_64)"
-    if [ -z "${sot_version}" ] || [ -z "${sot_sha}" ]; then
-        ci_log "[CI-ERROR-VERSION-0007]" "reason=\"SOT external_versions.netdata missing version/sha256_x86_64\""
+    sot_sha_arm="$(_ci_block_entry_field external_versions netdata sha256_aarch64)"
+    if [ -z "${sot_version}" ] || [ -z "${sot_sha}" ] || [ -z "${sot_sha_arm}" ]; then
+        ci_log "[CI-ERROR-VERSION-0007]" "reason=\"SOT external_versions.netdata missing version/sha256_x86_64/sha256_aarch64\""
         return 2
     fi
     df_version="$(_ci_dockerfile_arg_default "${dockerfile}" NETDATA_VERSION)" || return 2
     df_sha="$(_ci_dockerfile_arg_default "${dockerfile}" NETDATA_X86_64_SHA256)" || return 2
+    df_sha_arm="$(_ci_dockerfile_arg_default "${dockerfile}" NETDATA_AARCH64_SHA256)" || return 2
     case "${df_version}" in
         ABSENT)
             ci_log "[CI-ERROR-VERSION-0008]" "path=\"${dockerfile}\" name=\"NETDATA_VERSION\" reason=\"ARG not found\""
@@ -3770,12 +3772,26 @@ _ci_version_diff_netdata() {
             ;;
         FOUND:*) df_sha="${df_sha#FOUND:}" ;;
     esac
+    case "${df_sha_arm}" in
+        ABSENT)
+            ci_log "[CI-ERROR-VERSION-0008]" "path=\"${dockerfile}\" name=\"NETDATA_AARCH64_SHA256\" reason=\"ARG not found\""
+            return 2
+            ;;
+        BARE)
+            ci_log "[CI-ERROR-VERSION-0009]" "path=\"${dockerfile}\" name=\"NETDATA_AARCH64_SHA256\" reason=\"ARG has no default\""
+            return 2
+            ;;
+        FOUND:*) df_sha_arm="${df_sha_arm#FOUND:}" ;;
+    esac
     [ "${sot_version}" = "${df_version}" ] || match=no
     [ "${sot_sha}" = "${df_sha}" ] || match=no
+    [ "${sot_sha_arm}" = "${df_sha_arm}" ] || match=no
     printf 'key=netdata.version sot=%s dockerfile=%s match=%s\n' \
         "${sot_version}" "${df_version}" "$([ "${sot_version}" = "${df_version}" ] && echo yes || echo no)"
     printf 'key=netdata.sha256_x86_64 sot=%s dockerfile=%s match=%s\n' \
         "${sot_sha}" "${df_sha}" "$([ "${sot_sha}" = "${df_sha}" ] && echo yes || echo no)"
+    printf 'key=netdata.sha256_aarch64 sot=%s dockerfile=%s match=%s\n' \
+        "${sot_sha_arm}" "${df_sha_arm}" "$([ "${sot_sha_arm}" = "${df_sha_arm}" ] && echo yes || echo no)"
     [ "${match}" = yes ]
 }
 
@@ -3874,15 +3890,17 @@ _ci_version_audit_dhclient_branch_comment() {
 # From: Issue #1683 | PR #1858
 _ci_version_sync_netdata() {
     local dockerfile="${CI_REPO_ROOT}/services/netdata/Dockerfile"
-    local sot_version sot_sha cur_version cur_sha tmp did_write=0
+    local sot_version sot_sha sot_sha_arm cur_version cur_sha cur_sha_arm tmp did_write=0
     sot_version="$(_ci_block_entry_field external_versions netdata version)"
     sot_sha="$(_ci_block_entry_field external_versions netdata sha256_x86_64)"
-    if [ -z "${sot_version}" ] || [ -z "${sot_sha}" ]; then
-        ci_log "[CI-ERROR-VERSION-0007]" "reason=\"SOT external_versions.netdata missing version/sha256_x86_64\""
+    sot_sha_arm="$(_ci_block_entry_field external_versions netdata sha256_aarch64)"
+    if [ -z "${sot_version}" ] || [ -z "${sot_sha}" ] || [ -z "${sot_sha_arm}" ]; then
+        ci_log "[CI-ERROR-VERSION-0007]" "reason=\"SOT external_versions.netdata missing version/sha256_x86_64/sha256_aarch64\""
         return 2
     fi
     cur_version="$(_ci_dockerfile_arg_default "${dockerfile}" NETDATA_VERSION)" || return 2
     cur_sha="$(_ci_dockerfile_arg_default "${dockerfile}" NETDATA_X86_64_SHA256)" || return 2
+    cur_sha_arm="$(_ci_dockerfile_arg_default "${dockerfile}" NETDATA_AARCH64_SHA256)" || return 2
     case "${cur_version}" in
         FOUND:*) cur_version="${cur_version#FOUND:}" ;;
         *)
@@ -3897,15 +3915,24 @@ _ci_version_sync_netdata() {
             return 2
             ;;
     esac
-    if [ "${cur_version}" = "${sot_version}" ] && [ "${cur_sha}" = "${sot_sha}" ]; then
+    case "${cur_sha_arm}" in
+        FOUND:*) cur_sha_arm="${cur_sha_arm#FOUND:}" ;;
+        *)
+            ci_log "[CI-ERROR-VERSION-0008]" "path=\"${dockerfile}\" name=\"NETDATA_AARCH64_SHA256\" reason=\"no baked default to sync (${cur_sha_arm})\""
+            return 2
+            ;;
+    esac
+    if [ "${cur_version}" = "${sot_version}" ] && [ "${cur_sha}" = "${sot_sha}" ] && [ "${cur_sha_arm}" = "${sot_sha_arm}" ]; then
         printf 'key=netdata.version sot=%s written=%s changed=0\n' "${sot_version}" "${sot_version}"
         printf 'key=netdata.sha256_x86_64 sot=%s written=%s changed=0\n' "${sot_sha}" "${sot_sha}"
+        printf 'key=netdata.sha256_aarch64 sot=%s written=%s changed=0\n' "${sot_sha_arm}" "${sot_sha_arm}"
         return 0
     fi
     tmp="$(mktemp)"
-    awk -v ver="${sot_version}" -v sha="${sot_sha}" '
+    awk -v ver="${sot_version}" -v sha="${sot_sha}" -v shaarm="${sot_sha_arm}" '
         /^ARG NETDATA_VERSION=/ { print "ARG NETDATA_VERSION=" ver; next }
         /^ARG NETDATA_X86_64_SHA256=/ { print "ARG NETDATA_X86_64_SHA256=" sha; next }
+        /^ARG NETDATA_AARCH64_SHA256=/ { print "ARG NETDATA_AARCH64_SHA256=" shaarm; next }
         { print }
     ' "${dockerfile}" > "${tmp}"
     cp "${tmp}" "${dockerfile}"
@@ -3913,16 +3940,18 @@ _ci_version_sync_netdata() {
     # What: readback proves the write, never trust the awk.
     # Why: a shape the narrow rewrite misses must fail loud.
     # From: Issue #1683 | PR #1858
-    local rb_version rb_sha
+    local rb_version rb_sha rb_sha_arm
     rb_version="$(_ci_dockerfile_arg_default "${dockerfile}" NETDATA_VERSION)" || return 2
     rb_sha="$(_ci_dockerfile_arg_default "${dockerfile}" NETDATA_X86_64_SHA256)" || return 2
-    if [ "${rb_version}" != "FOUND:${sot_version}" ] || [ "${rb_sha}" != "FOUND:${sot_sha}" ]; then
+    rb_sha_arm="$(_ci_dockerfile_arg_default "${dockerfile}" NETDATA_AARCH64_SHA256)" || return 2
+    if [ "${rb_version}" != "FOUND:${sot_version}" ] || [ "${rb_sha}" != "FOUND:${sot_sha}" ] || [ "${rb_sha_arm}" != "FOUND:${sot_sha_arm}" ]; then
         ci_log "[CI-ERROR-VERSION-0015]" "path=\"${dockerfile}\" reason=\"write readback mismatch; canonical rewrite did not match the line shape\""
         return 2
     fi
     did_write=1
     printf 'key=netdata.version sot=%s written=%s changed=%s\n' "${sot_version}" "${sot_version}" "${did_write}"
     printf 'key=netdata.sha256_x86_64 sot=%s written=%s changed=%s\n' "${sot_sha}" "${sot_sha}" "${did_write}"
+    printf 'key=netdata.sha256_aarch64 sot=%s written=%s changed=%s\n' "${sot_sha_arm}" "${sot_sha_arm}" "${did_write}"
 }
 
 # What: version verify: default, read-only, fails on drift.
@@ -5075,8 +5104,29 @@ _ci_check_proxy_cache_env_doc_drift() {
     printf 'proxy-cache-env-doc-drift=clean scanned=%s checked=%s\n' "${scanned}" "${checked}"
 }
 
-# What: Fail if a Dockerfile tool is missing smoke coverage.
-# Why: a consumer tool must be verified, not just built.
+# What: Bare-word entries of a bash "name=(...)" array.
+# Why: shared by the Dockerfile + smoke-script tool-list readers.
+# From: Issue #1683
+_ci_bash_array_entries() {
+    local file="$1" name="$2" line in_arr=0 entry
+    while IFS= read -r line; do
+        if [ "${in_arr}" -eq 0 ]; then
+            case "${line}" in *"${name}="*'('*) in_arr=1 ;; esac
+            continue
+        fi
+        case "${line}" in *')'*) in_arr=0; continue ;; esac
+        entry="${line#"${line%%[![:space:]]*}"}"
+        entry="${entry%\\}"
+        entry="${entry%"${entry##*[![:space:]]}"}"
+        [ -n "${entry}" ] && [[ "${entry}" != \#* ]] && printf '%s\n' "${entry}"
+    done < "${file}"
+}
+
+# What: Fail if a Dockerfile tool lacks smoke coverage, or the
+#       SOT smoke_tools owner lists a tool smoke_test_image()
+#       does not actually verify.
+# Why: an installed tool must be verified, not just built; the
+#      SOT's required list must be true, not aspirational.
 # From: Issue #1683 | PR #1858
 _ci_check_build_tools_smoke_coverage() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
@@ -5090,20 +5140,9 @@ _ci_check_build_tools_smoke_coverage() {
         ci_log "[CI-ERROR-CHECK-0024]" "path=\"${smoke_script}\" reason=\"smoke script not found\""
         return 2
     fi
-    # What: both files declare a plain required_tools=(...).
-    # Why: one shared extractor, no per-file duplicate.
-    # shellcheck disable=SC2016
-    local extract_awk='
-        /required_tools=\(/ { in_arr = 1; next }
-        in_arr && /\)/ { in_arr = 0 }
-        in_arr {
-            gsub(/\\/, ""); gsub(/^[ \t]+|[ \t]+$/, "")
-            if ($0 != "" && $0 !~ /^#/) print
-        }
-    '
     local dockerfile_tools smoke_tools
-    dockerfile_tools="$(awk "${extract_awk}" "${dockerfile}" | sort -u | tr '\n' ' ')"
-    smoke_tools="$(awk "${extract_awk}" "${smoke_script}" | sort -u | tr '\n' ' ')"
+    dockerfile_tools="$(_ci_bash_array_entries "${dockerfile}" required_tools | sort -u | tr '\n' ' ')"
+    smoke_tools="$(_ci_bash_array_entries "${smoke_script}" required_tools | sort -u | tr '\n' ' ')"
     if [ -z "${dockerfile_tools// /}" ]; then
         ci_log "[CI-ERROR-CHECK-0025]" "path=\"${dockerfile}\" reason=\"no required_tools extracted; vacuous\""
         return 2
@@ -5129,22 +5168,22 @@ _ci_check_build_tools_smoke_coverage() {
             viol+=("'${cap} version' verified by the Dockerfile but not by smoke_test_image()")
         fi
     done
+    # What: every SOT smoke_tools entry must really be smoke-tested.
+    # Why: the SOT is the owner; an untested entry is a false claim.
+    # From: Issue #1683
+    local sot_tools t
+    sot_tools=" $(_ci_build_tools_smoke_tools 2>/dev/null | tr '\n' ' ') "
+    if [ -z "${sot_tools// /}" ]; then
+        ci_log "[CI-ERROR-CHECK-0025]" "reason=\"no SOT smoke_tools; vacuous\""
+        return 2
+    fi
+    for t in ${sot_tools}; do
+        case " ${smoke_tools} " in *" ${t} "*) continue ;; esac
+        viol+=("SOT smoke_tools lists '${t}' but smoke_test_image() does not verify it")
+    done
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0026]" "reason=\"build-tools smoke coverage gap (issues #790/#791/#822 Pattern G)\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
-    fi
-    # What: informational note; the SOT has a 3rd, own list.
-    # Why: visible (AG-INT-002), never enforced here.
-    # From: Issue #1683 | PR #1858
-    local sot_tools extra_count=0 t
-    sot_tools=" $(_ci_build_tools_smoke_tools 2>/dev/null | tr '\n' ' ') "
-    if [ -n "${sot_tools// /}" ]; then
-        for t in ${smoke_tools}; do
-            case "${sot_tools}" in *" ${t} "*) ;; *) extra_count=$((extra_count + 1)) ;; esac
-        done
-        if [ "${extra_count}" -gt 0 ]; then
-            ci_log "[CI-INFO-CHECK-0002]" "reason=\"smoke_test_image() covers ${extra_count} tool(s) the SOT smoke_tools list does not (informational only)\""
-        fi
     fi
     printf 'build-tools-smoke-coverage=clean\n'
 }
@@ -5845,14 +5884,14 @@ _ci_check_trivy_action_direct_usage() {
 
 # What: True if a Dockerfile's final stage COPYs anything to dest.
 # Why: only the runtime stage's files exist when entrypoint runs.
-#      A --from=<stage> naming an undeclared local alias is
-#      rejected (a renamed/typo'd builder stage must fail
-#      closed, not silently pass the destination check);
-#      --from=<external image> or --from=<index> is accepted
-#      as-is since its own contents are out of this check's scope.
+#      A --from=<stage> naming an undeclared local alias, and not
+#      a SOT named_contexts entry either, is rejected (a renamed/
+#      typo'd source must fail closed, not silently pass the
+#      destination check); --from=<external image> or
+#      --from=<index> is accepted as-is, out of this check's scope.
 # From: Issue #1683
 _ci_dockerfile_copies_to() {
-    local dockerfile="$1" want="$2" line lineno=0 last_from=0 dest from_val
+    local dockerfile="$1" want="$2" line lineno=0 last_from=0 dest from_val ctx_path
     local -a words real
     local -A aliases=()
     while IFS= read -r line; do
@@ -5882,7 +5921,12 @@ _ci_dockerfile_copies_to() {
                 *[!0-9]*)
                     case "${from_val,,}" in
                         */*|*:*|*.*) : ;;
-                        *) [ -n "${aliases[${from_val,,}]:-}" ] || continue ;;
+                        *)
+                            if [ -z "${aliases[${from_val,,}]:-}" ]; then
+                                ctx_path="$(_ci_block_entry_field named_contexts "${from_val}" path)"
+                                [ -n "${ctx_path}" ] || continue
+                            fi
+                            ;;
                     esac
                     ;;
             esac

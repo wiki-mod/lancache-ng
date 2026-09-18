@@ -4359,15 +4359,6 @@ EOF
     [ "${status}" -eq 0 ]
 }
 
-@test "check entrypoint-lib-wiring passes clean on the real repo" {
-    # What: today's entrypoints embed libs, none sources one yet.
-    # Why: proves the rewrite against production state.
-    # From: Issue #1683
-    run bash "${CI_SH}" check entrypoint-lib-wiring
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"entrypoint-lib-wiring=clean"* ]]
-}
-
 @test "check entrypoint-lib-wiring passes when the Dockerfile COPYs the sourced path" {
     # What: entrypoint sources a lib; Dockerfile COPYs it there.
     # Why: the wired-correctly baseline case.
@@ -4500,6 +4491,33 @@ EOF
     [ "${status}" -eq 0 ]
 }
 
+@test "check entrypoint-lib-wiring accepts a COPY --from a SOT named build context" {
+    # What: COPY --from=shared-scripts, a build-context name owned
+    #       by build-manifest.yml's named_contexts, not a FROM stage.
+    # Why: this is the real domain-validation consolidation's exact
+    #      shape (services/proxy/Dockerfile), no local FROM alias
+    #      exists for it at all.
+    # From: Issue #1683
+    local r="${BATS_TEST_TMPDIR}/elw-buildcontext"
+    mkdir -p "${r}/services/proxy"
+    printf '. /usr/local/lib/domain-validation.sh\n' > "${r}/services/proxy/entrypoint.sh"
+    printf 'FROM alpine:3.24\nCOPY --from=shared-scripts domain-validation.sh /usr/local/lib/domain-validation.sh\n' \
+        > "${r}/services/proxy/Dockerfile"
+    run bash "${CI_SH}" check entrypoint-lib-wiring "${r}"
+    [ "${status}" -eq 0 ]
+}
+
+@test "check entrypoint-lib-wiring passes clean and meaningfully on the real repo" {
+    # What: the real domain-validation consolidation is now live:
+    #       proxy+dns source it via COPY --from=shared-scripts.
+    # Why: the earlier vacuous-clean state is gone; this proves the
+    #      guard actually finds and validates real source lines now.
+    # From: Issue #1683
+    run bash "${CI_SH}" check entrypoint-lib-wiring
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"entrypoint-lib-wiring=clean"* ]]
+}
+
 @test "check changelog-direct-edit is clean when CHANGELOG.md is untouched" {
     # What: migrated from check-changelog-direct-edit.sh.
     # Why: rewritten in ci.sh; stays non-blocking always.
@@ -4552,13 +4570,38 @@ _smoke_coverage_fixture() {
         printf '  )\n'
         printf '}\n'
     } > "${root}/scripts/untracked/select-build-tools-image.sh"
+    # What: a minimal SOT fixture whose smoke_tools matches "bash".
+    # Why: the real check now hard-fails a SOT/smoke divergence too.
+    # From: Issue #1683
+    printf 'build_toolchain:\n  build-tools:\n    smoke_tools:\n      - bash\n' \
+        > "${root}/build-manifest.yml"
 }
 
-@test "check build-tools-smoke-coverage passes clean on the real repo" {
-    # What: migrated from check-build-tools-smoke-coverage.
-    # Why: rewritten in ci.sh; the real files must pass.
-    # From: Issue #1683 | PR #1858
+@test "check build-tools-smoke-coverage currently fails on a real SOT/smoke divergence" {
+    # What: the real repo has a genuine, pre-existing gap: the SOT
+    #       smoke_tools list names cargo-tarpaulin and timeout, but
+    #       smoke_test_image() does not actually verify either.
+    # Why: proves the new SOT-direction check catches a real bug
+    #      instead of only synthetic fixtures; NOT a regression this
+    #      guard introduced -- select-build-tools-image.sh and
+    #      build-manifest.yml are out of this dispatch's write scope.
+    # From: Issue #1683
     run bash "${CI_SH}" check build-tools-smoke-coverage
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0026"* ]]
+    [[ "${output}" == *"cargo-tarpaulin"* ]]
+    [[ "${output}" == *"timeout"* ]]
+}
+
+@test "check build-tools-smoke-coverage passes clean when Dockerfile/smoke/SOT all agree" {
+    # What: a fixture where Dockerfile, smoke script, and SOT
+    #       smoke_tools all name exactly the same tool.
+    # Why: the positive baseline the real-repo test above no
+    #      longer can be, now that all three are cross-checked.
+    # From: Issue #1683
+    local r="${BATS_TEST_TMPDIR}/allmatch"
+    _smoke_coverage_fixture "${r}"
+    CI_MANIFEST="${r}/build-manifest.yml" run bash "${CI_SH}" check build-tools-smoke-coverage "${r}"
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"build-tools-smoke-coverage=clean"* ]]
 }
@@ -4569,7 +4612,7 @@ _smoke_coverage_fixture() {
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/uncovered"
     _smoke_coverage_fixture "${r}" newtool
-    run bash "${CI_SH}" check build-tools-smoke-coverage "${r}"
+    CI_MANIFEST="${r}/build-manifest.yml" run bash "${CI_SH}" check build-tools-smoke-coverage "${r}"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0026"* ]]
     [[ "${output}" == *"'newtool' verified by the Dockerfile"* ]]
@@ -4581,7 +4624,7 @@ _smoke_coverage_fixture() {
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/excluded"
     _smoke_coverage_fixture "${r}" make
-    run bash "${CI_SH}" check build-tools-smoke-coverage "${r}"
+    CI_MANIFEST="${r}/build-manifest.yml" run bash "${CI_SH}" check build-tools-smoke-coverage "${r}"
     [ "${status}" -eq 0 ]
 }
 
@@ -4595,9 +4638,25 @@ _smoke_coverage_fixture() {
         > "${r}/tools/build-tools/Dockerfile"
     printf '#!/usr/bin/env bash\nsmoke_test_image() {\n  required_tools=(\n    bash\n  )\n}\n' \
         > "${r}/scripts/untracked/select-build-tools-image.sh"
-    run bash "${CI_SH}" check build-tools-smoke-coverage "${r}"
+    printf 'build_toolchain:\n  build-tools:\n    smoke_tools:\n      - bash\n' \
+        > "${r}/build-manifest.yml"
+    CI_MANIFEST="${r}/build-manifest.yml" run bash "${CI_SH}" check build-tools-smoke-coverage "${r}"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"'docker buildx version' verified"* ]]
+}
+
+@test "check build-tools-smoke-coverage fails closed when the SOT lacks smoke_tools" {
+    # What: build-manifest.yml has no build_toolchain.build-tools.
+    #       smoke_tools entry at all.
+    # Why: the SOT is the owner now; its absence must fail closed,
+    #      not silently skip the SOT-direction check.
+    # From: Issue #1683
+    local r="${BATS_TEST_TMPDIR}/nosot"
+    _smoke_coverage_fixture "${r}"
+    printf 'build_toolchain:\n  build-tools: {}\n' > "${r}/build-manifest.yml"
+    CI_MANIFEST="${r}/build-manifest.yml" run bash "${CI_SH}" check build-tools-smoke-coverage "${r}"
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0025"* ]]
 }
 
 @test "check build-tools-smoke-coverage fails closed on a vacuous scan" {
@@ -5919,6 +5978,19 @@ _version_fixture_repo() {
     [[ "${output}" == *"CI-ERROR-VERSION-0010"* ]]
 }
 
+@test "version verify fails closed on a netdata aarch64 sha256 drift" {
+    # What: SOT sha256_aarch64 changed, Dockerfile default did not.
+    # Why: arm64 must be verified like x86_64, not silently skipped.
+    # From: Issue #1683
+    local m="${BATS_TEST_TMPDIR}/nd-sha-arm.yml"
+    sed 's/sha256_aarch64: 8cd056d64078c109409c08e30d55324c82e3855f9d8e4b304cacc7c612610e09/sha256_aarch64: deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/' \
+        "${CI_MANIFEST_SOURCE}" > "${m}"
+    CI_MANIFEST="${m}" run bash "${CI_SH}" version verify
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"CI-ERROR-VERSION-0010"* ]]
+    [[ "${output}" == *"netdata.sha256_aarch64"* ]]
+}
+
 @test "version verify fails closed on a missing SOT dhclient field" {
     # What: SOT dhclient.sha256_arm64 line removed.
     # Why: dhclient stays fail-closed on a blank field.
@@ -6065,15 +6137,15 @@ _version_fixture_repo() {
     [ "${before}" = "${after}" ]
 }
 
-@test "version sync touches only the two netdata ARG lines" {
+@test "version sync touches only the three netdata ARG lines" {
     # What: every other Dockerfile line must survive sync.
-    # Why: sync owns two values, never a broader rewrite.
+    # Why: sync owns three values, never a broader rewrite.
     # From: Issue #1683 | PR #1858
     local root; root="$(_version_fixture_repo)"
     local m="${BATS_TEST_TMPDIR}/nd-scope.yml"
     sed 's/version: v2.11.0/version: v2.99.0/' \
         "${CI_MANIFEST_SOURCE}" > "${m}"
-    local strip='/^ARG NETDATA_VERSION=/d;/^ARG NETDATA_X86_64_SHA256=/d'
+    local strip='/^ARG NETDATA_VERSION=/d;/^ARG NETDATA_X86_64_SHA256=/d;/^ARG NETDATA_AARCH64_SHA256=/d'
     local before after
     before="$(sed "${strip}" "${root}/services/netdata/Dockerfile")"
     CI_MANIFEST="${m}" CI_REPO_ROOT="${root}" \
