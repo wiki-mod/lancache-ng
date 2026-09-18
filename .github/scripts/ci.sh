@@ -5507,7 +5507,7 @@ _ci_compose_service_names() {
     if profiles="$(docker compose -f "${file}" config --profiles 2>&1)"; then
         :
     else
-        ci_log "[CI-ERROR-CHECK-0034]" "path=\"${file}\" reason=\"docker compose config --profiles failed: ${profiles}\""
+        printf '%s\n' "${profiles}" >&2
         return 2
     fi
     local -a profile_flags=()
@@ -5557,6 +5557,7 @@ _ci_check_logging_matrix() {
         if raw_services="$(_ci_compose_service_names "${cf}")"; then
             :
         else
+            ci_log "[CI-ERROR-CHECK-0034]" "path=\"${cf}\" reason=\"compose service lookup failed\""
             return 2
         fi
         local -a file_services=()
