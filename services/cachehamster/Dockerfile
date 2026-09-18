@@ -1,26 +1,23 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Runtime for lancache-cachehamster, the Steam cache-warming prefill
-# daemon. Scaffold stage: builds and runs the credential-store and
-# stream-fetch primitives only -- see services/cachehamster/src/main.rs's
-# own module doc comment for what is deliberately not yet implemented.
+
+# What: cachehamster Steam cache-warming prefill (scaffold)
+# Why: cred-store/stream-fetch primitives; deferred features
+# From: Issue #871
 
 # What: Base image pin, consumed from the version SOT.
 # Why: build-manifest.yml is the sole owner of the pin.
 # From: Issue #1683
 ARG ALPINE_IMAGE
 
-# Intentional ARG default (overridable at build time via --build-arg).
-# Actual digest pinning for release builds is tracked in issue #508 (same
-# convention every other Rust service Dockerfile in this repo follows).
+# What: ARG default for build-tools (build-time override)
+# Why: digest pinning convention matches other Rust services
 ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
 FROM ${BUILD_TOOLS_IMAGE} AS cachehamster-builder
 
-# What: verifies the build-tools contract (Rust toolchain, musl cross
-#   target) is present before relying on any of it.
-# Why: fail closed rather than a confusing mid-build "command not found"
-#   if the pinned build-tools image ever regresses this contract.
+# What: verify build-tools Rust/musl contract
+# Why: fail closed on missing tools or targets
 # From: Issue #871
 RUN set -eu; \
     for tool in cargo rustc rustup; do \
@@ -35,42 +32,13 @@ RUN set -eu; \
     installed_musl_targets="$(rustup target list --installed)"; \
     grep -qx "$(cat /tmp/musl-target)" <<<"${installed_musl_targets}"
 
-# What: deliberately NOT wired up in this PR: sccache/distcc/ccache build
-#   acceleration (Rule-Ref: AG-CI-004/005/022), unlike
-#   services/dns/Dockerfile, services/ui/Dockerfile, and
-#   services/watchdog/Dockerfile's identical builder stages.
-# Why: those wiring blocks are non-trivial, project-specific shell that
-#   this PR's author could not build-test locally (no reachable Docker
-#   daemon in the authoring environment -- see this PR's own body). Per
-#   Rule-Ref: AG-CI-009, build acceleration is an optional CI/dev
-#   optimization, never a functional requirement -- this crate builds
-#   correctly without it, just without shared-cache speedup. Copying the
-#   existing accelerated block by hand without any way to test it risked
-#   a subtle, hard-to-debug CI failure for a marginal, deferrable benefit;
-#   left as an explicit, named follow-up rather than silently shipped
-#   either broken or absent with no explanation.
-# From: Issue #871
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src/ ./src/
-# What: exports CC/GCC/CXX/GXX explicitly before the build, matching
-#   services/dns/Dockerfile, services/ui/Dockerfile, and
-#   services/watchdog/Dockerfile's identical builder stages (every one of
-#   their code paths, accelerated or not, sets these -- see each file's own
-#   disable_distcc/disable_ccache fallback functions).
-# Why: this crate pulls in `ring` (a real C-dependency compile) via
-#   reqwest's rustls-tls feature, the same as those three crates' own
-#   documented reason. On this image `cc`/`gcc` already default to
-#   musl-targeting output (build-tools/Dockerfile's own comment: "musl is
-#   already this image's default rustc triple"), so this export is
-#   functionally a no-op today rather than a cross-compile requirement --
-#   kept explicit anyway, matching the other three services' convention of
-#   never relying on an implicit default for the C compiler a Rust build
-#   script will invoke.
-# From: Issue #871
-# What: trusts the LAN proxy CA for this build RUN only.
-# Why: cargo fetches crates.io via the intercepting proxy.
-# From: Issue #1671
+
+# What: cargo build with CC/GCC/CXX/GXX export and proxy CA
+# Why: C-dep (ring); selfhosted proxy; no build acceleration
+# From: Issue #871 | Issue #1671
 RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -eu; \
     if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
       cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig; \
@@ -86,14 +54,8 @@ FROM ${ALPINE_IMAGE}
 
 LABEL org.opencontainers.image.description="lancache-ng cachehamster: Steam cache-warming prefill daemon (scaffold, issue #871)."
 
-# `apk upgrade --no-cache` (before the package install, same layer)
-# upgrades packages already baked into the alpine:3.24 base layer itself
-# -- see services/dhcp-proxy/Dockerfile's identical comment/block for the
-# full rationale.
-# What: declares APT_CACHE_BUST right before the RUN it busts.
-# Why: without this, BuildKit's cache has no wall-clock expiry and can
-#   replay a stale apk upgrade forever; see tools/build-tools/Dockerfile's
-#   identical ARG for the full rationale.
+# What: declares APT_CACHE_BUST before apk upgrade/add RUN
+# Why: BuildKit cache expires to ensure fresh updates
 # From: Issue #871
 ARG APT_CACHE_BUST=""
 
@@ -102,22 +64,16 @@ ARG APT_CACHE_BUST=""
 # From: Issue #1095
 RUN sed -i 's|^https://|http://|' /etc/apk/repositories
 
+# What: apk upgrade base-layer; add ca-certs for public CDN
+# Why: ca-certs needed for Steam CDN via rustls-tls
 RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
     apk upgrade --no-cache && \
     apk add --no-cache ca-certificates
-# ca-certificates: this crate's reqwest client uses plain rustls-tls
-# (public webpki roots layered on top of this image's OS trust store is
-# not needed the way services/watchdog's rustls-tls-native-roots choice
-# is -- see services/cachehamster/Cargo.toml's own comment on that
-# distinction), talking to Steam's public CDN over the public Internet CA
-# chain.
 
 COPY --from=cachehamster-builder /build/lancache-cachehamster-out /usr/local/bin/lancache-cachehamster
 
-# Fixed uid/gid 10001, matching services/ui/Dockerfile's and
-# services/watchdog/Dockerfile's existing `lancache` account of the same
-# name/id -- this service never needs root (no privileged Docker/network
-# operations, unlike watchdog's own restart/health-check duties).
+# What: adduser lancache 10001; mount /data; set user
+# Why: unprivileged account, matches ui/watchdog lancache
 RUN addgroup -g 10001 lancache && \
     adduser -D -H -u 10001 -G lancache -s /sbin/nologin lancache && \
     mkdir -p /data && \
