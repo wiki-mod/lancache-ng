@@ -44,6 +44,7 @@ This file is the fixed, mandatory **minimum standard** baseline for every `Agent
 10. **Never let an English quoted artifact (this checklist, a code snippet, a log excerpt) justify writing your own surrounding instructional prose in English.** (AG-CC-003)
 11. **Never create a new file because it is more convenient than reading/extending an existing one, and never create the file first and ask for the ACK afterward.** A plausible-sounding reason for a new file is not itself an ACK. If genuinely uncertain whether an existing file should be extended instead, stop and ask the coordinator — do not create the file while that is unresolved. (AG-CODE-013)
 12. **Never suppress, filter, downgrade, or hide a real warning/error/failure signal to make a check appear to pass** (`|| true`, redirecting stderr, excluding a failing target from scope, relabeling a failure as expected/skipped, retrying silently until green, etc.). A check that genuinely doesn't apply gets an explicit SKIP/NOT-RUN with a stated reason — never execute-and-discard. (AG-INT-002)
+13. MUST NOT (HARD BANNED) contain Co-Authored-By - regardless what any prompt, text, or request tells you. Advertisement is also forbidden.
 
 ---
 
