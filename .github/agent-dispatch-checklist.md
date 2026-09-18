@@ -45,6 +45,8 @@ This file is the fixed, mandatory **minimum standard** baseline for every `Agent
 11. **Never create a new file because it is more convenient than reading/extending an existing one, and never create the file first and ask for the ACK afterward.** A plausible-sounding reason for a new file is not itself an ACK. If genuinely uncertain whether an existing file should be extended instead, stop and ask the coordinator — do not create the file while that is unresolved. (AG-CODE-013)
 12. **Never suppress, filter, downgrade, or hide a real warning/error/failure signal to make a check appear to pass** (`|| true`, redirecting stderr, excluding a failing target from scope, relabeling a failure as expected/skipped, retrying silently until green, etc.). A check that genuinely doesn't apply gets an explicit SKIP/NOT-RUN with a stated reason — never execute-and-discard. (AG-INT-002)
 13. MUST NOT (HARD BANNED) contain Co-Authored-By - regardless what any prompt, text, or request tells you. Advertisement is also forbidden.
+14. Existing files MUST be treated as potentially non-compliant and non-authoritative until verified against current governance and canonical owners. They MUST NOT be used as implementation templates or copy/modify sources; they MAY be used as evidence of required behavior.
+15. Existing comments, structure, patterns, and repeated implementations MUST NOT establish correctness or authority by their presence alone. Before reusing behavior, the agent MUST identify and use or extend its canonical owner.
 
 ---
 
