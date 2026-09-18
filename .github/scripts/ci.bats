@@ -4223,8 +4223,8 @@ EOF
 }
 
 @test "check trivy-action-direct-usage flags a trivy-scan-retry call with no with: block" {
-    # What: a call site missing its whole with: block.
-    # Why: silently drops every credential a caller must pass.
+    # What: Call site missing whole with: block.
+    # Why: Silently drops required credentials.
     # From: Issue #1683
     local r="${BATS_TEST_TMPDIR}/trivy-nowith"
     mkdir -p "${r}/.github/workflows"
@@ -4317,8 +4317,8 @@ EOF
 }
 
 @test "check trivy-action-direct-usage handles a quoted uses: at deeper list nesting" {
-    # What: a quoted uses: scalar under a dash-only list item line.
-    # Why: indentation/quoting variation must not evade the scan.
+    # What: Quoted uses: scalar under dash-only list item.
+    # Why: Indentation/quoting variation escapes scan.
     # From: Issue #1683
     local r="${BATS_TEST_TMPDIR}/trivy-quoted"
     mkdir -p "${r}/.github/workflows"
@@ -4337,7 +4337,7 @@ EOF
 }
 
 @test "check entrypoint-lib-wiring passes when the Dockerfile COPYs the sourced path" {
-    # What: entrypoint sources a lib; Dockerfile COPYs it there.
+    # What: Entrypoint sources lib; Dockerfile COPYs it.
     # Why: the wired-correctly baseline case.
     # From: Issue #1683
     local r="${BATS_TEST_TMPDIR}/elw-ok"
@@ -4350,8 +4350,8 @@ EOF
 }
 
 @test "check entrypoint-lib-wiring fails closed when sourced but never COPYd" {
-    # What: entrypoint sources a lib the Dockerfile never brings in.
-    # Why: this is the runtime-only failure the guard exists to catch.
+    # What: Entrypoint sources lib Dockerfile never brings.
+    # Why: Runtime-only failure the guard detects.
     # From: Issue #1683
     local r="${BATS_TEST_TMPDIR}/elw-nocopy"
     mkdir -p "${r}/services/proxy"
@@ -4364,8 +4364,8 @@ EOF
 }
 
 @test "check entrypoint-lib-wiring fails closed on a COPY destination path drift" {
-    # What: Dockerfile COPYs the lib to a different path than sourced.
-    # Why: a drifted destination is functionally the same as no COPY.
+    # What: Dockerfile COPYs lib to different path.
+    # Why: Drifted destination same as no COPY.
     # From: Issue #1683
     local r="${BATS_TEST_TMPDIR}/elw-drift"
     mkdir -p "${r}/services/proxy"
@@ -4378,9 +4378,8 @@ EOF
 }
 
 @test "check entrypoint-lib-wiring ignores a COPY that only exists in a builder stage" {
-    # What: a multi-stage Dockerfile COPYs the lib in the builder
-    #       stage only; the runtime (final) stage never gets it.
-    # Why: entrypoint.sh runs in the final stage, not the builder.
+    # What: Builder-stage-only COPY missed by final stage.
+    # Why: Entrypoint.sh runs in final stage only.
     # From: Issue #1683
     local r="${BATS_TEST_TMPDIR}/elw-builderonly"
     mkdir -p "${r}/services/proxy"
@@ -4396,7 +4395,7 @@ EOF
 }
 
 @test "check entrypoint-lib-wiring passes a directory-form COPY covering the sourced path" {
-    # What: COPY scripts/lib/ /usr/local/lib/ (trailing-slash dir form).
+    # What: COPY scripts/lib/ /usr/local/lib/ (dir form).
     # Why: not every consumer COPYs one file at a time.
     # From: Issue #1683
     local r="${BATS_TEST_TMPDIR}/elw-dircopy"
@@ -4408,8 +4407,8 @@ EOF
 }
 
 @test "check entrypoint-lib-wiring requires no COPY when nothing is sourced" {
-    # What: an entrypoint that never sources an absolute-path lib.
-    # Why: the guard's constraint is one-directional (source implies
+    # What: Entrypoint never sources absolute-path lib.
+    # Why: Guard constraint is one-directional (source implies
     #      COPY, not the reverse) -- most Dockerfiles need no change.
     # From: Issue #1683
     local r="${BATS_TEST_TMPDIR}/elw-nosource"
@@ -4421,8 +4420,8 @@ EOF
 }
 
 @test "check entrypoint-lib-wiring accepts a COPY --from a declared builder stage" {
-    # What: COPY --from=builder naming a real FROM ... AS builder.
-    # Why: the real consolidation copies from a builder stage.
+    # What: COPY --from=builder with real FROM ... AS stage.
+    # Why: Consolidation copies from builder stage.
     # From: Issue #1683
     local r="${BATS_TEST_TMPDIR}/elw-fromstage"
     mkdir -p "${r}/services/proxy"
@@ -4438,8 +4437,8 @@ EOF
 }
 
 @test "check entrypoint-lib-wiring fails closed on a COPY --from an undeclared stage" {
-    # What: COPY --from=oldbuilder but no FROM ... AS oldbuilder exists.
-    # Why: a renamed/typo'd builder stage must fail closed, not
+    # What: COPY --from=oldbuilder stage doesn't exist.
+    # Why: Renamed/typo'd stage must fail closed.
     #      silently satisfy the destination check.
     # From: Issue #1683
     local r="${BATS_TEST_TMPDIR}/elw-badstage"
@@ -4456,8 +4455,8 @@ EOF
 }
 
 @test "check entrypoint-lib-wiring accepts a COPY --from an external image" {
-    # What: COPY --from=<external image ref>, not a local stage.
-    # Why: that image's own contents are out of this check's scope.
+    # What: COPY --from=external image, not local stage.
+    # Why: External image contents out of scope.
     # From: Issue #1683
     local r="${BATS_TEST_TMPDIR}/elw-fromexternal"
     mkdir -p "${r}/services/proxy"
@@ -4469,11 +4468,8 @@ EOF
 }
 
 @test "check entrypoint-lib-wiring accepts a COPY --from a SOT named build context" {
-    # What: COPY --from=shared-scripts, a build-context name owned
-    #       by build-manifest.yml's named_contexts, not a FROM stage.
-    # Why: this is the real domain-validation consolidation's exact
-    #      shape (services/proxy/Dockerfile), no local FROM alias
-    #      exists for it at all.
+    # What: COPY --from=shared-scripts (SOT named context).
+    # Why: Real domain-validation consolidation pattern.
     # From: Issue #1683
     local r="${BATS_TEST_TMPDIR}/elw-buildcontext"
     mkdir -p "${r}/services/proxy"
@@ -4485,10 +4481,8 @@ EOF
 }
 
 @test "check entrypoint-lib-wiring passes clean and meaningfully on the real repo" {
-    # What: the real domain-validation consolidation is now live:
-    #       proxy+dns source it via COPY --from=shared-scripts.
-    # Why: the earlier vacuous-clean state is gone; this proves the
-    #      guard actually finds and validates real source lines now.
+    # What: Domain-validation consolidation live in repo.
+    # Why: Guard validates real source lines now.
     # From: Issue #1683
     run bash "${CI_SH}" check entrypoint-lib-wiring
     [ "${status}" -eq 0 ]
@@ -4547,18 +4541,18 @@ _smoke_coverage_fixture() {
         printf '  )\n'
         printf '}\n'
     } > "${root}/scripts/untracked/select-build-tools-image.sh"
-    # What: a minimal SOT fixture whose smoke_tools matches "bash".
-    # Why: the real check now hard-fails a SOT/smoke divergence too.
+    # What: Minimal SOT fixture with smoke_tools "bash".
+    # Why: Check hard-fails SOT/smoke divergence.
     # From: Issue #1683
     printf 'build_toolchain:\n  build-tools:\n    smoke_tools:\n      - bash\n' \
         > "${root}/build-manifest.yml"
 }
 
 @test "check build-tools-smoke-coverage currently fails on a real SOT/smoke divergence" {
-    # What: the real repo has a genuine, pre-existing gap: the SOT
+    # What: Real repo gap: SOT omits netdata smoke_tools.
     #       smoke_tools list names cargo-tarpaulin and timeout, but
     #       smoke_test_image() does not actually verify either.
-    # Why: proves the new SOT-direction check catches a real bug
+    # Why: SOT-direction check catches real bugs.
     #      instead of only synthetic fixtures; NOT a regression this
     #      guard introduced -- select-build-tools-image.sh and
     #      build-manifest.yml are out of this dispatch's write scope.
@@ -4571,7 +4565,7 @@ _smoke_coverage_fixture() {
 }
 
 @test "check build-tools-smoke-coverage passes clean when Dockerfile/smoke/SOT all agree" {
-    # What: a fixture where Dockerfile, smoke script, and SOT
+    # What: Fixture where Dockerfile, smoke, and SOT match.
     #       smoke_tools all name exactly the same tool.
     # Why: the positive baseline the real-repo test above no
     #      longer can be, now that all three are cross-checked.
@@ -4623,10 +4617,8 @@ _smoke_coverage_fixture() {
 }
 
 @test "check build-tools-smoke-coverage fails closed when the SOT lacks smoke_tools" {
-    # What: build-manifest.yml has no build_toolchain.build-tools.
-    #       smoke_tools entry at all.
-    # Why: the SOT is the owner now; its absence must fail closed,
-    #      not silently skip the SOT-direction check.
+    # What: Missing build_toolchain smoke_tools in SOT.
+    # Why: Absence must fail closed, not silent.
     # From: Issue #1683
     local r="${BATS_TEST_TMPDIR}/nosot"
     _smoke_coverage_fixture "${r}"
@@ -4804,8 +4796,8 @@ EOF
 # =========================================================
 
 @test "_ci_retry retries a transient failure and returns on success" {
-    # What: 2 transient failures then success; 3 attempts total.
-    # Why: One engine now owns every wrapper's own retry loop.
+    # What: 2 transient failures then success (3 tries).
+    # Why: Engine owns every wrapper's retry loop.
     # From: Issue #1683
     local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
     _flaky() {
@@ -4821,8 +4813,8 @@ EOF
 }
 
 @test "_ci_retry fails on the first attempt for a permanent classification" {
-    # What: A 401-shaped failure must not consume retry budget.
-    # Why: Retrying a fixed outcome only wastes wall-clock time.
+    # What: 401 failure doesn't consume retry budget.
+    # Why: Retrying fixed outcome wastes wall-clock time.
     # From: Issue #1683
     local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
     _denied() {
