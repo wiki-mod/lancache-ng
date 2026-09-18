@@ -3409,7 +3409,10 @@ _ci_apk_resolve() {
 # From: Issue #1683
 _ci_build_tools_resolve_signature() {
     local base packages arches arch av versions=""
-    base="$(_ci_build_tools_build_args --bare | sed -n 's/^ALPINE_IMAGE=//p')"
+    base="$(_ci_build_tools_build_args --bare | sed -n 's/^ALPINE_IMAGE=//p')" || {
+        ci_log "[CI-ERROR-BUILDTOOLS-0009]" "reason=\"no ALPINE_IMAGE from SOT; FAIL CLOSED\""
+        return 2
+    }
     if [ -z "${base}" ]; then
         ci_log "[CI-ERROR-BUILDTOOLS-0009]" "reason=\"no ALPINE_IMAGE from SOT; FAIL CLOSED\""
         return 2

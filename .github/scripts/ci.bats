@@ -2983,6 +2983,17 @@ netdata=sha256:n"
     [ -n "${output}" ]
 }
 
+@test "build-tools resolve-signature fails closed on a missing central base image" {
+    # What: missing base image must fail closed here.
+    # Why: errexit must not swallow the fail-closed path.
+    # From: Issue #1683
+    local m="${BATS_TEST_TMPDIR}/no-resolve-alpine.yml"
+    grep -v '^  alpine:' "${CI_MANIFEST_SOURCE}" > "${m}"
+    CI_MANIFEST="${m}" run bash "${CI_SH}" build-tools resolve-signature
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-BUILDTOOLS-0009"* ]]
+}
+
 @test "build-tools published-signature uses the injected reader" {
     # What: the registry read is injectable for tests.
     # Why: no live GHCR needed to prove the gate.
