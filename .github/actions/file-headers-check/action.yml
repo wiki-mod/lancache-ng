@@ -3,9 +3,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 name: File header / workflow size / review-chronology / dependabot-docker-base / trivy-action-direct-usage / short-sha-truncation checks
 description: >-
-  The six repository-hygiene checks shared by the self-hosted and
-  GitHub-hosted file-header jobs. Keeping the steps in one composite action
-  prevents the fallback path from silently enforcing a smaller policy set.
+  The six repository-hygiene checks build-push.yml's file-headers job
+  carries. Four now call the proven `ci.sh check` subcommand (file-headers,
+  workflow-line-limit, dependabot-docker-base-consistency, deny-short-sha);
+  review-chronology and trivy-action-direct-usage stay on their legacy
+  scripts pending further ci.sh interface work (Issue #1683).
 inputs:
   build-tools-image:
     description: Immutable build-tools image selected by the calling workflow
@@ -30,7 +32,7 @@ runs:
       run: >-
         docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work
         "${{ inputs.build-tools-image }}" timeout --kill-after=30s 5m
-        bash scripts/tracked/check-file-headers.sh
+        bash .github/scripts/ci.sh check file-headers
 
     # What: Checks workflow line/byte/run-block limits
     # Why: Enforces AG-CI-021 policy
@@ -40,7 +42,7 @@ runs:
       run: >-
         docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work
         "${{ inputs.build-tools-image }}" timeout --kill-after=30s 5m
-        bash scripts/untracked/check-workflow-line-limit.sh
+        bash .github/scripts/ci.sh check workflow-line-limit
 
     # What: Repo-wide review-chronology baseline check
     # Why: Push events need repo-wide guard; PR has diff-check
@@ -81,7 +83,7 @@ runs:
       run: >-
         docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work
         "${{ inputs.build-tools-image }}" timeout --kill-after=30s 5m
-        bash scripts/tracked/check-dependabot-docker-base-consistency.sh
+        bash .github/scripts/ci.sh check dependabot-docker-base-consistency
 
     # See scripts/untracked/check-trivy-action-direct-usage.sh's own header for why a
     # direct call site regresses the retry/auth/mirror fix
@@ -101,4 +103,4 @@ runs:
       run: >-
         docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work
         "${{ inputs.build-tools-image }}" timeout --kill-after=30s 5m
-        bash scripts/untracked/check-deny-short-sha.sh
+        bash .github/scripts/ci.sh check deny-short-sha
