@@ -5843,6 +5843,67 @@ _ci_check_trivy_action_direct_usage() {
     printf 'trivy-action-direct-usage=clean\n'
 }
 
+# What: True if a Dockerfile's final stage COPYs anything to dest.
+# Why: only the runtime stage's files exist when entrypoint runs.
+# From: Issue #1683
+_ci_dockerfile_copies_to() {
+    local dockerfile="$1" want="$2" line lineno=0 last_from=0 dest
+    local -a words real
+    while IFS= read -r line; do
+        lineno=$((lineno + 1))
+        case "${line}" in [Ff][Rr][Oo][Mm]\ *) last_from=${lineno} ;; esac
+    done < <(_ci_dockerfile_logical_lines "${dockerfile}")
+    lineno=0
+    while IFS= read -r line; do
+        lineno=$((lineno + 1))
+        [ "${lineno}" -ge "${last_from}" ] || continue
+        case "${line}" in [Cc][Oo][Pp][Yy]\ *) : ;; *) continue ;; esac
+        read -ra words <<< "${line}"
+        real=()
+        local w
+        for w in "${words[@]:1}"; do
+            case "${w}" in --*) continue ;; esac
+            real+=("${w}")
+        done
+        [ "${#real[@]}" -ge 2 ] || continue
+        dest="${real[$(( ${#real[@]} - 1 ))]}"
+        [ "${dest}" = "${want}" ] && return 0
+        case "${dest}" in */) [ "${dest}${want##*/}" = "${want}" ] && return 0 ;; esac
+    done < <(_ci_dockerfile_logical_lines "${dockerfile}")
+    return 1
+}
+
+# What: A sourced absolute-path lib must match a real COPY dest.
+# Why: source-not-embed drifts silently break only at runtime.
+# From: Issue #1683
+_ci_check_entrypoint_lib_wiring() {
+    local repo_root="${1:-${CI_REPO_ROOT}}"
+    local -a viol=() entrypoints
+    local ep svc dockerfile line lib_path
+
+    entrypoints=("${repo_root}"/services/*/entrypoint.sh "${repo_root}"/services/ui/docker-entrypoint.sh)
+    for ep in "${entrypoints[@]}"; do
+        [ -f "${ep}" ] || continue
+        svc="$(basename "$(dirname "${ep}")")"
+        dockerfile="${repo_root}/services/${svc}/Dockerfile"
+        while IFS= read -r line; do
+            [[ "${line}" =~ ^[[:space:]]*(\.|source)[[:space:]]+\"?(/[^\"[:space:]]+)\"?[[:space:]]*(\#.*)?$ ]] || continue
+            lib_path="${BASH_REMATCH[2]}"
+            if [ ! -f "${dockerfile}" ]; then
+                viol+=("services/${svc}: sources ${lib_path}, no Dockerfile found")
+                continue
+            fi
+            _ci_dockerfile_copies_to "${dockerfile}" "${lib_path}" ||
+                viol+=("services/${svc}/entrypoint.sh sources ${lib_path}: no matching final-stage COPY in ${dockerfile}")
+        done < "${ep}"
+    done
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0041]" "reason=\"entrypoint sources a lib its Dockerfile never COPYs\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'entrypoint-lib-wiring=clean\n'
+}
+
 # What: Route a source-hygiene check to its function.
 # Why: One owner per guard invariant; ci.bats calls it.
 # From: Issue #1683
@@ -5874,6 +5935,7 @@ ci_cmd_check() {
         idempotence-test-coverage) _ci_check_idempotence_test_coverage "$@" ;;
         logging-matrix) _ci_check_logging_matrix "$@" ;;
         trivy-action-direct-usage) _ci_check_trivy_action_direct_usage "$@" ;;
+        entrypoint-lib-wiring) _ci_check_entrypoint_lib_wiring "$@" ;;
         *)
             ci_log "[CI-ERROR-CHECK-0001]" "sub=\"${sub}\" reason=\"unknown check\""
             return 2

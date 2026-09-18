@@ -4359,6 +4359,99 @@ EOF
     [ "${status}" -eq 0 ]
 }
 
+@test "check entrypoint-lib-wiring passes clean on the real repo" {
+    # What: today's entrypoints embed libs, none sources one yet.
+    # Why: proves the rewrite against production state.
+    # From: Issue #1683
+    run bash "${CI_SH}" check entrypoint-lib-wiring
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"entrypoint-lib-wiring=clean"* ]]
+}
+
+@test "check entrypoint-lib-wiring passes when the Dockerfile COPYs the sourced path" {
+    # What: entrypoint sources a lib; Dockerfile COPYs it there.
+    # Why: the wired-correctly baseline case.
+    # From: Issue #1683
+    local r="${BATS_TEST_TMPDIR}/elw-ok"
+    mkdir -p "${r}/services/proxy"
+    printf '. /usr/local/lib/domain-validation.sh\n' > "${r}/services/proxy/entrypoint.sh"
+    printf 'FROM alpine:3.24\nCOPY scripts/lib/domain-validation.sh /usr/local/lib/domain-validation.sh\n' \
+        > "${r}/services/proxy/Dockerfile"
+    run bash "${CI_SH}" check entrypoint-lib-wiring "${r}"
+    [ "${status}" -eq 0 ]
+}
+
+@test "check entrypoint-lib-wiring fails closed when sourced but never COPYd" {
+    # What: entrypoint sources a lib the Dockerfile never brings in.
+    # Why: this is the runtime-only failure the guard exists to catch.
+    # From: Issue #1683
+    local r="${BATS_TEST_TMPDIR}/elw-nocopy"
+    mkdir -p "${r}/services/proxy"
+    printf '. /usr/local/lib/domain-validation.sh\n' > "${r}/services/proxy/entrypoint.sh"
+    printf 'FROM alpine:3.24\nRUN echo hi\n' > "${r}/services/proxy/Dockerfile"
+    run bash "${CI_SH}" check entrypoint-lib-wiring "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0041"* ]]
+    [[ "${output}" == *"no matching final-stage COPY"* ]]
+}
+
+@test "check entrypoint-lib-wiring fails closed on a COPY destination path drift" {
+    # What: Dockerfile COPYs the lib to a different path than sourced.
+    # Why: a drifted destination is functionally the same as no COPY.
+    # From: Issue #1683
+    local r="${BATS_TEST_TMPDIR}/elw-drift"
+    mkdir -p "${r}/services/proxy"
+    printf '. /usr/local/lib/domain-validation.sh\n' > "${r}/services/proxy/entrypoint.sh"
+    printf 'FROM alpine:3.24\nCOPY scripts/lib/domain-validation.sh /opt/lib/domain-validation.sh\n' \
+        > "${r}/services/proxy/Dockerfile"
+    run bash "${CI_SH}" check entrypoint-lib-wiring "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0041"* ]]
+}
+
+@test "check entrypoint-lib-wiring ignores a COPY that only exists in a builder stage" {
+    # What: a multi-stage Dockerfile COPYs the lib in the builder
+    #       stage only; the runtime (final) stage never gets it.
+    # Why: entrypoint.sh runs in the final stage, not the builder.
+    # From: Issue #1683
+    local r="${BATS_TEST_TMPDIR}/elw-builderonly"
+    mkdir -p "${r}/services/proxy"
+    printf '. /usr/local/lib/domain-validation.sh\n' > "${r}/services/proxy/entrypoint.sh"
+    cat > "${r}/services/proxy/Dockerfile" <<'EOF'
+FROM alpine:3.24 AS builder
+COPY scripts/lib/domain-validation.sh /usr/local/lib/domain-validation.sh
+FROM alpine:3.24
+RUN echo final
+EOF
+    run bash "${CI_SH}" check entrypoint-lib-wiring "${r}"
+    [ "${status}" -ne 0 ]
+}
+
+@test "check entrypoint-lib-wiring passes a directory-form COPY covering the sourced path" {
+    # What: COPY scripts/lib/ /usr/local/lib/ (trailing-slash dir form).
+    # Why: not every consumer COPYs one file at a time.
+    # From: Issue #1683
+    local r="${BATS_TEST_TMPDIR}/elw-dircopy"
+    mkdir -p "${r}/services/proxy"
+    printf '. /usr/local/lib/domain-validation.sh\n' > "${r}/services/proxy/entrypoint.sh"
+    printf 'FROM alpine:3.24\nCOPY scripts/lib/ /usr/local/lib/\n' > "${r}/services/proxy/Dockerfile"
+    run bash "${CI_SH}" check entrypoint-lib-wiring "${r}"
+    [ "${status}" -eq 0 ]
+}
+
+@test "check entrypoint-lib-wiring requires no COPY when nothing is sourced" {
+    # What: an entrypoint that never sources an absolute-path lib.
+    # Why: the guard's constraint is one-directional (source implies
+    #      COPY, not the reverse) -- most Dockerfiles need no change.
+    # From: Issue #1683
+    local r="${BATS_TEST_TMPDIR}/elw-nosource"
+    mkdir -p "${r}/services/proxy"
+    printf 'echo "nothing sourced here"\n' > "${r}/services/proxy/entrypoint.sh"
+    printf 'FROM alpine:3.24\nRUN echo hi\n' > "${r}/services/proxy/Dockerfile"
+    run bash "${CI_SH}" check entrypoint-lib-wiring "${r}"
+    [ "${status}" -eq 0 ]
+}
+
 @test "check changelog-direct-edit is clean when CHANGELOG.md is untouched" {
     # What: migrated from check-changelog-direct-edit.sh.
     # Why: rewritten in ci.sh; stays non-blocking always.
