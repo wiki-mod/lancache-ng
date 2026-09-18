@@ -26,17 +26,13 @@
 # volume, so whichever container boots first generates the value and every other
 # container reads that same value.
 #
-# It is not baked into the dns/dhcp/ui images through a shared Docker build
-# context (each of those Dockerfiles builds from its own service directory, the
-# same constraint documented for the known-good-snapshot library). Instead this
-# file is the single canonical copy, and services/dns/entrypoint.sh,
-# services/dhcp/entrypoint.sh, and services/ui/docker-entrypoint.sh each embed a
-# byte-identical copy of the function definitions below between
-# "# BEGIN shared-secret-bootstrap library" and "# END shared-secret-bootstrap
-# library" markers. tests/bats/shared_secret_bootstrap_sync.bats fails loudly if
-# any copy drifts. The nats service resolves the same way but inline in its
-# compose command (it has no service image/entrypoint of its own, and its
-# BusyBox shell escapes `$` as `$$` in YAML, so it cannot be byte-identical).
+# What: consumed at runtime by dns, dhcp, and ui entrypoints.
+# Why: shared-scripts context copies it into all three images.
+# From: Issue #1683
+#
+# The nats service resolves the same way but inline in its compose command
+# (it has no service image/entrypoint of its own, and its BusyBox shell
+# escapes `$` as `$$` in YAML, so it bind-mounts this same file instead).
 
 # What: lancache_shared_secret_dir — shared secret location
 # Why: Cross-container alignment via shared-secrets volume

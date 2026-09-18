@@ -4,10 +4,9 @@
 #
 # Cross-implementation parity coverage for secret/token placeholder detection
 # (issue #967). scripts/lib/shared-secret-bootstrap.sh's secret_is_placeholder
-# (canonical for shared secrets, embedded byte-identically into the
-# dns/dhcp/ui entrypoints -- already guarded by
-# tests/bats/shared_secret_bootstrap_sync.bats) and setup.sh's own, separately
-# maintained secret_value_is_placeholder are two independent bash
+# (canonical for shared secrets, sourced at runtime by the dns/dhcp/ui
+# entrypoints) and setup.sh's own, separately maintained
+# secret_value_is_placeholder are two independent bash
 # implementations; services/ui/src/main.rs's
 # secondary_registration_token_is_placeholder is a third, independent Rust
 # implementation checked the same way by that module's own

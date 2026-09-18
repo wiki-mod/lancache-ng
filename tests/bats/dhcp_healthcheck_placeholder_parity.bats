@@ -12,9 +12,7 @@
 # hand-rolled a different, weaker case pattern, so an operator whose placeholder
 # value was case/dash-varied got a permanently `unhealthy` container while Kea
 # ran fine on the real, shared-secret-resolved token. This test fails loudly if
-# the two ever diverge again or drift from secret_is_placeholder's verdict --
-# the same class of guard tests/bats/shared_secret_bootstrap_sync.bats provides
-# for the bash-side embedded copies.
+# the two ever diverge again or drift from secret_is_placeholder's verdict.
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"

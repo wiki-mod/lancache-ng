@@ -91,6 +91,11 @@ ARG no_proxy
 # From: Issue #1781 | PR #1783
 COPY --from=shared-scripts verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
 
+# What: copies the shared-secret-bootstrap library in.
+# Why: entrypoint.sh no longer embeds a byte-identical copy.
+# From: Issue #1683
+COPY --from=shared-scripts shared-secret-bootstrap.sh /usr/local/lib/shared-secret-bootstrap.sh
+
 # What: switches apk's own repositories to plain http.
 # Why: Squid caches http; signed indices keep integrity.
 # From: Issue #1095
