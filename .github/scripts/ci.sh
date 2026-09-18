@@ -3245,6 +3245,46 @@ DHSHAS
     printf '%s' "${out}"
 }
 
+# What: Emit ALPINE_IMAGE (+ per-service external_image pin)
+#       for one product-service target from build-manifest.yml.
+# Why: Single base-image owner; service Dockerfiles pin none.
+# From: Issue #1683
+_ci_service_build_args() {
+    local service="$1" fmt="${2:-}" prefix="--build-arg " out="" val ext ext_argname
+    [ "${fmt}" = "--bare" ] && prefix=""
+    val="$(_ci_manifest_scalar '^  alpine:')"
+    val="${val%\"}"; val="${val#\"}"
+    if [ -z "${val}" ]; then
+        ci_log "[CI-ERROR-BUILDARGS-0007]" "arg=\"ALPINE_IMAGE\" service=\"${service}\" key=\"base_images.alpine\" reason=\"missing central base image; FAIL CLOSED\""
+        return 2
+    fi
+    out="${out}${prefix}ALPINE_IMAGE=${val}"$'\n'
+    # What: a manifest-declared external_image gets its own pin.
+    # Why: syslog needs FLUENT_BIT_IMAGE; netdata (no
+    #      external_image entry) keeps its own baked-in
+    #      NETDATA_VERSION/NETDATA_X86_64_SHA256 ARG defaults
+    #      untouched -- this only ever adds ALPINE_IMAGE for it.
+    # From: Issue #1683
+    ext="$(_ci_block_entry_field services "${service}" external_image)"
+    if [ -n "${ext}" ]; then
+        case "${ext}" in
+            fluent_bit) ext_argname="FLUENT_BIT_IMAGE" ;;
+            *)
+                ci_log "[CI-ERROR-BUILDARGS-0008]" "service=\"${service}\" external_image=\"${ext}\" reason=\"no known build-arg mapping; FAIL CLOSED\""
+                return 2
+                ;;
+        esac
+        val="$(_ci_manifest_scalar "^  ${ext}:")"
+        val="${val%\"}"; val="${val#\"}"
+        if [ -z "${val}" ]; then
+            ci_log "[CI-ERROR-BUILDARGS-0007]" "arg=\"${ext_argname}\" service=\"${service}\" key=\"base_images.${ext}\" reason=\"missing central external image; FAIL CLOSED\""
+            return 2
+        fi
+        out="${out}${prefix}${ext_argname}=${val}"$'\n'
+    fi
+    printf '%s' "${out}"
+}
+
 # What: Emit SOT-owned docker build-args for a target.
 # Why: One version owner; the Dockerfile pins nothing.
 # From: Issue #1683
@@ -3257,10 +3297,18 @@ ci_cmd_build_args() {
     esac
     case "${service}" in
         build-tools) _ci_build_tools_build_args "${fmt}" "${platform}" ;;
-        # What: Non-toolchain targets carry no SOT arg.
-        # Why: Only build-tools pins central versions now.
+        # What: any manifest-listed product service gets args.
+        # Why: services list is manifest-owned; no 2nd copy here.
+        #      Capture before grep -q: a live producer piped into
+        #      an early-exiting consumer is pipefail-unsafe.
         # From: Issue #1683
-        *) : ;;
+        *)
+            local svc_list
+            svc_list="$(ci_services)" || return 2
+            if printf '%s\n' "${svc_list}" | grep -qxF -- "${service}"; then
+                _ci_service_build_args "${service}" "${fmt}"
+            fi
+            ;;
     esac
 }
 
