@@ -4963,6 +4963,101 @@ _ci_check_proxy_cache_env_doc_drift() {
     printf 'proxy-cache-env-doc-drift=clean scanned=%s checked=%s\n' "${scanned}" "${checked}"
 }
 
+# What: Fail if a Dockerfile tool is missing smoke coverage.
+# Why: a consumer tool must be verified, not just built.
+# From: Issue #1683 | PR #1858
+_ci_check_build_tools_smoke_coverage() {
+    local repo_root="${1:-${CI_REPO_ROOT}}"
+    local dockerfile="${repo_root}/tools/build-tools/Dockerfile"
+    local smoke_script="${repo_root}/scripts/untracked/select-build-tools-image.sh"
+    if [ ! -f "${dockerfile}" ]; then
+        ci_log "[CI-ERROR-CHECK-0024]" "path=\"${dockerfile}\" reason=\"Dockerfile not found\""
+        return 2
+    fi
+    if [ ! -f "${smoke_script}" ]; then
+        ci_log "[CI-ERROR-CHECK-0024]" "path=\"${smoke_script}\" reason=\"smoke script not found\""
+        return 2
+    fi
+    # What: both files declare a plain required_tools=(...).
+    # Why: one shared extractor, no per-file duplicate.
+    # shellcheck disable=SC2016
+    local extract_awk='
+        /required_tools=\(/ { in_arr = 1; next }
+        in_arr && /\)/ { in_arr = 0 }
+        in_arr {
+            gsub(/\\/, ""); gsub(/^[ \t]+|[ \t]+$/, "")
+            if ($0 != "" && $0 !~ /^#/) print
+        }
+    '
+    local dockerfile_tools smoke_tools
+    dockerfile_tools="$(awk "${extract_awk}" "${dockerfile}" | sort -u | tr '\n' ' ')"
+    smoke_tools="$(awk "${extract_awk}" "${smoke_script}" | sort -u | tr '\n' ' ')"
+    if [ -z "${dockerfile_tools// /}" ]; then
+        ci_log "[CI-ERROR-CHECK-0025]" "path=\"${dockerfile}\" reason=\"no required_tools extracted; vacuous\""
+        return 2
+    fi
+    if [ -z "${smoke_tools// /}" ]; then
+        ci_log "[CI-ERROR-CHECK-0025]" "path=\"${smoke_script}\" reason=\"no required_tools extracted; vacuous\""
+        return 2
+    fi
+    # What: build-only/base/opt-in tools the smoke skips.
+    # Why: a reviewed exclusion, not a silent gap (#822).
+    # From: Issue #1683 | PR #1858
+    local excluded=" cargo-tarpaulin dhclient ar ranlib cc c++ g++ clang ld.lld make cmake pkg-config git gpg awk basename cat chgrp chmod chown cp curl dirname dpkg find flock getent grep gzip install mkdir mktemp mv printf ps rm sed sha256sum sort tar tee test timeout xargs xz musl-gcc "
+    local -a viol=()
+    local tool
+    for tool in ${dockerfile_tools}; do
+        case " ${smoke_tools} " in *" ${tool} "*) continue ;; esac
+        case "${excluded}" in *" ${tool} "*) continue ;; esac
+        viol+=("'${tool}' verified by the Dockerfile but not covered by smoke_test_image() nor excluded")
+    done
+    local cap
+    for cap in "docker buildx" "docker compose"; do
+        if grep -qF "${cap} version" "${dockerfile}" && ! grep -qF "${cap} version" "${smoke_script}"; then
+            viol+=("'${cap} version' verified by the Dockerfile but not by smoke_test_image()")
+        fi
+    done
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0026]" "reason=\"build-tools smoke coverage gap (issues #790/#791/#822 Pattern G)\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    # What: informational note; the SOT has a 3rd, own list.
+    # Why: visible (AG-INT-002), never enforced here.
+    # From: Issue #1683 | PR #1858
+    local sot_tools extra_count=0 t
+    sot_tools=" $(_ci_build_tools_smoke_tools 2>/dev/null | tr '\n' ' ') "
+    if [ -n "${sot_tools// /}" ]; then
+        for t in ${smoke_tools}; do
+            case "${sot_tools}" in *" ${t} "*) ;; *) extra_count=$((extra_count + 1)) ;; esac
+        done
+        if [ "${extra_count}" -gt 0 ]; then
+            ci_log "[CI-INFO-CHECK-0002]" "reason=\"smoke_test_image() covers ${extra_count} tool(s) the SOT smoke_tools list does not (informational only)\""
+        fi
+    fi
+    printf 'build-tools-smoke-coverage=clean\n'
+}
+
+# What: Warn (never fail) on editing CHANGELOG.md directly.
+# Why: usually unintended; risks a merge-conflict cascade.
+# From: Issue #1683 | PR #1858
+_ci_check_changelog_direct_edit() {
+    local -a changed=("$@")
+    local path edited=0
+    for path in "${changed[@]}"; do
+        [ "${path}" = "CHANGELOG.md" ] && { edited=1; break; }
+    done
+    if [ "${edited}" -eq 0 ]; then
+        printf 'changelog-direct-edit=clean\n'
+        return 0
+    fi
+    if jq -e 'index("release") != null' <<<"${PR_LABELS_JSON:-[]}" >/dev/null 2>&1; then
+        ci_log "[CI-INFO-CHECK-0001]" "reason=\"CHANGELOG.md edited with release label; expected\""
+    else
+        ci_log "[CI-INFO-CHECK-0001]" "reason=\"CHANGELOG.md edited directly outside the release flow (issue #893); warn-only\""
+    fi
+    printf 'changelog-direct-edit=warn\n'
+}
+
 # What: Route a source-hygiene check to its function.
 # Why: One owner per guard invariant; ci.bats calls it.
 # From: Issue #1683
@@ -4988,6 +5083,8 @@ ci_cmd_check() {
         naming-consistency) _ci_check_naming_consistency "$@" ;;
         compose-healthchecks) _ci_check_compose_healthchecks "$@" ;;
         proxy-cache-env-doc-drift) _ci_check_proxy_cache_env_doc_drift "$@" ;;
+        changelog-direct-edit) _ci_check_changelog_direct_edit "$@" ;;
+        build-tools-smoke-coverage) _ci_check_build_tools_smoke_coverage "$@" ;;
         *)
             ci_log "[CI-ERROR-CHECK-0001]" "sub=\"${sub}\" reason=\"unknown check\""
             return 2

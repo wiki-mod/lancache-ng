@@ -3586,6 +3586,128 @@ EOF
     [[ "${output}" == *"scanned=1 checked=0"* ]]
 }
 
+@test "check changelog-direct-edit is clean when CHANGELOG.md is untouched" {
+    # What: migrated from check-changelog-direct-edit.sh.
+    # Why: rewritten in ci.sh; stays non-blocking always.
+    # From: Issue #1683 | PR #1858
+    run bash "${CI_SH}" check changelog-direct-edit "foo.txt" "bar.md"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"changelog-direct-edit=clean"* ]]
+}
+
+@test "check changelog-direct-edit warns without the release label" {
+    # What: a direct CHANGELOG.md edit, no exemption label.
+    # Why: issue #893: warn-only, never blocks the build.
+    # From: Issue #1683 | PR #1858
+    run bash "${CI_SH}" check changelog-direct-edit "CHANGELOG.md"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"CI-INFO-CHECK-0001"* ]]
+    [[ "${output}" == *"warn-only"* ]]
+    [[ "${output}" == *"changelog-direct-edit=warn"* ]]
+}
+
+@test "check changelog-direct-edit notices the release label exemption" {
+    # What: same edit, but the PR carries the release label.
+    # Why: the documented manual release-notes exemption.
+    # From: Issue #1683 | PR #1858
+    PR_LABELS_JSON='["release"]' \
+        run bash "${CI_SH}" check changelog-direct-edit "CHANGELOG.md"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"edited with release label; expected"* ]]
+}
+
+# What: builds a fixture Dockerfile + smoke script pair.
+# Why: shared by the build-tools-smoke-coverage tests below.
+# From: Issue #1683 | PR #1858
+_smoke_coverage_fixture() {
+    local root="$1" extra_dockerfile_tool="${2:-}"
+    mkdir -p "${root}/tools/build-tools" "${root}/scripts/untracked"
+    {
+        printf 'FROM alpine\n'
+        printf 'RUN true\n'
+        printf 'required_tools=(\n'
+        printf '  bash\n'
+        [ -n "${extra_dockerfile_tool}" ] && printf '  %s\n' "${extra_dockerfile_tool}"
+        printf ')\n'
+    } > "${root}/tools/build-tools/Dockerfile"
+    {
+        printf '#!/usr/bin/env bash\n'
+        printf 'smoke_test_image() {\n'
+        printf '  required_tools=(\n'
+        printf '    bash\n'
+        printf '  )\n'
+        printf '}\n'
+    } > "${root}/scripts/untracked/select-build-tools-image.sh"
+}
+
+@test "check build-tools-smoke-coverage passes clean on the real repo" {
+    # What: migrated from check-build-tools-smoke-coverage.
+    # Why: rewritten in ci.sh; the real files must pass.
+    # From: Issue #1683 | PR #1858
+    run bash "${CI_SH}" check build-tools-smoke-coverage
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"build-tools-smoke-coverage=clean"* ]]
+}
+
+@test "check build-tools-smoke-coverage fails an uncovered tool" {
+    # What: a Dockerfile tool, absent from smoke/exclusions.
+    # Why: issue #790/#791/#822's exact failure shape.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/uncovered"
+    _smoke_coverage_fixture "${r}" newtool
+    run bash "${CI_SH}" check build-tools-smoke-coverage "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0026"* ]]
+    [[ "${output}" == *"'newtool' verified by the Dockerfile"* ]]
+}
+
+@test "check build-tools-smoke-coverage allows an excluded tool" {
+    # What: a build tool on the reviewed exclusion list.
+    # Why: excluded tools must never trip the gap error.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/excluded"
+    _smoke_coverage_fixture "${r}" make
+    run bash "${CI_SH}" check build-tools-smoke-coverage "${r}"
+    [ "${status}" -eq 0 ]
+}
+
+@test "check build-tools-smoke-coverage fails an uncovered docker capability" {
+    # What: Dockerfile checks docker buildx, smoke does not.
+    # Why: array-only diffing can't see a subcommand check.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/cap"
+    mkdir -p "${r}/tools/build-tools" "${r}/scripts/untracked"
+    printf 'FROM alpine\nrequired_tools=(\n  bash\n)\ndocker buildx version\n' \
+        > "${r}/tools/build-tools/Dockerfile"
+    printf '#!/usr/bin/env bash\nsmoke_test_image() {\n  required_tools=(\n    bash\n  )\n}\n' \
+        > "${r}/scripts/untracked/select-build-tools-image.sh"
+    run bash "${CI_SH}" check build-tools-smoke-coverage "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"'docker buildx version' verified"* ]]
+}
+
+@test "check build-tools-smoke-coverage fails closed on a vacuous scan" {
+    # What: a Dockerfile with no required_tools array.
+    # Why: mirrors the legacy script's anti-vacuous guard.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/vacuous"
+    mkdir -p "${r}/tools/build-tools" "${r}/scripts/untracked"
+    printf 'FROM alpine\n' > "${r}/tools/build-tools/Dockerfile"
+    printf '#!/usr/bin/env bash\n' > "${r}/scripts/untracked/select-build-tools-image.sh"
+    run bash "${CI_SH}" check build-tools-smoke-coverage "${r}"
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0025"* ]]
+}
+
+@test "check build-tools-smoke-coverage fails closed with no files" {
+    # What: neither expected file exists at the given root.
+    # Why: a missing input must never silently pass.
+    # From: Issue #1683 | PR #1858
+    run bash "${CI_SH}" check build-tools-smoke-coverage "${BATS_TEST_TMPDIR}/nope"
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0024"* ]]
+}
+
 @test "docker-build builds a per-identity per-arch tag via buildx" {
     # What: ci.sh executes the build; YAML only calls it.
     # Why: engine owns execution, orchestrator just calls.
