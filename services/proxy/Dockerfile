@@ -27,7 +27,11 @@
 # `--with-stream --with-stream_ssl_preread_module` compiled in statically,
 # matching the Debian package exactly.
 #
-FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+# What: Base image pin, consumed from the version SOT.
+# Why: build-manifest.yml is the sole owner of the pin.
+# From: Issue #1683
+ARG ALPINE_IMAGE
+FROM ${ALPINE_IMAGE}
 
 LABEL org.opencontainers.image.description="nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic."
 

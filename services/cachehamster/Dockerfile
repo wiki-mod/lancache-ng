@@ -6,6 +6,11 @@
 # stream-fetch primitives only -- see services/cachehamster/src/main.rs's
 # own module doc comment for what is deliberately not yet implemented.
 
+# What: Base image pin, consumed from the version SOT.
+# Why: build-manifest.yml is the sole owner of the pin.
+# From: Issue #1683
+ARG ALPINE_IMAGE
+
 # Intentional ARG default (overridable at build time via --build-arg).
 # Actual digest pinning for release builds is tracked in issue #508 (same
 # convention every other Rust service Dockerfile in this repo follows).
@@ -77,7 +82,7 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -eu; \
     cp "target/${musl_target}/release/lancache-cachehamster" /build/lancache-cachehamster-out; \
     if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
-FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+FROM ${ALPINE_IMAGE}
 
 LABEL org.opencontainers.image.description="lancache-ng cachehamster: Steam cache-warming prefill daemon (scaffold, issue #871)."
 

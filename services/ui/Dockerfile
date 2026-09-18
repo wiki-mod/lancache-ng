@@ -10,6 +10,11 @@
 # only carries the compiled binary, its Tera templates, and the entrypoint
 # script.
 
+# What: Base image pin, consumed from the version SOT.
+# Why: build-manifest.yml is the sole owner of the pin.
+# From: Issue #1683
+ARG ALPINE_IMAGE
+
 # Intentional ARG default (overridable at build time via --build-arg).
 # Actual digest pinning for release builds is tracked in issue #508.
 ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
@@ -601,10 +606,10 @@ RUN --mount=type=secret,id=sccache_redis_url \
 
 # ── Runtime image ──────────────────────────────────────────────────────────────
 # Alpine base (issue #815): replaces the prior debian:trixie-slim final
-# stage. Same pinned alpine:3.24 digest already used by services/dhcp,
-# services/dhcp-proxy, services/watchdog, services/ntp, and services/dns.
+# stage. Same ALPINE_IMAGE build-arg (from build-manifest.yml's SOT pin,
+# issue #1683) that every other service Dockerfile in this repo consumes.
 
-FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+FROM ${ALPINE_IMAGE}
 
 LABEL org.opencontainers.image.description="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
 
