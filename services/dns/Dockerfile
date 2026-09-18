@@ -3,6 +3,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # DNS service: PowerDNS (recursor + authoritative), nats-subscriber binary, Lua RPZ scripts.
 
+# What: Base image pin, consumed from the version SOT.
+# Why: build-manifest.yml is the sole owner of the pin.
+# From: Issue #1683
+ARG ALPINE_IMAGE
+
 # Intentional ARG default (overridable at build time via --build-arg).
 # Actual digest pinning for release builds is tracked in issue #508.
 ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
@@ -395,7 +400,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     fi; \
     cp "target/${musl_target}/release/nats-subscriber" /build/nats-subscriber-out
 
-FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+FROM ${ALPINE_IMAGE}
 
 LABEL org.opencontainers.image.description="PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing."
 
@@ -412,9 +417,10 @@ ARG no_proxy
 # Alpine base (issue #815, services/dns Alpine migration -- the last of the
 # three original Part A services, done after dhcp/dhcp-proxy per #815's own
 # recommended staging order, because of the nats-subscriber musl builder-stage
-# work above). Same pinned digest already used by services/dhcp,
-# services/dhcp-proxy, and services/watchdog (issues #815/#1234/#1346), so
-# every Alpine-based service in this project tracks one shared, intentional
+# work above). Same ALPINE_IMAGE build-arg already used by services/dhcp,
+# services/dhcp-proxy, and services/watchdog (issues #815/#1234/#1346), now
+# sourced from build-manifest.yml's single SOT pin (issue #1683), so every
+# Alpine-based service in this project tracks one shared, intentional
 # version bump rather than drifting independently.
 #
 # This is a real major-version jump for the authoritative server, not just a

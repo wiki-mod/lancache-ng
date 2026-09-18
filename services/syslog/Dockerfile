@@ -9,9 +9,14 @@
 # What: copies pinned fluent-bit binary + glibc to prefix.
 # Why: Alpine stable lacks fluent-bit; isolated avoids gaps.
 # From: Issue #1428 | PR #1431
-FROM cr.fluentbit.io/fluent/fluent-bit:3.2.10@sha256:d6dec000c4929a439562525728c708f6e99800d7ddc82efd6aa4f45f3a20b562 AS fluent-bit-src
+# What: Base image pins, consumed from the version SOT.
+# Why: build-manifest.yml is the sole owner of both pins.
+# From: Issue #1683
+ARG ALPINE_IMAGE
+ARG FLUENT_BIT_IMAGE
+FROM ${FLUENT_BIT_IMAGE} AS fluent-bit-src
 
-FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+FROM ${ALPINE_IMAGE}
 
 LABEL org.opencontainers.image.description="Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428)."
 
