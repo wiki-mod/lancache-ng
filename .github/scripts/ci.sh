@@ -5819,7 +5819,7 @@ _ci_check_trivy_action_direct_usage() {
                             wiring_viol+=("${file}:${lineno}: dockerhub-password not a real secrets./inputs.* ref")
                         ;;
                 esac
-            elif [[ "${stripped}" == *"uses:"*"trivy-scan-retry"* ]]; then
+            elif [[ "${stripped}" =~ ^uses:[[:space:]]*[\"\']?\./\.github/actions/trivy-scan-retry[\"\']?[[:space:]]*(#.*)?$ ]]; then
                 state=1; uses_line="${lineno}"; uses_col="${col}"
             fi
         done < "${repo_root}/${file}"

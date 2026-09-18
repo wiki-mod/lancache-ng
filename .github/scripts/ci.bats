@@ -4299,6 +4299,26 @@ EOF
     [[ "${output}" == *"dockerhub-password not a real"* ]]
 }
 
+@test "check trivy-action-direct-usage flags a secret name sharing the expected prefix" {
+    # What: secrets.DOCKERHUB_USERNAME_OLD is not secrets.DOCKERHUB_USERNAME.
+    # Why: an unanchored substring match would wrongly accept this.
+    # From: Issue #1683
+    local r="${BATS_TEST_TMPDIR}/trivy-prefix"
+    mkdir -p "${r}/.github/workflows"
+    cat > "${r}/.github/workflows/scan.yml" <<'EOF'
+jobs:
+  scan:
+    steps:
+      - uses: ./.github/actions/trivy-scan-retry
+        with:
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME_OLD }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+EOF
+    run bash "${CI_SH}" check trivy-action-direct-usage "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"dockerhub-username not a real"* ]]
+}
+
 @test "check trivy-action-direct-usage passes a forwarded inputs.* reference" {
     # What: a wrapper action forwarding its caller's own inputs.
     # Why: nested-composite-action forwarding is a real, legal shape.
