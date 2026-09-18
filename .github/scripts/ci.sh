@@ -4372,7 +4372,14 @@ _ci_review_chronology_excluded() {
 }
 
 # What: Diff-scoped file list between CHRONOLOGY_DIFF_BASE_* and GITHUB_SHA.
-# Why: PR-changed-files mode (Issue #1095 | PR #1686 parity).
+# Why: PR-changed-files mode (Issue #1095 | PR #1686 parity). Writes the
+#      caller's `files` array directly (dynamic scoping, not a return
+#      value) so the caller's own loop stays untouched either way.
+#      Diffs to a temp file first, not `mapfile < <(git diff ...)`:
+#      process substitution loses `git diff`'s exit status, which would
+#      silently turn a real `git diff` failure into an empty (clean)
+#      file list -- exactly the fail-open case the legacy script's own
+#      explicit exit-1 branch exists to prevent (AG-INT-002).
 # From: Issue #1683
 _ci_review_chronology_diff_files() {
     : "${CHRONOLOGY_DIFF_BASE_REF:?CHRONOLOGY_DIFF_BASE_REF is required}"
@@ -4385,8 +4392,16 @@ _ci_review_chronology_diff_files() {
         ci_log "[CI-ERROR-CHECK-0010]" "reason=\"diff base sha unreachable\""; return 2; }
     git cat-file -e "${GITHUB_SHA}^{commit}" || {
         ci_log "[CI-ERROR-CHECK-0010]" "reason=\"GITHUB_SHA unreachable\""; return 2; }
-    mapfile -d '' files < <(git diff -z --name-only --diff-filter=ACMRTUXB \
-        "${CHRONOLOGY_DIFF_BASE_SHA}" "${GITHUB_SHA}")
+    local diff_file
+    diff_file="$(mktemp)"
+    if ! git diff -z --name-only --diff-filter=ACMRTUXB \
+        "${CHRONOLOGY_DIFF_BASE_SHA}" "${GITHUB_SHA}" > "${diff_file}"; then
+        ci_log "[CI-ERROR-CHECK-0010]" "reason=\"git diff itself failed; not treating as a clean pass\""
+        rm -f "${diff_file}"
+        return 2
+    fi
+    mapfile -d '' files < "${diff_file}"
+    rm -f "${diff_file}"
 }
 
 # What: Flag review-chronology, stale line-refs, dup #N outside From:.

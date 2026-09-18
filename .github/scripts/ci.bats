@@ -3321,6 +3321,47 @@ netdata=sha256:n"
     [[ "${output}" == *"review-chronology=clean"* ]]
 }
 
+@test "check review-chronology diff-scoped mode fails closed when git diff itself fails" {
+    # What: a real `git diff` failure (not "no changes") must return 2,
+    #       never an empty (clean) file list.
+    # Why: mapfile < <(git diff ...) loses exit status via process
+    #      substitution -- this proves the mktemp-file capture instead
+    #      actually propagates the failure (AG-INT-002/AG-VAL-030).
+    # From: Issue #1683
+    local bare="${BATS_TEST_TMPDIR}/chronofail-origin.git" work="${BATS_TEST_TMPDIR}/chronofail-work"
+    git init --quiet --bare "${bare}"
+    git clone --quiet "${bare}" "${work}"
+    (
+        cd "${work}" || exit 1
+        git config user.email chrono-bats@example.invalid
+        git config user.name chrono-bats
+        git commit --quiet --allow-empty -m base
+        git push --quiet origin HEAD:refs/heads/chrono-base
+    )
+    cd "${work}"
+    local base_sha; base_sha="$(git rev-parse HEAD)"
+    git commit --quiet --allow-empty -m "second commit"
+    local head_sha; head_sha="$(git rev-parse HEAD)"
+    local real_git; real_git="$(command -v git)"
+    local stub_bin="${BATS_TEST_TMPDIR}/stubbin"
+    mkdir -p "${stub_bin}"
+    cat > "${stub_bin}/git" <<STUBEOF
+#!/usr/bin/env bash
+if [ "\$1" = "diff" ]; then
+    echo "simulated git diff failure" >&2
+    exit 128
+fi
+exec "${real_git}" "\$@"
+STUBEOF
+    chmod +x "${stub_bin}/git"
+    run env PATH="${stub_bin}:${PATH}" CHRONOLOGY_DIFF_BASE_SHA="${base_sha}" \
+        CHRONOLOGY_DIFF_BASE_REF=chrono-base GITHUB_SHA="${head_sha}" \
+        bash "${CI_SH}" check review-chronology
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"git diff itself failed"* ]]
+    [[ "${output}" != *"review-chronology=clean"* ]]
+}
+
 @test "check pipefail-early-exit flags grep -q, not plain sed -n" {
     # What: ci.sh owns the SIGPIPE check; bats calls it.
     # Why: only true early-exit consumers risk exit 141.
