@@ -3510,7 +3510,7 @@ Fixes the thing.
 }
 
 @test "check workflow-line-limit fails a workflow file over the line ceiling" {
-    # What: ci.sh owns the GitHub dispatch-cliff size ceiling.
+    # What: ci.sh owns GitHub dispatch-cliff size limit.
     # Why: GitHub drops runs for oversized workflow files.
     # From: Issue #1683
     local d="${BATS_TEST_TMPDIR}/wf"; mkdir -p "${d}"
@@ -3626,7 +3626,7 @@ EOF
 
 @test "check governance-guards flags a stale TODO on a closed issue" {
     # What: ci.sh owns the governance scan; bats calls it.
-    # Why: a TODO(#N) on a closed issue is stale, must fail loud.
+    # Why: TODO on closed issue is stale, must fail loud.
     # From: Issue #1683
     printf '# TODO(#42): revisit once fixed\n' > "${BATS_TEST_TMPDIR}/stale.sh"
     CI_GOVERNANCE_ISSUE_STATE='42=closed' \
@@ -3639,8 +3639,8 @@ EOF
 }
 
 @test "check governance-guards requires an open Refs issue for partial-scope text" {
-    # What: partial-scope language needs a named open remainder.
-    # Why: prevents silently merging a known-incomplete change.
+    # What: Partial-scope text needs open issue reference.
+    # Why: Prevent merging known-incomplete changes.
     # From: Issue #1683
     GOVERNANCE_PR_BODY='This is a partial fix, TODO later.' \
         run bash "${CI_SH}" check governance-guards
@@ -3654,8 +3654,8 @@ EOF
 }
 
 @test "check naming-consistency requires every allowlist name as a real container_name" {
-    # What: ci.sh owns the cross-file name-consistency gate.
-    # Why: socket-proxy denies calls for names it never learned.
+    # What: ci.sh owns cross-file name-consistency gate.
+    # Why: socket-proxy denies unknown container names.
     # From: Issue #1683
     local r="${BATS_TEST_TMPDIR}/repo"
     mkdir -p "${r}/deploy/prod" "${r}/deploy/quickstart" "${r}/scripts/untracked"
@@ -3777,14 +3777,8 @@ EOF
 }
 
 @test "check dependabot-docker-base-consistency resolves a bare SOT ARG with no default" {
-    # What: ARG ALPINE_IMAGE (no `=default`) + FROM ${ALPINE_IMAGE}
-    #       resolves from the manifest, not "unresolved".
-    # Why: regression found in-session: Agent A's Dockerfile
-    #      consolidation (services/*/Dockerfile now declaring a
-    #      bare ARG ALPINE_IMAGE per AG-CI-006/AG-CI-008 -- no
-    #      baked default, the value comes from ci.sh build-args)
-    #      broke this check's real-repo pass until
-    #      _ci_sot_base_image_arg closed the gap.
+    # What: Bare ARG ALPINE_IMAGE resolves from manifest.
+    # Why: Bare ARG (no default) requires ci.sh build-args.
     # From: Issue #1683
     local r="${BATS_TEST_TMPDIR}/barearg"
     mkdir -p "${r}/.github" "${r}/services/a" "${r}/services/b"
@@ -4243,8 +4237,8 @@ EOF
 }
 
 @test "check trivy-action-direct-usage flags an empty dockerhub-username value" {
-    # What: a present but empty credential value.
-    # Why: key-presence-only checking would wrongly pass this.
+    # What: Present but empty credential value.
+    # Why: Key-presence-only check would wrongly pass.
     # From: Issue #1683
     local r="${BATS_TEST_TMPDIR}/trivy-empty"
     mkdir -p "${r}/.github/workflows"
@@ -4263,8 +4257,8 @@ EOF
 }
 
 @test "check trivy-action-direct-usage flags a hardcoded dockerhub-password value" {
-    # What: a literal string instead of a secrets./inputs. ref.
-    # Why: same silent-fallback risk as an empty value.
+    # What: Literal string instead of secrets./inputs. ref.
+    # Why: Same silent-fallback risk as empty value.
     # From: Issue #1683
     local r="${BATS_TEST_TMPDIR}/trivy-hardcoded"
     mkdir -p "${r}/.github/workflows"
@@ -4283,8 +4277,8 @@ EOF
 }
 
 @test "check trivy-action-direct-usage flags a secret name sharing the expected prefix" {
-    # What: secrets.DOCKERHUB_USERNAME_OLD is not secrets.DOCKERHUB_USERNAME.
-    # Why: an unanchored substring match would wrongly accept this.
+    # What: Prefix-matching secret name wrongly accepted.
+    # Why: Unanchored substring match is too loose.
     # From: Issue #1683
     local r="${BATS_TEST_TMPDIR}/trivy-prefix"
     mkdir -p "${r}/.github/workflows"
@@ -4303,8 +4297,8 @@ EOF
 }
 
 @test "check trivy-action-direct-usage passes a forwarded inputs.* reference" {
-    # What: a wrapper action forwarding its caller's own inputs.
-    # Why: nested-composite-action forwarding is a real, legal shape.
+    # What: Wrapper action forwards caller's own inputs.
+    # Why: Nested-composite-action forwarding is legal.
     # From: Issue #1683
     local r="${BATS_TEST_TMPDIR}/trivy-inputs"
     mkdir -p "${r}/.github/actions/some-wrapper"
