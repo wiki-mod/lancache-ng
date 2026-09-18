@@ -5742,6 +5742,97 @@ _ci_check_logging_matrix() {
     printf 'logging-matrix=clean rows=%s services=%s\n' "${#canonical[@]}" "${#consumer[@]}"
 }
 
+# What: True if a with:-block value is a real secret/input ref.
+# Why: bare literal or wrong secret must not pass silently.
+# From: Issue #1683
+_ci_trivy_value_ok() {
+    local val="$1" expected="$2"
+    case "${val}" in
+        *"inputs."*) return 0 ;;
+        *"secrets.${expected}"*)
+            case "${val}" in *"secrets.${expected}"[A-Za-z0-9_]*) return 1 ;; esac
+            return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# What: Deny direct aquasecurity/trivy-action call sites.
+# Why: bypasses the retry/auth/mirror wrapper (AG-VAL-029).
+# From: Issue #1535 | Issue #1683
+_ci_check_trivy_action_direct_usage() {
+    local repo_root="${1:-${CI_REPO_ROOT}}"
+    local allowed=".github/actions/aquasecurity-trivy-action-centralized-version/action.yml"
+    local -a direct_viol=() wiring_viol=()
+    local file
+
+    while IFS= read -r file; do
+        [ -n "${file}" ] || continue
+        [ "${file}" = "${allowed}" ] && continue
+        direct_viol+=("${file}: direct aquasecurity/trivy-action, use ${allowed}")
+    done < <(cd "${repo_root}" && grep -lRE --include='*.yml' --include='*.yaml' \
+        'uses:[[:space:]]*["'"'"']?aquasecurity/trivy-action@' .github/workflows .github/actions 2>/dev/null)
+
+    while IFS= read -r file; do
+        [ -n "${file}" ] || continue
+        local lineno=0 state=0 uses_line=0 uses_col=0 with_col=0 has_user=0 has_pass=0
+        local raw stripped col
+        while IFS= read -r raw || [ -n "${raw}" ]; do
+            lineno=$((lineno + 1))
+            stripped="${raw#"${raw%%[![:space:]]*}"}"
+            col=$(( ${#raw} - ${#stripped} ))
+            [ -z "${stripped}" ] && continue
+            case "${stripped}" in '#'*) continue ;; esac
+            if [ "${state}" -eq 2 ] && [ "${col}" -le "${with_col}" ]; then
+                if [ "${has_user}" -eq 0 ] || [ "${has_pass}" -eq 0 ]; then
+                    wiring_viol+=("${file}:${uses_line}: missing dockerhub-username/dockerhub-password")
+                fi
+                state=0
+            fi
+            if [ "${state}" -eq 1 ]; then
+                if [ "${col}" -eq "${uses_col}" ] && [[ "${stripped}" == with:* ]]; then
+                    state=2; with_col="${col}"; has_user=0; has_pass=0
+                else
+                    wiring_viol+=("${file}:${uses_line}: trivy-scan-retry has no with: block")
+                    state=0
+                fi
+            fi
+            if [ "${state}" -eq 2 ]; then
+                case "${stripped}" in
+                    dockerhub-username:*)
+                        has_user=1
+                        _ci_trivy_value_ok "${stripped#dockerhub-username:}" DOCKERHUB_USERNAME ||
+                            wiring_viol+=("${file}:${lineno}: dockerhub-username not a real secrets./inputs.* ref")
+                        ;;
+                    dockerhub-password:*)
+                        has_pass=1
+                        _ci_trivy_value_ok "${stripped#dockerhub-password:}" DOCKERHUB_TOKEN ||
+                            wiring_viol+=("${file}:${lineno}: dockerhub-password not a real secrets./inputs.* ref")
+                        ;;
+                esac
+            elif [[ "${stripped}" == *"uses:"*"trivy-scan-retry"* ]]; then
+                state=1; uses_line="${lineno}"; uses_col="${col}"
+            fi
+        done < "${repo_root}/${file}"
+        if [ "${state}" -eq 2 ] && { [ "${has_user}" -eq 0 ] || [ "${has_pass}" -eq 0 ]; }; then
+            wiring_viol+=("${file}:${uses_line}: missing dockerhub-username/dockerhub-password")
+        elif [ "${state}" -eq 1 ]; then
+            wiring_viol+=("${file}:${uses_line}: trivy-scan-retry has no with: block")
+        fi
+    done < <(cd "${repo_root}" && grep -lRE --include='*.yml' --include='*.yaml' \
+        'uses:[[:space:]]*["'"'"']?\./\.github/actions/trivy-scan-retry' .github/workflows .github/actions 2>/dev/null)
+
+    if [ "${#direct_viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0039]" "reason=\"direct aquasecurity/trivy-action call site\"" "$(printf '%s\n' "${direct_viol[@]}")"
+    fi
+    if [ "${#wiring_viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0040]" "reason=\"trivy-scan-retry missing dockerhub wiring\"" "$(printf '%s\n' "${wiring_viol[@]}")"
+    fi
+    if [ "${#direct_viol[@]}" -gt 0 ] || [ "${#wiring_viol[@]}" -gt 0 ]; then
+        return 1
+    fi
+    printf 'trivy-action-direct-usage=clean\n'
+}
+
 # What: Route a source-hygiene check to its function.
 # Why: One owner per guard invariant; ci.bats calls it.
 # From: Issue #1683
@@ -5772,6 +5863,7 @@ ci_cmd_check() {
         dependabot-docker-base-consistency) _ci_check_dependabot_docker_base_consistency "$@" ;;
         idempotence-test-coverage) _ci_check_idempotence_test_coverage "$@" ;;
         logging-matrix) _ci_check_logging_matrix "$@" ;;
+        trivy-action-direct-usage) _ci_check_trivy_action_direct_usage "$@" ;;
         *)
             ci_log "[CI-ERROR-CHECK-0001]" "sub=\"${sub}\" reason=\"unknown check\""
             return 2
