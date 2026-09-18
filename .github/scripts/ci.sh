@@ -5845,13 +5845,22 @@ _ci_check_trivy_action_direct_usage() {
 
 # What: True if a Dockerfile's final stage COPYs anything to dest.
 # Why: only the runtime stage's files exist when entrypoint runs.
+#      A --from=<stage> naming an undeclared local alias is
+#      rejected (a renamed/typo'd builder stage must fail
+#      closed, not silently pass the destination check);
+#      --from=<external image> or --from=<index> is accepted
+#      as-is since its own contents are out of this check's scope.
 # From: Issue #1683
 _ci_dockerfile_copies_to() {
-    local dockerfile="$1" want="$2" line lineno=0 last_from=0 dest
+    local dockerfile="$1" want="$2" line lineno=0 last_from=0 dest from_val
     local -a words real
+    local -A aliases=()
     while IFS= read -r line; do
         lineno=$((lineno + 1))
         case "${line}" in [Ff][Rr][Oo][Mm]\ *) last_from=${lineno} ;; esac
+        if [[ "${line}" =~ [Aa][Ss][[:space:]]+([A-Za-z0-9_.-]+)[[:space:]]*$ ]]; then
+            aliases["${BASH_REMATCH[1],,}"]=1
+        fi
     done < <(_ci_dockerfile_logical_lines "${dockerfile}")
     lineno=0
     while IFS= read -r line; do
@@ -5859,12 +5868,25 @@ _ci_dockerfile_copies_to() {
         [ "${lineno}" -ge "${last_from}" ] || continue
         case "${line}" in [Cc][Oo][Pp][Yy]\ *) : ;; *) continue ;; esac
         read -ra words <<< "${line}"
-        real=()
+        real=(); from_val=""
         local w
         for w in "${words[@]:1}"; do
-            case "${w}" in --*) continue ;; esac
+            case "${w}" in
+                --from=*) from_val="${w#--from=}"; continue ;;
+                --*) continue ;;
+            esac
             real+=("${w}")
         done
+        if [ -n "${from_val}" ]; then
+            case "${from_val}" in
+                *[!0-9]*)
+                    case "${from_val,,}" in
+                        */*|*:*|*.*) : ;;
+                        *) [ -n "${aliases[${from_val,,}]:-}" ] || continue ;;
+                    esac
+                    ;;
+            esac
+        fi
         [ "${#real[@]}" -ge 2 ] || continue
         dest="${real[$(( ${#real[@]} - 1 ))]}"
         [ "${dest}" = "${want}" ] && return 0

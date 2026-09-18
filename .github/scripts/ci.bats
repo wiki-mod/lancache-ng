@@ -4452,6 +4452,54 @@ EOF
     [ "${status}" -eq 0 ]
 }
 
+@test "check entrypoint-lib-wiring accepts a COPY --from a declared builder stage" {
+    # What: COPY --from=builder naming a real FROM ... AS builder.
+    # Why: the real consolidation copies from a builder stage.
+    # From: Issue #1683
+    local r="${BATS_TEST_TMPDIR}/elw-fromstage"
+    mkdir -p "${r}/services/proxy"
+    printf '. /usr/local/lib/domain-validation.sh\n' > "${r}/services/proxy/entrypoint.sh"
+    cat > "${r}/services/proxy/Dockerfile" <<'EOF'
+FROM alpine:3.24 AS builder
+RUN echo build
+FROM alpine:3.24
+COPY --from=builder /build/domain-validation.sh /usr/local/lib/domain-validation.sh
+EOF
+    run bash "${CI_SH}" check entrypoint-lib-wiring "${r}"
+    [ "${status}" -eq 0 ]
+}
+
+@test "check entrypoint-lib-wiring fails closed on a COPY --from an undeclared stage" {
+    # What: COPY --from=oldbuilder but no FROM ... AS oldbuilder exists.
+    # Why: a renamed/typo'd builder stage must fail closed, not
+    #      silently satisfy the destination check.
+    # From: Issue #1683
+    local r="${BATS_TEST_TMPDIR}/elw-badstage"
+    mkdir -p "${r}/services/proxy"
+    printf '. /usr/local/lib/domain-validation.sh\n' > "${r}/services/proxy/entrypoint.sh"
+    cat > "${r}/services/proxy/Dockerfile" <<'EOF'
+FROM alpine:3.24 AS builder
+RUN echo build
+FROM alpine:3.24
+COPY --from=oldbuilder /build/domain-validation.sh /usr/local/lib/domain-validation.sh
+EOF
+    run bash "${CI_SH}" check entrypoint-lib-wiring "${r}"
+    [ "${status}" -ne 0 ]
+}
+
+@test "check entrypoint-lib-wiring accepts a COPY --from an external image" {
+    # What: COPY --from=<external image ref>, not a local stage.
+    # Why: that image's own contents are out of this check's scope.
+    # From: Issue #1683
+    local r="${BATS_TEST_TMPDIR}/elw-fromexternal"
+    mkdir -p "${r}/services/proxy"
+    printf '. /usr/local/lib/domain-validation.sh\n' > "${r}/services/proxy/entrypoint.sh"
+    printf 'FROM alpine:3.24\nCOPY --from=ghcr.io/example/image:latest /x/domain-validation.sh /usr/local/lib/domain-validation.sh\n' \
+        > "${r}/services/proxy/Dockerfile"
+    run bash "${CI_SH}" check entrypoint-lib-wiring "${r}"
+    [ "${status}" -eq 0 ]
+}
+
 @test "check changelog-direct-edit is clean when CHANGELOG.md is untouched" {
     # What: migrated from check-changelog-direct-edit.sh.
     # Why: rewritten in ci.sh; stays non-blocking always.
