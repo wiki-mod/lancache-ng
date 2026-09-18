@@ -5163,8 +5163,12 @@ _ci_check_build_tools_smoke_coverage() {
     # What: every SOT entry is actually smoke-tested.
     # Why: SOT is owner; untested entry is false claim.
     # From: Issue #1683
-    local sot_tools t
-    sot_tools=" $(_ci_build_tools_smoke_tools 2>/dev/null | tr '\n' ' ') "
+    local sot_tools_raw sot_tools t
+    sot_tools_raw="$(_ci_build_tools_smoke_tools | tr '\n' ' ')" || {
+        ci_log "[CI-ERROR-CHECK-0025]" "reason=\"no SOT smoke_tools; vacuous\""
+        return 2
+    }
+    sot_tools=" ${sot_tools_raw} "
     if [ -z "${sot_tools// /}" ]; then
         ci_log "[CI-ERROR-CHECK-0025]" "reason=\"no SOT smoke_tools; vacuous\""
         return 2
