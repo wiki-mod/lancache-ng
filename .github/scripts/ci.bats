@@ -3586,6 +3586,283 @@ EOF
     [[ "${output}" == *"scanned=1 checked=0"* ]]
 }
 
+@test "check dependabot-docker-base-consistency passes on the real repo" {
+    # What: migrated from the legacy dependabot check.
+    # Why: rewritten in ci.sh; the real group must agree.
+    # From: Issue #1683 | PR #1858
+    run bash "${CI_SH}" check dependabot-docker-base-consistency
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"dependabot-docker-base-consistency=clean"* ]]
+}
+
+@test "check dependabot-docker-base-consistency resolves a global ARG" {
+    # What: FROM \${BASE} resolves via its pre-FROM ARG.
+    # Why: AG-VAL-036: real ARG grammar, not a guess.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/argmatch"
+    mkdir -p "${r}/.github" "${r}/services/a" "${r}/services/b"
+    printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    directories:\n      - /services/a\n      - /services/b\n    schedule:\n      interval: weekly\n' \
+        > "${r}/.github/dependabot.yml"
+    # shellcheck disable=SC2016
+    printf 'ARG BASE=alpine:3.24\nFROM ${BASE}\n' > "${r}/services/a/Dockerfile"
+    printf 'FROM alpine:3.24\n' > "${r}/services/b/Dockerfile"
+    run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"
+    [ "${status}" -eq 0 ]
+}
+
+@test "check dependabot-docker-base-consistency resolves a stage alias" {
+    # What: FROM builder resolves to its real origin image.
+    # Why: the alias text is never the compared value.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/alias"
+    mkdir -p "${r}/.github" "${r}/services/a" "${r}/services/b"
+    printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    directories:\n      - /services/a\n      - /services/b\n    schedule:\n      interval: weekly\n' \
+        > "${r}/.github/dependabot.yml"
+    printf 'FROM alpine:3.24 AS builder\nRUN true\nFROM builder\n' > "${r}/services/a/Dockerfile"
+    printf 'FROM alpine:3.24\n' > "${r}/services/b/Dockerfile"
+    run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"
+    [ "${status}" -eq 0 ]
+}
+
+@test "check dependabot-docker-base-consistency ignores a heredoc FROM" {
+    # What: a FROM inside a RUN heredoc body is not real.
+    # Why: only Docker instructions outside heredocs count.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/heredoc"
+    mkdir -p "${r}/.github" "${r}/services/a" "${r}/services/b"
+    printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    directories:\n      - /services/a\n      - /services/b\n    schedule:\n      interval: weekly\n' \
+        > "${r}/.github/dependabot.yml"
+    printf 'FROM alpine:3.24\nRUN <<EOT\nFROM should-be-ignored\nEOT\n' > "${r}/services/a/Dockerfile"
+    printf 'FROM alpine:3.24\n' > "${r}/services/b/Dockerfile"
+    run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"
+    [ "${status}" -eq 0 ]
+}
+
+@test "check dependabot-docker-base-consistency fails on real drift" {
+    # What: two grouped Dockerfiles, real different bases.
+    # Why: this is the guard's one real, enforced invariant.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/drift"
+    mkdir -p "${r}/.github" "${r}/services/a" "${r}/services/b"
+    printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    directories:\n      - /services/a\n      - /services/b\n    schedule:\n      interval: weekly\n' \
+        > "${r}/.github/dependabot.yml"
+    printf 'FROM alpine:3.24\n' > "${r}/services/a/Dockerfile"
+    printf 'FROM alpine:3.20\n' > "${r}/services/b/Dockerfile"
+    run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0032"* ]]
+    [[ "${output}" == *"diverges"* ]]
+}
+
+@test "check dependabot-docker-base-consistency distinguishes missing paths" {
+    # What: a declared, parseable dir, missing Dockerfile.
+    # Why: distinct from a block with zero directories.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/missingfile"
+    mkdir -p "${r}/.github"
+    printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    directory: /services/missing\n    schedule:\n      interval: weekly\n' \
+        > "${r}/.github/dependabot.yml"
+    run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0030"* ]]
+    local r2="${BATS_TEST_TMPDIR}/emptyblock"
+    mkdir -p "${r2}/.github"
+    printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    schedule:\n      interval: weekly\n' \
+        > "${r2}/.github/dependabot.yml"
+    run bash "${CI_SH}" check dependabot-docker-base-consistency "${r2}"
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0029"* ]]
+}
+
+@test "check dependabot-docker-base-consistency fails on unresolved ARG" {
+    # What: a FROM \${VAR} with no matching global ARG.
+    # Why: unresolved must fail closed, never a guess.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/unresolved"
+    mkdir -p "${r}/.github" "${r}/services/a"
+    printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    directory: /services/a\n    schedule:\n      interval: weekly\n' \
+        > "${r}/.github/dependabot.yml"
+    # shellcheck disable=SC2016
+    printf 'FROM ${UNKNOWN_ARG}\n' > "${r}/services/a/Dockerfile"
+    run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0031"* ]]
+}
+
+@test "check dependabot-docker-base-consistency fails with no dependabot.yml" {
+    # What: a repo root with no .github/dependabot.yml.
+    # Why: a missing input file must never silently pass.
+    # From: Issue #1683 | PR #1858
+    run bash "${CI_SH}" check dependabot-docker-base-consistency "${BATS_TEST_TMPDIR}/nope"
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0027"* ]]
+}
+
+# What: seeds every real WRITER_TEST_EVIDENCE pair.
+# Why: mirrors the legacy script's own fixture builder.
+# From: Issue #1683 | PR #1858
+_idempotence_fixture() {
+    local root="$1" at_test='@test'
+    mkdir -p "${root}/tests/bats" "${root}/services/dns" "${root}/services/watchdog" \
+        "${root}/services/ui/src/routes" "${root}/services/proxy" "${root}/services/dhcp-proxy" \
+        "${root}/services/dns/nats-subscriber/src" "${root}/deploy/prod" "${root}/deploy/quickstart"
+    printf '#!/usr/bin/env bash\n' > "${root}/setup.sh"
+    cat > "${root}/tests/bats/setup_update_idempotence.bats" <<EOF
+${at_test} "migrate_env_for_update repeats to the same result" {
+    true
+}
+EOF
+    printf '#!/usr/bin/env bash\n' > "${root}/services/dns/entrypoint.sh"
+    cat > "${root}/tests/bats/dns_config_snapshot_idempotence.bats" <<EOF
+${at_test} "rollback repeats to the same known-good config" {
+    true
+}
+EOF
+    printf '#!/usr/bin/env bash\n' > "${root}/services/watchdog/watchdog.sh"
+    cat > "${root}/tests/bats/watchdog_idempotence.bats" <<EOF
+${at_test} "write_status converges across repeated writes" {
+    true
+}
+EOF
+    printf '// fixture\n' > "${root}/services/ui/src/kea_snapshots.rs"
+    cat > "${root}/services/ui/src/routes/dhcp.rs" <<'EOF'
+#[test]
+fn kea_modify_repeat_rollback_converges() {
+    assert!(true);
+}
+EOF
+    cat > "${root}/services/dns/nats-subscriber/src/zone_snapshots.rs" <<'EOF'
+#[test]
+fn create_snapshot_repeat_writes_converge() {
+    assert!(true);
+}
+EOF
+    cat > "${root}/services/ui/src/routes/secondaries.rs" <<'EOF'
+#[tokio::test]
+async fn nats_conf_write_converges_across_repeated_writes() {
+    assert!(true);
+}
+EOF
+    printf '#!/usr/bin/env bash\n' > "${root}/services/proxy/entrypoint.sh"
+    cat > "${root}/tests/bats/proxy_known_good_snapshot.bats" <<EOF
+${at_test} "retention converges across repeated valid starts" {
+    true
+}
+EOF
+    printf '#!/usr/bin/env bash\n' > "${root}/services/dhcp-proxy/entrypoint.sh"
+    cat > "${root}/tests/bats/dhcp_proxy_known_good_snapshot.bats" <<EOF
+${at_test} "retention converges across repeated valid starts" {
+    true
+}
+EOF
+    printf 'services:\n  nats:\n    command: ["true"]\n' > "${root}/deploy/prod/docker-compose.yml"
+    printf 'services:\n  nats:\n    command: ["true"]\n' > "${root}/deploy/quickstart/docker-compose.yml"
+    cat > "${root}/tests/bats/nats_conf_entrypoint_idempotence.bats" <<EOF
+${at_test} "nats entrypoint regenerates a converging nats.conf" {
+    true
+}
+EOF
+    cat > "${root}/services/ui/src/netdata_alarms.rs" <<'EOF'
+#[test]
+fn append_is_idempotent_for_the_same_unique_id() {
+    assert!(true);
+}
+EOF
+}
+
+@test "check idempotence-test-coverage passes on the real repo" {
+    # What: migrated from the legacy idempotence check.
+    # Why: rewritten in ci.sh; writers must stay covered.
+    # From: Issue #1683 | PR #1858
+    run bash "${CI_SH}" check idempotence-test-coverage
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"idempotence-test-coverage=clean"* ]]
+}
+
+@test "check idempotence-test-coverage passes a full seeded fixture" {
+    # What: every real writer/evidence pair, freshly seeded.
+    # Why: proves the shared fixture below is itself valid.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/idem-ok"
+    _idempotence_fixture "${r}"
+    run bash "${CI_SH}" check idempotence-test-coverage "${r}"
+    [ "${status}" -eq 0 ]
+}
+
+@test "check idempotence-test-coverage fails a missing writer file" {
+    # What: a known config-writer source no longer exists.
+    # Why: distinct from a missing evidence file to fix.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/idem-nowriter"
+    _idempotence_fixture "${r}"
+    rm "${r}/services/watchdog/watchdog.sh"
+    run bash "${CI_SH}" check idempotence-test-coverage "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"no longer exists"* ]]
+}
+
+@test "check idempotence-test-coverage fails a missing evidence file" {
+    # What: the writer exists but its evidence file is gone.
+    # Why: no repeat-run proof left for that config-writer.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/idem-noevidence"
+    _idempotence_fixture "${r}"
+    rm "${r}/tests/bats/watchdog_idempotence.bats"
+    run bash "${CI_SH}" check idempotence-test-coverage "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"evidence file"* ]]
+    [[ "${output}" == *"missing"* ]]
+}
+
+@test "check idempotence-test-coverage rejects a commented-out bats test" {
+    # What: a disabled test bats never actually runs.
+    # Why: issue #732: must not silently satisfy the guard.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/idem-commented" at_test='@test'
+    _idempotence_fixture "${r}"
+    cat > "${r}/tests/bats/watchdog_idempotence.bats" <<EOF
+# ${at_test} "write_status converges across repeated writes" {
+#     true
+# }
+EOF
+    run bash "${CI_SH}" check idempotence-test-coverage "${r}"
+    [ "${status}" -ne 0 ]
+}
+
+@test "check idempotence-test-coverage rejects an #[ignore]d Rust test" {
+    # What: a disqualified test cargo never actually runs.
+    # Why: issue #732: must not silently satisfy the guard.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/idem-ignored"
+    _idempotence_fixture "${r}"
+    cat > "${r}/services/ui/src/netdata_alarms.rs" <<'EOF'
+#[test]
+#[ignore]
+fn append_is_idempotent_for_the_same_unique_id() {
+    assert!(true);
+}
+EOF
+    run bash "${CI_SH}" check idempotence-test-coverage "${r}"
+    [ "${status}" -ne 0 ]
+}
+
+@test "check idempotence-test-coverage rejects the NATS extra_marker evasion" {
+    # What: a repeat-named test unrelated to nats_conf.
+    # Why: secondaries.rs is its own evidence file here.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/idem-extramarker"
+    _idempotence_fixture "${r}"
+    cat > "${r}/services/ui/src/routes/secondaries.rs" <<'EOF'
+#[test]
+fn generate_nats_password_is_high_entropy_and_never_repeats() {
+    assert!(true);
+}
+EOF
+    run bash "${CI_SH}" check idempotence-test-coverage "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"secondaries.rs"* ]]
+}
+
 @test "check changelog-direct-edit is clean when CHANGELOG.md is untouched" {
     # What: migrated from check-changelog-direct-edit.sh.
     # Why: rewritten in ci.sh; stays non-blocking always.

@@ -5037,6 +5037,407 @@ _ci_check_build_tools_smoke_coverage() {
     printf 'build-tools-smoke-coverage=clean\n'
 }
 
+# What: Emit "block\tdir" or "block\t@BLOCK@" per group.
+# Why: dependabot.yml's own scalar/list forms, no yq dep.
+# From: Issue #1683 | PR #1858
+_ci_dependabot_docker_entries() {
+    local file="$1"
+    awk '
+        function scalar(line,    value) {
+            value = line
+            sub(/^[^:]*:[[:space:]]*/, "", value)
+            sub(/[[:space:]]*#.*$/, "", value)
+            gsub(/^[[:space:]"'"'"']+|[[:space:]"'"'"']+$/, "", value)
+            return value
+        }
+        /^  - package-ecosystem:/ {
+            ecosystem = tolower(scalar($0))
+            in_docker = (ecosystem == "docker")
+            if (in_docker) { block++; print block "\t@BLOCK@" }
+            next
+        }
+        in_docker && /^    directory:/ {
+            path = scalar($0)
+            if (path ~ /^\//) print block "\t" path
+            next
+        }
+        in_docker && /^    directories:[[:space:]]*\[/ {
+            paths = $0
+            sub(/^    directories:[[:space:]]*\[/, "", paths)
+            sub(/\][[:space:]]*(#.*)?$/, "", paths)
+            count = split(paths, entries, /,[[:space:]]*/)
+            for (i = 1; i <= count; i++) {
+                path = entries[i]
+                gsub(/^[[:space:]"'"'"']+|[[:space:]"'"'"']+$/, "", path)
+                if (path ~ /^\//) print block "\t" path
+            }
+            next
+        }
+        in_docker && /^      - / {
+            path = $0
+            sub(/^      - /, "", path)
+            sub(/[[:space:]]*#.*$/, "", path)
+            gsub(/^["'"'"']|["'"'"'][[:space:]]*$/, "", path)
+            if (path ~ /^\//) print block "\t" path
+        }
+    ' "${file}"
+}
+
+# What: Print Dockerfile logical lines (joined).
+# Why: AG-VAL-036: heredoc/escape= change what a line is.
+# From: Issue #1683 | PR #1858
+_ci_dockerfile_logical_lines() {
+    awk '
+        function emit_logical(    candidate, owner, marker) {
+            print logical
+            candidate = logical
+            sub(/^[[:space:]]*/, "", candidate)
+            owner = candidate
+            sub(/[[:space:]].*$/, "", owner)
+            if ((tolower(owner) == "run" || tolower(owner) == "copy") &&
+                match(candidate, /<<-?[[:space:]]*["'"'"']?[A-Za-z_][A-Za-z0-9_]*["'"'"']?/)) {
+                marker = substr(candidate, RSTART, RLENGTH)
+                sub(/^<<-?[[:space:]]*/, "", marker)
+                gsub(/["'"'"']/, "", marker)
+                heredoc = marker
+            }
+            logical = ""
+        }
+        heredoc != "" {
+            candidate = $0
+            sub(/^[[:space:]]*/, "", candidate)
+            if (candidate == heredoc) heredoc = ""
+            next
+        }
+        {
+            physical = $0
+            candidate = physical
+            sub(/^[[:space:]]*/, "", candidate)
+            if (!content_seen && candidate ~ /^#[[:space:]]*escape[[:space:]]*=/) {
+                directive = candidate
+                sub(/^#[[:space:]]*escape[[:space:]]*=[[:space:]]*/, "", directive)
+                sub(/[[:space:]]*$/, "", directive)
+                if (directive == "`" || directive == "\\") escape = directive
+                print physical
+                next
+            }
+            if (logical == "" && candidate ~ /^#/) { logical = physical; emit_logical(); next }
+            if (candidate != "") content_seen = 1
+            if (escape == "") escape = "\\"
+            escaped = (escape == "\\" ? physical ~ /\\[[:space:]]*$/ : physical ~ /`[[:space:]]*$/)
+            if (escaped) {
+                if (escape == "\\") sub(/\\[[:space:]]*$/, "", physical)
+                else sub(/`[[:space:]]*$/, "", physical)
+                logical = logical physical " "
+                next
+            }
+            logical = logical physical
+            emit_logical()
+        }
+        END { if (logical != "") emit_logical() }
+    ' "$1"
+}
+
+# What: Print a Dockerfile's final resolved FROM image.
+# Why: global ARG defaults + stage aliases change it.
+# From: Issue #1683 | PR #1858
+_ci_dockerfile_final_image() {
+    local dockerfile="$1" line instruction remainder image alias name value token
+    local seen_from=0 final_image=""
+    local -A global_args=() stage_images=()
+    while IFS= read -r line || [ -n "${line}" ]; do
+        line="${line#"${line%%[![:space:]]*}"}"
+        instruction="${line%%[[:space:]]*}"
+        remainder="${line#"${instruction}"}"
+        remainder="${remainder#"${remainder%%[![:space:]]*}"}"
+        if [ "${seen_from}" -eq 0 ] && [[ "${instruction,,}" == "arg" ]]; then
+            name="${remainder%%=*}"
+            if [[ "${remainder}" == *=* ]]; then
+                value="${remainder#*=}"
+                value="${value%\"}"; value="${value#\"}"
+                value="${value%\'}"; value="${value#\'}"
+                global_args["${name}"]="${value}"
+            fi
+            continue
+        fi
+        [[ "${instruction,,}" == "from" ]] || continue
+        seen_from=1
+        remainder="${remainder#--platform=* }"
+        image="${remainder%%[[:space:]]*}"
+        while [[ "${image}" =~ (\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)) ]]; do
+            token="${BASH_REMATCH[1]}"
+            name="${BASH_REMATCH[2]:-${BASH_REMATCH[3]}}"
+            if [[ ! -v "global_args[${name}]" ]]; then
+                ci_log "[CI-ERROR-CHECK-0031]" "path=\"${dockerfile}\" reason=\"unresolved global ARG ${name} in FROM\""
+                return 2
+            fi
+            image="${image/"${token}"/${global_args[${name}]}}"
+        done
+        if [[ "${image}" == *'$'* ]]; then
+            ci_log "[CI-ERROR-CHECK-0031]" "path=\"${dockerfile}\" reason=\"unresolved ARG expression in FROM: ${image}\""
+            return 2
+        fi
+        if [[ -v "stage_images[${image,,}]" ]]; then
+            image="${stage_images[${image,,}]}"
+        fi
+        alias=""
+        if [[ "${remainder}" =~ [[:space:]][Aa][Ss][[:space:]]+([^[:space:]]+)[[:space:]]*$ ]]; then
+            alias="${BASH_REMATCH[1],,}"
+            stage_images["${alias}"]="${image}"
+        fi
+        final_image="${image}"
+    done < <(_ci_dockerfile_logical_lines "${dockerfile}")
+    if [ -z "${final_image}" ]; then
+        ci_log "[CI-ERROR-CHECK-0031]" "path=\"${dockerfile}\" reason=\"no FROM instruction found\""
+        return 2
+    fi
+    printf '%s\n' "${final_image}"
+}
+
+# What: Fail if one docker group's Dockerfiles diverge.
+# Why: the grouped-PR premise needs one shared base image.
+# From: Issue #1683 | PR #1858
+_ci_check_dependabot_docker_base_consistency() {
+    local repo_root="${1:-${CI_REPO_ROOT}}"
+    local dependabot_file="${repo_root}/.github/dependabot.yml"
+    if [ ! -f "${dependabot_file}" ]; then
+        ci_log "[CI-ERROR-CHECK-0027]" "path=\"${dependabot_file}\" reason=\"dependabot.yml not found\""
+        return 2
+    fi
+    local -a entries=()
+    local line
+    while IFS= read -r line; do
+        [ -n "${line}" ] && entries+=("${line}")
+    done < <(_ci_dependabot_docker_entries "${dependabot_file}")
+    if [ "${#entries[@]}" -eq 0 ]; then
+        ci_log "[CI-ERROR-CHECK-0028]" "path=\"${dependabot_file}\" reason=\"no docker-ecosystem directories found\""
+        return 2
+    fi
+    local -A base_image_of=()
+    # What: dirs_seen = declared; blocks_seen = resolved.
+    # Why: a declared but missing dir is a 2nd failure kind.
+    # From: Issue #1683 | PR #1858
+    local -a declared_blocks=() dirs_seen=() blocks_seen=() missing=()
+    local entry block dir dockerfile image
+    for entry in "${entries[@]}"; do
+        block="${entry%%$'\t'*}"
+        dir="${entry#*$'\t'}"
+        if [ "${dir}" = "@BLOCK@" ]; then
+            declared_blocks+=("${block}")
+            continue
+        fi
+        dirs_seen+=("${block}")
+        dockerfile="${repo_root}${dir}/Dockerfile"
+        if [ ! -f "${dockerfile}" ]; then
+            missing+=("${dockerfile}")
+            continue
+        fi
+        image="$(_ci_dockerfile_final_image "${dockerfile}")" || return 2
+        base_image_of["${block}"$'\t'"${dockerfile}"]="${image}"
+        blocks_seen+=("${block}")
+    done
+    local b
+    for b in "${declared_blocks[@]}"; do
+        case " ${dirs_seen[*]:-} " in
+            *" ${b} "*) ;;
+            *)
+                ci_log "[CI-ERROR-CHECK-0029]" "reason=\"docker-ecosystem block #${b} has no parseable directory entries\""
+                return 2
+                ;;
+        esac
+    done
+    if [ "${#missing[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0030]" "reason=\"no Dockerfile for a dependabot.yml docker directory\"" "$(printf '%s\n' "${missing[@]}")"
+        return 2
+    fi
+    local -a distinct_blocks=()
+    while IFS= read -r b; do [ -n "${b}" ] && distinct_blocks+=("${b}"); done \
+        < <(printf '%s\n' "${blocks_seen[@]}" | sort -un)
+    local -a viol=()
+    local key key_block key_dockerfile
+    for b in "${distinct_blocks[@]}"; do
+        local -a block_images=()
+        for key in "${!base_image_of[@]}"; do
+            key_block="${key%%$'\t'*}"
+            [ "${key_block}" = "${b}" ] || continue
+            block_images+=("${base_image_of[${key}]}")
+        done
+        local distinct_count
+        distinct_count="$(printf '%s\n' "${block_images[@]}" | sort -u | grep -c .)"
+        if [ "${distinct_count}" -gt 1 ]; then
+            viol+=("block #${b} diverges:")
+            for key in "${!base_image_of[@]}"; do
+                key_block="${key%%$'\t'*}"
+                [ "${key_block}" = "${b}" ] || continue
+                key_dockerfile="${key#*$'\t'}"
+                viol+=("  ${key_dockerfile}: ${base_image_of[${key}]}")
+            done
+        fi
+    done
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0032]" "reason=\"dependabot docker group base-image drift\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'dependabot-docker-base-consistency=clean dockerfiles=%s blocks=%s\n' \
+        "${#base_image_of[@]}" "${#distinct_blocks[@]}"
+}
+
+# What: config-writer -> repeat-run test evidence pairs.
+# Why: issue #456/#640: every stateful writer needs one.
+# From: Issue #1683 | PR #1858
+_ci_idempotence_writer_evidence() {
+    printf '%s\n' \
+        "setup.sh|tests/bats/setup_update_idempotence.bats" \
+        "services/dns/entrypoint.sh|tests/bats/dns_config_snapshot_idempotence.bats" \
+        "services/watchdog/watchdog.sh|tests/bats/watchdog_idempotence.bats" \
+        "services/proxy/entrypoint.sh|tests/bats/proxy_known_good_snapshot.bats" \
+        "services/dhcp-proxy/entrypoint.sh|tests/bats/dhcp_proxy_known_good_snapshot.bats" \
+        "services/ui/src/kea_snapshots.rs|services/ui/src/routes/dhcp.rs" \
+        "services/dns/nats-subscriber/src/zone_snapshots.rs|services/dns/nats-subscriber/src/zone_snapshots.rs" \
+        "services/ui/src/routes/secondaries.rs|services/ui/src/routes/secondaries.rs|nats_conf" \
+        "deploy/prod/docker-compose.yml|tests/bats/nats_conf_entrypoint_idempotence.bats" \
+        "deploy/quickstart/docker-compose.yml|tests/bats/nats_conf_entrypoint_idempotence.bats" \
+        "services/ui/src/netdata_alarms.rs|services/ui/src/netdata_alarms.rs"
+}
+
+# What: True if a name matches repeat/idempoten/converge.
+# Why: extra_marker narrows self-referential evidence files.
+# From: Issue #1683 | PR #1858
+_ci_idempotence_name_has_marker() {
+    local name extra
+    name="$(tr '[:upper:]' '[:lower:]' <<<"$1")"
+    case "${name}" in
+        *repeat*|*idempoten*|*converge*) ;;
+        *) return 1 ;;
+    esac
+    extra="$(tr '[:upper:]' '[:lower:]' <<<"${2:-}")"
+    if [ -n "${extra}" ]; then
+        case "${name}" in
+            *"${extra}"*) return 0 ;;
+            *) return 1 ;;
+        esac
+    fi
+    return 0
+}
+
+# What: Print each active @test title in a bats file.
+# Why: a commented-out @test line must never count.
+# From: Issue #1683 | PR #1858
+_ci_extract_bats_test_titles() {
+    local file="$1" line stripped rest
+    while IFS= read -r line; do
+        stripped="${line#"${line%%[^[:space:]]*}"}"
+        case "${stripped}" in '#'*) continue ;; esac
+        case "${line}" in
+            *'@test "'*)
+                rest="${line#*@test \"}"
+                printf '%s\n' "${rest%%\"*}"
+                ;;
+        esac
+    done < "${file}"
+}
+
+# What: Print each active, non-ignored Rust test fn name.
+# Why: no regex engine; one silently failed on a runner.
+# From: Issue #1683 | PR #1858
+_ci_extract_rust_test_fn_names() {
+    local file="$1" line stripped pending=0 disqualified=0 rest name
+    while IFS= read -r line; do
+        stripped="${line#"${line%%[^[:space:]]*}"}"
+        case "${stripped}" in '//'*) continue ;; esac
+        case "${line}" in
+            *'#[test]'*|*'#[tokio::test]'*)
+                pending=1
+                disqualified=0
+                continue
+                ;;
+        esac
+        if [ "${pending}" -eq 1 ]; then
+            case "${line}" in
+                *'#[ignore'*)
+                    disqualified=1
+                    continue
+                    ;;
+            esac
+            case "${line}" in
+                *'fn '*'('*)
+                    rest="${line#*fn }"
+                    name="${rest%%(*}"
+                    name="${name%%[[:space:]]*}"
+                    [ "${disqualified}" -eq 0 ] && printf '%s\n' "${name}"
+                    pending=0
+                    disqualified=0
+                    ;;
+            esac
+        fi
+    done < "${file}"
+}
+
+# What: True if a bats file has a matching repeat test.
+# Why: shared by every .bats evidence-path check below.
+# From: Issue #1683 | PR #1858
+_ci_has_bats_repeat_test() {
+    local file="$1" extra="${2:-}" title
+    while IFS= read -r title; do
+        _ci_idempotence_name_has_marker "${title}" "${extra}" && return 0
+    done < <(_ci_extract_bats_test_titles "${file}")
+    return 1
+}
+
+# What: True if a Rust file has a matching repeat test.
+# Why: shared by every .rs evidence-path check below.
+# From: Issue #1683 | PR #1858
+_ci_has_rust_repeat_test() {
+    local file="$1" extra="${2:-}" name
+    while IFS= read -r name; do
+        _ci_idempotence_name_has_marker "${name}" "${extra}" && return 0
+    done < <(_ci_extract_rust_test_fn_names "${file}")
+    return 1
+}
+
+# What: Fail if a config-writer lacks repeat-run coverage.
+# Why: a one-shot test can hide a non-convergence bug.
+# From: Issue #1683 | PR #1858
+_ci_check_idempotence_test_coverage() {
+    local repo_root="${1:-${CI_REPO_ROOT}}"
+    local -a viol=() fields=()
+    local pair writer_path evidence_path extra_marker count=0
+    while IFS= read -r pair; do
+        [ -n "${pair}" ] || continue
+        count=$((count + 1))
+        IFS='|' read -ra fields <<<"${pair}"
+        writer_path="${repo_root}/${fields[0]}"
+        evidence_path="${repo_root}/${fields[1]}"
+        extra_marker="${fields[2]:-}"
+        if [ ! -f "${writer_path}" ]; then
+            viol+=("config-writer '${fields[0]}' no longer exists")
+            continue
+        fi
+        if [ ! -f "${evidence_path}" ]; then
+            viol+=("'${fields[0]}': evidence file '${fields[1]}' missing")
+            continue
+        fi
+        case "${evidence_path}" in
+            *.bats)
+                _ci_has_bats_repeat_test "${evidence_path}" "${extra_marker}" \
+                    || viol+=("'${fields[0]}': no matching @test in '${fields[1]}'")
+                ;;
+            *.rs)
+                _ci_has_rust_repeat_test "${evidence_path}" "${extra_marker}" \
+                    || viol+=("'${fields[0]}': no matching Rust test in '${fields[1]}'")
+                ;;
+            *)
+                viol+=("'${fields[1]}': unsupported evidence type (want .bats/.rs)")
+                ;;
+        esac
+    done < <(_ci_idempotence_writer_evidence)
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0033]" "reason=\"config-writer(s) missing repeat-run coverage\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'idempotence-test-coverage=clean writers=%s\n' "${count}"
+}
+
 # What: Warn (never fail) on editing CHANGELOG.md directly.
 # Why: usually unintended; risks a merge-conflict cascade.
 # From: Issue #1683 | PR #1858
@@ -5085,6 +5486,8 @@ ci_cmd_check() {
         proxy-cache-env-doc-drift) _ci_check_proxy_cache_env_doc_drift "$@" ;;
         changelog-direct-edit) _ci_check_changelog_direct_edit "$@" ;;
         build-tools-smoke-coverage) _ci_check_build_tools_smoke_coverage "$@" ;;
+        dependabot-docker-base-consistency) _ci_check_dependabot_docker_base_consistency "$@" ;;
+        idempotence-test-coverage) _ci_check_idempotence_test_coverage "$@" ;;
         *)
             ci_log "[CI-ERROR-CHECK-0001]" "sub=\"${sub}\" reason=\"unknown check\""
             return 2
