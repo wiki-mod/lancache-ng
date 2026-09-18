@@ -72,6 +72,15 @@ teardown() {
     [[ "${output}" == *"CI-ERROR-CORE-0002"* ]]
 }
 
+@test "_ci_repo lowercases a real mixed-case GITHUB_REPOSITORY" {
+    # What: a real mixed-case owner/repo, not pre-lowered.
+    # Why: GHCR needs lowercase; this transform was unseen.
+    # From: Issue #1683 | PR #1858
+    GITHUB_REPOSITORY='Wiki-Mod/LanCache-NG' run _ci_repo
+    [ "${status}" -eq 0 ]
+    [ "${output}" = "wiki-mod/lancache-ng" ]
+}
+
 # =========================================================
 # SEMANTIC IMPACT
 # =========================================================
@@ -2573,6 +2582,18 @@ netdata=sha256:n"
     [[ "${output}" == *"CI-ERROR-VARIABLES-0011"* ]]
 }
 
+@test "set-runtime errors on auth token without scheduler" {
+    # What: the symmetric half of the both-or-neither pair.
+    # Why: only the scheduler-without-token side had a test.
+    # From: Issue #1683 | PR #1858
+    CI_RUNTIME_SECRET_DIR="${BATS_TEST_TMPDIR}/rt2" \
+    SCCACHE_DIST_AUTH_TOKEN='tok' \
+        run bash "${CI_SH}" variables set-runtime
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VARIABLES-0011"* ]]
+    [[ "${output}" == *"auth token set without scheduler"* ]]
+}
+
 @test "set-runtime errors when required redis url is missing" {
     # What: mode=required needs SCCACHE_REDIS_URL.
     # Why: A trusted Rust build must have the cache.
@@ -3485,6 +3506,84 @@ EOF
     run _ci_check_naming_consistency "${r}"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0019"* ]]
+}
+
+@test "check compose-healthchecks passes clean on the real repo" {
+    # What: migrated from check-compose-healthchecks.sh.
+    # Why: rewritten in ci.sh; real deploy/*/ must pass.
+    # From: Issue #1683 | PR #1858
+    run bash "${CI_SH}" check compose-healthchecks
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"compose-healthchecks=clean"* ]]
+}
+
+@test "check compose-healthchecks fails a service with no healthcheck" {
+    # What: a real, un-excluded service has no healthcheck.
+    # Why: issue #1169: every service needs one.
+    # From: Issue #1683 | PR #1858
+    local f="${BATS_TEST_TMPDIR}/nohc/docker-compose.yml"
+    mkdir -p "$(dirname "${f}")"
+    printf 'services:\n  good:\n    image: x\n    healthcheck:\n      test: ["CMD", "true"]\n  bad:\n    image: y\n' \
+        > "${f}"
+    run bash "${CI_SH}" check compose-healthchecks "${f}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0021"* ]]
+    [[ "${output}" == *"service 'bad' has no healthcheck"* ]]
+}
+
+@test "check compose-healthchecks honors the documented exclusion list" {
+    # What: dhcp-probe is documented as exempt, not a fail.
+    # Why: issue #1169's exclusion contract still applies.
+    # From: Issue #1683 | PR #1858
+    local f="${BATS_TEST_TMPDIR}/excl/deploy/prod/docker-compose.yml"
+    mkdir -p "$(dirname "${f}")"
+    printf 'services:\n  dhcp-probe:\n    image: x\n' > "${f}"
+    run bash "${CI_SH}" check compose-healthchecks "${f}"
+    [ "${status}" -eq 0 ]
+}
+
+@test "check compose-healthchecks fails closed with no compose files" {
+    # What: a vacuous scan (no matched files) must not pass.
+    # Why: mirrors the legacy script's anti-vacuous guard.
+    # From: Issue #1683 | PR #1858
+    run bash "${CI_SH}" check compose-healthchecks "${BATS_TEST_TMPDIR}/nope/docker-compose.yml"
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0020"* ]]
+}
+
+@test "check proxy-cache-env-doc-drift passes clean on the real repo" {
+    # What: migrated from check-proxy-cache-env-doc-drift.
+    # Why: rewritten in ci.sh; real config/docs must agree.
+    # From: Issue #1683 | PR #1858
+    run bash "${CI_SH}" check proxy-cache-env-doc-drift
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"proxy-cache-env-doc-drift=clean"* ]]
+}
+
+@test "check proxy-cache-env-doc-drift fails a real default mismatch" {
+    # What: proxy.env's value disagrees with its doc row.
+    # Why: bug-hunt #1068: a copied default can go stale.
+    # From: Issue #1683 | PR #1858
+    local env="${BATS_TEST_TMPDIR}/proxy.env" doc="${BATS_TEST_TMPDIR}/arch.md"
+    printf 'CACHE_MEM_MB=999\n' > "${env}"
+    # shellcheck disable=SC2016
+    printf '| `CACHE_MEM_MB` | `512` | some description |\n' > "${doc}"
+    run bash "${CI_SH}" check proxy-cache-env-doc-drift "${env}" "${doc}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0023"* ]]
+    [[ "${output}" == *"proxy.env=999 vs doc=512"* ]]
+}
+
+@test "check proxy-cache-env-doc-drift ignores an undocumented CACHE_* var" {
+    # What: a CACHE_* var with no matching doc row is fine.
+    # Why: not every variable needs a table row.
+    # From: Issue #1683 | PR #1858
+    local env="${BATS_TEST_TMPDIR}/proxy2.env" doc="${BATS_TEST_TMPDIR}/arch2.md"
+    printf 'CACHE_UNDOCUMENTED=1\n' > "${env}"
+    printf '# no matching row here\n' > "${doc}"
+    run bash "${CI_SH}" check proxy-cache-env-doc-drift "${env}" "${doc}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"scanned=1 checked=0"* ]]
 }
 
 @test "docker-build builds a per-identity per-arch tag via buildx" {

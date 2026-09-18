@@ -4856,6 +4856,113 @@ _ci_check_naming_consistency() {
     printf 'naming-consistency=clean\n'
 }
 
+# What: Fail on a compose service with no healthcheck block.
+# Why: Issue #1169: every service needs a real healthcheck.
+# From: Issue #1683 | PR #1858
+_ci_check_compose_healthchecks() {
+    local -a files=("$@")
+    if [ "${#files[@]}" -eq 0 ]; then
+        local f
+        for f in "${CI_REPO_ROOT}"/deploy/*/docker-compose.yml; do
+            [ -f "${f}" ] && files+=("${f}")
+        done
+    fi
+    if [ "${#files[@]}" -eq 0 ]; then
+        ci_log "[CI-ERROR-CHECK-0020]" "reason=\"no deploy/*/docker-compose.yml files found\""
+        return 2
+    fi
+    # What: documented healthcheck exemptions (issue #1169).
+    # Why: a few services genuinely have none of their own.
+    # From: Issue #1683 | PR #1858
+    local -A excluded=(
+        ["deploy/prod/docker-compose.yml:dhcp-probe"]=1
+        ["deploy/quickstart/docker-compose.yml:dhcp-probe"]=1
+        ["deploy/prod/docker-compose.yml:syslog-logs-permissions"]=1
+        ["deploy/quickstart/docker-compose.yml:syslog-logs-permissions"]=1
+        ["deploy/prod/docker-compose.yml:retention"]=1
+        ["deploy/quickstart/docker-compose.yml:retention"]=1
+        ["deploy/full-setup/docker-compose.yml:retention"]=1
+        ["deploy/prod/docker-compose.yml:cachehamster"]=1
+        ["deploy/quickstart/docker-compose.yml:cachehamster"]=1
+    )
+    local file svc hc checked=0 key relpath
+    local -a viol=()
+    for file in "${files[@]}"; do
+        [ -f "${file}" ] || continue
+        # What: a canonical "deploy/<env>/compose.yml" key.
+        # Why: works for a repo path or a fixture path.
+        # From: Issue #1683 | PR #1858
+        case "${file}" in
+            */deploy/*/docker-compose.yml) relpath="deploy/${file#*/deploy/}" ;;
+            *) relpath="${file}" ;;
+        esac
+        while IFS=$'\t' read -r svc hc; do
+            [ -n "${svc}" ] || continue
+            checked=$((checked + 1))
+            [ "${hc}" = "1" ] && continue
+            key="${relpath}:${svc}"
+            [ -n "${excluded[${key}]:-}" ] && continue
+            viol+=("${file}: service '${svc}' has no healthcheck:")
+        done < <(awk '
+            /^services:[[:space:]]*$/ { insvc = 1; next }
+            insvc && /^[A-Za-z]/ {
+                if (name != "") print name "\t" hc
+                insvc = 0; name = ""; next
+            }
+            insvc && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ {
+                if (name != "") print name "\t" hc
+                name = $1; sub(/:$/, "", name); hc = 0; next
+            }
+            insvc && name != "" && /^    healthcheck:[[:space:]]*$/ { hc = 1 }
+            END { if (name != "") print name "\t" hc }
+        ' "${file}")
+    done
+    if [ "${checked}" -eq 0 ]; then
+        ci_log "[CI-ERROR-CHECK-0020]" "reason=\"no services found across deploy compose files\""
+        return 2
+    fi
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0021]" "reason=\"service missing a healthcheck (issue #1169)\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'compose-healthchecks=clean checked=%s\n' "${checked}"
+}
+
+# What: Fail if a CACHE_* value drifts from its doc row.
+# Why: a hand-copied doc default silently goes stale.
+# From: Issue #1683 | PR #1858
+_ci_check_proxy_cache_env_doc_drift() {
+    local proxy_env="${1:-${CI_REPO_ROOT}/config/prod/proxy.env}"
+    local arch_doc="${2:-${CI_REPO_ROOT}/docs/architecture-ng.md}"
+    if [ ! -f "${proxy_env}" ]; then
+        ci_log "[CI-ERROR-CHECK-0022]" "path=\"${proxy_env}\" reason=\"proxy.env not found\""
+        return 2
+    fi
+    if [ ! -f "${arch_doc}" ]; then
+        ci_log "[CI-ERROR-CHECK-0022]" "path=\"${arch_doc}\" reason=\"architecture doc not found\""
+        return 2
+    fi
+    local key value doc_row documented scanned=0 checked=0
+    local -a viol=()
+    while IFS='=' read -r key value; do
+        [[ "${key}" =~ ^CACHE_[A-Z_]+$ ]] || continue
+        scanned=$((scanned + 1))
+        doc_row="$(grep -E "^\| \`${key}\` \|" "${arch_doc}" || true)"
+        [ -n "${doc_row}" ] || continue
+        checked=$((checked + 1))
+        # shellcheck disable=SC2016
+        documented="$(sed -E 's/^\| `[A-Z_]+` \| `([^`]*)` \|.*/\1/' <<<"${doc_row}")"
+        if [ "${documented}" != "${value}" ]; then
+            viol+=("${key}: proxy.env=${value} vs doc=${documented}")
+        fi
+    done < <(grep -E '^CACHE_[A-Z_]+=' "${proxy_env}")
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0023]" "reason=\"proxy.env/doc CACHE_* default drift\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'proxy-cache-env-doc-drift=clean scanned=%s checked=%s\n' "${scanned}" "${checked}"
+}
+
 # What: Route a source-hygiene check to its function.
 # Why: One owner per guard invariant; ci.bats calls it.
 # From: Issue #1683
@@ -4879,6 +4986,8 @@ ci_cmd_check() {
         pr-tracking-metadata) _ci_check_pr_tracking_metadata "$@" ;;
         governance-guards) _ci_check_governance_guards "$@" ;;
         naming-consistency) _ci_check_naming_consistency "$@" ;;
+        compose-healthchecks) _ci_check_compose_healthchecks "$@" ;;
+        proxy-cache-env-doc-drift) _ci_check_proxy_cache_env_doc_drift "$@" ;;
         *)
             ci_log "[CI-ERROR-CHECK-0001]" "sub=\"${sub}\" reason=\"unknown check\""
             return 2
