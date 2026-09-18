@@ -19,8 +19,8 @@ setup() {
     export CI_APK_RESOLVE_CMD="$(_stub apkres 'printf "pkg-1.0\n"')"
 }
 
-# What: Removes every dir a manifest file lists, one per line.
-# Why: A function (not inline teardown) lets a test prove it.
+# What: Removes dirs listed in a manifest file.
+# Why: Function lets a test prove the cleanup.
 # From: Issue #1683 | PR #1858
 _trivy_cleanup_var_tmp_dirs() {
     local manifest="$1" d
@@ -606,47 +606,47 @@ _probe_stub() {
 }
 
 @test "retry classifier: matching is case-insensitive (curl/git casing)" {
-    # What: 'Connection reset by peer' (curl/git casing) matches too.
-    # Why: Go tools lowercase; curl/git capitalize the same class.
+    # What: Case-insensitive match for transient errors.
+    # Why: Go/curl/git have different error text casing.
     # From: Issue #1683
     [ "$(_ci_classify_failure 'Connection reset by peer')" = "transient" ]
     [ "$(_ci_classify_failure 'HTTP 401 Unauthorized')" = "permanent" ]
 }
 
 @test "retry classifier: op=github-api 404 is permanent, never not_found" {
-    # What: An API 404 must never read as a safe absence.
-    # Why: A registry 404 may build; a GH-API 404 never should.
+    # What: GitHub API 404 maps to permanent, not not_found.
+    # Why: Registry 404 can recover; API 404 never can.
     # From: Issue #1683
     [ "$(_ci_classify_failure 'gh: Not Found (HTTP 404)' github-api)" = "permanent" ]
     [ "$(_ci_classify_failure 'gh: Not Found (HTTP 404)' github-api)" != "not_found" ]
 }
 
 @test "retry classifier: op=registry (default) still returns not_found on 404-shaped text" {
-    # What: Default op keeps existing registry-probe behavior.
-    # Why: Backward compatibility for every unqualified caller.
+    # What: Default op returns not_found for 404 text.
+    # Why: Preserves legacy registry-probe behavior.
     # From: Issue #1683
     [ "$(_ci_classify_failure 'ghcr.io/x: not found: manifest')" = "not_found" ]
     [ "$(_ci_classify_failure 'ghcr.io/x: not found: manifest' registry)" = "not_found" ]
 }
 
 @test "retry classifier: op=buildx retries the layer-lock and go-panic signatures" {
-    # What: The two historical local-build transient signatures.
-    # Why: build-retry.sh/docker-buildx-retry.sh's exact evidence.
+    # What: layer-lock and panic signatures are transient.
+    # Why: build-retry.sh/docker-buildx-retry.sh evidence.
     # From: Issue #1683
     [ "$(_ci_classify_failure '(*service).Write failed: rpc error: code = Unavailable desc = ref layer-sha256:abc locked for 900ms (since t): unavailable' buildx)" = "transient" ]
     [ "$(_ci_classify_failure 'panic: methodref has no signature' buildx)" = "transient" ]
 }
 
 @test "retry classifier: buildx signatures never leak into a real compile failure" {
-    # What: An unrelated buildx op never gains the transient tag.
-    # Why: op-gating must not accidentally widen matching.
+    # What: Unrelated buildx ops stay permanent.
+    # Why: op-gating prevents matching widening.
     # From: Issue #1683
     [ "$(_ci_classify_failure 'error: could not compile lancache-ui' buildx)" = "permanent" ]
 }
 
 @test "retry classifier: git-fetch-retry.sh's transient signatures are covered" {
-    # What: DNS/RPC/disconnect signatures git_fetch_retry knew.
-    # Why: One classifier now owns what git-fetch-retry.sh owned.
+    # What: DNS/RPC/disconnect transient signatures.
+    # Why: Classifier now owns git-fetch-retry.sh cases.
     # From: Issue #1683
     [ "$(_ci_classify_failure 'unexpected disconnect while reading sideband packet')" = "transient" ]
     [ "$(_ci_classify_failure 'The remote end hung up unexpectedly')" = "transient" ]
@@ -656,8 +656,8 @@ _probe_stub() {
 }
 
 @test "retry classifier: a missing git ref is permanent, never retried" {
-    # What: resolve-remote-ref-with-retry.sh's own exit-2 case.
-    # Why: a genuinely absent ref cannot be fixed by retrying.
+    # What: Missing git ref maps to permanent.
+    # Why: Absent refs cannot be fixed by retrying.
     # From: Issue #1683
     [ "$(_ci_classify_failure "fatal: couldn't find remote ref refs/x")" = "permanent" ]
 }
@@ -941,8 +941,8 @@ _stub() {
 }
 
 @test "test runs the real cargo pipeline for a rust fixture (no injection)" {
-    # What: The default rust path runs real fmt/check/clippy/test.
-    # Why: AG-VAL-008 must run for real, not only via injection.
+    # What: Default rust path runs real cargo pipeline.
+    # Why: AG-VAL-008 must run for real, not via injection.
     # From: Issue #1683
     local root="${BATS_TEST_TMPDIR}/repo-ok"
     mkdir -p "${root}/crate/src"
@@ -972,8 +972,8 @@ RS
 }
 
 @test "test propagates a real cargo clippy failure without injection" {
-    # What: A real clippy violation must fail test, unmocked.
-    # Why: AG-INT-002: a real failure must never be hidden.
+    # What: Real clippy violations fail, unmocked.
+    # Why: AG-INT-002: real failures must never hide.
     # From: Issue #1683
     local root="${BATS_TEST_TMPDIR}/repo-fail"
     mkdir -p "${root}/crate/src"
@@ -1054,8 +1054,8 @@ RS
 # =========================================================
 
 @test "cache fallback: an unwired CAS lookup always misses, never a false hit" {
-    # What: No CI_CAS_LOOKUP_CMD -> _ci_cas_lookup misses.
-    # Why: Fallback must default to miss, never a silent hit.
+    # What: Unwired CAS lookup misses, not false hit.
+    # Why: Fallback defaults to miss, not silent hit.
     # From: Issue #1683
     run _ci_cas_lookup "deadbeef"
     [ "${status}" -ne 0 ]
@@ -1078,8 +1078,8 @@ RS
 }
 
 @test "cache fallback: a crashing CAS backend still falls back to a real build" {
-    # What: Any nonzero CAS exit, even noisy, means fall back.
-    # Why: A broken CAS backend must not block the pipeline.
+    # What: Any nonzero CAS exit falls back to build.
+    # Why: Broken CAS backend must not block pipeline.
     # From: Issue #1683
     local marker="${BATS_TEST_TMPDIR}/cas-invoked-crash"
     STUB_STATE=MISSING_CONFIRMED
@@ -1091,15 +1091,15 @@ RS
         run bash "${CI_SH}" build ui
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"result=built"* ]]
-    # What: The marker proves the CAS backend truly ran.
-    # Why: A skipped stub would make the fallback claim empty.
+    # What: Marker proves CAS backend ran.
+    # Why: Skipped stub makes fallback claim empty.
     # From: Issue #1683
     [ -f "${marker}" ]
 }
 
 @test "cache fallback: an apk (non-rust) service never consults the CAS" {
-    # What: build_type=apk must not call the CAS at all.
-    # Why: CAS is a rust-binary reuse path (§7), apk has none.
+    # What: build_type=apk must not call CAS.
+    # Why: CAS is rust-binary reuse (§7); apk has none.
     # From: Issue #1683
     local marker="${BATS_TEST_TMPDIR}/cas-invoked-apk"
     STUB_STATE=MISSING_CONFIRMED
@@ -1111,8 +1111,8 @@ RS
         run bash "${CI_SH}" build proxy
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"result=built"* ]]
-    # What: An absent marker proves the CAS was never invoked.
-    # Why: A no-op stub would pass with no proof of a skip.
+    # What: Absent marker proves CAS never invoked.
+    # Why: No-op stub passes with no skip proof.
     # From: Issue #1683
     [ ! -f "${marker}" ]
 }
@@ -1817,8 +1817,8 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
 }
 
 @test "gh_versions retries a transient GH-API failure, then succeeds" {
-    # What: 2 transient GH-API failures then a 200-shaped success.
-    # Why: github-api-retry.sh's own retry-on-transient behavior.
+    # What: Transient GH-API failures retry then succeed.
+    # Why: github-api-retry.sh retry-on-transient behavior.
     # From: Issue #1683
     local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
     gh() {
@@ -1834,8 +1834,8 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
 }
 
 @test "gh_versions fails immediately (no retry) on a 404, package skipped" {
-    # What: A 404 must not consume retry budget or hard-error.
-    # Why: github-api-retry.sh's own "fails 401/404 immediately".
+    # What: 404 does not consume retry budget.
+    # Why: github-api-retry.sh fails 401/404 immediately.
     # From: Issue #1683
     local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
     gh() {
@@ -2769,10 +2769,8 @@ netdata=sha256:n"
 }
 
 @test "build-args emits nothing for an unrecognized target" {
-    # What: A name absent from the manifest's services block
-    #       still gets no args -- no guessed default.
-    # Why: build-tools + the 10 manifest services own args now;
-    #      anything else stays the prior silent no-op.
+    # What: Unrecognized target emits nothing.
+    # Why: Only manifest services get args now.
     # From: Issue #1683
     run bash "${CI_SH}" build-args not-a-real-service
     [ "${status}" -eq 0 ]
@@ -2780,10 +2778,8 @@ netdata=sha256:n"
 }
 
 @test "build-args emits ALPINE_IMAGE for every plain product service" {
-    # What: proxy/dns/watchdog/dhcp/dhcp-proxy/ntp/ui/cachehamster
-    #       each get the shared ALPINE_IMAGE pin and nothing else.
-    # Why: One base-image owner (base_images.alpine); no service
-    #      Dockerfile pins its own alpine tag.
+    # What: Every product service gets shared ALPINE_IMAGE.
+    # Why: One base-image owner (base_images.alpine).
     # From: Issue #1683
     local svc
     for svc in proxy dns watchdog dhcp dhcp-proxy ntp ui cachehamster; do
@@ -2795,10 +2791,8 @@ netdata=sha256:n"
 }
 
 @test "build-args emits ALPINE_IMAGE + FLUENT_BIT_IMAGE for syslog only" {
-    # What: syslog's external_image: fluent_bit manifest entry
-    #       adds FLUENT_BIT_IMAGE from base_images.fluent_bit.
-    # Why: syslog copies a prebuilt fluent-bit binary; no other
-    #      service declares an external_image today.
+    # What: syslog emits ALPINE_IMAGE + FLUENT_BIT_IMAGE.
+    # Why: syslog has external_image: fluent_bit entry.
     # From: Issue #1683
     run bash "${CI_SH}" build-args syslog
     [ "${status}" -eq 0 ]
@@ -2807,8 +2801,8 @@ netdata=sha256:n"
 }
 
 @test "build-args --bare syslog emits FLUENT_BIT_IMAGE without the flag prefix" {
-    # What: --bare form drops --build-arg for the external image too.
-    # Why: docker/build-push-action's build-args wants NAME=VALUE.
+    # What: --bare drops --build-arg flag prefix.
+    # Why: docker/build-push-action wants NAME=VALUE format.
     # From: Issue #1683
     run bash "${CI_SH}" build-args syslog --bare
     [ "${status}" -eq 0 ]
@@ -2817,10 +2811,8 @@ netdata=sha256:n"
 }
 
 @test "build-args emits only ALPINE_IMAGE for netdata (no version pin)" {
-    # What: netdata gets ALPINE_IMAGE like any product service, but
-    #       NEVER NETDATA_VERSION/NETDATA_X86_64_SHA256.
-    # Why: netdata keeps its own baked-in ARG defaults (SOT-Sync);
-    #      this function must not touch that separate ownership.
+    # What: netdata gets ALPINE_IMAGE only.
+    # Why: netdata keeps baked-in ARG defaults (SOT-Sync).
     # From: Issue #1683
     run bash "${CI_SH}" build-args netdata
     [ "${status}" -eq 0 ]
@@ -2830,9 +2822,8 @@ netdata=sha256:n"
 }
 
 @test "build-args for a product service fails closed on a missing central base image" {
-    # What: A missing base_images.alpine pin must fail closed for
-    #       a product-service target too, not only build-tools.
-    # Why: FAIL CLOSED must cover every ALPINE_IMAGE emitter.
+    # What: Missing base_images.alpine pin fails closed.
+    # Why: FAIL CLOSED covers every ALPINE_IMAGE emitter.
     # From: Issue #1683
     local m="${BATS_TEST_TMPDIR}/no-rust-alpine-proxy.yml"
     grep -v '^  alpine:' "${CI_MANIFEST_SOURCE}" > "${m}"
@@ -2842,10 +2833,8 @@ netdata=sha256:n"
 }
 
 @test "build-args fails closed on an unmapped external_image value" {
-    # What: an external_image the arg-name case doesn't know must
-    #       fail closed rather than guess a build-arg name.
-    # Why: AG-VAL-030 -- prove the failure path, not only the two
-    #      real cases (none today / fluent_bit for syslog).
+    # What: Unmapped external_image value fails closed.
+    # Why: AG-VAL-030: prove failure path not guess.
     # From: Issue #1683
     local m="${BATS_TEST_TMPDIR}/bogus-external-image.yml"
     sed 's/external_image: fluent_bit/external_image: bogus_thing/' \
