@@ -3257,6 +3257,70 @@ netdata=sha256:n"
     [ "${status}" -ne 0 ]
 }
 
+@test "check review-chronology exempts legacy-excluded file types" {
+    # What: *.md (and the rest of the legacy exclusion list) must not
+    #       trip the scan even when it quotes a banned phrase verbatim.
+    # Why: parity with the migrated-from script's is_excluded().
+    # From: Issue #1683
+    printf '# found during code review earlier.\n' > "${BATS_TEST_TMPDIR}/notes.md"
+    run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/notes.md"
+    [ "${status}" -eq 0 ]
+}
+
+@test "check review-chronology CHRONOLOGY_WARN_ONLY downgrades a real violation to exit 0" {
+    # What: repo-wide PR mode: a real narration hit still surfaces but
+    #       does not block, matching the legacy repo-wide/PR split.
+    # Why: AG-GH-018-style transitional warn path (Issue #1095 | PR #1546).
+    # From: Issue #1683
+    printf '# found during code review earlier.\n' > "${BATS_TEST_TMPDIR}/badc.sh"
+    run env CHRONOLOGY_WARN_ONLY=1 bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/badc.sh"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"review-chronology=warn"* ]]
+    [[ "${output}" == *"CI-ERROR-CHECK-0010"* ]]
+}
+
+@test "check review-chronology duplicate #N outside From: is always warn-only" {
+    # What: a bare #N repeated outside the file's own From: pointer
+    #       must never block, even without CHRONOLOGY_WARN_ONLY.
+    # Why: PR #1856 downgraded this specific sub-check to warn-only.
+    # From: Issue #1683
+    printf '# From: Issue #1683\n# see #1683 again here\n' > "${BATS_TEST_TMPDIR}/dupref.sh"
+    run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/dupref.sh"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0010"* ]]
+    [[ "${output}" == *"warn-only, PR #1856"* ]]
+}
+
+@test "check review-chronology diff-scoped mode scans only the PR's changed files" {
+    # What: CHRONOLOGY_DIFF_BASE_SHA(+REF) restricts the scan to files
+    #       changed between the base and GITHUB_SHA, not the whole tree.
+    # Why: Issue #1095 | PR #1686 parity -- a pre-existing violation in
+    #      an untouched file must not block an unrelated PR.
+    # From: Issue #1683
+    local bare="${BATS_TEST_TMPDIR}/chrono-origin.git" work="${BATS_TEST_TMPDIR}/chrono-work"
+    git init --quiet --bare "${bare}"
+    git clone --quiet "${bare}" "${work}"
+    (
+        cd "${work}" || exit 1
+        git config user.email chrono-bats@example.invalid
+        git config user.name chrono-bats
+        printf '# found during code review earlier.\n' > pre-existing.sh
+        git add pre-existing.sh
+        git commit --quiet -m base
+        git push --quiet origin HEAD:refs/heads/chrono-base
+    )
+    cd "${work}"
+    local base_sha; base_sha="$(git rev-parse HEAD)"
+    printf '# a normal current-state comment.\n' > touched.sh
+    git add touched.sh
+    git commit --quiet -m "touch an unrelated file"
+    local head_sha; head_sha="$(git rev-parse HEAD)"
+    run env CHRONOLOGY_DIFF_BASE_SHA="${base_sha}" CHRONOLOGY_DIFF_BASE_REF=chrono-base \
+        GITHUB_SHA="${head_sha}" bash "${CI_SH}" check review-chronology
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"review-chronology=clean"* ]]
+}
+
 @test "check pipefail-early-exit flags grep -q, not plain sed -n" {
     # What: ci.sh owns the SIGPIPE check; bats calls it.
     # Why: only true early-exit consumers risk exit 141.

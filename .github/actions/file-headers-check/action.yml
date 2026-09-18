@@ -4,10 +4,10 @@
 name: File header / workflow size / review-chronology / dependabot-docker-base / trivy-action-direct-usage / short-sha-truncation checks
 description: >-
   The six repository-hygiene checks build-push.yml's file-headers job
-  carries. Four now call the proven `ci.sh check` subcommand (file-headers,
-  workflow-line-limit, dependabot-docker-base-consistency, deny-short-sha);
-  review-chronology and trivy-action-direct-usage stay on their legacy
-  scripts pending further ci.sh interface work (Issue #1683).
+  carries. Five now call the proven `ci.sh check` subcommand (file-headers,
+  workflow-line-limit, review-chronology, dependabot-docker-base-consistency,
+  deny-short-sha); trivy-action-direct-usage stays on its legacy script --
+  no ci.sh owner exists for it yet (Issue #1683).
 inputs:
   build-tools-image:
     description: Immutable build-tools image selected by the calling workflow
@@ -55,7 +55,7 @@ runs:
         docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work
         -e CHRONOLOGY_WARN_ONLY
         "${{ inputs.build-tools-image }}" timeout --kill-after=30s 5m
-        bash scripts/untracked/check-review-chronology-comments.sh
+        bash .github/scripts/ci.sh check review-chronology
 
     # What: Diff-scoped review-chronology check on PR changes
     # Why: Repo-wide is warn-only; this blocks PR violations
@@ -74,7 +74,7 @@ runs:
           -e GITHUB_SHA \
           "${{ inputs.build-tools-image }}" \
           timeout --kill-after=30 --signal=KILL 300 bash -c \
-            'cp -a /source /tmp/work && cd /tmp/work && bash scripts/untracked/check-review-chronology-comments.sh'
+            'cp -a /source /tmp/work && cd /tmp/work && bash .github/scripts/ci.sh check review-chronology'
 
     # See scripts/tracked/check-dependabot-docker-base-consistency.sh's own header
     # for the shared-base-image assumption this guards.

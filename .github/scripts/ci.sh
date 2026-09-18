@@ -4350,8 +4350,50 @@ _ci_check_executable_bits() {
     printf 'executable-bits=clean paths=%s\n' "${#paths[@]}"
 }
 
-# What: Flag review-chronology and stale line-refs.
-# Why: AG-CODE-002/003 comments state current code only.
+# What: Files exempt from every review-chronology sub-scan.
+# Why: docs/config/binary noise the legacy script also excluded.
+# From: Issue #1683
+_ci_review_chronology_excluded() {
+    case "$1" in
+        *.md) return 0 ;;
+        .env|.env.example|*/.env|*/.env.example) return 0 ;;
+        Cargo.lock|*/Cargo.lock) return 0 ;;
+        .gitkeep|*/.gitkeep) return 0 ;;
+        VERSION) return 0 ;;
+        LICENSE|COPYING) return 0 ;;
+        services/dhcp/kea-dhcp4.conf|services/dhcp/kea-ctrl-agent.conf|services/dhcp/kea-dhcp-ddns.conf) return 0 ;;
+        docs/validation-state.json|*/docs/validation-state.json) return 0 ;;
+        services/ui/src/static/chart.umd.min.js|services/ui/src/static/admin.css) return 0 ;;
+        services/proxy/public_suffix_list.dat) return 0 ;;
+        */fuzz/corpus/*|fuzz/corpus/*) return 0 ;;
+        *.png|*.jpg|*.jpeg|*.gif|*.ico|*.svg|*.woff|*.woff2|*.ttf|*.eot|*.crt|*.key|*.pem) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# What: Diff-scoped file list between CHRONOLOGY_DIFF_BASE_* and GITHUB_SHA.
+# Why: PR-changed-files mode (Issue #1095 | PR #1686 parity).
+# From: Issue #1683
+_ci_review_chronology_diff_files() {
+    : "${CHRONOLOGY_DIFF_BASE_REF:?CHRONOLOGY_DIFF_BASE_REF is required}"
+    : "${GITHUB_SHA:?GITHUB_SHA is required}"
+    _ci_retry "git-fetch-chronology-base-ref" git fetch --no-tags --depth=1 origin \
+        "+refs/heads/${CHRONOLOGY_DIFF_BASE_REF}:refs/remotes/origin/${CHRONOLOGY_DIFF_BASE_REF}" >/dev/null || return 2
+    _ci_retry "git-fetch-chronology-base-sha" git fetch --no-tags --depth=1 origin \
+        "${CHRONOLOGY_DIFF_BASE_SHA}" >/dev/null || return 2
+    git cat-file -e "${CHRONOLOGY_DIFF_BASE_SHA}^{commit}" || {
+        ci_log "[CI-ERROR-CHECK-0010]" "reason=\"diff base sha unreachable\""; return 2; }
+    git cat-file -e "${GITHUB_SHA}^{commit}" || {
+        ci_log "[CI-ERROR-CHECK-0010]" "reason=\"GITHUB_SHA unreachable\""; return 2; }
+    mapfile -d '' files < <(git diff -z --name-only --diff-filter=ACMRTUXB \
+        "${CHRONOLOGY_DIFF_BASE_SHA}" "${GITHUB_SHA}")
+}
+
+# What: Flag review-chronology, stale line-refs, dup #N outside From:.
+# Why: AG-CODE-002/003/012 comments state current code only.
+#      CHRONOLOGY_WARN_ONLY / CHRONOLOGY_DIFF_BASE_SHA(+REF) match the
+#      legacy script's repo-wide-warn / diff-scoped-block split; dup #N
+#      stays warn-only in every mode (PR #1856 policy).
 # From: Issue #1683
 _ci_check_review_chronology() {
     local verbs='(caught|found|flagged|spotted|identified|discovered|noticed)'
@@ -4361,14 +4403,21 @@ _ci_check_review_chronology() {
     rc="${rc}|(\\breview[[:space:]]+finding\\b)"
     local lr='\(([Ss]ee[[:space:]]+)?\bline\b[[:space:]]*~?[0-9]+'
     local -a files=()
-    if [ "$#" -gt 0 ]; then files=("$@"); else
+    if [ -n "${CHRONOLOGY_DIFF_BASE_SHA:-}" ]; then
+        _ci_review_chronology_diff_files || return 2
+    elif [ "$#" -gt 0 ]; then files=("$@"); else
         mapfile -t files < <(git ls-files)
     fi
     local path out ln joined fnums num
-    local -a viol=()
+    local -a viol=() dup_viol=()
     for path in "${files[@]}"; do
         [ -f "${path}" ] || continue
-        case "${path}" in */ci.sh|ci.sh|*/ci.bats|ci.bats) continue ;; esac
+        case "${path}" in
+            */ci.sh|ci.sh|*/ci.bats|ci.bats) continue ;;
+            */check-review-chronology-comments.sh|check-review-chronology-comments.sh) continue ;;
+            */check_review_chronology_comments.bats|check_review_chronology_comments.bats) continue ;;
+        esac
+        _ci_review_chronology_excluded "${path}" && continue
         out="$(grep -EinIH "${rc}" "${path}")" && viol+=("${out}")
         out="$(grep -EinIH "${lr}" "${path}")" && viol+=("${out}")
         while IFS=$'\t' read -r ln joined; do
@@ -4398,11 +4447,22 @@ _ci_check_review_chronology() {
                         if (af !~ /[0-9]/ && bf !~ /[0-9]/) m=1 } } }
                   if (m) print FILENAME ":" FNR ": " line }
             ' "${path}")"
-            [ -n "${out}" ] && viol+=("${out}")
+            [ -n "${out}" ] && dup_viol+=("${out}")
         done <<< "${fnums}"
     done
+    # What: dup #N outside From: is warn-only in every mode.
+    # Why: PR #1856 downgraded it; a genuine duplicate never blocks.
+    # From: Issue #1683
+    if [ "${#dup_viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0010]" "reason=\"bare #N duplicated outside From: (warn-only, PR #1856)\"" "$(printf '%s\n' "${dup_viol[@]}")"
+    fi
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0010]" "reason=\"review-chronology / stale line-ref / bare #N\"" "$(printf '%s\n' "${viol[@]}")"
+        if [ "${CHRONOLOGY_WARN_ONLY:-0}" = "1" ]; then
+            ci_error "[CI-ERROR-CHECK-0010]" "reason=\"review-chronology / stale line-ref (warn-only)\"" "$(printf '%s\n' "${viol[@]}")"
+            printf 'review-chronology=warn files=%s\n' "${#files[@]}"
+            return 0
+        fi
+        ci_error "[CI-ERROR-CHECK-0010]" "reason=\"review-chronology / stale line-ref\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
     printf 'review-chronology=clean files=%s\n' "${#files[@]}"
