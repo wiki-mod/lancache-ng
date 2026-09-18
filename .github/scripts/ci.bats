@@ -3247,9 +3247,8 @@ netdata=sha256:n"
 }
 
 @test "check review-chronology exempts legacy-excluded file types" {
-    # What: *.md (and the rest of the legacy exclusion list) must not
-    #       trip the scan even when it quotes a banned phrase verbatim.
-    # Why: parity with the migrated-from script's is_excluded().
+    # What: Legacy-excluded file types (*.md) skip scan.
+    # Why: Parity with legacy script's is_excluded().
     # From: Issue #1683
     printf '# found during code review earlier.\n' > "${BATS_TEST_TMPDIR}/notes.md"
     run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/notes.md"
@@ -3257,9 +3256,8 @@ netdata=sha256:n"
 }
 
 @test "check review-chronology CHRONOLOGY_WARN_ONLY downgrades a real violation to exit 0" {
-    # What: repo-wide PR mode: a real narration hit still surfaces but
-    #       does not block, matching the legacy repo-wide/PR split.
-    # Why: AG-GH-018-style transitional warn path (Issue #1095 | PR #1546).
+    # What: CHRONOLOGY_WARN_ONLY surfaces but doesn't block.
+    # Why: AG-GH-018 transitional warn path (Issue #1095).
     # From: Issue #1683
     printf '# found during code review earlier.\n' > "${BATS_TEST_TMPDIR}/badc.sh"
     run env CHRONOLOGY_WARN_ONLY=1 bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/badc.sh"
@@ -3269,9 +3267,8 @@ netdata=sha256:n"
 }
 
 @test "check review-chronology duplicate #N outside From: is always warn-only" {
-    # What: a bare #N repeated outside the file's own From: pointer
-    #       must never block, even without CHRONOLOGY_WARN_ONLY.
-    # Why: PR #1856 downgraded this specific sub-check to warn-only.
+    # What: Bare #N outside From: never blocks.
+    # Why: PR #1856 downgraded to warn-only.
     # From: Issue #1683
     printf '# From: Issue #1683\n# see #1683 again here\n' > "${BATS_TEST_TMPDIR}/dupref.sh"
     run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/dupref.sh"
@@ -3281,10 +3278,8 @@ netdata=sha256:n"
 }
 
 @test "check review-chronology diff-scoped mode scans only the PR's changed files" {
-    # What: CHRONOLOGY_DIFF_BASE_SHA(+REF) restricts the scan to files
-    #       changed between the base and GITHUB_SHA, not the whole tree.
-    # Why: Issue #1095 | PR #1686 parity -- a pre-existing violation in
-    #      an untouched file must not block an unrelated PR.
+    # What: CHRONOLOGY_DIFF_BASE_SHA scans changed files.
+    # Why: Parity: pre-existing violations don't block.
     # From: Issue #1683
     local bare="${BATS_TEST_TMPDIR}/chrono-origin.git" work="${BATS_TEST_TMPDIR}/chrono-work"
     git init --quiet --bare "${bare}"
@@ -3311,9 +3306,8 @@ netdata=sha256:n"
 }
 
 @test "check review-chronology diff-scoped mode fails closed when git diff itself fails" {
-    # What: a real `git diff` failure (not "no changes") must return 2,
-    #       never an empty (clean) file list.
-    # Why: mapfile < <(git diff ...) loses exit status via process
+    # What: git diff failure returns 2, not empty file list.
+    # Why: mapfile loses exit status via process
     #      substitution -- this proves the mktemp-file capture instead
     #      actually propagates the failure (AG-INT-002/AG-VAL-030).
     # From: Issue #1683
@@ -3449,8 +3443,8 @@ STUBEOF
 }
 
 @test "check pr-template requires every current template section filled" {
-    # What: ci.sh derives required sections from the real template.
-    # Why: a hardcoded section list drifts when the template gains one.
+    # What: ci.sh derives required sections from template.
+    # Why: Hardcoded list drifts with template changes.
     # From: Issue #1683
     local body='## Summary
 Fixes the thing.
@@ -3497,8 +3491,8 @@ Fixed foo.'
 }
 
 @test "check pr-template fails an unfilled section and an unchecked type-of-change" {
-    # What: an untouched heading or unchecked box must fail.
-    # Why: legacy only checked non-empty, missing the checkbox case.
+    # What: Untouched heading or unchecked box must fail.
+    # Why: Legacy missed checkbox case in validation.
     # From: Issue #1683
     local body='## Summary
 Fixes the thing.
@@ -3516,8 +3510,8 @@ Fixes the thing.
 }
 
 @test "check workflow-line-limit fails a workflow file over the line ceiling" {
-    # What: ci.sh owns the GitHub-dispatch-cliff size ceiling.
-    # Why: GitHub silently drops runs for oversized workflow files.
+    # What: ci.sh owns the GitHub dispatch-cliff size ceiling.
+    # Why: GitHub drops runs for oversized workflow files.
     # From: Issue #1683
     local d="${BATS_TEST_TMPDIR}/wf"; mkdir -p "${d}"
     printf 'name: ok\non: push\njobs:\n  x:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n' \
@@ -3535,8 +3529,8 @@ Fixes the thing.
 }
 
 @test "check pr-tracking-metadata requires PR context, labels, and milestone" {
-    # What: ci.sh owns the AG-GH-008 metadata gate; bats calls it.
-    # Why: label/milestone gaps must fail before network is touched.
+    # What: ci.sh owns AG-GH-008 metadata gate.
+    # Why: Metadata gaps must fail before network access.
     # From: Issue #1683
     run bash "${CI_SH}" check pr-tracking-metadata
     [ "${status}" -eq 2 ]
@@ -3550,8 +3544,8 @@ Fixes the thing.
 }
 
 @test "check pr-tracking-metadata fails when the project-board token is rejected" {
-    # What: a rejected GH_TOKEN is a config problem, must fail loud.
-    # Why: distinguishes "no token" (warn) from "bad token" (fail).
+    # What: Rejected GH_TOKEN is config problem, fails loud.
+    # Why: Distinguishes missing vs. bad token.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     cat > "${bin}/curl" <<'EOF'
