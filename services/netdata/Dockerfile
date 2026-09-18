@@ -39,6 +39,11 @@ LABEL org.opencontainers.image.description="First-party Alpine + netdata's offic
 # From: Issue #1304 | PR #1662
 ARG NETDATA_VERSION=v2.11.0
 ARG NETDATA_X86_64_SHA256=b42d9937807f28812502a967906d370cff9ab443453813656b99ff6a9b3c5649
+# What: arm64 static-build checksum, from the version SOT.
+# Why: amd64+arm64 both required; SOT already carried this value
+#      with no Dockerfile consumer until now (Issue #1683).
+# From: Issue #1683
+ARG NETDATA_AARCH64_SHA256=8cd056d64078c109409c08e30d55324c82e3855f9d8e4b304cacc7c612610e09
 
 # `bash` is required at build time because netdata's own installer script
 # (packaging/makeself/install-or-update.sh, run by the extracted .gz.run
@@ -59,11 +64,19 @@ ARG NETDATA_X86_64_SHA256=b42d9937807f28812502a967906d370cff9ab443453813656b99ff
 # From: Issue #1095
 RUN sed -i 's|^https://|http://|' /etc/apk/repositories
 
+# What: selects the netdata release asset + checksum by arch.
+# Why: netdata ships one static .gz.run per arch; no apk here.
+# From: Issue #1683
 RUN set -eu; \
     apk add --no-cache bash ca-certificates; \
+    case "$(uname -m)" in \
+      x86_64) netdata_arch="x86_64"; netdata_sha256="${NETDATA_X86_64_SHA256}"; ;; \
+      aarch64) netdata_arch="aarch64"; netdata_sha256="${NETDATA_AARCH64_SHA256}"; ;; \
+      *) echo "Unsupported architecture for netdata static build: $(uname -m)" >&2; exit 1; ;; \
+    esac; \
     wget -q -O /tmp/netdata.gz.run \
-      "https://github.com/netdata/netdata/releases/download/${NETDATA_VERSION}/netdata-x86_64-${NETDATA_VERSION}.gz.run"; \
-    echo "${NETDATA_X86_64_SHA256}  /tmp/netdata.gz.run" | sha256sum -c -; \
+      "https://github.com/netdata/netdata/releases/download/${NETDATA_VERSION}/netdata-${netdata_arch}-${NETDATA_VERSION}.gz.run"; \
+    echo "${netdata_sha256}  /tmp/netdata.gz.run" | sha256sum -c -; \
     chmod +x /tmp/netdata.gz.run; \
     # --dont-start-it: this is a Docker build, not a running system --
     # netdata is started by this image's own entrypoint.sh at container
