@@ -4,12 +4,12 @@
 name: Compose healthcheck coverage check
 description: >-
   The single step build-push.yml's `compose-healthchecks` job carries. No
-  build-tools image is needed here -- the underlying script is a pure
-  bash/grep scan of the committed deploy/*/docker-compose.yml files, unlike
-  shellcheck's steps.
+  build-tools image is needed here -- ci.sh's compose-healthchecks check is
+  a pure bash/awk scan of the committed deploy/*/docker-compose.yml files,
+  unlike shellcheck's steps.
 runs:
   using: composite
   steps:
     - name: Check every deploy/*/docker-compose.yml service has a healthcheck
       shell: bash
-      run: bash scripts/tracked/check-compose-healthchecks.sh
+      run: bash .github/scripts/ci.sh check compose-healthchecks
