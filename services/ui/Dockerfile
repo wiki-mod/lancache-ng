@@ -10,6 +10,11 @@
 # only carries the compiled binary, its Tera templates, and the entrypoint
 # script.
 
+# What: Base image pin, consumed from the version SOT.
+# Why: build-manifest.yml is the sole owner of the pin.
+# From: Issue #1683
+ARG ALPINE_IMAGE
+
 # Intentional ARG default (overridable at build time via --build-arg).
 # Actual digest pinning for release builds is tracked in issue #508.
 ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
@@ -475,10 +480,10 @@ RUN --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_dist_config \
     --mount=type=secret,id=distcc_potential_hosts \
     --mount=type=secret,id=ccache_redis_url \
-    --mount=type=secret,id=proxy_ca \
+    --mount=type=secret,id=project_selfhosted_proxy_ca \
     set -eu; \
-    if [ -s /run/secrets/proxy_ca ]; then \
-      cp /run/secrets/proxy_ca /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; \
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
+      cp /run/secrets/project_selfhosted_proxy_ca /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; \
       update-ca-certificates >/dev/null; \
       trap 'rm -f /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; update-ca-certificates >/dev/null 2>&1 || true' EXIT; \
     fi; \
@@ -564,10 +569,10 @@ RUN --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_dist_config \
     --mount=type=secret,id=distcc_potential_hosts \
     --mount=type=secret,id=ccache_redis_url \
-    --mount=type=secret,id=proxy_ca \
+    --mount=type=secret,id=project_selfhosted_proxy_ca \
     set -eu; \
-    if [ -s /run/secrets/proxy_ca ]; then \
-      cp /run/secrets/proxy_ca /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; \
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
+      cp /run/secrets/project_selfhosted_proxy_ca /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; \
       update-ca-certificates >/dev/null; \
       trap 'rm -f /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; update-ca-certificates >/dev/null 2>&1 || true' EXIT; \
     fi; \
@@ -601,10 +606,10 @@ RUN --mount=type=secret,id=sccache_redis_url \
 
 # ── Runtime image ──────────────────────────────────────────────────────────────
 # Alpine base (issue #815): replaces the prior debian:trixie-slim final
-# stage. Same pinned alpine:3.24 digest already used by services/dhcp,
-# services/dhcp-proxy, services/watchdog, services/ntp, and services/dns.
+# stage. Same ALPINE_IMAGE build-arg (from build-manifest.yml's SOT pin,
+# issue #1683) that every other service Dockerfile in this repo consumes.
 
-FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+FROM ${ALPINE_IMAGE}
 
 LABEL org.opencontainers.image.description="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
 
@@ -657,10 +662,10 @@ ARG APT_CACHE_BUST=""
 # What: trusts the proxy's CA for this RUN, never in a layer.
 # Why: a secret mount never persists; bundle restored below.
 # From: Issue #1781 | PR #1783
-RUN --mount=type=secret,id=proxy_ca \
-    if [ -s /run/secrets/proxy_ca ]; then \
+RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
       cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig && \
-      cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+      cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
     fi && \
     : "apt-cache-bust=${APT_CACHE_BUST}" && \
     apk upgrade --no-cache && \
@@ -672,7 +677,7 @@ RUN --mount=type=secret,id=proxy_ca \
     curl \
     lsof \
     ripgrep && \
-    if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
 # nano: in-container troubleshooting tool -- see services/proxy/Dockerfile's
 # identical comment for the full rationale; lsof/ripgrep are apk-installed

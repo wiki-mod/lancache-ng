@@ -1,38 +1,41 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-#
-# What: combined fluent-bit + syslog-ng container.
-# Why: accepted crash-coupling/one-HEALTHCHECK-slot tradeoff.
-# From: Issue #1428 | PR #1431
-#
-# What: copies pinned fluent-bit binary + glibc to prefix.
-# Why: Alpine stable lacks fluent-bit; isolated avoids gaps.
-# From: Issue #1428 | PR #1431
-FROM cr.fluentbit.io/fluent/fluent-bit:3.2.10@sha256:d6dec000c4929a439562525728c708f6e99800d7ddc82efd6aa4f45f3a20b562 AS fluent-bit-src
 
-FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+# What: Combined fluent-bit + syslog-ng container.
+# Why: Accept crash-coupling/single-HEALTHCHECK tradeoff.
+# From: Issue #1428 | PR #1431
+
+# What: Pinned fluent-bit binary + glibc in isolated prefix.
+# Why: Alpine stable lacks fluent-bit; isolated is safer.
+# From: Issue #1428 | PR #1431
+
+# What: Base image pins, consumed from version SOT.
+# Why: build-manifest.yml is sole owner of both pins.
+# From: Issue #1683
+ARG ALPINE_IMAGE
+ARG FLUENT_BIT_IMAGE
+FROM ${FLUENT_BIT_IMAGE} AS fluent-bit-src
+
+FROM ${ALPINE_IMAGE}
 
 LABEL org.opencontainers.image.description="Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428)."
 
-# syslog-ng ships in Alpine's STABLE main repo (confirmed live: 4.7.1-r1) --
-# the POC's own Dockerfile comment already established this; only fluent-bit
-# needed the edge/testing repo, which this image never touches. bash is this
-# project's default shell (AG-REL-006) and provides `wait -n` for
-# entrypoint.sh's fail-fast multi-child supervision; su-exec is NOT used here
-# (see the capability-posture comment on the fluent-bit interpreter's setcap
-# step below for why a runtime privilege-drop design was tried and rejected).
-#
-# What: pins the Alpine base to 3.24 (was 3.20).
-# Why: unintentional inconsistency; other services pin 3.24.
+# What: Install syslog-ng and bash for core services.
+# Why: syslog-ng in Alpine; bash for entrypoint supervision.
+# From: Issue #1428 | PR #1431 | AG-REL-006
+
+# What: Alpine base pin updated from 3.20 to 3.24.
+# Why: Consistency with other services' Alpine 3.24 pin.
 # From: Issue #1554 | PR #1555
-# What: switches apk's own repositories to plain http.
-# Why: Squid caches http; signed indices keep integrity.
+
+# What: Switch apk repositories to plain http.
+# Why: Squid proxy caches http; signing keeps integrity.
 # From: Issue #1095
 RUN sed -i 's|^https://|http://|' /etc/apk/repositories
 
-# What: declares APT_CACHE_BUST right before the RUN it busts.
-# Why: prevents stale apk-index replay; see build-tools/Dockerfile.
+# What: Declare APT_CACHE_BUST for this RUN block.
+# Why: Prevents stale apk index replay on rebuild.
 # From: Issue #1095
 ARG APT_CACHE_BUST=""
 RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
@@ -43,19 +46,19 @@ RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
         bash \
         zstd \
         tzdata \
-        # What: fixed uid/gid 10001, matching services/ui/Dockerfile.
-    # Why: syslog-ng needs to read files; avoid group workaround.
+        # What: Fixed uid/gid 10001 for syslog-ng user.
+    # Why: Service needs to read files as non-root.
     # From: Issue #1428 | PR #1431
     && addgroup -g 10001 lancache \
     && adduser -D -H -u 10001 -G lancache lancache \
     && mkdir -p /var/log/lancache-syslog-ng /var/lib/lancache-syslog-data /etc/syslog-ng /etc/fluent-bit /data /var/log/lancache \
     && chown -R lancache:lancache /var/log/lancache-syslog-ng /var/lib/lancache-syslog-data /etc/syslog-ng /etc/fluent-bit /data /var/log/lancache
-# What: pre-creates directories for `/data`, logs, and syslog-ng.
-# Why: avoids unwritable root:root dirs; guards against data loss.
+# What: Pre-create log and syslog-ng config directories.
+# Why: Lancache user needs writable paths; prevent loss.
 # From: Issue #1428 | PR #1431
 
-# What: globs *-linux-gnu for multiarch support (amd64/arm64).
-# Why: hardcoded path failed on arm64; glob is arch-agnostic.
+# What: Glob *-linux-gnu paths for multiarch support.
+# Why: Hardcoded path failed on arm64; glob works both.
 # From: Issue #1428 | PR #1431
 COPY --from=fluent-bit-src /fluent-bit/bin/fluent-bit /opt/fluent-bit-glibc/bin/fluent-bit
 COPY --from=fluent-bit-src /lib/*-linux-gnu/. /opt/fluent-bit-glibc/lib/
@@ -67,35 +70,25 @@ COPY entrypoint.sh /entrypoint.sh
 COPY healthcheck.sh /usr/local/bin/healthcheck.sh
 COPY data-loss-detector.sh /usr/local/bin/data-loss-detector.sh
 
+# What: Prepare fluent-bit binary for execution.
+# Why: Dynamic linker varies by arch; make unprivileged.
+# From: Issue #1428 | PR #1431
 RUN chmod 755 /entrypoint.sh /usr/local/bin/healthcheck.sh /usr/local/bin/data-loss-detector.sh \
-        # What: discovers the dynamic-linker interpreter filename.
-    # Why: empty glob exits non-zero; aborting loudly vs. silently.
-    # From: Issue #1428 | PR #1431
+        # discovers the dynamic-linker interpreter filename.
     && ld_interp="$(basename "$(ls /opt/fluent-bit-glibc/lib/ld-linux-*.so.* | head -n1)")" \
     && echo "$ld_interp" > /opt/fluent-bit-glibc/ld-interp-name \
     && chmod +x "/opt/fluent-bit-glibc/lib/$ld_interp" /opt/fluent-bit-glibc/bin/fluent-bit \
     && chown -R lancache:lancache /opt/fluent-bit-glibc
-    # What: runs entirely as non-root uid 10001 (su-exec rejected).
-    # Why: avoids three capabilities: CAP_SETGID, CAP_KILL, CAP_NET_*.
-    # From: Issue #1428 | PR #1431
-    #
-    # What: keeps the bundled fluent-bit closure entirely unprivileged.
-    # Why: logs are gid-10001-readable; no file capabilities needed.
-    # From: Issue #1427
-    #
-    # What: this RUN's last content line must not end in `\`.
-    # Why: BuildKit merges next line as literal if backslash-escaped.
-    # From: Issue #1095
 
 USER lancache:lancache
 
-# What: syslog-ng's receiver is 6601 (renumbered from 601).
-# Why: 601 is privileged; container lacks CAP_NET_BIND_SERVICE.
+# What: syslog-ng receiver on port 6601 (not 601).
+# Why: 601 privileged; container lacks CAP_NET_BIND_SERVICE.
 # From: Issue #1428 | PR #1431
 EXPOSE 6601/tcp 2020/tcp
 
-# What: healthcheck.sh checks fluent-bit and syslog-ng separately.
-# Why: one HEALTHCHECK slot; see healthcheck.sh for status logic.
+# What: Healthcheck verifies fluent-bit and syslog-ng.
+# Why: Single HEALTHCHECK slot; see healthcheck.sh logic.
 # From: Issue #1428 | PR #1431
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=20s \
     CMD ["/usr/local/bin/healthcheck.sh"]

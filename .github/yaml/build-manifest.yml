@@ -1,0 +1,296 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# What: Single source of truth for CI 2.0 build inputs.
+# Why: One list ends the copied-in-many-places drift.
+# From: Issue #1683
+schema: build-manifest/v1
+
+# What: The product stack: the 10 shipped services.
+# Why: One list; matrices/scans/release derive from it.
+# From: Issue #1683
+services:
+  proxy:
+    context: services/proxy
+    external_contexts: [services/dns]
+    build_type: apk
+    final_base: alpine
+    runner: light
+  dns:
+    context: services/dns
+    build_type: rust
+    final_base: alpine
+    runner: heavy
+  watchdog:
+    context: services/watchdog
+    build_type: rust
+    final_base: alpine
+    runner: heavy
+  dhcp:
+    context: services/dhcp
+    build_type: apk
+    final_base: alpine
+    runner: light
+  dhcp-proxy:
+    context: services/dhcp-proxy
+    build_type: apk
+    final_base: alpine
+    runner: light
+  ntp:
+    context: services/ntp
+    build_type: apk
+    final_base: alpine
+    runner: light
+  syslog:
+    context: services/syslog
+    # What: apk syslog-ng plus copied fluent-bit binary.
+    # Why: No compile, prebuilt binary -> light runner.
+    # From: Issue #1683
+    build_type: apk
+    external_image: fluent_bit
+    final_base: alpine
+    runner: light
+  ui:
+    context: services/ui
+    build_type: rust
+    final_base: alpine
+    runner: heavy
+  cachehamster:
+    context: services/cachehamster
+    # What: Rust compile via BUILD_TOOLS_IMAGE stage.
+    # Why: Real compile step -> heavy runner per AG-CI-002.
+    # From: Issue #1683
+    build_type: rust
+    final_base: alpine
+    runner: heavy
+  netdata:
+    context: services/netdata
+    # What: First-party install of static netdata binary.
+    # Why: No builder/compile stage -> light per AG-CI-002.
+    # From: Issue #1683
+    build_type: install
+    final_base: alpine
+    runner: light
+
+# What: The toolchain image that builds the product stack.
+# Why: NOT a product service; own workflow, never counted.
+# From: Issue #1683
+build_toolchain:
+  build-tools:
+    context: tools/build-tools
+    build_type: toolchain
+    final_base: alpine
+    runner: light
+    # What: apk packages installed into the toolchain image.
+    # Why: SOT owns the one list; consumers read it.
+    # From: Issue #1683
+    packages:
+      - actionlint
+      - bash
+      - bats
+      - bc
+      - bind-tools
+      - build-base
+      - ca-certificates
+      - cargo
+      - cargo-audit
+      - cargo-tarpaulin
+      - ccache
+      - clang22
+      - cmake
+      - coreutils
+      - curl
+      - distcc
+      - distcc-pump
+      - docker-cli
+      - docker-cli-buildx
+      - docker-cli-compose
+      - expect
+      - findutils
+      - gawk
+      - gettext
+      - git
+      - github-cli
+      - gnupg
+      - grep
+      - iproute2
+      - jq
+      - lld22
+      - make
+      - musl-dev
+      - openssl
+      - openssl-dev
+      - openssl-libs-static
+      - parallel
+      - perl
+      - pkgconf
+      - procps-ng
+      - python3
+      - rsync
+      - run-parts
+      - rust
+      - rust-clippy
+      - rustfmt
+      - sccache
+      - sed
+      - shellcheck
+      - shellspec
+      - sqlite
+      - tcpdump
+      - tzdata
+      - util-linux
+      - xz
+      - zlib-dev
+      - zlib-static
+    # What: Executables the toolchain smoke must find+run.
+    # Why: One owner of the smoke list; ci.sh reads it.
+    # From: Issue #1683
+    smoke_tools:
+      - actionlint
+      - bash
+      - bats
+      - cargo
+      - cargo-audit
+      - cargo-tarpaulin
+      - ccache
+      - clippy-driver
+      - dig
+      - distcc
+      - distcc-pump
+      - docker
+      - envsubst
+      - jq
+      - rustc
+      - rustfmt
+      - sccache
+      - shellcheck
+      - timeout
+
+# What: Runtime services not built by this project.
+# Why: Explicit out-of-build entry, no silent omission.
+# From: Issue #1683
+external_services:
+  nats:
+    image: "nats:2-alpine"
+    role: runtime
+
+# What: Pinned external base images by full digest.
+# Why: Single owner of the alpine pin, no per-file copies.
+# From: Issue #1683
+base_images:
+  alpine: "mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"
+  fluent_bit: "cr.fluentbit.io/fluent/fluent-bit:3.2.10@sha256:d6dec000c4929a439562525728c708f6e99800d7ddc82efd6aa4f45f3a20b562"
+
+# What: Pinned external tool/asset versions and checksums.
+# Why: Central version owner; consumers never re-pin.
+# From: Issue #1683
+external_versions:
+  netdata:
+    version: v2.11.0
+    sha256_x86_64: b42d9937807f28812502a967906d370cff9ab443453813656b99ff6a9b3c5649
+    sha256_aarch64: 8cd056d64078c109409c08e30d55324c82e3855f9d8e4b304cacc7c612610e09
+  # What: ISC dhclient reused from Alpine v3.20 pkg.
+  # Why: Alpine 3.21+ dropped it; musl build, both arches.
+  # From: Issue #1683
+  dhclient:
+    version: 4.4.3_p1-r4
+    alpine_branch: v3.20
+    sha256_amd64: 068c97e534e9c8f03db9064296b1d3c21d957f328e40309278559a92f9a74557
+    sha256_arm64: f1bd3a42210768b049f3157db09d68a399521db16f63122e7b6af28bf16fbea2
+
+# What: The one authoritative platform list for all targets.
+# Why: Platform is a parameter, not a twin/list.
+# From: Issue #1683
+build_matrix:
+  platforms: [linux/amd64, linux/arm64]
+
+# What: Named build contexts services COPY from at build.
+# Why: A change here rebuilds every consumer, not just self.
+# From: Issue #1683
+named_contexts:
+  shared-scripts:
+    path: scripts/lib
+  dns-domains:
+    path: services/dns/cdn-domains.txt
+
+# What: Build-identity inputs per build type (§7).
+# Why: Impact is content-identity, never path-touched alone.
+# From: Issue #1683
+build_identity:
+  rust:
+    inputs: [source_sha, toolchain_digest]
+  apk:
+    inputs: [package_versions, base_digest]
+  install:
+    inputs: [upstream_digest]
+  toolchain:
+    inputs: [toolchain_source_sha, base_digest]
+
+# What: Per-service rebuild edges beyond its own context.
+# Why: plan picks candidates, identity decides the build.
+# From: Issue #1683
+dependency_graph:
+  proxy:
+    contexts: [shared-scripts, dns-domains]
+  dns:
+    contexts: [shared-scripts]
+  watchdog:
+    contexts: [shared-scripts]
+  ui:
+    contexts: [shared-scripts]
+  dhcp:
+    contexts: [shared-scripts]
+  dhcp-proxy:
+    contexts: [shared-scripts]
+  ntp:
+    contexts: []
+  syslog:
+    contexts: []
+  cachehamster:
+    contexts: []
+  netdata:
+    contexts: []
+
+# What: Release channel and retention inventory.
+# Why: Consolidates release/stack-images.yml into the SOT.
+# From: Issue #1683
+release:
+  schema: stack-images/v1
+  registry: ghcr.io
+  image_prefix: wiki-mod/lancache-ng
+  channels:
+    sha:
+      tag: sha-<commit>
+      mutable: false
+    nightly:
+      mutable: true
+    latest:
+      mutable: true
+  retention:
+    minimum_stable_releases: 3
+    accepted_ordinary_roots_per_package: 10
+    channel_buffer_versions: 5
+    keep_mutable_channels: [latest, nightly]
+    keep_sha_tags_for_supported_releases: true
+    protect_release_and_rollback_digests: true
+    deletion_policy: manual-or-approved-automation-only
+    unaggregated_grace_minutes: 1440
+
+# What: CI runtime variables with their fallback defaults.
+# Why: No hardcode, like CARGO_BUILD_JOBS (AG-CI-006).
+# From: Issue #1683
+ci_variables:
+  REPOSITORY_CI_LEDGER_RETENTION_DAYS: 30
+
+# What: Stack-validation check parameters (data, not logic).
+# Why: One SOT for check inputs; logic stays in ci.sh.
+# From: Issue #1683 | PR #1858
+validation:
+  # What: CDN domains that resolve from validation hosts.
+  # Why: Real dig targets; some Steam domains fail.
+  # From: Issue #1683 | PR #1858
+  dns_test_domains: [deb.debian.org, download.epicgames.com]
+  # What: Cacheable HTTP URL for the proxy MISS/HIT probe.
+  # Why: Only HTTP is cached; a real HIT proves the path.
+  # From: Issue #1683 | PR #1858
+  proxy_cache_probe_url: http://deb.debian.org/debian/dists/stable/InRelease

@@ -1,33 +1,17 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-#
-# nginx-based caching proxy image: unified standard (SNI passthrough) and
-# SSL/MITM (TLS-interception) mode, selected at runtime by entrypoint.sh.
-# Installs nginx from nginx.org's own mainline apk repo (not Alpine's own
-# `nginx` distro package, which lags a minor version behind). nginx.org's
-# own package compiles the stream module (used by standard mode's SNI
-# passthrough, see nginx.conf's `stream {}` block) in statically -- no
-# separate module package and no `load_module` directive are needed, on
-# Alpine exactly as on the prior Debian base; see AGENTS.md's "Key Design
-# Decisions" (AG-KD-007) for the full explanation.
-#
-# Alpine base (issue #815 Part B, staged Alpine migration for
-# proxy/ntp/watchdog/ui -- proxy picked up after ntp/dhcp/dhcp-proxy/dns/
-# watchdog had already landed). Confirmed live (2026-08-06) against a real
-# alpine:3.24 container: nginx.org publishes a full apk repository at
-# http://nginx.org/packages/{mainline,stable}/alpine/v<ver>/main (plain
-# http since a later LAN-proxy caching pass -- nginx.org itself
-# also serves this same repo over https, but the plain-http form is
-# used here so the LAN Squid proxy can cache it; the signing-key fetch
-# below stays https, since that is the trust anchor) with identical
-# version currency to its Debian apt repo (both mainline 1.31.3
-# at the time of this migration) -- `apk add nginx` after adding that repo
-# and its signing key resolves to `nginx/1.31.3-r1`, and `nginx -V` shows
-# `--with-stream --with-stream_ssl_preread_module` compiled in statically,
-# matching the Debian package exactly.
-#
-FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+
+# What: Alpine nginx image using http apk repos
+# Why: Static stream module; http enables LAN proxy cache
+# From: Issue #815 | Issue #1683
+
+
+# What: Base image pin, consumed from the version SOT.
+# Why: build-manifest.yml is the sole owner of the pin.
+# From: Issue #1683
+ARG ALPINE_IMAGE
+FROM ${ALPINE_IMAGE}
 
 LABEL org.opencontainers.image.description="nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic."
 
@@ -41,67 +25,26 @@ ARG http_proxy
 ARG https_proxy
 ARG no_proxy
 
-# `apk upgrade --no-cache` (before the package installs, same layer)
-# upgrades packages already baked into the alpine:3.24 base layer itself --
-# see services/dhcp-proxy/Dockerfile's matching comment for the fuller
-# rationale and live verification of this behavior.
-#
-# nginx.org's own Alpine apk repo is added the same way its own official
-# Docker images do it: fetch the RSA public key it signs its packages with
-# (https://nginx.org/keys/nginx_signing.rsa.pub -- a different key format
-# than the apt/gpg key the prior Debian stage used, but the same nginx.org
-# signing identity), then append a `@nginx`-tagged repository line pointing
-# at this Alpine version's mainline channel. The `@nginx` tag namespaces the
-# repo so `apk add nginx@nginx` explicitly resolves from it rather than
-# whatever plain `nginx` a future Alpine base version's own main/community
-# repos might also carry, keeping this pin unambiguous even if Alpine's own
-# distro nginx package version ever happens to converge with nginx.org's.
-#
-# Package translations from the Debian stage (confirmed live against a real
-# alpine:3.24 container, 2026-08-06):
-#   - gettext-base -> gettext-envsubst: Alpine splits envsubst out of the
-#     base gettext package, matching every other already-migrated service.
-#   - locales/locale-gen/LANG=en_US.UTF-8 dropped entirely, not replaced:
-#     grepped entrypoint.sh, nginx.conf, proxy-params.conf, and conf.d/* for
-#     any LANG/LC_ALL/locale dependency -- none found. musl has no
-#     glibc-style locale-data system, and nothing this service actually does
-#     (nginx access/error log output, entrypoint.sh's own `sort`/string
-#     handling) depends on real glibc locale collation, so this block is
-#     purely cosmetic and safely droppable, per #815's own explicit
-#     instruction to check before assuming a substitute is needed.
-#   - findutils added: entrypoint.sh's kgs_list_snapshots() calls
-#     `find ... -printf '%f\n'`, a GNU-find-only flag BusyBox's own `find`
-#     applet does not support at all (confirmed live: `find: unrecognized:
-#     -printf`) -- the same BusyBox gap already hit and fixed for
-#     services/watchdog (#1346), services/dhcp/dhcp-proxy (#1347), and
-#     services/dns (#1425). Installing findutils (GNU find) fixes it with
-#     zero script changes.
-#   - coreutils added: BusyBox's own `date` applet silently produces an
-#     EMPTY nanosecond field for `date +%N` instead of erroring (confirmed
-#     live: real output was `20260806T120718.` -- a trailing dot with
-#     nothing after it), used both by kgs_new_snapshot_id() (snapshot-id
-#     uniqueness) and the CA serial-file first-init seed. Installing
-#     coreutils (GNU date) fixes both with zero script changes; also makes
-#     basename/dirname/sort consistently GNU-flavored (BusyBox's own
-#     versions of those already behaved correctly in this file's actual
-#     usage, verified live, so this is precautionary consistency rather
-#     than a second confirmed bug -- see this service's PR body for the
-#     full per-construct verification evidence).
-#   - bash added: entrypoint.sh's own `#!/bin/bash` shebang plus its use of
-#     `local`, indexed/associative arrays, `[[ ... ]]`, nameref parameters
-#     (`local -n`), and `${var,,}` lowercasing all require real bash --
-#     Alpine's base image has no bash by default, unlike Debian's.
-#
-# What: shared version-banner script, not a per-service copy.
-# Why: named build context avoids duplicating it per service.
+# What: Install nginx and GNU utilities from nginx.org repo
+# Why: Stream module needed; GNU tools for shell scripts
+# From: Issue #1781 | PR #1783 | Issue #1425
+
+# What: Shared version-banner script, reused by all services
+# Why: Named build context avoids per-service duplication
 # From: Issue #1781 | PR #1783
 COPY --from=shared-scripts verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
 
+# What: copies the domain-validation library in.
+# Why: entrypoint.sh no longer embeds a byte-identical copy.
+# From: Issue #1683
+COPY --from=shared-scripts domain-validation.sh /usr/local/lib/domain-validation.sh
+
 # What: Declare APT_CACHE_BUST to expire BuildKit cache.
-# Why: Without it, BuildKit replays stale apk upgrade forever.
+# Why: Expires BuildKit cache for apk upgrade phases.
 # From: Issue #1095
-# What: switches apk's own repositories to plain http.
-# Why: Squid caches http; signed indices keep integrity.
+
+# What: Switch apk repositories to plain http.
+# Why: Squid proxy caches http; signing keeps integrity.
 # From: Issue #1095
 RUN sed -i 's|^https://|http://|' /etc/apk/repositories
 
@@ -109,16 +52,16 @@ ARG APT_CACHE_BUST=""
 # What: trusts the proxy CA for this RUN, re-applied below.
 # Why: ca-certificates install resets the bundle mid-RUN.
 # From: Issue #1781 | PR #1783
-RUN --mount=type=secret,id=proxy_ca \
-    if [ -s /run/secrets/proxy_ca ]; then \
+RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
       cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig && \
-      cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+      cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
     fi && \
     : "apt-cache-bust=${APT_CACHE_BUST}" && \
     apk upgrade --no-cache && \
     apk add --no-cache ca-certificates openssl curl && \
-    if [ -s /run/secrets/proxy_ca ]; then \
-      cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
+      cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
     fi && \
     curl -fsSL -o /etc/apk/keys/nginx_signing.rsa.pub https://nginx.org/keys/nginx_signing.rsa.pub && \
     printf '%s\n' "@nginx http://nginx.org/packages/mainline/alpine/v$(cut -d. -f1,2 /etc/alpine-release)/main" >> /etc/apk/repositories && \
@@ -132,27 +75,14 @@ RUN --mount=type=secret,id=proxy_ca \
     gettext-envsubst \
     lsof \
     ripgrep && \
-    if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
-# curl/ca-certificates/openssl are kept at runtime (not purged): curl is
-# genuinely shelled out to by deploy/{prod,quickstart,full-setup}'s proxy
-# container healthcheck (`deploy/prod/docker-compose.yml`'s `curl -sf
-# http://127.0.0.1/healthz ...` probe); ca-certificates and openssl are
-# needed for TLS (nginx's SSL-mode wildcard certs, entrypoint.sh's CA/cert
-# generation via openssl, and the system trust store for whatever nginx
-# itself needs) -- same rationale as the prior Debian stage, no gnupg-style
-# purge-after-use step is needed here since Alpine's apk signing-key
-# mechanism (a plain RSA public key file) never pulls in a temporary
-# package the way apt's gpg-based key import did. ca-certificates and curl
-# are apk-installed in the same early call (the shared utilities image
-# every service used to COPY them from is gone): this build needs
-# the trust store and curl itself before the signing-key fetch a few lines
-# below runs.
-# nano: in-container troubleshooting tool -- see services/dns/Dockerfile's
-# identical comment for the full rationale; lsof/ripgrep are apk-installed
-# above for the same troubleshooting purpose.
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
-# What: verifies apk-installed binaries execute, not just exist.
-# Why: missing library dependencies fail at runtime, not apk add.
+# What: Keep runtime packages and add debug tools
+# Why: Curl/certs for healthcheck and TLS; tools for debug
+# From: Issue #1095 | Issue #1346 | Issue #1613
+
+# What: Verify apk-installed binaries execute properly.
+# Why: Missing library dependencies fail at runtime.
 # From: Issue #1613 | Issue #1781 | PR #1783
 RUN set -euo pipefail; \
     find . -maxdepth 0 -printf '%f\n' >/dev/null; \
@@ -173,29 +103,23 @@ RUN mkdir -p \
 COPY nginx.conf /etc/nginx/nginx.conf.template
 COPY conf.d/ /etc/nginx/conf.d/
 COPY proxy-params.conf /etc/nginx/proxy-params.conf.template
-# Static third-party data (not user-editable, unlike cdn-domains.txt below),
-# so it's baked into the image rather than volume-mounted. See entrypoint.sh
-# for how it's used to derive wildcard cert root domains.
+
+# What: Static public suffix list for certificate generation
+# Why: Used by entrypoint.sh to derive wildcard cert domains
+# From: Issue #1095
 COPY public_suffix_list.dat /etc/nginx/public_suffix_list.dat
-# Build-time snapshot fallback for deployments with no live bind-mount (see
-# deploy/quickstart, which has no local repo checkout to mount from). The
-# "dns-domains" name is a named additional build context — services/dns/ is
-# outside this Dockerfile's own build context (services/proxy/), and Docker
-# build contexts can't reach outside their own tree without one (see
-# .github/workflows/build-push.yml's `build-contexts: dns-domains=services/dns`
-# / `--build-context` for a plain `docker build`; no remaining compose file
-# builds this image locally via a compose-level `additional_contexts:` key --
-# the former `deploy/dev/docker-compose.yml` did, before being retired in
-# v0.3.0, #766). prod always shadows this baked default with a live
-# bind-mount of the real file at container start.
+
+# What: Build-time snapshot fallback for domain config.
+# Why: Used when live bind-mount unavailable (quickstart).
+# From: Issue #766
 COPY --from=dns-domains cdn-domains.txt /etc/nginx/cdn-domains.txt
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 VOLUME ["/etc/nginx/ssl", "/var/cache/nginx/lancache"]
 
-# What: final apk upgrade pass, no packages added.
-# Why: patches CVEs fixed after this file's package installs.
+# What: Final apk upgrade pass, no new packages added.
+# Why: Patches CVEs fixed after package installs.
 # From: Issue #1781 | PR #1783
 RUN apk upgrade --no-cache
 

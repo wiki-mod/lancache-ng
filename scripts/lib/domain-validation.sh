@@ -20,17 +20,12 @@
 #   - Input is trimmed and lowercased before validation
 #   - Control characters and special chars are rejected
 #
-# This is the canonical, documented reference implementation. It is NOT
-# copied into any container image via a shared Docker build context: each
-# service Dockerfile (services/proxy, services/dns) builds from its own
-# isolated directory with no shared-file context wired up for it. Instead,
-# services/proxy/entrypoint.sh and services/dns/entrypoint.sh each embed a
-# byte-identical copy of these functions between the marker comments
-#   # BEGIN domain-validation library (scripts/lib/domain-validation.sh)
-#   # END domain-validation library
-# tests/bats/domain_validation_sync.bats fails the build if either embedded
-# copy ever drifts from this file. tests/bats/domain_validation_parity.bats
-# and services/ui/src/routes/domains.rs's own
+# What: consumed at runtime by proxy and dns entrypoints.
+# Why: shared-scripts context copies it into both images.
+# From: Issue #1683
+#
+# tests/bats/domain_validation_parity.bats and
+# services/ui/src/routes/domains.rs's own
 # `is_valid_domain_matches_shared_parity_fixture` test both iterate the same
 # shared fixture file (tests/fixtures/domain-validation-cases.txt) so the
 # bash and Rust validators can't silently diverge in what they accept or
