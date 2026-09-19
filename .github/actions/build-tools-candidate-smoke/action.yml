@@ -78,7 +78,7 @@ runs:
           -w /work \
           "$IMAGE_REF" \
           timeout --kill-after=30s --signal=TERM 19m \
-          bash -lc 'set -euo pipefail; TMPDIR=/var/tmp bats --jobs 16 tests/bats'
+          bash -lc 'set -euo pipefail; TMPDIR=/var/tmp bats --jobs 32 tests/bats'
 
     - name: Run ShellSpec setup fixtures
       if: inputs.run-fixtures == 'true'
