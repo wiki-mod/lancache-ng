@@ -4252,6 +4252,18 @@ _prod_state_wiring_fixture() {
     [[ "${output}" == *"NATS_CONF_DIR"* ]]
 }
 
+@test "check prod-state-wiring fails cleanly when an input file is missing" {
+    # What: a missing compose/.env/doc yields a clear error.
+    # Why: must not read as an undocumented-key violation.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/psw-missing"
+    _prod_state_wiring_fixture "${r}"
+    rm "${r}/docs/backup-restore.md"
+    run bash "${CI_SH}" check prod-state-wiring "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"input missing"* ]]
+}
+
 # What: builds a fixture doc + quickstart web_log copy.
 # Why: shared by the logging-matrix tests below.
 # From: Issue #1683 | PR #1858

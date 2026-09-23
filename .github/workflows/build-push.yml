@@ -576,6 +576,26 @@ jobs:
           grep -F 'nats_conf_dir=$(get_env_var NATS_CONF_DIR "$env_file")' setup.sh >/dev/null \
             || { echo "::error::backup_manifest must read NATS_CONF_DIR."; exit 1; }
           VALIDATE_PREBUILT
+      - name: Check prebuilt-only production install path (ci.sh)
+        run: |
+          set -euo pipefail
+          docker run --rm -i \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 300 \
+            bash .github/scripts/ci.sh check prebuilt-prod
+      - name: Check prod state wiring derives from LANCACHE_STATE_DIR (ci.sh)
+        run: |
+          set -euo pipefail
+          docker run --rm -i \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 300 \
+            bash .github/scripts/ci.sh check prod-state-wiring
       - name: Validate compose files
         env:
           CACHE_INACTIVE: 365d

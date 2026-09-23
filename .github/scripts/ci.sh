@@ -5643,7 +5643,10 @@ _ci_check_prod_state_wiring() {
     local env_file="${repo_root}/deploy/prod/.env"
     local doc="${repo_root}/docs/backup-restore.md"
     local -a viol=()
-    local key
+    local key f
+    for f in "${compose}" "${env_file}" "${doc}"; do
+        [ -f "${f}" ] || { ci_error "[CI-ERROR-CHECK-0043]" "path=\"${f}\" reason=\"required prod-state-wiring input missing\"" "missing prod-state-wiring input: ${f}"; return 2; }
+    done
     for key in PDNS_STANDARD_DIR PDNS_SSL_DIR PDNS_FILTER_STATE_DIR NATS_DATA_DIR NATS_CONF_DIR; do
         grep -Fq "\${${key}:-\${LANCACHE_STATE_DIR" "${compose}" \
             || viol+=("deploy/prod compose does not derive ${key} from LANCACHE_STATE_DIR")
