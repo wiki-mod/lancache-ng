@@ -717,48 +717,8 @@ jobs:
             --env HOME=/tmp \
             --env DOCKER_CONFIG=/tmp/.docker \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            timeout --kill-after=30 --signal=KILL 300 bash -s <<'VALIDATE_COMPOSE_SETUP_KEYS_KEA'
-          set -euo pipefail
-          if grep -RInE '^(NATS_LOCAL_TOKEN|NATS_TOKEN)=' deploy/quickstart/.env deploy/prod/.env 2>/dev/null; then
-            echo "::error::Quickstart/prod env templates must not use deprecated NATS token keys; use role credentials instead."
-            exit 1
-          fi
-          setup_required_keys=(
-            DDNS_TSIG_KEY
-            KEA_CTRL_TOKEN
-            LANCACHE_IMAGE_TAG
-            NATS_DNS_REPLICA_PASSWORD
-            NATS_DNS_REPLICA_USER
-            NATS_DNS_WRITER_PASSWORD
-            NATS_DNS_WRITER_USER
-            NATS_CALLOUT_PASSWORD
-            NATS_CALLOUT_USER
-            NATS_SYS_PASSWORD
-            NATS_SYS_USER
-            NATS_UI_PASSWORD
-            NATS_UI_USER
-            PDNS_API_KEY
-            SECONDARY_REGISTRATION_TOKEN
-          )
-          for key in "${setup_required_keys[@]}"; do
-            grep -F "$key" setup.sh >/dev/null \
-              || { echo "::error::setup.sh must generate or migrate required runtime key ${key}."; exit 1; }
-          done
-          grep -F 'run_kea_dhcp_activation_preflight()' setup.sh >/dev/null \
-            || { echo "::error::setup.sh must define a DHCP discovery preflight before Kea activation."; exit 1; }
-          grep -F 'run_kea_dhcp_activation_preflight "$INSTALL_DIR/.env"' setup.sh >/dev/null \
-            || { echo "::error::setup.sh must call the Kea discovery preflight before starting the stack."; exit 1; }
-          grep -F 'nmap --script broadcast-dhcp-discover --script-args broadcast-dhcp-discover.timeout=5' setup.sh >/dev/null \
-            || { echo "::error::setup.sh must probe DHCP discovery with the Kea image before activation."; exit 1; }
-          if grep -F 'nmap --script broadcast-dhcp-discover -e any' setup.sh >/dev/null; then
-            echo "::error::setup.sh must not pass -e any to nmap; that is not a valid nmap interface and makes the preflight fail its own execution on every run."
-            exit 1
-          fi
-          grep -F 'nmap' services/dhcp/Dockerfile >/dev/null \
-            || { echo "::error::services/dhcp/Dockerfile must install nmap for the Kea discovery preflight."; exit 1; }
-          grep -F 'nmap|/usr/bin/nmap|/bin/nmap)' services/dhcp/entrypoint.sh >/dev/null \
-            || { echo "::error::services/dhcp/entrypoint.sh must pass through the nmap preflight command without starting Kea."; exit 1; }
-          VALIDATE_COMPOSE_SETUP_KEYS_KEA
+            timeout --kill-after=30 --signal=KILL 300 \
+            bash .github/scripts/ci.sh check setup-keys-kea
       - name: Validate setup.sh update-migration safety
         run: |
           set -euo pipefail

@@ -4553,6 +4553,65 @@ EOF
     [[ "${output}" == *"dhcp-proxy"* ]]
 }
 
+# What: seed a setup.sh/dhcp tree meeting the keys+Kea contract.
+# Why: shared by the setup-keys-kea checks below.
+# From: Issue #1683 | PR #1858
+_setup_keys_kea_fixture() {
+    local root="$1" k
+    mkdir -p "${root}/deploy/quickstart" "${root}/deploy/prod" "${root}/services/dhcp"
+    : > "${root}/deploy/quickstart/.env"
+    : > "${root}/deploy/prod/.env"
+    {
+        for k in DDNS_TSIG_KEY KEA_CTRL_TOKEN LANCACHE_IMAGE_TAG NATS_DNS_REPLICA_PASSWORD \
+            NATS_DNS_REPLICA_USER NATS_DNS_WRITER_PASSWORD NATS_DNS_WRITER_USER \
+            NATS_CALLOUT_PASSWORD NATS_CALLOUT_USER NATS_SYS_PASSWORD NATS_SYS_USER \
+            NATS_UI_PASSWORD NATS_UI_USER PDNS_API_KEY SECONDARY_REGISTRATION_TOKEN; do
+            printf '# %s\n' "${k}"
+        done
+        printf 'run_kea_dhcp_activation_preflight() { :; }\n'
+        printf 'run_kea_dhcp_activation_preflight "$INSTALL_DIR/.env"\n'
+        printf 'nmap --script broadcast-dhcp-discover --script-args broadcast-dhcp-discover.timeout=5\n'
+    } > "${root}/setup.sh"
+    printf 'RUN apk add nmap\n' > "${root}/services/dhcp/Dockerfile"
+    printf 'nmap|/usr/bin/nmap|/bin/nmap)\n' > "${root}/services/dhcp/entrypoint.sh"
+}
+
+@test "check setup-keys-kea passes a compliant tree" {
+    # What: all required keys + Kea preflight + nmap present.
+    # Why: first-time setup depends on this whole surface.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/skk-ok"
+    _setup_keys_kea_fixture "${r}"
+    run bash "${CI_SH}" check setup-keys-kea "${r}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"setup-keys-kea=clean"* ]]
+}
+
+@test "check setup-keys-kea fails a missing required key" {
+    # What: a required runtime key is absent from setup.sh.
+    # Why: setup must generate/migrate every runtime key.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/skk-key"
+    _setup_keys_kea_fixture "${r}"
+    grep -v 'PDNS_API_KEY' "${r}/setup.sh" > "${r}/setup.sh.tmp"
+    mv "${r}/setup.sh.tmp" "${r}/setup.sh"
+    run bash "${CI_SH}" check setup-keys-kea "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"PDNS_API_KEY"* ]]
+}
+
+@test "check setup-keys-kea fails a deprecated NATS token key" {
+    # What: an env template reintroduces NATS_TOKEN.
+    # Why: role credentials replaced the deprecated token keys.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/skk-nats"
+    _setup_keys_kea_fixture "${r}"
+    printf 'NATS_TOKEN=x\n' > "${r}/deploy/quickstart/.env"
+    run bash "${CI_SH}" check setup-keys-kea "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"deprecated NATS token"* ]]
+}
+
 # What: builds a fixture doc + quickstart web_log copy.
 # Why: shared by the logging-matrix tests below.
 # From: Issue #1683 | PR #1858

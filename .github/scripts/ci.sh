@@ -5927,6 +5927,40 @@ _ci_check_dhcp_proxy_env() {
     printf 'dhcp-proxy-env=clean\n'
 }
 
+# What: Fail unless setup.sh keys + Kea preflight stay intact.
+# Why: missing runtime keys or preflight breaks first-time setup.
+# From: Issue #1683 | PR #1858 (VALIDATE_COMPOSE_SETUP_KEYS_KEA)
+_ci_check_setup_keys_kea() {
+    local repo_root="${1:-${CI_REPO_ROOT}}"
+    local -a viol=()
+    local key su="${repo_root}/setup.sh"
+    if grep -RInE '^(NATS_LOCAL_TOKEN|NATS_TOKEN)=' "${repo_root}/deploy/quickstart/.env" "${repo_root}/deploy/prod/.env" >/dev/null 2>&1; then
+        viol+=("env templates must not use deprecated NATS token keys; use role credentials")
+    fi
+    local -a req=(DDNS_TSIG_KEY KEA_CTRL_TOKEN LANCACHE_IMAGE_TAG NATS_DNS_REPLICA_PASSWORD NATS_DNS_REPLICA_USER NATS_DNS_WRITER_PASSWORD NATS_DNS_WRITER_USER NATS_CALLOUT_PASSWORD NATS_CALLOUT_USER NATS_SYS_PASSWORD NATS_SYS_USER NATS_UI_PASSWORD NATS_UI_USER PDNS_API_KEY SECONDARY_REGISTRATION_TOKEN)
+    for key in "${req[@]}"; do
+        grep -Fq "${key}" "${su}" || viol+=("setup.sh must generate or migrate required runtime key ${key}")
+    done
+    grep -Fq 'run_kea_dhcp_activation_preflight()' "${su}" \
+        || viol+=("setup.sh must define a DHCP discovery preflight before Kea activation")
+    grep -Fq 'run_kea_dhcp_activation_preflight "$INSTALL_DIR/.env"' "${su}" \
+        || viol+=("setup.sh must call the Kea discovery preflight before starting the stack")
+    grep -Fq 'nmap --script broadcast-dhcp-discover --script-args broadcast-dhcp-discover.timeout=5' "${su}" \
+        || viol+=("setup.sh must probe DHCP discovery with the Kea image before activation")
+    if grep -Fq 'nmap --script broadcast-dhcp-discover -e any' "${su}"; then
+        viol+=("setup.sh must not pass -e any to nmap; invalid interface fails the preflight")
+    fi
+    grep -Fq 'nmap' "${repo_root}/services/dhcp/Dockerfile" \
+        || viol+=("services/dhcp/Dockerfile must install nmap for the Kea discovery preflight")
+    grep -Fq 'nmap|/usr/bin/nmap|/bin/nmap)' "${repo_root}/services/dhcp/entrypoint.sh" \
+        || viol+=("services/dhcp/entrypoint.sh must pass through the nmap preflight command")
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0049]" "reason=\"setup.sh required keys / Kea preflight contract violated\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'setup-keys-kea=clean\n'
+}
+
 # What: Warn (never fail) on editing CHANGELOG.md directly.
 # Why: usually unintended; risks a merge-conflict cascade.
 # From: Issue #1683 | PR #1858
@@ -6319,6 +6353,7 @@ ci_cmd_check() {
         docker-socket-proxy) _ci_check_docker_socket_proxy "$@" ;;
         quickstart-required-env) _ci_check_quickstart_required_env "$@" ;;
         dhcp-proxy-env) _ci_check_dhcp_proxy_env "$@" ;;
+        setup-keys-kea) _ci_check_setup_keys_kea "$@" ;;
         logging-matrix) _ci_check_logging_matrix "$@" ;;
         trivy-action-direct-usage) _ci_check_trivy_action_direct_usage "$@" ;;
         entrypoint-lib-wiring) _ci_check_entrypoint_lib_wiring "$@" ;;
