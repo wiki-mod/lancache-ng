@@ -4612,6 +4612,89 @@ _setup_keys_kea_fixture() {
     [[ "${output}" == *"deprecated NATS token"* ]]
 }
 
+@test "migrate_env_for_update repairs every empty required key" {
+    # What: each SOT required-repair key is non-empty after update.
+    # Why: an empty required key breaks the stack (AG-OP-007).
+    # From: Issue #1683 | PR #1858
+    local repo_root keys key d ef
+    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    keys="$(grep -E '^  setup_required_repairs:' "${repo_root}/.github/yaml/build-manifest.yml" | sed 's/^[^:]*:[[:space:]]*//')"
+    [ -n "${keys}" ]
+    _load_setup_update_helpers "${repo_root}"
+    for key in ${keys}; do
+        [ "${key}" = "LANCACHE_IMAGE_TAG" ] && continue  # tag derives from git/VERSION context, no static default
+        d="${BATS_TEST_TMPDIR}/req-${key}"
+        mkdir -p "${d}"
+        ef="${d}/.env"
+        _write_converged_env_fixture "${ef}"
+        awk -F= -v k="${key}" '$1==k{print k"=";next}{print}' "${ef}" > "${ef}.t"
+        mv "${ef}.t" "${ef}"
+        migrate_env_for_update "${d}" >/dev/null 2>&1 || { echo "migrate failed for ${key}"; return 1; }
+        grep -Eq "^${key}=..*" "${ef}" || { echo "required key ${key} not repaired"; return 1; }
+    done
+}
+
+@test "migrate_env_for_update derives CACHE_MAX_SIZE from CACHE_MAX_GB" {
+    # What: an empty CACHE_MAX_SIZE is rebuilt from CACHE_MAX_GB.
+    # Why: repair must reuse the operator's size, not a default.
+    # From: Issue #1683 | PR #1858
+    local repo_root ef
+    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    ef="${BATS_TEST_TMPDIR}/cms/.env"
+    mkdir -p "${BATS_TEST_TMPDIR}/cms"
+    _load_setup_update_helpers "${repo_root}"
+    _write_converged_env_fixture "${ef}"
+    awk -F= '$1=="CACHE_MAX_GB"{print "CACHE_MAX_GB=77";next} $1=="CACHE_MAX_SIZE"{print "CACHE_MAX_SIZE=";next} {print}' "${ef}" > "${ef}.t"
+    mv "${ef}.t" "${ef}"
+    run migrate_env_for_update "$(dirname "${ef}")"; [ "${status}" -eq 0 ]
+    grep -Eq '^CACHE_MAX_SIZE=.*77' "${ef}"
+}
+
+@test "get_env_assignment_value_raw_nonempty preserves the raw assignment" {
+    # What: the raw (unparsed) value of a key is returned intact.
+    # Why: templated/quoted overrides must not be flattened.
+    # From: Issue #1683 | PR #1858
+    local repo_root ef
+    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    ef="${BATS_TEST_TMPDIR}/raw.env"
+    _load_setup_update_helpers "${repo_root}"
+    printf 'FOO=${BAR}/baz\n' > "${ef}"
+    run get_env_assignment_value_raw_nonempty FOO "${ef}"
+    [ "${status}" -eq 0 ]
+    [ "${output}" = '${BAR}/baz' ]
+}
+
+@test "validate_ui_session_ttl_seconds rejects invalid and accepts valid" {
+    # What: TTL must be a positive integer within the max bound.
+    # Why: a bad TTL would be written or reused unchecked.
+    # From: Issue #1683 | PR #1858
+    local repo_root
+    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_update_helpers "${repo_root}"
+    run validate_ui_session_ttl_seconds abc src
+    [[ "${output}" == *"unsigned integer"* ]]
+    run validate_ui_session_ttl_seconds 0 src
+    [[ "${output}" == *"greater than zero"* ]]
+    run validate_ui_session_ttl_seconds 86400 src
+    [ "${status}" -eq 0 ]
+    [ -z "${output}" ]
+}
+
+@test "set_env_key collapses duplicate assignments to one" {
+    # What: a key present twice ends up assigned exactly once.
+    # Why: repair must not rewrite every duplicate line.
+    # From: Issue #1683 | PR #1858
+    local repo_root ef
+    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    ef="${BATS_TEST_TMPDIR}/dup.env"
+    _load_setup_update_helpers "${repo_root}"
+    printf 'FOO=1\nFOO=2\nBAR=3\n' > "${ef}"
+    set_env_key FOO 9 "${ef}"
+    [ "$(grep -c '^FOO=' "${ef}")" -eq 1 ]
+    grep -qx 'FOO=9' "${ef}"
+    grep -qx 'BAR=3' "${ef}"
+}
+
 # What: builds a fixture doc + quickstart web_log copy.
 # Why: shared by the logging-matrix tests below.
 # From: Issue #1683 | PR #1858
