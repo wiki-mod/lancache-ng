@@ -1344,8 +1344,7 @@ _ci_trivy_db_lock_run() {
     done
     # What: releases the lock on any return from this call.
     # Why: an unreleased lock wedges every later caller.
-    # shellcheck disable=SC2064
-    trap "rm -rf -- '${lock_dir}'" RETURN
+    trap 'rm -rf -- "${lock_dir:-}"' RETURN
     "$@"
 }
 
@@ -5069,8 +5068,7 @@ _ci_check_proxy_cache_env_doc_drift() {
         doc_row="$(grep -E "^\| \`${key}\` \|" "${arch_doc}" || true)"
         [ -n "${doc_row}" ] || continue
         checked=$((checked + 1))
-        # shellcheck disable=SC2016
-        documented="$(sed -E 's/^\| `[A-Z_]+` \| `([^`]*)` \|.*/\1/' <<<"${doc_row}")"
+        documented="$(sed -E "s/^\| \`[A-Z_]+\` \| \`([^\`]*)\` \|.*/\1/" <<<"${doc_row}")"
         if [ "${documented}" != "${value}" ]; then
             viol+=("${key}: proxy.env=${value} vs doc=${documented}")
         fi

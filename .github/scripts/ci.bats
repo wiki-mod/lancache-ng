@@ -16,7 +16,7 @@ setup() {
     # What: default apk resolver, rust ids docker-free.
     # Why: rust identity now keys the build-tools signature.
     # From: Issue #1683
-    export CI_APK_RESOLVE_CMD="$(_stub apkres 'printf "pkg-1.0\n"')"
+    CI_APK_RESOLVE_CMD="$(_stub apkres 'printf "pkg-1.0\n"')"; export CI_APK_RESOLVE_CMD
 }
 
 # What: Removes dirs listed in a manifest file.
@@ -1317,7 +1317,7 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     # What: A missing service blocks the promotion.
     # Why: Promotion is stack-atomic (docs section 50).
     # From: Issue #1683
-    local dig="$(_test_digest a)"
+    local dig; dig="$(_test_digest a)"
     CI_STACK_CANDIDATE_CMD="$(_stub cand "echo proxy=${dig}")" GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${CI_SH}" promote nightly
     [ "${status}" -eq 2 ]
@@ -1328,7 +1328,7 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     # What: Stack validation is a precondition.
     # Why: Fail-closed without validate (docs section 50).
     # From: Issue #1683
-    local dig="$(_test_digest a)"
+    local dig; dig="$(_test_digest a)"
     CI_STACK_CANDIDATE_CMD="$(_promote_full_candidate "${dig}")" GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${CI_SH}" promote nightly
     [ "${status}" -eq 2 ]
@@ -1339,7 +1339,7 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     # What: Moving refs is an authenticated action.
     # Why: Never anonymous (rate-limit).
     # From: Issue #1683
-    local dig="$(_test_digest a)"
+    local dig; dig="$(_test_digest a)"
     CI_STACK_CANDIDATE_CMD="$(_promote_full_candidate "${dig}")" CI_STACK_VALIDATED=SUCCESS \
         run bash "${CI_SH}" promote nightly
     [ "${status}" -eq 2 ]
@@ -1350,7 +1350,7 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     # What: Fresh promote: lock, move, readback, unlock.
     # Why: The one success path (docs section 51/53).
     # From: Issue #1683
-    local dig="$(_test_digest a)"
+    local dig; dig="$(_test_digest a)"
     CI_STACK_CANDIDATE_CMD="$(_promote_full_candidate "${dig}")" CI_STACK_VALIDATED=SUCCESS \
     CI_PROMOTE_LOCK_CMD="$(_promote_lock)" CI_PROMOTE_UNLOCK_CMD="$(_promote_unlock)" \
     CI_PROMOTE_MOVE_CMD="$(_stub mv 'touch "${BATS_TEST_TMPDIR}/moved.$1"')" \
@@ -1366,7 +1366,7 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     # What: A re-run reuses the state, takes no lock.
     # Why: Same end state on retry (docs section 26.4).
     # From: Issue #1683
-    local dig="$(_test_digest a)"
+    local dig; dig="$(_test_digest a)"
     CI_STACK_CANDIDATE_CMD="$(_promote_full_candidate "${dig}")" CI_STACK_VALIDATED=SUCCESS \
     CI_PROMOTE_LOCK_CMD="$(_promote_lock)" CI_PROMOTE_UNLOCK_CMD="$(_promote_unlock)" \
     CI_PROMOTE_MOVE_CMD="$(_stub mv 'true')" \
@@ -1382,8 +1382,8 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     # What: A mismatch fails closed, never leaks the lock.
     # Why: A held lock blocks all future promotions.
     # From: Issue #1683
-    local dig="$(_test_digest a)"
-    local other="$(_test_digest b)"
+    local dig; dig="$(_test_digest a)"
+    local other; other="$(_test_digest b)"
     CI_STACK_CANDIDATE_CMD="$(_promote_full_candidate "${dig}")" CI_STACK_VALIDATED=SUCCESS \
     CI_PROMOTE_LOCK_CMD="$(_promote_lock)" CI_PROMOTE_UNLOCK_CMD="$(_promote_unlock)" \
     CI_PROMOTE_MOVE_CMD="$(_stub mv 'true')" \
@@ -1422,7 +1422,7 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     # What: Fresh verdict promotes the exact candidate.
     # Why: latest promote is the release success path.
     # From: Issue #1683
-    local dig="$(_test_digest a)"
+    local dig; dig="$(_test_digest a)"
     CI_RELEASE_VALIDATION_CMD="$(_stub val 'exit 0')" \
     CI_STACK_CANDIDATE_CMD="$(_promote_full_candidate "${dig}")" CI_STACK_VALIDATED=SUCCESS \
     CI_PROMOTE_LOCK_CMD="$(_promote_lock)" CI_PROMOTE_UNLOCK_CMD="$(_promote_unlock)" \
@@ -1440,7 +1440,7 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     # What: A re-run promotes nothing, takes no lock.
     # Why: Same end state on retry (docs section 26.4).
     # From: Issue #1683
-    local dig="$(_test_digest a)"
+    local dig; dig="$(_test_digest a)"
     CI_RELEASE_VALIDATION_CMD="$(_stub val 'exit 0')" \
     CI_STACK_CANDIDATE_CMD="$(_promote_full_candidate "${dig}")" CI_STACK_VALIDATED=SUCCESS \
     CI_PROMOTE_LOCK_CMD="$(_promote_lock)" CI_PROMOTE_UNLOCK_CMD="$(_promote_unlock)" \
@@ -1457,7 +1457,7 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     # What: Fresh verdict still needs a complete stack.
     # Why: One acceptance model; promote gates apply.
     # From: Issue #1683
-    local dig="$(_test_digest a)"
+    local dig; dig="$(_test_digest a)"
     CI_RELEASE_VALIDATION_CMD="$(_stub val 'exit 0')" \
     CI_STACK_CANDIDATE_CMD="$(_stub cand "echo proxy=${dig}")" GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${CI_SH}" release
@@ -1531,7 +1531,7 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     # What: A not-found channel is skipped, not a failure.
     # Why: A service never promoted is legitimately absent.
     # From: Issue #1683
-    GITHUB_REPOSITORY=wiki-mod/lancache-ng
+    export GITHUB_REPOSITORY=wiki-mod/lancache-ng
     _ci_ledger_blob() { printf 'id1\tproxy\tlinux/amd64\tACCEPTED\tsha256:led\n'; }
     ci_services() { printf 'proxy\n'; }
     _ci_mutable_channels() { printf 'latest\n'; }
@@ -3741,8 +3741,7 @@ EOF
     # From: Issue #1683 | PR #1858
     local env="${BATS_TEST_TMPDIR}/proxy.env" doc="${BATS_TEST_TMPDIR}/arch.md"
     printf 'CACHE_MEM_MB=999\n' > "${env}"
-    # shellcheck disable=SC2016
-    printf '| `CACHE_MEM_MB` | `512` | some description |\n' > "${doc}"
+    printf "| \`CACHE_MEM_MB\` | \`512\` | some description |\n" > "${doc}"
     run bash "${CI_SH}" check proxy-cache-env-doc-drift "${env}" "${doc}"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0023"* ]]
@@ -3778,8 +3777,7 @@ EOF
     mkdir -p "${r}/.github" "${r}/services/a" "${r}/services/b"
     printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    directories:\n      - /services/a\n      - /services/b\n    schedule:\n      interval: weekly\n' \
         > "${r}/.github/dependabot.yml"
-    # shellcheck disable=SC2016
-    printf 'ARG BASE=alpine:3.24\nFROM ${BASE}\n' > "${r}/services/a/Dockerfile"
+    printf "ARG BASE=alpine:3.24\nFROM \${BASE}\n" > "${r}/services/a/Dockerfile"
     printf 'FROM alpine:3.24\n' > "${r}/services/b/Dockerfile"
     run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"
     [ "${status}" -eq 0 ]
@@ -3793,10 +3791,8 @@ EOF
     mkdir -p "${r}/.github" "${r}/services/a" "${r}/services/b"
     printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    directories:\n      - /services/a\n      - /services/b\n    schedule:\n      interval: weekly\n' \
         > "${r}/.github/dependabot.yml"
-    # shellcheck disable=SC2016
-    printf 'ARG ALPINE_IMAGE\nFROM ${ALPINE_IMAGE}\n' > "${r}/services/a/Dockerfile"
-    # shellcheck disable=SC2016
-    printf 'ARG ALPINE_IMAGE\nFROM ${ALPINE_IMAGE}\n' > "${r}/services/b/Dockerfile"
+    printf "ARG ALPINE_IMAGE\nFROM \${ALPINE_IMAGE}\n" > "${r}/services/a/Dockerfile"
+    printf "ARG ALPINE_IMAGE\nFROM \${ALPINE_IMAGE}\n" > "${r}/services/b/Dockerfile"
     run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"dependabot-docker-base-consistency=clean"* ]]
@@ -3874,8 +3870,7 @@ EOF
     mkdir -p "${r}/.github" "${r}/services/a"
     printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    directory: /services/a\n    schedule:\n      interval: weekly\n' \
         > "${r}/.github/dependabot.yml"
-    # shellcheck disable=SC2016
-    printf 'FROM ${UNKNOWN_ARG}\n' > "${r}/services/a/Dockerfile"
+    printf "FROM \${UNKNOWN_ARG}\n" > "${r}/services/a/Dockerfile"
     run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0031"* ]]
