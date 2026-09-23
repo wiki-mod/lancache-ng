@@ -11,7 +11,13 @@ on:
   # What: legacy CI frozen on the #1683 rewrite branch.
   # Why: stop the old pipeline building containers here.
   # From: Issue #1683
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Also promote this channel from the dispatched ref (e.g. spot-check a feature branch as "nightly").
+        type: choice
+        options: [none, nightly]
+        default: none
 permissions:
   contents: read
   pull-requests: read
