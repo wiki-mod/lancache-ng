@@ -6611,3 +6611,45 @@ _write_legacy_env_fixture() {
     run migrate_env_for_update "$(dirname "${env_file}")"; [ "${status}" -eq 0 ]
     run ! grep -q '^NATS_CONF_DIR=' "${env_file}"
 }
+
+@test "migrate_env_for_update writes LANCACHE_STATE_DIR on a legacy .env" {
+    # What: the one-root key is present after migrating legacy state.
+    # Why: LANCACHE_STATE_DIR is the single state-root contract.
+    # From: Issue #1683 | PR #1858
+    local repo_root env_file
+    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    env_file="${BATS_TEST_TMPDIR}/.env"
+    _load_setup_update_helpers "${repo_root}"
+    _write_legacy_env_fixture "${env_file}"
+    run ! grep -q '^LANCACHE_STATE_DIR=' "${env_file}"
+    run migrate_env_for_update "$(dirname "${env_file}")"; [ "${status}" -eq 0 ]
+    grep -q '^LANCACHE_STATE_DIR=/' "${env_file}"
+}
+
+@test "production_state_root_default keeps deploy/prod state out of the checkout" {
+    # What: a deploy/prod checkout defaults state off the checkout.
+    # Why: runtime state must not live inside the git checkout.
+    # From: Issue #1683 | PR #1858
+    local repo_root root
+    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_update_helpers "${repo_root}"
+    root="$(production_state_root_default /srv/checkout/deploy/prod)"
+    [ -n "${root}" ]
+    [ "${root}" != "/srv/checkout/deploy/prod" ]
+    [ "$(production_state_root_default /var/lib/lancache)" = "/var/lib/lancache" ]
+}
+
+@test "runtime_env_file_for_install_dir prefers deploy/prod/.env.local when present" {
+    # What: deploy/prod uses .env.local override when it exists.
+    # Why: a git pull must not clobber operator prod values.
+    # From: Issue #1683 | PR #1858
+    local repo_root dp
+    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_update_helpers "${repo_root}"
+    dp="${BATS_TEST_TMPDIR}/deploy/prod"
+    mkdir -p "${dp}"
+    [ "$(runtime_env_file_for_install_dir "${dp}")" = "${dp}/.env" ]
+    : > "${dp}/.env.local"
+    [ "$(runtime_env_file_for_install_dir "${dp}")" = "${dp}/.env.local" ]
+    [ "$(runtime_env_file_for_install_dir /var/lib/lancache)" = "/var/lib/lancache/.env" ]
+}
