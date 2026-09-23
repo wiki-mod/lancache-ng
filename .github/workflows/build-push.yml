@@ -673,34 +673,8 @@ jobs:
             --env SSL_CACHE_MAX_GB \
             --env STANDARD_CACHE_MAX_GB \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            timeout --kill-after=30 --signal=KILL 300 bash -s <<'VALIDATE_COMPOSE'
-          set -euo pipefail
-          validate_compose() {
-            local output
-            if ! output="$(docker compose "$@" config --quiet 2>&1)"; then
-              printf '%s\n' "$output"
-              return 1
-            fi
-            if grep -Eqi '(^|[[:space:]])(warn|warning|level=warning)' <<<"$output"; then
-              printf 'docker compose emitted warnings; treating warnings as errors:\n%s\n' "$output"
-              return 1
-            fi
-            if [ -n "$output" ]; then
-              printf '%s\n' "$output"
-            fi
-          }
-          validate_compose -f deploy/quickstart/docker-compose.yml --profile ssl
-          validate_compose -f deploy/prod/docker-compose.yml
-          validate_compose -f deploy/secondary/docker-compose.yml
-          validate_compose --env-file deploy/quickstart/.env -f deploy/quickstart/docker-compose.yml --profile ssl
-          for compose_file in \
-            deploy/prod/docker-compose.yml \
-            deploy/quickstart/docker-compose.yml; do
-            validate_compose -f "$compose_file" --profile dhcp-kea
-            validate_compose -f "$compose_file" --profile dhcp-proxy
-            validate_compose -f "$compose_file" --profile logging
-          done
-          VALIDATE_COMPOSE
+            timeout --kill-after=30 --signal=KILL 300 \
+            bash .github/scripts/ci.sh check compose-config
       - name: Validate NATS/atomic-write and Docker socket proxy contracts
         run: |
           set -euo pipefail

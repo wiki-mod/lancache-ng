@@ -294,3 +294,11 @@ validation:
   # Why: Only HTTP is cached; a real HIT proves the path.
   # From: Issue #1683 | PR #1858
   proxy_cache_probe_url: http://deb.debian.org/debian/dists/stable/InRelease
+  # What: deploy compose file[:profile] targets CI renders clean.
+  # Why: prod/quickstart/secondary only; full-setup is CI-internal.
+  # From: Issue #1683 | PR #1858
+  compose_targets: deploy/prod/docker-compose.yml deploy/secondary/docker-compose.yml deploy/quickstart/docker-compose.yml:ssl deploy/prod/docker-compose.yml:dhcp-kea deploy/prod/docker-compose.yml:dhcp-proxy deploy/prod/docker-compose.yml:logging deploy/quickstart/docker-compose.yml:dhcp-kea deploy/quickstart/docker-compose.yml:dhcp-proxy deploy/quickstart/docker-compose.yml:logging
+  # What: compose file[:profile] targets also rendered via --env-file.
+  # Why: quickstart's committed .env must interpolate cleanly too.
+  # From: Issue #1683 | PR #1858
+  compose_env_file_targets: deploy/quickstart/docker-compose.yml:ssl

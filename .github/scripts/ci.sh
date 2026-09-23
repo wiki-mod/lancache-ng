@@ -5662,6 +5662,72 @@ _ci_check_prod_state_wiring() {
     printf 'prod-state-wiring=clean\n'
 }
 
+# What: True if one compose file/profile renders warning-free.
+# Why: docker compose warnings hide real drift; fail closed.
+# From: Issue #1683 | PR #1858
+_ci_compose_config_ok() {
+    local file="$1" profile="${2:-}" env_file="${3:-}" out
+    if [ -n "${CI_COMPOSE_CONFIG_CMD:-}" ]; then
+        out="$("${CI_COMPOSE_CONFIG_CMD}" "${file}" "${profile}" "${env_file}" 2>&1)" || { printf '%s\n' "${out}"; return 1; }
+    else
+        local -a args=()
+        [ -n "${env_file}" ] && args+=(--env-file "${env_file}")
+        args+=(-f "${file}")
+        [ -n "${profile}" ] && args+=(--profile "${profile}")
+        out="$(docker compose "${args[@]}" config --quiet 2>&1)" || { printf '%s\n' "${out}"; return 1; }
+    fi
+    if grep -Eqi '(^|[[:space:]])(warn|warning|level=warning)' <<<"${out}"; then
+        printf 'warnings treated as errors:\n%s\n' "${out}"
+        return 1
+    fi
+    return 0
+}
+
+# What: Validate one SOT compose target token file[:profile].
+# Why: shared by the plain and --env-file target loops.
+# From: Issue #1683 | PR #1858
+_ci_compose_target_ok() {
+    local repo_root="$1" tok="$2" env_file="$3" rel profile cf
+    rel="${tok%%:*}"
+    profile=""
+    [ "${tok}" != "${rel}" ] && profile="${tok#*:}"
+    cf="${repo_root}/${rel}"
+    if [ ! -f "${cf}" ]; then
+        printf '%s: compose target missing\n' "${rel}"
+        return 1
+    fi
+    [ -n "${env_file}" ] && env_file="${repo_root}/$(dirname "${rel}")/.env"
+    _ci_compose_config_ok "${cf}" "${profile}" "${env_file}" || { printf '%s: config invalid\n' "${tok}"; return 1; }
+}
+
+# What: Fail unless every SOT compose target renders valid.
+# Why: prod/quickstart/secondary must render clean, no warnings.
+# From: Issue #1683 | PR #1858
+_ci_check_compose_config() {
+    local repo_root="${1:-${CI_REPO_ROOT}}"
+    local -a viol=()
+    local targets envtargets tok msg count=0
+    targets="$(_ci_manifest_scalar '^  compose_targets:[[:space:]]')"
+    if [ -z "${targets}" ]; then
+        ci_error "[CI-ERROR-CHECK-0044]" "reason=\"no compose_targets in SOT\"" "manifest=${CI_MANIFEST}"
+        return 1
+    fi
+    envtargets="$(_ci_manifest_scalar '^  compose_env_file_targets:[[:space:]]')"
+    for tok in ${targets}; do
+        count=$((count + 1))
+        msg="$(_ci_compose_target_ok "${repo_root}" "${tok}" "")" || viol+=("${msg}")
+    done
+    for tok in ${envtargets}; do
+        count=$((count + 1))
+        msg="$(_ci_compose_target_ok "${repo_root}" "${tok}" "env")" || viol+=("(env-file) ${msg}")
+    done
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0044]" "reason=\"deploy compose config invalid\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'compose-config=clean checks=%s\n' "${count}"
+}
+
 # What: Warn (never fail) on editing CHANGELOG.md directly.
 # Why: usually unintended; risks a merge-conflict cascade.
 # From: Issue #1683 | PR #1858
@@ -6049,6 +6115,7 @@ ci_cmd_check() {
         idempotence-test-coverage) _ci_check_idempotence_test_coverage "$@" ;;
         prebuilt-prod) _ci_check_prebuilt_prod "$@" ;;
         prod-state-wiring) _ci_check_prod_state_wiring "$@" ;;
+        compose-config) _ci_check_compose_config "$@" ;;
         logging-matrix) _ci_check_logging_matrix "$@" ;;
         trivy-action-direct-usage) _ci_check_trivy_action_direct_usage "$@" ;;
         entrypoint-lib-wiring) _ci_check_entrypoint_lib_wiring "$@" ;;

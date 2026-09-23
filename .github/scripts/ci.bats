@@ -4264,6 +4264,73 @@ _prod_state_wiring_fixture() {
     [[ "${output}" == *"input missing"* ]]
 }
 
+@test "check compose-config passes when all SOT targets validate" {
+    # What: every SOT file[:profile] target renders warning-free.
+    # Why: prod/quickstart/secondary compose must be valid.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/cc-ok" m="${BATS_TEST_TMPDIR}/cc-ok.yml"
+    mkdir -p "${r}/deploy/prod" "${r}/deploy/quickstart"
+    : > "${r}/deploy/prod/docker-compose.yml"
+    : > "${r}/deploy/quickstart/docker-compose.yml"
+    printf 'validation:\n  compose_targets: deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml:ssl\n  compose_env_file_targets: deploy/quickstart/docker-compose.yml:ssl\n' > "${m}"
+    CI_MANIFEST="${m}" CI_COMPOSE_CONFIG_CMD="$(_stub cfg 'exit 0')" \
+        run bash "${CI_SH}" check compose-config "${r}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"compose-config=clean"* ]]
+}
+
+@test "check compose-config fails when a SOT target is invalid" {
+    # What: one target renders a docker compose error.
+    # Why: an invalid target must fail the whole check.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/cc-bad" m="${BATS_TEST_TMPDIR}/cc-bad.yml"
+    mkdir -p "${r}/deploy/prod"
+    : > "${r}/deploy/prod/docker-compose.yml"
+    printf 'validation:\n  compose_targets: deploy/prod/docker-compose.yml:logging\n' > "${m}"
+    CI_MANIFEST="${m}" CI_COMPOSE_CONFIG_CMD="$(_stub cfg '[ "$2" = logging ] && { echo boom; exit 1; }; exit 0')" \
+        run bash "${CI_SH}" check compose-config "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"logging"* ]]
+}
+
+@test "check compose-config treats docker compose warnings as errors" {
+    # What: a warning line in config output fails the check.
+    # Why: warnings hide real drift; fail closed.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/cc-warn" m="${BATS_TEST_TMPDIR}/cc-warn.yml"
+    mkdir -p "${r}/deploy/prod"
+    : > "${r}/deploy/prod/docker-compose.yml"
+    printf 'validation:\n  compose_targets: deploy/prod/docker-compose.yml\n' > "${m}"
+    CI_MANIFEST="${m}" CI_COMPOSE_CONFIG_CMD="$(_stub cfg 'echo "level=warning drift"; exit 0')" \
+        run bash "${CI_SH}" check compose-config "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"config invalid"* ]]
+}
+
+@test "check compose-config fails when a SOT target file is missing" {
+    # What: a listed target compose file does not exist.
+    # Why: a renamed/removed deployment must surface here.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/cc-miss" m="${BATS_TEST_TMPDIR}/cc-miss.yml"
+    mkdir -p "${r}/deploy/prod"
+    printf 'validation:\n  compose_targets: deploy/prod/docker-compose.yml\n' > "${m}"
+    CI_MANIFEST="${m}" CI_COMPOSE_CONFIG_CMD="$(_stub cfg 'exit 0')" \
+        run bash "${CI_SH}" check compose-config "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"compose target missing"* ]]
+}
+
+@test "check compose-config fails when the SOT lists no targets" {
+    # What: the SOT has no compose_targets entry at all.
+    # Why: fail closed rather than validate nothing silently.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/cc-nosot" m="${BATS_TEST_TMPDIR}/cc-nosot.yml"
+    printf 'validation:\n  dns_test_domains: [x]\n' > "${m}"
+    CI_MANIFEST="${m}" run bash "${CI_SH}" check compose-config "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"no compose_targets"* ]]
+}
+
 # What: builds a fixture doc + quickstart web_log copy.
 # Why: shared by the logging-matrix tests below.
 # From: Issue #1683 | PR #1858
