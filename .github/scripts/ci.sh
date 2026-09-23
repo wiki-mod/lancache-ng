@@ -5896,9 +5896,13 @@ _ci_dhcp_proxy_env_file_ok() {
 _ci_check_dhcp_proxy_env() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local -a viol=()
-    local ef key out qc="${repo_root}/deploy/quickstart/docker-compose.yml"
+    local ef key out f qc="${repo_root}/deploy/quickstart/docker-compose.yml"
     local -a opt=(DHCP_PROXY_INTERFACE DHCP_PROXY_ROUTER DHCP_NTP_SERVERS DHCP_PROXY_DOMAIN DHCP_PROXY_BOOT_FILENAME DHCP_PROXY_BOOT_SERVER DHCP_PROXY_CUSTOM_OPTIONS)
     local -a pxe=(DHCP_PROXY_PXE_BOOT_SERVER DHCP_PROXY_PXE_BOOT_FILENAME_BIOS DHCP_PROXY_PXE_BOOT_FILENAME_UEFI)
+    for f in deploy/prod/docker-compose.yml config/prod/dhcp-proxy.env deploy/quickstart/.env \
+        deploy/quickstart/docker-compose.yml services/dhcp-proxy/entrypoint.sh services/dhcp-proxy/dnsmasq.conf.template; do
+        [ -f "${repo_root}/${f}" ] || { ci_error "[CI-ERROR-CHECK-0048]" "path=\"${f}\" reason=\"required dhcp-proxy input missing\"" "missing dhcp-proxy input: ${f}"; return 2; }
+    done
     out="$(_ci_dhcp_proxy_env_file_ok "${repo_root}/deploy/prod/docker-compose.yml" '../../config/prod/dhcp-proxy.env')" || viol+=("${out}")
     for ef in config/prod/dhcp-proxy.env deploy/quickstart/.env; do
         for key in "${opt[@]}" "${pxe[@]}"; do

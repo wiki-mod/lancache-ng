@@ -4553,6 +4553,18 @@ EOF
     [[ "${output}" == *"dhcp-proxy"* ]]
 }
 
+@test "check dhcp-proxy-env fails cleanly when an input file is missing" {
+    # What: a missing compose/env/entrypoint yields a clear error.
+    # Why: must not read as a dhcp-proxy contract violation.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/dpe-miss"
+    _dhcp_proxy_env_fixture "${r}"
+    rm "${r}/services/dhcp-proxy/dnsmasq.conf.template"
+    run bash "${CI_SH}" check dhcp-proxy-env "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"input missing"* ]]
+}
+
 # What: seed a setup.sh/dhcp tree meeting the keys+Kea contract.
 # Why: shared by the setup-keys-kea checks below.
 # From: Issue #1683 | PR #1858
