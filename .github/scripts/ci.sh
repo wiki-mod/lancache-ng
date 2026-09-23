@@ -5615,6 +5615,25 @@ _ci_check_idempotence_test_coverage() {
     printf 'idempotence-test-coverage=clean writers=%s\n' "${count}"
 }
 
+# What: Fail unless prod install paths stay prebuilt-only.
+# Why: docs/release-versioning: prod runs prebuilt images.
+# From: Issue #1683 | PR #1858 (VALIDATE_PREBUILT subset)
+_ci_check_prebuilt_prod() {
+    local repo_root="${1:-${CI_REPO_ROOT}}"
+    local -a viol=()
+    if grep -RInE '^[[:space:]]+build:' "${repo_root}/deploy/prod" "${repo_root}/deploy/quickstart" >/dev/null 2>&1; then
+        viol+=("deploy/prod or deploy/quickstart compose declares build:; prod must run prebuilt images only")
+    fi
+    if grep -RIn -- '--build' "${repo_root}/README.md" "${repo_root}/deploy/prod" "${repo_root}/deploy/quickstart" "${repo_root}/setup.sh" >/dev/null 2>&1; then
+        viol+=("a user-facing install path instructs --build; prod must run from prebuilt images, not a local build")
+    fi
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0042]" "reason=\"production install path is not prebuilt-only\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'prebuilt-prod=clean\n'
+}
+
 # What: Warn (never fail) on editing CHANGELOG.md directly.
 # Why: usually unintended; risks a merge-conflict cascade.
 # From: Issue #1683 | PR #1858
@@ -6000,6 +6019,7 @@ ci_cmd_check() {
         build-tools-smoke-coverage) _ci_check_build_tools_smoke_coverage "$@" ;;
         dependabot-docker-base-consistency) _ci_check_dependabot_docker_base_consistency "$@" ;;
         idempotence-test-coverage) _ci_check_idempotence_test_coverage "$@" ;;
+        prebuilt-prod) _ci_check_prebuilt_prod "$@" ;;
         logging-matrix) _ci_check_logging_matrix "$@" ;;
         trivy-action-direct-usage) _ci_check_trivy_action_direct_usage "$@" ;;
         entrypoint-lib-wiring) _ci_check_entrypoint_lib_wiring "$@" ;;

@@ -4164,6 +4164,53 @@ EOF
     [[ "${output}" == *"netdata_alarms.rs"* ]]
 }
 
+# What: seed a minimal prebuilt-only prod/quickstart tree.
+# Why: shared by the prebuilt-prod checks below.
+# From: Issue #1683 | PR #1858
+_prebuilt_fixture() {
+    local root="$1"
+    mkdir -p "${root}/deploy/prod" "${root}/deploy/quickstart"
+    printf 'services:\n  proxy:\n    image: ghcr.io/example/proxy:sha-abc\n' > "${root}/deploy/prod/docker-compose.yml"
+    printf 'services:\n  proxy:\n    image: ghcr.io/example/proxy:sha-abc\n' > "${root}/deploy/quickstart/docker-compose.yml"
+    printf '# LanCache-NG\nRun: docker compose up -d\n' > "${root}/README.md"
+    printf '#!/usr/bin/env bash\n' > "${root}/setup.sh"
+}
+
+@test "check prebuilt-prod passes a prebuilt-only tree" {
+    # What: no build: and no --build anywhere user-facing.
+    # Why: prod runs prebuilt first-party images (versioning).
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/prebuilt-ok"
+    _prebuilt_fixture "${r}"
+    run bash "${CI_SH}" check prebuilt-prod "${r}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"prebuilt-prod=clean"* ]]
+}
+
+@test "check prebuilt-prod fails a build: directive in prod compose" {
+    # What: a prod compose that would build locally.
+    # Why: prod must consume prebuilt images, not build.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/prebuilt-build"
+    _prebuilt_fixture "${r}"
+    printf 'services:\n  proxy:\n    build: .\n' > "${r}/deploy/prod/docker-compose.yml"
+    run bash "${CI_SH}" check prebuilt-prod "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"prebuilt"* ]]
+}
+
+@test "check prebuilt-prod fails a --build instruction in README" {
+    # What: a user-facing doc telling users to build.
+    # Why: install paths must not instruct local builds.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/prebuilt-readme"
+    _prebuilt_fixture "${r}"
+    printf '# LanCache-NG\nRun: docker compose up -d --build\n' > "${r}/README.md"
+    run bash "${CI_SH}" check prebuilt-prod "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"prebuilt"* ]]
+}
+
 # What: builds a fixture doc + quickstart web_log copy.
 # Why: shared by the logging-matrix tests below.
 # From: Issue #1683 | PR #1858
