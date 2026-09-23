@@ -4858,6 +4858,18 @@ EOF
     [[ "${output}" == *"quickstart's inline web_log job config has drifted"* ]]
 }
 
+@test "check logging-matrix passes a matching quickstart web_log fixture" {
+    # What: an in-sync inline web_log job passes the parity check.
+    # Why: the fixture-level match case (from the old weblog-parity bats).
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/lm-weblog-ok"
+    _logging_matrix_fixture "${r}" "svc-a"
+    CI_LOGGING_MATRIX_SERVICES_CMD="$(_stub svc 'printf "svc-a\n"')" \
+        run bash "${CI_SH}" check logging-matrix "${r}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"logging-matrix=clean"* ]]
+}
+
 @test "check trivy-action-direct-usage passes clean on the real repo" {
     # What: real tree has no direct call site, all wired.
     # Why: proves the rewrite against production state.

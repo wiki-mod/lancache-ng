@@ -1347,7 +1347,7 @@ jobs:
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             timeout --kill-after=30 --signal=KILL 300 \
-            bash scripts/tracked/check-naming-consistency.sh
+            bash .github/scripts/ci.sh check naming-consistency
       - name: Check workflow service lists stay in sync
         run: |
           set -euo pipefail
@@ -1417,7 +1417,7 @@ jobs:
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             timeout --kill-after=30 --signal=KILL 300 \
-            bash scripts/untracked/check-proxy-cache-env-doc-drift.sh
+            bash .github/scripts/ci.sh check proxy-cache-env-doc-drift
       - name: Check logging matrix (docs/architecture-ng.md, issue #633)
         env:
           CACHE_INACTIVE: 365d
@@ -1496,7 +1496,7 @@ jobs:
             --env STANDARD_CACHE_MAX_GB \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             timeout --kill-after=30 --signal=KILL 300 \
-            bash scripts/tracked/check-logging-matrix.sh
+            bash .github/scripts/ci.sh check logging-matrix
       - name: Remove fallback compose validation image
         if: always()
         run: |
