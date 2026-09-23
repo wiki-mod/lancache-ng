@@ -314,7 +314,7 @@ jobs:
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             timeout --kill-after=30 --signal=KILL 300 \
-            bash -lc 'set -euo pipefail; bash scripts/tracked/check-line-endings.sh'
+            bash .github/scripts/ci.sh check line-endings
       - name: Run governance guardrails
         if: github.event_name == 'pull_request'
         env:
