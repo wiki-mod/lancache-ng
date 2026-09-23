@@ -4211,6 +4211,47 @@ _prebuilt_fixture() {
     [[ "${output}" == *"prebuilt"* ]]
 }
 
+# What: seed a prod tree whose state derives from LANCACHE_STATE_DIR.
+# Why: shared by the prod-state-wiring checks below.
+# From: Issue #1683 | PR #1858
+_prod_state_wiring_fixture() {
+    local root="$1" k
+    mkdir -p "${root}/deploy/prod" "${root}/docs"
+    : > "${root}/deploy/prod/docker-compose.yml"
+    : > "${root}/deploy/prod/.env"
+    : > "${root}/docs/backup-restore.md"
+    for k in PDNS_STANDARD_DIR PDNS_SSL_DIR PDNS_FILTER_STATE_DIR NATS_DATA_DIR NATS_CONF_DIR; do
+        printf '      - ${%s:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/x}:/y\n' "${k}" >> "${root}/deploy/prod/docker-compose.yml"
+        printf '%s=\n' "${k}" >> "${root}/deploy/prod/.env"
+        printf '%s documented\n' "${k}" >> "${root}/docs/backup-restore.md"
+    done
+}
+
+@test "check prod-state-wiring passes a fully derived, documented tree" {
+    # What: all five keys derive from LANCACHE_STATE_DIR + documented.
+    # Why: AG-SETUP-001 one state root, manual upgrades documented.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/psw-ok"
+    _prod_state_wiring_fixture "${r}"
+    run bash "${CI_SH}" check prod-state-wiring "${r}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"prod-state-wiring=clean"* ]]
+}
+
+@test "check prod-state-wiring fails a key not derived from LANCACHE_STATE_DIR" {
+    # What: a per-service dir hardcoded off LANCACHE_STATE_DIR.
+    # Why: breaks the single state-root contract (AG-SETUP-001).
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/psw-noderive"
+    _prod_state_wiring_fixture "${r}"
+    grep -v 'NATS_CONF_DIR' "${r}/deploy/prod/docker-compose.yml" > "${r}/deploy/prod/dc.tmp"
+    printf '      - /hard/coded/nats-conf:/etc/nats\n' >> "${r}/deploy/prod/dc.tmp"
+    mv "${r}/deploy/prod/dc.tmp" "${r}/deploy/prod/docker-compose.yml"
+    run bash "${CI_SH}" check prod-state-wiring "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"NATS_CONF_DIR"* ]]
+}
+
 # What: builds a fixture doc + quickstart web_log copy.
 # Why: shared by the logging-matrix tests below.
 # From: Issue #1683 | PR #1858

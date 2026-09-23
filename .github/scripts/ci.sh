@@ -5634,6 +5634,31 @@ _ci_check_prebuilt_prod() {
     printf 'prebuilt-prod=clean\n'
 }
 
+# What: Check prod state derives from LANCACHE_STATE_DIR.
+# Why: AG-SETUP-001: LANCACHE_STATE_DIR is the one state root.
+# From: Issue #1683 | PR #1858 (VALIDATE_PREBUILT subset)
+_ci_check_prod_state_wiring() {
+    local repo_root="${1:-${CI_REPO_ROOT}}"
+    local compose="${repo_root}/deploy/prod/docker-compose.yml"
+    local env_file="${repo_root}/deploy/prod/.env"
+    local doc="${repo_root}/docs/backup-restore.md"
+    local -a viol=()
+    local key
+    for key in PDNS_STANDARD_DIR PDNS_SSL_DIR PDNS_FILTER_STATE_DIR NATS_DATA_DIR NATS_CONF_DIR; do
+        grep -Fq "\${${key}:-\${LANCACHE_STATE_DIR" "${compose}" \
+            || viol+=("deploy/prod compose does not derive ${key} from LANCACHE_STATE_DIR")
+        grep -Fq "${key}" "${env_file}" \
+            || viol+=("deploy/prod/.env does not document ${key} for manual upgrades")
+        grep -Fq "${key}" "${doc}" \
+            || viol+=("docs/backup-restore.md does not mention ${key}")
+    done
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0043]" "reason=\"prod state wiring not LANCACHE_STATE_DIR-derived or undocumented\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'prod-state-wiring=clean\n'
+}
+
 # What: Warn (never fail) on editing CHANGELOG.md directly.
 # Why: usually unintended; risks a merge-conflict cascade.
 # From: Issue #1683 | PR #1858
@@ -6020,6 +6045,7 @@ ci_cmd_check() {
         dependabot-docker-base-consistency) _ci_check_dependabot_docker_base_consistency "$@" ;;
         idempotence-test-coverage) _ci_check_idempotence_test_coverage "$@" ;;
         prebuilt-prod) _ci_check_prebuilt_prod "$@" ;;
+        prod-state-wiring) _ci_check_prod_state_wiring "$@" ;;
         logging-matrix) _ci_check_logging_matrix "$@" ;;
         trivy-action-direct-usage) _ci_check_trivy_action_direct_usage "$@" ;;
         entrypoint-lib-wiring) _ci_check_entrypoint_lib_wiring "$@" ;;
