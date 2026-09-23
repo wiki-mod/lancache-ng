@@ -5728,6 +5728,125 @@ _ci_check_compose_config() {
     printf 'compose-config=clean checks=%s\n' "${count}"
 }
 
+# What: Fail unless NATS/DNS configs are written atomically.
+# Why: a torn shared-config write can start a broken stack.
+# From: Issue #1683 | PR #1858 (VALIDATE_COMPOSE_NATS_SOCKETPROXY)
+_ci_check_nats_atomic_write() {
+    local repo_root="${1:-${CI_REPO_ROOT}}"
+    local -a viol=()
+    local cf ep='services/dns/entrypoint.sh' rs='services/ui/src/routes/secondaries.rs' su='setup.sh'
+    for cf in deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml; do
+        grep -Fq 'tmp_nats_conf="$(mktemp /etc/nats/.nats.conf.XXXXXX)"' "${repo_root}/${cf}" \
+            || viol+=("${cf}: NATS must stage the shared config in a temp file inside /etc/nats")
+        grep -Fq 'chown 10001:10001 "$$tmp_nats_conf"' "${repo_root}/${cf}" \
+            || viol+=("${cf}: NATS must restore shared config ownership to 10001 after writing")
+        grep -Fq 'mv "$$tmp_nats_conf" /etc/nats/nats.conf' "${repo_root}/${cf}" \
+            || viol+=("${cf}: NATS must atomically replace nats.conf after fixing ownership")
+    done
+    grep -Fq 'fn write_nats_conf_atomically(' "${repo_root}/${rs}" \
+        || viol+=("${rs}: Admin UI must keep an atomic nats.conf write helper")
+    grep -Fq 'fs::rename(&tmp_path, target)' "${repo_root}/${rs}" \
+        || viol+=("${rs}: Admin UI nats.conf writes must use temp-file plus rename")
+    grep -Fq 'render_template_atomic' "${repo_root}/${ep}" \
+        || viol+=("${ep}: DNS entrypoint must render generated configs atomically")
+    grep -Fq 'mktemp "${target_dir}/.${target_name}.tmp.XXXXXX"' "${repo_root}/${ep}" \
+        || viol+=("${ep}: DNS entrypoint must stage temp files in the target directory")
+    if grep -Fq '> /tmp/recursor.conf' "${repo_root}/${ep}" || grep -Fq '> /tmp/pdns.conf' "${repo_root}/${ep}"; then
+        viol+=("${ep}: DNS entrypoint must not render PDNS configs through /tmp")
+    fi
+    if grep -Fq "sed -i 's/^  loglevel: 3\$/  loglevel: 6/' /etc/pdns/recursor.conf" "${repo_root}/${ep}"; then
+        viol+=("${ep}: query logging must apply to the staged recursor.conf before replacement")
+    fi
+    grep -Fq 'write_generated_runtime_file "${secondary_dir}/docker-compose.yml"' "${repo_root}/${su}" \
+        || viol+=("${su}: secondary setup must atomically write generated docker-compose.yml")
+    grep -Fq 'write_env_file "${secondary_dir}/.env"' "${repo_root}/${su}" \
+        || viol+=("${su}: secondary setup must use the safe env writer for generated .env")
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0045]" "reason=\"shared config write is not atomic\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'nats-atomic-write=clean\n'
+}
+
+# What: Fail unless the Docker socket proxy stays deny-by-default.
+# Why: a broad allowlist re-exposes generic container APIs.
+# From: Issue #1683 | PR #1858 (VALIDATE_COMPOSE_NATS_SOCKETPROXY)
+_ci_check_docker_socket_proxy() {
+    local repo_root="${1:-${CI_REPO_ROOT}}"
+    local -a viol=()
+    local cf pat sp='scripts/untracked/docker-socket-proxy.sh'
+    for cf in deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml; do
+        if grep -Fq 'EXEC: "1"' "${repo_root}/${cf}"; then
+            viol+=("${cf}: Docker exec is banned from the Admin UI/watchdog proxy")
+        fi
+        if grep -Eq '^[[:space:]]*(CONTAINERS|POST): "1"' "${repo_root}/${cf}"; then
+            viol+=("${cf}: broad CONTAINERS=1/POST=1 exposes generic Docker APIs; use the allowlist")
+        fi
+        grep -Fq 'scripts/untracked/docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro' "${repo_root}/${cf}" \
+            || viol+=("${cf}: must mount the one real scripts/untracked/docker-socket-proxy.sh")
+        if grep -Eq '^x-docker-socket-proxy-command:' "${repo_root}/${cf}"; then
+            viol+=("${cf}: the dead x-docker-socket-proxy-command anchor must not be reintroduced")
+        fi
+    done
+    local -a must=(
+        'acl safe_service_restart'
+        'acl safe_dhcp_action'
+        'acl safe_probe_action'
+        'acl safe_netdata_restart'
+        'lancache-netdata/restart'
+        'acl lancache_container'
+        'lancache-dns-standard|lancache-dns-ssl'
+        'lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-nats)/restart'
+        'lancache-dhcp|lancache-dhcp-proxy)/(start|stop)'
+        'lancache-dhcp-probe/(start|stop|wait)'
+        'http-request deny if docker_container_path !lancache_container'
+        'http-request deny'
+    )
+    for pat in "${must[@]}"; do
+        grep -Fq "${pat}" "${repo_root}/${sp}" || viol+=("${sp}: missing required allowlist rule: ${pat}")
+    done
+    local -a forbid=(
+        'lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-dhcp|lancache-dhcp-proxy|lancache-dhcp-probe|lancache-nats)/(start|stop|restart|wait)'
+        '/containers/create'
+        '/containers/json'
+        '[A-Za-z0-9_.-]+/(start|stop|restart|attach)'
+    )
+    for pat in "${forbid[@]}"; do
+        if grep -Fq "${pat}" "${repo_root}/${sp}"; then
+            viol+=("${sp}: forbidden broad rule present: ${pat}")
+        fi
+    done
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0046]" "reason=\"docker socket proxy allowlist violated\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'docker-socket-proxy=clean\n'
+}
+
+# What: Fail unless quickstart .env defines every required key.
+# Why: a required-but-unset key breaks quickstart at compose time.
+# From: Issue #1683 | PR #1858 (VALIDATE_COMPOSE_NATS_SOCKETPROXY)
+_ci_check_quickstart_required_env() {
+    local repo_root="${1:-${CI_REPO_ROOT}}"
+    local -a viol=()
+    local key env="${repo_root}/deploy/quickstart/.env"
+    local compose="${repo_root}/deploy/quickstart/docker-compose.yml"
+    while IFS= read -r key; do
+        [ -n "${key}" ] || continue
+        grep -Eq "^${key}=[^[:space:]]+" "${env}" \
+            || viol+=("deploy/quickstart/.env must define non-empty ${key} (compose marks it required)")
+    done < <(
+        grep -oE '\$\{[A-Za-z0-9_]+:\?[^}]+\}' "${compose}" \
+            | sed -E 's/^\$\{([^:]+):.*/\1/' \
+            | sort -u
+    )
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0047]" "reason=\"quickstart required env not defined\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'quickstart-required-env=clean\n'
+}
+
 # What: Warn (never fail) on editing CHANGELOG.md directly.
 # Why: usually unintended; risks a merge-conflict cascade.
 # From: Issue #1683 | PR #1858
@@ -6116,6 +6235,9 @@ ci_cmd_check() {
         prebuilt-prod) _ci_check_prebuilt_prod "$@" ;;
         prod-state-wiring) _ci_check_prod_state_wiring "$@" ;;
         compose-config) _ci_check_compose_config "$@" ;;
+        nats-atomic-write) _ci_check_nats_atomic_write "$@" ;;
+        docker-socket-proxy) _ci_check_docker_socket_proxy "$@" ;;
+        quickstart-required-env) _ci_check_quickstart_required_env "$@" ;;
         logging-matrix) _ci_check_logging_matrix "$@" ;;
         trivy-action-direct-usage) _ci_check_trivy_action_direct_usage "$@" ;;
         entrypoint-lib-wiring) _ci_check_entrypoint_lib_wiring "$@" ;;

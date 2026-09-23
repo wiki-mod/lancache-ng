@@ -4331,6 +4331,150 @@ _prod_state_wiring_fixture() {
     [[ "${output}" == *"no compose_targets"* ]]
 }
 
+# What: seed a tree whose shared configs write atomically.
+# Why: shared by the nats-atomic-write checks below.
+# From: Issue #1683 | PR #1858
+_nats_atomic_fixture() {
+    local root="$1" cf
+    mkdir -p "${root}/deploy/prod" "${root}/deploy/quickstart" \
+        "${root}/services/dns" "${root}/services/ui/src/routes"
+    for cf in deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml; do
+        cat > "${root}/${cf}" <<'EOF'
+        tmp_nats_conf="$(mktemp /etc/nats/.nats.conf.XXXXXX)"
+        chown 10001:10001 "$$tmp_nats_conf"
+        mv "$$tmp_nats_conf" /etc/nats/nats.conf
+EOF
+    done
+    cat > "${root}/services/ui/src/routes/secondaries.rs" <<'EOF'
+fn write_nats_conf_atomically() {}
+fs::rename(&tmp_path, target)
+EOF
+    cat > "${root}/services/dns/entrypoint.sh" <<'EOF'
+render_template_atomic
+mktemp "${target_dir}/.${target_name}.tmp.XXXXXX"
+EOF
+    cat > "${root}/setup.sh" <<'EOF'
+write_generated_runtime_file "${secondary_dir}/docker-compose.yml"
+write_env_file "${secondary_dir}/.env"
+EOF
+}
+
+@test "check nats-atomic-write passes a fully atomic tree" {
+    # What: compose/rust/entrypoint/setup all write atomically.
+    # Why: shared config must never be torn on write.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/naw-ok"
+    _nats_atomic_fixture "${r}"
+    run bash "${CI_SH}" check nats-atomic-write "${r}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"nats-atomic-write=clean"* ]]
+}
+
+@test "check nats-atomic-write fails a non-atomic nats.conf replace" {
+    # What: compose overwrites nats.conf without temp+mv.
+    # Why: a torn config can start a broken shared stack.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/naw-bad"
+    _nats_atomic_fixture "${r}"
+    printf 'tmp_nats_conf="$(mktemp /etc/nats/.nats.conf.XXXXXX)"\n' > "${r}/deploy/prod/docker-compose.yml"
+    run bash "${CI_SH}" check nats-atomic-write "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"atomically replace nats.conf"* ]]
+}
+
+# What: seed a deny-by-default docker-socket-proxy tree.
+# Why: shared by the docker-socket-proxy checks below.
+# From: Issue #1683 | PR #1858
+_socket_proxy_fixture() {
+    local root="$1" cf
+    mkdir -p "${root}/deploy/prod" "${root}/deploy/quickstart" "${root}/scripts/untracked"
+    for cf in deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml; do
+        printf '      - scripts/untracked/docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro\n' > "${root}/${cf}"
+    done
+    cat > "${root}/scripts/untracked/docker-socket-proxy.sh" <<'EOF'
+acl safe_service_restart x
+acl safe_dhcp_action x
+acl safe_probe_action x
+acl safe_netdata_restart x
+lancache-netdata/restart
+acl lancache_container x
+lancache-dns-standard|lancache-dns-ssl
+lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-nats)/restart
+lancache-dhcp|lancache-dhcp-proxy)/(start|stop)
+lancache-dhcp-probe/(start|stop|wait)
+http-request deny if docker_container_path !lancache_container
+http-request deny
+EOF
+}
+
+@test "check docker-socket-proxy passes a deny-by-default allowlist" {
+    # What: every required allowlist rule present, no broad rule.
+    # Why: the socket proxy must stay deny-by-default.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/dsp-ok"
+    _socket_proxy_fixture "${r}"
+    run bash "${CI_SH}" check docker-socket-proxy "${r}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"docker-socket-proxy=clean"* ]]
+}
+
+@test "check docker-socket-proxy fails when Docker exec is enabled" {
+    # What: a compose re-enables the banned EXEC endpoint.
+    # Why: exec re-exposes arbitrary command execution.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/dsp-exec"
+    _socket_proxy_fixture "${r}"
+    printf '        EXEC: "1"\n' >> "${r}/deploy/prod/docker-compose.yml"
+    run bash "${CI_SH}" check docker-socket-proxy "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"exec is banned"* ]]
+}
+
+@test "check docker-socket-proxy fails a forbidden broad container rule" {
+    # What: a broad create/json rule re-enters the allowlist.
+    # Why: generic container APIs must stay denied.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/dsp-broad"
+    _socket_proxy_fixture "${r}"
+    printf '/containers/json\n' >> "${r}/scripts/untracked/docker-socket-proxy.sh"
+    run bash "${CI_SH}" check docker-socket-proxy "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"forbidden broad rule"* ]]
+}
+
+# What: seed a quickstart tree with required env keys set.
+# Why: shared by the quickstart-required-env checks below.
+# From: Issue #1683 | PR #1858
+_qs_required_env_fixture() {
+    local root="$1"
+    mkdir -p "${root}/deploy/quickstart"
+    printf 'services:\n  x:\n    environment:\n      A: ${A:?set A}\n      B: ${B:?set B}\n' > "${root}/deploy/quickstart/docker-compose.yml"
+    printf 'A=1\nB=2\n' > "${root}/deploy/quickstart/.env"
+}
+
+@test "check quickstart-required-env passes when all required keys are set" {
+    # What: every required ${VAR:?} key is non-empty in .env.
+    # Why: a required-but-unset key breaks compose at start.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/qre-ok"
+    _qs_required_env_fixture "${r}"
+    run bash "${CI_SH}" check quickstart-required-env "${r}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"quickstart-required-env=clean"* ]]
+}
+
+@test "check quickstart-required-env fails when a required key is unset" {
+    # What: a required ${VAR:?} key is missing from .env.
+    # Why: quickstart would fail at compose interpolation.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/qre-bad"
+    _qs_required_env_fixture "${r}"
+    printf 'A=1\n' > "${r}/deploy/quickstart/.env"
+    run bash "${CI_SH}" check quickstart-required-env "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"define non-empty B"* ]]
+}
+
 # What: builds a fixture doc + quickstart web_log copy.
 # Why: shared by the logging-matrix tests below.
 # From: Issue #1683 | PR #1858
