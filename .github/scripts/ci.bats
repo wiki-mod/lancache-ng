@@ -6653,3 +6653,29 @@ _write_legacy_env_fixture() {
     [ "$(runtime_env_file_for_install_dir "${dp}")" = "${dp}/.env.local" ]
     [ "$(runtime_env_file_for_install_dir /var/lib/lancache)" = "/var/lib/lancache/.env" ]
 }
+
+@test "deploy_prod_repo_input_paths snapshots repo-root runtime inputs for deploy/prod" {
+    # What: deploy/prod backup captures ../../ repo-root inputs.
+    # Why: rollback must restore the full manual prod config.
+    # From: Issue #1683 | PR #1858
+    local repo_root rr dp
+    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_update_helpers "${repo_root}"
+    rr="${BATS_TEST_TMPDIR}/checkout"
+    dp="${rr}/deploy/prod"
+    mkdir -p "${dp}" "${rr}/certs" "${rr}/config/prod" "${rr}/services/dns" \
+        "${rr}/scripts/untracked" "${rr}/scripts/lib"
+    : > "${rr}/services/dns/cdn-domains.txt"
+    : > "${rr}/scripts/untracked/docker-socket-proxy.sh"
+    : > "${rr}/scripts/lib/shared-secret-bootstrap.sh"
+    run deploy_prod_repo_input_paths "${dp}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"/certs"* ]]
+    [[ "${output}" == *"/config/prod"* ]]
+    [[ "${output}" == *"cdn-domains.txt"* ]]
+    [[ "${output}" == *"docker-socket-proxy.sh"* ]]
+    [[ "${output}" == *"shared-secret-bootstrap.sh"* ]]
+    run deploy_prod_repo_input_paths /var/lib/lancache
+    [ "${status}" -eq 0 ]
+    [ -z "${output}" ]
+}
