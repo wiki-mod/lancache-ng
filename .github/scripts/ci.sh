@@ -1081,6 +1081,15 @@ _ci_repo() {
     printf '%s' "${r,,}"
 }
 
+# What: The canonical registry host from the SOT.
+# Why: refs derive it; a missing value must fail closed.
+# From: Issue #1683
+_ci_registry() {
+    local r
+    r="$(_ci_manifest_scalar '^  registry:[[:space:]]')"
+    printf '%s' "${r:?[CI-ERROR-CORE-0005] release.registry missing from the SOT}"
+}
+
 # What: Run any command, retrying only a transient failure.
 # Why: RETRY OPERATION != REBUILD; classify before retry.
 # From: Issue #1683
@@ -1110,7 +1119,10 @@ _ci_retry() {
 # Why: One tag owner; build/publish/verify must agree.
 # From: Issue #1683
 _ci_image_tag() {
-    printf 'ghcr.io/%s/%s:sha-%s-%s' "$(_ci_repo)" "$1" "$3" "${2##*/}"
+    local registry repo
+    registry="$(_ci_registry)"
+    repo="$(_ci_repo)"
+    printf '%s/%s/%s:sha-%s-%s' "${registry}" "${repo}" "$1" "$3" "${2##*/}"
 }
 
 # What: OCI image labels from the SOT and env.
@@ -1376,7 +1388,7 @@ _ci_trivy_db_ensure_fresh() {
 # Why: A written report is a finding; only DB miss retries.
 # From: Issue #1683
 _ci_trivy_scan() {
-    local service="$1" digest="$2" ref report n=0 raw
+    local service="$1" digest="$2" ref report n=0 raw registry repo
     local max="${CI_TRIVY_MAX:-4}"
     local scanners="${CI_TRIVY_SCANNERS:-vuln,secret}"
     local ignore="${CI_TRIVY_IGNOREFILE:-.trivyignore.yaml}"
@@ -1385,7 +1397,9 @@ _ci_trivy_scan() {
     cache_dir="$(_ci_record_field "${cache_rec}" dir)"
     fresh_rec="$(_ci_trivy_db_ensure_fresh "${cache_dir}")" || return 3
     [ "$(_ci_record_field "${fresh_rec}" present)" = "true" ] && skip_db=1
-    ref="ghcr.io/$(_ci_repo)/${service}@${digest}"
+    registry="$(_ci_registry)"
+    repo="$(_ci_repo)"
+    ref="${registry}/${repo}/${service}@${digest}"
     report="$(mktemp "${TMPDIR:-/var/tmp}/ci-trivy.XXXXXX")"
     local -a targs=(trivy image --severity "HIGH,CRITICAL" --exit-code 1
         --ignore-unfixed --scanners "${scanners}" --cache-dir "${cache_dir}")
@@ -1772,10 +1786,11 @@ _ci_index_lookup() {
         "${CI_INDEX_LOOKUP_CMD}" "${service}"
         return "$?"
     fi
-    local repo sha tag idx grc=0 raw plats
+    local repo registry sha tag idx grc=0 raw plats
     repo="$(_ci_repo)"
+    registry="$(_ci_registry)"
     sha="${GITHUB_SHA:?GITHUB_SHA required}"
-    tag="ghcr.io/${repo}/${service}:sha-${sha}"
+    tag="${registry}/${repo}/${service}:sha-${sha}"
     idx="$(_ci_registry_probe "${tag}")" || grc=$?
     [ "${grc}" -eq 0 ] || return 1
     raw="$(_ci_index_raw "${tag}")" || return 1
@@ -1826,13 +1841,14 @@ _ci_reconcile_index() {
 # From: Issue #1683
 _ci_docker_assemble() {
     local service="$1"; shift
-    local repo sha target kv
+    local repo registry sha target kv
     repo="$(_ci_repo)"
+    registry="$(_ci_registry)"
     sha="${GITHUB_SHA:?GITHUB_SHA required}"
-    target="ghcr.io/${repo}/${service}:sha-${sha}"
+    target="${registry}/${repo}/${service}:sha-${sha}"
     local -a srcs=()
     for kv; do
-        srcs+=("ghcr.io/${repo}/${service}@${kv#*=}")
+        srcs+=("${registry}/${repo}/${service}@${kv#*=}")
     done
     _ci_imagetools_create "${target}" "${srcs[@]}" >/dev/null || return "$?"
     _ci_registry_digest "${target}"
@@ -1936,18 +1952,20 @@ _ci_default_promote_unlock() {
 # Why: shares the one index writer; moves, never builds.
 # From: Issue #1683
 _ci_default_channel_move() {
-    local svc="$1" channel="$2" digest="$3" repo
+    local svc="$1" channel="$2" digest="$3" repo registry
     repo="$(_ci_repo)"
-    _ci_imagetools_create "ghcr.io/${repo}/${svc}:${channel}" "ghcr.io/${repo}/${svc}@${digest}" >/dev/null
+    registry="$(_ci_registry)"
+    _ci_imagetools_create "${registry}/${repo}/${svc}:${channel}" "${registry}/${repo}/${svc}@${digest}" >/dev/null
 }
 
 # What: Default channel readback: the channel's digest.
 # Why: one digest reader; empty output means unknown.
 # From: Issue #1683
 _ci_default_channel_readback() {
-    local svc="$1" channel="$2" repo
+    local svc="$1" channel="$2" repo registry
     repo="$(_ci_repo)"
-    _ci_registry_digest "ghcr.io/${repo}/${svc}:${channel}" 2>/dev/null
+    registry="$(_ci_registry)"
+    _ci_registry_digest "${registry}/${repo}/${svc}:${channel}" 2>/dev/null
 }
 
 # What: Resolve the move backend, mock or default.
@@ -2095,9 +2113,10 @@ _ci_deletion_policy() {
 # Why: Ledger + channels + their index children (§101).
 # From: Issue #1683
 _ci_default_gc_roots() {
-    local remote repo blob rc=0 pairs="" out="" svc channel dig prc line s d raw
+    local remote repo registry blob rc=0 pairs="" out="" svc channel dig prc line s d raw
     remote="$(_ci_ledger_remote)"
     repo="$(_ci_repo)"
+    registry="$(_ci_registry)"
     blob="$(_ci_ledger_blob "${remote}")" || rc=$?
     # What: A failed ledger read refuses, never empties.
     # Why: UNKNOWN roots would delete live artifacts.
@@ -2115,7 +2134,7 @@ _ci_default_gc_roots() {
         while IFS= read -r channel; do
             [ -n "${channel}" ] || continue
             prc=0
-            dig="$(_ci_registry_probe "ghcr.io/${repo}/${svc}:${channel}")" || prc=$?
+            dig="$(_ci_registry_probe "${registry}/${repo}/${svc}:${channel}")" || prc=$?
             # What: A transient probe refuses the run.
             # Why: A flaky miss must not drop a channel.
             # From: Issue #1683
@@ -2128,7 +2147,7 @@ _ci_default_gc_roots() {
         [ -n "${d}" ] || continue
         out="${out}${d}"$'\n'
         rc=0
-        raw="$(_ci_index_raw "ghcr.io/${repo}/${s}@${d}")" || rc=$?
+        raw="$(_ci_index_raw "${registry}/${repo}/${s}@${d}")" || rc=$?
         # What: A transient child read refuses the run.
         # Why: Dropping children orphan-deletes arches.
         # From: Issue #1683

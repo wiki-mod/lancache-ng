@@ -459,6 +459,29 @@ teardown() {
     [ "${a}" != "${b}" ]
 }
 
+@test "registry derives from the SOT and drives refs" {
+    # What: A changed release.registry moves the built ref.
+    # Why: Proves the host is SOT-owned, not hardcoded inline.
+    # From: Issue #1683
+    local m="${BATS_TEST_TMPDIR}/reg.yml" host tag
+    sed 's/^  registry: ghcr.io$/  registry: example.io/' "${CI_MANIFEST_SOURCE}" > "${m}"
+    host="$(CI_MANIFEST="${m}" _ci_registry)"
+    [ "${host}" = "example.io" ]
+    tag="$(CI_MANIFEST="${m}" GITHUB_REPOSITORY=wiki-mod/lancache-ng _ci_image_tag proxy linux/amd64 abcd)"
+    [[ "${tag}" == example.io/* ]]
+}
+
+@test "registry fails closed when release.registry is absent" {
+    # What: A SOT without registry yields no empty host.
+    # Why: An empty host builds a malformed ref, silently.
+    # From: Issue #1683
+    local m="${BATS_TEST_TMPDIR}/noreg.yml"
+    grep -v '^  registry:' "${CI_MANIFEST_SOURCE}" > "${m}"
+    run bash -c "source '${CI_SH}'; CI_MANIFEST='${m}' _ci_registry 2>&1"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CORE-0005"* ]]
+}
+
 @test "resolve rejects a platform not in the target set" {
     # What: A selected unknown platform fails closed.
     # Why: Fail-closed dispatch (AG-VAL-002).
