@@ -456,7 +456,7 @@ jobs:
         run: bash scripts/tracked/cleanup-stale-buildx-builders.sh
       - name: Set up Docker Buildx for manifest inspection
         id: buildx
-        uses: &docker_setup_buildx_centraliced_versioning docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: &docker_setup_buildx_centraliced_versioning docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.3.0
       - name: Resolve compose validation image
         id: select-compose-validation-image
         env:
@@ -1924,7 +1924,7 @@ jobs:
       - name: Set up Docker Buildx
         if: steps.channel.outputs.pr-staging-available == 'true'
         id: buildx
-        uses: *docker_setup_buildx_centraliced_versioning # v4.3.0
+        uses: *docker_setup_buildx_centraliced_versioning # v4.4.1
       - name: Log in to GHCR
         if: steps.channel.outputs.pr-staging-available == 'true'
         uses: &docker_login_centraliced_versioning ./.github/actions/docker-login-action-centralized-version
@@ -3565,7 +3565,7 @@ jobs:
             steps.should-build.outputs.reuse-eligible == 'true'
           }}
         id: buildx
-        uses: *docker_setup_buildx_centraliced_versioning # v4.3.0
+        uses: *docker_setup_buildx_centraliced_versioning # v4.4.1
       - name: Log in to GHCR
         if: >-
           ${{
@@ -4771,7 +4771,7 @@ jobs:
         run: bash scripts/tracked/cleanup-stale-buildx-builders.sh
       - name: Set up Docker Buildx
         id: buildx
-        uses: *docker_setup_buildx_centraliced_versioning # v4.3.0
+        uses: *docker_setup_buildx_centraliced_versioning # v4.4.1
       - name: Log in to GHCR
         uses: *docker_login_centraliced_versioning
         with:
@@ -5205,7 +5205,7 @@ jobs:
         run: bash scripts/tracked/cleanup-stale-buildx-builders.sh
       - name: Set up Docker Buildx
         id: buildx
-        uses: *docker_setup_buildx_centraliced_versioning # v4.3.0
+        uses: *docker_setup_buildx_centraliced_versioning # v4.4.1
       - name: Log in to GHCR
         uses: *docker_login_centraliced_versioning
         with:
@@ -5458,7 +5458,7 @@ jobs:
         run: bash scripts/tracked/cleanup-stale-buildx-builders.sh
       - name: Set up Docker Buildx
         id: buildx
-        uses: *docker_setup_buildx_centraliced_versioning # v4.3.0
+        uses: *docker_setup_buildx_centraliced_versioning # v4.4.1
       - name: Log in to GHCR
         uses: *docker_login_centraliced_versioning
         with:
@@ -5729,7 +5729,7 @@ jobs:
         run: bash scripts/tracked/cleanup-stale-buildx-builders.sh
       - name: Set up Docker Buildx
         id: buildx
-        uses: *docker_setup_buildx_centraliced_versioning # v4.3.0
+        uses: *docker_setup_buildx_centraliced_versioning # v4.4.1
       - name: Log in to GHCR
         uses: *docker_login_centraliced_versioning
         with:
