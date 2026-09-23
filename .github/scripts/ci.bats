@@ -1536,6 +1536,19 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     [[ "${output}" == *"CI-ERROR-GC-0013"* ]]
 }
 
+@test "default gc roots refuses when release.registry is absent" {
+    # What: A SOT without registry refuses; never partial roots.
+    # Why: An empty host would silently drop a channel from roots.
+    # From: Issue #1683
+    GITHUB_REPOSITORY=wiki-mod/lancache-ng
+    local m="${BATS_TEST_TMPDIR}/noreg.yml"
+    grep -v '^  registry:' "${CI_MANIFEST_SOURCE}" > "${m}"
+    export CI_MANIFEST="${m}"
+    run _ci_default_gc_roots
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-CORE-0005"* ]]
+}
+
 @test "default gc roots refuses on a transient index-child read" {
     # What: A flaky child read refuses the whole run.
     # Why: Missing children would orphan-delete live arches.

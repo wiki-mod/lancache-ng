@@ -2116,7 +2116,7 @@ _ci_default_gc_roots() {
     local remote repo registry blob rc=0 pairs="" out="" svc channel dig prc line s d raw
     remote="$(_ci_ledger_remote)"
     repo="$(_ci_repo)"
-    registry="$(_ci_registry)"
+    registry="$(_ci_registry)" || return 2
     blob="$(_ci_ledger_blob "${remote}")" || rc=$?
     # What: A failed ledger read refuses, never empties.
     # Why: UNKNOWN roots would delete live artifacts.
