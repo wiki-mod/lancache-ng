@@ -4475,6 +4475,84 @@ _qs_required_env_fixture() {
     [[ "${output}" == *"define non-empty B"* ]]
 }
 
+# What: seed a dhcp-proxy tree that meets the env/PXE contract.
+# Why: shared by the dhcp-proxy-env checks below.
+# From: Issue #1683 | PR #1858
+_dhcp_proxy_env_fixture() {
+    local root="$1" k
+    mkdir -p "${root}/deploy/prod" "${root}/deploy/quickstart" \
+        "${root}/config/prod" "${root}/services/dhcp-proxy"
+    cat > "${root}/deploy/prod/docker-compose.yml" <<'EOF'
+services:
+  dhcp-proxy:
+    image: x
+    env_file:
+      - ../../config/prod/dhcp-proxy.env
+EOF
+    : > "${root}/config/prod/dhcp-proxy.env"
+    : > "${root}/deploy/quickstart/.env"
+    for k in DHCP_PROXY_INTERFACE DHCP_PROXY_ROUTER DHCP_NTP_SERVERS DHCP_PROXY_DOMAIN \
+        DHCP_PROXY_BOOT_FILENAME DHCP_PROXY_BOOT_SERVER DHCP_PROXY_CUSTOM_OPTIONS \
+        DHCP_PROXY_PXE_BOOT_SERVER DHCP_PROXY_PXE_BOOT_FILENAME_BIOS DHCP_PROXY_PXE_BOOT_FILENAME_UEFI; do
+        printf '%s=\n' "${k}" >> "${root}/config/prod/dhcp-proxy.env"
+        printf '%s=\n' "${k}" >> "${root}/deploy/quickstart/.env"
+    done
+    cat > "${root}/deploy/quickstart/docker-compose.yml" <<'EOF'
+        - DHCP_PROXY_INTERFACE=${DHCP_PROXY_INTERFACE:-}
+        - DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS:-}
+        - DHCP_PROXY_PXE_BOOT_SERVER=${DHCP_PROXY_PXE_BOOT_SERVER:-}
+        - DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=${DHCP_PROXY_PXE_BOOT_FILENAME_BIOS:-}
+        - DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=${DHCP_PROXY_PXE_BOOT_FILENAME_UEFI:-}
+EOF
+    cat > "${root}/services/dhcp-proxy/entrypoint.sh" <<'EOF'
+_dhcp_proxy_render_optional_directives() { :; }
+_dhcp_proxy_render_optional_directives /etc/dnsmasq.conf
+EOF
+    : > "${root}/services/dhcp-proxy/dnsmasq.conf.template"
+}
+
+@test "check dhcp-proxy-env passes a compliant env/PXE tree" {
+    # What: env_file used, all optional/PXE keys present + passed.
+    # Why: the dnsmasq relay/proxy surface must stay intact.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/dpe-ok"
+    _dhcp_proxy_env_fixture "${r}"
+    run bash "${CI_SH}" check dhcp-proxy-env "${r}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"dhcp-proxy-env=clean"* ]]
+}
+
+@test "check dhcp-proxy-env fails a missing optional key" {
+    # What: an optional dnsmasq key is absent from an env file.
+    # Why: the whole optional surface must be declared.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/dpe-key"
+    _dhcp_proxy_env_fixture "${r}"
+    grep -v 'DHCP_PROXY_ROUTER' "${r}/config/prod/dhcp-proxy.env" > "${r}/config/prod/dhcp-proxy.env.tmp"
+    mv "${r}/config/prod/dhcp-proxy.env.tmp" "${r}/config/prod/dhcp-proxy.env"
+    run bash "${CI_SH}" check dhcp-proxy-env "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"DHCP_PROXY_ROUTER"* ]]
+}
+
+@test "check dhcp-proxy-env fails compose environment interpolation" {
+    # What: prod dhcp-proxy uses environment instead of env_file.
+    # Why: env_file is the prod contract; loses setup-managed keys.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/dpe-env"
+    _dhcp_proxy_env_fixture "${r}"
+    cat > "${r}/deploy/prod/docker-compose.yml" <<'EOF'
+services:
+  dhcp-proxy:
+    image: x
+    environment:
+      - DHCP_SUBNET_START=${DHCP_SUBNET_START}
+EOF
+    run bash "${CI_SH}" check dhcp-proxy-env "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"dhcp-proxy"* ]]
+}
+
 # What: builds a fixture doc + quickstart web_log copy.
 # Why: shared by the logging-matrix tests below.
 # From: Issue #1683 | PR #1858

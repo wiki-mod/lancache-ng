@@ -5847,6 +5847,86 @@ _ci_check_quickstart_required_env() {
     printf 'quickstart-required-env=clean\n'
 }
 
+# What: True if a compose dhcp-proxy service uses env_file only.
+# Why: env_file is the prod contract; environment reinterpolation loses keys.
+# From: Issue #1683 | PR #1858 (VALIDATE_COMPOSE_DHCP_PROXY_ENV)
+_ci_dhcp_proxy_env_file_ok() {
+    local compose_file="$1" expected="$2"
+    awk -v compose_file="${compose_file}" -v expected_env_file="${expected}" '
+        function trim(value) {
+            sub(/^[[:space:]]+/, "", value)
+            sub(/[[:space:]]+$/, "", value)
+            return value
+        }
+        function content_indent(value, prefix) {
+            match(value, /^[[:space:]]*/)
+            prefix = substr(value, 1, RLENGTH)
+            return length(prefix)
+        }
+        function strip_inline_comment(value) {
+            sub(/[[:space:]]+#.*/, "", value)
+            return value
+        }
+        /^  dhcp-proxy:/ { in_service=1; saw_service=1; in_env_file_block=0; next }
+        in_service && /^  [[:alnum:]_-]+:/ { in_service=0; in_env_file_block=0 }
+        in_service {
+            line=strip_inline_comment($0)
+            stripped=trim(line)
+            if (in_env_file_block && stripped != "" && content_indent(line) <= env_file_indent) { in_env_file_block=0 }
+            if (in_env_file_block && stripped ~ /^-/ && index(stripped, expected_env_file) > 0) { saw_env_file=1 }
+            if (line ~ /^[[:space:]]*env_file:[[:space:]]*$/) {
+                in_env_file_block=1; env_file_indent=content_indent(line)
+            } else if (line ~ /^[[:space:]]*env_file:[[:space:]]*/ && index(line, expected_env_file) > 0) {
+                saw_env_file=1
+            }
+            if (line ~ /^[[:space:]]*environment:[[:space:]]*/) { saw_environment=1 }
+            if (stripped ~ /^-[[:space:]]*(DHCP_SUBNET_START|DHCP_DNS_PRIMARY|DHCP_DNS_SECONDARY|UPSTREAM_DHCP_IP)=\$\{/ || stripped ~ /[{,][[:space:]]*(DHCP_SUBNET_START|DHCP_DNS_PRIMARY|DHCP_DNS_SECONDARY|UPSTREAM_DHCP_IP):[[:space:]]*"\$\{/) { saw_interpolated_dhcp_key=1 }
+        }
+        END {
+            if (!saw_service) { printf "%s: dhcp-proxy service is missing\n", compose_file; exit 1 }
+            if (!saw_env_file) { printf "%s: dhcp-proxy must keep env_file %s\n", compose_file, expected_env_file; exit 1 }
+            if (saw_environment || saw_interpolated_dhcp_key) { printf "%s: dhcp-proxy must not reintroduce Compose environment interpolation; env_file is the contract\n", compose_file; exit 1 }
+        }
+    ' "${compose_file}"
+}
+
+# What: Fail unless the dhcp-proxy env/PXE surface stays intact.
+# Why: env_file contract + optional/PXE keys must not silently drop.
+# From: Issue #1683 | PR #1858 (VALIDATE_COMPOSE_DHCP_PROXY_ENV)
+_ci_check_dhcp_proxy_env() {
+    local repo_root="${1:-${CI_REPO_ROOT}}"
+    local -a viol=()
+    local ef key out qc="${repo_root}/deploy/quickstart/docker-compose.yml"
+    local -a opt=(DHCP_PROXY_INTERFACE DHCP_PROXY_ROUTER DHCP_NTP_SERVERS DHCP_PROXY_DOMAIN DHCP_PROXY_BOOT_FILENAME DHCP_PROXY_BOOT_SERVER DHCP_PROXY_CUSTOM_OPTIONS)
+    local -a pxe=(DHCP_PROXY_PXE_BOOT_SERVER DHCP_PROXY_PXE_BOOT_FILENAME_BIOS DHCP_PROXY_PXE_BOOT_FILENAME_UEFI)
+    out="$(_ci_dhcp_proxy_env_file_ok "${repo_root}/deploy/prod/docker-compose.yml" '../../config/prod/dhcp-proxy.env')" || viol+=("${out}")
+    for ef in config/prod/dhcp-proxy.env deploy/quickstart/.env; do
+        for key in "${opt[@]}" "${pxe[@]}"; do
+            grep -Eq "^${key}=" "${repo_root}/${ef}" || viol+=("${ef}: must define ${key} (empty default)")
+        done
+    done
+    grep -Fq 'DHCP_PROXY_INTERFACE=${DHCP_PROXY_INTERFACE:-}' "${qc}" \
+        || viol+=("quickstart compose must pass through DHCP_PROXY_INTERFACE")
+    grep -Fq 'DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS:-}' "${qc}" \
+        || viol+=("quickstart compose must pass through DHCP_PROXY_CUSTOM_OPTIONS")
+    for key in "${pxe[@]}"; do
+        grep -Fq "${key}=\${${key}:-}" "${qc}" \
+            || viol+=("quickstart compose must pass through ${key}")
+    done
+    grep -Fq '_dhcp_proxy_render_optional_directives()' "${repo_root}/services/dhcp-proxy/entrypoint.sh" \
+        || viol+=("dhcp-proxy entrypoint must render optional dnsmasq directives (#450)")
+    grep -Fq '_dhcp_proxy_render_optional_directives /etc/dnsmasq.conf' "${repo_root}/services/dhcp-proxy/entrypoint.sh" \
+        || viol+=("dhcp-proxy entrypoint must render optional directives before validating dnsmasq.conf")
+    if grep -Fq 'dhcp-proxy=${UPSTREAM_DHCP_IP}' "${repo_root}/services/dhcp-proxy/dnsmasq.conf.template"; then
+        viol+=("dnsmasq.conf.template must not reintroduce the RFC 5107 dhcp-proxy flag")
+    fi
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0048]" "reason=\"dhcp-proxy env/PXE contract violated\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'dhcp-proxy-env=clean\n'
+}
+
 # What: Warn (never fail) on editing CHANGELOG.md directly.
 # Why: usually unintended; risks a merge-conflict cascade.
 # From: Issue #1683 | PR #1858
@@ -6238,6 +6318,7 @@ ci_cmd_check() {
         nats-atomic-write) _ci_check_nats_atomic_write "$@" ;;
         docker-socket-proxy) _ci_check_docker_socket_proxy "$@" ;;
         quickstart-required-env) _ci_check_quickstart_required_env "$@" ;;
+        dhcp-proxy-env) _ci_check_dhcp_proxy_env "$@" ;;
         logging-matrix) _ci_check_logging_matrix "$@" ;;
         trivy-action-direct-usage) _ci_check_trivy_action_direct_usage "$@" ;;
         entrypoint-lib-wiring) _ci_check_entrypoint_lib_wiring "$@" ;;
