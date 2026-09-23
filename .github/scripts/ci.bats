@@ -4604,6 +4604,136 @@ EOF
     [[ "${output}" == *"0 VEX statements"* ]]
 }
 
+# What: Write a SOT with a netdata curl-pin policy block.
+# Why: The check reads version/threshold/until/cves from SOT.
+# From: Issue #1304 | PR #1858
+_netdata_sot() {
+    local m="${BATS_TEST_TMPDIR}/netdata-manifest.yml"
+    cat > "${m}" <<EOF
+external_versions:
+  netdata:
+    version: v2.10.4
+    curl_safe_threshold: 8.21.0
+    curl_accepted_until: 2030-12-31
+    curl_tracked_cves: [CVE-2026-12064, CVE-2026-9545]
+EOF
+    printf '%s\n' "${m}"
+}
+
+# What: Stub the bundled-packages fetch to a fixed curl tag.
+# Why: Deterministic offline coverage without GitHub.
+# From: Issue #1304 | PR #1858
+_netdata_fetch() {
+    _stub nf "printf 'PACKAGES=(\"CURL\")\nCURL_VERSION=\"curl-${1}\"\n'"
+}
+
+@test "check netdata-curl-pin warns (non-blocking) below threshold before deadline" {
+    # What: curl 8.17.0 < 8.21.0, today before ACCEPTED_UNTIL.
+    # Why: known time-boxed acceptance must warn, not block.
+    # From: Issue #1304 | PR #1858
+    CI_MANIFEST="$(_netdata_sot)" CI_NETDATA_FETCH_CMD="$(_netdata_fetch 8_17_0)" \
+        CI_NETDATA_TODAY="2026-08-01" run bash "${CI_SH}" check netdata-curl-pin
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"netdata-curl-pin=warn"* ]]
+    [[ "${output}" == *"CVE-2026-12064"* ]]
+    [[ "${output}" == *"CVE-2026-9545"* ]]
+}
+
+@test "check netdata-curl-pin fails (blocking) below threshold after deadline" {
+    # What: same vulnerable pin, today past ACCEPTED_UNTIL.
+    # Why: the grace period escalates to a hard failure.
+    # From: Issue #1304 | PR #1858
+    CI_MANIFEST="$(_netdata_sot)" CI_NETDATA_FETCH_CMD="$(_netdata_fetch 8_17_0)" \
+        CI_NETDATA_TODAY="2031-01-01" run bash "${CI_SH}" check netdata-curl-pin
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"grace period"* ]]
+    [[ "${output}" == *"passed"* ]]
+    [[ "${output}" == *"CVE-2026-12064"* ]]
+}
+
+@test "check netdata-curl-pin warns exactly on the deadline (inclusive)" {
+    # What: today equals ACCEPTED_UNTIL exactly.
+    # Why: the deadline day itself is still non-blocking.
+    # From: Issue #1304 | PR #1858
+    CI_MANIFEST="$(_netdata_sot)" CI_NETDATA_FETCH_CMD="$(_netdata_fetch 8_17_0)" \
+        CI_NETDATA_TODAY="2030-12-31" run bash "${CI_SH}" check netdata-curl-pin
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"netdata-curl-pin=warn"* ]]
+}
+
+@test "check netdata-curl-pin passes clean exactly at threshold" {
+    # What: curl 8.21.0 == threshold, any date.
+    # Why: at or above the fixed version is not affected.
+    # From: Issue #1304 | PR #1858
+    CI_MANIFEST="$(_netdata_sot)" CI_NETDATA_FETCH_CMD="$(_netdata_fetch 8_21_0)" \
+        CI_NETDATA_TODAY="2027-01-01" run bash "${CI_SH}" check netdata-curl-pin
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"netdata-curl-pin=clean"* ]]
+    [[ "${output}" != *"warn"* ]]
+}
+
+@test "check netdata-curl-pin passes clean well above threshold, differing segments" {
+    # What: curl 9.0 vs 8.21.0 (fewer segments) compares right.
+    # Why: sort -V must order differing segment counts correctly.
+    # From: Issue #1304 | PR #1858
+    CI_MANIFEST="$(_netdata_sot)" CI_NETDATA_FETCH_CMD="$(_netdata_fetch 9_0)" \
+        run bash "${CI_SH}" check netdata-curl-pin
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"netdata-curl-pin=clean"* ]]
+}
+
+@test "check netdata-curl-pin fails closed on unparseable fetch content" {
+    # What: fetched content has no CURL_VERSION line.
+    # Why: a broken parse must fail, never pass silently.
+    # From: Issue #1304 | PR #1858
+    CI_MANIFEST="$(_netdata_sot)" CI_NETDATA_FETCH_CMD="$(_stub nf 'printf "no curl line here\n"')" \
+        run bash "${CI_SH}" check netdata-curl-pin
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"no parseable CURL_VERSION"* ]]
+}
+
+@test "check netdata-curl-pin returns 2 when SOT netdata policy is missing" {
+    # What: manifest lacks external_versions.netdata fields.
+    # Why: a missing policy is a config error, not clean.
+    # From: Issue #1304 | PR #1858
+    local m="${BATS_TEST_TMPDIR}/empty-manifest.yml"
+    printf 'external_versions:\n  dhclient:\n    version: x\n' > "${m}"
+    CI_MANIFEST="${m}" run bash "${CI_SH}" check netdata-curl-pin
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"missing version/curl_safe_threshold"* ]]
+}
+
+@test "check netdata-curl-pin skips (non-blocking) on transient network failure" {
+    # What: fetch exits 6 (resolve/connect), not a 404.
+    # Why: transient infra must not block merges (GOAL section 4).
+    # From: Issue #1304 | PR #1858
+    CI_MANIFEST="$(_netdata_sot)" CI_NETDATA_FETCH_CMD="$(_stub nf 'exit 6')" \
+        run bash "${CI_SH}" check netdata-curl-pin
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"netdata-curl-pin=skip"* ]]
+    [[ "${output}" == *"reason=network"* ]]
+}
+
+@test "check netdata-curl-pin fails on a real upstream 404 (curl exit 22)" {
+    # What: exit 22 means the netdata tag is missing upstream.
+    # Why: a wrong pinned version is a real, blocking config error.
+    # From: Issue #1304 | PR #1858
+    CI_MANIFEST="$(_netdata_sot)" CI_NETDATA_FETCH_CMD="$(_stub nf 'exit 22')" \
+        run bash "${CI_SH}" check netdata-curl-pin
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"missing upstream"* ]]
+}
+
+@test "check netdata-curl-pin runs against the real SOT netdata version" {
+    # What: default SOT + a still-affected curl tag warns.
+    # Why: proves the real external_versions.netdata pin parses.
+    # From: Issue #1304 | PR #1858
+    CI_NETDATA_FETCH_CMD="$(_netdata_fetch 8_20_0)" CI_NETDATA_TODAY="2026-08-01" \
+        run bash "${CI_SH}" check netdata-curl-pin
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"netdata-curl-pin=warn"* ]]
+}
+
 # What: seed a setup.sh/dhcp tree meeting the keys+Kea contract.
 # Why: shared by the setup-keys-kea checks below.
 # From: Issue #1683 | PR #1858

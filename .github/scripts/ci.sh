@@ -5993,6 +5993,90 @@ _ci_check_vex_drift() {
     printf 'vex-drift=clean statements=%s\n' "${statement_count}"
 }
 
+# What: True if dotted version arg1 is >= arg2.
+# Why: sort -V orders differing segment counts correctly.
+# From: Issue #1304 | PR #1858
+_ci_version_ge() {
+    [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ]
+}
+
+# What: Fetch netdata's bundled-packages.version with retry.
+# Why: exit 22 is a real 404; other codes are transient infra.
+# From: Issue #1304 | PR #1858
+_ci_netdata_fetch_bundled() {
+    local netdata_version="$1"
+    local url="https://raw.githubusercontent.com/netdata/netdata/${netdata_version}/packaging/makeself/bundled-packages.version"
+    local attempt status=1
+    for attempt in 1 2 3; do
+        if curl -fsSL "${url}"; then
+            return 0
+        else
+            status=$?
+        fi
+        [ "${status}" -eq 22 ] && return 22
+        sleep $((attempt * 2))
+    done
+    return "${status}"
+}
+
+# What: Extract the vendored curl version from fetched content.
+# Why: netdata's underscore git-tag is the canonical curl pin.
+# From: Issue #1304 | PR #1858
+_ci_netdata_curl_version() {
+    local content="$1" line raw
+    line="$(grep -E '^CURL_VERSION=' <<<"${content}" || true)"
+    raw="$(head -1 <<<"${line}" | sed -E 's/^CURL_VERSION="?curl-([0-9_]+)"?.*/\1/')"
+    [ -n "${raw}" ] || return 1
+    printf '%s\n' "${raw}" | tr '_' '.'
+}
+
+# What: Fail if netdata's vendored curl is below the CVE-safe pin.
+# Why: Trivy's os-pkg scanner can't see the static-linked curl.
+# From: Issue #1304 | PR #1858 (absorbs check-netdata-curl-pin.sh)
+_ci_check_netdata_curl_pin() {
+    local version threshold accepted_until cves today
+    version="$(_ci_block_entry_field external_versions netdata version)"
+    threshold="$(_ci_block_entry_field external_versions netdata curl_safe_threshold)"
+    accepted_until="$(_ci_block_entry_field external_versions netdata curl_accepted_until)"
+    if [ -z "${version}" ] || [ -z "${threshold}" ] || [ -z "${accepted_until}" ]; then
+        ci_error "[CI-ERROR-CHECK-0051]" "reason=\"SOT external_versions.netdata missing version/curl_safe_threshold/curl_accepted_until\"" "manifest=${CI_MANIFEST}"
+        return 2
+    fi
+    local content status=0
+    if [ -n "${CI_NETDATA_FETCH_CMD:-}" ]; then
+        if content="$("${CI_NETDATA_FETCH_CMD}" "${version}")"; then status=0; else status=$?; fi
+    else
+        if content="$(_ci_netdata_fetch_bundled "${version}")"; then status=0; else status=$?; fi
+    fi
+    if [ "${status}" -eq 22 ]; then
+        ci_error "[CI-ERROR-CHECK-0051]" "reason=\"netdata ${version} tag missing upstream (HTTP 404)\"" "curl exit 22"
+        return 1
+    fi
+    if [ "${status}" -ne 0 ]; then
+        ci_log "[CI-WARN-CHECK-0051]" "reason=\"transient network failure fetching netdata bundled-packages (curl exit ${status}); skipping, not blocking\""
+        printf 'netdata-curl-pin=skip reason=network status=%s\n' "${status}"
+        return 0
+    fi
+    local curl_version
+    curl_version="$(_ci_netdata_curl_version "${content}")" || {
+        ci_error "[CI-ERROR-CHECK-0051]" "reason=\"no parseable CURL_VERSION line in netdata bundled-packages.version\"" "netdata=${version}"
+        return 1
+    }
+    if _ci_version_ge "${curl_version}" "${threshold}"; then
+        printf 'netdata-curl-pin=clean curl=%s threshold=%s\n' "${curl_version}" "${threshold}"
+        return 0
+    fi
+    cves="$(_ci_block_entry_list external_versions netdata curl_tracked_cves | tr '\n' ' ')"
+    today="${CI_NETDATA_TODAY:-$(date -u +%F)}"
+    if [[ "${today}" > "${accepted_until}" ]]; then
+        ci_error "[CI-ERROR-CHECK-0051]" "reason=\"netdata ${version} vendors curl ${curl_version} < ${threshold}, grace period ${accepted_until} passed (today ${today})\"" "tracked_cves: ${cves}"
+        return 1
+    fi
+    ci_log "[CI-WARN-CHECK-0051]" "reason=\"netdata ${version} vendors curl ${curl_version} < ${threshold}, time-boxed until ${accepted_until} (today ${today}); tracked_cves: ${cves}\""
+    printf 'netdata-curl-pin=warn curl=%s threshold=%s until=%s\n' "${curl_version}" "${threshold}" "${accepted_until}"
+    return 0
+}
+
 # What: Warn (never fail) on editing CHANGELOG.md directly.
 # Why: usually unintended; risks a merge-conflict cascade.
 # From: Issue #1683 | PR #1858
@@ -6387,6 +6471,7 @@ ci_cmd_check() {
         dhcp-proxy-env) _ci_check_dhcp_proxy_env "$@" ;;
         setup-keys-kea) _ci_check_setup_keys_kea "$@" ;;
         vex-drift) _ci_check_vex_drift "$@" ;;
+        netdata-curl-pin) _ci_check_netdata_curl_pin "$@" ;;
         logging-matrix) _ci_check_logging_matrix "$@" ;;
         trivy-action-direct-usage) _ci_check_trivy_action_direct_usage "$@" ;;
         entrypoint-lib-wiring) _ci_check_entrypoint_lib_wiring "$@" ;;

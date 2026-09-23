@@ -189,6 +189,12 @@ external_versions:
     version: v2.11.0
     sha256_x86_64: b42d9937807f28812502a967906d370cff9ab443453813656b99ff6a9b3c5649
     sha256_aarch64: 8cd056d64078c109409c08e30d55324c82e3855f9d8e4b304cacc7c612610e09
+    # What: Vendored static curl CVE-safe pin policy.
+    # Why: Trivy os-pkg scanner can't see static-linked curl.
+    # From: Issue #1304 | PR #1352
+    curl_safe_threshold: 8.21.0
+    curl_accepted_until: 2030-12-31
+    curl_tracked_cves: [CVE-2026-12064, CVE-2026-8286, CVE-2026-8927, CVE-2026-8932, CVE-2026-9079, CVE-2026-9080, CVE-2026-9545]
   # What: ISC dhclient reused from Alpine v3.20 pkg.
   # Why: Alpine 3.21+ dropped it; musl build, both arches.
   # From: Issue #1683

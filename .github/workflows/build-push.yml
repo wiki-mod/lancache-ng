@@ -1377,7 +1377,7 @@ jobs:
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             timeout --kill-after=30 --signal=KILL 300 \
-            bash scripts/untracked/check-netdata-curl-pin.sh
+            bash .github/scripts/ci.sh check netdata-curl-pin
       - name: Check config-writer idempotence test coverage (#640)
         run: |
           set -euo pipefail
