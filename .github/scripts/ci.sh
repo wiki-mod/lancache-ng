@@ -5464,7 +5464,7 @@ _ci_check_dependabot_docker_base_consistency() {
 # From: Issue #1683 | PR #1858
 _ci_idempotence_writer_evidence() {
     printf '%s\n' \
-        "setup.sh|tests/bats/setup_update_idempotence.bats" \
+        "setup.sh|.github/scripts/ci.bats|migrate_env_for_update" \
         "services/dns/entrypoint.sh|tests/bats/dns_config_snapshot_idempotence.bats" \
         "services/watchdog/watchdog.sh|tests/bats/watchdog_idempotence.bats" \
         "services/proxy/entrypoint.sh|tests/bats/proxy_known_good_snapshot.bats" \

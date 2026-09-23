@@ -3942,8 +3942,9 @@ _idempotence_fixture() {
         "${root}/services/ui/src/routes" "${root}/services/proxy" "${root}/services/dhcp-proxy" \
         "${root}/services/dns/nats-subscriber/src" "${root}/deploy/prod" "${root}/deploy/quickstart"
     printf '#!/usr/bin/env bash\n' > "${root}/setup.sh"
-    cat > "${root}/tests/bats/setup_update_idempotence.bats" <<EOF
-${at_test} "migrate_env_for_update repeats to the same result" {
+    mkdir -p "${root}/.github/scripts"
+    cat > "${root}/.github/scripts/ci.bats" <<EOF
+${at_test} "migrate_env_for_update converges a legacy .env and is stable on rerun" {
     true
 }
 EOF
@@ -4096,6 +4097,71 @@ EOF
     run bash "${CI_SH}" check idempotence-test-coverage "${r}"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"secondaries.rs"* ]]
+}
+
+@test "check idempotence-test-coverage rejects an active bats test with no marker" {
+    # What: an active @test whose name lacks the marker.
+    # Why: distinct path from a commented-out test line.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/idem-nomarker" at_test='@test'
+    _idempotence_fixture "${r}"
+    cat > "${r}/tests/bats/dns_config_snapshot_idempotence.bats" <<EOF
+${at_test} "rollback validates a config once" {
+    true
+}
+EOF
+    run bash "${CI_SH}" check idempotence-test-coverage "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"no matching"* ]]
+}
+
+@test "check idempotence-test-coverage reports every missing pair, not just the first" {
+    # What: two writers lose evidence in a single run.
+    # Why: proves all violations surface, not only one.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/idem-multi"
+    _idempotence_fixture "${r}"
+    rm "${r}/tests/bats/watchdog_idempotence.bats"
+    rm "${r}/tests/bats/dns_config_snapshot_idempotence.bats"
+    run bash "${CI_SH}" check idempotence-test-coverage "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"watchdog.sh"* ]]
+    [[ "${output}" == *"dns/entrypoint.sh"* ]]
+}
+
+@test "check idempotence-test-coverage rejects an #[ignore = \"reason\"]d Rust test" {
+    # What: an #[ignore] with a reason string, not bare.
+    # Why: the prefix match must catch this common form.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/idem-ignorereason"
+    _idempotence_fixture "${r}"
+    cat > "${r}/services/ui/src/netdata_alarms.rs" <<'EOF'
+#[test]
+#[ignore = "flaky under CI load"]
+fn append_is_idempotent_for_the_same_unique_id() {
+    assert!(true);
+}
+EOF
+    run bash "${CI_SH}" check idempotence-test-coverage "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"netdata_alarms.rs"* ]]
+}
+
+@test "check idempotence-test-coverage rejects a commented-out Rust test block" {
+    # What: a //-commented #[test]/fn pair is dead code.
+    # Why: distinct path from the #[ignore] disqualifier.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/idem-rustcomment"
+    _idempotence_fixture "${r}"
+    cat > "${r}/services/ui/src/netdata_alarms.rs" <<'EOF'
+// #[test]
+// fn append_is_idempotent_for_the_same_unique_id() {
+//     assert!(true);
+// }
+EOF
+    run bash "${CI_SH}" check idempotence-test-coverage "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"netdata_alarms.rs"* ]]
 }
 
 # What: builds a fixture doc + quickstart web_log copy.
@@ -6232,3 +6298,233 @@ _version_fixture_repo() {
 # =========================================================
 # HISTORICAL REGRESSIONS
 # =========================================================
+
+# What: Load setup.sh's real update-migration functions.
+# Why: Test true migrate_env_for_update without sourcing setup.sh.
+# From: Issue #1683 | PR #1546
+_load_setup_update_helpers() {
+    local repo_root="$1"
+    local helper_file="${BATS_TEST_TMPDIR}/setup-update-helpers.sh"
+    {
+        printf '%s\n' 'die() { printf "%s\n" "$*" >&2; return 1; }'
+        printf '%s\n' 'print_ok() { :; }'
+        printf '%s\n' 'print_step() { :; }'
+        printf '%s\n' 'print_warn() { :; }'
+        printf '%s\n' 'DEFAULT_UI_SESSION_TTL_SECONDS=86400'
+        printf '%s\n' 'MAX_UI_SESSION_TTL_SECONDS=31536000'
+        printf 'SCRIPT_DIR=%q\n' "${repo_root}"
+        awk '
+            /^is_valid_ipv4\(\)/ { capture = 1 }
+            /^# Backup\/restore may run on minimal hosts\./ { capture = 0 }
+            capture { print }
+        ' "${repo_root}/setup.sh"
+    } > "${helper_file}"
+    # shellcheck source=/dev/null
+    source "${helper_file}"
+}
+
+# What: A fully-converged install .env, every key backfilled.
+# Why: A missing key would fail the no-op test's first run.
+# From: Issue #1683 | PR #1546
+_write_converged_env_fixture() {
+    printf '%s\n' \
+        'IP_STANDARD=192.0.2.10' 'IP_SSL=192.0.2.11' 'SSL_ENABLED=1' \
+        'DNS_XFR_NOTIFY_TARGETS=dns-ssl:5300' 'UI_SESSION_TTL_SECONDS=86400' \
+        'LANCACHE_STATE_DIR=/opt/lancache-ng/state' 'CACHE_DIR=/opt/lancache-ng/cache' \
+        'CACHE_MAX_SIZE=50g' 'CACHE_MAX_GB=50' 'CACHE_MEM_MB=512' 'CACHE_SLICE_SIZE=8m' \
+        'CACHE_VALID_HIT=365d' 'CACHE_VALID_ANY=1m' 'CACHE_INACTIVE=365d' \
+        'PROXY_ALLOWED_CLIENT_CIDRS=' 'PROXY_SECURITY_MODE=lazy' \
+        'NGINX_UPSTREAM_RESOLVER=8.8.8.8 8.8.4.4' 'LANCACHE_IMAGE_REGISTRY=ghcr.io' \
+        'LANCACHE_IMAGE_PREFIX=wiki-mod/lancache-ng' 'LANCACHE_IMAGE_CHANNEL=pinned' \
+        'LANCACHE_IMAGE_TAG=v0.2.0' 'UI_BIND_IP=192.0.2.10' 'DHCP_ENABLED=0' \
+        'DHCP_MODE=disabled' 'DHCP_SUBNET=' 'DHCP_GATEWAY=' 'DHCP_RANGE_START=' \
+        'DHCP_RANGE_END=' 'DHCP_SUBNET_START=' 'DHCP_DNS_PRIMARY=192.0.2.10' \
+        'DHCP_DNS_SECONDARY=192.0.2.11' 'UPSTREAM_DHCP_IP=' 'DHCP_RELAY_LOCAL_ADDR=' \
+        'DHCP_PROXY_INTERFACE=' 'DHCP_PROXY_ROUTER=' 'DHCP_NTP_SERVERS=' \
+        'DHCP_PROXY_DOMAIN=' 'DHCP_PROXY_BOOT_FILENAME=' 'DHCP_PROXY_BOOT_SERVER=' \
+        'DHCP_PROXY_CUSTOM_OPTIONS=' 'DHCP_PROXY_PXE_BOOT_SERVER=' \
+        'DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=' 'DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=' \
+        'KEA_CTRL_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+        'DDNS_TSIG_KEY=YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYQ==' \
+        'PDNS_API_KEY=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
+        'NETDATA_ALARM_TOKEN=jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj' \
+        'NATS_UI_USER=lancache-ui' \
+        'NATS_UI_PASSWORD=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' \
+        'NATS_DNS_WRITER_USER=lancache-dns-writer' \
+        'NATS_DNS_WRITER_PASSWORD=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd' \
+        'NATS_DNS_REPLICA_USER=lancache-dns-replica' \
+        'NATS_DNS_REPLICA_PASSWORD=gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg' \
+        'NATS_CALLOUT_USER=lancache-nats-callout' \
+        'NATS_CALLOUT_PASSWORD=hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh' \
+        'NATS_SYS_USER=lancache-nats-sys' \
+        'NATS_SYS_PASSWORD=iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii' \
+        'SECONDARY_REGISTRATION_TOKEN=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff' \
+        'COMPOSE_PROFILES=ssl,logging' 'UI_AUTH_USER=admin' \
+        'UI_AUTH_PASSWORD=RealAdminPassword123' 'ALLOW_INSECURE_UI=false' \
+        'AUTO_UPDATE_ENABLED=0' 'NTP_ENABLED=0' 'LOGGING_ENABLED=1' \
+        > "$1"
+}
+
+# What: An old install .env: split cache keys, strict mode.
+# Why: Exercises the migration/converge path on first run.
+# From: Issue #1683 | PR #1546
+_write_legacy_env_fixture() {
+    local env_file="$1" ui_auth_user="${2:-}"
+    printf '%s\n' \
+        'IP_STANDARD=192.0.2.20' 'IP_SSL=' 'CACHE_DIR_STANDARD=/srv/lancache/cache' \
+        'CACHE_DIR_SSL=/srv/lancache/cache' 'PROXY_SECURITY_MODE=strict' \
+        'PROXY_ALLOWED_CLIENT_CIDRS=' 'LANCACHE_IMAGE_TAG=v0.2.0' \
+        "UI_AUTH_USER=${ui_auth_user}" 'UI_AUTH_PASSWORD=' \
+        > "$env_file"
+}
+
+@test "migrate_env_for_update is a no-op on an already-converged .env" {
+    # What: A converged .env stays byte-identical over two runs.
+    # Why: AG-OP-006 idempotence; no rewrite on repeat update.
+    # From: Issue #1683 | PR #1546
+    local repo_root env_file oh h1 h2
+    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    env_file="${BATS_TEST_TMPDIR}/.env"
+    _load_setup_update_helpers "${repo_root}"
+    _write_converged_env_fixture "${env_file}"
+    oh="$(sha256sum "${env_file}" | awk '{print $1}')"
+    run migrate_env_for_update "$(dirname "${env_file}")"; [ "${status}" -eq 0 ]
+    h1="$(sha256sum "${env_file}" | awk '{print $1}')"; [ "${oh}" = "${h1}" ]
+    run migrate_env_for_update "$(dirname "${env_file}")"; [ "${status}" -eq 0 ]
+    h2="$(sha256sum "${env_file}" | awk '{print $1}')"; [ "${h1}" = "${h2}" ]
+}
+
+@test "migrate_env_for_update runs cleanly under set -u" {
+    # What: A quickstart install must not trip nounset.
+    # Why: Unset prodsync locals must stay guarded (AG-VAL-002).
+    # From: Issue #1683 | PR #1546
+    local repo_root env_file
+    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    env_file="${BATS_TEST_TMPDIR}/.env"
+    _load_setup_update_helpers "${repo_root}"
+    set -u
+    _write_converged_env_fixture "${env_file}"
+    run migrate_env_for_update "$(dirname "${env_file}")"; [ "${status}" -eq 0 ]
+}
+
+@test "migrate_env_for_update converges a legacy .env and is stable on rerun" {
+    # What: Legacy keys migrate once, second run changes nothing.
+    # Why: AG-OP-007 convergence; secrets must not rotate.
+    # From: Issue #1683 | PR #1546
+    local repo_root env_file a1 a2 s1 s2
+    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    env_file="${BATS_TEST_TMPDIR}/.env"
+    _load_setup_update_helpers "${repo_root}"
+    _write_legacy_env_fixture "${env_file}"
+    run migrate_env_for_update "$(dirname "${env_file}")"; [ "${status}" -eq 0 ]
+    run ! grep -q '^CACHE_DIR_STANDARD=' "${env_file}"
+    run ! grep -q '^CACHE_DIR_SSL=' "${env_file}"
+    grep -qx 'CACHE_DIR=/srv/lancache/cache' "${env_file}"
+    grep -qx 'PROXY_SECURITY_MODE=lazy' "${env_file}"
+    a1="$(cat "${env_file}")"
+    s1="$(grep -E '^(KEA_CTRL_TOKEN|DDNS_TSIG_KEY|PDNS_API_KEY|NETDATA_ALARM_TOKEN|NATS_UI_PASSWORD|NATS_DNS_WRITER_PASSWORD|NATS_DNS_REPLICA_PASSWORD|NATS_CALLOUT_PASSWORD|NATS_SYS_PASSWORD|SECONDARY_REGISTRATION_TOKEN)=' "${env_file}" | sort)"
+    run migrate_env_for_update "$(dirname "${env_file}")"; [ "${status}" -eq 0 ]
+    a2="$(cat "${env_file}")"
+    s2="$(grep -E '^(KEA_CTRL_TOKEN|DDNS_TSIG_KEY|PDNS_API_KEY|NETDATA_ALARM_TOKEN|NATS_UI_PASSWORD|NATS_DNS_WRITER_PASSWORD|NATS_DNS_REPLICA_PASSWORD|NATS_CALLOUT_PASSWORD|NATS_SYS_PASSWORD|SECONDARY_REGISTRATION_TOKEN)=' "${env_file}" | sort)"
+    [ "${a1}" = "${a2}" ]; [ "${s1}" = "${s2}" ]
+}
+
+@test "migrate_env_for_update generates a UI password once, never rotates it" {
+    # What: The conditional UI-password branch runs once only.
+    # Why: AG-OP-006 stable secrets on repeat execution.
+    # From: Issue #1683 | PR #1546
+    local repo_root env_file gp p2
+    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    env_file="${BATS_TEST_TMPDIR}/.env"
+    _load_setup_update_helpers "${repo_root}"
+    _write_legacy_env_fixture "${env_file}" admin
+    run migrate_env_for_update "$(dirname "${env_file}")"; [ "${status}" -eq 0 ]
+    grep -qx 'UI_AUTH_USER=admin' "${env_file}"
+    gp="$(grep '^UI_AUTH_PASSWORD=' "${env_file}")"
+    [ -n "${gp}" ]; [ "${gp}" != "UI_AUTH_PASSWORD=" ]
+    run migrate_env_for_update "$(dirname "${env_file}")"; [ "${status}" -eq 0 ]
+    p2="$(grep '^UI_AUTH_PASSWORD=' "${env_file}")"; [ "${gp}" = "${p2}" ]
+}
+
+@test "migrate_env_for_update leaves no duplicate key assignments" {
+    # What: Two runs must not stack duplicate key lines.
+    # Why: set_env_key collapses duplicates (AG-OP-006).
+    # From: Issue #1683 | PR #1546
+    local repo_root env_file dup
+    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    env_file="${BATS_TEST_TMPDIR}/.env"
+    _load_setup_update_helpers "${repo_root}"
+    _write_legacy_env_fixture "${env_file}"
+    run migrate_env_for_update "$(dirname "${env_file}")"; [ "${status}" -eq 0 ]
+    run migrate_env_for_update "$(dirname "${env_file}")"; [ "${status}" -eq 0 ]
+    dup="$(awk -F= '{print $1}' "${env_file}" | sort | uniq -d)"; [ -z "${dup}" ]
+}
+
+@test "migrate_env_for_update preserves a config/prod PXE value across two runs" {
+    # What: A prod install backfills from config/prod, not .env.
+    # Why: AG-OP-009 preservation; the confirmed #1546 bug.
+    # From: Issue #1683 | PR #1546
+    local repo_root env_file pd cd cpe
+    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    pd="${BATS_TEST_TMPDIR}/scratch/deploy/prod"; cd="${BATS_TEST_TMPDIR}/scratch/config/prod"
+    mkdir -p "${pd}" "${cd}"; cpe="${cd}/dhcp-proxy.env"; env_file="${pd}/.env"
+    _load_setup_update_helpers "${repo_root}"
+    _write_legacy_env_fixture "${env_file}"
+    printf '%s\n' 'DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9' 'DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=real-pxelinux.0' > "${cpe}"
+    run migrate_env_for_update "${pd}"; [ "${status}" -eq 0 ]
+    grep -qx 'DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9' "${env_file}"
+    grep -qx 'DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=real-pxelinux.0' "${env_file}"
+    run migrate_env_for_update "${pd}"; [ "${status}" -eq 0 ]
+    run get_env_var DHCP_PROXY_PXE_BOOT_SERVER "${cpe}"; [ "${output}" = "10.9.9.9" ]
+    run get_env_var DHCP_PROXY_PXE_BOOT_FILENAME_BIOS "${cpe}"; [ "${output}" = "real-pxelinux.0" ]
+}
+
+@test "migrate_env_for_update preserves a direct config/prod edit after migration" {
+    # What: A later config/prod edit wins over a stale .env dup.
+    # Why: AG-OP-009 preserve existing operator values.
+    # From: Issue #1683 | PR #1546
+    local repo_root env_file pd cd cpe
+    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    pd="${BATS_TEST_TMPDIR}/scratch/deploy/prod"; cd="${BATS_TEST_TMPDIR}/scratch/config/prod"
+    mkdir -p "${pd}" "${cd}"; cpe="${cd}/dhcp-proxy.env"; env_file="${pd}/.env"
+    _load_setup_update_helpers "${repo_root}"
+    _write_legacy_env_fixture "${env_file}"
+    printf '%s\n' 'DHCP_PROXY_PXE_BOOT_SERVER=10.0.0.1' 'DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=pxelinux.0' > "${cpe}"
+    run migrate_env_for_update "${pd}"; [ "${status}" -eq 0 ]
+    grep -qx 'DHCP_PROXY_PXE_BOOT_SERVER=10.0.0.1' "${env_file}"
+    set_env_key DHCP_PROXY_PXE_BOOT_SERVER "10.0.0.2" "${cpe}"
+    run migrate_env_for_update "${pd}"; [ "${status}" -eq 0 ]
+    run get_env_var DHCP_PROXY_PXE_BOOT_SERVER "${cpe}"; [ "${output}" = "10.0.0.2" ]
+}
+
+@test "migrate_env_for_update tolerates an incomplete hand-edited PXE pair" {
+    # What: A server value with no filename must not abort update.
+    # Why: Hand-edited config/prod is never guaranteed complete.
+    # From: Issue #1683 | PR #1546
+    local repo_root env_file pd cd cpe
+    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    pd="${BATS_TEST_TMPDIR}/scratch/deploy/prod"; cd="${BATS_TEST_TMPDIR}/scratch/config/prod"
+    mkdir -p "${pd}" "${cd}"; cpe="${cd}/dhcp-proxy.env"; env_file="${pd}/.env"
+    _load_setup_update_helpers "${repo_root}"
+    _write_legacy_env_fixture "${env_file}"
+    printf '%s\n' 'DHCP_MODE=dnsmasq-proxy' 'DHCP_SUBNET_START=192.0.2.0' 'DHCP_DNS_PRIMARY=192.0.2.20' 'UPSTREAM_DHCP_IP=192.0.2.1' >> "${env_file}"
+    printf '%s\n' 'DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9' > "${cpe}"
+    run migrate_env_for_update "${pd}"; [ "${status}" -eq 0 ]
+    run get_env_var DHCP_PROXY_PXE_BOOT_SERVER "${cpe}"; [ "${output}" = "10.9.9.9" ]
+}
+
+@test "migrate_env_for_update tolerates an invalid hand-edited value" {
+    # What: A malformed value must not abort a working update.
+    # Why: Hand-edited files need not satisfy stricter validation.
+    # From: Issue #1683 | PR #1546
+    local repo_root env_file pd cd cpe
+    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    pd="${BATS_TEST_TMPDIR}/scratch/deploy/prod"; cd="${BATS_TEST_TMPDIR}/scratch/config/prod"
+    mkdir -p "${pd}" "${cd}"; cpe="${cd}/dhcp-proxy.env"; env_file="${pd}/.env"
+    _load_setup_update_helpers "${repo_root}"
+    _write_legacy_env_fixture "${env_file}"
+    printf '%s\n' 'DHCP_MODE=dnsmasq-proxy' 'DHCP_SUBNET_START=192.0.2.0' 'DHCP_DNS_PRIMARY=192.0.2.20' 'UPSTREAM_DHCP_IP=192.0.2.1' >> "${env_file}"
+    printf '%s\n' 'DHCP_PROXY_ROUTER=not-an-ip-address' > "${cpe}"
+    run migrate_env_for_update "${pd}"; [ "${status}" -eq 0 ]
+    run get_env_var DHCP_PROXY_ROUTER "${cpe}"; [ "${output}" = "not-an-ip-address" ]
+}

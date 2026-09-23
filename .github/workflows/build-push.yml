@@ -1709,7 +1709,7 @@ jobs:
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             timeout --kill-after=30 --signal=KILL 300 \
-            bash scripts/tracked/check-idempotence-test-coverage.sh
+            bash .github/scripts/ci.sh check idempotence-test-coverage
       - name: Check bats path-filter coverage (build-tools.yml vs. real bats dependencies, issue #879)
         run: |
           set -euo pipefail
