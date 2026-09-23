@@ -5965,6 +5965,34 @@ _ci_check_setup_keys_kea() {
     printf 'setup-keys-kea=clean\n'
 }
 
+# What: Fail unless generate-vex.sh emits valid, non-empty OpenVEX.
+# Why: catch VEX generator bugs before post-merge discovery.
+# From: Issue #1683 | PR #1858 (absorbs check-vex-drift.sh)
+_ci_check_vex_drift() {
+    local repo_root="${1:-${CI_REPO_ROOT}}"
+    local trivyignore="${repo_root}/.trivyignore.yaml"
+    local gen="${repo_root}/scripts/untracked/generate-vex.sh"
+    local out entry_count statement_count
+    [ -f "${trivyignore}" ] || { ci_error "[CI-ERROR-CHECK-0050]" "path=\"${trivyignore}\" reason=\".trivyignore.yaml not found\"" "${trivyignore}"; return 2; }
+    if [ -n "${CI_VEX_GENERATE_CMD:-}" ]; then
+        out="$("${CI_VEX_GENERATE_CMD}" "${trivyignore}")" || { ci_error "[CI-ERROR-CHECK-0050]" "reason=\"generate-vex.sh failed\"" "${trivyignore}"; return 1; }
+    else
+        [ -f "${gen}" ] || { ci_error "[CI-ERROR-CHECK-0050]" "path=\"${gen}\" reason=\"generate-vex.sh not found\"" "${gen}"; return 2; }
+        out="$(bash "${gen}" "${trivyignore}")" || { ci_error "[CI-ERROR-CHECK-0050]" "reason=\"generate-vex.sh failed\"" "${trivyignore}"; return 1; }
+    fi
+    if ! jq empty <<<"${out}" 2>/dev/null; then
+        ci_error "[CI-ERROR-CHECK-0050]" "reason=\"generate-vex.sh produced invalid JSON\"" "${trivyignore}"
+        return 1
+    fi
+    entry_count="$(grep -c '^  - id:' "${trivyignore}" 2>/dev/null || true)"
+    statement_count="$(jq '.statements | length' <<<"${out}")"
+    if [ "${entry_count:-0}" -gt 0 ] && [ "${statement_count}" -eq 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0050]" "reason=\"${entry_count} trivyignore entries but 0 VEX statements\"" "${trivyignore}"
+        return 1
+    fi
+    printf 'vex-drift=clean statements=%s\n' "${statement_count}"
+}
+
 # What: Warn (never fail) on editing CHANGELOG.md directly.
 # Why: usually unintended; risks a merge-conflict cascade.
 # From: Issue #1683 | PR #1858
@@ -6358,6 +6386,7 @@ ci_cmd_check() {
         quickstart-required-env) _ci_check_quickstart_required_env "$@" ;;
         dhcp-proxy-env) _ci_check_dhcp_proxy_env "$@" ;;
         setup-keys-kea) _ci_check_setup_keys_kea "$@" ;;
+        vex-drift) _ci_check_vex_drift "$@" ;;
         logging-matrix) _ci_check_logging_matrix "$@" ;;
         trivy-action-direct-usage) _ci_check_trivy_action_direct_usage "$@" ;;
         entrypoint-lib-wiring) _ci_check_entrypoint_lib_wiring "$@" ;;

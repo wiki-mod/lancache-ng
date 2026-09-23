@@ -4565,6 +4565,45 @@ EOF
     [[ "${output}" == *"input missing"* ]]
 }
 
+@test "check vex-drift passes valid non-empty OpenVEX" {
+    # What: generate-vex.sh emits parseable JSON with statements.
+    # Why: the generator smoke test's core success path.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/vex-ok"
+    mkdir -p "${r}"
+    printf 'ignore:\n  - id: CVE-1\n' > "${r}/.trivyignore.yaml"
+    CI_VEX_GENERATE_CMD="$(_stub vg 'printf "{\"statements\":[{\"x\":1}]}"')" \
+        run bash "${CI_SH}" check vex-drift "${r}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"vex-drift=clean"* ]]
+}
+
+@test "check vex-drift fails invalid JSON" {
+    # What: generate-vex.sh emits non-JSON output.
+    # Why: a broken generator must fail closed.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/vex-bad"
+    mkdir -p "${r}"
+    printf 'ignore:\n  - id: CVE-1\n' > "${r}/.trivyignore.yaml"
+    CI_VEX_GENERATE_CMD="$(_stub vg 'printf "not json"')" \
+        run bash "${CI_SH}" check vex-drift "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"invalid JSON"* ]]
+}
+
+@test "check vex-drift fails entries with zero statements" {
+    # What: real ignore entries but an empty statement list.
+    # Why: silently-empty output is broken, valid JSON or not.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/vex-empty"
+    mkdir -p "${r}"
+    printf 'ignore:\n  - id: CVE-1\n' > "${r}/.trivyignore.yaml"
+    CI_VEX_GENERATE_CMD="$(_stub vg 'printf "{\"statements\":[]}"')" \
+        run bash "${CI_SH}" check vex-drift "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"0 VEX statements"* ]]
+}
+
 # What: seed a setup.sh/dhcp tree meeting the keys+Kea contract.
 # Why: shared by the setup-keys-kea checks below.
 # From: Issue #1683 | PR #1858
