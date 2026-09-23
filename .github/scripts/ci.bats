@@ -6575,3 +6575,39 @@ _write_legacy_env_fixture() {
     run migrate_env_for_update "${pd}"; [ "${status}" -eq 0 ]
     run get_env_var DHCP_PROXY_ROUTER "${cpe}"; [ "${output}" = "not-an-ip-address" ]
 }
+
+@test "migrate_env_for_update preserves all custom per-service state dirs" {
+    # What: every custom absolute per-service state dir survives.
+    # Why: AG-OP-009 override preservation for all five keys.
+    # From: Issue #1683 | PR #1858
+    local repo_root env_file k
+    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    env_file="${BATS_TEST_TMPDIR}/.env"
+    _load_setup_update_helpers "${repo_root}"
+    _write_converged_env_fixture "${env_file}"
+    for k in PDNS_STANDARD_DIR PDNS_SSL_DIR PDNS_FILTER_STATE_DIR NATS_DATA_DIR NATS_CONF_DIR; do
+        printf '%s=/custom/%s\n' "${k}" "${k}" >> "${env_file}"
+    done
+    run migrate_env_for_update "$(dirname "${env_file}")"; [ "${status}" -eq 0 ]
+    for k in PDNS_STANDARD_DIR PDNS_SSL_DIR PDNS_FILTER_STATE_DIR NATS_DATA_DIR NATS_CONF_DIR; do
+        grep -qx "${k}=/custom/${k}" "${env_file}"
+    done
+    run migrate_env_for_update "$(dirname "${env_file}")"; [ "${status}" -eq 0 ]
+    for k in PDNS_STANDARD_DIR PDNS_SSL_DIR PDNS_FILTER_STATE_DIR NATS_DATA_DIR NATS_CONF_DIR; do
+        grep -qx "${k}=/custom/${k}" "${env_file}"
+    done
+}
+
+@test "migrate_env_for_update drops a per-service state dir equal to the one-root default" {
+    # What: a per-service dir equal to the derived default is dropped.
+    # Why: one-root contract keeps LANCACHE_STATE_DIR the single source.
+    # From: Issue #1683 | PR #1858
+    local repo_root env_file
+    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    env_file="${BATS_TEST_TMPDIR}/.env"
+    _load_setup_update_helpers "${repo_root}"
+    _write_converged_env_fixture "${env_file}"
+    printf 'NATS_CONF_DIR=/opt/lancache-ng/state/nats-conf\n' >> "${env_file}"
+    run migrate_env_for_update "$(dirname "${env_file}")"; [ "${status}" -eq 0 ]
+    run ! grep -q '^NATS_CONF_DIR=' "${env_file}"
+}
