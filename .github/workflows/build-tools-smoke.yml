@@ -257,7 +257,7 @@ jobs:
       # From: PR #1501
       - name: Set up Docker Buildx for manifest inspection
         id: buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       # What: authenticates published-image pull with credentials
       # Why: avoids GHCR's lower anonymous rate limit under CI load
