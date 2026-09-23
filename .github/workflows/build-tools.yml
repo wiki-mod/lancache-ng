@@ -35,9 +35,6 @@ concurrency:
   group: build-tools-image
   cancel-in-progress: false
 
-env:
-  BUILD_TOOLS_IMAGE: ghcr.io/${{ github.repository }}/build-tools
-
 jobs:
   determine-build-need:
     name: input-change gate
@@ -47,6 +44,7 @@ jobs:
       build-arm64: ${{ steps.plan.outputs.build-arm64 }}
       matrix: ${{ steps.plan.outputs.matrix }}
       signature: ${{ steps.plan.outputs.signature }}
+      image: ${{ steps.plan.outputs.image }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -90,7 +88,6 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Docker Buildx
-        id: buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GHCR
@@ -100,54 +97,25 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
-        with:
-          images: ${{ env.BUILD_TOOLS_IMAGE }}
-          # What: per-arch child tag sha-<full>-<arch>.
-          # Why: AG-REL-015 bans the -standalone- form.
-          # From: Issue #1683
-          tags: |
-            type=sha,prefix=sha-,format=long,suffix=-${{ matrix.arch }}
-
-      # What: resolve this platform's build-args via ci.sh.
-      # Why: ci.sh owns arch/dhclient resolution, not YAML.
-      # From: Issue #1683
-      - name: Resolve platform build-args
-        id: bargs
-        run: bash .github/scripts/ci.sh build-tools build-args-out ${{ matrix.platform }}
-
-      # What: build+push, stamping the signature.
-      # Why: the gate reads this label next time.
+      # What: build+push the per-arch image, emit its digest.
+      # Why: ci.sh owns the tag, labels, retry and readback.
       # From: Issue #1683
       - name: Build and push build-tools image
         id: build
         timeout-minutes: 90
-        uses: ./.github/actions/ghcr-build-push-retry
-        with:
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-          builder: ${{ steps.buildx.outputs.name }}
-          context: tools/build-tools
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: |
-            ${{ steps.meta.outputs.labels }}
-            org.lancache-ng.build-tools.signature=${{ needs.determine-build-need.outputs.signature }}
-          build-args: |
-            ${{ steps.bargs.outputs.build-args-bare }}
-          outputs: type=image,oci-mediatypes=true
-          platforms: ${{ matrix.platform }}
-          provenance: false
-          pull: true
-          cache-from: type=gha,scope=build-tools-${{ matrix.arch }}
-          cache-to: type=gha,scope=build-tools-${{ matrix.arch }},mode=max
+        env:
+          BT_PLATFORM: ${{ matrix.platform }}
+          BT_SIGNATURE: ${{ needs.determine-build-need.outputs.signature }}
+          CI_BUILD_CACHE_FROM: type=gha,scope=build-tools-${{ matrix.arch }}
+          CI_BUILD_CACHE_TO: type=gha,scope=build-tools-${{ matrix.arch }},mode=max
+        run: |
+          digest="$(bash .github/scripts/ci.sh build-tools build "${BT_PLATFORM}" "${BT_SIGNATURE}")"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Smoke-test pushed digest
         uses: ./.github/actions/build-tools-candidate-smoke
         with:
-          image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
+          image-ref: ${{ needs.determine-build-need.outputs.image }}@${{ steps.build.outputs.digest }}
           platform: ${{ matrix.platform }}
           run-fixtures: "true"
 
@@ -162,7 +130,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
           dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
           dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-          image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
+          image-ref: ${{ needs.determine-build-need.outputs.image }}@${{ steps.build.outputs.digest }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
           ignore-unfixed: true
@@ -177,7 +145,7 @@ jobs:
         with:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-          subject-name: ${{ env.BUILD_TOOLS_IMAGE }}
+          subject-name: ${{ needs.determine-build-need.outputs.image }}
           subject-digest: ${{ steps.build.outputs.digest }}
 
   merge-manifests:

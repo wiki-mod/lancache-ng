@@ -3059,7 +3059,7 @@ netdata=sha256:n"
     pub="$(_stub pub.sh 'echo OLD-SIG')"
     gho="${BATS_TEST_TMPDIR}/out.txt"; : > "${gho}"
     run env CI_APK_RESOLVE_CMD="${apk}" CI_PUBLISHED_SIG_CMD="${pub}" \
-        BUILD_TOOLS_IMAGE=example/build-tools BT_ARCH=both BT_MODE=check \
+        GITHUB_REPOSITORY=wiki-mod/lancache-ng BT_ARCH=both BT_MODE=check \
         GITHUB_OUTPUT="${gho}" \
         bash "${CI_SH}" build-tools plan
     [ "${status}" -eq 0 ]
@@ -3067,6 +3067,7 @@ netdata=sha256:n"
     grep -q '^build-amd64=true$' "${gho}"
     grep -q '^build-arm64=true$' "${gho}"
     grep -q '^matrix={"include":' "${gho}"
+    grep -q '^image=ghcr.io/wiki-mod/lancache-ng/build-tools$' "${gho}"
 }
 
 @test "build-tools rejects an unknown subcommand (fail closed)" {
@@ -3082,10 +3083,19 @@ netdata=sha256:n"
     # What: The tag binds the git sha and the arch.
     # Why: sha-<full>-<arch>; AG-REL-015 form only.
     # From: Issue #1683
-    BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools GITHUB_SHA=abc123 \
+    GITHUB_REPOSITORY=wiki-mod/lancache-ng GITHUB_SHA=abc123 \
         run _ci_build_tools_tag linux/arm64
     [ "${status}" -eq 0 ]
     [ "${output}" = "ghcr.io/wiki-mod/lancache-ng/build-tools:sha-abc123-arm64" ]
+}
+
+@test "build-tools image is the base ref from the SOT registry" {
+    # What: The base build-tools ref from the SOT.
+    # Why: One registry-host owner, no env fallback.
+    # From: Issue #1683
+    GITHUB_REPOSITORY=wiki-mod/lancache-ng run bash "${CI_SH}" build-tools image
+    [ "${status}" -eq 0 ]
+    [ "${output}" = "ghcr.io/wiki-mod/lancache-ng/build-tools" ]
 }
 
 @test "build-tools build pushes the per-arch tag and returns the digest" {
@@ -3095,7 +3105,7 @@ netdata=sha256:n"
     export DLOG="${BATS_TEST_TMPDIR}/d.log"; : > "${DLOG}"
     docker() { printf 'docker %s\n' "$*" >> "${DLOG}"; case "$*" in *"imagetools inspect"*) printf 'sha256:dead\n' ;; esac; return 0; }
     export -f docker
-    BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools GITHUB_SHA=abc123 \
+    GITHUB_REPOSITORY=wiki-mod/lancache-ng GITHUB_SHA=abc123 \
         run _ci_build_tools_build linux/amd64 sig-xyz
     [ "${status}" -eq 0 ]
     [ "${output}" = "sha256:dead" ]
@@ -3113,9 +3123,11 @@ netdata=sha256:n"
     GITHUB_SHA=abc123 run _ci_oci_labels build-tools
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"image.revision=abc123"* ]]
+    [[ "${output}" == *"image.version=abc123"* ]]
     [[ "${output}" == *"image.source=https://github.com/wiki-mod/lancache-ng"* ]]
     [[ "${output}" == *"image.licenses=AGPL-3.0-or-later"* ]]
     [[ "${output}" == *"image.title=build-tools"* ]]
+    [[ "${output}" == *"image.description=LanCache-NG build-tools image"* ]]
     [[ "${output}" == *"image.base.digest=sha256:"* ]]
 }
 
@@ -4802,7 +4814,7 @@ EOF
     export DLOG="${BATS_TEST_TMPDIR}/d.log"; : > "${DLOG}"
     docker() { printf 'docker %s\n' "$*" >> "${DLOG}"; case "$*" in *"imagetools inspect"*) printf 'sha256:dead\n' ;; esac; return 0; }
     export -f docker
-    BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools GITHUB_SHA=abc123 \
+    GITHUB_REPOSITORY=wiki-mod/lancache-ng GITHUB_SHA=abc123 \
         CI_BUILD_CACHE_TO="type=registry,ref=ghcr.io/wiki-mod/lancache-ng/build-tools:cache,mode=max" \
         run _ci_build_tools_build linux/amd64 sig-xyz
     [ "${status}" -eq 0 ]
@@ -5335,7 +5347,7 @@ EOF
     local log="${BATS_TEST_TMPDIR}/create.log"
     printf '#!/usr/bin/env bash\ncase "$*" in *"imagetools create"*) echo "$*" >> "%s" ;; esac\n' "${log}" > "${bin}/docker"
     chmod +x "${bin}/docker"
-    PATH="${bin}:${PATH}" BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools \
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
         run _ci_build_tools_merge abc123
     [ "${status}" -eq 0 ]
     run cat "${log}"

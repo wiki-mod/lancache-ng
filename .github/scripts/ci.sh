@@ -1125,6 +1125,13 @@ _ci_image_tag() {
     printf '%s/%s/%s:sha-%s-%s' "${registry}" "${repo}" "$1" "$3" "${2##*/}"
 }
 
+# What: The base build-tools image ref, no tag.
+# Why: One owner for the registry host, from the SOT.
+# From: Issue #1683
+_ci_build_tools_image() {
+    printf '%s/%s/build-tools' "$(_ci_registry)" "$(_ci_repo)"
+}
+
 # What: OCI image labels from the SOT and env.
 # Why: Provenance labels set once, not per Dockerfile.
 # From: Issue #1683
@@ -1137,12 +1144,14 @@ _ci_oci_labels() {
     created="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'org.opencontainers.image.created=%s\n' "${created}"
     [ -n "${GITHUB_SHA:-}" ] && printf 'org.opencontainers.image.revision=%s\n' "${GITHUB_SHA}"
+    [ -n "${GITHUB_SHA:-}" ] && printf 'org.opencontainers.image.version=%s\n' "${GITHUB_SHA}"
     printf 'org.opencontainers.image.source=%s\n' "${source}"
     printf 'org.opencontainers.image.url=%s\n' "${source}"
     printf 'org.opencontainers.image.documentation=%s\n' "${source}"
     printf 'org.opencontainers.image.licenses=%s\n' 'AGPL-3.0-or-later'
     printf 'org.opencontainers.image.vendor=%s\n' "${prefix%%/*}"
     printf 'org.opencontainers.image.title=%s\n' "${service}"
+    printf 'org.opencontainers.image.description=%s\n' "LanCache-NG ${service} image"
     if [ -n "${base}" ]; then
         printf 'org.opencontainers.image.base.name=%s\n' "${base%@*}"
         printf 'org.opencontainers.image.base.digest=%s\n' "${base#*@}"
@@ -3519,7 +3528,7 @@ _ci_build_tools_merge() {
         "${CI_MERGE_CMD}" "${sha}"
         return "$?"
     fi
-    image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE required}"
+    image="$(_ci_build_tools_image)"
     # What: per-arch children use sha-<full>-<arch>.
     # Why: AG-REL-015 bans the -standalone- form.
     # From: Issue #1683
@@ -3553,9 +3562,9 @@ _ci_emit_multiline() {
 # From: Issue #1683
 _ci_build_tools_plan() {
     local arch="${BT_ARCH:-both}" mode="${BT_MODE:-check}"
-    local image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE required}"
     local out="${GITHUB_OUTPUT:?GITHUB_OUTPUT required}"
-    local current published gate_lines
+    local image current published gate_lines
+    image="$(_ci_build_tools_image)"
     current="$(_ci_build_tools_resolve_signature)" || return 2
     published="$(_ci_build_tools_published_signature "${image}:latest")" || return 2
     gate_lines="$(_ci_build_tools_gate "${arch}" "${mode}" "${current}" "${published}")" || return 2
@@ -3564,6 +3573,7 @@ _ci_build_tools_plan() {
     # From: Issue #1683
     {
         printf 'signature=%s\n' "${current}"
+        printf 'image=%s\n' "${image}"
         printf '%s\n' "${gate_lines}"
     } >> "${out}"
 }
@@ -3588,8 +3598,7 @@ _ci_build_tools_build_args_emit() {
 # From: Issue #1683
 _ci_build_tools_tag() {
     local platform="$1"
-    local image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE required}"
-    printf '%s:sha-%s-%s' "${image}" "${GITHUB_SHA:?GITHUB_SHA required}" "${platform##*/}"
+    printf '%s:sha-%s-%s' "$(_ci_build_tools_image)" "${GITHUB_SHA:?GITHUB_SHA required}" "${platform##*/}"
 }
 
 # What: Build+push one arch's build-tools image.
@@ -3639,6 +3648,7 @@ ci_cmd_build_tools() {
         published-signature) _ci_build_tools_published_signature "${1:-}" ;;
         gate) _ci_build_tools_gate "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
         plan) _ci_build_tools_plan ;;
+        image) _ci_build_tools_image ;;
         build-args-out) _ci_build_tools_build_args_emit "${1:-}" ;;
         build) _ci_build_tools_build "${1:-}" "${2:-}" ;;
         merge) _ci_build_tools_merge "${1:-}" ;;
