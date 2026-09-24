@@ -86,6 +86,7 @@ smoke_test_image() {
       shellcheck
       actionlint
       bats
+      parallel
       shellspec
       distcc
       distcc-pump
