@@ -36,7 +36,7 @@ declare -A CI_DISPATCH=(
     [test]=ci_cmd_test [coverage]=ci_cmd_coverage [scan]=ci_cmd_scan [assemble]=ci_cmd_assemble
     [aggregate]=ci_cmd_aggregate [emit-result]=ci_cmd_emit_result [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files
     [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [coverage-stack]=ci_cmd_coverage_stack [nightly-status]=ci_cmd_nightly_status
-    [validate]=ci_cmd_validate [promote]=ci_cmd_promote [release]=ci_cmd_release
+    [validate]=ci_cmd_validate [promote]=ci_cmd_promote [promote-ref]=ci_cmd_promote_ref [release]=ci_cmd_release
     [release-publish]=ci_cmd_release_publish [release-sbom]=ci_cmd_release_sbom [release-vex]=ci_cmd_release_vex
     [gc]=ci_cmd_gc [variables]=ci_cmd_variables [check]=ci_cmd_check
     [version]=ci_cmd_version
@@ -2179,6 +2179,15 @@ _ci_valid_channel() {
     return 1
 }
 
+# What: True if a target is a mutable channel or a v-tag.
+# Why: promote writes the same ref for channels and releases.
+# From: Issue #1683
+_ci_valid_promote_target() {
+    local target="$1"
+    _ci_valid_channel "${target}" && return 0
+    _ci_release_prerelease "${target}" >/dev/null 2>&1
+}
+
 # What: The accepted multi-arch stack candidate: service=index-digest.
 # Why: promote/validate consume exact digests, never moving tags (§48).
 # From: Issue #1683
@@ -2324,8 +2333,8 @@ _ci_promote_all_current() {
 ci_cmd_promote() {
     local channel="${1:-}"
     [ -n "${channel}" ] || { ci_log "[CI-ERROR-PROMOTE-0001]" "reason=\"channel arg required\""; return 2; }
-    if ! _ci_valid_channel "${channel}"; then
-        ci_log "[CI-ERROR-PROMOTE-0002]" "channel=\"${channel}\" reason=\"not a known mutable release channel\""
+    if ! _ci_valid_promote_target "${channel}"; then
+        ci_log "[CI-ERROR-PROMOTE-0002]" "channel=\"${channel}\" reason=\"not a mutable channel or a vX.Y.Z release tag\""
         return 2
     fi
     local cand
@@ -2354,6 +2363,62 @@ ci_cmd_promote() {
     "${CI_PROMOTE_UNLOCK_CMD:-_ci_default_promote_unlock}" "${channel}" || ci_log "[CI-WARN-PROMOTE-0011]" "channel=\"${channel}\" reason=\"lock release failed\""
     [ "${rc}" -eq 0 ] || return "${rc}"
     printf 'channel=%s result=promoted services=%s\n' "${channel}" "$(printf '%s\n' "${cand}" | grep -c '=')"
+}
+
+# What: List the promote targets the current git ref maps to.
+# Why: ref-driven policy owner; no channel logic in YAML.
+# From: Issue #1683
+_ci_promote_targets_for_ref() {
+    local ref="${GITHUB_REF:-}" requested="${CI_PROMOTE_REQUESTED_CHANNEL:-}" tag pre
+    {
+        case "${ref}" in
+            refs/heads/master) printf 'latest\n' ;;
+            refs/tags/v*)
+                tag="${ref#refs/tags/}"
+                pre="$(_ci_release_prerelease "${tag}")" || return "$?"
+                printf '%s\n' "${tag}"
+                if [ "${pre}" = false ]; then printf 'latest\n'; fi
+                ;;
+        esac
+        if [ -n "${requested}" ] && [ "${requested}" != none ]; then
+            printf '%s\n' "${requested}"
+        fi
+    } | awk 'NF && !seen[$0]++'
+}
+
+# What: Resolve a git ref's current remote tip SHA.
+# Why: one ls-remote reader; injectable for tests.
+# From: Issue #1683
+_ci_ref_tip() {
+    git ls-remote origin "$1" | cut -f1
+}
+
+# What: Promote every target the current ref maps to.
+# Why: one ref entry, supersede-safe, single policy owner.
+# From: Issue #1683
+ci_cmd_promote_ref() {
+    local ref="${GITHUB_REF:-}" tip targets t
+    targets="$(_ci_promote_targets_for_ref)" || return "$?"
+    if [ -z "${targets}" ]; then
+        printf 'promote=noop reason=no-targets ref=%s\n' "${ref}"
+        return 0
+    fi
+    # What: A moved branch tip means a newer run supersedes this one.
+    # Why: determinism (§4); never promote a stale tip blind.
+    if [[ "${ref}" == refs/heads/* ]]; then
+        if ! tip="$("${CI_PROMOTE_TIP_CMD:-_ci_ref_tip}" "${ref}")"; then
+            ci_log "[CI-ERROR-PROMOTE-0013]" "ref=\"${ref}\" reason=\"could not resolve ref tip; refusing blind promote\""
+            return 2
+        fi
+        if [ -n "${tip}" ] && [ "${tip}" != "${GITHUB_SHA:-}" ]; then
+            printf 'promote=superseded ref=%s tip=%s sha=%s\n' "${ref}" "${tip}" "${GITHUB_SHA:-}"
+            return 0
+        fi
+    fi
+    while IFS= read -r t; do
+        [ -n "${t}" ] || continue
+        "${CI_PROMOTE_ONE_CMD:-ci_cmd_promote}" "${t}" || return "$?"
+    done <<< "${targets}"
 }
 
 # =========================================================

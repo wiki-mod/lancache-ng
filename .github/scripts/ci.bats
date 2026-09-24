@@ -1526,6 +1526,61 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     [[ "${output}" == *"CI-ERROR-PROMOTE-0004"* ]]
 }
 
+@test "valid-promote-target accepts channels and release tags only" {
+    # What: mutable channels and vX.Y.Z(-rc.N) are valid targets.
+    # Why: promote writes the same ref for both, nothing else.
+    # From: Issue #1683
+    run _ci_valid_promote_target latest;       [ "${status}" -eq 0 ]
+    run _ci_valid_promote_target nightly;      [ "${status}" -eq 0 ]
+    run _ci_valid_promote_target v1.2.3;       [ "${status}" -eq 0 ]
+    run _ci_valid_promote_target v1.2.3-rc.4;  [ "${status}" -eq 0 ]
+    run _ci_valid_promote_target sha-deadbeef; [ "${status}" -ne 0 ]
+    run _ci_valid_promote_target bogus;        [ "${status}" -ne 0 ]
+}
+
+@test "promote-targets-for-ref maps each ref to its channel set" {
+    # What: master->latest, stable->tag+latest, rc->tag, dev->none.
+    # Why: one ref-driven policy owner, no YAML conditionals.
+    # From: Issue #1683
+    GITHUB_REF=refs/heads/master CI_PROMOTE_REQUESTED_CHANNEL= run _ci_promote_targets_for_ref
+    [ "${output}" = latest ]
+    GITHUB_REF=refs/heads/current_dev CI_PROMOTE_REQUESTED_CHANNEL= run _ci_promote_targets_for_ref
+    [ -z "${output}" ]
+    GITHUB_REF=refs/tags/v1.2.3 CI_PROMOTE_REQUESTED_CHANNEL= run _ci_promote_targets_for_ref
+    [ "${lines[0]}" = v1.2.3 ]; [ "${lines[1]}" = latest ]; [ "${#lines[@]}" -eq 2 ]
+    GITHUB_REF=refs/tags/v1.2.3-rc.4 CI_PROMOTE_REQUESTED_CHANNEL= run _ci_promote_targets_for_ref
+    [ "${output}" = v1.2.3-rc.4 ]
+    GITHUB_REF=refs/heads/master CI_PROMOTE_REQUESTED_CHANNEL=nightly run _ci_promote_targets_for_ref
+    [ "${lines[0]}" = latest ]; [ "${lines[1]}" = nightly ]; [ "${#lines[@]}" -eq 2 ]
+    GITHUB_REF=refs/heads/master CI_PROMOTE_REQUESTED_CHANNEL=latest run _ci_promote_targets_for_ref
+    [ "${output}" = latest ]
+}
+
+@test "promote-ref promotes every derived target, tip-guarded" {
+    # What: derives targets, skips a superseded tip, promotes each.
+    # Why: supersede-safe single entry; determinism (section 4).
+    # From: Issue #1683
+    local calls="${BATS_TEST_TMPDIR}/promote-calls"
+    export PROMOTE_CALLS="${calls}"
+    local prom; prom="$(_stub prom 'echo "PROMOTE $1" >> "${PROMOTE_CALLS}"')"
+    : > "${calls}"
+    CI_PROMOTE_ONE_CMD="${prom}" GITHUB_REF=refs/tags/v1.2.3 CI_PROMOTE_REQUESTED_CHANNEL= run ci_cmd_promote_ref
+    [ "${status}" -eq 0 ]
+    [ "$(cat "${calls}")" = "PROMOTE v1.2.3
+PROMOTE latest" ]
+    : > "${calls}"
+    local tipstub; tipstub="$(_stub tip 'echo othersha')"
+    CI_PROMOTE_ONE_CMD="${prom}" GITHUB_REF=refs/heads/master GITHUB_SHA=mysha CI_PROMOTE_REQUESTED_CHANNEL= CI_PROMOTE_TIP_CMD="${tipstub}" run ci_cmd_promote_ref
+    [ "${status}" -eq 0 ]; [[ "${output}" == *"superseded"* ]]; [ ! -s "${calls}" ]
+    : > "${calls}"
+    local tipok; tipok="$(_stub tipok 'echo mysha')"
+    CI_PROMOTE_ONE_CMD="${prom}" GITHUB_REF=refs/heads/master GITHUB_SHA=mysha CI_PROMOTE_REQUESTED_CHANNEL= CI_PROMOTE_TIP_CMD="${tipok}" run ci_cmd_promote_ref
+    [ "${status}" -eq 0 ]; [ "$(cat "${calls}")" = "PROMOTE latest" ]
+    : > "${calls}"
+    CI_PROMOTE_ONE_CMD="${prom}" GITHUB_REF=refs/heads/current_dev CI_PROMOTE_REQUESTED_CHANNEL= run ci_cmd_promote_ref
+    [ "${status}" -eq 0 ]; [[ "${output}" == *"no-targets"* ]]; [ ! -s "${calls}" ]
+}
+
 # What: Build a gh stub that logs and mocks release view.
 # Why: publish/sbom/vex assert gh calls without a network.
 # From: Issue #1683
