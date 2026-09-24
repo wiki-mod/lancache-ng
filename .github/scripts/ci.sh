@@ -5188,8 +5188,18 @@ _ci_check_build_tools_smoke_coverage() {
         ci_log "[CI-ERROR-CHECK-0025]" "reason=\"no SOT smoke_tools; vacuous\""
         return 2
     fi
+    # What: tools smoke covers indirectly, not in its array.
+    # Why: timeout wraps each smoke run; opt-in tools use EXTRA.
+    # From: Issue #1683 | PR #1858
+    local smoke_wraps_timeout='' smoke_has_optin=''
+    grep -qE '(^|[^[:alnum:]_-])timeout ' "${smoke_script}" && smoke_wraps_timeout=1
+    grep -qF 'EXTRA_REQUIRED_TOOLS' "${smoke_script}" && smoke_has_optin=1
     for t in ${sot_tools}; do
         case " ${smoke_tools} " in *" ${t} "*) continue ;; esac
+        [ "${t}" = timeout ] && [ -n "${smoke_wraps_timeout}" ] && continue
+        if [ -n "${smoke_has_optin}" ] && grep -qE "(^|[^[:alnum:]_-])${t}"'([^[:alnum:]_-]|$)' "${smoke_script}"; then
+            continue
+        fi
         viol+=("SOT smoke_tools lists '${t}' but smoke_test_image() does not verify it")
     done
     if [ "${#viol[@]}" -gt 0 ]; then

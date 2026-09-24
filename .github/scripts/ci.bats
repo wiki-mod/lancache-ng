@@ -5617,15 +5617,13 @@ _smoke_coverage_fixture() {
         > "${root}/build-manifest.yml"
 }
 
-@test "check build-tools-smoke-coverage currently fails on a real SOT/smoke divergence" {
-    # What: Real repo gap: SOT omits netdata smoke_tools.
-    # Why: Catches real bugs, not just synthetic fixtures.
-    # From: Issue #1683
+@test "check build-tools-smoke-coverage passes on the real repo" {
+    # What: real SOT/smoke pair is consistent, not a gap.
+    # Why: cargo-tarpaulin (opt-in) + timeout (wrapper) are covered.
+    # From: Issue #1683 | PR #1858
     run bash "${CI_SH}" check build-tools-smoke-coverage
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0026"* ]]
-    [[ "${output}" == *"cargo-tarpaulin"* ]]
-    [[ "${output}" == *"timeout"* ]]
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"build-tools-smoke-coverage=clean"* ]]
 }
 
 @test "check build-tools-smoke-coverage passes clean when Dockerfile/smoke/SOT all agree" {
@@ -5659,6 +5657,42 @@ _smoke_coverage_fixture() {
     _smoke_coverage_fixture "${r}" make
     CI_MANIFEST="${r}/build-manifest.yml" run bash "${CI_SH}" check build-tools-smoke-coverage "${r}"
     [ "${status}" -eq 0 ]
+}
+
+@test "check build-tools-smoke-coverage fails an SOT tool smoke never covers" {
+    # What: SOT lists a tool absent from smoke and its mechanisms.
+    # Why: SOT owns the list; an uncovered entry is a false claim.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/sotgap"
+    _smoke_coverage_fixture "${r}"
+    printf 'build_toolchain:\n  build-tools:\n    smoke_tools:\n      - bash\n      - phantomtool\n' \
+        > "${r}/build-manifest.yml"
+    CI_MANIFEST="${r}/build-manifest.yml" run bash "${CI_SH}" check build-tools-smoke-coverage "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0026"* ]]
+    [[ "${output}" == *"SOT smoke_tools lists 'phantomtool'"* ]]
+}
+
+@test "check build-tools-smoke-coverage accepts SOT timeout and opt-in tools" {
+    # What: SOT lists timeout (wrapper) plus an EXTRA opt-in tool.
+    # Why: smoke covers both without a static required_tools entry.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/sotalt"
+    mkdir -p "${r}/tools/build-tools" "${r}/scripts/untracked"
+    printf 'FROM alpine\nrequired_tools=(\n  bash\n)\n' > "${r}/tools/build-tools/Dockerfile"
+    {
+        printf '#!/usr/bin/env bash\n'
+        printf 'smoke_test_image() {\n'
+        printf '  docker run --rm -e "EXTRA_REQUIRED_TOOLS=${EXTRA_REQUIRED_TOOLS:-}" "$1" timeout 60 true\n'
+        printf '  required_tools=(\n    bash\n  )\n'
+        printf '  # cargo-tarpaulin is opt-in via EXTRA_REQUIRED_TOOLS\n'
+        printf '}\n'
+    } > "${r}/scripts/untracked/select-build-tools-image.sh"
+    printf 'build_toolchain:\n  build-tools:\n    smoke_tools:\n      - bash\n      - timeout\n      - cargo-tarpaulin\n' \
+        > "${r}/build-manifest.yml"
+    CI_MANIFEST="${r}/build-manifest.yml" run bash "${CI_SH}" check build-tools-smoke-coverage "${r}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"build-tools-smoke-coverage=clean"* ]]
 }
 
 @test "check build-tools-smoke-coverage fails an uncovered docker capability" {
@@ -5711,6 +5745,38 @@ _smoke_coverage_fixture() {
     run bash "${CI_SH}" check build-tools-smoke-coverage "${BATS_TEST_TMPDIR}/nope"
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0024"* ]]
+}
+
+@test "verify-version-banner.sh matches a banner and ignores the tool exit code" {
+    # What: banner match passes; mismatch / too-few-args fail closed.
+    # Why: shared lsof-banner check; lsof -v's exit code is unreliable.
+    # From: Issue #1613 | PR #1858
+    local vb="${BATS_TEST_DIRNAME}/../../scripts/lib/verify-version-banner.sh"
+    [ -f "${vb}" ]
+    run sh "${vb}" "hello banner" printf "hello banner\n"; [ "${status}" -eq 0 ]
+    run sh "${vb}" "hello banner" printf "goodnight\n"; [ "${status}" -ne 0 ]; [[ "${output}" == *"ERROR"* ]]
+    run sh "${vb}" "only-one-arg"; [ "${status}" -ne 0 ]; [[ "${output}" == *"usage:"* ]]
+    cat > "${BATS_TEST_TMPDIR}/fake-lsof" <<'FXEOF'
+#!/bin/sh
+printf 'lsof version information: fake\n'
+exit 1
+FXEOF
+    chmod +x "${BATS_TEST_TMPDIR}/fake-lsof"
+    run sh "${vb}" "lsof version information" "${BATS_TEST_TMPDIR}/fake-lsof" -v; [ "${status}" -eq 0 ]
+}
+
+@test "the six lsof consumers COPY and invoke the shared verify-version-banner.sh" {
+    # What: shared COPY + invoke, no inline lsof / utilities-tools stage.
+    # Why: the shared script must replace the drifted inline banner checks.
+    # From: Issue #1613 | PR #1858
+    local root="${BATS_TEST_DIRNAME}/../.." f df
+    for f in dhcp-proxy dhcp dns proxy ui watchdog; do
+        df="${root}/services/${f}/Dockerfile"
+        grep -qF 'COPY --from=shared-scripts verify-version-banner.sh /usr/local/bin/verify-version-banner.sh' "${df}" || { echo "no COPY: ${f}"; false; }
+        grep -qF 'sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v' "${df}" || { echo "no invoke: ${f}"; false; }
+        ! grep -qF 'lsof_out="$(lsof -v 2>&1)"' "${df}" || { echo "inline lsof: ${f}"; false; }
+        ! grep -qF 'utilities-tools' "${df}" || { echo "utilities-tools: ${f}"; false; }
+    done
 }
 
 @test "docker-build builds a per-identity per-arch tag via buildx" {
