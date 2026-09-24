@@ -3253,6 +3253,24 @@ netdata=sha256:n"
     [[ "${output}" == *"CI-ERROR-CHECK-0008"* ]]
 }
 
+@test "check mutable-refs default scan includes composite-action action.yml" {
+    # What: the default glob now covers .github/actions/**/action.yml.
+    # Why: a composite action could carry a floating @vN ref unguarded.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/mrepo"
+    mkdir -p "${r}/.github/actions/x"
+    printf 'runs:\n  using: composite\n  steps:\n    - uses: foo/bar@v4\n' > "${r}/.github/actions/x/action.yml"
+    ( cd "${r}" && git init -q && git add -A )
+    run bash -c "cd '${r}' && bash '${CI_SH}' check mutable-refs"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"action-@vN"* ]]
+    printf 'runs:\n  using: composite\n  steps:\n    - uses: foo/bar@abc1234def\n' > "${r}/.github/actions/x/action.yml"
+    ( cd "${r}" && git add -A )
+    run bash -c "cd '${r}' && bash '${CI_SH}' check mutable-refs"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"mutable-refs=clean"* ]]
+}
+
 @test "check mutable-refs fails a floating BUILD_TOOLS_IMAGE default" {
     # What: the img-default-latest yml sub-pattern, unseen.
     # Why: a second violation kind in the same yml branch.
@@ -3262,6 +3280,11 @@ netdata=sha256:n"
     run bash "${CI_SH}" check mutable-refs "${BATS_TEST_TMPDIR}/imglatest.yml"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"img-default-latest"* ]]
+    printf "run: grep -F 'ARG BUILD_TOOLS_IMAGE=ghcr.io/x/build-tools:latest' f\n" \
+        > "${BATS_TEST_TMPDIR}/greppat.yml"
+    run bash "${CI_SH}" check mutable-refs "${BATS_TEST_TMPDIR}/greppat.yml"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"mutable-refs=clean"* ]]
 }
 
 @test "check mutable-refs fails a Dockerfile FROM:latest and untagged FROM" {

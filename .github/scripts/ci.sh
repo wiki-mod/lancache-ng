@@ -4365,7 +4365,7 @@ _ci_check_language_policy() {
 # From: Issue #1683
 _ci_check_mutable_refs() {
     local -a _ci_override=("$@") files=()
-    _ci_scan_files files _ci_override '.github/workflows/*.yml' '*/Dockerfile' 'Dockerfile'
+    _ci_scan_files files _ci_override '.github/workflows/*.yml' '.github/actions/**/action.yml' '*/Dockerfile' 'Dockerfile'
     local path out
     local -a viol=()
     for path in "${files[@]}"; do
@@ -4373,7 +4373,10 @@ _ci_check_mutable_refs() {
         case "${path}" in
             *.yml|*.yaml)
                 out="$(grep -nE 'uses:[^@]*@v[0-9]' "${path}")" && viol+=("${path} action-@vN: ${out}")
-                out="$(grep -nE 'BUILD_TOOLS_IMAGE=[^[:space:]]*:latest' "${path}")" && viol+=("${path} img-default-latest: ${out}")
+                # What: A grep pattern quoting a Dockerfile ARG is not a ref.
+                # Why: PROMOTE_TAGS greps the dns/ui ARG :latest default.
+                # From: Issue #1683 | PR #1858
+                out="$(grep -nE 'BUILD_TOOLS_IMAGE=[^[:space:]]*:latest' "${path}" | grep -vF 'ARG BUILD_TOOLS_IMAGE=')" && [ -n "${out}" ] && viol+=("${path} img-default-latest: ${out}")
                 ;;
             */Dockerfile|Dockerfile)
                 out="$(grep -nE '^FROM .+:latest' "${path}" | grep -vE 'sccache-ng|ccache-ng')" && [ -n "${out}" ] && viol+=("${path} FROM-latest: ${out}")
