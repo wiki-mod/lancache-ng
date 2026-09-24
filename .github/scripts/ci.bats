@@ -1526,6 +1526,146 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     [[ "${output}" == *"CI-ERROR-PROMOTE-0004"* ]]
 }
 
+# What: Build a gh stub that logs and mocks release view.
+# Why: publish/sbom/vex assert gh calls without a network.
+# From: Issue #1683
+_release_gh_stub() {
+    local stub="${BATS_TEST_TMPDIR}/relgh"
+    cat > "${stub}" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >> "${GH_CALLS}"
+if [ "$1 $2" = "release view" ]; then
+    [ -n "${STUB_VIEW:-}" ] && { printf '%s' "${STUB_VIEW}"; exit 0; }
+    exit 1
+fi
+exit 0
+EOF
+    chmod +x "${stub}"; printf '%s' "${stub}"
+}
+
+@test "release-prerelease maps tag shape to the prerelease flag" {
+    # What: vX.Y.Z is final, -rc.N is prerelease, else fail.
+    # Why: release publishes with the correct prerelease state.
+    # From: Issue #1683
+    run _ci_release_prerelease v1.2.3
+    [ "${status}" -eq 0 ]; [ "${output}" = false ]
+    run _ci_release_prerelease v1.2.3-rc.4
+    [ "${status}" -eq 0 ]; [ "${output}" = true ]
+    run _ci_release_prerelease sha-deadbeef
+    [ "${status}" -ne 0 ]; [[ "${output}" == *"CI-ERROR-RELEASE-0002"* ]]
+}
+
+@test "release-publish creates a new release with prerelease for rc tags" {
+    # What: A missing release is created, notes attached.
+    # Why: first publish of a tag; rc sets --prerelease.
+    # From: Issue #1683
+    local gh calls="${BATS_TEST_TMPDIR}/gh-calls"; gh="$(_release_gh_stub)"
+    export GH_CALLS="${calls}" GITHUB_REPOSITORY=o/r GITHUB_SHA=deadbeef CI_TMPDIR="${BATS_TEST_TMPDIR}"
+    _ci_require_ghcr_auth() { return 0; }
+    _ci_registry_digest() { echo "sha256:aaa"; }
+    ci_build_targets() { echo proxy; }
+    : > "${calls}"
+    STUB_VIEW='' CI_RELEASE_GH_CMD="${gh}" run ci_cmd_release_publish v1.2.3-rc.4
+    [ "${status}" -eq 0 ]
+    grep -q 'release create v1.2.3-rc.4' "${calls}"
+    grep -q -- '--prerelease' "${calls}"
+    [[ "${output}" == *"release=published"* ]]
+}
+
+@test "release-publish replaces the marker block on an existing release" {
+    # What: Existing notes keep prefix/suffix, block replaced.
+    # Why: idempotent update; hand-written notes are preserved.
+    # From: Issue #1683
+    local gh calls="${BATS_TEST_TMPDIR}/gh-calls"; gh="$(_release_gh_stub)"
+    export GH_CALLS="${calls}" GITHUB_REPOSITORY=o/r GITHUB_SHA=deadbeef CI_TMPDIR="${BATS_TEST_TMPDIR}"
+    _ci_require_ghcr_auth() { return 0; }
+    _ci_registry_digest() { echo "sha256:aaa"; }
+    ci_build_targets() { echo proxy; }
+    local start='<!-- lancache-ng-image-tags:start -->' end='<!-- lancache-ng-image-tags:end -->'
+    : > "${calls}"
+    STUB_VIEW="$(jq -nc --arg b "keep-me
+${start}
+old
+${end}
+tail" '{body:$b, isPrerelease:false}')" \
+        CI_RELEASE_GH_CMD="${gh}" run ci_cmd_release_publish v1.2.3
+    [ "${status}" -eq 0 ]
+    grep -q 'release edit v1.2.3' "${calls}"
+}
+
+@test "release-publish fails closed on a prerelease-state mismatch" {
+    # What: A final tag over a prerelease release must fail.
+    # Why: release state is policy, never silently flipped.
+    # From: Issue #1683
+    local gh calls="${BATS_TEST_TMPDIR}/gh-calls"; gh="$(_release_gh_stub)"
+    export GH_CALLS="${calls}" GITHUB_REPOSITORY=o/r GITHUB_SHA=deadbeef CI_TMPDIR="${BATS_TEST_TMPDIR}"
+    _ci_require_ghcr_auth() { return 0; }
+    _ci_registry_digest() { echo "sha256:aaa"; }
+    ci_build_targets() { echo proxy; }
+    STUB_VIEW='{"body":"x","isPrerelease":true}' \
+        CI_RELEASE_GH_CMD="${gh}" run ci_cmd_release_publish v1.2.3
+    [ "${status}" -ne 0 ]; [[ "${output}" == *"CI-ERROR-RELEASE-0005"* ]]
+}
+
+@test "release-publish requires a tag argument" {
+    # What: No tag is a hard fail before any gh call.
+    # Why: fail-closed; never publish an unnamed release.
+    # From: Issue #1683
+    run ci_cmd_release_publish
+    [ "${status}" -ne 0 ]; [[ "${output}" == *"CI-ERROR-RELEASE-0003"* ]]
+}
+
+@test "release-asset-put uploads with clobber and rejects an empty file" {
+    # What: One asset writer; --clobber replaces a prior asset.
+    # Why: SBOM and VEX share it; empty file is a hard fail.
+    # From: Issue #1683
+    local gh calls="${BATS_TEST_TMPDIR}/gh-calls"; gh="$(_release_gh_stub)"
+    export GH_CALLS="${calls}" GITHUB_REPOSITORY=o/r
+    local f="${BATS_TEST_TMPDIR}/proxy.cdx.json"; echo '{}' > "${f}"
+    : > "${calls}"
+    CI_RELEASE_GH_CMD="${gh}" run _ci_release_asset_put v1.2.3 "${f}"
+    [ "${status}" -eq 0 ]
+    grep -q -- '--clobber' "${calls}"
+    run _ci_release_asset_put v1.2.3 "${BATS_TEST_TMPDIR}/missing"
+    [ "${status}" -ne 0 ]; [[ "${output}" == *"CI-ERROR-RELEASE-0004"* ]]
+}
+
+@test "release-sbom generates a cyclonedx asset and uploads it" {
+    # What: A per-image SBOM is produced then attached.
+    # Why: released provenance asset, one owner uploads it.
+    # From: Issue #1683
+    local gh calls="${BATS_TEST_TMPDIR}/gh-calls"; gh="$(_release_gh_stub)"
+    export GH_CALLS="${calls}" GITHUB_REPOSITORY=o/r CI_TMPDIR="${BATS_TEST_TMPDIR}"
+    _ci_require_ghcr_auth() { return 0; }
+    _ci_registry_digest() { echo "sha256:aaa"; }
+    local sbom; sbom="$(_stub sbom 'printf "{}" > "$3"')"
+    : > "${calls}"
+    CI_SBOM_CMD="${sbom}" CI_RELEASE_GH_CMD="${gh}" run ci_cmd_release_sbom proxy v1.2.3
+    [ "${status}" -eq 0 ]
+    grep -q 'release upload v1.2.3' "${calls}"
+    grep -q 'proxy.cdx.json' "${calls}"
+    run ci_cmd_release_sbom proxy
+    [ "${status}" -ne 0 ]; [[ "${output}" == *"CI-ERROR-RELEASE-0008"* ]]
+}
+
+@test "release-vex generates the openvex document and attaches it" {
+    # What: One VEX per release, built from the trivyignore.
+    # Why: reuses the SOT vex generator; missing input fails.
+    # From: Issue #1683
+    local gh calls="${BATS_TEST_TMPDIR}/gh-calls"; gh="$(_release_gh_stub)"
+    export GH_CALLS="${calls}" GITHUB_REPOSITORY=o/r CI_TMPDIR="${BATS_TEST_TMPDIR}" CI_REPO_ROOT="${BATS_TEST_TMPDIR}"
+    printf '  - id: CVE-0\n' > "${BATS_TEST_TMPDIR}/.trivyignore.yaml"
+    local vex; vex="$(_stub vex 'printf "{\"statements\":[]}"')"
+    : > "${calls}"
+    CI_VEX_GENERATE_CMD="${vex}" CI_RELEASE_GH_CMD="${gh}" run ci_cmd_release_vex v1.2.3
+    [ "${status}" -eq 0 ]
+    grep -q 'release upload v1.2.3' "${calls}"
+    grep -q 'vex.openvex.json' "${calls}"
+    rm -f "${BATS_TEST_TMPDIR}/.trivyignore.yaml"
+    CI_VEX_GENERATE_CMD="${vex}" CI_RELEASE_GH_CMD="${gh}" run ci_cmd_release_vex v1.2.3
+    [ "${status}" -ne 0 ]; [[ "${output}" == *"CI-ERROR-RELEASE-0011"* ]]
+}
+
 # =========================================================
 # GC
 # =========================================================

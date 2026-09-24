@@ -37,6 +37,7 @@ declare -A CI_DISPATCH=(
     [aggregate]=ci_cmd_aggregate [emit-result]=ci_cmd_emit_result [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files
     [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [coverage-stack]=ci_cmd_coverage_stack [nightly-status]=ci_cmd_nightly_status
     [validate]=ci_cmd_validate [promote]=ci_cmd_promote [release]=ci_cmd_release
+    [release-publish]=ci_cmd_release_publish [release-sbom]=ci_cmd_release_sbom [release-vex]=ci_cmd_release_vex
     [gc]=ci_cmd_gc [variables]=ci_cmd_variables [check]=ci_cmd_check
     [version]=ci_cmd_version
 )
@@ -1956,6 +1957,22 @@ ci_cmd_coverage() {
     "${CI_COVERAGE_CMD:-_ci_default_coverage}" "${service}"
 }
 
+# What: Write a CycloneDX SBOM for an image digest.
+# Why: SBOM generate != vuln gate; shares the trivy cache.
+# From: Issue #1683
+_ci_trivy_sbom() {
+    local service="$1" digest="$2" out="$3" registry repo ref cache_rec cache_dir raw rc=0
+    registry="$(_ci_registry)" || return 2
+    repo="$(_ci_repo)"
+    ref="${registry}/${repo}/${service}@${digest}"
+    cache_rec="$(_ci_trivy_cache_dir)" || return 2
+    cache_dir="$(_ci_record_field "${cache_rec}" dir)"
+    raw="$(trivy image --format cyclonedx --cache-dir "${cache_dir}" --output "${out}" "${ref}" 2>&1)" || rc=$?
+    { [ "${rc}" -eq 0 ] && [ -s "${out}" ]; } && return 0
+    printf '%s\n' "${raw}" >&2
+    return 1
+}
+
 # What: Scan a published digest for vulnerabilities.
 # Why: /var/tmp staging (no tmpfs OOM), authed, fail-closed.
 # From: Issue #1683
@@ -2363,6 +2380,141 @@ ci_cmd_release() {
         return 2
     fi
     ci_cmd_promote latest
+}
+
+# What: Map a release tag to its prerelease flag.
+# Why: -rc.N ships as prerelease; vX.Y.Z is final.
+# From: Issue #1683
+_ci_release_prerelease() {
+    local tag="$1"
+    if [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
+        printf 'true\n'
+    elif [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        printf 'false\n'
+    else
+        ci_log "[CI-ERROR-RELEASE-0002]" "tag=\"${tag}\" reason=\"unsupported tag; use vX.Y.Z or vX.Y.Z-rc.N\""
+        return 2
+    fi
+}
+
+# What: Render the marker-delimited image provenance block.
+# Why: Records every shipped digest; SOT list, no hardcode.
+# From: Issue #1683
+_ci_release_notes_block() {
+    local tag="$1" registry repo target img dig
+    registry="$(_ci_registry)" || return "$?"
+    repo="$(_ci_repo)"
+    printf '%s\n' "${CI_RELEASE_NOTES_START:-<!-- lancache-ng-image-tags:start -->}"
+    printf 'Images published for %s (commit %s):\n\n' "${tag}" "${GITHUB_SHA:-unknown}"
+    for target in $(ci_build_targets) stack; do
+        img="${registry}/${repo}/${target}:${tag}"
+        dig="$(_ci_registry_digest "${img}")" || return "$?"
+        printf -- '- %s -> %s\n' "${img}" "${dig}"
+    done
+    printf '\nProvenance attestations and CycloneDX SBOMs attach per image.\n'
+    printf 'OpenVEX from .trivyignore.yaml attaches as vex.openvex.json.\n'
+    printf '%s\n' "${CI_RELEASE_NOTES_END:-<!-- lancache-ng-image-tags:end -->}"
+}
+
+# What: Upload one asset to a release, replacing any prior.
+# Why: One asset writer for SBOM and VEX; --clobber, no curl.
+# From: Issue #1683
+_ci_release_asset_put() {
+    local tag="$1" file="$2" gh="${CI_RELEASE_GH_CMD:-gh}" repo="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY required}"
+    [ -s "${file}" ] || { ci_log "[CI-ERROR-RELEASE-0004]" "file=\"${file}\" reason=\"asset file missing or empty\""; return 2; }
+    _ci_retry github-api "${gh}" release upload "${tag}" "${file}" --clobber --repo "${repo}" >/dev/null
+}
+
+# What: Create or update the GitHub release with notes.
+# Why: Idempotent marker replace; gh owner, prerelease-checked.
+# From: Issue #1683
+ci_cmd_release_publish() {
+    local tag="${1:-}"
+    [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0003]" "reason=\"tag arg required\""; return 2; }
+    local gh="${CI_RELEASE_GH_CMD:-gh}" repo="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY required}"
+    local sha="${GITHUB_SHA:?GITHUB_SHA required}" pre block start end body_file merged view rc=0
+    pre="$(_ci_release_prerelease "${tag}")" || return "$?"
+    _ci_require_ghcr_auth || return "$?"
+    block="$(_ci_release_notes_block "${tag}")" || return "$?"
+    start="${CI_RELEASE_NOTES_START:-<!-- lancache-ng-image-tags:start -->}"
+    end="${CI_RELEASE_NOTES_END:-<!-- lancache-ng-image-tags:end -->}"
+    body_file="$(mktemp "${CI_TMPDIR:-/var/tmp}/ci-release-notes.XXXXXX")"
+    if view="$("${gh}" release view "${tag}" --repo "${repo}" --json body,isPrerelease 2>/dev/null)"; then
+        local existing_body existing_pre
+        existing_body="$(printf '%s' "${view}" | jq -r '.body // ""')"
+        existing_pre="$(printf '%s' "${view}" | jq -r '.isPrerelease')"
+        if [ "${existing_pre}" != "${pre}" ]; then
+            rm -f "${body_file}"
+            ci_log "[CI-ERROR-RELEASE-0005]" "tag=\"${tag}\" reason=\"existing prerelease state != tag policy\" expected=\"${pre}\" found=\"${existing_pre}\""
+            return 2
+        fi
+        if [[ "${existing_body}" == *"${start}"* && "${existing_body}" == *"${end}"* ]]; then
+            merged="${existing_body%%"${start}"*}${block}${existing_body#*"${end}"}"
+        elif [ -n "${existing_body}" ]; then
+            merged="${existing_body}"$'\n\n'"${block}"
+        else
+            merged="${block}"
+        fi
+        printf '%s\n' "${merged}" > "${body_file}"
+        _ci_retry github-api "${gh}" release edit "${tag}" --repo "${repo}" \
+            --notes-file "${body_file}" --target "${sha}" >/dev/null || rc=$?
+    else
+        printf '%s\n' "${block}" > "${body_file}"
+        local -a create=("${gh}" release create "${tag}" --repo "${repo}"
+            --title "${tag}" --notes-file "${body_file}" --target "${sha}")
+        [ "${pre}" = true ] && create+=(--prerelease)
+        _ci_retry github-api "${create[@]}" >/dev/null || rc=$?
+    fi
+    rm -f "${body_file}"
+    [ "${rc}" -eq 0 ] || { ci_log "[CI-ERROR-RELEASE-0006]" "tag=\"${tag}\" reason=\"gh release create/edit failed\""; return 2; }
+    printf 'release=published tag=%s prerelease=%s\n' "${tag}" "${pre}"
+}
+
+# What: Generate and attach a CycloneDX SBOM for one image.
+# Why: Per-image provenance asset; reuses the trivy scanner.
+# From: Issue #1683
+ci_cmd_release_sbom() {
+    local service="${1:-}" tag="${2:-}"
+    [ -n "${service}" ] || { ci_log "[CI-ERROR-RELEASE-0007]" "reason=\"service arg required\""; return 2; }
+    [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0008]" "reason=\"tag arg required\""; return 2; }
+    _ci_require_ghcr_auth || return "$?"
+    local registry repo digest dir out rc=0
+    registry="$(_ci_registry)" || return "$?"
+    repo="$(_ci_repo)"
+    digest="$(_ci_registry_digest "${registry}/${repo}/${service}:${tag}")" || return "$?"
+    dir="$(mktemp -d "${CI_TMPDIR:-/var/tmp}/ci-sbom.XXXXXX")"
+    out="${dir}/${service}.cdx.json"
+    "${CI_SBOM_CMD:-_ci_trivy_sbom}" "${service}" "${digest}" "${out}" || rc=$?
+    if [ "${rc}" -ne 0 ]; then
+        rm -rf "${dir}"
+        ci_log "[CI-ERROR-RELEASE-0009]" "service=\"${service}\" reason=\"SBOM generation failed\""
+        return 2
+    fi
+    _ci_release_asset_put "${tag}" "${out}" || { rm -rf "${dir}"; return 2; }
+    rm -rf "${dir}"
+    printf 'release=sbom service=%s tag=%s digest=%s\n' "${service}" "${tag}" "${digest}"
+}
+
+# What: Generate and attach the OpenVEX document to a release.
+# Why: One VEX per release; reuses the SOT vex generator.
+# From: Issue #1683
+ci_cmd_release_vex() {
+    local tag="${1:-}"
+    [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0010]" "reason=\"tag arg required\""; return 2; }
+    local root="${CI_REPO_ROOT:-.}" trivyignore dir out rc=0
+    trivyignore="${root}/.trivyignore.yaml"
+    [ -s "${trivyignore}" ] || { ci_log "[CI-ERROR-RELEASE-0011]" "path=\"${trivyignore}\" reason=\"trivyignore missing; cannot build release VEX\""; return 2; }
+    dir="$(mktemp -d "${CI_TMPDIR:-/var/tmp}/ci-vex.XXXXXX")"
+    out="${dir}/vex.openvex.json"
+    _ci_generate_vex "${trivyignore}" "${root}" > "${out}" || rc=$?
+    if [ "${rc}" -ne 0 ] || [ ! -s "${out}" ]; then
+        rm -rf "${dir}"
+        ci_log "[CI-ERROR-RELEASE-0012]" "tag=\"${tag}\" reason=\"generate-vex produced no output\""
+        return 2
+    fi
+    _ci_release_asset_put "${tag}" "${out}" || { rm -rf "${dir}"; return 2; }
+    rm -rf "${dir}"
+    printf 'release=vex tag=%s\n' "${tag}"
 }
 
 # =========================================================
@@ -6545,20 +6697,33 @@ _ci_check_setup_keys_kea() {
     printf 'setup-keys-kea=clean\n'
 }
 
+# What: Emit the OpenVEX document for a trivyignore file.
+# Why: One VEX generator for drift-check and release attach.
+# From: Issue #1683
+_ci_generate_vex() {
+    local trivyignore="$1" repo_root="${2:-${CI_REPO_ROOT:-.}}"
+    local gen="${repo_root}/scripts/untracked/generate-vex.sh"
+    if [ -n "${CI_VEX_GENERATE_CMD:-}" ]; then
+        "${CI_VEX_GENERATE_CMD}" "${trivyignore}"
+        return "$?"
+    fi
+    [ -f "${gen}" ] || return 2
+    bash "${gen}" "${trivyignore}"
+}
+
 # What: Fail unless generate-vex.sh emits valid, non-empty OpenVEX.
 # Why: catch VEX generator bugs before post-merge discovery.
 # From: Issue #1683 | PR #1858 (absorbs check-vex-drift.sh)
 _ci_check_vex_drift() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local trivyignore="${repo_root}/.trivyignore.yaml"
-    local gen="${repo_root}/scripts/untracked/generate-vex.sh"
-    local out entry_count statement_count
+    local out entry_count statement_count rc=0
     [ -f "${trivyignore}" ] || { ci_error "[CI-ERROR-CHECK-0050]" "path=\"${trivyignore}\" reason=\".trivyignore.yaml not found\"" "${trivyignore}"; return 2; }
-    if [ -n "${CI_VEX_GENERATE_CMD:-}" ]; then
-        out="$("${CI_VEX_GENERATE_CMD}" "${trivyignore}")" || { ci_error "[CI-ERROR-CHECK-0050]" "reason=\"generate-vex.sh failed\"" "${trivyignore}"; return 1; }
-    else
-        [ -f "${gen}" ] || { ci_error "[CI-ERROR-CHECK-0050]" "path=\"${gen}\" reason=\"generate-vex.sh not found\"" "${gen}"; return 2; }
-        out="$(bash "${gen}" "${trivyignore}")" || { ci_error "[CI-ERROR-CHECK-0050]" "reason=\"generate-vex.sh failed\"" "${trivyignore}"; return 1; }
+    out="$(_ci_generate_vex "${trivyignore}" "${repo_root}")" || rc=$?
+    if [ "${rc}" -eq 2 ]; then
+        ci_error "[CI-ERROR-CHECK-0050]" "reason=\"generate-vex.sh not found\"" "${trivyignore}"; return 2
+    elif [ "${rc}" -ne 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0050]" "reason=\"generate-vex.sh failed\"" "${trivyignore}"; return 1
     fi
     if ! jq empty <<<"${out}" 2>/dev/null; then
         ci_error "[CI-ERROR-CHECK-0050]" "reason=\"generate-vex.sh produced invalid JSON\"" "${trivyignore}"
