@@ -469,7 +469,7 @@ wait_for_touched_image() {
 
 for service in "${full_setup_services[@]}"; do
     pr_image="ghcr.io/${REPOSITORY}/${service}:${PR_TAG}"
-    should_exist="$(vit_service_should_have_staging_tag "$service" "${touched_map[$service]}")"
+    should_exist="$(vit_service_should_have_staging_tag "$service" "${touched_map[$service]}" "$WORKFLOW_CHANGED")"
 
     if [[ "$should_exist" == "true" ]]; then
         if wait_for_touched_image "$pr_image" "$service"; then

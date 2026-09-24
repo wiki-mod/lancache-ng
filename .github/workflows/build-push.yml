@@ -1953,6 +1953,7 @@ jobs:
           PR_TAG: ${{ steps.channel.outputs.tag }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
+          WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow_reuse_scope }}
           PROXY_TOUCHED: ${{ needs['detect-changes'].outputs.proxy }}
           DNS_TOUCHED: ${{ needs['detect-changes'].outputs.dns_image }}
           WATCHDOG_TOUCHED: ${{ needs['detect-changes'].outputs.watchdog }}
@@ -1971,7 +1972,7 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/validation-image-tag.sh"
           : "${BASE_SHA:?BASE_SHA (github.event.pull_request.base.sha) is required}"
           service_should_have_staging_tag() {
-            vit_service_should_have_staging_tag "$1" "$2"
+            vit_service_should_have_staging_tag "$1" "$2" "$WORKFLOW_CHANGED"
           }
           declare -A touched_map=(
             [proxy]="$PROXY_TOUCHED"

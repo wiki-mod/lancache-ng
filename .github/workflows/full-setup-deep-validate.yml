@@ -272,6 +272,15 @@ jobs:
           dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
           dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      # The runner's /tmp is a small tmpfs. Registry inspection can emit
+      # repeated diagnostics, so keep this job's scratch files on disk.
+      - name: Create disk-backed staging scratch directory
+        run: |
+          set -euo pipefail
+          staging_tmpdir="/var/tmp/lancache-ng-staging-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          install -d -m 700 "$staging_tmpdir"
+          printf 'TMPDIR=%s\n' "$staging_tmpdir" >> "$GITHUB_ENV"
+
       - name: Wait for and ensure PR staging images
         env:
           REPOSITORY: ${{ github.repository }}
@@ -352,6 +361,15 @@ jobs:
         if: always()
         run: |
           docker buildx rm "${{ steps.buildx.outputs.name }}" || true
+
+      - name: Remove disk-backed staging scratch directory
+        if: always()
+        run: |
+          set -euo pipefail
+          case "${TMPDIR:-}" in
+            /var/tmp/lancache-ng-staging-*) rm -rf -- "$TMPDIR" ;;
+            *) echo "::error::Refusing to remove an unexpected TMPDIR value: ${TMPDIR:-<unset>}"; exit 1 ;;
+          esac
 
   # The ten simulation/validation jobs this suite shares with the manual
   # full-setup-validate.yml now live in one reusable workflow (issue #1014).

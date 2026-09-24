@@ -375,40 +375,51 @@ STUB
     ! printf '%s\n' "$output" | grep -q "confirmed no such manifest"
 }
 
-@test "workflow change no longer forces unrelated services to be treated as touched" {
-    # The workflow flag alone should be inert now: with no real service touch,
-    # every service is eligible for the cheap base-commit back-fill path.
-    export EXISTING_IMAGES="ghcr.io/wiki-mod/lancache-ng/build-tools:pr-715-sha-abcdef0"
+@test "workflow change requires every service's fresh PR staging tag" {
+    # A build-relevant workflow change rebuilds the entire matrix. Each
+    # service must therefore use its own PR tag instead of back-filling from
+    # a base commit whose push build may have failed.
+    EXISTING_IMAGES="$(printf '%s\n' \
+        ghcr.io/wiki-mod/lancache-ng/proxy:pr-715-sha-abcdef0 \
+        ghcr.io/wiki-mod/lancache-ng/dns:pr-715-sha-abcdef0 \
+        ghcr.io/wiki-mod/lancache-ng/watchdog:pr-715-sha-abcdef0 \
+        ghcr.io/wiki-mod/lancache-ng/ui:pr-715-sha-abcdef0 \
+        ghcr.io/wiki-mod/lancache-ng/build-tools:pr-715-sha-abcdef0 \
+        ghcr.io/wiki-mod/lancache-ng/dhcp:pr-715-sha-abcdef0 \
+        ghcr.io/wiki-mod/lancache-ng/dhcp-proxy:pr-715-sha-abcdef0 \
+        ghcr.io/wiki-mod/lancache-ng/ntp:pr-715-sha-abcdef0 \
+        ghcr.io/wiki-mod/lancache-ng/syslog:pr-715-sha-abcdef0)"
+    export EXISTING_IMAGES
     export WORKFLOW_CHANGED="true"
     export PROXY_TOUCHED="false" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
     run bash "$script"
     [ "$status" -eq 0 ]
-    # What: expects all nine full-setup services to back-fill.
-    # Why: full_setup_services now has 9 entries, not the old 5.
-    # From: PR #1775
-    [ "$(wc -l < "$backfill_log")" -eq 9 ]
-    grep -qF "build-tools:pr-715-sha-abcdef0" "$backfill_log"
+    [ ! -s "$backfill_log" ]
 }
 
-@test "workflow change: a real service touch still leaves unrelated services back-fill eligible" {
-    # The workflow flag must not broaden the touched set; only the real
-    # service touch below should remain required, while the others back-fill.
+@test "workflow change: a real service touch still requires every fresh PR tag" {
+    # The workflow gate applies to all services even when one service was
+    # also touched directly.
     # Declared and exported separately (SC2155): combining them would mask a
     # real failure exit status from the command substitution behind the
     # export builtin's own (always-successful-here) return value.
     EXISTING_IMAGES="$(printf '%s\n' \
-        ghcr.io/wiki-mod/lancache-ng/proxy:pr-715-sha-abcdef0)"
+        ghcr.io/wiki-mod/lancache-ng/proxy:pr-715-sha-abcdef0 \
+        ghcr.io/wiki-mod/lancache-ng/dns:pr-715-sha-abcdef0 \
+        ghcr.io/wiki-mod/lancache-ng/watchdog:pr-715-sha-abcdef0 \
+        ghcr.io/wiki-mod/lancache-ng/ui:pr-715-sha-abcdef0 \
+        ghcr.io/wiki-mod/lancache-ng/build-tools:pr-715-sha-abcdef0 \
+        ghcr.io/wiki-mod/lancache-ng/dhcp:pr-715-sha-abcdef0 \
+        ghcr.io/wiki-mod/lancache-ng/dhcp-proxy:pr-715-sha-abcdef0 \
+        ghcr.io/wiki-mod/lancache-ng/ntp:pr-715-sha-abcdef0 \
+        ghcr.io/wiki-mod/lancache-ng/syslog:pr-715-sha-abcdef0)"
     export EXISTING_IMAGES
     export WORKFLOW_CHANGED="true"
     export PROXY_TOUCHED="true" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
     export DHCP_TOUCHED="false" DHCP_PROXY_TOUCHED="false" NTP_TOUCHED="false" SYSLOG_TOUCHED="false"
     run bash "$script"
     [ "$status" -eq 0 ]
-    # What: expects the eight untouched services to back-fill.
-    # Why: nine total minus the one touched service, proxy.
-    # From: PR #1775
-    [ "$(wc -l < "$backfill_log")" -eq 8 ]
-    grep -qF "build-tools:pr-715-sha-abcdef0" "$backfill_log"
+    [ ! -s "$backfill_log" ]
 }
 
 @test "#895: past the normal budget, a still-active build-push run extends the wait until the tag appears" {
