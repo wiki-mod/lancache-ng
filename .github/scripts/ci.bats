@@ -5843,6 +5843,20 @@ _setup_keys_kea_fixture() {
     [[ "${output}" == *"CI-ERROR-CHECK-0063"* ]]
 }
 
+@test "check image-channel-resolution enforces the real channel/tag contract" {
+    # What: setup.sh/UI/prod-compose/docs share one image resolution.
+    # Why: pinned fails closed; mutable channels via the stack pointer.
+    # From: Issue #1683
+    run bash "${CI_SH}" check image-channel-resolution "${BATS_TEST_DIRNAME}/../.."
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"image-channel-resolution=clean"* ]]
+    local r="${BATS_TEST_TMPDIR}/icr-bad"; mkdir -p "${r}"
+    printf 'echo noop\n' > "${r}/setup.sh"
+    run bash "${CI_SH}" check image-channel-resolution "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0064"* ]]
+}
+
 @test "migrate_env_for_update repairs every empty required key" {
     # What: each SOT required-repair key is non-empty after update.
     # Why: an empty required key breaks the stack (AG-OP-007).

@@ -6919,6 +6919,70 @@ _ci_check_setup_docker_conflict() {
     printf 'setup-docker-conflict=clean\n'
 }
 
+# What: Fail unless image channel/tag resolves from config, pinned-safe.
+# Why: one resolution across setup.sh, UI, prod compose and the docs.
+# From: Issue #1683
+_ci_check_image_channel_resolution() {
+    local repo_root="${1:-${CI_REPO_ROOT}}"
+    local su="${repo_root}/setup.sh"
+    local sec="${repo_root}/services/ui/src/routes/secondaries.rs"
+    local prod="${repo_root}/deploy/prod/docker-compose.yml"
+    local -a viol=()
+    local f
+    [ -f "${su}" ] || { ci_error "[CI-ERROR-CHECK-0064]" "path=\"${su}\" reason=\"setup.sh not found\""; return 2; }
+    if awk '/^# .*Installing systemd watchdog/{i=1;p=0} /^# .*Post-start info/{i=0} i&&/docker[[:space:]]+compose([[:space:]]+--env-file[[:space:]]+[^[:space:]]+)?[[:space:]]+pull/{p=1} i&&!p&&/^[[:space:]]*(systemctl[[:space:]]+(enable|start)[[:space:]]+(lancache\.service|lancache-converge\.timer)|docker[[:space:]]+compose([[:space:]]+--env-file[[:space:]]+[^[:space:]]+)?[[:space:]]+up[[:space:]]+-d)/{v=1} END{exit v?0:1}' "${su}"; then
+        viol+=("setup.sh must not start/enable lancache services before image pull")
+    fi
+    for f in \
+        'lancache_image_registry=$(resolve_lancache_image_registry "$env_file")' \
+        'lancache_image_prefix=$(resolve_lancache_image_prefix "$env_file")' \
+        'lancache_image_channel=$(resolve_lancache_image_channel "$env_file")' \
+        'lancache_image_tag=$(resolve_lancache_image_tag "$env_file")' \
+        'LANCACHE_IMAGE_CHANNEL=pinned requires LANCACHE_IMAGE_TAG to be set to an immutable sha-* or vX.Y.Z tag.' \
+        'resolve_lancache_stack_channel_tag()' \
+        'docker cp "${container_id}:/stack.env" -' \
+        'response_image_tag=$(echo "$response"' \
+        'response_image_registry=$(echo "$response"' \
+        'response_image_prefix=$(echo "$response"' \
+        'response_image_channel=$(echo "$response"' \
+        'LANCACHE_IMAGE_REGISTRY=${LANCACHE_IMAGE_REGISTRY}' \
+        'LANCACHE_IMAGE_PREFIX=${LANCACHE_IMAGE_PREFIX}' \
+        'LANCACHE_IMAGE_CHANNEL=${lancache_image_channel}' \
+        'derive_release_archive_image_tag()' \
+        'channel="${channel:-latest}"'; do
+        grep -Fq "${f}" "${su}" || viol+=("setup.sh must keep image-resolution: ${f}")
+    done
+    if [ -f "${sec}" ]; then
+        for f in \
+            'pub image_tag: String' 'pub image_registry: String' \
+            'pub image_prefix: String' 'pub image_channel: String' \
+            'image_tag: state.config.lancache_image_tag.clone()' \
+            'image_registry: state.config.lancache_image_registry.clone()' \
+            'image_prefix: state.config.lancache_image_prefix.clone()' \
+            'image_channel: state.config.lancache_image_channel.clone()'; do
+            grep -Fq "${f}" "${sec}" || viol+=("secondaries.rs must expose/use ${f}")
+        done
+    fi
+    if [ -f "${prod}" ]; then
+        for f in \
+            'LANCACHE_IMAGE_REGISTRY=${LANCACHE_IMAGE_REGISTRY:-ghcr.io}' \
+            'LANCACHE_IMAGE_PREFIX=${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}' \
+            'LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL:-}' \
+            'LANCACHE_IMAGE_TAG=${LANCACHE_IMAGE_TAG:-latest}'; do
+            grep -Fq "${f}" "${prod}" || viol+=("prod compose must pass ${f}")
+        done
+    fi
+    grep -Fq 'LANCACHE_IMAGE_CHANNEL=latest' "${repo_root}/README.md" \
+        || viol+=("README must document latest as the install default")
+    grep -Fq 'fresh installs use `LANCACHE_IMAGE_CHANNEL=nightly` by default pre-1.0' "${repo_root}/docs/release-versioning.md" \
+        || viol+=("release docs must document nightly as the pre-1.0 default")
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0064]" "reason=\"image channel/tag resolution contract violated\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'image-channel-resolution=clean\n'
+}
+
 # What: Emit the OpenVEX document for a trivyignore file.
 # Why: One VEX generator for drift-check and release attach.
 # From: Issue #1683
@@ -7582,7 +7646,8 @@ ci_cmd_check_all() {
         dependabot-docker-base-consistency idempotence-test-coverage \
         prebuilt-prod prod-state-wiring compose-config nats-atomic-write \
         docker-socket-proxy quickstart-required-env dhcp-proxy-env \
-        setup-keys-kea setup-update-safety setup-docker-conflict vex-drift netdata-curl-pin logging-matrix \
+        setup-keys-kea setup-update-safety setup-docker-conflict image-channel-resolution \
+        vex-drift netdata-curl-pin logging-matrix \
         trivy-action-direct-usage entrypoint-lib-wiring dockerfile-build-tools \
         cargo-profile-tuning no-source-compiled-tools)
     for sub in "${repo_wide[@]}"; do
@@ -7644,6 +7709,7 @@ ci_cmd_check() {
         setup-keys-kea) _ci_check_setup_keys_kea "$@" ;;
         setup-update-safety) _ci_check_setup_update_safety "$@" ;;
         setup-docker-conflict) _ci_check_setup_docker_conflict "$@" ;;
+        image-channel-resolution) _ci_check_image_channel_resolution "$@" ;;
         vex-drift) _ci_check_vex_drift "$@" ;;
         netdata-curl-pin) _ci_check_netdata_curl_pin "$@" ;;
         logging-matrix) _ci_check_logging_matrix "$@" ;;
