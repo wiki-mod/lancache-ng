@@ -4289,6 +4289,33 @@ _anv_run() {
     [[ "${output}" == *"CI-ERROR-AGGREGATE-0005"* ]]
 }
 
+@test "scan-stack scans each built matrix pair and fails closed on a missing digest/matrix" {
+    # What: SCAN before ACCEPT for every built pair (§7); thin YAML.
+    # Why: iteration lives in ci.sh; missing digest or matrix fails closed.
+    # From: Issue #1683
+    _ci_require_ghcr_auth() { return 0; }
+    _ci_identity_for() { echo "id-$1"; }
+    _ci_image_tag() { echo "reg/$1:$3"; }
+    _ci_registry_digest() { echo "sha256:d-$1"; }
+    local calls="${BATS_TEST_TMPDIR}/scan-calls"
+    : > "${calls}"
+    ci_cmd_scan() { printf 'scan %s %s\n' "$1" "$2" >> "${calls}"; }
+    export CI_BUILD_MATRIX='{"include":[{"service":"dns","platform":"linux/amd64"},{"service":"ui","platform":"linux/arm64"}]}'
+    run ci_cmd_scan_stack
+    [ "${status}" -eq 0 ]
+    run cat "${calls}"
+    [[ "${output}" == *"scan dns "* ]]
+    [[ "${output}" == *"scan ui "* ]]
+    _ci_registry_digest() { return 1; }
+    run ci_cmd_scan_stack
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-SCAN-0017"* ]]
+    unset CI_BUILD_MATRIX
+    run ci_cmd_scan_stack
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-SCAN-0016"* ]]
+}
+
 @test "action-node-versions resolver: yaml fallback, transient retry, permanent stop" {
     # What: real curl path -- .yml->.yaml, 403 retries, 401 stops.
     # Why: fetch mechanics have no hook; a counted mock proves them.

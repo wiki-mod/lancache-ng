@@ -34,7 +34,8 @@ declare -A CI_DISPATCH=(
     [resolve]=ci_cmd_resolve [build]=ci_cmd_build [build-args]=ci_cmd_build_args
     [build-tools]=ci_cmd_build_tools [publish]=ci_cmd_publish [verify]=ci_cmd_verify
     [test]=ci_cmd_test [coverage]=ci_cmd_coverage [scan]=ci_cmd_scan [assemble]=ci_cmd_assemble
-    [aggregate]=ci_cmd_aggregate [emit-result]=ci_cmd_emit_result [aggregate-stack]=ci_cmd_aggregate_stack
+    [aggregate]=ci_cmd_aggregate [emit-result]=ci_cmd_emit_result [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files
+    [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [coverage-stack]=ci_cmd_coverage_stack
     [validate]=ci_cmd_validate [promote]=ci_cmd_promote [release]=ci_cmd_release
     [gc]=ci_cmd_gc [variables]=ci_cmd_variables [check]=ci_cmd_check
     [version]=ci_cmd_version
@@ -1071,17 +1072,26 @@ ci_cmd_aggregate() {
     return "${rc}"
 }
 
+# What: the published per-identity digest for a service/platform.
+# Why: emit-result and scan-stack resolve it identically (AG-CODE-011).
+# From: Issue #1683
+_ci_published_digest() {
+    local svc="$1" plat="$2" identity tag
+    identity="$(_ci_identity_for "${svc}" "${plat}")" || return "$?"
+    tag="$(_ci_image_tag "${svc}" "${plat}" "${identity}")"
+    _ci_registry_digest "${tag}"
+}
+
 # What: Emit one service/platform acceptance result.json (§26.1).
 # Why: the single aggregator reads these; digest verified from GHCR.
 # From: Issue #1683
 ci_cmd_emit_result() {
-    local service="${1:-}" platform="${2:-}" identity tag digest
+    local service="${1:-}" platform="${2:-}" identity digest
     [ -n "${service}" ] || { ci_log "[CI-ERROR-RESULT-0001]" "reason=\"service arg required\""; return 2; }
     [ -n "${platform}" ] || { ci_log "[CI-ERROR-RESULT-0002]" "reason=\"platform arg required\""; return 2; }
     _ci_require_ghcr_auth || return "$?"
     identity="$(_ci_identity_for "${service}" "${platform}")" || return "$?"
-    tag="$(_ci_image_tag "${service}" "${platform}" "${identity}")"
-    digest="$(_ci_registry_digest "${tag}")" || {
+    digest="$(_ci_published_digest "${service}" "${platform}")" || {
         ci_log "[CI-ERROR-RESULT-0003]" "service=\"${service}\" platform=\"${platform}\" reason=\"no published digest to accept\""
         return 2
     }
@@ -1089,21 +1099,83 @@ ci_cmd_emit_result() {
         '{service:$s, platform:$p, build_identity:$i, digest:$d, state:"ACCEPTED"}'
 }
 
+# What: emit "service platform" per built matrix pair.
+# Why: one matrix walk; aggregate-stack and scan-stack share it (AG-CODE-011).
+# From: Issue #1683
+_ci_matrix_pairs() {
+    printf '%s' "$1" | jq -r '.include[] | "\(.service) \(.platform)"'
+}
+
 # What: aggregate the built matrix into the ledger in one write.
 # Why: emit each pair's result.json, then one CAS commit (§26.1); thin YAML.
 # From: Issue #1683
 ci_cmd_aggregate_stack() {
-    local matrix="${CI_BUILD_MATRIX:-}" dir row svc plat
+    local matrix="${CI_BUILD_MATRIX:-}" dir svc plat
     [ -n "${matrix}" ] || { ci_log "[CI-ERROR-AGGREGATE-0005]" "reason=\"CI_BUILD_MATRIX required\""; return 2; }
     dir="$(mktemp -d "${CI_TMPDIR:-/var/tmp}/ci-results.XXXXXX")" || return 2
-    while IFS= read -r row; do
-        [ -n "${row}" ] || continue
-        svc="$(printf '%s' "${row}" | jq -r '.service')"
-        plat="$(printf '%s' "${row}" | jq -r '.platform')"
+    while read -r svc plat; do
+        [ -n "${svc}" ] || continue
         ci_cmd_emit_result "${svc}" "${plat}" > "${dir}/${svc}-${plat//\//-}.json" || return "$?"
-    done < <(printf '%s' "${matrix}" | jq -c '.include[]')
+    done < <(_ci_matrix_pairs "${matrix}")
     ci_cmd_aggregate "${dir}"
 }
+
+# What: scan every built matrix pair by its published digest (§7).
+# Why: SCAN before ACCEPT; thin YAML, iteration lives in ci.sh.
+# From: Issue #1683
+ci_cmd_scan_stack() {
+    local matrix="${CI_BUILD_MATRIX:-}" svc plat digest
+    [ -n "${matrix}" ] || { ci_log "[CI-ERROR-SCAN-0016]" "reason=\"CI_BUILD_MATRIX required\""; return 2; }
+    _ci_require_ghcr_auth || return "$?"
+    while read -r svc plat; do
+        [ -n "${svc}" ] || continue
+        digest="$(_ci_published_digest "${svc}" "${plat}")" || {
+            ci_log "[CI-ERROR-SCAN-0017]" "service=\"${svc}\" platform=\"${plat}\" reason=\"no published digest to scan\""
+            return 2
+        }
+        ci_cmd_scan "${svc}" "${digest}" || return "$?"
+    done < <(_ci_matrix_pairs "${matrix}")
+}
+
+# What: write and echo the changed-file list path for this event.
+# Why: one git-walk owner; plan/lint/checks share it (AG-CODE-011).
+# From: Issue #1683
+ci_cmd_changed_files() {
+    local out="${RUNNER_TEMP:-/var/tmp}/changed-files.txt"
+    if [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
+        git diff --name-only "${BASE_SHA:-}...FETCH_HEAD" > "${out}"
+    elif [ -n "${BEFORE_SHA:-}" ] \
+        && [ "${BEFORE_SHA}" != 0000000000000000000000000000000000000000 ] \
+        && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+        git diff --name-only "${BEFORE_SHA}" "${GITHUB_SHA}" > "${out}"
+    else
+        git ls-files > "${out}"
+    fi
+    printf '%s\n' "${out}"
+}
+
+# What: assemble every product service the build matrix produced.
+# Why: one matrix walk; thin YAML, iteration in ci.sh (AG-CODE-011).
+# From: Issue #1683
+ci_cmd_assemble_stack() {
+    local matrix="${CI_BUILD_MATRIX:-}" svc
+    [ -n "${matrix}" ] || { ci_log "[CI-ERROR-ASSEMBLE-0006]" "reason=\"CI_BUILD_MATRIX required\""; return 2; }
+    for svc in $(printf '%s' "${matrix}" | jq -r '[.include[].service] | unique | .[]'); do
+        ci_cmd_assemble "${svc}" || return "$?"
+    done
+}
+
+# What: run one ci.sh op for every changed rust test service.
+# Why: test-stack and coverage-stack share one TEST_SERVICES walk.
+# From: Issue #1683
+_ci_for_test_services() {
+    local fn="$1" svc
+    for svc in ${TEST_SERVICES:-}; do
+        "${fn}" "${svc}" || return "$?"
+    done
+}
+ci_cmd_test_stack() { _ci_for_test_services ci_cmd_test; }
+ci_cmd_coverage_stack() { _ci_for_test_services ci_cmd_coverage; }
 
 # =========================================================
 # CACHE CONFIGURATION

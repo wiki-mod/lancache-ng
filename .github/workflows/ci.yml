@@ -1,7 +1,7 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: CI 2.0 Base-CI: plan the product build, then result.
+# What: CI 2.0 Base-CI: plan, build, accept, promote the product stack.
 # Why: thin orchestration of ci.sh; one SOT build-manifest.yml.
 # From: Issue #1683
 name: CI 2.0
@@ -40,40 +40,30 @@ jobs:
       test-services: ${{ steps.plan.outputs.test-services }}
       docs-only: ${{ steps.plan.outputs.docs-only }}
     steps:
-      # What: native fail-closed checkout; no pinned action (AG-CI-006).
-      # Why: no SHA pin may live outside the SOT; git is a runner tool.
+      # What: native fail-closed checkout with full history for the diff.
+      # Why: no SHA pin outside the SOT; persistent auth for ci.sh git ops.
       # From: Issue #1683
-      - name: Bootstrap the working tree
+      - &bootstrap_diff
+        name: Bootstrap the working tree
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           git init -q .
           git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          git -c http.extraheader="AUTHORIZATION: bearer ${GHCR_TOKEN}" \
-            fetch -q --no-tags origin "${GITHUB_REF}" ${BASE_SHA:+"${BASE_SHA}"}
+          git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: bearer ${GHCR_TOKEN}"
+          git fetch -q --no-tags origin "${GITHUB_REF}" ${BASE_SHA:+"${BASE_SHA}"}
           git checkout -q FETCH_HEAD
-      # What: compute the changed-path list for this event.
-      # Why: ci.sh reads CHANGED_FILES and never walks git itself.
+      # What: ci.sh writes the changed-path list; the workflow only wires it.
+      # Why: one git-walk owner; plan/lint/checks share it (AG-CODE-011).
       # From: Issue #1683
-      - name: Collect changed files
+      - &collect_changed
+        name: Collect changed files
         id: changed
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           BEFORE_SHA: ${{ github.event.before }}
-        run: |
-          set -euo pipefail
-          out="${RUNNER_TEMP}/changed-files.txt"
-          if [ "${GITHUB_EVENT_NAME}" = pull_request ]; then
-            git diff --name-only "${BASE_SHA}...FETCH_HEAD" > "${out}"
-          elif [ -n "${BEFORE_SHA}" ] \
-            && [ "${BEFORE_SHA}" != 0000000000000000000000000000000000000000 ] \
-            && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
-            git diff --name-only "${BEFORE_SHA}" "${GITHUB_SHA}" > "${out}"
-          else
-            git ls-files > "${out}"
-          fi
-          echo "file=${out}" >> "$GITHUB_OUTPUT"
+        run: echo "file=$(bash .github/scripts/ci.sh changed-files)" >> "$GITHUB_OUTPUT"
       - name: Plan the product build matrix
         id: plan
         env:
@@ -93,13 +83,17 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     steps:
-      - name: Bootstrap the working tree
+      # What: native fail-closed checkout, shallow; persistent ci.sh auth.
+      # Why: no SHA pin outside the SOT; git is a runner tool (AG-CI-006).
+      # From: Issue #1683
+      - &bootstrap
+        name: Bootstrap the working tree
         run: |
           set -euo pipefail
           git init -q .
           git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          git -c http.extraheader="AUTHORIZATION: bearer ${GHCR_TOKEN}" \
-            fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
+          git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: bearer ${GHCR_TOKEN}"
+          git fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
           git checkout -q FETCH_HEAD
       # What: publish the immutable per-identity ref, then read it back.
       # Why: BUILD != PUBLISH; readback confirms the exact digest (§22/§23).
@@ -124,22 +118,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - name: Bootstrap the working tree
-        run: |
-          set -euo pipefail
-          git init -q .
-          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          git -c http.extraheader="AUTHORIZATION: bearer ${GHCR_TOKEN}" \
-            fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
-          git checkout -q FETCH_HEAD
+      - *bootstrap
       - name: Test the changed rust services
         env:
           TEST_SERVICES: ${{ needs.plan.outputs.test-services }}
-        run: |
-          set -euo pipefail
-          for service in ${TEST_SERVICES}; do
-            bash .github/scripts/ci.sh test "${service}"
-          done
+        run: bash .github/scripts/ci.sh test-stack
 
   # What: pin the published build-tools image by digest for container jobs.
   # Why: toolchain jobs run in the SOT-verified image, digest-immutable.
@@ -152,14 +135,7 @@ jobs:
     outputs:
       image: ${{ steps.resolve.outputs.image }}
     steps:
-      - name: Bootstrap the working tree
-        run: |
-          set -euo pipefail
-          git init -q .
-          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          git -c http.extraheader="AUTHORIZATION: bearer ${GHCR_TOKEN}" \
-            fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
-          git checkout -q FETCH_HEAD
+      - *bootstrap
       - name: Resolve the build-tools image
         id: resolve
         run: |
@@ -175,20 +151,13 @@ jobs:
     needs: [plan, resolve-build-tools]
     if: needs.plan.outputs.test-services != ''
     runs-on: ubuntu-latest
-    container:
+    container: &bt_container
       image: ${{ needs.resolve-build-tools.outputs.image }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Bootstrap the working tree
-        run: |
-          set -euo pipefail
-          git init -q .
-          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          git -c http.extraheader="AUTHORIZATION: bearer ${GHCR_TOKEN}" \
-            fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
-          git checkout -q FETCH_HEAD
+      - *bootstrap
       - name: Audit rust dependencies
         run: bash .github/scripts/ci.sh check cargo-audit
 
@@ -200,40 +169,10 @@ jobs:
     needs: [plan, resolve-build-tools]
     if: needs.plan.outputs.docs-only != 'true'
     runs-on: ubuntu-latest
-    container:
-      image: ${{ needs.resolve-build-tools.outputs.image }}
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+    container: *bt_container
     steps:
-      - name: Bootstrap the working tree
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          set -euo pipefail
-          git init -q .
-          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          git -c http.extraheader="AUTHORIZATION: bearer ${GHCR_TOKEN}" \
-            fetch -q --no-tags origin "${GITHUB_REF}" ${BASE_SHA:+"${BASE_SHA}"}
-          git checkout -q FETCH_HEAD
-      - name: Collect changed files
-        id: changed
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          BEFORE_SHA: ${{ github.event.before }}
-        run: |
-          set -euo pipefail
-          out="${RUNNER_TEMP:-/tmp}/changed-files.txt"
-          if [ "${GITHUB_EVENT_NAME}" = pull_request ]; then
-            git diff --name-only "${BASE_SHA}...FETCH_HEAD" > "${out}"
-          elif [ -n "${BEFORE_SHA}" ] \
-            && [ "${BEFORE_SHA}" != 0000000000000000000000000000000000000000 ] \
-            && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
-            git diff --name-only "${BEFORE_SHA}" "${GITHUB_SHA}" > "${out}"
-          else
-            git ls-files > "${out}"
-          fi
-          echo "file=${out}" >> "$GITHUB_OUTPUT"
+      - *bootstrap_diff
+      - *collect_changed
       - name: shellcheck changed shell scripts
         env:
           CHANGED_FILES: ${{ steps.changed.outputs.file }}
@@ -250,52 +189,43 @@ jobs:
     if: needs.plan.outputs.test-services != ''
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    container:
-      image: ${{ needs.resolve-build-tools.outputs.image }}
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+    container: *bt_container
     steps:
-      - name: Bootstrap the working tree
-        run: |
-          set -euo pipefail
-          git init -q .
-          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          git -c http.extraheader="AUTHORIZATION: bearer ${GHCR_TOKEN}" \
-            fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
-          git checkout -q FETCH_HEAD
+      - *bootstrap
       - name: Cover the changed rust services
         env:
           TEST_SERVICES: ${{ needs.plan.outputs.test-services }}
-        run: |
-          set -euo pipefail
-          for service in ${TEST_SERVICES}; do
-            bash .github/scripts/ci.sh coverage "${service}"
-          done
+        run: bash .github/scripts/ci.sh coverage-stack
+
+  # What: trivy-scan every built image by digest before ACCEPT (§7).
+  # Why: SCAN gates ACCEPT; the scanner lives in the build-tools image.
+  # From: Issue #1683
+  scan:
+    name: scan
+    needs: [plan, build, resolve-build-tools]
+    if: needs.plan.outputs.any-build == 'true'
+    runs-on: ubuntu-latest
+    container: *bt_container
+    steps:
+      - *bootstrap
+      - name: Scan the built images by digest
+        env:
+          CI_BUILD_MATRIX: ${{ needs.plan.outputs.matrix }}
+        run: bash .github/scripts/ci.sh scan-stack
 
   # What: one acceptance result.json per built pair; one ledger write (§26.1).
   # Why: single aggregator, exactly one CAS commit; push only, never a PR.
   # From: Issue #1683
   aggregate:
     name: aggregate
-    needs: [plan, build]
+    needs: [plan, build, scan]
     if: needs.plan.outputs.any-build == 'true' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: write
       packages: read
     steps:
-      - name: Bootstrap the working tree
-        run: |
-          set -euo pipefail
-          git init -q .
-          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: bearer ${GHCR_TOKEN}"
-          git fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
-          git checkout -q FETCH_HEAD
-      # What: emit one result.json per built pair, then one ledger commit.
-      # Why: ci.sh owns identity, digest and the single CAS write (§26.1).
-      # From: Issue #1683
+      - *bootstrap
       - name: Aggregate acceptance into the ledger
         env:
           CI_BUILD_MATRIX: ${{ needs.plan.outputs.matrix }}
@@ -307,28 +237,14 @@ jobs:
   assemble:
     name: assemble
     needs: [plan, aggregate]
-    if: needs.plan.outputs.any-build == 'true'
+    if: needs.plan.outputs.any-build == 'true' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - name: Bootstrap the working tree
-        run: |
-          set -euo pipefail
-          git init -q .
-          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          git -c http.extraheader="AUTHORIZATION: bearer ${GHCR_TOKEN}" \
-            fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
-          git checkout -q FETCH_HEAD
-      # What: assemble each product service the build matrix produced.
-      # Why: one index per service; ci.sh enforces both-platform (§45).
-      # From: Issue #1683
+      - *bootstrap
       - name: Assemble multi-arch indexes
         env:
-          MATRIX: ${{ needs.plan.outputs.matrix }}
-        run: |
-          set -euo pipefail
-          for service in $(jq -r '[.include[].service] | unique | .[]' <<< "${MATRIX}"); do
-            bash .github/scripts/ci.sh assemble "${service}"
-          done
+          CI_BUILD_MATRIX: ${{ needs.plan.outputs.matrix }}
+        run: bash .github/scripts/ci.sh assemble-stack
 
   # What: full-setup stack validation on the exact accepted candidate (§49).
   # Why: STACK ACCEPTED only after health + integration + client sim.
@@ -343,17 +259,7 @@ jobs:
       contents: read
       packages: read
     steps:
-      - name: Bootstrap the working tree
-        run: |
-          set -euo pipefail
-          git init -q .
-          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: bearer ${GHCR_TOKEN}"
-          git fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
-          git checkout -q FETCH_HEAD
-      # What: candidate comes from the ledger; full-setup validates it.
-      # Why: exact accepted digests, no moving tags (§48/§49).
-      # From: Issue #1683
+      - *bootstrap
       - name: Validate the accepted stack candidate
         run: bash .github/scripts/ci.sh validate
 
@@ -371,14 +277,7 @@ jobs:
     env:
       CI_STACK_VALIDATED: SUCCESS
     steps:
-      - name: Bootstrap the working tree
-        run: |
-          set -euo pipefail
-          git init -q .
-          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: bearer ${GHCR_TOKEN}"
-          git fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
-          git checkout -q FETCH_HEAD
+      - *bootstrap
       - name: Promote the latest channel
         run: bash .github/scripts/ci.sh promote latest
 
@@ -395,34 +294,8 @@ jobs:
       PR_BODY: ${{ github.event.pull_request.body }}
       REPO: ${{ github.repository }}
     steps:
-      - name: Bootstrap the working tree
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          set -euo pipefail
-          git init -q .
-          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          git -c http.extraheader="AUTHORIZATION: bearer ${GHCR_TOKEN}" \
-            fetch -q --no-tags origin "${GITHUB_REF}" ${BASE_SHA:+"${BASE_SHA}"}
-          git checkout -q FETCH_HEAD
-      - name: Collect changed files
-        id: changed
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          BEFORE_SHA: ${{ github.event.before }}
-        run: |
-          set -euo pipefail
-          out="${RUNNER_TEMP}/changed-files.txt"
-          if [ "${GITHUB_EVENT_NAME}" = pull_request ]; then
-            git diff --name-only "${BASE_SHA}...FETCH_HEAD" > "${out}"
-          elif [ -n "${BEFORE_SHA}" ] \
-            && [ "${BEFORE_SHA}" != 0000000000000000000000000000000000000000 ] \
-            && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
-            git diff --name-only "${BEFORE_SHA}" "${GITHUB_SHA}" > "${out}"
-          else
-            git ls-files > "${out}"
-          fi
-          echo "file=${out}" >> "$GITHUB_OUTPUT"
+      - *bootstrap_diff
+      - *collect_changed
       - name: Run the PR/push check set
         env:
           CHANGED_FILES: ${{ steps.changed.outputs.file }}
@@ -433,7 +306,7 @@ jobs:
   # From: Issue #1683
   result:
     name: result
-    needs: [plan, build, test, resolve-build-tools, cargo-audit, lint, coverage, aggregate, assemble, validate, promote, checks]
+    needs: [plan, build, test, resolve-build-tools, cargo-audit, lint, coverage, scan, aggregate, assemble, validate, promote, checks]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -447,6 +320,7 @@ jobs:
           cargo_audit='${{ needs.cargo-audit.result }}'
           lint='${{ needs.lint.result }}'
           coverage='${{ needs.coverage.result }}'
+          scan='${{ needs.scan.result }}'
           aggregate='${{ needs.aggregate.result }}'
           assemble='${{ needs.assemble.result }}'
           validate='${{ needs.validate.result }}'
@@ -456,7 +330,7 @@ jobs:
           if [ "${plan}" != success ]; then
             echo "[CI-ERROR-CORE-0100] phase=plan result=${plan}" >&2; exit 1
           fi
-          for phase in build:"${build}" test:"${test}" resolve-build-tools:"${resolve_bt}" cargo-audit:"${cargo_audit}" lint:"${lint}" coverage:"${coverage}" aggregate:"${aggregate}" assemble:"${assemble}" validate:"${validate}" promote:"${promote}"; do
+          for phase in build:"${build}" test:"${test}" resolve-build-tools:"${resolve_bt}" cargo-audit:"${cargo_audit}" lint:"${lint}" coverage:"${coverage}" scan:"${scan}" aggregate:"${aggregate}" assemble:"${assemble}" validate:"${validate}" promote:"${promote}"; do
             case "${phase#*:}" in
               success|skipped) ;;
               *) echo "[CI-ERROR-CORE-0100] phase=${phase%%:*} result=${phase#*:}" >&2; exit 1 ;;
