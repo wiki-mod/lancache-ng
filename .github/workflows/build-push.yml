@@ -3486,6 +3486,7 @@ jobs:
           DETECT_CHANGES_RESULT: ${{ needs['detect-changes'].result }}
           SUPERSEDED: ${{ needs['push-supersession-check'].outputs.superseded }}
           REUSE_JOB_RESULT: ${{ needs['determine-push-reuse-scope'].result }}
+          WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow_reuse_scope }}
           REUSE_PROXY: ${{ needs['determine-push-reuse-scope'].outputs.reuse_proxy }}
           REUSE_DNS: ${{ needs['determine-push-reuse-scope'].outputs.reuse_dns }}
           REUSE_WATCHDOG: ${{ needs['determine-push-reuse-scope'].outputs.reuse_watchdog }}
@@ -3536,7 +3537,14 @@ jobs:
                 exit 1
                 ;;
             esac
-            if [ "$should_build" = "false" ] && [ "$REUSE_JOB_RESULT" = "success" ]; then
+            # What: Rebuild every service after shared CI contract changes
+            # Why: PR staging tags must reflect the current build path
+            # From: Issue #1860 | PR #1872
+            if [ "$WORKFLOW_CHANGED" = "true" ]; then
+              should_build=true
+              reuse_eligible=false
+              echo "::notice::$MATRIX_SERVICE rebuild is required because the shared CI build contract changed."
+            elif [ "$should_build" = "false" ] && [ "$REUSE_JOB_RESULT" = "success" ]; then
               reuse="$(reuse_for_service "$MATRIX_SERVICE")"
               if [ "$reuse" = "true" ]; then
                 reuse_eligible=true
@@ -4146,6 +4154,7 @@ jobs:
           DETECT_CHANGES_RESULT: ${{ needs['detect-changes'].result }}
           SUPERSEDED: ${{ needs['push-supersession-check'].outputs.superseded }}
           REUSE_JOB_RESULT: ${{ needs['determine-push-reuse-scope'].result }}
+          WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow_reuse_scope }}
           REUSE_PROXY: ${{ needs['determine-push-reuse-scope'].outputs.reuse_proxy }}
           REUSE_DNS: ${{ needs['determine-push-reuse-scope'].outputs.reuse_dns }}
           REUSE_WATCHDOG: ${{ needs['determine-push-reuse-scope'].outputs.reuse_watchdog }}
@@ -4196,7 +4205,14 @@ jobs:
                 exit 1
                 ;;
             esac
-            if [ "$should_build" = "false" ] && [ "$REUSE_JOB_RESULT" = "success" ]; then
+            # What: Rebuild every service after shared CI contract changes
+            # Why: PR staging tags must reflect the current build path
+            # From: Issue #1860 | PR #1872
+            if [ "$WORKFLOW_CHANGED" = "true" ]; then
+              should_build=true
+              reuse_eligible=false
+              echo "::notice::$MATRIX_SERVICE rebuild is required because the shared CI build contract changed."
+            elif [ "$should_build" = "false" ] && [ "$REUSE_JOB_RESULT" = "success" ]; then
               reuse="$(reuse_for_service "$MATRIX_SERVICE")"
               if [ "$reuse" = "true" ]; then
                 reuse_eligible=true
