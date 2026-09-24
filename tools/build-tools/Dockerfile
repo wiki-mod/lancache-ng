@@ -99,7 +99,7 @@ RUN --mount=type=cache,target=${PROJECT_SELFHOSTED_GOMODCACHE},sharing=locked \
     --mount=type=cache,target=${PROJECT_SELFHOSTED_GOCACHE},sharing=locked \
     --mount=type=secret,id=project_selfhosted_proxy_ca set -eu; \
     apk update; \
-    apk add --no-cache ca-certificates curl tar; \
+    apk add --no-cache ca-certificates curl parallel tar; \
     sh /install-ca-cert.sh; \
     case "$(apk --print-arch)" in \
       x86_64) \
@@ -236,6 +236,7 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
       openssl \
       openssl-dev \
       openssl-libs-static \
+      parallel \
       perl \
       pkgconf \
       procps-ng \
@@ -436,6 +437,7 @@ RUN set -euo pipefail; \
       mktemp \
       mv \
       openssl \
+      parallel \
       printf \
       ps \
       rm \
@@ -583,6 +585,7 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
       jq \
       lld \
       make \
+      parallel \
       pkg-config \
       shellcheck \
       sqlite3 \
@@ -701,6 +704,7 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
       iproute2 \
       isc-dhcp-client \
       openssl \
+      parallel \
       procps \
       python3 \
       rsync \
@@ -713,7 +717,7 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
     # What: force-upgrade jq/libjq1/libpq for known CVEs
     # Why: jq/libpq pulled transitively with CVE exposure
     # From: Issue #1570 | PR #1571
-    apt-get install -y --no-install-recommends --only-upgrade linux-libc-dev jq libjq1 libpq-dev libpq5; \
+    apt-get install -y --no-install-recommends --only-upgrade linux-libc-dev jq libjq1 libpq-dev parallel libpq5; \
     distcc_pump_tmp="$(mktemp -d)"; \
     chmod 0755 "${distcc_pump_tmp}"; \
     # What: chown temp dir to _apt:root for apt-get
