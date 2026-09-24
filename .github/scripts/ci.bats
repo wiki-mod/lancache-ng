@@ -99,6 +99,38 @@ teardown() {
     [[ "${output}" == *"ui=false"* ]]
     [[ "${output}" == *"dns=false"* ]]
 }
+@test "codeql-impact admits Rust analysis on an analyzed crate source change" {
+    # What: A path under the config's services/*/src selects Rust analysis.
+    # Why: §73 admits analysis on a real analyzed-source change.
+    # From: Issue #1683
+    run bash "${CI_SH}" codeql-impact services/ui/src/main.rs
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"codeql-rust=true"* ]]
+}
+@test "codeql-impact is NOOP for a non-source change in a Rust service" {
+    # What: A service Dockerfile is not analyzed Rust source.
+    # Why: irrelevant changes must not trigger extraction (§73).
+    # From: Issue #1683
+    run bash "${CI_SH}" codeql-impact services/ui/Dockerfile
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"codeql-rust=false"* ]]
+}
+@test "codeql-impact is NOOP for a non-Rust service change" {
+    # What: A proxy change touches no analyzed Rust source path.
+    # Why: unrelated services must NOOP (§73).
+    # From: Issue #1683
+    run bash "${CI_SH}" codeql-impact services/proxy/nginx.conf
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"codeql-rust=false"* ]]
+}
+@test "codeql-impact admits Rust analysis on a CodeQL config change" {
+    # What: The query config re-scopes what CodeQL analyzes.
+    # Why: a config edit can change the Rust analysis (§73).
+    # From: Issue #1683
+    run bash "${CI_SH}" codeql-impact .github/codeql/codeql-config.yml
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"codeql-rust=true"* ]]
+}
 
 @test "plan rebuilds proxy on a dns-domains (cdn-domains.txt) change" {
     # What: proxy COPYs cdn-domains.txt (named context).

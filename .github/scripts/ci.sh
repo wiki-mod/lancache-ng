@@ -30,7 +30,7 @@ CI_REPO_ROOT="${CI_REPO_ROOT:-$(cd -- "${CI_SCRIPT_DIR}/../.." && pwd)}"
 # Why: One table is membership, dispatch and error text.
 # From: Issue #1683
 declare -A CI_DISPATCH=(
-    [plan]=ci_cmd_plan [plan-matrix]=ci_cmd_plan_matrix [impact]=ci_cmd_impact [identity]=ci_cmd_identity
+    [plan]=ci_cmd_plan [plan-matrix]=ci_cmd_plan_matrix [impact]=ci_cmd_impact [codeql-impact]=ci_cmd_codeql_impact [identity]=ci_cmd_identity
     [resolve]=ci_cmd_resolve [build]=ci_cmd_build [build-args]=ci_cmd_build_args
     [build-tools]=ci_cmd_build_tools [publish]=ci_cmd_publish [verify]=ci_cmd_verify
     [test]=ci_cmd_test [coverage]=ci_cmd_coverage [scan]=ci_cmd_scan [assemble]=ci_cmd_assemble
@@ -346,6 +346,43 @@ ci_cmd_plan() {
         fi
     done
     ci_log "[CI-INFO-PLAN-0001]" "phase=plan changed=${#changed[@]} note=\"candidates only; identity/CAS decides build\""
+}
+
+# What: List the CodeQL config's own analyzed Rust source paths.
+# Why: the config is the single truth for what CodeQL extracts (§73).
+# From: Issue #1683
+_ci_codeql_rust_paths() {
+    local cfg="${1:-.github/codeql/codeql-config.yml}"
+    [ -f "${cfg}" ] || return 0
+    awk '
+        /^paths:[[:space:]]*$/ { in_paths=1; next }
+        /^[^[:space:]]/        { in_paths=0 }
+        in_paths && $1=="-"    { print $2 }
+    ' "${cfg}" | grep '^services/' || true
+}
+
+# What: Admit CodeQL Rust analysis only when analyzed source or config changes.
+# Why: §73 admission owner; unchanged Rust must NOOP, not re-extract.
+# From: Issue #1683
+ci_cmd_codeql_impact() {
+    local -a changed=()
+    _ci_collect_changed changed "$@"
+    local rust=false p cfg=".github/codeql/codeql-config.yml"
+    # What: match a change against the config's own analyzed Rust source paths.
+    # Why: admission stays consistent with exactly what CodeQL extracts (§73).
+    # From: Issue #1683
+    while IFS= read -r p; do
+        [ -n "${p}" ] || continue
+        if _ci_paths_touch "${p}" "${changed[@]}"; then rust=true; break; fi
+    done < <(_ci_codeql_rust_paths "${cfg}")
+    # What: a change to the config file itself re-scopes the analysis.
+    # Why: adding or removing an analyzed path changes what must run.
+    # From: Issue #1683
+    if [ "${rust}" = false ] && _ci_paths_touch "${cfg}" "${changed[@]}"; then
+        rust=true
+    fi
+    printf 'codeql-rust=%s\n' "${rust}"
+    ci_log "[CI-INFO-CODEQL-0001]" "phase=codeql-impact rust=${rust} changed=${#changed[@]}"
 }
 
 # What: True when every changed path is documentation.

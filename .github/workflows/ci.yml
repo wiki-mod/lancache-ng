@@ -40,6 +40,7 @@ jobs:
       matrix: ${{ steps.plan.outputs.matrix }}
       test-services: ${{ steps.plan.outputs.test-services }}
       docs-only: ${{ steps.plan.outputs.docs-only }}
+      codeql-rust: ${{ steps.codeql.outputs.codeql-rust }}
     steps:
       # What: native fail-closed checkout with full history for the diff.
       # Why: no SHA pin outside the SOT; persistent auth for ci.sh git ops.
@@ -70,6 +71,14 @@ jobs:
         env:
           CHANGED_FILES: ${{ steps.changed.outputs.file }}
         run: bash .github/scripts/ci.sh plan-matrix
+      # What: admit CodeQL Rust analysis from ci.sh, not a second git-walk.
+      # Why: §73 admission owner; one changed-file source (AG-CODE-011).
+      # From: Issue #1683
+      - name: Admit CodeQL Rust analysis
+        id: codeql
+        env:
+          CHANGED_FILES: ${{ steps.changed.outputs.file }}
+        run: bash .github/scripts/ci.sh codeql-impact >> "$GITHUB_OUTPUT"
 
   # What: build+publish+verify one product service per platform.
   # Why: ci.sh owns build identity, publish and readback.
@@ -344,12 +353,54 @@ jobs:
           CHANGED_FILES: ${{ steps.changed.outputs.file }}
         run: bash .github/scripts/ci.sh check all
 
+  # What: CodeQL static analysis; admission comes from ci.sh (§73).
+  # Why: security scanning is a Base-CI step, not a separate workflow.
+  # From: Issue #1683
+  codeql:
+    name: CodeQL ${{ matrix.language }}
+    needs: plan
+    if: needs.plan.result == 'success'
+    permissions:
+      contents: read
+      security-events: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [actions, rust]
+    steps:
+      - *bootstrap_diff
+      # What: build the workspace so CodeQL extracts every first-party crate.
+      # Why: Rust build-mode none still needs the crates present.
+      # From: Issue #1683
+      - name: Install the Rust toolchain
+        if: matrix.language == 'rust' && needs.plan.outputs.codeql-rust == 'true'
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+      - name: Initialize CodeQL
+        if: matrix.language != 'rust' || needs.plan.outputs.codeql-rust == 'true'
+        uses: github/codeql-action/init@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          config-file: ./.github/codeql/codeql-config.yml
+      - name: Build the Rust workspace for CodeQL
+        if: matrix.language == 'rust' && needs.plan.outputs.codeql-rust == 'true'
+        run: cargo build --locked --workspace
+      - name: Perform CodeQL analysis
+        if: matrix.language != 'rust' || needs.plan.outputs.codeql-rust == 'true'
+        uses: github/codeql-action/analyze@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+        with:
+          category: "/language:${{ matrix.language }}"
+
   # What: the always-present required check for branch protection.
   # Why: a required check MUST always appear, even on a NOOP (§62).
   # From: Issue #1683
   result:
     name: result
-    needs: [plan, build, test, resolve-build-tools, cargo-audit, lint, coverage, scan, aggregate, assemble, validate, promote, release, release-sbom, checks]
+    needs: [plan, build, test, resolve-build-tools, cargo-audit, lint, coverage, scan, aggregate, assemble, validate, promote, release, release-sbom, codeql, checks]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -370,12 +421,13 @@ jobs:
           promote='${{ needs.promote.result }}'
           release='${{ needs.release.result }}'
           release_sbom='${{ needs.release-sbom.result }}'
+          codeql='${{ needs.codeql.result }}'
           checks='${{ needs.checks.result }}'
           # every non-plan/checks phase skips on a NOOP or a PR -- skipped is success.
           if [ "${plan}" != success ]; then
             echo "[CI-ERROR-CORE-0100] phase=plan result=${plan}" >&2; exit 1
           fi
-          for phase in build:"${build}" test:"${test}" resolve-build-tools:"${resolve_bt}" cargo-audit:"${cargo_audit}" lint:"${lint}" coverage:"${coverage}" scan:"${scan}" aggregate:"${aggregate}" assemble:"${assemble}" validate:"${validate}" promote:"${promote}" release:"${release}" release-sbom:"${release_sbom}"; do
+          for phase in build:"${build}" test:"${test}" resolve-build-tools:"${resolve_bt}" cargo-audit:"${cargo_audit}" lint:"${lint}" coverage:"${coverage}" scan:"${scan}" aggregate:"${aggregate}" assemble:"${assemble}" validate:"${validate}" promote:"${promote}" release:"${release}" release-sbom:"${release_sbom}" codeql:"${codeql}"; do
             case "${phase#*:}" in
               success|skipped) ;;
               *) echo "[CI-ERROR-CORE-0100] phase=${phase%%:*} result=${phase#*:}" >&2; exit 1 ;;
