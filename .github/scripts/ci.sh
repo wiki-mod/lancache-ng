@@ -4817,6 +4817,258 @@ _ci_check_pr_tracking_metadata() {
     printf 'pr-tracking-metadata=ok\n'
 }
 
+# What: Node runtimes GitHub Actions has retired.
+# Why: a pin on an EoL runtime breaks once GitHub drops it.
+# From: Issue #1683 | PR #1858
+_ci_action_deprecated_runtimes=" node6 node10 node12 node16 node20 "
+
+# What: print top-level runs.using from an action manifest.
+# Why: one parser for local + API-fetched action.yml bodies.
+# From: Issue #1683 | PR #1858
+_ci_action_runs_using() {
+    awk '
+        /^runs:/ { in_runs = 1; next }
+        in_runs && /^[^[:space:]]/ { exit }
+        in_runs && /^[[:space:]]*using:/ { print; exit }
+    ' | sed -E "s/.*using:[[:space:]]*//; s/[\"']//g; s/[[:space:]]*#.*\$//; s/[[:space:]]+\$//"
+}
+
+# What: one Contents-API GET; body on 200, else HTTP line.
+# Why: caller classifies the status; token raises rate limit.
+# From: Issue #1683 | PR #1858
+_ci_action_manifest_get() {
+    local url="$1" body status token
+    local -a auth=()
+    token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+    [ -n "${token}" ] && auth=(-H "Authorization: Bearer ${token}")
+    body="$(mktemp)"
+    status="$(curl -sS -o "${body}" -w '%{http_code}' \
+        -H "Accept: application/vnd.github.raw+json" "${auth[@]}" "${url}" 2>/dev/null)" || status="000"
+    if [ "${status}" = "200" ]; then
+        cat "${body}"; rm -f "${body}"; return 0
+    fi
+    rm -f "${body}"
+    printf 'HTTP %s\n' "${status}"
+    return 1
+}
+
+# What: resolve an external action manifest via the API.
+# Why: 200=body, 404=absent (try .yaml), else infra warn.
+# From: Issue #1683 | PR #1858
+_ci_fetch_action_manifest() {
+    local owner="$1" repo="$2" subpath="$3" ref="$4"
+    local base="https://api.github.com/repos/${owner}/${repo}/contents/${subpath:+${subpath}/}"
+    local file url out status n max="${CI_RETRY_MAX_ATTEMPTS:-4}" backoff="${CI_RETRY_BACKOFF_BASE_SECONDS:-1}" cls
+    for file in action.yml action.yaml; do
+        url="${base}${file}?ref=${ref}"
+        n=0
+        while :; do
+            n=$((n + 1))
+            if out="$(_ci_action_manifest_get "${url}")"; then
+                printf 'OK\n%s\n' "${out}"; return 0
+            fi
+            status="$(printf '%s' "${out}" | grep -oE '[0-9]{3}' | tail -1)"
+            # What: 404 is terminal, not an error; try the .yaml name.
+            # Why: some actions ship action.yaml, not action.yml.
+            # From: Issue #1683 | PR #1858
+            [ "${status}" = "404" ] && break
+            cls="$(_ci_classify_failure "${out}" github-api)"
+            if [ "${cls}" != "transient" ] || [ "${n}" -ge "${max}" ]; then
+                printf 'INFRA:%s\n' "${status}"; return 0
+            fi
+            sleep "$((n * n * backoff))"
+        done
+    done
+    printf 'NOTFOUND\n'; return 0
+}
+
+# What: true if a uses: ref is an external pinned action.
+# Why: local, docker, and same-repo refs skip the API path.
+# From: Issue #1683 | PR #1858
+_ci_action_ref_is_external() {
+    local v="$1"
+    case "${v}" in
+        *@*) ;; *) return 1 ;;
+    esac
+    case "${v}" in
+        ./*|\$/*|docker://*|wiki-mod/lancache-ng/*) return 1 ;;
+    esac
+    return 0
+}
+
+# What: enforce current Node runtime + ref hygiene on pins.
+# Why: single owner of issue #799/#1095 action-pin policy.
+# From: Issue #1683 | PR #1858
+_ci_check_action_node_versions() {
+    local repo_root="${1:-${CI_REPO_ROOT:-.}}"
+    local wf_dir="${repo_root}/.github/workflows" act_dir="${repo_root}/.github/actions"
+    local -a wf_files=() act_files=() scan_files=()
+    local f
+    for f in "${wf_dir}"/*.yml "${wf_dir}"/*.yaml; do [ -f "${f}" ] && wf_files+=("${f}"); done
+    for f in "${act_dir}"/*/action.yml "${act_dir}"/*/action.yaml; do [ -f "${f}" ] && act_files+=("${f}"); done
+    if [ "${#wf_files[@]}" -eq 0 ]; then
+        ci_log "[CI-ERROR-CHECK-0053]" "reason=\"no workflow files under ${wf_dir}\""; return 2
+    fi
+    scan_files=("${wf_files[@]}" "${act_files[@]}")
+
+    local -a viol=() warns=() uses_entries=() literal_entries=()
+    local extraction=0
+    # What: collect every real uses: step, resolving anchors.
+    # Why: an alias is not a duplicate; only literals count.
+    # From: Issue #1683 | PR #1858
+    local sf line raw resolved anchor
+    for sf in "${scan_files[@]}"; do
+        local -A anchors=()
+        while IFS= read -r line; do
+            raw="$(sed -E 's/^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*//; s/[[:space:]]*#.*$//; s/[[:space:]]+$//' <<<"${line}")"
+            resolved="${raw}"
+            if [[ "${raw}" =~ ^\&([A-Za-z0-9_-]+)[[:space:]]+(.+)$ ]]; then
+                anchor="${BASH_REMATCH[1]}"; resolved="${BASH_REMATCH[2]}"
+                anchors["${anchor}"]="${resolved}"
+                literal_entries+=("${sf}"$'\t'"${resolved}")
+            elif [[ "${raw}" =~ ^\*([A-Za-z0-9_-]+)$ ]]; then
+                anchor="${BASH_REMATCH[1]}"
+                if [ -z "${anchors[${anchor}]+x}" ]; then
+                    viol+=("${sf}: unresolved YAML alias '*${anchor}' in a uses: step")
+                    extraction=$((extraction + 1)); continue
+                fi
+                resolved="${anchors[${anchor}]}"
+            else
+                literal_entries+=("${sf}"$'\t'"${resolved}")
+            fi
+            uses_entries+=("${sf}"$'\t'"${resolved}")
+        done < <(grep -E '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*[^[:space:]]+' "${sf}" || true)
+        unset anchors
+    done
+
+    local -a uses_values=()
+    mapfile -t uses_values < <(printf '%s\n' "${uses_entries[@]}" | sed $'s/^[^\t]*\t//' | sort -u)
+    if [ "${#uses_values[@]}" -eq 0 ] || { [ "${#uses_values[@]}" -eq 1 ] && [ -z "${uses_values[0]}" ]; }; then
+        ci_log "[CI-ERROR-CHECK-0053]" "reason=\"no uses: steps extracted; scan vacuous\""; return 2
+    fi
+
+    # What: names the files a resolved ref appears in.
+    # Why: violation messages point at the real call sites.
+    # From: Issue #1683 | PR #1858
+    _ci_ando_reffiles() {
+        local needle="$1" e file val; local -a m=()
+        for e in "${uses_entries[@]}"; do
+            file="${e%%$'\t'*}"; val="${e#*$'\t'}"
+            [ "${val}" = "${needle}" ] || continue
+            case " ${m[*]} " in *" ${file} "*) ;; *) m+=("${file}") ;; esac
+        done
+        [ "${#m[@]}" -eq 0 ] && { printf '<none>'; return; }
+        printf '%s' "${m[*]}"
+    }
+
+    # What: per-file literal ref counts + per-key ref drift.
+    # Why: a repeated literal or split ref both fail closed.
+    # From: Issue #1683 | PR #1858
+    local -A file_ref_count=() key_refs=()
+    local e file val key ref
+    for e in "${literal_entries[@]}"; do
+        file="${e%%$'\t'*}"; val="${e#*$'\t'}"
+        _ci_action_ref_is_external "${val}" || continue
+        case "${file}" in
+            "${wf_dir}"/*)
+                key="${file}"$'\t'"${val}"
+                file_ref_count["${key}"]=$(( ${file_ref_count["${key}"]:-0} + 1 )) ;;
+        esac
+        key="${val%@*}"; ref="${val##*@}"
+        case " ${key_refs[${key}]:-} " in
+            *" ${ref} "*) ;;
+            *) key_refs["${key}"]="${key_refs[${key}]:-} ${ref}" ;;
+        esac
+    done
+    for key in "${!file_ref_count[@]}"; do
+        [ "${file_ref_count[${key}]}" -le 1 ] && continue
+        viol+=("${key%%$'\t'*}: repeats third-party ref '${key#*$'\t'}' ${file_ref_count[${key}]}x; collapse via a YAML anchor")
+    done
+    for key in "${!key_refs[@]}"; do
+        local -a refs=()
+        read -ra refs <<< "${key_refs[${key}]}"
+        [ "${#refs[@]}" -le 1 ] && continue
+        viol+=("third-party action '${key}' is pinned to multiple refs across .github/**: ${key_refs[${key}]# }; keep one canonical ref")
+    done
+
+    # What: fail an expression in a composite description field.
+    # Why: the manifest validator evaluates description bodies.
+    # From: Issue #1683 | PR #1858
+    local af hits hl
+    for af in "${act_files[@]}"; do
+        hits="$(awk '
+            in_block {
+                if ($0 ~ /^[[:space:]]*$/) { next }
+                match($0, /^[[:space:]]*/)
+                if (RLENGTH > bi) { if (index($0,"${{")>0 || index($0,"}}")>0) print NR; next }
+                in_block = 0
+            }
+            /^[[:space:]]*description[[:space:]]*:/ {
+                match($0, /^[[:space:]]*/); bi = RLENGTH
+                rest = $0; sub(/^[[:space:]]*description[[:space:]]*:[[:space:]]*/, "", rest)
+                if (rest ~ /^[>|]/) { in_block = 1; next }
+                if (index(rest,"${{")>0 || index(rest,"}}")>0) print NR
+            }' "${af}")"
+        [ -z "${hits}" ] && continue
+        while IFS= read -r hl; do
+            [ -n "${hl}" ] && viol+=("${af} line ${hl}: description: field contains \${{ }} expression syntax; the manifest validator evaluates it and the action fails to load")
+        done <<< "${hits}"
+    done
+
+    # What: check each pin's runs.using for a dead runtime.
+    # Why: local read off disk; external resolved via the API.
+    # From: Issue #1683 | PR #1858
+    local v using local_dir cand resolved_file owner repo subpath ref res marker meta
+    for v in "${uses_values[@]}"; do
+        [ -n "${v}" ] || continue
+        if [[ "${v}" == ./* ]]; then
+            case "${v}" in *.yml|*.yaml) continue ;; esac
+            local_dir="${repo_root}/${v#./}"
+            resolved_file=""
+            for cand in "${local_dir}/action.yml" "${local_dir}/action.yaml"; do
+                [ -f "${cand}" ] && { resolved_file="${cand}"; break; }
+            done
+            if [ -z "${resolved_file}" ]; then
+                viol+=("local action '${v}' (in: $(_ci_ando_reffiles "${v}")) has no action.yml/action.yaml"); continue
+            fi
+            using="$(_ci_action_runs_using < "${resolved_file}")"
+            [ -z "${using}" ] && { warns+=("no runs.using for local action '${v}'; skipped"); continue; }
+            case "${_ci_action_deprecated_runtimes}" in
+                *" ${using} "*) viol+=("local action '${v}' declares runs.using: ${using}, a deprecated Node runtime") ;;
+            esac
+            continue
+        fi
+        _ci_action_ref_is_external "${v}" || continue
+        ref="${v##*@}"; key="${v%@*}"
+        owner="$(cut -d/ -f1 <<<"${key}")"; repo="$(cut -d/ -f2 <<<"${key}")"; subpath="$(cut -d/ -f3- <<<"${key}")"
+        res="$(_ci_fetch_action_manifest "${owner}" "${repo}" "${subpath}" "${ref}")"
+        marker="${res%%$'\n'*}"
+        case "${marker}" in
+            OK)
+                meta="${res#*$'\n'}"
+                using="$(_ci_action_runs_using <<<"${meta}")"
+                if [ -z "${using}" ]; then
+                    warns+=("no parseable runs.using for '${v}' (docker/composite?); skipped")
+                elif case "${_ci_action_deprecated_runtimes}" in *" ${using} "*) true ;; *) false ;; esac; then
+                    viol+=("'${v}' (in: $(_ci_ando_reffiles "${v}")) declares runs.using: ${using}, a deprecated Node runtime")
+                fi ;;
+            NOTFOUND)
+                viol+=("no action.yml/action.yaml for '${v}' at ref '${ref}' (in: $(_ci_ando_reffiles "${v}")); broken pin") ;;
+            INFRA:*)
+                warns+=("could not resolve '${v}' (HTTP ${marker#INFRA:}); infra hiccup, not failing on it") ;;
+        esac
+    done
+    unset -f _ci_ando_reffiles
+
+    local w
+    for w in "${warns[@]:-}"; do [ -n "${w}" ] && ci_log "[CI-ERROR-CHECK-0053]" "warn=\"${w}\""; done
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0053]" "reason=\"deprecated runtime / ref drift / description expression (issue #799/#1095)\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'action-node-versions=clean pins=%s\n' "${#uses_values[@]}"
+}
+
 # What: Resolve GitHub issue state (open/closed/unknown).
 # Why: Shared by governance-guards for TODO checks.
 # From: Issue #1683
@@ -6469,6 +6721,7 @@ ci_cmd_check() {
         pr-template) _ci_check_pr_template "$@" ;;
         workflow-line-limit) _ci_check_workflow_line_limit "$@" ;;
         pr-tracking-metadata) _ci_check_pr_tracking_metadata "$@" ;;
+        action-node-versions) _ci_check_action_node_versions "$@" ;;
         governance-guards) _ci_check_governance_guards "$@" ;;
         naming-consistency) _ci_check_naming_consistency "$@" ;;
         compose-healthchecks) _ci_check_compose_healthchecks "$@" ;;

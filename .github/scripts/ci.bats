@@ -3884,6 +3884,152 @@ EOF
     [[ "${output}" == *"pr-tracking-metadata=warn-draft"* ]]
 }
 
+# What: install a mock curl mapping API URLs to canned files.
+# Why: action-node-versions resolves external pins via the API.
+# From: Issue #1683 | PR #1858
+_anv_mockcurl() {
+    local bindir="$1"
+    mkdir -p "${bindir}"
+    cat > "${bindir}/curl" <<'MC'
+#!/usr/bin/env bash
+out="" ; url="" ; prev=""
+for a in "$@"; do
+    [ "${prev}" = "-o" ] && out="${a}"
+    url="${a}"; prev="${a}"
+done
+key="$(printf '%s' "${url}" | sed -E 's#^https://api\.github\.com/repos/##' | tr '/?&=' '____')"
+f="${MOCK_CURL_FIXTURES}/${key}"
+[ -f "${f}" ] || { printf '000'; exit 0; }
+sl="$(head -n1 "${f}")"; tail -n +2 "${f}" > "${out}"; printf '%s' "${sl}"
+MC
+    chmod +x "${bindir}/curl"
+}
+
+# What: register one canned Contents-API response (body on stdin).
+# Why: keys match the owner's generated URL shape exactly.
+# From: Issue #1683 | PR #1858
+_anv_resp() {
+    local dir="$1" ownerrepo="$2" ref="$3" subpath="$4" file="$5" status="$6"
+    local key="${ownerrepo}_contents_${subpath:+${subpath}_}${file}_ref_${ref}"
+    key="${key//\//_}"
+    { printf '%s\n' "${status}"; cat; } > "${dir}/${key}"
+}
+
+@test "check action-node-versions resolves runtimes local+external, fails deprecated" {
+    # What: current runtime passes; deprecated local/external fail.
+    # Why: absorbs check-action-node-versions.sh #799 coverage.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/anvA" bin="${BATS_TEST_TMPDIR}/anvAbin"
+    mkdir -p "${r}/.github/workflows" "${r}/.github/actions/loc"
+    _anv_mockcurl "${bin}"
+    export MOCK_CURL_FIXTURES="${BATS_TEST_TMPDIR}/anvAfix"; mkdir -p "${MOCK_CURL_FIXTURES}"
+    printf 'name: CI\non: push\njobs:\n  b:\n    steps:\n      - uses: actions/checkout@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n      - uses: ./.github/actions/loc\n' > "${r}/.github/workflows/ci.yml"
+    printf 'name: L\nruns:\n  using: composite\n  steps:\n    - run: echo hi\n      shell: bash\n' > "${r}/.github/actions/loc/action.yml"
+    _anv_resp "${MOCK_CURL_FIXTURES}" actions/checkout aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "" action.yml 200 <<'EOF'
+name: C
+runs:
+  using: node24
+  main: x
+EOF
+    PATH="${bin}:${PATH}" CI_RETRY_MAX_ATTEMPTS=1 run bash "${CI_SH}" check action-node-versions "${r}"
+    [ "${status}" -eq 0 ] || { echo "${output}"; false; }
+    [[ "${output}" == *"action-node-versions=clean"* ]]
+    _anv_resp "${MOCK_CURL_FIXTURES}" actions/checkout aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "" action.yml 200 <<'EOF'
+name: C
+runs:
+  using: node16
+  main: x
+EOF
+    PATH="${bin}:${PATH}" CI_RETRY_MAX_ATTEMPTS=1 run bash "${CI_SH}" check action-node-versions "${r}"
+    [ "${status}" -ne 0 ]; [[ "${output}" == *"node16"* ]]
+    printf 'name: L\nruns:\n  using: node12\n  main: x\n' > "${r}/.github/actions/loc/action.yml"
+    _anv_resp "${MOCK_CURL_FIXTURES}" actions/checkout aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "" action.yml 200 <<'EOF'
+name: C
+runs:
+  using: node24
+EOF
+    PATH="${bin}:${PATH}" CI_RETRY_MAX_ATTEMPTS=1 run bash "${CI_SH}" check action-node-versions "${r}"
+    [ "${status}" -ne 0 ]; [[ "${output}" == *"local action './.github/actions/loc' declares runs.using: node12"* ]]
+}
+
+@test "check action-node-versions handles subpath, .yaml fallback, 404 fail, infra warn" {
+    # What: subpath resolves; .yaml fallback; 404 fails; infra warns.
+    # Why: absorbs the Contents-API resolution + fail/warn split.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/anvB" bin="${BATS_TEST_TMPDIR}/anvBbin"
+    mkdir -p "${r}/.github/workflows"
+    _anv_mockcurl "${bin}"
+    export MOCK_CURL_FIXTURES="${BATS_TEST_TMPDIR}/anvBfix"; mkdir -p "${MOCK_CURL_FIXTURES}"
+    printf 'name: CI\non: push\njobs:\n  b:\n    steps:\n      - uses: github/codeql-action/analyze@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n' > "${r}/.github/workflows/ci.yml"
+    _anv_resp "${MOCK_CURL_FIXTURES}" github/codeql-action bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb analyze action.yml 200 <<'EOF'
+name: Analyze
+runs:
+  using: node24
+EOF
+    PATH="${bin}:${PATH}" CI_RETRY_MAX_ATTEMPTS=1 run bash "${CI_SH}" check action-node-versions "${r}"
+    [ "${status}" -eq 0 ] || { echo "${output}"; false; }
+    # .yml 404, .yaml 200: fallback resolves
+    rm -f "${MOCK_CURL_FIXTURES}"/*
+    _anv_resp "${MOCK_CURL_FIXTURES}" github/codeql-action bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb analyze action.yml 404 </dev/null
+    _anv_resp "${MOCK_CURL_FIXTURES}" github/codeql-action bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb analyze action.yaml 200 <<'EOF'
+name: Analyze
+runs:
+  using: node24
+EOF
+    PATH="${bin}:${PATH}" CI_RETRY_MAX_ATTEMPTS=1 run bash "${CI_SH}" check action-node-versions "${r}"
+    [ "${status}" -eq 0 ] || { echo "${output}"; false; }
+    # both 404: broken pin fails
+    rm -f "${MOCK_CURL_FIXTURES}"/*
+    _anv_resp "${MOCK_CURL_FIXTURES}" github/codeql-action bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb analyze action.yml 404 </dev/null
+    _anv_resp "${MOCK_CURL_FIXTURES}" github/codeql-action bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb analyze action.yaml 404 </dev/null
+    PATH="${bin}:${PATH}" CI_RETRY_MAX_ATTEMPTS=1 run bash "${CI_SH}" check action-node-versions "${r}"
+    [ "${status}" -ne 0 ]; [[ "${output}" == *"broken pin"* ]]
+    # 403 infra: warns, does not fail
+    rm -f "${MOCK_CURL_FIXTURES}"/*
+    _anv_resp "${MOCK_CURL_FIXTURES}" github/codeql-action bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb analyze action.yml 403 </dev/null
+    PATH="${bin}:${PATH}" CI_RETRY_MAX_ATTEMPTS=1 run bash "${CI_SH}" check action-node-versions "${r}"
+    [ "${status}" -eq 0 ]; [[ "${output}" == *"infra hiccup"* ]]
+}
+
+@test "check action-node-versions enforces ref hygiene (repeat, drift, anchor)" {
+    # What: literal repeat + cross-file drift fail; anchor passes.
+    # Why: absorbs the duplicate-ref and ref-drift invariants.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/anvC" bin="${BATS_TEST_TMPDIR}/anvCbin"
+    mkdir -p "${r}/.github/workflows"
+    _anv_mockcurl "${bin}"
+    export MOCK_CURL_FIXTURES="${BATS_TEST_TMPDIR}/anvCfix"; mkdir -p "${MOCK_CURL_FIXTURES}"
+    printf 'jobs:\n  b:\n    steps:\n      - uses: foo/bar@1111111111111111111111111111111111111111\n      - uses: foo/bar@1111111111111111111111111111111111111111\n' > "${r}/.github/workflows/ci.yml"
+    PATH="${bin}:${PATH}" CI_RETRY_MAX_ATTEMPTS=1 run bash "${CI_SH}" check action-node-versions "${r}"
+    [ "${status}" -ne 0 ]; [[ "${output}" == *"repeats third-party ref"* ]]
+    printf 'jobs:\n  b:\n    steps:\n      - uses: foo/bar@1111111111111111111111111111111111111111\n' > "${r}/.github/workflows/a.yml"
+    printf 'jobs:\n  b:\n    steps:\n      - uses: foo/bar@2222222222222222222222222222222222222222\n' > "${r}/.github/workflows/b.yml"
+    rm -f "${r}/.github/workflows/ci.yml"
+    PATH="${bin}:${PATH}" CI_RETRY_MAX_ATTEMPTS=1 run bash "${CI_SH}" check action-node-versions "${r}"
+    [ "${status}" -ne 0 ]; [[ "${output}" == *"multiple refs"* ]]
+    printf 'jobs:\n  b:\n    steps:\n      - uses: &a foo/bar@1111111111111111111111111111111111111111\n  c:\n    steps:\n      - uses: *a\n' > "${r}/.github/workflows/a.yml"
+    rm -f "${r}/.github/workflows/b.yml"
+    PATH="${bin}:${PATH}" CI_RETRY_MAX_ATTEMPTS=1 run bash "${CI_SH}" check action-node-versions "${r}"
+    [ "${status}" -eq 0 ] || { echo "${output}"; false; }
+}
+
+@test "check action-node-versions fails a description expression, passes prose" {
+    # What: \${{ }} in a composite description fails; prose passes.
+    # Why: absorbs the manifest description-field expression guard.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/anvD" bin="${BATS_TEST_TMPDIR}/anvDbin"
+    mkdir -p "${r}/.github/workflows" "${r}/.github/actions/x"
+    _anv_mockcurl "${bin}"
+    export MOCK_CURL_FIXTURES="${BATS_TEST_TMPDIR}/anvDfix"; mkdir -p "${MOCK_CURL_FIXTURES}"
+    printf 'name: CI\non: push\njobs:\n  b:\n    steps:\n      - uses: ./.github/actions/x\n' > "${r}/.github/workflows/ci.yml"
+    printf 'name: X\ndescription: >-\n  uses %s here\nruns:\n  using: composite\n  steps: []\n' '${{ inputs.y }}' > "${r}/.github/actions/x/action.yml"
+    PATH="${bin}:${PATH}" CI_RETRY_MAX_ATTEMPTS=1 run bash "${CI_SH}" check action-node-versions "${r}"
+    [ "${status}" -ne 0 ]; [[ "${output}" == *"description: field contains"* ]]
+    printf 'name: X\ndescription: plain prose only\nruns:\n  using: composite\n  steps: []\n' > "${r}/.github/actions/x/action.yml"
+    PATH="${bin}:${PATH}" CI_RETRY_MAX_ATTEMPTS=1 run bash "${CI_SH}" check action-node-versions "${r}"
+    [ "${status}" -eq 0 ] || { echo "${output}"; false; }
+}
+
 @test "check governance-guards flags a stale TODO on a closed issue" {
     # What: ci.sh owns the governance scan; bats calls it.
     # Why: TODO on closed issue is stale, must fail loud.
