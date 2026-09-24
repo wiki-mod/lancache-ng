@@ -35,7 +35,7 @@ declare -A CI_DISPATCH=(
     [build-tools]=ci_cmd_build_tools [publish]=ci_cmd_publish [verify]=ci_cmd_verify
     [test]=ci_cmd_test [coverage]=ci_cmd_coverage [scan]=ci_cmd_scan [assemble]=ci_cmd_assemble
     [aggregate]=ci_cmd_aggregate [emit-result]=ci_cmd_emit_result [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files
-    [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [coverage-stack]=ci_cmd_coverage_stack
+    [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [coverage-stack]=ci_cmd_coverage_stack [nightly-status]=ci_cmd_nightly_status
     [validate]=ci_cmd_validate [promote]=ci_cmd_promote [release]=ci_cmd_release
     [gc]=ci_cmd_gc [variables]=ci_cmd_variables [check]=ci_cmd_check
     [version]=ci_cmd_version
@@ -1176,6 +1176,39 @@ _ci_for_test_services() {
 }
 ci_cmd_test_stack() { _ci_for_test_services ci_cmd_test; }
 ci_cmd_coverage_stack() { _ci_for_test_services ci_cmd_coverage; }
+
+# What: file/update/close one standing tracking issue for a run outcome.
+# Why: nightly reliability (#1801); self-closing issue, no composite action.
+# From: Issue #1683 | Issue #1095
+ci_cmd_nightly_status() {
+    local outcome="${1:-}" scope="${2:-}" label="${3:-nightly-broken}" failed="${CI_FAILED_JOBS:-}"
+    [ -n "${outcome}" ] || { ci_log "[CI-ERROR-STATUS-0001]" "reason=\"outcome arg required (success|failure)\""; return 2; }
+    [ -n "${scope}" ] || { ci_log "[CI-ERROR-STATUS-0002]" "reason=\"scope arg required\""; return 2; }
+    local repo="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY required}" gh="${CI_NIGHTLY_STATUS_CMD:-gh}"
+    local run_url="${GITHUB_SERVER_URL:-https://github.com}/${repo}/actions/runs/${GITHUB_RUN_ID:-0}" existing
+    existing="$("${gh}" issue list --repo "${repo}" --label "${label}" --state open \
+        --json number --jq 'sort_by(.number) | .[0].number // empty')" || return 2
+    if [ "${outcome}" = success ]; then
+        [ -n "${existing}" ] || { printf 'nightly-status=noop label=%s\n' "${label}"; return 0; }
+        "${gh}" issue comment "${existing}" --repo "${repo}" \
+            --body "Recovered: ${scope} succeeded in ${run_url}. Closing this standing issue; it re-opens if the check fails again." || return 2
+        "${gh}" issue close "${existing}" --repo "${repo}" || return 2
+        printf 'nightly-status=closed issue=%s\n' "${existing}"
+        return 0
+    fi
+    local detail="${scope} failed in ${run_url}"
+    [ -n "${failed}" ] && detail="${detail} (failed: ${failed})"
+    if [ -n "${existing}" ]; then
+        "${gh}" issue comment "${existing}" --repo "${repo}" --body "Still failing: ${detail}." || return 2
+        printf 'nightly-status=updated issue=%s\n' "${existing}"
+    else
+        "${gh}" label create "${label}" --repo "${repo}" --color b60205 \
+            --description "Recurring self-closing tracking issue: ${scope}" 2>/dev/null || true
+        "${gh}" issue create --repo "${repo}" --label "${label}" --title "[${label}] ${scope}" \
+            --body "Standing issue, reused across failures and auto-closed on the next success. ${detail}." >/dev/null || return 2
+        printf 'nightly-status=opened label=%s\n' "${label}"
+    fi
+}
 
 # =========================================================
 # CACHE CONFIGURATION

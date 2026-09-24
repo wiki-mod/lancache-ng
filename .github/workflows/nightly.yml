@@ -1,0 +1,87 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# What: promote the accepted current_dev stack to the nightly channel.
+# Why: current_dev is the default branch; nightly reuses, never rebuilds (§54).
+# From: Issue #1683
+name: CI 2.0 Nightly
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+permissions:
+  contents: write
+  packages: write
+  issues: write
+concurrency:
+  group: ci-2.0-nightly
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+# What: GHCR credentials ci.sh reads; no login action, no pin.
+# Why: auth is ci.sh policy; the workflow only supplies the env.
+# From: Issue #1683
+env:
+  GHCR_USERNAME: ${{ github.actor }}
+  GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+jobs:
+  # What: full-setup validation of the accepted current_dev candidate (§49).
+  # Why: nightly promotes only a green, already-accepted stack (green-gated).
+  # From: Issue #1683
+  validate:
+    name: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      # What: native fail-closed checkout, shallow; persistent ci.sh auth.
+      # Why: no SHA pin outside the SOT; git is a runner tool (AG-CI-006).
+      # From: Issue #1683
+      - &bootstrap
+        name: Bootstrap the working tree
+        run: |
+          set -euo pipefail
+          git init -q .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: bearer ${GHCR_TOKEN}"
+          git fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
+          git checkout -q FETCH_HEAD
+      - name: Validate the accepted stack candidate
+        run: bash .github/scripts/ci.sh validate
+
+  # What: move the nightly channel to the validated current_dev stack (§54).
+  # Why: current_dev -> nightly; promotion only moves refs (§51), idempotent.
+  # From: Issue #1683
+  promote:
+    name: promote nightly
+    needs: validate
+    runs-on: ubuntu-latest
+    env:
+      CI_STACK_VALIDATED: SUCCESS
+    steps:
+      - *bootstrap
+      - name: Promote the nightly channel
+        run: bash .github/scripts/ci.sh promote nightly
+
+  # What: file/close the standing nightly tracking issue on the outcome.
+  # Why: nightly must be reported reliably (#1801), self-closing.
+  # From: Issue #1683
+  report:
+    name: report
+    needs: [validate, promote]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - *bootstrap
+      - name: Report the nightly outcome
+        run: |
+          set -euo pipefail
+          v='${{ needs.validate.result }}'
+          p='${{ needs.promote.result }}'
+          outcome=failure
+          [ "${v}" = success ] && [ "${p}" = success ] && outcome=success
+          failed=''
+          [ "${v}" = success ] || failed='validate'
+          [ "${p}" = success ] || failed="${failed} promote"
+          CI_FAILED_JOBS="${failed# }" \
+            bash .github/scripts/ci.sh nightly-status "${outcome}" "nightly channel promote (current_dev)"

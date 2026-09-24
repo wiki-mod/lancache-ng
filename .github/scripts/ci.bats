@@ -4316,6 +4316,31 @@ _anv_run() {
     [[ "${output}" == *"CI-ERROR-SCAN-0016"* ]]
 }
 
+@test "nightly-status opens, updates, and closes the standing tracking issue" {
+    # What: self-closing issue per outcome (#1801); no composite action.
+    # Why: failure opens/updates, success closes; label-keyed, fail-closed.
+    # From: Issue #1683
+    local stub="${BATS_TEST_TMPDIR}/ghstub" calls="${BATS_TEST_TMPDIR}/gh-calls"
+    cat > "${stub}" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >> "${GH_CALLS}"
+[ "$1 $2" = "issue list" ] && printf '%s' "${STUB_EXISTING:-}"
+exit 0
+EOF
+    chmod +x "${stub}"
+    export GH_CALLS="${calls}" GITHUB_REPOSITORY=o/r GITHUB_RUN_ID=1
+    : > "${calls}"; STUB_EXISTING='' CI_NIGHTLY_STATUS_CMD="${stub}" run ci_cmd_nightly_status failure "nightly promote"
+    [ "${status}" -eq 0 ]; grep -q 'issue create' "${calls}"
+    : > "${calls}"; STUB_EXISTING=42 CI_NIGHTLY_STATUS_CMD="${stub}" run ci_cmd_nightly_status failure "nightly promote"
+    [ "${status}" -eq 0 ]; grep -q 'issue comment 42' "${calls}"
+    : > "${calls}"; STUB_EXISTING=42 CI_NIGHTLY_STATUS_CMD="${stub}" run ci_cmd_nightly_status success "nightly promote"
+    [ "${status}" -eq 0 ]; grep -q 'issue close 42' "${calls}"
+    : > "${calls}"; STUB_EXISTING='' CI_NIGHTLY_STATUS_CMD="${stub}" run ci_cmd_nightly_status success "nightly promote"
+    [ "${status}" -eq 0 ]; [[ "${output}" == *"noop"* ]]
+    run ci_cmd_nightly_status "" scope
+    [ "${status}" -ne 0 ]; [[ "${output}" == *"CI-ERROR-STATUS-0001"* ]]
+}
+
 @test "action-node-versions resolver: yaml fallback, transient retry, permanent stop" {
     # What: real curl path -- .yml->.yaml, 403 retries, 401 stops.
     # Why: fetch mechanics have no hook; a counted mock proves them.
