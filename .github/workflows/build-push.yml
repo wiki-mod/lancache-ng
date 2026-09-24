@@ -218,7 +218,7 @@ jobs:
             exit 1
           }
           echo "::notice::gh pr view succeeded. Body byte count: $(wc -c < /tmp/pr-body-live.txt). stderr: $(cat /tmp/pr-body-live.stderr)"
-          bash scripts/tracked/validate-pr-template.sh /tmp/pr-body-live.txt
+          bash .github/scripts/ci.sh check pr-template /tmp/pr-body-live.txt
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
   pr-tracking-metadata-check:
