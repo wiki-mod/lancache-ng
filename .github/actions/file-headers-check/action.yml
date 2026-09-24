@@ -86,8 +86,8 @@ runs:
         "${{ inputs.build-tools-image }}" timeout --kill-after=30s 5m
         bash .github/scripts/ci.sh check dependabot-docker-base-consistency
 
-    # See scripts/untracked/check-trivy-action-direct-usage.sh's own header for why a
-    # direct call site regresses the retry/auth/mirror fix
+    # ci.sh's _ci_check_trivy_action_direct_usage guards why a direct call
+    # site regresses the retry/auth/mirror fix
     # (AG-VAL-029: a point fix alone is not sufficient).
     - name: Check no direct aquasecurity/trivy-action call sites outside the retry wrapper
       shell: bash
