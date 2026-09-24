@@ -2287,6 +2287,39 @@ STUB
     [[ "$output" == *"sha-${real_change_sha}" ]]
 }
 
+@test "saf_resolve_untouched_backfill_source: active-producer gate rejects a missing base tag without the long wait" {
+    setup_linear_fixture
+    install_run_exists_stub
+    cat > "$run_exists_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+    chmod +x "$run_exists_stub"
+
+    inactive_stub="$BATS_TEST_TMPDIR/inactive-base-run.sh"
+    cat > "$inactive_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+    chmod +x "$inactive_stub"
+    export STAGING_CANDIDATE_RUN_ACTIVE_CMD="$inactive_stub"
+
+    revision_stub="$BATS_TEST_TMPDIR/missing-revision.sh"
+    cat > "$revision_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+    chmod +x "$revision_stub"
+    export STAGING_IMAGE_REVISION_CMD="$revision_stub"
+
+    start_epoch="$(date +%s)"
+    run --separate-stderr saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "proxy" "$real_change_sha" 30 30 0 0 0 0 1 50 "$git_dir" "" true
+    end_epoch="$(date +%s)"
+    [ "$status" -ne 0 ]
+    [[ "$stderr" == *"no tag-publishing build-push.yml run"* ]]
+    [ "$((end_epoch - start_epoch))" -lt 2 ]
+}
+
 @test "saf_resolve_untouched_backfill_source: ancestor_extended_freshness_* is independent of base_freshness_* -- a generous base budget never leaks into the ancestor's extended retry" {
     # Regression guard for the reason these two budgets are kept separate
     # (this file's own header, saf_resolve_untouched_backfill_source comment,

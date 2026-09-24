@@ -488,7 +488,7 @@ for service in "${full_setup_services[@]}"; do
         "$base_freshness_timeout_seconds" "$base_freshness_hard_ceiling_seconds" \
         "$ancestor_freshness_timeout_seconds" "$ancestor_freshness_hard_ceiling_seconds" \
         "$ancestor_extended_freshness_timeout_seconds" "$ancestor_extended_freshness_hard_ceiling_seconds" \
-        "$base_freshness_poll_interval_seconds" "$ancestor_search_depth" "${STAGING_FRESHNESS_GIT_DIR:-.}" "$BASE_REF")"; then
+        "$base_freshness_poll_interval_seconds" "$ancestor_search_depth" "${STAGING_FRESHNESS_GIT_DIR:-.}" "$BASE_REF" true)"; then
         exit 1
     fi
     echo "::notice::(re)pointing $PR_TAG at $resolved_source."

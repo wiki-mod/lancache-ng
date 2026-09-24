@@ -2003,7 +2003,7 @@ jobs:
             if ! resolved_source="$(saf_resolve_untouched_backfill_source "$REPOSITORY" "$service" "${classify_key_map[$service]}" "$BASE_SHA" \
               900 1200 \
               300 600 \
-              0 0 15 50 "$GITHUB_WORKSPACE" "$BASE_REF")"; then
+              0 0 15 50 "$GITHUB_WORKSPACE" "$BASE_REF" true)"; then
               exit 1
             fi
             echo "::notice::(re)pointing $PR_TAG at $resolved_source."
