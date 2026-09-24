@@ -4086,6 +4086,30 @@ EOF
     [[ "${output}" == *"CI-ERROR-CHECK-0027"* ]]
 }
 
+@test "check dependabot-docker-base-consistency Dockerfile FROM parsing edges" {
+    # What: only the last FROM counts; lowercase from; no-FROM fails.
+    # Why: absorbs the legacy FROM-parsing coverage.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/ddb-from"; mkdir -p "${r}/.github" "${r}/services/a" "${r}/services/b"
+    printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    directories:\n      - /services/a\n      - /services/b\n    schedule:\n      interval: weekly\n' > "${r}/.github/dependabot.yml"
+    printf 'FROM golang:1 AS builder\nRUN true\nfrom alpine:3.24\n' > "${r}/services/a/Dockerfile"
+    printf 'FROM alpine:3.24 AS final\n' > "${r}/services/b/Dockerfile"
+    run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"; [ "${status}" -eq 0 ]
+    printf 'RUN true\n' > "${r}/services/a/Dockerfile"
+    run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"; [ "${status}" -ne 0 ]
+}
+
+@test "check dependabot-docker-base-consistency resolves an unbraced ARG token" {
+    # What: FROM \$BASE (no braces) resolves via its ARG default.
+    # Why: absorbs the legacy unbraced-ARG-substitution coverage.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/ddb-arg"; mkdir -p "${r}/.github" "${r}/services/a" "${r}/services/b"
+    printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    directories:\n      - /services/a\n      - /services/b\n    schedule:\n      interval: weekly\n' > "${r}/.github/dependabot.yml"
+    printf 'ARG BASE=alpine:3.24\nFROM $BASE\n' > "${r}/services/a/Dockerfile"
+    printf 'FROM alpine:3.24\n' > "${r}/services/b/Dockerfile"
+    run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"; [ "${status}" -eq 0 ]
+}
+
 # What: seeds every real WRITER_TEST_EVIDENCE pair.
 # Why: mirrors the legacy script's own fixture builder.
 # From: Issue #1683 | PR #1858

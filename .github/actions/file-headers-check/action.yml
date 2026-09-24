@@ -77,8 +77,8 @@ runs:
           timeout --kill-after=30 --signal=KILL 300 bash -c \
             'cp -a /source /tmp/work && cd /tmp/work && bash .github/scripts/ci.sh check review-chronology'
 
-    # See scripts/tracked/check-dependabot-docker-base-consistency.sh's own header
-    # for the shared-base-image assumption this guards.
+    # The shared-base-image assumption this guards is documented in ci.sh's
+    # _ci_check_dependabot_docker_base_consistency.
     - name: Check dependabot.yml's docker-group base-image assumption still holds
       shell: bash
       run: >-
