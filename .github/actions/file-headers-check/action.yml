@@ -7,8 +7,8 @@ description: >-
   carries. All six now call the proven `ci.sh check` subcommand
   (file-headers, workflow-line-limit, review-chronology,
   dependabot-docker-base-consistency, trivy-action-direct-usage,
-  deny-short-sha). Legacy scripts stay committed pending the tests/bats
-  DELETE ratification (Issue #1683).
+  deny-short-sha). Their legacy scripts are deleted; only
+  workflow-line-limit's remains (a second caller holds it until cutover).
 inputs:
   build-tools-image:
     description: Immutable build-tools image selected by the calling workflow
