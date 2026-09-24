@@ -3012,6 +3012,18 @@ netdata=sha256:n"
     [ "$(_ci_build_tools_channel "")" = nightly ]
 }
 
+@test "build-tools resolve-image fails closed on a drifted published signature" {
+    # What: a published toolchain != SOT signature must fail closed.
+    # Why: container jobs must not run on a stale toolchain image.
+    # From: Issue #1683
+    CI_APK_RESOLVE_CMD="$(_stub apk 'printf "pkg-1.0\n"')" \
+    CI_PUBLISHED_SIG_CMD="$(_stub psig 'echo drifted-sig')" \
+    GHCR_USERNAME=u GHCR_TOKEN=t \
+        run bash "${CI_SH}" build-tools resolve-image
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"BUILDTOOLS-0019"* ]]
+}
+
 @test "build-tools signature moves on an arm64-only apk change" {
     # What: an aarch64-only change moves the sig.
     # Why: an arm64-only package bump must not be a NOOP.

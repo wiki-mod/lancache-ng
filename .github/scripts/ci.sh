@@ -3746,11 +3746,20 @@ _ci_build_tools_channel() {
 #      (gate + signature + SOT smoke already own toolchain trust).
 # From: Issue #1683
 _ci_build_tools_resolve_image() {
-    local ref channel image digest
+    local ref channel image digest current published
     ref="${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-}}"
     channel="$(_ci_build_tools_channel "${ref}")"
     image="$(_ci_build_tools_image)"
     _ci_require_ghcr_auth || return "$?"
+    # What: the published toolchain must match the SOT signature.
+    # Why: a drifted :channel is stale; fail closed, do not run on it.
+    # From: Issue #1683
+    current="$(_ci_build_tools_resolve_signature)" || return 2
+    published="$(_ci_build_tools_published_signature "${image}:${channel}")" || return 2
+    if [ "${current}" != "${published}" ]; then
+        ci_log "[CI-ERROR-BUILDTOOLS-0019]" "channel=\"${channel}\" reason=\"published toolchain signature drifted from SOT; rebuild via nightly\" resolved=\"${current}\"" "published=${published}"
+        return 2
+    fi
     if ! digest="$(_ci_registry_digest "${image}:${channel}")"; then
         ci_log "[CI-ERROR-BUILDTOOLS-0018]" "channel=\"${channel}\" reason=\"no published build-tools digest; FAIL CLOSED\""
         return 2
