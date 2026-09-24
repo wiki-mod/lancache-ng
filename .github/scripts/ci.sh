@@ -6870,6 +6870,31 @@ _ci_check_setup_keys_kea() {
     printf 'setup-keys-kea=clean\n'
 }
 
+# What: Fail unless setup.sh update pauses/guards before mutation.
+# Why: AG-OP-010 validation-before-mutation; prebuilt guard first.
+# From: Issue #1683
+_ci_check_setup_update_safety() {
+    local repo_root="${1:-${CI_REPO_ROOT}}"
+    local su="${repo_root}/setup.sh"
+    local -a viol=()
+    [ -f "${su}" ] || { ci_error "[CI-ERROR-CHECK-0062]" "path=\"${su}\" reason=\"setup.sh not found\""; return 2; }
+    awk '/This script must be run as root/{r=1} r&&/assert_prebuilt_image_platform_supported/{g=1} r&&!g&&/(install_docker|systemctl enable --now docker)/{f=1} END{exit f?0:1}' "${su}" \
+        && viol+=("prebuilt platform guard must run before Docker install or daemon startup")
+    awk '/^cmd_update\(\) \{/{u=1;p=0;next} /^# .*debug subcommand/{u=0} u&&/pause_lancache_convergence_for_update/{p=1} u&&!p&&!/^[[:space:]]*#/&&/(cmd_backup|git -C|cp "\$install_dir\/deploy\/quickstart\/docker-compose\.yml"|migrate_env_for_update|validate_compose_config|docker[[:space:]]+compose([[:space:]]+--env-file[[:space:]]+[^[:space:]]+)?[[:space:]]+(pull|up))/{f=1} END{exit f?0:1}' "${su}" \
+        && viol+=("update must pause the convergence timer before mutating install state")
+    grep -Fq 'systemctl stop lancache-converge.service' "${su}" \
+        || viol+=("update must stop the active convergence service before mutating install state")
+    awk '/if ! \( cmd_backup --config "\$install_dir" \); then/{b=1;next} b&&/resume_lancache_convergence_after_update true/{r=1} b&&/die "Pre-update rollback backup failed/{d=1;b=0} END{exit r&&d?0:1}' "${su}" \
+        || viol+=("update must restore the convergence timer when the rollback backup fails")
+    awk '/^cmd_update_ip\(\) \{/{u=1;g=0;next} /^# .*backup subcommand/{u=0} u&&/assert_prebuilt_image_platform_supported/{g=1} u&&!g&&/(sed -i|docker compose -f)/{f=1} END{exit f?0:1}' "${su}" \
+        && viol+=("update-ip must check prebuilt platform support before mutating config")
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0062]" "reason=\"setup.sh update-migration safety contract violated\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'setup-update-safety=clean\n'
+}
+
 # What: Emit the OpenVEX document for a trivyignore file.
 # Why: One VEX generator for drift-check and release attach.
 # From: Issue #1683
@@ -7533,7 +7558,7 @@ ci_cmd_check_all() {
         dependabot-docker-base-consistency idempotence-test-coverage \
         prebuilt-prod prod-state-wiring compose-config nats-atomic-write \
         docker-socket-proxy quickstart-required-env dhcp-proxy-env \
-        setup-keys-kea vex-drift netdata-curl-pin logging-matrix \
+        setup-keys-kea setup-update-safety vex-drift netdata-curl-pin logging-matrix \
         trivy-action-direct-usage entrypoint-lib-wiring dockerfile-build-tools \
         cargo-profile-tuning no-source-compiled-tools)
     for sub in "${repo_wide[@]}"; do
@@ -7593,6 +7618,7 @@ ci_cmd_check() {
         quickstart-required-env) _ci_check_quickstart_required_env "$@" ;;
         dhcp-proxy-env) _ci_check_dhcp_proxy_env "$@" ;;
         setup-keys-kea) _ci_check_setup_keys_kea "$@" ;;
+        setup-update-safety) _ci_check_setup_update_safety "$@" ;;
         vex-drift) _ci_check_vex_drift "$@" ;;
         netdata-curl-pin) _ci_check_netdata_curl_pin "$@" ;;
         logging-matrix) _ci_check_logging_matrix "$@" ;;

@@ -5815,6 +5815,20 @@ _setup_keys_kea_fixture() {
     [[ "${output}" == *"deprecated NATS token"* ]]
 }
 
+@test "check setup-update-safety enforces the real setup.sh update flow" {
+    # What: real setup.sh pauses/guards before update mutations.
+    # Why: AG-OP-010; a missing guard must fail the check.
+    # From: Issue #1683
+    run bash "${CI_SH}" check setup-update-safety "${BATS_TEST_DIRNAME}/../.."
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"setup-update-safety=clean"* ]]
+    local r="${BATS_TEST_TMPDIR}/sus-bad"; mkdir -p "${r}"
+    printf 'echo noop\n' > "${r}/setup.sh"
+    run bash "${CI_SH}" check setup-update-safety "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0062"* ]]
+}
+
 @test "migrate_env_for_update repairs every empty required key" {
     # What: each SOT required-repair key is non-empty after update.
     # Why: an empty required key breaks the stack (AG-OP-007).
