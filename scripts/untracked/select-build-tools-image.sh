@@ -102,6 +102,7 @@ smoke_test_image() {
       envsubst
       expect
       tcpdump
+      trivy
     )
 
     # What: dhclient is opt-in via EXTRA_REQUIRED_TOOLS.

@@ -83,6 +83,11 @@ ARG APK_PACKAGES
 # From: Issue #1095
 RUN sed -i 's|^https://|http://|' /etc/apk/repositories
 
+# What: add edge/testing as a tagged repo, http like the rest.
+# Why: only @testing-tagged packages (trivy) resolve here, not global (§64).
+# From: Issue #1683
+RUN echo "@testing http://dl-cdn.alpinelinux.org/alpine/edge/testing" >> /etc/apk/repositories
+
 # What: install base utils + SOT tools; trust proxy CA.
 # Why: GNU coreutils differ; CA restored before commit.
 # From: Issue #1683

@@ -148,6 +148,10 @@ build_toolchain:
       - shellspec
       - sqlite
       - tcpdump
+      # What: trivy scan tool, version-pinned from edge/testing (§64).
+      # Why: 0.74.0 lives only in edge/testing; @testing scopes it, not global.
+      # From: Issue #1683
+      - trivy@testing=0.74.0-r0
       - tzdata
       - util-linux
       - xz
@@ -176,6 +180,7 @@ build_toolchain:
       - sccache
       - shellcheck
       - timeout
+      - trivy
 
 # What: Runtime services not built by this project.
 # Why: Explicit out-of-build entry, no silent omission.

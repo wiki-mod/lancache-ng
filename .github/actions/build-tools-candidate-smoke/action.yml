@@ -40,7 +40,7 @@ runs:
         required_tools=(
           actionlint bash bats cargo cargo-audit cargo-tarpaulin ccache clippy-driver
           dig distcc distcc-pump docker envsubst jq rustc rustfmt sccache
-          shellspec shellcheck timeout
+          shellspec shellcheck timeout trivy
         )
         for tool in "${required_tools[@]}"; do command -v "$tool" >/dev/null; done
         cargo --version
