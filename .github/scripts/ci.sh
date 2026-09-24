@@ -37,7 +37,7 @@ declare -A CI_DISPATCH=(
     [aggregate]=ci_cmd_aggregate [emit-result]=ci_cmd_emit_result [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files
     [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [coverage-stack]=ci_cmd_coverage_stack [nightly-status]=ci_cmd_nightly_status
     [validate]=ci_cmd_validate [promote]=ci_cmd_promote [promote-ref]=ci_cmd_promote_ref [release]=ci_cmd_release
-    [release-publish]=ci_cmd_release_publish [release-sbom]=ci_cmd_release_sbom [release-vex]=ci_cmd_release_vex
+    [release-publish]=ci_cmd_release_publish [release-sbom]=ci_cmd_release_sbom [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex
     [gc]=ci_cmd_gc [variables]=ci_cmd_variables [check]=ci_cmd_check
     [version]=ci_cmd_version
 )
@@ -104,6 +104,18 @@ ci_services() {
 # From: Issue #1683
 ci_build_targets() {
     ci_services
+    _ci_block_keys "build_toolchain"
+}
+
+# What: Build targets that publish a first-party image.
+# Why: release notes/SBOM skip install-type third-party services.
+# From: Issue #1683
+_ci_published_services() {
+    local svc
+    for svc in $(ci_services); do
+        [ "$(ci_service_field "${svc}" build_type)" = install ] && continue
+        printf '%s\n' "${svc}"
+    done
     _ci_block_keys "build_toolchain"
 }
 
@@ -2471,7 +2483,7 @@ _ci_release_notes_block() {
     repo="$(_ci_repo)"
     printf '%s\n' "${CI_RELEASE_NOTES_START:-<!-- lancache-ng-image-tags:start -->}"
     printf 'Images published for %s (commit %s):\n\n' "${tag}" "${GITHUB_SHA:-unknown}"
-    for target in $(ci_build_targets) stack; do
+    for target in $(_ci_published_services) stack; do
         img="${registry}/${repo}/${target}:${tag}"
         dig="$(_ci_registry_digest "${img}")" || return "$?"
         printf -- '- %s -> %s\n' "${img}" "${dig}"
@@ -2558,6 +2570,17 @@ ci_cmd_release_sbom() {
     _ci_release_asset_put "${tag}" "${out}" || { rm -rf "${dir}"; return 2; }
     rm -rf "${dir}"
     printf 'release=sbom service=%s tag=%s digest=%s\n' "${service}" "${tag}" "${digest}"
+}
+
+# What: Generate and attach an SBOM for every published image.
+# Why: one release SBOM walk; SOT-driven, skips third-party.
+# From: Issue #1683
+ci_cmd_release_sbom_stack() {
+    local tag="${1:-}" svc
+    [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0013]" "reason=\"tag arg required\""; return 2; }
+    for svc in $(_ci_published_services); do
+        ci_cmd_release_sbom "${svc}" "${tag}" || return "$?"
+    done
 }
 
 # What: Generate and attach the OpenVEX document to a release.

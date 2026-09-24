@@ -1618,7 +1618,7 @@ EOF
     export GH_CALLS="${calls}" GITHUB_REPOSITORY=o/r GITHUB_SHA=deadbeef CI_TMPDIR="${BATS_TEST_TMPDIR}"
     _ci_require_ghcr_auth() { return 0; }
     _ci_registry_digest() { echo "sha256:aaa"; }
-    ci_build_targets() { echo proxy; }
+    _ci_published_services() { echo proxy; }
     : > "${calls}"
     STUB_VIEW='' CI_RELEASE_GH_CMD="${gh}" run ci_cmd_release_publish v1.2.3-rc.4
     [ "${status}" -eq 0 ]
@@ -1635,7 +1635,7 @@ EOF
     export GH_CALLS="${calls}" GITHUB_REPOSITORY=o/r GITHUB_SHA=deadbeef CI_TMPDIR="${BATS_TEST_TMPDIR}"
     _ci_require_ghcr_auth() { return 0; }
     _ci_registry_digest() { echo "sha256:aaa"; }
-    ci_build_targets() { echo proxy; }
+    _ci_published_services() { echo proxy; }
     local start='<!-- lancache-ng-image-tags:start -->' end='<!-- lancache-ng-image-tags:end -->'
     : > "${calls}"
     STUB_VIEW="$(jq -nc --arg b "keep-me
@@ -1656,7 +1656,7 @@ tail" '{body:$b, isPrerelease:false}')" \
     export GH_CALLS="${calls}" GITHUB_REPOSITORY=o/r GITHUB_SHA=deadbeef CI_TMPDIR="${BATS_TEST_TMPDIR}"
     _ci_require_ghcr_auth() { return 0; }
     _ci_registry_digest() { echo "sha256:aaa"; }
-    ci_build_targets() { echo proxy; }
+    _ci_published_services() { echo proxy; }
     STUB_VIEW='{"body":"x","isPrerelease":true}' \
         CI_RELEASE_GH_CMD="${gh}" run ci_cmd_release_publish v1.2.3
     [ "${status}" -ne 0 ]; [[ "${output}" == *"CI-ERROR-RELEASE-0005"* ]]
@@ -1701,6 +1701,36 @@ tail" '{body:$b, isPrerelease:false}')" \
     grep -q 'proxy.cdx.json' "${calls}"
     run ci_cmd_release_sbom proxy
     [ "${status}" -ne 0 ]; [[ "${output}" == *"CI-ERROR-RELEASE-0008"* ]]
+}
+
+@test "published-services lists first-party images, excludes third-party" {
+    # What: apk/rust/toolchain publish, install (netdata) does not.
+    # Why: release notes/SBOM target only scannable first-party.
+    # From: Issue #1683
+    run _ci_published_services
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *proxy* ]]
+    [[ "${output}" == *build-tools* ]]
+    [[ "${output}" != *netdata* ]]
+}
+
+@test "release-sbom-stack builds an SBOM for every published service" {
+    # What: one SOT-driven walk, one SBOM per first-party image.
+    # Why: no hardcoded matrix; third-party services are skipped.
+    # From: Issue #1683
+    local gh calls="${BATS_TEST_TMPDIR}/gh-calls"; gh="$(_release_gh_stub)"
+    export GH_CALLS="${calls}" GITHUB_REPOSITORY=o/r CI_TMPDIR="${BATS_TEST_TMPDIR}"
+    _ci_require_ghcr_auth() { return 0; }
+    _ci_registry_digest() { echo "sha256:aaa"; }
+    _ci_published_services() { printf 'proxy\ndns\n'; }
+    local sbom; sbom="$(_stub sbom 'printf "{}" > "$3"')"
+    : > "${calls}"
+    CI_SBOM_CMD="${sbom}" CI_RELEASE_GH_CMD="${gh}" run ci_cmd_release_sbom_stack v1.2.3
+    [ "${status}" -eq 0 ]
+    grep -q 'proxy.cdx.json' "${calls}"
+    grep -q 'dns.cdx.json' "${calls}"
+    run ci_cmd_release_sbom_stack
+    [ "${status}" -ne 0 ]; [[ "${output}" == *"CI-ERROR-RELEASE-0013"* ]]
 }
 
 @test "release-vex generates the openvex document and attaches it" {
