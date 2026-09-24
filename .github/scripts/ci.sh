@@ -4852,11 +4852,18 @@ _ci_action_manifest_get() {
     return 1
 }
 
-# What: resolve an external action manifest via the API.
-# Why: 200=body, 404=absent (try .yaml), else infra warn.
+# What: resolve an external action manifest for a pinned ref.
+# Why: injectable resolver keeps the API URL shape private.
 # From: Issue #1683 | PR #1858
 _ci_fetch_action_manifest() {
     local owner="$1" repo="$2" subpath="$3" ref="$4"
+    # What: a caller-supplied resolver overrides the API path.
+    # Why: tests assert the OK/NOTFOUND/INFRA contract, not curl.
+    # From: Issue #1683 | PR #1858
+    if [ -n "${CI_ACTION_MANIFEST_CMD:-}" ]; then
+        "${CI_ACTION_MANIFEST_CMD}" "${owner}" "${repo}" "${subpath}" "${ref}"
+        return
+    fi
     local base="https://api.github.com/repos/${owner}/${repo}/contents/${subpath:+${subpath}/}"
     local file url out status n max="${CI_RETRY_MAX_ATTEMPTS:-4}" backoff="${CI_RETRY_BACKOFF_BASE_SECONDS:-1}" cls
     for file in action.yml action.yaml; do
@@ -4911,8 +4918,7 @@ _ci_check_action_node_versions() {
     fi
     scan_files=("${wf_files[@]}" "${act_files[@]}")
 
-    local -a viol=() warns=() uses_entries=() literal_entries=()
-    local extraction=0
+    local -a viol=() xv=() warns=() uses_entries=() literal_entries=()
     # What: collect every real uses: step, resolving anchors.
     # Why: an alias is not a duplicate; only literals count.
     # From: Issue #1683 | PR #1858
@@ -4929,8 +4935,8 @@ _ci_check_action_node_versions() {
             elif [[ "${raw}" =~ ^\*([A-Za-z0-9_-]+)$ ]]; then
                 anchor="${BASH_REMATCH[1]}"
                 if [ -z "${anchors[${anchor}]+x}" ]; then
-                    viol+=("${sf}: unresolved YAML alias '*${anchor}' in a uses: step")
-                    extraction=$((extraction + 1)); continue
+                    xv+=("${sf}: unresolved YAML alias '*${anchor}' in a uses: step")
+                    continue
                 fi
                 resolved="${anchors[${anchor}]}"
             else
@@ -4943,7 +4949,10 @@ _ci_check_action_node_versions() {
 
     local -a uses_values=()
     mapfile -t uses_values < <(printf '%s\n' "${uses_entries[@]}" | sed $'s/^[^\t]*\t//' | sort -u)
-    if [ "${#uses_values[@]}" -eq 0 ] || { [ "${#uses_values[@]}" -eq 1 ] && [ -z "${uses_values[0]}" ]; }; then
+    # What: no uses: at all AND no extraction failure is vacuous.
+    # Why: an unresolved alias is an extraction fault, not vacuous.
+    # From: Issue #1683 | PR #1858
+    if { [ "${#uses_values[@]}" -eq 0 ] || { [ "${#uses_values[@]}" -eq 1 ] && [ -z "${uses_values[0]}" ]; }; } && [ "${#xv[@]}" -eq 0 ]; then
         ci_log "[CI-ERROR-CHECK-0053]" "reason=\"no uses: steps extracted; scan vacuous\""; return 2
     fi
 
@@ -5061,9 +5070,18 @@ _ci_check_action_node_versions() {
     unset -f _ci_ando_reffiles
 
     local w
+    local w
     for w in "${warns[@]:-}"; do [ -n "${w}" ] && ci_log "[CI-ERROR-CHECK-0053]" "warn=\"${w}\""; done
+    # What: extraction faults are reported apart from pin faults.
+    # Why: a parse gap must not read as a deprecated-runtime failure.
+    # From: Issue #1683 | PR #1858
+    if [ "${#xv[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0054]" "reason=\"uses: extraction failure (unresolved alias / unparseable step)\"" "$(printf '%s\n' "${xv[@]}")"
+    fi
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0053]" "reason=\"deprecated runtime / ref drift / description expression (issue #799/#1095)\"" "$(printf '%s\n' "${viol[@]}")"
+    fi
+    if [ "${#xv[@]}" -gt 0 ] || [ "${#viol[@]}" -gt 0 ]; then
         return 1
     fi
     printf 'action-node-versions=clean pins=%s\n' "${#uses_values[@]}"
