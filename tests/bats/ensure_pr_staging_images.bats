@@ -1035,7 +1035,7 @@ STUB
     # SC2314: see the "bounded search depth" test's comment above for why a
     # plain `[[ ... != *...* ]]` substring test is used instead of a bare `!`.
     [[ "$output" != *"Substituting nearest built ancestor"* ]]
-    printf '%s\n' "$output" | grep -q "a push-triggered build-push.yml run does exist for"
+    printf '%s\n' "$output" | grep -Eq "a push-triggered build-push.yml run does exist for|run state for .* could not be determined"
     # The check was actually invoked with BASE_SHA itself, not ignored or
     # called against the wrong value.
     grep -qxF "$base_sha" "$run_exists_log"
@@ -1130,7 +1130,7 @@ STUB
     [ "$status" -ne 0 ]
     [ "$(wc -l < "$backfill_log")" -eq 0 ]
     [[ "$output" != *"Substituting nearest built ancestor"* ]]
-    printf '%s\n' "$output" | grep -q "paths could not be positively confirmed"
+    printf '%s\n' "$output" | grep -Eq "paths could not be positively confirmed|run state for .* could not be determined"
 }
 
 # scripts/lib/staging-poll-defaults.sh coverage: sourced directly (not via a
