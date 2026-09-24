@@ -468,15 +468,18 @@ jobs:
           github.event.pull_request.head.repo.full_name == github.repository
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
           [ "${{ steps.trivy-scan.outputs.db-status }}" = "available" ] || { echo "::error::Refusing to publish an unscanned amd64 PR candidate."; exit 1; }
           [ "${{ steps.trivy-scan.outputs.scan-error }}" != "true" ] || { echo "::error::Refusing to publish a scan-error amd64 PR candidate."; exit 1; }
           [ "${{ steps.trivy-scan.outcome }}" = "success" ] || { echo "::error::Refusing to publish an amd64 PR candidate with Trivy findings."; exit 1; }
           tag="${BUILD_TOOLS_IMAGE}:pr-${PR_NUMBER}-sha-${GITHUB_SHA}-amd64"
           docker tag "$BUILD_TOOLS_SCAN_IMAGE_AMD64" "$tag"
-          docker push "$tag"
-          digest="$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest.Digest}}')"
+          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker push "$tag"
+          digest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$tag" --format '{{json .Manifest.Digest}}')"
           digest="${digest%\"}"; digest="${digest#\"}"
           [[ "$digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid published amd64 digest '$digest'."; exit 1; }
           printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
@@ -779,15 +782,18 @@ jobs:
           github.event.pull_request.head.repo.full_name == github.repository
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
           [ "${{ steps.trivy-scan.outputs.db-status }}" = "available" ] || { echo "::error::Refusing to publish an unscanned arm64 PR candidate."; exit 1; }
           [ "${{ steps.trivy-scan.outputs.scan-error }}" != "true" ] || { echo "::error::Refusing to publish a scan-error arm64 PR candidate."; exit 1; }
           [ "${{ steps.trivy-scan.outcome }}" = "success" ] || { echo "::error::Refusing to publish an arm64 PR candidate with Trivy findings."; exit 1; }
           tag="${BUILD_TOOLS_IMAGE}:pr-${PR_NUMBER}-sha-${GITHUB_SHA}-arm64"
           docker tag "$BUILD_TOOLS_SCAN_IMAGE_ARM64" "$tag"
-          docker push "$tag"
-          digest="$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest.Digest}}')"
+          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker push "$tag"
+          digest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$tag" --format '{{json .Manifest.Digest}}')"
           digest="${digest%\"}"; digest="${digest#\"}"
           [[ "$digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid published arm64 digest '$digest'."; exit 1; }
           printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
