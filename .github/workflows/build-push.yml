@@ -341,9 +341,10 @@ jobs:
             -e GITHUB_REPOSITORY \
             -e GOVERNANCE_PR_TITLE="$governance_pr_title" \
             -e GOVERNANCE_PR_BODY="$governance_pr_body" \
+            -e CHANGED_FILES_REL="$(basename "$changed_files")" \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             timeout --kill-after=30 --signal=KILL 300 \
-            bash scripts/tracked/check-governance-guards.sh --changed-files-file "/work/$(basename "$changed_files")"
+            bash -c 'mapfile -t f < "$CHANGED_FILES_REL"; exec bash .github/scripts/ci.sh check governance-guards "${f[@]}"'
       - name: Warn on direct CHANGELOG.md edits outside a release PR
         if: github.event_name == 'pull_request'
         env:

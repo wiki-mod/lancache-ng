@@ -3728,6 +3728,17 @@ EOF
     [ "${status}" -eq 0 ]
 }
 
+@test "check governance-guards flags a malformed PR-body upload" {
+    # What: a body that is a literal @/tmp upload path, not text.
+    # Why: an upload mistake must not pass as real PR body text.
+    # From: Issue #1683 | PR #1858
+    GOVERNANCE_PR_BODY='@/tmp/pr-body-1234.txt' \
+        run bash "${CI_SH}" check governance-guards
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0018"* ]]
+    [[ "${output}" == *"@/tmp"* ]]
+}
+
 @test "check naming-consistency requires every allowlist name as a real container_name" {
     # What: ci.sh owns cross-file name-consistency gate.
     # Why: socket-proxy denies unknown container names.
