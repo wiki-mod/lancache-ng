@@ -63,6 +63,21 @@ wait_for_marker() {
     [[ -f "$marker" ]]
 }
 
+# What: waits for a killed holder to release its flock.
+# Why: kernel reaping can lag group-termination delivery.
+# From: Issue #1860 | PR #1872
+wait_for_unlock() {
+    local path="$1" waited=0
+    while (( waited < 50 )); do
+        if flock -n "$path" -c true; then
+            return 0
+        fi
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+    return 1
+}
+
 @test "sourcing defines the function and preserves the original hardcoded lock path" {
     # The literal path the original 3-copy inline pattern used
     # (exec {lock_fd}>/tmp/lancache-setup-cli-simulation.lock) must be
@@ -135,8 +150,8 @@ wait_for_marker() {
     kill -- "-${holder_pid}"
     wait "$holder_pid" 2>/dev/null || true
 
-    # Released: the same non-blocking probe must now succeed.
-    run flock -n "$test_lock_path" -c true
+    # Released: prove the asynchronous process-group cleanup completed.
+    run wait_for_unlock "$test_lock_path"
     [ "$status" -eq 0 ]
 }
 
