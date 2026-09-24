@@ -3513,6 +3513,34 @@ _ci_validate_proxy() {
     fi
 }
 
+# What: Print stream-target wildcard lines that hardcode a root (#1297).
+# Why: a *.domain target must forward to the requested SNI, not a literal.
+# From: Issue #1683 | Issue #1297
+_ci_stream_map_violations() {
+    awk '/^[[:space:]]*\*\./ && $2 != "$ssl_preread_server_name:443;" { print }'
+}
+
+# What: Prove the proxy stream-target map routes wildcards by SNI (#1297).
+# Why: a registrable-root literal misroutes subdomains to the wrong origin.
+# From: Issue #1683 | Issue #1297
+_ci_validate_proxy_stream_map() {
+    local project="$1" cid map bad
+    cid="$(docker compose -p "${project}" ps -q proxy 2>/dev/null)"
+    if [ -z "${cid}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0018]" "reason=\"no proxy container for stream-map check\""
+        return 2
+    fi
+    if ! map="$(docker exec "${cid}" cat /etc/nginx/stream.d/00-stream-targets.conf 2>/dev/null)"; then
+        ci_log "[CI-ERROR-VALIDATE-0019]" "reason=\"could not read proxy stream-target map\""
+        return 2
+    fi
+    bad="$(printf '%s\n' "${map}" | _ci_stream_map_violations)"
+    if [ -n "${bad}" ]; then
+        ci_error "[CI-ERROR-VALIDATE-0020]" "reason=\"stream-target wildcard forwards to a hardcoded root, not the requested SNI (#1297)\"" "${bad}"
+        return 1
+    fi
+}
+
 # What: Validate the candidate on one live prod stack.
 # Why: One up, all checks, one teardown (AG-VAL-027).
 # From: Issue #1683 | PR #1858
@@ -3534,6 +3562,7 @@ _ci_default_validate() {
             _ci_validate_wait_healthy "${project}" || rc=$?
             [ "${rc}" -eq 0 ] && { _ci_validate_dns "${project}" || rc=$?; }
             [ "${rc}" -eq 0 ] && { _ci_validate_proxy "${project}" || rc=$?; }
+            [ "${rc}" -eq 0 ] && { _ci_validate_proxy_stream_map "${project}" || rc=$?; }
         elif _ci_validate_is_collision "${up_out}"; then
             ci_error "[CI-ERROR-VALIDATE-0016]" "reason=\"subnet/port collision after slot reservation\"" "${up_out}"
             rc=1

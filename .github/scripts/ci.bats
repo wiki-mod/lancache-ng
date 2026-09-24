@@ -2430,6 +2430,24 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     [[ "${output}" == http://* ]]
 }
 
+@test "stream-map check accepts a wildcard that forwards to the requested SNI" {
+    # What: *.domain -> $ssl_preread_server_name:443 is the correct target.
+    # Why: #1297 requires wildcards route by requested SNI, not a root literal.
+    # From: Issue #1683 | Issue #1297
+    run bash -c "source '${CI_SH}'; printf '%s\n' '    *.example.com   \$ssl_preread_server_name:443;' | _ci_stream_map_violations"
+    [ "${status}" -eq 0 ]
+    [ -z "${output}" ]
+}
+
+@test "stream-map check flags a wildcard hardcoded to a root literal (#1297)" {
+    # What: *.domain -> <root>:443 literal is the #1297 misroute bug.
+    # Why: a subdomain must reach its own origin, not the root's backend.
+    # From: Issue #1683 | Issue #1297
+    run bash -c "source '${CI_SH}'; printf '%s\n' '    *.example.com   example.com:443;' | _ci_stream_map_violations"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"*.example.com"* ]]
+}
+
 @test "validate pins one SOT service onto both its compose containers" {
     # What: dns pins both dns-standard and dns-ssl.
     # Why: Pin by image, not key (1 service, 2 containers).
