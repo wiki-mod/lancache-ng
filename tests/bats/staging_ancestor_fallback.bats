@@ -1972,10 +1972,13 @@ esac
 STUB
     chmod +x "$run_exists_stub"
 
+    revision_probe_log="$BATS_TEST_TMPDIR/revision-probes.log"
+    : > "$revision_probe_log"
     revision_stub="$BATS_TEST_TMPDIR/revision.sh"
     cat > "$revision_stub" <<STUB
 #!/usr/bin/env bash
 image="\$1"
+printf '%s\n' "\$image" >> "$revision_probe_log"
 suffix="\${image##*:sha-}"
 case "\$suffix" in
     "${ancestor2_sha}") echo "$ancestor2_sha" ;;
@@ -1985,20 +1988,13 @@ STUB
     chmod +x "$revision_stub"
     export STAGING_IMAGE_REVISION_CMD="$revision_stub"
 
-    # Deliberately small but non-zero budgets (3s/3s, not 300s/600s): large
-    # enough that "the long wait ran" and "the fast path skipped it" are
-    # clearly distinguishable by elapsed time, small enough that a
-    # regression reintroducing the slow path fails this assertion in
-    # seconds rather than hanging the suite for up to 10 minutes.
-    start_epoch="$(date +%s)"
     run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "proxy" "$base_sha" 3 3 3 3 3 3 1 50 "$git_dir"
-    end_epoch="$(date +%s)"
     [ "$status" -eq 0 ]
     [[ "$output" == *"sha-${ancestor2_sha}" ]]
-    # The fast path (reordering) means this must resolve in well under the
-    # 3s ceiling above -- proves the long wait was genuinely skipped, not
-    # merely fast because the test stubs are instant.
-    [ "$((end_epoch - start_epoch))" -lt 2 ]
+    # What: counts base-image probes in the fast-path test.
+    # Why: retries prove the long wait ran despite parallel load.
+    # From: Issue #1860 | PR #1872
+    [ "$(grep -cxF "ghcr.io/wiki-mod/lancache-ng/proxy:sha-${base_sha}" "$revision_probe_log")" -eq 1 ]
 }
 
 @test "saf_resolve_sha_image_ref: resolves to the canonical full-SHA tag when it already exists" {
