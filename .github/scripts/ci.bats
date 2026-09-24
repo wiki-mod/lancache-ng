@@ -5829,6 +5829,20 @@ _setup_keys_kea_fixture() {
     [[ "${output}" == *"CI-ERROR-CHECK-0062"* ]]
 }
 
+@test "check setup-docker-conflict enforces the real setup.sh Docker RPM guard" {
+    # What: real setup.sh keeps the Fedora/RHEL Docker RPM conflict guard.
+    # Why: legacy docker RPMs conflict; podman/runc must stay installable.
+    # From: Issue #1683
+    run bash "${CI_SH}" check setup-docker-conflict "${BATS_TEST_DIRNAME}/../.."
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"setup-docker-conflict=clean"* ]]
+    local r="${BATS_TEST_TMPDIR}/sdc-bad"; mkdir -p "${r}"
+    printf 'echo noop\n' > "${r}/setup.sh"
+    run bash "${CI_SH}" check setup-docker-conflict "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0063"* ]]
+}
+
 @test "migrate_env_for_update repairs every empty required key" {
     # What: each SOT required-repair key is non-empty after update.
     # Why: an empty required key breaks the stack (AG-OP-007).

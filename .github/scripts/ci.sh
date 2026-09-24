@@ -6895,6 +6895,30 @@ _ci_check_setup_update_safety() {
     printf 'setup-update-safety=clean\n'
 }
 
+# What: Fail unless setup.sh guards the Fedora/RHEL Docker RPM install.
+# Why: legacy docker RPMs conflict; podman/runc must not be blocked.
+# From: Issue #1683
+_ci_check_setup_docker_conflict() {
+    local repo_root="${1:-${CI_REPO_ROOT}}"
+    local su="${repo_root}/setup.sh"
+    local -a viol=()
+    [ -f "${su}" ] || { ci_error "[CI-ERROR-CHECK-0063]" "path=\"${su}\" reason=\"setup.sh not found\""; return 2; }
+    grep -Fq 'rpm_legacy_docker_package_list()' "${su}" \
+        || viol+=("setup.sh must keep a shared legacy Docker RPM conflict list")
+    { grep -Fq 'docker-selinux' "${su}" && grep -Fq 'docker-engine-selinux' "${su}"; } \
+        || viol+=("Fedora/RHEL Docker RPM conflict guard must include legacy Docker selinux packages")
+    grep -Fq 'docker-ce|docker-ce-cli|containerd.io|docker-buildx-plugin|docker-compose-plugin)' "${su}" \
+        || viol+=("compose-plugin-only RPM install must still run the Docker/Podman conflict guard")
+    if awk '/\[\[ "\$os_id" = fedora \]\]/{f=1;next} /^    else$/{f=0} f&&/ (podman|runc)([[:space:]]|$)/{v=1} END{exit v?0:1}' "${su}"; then
+        viol+=("Fedora Docker conflict guard must not block stock podman or runc")
+    fi
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0063]" "reason=\"setup.sh Docker RPM conflict contract violated\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'setup-docker-conflict=clean\n'
+}
+
 # What: Emit the OpenVEX document for a trivyignore file.
 # Why: One VEX generator for drift-check and release attach.
 # From: Issue #1683
@@ -7558,7 +7582,7 @@ ci_cmd_check_all() {
         dependabot-docker-base-consistency idempotence-test-coverage \
         prebuilt-prod prod-state-wiring compose-config nats-atomic-write \
         docker-socket-proxy quickstart-required-env dhcp-proxy-env \
-        setup-keys-kea setup-update-safety vex-drift netdata-curl-pin logging-matrix \
+        setup-keys-kea setup-update-safety setup-docker-conflict vex-drift netdata-curl-pin logging-matrix \
         trivy-action-direct-usage entrypoint-lib-wiring dockerfile-build-tools \
         cargo-profile-tuning no-source-compiled-tools)
     for sub in "${repo_wide[@]}"; do
@@ -7619,6 +7643,7 @@ ci_cmd_check() {
         dhcp-proxy-env) _ci_check_dhcp_proxy_env "$@" ;;
         setup-keys-kea) _ci_check_setup_keys_kea "$@" ;;
         setup-update-safety) _ci_check_setup_update_safety "$@" ;;
+        setup-docker-conflict) _ci_check_setup_docker_conflict "$@" ;;
         vex-drift) _ci_check_vex_drift "$@" ;;
         netdata-curl-pin) _ci_check_netdata_curl_pin "$@" ;;
         logging-matrix) _ci_check_logging_matrix "$@" ;;
