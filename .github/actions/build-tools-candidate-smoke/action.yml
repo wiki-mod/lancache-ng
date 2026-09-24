@@ -39,7 +39,7 @@ runs:
         set -euo pipefail
         required_tools=(
           actionlint bash bats cargo cargo-audit cargo-tarpaulin ccache clippy-driver
-          dig distcc distcc-pump docker envsubst jq rustc rustfmt sccache
+          dig distcc distcc-pump docker envsubst jq parallel rustc rustfmt sccache
           shellspec shellcheck timeout
         )
         for tool in "${required_tools[@]}"; do command -v "$tool" >/dev/null; done
@@ -52,6 +52,7 @@ runs:
         sccache --version
         actionlint --version
         bats --version
+        parallel --version
         shellspec --version
         shellcheck --version
         distcc --version
