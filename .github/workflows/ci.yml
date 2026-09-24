@@ -141,12 +141,58 @@ jobs:
             bash .github/scripts/ci.sh assemble "${service}"
           done
 
+  # What: run the diff-scoped + repo-wide guard set (§98).
+  # Why: static guards, own failure domain, no build needed.
+  # From: Issue #1683
+  checks:
+    name: checks
+    runs-on: ubuntu-latest
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      PR_TITLE: ${{ github.event.pull_request.title }}
+      PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+      PR_BODY: ${{ github.event.pull_request.body }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Bootstrap the working tree
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          git init -q .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git -c http.extraheader="AUTHORIZATION: bearer ${GHCR_TOKEN}" \
+            fetch -q --no-tags origin "${GITHUB_REF}" ${BASE_SHA:+"${BASE_SHA}"}
+          git checkout -q FETCH_HEAD
+      - name: Collect changed files
+        id: changed
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/changed-files.txt"
+          if [ "${GITHUB_EVENT_NAME}" = pull_request ]; then
+            git diff --name-only "${BASE_SHA}...FETCH_HEAD" > "${out}"
+          elif [ -n "${BEFORE_SHA}" ] \
+            && [ "${BEFORE_SHA}" != 0000000000000000000000000000000000000000 ] \
+            && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+            git diff --name-only "${BEFORE_SHA}" "${GITHUB_SHA}" > "${out}"
+          else
+            git ls-files > "${out}"
+          fi
+          echo "file=${out}" >> "$GITHUB_OUTPUT"
+      - name: Run the PR/push check set
+        env:
+          CHANGED_FILES: ${{ steps.changed.outputs.file }}
+        run: bash .github/scripts/ci.sh check all
+
   # What: the always-present required check for branch protection.
   # Why: a required check MUST always appear, even on a NOOP (§62).
   # From: Issue #1683
   result:
     name: result
-    needs: [plan, build, assemble]
+    needs: [plan, build, assemble, checks]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -156,6 +202,7 @@ jobs:
           plan='${{ needs.plan.result }}'
           build='${{ needs.build.result }}'
           assemble='${{ needs.assemble.result }}'
+          checks='${{ needs.checks.result }}'
           # build/assemble are 'skipped' on a NOOP run -- that is success.
           if [ "${plan}" != success ]; then
             echo "[CI-ERROR-CORE-0100] phase=plan result=${plan}" >&2; exit 1
@@ -166,4 +213,8 @@ jobs:
               *) echo "[CI-ERROR-CORE-0100] phase=${phase%%:*} result=${phase#*:}" >&2; exit 1 ;;
             esac
           done
-          echo "CI 2.0 result: plan=${plan} build=${build} assemble=${assemble} -> SUCCESS"
+          # checks always runs (static guards); it must pass.
+          if [ "${checks}" != success ]; then
+            echo "[CI-ERROR-CORE-0100] phase=checks result=${checks}" >&2; exit 1
+          fi
+          echo "CI 2.0 result: plan=${plan} build=${build} assemble=${assemble} checks=${checks} -> SUCCESS"

@@ -3995,6 +3995,30 @@ _anv_run() {
     _anv_run "${r}"; [ "${status}" -ne 0 ]; [[ "${output}" == *"unresolved YAML alias"* ]]
 }
 
+@test "check all diff-scopes its checks and gates PR checks on PR context" {
+    # What: stub the dispatcher; record what check-all invokes.
+    # Why: prove scope+gating without running 36 real checks.
+    # From: Issue #1683
+    local log="${BATS_TEST_TMPDIR}/checkall.calls"; : > "${log}"
+    ci_cmd_check() { printf '%s|%s\n' "$1" "${2:-}" >> "${log}"; return 0; }
+    CHANGED_FILES="" PR_NUMBER="" ci_cmd_check_all services/dns/Dockerfile
+    grep -qx 'line-endings|services/dns/Dockerfile' "${log}"
+    grep -qx 'action-node-versions|' "${log}"
+    ! grep -q '^pr-title|' "${log}"
+}
+
+@test "check all runs PR-metadata checks when a PR number is present" {
+    # What: with PR_NUMBER set, the PR checks are invoked.
+    # Why: they have a PR to check only on a pull request (§60).
+    # From: Issue #1683
+    local cf="${BATS_TEST_TMPDIR}/checkall.cf"; printf 'services/dns/Dockerfile\n' > "${cf}"
+    local log="${BATS_TEST_TMPDIR}/checkall.pr"; : > "${log}"
+    ci_cmd_check() { printf '%s\n' "$1" >> "${log}"; return 0; }
+    CHANGED_FILES="${cf}" PR_NUMBER=42 ci_cmd_check_all
+    grep -qx 'pr-title' "${log}"
+    grep -qx 'pr-tracking-metadata' "${log}"
+}
+
 @test "action-node-versions resolver: yaml fallback, transient retry, permanent stop" {
     # What: real curl path -- .yml->.yaml, 403 retries, 401 stops.
     # Why: fetch mechanics have no hook; a counted mock proves them.

@@ -6745,10 +6745,54 @@ _ci_check_entrypoint_lib_wiring() {
 # What: Route a source-hygiene check to its function.
 # Why: One owner per guard invariant; ci.bats calls it.
 # From: Issue #1683
+# What: Run every applicable check, aggregating failures (§98).
+# Why: One owner of the PR/push check set; per-check scope is fixed.
+# From: Issue #1683
+ci_cmd_check_all() {
+    local -a changed=()
+    _ci_collect_changed changed "$@"
+    local sub rc=0
+    # What: diff-scoped checks see only the changed files (§98 default).
+    # Why: a PR check MUST NOT re-scan the whole repo by default.
+    # From: Issue #1683
+    local -a diff_scoped=(line-endings file-headers comment-length \
+        deny-short-sha language-policy mutable-refs executable-bits \
+        pipefail-early-exit review-chronology governance-guards \
+        changelog-direct-edit)
+    for sub in "${diff_scoped[@]}"; do
+        ci_cmd_check "${sub}" "${changed[@]}" || rc=1
+    done
+    # What: repo-wide invariants a diff alone cannot answer (§98 exception).
+    # Why: cross-file/state consistency that must hold every run.
+    # From: Issue #1683
+    local -a repo_wide=(action-node-versions naming-consistency \
+        workflow-line-limit stable-external-images compose-healthchecks \
+        proxy-cache-env-doc-drift build-tools-smoke-coverage \
+        dependabot-docker-base-consistency idempotence-test-coverage \
+        prebuilt-prod prod-state-wiring compose-config nats-atomic-write \
+        docker-socket-proxy quickstart-required-env dhcp-proxy-env \
+        setup-keys-kea vex-drift netdata-curl-pin logging-matrix \
+        trivy-action-direct-usage entrypoint-lib-wiring)
+    for sub in "${repo_wide[@]}"; do
+        ci_cmd_check "${sub}" || rc=1
+    done
+    # What: PR-metadata checks only run on a real pull request.
+    # Why: no PR context on a push; they have nothing to check (§60).
+    # From: Issue #1683
+    if [ -n "${PR_NUMBER:-}" ]; then
+        for sub in pr-title pr-template pr-tracking-metadata; do
+            ci_cmd_check "${sub}" || rc=1
+        done
+    fi
+    [ "${rc}" -eq 0 ] && printf 'check-all=clean\n'
+    return "${rc}"
+}
+
 ci_cmd_check() {
     local sub="${1:-}"
     if [ "$#" -gt 0 ]; then shift; fi
     case "${sub}" in
+        all) ci_cmd_check_all "$@" ;;
         line-endings) _ci_check_line_endings "$@" ;;
         file-headers) _ci_check_file_headers "$@" ;;
         comment-length) _ci_check_comment_length "$@" ;;
