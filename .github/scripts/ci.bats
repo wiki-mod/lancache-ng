@@ -4146,6 +4146,30 @@ _anv_run() {
     [[ "${output}" == *"coverage=40"* ]]
 }
 
+@test "check dockerfile-build-tools passes clean and flags a bad rust Dockerfile" {
+    # What: rust Dockerfiles must consume the build-tools image.
+    # Why: AG-CI-008/AG-REL-002 -- one toolchain owner, no self-compile.
+    # From: Issue #1683
+    run bash "${CI_SH}" check dockerfile-build-tools
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"dockerfile-build-tools=clean"* ]]
+    local r="${BATS_TEST_TMPDIR}/dfrepo" s ctx broke=0
+    while IFS= read -r s; do
+        [ "$(ci_service_field "$s" build_type)" = rust ] || continue
+        ctx="$(ci_service_field "$s" context)"
+        mkdir -p "${r}/${ctx}"
+        if [ "${broke}" -eq 0 ]; then
+            printf 'FROM alpine\nRUN cargo install sccache\n' > "${r}/${ctx}/Dockerfile"
+            broke=1
+        else
+            printf 'ARG BUILD_TOOLS_IMAGE\nFROM ${BUILD_TOOLS_IMAGE}\n' > "${r}/${ctx}/Dockerfile"
+        fi
+    done < <(ci_services)
+    run bash "${CI_SH}" check dockerfile-build-tools "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0058"* ]]
+}
+
 @test "action-node-versions resolver: yaml fallback, transient retry, permanent stop" {
     # What: real curl path -- .yml->.yaml, 403 retries, 401 stops.
     # Why: fetch mechanics have no hook; a counted mock proves them.

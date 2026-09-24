@@ -6855,6 +6855,34 @@ _ci_check_entrypoint_lib_wiring() {
 # What: Route a source-hygiene check to its function.
 # Why: One owner per guard invariant; ci.bats calls it.
 # From: Issue #1683
+# What: rust service Dockerfiles must consume the build-tools image.
+# Why: AG-CI-008/AG-REL-002 -- one toolchain owner, no self-compile.
+# From: Issue #1683
+_ci_check_dockerfile_build_tools() {
+    local repo_root="${1:-${CI_REPO_ROOT:-.}}" service ctx df
+    local -a viol=()
+    for service in $(ci_services); do
+        [ "$(ci_service_field "${service}" build_type)" = rust ] || continue
+        ctx="$(ci_service_field "${service}" context)"
+        df="${repo_root}/${ctx}/Dockerfile"
+        if [ ! -f "${df}" ]; then
+            viol+=("${service}: no Dockerfile at ${ctx}"); continue
+        fi
+        grep -q 'ARG BUILD_TOOLS_IMAGE' "${df}" \
+            || viol+=("${service}: Dockerfile must declare ARG BUILD_TOOLS_IMAGE")
+        grep -Fq 'FROM ${BUILD_TOOLS_IMAGE}' "${df}" \
+            || viol+=("${service}: Dockerfile must build FROM \${BUILD_TOOLS_IMAGE}")
+        if grep -q 'cargo install' "${df}"; then
+            viol+=("${service}: Dockerfile compiles a tool with cargo install; consume the build-tools image")
+        fi
+    done
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0058]" "reason=\"rust Dockerfile does not consume the build-tools image (AG-CI-008/AG-REL-002)\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'dockerfile-build-tools=clean\n'
+}
+
 # What: shellcheck the changed shell scripts at warning severity (§98).
 # Why: one owner; runs in the SOT build-tools image (AG-VAL-016).
 # From: Issue #1683 | Issue #1095
@@ -6946,7 +6974,7 @@ ci_cmd_check_all() {
         prebuilt-prod prod-state-wiring compose-config nats-atomic-write \
         docker-socket-proxy quickstart-required-env dhcp-proxy-env \
         setup-keys-kea vex-drift netdata-curl-pin logging-matrix \
-        trivy-action-direct-usage entrypoint-lib-wiring)
+        trivy-action-direct-usage entrypoint-lib-wiring dockerfile-build-tools)
     for sub in "${repo_wide[@]}"; do
         ci_cmd_check "${sub}" || rc=1
     done
@@ -6968,6 +6996,7 @@ ci_cmd_check() {
     case "${sub}" in
         all) ci_cmd_check_all "$@" ;;
         cargo-audit) _ci_check_cargo_audit "$@" ;;
+        dockerfile-build-tools) _ci_check_dockerfile_build_tools "$@" ;;
         shellcheck) _ci_check_shellcheck "$@" ;;
         actionlint) _ci_check_actionlint "$@" ;;
         line-endings) _ci_check_line_endings "$@" ;;
