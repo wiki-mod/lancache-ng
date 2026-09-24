@@ -281,6 +281,11 @@ jobs:
       - *bootstrap
       - name: Promote the channels the ref maps to
         run: bash .github/scripts/ci.sh promote-ref
+      - name: Cut the next patch tag on an image-affecting master push
+        if: github.ref == 'refs/heads/master'
+        env:
+          PROJECT_AUTOMATION_PAT: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+        run: bash .github/scripts/ci.sh cut-release-tag
 
   # What: publish the GitHub release notes and OpenVEX on a v-tag.
   # Why: release artifacts follow a successful channel promote.

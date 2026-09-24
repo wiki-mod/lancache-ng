@@ -37,7 +37,7 @@ declare -A CI_DISPATCH=(
     [aggregate]=ci_cmd_aggregate [emit-result]=ci_cmd_emit_result [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files
     [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [coverage-stack]=ci_cmd_coverage_stack [nightly-status]=ci_cmd_nightly_status
     [validate]=ci_cmd_validate [promote]=ci_cmd_promote [promote-ref]=ci_cmd_promote_ref [release]=ci_cmd_release
-    [release-publish]=ci_cmd_release_publish [release-sbom]=ci_cmd_release_sbom [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex
+    [release-publish]=ci_cmd_release_publish [release-sbom]=ci_cmd_release_sbom [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag
     [gc]=ci_cmd_gc [variables]=ci_cmd_variables [check]=ci_cmd_check
     [version]=ci_cmd_version
 )
@@ -2603,6 +2603,91 @@ ci_cmd_release_vex() {
     _ci_release_asset_put "${tag}" "${out}" || { rm -rf "${dir}"; return 2; }
     rm -rf "${dir}"
     printf 'release=vex tag=%s\n' "${tag}"
+}
+
+# What: The highest plain vX.Y.Z release tag on origin, or empty.
+# Why: ls-remote needs no deep fetch; empty pre-1.0 bootstrap.
+# From: Issue #1683
+_ci_last_release_tag() {
+    git ls-remote --tags --refs origin 'refs/tags/v[0-9]*.[0-9]*.[0-9]*' 2>/dev/null \
+        | sed 's#.*refs/tags/##' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1
+}
+
+# What: The next patch tag after a plain vX.Y.Z tag.
+# Why: automated patch releases bump Z only, never rc/minor.
+# From: Issue #1683
+_ci_next_patch_tag() {
+    local tag="$1"
+    if [[ ! "${tag}" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+        ci_log "[CI-ERROR-RELEASE-0015]" "tag=\"${tag}\" reason=\"not a plain vX.Y.Z tag; not auto-bumped\""
+        return 2
+    fi
+    printf 'v%s.%s.%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "$(( 10#${BASH_REMATCH[3]} + 1 ))"
+}
+
+# What: True if a published image differs from the base tag's.
+# Why: content-identity release trigger, not a path heuristic.
+# From: Issue #1683
+_ci_release_stack_changed() {
+    local base_tag="$1" registry repo sha svc cur rel
+    registry="$(_ci_registry)" || return 2
+    repo="$(_ci_repo)"
+    sha="${GITHUB_SHA:?GITHUB_SHA required}"
+    for svc in $(_ci_published_services); do
+        cur="$(_ci_registry_digest "${registry}/${repo}/${svc}:sha-${sha}")" || return 2
+        rel="$(_ci_registry_probe "${registry}/${repo}/${svc}:${base_tag}")" || rel=""
+        [ "${cur}" = "${rel}" ] || return 0
+    done
+    return 1
+}
+
+# What: Push a PAT-authored annotated tag to origin.
+# Why: GITHUB_TOKEN tag pushes do not re-trigger CI (anti-recursion).
+# From: Issue #1683
+_ci_push_release_tag() {
+    local tag="$1" sha="$2" pat="${PROJECT_AUTOMATION_PAT:?PROJECT_AUTOMATION_PAT required to push a release tag}"
+    local url="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:?}.git"
+    git tag -a "${tag}" "${sha}" -m "Automated patch release ${tag}"
+    git -c "http.${url}.extraheader=AUTHORIZATION: basic $(printf '%s' "x-access-token:${pat}" | base64 -w0)" \
+        push "${url}" "refs/tags/${tag}"
+}
+
+# What: True if a tag already exists on origin.
+# Why: never re-cut an existing release tag.
+# From: Issue #1683
+_ci_remote_tag_exists() {
+    [ -n "$(git ls-remote --tags origin "refs/tags/$1" 2>/dev/null)" ]
+}
+
+# What: Cut the next patch tag when master changed the stack.
+# Why: automated releases on image-affecting master pushes (docs).
+# From: Issue #1683
+ci_cmd_cut_release_tag() {
+    local base_tag next_tag tip
+    base_tag="$("${CI_LAST_RELEASE_TAG_CMD:-_ci_last_release_tag}")"
+    if [ -z "${base_tag}" ]; then
+        printf 'cut-tag=noop reason=no-base-tag\n'
+        return 0
+    fi
+    if ! "${CI_STACK_CHANGED_CMD:-_ci_release_stack_changed}" "${base_tag}"; then
+        printf 'cut-tag=noop reason=stack-unchanged base=%s\n' "${base_tag}"
+        return 0
+    fi
+    next_tag="$(_ci_next_patch_tag "${base_tag}")" || return "$?"
+    if ! tip="$("${CI_PROMOTE_TIP_CMD:-_ci_ref_tip}" refs/heads/master)"; then
+        ci_log "[CI-ERROR-RELEASE-0016]" "reason=\"could not resolve master tip; not cutting blind\""
+        return 2
+    fi
+    if [ -n "${tip}" ] && [ "${tip}" != "${GITHUB_SHA:-}" ]; then
+        printf 'cut-tag=superseded tip=%s sha=%s\n' "${tip}" "${GITHUB_SHA:-}"
+        return 0
+    fi
+    if "${CI_TAG_EXISTS_CMD:-_ci_remote_tag_exists}" "${next_tag}"; then
+        printf 'cut-tag=noop reason=exists tag=%s\n' "${next_tag}"
+        return 0
+    fi
+    "${CI_TAG_PUSH_CMD:-_ci_push_release_tag}" "${next_tag}" "${GITHUB_SHA:?}" || return "$?"
+    printf 'cut-tag=pushed tag=%s\n' "${next_tag}"
 }
 
 # =========================================================

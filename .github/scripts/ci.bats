@@ -1751,6 +1751,63 @@ tail" '{body:$b, isPrerelease:false}')" \
     [ "${status}" -ne 0 ]; [[ "${output}" == *"CI-ERROR-RELEASE-0011"* ]]
 }
 
+@test "next-patch-tag bumps Z only on a plain vX.Y.Z tag" {
+    # What: patch bump only; rc/minor tags are rejected.
+    # Why: automated releases never bump minor or a prerelease.
+    # From: Issue #1683
+    run _ci_next_patch_tag v0.2.9;      [ "${status}" -eq 0 ]; [ "${output}" = v0.2.10 ]
+    run _ci_next_patch_tag v1.0.0;      [ "${status}" -eq 0 ]; [ "${output}" = v1.0.1 ]
+    run _ci_next_patch_tag v0.2.0-rc.1; [ "${status}" -ne 0 ]; [[ "${output}" == *"CI-ERROR-RELEASE-0015"* ]]
+}
+
+@test "release-stack-changed compares published digests to the base tag" {
+    # What: any published image differing from the base tag => changed.
+    # Why: content-identity release trigger; identical stack => no cut.
+    # From: Issue #1683
+    export GITHUB_SHA=mysha
+    _ci_published_services() { printf 'proxy\n'; }
+    _ci_registry() { echo ghcr.io; }
+    _ci_repo() { echo o/r; }
+    _ci_registry_digest() { echo sha256:same; }
+    _ci_registry_probe() { echo sha256:same; }
+    run _ci_release_stack_changed v0.2.0
+    [ "${status}" -eq 1 ]
+    _ci_registry_probe() { echo sha256:other; }
+    run _ci_release_stack_changed v0.2.0
+    [ "${status}" -eq 0 ]
+}
+
+@test "cut-release-tag pushes the next patch tag only when the stack changed" {
+    # What: base -> impact -> tip -> exists gate before a PAT tag push.
+    # Why: automated patch releases on image-affecting master pushes.
+    # From: Issue #1683
+    local calls="${BATS_TEST_TMPDIR}/cut-calls"; export CUT_CALLS="${calls}"
+    local push base tipok noexist changed unchanged tipmoved
+    push="$(_stub push 'echo "PUSH $1 $2" >> "${CUT_CALLS}"')"
+    base="$(_stub base 'echo v0.2.0')"
+    tipok="$(_stub tipok 'echo mysha')"
+    tipmoved="$(_stub tipmoved 'echo othersha')"
+    noexist="$(_stub noexist 'exit 1')"
+    changed="$(_stub changed 'exit 0')"
+    unchanged="$(_stub unchanged 'exit 1')"
+    : > "${calls}"
+    CI_LAST_RELEASE_TAG_CMD="$(_stub nobase 'true')" run ci_cmd_cut_release_tag
+    [ "${status}" -eq 0 ]; [[ "${output}" == *"no-base-tag"* ]]; [ ! -s "${calls}" ]
+    : > "${calls}"
+    CI_LAST_RELEASE_TAG_CMD="${base}" CI_STACK_CHANGED_CMD="${unchanged}" run ci_cmd_cut_release_tag
+    [ "${status}" -eq 0 ]; [[ "${output}" == *"stack-unchanged"* ]]; [ ! -s "${calls}" ]
+    : > "${calls}"
+    CI_LAST_RELEASE_TAG_CMD="${base}" CI_STACK_CHANGED_CMD="${changed}" GITHUB_SHA=mysha CI_PROMOTE_TIP_CMD="${tipmoved}" run ci_cmd_cut_release_tag
+    [ "${status}" -eq 0 ]; [[ "${output}" == *"superseded"* ]]; [ ! -s "${calls}" ]
+    : > "${calls}"
+    CI_LAST_RELEASE_TAG_CMD="${base}" CI_STACK_CHANGED_CMD="${changed}" GITHUB_SHA=mysha CI_PROMOTE_TIP_CMD="${tipok}" CI_TAG_EXISTS_CMD="$(_stub exists 'exit 0')" run ci_cmd_cut_release_tag
+    [ "${status}" -eq 0 ]; [[ "${output}" == *"exists"* ]]; [ ! -s "${calls}" ]
+    : > "${calls}"
+    CI_LAST_RELEASE_TAG_CMD="${base}" CI_STACK_CHANGED_CMD="${changed}" GITHUB_SHA=mysha CI_PROMOTE_TIP_CMD="${tipok}" CI_TAG_EXISTS_CMD="${noexist}" CI_TAG_PUSH_CMD="${push}" run ci_cmd_cut_release_tag
+    [ "${status}" -eq 0 ]; [[ "${output}" == *"pushed tag=v0.2.1"* ]]
+    [ "$(cat "${calls}")" = "PUSH v0.2.1 mysha" ]
+}
+
 # =========================================================
 # GC
 # =========================================================
