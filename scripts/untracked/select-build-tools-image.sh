@@ -40,6 +40,7 @@ repository="${GITHUB_REPOSITORY:-wiki-mod/lancache-ng}"
 channel_ref="${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-}}"
 build_tools_channel="$(resolve_build_tools_channel "$channel_ref")"
 published_image="ghcr.io/${repository}/build-tools:${build_tools_channel}"
+pr_staging_image="${BUILD_TOOLS_PR_STAGING_IMAGE:-}"
 build_tools_context="${BUILD_TOOLS_CONTEXT:-tools/build-tools}"
 fallback_image="${FALLBACK_IMAGE:-lancache-ng-build-tools-validation:${GITHUB_SHA:-local}-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}}"
 event_name="${GITHUB_EVENT_NAME:-${EVENT_NAME:-}}"
@@ -47,6 +48,13 @@ head_repository="${GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME:-${HEAD_REPOSIT
 base_repository="${GITHUB_REPOSITORY:-${BASE_REPOSITORY:-}}"
 require_published="${BUILD_TOOLS_REQUIRE_PUBLISHED:-false}"
 pull_log="$(mktemp)"
+
+# What: selects the verified PR staging manifest when supplied.
+# Why: consumers must not use a stale channel during PR validation.
+# From: Issue #1860 | PR #1872
+if [[ -n "$pr_staging_image" ]]; then
+  published_image="$pr_staging_image"
+fi
 
 cleanup() {
   rm -f "$pull_log"
