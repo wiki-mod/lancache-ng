@@ -34,7 +34,7 @@ declare -A CI_DISPATCH=(
     [resolve]=ci_cmd_resolve [build]=ci_cmd_build [build-args]=ci_cmd_build_args
     [build-tools]=ci_cmd_build_tools [publish]=ci_cmd_publish [verify]=ci_cmd_verify
     [test]=ci_cmd_test [coverage]=ci_cmd_coverage [scan]=ci_cmd_scan [assemble]=ci_cmd_assemble
-    [aggregate]=ci_cmd_aggregate [emit-result]=ci_cmd_emit_result
+    [aggregate]=ci_cmd_aggregate [emit-result]=ci_cmd_emit_result [aggregate-stack]=ci_cmd_aggregate_stack
     [validate]=ci_cmd_validate [promote]=ci_cmd_promote [release]=ci_cmd_release
     [gc]=ci_cmd_gc [variables]=ci_cmd_variables [check]=ci_cmd_check
     [version]=ci_cmd_version
@@ -1087,6 +1087,22 @@ ci_cmd_emit_result() {
     }
     jq -cn --arg s "${service}" --arg p "${platform}" --arg i "${identity}" --arg d "${digest}" \
         '{service:$s, platform:$p, build_identity:$i, digest:$d, state:"ACCEPTED"}'
+}
+
+# What: aggregate the built matrix into the ledger in one write.
+# Why: emit each pair's result.json, then one CAS commit (§26.1); thin YAML.
+# From: Issue #1683
+ci_cmd_aggregate_stack() {
+    local matrix="${CI_BUILD_MATRIX:-}" dir row svc plat
+    [ -n "${matrix}" ] || { ci_log "[CI-ERROR-AGGREGATE-0005]" "reason=\"CI_BUILD_MATRIX required\""; return 2; }
+    dir="$(mktemp -d "${CI_TMPDIR:-/var/tmp}/ci-results.XXXXXX")" || return 2
+    while IFS= read -r row; do
+        [ -n "${row}" ] || continue
+        svc="$(printf '%s' "${row}" | jq -r '.service')"
+        plat="$(printf '%s' "${row}" | jq -r '.platform')"
+        ci_cmd_emit_result "${svc}" "${plat}" > "${dir}/${svc}-${plat//\//-}.json" || return "$?"
+    done < <(printf '%s' "${matrix}" | jq -c '.include[]')
+    ci_cmd_aggregate "${dir}"
 }
 
 # =========================================================

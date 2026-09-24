@@ -4269,6 +4269,26 @@ _anv_run() {
     [[ "${output}" == *"CI-ERROR-RESULT-0003"* ]]
 }
 
+@test "aggregate-stack emits one result per matrix pair then one ledger write" {
+    # What: matrix -> emit-result per pair -> single ci.sh aggregate (§26.1).
+    # Why: iteration lives in ci.sh; the workflow stays thin.
+    # From: Issue #1683
+    ci_cmd_emit_result() { printf 'emit %s %s\n' "$1" "$2"; }
+    local seen="${BATS_TEST_TMPDIR}/agg-dir"
+    ci_cmd_aggregate() { ls "$1" | LC_ALL=C sort | tr '\n' ' ' > "${seen}"; }
+    export CI_BUILD_MATRIX='{"include":[{"service":"dns","platform":"linux/amd64"},{"service":"ui","platform":"linux/arm64"}]}'
+    export CI_TMPDIR="${BATS_TEST_TMPDIR}"
+    run ci_cmd_aggregate_stack
+    [ "${status}" -eq 0 ]
+    run cat "${seen}"
+    [[ "${output}" == *"dns-linux-amd64.json"* ]]
+    [[ "${output}" == *"ui-linux-arm64.json"* ]]
+    unset CI_BUILD_MATRIX
+    run ci_cmd_aggregate_stack
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-AGGREGATE-0005"* ]]
+}
+
 @test "action-node-versions resolver: yaml fallback, transient retry, permanent stop" {
     # What: real curl path -- .yml->.yaml, 403 retries, 401 stops.
     # Why: fetch mechanics have no hook; a counted mock proves them.

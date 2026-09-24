@@ -273,12 +273,40 @@ jobs:
             bash .github/scripts/ci.sh coverage "${service}"
           done
 
+  # What: one acceptance result.json per built pair; one ledger write (§26.1).
+  # Why: single aggregator, exactly one CAS commit; push only, never a PR.
+  # From: Issue #1683
+  aggregate:
+    name: aggregate
+    needs: [plan, build]
+    if: needs.plan.outputs.any-build == 'true' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: read
+    steps:
+      - name: Bootstrap the working tree
+        run: |
+          set -euo pipefail
+          git init -q .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: bearer ${GHCR_TOKEN}"
+          git fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
+          git checkout -q FETCH_HEAD
+      # What: emit one result.json per built pair, then one ledger commit.
+      # Why: ci.sh owns identity, digest and the single CAS write (§26.1).
+      # From: Issue #1683
+      - name: Aggregate acceptance into the ledger
+        env:
+          CI_BUILD_MATRIX: ${{ needs.plan.outputs.matrix }}
+        run: bash .github/scripts/ci.sh aggregate-stack
+
   # What: merge each service's platform digests into a multi-arch index.
   # Why: ci.sh owns the accepted-digest merge; §45 both-or-none.
   # From: Issue #1683
   assemble:
     name: assemble
-    needs: [plan, build]
+    needs: [plan, aggregate]
     if: needs.plan.outputs.any-build == 'true'
     runs-on: ubuntu-latest
     steps:
@@ -301,6 +329,58 @@ jobs:
           for service in $(jq -r '[.include[].service] | unique | .[]' <<< "${MATRIX}"); do
             bash .github/scripts/ci.sh assemble "${service}"
           done
+
+  # What: full-setup stack validation on the exact accepted candidate (§49).
+  # Why: STACK ACCEPTED only after health + integration + client sim.
+  # From: Issue #1683
+  validate:
+    name: validate
+    needs: [plan, aggregate, assemble]
+    if: needs.plan.outputs.any-build == 'true' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Bootstrap the working tree
+        run: |
+          set -euo pipefail
+          git init -q .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: bearer ${GHCR_TOKEN}"
+          git fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
+          git checkout -q FETCH_HEAD
+      # What: candidate comes from the ledger; full-setup validates it.
+      # Why: exact accepted digests, no moving tags (§48/§49).
+      # From: Issue #1683
+      - name: Validate the accepted stack candidate
+        run: bash .github/scripts/ci.sh validate
+
+  # What: move the latest channel to the validated stack, master only (§55).
+  # Why: master = current stable; promotion only moves refs (§51).
+  # From: Issue #1683
+  promote:
+    name: promote
+    needs: [plan, validate]
+    if: needs.plan.outputs.any-build == 'true' && github.ref == 'refs/heads/master' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    env:
+      CI_STACK_VALIDATED: SUCCESS
+    steps:
+      - name: Bootstrap the working tree
+        run: |
+          set -euo pipefail
+          git init -q .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: bearer ${GHCR_TOKEN}"
+          git fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
+          git checkout -q FETCH_HEAD
+      - name: Promote the latest channel
+        run: bash .github/scripts/ci.sh promote latest
 
   # What: run the diff-scoped + repo-wide guard set (§98).
   # Why: static guards, own failure domain, no build needed.
@@ -353,7 +433,7 @@ jobs:
   # From: Issue #1683
   result:
     name: result
-    needs: [plan, build, test, resolve-build-tools, cargo-audit, lint, coverage, assemble, checks]
+    needs: [plan, build, test, resolve-build-tools, cargo-audit, lint, coverage, aggregate, assemble, validate, promote, checks]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -367,13 +447,16 @@ jobs:
           cargo_audit='${{ needs.cargo-audit.result }}'
           lint='${{ needs.lint.result }}'
           coverage='${{ needs.coverage.result }}'
+          aggregate='${{ needs.aggregate.result }}'
           assemble='${{ needs.assemble.result }}'
+          validate='${{ needs.validate.result }}'
+          promote='${{ needs.promote.result }}'
           checks='${{ needs.checks.result }}'
-          # build/test/audit/lint/coverage/assemble skip on a NOOP -- success.
+          # every non-plan/checks phase skips on a NOOP or a PR -- skipped is success.
           if [ "${plan}" != success ]; then
             echo "[CI-ERROR-CORE-0100] phase=plan result=${plan}" >&2; exit 1
           fi
-          for phase in build:"${build}" test:"${test}" resolve-build-tools:"${resolve_bt}" cargo-audit:"${cargo_audit}" lint:"${lint}" coverage:"${coverage}" assemble:"${assemble}"; do
+          for phase in build:"${build}" test:"${test}" resolve-build-tools:"${resolve_bt}" cargo-audit:"${cargo_audit}" lint:"${lint}" coverage:"${coverage}" aggregate:"${aggregate}" assemble:"${assemble}" validate:"${validate}" promote:"${promote}"; do
             case "${phase#*:}" in
               success|skipped) ;;
               *) echo "[CI-ERROR-CORE-0100] phase=${phase%%:*} result=${phase#*:}" >&2; exit 1 ;;
@@ -383,4 +466,4 @@ jobs:
           if [ "${checks}" != success ]; then
             echo "[CI-ERROR-CORE-0100] phase=checks result=${checks}" >&2; exit 1
           fi
-          echo "CI 2.0 result: plan=${plan} build=${build} test=${test} assemble=${assemble} checks=${checks} -> SUCCESS"
+          echo "CI 2.0 result: plan=${plan} build=${build} aggregate=${aggregate} assemble=${assemble} validate=${validate} promote=${promote} checks=${checks} -> SUCCESS"
