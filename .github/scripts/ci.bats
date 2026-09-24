@@ -4041,6 +4041,21 @@ _anv_run() {
     grep -qx 'pr-tracking-metadata' "${log}"
 }
 
+@test "check cargo-audit passes clean, fails on advisory and on warnings" {
+    # What: injected auditor; prove the pass/fail policy.
+    # Why: real cargo audit needs the toolchain image; hook it.
+    # From: Issue #1683
+    CI_CARGO_AUDIT_CMD="$(_stub aud 'exit 0')" run bash "${CI_SH}" check cargo-audit
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"cargo-audit=clean"* ]]
+    CI_CARGO_AUDIT_CMD="$(_stub aud2 'echo "error: vulnerability RUSTSEC-x"; exit 1')" run bash "${CI_SH}" check cargo-audit
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0055"* ]]
+    CI_CARGO_AUDIT_CMD="$(_stub aud3 'echo "warning: yanked crate"; exit 0')" run bash "${CI_SH}" check cargo-audit
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0055"* ]]
+}
+
 @test "action-node-versions resolver: yaml fallback, transient retry, permanent stop" {
     # What: real curl path -- .yml->.yaml, 403 retries, 401 stops.
     # Why: fetch mechanics have no hook; a counted mock proves them.

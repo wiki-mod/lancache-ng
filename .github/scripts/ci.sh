@@ -6751,6 +6751,26 @@ _ci_check_entrypoint_lib_wiring() {
 # What: Route a source-hygiene check to its function.
 # Why: One owner per guard invariant; ci.bats calls it.
 # From: Issue #1683
+# What: Fail on a vulnerable or yanked Rust dependency.
+# Why: cargo-audit policy owner; the workflow only runs it.
+# From: Issue #1683
+_ci_check_cargo_audit() {
+    local lock="${1:-Cargo.lock}" out rc=0
+    if [ -n "${CI_CARGO_AUDIT_CMD:-}" ]; then
+        out="$("${CI_CARGO_AUDIT_CMD}" "${lock}" 2>&1)" || rc=$?
+    else
+        out="$(cargo audit --deny warnings --file "${lock}" 2>&1)" || rc=$?
+    fi
+    # What: advisories fail, and any warning fails too (belt+braces).
+    # Why: --deny warnings should catch it; never pass a warning.
+    # From: Issue #1683 | Issue #1535
+    if [ "${rc}" -ne 0 ] || printf '%s' "${out}" | grep -Eiq '(^|[[:space:]])warning:'; then
+        ci_error "[CI-ERROR-CHECK-0055]" "reason=\"cargo audit found advisories or warnings\"" "${out}"
+        return 1
+    fi
+    printf 'cargo-audit=clean\n'
+}
+
 # What: Run every applicable check, aggregating failures (§98).
 # Why: One owner of the PR/push check set; per-check scope is fixed.
 # From: Issue #1683
@@ -6799,6 +6819,7 @@ ci_cmd_check() {
     if [ "$#" -gt 0 ]; then shift; fi
     case "${sub}" in
         all) ci_cmd_check_all "$@" ;;
+        cargo-audit) _ci_check_cargo_audit "$@" ;;
         line-endings) _ci_check_line_endings "$@" ;;
         file-headers) _ci_check_file_headers "$@" ;;
         comment-length) _ci_check_comment_length "$@" ;;
