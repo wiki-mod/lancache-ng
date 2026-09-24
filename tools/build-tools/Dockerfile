@@ -226,7 +226,6 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
       gettext \
       git \
       github-cli \
-      parallel \
       gnupg \
       grep \
       iproute2 \
@@ -397,7 +396,6 @@ RUN set -euo pipefail; \
       cargo-audit \
       cargo-tarpaulin \
       actionlint \
-      parallel \
       shellspec \
       shellcheck \
       jq \
