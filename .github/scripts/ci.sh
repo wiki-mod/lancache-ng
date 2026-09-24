@@ -34,7 +34,7 @@ declare -A CI_DISPATCH=(
     [resolve]=ci_cmd_resolve [build]=ci_cmd_build [build-args]=ci_cmd_build_args
     [build-tools]=ci_cmd_build_tools [publish]=ci_cmd_publish [verify]=ci_cmd_verify
     [test]=ci_cmd_test [coverage]=ci_cmd_coverage [scan]=ci_cmd_scan [assemble]=ci_cmd_assemble
-    [aggregate]=ci_cmd_aggregate
+    [aggregate]=ci_cmd_aggregate [emit-result]=ci_cmd_emit_result
     [validate]=ci_cmd_validate [promote]=ci_cmd_promote [release]=ci_cmd_release
     [gc]=ci_cmd_gc [variables]=ci_cmd_variables [check]=ci_cmd_check
     [version]=ci_cmd_version
@@ -1071,6 +1071,24 @@ ci_cmd_aggregate() {
     return "${rc}"
 }
 
+# What: Emit one service/platform acceptance result.json (§26.1).
+# Why: the single aggregator reads these; digest verified from GHCR.
+# From: Issue #1683
+ci_cmd_emit_result() {
+    local service="${1:-}" platform="${2:-}" identity tag digest
+    [ -n "${service}" ] || { ci_log "[CI-ERROR-RESULT-0001]" "reason=\"service arg required\""; return 2; }
+    [ -n "${platform}" ] || { ci_log "[CI-ERROR-RESULT-0002]" "reason=\"platform arg required\""; return 2; }
+    _ci_require_ghcr_auth || return "$?"
+    identity="$(_ci_identity_for "${service}" "${platform}")" || return "$?"
+    tag="$(_ci_image_tag "${service}" "${platform}" "${identity}")"
+    digest="$(_ci_registry_digest "${tag}")" || {
+        ci_log "[CI-ERROR-RESULT-0003]" "service=\"${service}\" platform=\"${platform}\" reason=\"no published digest to accept\""
+        return 2
+    }
+    jq -cn --arg s "${service}" --arg p "${platform}" --arg i "${identity}" --arg d "${digest}" \
+        '{service:$s, platform:$p, build_identity:$i, digest:$d, state:"ACCEPTED"}'
+}
+
 # =========================================================
 # CACHE CONFIGURATION
 # =========================================================
@@ -2015,15 +2033,29 @@ _ci_valid_channel() {
     return 1
 }
 
-# What: Read the accepted stack candidate (injectable).
-# Why: consumes a candidate; no ledger to test it.
+# What: The accepted multi-arch stack candidate: service=index-digest.
+# Why: promote/validate consume exact digests, never moving tags (§48).
+# From: Issue #1683
+_ci_stack_candidate_ledger() {
+    local service inputs want idx
+    while IFS= read -r service; do
+        [ -n "${service}" ] || continue
+        inputs="$(_ci_collect_accepted_digests "${service}")" || return "$?"
+        want="$(printf '%s\n' ${inputs} | sort | tr '\n' ' ')"
+        idx="$(_ci_reconcile_index "${service}" "${want% }")" || return "$?"
+        if [ -z "${idx}" ]; then
+            ci_log "[CI-ERROR-CANDIDATE-0001]" "service=\"${service}\" reason=\"platforms accepted but no assembled multi-arch index; stack not candidate-ready\""
+            return 2
+        fi
+        printf '%s=%s\n' "${service}" "${idx}"
+    done < <(ci_services)
+}
+
+# What: Read the accepted stack candidate (injectable, ledger default).
+# Why: exact-digest candidate (§48); tests inject, production reads the ledger.
 # From: Issue #1683
 _ci_stack_candidate() {
-    if [ -n "${CI_STACK_CANDIDATE_CMD:-}" ]; then
-        "${CI_STACK_CANDIDATE_CMD}"
-        return "$?"
-    fi
-    return 1
+    "${CI_STACK_CANDIDATE_CMD:-_ci_stack_candidate_ledger}"
 }
 
 # What: True only if the stack validated (docs section 50).

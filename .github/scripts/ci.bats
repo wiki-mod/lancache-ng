@@ -4215,6 +4215,43 @@ _anv_run() {
     [[ "${output}" == *"no-source-compiled-tools=clean"* ]]
 }
 
+@test "stack-candidate reader emits service=index-digest and fails closed on a missing index" {
+    # What: the production stack candidate is exact multi-arch index digests (§48).
+    # Why: promote/validate consume exact digests, never moving service tags.
+    # From: Issue #1683
+    _ci_collect_accepted_digests() { printf 'linux/amd64=sha256:a\nlinux/arm64=sha256:b\n'; }
+    _ci_reconcile_index() { printf 'sha256:idx-%s\n' "$1"; }
+    run _ci_stack_candidate_ledger
+    [ "${status}" -eq 0 ]
+    local s
+    for s in $(ci_services); do
+        [[ "${output}" == *"${s}=sha256:idx-${s}"* ]]
+    done
+    _ci_reconcile_index() { printf '\n'; }
+    run _ci_stack_candidate_ledger
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CANDIDATE-0001"* ]]
+}
+
+@test "emit-result produces an ACCEPTED record and fails closed on a missing digest" {
+    # What: the single aggregator's input record for one service/platform (§26.1).
+    # Why: state ACCEPTED with the exact GHCR digest, verified from the registry.
+    # From: Issue #1683
+    _ci_require_ghcr_auth() { return 0; }
+    _ci_identity_for() { echo "id-$1"; }
+    _ci_image_tag() { echo "reg/$1:$3"; }
+    _ci_registry_digest() { echo "sha256:deadbeef"; }
+    run ci_cmd_emit_result dns linux/amd64
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *'"service":"dns"'* ]]
+    [[ "${output}" == *'"state":"ACCEPTED"'* ]]
+    [[ "${output}" == *'"digest":"sha256:deadbeef"'* ]]
+    _ci_registry_digest() { return 1; }
+    run ci_cmd_emit_result dns linux/amd64
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-RESULT-0003"* ]]
+}
+
 @test "action-node-versions resolver: yaml fallback, transient retry, permanent stop" {
     # What: real curl path -- .yml->.yaml, 403 retries, 401 stops.
     # Why: fetch mechanics have no hook; a counted mock proves them.
