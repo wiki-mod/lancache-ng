@@ -168,11 +168,19 @@ exit 0
 STUB
     chmod +x "$base_run_exists_stub"
 
+    base_run_active_stub="$BATS_TEST_TMPDIR/base_run_active.sh"
+    cat > "$base_run_active_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+    chmod +x "$base_run_active_stub"
+
     export STAGING_IMAGE_EXISTS_CMD="$exists_stub"
     export STAGING_BACKFILL_CMD="$backfill_stub"
     export STAGING_IMAGE_REVISION_CMD="$revision_stub"
     export STAGING_FRESHNESS_GIT_DIR="$git_dir"
     export STAGING_BASE_BUILD_RUN_EXISTS_CMD="$base_run_exists_stub"
+    export STAGING_CANDIDATE_RUN_ACTIVE_CMD="$base_run_active_stub"
     export BASE_SHA="$base_sha"
     export BASE_REF="current_dev"
     # Keep the fail path fast: no real waiting in tests.
