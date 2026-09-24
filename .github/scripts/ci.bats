@@ -3874,6 +3874,16 @@ EOF
     [[ "${output}" == *"Not on project board"* ]]
 }
 
+@test "check pr-tracking-metadata warns non-blocking on a draft PR" {
+    # What: a draft PR missing metadata warns but exits 0.
+    # Why: metadata settles before a PR leaves draft (AG-GH-008).
+    # From: Issue #1683 | PR #1858
+    PR_DRAFT=true PR_NUMBER=12 REPO=wiki-mod/lancache-ng PR_LABELS_JSON='[]' \
+        run bash "${CI_SH}" check pr-tracking-metadata
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"pr-tracking-metadata=warn-draft"* ]]
+}
+
 @test "check governance-guards flags a stale TODO on a closed issue" {
     # What: ci.sh owns the governance scan; bats calls it.
     # Why: TODO on closed issue is stale, must fail loud.
