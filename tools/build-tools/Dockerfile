@@ -585,7 +585,6 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
       gh \
       git \
       jq \
-      parallel \
       lld \
       make \
       parallel \
