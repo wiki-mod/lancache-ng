@@ -178,6 +178,18 @@ teardown() {
     [ "$(printf '%s' "${m}" | jq -r '[.include[].platform]|sort|join(",")')" = "linux/amd64,linux/arm64" ]
 }
 
+@test "plan-matrix emits docs-only=true for a docs-only change" {
+    # What: a docs-only change is a NOOP; no container jobs (§63).
+    # Why: container jobs gate on docs-only != true.
+    # From: Issue #1683
+    local gh="${BATS_TEST_TMPDIR}/out.txt"; : > "${gh}"
+    GITHUB_OUTPUT="${gh}" GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_stub p 'echo MISSING_CONFIRMED')" \
+        run bash "${CI_SH}" plan-matrix fixture-note.md
+    [ "${status}" -eq 0 ]
+    grep -q '^docs-only=true$' "${gh}"
+    grep -q '^any-build=false$' "${gh}"
+}
+
 @test "plan-matrix emits test-services for a path-changed rust service" {
     # What: a changed rust source makes the service a test candidate.
     # Why: tests run on source change, reuse or not (§60).
@@ -4049,6 +4061,44 @@ _anv_run() {
     CHANGED_FILES="${cf}" PR_NUMBER=42 ci_cmd_check_all
     grep -qx 'pr-title' "${log}"
     grep -qx 'pr-tracking-metadata' "${log}"
+}
+
+@test "docs-only is true only when every changed path is docs" {
+    # What: a docs-only change is a NOOP (§63).
+    # Why: container jobs must not run on docs-only.
+    # From: Issue #1683
+    _ci_docs_only fixture-note.md docs/fixture-asset
+    ! _ci_docs_only fixture-note.md fixture-src/code.rs
+    ! _ci_docs_only
+}
+
+@test "check shellcheck noops without shell files and fails on findings" {
+    # What: injected shellcheck; prove noop + fail.
+    # Why: real shellcheck needs the toolchain image; hook it.
+    # From: Issue #1683
+    local cf="${BATS_TEST_TMPDIR}/sc.cf" doc="${BATS_TEST_TMPDIR}/note.md"
+    : > "${doc}"
+    printf '%s\n' "${doc}" > "${cf}"
+    CHANGED_FILES="${cf}" run bash "${CI_SH}" check shellcheck
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"shellcheck=noop"* ]]
+    local sh="${BATS_TEST_TMPDIR}/fixture.sh"; : > "${sh}"
+    printf '%s\n' "${sh}" > "${cf}"
+    CI_SHELLCHECK_CMD="$(_stub sc 'exit 1')" CHANGED_FILES="${cf}" run bash "${CI_SH}" check shellcheck
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0056"* ]]
+}
+
+@test "check actionlint passes clean and fails on findings" {
+    # What: injected actionlint; prove pass/fail.
+    # Why: real actionlint needs the toolchain image; hook it.
+    # From: Issue #1683
+    CI_ACTIONLINT_CMD="$(_stub al 'exit 0')" run bash "${CI_SH}" check actionlint
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"actionlint=clean"* ]]
+    CI_ACTIONLINT_CMD="$(_stub al2 'exit 1')" run bash "${CI_SH}" check actionlint
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0057"* ]]
 }
 
 @test "check cargo-audit passes clean, fails on advisory and on warnings" {

@@ -334,6 +334,21 @@ ci_cmd_plan() {
     ci_log "[CI-INFO-PLAN-0001]" "phase=plan changed=${#changed[@]} note=\"candidates only; identity/CAS decides build\""
 }
 
+# What: True when every changed path is documentation.
+# Why: a docs-only change is a NOOP; no container jobs run (§63).
+# From: Issue #1683
+_ci_docs_only() {
+    [ "$#" -gt 0 ] || return 1
+    local f
+    for f in "$@"; do
+        case "${f}" in
+            *.md|docs/*) ;;
+            *) return 1 ;;
+        esac
+    done
+    return 0
+}
+
 # What: Emit a resolve-filtered matrix to GITHUB_OUTPUT.
 # Why: Base-CI builds only what identity proves needs work.
 # From: Issue #1683
@@ -341,6 +356,8 @@ ci_cmd_plan_matrix() {
     local out="${GITHUB_OUTPUT:?GITHUB_OUTPUT required}"
     local -a changed=()
     _ci_collect_changed changed "$@"
+    local docs_only=false
+    _ci_docs_only "${changed[@]}" && docs_only=true
     local service platform include='[]' any=false resolved paction runner authed=false test_services=''
     # What: iterate product services; build-tools is separate.
     # Why: build-tools has its own workflow (Contract §111.2).
@@ -376,6 +393,7 @@ ci_cmd_plan_matrix() {
         printf 'any-build=%s\n' "${any}"
         printf 'matrix={"include":%s}\n' "${include}"
         printf 'test-services=%s\n' "${test_services# }"
+        printf 'docs-only=%s\n' "${docs_only}"
     } >> "${out}"
 }
 
@@ -6779,6 +6797,50 @@ _ci_check_entrypoint_lib_wiring() {
 # What: Route a source-hygiene check to its function.
 # Why: One owner per guard invariant; ci.bats calls it.
 # From: Issue #1683
+# What: shellcheck the changed shell scripts at warning severity (§98).
+# Why: one owner; runs in the SOT build-tools image (AG-VAL-016).
+# From: Issue #1683 | Issue #1095
+_ci_check_shellcheck() {
+    local -a changed=() files=()
+    _ci_collect_changed changed "$@"
+    # What: keep only real shell files; CHANGED_FILES is mixed.
+    # Why: shellcheck reads shell only; docs/yaml are not its input.
+    # From: Issue #1683
+    local f
+    for f in "${changed[@]}"; do
+        case "${f}" in *.sh|*.bats) [ -f "${f}" ] && files+=("${f}") ;; esac
+    done
+    [ "${#files[@]}" -eq 0 ] && { printf 'shellcheck=noop\n'; return 0; }
+    local out rc=0
+    if [ -n "${CI_SHELLCHECK_CMD:-}" ]; then
+        out="$("${CI_SHELLCHECK_CMD}" "${files[@]}" 2>&1)" || rc=$?
+    else
+        out="$(shellcheck --severity=warning "${files[@]}" 2>&1)" || rc=$?
+    fi
+    if [ "${rc}" -ne 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0056]" "reason=\"shellcheck found issues\"" "${out}"
+        return 1
+    fi
+    printf 'shellcheck=clean files=%s\n' "${#files[@]}"
+}
+
+# What: actionlint the workflow files (repo-wide, §98 exception).
+# Why: one owner; workflow syntax is not answerable from a diff.
+# From: Issue #1683
+_ci_check_actionlint() {
+    local repo_root="${1:-${CI_REPO_ROOT:-.}}" out rc=0
+    if [ -n "${CI_ACTIONLINT_CMD:-}" ]; then
+        out="$("${CI_ACTIONLINT_CMD}" "${repo_root}" 2>&1)" || rc=$?
+    else
+        out="$(actionlint "${repo_root}/.github/workflows/"*.yml 2>&1)" || rc=$?
+    fi
+    if [ "${rc}" -ne 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0057]" "reason=\"actionlint found issues\"" "${out}"
+        return 1
+    fi
+    printf 'actionlint=clean\n'
+}
+
 # What: Fail on a vulnerable or yanked Rust dependency.
 # Why: cargo-audit policy owner; the workflow only runs it.
 # From: Issue #1683
@@ -6848,6 +6910,8 @@ ci_cmd_check() {
     case "${sub}" in
         all) ci_cmd_check_all "$@" ;;
         cargo-audit) _ci_check_cargo_audit "$@" ;;
+        shellcheck) _ci_check_shellcheck "$@" ;;
+        actionlint) _ci_check_actionlint "$@" ;;
         line-endings) _ci_check_line_endings "$@" ;;
         file-headers) _ci_check_file_headers "$@" ;;
         comment-length) _ci_check_comment_length "$@" ;;

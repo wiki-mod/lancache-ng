@@ -38,6 +38,7 @@ jobs:
       any-build: ${{ steps.plan.outputs.any-build }}
       matrix: ${{ steps.plan.outputs.matrix }}
       test-services: ${{ steps.plan.outputs.test-services }}
+      docs-only: ${{ steps.plan.outputs.docs-only }}
     steps:
       # What: native fail-closed checkout; no pinned action (AG-CI-006).
       # Why: no SHA pin may live outside the SOT; git is a runner tool.
@@ -146,7 +147,7 @@ jobs:
   resolve-build-tools:
     name: resolve build-tools
     needs: plan
-    if: needs.plan.outputs.test-services != ''
+    if: needs.plan.outputs.docs-only != 'true'
     runs-on: ubuntu-latest
     outputs:
       image: ${{ steps.resolve.outputs.image }}
@@ -190,6 +191,55 @@ jobs:
           git checkout -q FETCH_HEAD
       - name: Audit rust dependencies
         run: bash .github/scripts/ci.sh check cargo-audit
+
+  # What: shellcheck + actionlint in the pinned build-tools image.
+  # Why: SOT-pinned linter versions, not runner drift (AG-VAL-016).
+  # From: Issue #1683
+  lint:
+    name: lint
+    needs: [plan, resolve-build-tools]
+    if: needs.plan.outputs.docs-only != 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ needs.resolve-build-tools.outputs.image }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Bootstrap the working tree
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          git init -q .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git -c http.extraheader="AUTHORIZATION: bearer ${GHCR_TOKEN}" \
+            fetch -q --no-tags origin "${GITHUB_REF}" ${BASE_SHA:+"${BASE_SHA}"}
+          git checkout -q FETCH_HEAD
+      - name: Collect changed files
+        id: changed
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP:-/tmp}/changed-files.txt"
+          if [ "${GITHUB_EVENT_NAME}" = pull_request ]; then
+            git diff --name-only "${BASE_SHA}...FETCH_HEAD" > "${out}"
+          elif [ -n "${BEFORE_SHA}" ] \
+            && [ "${BEFORE_SHA}" != 0000000000000000000000000000000000000000 ] \
+            && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+            git diff --name-only "${BEFORE_SHA}" "${GITHUB_SHA}" > "${out}"
+          else
+            git ls-files > "${out}"
+          fi
+          echo "file=${out}" >> "$GITHUB_OUTPUT"
+      - name: shellcheck changed shell scripts
+        env:
+          CHANGED_FILES: ${{ steps.changed.outputs.file }}
+        run: bash .github/scripts/ci.sh check shellcheck
+      - name: actionlint workflows
+        run: bash .github/scripts/ci.sh check actionlint
 
   # What: merge each service's platform digests into a multi-arch index.
   # Why: ci.sh owns the accepted-digest merge; §45 both-or-none.
@@ -271,7 +321,7 @@ jobs:
   # From: Issue #1683
   result:
     name: result
-    needs: [plan, build, test, resolve-build-tools, cargo-audit, assemble, checks]
+    needs: [plan, build, test, resolve-build-tools, cargo-audit, lint, assemble, checks]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -283,13 +333,14 @@ jobs:
           test='${{ needs.test.result }}'
           resolve_bt='${{ needs.resolve-build-tools.result }}'
           cargo_audit='${{ needs.cargo-audit.result }}'
+          lint='${{ needs.lint.result }}'
           assemble='${{ needs.assemble.result }}'
           checks='${{ needs.checks.result }}'
-          # build/test/audit/assemble are 'skipped' on a NOOP run -- success.
+          # build/test/audit/lint/assemble are 'skipped' on a NOOP -- success.
           if [ "${plan}" != success ]; then
             echo "[CI-ERROR-CORE-0100] phase=plan result=${plan}" >&2; exit 1
           fi
-          for phase in build:"${build}" test:"${test}" resolve-build-tools:"${resolve_bt}" cargo-audit:"${cargo_audit}" assemble:"${assemble}"; do
+          for phase in build:"${build}" test:"${test}" resolve-build-tools:"${resolve_bt}" cargo-audit:"${cargo_audit}" lint:"${lint}" assemble:"${assemble}"; do
             case "${phase#*:}" in
               success|skipped) ;;
               *) echo "[CI-ERROR-CORE-0100] phase=${phase%%:*} result=${phase#*:}" >&2; exit 1 ;;
