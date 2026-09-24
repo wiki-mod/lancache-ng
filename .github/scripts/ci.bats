@@ -2990,6 +2990,16 @@ netdata=sha256:n"
     printf '%s\n' "${output}" | grep -qx "aarch64"
 }
 
+@test "build-tools channel maps master to latest, else to nightly" {
+    # What: the tooling-image channel per target ref.
+    # Why: promote feeds only latest (master) and nightly (else).
+    # From: Issue #1683
+    [ "$(_ci_build_tools_channel master)" = latest ]
+    [ "$(_ci_build_tools_channel current_dev)" = nightly ]
+    [ "$(_ci_build_tools_channel feature/claude/x)" = nightly ]
+    [ "$(_ci_build_tools_channel "")" = nightly ]
+}
+
 @test "build-tools signature moves on an arm64-only apk change" {
     # What: an aarch64-only change moves the sig.
     # Why: an arm64-only package bump must not be a NOOP.

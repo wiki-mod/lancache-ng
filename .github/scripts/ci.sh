@@ -3664,6 +3664,33 @@ _ci_build_tools_build() {
     _ci_registry_digest "${tag}"
 }
 
+# What: The build-tools channel for a target ref (master=latest).
+# Why: promote feeds only latest (master) and nightly (else).
+# From: Issue #1683
+_ci_build_tools_channel() {
+    case "${1:-}" in
+        master) printf 'latest\n' ;;
+        *) printf 'nightly\n' ;;
+    esac
+}
+
+# What: Resolve the published build-tools image to an immutable ref.
+# Why: container: jobs pin the toolchain by digest; no select cascade
+#      (gate + signature + SOT smoke already own toolchain trust).
+# From: Issue #1683
+_ci_build_tools_resolve_image() {
+    local ref channel image digest
+    ref="${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-}}"
+    channel="$(_ci_build_tools_channel "${ref}")"
+    image="$(_ci_build_tools_image)"
+    _ci_require_ghcr_auth || return "$?"
+    if ! digest="$(_ci_registry_digest "${image}:${channel}")"; then
+        ci_log "[CI-ERROR-BUILDTOOLS-0018]" "channel=\"${channel}\" reason=\"no published build-tools digest; FAIL CLOSED\""
+        return 2
+    fi
+    printf '%s@%s\n' "${image}" "${digest}"
+}
+
 # What: build-tools lifecycle helpers for the workflow.
 # Why: all gate logic lives here; YAML only orchestrates.
 # From: Issue #1683
@@ -3679,6 +3706,7 @@ ci_cmd_build_tools() {
         gate) _ci_build_tools_gate "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
         plan) _ci_build_tools_plan ;;
         image) _ci_build_tools_image ;;
+        resolve-image) _ci_build_tools_resolve_image ;;
         build-args-out) _ci_build_tools_build_args_emit "${1:-}" ;;
         build) _ci_build_tools_build "${1:-}" "${2:-}" ;;
         merge) _ci_build_tools_merge "${1:-}" ;;
