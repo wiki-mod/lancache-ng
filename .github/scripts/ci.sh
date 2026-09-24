@@ -4306,7 +4306,7 @@ _ci_check_comment_length() {
 _ci_check_deny_short_sha() {
     local pat='\$\{([A-Za-z_][A-Za-z0-9_]*)?([Ss][Hh][Aa]|[Cc][Oo][Mm][Mm][Ii][Tt]|[Cc][Aa][Nn][Dd][Ii][Dd][Aa][Tt][Ee]|[Rr][Ee][Vv][Ii][Ss][Ii][Oo][Nn])[A-Za-z0-9_]*[[:space:]]*(:[[:space:]]*:[[:space:]]*[A-Za-z0-9_]+|:[[:space:]]*0[[:space:]]*:[[:space:]]*[A-Za-z0-9_]+)\}'
     local -a _ci_override=("$@") files=()
-    _ci_scan_files files _ci_override '.github/scripts/*.sh' '.github/workflows/*.yml'
+    _ci_scan_files files _ci_override '.github/scripts/*.sh' '.github/workflows/*.yml' 'scripts/lib/*.sh'
     local path out gs
     local -a viol=()
     for path in "${files[@]}"; do

@@ -3251,6 +3251,43 @@ netdata=sha256:n"
     [[ "${output}" == *"CI-ERROR-CHECK-0005"* ]]
 }
 
+@test "check deny-short-sha catches naming, prefix, and format slice variants" {
+    # What: every sha/commit/candidate/revision slice shape fails.
+    # Why: preserves check-deny-short-sha.sh's pattern coverage.
+    # From: Issue #1683 | PR #1858
+    local d="${BATS_TEST_TMPDIR}"
+    printf 'a=${commit:0:7}\nb=${candidate::7}\nc=${revision:0:8}\n' > "${d}/naming.sh"
+    run bash "${CI_SH}" check deny-short-sha "${d}/naming.sh"
+    [ "${status}" -ne 0 ]; [[ "${output}" == *"naming.sh:1"* ]]; [[ "${output}" == *"naming.sh:2"* ]]; [[ "${output}" == *"naming.sh:3"* ]]
+    printf 'x=${commit1_sha:0:7}\n' > "${d}/digit.sh"
+    run bash "${CI_SH}" check deny-short-sha "${d}/digit.sh"; [ "${status}" -ne 0 ]
+    printf 'base_sha_short="${base_sha:0:7}"\n' > "${d}/target.sh"
+    run bash "${CI_SH}" check deny-short-sha "${d}/target.sh"; [ "${status}" -ne 0 ]
+    printf 't="ghcr.io/x:sha-${ancestor_sha:0:7}"\n' > "${d}/interp.sh"
+    run bash "${CI_SH}" check deny-short-sha "${d}/interp.sh"; [ "${status}" -ne 0 ]
+    printf 'v=${full_sha:0:length}\n' > "${d}/varlen.sh"
+    run bash "${CI_SH}" check deny-short-sha "${d}/varlen.sh"; [ "${status}" -ne 0 ]
+    printf 'w=${GITHUB_SHA: 0 : 7}\n' > "${d}/ws1.sh"
+    run bash "${CI_SH}" check deny-short-sha "${d}/ws1.sh"; [ "${status}" -ne 0 ]
+    printf 'w=${GITHUB_SHA : : 7}\n' > "${d}/ws2.sh"
+    run bash "${CI_SH}" check deny-short-sha "${d}/ws2.sh"; [ "${status}" -ne 0 ]
+    printf 'n=${COMMIT_SHA::12}\n' > "${d}/len12.sh"
+    run bash "${CI_SH}" check deny-short-sha "${d}/len12.sh"; [ "${status}" -ne 0 ]
+}
+
+@test "check deny-short-sha allows full-SHA refs and git rev-parse --short" {
+    # What: full-SHA use and rev-parse --short fallback stay clean.
+    # Why: the ban targets bash slices only (issue #1095).
+    # From: Issue #1683 | PR #1858
+    local d="${BATS_TEST_TMPDIR}"
+    printf 'full="ghcr.io/${repo}/${svc}:sha-${commit}"\n' > "${d}/full.sh"
+    run bash "${CI_SH}" check deny-short-sha "${d}/full.sh"
+    [ "${status}" -eq 0 ]; [[ "${output}" == *"deny-short-sha=clean"* ]]
+    printf 's="$(git rev-parse --short=7 "$c")"\n' > "${d}/revparse.sh"
+    run bash "${CI_SH}" check deny-short-sha "${d}/revparse.sh"
+    [ "${status}" -eq 0 ]
+}
+
 @test "check language-policy fails banned ext and inline interpreter" {
     # What: ci.sh owns AG-REL-001; bats calls it.
     # Why: extension ban plus the heredoc foreign-lang gap.
