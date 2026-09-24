@@ -3178,6 +3178,51 @@ netdata=sha256:n"
     [[ "${output}" == *"legacy lowercase header present"* ]]
 }
 
+@test "check file-headers accepts canonical headers across comment syntaxes" {
+    # What: shebang/blank line 1 + Lua/CSS/Rust-placeholder native syntax.
+    # Why: absorbs check-file-headers.sh's per-format acceptance coverage.
+    # From: Issue #1683 | PR #1858
+    local h='# LanCache-NG (https://github.com/wiki-mod/lancache-ng)'
+    local s='# SPDX-License-Identifier: AGPL-3.0-or-later'
+    printf '#!/usr/bin/env bash\n%s\n%s\necho hi\n' "${h}" "${s}" > "${BATS_TEST_TMPDIR}/a.sh"
+    run bash "${CI_SH}" check file-headers "${BATS_TEST_TMPDIR}/a.sh"; [ "${status}" -eq 0 ]
+    printf '\n-- LanCache-NG (https://github.com/wiki-mod/lancache-ng)\n-- SPDX-License-Identifier: AGPL-3.0-or-later\nreturn true\n' > "${BATS_TEST_TMPDIR}/a.lua"
+    run bash "${CI_SH}" check file-headers "${BATS_TEST_TMPDIR}/a.lua"; [ "${status}" -eq 0 ]
+    printf '\n/* LanCache-NG (https://github.com/wiki-mod/lancache-ng) */\n/* SPDX-License-Identifier: AGPL-3.0-or-later */\nbody {}\n' > "${BATS_TEST_TMPDIR}/a.css"
+    run bash "${CI_SH}" check file-headers "${BATS_TEST_TMPDIR}/a.css"; [ "${status}" -eq 0 ]
+    printf '//!\n//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)\n//! SPDX-License-Identifier: AGPL-3.0-or-later\nfn main() {}\n' > "${BATS_TEST_TMPDIR}/a.rs"
+    run bash "${CI_SH}" check file-headers "${BATS_TEST_TMPDIR}/a.rs"; [ "${status}" -eq 0 ]
+    printf '# hello\n' > "${BATS_TEST_TMPDIR}/a.md"
+    run bash "${CI_SH}" check file-headers "${BATS_TEST_TMPDIR}/a.md"; [ "${status}" -eq 0 ]
+}
+
+@test "check file-headers rejects layout violations" {
+    # What: swapped, duplicate, no-blank line 1, JS-embedded SPDX.
+    # Why: absorbs check-file-headers.sh's layout-contract rejections.
+    # From: Issue #1683 | PR #1858
+    printf '#!/usr/bin/env bash\n# SPDX-License-Identifier: AGPL-3.0-or-later\n# LanCache-NG (https://github.com/wiki-mod/lancache-ng)\necho hi\n' > "${BATS_TEST_TMPDIR}/sw.sh"
+    run bash "${CI_SH}" check file-headers "${BATS_TEST_TMPDIR}/sw.sh"; [ "${status}" -ne 0 ]
+    printf '#!/usr/bin/env bash\n# LanCache-NG (https://github.com/wiki-mod/lancache-ng)\n# SPDX-License-Identifier: AGPL-3.0-or-later\n# LanCache-NG (https://github.com/wiki-mod/lancache-ng)\necho hi\n' > "${BATS_TEST_TMPDIR}/dup.sh"
+    run bash "${CI_SH}" check file-headers "${BATS_TEST_TMPDIR}/dup.sh"; [ "${status}" -ne 0 ]; [[ "${output}" == *"count"* ]]
+    printf '# LanCache-NG (https://github.com/wiki-mod/lancache-ng)\n# SPDX-License-Identifier: AGPL-3.0-or-later\nkey: value\n' > "${BATS_TEST_TMPDIR}/nb.yml"
+    run bash "${CI_SH}" check file-headers "${BATS_TEST_TMPDIR}/nb.yml"; [ "${status}" -ne 0 ]
+    printf '\n// LanCache-NG (https://github.com/wiki-mod/lancache-ng)\nconst license = "SPDX-License-Identifier: AGPL-3.0-or-later";\n' > "${BATS_TEST_TMPDIR}/emb.js"
+    run bash "${CI_SH}" check file-headers "${BATS_TEST_TMPDIR}/emb.js"; [ "${status}" -ne 0 ]
+}
+
+@test "check file-headers handles Tera and Docker parser-directive cases" {
+    # What: Tera block accept, Docker directive accept + second-line reject.
+    # Why: absorbs check-file-headers.sh's line-1-marker edge coverage.
+    # From: Issue #1683 | PR #1858
+    local t="${BATS_TEST_TMPDIR}/services/ui/src/templates"; mkdir -p "${t}"
+    printf '%s\n' '' '{# LanCache-NG (https://github.com/wiki-mod/lancache-ng) #}' '{# SPDX-License-Identifier: AGPL-3.0-or-later #}' '{% extends "base.html" %}' > "${t}/ok.html"
+    run bash -c "cd '${BATS_TEST_TMPDIR}' && bash '${CI_SH}' check file-headers services/ui/src/templates/ok.html"; [ "${status}" -eq 0 ]
+    printf '# syntax=docker/dockerfile:1\n# LanCache-NG (https://github.com/wiki-mod/lancache-ng)\n# SPDX-License-Identifier: AGPL-3.0-or-later\nFROM scratch\n' > "${BATS_TEST_TMPDIR}/Dockerfile"
+    run bash "${CI_SH}" check file-headers "${BATS_TEST_TMPDIR}/Dockerfile"; [ "${status}" -eq 0 ]
+    printf '# syntax=docker/dockerfile:1\n# escape=\140\n# SPDX-License-Identifier: AGPL-3.0-or-later\nFROM scratch\n' > "${BATS_TEST_TMPDIR}/Dockerfile"
+    run bash "${CI_SH}" check file-headers "${BATS_TEST_TMPDIR}/Dockerfile"; [ "${status}" -ne 0 ]
+}
+
 @test "check comment-length passes valid, fails oversize and story-run" {
     # What: ci.sh owns AG-CODE-012 limits; bats calls it.
     # Why: guard logic lives once, tested through ci.sh.
