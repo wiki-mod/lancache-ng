@@ -793,6 +793,7 @@ saf_event_has_incomplete_run() {
   local repository="${1:?saf_event_has_incomplete_run: repository is required}"
   local sha="${2:?saf_event_has_incomplete_run: sha is required}"
   local event="${3:?saf_event_has_incomplete_run: event is required}"
+  local workflow_file="${4:-build-push.yml}"
   # `curl` is capability-checked rather than assumed present, per AG-CI-001 --
   # see saf_query_run_count's own header for why that applies to `curl` too
   # and not just to the `gh` CLI this function replaced.
@@ -800,7 +801,7 @@ saf_event_has_incomplete_run() {
     return 2
   fi
   local url body statuses
-  url="https://api.github.com/repos/${repository}/actions/workflows/build-push.yml/runs?head_sha=${sha}&event=${event}&per_page=20"
+  url="https://api.github.com/repos/${repository}/actions/workflows/${workflow_file}/runs?head_sha=${sha}&event=${event}&per_page=20"
   body="$(_saf_mktemp_body_file)"
   if ! ghcr_retry "n/a-not-a-real-registry" "" "" -- _saf_github_api_get "$url" "$body"; then
     rm -f "$body"
