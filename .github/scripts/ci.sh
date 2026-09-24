@@ -4338,8 +4338,12 @@ _ci_check_language_policy() {
     local -a viol=()
     for path in "${files[@]}"; do
         [ -f "${path}" ] || continue
+        # What: Vendored minified UI asset is served, not authored.
+        # Why: AG-REL-001 governs authored code, not vendored assets.
+        # From: Issue #1683 | PR #1858
+        case "${path}" in services/ui/src/static/*.min.js) continue ;; esac
         case "${path}" in
-            *.py|*.pyc|*.pyw|*.rb|*.php|*.pl|*.pm) viol+=("${path}: banned-language file"); continue ;;
+            *.py|*.pyc|*.pyw|*.rb|*.php|*.pl|*.pm|*.js|*.mjs|*.cjs|*.ts) viol+=("${path}: banned-language file"); continue ;;
         esac
         case "${path}" in */ci.sh|ci.sh|*/ci.bats|ci.bats) continue ;; esac
         case "${path}" in

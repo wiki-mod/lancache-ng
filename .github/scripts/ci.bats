@@ -3222,6 +3222,24 @@ netdata=sha256:n"
     [[ "${output}" == *"CI-ERROR-CHECK-0007"* ]]
 }
 
+@test "check language-policy bans JS/TS files but exempts vendored min.js" {
+    # What: absorbs check-language-policy.sh's JS/TS extension ban.
+    # Why: a new authored .js must fail; vendored min.js must not.
+    # From: Issue #1683 | PR #1858
+    printf 'let x=1\n' > "${BATS_TEST_TMPDIR}/app.js"
+    run bash "${CI_SH}" check language-policy "${BATS_TEST_TMPDIR}/app.js"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0007"* ]]
+    printf 'export const x=1\n' > "${BATS_TEST_TMPDIR}/mod.ts"
+    run bash "${CI_SH}" check language-policy "${BATS_TEST_TMPDIR}/mod.ts"
+    [ "${status}" -ne 0 ]
+    mkdir -p "${BATS_TEST_TMPDIR}/services/ui/src/static"
+    printf 'minified\n' > "${BATS_TEST_TMPDIR}/services/ui/src/static/x.min.js"
+    run bash -c "cd '${BATS_TEST_TMPDIR}' && bash '${CI_SH}' check language-policy services/ui/src/static/x.min.js"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"language-policy=clean"* ]]
+}
+
 @test "check mutable-refs fails a floating action version via ci.sh" {
     # What: ci.sh owns the pin invariant; bats calls it.
     # Why: no :latest / @vN; SHA/digest-pinned only.

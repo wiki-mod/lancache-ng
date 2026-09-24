@@ -402,7 +402,7 @@ jobs:
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             timeout --kill-after=30 --signal=KILL 300 \
-            bash -lc 'set -euo pipefail; bash scripts/tracked/check-language-policy.sh'
+            bash .github/scripts/ci.sh check language-policy
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
   shellcheck:
