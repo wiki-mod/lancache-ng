@@ -8,16 +8,6 @@
 name: Build Tools Image
 
 on:
-  # What: publishes build-tools after current_dev input changes.
-  # Why: nightly must include changed validation dependencies.
-  # From: Issue #1860 | PR #1872
-  push:
-    branches: [current_dev]
-    paths:
-      - "tools/build-tools/**"
-      - ".github/workflows/build-tools.yml"
-      - ".github/actions/build-tools-candidate-smoke/**"
-      - ".github/actions/trivy-scan-exact-digest/**"
   workflow_dispatch:
   schedule:
     - cron: "23 3 * * 0"
