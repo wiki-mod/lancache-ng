@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # What: builds, scans, and publishes multi-arch build-tools image.
-# Why: fork PRs: parallel arch builds; same-repo: build-push.yml
+# Why: every PR validates the candidate before publication.
 # From: PR #1523
 name: Build Tools Image
 
@@ -56,9 +56,8 @@ jobs:
   determine-publish-scope:
     name: admit standalone build-tools route
     # What: shared admission gate for both architecture jobs below.
-    # Why: centralize fork-only exception, not per-job repeats.
+    # Why: PR candidate validation must not depend on publish flow.
     # From: PR #1523
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.id != github.event.repository.id }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -233,8 +232,8 @@ jobs:
           printf 'RUST_ACCELERATION_NETWORK=%s\n' "bridge" >> "$GITHUB_ENV"
           printf 'RUST_BUILDX_NETWORK=%s\n' "default" >> "$GITHUB_ENV"
 
-      # What: build local amd64 candidate for fork PRs.
-      # Why: fork PRs can't publish; still need candidate for smoke/vuln.
+      # What: build local amd64 candidate for pull requests.
+      # Why: candidate proof must precede any channel publication.
       # From: PR #1523
       - name: Build local amd64 scan image
         id: local-build-amd64
@@ -583,8 +582,8 @@ jobs:
             printf 'rust=%s\n' "$(digest_for_image rust:latest)"
           } >> "$GITHUB_OUTPUT"
 
-      # What: build local arm64 candidate for fork PRs.
-      # Why: manual/scheduled runs use pushed exact-digest path instead.
+      # What: build local arm64 candidate for pull requests.
+      # Why: manual and scheduled runs use pushed exact digests.
       # From: PR #1523
       - name: Build local arm64 scan image
         id: local-build-arm64
