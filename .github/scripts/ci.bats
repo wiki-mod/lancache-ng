@@ -4146,28 +4146,73 @@ _anv_run() {
     [[ "${output}" == *"coverage=40"* ]]
 }
 
-@test "check dockerfile-build-tools passes clean and flags a bad rust Dockerfile" {
-    # What: rust Dockerfiles must consume the build-tools image.
-    # Why: AG-CI-008/AG-REL-002 -- one toolchain owner, no self-compile.
+@test "check dockerfile-build-tools flags both image and hardcoded-tuning violations" {
+    # What: rust Dockerfiles must consume the build-tools image and hardcode no tuning.
+    # Why: AG-CI-008/AG-REL-002 (image) plus AG-CI-006 (jobs/lto/codegen from CI vars).
     # From: Issue #1683
     run bash "${CI_SH}" check dockerfile-build-tools
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"dockerfile-build-tools=clean"* ]]
-    local r="${BATS_TEST_TMPDIR}/dfrepo" s ctx broke=0
+    local r="${BATS_TEST_TMPDIR}/dfrepo" s ctx n=0
     while IFS= read -r s; do
         [ "$(ci_service_field "$s" build_type)" = rust ] || continue
         ctx="$(ci_service_field "$s" context)"
         mkdir -p "${r}/${ctx}"
-        if [ "${broke}" -eq 0 ]; then
-            printf 'FROM alpine\nRUN cargo install sccache\n' > "${r}/${ctx}/Dockerfile"
-            broke=1
-        else
-            printf 'ARG BUILD_TOOLS_IMAGE\nFROM ${BUILD_TOOLS_IMAGE}\n' > "${r}/${ctx}/Dockerfile"
-        fi
+        case "${n}" in
+            0) printf 'FROM alpine\nRUN cargo install sccache\n' > "${r}/${ctx}/Dockerfile" ;;
+            1) printf 'ARG BUILD_TOOLS_IMAGE\nFROM ${BUILD_TOOLS_IMAGE}\nENV CARGO_BUILD_JOBS=4\n' > "${r}/${ctx}/Dockerfile" ;;
+            *) printf 'ARG BUILD_TOOLS_IMAGE\nFROM ${BUILD_TOOLS_IMAGE}\nARG PROJECT_CARGO_LTO=\n' > "${r}/${ctx}/Dockerfile" ;;
+        esac
+        n=$((n + 1))
     done < <(ci_services)
     run bash "${CI_SH}" check dockerfile-build-tools "${r}"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0058"* ]]
+    [[ "${output}" == *"CI-ERROR-CHECK-0060"* ]]
+}
+
+@test "check cargo-profile-tuning flags hardcoded [profile] lto/codegen-units" {
+    # What: no Cargo.toml may set [profile] lto/codegen-units.
+    # Why: they come from CARGO_PROFILE_RELEASE env (AG-CI-006).
+    # From: Issue #1683
+    local r="${BATS_TEST_TMPDIR}/cptrepo"
+    mkdir -p "${r}/crate-a" "${r}/crate-b"
+    printf '[package]\nname = "a"\n\n[profile.release]\n# no tuning here\n' > "${r}/crate-a/Cargo.toml"
+    printf '[package]\nname = "b"\n\n[profile.release]\nlto = "thin"\ncodegen-units = 1\n' > "${r}/crate-b/Cargo.toml"
+    git -C "${r}" init -q
+    git -C "${r}" add -A
+    run bash "${CI_SH}" check cargo-profile-tuning "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0059"* ]]
+    [[ "${output}" == *"crate-b/Cargo.toml"* ]]
+    printf '[package]\nname = "b"\n\n[profile.release]\n' > "${r}/crate-b/Cargo.toml"
+    git -C "${r}" add -A
+    run bash "${CI_SH}" check cargo-profile-tuning "${r}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"cargo-profile-tuning=clean"* ]]
+}
+
+@test "check no-source-compiled-tools flags cargo install of a prebuilt SOT tool" {
+    # What: no Dockerfile may cargo-install a tool the SOT ships prebuilt.
+    # Why: INSTALL-DON'T-COMPILE; build-tools is the toolchain owner (AG-REL-002).
+    # From: Issue #1683
+    local r="${BATS_TEST_TMPDIR}/nsctrepo" pkg
+    pkg="$(_ci_build_tools_packages | grep -E '^(sccache|cargo-audit|cargo-tarpaulin)$' | head -1)"
+    [ -n "${pkg}" ]
+    mkdir -p "${r}/svc-a" "${r}/svc-b"
+    printf 'FROM alpine\nRUN cargo build --release --locked\n' > "${r}/svc-a/Dockerfile"
+    printf 'FROM alpine\nRUN cargo install --locked %s\n' "${pkg}" > "${r}/svc-b/Dockerfile"
+    git -C "${r}" init -q
+    git -C "${r}" add -A
+    run bash "${CI_SH}" check no-source-compiled-tools "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0061"* ]]
+    [[ "${output}" == *"${pkg}"* ]]
+    printf 'FROM alpine\nRUN cargo build --release --locked\n' > "${r}/svc-b/Dockerfile"
+    git -C "${r}" add -A
+    run bash "${CI_SH}" check no-source-compiled-tools "${r}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"no-source-compiled-tools=clean"* ]]
 }
 
 @test "action-node-versions resolver: yaml fallback, transient retry, permanent stop" {

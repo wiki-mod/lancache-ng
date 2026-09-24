@@ -6859,8 +6859,8 @@ _ci_check_entrypoint_lib_wiring() {
 # Why: AG-CI-008/AG-REL-002 -- one toolchain owner, no self-compile.
 # From: Issue #1683
 _ci_check_dockerfile_build_tools() {
-    local repo_root="${1:-${CI_REPO_ROOT:-.}}" service ctx df
-    local -a viol=()
+    local repo_root="${1:-${CI_REPO_ROOT:-.}}" service ctx df rc=0
+    local -a viol=() tuning=()
     for service in $(ci_services); do
         [ "$(ci_service_field "${service}" build_type)" = rust ] || continue
         ctx="$(ci_service_field "${service}" context)"
@@ -6875,12 +6875,73 @@ _ci_check_dockerfile_build_tools() {
         if grep -q 'cargo install' "${df}"; then
             viol+=("${service}: Dockerfile compiles a tool with cargo install; consume the build-tools image")
         fi
+        # What: reject a hardcoded Cargo tuning value; an empty ARG is fine.
+        # Why: jobs/lto/codegen come from CI vars, fail closed when unset (AG-CI-006).
+        # From: Issue #1683
+        if grep -qE '^[[:space:]]*(ARG[[:space:]]+SCCACHE_DIST_SCHEDULER_URL|ENV[[:space:]]+CARGO_BUILD_JOBS=|ARG[[:space:]]+PROJECT_CARGO_LTO=.+|ARG[[:space:]]+PROJECT_CARGO_CODEGENUNIT=.+|ENV[[:space:]]+PROJECT_CARGO_LTO=|ENV[[:space:]]+PROJECT_CARGO_CODEGENUNIT=)' "${df}"; then
+            tuning+=("${service}: Dockerfile hardcodes a Cargo tuning value; source jobs/lto/codegen from CI vars")
+        fi
     done
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0058]" "reason=\"rust Dockerfile does not consume the build-tools image (AG-CI-008/AG-REL-002)\"" "$(printf '%s\n' "${viol[@]}")"
+        rc=1
+    fi
+    if [ "${#tuning[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0060]" "reason=\"rust Dockerfile hardcodes a Cargo tuning value (AG-CI-006)\"" "$(printf '%s\n' "${tuning[@]}")"
+        rc=1
+    fi
+    [ "${rc}" -eq 0 ] && printf 'dockerfile-build-tools=clean\n'
+    return "${rc}"
+}
+
+# What: no workspace Cargo.toml may set [profile] lto/codegen-units.
+# Why: they come from CARGO_PROFILE_RELEASE_LTO/_CODEGEN_UNITS env (AG-CI-006).
+# From: Issue #1683
+_ci_check_cargo_profile_tuning() {
+    local repo_root="${1:-${CI_REPO_ROOT:-.}}" f line
+    local -a viol=()
+    while IFS= read -r f; do
+        [ -n "${f}" ] || continue
+        while IFS= read -r line; do
+            [ -n "${line}" ] && viol+=("${f}:${line}")
+        done < <(grep -nE '^[[:space:]]*(lto|codegen-units)[[:space:]]*=' "${repo_root}/${f}" 2>/dev/null)
+    done < <(git -C "${repo_root}" ls-files '*Cargo.toml' 2>/dev/null)
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0059]" "reason=\"Cargo.toml hardcodes [profile] lto/codegen-units; source them from CARGO_PROFILE_RELEASE env (AG-CI-006)\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
-    printf 'dockerfile-build-tools=clean\n'
+    printf 'cargo-profile-tuning=clean\n'
+}
+
+# What: no Dockerfile may cargo-install a tool the SOT ships prebuilt.
+# Why: INSTALL-DON'T-COMPILE; build-tools is the one toolchain owner (AG-REL-002).
+# From: Issue #1683
+_ci_check_no_source_compiled_tools() {
+    local repo_root="${1:-${CI_REPO_ROOT:-.}}" df tok
+    local -a viol=() pkgs=()
+    local -A is_pkg=()
+    mapfile -t pkgs < <(_ci_build_tools_packages) || return 2
+    for tok in "${pkgs[@]}"; do [ -n "${tok}" ] && is_pkg["${tok}"]=1; done
+    while IFS= read -r df; do
+        [ -n "${df}" ] || continue
+        while IFS= read -r tok; do
+            [ -n "${tok}" ] && [ -n "${is_pkg[${tok}]:-}" ] \
+                && viol+=("${df}: cargo install ${tok}; SOT ships it prebuilt in build-tools")
+        done < <(awk '
+            match($0, /cargo[ \t]+install[ \t]+/) {
+                r = substr($0, RSTART + RLENGTH)
+                sub(/[&|;].*/, "", r)
+                n = split(r, a, /[ \t]+/)
+                for (i = 1; i <= n; i++)
+                    if (a[i] != "" && a[i] !~ /^-/) print a[i]
+            }
+        ' "${repo_root}/${df}" 2>/dev/null)
+    done < <(git -C "${repo_root}" ls-files '*Dockerfile' 2>/dev/null)
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0061]" "reason=\"Dockerfile source-compiles a prebuilt SOT tool; consume the build-tools image\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'no-source-compiled-tools=clean\n'
 }
 
 # What: shellcheck the changed shell scripts at warning severity (§98).
@@ -6974,7 +7035,8 @@ ci_cmd_check_all() {
         prebuilt-prod prod-state-wiring compose-config nats-atomic-write \
         docker-socket-proxy quickstart-required-env dhcp-proxy-env \
         setup-keys-kea vex-drift netdata-curl-pin logging-matrix \
-        trivy-action-direct-usage entrypoint-lib-wiring dockerfile-build-tools)
+        trivy-action-direct-usage entrypoint-lib-wiring dockerfile-build-tools \
+        cargo-profile-tuning no-source-compiled-tools)
     for sub in "${repo_wide[@]}"; do
         ci_cmd_check "${sub}" || rc=1
     done
@@ -6997,6 +7059,8 @@ ci_cmd_check() {
         all) ci_cmd_check_all "$@" ;;
         cargo-audit) _ci_check_cargo_audit "$@" ;;
         dockerfile-build-tools) _ci_check_dockerfile_build_tools "$@" ;;
+        cargo-profile-tuning) _ci_check_cargo_profile_tuning "$@" ;;
+        no-source-compiled-tools) _ci_check_no_source_compiled_tools "$@" ;;
         shellcheck) _ci_check_shellcheck "$@" ;;
         actionlint) _ci_check_actionlint "$@" ;;
         line-endings) _ci_check_line_endings "$@" ;;
