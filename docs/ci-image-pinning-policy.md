@@ -132,16 +132,25 @@ Operators or CI runners that require Docker Hub as the source should configure
 that at the Docker daemon or build infrastructure layer, not by adding
 undocumented per-Dockerfile fallback logic.
 
-- `services/proxy/Dockerfile`: `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian 13-slim to Alpine, issue #815, staged Alpine migration)
-- `services/dns/Dockerfile` (runtime stage): `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian trixie-slim to Alpine, issue #815, staged Alpine migration; PowerDNS/recursor pinned to Alpine's `edge` branch specifically for a CVE fix, see `services/dns/Dockerfile`'s own comment)
-- `services/dhcp/Dockerfile`: `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian trixie-slim to Alpine, issue #815, staged Alpine migration — Kea second)
-- `services/dhcp-proxy/Dockerfile`: `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian trixie-slim to Alpine, issue #815, staged Alpine migration — dnsmasq-first)
-- `services/ntp/Dockerfile`: `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian trixie-slim to Alpine, issue #815, staged Alpine migration)
-- `services/ui/Dockerfile` (runtime stage): `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian trixie-slim to Alpine in a sibling PR, issue #815, staged Alpine migration)
-- `services/watchdog/Dockerfile`: `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian 13-slim to Alpine, issue #815's watchdog carve-out, revisited/approved 2026-07-31 -- independent of #842's Rust rewrite, which now has a scaffold crate but is not yet built or used as this container's entrypoint)
-- `services/syslog/Dockerfile`: `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (born on Alpine from its first commit, #1431/#1433 -- not part of issue #815's Debian-to-Alpine migration since it never ran on Debian; originally pinned directly to `alpine:3.20` rather than through `mirror.gcr.io`, an unintentional scaffold-commit inconsistency never a deliberate choice -- issue #1554 brought it onto the same `mirror.gcr.io/library/alpine:3.24` pin every other first-party service already uses; `syslog-ng` stayed available, and newer, on 3.24, see that file's own header comment for the full version rationale)
+Every entry below now resolves its base image through `ARG ALPINE_IMAGE`
+(no in-file default) plus `FROM ${ALPINE_IMAGE}`, consuming the one pinned
+digest owned by `build-manifest.yml`'s `base_images.alpine` and supplied at
+build time by `ci.sh`'s `_ci_service_build_args` (issue #1683). No service
+Dockerfile pins this digest itself any more; the digest value and its
+history stay in `build-manifest.yml`, not duplicated per file below.
 
-**Status**: ✅ All runtime base images are pinned.
+- `services/proxy/Dockerfile`: `ARG ALPINE_IMAGE` / `FROM ${ALPINE_IMAGE}` ✅ (migrated from Debian 13-slim to Alpine, issue #815, staged Alpine migration)
+- `services/dns/Dockerfile` (runtime stage): `ARG ALPINE_IMAGE` / `FROM ${ALPINE_IMAGE}` ✅ (migrated from Debian trixie-slim to Alpine, issue #815, staged Alpine migration; PowerDNS/recursor pinned to Alpine's `edge` branch specifically for a CVE fix, see `services/dns/Dockerfile`'s own comment)
+- `services/dhcp/Dockerfile`: `ARG ALPINE_IMAGE` / `FROM ${ALPINE_IMAGE}` ✅ (migrated from Debian trixie-slim to Alpine, issue #815, staged Alpine migration — Kea second)
+- `services/dhcp-proxy/Dockerfile`: `ARG ALPINE_IMAGE` / `FROM ${ALPINE_IMAGE}` ✅ (migrated from Debian trixie-slim to Alpine, issue #815, staged Alpine migration — dnsmasq-first)
+- `services/ntp/Dockerfile`: `ARG ALPINE_IMAGE` / `FROM ${ALPINE_IMAGE}` ✅ (migrated from Debian trixie-slim to Alpine, issue #815, staged Alpine migration)
+- `services/ui/Dockerfile` (runtime stage): `ARG ALPINE_IMAGE` / `FROM ${ALPINE_IMAGE}` ✅ (migrated from Debian trixie-slim to Alpine in a sibling PR, issue #815, staged Alpine migration)
+- `services/watchdog/Dockerfile`: `ARG ALPINE_IMAGE` / `FROM ${ALPINE_IMAGE}` ✅ (migrated from Debian 13-slim to Alpine, issue #815's watchdog carve-out, revisited/approved 2026-07-31 -- independent of #842's Rust rewrite, which now has a scaffold crate but is not yet built or used as this container's entrypoint)
+- `services/syslog/Dockerfile`: `ARG ALPINE_IMAGE` / `FROM ${ALPINE_IMAGE}` ✅ (born on Alpine from its first commit, #1431/#1433 -- not part of issue #815's Debian-to-Alpine migration since it never ran on Debian; originally pinned directly to `alpine:3.20` rather than through `mirror.gcr.io`, an unintentional scaffold-commit inconsistency never a deliberate choice -- issue #1554 brought it onto the same Alpine 3.24 pin every other first-party service already uses; `syslog-ng` stayed available, and newer, on 3.24, see that file's own header comment for the full version rationale)
+- `services/cachehamster/Dockerfile`: `ARG ALPINE_IMAGE` / `FROM ${ALPINE_IMAGE}` ✅ (Steam cache-warming prefill daemon scaffold, issue #871 -- born on Alpine from its first commit, not part of issue #815's Debian-to-Alpine migration since it never ran on Debian)
+- `services/netdata/Dockerfile`: `ARG ALPINE_IMAGE` / `FROM ${ALPINE_IMAGE}` ✅ (first-party build of netdata's own officially-supported static musl release asset on a plain Alpine base, replacing the previously pulled third-party `netdata/netdata` Debian-based image, issue #815 Part C -- not part of #815's staged Debian-to-Alpine Dockerfile migration proper since this service never had a project-owned Debian stage to migrate from)
+
+**Status**: ✅ All runtime base images are pinned (centrally, via `build-manifest.yml`'s `base_images.alpine`, issue #1683).
 
 ### Build-Time Images (Builder Stages)
 

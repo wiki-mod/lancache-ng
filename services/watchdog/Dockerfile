@@ -4,6 +4,11 @@
 # Runtime health-check/restart daemon (compiled Rust binary) plus the
 # separate file-retention sidecar entrypoint for lancache-ng containers.
 
+# What: Base image pin, consumed from the version SOT.
+# Why: build-manifest.yml is the sole owner of the pin.
+# From: Issue #1683
+ARG ALPINE_IMAGE
+
 # Intentional ARG default (overridable at build time via --build-arg).
 # Actual digest pinning for release builds is tracked in issue #508.
 ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
@@ -108,10 +113,10 @@ RUN --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_dist_config \
     --mount=type=secret,id=distcc_potential_hosts \
     --mount=type=secret,id=ccache_redis_url \
-    --mount=type=secret,id=proxy_ca \
+    --mount=type=secret,id=project_selfhosted_proxy_ca \
     set -eu; \
-    if [ -s /run/secrets/proxy_ca ]; then \
-      cp /run/secrets/proxy_ca /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; \
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
+      cp /run/secrets/project_selfhosted_proxy_ca /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; \
       update-ca-certificates >/dev/null; \
       trap 'rm -f /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; update-ca-certificates >/dev/null 2>&1 || true' EXIT; \
     fi; \
@@ -342,7 +347,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     fi; \
     cp "target/${musl_target}/release/lancache-watchdog" /build/lancache-watchdog-out
 
-FROM mirror.gcr.io/library/alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+FROM ${ALPINE_IMAGE}
 
 LABEL org.opencontainers.image.description="lancache-ng watchdog: compiled Rust health-check/restart daemon plus the separate file-retention sidecar entrypoint."
 
@@ -377,10 +382,10 @@ ARG APT_CACHE_BUST=""
 # What: trusts the proxy's CA for this RUN, never in a layer.
 # Why: a secret mount never persists; bundle restored below.
 # From: Issue #1781 | PR #1783
-RUN --mount=type=secret,id=proxy_ca \
-    if [ -s /run/secrets/proxy_ca ]; then \
+RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
       cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig && \
-      cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+      cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
     fi && \
     : "apt-cache-bust=${APT_CACHE_BUST}" && \
     apk upgrade --no-cache && \
@@ -395,7 +400,7 @@ RUN --mount=type=secret,id=proxy_ca \
     findutils \
     lsof \
     ripgrep && \
-    if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
 # What: verifies apk-installed binaries execute, not just exist.
 # Why: missing library dependencies fail at runtime, not apk add.

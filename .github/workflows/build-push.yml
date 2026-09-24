@@ -8,25 +8,16 @@
 
 name: Build & Push
 on:
+  # What: legacy CI frozen on the #1683 rewrite branch.
+  # Why: stop the old pipeline building containers here.
+  # From: Issue #1683
   workflow_dispatch:
     inputs:
       channel:
-        description: Also promote this channel from the dispatched ref, in addition to the automatic branch/tag rule below (e.g. spot-check a feature branch as "nightly" without merging it first).
+        description: Also promote this channel from the dispatched ref (e.g. spot-check a feature branch as "nightly").
         type: choice
         options: [none, nightly]
         default: none
-  schedule:
-    - cron: "0 1 * * *"
-  push:
-    branches: [master, current_dev, "v[0-9]*"]
-    tags: ["v*"]
-    paths-ignore:
-      - "**/*.md"
-      - "docs/**"
-      - "!CHANGELOG.md"
-  pull_request:
-    branches: [master, current_dev, "v[0-9]*"]
-    types: [opened, synchronize, reopened, labeled, unlabeled, milestoned, demilestoned, ready_for_review]
 permissions:
   contents: read
   pull-requests: read
@@ -165,23 +156,6 @@ jobs:
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
           diff-base-sha: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
           diff-base-ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || '' }}
-      - name: Check SPDX header on this PR's changed files (AG-HDR-008)
-        if: github.event_name == 'pull_request'
-        env:
-          SPDX_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          SPDX_BASE_REF: ${{ github.event.pull_request.base.ref }}
-        run: |
-          set -euo pipefail
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/source:ro" \
-            -w /tmp \
-            -e SPDX_BASE_SHA \
-            -e SPDX_BASE_REF \
-            -e GITHUB_SHA \
-            "$BUILD_TOOLS_IMAGE" \
-            timeout --kill-after=30 --signal=KILL 300 bash -c \
-              'cp -a /source /tmp/work && cd /tmp/work && bash scripts/tracked/check-pr-diff-file-headers.sh'
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
   compose-healthchecks:
@@ -227,7 +201,7 @@ jobs:
             exit 1
           }
           echo "::notice::gh pr view succeeded. Body byte count: $(wc -c < /tmp/pr-body-live.txt). stderr: $(cat /tmp/pr-body-live.stderr)"
-          bash scripts/tracked/validate-pr-template.sh /tmp/pr-body-live.txt
+          bash .github/scripts/ci.sh check pr-template /tmp/pr-body-live.txt
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
   pr-tracking-metadata-check:
@@ -323,7 +297,7 @@ jobs:
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             timeout --kill-after=30 --signal=KILL 300 \
-            bash -lc 'set -euo pipefail; bash scripts/tracked/check-line-endings.sh'
+            bash .github/scripts/ci.sh check line-endings
       - name: Run governance guardrails
         if: github.event_name == 'pull_request'
         env:
@@ -350,15 +324,16 @@ jobs:
             -e GITHUB_REPOSITORY \
             -e GOVERNANCE_PR_TITLE="$governance_pr_title" \
             -e GOVERNANCE_PR_BODY="$governance_pr_body" \
+            -e CHANGED_FILES_REL="$(basename "$changed_files")" \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             timeout --kill-after=30 --signal=KILL 300 \
-            bash scripts/tracked/check-governance-guards.sh --changed-files-file "/work/$(basename "$changed_files")"
+            bash -c 'mapfile -t f < "$CHANGED_FILES_REL"; exec bash .github/scripts/ci.sh check governance-guards "${f[@]}"'
       - name: Warn on direct CHANGELOG.md edits outside a release PR
         if: github.event_name == 'pull_request'
         env:
           GOVERNANCE_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           GOVERNANCE_BASE_REF: ${{ github.event.pull_request.base.ref }}
-          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
         run: |
           set -uo pipefail
           changelog_guard_changed_files="$(mktemp "$PWD/.changelog-guard-changed-files.XXXXXX")"
@@ -377,10 +352,11 @@ jobs:
             --user "$(id -u):$(id -g)" \
             -v "$PWD:/work:ro" \
             -w /work \
-            -e CHANGELOG_GUARD_PR_LABELS="$PR_LABELS" \
+            -e PR_LABELS_JSON="$PR_LABELS_JSON" \
+            -e CHANGED_FILES_REL="$(basename "$changelog_guard_changed_files")" \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             timeout --kill-after=30 --signal=KILL 300 \
-            bash scripts/tracked/check-changelog-direct-edit.sh --changed-files-file "/work/$(basename "$changelog_guard_changed_files")" \
+            bash -c 'mapfile -t f < "$CHANGED_FILES_REL"; exec bash .github/scripts/ci.sh check changelog-direct-edit "${f[@]}"' \
           || true
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
@@ -411,7 +387,7 @@ jobs:
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             timeout --kill-after=30 --signal=KILL 300 \
-            bash -lc 'set -euo pipefail; bash scripts/tracked/check-language-policy.sh'
+            bash .github/scripts/ci.sh check language-policy
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
   shellcheck:
@@ -591,6 +567,26 @@ jobs:
           grep -F 'nats_conf_dir=$(get_env_var NATS_CONF_DIR "$env_file")' setup.sh >/dev/null \
             || { echo "::error::backup_manifest must read NATS_CONF_DIR."; exit 1; }
           VALIDATE_PREBUILT
+      - name: Check prebuilt-only production install path (ci.sh)
+        run: |
+          set -euo pipefail
+          docker run --rm -i \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 300 \
+            bash .github/scripts/ci.sh check prebuilt-prod
+      - name: Check prod state wiring derives from LANCACHE_STATE_DIR (ci.sh)
+        run: |
+          set -euo pipefail
+          docker run --rm -i \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 300 \
+            bash .github/scripts/ci.sh check prod-state-wiring
       - name: Validate compose files
         env:
           CACHE_INACTIVE: 365d
@@ -668,34 +664,8 @@ jobs:
             --env SSL_CACHE_MAX_GB \
             --env STANDARD_CACHE_MAX_GB \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            timeout --kill-after=30 --signal=KILL 300 bash -s <<'VALIDATE_COMPOSE'
-          set -euo pipefail
-          validate_compose() {
-            local output
-            if ! output="$(docker compose "$@" config --quiet 2>&1)"; then
-              printf '%s\n' "$output"
-              return 1
-            fi
-            if grep -Eqi '(^|[[:space:]])(warn|warning|level=warning)' <<<"$output"; then
-              printf 'docker compose emitted warnings; treating warnings as errors:\n%s\n' "$output"
-              return 1
-            fi
-            if [ -n "$output" ]; then
-              printf '%s\n' "$output"
-            fi
-          }
-          validate_compose -f deploy/quickstart/docker-compose.yml --profile ssl
-          validate_compose -f deploy/prod/docker-compose.yml
-          validate_compose -f deploy/secondary/docker-compose.yml
-          validate_compose --env-file deploy/quickstart/.env -f deploy/quickstart/docker-compose.yml --profile ssl
-          for compose_file in \
-            deploy/prod/docker-compose.yml \
-            deploy/quickstart/docker-compose.yml; do
-            validate_compose -f "$compose_file" --profile dhcp-kea
-            validate_compose -f "$compose_file" --profile dhcp-proxy
-            validate_compose -f "$compose_file" --profile logging
-          done
-          VALIDATE_COMPOSE
+            timeout --kill-after=30 --signal=KILL 300 \
+            bash .github/scripts/ci.sh check compose-config
       - name: Validate NATS/atomic-write and Docker socket proxy contracts
         run: |
           set -euo pipefail
@@ -706,110 +676,10 @@ jobs:
             --env HOME=/tmp \
             --env DOCKER_CONFIG=/tmp/.docker \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            timeout --kill-after=30 --signal=KILL 300 bash -s <<'VALIDATE_COMPOSE_NATS_SOCKETPROXY'
-          set -euo pipefail
-          validate_nats_config_ownership() {
-            local path
-            for path in \
-              deploy/prod/docker-compose.yml \
-              deploy/quickstart/docker-compose.yml
-            do
-              grep -Fq 'tmp_nats_conf="$(mktemp /etc/nats/.nats.conf.XXXXXX)"' "$path" \
-                || {
-                  printf '::error file=%s::NATS must stage the shared config in a temp file inside /etc/nats.\n' "$path"
-                  return 1
-                }
-              grep -Fq 'chown 10001:10001 "$$tmp_nats_conf"' "$path" \
-                || {
-                  printf '::error file=%s::NATS must restore shared config ownership to UID/GID 10001 after writing.\n' "$path"
-                  return 1
-                }
-              grep -Fq 'mv "$$tmp_nats_conf" /etc/nats/nats.conf' "$path" \
-                || {
-                  printf '::error file=%s::NATS must atomically replace the shared nats.conf after fixing ownership.\n' "$path"
-                  return 1
-                }
-            done
-          }
-          validate_nats_config_ownership
-          grep -Fq 'fn write_nats_conf_atomically(' services/ui/src/routes/secondaries.rs \
-            || { echo "::error::Admin UI must keep an atomic nats.conf write helper for the v0.1.0 shared-token path."; exit 1; }
-          grep -Fq 'fs::rename(&tmp_path, target)' services/ui/src/routes/secondaries.rs \
-            || { echo "::error::Admin UI nats.conf writes must use temp-file plus rename, not direct overwrite."; exit 1; }
-          grep -Fq 'render_template_atomic' services/dns/entrypoint.sh \
-            || { echo "::error::DNS entrypoint must render generated configs through the atomic helper."; exit 1; }
-          grep -Fq 'mktemp "${target_dir}/.${target_name}.tmp.XXXXXX"' services/dns/entrypoint.sh \
-            || { echo "::error::DNS entrypoint generated configs must stage temp files in the target directory."; exit 1; }
-          if grep -Fq '> /tmp/recursor.conf' services/dns/entrypoint.sh \
-            || grep -Fq '> /tmp/pdns.conf' services/dns/entrypoint.sh; then
-            echo "::error::DNS entrypoint must not render PDNS configs through /tmp before replacing target configs."
-            exit 1
-          fi
-          if grep -Fq "sed -i 's/^  loglevel: 3$/  loglevel: 6/' /etc/pdns/recursor.conf" services/dns/entrypoint.sh; then
-            echo "::error::DNS query logging must be applied to the staged recursor.conf before replacement."
-            exit 1
-          fi
-          grep -Fq 'write_generated_runtime_file "${secondary_dir}/docker-compose.yml"' setup.sh \
-            || { echo "::error::Secondary setup must atomically write generated docker-compose.yml."; exit 1; }
-          grep -Fq 'write_env_file "${secondary_dir}/.env"' setup.sh \
-            || { echo "::error::Secondary setup must use the safe env writer for generated .env files."; exit 1; }
-          if grep -F 'EXEC: "1"' deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml >/dev/null; then
-            echo "::error::Docker exec is banned from the Admin UI/watchdog proxy for security reasons; use predeclared container actions instead."
-            exit 1
-          fi
-          if grep -E '^[[:space:]]*(CONTAINERS|POST): "1"' deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml >/dev/null; then
-            echo "::error::Broad CONTAINERS=1/POST=1 exposes generic Docker container APIs; use the explicit HAProxy allowlist instead."
-            exit 1
-          fi
-          socket_proxy_script="scripts/untracked/docker-socket-proxy.sh"
-          grep -Fq 'acl safe_service_restart' "$socket_proxy_script" \
-            && grep -Fq 'acl safe_dhcp_action' "$socket_proxy_script" \
-            && grep -Fq 'acl safe_probe_action' "$socket_proxy_script" \
-            && grep -Fq 'acl safe_netdata_restart' "$socket_proxy_script" \
-            && grep -Fq 'lancache-netdata/restart' "$socket_proxy_script" \
-            && grep -Fq 'acl lancache_container' "$socket_proxy_script" \
-            && grep -Fq 'lancache-dns-standard|lancache-dns-ssl' "$socket_proxy_script" \
-            && grep -Fq 'lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-nats)/restart' "$socket_proxy_script" \
-            && grep -Fq 'lancache-dhcp|lancache-dhcp-proxy)/(start|stop)' "$socket_proxy_script" \
-            && grep -Fq 'lancache-dhcp-probe/(start|stop|wait)' "$socket_proxy_script" \
-            && ! grep -Fq 'lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-dhcp|lancache-dhcp-proxy|lancache-dhcp-probe|lancache-nats)/(start|stop|restart|wait)' "$socket_proxy_script" \
-            && grep -Fq 'http-request deny if docker_container_path !lancache_container' "$socket_proxy_script" \
-            && grep -Fq 'http-request deny' "$socket_proxy_script" \
-            && ! grep -Fq '/containers/create' "$socket_proxy_script" \
-            && ! grep -Fq '/containers/json' "$socket_proxy_script" \
-            && ! grep -Fq '[A-Za-z0-9_.-]+/(start|stop|restart|attach)' "$socket_proxy_script" \
-            || {
-              echo "::error file=${socket_proxy_script}::Docker socket proxy must deny generic container listing/creation and only allow explicit project container actions; stop/start/wait are restricted to the DHCP probe."
-              exit 1
-            }
-          for compose_file in deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml; do
-            grep -Fq 'scripts/untracked/docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro' "$compose_file" \
-              || {
-                echo "::error file=${compose_file}::docker-socket-proxy service must mount the one real scripts/untracked/docker-socket-proxy.sh, not an inline, divergent, or stale pre-move copy."
-                exit 1
-              }
-            grep -Eq '^x-docker-socket-proxy-command:' "$compose_file" \
-              && {
-                echo "::error file=${compose_file}::The dead x-docker-socket-proxy-command anchor must not be reintroduced; it duplicated scripts/untracked/docker-socket-proxy.sh without ever being referenced."
-                exit 1
-              }
-            true
-          done
-          missing_required=0
-          while IFS= read -r key; do
-            if ! grep -Eq "^${key}=[^[:space:]]+" deploy/quickstart/.env; then
-              echo "::error::deploy/quickstart/.env must define non-empty ${key} because quickstart compose marks it required."
-              missing_required=1
-            fi
-          done < <(
-            grep -oE '\$\{[A-Za-z0-9_]+:\?[^}]+\}' deploy/quickstart/docker-compose.yml \
-              | sed -E 's/^\$\{([^:]+):.*/\1/' \
-              | sort -u
-          )
-          if [[ "$missing_required" = "1" ]]; then
-            exit 1
-          fi
-          VALIDATE_COMPOSE_NATS_SOCKETPROXY
+            timeout --kill-after=30 --signal=KILL 300 sh -euc '
+            bash .github/scripts/ci.sh check nats-atomic-write
+            bash .github/scripts/ci.sh check docker-socket-proxy
+            bash .github/scripts/ci.sh check quickstart-required-env'
       - name: Validate DHCP proxy env-file and PXE contracts
         run: |
           set -euo pipefail
@@ -820,118 +690,8 @@ jobs:
             --env HOME=/tmp \
             --env DOCKER_CONFIG=/tmp/.docker \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            timeout --kill-after=30 --signal=KILL 300 bash -s <<'VALIDATE_COMPOSE_DHCP_PROXY_ENV'
-          set -euo pipefail
-          validate_dhcp_proxy_env_file_contract() {
-            local compose_file="$1"
-            local expected_env_file="$2"
-            awk -v compose_file="$compose_file" -v expected_env_file="$expected_env_file" '
-              function trim(value) {
-                sub(/^[[:space:]]+/, "", value)
-                sub(/[[:space:]]+$/, "", value)
-                return value
-              }
-              function content_indent(value, prefix) {
-                match(value, /^[[:space:]]*/)
-                prefix = substr(value, 1, RLENGTH)
-                return length(prefix)
-              }
-              function strip_inline_comment(value) {
-                sub(/[[:space:]]+#.*/, "", value)
-                return value
-              }
-              /^  dhcp-proxy:/ {
-                in_service=1
-                saw_service=1
-                in_env_file_block=0
-                next
-              }
-              in_service && /^  [[:alnum:]_-]+:/ {
-                in_service=0
-                in_env_file_block=0
-              }
-              in_service {
-                line=strip_inline_comment($0)
-                stripped=trim(line)
-                if (in_env_file_block && stripped != "" && content_indent(line) <= env_file_indent) {
-                  in_env_file_block=0
-                }
-                if (in_env_file_block && stripped ~ /^-/ && index(stripped, expected_env_file) > 0) {
-                  saw_env_file=1
-                }
-                if (line ~ /^[[:space:]]*env_file:[[:space:]]*$/) {
-                  in_env_file_block=1
-                  env_file_indent=content_indent(line)
-                } else if (line ~ /^[[:space:]]*env_file:[[:space:]]*/ && index(line, expected_env_file) > 0) {
-                  saw_env_file=1
-                }
-                if (line ~ /^[[:space:]]*environment:[[:space:]]*/) {
-                  saw_environment=1
-                }
-                if (stripped ~ /^-[[:space:]]*(DHCP_SUBNET_START|DHCP_DNS_PRIMARY|DHCP_DNS_SECONDARY|UPSTREAM_DHCP_IP)=\$\{/ || stripped ~ /[{,][[:space:]]*(DHCP_SUBNET_START|DHCP_DNS_PRIMARY|DHCP_DNS_SECONDARY|UPSTREAM_DHCP_IP):[[:space:]]*"\$\{/) {
-                  saw_interpolated_dhcp_key=1
-                }
-              }
-              END {
-                if (!saw_service) {
-                  printf "::error file=%s::dhcp-proxy service is missing.\n", compose_file
-                  exit 1
-                }
-                if (!saw_env_file) {
-                  printf "::error file=%s::dhcp-proxy must keep using env_file %s so setup-managed dnsmasq-proxy values are not lost.\n", compose_file, expected_env_file
-                  exit 1
-                }
-                if (saw_environment || saw_interpolated_dhcp_key) {
-                  printf "::error file=%s::dhcp-proxy must not reintroduce Compose environment interpolation for dnsmasq-proxy values; env_file is the contract for prod.\n", compose_file
-                  exit 1
-                }
-              }
-            ' "$compose_file"
-          }
-          validate_dhcp_proxy_env_file_contract deploy/prod/docker-compose.yml ../../config/prod/dhcp-proxy.env
-          dhcp_proxy_optional_keys=(
-            DHCP_PROXY_INTERFACE
-            DHCP_PROXY_ROUTER
-            DHCP_NTP_SERVERS
-            DHCP_PROXY_DOMAIN
-            DHCP_PROXY_BOOT_FILENAME
-            DHCP_PROXY_BOOT_SERVER
-            DHCP_PROXY_CUSTOM_OPTIONS
-          )
-          for env_file in config/prod/dhcp-proxy.env deploy/quickstart/.env; do
-            for key in "${dhcp_proxy_optional_keys[@]}"; do
-              grep -Eq "^${key}=" "$env_file" \
-                || { echo "::error file=${env_file}::${env_file} must define ${key} (empty by default) for the dnsmasq relay/proxy optional-option surface added by issue #450."; exit 1; }
-            done
-          done
-          grep -F 'DHCP_PROXY_INTERFACE=${DHCP_PROXY_INTERFACE:-}' deploy/quickstart/docker-compose.yml >/dev/null \
-            || { echo "::error::deploy/quickstart/docker-compose.yml's dhcp-proxy service must pass through DHCP_PROXY_INTERFACE like the other optional dnsmasq relay/proxy keys."; exit 1; }
-          grep -F 'DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS:-}' deploy/quickstart/docker-compose.yml >/dev/null \
-            || { echo "::error::deploy/quickstart/docker-compose.yml's dhcp-proxy service must pass through DHCP_PROXY_CUSTOM_OPTIONS like the other optional dnsmasq relay/proxy keys."; exit 1; }
-          dhcp_proxy_pxe_keys=(
-            DHCP_PROXY_PXE_BOOT_SERVER
-            DHCP_PROXY_PXE_BOOT_FILENAME_BIOS
-            DHCP_PROXY_PXE_BOOT_FILENAME_UEFI
-          )
-          for env_file in config/prod/dhcp-proxy.env deploy/quickstart/.env; do
-            for key in "${dhcp_proxy_pxe_keys[@]}"; do
-              grep -Eq "^${key}=" "$env_file" \
-                || { echo "::error file=${env_file}::${env_file} must define ${key} (empty by default) for the PXE boot-pointer opt-in surface added by issue #705."; exit 1; }
-            done
-          done
-          for key in "${dhcp_proxy_pxe_keys[@]}"; do
-            grep -F "${key}=\${${key}:-}" deploy/quickstart/docker-compose.yml >/dev/null \
-              || { echo "::error::deploy/quickstart/docker-compose.yml's dhcp-proxy service must pass through ${key} like the other optional dnsmasq relay/proxy keys."; exit 1; }
-          done
-          grep -F '_dhcp_proxy_render_optional_directives()' services/dhcp-proxy/entrypoint.sh >/dev/null \
-            || { echo "::error::services/dhcp-proxy/entrypoint.sh must render the issue #450 optional dnsmasq relay/proxy directives."; exit 1; }
-          grep -F '_dhcp_proxy_render_optional_directives /etc/dnsmasq.conf' services/dhcp-proxy/entrypoint.sh >/dev/null \
-            || { echo "::error::services/dhcp-proxy/entrypoint.sh must call _dhcp_proxy_render_optional_directives before validating dnsmasq.conf."; exit 1; }
-          if grep -F 'dhcp-proxy=${UPSTREAM_DHCP_IP}' services/dhcp-proxy/dnsmasq.conf.template >/dev/null; then
-            echo "::error::services/dhcp-proxy/dnsmasq.conf.template must not reintroduce 'dhcp-proxy=\${UPSTREAM_DHCP_IP}': that flag means \"treat these DHCP-relay agents as full proxies\" (RFC 5107), it does nothing without --dhcp-relay=, and this service never configures one. Confirmed against a live dnsmasq --help/--test; see docs/dhcp-modes.md."
-            exit 1
-          fi
-          VALIDATE_COMPOSE_DHCP_PROXY_ENV
+            timeout --kill-after=30 --signal=KILL 300 \
+            bash .github/scripts/ci.sh check dhcp-proxy-env
       - name: Validate setup.sh required keys and Kea DHCP preflight
         run: |
           set -euo pipefail
@@ -942,48 +702,8 @@ jobs:
             --env HOME=/tmp \
             --env DOCKER_CONFIG=/tmp/.docker \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            timeout --kill-after=30 --signal=KILL 300 bash -s <<'VALIDATE_COMPOSE_SETUP_KEYS_KEA'
-          set -euo pipefail
-          if grep -RInE '^(NATS_LOCAL_TOKEN|NATS_TOKEN)=' deploy/quickstart/.env deploy/prod/.env 2>/dev/null; then
-            echo "::error::Quickstart/prod env templates must not use deprecated NATS token keys; use role credentials instead."
-            exit 1
-          fi
-          setup_required_keys=(
-            DDNS_TSIG_KEY
-            KEA_CTRL_TOKEN
-            LANCACHE_IMAGE_TAG
-            NATS_DNS_REPLICA_PASSWORD
-            NATS_DNS_REPLICA_USER
-            NATS_DNS_WRITER_PASSWORD
-            NATS_DNS_WRITER_USER
-            NATS_CALLOUT_PASSWORD
-            NATS_CALLOUT_USER
-            NATS_SYS_PASSWORD
-            NATS_SYS_USER
-            NATS_UI_PASSWORD
-            NATS_UI_USER
-            PDNS_API_KEY
-            SECONDARY_REGISTRATION_TOKEN
-          )
-          for key in "${setup_required_keys[@]}"; do
-            grep -F "$key" setup.sh >/dev/null \
-              || { echo "::error::setup.sh must generate or migrate required runtime key ${key}."; exit 1; }
-          done
-          grep -F 'run_kea_dhcp_activation_preflight()' setup.sh >/dev/null \
-            || { echo "::error::setup.sh must define a DHCP discovery preflight before Kea activation."; exit 1; }
-          grep -F 'run_kea_dhcp_activation_preflight "$INSTALL_DIR/.env"' setup.sh >/dev/null \
-            || { echo "::error::setup.sh must call the Kea discovery preflight before starting the stack."; exit 1; }
-          grep -F 'nmap --script broadcast-dhcp-discover --script-args broadcast-dhcp-discover.timeout=5' setup.sh >/dev/null \
-            || { echo "::error::setup.sh must probe DHCP discovery with the Kea image before activation."; exit 1; }
-          if grep -F 'nmap --script broadcast-dhcp-discover -e any' setup.sh >/dev/null; then
-            echo "::error::setup.sh must not pass -e any to nmap; that is not a valid nmap interface and makes the preflight fail its own execution on every run."
-            exit 1
-          fi
-          grep -F 'nmap' services/dhcp/Dockerfile >/dev/null \
-            || { echo "::error::services/dhcp/Dockerfile must install nmap for the Kea discovery preflight."; exit 1; }
-          grep -F 'nmap|/usr/bin/nmap|/bin/nmap)' services/dhcp/entrypoint.sh >/dev/null \
-            || { echo "::error::services/dhcp/entrypoint.sh must pass through the nmap preflight command without starting Kea."; exit 1; }
-          VALIDATE_COMPOSE_SETUP_KEYS_KEA
+            timeout --kill-after=30 --signal=KILL 300 \
+            bash .github/scripts/ci.sh check setup-keys-kea
       - name: Validate setup.sh update-migration safety
         run: |
           set -euo pipefail
@@ -996,79 +716,7 @@ jobs:
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             timeout --kill-after=30 --signal=KILL 300 bash -s <<'VALIDATE_COMPOSE_SETUP_UPDATE_MIGRATION'
           set -euo pipefail
-          setup_update_required_repairs=(
-            CACHE_INACTIVE
-            CACHE_MAX_GB
-            CACHE_MAX_SIZE
-            CACHE_MEM_MB
-            CACHE_SLICE_SIZE
-            CACHE_VALID_ANY
-            CACHE_VALID_HIT
-            DDNS_TSIG_KEY
-            KEA_CTRL_TOKEN
-            LANCACHE_IMAGE_CHANNEL
-            LANCACHE_IMAGE_PREFIX
-            LANCACHE_IMAGE_REGISTRY
-            LANCACHE_IMAGE_TAG
-            NATS_DNS_REPLICA_PASSWORD
-            NATS_DNS_REPLICA_USER
-            NATS_DNS_WRITER_PASSWORD
-            NATS_DNS_WRITER_USER
-            NATS_CALLOUT_PASSWORD
-            NATS_CALLOUT_USER
-            NATS_SYS_PASSWORD
-            NATS_SYS_USER
-            NATS_UI_PASSWORD
-            NATS_UI_USER
-            NGINX_UPSTREAM_RESOLVER
-            PDNS_API_KEY
-            PROXY_SECURITY_MODE
-            SSL_ENABLED
-            SECONDARY_REGISTRATION_TOKEN
-          )
-          for key in "${setup_update_required_repairs[@]}"; do
-            if awk -v key="$key" '
-              /^migrate_env_for_update\(\)/ { in_func=1; next }
-              in_func && /^}/ { in_func=0 }
-              in_func && $0 ~ "append_env_key_if_missing[[:space:]]+" key "([[:space:]]|$)" { found=1 }
-              END { exit found ? 0 : 1 }
-            ' setup.sh; then
-              echo "::error::setup.sh update must not preserve empty required ${key} values with append_env_key_if_missing."
-              exit 1
-            fi
-            awk -v key="$key" '
-              /^migrate_env_for_update\(\)/ { in_func=1; next }
-              in_func && /^}/ { in_func=0 }
-              in_func && $0 ~ "(set_env_key_if_empty_or_missing|set_env_key|ensure_secret_env_key|append_required_env_migrated_assignment_if_empty_or_missing)[[:space:]]+" key "([[:space:]]|$)" { found=1 }
-              END { exit found ? 0 : 1 }
-            ' setup.sh \
-              || { echo "::error::setup.sh update must repair empty or missing required ${key} values."; exit 1; }
-          done
-          grep -F 'get_env_var_nonempty()' setup.sh >/dev/null \
-            || { echo "::error::setup.sh must provide a helper that finds non-empty duplicate env values before repairing required keys."; exit 1; }
-          grep -F 'get_env_assignment_value_raw_nonempty()' setup.sh >/dev/null \
-            || { echo "::error::setup.sh must provide a helper that preserves the raw assignment for a non-empty duplicate env value."; exit 1; }
-          grep -F 'existing_assignment=$(get_env_assignment_value_raw_nonempty "$key" "$env_file")' setup.sh >/dev/null \
-            || { echo "::error::Required-key repair must preserve the raw non-empty assignment before writing a fallback."; exit 1; }
-          grep -F 'source_assignment=$(get_env_assignment_value_raw_nonempty "$source_key" "$env_file")' setup.sh >/dev/null \
-            || { echo "::error::Migrated assignments must preserve raw non-empty source values before writing a fallback."; exit 1; }
-          grep -F 'cache_max_gb=$(get_env_var_nonempty CACHE_MAX_GB "$env_file")' setup.sh >/dev/null \
-            || { echo "::error::CACHE_MAX_SIZE repair must derive from existing CACHE_MAX_GB before falling back to the default."; exit 1; }
-          if ! awk '
-            /^set_env_key\(\) \{/ { in_func=1; seen_next=0; next }
-            in_func && /^}/ { exit seen_next ? 0 : 1 }
-            in_func && /\$1 == key \{/ { in_key=1 }
-            in_func && in_key && /if \(!seen\)/ { seen_next=1 }
-          ' setup.sh; then
-            echo "::error::set_env_key must collapse duplicate assignments instead of rewriting every duplicate key."
-            exit 1
-          fi
-          grep -F 'validate_ui_session_ttl_seconds()' setup.sh >/dev/null \
-            || { echo "::error::setup.sh must validate UI_SESSION_TTL_SECONDS before writing or reusing it."; exit 1; }
-          grep -F 'validate_ui_session_ttl_seconds "$ui_session_ttl" "$env_file"' setup.sh >/dev/null \
-            || { echo "::error::setup.sh update must validate preserved UI_SESSION_TTL_SECONDS before mutating or restarting the stack."; exit 1; }
-          grep -F 'validate_ui_session_ttl_seconds "$UI_SESSION_TTL_SECONDS" "$env_file"' setup.sh >/dev/null \
-            || { echo "::error::setup.sh install must validate UI_SESSION_TTL_SECONDS before writing the runtime .env."; exit 1; }
+          # migrate/env-helper repair contracts now in ci.bats + SOT.
           if awk '
             /^  release:/ { in_release=1; next }
             in_release && /^  [[:alnum:]_-]+:/ { in_release=0 }
@@ -1684,7 +1332,7 @@ jobs:
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             timeout --kill-after=30 --signal=KILL 300 \
-            bash scripts/tracked/check-naming-consistency.sh
+            bash .github/scripts/ci.sh check naming-consistency
       - name: Check workflow service lists stay in sync
         run: |
           set -euo pipefail
@@ -1704,7 +1352,7 @@ jobs:
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             timeout --kill-after=30 --signal=KILL 300 \
-            bash scripts/tracked/check-vex-drift.sh
+            bash .github/scripts/ci.sh check vex-drift
       - name: Check netdata's vendored curl pin against issue #1304's tracked CVEs (PR #1352 tracking mechanism)
         run: |
           set -euo pipefail
@@ -1714,7 +1362,7 @@ jobs:
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             timeout --kill-after=30 --signal=KILL 300 \
-            bash scripts/untracked/check-netdata-curl-pin.sh
+            bash .github/scripts/ci.sh check netdata-curl-pin
       - name: Check config-writer idempotence test coverage (#640)
         run: |
           set -euo pipefail
@@ -1724,7 +1372,7 @@ jobs:
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             timeout --kill-after=30 --signal=KILL 300 \
-            bash scripts/tracked/check-idempotence-test-coverage.sh
+            bash .github/scripts/ci.sh check idempotence-test-coverage
       - name: Check bats path-filter coverage (build-tools.yml vs. real bats dependencies, issue #879)
         run: |
           set -euo pipefail
@@ -1754,7 +1402,7 @@ jobs:
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             timeout --kill-after=30 --signal=KILL 300 \
-            bash scripts/untracked/check-proxy-cache-env-doc-drift.sh
+            bash .github/scripts/ci.sh check proxy-cache-env-doc-drift
       - name: Check logging matrix (docs/architecture-ng.md, issue #633)
         env:
           CACHE_INACTIVE: 365d
@@ -1833,7 +1481,7 @@ jobs:
             --env STANDARD_CACHE_MAX_GB \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             timeout --kill-after=30 --signal=KILL 300 \
-            bash scripts/tracked/check-logging-matrix.sh
+            bash .github/scripts/ci.sh check logging-matrix
       - name: Remove fallback compose validation image
         if: always()
         run: |
