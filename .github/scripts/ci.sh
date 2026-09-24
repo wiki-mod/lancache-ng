@@ -341,12 +341,17 @@ ci_cmd_plan_matrix() {
     local out="${GITHUB_OUTPUT:?GITHUB_OUTPUT required}"
     local -a changed=()
     _ci_collect_changed changed "$@"
-    local service platform include='[]' any=false resolved paction runner authed=false
+    local service platform include='[]' any=false resolved paction runner authed=false test_services=''
     # What: iterate product services; build-tools is separate.
     # Why: build-tools has its own workflow (Contract §111.2).
     # From: Issue #1683 | PR #1858
     for service in $(ci_services); do
         _ci_plan_candidate "${service}" "${changed[@]}" || continue
+        # What: a path-changed rust service is a test candidate (§60).
+        # Why: tests run on source change even when the build reuses.
+        # From: Issue #1683
+        [ "$(ci_service_field "${service}" build_type)" = rust ] \
+            && test_services="${test_services} ${service}"
         # What: authenticate once, only when a candidate exists.
         # Why: a docs-only NOOP run touches the registry 0 times (§63).
         # From: Issue #1683
@@ -370,6 +375,7 @@ ci_cmd_plan_matrix() {
     {
         printf 'any-build=%s\n' "${any}"
         printf 'matrix={"include":%s}\n' "${include}"
+        printf 'test-services=%s\n' "${test_services# }"
     } >> "${out}"
 }
 

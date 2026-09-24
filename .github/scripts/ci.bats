@@ -178,6 +178,28 @@ teardown() {
     [ "$(printf '%s' "${m}" | jq -r '[.include[].platform]|sort|join(",")')" = "linux/amd64,linux/arm64" ]
 }
 
+@test "plan-matrix emits test-services for a path-changed rust service" {
+    # What: a changed rust source makes the service a test candidate.
+    # Why: tests run on source change, reuse or not (§60).
+    # From: Issue #1683
+    local gh="${BATS_TEST_TMPDIR}/out.txt"; : > "${gh}"
+    GITHUB_OUTPUT="${gh}" GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_stub p 'echo MISSING_CONFIRMED')" \
+        run bash "${CI_SH}" plan-matrix services/watchdog/src/main.rs
+    [ "${status}" -eq 0 ]
+    grep -q '^test-services=watchdog$' "${gh}"
+}
+
+@test "plan-matrix emits no test-services for a path-changed apk service" {
+    # What: an apk service has no unit tests; not a test candidate.
+    # Why: ci.sh test SKIPs apk; the matrix must not list it.
+    # From: Issue #1683
+    local gh="${BATS_TEST_TMPDIR}/out.txt"; : > "${gh}"
+    GITHUB_OUTPUT="${gh}" GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_stub p 'echo MISSING_CONFIRMED')" \
+        run bash "${CI_SH}" plan-matrix services/ntp/Dockerfile
+    [ "${status}" -eq 0 ]
+    grep -q '^test-services=$' "${gh}"
+}
+
 @test "plan-matrix omits an accepted target (NOOP), any-build=false" {
     # What: An accepted identity is not rebuilt.
     # Why: NOOP/reuse precedes build; a skip stays out.

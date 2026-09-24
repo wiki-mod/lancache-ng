@@ -37,6 +37,7 @@ jobs:
     outputs:
       any-build: ${{ steps.plan.outputs.any-build }}
       matrix: ${{ steps.plan.outputs.matrix }}
+      test-services: ${{ steps.plan.outputs.test-services }}
     steps:
       # What: native fail-closed checkout; no pinned action (AG-CI-006).
       # Why: no SHA pin may live outside the SOT; git is a runner tool.
@@ -111,6 +112,33 @@ jobs:
           digest="$(printf '%s' "${out}" | sed -n 's/.*published=\([^ ]*\).*/\1/p')"
           [ -n "${digest}" ] || { echo "no digest from publish" >&2; exit 1; }
           bash .github/scripts/ci.sh verify "${{ matrix.service }}" "${digest}" "${{ matrix.platform }}"
+
+  # What: run rust fmt/check/clippy/test for changed rust services.
+  # Why: ci.sh owns cargo; tests run on source change, reuse or not (§60).
+  # From: Issue #1683
+  test:
+    name: test
+    needs: plan
+    if: needs.plan.outputs.test-services != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Bootstrap the working tree
+        run: |
+          set -euo pipefail
+          git init -q .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git -c http.extraheader="AUTHORIZATION: bearer ${GHCR_TOKEN}" \
+            fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
+          git checkout -q FETCH_HEAD
+      - name: Test the changed rust services
+        env:
+          TEST_SERVICES: ${{ needs.plan.outputs.test-services }}
+        run: |
+          set -euo pipefail
+          for service in ${TEST_SERVICES}; do
+            bash .github/scripts/ci.sh test "${service}"
+          done
 
   # What: merge each service's platform digests into a multi-arch index.
   # Why: ci.sh owns the accepted-digest merge; §45 both-or-none.
@@ -192,7 +220,7 @@ jobs:
   # From: Issue #1683
   result:
     name: result
-    needs: [plan, build, assemble, checks]
+    needs: [plan, build, test, assemble, checks]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -201,13 +229,14 @@ jobs:
           set -euo pipefail
           plan='${{ needs.plan.result }}'
           build='${{ needs.build.result }}'
+          test='${{ needs.test.result }}'
           assemble='${{ needs.assemble.result }}'
           checks='${{ needs.checks.result }}'
-          # build/assemble are 'skipped' on a NOOP run -- that is success.
+          # build/test/assemble are 'skipped' on a NOOP run -- that is success.
           if [ "${plan}" != success ]; then
             echo "[CI-ERROR-CORE-0100] phase=plan result=${plan}" >&2; exit 1
           fi
-          for phase in build:"${build}" assemble:"${assemble}"; do
+          for phase in build:"${build}" test:"${test}" assemble:"${assemble}"; do
             case "${phase#*:}" in
               success|skipped) ;;
               *) echo "[CI-ERROR-CORE-0100] phase=${phase%%:*} result=${phase#*:}" >&2; exit 1 ;;
@@ -217,4 +246,4 @@ jobs:
           if [ "${checks}" != success ]; then
             echo "[CI-ERROR-CORE-0100] phase=checks result=${checks}" >&2; exit 1
           fi
-          echo "CI 2.0 result: plan=${plan} build=${build} assemble=${assemble} checks=${checks} -> SUCCESS"
+          echo "CI 2.0 result: plan=${plan} build=${build} test=${test} assemble=${assemble} checks=${checks} -> SUCCESS"
