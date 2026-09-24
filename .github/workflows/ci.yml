@@ -112,12 +112,41 @@ jobs:
           [ -n "${digest}" ] || { echo "no digest from publish" >&2; exit 1; }
           bash .github/scripts/ci.sh verify "${{ matrix.service }}" "${digest}" "${{ matrix.platform }}"
 
+  # What: merge each service's platform digests into a multi-arch index.
+  # Why: ci.sh owns the accepted-digest merge; §45 both-or-none.
+  # From: Issue #1683
+  assemble:
+    name: assemble
+    needs: [plan, build]
+    if: needs.plan.outputs.any-build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bootstrap the working tree
+        run: |
+          set -euo pipefail
+          git init -q .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git -c http.extraheader="AUTHORIZATION: bearer ${GHCR_TOKEN}" \
+            fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
+          git checkout -q FETCH_HEAD
+      # What: assemble each product service the build matrix produced.
+      # Why: one index per service; ci.sh enforces both-platform (§45).
+      # From: Issue #1683
+      - name: Assemble multi-arch indexes
+        env:
+          MATRIX: ${{ needs.plan.outputs.matrix }}
+        run: |
+          set -euo pipefail
+          for service in $(jq -r '[.include[].service] | unique | .[]' <<< "${MATRIX}"); do
+            bash .github/scripts/ci.sh assemble "${service}"
+          done
+
   # What: the always-present required check for branch protection.
   # Why: a required check MUST always appear, even on a NOOP (§62).
   # From: Issue #1683
   result:
     name: result
-    needs: [plan, build]
+    needs: [plan, build, assemble]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -126,12 +155,15 @@ jobs:
           set -euo pipefail
           plan='${{ needs.plan.result }}'
           build='${{ needs.build.result }}'
-          # build is 'skipped' on a NOOP run (no matrix) -- that is success.
+          assemble='${{ needs.assemble.result }}'
+          # build/assemble are 'skipped' on a NOOP run -- that is success.
           if [ "${plan}" != success ]; then
             echo "[CI-ERROR-CORE-0100] phase=plan result=${plan}" >&2; exit 1
           fi
-          case "${build}" in
-            success|skipped) ;;
-            *) echo "[CI-ERROR-CORE-0100] phase=build result=${build}" >&2; exit 1 ;;
-          esac
-          echo "CI 2.0 result: plan=${plan} build=${build} -> SUCCESS"
+          for phase in build:"${build}" assemble:"${assemble}"; do
+            case "${phase#*:}" in
+              success|skipped) ;;
+              *) echo "[CI-ERROR-CORE-0100] phase=${phase%%:*} result=${phase#*:}" >&2; exit 1 ;;
+            esac
+          done
+          echo "CI 2.0 result: plan=${plan} build=${build} assemble=${assemble} -> SUCCESS"
