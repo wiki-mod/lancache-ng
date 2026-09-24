@@ -3625,6 +3625,20 @@ STUBEOF
     [[ "${output}" == *"CI-ERROR-CHECK-0012"* ]]
 }
 
+@test "check pr-title accepts breaking-marker, optional scope, security type, CRLF" {
+    # What: !, no-scope, scope+!, security, and a CRLF title pass.
+    # Why: preserves check-pr-title-convention.sh grammar coverage.
+    # From: Issue #1683 | PR #1858
+    local t
+    for t in "fix: correct cache key" "feat!: drop legacy flag" "fix(build-tools)!: bump base" "security: patch cve" "security(proxy): patch cve"; do
+        run bash "${CI_SH}" check pr-title "${t}"
+        [ "${status}" -eq 0 ] || { echo "rejected: ${t} -> ${output}"; false; }
+        [[ "${output}" == *"pr-title=ok"* ]]
+    done
+    PR_TITLE=$'feat(dns): ok\r' run bash "${CI_SH}" check pr-title
+    [ "${status}" -eq 0 ]; [[ "${output}" == *"pr-title=ok"* ]]
+}
+
 @test "check pr-title warns (default mode) on a disallowed type" {
     # What: a title matching the pattern but a bad type.
     # Why: distinct from the not-conventional regex miss.
