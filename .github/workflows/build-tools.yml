@@ -122,7 +122,7 @@ jobs:
       artifact-metadata: write
       issues: write
     outputs:
-      candidate-digest: ${{ steps.build.outputs.digest }}
+      candidate-digest: ${{ github.event_name == 'pull_request' && steps.pr-publish.outputs.digest || steps.build.outputs.digest }}
     steps:
       - name: Checkout
         uses: *checkout_centraliced_versioning # v7.0.1
@@ -156,7 +156,10 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
+        if: >-
+          github.event_name != 'pull_request' ||
+          (github.actor != 'dependabot[bot]' &&
+           github.event.pull_request.head.repo.full_name == github.repository)
         uses: &docker_login_centraliced_versioning ./.github/actions/docker-login-action-centralized-version
         with:
           registry: ghcr.io
@@ -454,6 +457,30 @@ jobs:
           fork-check-step-name: Scan local build-tools amd64 image with Trivy
           project_pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
 
+      # What: publishes the scanned Same-Repo PR child manifest.
+      # Why: separate runner jobs need one immutable candidate.
+      # From: Issue #1860 | PR #1872
+      - name: Publish scanned amd64 PR staging candidate
+        id: pr-publish
+        if: >-
+          github.event_name == 'pull_request' &&
+          github.actor != 'dependabot[bot]' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          [ "${{ steps.trivy-scan.outputs.db-status }}" = "available" ] || { echo "::error::Refusing to publish an unscanned amd64 PR candidate."; exit 1; }
+          [ "${{ steps.trivy-scan.outputs.scan-error }}" != "true" ] || { echo "::error::Refusing to publish a scan-error amd64 PR candidate."; exit 1; }
+          [ "${{ steps.trivy-scan.outcome }}" = "success" ] || { echo "::error::Refusing to publish an amd64 PR candidate with Trivy findings."; exit 1; }
+          tag="${BUILD_TOOLS_IMAGE}:pr-${PR_NUMBER}-sha-${GITHUB_SHA}-amd64"
+          docker tag "$BUILD_TOOLS_SCAN_IMAGE_AMD64" "$tag"
+          docker push "$tag"
+          digest="$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest.Digest}}')"
+          digest="${digest%\"}"; digest="${digest#\"}"
+          [[ "$digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid published amd64 digest '$digest'."; exit 1; }
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+
       - name: Scan pushed amd64 build-tools digest with Trivy
         if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
         # What: allow 50 minutes for scan with retry.
@@ -524,7 +551,7 @@ jobs:
       artifact-metadata: write
       issues: write
     outputs:
-      candidate-digest: ${{ steps.build.outputs.digest }}
+      candidate-digest: ${{ github.event_name == 'pull_request' && steps.pr-publish.outputs.digest || steps.build.outputs.digest }}
     steps:
       - name: Checkout
         uses: *checkout_centraliced_versioning # v7.0.1
@@ -534,7 +561,10 @@ jobs:
         uses: ./.github/actions/buildx-setup-retry
 
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
+        if: >-
+          github.event_name != 'pull_request' ||
+          (github.actor != 'dependabot[bot]' &&
+           github.event.pull_request.head.repo.full_name == github.repository)
         uses: *docker_login_centraliced_versioning
         with:
           registry: ghcr.io
@@ -738,6 +768,30 @@ jobs:
           fork-check-step-name: Scan local build-tools arm64 image with Trivy
           project_pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
 
+      # What: publishes the scanned Same-Repo PR child manifest.
+      # Why: separate runner jobs need one immutable candidate.
+      # From: Issue #1860 | PR #1872
+      - name: Publish scanned arm64 PR staging candidate
+        id: pr-publish
+        if: >-
+          github.event_name == 'pull_request' &&
+          github.actor != 'dependabot[bot]' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          [ "${{ steps.trivy-scan.outputs.db-status }}" = "available" ] || { echo "::error::Refusing to publish an unscanned arm64 PR candidate."; exit 1; }
+          [ "${{ steps.trivy-scan.outputs.scan-error }}" != "true" ] || { echo "::error::Refusing to publish a scan-error arm64 PR candidate."; exit 1; }
+          [ "${{ steps.trivy-scan.outcome }}" = "success" ] || { echo "::error::Refusing to publish an arm64 PR candidate with Trivy findings."; exit 1; }
+          tag="${BUILD_TOOLS_IMAGE}:pr-${PR_NUMBER}-sha-${GITHUB_SHA}-arm64"
+          docker tag "$BUILD_TOOLS_SCAN_IMAGE_ARM64" "$tag"
+          docker push "$tag"
+          digest="$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest.Digest}}')"
+          digest="${digest%\"}"; digest="${digest#\"}"
+          [[ "$digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid published arm64 digest '$digest'."; exit 1; }
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+
       - name: Scan pushed arm64 build-tools digest with Trivy
         if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
         # What: allow 50 minutes for scan with retry.
@@ -785,7 +839,9 @@ jobs:
         !cancelled() &&
         needs['build-tools'].result == 'success' &&
         needs['build-tools-arm64'].result == 'success' &&
-        github.event_name != 'pull_request'
+        (github.event_name != 'pull_request' ||
+         (github.actor != 'dependabot[bot]' &&
+          github.event.pull_request.head.repo.full_name == github.repository))
       }}
     runs-on: [self-hosted, linux, lancache, lancache-light]
     timeout-minutes: 20
@@ -815,6 +871,7 @@ jobs:
         env:
           AMD64_DIGEST: ${{ needs.build-tools.outputs.candidate-digest }}
           ARM64_DIGEST: ${{ needs.build-tools-arm64.outputs.candidate-digest }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -826,7 +883,11 @@ jobs:
           [[ "$AMD64_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid amd64 digest '$AMD64_DIGEST'."; exit 1; }
           [[ "$ARM64_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid arm64 digest '$ARM64_DIGEST'."; exit 1; }
 
-          source_tag="${BUILD_TOOLS_IMAGE}:sha-${GITHUB_SHA}"
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            source_tag="${BUILD_TOOLS_IMAGE}:pr-${PR_NUMBER}-sha-${GITHUB_SHA}"
+          else
+            source_tag="${BUILD_TOOLS_IMAGE}:sha-${GITHUB_SHA}"
+          fi
           amd64_ref="${BUILD_TOOLS_IMAGE}@${AMD64_DIGEST}"
           arm64_ref="${BUILD_TOOLS_IMAGE}@${ARM64_DIGEST}"
 
@@ -876,6 +937,7 @@ jobs:
       # Why: schedule always resolves REF_NAME to the default branch.
       # From: Issue #1095
       - name: Promote mutable tags from the attested digest
+        if: github.event_name != 'pull_request'
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           REF_NAME: ${{ github.ref_name }}
