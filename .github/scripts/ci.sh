@@ -1901,6 +1901,14 @@ _ci_index_raw() {
     printf '%s' "${raw}"
 }
 
+# What: Canonical sorted "platform=digest ..." from a digest set.
+# Why: assemble, reconcile and candidate compare one representation (AG-CODE-011).
+# From: Issue #1683
+_ci_normalize_platform_digests() {
+    local input="$1"
+    printf '%s\n' "${input}" | tr ' ' '\n' | awk 'NF' | LC_ALL=C sort | tr '\n' ' '
+}
+
 # What: Look up an existing multi-arch index (injectable).
 # Why: Idempotency: reuse an identical index.
 # From: Issue #1683
@@ -1951,7 +1959,7 @@ _ci_reconcile_index() {
     local service="$1" want="$2" existing ex_digest ex_have
     existing="$(_ci_index_lookup "${service}")" || return 0
     ex_digest="${existing%% *}"
-    ex_have="$(printf '%s\n' ${existing#* } | sort | tr '\n' ' ')"
+    ex_have="$(_ci_normalize_platform_digests "${existing#* }")"
     if [ "${want}" = "${ex_have}" ]; then
         printf '%s\n' "${ex_digest}"
         return 0
@@ -1986,7 +1994,7 @@ ci_cmd_assemble() {
     [ -n "${service}" ] || { ci_log "[CI-ERROR-ASSEMBLE-0001]" "reason=\"service arg required\""; return 2; }
     local inputs want count reused index
     inputs="$(_ci_collect_accepted_digests "${service}")" || return "$?"
-    want="$(printf '%s\n' ${inputs} | sort | tr '\n' ' ')"
+    want="$(_ci_normalize_platform_digests "${inputs}")"
     count="$(printf '%s\n' ${inputs} | grep -c '=')"
     if ! reused="$(_ci_reconcile_index "${service}" "${want}")"; then
         return 2
@@ -2041,8 +2049,8 @@ _ci_stack_candidate_ledger() {
     while IFS= read -r service; do
         [ -n "${service}" ] || continue
         inputs="$(_ci_collect_accepted_digests "${service}")" || return "$?"
-        want="$(printf '%s\n' ${inputs} | sort | tr '\n' ' ')"
-        idx="$(_ci_reconcile_index "${service}" "${want% }")" || return "$?"
+        want="$(_ci_normalize_platform_digests "${inputs}")"
+        idx="$(_ci_reconcile_index "${service}" "${want}")" || return "$?"
         if [ -z "${idx}" ]; then
             ci_log "[CI-ERROR-CANDIDATE-0001]" "service=\"${service}\" reason=\"platforms accepted but no assembled multi-arch index; stack not candidate-ready\""
             return 2

@@ -4215,18 +4215,35 @@ _anv_run() {
     [[ "${output}" == *"no-source-compiled-tools=clean"* ]]
 }
 
-@test "stack-candidate reader emits service=index-digest and fails closed on a missing index" {
-    # What: the production stack candidate is exact multi-arch index digests (§48).
-    # Why: promote/validate consume exact digests, never moving service tags.
+@test "stack-candidate reader: full SOT stack, fail-closed on every failure, no stray services" {
+    # What: exact multi-arch index digests for the SOT product stack (§48).
+    # Why: candidate feeds validate/promote; each failure must fail closed.
     # From: Issue #1683
     _ci_collect_accepted_digests() { printf 'linux/amd64=sha256:a\nlinux/arm64=sha256:b\n'; }
     _ci_reconcile_index() { printf 'sha256:idx-%s\n' "$1"; }
     run _ci_stack_candidate_ledger
     [ "${status}" -eq 0 ]
-    local s
+    # A: exactly one service=digest per SOT product service (count from ci_services)
+    local s expected actual
+    expected="$(ci_services | grep -c .)"
+    actual="$(printf '%s\n' "${output}" | grep -c '=sha256:idx-')"
+    [ "${actual}" -eq "${expected}" ]
     for s in $(ci_services); do
         [[ "${output}" == *"${s}=sha256:idx-${s}"* ]]
     done
+    # E: no toolchain member (build-tools is not a product-stack service)
+    [[ "${output}" != *"build-tools=sha256"* ]]
+    # B: a collect failure propagates non-zero (no partial, no skip)
+    _ci_collect_accepted_digests() { return 2; }
+    _ci_reconcile_index() { printf 'sha256:idx\n'; }
+    run _ci_stack_candidate_ledger
+    [ "${status}" -ne 0 ]
+    # C: a reconcile divergence propagates non-zero
+    _ci_collect_accepted_digests() { printf 'linux/amd64=sha256:a\n'; }
+    _ci_reconcile_index() { return 2; }
+    run _ci_stack_candidate_ledger
+    [ "${status}" -ne 0 ]
+    # D: platforms accepted but no assembled index -> CANDIDATE-0001 (distinct state)
     _ci_reconcile_index() { printf '\n'; }
     run _ci_stack_candidate_ledger
     [ "${status}" -ne 0 ]
