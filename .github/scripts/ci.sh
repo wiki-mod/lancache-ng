@@ -341,9 +341,19 @@ ci_cmd_plan_matrix() {
     local out="${GITHUB_OUTPUT:?GITHUB_OUTPUT required}"
     local -a changed=()
     _ci_collect_changed changed "$@"
-    local service platform include='[]' any=false resolved paction runner
-    for service in $(ci_build_targets); do
+    local service platform include='[]' any=false resolved paction runner authed=false
+    # What: iterate product services; build-tools is separate.
+    # Why: build-tools has its own workflow (Contract §111.2).
+    # From: Issue #1683 | PR #1858
+    for service in $(ci_services); do
         _ci_plan_candidate "${service}" "${changed[@]}" || continue
+        # What: authenticate once, only when a candidate exists.
+        # Why: a docs-only NOOP run touches the registry 0 times (§63).
+        # From: Issue #1683
+        if [ "${authed}" = false ]; then
+            _ci_require_ghcr_auth || return "$?"
+            authed=true
+        fi
         while IFS= read -r platform; do
             [ -n "${platform}" ] || continue
             resolved="$(_ci_resolve_one "${service}" "${platform}")" || return "$?"
@@ -1056,8 +1066,22 @@ ci_reuse_order() {
 # Why: Every GHCR action authenticates, never anonymous.
 # From: Issue #1683
 _ci_require_ghcr_auth() {
-    [ -n "${GHCR_USERNAME:-}" ] && [ -n "${GHCR_TOKEN:-}" ] && return 0
-    ci_log "[CI-ERROR-BUILD-0002]" "reason=\"GHCR credentials required; anonymous is rate-limited\""
+    [ -n "${GHCR_USERNAME:-}" ] && [ -n "${GHCR_TOKEN:-}" ] || {
+        ci_log "[CI-ERROR-BUILD-0002]" "reason=\"GHCR credentials required; anonymous is rate-limited\""
+        return 2
+    }
+    # What: Log docker in so push/inspect authenticate; injectable.
+    # Why: auth is ci.sh policy (§7); no login action in a workflow.
+    # From: Issue #1683
+    local reg out rc=0
+    if [ -n "${CI_GHCR_LOGIN_CMD:-}" ]; then
+        out="$("${CI_GHCR_LOGIN_CMD}" 2>&1)" || rc=$?
+    else
+        reg="$(_ci_registry)" || return "$?"
+        out="$(printf '%s' "${GHCR_TOKEN}" | docker login "${reg}" -u "${GHCR_USERNAME}" --password-stdin 2>&1)" || rc=$?
+    fi
+    [ "${rc}" -eq 0 ] && return 0
+    ci_error "[CI-ERROR-BUILD-0002]" "reason=\"docker login to GHCR failed\"" "${out}"
     return 2
 }
 

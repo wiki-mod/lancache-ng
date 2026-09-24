@@ -17,6 +17,10 @@ setup() {
     # Why: rust identity now keys the build-tools signature.
     # From: Issue #1683
     CI_APK_RESOLVE_CMD="$(_stub apkres 'printf "pkg-1.0\n"')"; export CI_APK_RESOLVE_CMD
+    # What: GHCR login is a no-op here; docker is absent in tests.
+    # Why: auth is ci.sh policy (docker login) with a test hook (§7).
+    # From: Issue #1683
+    CI_GHCR_LOGIN_CMD="$(_stub ghcrlogin 'exit 0')"; export CI_GHCR_LOGIN_CMD
 }
 
 # What: Removes dirs listed in a manifest file.
@@ -164,7 +168,7 @@ teardown() {
     # Why: identity filters, not path-sledgehammer.
     # From: Issue #1683
     local gh="${BATS_TEST_TMPDIR}/out.txt"; : > "${gh}"
-    GITHUB_OUTPUT="${gh}" CI_RESOLVE_PROBE_CMD="$(_stub p 'echo MISSING_CONFIRMED')" \
+    GITHUB_OUTPUT="${gh}" GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_stub p 'echo MISSING_CONFIRMED')" \
         run bash "${CI_SH}" plan-matrix services/proxy/Dockerfile
     [ "${status}" -eq 0 ]
     grep -q '^any-build=true$' "${gh}"
@@ -179,7 +183,7 @@ teardown() {
     # Why: NOOP/reuse precedes build; a skip stays out.
     # From: Issue #1683
     local gh="${BATS_TEST_TMPDIR}/out.txt"; : > "${gh}"
-    GITHUB_OUTPUT="${gh}" CI_RESOLVE_PROBE_CMD="$(_stub p 'echo PRESENT_ACCEPTED')" \
+    GITHUB_OUTPUT="${gh}" GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_stub p 'echo PRESENT_ACCEPTED')" \
         run bash "${CI_SH}" plan-matrix services/proxy/Dockerfile
     [ "${status}" -eq 0 ]
     grep -q '^any-build=false$' "${gh}"

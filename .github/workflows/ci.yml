@@ -1,0 +1,137 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# What: CI 2.0 Base-CI: plan the product build, then result.
+# Why: thin orchestration of ci.sh; one SOT build-manifest.yml.
+# From: Issue #1683
+name: CI 2.0
+on:
+  pull_request:
+  push:
+    branches: [current_dev, master]
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+defaults:
+  run:
+    shell: bash
+# What: GHCR credentials ci.sh reads; no login action, no pin.
+# Why: auth is ci.sh policy; the workflow only supplies the env.
+# From: Issue #1683
+env:
+  GHCR_USERNAME: ${{ github.actor }}
+  GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+jobs:
+  # What: emit the identity-filtered product build matrix.
+  # Why: path picks candidates; ci.sh resolve decides the build.
+  # From: Issue #1683
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    outputs:
+      any-build: ${{ steps.plan.outputs.any-build }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      # What: native fail-closed checkout; no pinned action (AG-CI-006).
+      # Why: no SHA pin may live outside the SOT; git is a runner tool.
+      # From: Issue #1683
+      - name: Bootstrap the working tree
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          git init -q .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git -c http.extraheader="AUTHORIZATION: bearer ${GHCR_TOKEN}" \
+            fetch -q --no-tags origin "${GITHUB_REF}" ${BASE_SHA:+"${BASE_SHA}"}
+          git checkout -q FETCH_HEAD
+      # What: compute the changed-path list for this event.
+      # Why: ci.sh reads CHANGED_FILES and never walks git itself.
+      # From: Issue #1683
+      - name: Collect changed files
+        id: changed
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/changed-files.txt"
+          if [ "${GITHUB_EVENT_NAME}" = pull_request ]; then
+            git diff --name-only "${BASE_SHA}...FETCH_HEAD" > "${out}"
+          elif [ -n "${BEFORE_SHA}" ] \
+            && [ "${BEFORE_SHA}" != 0000000000000000000000000000000000000000 ] \
+            && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+            git diff --name-only "${BEFORE_SHA}" "${GITHUB_SHA}" > "${out}"
+          else
+            git ls-files > "${out}"
+          fi
+          echo "file=${out}" >> "$GITHUB_OUTPUT"
+      - name: Plan the product build matrix
+        id: plan
+        env:
+          CHANGED_FILES: ${{ steps.changed.outputs.file }}
+        run: bash .github/scripts/ci.sh plan-matrix
+
+  # What: build+publish+verify one product service per platform.
+  # Why: ci.sh owns build identity, publish and readback.
+  # From: Issue #1683
+  build:
+    name: build ${{ matrix.service }} ${{ matrix.arch }}
+    needs: plan
+    if: needs.plan.outputs.any-build == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - name: Bootstrap the working tree
+        run: |
+          set -euo pipefail
+          git init -q .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git -c http.extraheader="AUTHORIZATION: bearer ${GHCR_TOKEN}" \
+            fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
+          git checkout -q FETCH_HEAD
+      # What: publish the immutable per-identity ref, then read it back.
+      # Why: BUILD != PUBLISH; readback confirms the exact digest (§22/§23).
+      # From: Issue #1683
+      - name: Build, publish and verify the platform image
+        run: |
+          set -euo pipefail
+          bash .github/scripts/ci.sh build "${{ matrix.service }}" "${{ matrix.platform }}"
+          out="$(bash .github/scripts/ci.sh publish "${{ matrix.service }}" "${{ matrix.platform }}")"
+          printf '%s\n' "${out}"
+          digest="$(printf '%s' "${out}" | sed -n 's/.*published=\([^ ]*\).*/\1/p')"
+          [ -n "${digest}" ] || { echo "no digest from publish" >&2; exit 1; }
+          bash .github/scripts/ci.sh verify "${{ matrix.service }}" "${digest}" "${{ matrix.platform }}"
+
+  # What: the always-present required check for branch protection.
+  # Why: a required check MUST always appear, even on a NOOP (§62).
+  # From: Issue #1683
+  result:
+    name: result
+    needs: [plan, build]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Aggregate the pipeline result
+        run: |
+          set -euo pipefail
+          plan='${{ needs.plan.result }}'
+          build='${{ needs.build.result }}'
+          # build is 'skipped' on a NOOP run (no matrix) -- that is success.
+          if [ "${plan}" != success ]; then
+            echo "[CI-ERROR-CORE-0100] phase=plan result=${plan}" >&2; exit 1
+          fi
+          case "${build}" in
+            success|skipped) ;;
+            *) echo "[CI-ERROR-CORE-0100] phase=build result=${build}" >&2; exit 1 ;;
+          esac
+          echo "CI 2.0 result: plan=${plan} build=${build} -> SUCCESS"
