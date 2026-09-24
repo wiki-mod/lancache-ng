@@ -112,8 +112,10 @@ jobs:
         env:
           GITHUB_BASE_REF: ${{ github.base_ref }}
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
+          GITHUB_EVENT_PULL_REQUEST_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ github.token }}
+          BUILD_TOOLS_PR_STAGING_IMAGE: ${{ github.event_name == 'pull_request' && github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository && format('ghcr.io/{0}/build-tools:pr-{1}-sha-{2}', github.repository, github.event.pull_request.number, github.sha) || '' }}
         run: |
           set -euo pipefail
           # What: pull-only; never build build-tools on this runner.
