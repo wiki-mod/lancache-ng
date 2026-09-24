@@ -26,19 +26,18 @@ env:
   GHCR_USERNAME: ${{ github.actor }}
   GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 jobs:
-  # What: full-setup validation of the accepted current_dev candidate (§49).
-  # Why: nightly promotes only a green, already-accepted stack (green-gated).
+  # What: validate, then promote the accepted current_dev stack; report always.
+  # Why: one job, one checkout; nightly reuses ci.sh, never rebuilds (§54).
   # From: Issue #1683
-  validate:
-    name: validate
+  nightly:
+    name: nightly
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       # What: native fail-closed checkout, shallow; persistent ci.sh auth.
       # Why: no SHA pin outside the SOT; git is a runner tool (AG-CI-006).
       # From: Issue #1683
-      - &bootstrap
-        name: Bootstrap the working tree
+      - name: Bootstrap the working tree
         run: |
           set -euo pipefail
           git init -q .
@@ -46,42 +45,25 @@ jobs:
           git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: bearer ${GHCR_TOKEN}"
           git fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
           git checkout -q FETCH_HEAD
+      # What: full-setup validation of the accepted candidate (§49/§54).
+      # Why: nightly promotes only a green, already-accepted stack.
+      # From: Issue #1683
       - name: Validate the accepted stack candidate
+        id: validate
         run: bash .github/scripts/ci.sh validate
-
-  # What: move the nightly channel to the validated current_dev stack (§54).
-  # Why: current_dev -> nightly; promotion only moves refs (§51), idempotent.
-  # From: Issue #1683
-  promote:
-    name: promote nightly
-    needs: validate
-    runs-on: ubuntu-latest
-    env:
-      CI_STACK_VALIDATED: SUCCESS
-    steps:
-      - *bootstrap
+      # What: move the nightly channel to the validated stack (§54).
+      # Why: skipped automatically if validate failed; promotion moves refs (§51).
+      # From: Issue #1683
       - name: Promote the nightly channel
+        id: promote
+        env:
+          CI_STACK_VALIDATED: SUCCESS
         run: bash .github/scripts/ci.sh promote nightly
-
-  # What: file/close the standing nightly tracking issue on the outcome.
-  # Why: nightly must be reported reliably (#1801), self-closing.
-  # From: Issue #1683
-  report:
-    name: report
-    needs: [validate, promote]
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - *bootstrap
+      # What: file/close the standing nightly tracking issue on the outcome.
+      # Why: nightly must be reported reliably (#1801), self-closing.
+      # From: Issue #1683
       - name: Report the nightly outcome
-        run: |
-          set -euo pipefail
-          v='${{ needs.validate.result }}'
-          p='${{ needs.promote.result }}'
-          outcome=failure
-          [ "${v}" = success ] && [ "${p}" = success ] && outcome=success
-          failed=''
-          [ "${v}" = success ] || failed='validate'
-          [ "${p}" = success ] || failed="${failed} promote"
-          CI_FAILED_JOBS="${failed# }" \
-            bash .github/scripts/ci.sh nightly-status "${outcome}" "nightly channel promote (current_dev)"
+        if: always()
+        env:
+          OUTCOME: ${{ (steps.validate.outcome == 'success' && steps.promote.outcome == 'success') && 'success' || 'failure' }}
+        run: bash .github/scripts/ci.sh nightly-status "${OUTCOME}" "nightly channel promote (current_dev)"
