@@ -151,10 +151,10 @@ runs:
           "${{ inputs.build-tools-image }}" \
           timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-pipefail-scope-coverage.sh
 
-    - name: Check github.repository case-safety in GHCR paths
-      # What: Checks repository case for GHCR lowercase requirement.
-      # Why: github.repository is not guaranteed lowercase for GHCR.
-      # From: Issue #1095 | PR #1597
+    - name: Check for mutable image/action references (SHA/digest-pinned only)
+      # What: Flag floating :latest / @vN / untagged refs repo-wide.
+      # Why: owner _ci_check_mutable_refs; GHCR case is _ci_repo's job.
+      # From: Issue #1095 | PR #1858
       shell: bash
       run: |
         set -euo pipefail
@@ -163,4 +163,4 @@ runs:
           -v "$PWD:/work:ro" \
           -w /work \
           "${{ inputs.build-tools-image }}" \
-          timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-mutable-refs.sh --only repository-case
+          timeout --kill-after=30 --signal=KILL 300 bash .github/scripts/ci.sh check mutable-refs
