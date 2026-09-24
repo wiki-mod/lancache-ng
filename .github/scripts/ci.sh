@@ -4462,8 +4462,6 @@ _ci_check_review_chronology() {
         [ -f "${path}" ] || continue
         case "${path}" in
             */ci.sh|ci.sh|*/ci.bats|ci.bats) continue ;;
-            */check-review-chronology-comments.sh|check-review-chronology-comments.sh) continue ;;
-            */check_review_chronology_comments.bats|check_review_chronology_comments.bats) continue ;;
         esac
         _ci_prose_excluded "${path}" && continue
         out="$(grep -EinIH "${rc}" "${path}")" && viol+=("${out}")

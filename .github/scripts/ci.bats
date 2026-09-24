@@ -3488,6 +3488,62 @@ STUBEOF
     [[ "${output}" != *"review-chronology=clean"* ]]
 }
 
+@test "check review-chronology detects varied discovery-verb phrasings" {
+    # What: before-this-fix / flagged-in-review / review-finding, incl wrapped.
+    # Why: absorbs check_review_chronology_comments.bats verb coverage.
+    # From: Issue #1683 | PR #1858
+    local p
+    for p in "fixed it before this fix landed" "flagged in review on PR #743" "this is a review finding note" "caught during self-review here"; do
+        printf '# %s\n' "${p}" > "${BATS_TEST_TMPDIR}/v.sh"
+        run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/v.sh"
+        [ "${status}" -ne 0 ] || { echo "want fail: ${p}"; false; }
+    done
+    printf '# noted a review\n# finding in the code\n' > "${BATS_TEST_TMPDIR}/w.sh"
+    run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/w.sh"; [ "${status}" -ne 0 ]
+    for p in "see the manual review section" "runs after this PR merges" "remembered during review to add this"; do
+        printf '# %s\n' "${p}" > "${BATS_TEST_TMPDIR}/ok.sh"
+        run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/ok.sh"
+        [ "${status}" -eq 0 ] || { echo "want pass: ${p}"; false; }
+    done
+}
+
+@test "check review-chronology flags stale line-refs, exempts plain prose" {
+    # What: (line ~N) and (see line N) fail; prose 'line' passes.
+    # Why: absorbs the line-ref-detection coverage.
+    # From: Issue #1683 | PR #1858
+    printf '# revisit this logic (line ~890) soon\n' > "${BATS_TEST_TMPDIR}/l.sh"
+    run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/l.sh"; [ "${status}" -ne 0 ]
+    printf '# the fix is above (see line 42 above)\n' > "${BATS_TEST_TMPDIR}/l.sh"
+    run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/l.sh"; [ "${status}" -ne 0 ]
+    printf '# each line of the config is parsed here\n' > "${BATS_TEST_TMPDIR}/l.sh"
+    run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/l.sh"; [ "${status}" -eq 0 ]
+}
+
+@test "check review-chronology duplicate-#N string-literal and longer-number cases" {
+    # What: a bare From: dup warns; string-literal / longer / different pass.
+    # Why: absorbs the bare-#N duplicate edge coverage.
+    # From: Issue #1683 | PR #1858
+    printf '# From: Issue #887\nlocal x="#887"\n' > "${BATS_TEST_TMPDIR}/d.sh"
+    run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/d.sh"; [ "${status}" -eq 0 ]
+    printf '# From: Issue #887\n# see also #999 for context\n' > "${BATS_TEST_TMPDIR}/d.sh"
+    run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/d.sh"; [ "${status}" -eq 0 ]
+    printf '# From: Issue #887\n# unrelated #8871 ticket\n' > "${BATS_TEST_TMPDIR}/d.sh"
+    run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/d.sh"; [ "${status}" -eq 0 ]
+    printf '# From: Issue #887\n# duplicate ref #887 here\n' > "${BATS_TEST_TMPDIR}/d.sh"
+    run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/d.sh"
+    [ "${status}" -eq 0 ]; [[ "${output}" == *"CI-ERROR-CHECK-0010"* ]]
+}
+
+@test "check review-chronology explicit args scan only the listed files" {
+    # What: only listed files scanned; a violation elsewhere is ignored.
+    # Why: absorbs the explicit-file-args scoping coverage.
+    # From: Issue #1683 | PR #1858
+    printf '# clean note\n' > "${BATS_TEST_TMPDIR}/clean.sh"
+    printf '# caught in review here\n' > "${BATS_TEST_TMPDIR}/dirty.sh"
+    run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/clean.sh"; [ "${status}" -eq 0 ]
+    run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/dirty.sh"; [ "${status}" -ne 0 ]
+}
+
 @test "check pipefail-early-exit flags grep -q, not plain sed -n" {
     # What: ci.sh owns the SIGPIPE check; bats calls it.
     # Why: only true early-exit consumers risk exit 141.
