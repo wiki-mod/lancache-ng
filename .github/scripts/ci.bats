@@ -4116,6 +4116,24 @@ _anv_run() {
     [[ "${output}" == *"CI-ERROR-CHECK-0055"* ]]
 }
 
+@test "coverage skips a no-SOT service, passes the floor, fails below it" {
+    # What: injected tarpaulin; prove the floor policy.
+    # Why: real tarpaulin needs the toolchain image; hook it.
+    # From: Issue #1683
+    run bash "${CI_SH}" coverage watchdog
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"coverage=SKIP"* ]]
+    CI_TARPAULIN_CMD="$(_stub tp 'echo 12.5')" run bash "${CI_SH}" coverage dns
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"coverage=12.5"* ]]
+    CI_TARPAULIN_CMD="$(_stub tp2 'echo 20')" run bash "${CI_SH}" coverage ui
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-COVERAGE-0004"* ]]
+    CI_TARPAULIN_CMD="$(_stub tp3 'echo 40')" run bash "${CI_SH}" coverage ui
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"coverage=40"* ]]
+}
+
 @test "action-node-versions resolver: yaml fallback, transient retry, permanent stop" {
     # What: real curl path -- .yml->.yaml, 403 retries, 401 stops.
     # Why: fetch mechanics have no hook; a counted mock proves them.

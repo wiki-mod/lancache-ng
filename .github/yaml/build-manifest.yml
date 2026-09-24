@@ -21,6 +21,12 @@ services:
     build_type: rust
     final_base: alpine
     runner: heavy
+    # What: coverage crate + floor; the dns floor is 0.
+    # Why: nats-subscriber is unit-coverable; the async loop is
+    #      covered by stack validate, not tarpaulin (Issue #504).
+    # From: Issue #1683
+    coverage_manifest: services/dns/nats-subscriber/Cargo.toml
+    coverage_threshold: 0
   watchdog:
     context: services/watchdog
     build_type: rust
@@ -55,6 +61,11 @@ services:
     build_type: rust
     final_base: alpine
     runner: heavy
+    # What: coverage crate + floor; the ui floor is 35 percent.
+    # Why: ui logic is unit-coverable and its floor is enforced.
+    # From: Issue #1683
+    coverage_manifest: services/ui/Cargo.toml
+    coverage_threshold: 35
   cachehamster:
     context: services/cachehamster
     # What: Rust compile via BUILD_TOOLS_IMAGE stage.

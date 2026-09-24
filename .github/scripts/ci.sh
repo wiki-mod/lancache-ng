@@ -33,7 +33,7 @@ declare -A CI_DISPATCH=(
     [plan]=ci_cmd_plan [plan-matrix]=ci_cmd_plan_matrix [impact]=ci_cmd_impact [identity]=ci_cmd_identity
     [resolve]=ci_cmd_resolve [build]=ci_cmd_build [build-args]=ci_cmd_build_args
     [build-tools]=ci_cmd_build_tools [publish]=ci_cmd_publish [verify]=ci_cmd_verify
-    [test]=ci_cmd_test [scan]=ci_cmd_scan [assemble]=ci_cmd_assemble
+    [test]=ci_cmd_test [coverage]=ci_cmd_coverage [scan]=ci_cmd_scan [assemble]=ci_cmd_assemble
     [aggregate]=ci_cmd_aggregate
     [validate]=ci_cmd_validate [promote]=ci_cmd_promote [release]=ci_cmd_release
     [gc]=ci_cmd_gc [variables]=ci_cmd_variables [check]=ci_cmd_check
@@ -1766,6 +1766,55 @@ ci_cmd_test() {
         return 2
     fi
     printf '%s\n' "${raw}"
+}
+
+# What: Run tarpaulin and print the coverage percent.
+# Why: injectable; the container has tarpaulin, tests do not.
+# From: Issue #1683
+_ci_tarpaulin_pct() {
+    local manifest="$1" dir pct
+    if [ -n "${CI_TARPAULIN_CMD:-}" ]; then
+        "${CI_TARPAULIN_CMD}" "${manifest}"
+        return "$?"
+    fi
+    dir="$(mktemp -d)"
+    if ! ( cd "${CI_REPO_ROOT:-.}" && cargo tarpaulin --engine llvm \
+            --manifest-path "${manifest}" --locked --timeout 300 \
+            --out json --output-dir "${dir}" ); then
+        ci_log "[CI-ERROR-COVERAGE-0003]" "manifest=\"${manifest}\" reason=\"tarpaulin failed\""
+        rm -rf "${dir}"; return 2
+    fi
+    pct="$(jq -r '.coverage // 0' "${dir}/tarpaulin-report.json" 2>/dev/null || echo 0)"
+    rm -rf "${dir}"
+    printf '%s\n' "${pct}"
+}
+
+# What: Run coverage for a rust service, enforcing its floor.
+# Why: tarpaulin runs; the floor is ci.sh policy from the SOT.
+# From: Issue #1683
+_ci_default_coverage() {
+    local service="$1" manifest threshold pct
+    manifest="$(ci_service_field "${service}" coverage_manifest)"
+    threshold="$(ci_service_field "${service}" coverage_threshold)"
+    if [ -z "${manifest}" ] || [ -z "${threshold}" ]; then
+        printf 'service=%s coverage=SKIP reason=no coverage in SOT\n' "${service}"
+        return 0
+    fi
+    pct="$(_ci_tarpaulin_pct "${manifest}")" || return "$?"
+    if awk -v p="${pct}" -v t="${threshold}" 'BEGIN { exit !(p < t) }'; then
+        ci_error "[CI-ERROR-COVERAGE-0004]" "service=\"${service}\" reason=\"coverage below floor\" coverage=\"${pct}\"" "floor=${threshold}"
+        return 1
+    fi
+    printf 'service=%s coverage=%s floor=%s\n' "${service}" "${pct}" "${threshold}"
+}
+
+# What: Run a service's coverage via the wired backend.
+# Why: injectable for tests; a real floor breach fails the run.
+# From: Issue #1683
+ci_cmd_coverage() {
+    local service="${1:-}"
+    [ -n "${service}" ] || { ci_log "[CI-ERROR-COVERAGE-0001]" "reason=\"service arg required\""; return 2; }
+    "${CI_COVERAGE_CMD:-_ci_default_coverage}" "${service}"
 }
 
 # What: Scan a published digest for vulnerabilities.
