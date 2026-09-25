@@ -17,6 +17,11 @@ ARG ALPINE_IMAGE
 ARG BUILD_TOOLS_IMAGE
 FROM ${BUILD_TOOLS_IMAGE} AS cachehamster-builder
 
+# What: musl cross-target, supplied by ci.sh per platform.
+# Why: ci.sh owns arch mapping; no uname -m in the image.
+# From: Issue #1683
+ARG MUSL_TARGET
+
 # What: verify build-tools Rust/musl contract
 # Why: fail closed on missing tools or targets
 # From: Issue #871
@@ -25,11 +30,8 @@ RUN set -eu; \
       command -v "$tool" >/dev/null; \
     done; \
     command -v musl-gcc >/dev/null; \
-    case "$(uname -m)" in \
-      x86_64) echo "x86_64-unknown-linux-musl" > /tmp/musl-target; ;; \
-      aarch64) echo "aarch64-unknown-linux-musl" > /tmp/musl-target; ;; \
-      *) echo "Unsupported architecture for musl cross-compilation target: $(uname -m)" >&2; exit 1; ;; \
-    esac; \
+    [ -n "${MUSL_TARGET}" ] || { echo "MUSL_TARGET build-arg is required" >&2; exit 1; }; \
+    printf '%s\n' "${MUSL_TARGET}" > /tmp/musl-target; \
     installed_musl_targets="$(rustup target list --installed)"; \
     grep -qx "$(cat /tmp/musl-target)" <<<"${installed_musl_targets}"
 

@@ -3975,7 +3975,7 @@ DHSHAS
 # Why: single base-image owner; Dockerfiles pin none.
 # From: Issue #1683
 _ci_service_build_args() {
-    local service="$1" fmt="${2:-}" prefix="--build-arg " out="" val ext ext_argname
+    local service="$1" fmt="${2:-}" platform="${3:-}" prefix="--build-arg " out="" val ext ext_argname
     [ "${fmt}" = "--bare" ] && prefix=""
     val="$(_ci_manifest_scalar '^  alpine:')"
     val="${val%\"}"; val="${val#\"}"
@@ -4011,6 +4011,14 @@ _ci_service_build_args() {
         val="$(${CI_BUILD_TOOLS_IMAGE_CMD:-_ci_build_tools_resolve_image})" || return 2
         [ -n "${val}" ] || { ci_log "[CI-ERROR-BUILDARGS-0009]" "arg=\"BUILD_TOOLS_IMAGE\" service=\"${service}\" reason=\"empty resolved build-tools image; FAIL CLOSED\""; return 2; }
         out="${out}${prefix}BUILD_TOOLS_IMAGE=${val}"$'\n'
+        # What: emit the musl cross-target for the platform.
+        # Why: ci.sh owns arch mapping; Dockerfile drops uname -m.
+        # From: Issue #1683
+        if [ -n "${platform}" ]; then
+            local arch
+            arch="$(_ci_platform_apk_arch "${platform}")" || { ci_log "[CI-ERROR-BUILDARGS-0010]" "platform=\"${platform}\" service=\"${service}\" reason=\"no apk-arch mapping for platform; FAIL CLOSED\""; return 2; }
+            out="${out}${prefix}MUSL_TARGET=${arch}-unknown-linux-musl"$'\n'
+        fi
     fi
     printf '%s' "${out}"
 }
@@ -4034,7 +4042,7 @@ ci_cmd_build_args() {
             local svc_list
             svc_list="$(ci_services)" || return 2
             if printf '%s\n' "${svc_list}" | grep -qxF -- "${service}"; then
-                _ci_service_build_args "${service}" "${fmt}"
+                _ci_service_build_args "${service}" "${fmt}" "${platform}"
             fi
             ;;
     esac

@@ -3319,6 +3319,24 @@ netdata=sha256:n"
     [[ "${output}" != *"BUILD_TOOLS_IMAGE"* ]]
 }
 
+@test "build-args emits MUSL_TARGET per platform for a rust service" {
+    # What: rust build-args add the platform's musl target.
+    # Why: ci.sh owns arch mapping; Dockerfile drops uname -m.
+    # From: Issue #1683
+    local m="${BATS_TEST_TMPDIR}/mt-manifest.yml"
+    printf 'base_images:\n  alpine: "a"\nservices:\n  svc-rust:\n    context: c\n    build_type: rust\n' > "${m}"
+    export CI_BUILD_TOOLS_IMAGE_CMD='echo bt-stub@sha256:test'
+    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc-rust --bare linux/amd64
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"MUSL_TARGET=x86_64-unknown-linux-musl"* ]]
+    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc-rust --bare linux/arm64
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"MUSL_TARGET=aarch64-unknown-linux-musl"* ]]
+    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc-rust
+    [ "${status}" -eq 0 ]
+    [[ "${output}" != *"MUSL_TARGET"* ]]
+}
+
 @test "build-args emits ALPINE_IMAGE + FLUENT_BIT_IMAGE for syslog only" {
     # What: syslog emits ALPINE_IMAGE + FLUENT_BIT_IMAGE.
     # Why: syslog has external_image: fluent_bit entry.

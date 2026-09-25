@@ -15,6 +15,11 @@ ARG ALPINE_IMAGE
 ARG BUILD_TOOLS_IMAGE
 FROM ${BUILD_TOOLS_IMAGE} AS watchdog-builder
 
+# What: musl cross-target, supplied by ci.sh per platform.
+# Why: ci.sh owns arch mapping; no uname -m in the image.
+# From: Issue #1683
+ARG MUSL_TARGET
+
 # What: verifies the build-tools contract is present first.
 # Why: fail closed, not a confusing mid-build not-found.
 # From: Issue #842
@@ -28,11 +33,8 @@ RUN set -eu; \
     done; \
     command -v musl-gcc >/dev/null; \
     command -v ccache >/dev/null; \
-    case "$(uname -m)" in \
-      x86_64) echo "x86_64-unknown-linux-musl" > /tmp/musl-target; ;; \
-      aarch64) echo "aarch64-unknown-linux-musl" > /tmp/musl-target; ;; \
-      *) echo "Unsupported architecture for musl cross-compilation target: $(uname -m)" >&2; exit 1; ;; \
-    esac; \
+    [ -n "${MUSL_TARGET}" ] || { echo "MUSL_TARGET build-arg is required" >&2; exit 1; }; \
+    printf '%s\n' "${MUSL_TARGET}" > /tmp/musl-target; \
     # Captured into a variable first, then grepped via a here-string
     # (AG-VAL-032): a live pipe into `grep -qx` is the exact SIGPIPE-under-
     # pipefail shape already confirmed in this project's own CI failures.
