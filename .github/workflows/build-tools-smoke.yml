@@ -314,7 +314,7 @@ jobs:
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             timeout --kill-after=30 --signal=KILL 1000 \
-            bash -lc 'set -euo pipefail; bats tests/bats'
+            bash -lc 'set -euo pipefail; bats_jobs=$(( $(nproc) * 2 )); (( bats_jobs >= 16 )) || bats_jobs=16; TMPDIR=/var/tmp bats --jobs "$bats_jobs" tests/bats'
           status=$?
           set -e
           if [ "$status" -ne 0 ]; then
