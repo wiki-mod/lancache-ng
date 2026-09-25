@@ -612,8 +612,7 @@ dhcp_lease_deadline=$((SECONDS + 30))
 dhcp_lease_obtained=0
 while (( SECONDS < dhcp_lease_deadline )); do
     # What: waits for the lease file's closing brace.
-    # Why: the file exists before dhclient finishes writing.
-    if [[ -s "$work_dir/shared/dhcp-client.leases" ]] && grep -q '^}' "$work_dir/shared/dhcp-client.leases" 2>/dev/null; then
+    if grep -qE 'lease of [0-9.]+ obtained' "$work_dir/shared/dhcp-client.out" 2>/dev/null; then
         dhcp_lease_obtained=1
         break
     fi
@@ -626,7 +625,7 @@ cat "$work_dir/shared/dhcp-client.out" 2>/dev/null || echo "(no client output ca
 echo "::endgroup::"
 
 if [[ "$dhcp_lease_obtained" -ne 1 ]]; then
-    echo "::error::dhclient never obtained a real lease from this run's dhcp (Kea) container within 30s over dhcp-test-net." >&2
+    echo "::error::DHCP client never obtained a real lease from this run's dhcp (Kea) container within 30s over dhcp-test-net." >&2
     "${compose[@]}" logs --no-color dhcp || true
     exit 1
 fi
@@ -634,12 +633,12 @@ fi
 # What: captures fixed-address lines before piping to head.
 # Why: avoids SIGPIPE under pipefail with >1 match.
 # From: Issue #1377
-if ! fixed_address_lines="$(grep -oE 'fixed-address [0-9.]+' "$work_dir/shared/dhcp-client.leases")"; then
-    echo "::error::Could not parse the offered address out of the real dhclient lease file." >&2
+if ! fixed_address_lines="$(grep -oE 'lease of [0-9.]+' "$work_dir/shared/dhcp-client.out")"; then
+    echo "::error::Could not parse the offered address out of the real DHCP client output." >&2
     exit 1
 fi
-dhcp_offered_address="$(head -1 <<<"$fixed_address_lines" | cut -d' ' -f2)"
-[[ -n "$dhcp_offered_address" ]] || { echo "::error::dhclient's lease file had no fixed-address field." >&2; exit 1; }
+dhcp_offered_address="$(head -1 <<<"$fixed_address_lines" | cut -d' ' -f3)"
+[[ -n "$dhcp_offered_address" ]] || { echo "::error::DHCP client output had no leased address." >&2; exit 1; }
 echo "Real lease obtained: $dhcp_offered_address (Kea's own DHCP4_LEASE_ALLOC log line names this address verbatim)."
 # What: matches the full DHCP4_LEASE_ALLOC wording.
 # Why: a bare IP substring-matches unrelated log lines.
