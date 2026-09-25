@@ -857,7 +857,14 @@ if [ "${SSL_ENABLED}" = "1" ]; then
     fi
 
     _sign_cert() {
-        local cn="$1" key="$2" crt="$3" ext="${4:-}"
+        local cn="$1" key="$2" crt="$3" ext="${4:-}" csr
+        # What: Uses a unique temporary certificate request.
+        # Why: Concurrent signers must not delete another CSR.
+        # From: Issue #1860 | PR #1872
+        if ! csr="$(mktemp -p /var/tmp lancache-cert.XXXXXX)"; then
+            echo "[lancache] ERROR: Failed to create certificate request file" >&2
+            return 1
+        fi
         # Subject CN is a fixed, short placeholder, not the real hostname:
         # OpenSSL's default policy caps commonName at 64 bytes
         # (ASN1_mbstring_ncopy rejects longer values with "string too long"),
@@ -868,14 +875,14 @@ if [ "${SSL_ENABLED}" = "1" ]; then
         # baseline), so the real hostname belongs only in $ext's SAN, which
         # has no such length limit here.
         if ! openssl req -new -newkey rsa:2048 -nodes -subj "/CN=lancache-ng" \
-            -keyout "$key" -out /tmp/lancache-cert.csr; then
-            rm -f /tmp/lancache-cert.csr
+            -keyout "$key" -out "$csr"; then
+            rm -f "$csr"
             echo "[lancache] ERROR: Failed to generate certificate request for ${cn}" >&2
             return 1
         fi
         if [ -n "$ext" ]; then
             if ! openssl x509 -req -days 3650 \
-                -in /tmp/lancache-cert.csr \
+                -in "$csr" \
                 -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/ca.key" -CAserial "$SERIAL_FILE" \
                 -extfile <(printf "%s" "$ext") \
                 -out "$crt"; then
@@ -883,21 +890,21 @@ if [ "${SSL_ENABLED}" = "1" ]; then
                 # failed sign otherwise leaves an orphaned private key (and a
                 # possibly truncated $crt from an interrupted/full-disk write)
                 # on disk (#655).
-                rm -f /tmp/lancache-cert.csr "$key" "$crt"
+                rm -f "$csr" "$key" "$crt"
                 echo "[lancache] ERROR: Failed to sign certificate for ${cn}" >&2
                 return 1
             fi
         else
             if ! openssl x509 -req -days 3650 \
-                -in /tmp/lancache-cert.csr \
+                -in "$csr" \
                 -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/ca.key" -CAserial "$SERIAL_FILE" \
                 -out "$crt"; then
-                rm -f /tmp/lancache-cert.csr "$key" "$crt"
+                rm -f "$csr" "$key" "$crt"
                 echo "[lancache] ERROR: Failed to sign certificate for ${cn}" >&2
                 return 1
             fi
         fi
-        rm -f /tmp/lancache-cert.csr
+        rm -f "$csr"
     }
 
     # Returns 0 (true = needs regen) if the default cert:
