@@ -1,0 +1,53 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# What: reap unreachable GHCR artifacts (reachability GC).
+# Why: GC is its own workflow; retention to roots only.
+# From: Issue #1683
+name: CI 2.0 GC
+on:
+  schedule:
+    - cron: "43 4 * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: read
+concurrency:
+  group: ci-2.0-gc
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+# What: GHCR creds ci.sh reads; no login action, no pin.
+# Why: auth is ci.sh policy; the workflow supplies env.
+# From: Issue #1683
+env:
+  GHCR_USERNAME: ${{ github.actor }}
+  GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+jobs:
+  # What: reap unreachable artifacts vs protected roots.
+  # Why: reachability decides, not age (§78).
+  # From: Issue #1683
+  gc:
+    name: gc
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      # What: native fail-closed checkout, ci.sh auth.
+      # Why: no SHA pin outside the SOT; git is a tool.
+      # From: Issue #1683
+      - name: Bootstrap the working tree
+        run: |
+          set -euo pipefail
+          git init -q .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: bearer ${GHCR_TOKEN}"
+          git fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
+          git checkout -q FETCH_HEAD
+      # What: delete only unreachable artifacts (§97).
+      # Why: SQLite is candidate-only; delete needs the PAT.
+      # From: Issue #1683
+      - name: Reap unreachable GHCR artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GHCR_PACKAGE_DELETE_PAT }}
+        run: bash .github/scripts/ci.sh gc --apply

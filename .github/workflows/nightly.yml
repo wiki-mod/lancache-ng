@@ -67,11 +67,3 @@ jobs:
         env:
           OUTCOME: ${{ (steps.validate.outcome == 'success' && steps.promote.outcome == 'success') && 'success' || 'failure' }}
         run: bash .github/scripts/ci.sh nightly-status "${OUTCOME}" "nightly channel promote (current_dev)"
-      # What: reap unreachable GHCR artifacts on the nightly schedule.
-      # Why: deterministic reachability GC bounds retention to roots (§15/§87).
-      # From: Issue #1683
-      - name: Reap unreachable GHCR artifacts
-        if: always()
-        env:
-          GH_TOKEN: ${{ secrets.GHCR_PACKAGE_DELETE_PAT }}
-        run: bash .github/scripts/ci.sh gc --apply
