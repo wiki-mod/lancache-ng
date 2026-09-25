@@ -15,9 +15,10 @@
 # From: Issue #1683
 ARG ALPINE_IMAGE
 
-# Intentional ARG default (overridable at build time via --build-arg).
-# Actual digest pinning for release builds is tracked in issue #508.
-ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
+# What: builder image, supplied by ci.sh from the SOT.
+# Why: no mutable default; CI resolves the immutable ref.
+# From: Issue #1683
+ARG BUILD_TOOLS_IMAGE
 FROM ${BUILD_TOOLS_IMAGE} AS builder
 
 # The shared build-tools image already carries the Rust toolchain, sccache,

@@ -3291,6 +3291,10 @@ netdata=sha256:n"
     # What: Every product service gets shared ALPINE_IMAGE.
     # Why: One base-image owner (base_images.alpine).
     # From: Issue #1683
+    # What: stub the build-tools resolver for rust services.
+    # Why: rust build-args resolve a ref without GHCR here.
+    # From: Issue #1683
+    export CI_BUILD_TOOLS_IMAGE_CMD='echo bt-stub@sha256:test'
     local svc
     for svc in proxy dns watchdog dhcp dhcp-proxy ntp ui cachehamster; do
         run bash "${CI_SH}" build-args "${svc}"
@@ -3298,6 +3302,21 @@ netdata=sha256:n"
         [[ "${output}" == *"--build-arg ALPINE_IMAGE=mirror.gcr.io"* ]]
         [[ "${output}" != *"FLUENT_BIT_IMAGE"* ]]
     done
+}
+
+@test "build-args emits BUILD_TOOLS_IMAGE for a rust service, not apk" {
+    # What: rust build-args add the resolved build-tools ref.
+    # Why: no mutable Dockerfile default; ci.sh owns it.
+    # From: Issue #1683
+    local m="${BATS_TEST_TMPDIR}/bt-manifest.yml"
+    printf 'base_images:\n  alpine: "a"\nservices:\n  svc-rust:\n    context: c\n    build_type: rust\n  svc-apk:\n    context: c\n    build_type: apk\n' > "${m}"
+    export CI_BUILD_TOOLS_IMAGE_CMD='echo bt-stub@sha256:test'
+    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc-rust
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"BUILD_TOOLS_IMAGE=bt-stub@sha256:test"* ]]
+    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc-apk
+    [ "${status}" -eq 0 ]
+    [[ "${output}" != *"BUILD_TOOLS_IMAGE"* ]]
 }
 
 @test "build-args emits ALPINE_IMAGE + FLUENT_BIT_IMAGE for syslog only" {
@@ -4517,6 +4536,19 @@ _anv_run() {
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0058"* ]]
     [[ "${output}" == *"CI-ERROR-CHECK-0060"* ]]
+}
+
+@test "check dockerfile-build-tools flags a mutable BUILD_TOOLS_IMAGE default" {
+    # What: rust Dockerfile ARG must carry no default.
+    # Why: ci.sh supplies the immutable ref (AG-CI-008).
+    # From: Issue #1683
+    local m="${BATS_TEST_TMPDIR}/md-manifest.yml" r="${BATS_TEST_TMPDIR}/mdrepo"
+    printf 'services:\n  svc-rust:\n    context: c\n    build_type: rust\n' > "${m}"
+    mkdir -p "${r}/c"
+    printf 'ARG BUILD_TOOLS_IMAGE=x:latest\nFROM ${BUILD_TOOLS_IMAGE}\n' > "${r}/c/Dockerfile"
+    CI_MANIFEST="${m}" run bash "${CI_SH}" check dockerfile-build-tools "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"must carry no default"* ]]
 }
 
 @test "check cargo-profile-tuning flags hardcoded [profile] lto/codegen-units" {

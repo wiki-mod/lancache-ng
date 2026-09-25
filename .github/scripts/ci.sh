@@ -4004,6 +4004,14 @@ _ci_service_build_args() {
         fi
         out="${out}${prefix}${ext_argname}=${val}"$'\n'
     fi
+    # What: Rust builders consume the resolved build-tools image.
+    # Why: SOT owns the ref; Dockerfile keeps no mutable default.
+    # From: Issue #1683
+    if [ "$(_ci_block_entry_field services "${service}" build_type)" = rust ]; then
+        val="$(${CI_BUILD_TOOLS_IMAGE_CMD:-_ci_build_tools_resolve_image})" || return 2
+        [ -n "${val}" ] || { ci_log "[CI-ERROR-BUILDARGS-0009]" "arg=\"BUILD_TOOLS_IMAGE\" service=\"${service}\" reason=\"empty resolved build-tools image; FAIL CLOSED\""; return 2; }
+        out="${out}${prefix}BUILD_TOOLS_IMAGE=${val}"$'\n'
+    fi
     printf '%s' "${out}"
 }
 
@@ -6233,16 +6241,14 @@ _ci_dockerfile_final_image() {
                 if sot_val="$(_ci_sot_base_image_arg "${name}")"; then
                     global_args["${name}"]="${sot_val}"
                 else
-                    ci_log "[CI-ERROR-CHECK-0031]" "path=\"${dockerfile}\" reason=\"unresolved global ARG ${name} in FROM\""
-                    return 2
+                    # What: leave a non-base-image ARG opaque here.
+                    # Why: builder-stage ARGs are not final bases.
+                    # From: Issue #1683
+                    break
                 fi
             fi
             image="${image/"${token}"/${global_args[${name}]}}"
         done
-        if [[ "${image}" == *'$'* ]]; then
-            ci_log "[CI-ERROR-CHECK-0031]" "path=\"${dockerfile}\" reason=\"unresolved ARG expression in FROM: ${image}\""
-            return 2
-        fi
         if [[ -v "stage_images[${image,,}]" ]]; then
             image="${stage_images[${image,,}]}"
         fi
@@ -6255,6 +6261,13 @@ _ci_dockerfile_final_image() {
     done < <(_ci_dockerfile_logical_lines "${dockerfile}")
     if [ -z "${final_image}" ]; then
         ci_log "[CI-ERROR-CHECK-0031]" "path=\"${dockerfile}\" reason=\"no FROM instruction found\""
+        return 2
+    fi
+    # What: only the final base image must fully resolve.
+    # Why: builder-stage ARGs (BUILD_TOOLS_IMAGE) stay opaque.
+    # From: Issue #1683
+    if [[ "${final_image}" == *'$'* ]]; then
+        ci_log "[CI-ERROR-CHECK-0031]" "path=\"${dockerfile}\" reason=\"unresolved ARG in final FROM: ${final_image}\""
         return 2
     fi
     printf '%s\n' "${final_image}"
@@ -7465,6 +7478,11 @@ _ci_check_dockerfile_build_tools() {
             || viol+=("${service}: Dockerfile must declare ARG BUILD_TOOLS_IMAGE")
         grep -Fq 'FROM ${BUILD_TOOLS_IMAGE}' "${df}" \
             || viol+=("${service}: Dockerfile must build FROM \${BUILD_TOOLS_IMAGE}")
+        # What: forbid a mutable default on the ARG.
+        # Why: ci.sh supplies the immutable ref (AG-CI-008).
+        # From: Issue #1683
+        grep -qE '^ARG BUILD_TOOLS_IMAGE=' "${df}" \
+            && viol+=("${service}: ARG BUILD_TOOLS_IMAGE must carry no default; ci.sh supplies it")
         if grep -q 'cargo install' "${df}"; then
             viol+=("${service}: Dockerfile compiles a tool with cargo install; consume the build-tools image")
         fi

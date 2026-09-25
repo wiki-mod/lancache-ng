@@ -11,9 +11,10 @@
 # From: Issue #1683
 ARG ALPINE_IMAGE
 
-# What: ARG default for build-tools (build-time override)
-# Why: digest pinning convention matches other Rust services
-ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
+# What: builder image, supplied by ci.sh from the SOT.
+# Why: no mutable default; CI resolves the immutable ref.
+# From: Issue #1683
+ARG BUILD_TOOLS_IMAGE
 FROM ${BUILD_TOOLS_IMAGE} AS cachehamster-builder
 
 # What: verify build-tools Rust/musl contract
