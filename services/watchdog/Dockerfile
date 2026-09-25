@@ -1,8 +1,7 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Runtime health-check/restart daemon (compiled Rust binary) plus the
-# separate file-retention sidecar entrypoint for lancache-ng containers.
+# Health-check/restart daemon + file-retention sidecar (Rust).
 
 # What: Base image pin, consumed from the version SOT.
 # Why: build-manifest.yml is the sole owner of the pin.
@@ -20,51 +19,15 @@ FROM ${BUILD_TOOLS_IMAGE} AS watchdog-builder
 # From: Issue #1683
 ARG MUSL_TARGET
 
-# What: verifies the build-tools contract is present first.
-# Why: fail closed, not a confusing mid-build not-found.
-# From: Issue #842
-#
-# What: detects host arch for the musl cross-compile target.
-# Why: uname -m needs no extra package, unlike dpkg.
-# From: Issue #1095
-RUN set -eu; \
-    for tool in cargo rustc rustup rustfmt clippy-driver sccache distcc distcc-pump python3 pkg-config; do \
-      command -v "$tool" >/dev/null; \
-    done; \
-    command -v musl-gcc >/dev/null; \
-    command -v ccache >/dev/null; \
-    [ -n "${MUSL_TARGET}" ] || { echo "MUSL_TARGET build-arg is required" >&2; exit 1; }; \
-    printf '%s\n' "${MUSL_TARGET}" > /var/tmp/musl-target; \
-    # Captured into a variable first, then grepped via a here-string
-    # (AG-VAL-032): a live pipe into `grep -qx` is the exact SIGPIPE-under-
-    # pipefail shape already confirmed in this project's own CI failures.
-    # This stage is `FROM ${BUILD_TOOLS_IMAGE}`, which sets
-    # `SHELL ["/bin/bash", "-o", "pipefail", "-c"]` and a child Dockerfile
-    # with no SHELL override inherits that, so a live pipe here would be
-    # exploitable, not merely at theoretical risk.
-    installed_musl_targets="$(rustup target list --installed)"; \
-    grep -qx "$(cat /var/tmp/musl-target)" <<<"${installed_musl_targets}"; \
-    distcc_bin="$(command -v distcc)"; \
-    mkdir -p /usr/local/lib/distcc; \
-    for wrapper in cc gcc c++ g++; do ln -sf "$distcc_bin" "/usr/local/lib/distcc/$wrapper"; done; \
-    printf '%s\n' \
-      '#!/bin/sh' \
-      'case "${1:-}" in' \
-      '  distcc|*/distcc) exec "$@" ;;' \
-      '  *) exec /usr/local/bin/sccache "$@" ;;' \
-      'esac' \
-      > /usr/local/bin/lancache-rustc-wrapper; \
-    chmod +x /usr/local/bin/lancache-rustc-wrapper
-
+# What: cargo tuning args, consumed by ci.sh rust-build.
+# Why: PROJECT_CARGO_*/CARGO_BUILD_JOBS own these.
+# From: Issue #1683
 ARG CARGO_BUILD_JOBS=
-# What: empty default; resolve_cargo_profile_overrides fails closed.
-# Why: no fallback value, same contract as CARGO_BUILD_JOBS above.
-# From: Issue #1095
 ARG PROJECT_CARGO_LTO=
 ARG PROJECT_CARGO_CODEGENUNIT=
-# What: redeclares BUILD_TOOLS_IMAGE as a shell var here.
-# Why: post-FROM ARG scoping; ccache key below needs it.
-# From: Issue #842
+# What: redeclare BUILD_TOOLS_IMAGE for the RUN stage.
+# Why: ci.sh rust-build folds it into the ccache key.
+# From: Issue #1683
 ARG BUILD_TOOLS_IMAGE
 
 WORKDIR /build
@@ -87,268 +50,16 @@ RUN mkdir -p services/ui/src services/cachehamster/src \
     && : > services/dns/nats-subscriber/src/lib.rs \
     && printf 'fn main() {}\n' > tools/pxe-client-probe/src/main.rs
 COPY services/watchdog/src/ ./services/watchdog/src/
-# The shell functions below (configure_sccache/configure_distcc/
-# disable_distcc/resolve_distcc_wrapper_dir/extract_remote_toolchain_id/
-# configure_ccache/disable_ccache/resolve_cargo_profile_overrides/
-# resolve_cargo_jobs/run_cargo_build) are byte-identical in structure and
-# intent to services/dns/Dockerfile's own nats-subscriber builder stage
-# (the ccache-over-distcc pattern, AG-CI-022; resolve_cargo_profile_overrides
-# mirrors that file's own function of the same name, per maintainer review
-# 5109560874) -- see that file's own extensive inline documentation for the
-# full reasoning behind each step (probe-then-commit accelerator selection,
-# three-tier fallback, remote-toolchain-identity verification). Only the
-# per-crate identifiers differ: SCCACHE_REDIS_KEY_PREFIX/CCACHE_DIR use
-# "lancache-watchdog" instead of "lancache-dns", and the copied binary is
-# this crate's own `lancache-watchdog`, not `nats-subscriber`.
-# What: builds the release binary with sccache/ccache-distcc.
-# Why: ring's C-dependency compile needs the same wiring.
-# From: Issue #842
-# NOTE: comments cannot be embedded inside this block itself -- Docker's
-# line-continuation strips the backslash-newline entirely, so a "#" comment
-# ending in "\" would swallow every following continuation line as
-# commented-out text instead of executable shell (verified empirically on
-# services/dns/Dockerfile's identical block).
-#
-# What: trusts proxy CA so cargo's crates.io fetch verifies.
-# Why: trap removes it before this stage's layer commits.
-# From: Issue #1781 | PR #1783
-RUN --mount=type=secret,id=sccache_redis_url \
+# What: ci.sh owns the rust build accel policy (one owner).
+# Why: AG-CI-005/022/023; bind-mounted, never baked in.
+# From: Issue #1683
+RUN --mount=type=bind,source=.github/scripts/ci.sh,target=/usr/local/bin/ci.sh \
+    --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_dist_config \
     --mount=type=secret,id=distcc_potential_hosts \
     --mount=type=secret,id=ccache_redis_url \
     --mount=type=secret,id=project_selfhosted_proxy_ca \
-    set -eu; \
-    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
-      cp /run/secrets/project_selfhosted_proxy_ca /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; \
-      update-ca-certificates >/dev/null; \
-      trap 'rm -f /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; update-ca-certificates >/dev/null 2>&1 || true' EXIT; \
-    fi; \
-    musl_target="$(cat /var/tmp/musl-target)"; \
-    distcc_enabled=0; \
-    ccache_enabled=0; \
-    original_path="$PATH"; \
-    real_cc="$(PATH="$original_path" command -v cc)"; \
-    real_gcc="$(PATH="$original_path" command -v gcc)"; \
-    real_cxx="$(PATH="$original_path" command -v c++)"; \
-    real_gxx="$(PATH="$original_path" command -v g++)"; \
-    configure_sccache() { \
-      if [ -s /run/secrets/sccache_redis_url ] || [ -s /run/secrets/sccache_dist_config ]; then \
-        unset CARGO_MAKEFLAGS MAKEFLAGS; \
-        export RUSTC_WRAPPER=/usr/local/bin/lancache-rustc-wrapper SCCACHE_REDIS_KEY_PREFIX=lancache-watchdog; \
-        if [ -s /run/secrets/sccache_redis_url ]; then \
-        SCCACHE_REDIS="$(cat /run/secrets/sccache_redis_url)"; export SCCACHE_REDIS; \
-        fi; \
-        if [ -s /run/secrets/sccache_dist_config ]; then \
-          export SCCACHE_CONF=/run/secrets/sccache_dist_config; \
-          sccache --dist-status; \
-        fi; \
-      else \
-        echo "[INFO] sccache disabled (no sccache_redis_url or sccache_dist_config secret present)." >&2; \
-      fi; \
-    }; \
-    disable_distcc() { \
-      if [ "${distcc_enabled:-0}" = "1" ]; then distcc-pump --shutdown >/dev/null 2>&1 || true; fi; \
-      distcc_enabled=0; \
-      trap - EXIT; \
-      unset DISTCC_POTENTIAL_HOSTS DISTCC_HOSTS DISTCC_FALLBACK CC GCC CXX GXX INCLUDE_SERVER_PORT INCLUDE_SERVER_PID; \
-      PATH="$original_path"; \
-      export PATH; \
-    }; \
-    resolve_distcc_wrapper_dir() { \
-      for candidate in /usr/local/lib/distcc /usr/lib/distcc; do \
-        if [ -x "$candidate/cc" ] && [ -x "$candidate/gcc" ] && [ -x "$candidate/c++" ] && [ -x "$candidate/g++" ]; then \
-          printf '%s\n' "$candidate"; \
-          return 0; \
-        fi; \
-      done; \
-      echo "distcc wrapper directory not found" >&2; \
-      exit 1; \
-    }; \
-    extract_remote_toolchain_id() { \
-      rm -f /var/tmp/ccache-remote-toolchain-id; \
-      if command -v readelf >/dev/null 2>&1; then \
-        readelf_comment_section="$(readelf -p .comment "$1" 2>/dev/null)"; \
-        sed -n 's/^ *\[[^]]*\] *//p' <<<"$readelf_comment_section" > /var/tmp/ccache-remote-toolchain-id; \
-      fi; \
-    }; \
-    configure_distcc() { \
-      if [ -s /run/secrets/distcc_potential_hosts ]; then \
-        distcc_probe_dir="$(mktemp -d -p /var/tmp)"; \
-        DISTCC_POTENTIAL_HOSTS="$(cat /run/secrets/distcc_potential_hosts)"; export DISTCC_POTENTIAL_HOSTS; \
-        echo "[INFO] trying distcc path." >&2; \
-        distcc_wrapper_dir="$(resolve_distcc_wrapper_dir)"; \
-        export PATH="$distcc_wrapper_dir:$PATH" CC=cc GCC=gcc CXX=c++ GXX=g++ DISTCC_FALLBACK=0; \
-        if ! distcc_pump_env="$(distcc-pump --startup 2>"$distcc_probe_dir/distcc-pump.log")"; then \
-          disable_distcc; \
-          rm -rf "$distcc_probe_dir"; \
-          echo "[INFO] distcc pump unavailable; continuing with normal local C compiler." >&2; \
-          return 0; \
-        fi; \
-        eval "$distcc_pump_env"; \
-        PATH="$distcc_wrapper_dir:$PATH"; \
-        export PATH; \
-        export CC=cc GCC=gcc CXX=c++ GXX=g++; \
-        distcc_enabled=1; \
-        trap 'distcc-pump --shutdown' EXIT; \
-        printf '%s\n' 'int main(void) { return 0; }' > "$distcc_probe_dir/distcc-probe.c"; \
-        if ! cc -c "$distcc_probe_dir/distcc-probe.c" -o "$distcc_probe_dir/distcc-probe.o" >"$distcc_probe_dir/distcc-probe.log" 2>&1; then \
-          disable_distcc; \
-          rm -rf "$distcc_probe_dir"; \
-          echo "[INFO] distcc probe unavailable; continuing with normal local C compiler." >&2; \
-          return 0; \
-        fi; \
-        extract_remote_toolchain_id "$distcc_probe_dir/distcc-probe.o"; \
-        rm -rf "$distcc_probe_dir"; \
-      else \
-        echo "[INFO] distcc disabled (no distcc_potential_hosts secret present)." >&2; \
-      fi; \
-    }; \
-    disable_ccache() { \
-      ccache_enabled=0; \
-      unset CCACHE_REMOTE_STORAGE CCACHE_DIR CCACHE_COMPILERCHECK CCACHE_PREFIX CCACHE_EXTRAFILES CCACHE_BASEDIR; \
-      rm -f /var/tmp/ccache-toolchain-id /var/tmp/ccache-remote-toolchain-id; \
-      export CC=cc GCC=gcc CXX=c++ GXX=g++; \
-    }; \
-    configure_ccache() { \
-      if [ "${distcc_enabled:-0}" = "1" ] && [ -s /run/secrets/ccache_redis_url ]; then \
-        if [ ! -s /var/tmp/ccache-remote-toolchain-id ]; then \
-          echo "[INFO] no verified remote distcc toolchain identity available (the distcc probe's compiled object carried no readable .comment identity, or readelf is missing); continuing with plain distcc (no cache layer) rather than risk a stale cross-toolchain cache hit." >&2; \
-          return 0; \
-        fi; \
-        ccache_probe_dir="$(mktemp -d -p /var/tmp)"; \
-        echo "[INFO] wrapping distcc with ccache (Redis remote storage)." >&2; \
-        ccache_redis_endpoint="$(cat /run/secrets/ccache_redis_url)"; \
-        case "$ccache_redis_endpoint" in \
-          redis://*|redis+unix:*) ;; \
-          *) ccache_redis_endpoint="redis://$ccache_redis_endpoint" ;; \
-        esac; \
-        export CCACHE_REMOTE_STORAGE="$ccache_redis_endpoint"; \
-        export CCACHE_DIR=/var/tmp/ccache-watchdog; \
-        export CCACHE_PREFIX=distcc; \
-        export CCACHE_COMPILERCHECK=content; \
-        printf '%s' "$BUILD_TOOLS_IMAGE" > /var/tmp/ccache-toolchain-id; \
-        export CCACHE_EXTRAFILES="/var/tmp/ccache-toolchain-id:/var/tmp/ccache-remote-toolchain-id"; \
-        export CCACHE_BASEDIR="$ccache_probe_dir"; \
-        export CC="ccache $real_cc" GCC="ccache $real_gcc" CXX="ccache $real_cxx" GXX="ccache $real_gxx"; \
-        ccache_enabled=1; \
-        printf '%s\n' 'int main(void) { return 0; }' > "$ccache_probe_dir/ccache-probe.c"; \
-        if ! (cd "$ccache_probe_dir" && $CC -c ccache-probe.c -o ccache-probe.o) >"$ccache_probe_dir/ccache-probe.log" 2>&1; then \
-          cat "$ccache_probe_dir/ccache-probe.log" >&2; \
-          disable_ccache; \
-          rm -rf "$ccache_probe_dir"; \
-          echo "[INFO] ccache probe unavailable; continuing with plain distcc (no cache layer)." >&2; \
-          return 0; \
-        fi; \
-        ccache_probe_stats="$ccache_probe_dir/ccache-probe-stats.log"; \
-        ccache --print-stats > "$ccache_probe_stats"; \
-        if grep -qE '^remote_storage_error[[:space:]]+[1-9]' "$ccache_probe_stats" \
-          || ! grep -qE '^remote_storage_(write|hit)[[:space:]]+[1-9]' "$ccache_probe_stats"; then \
-          cat "$ccache_probe_stats" >&2; \
-          disable_ccache; \
-          rm -rf "$ccache_probe_dir"; \
-          echo "[INFO] ccache probe's Redis remote-storage round trip failed (neither a write nor a hit was recorded); continuing with plain distcc (no cache layer)." >&2; \
-          return 0; \
-        fi; \
-        rm -rf "$ccache_probe_dir"; \
-      else \
-        if [ "${distcc_enabled:-0}" != "1" ]; then \
-          echo "[INFO] ccache disabled (distcc is not enabled, so there is nothing to wrap)." >&2; \
-        else \
-          echo "[INFO] ccache disabled (no ccache_redis_url secret present)." >&2; \
-        fi; \
-      fi; \
-    }; \
-    resolve_cargo_profile_overrides() { \
-      lto="${PROJECT_CARGO_LTO:-}"; \
-      cgu="${PROJECT_CARGO_CODEGENUNIT:-}"; \
-      if [ -z "$lto" ]; then echo "PROJECT_CARGO_LTO is required (no in-file/build-arg default; Issue #1095, PR #1796 review 5109560874)" >&2; exit 1; fi; \
-      case "$lto" in off|thin|fat|true|false) ;; *) echo "PROJECT_CARGO_LTO must be one of: off, thin, fat, true, false (got '$lto')" >&2; exit 1;; esac; \
-      if [ -z "$cgu" ]; then echo "PROJECT_CARGO_CODEGENUNIT is required (no in-file/build-arg default; Issue #1095, PR #1796 review 5109560874)" >&2; exit 1; fi; \
-      case "$cgu" in ''|*[!0-9]*) echo "PROJECT_CARGO_CODEGENUNIT must be a positive integer (got '$cgu')" >&2; exit 1;; esac; \
-      if [ "$cgu" -le 0 ]; then echo "PROJECT_CARGO_CODEGENUNIT must be greater than zero" >&2; exit 1; fi; \
-      export CARGO_PROFILE_RELEASE_LTO="$lto"; \
-      export CARGO_PROFILE_RELEASE_CODEGEN_UNITS="$cgu"; \
-      echo "[INFO] using CARGO_PROFILE_RELEASE_LTO=$lto CARGO_PROFILE_RELEASE_CODEGEN_UNITS=$cgu (from PROJECT_CARGO_LTO/PROJECT_CARGO_CODEGENUNIT)." >&2; \
-    }; \
-    resolve_cargo_jobs() { \
-      jobs="${CARGO_BUILD_JOBS:-}"; \
-      if [ -z "$jobs" ]; then \
-        cores="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN || echo 2)"; \
-        jobs=$((cores - 2)); \
-        if [ "$jobs" -lt 4 ]; then jobs=4; fi; \
-        jobs_source="auto-detected from $cores core(s)"; \
-      else \
-        jobs_source="explicit CARGO_BUILD_JOBS"; \
-      fi; \
-      case "$jobs" in ''|*[!0-9]*) echo "CARGO_BUILD_JOBS must be a positive integer" >&2; exit 1;; esac; \
-      if [ "$jobs" -le 0 ]; then echo "CARGO_BUILD_JOBS must be greater than zero" >&2; exit 1; fi; \
-      echo "[INFO] using $jobs job(s) ($jobs_source)." >&2; \
-      printf '%s\n' "$jobs"; \
-    }; \
-    run_cargo_build() { \
-      cargo_log="$(mktemp -p /var/tmp)"; \
-      cargo_status_file="$(mktemp -p /var/tmp)"; \
-      { set +e; cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" -p lancache-watchdog 2>&1; echo "$?" >"$cargo_status_file"; set -e; } | tee "$cargo_log"; \
-      cargo_status="$(cat "$cargo_status_file")"; \
-      rm -f "$cargo_status_file"; \
-      if [ "$cargo_status" = "0" ]; then rm -f "$cargo_log"; return 0; fi; \
-      if [ "${ccache_enabled:-0}" = "1" ]; then \
-        disable_ccache; \
-        echo "[INFO] ccache build path unavailable; retrying with plain distcc (no cache layer)." >&2; \
-        ccache_retry_status_file="$(mktemp -p /var/tmp)"; \
-        { set +e; cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" -p lancache-watchdog 2>&1; echo "$?" >"$ccache_retry_status_file"; set -e; } | tee -a "$cargo_log"; \
-        cargo_status="$(cat "$ccache_retry_status_file")"; \
-        rm -f "$ccache_retry_status_file"; \
-        if [ "$cargo_status" = "0" ]; then \
-          echo "[INFO] plain distcc fallback (ccache disabled) completed." >&2; \
-          rm -f "$cargo_log"; \
-          return 0; \
-        fi; \
-        echo "[INFO] plain distcc fallback also failed; falling through to full local-compiler retry." >&2; \
-      fi; \
-      if [ "${distcc_enabled:-0}" = "1" ]; then \
-        disable_distcc; \
-        unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
-        echo "[INFO] distcc build path unavailable; retrying with normal local C compiler." >&2; \
-        if cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" -p lancache-watchdog; then \
-          echo "[INFO] normal local C compiler fallback completed." >&2; \
-          rm -f "$cargo_log"; \
-          return 0; \
-        fi; \
-        rm -f "$cargo_log"; \
-        return 1; \
-      fi; \
-      if grep -Eqi 'sccache: error|Fixed token mismatch|Timed out waiting for server startup|SCCACHE_' "$cargo_log"; then \
-        unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
-        echo "[INFO] sccache build path unavailable; retrying with sccache disabled." >&2; \
-        rm -f "$cargo_log"; \
-        if cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" -p lancache-watchdog; then \
-          echo "[INFO] sccache-disabled fallback completed." >&2; \
-          return 0; \
-        fi; \
-        return 1; \
-      fi; \
-      echo "[ERROR] cargo build failed for reasons unrelated to sccache or distcc; not retrying." >&2; \
-      rm -f "$cargo_log"; \
-      return "$cargo_status"; \
-    }; \
-    configure_sccache; \
-    configure_distcc; \
-    configure_ccache; \
-    resolve_cargo_profile_overrides; \
-    cargo_jobs="$(resolve_cargo_jobs)"; \
-    run_cargo_build; \
-    if [ "${ccache_enabled:-0}" = "1" ]; then \
-      ccache -s; \
-      ccache_final_stats="$(mktemp -p /var/tmp)"; \
-      ccache --print-stats > "$ccache_final_stats"; \
-      if grep -qE '^remote_storage_error[[:space:]]+[1-9]' "$ccache_final_stats"; then \
-        echo "[INFO] ccache recorded a Redis remote-storage error during the real Cargo build; this build's binary is already correct and unaffected, but the optional Redis cache layer degraded mid-build -- later builds may miss cache reuse until Redis recovers." >&2; \
-        cat "$ccache_final_stats" >&2; \
-      fi; \
-      rm -f "$ccache_final_stats"; \
-    fi; \
-    cp "target/${musl_target}/release/lancache-watchdog" /build/lancache-watchdog-out
+    bash /usr/local/bin/ci.sh rust-build watchdog lancache-watchdog
 
 FROM ${ALPINE_IMAGE}
 
@@ -364,27 +75,23 @@ ARG http_proxy
 ARG https_proxy
 ARG no_proxy
 
-# What: shared version-banner script, not a per-service copy.
-# Why: named build context avoids duplicating it per service.
+# What: shared version-banner, not a per-service copy.
+# Why: named build context avoids a per-service copy.
 # From: Issue #1781 | PR #1783
 COPY --from=shared-scripts verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
 
-# `apk upgrade --no-cache` (before the package install, same layer) upgrades
-# packages already baked into the alpine:3.24 base layer itself -- see
-# services/dhcp-proxy/Dockerfile's identical comment/block for the full
-# rationale and the real verification behind it.
 # What: switches apk's own repositories to plain http.
 # Why: Squid caches http; signed indices keep integrity.
 # From: Issue #1095
 RUN sed -i 's|^https://|http://|' /etc/apk/repositories
 
-# What: declares APT_CACHE_BUST right before the RUN it busts.
-# Why: without this, BuildKit cache has no wall-clock expiry.
+# What: declares APT_CACHE_BUST before the busting RUN.
+# Why: BuildKit cache has no wall-clock expiry.
 # From: Issue #1095
 ARG APT_CACHE_BUST=""
-# What: trusts the proxy's CA for this RUN, never in a layer.
-# Why: a secret mount never persists; bundle restored below.
-# From: Issue #1781 | PR #1783
+# What: trust proxy CA, upgrade, apk install runtime tools.
+# Why: CA restored (no leak); retention.sh needs these.
+# From: Issue #1556 | PR #1783
 RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
     if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
       cp /etc/ssl/certs/ca-certificates.crt /var/tmp/ca-bundle.orig && \
@@ -405,21 +112,15 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
     ripgrep && \
     if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /var/tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
-# What: verifies apk-installed binaries execute, not just exist.
-# Why: missing library dependencies fail at runtime, not apk add.
-# From: Issue #1613 | Issue #1781 | PR #1783
+# What: verify apk binaries execute, not just exist.
+# Why: missing libs fail at runtime, not at apk add.
+# From: Issue #1613 | PR #1783
 RUN set -euo pipefail; \
     find . -maxdepth 0 -printf '%f\n' >/dev/null; \
     rg --version >/dev/null; \
     curl --version >/dev/null; \
     sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
 
-# What: bash/coreutils/util-linux/zstd/ca-certificates+nano.
-# Why: retention.sh/-entrypoint.sh need these; jq is unused.
-# From: Issue #1556
-
-# nano/lsof/ripgrep/curl: in-container troubleshooting tools -- see
-# services/proxy/Dockerfile's identical comment for the full rationale.
 ENV EDITOR=nano
 ENV VISUAL=$EDITOR
 
@@ -430,11 +131,9 @@ COPY services/watchdog/retention-entrypoint.sh /retention-entrypoint.sh
 RUN chmod +x /healthcheck.sh /retention.sh /retention-entrypoint.sh
 VOLUME ["/var/run/watchdog"]
 
-# `lancache` account (Teil 2, 2026-08-01): fixed uid/gid 10001,
-# matching services/ui/Dockerfile's own existing account of the same name.
-# Only the `retention` compose service actually runs as this user (via
-# retention-entrypoint.sh's root-to-lancache privilege drop); the plain
-# `watchdog` service still runs as root, unchanged.
+# What: lancache account, fixed uid/gid 10001.
+# Why: only the retention sidecar drops to this user.
+# From: Issue #842
 RUN addgroup -g 10001 lancache && \
     adduser -D -H -u 10001 -G lancache -s /sbin/nologin lancache && \
     mkdir -p /var/lib/lancache-retention-state && \
@@ -448,7 +147,7 @@ RUN if [ -e /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt ]; then \
     fi
 
 # What: final apk upgrade pass, no packages added.
-# Why: patches CVEs fixed after this file's package installs.
+# Why: patches CVEs fixed after the installs above.
 # From: Issue #1781 | PR #1783
 RUN apk upgrade --no-cache
 
