@@ -117,14 +117,14 @@ RUN --mount=type=cache,target=${PROJECT_SELFHOSTED_GOMODCACHE},sharing=locked \
     install -d /out; \
     tmp="$(mktemp -d -p /var/tmp lancache-build-tools.XXXXXX)"; \
     trap 'rm -rf "$tmp"' EXIT; \
-    curl -fsSL "https://download.docker.com/linux/static/stable/${docker_arch}/docker-${DOCKER_CLI_VERSION}.tgz" -o "$tmp/docker.tgz"; \
+    curl --retry 4 --retry-all-errors --retry-delay 2 -fsSL "https://download.docker.com/linux/static/stable/${docker_arch}/docker-${DOCKER_CLI_VERSION}.tgz" -o "$tmp/docker.tgz"; \
     printf '%s  %s\n' "$docker_sha256" "$tmp/docker.tgz" | sha256sum -c -; \
     tar -xzf "$tmp/docker.tgz" -C "$tmp" docker/docker; \
     install -m 0755 "$tmp/docker/docker" /out/docker; \
-    curl -fsSL "https://github.com/docker/compose/releases/download/v${DOCKER_COMPOSE_VERSION}/docker-compose-linux-${docker_arch}" -o "$tmp/docker-compose"; \
+    curl --retry 4 --retry-all-errors --retry-delay 2 -fsSL "https://github.com/docker/compose/releases/download/v${DOCKER_COMPOSE_VERSION}/docker-compose-linux-${docker_arch}" -o "$tmp/docker-compose"; \
     printf '%s  %s\n' "$compose_sha256" "$tmp/docker-compose" | sha256sum -c -; \
     install -m 0755 "$tmp/docker-compose" /out/docker-compose; \
-    curl -fsSL "https://github.com/docker/buildx/releases/download/v${DOCKER_BUILDX_VERSION}/buildx-v${DOCKER_BUILDX_VERSION}.linux-${buildx_arch}" -o "$tmp/docker-buildx"; \
+    curl --retry 4 --retry-all-errors --retry-delay 2 -fsSL "https://github.com/docker/buildx/releases/download/v${DOCKER_BUILDX_VERSION}/buildx-v${DOCKER_BUILDX_VERSION}.linux-${buildx_arch}" -o "$tmp/docker-buildx"; \
     printf '%s  %s\n' "$buildx_sha256" "$tmp/docker-buildx" | sha256sum -c -; \
     install -m 0755 "$tmp/docker-buildx" /out/docker-buildx; \
     /out/docker --version; \
@@ -301,7 +301,7 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
     esac; \
     actionlint_tmp="$(mktemp -d -p /var/tmp lancache-actionlint.XXXXXX)"; \
     trap 'rm -rf "$actionlint_tmp"' EXIT; \
-    curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_${actionlint_arch}.tar.gz" \
+    curl --retry 4 --retry-all-errors --retry-delay 2 -fsSL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_${actionlint_arch}.tar.gz" \
       -o "$actionlint_tmp/actionlint.tar.gz"; \
     printf '%s  %s\n' "$actionlint_sha256" "$actionlint_tmp/actionlint.tar.gz" | sha256sum -c -; \
     tar -xzf "$actionlint_tmp/actionlint.tar.gz" -C "$actionlint_tmp" actionlint; \
@@ -319,7 +319,7 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
     fi; \
     shellspec_tmp="$(mktemp -d -p /var/tmp lancache-shellspec.XXXXXX)"; \
     trap 'rm -rf "$shellspec_tmp"' EXIT; \
-    curl -fsSL "https://github.com/shellspec/shellspec/releases/download/${SHELLSPEC_VERSION}/shellspec-dist.tar.gz" \
+    curl --retry 4 --retry-all-errors --retry-delay 2 -fsSL "https://github.com/shellspec/shellspec/releases/download/${SHELLSPEC_VERSION}/shellspec-dist.tar.gz" \
       -o "$shellspec_tmp/shellspec-dist.tar.gz"; \
     printf '%s  %s\n' "${SHELLSPEC_SHA256}" "$shellspec_tmp/shellspec-dist.tar.gz" | sha256sum -c -; \
     tar -xzf "$shellspec_tmp/shellspec-dist.tar.gz" -C /opt; \
