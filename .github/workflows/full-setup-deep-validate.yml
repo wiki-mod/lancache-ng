@@ -749,10 +749,10 @@ jobs:
           BUILD_TOOLS_TOUCHED: ${{ needs.plan.outputs.build_tools }}
           IMAGE_TAG: ${{ needs.plan.outputs.image_tag }}
           REPOSITORY: ${{ github.repository }}
-          # What: Widens smoke test to require dhclient (not baseline Alpine).
-          # Why: This sim uses dhclient; Alpine lacks it in stock apk.
+          # What: Widens smoke test to require BusyBox's DHCP client.
+          # Why: This sim uses udhcpc on Alpine.
           # From: Issue #1095
-          EXTRA_REQUIRED_TOOLS: dhclient
+          EXTRA_REQUIRED_TOOLS: udhcpc
         run: |
           set -euo pipefail
           if [[ "$PR_STAGING_AVAILABLE" == "true" && "$BUILD_TOOLS_TOUCHED" == "true" ]]; then

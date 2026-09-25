@@ -119,13 +119,13 @@ jobs:
 
       - name: Resolve build-tools image
         # What: Does not require published image.
-        # Why: Needs dhclient; not in published image yet.
+        # Why: Needs BusyBox's udhcpc DHCP client.
         id: build-tools-image
         env:
-          # What: requires dhclient in the smoke-test check.
-          # Why: opt-in only; this job's own sim needs it.
+          # What: requires udhcpc in the smoke-test check.
+          # Why: this job's own sim needs it.
           # From: Issue #1095
-          EXTRA_REQUIRED_TOOLS: dhclient
+          EXTRA_REQUIRED_TOOLS: udhcpc
         run: |
           set -euo pipefail
           image="$(bash scripts/untracked/select-build-tools-image.sh)"

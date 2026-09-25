@@ -572,7 +572,7 @@ echo "== Trigger 6/8: watchdog -- real startup banner carrying this run's overri
 assert_marker_reaches_ui "$marker_watchdog" "watchdog (startup banner's CHECK_INTERVAL value)" 90 watchdog
 
 echo "== Trigger 7/8: dhcp (Kea) -- a real DHCPDISCOVER/OFFER/REQUEST/ACK lease over the isolated dhcp-test-net =="
-# What: runs a real dhclient lease over dhcp-test-net.
+# What: runs a real DHCP lease over dhcp-test-net.
 # Why: proves Kea's own DHCP4_LEASE_ALLOC log line.
 dhcp_client_container="lancachee2e-dhcp-client-$$"
 docker run -d --name "$dhcp_client_container" \
@@ -580,7 +580,32 @@ docker run -d --name "$dhcp_client_container" \
     --cap-add NET_ADMIN --cap-add NET_RAW \
     -v "$work_dir/shared:/shared" \
     "$BUILD_TOOLS_IMAGE" \
-    bash -c 'dhclient -4 -1 -v -d -sf /bin/true -pf /shared/dhcp-client.pid -lf /shared/dhcp-client.leases eth0 >/shared/dhcp-client.out 2>&1; echo DONE >> /shared/dhcp-client.out' \
+    bash -c '
+      set -u
+      if command -v dhclient >/dev/null 2>&1; then
+        dhclient -4 -1 -v -d -sf /bin/true -pf /shared/dhcp-client.pid -lf /shared/dhcp-client.leases eth0 >/shared/dhcp-client.out 2>&1
+      else
+        cat > /var/tmp/udhcpc-lease-capture.sh <<"HOOK"
+#!/bin/sh
+[ "$1" = "bound" ] || [ "$1" = "renew" ] || exit 0
+csv() { printf "%s" "$1" | tr " " ","; }
+{
+  echo "lease {"
+  [ -n "${ip:-}" ] && echo "  fixed-address ${ip};"
+  [ -n "${router:-}" ] && echo "  option routers ${router};"
+  [ -n "${serverid:-}" ] && echo "  option dhcp-server-identifier ${serverid};"
+  [ -n "${dns:-}" ] && echo "  option domain-name-servers $(csv "${dns}");"
+  [ -n "${ntpsrv:-}" ] && echo "  option ntp-servers $(csv "${ntpsrv}");"
+  [ -n "${lease:-}" ] && echo "  option dhcp-lease-time ${lease};"
+  [ -n "${domain:-}" ] && echo "  option domain-name \"${domain}\";"
+  [ -n "${subnet:-}" ] && echo "  option subnet-mask ${subnet};"
+  echo "}"
+} >> /shared/dhcp-client.leases
+HOOK
+        udhcpc -i eth0 -s /var/tmp/udhcpc-lease-capture.sh -x hostname:"$(hostname)" -q -n -f >/shared/dhcp-client.out 2>&1
+      fi
+      echo DONE >> /shared/dhcp-client.out
+    ' \
     >/dev/null
 
 dhcp_lease_deadline=$((SECONDS + 30))
