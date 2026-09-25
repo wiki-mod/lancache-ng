@@ -83,8 +83,8 @@ ARG APK_PACKAGES
 # From: Issue #1095
 RUN sed -i 's|^https://|http://|' /etc/apk/repositories
 
-# What: add edge/testing as a tagged repo, http like the rest.
-# Why: only @testing-tagged packages (trivy) resolve here, not global (§64).
+# What: add edge/testing as a tagged http repo.
+# Why: only @testing tags (trivy) resolve, not global.
 # From: Issue #1683
 RUN echo "@testing http://dl-cdn.alpinelinux.org/alpine/edge/testing" >> /etc/apk/repositories
 
@@ -93,7 +93,7 @@ RUN echo "@testing http://dl-cdn.alpinelinux.org/alpine/edge/testing" >> /etc/ap
 # From: Issue #1683
 RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
     if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
-      cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig; \
+      cp /etc/ssl/certs/ca-certificates.crt /var/tmp/ca-bundle.orig; \
       cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
     fi; \
     : "apk-cache-bust=${APK_CACHE_BUST}"; \
@@ -103,7 +103,7 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
     distcc_bin="$(command -v distcc)"; \
     mkdir -p /usr/local/lib/distcc; \
     for wrapper in cc gcc c++ g++; do ln -sf "$distcc_bin" "/usr/local/lib/distcc/$wrapper"; done; \
-    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /var/tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
 # What: verifies the apk-installed curl actually runs
 # Why: catches a missing shared-lib chain at build time
@@ -119,7 +119,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # Why: 3.21+ dropped it; musl build, real dhclient.
 # From: Issue #1683
 RUN set -euo pipefail; \
-    dh_tmp="$(mktemp -d)"; \
+    dh_tmp="$(mktemp -d -p /var/tmp)"; \
     trap 'rm -rf "$dh_tmp"' EXIT; \
     curl -fsSL \
       "http://dl-cdn.alpinelinux.org/alpine/${DHCLIENT_ALPINE_BRANCH}/main/${DHCLIENT_APK_ARCH}/dhclient-${DHCLIENT_VERSION}.apk" \
