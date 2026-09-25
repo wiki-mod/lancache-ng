@@ -1,14 +1,11 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: build, scan, publish the Alpine build-tools image.
-# Why: weekly rebuild only on a changed input; NOOP else.
+# What: Build, smoke, scan, publish the build-tools image.
+# Why: Weekly input-change gate; NOOP when unchanged.
 # From: Issue #1683
 name: Build Tools Image
 
-# What: weekly input-change check + manual dispatch.
-# Why: build-tools is a factory, rebuilt on input change.
-# From: Issue #1683
 on:
   schedule:
     - cron: "17 4 * * 1"
@@ -28,12 +25,14 @@ on:
 permissions:
   contents: read
   packages: write
-  id-token: write
-  attestations: write
 
 concurrency:
   group: build-tools-image
   cancel-in-progress: false
+
+env:
+  GHCR_USERNAME: ${{ github.actor }}
+  GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
   determine-build-need:
@@ -46,19 +45,18 @@ jobs:
       signature: ${{ steps.plan.outputs.signature }}
       image: ${{ steps.plan.outputs.image }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Log in to GHCR
-        uses: ./.github/actions/docker-login-action-centralized-version
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      # What: resolve, decide, emit all outputs.
-      # Why: the gate lives in ci.sh; YAML only calls it.
+      # What: native fail-closed checkout; persistent ci.sh git auth.
+      # Why: no SHA pin outside the SOT; git is a runner tool.
       # From: Issue #1683
+      - &bootstrap
+        name: Bootstrap the working tree
+        run: |
+          set -euo pipefail
+          git init -q .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: bearer ${GHCR_TOKEN}"
+          git fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
+          git checkout -q FETCH_HEAD
       - name: Plan the build-tools refresh
         id: plan
         env:
@@ -66,9 +64,6 @@ jobs:
           BT_MODE: ${{ github.event.inputs.mode || 'check' }}
         run: bash .github/scripts/ci.sh build-tools plan
 
-  # What: one platform-parameterized build job, not a twin.
-  # Why: platform is a matrix parameter; logic exists once.
-  # From: Issue #1683
   build:
     name: build ${{ matrix.arch }} build-tools image (native)
     needs: determine-build-need
@@ -78,79 +73,39 @@ jobs:
       matrix: ${{ fromJSON(needs.determine-build-need.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-      attestations: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      # What: log in to GHCR + Docker Hub before the buildx bootstrap.
-      # Why: setup-buildx pulls moby/buildkit from Docker Hub (#930).
+      - *bootstrap
+      # What: Docker Hub auth for the buildkit bootstrap pull.
+      # Why: setup-buildx pulls moby/buildkit from Docker Hub.
       # From: Issue #1683 | Issue #930
-      - name: Log in to GHCR, then Docker Hub for the buildkit bootstrap pull
-        uses: ./.github/actions/ghcr-then-dockerhub-login
+      - name: Log in to Docker Hub
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
-          ghcr-username: ${{ github.actor }}
-          ghcr-password: ${{ secrets.GITHUB_TOKEN }}
-          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-
-      # What: build+push the per-arch image, emit its digest.
-      # Why: ci.sh owns the tag, labels, retry and readback.
+      # What: ci.sh builds+pushes, then smokes and scans the digest.
+      # Why: ci.sh owns tag, labels, readback, smoke and scan policy.
       # From: Issue #1683
-      - name: Build and push build-tools image
-        id: build
-        timeout-minutes: 90
+      - name: Build, smoke and scan the platform image
         env:
           BT_PLATFORM: ${{ matrix.platform }}
           BT_SIGNATURE: ${{ needs.determine-build-need.outputs.signature }}
+          IMAGE: ${{ needs.determine-build-need.outputs.image }}
           CI_BUILD_CACHE_FROM: type=gha,scope=build-tools-${{ matrix.arch }}
           CI_BUILD_CACHE_TO: type=gha,scope=build-tools-${{ matrix.arch }},mode=max
         run: |
+          set -euo pipefail
           digest="$(bash .github/scripts/ci.sh build-tools build "${BT_PLATFORM}" "${BT_SIGNATURE}")"
-          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
-
-      - name: Smoke-test pushed digest
-        uses: ./.github/actions/build-tools-candidate-smoke
-        with:
-          image-ref: ${{ needs.determine-build-need.outputs.image }}@${{ steps.build.outputs.digest }}
-          platform: ${{ matrix.platform }}
-          run-fixtures: "true"
-
-      # What: retry-wrapped Trivy scan of the pushed image.
-      # Why: HIGH/CRITICAL must fail a real publish.
-      # From: Issue #1535
-      - name: Scan pushed image with Trivy
-        timeout-minutes: 50
-        uses: ./.github/actions/trivy-scan-retry
-        with:
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-          image-ref: ${{ needs.determine-build-need.outputs.image }}@${{ steps.build.outputs.digest }}
-          scanners: vuln,secret
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          trivyignores: .trivyignore.yaml
-          hide-progress: true
-          cache: "false"
-          timeout: 10m
-          exit-code: "1"
-
-      - name: Attest build-tools image provenance
-        uses: ./.github/actions/ghcr-attest-retry
-        with:
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-          subject-name: ${{ needs.determine-build-need.outputs.image }}
-          subject-digest: ${{ steps.build.outputs.digest }}
+          [ -n "${digest}" ] || { echo "no digest from build" >&2; exit 1; }
+          CI_TOOLCHAIN_IMAGE="${IMAGE}@${digest}" bash .github/scripts/ci.sh test build-tools
+          # What: scan in the just-built image; it ships trivy (SOT).
+          # Why: the runner has no trivy; the toolchain image does.
+          # From: Issue #1683 | Issue #1535
+          docker run --rm -e GHCR_USERNAME -e GHCR_TOKEN -e CI_TMPDIR=/var/tmp \
+            -v "${PWD}:/w" -w /w "${IMAGE}@${digest}" \
+            bash .github/scripts/ci.sh scan build-tools "${digest}"
 
   merge-manifests:
     name: assemble multi-arch build-tools manifest
@@ -158,29 +113,14 @@ jobs:
     if: needs.determine-build-need.outputs.build-amd64 == 'true' && needs.determine-build-need.outputs.build-arm64 == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    permissions:
-      contents: read
-      packages: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      # What: log in to GHCR + Docker Hub before the buildx bootstrap.
-      # Why: setup-buildx pulls moby/buildkit from Docker Hub (#930).
-      # From: Issue #1683 | Issue #930
-      - name: Log in to GHCR, then Docker Hub for the buildkit bootstrap pull
-        uses: ./.github/actions/ghcr-then-dockerhub-login
+      - *bootstrap
+      - name: Log in to Docker Hub
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
-          ghcr-username: ${{ github.actor }}
-          ghcr-password: ${{ secrets.GITHUB_TOKEN }}
-          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-
-      # What: assemble the multi-arch image via ci.sh.
-      # Why: registry assembly logic lives in ci.sh.
-      # From: Issue #1683
       - name: Assemble the multi-arch manifest
         run: bash .github/scripts/ci.sh build-tools merge
