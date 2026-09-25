@@ -183,14 +183,7 @@ RUN sed -i 's|^https://|http://|' /etc/apk/repositories
 # What: installs bash, coreutils, github-cli, sqlite, etc
 # Why: GNU coreutils differ from BusyBox (AG-VAL-034)
 # From: Issue #1095
-# What: trusts the proxy CA for this RUN, re-applied below.
-# Why: ca-certificates install resets the bundle mid-RUN.
-# From: Issue #1781 | PR #1783
-RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
-    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
-      cp /etc/ssl/certs/ca-certificates.crt /var/tmp/lancache-ca-bundle.orig; \
-      cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
-    fi; \
+RUN set -euo pipefail; \
     : "package-cache-bust=${APT_CACHE_BUST}"; \
     apk update; \
     apk upgrade --no-cache; \
@@ -248,8 +241,7 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
     ln -sf /usr/bin/pump /usr/bin/distcc-pump; \
     distcc_bin="$(command -v distcc)"; \
     mkdir -p /usr/local/lib/distcc; \
-    for wrapper in cc gcc c++ g++; do ln -sf "$distcc_bin" "/usr/local/lib/distcc/$wrapper"; done; \
-    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /var/tmp/lancache-ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
+    for wrapper in cc gcc c++ g++; do ln -sf "$distcc_bin" "/usr/local/lib/distcc/$wrapper"; done
 
 # What: verifies the apk-installed curl actually runs
 # Why: catches a missing shared-lib chain at build time
