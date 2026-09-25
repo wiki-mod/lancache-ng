@@ -54,7 +54,7 @@ ARG APT_CACHE_BUST=""
 # From: Issue #1781 | PR #1783
 RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
     if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
-      cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig && \
+      cp /etc/ssl/certs/ca-certificates.crt /var/tmp/ca-bundle.orig && \
       cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
     fi && \
     : "apt-cache-bust=${APT_CACHE_BUST}" && \
@@ -75,11 +75,14 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
     gettext-envsubst \
     lsof \
     ripgrep && \
-    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /var/tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
-# What: Keep runtime packages and add debug tools
-# Why: Curl/certs for healthcheck and TLS; tools for debug
-# From: Issue #1095 | Issue #1346 | Issue #1613
+# What: verify nginx.org binary carries stream_ssl_preread.
+# Why: SNI TLS interception needs built-in stream.
+# From: Issue #815 | Issue #1683
+RUN nginx_v="$(nginx -V 2>&1)"; \
+    case "$nginx_v" in *--with-stream_ssl_preread_module*) ;; \
+      *) echo "nginx.org binary lacks stream_ssl_preread (AG-KD-007)" >&2; exit 1;; esac
 
 # What: Verify apk-installed binaries execute properly.
 # Why: Missing library dependencies fail at runtime.
