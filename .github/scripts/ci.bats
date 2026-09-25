@@ -169,6 +169,37 @@ teardown() {
     [ "${status}" -eq 0 ]
     [[ "${output}" == *'codeql-matrix={"include":[{"language":"actions"}]}'* ]]
 }
+@test "codeql-impact gates on content: comment NOOP, real change analyzes" {
+    # What: comment-only .rs is NOOP; real change analyzes.
+    # Why: content decides, not path (§11.1/§12.5).
+    # From: Issue #1683
+    local r="${BATS_TEST_TMPDIR}/cqrepo" m
+    mkdir -p "${r}/svc"
+    git -C "${r}" init -q
+    git -C "${r}" config user.email t@t
+    git -C "${r}" config user.name t
+    printf 'fn main() {}\n' > "${r}/svc/a.rs"
+    git -C "${r}" add -A && git -C "${r}" commit -qm base
+    local base; base="$(git -C "${r}" rev-parse HEAD)"
+    printf '// note\nfn main() {}\n' > "${r}/svc/a.rs"
+    git -C "${r}" add -A && git -C "${r}" commit -qm cmt
+    local cmt; cmt="$(git -C "${r}" rev-parse HEAD)"
+    m="${r}/manifest.yml"
+    printf 'codeql_languages:\n  rust:\n    paths: [svc]\n' > "${m}"
+    CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" GITHUB_EVENT_NAME=push \
+      BEFORE_SHA="${base}" GITHUB_SHA="${cmt}" \
+        run bash "${CI_SH}" codeql-impact svc/a.rs
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *'codeql-matrix={"include":[]}'* ]]
+    printf 'fn main() { let x = 1; }\n' > "${r}/svc/a.rs"
+    git -C "${r}" add -A && git -C "${r}" commit -qm real
+    local real; real="$(git -C "${r}" rev-parse HEAD)"
+    CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" GITHUB_EVENT_NAME=push \
+      BEFORE_SHA="${base}" GITHUB_SHA="${real}" \
+        run bash "${CI_SH}" codeql-impact svc/a.rs
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *'{"language":"rust"}'* ]]
+}
 
 @test "plan rebuilds proxy on a dns-domains (cdn-domains.txt) change" {
     # What: proxy COPYs cdn-domains.txt (named context).

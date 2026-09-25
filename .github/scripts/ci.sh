@@ -351,8 +351,19 @@ ci_cmd_plan() {
     ci_log "[CI-INFO-PLAN-0001]" "phase=plan changed=${#changed[@]} note=\"candidates only; identity/CAS decides build\""
 }
 
+# What: True if a path changed vs base (comment-cut).
+# Why: comment-only edits keep identity (§11.1/§12.5).
+# From: Issue #1683
+_ci_path_content_changed() {
+    local path="$1" base head
+    read -r base head <<< "$(_ci_diff_refs)"
+    [ -n "${base}" ] || return 0
+    [ "$(_ci_tracked_content_ids "${path}" "${base}")" \
+        != "$(_ci_tracked_content_ids "${path}" "${head}")" ]
+}
+
 # What: CodeQL admission: dynamic language matrix.
-# Why: §70 books no empty runner; path picks candidates.
+# Why: §70 no empty runner; content decides, not path.
 # From: Issue #1683
 ci_cmd_codeql_impact() {
     local -a changed=()
@@ -363,7 +374,8 @@ ci_cmd_codeql_impact() {
         hit=false
         while IFS= read -r p; do
             [ -n "${p}" ] || continue
-            _ci_paths_touch "${p}" "${changed[@]}" && { hit=true; break; }
+            _ci_paths_touch "${p}" "${changed[@]}" || continue
+            _ci_path_content_changed "${p}" && { hit=true; break; }
         done < <(_ci_block_entry_list codeql_languages "${lang}" paths)
         [ "${hit}" = true ] && { include="$(_ci_matrix_append "${include}" language="${lang}")" || return 2; }
     done < <(_ci_block_keys codeql_languages)
@@ -1196,19 +1208,31 @@ ci_cmd_scan_stack() {
     done < <(_ci_matrix_pairs "${matrix}")
 }
 
+# What: This run's base and head diff refs, or empty.
+# Why: one owner; changed-files and codeql share the refs.
+# From: Issue #1683
+_ci_diff_refs() {
+    if [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
+        local mb
+        mb="$( cd -- "${CI_REPO_ROOT}" && git merge-base "${BASE_SHA:-}" FETCH_HEAD 2>/dev/null )" || return 0
+        [ -n "${mb}" ] && printf '%s %s\n' "${mb}" FETCH_HEAD
+    elif [ -n "${BEFORE_SHA:-}" ] \
+        && [ "${BEFORE_SHA}" != 0000000000000000000000000000000000000000 ] \
+        && ( cd -- "${CI_REPO_ROOT}" && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null ); then
+        printf '%s %s\n' "${BEFORE_SHA}" "${GITHUB_SHA}"
+    fi
+}
+
 # What: write/echo changed-file list path for this event.
 # Why: one git-walk owner; plan/lint/checks (AG-CODE-011).
 # From: Issue #1683
 ci_cmd_changed_files() {
-    local out="${RUNNER_TEMP:-/var/tmp}/changed-files.txt"
-    if [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
-        git diff --name-only "${BASE_SHA:-}...FETCH_HEAD" > "${out}"
-    elif [ -n "${BEFORE_SHA:-}" ] \
-        && [ "${BEFORE_SHA}" != 0000000000000000000000000000000000000000 ] \
-        && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
-        git diff --name-only "${BEFORE_SHA}" "${GITHUB_SHA}" > "${out}"
+    local out="${RUNNER_TEMP:-/var/tmp}/changed-files.txt" base head
+    read -r base head <<< "$(_ci_diff_refs)"
+    if [ -n "${base}" ]; then
+        ( cd -- "${CI_REPO_ROOT}" && git diff --name-only "${base}" "${head}" ) > "${out}"
     else
-        git ls-files > "${out}"
+        ( cd -- "${CI_REPO_ROOT}" && git ls-files ) > "${out}"
     fi
     printf '%s\n' "${out}"
 }
