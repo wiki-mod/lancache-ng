@@ -176,17 +176,18 @@ EOF
 }
 
 @test "propagates a real grep failure instead of folding it into a clean pass" {
-    # What: Verifies grep failure doesn't result in false pass
-    # Why: Distinguishes grep failure from no-match status code
+    # What: Forces grep to return a read-error status.
+    # Why: Root can read a chmod-000 fixture, so permissions cannot prove propagation.
     # From: Issue #1095
     cat > "$fixture_root/scripts/lib/example.sh" <<'EOF'
 #!/usr/bin/env bash
 short_sha="${COMMIT_SHA::7}"
 EOF
-    chmod 000 "$fixture_root/scripts/lib/example.sh"
+    mkdir -p "$fixture_root/bin"
+    printf '#!/usr/bin/env bash\nexit 2\n' > "$fixture_root/bin/grep"
+    chmod +x "$fixture_root/bin/grep"
 
-    run bash "$script" "$fixture_root"
-    chmod 644 "$fixture_root/scripts/lib/example.sh"
+    run env PATH="$fixture_root/bin:$PATH" bash "$script" "$fixture_root"
 
     [ "$status" -eq 1 ]
     [[ "$output" == *"grep"*"failed"* ]] || fail "did not diagnose the grep failure: $output"
