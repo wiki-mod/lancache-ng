@@ -148,7 +148,8 @@ jobs:
               bash -n scripts/untracked/gc-sha-retention-audit.sh scripts/lib/github-api-retry.sh scripts/lib/sha-retention-audit.sh scripts/untracked/validate-stack-images.sh
               shellcheck --severity=warning scripts/untracked/gc-sha-retention-audit.sh scripts/lib/github-api-retry.sh scripts/lib/sha-retention-audit.sh scripts/untracked/validate-stack-images.sh tests/bats/sha_retention_audit.bats
               actionlint .github/workflows/gc-sha-retention-audit.yml
-              bats tests/bats/sha_retention_audit.bats
+              bats_jobs=$(( $(nproc) * 2 )); (( bats_jobs >= 16 )) || bats_jobs=16
+              TMPDIR=/var/tmp bats --jobs "$bats_jobs" tests/bats/sha_retention_audit.bats
               bash scripts/untracked/validate-stack-images.sh
               bash scripts/untracked/check-workflow-line-limit.sh
             '
