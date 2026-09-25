@@ -1,0 +1,91 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# What: GitHub release, OpenVEX and SBOM on a v-tag.
+# Why: separate release workflow (§6.3); ci.sh owns it.
+# From: Issue #1683
+name: CI 2.0 Release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to (re)publish (vX.Y.Z or vX.Y.Z-rc.N).
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: ci-2.0-release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+# What: GHCR creds ci.sh reads; one tag source for all jobs.
+# Why: auth is ci.sh policy; the workflow supplies the env.
+# From: Issue #1683
+env:
+  GHCR_USERNAME: ${{ github.actor }}
+  GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+jobs:
+  # What: resolve build-tools image for the SBOM scanner.
+  # Why: trivy lives in the toolchain image, not the runner.
+  # From: Issue #1683
+  resolve-build-tools:
+    name: resolve build-tools
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.resolve.outputs.image }}
+    steps:
+      - &bootstrap
+        name: Bootstrap the working tree
+        run: |
+          set -euo pipefail
+          git init -q .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: bearer ${GHCR_TOKEN}"
+          git fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
+          git checkout -q FETCH_HEAD
+      - name: Resolve the build-tools image
+        id: resolve
+        run: echo "image=$(bash .github/scripts/ci.sh build-tools resolve-image)" >> "$GITHUB_OUTPUT"
+
+  # What: publish the GitHub release notes and OpenVEX.
+  # Why: §6.3 release artifacts; ci.sh is idempotent.
+  # From: Issue #1683
+  release:
+    name: release
+    needs: resolve-build-tools
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - *bootstrap
+      - name: Publish the GitHub release and OpenVEX
+        run: |
+          set -euo pipefail
+          bash .github/scripts/ci.sh release-publish "${RELEASE_TAG}"
+          bash .github/scripts/ci.sh release-vex "${RELEASE_TAG}"
+
+  # What: attach a CycloneDX SBOM per first-party image.
+  # Why: per-image provenance; SOT-driven walk, no matrix.
+  # From: Issue #1683
+  release-sbom:
+    name: release-sbom
+    needs: [resolve-build-tools, release]
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ needs.resolve-build-tools.outputs.image }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - *bootstrap
+      - name: Attach a CycloneDX SBOM per published image
+        run: bash .github/scripts/ci.sh release-sbom-stack "${RELEASE_TAG}"

@@ -287,43 +287,6 @@ jobs:
           PROJECT_AUTOMATION_PAT: ${{ secrets.PROJECT_AUTOMATION_PAT }}
         run: bash .github/scripts/ci.sh cut-release-tag
 
-  # What: publish the GitHub release notes and OpenVEX on a v-tag.
-  # Why: release artifacts follow a successful channel promote.
-  # From: Issue #1683
-  release:
-    name: release
-    needs: [plan, promote]
-    if: needs.plan.outputs.any-build == 'true' && startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      packages: read
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - *bootstrap
-      - name: Publish the GitHub release and OpenVEX
-        run: |
-          set -euo pipefail
-          bash .github/scripts/ci.sh release-publish "${GITHUB_REF_NAME}"
-          bash .github/scripts/ci.sh release-vex "${GITHUB_REF_NAME}"
-
-  # What: attach a CycloneDX SBOM per first-party image on a v-tag.
-  # Why: per-image provenance; one SOT-driven walk, no matrix.
-  # From: Issue #1683
-  release-sbom:
-    name: release-sbom
-    needs: [plan, release, resolve-build-tools]
-    if: needs.plan.outputs.any-build == 'true' && startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
-    runs-on: ubuntu-latest
-    container: *bt_container
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - *bootstrap
-      - name: Attach a CycloneDX SBOM per published image
-        run: bash .github/scripts/ci.sh release-sbom-stack "${GITHUB_REF_NAME}"
-
   # What: run the diff-scoped + repo-wide guard set (§98).
   # Why: static guards, own failure domain, no build needed.
   # From: Issue #1683
@@ -349,7 +312,7 @@ jobs:
   # From: Issue #1683
   result:
     name: result
-    needs: [plan, build, test, resolve-build-tools, cargo-audit, lint, coverage, scan, aggregate, assemble, validate, promote, release, release-sbom, checks]
+    needs: [plan, build, test, resolve-build-tools, cargo-audit, lint, coverage, scan, aggregate, assemble, validate, promote, checks]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -368,14 +331,12 @@ jobs:
           assemble='${{ needs.assemble.result }}'
           validate='${{ needs.validate.result }}'
           promote='${{ needs.promote.result }}'
-          release='${{ needs.release.result }}'
-          release_sbom='${{ needs.release-sbom.result }}'
           checks='${{ needs.checks.result }}'
           # every non-plan/checks phase skips on a NOOP or a PR -- skipped is success.
           if [ "${plan}" != success ]; then
             echo "[CI-ERROR-CORE-0100] phase=plan result=${plan}" >&2; exit 1
           fi
-          for phase in build:"${build}" test:"${test}" resolve-build-tools:"${resolve_bt}" cargo-audit:"${cargo_audit}" lint:"${lint}" coverage:"${coverage}" scan:"${scan}" aggregate:"${aggregate}" assemble:"${assemble}" validate:"${validate}" promote:"${promote}" release:"${release}" release-sbom:"${release_sbom}"; do
+          for phase in build:"${build}" test:"${test}" resolve-build-tools:"${resolve_bt}" cargo-audit:"${cargo_audit}" lint:"${lint}" coverage:"${coverage}" scan:"${scan}" aggregate:"${aggregate}" assemble:"${assemble}" validate:"${validate}" promote:"${promote}"; do
             case "${phase#*:}" in
               success|skipped) ;;
               *) echo "[CI-ERROR-CORE-0100] phase=${phase%%:*} result=${phase#*:}" >&2; exit 1 ;;
