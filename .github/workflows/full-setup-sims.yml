@@ -87,6 +87,13 @@ jobs:
 
       - name: Resolve immutable build-tools image
         id: build-tools
+        env:
+          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
+          GITHUB_EVENT_PULL_REQUEST_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUILD_TOOLS_PR_STAGING_IMAGE: ${{ inputs.pr_staging_available == 'true' && inputs.build_tools_touched == 'true' && github.event.pull_request.head.repo.full_name == github.repository && format('ghcr.io/{0}/build-tools:pr-{1}-sha-{2}', github.repository, github.event.pull_request.number, github.sha) || '' }}
         run: |
           set -euo pipefail
           build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
@@ -523,7 +530,7 @@ jobs:
       - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Resolve build-tools image
         # What: omits BUILD_TOOLS_REQUIRE_PUBLISHED here.
-        # Why: needs isc-dhcp-client for a PR-scoped image.
+        # Why: needs BusyBox's DHCP client for a PR-scoped image.
         id: build-tools-image
         # What: reads step inputs via env: variables.
         # Why: avoids script-injection (OSPS-BR-01.04).
@@ -534,10 +541,10 @@ jobs:
           BUILD_TOOLS_TOUCHED: ${{ inputs.build_tools_touched }}
           IMAGE_TAG: ${{ inputs.image_tag }}
           REPOSITORY: ${{ github.repository }}
-          # What: require dhclient in smoke test.
-          # Why: opt-in, not baseline in build-tools.
+          # What: require udhcpc in smoke test.
+          # Why: BusyBox provides it in Alpine build-tools.
           # From: Issue #1095
-          EXTRA_REQUIRED_TOOLS: dhclient
+          EXTRA_REQUIRED_TOOLS: udhcpc
         run: |
           set -euo pipefail
           if [[ "$PR_STAGING_AVAILABLE" == "true" && "$BUILD_TOOLS_TOUCHED" == "true" ]]; then
