@@ -17,8 +17,8 @@ setup() {
     # Why: rust identity now keys the build-tools signature.
     # From: Issue #1683
     CI_APK_RESOLVE_CMD="$(_stub apkres 'printf "pkg-1.0\n"')"; export CI_APK_RESOLVE_CMD
-    # What: GHCR login is a no-op here; docker is absent in tests.
-    # Why: auth is ci.sh policy (docker login) with a test hook (§7).
+    # What: GHCR login stub (no-op, docker absent).
+    # Why: ci.sh policy uses docker login; tests stub it.
     # From: Issue #1683
     CI_GHCR_LOGIN_CMD="$(_stub ghcrlogin 'exit 0')"; export CI_GHCR_LOGIN_CMD
 }
@@ -86,7 +86,7 @@ teardown() {
 }
 
 @test "image-ref builds the one registry service@digest form" {
-    # What: One owner builds <registry>/<repo>/<svc>@<digest>.
+    # What: Builds <registry>/<repo>/<service>@<digest> ref.
     # Why: scan, sbom, assemble, verify must share the ref.
     # From: Issue #1683
     GITHUB_REPOSITORY=wiki-mod/lancache-ng run _ci_image_ref build-tools sha256:beef
@@ -96,7 +96,7 @@ teardown() {
 
 @test "image-ref fails closed and prints no ref without a repo owner" {
     # What: A missing repo owner yields nonzero and no ref.
-    # Why: AG-VAL-002: a missing required env is a hard fail.
+    # Why: AG-VAL-002: missing required env fails.
     # From: Issue #1683
     unset GITHUB_REPOSITORY
     run _ci_image_ref build-tools sha256:beef
@@ -119,23 +119,23 @@ teardown() {
     [[ "${output}" == *"dns=false"* ]]
 }
 @test "codeql-impact admits Rust analysis on an analyzed crate source change" {
-    # What: A path under the config's services/*/src selects Rust analysis.
-    # Why: §73 admits analysis on a real analyzed-source change.
+    # What: services/*/src path triggers Rust analysis.
+    # Why: §73 permits analysis on source changes.
     # From: Issue #1683
     run bash "${CI_SH}" codeql-impact services/ui/src/main.rs
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"codeql-rust=true"* ]]
 }
 @test "codeql-impact is NOOP for a non-source change in a Rust service" {
-    # What: A service Dockerfile is not analyzed Rust source.
-    # Why: irrelevant changes must not trigger extraction (§73).
+    # What: Service Dockerfile is not analyzed source.
+    # Why: Non-source changes must not extract (§73).
     # From: Issue #1683
     run bash "${CI_SH}" codeql-impact services/ui/Dockerfile
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"codeql-rust=false"* ]]
 }
 @test "codeql-impact is NOOP for a non-Rust service change" {
-    # What: A proxy change touches no analyzed Rust source path.
+    # What: Proxy change touches no analyzed source.
     # Why: unrelated services must NOOP (§73).
     # From: Issue #1683
     run bash "${CI_SH}" codeql-impact services/proxy/nginx.conf
@@ -144,7 +144,7 @@ teardown() {
 }
 @test "codeql-impact admits Rust analysis on a CodeQL config change" {
     # What: The query config re-scopes what CodeQL analyzes.
-    # Why: a config edit can change the Rust analysis (§73).
+    # Why: Config change affects analysis scope (§73).
     # From: Issue #1683
     run bash "${CI_SH}" codeql-impact .github/codeql/codeql-config.yml
     [ "${status}" -eq 0 ]
@@ -230,7 +230,7 @@ teardown() {
 }
 
 @test "plan-matrix emits docs-only=true for a docs-only change" {
-    # What: a docs-only change is a NOOP; no container jobs (§63).
+    # What: Docs-only change: no container jobs (§63).
     # Why: container jobs gate on docs-only != true.
     # From: Issue #1683
     local gh="${BATS_TEST_TMPDIR}/out.txt"; : > "${gh}"
@@ -242,7 +242,7 @@ teardown() {
 }
 
 @test "plan-matrix emits test-services for a path-changed rust service" {
-    # What: a changed rust source makes the service a test candidate.
+    # What: Changed Rust source triggers test run.
     # Why: tests run on source change, reuse or not (§60).
     # From: Issue #1683
     local gh="${BATS_TEST_TMPDIR}/out.txt"; : > "${gh}"
@@ -253,8 +253,8 @@ teardown() {
 }
 
 @test "plan-matrix emits no test-services for a path-changed apk service" {
-    # What: an apk service has no unit tests; not a test candidate.
-    # Why: ci.sh test SKIPs apk; the matrix must not list it.
+    # What: APK service has no unit tests.
+    # Why: ci.sh test skips APK services.
     # From: Issue #1683
     local gh="${BATS_TEST_TMPDIR}/out.txt"; : > "${gh}"
     GITHUB_OUTPUT="${gh}" GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_stub p 'echo MISSING_CONFIRMED')" \
@@ -550,7 +550,7 @@ teardown() {
 
 @test "registry derives from the SOT and drives refs" {
     # What: A changed release.registry moves the built ref.
-    # Why: Proves the host is SOT-owned, not hardcoded inline.
+    # Why: Proves host is SOT-driven, not hardcoded.
     # From: Issue #1683
     local m="${BATS_TEST_TMPDIR}/reg.yml" host tag
     sed 's/^  registry: ghcr.io$/  registry: example.io/' "${CI_MANIFEST_SOURCE}" > "${m}"
@@ -1073,7 +1073,7 @@ _stub() {
 
 @test "verify smoke-tests a toolchain image after a matching readback" {
     # What: A toolchain verify runs the SOT tool smoke.
-    # Why: §25 requires the accel tools at the verified digest.
+    # Why: §25 requires accelerator tools at digest.
     # From: Issue #1683
     CI_READBACK_CMD="$(_stub rb 'echo sha256:dead')" \
     CI_TOOLCHAIN_TEST_CMD="$(_stub tc 'echo "service=$1 tested=ok"')" \
@@ -1085,7 +1085,7 @@ _stub() {
 
 @test "assemble moves only a toolchain channel to the fresh index" {
     # What: build_type=toolchain refreshes its channel here.
-    # Why: build-tools is outside the atomic stack promote (§133).
+    # Why: build-tools outside atomic promote (§133).
     # From: Issue #1683
     CI_PROMOTE_MOVE_CMD="$(_stub mv 'echo moved svc=$1 ch=$2 dig=$3')" \
         run _ci_assemble_toolchain_channel build-tools sha256:idx
@@ -1624,8 +1624,8 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
 }
 
 @test "valid-promote-target accepts channels and release tags only" {
-    # What: mutable channels and vX.Y.Z(-rc.N) are valid targets.
-    # Why: promote writes the same ref for both, nothing else.
+    # What: Channels/vX.Y.Z(-rc.N) are valid targets.
+    # Why: Promote writes same ref for both.
     # From: Issue #1683
     run _ci_valid_promote_target latest;       [ "${status}" -eq 0 ]
     run _ci_valid_promote_target nightly;      [ "${status}" -eq 0 ]
@@ -1636,8 +1636,8 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
 }
 
 @test "promote-targets-for-ref maps each ref to its channel set" {
-    # What: master->latest, stable->tag+latest, rc->tag, dev->none.
-    # Why: one ref-driven policy owner, no YAML conditionals.
+    # What: Maps ref to targets: master/stable/rc/dev.
+    # Why: One policy owner, no YAML conditionals.
     # From: Issue #1683
     GITHUB_REF=refs/heads/master CI_PROMOTE_REQUESTED_CHANNEL= run _ci_promote_targets_for_ref
     [ "${output}" = latest ]
@@ -1654,8 +1654,8 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
 }
 
 @test "promote-ref promotes every derived target, tip-guarded" {
-    # What: derives targets, skips a superseded tip, promotes each.
-    # Why: supersede-safe single entry; determinism (section 4).
+    # What: Promotes derived targets, skips superseded.
+    # Why: Single entry ensures determinism (§4).
     # From: Issue #1683
     local calls="${BATS_TEST_TMPDIR}/promote-calls"
     export PROMOTE_CALLS="${calls}"
@@ -1697,7 +1697,7 @@ EOF
 
 @test "release-prerelease maps tag shape to the prerelease flag" {
     # What: vX.Y.Z is final, -rc.N is prerelease, else fail.
-    # Why: release publishes with the correct prerelease state.
+    # Why: Publishes with correct prerelease state.
     # From: Issue #1683
     run _ci_release_prerelease v1.2.3
     [ "${status}" -eq 0 ]; [ "${output}" = false ]
@@ -1725,8 +1725,8 @@ EOF
 }
 
 @test "release-publish replaces the marker block on an existing release" {
-    # What: Existing notes keep prefix/suffix, block replaced.
-    # Why: idempotent update; hand-written notes are preserved.
+    # What: Keep notes prefix/suffix, block replaced.
+    # Why: Idempotent; hand-written notes preserved.
     # From: Issue #1683
     local gh calls="${BATS_TEST_TMPDIR}/gh-calls"; gh="$(_release_gh_stub)"
     export GH_CALLS="${calls}" GITHUB_REPOSITORY=o/r GITHUB_SHA=deadbeef CI_TMPDIR="${BATS_TEST_TMPDIR}"
@@ -1768,7 +1768,7 @@ tail" '{body:$b, isPrerelease:false}')" \
 }
 
 @test "release-asset-put uploads with clobber and rejects an empty file" {
-    # What: One asset writer; --clobber replaces a prior asset.
+    # What: One asset writer; --clobber replaces prior.
     # Why: SBOM and VEX share it; empty file is a hard fail.
     # From: Issue #1683
     local gh calls="${BATS_TEST_TMPDIR}/gh-calls"; gh="$(_release_gh_stub)"
@@ -1801,8 +1801,8 @@ tail" '{body:$b, isPrerelease:false}')" \
 }
 
 @test "published-services lists first-party images, excludes third-party" {
-    # What: apk/rust/toolchain publish, install (netdata) does not.
-    # Why: release notes/SBOM target only scannable first-party.
+    # What: Publishes apk/rust/toolchain, skips netdata.
+    # Why: SBOM targets first-party images only.
     # From: Issue #1683
     run _ci_published_services
     [ "${status}" -eq 0 ]
@@ -1812,8 +1812,8 @@ tail" '{body:$b, isPrerelease:false}')" \
 }
 
 @test "release-sbom-stack builds an SBOM for every published service" {
-    # What: one SOT-driven walk, one SBOM per first-party image.
-    # Why: no hardcoded matrix; third-party services are skipped.
+    # What: One SBOM per first-party image.
+    # Why: No matrix; third-party skipped.
     # From: Issue #1683
     local gh calls="${BATS_TEST_TMPDIR}/gh-calls"; gh="$(_release_gh_stub)"
     export GH_CALLS="${calls}" GITHUB_REPOSITORY=o/r CI_TMPDIR="${BATS_TEST_TMPDIR}"
@@ -1832,7 +1832,7 @@ tail" '{body:$b, isPrerelease:false}')" \
 
 @test "release-vex generates the openvex document and attaches it" {
     # What: One VEX per release, built from the trivyignore.
-    # Why: reuses the SOT vex generator; missing input fails.
+    # Why: Reuses SOT vex generator; fails on missing.
     # From: Issue #1683
     local gh calls="${BATS_TEST_TMPDIR}/gh-calls"; gh="$(_release_gh_stub)"
     export GH_CALLS="${calls}" GITHUB_REPOSITORY=o/r CI_TMPDIR="${BATS_TEST_TMPDIR}" CI_REPO_ROOT="${BATS_TEST_TMPDIR}"
@@ -1850,7 +1850,7 @@ tail" '{body:$b, isPrerelease:false}')" \
 
 @test "next-patch-tag bumps Z only on a plain vX.Y.Z tag" {
     # What: patch bump only; rc/minor tags are rejected.
-    # Why: automated releases never bump minor or a prerelease.
+    # Why: Bumps patch only; minor and rc rejected.
     # From: Issue #1683
     run _ci_next_patch_tag v0.2.9;      [ "${status}" -eq 0 ]; [ "${output}" = v0.2.10 ]
     run _ci_next_patch_tag v1.0.0;      [ "${status}" -eq 0 ]; [ "${output}" = v1.0.1 ]
@@ -1858,8 +1858,8 @@ tail" '{body:$b, isPrerelease:false}')" \
 }
 
 @test "release-stack-changed compares published digests to the base tag" {
-    # What: any published image differing from the base tag => changed.
-    # Why: content-identity release trigger; identical stack => no cut.
+    # What: Image diff from base triggers release.
+    # Why: Content identity determines release need.
     # From: Issue #1683
     export GITHUB_SHA=mysha
     _ci_published_services() { printf 'proxy\n'; }
@@ -1875,8 +1875,8 @@ tail" '{body:$b, isPrerelease:false}')" \
 }
 
 @test "cut-release-tag pushes the next patch tag only when the stack changed" {
-    # What: base -> impact -> tip -> exists gate before a PAT tag push.
-    # Why: automated patch releases on image-affecting master pushes.
+    # What: Gate sequence before PAT tag push.
+    # Why: Patch releases on image-affecting pushes.
     # From: Issue #1683
     local calls="${BATS_TEST_TMPDIR}/cut-calls"; export CUT_CALLS="${calls}"
     local push base tipok noexist changed unchanged tipmoved
@@ -1954,8 +1954,8 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
 }
 
 @test "default gc roots refuses when release.registry is absent" {
-    # What: A SOT without registry refuses; never partial roots.
-    # Why: An empty host would silently drop a channel from roots.
+    # What: SOT without registry refused.
+    # Why: Empty host drops channels.
     # From: Issue #1683
     GITHUB_REPOSITORY=wiki-mod/lancache-ng
     local m="${BATS_TEST_TMPDIR}/noreg.yml"
@@ -2496,8 +2496,8 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
 }
 
 @test "stream-map check accepts a wildcard that forwards to the requested SNI" {
-    # What: *.domain -> $ssl_preread_server_name:443 is the correct target.
-    # Why: #1297 requires wildcards route by requested SNI, not a root literal.
+    # What: *.domain->SNI route is correct.
+    # Why: Wildcards route by SNI, not root.
     # From: Issue #1683 | Issue #1297
     run bash -c "source '${CI_SH}'; printf '%s\n' '    *.example.com   \$ssl_preread_server_name:443;' | _ci_stream_map_violations"
     [ "${status}" -eq 0 ]
@@ -2505,8 +2505,8 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
 }
 
 @test "stream-map check flags a wildcard hardcoded to a root literal (#1297)" {
-    # What: *.domain -> <root>:443 literal is the #1297 misroute bug.
-    # Why: a subdomain must reach its own origin, not the root's backend.
+    # What: *.domain -> <root>:443 is bug.
+    # Why: Subdomain must reach own origin.
     # From: Issue #1683 | Issue #1297
     run bash -c "source '${CI_SH}'; printf '%s\n' '    *.example.com   example.com:443;' | _ci_stream_map_violations"
     [ "${status}" -eq 0 ]
@@ -3390,7 +3390,7 @@ netdata=sha256:n"
 
 @test "build-tools channel maps master to latest, else to nightly" {
     # What: the tooling-image channel per target ref.
-    # Why: promote feeds only latest (master) and nightly (else).
+    # Why: Promote feeds latest/nightly only.
     # From: Issue #1683
     [ "$(_ci_build_tools_channel master)" = latest ]
     [ "$(_ci_build_tools_channel current_dev)" = nightly ]
@@ -3399,8 +3399,8 @@ netdata=sha256:n"
 }
 
 @test "build-tools resolve-image fails closed on a drifted published signature" {
-    # What: a published toolchain != SOT signature must fail closed.
-    # Why: container jobs must not run on a stale toolchain image.
+    # What: Toolchain != SOT sig must fail.
+    # Why: Jobs must not run stale toolchain.
     # From: Issue #1683
     CI_APK_RESOLVE_CMD="$(_stub apk 'printf "pkg-1.0\n"')" \
     CI_PUBLISHED_SIG_CMD="$(_stub psig 'echo drifted-sig')" \
@@ -3533,8 +3533,8 @@ netdata=sha256:n"
 }
 
 @test "check file-headers accepts canonical headers across comment syntaxes" {
-    # What: shebang/blank line 1 + Lua/CSS/Rust-placeholder native syntax.
-    # Why: absorbs check-file-headers.sh's per-format acceptance coverage.
+    # What: Multi-syntax (bash/lua/css/rust) headers.
+    # Why: Absorbs per-format header coverage.
     # From: Issue #1683 | PR #1858
     local h='# LanCache-NG (https://github.com/wiki-mod/lancache-ng)'
     local s='# SPDX-License-Identifier: AGPL-3.0-or-later'
@@ -3551,8 +3551,8 @@ netdata=sha256:n"
 }
 
 @test "check file-headers rejects layout violations" {
-    # What: swapped, duplicate, no-blank line 1, JS-embedded SPDX.
-    # Why: absorbs check-file-headers.sh's layout-contract rejections.
+    # What: Swapped/duplicate/no-blank/embedded SPDX.
+    # Why: Absorbs layout contract rejections.
     # From: Issue #1683 | PR #1858
     printf '#!/usr/bin/env bash\n# SPDX-License-Identifier: AGPL-3.0-or-later\n# LanCache-NG (https://github.com/wiki-mod/lancache-ng)\necho hi\n' > "${BATS_TEST_TMPDIR}/sw.sh"
     run bash "${CI_SH}" check file-headers "${BATS_TEST_TMPDIR}/sw.sh"; [ "${status}" -ne 0 ]
@@ -3565,8 +3565,8 @@ netdata=sha256:n"
 }
 
 @test "check file-headers handles Tera and Docker parser-directive cases" {
-    # What: Tera block accept, Docker directive accept + second-line reject.
-    # Why: absorbs check-file-headers.sh's line-1-marker edge coverage.
+    # What: Tera/Docker parser-directive edge cases.
+    # Why: Absorbs line-1-marker edge coverage.
     # From: Issue #1683 | PR #1858
     local t="${BATS_TEST_TMPDIR}/services/ui/src/templates"; mkdir -p "${t}"
     printf '%s\n' '' '{# LanCache-NG (https://github.com/wiki-mod/lancache-ng) #}' '{# SPDX-License-Identifier: AGPL-3.0-or-later #}' '{% extends "base.html" %}' > "${t}/ok.html"
@@ -3610,8 +3610,8 @@ netdata=sha256:n"
 }
 
 @test "check deny-short-sha catches naming, prefix, and format slice variants" {
-    # What: every sha/commit/candidate/revision slice shape fails.
-    # Why: preserves check-deny-short-sha.sh's pattern coverage.
+    # What: All sha/commit/candidate/revision slices fail.
+    # Why: Preserves pattern coverage.
     # From: Issue #1683 | PR #1858
     local d="${BATS_TEST_TMPDIR}"
     printf 'a=${commit:0:7}\nb=${candidate::7}\nc=${revision:0:8}\n' > "${d}/naming.sh"
@@ -3634,8 +3634,8 @@ netdata=sha256:n"
 }
 
 @test "check deny-short-sha allows full-SHA refs and git rev-parse --short" {
-    # What: full-SHA use and rev-parse --short fallback stay clean.
-    # Why: the ban targets bash slices only (issue #1095).
+    # What: Full-SHA and rev-parse --short stay clean.
+    # Why: Ban targets bash slices only.
     # From: Issue #1683 | PR #1858
     local d="${BATS_TEST_TMPDIR}"
     printf 'full="ghcr.io/${repo}/${svc}:sha-${commit}"\n' > "${d}/full.sh"
@@ -3663,8 +3663,8 @@ netdata=sha256:n"
 }
 
 @test "check language-policy bans JS/TS files but exempts vendored min.js" {
-    # What: absorbs check-language-policy.sh's JS/TS extension ban.
-    # Why: a new authored .js must fail; vendored min.js must not.
+    # What: Absorbs JS/TS extension ban.
+    # Why: Authored .js fails; vendored min.js exempt.
     # From: Issue #1683 | PR #1858
     printf 'let x=1\n' > "${BATS_TEST_TMPDIR}/app.js"
     run bash "${CI_SH}" check language-policy "${BATS_TEST_TMPDIR}/app.js"
@@ -3694,8 +3694,8 @@ netdata=sha256:n"
 }
 
 @test "check mutable-refs default scan includes composite-action action.yml" {
-    # What: the default glob now covers .github/actions/**/action.yml.
-    # Why: a composite action could carry a floating @vN ref unguarded.
+    # What: Default glob covers .github/actions/action."
+    # Why: Composite action @vN refs must be guarded.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/mrepo"
     mkdir -p "${r}/.github/actions/x"
@@ -3797,7 +3797,7 @@ netdata=sha256:n"
 
 @test "check review-chronology CHRONOLOGY_WARN_ONLY downgrades a real violation to exit 0" {
     # What: CHRONOLOGY_WARN_ONLY surfaces but doesn't block.
-    # Why: AG-GH-018 transitional warn path (Issue #1095).
+    # Why: AG-GH-018 transitional warn path.
     # From: Issue #1683
     printf '# found during code review earlier.\n' > "${BATS_TEST_TMPDIR}/badc.sh"
     run env CHRONOLOGY_WARN_ONLY=1 bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/badc.sh"
@@ -3808,7 +3808,7 @@ netdata=sha256:n"
 
 @test "check review-chronology duplicate #N outside From: is always warn-only" {
     # What: Bare #N outside From: never blocks.
-    # Why: PR #1856 downgraded to warn-only.
+    # Why: Downgraded to warn-only.
     # From: Issue #1683
     printf '# From: Issue #1683\n# see #1683 again here\n' > "${BATS_TEST_TMPDIR}/dupref.sh"
     run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/dupref.sh"
@@ -3884,8 +3884,8 @@ STUBEOF
 }
 
 @test "check review-chronology detects varied discovery-verb phrasings" {
-    # What: before-this-fix / flagged-in-review / review-finding, incl wrapped.
-    # Why: absorbs check_review_chronology_comments.bats verb coverage.
+    # What: Varied discovery verbs.
+    # Why: Absorbs verb coverage.
     # From: Issue #1683 | PR #1858
     local p
     for p in "fixed it before this fix landed" "flagged in review on PR #743" "this is a review finding note" "caught during self-review here"; do
@@ -3903,7 +3903,7 @@ STUBEOF
 }
 
 @test "check review-chronology flags stale line-refs, exempts plain prose" {
-    # What: (line ~N) and (see line N) fail; prose 'line' passes.
+    # What: (line ~N)/(see line N) fail; prose passes.
     # Why: absorbs the line-ref-detection coverage.
     # From: Issue #1683 | PR #1858
     printf '# revisit this logic (line ~890) soon\n' > "${BATS_TEST_TMPDIR}/l.sh"
@@ -3915,7 +3915,7 @@ STUBEOF
 }
 
 @test "check review-chronology duplicate-#N string-literal and longer-number cases" {
-    # What: a bare From: dup warns; string-literal / longer / different pass.
+    # What: Bare From: dup warns.
     # Why: absorbs the bare-#N duplicate edge coverage.
     # From: Issue #1683 | PR #1858
     printf '# From: Issue #887\nlocal x="#887"\n' > "${BATS_TEST_TMPDIR}/d.sh"
@@ -3930,7 +3930,7 @@ STUBEOF
 }
 
 @test "check review-chronology explicit args scan only the listed files" {
-    # What: only listed files scanned; a violation elsewhere is ignored.
+    # What: Only listed files scanned; others ignored.
     # Why: absorbs the explicit-file-args scoping coverage.
     # From: Issue #1683 | PR #1858
     printf '# clean note\n' > "${BATS_TEST_TMPDIR}/clean.sh"
@@ -3984,8 +3984,8 @@ STUBEOF
 }
 
 @test "check pr-title accepts breaking-marker, optional scope, security type, CRLF" {
-    # What: !, no-scope, scope+!, security, and a CRLF title pass.
-    # Why: preserves check-pr-title-convention.sh grammar coverage.
+    # What: !/no-scope/scope+!/security/CRLF titles pass.
+    # Why: Preserves grammar coverage.
     # From: Issue #1683 | PR #1858
     local t
     for t in "fix: correct cache key" "feat!: drop legacy flag" "fix(build-tools)!: bump base" "security: patch cve" "security(proxy): patch cve"; do
@@ -4234,7 +4234,7 @@ EOF
 
 @test "check pr-tracking-metadata warns non-blocking on a draft PR" {
     # What: a draft PR missing metadata warns but exits 0.
-    # Why: metadata settles before a PR leaves draft (AG-GH-008).
+    # Why: Metadata settles in draft.
     # From: Issue #1683 | PR #1858
     PR_DRAFT=true PR_NUMBER=12 REPO=wiki-mod/lancache-ng PR_LABELS_JSON='[]' \
         run bash "${CI_SH}" check pr-tracking-metadata
@@ -4260,16 +4260,16 @@ RS
     chmod +x "${r}/resolver"
 }
 
-# What: run the owner against a fixture via the fake resolver.
-# Why: one call site for the shared invocation (AG-CODE-011).
+# What: Run owner against fixture via fake resolver.
+# Why: One call site for shared invocation (AG-CODE-011).
 # From: Issue #1683 | PR #1858
 _anv_run() {
     CI_ACTION_MANIFEST_CMD="$1/resolver" run bash "${CI_SH}" check action-node-versions "$1"
 }
 
 @test "check action-node-versions passes current, fails deprecated runtimes" {
-    # What: current pins pass; a dead runtime (local/external) fails.
-    # Why: the #799 node-runtime invariant, plus no-manifest/skip.
+    # What: Current pins pass; dead runtime fails.
+    # Why: Node-runtime invariant, no-manifest/skip.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/anvR"
     _anv_setup "${r}"
@@ -4289,8 +4289,8 @@ _anv_run() {
 }
 
 @test "check action-node-versions fails an unresolvable pin, warns on infra" {
-    # What: NOTFOUND is a broken pin (fail); infra hiccup warns.
-    # Why: fail-closed on a bad pin vs cannot-check-now split.
+    # What: NOTFOUND broken (fail); infra hiccup warns.
+    # Why: Fail-closed bad pin vs cannot-check split.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/anvF"
     _anv_setup "${r}"
@@ -4301,8 +4301,8 @@ _anv_run() {
 }
 
 @test "check action-node-versions enforces ref hygiene" {
-    # What: literal repeat + cross-file drift fail; anchor/composite ok.
-    # Why: one canonical ref per key; anchors don't load in composites.
+    # What: Literal repeat/cross-file drift fail; anchor ok.
+    # Why: One canonical ref per key; anchors unload.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/anvH"
     _anv_setup "${r}"
@@ -4323,8 +4323,8 @@ _anv_run() {
 }
 
 @test "check action-node-versions fails a description expression, allows prose" {
-    # What: an expression in a composite description fails; prose ok.
-    # Why: the manifest validator evaluates description bodies.
+    # What: Expression in description fails; prose ok.
+    # Why: Manifest validator evaluates descriptions.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/anvD"
     _anv_setup "${r}"
@@ -4337,8 +4337,8 @@ _anv_run() {
 }
 
 @test "check action-node-versions aggregates failures, separates extraction" {
-    # What: all bad pins reported; run: uses ignored; alias = extraction.
-    # Why: one run surfaces every defect; parse gaps not mislabeled.
+    # What: All bad pins; run/alias extraction.
+    # Why: One run surfaces every defect.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/anvA"
     _anv_setup "${r}"
@@ -4350,8 +4350,8 @@ _anv_run() {
 }
 
 @test "check all diff-scopes its checks and gates PR checks on PR context" {
-    # What: stub the dispatcher; record what check-all invokes.
-    # Why: prove scope+gating without running 36 real checks.
+    # What: Stub dispatcher; record check-all invokes.
+    # Why: Prove scope+gating without 36 checks.
     # From: Issue #1683
     local log="${BATS_TEST_TMPDIR}/checkall.calls"; : > "${log}"
     ci_cmd_check() { printf '%s|%s\n' "$1" "${2:-}" >> "${log}"; return 0; }
@@ -4362,8 +4362,8 @@ _anv_run() {
 }
 
 @test "check all runs PR-metadata checks when a PR number is present" {
-    # What: with PR_NUMBER set, the PR checks are invoked.
-    # Why: they have a PR to check only on a pull request (§60).
+    # What: PR_NUMBER set invokes PR checks.
+    # Why: PR checks only on PR (§60).
     # From: Issue #1683
     local cf="${BATS_TEST_TMPDIR}/checkall.cf"; printf 'services/dns/Dockerfile\n' > "${cf}"
     local log="${BATS_TEST_TMPDIR}/checkall.pr"; : > "${log}"
@@ -4383,8 +4383,8 @@ _anv_run() {
 }
 
 @test "check shellcheck noops without shell files and fails on findings" {
-    # What: injected shellcheck; prove noop + fail.
-    # Why: real shellcheck needs the toolchain image; hook it.
+    # What: Injected shellcheck; prove noop/fail.
+    # Why: Real shellcheck needs toolchain; hook it.
     # From: Issue #1683
     local cf="${BATS_TEST_TMPDIR}/sc.cf" doc="${BATS_TEST_TMPDIR}/note.md"
     : > "${doc}"
@@ -4401,7 +4401,7 @@ _anv_run() {
 
 @test "check actionlint passes clean and fails on findings" {
     # What: injected actionlint; prove pass/fail.
-    # Why: real actionlint needs the toolchain image; hook it.
+    # Why: Real actionlint needs toolchain; hook it.
     # From: Issue #1683
     CI_ACTIONLINT_CMD="$(_stub al 'exit 0')" run bash "${CI_SH}" check actionlint
     [ "${status}" -eq 0 ]
@@ -4412,8 +4412,8 @@ _anv_run() {
 }
 
 @test "check cargo-audit passes clean, fails on advisory and on warnings" {
-    # What: injected auditor; prove the pass/fail policy.
-    # Why: real cargo audit needs the toolchain image; hook it.
+    # What: Injected auditor; prove pass/fail.
+    # Why: Real cargo audit needs toolchain; hook it.
     # From: Issue #1683
     CI_CARGO_AUDIT_CMD="$(_stub aud 'exit 0')" run bash "${CI_SH}" check cargo-audit
     [ "${status}" -eq 0 ]
@@ -4427,8 +4427,8 @@ _anv_run() {
 }
 
 @test "coverage skips a no-SOT service, passes the floor, fails below it" {
-    # What: injected tarpaulin; prove the floor policy.
-    # Why: real tarpaulin needs the toolchain image; hook it.
+    # What: Injected tarpaulin; prove floor policy.
+    # Why: Real tarpaulin needs toolchain; hook it.
     # From: Issue #1683
     run bash "${CI_SH}" coverage watchdog
     [ "${status}" -eq 0 ]
@@ -4445,8 +4445,8 @@ _anv_run() {
 }
 
 @test "check dockerfile-build-tools flags both image and hardcoded-tuning violations" {
-    # What: rust Dockerfiles must consume the build-tools image and hardcode no tuning.
-    # Why: AG-CI-008/AG-REL-002 (image) plus AG-CI-006 (jobs/lto/codegen from CI vars).
+    # What: Rust Dockerfiles use build-tools, no tuning.
+    # Why: AG-CI-008/AG-REL-002 (image) + AG-CI-006.
     # From: Issue #1683
     run bash "${CI_SH}" check dockerfile-build-tools
     [ "${status}" -eq 0 ]
@@ -4470,8 +4470,8 @@ _anv_run() {
 }
 
 @test "check cargo-profile-tuning flags hardcoded [profile] lto/codegen-units" {
-    # What: no Cargo.toml may set [profile] lto/codegen-units.
-    # Why: they come from CARGO_PROFILE_RELEASE env (AG-CI-006).
+    # What: Cargo.toml cannot set [profile] lto/codegen.
+    # Why: From CARGO_PROFILE_RELEASE env (AG-CI-006).
     # From: Issue #1683
     local r="${BATS_TEST_TMPDIR}/cptrepo"
     mkdir -p "${r}/crate-a" "${r}/crate-b"
@@ -4491,8 +4491,8 @@ _anv_run() {
 }
 
 @test "check no-source-compiled-tools flags cargo install of a prebuilt SOT tool" {
-    # What: no Dockerfile may cargo-install a tool the SOT ships prebuilt.
-    # Why: INSTALL-DON'T-COMPILE; build-tools is the toolchain owner (AG-REL-002).
+    # What: Dockerfile cannot cargo-install SOT tools.
+    # Why: INSTALL-DON'T-COMPILE; build-tools owner.
     # From: Issue #1683
     local r="${BATS_TEST_TMPDIR}/nsctrepo" pkg
     pkg="$(_ci_build_tools_packages | grep -E '^(sccache|cargo-audit|cargo-tarpaulin)$' | head -1)"
@@ -4514,8 +4514,8 @@ _anv_run() {
 }
 
 @test "stack-candidate reader: full SOT stack, fail-closed on every failure, no stray services" {
-    # What: exact multi-arch index digests for the SOT product stack (§48).
-    # Why: candidate feeds validate/promote; each failure must fail closed.
+    # What: Exact multi-arch digests for SOT (§48).
+    # Why: Candidate feeds validate/promote, fail closed.
     # From: Issue #1683
     _ci_collect_accepted_digests() { printf 'linux/amd64=sha256:a\nlinux/arm64=sha256:b\n'; }
     _ci_reconcile_index() { printf 'sha256:idx-%s\n' "$1"; }
@@ -4549,8 +4549,8 @@ _anv_run() {
 }
 
 @test "emit-result produces an ACCEPTED record and fails closed on a missing digest" {
-    # What: the single aggregator's input record for one service/platform (§26.1).
-    # Why: state ACCEPTED with the exact GHCR digest, verified from the registry.
+    # What: Single aggregator record per service/platform.
+    # Why: ACCEPTED state with exact GHCR digest.
     # From: Issue #1683
     _ci_require_ghcr_auth() { return 0; }
     _ci_identity_for() { echo "id-$1"; }
@@ -4568,8 +4568,8 @@ _anv_run() {
 }
 
 @test "aggregate-stack emits one result per matrix pair then one ledger write" {
-    # What: matrix -> emit-result per pair -> single ci.sh aggregate (§26.1).
-    # Why: iteration lives in ci.sh; the workflow stays thin.
+    # What: Matrix->emit->aggregate per pair (§26.1).
+    # Why: Iteration in ci.sh; workflow thin.
     # From: Issue #1683
     ci_cmd_emit_result() { printf 'emit %s %s\n' "$1" "$2"; }
     local seen="${BATS_TEST_TMPDIR}/agg-dir"
@@ -4588,8 +4588,8 @@ _anv_run() {
 }
 
 @test "scan-stack scans each built matrix pair and fails closed on a missing digest/matrix" {
-    # What: SCAN before ACCEPT for every built pair (§7); thin YAML.
-    # Why: iteration lives in ci.sh; missing digest or matrix fails closed.
+    # What: SCAN before ACCEPT per pair (§7).
+    # Why: Missing digest/matrix fails closed.
     # From: Issue #1683
     _ci_require_ghcr_auth() { return 0; }
     _ci_identity_for() { echo "id-$1"; }
@@ -4615,8 +4615,8 @@ _anv_run() {
 }
 
 @test "nightly-status opens, updates, and closes the standing tracking issue" {
-    # What: self-closing issue per outcome (#1801); no composite action.
-    # Why: failure opens/updates, success closes; label-keyed, fail-closed.
+    # What: Self-closing issue per outcome.
+    # Why: Fail=open/update, success=close.
     # From: Issue #1683
     local stub="${BATS_TEST_TMPDIR}/ghstub" calls="${BATS_TEST_TMPDIR}/gh-calls"
     cat > "${stub}" <<'EOF'
@@ -4640,8 +4640,8 @@ EOF
 }
 
 @test "action-node-versions resolver: yaml fallback, transient retry, permanent stop" {
-    # What: real curl path -- .yml->.yaml, 403 retries, 401 stops.
-    # Why: fetch mechanics have no hook; a counted mock proves them.
+    # What: Real curl: .yml->.yaml, 403 retry.
+    # Why: Fetch has no hook; mock proves it.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/anvM" bin="${BATS_TEST_TMPDIR}/anvMbin" cnt="${BATS_TEST_TMPDIR}/anvMcnt"
     mkdir -p "${r}/.github/workflows" "${bin}"
@@ -4714,8 +4714,8 @@ C3
 }
 
 @test "check governance-guards flags a malformed PR-body upload" {
-    # What: a body that is a literal @/tmp upload path, not text.
-    # Why: an upload mistake must not pass as real PR body text.
+    # What: Literal @/tmp is upload path, not text.
+    # Why: Upload mistake must not pass.
     # From: Issue #1683 | PR #1858
     GOVERNANCE_PR_BODY='@/tmp/pr-body-1234.txt' \
         run bash "${CI_SH}" check governance-guards
@@ -4756,7 +4756,7 @@ C3
 
 @test "check compose-healthchecks fails a service with no healthcheck" {
     # What: a real, un-excluded service has no healthcheck.
-    # Why: issue #1169: every service needs one.
+    # Why: Every service needs healthcheck.
     # From: Issue #1683 | PR #1858
     local f="${BATS_TEST_TMPDIR}/nohc/docker-compose.yml"
     mkdir -p "$(dirname "${f}")"
@@ -4770,7 +4770,7 @@ C3
 
 @test "check compose-healthchecks honors the documented exclusion list" {
     # What: dhcp-probe is documented as exempt, not a fail.
-    # Why: issue #1169's exclusion contract still applies.
+    # Why: Exclusion contract still applies.
     # From: Issue #1683 | PR #1858
     local f="${BATS_TEST_TMPDIR}/excl/deploy/prod/docker-compose.yml"
     mkdir -p "$(dirname "${f}")"
@@ -4799,7 +4799,7 @@ C3
 
 @test "check proxy-cache-env-doc-drift fails a real default mismatch" {
     # What: proxy.env's value disagrees with its doc row.
-    # Why: bug-hunt #1068: a copied default can go stale.
+    # Why: Copied default can go stale.
     # From: Issue #1683 | PR #1858
     local env="${BATS_TEST_TMPDIR}/proxy.env" doc="${BATS_TEST_TMPDIR}/arch.md"
     printf 'CACHE_MEM_MB=999\n' > "${env}"
@@ -4948,7 +4948,7 @@ C3
 }
 
 @test "check dependabot-docker-base-consistency Dockerfile FROM parsing edges" {
-    # What: only the last FROM counts; lowercase from; no-FROM fails.
+    # What: Last FROM; lowercase ok; no-FROM fails.
     # Why: absorbs the legacy FROM-parsing coverage.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/ddb-from"; mkdir -p "${r}/.github" "${r}/services/a" "${r}/services/b"
@@ -4961,8 +4961,8 @@ C3
 }
 
 @test "check dependabot-docker-base-consistency resolves an unbraced ARG token" {
-    # What: FROM \$BASE (no braces) resolves via its ARG default.
-    # Why: absorbs the legacy unbraced-ARG-substitution coverage.
+    # What: FROM \$BASE (bare) resolves via ARG.
+    # Why: Absorbs unbraced-ARG coverage.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/ddb-arg"; mkdir -p "${r}/.github" "${r}/services/a" "${r}/services/b"
     printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    directories:\n      - /services/a\n      - /services/b\n    schedule:\n      interval: weekly\n' > "${r}/.github/dependabot.yml"
@@ -5090,7 +5090,7 @@ EOF
 
 @test "check idempotence-test-coverage rejects a commented-out bats test" {
     # What: a disabled test bats never actually runs.
-    # Why: issue #732: must not silently satisfy the guard.
+    # Why: Must not silently satisfy guard.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/idem-commented" at_test='@test'
     _idempotence_fixture "${r}"
@@ -5105,7 +5105,7 @@ EOF
 
 @test "check idempotence-test-coverage rejects an #[ignore]d Rust test" {
     # What: a disqualified test cargo never actually runs.
-    # Why: issue #732: must not silently satisfy the guard.
+    # Why: Must not silently satisfy guard.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/idem-ignored"
     _idempotence_fixture "${r}"
@@ -5216,7 +5216,7 @@ _prebuilt_fixture() {
 
 @test "check prebuilt-prod passes a prebuilt-only tree" {
     # What: no build: and no --build anywhere user-facing.
-    # Why: prod runs prebuilt first-party images (versioning).
+    # Why: Prod runs prebuilt images.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/prebuilt-ok"
     _prebuilt_fixture "${r}"
@@ -5249,7 +5249,7 @@ _prebuilt_fixture() {
     [[ "${output}" == *"prebuilt"* ]]
 }
 
-# What: seed a prod tree whose state derives from LANCACHE_STATE_DIR.
+# What: Seed prod tree from LANCACHE_STATE_DIR.
 # Why: shared by the prod-state-wiring checks below.
 # From: Issue #1683 | PR #1858
 _prod_state_wiring_fixture() {
@@ -5266,8 +5266,8 @@ _prod_state_wiring_fixture() {
 }
 
 @test "check prod-state-wiring passes a fully derived, documented tree" {
-    # What: all five keys derive from LANCACHE_STATE_DIR + documented.
-    # Why: AG-SETUP-001 one state root, manual upgrades documented.
+    # What: All keys from LANCACHE_STATE_DIR.
+    # Why: One state root, manual upgrades.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/psw-ok"
     _prod_state_wiring_fixture "${r}"
@@ -5277,8 +5277,8 @@ _prod_state_wiring_fixture() {
 }
 
 @test "check prod-state-wiring fails a key not derived from LANCACHE_STATE_DIR" {
-    # What: a per-service dir hardcoded off LANCACHE_STATE_DIR.
-    # Why: breaks the single state-root contract (AG-SETUP-001).
+    # What: Per-service dir hardcoded off root.
+    # Why: Breaks state-root contract.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/psw-noderive"
     _prod_state_wiring_fixture "${r}"
@@ -5303,7 +5303,7 @@ _prod_state_wiring_fixture() {
 }
 
 @test "check compose-config passes when all SOT targets validate" {
-    # What: every SOT file[:profile] target renders warning-free.
+    # What: SOT targets render warning-free.
     # Why: prod/quickstart/secondary compose must be valid.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/cc-ok" m="${BATS_TEST_TMPDIR}/cc-ok.yml"
@@ -5360,7 +5360,7 @@ _prod_state_wiring_fixture() {
 
 @test "check compose-config fails when the SOT lists no targets" {
     # What: the SOT has no compose_targets entry at all.
-    # Why: fail closed rather than validate nothing silently.
+    # Why: Fail closed, not silent.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/cc-nosot" m="${BATS_TEST_TMPDIR}/cc-nosot.yml"
     printf 'validation:\n  dns_test_domains: [x]\n' > "${m}"
@@ -5398,7 +5398,7 @@ EOF
 }
 
 @test "check nats-atomic-write passes a fully atomic tree" {
-    # What: compose/rust/entrypoint/setup all write atomically.
+    # What: All writers write atomically.
     # Why: shared config must never be torn on write.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/naw-ok"
@@ -5446,7 +5446,7 @@ EOF
 }
 
 @test "check docker-socket-proxy passes a deny-by-default allowlist" {
-    # What: every required allowlist rule present, no broad rule.
+    # What: Required rules present, no broad.
     # Why: the socket proxy must stay deny-by-default.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/dsp-ok"
@@ -5469,7 +5469,7 @@ EOF
 }
 
 @test "check docker-socket-proxy fails a forbidden broad container rule" {
-    # What: a broad create/json rule re-enters the allowlist.
+    # What: Broad rule re-enters allowlist.
     # Why: generic container APIs must stay denied.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/dsp-broad"
@@ -5491,7 +5491,7 @@ _qs_required_env_fixture() {
 }
 
 @test "check quickstart-required-env passes when all required keys are set" {
-    # What: every required ${VAR:?} key is non-empty in .env.
+    # What: Required ${VAR:?} keys non-empty.
     # Why: a required-but-unset key breaks compose at start.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/qre-ok"
@@ -5513,7 +5513,7 @@ _qs_required_env_fixture() {
     [[ "${output}" == *"define non-empty B"* ]]
 }
 
-# What: seed a dhcp-proxy tree that meets the env/PXE contract.
+# What: Seed DHCP tree for env/PXE.
 # Why: shared by the dhcp-proxy-env checks below.
 # From: Issue #1683 | PR #1858
 _dhcp_proxy_env_fixture() {
@@ -5550,7 +5550,7 @@ EOF
 }
 
 @test "check dhcp-proxy-env passes a compliant env/PXE tree" {
-    # What: env_file used, all optional/PXE keys present + passed.
+    # What: env_file + all PXE keys present.
     # Why: the dnsmasq relay/proxy surface must stay intact.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/dpe-ok"
@@ -5561,7 +5561,7 @@ EOF
 }
 
 @test "check dhcp-proxy-env fails a missing optional key" {
-    # What: an optional dnsmasq key is absent from an env file.
+    # What: Optional dnsmasq key absent.
     # Why: the whole optional surface must be declared.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/dpe-key"
@@ -5574,8 +5574,8 @@ EOF
 }
 
 @test "check dhcp-proxy-env fails compose environment interpolation" {
-    # What: prod dhcp-proxy uses environment instead of env_file.
-    # Why: env_file is the prod contract; loses setup-managed keys.
+    # What: Prod DHCP uses env, not file.
+    # Why: env_file contract; loses keys.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/dpe-env"
     _dhcp_proxy_env_fixture "${r}"
@@ -5592,7 +5592,7 @@ EOF
 }
 
 @test "check dhcp-proxy-env fails cleanly when an input file is missing" {
-    # What: a missing compose/env/entrypoint yields a clear error.
+    # What: Missing compose/env/entrypoint.
     # Why: must not read as a dhcp-proxy contract violation.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/dpe-miss"
@@ -5604,7 +5604,7 @@ EOF
 }
 
 @test "check vex-drift passes valid non-empty OpenVEX" {
-    # What: generate-vex.sh emits parseable JSON with statements.
+    # What: generate-vex.sh emits JSON with statements.
     # Why: the generator smoke test's core success path.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/vex-ok"
@@ -5631,7 +5631,7 @@ EOF
 
 @test "check vex-drift fails entries with zero statements" {
     # What: real ignore entries but an empty statement list.
-    # Why: silently-empty output is broken, valid JSON or not.
+    # Why: Empty output broken, JSON or not.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/vex-empty"
     mkdir -p "${r}"
@@ -5643,7 +5643,7 @@ EOF
 }
 
 # What: Write a SOT with a netdata curl-pin policy block.
-# Why: The check reads version/threshold/until/cves from SOT.
+# Why: Check reads version/threshold/cves from SOT.
 # From: Issue #1304 | PR #1858
 _netdata_sot() {
     local m="${BATS_TEST_TMPDIR}/netdata-manifest.yml"
@@ -5666,7 +5666,7 @@ _netdata_fetch() {
 }
 
 @test "check netdata-curl-pin warns (non-blocking) below threshold before deadline" {
-    # What: curl 8.17.0 < 8.21.0, today before ACCEPTED_UNTIL.
+    # What: curl 8.17.0 < 8.21.0 before UNTIL.
     # Why: known time-boxed acceptance must warn, not block.
     # From: Issue #1304 | PR #1858
     CI_MANIFEST="$(_netdata_sot)" CI_NETDATA_FETCH_CMD="$(_netdata_fetch 8_17_0)" \
@@ -5711,8 +5711,8 @@ _netdata_fetch() {
 }
 
 @test "check netdata-curl-pin passes clean well above threshold, differing segments" {
-    # What: curl 9.0 vs 8.21.0 (fewer segments) compares right.
-    # Why: sort -V must order differing segment counts correctly.
+    # What: curl 9.0 vs 8.21.0 compares right.
+    # Why: sort -V orders segments correctly.
     # From: Issue #1304 | PR #1858
     CI_MANIFEST="$(_netdata_sot)" CI_NETDATA_FETCH_CMD="$(_netdata_fetch 9_0)" \
         run bash "${CI_SH}" check netdata-curl-pin
@@ -5743,7 +5743,7 @@ _netdata_fetch() {
 
 @test "check netdata-curl-pin skips (non-blocking) on transient network failure" {
     # What: fetch exits 6 (resolve/connect), not a 404.
-    # Why: transient infra must not block merges (GOAL section 4).
+    # Why: Transient infra doesn't block.
     # From: Issue #1304 | PR #1858
     CI_MANIFEST="$(_netdata_sot)" CI_NETDATA_FETCH_CMD="$(_stub nf 'exit 6')" \
         run bash "${CI_SH}" check netdata-curl-pin
@@ -5753,8 +5753,8 @@ _netdata_fetch() {
 }
 
 @test "check netdata-curl-pin fails on a real upstream 404 (curl exit 22)" {
-    # What: exit 22 means the netdata tag is missing upstream.
-    # Why: a wrong pinned version is a real, blocking config error.
+    # What: exit 22 means tag missing.
+    # Why: Wrong pin is blocking error.
     # From: Issue #1304 | PR #1858
     CI_MANIFEST="$(_netdata_sot)" CI_NETDATA_FETCH_CMD="$(_stub nf 'exit 22')" \
         run bash "${CI_SH}" check netdata-curl-pin
@@ -5764,7 +5764,7 @@ _netdata_fetch() {
 
 @test "check netdata-curl-pin runs against the real SOT netdata version" {
     # What: default SOT + a still-affected curl tag warns.
-    # Why: proves the real external_versions.netdata pin parses.
+    # Why: Proves real netdata pin parses.
     # From: Issue #1304 | PR #1858
     CI_NETDATA_FETCH_CMD="$(_netdata_fetch 8_20_0)" CI_NETDATA_TODAY="2026-08-01" \
         run bash "${CI_SH}" check netdata-curl-pin
@@ -5772,7 +5772,7 @@ _netdata_fetch() {
     [[ "${output}" == *"netdata-curl-pin=warn"* ]]
 }
 
-# What: seed a setup.sh/dhcp tree meeting the keys+Kea contract.
+# What: Seed setup.sh/dhcp for Kea.
 # Why: shared by the setup-keys-kea checks below.
 # From: Issue #1683 | PR #1858
 _setup_keys_kea_fixture() {
@@ -5796,7 +5796,7 @@ _setup_keys_kea_fixture() {
 }
 
 @test "check setup-keys-kea passes a compliant tree" {
-    # What: all required keys + Kea preflight + nmap present.
+    # What: Required keys + Kea + nmap present.
     # Why: first-time setup depends on this whole surface.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/skk-ok"
@@ -5821,7 +5821,7 @@ _setup_keys_kea_fixture() {
 
 @test "check setup-keys-kea fails a deprecated NATS token key" {
     # What: an env template reintroduces NATS_TOKEN.
-    # Why: role credentials replaced the deprecated token keys.
+    # Why: Role credentials replace token keys.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/skk-nats"
     _setup_keys_kea_fixture "${r}"
@@ -5832,7 +5832,7 @@ _setup_keys_kea_fixture() {
 }
 
 @test "check setup-update-safety enforces the real setup.sh update flow" {
-    # What: real setup.sh pauses/guards before update mutations.
+    # What: setup.sh guards before mutations.
     # Why: AG-OP-010; a missing guard must fail the check.
     # From: Issue #1683
     run bash "${CI_SH}" check setup-update-safety "${BATS_TEST_DIRNAME}/../.."
@@ -5846,8 +5846,8 @@ _setup_keys_kea_fixture() {
 }
 
 @test "check setup-docker-conflict enforces the real setup.sh Docker RPM guard" {
-    # What: real setup.sh keeps the Fedora/RHEL Docker RPM conflict guard.
-    # Why: legacy docker RPMs conflict; podman/runc must stay installable.
+    # What: Keeps RPM conflict guard.
+    # Why: Legacy docker conflicts; podman ok.
     # From: Issue #1683
     run bash "${CI_SH}" check setup-docker-conflict "${BATS_TEST_DIRNAME}/../.."
     [ "${status}" -eq 0 ]
@@ -5860,8 +5860,8 @@ _setup_keys_kea_fixture() {
 }
 
 @test "check image-channel-resolution enforces the real channel/tag contract" {
-    # What: setup.sh/UI/prod-compose/docs share one image resolution.
-    # Why: pinned fails closed; mutable channels via the stack pointer.
+    # What: All share one image resolution.
+    # Why: Pinned fails; mutable via stack.
     # From: Issue #1683
     run bash "${CI_SH}" check image-channel-resolution "${BATS_TEST_DIRNAME}/../.."
     [ "${status}" -eq 0 ]
@@ -5874,8 +5874,8 @@ _setup_keys_kea_fixture() {
 }
 
 @test "migrate_env_for_update repairs every empty required key" {
-    # What: each SOT required-repair key is non-empty after update.
-    # Why: an empty required key breaks the stack (AG-OP-007).
+    # What: SOT repair keys non-empty.
+    # Why: Empty breaks stack (AG-OP-007).
     # From: Issue #1683 | PR #1858
     local repo_root keys key d ef
     repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
@@ -5896,8 +5896,8 @@ _setup_keys_kea_fixture() {
 }
 
 @test "migrate_env_for_update derives CACHE_MAX_SIZE from CACHE_MAX_GB" {
-    # What: an empty CACHE_MAX_SIZE is rebuilt from CACHE_MAX_GB.
-    # Why: repair must reuse the operator's size, not a default.
+    # What: Empty MAX_SIZE rebuilt from MAX_GB.
+    # Why: Reuse operator size, not default.
     # From: Issue #1683 | PR #1858
     local repo_root ef
     repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
@@ -5912,7 +5912,7 @@ _setup_keys_kea_fixture() {
 }
 
 @test "get_env_assignment_value_raw_nonempty preserves the raw assignment" {
-    # What: the raw (unparsed) value of a key is returned intact.
+    # What: Raw (unparsed) value returned.
     # Why: templated/quoted overrides must not be flattened.
     # From: Issue #1683 | PR #1858
     local repo_root ef
@@ -5926,7 +5926,7 @@ _setup_keys_kea_fixture() {
 }
 
 @test "validate_ui_session_ttl_seconds rejects invalid and accepts valid" {
-    # What: TTL must be a positive integer within the max bound.
+    # What: TTL positive int within max.
     # Why: a bad TTL would be written or reused unchecked.
     # From: Issue #1683 | PR #1858
     local repo_root
@@ -5942,7 +5942,7 @@ _setup_keys_kea_fixture() {
 }
 
 @test "set_env_key collapses duplicate assignments to one" {
-    # What: a key present twice ends up assigned exactly once.
+    # What: Duplicate key assigned once.
     # Why: repair must not rewrite every duplicate line.
     # From: Issue #1683 | PR #1858
     local repo_root ef
@@ -6016,7 +6016,7 @@ EOF
 
 @test "check logging-matrix fails a service with no matrix row" {
     # What: a real Compose service, absent from the matrix.
-    # Why: issue #633: every service needs a declared row.
+    # Why: Every service needs matrix row.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/lm-extra"
     _logging_matrix_fixture "${r}" "svc-a"
@@ -6041,7 +6041,7 @@ EOF
 
 @test "check logging-matrix fails a collapsed/duplicate row" {
     # What: two rows whose names normalize to the same one.
-    # Why: a genuine row-parsing defense, distinct from #1.
+    # Why: Genuine row-parsing defense.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/lm-dup"
     mkdir -p "${r}/docs"
@@ -6087,7 +6087,7 @@ EOF
 
 @test "check logging-matrix fails a drifted quickstart web_log job" {
     # What: quickstart's inline job no longer matches it.
-    # Why: #849's own stated byte-identical promise.
+    # Why: Byte-identical promise.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/lm-weblog"
     _logging_matrix_fixture "${r}" "svc-a"
@@ -6108,8 +6108,8 @@ EOF
 }
 
 @test "check logging-matrix passes a matching quickstart web_log fixture" {
-    # What: an in-sync inline web_log job passes the parity check.
-    # Why: the fixture-level match case (from the old weblog-parity bats).
+    # What: Inline web_log passes parity.
+    # Why: Fixture-level match case.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/lm-weblog-ok"
     _logging_matrix_fixture "${r}" "svc-a"
@@ -6239,9 +6239,8 @@ EOF
 }
 
 @test "check trivy-action-direct-usage flags direct + unwired calls in composite actions" {
-    # What: a non-wrapper composite calling trivy-action, and one calling
-    # trivy-scan-retry with no dockerhub wiring.
-    # Why: absorbs the composite-action call-site coverage.
+    # What: Composite calls trivy-action.
+    # Why: Absorbs call-site coverage.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/trivy-comp"
     mkdir -p "${r}/.github/actions/aquasecurity-trivy-action-centralized-version" "${r}/.github/actions/other"
@@ -6257,8 +6256,8 @@ EOF
 }
 
 @test "check trivy-action-direct-usage dockerhub-key wiring variants" {
-    # What: interleaved-comment + both keys pass; only-one / bare uses fail.
-    # Why: absorbs the trivy-scan-retry dockerhub-wiring edge coverage.
+    # What: Interleaved + both pass; others fail.
+    # Why: Absorbs trivy-scan edge coverage.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/trivy-keys"; mkdir -p "${r}/.github/workflows"
     cat > "${r}/.github/workflows/s.yml" <<'EOF'
@@ -6472,7 +6471,7 @@ EOF
 
 @test "check changelog-direct-edit warns without the release label" {
     # What: a direct CHANGELOG.md edit, no exemption label.
-    # Why: issue #893: warn-only, never blocks the build.
+    # Why: Warn-only, never blocks.
     # From: Issue #1683 | PR #1858
     run bash "${CI_SH}" check changelog-direct-edit "CHANGELOG.md"
     [ "${status}" -eq 0 ]
@@ -6522,7 +6521,7 @@ _smoke_coverage_fixture() {
 
 @test "check build-tools-smoke-coverage passes on the real repo" {
     # What: real SOT/smoke pair is consistent, not a gap.
-    # Why: cargo-tarpaulin (opt-in) + timeout (wrapper) are covered.
+    # Why: Cargo-tarpaulin + timeout covered.
     # From: Issue #1683 | PR #1858
     run bash "${CI_SH}" check build-tools-smoke-coverage
     [ "${status}" -eq 0 ]
@@ -6542,7 +6541,7 @@ _smoke_coverage_fixture() {
 
 @test "check build-tools-smoke-coverage fails an uncovered tool" {
     # What: a Dockerfile tool, absent from smoke/exclusions.
-    # Why: issue #790/#791/#822's exact failure shape.
+    # Why: Exact failure shape.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/uncovered"
     _smoke_coverage_fixture "${r}" newtool
@@ -6563,8 +6562,8 @@ _smoke_coverage_fixture() {
 }
 
 @test "check build-tools-smoke-coverage fails an SOT tool smoke never covers" {
-    # What: SOT lists a tool absent from smoke and its mechanisms.
-    # Why: SOT owns the list; an uncovered entry is a false claim.
+    # What: SOT lists tool absent from smoke.
+    # Why: SOT owns; uncovered is false.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/sotgap"
     _smoke_coverage_fixture "${r}"
@@ -6577,8 +6576,8 @@ _smoke_coverage_fixture() {
 }
 
 @test "check build-tools-smoke-coverage accepts SOT timeout and opt-in tools" {
-    # What: SOT lists timeout (wrapper) plus an EXTRA opt-in tool.
-    # Why: smoke covers both without a static required_tools entry.
+    # What: SOT lists timeout + opt-in.
+    # Why: Smoke covers both.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/sotalt"
     mkdir -p "${r}/tools/build-tools" "${r}/scripts/untracked"
@@ -6651,8 +6650,8 @@ _smoke_coverage_fixture() {
 }
 
 @test "verify-version-banner.sh matches a banner and ignores the tool exit code" {
-    # What: banner match passes; mismatch / too-few-args fail closed.
-    # Why: shared lsof-banner check; lsof -v's exit code is unreliable.
+    # What: Banner passes; others fail.
+    # Why: lsof-banner check; exit uncertain.
     # From: Issue #1613 | PR #1858
     local vb="${BATS_TEST_DIRNAME}/../../scripts/lib/verify-version-banner.sh"
     [ -f "${vb}" ]
@@ -6669,8 +6668,8 @@ FXEOF
 }
 
 @test "the six lsof consumers COPY and invoke the shared verify-version-banner.sh" {
-    # What: shared COPY + invoke, no inline lsof / utilities-tools stage.
-    # Why: the shared script must replace the drifted inline banner checks.
+    # What: Shared COPY + invoke.
+    # Why: Replaces drifted banner checks.
     # From: Issue #1613 | PR #1858
     local root="${BATS_TEST_DIRNAME}/../.." f df
     for f in dhcp-proxy dhcp dns proxy ui watchdog; do
@@ -8191,7 +8190,7 @@ _version_fixture_repo() {
 # =========================================================
 
 # What: Load setup.sh's real update-migration functions.
-# Why: Test true migrate_env_for_update without sourcing setup.sh.
+# Why: Test without sourcing setup.sh.
 # From: Issue #1683 | PR #1546
 _load_setup_update_helpers() {
     local repo_root="$1"
@@ -8214,7 +8213,7 @@ _load_setup_update_helpers() {
     source "${helper_file}"
 }
 
-# What: A fully-converged install .env, every key backfilled.
+# What: Converged .env, all keys filled.
 # Why: A missing key would fail the no-op test's first run.
 # From: Issue #1683 | PR #1546
 _write_converged_env_fixture() {
@@ -8270,8 +8269,8 @@ _write_legacy_env_fixture() {
 }
 
 @test "migrate_env_for_update is a no-op on an already-converged .env" {
-    # What: A converged .env stays byte-identical over two runs.
-    # Why: AG-OP-006 idempotence; no rewrite on repeat update.
+    # What: .env stays byte-identical.
+    # Why: Idempotent, no rewrite.
     # From: Issue #1683 | PR #1546
     local repo_root env_file oh h1 h2
     repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
@@ -8287,7 +8286,7 @@ _write_legacy_env_fixture() {
 
 @test "migrate_env_for_update runs cleanly under set -u" {
     # What: A quickstart install must not trip nounset.
-    # Why: Unset prodsync locals must stay guarded (AG-VAL-002).
+    # Why: Unset prodsync guarded.
     # From: Issue #1683 | PR #1546
     local repo_root env_file
     repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
@@ -8299,7 +8298,7 @@ _write_legacy_env_fixture() {
 }
 
 @test "migrate_env_for_update converges a legacy .env and is stable on rerun" {
-    # What: Legacy keys migrate once, second run changes nothing.
+    # What: Legacy keys migrate once.
     # Why: AG-OP-007 convergence; secrets must not rotate.
     # From: Issue #1683 | PR #1546
     local repo_root env_file a1 a2 s1 s2
@@ -8321,7 +8320,7 @@ _write_legacy_env_fixture() {
 }
 
 @test "migrate_env_for_update generates a UI password once, never rotates it" {
-    # What: The conditional UI-password branch runs once only.
+    # What: UI-password branch runs once.
     # Why: AG-OP-006 stable secrets on repeat execution.
     # From: Issue #1683 | PR #1546
     local repo_root env_file gp p2
@@ -8352,8 +8351,8 @@ _write_legacy_env_fixture() {
 }
 
 @test "migrate_env_for_update preserves a config/prod PXE value across two runs" {
-    # What: A prod install backfills from config/prod, not .env.
-    # Why: AG-OP-009 preservation; the confirmed #1546 bug.
+    # What: Prod install backfills from config/prod.
+    # Why: AG-OP-009 preservation.
     # From: Issue #1683 | PR #1546
     local repo_root env_file pd cd cpe
     repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
@@ -8371,7 +8370,7 @@ _write_legacy_env_fixture() {
 }
 
 @test "migrate_env_for_update preserves a direct config/prod edit after migration" {
-    # What: A later config/prod edit wins over a stale .env dup.
+    # What: Direct config/prod edit wins over stale .env.
     # Why: AG-OP-009 preserve existing operator values.
     # From: Issue #1683 | PR #1546
     local repo_root env_file pd cd cpe
@@ -8389,8 +8388,8 @@ _write_legacy_env_fixture() {
 }
 
 @test "migrate_env_for_update tolerates an incomplete hand-edited PXE pair" {
-    # What: A server value with no filename must not abort update.
-    # Why: Hand-edited config/prod is never guaranteed complete.
+    # What: Incomplete PXE pair does not abort update.
+    # Why: Hand-edited config/prod may be incomplete.
     # From: Issue #1683 | PR #1546
     local repo_root env_file pd cd cpe
     repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
@@ -8405,8 +8404,8 @@ _write_legacy_env_fixture() {
 }
 
 @test "migrate_env_for_update tolerates an invalid hand-edited value" {
-    # What: A malformed value must not abort a working update.
-    # Why: Hand-edited files need not satisfy stricter validation.
+    # What: Malformed value does not abort update.
+    # Why: Hand-edited files may skip validation.
     # From: Issue #1683 | PR #1546
     local repo_root env_file pd cd cpe
     repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
@@ -8421,8 +8420,8 @@ _write_legacy_env_fixture() {
 }
 
 @test "migrate_env_for_update preserves all custom per-service state dirs" {
-    # What: every custom absolute per-service state dir survives.
-    # Why: AG-OP-009 override preservation for all five keys.
+    # What: Custom per-service state dirs survive.
+    # Why: AG-OP-009 override preservation.
     # From: Issue #1683 | PR #1858
     local repo_root env_file k
     repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
@@ -8443,8 +8442,8 @@ _write_legacy_env_fixture() {
 }
 
 @test "migrate_env_for_update drops a per-service state dir equal to the one-root default" {
-    # What: a per-service dir equal to the derived default is dropped.
-    # Why: one-root contract keeps LANCACHE_STATE_DIR the single source.
+    # What: Default per-service dir is dropped.
+    # Why: One-root contract via LANCACHE_STATE_DIR.
     # From: Issue #1683 | PR #1858
     local repo_root env_file
     repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
@@ -8457,8 +8456,8 @@ _write_legacy_env_fixture() {
 }
 
 @test "migrate_env_for_update writes LANCACHE_STATE_DIR on a legacy .env" {
-    # What: the one-root key is present after migrating legacy state.
-    # Why: LANCACHE_STATE_DIR is the single state-root contract.
+    # What: One-root key present after legacy migration.
+    # Why: LANCACHE_STATE_DIR single state-root contract.
     # From: Issue #1683 | PR #1858
     local repo_root env_file
     repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
@@ -8471,8 +8470,8 @@ _write_legacy_env_fixture() {
 }
 
 @test "production_state_root_default keeps deploy/prod state out of the checkout" {
-    # What: a deploy/prod checkout defaults state off the checkout.
-    # Why: runtime state must not live inside the git checkout.
+    # What: Deploy/prod state defaults off checkout.
+    # Why: Runtime state outside git checkout.
     # From: Issue #1683 | PR #1858
     local repo_root root
     repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
@@ -8484,7 +8483,7 @@ _write_legacy_env_fixture() {
 }
 
 @test "runtime_env_file_for_install_dir prefers deploy/prod/.env.local when present" {
-    # What: deploy/prod uses .env.local override when it exists.
+    # What: Deploy/prod prefers .env.local override.
     # Why: a git pull must not clobber operator prod values.
     # From: Issue #1683 | PR #1858
     local repo_root dp
@@ -8499,8 +8498,8 @@ _write_legacy_env_fixture() {
 }
 
 @test "deploy_prod_repo_input_paths snapshots repo-root runtime inputs for deploy/prod" {
-    # What: deploy/prod backup captures ../../ repo-root inputs.
-    # Why: rollback must restore the full manual prod config.
+    # What: Backup captures repo-root inputs.
+    # Why: Rollback restores prod config.
     # From: Issue #1683 | PR #1858
     local repo_root rr dp
     repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
