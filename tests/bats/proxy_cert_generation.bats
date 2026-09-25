@@ -8,6 +8,8 @@
 # - Subject Alternative Name (SAN) handling
 # - Serial file monotonic counter
 
+bats_require_minimum_version 1.5.0
+
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     helper_file="$BATS_TEST_TMPDIR/proxy-cert-helpers.sh"
@@ -446,7 +448,7 @@ teardown() {
     run _sign_cert "csr-fail.example.com" "$key_as_dir" "$crt" "subjectAltName=DNS:csr-fail.example.com"
 
     [ "$status" -ne 0 ]
-    ! compgen -G "$BATS_TEST_TMPDIR/lancache-cert.*" > /dev/null
+    run ! compgen -G "$BATS_TEST_TMPDIR/lancache-cert.*" > /dev/null
     [ ! -f "$crt" ]
 
     rmdir "$key_as_dir"
@@ -461,7 +463,7 @@ teardown() {
     _sign_cert "$domain" "$key" "$crt" "subjectAltName=DNS:${domain}"
 
     # Check that no orphaned CSR files remain
-    ! compgen -G "$BATS_TEST_TMPDIR/lancache-cert.*" > /dev/null
+    run ! compgen -G "$BATS_TEST_TMPDIR/lancache-cert.*" > /dev/null
 }
 
 # What: Signs two certificates concurrently using separate CSRs.
@@ -487,7 +489,7 @@ teardown() {
     [ "$second_status" -eq 0 ]
     [ -f "$first_crt" ]
     [ -f "$second_crt" ]
-    ! compgen -G "$BATS_TEST_TMPDIR/lancache-cert.*" > /dev/null
+    run ! compgen -G "$BATS_TEST_TMPDIR/lancache-cert.*" > /dev/null
 }
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -521,7 +523,7 @@ teardown() {
     # Before the #655 fix, the key from the successful `openssl req` step
     # would still be sitting on disk here even though signing failed.
     [ ! -f "$key" ]
-    ! compgen -G "$BATS_TEST_TMPDIR/lancache-cert.*" > /dev/null
+    run ! compgen -G "$BATS_TEST_TMPDIR/lancache-cert.*" > /dev/null
 
     rmdir "$crt"
 }
@@ -549,7 +551,7 @@ teardown() {
 
     [ "$status" -ne 0 ]
     [ ! -f "$crt" ]
-    ! compgen -G "$BATS_TEST_TMPDIR/lancache-cert.*.csr" > /dev/null
+    run ! compgen -G "$BATS_TEST_TMPDIR/lancache-cert.*.csr" > /dev/null
 }
 
 # Reproduces #655's exact scenario: IP_SSL migrates from 192.168.1.11 to
