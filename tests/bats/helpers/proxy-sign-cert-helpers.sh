@@ -15,34 +15,38 @@
 # would not have caught either the CN-length or filename-length regression
 # this file's tests guard against.
 _sign_cert() {
-    local cn="$1" key="$2" crt="$3" ext="${4:-}"
+    local cn="$1" key="$2" crt="$3" ext="${4:-}" csr
+    if ! csr="$(mktemp -p "$BATS_TEST_TMPDIR" lancache-cert.XXXXXX)"; then
+        echo "[lancache] ERROR: Failed to create certificate request file" >&2
+        return 1
+    fi
     if ! openssl req -new -newkey rsa:2048 -nodes -subj "/CN=lancache-ng" \
-        -keyout "$key" -out "$BATS_TEST_TMPDIR/lancache-cert.csr" 2>/dev/null; then
-        rm -f "$BATS_TEST_TMPDIR/lancache-cert.csr"
+        -keyout "$key" -out "$csr" 2>/dev/null; then
+        rm -f "$csr"
         echo "[lancache] ERROR: Failed to generate certificate request for ${cn}" >&2
         return 1
     fi
     if [ -n "$ext" ]; then
         if ! openssl x509 -req -days 3650 \
-            -in "$BATS_TEST_TMPDIR/lancache-cert.csr" \
+            -in "$csr" \
             -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/ca.key" -CAserial "$SERIAL_FILE" \
             -extfile <(printf "%s" "$ext") \
             -out "$crt" 2>/dev/null; then
-            rm -f "$BATS_TEST_TMPDIR/lancache-cert.csr" "$key" "$crt"
+            rm -f "$csr" "$key" "$crt"
             echo "[lancache] ERROR: Failed to sign certificate for ${cn}" >&2
             return 1
         fi
     else
         if ! openssl x509 -req -days 3650 \
-            -in "$BATS_TEST_TMPDIR/lancache-cert.csr" \
+            -in "$csr" \
             -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/ca.key" -CAserial "$SERIAL_FILE" \
             -out "$crt" 2>/dev/null; then
-            rm -f "$BATS_TEST_TMPDIR/lancache-cert.csr" "$key" "$crt"
+            rm -f "$csr" "$key" "$crt"
             echo "[lancache] ERROR: Failed to sign certificate for ${cn}" >&2
             return 1
         fi
     fi
-    rm -f "$BATS_TEST_TMPDIR/lancache-cert.csr"
+    rm -f "$csr"
 }
 
 _bounded_cert_name() {
