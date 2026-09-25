@@ -1506,14 +1506,24 @@ ci_cmd_rust_build() {
     for wrapper in cc gcc c++ g++; do ln -sf "${distcc_bin}" "/usr/local/lib/distcc/${wrapper}"; done
     printf '%s\n' '#!/bin/sh' 'case "${1:-}" in' '  distcc|*/distcc) exec "$@" ;;' '  *) exec /usr/local/bin/sccache "$@" ;;' 'esac' > /usr/local/bin/lancache-rustc-wrapper
     chmod +x /usr/local/bin/lancache-rustc-wrapper
+    local distcc_enabled=0 ccache_enabled=0 ca_installed=0 original_path="${PATH}"
+    # What: one EXIT trap cleans CA trust and the distcc pump.
+    # Why: two separate EXIT traps overwrote each other, leaking CA.
+    _rust_build_cleanup() {
+        if [ "${distcc_enabled:-0}" = "1" ]; then distcc-pump --shutdown >/dev/null 2>&1 || true; fi
+        if [ "${ca_installed:-0}" = "1" ]; then
+            rm -f /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt
+            update-ca-certificates >/dev/null 2>&1 || true
+        fi
+    }
+    trap _rust_build_cleanup EXIT
     # What: trust the proxy CA so cargo's crates.io fetch verifies.
-    # Why: removed on EXIT; never persisted in a runtime layer.
+    # Why: cleanup trap removes it; never persisted in a layer.
     if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then
         cp /run/secrets/project_selfhosted_proxy_ca /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt
         update-ca-certificates >/dev/null
-        trap 'rm -f /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; update-ca-certificates >/dev/null 2>&1 || true' EXIT
+        ca_installed=1
     fi
-    local distcc_enabled=0 ccache_enabled=0 original_path="${PATH}"
     local real_cc real_gcc real_cxx real_gxx
     real_cc="$(PATH="${original_path}" command -v cc)"
     real_gcc="$(PATH="${original_path}" command -v gcc)"
@@ -1532,7 +1542,6 @@ ci_cmd_rust_build() {
     disable_distcc() {
         if [ "${distcc_enabled:-0}" = "1" ]; then distcc-pump --shutdown >/dev/null 2>&1 || true; fi
         distcc_enabled=0
-        trap - EXIT
         unset DISTCC_POTENTIAL_HOSTS DISTCC_HOSTS DISTCC_FALLBACK CC GCC CXX GXX INCLUDE_SERVER_PORT INCLUDE_SERVER_PID
         PATH="${original_path}"; export PATH
     }
@@ -1543,7 +1552,7 @@ ci_cmd_rust_build() {
                 printf '%s\n' "${candidate}"; return 0
             fi
         done
-        echo "distcc wrapper directory not found" >&2; exit 1
+        echo "distcc wrapper directory not found" >&2; return 1
     }
     # What: read one farm host's real compiler identity.
     # Why: ccache content-check misses a remote toolchain bump.
@@ -1570,7 +1579,6 @@ ci_cmd_rust_build() {
             PATH="${distcc_wrapper_dir}:${PATH}"; export PATH
             export CC=cc GCC=gcc CXX=c++ GXX=g++
             distcc_enabled=1
-            trap 'distcc-pump --shutdown' EXIT
             printf '%s\n' 'int main(void) { return 0; }' > "${distcc_probe_dir}/distcc-probe.c"
             if ! cc -c "${distcc_probe_dir}/distcc-probe.c" -o "${distcc_probe_dir}/distcc-probe.o" >"${distcc_probe_dir}/distcc-probe.log" 2>&1; then
                 disable_distcc; rm -rf "${distcc_probe_dir}"
@@ -1612,7 +1620,11 @@ ci_cmd_rust_build() {
             export CC="ccache ${real_cc}" GCC="ccache ${real_gcc}" CXX="ccache ${real_cxx}" GXX="ccache ${real_gxx}"
             ccache_enabled=1
             printf '%s\n' 'int main(void) { return 0; }' > "${ccache_probe_dir}/ccache-probe.c"
-            if ! ( cd "${ccache_probe_dir}" && $CC -c ccache-probe.c -o ccache-probe.o ) >"${ccache_probe_dir}/ccache-probe.log" 2>&1; then
+            # What: probe compiles into an isolated ccache dir.
+            # Why: keeps the real build cache clean; word-split-safe.
+            local ccache_probe_cache_dir="${ccache_probe_dir}/probe-cache"
+            mkdir -p "${ccache_probe_cache_dir}"
+            if ! ( cd "${ccache_probe_dir}" && CCACHE_DIR="${ccache_probe_cache_dir}" ccache "${real_cc}" -c ccache-probe.c -o ccache-probe.o ) >"${ccache_probe_dir}/ccache-probe.log" 2>&1; then
                 cat "${ccache_probe_dir}/ccache-probe.log" >&2
                 disable_ccache; rm -rf "${ccache_probe_dir}"
                 echo "[INFO] ccache probe unavailable; continuing with plain distcc (no cache layer)." >&2; return 0
@@ -1638,11 +1650,11 @@ ci_cmd_rust_build() {
     # Why: no in-file default; owner is PROJECT_CARGO_* (AG-CI-006).
     resolve_cargo_profile_overrides() {
         local lto="${PROJECT_CARGO_LTO:-}" cgu="${PROJECT_CARGO_CODEGENUNIT:-}"
-        [ -n "${lto}" ] || { echo "PROJECT_CARGO_LTO is required (no default; Issue #1095)" >&2; exit 1; }
-        case "${lto}" in off|thin|fat|true|false) ;; *) echo "PROJECT_CARGO_LTO must be off|thin|fat|true|false (got '${lto}')" >&2; exit 1;; esac
-        [ -n "${cgu}" ] || { echo "PROJECT_CARGO_CODEGENUNIT is required (no default; Issue #1095)" >&2; exit 1; }
-        case "${cgu}" in ''|*[!0-9]*) echo "PROJECT_CARGO_CODEGENUNIT must be a positive integer (got '${cgu}')" >&2; exit 1;; esac
-        [ "${cgu}" -gt 0 ] || { echo "PROJECT_CARGO_CODEGENUNIT must be greater than zero" >&2; exit 1; }
+        [ -n "${lto}" ] || { echo "PROJECT_CARGO_LTO is required (no default; Issue #1095)" >&2; return 1; }
+        case "${lto}" in off|thin|fat|true|false) ;; *) echo "PROJECT_CARGO_LTO must be off|thin|fat|true|false (got '${lto}')" >&2; return 1;; esac
+        [ -n "${cgu}" ] || { echo "PROJECT_CARGO_CODEGENUNIT is required (no default; Issue #1095)" >&2; return 1; }
+        case "${cgu}" in ''|*[!0-9]*) echo "PROJECT_CARGO_CODEGENUNIT must be a positive integer (got '${cgu}')" >&2; return 1;; esac
+        [ "${cgu}" -gt 0 ] || { echo "PROJECT_CARGO_CODEGENUNIT must be greater than zero" >&2; return 1; }
         export CARGO_PROFILE_RELEASE_LTO="${lto}" CARGO_PROFILE_RELEASE_CODEGEN_UNITS="${cgu}"
         echo "[INFO] using CARGO_PROFILE_RELEASE_LTO=${lto} CARGO_PROFILE_RELEASE_CODEGEN_UNITS=${cgu}." >&2
     }
@@ -1657,8 +1669,8 @@ ci_cmd_rust_build() {
         else
             jobs_source="explicit CARGO_BUILD_JOBS"
         fi
-        case "${jobs}" in ''|*[!0-9]*) echo "CARGO_BUILD_JOBS must be a positive integer" >&2; exit 1;; esac
-        [ "${jobs}" -gt 0 ] || { echo "CARGO_BUILD_JOBS must be greater than zero" >&2; exit 1; }
+        case "${jobs}" in ''|*[!0-9]*) echo "CARGO_BUILD_JOBS must be a positive integer" >&2; return 1;; esac
+        [ "${jobs}" -gt 0 ] || { echo "CARGO_BUILD_JOBS must be greater than zero" >&2; return 1; }
         echo "[INFO] using ${jobs} job(s) (${jobs_source})." >&2
         printf '%s\n' "${jobs}"
     }
@@ -4926,7 +4938,10 @@ ci_main() {
         ci_log "[CI-ERROR-CORE-0002]" "command=\"${command}\" reason=\"unknown subcommand\" known=\"${!CI_DISPATCH[*]}\""
         return 2
     fi
-    case "${command}" in check) ;; *) ci_require_manifest || return "$?" ;; esac
+    # What: check + rust-build need no SOT manifest.
+    # Why: rust-build is bind-mounted into a builder with no SOT.
+    # From: Issue #1683
+    case "${command}" in check|rust-build) ;; *) ci_require_manifest || return "$?" ;; esac
     "${fn}" "$@"
 }
 
