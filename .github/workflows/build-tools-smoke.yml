@@ -18,6 +18,7 @@ on:
     paths:
       - ".github/workflows/build-tools-smoke.yml"
       - "certs/generate-ca.sh"
+      - "tools/build-tools/Dockerfile"
       - "tests/bats/**"
       - "tests/shellspec/**"
       - "tests/fixtures/**"
@@ -124,6 +125,7 @@ on:
     paths:
       - ".github/workflows/build-tools-smoke.yml"
       - "certs/generate-ca.sh"
+      - "tools/build-tools/Dockerfile"
       - "tests/bats/**"
       - "tests/shellspec/**"
       - "tests/fixtures/**"
