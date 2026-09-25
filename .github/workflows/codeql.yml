@@ -1,0 +1,96 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# What: CodeQL security analysis; scope owned by the SOT.
+# Why: separate workflow (§73); ci.sh admits, YAML orchestrates.
+# From: Issue #1683
+name: CI 2.0 CodeQL
+on:
+  pull_request:
+  push:
+    branches: [current_dev, master]
+  schedule:
+    - cron: "27 3 * * 1"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-2.0-codeql-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+defaults:
+  run:
+    shell: bash
+# What: GHCR credentials ci.sh reads; no login action, no pin.
+# Why: auth is ci.sh policy; the workflow only supplies the env.
+# From: Issue #1683
+env:
+  GHCR_USERNAME: ${{ github.actor }}
+  GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+jobs:
+  # What: emit the CodeQL language matrix from ci.sh.
+  # Why: §70 books runners only for real analysis.
+  # From: Issue #1683
+  impact:
+    name: codeql-impact
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.impact.outputs.codeql-matrix }}
+    steps:
+      # What: native fail-closed checkout with diff history.
+      # Why: no SHA pin outside the SOT; ci.sh reads the diff.
+      # From: Issue #1683
+      - &bootstrap
+        name: Bootstrap the working tree
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          git init -q .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: bearer ${GHCR_TOKEN}"
+          git fetch -q --no-tags origin "${GITHUB_REF}" ${BASE_SHA:+"${BASE_SHA}"}
+          git checkout -q FETCH_HEAD
+      - name: Collect changed files
+        id: changed
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: echo "file=$(bash .github/scripts/ci.sh changed-files)" >> "$GITHUB_OUTPUT"
+      - name: Admit CodeQL analysis
+        id: impact
+        env:
+          CHANGED_FILES: ${{ steps.changed.outputs.file }}
+        run: bash .github/scripts/ci.sh codeql-impact >> "$GITHUB_OUTPUT"
+
+  # What: analyze each admitted language on its own runner.
+  # Why: an empty matrix books no runner (§70).
+  # From: Issue #1683
+  analyze:
+    name: CodeQL ${{ matrix.language }}
+    needs: impact
+    if: ${{ fromJSON(needs.impact.outputs.matrix).include[0] != null }}
+    permissions:
+      contents: read
+      security-events: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.impact.outputs.matrix) }}
+    steps:
+      - *bootstrap
+      # What: render the CodeQL config from the SOT.
+      # Why: SOT owns scope; no committed config file.
+      # From: Issue #1683
+      - name: Render the CodeQL config
+        run: bash .github/scripts/ci.sh codeql-config > "${RUNNER_TEMP}/codeql-config.yml"
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          config-file: ${{ runner.temp }}/codeql-config.yml
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+        with:
+          category: "/language:${{ matrix.language }}"

@@ -118,37 +118,56 @@ teardown() {
     [[ "${output}" == *"ui=false"* ]]
     [[ "${output}" == *"dns=false"* ]]
 }
-@test "codeql-impact admits Rust analysis on an analyzed crate source change" {
-    # What: services/*/src path triggers Rust analysis.
-    # Why: §73 permits analysis on source changes.
+@test "codeql-impact emits a rust-only matrix on crate source change" {
+    # What: crate src change scopes rust only.
+    # Why: §70 books no empty runner; SOT scope.
     # From: Issue #1683
     run bash "${CI_SH}" codeql-impact services/ui/src/main.rs
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"codeql-rust=true"* ]]
+    [[ "${output}" == *'codeql-matrix={"include":[{"language":"rust"}]}'* ]]
 }
-@test "codeql-impact is NOOP for a non-source change in a Rust service" {
-    # What: Service Dockerfile is not analyzed source.
-    # Why: Non-source changes must not extract (§73).
+@test "codeql-impact emits an empty matrix for a non-source change" {
+    # What: Dockerfile is not analyzed source.
+    # Why: empty matrix books no runner (§70).
     # From: Issue #1683
     run bash "${CI_SH}" codeql-impact services/ui/Dockerfile
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"codeql-rust=false"* ]]
+    [[ "${output}" == *'codeql-matrix={"include":[]}'* ]]
 }
-@test "codeql-impact is NOOP for a non-Rust service change" {
-    # What: Proxy change touches no analyzed source.
-    # Why: unrelated services must NOOP (§73).
+@test "codeql-impact emits an empty matrix for a non-Rust service" {
+    # What: proxy touches no analyzed source.
+    # Why: unrelated services book no runner (§70).
     # From: Issue #1683
     run bash "${CI_SH}" codeql-impact services/proxy/nginx.conf
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"codeql-rust=false"* ]]
+    [[ "${output}" == *'codeql-matrix={"include":[]}'* ]]
 }
-@test "codeql-impact admits Rust analysis on a CodeQL config change" {
-    # What: The query config re-scopes what CodeQL analyzes.
-    # Why: Config change affects analysis scope (§73).
+@test "codeql-impact emits an empty matrix on a SOT-only change" {
+    # What: SOT change alone touches no analyzed source.
+    # Why: no path-hammer; source impact decides (§11).
     # From: Issue #1683
-    run bash "${CI_SH}" codeql-impact .github/codeql/codeql-config.yml
+    run bash "${CI_SH}" codeql-impact .github/yaml/build-manifest.yml
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"codeql-rust=true"* ]]
+    [[ "${output}" == *'codeql-matrix={"include":[]}'* ]]
+}
+@test "codeql-config renders queries+paths+ignore from the SOT" {
+    # What: config is derived from the SOT, not a file.
+    # Why: one SOT owner; codeql-config.yml is removed.
+    # From: Issue #1683
+    run bash "${CI_SH}" codeql-config
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *'- uses: security-extended'* ]]
+    [[ "${output}" == *'- services/ui/src'* ]]
+    [[ "${output}" == *'- .github/workflows'* ]]
+    [[ "${output}" == *'- "**/target/**"'* ]]
+}
+@test "codeql-impact emits an actions-only matrix on a workflow change" {
+    # What: workflow change scopes actions only.
+    # Why: workflows are the actions scope.
+    # From: Issue #1683
+    run bash "${CI_SH}" codeql-impact .github/workflows/ci.yml
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *'codeql-matrix={"include":[{"language":"actions"}]}'* ]]
 }
 
 @test "plan rebuilds proxy on a dns-domains (cdn-domains.txt) change" {

@@ -30,7 +30,7 @@ CI_REPO_ROOT="${CI_REPO_ROOT:-$(cd -- "${CI_SCRIPT_DIR}/../.." && pwd)}"
 # Why: One table is membership, dispatch and error text.
 # From: Issue #1683
 declare -A CI_DISPATCH=(
-    [plan]=ci_cmd_plan [plan-matrix]=ci_cmd_plan_matrix [impact]=ci_cmd_impact [codeql-impact]=ci_cmd_codeql_impact [identity]=ci_cmd_identity
+    [plan]=ci_cmd_plan [plan-matrix]=ci_cmd_plan_matrix [impact]=ci_cmd_impact [codeql-impact]=ci_cmd_codeql_impact [codeql-config]=ci_cmd_codeql_config [identity]=ci_cmd_identity
     [resolve]=ci_cmd_resolve [build]=ci_cmd_build [build-args]=ci_cmd_build_args
     [build-tools]=ci_cmd_build_tools [publish]=ci_cmd_publish [verify]=ci_cmd_verify
     [test]=ci_cmd_test [coverage]=ci_cmd_coverage [scan]=ci_cmd_scan [assemble]=ci_cmd_assemble
@@ -351,41 +351,47 @@ ci_cmd_plan() {
     ci_log "[CI-INFO-PLAN-0001]" "phase=plan changed=${#changed[@]} note=\"candidates only; identity/CAS decides build\""
 }
 
-# What: CodeQL config's own analyzed Rust source paths.
-# Why: config is the single truth for CodeQL paths.
-# From: Issue #1683
-_ci_codeql_rust_paths() {
-    local cfg="${1:-.github/codeql/codeql-config.yml}"
-    [ -f "${cfg}" ] || return 0
-    awk '
-        /^paths:[[:space:]]*$/ { in_paths=1; next }
-        /^[^[:space:]]/        { in_paths=0 }
-        in_paths && $1=="-"    { print $2 }
-    ' "${cfg}" | grep '^services/' || true
-}
-
-# What: CodeQL Rust admission on source or config change.
-# Why: §73 owner; unchanged is NOOP, not re-extract.
+# What: CodeQL admission: dynamic language matrix.
+# Why: §70 books no empty runner; path picks candidates.
 # From: Issue #1683
 ci_cmd_codeql_impact() {
     local -a changed=()
     _ci_collect_changed changed "$@"
-    local rust=false p cfg=".github/codeql/codeql-config.yml"
-    # What: match against config's own analyzed paths.
-    # Why: stays consistent with CodeQL extracts (§73).
-    # From: Issue #1683
-    while IFS= read -r p; do
-        [ -n "${p}" ] || continue
-        if _ci_paths_touch "${p}" "${changed[@]}"; then rust=true; break; fi
-    done < <(_ci_codeql_rust_paths "${cfg}")
-    # What: config change re-scopes CodeQL analysis.
-    # Why: path changes in config change what runs.
-    # From: Issue #1683
-    if [ "${rust}" = false ] && _ci_paths_touch "${cfg}" "${changed[@]}"; then
-        rust=true
-    fi
-    printf 'codeql-rust=%s\n' "${rust}"
-    ci_log "[CI-INFO-CODEQL-0001]" "phase=codeql-impact rust=${rust} changed=${#changed[@]}"
+    local include='[]' lang p hit
+    while IFS= read -r lang; do
+        [ -n "${lang}" ] || continue
+        hit=false
+        while IFS= read -r p; do
+            [ -n "${p}" ] || continue
+            _ci_paths_touch "${p}" "${changed[@]}" && { hit=true; break; }
+        done < <(_ci_block_entry_list codeql_languages "${lang}" paths)
+        [ "${hit}" = true ] && { include="$(_ci_matrix_append "${include}" language="${lang}")" || return 2; }
+    done < <(_ci_block_keys codeql_languages)
+    printf 'codeql-matrix={"include":%s}\n' "${include}"
+    ci_log "[CI-INFO-CODEQL-0001]" "phase=codeql-impact langs=$(printf '%s' "${include}" | jq -r 'length') changed=${#changed[@]}"
+}
+
+# What: Render the CodeQL config file from the SOT.
+# Why: SOT owns scope; the action reads a derived config.
+# From: Issue #1683
+ci_cmd_codeql_config() {
+    local item lang p
+    printf 'name: lancache-ng-codeql\n'
+    printf 'queries:\n'
+    while IFS= read -r item; do
+        printf '  - uses: %s\n' "${item}"
+    done < <(_ci_block_entry_list codeql "" queries)
+    printf 'paths:\n'
+    while IFS= read -r lang; do
+        [ -n "${lang}" ] || continue
+        while IFS= read -r p; do
+            [ -n "${p}" ] && printf '  - %s\n' "${p}"
+        done < <(_ci_block_entry_list codeql_languages "${lang}" paths)
+    done < <(_ci_block_keys codeql_languages)
+    printf 'paths-ignore:\n'
+    while IFS= read -r item; do
+        printf '  - %s\n' "${item}"
+    done < <(_ci_block_entry_list codeql "" paths_ignore)
 }
 
 # What: True when every changed path is documentation.

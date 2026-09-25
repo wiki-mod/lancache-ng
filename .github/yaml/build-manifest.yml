@@ -273,6 +273,22 @@ dependency_graph:
   netdata:
     contexts: []
 
+# What: CodeQL query suites and ignored paths.
+# Why: One SOT owner; codeql.yml/ci.sh derive, no dup.
+# From: Issue #1683
+codeql:
+  queries: [security-extended, security-and-quality]
+  paths_ignore: ["**/target/**"]
+
+# What: Analyzed paths per CodeQL language (entry=language).
+# Why: read like services; generic block reader, no dup.
+# From: Issue #1683
+codeql_languages:
+  actions:
+    paths: [.github/workflows]
+  rust:
+    paths: [services/dns/nats-subscriber/src, services/ui/src, services/watchdog/src]
+
 # What: Release channel and retention inventory.
 # Why: Consolidates release/stack-images.yml into the SOT.
 # From: Issue #1683
