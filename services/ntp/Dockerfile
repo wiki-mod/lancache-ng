@@ -39,7 +39,7 @@ ARG APT_CACHE_BUST=""
 # From: Issue #1781 | PR #1783
 RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
     if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
-      cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig && \
+      cp /etc/ssl/certs/ca-certificates.crt /var/tmp/ca-bundle.orig && \
       cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
     fi && \
     : "apt-cache-bust=${APT_CACHE_BUST}" && \
@@ -50,7 +50,7 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
     chrony-nts \
     curl \
     gettext-envsubst && \
-    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /var/tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
 # What: verify apk binaries execute, not just exist
 # Why: library deps fail at runtime, not during apk add
