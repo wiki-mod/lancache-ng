@@ -55,11 +55,11 @@ RUN set -eu; \
     done; \
     command -v musl-gcc >/dev/null; \
     [ -n "${MUSL_TARGET}" ] || { echo "MUSL_TARGET build-arg is required" >&2; exit 1; }; \
-    printf '%s\n' "${MUSL_TARGET}" > /tmp/musl-target; \
+    printf '%s\n' "${MUSL_TARGET}" > /var/tmp/musl-target; \
     # What: capture rustup targets, match via here-string.
     # Why: inherited pipefail would mask a live producer error.
     installed_musl_targets="$(rustup target list --installed)"; \
-    grep -qx "$(cat /tmp/musl-target)" <<<"${installed_musl_targets}"; \
+    grep -qx "$(cat /var/tmp/musl-target)" <<<"${installed_musl_targets}"; \
     distcc_bin="$(command -v distcc)"; \
     distcc_real_bin="/usr/local/bin/distcc-real"; \
     cp "$distcc_bin" "$distcc_real_bin"; \
@@ -189,15 +189,15 @@ cat > /usr/local/lib/lancache-ui-build-accel.sh <<'LANCACHE_UI_HELPERS_EOF'
       exit 1; \
     }; \
     extract_remote_toolchain_id() { \
-      rm -f /tmp/ccache-remote-toolchain-id; \
+      rm -f /var/tmp/ccache-remote-toolchain-id; \
       if command -v readelf >/dev/null 2>&1; then \
         readelf_comment_section="$(readelf -p .comment "$1" 2>/dev/null)"; \
-        sed -n 's/^ *\[[^]]*\] *//p' <<<"$readelf_comment_section" > /tmp/ccache-remote-toolchain-id; \
+        sed -n 's/^ *\[[^]]*\] *//p' <<<"$readelf_comment_section" > /var/tmp/ccache-remote-toolchain-id; \
       fi; \
     }; \
     configure_distcc() { \
       if [ -s /run/secrets/distcc_potential_hosts ]; then \
-        distcc_probe_dir="$(mktemp -d)"; \
+        distcc_probe_dir="$(mktemp -d -p /var/tmp)"; \
         DISTCC_POTENTIAL_HOSTS="$(cat /run/secrets/distcc_potential_hosts)"; export DISTCC_POTENTIAL_HOSTS; \
         distcc_hosts=""; \
         distcc_hosts_with_pump=""; \
@@ -259,7 +259,7 @@ cat > /usr/local/lib/lancache-ui-build-accel.sh <<'LANCACHE_UI_HELPERS_EOF'
     disable_ccache() { \
       ccache_enabled=0; \
       unset CCACHE_REMOTE_STORAGE CCACHE_DIR CCACHE_COMPILERCHECK CCACHE_PREFIX CCACHE_EXTRAFILES CCACHE_BASEDIR; \
-      rm -f /tmp/ccache-toolchain-id /tmp/ccache-remote-toolchain-id; \
+      rm -f /var/tmp/ccache-toolchain-id /var/tmp/ccache-remote-toolchain-id; \
       export CC=cc GCC=gcc CXX=c++ GXX=g++; \
     }; \
     # What: cache key reflects only single answering farm host
@@ -267,11 +267,11 @@ cat > /usr/local/lib/lancache-ui-build-accel.sh <<'LANCACHE_UI_HELPERS_EOF'
     # From: PR #1612
     configure_ccache() { \
       if [ "${distcc_enabled:-0}" = "1" ] && [ -s /run/secrets/ccache_redis_url ]; then \
-        if [ ! -s /tmp/ccache-remote-toolchain-id ]; then \
+        if [ ! -s /var/tmp/ccache-remote-toolchain-id ]; then \
           echo "[INFO] no verified remote distcc toolchain identity available (the distcc probe's compiled object carried no readable .comment identity, or readelf is missing); continuing with plain distcc (no cache layer) rather than risk a stale cross-toolchain cache hit." >&2; \
           return 0; \
         fi; \
-        ccache_probe_dir="$(mktemp -d)"; \
+        ccache_probe_dir="$(mktemp -d -p /var/tmp)"; \
         echo "[INFO] wrapping distcc with ccache (Redis remote storage)." >&2; \
         ccache_redis_endpoint="$(cat /run/secrets/ccache_redis_url)"; \
         case "$ccache_redis_endpoint" in \
@@ -279,11 +279,11 @@ cat > /usr/local/lib/lancache-ui-build-accel.sh <<'LANCACHE_UI_HELPERS_EOF'
           *) ccache_redis_endpoint="redis://$ccache_redis_endpoint" ;; \
         esac; \
         export CCACHE_REMOTE_STORAGE="$ccache_redis_endpoint"; \
-        export CCACHE_DIR=/tmp/ccache-ui; \
+        export CCACHE_DIR=/var/tmp/ccache-ui; \
         export CCACHE_PREFIX=distcc; \
         export CCACHE_COMPILERCHECK=content; \
-        printf '%s' "$BUILD_TOOLS_IMAGE" > /tmp/ccache-toolchain-id; \
-        export CCACHE_EXTRAFILES="/tmp/ccache-toolchain-id:/tmp/ccache-remote-toolchain-id"; \
+        printf '%s' "$BUILD_TOOLS_IMAGE" > /var/tmp/ccache-toolchain-id; \
+        export CCACHE_EXTRAFILES="/var/tmp/ccache-toolchain-id:/var/tmp/ccache-remote-toolchain-id"; \
         export CCACHE_BASEDIR="$ccache_probe_dir"; \
         export CC="ccache $real_cc" GCC="ccache $real_gcc" CXX="ccache $real_cxx" GXX="ccache $real_gxx"; \
         ccache_enabled=1; \
@@ -341,8 +341,8 @@ cat > /usr/local/lib/lancache-ui-build-accel.sh <<'LANCACHE_UI_HELPERS_EOF'
       printf '%s\n' "$jobs"; \
     }; \
     run_cargo_build() { \
-      cargo_log="$(mktemp)"; \
-      cargo_status_file="$(mktemp)"; \
+      cargo_log="$(mktemp -p /var/tmp)"; \
+      cargo_status_file="$(mktemp -p /var/tmp)"; \
       { set +e; cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" -p lancache-ui 2>&1; echo "$?" >"$cargo_status_file"; set -e; } | tee "$cargo_log"; \
       cargo_status="$(cat "$cargo_status_file")"; \
       rm -f "$cargo_status_file"; \
@@ -350,7 +350,7 @@ cat > /usr/local/lib/lancache-ui-build-accel.sh <<'LANCACHE_UI_HELPERS_EOF'
       if [ "${ccache_enabled:-0}" = "1" ]; then \
         disable_ccache; \
         echo "[INFO] ccache build path unavailable; retrying with plain distcc (no cache layer)." >&2; \
-        ccache_retry_status_file="$(mktemp)"; \
+        ccache_retry_status_file="$(mktemp -p /var/tmp)"; \
         { set +e; cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" -p lancache-ui 2>&1; echo "$?" >"$ccache_retry_status_file"; set -e; } | tee -a "$cargo_log"; \
         cargo_status="$(cat "$ccache_retry_status_file")"; \
         rm -f "$ccache_retry_status_file"; \
@@ -479,7 +479,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
       update-ca-certificates >/dev/null; \
       trap 'rm -f /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; update-ca-certificates >/dev/null 2>&1 || true' EXIT; \
     fi; \
-    musl_target="$(cat /tmp/musl-target)"; \
+    musl_target="$(cat /var/tmp/musl-target)"; \
     distcc_enabled=0; \
     ccache_enabled=0; \
     original_path="$PATH"; \
@@ -497,7 +497,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     && run_cargo_build \
     && if [ "${ccache_enabled:-0}" = "1" ]; then \
          ccache -s; \
-         ccache_final_stats="$(mktemp)"; \
+         ccache_final_stats="$(mktemp -p /var/tmp)"; \
          ccache --print-stats > "$ccache_final_stats"; \
          if grep -qE '^remote_storage_error[[:space:]]+[1-9]' "$ccache_final_stats"; then \
            echo "[INFO] ccache recorded a Redis remote-storage error during the real Cargo build; this build's binary is already correct and unaffected, but the optional Redis cache layer degraded mid-build -- later builds may miss cache reuse until Redis recovers." >&2; \
@@ -568,7 +568,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
       update-ca-certificates >/dev/null; \
       trap 'rm -f /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; update-ca-certificates >/dev/null 2>&1 || true' EXIT; \
     fi; \
-    musl_target="$(cat /tmp/musl-target)"; \
+    musl_target="$(cat /var/tmp/musl-target)"; \
     distcc_enabled=0; \
     ccache_enabled=0; \
     original_path="$PATH"; \
@@ -586,7 +586,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     && run_cargo_build \
     && if [ "${ccache_enabled:-0}" = "1" ]; then \
          ccache -s; \
-         ccache_final_stats="$(mktemp)"; \
+         ccache_final_stats="$(mktemp -p /var/tmp)"; \
          ccache --print-stats > "$ccache_final_stats"; \
          if grep -qE '^remote_storage_error[[:space:]]+[1-9]' "$ccache_final_stats"; then \
            echo "[INFO] ccache recorded a Redis remote-storage error during the real Cargo build; this build's binary is already correct and unaffected, but the optional Redis cache layer degraded mid-build -- later builds may miss cache reuse until Redis recovers." >&2; \
@@ -656,7 +656,7 @@ ARG APT_CACHE_BUST=""
 # From: Issue #1781 | PR #1783
 RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
     if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
-      cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig && \
+      cp /etc/ssl/certs/ca-certificates.crt /var/tmp/ca-bundle.orig && \
       cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
     fi && \
     : "apt-cache-bust=${APT_CACHE_BUST}" && \
@@ -669,7 +669,7 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
     curl \
     lsof \
     ripgrep && \
-    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /var/tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
 # nano: in-container troubleshooting tool -- see services/proxy/Dockerfile's
 # identical comment for the full rationale; lsof/ripgrep are apk-installed

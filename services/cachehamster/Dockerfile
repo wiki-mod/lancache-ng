@@ -31,9 +31,9 @@ RUN set -eu; \
     done; \
     command -v musl-gcc >/dev/null; \
     [ -n "${MUSL_TARGET}" ] || { echo "MUSL_TARGET build-arg is required" >&2; exit 1; }; \
-    printf '%s\n' "${MUSL_TARGET}" > /tmp/musl-target; \
+    printf '%s\n' "${MUSL_TARGET}" > /var/tmp/musl-target; \
     installed_musl_targets="$(rustup target list --installed)"; \
-    grep -qx "$(cat /tmp/musl-target)" <<<"${installed_musl_targets}"
+    grep -qx "$(cat /var/tmp/musl-target)" <<<"${installed_musl_targets}"
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
@@ -44,14 +44,14 @@ COPY src/ ./src/
 # From: Issue #871 | Issue #1671
 RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -eu; \
     if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
-      cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig; \
+      cp /etc/ssl/certs/ca-certificates.crt /var/tmp/ca-bundle.orig; \
       cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
     fi; \
     export CC=cc GCC=gcc CXX=c++ GXX=g++; \
-    musl_target="$(cat /tmp/musl-target)"; \
+    musl_target="$(cat /var/tmp/musl-target)"; \
     cargo build --release --locked --target "$musl_target"; \
     cp "target/${musl_target}/release/lancache-cachehamster" /build/lancache-cachehamster-out; \
-    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
+    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /var/tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
 FROM ${ALPINE_IMAGE}
 
