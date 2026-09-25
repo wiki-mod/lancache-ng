@@ -85,6 +85,25 @@ teardown() {
     [ "${output}" = "wiki-mod/lancache-ng" ]
 }
 
+@test "image-ref builds the one registry service@digest form" {
+    # What: One owner builds <registry>/<repo>/<svc>@<digest>.
+    # Why: scan, sbom, assemble, verify must share the ref.
+    # From: Issue #1683
+    GITHUB_REPOSITORY=wiki-mod/lancache-ng run _ci_image_ref build-tools sha256:beef
+    [ "${status}" -eq 0 ]
+    [ "${output}" = "ghcr.io/wiki-mod/lancache-ng/build-tools@sha256:beef" ]
+}
+
+@test "image-ref fails closed and prints no ref without a repo owner" {
+    # What: A missing repo owner yields nonzero and no ref.
+    # Why: AG-VAL-002: a missing required env is a hard fail.
+    # From: Issue #1683
+    unset GITHUB_REPOSITORY
+    run _ci_image_ref build-tools sha256:beef
+    [ "${status}" -ne 0 ]
+    [[ "${output}" != *"//"* ]]
+}
+
 # =========================================================
 # SEMANTIC IMPACT
 # =========================================================
@@ -1004,23 +1023,42 @@ _stub() {
     [[ "${output}" == *"CI-ERROR-BUILDTOOLS-0013"* ]]
 }
 
-@test "toolchain smoke passes when every tool is present" {
-    # What: command -v every smoke tool in the image.
+@test "toolchain smoke passes when every SOT tool resolves" {
+    # What: Resolve every SOT tool in the candidate image.
     # Why: Presence of each accel tool is the contract.
     # From: Issue #1683
-    docker() { while [ "${1:-}" != "sh" ] && [ $# -gt 0 ]; do shift; done; "$@"; }
-    run _ci_toolchain_smoke fake-img "$(printf 'bash\nsh\n')"
+    docker() {
+        local seen=0 a; local -a tools=()
+        for a in "$@"; do
+            [ "${seen}" -eq 1 ] && tools+=("${a}")
+            [ "${a}" = _ ] && seen=1
+        done
+        [ "${#tools[@]}" -gt 0 ] || return 1
+        return 0
+    }
+    CI_TOOLCHAIN_IMAGE=fake-img run _ci_test_toolchain build-tools
     [ "${status}" -eq 0 ]
+    [[ "${output}" == *"tested=ok"* ]]
 }
 
-@test "toolchain smoke fails when a tool is missing" {
+@test "toolchain smoke fails when a SOT tool is missing" {
     # What: A missing tool fails the smoke loudly.
     # Why: A broken toolchain must not pass as ok.
     # From: Issue #1683
-    docker() { while [ "${1:-}" != "sh" ] && [ $# -gt 0 ]; do shift; done; "$@"; }
-    run _ci_toolchain_smoke fake-img "$(printf 'bash\nnope-xyz-123\n')"
+    docker() {
+        local seen=0 a; local -a tools=()
+        for a in "$@"; do
+            [ "${seen}" -eq 1 ] && tools+=("${a}")
+            [ "${a}" = _ ] && seen=1
+        done
+        for a in "${tools[@]}"; do
+            [ "${a}" = cargo ] && { echo "missing ${a}" >&2; return 1; }
+        done
+        return 0
+    }
+    CI_TOOLCHAIN_IMAGE=fake-img run _ci_test_toolchain build-tools
     [ "${status}" -ne 0 ]
-    [[ "${output}" == *"missing nope-xyz-123"* ]]
+    [[ "${output}" == *"missing cargo"* ]]
 }
 
 @test "test build-tools reports ok via the wired smoke backend" {
@@ -1031,6 +1069,33 @@ _stub() {
         run bash "${CI_SH}" test build-tools
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"tested=ok"* ]]
+}
+
+@test "verify smoke-tests a toolchain image after a matching readback" {
+    # What: A toolchain verify runs the SOT tool smoke.
+    # Why: §25 requires the accel tools at the verified digest.
+    # From: Issue #1683
+    CI_READBACK_CMD="$(_stub rb 'echo sha256:dead')" \
+    CI_TOOLCHAIN_TEST_CMD="$(_stub tc 'echo "service=$1 tested=ok"')" \
+    GHCR_USERNAME=u GHCR_TOKEN=t GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+        run bash "${CI_SH}" verify build-tools sha256:dead linux/amd64
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"verified=sha256:dead"* ]]
+}
+
+@test "assemble moves only a toolchain channel to the fresh index" {
+    # What: build_type=toolchain refreshes its channel here.
+    # Why: build-tools is outside the atomic stack promote (§133).
+    # From: Issue #1683
+    CI_PROMOTE_MOVE_CMD="$(_stub mv 'echo moved svc=$1 ch=$2 dig=$3')" \
+        run _ci_assemble_toolchain_channel build-tools sha256:idx
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"moved svc=build-tools"* ]]
+    [[ "${output}" == *"dig=sha256:idx"* ]]
+    CI_PROMOTE_MOVE_CMD="$(_stub mv 'echo SHOULD-NOT-RUN')" \
+        run _ci_assemble_toolchain_channel proxy sha256:idx
+    [ "${status}" -eq 0 ]
+    [[ "${output}" != *"SHOULD-NOT-RUN"* ]]
 }
 
 @test "test runs the real cargo pipeline for a rust fixture (no injection)" {
@@ -3123,17 +3188,6 @@ netdata=sha256:n"
     [[ "${output}" == *"DHCLIENT_APK_ARCH=aarch64"* ]]
 }
 
-@test "build-tools build-args-out emits one platform's args" {
-    # What: build-args-out writes per-platform args.
-    # Why: each build job resolves its own arch.
-    # From: Issue #1683
-    local gho="${BATS_TEST_TMPDIR}/out.txt"; : > "${gho}"
-    run env GITHUB_OUTPUT="${gho}" bash "${CI_SH}" build-tools build-args-out linux/arm64
-    [ "${status}" -eq 0 ]
-    grep -q '^build-args-bare<<' "${gho}"
-    grep -q '^DHCLIENT_APK_ARCH=aarch64' "${gho}"
-}
-
 @test "build-args fails closed on a missing central base image" {
     # What: A missing base pin must never build unpinned.
     # Why: Empty value = FAIL CLOSED, no partial emit.
@@ -3367,40 +3421,6 @@ netdata=sha256:n"
     [ "${a}" != "${b}" ]
 }
 
-@test "build-tools gate: an unchanged signature is a NOOP" {
-    # What: same current/published sig builds nothing.
-    # Why: unchanged inputs must not rebuild.
-    # From: Issue #1683
-    run bash "${CI_SH}" build-tools gate both check SIG SIG
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"build-amd64=false"* ]]
-    [[ "${output}" == *"build-arm64=false"* ]]
-    [[ "${output}" == *'"include":[]'* ]]
-}
-
-@test "build-tools gate: a changed signature builds the arches" {
-    # What: changed sig or mode=build selects arches.
-    # Why: a real change or a forced build must build.
-    # From: Issue #1683
-    run bash "${CI_SH}" build-tools gate both check SIG OLD
-    [[ "${output}" == *"build-amd64=true"* ]]
-    [[ "${output}" == *"build-arm64=true"* ]]
-    [[ "${output}" == *'"arch":"amd64"'* ]]
-    [[ "${output}" == *'"arch":"arm64"'* ]]
-    run bash "${CI_SH}" build-tools gate amd64 build SIG SIG
-    [[ "${output}" == *"build-amd64=true"* ]]
-    [[ "${output}" == *"build-arm64=false"* ]]
-}
-
-@test "build-tools gate fails closed on an empty current sig" {
-    # What: no current signature must not decide.
-    # Why: an empty gate input is fail-closed.
-    # From: Issue #1683
-    run bash "${CI_SH}" build-tools gate both check "" X
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-BUILDTOOLS-0013"* ]]
-}
-
 @test "build-tools resolve-signature uses the injected resolver" {
     # What: the apk resolver is injectable for tests.
     # Why: signature logic is proven without a container.
@@ -3432,36 +3452,6 @@ netdata=sha256:n"
     [[ "${output}" == *"PUB-123"* ]]
 }
 
-@test "build-tools merge uses the injected assembler" {
-    # What: the manifest assembly is injectable.
-    # Why: no live registry needed to prove the call.
-    # From: Issue #1683
-    local mock; mock="$(_stub merge.sh 'echo "merged sha=$1"')"
-    run env CI_MERGE_CMD="${mock}" bash "${CI_SH}" build-tools merge abc123
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"merged sha=abc123"* ]]
-}
-
-@test "build-tools plan writes every determine-job output" {
-    # What: plan emits all outputs to $GITHUB_OUTPUT.
-    # Why: the run-block stays a single pure ci.sh call.
-    # From: Issue #1683
-    local apk pub gho
-    apk="$(_stub apk.sh 'echo "sccache-0.15.0-r0 fake-$2-1.0-r0"')"
-    pub="$(_stub pub.sh 'echo OLD-SIG')"
-    gho="${BATS_TEST_TMPDIR}/out.txt"; : > "${gho}"
-    run env CI_APK_RESOLVE_CMD="${apk}" CI_PUBLISHED_SIG_CMD="${pub}" \
-        GITHUB_REPOSITORY=wiki-mod/lancache-ng BT_ARCH=both BT_MODE=check \
-        GITHUB_OUTPUT="${gho}" \
-        bash "${CI_SH}" build-tools plan
-    [ "${status}" -eq 0 ]
-    grep -q '^signature=' "${gho}"
-    grep -q '^build-amd64=true$' "${gho}"
-    grep -q '^build-arm64=true$' "${gho}"
-    grep -q '^matrix={"include":' "${gho}"
-    grep -q '^image=ghcr.io/wiki-mod/lancache-ng/build-tools$' "${gho}"
-}
-
 @test "build-tools rejects an unknown subcommand (fail closed)" {
     # What: An unknown sub must not silently succeed.
     # Why: Fail-closed dispatch (AG-VAL-002).
@@ -3471,16 +3461,6 @@ netdata=sha256:n"
     [[ "${output}" == *"CI-ERROR-BUILDTOOLS-0003"* ]]
 }
 
-@test "build-tools tag is sha-<full>-<arch> for a platform" {
-    # What: The tag binds the git sha and the arch.
-    # Why: sha-<full>-<arch>; AG-REL-015 form only.
-    # From: Issue #1683
-    GITHUB_REPOSITORY=wiki-mod/lancache-ng GITHUB_SHA=abc123 \
-        run _ci_build_tools_tag linux/arm64
-    [ "${status}" -eq 0 ]
-    [ "${output}" = "ghcr.io/wiki-mod/lancache-ng/build-tools:sha-abc123-arm64" ]
-}
-
 @test "build-tools image is the base ref from the SOT registry" {
     # What: The base build-tools ref from the SOT.
     # Why: One registry-host owner, no env fallback.
@@ -3488,24 +3468,6 @@ netdata=sha256:n"
     GITHUB_REPOSITORY=wiki-mod/lancache-ng run bash "${CI_SH}" build-tools image
     [ "${status}" -eq 0 ]
     [ "${output}" = "ghcr.io/wiki-mod/lancache-ng/build-tools" ]
-}
-
-@test "build-tools build pushes the per-arch tag and returns the digest" {
-    # What: build+push then read back the pushed digest.
-    # Why: One build+push owner; no live registry in test.
-    # From: Issue #1683
-    export DLOG="${BATS_TEST_TMPDIR}/d.log"; : > "${DLOG}"
-    docker() { printf 'docker %s\n' "$*" >> "${DLOG}"; case "$*" in *"imagetools inspect"*) printf 'sha256:dead\n' ;; esac; return 0; }
-    export -f docker
-    GITHUB_REPOSITORY=wiki-mod/lancache-ng GITHUB_SHA=abc123 \
-        run _ci_build_tools_build linux/amd64 sig-xyz
-    [ "${status}" -eq 0 ]
-    [ "${output}" = "sha256:dead" ]
-    grep -q "buildx build --push" "${DLOG}"
-    grep -q "sha-abc123-amd64" "${DLOG}"
-    grep -q "signature=sig-xyz" "${DLOG}"
-    grep -q "tools/build-tools" "${DLOG}"
-    grep -q "org.opencontainers.image.revision=abc123" "${DLOG}"
 }
 
 @test "oci labels emit provenance from the SOT and env" {
@@ -6829,20 +6791,6 @@ EOF
     [[ "${output}" == *"CI-WARN-BUILD-0012"* ]]
 }
 
-@test "build-tools build cache-to carries ignore-error for §35 resilience" {
-    # What: build-tools cache-to also gets ignore-error.
-    # Why: same failure class as build (AG-WF-011).
-    # From: Issue #1683
-    export DLOG="${BATS_TEST_TMPDIR}/d.log"; : > "${DLOG}"
-    docker() { printf 'docker %s\n' "$*" >> "${DLOG}"; case "$*" in *"imagetools inspect"*) printf 'sha256:dead\n' ;; esac; return 0; }
-    export -f docker
-    GITHUB_REPOSITORY=wiki-mod/lancache-ng GITHUB_SHA=abc123 \
-        CI_BUILD_CACHE_TO="type=registry,ref=ghcr.io/wiki-mod/lancache-ng/build-tools:cache,mode=max" \
-        run _ci_build_tools_build linux/amd64 sig-xyz
-    [ "${status}" -eq 0 ]
-    grep -q -- "--cache-to type=registry,ref=ghcr.io/wiki-mod/lancache-ng/build-tools:cache,mode=max,ignore-error=true" "${DLOG}"
-}
-
 @test "docker-publish pushes then reads back the registry digest" {
     # What: publish retries push, then reads the digest.
     # Why: BUILD != PUBLISH; same digest, many retries.
@@ -7359,23 +7307,6 @@ EOF
     [[ "${output}" == *"--tag ghcr.io/wiki-mod/lancache-ng/ui:sha-deadbeef"* ]]
     [[ "${output}" == *"ghcr.io/wiki-mod/lancache-ng/ui@sha256:aaa"* ]]
     [[ "${output}" == *"ghcr.io/wiki-mod/lancache-ng/ui@sha256:bbb"* ]]
-}
-
-@test "build-tools merge default shares the imagetools writer" {
-    # What: default merge writes sha and latest indexes.
-    # Why: one writer, no live registry; proves reuse.
-    # From: Issue #1683
-    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    local log="${BATS_TEST_TMPDIR}/create.log"
-    printf '#!/usr/bin/env bash\ncase "$*" in *"imagetools create"*) echo "$*" >> "%s" ;; esac\n' "${log}" > "${bin}/docker"
-    chmod +x "${bin}/docker"
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
-        run _ci_build_tools_merge abc123
-    [ "${status}" -eq 0 ]
-    run cat "${log}"
-    [[ "${output}" == *"--tag ghcr.io/wiki-mod/lancache-ng/build-tools:sha-abc123"* ]]
-    [[ "${output}" == *"--tag ghcr.io/wiki-mod/lancache-ng/build-tools:latest"* ]]
-    [[ "${output}" == *"build-tools:sha-abc123-amd64"* ]]
 }
 
 # What: bare repo + two host clones for real CAS tests.

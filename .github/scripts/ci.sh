@@ -174,8 +174,15 @@ _ci_block_entry_list() {
 # What: Print one scalar field of a service entry.
 # Why: Read build_type/runner/final_base without a copy.
 # From: Issue #1683
+# What: A service field from the SOT; build-tools falls back.
+# Why: build-tools builds via the generic pipeline, but stays
+#      out of the product stack (services); one field reader.
+# From: Issue #1683
 ci_service_field() {
-    _ci_block_entry_field "services" "$1" "$2"
+    local v
+    v="$(_ci_block_entry_field "services" "$1" "$2")"
+    [ -n "${v}" ] && { printf '%s\n' "${v}"; return 0; }
+    _ci_block_entry_field "build_toolchain" "$1" "$2"
 }
 
 # What: Print the named contexts a service rebuilds on.
@@ -410,10 +417,11 @@ ci_cmd_plan_matrix() {
     local docs_only=false
     _ci_docs_only "${changed[@]}" && docs_only=true
     local service platform include='[]' any=false resolved paction runner authed=false test_services=''
-    # What: iterate product services; build-tools is separate.
-    # Why: build-tools has its own workflow (Contract §111.2).
-    # From: Issue #1683 | PR #1858
-    for service in $(ci_services); do
+    # What: build the product services plus the build toolchain.
+    # Why: build-tools builds via the generic pipeline on its own
+    #      impact; stays out of the product stack (assembly).
+    # From: Issue #1683
+    for service in $(ci_services) $(_ci_block_keys build_toolchain); do
         _ci_plan_candidate "${service}" "${changed[@]}" || continue
         # What: a path-changed rust service is a test candidate (§60).
         # Why: tests run on source change even when the build reuses.
@@ -1362,6 +1370,16 @@ _ci_image_tag() {
     printf '%s/%s/%s:sha-%s-%s' "${registry}" "${repo}" "$1" "$3" "${2##*/}"
 }
 
+# What: The registry ref for a service at a digest.
+# Why: One owner of the image@digest form used by many.
+# From: Issue #1683
+_ci_image_ref() {
+    local reg repo
+    reg="$(_ci_registry)" || return 2
+    repo="$(_ci_repo)" || return 2
+    printf '%s/%s/%s@%s' "${reg}" "${repo}" "$1" "$2"
+}
+
 # What: The base build-tools image ref, no tag.
 # Why: One owner for the registry host, from the SOT.
 # From: Issue #1683
@@ -1634,7 +1652,7 @@ _ci_trivy_db_ensure_fresh() {
 # Why: A written report is a finding; only DB miss retries.
 # From: Issue #1683
 _ci_trivy_scan() {
-    local service="$1" digest="$2" ref report n=0 raw registry repo
+    local service="$1" digest="$2" ref report n=0 raw
     local max="${CI_TRIVY_MAX:-4}"
     local scanners="${CI_TRIVY_SCANNERS:-vuln,secret}"
     local ignore="${CI_TRIVY_IGNOREFILE:-.trivyignore.yaml}"
@@ -1643,9 +1661,7 @@ _ci_trivy_scan() {
     cache_dir="$(_ci_record_field "${cache_rec}" dir)"
     fresh_rec="$(_ci_trivy_db_ensure_fresh "${cache_dir}")" || return 3
     [ "$(_ci_record_field "${fresh_rec}" present)" = "true" ] && skip_db=1
-    registry="$(_ci_registry)"
-    repo="$(_ci_repo)"
-    ref="${registry}/${repo}/${service}@${digest}"
+    ref="$(_ci_image_ref "${service}" "${digest}")"
     report="$(mktemp "${TMPDIR:-/var/tmp}/ci-trivy.XXXXXX")"
     local -a targs=(trivy image --severity "HIGH,CRITICAL" --exit-code 1
         --ignore-unfixed --scanners "${scanners}" --cache-dir "${cache_dir}")
@@ -1869,6 +1885,14 @@ ci_cmd_verify() {
         ci_error "[CI-ERROR-VERIFY-0005]" "service=\"${service}\" reason=\"digest MISMATCH; produced != accepted\" expected=\"${expected}\"" "readback=${seen}"
         return 2
     fi
+    # What: A toolchain image is smoke-tested at its digest.
+    # Why: §25 requires the accel tools to exist in the image.
+    # From: Issue #1683
+    if [ "$(ci_service_field "${service}" build_type)" = toolchain ]; then
+        local CI_TOOLCHAIN_IMAGE
+        CI_TOOLCHAIN_IMAGE="$(_ci_image_ref "${service}" "${expected}")"
+        _ci_test_toolchain "${service}" || return "$?"
+    fi
     printf 'service=%s verified=%s\n' "${service}" "${seen}"
 }
 
@@ -1894,25 +1918,11 @@ _ci_test_rust() {
     printf 'service=%s tested=ok\n' "${service}"
 }
 
-# What: Assert every smoke tool exists in the image.
-# Why: A missing accel tool must fail, not build broken.
-# From: Issue #1683
-_ci_toolchain_smoke() {
-    local image="$1" tools="$2"
-    local -a tl=()
-    local t
-    while IFS= read -r t; do
-        [ -n "${t}" ] && tl+=("${t}")
-    done <<< "${tools}"
-    docker run --rm "${image}" timeout --kill-after=30s --signal=TERM 14m \
-        sh -c 'for t in "$@"; do command -v "$t" >/dev/null || { echo "missing $t" >&2; exit 1; }; done' _ "${tl[@]}"
-}
-
-# What: Smoke the build-tools image tool inventory.
-# Why: The SOT owns the list; ci.sh runs it in the image.
+# What: Assert each smoke tool exists in the image.
+# Why: The SOT owns the list; a missing accel tool fails.
 # From: Issue #1683 | PR #1858
 _ci_test_toolchain() {
-    local service="$1" image tools
+    local service="$1" image tools t
     if [ -n "${CI_TOOLCHAIN_TEST_CMD:-}" ]; then
         "${CI_TOOLCHAIN_TEST_CMD}" "${service}"
         return "$?"
@@ -1923,7 +1933,13 @@ _ci_test_toolchain() {
         return 2
     fi
     tools="$(_ci_build_tools_smoke_tools)" || return 2
-    _ci_toolchain_smoke "${image}" "${tools}" || return 1
+    local -a tl=()
+    while IFS= read -r t; do
+        [ -n "${t}" ] && tl+=("${t}")
+    done <<< "${tools}"
+    docker run --rm "${image}" timeout --kill-after=30s --signal=TERM 14m \
+        sh -c 'for t in "$@"; do command -v "$t" >/dev/null || { echo "missing $t" >&2; exit 1; }; done' _ "${tl[@]}" \
+        || return 1
     printf 'service=%s tested=ok\n' "${service}"
 }
 
@@ -2010,10 +2026,8 @@ ci_cmd_coverage() {
 # Why: SBOM generate != vuln gate; shares the trivy cache.
 # From: Issue #1683
 _ci_trivy_sbom() {
-    local service="$1" digest="$2" out="$3" registry repo ref cache_rec cache_dir raw rc=0
-    registry="$(_ci_registry)" || return 2
-    repo="$(_ci_repo)"
-    ref="${registry}/${repo}/${service}@${digest}"
+    local service="$1" digest="$2" out="$3" ref cache_rec cache_dir raw rc=0
+    ref="$(_ci_image_ref "${service}" "${digest}")" || return 2
     cache_rec="$(_ci_trivy_cache_dir)" || return 2
     cache_dir="$(_ci_record_field "${cache_rec}" dir)"
     raw="$(trivy image --format cyclonedx --cache-dir "${cache_dir}" --output "${out}" "${ref}" 2>&1)" || rc=$?
@@ -2167,7 +2181,7 @@ _ci_docker_assemble() {
     target="${registry}/${repo}/${service}:sha-${sha}"
     local -a srcs=()
     for kv; do
-        srcs+=("${registry}/${repo}/${service}@${kv#*=}")
+        srcs+=("$(_ci_image_ref "${service}" "${kv#*=}")")
     done
     _ci_imagetools_create "${target}" "${srcs[@]}" >/dev/null || return "$?"
     _ci_registry_digest "${target}"
@@ -2196,7 +2210,19 @@ ci_cmd_assemble() {
         ci_log "[CI-ERROR-ASSEMBLE-0005]" "service=\"${service}\" reason=\"assemble backend failed\""
         return 2
     fi
+    _ci_assemble_toolchain_channel "${service}" "${index}" || return "$?"
     printf 'service=%s result=assembled assembled=%s platforms=%s\n' "${service}" "${index}" "${count}"
+}
+
+# What: Point a toolchain channel at its fresh multi-arch index.
+# Why: build-tools is outside the atomic product-stack promote (§133);
+#      its channel refreshes here so the next run's resolve finds it.
+# From: Issue #1683
+_ci_assemble_toolchain_channel() {
+    local service="$1" index="$2" ch
+    [ "$(ci_service_field "${service}" build_type)" = toolchain ] || return 0
+    ch="$(_ci_build_tools_channel "${GITHUB_REF_NAME:-}")"
+    "${CI_PROMOTE_MOVE_CMD:-_ci_default_channel_move}" "${service}" "${ch}" "${index}"
 }
 
 # =========================================================
@@ -4138,56 +4164,6 @@ _ci_matrix_append() {
     printf '%s' "${arr}" | jq -c --argjson o "${obj}" '. + [$o]'
 }
 
-# What: Decide arches to build and emit the matrix.
-# Why: BUILD/NOOP + matrix logic lives here, not in YAML.
-# From: Issue #1683
-_ci_build_tools_gate() {
-    local arch="$1" mode="$2" current="$3" published="$4"
-    if [ -z "${current}" ]; then
-        ci_log "[CI-ERROR-BUILDTOOLS-0013]" "reason=\"empty current signature; FAIL CLOSED\""
-        return 2
-    fi
-    local need=false amd=false arm=false include='[]'
-    if [ "${mode}" = "build" ] || [ "${current}" != "${published}" ]; then
-        need=true
-    fi
-    if [ "${need}" = "true" ]; then
-        case "${arch}" in
-            amd64) amd=true ;;
-            arm64) arm=true ;;
-            both) amd=true; arm=true ;;
-            *) ci_log "[CI-ERROR-BUILDTOOLS-0014]" "arch=\"${arch}\" reason=\"unknown arch\""; return 2 ;;
-        esac
-    fi
-    [ "${amd}" = "true" ] && include="$(_ci_matrix_append "${include}" arch=amd64 runner="$(_ci_platform_runner linux/amd64)" platform=linux/amd64)"
-    [ "${arm}" = "true" ] && include="$(_ci_matrix_append "${include}" arch=arm64 runner="$(_ci_platform_runner linux/arm64)" platform=linux/arm64)"
-    printf 'build-amd64=%s\nbuild-arm64=%s\nmatrix={"include":%s}\n' "${amd}" "${arm}" "${include}"
-}
-
-# What: Assemble the multi-arch manifest (injectable).
-# Why: registry assembly lives here, not in YAML.
-# From: Issue #1683
-_ci_build_tools_merge() {
-    local sha="${1:-${GITHUB_SHA:-}}" image amd64 arm64 tag
-    if [ -z "${sha}" ]; then
-        ci_log "[CI-ERROR-BUILDTOOLS-0015]" "reason=\"commit sha required\""
-        return 2
-    fi
-    if [ -n "${CI_MERGE_CMD:-}" ]; then
-        "${CI_MERGE_CMD}" "${sha}"
-        return "$?"
-    fi
-    image="$(_ci_build_tools_image)"
-    # What: per-arch children use sha-<full>-<arch>.
-    # Why: AG-REL-015 bans the -standalone- form.
-    # From: Issue #1683
-    amd64="${image}:sha-${sha}-amd64"
-    arm64="${image}:sha-${sha}-arm64"
-    for tag in "sha-${sha}" latest; do
-        _ci_imagetools_create "${image}:${tag}" "${amd64}" "${arm64}" >/dev/null || return "$?"
-    done
-}
-
 # What: Format a multiline value as a GITHUB_OUTPUT block.
 # Why: Actions multiline outputs need a heredoc delimiter.
 # From: Issue #1683
@@ -4204,83 +4180,6 @@ _ci_emit_multiline() {
             ;;
     esac
     printf '%s<<%s\n%s\n%s' "${key}" "${delim}" "${value}" "${delim}"
-}
-
-# What: Resolve, decide, emit the determine outputs.
-# Why: One call keeps the YAML run-block pure per AG-CI-023.
-# From: Issue #1683
-_ci_build_tools_plan() {
-    local arch="${BT_ARCH:-both}" mode="${BT_MODE:-check}"
-    local out="${GITHUB_OUTPUT:?GITHUB_OUTPUT required}"
-    local image current published gate_lines
-    image="$(_ci_build_tools_image)"
-    current="$(_ci_build_tools_resolve_signature)" || return 2
-    published="$(_ci_build_tools_published_signature "${image}:latest")" || return 2
-    gate_lines="$(_ci_build_tools_gate "${arch}" "${mode}" "${current}" "${published}")" || return 2
-    # What: append resolved outputs to the step file.
-    # Why: each build job resolves its own platform args.
-    # From: Issue #1683
-    {
-        printf 'signature=%s\n' "${current}"
-        printf 'image=%s\n' "${image}"
-        printf '%s\n' "${gate_lines}"
-    } >> "${out}"
-}
-
-# What: Emit one platform's build-args to the step file.
-# Why: each build job resolves its own arch's args + sha.
-# From: Issue #1683
-_ci_build_tools_build_args_emit() {
-    local platform="${1:-}" bare block out
-    out="${GITHUB_OUTPUT:?GITHUB_OUTPUT required}"
-    if [ -z "${platform}" ]; then
-        ci_log "[CI-ERROR-BUILDTOOLS-0016]" "reason=\"platform arg required\""
-        return 2
-    fi
-    bare="$(_ci_build_tools_build_args --bare "${platform}")" || return 2
-    block="$(_ci_emit_multiline build-args-bare "${bare}")" || return 2
-    printf '%s\n' "${block}" >> "${out}"
-}
-
-# What: The build-tools registry tag for a platform.
-# Why: sha-<full>-<arch>; AG-REL-015 bans -standalone-.
-# From: Issue #1683
-_ci_build_tools_tag() {
-    local platform="$1"
-    printf '%s:sha-%s-%s' "$(_ci_build_tools_image)" "${GITHUB_SHA:?GITHUB_SHA required}" "${platform##*/}"
-}
-
-# What: Build+push one arch's build-tools image.
-# Why: One build+push owner; digest via readback.
-# From: Issue #1683
-_ci_build_tools_build() {
-    local platform="${1:-}" sig="${2:-}" tag a
-    if [ -z "${platform}" ]; then
-        ci_log "[CI-ERROR-BUILDTOOLS-0017]" "reason=\"platform arg required\""
-        return 2
-    fi
-    tag="$(_ci_build_tools_tag "${platform}")" || return 2
-    local -a args=(docker buildx build --push --provenance=false
-        --platform "${platform}" --tag "${tag}"
-        --output "type=image,oci-mediatypes=true")
-    while IFS= read -r a; do
-        [ -n "${a}" ] && args+=(--label "${a}")
-    done < <(_ci_oci_labels build-tools)
-    [ -n "${sig}" ] && args+=(--label "org.lancache-ng.build-tools.signature=${sig}")
-    # What: cache-to gains ignore-error (§35 resilience).
-    # Why: shares _ci_docker_build's safe cache-to helper.
-    # From: Issue #1683
-    [ -n "${CI_BUILD_CACHE_FROM:-}" ] && args+=(--cache-from "${CI_BUILD_CACHE_FROM}")
-    [ -n "${CI_BUILD_CACHE_TO:-}" ] && args+=(--cache-to "$(_ci_cache_to_spec "${CI_BUILD_CACHE_TO}")")
-    while IFS= read -r a; do
-        [ -n "${a}" ] && args+=(--build-arg "${a}")
-    done < <(_ci_build_tools_build_args --bare "${platform}")
-    args+=(tools/build-tools)
-    # What: op=buildx only; signature fix, behavior intact.
-    # Why: exporter/build+push shared; build-wave owns.
-    # From: Issue #1683
-    _ci_retry buildx "${args[@]}" >/dev/null || return "$?"
-    _ci_registry_digest "${tag}"
 }
 
 # What: The build-tools channel for a target ref (master=latest).
@@ -4331,13 +4230,8 @@ ci_cmd_build_tools() {
         signature) _ci_build_tools_signature "${1:-}" ;;
         resolve-signature) _ci_build_tools_resolve_signature ;;
         published-signature) _ci_build_tools_published_signature "${1:-}" ;;
-        gate) _ci_build_tools_gate "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
-        plan) _ci_build_tools_plan ;;
         image) _ci_build_tools_image ;;
         resolve-image) _ci_build_tools_resolve_image ;;
-        build-args-out) _ci_build_tools_build_args_emit "${1:-}" ;;
-        build) _ci_build_tools_build "${1:-}" "${2:-}" ;;
-        merge) _ci_build_tools_merge "${1:-}" ;;
         *)
             ci_log "[CI-ERROR-BUILDTOOLS-0003]" "sub=\"${sub}\" reason=\"unknown build-tools subcommand\""
             return 2

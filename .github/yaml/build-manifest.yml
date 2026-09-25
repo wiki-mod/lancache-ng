@@ -84,7 +84,7 @@ services:
     runner: light
 
 # What: The toolchain image that builds the product stack.
-# Why: NOT a product service; own workflow, never counted.
+# Why: built by the generic pipeline; never counted in the stack.
 # From: Issue #1683
 build_toolchain:
   build-tools:
