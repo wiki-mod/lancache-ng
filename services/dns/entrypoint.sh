@@ -1023,10 +1023,8 @@ _dns_recursor_validate_snapshot_or_rollback() {
         # PDNS_API_KEY also changed. Detected here, not assumed: compare
         # what's actually on disk after the restore against the live env,
         # so this only fires when the two are genuinely out of sync.
-        # Captured via a here-string, not `sed -n ... | head -n1` (AG-VAL-032):
-        # under this script's own pipefail, a multi-match recursor.conf could
-        # let head exit after the first line while sed is still writing more,
-        # which pipefail would report as failure even though head succeeded.
+        # What: capture sed output, then head via here-string.
+        # Why: a live pipe could SIGPIPE under pipefail (AG-VAL-032).
         local sed_output restored_api_key
         sed_output=$(sed -n 's/^[[:space:]]*api_key:[[:space:]]*//p' "$recursor_conf")
         restored_api_key=$(head -n1 <<< "$sed_output")
@@ -1100,10 +1098,8 @@ _dns_auth_validate_snapshot_or_rollback() {
         # env, so this only fires when the two are genuinely out of sync.
         # pdns.conf is flat `key=value` (no leading whitespace, no YAML
         # colon), unlike recursor.conf's indented `api_key: value`.
-        # Captured via a here-string, not `sed -n ... | head -n1` (AG-VAL-032):
-        # under this script's own pipefail, a multi-match pdns.conf could let
-        # head exit after the first line while sed is still writing more,
-        # which pipefail would report as failure even though head succeeded.
+        # What: capture sed output, then head via here-string.
+        # Why: a live pipe could SIGPIPE under pipefail (AG-VAL-032).
         local sed_output restored_api_key
         sed_output=$(sed -n 's/^api-key=//p' "$pdns_conf")
         restored_api_key=$(head -n1 <<< "$sed_output")
@@ -1285,11 +1281,8 @@ _dns_ensure_zone_exists() {
     # empirically against the actual binary) -- "already exists" (the
     # reverse word order) never matches it, so this tolerance check would
     # silently never fire even with the errexit issue above fixed. Matched
-    # via a here-string (not `printf ... | grep -qi`, per AG-VAL-032): a
-    # multi-line create_output piped live into `grep -q` can let grep exit
-    # after an early match while printf is still writing, which under
-    # `pipefail` reports the whole pipeline as failed even though grep
-    # itself matched.
+    # via a here-string, pipefail-safe (AG-VAL-032): a live
+    # pipe could SIGPIPE before the producer finishes.
     if grep -qi "exists already" <<< "$create_output"; then
         return 0
     fi

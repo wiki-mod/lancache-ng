@@ -829,12 +829,8 @@ if [ "${SSL_ENABLED}" = "1" ]; then
         fi
         local san
         san=$(openssl x509 -noout -ext subjectAltName -in "$CERT_DIR/default.crt" 2>/dev/null)
-        # Matched via a here-string, not `echo ... | grep -q` (AG-VAL-032):
-        # this script runs under `set -o pipefail`, and a multi-line $san
-        # could let grep exit after an early match while echo is still
-        # writing, which pipefail would report as failure even though grep
-        # matched -- the general SIGPIPE-under-pipefail hazard that
-        # scripts/untracked/check-pipefail-early-exit-grep.sh guards against repo-wide.
+        # What: match SAN via a here-string, not a live pipe.
+        # Why: a live pipe could SIGPIPE under pipefail (AG-VAL-032).
         grep -q "DNS:" <<< "$san" || return 0
         if [ -n "${IP_SSL}" ]; then
             # `grep -q "IP Address:${IP_SSL}"` would be an unanchored substring
