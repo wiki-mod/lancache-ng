@@ -108,7 +108,7 @@ ci_build_targets() {
 }
 
 # What: Build targets that publish a first-party image.
-# Why: release notes/SBOM skip install-type third-party services.
+# Why: skip install-type services from release notes.
 # From: Issue #1683
 _ci_published_services() {
     local svc
@@ -171,12 +171,8 @@ _ci_block_entry_list() {
     ' "${CI_MANIFEST}"
 }
 
-# What: Print one scalar field of a service entry.
-# Why: Read build_type/runner/final_base without a copy.
-# From: Issue #1683
-# What: A service field from the SOT; build-tools falls back.
-# Why: build-tools builds via the generic pipeline, but stays
-#      out of the product stack (services); one field reader.
+# What: Query a service field (services or build_toolchain).
+# Why: build-tools uses same reader, not a services entry.
 # From: Issue #1683
 ci_service_field() {
     local v
@@ -355,8 +351,8 @@ ci_cmd_plan() {
     ci_log "[CI-INFO-PLAN-0001]" "phase=plan changed=${#changed[@]} note=\"candidates only; identity/CAS decides build\""
 }
 
-# What: List the CodeQL config's own analyzed Rust source paths.
-# Why: the config is the single truth for what CodeQL extracts (§73).
+# What: CodeQL config's own analyzed Rust source paths.
+# Why: config is the single truth for CodeQL paths.
 # From: Issue #1683
 _ci_codeql_rust_paths() {
     local cfg="${1:-.github/codeql/codeql-config.yml}"
@@ -368,22 +364,22 @@ _ci_codeql_rust_paths() {
     ' "${cfg}" | grep '^services/' || true
 }
 
-# What: Admit CodeQL Rust analysis only when analyzed source or config changes.
-# Why: §73 admission owner; unchanged Rust must NOOP, not re-extract.
+# What: CodeQL Rust admission on source or config change.
+# Why: §73 owner; unchanged is NOOP, not re-extract.
 # From: Issue #1683
 ci_cmd_codeql_impact() {
     local -a changed=()
     _ci_collect_changed changed "$@"
     local rust=false p cfg=".github/codeql/codeql-config.yml"
-    # What: match a change against the config's own analyzed Rust source paths.
-    # Why: admission stays consistent with exactly what CodeQL extracts (§73).
+    # What: match against config's own analyzed paths.
+    # Why: stays consistent with CodeQL extracts (§73).
     # From: Issue #1683
     while IFS= read -r p; do
         [ -n "${p}" ] || continue
         if _ci_paths_touch "${p}" "${changed[@]}"; then rust=true; break; fi
     done < <(_ci_codeql_rust_paths "${cfg}")
-    # What: a change to the config file itself re-scopes the analysis.
-    # Why: adding or removing an analyzed path changes what must run.
+    # What: config change re-scopes CodeQL analysis.
+    # Why: path changes in config change what runs.
     # From: Issue #1683
     if [ "${rust}" = false ] && _ci_paths_touch "${cfg}" "${changed[@]}"; then
         rust=true
@@ -393,7 +389,7 @@ ci_cmd_codeql_impact() {
 }
 
 # What: True when every changed path is documentation.
-# Why: a docs-only change is a NOOP; no container jobs run (§63).
+# Why: docs-only is NOOP; no container jobs run (§63).
 # From: Issue #1683
 _ci_docs_only() {
     [ "$#" -gt 0 ] || return 1
@@ -417,19 +413,18 @@ ci_cmd_plan_matrix() {
     local docs_only=false
     _ci_docs_only "${changed[@]}" && docs_only=true
     local service platform include='[]' any=false resolved paction runner authed=false test_services=''
-    # What: build the product services plus the build toolchain.
-    # Why: build-tools builds via the generic pipeline on its own
-    #      impact; stays out of the product stack (assembly).
+    # What: build product services and the toolchain.
+    # Why: build-tools generic pipeline, separate assembly.
     # From: Issue #1683
     for service in $(ci_services) $(_ci_block_keys build_toolchain); do
         _ci_plan_candidate "${service}" "${changed[@]}" || continue
-        # What: a path-changed rust service is a test candidate (§60).
-        # Why: tests run on source change even when the build reuses.
+        # What: path-changed rust is test candidate (§60).
+        # Why: tests run on change, even build reuse (§60).
         # From: Issue #1683
         [ "$(ci_service_field "${service}" build_type)" = rust ] \
             && test_services="${test_services} ${service}"
-        # What: authenticate once, only when a candidate exists.
-        # Why: a docs-only NOOP run touches the registry 0 times (§63).
+        # What: auth once, only when a candidate exists.
+        # Why: docs-only NOOP: registry zero touches (§63).
         # From: Issue #1683
         if [ "${authed}" = false ]; then
             _ci_require_ghcr_auth || return "$?"
@@ -1130,8 +1125,8 @@ ci_cmd_aggregate() {
     return "${rc}"
 }
 
-# What: the published per-identity digest for a service/platform.
-# Why: emit-result and scan-stack resolve it identically (AG-CODE-011).
+# What: published per-identity digest for service/platform.
+# Why: emit-result and scan-stack resolve (AG-CODE-011).
 # From: Issue #1683
 _ci_published_digest() {
     local svc="$1" plat="$2" identity tag
@@ -1140,8 +1135,8 @@ _ci_published_digest() {
     _ci_registry_digest "${tag}"
 }
 
-# What: Emit one service/platform acceptance result.json (§26.1).
-# Why: the single aggregator reads these; digest verified from GHCR.
+# What: Emit service/platform acceptance result (§26.1).
+# Why: single aggregator reads; digest from GHCR verified.
 # From: Issue #1683
 ci_cmd_emit_result() {
     local service="${1:-}" platform="${2:-}" identity digest
@@ -1158,14 +1153,14 @@ ci_cmd_emit_result() {
 }
 
 # What: emit "service platform" per built matrix pair.
-# Why: one matrix walk; aggregate-stack and scan-stack share it (AG-CODE-011).
+# Why: matrix walk shared by aggregate-stack/scan-stack.
 # From: Issue #1683
 _ci_matrix_pairs() {
     printf '%s' "$1" | jq -r '.include[] | "\(.service) \(.platform)"'
 }
 
-# What: aggregate the built matrix into the ledger in one write.
-# Why: emit each pair's result.json, then one CAS commit (§26.1); thin YAML.
+# What: aggregate built matrix into ledger in one write.
+# Why: emit each pair then one CAS commit (§26.1); thin.
 # From: Issue #1683
 ci_cmd_aggregate_stack() {
     local matrix="${CI_BUILD_MATRIX:-}" dir svc plat
@@ -1178,8 +1173,8 @@ ci_cmd_aggregate_stack() {
     ci_cmd_aggregate "${dir}"
 }
 
-# What: scan every built matrix pair by its published digest (§7).
-# Why: SCAN before ACCEPT; thin YAML, iteration lives in ci.sh.
+# What: scan each built pair by published digest (§7).
+# Why: SCAN before ACCEPT; thin YAML, iteration in ci.sh.
 # From: Issue #1683
 ci_cmd_scan_stack() {
     local matrix="${CI_BUILD_MATRIX:-}" svc plat digest
@@ -1195,8 +1190,8 @@ ci_cmd_scan_stack() {
     done < <(_ci_matrix_pairs "${matrix}")
 }
 
-# What: write and echo the changed-file list path for this event.
-# Why: one git-walk owner; plan/lint/checks share it (AG-CODE-011).
+# What: write/echo changed-file list path for this event.
+# Why: one git-walk owner; plan/lint/checks (AG-CODE-011).
 # From: Issue #1683
 ci_cmd_changed_files() {
     local out="${RUNNER_TEMP:-/var/tmp}/changed-files.txt"
@@ -1212,8 +1207,8 @@ ci_cmd_changed_files() {
     printf '%s\n' "${out}"
 }
 
-# What: assemble every product service the build matrix produced.
-# Why: one matrix walk; thin YAML, iteration in ci.sh (AG-CODE-011).
+# What: assemble product services from build matrix.
+# Why: one matrix walk; iteration in ci.sh (AG-CODE-011).
 # From: Issue #1683
 ci_cmd_assemble_stack() {
     local matrix="${CI_BUILD_MATRIX:-}" svc
@@ -1223,8 +1218,8 @@ ci_cmd_assemble_stack() {
     done
 }
 
-# What: run one ci.sh op for every changed rust test service.
-# Why: test-stack and coverage-stack share one TEST_SERVICES walk.
+# What: run ci.sh op for each changed rust test service.
+# Why: test/coverage-stack share one TEST_SERVICES walk.
 # From: Issue #1683
 _ci_for_test_services() {
     local fn="$1" svc
@@ -1235,8 +1230,8 @@ _ci_for_test_services() {
 ci_cmd_test_stack() { _ci_for_test_services ci_cmd_test; }
 ci_cmd_coverage_stack() { _ci_for_test_services ci_cmd_coverage; }
 
-# What: file/update/close one standing tracking issue for a run outcome.
-# Why: nightly reliability (#1801); self-closing issue, no composite action.
+# What: file/update/close standing tracking issue for run.
+# Why: nightly reliability; self-closing, no action.
 # From: Issue #1683 | Issue #1095
 ci_cmd_nightly_status() {
     local outcome="${1:-}" scope="${2:-}" label="${3:-nightly-broken}" failed="${CI_FAILED_JOBS:-}"
@@ -1291,8 +1286,8 @@ _ci_require_ghcr_auth() {
         ci_log "[CI-ERROR-BUILD-0002]" "reason=\"GHCR credentials required; anonymous is rate-limited\""
         return 2
     }
-    # What: Log docker in so push/inspect authenticate; injectable.
-    # Why: auth is ci.sh policy (§7); no login action in a workflow.
+    # What: Log docker in for auth; injectable.
+    # Why: auth is ci.sh policy (§7); no workflow action.
     # From: Issue #1683
     local reg out rc=0
     if [ -n "${CI_GHCR_LOGIN_CMD:-}" ]; then
@@ -1885,8 +1880,8 @@ ci_cmd_verify() {
         ci_error "[CI-ERROR-VERIFY-0005]" "service=\"${service}\" reason=\"digest MISMATCH; produced != accepted\" expected=\"${expected}\"" "readback=${seen}"
         return 2
     fi
-    # What: A toolchain image is smoke-tested at its digest.
-    # Why: §25 requires the accel tools to exist in the image.
+    # What: smoke-test toolchain at its digest.
+    # Why: §25: accel tools must exist in image.
     # From: Issue #1683
     if [ "$(ci_service_field "${service}" build_type)" = toolchain ]; then
         local CI_TOOLCHAIN_IMAGE
@@ -1973,8 +1968,8 @@ ci_cmd_test() {
     printf '%s\n' "${raw}"
 }
 
-# What: Run tarpaulin and print the coverage percent.
-# Why: injectable; the container has tarpaulin, tests do not.
+# What: Run tarpaulin and print coverage percent.
+# Why: injectable; container has tarpaulin.
 # From: Issue #1683
 _ci_tarpaulin_pct() {
     local manifest="$1" dir pct
@@ -1994,8 +1989,8 @@ _ci_tarpaulin_pct() {
     printf '%s\n' "${pct}"
 }
 
-# What: Run coverage for a rust service, enforcing its floor.
-# Why: tarpaulin runs; the floor is ci.sh policy from the SOT.
+# What: run coverage for rust, enforcing floor.
+# Why: tarpaulin runs; floor is ci.sh policy.
 # From: Issue #1683
 _ci_default_coverage() {
     local service="$1" manifest threshold pct
@@ -2013,8 +2008,8 @@ _ci_default_coverage() {
     printf 'service=%s coverage=%s floor=%s\n' "${service}" "${pct}" "${threshold}"
 }
 
-# What: Run a service's coverage via the wired backend.
-# Why: injectable for tests; a real floor breach fails the run.
+# What: run service coverage via wired backend.
+# Why: injectable; floor breach fails run.
 # From: Issue #1683
 ci_cmd_coverage() {
     local service="${1:-}"
@@ -2102,8 +2097,8 @@ _ci_index_raw() {
     printf '%s' "${raw}"
 }
 
-# What: Canonical sorted "platform=digest ..." from a digest set.
-# Why: assemble, reconcile and candidate compare one representation (AG-CODE-011).
+# What: canonical sorted "platform=digest ..." values.
+# Why: shared format for assemble/reconcile/candidate.
 # From: Issue #1683
 _ci_normalize_platform_digests() {
     local input="$1"
@@ -2214,9 +2209,8 @@ ci_cmd_assemble() {
     printf 'service=%s result=assembled assembled=%s platforms=%s\n' "${service}" "${index}" "${count}"
 }
 
-# What: Point a toolchain channel at its fresh multi-arch index.
-# Why: build-tools is outside the atomic product-stack promote (§133);
-#      its channel refreshes here so the next run's resolve finds it.
+# What: update toolchain channel to fresh multi-arch index.
+# Why: build-tools outside stack; channel updates here.
 # From: Issue #1683
 _ci_assemble_toolchain_channel() {
     local service="$1" index="$2" ch
@@ -2254,8 +2248,8 @@ _ci_valid_channel() {
     return 1
 }
 
-# What: True if a target is a mutable channel or a v-tag.
-# Why: promote writes the same ref for channels and releases.
+# What: true if target is mutable channel or v-tag.
+# Why: promote uses same ref for channels/releases.
 # From: Issue #1683
 _ci_valid_promote_target() {
     local target="$1"
@@ -2263,8 +2257,8 @@ _ci_valid_promote_target() {
     _ci_release_prerelease "${target}" >/dev/null 2>&1
 }
 
-# What: The accepted multi-arch stack candidate: service=index-digest.
-# Why: promote/validate consume exact digests, never moving tags (§48).
+# What: accepted multi-arch candidate: service=index-digest.
+# Why: promote/validate use digests, no moving tags (§48).
 # From: Issue #1683
 _ci_stack_candidate_ledger() {
     local service inputs want idx
@@ -2281,8 +2275,8 @@ _ci_stack_candidate_ledger() {
     done < <(ci_services)
 }
 
-# What: Read the accepted stack candidate (injectable, ledger default).
-# Why: exact-digest candidate (§48); tests inject, production reads the ledger.
+# What: read accepted stack candidate (injectable).
+# Why: exact-digest candidate (§48); tests/prod differ.
 # From: Issue #1683
 _ci_stack_candidate() {
     "${CI_STACK_CANDIDATE_CMD:-_ci_stack_candidate_ledger}"
@@ -2440,8 +2434,8 @@ ci_cmd_promote() {
     printf 'channel=%s result=promoted services=%s\n' "${channel}" "$(printf '%s\n' "${cand}" | grep -c '=')"
 }
 
-# What: List the promote targets the current git ref maps to.
-# Why: ref-driven policy owner; no channel logic in YAML.
+# What: list promote targets for current git ref.
+# Why: ref-driven policy; no channel logic in YAML.
 # From: Issue #1683
 _ci_promote_targets_for_ref() {
     local ref="${GITHUB_REF:-}" requested="${CI_PROMOTE_REQUESTED_CHANNEL:-}" tag pre
@@ -2478,8 +2472,8 @@ ci_cmd_promote_ref() {
         printf 'promote=noop reason=no-targets ref=%s\n' "${ref}"
         return 0
     fi
-    # What: A moved branch tip means a newer run supersedes this one.
-    # Why: determinism (§4); never promote a stale tip blind.
+    # What: moved branch tip means newer run supersedes.
+    # Why: determinism (§4); never promote stale blind.
     if [[ "${ref}" == refs/heads/* ]]; then
         if ! tip="$("${CI_PROMOTE_TIP_CMD:-_ci_ref_tip}" "${ref}")"; then
             ci_log "[CI-ERROR-PROMOTE-0013]" "ref=\"${ref}\" reason=\"could not resolve ref tip; refusing blind promote\""
@@ -2556,8 +2550,8 @@ _ci_release_notes_block() {
     printf '%s\n' "${CI_RELEASE_NOTES_END:-<!-- lancache-ng-image-tags:end -->}"
 }
 
-# What: Upload one asset to a release, replacing any prior.
-# Why: One asset writer for SBOM and VEX; --clobber, no curl.
+# What: upload asset to release, replacing any prior.
+# Why: one asset writer; SBOM/VEX; --clobber.
 # From: Issue #1683
 _ci_release_asset_put() {
     local tag="$1" file="$2" gh="${CI_RELEASE_GH_CMD:-gh}" repo="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY required}"
@@ -2565,8 +2559,8 @@ _ci_release_asset_put() {
     _ci_retry github-api "${gh}" release upload "${tag}" "${file}" --clobber --repo "${repo}" >/dev/null
 }
 
-# What: Create or update the GitHub release with notes.
-# Why: Idempotent marker replace; gh owner, prerelease-checked.
+# What: create/update GitHub release with notes.
+# Why: idempotent marker replace; prerelease-checked.
 # From: Issue #1683
 ci_cmd_release_publish() {
     local tag="${1:-}"
@@ -2635,8 +2629,8 @@ ci_cmd_release_sbom() {
     printf 'release=sbom service=%s tag=%s digest=%s\n' "${service}" "${tag}" "${digest}"
 }
 
-# What: Generate and attach an SBOM for every published image.
-# Why: one release SBOM walk; SOT-driven, skips third-party.
+# What: generate and attach SBOM for each image.
+# Why: one SBOM walk; SOT-driven, skips third-party.
 # From: Issue #1683
 ci_cmd_release_sbom_stack() {
     local tag="${1:-}" svc
@@ -2646,8 +2640,8 @@ ci_cmd_release_sbom_stack() {
     done
 }
 
-# What: Generate and attach the OpenVEX document to a release.
-# Why: One VEX per release; reuses the SOT vex generator.
+# What: generate and attach OpenVEX to release.
+# Why: one VEX per release; reuses SOT vex generator.
 # From: Issue #1683
 ci_cmd_release_vex() {
     local tag="${1:-}"
@@ -2668,8 +2662,8 @@ ci_cmd_release_vex() {
     printf 'release=vex tag=%s\n' "${tag}"
 }
 
-# What: The highest plain vX.Y.Z release tag on origin, or empty.
-# Why: ls-remote needs no deep fetch; empty pre-1.0 bootstrap.
+# What: highest plain vX.Y.Z release tag, or empty.
+# Why: ls-remote skips deep fetch; empty pre-1.0.
 # From: Issue #1683
 _ci_last_release_tag() {
     git ls-remote --tags --refs origin 'refs/tags/v[0-9]*.[0-9]*.[0-9]*' 2>/dev/null \
@@ -2688,8 +2682,8 @@ _ci_next_patch_tag() {
     printf 'v%s.%s.%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "$(( 10#${BASH_REMATCH[3]} + 1 ))"
 }
 
-# What: True if a published image differs from the base tag's.
-# Why: content-identity release trigger, not a path heuristic.
+# What: true if published image differs from base.
+# Why: content-identity trigger, not path heuristic.
 # From: Issue #1683
 _ci_release_stack_changed() {
     local base_tag="$1" registry repo sha svc cur rel
@@ -2704,8 +2698,8 @@ _ci_release_stack_changed() {
     return 1
 }
 
-# What: Push a PAT-authored annotated tag to origin.
-# Why: GITHUB_TOKEN tag pushes do not re-trigger CI (anti-recursion).
+# What: push PAT-authored annotated tag to origin.
+# Why: GITHUB_TOKEN no re-trigger CI (anti-recursion).
 # From: Issue #1683
 _ci_push_release_tag() {
     local tag="$1" sha="$2" pat="${PROJECT_AUTOMATION_PAT:?PROJECT_AUTOMATION_PAT required to push a release tag}"
@@ -2722,8 +2716,8 @@ _ci_remote_tag_exists() {
     [ -n "$(git ls-remote --tags origin "refs/tags/$1" 2>/dev/null)" ]
 }
 
-# What: Cut the next patch tag when master changed the stack.
-# Why: automated releases on image-affecting master pushes (docs).
+# What: cut next patch tag when master changed stack.
+# Why: automated releases on image-affecting pushes.
 # From: Issue #1683
 ci_cmd_cut_release_tag() {
     local base_tag next_tag tip
@@ -3539,15 +3533,15 @@ _ci_validate_proxy() {
     fi
 }
 
-# What: Print stream-target wildcard lines that hardcode a root (#1297).
-# Why: a *.domain target must forward to the requested SNI, not a literal.
+# What: print stream-target wildcard hardcode lines.
+# Why: *.domain must forward to SNI, not literal.
 # From: Issue #1683 | Issue #1297
 _ci_stream_map_violations() {
     awk '/^[[:space:]]*\*\./ && $2 != "$ssl_preread_server_name:443;" { print }'
 }
 
-# What: Prove the proxy stream-target map routes wildcards by SNI (#1297).
-# Why: a registrable-root literal misroutes subdomains to the wrong origin.
+# What: prove proxy routes wildcards by SNI.
+# Why: root literal misroutes subdomains.
 # From: Issue #1683 | Issue #1297
 _ci_validate_proxy_stream_map() {
     local project="$1" cid map bad
@@ -4182,8 +4176,8 @@ _ci_emit_multiline() {
     printf '%s<<%s\n%s\n%s' "${key}" "${delim}" "${value}" "${delim}"
 }
 
-# What: The build-tools channel for a target ref (master=latest).
-# Why: promote feeds only latest (master) and nightly (else).
+# What: build-tools channel for ref (master=latest).
+# Why: promote feeds latest (master) or nightly.
 # From: Issue #1683
 _ci_build_tools_channel() {
     case "${1:-}" in
@@ -4192,9 +4186,8 @@ _ci_build_tools_channel() {
     esac
 }
 
-# What: Resolve the published build-tools image to an immutable ref.
-# Why: container: jobs pin the toolchain by digest; no select cascade
-#      (gate + signature + SOT smoke already own toolchain trust).
+# What: resolve published build-tools to immutable ref.
+# Why: jobs pin toolchain by digest; no cascade.
 # From: Issue #1683
 _ci_build_tools_resolve_image() {
     local ref channel image digest current published
@@ -4202,8 +4195,8 @@ _ci_build_tools_resolve_image() {
     channel="$(_ci_build_tools_channel "${ref}")"
     image="$(_ci_build_tools_image)"
     _ci_require_ghcr_auth || return "$?"
-    # What: the published toolchain must match the SOT signature.
-    # Why: a drifted :channel is stale; fail closed, do not run on it.
+    # What: published toolchain must match SOT signature.
+    # Why: drifted :channel stale; fail closed.
     # From: Issue #1683
     current="$(_ci_build_tools_resolve_signature)" || return 2
     published="$(_ci_build_tools_published_signature "${image}:${channel}")" || return 2
@@ -4881,8 +4874,8 @@ _ci_check_comment_length() {
     return "${rc}"
 }
 
-# What: Fail on a short-SHA slice of a sha-named variable.
-# Why: bans collision-unsafe truncation (issue #1095 G2).
+# What: fail on short-SHA slice of sha-named variable.
+# Why: bans collision-unsafe truncation.
 # From: Issue #1683
 _ci_check_deny_short_sha() {
     local pat='\$\{([A-Za-z_][A-Za-z0-9_]*)?([Ss][Hh][Aa]|[Cc][Oo][Mm][Mm][Ii][Tt]|[Cc][Aa][Nn][Dd][Ii][Dd][Aa][Tt][Ee]|[Rr][Ee][Vv][Ii][Ss][Ii][Oo][Nn])[A-Za-z0-9_]*[[:space:]]*(:[[:space:]]*:[[:space:]]*[A-Za-z0-9_]+|:[[:space:]]*0[[:space:]]*:[[:space:]]*[A-Za-z0-9_]+)\}'
@@ -4919,8 +4912,8 @@ _ci_check_language_policy() {
     local -a viol=()
     for path in "${files[@]}"; do
         [ -f "${path}" ] || continue
-        # What: Vendored minified UI asset is served, not authored.
-        # Why: AG-REL-001 governs authored code, not vendored assets.
+        # What: vendored minified UI asset, not authored.
+        # Why: AG-REL-001 governs authored, not vendored.
         # From: Issue #1683 | PR #1858
         case "${path}" in services/ui/src/static/*.min.js) continue ;; esac
         case "${path}" in
@@ -4954,8 +4947,8 @@ _ci_check_mutable_refs() {
         case "${path}" in
             *.yml|*.yaml)
                 out="$(grep -nE 'uses:[^@]*@v[0-9]' "${path}")" && viol+=("${path} action-@vN: ${out}")
-                # What: A grep pattern quoting a Dockerfile ARG is not a ref.
-                # Why: PROMOTE_TAGS greps the dns/ui ARG :latest default.
+                # What: grep pattern in ARG not ref.
+                # Why: PROMOTE_TAGS greps ARG :latest.
                 # From: Issue #1683 | PR #1858
                 out="$(grep -nE 'BUILD_TOOLS_IMAGE=[^[:space:]]*:latest' "${path}" | grep -vF 'ARG BUILD_TOOLS_IMAGE=')" && [ -n "${out}" ] && viol+=("${path} img-default-latest: ${out}")
                 ;;
@@ -5414,8 +5407,8 @@ _ci_action_runs_using() {
     ' | sed -E "s/.*using:[[:space:]]*//; s/[\"']//g; s/[[:space:]]*#.*\$//; s/[[:space:]]+\$//"
 }
 
-# What: one Contents-API GET; body on 200, else HTTP line.
-# Why: caller classifies the status; token raises rate limit.
+# What: Contents-API GET; body on 200, else HTTP.
+# Why: caller classifies; token limit.
 # From: Issue #1683 | PR #1858
 _ci_action_manifest_get() {
     local url="$1" body status token
@@ -5433,13 +5426,13 @@ _ci_action_manifest_get() {
     return 1
 }
 
-# What: resolve an external action manifest for a pinned ref.
-# Why: injectable resolver keeps the API URL shape private.
+# What: resolve external action manifest for pin.
+# Why: injectable resolver keeps API URL private.
 # From: Issue #1683 | PR #1858
 _ci_fetch_action_manifest() {
     local owner="$1" repo="$2" subpath="$3" ref="$4"
-    # What: a caller-supplied resolver overrides the API path.
-    # Why: tests assert the OK/NOTFOUND/INFRA contract, not curl.
+    # What: caller resolver overrides API path.
+    # Why: tests assert OK/NOTFOUND/INFRA, not curl.
     # From: Issue #1683 | PR #1858
     if [ -n "${CI_ACTION_MANIFEST_CMD:-}" ]; then
         "${CI_ACTION_MANIFEST_CMD}" "${owner}" "${repo}" "${subpath}" "${ref}"
@@ -5456,8 +5449,8 @@ _ci_fetch_action_manifest() {
                 printf 'OK\n%s\n' "${out}"; return 0
             fi
             status="$(printf '%s' "${out}" | grep -oE '[0-9]{3}' | tail -1)"
-            # What: 404 is terminal, not an error; try the .yaml name.
-            # Why: some actions ship action.yaml, not action.yml.
+            # What: 404 terminal, not error; try .yaml.
+            # Why: some ship action.yaml not .yml.
             # From: Issue #1683 | PR #1858
             [ "${status}" = "404" ] && break
             cls="$(_ci_classify_failure "${out}" github-api)"
@@ -5484,8 +5477,8 @@ _ci_action_ref_is_external() {
     return 0
 }
 
-# What: enforce current Node runtime + ref hygiene on pins.
-# Why: single owner of issue #799/#1095 action-pin policy.
+# What: enforce Node runtime + ref hygiene on pins.
+# Why: single owner of action-pin policy.
 # From: Issue #1683 | PR #1858
 _ci_check_action_node_versions() {
     local repo_root="${1:-${CI_REPO_ROOT:-.}}"
@@ -5500,8 +5493,8 @@ _ci_check_action_node_versions() {
     scan_files=("${wf_files[@]}" "${act_files[@]}")
 
     local -a viol=() xv=() warns=() uses_entries=() literal_entries=()
-    # What: collect every real uses: step, resolving anchors.
-    # Why: an alias is not a duplicate; only literals count.
+    # What: collect every uses: step, resolve anchors.
+    # Why: alias not duplicate; only literals count.
     # From: Issue #1683 | PR #1858
     local sf line raw resolved anchor
     for sf in "${scan_files[@]}"; do
@@ -5530,8 +5523,8 @@ _ci_check_action_node_versions() {
 
     local -a uses_values=()
     mapfile -t uses_values < <(printf '%s\n' "${uses_entries[@]}" | sed $'s/^[^\t]*\t//' | sort -u)
-    # What: no uses: at all AND no extraction failure is vacuous.
-    # Why: an unresolved alias is an extraction fault, not vacuous.
+    # What: no uses: AND no fail is vacuous.
+    # Why: unresolved alias is extraction fault.
     # From: Issue #1683 | PR #1858
     if { [ "${#uses_values[@]}" -eq 0 ] || { [ "${#uses_values[@]}" -eq 1 ] && [ -z "${uses_values[0]}" ]; }; } && [ "${#xv[@]}" -eq 0 ]; then
         ci_log "[CI-ERROR-CHECK-0053]" "reason=\"no uses: steps extracted; scan vacuous\""; return 2
@@ -5581,8 +5574,8 @@ _ci_check_action_node_versions() {
         viol+=("third-party action '${key}' is pinned to multiple refs across .github/**: ${key_refs[${key}]# }; keep one canonical ref")
     done
 
-    # What: fail an expression in a composite description field.
-    # Why: the manifest validator evaluates description bodies.
+    # What: fail expression in composite description.
+    # Why: manifest validator evaluates description.
     # From: Issue #1683 | PR #1858
     local af hits hl
     for af in "${act_files[@]}"; do
@@ -5605,8 +5598,8 @@ _ci_check_action_node_versions() {
         done <<< "${hits}"
     done
 
-    # What: check each pin's runs.using for a dead runtime.
-    # Why: local read off disk; external resolved via the API.
+    # What: check each pin's runs.using for dead runtime.
+    # Why: local reads disk; external via API.
     # From: Issue #1683 | PR #1858
     local v using local_dir cand resolved_file owner repo subpath ref res marker meta
     for v in "${uses_values[@]}"; do
@@ -5653,8 +5646,8 @@ _ci_check_action_node_versions() {
     local w
     local w
     for w in "${warns[@]:-}"; do [ -n "${w}" ] && ci_log "[CI-ERROR-CHECK-0053]" "warn=\"${w}\""; done
-    # What: extraction faults are reported apart from pin faults.
-    # Why: a parse gap must not read as a deprecated-runtime failure.
+    # What: extraction faults reported apart from pin.
+    # Why: parse gap not deprecated-runtime fail.
     # From: Issue #1683 | PR #1858
     if [ "${#xv[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0054]" "reason=\"uses: extraction failure (unresolved alias / unparseable step)\"" "$(printf '%s\n' "${xv[@]}")"
@@ -5859,8 +5852,8 @@ _ci_check_naming_consistency() {
     printf 'naming-consistency=clean\n'
 }
 
-# What: Fail on a compose service with no healthcheck block.
-# Why: Issue #1169: every service needs a real healthcheck.
+# What: fail on compose service with no healthcheck.
+# Why: every service needs a real healthcheck.
 # From: Issue #1683 | PR #1858
 _ci_check_compose_healthchecks() {
     local -a files=("$@")
@@ -5874,8 +5867,8 @@ _ci_check_compose_healthchecks() {
         ci_log "[CI-ERROR-CHECK-0020]" "reason=\"no deploy/*/docker-compose.yml files found\""
         return 2
     fi
-    # What: documented healthcheck exemptions (issue #1169).
-    # Why: a few services genuinely have none of their own.
+    # What: documented healthcheck exemptions.
+    # Why: some services genuinely have none of their own.
     # From: Issue #1683 | PR #1858
     local -A excluded=(
         ["deploy/prod/docker-compose.yml:dhcp-probe"]=1
@@ -6009,8 +6002,8 @@ _ci_check_build_tools_smoke_coverage() {
         ci_log "[CI-ERROR-CHECK-0025]" "path=\"${smoke_script}\" reason=\"no required_tools extracted; vacuous\""
         return 2
     fi
-    # What: build-only/base/opt-in tools the smoke skips.
-    # Why: a reviewed exclusion, not a silent gap (#822).
+    # What: build-only/base/opt-in tools smoke skips.
+    # Why: a reviewed exclusion, not a silent gap.
     # From: Issue #1683 | PR #1858
     local excluded=" cargo-tarpaulin dhclient ar ranlib cc c++ g++ clang ld.lld make cmake pkg-config git gpg awk basename cat chgrp chmod chown cp curl dirname dpkg find flock getent grep gzip install mkdir mktemp mv printf ps rm sed sha256sum sort tar tee test timeout xargs xz musl-gcc "
     local -a viol=()
@@ -6039,8 +6032,8 @@ _ci_check_build_tools_smoke_coverage() {
         ci_log "[CI-ERROR-CHECK-0025]" "reason=\"no SOT smoke_tools; vacuous\""
         return 2
     fi
-    # What: tools smoke covers indirectly, not in its array.
-    # Why: timeout wraps each smoke run; opt-in tools use EXTRA.
+    # What: tools smoke covers indirectly, not in array.
+    # Why: timeout wraps smoke; opt-in tools use EXTRA.
     # From: Issue #1683 | PR #1858
     local smoke_wraps_timeout='' smoke_has_optin=''
     grep -qE '(^|[^[:alnum:]_-])timeout ' "${smoke_script}" && smoke_wraps_timeout=1
@@ -6325,8 +6318,8 @@ _ci_check_dependabot_docker_base_consistency() {
         "${#base_image_of[@]}" "${#distinct_blocks[@]}"
 }
 
-# What: config-writer -> repeat-run test evidence pairs.
-# Why: issue #456/#640: every stateful writer needs one.
+# What: config-writer repeat-run test evidence pairs.
+# Why: every stateful writer needs one.
 # From: Issue #1683 | PR #1858
 _ci_idempotence_writer_evidence() {
     printf '%s\n' \
@@ -6501,7 +6494,7 @@ _ci_check_prebuilt_prod() {
 }
 
 # What: Check prod state derives from LANCACHE_STATE_DIR.
-# Why: AG-SETUP-001: LANCACHE_STATE_DIR is the one state root.
+# Why: AG-SETUP-001: LANCACHE_STATE_DIR is state root.
 # From: Issue #1683 | PR #1858 (VALIDATE_PREBUILT subset)
 _ci_check_prod_state_wiring() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
@@ -6528,7 +6521,7 @@ _ci_check_prod_state_wiring() {
     printf 'prod-state-wiring=clean\n'
 }
 
-# What: True if one compose file/profile renders warning-free.
+# What: True if compose file/profile warning-free.
 # Why: docker compose warnings hide real drift; fail closed.
 # From: Issue #1683 | PR #1858
 _ci_compose_config_ok() {
@@ -6549,7 +6542,7 @@ _ci_compose_config_ok() {
     return 0
 }
 
-# What: Validate one SOT compose target token file[:profile].
+# What: Validate SOT compose target file[:profile].
 # Why: shared by the plain and --env-file target loops.
 # From: Issue #1683 | PR #1858
 _ci_compose_target_ok() {
@@ -6567,7 +6560,7 @@ _ci_compose_target_ok() {
 }
 
 # What: Fail unless every SOT compose target renders valid.
-# Why: prod/quickstart/secondary must render clean, no warnings.
+# Why: prod/quickstart/secondary render clean.
 # From: Issue #1683 | PR #1858
 _ci_check_compose_config() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
@@ -6596,7 +6589,7 @@ _ci_check_compose_config() {
 
 # What: Fail unless NATS/DNS configs are written atomically.
 # Why: a torn shared-config write can start a broken stack.
-# From: Issue #1683 | PR #1858 (VALIDATE_COMPOSE_NATS_SOCKETPROXY)
+# From: Issue #1683 | PR #1858
 _ci_check_nats_atomic_write() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local -a viol=()
@@ -6634,9 +6627,9 @@ _ci_check_nats_atomic_write() {
     printf 'nats-atomic-write=clean\n'
 }
 
-# What: Fail unless the Docker socket proxy stays deny-by-default.
+# What: Fail unless socket proxy stays deny-by-default.
 # Why: a broad allowlist re-exposes generic container APIs.
-# From: Issue #1683 | PR #1858 (VALIDATE_COMPOSE_NATS_SOCKETPROXY)
+# From: Issue #1683 | PR #1858
 _ci_check_docker_socket_proxy() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local -a viol=()
@@ -6689,9 +6682,9 @@ _ci_check_docker_socket_proxy() {
     printf 'docker-socket-proxy=clean\n'
 }
 
-# What: Fail unless quickstart .env defines every required key.
-# Why: a required-but-unset key breaks quickstart at compose time.
-# From: Issue #1683 | PR #1858 (VALIDATE_COMPOSE_NATS_SOCKETPROXY)
+# What: Fail unless .env defines every key.
+# Why: unset key breaks quickstart compose.
+# From: Issue #1683 | PR #1858
 _ci_check_quickstart_required_env() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local -a viol=()
@@ -6713,9 +6706,9 @@ _ci_check_quickstart_required_env() {
     printf 'quickstart-required-env=clean\n'
 }
 
-# What: True if a compose dhcp-proxy service uses env_file only.
-# Why: env_file is the prod contract; environment reinterpolation loses keys.
-# From: Issue #1683 | PR #1858 (VALIDATE_COMPOSE_DHCP_PROXY_ENV)
+# What: True if dhcp-proxy service uses env_file only.
+# Why: env_file prod contract; reinterpolation loses keys.
+# From: Issue #1683 | PR #1858
 _ci_dhcp_proxy_env_file_ok() {
     local compose_file="$1" expected="$2"
     awk -v compose_file="${compose_file}" -v expected_env_file="${expected}" '
@@ -6756,9 +6749,9 @@ _ci_dhcp_proxy_env_file_ok() {
     ' "${compose_file}"
 }
 
-# What: Fail unless the dhcp-proxy env/PXE surface stays intact.
-# Why: env_file contract + optional/PXE keys must not silently drop.
-# From: Issue #1683 | PR #1858 (VALIDATE_COMPOSE_DHCP_PROXY_ENV)
+# What: Fail unless dhcp-proxy env/PXE surface intact.
+# Why: env_file contract + optional/PXE keys not drop.
+# From: Issue #1683 | PR #1858
 _ci_check_dhcp_proxy_env() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local -a viol=()
@@ -6797,9 +6790,9 @@ _ci_check_dhcp_proxy_env() {
     printf 'dhcp-proxy-env=clean\n'
 }
 
-# What: Fail unless setup.sh keys + Kea preflight stay intact.
-# Why: missing runtime keys or preflight breaks first-time setup.
-# From: Issue #1683 | PR #1858 (VALIDATE_COMPOSE_SETUP_KEYS_KEA)
+# What: Fail unless setup.sh keys + Kea preflight intact.
+# Why: missing runtime keys/preflight breaks setup.
+# From: Issue #1683 | PR #1858
 _ci_check_setup_keys_kea() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local -a viol=()
@@ -6831,8 +6824,8 @@ _ci_check_setup_keys_kea() {
     printf 'setup-keys-kea=clean\n'
 }
 
-# What: Fail unless setup.sh update pauses/guards before mutation.
-# Why: AG-OP-010 validation-before-mutation; prebuilt guard first.
+# What: Fail unless update pauses/guards before mutation.
+# Why: AG-OP-010 validation-before-mutation; prebuilt first.
 # From: Issue #1683
 _ci_check_setup_update_safety() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
@@ -6856,8 +6849,8 @@ _ci_check_setup_update_safety() {
     printf 'setup-update-safety=clean\n'
 }
 
-# What: Fail unless setup.sh guards the Fedora/RHEL Docker RPM install.
-# Why: legacy docker RPMs conflict; podman/runc must not be blocked.
+# What: Fail unless Fedora/RHEL Docker RPM guarded.
+# Why: legacy docker RPMs conflict; podman/runc ok.
 # From: Issue #1683
 _ci_check_setup_docker_conflict() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
@@ -6880,8 +6873,8 @@ _ci_check_setup_docker_conflict() {
     printf 'setup-docker-conflict=clean\n'
 }
 
-# What: Fail unless image channel/tag resolves from config, pinned-safe.
-# Why: one resolution across setup.sh, UI, prod compose and the docs.
+# What: Fail unless channel/tag resolves from config.
+# Why: one resolution across setup.sh/UI/compose.
 # From: Issue #1683
 _ci_check_image_channel_resolution() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
@@ -6958,7 +6951,7 @@ _ci_generate_vex() {
     bash "${gen}" "${trivyignore}"
 }
 
-# What: Fail unless generate-vex.sh emits valid, non-empty OpenVEX.
+# What: Fail unless generate-vex.sh emits valid OpenVEX.
 # Why: catch VEX generator bugs before post-merge discovery.
 # From: Issue #1683 | PR #1858 (absorbs check-vex-drift.sh)
 _ci_check_vex_drift() {
@@ -6993,7 +6986,7 @@ _ci_version_ge() {
 }
 
 # What: Fetch netdata's bundled-packages.version with retry.
-# Why: exit 22 is a real 404; other codes are transient infra.
+# Why: exit 22 is 404; other codes transient.
 # From: Issue #1304 | PR #1858
 _ci_netdata_fetch_bundled() {
     local netdata_version="$1"
@@ -7011,8 +7004,8 @@ _ci_netdata_fetch_bundled() {
     return "${status}"
 }
 
-# What: Extract the vendored curl version from fetched content.
-# Why: netdata's underscore git-tag is the canonical curl pin.
+# What: Extract vendored curl version from content.
+# Why: netdata underscore git-tag is curl pin.
 # From: Issue #1304 | PR #1858
 _ci_netdata_curl_version() {
     local content="$1" line raw
@@ -7022,9 +7015,9 @@ _ci_netdata_curl_version() {
     printf '%s\n' "${raw}" | tr '_' '.'
 }
 
-# What: Fail if netdata's vendored curl is below the CVE-safe pin.
-# Why: Trivy's os-pkg scanner can't see the static-linked curl.
-# From: Issue #1304 | PR #1858 (absorbs check-netdata-curl-pin.sh)
+# What: Fail if vendored curl below CVE-safe pin.
+# Why: Trivy os-pkg scanner can't see static curl.
+# From: Issue #1304 | PR #1858
 _ci_check_netdata_curl_pin() {
     local version threshold accepted_until cves today
     version="$(_ci_block_entry_field external_versions netdata version)"
@@ -7149,8 +7142,8 @@ _ci_compose_service_names() {
     docker compose -f "${file}" "${profile_flags[@]}" config --services
 }
 
-# What: Fail if a logging-matrix row/service pair drifts.
-# Why: issue #633/#453: every service needs a declared row.
+# What: Fail if logging-matrix row/service pair drifts.
+# Why: every service needs a declared row.
 # From: Issue #1683 | PR #1858
 _ci_check_logging_matrix() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
@@ -7425,11 +7418,8 @@ _ci_check_entrypoint_lib_wiring() {
     printf 'entrypoint-lib-wiring=clean\n'
 }
 
-# What: Route a source-hygiene check to its function.
-# Why: One owner per guard invariant; ci.bats calls it.
-# From: Issue #1683
-# What: rust service Dockerfiles must consume the build-tools image.
-# Why: AG-CI-008/AG-REL-002 -- one toolchain owner, no self-compile.
+# What: rust Dockerfiles must use build-tools image.
+# Why: one toolchain owner; no self-compile (AG-CI-008).
 # From: Issue #1683
 _ci_check_dockerfile_build_tools() {
     local repo_root="${1:-${CI_REPO_ROOT:-.}}" service ctx df rc=0
@@ -7448,8 +7438,8 @@ _ci_check_dockerfile_build_tools() {
         if grep -q 'cargo install' "${df}"; then
             viol+=("${service}: Dockerfile compiles a tool with cargo install; consume the build-tools image")
         fi
-        # What: reject a hardcoded Cargo tuning value; an empty ARG is fine.
-        # Why: jobs/lto/codegen come from CI vars, fail closed when unset (AG-CI-006).
+        # What: reject Cargo tuning hardcode; empty ARG ok.
+        # Why: jobs/lto/codegen from CI vars (AG-CI-006).
         # From: Issue #1683
         if grep -qE '^[[:space:]]*(ARG[[:space:]]+SCCACHE_DIST_SCHEDULER_URL|ENV[[:space:]]+CARGO_BUILD_JOBS=|ARG[[:space:]]+PROJECT_CARGO_LTO=.+|ARG[[:space:]]+PROJECT_CARGO_CODEGENUNIT=.+|ENV[[:space:]]+PROJECT_CARGO_LTO=|ENV[[:space:]]+PROJECT_CARGO_CODEGENUNIT=)' "${df}"; then
             tuning+=("${service}: Dockerfile hardcodes a Cargo tuning value; source jobs/lto/codegen from CI vars")
@@ -7467,8 +7457,8 @@ _ci_check_dockerfile_build_tools() {
     return "${rc}"
 }
 
-# What: no workspace Cargo.toml may set [profile] lto/codegen-units.
-# Why: they come from CARGO_PROFILE_RELEASE_LTO/_CODEGEN_UNITS env (AG-CI-006).
+# What: no workspace Cargo.toml set [profile].
+# Why: sourced from CARGO env vars (AG-CI-006).
 # From: Issue #1683
 _ci_check_cargo_profile_tuning() {
     local repo_root="${1:-${CI_REPO_ROOT:-.}}" f line
@@ -7486,8 +7476,8 @@ _ci_check_cargo_profile_tuning() {
     printf 'cargo-profile-tuning=clean\n'
 }
 
-# What: no Dockerfile may cargo-install a tool the SOT ships prebuilt.
-# Why: INSTALL-DON'T-COMPILE; build-tools is the one toolchain owner (AG-REL-002).
+# What: no Dockerfile cargo-install prebuilt.
+# Why: build-tools one toolchain owner (AG-REL-002).
 # From: Issue #1683
 _ci_check_no_source_compiled_tools() {
     local repo_root="${1:-${CI_REPO_ROOT:-.}}" df tok
@@ -7517,14 +7507,14 @@ _ci_check_no_source_compiled_tools() {
     printf 'no-source-compiled-tools=clean\n'
 }
 
-# What: shellcheck the changed shell scripts at warning severity (§98).
-# Why: one owner; runs in the SOT build-tools image (AG-VAL-016).
+# What: shellcheck changed shell scripts (§98).
+# Why: one owner; SOT build-tools image.
 # From: Issue #1683 | Issue #1095
 _ci_check_shellcheck() {
     local -a changed=() files=()
     _ci_collect_changed changed "$@"
-    # What: keep only real shell files; CHANGED_FILES is mixed.
-    # Why: shellcheck reads shell only; docs/yaml are not its input.
+    # What: keep only real shell files; mixed.
+    # Why: shellcheck reads shell; yaml etc not input.
     # From: Issue #1683
     local f
     for f in "${changed[@]}"; do
@@ -7544,8 +7534,8 @@ _ci_check_shellcheck() {
     printf 'shellcheck=clean files=%s\n' "${#files[@]}"
 }
 
-# What: actionlint the workflow files (repo-wide, §98 exception).
-# Why: one owner; workflow syntax is not answerable from a diff.
+# What: actionlint workflow files (§98 exception).
+# Why: workflow syntax not answerable from diff.
 # From: Issue #1683
 _ci_check_actionlint() {
     local repo_root="${1:-${CI_REPO_ROOT:-.}}" out rc=0
@@ -7571,8 +7561,8 @@ _ci_check_cargo_audit() {
     else
         out="$(cargo audit --deny warnings --file "${lock}" 2>&1)" || rc=$?
     fi
-    # What: advisories fail, and any warning fails too (belt+braces).
-    # Why: --deny warnings should catch it; never pass a warning.
+    # What: advisories/warnings fail (belt+braces).
+    # Why: --deny warnings catches; never pass.
     # From: Issue #1683 | Issue #1535
     if [ "${rc}" -ne 0 ] || printf '%s' "${out}" | grep -Eiq '(^|[[:space:]])warning:'; then
         ci_error "[CI-ERROR-CHECK-0055]" "reason=\"cargo audit found advisories or warnings\"" "${out}"
@@ -7581,15 +7571,15 @@ _ci_check_cargo_audit() {
     printf 'cargo-audit=clean\n'
 }
 
-# What: Run every applicable check, aggregating failures (§98).
-# Why: One owner of the PR/push check set; per-check scope is fixed.
+# What: Run all checks, aggregate failures (§98).
+# Why: one owner; per-check scope fixed.
 # From: Issue #1683
 ci_cmd_check_all() {
     local -a changed=()
     _ci_collect_changed changed "$@"
     local sub rc=0
-    # What: diff-scoped checks see only the changed files (§98 default).
-    # Why: a PR check MUST NOT re-scan the whole repo by default.
+    # What: diff-scoped checks see changed files.
+    # Why: PR check doesn't re-scan whole repo.
     # From: Issue #1683
     local -a diff_scoped=(line-endings file-headers comment-length \
         deny-short-sha language-policy mutable-refs executable-bits \
@@ -7598,8 +7588,8 @@ ci_cmd_check_all() {
     for sub in "${diff_scoped[@]}"; do
         ci_cmd_check "${sub}" "${changed[@]}" || rc=1
     done
-    # What: repo-wide invariants a diff alone cannot answer (§98 exception).
-    # Why: cross-file/state consistency that must hold every run.
+    # What: repo-wide invariants diff can't answer.
+    # Why: cross-file/state consistency every run.
     # From: Issue #1683
     local -a repo_wide=(action-node-versions naming-consistency \
         workflow-line-limit stable-external-images compose-healthchecks \
@@ -7614,8 +7604,8 @@ ci_cmd_check_all() {
     for sub in "${repo_wide[@]}"; do
         ci_cmd_check "${sub}" || rc=1
     done
-    # What: PR-metadata checks only run on a real pull request.
-    # Why: no PR context on a push; they have nothing to check (§60).
+    # What: PR-metadata checks on real PR.
+    # Why: no PR context on push.
     # From: Issue #1683
     if [ -n "${PR_NUMBER:-}" ]; then
         for sub in pr-title pr-template pr-tracking-metadata; do
