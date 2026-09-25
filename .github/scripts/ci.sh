@@ -1488,9 +1488,12 @@ _ci_docker_build() {
 # Why: one owner for dns/ui/watchdog builders (was 3x inline).
 # From: Issue #1683
 ci_cmd_rust_build() {
-    local service="${1:-}" crate="${2:-}"
+    local service="${1:-}" crate="${2:-}" mode="${3:-build}"
     [ -n "${service}" ] || { ci_log "[CI-ERROR-RUSTBUILD-0001]" "reason=\"service arg required\""; return 2; }
     [ -n "${crate}" ] || { ci_log "[CI-ERROR-RUSTBUILD-0002]" "reason=\"crate arg required\""; return 2; }
+    # What: mode build (real+cp) or deps (dep pre-cache, no cp).
+    # Why: services with a stub-src dep-cache stage call deps first.
+    case "${mode}" in build|deps) ;; *) ci_log "[CI-ERROR-RUSTBUILD-0005]" "mode=\"${mode}\" reason=\"mode must be build or deps\""; return 2 ;; esac
     local musl_target="${MUSL_TARGET:-}"
     [ -n "${musl_target}" ] || { ci_log "[CI-ERROR-RUSTBUILD-0003]" "reason=\"MUSL_TARGET env required\""; return 2; }
     # What: verify the cross-target is installed, via here-string.
@@ -1498,12 +1501,91 @@ ci_cmd_rust_build() {
     local installed_targets; installed_targets="$(rustup target list --installed)"
     grep -qx "${musl_target}" <<<"${installed_targets}" || { ci_log "[CI-ERROR-RUSTBUILD-0004]" "target=\"${musl_target}\" reason=\"musl target not installed in build-tools\""; return 2; }
     local key_prefix="lancache-${service}" ccache_dir="/var/tmp/ccache-${service}"
-    # What: wire cc/gcc/c++/g++ to distcc; sccache when not distcc.
-    # Why: distcc can't be wrapped through the sccache masquerade.
+    # What: distcc wrapper bypasses pump for aws-lc-sys headers.
+    # Why: pump can't see generated headers; would fail (#1533).
     mkdir -p /usr/local/lib/distcc
     local distcc_bin; distcc_bin="$(command -v distcc)"
+    cp "${distcc_bin}" /usr/local/bin/distcc-real
+    printf '%s\n' \
+      '#!/bin/sh' \
+      'set -eu' \
+      'distcc_real="/usr/local/bin/distcc-real"' \
+      'wrapper_self="/usr/local/bin/lancache-distcc-wrapper"' \
+      'wrapper_dir="/usr/local/lib/distcc"' \
+      'compiler_name="$(basename "$0")"' \
+      'case "$compiler_name" in' \
+      '  cc|gcc|c++|g++)' \
+      '    real_compiler="$compiler_name"' \
+      '    local_compiler="/usr/bin/$real_compiler"' \
+      '    ;;' \
+      '  *)' \
+      '    if [ "$#" -ge 1 ] && [ -x "${1:-}" ]; then' \
+      '      resolved_arg1="$(readlink -f "$1" 2>/dev/null || printf "%s" "$1")"' \
+      '      case "$resolved_arg1" in' \
+      '        "$wrapper_self"|"$wrapper_dir"/*)' \
+      '          echo "[ERROR] lancache-distcc-wrapper: refusing to dispatch $1 back to itself (real-compiler resolution must happen before the distcc masquerade PATH is active)." >&2' \
+      '          exit 1' \
+      '          ;;' \
+      '      esac' \
+      '      real_compiler="$1"' \
+      '      local_compiler="$1"' \
+      '      shift' \
+      '    else' \
+      '      echo "[INFO] lancache-distcc-wrapper: unrecognized invocation (argv0=$0); defaulting to cc." >&2' \
+      '      real_compiler="cc"' \
+      '      local_compiler="/usr/bin/cc"' \
+      '    fi' \
+      '    ;;' \
+      'esac' \
+      'normalize_argument() {' \
+      '  arg="$1"' \
+      '  case "$arg" in' \
+      '    -I*|-isystem*)' \
+      '      case "$arg" in' \
+      '        -I*) echo "${arg#-I}" ;;' \
+      '        -isystem*) echo "${arg#-isystem}" ;;' \
+      '      esac' \
+      '      return' \
+      '      ;;' \
+      '  esac' \
+      '  printf "%s\n" "$arg"' \
+      '}' \
+      'matches_aws_lc_generated_path() {' \
+      '  arg="$1"' \
+      '  case "$arg" in' \
+      '    *aws-lc-sys*|*aws_lc_sys*)' \
+      '      case "$arg" in' \
+      '        *generated*|*out*|*target*/*/build/*) return 0;;' \
+      '      esac' \
+      '      ;;' \
+      '  esac' \
+      '  return 1' \
+      '}' \
+      'for arg in "$@"; do' \
+      '  normalized_arg="$(normalize_argument "$arg")"' \
+      '  if matches_aws_lc_generated_path "$normalized_arg"; then' \
+      '    matched_arg="$normalized_arg"' \
+      '    break' \
+      '  fi' \
+      'done' \
+      'if [ -n "${matched_arg:-}" ]; then' \
+      '  echo "[INFO] bypassing distcc-pump for generated-header input: $matched_arg" >&2' \
+      '  if [ -n "${DISTCC_HOSTS_NO_PUMP:-}" ]; then' \
+      '    env -u INCLUDE_SERVER_PORT -u INCLUDE_SERVER_PID DISTCC_HOSTS="$DISTCC_HOSTS_NO_PUMP" "$distcc_real" "$real_compiler" "$@"' \
+      '    exit $?' \
+      '  fi' \
+      '  echo "[INFO] no non-pump hosts configured; compiling through local compiler path." >&2' \
+      '  env -u DISTCC_HOSTS -u INCLUDE_SERVER_PORT -u INCLUDE_SERVER_PID -u DISTCC_FALLBACK "$local_compiler" "$@"' \
+      '  exit $?' \
+      'fi' \
+      'exec "$distcc_real" "$real_compiler" "$@"' \
+      > /usr/local/bin/lancache-distcc-wrapper
+    chmod +x /usr/local/bin/lancache-distcc-wrapper
     local wrapper
-    for wrapper in cc gcc c++ g++; do ln -sf "${distcc_bin}" "/usr/local/lib/distcc/${wrapper}"; done
+    for wrapper in cc gcc c++ g++; do ln -sf /usr/local/bin/lancache-distcc-wrapper "/usr/local/lib/distcc/${wrapper}"; done
+    ln -sf /usr/local/bin/lancache-distcc-wrapper "${distcc_bin}"
+    # What: rustc wrapper: distcc passthrough, else sccache.
+    # Why: distcc can't be wrapped through the sccache masquerade.
     printf '%s\n' '#!/bin/sh' 'case "${1:-}" in' '  distcc|*/distcc) exec "$@" ;;' '  *) exec /usr/local/bin/sccache "$@" ;;' 'esac' > /usr/local/bin/lancache-rustc-wrapper
     chmod +x /usr/local/bin/lancache-rustc-wrapper
     local distcc_enabled=0 ccache_enabled=0 ca_installed=0 original_path="${PATH}"
@@ -1542,7 +1624,7 @@ ci_cmd_rust_build() {
     disable_distcc() {
         if [ "${distcc_enabled:-0}" = "1" ]; then distcc-pump --shutdown >/dev/null 2>&1 || true; fi
         distcc_enabled=0
-        unset DISTCC_POTENTIAL_HOSTS DISTCC_HOSTS DISTCC_FALLBACK CC GCC CXX GXX INCLUDE_SERVER_PORT INCLUDE_SERVER_PID
+        unset DISTCC_POTENTIAL_HOSTS DISTCC_HOSTS DISTCC_HOSTS_NO_PUMP DISTCC_FALLBACK CC GCC CXX GXX INCLUDE_SERVER_PORT INCLUDE_SERVER_PID
         PATH="${original_path}"; export PATH
     }
     resolve_distcc_wrapper_dir() {
@@ -1563,22 +1645,51 @@ ci_cmd_rust_build() {
             sed -n 's/^ *\[[^]]*\] *//p' <<<"${readelf_comment_section}" > /var/tmp/ccache-remote-toolchain-id
         fi
     }
+    # What: split hosts into pump-capable vs non-pump, set up distcc.
+    # Why: aws-lc-sys generated headers must bypass pump (#1533/#1612).
     configure_distcc() {
         if [ -s /run/secrets/distcc_potential_hosts ]; then
             local distcc_probe_dir; distcc_probe_dir="$(mktemp -d -p /var/tmp)"
             DISTCC_POTENTIAL_HOSTS="$(cat /run/secrets/distcc_potential_hosts)"; export DISTCC_POTENTIAL_HOSTS
+            local -a distcc_host_specs; read -ra distcc_host_specs <<<"${DISTCC_POTENTIAL_HOSTS}"
+            local distcc_hosts="" distcc_hosts_with_pump="" distcc_hosts_without_pump="" distcc_host_spec distcc_host_base
+            for distcc_host_spec in "${distcc_host_specs[@]}"; do
+                distcc_host_base="${distcc_host_spec%%,*}"
+                if [ -n "${distcc_host_base}" ]; then distcc_hosts="${distcc_hosts:+${distcc_hosts} }${distcc_host_base}"; fi
+                case "${distcc_host_spec}" in
+                    *,cpp*) distcc_hosts_with_pump="${distcc_hosts_with_pump:+${distcc_hosts_with_pump} }${distcc_host_base}" ;;
+                    *) distcc_hosts_without_pump="${distcc_hosts_without_pump:+${distcc_hosts_without_pump} }${distcc_host_spec}" ;;
+                esac
+            done
+            if [ -z "${distcc_hosts}" ]; then
+                rm -rf "${distcc_probe_dir}"
+                echo "DISTCC_POTENTIAL_HOSTS does not contain usable distcc hosts" >&2; return 1
+            fi
+            local distcc_pump_hosts="${distcc_hosts_with_pump:-}"
+            distcc_hosts_without_pump="${distcc_hosts_without_pump:-${distcc_hosts}}"
             echo "[INFO] trying distcc path." >&2
             local distcc_wrapper_dir; distcc_wrapper_dir="$(resolve_distcc_wrapper_dir)"
+            export DISTCC_HOSTS_NO_PUMP="${distcc_hosts_without_pump}"
             export PATH="${distcc_wrapper_dir}:${PATH}" CC=cc GCC=gcc CXX=c++ GXX=g++ DISTCC_FALLBACK=0
-            local distcc_pump_env
-            if ! distcc_pump_env="$(distcc-pump --startup 2>"${distcc_probe_dir}/distcc-pump.log")"; then
-                disable_distcc; rm -rf "${distcc_probe_dir}"
-                echo "[INFO] distcc pump unavailable; continuing with normal local C compiler." >&2; return 0
-            fi
-            eval "${distcc_pump_env}"
-            PATH="${distcc_wrapper_dir}:${PATH}"; export PATH
-            export CC=cc GCC=gcc CXX=c++ GXX=g++
             distcc_enabled=1
+            if [ -n "${distcc_pump_hosts}" ]; then
+                export DISTCC_POTENTIAL_HOSTS="${distcc_pump_hosts}"
+                unset DISTCC_HOSTS
+                local distcc_pump_env
+                if ! distcc_pump_env="$(distcc-pump --startup 2>"${distcc_probe_dir}/distcc-pump.log")"; then
+                    disable_distcc; rm -rf "${distcc_probe_dir}"
+                    echo "[INFO] distcc pump unavailable; continuing with normal local C compiler." >&2; return 0
+                fi
+                eval "${distcc_pump_env}"
+                local -a distcc_hosts_arr; read -ra distcc_hosts_arr <<<"${DISTCC_HOSTS:-}"
+                local distcc_pump_real_hosts="" distcc_host_token
+                for distcc_host_token in "${distcc_hosts_arr[@]}"; do case "${distcc_host_token}" in --*) ;; *) distcc_pump_real_hosts=1 ;; esac; done
+                if [ -z "${distcc_pump_real_hosts}" ]; then unset DISTCC_HOSTS; fi
+                PATH="${distcc_wrapper_dir}:${PATH}"
+                export PATH DISTCC_HOSTS_NO_PUMP CC=cc GCC=gcc CXX=c++ GXX=g++
+            else
+                export DISTCC_HOSTS="${distcc_hosts}"
+            fi
             printf '%s\n' 'int main(void) { return 0; }' > "${distcc_probe_dir}/distcc-probe.c"
             if ! cc -c "${distcc_probe_dir}/distcc-probe.c" -o "${distcc_probe_dir}/distcc-probe.o" >"${distcc_probe_dir}/distcc-probe.log" 2>&1; then
                 disable_distcc; rm -rf "${distcc_probe_dir}"
@@ -1717,6 +1828,11 @@ ci_cmd_rust_build() {
     configure_ccache
     resolve_cargo_profile_overrides
     local cargo_jobs; cargo_jobs="$(resolve_cargo_jobs)"
+    # What: drop this crate's stale artifact before a real build.
+    # Why: a dep pre-cache stub rlib outdates COPYed src (mtime).
+    if [ "${mode}" = "build" ]; then
+        cargo clean -p "${crate}" --release --target "${musl_target}"
+    fi
     run_cargo_build
     # What: dump ccache stats; a mid-build Redis error is not fatal.
     # Why: the binary is already correct; only cache reuse degrades.
@@ -1730,7 +1846,11 @@ ci_cmd_rust_build() {
         fi
         rm -f "${ccache_final_stats}"
     fi
-    cp "target/${musl_target}/release/${crate}" "/build/${crate}-out"
+    # What: copy the built binary out only for a real build.
+    # Why: the deps pre-cache pass produces no shippable binary.
+    if [ "${mode}" = "build" ]; then
+        cp "target/${musl_target}/release/${crate}" "/build/${crate}-out"
+    fi
 }
 
 # What: Read a pushed tag's immutable registry digest.
