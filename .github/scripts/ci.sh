@@ -4783,8 +4783,8 @@ _ci_check_file_headers() {
     printf 'file-headers=clean files=%s\n' "${sc}"
 }
 
-# What: Enforce AG-CODE-012 comment size and block limits.
-# Why: Mechanical 1-1-1-60 plus story-telling-run size.
+# What: Enforce AG-CODE-012 comment size, block, ref rules.
+# Why: 1-1-1-60, story-run size, and refs go in From only.
 # From: Issue #1683
 _ci_check_comment_length() {
     local file heredoc_on yaml_on rc=0
@@ -4804,6 +4804,7 @@ _ci_check_comment_length() {
                     if (blocklen == 0) blockstart = FNR
                     blocklen++
                     if (length(line) > 60) { printf "%s:%d: %d chars (max 60): %s\n", FILENAME, FNR, length(line), line; viol++ }
+                    if (line ~ /^[[:space:]]*#[[:space:]]*(What|Why):/ && line ~ /#[0-9]/) { printf "%s:%d: issue/PR ref in What/Why (use From:): %s\n", FILENAME, FNR, line; viol++ }
                 } else if (blocklen > 0) flush()
             }
             END { if (blocklen > 0) flush(); if (viol > 0) exit 1 }

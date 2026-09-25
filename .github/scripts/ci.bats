@@ -3577,7 +3577,7 @@ netdata=sha256:n"
     run bash "${CI_SH}" check file-headers "${BATS_TEST_TMPDIR}/Dockerfile"; [ "${status}" -ne 0 ]
 }
 
-@test "check comment-length passes valid, fails oversize and story-run" {
+@test "check comment-length flags oversize, story-run, and What/Why ref" {
     # What: ci.sh owns AG-CODE-012 limits; bats calls it.
     # Why: guard logic lives once, tested through ci.sh.
     # From: Issue #1683
@@ -3590,6 +3590,10 @@ netdata=sha256:n"
     printf '# one\n# two\n# three\n# four\n' > "${BATS_TEST_TMPDIR}/story.sh"
     run bash "${CI_SH}" check comment-length "${BATS_TEST_TMPDIR}/story.sh"
     [ "${status}" -ne 0 ]
+    printf '# What: does a thing for #1683\n# Why: a real reason\n' > "${BATS_TEST_TMPDIR}/ref.sh"
+    run bash "${CI_SH}" check comment-length "${BATS_TEST_TMPDIR}/ref.sh"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"ref in What/Why"* ]]
 }
 
 @test "check deny-short-sha passes full SHA, fails a slice via ci.sh" {
