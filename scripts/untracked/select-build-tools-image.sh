@@ -52,7 +52,10 @@ pr_head_sha="${GITHUB_EVENT_PULL_REQUEST_HEAD_SHA:-}"
 head_repository="${GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME:-${HEAD_REPOSITORY:-}}"
 base_repository="${GITHUB_REPOSITORY:-${BASE_REPOSITORY:-}}"
 require_published="${BUILD_TOOLS_REQUIRE_PUBLISHED:-false}"
-pull_log="$(mktemp)"
+# What: records image-pull output below /var/tmp.
+# Why: self-hosted /tmp is RAM-backed and risks OOM.
+# From: Issue #1860 | PR #1872
+pull_log="$(mktemp -p /var/tmp lancache-build-tools-pull.XXXXXX)"
 
 # What: selects the verified PR staging manifest when supplied.
 # Why: consumers must not use a stale channel during PR validation.
@@ -100,7 +103,6 @@ smoke_test_image() {
       bash
       cargo
       rustc
-      rustup
       rustfmt
       clippy-driver
       sccache

@@ -194,7 +194,7 @@ jobs:
             printf '%s\n' "$digest"
           }
           {
-            printf 'rust=%s\n' "$(digest_for_image rust:latest)"
+            printf 'alpine=%s\n' "$(digest_for_image alpine:3.24)"
           } >> "$GITHUB_OUTPUT"
 
       # What: acceleration network, always bridge/default now
@@ -293,7 +293,7 @@ jobs:
           tags: ${{ steps.source-tag.outputs.image }}
           labels: |
             ${{ steps.meta.outputs.labels }}
-            org.opencontainers.image.base.rust.digest=${{ steps.build-tools-base-digests.outputs.rust }}
+            org.opencontainers.image.base.alpine.digest=${{ steps.build-tools-base-digests.outputs.alpine }}
           # What: https_proxy trusted via the proxy CA secret file.
           # Why: Squid re-signs https; the CA makes it verifiable.
           # From: Issue #1095
@@ -383,7 +383,6 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           trivyignores: .trivyignore.yaml
-          skip-dirs: /usr/local/rustup/toolchains
           hide-progress: true
           cache: "false"
           cache-dir: ${{ steps.trivy-cache.outputs.dir }}
@@ -602,7 +601,7 @@ jobs:
             printf '%s\n' "$digest"
           }
           {
-            printf 'rust=%s\n' "$(digest_for_image rust:latest)"
+            printf 'alpine=%s\n' "$(digest_for_image alpine:3.24)"
           } >> "$GITHUB_OUTPUT"
 
       # What: build local arm64 candidate for pull requests.
@@ -643,7 +642,7 @@ jobs:
           tags: ${{ steps.source-tag.outputs.image }}
           labels: |
             ${{ steps.meta.outputs.labels }}
-            org.opencontainers.image.base.rust.digest=${{ steps.build-tools-base-digests.outputs.rust }}
+            org.opencontainers.image.base.alpine.digest=${{ steps.build-tools-base-digests.outputs.alpine }}
           # What: omits the LAN-proxy build-arg on this arm64 job.
           # Why: no route to the self-hosted-only proxy; static split.
           # From: Issue #1095
@@ -699,7 +698,6 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           trivyignores: .trivyignore.yaml
-          skip-dirs: /usr/local/rustup/toolchains
           hide-progress: true
           cache: "false"
           timeout: 10m

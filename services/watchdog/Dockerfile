@@ -13,29 +13,22 @@ FROM ${BUILD_TOOLS_IMAGE} AS watchdog-builder
 # Why: fail closed, not a confusing mid-build not-found.
 # From: Issue #842
 #
-# What: detects host arch for the musl cross-compile target.
-# Why: uname -m needs no extra package, unlike dpkg.
+# What: detects the installed native Rust target.
+# Why: Alpine packages Rust's musl standard library under its host triple.
 # From: Issue #1095
 RUN set -eu; \
-    for tool in cargo rustc rustup rustfmt clippy-driver sccache distcc distcc-pump python3 pkg-config; do \
+    for tool in cargo rustc rustfmt clippy-driver sccache distcc distcc-pump python3 pkg-config; do \
       command -v "$tool" >/dev/null; \
     done; \
     command -v musl-gcc >/dev/null; \
     command -v ccache >/dev/null; \
     case "$(uname -m)" in \
-      x86_64) echo "x86_64-unknown-linux-musl" > /tmp/musl-target; ;; \
-      aarch64) echo "aarch64-unknown-linux-musl" > /tmp/musl-target; ;; \
+      x86_64) echo "x86_64-alpine-linux-musl" > /tmp/musl-target; ;; \
+      aarch64) echo "aarch64-alpine-linux-musl" > /tmp/musl-target; ;; \
       *) echo "Unsupported architecture for musl cross-compilation target: $(uname -m)" >&2; exit 1; ;; \
     esac; \
-    # Captured into a variable first, then grepped via a here-string
-    # (AG-VAL-032): a live pipe into `grep -qx` is the exact SIGPIPE-under-
-    # pipefail shape already confirmed in this project's own CI failures.
-    # This stage is `FROM ${BUILD_TOOLS_IMAGE}`, which sets
-    # `SHELL ["/bin/bash", "-o", "pipefail", "-c"]` and a child Dockerfile
-    # with no SHELL override inherits that, so a live pipe here would be
-    # exploitable, not merely at theoretical risk.
-    installed_musl_targets="$(rustup target list --installed)"; \
-    grep -qx "$(cat /tmp/musl-target)" <<<"${installed_musl_targets}"; \
+    rustc_host_line="$(rustc -vV)"; \
+    grep -qx "host: $(cat /tmp/musl-target)" <<<"${rustc_host_line}"; \
     distcc_bin="$(command -v distcc)"; \
     mkdir -p /usr/local/lib/distcc; \
     for wrapper in cc gcc c++ g++; do ln -sf "$distcc_bin" "/usr/local/lib/distcc/$wrapper"; done; \
