@@ -78,18 +78,17 @@ ARG APT_CACHE_BUST=""
 # From: Issue #1683
 ARG APK_PACKAGES
 
-# What: switches apk's own repositories to plain http.
-# Why: Squid caches http; signed indices keep integrity.
-# From: Issue #1095
-RUN sed -i 's|^https://|http://|' /etc/apk/repositories
-
-# What: apk upgrade the base, then add the SOT-listed packages.
-# Why: mandatory dist-upgrade invariant (§40.1); ca-certs for CDN.
+# What: bootstrap bash so the SHELL below is not busybox ash.
+# Why: AG-REL-001 forbids ash; ci.sh apk-setup needs bash.
+# From: Issue #1683
+RUN apk add --no-cache bash
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+# What: shared apk setup (repo-http+update+upgrade+add) via ci.sh.
+# Why: one owner for the mandatory update+upgrade; SOT owns packages.
 # From: Issue #871 | Issue #1683
-RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
-    apk update --no-cache && \
-    apk upgrade --no-cache && \
-    apk add --no-cache ${APK_PACKAGES}
+RUN --mount=type=bind,source=.github/scripts/ci.sh,target=/usr/local/bin/ci.sh \
+    : "apt-cache-bust=${APT_CACHE_BUST}" \
+    && bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
 
 COPY --from=cachehamster-builder /build/lancache-cachehamster-out /usr/local/bin/lancache-cachehamster
 
