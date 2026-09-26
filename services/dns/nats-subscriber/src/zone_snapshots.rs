@@ -43,9 +43,8 @@ pub const DEFAULT_KEEP_KNOWN_GOOD_CONFIGS: u32 = 3;
 /// Every zone this adapter is allowed to snapshot or roll back, mirroring
 /// `services/dns/entrypoint.sh`'s `DDNS_UPDATE_ZONES` array (`LAN_ZONES` +
 /// `PRIVATE_REVERSE_ZONES`) exactly. The two lists must be kept in sync by
-/// hand -- there is no automated cross-language check comparable to
-/// `tests/bats/known_good_snapshots_sync.bats` (one side is bash, the other
-/// Rust) -- but `zone_list_matches_entrypoint_ddns_update_zones` below pins
+/// hand -- there is no automated cross-language check (one side is bash, the
+/// other Rust) -- but `zone_list_matches_entrypoint_ddns_update_zones` below pins
 /// the exact expected contents so a future edit to either list that forgets
 /// its counterpart fails a test instead of silently drifting.
 ///
@@ -508,8 +507,7 @@ mod tests {
     // PRIVATE_REVERSE_ZONES), the two arrays this const must be kept in
     // sync with by hand. A future edit to either side that forgets its
     // counterpart fails this test instead of silently drifting -- there is
-    // no automated bash<->Rust check comparable to
-    // tests/bats/known_good_snapshots_sync.bats for this pair.
+    // no automated bash<->Rust check for this pair.
     #[test]
     fn zone_list_matches_entrypoint_ddns_update_zones() {
         let expected = [

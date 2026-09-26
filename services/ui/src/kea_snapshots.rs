@@ -10,9 +10,9 @@
 //! (`CREATE`/`PRUNE`/`SELECT`/`REJECT`/`FATAL`) shared with the nginx/
 //! dnsmasq/PowerDNS shell adapters (`scripts/lib/known-good-snapshots.sh`).
 //!
-//! This is NOT a byte-identical embedded copy of that shell library like the
-//! other three adapters carry, and `tests/bats/known_good_snapshots_sync.bats`
-//! deliberately does not cover this file: Kea's config is mutated live
+//! This is NOT a copy of that shell library, which the shell adapters source
+//! at runtime; this Rust module reimplements the same contract natively:
+//! Kea's config is mutated live
 //! through this Admin UI's own HTTP client against the Kea Control Agent
 //! (see `routes/dhcp.rs`'s `kea_config_modify`), not regenerated from a
 //! shell template at container startup, so there is nothing here to embed
