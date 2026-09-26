@@ -6,8 +6,8 @@
 # Why: cred-store/stream-fetch primitives; deferred features
 # From: Issue #871
 
-# What: Base image pin, consumed from the version SOT.
-# Why: build-manifest.yml is the sole owner of the pin.
+# What: base image pin, supplied by ci.sh from the SOT.
+# Why: SOT base_images.alpine is the sole owner (AG-CI-006).
 # From: Issue #1683
 ARG ALPINE_IMAGE
 
@@ -22,56 +22,73 @@ FROM ${BUILD_TOOLS_IMAGE} AS cachehamster-builder
 # From: Issue #1683
 ARG MUSL_TARGET
 
-# What: verify build-tools Rust/musl contract
-# Why: fail closed on missing tools or targets
-# From: Issue #871
-RUN set -eu; \
-    for tool in cargo rustc rustup; do \
-      command -v "$tool" >/dev/null; \
-    done; \
-    command -v musl-gcc >/dev/null; \
-    [ -n "${MUSL_TARGET}" ] || { echo "MUSL_TARGET build-arg is required" >&2; exit 1; }; \
-    printf '%s\n' "${MUSL_TARGET}" > /var/tmp/musl-target; \
-    installed_musl_targets="$(rustup target list --installed)"; \
-    grep -qx "$(cat /var/tmp/musl-target)" <<<"${installed_musl_targets}"
+# What: cargo tuning args, consumed by ci.sh rust-build.
+# Why: PROJECT_CARGO_*/CARGO_BUILD_JOBS own these.
+# From: Issue #1683
+ARG CARGO_BUILD_JOBS=
+ARG PROJECT_CARGO_LTO=
+ARG PROJECT_CARGO_CODEGENUNIT=
+# What: redeclare BUILD_TOOLS_IMAGE for the RUN stage.
+# Why: ci.sh rust-build folds it into the ccache key.
+# From: Issue #1683
+ARG BUILD_TOOLS_IMAGE
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
-COPY src/ ./src/
-
-# What: cargo build with CC/GCC/CXX/GXX export and proxy CA
-# Why: C-dep (ring); selfhosted proxy; no build acceleration
-# From: Issue #871 | Issue #1671
-RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -eu; \
-    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
-      cp /etc/ssl/certs/ca-certificates.crt /var/tmp/ca-bundle.orig; \
-      cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
-    fi; \
-    export CC=cc GCC=gcc CXX=c++ GXX=g++; \
-    musl_target="$(cat /var/tmp/musl-target)"; \
-    cargo build --release --locked --target "$musl_target"; \
-    cp "target/${musl_target}/release/lancache-cachehamster" /build/lancache-cachehamster-out; \
-    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /var/tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
+COPY services/cachehamster/Cargo.toml services/cachehamster/Cargo.toml
+COPY services/ui/Cargo.toml services/ui/Cargo.toml
+COPY services/watchdog/Cargo.toml services/watchdog/Cargo.toml
+COPY services/dns/nats-subscriber/Cargo.toml services/dns/nats-subscriber/Cargo.toml
+COPY tools/pxe-client-probe/Cargo.toml tools/pxe-client-probe/Cargo.toml
+# What: stub targets for workspace members not built here.
+# Why: cargo loads every member manifest to resolve deps.
+# From: Issue #1095
+RUN mkdir -p services/ui/src services/watchdog/src \
+      services/dns/nats-subscriber/src tools/pxe-client-probe/src \
+    && printf 'fn main() {}\n' > services/ui/src/main.rs \
+    && : > services/ui/src/lib.rs \
+    && printf 'fn main() {}\n' > services/watchdog/src/main.rs \
+    && : > services/watchdog/src/lib.rs \
+    && printf 'fn main() {}\n' > services/dns/nats-subscriber/src/main.rs \
+    && : > services/dns/nats-subscriber/src/lib.rs \
+    && printf 'fn main() {}\n' > tools/pxe-client-probe/src/main.rs
+COPY services/cachehamster/src services/cachehamster/src
+# What: ci.sh owns the rust build accel policy (one owner).
+# Why: AG-CI-005/022/023; bind-mounted, never baked in.
+# From: Issue #1683
+RUN --mount=type=bind,source=.github/scripts/ci.sh,target=/usr/local/bin/ci.sh \
+    --mount=type=secret,id=sccache_redis_url \
+    --mount=type=secret,id=sccache_dist_config \
+    --mount=type=secret,id=distcc_potential_hosts \
+    --mount=type=secret,id=ccache_redis_url \
+    --mount=type=secret,id=project_selfhosted_proxy_ca \
+    bash /usr/local/bin/ci.sh rust-build cachehamster lancache-cachehamster
 
 FROM ${ALPINE_IMAGE}
 
 LABEL org.opencontainers.image.description="lancache-ng cachehamster: Steam cache-warming prefill daemon (scaffold, issue #871)."
 
-# What: declares APT_CACHE_BUST before apk upgrade/add RUN
-# Why: BuildKit cache expires to ensure fresh updates
+# What: declares APT_CACHE_BUST before the apk RUN.
+# Why: BuildKit cache expires to ensure fresh updates.
 # From: Issue #871
 ARG APT_CACHE_BUST=""
+
+# What: the apk package list, supplied from the SOT.
+# Why: the SOT owns the list; this stage only consumes it.
+# From: Issue #1683
+ARG APK_PACKAGES
 
 # What: switches apk's own repositories to plain http.
 # Why: Squid caches http; signed indices keep integrity.
 # From: Issue #1095
 RUN sed -i 's|^https://|http://|' /etc/apk/repositories
 
-# What: apk upgrade base-layer; add ca-certs for public CDN
-# Why: ca-certs needed for Steam CDN via rustls-tls
+# What: apk upgrade the base, then add the SOT-listed packages.
+# Why: mandatory dist-upgrade invariant (§40.1); ca-certs for CDN.
+# From: Issue #871 | Issue #1683
 RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
     apk upgrade --no-cache && \
-    apk add --no-cache ca-certificates
+    apk add --no-cache ${APK_PACKAGES}
 
 COPY --from=cachehamster-builder /build/lancache-cachehamster-out /usr/local/bin/lancache-cachehamster
 

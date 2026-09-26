@@ -139,6 +139,11 @@ services:
     build_type: rust
     final_base: alpine
     runner: heavy
+    # What: final-image apk packages; the SOT owns the list.
+    # Why: consumer derives; no hardcoded apk add (AG-CI-006).
+    # From: Issue #1683
+    packages:
+      - ca-certificates
   netdata:
     context: services/netdata
     # What: First-party install of static netdata binary.
