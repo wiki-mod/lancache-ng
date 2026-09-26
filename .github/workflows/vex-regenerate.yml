@@ -119,7 +119,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+          image="$(bash .github/scripts/ci.sh build-tools resolve-image)"
           case "$image" in
             *@sha256:*)
               ;;

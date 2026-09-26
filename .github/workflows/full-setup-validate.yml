@@ -50,13 +50,13 @@ jobs:
       - uses: &checkout_centraliced_versioning actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Resolve build-tools image
-        # What: Does not require published image.
-        # Why: Dockerfile differs; needs fresh build.
-        # From: Issue #705
+        # What: Resolve published build-tools digest.
+        # Why: Full setup uses published digests (SOT).
+        # From: Issue #1683 | PR #1858
         id: build-tools-image
         run: |
           set -euo pipefail
-          image="$(bash scripts/untracked/select-build-tools-image.sh)"
+          image="$(bash .github/scripts/ci.sh build-tools resolve-image)"
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
       - name: Run DHCP proxy PXE simulation
@@ -118,17 +118,13 @@ jobs:
           dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Resolve build-tools image
-        # What: Does not require published image.
-        # Why: Needs dhclient; not in published image yet.
+        # What: Resolve published build-tools digest.
+        # Why: dhclient now built into the published image.
+        # From: Issue #1683 | PR #1858
         id: build-tools-image
-        env:
-          # What: requires dhclient in the smoke-test check.
-          # Why: opt-in only; this job's own sim needs it.
-          # From: Issue #1095
-          EXTRA_REQUIRED_TOOLS: dhclient
         run: |
           set -euo pipefail
-          image="$(bash scripts/untracked/select-build-tools-image.sh)"
+          image="$(bash .github/scripts/ci.sh build-tools resolve-image)"
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
       - name: Run DHCP Kea Control Agent mutation simulation

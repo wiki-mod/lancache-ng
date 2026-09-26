@@ -82,16 +82,12 @@ jobs:
           git fetch --prune --depth=1 origin '+refs/heads/*:refs/remotes/origin/*'
 
       - name: Resolve build-tools image
-        # Strict mode (BUILD_TOOLS_REQUIRE_PUBLISHED=true): this check only
-        # needs bash/curl/jq/git, already present in the published :dev/:nightly
-        # channel image, and this workflow has no PR of its own whose
-        # Dockerfile changes would need a branch-local rebuild to validate
-        # against -- so there is no reason to pay a local `docker build` on
-        # every scheduled run the way a trusted-ref PR/push job would. Same
-        # pattern as pr-tracking-metadata-check in build-push.yml.
+        # What: Resolve published build-tools digest.
+        # Why: scheduled run, no PR; published channel only.
+        # From: Issue #1683 | PR #1858
         run: |
           set -euo pipefail
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)" >> "$GITHUB_ENV"
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(bash .github/scripts/ci.sh build-tools resolve-image)" >> "$GITHUB_ENV"
 
       - name: Scan for orphaned branches
         env:

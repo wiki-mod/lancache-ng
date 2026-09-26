@@ -455,10 +455,9 @@ jobs:
           dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Resolve build-tools image
-        # See ssl-mitm-cache-simulation's identical step above for why a
-        # same-PR build-tools change prefers the confirmed PR staging tag.
-        # BUILD_TOOLS_REQUIRE_PUBLISHED: this job's dig/curl/jq client checks
-        # only need tools already in every published build-tools image.
+        # What: PR-staging build-tools if touched, else published.
+        # Why: a same-PR Dockerfile change needs its staging image.
+        # From: Issue #1683 | PR #1858
         id: build-tools-image
         # Read via env: + quoted shell variables instead of interpolating
         # `${{ }}` expressions directly into the run: script (OSPS-BR-01.04
@@ -476,7 +475,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+            image="$(bash .github/scripts/ci.sh build-tools resolve-image)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run DNS zone/record rollback simulation
@@ -569,8 +568,9 @@ jobs:
           dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Resolve build-tools image
-        # No BUILD_TOOLS_REQUIRE_PUBLISHED: same-PR tools/build-tools override
-        # preference, matching every other job in this suite.
+        # What: PR-staging build-tools if touched, else published.
+        # Why: a same-PR Dockerfile change needs its staging image.
+        # From: Issue #1683 | PR #1858
         id: build-tools-image
         # See dns-zone-rollback-simulation's "Resolve build-tools image" step
         # above for why these are read via env: + quoted shell variables
@@ -587,7 +587,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+            image="$(bash .github/scripts/ci.sh build-tools resolve-image)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run Admin UI Kea rollback (POST /dhcp/snapshot/rollback) simulation
@@ -672,10 +672,9 @@ jobs:
           dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Resolve build-tools image
-        # No BUILD_TOOLS_REQUIRE_PUBLISHED: this script needs `expect` (real
-        # setup.sh CLI fresh install, same reason setup-cli-simulation.sh
-        # needs it) from build-tools. Same PR-staging-tag preference as
-        # setup-cli-simulation above, for the same reason.
+        # What: PR-staging build-tools if touched, else published.
+        # Why: a same-PR Dockerfile change needs its staging image.
+        # From: Issue #1683 | PR #1858
         id: build-tools-image
         # See dns-zone-rollback-simulation's "Resolve build-tools image" step
         # for why PR_STAGING_AVAILABLE/BUILD_TOOLS_TOUCHED/IMAGE_TAG/
@@ -689,17 +688,13 @@ jobs:
           BUILD_TOOLS_TOUCHED: ${{ needs.plan.outputs.build_tools }}
           IMAGE_TAG: ${{ needs.plan.outputs.image_tag }}
           REPOSITORY: ${{ github.repository }}
-          # What: Widens smoke test to require dhclient (not baseline Alpine).
-          # Why: This sim uses dhclient; Alpine lacks it in stock apk.
-          # From: Issue #1095
-          EXTRA_REQUIRED_TOOLS: dhclient
         run: |
           set -euo pipefail
           if [[ "$PR_STAGING_AVAILABLE" == "true" && "$BUILD_TOOLS_TOUCHED" == "true" ]]; then
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image."
           else
-            image="$(bash scripts/untracked/select-build-tools-image.sh)"
+            image="$(bash .github/scripts/ci.sh build-tools resolve-image)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run syslog forwarding + Admin UI visibility simulation

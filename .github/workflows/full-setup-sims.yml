@@ -89,7 +89,7 @@ jobs:
         id: build-tools
         run: |
           set -euo pipefail
-          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+          build_tools_image="$(bash .github/scripts/ci.sh build-tools resolve-image)"
           case "$build_tools_image" in
             *@sha256:*) ;;
             *)
@@ -222,7 +222,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+            image="$(bash .github/scripts/ci.sh build-tools resolve-image)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run SSL MITM cache simulation
@@ -262,7 +262,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+            image="$(bash .github/scripts/ci.sh build-tools resolve-image)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run proxy deep-wildcard TLS simulation
@@ -303,7 +303,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+            image="$(bash .github/scripts/ci.sh build-tools resolve-image)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run proxy standard-mode SNI routing simulation
@@ -344,7 +344,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+            image="$(bash .github/scripts/ci.sh build-tools resolve-image)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run proxy SSL-mode two-relay dispatch simulation
@@ -419,7 +419,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+            image="$(bash .github/scripts/ci.sh build-tools resolve-image)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run UI/NATS/DNS integration simulation
@@ -476,7 +476,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image."
           else
-            image="$(bash scripts/untracked/select-build-tools-image.sh)"
+            image="$(bash .github/scripts/ci.sh build-tools resolve-image)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run setup.sh CLI simulation
@@ -522,8 +522,9 @@ jobs:
     steps:
       - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Resolve build-tools image
-        # What: omits BUILD_TOOLS_REQUIRE_PUBLISHED here.
-        # Why: needs isc-dhcp-client for a PR-scoped image.
+        # What: PR-staging build-tools if touched, else published.
+        # Why: a same-PR Dockerfile change needs its staging image.
+        # From: Issue #1683 | PR #1858
         id: build-tools-image
         # What: reads step inputs via env: variables.
         # Why: avoids script-injection (OSPS-BR-01.04).
@@ -534,17 +535,13 @@ jobs:
           BUILD_TOOLS_TOUCHED: ${{ inputs.build_tools_touched }}
           IMAGE_TAG: ${{ inputs.image_tag }}
           REPOSITORY: ${{ github.repository }}
-          # What: require dhclient in smoke test.
-          # Why: opt-in, not baseline in build-tools.
-          # From: Issue #1095
-          EXTRA_REQUIRED_TOOLS: dhclient
         run: |
           set -euo pipefail
           if [[ "$PR_STAGING_AVAILABLE" == "true" && "$BUILD_TOOLS_TOUCHED" == "true" ]]; then
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image."
           else
-            image="$(bash scripts/untracked/select-build-tools-image.sh)"
+            image="$(bash .github/scripts/ci.sh build-tools resolve-image)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run DHCP Kea lease-flow simulation
@@ -621,7 +618,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+            image="$(bash .github/scripts/ci.sh build-tools resolve-image)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run NATS auth-callout simulation
@@ -679,8 +676,9 @@ jobs:
           dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Resolve build-tools image
-        # What: omits BUILD_TOOLS_REQUIRE_PUBLISHED here.
-        # Why: curl check needs only published tools.
+        # What: PR-staging build-tools if touched, else published.
+        # Why: a same-PR Dockerfile change needs its staging image.
+        # From: Issue #1683 | PR #1858
         id: build-tools-image
         # What: reads step inputs via env: variables.
         # Why: avoids script-injection (OSPS-BR-01.04).
@@ -695,7 +693,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+            image="$(bash .github/scripts/ci.sh build-tools resolve-image)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run Admin UI reachability during crash-loop simulation
@@ -750,8 +748,9 @@ jobs:
           dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Resolve build-tools image
-        # What: omits BUILD_TOOLS_REQUIRE_PUBLISHED here.
-        # Why: allows a same-PR tools/build-tools override.
+        # What: PR-staging build-tools if touched, else published.
+        # Why: a same-PR Dockerfile change needs its staging image.
+        # From: Issue #1683 | PR #1858
         id: build-tools-image
         # What: reads step inputs via env: variables.
         # Why: avoids script-injection (OSPS-BR-01.04).
@@ -766,7 +765,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+            image="$(bash .github/scripts/ci.sh build-tools resolve-image)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run setup.sh reset-to-last-known-good-config (Kea) simulation
@@ -821,8 +820,9 @@ jobs:
           dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Resolve build-tools image
-        # What: omits BUILD_TOOLS_REQUIRE_PUBLISHED here.
-        # Why: allows a same-PR tools/build-tools override.
+        # What: PR-staging build-tools if touched, else published.
+        # Why: a same-PR Dockerfile change needs its staging image.
+        # From: Issue #1683 | PR #1858
         id: build-tools-image
         # What: reads step inputs via env: variables.
         # Why: avoids script-injection (OSPS-BR-01.04).
@@ -837,7 +837,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+            image="$(bash .github/scripts/ci.sh build-tools resolve-image)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run setup.sh reset-to-last-known-good-config (DNS) simulation
