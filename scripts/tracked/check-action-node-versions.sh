@@ -73,17 +73,8 @@
 # repos' Contents API works fine too at this repo's current scale).
 set -euo pipefail
 
-# Own script directory, independent of $repo_root below: $repo_root can be
-# overridden to a throwaway fixture tree by tests/bats/check_action_node_versions.bats,
-# which never has its own scripts/lib/ghcr-retry.sh -- this file's location
-# on disk never moves just because the tree it's asked to *scan* does.
-script_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)"
-
 repo_root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 cd "$repo_root"
-
-# shellcheck source=scripts/lib/github-api-retry.sh
-source "$script_lib_dir/github-api-retry.sh"
 
 workflow_dir=.github/workflows
 actions_dir=.github/actions
@@ -340,23 +331,24 @@ for action_file in "${local_action_files[@]}"; do
   fi
 done
 
-gh_token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
-if [ -n "$gh_token" ]; then
-  echo "::notice::check-action-node-versions: using authenticated GitHub API requests for external action metadata."
-else
-  echo "::notice::check-action-node-versions: GH_TOKEN/GITHUB_TOKEN unset; using unauthenticated GitHub API fallback for external action metadata."
-fi
-
-# What: Resolves external manifests through the shared GitHub REST owner
-# Why: Both supported manifest names are needed after a transient response
+# What: Resolves immutable external manifests from GitHub's raw host
+# Why: Public SHA reads must not consume GitHub REST rate-limit budget
 # From: Issue #1860 | PR #1872
 fetch_external_action_yaml() {
   local owner="$1" repo="$2" subpath="$3" ref="$4"
-  local file body url status infrastructure_status=""
+  local file body url status curl_status infrastructure_status="" attempt delay
   for file in action.yml action.yaml; do
     body="$(mktemp "${TMPDIR:-/var/tmp}/action-metadata.XXXXXX")" || return 1
-    url="https://api.github.com/repos/${owner}/${repo}/contents/${subpath:+${subpath}/}${file}?ref=${ref}"
-    if github_api_get_with_retry "$url" "$body" false application/vnd.github.raw+json; then
+    url="https://raw.githubusercontent.com/${owner}/${repo}/${ref}/${subpath:+${subpath}/}${file}"
+    for (( attempt=1; attempt<=3; attempt++ )); do
+      if status="$(curl -sS --connect-timeout 10 --max-time 30 --location -o "$body" -w '%{http_code}' "$url")"; then curl_status=0; else curl_status=$?; status=000; fi
+      if (( curl_status == 0 )) && [[ "$status" != "429" && ! "$status" =~ ^5 ]]; then break; fi
+      (( attempt == 3 )) && break
+      delay=$(( 5 * (1 << (attempt - 1)) ))
+      echo "::notice::Raw action manifest read returned HTTP $status; retrying after ${delay}s." >&2
+      sleep "$delay"
+    done
+    if (( curl_status == 0 )) && [[ "$status" == "200" ]]; then
       printf 'OK\n'
       cat "$body"
       rm -f -- "$body"
@@ -436,7 +428,7 @@ for value in "${uses_values[@]}"; do
         fail "Could not find action.yml or action.yaml for '$value' at ref '$ref' (referenced in: $(referencing_files "$value")) -- the pin may be broken, or point at a ref that never had this file."
         ;;
       INFRA:*)
-        fail "Could not fully validate '$value' (HTTP ${marker#INFRA:}); GitHub REST metadata remained unavailable after bounded retries."
+        fail "Could not fully validate '$value' (HTTP ${marker#INFRA:}); raw manifest metadata remained unavailable after bounded retries."
         ;;
       *)
         fail "Could not fully validate '$value' (referenced in: $(referencing_files "$value")); external action metadata resolution returned an unexpected result."
