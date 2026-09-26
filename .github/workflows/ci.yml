@@ -316,34 +316,24 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
+      - *bootstrap
+      # What: hand phase results to the ci.sh result gate.
+      # Why: pass/fail classification is ci.sh policy (§5).
+      # From: Issue #1683
       - name: Aggregate the pipeline result
-        run: |
-          set -euo pipefail
-          plan='${{ needs.plan.result }}'
-          build='${{ needs.build.result }}'
-          test='${{ needs.test.result }}'
-          resolve_bt='${{ needs.resolve-build-tools.result }}'
-          cargo_audit='${{ needs.cargo-audit.result }}'
-          lint='${{ needs.lint.result }}'
-          coverage='${{ needs.coverage.result }}'
-          scan='${{ needs.scan.result }}'
-          aggregate='${{ needs.aggregate.result }}'
-          assemble='${{ needs.assemble.result }}'
-          validate='${{ needs.validate.result }}'
-          promote='${{ needs.promote.result }}'
-          checks='${{ needs.checks.result }}'
-          # every non-plan/checks phase skips on a NOOP or a PR -- skipped is success.
-          if [ "${plan}" != success ]; then
-            echo "[CI-ERROR-CORE-0100] phase=plan result=${plan}" >&2; exit 1
-          fi
-          for phase in build:"${build}" test:"${test}" resolve-build-tools:"${resolve_bt}" cargo-audit:"${cargo_audit}" lint:"${lint}" coverage:"${coverage}" scan:"${scan}" aggregate:"${aggregate}" assemble:"${assemble}" validate:"${validate}" promote:"${promote}"; do
-            case "${phase#*:}" in
-              success|skipped) ;;
-              *) echo "[CI-ERROR-CORE-0100] phase=${phase%%:*} result=${phase#*:}" >&2; exit 1 ;;
-            esac
-          done
-          # checks always runs (static guards); it must pass.
-          if [ "${checks}" != success ]; then
-            echo "[CI-ERROR-CORE-0100] phase=checks result=${checks}" >&2; exit 1
-          fi
-          echo "CI 2.0 result: plan=${plan} build=${build} aggregate=${aggregate} assemble=${assemble} validate=${validate} promote=${promote} checks=${checks} -> SUCCESS"
+        env:
+          CI_PHASE_RESULTS: >-
+            plan:${{ needs.plan.result }}
+            build:${{ needs.build.result }}
+            test:${{ needs.test.result }}
+            resolve-build-tools:${{ needs.resolve-build-tools.result }}
+            cargo-audit:${{ needs.cargo-audit.result }}
+            lint:${{ needs.lint.result }}
+            coverage:${{ needs.coverage.result }}
+            scan:${{ needs.scan.result }}
+            aggregate:${{ needs.aggregate.result }}
+            assemble:${{ needs.assemble.result }}
+            validate:${{ needs.validate.result }}
+            promote:${{ needs.promote.result }}
+            checks:${{ needs.checks.result }}
+        run: bash .github/scripts/ci.sh result-gate

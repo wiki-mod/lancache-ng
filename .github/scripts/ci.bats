@@ -48,6 +48,33 @@ teardown() {
 # CORE INVARIANTS
 # =========================================================
 
+@test "result-gate accepts an all-success and a NOOP-skipped pipeline" {
+    # What: required check greens on success and on skips.
+    # Why: non-plan/checks phases skip on NOOP/PR (§62).
+    # From: Issue #1683 | PR #1858
+    CI_PHASE_RESULTS="plan:success build:success checks:success" run ci_cmd_result_gate
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *SUCCESS* ]]
+    CI_PHASE_RESULTS="plan:success build:skipped validate:skipped checks:success" run ci_cmd_result_gate
+    [ "${status}" -eq 0 ]
+}
+
+@test "result-gate fails closed on plan, checks, phase failure, or empty" {
+    # What: plan/checks must succeed; others success or skip.
+    # Why: a real phase failure must block promotion.
+    # From: Issue #1683 | PR #1858
+    CI_PHASE_RESULTS="plan:failure checks:success" run ci_cmd_result_gate
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *CI-ERROR-CORE-0100* ]]
+    CI_PHASE_RESULTS="plan:success checks:failure" run ci_cmd_result_gate
+    [ "${status}" -eq 1 ]
+    CI_PHASE_RESULTS="plan:success build:failure checks:success" run ci_cmd_result_gate
+    [ "${status}" -eq 1 ]
+    run ci_cmd_result_gate
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *CI-ERROR-CORE-0101* ]]
+}
+
 @test "ci_services lists exactly the 10 product-stack services" {
     # What: The one service list drives everything.
     # Why: Drift here breaks matrices/scans/release.
