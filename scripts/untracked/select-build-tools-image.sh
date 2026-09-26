@@ -141,6 +141,10 @@ smoke_test_image() {
     fi
 
     for tool in "${required_tools[@]}"; do
+      if [[ "$tool" == "parallel" ]] && ! command -v "$tool" >/dev/null; then
+        echo "::notice::parallel is unavailable; Bats consumers will run serially." >&2
+        continue
+      fi
       command -v "$tool" >/dev/null
     done
 
