@@ -236,15 +236,16 @@ teardown() {
     [[ "${output}" == *"proxy=true"* ]]
 }
 
-@test "plan rebuilds every shared-scripts consumer, and no other" {
-    # What: shared-scripts feeds its SOT dependency_graph set.
-    # Why: One shared context, exactly its SOT consumers.
+@test "plan rebuilds every known-good consumer, and no other" {
+    # What: known-good (file) feeds its consumer set.
+    # Why: only the snapshot-holding services rebuild.
     # From: Issue #1683
     run bash "${CI_SH}" plan scripts/lib/known-good-snapshots.sh
     [[ "${output}" == *"proxy=true"* ]]
+    [[ "${output}" == *"dns=true"* ]]
     [[ "${output}" == *"dhcp-proxy=true"* ]]
     [[ "${output}" == *"dhcp=false"* ]]
-    [[ "${output}" == *"dns=false"* ]]
+    [[ "${output}" == *"ui=false"* ]]
     [[ "${output}" == *"ntp=false"* ]]
     [[ "${output}" == *"cachehamster=false"* ]]
 }
@@ -378,11 +379,11 @@ teardown() {
 }
 
 @test "ci_service_contexts returns the named contexts for proxy" {
-    # What: proxy depends on shared-scripts and dns-domains.
+    # What: proxy depends on known-good and dns-domains.
     # Why: The SOT edge set is authoritative (Finding 93).
     # From: Issue #1683
     run ci_service_contexts proxy
-    [[ "${output}" == *"shared-scripts"* ]]
+    [[ "${output}" == *"known-good"* ]]
     [[ "${output}" == *"dns-domains"* ]]
 }
 

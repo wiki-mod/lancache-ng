@@ -17,6 +17,7 @@ services:
     # From: Issue #1683
     external_contexts:
       - dns-domains=services/dns
+      - known-good=scripts/lib
     build_type: apk
     final_base: alpine
     runner: light
@@ -32,11 +33,12 @@ services:
       - "nginx -V 2>&1 | grep -q -- --with-stream_ssl_preread_module"
   dns:
     context: services/dns
-    # What: named context for the shared-secret lib.
+    # What: named contexts for the shared-secret + known-good libs.
     # Why: entrypoint sources scripts/lib, not embedded.
     # From: Issue #858 | Issue #1683
     external_contexts:
       - shared-secret=scripts/lib
+      - known-good=scripts/lib
     build_type: rust
     final_base: alpine
     runner: heavy
@@ -138,6 +140,11 @@ services:
       - find --version
   dhcp-proxy:
     context: services/dhcp-proxy
+    # What: named context for the known-good lib.
+    # Why: entrypoint sources scripts/lib, not embedded.
+    # From: Issue #1683
+    external_contexts:
+      - known-good=scripts/lib
     build_type: apk
     final_base: alpine
     runner: light
@@ -426,6 +433,8 @@ named_contexts:
     path: scripts/lib
   shared-secret:
     path: scripts/lib/shared-secret-bootstrap.sh
+  known-good:
+    path: scripts/lib/known-good-snapshots.sh
   dns-domains:
     path: services/dns/cdn-domains.txt
 
@@ -447,9 +456,9 @@ build_identity:
 # From: Issue #1683
 dependency_graph:
   proxy:
-    contexts: [shared-scripts, dns-domains]
+    contexts: [known-good, dns-domains]
   dns:
-    contexts: [shared-secret]
+    contexts: [shared-secret, known-good]
   watchdog:
     contexts: []
   ui:
@@ -457,7 +466,7 @@ dependency_graph:
   dhcp:
     contexts: [shared-secret]
   dhcp-proxy:
-    contexts: [shared-scripts]
+    contexts: [known-good]
   ntp:
     contexts: []
   syslog:

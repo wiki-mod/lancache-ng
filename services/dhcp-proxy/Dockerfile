@@ -41,6 +41,10 @@ ENV VISUAL=$EDITOR
 # From: Issue #815
 COPY dnsmasq.conf.template /etc/dnsmasq.conf.template
 COPY dnsmasq-relay.conf.template /etc/dnsmasq-relay.conf.template
+# What: copy the known-good-snapshot library.
+# Why: entrypoint sources it; no embedded copy (AG-CODE-011).
+# From: Issue #1683
+COPY --from=known-good known-good-snapshots.sh /usr/local/lib/known-good-snapshots.sh
 COPY entrypoint.sh /entrypoint.sh
 
 EXPOSE 67/udp

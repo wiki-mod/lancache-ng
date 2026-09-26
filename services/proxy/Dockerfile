@@ -84,6 +84,10 @@ COPY public_suffix_list.dat /etc/nginx/public_suffix_list.dat
 COPY --from=dns-domains domain-validation.sh /usr/local/lib/domain-validation.sh
 COPY --from=dns-domains cdn-domains.txt /etc/nginx/cdn-domains.txt
 
+# What: copy the known-good-snapshot library.
+# Why: entrypoint sources it; no embedded copy (AG-CODE-011).
+# From: Issue #1683
+COPY --from=known-good known-good-snapshots.sh /usr/local/lib/known-good-snapshots.sh
 COPY entrypoint.sh /entrypoint.sh
 
 VOLUME ["/etc/nginx/ssl", "/var/cache/nginx/lancache"]

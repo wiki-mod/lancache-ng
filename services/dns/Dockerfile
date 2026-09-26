@@ -83,6 +83,10 @@ COPY services/dns/domain-validation.sh /usr/local/lib/domain-validation.sh
 # Why: entrypoint sources it; no embedded copy (AG-CODE-011).
 # From: Issue #858 | Issue #1683
 COPY --from=shared-secret shared-secret-bootstrap.sh /usr/local/lib/shared-secret-bootstrap.sh
+# What: copy the known-good-snapshot library.
+# Why: entrypoint sources it; no embedded copy (AG-CODE-011).
+# From: Issue #1683
+COPY --from=known-good known-good-snapshots.sh /usr/local/lib/known-good-snapshots.sh
 
 # What: declares APT_CACHE_BUST before the busting RUN.
 # Why: BuildKit cache has no wall-clock expiry.
