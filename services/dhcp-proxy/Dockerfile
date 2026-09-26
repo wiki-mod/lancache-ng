@@ -5,10 +5,10 @@
 # Why: image-local apk; ci.sh builds via the generic path.
 # From: Issue #815 | Issue #1683
 
-# What: base image, supplied by ci.sh from the SOT pin.
-# Why: non-authoritative fallback keeps FROM valid (AG-CI-008).
+# What: base image pin, supplied by ci.sh from the SOT.
+# Why: SOT base_images.alpine is the sole owner (AG-CI-006).
 # From: Issue #1683
-ARG ALPINE_IMAGE=alpine:3.24
+ARG ALPINE_IMAGE
 FROM ${ALPINE_IMAGE}
 
 LABEL org.opencontainers.image.description="dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments."
@@ -17,21 +17,18 @@ LABEL org.opencontainers.image.description="dnsmasq-based DHCP proxy and relay h
 # Why: without it BuildKit replays a stale layer forever.
 # From: Issue #1095
 ARG APT_CACHE_BUST=""
-# What: image-local apk install of dnsmasq + operator tools.
+# What: apk package list, supplied from the SOT.
+# Why: the SOT owns the list; this stage only consumes it.
+# From: Issue #1683
+ARG APK_PACKAGES
+# What: image-local apk install of the SOT-listed dnsmasq + tools.
 # Why: http repos let Squid cache; GNU find/date for kgs logic.
 # From: Issue #815 | Issue #840 | Issue #1095
 RUN sed -i 's|^https://|http://|' /etc/apk/repositories \
     && : "apt-cache-bust=${APT_CACHE_BUST}" \
+    && apk update --no-cache \
     && apk upgrade --no-cache \
-    && apk add --no-cache \
-        bash \
-        dnsmasq \
-        coreutils \
-        nano \
-        findutils \
-        gettext-envsubst \
-        lsof \
-        ripgrep
+    && apk add --no-cache ${APK_PACKAGES}
 
 ENV EDITOR=nano
 ENV VISUAL=$EDITOR
