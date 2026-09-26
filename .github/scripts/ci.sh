@@ -6400,69 +6400,38 @@ _ci_bash_array_entries() {
 _ci_check_build_tools_smoke_coverage() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local dockerfile="${repo_root}/tools/build-tools/Dockerfile"
-    local smoke_script="${repo_root}/scripts/untracked/select-build-tools-image.sh"
     if [ ! -f "${dockerfile}" ]; then
         ci_log "[CI-ERROR-CHECK-0024]" "path=\"${dockerfile}\" reason=\"Dockerfile not found\""
         return 2
     fi
-    if [ ! -f "${smoke_script}" ]; then
-        ci_log "[CI-ERROR-CHECK-0024]" "path=\"${smoke_script}\" reason=\"smoke script not found\""
-        return 2
-    fi
-    local dockerfile_tools smoke_tools
+    # What: Dockerfile-verified tools vs the SOT smoke list.
+    # Why: SOT owns the list; _ci_test_toolchain runs it.
+    # From: Issue #1683 | PR #1858
+    local dockerfile_tools sot_tools sot_raw
     dockerfile_tools="$(_ci_bash_array_entries "${dockerfile}" required_tools | sort -u | tr '\n' ' ')"
-    smoke_tools="$(_ci_bash_array_entries "${smoke_script}" required_tools | sort -u | tr '\n' ' ')"
+    sot_raw="$(_ci_build_tools_smoke_tools | tr '\n' ' ')" || {
+        ci_log "[CI-ERROR-CHECK-0025]" "reason=\"no SOT smoke_tools; vacuous\""
+        return 2
+    }
+    sot_tools=" ${sot_raw} "
     if [ -z "${dockerfile_tools// /}" ]; then
         ci_log "[CI-ERROR-CHECK-0025]" "path=\"${dockerfile}\" reason=\"no required_tools extracted; vacuous\""
         return 2
     fi
-    if [ -z "${smoke_tools// /}" ]; then
-        ci_log "[CI-ERROR-CHECK-0025]" "path=\"${smoke_script}\" reason=\"no required_tools extracted; vacuous\""
+    if [ -z "${sot_tools// /}" ]; then
+        ci_log "[CI-ERROR-CHECK-0025]" "reason=\"no SOT smoke_tools; vacuous\""
         return 2
     fi
-    # What: build-only/base/opt-in tools smoke skips.
+    # What: build-only/base tools smoke skips.
     # Why: a reviewed exclusion, not a silent gap.
     # From: Issue #1683 | PR #1858
     local excluded=" cargo-tarpaulin dhclient ar ranlib cc c++ g++ clang ld.lld make cmake pkg-config git gpg awk basename cat chgrp chmod chown cp curl dirname dpkg find flock getent grep gzip install mkdir mktemp mv printf ps rm sed sha256sum sort tar tee test timeout xargs xz musl-gcc "
     local -a viol=()
     local tool
     for tool in ${dockerfile_tools}; do
-        case " ${smoke_tools} " in *" ${tool} "*) continue ;; esac
+        case "${sot_tools}" in *" ${tool} "*) continue ;; esac
         case "${excluded}" in *" ${tool} "*) continue ;; esac
-        viol+=("'${tool}' verified by the Dockerfile but not covered by smoke_test_image() nor excluded")
-    done
-    local cap
-    for cap in "docker buildx" "docker compose"; do
-        if grep -qF "${cap} version" "${dockerfile}" && ! grep -qF "${cap} version" "${smoke_script}"; then
-            viol+=("'${cap} version' verified by the Dockerfile but not by smoke_test_image()")
-        fi
-    done
-    # What: every SOT entry is actually smoke-tested.
-    # Why: SOT is owner; untested entry is false claim.
-    # From: Issue #1683
-    local sot_tools_raw sot_tools t
-    sot_tools_raw="$(_ci_build_tools_smoke_tools | tr '\n' ' ')" || {
-        ci_log "[CI-ERROR-CHECK-0025]" "reason=\"no SOT smoke_tools; vacuous\""
-        return 2
-    }
-    sot_tools=" ${sot_tools_raw} "
-    if [ -z "${sot_tools// /}" ]; then
-        ci_log "[CI-ERROR-CHECK-0025]" "reason=\"no SOT smoke_tools; vacuous\""
-        return 2
-    fi
-    # What: tools smoke covers indirectly, not in array.
-    # Why: timeout wraps smoke; opt-in tools use EXTRA.
-    # From: Issue #1683 | PR #1858
-    local smoke_wraps_timeout='' smoke_has_optin=''
-    grep -qE '(^|[^[:alnum:]_-])timeout ' "${smoke_script}" && smoke_wraps_timeout=1
-    grep -qF 'EXTRA_REQUIRED_TOOLS' "${smoke_script}" && smoke_has_optin=1
-    for t in ${sot_tools}; do
-        case " ${smoke_tools} " in *" ${t} "*) continue ;; esac
-        [ "${t}" = timeout ] && [ -n "${smoke_wraps_timeout}" ] && continue
-        if [ -n "${smoke_has_optin}" ] && grep -qE "(^|[^[:alnum:]_-])${t}"'([^[:alnum:]_-]|$)' "${smoke_script}"; then
-            continue
-        fi
-        viol+=("SOT smoke_tools lists '${t}' but smoke_test_image() does not verify it")
+        viol+=("'${tool}' verified by the Dockerfile but not in SOT smoke_tools nor excluded")
     done
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0026]" "reason=\"build-tools smoke coverage gap (issues #790/#791/#822 Pattern G)\"" "$(printf '%s\n' "${viol[@]}")"

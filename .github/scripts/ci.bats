@@ -793,7 +793,7 @@ _probe_stub() {
 
 @test "retry classifier: op=buildx retries the layer-lock and go-panic signatures" {
     # What: layer-lock and panic signatures are transient.
-    # Why: build-retry.sh/docker-buildx-retry.sh evidence.
+    # Why: build-retry.sh's #1222 signature evidence.
     # From: Issue #1683
     [ "$(_ci_classify_failure '(*service).Write failed: rpc error: code = Unavailable desc = ref layer-sha256:abc locked for 900ms (since t): unavailable' buildx)" = "transient" ]
     [ "$(_ci_classify_failure 'panic: methodref has no signature' buildx)" = "transient" ]
@@ -6604,16 +6604,8 @@ _smoke_coverage_fixture() {
         [ -n "${extra_dockerfile_tool}" ] && printf '  %s\n' "${extra_dockerfile_tool}"
         printf ')\n'
     } > "${root}/tools/build-tools/Dockerfile"
-    {
-        printf '#!/usr/bin/env bash\n'
-        printf 'smoke_test_image() {\n'
-        printf '  required_tools=(\n'
-        printf '    bash\n'
-        printf '  )\n'
-        printf '}\n'
-    } > "${root}/scripts/untracked/select-build-tools-image.sh"
     # What: Minimal SOT fixture with smoke_tools "bash".
-    # Why: Check hard-fails SOT/smoke divergence.
+    # Why: Check compares Dockerfile tools to the SOT list.
     # From: Issue #1683
     printf 'build_toolchain:\n  build-tools:\n    smoke_tools:\n      - bash\n' \
         > "${root}/build-manifest.yml"
@@ -6661,59 +6653,6 @@ _smoke_coverage_fixture() {
     [ "${status}" -eq 0 ]
 }
 
-@test "check build-tools-smoke-coverage fails an SOT tool smoke never covers" {
-    # What: SOT lists tool absent from smoke.
-    # Why: SOT owns; uncovered is false.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/sotgap"
-    _smoke_coverage_fixture "${r}"
-    printf 'build_toolchain:\n  build-tools:\n    smoke_tools:\n      - bash\n      - phantomtool\n' \
-        > "${r}/build-manifest.yml"
-    CI_MANIFEST="${r}/build-manifest.yml" run bash "${CI_SH}" check build-tools-smoke-coverage "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0026"* ]]
-    [[ "${output}" == *"SOT smoke_tools lists 'phantomtool'"* ]]
-}
-
-@test "check build-tools-smoke-coverage accepts SOT timeout and opt-in tools" {
-    # What: SOT lists timeout + opt-in.
-    # Why: Smoke covers both.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/sotalt"
-    mkdir -p "${r}/tools/build-tools" "${r}/scripts/untracked"
-    printf 'FROM alpine\nrequired_tools=(\n  bash\n)\n' > "${r}/tools/build-tools/Dockerfile"
-    {
-        printf '#!/usr/bin/env bash\n'
-        printf 'smoke_test_image() {\n'
-        printf '  docker run --rm -e "EXTRA_REQUIRED_TOOLS=${EXTRA_REQUIRED_TOOLS:-}" "$1" timeout 60 true\n'
-        printf '  required_tools=(\n    bash\n  )\n'
-        printf '  # cargo-tarpaulin is opt-in via EXTRA_REQUIRED_TOOLS\n'
-        printf '}\n'
-    } > "${r}/scripts/untracked/select-build-tools-image.sh"
-    printf 'build_toolchain:\n  build-tools:\n    smoke_tools:\n      - bash\n      - timeout\n      - cargo-tarpaulin\n' \
-        > "${r}/build-manifest.yml"
-    CI_MANIFEST="${r}/build-manifest.yml" run bash "${CI_SH}" check build-tools-smoke-coverage "${r}"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"build-tools-smoke-coverage=clean"* ]]
-}
-
-@test "check build-tools-smoke-coverage fails an uncovered docker capability" {
-    # What: Dockerfile checks docker buildx, smoke does not.
-    # Why: array-only diffing can't see a subcommand check.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/cap"
-    mkdir -p "${r}/tools/build-tools" "${r}/scripts/untracked"
-    printf 'FROM alpine\nrequired_tools=(\n  bash\n)\ndocker buildx version\n' \
-        > "${r}/tools/build-tools/Dockerfile"
-    printf '#!/usr/bin/env bash\nsmoke_test_image() {\n  required_tools=(\n    bash\n  )\n}\n' \
-        > "${r}/scripts/untracked/select-build-tools-image.sh"
-    printf 'build_toolchain:\n  build-tools:\n    smoke_tools:\n      - bash\n' \
-        > "${r}/build-manifest.yml"
-    CI_MANIFEST="${r}/build-manifest.yml" run bash "${CI_SH}" check build-tools-smoke-coverage "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"'docker buildx version' verified"* ]]
-}
-
 @test "check build-tools-smoke-coverage fails closed when the SOT lacks smoke_tools" {
     # What: Missing build_toolchain smoke_tools in SOT.
     # Why: Absence must fail closed, not silent.
@@ -6732,9 +6671,8 @@ _smoke_coverage_fixture() {
     # Why: mirrors the legacy script's anti-vacuous guard.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/vacuous"
-    mkdir -p "${r}/tools/build-tools" "${r}/scripts/untracked"
+    mkdir -p "${r}/tools/build-tools"
     printf 'FROM alpine\n' > "${r}/tools/build-tools/Dockerfile"
-    printf '#!/usr/bin/env bash\n' > "${r}/scripts/untracked/select-build-tools-image.sh"
     run bash "${CI_SH}" check build-tools-smoke-coverage "${r}"
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0025"* ]]

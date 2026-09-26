@@ -174,11 +174,18 @@ build_toolchain:
       - distcc-pump
       - docker
       - envsubst
+      - expect
+      - gh
+      - ip
       - jq
+      - openssl
+      - rsync
       - rustc
       - rustfmt
       - sccache
       - shellcheck
+      - shellspec
+      - tcpdump
       - timeout
       - trivy
 
