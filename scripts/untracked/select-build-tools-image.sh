@@ -22,6 +22,10 @@ source "$script_dir/../lib/ghcr-retry.sh"
 source "$script_dir/../lib/build-tools-channel.sh"
 # shellcheck source=scripts/lib/docker-buildx-retry.sh
 source "$script_dir/../lib/docker-buildx-retry.sh"
+# shellcheck source=scripts/lib/staging-ancestor-fallback.sh
+source "$script_dir/../lib/staging-ancestor-fallback.sh"
+# shellcheck source=scripts/lib/staging-poll-defaults.sh
+source "$script_dir/../lib/staging-poll-defaults.sh"
 
 repository="${GITHUB_REPOSITORY:-wiki-mod/lancache-ng}"
 
@@ -40,16 +44,29 @@ repository="${GITHUB_REPOSITORY:-wiki-mod/lancache-ng}"
 channel_ref="${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-}}"
 build_tools_channel="$(resolve_build_tools_channel "$channel_ref")"
 published_image="ghcr.io/${repository}/build-tools:${build_tools_channel}"
+pr_staging_image="${BUILD_TOOLS_PR_STAGING_IMAGE:-}"
 build_tools_context="${BUILD_TOOLS_CONTEXT:-tools/build-tools}"
 fallback_image="${FALLBACK_IMAGE:-lancache-ng-build-tools-validation:${GITHUB_SHA:-local}-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}}"
 event_name="${GITHUB_EVENT_NAME:-${EVENT_NAME:-}}"
+pr_head_sha="${GITHUB_EVENT_PULL_REQUEST_HEAD_SHA:-}"
 head_repository="${GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME:-${HEAD_REPOSITORY:-}}"
 base_repository="${GITHUB_REPOSITORY:-${BASE_REPOSITORY:-}}"
 require_published="${BUILD_TOOLS_REQUIRE_PUBLISHED:-false}"
-pull_log="$(mktemp)"
+# What: records image-pull output below /var/tmp.
+# Why: self-hosted /tmp is RAM-backed and risks OOM.
+# From: Issue #1860 | PR #1872
+pull_log="$(mktemp -p /var/tmp lancache-build-tools-pull.XXXXXX)"
+
+# What: selects the verified PR staging manifest when supplied.
+# Why: consumers must not use a stale channel during PR validation.
+# From: Issue #1860 | PR #1872
+if [[ -n "$pr_staging_image" ]]; then
+  published_image="$pr_staging_image"
+fi
 
 cleanup() {
   rm -f "$pull_log"
+  rm -rf "${SAF_ANCESTOR_RUN_CACHE_DIR:-}"
 }
 trap cleanup EXIT
 
@@ -57,6 +74,15 @@ fail() {
   printf 'select-build-tools-image: %s\n' "$1" >&2
   exit 1
 }
+
+build_tools_pr_producer_is_active() {
+  [[ -n "$pr_head_sha" ]] || return 1
+  saf_event_has_incomplete_run "$repository" "$pr_head_sha" "pull_request" "build-tools.yml"
+}
+
+staging_poll_set_defaults_for_workflow_changed "false"
+build_tools_wait_seconds="${BUILD_TOOLS_STAGING_POLL_HARD_CEILING_SECONDS:-$default_poll_hard_ceiling_seconds}"
+build_tools_poll_interval_seconds="${BUILD_TOOLS_STAGING_POLL_INTERVAL_SECONDS:-15}"
 
 # smoke_test_image verifies the provided image contains all required CI tools (cargo,
 # rustc, distcc, docker, etc.) before it is trusted. The published channel tag (:latest or
@@ -77,7 +103,6 @@ smoke_test_image() {
       bash
       cargo
       rustc
-      rustup
       rustfmt
       clippy-driver
       sccache
@@ -86,6 +111,7 @@ smoke_test_image() {
       shellcheck
       actionlint
       bats
+      parallel
       shellspec
       distcc
       distcc-pump
@@ -115,6 +141,10 @@ smoke_test_image() {
     fi
 
     for tool in "${required_tools[@]}"; do
+      if [[ "$tool" == "parallel" ]] && ! command -v "$tool" >/dev/null; then
+        echo "::notice::parallel is unavailable; Bats consumers will run serially." >&2
+        continue
+      fi
       command -v "$tool" >/dev/null
     done
 
@@ -221,6 +251,17 @@ if [[ "$require_published" = "true" ]]; then
   if ghcr_retry ghcr.io "${GHCR_RETRY_USERNAME:-}" "${GHCR_RETRY_PASSWORD:-}" -- docker pull "$published_image" >"$pull_log" 2>&1 && smoke_test_image "$published_image"; then
     published_image_reference "$published_image"
     exit 0
+  fi
+  if [[ -n "$pr_staging_image" && "$event_name" == "pull_request" ]] && build_tools_pr_producer_is_active; then
+    deadline=$((SECONDS + build_tools_wait_seconds))
+    while (( SECONDS < deadline )) && build_tools_pr_producer_is_active; do
+      echo "::notice::build-tools.yml is active for PR head $pr_head_sha; waiting for its staging image." >&2
+      sleep "$build_tools_poll_interval_seconds"
+      if ghcr_retry ghcr.io "${GHCR_RETRY_USERNAME:-}" "${GHCR_RETRY_PASSWORD:-}" -- docker pull "$published_image" >"$pull_log" 2>&1 && smoke_test_image "$published_image"; then
+        published_image_reference "$published_image"
+        exit 0
+      fi
+    done
   fi
   cat "$pull_log" >&2
   fail "published build-tools image is required for downstream jobs but was not pullable or did not satisfy smoke checks"

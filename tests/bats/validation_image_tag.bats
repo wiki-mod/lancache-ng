@@ -133,6 +133,11 @@ setup() {
     [ "$output" = "false" ]
 }
 
+@test "should-have-staging: a build-relevant workflow change requires every service tag" {
+    run vit_service_should_have_staging_tag "proxy" "false" "true"
+    [ "$output" = "true" ]
+}
+
 @test "build-push.yml calls this file's functions instead of reimplementing them (#822 pattern)" {
     workflow_file="$repo_root/.github/workflows/build-push.yml"
     [ -f "$workflow_file" ] || fail "build-push.yml not found"

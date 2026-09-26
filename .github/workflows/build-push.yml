@@ -154,8 +154,11 @@ jobs:
       - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Select immutable build-tools image
         env:
+          GITHUB_EVENT_PULL_REQUEST_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUILD_TOOLS_PR_STAGING_IMAGE: ${{ github.event_name == 'pull_request' && github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository && format('ghcr.io/{0}/build-tools:pr-{1}-sha-{2}', github.repository, github.event.pull_request.number, github.sha) || '' }}
         run: |
           set -euo pipefail
           build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
@@ -476,8 +479,11 @@ jobs:
         id: select-compose-validation-image
         env:
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
+          GITHUB_EVENT_PULL_REQUEST_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUILD_TOOLS_PR_STAGING_IMAGE: ${{ github.event_name == 'pull_request' && github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository && format('ghcr.io/{0}/build-tools:pr-{1}-sha-{2}', github.repository, github.event.pull_request.number, github.sha) || '' }}
         run: |
           set -euo pipefail
           downstream_build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
@@ -1475,7 +1481,7 @@ jobs:
               echo "::error::$dockerfile must not bootstrap Rust builder tools locally anymore."
               exit 1
             fi
-            grep -F 'for tool in cargo rustc rustup rustfmt clippy-driver sccache distcc distcc-pump python3 pkg-config; do' "$dockerfile" >/dev/null \
+            grep -F 'for tool in cargo rustc rustfmt clippy-driver sccache distcc distcc-pump python3 pkg-config; do' "$dockerfile" >/dev/null \
               && grep -F 'command -v "$tool" >/dev/null' "$dockerfile" >/dev/null \
               || { echo "::error::$dockerfile must fail closed if the shared build-tools image is missing a required tool."; exit 1; }
             grep -F 'lancache-rustc-wrapper' "$dockerfile" >/dev/null \
@@ -1953,6 +1959,7 @@ jobs:
           PR_TAG: ${{ steps.channel.outputs.tag }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
+          WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow_reuse_scope }}
           PROXY_TOUCHED: ${{ needs['detect-changes'].outputs.proxy }}
           DNS_TOUCHED: ${{ needs['detect-changes'].outputs.dns_image }}
           WATCHDOG_TOUCHED: ${{ needs['detect-changes'].outputs.watchdog }}
@@ -1971,7 +1978,7 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/validation-image-tag.sh"
           : "${BASE_SHA:?BASE_SHA (github.event.pull_request.base.sha) is required}"
           service_should_have_staging_tag() {
-            vit_service_should_have_staging_tag "$1" "$2"
+            vit_service_should_have_staging_tag "$1" "$2" "$WORKFLOW_CHANGED"
           }
           declare -A touched_map=(
             [proxy]="$PROXY_TOUCHED"
@@ -2002,7 +2009,7 @@ jobs:
             if ! resolved_source="$(saf_resolve_untouched_backfill_source "$REPOSITORY" "$service" "${classify_key_map[$service]}" "$BASE_SHA" \
               900 1200 \
               300 600 \
-              0 0 15 50 "$GITHUB_WORKSPACE" "$BASE_REF")"; then
+              0 0 15 50 "$GITHUB_WORKSPACE" "$BASE_REF" true)"; then
               exit 1
             fi
             echo "::notice::(re)pointing $PR_TAG at $resolved_source."
@@ -2137,6 +2144,19 @@ jobs:
         run: rm -f deploy/full-setup/.ci-exact-digests.yml
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
+  deep-full-setup-validate:
+    name: deep full-setup validation
+    needs: full-setup-validate
+    if: >-
+      always() &&
+      github.event_name == 'pull_request' &&
+      needs['full-setup-validate'].result == 'success'
+    permissions:
+      contents: read
+      packages: write
+      actions: read
+    uses: ./.github/workflows/full-setup-deep-validate.yml
+    secrets: inherit
   dns_rust_quality:
     name: rust-quality (dns/nats-subscriber)
     needs: detect-changes
@@ -2150,7 +2170,7 @@ jobs:
         (
           github.event_name != 'pull_request' ||
           needs['detect-changes'].outputs.dns_rust == 'true' ||
-          needs['detect-changes'].outputs.workflow == 'true'
+          needs['detect-changes'].outputs.workflow_reuse_scope == 'true'
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
@@ -2213,7 +2233,7 @@ jobs:
         (
           github.event_name != 'pull_request' ||
           needs['detect-changes'].outputs.ui == 'true' ||
-          needs['detect-changes'].outputs.workflow == 'true'
+          needs['detect-changes'].outputs.workflow_reuse_scope == 'true'
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
@@ -2276,7 +2296,7 @@ jobs:
         (
           github.event_name != 'pull_request' ||
           needs['detect-changes'].outputs.watchdog == 'true' ||
-          needs['detect-changes'].outputs.workflow == 'true'
+          needs['detect-changes'].outputs.workflow_reuse_scope == 'true'
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
@@ -2341,7 +2361,7 @@ jobs:
         (
           needs['detect-changes'].result != 'success' ||
           needs['detect-changes'].outputs.dns_rust == 'true' ||
-          needs['detect-changes'].outputs.workflow == 'true'
+          needs['detect-changes'].outputs.workflow_reuse_scope == 'true'
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
@@ -2404,7 +2424,7 @@ jobs:
         (
           needs['detect-changes'].result != 'success' ||
           needs['detect-changes'].outputs.ui == 'true' ||
-          needs['detect-changes'].outputs.workflow == 'true'
+          needs['detect-changes'].outputs.workflow_reuse_scope == 'true'
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
@@ -2465,7 +2485,7 @@ jobs:
           github.event_name != 'pull_request' ||
           needs['detect-changes'].outputs.dns_rust == 'true' ||
           needs['detect-changes'].outputs.ui == 'true' ||
-          needs['detect-changes'].outputs.workflow == 'true'
+          needs['detect-changes'].outputs.workflow_reuse_scope == 'true'
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
@@ -2698,7 +2718,7 @@ jobs:
         (
           needs['detect-changes'].result != 'success' ||
           needs['detect-changes'].outputs.watchdog == 'true' ||
-          needs['detect-changes'].outputs.workflow == 'true'
+          needs['detect-changes'].outputs.workflow_reuse_scope == 'true'
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
@@ -2766,7 +2786,7 @@ jobs:
           needs['detect-changes'].outputs.dns_rust == 'true' ||
           needs['detect-changes'].outputs.ui == 'true' ||
           needs['detect-changes'].outputs.watchdog == 'true' ||
-          needs['detect-changes'].outputs.workflow == 'true'
+          needs['detect-changes'].outputs.workflow_reuse_scope == 'true'
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
@@ -3485,6 +3505,7 @@ jobs:
           DETECT_CHANGES_RESULT: ${{ needs['detect-changes'].result }}
           SUPERSEDED: ${{ needs['push-supersession-check'].outputs.superseded }}
           REUSE_JOB_RESULT: ${{ needs['determine-push-reuse-scope'].result }}
+          WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow_reuse_scope }}
           REUSE_PROXY: ${{ needs['determine-push-reuse-scope'].outputs.reuse_proxy }}
           REUSE_DNS: ${{ needs['determine-push-reuse-scope'].outputs.reuse_dns }}
           REUSE_WATCHDOG: ${{ needs['determine-push-reuse-scope'].outputs.reuse_watchdog }}
@@ -3535,7 +3556,14 @@ jobs:
                 exit 1
                 ;;
             esac
-            if [ "$should_build" = "false" ] && [ "$REUSE_JOB_RESULT" = "success" ]; then
+            # What: Rebuild every service after shared CI contract changes
+            # Why: PR staging tags must reflect the current build path
+            # From: Issue #1860 | PR #1872
+            if [ "$WORKFLOW_CHANGED" = "true" ]; then
+              should_build=true
+              reuse_eligible=false
+              echo "::notice::$MATRIX_SERVICE rebuild is required because the shared CI build contract changed."
+            elif [ "$should_build" = "false" ] && [ "$REUSE_JOB_RESULT" = "success" ]; then
               reuse="$(reuse_for_service "$MATRIX_SERVICE")"
               if [ "$reuse" = "true" ]; then
                 reuse_eligible=true
@@ -3721,7 +3749,7 @@ jobs:
             printf '%s\n' "$digest"
           }
           {
-            printf 'rust=%s\n' "$(digest_for_image rust:latest)"
+            printf 'alpine=%s\n' "$(digest_for_image alpine:3.24)"
           } >> "$GITHUB_OUTPUT"
       - name: Prepare local Buildx cache
         if: steps.should-build.outputs.should-build == 'true'
@@ -3986,7 +4014,7 @@ jobs:
           labels: |
             ${{ steps.meta.outputs.labels }}
             org.opencontainers.image.description=${{ matrix.description }}
-            ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
+            ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.alpine.digest={0}', steps.build-tools-base-digests.outputs.alpine) || '' }}
           outputs: type=image,oci-mediatypes=true
           platforms: linux/amd64
           provenance: false
@@ -4145,6 +4173,7 @@ jobs:
           DETECT_CHANGES_RESULT: ${{ needs['detect-changes'].result }}
           SUPERSEDED: ${{ needs['push-supersession-check'].outputs.superseded }}
           REUSE_JOB_RESULT: ${{ needs['determine-push-reuse-scope'].result }}
+          WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow_reuse_scope }}
           REUSE_PROXY: ${{ needs['determine-push-reuse-scope'].outputs.reuse_proxy }}
           REUSE_DNS: ${{ needs['determine-push-reuse-scope'].outputs.reuse_dns }}
           REUSE_WATCHDOG: ${{ needs['determine-push-reuse-scope'].outputs.reuse_watchdog }}
@@ -4195,7 +4224,14 @@ jobs:
                 exit 1
                 ;;
             esac
-            if [ "$should_build" = "false" ] && [ "$REUSE_JOB_RESULT" = "success" ]; then
+            # What: Rebuild every service after shared CI contract changes
+            # Why: PR staging tags must reflect the current build path
+            # From: Issue #1860 | PR #1872
+            if [ "$WORKFLOW_CHANGED" = "true" ]; then
+              should_build=true
+              reuse_eligible=false
+              echo "::notice::$MATRIX_SERVICE rebuild is required because the shared CI build contract changed."
+            elif [ "$should_build" = "false" ] && [ "$REUSE_JOB_RESULT" = "success" ]; then
               reuse="$(reuse_for_service "$MATRIX_SERVICE")"
               if [ "$reuse" = "true" ]; then
                 reuse_eligible=true
@@ -4379,7 +4415,7 @@ jobs:
             printf '%s\n' "$digest"
           }
           {
-            printf 'rust=%s\n' "$(digest_for_image rust:latest)"
+            printf 'alpine=%s\n' "$(digest_for_image alpine:3.24)"
           } >> "$GITHUB_OUTPUT"
       - name: Compute Docker build parallelism
         if: steps.should-build.outputs.should-build == 'true'
@@ -4431,7 +4467,7 @@ jobs:
           labels: |
             ${{ steps.meta.outputs.labels }}
             org.opencontainers.image.description=${{ matrix.description }}
-            ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
+            ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.alpine.digest={0}', steps.build-tools-base-digests.outputs.alpine) || '' }}
           outputs: type=image,oci-mediatypes=true
           platforms: linux/arm64
           provenance: false
@@ -5539,8 +5575,8 @@ jobs:
           ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$build_tools_image" >/dev/null
           ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$stack_pointer_image" >/dev/null
           ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker pull "$build_tools_image" >/dev/null
-          rust_base_digest="$(docker image inspect "$build_tools_image" --format '{{ index .Config.Labels "org.opencontainers.image.base.rust.digest" }}')"
-          if [[ ! "$rust_base_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+          alpine_base_digest="$(docker image inspect "$build_tools_image" --format '{{ index .Config.Labels "org.opencontainers.image.base.alpine.digest" }}')"
+          if [[ ! "$alpine_base_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "::error::build-tools image is missing its build-time base digest label."
             exit 1
           fi
@@ -5573,7 +5609,7 @@ jobs:
             printf -- '- %s -> %s\n' "$stack_pointer_image" "$(digest_for_image "$stack_pointer_image")"
             printf -- '- ghcr.io/%s/stack:%s -> %s\n' "$REPOSITORY" "$source_tag" "$(digest_for_image "ghcr.io/${REPOSITORY}/stack:${source_tag}")"
             printf '\nResolved build-tools base image digests:\n\n'
-            printf -- '- rust:latest -> %s\n' "$rust_base_digest"
+            printf -- '- alpine:3.24 -> %s\n' "$alpine_base_digest"
             printf '\nProvenance and SBOM status:\n\n'
             printf -- '- Provenance attestations are pushed to GHCR for every first-party service image digest and the stack channel-pointer digest.\n'
             printf -- '- CycloneDX SBOMs are generated per released first-party image digest (via Trivy) and attached to this GitHub release as <service>.cdx.json assets by the release-sbom job.\n'

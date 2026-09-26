@@ -1972,10 +1972,13 @@ esac
 STUB
     chmod +x "$run_exists_stub"
 
+    revision_probe_log="$BATS_TEST_TMPDIR/revision-probes.log"
+    : > "$revision_probe_log"
     revision_stub="$BATS_TEST_TMPDIR/revision.sh"
     cat > "$revision_stub" <<STUB
 #!/usr/bin/env bash
 image="\$1"
+printf '%s\n' "\$image" >> "$revision_probe_log"
 suffix="\${image##*:sha-}"
 case "\$suffix" in
     "${ancestor2_sha}") echo "$ancestor2_sha" ;;
@@ -1985,20 +1988,13 @@ STUB
     chmod +x "$revision_stub"
     export STAGING_IMAGE_REVISION_CMD="$revision_stub"
 
-    # Deliberately small but non-zero budgets (3s/3s, not 300s/600s): large
-    # enough that "the long wait ran" and "the fast path skipped it" are
-    # clearly distinguishable by elapsed time, small enough that a
-    # regression reintroducing the slow path fails this assertion in
-    # seconds rather than hanging the suite for up to 10 minutes.
-    start_epoch="$(date +%s)"
     run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "proxy" "$base_sha" 3 3 3 3 3 3 1 50 "$git_dir"
-    end_epoch="$(date +%s)"
     [ "$status" -eq 0 ]
     [[ "$output" == *"sha-${ancestor2_sha}" ]]
-    # The fast path (reordering) means this must resolve in well under the
-    # 3s ceiling above -- proves the long wait was genuinely skipped, not
-    # merely fast because the test stubs are instant.
-    [ "$((end_epoch - start_epoch))" -lt 2 ]
+    # What: counts base-image probes in the fast-path test.
+    # Why: retries prove the long wait ran despite parallel load.
+    # From: Issue #1860 | PR #1872
+    [ "$(grep -cxF "ghcr.io/wiki-mod/lancache-ng/proxy:sha-${base_sha}" "$revision_probe_log")" -eq 1 ]
 }
 
 @test "saf_resolve_sha_image_ref: resolves to the canonical full-SHA tag when it already exists" {
@@ -2287,74 +2283,70 @@ STUB
     [[ "$output" == *"sha-${real_change_sha}" ]]
 }
 
-@test "saf_resolve_untouched_backfill_source: ancestor_extended_freshness_* is independent of base_freshness_* -- a generous base budget never leaks into the ancestor's extended retry" {
-    # Regression guard for the reason these two budgets are kept separate
-    # (this file's own header, saf_resolve_untouched_backfill_source comment,
-    # documents the full reasoning): if ancestor_extended_freshness_* were
-    # ever collapsed back into sharing base_freshness_*'s value, ANY caller
-    # passing a generous base_freshness pair (scripts/untracked/ensure-pr-staging-images.sh's
-    # real 900/5400) would silently force that same generous extension onto
-    # the ancestor candidate's extended retry too, regardless of what
-    # ancestor_extended_freshness_* itself said -- exactly the shape of bug
-    # that would let build-push.yml's 30-minute full-setup-validate job
-    # inherit an up-to-90-minute wait it cannot survive. Proven here from the
-    # opposite angle: base commit's own base_freshness is set generously
-    # (300/600), but ancestor_extended_freshness is 0/0 -- if the two were
-    # ever collapsed back together, the ancestor candidate below would
-    # resolve at ~3 real seconds, comfortably inside a 600s ceiling, and this
-    # call would succeed. With them genuinely independent, the extended retry
-    # gets only one immediate (0s) re-check -- too early to see the image --
-    # so this must fail closed, and fast, not after actually waiting anywhere
-    # close to 3s.
+@test "saf_resolve_untouched_backfill_source: active-producer gate rejects a missing base tag without the long wait" {
     setup_linear_fixture
     install_run_exists_stub
-    # base_sha: confirmed zero push runs (activates the fast path, since its
-    # own paths -- docs/base.md -- are also ignorable). older_sha (its
-    # immediate first-parent ancestor): a run is confirmed to exist, so the
-    # walk proceeds to older_sha's own freshness check instead of walking
-    # past it.
+    cat > "$run_exists_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+    chmod +x "$run_exists_stub"
+
+    inactive_stub="$BATS_TEST_TMPDIR/inactive-base-run.sh"
+    cat > "$inactive_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+    chmod +x "$inactive_stub"
+    export STAGING_CANDIDATE_RUN_ACTIVE_CMD="$inactive_stub"
+
+    revision_stub="$BATS_TEST_TMPDIR/missing-revision.sh"
+    cat > "$revision_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+    chmod +x "$revision_stub"
+    export STAGING_IMAGE_REVISION_CMD="$revision_stub"
+
+    start_epoch="$(date +%s)"
+    run --separate-stderr saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "proxy" "$real_change_sha" 30 30 0 0 0 0 1 50 "$git_dir" "" true
+    end_epoch="$(date +%s)"
+    [ "$status" -ne 0 ]
+    [[ "$stderr" == *"no tag-publishing build-push.yml run"* ]]
+    [ "$((end_epoch - start_epoch))" -lt 2 ]
+}
+
+@test "saf_resolve_untouched_backfill_source: ancestor_extended_freshness_* is independent of base_freshness_* -- a generous base budget never leaks into the ancestor's extended retry" {
+    # The actual 0/0 retry behavior is covered by the dedicated
+    # saf_find_built_ancestor test above. This is the caller wiring test: it
+    # verifies that generous BASE_SHA budgets cannot be substituted for the
+    # ancestor extension budgets when the orchestrator invokes that helper.
+    # Do not use elapsed wall time here. With Bats --jobs, worker scheduling
+    # can cross a timestamp boundary even when this code performs no sleep,
+    # which made the former <2s assertion flaky rather than proving the
+    # parameter mapping.
+    setup_linear_fixture
+    install_run_exists_stub
     cat > "$run_exists_stub" <<STUB
 #!/usr/bin/env bash
 case "\$1" in
     "$base_sha") exit 1 ;;
-    "$older_sha") exit 0 ;;
     *) exit 1 ;;
 esac
 STUB
     chmod +x "$run_exists_stub"
 
-    active_stub="$BATS_TEST_TMPDIR/active.sh"
-    cat > "$active_stub" <<'STUB'
-#!/usr/bin/env bash
-exit 0
-STUB
-    chmod +x "$active_stub"
-    export STAGING_CANDIDATE_RUN_ACTIVE_CMD="$active_stub"
-
-    start_epoch="$(date +%s)"
-    revision_stub="$BATS_TEST_TMPDIR/revision.sh"
-    cat > "$revision_stub" <<STUB
-#!/usr/bin/env bash
-image="\$1"
-suffix="\${image##*:sha-}"
-now="\$(date +%s)"
-elapsed=\$((now - $start_epoch))
-if [ "\$suffix" = "${older_sha}" ] && (( elapsed >= 3 )); then
-    echo "$older_sha"
-else
-    exit 1
-fi
-STUB
-    chmod +x "$revision_stub"
-    export STAGING_IMAGE_REVISION_CMD="$revision_stub"
-
+    captured_args="$BATS_TEST_TMPDIR/ancestor-args"
+    export captured_args
+    saf_find_built_ancestor() {
+        printf '%s\n' "$@" > "$captured_args"
+        return 1
+    }
     run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "proxy" "$base_sha" 300 600 0 0 0 0 1 50 "$git_dir"
-    end_epoch="$(date +%s)"
     [ "$status" -ne 0 ]
-    # Fails within ~2s, not anywhere near the 3s the image needs to appear --
-    # proves this was the 0/0 extended budget giving up immediately, not a
-    # coincidental failure after actually waiting most of the way there.
-    [ "$((end_epoch - start_epoch))" -lt 2 ]
+    mapfile -t args < "$captured_args"
+    [ "${args[8]}" = "0" ]
+    [ "${args[9]}" = "0" ]
 }
 
 @test "saf_resolve_untouched_backfill_source: curl genuinely missing throughout never gets misread as a confirmed answer -- the ancestor substitution is never taken" {

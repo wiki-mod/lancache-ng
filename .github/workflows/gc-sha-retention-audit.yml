@@ -112,8 +112,11 @@ jobs:
         env:
           GITHUB_BASE_REF: ${{ github.base_ref }}
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
+          GITHUB_EVENT_PULL_REQUEST_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+          BUILD_TOOLS_PR_STAGING_IMAGE: ${{ github.event_name == 'pull_request' && github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository && format('ghcr.io/{0}/build-tools:pr-{1}-sha-{2}', github.repository, github.event.pull_request.number, github.sha) || '' }}
         run: |
           set -euo pipefail
           # What: pull-only; never build build-tools on this runner.
@@ -145,7 +148,13 @@ jobs:
               bash -n scripts/untracked/gc-sha-retention-audit.sh scripts/lib/github-api-retry.sh scripts/lib/sha-retention-audit.sh scripts/untracked/validate-stack-images.sh
               shellcheck --severity=warning scripts/untracked/gc-sha-retention-audit.sh scripts/lib/github-api-retry.sh scripts/lib/sha-retention-audit.sh scripts/untracked/validate-stack-images.sh tests/bats/sha_retention_audit.bats
               actionlint .github/workflows/gc-sha-retention-audit.yml
-              bats tests/bats/sha_retention_audit.bats
+              if command -v parallel >/dev/null; then
+                bats_jobs=$(( $(nproc) * 2 )); (( bats_jobs >= 16 )) || bats_jobs=16
+                TMPDIR=/var/tmp bats --jobs "$bats_jobs" tests/bats/sha_retention_audit.bats
+              else
+                echo "::notice::parallel is unavailable; running Bats serially."
+                TMPDIR=/var/tmp bats tests/bats/sha_retention_audit.bats
+              fi
               bash scripts/untracked/validate-stack-images.sh
               bash scripts/untracked/check-workflow-line-limit.sh
             '

@@ -36,64 +36,10 @@
 # is safe to require without blocking docs-only PRs -- a required check that
 # gets skipped would otherwise leave a PR permanently un-mergeable.
 #
-# RUNNER CAPACITY NOTE (updated for the lancache-heavy tier move, see the
-# job-level comments below): these sims now run serially on the scarce
-# lancache-heavy tier (AG-CI-002 -- they build and run real Docker
-# containers/compose stacks, not just plan or poll), the same tier the image
-# BUILDS they wait on also use. That no longer gives a "different runner
-# pools" guarantee against self-deadlock; what still prevents it is ordering,
-# not isolation: every heavy-tier sim job's `needs:` chain runs through
-# ensure-pr-staging-images (which stays on lancache-light and internally
-# polls until build-push's builds finish and push this PR's staging tags), so
-# a sim never requests a heavy slot until this PR's OWN builds have already
-# finished and released theirs. It does not prevent contention with OTHER
-# PRs' concurrent heavy-tier builds/sims -- this change increases total
-# heavy-tier demand per PR run (sims move off light onto the same small pool
-# builds already compete for), a real, separate capacity concern that
-# intersects with issue #1065's heavy-pool saturation finding, not one this
-# note's ordering argument resolves. #715 states CI time is not the
-# constraint but acknowledges self-hosted CAPACITY under higher trigger
-# frequency is a real, separate concern to watch.
-
 name: Full-Setup Deep Validate
 
 on:
-  # Branch-filtered to match build-push.yml's own pull_request trigger
-  # EXACTLY (see build-push.yml's `on.pull_request.branches`). This suite's
-  # whole pr_staging_available/ensure-pr-staging-images mechanism assumes
-  # build-push.yml ran for the same PR and pushed its pr-<N>-sha-<full>
-  # staging tags -- vit_pr_staging_available() (scripts/lib/
-  # validation-image-tag.sh) has no base-branch check of its own, so without
-  # this filter a PR opened against a base branch build-push.yml ignores
-  # would still be marked staging-available here, and
-  # ensure-pr-staging-images would poll for tags that no workflow will ever
-  # push until it times out and fails closed. Restricting the trigger the
-  # same way build-push.yml is restricted
-  # is the correct fix rather than teaching the planner a fallback: a PR
-  # against an unprotected branch isn't covered by branch-protection
-  # required-status-checks anyway (see the BRANCH PROTECTION NOTE above), so
-  # skipping this workflow entirely for it loses nothing.
-  #
-  # current_dev was missing here even though build-push.yml's own
-  # pull_request.branches already listed it -- found during #709's audit of
-  # hardcoded/drifted branch-trigger lists. Restored to match exactly, as
-  # this comment has always claimed it does.
-  pull_request:
-    branches: [master, current_dev, "v[0-9]*"]
-    # Issue #1203: same trigger-level docs-only skip as build-push.yml's own
-    # pull_request trigger (see that block's comment for the full
-    # rationale/evidence) -- this workflow's own job names (`plan deep
-    # validation`, `ensure PR staging images`, `full-setup simulations`,
-    # `DNS zone/record rollback simulation`,
-    # `Admin UI Kea rollback (POST /dhcp/snapshot/rollback) simulation`,
-    # `Syslog forwarding + Admin UI visibility simulation`,
-    # `deep full-setup validation`) do NOT appear in master's or v0.2.0's
-    # required-status-checks list at all (confirmed via the GitHub API), so
-    # unlike build-push.yml this carries no branch-protection risk on any
-    # branch this workflow triggers for.
-    paths-ignore:
-      - "**/*.md"
-      - "docs/**"
+  workflow_call:
   workflow_dispatch:
     inputs:
       image_tag:
@@ -109,7 +55,7 @@ on:
 # tier. Manual (publish) runs are never grouped together so two operators'
 # dispatches don't cancel each other.
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.ref) || format('{0}-{1}', github.workflow, github.run_id) }}
+  group: ${{ github.event_name == 'pull_request' && format('deep-full-setup-{0}', github.ref) || format('deep-full-setup-{0}', github.run_id) }}
   cancel-in-progress: true
 
 permissions:
@@ -253,7 +199,7 @@ jobs:
             echo "::notice::pre-checkout resync: no valid checked-out HEAD found (fresh or mid-clone workspace), guard is a no-op"
           fi
 
-      - uses: *checkout_centraliced_versioning # v7.0.1
+      - uses: *checkout_centraliced_versioning
         with:
           fetch-depth: 0
 
@@ -271,6 +217,15 @@ jobs:
           ghcr-password: ${{ secrets.GITHUB_TOKEN }}
           dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
           dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # The runner's /tmp is a small tmpfs. Registry inspection can emit
+      # repeated diagnostics, so keep this job's scratch files on disk.
+      - name: Create disk-backed staging scratch directory
+        run: |
+          set -euo pipefail
+          staging_tmpdir="/var/tmp/lancache-ng-staging-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          install -d -m 700 "$staging_tmpdir"
+          printf 'TMPDIR=%s\n' "$staging_tmpdir" >> "$GITHUB_ENV"
 
       - name: Wait for and ensure PR staging images
         env:
@@ -353,6 +308,15 @@ jobs:
         run: |
           docker buildx rm "${{ steps.buildx.outputs.name }}" || true
 
+      - name: Remove disk-backed staging scratch directory
+        if: always()
+        run: |
+          set -euo pipefail
+          case "${TMPDIR:-}" in
+            /var/tmp/lancache-ng-staging-*) rm -rf -- "$TMPDIR" ;;
+            *) echo "::error::Refusing to remove an unexpected TMPDIR value: ${TMPDIR:-<unset>}"; exit 1 ;;
+          esac
+
   # The ten simulation/validation jobs this suite shares with the manual
   # full-setup-validate.yml now live in one reusable workflow (issue #1014).
   # This per-PR gate invokes them with the PR's own resolved staging tag; the
@@ -423,7 +387,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: *checkout_centraliced_versioning # v7.0.1
+      - uses: *checkout_centraliced_versioning
       - name: Run ntp CAP_SYS_TIME / clock-discipline simulation
         env:
           REPOSITORY: ${{ github.repository }}
@@ -483,7 +447,7 @@ jobs:
             echo "::notice::pre-checkout resync: no valid checked-out HEAD found (fresh or mid-clone workspace), guard is a no-op"
           fi
 
-      - uses: *checkout_centraliced_versioning # v7.0.1
+      - uses: *checkout_centraliced_versioning
 
       # What: authenticates registry pulls before compose up.
       # Why: pulls nats/docker-socket-proxy from docker.io.
@@ -597,7 +561,7 @@ jobs:
             echo "::notice::pre-checkout resync: no valid checked-out HEAD found (fresh or mid-clone workspace), guard is a no-op"
           fi
 
-      - uses: *checkout_centraliced_versioning # v7.0.1
+      - uses: *checkout_centraliced_versioning
 
       # What: authenticates registry pulls before compose up.
       # Why: pulls nats/docker-socket-proxy from docker.io.
@@ -700,7 +664,7 @@ jobs:
             echo "::notice::pre-checkout resync: no valid checked-out HEAD found (fresh or mid-clone workspace), guard is a no-op"
           fi
 
-      - uses: *checkout_centraliced_versioning # v7.0.1
+      - uses: *checkout_centraliced_versioning
 
       # What: authenticates registry pulls before setup.sh runs.
       # Why: nested container inherits config via mount below.
@@ -731,10 +695,10 @@ jobs:
           BUILD_TOOLS_TOUCHED: ${{ needs.plan.outputs.build_tools }}
           IMAGE_TAG: ${{ needs.plan.outputs.image_tag }}
           REPOSITORY: ${{ github.repository }}
-          # What: Widens smoke test to require dhclient (not baseline Alpine).
-          # Why: This sim uses dhclient; Alpine lacks it in stock apk.
+          # What: Widens smoke test to require BusyBox's DHCP client.
+          # Why: This sim uses udhcpc on Alpine.
           # From: Issue #1095
-          EXTRA_REQUIRED_TOOLS: dhclient
+          EXTRA_REQUIRED_TOOLS: udhcpc
         run: |
           set -euo pipefail
           if [[ "$PR_STAGING_AVAILABLE" == "true" && "$BUILD_TOOLS_TOUCHED" == "true" ]]; then

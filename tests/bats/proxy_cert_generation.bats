@@ -8,6 +8,8 @@
 # - Subject Alternative Name (SAN) handling
 # - Serial file monotonic counter
 
+bats_require_minimum_version 1.5.0
+
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     helper_file="$BATS_TEST_TMPDIR/proxy-cert-helpers.sh"
@@ -446,23 +448,12 @@ teardown() {
     run _sign_cert "csr-fail.example.com" "$key_as_dir" "$crt" "subjectAltName=DNS:csr-fail.example.com"
 
     [ "$status" -ne 0 ]
-    [ ! -f "/tmp/lancache-cert.csr" ]
+    run ! compgen -G "$BATS_TEST_TMPDIR/lancache-cert.*" > /dev/null
     [ ! -f "$crt" ]
 
     rmdir "$key_as_dir"
 }
 
-# _sign_cert writes its intermediate CSR to a single hardcoded path,
-# /tmp/lancache-cert.csr (see entrypoint.sh), rather than a per-call
-# temp file, and removes it with `rm -f` on both the success and every
-# failure path. This test's name says "on generation failure" but exercises
-# the success path (a real deployment signs many domains back-to-back, so
-# a leftover CSR after a *successful* sign is just as real a leak as one
-# left behind by a failure); "signing failure cleans up the orphaned private
-# key, not just the CSR" and "signing failure removes a partially-written crt
-# output file" below cover the failure path for the same cleanup behavior
-# (the over-length-CN test above no longer fails at all, by design -- see its
-# own comment -- so it can no longer serve as the failure-path example).
 @test "CSR cleanup prevents orphaned files on generation failure" {
     local domain="cleanup-test.example.com"
     local key="$test_cert_dir/${domain}.key"
@@ -472,7 +463,33 @@ teardown() {
     _sign_cert "$domain" "$key" "$crt" "subjectAltName=DNS:${domain}"
 
     # Check that no orphaned CSR files remain
-    [ ! -f "/tmp/lancache-cert.csr" ]
+    run ! compgen -G "$BATS_TEST_TMPDIR/lancache-cert.*" > /dev/null
+}
+
+# What: Signs two certificates concurrently using separate CSRs.
+# Why: Bats executes certificate tests in parallel.
+# From: Issue #1860 | PR #1872
+@test "concurrent certificate signing does not share a CSR" {
+    local first_key="$test_cert_dir/parallel-first.key"
+    local first_crt="$test_cert_dir/parallel-first.crt"
+    local second_key="$test_cert_dir/parallel-second.key"
+    local second_crt="$test_cert_dir/parallel-second.crt"
+    local first_pid second_pid first_status second_status
+
+    _sign_cert "parallel-first.example.com" "$first_key" "$first_crt" \
+        "subjectAltName=DNS:parallel-first.example.com" &
+    first_pid=$!
+    _sign_cert "parallel-second.example.com" "$second_key" "$second_crt" \
+        "subjectAltName=DNS:parallel-second.example.com" &
+    second_pid=$!
+    wait "$first_pid"; first_status=$?
+    wait "$second_pid"; second_status=$?
+
+    [ "$first_status" -eq 0 ]
+    [ "$second_status" -eq 0 ]
+    [ -f "$first_crt" ]
+    [ -f "$second_crt" ]
+    run ! compgen -G "$BATS_TEST_TMPDIR/lancache-cert.*" > /dev/null
 }
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -506,7 +523,7 @@ teardown() {
     # Before the #655 fix, the key from the successful `openssl req` step
     # would still be sitting on disk here even though signing failed.
     [ ! -f "$key" ]
-    [ ! -f "/tmp/lancache-cert.csr" ]
+    run ! compgen -G "$BATS_TEST_TMPDIR/lancache-cert.*" > /dev/null
 
     rmdir "$crt"
 }
@@ -534,7 +551,7 @@ teardown() {
 
     [ "$status" -ne 0 ]
     [ ! -f "$crt" ]
-    [ ! -f "/tmp/lancache-cert.csr" ]
+    run ! compgen -G "$BATS_TEST_TMPDIR/lancache-cert.*.csr" > /dev/null
 }
 
 # Reproduces #655's exact scenario: IP_SSL migrates from 192.168.1.11 to

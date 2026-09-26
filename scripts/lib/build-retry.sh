@@ -110,7 +110,7 @@ build_retry() {
   local attempt=1
   local status=0
   local logfile
-  logfile="$(mktemp)"
+  logfile="$(mktemp -p /var/tmp lancache-build-retry.XXXXXX)"
 
   while (( attempt <= BUILD_RETRY_MAX_ATTEMPTS )); do
     : > "$logfile"

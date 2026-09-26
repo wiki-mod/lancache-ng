@@ -379,9 +379,9 @@ require_grep 'CycloneDX SBOMs are generated per released first-party image diges
 require_grep 'An OpenVEX document generated from .trivyignore.yaml is attached to this release' \
   .github/workflows/build-push.yml \
   'release notes must state that the OpenVEX document is attached as a release asset'
-require_grep 'rust:latest ->' \
+require_grep 'alpine:3.24 ->' \
   .github/workflows/build-push.yml \
-  'release notes must include the resolved rust:latest base digest for build-tools'
+  'release notes must include the resolved alpine:3.24 base digest for build-tools'
 require_grep 'stable releases require external images in supported profiles to be pinned by digest, mirrored, or explicitly removed from the stable profile' \
   scripts/tracked/check-stable-external-images.sh \
   'stable release promotion must fail closed while release-relevant external images are floating'

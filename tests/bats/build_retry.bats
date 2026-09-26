@@ -176,3 +176,8 @@ always_fail_dockerfile_cmd() {
     [ "$status" -eq 2 ]
     [[ "$output" == *"expected -- before the command"* ]]
 }
+
+@test "build_retry stores captured build output below /var/tmp" {
+    run grep -F 'mktemp -p /var/tmp lancache-build-retry.XXXXXX' "$repo_root/scripts/lib/build-retry.sh"
+    [ "$status" -eq 0 ]
+}

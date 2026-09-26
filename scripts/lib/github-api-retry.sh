@@ -15,7 +15,11 @@ GITHUB_API_RETRY_SH_LOADED=1
 
 GITHUB_API_RETRY_ATTEMPTS="${GITHUB_API_RETRY_ATTEMPTS:-4}"
 GITHUB_API_RETRY_DELAY_SECONDS="${GITHUB_API_RETRY_DELAY_SECONDS:-5}"
+GITHUB_API_MAX_RETRY_DELAY_SECONDS="${GITHUB_API_MAX_RETRY_DELAY_SECONDS:-60}"
 GITHUB_API_HTTP_STATUS=""
+GITHUB_API_RETRY_AFTER=""
+GITHUB_API_RATE_LIMIT_REMAINING=""
+GITHUB_API_RATE_LIMIT_RESET=""
 # What: TTL file cache for successful GET responses, keyed by URL
 # Why: Reusing cache across runs avoids rate-limit exhaustion
 # From: Issue #1095 | PR #1501.
@@ -42,8 +46,8 @@ _github_api_cache_hit() {
   cache_file="$(_github_api_cache_path "$url")" || return 1
   [[ -s "$cache_file" ]] || return 1
   now="$(date +%s)" || return 1
-  # What: Reads mtime via GNU stat -c only (no BSD fallback)
-  # Why: Build-tools Debian-based; BSD fallback untested, unreachable
+  # What: Reads cache mtime with the build-tools stat interface
+  # Why: The supported build-tools image provides GNU-compatible stat
   # From: Issue #1095 | PR #1501.
   mtime="$(stat -c %Y "$cache_file" 2>/dev/null)" || return 1
   [[ "$mtime" =~ ^[0-9]+$ ]] || return 1
@@ -68,20 +72,34 @@ _github_api_cache_store() {
 _github_api_get_once() {
   local url="${1:?_github_api_get_once: url is required}"
   local body_file="${2:?_github_api_get_once: body file is required}"
-  : "${GH_TOKEN:?_github_api_get_once: GH_TOKEN is required}"
+  local accept="${3:-application/vnd.github+json}"
 
   command -v curl >/dev/null 2>&1 || return 127
 
-  local header_config curl_status
-  header_config="$(printf 'header = "Accept: application/vnd.github+json"\nheader = "X-GitHub-Api-Version: 2022-11-28"\nheader = "Authorization: Bearer %s"\n' "$GH_TOKEN")"
+  local header_config curl_status headers_file github_token
+  headers_file="$(mktemp "${TMPDIR:-/var/tmp}/github-api-headers.XXXXXX")" || return 1
+  header_config="$(printf 'header = "Accept: %s"\nheader = "X-GitHub-Api-Version: 2022-11-28"' "$accept")"
+  github_token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+  if [[ -n "$github_token" ]]; then
+    printf -v header_config '%s\nheader = "Authorization: Bearer %s"' "$header_config" "$github_token"
+  fi
 
   GITHUB_API_HTTP_STATUS=""
+  GITHUB_API_RETRY_AFTER=""
+  GITHUB_API_RATE_LIMIT_REMAINING=""
+  GITHUB_API_RATE_LIMIT_RESET=""
   if GITHUB_API_HTTP_STATUS="$(curl -sS --connect-timeout 10 --max-time 30 \
-      -o "$body_file" -w '%{http_code}' -K - "$url" <<<"$header_config")"; then
+      --location -D "$headers_file" -o "$body_file" -w '%{http_code}' \
+      -K - "$url" <<<"$header_config")"; then
     curl_status=0
   else
     curl_status=$?
   fi
+
+  GITHUB_API_RETRY_AFTER="$(awk -F ': *' 'tolower($1) == "retry-after" { value=$2 } END { sub(/\r$/, "", value); print value }' "$headers_file")"
+  GITHUB_API_RATE_LIMIT_REMAINING="$(awk -F ': *' 'tolower($1) == "x-ratelimit-remaining" { value=$2 } END { sub(/\r$/, "", value); print value }' "$headers_file")"
+  GITHUB_API_RATE_LIMIT_RESET="$(awk -F ': *' 'tolower($1) == "x-ratelimit-reset" { value=$2 } END { sub(/\r$/, "", value); print value }' "$headers_file")"
+  rm -f -- "$headers_file"
 
   if (( curl_status != 0 )); then
     GITHUB_API_HTTP_STATUS=""
@@ -92,9 +110,44 @@ _github_api_get_once() {
   return 0
 }
 
+_github_api_retry_delay() {
+  local attempt="${1:?_github_api_retry_delay: attempt is required}"
+  local http_status="${2:?_github_api_retry_delay: HTTP status is required}"
+  local delay="$GITHUB_API_RETRY_DELAY_SECONDS" candidate now multiplier
+
+  if [[ "$http_status" == "403" || "$http_status" == "429" ]]; then
+    if [[ "$GITHUB_API_RETRY_AFTER" =~ ^[0-9]+$ ]]; then
+      printf '%s\n' "$GITHUB_API_RETRY_AFTER"
+      return 0
+    elif [[ "$GITHUB_API_RATE_LIMIT_REMAINING" == "0" && "$GITHUB_API_RATE_LIMIT_RESET" =~ ^[0-9]+$ ]]; then
+      now="$(date +%s)" || return 1
+      candidate=$(( GITHUB_API_RATE_LIMIT_RESET - now ))
+      (( candidate > 0 )) || candidate=0
+    else
+      candidate="$delay"
+    fi
+    (( candidate > delay )) && delay="$candidate"
+  fi
+
+  multiplier=$(( 1 << (attempt - 1) ))
+  delay=$(( delay * multiplier ))
+  (( delay > GITHUB_API_MAX_RETRY_DELAY_SECONDS )) && delay="$GITHUB_API_MAX_RETRY_DELAY_SECONDS"
+
+  printf '%s\n' "$delay"
+}
+
+_github_api_is_rate_limited() {
+  local body_file="${1:?_github_api_is_rate_limited: body file is required}"
+  [[ "$GITHUB_API_RETRY_AFTER" =~ ^[0-9]+$ ]] ||
+    [[ "$GITHUB_API_RATE_LIMIT_REMAINING" == "0" ]] ||
+    grep -qiE 'secondary rate limit|rate limit exceeded|api rate limit exceeded' "$body_file"
+}
+
 github_api_get_with_retry() {
   local url="${1:?github_api_get_with_retry: url is required}"
   local body_file="${2:?github_api_get_with_retry: body file is required}"
+  local report_failure="${3:-true}"
+  local accept="${4:-application/vnd.github+json}"
 
   [[ "$GITHUB_API_RETRY_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] || {
     echo "::error::GITHUB_API_RETRY_ATTEMPTS must be a positive integer." >&2
@@ -104,16 +157,24 @@ github_api_get_with_retry() {
     echo "::error::GITHUB_API_RETRY_DELAY_SECONDS must be a non-negative integer." >&2
     return 1
   }
+  [[ "$GITHUB_API_MAX_RETRY_DELAY_SECONDS" =~ ^[1-9][0-9]*$ ]] || {
+    echo "::error::GITHUB_API_MAX_RETRY_DELAY_SECONDS must be a positive integer." >&2
+    return 1
+  }
+  [[ "$report_failure" == "true" || "$report_failure" == "false" ]] || {
+    echo "::error::github_api_get_with_retry: report_failure must be true or false." >&2
+    return 1
+  }
 
   if _github_api_cache_hit "$url" "$body_file"; then
-    echo "::notice::Serving GHCR API response for $url from the local rate-limit cache (age < ${GITHUB_API_CACHE_TTL_SECONDS}s)." >&2
+    echo "::notice::Serving GitHub REST API response for $url from the local rate-limit cache (age < ${GITHUB_API_CACHE_TTL_SECONDS}s)." >&2
     return 0
   fi
 
-  local attempt call_status http_status
+  local attempt call_status http_status retry_delay
   for (( attempt=1; attempt<=GITHUB_API_RETRY_ATTEMPTS; attempt++ )); do
     : >"$body_file"
-    if _github_api_get_once "$url" "$body_file"; then
+    if _github_api_get_once "$url" "$body_file" "$accept"; then
       call_status=0
     else
       call_status=$?
@@ -125,33 +186,55 @@ github_api_get_with_retry() {
       return 0
     fi
 
-    # What: Fails immediately on HTTP 401/404 instead of retrying
-    # Why: Auth and 404 failures must not be retried per audit rules
+    # What: Fails immediately on definitive request or auth statuses
+    # Why: Retrying cannot repair an invalid request, token, or missing path
     # From: Issue #1095 | PR #1501.
-    if (( call_status == 0 )) && [[ "$http_status" == "401" || "$http_status" == "404" ]]; then
-      echo "::error::GitHub REST GET failed permanently with HTTP $http_status for $url; refusing to interpret this response as an empty result." >&2
+    if (( call_status == 0 )) && [[ "$http_status" == "400" || "$http_status" == "401" || "$http_status" == "404" || "$http_status" == "422" ]] ||
+       { (( call_status == 0 )) && [[ "$http_status" == "403" ]] && ! _github_api_is_rate_limited "$body_file"; }; then
+      if [[ "$report_failure" == "true" ]]; then
+        echo "::error::GitHub REST GET failed permanently with HTTP $http_status for $url; refusing to interpret this response as an empty result." >&2
+      fi
       return 1
     fi
 
     if (( attempt == GITHUB_API_RETRY_ATTEMPTS )); then
-      if [[ -n "$http_status" ]]; then
+      if [[ "$report_failure" == "true" && -n "$http_status" ]]; then
         echo "::error::GitHub REST GET failed after $attempt attempts with HTTP $http_status for $url." >&2
-      else
+      elif [[ "$report_failure" == "true" ]]; then
         echo "::error::GitHub REST GET failed after $attempt attempts with curl status $call_status for $url." >&2
       fi
       return 1
     fi
 
-    # What: Logs mid-retry attempts as ::notice::, not ::warning::
-    # Why: Recovered transients excluded from warnings-as-errors policy
+    retry_delay="$(_github_api_retry_delay "$attempt" "$http_status")" || return 1
+    # What: Logs rate-aware retry attempts as ::notice::, not warnings
+    # Why: Recovered transient attempts remain observable without a warning
     # From: Issue #1095 | PR #1501.
     if [[ -n "$http_status" ]]; then
-      echo "::notice::GitHub REST GET attempt $attempt/$GITHUB_API_RETRY_ATTEMPTS returned HTTP $http_status; retrying after ${GITHUB_API_RETRY_DELAY_SECONDS}s." >&2
+      echo "::notice::GitHub REST GET attempt $attempt/$GITHUB_API_RETRY_ATTEMPTS returned HTTP $http_status; retrying after ${retry_delay}s." >&2
     else
-      echo "::notice::GitHub REST GET attempt $attempt/$GITHUB_API_RETRY_ATTEMPTS failed with curl status $call_status; retrying after ${GITHUB_API_RETRY_DELAY_SECONDS}s." >&2
+      echo "::notice::GitHub REST GET attempt $attempt/$GITHUB_API_RETRY_ATTEMPTS failed with curl status $call_status; retrying after ${retry_delay}s." >&2
     fi
-    sleep "$GITHUB_API_RETRY_DELAY_SECONDS"
+    sleep "$retry_delay"
   done
 
   return 1
+}
+
+github_raw_get_with_retry() {
+  local url="${1:?github_raw_get_with_retry: url is required}"
+  local body_file="${2:?github_raw_get_with_retry: body file is required}"
+  local attempt status curl_status delay
+  [[ "$url" == https://raw.githubusercontent.com/* ]] || return 2
+  for (( attempt=1; attempt<=GITHUB_API_RETRY_ATTEMPTS; attempt++ )); do
+    if status="$(curl -sS --connect-timeout 10 --max-time 30 --location -o "$body_file" -w '%{http_code}' "$url")"; then curl_status=0; else curl_status=$?; status=000; fi
+    [[ "$status" =~ ^[0-9]{3}$ ]] || status=000
+    GITHUB_API_HTTP_STATUS="$status"
+    (( curl_status == 0 )) && [[ "$status" == 200 ]] && return 0
+    (( curl_status == 0 )) && [[ "$status" == 404 || "$status" == 400 || "$status" == 401 || "$status" == 403 || "$status" == 422 ]] && return 1
+    (( attempt == GITHUB_API_RETRY_ATTEMPTS )) && return 1
+    delay="$(_github_api_retry_delay "$attempt" "$status")" || return 1
+    echo "::notice::GitHub raw GET attempt $attempt/$GITHUB_API_RETRY_ATTEMPTS returned HTTP $status; retrying after ${delay}s." >&2
+    sleep "$delay"
+  done
 }

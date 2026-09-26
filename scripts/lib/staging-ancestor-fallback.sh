@@ -793,6 +793,7 @@ saf_event_has_incomplete_run() {
   local repository="${1:?saf_event_has_incomplete_run: repository is required}"
   local sha="${2:?saf_event_has_incomplete_run: sha is required}"
   local event="${3:?saf_event_has_incomplete_run: event is required}"
+  local workflow_file="${4:-build-push.yml}"
   # `curl` is capability-checked rather than assumed present, per AG-CI-001 --
   # see saf_query_run_count's own header for why that applies to `curl` too
   # and not just to the `gh` CLI this function replaced.
@@ -800,7 +801,7 @@ saf_event_has_incomplete_run() {
     return 2
   fi
   local url body statuses
-  url="https://api.github.com/repos/${repository}/actions/workflows/build-push.yml/runs?head_sha=${sha}&event=${event}&per_page=20"
+  url="https://api.github.com/repos/${repository}/actions/workflows/${workflow_file}/runs?head_sha=${sha}&event=${event}&per_page=20"
   body="$(_saf_mktemp_body_file)"
   if ! ghcr_retry "n/a-not-a-real-registry" "" "" -- _saf_github_api_get "$url" "$body"; then
     rm -f "$body"
@@ -1610,7 +1611,7 @@ saf_find_built_ancestor() {
 #     <base_freshness_timeout_seconds> <base_freshness_hard_ceiling_seconds> \
 #     <ancestor_freshness_timeout_seconds> <ancestor_freshness_hard_ceiling_seconds> \
 #     <ancestor_extended_freshness_timeout_seconds> <ancestor_extended_freshness_hard_ceiling_seconds> \
-#     <freshness_poll_interval_seconds> <ancestor_search_depth> [git_dir] [base_ref]
+#     <freshness_poll_interval_seconds> <ancestor_search_depth> [git_dir] [base_ref] [require_active_base_run]
 #
 # The single shared orchestrator both callers (scripts/untracked/ensure-pr-staging-images.sh
 # and build-push.yml's own "Ensure PR staging tags exist for full-setup
@@ -1726,6 +1727,7 @@ saf_resolve_untouched_backfill_source() {
   local freshness_poll_interval_seconds="${11}" ancestor_search_depth="${12}"
   local git_dir="${13:-.}"
   local base_ref="${14:-}"
+  local require_active_base_run="${15:-false}"
   # See saf_find_built_ancestor's own comment for why this is set at all, and
   # why it is `local -x` (exported, but restored to the caller's own value when
   # this function returns) rather than a bare `export`:
@@ -1837,6 +1839,27 @@ saf_resolve_untouched_backfill_source() {
   # per-commit tag, so a push-reuse retag that kept an older source commit's
   # revision label is exactly as safe to accept here as it already is for
   # every ancestor-candidate check in saf_find_built_ancestor.
+  # The two CI callers set require_active_base_run=true: starting a long
+  # registry poll before knowing that this base commit still has a producer
+  # is wasted runner time. Preserve one immediate inspection first, because
+  # a completed producer may have published the tag just before this job.
+  if [[ "$require_active_base_run" == "true" ]]; then
+    if sif_wait_for_fresh_base_image "$base_image" "$base_sha" "$service" 0 0 "$freshness_poll_interval_seconds" true >/dev/null; then
+      printf '%s\n' "$base_image"
+      return 0
+    fi
+    local base_run_active_status=0
+    saf_candidate_run_is_active "$repository" "$base_sha" || base_run_active_status=$?
+    if (( base_run_active_status == 1 )); then
+      echo "::error::Refusing to wait for $service's missing PR-base image ($base_image): no tag-publishing build-push.yml run for $base_sha is active, so a later registry upload cannot make this wait succeed. Inspect that producer run instead." >&2
+      return 1
+    fi
+    if (( base_run_active_status == 2 )); then
+      echo "::error::Refusing to wait for $service's missing PR-base image ($base_image): the tag-publishing build-push.yml run state for $base_sha could not be determined. Failing closed instead of starting a blind registry poll." >&2
+      return 1
+    fi
+  fi
+
   echo "::notice::$service is untouched by this PR; waiting for its PR-base per-commit image ($base_image) to exist and be confirmed built at $base_sha before backfilling..." >&2
   if sif_wait_for_fresh_base_image "$base_image" "$base_sha" "$service" \
     "$base_freshness_timeout_seconds" "$base_freshness_hard_ceiling_seconds" "$freshness_poll_interval_seconds" true >/dev/null; then

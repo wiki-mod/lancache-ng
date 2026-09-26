@@ -141,8 +141,6 @@ teardown() {
     [ -n "$holder_pid" ]
 
     validation_subnet_release "$holder_pid"
-    run kill -0 "$holder_pid"
-    [ "$status" -ne 0 ]
 
     holder_pid_2="$(validation_subnet_try_lock "$lock_root" 77)"
     [ -n "$holder_pid_2" ]

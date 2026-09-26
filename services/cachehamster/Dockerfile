@@ -12,23 +12,23 @@
 ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
 FROM ${BUILD_TOOLS_IMAGE} AS cachehamster-builder
 
-# What: verifies the build-tools contract (Rust toolchain, musl cross
+# What: verifies the build-tools contract (Rust toolchain and native musl
 #   target) is present before relying on any of it.
 # Why: fail closed rather than a confusing mid-build "command not found"
 #   if the pinned build-tools image ever regresses this contract.
 # From: Issue #871
 RUN set -eu; \
-    for tool in cargo rustc rustup; do \
+    for tool in cargo rustc; do \
       command -v "$tool" >/dev/null; \
     done; \
     command -v musl-gcc >/dev/null; \
     case "$(uname -m)" in \
-      x86_64) echo "x86_64-unknown-linux-musl" > /tmp/musl-target; ;; \
-      aarch64) echo "aarch64-unknown-linux-musl" > /tmp/musl-target; ;; \
+      x86_64) echo "x86_64-alpine-linux-musl" > /tmp/musl-target; ;; \
+      aarch64) echo "aarch64-alpine-linux-musl" > /tmp/musl-target; ;; \
       *) echo "Unsupported architecture for musl cross-compilation target: $(uname -m)" >&2; exit 1; ;; \
     esac; \
-    installed_musl_targets="$(rustup target list --installed)"; \
-    grep -qx "$(cat /tmp/musl-target)" <<<"${installed_musl_targets}"
+    rustc_host_line="$(rustc -vV)"; \
+    grep -qx "host: $(cat /tmp/musl-target)" <<<"${rustc_host_line}"
 
 # What: deliberately NOT wired up in this PR: sccache/distcc/ccache build
 #   acceleration (Rule-Ref: AG-CI-004/005/022), unlike

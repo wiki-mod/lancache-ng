@@ -149,6 +149,12 @@ write_smoke() {
     [[ "$output" == *"OK"* ]]
 }
 
+@test "build-tools retries every external tool download" {
+    run grep -Ec 'curl --trace-time --verbose --connect-timeout 20 --max-time 120 --retry 4 --retry-all-errors --retry-delay 2 -fsSL' "$repo_root/tools/build-tools/Dockerfile"
+    [ "$status" -eq 0 ]
+    [ "$output" -eq 5 ]
+}
+
 # --- scripts/lib/verify-version-banner.sh -----------------------------------
 #
 # What: coverage for the shared version-banner smoke check.

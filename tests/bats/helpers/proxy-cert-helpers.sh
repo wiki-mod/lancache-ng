@@ -54,10 +54,10 @@ load_proxy_cert_helpers() {
             /^_is_valid_domain_label\(\)/ { capture = 1 }
             /^_load_public_suffix_list\(\)/ { capture = 0 }
             capture { print }
-            /^    _sign_cert\(\) {/ { in_sign_cert = 1 }
+            /^    _sign_cert\(\) \{$/ { in_sign_cert = 1 }
             in_sign_cert { print }
             in_sign_cert && /^    \}$/ { in_sign_cert = 0 }
-            /^    _default_cert_needs_regen\(\) {/ { in_needs_regen = 1 }
+            /^    _default_cert_needs_regen\(\) \{$/ { in_needs_regen = 1 }
             in_needs_regen { print }
             in_needs_regen && /^    \}$/ { exit }
         ' "$repo_root/services/proxy/entrypoint.sh"
