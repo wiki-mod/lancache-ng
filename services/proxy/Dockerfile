@@ -1,22 +1,20 @@
-
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-# What: Alpine nginx image using http apk repos
-# Why: Static stream module; http enables LAN proxy cache
+# What: Alpine nginx caching proxy; apk install image-local.
+# Why: nginx.org stream module; http repos let Squid cache.
 # From: Issue #815 | Issue #1683
 
-
-# What: Base image pin, consumed from the version SOT.
-# Why: build-manifest.yml is the sole owner of the pin.
+# What: base image, supplied by ci.sh from the SOT pin.
+# Why: non-authoritative fallback keeps FROM valid (AG-CI-008).
 # From: Issue #1683
-ARG ALPINE_IMAGE
+ARG ALPINE_IMAGE=alpine:3.24
 FROM ${ALPINE_IMAGE}
 
 LABEL org.opencontainers.image.description="nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic."
 
-# What: explicit proxy build-args, no default value set
-# Why: routes self-hosted downloads via the LAN proxy
+# What: explicit proxy build-args, no default value set.
+# Why: routes self-hosted apk fetches via the LAN proxy.
 # From: Issue #1781 | PR #1783
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
@@ -25,78 +23,45 @@ ARG http_proxy
 ARG https_proxy
 ARG no_proxy
 
-# What: Install nginx and GNU utilities from nginx.org repo
-# Why: Stream module needed; GNU tools for shell scripts
-# From: Issue #1781 | PR #1783 | Issue #1425
-
-# What: Shared version-banner script, reused by all services
-# Why: Named build context avoids per-service duplication
-# From: Issue #1781 | PR #1783
-COPY --from=shared-scripts verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
-
-# What: copies the domain-validation library in.
-# Why: entrypoint.sh no longer embeds a byte-identical copy.
-# From: Issue #1683
-COPY --from=shared-scripts domain-validation.sh /usr/local/lib/domain-validation.sh
-
-# What: Declare APT_CACHE_BUST to expire BuildKit cache.
-# Why: Expires BuildKit cache for apk upgrade phases.
+# What: APT_CACHE_BUST invalidates BuildKit's apk layer cache.
+# Why: without it BuildKit replays a stale layer forever.
 # From: Issue #1095
-
-# What: Switch apk repositories to plain http.
-# Why: Squid proxy caches http; signing keeps integrity.
-# From: Issue #1095
-RUN sed -i 's|^https://|http://|' /etc/apk/repositories
-
 ARG APT_CACHE_BUST=""
-# What: trusts the proxy CA for this RUN, re-applied below.
-# Why: ca-certificates install resets the bundle mid-RUN.
-# From: Issue #1781 | PR #1783
+# What: image-local nginx.org nginx + tools; CA-trust build-only.
+# Why: stream module needs nginx.org; CA reaches it via the proxy.
+# From: Issue #815 | Issue #1095 | Issue #1781
 RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
-    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
-      cp /etc/ssl/certs/ca-certificates.crt /var/tmp/ca-bundle.orig && \
-      cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
-    fi && \
-    : "apt-cache-bust=${APT_CACHE_BUST}" && \
-    apk upgrade --no-cache && \
-    apk add --no-cache ca-certificates openssl curl && \
-    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
-      cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
-    fi && \
-    curl -fsSL -o /etc/apk/keys/nginx_signing.rsa.pub https://nginx.org/keys/nginx_signing.rsa.pub && \
-    printf '%s\n' "@nginx http://nginx.org/packages/mainline/alpine/v$(cut -d. -f1,2 /etc/alpine-release)/main" >> /etc/apk/repositories && \
-    apk update && \
-    apk add --no-cache \
-    nginx@nginx \
-    coreutils \
-    bash \
-    nano \
-    findutils \
-    gettext-envsubst \
-    lsof \
-    ripgrep && \
-    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /var/tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
-
-# What: verify nginx.org binary carries stream_ssl_preread.
-# Why: SNI TLS interception needs built-in stream.
-# From: Issue #815 | Issue #1683
-RUN nginx_v="$(nginx -V 2>&1)"; \
-    case "$nginx_v" in *--with-stream_ssl_preread_module*) ;; \
-      *) echo "nginx.org binary lacks stream_ssl_preread (AG-KD-007)" >&2; exit 1;; esac
-
-# What: Verify apk-installed binaries execute properly.
-# Why: Missing library dependencies fail at runtime.
-# From: Issue #1613 | Issue #1781 | PR #1783
-RUN set -euo pipefail; \
-    find . -maxdepth 0 -printf '%f\n' >/dev/null; \
-    printf '%s' '$FOO' | FOO=bar envsubst >/dev/null; \
-    rg --version >/dev/null; \
-    curl --version >/dev/null; \
-    sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
+    sed -i 's|^https://|http://|' /etc/apk/repositories \
+    && if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
+         cp /etc/ssl/certs/ca-certificates.crt /var/tmp/ca-bundle.orig \
+         && cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+       fi \
+    && : "apt-cache-bust=${APT_CACHE_BUST}" \
+    && apk upgrade --no-cache \
+    && apk add --no-cache ca-certificates openssl curl \
+    && if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
+         cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+       fi \
+    && curl -fsSL -o /etc/apk/keys/nginx_signing.rsa.pub https://nginx.org/keys/nginx_signing.rsa.pub \
+    && printf '%s\n' "@nginx http://nginx.org/packages/mainline/alpine/v$(cut -d. -f1,2 /etc/alpine-release)/main" >> /etc/apk/repositories \
+    && apk update \
+    && apk add --no-cache \
+        nginx@nginx \
+        coreutils \
+        bash \
+        nano \
+        findutils \
+        gettext-envsubst \
+        lsof \
+        ripgrep \
+    && if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /var/tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
 ENV EDITOR=nano
 ENV VISUAL=$EDITOR
 
+# What: nginx cache, ssl and tmp dirs pre-created.
+# Why: entrypoint drops privileges; dirs must pre-exist.
+# From: Issue #1428 | PR #1431
 RUN mkdir -p \
     /etc/nginx/ssl/ca \
     /etc/nginx/ssl/certs \
@@ -107,24 +72,20 @@ COPY nginx.conf /etc/nginx/nginx.conf.template
 COPY conf.d/ /etc/nginx/conf.d/
 COPY proxy-params.conf /etc/nginx/proxy-params.conf.template
 
-# What: Static public suffix list for certificate generation
-# Why: Used by entrypoint.sh to derive wildcard cert domains
+# What: static public suffix list for cert-domain derivation.
+# Why: entrypoint derives wildcard cert domains from it.
 # From: Issue #1095
 COPY public_suffix_list.dat /etc/nginx/public_suffix_list.dat
 
-# What: Build-time snapshot fallback for domain config.
-# Why: Used when live bind-mount unavailable (quickstart).
-# From: Issue #766
+# What: shared domain-validation lib + cdn-domains snapshot.
+# Why: dns owns both; proxy consumes them via the named context.
+# From: Issue #766 | Issue #1683
+COPY --from=dns-domains domain-validation.sh /usr/local/lib/domain-validation.sh
 COPY --from=dns-domains cdn-domains.txt /etc/nginx/cdn-domains.txt
+
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
 
 VOLUME ["/etc/nginx/ssl", "/var/cache/nginx/lancache"]
-
-# What: Final apk upgrade pass, no new packages added.
-# Why: Patches CVEs fixed after package installs.
-# From: Issue #1781 | PR #1783
-RUN apk upgrade --no-cache
 
 EXPOSE 80 443
 

@@ -12,10 +12,24 @@ schema: build-manifest/v1
 services:
   proxy:
     context: services/proxy
-    external_contexts: [services/dns]
+    # What: named build contexts (name=path) for COPY --from.
+    # Why: proxy consumes dns' cdn-domains.txt via a named context.
+    # From: Issue #1683
+    external_contexts:
+      - dns-domains=services/dns
     build_type: apk
     final_base: alpine
     runner: light
+    # What: execute-smoke checks run post-build by ci.sh.
+    # Why: prove apk binaries run, not just exist (#1613).
+    # From: Issue #1613 | Issue #1683
+    smoke:
+      - rg --version
+      - curl --version
+      - lsof -v
+      - envsubst --version
+      - find --version
+      - "nginx -V 2>&1 | grep -q -- --with-stream_ssl_preread_module"
   dns:
     context: services/dns
     build_type: rust

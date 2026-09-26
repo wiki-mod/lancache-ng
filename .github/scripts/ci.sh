@@ -1469,6 +1469,22 @@ _ci_docker_build() {
     while IFS= read -r a; do
         [ -n "${a}" ] && args+=(--build-arg "${a}")
     done < <(ci_cmd_build_args "${service}" --bare "${platform}")
+    # What: SOT-owned named build contexts (name=path).
+    # Why: a Dockerfile COPY --from derives it; SOT owns the list.
+    # From: Issue #1683
+    while IFS= read -r a; do
+        [ -n "${a}" ] && args+=(--build-context "${a}")
+    done < <(_ci_block_entry_list services "${service}" external_contexts)
+    # What: mount build-time secrets set-runtime provisioned.
+    # Why: leak-safe --secret; clear-runtime removes them after.
+    # From: Issue #1683 | Issue #1781
+    local secret_dir sf
+    secret_dir="$(_ci_runtime_secret_dir)"
+    if [ -d "${secret_dir}" ]; then
+        for sf in "${secret_dir}"/*; do
+            [ -f "${sf}" ] && args+=(--secret "id=$(basename "${sf}"),src=${sf}")
+        done
+    fi
     # What: per-service registry cache-from/to (§35).
     # Why: caller scopes ref per service; a miss is fine.
     # From: Issue #1683
@@ -2337,8 +2353,38 @@ _ci_test_toolchain() {
     printf 'service=%s tested=ok\n' "${service}"
 }
 
+# What: Execute-smoke a product image's SOT smoke checks.
+# Why: prove apk binaries run, not just exist (#1613).
+# From: Issue #1613 | Issue #1683
+_ci_smoke_service() {
+    local service="$1" checks image c
+    if [ -n "${CI_SMOKE_CMD:-}" ]; then
+        "${CI_SMOKE_CMD}" "${service}"
+        return "$?"
+    fi
+    checks="$(_ci_block_entry_list services "${service}" smoke)"
+    if [ -z "${checks}" ]; then
+        printf 'service=%s smoke=SKIP reason=no SOT smoke\n' "${service}"
+        return 0
+    fi
+    image="${CI_SERVICE_IMAGE:-}"
+    if [ -z "${image}" ]; then
+        ci_log "[CI-ERROR-TEST-0007]" "service=\"${service}\" reason=\"CI_SERVICE_IMAGE required for the smoke\""
+        return 2
+    fi
+    local -a cl=()
+    while IFS= read -r c; do [ -n "${c}" ] && cl+=("${c}"); done <<< "${checks}"
+    for c in "${cl[@]}"; do
+        if ! docker run --rm --entrypoint timeout "${image}" --kill-after=30s --signal=TERM 5m sh -c "${c}" >/dev/null 2>&1; then
+            ci_error "[CI-ERROR-TEST-0008]" "service=\"${service}\" check=\"${c}\" reason=\"execute-smoke failed; missing lib?\"" "$(docker run --rm --entrypoint sh "${image}" -c "${c}" 2>&1 | head -5)"
+            return 1
+        fi
+    done
+    printf 'service=%s smoke=ok checks=%s\n' "${service}" "${#cl[@]}"
+}
+
 # What: Dispatch a service's test by its build type.
-# Why: rust runs cargo; apk has no unit test to run.
+# Why: rust runs cargo; apk services execute-smoke via SOT.
 # From: Issue #1683 | PR #1858
 _ci_default_test() {
     local service="$1" build_type
@@ -2346,7 +2392,7 @@ _ci_default_test() {
     [ -n "${build_type}" ] || build_type="toolchain"
     case "${build_type}" in
         rust) _ci_test_rust "${service}" ;;
-        apk|install) printf 'service=%s tested=SKIP build_type=%s reason=no unit test; runtime in validate\n' "${service}" "${build_type}" ;;
+        apk|install) _ci_smoke_service "${service}" ;;
         toolchain) _ci_test_toolchain "${service}" ;;
         *) ci_log "[CI-ERROR-TEST-0004]" "service=\"${service}\" build_type=\"${build_type}\" reason=\"unknown build_type\""; return 2 ;;
     esac
