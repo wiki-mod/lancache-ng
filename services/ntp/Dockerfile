@@ -5,10 +5,10 @@
 # Why: image-local apk install; ci.sh builds via the generic path.
 # From: Issue #815 | Issue #1683
 
-# What: Base image pin, consumed from the version SOT.
-# Why: build-manifest.yml is the sole owner of the pin.
+# What: base image, supplied by ci.sh from the SOT pin.
+# Why: non-authoritative fallback keeps FROM valid (AG-CI-008).
 # From: Issue #1683
-ARG ALPINE_IMAGE
+ARG ALPINE_IMAGE=alpine:3.24
 FROM ${ALPINE_IMAGE}
 
 LABEL org.opencontainers.image.description="LanCache-NG-NTP: chrony-based NTP server, disciplined against public NTP servers, serving LAN clients on UDP/123."
