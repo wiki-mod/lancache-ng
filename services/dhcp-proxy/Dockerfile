@@ -21,14 +21,17 @@ ARG APT_CACHE_BUST=""
 # Why: the SOT owns the list; this stage only consumes it.
 # From: Issue #1683
 ARG APK_PACKAGES
-# What: image-local apk install of the SOT-listed dnsmasq + tools.
-# Why: http repos let Squid cache; GNU find/date for kgs logic.
-# From: Issue #815 | Issue #840 | Issue #1095
-RUN sed -i 's|^https://|http://|' /etc/apk/repositories \
-    && : "apt-cache-bust=${APT_CACHE_BUST}" \
-    && apk update --no-cache \
-    && apk upgrade --no-cache \
-    && apk add --no-cache ${APK_PACKAGES}
+# What: bootstrap bash so the SHELL below is not busybox ash.
+# Why: AG-REL-001 forbids ash; ci.sh apk-setup needs bash.
+# From: Issue #1683
+RUN apk add --no-cache bash
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+# What: shared apk setup (repo-http+update+upgrade+add) via ci.sh.
+# Why: one owner for the mandatory update+upgrade; SOT owns packages.
+# From: Issue #815 | Issue #1683
+RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
+    : "apt-cache-bust=${APT_CACHE_BUST}" \
+    && bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
 
 ENV EDITOR=nano
 ENV VISUAL=$EDITOR

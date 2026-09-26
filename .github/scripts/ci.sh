@@ -31,7 +31,7 @@ CI_REPO_ROOT="${CI_REPO_ROOT:-$(cd -- "${CI_SCRIPT_DIR}/../.." && pwd)}"
 # From: Issue #1683
 declare -A CI_DISPATCH=(
     [plan]=ci_cmd_plan [plan-matrix]=ci_cmd_plan_matrix [impact]=ci_cmd_impact [codeql-impact]=ci_cmd_codeql_impact [codeql-config]=ci_cmd_codeql_config [identity]=ci_cmd_identity
-    [resolve]=ci_cmd_resolve [build]=ci_cmd_build [build-args]=ci_cmd_build_args [rust-build]=ci_cmd_rust_build
+    [resolve]=ci_cmd_resolve [build]=ci_cmd_build [build-args]=ci_cmd_build_args [rust-build]=ci_cmd_rust_build [apk-setup]=ci_cmd_apk_setup
     [build-tools]=ci_cmd_build_tools [publish]=ci_cmd_publish [verify]=ci_cmd_verify
     [test]=ci_cmd_test [coverage]=ci_cmd_coverage [scan]=ci_cmd_scan [assemble]=ci_cmd_assemble
     [aggregate]=ci_cmd_aggregate [emit-result]=ci_cmd_emit_result [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files
@@ -1471,6 +1471,12 @@ _ci_docker_build() {
         args+=(--file "${context}/Dockerfile")
         context="."
     fi
+    # What: apk final stages bind-mount ci.sh via a named context.
+    # Why: apk-setup runs in the bare final stage, ci.sh not in context.
+    # From: Issue #1683
+    if [ "${build_type}" = apk ]; then
+        args+=(--build-context "ci-scripts=${CI_SCRIPT_DIR}")
+    fi
     while IFS= read -r a; do
         [ -n "${a}" ] && args+=(--label "${a}")
     done < <(_ci_oci_labels "${service}")
@@ -1506,6 +1512,18 @@ _ci_docker_build() {
     [ "${rc}" -eq 0 ] || return "${rc}"
     printf '%s\n' "${buildlog}" >&2
     printf '%s\n' "${tag}"
+}
+
+# What: In-image apk setup: repo-http, update, upgrade, add packages.
+# Why: one owner for the mandatory update+upgrade + SOT packages.
+# From: Issue #1683
+ci_cmd_apk_setup() {
+    sed -i 's|^https://|http://|' /etc/apk/repositories
+    apk update --no-cache
+    apk upgrade --no-cache
+    if [ "$#" -gt 0 ]; then
+        apk add --no-cache "$@"
+    fi
 }
 
 # What: In-image rust builder: opt-in sccache/distcc/ccache + fallback.
@@ -4469,6 +4487,15 @@ _ci_service_build_args() {
             out="${out}${prefix}${iarg}_SHA256=${isha}"$'\n'
         fi
     fi
+    # What: SOT-owned apk package list, when the service has one.
+    # Why: services.<svc>.packages owns it; the Dockerfile derives.
+    # From: Issue #1683
+    local apk_pkgs
+    apk_pkgs="$(_ci_block_entry_list services "${service}" packages | tr '\n' ' ')"
+    apk_pkgs="${apk_pkgs% }"
+    if [ -n "${apk_pkgs}" ]; then
+        out="${out}${prefix}APK_PACKAGES=${apk_pkgs}"$'\n'
+    fi
     printf '%s' "${out}"
 }
 
@@ -5034,10 +5061,10 @@ ci_main() {
         ci_log "[CI-ERROR-CORE-0002]" "command=\"${command}\" reason=\"unknown subcommand\" known=\"${!CI_DISPATCH[*]}\""
         return 2
     fi
-    # What: check + rust-build need no SOT manifest.
-    # Why: rust-build is bind-mounted into a builder with no SOT.
+    # What: check/rust-build/apk-setup need no SOT manifest.
+    # Why: bind-mounted into a build stage with no SOT tree present.
     # From: Issue #1683
-    case "${command}" in check|rust-build) ;; *) ci_require_manifest || return "$?" ;; esac
+    case "${command}" in check|rust-build|apk-setup) ;; *) ci_require_manifest || return "$?" ;; esac
     "${fn}" "$@"
 }
 
