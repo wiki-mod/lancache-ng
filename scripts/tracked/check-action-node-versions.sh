@@ -356,7 +356,7 @@ fetch_external_action_yaml() {
   for file in action.yml action.yaml; do
     body="$(mktemp "${TMPDIR:-/var/tmp}/action-metadata.XXXXXX")" || return 1
     url="https://api.github.com/repos/${owner}/${repo}/contents/${subpath:+${subpath}/}${file}?ref=${ref}"
-    if github_api_get_with_retry "$url" "$body" false; then
+    if github_api_get_with_retry "$url" "$body" false application/vnd.github.raw+json; then
       printf 'OK\n'
       cat "$body"
       rm -f -- "$body"

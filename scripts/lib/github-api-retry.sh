@@ -71,12 +71,13 @@ _github_api_cache_store() {
 _github_api_get_once() {
   local url="${1:?_github_api_get_once: url is required}"
   local body_file="${2:?_github_api_get_once: body file is required}"
+  local accept="${3:-application/vnd.github+json}"
 
   command -v curl >/dev/null 2>&1 || return 127
 
   local header_config curl_status headers_file github_token
   headers_file="$(mktemp "${TMPDIR:-/var/tmp}/github-api-headers.XXXXXX")" || return 1
-  header_config="$(printf 'header = "Accept: application/vnd.github.raw+json"\nheader = "X-GitHub-Api-Version: 2022-11-28"\n')"
+  header_config="$(printf 'header = "Accept: %s"\nheader = "X-GitHub-Api-Version: 2022-11-28"\n' "$accept")"
   github_token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
   if [[ -n "$github_token" ]]; then
     header_config+="$(printf 'header = "Authorization: Bearer %s"\n' "$github_token")"
@@ -135,6 +136,7 @@ github_api_get_with_retry() {
   local url="${1:?github_api_get_with_retry: url is required}"
   local body_file="${2:?github_api_get_with_retry: body file is required}"
   local report_failure="${3:-true}"
+  local accept="${4:-application/vnd.github+json}"
 
   [[ "$GITHUB_API_RETRY_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] || {
     echo "::error::GITHUB_API_RETRY_ATTEMPTS must be a positive integer." >&2
@@ -157,7 +159,7 @@ github_api_get_with_retry() {
   local attempt call_status http_status retry_delay
   for (( attempt=1; attempt<=GITHUB_API_RETRY_ATTEMPTS; attempt++ )); do
     : >"$body_file"
-    if _github_api_get_once "$url" "$body_file"; then
+    if _github_api_get_once "$url" "$body_file" "$accept"; then
       call_status=0
     else
       call_status=$?
