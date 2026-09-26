@@ -4042,6 +4042,35 @@ STUBEOF
     [ "${status}" -eq 0 ]
 }
 
+@test "check if-without-else-status flags a masked \$? after an else-less if" {
+    # What: ci.sh owns the AG-VAL-029 if-status check.
+    # Why: else-less if reports 0, masking the real status.
+    # From: Issue #1683 | PR #1858
+    printf 'if grep -q x f; then STATUS=0; else STATUS=$?; fi\necho ok\n' > "${BATS_TEST_TMPDIR}/okif.sh"
+    run bash "${CI_SH}" check if-without-else-status "${BATS_TEST_TMPDIR}/okif.sh"
+    [ "${status}" -eq 0 ]
+    printf 'if grep -q x f; then\n  :\nfi\nrc=$?\n' > "${BATS_TEST_TMPDIR}/badif.sh"
+    run bash "${CI_SH}" check if-without-else-status "${BATS_TEST_TMPDIR}/badif.sh"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0065"* ]]
+    printf 'if grep -q x f; then\n  :\nfi\nrc=$? # if-status-safe: not consuming\n' > "${BATS_TEST_TMPDIR}/safeif.sh"
+    run bash "${CI_SH}" check if-without-else-status "${BATS_TEST_TMPDIR}/safeif.sh"
+    [ "${status}" -eq 0 ]
+}
+
+@test "check docker-run-heredoc-stdin flags a heredoc docker run missing -i" {
+    # What: ci.sh owns the AG-VAL-029 heredoc-stdin check.
+    # Why: unattached stdin runs nothing yet reports success.
+    # From: Issue #1683 | PR #1858
+    printf 'jobs:\n  a:\n    steps:\n      - run: docker run -i img bash -s <<EOF\n' > "${BATS_TEST_TMPDIR}/okhd.yml"
+    run bash "${CI_SH}" check docker-run-heredoc-stdin "${BATS_TEST_TMPDIR}/okhd.yml"
+    [ "${status}" -eq 0 ]
+    printf 'jobs:\n  a:\n    steps:\n      - run: docker run img bash -s <<EOF\n' > "${BATS_TEST_TMPDIR}/badhd.yml"
+    run bash "${CI_SH}" check docker-run-heredoc-stdin "${BATS_TEST_TMPDIR}/badhd.yml"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0066"* ]]
+}
+
 @test "check pr-title accepts valid conventional, warns by default on bad scope/format" {
     # What: ci.sh owns the title taxonomy; bats calls it.
     # Why: AG-GH-018: warn is the default, not a hard fail.

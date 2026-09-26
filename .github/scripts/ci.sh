@@ -5528,6 +5528,87 @@ _ci_check_pipefail_early_exit() {
     printf 'pipefail-early-exit=clean files=%s\n' "${#files[@]}"
 }
 
+# What: Flag a $? read after an else-less if-block.
+# Why: POSIX reports the if's own 0 status, masking (AG-VAL-029).
+# From: Issue #1683 | PR #1858
+_ci_check_if_without_else_status() {
+    local -a _ci_override=("$@") files=()
+    _ci_scan_files files _ci_override '.github/scripts/*.sh' '*/Dockerfile' 'Dockerfile' 'services/*.sh'
+    local path fi_line status_line status_content
+    local -a viol=()
+    for path in "${files[@]}"; do
+        [ -f "${path}" ] || continue
+        case "${path}" in */ci.sh|ci.sh) continue ;; esac
+        while IFS=: read -r fi_line status_line status_content; do
+            [ -n "${fi_line}" ] || continue
+            viol+=("${path}:${status_line}: reads \$? after an else-less if (fi at line ${fi_line}); POSIX reports the if's own status 0, not the command's -- use 'if CMD; then STATUS=0; else STATUS=\$?; fi' or mark '# if-status-safe: <reason>'")
+        done < <(awk '
+            { lines[NR] = $0 }
+            END {
+              depth = 0; nc = 0
+              for (i = 1; i <= NR; i++) {
+                stripped = lines[i]; sub(/#.*/, "", stripped)
+                n = split(stripped, toks, /[ \t;]+/)
+                for (k = 1; k <= n; k++) {
+                  t = toks[k]
+                  if (t == "if") { depth++; has_else[depth] = 0 }
+                  else if (t == "elif" || t == "else") { if (depth > 0) has_else[depth] = 1 }
+                  else if (t == "fi") { if (depth > 0) { if (has_else[depth] == 0) { nc++; fic[nc] = i } depth-- } }
+                }
+              }
+              for (c = 1; c <= nc; c++) {
+                fi_i = fic[c]; checked = 0
+                for (j = fi_i + 1; j <= NR && checked < 6; j++) {
+                  nxt = lines[j]
+                  if (nxt ~ /^[ \t]*$/) continue
+                  ns = nxt; sub(/^[ \t]*/, "", ns)
+                  if (ns ~ /^#/) { checked++; continue }
+                  checked++
+                  if (nxt ~ /\$\?/ && nxt !~ /#[ \t]*if-status-safe:/) printf "%d:%d:%s\n", fi_i, j, nxt
+                  break
+                }
+              }
+            }
+          ' "${path}")
+    done
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0065]" "reason=\"\$? read after else-less if masks status (AG-VAL-029)\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'if-without-else-status=clean files=%s\n' "${#files[@]}"
+}
+
+# What: Flag a heredoc-fed docker run missing -i.
+# Why: unattached stdin runs nothing yet reports success (AG-VAL-029).
+# From: Issue #1683 | PR #1858
+_ci_check_docker_run_heredoc_stdin() {
+    local -a _ci_override=("$@") files=()
+    _ci_scan_files files _ci_override '.github/workflows/*.yml' '.github/workflows/*.yaml' '.github/actions/**/*.yml' '.github/actions/**/*.yaml'
+    local path lineno matched trimmed start window last_off invocation
+    local -a viol=()
+    for path in "${files[@]}"; do
+        [ -f "${path}" ] || continue
+        while IFS=: read -r lineno _rest; do
+            [ -n "${lineno}" ] || continue
+            matched="$(sed -n "${lineno}p" "${path}")"
+            trimmed="${matched#"${matched%%[![:space:]]*}"}"
+            case "${trimmed}" in '#'*) continue ;; esac
+            start=$(( lineno > 20 ? lineno - 20 : 1 ))
+            window="$(sed -n "${start},${lineno}p" "${path}")"
+            last_off="$(printf '%s\n' "${window}" | grep -n 'docker run' | tail -1 | cut -d: -f1)"
+            [ -n "${last_off}" ] || continue
+            invocation="$(printf '%s\n' "${window}" | tail -n +"${last_off}")"
+            grep -qE '(^|[[:space:]])-i([[:space:]]|$)' <<<"${invocation}" && continue
+            viol+=("${path}:${lineno}: heredoc-fed 'docker run' (bash -s / sh -s) missing -i; container stdin never attaches so the heredoc runs nothing while the step reports success")
+        done < <(grep -noE '(bash|sh)[[:space:]]+-s[[:space:]]*<<' "${path}" 2>/dev/null)
+    done
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0066]" "reason=\"heredoc docker run missing -i; stdin unattached (AG-VAL-029)\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'docker-run-heredoc-stdin=clean files=%s\n' "${#files[@]}"
+}
+
 # What: Check a PR title's Conventional-Commit form.
 # Why: types fixed; scopes derive from the SOT service list.
 # From: Issue #1683
@@ -7980,7 +8061,8 @@ ci_cmd_check_all() {
     # From: Issue #1683
     local -a diff_scoped=(line-endings file-headers comment-length \
         deny-short-sha language-policy mutable-refs executable-bits \
-        pipefail-early-exit review-chronology governance-guards \
+        pipefail-early-exit if-without-else-status docker-run-heredoc-stdin \
+        review-chronology governance-guards \
         changelog-direct-edit)
     for sub in "${diff_scoped[@]}"; do
         ci_cmd_check "${sub}" "${changed[@]}" || rc=1
@@ -8033,6 +8115,8 @@ ci_cmd_check() {
         executable-bits) _ci_check_executable_bits "$@" ;;
         review-chronology) _ci_check_review_chronology "$@" ;;
         pipefail-early-exit) _ci_check_pipefail_early_exit "$@" ;;
+        if-without-else-status) _ci_check_if_without_else_status "$@" ;;
+        docker-run-heredoc-stdin) _ci_check_docker_run_heredoc_stdin "$@" ;;
         pr-title) _ci_check_pr_title "$@" ;;
         stable-external-images) _ci_check_stable_external_images "$@" ;;
         pr-template) _ci_check_pr_template "$@" ;;
