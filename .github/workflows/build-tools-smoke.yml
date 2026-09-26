@@ -247,7 +247,7 @@ jobs:
     outputs:
       build_tools: ${{ steps.classify.outputs.build_tools }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: &checkout_centraliced_versioning actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - id: classify
@@ -274,7 +274,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: *checkout_centraliced_versioning
 
       # What: sets up Docker Buildx for manifest inspection
       # Why: resolves channel tag to digest via buildx imagetools
