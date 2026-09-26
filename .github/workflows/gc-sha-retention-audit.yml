@@ -148,8 +148,13 @@ jobs:
               bash -n scripts/untracked/gc-sha-retention-audit.sh scripts/lib/github-api-retry.sh scripts/lib/sha-retention-audit.sh scripts/untracked/validate-stack-images.sh
               shellcheck --severity=warning scripts/untracked/gc-sha-retention-audit.sh scripts/lib/github-api-retry.sh scripts/lib/sha-retention-audit.sh scripts/untracked/validate-stack-images.sh tests/bats/sha_retention_audit.bats
               actionlint .github/workflows/gc-sha-retention-audit.yml
-              bats_jobs=$(( $(nproc) * 2 )); (( bats_jobs >= 16 )) || bats_jobs=16
-              TMPDIR=/var/tmp bats --jobs "$bats_jobs" tests/bats/sha_retention_audit.bats
+              if command -v parallel >/dev/null; then
+                bats_jobs=$(( $(nproc) * 2 )); (( bats_jobs >= 16 )) || bats_jobs=16
+                TMPDIR=/var/tmp bats --jobs "$bats_jobs" tests/bats/sha_retention_audit.bats
+              else
+                echo "::notice::parallel is unavailable; running Bats serially."
+                TMPDIR=/var/tmp bats tests/bats/sha_retention_audit.bats
+              fi
               bash scripts/untracked/validate-stack-images.sh
               bash scripts/untracked/check-workflow-line-limit.sh
             '
