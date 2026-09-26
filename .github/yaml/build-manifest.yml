@@ -122,6 +122,10 @@ services:
     # From: Issue #1683
     coverage_manifest: services/ui/Cargo.toml
     coverage_threshold: 35
+    smoke:
+      - rg --version
+      - curl --version
+      - lsof -v
   cachehamster:
     context: services/cachehamster
     # What: Rust compile via BUILD_TOOLS_IMAGE stage.
@@ -322,7 +326,7 @@ dependency_graph:
   watchdog:
     contexts: [shared-scripts]
   ui:
-    contexts: [shared-scripts]
+    contexts: []
   dhcp:
     contexts: [shared-scripts]
   dhcp-proxy:
