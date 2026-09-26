@@ -51,16 +51,11 @@ for ((i = 0; i < ${#args[@]}; i++)); do
     fi
 done
 url="${args[-1]}"
-key=$(printf '%s' "$url" | sed -E 's#^https://raw\.githubusercontent\.com/##' | tr '/?&=' '____')
+key=$(printf '%s' "$url" | sed -E 's#^https://raw\.githubusercontent\.com/##' | tr '/' '_')
 fixture_file="${MOCK_CURL_FIXTURES:?MOCK_CURL_FIXTURES not set}/$key"
 if [ ! -f "$fixture_file" ]; then
-    ref=$(printf '%s' "$url" | cut -d/ -f6)
-    file=$(printf '%s' "$url" | sed 's#.*/##')
-    fixture_file=$(find "${MOCK_CURL_FIXTURES:?MOCK_CURL_FIXTURES not set}" -maxdepth 1 -type f -name "*_${ref}_${file}" -print -quit)
-    if [ -z "$fixture_file" ]; then
-        printf '000'
-        exit 0
-    fi
+    printf '000'
+    exit 0
 fi
 status_line=$(head -n1 "$fixture_file")
 tail -n +2 "$fixture_file" > "$out_file"
@@ -87,15 +82,12 @@ MOCKSLEEP
 # knowledge lives in one place instead of being hand-duplicated per test.
 mock_curl_response() {
     local owner_repo="$1" ref="$2" subpath="$3" file="$4" status="$5" body="$6"
-    local key="${owner_repo}_contents_${subpath:+${subpath}_}${file}_ref_${ref}"
+    local key="${owner_repo}/${ref}/${subpath:+${subpath}/}${file}"
     key="${key//\//_}"
     {
         printf '%s\n' "$status"
         printf '%s\n' "$body"
     } > "$mock_fixtures_dir/$key"
-    local raw_key="${owner_repo}_${ref}_${subpath:+${subpath}_}${file}"
-    raw_key="${raw_key//\//_}"
-    cp "$mock_fixtures_dir/$key" "$mock_fixtures_dir/$raw_key"
 }
 
 write_workflow() {
@@ -265,6 +257,21 @@ EOF
     run "$script" "$fixture_root"
     [ "$status" -ne 0 ]
     [[ "$output" == *"Could not find action.yml or action.yaml"* ]]
+}
+
+@test "rejects external action refs that are not full commit SHAs" {
+    write_workflow <<'EOF'
+name: CI
+on: push
+jobs:
+  build:
+    steps:
+      - uses: someorg/tagged-action@v1 # v1
+EOF
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"must use a full 40-hex commit SHA"* ]]
 }
 
 @test "fails closed when action.yml returns a temporary API failure" {

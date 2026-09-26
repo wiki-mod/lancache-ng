@@ -20,57 +20,9 @@
 # hardcoded as "always fine", so a future local action that DID wrap a
 # JavaScript runtime would still be covered.
 #
-# External actions (`uses: <owner>/<repo>[/<subpath>]@<sha-or-tag>`) are
-# resolved via the GitHub REST Contents API
-# (repos/<owner>/<repo>/contents/<subpath/>action.yml?ref=<ref>, falling back
-# to action.yaml if action.yml 404s -- some actions use either name) using
-# curl with the `application/vnd.github.raw+json` Accept header, which
-# returns the file's raw text directly instead of a base64-wrapped JSON
-# envelope. This project's established convention for hitting the GitHub API
-# from a guard script is curl + GH_TOKEN, not the `gh` CLI (see
-# check-pr-tracking-metadata.sh) -- the `gh` binary is not installed in the
-# build-tools image this script runs inside in CI, and adding it purely for
-# this one script would be a heavier dependency than a handful of curl calls
-# need.
-#
-# A pin can name a branch or tag instead of a commit SHA (`ref=<tag>` resolves
-# fine against the Contents API either way), but this project's own
-# established convention is to SHA-pin every third-party action (every
-# example in this repo's workflows already does; see AGENTS.md), so this case
-# is expected to be rare-to-nonexistent here. If it does occur: a tag's
-# underlying commit can change after this check last ran, so a clean result
-# for a tag-pinned action is a point-in-time snapshot of whatever that tag
-# pointed at during this run, not a permanent guarantee the way a SHA pin's
-# result is. That's a property of tag pins in general, not something this
-# script can fix; it resolves the ref exactly as given and reports what it
-# finds.
-#
-# Rate limits: as of this writing this repo pins ~15 distinct external
-# action refs across all workflows (see CHANGELOG/PR for the exact count at
-# the time this was added) -- small enough that a checked-in cache mapping
-# owner/repo@ref -> runs.using would be premature complexity for the API
-# load this actually generates (a per-run duplicate-request dedupe, done
-# below via `sort -u` over the extracted refs, is all that is warranted at
-# this scale). Re-evaluate a persistent cache if the number of distinct pins
-# grows enough that GitHub API rate limiting becomes a real, observed
-# problem, not a hypothetical one.
-#
-# Failure handling: a *definitive* resolution failure (action.yml AND
-# action.yaml both come back 404 for a pinned ref) fails the check -- that
-# pin cannot be verified safe, and this project's guard scripts fail closed
-# rather than silently skip. Anything else non-200 (auth rejection, rate
-# limiting, a network hiccup, any other HTTP status) is treated as an
-# infrastructure problem, not a verdict on the pin itself, and only emits a
-# warning -- matching check-pr-tracking-metadata.sh's own split between
-# "the thing we're checking is actually wrong" (fail) and "we couldn't check
-# it right now" (warn, don't fail the whole PR on a GitHub-side blip).
-#
-# Accepts an optional repo_root argument (defaults to this script's own
-# repo) so tests/bats/check_action_node_versions.bats can point it at a
-# fixture tree instead of mutating/depending on the real repository, and
-# an optional GH_TOKEN (or GITHUB_TOKEN) env var to authenticate the
-# GitHub API calls (raises the rate limit; unauthenticated access to public
-# repos' Contents API works fine too at this repo's current scale).
+# What: Reads public action manifests by immutable raw SHA URL.
+# Why: Raw reads avoid API auth and rate-limit coupling.
+# From: Issue #1860 | PR #1872
 set -euo pipefail
 
 repo_root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"

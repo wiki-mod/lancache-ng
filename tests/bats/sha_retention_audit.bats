@@ -393,6 +393,50 @@ EOF
   [[ "$output" != *"::warning::"* ]]
 }
 
+# What: checks server Retry-After against the total retry budget.
+# Why: a server delay beyond budget must fail, not overrun CI.
+# From: Issue #1860 | PR #1872
+@test "GitHub REST retry rejects Retry-After beyond its total budget" {
+  GITHUB_API_RETRY_DELAY_SECONDS=5
+  GITHUB_API_MAX_RETRY_DELAY_SECONDS=60
+  GITHUB_API_RETRY_AFTER=300
+  GITHUB_API_RATE_LIMIT_REMAINING=""
+  GITHUB_API_RATE_LIMIT_RESET=""
+
+  run _github_api_retry_delay 1 429 120
+  [ "$status" -eq 2 ]
+}
+
+# What: keeps server Retry-After exact when it fits the budget.
+# Why: rate-limited callers must not retry before server allows it.
+# From: Issue #1860 | PR #1872
+@test "GitHub REST retry keeps an in-budget Retry-After exact" {
+  GITHUB_API_RETRY_DELAY_SECONDS=5
+  GITHUB_API_MAX_RETRY_DELAY_SECONDS=60
+  GITHUB_API_RETRY_AFTER=25
+  GITHUB_API_RATE_LIMIT_REMAINING=""
+  GITHUB_API_RATE_LIMIT_RESET=""
+
+  run _github_api_retry_delay 2 429 120
+  [ "$status" -eq 0 ]
+  [ "$output" = "25" ]
+}
+
+# What: applies bounded exponential delay without server guidance.
+# Why: transient failures need short retries that cannot consume CI time.
+# From: Issue #1860 | PR #1872
+@test "GitHub REST retry uses short exponential fallback delays" {
+  GITHUB_API_RETRY_DELAY_SECONDS=5
+  GITHUB_API_MAX_RETRY_DELAY_SECONDS=60
+  GITHUB_API_RETRY_AFTER=""
+  GITHUB_API_RATE_LIMIT_REMAINING=""
+  GITHUB_API_RATE_LIMIT_RESET=""
+
+  run _github_api_retry_delay 3 429 120
+  [ "$status" -eq 0 ]
+  [ "$output" = "20" ]
+}
+
 # What: commit-prefix resolution is exact and history-aware.
 # Why: SHA abbreviation handling must resolve through Git it
 # an unknown/unresolvable prefix, not guess.

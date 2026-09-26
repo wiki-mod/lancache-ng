@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: Retry mechanism for GitHub API reads with TTL cache
-# Why: API reads need no login recovery; token protected via stdin
-# From: Issue #1095 | PR #1501.
+# What: GitHub HTTP retry transport with REST response cache
+# Why: API and raw reads need one bounded failure classifier
+# From: Issue #1860 | PR #1872
 
 if [[ -n "${GITHUB_API_RETRY_SH_LOADED:-}" ]]; then
   if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
@@ -16,6 +16,7 @@ GITHUB_API_RETRY_SH_LOADED=1
 GITHUB_API_RETRY_ATTEMPTS="${GITHUB_API_RETRY_ATTEMPTS:-4}"
 GITHUB_API_RETRY_DELAY_SECONDS="${GITHUB_API_RETRY_DELAY_SECONDS:-5}"
 GITHUB_API_MAX_RETRY_DELAY_SECONDS="${GITHUB_API_MAX_RETRY_DELAY_SECONDS:-60}"
+GITHUB_API_RETRY_BUDGET_SECONDS="${GITHUB_API_RETRY_BUDGET_SECONDS:-120}"
 GITHUB_API_HTTP_STATUS=""
 GITHUB_API_RETRY_AFTER=""
 GITHUB_API_RATE_LIMIT_REMAINING=""
@@ -113,27 +114,42 @@ _github_api_get_once() {
 _github_api_retry_delay() {
   local attempt="${1:?_github_api_retry_delay: attempt is required}"
   local http_status="${2:?_github_api_retry_delay: HTTP status is required}"
-  local delay="$GITHUB_API_RETRY_DELAY_SECONDS" candidate now multiplier
+  local remaining_budget="${3:?_github_api_retry_delay: remaining budget is required}"
+  local delay="$GITHUB_API_RETRY_DELAY_SECONDS" candidate now multiplier server_delay=false
 
   if [[ "$http_status" == "403" || "$http_status" == "429" ]]; then
     if [[ "$GITHUB_API_RETRY_AFTER" =~ ^[0-9]+$ ]]; then
-      printf '%s\n' "$GITHUB_API_RETRY_AFTER"
-      return 0
+      candidate="$GITHUB_API_RETRY_AFTER"
+      server_delay=true
     elif [[ "$GITHUB_API_RATE_LIMIT_REMAINING" == "0" && "$GITHUB_API_RATE_LIMIT_RESET" =~ ^[0-9]+$ ]]; then
       now="$(date +%s)" || return 1
       candidate=$(( GITHUB_API_RATE_LIMIT_RESET - now ))
       (( candidate > 0 )) || candidate=0
-    else
-      candidate="$delay"
+      server_delay=true
     fi
-    (( candidate > delay )) && delay="$candidate"
+  fi
+
+  if [[ "$server_delay" == true ]]; then
+    if (( candidate > remaining_budget )); then
+      return 2
+    fi
+    printf '%s\n' "$candidate"
+    return 0
   fi
 
   multiplier=$(( 1 << (attempt - 1) ))
   delay=$(( delay * multiplier ))
   (( delay > GITHUB_API_MAX_RETRY_DELAY_SECONDS )) && delay="$GITHUB_API_MAX_RETRY_DELAY_SECONDS"
+  (( delay > remaining_budget )) && delay="$remaining_budget"
 
   printf '%s\n' "$delay"
+}
+
+_github_api_remaining_retry_budget() {
+  local started_at="${1:?_github_api_remaining_retry_budget: start time is required}"
+  local now
+  now="$(date +%s)" || return 1
+  printf '%s\n' "$(( GITHUB_API_RETRY_BUDGET_SECONDS - (now - started_at) ))"
 }
 
 _github_api_is_rate_limited() {
@@ -161,6 +177,10 @@ github_api_get_with_retry() {
     echo "::error::GITHUB_API_MAX_RETRY_DELAY_SECONDS must be a positive integer." >&2
     return 1
   }
+  [[ "$GITHUB_API_RETRY_BUDGET_SECONDS" =~ ^[1-9][0-9]*$ ]] || {
+    echo "::error::GITHUB_API_RETRY_BUDGET_SECONDS must be a positive integer." >&2
+    return 1
+  }
   [[ "$report_failure" == "true" || "$report_failure" == "false" ]] || {
     echo "::error::github_api_get_with_retry: report_failure must be true or false." >&2
     return 1
@@ -171,7 +191,8 @@ github_api_get_with_retry() {
     return 0
   fi
 
-  local attempt call_status http_status retry_delay
+  local attempt call_status http_status retry_delay retry_started_at remaining_budget
+  retry_started_at="$(date +%s)" || return 1
   for (( attempt=1; attempt<=GITHUB_API_RETRY_ATTEMPTS; attempt++ )); do
     : >"$body_file"
     if _github_api_get_once "$url" "$body_file" "$accept"; then
@@ -206,7 +227,15 @@ github_api_get_with_retry() {
       return 1
     fi
 
-    retry_delay="$(_github_api_retry_delay "$attempt" "$http_status")" || return 1
+    remaining_budget="$(_github_api_remaining_retry_budget "$retry_started_at")" || return 1
+    if (( remaining_budget <= 0 )); then
+      [[ "$report_failure" == "true" ]] && echo "::error::GitHub REST GET exhausted its retry budget for $url." >&2
+      return 1
+    fi
+    if ! retry_delay="$(_github_api_retry_delay "$attempt" "$http_status" "$remaining_budget")"; then
+      [[ "$report_failure" == "true" ]] && echo "::error::GitHub REST GET is rate limited beyond retry budget for $url." >&2
+      return 1
+    fi
     # What: Logs rate-aware retry attempts as ::notice::, not warnings
     # Why: Recovered transient attempts remain observable without a warning
     # From: Issue #1095 | PR #1501.
@@ -224,16 +253,26 @@ github_api_get_with_retry() {
 github_raw_get_with_retry() {
   local url="${1:?github_raw_get_with_retry: url is required}"
   local body_file="${2:?github_raw_get_with_retry: body file is required}"
-  local attempt status curl_status delay
+  local attempt status curl_status delay retry_started_at remaining_budget
   [[ "$url" == https://raw.githubusercontent.com/* ]] || return 2
+  [[ "$GITHUB_API_RETRY_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] || return 2
+  [[ "$GITHUB_API_RETRY_DELAY_SECONDS" =~ ^[0-9]+$ ]] || return 2
+  [[ "$GITHUB_API_MAX_RETRY_DELAY_SECONDS" =~ ^[1-9][0-9]*$ ]] || return 2
+  [[ "$GITHUB_API_RETRY_BUDGET_SECONDS" =~ ^[1-9][0-9]*$ ]] || return 2
+  retry_started_at="$(date +%s)" || return 1
   for (( attempt=1; attempt<=GITHUB_API_RETRY_ATTEMPTS; attempt++ )); do
+    GITHUB_API_RETRY_AFTER=""
+    GITHUB_API_RATE_LIMIT_REMAINING=""
+    GITHUB_API_RATE_LIMIT_RESET=""
     if status="$(curl -sS --connect-timeout 10 --max-time 30 --location -o "$body_file" -w '%{http_code}' "$url")"; then curl_status=0; else curl_status=$?; status=000; fi
     [[ "$status" =~ ^[0-9]{3}$ ]] || status=000
     GITHUB_API_HTTP_STATUS="$status"
     (( curl_status == 0 )) && [[ "$status" == 200 ]] && return 0
     (( curl_status == 0 )) && [[ "$status" == 404 || "$status" == 400 || "$status" == 401 || "$status" == 403 || "$status" == 422 ]] && return 1
     (( attempt == GITHUB_API_RETRY_ATTEMPTS )) && return 1
-    delay="$(_github_api_retry_delay "$attempt" "$status")" || return 1
+    remaining_budget="$(_github_api_remaining_retry_budget "$retry_started_at")" || return 1
+    (( remaining_budget > 0 )) || return 1
+    delay="$(_github_api_retry_delay "$attempt" "$status" "$remaining_budget")" || return 1
     echo "::notice::GitHub raw GET attempt $attempt/$GITHUB_API_RETRY_ATTEMPTS returned HTTP $status; retrying after ${delay}s." >&2
     sleep "$delay"
   done
