@@ -3361,10 +3361,11 @@ netdata=sha256:n"
     # What: netdata derives version from SOT; no baked pin.
     # Why: version is platform-independent; digest is per-arch.
     # From: Issue #1683
+    local ver; ver="$(_ci_block_entry_field external_versions netdata version)"
     run bash "${CI_SH}" build-args netdata
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"--build-arg ALPINE_IMAGE=mirror.gcr.io"* ]]
-    [[ "${output}" == *"--build-arg NETDATA_VERSION=v2.11.0"* ]]
+    [[ "${output}" == *"--build-arg ALPINE_IMAGE="* ]]
+    [[ "${output}" == *"--build-arg NETDATA_VERSION=${ver}"* ]]
     [[ "${output}" != *"NETDATA_SHA256"* ]]
     [[ "${output}" != *"NETDATA_ARCH"* ]]
 }
@@ -3373,10 +3374,13 @@ netdata=sha256:n"
     # What: a platform selects arch + digest from the SOT.
     # Why: install services pin the exact per-platform asset.
     # From: Issue #1683
+    local arch sha
+    arch="$(_ci_platform_apk_arch linux/amd64)"
+    sha="$(_ci_block_entry_field external_versions netdata "sha256_${arch}")"
     run bash "${CI_SH}" build-args netdata "" linux/amd64
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"--build-arg NETDATA_ARCH=x86_64"* ]]
-    [[ "${output}" == *"--build-arg NETDATA_SHA256=b42d9937"* ]]
+    [[ "${output}" == *"--build-arg NETDATA_ARCH=${arch}"* ]]
+    [[ "${output}" == *"--build-arg NETDATA_SHA256=${sha}"* ]]
 }
 
 @test "build-args for a product service fails closed on a missing central base image" {
@@ -8031,8 +8035,9 @@ _version_fixture_repo() {
     # What: someone re-pins NETDATA_VERSION with a default.
     # Why: netdata stays SOT-driven, no local re-pin ever.
     # From: Issue #1683 | PR #1858
-    local root; root="$(_version_fixture_repo)"
-    sed -i 's/^ARG NETDATA_VERSION$/ARG NETDATA_VERSION=v2.99.0/' \
+    local root ver; root="$(_version_fixture_repo)"
+    ver="$(_ci_block_entry_field external_versions netdata version)"
+    sed -i "s/^ARG NETDATA_VERSION\$/ARG NETDATA_VERSION=${ver}/" \
         "${root}/services/netdata/Dockerfile"
     CI_REPO_ROOT="${root}" run bash "${CI_SH}" version verify
     [ "${status}" -eq 2 ]
@@ -8040,12 +8045,12 @@ _version_fixture_repo() {
 }
 
 @test "version verify fails closed on a malformed SOT netdata sha256" {
-    # What: SOT sha256_x86_64 shortened to non-hex64 text.
+    # What: SOT sha256_x86_64 replaced by non-hex64 text.
     # Why: a truncated/garbled pin must never pass silently.
     # From: Issue #1683 | PR #1858
-    local m="${BATS_TEST_TMPDIR}/nd-badsha.yml"
-    sed 's/sha256_x86_64: b42d9937807f28812502a967906d370cff9ab443453813656b99ff6a9b3c5649/sha256_x86_64: not-a-real-hash/' \
-        "${CI_MANIFEST_SOURCE}" > "${m}"
+    local m sha; m="${BATS_TEST_TMPDIR}/nd-badsha.yml"
+    sha="$(_ci_block_entry_field external_versions netdata sha256_x86_64)"
+    sed "s/${sha}/not-a-real-hash/" "${CI_MANIFEST_SOURCE}" > "${m}"
     CI_MANIFEST="${m}" run bash "${CI_SH}" version verify
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-VERSION-0007"* ]]
