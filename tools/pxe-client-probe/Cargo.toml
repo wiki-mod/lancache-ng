@@ -21,9 +21,9 @@ path = "src/main.rs"
 # reading the send interface's own MAC. Only the datalink half of pnet is
 # needed -- the packet bytes and their checksums are built by hand -- so this
 # depends on the leaner pnet_datalink crate rather than the pnet umbrella.
-pnet_datalink = "0.35"
+pnet_datalink = { workspace = true }
 # SIGTERM the tcpdump child before falling back to SIGKILL, mirroring the
 # Python version's terminate()-then-kill() sequence. std's Child::kill sends
 # SIGKILL only, so libc::kill is used for the graceful SIGTERM.
-libc = "0.2"
-anyhow = "1"
+libc = { workspace = true }
+anyhow = { workspace = true }

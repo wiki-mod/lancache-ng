@@ -15,9 +15,42 @@ members = [
     "tools/pxe-client-probe",
 ]
 
-# What: no [workspace.dependencies] table added here.
-# Why: scope is lockfile unification, not a dep refactor.
-# From: Issue #1095
+# What: canonical owner of shared direct rust dep versions.
+# Why: consumers derive; one owner ends per-crate drift.
+# From: Issue #1683
+[workspace.dependencies]
+anyhow = "1"
+argon2 = "0.6"
+async-nats = "0.50"
+axum = "0.8"
+base64 = "0.23"
+bollard = "0.21"
+chacha20poly1305 = "0.10"
+data-encoding = "2"
+dhcproto = "0.15"
+flate2 = "1"
+form_urlencoded = "1"
+futures = "0.3"
+futures-util = "0.3"
+hex = "0.4"
+libc = "0.2"
+nkeys = { version = "0.4", features = ["xkeys"] }
+pnet_datalink = "0.35"
+rand = "0.10"
+regex = "1"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+subtle = "2"
+tera = "2"
+time = { version = "0.3", default-features = false, features = ["formatting"] }
+tokio = { version = "1", features = ["full"] }
+tower = { version = "0.5", default-features = false, features = ["util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+zstd = "0.14"
 
 # What: no lto/codegen-units keys in [profile.release] here.
 # Why: sourced from CARGO_PROFILE_RELEASE_LTO/_CODEGEN_UNITS env vars.

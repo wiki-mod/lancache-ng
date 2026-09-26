@@ -40,8 +40,8 @@ name = "lancache-watchdog"
 path = "src/main.rs"
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
 # rustls, never openssl-sys (Rule-Ref: AG-REL-003) -- rust:slim/the eventual runtime
 # base has no OpenSSL headers. Matches services/dns/nats-subscriber's
 # reqwest version/feature shape (a small binary with a narrow HTTP surface,
@@ -58,8 +58,8 @@ serde_json = "1"
 # and this crate's reqwest client reject it, if left on plain webpki roots.
 # "-native-roots" is still 100% rustls (no openssl-sys, Rule-Ref: AG-REL-003 intact),
 # it only changes which root store rustls consults.
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
-tokio = { version = "1", features = ["full"] }
+reqwest = { workspace = true }
+tokio = { workspace = true }
 # Only pulled in for one purpose: rendering the same UTC RFC3339-ish
 # timestamp shape watchdog.sh's `date -u +%Y-%m-%dT%H:%M:%SZ` produces for
 # status.json's "updated" field (services/ui/src/watchdog_status.rs's
@@ -72,7 +72,7 @@ tokio = { version = "1", features = ["full"] }
 # `format_description!` used by both timestamp call sites) since only UTC,
 # fixed-format rendering is needed here, never timezone conversion or
 # parsing.
-time = { version = "0.3", features = ["formatting", "macros"] }
+time = { workspace = true, features = ["macros"] }
 
 # What: release profile now lives at the workspace root.
 # Why: cargo ignores a member profile in a workspace.
