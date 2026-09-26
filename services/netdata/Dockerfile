@@ -32,20 +32,20 @@ RUN sed -i 's|^https://|http://|' /etc/apk/repositories
 # What: select netdata release asset by architecture
 # Why: one static .gz.run per arch; no apk package
 # From: Issue #1683
-RUN set -eu; \
+RUN set -eu; export TMPDIR=/var/tmp; \
     apk add --no-cache bash ca-certificates; \
     case "$(uname -m)" in \
       x86_64) netdata_arch="x86_64"; netdata_sha256="${NETDATA_X86_64_SHA256}"; ;; \
       aarch64) netdata_arch="aarch64"; netdata_sha256="${NETDATA_AARCH64_SHA256}"; ;; \
       *) echo "Unsupported architecture for netdata static build: $(uname -m)" >&2; exit 1; ;; \
     esac; \
-    wget -q -O /tmp/netdata.gz.run \
+    wget -q -O /var/tmp/netdata.gz.run \
       "https://github.com/netdata/netdata/releases/download/${NETDATA_VERSION}/netdata-${netdata_arch}-${NETDATA_VERSION}.gz.run"; \
-    echo "${netdata_sha256}  /tmp/netdata.gz.run" | sha256sum -c -; \
-    chmod +x /tmp/netdata.gz.run; \
-    /tmp/netdata.gz.run --accept -- --dont-start-it --disable-telemetry --stable-channel; \
-    rm -f /tmp/netdata.gz.run; \
-    rm -rf /tmp/netdata-updater* /tmp/netdata-installer*
+    echo "${netdata_sha256}  /var/tmp/netdata.gz.run" | sha256sum -c -; \
+    chmod +x /var/tmp/netdata.gz.run; \
+    /var/tmp/netdata.gz.run --accept -- --dont-start-it --disable-telemetry --stable-channel; \
+    rm -f /var/tmp/netdata.gz.run; \
+    rm -rf /var/tmp/netdata-updater* /var/tmp/netdata-installer*
 
 EXPOSE 19999
 
