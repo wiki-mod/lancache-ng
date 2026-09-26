@@ -4071,6 +4071,25 @@ STUBEOF
     [[ "${output}" == *"CI-ERROR-CHECK-0066"* ]]
 }
 
+@test "check setup-prompt-drift flags an uncovered unconditional wizard prompt" {
+    # What: ci.sh owns the #1176 setup.sh/expect-sim drift guard.
+    # Why: a new unconditional prompt with no sim answer hangs it.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/spd"
+    mkdir -p "${r}/scripts/untracked/simulations"
+    printf 'case "${1:-install}" in\ninstall|"") ;;\nesac\nask "Username?" "admin"\n' > "${r}/setup.sh"
+    printf 'expect_prompt {Username[^\\n]*\\[admin\\]} "x"\n' > "${r}/scripts/untracked/simulations/setup-cli-simulation.sh"
+    printf 'expect_prompt {Username[^\\n]*\\[admin\\]} "x"\n' > "${r}/scripts/untracked/simulations/syslog-forwarding-simulation.sh"
+    run bash "${CI_SH}" check setup-prompt-drift "${r}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"setup-prompt-drift=clean"* ]]
+    printf 'ask "NewPrompt?" "y"\n' >> "${r}/setup.sh"
+    run bash "${CI_SH}" check setup-prompt-drift "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0067"* ]]
+    [[ "${output}" == *"NewPrompt?"* ]]
+}
+
 @test "check pr-title accepts valid conventional, warns by default on bad scope/format" {
     # What: ci.sh owns the title taxonomy; bats calls it.
     # Why: AG-GH-018: warn is the default, not a hard fail.

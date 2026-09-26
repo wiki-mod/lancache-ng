@@ -5609,6 +5609,111 @@ _ci_check_docker_run_heredoc_stdin() {
     printf 'docker-run-heredoc-stdin=clean files=%s\n' "${#files[@]}"
 }
 
+# What: setup.sh wizard prompts vs expect-sim coverage/staleness.
+# Why: an unanswered new prompt hangs a sim to timeout (#1176).
+# From: Issue #1683 | PR #1858
+_ci_setup_wizard_rows() {
+    # Emit FLAG\tPROMPT\tHAYSTACK per ask/confirm in setup.sh's wizard region.
+    # FLAG=COND when any if/case encloses the call (one keyword per line).
+    local setup="$1" cs_line esac_line wiz_start
+    cs_line="$(grep -n '^case "${1:-install}" in$' "${setup}" | head -1 | cut -d: -f1)"
+    [ -n "${cs_line}" ] || return 3
+    esac_line="$(awk -v s="${cs_line}" 'NR>s && /^esac$/{print NR; exit}' "${setup}")"
+    [ -n "${esac_line}" ] || return 3
+    wiz_start=$((esac_line + 1))
+    tail -n "+${wiz_start}" "${setup}" | awk '
+        {
+            t=$0; sub(/^[ \t]+/,"",t)
+            if(t==""){ next }
+            prompt=""; rest=""
+            if(index(t,"ask \"")>0){ rest=substr(t,index(t,"ask \"")+5) }
+            else if(index(t,"confirm \"")>0){ rest=substr(t,index(t,"confirm \"")+9) }
+            if(rest!=""){ prompt=rest; sub(/".*/,"",prompt) }
+            if(prompt!="" && substr(prompt,1,1)!="$"){
+                ap=rest; sub(/^[^"]*"/,"",ap)                 # drop prompt + its closing quote
+                if(index(ap,"\"")>0){
+                    def=ap; sub(/^[^"]*"/,"",def); sub(/".*/,"",def)   # second quoted arg
+                    flag="UNCOND"
+                    for(i=1;i<=depth;i++){ if(stack[i]=="if"||stack[i]=="case"){ flag="COND"; break } }
+                    printf "%s\t%s\t%s [%s]: \n", flag, prompt, prompt, def
+                }
+            }
+            kw=t; sub(/[ \t].*/,"",kw)
+            if(kw=="if"){ stack[++depth]="if" }
+            else if(kw=="fi"){ if(depth>0)depth-- }
+            else if(kw=="while"||kw=="until"||kw=="for"||kw=="select"){ stack[++depth]="loop" }
+            else if(kw=="done"){ if(depth>0)depth-- }
+            else if(kw=="case"){ stack[++depth]="case" }
+            else if(kw=="esac"){ if(depth>0)depth-- }
+        }
+    '
+}
+_ci_check_setup_prompt_drift() {
+    local repo_root="${1:-${CI_REPO_ROOT:-.}}"
+    local setup="${repo_root}/setup.sh"
+    if [ ! -f "${setup}" ]; then
+        ci_log "[CI-ERROR-CHECK-0067]" "path=\"${setup}\" reason=\"setup.sh not found\""
+        return 2
+    fi
+    if [ "$(grep -c '^case "${1:-install}" in$' "${setup}")" -ne 1 ]; then
+        ci_error "[CI-ERROR-CHECK-0067]" "reason=\"setup.sh dispatch case anchor not unique\""
+        return 1
+    fi
+    local -a sims=(
+        "${repo_root}/scripts/untracked/simulations/setup-cli-simulation.sh"
+        "${repo_root}/scripts/untracked/simulations/syslog-forwarding-simulation.sh"
+    )
+    local -a rows=() all_prompts=() uncond=() viol=()
+    local r
+    while IFS= read -r r; do [ -n "${r}" ] && rows+=("${r}"); done < <(_ci_setup_wizard_rows "${setup}")
+    if [ "${#rows[@]}" -eq 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0067]" "reason=\"zero ask/confirm prompts in setup.sh wizard; vacuous\""
+        return 1
+    fi
+    while IFS= read -r r; do [ -n "${r}" ] && all_prompts+=("${r}"); done < <(printf '%s\n' "${rows[@]}" | cut -f3 | sort -u)
+    while IFS= read -r r; do [ -n "${r}" ] && uncond+=("${r}"); done < <(printf '%s\n' "${rows[@]}" | awk -F'\t' '$1=="UNCOND"{print $2"\t"$3}' | sort -u)
+    if [ "${#uncond[@]}" -eq 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0067]" "reason=\"zero unconditional prompts in setup.sh wizard; vacuous\""
+        return 1
+    fi
+    local sim pair prompt haystack tcl gpat covered matched checked=0
+    local -a sim_pats=() gpats=()
+    for sim in "${sims[@]}"; do
+        [ -f "${sim}" ] || { viol+=("expected simulation script not found: ${sim}"); continue; }
+        # Introspection-driven sims (setup.sh list-prompts) hand-encode nothing.
+        if grep -qF 'build_expect_prompt_block' "${sim}"; then
+            grep -qF 'spawn bash setup.sh' "${sim}" || viol+=("${sim}: introspection-driven but no 'spawn bash setup.sh'")
+            continue
+        fi
+        checked=$((checked + 1))
+        sim_pats=(); gpats=()
+        while IFS= read -r r; do [ -n "${r}" ] && sim_pats+=("${r}"); done < <(
+            awk '{ t=$0; sub(/^[ \t]+/,"",t); if(index(t,"expect_prompt {")==1){ x=substr(t,length("expect_prompt {")+1); sub(/}.*/,"",x); if(x!="")print x } }' "${sim}")
+        if [ "${#sim_pats[@]}" -eq 0 ]; then
+            viol+=("${sim}: zero expect_prompt patterns; vacuous or no longer drives the wizard")
+            continue
+        fi
+        for tcl in "${sim_pats[@]}"; do gpats+=("$(printf '%s' "${tcl}" | sed 's/\[\^\\n\]/./g')"); done
+        # coverage: each unconditional prompt answerable by this sim (#1082/#1175)
+        for pair in "${uncond[@]}"; do
+            prompt="${pair%%$'\t'*}"; haystack="${pair#*$'\t'}"; covered=0
+            for gpat in "${gpats[@]}"; do grep -Eq -- "${gpat}" <<<"${haystack}" && { covered=1; break; }; done
+            [ "${covered}" -eq 0 ] && viol+=("${sim}: no expect_prompt matches setup.sh unconditional prompt '${prompt}' (#1082/#1175: would hang to timeout)")
+        done
+        # staleness: each hand-encoded pattern still matches a real prompt
+        for tcl in "${gpats[@]}"; do
+            matched=0
+            for haystack in "${all_prompts[@]}"; do grep -Eq -- "${tcl}" <<<"${haystack}" && { matched=1; break; }; done
+            [ "${matched}" -eq 0 ] && viol+=("${sim}: expect_prompt pattern '${tcl}' matches no current setup.sh prompt (stale)")
+        done
+    done
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0067]" "reason=\"setup.sh/simulation prompt drift (#1176)\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'setup-prompt-drift=clean sims_checked=%s uncond=%s\n' "${checked}" "${#uncond[@]}"
+}
+
 # What: Check a PR title's Conventional-Commit form.
 # Why: types fixed; scopes derive from the SOT service list.
 # From: Issue #1683
@@ -8076,7 +8181,7 @@ ci_cmd_check_all() {
         dependabot-docker-base-consistency idempotence-test-coverage \
         prebuilt-prod prod-state-wiring compose-config nats-atomic-write \
         docker-socket-proxy quickstart-required-env dhcp-proxy-env \
-        setup-keys-kea setup-update-safety setup-docker-conflict image-channel-resolution \
+        setup-keys-kea setup-update-safety setup-docker-conflict setup-prompt-drift image-channel-resolution \
         vex-drift netdata-curl-pin logging-matrix \
         trivy-action-direct-usage entrypoint-lib-wiring dockerfile-build-tools \
         cargo-profile-tuning no-source-compiled-tools)
@@ -8117,6 +8222,7 @@ ci_cmd_check() {
         pipefail-early-exit) _ci_check_pipefail_early_exit "$@" ;;
         if-without-else-status) _ci_check_if_without_else_status "$@" ;;
         docker-run-heredoc-stdin) _ci_check_docker_run_heredoc_stdin "$@" ;;
+        setup-prompt-drift) _ci_check_setup_prompt_drift "$@" ;;
         pr-title) _ci_check_pr_title "$@" ;;
         stable-external-images) _ci_check_stable_external_images "$@" ;;
         pr-template) _ci_check_pr_template "$@" ;;
