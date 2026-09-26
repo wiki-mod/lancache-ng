@@ -242,9 +242,21 @@ teardown() {
     # From: Issue #1683
     run bash "${CI_SH}" plan scripts/lib/known-good-snapshots.sh
     [[ "${output}" == *"proxy=true"* ]]
-    [[ "${output}" == *"dhcp=true"* ]]
     [[ "${output}" == *"dhcp-proxy=true"* ]]
+    [[ "${output}" == *"dhcp=false"* ]]
     [[ "${output}" == *"dns=false"* ]]
+    [[ "${output}" == *"ntp=false"* ]]
+    [[ "${output}" == *"cachehamster=false"* ]]
+}
+
+@test "plan rebuilds every shared-secret consumer, and no other" {
+    # What: shared-secret (file) feeds its consumer set.
+    # Why: dns/dhcp/ui source the lib; ntp does not.
+    # From: Issue #858 | Issue #1683
+    run bash "${CI_SH}" plan scripts/lib/shared-secret-bootstrap.sh
+    [[ "${output}" == *"dns=true"* ]]
+    [[ "${output}" == *"dhcp=true"* ]]
+    [[ "${output}" == *"ui=true"* ]]
     [[ "${output}" == *"ntp=false"* ]]
     [[ "${output}" == *"cachehamster=false"* ]]
 }

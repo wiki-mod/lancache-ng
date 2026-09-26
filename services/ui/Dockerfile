@@ -122,6 +122,10 @@ ENV VISUAL=$EDITOR
 
 COPY --from=builder /build/lancache-ui-out /usr/local/bin/lancache-ui
 COPY services/ui/src/templates /templates
+# What: copy the shared-secret bootstrap lib.
+# Why: entrypoint sources it; no embedded copy (AG-CODE-011).
+# From: Issue #858 | Issue #1683
+COPY --from=shared-secret shared-secret-bootstrap.sh /usr/local/lib/shared-secret-bootstrap.sh
 COPY services/ui/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 # What: dhcp-probe runs this binary with --dhcp-probe.
 # Why: retired dhcp-probe.sh; no separate script copied in.

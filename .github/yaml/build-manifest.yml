@@ -32,6 +32,11 @@ services:
       - "nginx -V 2>&1 | grep -q -- --with-stream_ssl_preread_module"
   dns:
     context: services/dns
+    # What: named context for the shared-secret lib.
+    # Why: entrypoint sources scripts/lib, not embedded.
+    # From: Issue #858 | Issue #1683
+    external_contexts:
+      - shared-secret=scripts/lib
     build_type: rust
     final_base: alpine
     runner: heavy
@@ -92,6 +97,11 @@ services:
       - lsof -v
   dhcp:
     context: services/dhcp
+    # What: named context for the shared-secret lib.
+    # Why: entrypoint sources scripts/lib, not embedded.
+    # From: Issue #858 | Issue #1683
+    external_contexts:
+      - shared-secret=scripts/lib
     build_type: apk
     final_base: alpine
     runner: light
@@ -202,6 +212,11 @@ services:
       - bash --version
   ui:
     context: services/ui
+    # What: named context for the shared-secret lib.
+    # Why: entrypoint sources scripts/lib, not embedded.
+    # From: Issue #858 | Issue #1683
+    external_contexts:
+      - shared-secret=scripts/lib
     build_type: rust
     final_base: alpine
     runner: heavy
@@ -409,6 +424,8 @@ build_matrix:
 named_contexts:
   shared-scripts:
     path: scripts/lib
+  shared-secret:
+    path: scripts/lib/shared-secret-bootstrap.sh
   dns-domains:
     path: services/dns/cdn-domains.txt
 
@@ -432,13 +449,13 @@ dependency_graph:
   proxy:
     contexts: [shared-scripts, dns-domains]
   dns:
-    contexts: []
+    contexts: [shared-secret]
   watchdog:
     contexts: []
   ui:
-    contexts: []
+    contexts: [shared-secret]
   dhcp:
-    contexts: [shared-scripts]
+    contexts: [shared-secret]
   dhcp-proxy:
     contexts: [shared-scripts]
   ntp:

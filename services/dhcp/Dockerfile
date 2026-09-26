@@ -52,6 +52,10 @@ ENV VISUAL=$EDITOR
 COPY kea-dhcp4.conf /etc/kea/kea-dhcp4.conf.template
 COPY kea-ctrl-agent.conf /etc/kea/kea-ctrl-agent.conf.template
 COPY kea-dhcp-ddns.conf /etc/kea/kea-dhcp-ddns.conf.template
+# What: copy the shared-secret bootstrap lib.
+# Why: entrypoint sources it; no embedded copy (AG-CODE-011).
+# From: Issue #858 | Issue #1683
+COPY --from=shared-secret shared-secret-bootstrap.sh /usr/local/lib/shared-secret-bootstrap.sh
 COPY entrypoint.sh /entrypoint.sh
 
 # What: /run/kea (mode 750) + /var/lib/kea for Kea.

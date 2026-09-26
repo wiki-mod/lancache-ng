@@ -79,6 +79,10 @@ ARG no_proxy
 # Why: dns is the arch owner; no shared-scripts indirection.
 # From: Issue #1683
 COPY services/dns/domain-validation.sh /usr/local/lib/domain-validation.sh
+# What: copy the shared-secret bootstrap lib.
+# Why: entrypoint sources it; no embedded copy (AG-CODE-011).
+# From: Issue #858 | Issue #1683
+COPY --from=shared-secret shared-secret-bootstrap.sh /usr/local/lib/shared-secret-bootstrap.sh
 
 # What: declares APT_CACHE_BUST before the busting RUN.
 # Why: BuildKit cache has no wall-clock expiry.
