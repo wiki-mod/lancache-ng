@@ -2958,6 +2958,52 @@ netdata=sha256:n"
     [ "${output}" = "172.16.1.35" ]
 }
 
+@test "validate dns fails when a resolver IP is missing" {
+    # What: Missing dns container IP returns rc 2.
+    # Why: Cannot dig without a resolver target.
+    # From: Issue #1683
+    _ci_validate_container_ip() { :; }
+    _ci_validation_dns_domains() { echo "deb.debian.org"; }
+    run _ci_validate_dns proj
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0010"* ]]
+}
+
+@test "validate dns fails when a mode returns no answer" {
+    # What: An empty dig answer returns rc 1.
+    # Why: A resolver mode must actually answer.
+    # From: Issue #668 | Issue #1683
+    _ci_validate_container_ip() { case "$2" in dns-standard) echo 1.1.1.1 ;; dns-ssl) echo 2.2.2.2 ;; esac; }
+    _ci_validation_dns_domains() { echo "deb.debian.org"; }
+    dig() { case "$2" in @1.1.1.1) echo 10.0.0.1 ;; *) : ;; esac; }
+    run _ci_validate_dns proj
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0011"* ]]
+}
+
+@test "validate dns fails when standard and ssl share an answer" {
+    # What: Identical std/ssl answers return rc 1.
+    # Why: #668 split routing must give distinct IPs.
+    # From: Issue #668
+    _ci_validate_container_ip() { case "$2" in dns-standard) echo 1.1.1.1 ;; dns-ssl) echo 2.2.2.2 ;; esac; }
+    _ci_validation_dns_domains() { echo "deb.debian.org"; }
+    dig() { echo 10.0.0.9; }
+    run _ci_validate_dns proj
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0021"* ]]
+}
+
+@test "validate dns passes on distinct split-routed answers" {
+    # What: Distinct std/ssl answers return rc 0.
+    # Why: Proves #668 split routing holds.
+    # From: Issue #668 | Issue #1683
+    _ci_validate_container_ip() { case "$2" in dns-standard) echo 1.1.1.1 ;; dns-ssl) echo 2.2.2.2 ;; esac; }
+    _ci_validation_dns_domains() { echo "deb.debian.org"; }
+    dig() { case "$2" in @1.1.1.1) echo 10.0.0.1 ;; @2.2.2.2) echo 10.0.0.2 ;; esac; }
+    run _ci_validate_dns proj
+    [ "${status}" -eq 0 ]
+}
+
 # =========================================================
 # VARIABLES
 # =========================================================

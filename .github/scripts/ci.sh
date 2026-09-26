@@ -3961,11 +3961,11 @@ _ci_validate_wait_healthy() {
     return "${rc}"
 }
 
-# What: Prove DNS resolves a CDN domain, both modes.
-# Why: Real dig query/response, not ping (AG-VAL-013).
-# From: Issue #1683 | PR #1858
+# What: Prove DNS resolves a CDN domain and split-routes.
+# Why: Real dig; standard/ssl MUST differ (#668), not ping.
+# From: Issue #668 | Issue #1683 | PR #1858
 _ci_validate_dns() {
-    local project="$1" ip_std ip_ssl domain ip
+    local project="$1" ip_std ip_ssl domain a_std a_ssl
     ip_std="$(_ci_validate_container_ip "${project}" dns-standard)"
     ip_ssl="$(_ci_validate_container_ip "${project}" dns-ssl)"
     domain="$(_ci_validation_dns_domains | head -1)"
@@ -3973,12 +3973,19 @@ _ci_validate_dns() {
         ci_log "[CI-ERROR-VALIDATE-0010]" "reason=\"missing dns container IP or test domain\""
         return 2
     fi
-    for ip in "${ip_std}" "${ip_ssl}"; do
-        if ! dig +short "@${ip}" "${domain}" | grep -q .; then
-            ci_log "[CI-ERROR-VALIDATE-0011]" "resolver=\"${ip}\" domain=\"${domain}\" reason=\"no DNS answer\""
-            return 1
-        fi
-    done
+    a_std="$(dig +short "@${ip_std}" A "${domain}" | sort -u)"
+    a_ssl="$(dig +short "@${ip_ssl}" A "${domain}" | sort -u)"
+    if [ -z "${a_std}" ] || [ -z "${a_ssl}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0011]" "domain=\"${domain}\" reason=\"no DNS answer from a resolver mode\""
+        return 1
+    fi
+    # What: standard and ssl mode MUST resolve to distinct IPs.
+    # Why: proves #668 split routing (prod PROXY_IP .10 vs .11).
+    # From: Issue #668
+    if [ "${a_std}" = "${a_ssl}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0021]" "domain=\"${domain}\" reason=\"standard and ssl DNS returned the same answer (#668 split routing lost)\""
+        return 1
+    fi
 }
 
 # What: Prove the proxy caches: real MISS then HIT.
@@ -4018,7 +4025,7 @@ _ci_validate_proxy_stream_map() {
     local project="$1" cid map bad
     cid="$(docker compose -p "${project}" ps -q proxy 2>/dev/null)"
     if [ -z "${cid}" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0018]" "reason=\"no proxy container for stream-map check\""
+        ci_log "[CI-ERROR-VALIDATE-0022]" "reason=\"no proxy container for stream-map check\""
         return 2
     fi
     if ! map="$(docker exec "${cid}" cat /etc/nginx/stream.d/00-stream-targets.conf 2>/dev/null)"; then
