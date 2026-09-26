@@ -264,7 +264,7 @@ jobs:
       # What: authenticates published-image pull with credentials
       # Why: avoids GHCR's lower anonymous rate limit under CI load
       # From: PR #1501
-      - name: Select published build-tools image
+      - name: Select stable build-tools image for independent fixtures
         id: select-image
         env:
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
@@ -272,7 +272,6 @@ jobs:
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BUILD_TOOLS_PR_STAGING_IMAGE: ${{ github.event_name == 'pull_request' && github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository && format('ghcr.io/{0}/build-tools:pr-{1}-sha-{2}', github.repository, github.event.pull_request.number, github.sha) || '' }}
         run: |
           set -euo pipefail
 
@@ -357,3 +356,29 @@ jobs:
             echo "::error::docker run (shellspec) exited $status. 124/137 means the AG-CI-016 kill-timeout fired (a hung/signal-deaf process); any other code with no preceding failing-example line means the failure is in the wrapper/container lifecycle itself -- see the streamed output above for whatever shellspec/the shell did print."
             exit "$status"
           fi
+
+      # What: Resolves the PR staging manifest after fixtures.
+      # Why: Producer already runs fixtures on the exact candidate.
+      # From: Issue #1860 | PR #1872
+      - name: Verify published PR staging build-tools image
+        if: >-
+          github.event_name == 'pull_request' &&
+          github.actor != 'dependabot[bot]' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
+          GITHUB_EVENT_PULL_REQUEST_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUILD_TOOLS_PR_STAGING_IMAGE: ${{ format('ghcr.io/{0}/build-tools:pr-{1}-sha-{2}', github.repository, github.event.pull_request.number, github.sha) }}
+        run: |
+          set -euo pipefail
+          image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+          case "$image" in
+            *@sha256:*) ;;
+            *)
+              echo "::error::Expected a digest-qualified PR staging build-tools image, got '$image'."
+              exit 1
+              ;;
+          esac
