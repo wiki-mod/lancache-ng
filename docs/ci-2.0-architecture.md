@@ -1,5 +1,5 @@
 # LanCache-NG CI 2.0 Architecture Plan
-Status: design document, not yet implemented. Tracked by issue #1683 ("CI 1.2 Re-Write & all thematics around it"), which links here for the full text and carries day-to-day status/progress notes. This file is the durable, version-controlled home for the architecture itself. Authored by the maintainer, refined in review with Claude Code across issue #1683 and this document. Original design in German; translated to English per this repository's AG-GH-001 (GitHub-bound content is English). Diagrams and section numbering (1-92) are preserved from the original for traceability; sections 93+ and "Open Decisions" were added during review to capture refinements made after the original 92 sections were written. `build-push.yml` is not a template for CI 2.0. It is a source of existing requirements, a collection of historically grown guards, a record of real failure classes that occurred in production, and a source of existing release/security/validation invariants. Its implementation structure is not carried forward.
+Status: architecture contract; implementation is in progress. Tracked by issue #1683 ("CI 1.2 Re-Write & all thematics around it"), which links here for the full text and carries day-to-day status/progress notes. This file is the durable, version-controlled home for the architecture itself. Authored by the maintainer, refined in review with Claude Code across issue #1683 and this document. Original design in German; translated to English per this repository's AG-GH-001 (GitHub-bound content is English). Diagrams and section numbering (1-92) are preserved from the original for traceability; sections 93+ and "Open Decisions" were added during review to capture refinements made after the original 92 sections were written. `build-push.yml` is not a template for CI 2.0. It is a source of existing requirements, a collection of historically grown guards, a record of real failure classes that occurred in production, and a source of existing release/security/validation invariants. Its implementation structure is not carried forward.
 ## 1. Goal
 CI 2.0 replaces today's organically grown CI architecture with a content-based, state-oriented pipeline. CI should not ask: ```text What did GitHub just trigger? ``` but instead: ```text What desired state follows from this content? Does that state already exist? If yes: do nothing, or reuse the existing result. If no: perform only the work that is actually missing. ``` Principle: ```text A CI run is not an order to build. A CI run determines whether any work is required to reach the desired verified state. ```
 ## 2. Non-negotiable core rules
@@ -13,20 +13,22 @@ Uncertainty is never a license to build. The following states must be handled se
 ## 3. Priority order
 CI 2.0 always decides in this order: ```text 1. NOOP 2. cheap semantic content check 3. reuse an existing ACCEPTED result 4. only the tests/validations actually required 5. BUILD only on proven necessity 6. use maximum cache within the build 7. publish an immutable result 8. read the published result back 9. verify exactly this digest 10. ACCEPT or REJECT the artifact 11. ASSEMBLE the full candidate 12. VALIDATE the full candidate 13. PROMOTE atomically 14. CONSUME ```
 ## 4. Target structure
-CI-specific business logic is reduced to two central files:
+CI 2.0 has three central owners:
 ```text
-scripts/
-└── ci/
-    ├── ci.sh
-    └── ci.bats
+.github/
+├── scripts/
+│   ├── ci.sh
+│   └── ci.bats
+└── yaml/
+    └── build-manifest.yml
 ```
-Meaning: ```text ci.sh -> the single authoritative CI implementation ci.bats -> the single authoritative CI regression suite ``` File size is explicitly not a criterion for splitting. A large file with one coherent responsibility is allowed.
+Meaning: ```text ci.sh -> the single authoritative CI policy/execution implementation ci.bats -> the single authoritative CI regression suite build-manifest.yml -> the single authoritative CI data/SOT for product services, build-toolchain metadata, external versions, build matrix, release inventory, and other declarative CI inputs ``` File size is explicitly not a criterion for splitting. A large file with one coherent responsibility is allowed.
 ### 4.1 ci.sh
-`ci.sh` centrally contains: service inventory, service dependencies, semantic impact detection, build identity, test identity, validation identity, build admission, artifact resolver, artifact acceptance, build locking, retry classification, registry operations, build operations, test selection, scan selection, multi-arch assembly, stack assembly, stack validation, promotion, nightly, release, GC decisions, cache configuration, runner/platform metadata, central error classification.
+`ci.sh` centrally contains the policy and execution logic for: service dependency evaluation, semantic impact detection, build identity, test identity, validation identity, build admission, artifact resolver, artifact acceptance, build locking, retry classification, registry operations, build operations, test selection, scan selection, multi-arch assembly, stack assembly, stack validation, promotion, nightly, release, GC decisions, cache configuration, runner/platform handling, and central error classification. Declarative inventories and version/build metadata are read from `build-manifest.yml`, not duplicated in `ci.sh`.
 ### 4.2 ci.bats
 `ci.bats` centrally tests: core invariants, NOOP, comment-only changes, service impact, dependency impact, build identity, test identity, artifact resolver, UNKNOWN behavior, retry behavior, build admission, cache fallback, registry errors, digest validation, assembly, promotion, GC, service-specific rules, historical regressions.
 ## 5. No more CI logic in YAML
-`.github/workflows/*.yml` become thin orchestrators. YAML only answers: ```text When does something start? Which runner is needed? Which permissions are needed? Which job does this job depend on? Which ci.sh command is executed? ``` YAML no longer decides: whether DNS really needs to be built, whether proxy is affected, whether a registry error produces a build, which digest is accepted, which service is reusable, which retry makes sense, which files are build inputs, which test is necessary. These decisions belong exclusively in `scripts/ci/ci.sh`.
+`.github/workflows/*.yml` become thin orchestrators. YAML only answers: ```text When does something start? Which runner is needed? Which permissions are needed? Which job does this job depend on? Which ci.sh command is executed? ``` YAML no longer decides: whether DNS really needs to be built, whether proxy is affected, whether a registry error produces a build, which digest is accepted, which service is reusable, which retry makes sense, which files are build inputs, which test is necessary. These decisions belong exclusively in `.github/scripts/ci.sh`.
 ## 6. Target workflows
 CI-related workflows should be reduced to roughly these roles: ```text .github/workflows/ ci.yml nightly.yml release.yml gc.yml codeql.yml ``` Administrative GitHub workflows such as labeler, project automation, or first-interaction bots are not part of the actual build pipeline and may remain separate.
 ### 6.1 ci.yml
@@ -38,14 +40,17 @@ Responsibility: release -> determine the exact accepted candidate -> re-validate
 ### 6.4 gc.yml
 Responsibility: determine reachability -> protected artifacts -> unreferenced artifacts -> cache lifecycle -> safe deletion.
 ## 7. Central service list
-There is exactly one authoritative service list. Current members:
-```bash CI_SERVICES=( proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools ) ```
-No workflow contains a second list. No scan contains a second list. No release contains a second list. No GC contains a second list. No multi-arch job contains a second list. No full-setup job contains a second list.
-> **Open decision (found during review, not yet resolved):** `services/netdata/Dockerfile` exists as a first-party Dockerfile but is currently **not** in `CI_BUILD_SERVICES` on `current_dev`. This must be decided deliberately before the service list is frozen for CI 2.0 — either "netdata is part of the CI 2.0 artifact pipeline" or "netdata is explicitly out of scope" — and recorded here. It must not stay missing by accident, which is exactly the drift class this single-authoritative-list mechanism exists to prevent.
+There is exactly one authoritative product-service list, owned by `.github/yaml/build-manifest.yml`. Current members:
+```bash
+CI_SERVICES=( proxy dns watchdog dhcp dhcp-proxy ntp syslog ui cachehamster netdata )
+```
+`build-tools` is not a product service; it is the separately owned CI build toolchain under `build_toolchain:` in the same SOT. No workflow contains a second product-service list. No scan contains a second list. No release contains a second list. No GC contains a second list. No multi-arch job contains a second list. No full-setup job contains a second list.
+
+`services/netdata/Dockerfile` is part of the CI 2.0 artifact pipeline. `netdata` is a first-party product service and follows the same build, verify, scan, acceptance, assembly, and promotion lifecycle as the other product images.
 ## 8. Central service metadata
-`ci.sh` has exactly one service definition. Conceptually: ```text service: name build context external build contexts platforms runner class compiler class build dependencies runtime dependencies test domains validation domains artifact repository ``` Example: ```text proxy: context = services/proxy external-context = services/dns platforms = amd64,arm64 runner = light dns: context = services/dns platforms = amd64,arm64 runner = heavy rust = true build-tools: context = tools/build-tools platforms = amd64,arm64 runner = heavy c-compile = true ``` GitHub matrices are generated from this. Not the other way around.
+`build-manifest.yml` has exactly one product-service definition and a separate `build_toolchain` definition. `ci.sh` consumes this metadata; it does not maintain a second inventory. Conceptually: ```text service: name build context external build contexts platforms runner class compiler class build dependencies runtime dependencies test domains validation domains artifact repository ``` Example: ```text proxy: context = services/proxy external-context = services/dns platforms = amd64,arm64 runner = light dns: context = services/dns platforms = amd64,arm64 runner = heavy rust = true build_toolchain/build-tools: context = tools/build-tools platforms = amd64,arm64 runner = toolchain ``` GitHub matrices are derived from the SOT. Not the other way around.
 ## 9. Central CLI contract
-Example: ```bash ./scripts/ci/ci.sh plan ./scripts/ci/ci.sh impact  ./scripts/ci/ci.sh identity proxy ./scripts/ci/ci.sh resolve proxy linux/amd64 ./scripts/ci/ci.sh test proxy ./scripts/ci/ci.sh build proxy linux/amd64 ./scripts/ci/ci.sh publish proxy linux/amd64 ./scripts/ci/ci.sh verify proxy <digest> ./scripts/ci/ci.sh assemble proxy ./scripts/ci/ci.sh validate ./scripts/ci/ci.sh promote nightly ./scripts/ci/ci.sh promote latest  ./scripts/ci/ci.sh gc ``` For GitHub: ```bash ./scripts/ci/ci.sh plan --json ```
+Example: ```bash ./.github/scripts/ci.sh plan ./.github/scripts/ci.sh impact ./.github/scripts/ci.sh identity proxy ./.github/scripts/ci.sh resolve proxy linux/amd64 ./.github/scripts/ci.sh test proxy ./.github/scripts/ci.sh build proxy linux/amd64 ./.github/scripts/ci.sh publish proxy linux/amd64 ./.github/scripts/ci.sh verify proxy <digest> ./.github/scripts/ci.sh assemble proxy ./.github/scripts/ci.sh validate ./.github/scripts/ci.sh promote nightly ./.github/scripts/ci.sh promote latest ./.github/scripts/ci.sh gc ``` For GitHub: ```bash ./.github/scripts/ci.sh plan --json ```
 returns machine-readable state.
 ## 10. Planner
 The planner is always the first CI stage. It builds nothing. It scans no containers. It retags nothing. It does not need a heavy runner.
@@ -257,7 +262,7 @@ single aggregator
     +-> verifies acceptance
     +-> ONE atomic ledger write
 ```
-This turns "~20 CAS writes per pipeline run" into "1 workflow -> 1 acceptance commit/CAS update" — a large reduction in how hard the CAS primitive is pushed. `promote-lock.sh` has been proven safe at roughly one write per promotion; one ledger write per workflow keeps the mechanism within that already-validated envelope, rather than multiplying its write volume by the size of the build matrix. This was the single riskiest open item from the first review pass and is considered resolved by this design, subject to the open item in §26.4 below.
+This turns "~20 CAS writes per pipeline run" into "1 workflow -> 1 acceptance commit/CAS update" — a large reduction in how hard the CAS primitive is pushed. `promote-lock.sh` has been proven safe at roughly one write per promotion; one ledger write per workflow keeps the mechanism within that already-validated envelope, rather than multiplying its write volume by the size of the build matrix. This was the single riskiest open item from the first review pass and is resolved by this design together with the idempotency contract in §26.4 below.
 ### 26.2 SQLite as materialized index, not truth
 SQLite is explicitly **not** the source of truth for anything. It exists purely to avoid repeatedly re-querying GHCR/GitHub for cheap, frequent questions: ```text artifacts service platform build_identity artifact_digest source_full_sha state created_at published_at accepted_at last_seen_at last_used_at validation_identity validation_at parent_digest ``` Possible states: `BUILDING`, `PRODUCED`, `PUBLISHED`, `DISCOVERED`, `VERIFIED`, `ACCEPTED`, `REJECTED`, `ORPHAN_CANDIDATE`, `GC_CANDIDATE`, `DELETED`. Plus, for example: ```text builds service platform build_identity started_at finished_at result artifact_digest ``` A planner can then cheaply answer "have I seen build identity X before? Which digest? Was it ACCEPTED? When was it last used? Is its validation still current? Is it already a GC candidate?" from local SQLite first, and only fall back to the actual source of truth on a miss: ```text SQLite HIT -> verify result if required -> proceed quickly SQLite MISS -> check GHCR / OCI / Git -> populate index SQLite broken/lost -> rebuild index -> NO BUILD just because the DB is missing ```
 ### 26.3 Where SQLite lives: self-hosted vs. hosted-fallback
@@ -283,9 +288,9 @@ SQLite is explicitly **not** the source of truth for anything. It exists purely 
                          v
                   actions/cache save (NEW key)
 ```
-Each matrix job only ever produces a small result, e.g.: ```json { "service": "dns", "platform": "linux/amd64", "build_identity": "...", "digest": "sha256:...", "state": "ACCEPTED" } ``` Only the aggregator merges them, writes one SQLite transaction, and saves the resulting snapshot under a fresh cache key. Hosted runners on a later run restore the latest snapshot for read acceleration only; they never write back directly. On cache retention limits: GitHub's documented defaults are 7 days without access and 10 GB per repository, but retention and size are repository-/org-configurable (public repositories can raise retention up to 90 days, and cache size above the free 10 GB can be configured at additional cost). CI 2.0 must not write these numbers into the design as hard constants, and — more importantly — **correctness must never depend on this retention window**: ```text Actions Cache lost -> performance loss Acceptance Ledger lost/corrupted -> CI blocked / deliberately reconstructed GHCR digest missing -> artifact genuinely missing Compile fails -> no persistent artifact Scan fails -> no ACCEPTED artifact One matrix job fails -> other successful results remain valid ```
-### 26.4 Open item: aggregator idempotency contract
-The aggregator writes two things: the Acceptance Ledger CAS commit and the SQLite snapshot. If it dies between the two, a retry of the aggregator step must land in the same end state as a clean run — this needs an explicit idempotency contract (safe to reprocess the same set of `result.json` inputs) before Phase 3 implements it. This is not a correctness hole in the design: the fail-safe direction is already right (no acceptance recorded yet means the artifacts in question stay `PRODUCED_UNVERIFIED` and become GC candidates, i.e. `DISACK`-by-default keeps working as intended even on a partial aggregator failure). It is a "define before building" item, not an open risk.
+Each matrix job only ever produces a small result, e.g.: ```json { "service": "dns", "platform": "linux/amd64", "build_identity": "...", "digest": "sha256:...", "state": "ACCEPTED" } ``` Only the aggregator merges them, writes one SQLite transaction, and saves the resulting snapshot under a fresh cache key. Hosted runners on a later run restore the latest snapshot for read acceleration only; they never write back directly. Cache retention and size are operational platform/repository settings, not CI 2.0 architectural constants. CI 2.0 MUST NOT hardcode platform-default retention or size values and, more importantly, **correctness must never depend on any cache retention window or quota**: ```text Actions Cache lost -> performance loss Acceptance Ledger lost/corrupted -> CI blocked / deliberately reconstructed GHCR digest missing -> artifact genuinely missing Compile fails -> no persistent artifact Scan fails -> no ACCEPTED artifact One matrix job fails -> other successful results remain valid ```
+### 26.4 Aggregator idempotency contract
+The aggregator may update Policy Truth (the Acceptance Ledger) and a disposable SQLite snapshot. Reprocessing the same logical set of `result.json` inputs MUST converge to the same accepted policy state and an equivalent SQLite materialized view, independent of input order or retry count. Malformed or partial result records MUST fail before any acceptance write. Duplicate records for the same identity with identical content MAY collapse; conflicting records for the same identity MUST fail closed. The Acceptance Ledger write remains the atomic policy-truth update. SQLite is never authoritative: if snapshot creation or cache save fails after the ledger update, a retry MUST reconstruct the disposable view from the canonical truths and MUST NOT create a second or divergent acceptance state. If the ledger update did not complete, no SQLite/cache state may be interpreted as acceptance. This makes a retry after interruption between ledger and snapshot converge to the same end state as an uninterrupted aggregation.
 ## 27. Reuse
 Reuse means: desired build identity -> an ACCEPTED digest exists -> use that digest. Reuse does **not** mean: create a new commit tag, rebuild, re-resolve the same digest again, automatically re-scan, or automatically re-attest.
 ## 28. No commit version per unchanged service
@@ -295,7 +300,7 @@ Tests are independent of the container build. ```text test code changed -> TEST 
 ## 30. Validation Identity
 Security scans are likewise kept separate. ```text container digest unchanged Trivy policy unchanged validation still valid -> no scan ``` New security data, however, can cause: ```text digest identical validation identity changed -> RESCAN -> NO BUILD ```
 ## 31. Security revalidation separate from normal commit CI
-Newly published CVEs are not a reason to scan every unchanged image on every commit. Instead of every push scanning 9 services across 2 platforms, security refresh is handled separately:
+Newly published CVEs are not a reason to scan every unchanged image on every commit. Instead of every push scanning 10 product services across 2 platforms, security refresh is handled separately:
 ```text
 scheduled security validation
         |
@@ -483,7 +488,7 @@ ACCEPTED
 ```
 A missing platform does not trigger a rebuild of the successful platform.
 ## 46. Service failure domains
-Each service is its own failure domain. ```text proxy ACCEPTED dns ACCEPTED watchdog FAILED dhcp ACCEPTED dhcp-proxy ACCEPTED ntp ACCEPTED syslog ACCEPTED ui ACCEPTED build-tools ACCEPTED ``` Result: watchdog's candidate failed; the other eight results stay valid, stay ACCEPTED, and may be reused on the next run.
+Each product service is its own failure domain. ```text proxy ACCEPTED dns ACCEPTED watchdog FAILED dhcp ACCEPTED dhcp-proxy ACCEPTED ntp ACCEPTED syslog ACCEPTED ui ACCEPTED cachehamster ACCEPTED netdata ACCEPTED ``` Result: watchdog's candidate failed; the other nine product-service results stay valid, stay ACCEPTED, and may be reused on the next run.
 ## 47. Stack assembly
 A complete stack consists exclusively of ACCEPTED digests.
 ```text
@@ -495,7 +500,8 @@ dhcp-proxy digest
 ntp digest
 syslog digest
 ui digest
-build-tools digest
+cachehamster digest
+netdata digest
         |
         v
 STACK CANDIDATE
@@ -528,14 +534,14 @@ STACK ACCEPTED
 ## 50. Promotion stays atomic
 Builds are per-service independent. Promotion is stack-atomic.
 ```text
-9/9 service digests ACCEPTED
+10/10 product-service digests ACCEPTED
 +
 stack validation SUCCESS
         |
         v
 PROMOTE
 ```
-At `8/9`: `NO PROMOTION`. The eight successful artifacts stay ACCEPTED regardless.
+At `9/10`: `NO PROMOTION`. The nine successful product-service artifacts stay ACCEPTED regardless.
 ## 51. Promotion never builds
 `promote` may exclusively move references. Forbidden: `PROMOTE -> build`. Allowed: ```text PROMOTE -> verify candidate digests -> acquire lock -> move channel refs -> verify readback -> release lock ```
 ## 52. Promotion Lock
@@ -896,11 +902,11 @@ CI 2.0 is built as a new architecture. The current 8,171-line file is not increm
 ### Phase 0 — Freeze
 No further structural growth of `build-push.yml`. Only: critical bug fixes, security fixes, necessary production fixes.
 ### Phase 1 — Central Engine
-Create `scripts/ci/ci.sh` and `scripts/ci/ci.bats`. Initially: service inventory, shared utility functions, SHA/digest validation, retry classifier, semantic impact, identity engine.
+Create `.github/scripts/ci.sh` and `.github/scripts/ci.bats`, with `.github/yaml/build-manifest.yml` as the declarative CI SOT. Initially: SOT consumption, shared utility functions, SHA/digest validation, retry classifier, semantic impact, identity engine.
 ### Phase 2 — Shadow Planner
 The new CI runs `ci.sh plan` in parallel with the old CI. No build control yet. Old decision vs. CI 2.0 decision are compared; deviations are analyzed.
 ### Phase 3 — Acceptance Ledger
-Introduce `build identity -> accepted digest`, initially read-only / shadow. (See §26 for the revised truth model this now implements, and §26.4 for the aggregator idempotency contract that must be defined before this phase goes live.)
+Introduce `build identity -> accepted digest`, initially read-only / shadow. (See §26 for the revised truth model and §26.4 for the aggregator idempotency contract.)
 ### Phase 4 — Resolver
 Activate `PRESENT_ACCEPTED`, `MISSING_CONFIRMED`, `IN_PROGRESS`, `PRODUCED_UNVERIFIED`, `MISMATCH`, `UNKNOWN`. Still no automatic build approval on UNKNOWN.
 ### Phase 5 — Build Admission
@@ -1075,8 +1081,4 @@ A check that re-scans/re-searches the entire repository on every run, when its a
 ## 99. Implementation-process rules for building ci.sh/ci.bats itself (added during review)
 Hard rules for whoever (human or agent) actually implements CI 2.0, not rules about the CI's own runtime behavior: **Verification depth has no line-count shortcut.** Before starting implementation work on any part of `ci.sh`/`ci.bats`, or before relying on an existing file's current behavior, read the real source in full -- never truncate a verification read to an arbitrary line count and generalize from the partial result. When a single read would exceed a practical limit, read in sequential chunks of up to ~24,999 tokens each and keep going, chunk after chunk, until the entire file/document has actually been covered. A conclusion drawn from a partial read is not verification, it is a guess wearing verification's clothes. **Bash tools before API calls, always.** Matches `AG-VAL-005`, restated here because `ci.sh` implementation work leans on shell tooling by its nature: prefer a native local command (`grep`, `sed`, `awk`, `find`, `git`, etc.) over an API call at any time, instead of and/or before reaching for an API call. An API call is for the case with no local equivalent, not the default first move. **Bulk operations over one-by-one edits.** Wherever a change genuinely applies uniformly across multiple lines or files, use a bulk/batch tool (`sed` and equivalents) instead of many individual edits. This is about using the right tool for a uniform transformation, not a license to apply a blind, unreviewed find-and-replace across semantically different call sites -- the semantic-impact discipline in §11/§12 still governs whether a given change is actually uniform in the first place.
 ## Open decisions
-These are explicitly open, not resolved by this document:
-1. **`netdata` service-list membership** (§7). `services/netdata/Dockerfile` exists but is not in `CI_BUILD_SERVICES` today. Verified as a live drift finding, not a hypothetical — needs a deliberate in/out decision before the service list is frozen.
-2. **Aggregator idempotency contract** (§26.4). Must be defined — safe reprocessing of the same `result.json` set — before Phase 3 goes live.
-3. **Whether the git-ref-CAS Acceptance Ledger needs anything beyond the build lock and the small ledger described in §26.1**, now that GHCR/OCI is explicitly the Artifact Truth and SQLite is explicitly disposable.
-4. **`actions/cache` retention/size numbers** (§26.3) — stated as current documented defaults, explicitly not to be relied on for correctness, but not independently re-verified line-by-line against the cache action's own documentation in this review pass (the 10 GB/7-day figures were verified for the BuildKit `type=gha` backend specifically, not the general-purpose cache action).
+No architecture decisions remain open in this document. Implementation details explicitly marked as implementation details remain subject to the contracts above and do not create alternate architecture owners.
