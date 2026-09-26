@@ -58,11 +58,11 @@ COPY --from=fluent-bit-src /fluent-bit/bin/fluent-bit /opt/fluent-bit-glibc/bin/
 COPY --from=fluent-bit-src /lib/*-linux-gnu/. /opt/fluent-bit-glibc/lib/
 COPY --from=fluent-bit-src /usr/lib/*-linux-gnu/. /opt/fluent-bit-glibc/lib/
 
-COPY services/syslog/fluent-bit.conf /etc/fluent-bit/fluent-bit.conf
-COPY services/syslog/syslog-ng.conf /etc/syslog-ng/syslog-ng.conf
-COPY services/syslog/entrypoint.sh /entrypoint.sh
-COPY services/syslog/healthcheck.sh /usr/local/bin/healthcheck.sh
-COPY services/syslog/data-loss-detector.sh /usr/local/bin/data-loss-detector.sh
+COPY fluent-bit.conf /etc/fluent-bit/fluent-bit.conf
+COPY syslog-ng.conf /etc/syslog-ng/syslog-ng.conf
+COPY entrypoint.sh /entrypoint.sh
+COPY healthcheck.sh /usr/local/bin/healthcheck.sh
+COPY data-loss-detector.sh /usr/local/bin/data-loss-detector.sh
 
 # What: resolve the glibc dynamic linker; own the prefix.
 # Why: interpreter filename varies by arch; must be executable.

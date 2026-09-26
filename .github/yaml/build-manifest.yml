@@ -78,6 +78,13 @@ services:
     external_image: fluent_bit
     final_base: alpine
     runner: light
+    # What: execute-smoke checks run post-build by ci.sh.
+    # Why: prove apk binaries run, not just exist (#1613).
+    # From: Issue #1613 | Issue #1683
+    smoke:
+      - syslog-ng --version
+      - zstd --version
+      - bash --version
   ui:
     context: services/ui
     build_type: rust
