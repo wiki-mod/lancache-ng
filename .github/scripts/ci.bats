@@ -793,7 +793,7 @@ _probe_stub() {
 
 @test "retry classifier: op=buildx retries the layer-lock and go-panic signatures" {
     # What: layer-lock and panic signatures are transient.
-    # Why: build-retry.sh's #1222 signature evidence.
+    # Why: #1222 buildx layer-lock signature evidence.
     # From: Issue #1683
     [ "$(_ci_classify_failure '(*service).Write failed: rpc error: code = Unavailable desc = ref layer-sha256:abc locked for 900ms (since t): unavailable' buildx)" = "transient" ]
     [ "$(_ci_classify_failure 'panic: methodref has no signature' buildx)" = "transient" ]
@@ -806,9 +806,9 @@ _probe_stub() {
     [ "$(_ci_classify_failure 'error: could not compile lancache-ui' buildx)" = "permanent" ]
 }
 
-@test "retry classifier: git-fetch-retry.sh's transient signatures are covered" {
+@test "retry classifier: git-fetch transient signatures are covered" {
     # What: DNS/RPC/disconnect transient signatures.
-    # Why: Classifier now owns git-fetch-retry.sh cases.
+    # Why: Classifier owns the git-fetch transient cases.
     # From: Issue #1683
     [ "$(_ci_classify_failure 'unexpected disconnect while reading sideband packet')" = "transient" ]
     [ "$(_ci_classify_failure 'The remote end hung up unexpectedly')" = "transient" ]
