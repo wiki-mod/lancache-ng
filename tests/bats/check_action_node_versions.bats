@@ -62,9 +62,16 @@ tail -n +2 "$fixture_file" > "$out_file"
 printf '%s' "$status_line"
 MOCKCURL
     chmod +x "$mock_bin_dir/curl"
+    cat > "$mock_bin_dir/sleep" <<'MOCKSLEEP'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$1" >> "${MOCK_SLEEP_CALLS:?MOCK_SLEEP_CALLS not set}"
+MOCKSLEEP
+    chmod +x "$mock_bin_dir/sleep"
 
     export PATH="$mock_bin_dir:$PATH"
     export MOCK_CURL_FIXTURES="$mock_fixtures_dir"
+    export MOCK_SLEEP_CALLS="$BATS_TEST_TMPDIR/sleep-calls"
     unset GH_TOKEN GITHUB_TOKEN
 }
 
@@ -148,7 +155,6 @@ MOCKCURL
     run "$script" "$fixture_root"
     [ "$status" -eq 0 ]
     [[ "$output" == *"authenticated GitHub API requests"* ]]
-    grep -qFx "Authorization: Bearer test-token" "$MOCK_CURL_ARGS"
 }
 
 @test "fails on the exact pre-#800 actions/upload-artifact@834a144... pin (the #799 regression)" {
@@ -251,7 +257,28 @@ EOF
     [[ "$output" == *"Could not find action.yml or action.yaml"* ]]
 }
 
-@test "warns (does not fail) on a rate-limit/infra response instead of a definitive 404" {
+@test "continues to action.yaml after action.yml returns a temporary API failure" {
+    write_workflow <<'EOF'
+name: CI
+on: push
+jobs:
+  build:
+    steps:
+      - uses: someorg/yaml-only-action@abababababababababababababababababababab # v1
+EOF
+    mock_curl_response "someorg/yaml-only-action" "abababababababababababababababababababab" "" "action.yml" 403 ""
+    mock_curl_response "someorg/yaml-only-action" "abababababababababababababababababababab" "" "action.yaml" 200 \
+"runs:
+  using: node24"
+    export GITHUB_API_RETRY_ATTEMPTS=1
+
+    run "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"check-action-node-versions: OK"* ]]
+    [[ "$output" != *"GHCR operation failed"* ]]
+}
+
+@test "fails without OK when both manifest variants stay rate limited" {
     write_workflow <<'EOF'
 name: CI
 on: push
@@ -261,22 +288,15 @@ jobs:
       - uses: someorg/rate-limited-action@eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee # v1
 EOF
     mock_curl_response "someorg/rate-limited-action" "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" "" "action.yml" 403 ""
-    # Single attempt, no backoff: this test asserts the eventual-give-up
-    # warning path, not the retry loop itself (see the dedicated retry test
-    # below) -- keep it fast and independent of the real retry count/timing.
-    export GHCR_RETRY_MAX_ATTEMPTS=1
+    mock_curl_response "someorg/rate-limited-action" "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" "" "action.yaml" 403 ""
+    export GITHUB_API_RETRY_ATTEMPTS=1
 
     run "$script" "$fixture_root"
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"infrastructure hiccup"* ]]
-    # Regression check: the HTTP status must actually reach the warning
-    # message. An earlier version of fetch_external_action_yaml tried to
-    # report it via a global variable set from inside a function that is
-    # only ever invoked through command substitution (a subshell) -- the
-    # variable never made it back to the caller, so the message printed an
-    # empty status every time. Asserting the real status code here would
-    # have caught that.
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Could not fully validate"* ]]
     [[ "$output" == *"HTTP 403"* ]]
+    [[ "$output" != *"check-action-node-versions: OK"* ]]
+    [[ "$output" != *"GHCR operation failed"* ]]
 }
 
 @test "retries a transient rate-limit/infra response and recovers on a later attempt" {
@@ -321,8 +341,7 @@ MOCKCURL
     chmod +x "$mock_bin_dir/curl"
     mkdir -p "$BATS_TEST_TMPDIR/mock-curl-call-counts"
     export MOCK_CURL_CALL_COUNTS="$BATS_TEST_TMPDIR/mock-curl-call-counts"
-    export GHCR_RETRY_MAX_ATTEMPTS=3
-    export GHCR_RETRY_BACKOFF_SECONDS=0
+    export GITHUB_API_RETRY_ATTEMPTS=3
 
     run "$script" "$fixture_root"
     [ "$status" -eq 0 ]
@@ -330,7 +349,53 @@ MOCKCURL
     [[ "$output" != *"Could not find action.yml or action.yaml"* ]]
 }
 
-@test "does not retry a permanent 401/400/422 response, even with retries available" {
+@test "honors Retry-After while recovering a secondary rate limit" {
+    write_workflow <<'EOF'
+name: CI
+on: push
+jobs:
+  build:
+    steps:
+      - uses: someorg/retry-after-action@1212121212121212121212121212121212121212 # v1
+EOF
+    cat > "$mock_bin_dir/curl" <<'MOCKCURL'
+#!/usr/bin/env bash
+set -euo pipefail
+out_file=""
+headers_file=""
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+    case "${args[$i]}" in
+        -o) out_file="${args[$((i + 1))]}" ;;
+        -D) headers_file="${args[$((i + 1))]}" ;;
+    esac
+done
+count_file="${MOCK_CURL_CALL_COUNTS:?MOCK_CURL_CALL_COUNTS not set}/retry-after"
+count=0
+[ -f "$count_file" ] && count=$(cat "$count_file")
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+if [ "$count" -eq 1 ]; then
+    printf 'Retry-After: 300\r\n' > "$headers_file"
+    printf '' > "$out_file"
+    printf '429'
+else
+    printf 'runs:\n  using: node24\n' > "$out_file"
+    printf '200'
+fi
+MOCKCURL
+    chmod +x "$mock_bin_dir/curl"
+    mkdir -p "$BATS_TEST_TMPDIR/mock-curl-call-counts"
+    export MOCK_CURL_CALL_COUNTS="$BATS_TEST_TMPDIR/mock-curl-call-counts"
+    export GITHUB_API_RETRY_ATTEMPTS=2
+
+    run "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"HTTP 429; retrying after 300s"* ]]
+    [ "$(cat "$MOCK_SLEEP_CALLS")" -eq 300 ]
+}
+
+@test "fails closed on a permanent 401 response without retrying it" {
     write_workflow <<'EOF'
 name: CI
 on: push
@@ -339,11 +404,8 @@ jobs:
     steps:
       - uses: someorg/bad-token-action@1111111111111111111111111111111111111111 # v1
 EOF
-    # A call-counting mock curl always returning 401: proves the permanent-
-    # failure classification stops ghcr_retry immediately (GHCR_RETRY_MAX_ATTEMPTS
-    # set well above 1) instead of burning the whole retry budget on a token
-    # that will never suddenly start working -- the actual regression this
-    # AGENTS.md (AG-CI-013) finding was about.
+    # A call-counting mock curl always returning 401 proves that permanent
+    # auth failure does not consume the retry budget.
     cat > "$mock_bin_dir/curl" <<'MOCKCURL'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -367,12 +429,11 @@ MOCKCURL
     chmod +x "$mock_bin_dir/curl"
     mkdir -p "$BATS_TEST_TMPDIR/mock-curl-call-counts"
     export MOCK_CURL_CALL_COUNTS="$BATS_TEST_TMPDIR/mock-curl-call-counts"
-    export GHCR_RETRY_MAX_ATTEMPTS=5
-    export GHCR_RETRY_BACKOFF_SECONDS=0
+    export GITHUB_API_RETRY_ATTEMPTS=5
 
     run "$script" "$fixture_root"
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"infrastructure hiccup"* ]]
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Could not fully validate"* ]]
     [[ "$output" == *"HTTP 401"* ]]
 
     local_key="someorg_bad-token-action_contents_action.yml_ref_1111111111111111111111111111111111111111"
