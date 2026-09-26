@@ -47,6 +47,21 @@ services:
     build_type: apk
     final_base: alpine
     runner: light
+    # What: apk packages installed into the ntp image.
+    # Why: SOT owns the list; ci.sh apk-build consumes it.
+    # From: Issue #1683
+    packages:
+      - bash
+      - ca-certificates
+      - chrony-nts
+      - curl
+      - gettext-envsubst
+    # What: executables smoke-tested after the install.
+    # Why: prove apk binaries execute, not just exist (#1613).
+    # From: Issue #1613 | Issue #1781
+    smoke:
+      - envsubst
+      - curl
   syslog:
     context: services/syslog
     # What: apk syslog-ng plus copied fluent-bit binary.

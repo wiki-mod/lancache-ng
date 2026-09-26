@@ -8,7 +8,15 @@
 # Keep Docker build contexts small and deterministic.
 .git
 .gitignore
-.github
+# .github: ignore all except the ci.sh engine + SOT, which
+# service Dockerfiles bind-mount as build-context orchestrators.
+.github/*
+!.github/scripts
+.github/scripts/*
+!.github/scripts/ci.sh
+!.github/yaml
+.github/yaml/*
+!.github/yaml/build-manifest.yml
 
 # Local build output and caches.
 target
