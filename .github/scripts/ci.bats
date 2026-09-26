@@ -2321,7 +2321,7 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
 
 @test "gh_versions retries a transient GH-API failure, then succeeds" {
     # What: Transient GH-API failures retry then succeed.
-    # Why: github-api-retry.sh retry-on-transient behavior.
+    # Why: _ci_retry github-api retries a transient GH-API.
     # From: Issue #1683
     local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
     gh() {
@@ -2338,7 +2338,7 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
 
 @test "gh_versions fails immediately (no retry) on a 404, package skipped" {
     # What: 404 does not consume retry budget.
-    # Why: github-api-retry.sh fails 401/404 immediately.
+    # Why: a GH-API 404 is permanent, never retried.
     # From: Issue #1683
     local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
     gh() {
