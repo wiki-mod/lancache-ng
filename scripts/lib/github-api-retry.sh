@@ -14,7 +14,8 @@ fi
 GITHUB_API_RETRY_SH_LOADED=1
 
 GITHUB_API_RETRY_ATTEMPTS="${GITHUB_API_RETRY_ATTEMPTS:-4}"
-GITHUB_API_RETRY_DELAY_SECONDS="${GITHUB_API_RETRY_DELAY_SECONDS:-300}"
+GITHUB_API_RETRY_DELAY_SECONDS="${GITHUB_API_RETRY_DELAY_SECONDS:-5}"
+GITHUB_API_MAX_RETRY_DELAY_SECONDS="${GITHUB_API_MAX_RETRY_DELAY_SECONDS:-60}"
 GITHUB_API_HTTP_STATUS=""
 GITHUB_API_RETRY_AFTER=""
 GITHUB_API_RATE_LIMIT_REMAINING=""
@@ -116,7 +117,8 @@ _github_api_retry_delay() {
 
   if [[ "$http_status" == "403" || "$http_status" == "429" ]]; then
     if [[ "$GITHUB_API_RETRY_AFTER" =~ ^[0-9]+$ ]]; then
-      candidate="$GITHUB_API_RETRY_AFTER"
+      printf '%s\n' "$GITHUB_API_RETRY_AFTER"
+      return 0
     elif [[ "$GITHUB_API_RATE_LIMIT_REMAINING" == "0" && "$GITHUB_API_RATE_LIMIT_RESET" =~ ^[0-9]+$ ]]; then
       now="$(date +%s)" || return 1
       candidate=$(( GITHUB_API_RATE_LIMIT_RESET - now ))
@@ -125,11 +127,20 @@ _github_api_retry_delay() {
       candidate=60
     fi
     (( candidate > delay )) && delay="$candidate"
-    multiplier=$(( 1 << (attempt - 1) ))
-    delay=$(( delay * multiplier ))
   fi
 
+  multiplier=$(( 1 << (attempt - 1) ))
+  delay=$(( delay * multiplier ))
+  (( delay > GITHUB_API_MAX_RETRY_DELAY_SECONDS )) && delay="$GITHUB_API_MAX_RETRY_DELAY_SECONDS"
+
   printf '%s\n' "$delay"
+}
+
+_github_api_is_rate_limited() {
+  local body_file="${1:?_github_api_is_rate_limited: body file is required}"
+  [[ "$GITHUB_API_RETRY_AFTER" =~ ^[0-9]+$ ]] ||
+    [[ "$GITHUB_API_RATE_LIMIT_REMAINING" == "0" ]] ||
+    grep -qiE 'secondary rate limit|rate limit exceeded|api rate limit exceeded' "$body_file"
 }
 
 github_api_get_with_retry() {
@@ -144,6 +155,10 @@ github_api_get_with_retry() {
   }
   [[ "$GITHUB_API_RETRY_DELAY_SECONDS" =~ ^[0-9]+$ ]] || {
     echo "::error::GITHUB_API_RETRY_DELAY_SECONDS must be a non-negative integer." >&2
+    return 1
+  }
+  [[ "$GITHUB_API_MAX_RETRY_DELAY_SECONDS" =~ ^[1-9][0-9]*$ ]] || {
+    echo "::error::GITHUB_API_MAX_RETRY_DELAY_SECONDS must be a positive integer." >&2
     return 1
   }
   [[ "$report_failure" == "true" || "$report_failure" == "false" ]] || {
@@ -174,7 +189,8 @@ github_api_get_with_retry() {
     # What: Fails immediately on definitive request or auth statuses
     # Why: Retrying cannot repair an invalid request, token, or missing path
     # From: Issue #1095 | PR #1501.
-    if (( call_status == 0 )) && [[ "$http_status" == "400" || "$http_status" == "401" || "$http_status" == "404" || "$http_status" == "422" ]]; then
+    if (( call_status == 0 )) && [[ "$http_status" == "400" || "$http_status" == "401" || "$http_status" == "404" || "$http_status" == "422" ]] ||
+       { (( call_status == 0 )) && [[ "$http_status" == "403" ]] && ! _github_api_is_rate_limited "$body_file"; }; then
       if [[ "$report_failure" == "true" ]]; then
         echo "::error::GitHub REST GET failed permanently with HTTP $http_status for $url; refusing to interpret this response as an empty result." >&2
       fi

@@ -4,13 +4,13 @@
 #
 # Coverage for scripts/tracked/check-action-node-versions.sh (#801): the CI guard
 # that fails a build if any pinned GitHub Action -- local composite or
-# external, resolved via the GitHub Contents API -- declares a deprecated
+# external, resolved via immutable GitHub raw content -- declares a deprecated
 # Node runtime in its own action.yml/action.yaml.
 #
 # This builds a small fixture repo (a fake .github/workflows + .github/actions
 # tree) and a mock `curl` binary placed ahead of the real one on PATH, so
 # every scenario runs fully offline and deterministically -- no live call to
-# api.github.com, and no dependency on what any real action currently
+# raw.githubusercontent.com, and no dependency on what any real action currently
 # declares. The mock maps a request URL to a canned (HTTP status, body) pair
 # read from a small per-test fixtures directory; see mock_curl_response()
 # below for how a test registers one.
@@ -35,8 +35,8 @@ setup() {
     mkdir -p "$mock_fixtures_dir"
 
     # A mock `curl` standing in for the real binary: it recognizes only the
-    # GitHub Contents API shape this script generates (a `-o <file>` output
-    # target, an `Accept` header, and a trailing URL), maps the URL to a
+    # raw.githubusercontent.com shape this script generates (a `-o <file>`
+    # output target and a trailing URL), maps the URL to a
     # canned response registered by mock_curl_response() below, writes the
     # canned body to the `-o` target, and prints the canned status code to
     # stdout the same way `curl -w '%{http_code}'` would.
@@ -51,11 +51,16 @@ for ((i = 0; i < ${#args[@]}; i++)); do
     fi
 done
 url="${args[-1]}"
-key=$(printf '%s' "$url" | sed -E 's#^https://api\.github\.com/repos/##' | tr '/?&=' '____')
+key=$(printf '%s' "$url" | sed -E 's#^https://raw\.githubusercontent\.com/##' | tr '/?&=' '____')
 fixture_file="${MOCK_CURL_FIXTURES:?MOCK_CURL_FIXTURES not set}/$key"
 if [ ! -f "$fixture_file" ]; then
-    printf '000'
-    exit 0
+    ref=$(printf '%s' "$url" | cut -d/ -f6)
+    file=$(printf '%s' "$url" | sed 's#.*/##')
+    fixture_file=$(find "${MOCK_CURL_FIXTURES:?MOCK_CURL_FIXTURES not set}" -maxdepth 1 -type f -name "*_${ref}_${file}" -print -quit)
+    if [ -z "$fixture_file" ]; then
+        printf '000'
+        exit 0
+    fi
 fi
 status_line=$(head -n1 "$fixture_file")
 tail -n +2 "$fixture_file" > "$out_file"
@@ -88,6 +93,9 @@ mock_curl_response() {
         printf '%s\n' "$status"
         printf '%s\n' "$body"
     } > "$mock_fixtures_dir/$key"
+    local raw_key="${owner_repo}_${ref}_${subpath:+${subpath}_}${file}"
+    raw_key="${raw_key//\//_}"
+    cp "$mock_fixtures_dir/$key" "$mock_fixtures_dir/$raw_key"
 }
 
 write_workflow() {
@@ -122,10 +130,10 @@ runs:
     run "$script" "$fixture_root"
     [ "$status" -eq 0 ]
     [[ "$output" == *"OK"* ]]
-    [[ "$output" == *"unauthenticated GitHub API fallback"* ]]
+    [[ "$output" != *"GitHub API"* ]]
 }
 
-@test "uses authenticated GitHub API requests when GH_TOKEN is set" {
+@test "does not send GH_TOKEN to public raw action manifest reads" {
     write_workflow <<'EOF'
 name: CI
 on: push
@@ -145,21 +153,17 @@ for ((i = 0; i < ${#args[@]}; i++)); do
     fi
 done
 printf '%s\n' "$@" > "${MOCK_CURL_ARGS:?MOCK_CURL_ARGS not set}"
-cat > "${MOCK_CURL_CONFIG:?MOCK_CURL_CONFIG not set}"
 printf 'runs:\n  using: node24\n' > "$out_file"
 printf '200'
 MOCKCURL
     chmod +x "$mock_bin_dir/curl"
     export MOCK_CURL_ARGS="$BATS_TEST_TMPDIR/curl-args.txt"
-    export MOCK_CURL_CONFIG="$BATS_TEST_TMPDIR/curl-config.txt"
     export GH_TOKEN="test-token"
 
     run "$script" "$fixture_root"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"authenticated GitHub API requests"* ]]
-    grep -qFx 'header = "Accept: application/vnd.github.raw+json"' "$MOCK_CURL_CONFIG"
-    grep -qFx 'header = "X-GitHub-Api-Version: 2022-11-28"' "$MOCK_CURL_CONFIG"
-    grep -qFx 'header = "Authorization: Bearer test-token"' "$MOCK_CURL_CONFIG"
+    ! grep -qF 'test-token' "$MOCK_CURL_ARGS"
+    grep -qF 'https://raw.githubusercontent.com/actions/checkout/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/action.yml' "$MOCK_CURL_ARGS"
 }
 
 @test "fails on the exact pre-#800 actions/upload-artifact@834a144... pin (the #799 regression)" {
@@ -329,7 +333,7 @@ for ((i = 0; i < ${#args[@]}; i++)); do
     fi
 done
 url="${args[-1]}"
-key=$(printf '%s' "$url" | sed -E 's#^https://api\.github\.com/repos/##' | tr '/?&=' '____')
+key=$(printf '%s' "$url" | sed -E 's#^https://raw\.githubusercontent\.com/##' | tr '/?&=' '____')
 counter_file="${MOCK_CURL_CALL_COUNTS:?MOCK_CURL_CALL_COUNTS not set}/$key"
 count=0
 [ -f "$counter_file" ] && count=$(cat "$counter_file")
@@ -337,7 +341,7 @@ count=$((count + 1))
 printf '%s' "$count" > "$counter_file"
 if [ "$count" -eq 1 ]; then
     printf '' > "$out_file"
-    printf '403'
+    printf '500'
 else
     printf 'runs:\n  using: node24\n' > "$out_file"
     printf '200'
@@ -396,8 +400,8 @@ MOCKCURL
 
     run "$script" "$fixture_root"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"HTTP 429; retrying after 300s"* ]]
-    [ "$(cat "$MOCK_SLEEP_CALLS")" -eq 300 ]
+    [[ "$output" == *"HTTP 429; retrying after 5s"* ]]
+    [ "$(cat "$MOCK_SLEEP_CALLS")" -eq 5 ]
 }
 
 @test "fails closed on a permanent 401 response without retrying it" {
@@ -422,7 +426,7 @@ for ((i = 0; i < ${#args[@]}; i++)); do
     fi
 done
 url="${args[-1]}"
-key=$(printf '%s' "$url" | sed -E 's#^https://api\.github\.com/repos/##' | tr '/?&=' '____')
+key=$(printf '%s' "$url" | sed -E 's#^https://raw\.githubusercontent\.com/##' | tr '/?&=' '____')
 counter_file="${MOCK_CURL_CALL_COUNTS:?MOCK_CURL_CALL_COUNTS not set}/$key"
 count=0
 [ -f "$counter_file" ] && count=$(cat "$counter_file")
