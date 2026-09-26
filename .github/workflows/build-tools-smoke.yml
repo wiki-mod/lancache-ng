@@ -238,11 +238,33 @@ defaults:
     shell: bash
 
 jobs:
+  determine-fixture-owner:
+    name: determine fixture owner
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    timeout-minutes: 15
+    outputs:
+      build_tools: ${{ steps.classify.outputs.build_tools }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: classify
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
+            printf 'build_tools=false\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          bash scripts/untracked/detect-full-setup-changes.sh
+
   bats-shellspec-smoke:
     # What: runs on the light tier, not heavy
     # Why: pulls digest and runs suites per light tier contract
     # From: PR #1501
     name: run bats/shellspec suites against the published build-tools image
+    needs: determine-fixture-owner
     runs-on: [self-hosted, linux, lancache, lancache-light]
     # What: sets a generous timeout well above observed runtime
     # Why: headroom covers image pull and test suites under load
@@ -256,6 +278,7 @@ jobs:
       # Why: resolves channel tag to digest via buildx imagetools
       # From: PR #1501
       - name: Set up Docker Buildx for manifest inspection
+        if: needs.determine-fixture-owner.outputs.build_tools != 'true'
         id: buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
@@ -263,6 +286,7 @@ jobs:
       # Why: avoids GHCR's lower anonymous rate limit under CI load
       # From: PR #1501
       - name: Select published build-tools image
+        if: needs.determine-fixture-owner.outputs.build_tools != 'true'
         id: select-image
         env:
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
@@ -291,6 +315,7 @@ jobs:
       # Why: light-tier job must stay pull-only, never build locally
       # From: PR #1501
       - name: Run Bats setup fixtures
+        if: needs.determine-fixture-owner.outputs.build_tools != 'true'
         timeout-minutes: 20
         run: |
           set -euo pipefail
@@ -325,6 +350,7 @@ jobs:
       # Why: keeps light-tier job pull-only and consistent
       # From: PR #1501
       - name: Run ShellSpec setup fixtures
+        if: needs.determine-fixture-owner.outputs.build_tools != 'true'
         timeout-minutes: 20
         run: |
           set -euo pipefail
