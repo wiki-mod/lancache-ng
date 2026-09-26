@@ -67,6 +67,16 @@ services:
     build_type: apk
     final_base: alpine
     runner: light
+    # What: execute-smoke checks run post-build by ci.sh.
+    # Why: prove apk binaries run, not just exist (#1613).
+    # From: Issue #1613 | Issue #1683
+    smoke:
+      - dnsmasq --version
+      - envsubst --version
+      - rg --version
+      - lsof -v
+      - find --version
+      - bash --version
   ntp:
     context: services/ntp
     build_type: apk
