@@ -210,16 +210,14 @@ teardown() {
 }
 
 @test "plan rebuilds every shared-scripts consumer, and no other" {
-    # What: shared-scripts feeds 6 services (Finding 93).
-    # Why: One shared context, exactly its consumers.
+    # What: shared-scripts feeds its SOT dependency_graph set.
+    # Why: One shared context, exactly its SOT consumers.
     # From: Issue #1683
-    run bash "${CI_SH}" plan scripts/lib/verify-version-banner.sh
+    run bash "${CI_SH}" plan scripts/lib/known-good-snapshots.sh
     [[ "${output}" == *"proxy=true"* ]]
-    [[ "${output}" == *"dns=true"* ]]
-    [[ "${output}" == *"ui=true"* ]]
-    [[ "${output}" == *"watchdog=true"* ]]
     [[ "${output}" == *"dhcp=true"* ]]
     [[ "${output}" == *"dhcp-proxy=true"* ]]
+    [[ "${output}" == *"dns=false"* ]]
     [[ "${output}" == *"ntp=false"* ]]
     [[ "${output}" == *"cachehamster=false"* ]]
 }
@@ -6750,38 +6748,6 @@ _smoke_coverage_fixture() {
     [[ "${output}" == *"CI-ERROR-CHECK-0024"* ]]
 }
 
-@test "verify-version-banner.sh matches a banner and ignores the tool exit code" {
-    # What: Banner passes; others fail.
-    # Why: lsof-banner check; exit uncertain.
-    # From: Issue #1613 | PR #1858
-    local vb="${BATS_TEST_DIRNAME}/../../scripts/lib/verify-version-banner.sh"
-    [ -f "${vb}" ]
-    run sh "${vb}" "hello banner" printf "hello banner\n"; [ "${status}" -eq 0 ]
-    run sh "${vb}" "hello banner" printf "goodnight\n"; [ "${status}" -ne 0 ]; [[ "${output}" == *"ERROR"* ]]
-    run sh "${vb}" "only-one-arg"; [ "${status}" -ne 0 ]; [[ "${output}" == *"usage:"* ]]
-    cat > "${BATS_TEST_TMPDIR}/fake-lsof" <<'FXEOF'
-#!/bin/sh
-printf 'lsof version information: fake\n'
-exit 1
-FXEOF
-    chmod +x "${BATS_TEST_TMPDIR}/fake-lsof"
-    run sh "${vb}" "lsof version information" "${BATS_TEST_TMPDIR}/fake-lsof" -v; [ "${status}" -eq 0 ]
-}
-
-@test "the six lsof consumers COPY and invoke the shared verify-version-banner.sh" {
-    # What: Shared COPY + invoke.
-    # Why: Replaces drifted banner checks.
-    # From: Issue #1613 | PR #1858
-    local root="${BATS_TEST_DIRNAME}/../.." f df
-    for f in dhcp-proxy dhcp dns proxy ui watchdog; do
-        df="${root}/services/${f}/Dockerfile"
-        grep -qF 'COPY --from=shared-scripts verify-version-banner.sh /usr/local/bin/verify-version-banner.sh' "${df}" || { echo "no COPY: ${f}"; false; }
-        grep -qF 'sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v' "${df}" || { echo "no invoke: ${f}"; false; }
-        ! grep -qF 'lsof_out="$(lsof -v 2>&1)"' "${df}" || { echo "inline lsof: ${f}"; false; }
-        ! grep -qF 'utilities-tools' "${df}" || { echo "utilities-tools: ${f}"; false; }
-    done
-}
-
 @test "docker-build builds a per-identity per-arch tag via buildx" {
     # What: ci.sh executes the build; YAML only calls it.
     # Why: engine owns execution, orchestrator just calls.
@@ -8536,4 +8502,35 @@ _write_legacy_env_fixture() {
     run deploy_prod_repo_input_paths /var/lib/lancache
     [ "${status}" -eq 0 ]
     [ -z "${output}" ]
+}
+
+# What: run apk-setup with sed+apk stubbed, echo the recorded call log.
+# Why: one shared mechanic for both apk-setup cases (AG-CODE-013).
+# From: Issue #1683
+_run_apk_setup() {
+    local logf="${BATS_TEST_TMPDIR}/apk-setup.log" d="${BATS_TEST_TMPDIR}/apk-setup-bin" t
+    rm -f "${logf}"; mkdir -p "${d}"
+    for t in sed apk; do
+        printf '#!/usr/bin/env bash\nprintf "%%s %%s\\n" "$(basename "$0")" "$*" >> "%s"\n' "${logf}" > "${d}/${t}"
+        chmod +x "${d}/${t}"
+    done
+    PATH="${d}:${PATH}" bash "${CI_SH}" apk-setup "$@"
+    cat "${logf}" 2>/dev/null || true
+}
+
+@test "apk-setup switches repos to http, updates, upgrades, then adds packages" {
+    run _run_apk_setup pkg-one pkg-two
+    [ "${status}" -eq 0 ]
+    [ "${lines[0]}" = "sed -i s|^https://|http://| /etc/apk/repositories" ]
+    [ "${lines[1]}" = "apk update --no-cache" ]
+    [ "${lines[2]}" = "apk upgrade --no-cache" ]
+    [ "${lines[3]}" = "apk add --no-cache pkg-one pkg-two" ]
+}
+
+@test "apk-setup with no packages performs update+upgrade but skips apk add" {
+    run _run_apk_setup
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"apk update --no-cache"* ]]
+    [[ "${output}" == *"apk upgrade --no-cache"* ]]
+    [[ "${output}" != *"apk add"* ]]
 }
