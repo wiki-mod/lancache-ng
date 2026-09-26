@@ -4039,6 +4039,40 @@ _ci_validate_proxy_stream_map() {
     fi
 }
 
+# What: Prove ssl mode intercepts (MITM) with our LAN CA.
+# Why: proxy :443 must present a cert we signed (#597/#668).
+# From: Issue #597 | Issue #668 | Issue #1683
+_ci_validate_ssl_mitm() {
+    local project="$1" ip cid domain ca_subj issuer tmp
+    ip="$(_ci_validate_container_ip "${project}" proxy)"
+    cid="$(docker compose -p "${project}" ps -q proxy 2>/dev/null)"
+    domain="$(_ci_validation_dns_domains | head -1)"
+    if [ -z "${ip}" ] || [ -z "${cid}" ] || [ -z "${domain}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0023]" "reason=\"no proxy container/IP or test domain for ssl-mitm check\""
+        return 2
+    fi
+    tmp="$(mktemp "${TMPDIR:-/var/tmp}/ci-proxy-ca.XXXXXX")"
+    if ! docker cp "${cid}:/etc/nginx/ssl/ca/ca.crt" "${tmp}" 2>/dev/null; then
+        ci_log "[CI-ERROR-VALIDATE-0024]" "reason=\"could not read proxy LAN CA for ssl-mitm check\""
+        rm -f "${tmp}"
+        return 2
+    fi
+    ca_subj="$(openssl x509 -noout -subject -in "${tmp}" 2>/dev/null | sed 's/^subject=//')"
+    issuer="$(openssl s_client -connect "${ip}:443" -servername "${domain}" </dev/null 2>/dev/null | openssl x509 -noout -issuer 2>/dev/null | sed 's/^issuer=//')"
+    rm -f "${tmp}"
+    if [ -z "${ca_subj}" ] || [ -z "${issuer}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0025]" "domain=\"${domain}\" reason=\"no TLS issuer or CA subject for ssl-mitm check\""
+        return 1
+    fi
+    # What: the :443 cert issuer MUST equal our own LAN CA.
+    # Why: proves interception, not passthrough (#668).
+    # From: Issue #668
+    if [ "${issuer}" != "${ca_subj}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0026]" "issuer=\"${issuer}\" ca=\"${ca_subj}\" reason=\"ssl mode :443 cert not issued by our LAN CA (not intercepting, #668)\""
+        return 1
+    fi
+}
+
 # What: Validate the candidate on one live prod stack.
 # Why: One up, all checks, one teardown (AG-VAL-027).
 # From: Issue #1683 | PR #1858
@@ -4061,6 +4095,7 @@ _ci_default_validate() {
             [ "${rc}" -eq 0 ] && { _ci_validate_dns "${project}" || rc=$?; }
             [ "${rc}" -eq 0 ] && { _ci_validate_proxy "${project}" || rc=$?; }
             [ "${rc}" -eq 0 ] && { _ci_validate_proxy_stream_map "${project}" || rc=$?; }
+            [ "${rc}" -eq 0 ] && { _ci_validate_ssl_mitm "${project}" || rc=$?; }
         elif _ci_validate_is_collision "${up_out}"; then
             ci_error "[CI-ERROR-VALIDATE-0016]" "reason=\"subnet/port collision after slot reservation\"" "${up_out}"
             rc=1

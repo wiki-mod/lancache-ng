@@ -3004,6 +3004,55 @@ netdata=sha256:n"
     [ "${status}" -eq 0 ]
 }
 
+@test "validate ssl-mitm fails when proxy IP is missing" {
+    # What: Missing proxy container/IP returns rc 2.
+    # Why: Cannot TLS-probe without a target.
+    # From: Issue #668
+    _ci_validate_container_ip() { :; }
+    _ci_validation_dns_domains() { echo deb.debian.org; }
+    docker() { case "$1" in compose) echo cid1 ;; esac; }
+    run _ci_validate_ssl_mitm proj
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0023"* ]]
+}
+
+@test "validate ssl-mitm fails when the proxy CA is unreadable" {
+    # What: A failed CA copy returns rc 2.
+    # Why: Cannot compare issuer without our CA.
+    # From: Issue #668
+    _ci_validate_container_ip() { echo 172.16.1.9; }
+    _ci_validation_dns_domains() { echo deb.debian.org; }
+    docker() { case "$1" in compose) echo cid1 ;; cp) return 1 ;; esac; }
+    run _ci_validate_ssl_mitm proj
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0024"* ]]
+}
+
+@test "validate ssl-mitm fails when :443 cert is not our LAN CA" {
+    # What: A foreign issuer returns rc 1.
+    # Why: Foreign issuer means passthrough, not MITM.
+    # From: Issue #668
+    _ci_validate_container_ip() { echo 172.16.1.9; }
+    _ci_validation_dns_domains() { echo deb.debian.org; }
+    docker() { case "$1" in compose) echo cid1 ;; cp) return 0 ;; esac; }
+    openssl() { case "$*" in *s_client*) echo PEM ;; *-subject*) echo "subject=CN=LanCache Root CA" ;; *-issuer*) echo "issuer=CN=DigiCert" ;; esac; }
+    run _ci_validate_ssl_mitm proj
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0026"* ]]
+}
+
+@test "validate ssl-mitm passes when :443 cert is our LAN CA" {
+    # What: Our CA as issuer returns rc 0.
+    # Why: Proves genuine MITM interception (#668).
+    # From: Issue #597 | Issue #668
+    _ci_validate_container_ip() { echo 172.16.1.9; }
+    _ci_validation_dns_domains() { echo deb.debian.org; }
+    docker() { case "$1" in compose) echo cid1 ;; cp) return 0 ;; esac; }
+    openssl() { case "$*" in *s_client*) echo PEM ;; *-subject*) echo "subject=CN=LanCache Root CA" ;; *-issuer*) echo "issuer=CN=LanCache Root CA" ;; esac; }
+    run _ci_validate_ssl_mitm proj
+    [ "${status}" -eq 0 ]
+}
+
 # =========================================================
 # VARIABLES
 # =========================================================
