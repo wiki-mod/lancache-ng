@@ -6,10 +6,10 @@
 # From: Issue #1428 | PR #1431 | Issue #1683
 
 # What: base images, supplied by ci.sh from the SOT pins.
-# Why: non-authoritative fallbacks keep FROM valid (AG-CI-008).
+# Why: SOT base_images is the sole owner (AG-CI-006).
 # From: Issue #1683
-ARG ALPINE_IMAGE=alpine:3.24
-ARG FLUENT_BIT_IMAGE=cr.fluentbit.io/fluent/fluent-bit:3.2.10
+ARG ALPINE_IMAGE
+ARG FLUENT_BIT_IMAGE
 FROM ${FLUENT_BIT_IMAGE} AS fluent-bit-src
 
 FROM ${ALPINE_IMAGE}
@@ -30,18 +30,21 @@ ARG no_proxy
 # Why: without it BuildKit replays a stale layer forever.
 # From: Issue #1095
 ARG APT_CACHE_BUST=""
-# What: image-local apk install of the syslog-ng runtime deps.
-# Why: http repos let Squid cache; signed indices keep integrity.
+# What: apk package list, supplied from the SOT.
+# Why: the SOT owns the list; this stage only consumes it.
+# From: Issue #1683
+ARG APK_PACKAGES
+# What: bootstrap bash so the SHELL below is not busybox ash.
+# Why: AG-REL-001 forbids ash; ci.sh apk-setup needs bash.
+# From: Issue #1683
+RUN apk add --no-cache bash
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+# What: shared apk setup (repo-http+update+upgrade+add) via ci.sh.
+# Why: one owner for the mandatory update+upgrade; SOT owns packages.
 # From: Issue #1428 | Issue #1095
-RUN sed -i 's|^https://|http://|' /etc/apk/repositories \
-    && : "apt-cache-bust=${APT_CACHE_BUST}" \
-    && apk upgrade --no-cache \
-    && apk add --no-cache \
-        syslog-ng \
-        syslog-ng-json \
-        bash \
-        zstd \
-        tzdata
+RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
+    : "apt-cache-bust=${APT_CACHE_BUST}" \
+    && bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
 
 # What: fixed uid/gid 10001 + writable dirs for syslog-ng.
 # Why: service reads files as non-root; dirs must pre-exist.

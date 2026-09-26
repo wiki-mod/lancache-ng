@@ -35,6 +35,25 @@ services:
     build_type: rust
     final_base: alpine
     runner: heavy
+    # What: final-image apk packages; the SOT owns the list.
+    # Why: consumer derives; no hardcoded apk add (AG-CI-006).
+    # From: Issue #1683
+    packages:
+      - pdns
+      - pdns-backend-sqlite3
+      - pdns-recursor-luajit
+      - bind-tools
+      - sqlite
+      - iproute2
+      - grep
+      - coreutils
+      - bash
+      - nano
+      - curl
+      - findutils
+      - gettext-envsubst
+      - lsof
+      - ripgrep
     # What: coverage crate + floor; the dns floor is 0.
     # Why: nats-subscriber is unit-coverable; the async loop is
     #      covered by stack validate, not tarpaulin (Issue #504).
@@ -52,6 +71,20 @@ services:
     build_type: rust
     final_base: alpine
     runner: heavy
+    # What: final-image apk packages; the SOT owns the list.
+    # Why: consumer derives; no hardcoded apk add (AG-CI-006).
+    # From: Issue #1683
+    packages:
+      - bash
+      - ca-certificates
+      - coreutils
+      - util-linux
+      - nano
+      - zstd
+      - curl
+      - findutils
+      - lsof
+      - ripgrep
     smoke:
       - find --version
       - rg --version
@@ -151,6 +184,15 @@ services:
     external_image: fluent_bit
     final_base: alpine
     runner: light
+    # What: final-image apk packages; the SOT owns the list.
+    # Why: consumer derives; no hardcoded apk add (AG-CI-006).
+    # From: Issue #1683
+    packages:
+      - syslog-ng
+      - syslog-ng-json
+      - bash
+      - zstd
+      - tzdata
     # What: execute-smoke checks run post-build by ci.sh.
     # Why: prove apk binaries run, not just exist (#1613).
     # From: Issue #1613 | Issue #1683
@@ -163,6 +205,17 @@ services:
     build_type: rust
     final_base: alpine
     runner: heavy
+    # What: final-image apk packages; the SOT owns the list.
+    # Why: consumer derives; no hardcoded apk add (AG-CI-006).
+    # From: Issue #1683
+    packages:
+      - ca-certificates
+      - coreutils
+      - util-linux
+      - nano
+      - curl
+      - lsof
+      - ripgrep
     # What: coverage crate + floor; the ui floor is 35 percent.
     # Why: ui logic is unit-coverable and its floor is enforced.
     # From: Issue #1683

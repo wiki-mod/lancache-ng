@@ -5,10 +5,10 @@
 # Why: nginx.org stream module; http repos let Squid cache.
 # From: Issue #815 | Issue #1683
 
-# What: base image, supplied by ci.sh from the SOT pin.
-# Why: non-authoritative fallback keeps FROM valid (AG-CI-008).
+# What: base image pin, supplied by ci.sh from the SOT.
+# Why: SOT base_images.alpine is the sole owner (AG-CI-006).
 # From: Issue #1683
-ARG ALPINE_IMAGE=alpine:3.24
+ARG ALPINE_IMAGE
 FROM ${ALPINE_IMAGE}
 
 LABEL org.opencontainers.image.description="nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic."
@@ -37,6 +37,7 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
          && cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
        fi \
     && : "apt-cache-bust=${APT_CACHE_BUST}" \
+    && apk update --no-cache \
     && apk upgrade --no-cache \
     && apk add --no-cache ca-certificates openssl curl \
     && if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \

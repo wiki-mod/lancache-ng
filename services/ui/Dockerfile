@@ -3,10 +3,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Admin UI: Rust binary + Tera templates on Alpine.
 
-# What: base image, supplied by ci.sh from the SOT pin.
-# Why: non-authoritative fallback keeps FROM valid (AG-CI-008).
+# What: base image pin, supplied by ci.sh from the SOT.
+# Why: SOT base_images.alpine is the sole owner (AG-CI-006).
 # From: Issue #1683
-ARG ALPINE_IMAGE=alpine:3.24
+ARG ALPINE_IMAGE
 
 # What: builder image, supplied by ci.sh from the SOT.
 # Why: no mutable default; CI resolves the immutable ref.
@@ -89,33 +89,32 @@ ARG http_proxy
 ARG https_proxy
 ARG no_proxy
 
-# What: switches apk's own repositories to plain http.
-# Why: Squid caches http; signed indices keep integrity.
-# From: Issue #1095
-RUN sed -i 's|^https://|http://|' /etc/apk/repositories
-
 # What: declares APT_CACHE_BUST before the busting RUN.
 # Why: BuildKit cache has no wall-clock expiry.
 # From: Issue #1095
 ARG APT_CACHE_BUST=""
-# What: trust proxy CA, upgrade, apk install ui runtime.
-# Why: CA restored (no leak); coreutils/util-linux needed.
-# From: Issue #815
+# What: apk package list, supplied from the SOT.
+# Why: the SOT owns the list; this stage only consumes it.
+# From: Issue #1683
+ARG APK_PACKAGES
+# What: bootstrap bash so the SHELL below is not busybox ash.
+# Why: AG-REL-001 forbids ash; the CA RUN below is bash logic.
+# From: Issue #1683
+RUN apk add --no-cache bash
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+# What: trust proxy CA, repo-http, update+upgrade, install runtime.
+# Why: CA restored (no leak); mandatory update+upgrade invariant.
+# From: Issue #815 | Issue #1683
 RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
     if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
       cp /etc/ssl/certs/ca-certificates.crt /var/tmp/ca-bundle.orig && \
       cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
     fi && \
+    sed -i 's|^https://|http://|' /etc/apk/repositories && \
     : "apt-cache-bust=${APT_CACHE_BUST}" && \
+    apk update --no-cache && \
     apk upgrade --no-cache && \
-    apk add --no-cache \
-    ca-certificates \
-    coreutils \
-    util-linux \
-    nano \
-    curl \
-    lsof \
-    ripgrep && \
+    apk add --no-cache ${APK_PACKAGES} && \
     if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /var/tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
 ENV EDITOR=nano
