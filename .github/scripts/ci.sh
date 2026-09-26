@@ -31,7 +31,7 @@ CI_REPO_ROOT="${CI_REPO_ROOT:-$(cd -- "${CI_SCRIPT_DIR}/../.." && pwd)}"
 # From: Issue #1683
 declare -A CI_DISPATCH=(
     [plan]=ci_cmd_plan [plan-matrix]=ci_cmd_plan_matrix [impact]=ci_cmd_impact [codeql-impact]=ci_cmd_codeql_impact [codeql-config]=ci_cmd_codeql_config [identity]=ci_cmd_identity
-    [resolve]=ci_cmd_resolve [build]=ci_cmd_build [build-args]=ci_cmd_build_args [rust-build]=ci_cmd_rust_build [apk-build]=ci_cmd_apk_build
+    [resolve]=ci_cmd_resolve [build]=ci_cmd_build [build-args]=ci_cmd_build_args [rust-build]=ci_cmd_rust_build
     [build-tools]=ci_cmd_build_tools [publish]=ci_cmd_publish [verify]=ci_cmd_verify
     [test]=ci_cmd_test [coverage]=ci_cmd_coverage [scan]=ci_cmd_scan [assemble]=ci_cmd_assemble
     [aggregate]=ci_cmd_aggregate [emit-result]=ci_cmd_emit_result [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files
@@ -1482,70 +1482,6 @@ _ci_docker_build() {
     [ "${rc}" -eq 0 ] || return "${rc}"
     printf '%s\n' "${buildlog}" >&2
     printf '%s\n' "${tag}"
-}
-
-# What: Read a service's SOT apk package list, fail-closed.
-# Why: SOT owns it; one reader, service is the parameter.
-# From: Issue #1683
-_ci_service_packages() {
-    local service="${1:-}" pkgs
-    [ -n "${service}" ] || { ci_log "[CI-ERROR-APKBUILD-0002]" "reason=\"service arg required\""; return 2; }
-    pkgs="$(_ci_block_entry_list services "${service}" packages)"
-    if [ -z "${pkgs}" ]; then
-        ci_log "[CI-ERROR-APKBUILD-0003]" "service=\"${service}\" reason=\"no SOT services.${service}.packages; FAIL CLOSED\""
-        return 2
-    fi
-    printf '%s\n' "${pkgs}"
-}
-
-# What: Read a service's SOT smoke executable list.
-# Why: SOT owns it; one reader, service is the parameter.
-# From: Issue #1613
-_ci_service_smoke() {
-    local service="${1:-}"
-    [ -n "${service}" ] || { ci_log "[CI-ERROR-APKBUILD-0004]" "reason=\"service arg required\""; return 2; }
-    _ci_block_entry_list services "${service}" smoke
-}
-
-# What: In-image apk build: SOT install, CA-safe, smoke.
-# Why: one owner; Dockerfiles orchestrate, never inline apk.
-# From: Issue #1683 | Issue #1095 | Issue #1781
-ci_cmd_apk_build() {
-    local service="${1:-}"
-    [ -n "${service}" ] || { ci_log "[CI-ERROR-APKBUILD-0001]" "reason=\"service arg required\""; return 2; }
-    local packages smoke tool
-    packages="$(_ci_service_packages "${service}")" || return "$?"
-    local -a pkg=() smk=()
-    while IFS= read -r tool; do [ -n "${tool}" ] && pkg+=("${tool}"); done <<< "${packages}"
-    # What: switch apk repos to http so Squid caches them.
-    # Why: signed indices keep integrity (#1095, repo-wide).
-    # From: Issue #1095
-    sed -i 's|^https://|http://|' /etc/apk/repositories
-    # What: trust the proxy CA for this build only.
-    # Why: a RETURN trap restores it; never baked into a layer.
-    # From: Issue #1781
-    local ca=/etc/ssl/certs/ca-certificates.crt orig=/var/tmp/ca-bundle.orig added=0
-    _ci_apk_build_restore() { if [ "${added:-0}" = 1 ]; then mv "${orig:?}" "${ca:?}"; fi; }
-    trap _ci_apk_build_restore RETURN
-    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then
-        cp "${ca}" "${orig}"
-        cat /run/secrets/project_selfhosted_proxy_ca >> "${ca}"
-        added=1
-    fi
-    # What: upgrade immediately before add; no final pass.
-    # Why: the proven freshness path (PR #1783).
-    # From: Issue #1781 | PR #1783
-    apk upgrade --no-cache || return 2
-    apk add --no-cache "${pkg[@]}" || return 2
-    # What: prove each SOT smoke tool executes, not just exists.
-    # Why: missing libs fail at runtime, not at apk add (#1613).
-    # From: Issue #1613 | Issue #1781
-    smoke="$(_ci_service_smoke "${service}")" || return "$?"
-    while IFS= read -r tool; do [ -n "${tool}" ] && smk+=("${tool}"); done <<< "${smoke}"
-    for tool in "${smk[@]}"; do
-        "${tool}" --version >/dev/null 2>&1 || { ci_error "[CI-ERROR-APKBUILD-0005]" "service=\"${service}\" tool=\"${tool}\" reason=\"smoke execute failed; missing lib?\"" "$("${tool}" --version 2>&1 | head -3)"; return 2; }
-    done
-    printf 'service=%s apk-build=ok packages=%s\n' "${service}" "${#pkg[@]}"
 }
 
 # What: In-image rust builder: opt-in sccache/distcc/ccache + fallback.
@@ -5598,12 +5534,12 @@ _ci_check_pipefail_early_exit() {
 _ci_check_if_without_else_status() {
     local -a _ci_override=("$@") files=()
     _ci_scan_files files _ci_override '.github/scripts/*.sh' '*/Dockerfile' 'Dockerfile' 'services/*.sh'
-    local path fi_line status_line status_content
+    local path fi_line status_line
     local -a viol=()
     for path in "${files[@]}"; do
         [ -f "${path}" ] || continue
         case "${path}" in */ci.sh|ci.sh) continue ;; esac
-        while IFS=: read -r fi_line status_line status_content; do
+        while IFS=: read -r fi_line status_line; do
             [ -n "${fi_line}" ] || continue
             viol+=("${path}:${status_line}: reads \$? after an else-less if (fi at line ${fi_line}); POSIX reports the if's own status 0, not the command's -- use 'if CMD; then STATUS=0; else STATUS=\$?; fi' or mark '# if-status-safe: <reason>'")
         done < <(awk '
@@ -5628,7 +5564,7 @@ _ci_check_if_without_else_status() {
                   ns = nxt; sub(/^[ \t]*/, "", ns)
                   if (ns ~ /^#/) { checked++; continue }
                   checked++
-                  if (nxt ~ /\$\?/ && nxt !~ /#[ \t]*if-status-safe:/) printf "%d:%d:%s\n", fi_i, j, nxt
+                  if (nxt ~ /\$\?/ && nxt !~ /#[ \t]*if-status-safe:/) printf "%d:%d\n", fi_i, j
                   break
                 }
               }
