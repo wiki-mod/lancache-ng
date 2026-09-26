@@ -51,6 +51,17 @@ services:
     build_type: apk
     final_base: alpine
     runner: light
+    # What: execute-smoke checks run post-build by ci.sh.
+    # Why: prove apk binaries run, not just exist (#1613).
+    # From: Issue #1613 | Issue #1683
+    smoke:
+      - kea-dhcp4 -v
+      - curl --version
+      - jq --version
+      - envsubst --version
+      - rg --version
+      - lsof -v
+      - find --version
   dhcp-proxy:
     context: services/dhcp-proxy
     build_type: apk
