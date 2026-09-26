@@ -212,3 +212,14 @@ resolve_shared_secret() {
     fi
     return 1
 }
+
+# What: keeps a log dir readable by the shared-reader gid.
+# Why: root-created files revert to root-only on volumes.
+# From: Issue #1427 | PR #1670
+prepare_log_dir_for_shared_reader() {
+    _pld_dir="$1"
+    mkdir -p "$_pld_dir"
+    chgrp "$(lancache_shared_secret_gid)" "$_pld_dir"
+    chmod 2750 "$_pld_dir"
+    find "$_pld_dir" -maxdepth 1 -type f -exec chgrp "$(lancache_shared_secret_gid)" {} + -exec chmod g+r {} +
+}

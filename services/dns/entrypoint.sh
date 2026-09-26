@@ -11,20 +11,6 @@ set -euo pipefail
 # From: Issue #858 | Issue #1683
 . /usr/local/lib/shared-secret-bootstrap.sh
 
-# What: Helper for producer log dir readability
-# Why: Keep gid 10001 readable on persistent volumes
-#   root-only readability after reopen or recreation. dns/dhcp-only (not part
-#   of the shared-secret-bootstrap contract ui also embeds), so it lives after
-#   the sync-guarded block instead of inside it.
-# From: Issue #1427
-prepare_log_dir_for_shared_reader() {
-    local dir="$1"
-    mkdir -p "$dir"
-    chgrp "$(lancache_shared_secret_gid)" "$dir"
-    chmod 2750 "$dir"
-    find "$dir" -maxdepth 1 -type f -exec chgrp "$(lancache_shared_secret_gid)" {} + -exec chmod g+r {} +
-}
-
 # ── Setup Variables ──────────────────────────────────────────────────────────
 PROXY_IP="${PROXY_IP:?PROXY_IP is required - set it to the host LAN IP}"
 PROXY_IPV6="${PROXY_IPV6:-}"

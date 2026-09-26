@@ -15,17 +15,6 @@ set -e
 # From: Issue #858 | Issue #1683
 . /usr/local/lib/shared-secret-bootstrap.sh
 
-# What: keeps log dirs readable by gid 10001 on reopen.
-# Why: root-created files revert to root-only on volumes.
-# From: Issue #1427 | PR #1670
-prepare_log_dir_for_shared_reader() {
-    local dir="$1"
-    mkdir -p "$dir"
-    chgrp "$(lancache_shared_secret_gid)" "$dir"
-    chmod 2750 "$dir"
-    find "$dir" -maxdepth 1 -type f -exec chgrp "$(lancache_shared_secret_gid)" {} + -exec chmod g+r {} +
-}
-
 install -d -m 750 /run/kea
 mkdir -p /var/lib/kea
 # Central logging pipeline (#633): Kea's loggers write to this file in
