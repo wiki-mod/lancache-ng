@@ -52,6 +52,11 @@ services:
     build_type: rust
     final_base: alpine
     runner: heavy
+    smoke:
+      - find --version
+      - rg --version
+      - curl --version
+      - lsof -v
   dhcp:
     context: services/dhcp
     build_type: apk
@@ -324,7 +329,7 @@ dependency_graph:
   dns:
     contexts: []
   watchdog:
-    contexts: [shared-scripts]
+    contexts: []
   ui:
     contexts: []
   dhcp:

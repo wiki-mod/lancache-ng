@@ -3,10 +3,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Health-check/restart daemon + file-retention sidecar (Rust).
 
-# What: Base image pin, consumed from the version SOT.
-# Why: build-manifest.yml is the sole owner of the pin.
+# What: base image, supplied by ci.sh from the SOT pin.
+# Why: non-authoritative fallback keeps FROM valid (AG-CI-008).
 # From: Issue #1683
-ARG ALPINE_IMAGE
+ARG ALPINE_IMAGE=alpine:3.24
 
 # What: builder image, supplied by ci.sh from the SOT.
 # Why: no mutable default; CI resolves the immutable ref.
@@ -75,11 +75,6 @@ ARG http_proxy
 ARG https_proxy
 ARG no_proxy
 
-# What: shared version-banner, not a per-service copy.
-# Why: named build context avoids a per-service copy.
-# From: Issue #1781 | PR #1783
-COPY --from=shared-scripts verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
-
 # What: switches apk's own repositories to plain http.
 # Why: Squid caches http; signed indices keep integrity.
 # From: Issue #1095
@@ -112,15 +107,6 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
     ripgrep && \
     if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /var/tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
-# What: verify apk binaries execute, not just exist.
-# Why: missing libs fail at runtime, not at apk add.
-# From: Issue #1613 | PR #1783
-RUN set -euo pipefail; \
-    find . -maxdepth 0 -printf '%f\n' >/dev/null; \
-    rg --version >/dev/null; \
-    curl --version >/dev/null; \
-    sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
-
 ENV EDITOR=nano
 ENV VISUAL=$EDITOR
 
@@ -145,11 +131,6 @@ RUN addgroup -g 10001 lancache && \
 RUN if [ -e /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt ]; then \
       echo "SECURITY: CI proxy CA persisted in final image" >&2; exit 1; \
     fi
-
-# What: final apk upgrade pass, no packages added.
-# Why: patches CVEs fixed after the installs above.
-# From: Issue #1781 | PR #1783
-RUN apk upgrade --no-cache
 
 # What: default ENTRYPOINT is the compiled Rust binary now.
 # Why: maintainer decision authorized the ENTRYPOINT swap.
