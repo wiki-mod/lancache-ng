@@ -124,7 +124,7 @@ _github_api_retry_delay() {
       candidate=$(( GITHUB_API_RATE_LIMIT_RESET - now ))
       (( candidate > 0 )) || candidate=0
     else
-      candidate=60
+      candidate="$delay"
     fi
     (( candidate > delay )) && delay="$candidate"
   fi
@@ -219,4 +219,22 @@ github_api_get_with_retry() {
   done
 
   return 1
+}
+
+github_raw_get_with_retry() {
+  local url="${1:?github_raw_get_with_retry: url is required}"
+  local body_file="${2:?github_raw_get_with_retry: body file is required}"
+  local attempt status curl_status delay
+  [[ "$url" == https://raw.githubusercontent.com/* ]] || return 2
+  for (( attempt=1; attempt<=GITHUB_API_RETRY_ATTEMPTS; attempt++ )); do
+    if status="$(curl -sS --connect-timeout 10 --max-time 30 --location -o "$body_file" -w '%{http_code}' "$url")"; then curl_status=0; else curl_status=$?; status=000; fi
+    [[ "$status" =~ ^[0-9]{3}$ ]] || status=000
+    GITHUB_API_HTTP_STATUS="$status"
+    (( curl_status == 0 )) && [[ "$status" == 200 ]] && return 0
+    (( curl_status == 0 )) && [[ "$status" == 404 || "$status" == 400 || "$status" == 401 || "$status" == 403 || "$status" == 422 ]] && return 1
+    (( attempt == GITHUB_API_RETRY_ATTEMPTS )) && return 1
+    delay="$(_github_api_retry_delay "$attempt" "$status")" || return 1
+    echo "::notice::GitHub raw GET attempt $attempt/$GITHUB_API_RETRY_ATTEMPTS returned HTTP $status; retrying after ${delay}s." >&2
+    sleep "$delay"
+  done
 }

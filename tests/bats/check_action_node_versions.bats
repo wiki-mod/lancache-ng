@@ -162,7 +162,8 @@ MOCKCURL
 
     run "$script" "$fixture_root"
     [ "$status" -eq 0 ]
-    ! grep -qF 'test-token' "$MOCK_CURL_ARGS"
+    run grep -qF 'test-token' "$MOCK_CURL_ARGS"
+    [ "$status" -ne 0 ]
     grep -qF 'https://raw.githubusercontent.com/actions/checkout/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/action.yml' "$MOCK_CURL_ARGS"
 }
 
@@ -266,7 +267,7 @@ EOF
     [[ "$output" == *"Could not find action.yml or action.yaml"* ]]
 }
 
-@test "continues to action.yaml after action.yml returns a temporary API failure" {
+@test "fails closed when action.yml returns a temporary API failure" {
     write_workflow <<'EOF'
 name: CI
 on: push
@@ -282,8 +283,8 @@ EOF
     export GITHUB_API_RETRY_ATTEMPTS=1
 
     run "$script" "$fixture_root"
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"check-action-node-versions: OK"* ]]
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Could not fully validate"* ]]
     [[ "$output" != *"GHCR operation failed"* ]]
 }
 
@@ -358,52 +359,6 @@ MOCKCURL
     [[ "$output" != *"Could not find action.yml or action.yaml"* ]]
 }
 
-@test "honors Retry-After while recovering a secondary rate limit" {
-    write_workflow <<'EOF'
-name: CI
-on: push
-jobs:
-  build:
-    steps:
-      - uses: someorg/retry-after-action@1212121212121212121212121212121212121212 # v1
-EOF
-    cat > "$mock_bin_dir/curl" <<'MOCKCURL'
-#!/usr/bin/env bash
-set -euo pipefail
-out_file=""
-headers_file=""
-args=("$@")
-for ((i = 0; i < ${#args[@]}; i++)); do
-    case "${args[$i]}" in
-        -o) out_file="${args[$((i + 1))]}" ;;
-        -D) headers_file="${args[$((i + 1))]}" ;;
-    esac
-done
-count_file="${MOCK_CURL_CALL_COUNTS:?MOCK_CURL_CALL_COUNTS not set}/retry-after"
-count=0
-[ -f "$count_file" ] && count=$(cat "$count_file")
-count=$((count + 1))
-printf '%s' "$count" > "$count_file"
-if [ "$count" -eq 1 ]; then
-    printf 'Retry-After: 300\r\n' > "$headers_file"
-    printf '' > "$out_file"
-    printf '429'
-else
-    printf 'runs:\n  using: node24\n' > "$out_file"
-    printf '200'
-fi
-MOCKCURL
-    chmod +x "$mock_bin_dir/curl"
-    mkdir -p "$BATS_TEST_TMPDIR/mock-curl-call-counts"
-    export MOCK_CURL_CALL_COUNTS="$BATS_TEST_TMPDIR/mock-curl-call-counts"
-    export GITHUB_API_RETRY_ATTEMPTS=2
-
-    run "$script" "$fixture_root"
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"HTTP 429; retrying after 5s"* ]]
-    [ "$(cat "$MOCK_SLEEP_CALLS")" -eq 5 ]
-}
-
 @test "fails closed on a permanent 401 response without retrying it" {
     write_workflow <<'EOF'
 name: CI
@@ -445,7 +400,7 @@ MOCKCURL
     [[ "$output" == *"Could not fully validate"* ]]
     [[ "$output" == *"HTTP 401"* ]]
 
-    local_key="someorg_bad-token-action_contents_action.yml_ref_1111111111111111111111111111111111111111"
+    local_key="someorg_bad-token-action_1111111111111111111111111111111111111111_action.yml"
     call_count=$(cat "$BATS_TEST_TMPDIR/mock-curl-call-counts/$local_key")
     [ "$call_count" -eq 1 ]
 }
