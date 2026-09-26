@@ -4443,6 +4443,32 @@ _ci_service_build_args() {
             out="${out}${prefix}MUSL_TARGET=${arch}-unknown-linux-musl"$'\n'
         fi
     fi
+    # What: install services derive version+digest from the SOT.
+    # Why: SOT owns external_versions; Dockerfile bakes none.
+    # From: Issue #1683
+    if [ "$(_ci_block_entry_field services "${service}" build_type)" = install ]; then
+        local iv iarch isha iarg
+        case "${service}" in
+            netdata) iarg="NETDATA" ;;
+            *)
+                ci_log "[CI-ERROR-BUILDARGS-0011]" "service=\"${service}\" build_type=\"install\" reason=\"no known install build-arg mapping; FAIL CLOSED\""
+                return 2
+                ;;
+        esac
+        iv="$(_ci_block_entry_field external_versions "${service}" version)"
+        [ -n "${iv}" ] || { ci_log "[CI-ERROR-BUILDARGS-0012]" "arg=\"${iarg}_VERSION\" service=\"${service}\" reason=\"missing external_versions.${service}.version; FAIL CLOSED\""; return 2; }
+        out="${out}${prefix}${iarg}_VERSION=${iv}"$'\n'
+        # What: per-platform arch + digest; skip when no platform.
+        # Why: identity/version reads are platform-scoped (§45).
+        # From: Issue #1683
+        if [ -n "${platform}" ]; then
+            iarch="$(_ci_platform_apk_arch "${platform}")" || { ci_log "[CI-ERROR-BUILDARGS-0010]" "platform=\"${platform}\" service=\"${service}\" reason=\"no apk-arch mapping for platform; FAIL CLOSED\""; return 2; }
+            isha="$(_ci_block_entry_field external_versions "${service}" "sha256_${iarch}")"
+            [ -n "${isha}" ] || { ci_log "[CI-ERROR-BUILDARGS-0013]" "arg=\"${iarg}_SHA256\" service=\"${service}\" arch=\"${iarch}\" reason=\"missing external_versions.${service}.sha256_${iarch}; FAIL CLOSED\""; return 2; }
+            out="${out}${prefix}${iarg}_ARCH=${iarch}"$'\n'
+            out="${out}${prefix}${iarg}_SHA256=${isha}"$'\n'
+        fi
+    fi
     printf '%s' "${out}"
 }
 
@@ -4805,68 +4831,51 @@ _ci_dockerfile_arg_default() {
     esac
 }
 
-# What: Diff SOT netdata fields vs its Dockerfile default.
-# Why: netdata bakes its own ARG; nothing enforces it yet.
+# What: Check SOT netdata fields + Dockerfile ARG contract.
+# Why: netdata must stay fully SOT-driven, no baked re-pin.
 # From: Issue #1683 | PR #1858
 _ci_version_diff_netdata() {
     local dockerfile="${CI_REPO_ROOT}/services/netdata/Dockerfile"
-    local sot_version sot_sha sot_sha_arm df_version df_sha df_sha_arm match=yes
-    sot_version="$(_ci_block_entry_field external_versions netdata version)"
-    sot_sha="$(_ci_block_entry_field external_versions netdata sha256_x86_64)"
-    sot_sha_arm="$(_ci_block_entry_field external_versions netdata sha256_aarch64)"
-    if [ -z "${sot_version}" ] || [ -z "${sot_sha}" ] || [ -z "${sot_sha_arm}" ]; then
-        ci_log "[CI-ERROR-VERSION-0007]" "reason=\"SOT external_versions.netdata missing version/sha256_x86_64/sha256_aarch64\""
+    local key val out=""
+    val="$(_ci_block_entry_field external_versions netdata version)"
+    if [ -z "${val}" ]; then
+        ci_log "[CI-ERROR-VERSION-0007]" "reason=\"SOT external_versions.netdata.version missing\""
         return 2
     fi
-    df_version="$(_ci_dockerfile_arg_default "${dockerfile}" NETDATA_VERSION)" || return 2
-    df_sha="$(_ci_dockerfile_arg_default "${dockerfile}" NETDATA_X86_64_SHA256)" || return 2
-    df_sha_arm="$(_ci_dockerfile_arg_default "${dockerfile}" NETDATA_AARCH64_SHA256)" || return 2
-    case "${df_version}" in
-        ABSENT)
-            ci_log "[CI-ERROR-VERSION-0008]" "path=\"${dockerfile}\" name=\"NETDATA_VERSION\" reason=\"ARG not found\""
+    out="${out}key=netdata.version sot=${val} present=yes"$'\n'
+    for key in sha256_x86_64 sha256_aarch64; do
+        val="$(_ci_block_entry_field external_versions netdata "${key}")"
+        if [ -z "${val}" ]; then
+            ci_log "[CI-ERROR-VERSION-0007]" "reason=\"SOT external_versions.netdata.${key} missing\""
             return 2
-            ;;
-        BARE)
-            ci_log "[CI-ERROR-VERSION-0009]" "path=\"${dockerfile}\" name=\"NETDATA_VERSION\" reason=\"ARG has no default\""
+        fi
+        if [[ ! "${val}" =~ ^[0-9a-f]{64}$ ]]; then
+            ci_log "[CI-ERROR-VERSION-0007]" "reason=\"external_versions.netdata.${key} not 64 hex chars\""
             return 2
-            ;;
-        FOUND:*) df_version="${df_version#FOUND:}" ;;
-    esac
-    case "${df_sha}" in
-        ABSENT)
-            ci_log "[CI-ERROR-VERSION-0008]" "path=\"${dockerfile}\" name=\"NETDATA_X86_64_SHA256\" reason=\"ARG not found\""
-            return 2
-            ;;
-        BARE)
-            ci_log "[CI-ERROR-VERSION-0009]" "path=\"${dockerfile}\" name=\"NETDATA_X86_64_SHA256\" reason=\"ARG has no default\""
-            return 2
-            ;;
-        FOUND:*) df_sha="${df_sha#FOUND:}" ;;
-    esac
-    case "${df_sha_arm}" in
-        ABSENT)
-            ci_log "[CI-ERROR-VERSION-0008]" "path=\"${dockerfile}\" name=\"NETDATA_AARCH64_SHA256\" reason=\"ARG not found\""
-            return 2
-            ;;
-        BARE)
-            ci_log "[CI-ERROR-VERSION-0009]" "path=\"${dockerfile}\" name=\"NETDATA_AARCH64_SHA256\" reason=\"ARG has no default\""
-            return 2
-            ;;
-        FOUND:*) df_sha_arm="${df_sha_arm#FOUND:}" ;;
-    esac
-    [ "${sot_version}" = "${df_version}" ] || match=no
-    [ "${sot_sha}" = "${df_sha}" ] || match=no
-    [ "${sot_sha_arm}" = "${df_sha_arm}" ] || match=no
-    printf 'key=netdata.version sot=%s dockerfile=%s match=%s\n' \
-        "${sot_version}" "${df_version}" "$([ "${sot_version}" = "${df_version}" ] && echo yes || echo no)"
-    printf 'key=netdata.sha256_x86_64 sot=%s dockerfile=%s match=%s\n' \
-        "${sot_sha}" "${df_sha}" "$([ "${sot_sha}" = "${df_sha}" ] && echo yes || echo no)"
-    printf 'key=netdata.sha256_aarch64 sot=%s dockerfile=%s match=%s\n' \
-        "${sot_sha_arm}" "${df_sha_arm}" "$([ "${sot_sha_arm}" = "${df_sha_arm}" ] && echo yes || echo no)"
-    [ "${match}" = yes ]
+        fi
+        out="${out}key=netdata.${key} sot=${val} present=yes"$'\n'
+    done
+    local argname want
+    for argname in NETDATA_VERSION NETDATA_ARCH NETDATA_SHA256; do
+        want="$(_ci_dockerfile_arg_default "${dockerfile}" "${argname}")" || return 2
+        case "${want}" in
+            ABSENT)
+                ci_log "[CI-ERROR-VERSION-0008]" "path=\"${dockerfile}\" name=\"${argname}\" reason=\"expected ARG declaration missing\""
+                return 2
+                ;;
+            BARE)
+                out="${out}key=netdata.consumer.${argname} shape=bare"$'\n'
+                ;;
+            FOUND:*)
+                ci_log "[CI-ERROR-VERSION-0009]" "path=\"${dockerfile}\" name=\"${argname}\" reason=\"unexpected baked default; must stay SOT-driven\""
+                return 2
+                ;;
+        esac
+    done
+    printf '%s' "${out}"
 }
 
-# What: netdata verify: read-only, fails on real drift.
+# What: netdata verify: read-only, fails on contract breach.
 # Why: verify is the enforced gate; audit only reports.
 # From: Issue #1683 | PR #1858
 _ci_version_verify_netdata() {
@@ -4878,10 +4887,6 @@ _ci_version_verify_netdata() {
         rc=0
     else
         rc=$?
-    fi
-    if [ "${rc}" -eq 1 ]; then
-        ci_error "[CI-ERROR-VERSION-0010]" "key=\"netdata\" reason=\"SOT vs Dockerfile default drifted\"" "${out}"
-        return 1
     fi
     [ "${rc}" -eq 0 ] && printf '%s\n' "${out}"
     return "${rc}"
@@ -4929,20 +4934,6 @@ _ci_version_diff_dhclient() {
     printf '%s' "${out}"
 }
 
-# What: flags SOT netdata aarch64 sha with no ARG consumer.
-# Why: catches a future arm64 SOT/Dockerfile wiring gap.
-# From: Issue #1683 | PR #1858
-_ci_version_audit_netdata_aarch64_orphan() {
-    local sha res
-    sha="$(_ci_block_entry_field external_versions netdata sha256_aarch64)"
-    [ -n "${sha}" ] || return 0
-    res="$(_ci_dockerfile_arg_default \
-        "${CI_REPO_ROOT}/services/netdata/Dockerfile" \
-        NETDATA_AARCH64_SHA256)" || return 0
-    if [ "${res}" = "ABSENT" ]; then
-        ci_log "[CI-WARN-VERSION-0001]" "key=\"netdata.sha256_aarch64\" value=\"${sha}\" reason=\"no Dockerfile consumer; escalate, out of scope\""
-    fi
-}
 
 # What: Flag if dhclient's branch comment text has drifted.
 # Why: Prose restates the SOT value; sync never touches it.
@@ -4956,74 +4947,6 @@ _ci_version_audit_dhclient_branch_comment() {
     fi
 }
 
-# What: Idempotently write SOT netdata into its Dockerfile.
-# Why: sync repairs drift; verify/audit only ever report it.
-# From: Issue #1683 | PR #1858
-_ci_version_sync_netdata() {
-    local dockerfile="${CI_REPO_ROOT}/services/netdata/Dockerfile"
-    local sot_version sot_sha sot_sha_arm cur_version cur_sha cur_sha_arm tmp did_write=0
-    sot_version="$(_ci_block_entry_field external_versions netdata version)"
-    sot_sha="$(_ci_block_entry_field external_versions netdata sha256_x86_64)"
-    sot_sha_arm="$(_ci_block_entry_field external_versions netdata sha256_aarch64)"
-    if [ -z "${sot_version}" ] || [ -z "${sot_sha}" ] || [ -z "${sot_sha_arm}" ]; then
-        ci_log "[CI-ERROR-VERSION-0007]" "reason=\"SOT external_versions.netdata missing version/sha256_x86_64/sha256_aarch64\""
-        return 2
-    fi
-    cur_version="$(_ci_dockerfile_arg_default "${dockerfile}" NETDATA_VERSION)" || return 2
-    cur_sha="$(_ci_dockerfile_arg_default "${dockerfile}" NETDATA_X86_64_SHA256)" || return 2
-    cur_sha_arm="$(_ci_dockerfile_arg_default "${dockerfile}" NETDATA_AARCH64_SHA256)" || return 2
-    case "${cur_version}" in
-        FOUND:*) cur_version="${cur_version#FOUND:}" ;;
-        *)
-            ci_log "[CI-ERROR-VERSION-0008]" "path=\"${dockerfile}\" name=\"NETDATA_VERSION\" reason=\"no baked default to sync (${cur_version})\""
-            return 2
-            ;;
-    esac
-    case "${cur_sha}" in
-        FOUND:*) cur_sha="${cur_sha#FOUND:}" ;;
-        *)
-            ci_log "[CI-ERROR-VERSION-0008]" "path=\"${dockerfile}\" name=\"NETDATA_X86_64_SHA256\" reason=\"no baked default to sync (${cur_sha})\""
-            return 2
-            ;;
-    esac
-    case "${cur_sha_arm}" in
-        FOUND:*) cur_sha_arm="${cur_sha_arm#FOUND:}" ;;
-        *)
-            ci_log "[CI-ERROR-VERSION-0008]" "path=\"${dockerfile}\" name=\"NETDATA_AARCH64_SHA256\" reason=\"no baked default to sync (${cur_sha_arm})\""
-            return 2
-            ;;
-    esac
-    if [ "${cur_version}" = "${sot_version}" ] && [ "${cur_sha}" = "${sot_sha}" ] && [ "${cur_sha_arm}" = "${sot_sha_arm}" ]; then
-        printf 'key=netdata.version sot=%s written=%s changed=0\n' "${sot_version}" "${sot_version}"
-        printf 'key=netdata.sha256_x86_64 sot=%s written=%s changed=0\n' "${sot_sha}" "${sot_sha}"
-        printf 'key=netdata.sha256_aarch64 sot=%s written=%s changed=0\n' "${sot_sha_arm}" "${sot_sha_arm}"
-        return 0
-    fi
-    tmp="$(mktemp)"
-    awk -v ver="${sot_version}" -v sha="${sot_sha}" -v shaarm="${sot_sha_arm}" '
-        /^ARG NETDATA_VERSION=/ { print "ARG NETDATA_VERSION=" ver; next }
-        /^ARG NETDATA_X86_64_SHA256=/ { print "ARG NETDATA_X86_64_SHA256=" sha; next }
-        /^ARG NETDATA_AARCH64_SHA256=/ { print "ARG NETDATA_AARCH64_SHA256=" shaarm; next }
-        { print }
-    ' "${dockerfile}" > "${tmp}"
-    cp "${tmp}" "${dockerfile}"
-    rm -f "${tmp}"
-    # What: readback proves the write, never trust the awk.
-    # Why: a shape the narrow rewrite misses must fail loud.
-    # From: Issue #1683 | PR #1858
-    local rb_version rb_sha rb_sha_arm
-    rb_version="$(_ci_dockerfile_arg_default "${dockerfile}" NETDATA_VERSION)" || return 2
-    rb_sha="$(_ci_dockerfile_arg_default "${dockerfile}" NETDATA_X86_64_SHA256)" || return 2
-    rb_sha_arm="$(_ci_dockerfile_arg_default "${dockerfile}" NETDATA_AARCH64_SHA256)" || return 2
-    if [ "${rb_version}" != "FOUND:${sot_version}" ] || [ "${rb_sha}" != "FOUND:${sot_sha}" ] || [ "${rb_sha_arm}" != "FOUND:${sot_sha_arm}" ]; then
-        ci_log "[CI-ERROR-VERSION-0015]" "path=\"${dockerfile}\" reason=\"write readback mismatch; canonical rewrite did not match the line shape\""
-        return 2
-    fi
-    did_write=1
-    printf 'key=netdata.version sot=%s written=%s changed=%s\n' "${sot_version}" "${sot_version}" "${did_write}"
-    printf 'key=netdata.sha256_x86_64 sot=%s written=%s changed=%s\n' "${sot_sha}" "${sot_sha}" "${did_write}"
-    printf 'key=netdata.sha256_aarch64 sot=%s written=%s changed=%s\n' "${sot_sha_arm}" "${sot_sha_arm}" "${did_write}"
-}
 
 # What: version verify: default, read-only, fails on drift.
 # Why: The one CI gate for SOT-vs-repo version drift.
@@ -5059,17 +4982,16 @@ _ci_version_audit() {
     if out="$(_ci_version_diff_dhclient)"; then rcd=0; else rcd=$?; fi
     [ -n "${out}" ] && printf '%s\n' "${out}"
     [ "${rcd}" -eq 2 ] && rc=2
-    _ci_version_audit_netdata_aarch64_orphan
     _ci_version_audit_dhclient_branch_comment
     return "${rc}"
 }
 
-# What: version sync: writes netdata, re-checks dhclient.
-# Why: dhclient has nothing to write; contract-only, no-op.
+# What: version sync: both consumers are BARE, contract-only.
+# Why: netdata+dhclient derive from SOT; nothing to write.
 # From: Issue #1683 | PR #1858
 _ci_version_sync() {
     local rc=0 out rcd
-    _ci_version_sync_netdata || rc=2
+    printf 'sync=netdata changed=0 reason=nothing-to-write\n'
     if out="$(_ci_version_diff_dhclient)"; then rcd=0; else rcd=$?; fi
     [ -n "${out}" ] && printf '%s\n' "${out}"
     if [ "${rcd}" -eq 0 ]; then

@@ -3357,15 +3357,26 @@ netdata=sha256:n"
     [[ "${output}" != *"--build-arg"* ]]
 }
 
-@test "build-args emits only ALPINE_IMAGE for netdata (no version pin)" {
-    # What: netdata gets ALPINE_IMAGE only.
-    # Why: netdata keeps baked-in ARG defaults (SOT-Sync).
+@test "build-args netdata emits SOT version; digest needs a platform" {
+    # What: netdata derives version from SOT; no baked pin.
+    # Why: version is platform-independent; digest is per-arch.
     # From: Issue #1683
     run bash "${CI_SH}" build-args netdata
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"--build-arg ALPINE_IMAGE=mirror.gcr.io"* ]]
-    [[ "${output}" != *"NETDATA_VERSION"* ]]
-    [[ "${output}" != *"NETDATA_X86_64_SHA256"* ]]
+    [[ "${output}" == *"--build-arg NETDATA_VERSION=v2.11.0"* ]]
+    [[ "${output}" != *"NETDATA_SHA256"* ]]
+    [[ "${output}" != *"NETDATA_ARCH"* ]]
+}
+
+@test "build-args netdata with a platform emits the per-arch digest" {
+    # What: a platform selects arch + digest from the SOT.
+    # Why: install services pin the exact per-platform asset.
+    # From: Issue #1683
+    run bash "${CI_SH}" build-args netdata "" linux/amd64
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"--build-arg NETDATA_ARCH=x86_64"* ]]
+    [[ "${output}" == *"--build-arg NETDATA_SHA256=b42d9937"* ]]
 }
 
 @test "build-args for a product service fails closed on a missing central base image" {
@@ -7988,11 +7999,11 @@ _version_fixture_repo() {
 
 @test "version verify (default) passes clean on the real repo" {
     # What: default subcommand is verify, read-only.
-    # Why: netdata+dhclient must match today's real files.
+    # Why: netdata+dhclient stay SOT-driven, ARGs bare.
     # From: Issue #1683 | PR #1858
     run bash "${CI_SH}" version
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"key=netdata.version"*"match=yes"* ]]
+    [[ "${output}" == *"key=netdata.consumer.NETDATA_SHA256 shape=bare"* ]]
     [[ "${output}" == *"key=dhclient.consumer.DHCLIENT_SHA256 shape=bare"* ]]
 }
 
@@ -8004,43 +8015,40 @@ _version_fixture_repo() {
     [ "${status}" -eq 0 ]
 }
 
-@test "version verify fails closed on a netdata version drift" {
-    # What: SOT bumped, Dockerfile default left behind.
-    # Why: verify is the CI gate; drift must fail the run.
+@test "version verify fails closed if a netdata ARG is missing" {
+    # What: netdata loses its NETDATA_SHA256 ARG line.
+    # Why: the SOT-to-consumer contract must not just break.
     # From: Issue #1683 | PR #1858
-    local m="${BATS_TEST_TMPDIR}/nd-version.yml"
-    sed 's/version: v2.11.0/version: v2.99.0/' \
-        "${CI_MANIFEST_SOURCE}" > "${m}"
-    CI_MANIFEST="${m}" run bash "${CI_SH}" version verify
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *"CI-ERROR-VERSION-0010"* ]]
-    [[ "${output}" == *"sot=v2.99.0"* ]]
-    [[ "${output}" == *"dockerfile=v2.11.0"* ]]
+    local root; root="$(_version_fixture_repo)"
+    sed -i '/^ARG NETDATA_SHA256$/d' \
+        "${root}/services/netdata/Dockerfile"
+    CI_REPO_ROOT="${root}" run bash "${CI_SH}" version verify
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VERSION-0008"* ]]
 }
 
-@test "version verify fails closed on a netdata sha256 drift" {
-    # What: SOT sha256_x86_64 changed, Dockerfile did not.
-    # Why: a silent hash drift must fail the run too.
+@test "version verify fails closed on a baked-in netdata default" {
+    # What: someone re-pins NETDATA_VERSION with a default.
+    # Why: netdata stays SOT-driven, no local re-pin ever.
     # From: Issue #1683 | PR #1858
-    local m="${BATS_TEST_TMPDIR}/nd-sha.yml"
-    sed 's/sha256_x86_64: b42d9937807f28812502a967906d370cff9ab443453813656b99ff6a9b3c5649/sha256_x86_64: deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/' \
-        "${CI_MANIFEST_SOURCE}" > "${m}"
-    CI_MANIFEST="${m}" run bash "${CI_SH}" version verify
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *"CI-ERROR-VERSION-0010"* ]]
+    local root; root="$(_version_fixture_repo)"
+    sed -i 's/^ARG NETDATA_VERSION$/ARG NETDATA_VERSION=v2.99.0/' \
+        "${root}/services/netdata/Dockerfile"
+    CI_REPO_ROOT="${root}" run bash "${CI_SH}" version verify
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VERSION-0009"* ]]
 }
 
-@test "version verify fails closed on a netdata aarch64 sha256 drift" {
-    # What: SOT aarch64 sha256 changed; Dockerfile didn't.
-    # Why: Verify arm64 as hard as x86_64.
-    # From: Issue #1683
-    local m="${BATS_TEST_TMPDIR}/nd-sha-arm.yml"
-    sed 's/sha256_aarch64: 8cd056d64078c109409c08e30d55324c82e3855f9d8e4b304cacc7c612610e09/sha256_aarch64: deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/' \
+@test "version verify fails closed on a malformed SOT netdata sha256" {
+    # What: SOT sha256_x86_64 shortened to non-hex64 text.
+    # Why: a truncated/garbled pin must never pass silently.
+    # From: Issue #1683 | PR #1858
+    local m="${BATS_TEST_TMPDIR}/nd-badsha.yml"
+    sed 's/sha256_x86_64: b42d9937807f28812502a967906d370cff9ab443453813656b99ff6a9b3c5649/sha256_x86_64: not-a-real-hash/' \
         "${CI_MANIFEST_SOURCE}" > "${m}"
     CI_MANIFEST="${m}" run bash "${CI_SH}" version verify
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *"CI-ERROR-VERSION-0010"* ]]
-    [[ "${output}" == *"netdata.sha256_aarch64"* ]]
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VERSION-0007"* ]]
 }
 
 @test "version verify fails closed on a missing SOT dhclient field" {
@@ -8090,111 +8098,27 @@ _version_fixture_repo() {
     [[ "${output}" == *"CI-ERROR-VERSION-0013"* ]]
 }
 
-@test "version audit reports the netdata aarch64 orphan when no consumer exists" {
-    # What: aarch64 ARG orphan still visible always.
-    # Why: Audit must fail closed when required ARG missing.
-    # From: Issue #1683
-    local root; root="$(_version_fixture_repo)"
-    sed -i '/^ARG NETDATA_AARCH64_SHA256=/d' "${root}/services/netdata/Dockerfile"
-    CI_REPO_ROOT="${root}" run bash "${CI_SH}" version audit
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-WARN-VERSION-0001"* ]]
-    [[ "${output}" == *"netdata.sha256_aarch64"* ]]
-}
-
-@test "version audit no longer flags the netdata aarch64 orphan on the real repo" {
-    # What: Real repo now consumes aarch64 ARG; no warning.
-    # Why: Proof consolidation resolved scope gap.
-    # From: Issue #1683
+@test "version audit reports the netdata contract without failing" {
+    # What: audit is the report-only view of the contract.
+    # Why: verify is the CI gate; audit stays exit 0 when clean.
+    # From: Issue #1683 | PR #1858
     run bash "${CI_SH}" version audit
     [ "${status}" -eq 0 ]
-    [[ "${output}" != *"CI-WARN-VERSION-0001"* ]]
+    [[ "${output}" == *"key=netdata.version"* ]]
+    [[ "${output}" == *"shape=bare"* ]]
 }
 
-@test "version audit reports drift but never fails on it" {
-    # What: audit is the report-only view of the same drift.
-    # Why: verify is the CI gate; audit must stay exit 0.
-    # From: Issue #1683 | PR #1858
-    local m="${BATS_TEST_TMPDIR}/nd-audit.yml"
-    sed 's/version: v2.11.0/version: v2.99.0/' \
-        "${CI_MANIFEST_SOURCE}" > "${m}"
-    CI_MANIFEST="${m}" run bash "${CI_SH}" version audit
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"match=no"* ]]
-}
-
-@test "version sync is a byte-identical no-op when already synced" {
-    # What: today's real files already match the SOT.
-    # Why: sync must never touch a file with nothing to fix.
+@test "version sync is a contract-only no-op for both consumers" {
+    # What: both consumers are BARE; sync writes nothing.
+    # Why: netdata+dhclient derive live from the SOT.
     # From: Issue #1683 | PR #1858
     local root; root="$(_version_fixture_repo)"
     local before; before="$(sha256sum "${root}/services/netdata/Dockerfile")"
     CI_REPO_ROOT="${root}" run bash "${CI_SH}" version sync
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"changed=0"* ]]
-    [[ "${output}" == *"sync=dhclient changed=0"* ]]
+    [[ "${output}" == *"sync=netdata changed=0 reason=nothing-to-write"* ]]
+    [[ "${output}" == *"sync=dhclient changed=0 reason=nothing-to-write"* ]]
     local after; after="$(sha256sum "${root}/services/netdata/Dockerfile")"
-    [ "${before}" = "${after}" ]
-}
-
-@test "version sync writes a drifted netdata default, then no-ops" {
-    # What: SOT moves ahead; sync must repair the file.
-    # Why: sync is the only subcommand allowed to mutate.
-    # From: Issue #1683 | PR #1858
-    local root; root="$(_version_fixture_repo)"
-    local m="${BATS_TEST_TMPDIR}/nd-sync.yml"
-    sed 's/version: v2.11.0/version: v2.99.0/' \
-        "${CI_MANIFEST_SOURCE}" > "${m}"
-    CI_MANIFEST="${m}" CI_REPO_ROOT="${root}" \
-        run bash "${CI_SH}" version sync
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"changed=1"* ]]
-    grep -qx 'ARG NETDATA_VERSION=v2.99.0' \
-        "${root}/services/netdata/Dockerfile"
-    local first; first="$(sha256sum "${root}/services/netdata/Dockerfile")"
-    CI_MANIFEST="${m}" CI_REPO_ROOT="${root}" \
-        run bash "${CI_SH}" version sync
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"changed=0"* ]]
-    local second; second="$(sha256sum "${root}/services/netdata/Dockerfile")"
-    [ "${first}" = "${second}" ]
-}
-
-@test "version sync fails loud on a non-canonical ARG line" {
-    # What: Non-canonical ARG shape must fail (lowercase).
-    # Why: Write regex must never claim false positive.
-    # From: Issue #1683 | PR #1858
-    local root; root="$(_version_fixture_repo)"
-    sed -i 's/^ARG NETDATA_VERSION=/arg NETDATA_VERSION=/' \
-        "${root}/services/netdata/Dockerfile"
-    local m="${BATS_TEST_TMPDIR}/nd-noncanon.yml"
-    sed 's/version: v2.11.0/version: v2.99.0/' \
-        "${CI_MANIFEST_SOURCE}" > "${m}"
-    local before; before="$(sha256sum "${root}/services/netdata/Dockerfile")"
-    CI_MANIFEST="${m}" CI_REPO_ROOT="${root}" \
-        run bash "${CI_SH}" version sync
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VERSION-0015"* ]]
-    [[ "${output}" != *"changed=1"* ]]
-    local after; after="$(sha256sum "${root}/services/netdata/Dockerfile")"
-    [ "${before}" = "${after}" ]
-}
-
-@test "version sync touches only the three netdata ARG lines" {
-    # What: every other Dockerfile line must survive sync.
-    # Why: sync owns three values, never a broader rewrite.
-    # From: Issue #1683 | PR #1858
-    local root; root="$(_version_fixture_repo)"
-    local m="${BATS_TEST_TMPDIR}/nd-scope.yml"
-    sed 's/version: v2.11.0/version: v2.99.0/' \
-        "${CI_MANIFEST_SOURCE}" > "${m}"
-    local strip='/^ARG NETDATA_VERSION=/d;/^ARG NETDATA_X86_64_SHA256=/d;/^ARG NETDATA_AARCH64_SHA256=/d'
-    local before after
-    before="$(sed "${strip}" "${root}/services/netdata/Dockerfile")"
-    CI_MANIFEST="${m}" CI_REPO_ROOT="${root}" \
-        run bash "${CI_SH}" version sync
-    [ "${status}" -eq 0 ]
-    after="$(sed "${strip}" "${root}/services/netdata/Dockerfile")"
     [ "${before}" = "${after}" ]
 }
 
