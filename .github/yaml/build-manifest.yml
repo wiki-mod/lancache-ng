@@ -62,6 +62,26 @@ services:
     build_type: apk
     final_base: alpine
     runner: light
+    # What: final-image apk packages; the SOT owns the list.
+    # Why: consumer derives; no hardcoded apk add (AG-CI-006).
+    # From: Issue #1683
+    packages:
+      - kea-dhcp4
+      - kea-ctrl-agent
+      - kea-dhcp-ddns
+      - kea-admin
+      - kea-hook-lease-cmds
+      - bash
+      - nmap
+      - openssl
+      - jq
+      - iptables
+      - nano
+      - curl
+      - findutils
+      - gettext-envsubst
+      - lsof
+      - ripgrep
     # What: execute-smoke checks run post-build by ci.sh.
     # Why: prove apk binaries run, not just exist (#1613).
     # From: Issue #1613 | Issue #1683
