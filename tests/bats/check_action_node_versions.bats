@@ -259,19 +259,20 @@ EOF
     [[ "$output" == *"Could not find action.yml or action.yaml"* ]]
 }
 
-@test "rejects external action refs that are not full commit SHAs" {
+@test "allows same-repository bootstrap actions without raw third-party fetches" {
     write_workflow <<'EOF'
 name: CI
 on: push
 jobs:
   build:
     steps:
-      - uses: someorg/tagged-action@v1 # v1
+      - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
+      - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
 EOF
 
     run "$script" "$fixture_root"
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"must use a full 40-hex commit SHA"* ]]
+    [ "$status" -eq 0 ]
+    [ ! -s "$MOCK_SLEEP_CALLS" ]
 }
 
 @test "fails closed when action.yml returns a temporary API failure" {

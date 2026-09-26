@@ -350,7 +350,14 @@ for value in "${uses_values[@]}"; do
     if is_deprecated_runtime "$using"; then
       fail "Local action '$value' ($resolved) declares runs.using: $using, a deprecated Node runtime. Update its steps to drop the Node-based step, or split it so no step still needs a deprecated runtime."
     fi
-  else
+  elif is_same_repo_owner_ref "$value"; then
+    # What: Keeps same-repository bootstrap action refs out of raw fetches.
+    # Why: Their branch ref is governed by repository checkout semantics.
+    # From: Issue #1860 | PR #1872
+    if [[ "$value" != *'@'* ]]; then
+      fail "Same-repository action '$value' must include an explicit ref."
+    fi
+  elif is_external_action_ref "$value"; then
     # What: Resolves external action manifests by immutable commit SHA.
     # Why: Raw content must not permit mutable tag or branch references.
     ref="${value##*@}"
@@ -386,6 +393,8 @@ for value in "${uses_values[@]}"; do
         fail "Could not fully validate '$value' (referenced in: $(referencing_files "$value")); external action metadata resolution returned an unexpected result."
         ;;
     esac
+  else
+    fail "Unsupported action reference '$value' (referenced in: $(referencing_files "$value"))."
   fi
 done
 
