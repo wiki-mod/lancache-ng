@@ -2144,6 +2144,19 @@ jobs:
         run: rm -f deploy/full-setup/.ci-exact-digests.yml
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
+  deep-full-setup-validate:
+    name: deep full-setup validation
+    needs: full-setup-validate
+    if: >-
+      always() &&
+      github.event_name == 'pull_request' &&
+      needs['full-setup-validate'].result == 'success'
+    permissions:
+      contents: read
+      packages: write
+      actions: read
+    uses: ./.github/workflows/full-setup-deep-validate.yml
+    secrets: inherit
   dns_rust_quality:
     name: rust-quality (dns/nats-subscriber)
     needs: detect-changes
