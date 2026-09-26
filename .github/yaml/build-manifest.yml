@@ -246,6 +246,12 @@ services:
     build_type: install
     final_base: alpine
     runner: light
+    # What: final-image apk packages; the SOT owns the list.
+    # Why: consumer derives; no hardcoded apk add (AG-CI-006).
+    # From: Issue #1683
+    packages:
+      - bash
+      - ca-certificates
 
 # What: The toolchain image that builds the product stack.
 # Why: built by the generic pipeline; never counted in the stack.

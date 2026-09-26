@@ -1474,7 +1474,7 @@ _ci_docker_build() {
     # What: apk final stages bind-mount ci.sh via a named context.
     # Why: apk-setup runs in the bare final stage, ci.sh not in context.
     # From: Issue #1683
-    if [ "${build_type}" = apk ]; then
+    if [ "${build_type}" = apk ] || [ "${build_type}" = install ]; then
         args+=(--build-context "ci-scripts=${CI_SCRIPT_DIR}")
     fi
     while IFS= read -r a; do
