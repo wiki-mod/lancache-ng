@@ -1458,11 +1458,19 @@ _ci_cache_to_spec() {
 # From: Issue #1683
 _ci_docker_build() {
     local service="$1" identity="$2" platform="$3"
-    local context tag a
+    local context tag a build_type
+    build_type="$(ci_service_field "${service}" build_type)"
     context="$(ci_service_field "${service}" context)"
     [ -z "${context}" ] && context="services/${service}"
     tag="$(_ci_image_tag "${service}" "${platform}" "${identity}")"
     local -a args=()
+    # What: rust builds from repo-root, not service dir.
+    # Why: bind-mount + workspace COPYs need the tree.
+    # From: Issue #1683
+    if [ "${build_type}" = rust ]; then
+        args+=(--file "${context}/Dockerfile")
+        context="."
+    fi
     while IFS= read -r a; do
         [ -n "${a}" ] && args+=(--label "${a}")
     done < <(_ci_oci_labels "${service}")
@@ -2391,7 +2399,7 @@ _ci_default_test() {
     build_type="$(ci_service_field "${service}" build_type)"
     [ -n "${build_type}" ] || build_type="toolchain"
     case "${build_type}" in
-        rust) _ci_test_rust "${service}" ;;
+        rust) _ci_test_rust "${service}" && _ci_smoke_service "${service}" ;;
         apk|install) _ci_smoke_service "${service}" ;;
         toolchain) _ci_test_toolchain "${service}" ;;
         *) ci_log "[CI-ERROR-TEST-0004]" "service=\"${service}\" build_type=\"${build_type}\" reason=\"unknown build_type\""; return 2 ;;

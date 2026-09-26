@@ -41,6 +41,12 @@ services:
     # From: Issue #1683
     coverage_manifest: services/dns/nats-subscriber/Cargo.toml
     coverage_threshold: 0
+    smoke:
+      - find --version
+      - envsubst --version
+      - rg --version
+      - curl --version
+      - lsof -v
   watchdog:
     context: services/watchdog
     build_type: rust
@@ -312,7 +318,7 @@ dependency_graph:
   proxy:
     contexts: [shared-scripts, dns-domains]
   dns:
-    contexts: [shared-scripts]
+    contexts: []
   watchdog:
     contexts: [shared-scripts]
   ui:
