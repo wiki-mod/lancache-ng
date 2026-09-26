@@ -2375,7 +2375,7 @@ _ci_smoke_service() {
     local -a cl=()
     while IFS= read -r c; do [ -n "${c}" ] && cl+=("${c}"); done <<< "${checks}"
     for c in "${cl[@]}"; do
-        if ! docker run --rm --entrypoint timeout "${image}" --kill-after=30s --signal=TERM 5m sh -c "${c}" >/dev/null 2>&1; then
+        if ! timeout --kill-after=30s --signal=TERM 5m docker run --rm --entrypoint sh "${image}" -c "${c}" >/dev/null 2>&1; then
             ci_error "[CI-ERROR-TEST-0008]" "service=\"${service}\" check=\"${c}\" reason=\"execute-smoke failed; missing lib?\"" "$(docker run --rm --entrypoint sh "${image}" -c "${c}" 2>&1 | head -5)"
             return 1
         fi

@@ -40,8 +40,8 @@ RUN sed -i 's|^https://|http://|' /etc/apk/repositories \
         curl \
         gettext-envsubst
 
-COPY services/ntp/chrony.conf /etc/chrony/chrony.conf.template
-COPY services/ntp/entrypoint.sh /entrypoint.sh
+COPY chrony.conf /etc/chrony/chrony.conf.template
+COPY entrypoint.sh /entrypoint.sh
 
 # What: chrony log and lib dirs; entrypoint drops privileges.
 # Why: chronyd needs root for UDP/123; dirs pre-created here.

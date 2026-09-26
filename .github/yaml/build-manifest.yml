@@ -61,6 +61,14 @@ services:
     build_type: apk
     final_base: alpine
     runner: light
+    # What: execute-smoke checks run post-build by ci.sh.
+    # Why: prove apk binaries run, not just exist (#1613).
+    # From: Issue #1613 | Issue #1683
+    smoke:
+      - chronyd -v
+      - curl --version
+      - envsubst --version
+      - bash --version
   syslog:
     context: services/syslog
     # What: apk syslog-ng plus copied fluent-bit binary.
