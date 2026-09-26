@@ -5,11 +5,11 @@
 # Why: Alpine lacks fluent-bit; pin its binary in a prefix.
 # From: Issue #1428 | PR #1431 | Issue #1683
 
-# What: Base image pins, consumed from the version SOT.
-# Why: build-manifest.yml is the sole owner of both pins.
+# What: base images, supplied by ci.sh from the SOT pins.
+# Why: non-authoritative fallbacks keep FROM valid (AG-CI-008).
 # From: Issue #1683
-ARG ALPINE_IMAGE
-ARG FLUENT_BIT_IMAGE
+ARG ALPINE_IMAGE=alpine:3.24
+ARG FLUENT_BIT_IMAGE=cr.fluentbit.io/fluent/fluent-bit:3.2.10
 FROM ${FLUENT_BIT_IMAGE} AS fluent-bit-src
 
 FROM ${ALPINE_IMAGE}
