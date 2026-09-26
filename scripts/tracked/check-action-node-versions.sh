@@ -75,6 +75,7 @@ set -euo pipefail
 
 repo_root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 cd "$repo_root"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/github-api-retry.sh"
 
 workflow_dir=.github/workflows
 actions_dir=.github/actions
@@ -336,19 +337,11 @@ done
 # From: Issue #1860 | PR #1872
 fetch_external_action_yaml() {
   local owner="$1" repo="$2" subpath="$3" ref="$4"
-  local file body url status curl_status infrastructure_status="" attempt delay
+  local file body url status infrastructure_status=""
   for file in action.yml action.yaml; do
     body="$(mktemp "${TMPDIR:-/var/tmp}/action-metadata.XXXXXX")" || return 1
     url="https://raw.githubusercontent.com/${owner}/${repo}/${ref}/${subpath:+${subpath}/}${file}"
-    for (( attempt=1; attempt<=3; attempt++ )); do
-      if status="$(curl -sS --connect-timeout 10 --max-time 30 --location -o "$body" -w '%{http_code}' "$url")"; then curl_status=0; else curl_status=$?; status=000; fi
-      if (( curl_status == 0 )) && [[ "$status" != "429" && ! "$status" =~ ^5 ]]; then break; fi
-      (( attempt == 3 )) && break
-      delay=$(( 5 * (1 << (attempt - 1)) ))
-      echo "::notice::Raw action manifest read returned HTTP $status; retrying after ${delay}s." >&2
-      sleep "$delay"
-    done
-    if (( curl_status == 0 )) && [[ "$status" == "200" ]]; then
+    if github_raw_get_with_retry "$url" "$body"; then
       printf 'OK\n'
       cat "$body"
       rm -f -- "$body"
@@ -359,7 +352,8 @@ fetch_external_action_yaml() {
     if [[ "$status" == "404" ]]; then
       continue
     fi
-    [[ -n "$infrastructure_status" ]] || infrastructure_status="$status"
+    printf 'INFRA:%s\n' "$status"
+    return 0
   done
   if [[ -n "$infrastructure_status" ]]; then
     printf 'INFRA:%s\n' "$infrastructure_status"
@@ -405,12 +399,18 @@ for value in "${uses_values[@]}"; do
       fail "Local action '$value' ($resolved) declares runs.using: $using, a deprecated Node runtime. Update its steps to drop the Node-based step, or split it so no step still needs a deprecated runtime."
     fi
   else
-    # --- External pinned action (resolve via the GitHub Contents API) -----
+    # What: Resolves external action manifests by immutable commit SHA.
+    # Why: Raw content must not permit mutable tag or branch references.
     ref="${value##*@}"
     path_at="${value%@*}"
     owner=$(cut -d/ -f1 <<<"$path_at")
     repo=$(cut -d/ -f2 <<<"$path_at")
     subpath=$(cut -d/ -f3- <<<"$path_at")
+
+    if [[ ! "$ref" =~ ^[0-9a-fA-F]{40}$ ]]; then
+      fail "External action '$value' must use a full 40-hex commit SHA before its raw manifest can be validated."
+      continue
+    fi
 
     result=$(fetch_external_action_yaml "$owner" "$repo" "$subpath" "$ref")
     marker="${result%%$'\n'*}"
