@@ -55,7 +55,7 @@ on:
 # tier. Manual (publish) runs are never grouped together so two operators'
 # dispatches don't cancel each other.
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.ref) || format('{0}-{1}', github.workflow, github.run_id) }}
+  group: ${{ github.event_name == 'pull_request' && format('deep-full-setup-{0}', github.ref) || format('deep-full-setup-{0}', github.run_id) }}
   cancel-in-progress: true
 
 permissions:
