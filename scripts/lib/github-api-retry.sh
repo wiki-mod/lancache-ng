@@ -77,10 +77,10 @@ _github_api_get_once() {
 
   local header_config curl_status headers_file github_token
   headers_file="$(mktemp "${TMPDIR:-/var/tmp}/github-api-headers.XXXXXX")" || return 1
-  header_config="$(printf 'header = "Accept: %s"\nheader = "X-GitHub-Api-Version: 2022-11-28"\n' "$accept")"
+  header_config="$(printf 'header = "Accept: %s"\nheader = "X-GitHub-Api-Version: 2022-11-28"' "$accept")"
   github_token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
   if [[ -n "$github_token" ]]; then
-    header_config+="$(printf 'header = "Authorization: Bearer %s"\n' "$github_token")"
+    printf -v header_config '%s\nheader = "Authorization: Bearer %s"' "$header_config" "$github_token"
   fi
 
   GITHUB_API_HTTP_STATUS=""

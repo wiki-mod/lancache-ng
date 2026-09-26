@@ -145,16 +145,21 @@ for ((i = 0; i < ${#args[@]}; i++)); do
     fi
 done
 printf '%s\n' "$@" > "${MOCK_CURL_ARGS:?MOCK_CURL_ARGS not set}"
+cat > "${MOCK_CURL_CONFIG:?MOCK_CURL_CONFIG not set}"
 printf 'runs:\n  using: node24\n' > "$out_file"
 printf '200'
 MOCKCURL
     chmod +x "$mock_bin_dir/curl"
     export MOCK_CURL_ARGS="$BATS_TEST_TMPDIR/curl-args.txt"
+    export MOCK_CURL_CONFIG="$BATS_TEST_TMPDIR/curl-config.txt"
     export GH_TOKEN="test-token"
 
     run "$script" "$fixture_root"
     [ "$status" -eq 0 ]
     [[ "$output" == *"authenticated GitHub API requests"* ]]
+    grep -qFx 'header = "Accept: application/vnd.github.raw+json"' "$MOCK_CURL_CONFIG"
+    grep -qFx 'header = "X-GitHub-Api-Version: 2022-11-28"' "$MOCK_CURL_CONFIG"
+    grep -qFx 'header = "Authorization: Bearer test-token"' "$MOCK_CURL_CONFIG"
 }
 
 @test "fails on the exact pre-#800 actions/upload-artifact@834a144... pin (the #799 regression)" {
