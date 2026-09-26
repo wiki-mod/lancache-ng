@@ -36,6 +36,7 @@ ARG APK_PACKAGES
 # From: Issue #815 | Issue #1095
 RUN sed -i 's|^https://|http://|' /etc/apk/repositories \
     && : "apt-cache-bust=${APT_CACHE_BUST}" \
+    && apk update --no-cache \
     && apk upgrade --no-cache \
     && apk add --no-cache ${APK_PACKAGES}
 

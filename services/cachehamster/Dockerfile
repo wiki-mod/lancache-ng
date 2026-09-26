@@ -87,6 +87,7 @@ RUN sed -i 's|^https://|http://|' /etc/apk/repositories
 # Why: mandatory dist-upgrade invariant (§40.1); ca-certs for CDN.
 # From: Issue #871 | Issue #1683
 RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
+    apk update --no-cache && \
     apk upgrade --no-cache && \
     apk add --no-cache ${APK_PACKAGES}
 
