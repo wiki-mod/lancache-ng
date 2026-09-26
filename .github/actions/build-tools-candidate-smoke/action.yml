@@ -79,7 +79,7 @@ runs:
           -w /work \
           "$IMAGE_REF" \
           timeout --kill-after=30s --signal=TERM 19m \
-          bash -lc 'set -euo pipefail; bats_jobs=$(( $(nproc) * 2 )); (( bats_jobs >= 16 )) || bats_jobs=16; TMPDIR=/var/tmp bats --jobs "$bats_jobs" tests/bats'
+          bash -lc 'set -euo pipefail; if command -v parallel >/dev/null; then bats_jobs=$(( $(nproc) * 2 )); (( bats_jobs >= 16 )) || bats_jobs=16; TMPDIR=/var/tmp bats --jobs "$bats_jobs" tests/bats; else echo "::notice::parallel is unavailable; running Bats serially."; TMPDIR=/var/tmp bats tests/bats; fi'
 
     - name: Run ShellSpec setup fixtures
       if: inputs.run-fixtures == 'true'
