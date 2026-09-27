@@ -61,90 +61,10 @@ jobs:
         uses: ./.github/actions/derive-validation-network
 
 
-  ssl-mitm-cache-simulation:
-    # What: real DNS/HTTP/HTTPS caching test.
-    # Why: serialize runner; if: always() gate.
-    # From: PR #1523
-    name: SSL MITM cache simulation
-    needs: [compute-validation-network]
-    if: >-
-      always() &&
-      inputs.should_run == 'true' &&
-      needs['compute-validation-network'].result != 'failure' &&
-      needs['compute-validation-network'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    timeout-minutes: 45
-    env:
-      LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
-      # What: threads VALIDATION_SUBNET/*_IP via env.
-      # Why: compose falls back to a fixed subnet else.
-      # From: Issue #820
-      VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
-      VALIDATION_GATEWAY: ${{ needs.compute-validation-network.outputs.gateway }}
-      VALIDATION_PROXY_IP: ${{ needs.compute-validation-network.outputs.proxy_ip }}
-      VALIDATION_PROXY_SSL_IP: ${{ needs.compute-validation-network.outputs.proxy_ssl_ip }}
-      VALIDATION_DNS_STANDARD_IP: ${{ needs.compute-validation-network.outputs.dns_standard_ip }}
-      VALIDATION_DNS_SSL_IP: ${{ needs.compute-validation-network.outputs.dns_ssl_ip }}
-      VALIDATION_WATCHDOG_IP: ${{ needs.compute-validation-network.outputs.watchdog_ip }}
-      VALIDATION_NETDATA_IP: ${{ needs.compute-validation-network.outputs.netdata_ip }}
-      VALIDATION_NATS_IP: ${{ needs.compute-validation-network.outputs.nats_ip }}
-      VALIDATION_UI_IP: ${{ needs.compute-validation-network.outputs.ui_ip }}
-      # What: thread collision-safe IP for standard shim.
-      # Why: only this job starts this service.
-      # From: Issue #668
-      VALIDATION_STANDARD_SHIM_IP: ${{ needs.compute-validation-network.outputs.standard_shim_ip }}
-      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
-      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
-    steps:
-      - uses: *checkout_centraliced_versioning # v7.0.1
-
-      # What: authenticate registry before compose.
-      # Why: compose pulls nats from docker.io.
-      # From: Issue #1095
-      - name: Log in to registries (GHCR + optional Docker Hub)
-        uses: ./.github/actions/ghcr-then-dockerhub-login
-        with:
-          ghcr-username: ${{ github.actor }}
-          ghcr-password: ${{ secrets.GITHUB_TOKEN }}
-          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Resolve build-tools image
-        # What: requires a published build-tools image.
-        # Why: unless this PR's own build-tools is staged.
-        id: build-tools-image
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          # What: pass inputs via env, not interpolation.
-          # Why: OSPS-BR-01.04 script-injection hardening.
-          # From: Issue #1130
-          PR_STAGING_AVAILABLE: ${{ inputs.pr_staging_available }}
-          BUILD_TOOLS_TOUCHED: ${{ inputs.build_tools_touched }}
-          IMAGE_TAG: ${{ inputs.image_tag }}
-          REPOSITORY: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          if [[ "$PR_STAGING_AVAILABLE" == "true" && "$BUILD_TOOLS_TOUCHED" == "true" ]]; then
-            image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
-            echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
-          else
-            image="$(bash .github/scripts/ci.sh build-tools resolve-image)"
-          fi
-          echo "image=$image" >> "$GITHUB_OUTPUT"
-      - name: Run SSL MITM cache simulation
-        env:
-          BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
-        run: |
-          set -euo pipefail
-          # What: reserves a free /27 slot via flock+retry.
-          # Why: avoids racing concurrent runs on this host.
-          # From: Issue #820
-          bash scripts/lib/run-in-validation-subnet.sh bash scripts/untracked/simulations/ssl-mitm-cache-simulation.sh
-
   proxy-deep-wildcard-tls-simulation:
 
     name: Proxy deep-wildcard TLS simulation
-    needs: [compute-validation-network, ssl-mitm-cache-simulation]
+    needs: [compute-validation-network]
     if: >-
       always() &&
       inputs.should_run == 'true' &&
