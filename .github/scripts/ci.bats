@@ -3102,6 +3102,104 @@ netdata=sha256:n"
     [ "${status}" -eq 0 ]
 }
 
+@test "validate ui-session fails when no ui IP" {
+    # What: Missing ui IP returns rc 2.
+    # Why: Cannot open a session without a target.
+    # From: Issue #1164
+    _ci_validate_container_ip() { :; }
+    run _ci_validate_ui_session proj /tmp/ci-test-jar.$$
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0030"* ]]
+}
+
+@test "validate ui-session extracts the CSRF token" {
+    # What: A session cookie yields its CSRF segment.
+    # Why: One owner for cookiejar + CSRF extraction.
+    # From: Issue #628 | Issue #1164
+    _ci_validate_container_ip() { echo 172.16.1.9; }
+    curl() {
+        local jar="" a
+        for a in "$@"; do [ "$a" = "-w" ] && { echo 303; return 0; }; done
+        while [ $# -gt 0 ]; do case "$1" in -c) jar="$2"; shift 2;; *) shift;; esac; done
+        [ -n "$jar" ] && printf 'd\tF\t/\tF\t0\tlancache_ui_session\thdr.body.TOK123\n' > "$jar"
+        return 0
+    }
+    run _ci_validate_ui_session proj /tmp/ci-test-jar.$$
+    [ "${status}" -eq 0 ]
+    [ "${output}" = "TOK123" ]
+    rm -f /tmp/ci-test-jar.$$
+}
+
+@test "validate ui-add-record fails on non-303" {
+    # What: A non-303 add returns rc 1.
+    # Why: UI must accept the write (303 redirect).
+    # From: Issue #1164
+    _ci_validate_container_ip() { echo 172.16.1.9; }
+    curl() { echo 500; }
+    run _ci_validate_ui_add_record proj /tmp/jar tok ci-probe 203.0.113.60
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0034"* ]]
+}
+
+@test "validate ui-add-record passes on 303" {
+    # What: A 303 add returns rc 0.
+    # Why: 303 is the UI's success redirect.
+    # From: Issue #1164
+    _ci_validate_container_ip() { echo 172.16.1.9; }
+    curl() { echo 303; }
+    run _ci_validate_ui_add_record proj /tmp/jar tok ci-probe 203.0.113.60
+    [ "${status}" -eq 0 ]
+}
+
+@test "validate dns-resolves fails when no dns IP" {
+    # What: Missing dns IP returns rc 2.
+    # Why: Cannot dig without a resolver.
+    # From: Issue #1164
+    _ci_validate_container_ip() { :; }
+    run _ci_validate_dns_resolves proj dns-standard x.lan. 203.0.113.60 2
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0035"* ]]
+}
+
+@test "validate dns-resolves fails when record never matches" {
+    # What: A never-matching record returns rc 1.
+    # Why: The written record must actually resolve.
+    # From: Issue #1164
+    _ci_validate_container_ip() { echo 172.16.1.3; }
+    dig() { echo 10.9.9.9; }
+    sleep() { :; }
+    run _ci_validate_dns_resolves proj dns-standard x.lan. 203.0.113.60 2
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0036"* ]]
+}
+
+@test "validate dns-resolves passes when record matches" {
+    # What: A matching answer returns rc 0.
+    # Why: Proves the record reached this dns mode.
+    # From: Issue #1164
+    _ci_validate_container_ip() { echo 172.16.1.3; }
+    dig() { echo 203.0.113.60; }
+    run _ci_validate_dns_resolves proj dns-standard x.lan. 203.0.113.60 2
+    [ "${status}" -eq 0 ]
+}
+
+@test "validate ui-nats-dns passes end to end" {
+    # What: session+add+resolve(std,ssl) returns rc 0.
+    # Why: Proves the UI->NATS->PowerDNS+AXFR path.
+    # From: Issue #1164 | Issue #1683
+    _ci_validate_container_ip() { echo 172.16.1.9; }
+    curl() {
+        local jar="" a
+        for a in "$@"; do [ "$a" = "-w" ] && { echo 303; return 0; }; done
+        while [ $# -gt 0 ]; do case "$1" in -c) jar="$2"; shift 2;; *) shift;; esac; done
+        [ -n "$jar" ] && printf 'd\tF\t/\tF\t0\tlancache_ui_session\th.b.TOK\n' > "$jar"
+        return 0
+    }
+    dig() { echo 203.0.113.60; }
+    run _ci_validate_ui_nats_dns proj
+    [ "${status}" -eq 0 ]
+}
+
 # =========================================================
 # VARIABLES
 # =========================================================

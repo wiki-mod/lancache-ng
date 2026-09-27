@@ -4101,6 +4101,92 @@ _ci_validate_ssl_dispatch_map() {
     fi
 }
 
+# What: Open a UI session into <jar>, print its CSRF token.
+# Why: One owner for the cookiejar + CSRF extraction.
+# From: Issue #628 | Issue #1164 | Issue #1683
+_ci_validate_ui_session() {
+    local project="$1" jar="$2" ip cookie csrf attempt
+    ip="$(_ci_validate_container_ip "${project}" ui)"
+    if [ -z "${ip}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0030]" "reason=\"no ui container IP for session check\""
+        return 2
+    fi
+    # What: ui has no compose healthcheck; poll GET /domains.
+    # Why: wait_healthy misses ui; prove it answers first.
+    # From: Issue #1683
+    for attempt in $(seq 1 30); do
+        curl -fsS -c "${jar}" -o /dev/null "http://${ip}:8080/domains" 2>/dev/null && break
+        if [ "${attempt}" -eq 30 ]; then
+            ci_log "[CI-ERROR-VALIDATE-0031]" "reason=\"ui /domains never answered\""
+            return 1
+        fi
+        sleep 2
+    done
+    cookie="$(awk -F'\t' '$6 == "lancache_ui_session" {print $7}' "${jar}" 2>/dev/null)"
+    csrf="$(printf '%s' "${cookie}" | cut -d. -f3)"
+    if [ -z "${csrf}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0032]" "reason=\"no CSRF token in ui session cookie\""
+        return 1
+    fi
+    printf '%s' "${csrf}"
+}
+
+# What: POST a LAN A record through the UI (303 on ok).
+# Why: Drives the real UI->NATS->PowerDNS write path.
+# From: Issue #1164 | Issue #628
+_ci_validate_ui_add_record() {
+    local project="$1" jar="$2" csrf="$3" name="$4" content="$5" ip code
+    ip="$(_ci_validate_container_ip "${project}" ui)"
+    if [ -z "${ip}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0033]" "reason=\"no ui container IP for add-record\""
+        return 2
+    fi
+    code="$(curl -sS -b "${jar}" -o /dev/null -w '%{http_code}' \
+        --data-urlencode "csrf_token=${csrf}" \
+        --data-urlencode "name=${name}" \
+        --data-urlencode "record_type=A" \
+        --data-urlencode "content=${content}" \
+        --data-urlencode "ttl=60" \
+        "http://${ip}:8080/domains/lan/add" 2>/dev/null)"
+    if [ "${code}" != "303" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0034]" "code=\"${code}\" reason=\"ui /domains/lan/add did not return 303\""
+        return 1
+    fi
+}
+
+# What: Poll dig on <svc> until <fqdn> resolves to <expected>.
+# Why: NATS->PowerDNS (and AXFR to ssl) are async; prove it.
+# From: Issue #1164 | Issue #628
+_ci_validate_dns_resolves() {
+    local project="$1" svc="$2" fqdn="$3" expected="$4" attempts="${5:-15}" ip got i
+    ip="$(_ci_validate_container_ip "${project}" "${svc}")"
+    if [ -z "${ip}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0035]" "svc=\"${svc}\" reason=\"no dns IP for resolve check\""
+        return 2
+    fi
+    for i in $(seq 1 "${attempts}"); do
+        got="$(dig +time=2 +tries=1 +short "@${ip}" A "${fqdn}" | sort -u)"
+        [ "${got}" = "${expected}" ] && return 0
+        sleep 1
+    done
+    ci_log "[CI-ERROR-VALIDATE-0036]" "svc=\"${svc}\" fqdn=\"${fqdn}\" expected=\"${expected}\" got=\"${got:-}\" reason=\"record did not resolve as expected\""
+    return 1
+}
+
+# What: Prove UI->NATS->PowerDNS writes reach both dns modes.
+# Why: Real end-to-end NATS ingest + AXFR (#1164), not a mock.
+# From: Issue #1164 | Issue #1683
+_ci_validate_ui_nats_dns() {
+    local project="$1" jar csrf rc=0
+    jar="$(mktemp "${TMPDIR:-/var/tmp}/ci-ui-jar.XXXXXX")"
+    csrf="$(_ci_validate_ui_session "${project}" "${jar}")" || { rc=$?; rm -f "${jar}"; return "${rc}"; }
+    _ci_validate_ui_add_record "${project}" "${jar}" "${csrf}" ci-uinats-probe 203.0.113.60 || rc=$?
+    rm -f "${jar}"
+    [ "${rc}" -eq 0 ] || return "${rc}"
+    _ci_validate_dns_resolves "${project}" dns-standard ci-uinats-probe.lan. 203.0.113.60 15 || return $?
+    _ci_validate_dns_resolves "${project}" dns-ssl ci-uinats-probe.lan. 203.0.113.60 60 || return $?
+}
+
 # What: Validate the candidate on one live prod stack.
 # Why: One up, all checks, one teardown (AG-VAL-027).
 # From: Issue #1683 | PR #1858
@@ -4125,6 +4211,7 @@ _ci_default_validate() {
             [ "${rc}" -eq 0 ] && { _ci_validate_proxy_stream_map "${project}" || rc=$?; }
             [ "${rc}" -eq 0 ] && { _ci_validate_ssl_mitm "${project}" || rc=$?; }
             [ "${rc}" -eq 0 ] && { _ci_validate_ssl_dispatch_map "${project}" || rc=$?; }
+            [ "${rc}" -eq 0 ] && { _ci_validate_ui_nats_dns "${project}" || rc=$?; }
         elif _ci_validate_is_collision "${up_out}"; then
             ci_error "[CI-ERROR-VALIDATE-0016]" "reason=\"subnet/port collision after slot reservation\"" "${up_out}"
             rc=1
