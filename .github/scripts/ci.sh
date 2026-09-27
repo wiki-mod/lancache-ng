@@ -4270,6 +4270,57 @@ _ci_validate_ui_depends_started() {
     fi
 }
 
+# What: POST /api/secondary/register; print JSON body on 200.
+# Why: token-gated, no session/CSRF (main.rs); reused per name.
+# From: Issue #583 | Issue #433
+_ci_register_secondary() {
+    local ip="$1" token="$2" name="$3" out code
+    out="$(curl -sS -w '\n%{http_code}' -H 'Content-Type: application/json' \
+        -d "{\"token\":\"${token}\",\"name\":\"${name}\"}" \
+        "http://${ip}:8080/api/secondary/register" 2>/dev/null)"
+    code="${out##*$'\n'}"
+    [ "${code}" = "200" ] || return 1
+    printf '%s' "${out%$'\n'*}"
+}
+
+# What: Prove each registered secondary gets a unique identity.
+# Why: per-secondary NATS auth-callout, not a shared token (#583).
+# From: Issue #583 | Issue #433 | Issue #1683
+_ci_validate_secondary_identity() {
+    local project="$1" ip cid token a b au bu ap bp
+    ip="$(_ci_validate_container_ip "${project}" ui)"
+    cid="$(docker compose -p "${project}" ps -q ui 2>/dev/null)"
+    if [ -z "${ip}" ] || [ -z "${cid}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0045]" "reason=\"no ui container/IP for secondary-identity check\""
+        return 2
+    fi
+    # What: read SECONDARY_REGISTRATION_TOKEN from the ui token file.
+    # Why: ui resolves it at runtime; not env, not hardcoded (AG-CI-006).
+    # From: Issue #583
+    token="$(docker exec "${cid}" cat /data/lancache-secondary-registration.token 2>/dev/null | tr -d '\n')"
+    if [ -z "${token}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0046]" "reason=\"could not read SECONDARY_REGISTRATION_TOKEN from ui\""
+        return 2
+    fi
+    if ! a="$(_ci_register_secondary "${ip}" "${token}" ci-secondary-a)" \
+        || ! b="$(_ci_register_secondary "${ip}" "${token}" ci-secondary-b)"; then
+        ci_log "[CI-ERROR-VALIDATE-0047]" "reason=\"a secondary register did not return 200\""
+        return 1
+    fi
+    au="$(printf '%s' "${a}" | jq -r '.nats_user // empty')"
+    bu="$(printf '%s' "${b}" | jq -r '.nats_user // empty')"
+    ap="$(printf '%s' "${a}" | jq -r '.nats_password // empty')"
+    bp="$(printf '%s' "${b}" | jq -r '.nats_password // empty')"
+    if [ -z "${au}" ] || [ -z "${bu}" ] || [ -z "${ap}" ] || [ -z "${bp}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0048]" "reason=\"register response missing nats_user/nats_password\""
+        return 1
+    fi
+    if [ "${au}" = "${bu}" ] || [ "${ap}" = "${bp}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0049]" "reason=\"two secondaries got the same NATS identity (#583 per-secondary identity lost)\""
+        return 1
+    fi
+}
+
 # What: Validate the candidate on one live prod stack.
 # Why: One up, all checks, one teardown (AG-VAL-027).
 # From: Issue #1683 | PR #1858
@@ -4297,6 +4348,7 @@ _ci_default_validate() {
             [ "${rc}" -eq 0 ] && { _ci_validate_ui_nats_dns "${project}" || rc=$?; }
             [ "${rc}" -eq 0 ] && { _ci_validate_dns_rollback "${project}" || rc=$?; }
             [ "${rc}" -eq 0 ] && { _ci_validate_ui_depends_started || rc=$?; }
+            [ "${rc}" -eq 0 ] && { _ci_validate_secondary_identity "${project}" || rc=$?; }
         elif _ci_validate_is_collision "${up_out}"; then
             ci_error "[CI-ERROR-VALIDATE-0016]" "reason=\"subnet/port collision after slot reservation\"" "${up_out}"
             rc=1

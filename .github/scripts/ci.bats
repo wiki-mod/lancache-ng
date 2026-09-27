@@ -3296,6 +3296,68 @@ netdata=sha256:n"
     [ "${status}" -eq 0 ]
 }
 
+@test "validate secondary-identity fails when no ui" {
+    # What: Missing ui container/IP returns rc 2.
+    # Why: No target for the register round-trip.
+    # From: Issue #583
+    _ci_validate_container_ip() { :; }
+    docker() { :; }
+    run _ci_validate_secondary_identity proj
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0045"* ]]
+}
+
+@test "validate secondary-identity fails when token is unreadable" {
+    # What: An empty registration token returns rc 2.
+    # Why: Cannot register a secondary without it.
+    # From: Issue #583
+    _ci_validate_container_ip() { echo 172.16.1.9; }
+    docker() { case "$1" in compose) echo cid1 ;; exec) : ;; esac; }
+    run _ci_validate_secondary_identity proj
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0046"* ]]
+}
+
+@test "validate secondary-identity fails when register is not 200" {
+    # What: A non-200 register returns rc 1.
+    # Why: Registration must succeed to compare identities.
+    # From: Issue #583
+    _ci_validate_container_ip() { echo 172.16.1.9; }
+    docker() { case "$1" in compose) echo cid1 ;; exec) echo TOK ;; esac; }
+    curl() { printf 'err\n500'; }
+    run _ci_validate_secondary_identity proj
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0047"* ]]
+}
+
+@test "validate secondary-identity fails when two secondaries share an identity" {
+    # What: Identical nats_user/password returns rc 1.
+    # Why: per-secondary identity must be unique (#583).
+    # From: Issue #583
+    _ci_validate_container_ip() { echo 172.16.1.9; }
+    docker() { case "$1" in compose) echo cid1 ;; exec) echo TOK ;; esac; }
+    curl() { printf '{"nats_user":"same","nats_password":"same"}\n200'; }
+    run _ci_validate_secondary_identity proj
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0049"* ]]
+}
+
+@test "validate secondary-identity passes on distinct identities" {
+    # What: Distinct nats_user/password returns rc 0.
+    # Why: Proves per-secondary auth-callout identity (#583).
+    # From: Issue #583 | Issue #433
+    _ci_validate_container_ip() { echo 172.16.1.9; }
+    docker() { case "$1" in compose) echo cid1 ;; exec) echo TOK ;; esac; }
+    curl() {
+        case "$*" in
+            *ci-secondary-a*) printf '{"nats_user":"ua","nats_password":"pa"}\n200' ;;
+            *ci-secondary-b*) printf '{"nats_user":"ub","nats_password":"pb"}\n200' ;;
+        esac
+    }
+    run _ci_validate_secondary_identity proj
+    [ "${status}" -eq 0 ]
+}
+
 # =========================================================
 # VARIABLES
 # =========================================================
