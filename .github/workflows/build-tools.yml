@@ -9,6 +9,11 @@ name: Build Tools Image
 
 on:
   workflow_dispatch:
+    inputs:
+      debug:
+        description: Enable GitHub Actions step and runner debug logging for this dispatched run.
+        type: boolean
+        default: false
   schedule:
     - cron: "23 3 * * 0"
   pull_request:
@@ -32,6 +37,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  ACTIONS_STEP_DEBUG: ${{ inputs.debug && 'true' || 'false' }}
+  ACTIONS_RUNNER_DEBUG: ${{ inputs.debug && 'true' || 'false' }}
   BUILD_TOOLS_IMAGE: ghcr.io/${{ github.repository }}/build-tools
   # What: local scan-image tags are suffixed by run_id-run_attempt.
   # Why: isolate images per run to prevent deletion race.
