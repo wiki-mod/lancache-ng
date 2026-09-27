@@ -168,35 +168,16 @@ entirely and deterministically derived from `.trivyignore.yaml`, so keeping a
 second, independently-editable copy in the same branch only recreated the
 exact class of bug it was meant to prevent. Instead:
 
-- A dedicated orphan branch, `CI-Automation/vex`, carries only the current
-  `vex.openvex.json` plus a short README. `.github/workflows/vex-regenerate.yml`
-  regenerates and commits to that branch automatically whenever
-  `.trivyignore.yaml` or `scripts/untracked/generate-vex.sh` changes on
-  `current_dev` -- no PR, no review gate, mirroring this repo's existing
-  precedent for other mechanically-reproducible automated commits (e.g.
-  `nightly-refresh.yml`'s channel-tag refresh, and `build-push.yml`'s own
-  coverage-badge publish job). The current document is always fetchable at
-  `https://raw.githubusercontent.com/wiki-mod/lancache-ng/CI-Automation/vex/vex.openvex.json`.
-  A failed regeneration does not fail that workflow's own run status (a
-  best-effort, unreviewed `push` automation with no real-time consumer,
-  Issue #1095) but does open/reuse a `vex-generator-broken`-labeled GitHub
-  issue and emit a visible `::error::` annotation -- see that workflow file's
-  own header comment for the documented-exception rationale.
-- `scripts/tracked/check-vex-drift.sh`, run as the "Check VEX generator
-  produces valid OpenVEX JSON" step in the `validate-compose` job, no longer
-  compares two committed copies (there is only one, and it isn't on
-  `current_dev`) -- it is a generator smoke test: run
-  `scripts/untracked/generate-vex.sh` and assert the result is valid,
-  non-empty OpenVEX JSON. This still fails a PR that breaks the generator or
-  feeds it malformed `.trivyignore.yaml`, just without a second-copy
-  comparison.
-- Each release tag's own `vex.openvex.json` asset is regenerated fresh from
-  that exact tag's own checked-out `.trivyignore.yaml` by the release job
-  (`build-push.yml`'s "Attach OpenVEX document to the release" step) --
-  never copied from `CI-Automation/vex`'s current tip, since that branch's
-  automated refresh runs asynchronously off a plain `push` and could still be
-  catching up when a release tag is cut moments after a `.trivyignore.yaml`
-  change lands.
+- The OpenVEX document is a release artifact. Each release tag's own
+  `vex.openvex.json` asset is regenerated fresh from that exact tag's own
+  checked-out `.trivyignore.yaml` by the release path (`ci.sh release-vex`,
+  invoked from `release.yml`), alongside the SBOM and provenance assets that
+  belong to the release channel.
+- `scripts/tracked/check-vex-drift.sh` is a generator smoke test: it runs
+  `scripts/untracked/generate-vex.sh` and asserts the result is valid,
+  non-empty OpenVEX JSON, failing a change that breaks the generator or feeds
+  it malformed `.trivyignore.yaml`. The generator-validity invariant is owned
+  by `ci.sh` and enforced as a regression through `ci.bats`.
 
 This complements the Vulnerability Management Policy documentation in
 `SECURITY.md` (refs #1130 / #1185).
