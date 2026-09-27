@@ -1065,22 +1065,24 @@ _stub() {
 }
 
 @test "test dispatches a rust service to the cargo checks" {
-    # What: A rust service runs the cargo checks.
-    # Why: fmt/check/clippy/test are AG-VAL-008.
+    # What: A rust service runs the cargo checks then smoke.
+    # Why: fmt/check/clippy/test are AG-VAL-008; smoke #1613.
     # From: Issue #1683 | PR #1858
     CI_RUST_TEST_CMD="$(_stub rt 'echo "service=$1 tested=ok"')" \
+    CI_SMOKE_CMD="$(_stub sm 'echo "service=$1 smoke=ok"')" \
         run bash "${CI_SH}" test dns
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"tested=ok"* ]]
 }
 
-@test "test skips an apk-install service without claiming pass" {
-    # What: An apk service reports SKIP, not ok.
-    # Why: No unit test; PASS would misrepresent.
-    # From: Issue #1683 | PR #1858
-    run bash "${CI_SH}" test proxy
+@test "test runs smoke for an apk service, not the cargo checks" {
+    # What: An apk service runs execute-smoke, not cargo.
+    # Why: apk binaries must run (#1613); no rust unit test.
+    # From: Issue #1613 | Issue #1683
+    CI_SMOKE_CMD="$(_stub sm 'echo "service=$1 smoke=ok"')" \
+        run bash "${CI_SH}" test proxy
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"tested=SKIP"* ]]
+    [[ "${output}" == *"smoke=ok"* ]]
     [[ "${output}" != *"tested=ok"* ]]
 }
 
