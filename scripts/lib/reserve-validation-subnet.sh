@@ -549,7 +549,7 @@ validation_network_await_detached() {
 # once this returns, instead of merely once `down`'s own CLI call returned.
 validation_network_teardown() {
     local network_name="$1" timeout="${2:-30}"
-    local recovery_attempted=false
+    local recovery_attempted=false recovery_failed=false containers=""
 
     if ! docker network inspect "$network_name" >/dev/null 2>&1; then
         return 0
@@ -558,15 +558,31 @@ validation_network_teardown() {
     if ! validation_network_await_detached "$network_name" "$timeout"; then
         recovery_attempted=true
         echo "::warning::Force-disconnecting remaining containers from $network_name after the ${timeout}s wait; they did not shut down cleanly on their own." >&2
-        local containers cid
+        local cid
         containers="$(docker network inspect "$network_name" --format '{{range $id, $c := .Containers}}{{$id}} {{end}}' 2>/dev/null)"
         for cid in $containers; do
-            docker network disconnect -f "$network_name" "$cid" >/dev/null 2>&1 || true
+            if ! docker network disconnect -f "$network_name" "$cid"; then
+                recovery_failed=true
+                printf '::warning::Force-disconnect failed for container %s on %s.\n' "$cid" "$network_name" >&2
+            fi
         done
         validation_network_await_detached "$network_name" "$timeout" || true
     fi
 
     if docker network rm "$network_name" >/dev/null 2>&1; then
+        for cid in $containers; do
+            if docker inspect "$cid" >/dev/null 2>&1; then
+                printf '::notice::Removing leftover validation container %s after network recovery.\n' "$cid" >&2
+                if ! docker rm -f "$cid"; then
+                    recovery_failed=true
+                    printf '::warning::Could not remove leftover validation container %s after network recovery.\n' "$cid" >&2
+                fi
+            fi
+        done
+        if [[ "$recovery_failed" == true ]]; then
+            printf '::error::Docker network %s was removed, but one or more leftover containers could not be removed.\n' "$network_name" >&2
+            return 1
+        fi
         if [[ "$recovery_attempted" == true ]]; then
             printf '::notice::Docker network %s recovery succeeded after force-disconnect.\n' "$network_name" >&2
         fi

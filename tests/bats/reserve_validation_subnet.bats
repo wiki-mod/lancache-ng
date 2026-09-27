@@ -478,6 +478,11 @@ elif [[ "$1" == "network" && "$2" == "disconnect" ]]; then
 elif [[ "$1" == "network" && "$2" == "ls" ]]; then
     cat "$state/ls_ids" 2>/dev/null
     exit 0
+elif [[ "$1" == "inspect" ]]; then
+    exit 0
+elif [[ "$1" == "rm" && "$2" == "-f" ]]; then
+    touch "$state/container-$3.removed"
+    exit 0
 elif [[ "$1" == "compose" ]]; then
     exit 0
 fi
@@ -544,6 +549,7 @@ STUB
     [ "$status" -eq 0 ]
     [ -f "$FAKE_DOCKER_STATE/known-net.removed" ]
     grep -q "network disconnect -f known-net stuck-id" "$FAKE_DOCKER_LOG"
+    grep -q "rm -f stuck-id" "$FAKE_DOCKER_LOG"
     [[ "$output" == *"::warning::Force-disconnecting"* ]]
     [[ "$output" == *"recovery succeeded after force-disconnect"* ]]
     [[ "$output" != *"::error::"* ]]
