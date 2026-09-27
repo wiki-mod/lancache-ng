@@ -220,6 +220,10 @@ services:
       - /tmp
     volumes:
       - proxy-cache:/var/cache/lancache
+      # What: Provide the retention daemon's writable log directory.
+      # Why: read_only stays enabled while retention.log has a dedicated volume.
+      # From: Issue #1860
+      - watchdog-logs:/var/log/lancache-watchdog
       - retention-state:/var/lib/lancache-retention-state
     restart: unless-stopped
 
@@ -527,3 +531,7 @@ volumes:
   # Why: separate from watchdog-status; see retention: comment.
   # From: Issue #842 | PR #1360
   retention-state:
+  # What: retention-entrypoint.sh log volume for the read-only retention service.
+  # Why: the service must write retention.log without weakening read_only.
+  # From: Issue #1860
+  watchdog-logs:

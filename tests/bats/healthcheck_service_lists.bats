@@ -100,6 +100,17 @@ setup() {
         || fail "build-push candidate validation is missing"
 }
 
+@test "full-setup retention keeps read-only mode with a writable watchdog log volume" {
+    compose="$repo_root/deploy/full-setup/docker-compose.yml"
+    retention_block="$(awk '/^  retention:/{found=1} found{print} found && /^  [a-z0-9-]+:/{if ($0 != "  retention:") exit}' "$compose")"
+    [[ "$retention_block" == *"read_only: true"* ]] \
+        || fail "full-setup retention lost its read_only hardening"
+    [[ "$retention_block" == *"watchdog-logs:/var/log/lancache-watchdog"* ]] \
+        || fail "full-setup retention has no writable watchdog log mount"
+    grep -q '^  watchdog-logs:$' "$compose" \
+        || fail "full-setup compose does not declare the watchdog log volume"
+}
+
 # fail <message>: this file's own `[ cond ] || fail "..."` assertions (a
 # pattern already used throughout this file before this addition) rely on a
 # `fail` helper that neither bats-core nor this project provides globally --
