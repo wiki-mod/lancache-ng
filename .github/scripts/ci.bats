@@ -3277,6 +3277,25 @@ netdata=sha256:n"
     [ "${status}" -eq 0 ]
 }
 
+@test "validate ui-depends fails on a service_healthy gate" {
+    # What: A service_healthy condition returns rc 1.
+    # Why: UI must not wait on dependency health (#763).
+    # From: Issue #763
+    _ci_validate_config_json() { echo '{"services":{"ui":{"depends_on":{"proxy":{"condition":"service_healthy"}}}}}'; }
+    run _ci_validate_ui_depends_started
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0044"* ]]
+}
+
+@test "validate ui-depends passes when all deps are service_started" {
+    # What: All service_started conditions return rc 0.
+    # Why: UI starts independently of dependency health (#763).
+    # From: Issue #763
+    _ci_validate_config_json() { echo '{"services":{"ui":{"depends_on":{"proxy":{"condition":"service_started"},"nats":{"condition":"service_started"}}}}}'; }
+    run _ci_validate_ui_depends_started
+    [ "${status}" -eq 0 ]
+}
+
 # =========================================================
 # VARIABLES
 # =========================================================

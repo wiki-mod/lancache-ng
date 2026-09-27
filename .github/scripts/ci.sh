@@ -59,7 +59,7 @@ ci_log() {
 # Why: Command raw stderr MUST always show (Contract 55).
 # From: Issue #1683
 ci_error() {
-    local message_id="$1" context="$2" raw="$3"
+    local message_id="$1" context="$2" raw="${3:-}"
     ci_log "${message_id}" "${context}"
     printf 'raw:\n%s\n' "${raw}" >&2
 }
@@ -4258,6 +4258,18 @@ _ci_validate_dns_rollback() {
     _ci_validate_dns_resolves "${project}" dns-standard ci-rollback-probe.lan. 203.0.113.70 15 || return $?
 }
 
+# What: Prove ui.depends_on never gates on service_healthy.
+# Why: UI must start even while a dependency crash-loops (#763).
+# From: Issue #763 | Issue #1683
+_ci_validate_ui_depends_started() {
+    local bad
+    bad="$(_ci_validate_config_json | jq -r '.services.ui.depends_on // {} | to_entries[] | select(.value.condition == "service_healthy") | .key' 2>/dev/null)"
+    if [ -n "${bad}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0044]" "deps=\"${bad}\" reason=\"ui depends_on gates on service_healthy; UI must start independently of dependency health (#763)\""
+        return 1
+    fi
+}
+
 # What: Validate the candidate on one live prod stack.
 # Why: One up, all checks, one teardown (AG-VAL-027).
 # From: Issue #1683 | PR #1858
@@ -4284,6 +4296,7 @@ _ci_default_validate() {
             [ "${rc}" -eq 0 ] && { _ci_validate_ssl_dispatch_map "${project}" || rc=$?; }
             [ "${rc}" -eq 0 ] && { _ci_validate_ui_nats_dns "${project}" || rc=$?; }
             [ "${rc}" -eq 0 ] && { _ci_validate_dns_rollback "${project}" || rc=$?; }
+            [ "${rc}" -eq 0 ] && { _ci_validate_ui_depends_started || rc=$?; }
         elif _ci_validate_is_collision "${up_out}"; then
             ci_error "[CI-ERROR-VALIDATE-0016]" "reason=\"subnet/port collision after slot reservation\"" "${up_out}"
             rc=1
