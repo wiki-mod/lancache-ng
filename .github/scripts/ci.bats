@@ -7040,13 +7040,13 @@ EOF
 }
 
 @test "check entrypoint-lib-wiring accepts a COPY --from a SOT named build context" {
-    # What: COPY --from=shared-scripts (SOT named context).
-    # Why: Real domain-validation consolidation pattern.
+    # What: COPY --from=dns-domains (SOT named context).
+    # Why: Real domain-validation consolidation pattern (proxy).
     # From: Issue #1683
     local r="${BATS_TEST_TMPDIR}/elw-buildcontext"
     mkdir -p "${r}/services/proxy"
     printf '. /usr/local/lib/domain-validation.sh\n' > "${r}/services/proxy/entrypoint.sh"
-    printf 'FROM alpine:3.24\nCOPY --from=shared-scripts domain-validation.sh /usr/local/lib/domain-validation.sh\n' \
+    printf 'FROM alpine:3.24\nCOPY --from=dns-domains domain-validation.sh /usr/local/lib/domain-validation.sh\n' \
         > "${r}/services/proxy/Dockerfile"
     run bash "${CI_SH}" check entrypoint-lib-wiring "${r}"
     [ "${status}" -eq 0 ]

@@ -429,8 +429,6 @@ build_matrix:
 # Why: A change here rebuilds every consumer, not just self.
 # From: Issue #1683
 named_contexts:
-  shared-scripts:
-    path: scripts/lib
   shared-secret:
     path: scripts/lib/shared-secret-bootstrap.sh
   known-good:
