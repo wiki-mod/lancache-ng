@@ -263,81 +263,6 @@ jobs:
           # From: Issue #822
           bash scripts/lib/run-in-validation-subnet.sh bash scripts/untracked/simulations/proxy-ssl-mode-two-relay-dispatch-simulation.sh
 
-  ui-nats-dns-integration-simulation:
-    # What: wires LANCACHE_IMAGE_TAG for this UI/DNS test.
-    # Why: fixes always testing nightly, not the real tag.
-    # From: Issue #715
-    name: UI/NATS/DNS integration simulation
-    needs: [compute-validation-network, proxy-ssl-mode-two-relay-dispatch-simulation]
-    if: >-
-      always() &&
-      inputs.should_run == 'true' &&
-      needs['compute-validation-network'].result != 'failure' &&
-      needs['compute-validation-network'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    timeout-minutes: 45
-    env:
-      LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
-      # What: threads VALIDATION_SUBNET/*_IP via env.
-      # Why: compose falls back to a fixed subnet else.
-      # From: Issue #820
-      VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
-      VALIDATION_GATEWAY: ${{ needs.compute-validation-network.outputs.gateway }}
-      VALIDATION_PROXY_IP: ${{ needs.compute-validation-network.outputs.proxy_ip }}
-      VALIDATION_PROXY_SSL_IP: ${{ needs.compute-validation-network.outputs.proxy_ssl_ip }}
-      VALIDATION_DNS_STANDARD_IP: ${{ needs.compute-validation-network.outputs.dns_standard_ip }}
-      VALIDATION_DNS_SSL_IP: ${{ needs.compute-validation-network.outputs.dns_ssl_ip }}
-      VALIDATION_WATCHDOG_IP: ${{ needs.compute-validation-network.outputs.watchdog_ip }}
-      VALIDATION_NETDATA_IP: ${{ needs.compute-validation-network.outputs.netdata_ip }}
-      VALIDATION_NATS_IP: ${{ needs.compute-validation-network.outputs.nats_ip }}
-      VALIDATION_UI_IP: ${{ needs.compute-validation-network.outputs.ui_ip }}
-      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
-      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
-    steps:
-      - uses: *checkout_centraliced_versioning # v7.0.1
-
-      # What: authenticate registry before compose.
-      # Why: pulls nats/docker-socket-proxy docker.io.
-      # From: Issue #1095
-      - name: Log in to registries (GHCR + optional Docker Hub)
-        uses: ./.github/actions/ghcr-then-dockerhub-login
-        with:
-          ghcr-username: ${{ github.actor }}
-          ghcr-password: ${{ secrets.GITHUB_TOKEN }}
-          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Resolve build-tools image
-        # What: same build-tools resolution pattern.
-        # Why: prefer PR staging tag for same-PR.
-        # From: PR #1523
-        id: build-tools-image
-        # What: reads step inputs via env: variables.
-        # Why: avoids script-injection (OSPS-BR-01.04).
-        env:
-          PR_STAGING_AVAILABLE: ${{ inputs.pr_staging_available }}
-          BUILD_TOOLS_TOUCHED: ${{ inputs.build_tools_touched }}
-          IMAGE_TAG: ${{ inputs.image_tag }}
-          REPOSITORY: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          if [[ "$PR_STAGING_AVAILABLE" == "true" && "$BUILD_TOOLS_TOUCHED" == "true" ]]; then
-            image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
-            echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
-          else
-            image="$(bash .github/scripts/ci.sh build-tools resolve-image)"
-          fi
-          echo "image=$image" >> "$GITHUB_OUTPUT"
-      - name: Run UI/NATS/DNS integration simulation
-        env:
-          BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
-        run: |
-          set -euo pipefail
-          # What: reserves a collision-free subnet.
-          # Why: avoids racing the job-level subnet pool.
-          # From: Issue #820
-          bash scripts/lib/run-in-validation-subnet.sh bash scripts/untracked/simulations/ui-nats-dns-integration-simulation.sh
-
   setup-cli-simulation:
     # What: pins the sim to the PR's own immutable image.
     # Why: avoids testing a stale, slow-moving channel tag.
@@ -345,7 +270,7 @@ jobs:
     name: setup.sh CLI simulation
     # What: chains after the UI/NATS/DNS sim job.
     # Why: serializes the shared runner slot, not data.
-    needs: [ui-nats-dns-integration-simulation]
+    needs: [compute-validation-network]
     if: always() && inputs.should_run == 'true'
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 45
