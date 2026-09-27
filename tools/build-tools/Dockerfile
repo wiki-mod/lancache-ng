@@ -217,6 +217,7 @@ RUN set -euo pipefail; \
       iproute2 \
       jq \
       lld22 \
+      llvm22 \
       make \
       musl-dev \
       openssl \
@@ -241,6 +242,9 @@ RUN set -euo pipefail; \
       zlib-dev \
       zlib-static; \
     ln -sf /usr/bin/pump /usr/bin/distcc-pump; \
+    if [ ! -e /usr/bin/clang-offload-packager ] && [ -x /usr/lib/llvm22/bin/clang-offload-packager ]; then \
+      ln -s /usr/lib/llvm22/bin/clang-offload-packager /usr/bin/clang-offload-packager; \
+    fi; \
     distcc_bin="$(command -v distcc)"; \
     mkdir -p /usr/local/lib/distcc; \
     for wrapper in cc gcc c++ g++; do ln -sf "$distcc_bin" "/usr/local/lib/distcc/$wrapper"; done
