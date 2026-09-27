@@ -427,8 +427,9 @@ RUN set -euo pipefail; \
       local output status; \
       if output="$("$@" 2>&1)"; then \
         return 0; \
+      else \
+        status=$?; \
       fi; \
-      status=$?; \
       printf 'ERROR: build-tools contract command failed: %s (exit %s)\n%s\n' "$label" "$status" "$output" >&2; \
       contract_failures+=("$label"); \
     }; \
@@ -453,11 +454,14 @@ RUN set -euo pipefail; \
       *:/usr/local/bin:*) ;; \
       *) printf 'ERROR: build-tools contract failed: /usr/local/bin is missing from PATH\n' >&2; contract_failures+=(PATH) ;; \
     esac; \
-    rustc_host_line="$(rustc -vV 2>&1)" || { \
-      printf 'ERROR: build-tools contract command failed: rustc -vV (exit %s)\n%s\n' "$?" "$rustc_host_line" >&2; \
+    if rustc_host_line="$(rustc -vV 2>&1)"; then \
+      :; \
+    else \
+      status=$?; \
+      printf 'ERROR: build-tools contract command failed: rustc -vV (exit %s)\n%s\n' "$status" "$rustc_host_line" >&2; \
       contract_failures+=("rustc -vV"); \
       rustc_host_line=""; \
-    }; \
+    fi; \
     if [ -n "$rustc_host_line" ] && ! grep -qE '^host: .*-alpine-linux-musl$' <<<"${rustc_host_line}"; then \
       printf 'ERROR: build-tools Rust host triple violates Alpine-musl contract:\n%s\n' "$rustc_host_line" >&2; \
       contract_failures+=("rustc host triple"); \
