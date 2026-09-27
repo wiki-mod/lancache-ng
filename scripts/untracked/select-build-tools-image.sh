@@ -105,6 +105,7 @@ smoke_test_image() {
       rustc
       rustfmt
       clippy-driver
+      clang-offload-packager
       sccache
       ccache
       cargo-audit

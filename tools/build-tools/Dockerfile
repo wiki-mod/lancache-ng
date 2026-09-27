@@ -359,6 +359,7 @@ RUN set -euo pipefail; \
       chmod \
       chown \
       clang \
+      clang-offload-packager \
       c++ \
       ccache \
       cp \

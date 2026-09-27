@@ -38,7 +38,7 @@ runs:
           timeout --kill-after=30s --signal=TERM 14m bash -c '
         set -euo pipefail
         required_tools=(
-          actionlint bash bats cargo cargo-audit cargo-tarpaulin ccache clippy-driver
+          actionlint bash bats cargo cargo-audit cargo-tarpaulin ccache clang-offload-packager clippy-driver
           dig distcc distcc-pump docker envsubst jq parallel rustc rustfmt sccache
           shellspec shellcheck timeout
         )
