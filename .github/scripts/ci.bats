@@ -8294,6 +8294,57 @@ SH
     [ "${status}" -eq 1 ]
 }
 
+@test "pr candidate resolves each service to its amd64 built digest" {
+    # What: PR candidate is the per-service amd64 registry digest.
+    # Why: a PR has no ledger; validate pins the built images.
+    # From: Issue #1683
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    cat > "${bin}/docker" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"/dns:"*) echo "sha256:aaa" ;;
+  *"/ui:"*)  echo "sha256:bbb" ;;
+  *) echo "unexpected: $*" >&2; exit 1 ;;
+esac
+SH
+    chmod +x "${bin}/docker"
+    ci_services() { printf 'dns\nui\n'; }
+    _ci_identity_for() { echo "id-$1"; }
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+        run _ci_stack_candidate_pr
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"dns=sha256:aaa"* ]]
+    [[ "${output}" == *"ui=sha256:bbb"* ]]
+}
+
+@test "pr candidate fails closed when a service image is missing" {
+    # What: a not_found PR image fails the candidate closed.
+    # Why: never validate a partial stack; missing is not skip.
+    # From: Issue #1683
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    printf '#!/usr/bin/env bash\necho "not found: manifest unknown" >&2\nexit 1\n' > "${bin}/docker"
+    chmod +x "${bin}/docker"
+    ci_services() { printf 'dns\n'; }
+    _ci_identity_for() { echo "id-$1"; }
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+        run _ci_stack_candidate_pr
+    [ "${status}" -eq 2 ]
+}
+
+@test "pr candidate fails closed on an unknown registry error" {
+    # What: a transient/unknown probe fails the candidate closed.
+    # Why: UNKNOWN is never a resolvable image; no build either.
+    # From: Issue #1683
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    printf '#!/usr/bin/env bash\necho "Connection reset by peer" >&2\nexit 1\n' > "${bin}/docker"
+    chmod +x "${bin}/docker"
+    ci_services() { printf 'dns\n'; }
+    _ci_identity_for() { echo "id-$1"; }
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+        run _ci_stack_candidate_pr
+    [ "${status}" -eq 2 ]
+}
+
 @test "ledger upsert writes many records in one commit" {
     # What: a batch of records lands in one CAS commit.
     # Why: §26.1 one write per workflow, not per record.

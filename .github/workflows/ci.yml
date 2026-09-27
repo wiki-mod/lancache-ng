@@ -247,13 +247,16 @@ jobs:
           CI_BUILD_MATRIX: ${{ needs.plan.outputs.matrix }}
         run: bash .github/scripts/ci.sh assemble-stack
 
-  # What: full-setup stack validation on the exact accepted candidate (§49).
-  # Why: STACK ACCEPTED only after health + integration + client sim.
+  # What: full-setup stack validation on the exact candidate (§49).
+  # Why: STACK health+integration; push=accepted, PR=built images.
   # From: Issue #1683
   validate:
     name: validate
-    needs: [plan, aggregate, assemble]
-    if: needs.plan.outputs.any-build == 'true' && github.event_name != 'pull_request'
+    needs: [plan, build, aggregate, assemble]
+    if: >-
+      !cancelled() && needs.plan.outputs.any-build == 'true' &&
+      needs.build.result == 'success' &&
+      (github.event_name == 'pull_request' || needs.assemble.result == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:

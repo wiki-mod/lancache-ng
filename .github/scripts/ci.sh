@@ -2746,11 +2746,34 @@ _ci_stack_candidate_ledger() {
     done < <(ci_services)
 }
 
+# What: PR stack candidate: per-service amd64 built digest.
+# Why: a PR has no ledger/index; validate pins built images.
+# From: Issue #1683
+_ci_stack_candidate_pr() {
+    local service digest platform=linux/amd64
+    while IFS= read -r service; do
+        [ -n "${service}" ] || continue
+        if ! digest="$(_ci_published_digest "${service}" "${platform}")"; then
+            ci_log "[CI-ERROR-CANDIDATE-0002]" "service=\"${service}\" reason=\"PR image not resolvable; refusing to validate a partial stack\""
+            return 2
+        fi
+        printf '%s=%s\n' "${service}" "${digest}"
+    done < <(ci_services)
+}
+
 # What: read accepted stack candidate (injectable).
 # Why: exact-digest candidate (§48); tests/prod differ.
 # From: Issue #1683
 _ci_stack_candidate() {
-    "${CI_STACK_CANDIDATE_CMD:-_ci_stack_candidate_ledger}"
+    if [ -n "${CI_STACK_CANDIDATE_CMD:-}" ]; then
+        "${CI_STACK_CANDIDATE_CMD}"
+        return "$?"
+    fi
+    if [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
+        _ci_stack_candidate_pr
+        return "$?"
+    fi
+    _ci_stack_candidate_ledger
 }
 
 # What: True only if the stack validated (docs section 50).
