@@ -4187,6 +4187,77 @@ _ci_validate_ui_nats_dns() {
     _ci_validate_dns_resolves "${project}" dns-ssl ci-uinats-probe.lan. 203.0.113.60 60 || return $?
 }
 
+# What: Prove the DNS known-good snapshot/rollback round-trip.
+# Why: Real listener HTTP + PowerDNS PATCH + cache flush (#628).
+# From: Issue #628 | Issue #1683
+_ci_validate_dns_rollback() {
+    local project="$1" ip cid key jar csrf snap resp applied changed flush code i rc=0
+    ip="$(_ci_validate_container_ip "${project}" dns-standard)"
+    cid="$(docker compose -p "${project}" ps -q dns-standard 2>/dev/null)"
+    if [ -z "${ip}" ] || [ -z "${cid}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0037]" "reason=\"no dns-standard container/IP for rollback check\""
+        return 2
+    fi
+    # What: read PDNS_API_KEY from the shared-secrets file.
+    # Why: entrypoint resolves it at runtime, not compose env (#858).
+    # From: Issue #628 | Issue #858
+    key="$(docker exec "${cid}" cat /var/lib/lancache-secrets/pdns-api-key 2>/dev/null | tr -d '\n')"
+    if [ -z "${key}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0038]" "reason=\"could not read PDNS_API_KEY from shared-secrets\""
+        return 2
+    fi
+    # What: poll until the rollback listener :8083 accepts.
+    # Why: healthy != bound; nats-subscriber binds late (#628).
+    # From: Issue #628
+    for i in $(seq 1 30); do
+        curl -fsS -o /dev/null -H "X-API-Key: ${key}" "http://${ip}:8083/snapshots" 2>/dev/null && break
+        if [ "${i}" -eq 30 ]; then
+            ci_log "[CI-ERROR-VALIDATE-0039]" "reason=\"rollback listener :8083 never accepted a connection\""
+            return 1
+        fi
+        sleep 1
+    done
+    code="$(curl -sS -o /dev/null -w '%{http_code}' "http://${ip}:8083/snapshots" 2>/dev/null)"
+    if [ "${code}" != "401" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0040]" "code=\"${code}\" reason=\"/snapshots without X-API-Key not 401\""
+        return 1
+    fi
+    code="$(curl -sS -o /dev/null -w '%{http_code}' -H 'X-API-Key: wrong' "http://${ip}:8083/snapshots" 2>/dev/null)"
+    if [ "${code}" != "401" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0041]" "code=\"${code}\" reason=\"/snapshots with wrong X-API-Key not 401\""
+        return 1
+    fi
+    jar="$(mktemp "${TMPDIR:-/var/tmp}/ci-rb-jar.XXXXXX")"
+    csrf="$(_ci_validate_ui_session "${project}" "${jar}")" || { rc=$?; rm -f "${jar}"; return "${rc}"; }
+    _ci_validate_ui_add_record "${project}" "${jar}" "${csrf}" ci-rollback-probe 203.0.113.70 || { rm -f "${jar}"; return 1; }
+    _ci_validate_dns_resolves "${project}" dns-standard ci-rollback-probe.lan. 203.0.113.70 15 || { rm -f "${jar}"; return 1; }
+    # What: capture the newest lan. snapshot (the pre-change state).
+    # Why: the target this test rolls back to after the second write.
+    # From: Issue #628
+    snap="$(curl -sS -H "X-API-Key: ${key}" "http://${ip}:8083/snapshots" 2>/dev/null | jq -r '.zones["lan."][0].id // empty')"
+    if [ -z "${snap}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0042]" "reason=\"no lan. known-good snapshot after first write\""
+        rm -f "${jar}"
+        return 1
+    fi
+    _ci_validate_ui_add_record "${project}" "${jar}" "${csrf}" ci-rollback-probe 203.0.113.71 || { rm -f "${jar}"; return 1; }
+    _ci_validate_dns_resolves "${project}" dns-standard ci-rollback-probe.lan. 203.0.113.71 15 || { rm -f "${jar}"; return 1; }
+    rm -f "${jar}"
+    resp="$(curl -sS -X POST -H "X-API-Key: ${key}" -H 'Content-Type: application/json' \
+        -d "{\"zone\":\"lan.\",\"snapshot_id\":\"${snap}\"}" "http://${ip}:8083/rollback" 2>/dev/null)"
+    applied="$(printf '%s' "${resp}" | jq -r '.applied // false')"
+    changed="$(printf '%s' "${resp}" | jq -r '(.changed_names // []) | join(",")')"
+    flush="$(printf '%s' "${resp}" | jq -r '.flush_ok // false')"
+    if [ "${applied}" != "true" ] || [ "${flush}" != "true" ] || [ "${changed#*ci-rollback-probe.lan.}" = "${changed}" ]; then
+        ci_error "[CI-ERROR-VALIDATE-0043]" "reason=\"rollback not applied=true/flush_ok=true/changed_names lacking fqdn\"" "${resp}"
+        return 1
+    fi
+    # What: post-rollback dig must return the OLD content.
+    # Why: proves the recursor cache flush actually reached it.
+    # From: Issue #628
+    _ci_validate_dns_resolves "${project}" dns-standard ci-rollback-probe.lan. 203.0.113.70 15 || return $?
+}
+
 # What: Validate the candidate on one live prod stack.
 # Why: One up, all checks, one teardown (AG-VAL-027).
 # From: Issue #1683 | PR #1858
@@ -4212,6 +4283,7 @@ _ci_default_validate() {
             [ "${rc}" -eq 0 ] && { _ci_validate_ssl_mitm "${project}" || rc=$?; }
             [ "${rc}" -eq 0 ] && { _ci_validate_ssl_dispatch_map "${project}" || rc=$?; }
             [ "${rc}" -eq 0 ] && { _ci_validate_ui_nats_dns "${project}" || rc=$?; }
+            [ "${rc}" -eq 0 ] && { _ci_validate_dns_rollback "${project}" || rc=$?; }
         elif _ci_validate_is_collision "${up_out}"; then
             ci_error "[CI-ERROR-VALIDATE-0016]" "reason=\"subnet/port collision after slot reservation\"" "${up_out}"
             rc=1

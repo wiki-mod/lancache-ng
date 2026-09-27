@@ -3200,6 +3200,83 @@ netdata=sha256:n"
     [ "${status}" -eq 0 ]
 }
 
+@test "validate dns-rollback fails when no dns container" {
+    # What: Missing dns-standard container returns rc 2.
+    # Why: No target for the rollback round-trip.
+    # From: Issue #628
+    _ci_validate_container_ip() { :; }
+    docker() { :; }
+    run _ci_validate_dns_rollback proj
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0037"* ]]
+}
+
+@test "validate dns-rollback fails when the API key is unreadable" {
+    # What: An empty shared-secret key returns rc 2.
+    # Why: Cannot authenticate to the listener without it.
+    # From: Issue #628 | Issue #858
+    _ci_validate_container_ip() { echo 172.16.1.3; }
+    docker() { case "$1" in compose) echo cid1 ;; exec) : ;; esac; }
+    run _ci_validate_dns_rollback proj
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0038"* ]]
+}
+
+@test "validate dns-rollback fails when /snapshots is not 401 without a key" {
+    # What: A non-401 unauth response returns rc 1.
+    # Why: The listener MUST require authentication (#628).
+    # From: Issue #628
+    _ci_validate_container_ip() { echo 172.16.1.3; }
+    docker() { case "$1" in compose) echo cid1 ;; exec) echo KEY123 ;; esac; }
+    curl() { case "$*" in *-w*) echo 200 ;; *) return 0 ;; esac; }
+    run _ci_validate_dns_rollback proj
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0040"* ]]
+}
+
+@test "validate dns-rollback fails when rollback is not applied" {
+    # What: applied!=true in the response returns rc 1.
+    # Why: The rollback must actually be applied+flushed.
+    # From: Issue #628
+    _ci_validate_container_ip() { echo 172.16.1.3; }
+    docker() { case "$1" in compose) echo cid1 ;; exec) echo KEY123 ;; esac; }
+    _ci_validate_ui_session() { echo TOK; }
+    _ci_validate_ui_add_record() { return 0; }
+    _ci_validate_dns_resolves() { return 0; }
+    curl() {
+        case "$*" in
+            *rollback*) echo '{"applied":false,"changed_names":[],"flush_ok":false}' ;;
+            *-w*) echo 401 ;;
+            *-o\ /dev/null*) return 0 ;;
+            *) echo '{"zones":{"lan.":[{"id":"snap1"}]}}' ;;
+        esac
+    }
+    run _ci_validate_dns_rollback proj
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0043"* ]]
+}
+
+@test "validate dns-rollback passes on a full round-trip" {
+    # What: 401 auth + applied + flush + changed returns rc 0.
+    # Why: Proves the real listener/PATCH/flush path (#628).
+    # From: Issue #628 | Issue #1683
+    _ci_validate_container_ip() { echo 172.16.1.3; }
+    docker() { case "$1" in compose) echo cid1 ;; exec) echo KEY123 ;; esac; }
+    _ci_validate_ui_session() { echo TOK; }
+    _ci_validate_ui_add_record() { return 0; }
+    _ci_validate_dns_resolves() { return 0; }
+    curl() {
+        case "$*" in
+            *rollback*) echo '{"applied":true,"changed_names":["ci-rollback-probe.lan."],"flush_ok":true}' ;;
+            *-w*) echo 401 ;;
+            *-o\ /dev/null*) return 0 ;;
+            *) echo '{"zones":{"lan.":[{"id":"snap1"}]}}' ;;
+        esac
+    }
+    run _ci_validate_dns_rollback proj
+    [ "${status}" -eq 0 ]
+}
+
 # =========================================================
 # VARIABLES
 # =========================================================
