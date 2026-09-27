@@ -40,8 +40,10 @@ compose=(docker compose -p "$compose_project" -f deploy/full-setup/docker-compos
 
 cleanup() {
     local status=$?
-    validation_simulation_teardown "$compose_project" "$work_dir"
-    exit "$status"
+    local cleanup_status=0
+    validation_simulation_teardown "$compose_project" "$work_dir" || cleanup_status=$?
+    (( status != 0 )) && exit "$status"
+    exit "$cleanup_status"
 }
 trap cleanup EXIT
 
