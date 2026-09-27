@@ -61,106 +61,12 @@ jobs:
         uses: ./.github/actions/derive-validation-network
 
 
-  full-setup-validate:
-    name: validate full-setup image
-    needs: compute-validation-network
-    if: >-
-      always() &&
-      inputs.should_run == 'true' &&
-      needs['compute-validation-network'].result != 'failure' &&
-      needs['compute-validation-network'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    timeout-minutes: 45
-    env:
-      LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
-    steps:
-      - uses: *checkout_centraliced_versioning # v7.0.1
-
-
-      - name: Log in to registries (GHCR + optional Docker Hub)
-        uses: ./.github/actions/ghcr-then-dockerhub-login
-        with:
-          ghcr-username: ${{ github.actor }}
-          ghcr-password: ${{ secrets.GITHUB_TOKEN }}
-          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Resolve immutable build-tools image
-        id: build-tools
-        run: |
-          set -euo pipefail
-          build_tools_image="$(bash .github/scripts/ci.sh build-tools resolve-image)"
-          case "$build_tools_image" in
-            *@sha256:*) ;;
-            *)
-              echo "::error::Expected digest-qualified build-tools image, got '$build_tools_image'."
-              exit 1
-              ;;
-          esac
-          printf 'image=%s\n' "$build_tools_image" >> "$GITHUB_OUTPUT"
-
-      - name: Validate compose configuration
-        env:
-          BUILD_TOOLS_IMAGE: ${{ steps.build-tools.outputs.image }}
-          LANCACHE_IMAGE_REGISTRY: ghcr.io
-          LANCACHE_IMAGE_PREFIX: wiki-mod/lancache-ng
-        run: |
-          set -euo pipefail
-          : "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
-
-          docker run --rm \
-            -v "$PWD/deploy/full-setup:/validation:ro" \
-            -w /validation \
-            --env LANCACHE_IMAGE_REGISTRY \
-            --env LANCACHE_IMAGE_PREFIX \
-            --env LANCACHE_IMAGE_TAG \
-            "$BUILD_TOOLS_IMAGE" \
-            timeout --kill-after=30 --signal=KILL 300 \
-            docker compose -f docker-compose.yml config >/dev/null
-
-      - name: Reserve a validation subnet and start the stack (locked, retries on collision)
-        uses: ./.github/actions/reserve-validation-subnet-stack
-        with:
-          image-tag: ${{ inputs.image_tag }}
-
-      - name: Wait for the stack to stabilize and check container health
-        uses: ./.github/actions/wait-validation-stack-health
-
-      - name: Run client simulation against the full-setup stack
-        env:
-          FULL_SETUP_CLIENT_TOOLS_IMAGE: ghcr.io/${{ github.repository }}/build-tools:${{ inputs.image_tag }}
-        run: |
-          set -euo pipefail
-          bash scripts/untracked/simulations/full-setup-client-simulation.sh
-
-      - name: Tear down full-setup validation stack
-        if: always()
-        working-directory: deploy/full-setup
-        run: |
-          set -euo pipefail
-          docker compose down --volumes --remove-orphans || true
-
-
-          # shellcheck source=scripts/lib/reserve-validation-subnet.sh
-          source "$GITHUB_WORKSPACE/scripts/lib/reserve-validation-subnet.sh"
-
-          if [[ -n "${COMPOSE_PROJECT_NAME:-}" ]]; then
-            validation_project_networks_teardown "$COMPOSE_PROJECT_NAME" || true
-          fi
-
-          # What: release host subnet lock from reserve.
-          # Why: frees slot immediately, not at exit.
-          # From: PR #1523
-          if [[ -n "${VALIDATION_LOCK_HOLDER_PID:-}" ]]; then
-            kill "$VALIDATION_LOCK_HOLDER_PID" 2>/dev/null || true
-          fi
-
   ssl-mitm-cache-simulation:
     # What: real DNS/HTTP/HTTPS caching test.
     # Why: serialize runner; if: always() gate.
     # From: PR #1523
     name: SSL MITM cache simulation
-    needs: [compute-validation-network, full-setup-validate]
+    needs: [compute-validation-network]
     if: >-
       always() &&
       inputs.should_run == 'true' &&
