@@ -174,6 +174,7 @@ ENV PATH="/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin" \
 # Why: rebuilds must refresh Alpine packages when the shared cache epoch changes.
 # From: Issue #1095
 ARG APT_CACHE_BUST=""
+ARG BUILD_TOOLS_ACCELERATION_CACHE_BUST=clang-offload-packager-v1
 
 # What: switches apk's own repositories to plain http.
 # Why: Squid caches http; signed indices keep integrity.
@@ -185,6 +186,7 @@ RUN sed -i 's|^https://|http://|' /etc/apk/repositories
 # From: Issue #1095
 RUN set -euo pipefail; \
     : "package-cache-bust=${APT_CACHE_BUST}"; \
+    : "acceleration-cache-bust=${BUILD_TOOLS_ACCELERATION_CACHE_BUST}"; \
     apk update; \
     apk upgrade --no-cache; \
     apk add --no-cache \
