@@ -409,33 +409,65 @@ RUN set -euo pipefail; \
       cc \
       g++ \
     ); \
+    missing_tools=(); \
     for tool in "${required_tools[@]}"; do \
-      command -v "$tool" >/dev/null; \
+      if ! command -v "$tool" >/dev/null 2>&1; then \
+        missing_tools+=("$tool"); \
+      fi; \
     done; \
-    cargo --version; \
-    rustc --version; \
-    cargo fmt --version; \
-    cargo clippy --version; \
-    sccache --version; \
-    ccache --version; \
-    cargo audit --version; \
-    cargo tarpaulin --version; \
-    actionlint --version; \
-    bats --version; \
-    shellspec --version; \
-    shellcheck --version; \
-    docker --version; \
-    docker compose version; \
-    docker buildx version; \
-    expect -v; \
+    if ((${#missing_tools[@]})); then \
+      printf 'ERROR: required build-tools commands missing:\n' >&2; \
+      printf '  %s\n' "${missing_tools[@]}" >&2; \
+      exit 1; \
+    fi; \
+    contract_failures=(); \
+    run_contract_check() { \
+      local label="$1"; \
+      shift; \
+      local output status; \
+      if output="$("$@" 2>&1)"; then \
+        return 0; \
+      fi; \
+      status=$?; \
+      printf 'ERROR: build-tools contract command failed: %s (exit %s)\n%s\n' "$label" "$status" "$output" >&2; \
+      contract_failures+=("$label"); \
+    }; \
+    run_contract_check 'cargo --version' cargo --version; \
+    run_contract_check 'rustc --version' rustc --version; \
+    run_contract_check 'cargo fmt --version' cargo fmt --version; \
+    run_contract_check 'cargo clippy --version' cargo clippy --version; \
+    run_contract_check 'sccache --version' sccache --version; \
+    run_contract_check 'ccache --version' ccache --version; \
+    run_contract_check 'cargo audit --version' cargo audit --version; \
+    run_contract_check 'cargo tarpaulin --version' cargo tarpaulin --version; \
+    run_contract_check 'actionlint --version' actionlint --version; \
+    run_contract_check 'bats --version' bats --version; \
+    run_contract_check 'shellspec --version' shellspec --version; \
+    run_contract_check 'shellcheck --version' shellcheck --version; \
+    run_contract_check 'docker --version' docker --version; \
+    run_contract_check 'docker compose version' docker compose version; \
+    run_contract_check 'docker buildx version' docker buildx version; \
+    run_contract_check 'expect -v' expect -v; \
     printf 'PATH=%s\n' "$PATH"; \
     case ":$PATH:" in \
       *:/usr/local/bin:*) ;; \
-      *) echo "/usr/local/bin is missing from PATH" >&2; exit 1 ;; \
+      *) printf 'ERROR: build-tools contract failed: /usr/local/bin is missing from PATH\n' >&2; contract_failures+=(PATH) ;; \
     esac; \
-    rustc_host_line="$(rustc -vV)"; \
-    grep -qE '^host: .*-alpine-linux-musl$' <<<"${rustc_host_line}"; \
-    musl-gcc --version
+    rustc_host_line="$(rustc -vV 2>&1)" || { \
+      printf 'ERROR: build-tools contract command failed: rustc -vV (exit %s)\n%s\n' "$?" "$rustc_host_line" >&2; \
+      contract_failures+=("rustc -vV"); \
+      rustc_host_line=""; \
+    }; \
+    if [ -n "$rustc_host_line" ] && ! grep -qE '^host: .*-alpine-linux-musl$' <<<"${rustc_host_line}"; then \
+      printf 'ERROR: build-tools Rust host triple violates Alpine-musl contract:\n%s\n' "$rustc_host_line" >&2; \
+      contract_failures+=("rustc host triple"); \
+    fi; \
+    run_contract_check 'musl-gcc --version' musl-gcc --version; \
+    if ((${#contract_failures[@]})); then \
+      printf 'ERROR: build-tools contract checks failed:\n' >&2; \
+      printf '  %s\n' "${contract_failures[@]}" >&2; \
+      exit 1; \
+    fi
 
 # What: fail build if CI proxy CA leaked into image
 # Why: CA must never persist in published build-tools
