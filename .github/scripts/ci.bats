@@ -8272,6 +8272,28 @@ SH
     [ "${status}" -eq 1 ]
 }
 
+@test "index_raw reports unknown, not absent, on a transient failure" {
+    # What: a transient inspect failure is rc 2, not rc 1.
+    # Why: transient must not read as a missing platform.
+    # From: Issue #1683
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    printf '#!/usr/bin/env bash\necho "Connection reset by peer" >&2\nexit 1\n' > "${bin}/docker"
+    chmod +x "${bin}/docker"
+    PATH="${bin}:${PATH}" run _ci_index_raw ghcr.io/wiki-mod/lancache-ng/ui:sha-deadbeef
+    [ "${status}" -eq 2 ]
+}
+
+@test "index_raw reports absent only on a genuine not_found" {
+    # What: a manifest-unknown miss is rc 1 (absent).
+    # Why: only a real miss may drive assembly, never transient.
+    # From: Issue #1683
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    printf '#!/usr/bin/env bash\necho "not found: manifest unknown" >&2\nexit 1\n' > "${bin}/docker"
+    chmod +x "${bin}/docker"
+    PATH="${bin}:${PATH}" run _ci_index_raw ghcr.io/wiki-mod/lancache-ng/ui:sha-deadbeef
+    [ "${status}" -eq 1 ]
+}
+
 @test "ledger upsert writes many records in one commit" {
     # What: a batch of records lands in one CAS commit.
     # Why: §26.1 one write per workflow, not per record.
