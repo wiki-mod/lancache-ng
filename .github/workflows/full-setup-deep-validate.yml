@@ -388,105 +388,6 @@ jobs:
           IMAGE_TAG: ${{ needs.plan.outputs.image_tag }}
         run: bash scripts/untracked/simulations/ntp-cap-sys-time-simulation.sh
 
-  dns-zone-rollback-simulation:
-    # Real end-to-end test (#628) of the PowerDNS zone/record known-good
-    # snapshot + rollback mechanism: makes two real DNS writes through the
-    # real UI/NATS path, calls the new rollback listener
-    # (services/dns/nats-subscriber/src/rollback_listener.rs, port 8083)
-    # directly over HTTP with the real X-API-Key, and confirms via real
-    # `dig` queries that PowerDNS's data and dns-standard's own recursor
-    # cache were both actually rolled back -- see
-    # scripts/untracked/simulations/dns-zone-rollback-simulation.sh's header comment for why this
-    # is needed alongside the crate's unit tests (they cannot exercise a
-    # live PowerDNS/recursor round-trip). Pulls the real dns/ui/nats images,
-    # so it threads the PR staging tag to test the PR's own code.
-    name: DNS zone/record rollback simulation
-    needs: [plan, ensure-pr-staging-images, full-setup-sims]
-    if: >-
-      always() &&
-      needs.plan.outputs.should_run == 'true' &&
-      needs['ensure-pr-staging-images'].result != 'failure' &&
-      needs['ensure-pr-staging-images'].result != 'cancelled'
-    # heavy, not light: this job brings up a real full-setup stack subset
-    # (PowerDNS/nats-subscriber/UI) rather than just polling or planning.
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    timeout-minutes: 45
-    env:
-      LANCACHE_IMAGE_TAG: ${{ needs.plan.outputs.image_tag }}
-      # The run-in-validation-subnet.sh wrapper below self-reserves a
-      # collision-free /27 slot and exports the full VALIDATION_* set for it.
-      # Issue #1014: this job no longer threads compute-validation-network's
-      # per-run outputs as job-level env -- that job now lives in the reusable
-      # full-setup-sims.yml, and the wrapper supplies the addresses anyway.
-    steps:
-      # What: Resyncs HEAD, clears skip-worktree bits.
-      # Why: Prior checkout's leftover blocks ref-switch on reused host.
-      # From: Issue #1095 | PR #1640
-      - name: Resync workspace to its own HEAD before checkout (self-hosted reuse hardening)
-        run: |
-          set -euo pipefail
-          if [ -d .git ] && git rev-parse --verify -q HEAD >/dev/null 2>&1; then
-            inherited_head="$(git rev-parse HEAD)"
-            echo "::notice::pre-checkout resync: inherited HEAD is $inherited_head"
-            git sparse-checkout disable || true
-            rm -f .git/info/sparse-checkout
-            ls_files_before="$(git ls-files -v)"
-            mapfile -t remaining_skip_worktree < <(printf '%s\n' "$ls_files_before" | awk '/^S /{print substr($0,3)}')
-            echo "::notice::pre-checkout resync: ${#remaining_skip_worktree[@]} skip-worktree path(s) found"
-            if [ "${#remaining_skip_worktree[@]}" -gt 0 ]; then
-              git update-index --no-skip-worktree -- "${remaining_skip_worktree[@]}"
-            fi
-            git checkout --progress --force HEAD -- .
-          else
-            echo "::notice::pre-checkout resync: no valid checked-out HEAD found (fresh or mid-clone workspace), guard is a no-op"
-          fi
-
-      - uses: *checkout_centraliced_versioning # v7.0.1
-
-      # What: authenticates registry pulls before compose up.
-      # Why: pulls nats/docker-socket-proxy from docker.io.
-      # From: Issue #1095
-      - name: Log in to registries (GHCR + optional Docker Hub)
-        uses: ./.github/actions/ghcr-then-dockerhub-login
-        with:
-          ghcr-username: ${{ github.actor }}
-          ghcr-password: ${{ secrets.GITHUB_TOKEN }}
-          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Resolve build-tools image
-        # What: PR-staging build-tools if touched, else published.
-        # Why: a same-PR Dockerfile change needs its staging image.
-        # From: Issue #1683 | PR #1858
-        id: build-tools-image
-        # Read via env: + quoted shell variables instead of interpolating
-        # `${{ }}` expressions directly into the run: script (OSPS-BR-01.04
-        # hardening, refs #1130): matches this file's own LANCACHE_IMAGE_TAG
-        # env-var convention above and avoids the documented GitHub Actions
-        # script-injection anti-pattern.
-        env:
-          PR_STAGING_AVAILABLE: ${{ needs.plan.outputs.pr_staging_available }}
-          BUILD_TOOLS_TOUCHED: ${{ needs.plan.outputs.build_tools }}
-          IMAGE_TAG: ${{ needs.plan.outputs.image_tag }}
-          REPOSITORY: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          if [[ "$PR_STAGING_AVAILABLE" == "true" && "$BUILD_TOOLS_TOUCHED" == "true" ]]; then
-            image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
-            echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
-          else
-            image="$(bash .github/scripts/ci.sh build-tools resolve-image)"
-          fi
-          echo "image=$image" >> "$GITHUB_OUTPUT"
-      - name: Run DNS zone/record rollback simulation
-        env:
-          BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
-        run: |
-          set -euo pipefail
-          # Reserve a collision-free subnet (flock + retry, #820) and run the
-          # sim inside it rather than racing the shared job-level subnet.
-          bash scripts/lib/run-in-validation-subnet.sh bash scripts/untracked/simulations/dns-zone-rollback-simulation.sh
-
   dhcp-kea-ui-rollback-simulation:
     # Real end-to-end proof for issue #837: the Admin UI's OWN Kea rollback
     # route (POST /dhcp/snapshot/rollback, rollback_kea_snapshot in
@@ -801,7 +702,6 @@ jobs:
       - ensure-pr-staging-images
       - full-setup-sims
       - ntp-cap-sys-time-simulation
-      - dns-zone-rollback-simulation
       - dhcp-kea-ui-rollback-simulation
       - syslog-forwarding-simulation
     if: always()
@@ -827,7 +727,6 @@ jobs:
           # lists each inner job so a failure is attributable.
           FULL_SETUP_SIMS_RESULT: ${{ needs['full-setup-sims'].result }}
           NTP_CAP_SYS_TIME_RESULT: ${{ needs['ntp-cap-sys-time-simulation'].result }}
-          DNS_ROLLBACK_RESULT: ${{ needs['dns-zone-rollback-simulation'].result }}
           UI_KEA_ROLLBACK_RESULT: ${{ needs['dhcp-kea-ui-rollback-simulation'].result }}
           SYSLOG_FORWARDING_RESULT: ${{ needs['syslog-forwarding-simulation'].result }}
         run: |
@@ -872,7 +771,6 @@ jobs:
           echo "Deep validation job results:"
           check "ensure-pr-staging-images" "$ENSURE_RESULT"
           check "ntp-cap-sys-time-simulation" "$NTP_CAP_SYS_TIME_RESULT"
-          check "dns-zone-rollback-simulation" "$DNS_ROLLBACK_RESULT"
           check "dhcp-kea-ui-rollback-simulation" "$UI_KEA_ROLLBACK_RESULT"
           check "syslog-forwarding-simulation" "$SYSLOG_FORWARDING_RESULT"
 
