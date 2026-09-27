@@ -351,6 +351,12 @@ svc_split_commands() {
 # hoisting to scripts/lib is a separate maintainer decision.
 svc_strip_command_prefix() {
     SVC_STRIPPED="${1#"${1%%[![:space:]]*}"}"
+    # What: unwrap the repository's host-local BuildKit lock before command classification.
+    # Why: DHCP simulations retain their documented client-IP exemption when the build is locked.
+    # From: Issue #1860
+    while [[ "$SVC_STRIPPED" == docker_build_with_content_store_lock\ --\ * ]]; do
+        SVC_STRIPPED="${SVC_STRIPPED#docker_build_with_content_store_lock -- }"
+    done
     while [[ "$SVC_STRIPPED" =~ ^(if|then|else|elif|while|until|do|!)[[:space:]]+ ]]; do
         SVC_STRIPPED="${SVC_STRIPPED#"${BASH_REMATCH[0]}"}"
     done
