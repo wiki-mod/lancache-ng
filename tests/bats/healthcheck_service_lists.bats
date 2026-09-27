@@ -75,6 +75,31 @@ setup() {
     done
 }
 
+@test "deep rollback simulations do not wait for the reusable simulation workflow" {
+    # Both jobs reserve their own validation subnet.  The Kea rollback's
+    # local image build uses the same content-store lock as sibling builds.
+    workflow="$repo_root/.github/workflows/full-setup-deep-validate.yml"
+    for job in dns-zone-rollback-simulation dhcp-kea-ui-rollback-simulation; do
+        needs_line="$(awk -v job="$job" '$0 == "  " job ":" {found=1; next} found && /^    needs:/ {print; exit} found && /^  [a-z0-9-]+:$/ {exit}' "$workflow")"
+        [ "$needs_line" = "    needs: [plan, ensure-pr-staging-images]" ] \
+            || fail "$job still has an artificial full-setup-sims prerequisite"
+    done
+    grep -q 'docker_build_with_content_store_lock -- docker build' \
+        "$repo_root/scripts/untracked/simulations/dhcp-kea-ui-rollback-simulation.sh" \
+        || fail "dhcp-kea-ui-rollback-simulation.sh does not protect its local Docker build"
+}
+
+@test "manual full-setup keeps base validation while deep PR validation omits it" {
+    manual="$repo_root/.github/workflows/full-setup-validate.yml"
+    deep="$repo_root/.github/workflows/full-setup-deep-validate.yml"
+    grep -q 'include_base_validation: true' "$manual" \
+        || fail "manual full-setup workflow no longer explicitly requests base validation"
+    grep -q 'include_base_validation: false' "$deep" \
+        || fail "deep validation no longer explicitly omits the duplicate base validation"
+    grep -q 'name: validate full-setup image' "$repo_root/.github/workflows/build-push.yml" \
+        || fail "build-push candidate validation is missing"
+}
+
 # fail <message>: this file's own `[ cond ] || fail "..."` assertions (a
 # pattern already used throughout this file before this addition) rely on a
 # `fail` helper that neither bats-core nor this project provides globally --

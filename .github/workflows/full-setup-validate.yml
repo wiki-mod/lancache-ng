@@ -30,9 +30,10 @@ jobs:
     uses: ./.github/workflows/full-setup-sims.yml
     with:
       image_tag: ${{ inputs.image_tag }}
-      # What: Omits optional reusable inputs.
-      # Why: Defaults already match dispatch intent.
-      # From: Issue #1014
+      # What: Keep the standalone manual workflow's general base validation.
+      # Why: Deep PR validation already performs the candidate check in build-push.yml.
+      # From: Issue #1860
+      include_base_validation: true
     secrets: inherit
 
   dhcp-proxy-pxe-simulation:

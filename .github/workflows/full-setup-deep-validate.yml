@@ -2,23 +2,17 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# DEEP full-setup validation gate (#715). This is the THIRD, additive check
-# the project owner asked for in #715's clarification comments: a strict
-# SUPERSET of both existing checks, wired to run automatically on every
-# relevant PR.
+# DEEP full-setup validation gate (#715). This is the additive functional
+# simulation check wired to run automatically on every relevant PR.
 #
-#   - It does everything build-push.yml's shallow "validate full-setup image"
-#     job does (bring the full-setup compose stack up on real images, assert
-#     every container is healthy and not crash-looping)...
-#   - ...PLUS every real functional simulation that until now lived only in
+#   - It runs every real functional simulation that until now lived only in
 #     the manual-dispatch-only full-setup-validate.yml (SSL/HTTP/HTTPS
 #     caching, UI->NATS->PowerDNS integration, setup.sh CLI, Kea DHCP lease
 #     flow, per-secondary NATS auth-callout).
 #
-# Neither existing workflow is modified: build-push.yml's shallow job and the
-# manual full-setup-validate.yml both stay exactly as they are, so their fast
-# and on-demand fallback paths remain available (see #715's comments on why
-# the two originals are kept untouched rather than merged in place).
+# build-push.yml keeps its shallow candidate validation, while the manual
+# full-setup-validate.yml keeps the standalone base validation and simulation
+# path. Deep validation supplies only the additional simulations below.
 #
 # On a pull_request event this validates the PR's OWN commits by reusing the
 # pr-<N>-sha-<full> staging-tag mechanism (see
@@ -317,9 +311,11 @@ jobs:
             *) echo "::error::Refusing to remove an unexpected TMPDIR value: ${TMPDIR:-<unset>}"; exit 1 ;;
           esac
 
-  # The ten simulation/validation jobs this suite shares with the manual
-  # full-setup-validate.yml now live in one reusable workflow (issue #1014).
-  # This per-PR gate invokes them with the PR's own resolved staging tag; the
+  # The additional simulation jobs shared with the manual
+  # full-setup-validate.yml live in one reusable workflow (issue #1014).
+  # This per-PR gate invokes them with the PR's own resolved staging tag and
+  # explicitly omits the general base-validation job; build-push.yml already
+  # validates that candidate stack.
   # caller keeps its own trigger, plan gating, and ensure-pr-staging-images
   # ordering. That job's failure/cancel guard therefore lives here on the
   # `uses:` job rather than on each job inside the reusable workflow.
@@ -337,6 +333,7 @@ jobs:
       should_run: ${{ needs.plan.outputs.should_run }}
       pr_staging_available: ${{ needs.plan.outputs.pr_staging_available }}
       build_tools_touched: ${{ needs.plan.outputs.build_tools }}
+      include_base_validation: false
     secrets: inherit
 
   ntp-cap-sys-time-simulation:
@@ -407,7 +404,7 @@ jobs:
     # live PowerDNS/recursor round-trip). Pulls the real dns/ui/nats images,
     # so it threads the PR staging tag to test the PR's own code.
     name: DNS zone/record rollback simulation
-    needs: [plan, ensure-pr-staging-images, full-setup-sims]
+    needs: [plan, ensure-pr-staging-images]
     if: >-
       always() &&
       needs.plan.outputs.should_run == 'true' &&
@@ -514,13 +511,10 @@ jobs:
     # full-setup-sims.yml (issue #1014) -- doing so would run it in the
     # manual-dispatch context where it never existed. Instead it stays a
     # top-level job here, alongside dns-zone-rollback-simulation and
-    # syslog-forwarding-simulation, needing the whole full-setup-sims caller
-    # job (its former dependency, ui-reachability-crash-loop-simulation, is
-    # now one of the jobs folded inside it and no longer addressable by name
-    # at this level) instead of compute-validation-network's raw per-job
-    # outputs directly.
+    # syslog-forwarding-simulation. It has no data dependency on the
+    # full-setup-sims caller and reserves its own isolated subnet below.
     name: Admin UI Kea rollback (POST /dhcp/snapshot/rollback) simulation
-    needs: [plan, ensure-pr-staging-images, full-setup-sims]
+    needs: [plan, ensure-pr-staging-images]
     if: >-
       always() &&
       needs.plan.outputs.should_run == 'true' &&
@@ -830,9 +824,10 @@ jobs:
           SHOULD_RUN: ${{ needs.plan.outputs.should_run }}
           PLAN_RESULT: ${{ needs.plan.result }}
           ENSURE_RESULT: ${{ needs['ensure-pr-staging-images'].result }}
-          # One combined result for the ten shared jobs now in the reusable
-          # full-setup-sims.yml (compute-validation-network + full-setup-validate
-          # + the eight simulations). A reusable-workflow caller job reports
+          # One combined result for the shared deep simulations in the reusable
+          # full-setup-sims.yml (compute-validation-network plus the additional
+          # simulations; the general base validation is intentionally omitted).
+          # A reusable-workflow caller job reports
           # 'failure' if ANY job inside it failed, so this single result is a
           # faithful pass/fail for the whole shared set; GitHub's checks UI still
           # lists each inner job so a failure is attributable.
@@ -857,9 +852,9 @@ jobs:
           # Hard requirement, deliberately NOT routed through the lenient
           # check() helper below: the shared full-setup-sims suite contains
           # compute-validation-network (the per-run subnet/IP derivation every
-          # job relies on for collision-free isolation) plus full-setup-validate
-          # and the eight simulations. should_run is already 'true' here, so this
-          # suite must have actually run and succeeded -- never merely be
+          # job relies on for collision-free isolation) plus the additional
+          # simulations. should_run is already 'true' here, so this suite must
+          # have actually run and succeeded -- never merely be
           # 'skipped' (which check() treats as fine and would let this required
           # gate go green after silently losing the isolation guarantee this
           # hard requirement exists to preserve).

@@ -28,6 +28,11 @@ on:
         required: false
         default: "false"
         type: string
+      include_base_validation:
+        description: "'true' to run the general full-setup image validation job."
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -67,6 +72,7 @@ jobs:
     if: >-
       always() &&
       inputs.should_run == 'true' &&
+      inputs.include_base_validation &&
       needs['compute-validation-network'].result != 'failure' &&
       needs['compute-validation-network'].result != 'cancelled'
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
