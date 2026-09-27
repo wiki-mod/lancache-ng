@@ -280,15 +280,19 @@ teardown() {
     [ "${status}" -ne 0 ]
 }
 
-@test "platform-runner maps each platform to one runner, fail-closed" {
-    # What: One owner of platform to GitHub runner label.
-    # Why: gate and Base-CI must not both hardcode it.
+@test "platform-field reads apk arch and runner from the SOT, fail-closed" {
+    # What: platform->field comes from the platform_arch SOT.
+    # Why: one owner; ci.sh keeps no per-arch case (AG-CODE-011).
     # From: Issue #1683
-    run _ci_platform_runner linux/amd64
-    [ "${output}" = "ubuntu-latest" ]
-    run _ci_platform_runner linux/arm64
-    [ "${output}" = "ubuntu-24.04-arm" ]
-    run _ci_platform_runner linux/riscv64
+    local m="${BATS_TEST_TMPDIR}/m.yml"
+    printf 'platform_arch:\n  amd64:\n    apk: TESTARCH\n    runner: TESTRUN\n' > "${m}"
+    CI_MANIFEST="${m}" run _ci_platform_apk_arch linux/amd64
+    [ "${status}" -eq 0 ]
+    [ "${output}" = "TESTARCH" ]
+    CI_MANIFEST="${m}" run _ci_platform_runner linux/amd64
+    [ "${status}" -eq 0 ]
+    [ "${output}" = "TESTRUN" ]
+    CI_MANIFEST="${m}" run _ci_platform_runner linux/riscv64
     [ "${status}" -ne 0 ]
 }
 
@@ -3762,7 +3766,7 @@ netdata=sha256:n"
     # Why: ci.sh owns arch mapping; Dockerfile drops uname -m.
     # From: Issue #1683
     local m="${BATS_TEST_TMPDIR}/mt-manifest.yml"
-    printf 'base_images:\n  alpine: "a"\nservices:\n  svc-rust:\n    context: c\n    build_type: rust\n' > "${m}"
+    printf 'base_images:\n  alpine: "a"\nplatform_arch:\n  amd64:\n    apk: x86_64\n  arm64:\n    apk: aarch64\nservices:\n  svc-rust:\n    context: c\n    build_type: rust\n' > "${m}"
     export CI_BUILD_TOOLS_IMAGE_CMD='echo bt-stub@sha256:test'
     CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc-rust --bare linux/amd64
     [ "${status}" -eq 0 ]

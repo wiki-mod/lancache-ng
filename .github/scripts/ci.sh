@@ -241,26 +241,28 @@ _ci_valid_platform() {
     return 1
 }
 
+# What: Read a platform's SOT arch attribute, fail-closed.
+# Why: one owner of platform facts; no per-fact case dup.
+# From: Issue #1683
+_ci_platform_field() {
+    local arch="${1##*/}" field="$2" val
+    val="$(_ci_block_entry_field platform_arch "${arch}" "${field}")"
+    [ -n "${val}" ] || return 2
+    printf '%s\n' "${val}"
+}
+
 # What: Map a platform to its apk arch, fail-closed.
 # Why: One owner of the platform->apk-arch fact.
 # From: Issue #1683
 _ci_platform_apk_arch() {
-    case "$1" in
-        */amd64|amd64) printf 'x86_64\n' ;;
-        */arm64|arm64) printf 'aarch64\n' ;;
-        *) return 2 ;;
-    esac
+    _ci_platform_field "$1" apk
 }
 
 # What: Map a platform to its GitHub-hosted runner label.
 # Why: One owner; gate and Base-CI must not both hardcode.
 # From: Issue #1683
 _ci_platform_runner() {
-    case "$1" in
-        */amd64|amd64) printf 'ubuntu-latest\n' ;;
-        */arm64|arm64) printf 'ubuntu-24.04-arm\n' ;;
-        *) return 2 ;;
-    esac
+    _ci_platform_field "$1" runner
 }
 
 # What: Print the known arch-suffix aliases of a platform.

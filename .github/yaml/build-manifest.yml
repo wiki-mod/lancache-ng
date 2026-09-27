@@ -425,6 +425,17 @@ external_versions:
 build_matrix:
   platforms: [linux/amd64, linux/arm64]
 
+# What: Per-arch apk arch name and GitHub runner label.
+# Why: one SOT owner; no platform case dup in ci.sh.
+# From: Issue #1683
+platform_arch:
+  amd64:
+    apk: x86_64
+    runner: ubuntu-latest
+  arm64:
+    apk: aarch64
+    runner: ubuntu-24.04-arm
+
 # What: Named build contexts services COPY from at build.
 # Why: A change here rebuilds every consumer, not just self.
 # From: Issue #1683
