@@ -1218,23 +1218,22 @@ jobs:
           grep -F 'distcc_potential_hosts=' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Docker Rust builds must pass distcc hosts through a BuildKit secret."; exit 1; }
           if awk '
-            /^      - name: Prepare Rust acceleration secret files$/ { in_block=1; saw_pr_gate=0; next }
+            /^      - name: Prepare Rust acceleration secret files$/ { in_block=1; saw_self_hosted_gate=0; next }
             in_block && /^      - name: / {
-              if (!saw_pr_gate) {
-                print FILENAME ":" FNR ":" "missing pull_request gate in Rust BuildKit secret preparation."
+              if (!saw_self_hosted_gate) {
+                print FILENAME ":" FNR ":" "missing self-hosted runner gate in Rust BuildKit secret preparation."
                 bad=1
               }
               in_block=0
               next
             }
-            in_block && /github.event_name != '\''pull_request'\''/ { saw_pr_gate=1 }
-            in_block && /github.event.pull_request.head.repo.full_name == github.repository/ { print FILENAME ":" FNR ":" $0; bad=1 }
+            in_block && /runner.environment == '\''self-hosted'\''/ { saw_self_hosted_gate=1 }
             END {
-              if (in_block && !saw_pr_gate) bad=1
+              if (in_block && !saw_self_hosted_gate) bad=1
               exit bad ? 0 : 1
             }
           ' .github/workflows/build-push.yml; then
-            echo "::error::Rust Docker builds must not prepare BuildKit secret-files on pull_request runs."
+            echo "::error::Rust BuildKit acceleration secrets must only be prepared on self-hosted runners."
             exit 1
           fi
           grep -F 'uses: ./.github/actions/rust-acceleration-preflight' .github/workflows/build-push.yml >/dev/null \
@@ -3812,8 +3811,7 @@ jobs:
               steps.should-build.outputs.should-build == 'true'
             ) &&
             matrix.rust == true &&
-            github.actor != 'dependabot[bot]' &&
-            github.event_name != 'pull_request'
+            runner.environment == 'self-hosted'
           }}
         id: sccache-secret
         env:
