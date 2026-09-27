@@ -4,8 +4,7 @@ Every `*-simulation.sh` script (issue #1095 F-16): real, opt-in end-to-end
 proofs that exercise the actual running stack (Docker Compose, live DNS
 queries, real DHCP lease exchanges, NATS auth callouts, TLS interception,
 syslog forwarding, and similar) rather than unit-testing code in isolation.
-These are what `.github/workflows/full-setup-deep-validate.yml` and
-`full-setup-sims.yml` invoke, and what
+These are what `.github/workflows/full-setup-sims.yml` invokes, and what
 `scripts/untracked/detect-full-setup-changes.sh`'s `should_run` gate exists
 to decide whether to run at all for a given PR diff.
 

@@ -3,7 +3,7 @@
 Every `scripts/` file that is NOT CI-tooling-only (issue #1095 F-16):
 release/setup/runtime utilities, plus the small set of scripts that
 themselves decide or influence CI behavior (`detect-full-setup-changes.sh`,
-`plan-deep-validation.sh`, `classify-image-impact.sh`,
+`classify-image-impact.sh`,
 `select-build-tools-image.sh`) and must therefore keep triggering real
 validation when touched rather than being exempted. `scripts/untracked/
 simulations/` holds the `*-simulation.sh` files specifically (see that

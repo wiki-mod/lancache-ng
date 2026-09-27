@@ -5,7 +5,7 @@ been individually verified to have no service/product-code dependency at
 all -- specifically, verified to be invoked only from `build-push.yml`'s own
 PR-gate jobs, `build-tools-smoke.yml`, `backfill-stack-latest.yml`, or
 `orphaned-branches.yml`, and never sourced/invoked/COPYed by anything
-`full-setup-deep-validate.yml`/`full-setup-sims.yml`/`full-setup-validate.yml`
+`full-setup-sims.yml`/`full-setup-validate.yml`
 (or the simulation scripts they run) exercises.
 
 Any path under this directory is automatically recognized as CI-tooling-only
