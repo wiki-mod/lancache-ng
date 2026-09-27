@@ -13,6 +13,8 @@ compose_project="${COMPOSE_PROJECT_NAME:-lancache-ng-validation}"
 network_name="${compose_project}_validation"
 image_tag="${LANCACHE_IMAGE_TAG:-nightly}"
 build_tools_image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required (an image providing curl, e.g. the build-tools image)}"
+# shellcheck source=scripts/lib/docker-buildx-retry.sh
+source "$repo_root/scripts/lib/docker-buildx-retry.sh"
 
 # What: Load per-run VALIDATION_SUBNET from environment.
 # Why: Job threads subnet; addresses must be derived.
@@ -91,7 +93,7 @@ echo "== Building the Kea DHCP image from this checkout's services/dhcp =="
 # What: passes shared-scripts as a named build context.
 # Why: else COPY --from=shared-scripts triggers a bad pull.
 # From: Issue #1095
-docker build -q -t "$kea_image_tag" --build-context "shared-scripts=$repo_root/scripts/lib" services/dhcp >/dev/null
+docker_build_with_content_store_lock -- docker build -q -t "$kea_image_tag" --build-context "shared-scripts=$repo_root/scripts/lib" services/dhcp
 
 echo "== Starting docker-socket-proxy/proxy/nats from the published $image_tag images =="
 LANCACHE_IMAGE_TAG="$image_tag" "${compose[@]}" up -d docker-socket-proxy proxy nats

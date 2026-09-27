@@ -73,6 +73,58 @@
 DOCKER_BUILDX_RETRY_MAX_ATTEMPTS="${DOCKER_BUILDX_RETRY_MAX_ATTEMPTS:-4}"
 DOCKER_BUILDX_RETRY_BACKOFF_SECONDS="${DOCKER_BUILDX_RETRY_BACKOFF_SECONDS:-30}"
 
+# What: Host-local lock for the Docker daemon's shared BuildKit/containerd store.
+# Why: Only the build mutates this shared resource; simulation assertions stay parallel.
+# From: Issue #1860
+DOCKER_BUILD_CONTENT_STORE_LOCK_PATH="${DOCKER_BUILD_CONTENT_STORE_LOCK_PATH:-/var/tmp/lancache-docker-build-content-store.lock}"
+
+# docker_build_with_content_store_lock -- <command...>
+# Serializes only a local Docker build against the daemon shared by jobs on
+# this host. Output and the real exit status remain visible to the caller.
+docker_build_with_content_store_lock() {
+  if [[ "${1:-}" != "--" ]]; then
+    echo "::error::docker_build_with_content_store_lock: expected -- before the command to run" >&2
+    return 2
+  fi
+  shift
+
+  if ! command -v flock >/dev/null 2>&1; then
+    echo "::error::docker_build_with_content_store_lock: flock is required for safe BuildKit content-store locking." >&2
+    return 1
+  fi
+
+  local lock_directory
+  lock_directory="$(dirname "$DOCKER_BUILD_CONTENT_STORE_LOCK_PATH")"
+  if ! mkdir -p "$lock_directory"; then
+    echo "::error::docker_build_with_content_store_lock: cannot create lock directory $lock_directory." >&2
+    return 1
+  fi
+
+  if ! exec {DOCKER_BUILD_CONTENT_STORE_LOCK_FD}>"$DOCKER_BUILD_CONTENT_STORE_LOCK_PATH"; then
+    echo "::error::docker_build_with_content_store_lock: cannot open $DOCKER_BUILD_CONTENT_STORE_LOCK_PATH." >&2
+    return 1
+  fi
+  echo "::notice::Waiting for the host-local Docker BuildKit content-store lock." >&2
+  if ! flock "$DOCKER_BUILD_CONTENT_STORE_LOCK_FD"; then
+    exec {DOCKER_BUILD_CONTENT_STORE_LOCK_FD}>&-
+    echo "::error::docker_build_with_content_store_lock: cannot acquire $DOCKER_BUILD_CONTENT_STORE_LOCK_PATH." >&2
+    return 1
+  fi
+  echo "::notice::Acquired the host-local Docker BuildKit content-store lock." >&2
+
+  local status
+  if "$@"; then
+    status=0
+  else
+    status=$?
+  fi
+
+  flock -u "$DOCKER_BUILD_CONTENT_STORE_LOCK_FD"
+  exec {DOCKER_BUILD_CONTENT_STORE_LOCK_FD}>&-
+  echo "::notice::Released the host-local Docker BuildKit content-store lock." >&2
+  return "$status"
+}
+
 # The historical failures' error text, loosened only where the real payload
 # varies run to run (the layer digest, the lock duration in ms, the lock
 # timestamp). Anchored on the stable, load-bearing tokens

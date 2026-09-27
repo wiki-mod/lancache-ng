@@ -16,6 +16,8 @@ cd "$repo_root"
 source "$repo_root/scripts/lib/dhcp-lease-parse.sh"
 # shellcheck source=scripts/lib/reserve-validation-subnet.sh
 source "$repo_root/scripts/lib/reserve-validation-subnet.sh"
+# shellcheck source=scripts/lib/docker-buildx-retry.sh
+source "$repo_root/scripts/lib/docker-buildx-retry.sh"
 
 client_tool_image="${DHCP_LEASE_FLOW_CLIENT_IMAGE:?DHCP_LEASE_FLOW_CLIENT_IMAGE is required (an image providing dhclient or udhcpc/busybox, e.g. the build-tools image)}"
 
@@ -138,7 +140,7 @@ echo "== Building the Kea DHCP image from this checkout's services/dhcp =="
 # What: passes shared-scripts as a named build context.
 # Why: else COPY --from=shared-scripts triggers a bad pull.
 # From: Issue #1095
-docker build -q -t "$image_tag" --build-context "shared-scripts=$repo_root/scripts/lib" services/dhcp >/dev/null
+docker_build_with_content_store_lock -- docker build -q -t "$image_tag" --build-context "shared-scripts=$repo_root/scripts/lib" services/dhcp
 
 # What: Uses flock+retry for dynamic subnet allocation.
 # Why: Concurrent jobs collide; needs distributed lock.
@@ -229,7 +231,7 @@ echo "== Building the PowerDNS image from this checkout's services/dns (issue #7
 # What: Pins DNS image build to resolved build-tools image.
 # Why: Prevents silent divergence from :latest moving tag.
 # From: PR #769
-docker build -q -t "$dns_image_tag" --build-arg "BUILD_TOOLS_IMAGE=${client_tool_image}" \
+docker_build_with_content_store_lock -- docker build -q -t "$dns_image_tag" --build-arg "BUILD_TOOLS_IMAGE=${client_tool_image}" \
     --build-arg "PROJECT_CARGO_LTO=${project_cargo_lto}" \
     --build-arg "PROJECT_CARGO_CODEGENUNIT=${project_cargo_codegenunit}" \
     --build-context "shared-scripts=$repo_root/scripts/lib" \

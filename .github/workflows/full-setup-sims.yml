@@ -164,10 +164,10 @@ jobs:
 
   ssl-mitm-cache-simulation:
     # What: real DNS/HTTP/HTTPS caching test.
-    # Why: serialize runner; if: always() gate.
+    # Why: independent Compose test; if: always() gate.
     # From: PR #1523
     name: SSL MITM cache simulation
-    needs: [compute-validation-network, full-setup-validate]
+    needs: [compute-validation-network]
     if: >-
       always() &&
       inputs.should_run == 'true' &&
@@ -245,7 +245,7 @@ jobs:
   proxy-deep-wildcard-tls-simulation:
 
     name: Proxy deep-wildcard TLS simulation
-    needs: [compute-validation-network, ssl-mitm-cache-simulation]
+    needs: [compute-validation-network]
     if: >-
       always() &&
       inputs.should_run == 'true' &&
@@ -281,10 +281,10 @@ jobs:
 
   proxy-standard-mode-sni-routing-simulation:
     # What: TLS-handshake test for SNI passthrough.
-    # Why: chained to bound shared BuildKit contention.
+    # Why: BuildKit contention is locked around only docker build.
     # From: Issue #1297
     name: Proxy standard-mode SNI routing simulation
-    needs: [compute-validation-network, proxy-deep-wildcard-tls-simulation]
+    needs: [compute-validation-network]
     if: >-
       always() &&
       inputs.should_run == 'true' &&
@@ -325,7 +325,7 @@ jobs:
     # Why: base has fix; chain for AG-CI-017.
     # From: Issue #1276
     name: Proxy SSL-mode two-relay dispatch simulation
-    needs: [compute-validation-network, proxy-standard-mode-sni-routing-simulation]
+    needs: [compute-validation-network]
     if: >-
       always() &&
       inputs.should_run == 'true' &&
@@ -369,7 +369,7 @@ jobs:
     # Why: fixes always testing nightly, not the real tag.
     # From: Issue #715
     name: UI/NATS/DNS integration simulation
-    needs: [compute-validation-network, proxy-ssl-mode-two-relay-dispatch-simulation]
+    needs: [compute-validation-network]
     if: >-
       always() &&
       inputs.should_run == 'true' &&
@@ -445,8 +445,8 @@ jobs:
     # From: PR #786
     name: setup.sh CLI simulation
     # What: chains after the UI/NATS/DNS sim job.
-    # Why: serializes the shared runner slot, not data.
-    needs: [ui-nats-dns-integration-simulation]
+    # Why: owns a separate Quickstart lock, not simulation state.
+    needs: [compute-validation-network]
     if: always() && inputs.should_run == 'true'
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 45
@@ -522,7 +522,7 @@ jobs:
     # What: tests DHCP lease flow via this PR's Kea build.
     # Why: needs no staging tag; builds from this checkout.
     name: DHCP Kea lease-flow simulation
-    needs: [setup-cli-simulation]
+    needs: [compute-validation-network]
     if: always() && inputs.should_run == 'true'
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 45
@@ -571,7 +571,7 @@ jobs:
     # dns/ui/nats images (via the script), so it threads the PR staging tag to
     # test the PR's own secondary credentialing code.
     name: NATS auth-callout simulation
-    needs: [compute-validation-network, dhcp-kea-lease-flow-simulation]
+    needs: [compute-validation-network]
     if: >-
       always() &&
       inputs.should_run == 'true' &&
@@ -646,7 +646,7 @@ jobs:
     # Why: verifies no service_healthy depends_on gate.
     # From: Issue #763
     name: Admin UI reachability during dependency crash-loop
-    needs: [compute-validation-network, nats-auth-callout-simulation]
+    needs: [compute-validation-network]
     if: >-
       always() &&
       inputs.should_run == 'true' &&
@@ -720,7 +720,7 @@ jobs:
     # Why: verifies a real rollback via Control Agent API.
     # From: Issue #763
     name: setup.sh reset-to-last-known-good-config (Kea) simulation
-    needs: [compute-validation-network, ui-reachability-crash-loop-simulation]
+    needs: [compute-validation-network]
     if: >-
       always() &&
       inputs.should_run == 'true' &&
@@ -791,7 +791,7 @@ jobs:
     # Why: verifies rollback via nats-subscriber listener.
     # From: Issue #836
     name: setup.sh reset-to-last-known-good-config (DNS) simulation
-    needs: [compute-validation-network, setup-reset-kea-config-simulation]
+    needs: [compute-validation-network]
     if: >-
       always() &&
       inputs.should_run == 'true' &&

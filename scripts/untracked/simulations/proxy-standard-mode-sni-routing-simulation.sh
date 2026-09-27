@@ -10,6 +10,8 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 cd "$repo_root"
 
 build_tools_image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
+# shellcheck source=scripts/lib/docker-buildx-retry.sh
+source "$repo_root/scripts/lib/docker-buildx-retry.sh"
 
 # What: suffixes every Docker resource name with run_id.
 # Why: avoids collisions with a concurrent sibling-sim run.
@@ -65,7 +67,7 @@ echo "== Building throwaway proxy image with synthetic cdn-domains.txt fixture (
 # What: passes shared-scripts as a named build context.
 # Why: else COPY --from=shared-scripts triggers a bad pull.
 # From: Issue #1095
-docker build -q -t "$proxy_image" --build-context "dns-domains=$work_dir/fixture" --build-context "shared-scripts=$repo_root/scripts/lib" services/proxy >/dev/null
+docker_build_with_content_store_lock -- docker build -q -t "$proxy_image" --build-context "dns-domains=$work_dir/fixture" --build-context "shared-scripts=$repo_root/scripts/lib" services/proxy
 
 docker network create "$network_name" >/dev/null
 

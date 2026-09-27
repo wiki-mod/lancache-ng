@@ -173,3 +173,15 @@ always_fail_dockerfile_cmd() {
     [ "$status" -eq 2 ]
     [[ "$output" == *"expected -- before the command to run"* ]]
 }
+
+@test "docker_build_with_content_store_lock preserves command output and releases the lock after a failing build" {
+    # A failed build must remain visible and must not leave the host-local
+    # content-store lock held for a later independent simulation.
+    DOCKER_BUILD_CONTENT_STORE_LOCK_PATH="$BATS_TEST_TMPDIR/content-store.lock"
+    run docker_build_with_content_store_lock -- bash -c 'echo raw-build-error >&2; exit 17'
+    [ "$status" -eq 17 ]
+    [[ "$output" == *"raw-build-error"* ]]
+
+    run flock -n "$DOCKER_BUILD_CONTENT_STORE_LOCK_PATH" true
+    [ "$status" -eq 0 ]
+}

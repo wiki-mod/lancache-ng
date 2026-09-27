@@ -49,6 +49,32 @@ setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
 }
 
+@test "full-setup simulations fan out from the shared validation prerequisite without dropping a job" {
+    # These simulations own no cross-job state.  Their only workflow edge is
+    # the common validation-network calculation; local Docker builds lock
+    # their content-store section in the simulation scripts instead.
+    workflow="$repo_root/.github/workflows/full-setup-sims.yml"
+    jobs=(
+        full-setup-validate
+        ssl-mitm-cache-simulation
+        proxy-deep-wildcard-tls-simulation
+        proxy-standard-mode-sni-routing-simulation
+        proxy-ssl-mode-two-relay-dispatch-simulation
+        ui-nats-dns-integration-simulation
+        setup-cli-simulation
+        dhcp-kea-lease-flow-simulation
+        nats-auth-callout-simulation
+        ui-reachability-crash-loop-simulation
+        setup-reset-kea-config-simulation
+        setup-reset-dns-config-simulation
+    )
+    for job in "${jobs[@]}"; do
+        block="$(awk -v job="$job" '$0 == "  " job ":" {found=1} found {print} found && NR > 1 && $0 ~ /^  [a-z0-9-]+:$/ && $0 != "  " job ":" {exit}' "$workflow")"
+        [[ "$block" == *"needs: [compute-validation-network]"* || "$block" == *"needs: compute-validation-network"* ]] \
+            || fail "$job no longer depends only on compute-validation-network"
+    done
+}
+
 # fail <message>: this file's own `[ cond ] || fail "..."` assertions (a
 # pattern already used throughout this file before this addition) rely on a
 # `fail` helper that neither bats-core nor this project provides globally --
