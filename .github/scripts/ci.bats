@@ -3053,6 +3053,55 @@ netdata=sha256:n"
     [ "${status}" -eq 0 ]
 }
 
+@test "validate ssl-dispatch fails when no proxy container" {
+    # What: Missing proxy container returns rc 2.
+    # Why: Cannot read the dispatch map without it.
+    # From: Issue #1276
+    docker() { case "$1" in compose) : ;; esac; }
+    run _ci_validate_ssl_dispatch_map proj
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0027"* ]]
+}
+
+@test "validate ssl-dispatch fails when map is unreadable" {
+    # What: An unreadable dispatch map returns rc 2.
+    # Why: SSL_ENABLED=0 or missing file, not a defect.
+    # From: Issue #1276
+    docker() { case "$1" in compose) echo cid1 ;; exec) return 1 ;; esac; }
+    run _ci_validate_ssl_dispatch_map proj
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0028"* ]]
+}
+
+@test "validate ssl-dispatch fails when deeper SNI routes to MITM" {
+    # What: A depth>=2 entry to :9445 returns rc 1.
+    # Why: deeper SNI has no wildcard cert (#1276/#1322).
+    # From: Issue #1322
+    docker() {
+        case "$1" in
+            compose) echo cid1 ;;
+            exec) printf '%s\n' '    "~^[^.]+\.example\.net$"   127.0.0.1:9445;' '    "~^.+\.example\.net$"      127.0.0.1:9445;' ;;
+        esac
+    }
+    run _ci_validate_ssl_dispatch_map proj
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0029"* ]]
+}
+
+@test "validate ssl-dispatch passes on correct depth split" {
+    # What: deeper->:9446, one-level->:9445 returns rc 0.
+    # Why: Proves the #1276/#1322 depth dispatch holds.
+    # From: Issue #1276 | Issue #1322
+    docker() {
+        case "$1" in
+            compose) echo cid1 ;;
+            exec) printf '%s\n' '    "~^[^.]+\.example\.net$"   127.0.0.1:9445;' '    "~^.+\.example\.net$"      127.0.0.1:9446;' ;;
+        esac
+    }
+    run _ci_validate_ssl_dispatch_map proj
+    [ "${status}" -eq 0 ]
+}
+
 # =========================================================
 # VARIABLES
 # =========================================================

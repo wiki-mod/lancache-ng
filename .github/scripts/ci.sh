@@ -4018,6 +4018,13 @@ _ci_stream_map_violations() {
     awk '/^[[:space:]]*\*\./ && $2 != "$ssl_preread_server_name:443;" { print }'
 }
 
+# What: print depth>=2 dispatch entries not routed to :9446.
+# Why: deeper SNI has no wildcard cert; must passthrough.
+# From: Issue #1683 | Issue #1276 | Issue #1322
+_ci_ssl_dispatch_violations() {
+    awk 'index($0, "~^.+\\.") > 0 && $NF != "127.0.0.1:9446;" { print }'
+}
+
 # What: prove proxy routes wildcards by SNI.
 # Why: root literal misroutes subdomains.
 # From: Issue #1683 | Issue #1297
@@ -4073,6 +4080,27 @@ _ci_validate_ssl_mitm() {
     fi
 }
 
+# What: Prove ssl-mode depth-dispatch routes deeper SNI right.
+# Why: depth>=2 SNI must passthrough (:9446), not MITM.
+# From: Issue #1276 | Issue #1322 | Issue #1683
+_ci_validate_ssl_dispatch_map() {
+    local project="$1" cid map bad
+    cid="$(docker compose -p "${project}" ps -q proxy 2>/dev/null)"
+    if [ -z "${cid}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0027]" "reason=\"no proxy container for ssl-dispatch-map check\""
+        return 2
+    fi
+    if ! map="$(docker exec "${cid}" cat /etc/nginx/stream.d/01-ssl-dispatch.conf 2>/dev/null)"; then
+        ci_log "[CI-ERROR-VALIDATE-0028]" "reason=\"could not read proxy ssl-dispatch map (SSL_ENABLED=0?)\""
+        return 2
+    fi
+    bad="$(printf '%s\n' "${map}" | _ci_ssl_dispatch_violations)"
+    if [ -n "${bad}" ]; then
+        ci_error "[CI-ERROR-VALIDATE-0029]" "reason=\"depth>=2 SNI dispatch entry routes to MITM, not passthrough relay :9446 (#1276/#1322)\"" "${bad}"
+        return 1
+    fi
+}
+
 # What: Validate the candidate on one live prod stack.
 # Why: One up, all checks, one teardown (AG-VAL-027).
 # From: Issue #1683 | PR #1858
@@ -4096,6 +4124,7 @@ _ci_default_validate() {
             [ "${rc}" -eq 0 ] && { _ci_validate_proxy "${project}" || rc=$?; }
             [ "${rc}" -eq 0 ] && { _ci_validate_proxy_stream_map "${project}" || rc=$?; }
             [ "${rc}" -eq 0 ] && { _ci_validate_ssl_mitm "${project}" || rc=$?; }
+            [ "${rc}" -eq 0 ] && { _ci_validate_ssl_dispatch_map "${project}" || rc=$?; }
         elif _ci_validate_is_collision "${up_out}"; then
             ci_error "[CI-ERROR-VALIDATE-0016]" "reason=\"subnet/port collision after slot reservation\"" "${up_out}"
             rc=1
