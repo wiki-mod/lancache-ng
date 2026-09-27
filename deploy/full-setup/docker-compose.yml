@@ -424,7 +424,7 @@ services:
 
   # System metrics backend
   netdata:
-    image: netdata/netdata@sha256:a130dbbf3d6e6a5472efdebaa123797190a5822627e908106d34edae02bc8a74
+    image: netdata/netdata:latest
     hostname: lancache-netdata-validation
     # What: `pid: host`, matching deploy/prod and deploy/quickstart.
     # Why: netdata requires it for apps.plugin to read container /proc.

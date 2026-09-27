@@ -895,7 +895,7 @@ services:
   # ── Netdata (system metrics) ───────────────────────────────────────────────
   netdata:
     container_name: lancache-netdata${LANCACHE_CONTAINER_SUFFIX:-}
-    image: netdata/netdata@sha256:a130dbbf3d6e6a5472efdebaa123797190a5822627e908106d34edae02bc8a74
+    image: netdata/netdata:latest
     hostname: lancache-netdata
     # What: pid: host, required by netdata's own Docker documentation for apps.plugin to read other containers' /proc/<pid> entries.
     # Why: without it, netdata's PID namespace is a sibling, not an ancestor, of the host's, so ptrace_may_access fails even with cap_add: SYS_PTRACE below.
