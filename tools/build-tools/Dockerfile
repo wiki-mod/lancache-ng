@@ -183,7 +183,6 @@ RUN sed -i 's|^https://|http://|' /etc/apk/repositories
 
 # What: installs bash, coreutils, github-cli, sqlite, etc
 # Why: GNU coreutils differ from BusyBox (AG-VAL-034)
-# Alpine's musl-utils package provides the native musl compiler support used below.
 # From: Issue #1095
 RUN set -euo pipefail; \
     : "package-cache-bust=${APT_CACHE_BUST}"; \
@@ -274,13 +273,10 @@ RUN docker --version; \
 
 COPY --from=go-tools-script /install-ca-cert.sh /install-ca-cert.sh
 
-# What: builds sccache from source.
-# Why: the Alpine package lacks the required Redis and dist-client feature set.
-# From: Issue #1095
+# What: builds sccache and removes the temporary proxy CA
+# Why: keeps the image self-contained without persisting the CA
+# From: Issue #1095 | PR #1752
 RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
-    # What: drop CI proxy CA before layer commit
-    # Why: CA must never persist in published image
-    # From: PR #1752 regression | Issue #1095
     trap 'rm -f /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; update-ca-certificates >/dev/null 2>&1 || true' EXIT; \
     sh /install-ca-cert.sh; \
     cargo install sccache --version "${SCCACHE_VERSION}" --no-default-features --features redis,dist-client --root /usr/local; \
