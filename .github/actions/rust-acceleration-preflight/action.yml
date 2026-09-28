@@ -334,6 +334,7 @@ runs:
               rust_log="$preflight_dir/sccache-rustc.log"
               run_logged "$rust_log" sccache rustc --crate-name lancache_accel_preflight --crate-type lib "$preflight_dir/lib.rs" --emit=link,dep-info --out-dir "$preflight_dir/out"
               run_logged "$rust_log" sccache rustc --crate-name lancache_accel_preflight --crate-type lib "$preflight_dir/lib.rs" --emit=link,dep-info --out-dir "$preflight_dir/out"
+              unset SCCACHE_LOG
               stats_log="$preflight_dir/sccache-stats.log"
               run_logged "$stats_log" sccache --show-stats --stats-format=json
               require_sccache_activity "$stats_log" "$require_cache_write"
