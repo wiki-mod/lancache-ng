@@ -78,6 +78,13 @@ outputs:
 runs:
   using: composite
   steps:
+    - shell: bash
+      run: |
+        set -euo pipefail
+        docker_config="${RUNNER_TEMP:?}/docker-config"
+        mkdir -p "$docker_config"
+        chmod 700 "$docker_config"
+        printf 'DOCKER_CONFIG=%s\n' "$docker_config" >> "$GITHUB_ENV"
     - id: setup
       uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       with:
