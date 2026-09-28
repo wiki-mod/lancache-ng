@@ -183,6 +183,7 @@ RUN sed -i 's|^https://|http://|' /etc/apk/repositories
 
 # What: installs bash, coreutils, github-cli, sqlite, etc
 # Why: GNU coreutils differ from BusyBox (AG-VAL-034)
+# Alpine's musl-utils package provides the native musl compiler support used below.
 # From: Issue #1095
 RUN set -euo pipefail; \
     : "package-cache-bust=${APT_CACHE_BUST}"; \
@@ -220,7 +221,6 @@ RUN set -euo pipefail; \
       llvm22 \
       make \
       musl-dev \
-      # Alpine's musl-tools equivalent (musl-gcc is exposed below). \
       musl-utils \
       openssl \
       openssl-dev \
