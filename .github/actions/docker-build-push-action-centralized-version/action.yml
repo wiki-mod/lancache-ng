@@ -38,7 +38,7 @@ inputs:
     default: ""
   push:
     required: false
-    default: ""
+    default: "false"
   tags:
     required: false
     default: ""
@@ -56,10 +56,10 @@ inputs:
     default: ""
   load:
     required: false
-    default: ""
+    default: "false"
   pull:
     required: false
-    default: ""
+    default: "false"
   cache-from:
     required: false
     default: ""
