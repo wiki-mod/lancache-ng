@@ -151,7 +151,7 @@ smoke_test_image() {
       command -v "$tool" >/dev/null
     done
     target_triplet="$(gcc -dumpmachine)"
-    case "$target_triplet" in ''|unknown*|*-unknown-*) exit 1 ;; esac
+    case "$target_triplet" in ""|unknown*|*-unknown-*) exit 1 ;; esac
     musl_target_compiler="${target_triplet}-gcc"
     command -v "$musl_target_compiler" >/dev/null
     "$musl_target_compiler" --version >/dev/null
