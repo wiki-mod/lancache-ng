@@ -112,18 +112,10 @@ vit_resolve_tag() {
 }
 
 # Whether a given full-setup service is expected to already have a pushed
-# staging image for this PR. A direct service touch requires that service's
-# tag. A build-relevant workflow or composite-action change requires every
-# service's tag because build admission deliberately rebuilds the whole
-# matrix in that case; treating those tags as absent would discard the fresh
-# PR image and incorrectly require an older base commit's tag instead.
+# staging image for this PR. Mirrors the per-service touch result only.
 # Echoes "true"/"false". Used by the fail-closed guard so a producer failure
 # cannot be hidden behind a base-image back-fill.
 vit_service_should_have_staging_tag() {
-    local touched="$2" workflow_reuse_scope="${3:-false}"
-    if [[ "$touched" == "true" || "$workflow_reuse_scope" == "true" ]]; then
-        printf 'true\n'
-    else
-        printf 'false\n'
-    fi
+    local touched="$2"
+    printf '%s\n' "$touched"
 }

@@ -1979,7 +1979,7 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/validation-image-tag.sh"
           : "${BASE_SHA:?BASE_SHA (github.event.pull_request.base.sha) is required}"
           service_should_have_staging_tag() {
-            vit_service_should_have_staging_tag "$1" "$2" "$WORKFLOW_CHANGED"
+            vit_service_should_have_staging_tag "$1" "$2"
           }
           declare -A touched_map=(
             [proxy]="$PROXY_TOUCHED"
