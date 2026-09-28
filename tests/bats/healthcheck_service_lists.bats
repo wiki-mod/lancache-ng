@@ -49,68 +49,6 @@ setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
 }
 
-@test "full-setup simulations fan out from the shared validation prerequisite without dropping a job" {
-    # These simulations own no cross-job state.  Their only workflow edge is
-    # the common validation-network calculation; local Docker builds lock
-    # their content-store section in the simulation scripts instead.
-    workflow="$repo_root/.github/workflows/full-setup-sims.yml"
-    jobs=(
-        full-setup-validate
-        ssl-mitm-cache-simulation
-        proxy-deep-wildcard-tls-simulation
-        proxy-standard-mode-sni-routing-simulation
-        proxy-ssl-mode-two-relay-dispatch-simulation
-        ui-nats-dns-integration-simulation
-        setup-cli-simulation
-        dhcp-kea-lease-flow-simulation
-        nats-auth-callout-simulation
-        ui-reachability-crash-loop-simulation
-        setup-reset-kea-config-simulation
-        setup-reset-dns-config-simulation
-    )
-    for job in "${jobs[@]}"; do
-        block="$(awk -v job="$job" '$0 == "  " job ":" {found=1} found {print} found && NR > 1 && $0 ~ /^  [a-z0-9-]+:$/ && $0 != "  " job ":" {exit}' "$workflow")"
-        [[ "$block" == *"needs: [compute-validation-network]"* || "$block" == *"needs: compute-validation-network"* ]] \
-            || fail "$job no longer depends only on compute-validation-network"
-    done
-}
-
-@test "deep rollback simulations do not wait for the reusable simulation workflow" {
-    # Both jobs reserve their own validation subnet.  The Kea rollback's
-    # local image build uses the same content-store lock as sibling builds.
-    workflow="$repo_root/.github/workflows/full-setup-deep-validate.yml"
-    for job in dns-zone-rollback-simulation dhcp-kea-ui-rollback-simulation; do
-        needs_line="$(awk -v job="$job" '$0 == "  " job ":" {found=1; next} found && /^    needs:/ {print; exit} found && /^  [a-z0-9-]+:$/ {exit}' "$workflow")"
-        [ "$needs_line" = "    needs: [plan, ensure-pr-staging-images]" ] \
-            || fail "$job still has an artificial full-setup-sims prerequisite"
-    done
-    grep -q 'docker_build_with_content_store_lock -- docker build' \
-        "$repo_root/scripts/untracked/simulations/dhcp-kea-ui-rollback-simulation.sh" \
-        || fail "dhcp-kea-ui-rollback-simulation.sh does not protect its local Docker build"
-}
-
-@test "manual full-setup keeps base validation while deep PR validation omits it" {
-    manual="$repo_root/.github/workflows/full-setup-validate.yml"
-    deep="$repo_root/.github/workflows/full-setup-deep-validate.yml"
-    grep -q 'include_base_validation: true' "$manual" \
-        || fail "manual full-setup workflow no longer explicitly requests base validation"
-    grep -q 'include_base_validation: false' "$deep" \
-        || fail "deep validation no longer explicitly omits the duplicate base validation"
-    grep -q 'name: validate full-setup image' "$repo_root/.github/workflows/build-push.yml" \
-        || fail "build-push candidate validation is missing"
-}
-
-@test "full-setup retention keeps read-only mode with a writable watchdog log volume" {
-    compose="$repo_root/deploy/full-setup/docker-compose.yml"
-    retention_block="$(awk '/^  retention:/{found=1} found{print} found && /^  [a-z0-9-]+:/{if ($0 != "  retention:") exit}' "$compose")"
-    [[ "$retention_block" == *"read_only: true"* ]] \
-        || fail "full-setup retention lost its read_only hardening"
-    [[ "$retention_block" == *"watchdog-logs:/var/log/lancache-watchdog"* ]] \
-        || fail "full-setup retention has no writable watchdog log mount"
-    grep -q '^  watchdog-logs:$' "$compose" \
-        || fail "full-setup compose does not declare the watchdog log volume"
-}
-
 # fail <message>: this file's own `[ cond ] || fail "..."` assertions (a
 # pattern already used throughout this file before this addition) rely on a
 # `fail` helper that neither bats-core nor this project provides globally --

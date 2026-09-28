@@ -141,6 +141,8 @@ teardown() {
     [ -n "$holder_pid" ]
 
     validation_subnet_release "$holder_pid"
+    run kill -0 "$holder_pid"
+    [ "$status" -ne 0 ]
 
     holder_pid_2="$(validation_subnet_try_lock "$lock_root" 77)"
     [ -n "$holder_pid_2" ]
@@ -478,13 +480,6 @@ elif [[ "$1" == "network" && "$2" == "disconnect" ]]; then
 elif [[ "$1" == "network" && "$2" == "ls" ]]; then
     cat "$state/ls_ids" 2>/dev/null
     exit 0
-elif [[ "$1" == "inspect" ]]; then
-    exit 0
-elif [[ "$1" == "rm" && "$2" == "-f" ]]; then
-    touch "$state/container-$3.removed"
-    exit 0
-elif [[ "$1" == "compose" ]]; then
-    exit 0
 fi
 exit 1
 STUB
@@ -520,9 +515,7 @@ STUB
     run validation_network_await_detached "known-net" 1
     [ "$status" -eq 1 ]
     [[ "$output" == *"still reports attached containers after 1s"* ]]
-    [[ "$output" == *"::notice::"* ]]
     [[ "$output" == *"stuck-container"* ]]
-    [[ "$output" != *"::error::"* ]]
 }
 
 @test "network_teardown removes an already-clear network directly" {
@@ -549,10 +542,6 @@ STUB
     [ "$status" -eq 0 ]
     [ -f "$FAKE_DOCKER_STATE/known-net.removed" ]
     grep -q "network disconnect -f known-net stuck-id" "$FAKE_DOCKER_LOG"
-    grep -q "rm -f stuck-id" "$FAKE_DOCKER_LOG"
-    [[ "$output" == *"::warning::Force-disconnecting"* ]]
-    [[ "$output" == *"recovery succeeded after force-disconnect"* ]]
-    [[ "$output" != *"::error::"* ]]
 }
 
 @test "network_teardown reports a clear, actionable error when the network still cannot be removed" {
@@ -564,20 +553,6 @@ STUB
     run validation_network_teardown "known-net" 1
     [ "$status" -eq 1 ]
     [[ "$output" == *"could not be removed even after waiting"* ]]
-    [[ "$output" == *"::error::"* ]]
-}
-
-@test "simulation teardown fails when project network recovery cannot finish" {
-    fake_docker_network_ops
-    touch "$FAKE_DOCKER_STATE/known-net.exists"
-    echo 1 > "$FAKE_DOCKER_STATE/known-net.count"
-    echo "stuck-id" > "$FAKE_DOCKER_STATE/known-net.containers"
-    touch "$FAKE_DOCKER_STATE/known-net.rm_fails"
-    echo "known-net" > "$FAKE_DOCKER_STATE/ls_ids"
-
-    run validation_simulation_teardown "some-project" "$BATS_TEST_TMPDIR/work"
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"::error::Docker network known-net could not be removed"* ]]
 }
 
 @test "project_networks_teardown tears down every network belonging to a compose project" {

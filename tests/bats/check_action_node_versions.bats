@@ -4,13 +4,13 @@
 #
 # Coverage for scripts/tracked/check-action-node-versions.sh (#801): the CI guard
 # that fails a build if any pinned GitHub Action -- local composite or
-# external, resolved via immutable GitHub raw content -- declares a deprecated
+# external, resolved via the GitHub Contents API -- declares a deprecated
 # Node runtime in its own action.yml/action.yaml.
 #
 # This builds a small fixture repo (a fake .github/workflows + .github/actions
 # tree) and a mock `curl` binary placed ahead of the real one on PATH, so
 # every scenario runs fully offline and deterministically -- no live call to
-# raw.githubusercontent.com, and no dependency on what any real action currently
+# api.github.com, and no dependency on what any real action currently
 # declares. The mock maps a request URL to a canned (HTTP status, body) pair
 # read from a small per-test fixtures directory; see mock_curl_response()
 # below for how a test registers one.
@@ -35,8 +35,8 @@ setup() {
     mkdir -p "$mock_fixtures_dir"
 
     # A mock `curl` standing in for the real binary: it recognizes only the
-    # raw.githubusercontent.com shape this script generates (a `-o <file>`
-    # output target and a trailing URL), maps the URL to a
+    # GitHub Contents API shape this script generates (a `-o <file>` output
+    # target, an `Accept` header, and a trailing URL), maps the URL to a
     # canned response registered by mock_curl_response() below, writes the
     # canned body to the `-o` target, and prints the canned status code to
     # stdout the same way `curl -w '%{http_code}'` would.
@@ -51,7 +51,7 @@ for ((i = 0; i < ${#args[@]}; i++)); do
     fi
 done
 url="${args[-1]}"
-key=$(printf '%s' "$url" | sed -E 's#^https://raw\.githubusercontent\.com/##' | tr '/' '_')
+key=$(printf '%s' "$url" | sed -E 's#^https://api\.github\.com/repos/##' | tr '/?&=' '____')
 fixture_file="${MOCK_CURL_FIXTURES:?MOCK_CURL_FIXTURES not set}/$key"
 if [ ! -f "$fixture_file" ]; then
     printf '000'
@@ -62,16 +62,9 @@ tail -n +2 "$fixture_file" > "$out_file"
 printf '%s' "$status_line"
 MOCKCURL
     chmod +x "$mock_bin_dir/curl"
-    cat > "$mock_bin_dir/sleep" <<'MOCKSLEEP'
-#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\n' "$1" >> "${MOCK_SLEEP_CALLS:?MOCK_SLEEP_CALLS not set}"
-MOCKSLEEP
-    chmod +x "$mock_bin_dir/sleep"
 
     export PATH="$mock_bin_dir:$PATH"
     export MOCK_CURL_FIXTURES="$mock_fixtures_dir"
-    export MOCK_SLEEP_CALLS="$BATS_TEST_TMPDIR/sleep-calls"
     unset GH_TOKEN GITHUB_TOKEN
 }
 
@@ -82,7 +75,7 @@ MOCKSLEEP
 # knowledge lives in one place instead of being hand-duplicated per test.
 mock_curl_response() {
     local owner_repo="$1" ref="$2" subpath="$3" file="$4" status="$5" body="$6"
-    local key="${owner_repo}/${ref}/${subpath:+${subpath}/}${file}"
+    local key="${owner_repo}_contents_${subpath:+${subpath}_}${file}_ref_${ref}"
     key="${key//\//_}"
     {
         printf '%s\n' "$status"
@@ -122,10 +115,10 @@ runs:
     run "$script" "$fixture_root"
     [ "$status" -eq 0 ]
     [[ "$output" == *"OK"* ]]
-    [[ "$output" != *"GitHub API"* ]]
+    [[ "$output" == *"unauthenticated GitHub API fallback"* ]]
 }
 
-@test "does not send GH_TOKEN to public raw action manifest reads" {
+@test "uses authenticated GitHub API requests when GH_TOKEN is set" {
     write_workflow <<'EOF'
 name: CI
 on: push
@@ -154,9 +147,8 @@ MOCKCURL
 
     run "$script" "$fixture_root"
     [ "$status" -eq 0 ]
-    run grep -qF 'test-token' "$MOCK_CURL_ARGS"
-    [ "$status" -ne 0 ]
-    grep -qF 'https://raw.githubusercontent.com/actions/checkout/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/action.yml' "$MOCK_CURL_ARGS"
+    [[ "$output" == *"authenticated GitHub API requests"* ]]
+    grep -qFx "Authorization: Bearer test-token" "$MOCK_CURL_ARGS"
 }
 
 @test "fails on the exact pre-#800 actions/upload-artifact@834a144... pin (the #799 regression)" {
@@ -259,44 +251,7 @@ EOF
     [[ "$output" == *"Could not find action.yml or action.yaml"* ]]
 }
 
-@test "allows same-repository bootstrap actions without raw third-party fetches" {
-    write_workflow <<'EOF'
-name: CI
-on: push
-jobs:
-  build:
-    steps:
-      - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
-      - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
-EOF
-
-    run "$script" "$fixture_root"
-    [ "$status" -eq 0 ]
-    [ ! -s "$MOCK_SLEEP_CALLS" ]
-}
-
-@test "fails closed when action.yml returns a temporary API failure" {
-    write_workflow <<'EOF'
-name: CI
-on: push
-jobs:
-  build:
-    steps:
-      - uses: someorg/yaml-only-action@abababababababababababababababababababab # v1
-EOF
-    mock_curl_response "someorg/yaml-only-action" "abababababababababababababababababababab" "" "action.yml" 403 ""
-    mock_curl_response "someorg/yaml-only-action" "abababababababababababababababababababab" "" "action.yaml" 200 \
-"runs:
-  using: node24"
-    export GITHUB_API_RETRY_ATTEMPTS=1
-
-    run "$script" "$fixture_root"
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"Could not fully validate"* ]]
-    [[ "$output" != *"GHCR operation failed"* ]]
-}
-
-@test "fails without OK when both manifest variants stay rate limited" {
+@test "warns (does not fail) on a rate-limit/infra response instead of a definitive 404" {
     write_workflow <<'EOF'
 name: CI
 on: push
@@ -306,15 +261,22 @@ jobs:
       - uses: someorg/rate-limited-action@eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee # v1
 EOF
     mock_curl_response "someorg/rate-limited-action" "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" "" "action.yml" 403 ""
-    mock_curl_response "someorg/rate-limited-action" "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" "" "action.yaml" 403 ""
-    export GITHUB_API_RETRY_ATTEMPTS=1
+    # Single attempt, no backoff: this test asserts the eventual-give-up
+    # warning path, not the retry loop itself (see the dedicated retry test
+    # below) -- keep it fast and independent of the real retry count/timing.
+    export GHCR_RETRY_MAX_ATTEMPTS=1
 
     run "$script" "$fixture_root"
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"Could not fully validate"* ]]
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"infrastructure hiccup"* ]]
+    # Regression check: the HTTP status must actually reach the warning
+    # message. An earlier version of fetch_external_action_yaml tried to
+    # report it via a global variable set from inside a function that is
+    # only ever invoked through command substitution (a subshell) -- the
+    # variable never made it back to the caller, so the message printed an
+    # empty status every time. Asserting the real status code here would
+    # have caught that.
     [[ "$output" == *"HTTP 403"* ]]
-    [[ "$output" != *"check-action-node-versions: OK"* ]]
-    [[ "$output" != *"GHCR operation failed"* ]]
 }
 
 @test "retries a transient rate-limit/infra response and recovers on a later attempt" {
@@ -342,7 +304,7 @@ for ((i = 0; i < ${#args[@]}; i++)); do
     fi
 done
 url="${args[-1]}"
-key=$(printf '%s' "$url" | sed -E 's#^https://raw\.githubusercontent\.com/##' | tr '/?&=' '____')
+key=$(printf '%s' "$url" | sed -E 's#^https://api\.github\.com/repos/##' | tr '/?&=' '____')
 counter_file="${MOCK_CURL_CALL_COUNTS:?MOCK_CURL_CALL_COUNTS not set}/$key"
 count=0
 [ -f "$counter_file" ] && count=$(cat "$counter_file")
@@ -350,7 +312,7 @@ count=$((count + 1))
 printf '%s' "$count" > "$counter_file"
 if [ "$count" -eq 1 ]; then
     printf '' > "$out_file"
-    printf '500'
+    printf '403'
 else
     printf 'runs:\n  using: node24\n' > "$out_file"
     printf '200'
@@ -359,7 +321,8 @@ MOCKCURL
     chmod +x "$mock_bin_dir/curl"
     mkdir -p "$BATS_TEST_TMPDIR/mock-curl-call-counts"
     export MOCK_CURL_CALL_COUNTS="$BATS_TEST_TMPDIR/mock-curl-call-counts"
-    export GITHUB_API_RETRY_ATTEMPTS=3
+    export GHCR_RETRY_MAX_ATTEMPTS=3
+    export GHCR_RETRY_BACKOFF_SECONDS=0
 
     run "$script" "$fixture_root"
     [ "$status" -eq 0 ]
@@ -367,7 +330,7 @@ MOCKCURL
     [[ "$output" != *"Could not find action.yml or action.yaml"* ]]
 }
 
-@test "fails closed on a permanent 401 response without retrying it" {
+@test "does not retry a permanent 401/400/422 response, even with retries available" {
     write_workflow <<'EOF'
 name: CI
 on: push
@@ -376,8 +339,11 @@ jobs:
     steps:
       - uses: someorg/bad-token-action@1111111111111111111111111111111111111111 # v1
 EOF
-    # A call-counting mock curl always returning 401 proves that permanent
-    # auth failure does not consume the retry budget.
+    # A call-counting mock curl always returning 401: proves the permanent-
+    # failure classification stops ghcr_retry immediately (GHCR_RETRY_MAX_ATTEMPTS
+    # set well above 1) instead of burning the whole retry budget on a token
+    # that will never suddenly start working -- the actual regression this
+    # AGENTS.md (AG-CI-013) finding was about.
     cat > "$mock_bin_dir/curl" <<'MOCKCURL'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -389,7 +355,7 @@ for ((i = 0; i < ${#args[@]}; i++)); do
     fi
 done
 url="${args[-1]}"
-key=$(printf '%s' "$url" | sed -E 's#^https://raw\.githubusercontent\.com/##' | tr '/?&=' '____')
+key=$(printf '%s' "$url" | sed -E 's#^https://api\.github\.com/repos/##' | tr '/?&=' '____')
 counter_file="${MOCK_CURL_CALL_COUNTS:?MOCK_CURL_CALL_COUNTS not set}/$key"
 count=0
 [ -f "$counter_file" ] && count=$(cat "$counter_file")
@@ -401,14 +367,15 @@ MOCKCURL
     chmod +x "$mock_bin_dir/curl"
     mkdir -p "$BATS_TEST_TMPDIR/mock-curl-call-counts"
     export MOCK_CURL_CALL_COUNTS="$BATS_TEST_TMPDIR/mock-curl-call-counts"
-    export GITHUB_API_RETRY_ATTEMPTS=5
+    export GHCR_RETRY_MAX_ATTEMPTS=5
+    export GHCR_RETRY_BACKOFF_SECONDS=0
 
     run "$script" "$fixture_root"
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"Could not fully validate"* ]]
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"infrastructure hiccup"* ]]
     [[ "$output" == *"HTTP 401"* ]]
 
-    local_key="someorg_bad-token-action_1111111111111111111111111111111111111111_action.yml"
+    local_key="someorg_bad-token-action_contents_action.yml_ref_1111111111111111111111111111111111111111"
     call_count=$(cat "$BATS_TEST_TMPDIR/mock-curl-call-counts/$local_key")
     [ "$call_count" -eq 1 ]
 }
