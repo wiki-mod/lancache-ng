@@ -67,6 +67,7 @@ runs:
         "$musl_target_compiler" --version >/dev/null
         docker --version
         docker compose version
+        docker buildx version
         '
 
     - name: Run Bats setup fixtures

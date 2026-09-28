@@ -53,7 +53,8 @@ if [ "${#dockerfile_tools[@]}" -eq 0 ]; then
   fail "could not extract any required_tools from $dockerfile -- refusing to run a vacuous check (parser bug or the array was renamed/refactored)."
 fi
 for consumer in "$smoke_script" "$candidate_smoke"; do
-  if ! grep -qF 'check-build-tools-smoke-coverage.sh --print-required-tools' "$consumer"; then
+  if ! grep -qF 'check-build-tools-smoke-coverage.sh' "$consumer" \
+    || ! grep -qF -- '--print-required-tools' "$consumer"; then
     fail "$consumer does not derive its smoke inventory from $dockerfile"
   fi
 done
