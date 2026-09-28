@@ -125,7 +125,7 @@ runs:
               local log_file="$1"
               local diagnostics
               diagnostics="$(grep -Eai "(^|[^[:alpha:]])(warning|warn|error|failed|failure|panic)([^[:alpha:]]|$)" "$log_file" \
-                | grep -Ev '^\\[[^]]* DEBUG sccache::commands\\] redirecting stderr into File .*sccache-error\\.log' \
+                | grep -Ev '^\[[^]]* DEBUG sccache::commands\] redirecting stderr into File .*sccache-error\.log' \
                 || true)"
               if [ -n "$diagnostics" ]; then
                 printf '%s\\n' "$diagnostics" >&2
