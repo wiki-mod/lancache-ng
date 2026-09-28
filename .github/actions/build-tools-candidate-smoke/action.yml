@@ -30,18 +30,21 @@ runs:
         set -euo pipefail
         : "${IMAGE_REF:?image-ref is required}"
         : "${PLATFORM:?platform is required}"
+        mapfile -t required_tool_list < <(
+          bash scripts/tracked/check-build-tools-smoke-coverage.sh --print-required-tools
+        )
+        required_tools="${required_tool_list[*]}"
+        : "${required_tools:?canonical build-tools inventory is empty}"
 
         # What: Runs timeout in candidate container over tool checks.
         # Why: Prevents signal-deaf tool from wedging runner slot.
         # From: Issue #1522 | PR #1523
-        docker run --rm --platform "$PLATFORM" "$IMAGE_REF" \
+        docker run --rm --platform "$PLATFORM" \
+          -e "REQUIRED_TOOLS=$required_tools" \
+          "$IMAGE_REF" \
           timeout --kill-after=30s --signal=TERM 14m bash -c '
         set -euo pipefail
-        required_tools=(
-          actionlint bash bats cargo cargo-audit cargo-tarpaulin ccache clang-offload-packager clippy-driver
-          dig distcc distcc-pump docker envsubst gcc jq parallel rustc rustfmt sccache musl-gcc
-          shellspec shellcheck timeout
-        )
+        read -r -a required_tools <<< "${REQUIRED_TOOLS:?canonical build-tools inventory is required}"
         for tool in "${required_tools[@]}"; do command -v "$tool" >/dev/null; done
         cargo --version
         cargo audit --version

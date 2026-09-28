@@ -89,49 +89,26 @@ build_tools_poll_interval_seconds="${BUILD_TOOLS_STAGING_POLL_INTERVAL_SECONDS:-
 # :nightly) is mutable and could become stale, broken, or missing tools between publication
 # and use, so explicit verification is preferable to assuming the tag is current and valid.
 smoke_test_image() {
-  local image="$1"
+  local image="$1" required_tools
+  local -a required_tool_list
 
-  # EXTRA_REQUIRED_TOOLS lets a specific caller (e.g. the coverage job, which
-  # needs cargo-tarpaulin) widen this check without forcing every other
-  # consumer of this script (cargo-audit jobs, the plain compose-validation
-  # path) to also require a tool they never use.
-  docker run --rm -e "EXTRA_REQUIRED_TOOLS=${EXTRA_REQUIRED_TOOLS:-}" "$image" \
+  mapfile -t required_tool_list < <(
+    bash "$script_dir/../tracked/check-build-tools-smoke-coverage.sh" --print-required-tools
+  )
+  required_tools="${required_tool_list[*]}"
+  : "${required_tools:?canonical build-tools inventory is empty}"
+
+  # What: adds caller-specific tools to the canonical inventory
+  # Why: dhclient is unavailable in the Alpine image
+  # From: Issue #1095
+  docker run --rm \
+    -e "REQUIRED_TOOLS=$required_tools" \
+    -e "EXTRA_REQUIRED_TOOLS=${EXTRA_REQUIRED_TOOLS:-}" \
+    "$image" \
     timeout --kill-after=30 --signal=KILL 300 bash -lc '
     set -euo pipefail
 
-    required_tools=(
-      bash
-      cargo
-      rustc
-      rustfmt
-      clippy-driver
-      clang-offload-packager
-      sccache
-      ccache
-      cargo-audit
-      shellcheck
-      actionlint
-      bats
-      parallel
-      shellspec
-      distcc
-      distcc-pump
-      gcc
-      musl-gcc
-      docker
-      # What: verifies gh is present in the image.
-      # Why: gc-pr-staging-images.sh requires gh at runtime.
-      # From: Issue #1095.
-      gh
-      jq
-      dig
-      ip
-      openssl
-      rsync
-      envsubst
-      expect
-      tcpdump
-    )
+    read -r -a required_tools <<< "${REQUIRED_TOOLS:?canonical build-tools inventory is required}"
 
     # What: dhclient is opt-in via EXTRA_REQUIRED_TOOLS.
     # Why: no Alpine apk package ships dhclient; would break
