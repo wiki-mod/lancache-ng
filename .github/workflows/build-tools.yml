@@ -615,7 +615,7 @@ jobs:
         id: local-build-arm64
         if: github.event_name == 'pull_request'
         timeout-minutes: 60
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        uses: ./.github/actions/docker-build-push-action-centralized-version
         with:
           builder: ${{ steps.buildx.outputs.name }}
           context: tools/build-tools
