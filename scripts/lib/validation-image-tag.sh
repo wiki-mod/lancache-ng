@@ -111,10 +111,9 @@ vit_resolve_tag() {
     vit_base_channel_tag "$base_ref"
 }
 
-# Whether a given full-setup service is expected to already have a pushed
-# staging image for this PR. Mirrors the per-service touch result only.
-# Echoes "true"/"false". Used by the fail-closed guard so a producer failure
-# cannot be hidden behind a base-image back-fill.
+# What: checks whether a service staging tag is required.
+# Why: touched services must fail closed when their tag is absent.
+# From: Issue #626 | PR #627
 vit_service_should_have_staging_tag() {
     local touched="$2"
     printf '%s\n' "$touched"

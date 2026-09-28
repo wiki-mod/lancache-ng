@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: derives the build-tools smoke contract from Dockerfile
+# What: derives smoke contract from Dockerfile
 # Why: one owner covers tools and subcommands
 # From: Issue #1095 | PR #1872
 set -euo pipefail
