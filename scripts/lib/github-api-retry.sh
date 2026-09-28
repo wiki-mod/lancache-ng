@@ -18,6 +18,7 @@ GITHUB_API_RETRY_DELAY_SECONDS="${GITHUB_API_RETRY_DELAY_SECONDS:-5}"
 GITHUB_API_MAX_RETRY_DELAY_SECONDS="${GITHUB_API_MAX_RETRY_DELAY_SECONDS:-60}"
 GITHUB_API_RETRY_BUDGET_SECONDS="${GITHUB_API_RETRY_BUDGET_SECONDS:-120}"
 GITHUB_API_HTTP_STATUS=""
+GITHUB_RAW_HTTP_STATUS=""
 GITHUB_API_RETRY_AFTER=""
 GITHUB_API_RATE_LIMIT_REMAINING=""
 GITHUB_API_RATE_LIMIT_RESET=""
@@ -259,6 +260,7 @@ github_raw_get_with_retry() {
   [[ "$GITHUB_API_RETRY_DELAY_SECONDS" =~ ^[0-9]+$ ]] || return 2
   [[ "$GITHUB_API_MAX_RETRY_DELAY_SECONDS" =~ ^[1-9][0-9]*$ ]] || return 2
   [[ "$GITHUB_API_RETRY_BUDGET_SECONDS" =~ ^[1-9][0-9]*$ ]] || return 2
+  GITHUB_RAW_HTTP_STATUS=""
   retry_started_at="$(date +%s)" || return 1
   for (( attempt=1; attempt<=GITHUB_API_RETRY_ATTEMPTS; attempt++ )); do
     GITHUB_API_RETRY_AFTER=""
@@ -266,7 +268,7 @@ github_raw_get_with_retry() {
     GITHUB_API_RATE_LIMIT_RESET=""
     if status="$(curl -sS --connect-timeout 10 --max-time 30 --location -o "$body_file" -w '%{http_code}' "$url")"; then curl_status=0; else curl_status=$?; status=000; fi
     [[ "$status" =~ ^[0-9]{3}$ ]] || status=000
-    GITHUB_API_HTTP_STATUS="$status"
+    GITHUB_RAW_HTTP_STATUS="$status"
     (( curl_status == 0 )) && [[ "$status" == 200 ]] && return 0
     (( curl_status == 0 )) && [[ "$status" == 404 || "$status" == 400 || "$status" == 401 || "$status" == 403 || "$status" == 422 ]] && return 1
     (( attempt == GITHUB_API_RETRY_ATTEMPTS )) && return 1

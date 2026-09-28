@@ -289,7 +289,7 @@ done
 # From: Issue #1860 | PR #1872
 fetch_external_action_yaml() {
   local owner="$1" repo="$2" subpath="$3" ref="$4"
-  local file body url status infrastructure_status=""
+  local file body url status
   for file in action.yml action.yaml; do
     body="$(mktemp "${TMPDIR:-/var/tmp}/action-metadata.XXXXXX")" || return 1
     url="https://raw.githubusercontent.com/${owner}/${repo}/${ref}/${subpath:+${subpath}/}${file}"
@@ -299,7 +299,7 @@ fetch_external_action_yaml() {
       rm -f -- "$body"
       return 0
     fi
-    status="${GITHUB_API_HTTP_STATUS:-000}"
+    status="${GITHUB_RAW_HTTP_STATUS:-000}"
     rm -f -- "$body"
     if [[ "$status" == "404" ]]; then
       continue
@@ -307,10 +307,6 @@ fetch_external_action_yaml() {
     printf 'INFRA:%s\n' "$status"
     return 0
   done
-  if [[ -n "$infrastructure_status" ]]; then
-    printf 'INFRA:%s\n' "$infrastructure_status"
-    return 0
-  fi
   printf 'NOTFOUND\n'
   return 0
 }
