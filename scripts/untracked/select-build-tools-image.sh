@@ -84,10 +84,6 @@ staging_poll_set_defaults_for_workflow_changed "false"
 build_tools_wait_seconds="${BUILD_TOOLS_STAGING_POLL_HARD_CEILING_SECONDS:-$default_poll_hard_ceiling_seconds}"
 build_tools_poll_interval_seconds="${BUILD_TOOLS_STAGING_POLL_INTERVAL_SECONDS:-15}"
 
-# smoke_test_image verifies the provided image contains all required CI tools (cargo,
-# rustc, distcc, docker, etc.) before it is trusted. The published channel tag (:latest or
-# :nightly) is mutable and could become stale, broken, or missing tools between publication
-# and use, so explicit verification is preferable to assuming the tag is current and valid.
 smoke_test_image() {
   local image="$1" required_tools
   local -a required_tool_list
@@ -107,11 +103,6 @@ smoke_test_image() {
 
     read -r -a required_tools <<< "${REQUIRED_TOOLS:?canonical build-tools inventory is required}"
 
-    # What: dhclient is opt-in via EXTRA_REQUIRED_TOOLS.
-    # Why: no Alpine apk package ships dhclient; would break
-    # every caller once Alpine ships. Three callers opt in.
-    # From: Issue #1095
-
     if [[ -n "${EXTRA_REQUIRED_TOOLS:-}" ]]; then
       read -ra extra_tools <<<"$EXTRA_REQUIRED_TOOLS"
       required_tools+=("${extra_tools[@]}")
@@ -126,28 +117,9 @@ smoke_test_image() {
     done
     docker --version >/dev/null
     docker compose version >/dev/null
-    # docker buildx is verified here now (issue #791). It was deliberately
-    # deferred while #789 first added buildx to tools/build-tools/Dockerfile,
-    # because this strict path (BUILD_TOOLS_REQUIRE_PUBLISHED callers have no
-    # local-build fallback -- see the strict-mode branch below) trusts the
-    # already-published :latest/:nightly image, which could not contain buildx
-    # until after #789 merged and republished it. That has since happened, so
-    # gating on it now no longer creates the chicken-and-egg failure #791
-    # documents. The setup.sh assert_resolved_image_tag_platform_supported
-    # check hard-requires buildx (issue #787), so a published image silently
-    # missing it must fail this smoke test rather than surface deeper.
-    # (No apostrophes in these comments: this whole block is a single-quoted
-    # bash -lc argument, so a stray quote would terminate it -- see #833.)
     docker buildx version >/dev/null
     shellcheck --version >/dev/null
     actionlint --version >/dev/null
-    # bats and shellspec are the two test-runner tools real consumer suites
-    # depend on (tests/bats/*.bats via `bats tests/bats`; tests/shellspec via
-    # shellspec). #790: the smoke test asserted neither, even though both are
-    # installed and build-time-verified in tools/build-tools/Dockerfile --
-    # exactly the derive-not-from-real-requirements drift #822 Pattern G
-    # names. scripts/tracked/check-build-tools-smoke-coverage.sh now guards against
-    # this list drifting from the Dockerfile verification list again.
     bats --version >/dev/null
     shellspec --version >/dev/null
     cargo-audit --version >/dev/null
