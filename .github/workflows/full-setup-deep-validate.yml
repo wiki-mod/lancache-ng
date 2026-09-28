@@ -297,11 +297,6 @@ jobs:
       # build-push.yml/build-tools.yml/build-push-hosted-fallback.yml
       # already apply, so this job stops leaving an orphaned
       # buildx_buildkit_* builder container/volume behind on every run.
-      - name: Remove buildx builder
-        if: always()
-        run: |
-          docker buildx rm "${{ steps.buildx.outputs.name }}" || true
-
       - name: Remove disk-backed staging scratch directory
         if: always()
         run: |

@@ -84,10 +84,6 @@ jobs:
           esac
           printf 'build_tools_image=%s\n' "$build_tools_image" >> "$GITHUB_OUTPUT"
 
-      - name: Remove buildx builder
-        if: always()
-        run: docker buildx rm "${{ steps.buildx.outputs.name }}" || true
-
       - name: Compute service matrix
         id: services
         env:
@@ -417,10 +413,6 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
           subject-name: ${{ steps.merge.outputs.subject-name }}
           subject-digest: ${{ steps.merge.outputs.digest }}
-
-      - name: Remove buildx builder
-        if: always()
-        run: docker buildx rm "${{ steps.buildx.outputs.name }}" || true
 
       - name: Summary
         run: echo "::notice::Hosted overflow fallback completed ${{ matrix.service }} from one amd64 candidate; channel promotion remains owned by build-push.yml."

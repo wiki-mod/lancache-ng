@@ -239,11 +239,6 @@ jobs:
             printf -- '- Target channel: latest\n'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Remove buildx builder
-        if: always()
-        run: |
-          docker buildx rm "${{ steps.buildx.outputs.name }}" || true
-
       - name: Release the cross-workflow promote lock
         if: always()
         env:

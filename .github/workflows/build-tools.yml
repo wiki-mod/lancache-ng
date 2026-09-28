@@ -541,10 +541,6 @@ jobs:
         if: always()
         run: docker rmi "$BUILD_TOOLS_SCAN_IMAGE_AMD64" || true
 
-      - name: Remove buildx builder
-        if: always()
-        run: docker buildx rm "${{ steps.buildx.outputs.name }}" || true
-
   build-tools-arm64:
     name: build arm64 build-tools image (native)
     needs: determine-publish-scope
@@ -836,10 +832,6 @@ jobs:
         if: always()
         run: docker rmi "$BUILD_TOOLS_SCAN_IMAGE_ARM64" || true
 
-      - name: Remove buildx builder
-        if: always()
-        run: docker buildx rm "${{ steps.buildx.outputs.name }}" || true
-
   merge-build-tools-manifests:
     name: merge build-tools multi-platform manifest
     # What: merges amd64+arm64 tags into sha-<commit> multi-arch tag.
@@ -969,7 +961,3 @@ jobs:
           elif [ "$REF_NAME" = "current_dev" ]; then
             ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools create --prefer-index=false -t "${BUILD_TOOLS_IMAGE}:nightly" "$source_ref"
           fi
-
-      - name: Remove buildx builder
-        if: always()
-        run: docker buildx rm "${{ steps.buildx.outputs.name }}" || true
