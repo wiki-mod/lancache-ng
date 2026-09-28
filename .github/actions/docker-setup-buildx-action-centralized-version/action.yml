@@ -100,10 +100,12 @@ runs:
         set -euo pipefail
         builder_config="${DOCKER_CONFIG:-${HOME:?}/.docker}/buildx"
         workspace_key="$(printf '%s' "${GITHUB_WORKSPACE:?}" | sha256sum | cut -c1-16)"
-        docker_config="${RUNNER_TEMP:?}/docker-config/${GITHUB_RUN_ID:?}/${GITHUB_JOB:?}-${workspace_key}"
+        docker_home="${RUNNER_TEMP:?}/docker-home/${GITHUB_RUN_ID:?}/${GITHUB_JOB:?}-${workspace_key}"
+        docker_config="$docker_home/.docker"
         mkdir -p "$docker_config"
-        chmod 700 "$docker_config"
+        chmod 700 "$docker_home" "$docker_config"
         {
+          printf 'HOME=%s\n' "$docker_home"
           printf 'DOCKER_CONFIG=%s\n' "$docker_config"
           printf 'BUILDX_CONFIG=%s\n' "$builder_config"
         } >> "$GITHUB_ENV"
