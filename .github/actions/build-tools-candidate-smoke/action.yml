@@ -39,7 +39,7 @@ runs:
         set -euo pipefail
         required_tools=(
           actionlint bash bats cargo cargo-audit cargo-tarpaulin ccache clang-offload-packager clippy-driver
-          dig distcc distcc-pump docker envsubst jq parallel rustc rustfmt sccache
+          dig distcc distcc-pump docker envsubst gcc jq parallel rustc rustfmt sccache musl-gcc
           shellspec shellcheck timeout
         )
         for tool in "${required_tools[@]}"; do command -v "$tool" >/dev/null; done
@@ -57,6 +57,11 @@ runs:
         shellcheck --version
         distcc --version
         distcc-pump --help >/dev/null
+        target_triplet="$(gcc -dumpmachine)"
+        case "$target_triplet" in ''|unknown*|*-unknown-*) exit 1 ;; esac
+        musl_target_compiler="${target_triplet}-gcc"
+        command -v "$musl_target_compiler" >/dev/null
+        "$musl_target_compiler" --version >/dev/null
         docker --version
         docker compose version
         '

@@ -116,6 +116,8 @@ smoke_test_image() {
       shellspec
       distcc
       distcc-pump
+      gcc
+      musl-gcc
       docker
       # What: verifies gh is present in the image.
       # Why: gc-pr-staging-images.sh requires gh at runtime.
@@ -148,6 +150,11 @@ smoke_test_image() {
       fi
       command -v "$tool" >/dev/null
     done
+    target_triplet="$(gcc -dumpmachine)"
+    case "$target_triplet" in ''|unknown*|*-unknown-*) exit 1 ;; esac
+    musl_target_compiler="${target_triplet}-gcc"
+    command -v "$musl_target_compiler" >/dev/null
+    "$musl_target_compiler" --version >/dev/null
 
     docker --version >/dev/null
     docker compose version >/dev/null

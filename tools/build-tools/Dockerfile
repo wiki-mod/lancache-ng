@@ -220,6 +220,8 @@ RUN set -euo pipefail; \
       llvm22 \
       make \
       musl-dev \
+      # Alpine's musl-tools equivalent (musl-gcc is exposed below). \
+      musl-utils \
       openssl \
       openssl-dev \
       openssl-libs-static \
@@ -329,15 +331,23 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
 # Why: udhcpc ships in busybox base, nothing to install
 # From: Issue #1095
 
-# What: symlink musl-gcc to gcc; gcc targets musl already
-# Why: required by dns/ui/watchdog; avoids duplicate binary
+# What: expose Alpine's native musl compiler under stable and target-native names.
+# Why: every consumer must receive the same Alpine-musl compiler from this image;
+#      no runner-local compiler or distro package is part of the contract.
 # From: Issue #1095 | PR #1691
-RUN ln -sf /usr/bin/gcc /usr/local/bin/musl-gcc
+RUN set -eu; \
+    target_triplet="$(gcc -dumpmachine)"; \
+    case "$target_triplet" in \
+      ''|unknown*|*-unknown-*) printf 'ERROR: gcc reported an unknown Alpine target: %s\n' "$target_triplet" >&2; exit 1 ;; \
+    esac; \
+    ln -sf /usr/bin/gcc /usr/local/bin/musl-gcc; \
+    ln -sf /usr/bin/gcc "/usr/local/bin/${target_triplet}-gcc"
 
 # What: verifies Alpine's native musl Rust target.
 # Why: service builders must compile for the installed Rust standard library.
 # From: Issue #1095
 RUN set -euo pipefail; \
+    musl_target_compiler="$(gcc -dumpmachine)-gcc"; \
     required_tools=( \
       bash \
       bats \
@@ -467,6 +477,7 @@ RUN set -euo pipefail; \
       contract_failures+=("rustc host triple"); \
     fi; \
     run_contract_check 'musl-gcc --version' musl-gcc --version; \
+    run_contract_check "${musl_target_compiler} --version" "${musl_target_compiler}" --version; \
     if ((${#contract_failures[@]})); then \
       printf 'ERROR: build-tools contract checks failed:\n' >&2; \
       printf '  %s\n' "${contract_failures[@]}" >&2; \

@@ -80,24 +80,6 @@ done
 #   - Base utilities: standard coreutils / util-linux / base-image binaries
 #     present in any Debian base, so their presence is not a meaningful "was
 #     this image built correctly" signal the way a specialized tool is.
-#   - Musl cross-compilation toolchain: added by issue #815's groundwork PR
-#     (build-tools's own musl target addition). Deliberately excluded from
-#     the smoke test's required_tools, not merely deferred there, for the
-#     exact chicken-and-egg reason select-build-tools-image.sh's own
-#     smoke_test_image() comment already documents for `docker buildx`
-#     (issue #791): the smoke test's strict/published-image path trusts
-#     whatever image is *currently* published under the mutable :latest/
-#     :nightly tag, which does not carry musl-gcc until the build-tools
-#     workflow rebuilds and republishes it after the musl-target addition
-#     merges. Making musl-gcc a hard smoke-test requirement immediately
-#     would fail every unrelated PR's CI during the window between that
-#     merge and the republish completing, for a tool no consumer simulation
-#     script invokes yet (the real proof performed for the musl-target
-#     addition was a one-off SSH-driven build, not a repeatable simulation
-#     script). Revisit moving musl-gcc from here into
-#     smoke_test_image()'s required_tools once a real consumer simulation
-#     script depends on it directly.
-#
 #     ccache went through this exact same chicken-and-egg window and was
 #     deliberately excluded here for the identical reason while the
 #     bootstrap gap was open. It has since been added to
@@ -129,8 +111,6 @@ EXCLUDED_TOOLS=(
   awk basename cat chgrp chmod chown cp curl dirname dpkg find flock getent
   grep gzip install mkdir mktemp mv printf ps rm sed sha256sum sort tar tee
   test timeout xargs xz
-  # Musl cross-compilation toolchain (issue #815)
-  musl-gcc
 )
 
 # Multi-word capabilities the Dockerfile verifies via a subcommand invocation
