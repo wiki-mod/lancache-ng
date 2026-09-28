@@ -148,8 +148,10 @@ MOCKCURL
     run "$script" "$fixture_root"
     [ "$status" -eq 0 ]
     grep -qF "https://raw.githubusercontent.com/actions/checkout/" "$MOCK_CURL_ARGS"
-    ! grep -qF "Authorization" "$MOCK_CURL_ARGS"
-    ! grep -qF "test-token" "$MOCK_CURL_ARGS"
+    run grep -qF "Authorization" "$MOCK_CURL_ARGS"
+    [ "$status" -ne 0 ]
+    run grep -qF "test-token" "$MOCK_CURL_ARGS"
+    [ "$status" -ne 0 ]
 }
 
 @test "fails on the exact pre-#800 actions/upload-artifact@834a144... pin (the #799 regression)" {
