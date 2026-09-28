@@ -17,9 +17,6 @@ dockerfile="tools/build-tools/Dockerfile"
 smoke_script="scripts/untracked/select-build-tools-image.sh"
 candidate_smoke=".github/actions/build-tools-candidate-smoke/action.yml"
 
-# What: validates consumers derive the canonical tool inventory
-# Why: installation and smoke checks must not own parallel inventories
-# From: Issue #1095 | PR #1872
 for f in "$dockerfile" "$smoke_script" "$candidate_smoke"; do
   if [ ! -f "$f" ]; then
     printf '::error::check-build-tools-smoke-coverage: expected file not found: %s\n' "$f" >&2
@@ -33,9 +30,6 @@ fail() {
   failures=$((failures + 1))
 }
 
-# What: extracts required_tools entries from a file
-# Why: consumers must derive the Dockerfile inventory
-# From: Issue #1095 | PR #1872
 extract_required_tools() {
   awk '
     /required_tools=\(/ { in_arr = 1; next }
