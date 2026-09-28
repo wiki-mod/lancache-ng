@@ -16,7 +16,7 @@ inputs:
     default: ""
   driver:
     required: false
-    default: ""
+    default: "docker-container"
   driver-opts:
     required: false
     default: ""
@@ -31,7 +31,7 @@ inputs:
     default: ""
   use:
     required: false
-    default: ""
+    default: "true"
   name:
     required: false
     default: ""
@@ -46,13 +46,13 @@ inputs:
     default: ""
   keep-state:
     required: false
-    default: ""
+    default: "false"
   cache-binary:
     required: false
-    default: ""
+    default: "true"
   cleanup:
     required: false
-    default: ""
+    default: "true"
 outputs:
   name:
     description: Builder name.
