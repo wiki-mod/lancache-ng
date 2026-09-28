@@ -81,7 +81,8 @@ runs:
     - shell: bash
       run: |
         set -euo pipefail
-        docker_config="${RUNNER_TEMP:?}/docker-config"
+        workspace_key="$(printf '%s' "${GITHUB_WORKSPACE:?}" | sha256sum | cut -c1-16)"
+        docker_config="${RUNNER_TEMP:?}/docker-config/${GITHUB_RUN_ID:?}/${GITHUB_JOB:?}-${workspace_key}"
         mkdir -p "$docker_config"
         chmod 700 "$docker_config"
         printf 'DOCKER_CONFIG=%s\n' "$docker_config" >> "$GITHUB_ENV"
