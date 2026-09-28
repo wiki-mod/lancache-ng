@@ -98,9 +98,6 @@ smoke_test_image() {
   required_tools="${required_tool_list[*]}"
   : "${required_tools:?canonical build-tools inventory is empty}"
 
-  # What: adds caller-specific tools to the canonical inventory
-  # Why: dhclient is unavailable in the Alpine image
-  # From: Issue #1095
   docker run --rm \
     -e "REQUIRED_TOOLS=$required_tools" \
     -e "EXTRA_REQUIRED_TOOLS=${EXTRA_REQUIRED_TOOLS:-}" \
