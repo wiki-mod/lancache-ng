@@ -98,12 +98,17 @@ runs:
     - shell: bash
       run: |
         set -euo pipefail
-        builder_config="${DOCKER_CONFIG:-${HOME:?}/.docker}/buildx"
+        source_docker_config="${DOCKER_CONFIG:-${HOME:?}/.docker}"
+        builder_config="$source_docker_config/buildx"
         workspace_key="$(printf '%s' "${GITHUB_WORKSPACE:?}" | sha256sum | cut -c1-16)"
         docker_home="${RUNNER_TEMP:?}/docker-home/${GITHUB_RUN_ID:?}/${GITHUB_JOB:?}-${workspace_key}"
         docker_config="$docker_home/.docker"
         mkdir -p "$docker_config"
         chmod 700 "$docker_home" "$docker_config"
+        if [[ -f "$source_docker_config/config.json" ]]; then
+          cp "$source_docker_config/config.json" "$docker_config/config.json"
+          chmod 600 "$docker_config/config.json"
+        fi
         {
           printf 'HOME=%s\n' "$docker_home"
           printf 'DOCKER_CONFIG=%s\n' "$docker_config"
