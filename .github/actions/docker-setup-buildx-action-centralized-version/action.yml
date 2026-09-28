@@ -78,14 +78,6 @@ outputs:
 runs:
   using: composite
   steps:
-    - shell: bash
-      run: |
-        set -euo pipefail
-        workspace_key="$(printf '%s' "${GITHUB_WORKSPACE:?}" | sha256sum | cut -c1-16)"
-        docker_config="${RUNNER_TEMP:?}/docker-config/${GITHUB_RUN_ID:?}/${GITHUB_JOB:?}-${workspace_key}"
-        mkdir -p "$docker_config"
-        chmod 700 "$docker_config"
-        printf 'DOCKER_CONFIG=%s\n' "$docker_config" >> "$GITHUB_ENV"
     - id: setup
       uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       with:
@@ -103,3 +95,11 @@ runs:
         keep-state: ${{ inputs.keep-state }}
         cache-binary: ${{ inputs.cache-binary }}
         cleanup: ${{ inputs.cleanup }}
+    - shell: bash
+      run: |
+        set -euo pipefail
+        workspace_key="$(printf '%s' "${GITHUB_WORKSPACE:?}" | sha256sum | cut -c1-16)"
+        docker_config="${RUNNER_TEMP:?}/docker-config/${GITHUB_RUN_ID:?}/${GITHUB_JOB:?}-${workspace_key}"
+        mkdir -p "$docker_config"
+        chmod 700 "$docker_config"
+        printf 'DOCKER_CONFIG=%s\n' "$docker_config" >> "$GITHUB_ENV"
