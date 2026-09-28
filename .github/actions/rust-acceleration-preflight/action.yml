@@ -271,6 +271,16 @@ runs:
 
               if ! jq -e '(.stats.dist_errors // 0) == 0' "$stats_file" >/dev/null; then
                 echo "[ERROR] sccache-dist recorded distributed compile errors." >&2
+                if [ -n "${SCCACHE_ERROR_LOG:-}" ] && [ -s "$SCCACHE_ERROR_LOG" ]; then
+                  echo "::group::sccache-dist debug diagnostics (secrets redacted)" >&2
+                  sed -E \
+                    -e 's/(token[[:space:]]*=[[:space:]]*")[^"]*/\1[REDACTED]/g' \
+                    -e 's#(redis://)[^/@]+@#\1[REDACTED]@#g' \
+                    "$SCCACHE_ERROR_LOG" >&2
+                  echo "::endgroup::" >&2
+                else
+                  echo "[INFO] sccache-dist produced no debug log at ${SCCACHE_ERROR_LOG:-<unset>}." >&2
+                fi
                 cat "$stats_file" >&2
                 exit 1
               fi
@@ -303,6 +313,9 @@ runs:
               if [ -s /run/lancache/sccache-dist-config ]; then
                 export SCCACHE_CONF=/run/lancache/sccache-dist-config
                 require_dist_activity=1
+                export SCCACHE_LOG=debug
+                export SCCACHE_ERROR_LOG="$preflight_dir/sccache-error.log"
+                export RUST_BACKTRACE=1
                 dist_log="$preflight_dir/sccache-dist-status.log"
                 run_logged "$dist_log" sccache --dist-status
                 require_sccache_dist_connected "$dist_log"
