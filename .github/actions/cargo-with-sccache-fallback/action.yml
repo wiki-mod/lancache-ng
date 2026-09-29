@@ -1,9 +1,9 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# GitHub Action for cargo invocation with automatic sccache-fallback retry on failure or timeout
+# GitHub Action for cargo invocation with automatic sccache-fallback retry on failure
 name: Run cargo with sccache fallback
-description: Run one cargo command and retry without sccache if the cache wrapper fails, so CI still completes without LAN-only acceleration.
+description: Run one cargo command and retry without sccache if the cache wrapper fails.
 
 inputs:
   command:
@@ -119,7 +119,7 @@ runs:
           exit "$status"
         fi
 
-        echo "::warning::Cargo command failed because optional sccache acceleration failed or timed out; retrying once without RUSTC_WRAPPER."
+        echo "::warning::Cargo command failed because optional sccache acceleration failed; retrying once without RUSTC_WRAPPER."
         unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_REDIS_KEY_PREFIX SCCACHE_CONF SCCACHE_NO_DAEMON
 
         fallback_output="$(mktemp "$log_root/lancache-cargo-fallback.XXXXXX")"
