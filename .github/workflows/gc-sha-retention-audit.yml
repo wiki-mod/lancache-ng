@@ -7,26 +7,15 @@
 name: SHA Retention Audit
 
 on:
-  pull_request:
-    branches:
-      - current_dev
-    types: [opened, synchronize, reopened]
-    paths:
-      - .github/workflows/gc-sha-retention-audit.yml
-      - release/stack-images.yml
-      - docs/release-versioning.md
-      - scripts/untracked/select-build-tools-image.sh
-      - scripts/untracked/gc-sha-retention-audit.sh
-      - scripts/lib/github-api-retry.sh
-      - scripts/lib/sha-retention-audit.sh
-      - scripts/untracked/validate-stack-images.sh
-      - tests/bats/sha_retention_audit.bats
+  workflow_run:
+    workflows: ["Build Tools Image"]
+    types: [completed]
   workflow_dispatch:
 
 permissions: {}
 
 concurrency:
-  group: sha-retention-audit-${{ github.event.pull_request.number || github.ref }}
+  group: sha-retention-audit-${{ github.event.workflow_run.id || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -34,7 +23,10 @@ jobs:
     # What: skips job for fork PR instead of running weaker mode.
     # Why: fork PRs lack package-read perms; fallback would be false.
     # From: Issue #1095 | PR #1501.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.pull_requests[0].head.repo.full_name == github.repository)
     # What: GitHub-hosted, not self-hosted -- no LAN dependency here.
     # Why: self-hosted workspace race broke a live sibling GC run.
     # From: Issue #1095
@@ -68,6 +60,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
           path: f17-sha-retention-audit
 
       # What: confirms checkout identity, files, no skip-worktree state.
@@ -76,7 +69,7 @@ jobs:
       - name: Verify isolated checkout identity and completeness
         working-directory: f17-sha-retention-audit
         env:
-          EXPECTED_SHA: ${{ github.sha }}
+          EXPECTED_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
         run: |
           set -euo pipefail
           actual_sha="$(git rev-parse HEAD)"
@@ -110,13 +103,13 @@ jobs:
         id: build_tools
         working-directory: f17-sha-retention-audit
         env:
-          GITHUB_BASE_REF: ${{ github.base_ref }}
-          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
-          GITHUB_EVENT_PULL_REQUEST_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GITHUB_BASE_REF: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.pull_requests[0].base.ref || '' }}
+          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.pull_requests[0].head.repo.full_name || github.repository }}
+          GITHUB_EVENT_PULL_REQUEST_HEAD_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.pull_requests[0].head.sha || github.sha }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ github.token }}
           GH_TOKEN: ${{ github.token }}
-          BUILD_TOOLS_PR_STAGING_IMAGE: ${{ github.event_name == 'pull_request' && github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository && format('ghcr.io/{0}/build-tools:pr-{1}-sha-{2}', github.repository, github.event.pull_request.number, github.sha) || '' }}
+          BUILD_TOOLS_PR_STAGING_IMAGE: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.pull_requests[0].head.repo.full_name == github.repository && format('ghcr.io/{0}/build-tools:pr-{1}-sha-{2}', github.repository, github.event.workflow_run.pull_requests[0].number, github.event.workflow_run.head_sha) || '' }}
         run: |
           set -euo pipefail
           # What: pull-only; never build build-tools on this runner.
