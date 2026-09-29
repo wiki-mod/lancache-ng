@@ -230,13 +230,15 @@ jobs:
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
-          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body -q .body > /tmp/pr-body-live.txt 2> /tmp/pr-body-live.stderr || {
+          body_file="${RUNNER_TEMP:-/var/tmp}/lancache-pr-body-live.txt"
+          stderr_file="${RUNNER_TEMP:-/var/tmp}/lancache-pr-body-live.stderr"
+          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body -q .body > "$body_file" 2> "$stderr_file" || {
             echo "::error::gh pr view failed, exit code $?"
-            cat /tmp/pr-body-live.stderr
+            cat "$stderr_file"
             exit 1
           }
-          echo "::notice::gh pr view succeeded. Body byte count: $(wc -c < /tmp/pr-body-live.txt). stderr: $(cat /tmp/pr-body-live.stderr)"
-          bash scripts/tracked/validate-pr-template.sh /tmp/pr-body-live.txt
+          echo "::notice::gh pr view succeeded. Body byte count: $(wc -c < "$body_file"). stderr: $(cat "$stderr_file")"
+          bash scripts/tracked/validate-pr-template.sh "$body_file"
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
   pr-tracking-metadata-check:

@@ -63,7 +63,7 @@ docker build -q -t "$image_tag" --build-context "shared-scripts=$repo_root/scrip
 
 # What: Use 172.29.0.0/16 with flock+retry.
 # Why: Avoid collision on shared runner; RFC1918.
-subnet_lock_root="/tmp/lancache-validation-locks-dhcp-proxy-pxe"
+subnet_lock_root="/var/tmp/lancache-validation-locks-dhcp-proxy-pxe"
 subnet_max_attempts=10
 subnet_run_id="${GITHUB_RUN_ID:-local}-$$-${RANDOM:-0}-pxe"
 subnet_run_attempt="${GITHUB_RUN_ATTEMPT:-1}"

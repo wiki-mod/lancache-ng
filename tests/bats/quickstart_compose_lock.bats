@@ -69,7 +69,7 @@ wait_for_marker() {
     # unchanged by this refactor -- a different default here would silently
     # stop this helper from serializing against any leftover job still on
     # the old inline form.
-    [ "$QUICKSTART_COMPOSE_LOCK_PATH" = "/tmp/lancache-setup-cli-simulation.lock" ]
+    [ "$QUICKSTART_COMPOSE_LOCK_PATH" = "/var/tmp/lancache-setup-cli-simulation.lock" ]
     declare -f quickstart_compose_lock_acquire >/dev/null
 }
 

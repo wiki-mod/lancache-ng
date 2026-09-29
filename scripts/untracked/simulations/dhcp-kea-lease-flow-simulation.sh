@@ -145,7 +145,7 @@ docker_build_with_content_store_lock -- docker build -q -t "$image_tag" --build-
 # What: Uses flock+retry for dynamic subnet allocation.
 # Why: Concurrent jobs collide; needs distributed lock.
 # From: Issue #820
-subnet_lock_root="/tmp/lancache-validation-locks-dhcp-kea"
+subnet_lock_root="/var/tmp/lancache-validation-locks-dhcp-kea"
 subnet_max_attempts=10
 subnet_run_id="${GITHUB_RUN_ID:-local}-$$-${RANDOM:-0}"
 subnet_run_attempt="${GITHUB_RUN_ATTEMPT:-1}"

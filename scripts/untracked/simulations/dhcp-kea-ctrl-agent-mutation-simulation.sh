@@ -51,7 +51,7 @@ ui_container="lancache-ng-dhcp634-ui-$$"
 # What: Work directory outside git worktree.
 # Why: Prevents uid-10001 dirs from poisoning future CI.
 # From: Issue #1123
-work_dir="${TMPDIR:-/tmp}/lancache-ng-dhcp-kea-ctrl-agent-mutation.$$"
+work_dir="${RUNNER_TEMP:-/var/tmp}/lancache-ng-dhcp-kea-ctrl-agent-mutation.$$"
 rm -rf "$work_dir"
 mkdir -p "$work_dir/shared"
 # What: Shared kea-data volume for snapshots.

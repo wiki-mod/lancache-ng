@@ -53,7 +53,7 @@ ui_container="lancache-ng-resetkea-ui-$$"
 # What: Work directory outside git worktree.
 # Why: Prevents uid-10001 dirs from poisoning future CI.
 # From: Issue #1123
-work_dir="${TMPDIR:-/tmp}/lancache-ng-setup-reset-kea-config.$$"
+work_dir="${RUNNER_TEMP:-/var/tmp}/lancache-ng-setup-reset-kea-config.$$"
 rm -rf "$work_dir"
 mkdir -p "$work_dir/shared" "$work_dir/kea-data" "$work_dir/install"
 
