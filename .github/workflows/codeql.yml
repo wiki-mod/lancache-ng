@@ -26,6 +26,7 @@ on:
 
 permissions:
   contents: read
+  packages: read
   security-events: write
 
 env:
@@ -336,19 +337,31 @@ jobs:
           fi
           echo "superseded=$superseded" >> "$GITHUB_OUTPUT"
 
-      - name: Isolate Rust toolchain paths
+      - name: Set up Docker Buildx for build-tools selection
         if: steps.admission.outputs.superseded != 'true' && matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
-        run: |
-          {
-            echo 'CARGO_HOME=${{ runner.temp }}/cargo-home/codeql-${{ matrix.language }}'
-            echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/codeql-${{ matrix.language }}'
-          } >> "$GITHUB_ENV"
+        uses: ./.github/actions/buildx-setup-retry
 
-      - name: Install Rust toolchain
+      - name: Resolve immutable build-tools image
         if: steps.admission.outputs.superseded != 'true' && matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-        with:
-          toolchain: stable
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_EVENT_PULL_REQUEST_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || '' }}
+          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || '' }}
+          BUILD_TOOLS_REQUIRE_PUBLISHED: "true"
+          BUILD_TOOLS_PR_STAGING_IMAGE: ${{ github.event_name == 'pull_request' && github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository && format('ghcr.io/{0}/build-tools:pr-{1}-sha-{2}', github.repository, github.event.pull_request.number, github.sha) || '' }}
+        run: |
+          set -euo pipefail
+          build_tools_image="$(bash scripts/untracked/select-build-tools-image.sh)"
+          case "$build_tools_image" in
+            *@sha256:*) ;;
+            *)
+              echo "::error::Expected a digest-qualified build-tools image, got '$build_tools_image'."
+              exit 1
+              ;;
+          esac
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
       # Optional acceleration only: CodeQL must still run if Redis-backed sccache is unavailable.
       - name: Configure Redis-backed sccache
         if: >-
@@ -370,6 +383,7 @@ jobs:
           key-prefix: lancache-codeql-${{ matrix.language }}
           dist-scheduler-url: ${{ vars.CODEQL_USE_SELF_HOSTED == 'true' && vars.SCCACHE_DIST_SCHEDULER_URL || '' }}
           dist-auth-token: ${{ vars.CODEQL_USE_SELF_HOSTED == 'true' && secrets.SCCACHE_DIST_AUTH_TOKEN || '' }}
+          verify-binary: false
       - name: Start CodeQL memory monitor
         # What: Samples host memory every 10s; logs to temp file
         # Why: Makes OOM failures visible instead of silent quits
@@ -428,18 +442,21 @@ jobs:
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
           command: cargo build --locked --manifest-path services/dns/nats-subscriber/Cargo.toml
+          container-image: ${{ env.BUILD_TOOLS_IMAGE }}
 
       - name: Build UI Rust crate for CodeQL
         if: steps.admission.outputs.superseded != 'true' && matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
           command: cargo build --locked --manifest-path services/ui/Cargo.toml
+          container-image: ${{ env.BUILD_TOOLS_IMAGE }}
 
       - name: Build watchdog Rust crate for CodeQL
         if: steps.admission.outputs.superseded != 'true' && matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
           command: cargo build --locked --manifest-path services/watchdog/Cargo.toml
+          container-image: ${{ env.BUILD_TOOLS_IMAGE }}
 
       - name: Perform CodeQL Analysis
         # Same gate as Initialize CodeQL above: skip the 'rust' analysis when
