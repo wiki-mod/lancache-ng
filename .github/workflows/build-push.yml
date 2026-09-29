@@ -1970,7 +1970,6 @@ jobs:
           PR_TAG: ${{ steps.channel.outputs.tag }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
-          WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow_reuse_scope }}
           PROXY_TOUCHED: ${{ needs['detect-changes'].outputs.proxy }}
           DNS_TOUCHED: ${{ needs['detect-changes'].outputs.dns_image }}
           WATCHDOG_TOUCHED: ${{ needs['detect-changes'].outputs.watchdog }}
@@ -3577,7 +3576,6 @@ jobs:
           DETECT_CHANGES_RESULT: ${{ needs['detect-changes'].result }}
           SUPERSEDED: ${{ needs['push-supersession-check'].outputs.superseded }}
           REUSE_JOB_RESULT: ${{ needs['determine-push-reuse-scope'].result }}
-          WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow_reuse_scope }}
           REUSE_PROXY: ${{ needs['determine-push-reuse-scope'].outputs.reuse_proxy }}
           REUSE_DNS: ${{ needs['determine-push-reuse-scope'].outputs.reuse_dns }}
           REUSE_WATCHDOG: ${{ needs['determine-push-reuse-scope'].outputs.reuse_watchdog }}
@@ -3628,19 +3626,7 @@ jobs:
                 exit 1
                 ;;
             esac
-            if [ "$MATRIX_SERVICE" = "build-tools" ]; then
-              should_build=false
-              reuse_eligible=false
-              echo "::notice::The standalone build-tools workflow owns PR candidate production; this matrix entry only waits for and consumes its published candidate."
-            fi
-            # What: Rebuild every service after shared CI contract changes
-            # Why: PR staging tags must reflect the current build path
-            # From: Issue #1860 | PR #1872
-            if [ "$MATRIX_SERVICE" != "build-tools" ] && [ "$WORKFLOW_CHANGED" = "true" ]; then
-              should_build=true
-              reuse_eligible=false
-              echo "::notice::$MATRIX_SERVICE rebuild is required because the shared CI build contract changed."
-            elif [ "$should_build" = "false" ] && [ "$REUSE_JOB_RESULT" = "success" ]; then
+            if [ "$should_build" = "false" ] && [ "$REUSE_JOB_RESULT" = "success" ]; then
               reuse="$(reuse_for_service "$MATRIX_SERVICE")"
               if [ "$reuse" = "true" ]; then
                 reuse_eligible=true
@@ -4179,7 +4165,6 @@ jobs:
         with:
           image-ref: ghcr.io/${{ github.repository }}/build-tools@${{ steps.build.outputs.digest }}
           platform: linux/amd64
-          run-fixtures: "true"
       - name: Attest image build provenance
         if: >-
           ${{
@@ -4282,7 +4267,6 @@ jobs:
           DETECT_CHANGES_RESULT: ${{ needs['detect-changes'].result }}
           SUPERSEDED: ${{ needs['push-supersession-check'].outputs.superseded }}
           REUSE_JOB_RESULT: ${{ needs['determine-push-reuse-scope'].result }}
-          WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow_reuse_scope }}
           REUSE_PROXY: ${{ needs['determine-push-reuse-scope'].outputs.reuse_proxy }}
           REUSE_DNS: ${{ needs['determine-push-reuse-scope'].outputs.reuse_dns }}
           REUSE_WATCHDOG: ${{ needs['determine-push-reuse-scope'].outputs.reuse_watchdog }}
@@ -4333,19 +4317,7 @@ jobs:
                 exit 1
                 ;;
             esac
-            if [ "$MATRIX_SERVICE" = "build-tools" ]; then
-              should_build=false
-              reuse_eligible=false
-              echo "::notice::The standalone build-tools workflow owns PR candidate production; this matrix entry only waits for and consumes its published candidate."
-            fi
-            # What: Rebuild every service after shared CI contract changes
-            # Why: PR staging tags must reflect the current build path
-            # From: Issue #1860 | PR #1872
-            if [ "$MATRIX_SERVICE" != "build-tools" ] && [ "$WORKFLOW_CHANGED" = "true" ]; then
-              should_build=true
-              reuse_eligible=false
-              echo "::notice::$MATRIX_SERVICE rebuild is required because the shared CI build contract changed."
-            elif [ "$should_build" = "false" ] && [ "$REUSE_JOB_RESULT" = "success" ]; then
+            if [ "$should_build" = "false" ] && [ "$REUSE_JOB_RESULT" = "success" ]; then
               reuse="$(reuse_for_service "$MATRIX_SERVICE")"
               if [ "$reuse" = "true" ]; then
                 reuse_eligible=true
@@ -4717,7 +4689,6 @@ jobs:
         with:
           image-ref: ghcr.io/${{ github.repository }}/build-tools@${{ steps.build.outputs.digest }}
           platform: linux/arm64
-          run-fixtures: "false"
       - name: Attest image build provenance
         if: >-
           ${{

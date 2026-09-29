@@ -16,14 +16,6 @@ on:
         default: false
   schedule:
     - cron: "23 3 * * 0"
-  pull_request:
-    branches: [master, current_dev]
-    paths:
-      - "tools/build-tools/**"
-      - ".github/workflows/build-tools.yml"
-      - ".github/actions/build-tools-candidate-smoke/**"
-      - ".github/actions/trivy-scan-exact-digest/**"
-
 permissions:
   contents: read
   packages: write
@@ -80,10 +72,6 @@ jobs:
 
           case "${{ github.event_name }}" in
             workflow_dispatch|schedule)
-              echo "should-publish=true" >> "$GITHUB_OUTPUT"
-              exit 0
-              ;;
-            pull_request)
               echo "should-publish=true" >> "$GITHUB_OUTPUT"
               exit 0
               ;;
@@ -354,15 +342,13 @@ jobs:
         with:
           image-ref: ${{ env.BUILD_TOOLS_SCAN_IMAGE_AMD64 }}
           platform: linux/amd64
-          run-fixtures: "true"
 
       - name: Smoke-test exact pushed amd64 candidate digest
-        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        if: needs['determine-publish-scope'].outputs.should-publish == 'true'
         uses: ./.github/actions/build-tools-candidate-smoke
         with:
           image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
           platform: linux/amd64
-          run-fixtures: "true"
 
       # What: resolves shared, NFS-backed Trivy DB cache directory.
       # Why: replaces a dir wiped every run, forcing full DB re-download.
@@ -682,7 +668,7 @@ jobs:
           platform: linux/arm64
 
       - name: Smoke-test exact pushed arm64 candidate digest
-        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        if: needs['determine-publish-scope'].outputs.should-publish == 'true'
         uses: ./.github/actions/build-tools-candidate-smoke
         with:
           image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
