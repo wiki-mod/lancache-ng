@@ -2161,8 +2161,7 @@ jobs:
         ) &&
         (
           github.event_name != 'pull_request' ||
-          needs['detect-changes'].outputs.dns_rust == 'true' ||
-          needs['detect-changes'].outputs.workflow_reuse_scope == 'true'
+          needs['detect-changes'].outputs.dns_rust == 'true'
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
@@ -2224,8 +2223,7 @@ jobs:
         ) &&
         (
           github.event_name != 'pull_request' ||
-          needs['detect-changes'].outputs.ui == 'true' ||
-          needs['detect-changes'].outputs.workflow_reuse_scope == 'true'
+          needs['detect-changes'].outputs.ui == 'true'
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
@@ -2287,8 +2285,7 @@ jobs:
         ) &&
         (
           github.event_name != 'pull_request' ||
-          needs['detect-changes'].outputs.watchdog == 'true' ||
-          needs['detect-changes'].outputs.workflow_reuse_scope == 'true'
+          needs['detect-changes'].outputs.watchdog == 'true'
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
@@ -2352,8 +2349,7 @@ jobs:
         ) &&
         (
           needs['detect-changes'].result != 'success' ||
-          needs['detect-changes'].outputs.dns_rust == 'true' ||
-          needs['detect-changes'].outputs.workflow_reuse_scope == 'true'
+          needs['detect-changes'].outputs.dns_rust == 'true'
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
@@ -2415,8 +2411,7 @@ jobs:
         ) &&
         (
           needs['detect-changes'].result != 'success' ||
-          needs['detect-changes'].outputs.ui == 'true' ||
-          needs['detect-changes'].outputs.workflow_reuse_scope == 'true'
+          needs['detect-changes'].outputs.ui == 'true'
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
@@ -2476,8 +2471,7 @@ jobs:
         (
           github.event_name != 'pull_request' ||
           needs['detect-changes'].outputs.dns_rust == 'true' ||
-          needs['detect-changes'].outputs.ui == 'true' ||
-          needs['detect-changes'].outputs.workflow_reuse_scope == 'true'
+          needs['detect-changes'].outputs.ui == 'true'
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
@@ -2721,8 +2715,7 @@ jobs:
         ) &&
         (
           needs['detect-changes'].result != 'success' ||
-          needs['detect-changes'].outputs.watchdog == 'true' ||
-          needs['detect-changes'].outputs.workflow_reuse_scope == 'true'
+          needs['detect-changes'].outputs.watchdog == 'true'
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
@@ -2789,8 +2782,7 @@ jobs:
           needs['detect-changes'].result != 'success' ||
           needs['detect-changes'].outputs.dns_rust == 'true' ||
           needs['detect-changes'].outputs.ui == 'true' ||
-          needs['detect-changes'].outputs.watchdog == 'true' ||
-          needs['detect-changes'].outputs.workflow_reuse_scope == 'true'
+          needs['detect-changes'].outputs.watchdog == 'true'
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
@@ -2969,11 +2961,6 @@ jobs:
           ui_required=false
           watchdog_required=false
           if [ "$content_event" = "true" ]; then
-            if [ "$WORKFLOW_CHANGED" = "true" ]; then
-              dns_rust_required=true
-              ui_required=true
-              watchdog_required=true
-            fi
             if [ "$DNS_RUST_CHANGED" = "true" ]; then
               dns_rust_required=true
             fi
