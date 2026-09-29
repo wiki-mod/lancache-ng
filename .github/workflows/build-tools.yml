@@ -32,7 +32,7 @@ permissions:
 
 concurrency:
   group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.ref) || format('{0}-publish', github.workflow) }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   ACTIONS_STEP_DEBUG: ${{ inputs.debug && 'true' || 'false' }}
@@ -132,7 +132,7 @@ jobs:
     timeout-minutes: 150
     concurrency:
       group: build-tools-amd64-image-build
-      cancel-in-progress: false
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     # What: add issues:write to job permissions; others unchanged.
     # Why: job perms replace workflow level; issues:write for Trivy.
     # From: Issue #1095
@@ -558,6 +558,9 @@ jobs:
     needs: determine-publish-scope
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 150
+    concurrency:
+      group: build-tools-arm64-image-build
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     # What: add issues:write; others unchanged (same as amd64 job).
     # Why: needed for self-closing Trivy report in this job.
     # From: Issue #1095

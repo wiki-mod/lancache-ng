@@ -34,6 +34,20 @@ inputs:
     description: Verify sccache on the invoking environment.
     required: false
     default: "true"
+  emit-buildkit-secrets:
+    description: Emit temporary GHA cache files for a BuildKit secret mount.
+    required: false
+    default: "false"
+outputs:
+  config-file:
+    description: Generated sccache configuration file.
+    value: ${{ steps.configure.outputs.config-file }}
+  url-file:
+    description: Generated GitHub Actions cache URL file.
+    value: ${{ steps.configure.outputs.url-file }}
+  token-file:
+    description: Generated GitHub Actions runtime token file.
+    value: ${{ steps.configure.outputs.token-file }}
 runs:
   using: composite
   steps:
@@ -45,6 +59,7 @@ runs:
           core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
           core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
     - name: Configure Rust sccache environment
+      id: configure
       shell: bash
       env:
         SCCACHE_REDIS_MODE: ${{ inputs.mode }}
@@ -54,6 +69,7 @@ runs:
         SCCACHE_DIST_AUTH_TOKEN: ${{ inputs.dist-auth-token }}
         SCCACHE_DIST_TOOLCHAIN_CACHE_SIZE: ${{ inputs.dist-toolchain-cache-size }}
         SCCACHE_VERIFY_BINARY: ${{ inputs.verify-binary }}
+        EMIT_BUILDKIT_SECRETS: ${{ inputs.emit-buildkit-secrets }}
         ACTIONS_RESULTS_URL: ${{ env.ACTIONS_RESULTS_URL }}
         ACTIONS_RUNTIME_TOKEN: ${{ env.ACTIONS_RUNTIME_TOKEN }}
         GITHUB_REPOSITORY: ${{ github.repository }}
@@ -159,6 +175,23 @@ runs:
             printf '\n[cache.multilevel]\n'
             printf 'chain = ["redis", "gha"]\n'
           } >> "$sccache_config"
+        fi
+
+        if [ "$EMIT_BUILDKIT_SECRETS" = "true" ]; then
+          if [ "$gha_enabled" != "1" ]; then
+            echo "::error::GitHub Actions cache runtime is required for BuildKit sccache secrets."
+            exit 1
+          fi
+          url_file="${RUNNER_TEMP}/sccache-gha-url-${GITHUB_JOB:-rust}"
+          token_file="${RUNNER_TEMP}/sccache-gha-token-${GITHUB_JOB:-rust}"
+          umask 077
+          printf '%s' "$ACTIONS_RESULTS_URL" > "$url_file"
+          printf '%s' "$ACTIONS_RUNTIME_TOKEN" > "$token_file"
+          {
+            printf 'config-file=%s\n' "$sccache_config"
+            printf 'url-file=%s\n' "$url_file"
+            printf 'token-file=%s\n' "$token_file"
+          } >> "$GITHUB_OUTPUT"
         fi
 
         if [ -n "$SCCACHE_DIST_SCHEDULER_URL" ]; then

@@ -3902,13 +3902,6 @@ jobs:
             echo "::notice::Using CARGO_BUILD_JOBS=$jobs from $detected_cores detected cores for Docker builds."
           fi
           echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
-      - name: Export GitHub Actions cache runtime
-        if: matrix.rust == true && runner.environment != 'self-hosted'
-        uses: &github_script_centralized actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-        with:
-          script: |
-            core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
-            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
       - name: Prepare Rust acceleration secret files
         if: >-
           ${{
@@ -4258,42 +4251,15 @@ jobs:
     steps:
       - name: Checkout
         uses: *checkout_centraliced_versioning # v7.0.1
-      - name: Export GitHub Actions cache runtime
-        if: matrix.rust == true
-        uses: *github_script_centralized
-        with:
-          script: |
-            core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
-            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
       - name: Prepare hosted sccache GHA configuration
         if: matrix.rust == true
         id: sccache-gha
-        env:
-          ACTIONS_RESULTS_URL: ${{ env.ACTIONS_RESULTS_URL }}
-          ACTIONS_RUNTIME_TOKEN: ${{ env.ACTIONS_RUNTIME_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -z "$ACTIONS_RESULTS_URL" ] || [ -z "$ACTIONS_RUNTIME_TOKEN" ]; then
-            echo "::error::GitHub Actions sccache runtime is unavailable for hosted Rust builds."
-            exit 1
-          fi
-          config_file="${RUNNER_TEMP}/sccache-gha-config-${{ matrix.service }}"
-          url_file="${RUNNER_TEMP}/sccache-gha-url-${{ matrix.service }}"
-          token_file="${RUNNER_TEMP}/sccache-gha-token-${{ matrix.service }}"
-          umask 077
-          printf '%s' "$ACTIONS_RESULTS_URL" > "$url_file"
-          printf '%s' "$ACTIONS_RUNTIME_TOKEN" > "$token_file"
-          {
-            printf '[cache.gha]\n'
-            printf 'enabled = true\n'
-            printf 'version = "lancache-%s"\n' "${{ matrix.service }}"
-            printf 'rw_mode = "READ_WRITE"\n'
-          } > "$config_file"
-          {
-            echo "config-file=$config_file"
-            echo "url-file=$url_file"
-            echo "token-file=$token_file"
-          } >> "$GITHUB_OUTPUT"
+        uses: ./.github/actions/configure-rust-sccache
+        with:
+          mode: off
+          key-prefix: lancache-${{ matrix.service }}
+          verify-binary: "false"
+          emit-buildkit-secrets: "true"
       - name: Determine whether this service needs building
         id: should-build
         env:
