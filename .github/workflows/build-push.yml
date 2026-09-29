@@ -1852,6 +1852,14 @@ jobs:
           esac
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
+  sha-retention-audit:
+    name: audit
+    if: github.event_name == 'pull_request' && needs.validate-compose.result == 'success'
+    needs: validate-compose
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/gc-sha-retention-audit.yml
   compute-validation-network:
     name: derive per-run validation subnet
     runs-on: [self-hosted, linux, lancache, lancache-light]

@@ -24,15 +24,6 @@ on:
       - ".github/workflows/build-tools.yml"
       - ".github/actions/build-tools-candidate-smoke/**"
       - ".github/actions/trivy-scan-exact-digest/**"
-      - ".github/workflows/gc-sha-retention-audit.yml"
-      - "release/stack-images.yml"
-      - "docs/release-versioning.md"
-      - "scripts/untracked/select-build-tools-image.sh"
-      - "scripts/untracked/gc-sha-retention-audit.sh"
-      - "scripts/lib/github-api-retry.sh"
-      - "scripts/lib/sha-retention-audit.sh"
-      - "scripts/untracked/validate-stack-images.sh"
-      - "tests/bats/sha_retention_audit.bats"
 
 permissions:
   contents: read
