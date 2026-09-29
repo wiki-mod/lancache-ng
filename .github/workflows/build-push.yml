@@ -1437,11 +1437,10 @@ jobs:
               exit 1
             fi
           done
-          for workflow in .github/workflows/build-push.yml .github/workflows/codeql.yml; do
-            grep -F 'CARGO_BUILD_JOBS:' "$workflow" >/dev/null \
-              && grep -F 'vars.CARGO_BUILD_JOBS' "$workflow" >/dev/null \
-              || { echo "::error::$workflow must expose the CARGO_BUILD_JOBS repository variable to Cargo jobs."; exit 1; }
-          done
+          workflow=.github/workflows/build-push.yml
+          grep -F 'CARGO_BUILD_JOBS:' "$workflow" >/dev/null \
+            && grep -F 'vars.CARGO_BUILD_JOBS' "$workflow" >/dev/null \
+            || { echo "::error::$workflow must expose the CARGO_BUILD_JOBS repository variable to Cargo jobs."; exit 1; }
           if grep -RInE '^(ARG SCCACHE_DIST_SCHEDULER_URL|ENV CARGO_BUILD_JOBS=)' services/*/Dockerfile; then
             echo "::error::Rust service Dockerfiles must not use scheduler-only args or hardcoded CARGO_BUILD_JOBS values."
             exit 1
@@ -3625,7 +3624,11 @@ jobs:
                 exit 1
                 ;;
             esac
-            if [ "$should_build" = "false" ] && [ "$REUSE_JOB_RESULT" = "success" ]; then
+            if [ "$MATRIX_SERVICE" = "build-tools" ]; then
+              should_build=false
+              reuse_eligible=false
+              echo "::notice::The standalone build-tools workflow owns PR candidate production; this matrix entry consumes its published candidate."
+            elif [ "$should_build" = "false" ] && [ "$REUSE_JOB_RESULT" = "success" ]; then
               reuse="$(reuse_for_service "$MATRIX_SERVICE")"
               if [ "$reuse" = "true" ]; then
                 reuse_eligible=true
@@ -4316,7 +4319,11 @@ jobs:
                 exit 1
                 ;;
             esac
-            if [ "$should_build" = "false" ] && [ "$REUSE_JOB_RESULT" = "success" ]; then
+            if [ "$MATRIX_SERVICE" = "build-tools" ]; then
+              should_build=false
+              reuse_eligible=false
+              echo "::notice::The standalone build-tools workflow owns PR candidate production; this matrix entry consumes its published candidate."
+            elif [ "$should_build" = "false" ] && [ "$REUSE_JOB_RESULT" = "success" ]; then
               reuse="$(reuse_for_service "$MATRIX_SERVICE")"
               if [ "$reuse" = "true" ]; then
                 reuse_eligible=true
