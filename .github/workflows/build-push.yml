@@ -1854,8 +1854,8 @@ jobs:
         if: always()
   sha-retention-audit:
     name: audit
-    if: github.event_name == 'pull_request' && needs.validate-compose.result == 'success'
-    needs: validate-compose
+    if: github.event_name == 'pull_request' && needs['merge-manifests'].result == 'success'
+    needs: merge-manifests
     permissions:
       contents: read
       packages: read
