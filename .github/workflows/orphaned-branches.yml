@@ -55,6 +55,7 @@ permissions:
   contents: read
   issues: read
   pull-requests: read
+  packages: read
 
 concurrency:
   group: orphaned-branch-guard
@@ -89,9 +90,17 @@ jobs:
         # against -- so there is no reason to pay a local `docker build` on
         # every scheduled run the way a trusted-ref PR/push job would. Same
         # pattern as pr-tracking-metadata-check in build-push.yml.
+        env:
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)" >> "$GITHUB_ENV"
+          image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+          if [[ -z "$image" ]]; then
+            echo "::error::Build-tools selector returned an empty image reference."
+            exit 1
+          fi
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
 
       - name: Scan for orphaned branches
         env:
