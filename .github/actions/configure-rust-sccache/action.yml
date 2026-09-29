@@ -154,6 +154,13 @@ runs:
           } >> "$sccache_config"
         fi
 
+        if [ "$redis_enabled" = "1" ] && [ "$gha_enabled" = "1" ]; then
+          {
+            printf '\n[cache.multilevel]\n'
+            printf 'chain = ["redis", "gha"]\n'
+          } >> "$sccache_config"
+        fi
+
         if [ -n "$SCCACHE_DIST_SCHEDULER_URL" ]; then
           {
             printf '\n[dist]\n'
