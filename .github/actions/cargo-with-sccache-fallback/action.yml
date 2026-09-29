@@ -78,6 +78,38 @@ runs:
           return "$status"
         }
 
+        cleanup_stale_cargo_containers() {
+          local container_ids container_id command config_source
+
+          if ! container_ids="$(docker ps -q)"; then
+            echo "::error::Unable to inspect running Docker containers before starting verification." >&2
+            return 1
+          fi
+
+          while IFS= read -r container_id; do
+            [ -n "$container_id" ] || continue
+
+            if ! command="$(docker inspect -f '{{join .Config.Cmd " "}}' "$container_id" 2>&1)"; then
+              printf '::error::Unable to inspect candidate Cargo container %s: %s\n' "$container_id" "$command" >&2
+              return 1
+            fi
+            [[ "$command" == cargo\ * ]] || continue
+
+            if ! config_source="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/run/lancache/sccache.conf"}}{{.Source}}{{end}}{{end}}' "$container_id" 2>&1)"; then
+              printf '::error::Unable to inspect sccache config mount for Cargo container %s: %s\n' "$container_id" "$config_source" >&2
+              return 1
+            fi
+            [ -n "$config_source" ] || continue
+            [ -e "$config_source" ] && continue
+
+            printf '::warning::Removing stale Cargo container %s; its sccache config source no longer exists: %s\n' "$container_id" "$config_source" >&2
+            if ! docker rm -f "$container_id"; then
+              printf '::error::Failed to remove stale Cargo container %s.\n' "$container_id" >&2
+              return 1
+            fi
+          done <<< "$container_ids"
+        }
+
         is_sccache_failure() {
           local status="$1"
           local output_file="$2"
@@ -95,6 +127,8 @@ runs:
         log_root="${RUNNER_TEMP:-/var/tmp}"
         mkdir -p -- "$log_root"
         output_file="$(mktemp "$log_root/lancache-cargo-sccache.XXXXXX")"
+
+        cleanup_stale_cargo_containers
 
         # Capture the real exit status in the else branch — under `set -e`, a bare
         # failing command would abort the script immediately, and `$?` after an
