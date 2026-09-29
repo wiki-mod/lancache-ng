@@ -108,7 +108,7 @@ jobs:
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
   push-supersession-check:
-    name: check for a newer push already superseding this one
+    name: check for a newer revision already superseding this one
     runs-on: [self-hosted, linux, lancache, lancache-light]
     outputs:
       superseded: ${{ steps.check.outputs.superseded }}
@@ -121,6 +121,8 @@ jobs:
           CHECK_GITHUB_REF: ${{ github.ref }}
           CHECK_GITHUB_SHA: ${{ github.sha }}
           CHECK_EVENT_NAME: ${{ github.event_name }}
+          CHECK_PR_NUMBER: ${{ github.event.pull_request.number }}
+          CHECK_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           superseded=false
@@ -136,6 +138,14 @@ jobs:
                 fi
                 ;;
             esac
+          elif [ "$CHECK_EVENT_NAME" = "pull_request" ]; then
+            current_head="$(git ls-remote origin "refs/pull/${CHECK_PR_NUMBER}/head" | cut -f1 || true)"
+            if [ -z "$current_head" ]; then
+              echo "::warning::Could not resolve the current head of pull request #${CHECK_PR_NUMBER}; failing open (treating this run as NOT superseded)."
+            elif [ "$current_head" != "$CHECK_PR_HEAD_SHA" ]; then
+              echo "::notice::Pull request #${CHECK_PR_NUMBER} has already moved to ${current_head} since this run targeted ${CHECK_PR_HEAD_SHA}; skipping heavy work for this run."
+              superseded=true
+            fi
           fi
           echo "superseded=$superseded" >> "$GITHUB_OUTPUT"
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
@@ -2150,12 +2160,14 @@ jobs:
         if: always()
   dns_rust_quality:
     name: rust-quality (dns/nats-subscriber)
-    needs: [validate-compose, detect-changes]
+    needs: [validate-compose, detect-changes, push-supersession-check]
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     if: >-
       ${{
         always() &&
+        needs['push-supersession-check'].result == 'success' &&
+        needs['push-supersession-check'].outputs.superseded != 'true' &&
         (
           github.event_name != 'pull_request' ||
           !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
@@ -2232,12 +2244,14 @@ jobs:
         if: always()
   ui_rust_quality:
     name: rust-quality (ui)
-    needs: [validate-compose, detect-changes]
+    needs: [validate-compose, detect-changes, push-supersession-check]
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     if: >-
       ${{
         always() &&
+        needs['push-supersession-check'].result == 'success' &&
+        needs['push-supersession-check'].outputs.superseded != 'true' &&
         (
           github.event_name != 'pull_request' ||
           !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
@@ -2314,12 +2328,14 @@ jobs:
         if: always()
   watchdog_rust_quality:
     name: rust-quality (watchdog)
-    needs: [validate-compose, detect-changes]
+    needs: [validate-compose, detect-changes, push-supersession-check]
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     if: >-
       ${{
         always() &&
+        needs['push-supersession-check'].result == 'success' &&
+        needs['push-supersession-check'].outputs.superseded != 'true' &&
         (
           github.event_name != 'pull_request' ||
           !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
@@ -2396,12 +2412,14 @@ jobs:
         if: always()
   dns_test:
     name: test (dns/nats-subscriber)
-    needs: [validate-compose, dns_rust_quality, detect-changes]
+    needs: [validate-compose, dns_rust_quality, detect-changes, push-supersession-check]
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     if: >-
       ${{
         always() &&
+        needs['push-supersession-check'].result == 'success' &&
+        needs['push-supersession-check'].outputs.superseded != 'true' &&
         needs['validate-compose'].result == 'success' &&
         (needs.dns_rust_quality.result == 'success' || needs.dns_rust_quality.result == 'skipped') &&
         (
@@ -2462,12 +2480,14 @@ jobs:
         if: always()
   ui_test:
     name: test (ui)
-    needs: [validate-compose, ui_rust_quality, detect-changes]
+    needs: [validate-compose, ui_rust_quality, detect-changes, push-supersession-check]
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     if: >-
       ${{
         always() &&
+        needs['push-supersession-check'].result == 'success' &&
+        needs['push-supersession-check'].outputs.superseded != 'true' &&
         needs['validate-compose'].result == 'success' &&
         (needs.ui_rust_quality.result == 'success' || needs.ui_rust_quality.result == 'skipped') &&
         (
@@ -2528,10 +2548,12 @@ jobs:
         if: always()
   rust_coverage:
     name: coverage (Rust)
-    needs: [validate-compose, dns_test, ui_test, detect-changes]
+    needs: [validate-compose, dns_test, ui_test, detect-changes, push-supersession-check]
     if: >-
       ${{
         always() &&
+        needs['push-supersession-check'].result == 'success' &&
+        needs['push-supersession-check'].outputs.superseded != 'true' &&
         needs['validate-compose'].result == 'success' &&
         (needs.dns_test.result == 'success' || needs.dns_test.result == 'skipped') &&
         (needs.ui_test.result == 'success' || needs.ui_test.result == 'skipped') &&
@@ -2767,12 +2789,14 @@ jobs:
     # What: watchdog test on self-hosted heavy tier
     # Why: runs cargo test (AG-CI-002), not cheap lint
     # From: Issue #1095
-    needs: [validate-compose, watchdog_rust_quality, detect-changes]
+    needs: [validate-compose, watchdog_rust_quality, detect-changes, push-supersession-check]
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     if: >-
       ${{
         always() &&
+        needs['push-supersession-check'].result == 'success' &&
+        needs['push-supersession-check'].outputs.superseded != 'true' &&
         needs['validate-compose'].result == 'success' &&
         (needs.watchdog_rust_quality.result == 'success' || needs.watchdog_rust_quality.result == 'skipped') &&
         (
@@ -2837,10 +2861,12 @@ jobs:
         if: always()
   cargo_audit:
     name: cargo-audit (workspace)
-    needs: [validate-compose, detect-changes]
+    needs: [validate-compose, detect-changes, push-supersession-check]
     if: >-
       ${{
         always() &&
+        needs['push-supersession-check'].result == 'success' &&
+        needs['push-supersession-check'].outputs.superseded != 'true' &&
         needs['validate-compose'].result == 'success' &&
         (
           github.event_name != 'pull_request' ||
@@ -2904,6 +2930,7 @@ jobs:
       - ui_test
       - watchdog_test
       - cargo_audit
+      - push-supersession-check
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
     timeout-minutes: 15
@@ -2922,6 +2949,7 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           EVENT_ACTION: ${{ github.event.action }}
+          SUPERSEDED: ${{ needs['push-supersession-check'].outputs.superseded }}
           DETECT_RESULT: ${{ needs['detect-changes'].result }}
           DNS_RUST_CHANGED: ${{ needs['detect-changes'].outputs.dns_rust }}
           UI_CHANGED: ${{ needs['detect-changes'].outputs.ui }}
@@ -2943,6 +2971,10 @@ jobs:
           CARGO_AUDIT_RESULT: ${{ needs.cargo_audit.result }}
         run: |
           set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ] && [ "$SUPERSEDED" = "true" ]; then
+            echo "::notice::This pull request run is superseded by a newer head; no scoped gate is required for this run."
+            exit 0
+          fi
           grep -n -- "- name: [S]et up Docker Buildx for manifest inspection" .github/workflows/build-push.yml >/dev/null || {
             echo "::error::validate-compose must set up Buildx before resolving digest-qualified build-tools images."
             exit 1
