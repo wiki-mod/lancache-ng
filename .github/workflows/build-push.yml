@@ -3576,6 +3576,11 @@ jobs:
                 exit 1
                 ;;
             esac
+            if [ "$MATRIX_SERVICE" = "build-tools" ]; then
+              should_build=false
+              reuse_eligible=false
+              echo "::notice::The standalone build-tools workflow owns PR candidate production; this matrix entry only waits for and consumes its published candidate."
+            fi
             # What: Rebuild every service after shared CI contract changes
             # Why: PR staging tags must reflect the current build path
             # From: Issue #1860 | PR #1872
@@ -4268,6 +4273,11 @@ jobs:
                 exit 1
                 ;;
             esac
+            if [ "$MATRIX_SERVICE" = "build-tools" ]; then
+              should_build=false
+              reuse_eligible=false
+              echo "::notice::The standalone build-tools workflow owns PR candidate production; this matrix entry only waits for and consumes its published candidate."
+            fi
             # What: Rebuild every service after shared CI contract changes
             # Why: PR staging tags must reflect the current build path
             # From: Issue #1860 | PR #1872
