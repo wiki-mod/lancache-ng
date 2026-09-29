@@ -31,6 +31,16 @@ runs:
         set -euo pipefail
 
         sccache_enabled="${LANCACHE_SCCACHE_ENABLED:-0}"
+        sccache_mode="${SCCACHE_REDIS_MODE:-required}"
+
+        case "$sccache_mode" in
+          required|optional|off)
+            ;;
+          *)
+            echo "::error::SCCACHE_REDIS_MODE must be one of: required, optional, off."
+            exit 1
+            ;;
+        esac
 
         if [ "$sccache_enabled" != "1" ]; then
           # Fallback must leave Cargo runnable without any LAN-only acceleration.
@@ -112,7 +122,9 @@ runs:
           grep -Eqi 'sccache: error|Fixed token mismatch|Timed out waiting for server startup|SCCACHE_|sccache: Job failed on server' "$output_file"
         }
 
-        output_file="$(mktemp)"
+        log_root="${RUNNER_TEMP:-/var/tmp}"
+        mkdir -p -- "$log_root"
+        output_file="$(mktemp "$log_root/lancache-cargo-sccache.XXXXXX")"
 
         # Capture the real exit status in the else branch — under `set -e`, a bare
         # failing command would abort the script immediately, and `$?` after an
@@ -132,8 +144,13 @@ runs:
           exit "$status"
         fi
 
-        echo "::notice::Cargo command failed because the sccache path failed or timed out; retrying once without RUSTC_WRAPPER."
+        if [ "$sccache_mode" = "required" ]; then
+          echo "::error::Cargo command failed because required sccache acceleration failed; local fallback is disabled."
+          exit "$status"
+        fi
+
+        echo "::warning::Cargo command failed because optional sccache acceleration failed or timed out; retrying once without RUSTC_WRAPPER."
         unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_REDIS_KEY_PREFIX SCCACHE_CONF SCCACHE_NO_DAEMON
 
-        fallback_output="$(mktemp)"
+        fallback_output="$(mktemp "$log_root/lancache-cargo-fallback.XXXXXX")"
         run_with_log "$fallback_output" "$FALLBACK_TIMEOUT_SECONDS"

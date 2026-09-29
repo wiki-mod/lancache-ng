@@ -2501,52 +2501,64 @@ jobs:
           set -euo pipefail
           image="$(bash scripts/untracked/select-build-tools-image.sh)"
           printf 'BUILD_TOOLS_IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
+      - name: Configure Rust sccache for coverage
+        uses: ./.github/actions/configure-rust-sccache
+        with:
+          mode: ${{ vars.SCCACHE_REDIS_MODE || 'required' }}
+          redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
+          key-prefix: lancache-coverage
+          dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
       - name: Prepare writable coverage output directories
         run: |
           set -euo pipefail
           mkdir -p coverage-dns coverage-ui
       - name: Run coverage (dns/nats-subscriber)
-        run: |
-          set -euo pipefail
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -e HOME=/tmp \
-            -e CARGO_HOME=/tmp/cargo-home \
-            -e CARGO_TARGET_DIR=/tmp/target-dns \
-            -v "$PWD:/work" \
-            -v "$PWD/coverage-dns:/coverage-dns" \
-            -w /work \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            timeout --kill-after=30 --signal=KILL 1800 \
-            bash -c 'set -euo pipefail
-              cargo tarpaulin \
-                --engine llvm \
-                --manifest-path services/dns/nats-subscriber/Cargo.toml \
-                --locked \
-                --timeout 300 \
-                --out json \
-                --output-dir /coverage-dns'
+        uses: ./.github/actions/cargo-with-sccache-fallback
+        with:
+          sccache-timeout-seconds: "1800"
+          fallback-timeout-seconds: "1800"
+          command: >-
+            docker run --rm
+            --user "$(id -u):$(id -g)"
+            -e HOME=/var/tmp/coverage-home
+            -e CARGO_HOME=/var/tmp/cargo-home
+            -e CARGO_TARGET_DIR=/var/tmp/target-dns
+            -e RUSTC_WRAPPER="${RUSTC_WRAPPER:-}"
+            -e SCCACHE_CONF=/run/lancache/sccache.conf
+            -e SCCACHE_REDIS="${SCCACHE_REDIS:-}"
+            -e SCCACHE_REDIS_KEY_PREFIX="${SCCACHE_REDIS_KEY_PREFIX:-lancache-coverage}"
+            -e SCCACHE_NO_DAEMON=1
+            -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
+            -v "$PWD:/work"
+            -v "$PWD/coverage-dns:/coverage-dns"
+            -w /work
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
+            timeout --kill-after=30 --signal=KILL 1800
+            bash -c 'set -euo pipefail; cargo tarpaulin --engine llvm --manifest-path services/dns/nats-subscriber/Cargo.toml --locked --timeout 300 --out json --output-dir /coverage-dns'
       - name: Run coverage (ui)
-        run: |
-          set -euo pipefail
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -e HOME=/tmp \
-            -e CARGO_HOME=/tmp/cargo-home \
-            -e CARGO_TARGET_DIR=/tmp/target-ui \
-            -v "$PWD:/work" \
-            -v "$PWD/coverage-ui:/coverage-ui" \
-            -w /work \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            timeout --kill-after=30 --signal=KILL 1800 \
-            bash -c 'set -euo pipefail
-              cargo tarpaulin \
-                --engine llvm \
-                --manifest-path services/ui/Cargo.toml \
-                --locked \
-                --timeout 300 \
-                --out json \
-                --output-dir /coverage-ui'
+        uses: ./.github/actions/cargo-with-sccache-fallback
+        with:
+          sccache-timeout-seconds: "1800"
+          fallback-timeout-seconds: "1800"
+          command: >-
+            docker run --rm
+            --user "$(id -u):$(id -g)"
+            -e HOME=/var/tmp/coverage-home
+            -e CARGO_HOME=/var/tmp/cargo-home
+            -e CARGO_TARGET_DIR=/var/tmp/target-ui
+            -e RUSTC_WRAPPER="${RUSTC_WRAPPER:-}"
+            -e SCCACHE_CONF=/run/lancache/sccache.conf
+            -e SCCACHE_REDIS="${SCCACHE_REDIS:-}"
+            -e SCCACHE_REDIS_KEY_PREFIX="${SCCACHE_REDIS_KEY_PREFIX:-lancache-coverage}"
+            -e SCCACHE_NO_DAEMON=1
+            -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
+            -v "$PWD:/work"
+            -v "$PWD/coverage-ui:/coverage-ui"
+            -w /work
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
+            timeout --kill-after=30 --signal=KILL 1800
+            bash -c 'set -euo pipefail; cargo tarpaulin --engine llvm --manifest-path services/ui/Cargo.toml --locked --timeout 300 --out json --output-dir /coverage-ui'
       - name: Merge coverage reports and check threshold
         id: coverage
         run: |
@@ -2554,7 +2566,7 @@ jobs:
           mkdir -p coverage-badge
           docker run --rm \
             --user "$(id -u):$(id -g)" \
-            -e HOME=/tmp \
+            -e HOME=/var/tmp/coverage-home \
             -v "$PWD:/work:ro" \
             -v "$PWD/coverage-badge:/coverage-badge" \
             -w /work \
@@ -3561,7 +3573,7 @@ jobs:
             # What: Rebuild every service after shared CI contract changes
             # Why: PR staging tags must reflect the current build path
             # From: Issue #1860 | PR #1872
-            if [ "$WORKFLOW_CHANGED" = "true" ]; then
+            if [ "$MATRIX_SERVICE" != "build-tools" ] && [ "$WORKFLOW_CHANGED" = "true" ]; then
               should_build=true
               reuse_eligible=false
               echo "::notice::$MATRIX_SERVICE rebuild is required because the shared CI build contract changed."
@@ -4001,6 +4013,7 @@ jobs:
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
             PROJECT_CARGO_LTO=${{ vars.PROJECT_CARGO_LTO }}
             PROJECT_CARGO_CODEGENUNIT=${{ vars.PROJECT_CARGO_CODEGENUNIT }}
+            SCCACHE_REDIS_MODE=${{ vars.SCCACHE_REDIS_MODE }}
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
             HTTP_PROXY=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
             HTTPS_PROXY=${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
@@ -4217,7 +4230,7 @@ jobs:
             # What: Rebuild every service after shared CI contract changes
             # Why: PR staging tags must reflect the current build path
             # From: Issue #1860 | PR #1872
-            if [ "$WORKFLOW_CHANGED" = "true" ]; then
+            if [ "$MATRIX_SERVICE" != "build-tools" ] && [ "$WORKFLOW_CHANGED" = "true" ]; then
               should_build=true
               reuse_eligible=false
               echo "::notice::$MATRIX_SERVICE rebuild is required because the shared CI build contract changed."

@@ -116,7 +116,9 @@ runs:
           printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
         }
 
-        sccache_config="$(mktemp)"
+        config_root="${RUNNER_TEMP:-/var/tmp}"
+        mkdir -p -- "$config_root"
+        sccache_config="$(mktemp "$config_root/lancache-sccache.XXXXXX")"
         : > "$sccache_config"
         if [ "$redis_enabled" = "1" ]; then
           printf '[cache.redis]\nurl = "%s"\n' "$(toml_escape "$SCCACHE_REDIS_URL")" > "$sccache_config"
@@ -135,6 +137,8 @@ runs:
         fi
 
         {
+          echo "SCCACHE_REDIS_MODE=$mode"
+          echo "LANCACHE_SCCACHE_CONF=$sccache_config"
           echo "RUSTC_WRAPPER=sccache"
           if [ "$redis_enabled" = "1" ]; then
             echo "SCCACHE_REDIS=$SCCACHE_REDIS_URL"
