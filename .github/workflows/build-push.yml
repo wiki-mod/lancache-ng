@@ -4268,9 +4268,11 @@ jobs:
             printf 'version = "lancache-%s"\n' "${{ matrix.service }}"
             printf 'rw_mode = "READ_WRITE"\n'
           } > "$config_file"
-          echo "config-file=$config_file" >> "$GITHUB_OUTPUT"
-          echo "url-file=$url_file" >> "$GITHUB_OUTPUT"
-          echo "token-file=$token_file" >> "$GITHUB_OUTPUT"
+          {
+            echo "config-file=$config_file"
+            echo "url-file=$url_file"
+            echo "token-file=$token_file"
+          } >> "$GITHUB_OUTPUT"
       - name: Determine whether this service needs building
         id: should-build
         env:
