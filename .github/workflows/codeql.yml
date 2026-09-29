@@ -26,11 +26,7 @@ on:
 
 permissions:
   contents: read
-  packages: read
   security-events: write
-
-env:
-  CARGO_BUILD_JOBS: ${{ vars.CARGO_BUILD_JOBS }}
 
 defaults:
   run:
@@ -177,10 +173,6 @@ jobs:
           # services/watchdog/Cargo.toml, #1355 -- also a whole-directory
           # filter like ui, not split into a Rust-only sub-filter like dns,
           # since the shell runtime and the Rust crate share one directory);
-          # workflow covers build-push.yml/build-tools.yml/.github/actions/*,
-          # which includes the two composite actions this workflow's rust
-          # matrix entry consumes (cargo-with-sccache-fallback,
-          # configure-rust-sccache).
           rust_via_shared_classifier=false
           if [ "$force_all" = "true" ]; then
             rust_via_shared_classifier=true
@@ -198,10 +190,7 @@ jobs:
           fi
 
           # Additive to the shared classifier: a change to this workflow file
-          # itself or its CodeQL config, since either can change how the rust
-          # matrix entry is built/analyzed even when no Rust source moved
-          # (e.g. a new crate added to the "Build ... Rust crate for CodeQL"
-          # steps, or a query-suite change in codeql-config.yml).
+          # itself or its CodeQL config.
           codeql_self=false
           if [ "$force_all" = "true" ]; then
             codeql_self=true
@@ -285,25 +274,6 @@ jobs:
         include:
           - language: actions
             build-mode: none
-          # CodeQL Rust extraction can silently degrade while the job still reports success.
-          # Observed historical example (PR #357, run 28596839186): the Rust extractor reported
-          # "12 files extracted with errors" vs "2 without error" (partial `macro expansion failed`
-          # for ordinary macros like format!, vec!, json!, tracing::*, assert!) yet the job
-          # concluded `success`. This is a known upstream limitation of CodeQL's Rust extractor,
-          # not a defect in this repository, and it is not tunable here: Rust supports only
-          # `build-mode: none` (manual/autobuild modes do not exist for Rust). Tracked upstream in
-          # github/codeql #19966, #19982, #20643, #20659, and locally in issue #394.
-          #
-          # CodeQL's own authoritative quality gate is the `rust/diagnostic/database-quality`
-          # ("Low Rust analysis quality") diagnostic query. On the observed degraded run it did NOT
-          # fire (the extractor's macro-expansion errors are classified as normal), so CodeQL does
-          # not treat this state as low quality. The raw per-file counts are metric-query output
-          # printed only to the analysis log summary; they are not exposed as a supported,
-          # machine-readable workflow output (github/codeql-action #1742, open since 2023) and the
-          # database is cleaned after `analyze`. The "Report CodeQL Rust extraction-quality signal"
-          # step below therefore surfaces CodeQL's own determination and a standing caveat instead
-          # of a hand-rolled count threshold. A green CodeQL Rust job must NOT be read as full
-          # security-scan coverage of the Rust codebase.
           - language: rust
             build-mode: none
     steps:
@@ -337,75 +307,6 @@ jobs:
           fi
           echo "superseded=$superseded" >> "$GITHUB_OUTPUT"
 
-      - name: Set up Docker Buildx for build-tools selection
-        if: steps.admission.outputs.superseded != 'true' && matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
-        uses: ./.github/actions/buildx-setup-retry
-
-      - name: Resolve immutable build-tools image
-        if: steps.admission.outputs.superseded != 'true' && matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GHCR_RETRY_USERNAME: ${{ github.actor }}
-          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_EVENT_PULL_REQUEST_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || '' }}
-          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || '' }}
-          BUILD_TOOLS_REQUIRE_PUBLISHED: "true"
-          BUILD_TOOLS_PR_STAGING_IMAGE: ${{ github.event_name == 'pull_request' && github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository && format('ghcr.io/{0}/build-tools:pr-{1}-sha-{2}', github.repository, github.event.pull_request.number, github.sha) || '' }}
-        run: |
-          set -euo pipefail
-          build_tools_image="$(bash scripts/untracked/select-build-tools-image.sh)"
-          case "$build_tools_image" in
-            *@sha256:*) ;;
-            *)
-              echo "::error::Expected a digest-qualified build-tools image, got '$build_tools_image'."
-              exit 1
-              ;;
-          esac
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
-      # Optional acceleration only: CodeQL must still run if Redis-backed sccache is unavailable.
-      - name: Configure Redis-backed sccache
-        if: >-
-          ${{ steps.admission.outputs.superseded != 'true' &&
-            matrix.language == 'rust' &&
-            github.actor != 'dependabot[bot]' &&
-            (
-              github.event_name != 'pull_request' ||
-              github.event.pull_request.head.repo.full_name == github.repository
-            )
-          }}
-        uses: ./.github/actions/configure-rust-sccache
-        with:
-          # What: Mode "optional"; scheduler URL only set on self-hosted
-          # Why: GitHub-hosted can't reach LAN scheduler; must empty URL
-          # From: Issue #1095
-          mode: optional
-          redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
-          key-prefix: lancache-codeql-${{ matrix.language }}
-          dist-scheduler-url: ${{ vars.CODEQL_USE_SELF_HOSTED == 'true' && vars.SCCACHE_DIST_SCHEDULER_URL || '' }}
-          dist-auth-token: ${{ vars.CODEQL_USE_SELF_HOSTED == 'true' && secrets.SCCACHE_DIST_AUTH_TOKEN || '' }}
-          verify-binary: false
-      - name: Start CodeQL memory monitor
-        # What: Samples host memory every 10s; logs to temp file
-        # Why: Makes OOM failures visible instead of silent quits
-        # From: Issue #1095
-        if: steps.admission.outputs.superseded != 'true' && (matrix.language != 'rust' || needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
-        run: |
-          set -uo pipefail
-          logfile="${RUNNER_TEMP}/codeql-memlog-${{ matrix.language }}.log"
-          pidfile="${RUNNER_TEMP}/codeql-memlog-${{ matrix.language }}.pid"
-          ( while true; do
-              printf '%s ' "$(date -u +%FT%TZ)"
-              free -m | awk 'NR==2{printf "total=%sMB used=%sMB free=%sMB avail=%sMB", $2,$3,$4,$7}'
-              printf '\n'
-              sleep 10
-            done ) >>"$logfile" 2>&1 &
-          disown
-          echo $! >"$pidfile" || echo "::warning::Could not start the CodeQL memory monitor (non-fatal, diagnostics only)."
-          {
-            echo "CODEQL_MEMLOG_FILE=$logfile"
-            echo "CODEQL_MEMLOG_PID_FILE=$pidfile"
-          } >> "$GITHUB_ENV"
-
       - name: Initialize CodeQL
         # What: RAM setting changes with runner pool (no manual sync)
         # Why: Self-hosted pool OOM'd; GitHub-hosted has more headroom
@@ -422,42 +323,6 @@ jobs:
           ram: ${{ vars.CODEQL_USE_SELF_HOSTED == 'true' && (vars.CODEQL_RAM_MB_SELFHOSTED || '2048') || (vars.CODEQL_RAM_MB_HOSTED || '10240') }}
           threads: ${{ vars.CODEQL_THREADS || '4' }}
 
-      - name: Cache Cargo registry and target dirs for CodeQL's Rust build
-        # What: caches cargo registry and workspace target.
-        # Why: one lockfile now covers every member crate.
-        # From: Issue #1095
-        if: steps.admission.outputs.superseded != 'true' && matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-codeql-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            cargo-codeql-${{ runner.os }}-
-
-      - name: Build DNS Rust crate for CodeQL
-        if: steps.admission.outputs.superseded != 'true' && matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
-        uses: ./.github/actions/cargo-with-sccache-fallback
-        with:
-          command: cargo build --locked --manifest-path services/dns/nats-subscriber/Cargo.toml
-          container-image: ${{ env.BUILD_TOOLS_IMAGE }}
-
-      - name: Build UI Rust crate for CodeQL
-        if: steps.admission.outputs.superseded != 'true' && matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
-        uses: ./.github/actions/cargo-with-sccache-fallback
-        with:
-          command: cargo build --locked --manifest-path services/ui/Cargo.toml
-          container-image: ${{ env.BUILD_TOOLS_IMAGE }}
-
-      - name: Build watchdog Rust crate for CodeQL
-        if: steps.admission.outputs.superseded != 'true' && matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
-        uses: ./.github/actions/cargo-with-sccache-fallback
-        with:
-          command: cargo build --locked --manifest-path services/watchdog/Cargo.toml
-          container-image: ${{ env.BUILD_TOOLS_IMAGE }}
-
       - name: Perform CodeQL Analysis
         # Same gate as Initialize CodeQL above: skip the 'rust' analysis when
         # Rust is not relevant, so init and analyze stay paired.
@@ -465,70 +330,3 @@ jobs:
         uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         with:
           category: "/language:${{ matrix.language }}"
-          # Persist the interpreted SARIF locally so the extraction-quality step can read
-          # CodeQL's own diagnostic notifications. Results are still uploaded as usual.
-          output: ${{ runner.temp }}/codeql-sarif
-
-      - name: Stop CodeQL memory monitor and print log
-        # What: Kills memory monitor sampler; prints collected log
-        # Why: Shows OOM failures hidden behind exit code 137
-        # From: Issue #1095
-        if: always() && steps.admission.outputs.superseded != 'true' && (matrix.language != 'rust' || needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
-        run: |
-          set -uo pipefail
-          if [ -n "${CODEQL_MEMLOG_PID_FILE:-}" ] && [ -f "$CODEQL_MEMLOG_PID_FILE" ]; then
-            kill "$(cat "$CODEQL_MEMLOG_PID_FILE")" 2>/dev/null || true
-          fi
-          if [ -n "${CODEQL_MEMLOG_FILE:-}" ] && [ -f "$CODEQL_MEMLOG_FILE" ]; then
-            echo "::group::CodeQL memory usage (${{ matrix.language }}, 10s samples, ${{ vars.CODEQL_USE_SELF_HOSTED == 'true' && (vars.CODEQL_RAM_MB_SELFHOSTED || '2048') || (vars.CODEQL_RAM_MB_HOSTED || '10240') }} MB cap)"
-            cat "$CODEQL_MEMLOG_FILE"
-            echo "::endgroup::"
-          else
-            echo "::warning::No CodeQL memory monitor log found for ${{ matrix.language }} (monitor may not have started)."
-          fi
-
-      # Make CodeQL's Rust extraction-quality determination visible on every run so a green
-      # CodeQL Rust job is not silently misread as full extraction coverage (issue #394).
-      # This keys on CodeQL's own `rust/diagnostic/database-quality` signal rather than a
-      # hand-rolled count threshold, so it never turns red on the known, upstream, permanent
-      # macro-expansion limitation. It is warn-only and can never fail the job or manufacture
-      # false confidence: it always prints the standing caveat, and warns (not fails) only when
-      # CodeQL itself flags low quality or when the signal cannot be read.
-      - name: Report CodeQL Rust extraction-quality signal
-        if: always() && steps.admission.outputs.superseded != 'true' && matrix.language == 'rust'
-        env:
-          SARIF_DIR: ${{ runner.temp }}/codeql-sarif
-        run: |
-          set -uo pipefail
-          {
-            printf '%s\n' '### CodeQL Rust extraction-quality signal'
-            printf '\n'
-            printf '%s\n' 'A green CodeQL Rust job does NOT by itself confirm full extraction coverage.'
-            printf '%s\n' "CodeQL's Rust extractor (build-mode: none is the only supported Rust mode)"
-            printf '%s\n' 'reports partial "macro expansion failed" errors for ordinary macros as a known'
-            printf '%s\n' 'upstream limitation (github/codeql #19966, #19982, #20643, #20659; local #394).'
-            printf '\n'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          sarif_file="$(find "$SARIF_DIR" -maxdepth 1 -name '*.sarif' -print -quit 2>/dev/null || true)"
-          if [ -z "$sarif_file" ] || ! command -v jq >/dev/null 2>&1; then
-            echo "::warning::Could not read the CodeQL Rust extraction-quality signal (SARIF or jq unavailable). Do not treat a green CodeQL Rust job as full Rust security-scan coverage (issue #394)."
-            echo '- Extraction-quality signal unavailable this run (SARIF or jq missing).' >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-
-          # `rust/diagnostic/database-quality` ("Low Rust analysis quality") appears as a SARIF
-          # notification only when CodeQL itself judges extraction degraded beyond the tolerated
-          # macro-expansion errors. Count matches across both possible notification id fields.
-          quality_hits="$(jq '[.runs[]?.invocations[]?.toolExecutionNotifications[]?
-            | select((.descriptor.id? // .associatedRule.id? // "") == "rust/diagnostic/database-quality")]
-            | length' "$sarif_file" 2>/dev/null || echo 0)"
-          quality_hits="${quality_hits:-0}"
-
-          if [ "$quality_hits" -gt 0 ]; then
-            echo "::warning::CodeQL flagged Low Rust analysis quality (rust/diagnostic/database-quality). Rust extraction is degraded beyond the known macro-expansion limitation this run; investigate (issue #394)."
-            echo "- CodeQL flagged Low Rust analysis quality this run (${quality_hits} notification(s)). See issue #394." >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo '- CodeQL did not flag Low Rust analysis quality this run. That gate tolerates partial macro-expansion extraction, so it is not proof of full semantic coverage (issue #394).' >> "$GITHUB_STEP_SUMMARY"
-          fi
-          exit 0

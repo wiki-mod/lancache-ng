@@ -56,6 +56,8 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
     --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_dist_config \
     --mount=type=secret,id=sccache_gha_config,required=false \
+    --mount=type=secret,id=sccache_gha_url,required=false \
+    --mount=type=secret,id=sccache_gha_token,required=false \
     set -eu; \
     if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
       cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig; \
@@ -68,6 +70,7 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
       if [ -s /run/secrets/sccache_redis_url ]; then export SCCACHE_REDIS="$(cat /run/secrets/sccache_redis_url)"; fi; \
       if [ -s /run/secrets/sccache_dist_config ]; then export SCCACHE_CONF=/run/secrets/sccache_dist_config; sccache --dist-status; fi; \
       if [ -s /run/secrets/sccache_gha_config ] && [ ! -s /run/secrets/sccache_dist_config ]; then export SCCACHE_CONF=/run/secrets/sccache_gha_config SCCACHE_GHA_ENABLED=on; fi; \
+      if [ -s /run/secrets/sccache_gha_url ] && [ -s /run/secrets/sccache_gha_token ]; then export ACTIONS_RESULTS_URL="$(cat /run/secrets/sccache_gha_url)" ACTIONS_RUNTIME_TOKEN="$(cat /run/secrets/sccache_gha_token)"; fi; \
       echo "[INFO] sccache enabled for cachehamster (mode=$sccache_mode)." >&2; \
     elif [ "$sccache_mode" = "required" ]; then \
       echo "ERROR: required sccache configuration is unavailable for cachehamster." >&2; exit 1; \

@@ -30,11 +30,6 @@ inputs:
     description: sccache-dist client toolchain cache size in bytes.
     required: false
     default: "5368709120"
-  verify-binary:
-    description: Verify sccache on the invoking environment.
-    required: false
-    default: "true"
-
 runs:
   using: composite
   steps:
@@ -54,7 +49,6 @@ runs:
         SCCACHE_DIST_SCHEDULER_URL: ${{ inputs.dist-scheduler-url }}
         SCCACHE_DIST_AUTH_TOKEN: ${{ inputs.dist-auth-token }}
         SCCACHE_DIST_TOOLCHAIN_CACHE_SIZE: ${{ inputs.dist-toolchain-cache-size }}
-        SCCACHE_VERIFY_BINARY: ${{ inputs.verify-binary }}
         ACTIONS_RESULTS_URL: ${{ env.ACTIONS_RESULTS_URL }}
         ACTIONS_RUNTIME_TOKEN: ${{ env.ACTIONS_RUNTIME_TOKEN }}
         GITHUB_REPOSITORY: ${{ github.repository }}
@@ -121,9 +115,7 @@ runs:
           exit 0
         fi
 
-        if [ "$SCCACHE_VERIFY_BINARY" = "false" ]; then
-          :
-        elif ! command -v sccache >/dev/null 2>&1; then
+        if ! command -v sccache >/dev/null 2>&1; then
           if [ "$mode" = "optional" ] && [ "$gha_enabled" = "0" ] && [ -z "$SCCACHE_DIST_SCHEDULER_URL" ]; then
             echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
             echo "Skipping Redis-backed sccache because no sccache binary is available and SCCACHE_REDIS_MODE=optional."
@@ -149,10 +141,9 @@ runs:
         if [ "$gha_enabled" = "1" ]; then
           {
             printf '\n[cache.gha]\n'
-            printf 'url = "%s"\n' "$(toml_escape "$ACTIONS_RESULTS_URL")"
-            printf 'token = "%s"\n' "$(toml_escape "$ACTIONS_RUNTIME_TOKEN")"
-            printf 'cache_to = "%s"\n' "$(toml_escape "$SCCACHE_REDIS_KEY_PREFIX")"
-            printf 'cache_from = "%s"\n' "$(toml_escape "$SCCACHE_REDIS_KEY_PREFIX")"
+            printf 'enabled = true\n'
+            printf 'version = "%s"\n' "$(toml_escape "$SCCACHE_REDIS_KEY_PREFIX")"
+            printf 'rw_mode = "READ_WRITE"\n'
           } >> "$sccache_config"
         fi
 
@@ -190,9 +181,7 @@ runs:
           export SCCACHE_REDIS="$SCCACHE_REDIS_URL"
         fi
 
-        if [ "$SCCACHE_VERIFY_BINARY" != "false" ]; then
-          sccache --version
-        fi
-        if [ "$SCCACHE_VERIFY_BINARY" != "false" ] && [ -n "$SCCACHE_DIST_SCHEDULER_URL" ]; then
+        sccache --version
+        if [ -n "$SCCACHE_DIST_SCHEDULER_URL" ]; then
           sccache --dist-status
         fi

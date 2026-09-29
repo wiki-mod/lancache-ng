@@ -17,11 +17,6 @@ inputs:
     description: Maximum runtime for the fallback cargo attempt without sccache.
     required: false
     default: "1800"
-  container-image:
-    description: Run the cargo command in the selected build-tools image.
-    required: false
-    default: ""
-
 runs:
   using: composite
   steps:
@@ -31,7 +26,6 @@ runs:
         COMMAND: ${{ inputs.command }}
         SCCACHE_TIMEOUT_SECONDS: ${{ inputs.sccache-timeout-seconds }}
         FALLBACK_TIMEOUT_SECONDS: ${{ inputs.fallback-timeout-seconds }}
-        CONTAINER_IMAGE: ${{ inputs.container-image }}
       run: |
         set -euo pipefail
 
@@ -51,45 +45,6 @@ runs:
           # Fallback must leave Cargo runnable without any LAN-only acceleration.
           unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_REDIS_KEY_PREFIX SCCACHE_CONF SCCACHE_NO_DAEMON
         fi
-
-        run_command() {
-          local use_sccache="$1"
-          if [ -z "$CONTAINER_IMAGE" ]; then
-            bash -euo pipefail -c "$COMMAND"
-            return
-          fi
-
-          local cargo_home="${CARGO_HOME:-$HOME/.cargo}"
-          mkdir -p -- "$cargo_home"
-          local -a docker_args=(
-            run --rm
-            --user "$(id -u):$(id -g)"
-            -v "$GITHUB_WORKSPACE:/workspace"
-            -w /workspace
-            -e HOME=/var/tmp
-            -e CARGO_HOME=/var/tmp/cargo-home
-            -v "$cargo_home:/var/tmp/cargo-home"
-          )
-          if [ "$use_sccache" = "1" ]; then
-            docker_args+=(
-              -e RUSTC_WRAPPER=sccache
-              -e SCCACHE_NO_DAEMON=1
-              -e SCCACHE_GHA_ENABLED
-              -e ACTIONS_RESULTS_URL
-              -e ACTIONS_RUNTIME_TOKEN
-              -e SCCACHE_REDIS_MODE
-              -e SCCACHE_REDIS_KEY_PREFIX
-            )
-            if [ -n "${SCCACHE_CONF:-}" ]; then
-              docker_args+=(
-                --mount "type=bind,src=${SCCACHE_CONF},dst=/run/lancache/sccache.conf,readonly"
-                -e SCCACHE_CONF=/run/lancache/sccache.conf
-              )
-            fi
-          fi
-          docker_args+=("$CONTAINER_IMAGE" bash -euo pipefail -c "$COMMAND")
-          docker "${docker_args[@]}"
-        }
 
         validate_positive_integer() {
           local name="$1"
@@ -138,11 +93,10 @@ runs:
         run_with_log() {
           local output_file="$1"
           local timeout_seconds="$2"
-          local use_sccache="$3"
           local status
 
           set +e
-          timeout --kill-after=30s "${timeout_seconds}s" bash -c "$(declare -f run_command); run_command '$use_sccache'" 2>&1 | tee "$output_file"
+          timeout --kill-after=30s "${timeout_seconds}s" bash -euo pipefail -c "$COMMAND" 2>&1 | tee "$output_file"
           status="${PIPESTATUS[0]}"
           set -e
 
@@ -175,7 +129,7 @@ runs:
         # failing command would abort the script immediately, and `$?` after an
         # `if` with no matching `else` is defined by POSIX as the `if` construct's
         # own exit status (0 when no branch ran), not the tested command's status.
-        if run_with_log "$output_file" "$SCCACHE_TIMEOUT_SECONDS" 1; then
+        if run_with_log "$output_file" "$SCCACHE_TIMEOUT_SECONDS"; then
           status=0
         else
           status="$?"
@@ -198,4 +152,4 @@ runs:
         unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_REDIS_KEY_PREFIX SCCACHE_CONF SCCACHE_NO_DAEMON
 
         fallback_output="$(mktemp "$log_root/lancache-cargo-fallback.XXXXXX")"
-        run_with_log "$fallback_output" "$FALLBACK_TIMEOUT_SECONDS" 0
+        run_with_log "$fallback_output" "$FALLBACK_TIMEOUT_SECONDS"

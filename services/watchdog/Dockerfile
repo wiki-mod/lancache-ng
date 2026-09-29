@@ -100,6 +100,8 @@ COPY services/watchdog/src/ ./services/watchdog/src/
 RUN --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_dist_config \
     --mount=type=secret,id=sccache_gha_config,required=false \
+    --mount=type=secret,id=sccache_gha_url,required=false \
+    --mount=type=secret,id=sccache_gha_token,required=false \
     --mount=type=secret,id=distcc_potential_hosts \
     --mount=type=secret,id=ccache_redis_url \
     --mount=type=secret,id=proxy_ca \
@@ -130,6 +132,9 @@ RUN --mount=type=secret,id=sccache_redis_url \
         fi; \
         if [ -s /run/secrets/sccache_gha_config ] && [ ! -s /run/secrets/sccache_dist_config ]; then \
           export SCCACHE_CONF=/run/secrets/sccache_gha_config SCCACHE_GHA_ENABLED=on; \
+        fi; \
+        if [ -s /run/secrets/sccache_gha_url ] && [ -s /run/secrets/sccache_gha_token ]; then \
+          export ACTIONS_RESULTS_URL="$(cat /run/secrets/sccache_gha_url)" ACTIONS_RUNTIME_TOKEN="$(cat /run/secrets/sccache_gha_token)"; \
         fi; \
       else \
         echo "[INFO] sccache disabled (no cache configuration secret present)." >&2; \
