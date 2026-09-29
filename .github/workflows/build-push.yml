@@ -2696,8 +2696,7 @@ jobs:
             -v "$PWD/coverage-dns:/coverage-dns"
             -w /work
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
-            timeout --kill-after=30 --signal=KILL 1800
-            bash -c 'set -euo pipefail; cargo tarpaulin --engine llvm --manifest-path services/dns/nats-subscriber/Cargo.toml --locked --timeout 300 --out json --output-dir /coverage-dns'
+            cargo tarpaulin --engine llvm --manifest-path services/dns/nats-subscriber/Cargo.toml --locked --timeout 300 --out json --output-dir /coverage-dns
       - name: Run coverage (ui)
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
@@ -2718,8 +2717,7 @@ jobs:
             -v "$PWD/coverage-ui:/coverage-ui"
             -w /work
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
-            timeout --kill-after=30 --signal=KILL 1800
-            bash -c 'set -euo pipefail; cargo tarpaulin --engine llvm --manifest-path services/ui/Cargo.toml --locked --timeout 300 --out json --output-dir /coverage-ui'
+            cargo tarpaulin --engine llvm --manifest-path services/ui/Cargo.toml --locked --timeout 300 --out json --output-dir /coverage-ui
       - name: Merge coverage reports and check threshold
         id: coverage
         run: |
