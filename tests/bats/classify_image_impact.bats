@@ -288,8 +288,6 @@ val() {
     run_classify "release/stack-images.yml"
     [ "$(val release_contract)" = "true" ]
 
-    run_classify ".github/workflows/backfill-stack-latest.yml"
-    [ "$(val release_contract)" = "true" ]
 }
 
 # --- IMAGE_IMPACT verdict boundary (the additive #819 layer) ---

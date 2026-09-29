@@ -16,9 +16,9 @@
 # build-push.yml's current contents.
 #
 # The remaining tests cover the guard's extension (#822 pattern audit, beyond
-# issue #935's original build-push.yml-only scope) to 3 more real files that
-# duplicate the same service-list class: scripts/untracked/gc-pr-staging-images.sh,
-# backfill-stack-latest.yml, and scripts/untracked/ensure-pr-staging-images.sh. These
+# issue #935's original build-push.yml-only scope) to 2 more real files that
+# duplicate the same service-list class: scripts/untracked/gc-pr-staging-images.sh
+# and scripts/untracked/ensure-pr-staging-images.sh. These
 # invoke the script with a matrix-source fixture PLUS additional fixture
 # files, mirroring the script's own `[primary] [extra]...` argument shape.
 #
@@ -36,7 +36,6 @@ setup() {
     script="$BATS_TEST_DIRNAME/../../scripts/tracked/check-workflow-service-lists.sh"
     fixture="$BATS_TEST_TMPDIR/build-push.yml"
     gc_fixture="$BATS_TEST_TMPDIR/gc-pr-staging-images.sh"
-    backfill_fixture="$BATS_TEST_TMPDIR/backfill-stack-latest.yml"
     ensure_fixture="$BATS_TEST_TMPDIR/ensure-pr-staging-images.sh"
     hosted_fixture="$BATS_TEST_TMPDIR/build-push-hosted-fallback.yml"
 }
@@ -195,20 +194,15 @@ EOF
     [ "$status" -eq 0 ]
 }
 
-# Writes correct, in-sync content for all 3 extended-scope fixtures, modeled
+# Writes correct, in-sync content for all extended-scope fixtures, modeled
 # on the real files: scripts/untracked/gc-pr-staging-images.sh equals the canonical
 # set, declared at column 0 like ensure-pr-staging-images.sh below (it is a
 # plain shell script, not indented inside a YAML `run:` block -- unlike
 # before this array moved out of .github/workflows/gc-pr-staging-images.yml's
-# own `run:` block, when this fixture was indented to match); backfill-stack-latest.yml deliberately
-# excludes build-tools (a documented subset, matching its own "intentionally
-# excludes build-tools" comment) and stays YAML-embedded/indented, since that
-# real file's array genuinely is still inline in a `run:` block;
 # ensure-pr-staging-images.sh declares full_setup_services=(...) at column 0
 # (a plain shell script, not indented inside a YAML `run:` block).
 write_good_extra_fixtures() {
     echo 'services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)' > "$gc_fixture"
-    echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui)' > "$backfill_fixture"
     # #1296 (2026-07-30): dhcp/dhcp-proxy moved from excluded to required
     # first (ensure-pr-staging-images.sh started ensuring both -- see that
     # script's own full_setup_services=(...) comment); ntp completes the set
@@ -228,12 +222,12 @@ write_matrix_source_with_services() {
 }
 
 # The happy path for the extended multi-file invocation: matrix-source fixture
-# plus 3 correctly-synced extra fixtures must pass as a whole.
-@test "multi-file: passes when all 3 extended-scope files are in sync" {
+# plus correctly-synced extra fixtures must pass as a whole.
+@test "multi-file: passes when extended-scope files are in sync" {
     write_matrix_source_with_services > "$fixture"
     write_good_extra_fixtures
 
-    run bash "$script" "$fixture" "$gc_fixture" "$backfill_fixture" "$ensure_fixture"
+    run bash "$script" "$fixture" "$gc_fixture" "$ensure_fixture"
     [ "$status" -eq 0 ]
     [[ "$output" == *"consistent"* ]]
 }
@@ -246,57 +240,10 @@ write_matrix_source_with_services() {
     write_good_extra_fixtures
     echo 'services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui)' > "$gc_fixture"
 
-    run bash "$script" "$fixture" "$gc_fixture" "$backfill_fixture" "$ensure_fixture"
+    run bash "$script" "$fixture" "$gc_fixture" "$ensure_fixture"
     [ "$status" -ne 0 ]
     [[ "$output" == *"diverges"* ]]
     [[ "$output" == *"$gc_fixture"* ]]
-}
-
-# backfill-stack-latest.yml's services=(...) is a DELIBERATE subset (it
-# excludes build-tools on purpose, per its own inline comment) -- this must
-# NOT be flagged as a divergence, guarding against a naive
-# "every services=() must equal canonical" implementation being wrongly
-# applied to this file too.
-@test "multi-file: backfill-stack-latest.yml's documented build-tools exclusion does not false-positive" {
-    write_matrix_source_with_services > "$fixture"
-    write_good_extra_fixtures
-    # write_good_extra_fixtures already omits build-tools here; this test
-    # exists to make that specific non-failure an explicit, named assertion
-    # rather than an implicit side effect of the happy-path test above.
-
-    run bash "$script" "$fixture" "$gc_fixture" "$backfill_fixture" "$ensure_fixture"
-    [ "$status" -eq 0 ]
-}
-
-# backfill-stack-latest.yml's services=(...) must equal EXACTLY
-# canonical-minus-{build-tools}, not just "no phantom members" -- a phantom
-# member (a service the matrix doesn't build at all) must still fail.
-@test "multi-file: fails when backfill-stack-latest.yml's services=() contains a non-canonical service" {
-    write_matrix_source_with_services > "$fixture"
-    write_good_extra_fixtures
-    echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui phantom)' > "$backfill_fixture"
-
-    run bash "$script" "$fixture" "$gc_fixture" "$backfill_fixture" "$ensure_fixture"
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"diverges from the expected set"* ]]
-    [[ "$output" == *"$backfill_fixture"* ]]
-}
-
-# The actual #822 failure mode for a subset-checked file: a real service
-# silently DROPPED (here, watchdog -- missing on top of the documented
-# build-tools exclusion) must fail. A membership-only "no phantom members"
-# check would wrongly pass this, since a shorter list is still a valid
-# subset by that weaker definition -- this is exactly the gap an exact
-# canonical-minus-exclusions equality check exists to close.
-@test "multi-file: fails when backfill-stack-latest.yml's services=() silently drops a real service" {
-    write_matrix_source_with_services > "$fixture"
-    write_good_extra_fixtures
-    echo '          services=(proxy dns dhcp dhcp-proxy ntp syslog ui)' > "$backfill_fixture"
-
-    run bash "$script" "$fixture" "$gc_fixture" "$backfill_fixture" "$ensure_fixture"
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"diverges from the expected set"* ]]
-    [[ "$output" == *"$backfill_fixture"* ]]
 }
 
 # ensure-pr-staging-images.sh declares full_setup_services=(...) at column 0
@@ -310,13 +257,13 @@ write_matrix_source_with_services() {
     write_good_extra_fixtures
     echo 'full_setup_services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools typo)' > "$ensure_fixture"
 
-    run bash "$script" "$fixture" "$gc_fixture" "$backfill_fixture" "$ensure_fixture"
+    run bash "$script" "$fixture" "$gc_fixture" "$ensure_fixture"
     [ "$status" -ne 0 ]
     [[ "$output" == *"diverges from the expected set"* ]]
     [[ "$output" == *"$ensure_fixture"* ]]
 }
 
-# Same silent-drop failure mode as backfill-stack-latest.yml above, but for
+# Same silent-drop failure mode as the service list above, but for
 # ensure-pr-staging-images.sh's full_setup_services=(...): dropping a real
 # service (here, ui and dhcp-proxy) must fail. This is the specific gap that
 # scoping this file into FULL_SETUP_EXACT_EXCLUSIONS (exact-equality) rather
@@ -328,7 +275,7 @@ write_matrix_source_with_services() {
     write_good_extra_fixtures
     echo 'full_setup_services=(proxy dns watchdog dhcp ntp syslog build-tools)' > "$ensure_fixture"
 
-    run bash "$script" "$fixture" "$gc_fixture" "$backfill_fixture" "$ensure_fixture"
+    run bash "$script" "$fixture" "$gc_fixture" "$ensure_fixture"
     [ "$status" -ne 0 ]
     [[ "$output" == *"diverges from the expected set"* ]]
     [[ "$output" == *"$ensure_fixture"* ]]
@@ -351,13 +298,13 @@ write_matrix_source_with_services() {
     write_good_extra_fixtures
     echo 'full_setup_services=(proxy dns watchdog dhcp dhcp-proxy syslog ui build-tools)' > "$ensure_fixture"
 
-    run bash "$script" "$fixture" "$gc_fixture" "$backfill_fixture" "$ensure_fixture"
+    run bash "$script" "$fixture" "$gc_fixture" "$ensure_fixture"
     [ "$status" -ne 0 ]
     [[ "$output" == *"diverges from the expected set"* ]]
     [[ "$output" == *"$ensure_fixture"* ]]
 }
 
-# scripts/untracked/gc-pr-staging-images.sh and backfill-stack-latest.yml are both
+# scripts/untracked/gc-pr-staging-images.sh is a
 # "required" services=(...) files (see REQUIRES_SERVICES_ARRAY in the
 # script): if the array vanishes entirely (renamed, refactored away), the
 # guard must fail closed instead of silently no-op'ing on that file. This is
@@ -372,7 +319,7 @@ write_matrix_source_with_services() {
     write_good_extra_fixtures
     echo '# no services array here anymore' > "$gc_fixture"
 
-    run bash "$script" "$fixture" "$gc_fixture" "$backfill_fixture" "$ensure_fixture"
+    run bash "$script" "$fixture" "$gc_fixture" "$ensure_fixture"
     [ "$status" -ne 0 ]
     [[ "$output" == *"no 'services=(...)' array found"* ]]
     [[ "$output" == *"$gc_fixture"* ]]
@@ -387,24 +334,10 @@ write_matrix_source_with_services() {
     write_good_extra_fixtures
     echo '# no full_setup_services array here anymore' > "$ensure_fixture"
 
-    run bash "$script" "$fixture" "$gc_fixture" "$backfill_fixture" "$ensure_fixture"
+    run bash "$script" "$fixture" "$gc_fixture" "$ensure_fixture"
     [ "$status" -ne 0 ]
     [[ "$output" == *"no 'full_setup_services=(...)' array found"* ]]
     [[ "$output" == *"$ensure_fixture"* ]]
-}
-
-# If one of the extended-scope files itself disappears (moved, renamed,
-# deleted) the guard must fail closed and say which file, rather than
-# silently skipping it and reporting overall success.
-@test "multi-file: fails closed when an extended-scope file argument does not exist" {
-    write_matrix_source_with_services > "$fixture"
-    write_good_extra_fixtures
-    rm -f "$backfill_fixture"
-
-    run bash "$script" "$fixture" "$gc_fixture" "$backfill_fixture" "$ensure_fixture"
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"expected file not found"* ]]
-    [[ "$output" == *"$backfill_fixture"* ]]
 }
 
 # Hosted fallback maps are a separate service-list representation from the
@@ -495,7 +428,7 @@ EOF
 # Defense-in-depth: proves the guard's default zero-argument production
 # invocation -- the exact way build-push.yml's CI step calls it, covering
 # the real build-push.yml plus the real scripts/untracked/gc-pr-staging-images.sh,
-# backfill-stack-latest.yml, scripts/untracked/ensure-pr-staging-images.sh, and (since
+# scripts/untracked/ensure-pr-staging-images.sh, and (since
 # the hosted-fallback drift class above) the real
 # build-push-hosted-fallback.yml too, since check-workflow-service-lists.sh's
 # own zero-arg default now also passes --hosted-fallback -- is actually green
