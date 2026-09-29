@@ -794,7 +794,7 @@ jobs:
           }
           validate_nats_config_ownership
           grep -Fq 'fn write_nats_conf_atomically(' services/ui/src/routes/secondaries.rs \
-            || { echo "::error::Admin UI must keep an atomic nats.conf write helper for the v0.1.0 shared-token path."; exit 1; }
+            || { echo "::error::Admin UI must keep an atomic nats.conf write helper for the shared-token path."; exit 1; }
           grep -Fq 'fs::rename(&tmp_path, target)' services/ui/src/routes/secondaries.rs \
             || { echo "::error::Admin UI nats.conf writes must use temp-file plus rename, not direct overwrite."; exit 1; }
           grep -Fq 'render_template_atomic' services/dns/entrypoint.sh \
@@ -1458,7 +1458,7 @@ jobs:
             timeout --kill-after=30 --signal=KILL 300 bash -s <<'VALIDATE_COMPOSE_PROMOTE_TAGS_DOCKERFILES'
           set -euo pipefail
           grep -F 'branch_tag="${sanitized_ref}-tc"' .github/workflows/build-tools.yml >/dev/null \
-            || { echo "::error::build-tools.yml's branch-tag promotion must suffix every derived tag with '-tc' so a branch named like a release tag (e.g. v0.2.0) can never collide with a real vX.Y.Z stable-release tag on the same GHCR package."; exit 1; }
+            || { echo "::error::build-tools.yml's branch-tag promotion must suffix every derived tag with '-tc' so a branch named like a release tag can never collide with a real vX.Y.Z stable-release tag on the same GHCR package."; exit 1; }
           promote_tags_script="$(awk '
             /name: Promote mutable tags/ { in_step = 1 }
             in_step && /sanitized_ref=/ { capture = 1 }
@@ -1476,7 +1476,7 @@ jobs:
             printf '%s\n' "$promote_tags_script"
             printf '%s\n' 'printf '\''%s'\'' "$branch_tag"'
           } > "$guard_script"
-          for candidate_ref in v0.2.0 v1.2.3 v10.20.30 master feature/x; do
+          for candidate_ref in v1.2.3 v10.20.30 master feature/x; do
             derived_tag="$(
               REF_NAME="$candidate_ref" \
               BUILD_TOOLS_IMAGE=ghcr.io/example/build-tools \

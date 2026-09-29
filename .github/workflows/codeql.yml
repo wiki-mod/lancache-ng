@@ -7,17 +7,17 @@ name: CodeQL
 
 on:
   push:
-    # current_dev is the active development branch today (v0.2.0 is frozen);
+    # current_dev is the active development branch today;
     # without it, CodeQL silently stopped scanning the branch real work
     # actually lands on (#709).
-    branches: [master, current_dev, v0.2.0]
+    branches: [master, current_dev]
     paths-ignore:
       - "**/*.md"
   pull_request:
-    # current_dev is the active development branch today (v0.2.0 is frozen);
+    # current_dev is the active development branch today;
     # without it, CodeQL silently stopped scanning the branch real work
     # actually lands on (#709).
-    branches: [master, current_dev, v0.2.0]
+    branches: [master, current_dev]
     paths-ignore:
       - "**/*.md"
   schedule:
