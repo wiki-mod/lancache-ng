@@ -28,7 +28,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        docker_config="${RUNNER_TEMP:?RUNNER_TEMP is required}/docker-config"
+        docker_config="${DOCKER_CONFIG:-${RUNNER_TEMP:?RUNNER_TEMP is required}/docker-config}"
         mkdir -p -- "$docker_config"
         chmod 700 "$docker_config"
         printf 'DOCKER_CONFIG=%s\n' "$docker_config" >> "$GITHUB_ENV"
