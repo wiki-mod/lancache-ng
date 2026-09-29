@@ -279,7 +279,7 @@ COPY --from=go-tools-script /install-ca-cert.sh /install-ca-cert.sh
 RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
     trap 'rm -f /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; update-ca-certificates >/dev/null 2>&1 || true' EXIT; \
     sh /install-ca-cert.sh; \
-    cargo install sccache --version "${SCCACHE_VERSION}" --no-default-features --features redis,dist-client --root /usr/local; \
+    cargo install sccache --version "${SCCACHE_VERSION}" --no-default-features --features gha,redis,dist-client --root /usr/local; \
     rm -rf /root/.cargo/registry /root/.cargo/git
 
 # What: fetches actionlint using /var/tmp and a temporary CA.

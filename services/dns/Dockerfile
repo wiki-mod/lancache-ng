@@ -143,6 +143,7 @@ COPY services/dns/nats-subscriber/src services/dns/nats-subscriber/src
 # From: Issue #1781 | PR #1783
 RUN --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_dist_config \
+    --mount=type=secret,id=sccache_gha_config,required=false \
     --mount=type=secret,id=distcc_potential_hosts \
     --mount=type=secret,id=ccache_redis_url \
     --mount=type=secret,id=proxy_ca \
@@ -161,7 +162,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     real_cxx="$(PATH="$original_path" command -v c++)"; \
     real_gxx="$(PATH="$original_path" command -v g++)"; \
     configure_sccache() { \
-      if [ -s /run/secrets/sccache_redis_url ] || [ -s /run/secrets/sccache_dist_config ]; then \
+      if [ -s /run/secrets/sccache_redis_url ] || [ -s /run/secrets/sccache_dist_config ] || [ -s /run/secrets/sccache_gha_config ]; then \
         unset CARGO_MAKEFLAGS MAKEFLAGS; \
         export RUSTC_WRAPPER=/usr/local/bin/lancache-rustc-wrapper SCCACHE_REDIS_KEY_PREFIX=lancache-dns; \
         if [ -s /run/secrets/sccache_redis_url ]; then \
@@ -171,8 +172,11 @@ RUN --mount=type=secret,id=sccache_redis_url \
           export SCCACHE_CONF=/run/secrets/sccache_dist_config; \
           sccache --dist-status; \
         fi; \
+        if [ -s /run/secrets/sccache_gha_config ] && [ ! -s /run/secrets/sccache_dist_config ]; then \
+          export SCCACHE_CONF=/run/secrets/sccache_gha_config SCCACHE_GHA_ENABLED=on; \
+        fi; \
       else \
-        echo "[INFO] sccache disabled (no sccache_redis_url or sccache_dist_config secret present)." >&2; \
+        echo "[INFO] sccache disabled (no cache configuration secret present)." >&2; \
       fi; \
     }; \
     disable_distcc() { \

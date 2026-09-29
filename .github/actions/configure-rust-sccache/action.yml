@@ -34,6 +34,13 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Export GitHub Actions cache runtime
+      if: runner.environment != 'self-hosted'
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+      with:
+        script: |
+          core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
+          core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
     - name: Configure Rust sccache environment
       shell: bash
       env:
@@ -43,6 +50,9 @@ runs:
         SCCACHE_DIST_SCHEDULER_URL: ${{ inputs.dist-scheduler-url }}
         SCCACHE_DIST_AUTH_TOKEN: ${{ inputs.dist-auth-token }}
         SCCACHE_DIST_TOOLCHAIN_CACHE_SIZE: ${{ inputs.dist-toolchain-cache-size }}
+        ACTIONS_RESULTS_URL: ${{ env.ACTIONS_RESULTS_URL }}
+        ACTIONS_RUNTIME_TOKEN: ${{ env.ACTIONS_RUNTIME_TOKEN }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
       run: |
         set -euo pipefail
 
@@ -57,8 +67,13 @@ runs:
             ;;
         esac
 
+        gha_enabled=0
+        if [ -n "$ACTIONS_RESULTS_URL" ] && [ -n "$ACTIONS_RUNTIME_TOKEN" ]; then
+          gha_enabled=1
+        fi
+
         # Optional or off modes let CI keep running on runners without LAN-only acceleration.
-        if [ "$mode" = "off" ]; then
+        if [ "$mode" = "off" ] && [ "$gha_enabled" = "0" ]; then
           echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
           echo "Redis-backed sccache is disabled by SCCACHE_REDIS_MODE=off."
           exit 0
@@ -95,14 +110,14 @@ runs:
           redis_enabled=0
         fi
 
-        if [ "$redis_enabled" = "0" ] && [ -z "$SCCACHE_DIST_SCHEDULER_URL" ]; then
+        if [ "$redis_enabled" = "0" ] && [ "$gha_enabled" = "0" ] && [ -z "$SCCACHE_DIST_SCHEDULER_URL" ]; then
           echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
           echo "Skipping sccache because Redis is optional but unset and sccache-dist is not configured."
           exit 0
         fi
 
         if ! command -v sccache >/dev/null 2>&1; then
-          if [ "$mode" = "optional" ] && [ -z "$SCCACHE_DIST_SCHEDULER_URL" ]; then
+          if [ "$mode" = "optional" ] && [ "$gha_enabled" = "0" ] && [ -z "$SCCACHE_DIST_SCHEDULER_URL" ]; then
             echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
             echo "Skipping Redis-backed sccache because no sccache binary is available and SCCACHE_REDIS_MODE=optional."
             exit 0
@@ -122,6 +137,16 @@ runs:
         : > "$sccache_config"
         if [ "$redis_enabled" = "1" ]; then
           printf '[cache.redis]\nurl = "%s"\n' "$(toml_escape "$SCCACHE_REDIS_URL")" > "$sccache_config"
+        fi
+
+        if [ "$gha_enabled" = "1" ]; then
+          {
+            printf '\n[cache.gha]\n'
+            printf 'url = "%s"\n' "$(toml_escape "$ACTIONS_RESULTS_URL")"
+            printf 'token = "%s"\n' "$(toml_escape "$ACTIONS_RUNTIME_TOKEN")"
+            printf 'cache_to = "%s"\n' "$(toml_escape "$SCCACHE_REDIS_KEY_PREFIX")"
+            printf 'cache_from = "%s"\n' "$(toml_escape "$SCCACHE_REDIS_KEY_PREFIX")"
+          } >> "$sccache_config"
         fi
 
         if [ -n "$SCCACHE_DIST_SCHEDULER_URL" ]; then
@@ -145,6 +170,9 @@ runs:
           fi
           echo "SCCACHE_REDIS_KEY_PREFIX=$SCCACHE_REDIS_KEY_PREFIX"
           echo "SCCACHE_CONF=$sccache_config"
+          if [ "$gha_enabled" = "1" ]; then
+            echo "SCCACHE_GHA_ENABLED=on"
+          fi
           echo "SCCACHE_NO_DAEMON=1"
           echo "LANCACHE_SCCACHE_ENABLED=1"
         } >> "$GITHUB_ENV"

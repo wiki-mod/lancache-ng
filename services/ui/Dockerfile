@@ -147,7 +147,7 @@ RUN <<'LANCACHE_UI_BUILD_ACCEL_EOF'
 set -eu
 cat > /usr/local/lib/lancache-ui-build-accel.sh <<'LANCACHE_UI_HELPERS_EOF'
     configure_sccache() { \
-      if [ -s /run/secrets/sccache_redis_url ] || [ -s /run/secrets/sccache_dist_config ]; then \
+      if [ -s /run/secrets/sccache_redis_url ] || [ -s /run/secrets/sccache_dist_config ] || [ -s /run/secrets/sccache_gha_config ]; then \
         unset CARGO_MAKEFLAGS MAKEFLAGS; \
         export RUSTC_WRAPPER=/usr/local/bin/lancache-rustc-wrapper SCCACHE_REDIS_KEY_PREFIX=lancache-ui; \
         if [ -s /run/secrets/sccache_redis_url ]; then \
@@ -157,8 +157,11 @@ cat > /usr/local/lib/lancache-ui-build-accel.sh <<'LANCACHE_UI_HELPERS_EOF'
           export SCCACHE_CONF=/run/secrets/sccache_dist_config; \
           sccache --dist-status; \
         fi; \
+        if [ -s /run/secrets/sccache_gha_config ] && [ ! -s /run/secrets/sccache_dist_config ]; then \
+          export SCCACHE_CONF=/run/secrets/sccache_gha_config SCCACHE_GHA_ENABLED=on; \
+        fi; \
       else \
-        echo "[INFO] sccache disabled (no sccache_redis_url or sccache_dist_config secret present)." >&2; \
+        echo "[INFO] sccache disabled (no cache configuration secret present)." >&2; \
       fi; \
     }; \
     disable_distcc() { \
@@ -460,6 +463,7 @@ RUN mkdir -p services/watchdog/src services/cachehamster/src \
 # From: Issue #1781 | PR #1783
 RUN --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_dist_config \
+    --mount=type=secret,id=sccache_gha_config,required=false \
     --mount=type=secret,id=distcc_potential_hosts \
     --mount=type=secret,id=ccache_redis_url \
     --mount=type=secret,id=proxy_ca \
@@ -549,6 +553,7 @@ COPY services/ui/src ./services/ui/src
 # From: Issue #1781 | PR #1783
 RUN --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_dist_config \
+    --mount=type=secret,id=sccache_gha_config,required=false \
     --mount=type=secret,id=distcc_potential_hosts \
     --mount=type=secret,id=ccache_redis_url \
     --mount=type=secret,id=proxy_ca \
