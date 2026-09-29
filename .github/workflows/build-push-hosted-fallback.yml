@@ -299,7 +299,6 @@ jobs:
         with:
           image-ref: ghcr.io/${{ github.repository }}/build-tools@${{ steps.build.outputs.digest }}
           platform: linux/amd64
-          run-fixtures: "true"
 
       # What: Scan pushed candidate digest with 50-minute timeout.
       # Why: trivy-scan-retry can run up to 4 attempts; worst case.
