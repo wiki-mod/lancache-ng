@@ -355,7 +355,7 @@ jobs:
           platform: linux/amd64
 
       - name: Smoke-test exact pushed amd64 candidate digest
-        if: needs['determine-publish-scope'].outputs.should-publish == 'true'
+        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
         uses: ./.github/actions/build-tools-candidate-smoke
         with:
           image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
@@ -682,7 +682,7 @@ jobs:
           platform: linux/arm64
 
       - name: Smoke-test exact pushed arm64 candidate digest
-        if: needs['determine-publish-scope'].outputs.should-publish == 'true'
+        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
         uses: ./.github/actions/build-tools-candidate-smoke
         with:
           image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
