@@ -9,14 +9,6 @@ inputs:
   command:
     description: Cargo command to run.
     required: true
-  sccache-timeout-seconds:
-    description: Maximum runtime for the sccache-backed cargo attempt.
-    required: false
-    default: "120"
-  fallback-timeout-seconds:
-    description: Maximum runtime for the fallback cargo attempt without sccache.
-    required: false
-    default: "1800"
 runs:
   using: composite
   steps:
@@ -24,8 +16,6 @@ runs:
       shell: bash
       env:
         COMMAND: ${{ inputs.command }}
-        SCCACHE_TIMEOUT_SECONDS: ${{ inputs.sccache-timeout-seconds }}
-        FALLBACK_TIMEOUT_SECONDS: ${{ inputs.fallback-timeout-seconds }}
       run: |
         set -euo pipefail
 
@@ -76,27 +66,12 @@ runs:
           echo "::notice::Using CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS} from workflow environment."
         fi
 
-        validate_timeout() {
-          local name="$1"
-          local value="$2"
-
-          validate_positive_integer "$name" "$value"
-        }
-
-        validate_timeout "sccache-timeout-seconds" "$SCCACHE_TIMEOUT_SECONDS"
-        validate_timeout "fallback-timeout-seconds" "$FALLBACK_TIMEOUT_SECONDS"
-
-        if [ "$sccache_enabled" != "1" ]; then
-          SCCACHE_TIMEOUT_SECONDS="$FALLBACK_TIMEOUT_SECONDS"
-        fi
-
         run_with_log() {
           local output_file="$1"
-          local timeout_seconds="$2"
           local status
 
           set +e
-          timeout --kill-after=30s "${timeout_seconds}s" bash -euo pipefail -c "$COMMAND" 2>&1 | tee "$output_file"
+          bash -euo pipefail -c "$COMMAND" 2>&1 | tee "$output_file"
           status="${PIPESTATUS[0]}"
           set -e
 
@@ -106,10 +81,6 @@ runs:
         is_sccache_failure() {
           local status="$1"
           local output_file="$2"
-
-          if [ "$status" -eq 124 ]; then
-            return 0
-          fi
 
           # "sccache: Job failed on server ..." covers sccache-dist remote-build
           # failures (e.g. a dist server's sandbox rejecting the build, as seen
@@ -129,7 +100,7 @@ runs:
         # failing command would abort the script immediately, and `$?` after an
         # `if` with no matching `else` is defined by POSIX as the `if` construct's
         # own exit status (0 when no branch ran), not the tested command's status.
-        if run_with_log "$output_file" "$SCCACHE_TIMEOUT_SECONDS"; then
+        if run_with_log "$output_file"; then
           status=0
         else
           status="$?"
@@ -152,4 +123,4 @@ runs:
         unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_REDIS_KEY_PREFIX SCCACHE_CONF SCCACHE_NO_DAEMON
 
         fallback_output="$(mktemp "$log_root/lancache-cargo-fallback.XXXXXX")"
-        run_with_log "$fallback_output" "$FALLBACK_TIMEOUT_SECONDS"
+        run_with_log "$fallback_output"

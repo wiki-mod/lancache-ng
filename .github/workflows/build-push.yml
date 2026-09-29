@@ -2529,8 +2529,6 @@ jobs:
       - name: Run coverage (dns/nats-subscriber)
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
-          sccache-timeout-seconds: "1800"
-          fallback-timeout-seconds: "1800"
           command: >-
             docker run --rm
             --user "$(id -u):$(id -g)"
@@ -2552,8 +2550,6 @@ jobs:
       - name: Run coverage (ui)
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
-          sccache-timeout-seconds: "1800"
-          fallback-timeout-seconds: "1800"
           command: >-
             docker run --rm
             --user "$(id -u):$(id -g)"
