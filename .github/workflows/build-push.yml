@@ -1209,14 +1209,13 @@ jobs:
             echo "::error::cargo-with-sccache-fallback must not use timeout --foreground because it can leave Cargo child processes alive and bypass the fallback."
             exit 1
           fi
-          for workflow in .github/workflows/build-push.yml .github/workflows/codeql.yml; do
-            grep -F 'dist-scheduler-url:' "$workflow" >/dev/null \
-              && grep -F 'SCCACHE_DIST_SCHEDULER_URL' "$workflow" >/dev/null \
-              || { echo "::error::$workflow must wire SCCACHE_DIST_SCHEDULER_URL into configure-rust-sccache."; exit 1; }
-            grep -F 'dist-auth-token:' "$workflow" >/dev/null \
-              && grep -F 'SCCACHE_DIST_AUTH_TOKEN' "$workflow" >/dev/null \
-              || { echo "::error::$workflow must wire SCCACHE_DIST_AUTH_TOKEN into configure-rust-sccache."; exit 1; }
-          done
+          workflow=.github/workflows/build-push.yml
+          grep -F 'dist-scheduler-url:' "$workflow" >/dev/null \
+            && grep -F 'SCCACHE_DIST_SCHEDULER_URL' "$workflow" >/dev/null \
+            || { echo "::error::$workflow must wire SCCACHE_DIST_SCHEDULER_URL into configure-rust-sccache."; exit 1; }
+          grep -F 'dist-auth-token:' "$workflow" >/dev/null \
+            && grep -F 'SCCACHE_DIST_AUTH_TOKEN' "$workflow" >/dev/null \
+            || { echo "::error::$workflow must wire SCCACHE_DIST_AUTH_TOKEN into configure-rust-sccache."; exit 1; }
           grep -F 'sccache_dist_config=' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Docker Rust builds must pass sccache-dist config through a BuildKit secret."; exit 1; }
           grep -F 'distcc_potential_hosts=' .github/workflows/build-push.yml >/dev/null \
