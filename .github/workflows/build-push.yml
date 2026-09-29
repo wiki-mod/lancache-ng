@@ -34,6 +34,7 @@ on:
 permissions:
   contents: read
   pull-requests: read
+  packages: read
 concurrency:
   group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.ref) || format('{0}-publish-{1}', github.workflow, github.run_id) }}
   cancel-in-progress: true
@@ -168,6 +169,12 @@ jobs:
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - uses: *checkout_centraliced_versioning # v7.0.1
+      - name: Log in to GHCR for build-tools validation
+        uses: ./.github/actions/docker-login-action-centralized-version
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Select immutable build-tools image
         env:
           GITHUB_EVENT_PULL_REQUEST_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -260,11 +267,18 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+      packages: read
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - uses: *checkout_centraliced_versioning # v7.0.1
+      - name: Log in to GHCR for build-tools validation
+        uses: ./.github/actions/docker-login-action-centralized-version
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Auto-assign Dependabot PR milestone
         if: github.event.pull_request.user.login == 'dependabot[bot]'
         env:
@@ -303,11 +317,18 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+      packages: read
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - uses: *checkout_centraliced_versioning # v7.0.1
+      - name: Log in to GHCR for build-tools validation
+        uses: ./.github/actions/docker-login-action-centralized-version
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - uses: ./.github/actions/pr-title-convention-check
         with:
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
@@ -332,9 +353,16 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+      packages: read
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - uses: *checkout_centraliced_versioning # v7.0.1
+      - name: Log in to GHCR for build-tools validation
+        uses: ./.github/actions/docker-login-action-centralized-version
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Check tracked files use Unix (LF) line endings
         run: |
           set -euo pipefail
@@ -423,6 +451,12 @@ jobs:
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - uses: *checkout_centraliced_versioning # v7.0.1
+      - name: Log in to GHCR for build-tools validation
+        uses: ./.github/actions/docker-login-action-centralized-version
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Check for banned-language source files (AG-REL-001)
         run: |
           set -euo pipefail
@@ -458,11 +492,18 @@ jobs:
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     permissions:
       contents: read
+      packages: read
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - uses: *checkout_centraliced_versioning # v7.0.1
+      - name: Log in to GHCR for build-tools validation
+        uses: ./.github/actions/docker-login-action-centralized-version
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - uses: ./.github/actions/shellcheck-and-standing-guards
         timeout-minutes: 15
         with:
@@ -2182,6 +2223,11 @@ jobs:
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - uses: *checkout_centraliced_versioning # v7.0.1
+      - uses: *docker_login_centraliced_versioning
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Configure Redis-backed sccache
         if: >-
           ${{
@@ -2266,6 +2312,11 @@ jobs:
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - uses: *checkout_centraliced_versioning # v7.0.1
+      - uses: *docker_login_centraliced_versioning
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Configure Redis-backed sccache
         if: >-
           ${{
@@ -2350,6 +2401,11 @@ jobs:
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - uses: *checkout_centraliced_versioning # v7.0.1
+      - uses: *docker_login_centraliced_versioning
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Configure Redis-backed sccache
         if: >-
           ${{
@@ -2444,6 +2500,11 @@ jobs:
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - uses: *checkout_centraliced_versioning # v7.0.1
+      - uses: *docker_login_centraliced_versioning
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Configure Redis-backed sccache
         if: >-
           ${{
@@ -2512,6 +2573,11 @@ jobs:
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - uses: *checkout_centraliced_versioning # v7.0.1
+      - uses: *docker_login_centraliced_versioning
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Configure Redis-backed sccache
         if: >-
           ${{
@@ -2576,6 +2642,11 @@ jobs:
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - uses: *checkout_centraliced_versioning # v7.0.1
+      - uses: *docker_login_centraliced_versioning
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Resolve build-tools image (with tarpaulin required)
         env:
           EXTRA_REQUIRED_TOOLS: "cargo-tarpaulin bc"
@@ -2821,6 +2892,11 @@ jobs:
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - uses: *checkout_centraliced_versioning # v7.0.1
+      - uses: *docker_login_centraliced_versioning
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: test (watchdog shell script)
         run: |
           bash -n services/watchdog/watchdog.sh
@@ -2894,6 +2970,11 @@ jobs:
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - uses: *checkout_centraliced_versioning # v7.0.1
+      - uses: *docker_login_centraliced_versioning
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Audit Rust dependencies (workspace)
         run: |
           set -euo pipefail
