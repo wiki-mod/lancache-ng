@@ -107,8 +107,9 @@ jobs:
           fi
 
           db_dir="$CACHE_DIR/db"
-          if ! mkdir -p "$db_dir" 2>/tmp/trivy-db-mkdir-err.txt; then
-            echo "::error::Cannot create/use '$db_dir' as $(id -un) ($(id -u):$(id -g)): $(cat /tmp/trivy-db-mkdir-err.txt). trivy-cache-dir's own write-probe against the parent directory already succeeded as this same uid, so this is scoped to the 'db' entry specifically -- needs an operator fix on the runner host, root cause not yet confirmed without host access (see this change's PR body)." >&2
+          mkdir_error_file="${RUNNER_TEMP:-/var/tmp}/trivy-db-mkdir-err.txt"
+          if ! mkdir -p "$db_dir" 2>"$mkdir_error_file"; then
+            echo "::error::Cannot create/use '$db_dir' as $(id -un) ($(id -u):$(id -g)): $(cat "$mkdir_error_file"). trivy-cache-dir's own write-probe against the parent directory already succeeded as this same uid, so this is scoped to the 'db' entry specifically -- needs an operator fix on the runner host, root cause not yet confirmed without host access (see this change's PR body)." >&2
             exit 1
           fi
           probe="$db_dir/.trivy-db-scheduled-refresh-write-probe.$$"

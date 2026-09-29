@@ -91,7 +91,7 @@
 #      reclaimed even when this process never gets to run a single line of
 #      its own cleanup -- the SIGKILL case a trap fundamentally cannot cover,
 #      and exactly what a job-level `timeout-minutes` expiry does to a step
-#      that overruns it. `${TMPDIR:-/tmp}` remains the fallback for a plain
+#      that overruns it. `${TMPDIR:-/var/tmp}` remains the fallback for a plain
 #      local/bats invocation outside Actions.
 #   2. An EXIT trap for the ordinary path (normal exit, and -- verified on
 #      bash 5.2, the pinned build-tools image's version -- SIGINT/SIGTERM
@@ -148,7 +148,7 @@ if [[ -z "${SAF_ANCESTOR_RUN_CACHE_DIR:-}" ]]; then
   # (a full or read-only $TMPDIR) must not take down a CI job that would
   # otherwise complete perfectly well without any caching at all. `2>/dev/null
   # || true` keeps that true under the callers' `set -e`.
-  SAF_ANCESTOR_RUN_CACHE_DIR="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/saf-ancestor-run-cache.XXXXXX" 2>/dev/null || true)"
+  SAF_ANCESTOR_RUN_CACHE_DIR="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/var/tmp}}/saf-ancestor-run-cache.XXXXXX" 2>/dev/null || true)"
   if [[ -n "$SAF_ANCESTOR_RUN_CACHE_DIR" ]]; then
     _saf_prior_exit_trap_line="$(trap -p EXIT)"
     if [[ -n "$_saf_prior_exit_trap_line" ]]; then
