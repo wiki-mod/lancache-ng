@@ -30,7 +30,7 @@ RUN set -eu; \
     rustc_host_line="$(rustc -vV)"; \
     grep -qx "host: $(cat /tmp/musl-target)" <<<"${rustc_host_line}"
 
-ARG SCCACHE_REDIS_MODE=required
+ARG SCCACHE_REDIS_MODE=off
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src/ ./src/

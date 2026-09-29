@@ -4464,6 +4464,7 @@ jobs:
             CARGO_BUILD_JOBS=${{ steps.docker-build-jobs.outputs.jobs }}
             PROJECT_CARGO_LTO=${{ vars.PROJECT_CARGO_LTO }}
             PROJECT_CARGO_CODEGENUNIT=${{ vars.PROJECT_CARGO_CODEGENUNIT }}
+            SCCACHE_REDIS_MODE=off
             APT_CACHE_BUST=${{ vars.APT_CACHE_BUST }}
           push: ${{ github.event_name != 'pull_request' || (github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository) }}
           tags: ${{ steps.pr-tag.outputs.image || steps.meta.outputs.tags }}
