@@ -2187,6 +2187,7 @@ jobs:
           key-prefix: lancache-ci-${{ github.job }}
           dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
           dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          verify-binary: false
       - name: cargo fmt --check (dns/nats-subscriber)
         run: |
           set -euo pipefail
@@ -2232,7 +2233,9 @@ jobs:
         if: always()
   ui_rust_quality:
     name: rust-quality (ui)
-    needs: detect-changes
+    needs: [validate-compose, detect-changes]
+    env:
+      BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     if: >-
       ${{
         always() &&
@@ -2250,17 +2253,6 @@ jobs:
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - uses: *checkout_centraliced_versioning # v7.0.1
-      - name: Isolate Rust toolchain paths
-        run: |
-          {
-            echo 'CARGO_HOME=${{ runner.temp }}/cargo-home/ui'
-            echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/ui'
-          } >> "$GITHUB_ENV"
-      - name: Install Rust toolchain
-        uses: &dtolnay_rust_toolchain_centraliced_versioning dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-        with:
-          toolchain: stable
-          components: rustfmt, clippy
       - name: Configure Redis-backed sccache
         if: >-
           ${{
@@ -2277,24 +2269,55 @@ jobs:
           key-prefix: lancache-ci-${{ github.job }}
           dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
           dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          verify-binary: false
       - name: cargo fmt --check (ui)
-        run: cargo fmt --manifest-path services/ui/Cargo.toml -- --check
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -e HOME=/var/tmp/rust-home -e CARGO_HOME=/var/tmp/cargo-home \
+            -v "$PWD:/work" -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            cargo fmt --manifest-path services/ui/Cargo.toml -- --check
       - name: cargo check with warnings denied (ui)
         uses: ./.github/actions/cargo-with-sccache-fallback
         env:
           RUSTFLAGS: "-D warnings"
         with:
-          command: cargo check --locked --all-targets --manifest-path services/ui/Cargo.toml
+          command: >-
+            docker run --rm --user "$(id -u):$(id -g)"
+            -e HOME=/var/tmp/rust-home -e CARGO_HOME=/var/tmp/cargo-home
+            -e RUSTFLAGS="${RUSTFLAGS:-}"
+            -e RUSTC_WRAPPER=/usr/local/bin/sccache
+            -e SCCACHE_CONF=/run/lancache/sccache.conf
+            -e SCCACHE_REDIS="${SCCACHE_REDIS:-}"
+            -e SCCACHE_REDIS_KEY_PREFIX="${SCCACHE_REDIS_KEY_PREFIX:-lancache-ui-quality}"
+            -e SCCACHE_NO_DAEMON=1
+            -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
+            -v "$PWD:/work" -w /work
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
+            cargo check --locked --all-targets --manifest-path services/ui/Cargo.toml
       - name: cargo clippy with warnings denied (ui)
         timeout-minutes: 35
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
-          command: cargo clippy --locked --all-targets --manifest-path services/ui/Cargo.toml -- -D warnings
+          command: >-
+            docker run --rm --user "$(id -u):$(id -g)"
+            -e HOME=/var/tmp/rust-home -e CARGO_HOME=/var/tmp/cargo-home
+            -e RUSTC_WRAPPER=/usr/local/bin/sccache
+            -e SCCACHE_CONF=/run/lancache/sccache.conf
+            -e SCCACHE_REDIS="${SCCACHE_REDIS:-}"
+            -e SCCACHE_REDIS_KEY_PREFIX="${SCCACHE_REDIS_KEY_PREFIX:-lancache-ui-quality}"
+            -e SCCACHE_NO_DAEMON=1
+            -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
+            -v "$PWD:/work" -w /work
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
+            cargo clippy --locked --all-targets --manifest-path services/ui/Cargo.toml -- -D warnings
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
   watchdog_rust_quality:
     name: rust-quality (watchdog)
-    needs: detect-changes
+    needs: [validate-compose, detect-changes]
+    env:
+      BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     if: >-
       ${{
         always() &&
@@ -2312,17 +2335,6 @@ jobs:
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - uses: *checkout_centraliced_versioning # v7.0.1
-      - name: Isolate Rust toolchain paths
-        run: |
-          {
-            echo 'CARGO_HOME=${{ runner.temp }}/cargo-home/watchdog'
-            echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/watchdog'
-          } >> "$GITHUB_ENV"
-      - name: Install Rust toolchain
-        uses: *dtolnay_rust_toolchain_centraliced_versioning # stable
-        with:
-          toolchain: stable
-          components: rustfmt, clippy
       - name: Configure Redis-backed sccache
         if: >-
           ${{
@@ -2339,24 +2351,55 @@ jobs:
           key-prefix: lancache-ci-${{ github.job }}
           dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
           dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          verify-binary: false
       - name: cargo fmt --check (watchdog)
-        run: cargo fmt --manifest-path services/watchdog/Cargo.toml -- --check
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -e HOME=/var/tmp/rust-home -e CARGO_HOME=/var/tmp/cargo-home \
+            -v "$PWD:/work" -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            cargo fmt --manifest-path services/watchdog/Cargo.toml -- --check
       - name: cargo check with warnings denied (watchdog)
         uses: ./.github/actions/cargo-with-sccache-fallback
         env:
           RUSTFLAGS: "-D warnings"
         with:
-          command: cargo check --locked --all-targets --manifest-path services/watchdog/Cargo.toml
+          command: >-
+            docker run --rm --user "$(id -u):$(id -g)"
+            -e HOME=/var/tmp/rust-home -e CARGO_HOME=/var/tmp/cargo-home
+            -e RUSTFLAGS="${RUSTFLAGS:-}"
+            -e RUSTC_WRAPPER=/usr/local/bin/sccache
+            -e SCCACHE_CONF=/run/lancache/sccache.conf
+            -e SCCACHE_REDIS="${SCCACHE_REDIS:-}"
+            -e SCCACHE_REDIS_KEY_PREFIX="${SCCACHE_REDIS_KEY_PREFIX:-lancache-watchdog-quality}"
+            -e SCCACHE_NO_DAEMON=1
+            -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
+            -v "$PWD:/work" -w /work
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
+            cargo check --locked --all-targets --manifest-path services/watchdog/Cargo.toml
       - name: cargo clippy with warnings denied (watchdog)
         timeout-minutes: 35
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
-          command: cargo clippy --locked --all-targets --manifest-path services/watchdog/Cargo.toml -- -D warnings
+          command: >-
+            docker run --rm --user "$(id -u):$(id -g)"
+            -e HOME=/var/tmp/rust-home -e CARGO_HOME=/var/tmp/cargo-home
+            -e RUSTC_WRAPPER=/usr/local/bin/sccache
+            -e SCCACHE_CONF=/run/lancache/sccache.conf
+            -e SCCACHE_REDIS="${SCCACHE_REDIS:-}"
+            -e SCCACHE_REDIS_KEY_PREFIX="${SCCACHE_REDIS_KEY_PREFIX:-lancache-watchdog-quality}"
+            -e SCCACHE_NO_DAEMON=1
+            -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
+            -v "$PWD:/work" -w /work
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
+            cargo clippy --locked --all-targets --manifest-path services/watchdog/Cargo.toml -- -D warnings
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
   dns_test:
     name: test (dns/nats-subscriber)
     needs: [validate-compose, dns_rust_quality, detect-changes]
+    env:
+      BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     if: >-
       ${{
         always() &&
@@ -2384,16 +2427,6 @@ jobs:
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - uses: *checkout_centraliced_versioning # v7.0.1
-      - name: Isolate Rust toolchain paths
-        run: |
-          {
-            echo 'CARGO_HOME=${{ runner.temp }}/cargo-home/dns-nats-subscriber'
-            echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/dns-nats-subscriber'
-          } >> "$GITHUB_ENV"
-      - name: Install Rust toolchain
-        uses: *dtolnay_rust_toolchain_centraliced_versioning # stable
-        with:
-          toolchain: stable
       - name: Configure Redis-backed sccache
         if: >-
           ${{
@@ -2410,15 +2443,29 @@ jobs:
           key-prefix: lancache-ci-${{ github.job }}
           dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
           dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          verify-binary: false
       - name: test (dns/nats-subscriber)
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
-          command: cargo test --locked --manifest-path services/dns/nats-subscriber/Cargo.toml
+          command: >-
+            docker run --rm --user "$(id -u):$(id -g)"
+            -e HOME=/var/tmp/rust-home -e CARGO_HOME=/var/tmp/cargo-home
+            -e RUSTC_WRAPPER=/usr/local/bin/sccache
+            -e SCCACHE_CONF=/run/lancache/sccache.conf
+            -e SCCACHE_REDIS="${SCCACHE_REDIS:-}"
+            -e SCCACHE_REDIS_KEY_PREFIX="${SCCACHE_REDIS_KEY_PREFIX:-lancache-dns-test}"
+            -e SCCACHE_NO_DAEMON=1
+            -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
+            -v "$PWD:/work" -w /work
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
+            cargo test --locked --manifest-path services/dns/nats-subscriber/Cargo.toml
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
   ui_test:
     name: test (ui)
     needs: [validate-compose, ui_rust_quality, detect-changes]
+    env:
+      BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     if: >-
       ${{
         always() &&
@@ -2446,16 +2493,6 @@ jobs:
     steps:
       - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
       - uses: *checkout_centraliced_versioning # v7.0.1
-      - name: Isolate Rust toolchain paths
-        run: |
-          {
-            echo 'CARGO_HOME=${{ runner.temp }}/cargo-home/ui'
-            echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/ui'
-          } >> "$GITHUB_ENV"
-      - name: Install Rust toolchain
-        uses: *dtolnay_rust_toolchain_centraliced_versioning # stable
-        with:
-          toolchain: stable
       - name: Configure Redis-backed sccache
         if: >-
           ${{
@@ -2472,10 +2509,22 @@ jobs:
           key-prefix: lancache-ci-${{ github.job }}
           dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
           dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          verify-binary: false
       - name: test (ui)
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
-          command: cargo test --locked --manifest-path services/ui/Cargo.toml
+          command: >-
+            docker run --rm --user "$(id -u):$(id -g)"
+            -e HOME=/var/tmp/rust-home -e CARGO_HOME=/var/tmp/cargo-home
+            -e RUSTC_WRAPPER=/usr/local/bin/sccache
+            -e SCCACHE_CONF=/run/lancache/sccache.conf
+            -e SCCACHE_REDIS="${SCCACHE_REDIS:-}"
+            -e SCCACHE_REDIS_KEY_PREFIX="${SCCACHE_REDIS_KEY_PREFIX:-lancache-ui-test}"
+            -e SCCACHE_NO_DAEMON=1
+            -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
+            -v "$PWD:/work" -w /work
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
+            cargo test --locked --manifest-path services/ui/Cargo.toml
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
   rust_coverage:
@@ -2522,6 +2571,7 @@ jobs:
           key-prefix: lancache-coverage
           dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
           dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          verify-binary: false
       - name: Prepare writable coverage output directories
         run: |
           set -euo pipefail
@@ -2719,6 +2769,8 @@ jobs:
     # Why: runs cargo test (AG-CI-002), not cheap lint
     # From: Issue #1095
     needs: [validate-compose, watchdog_rust_quality, detect-changes]
+    env:
+      BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     if: >-
       ${{
         always() &&
@@ -2750,16 +2802,6 @@ jobs:
         run: |
           bash -n services/watchdog/watchdog.sh
           test -x services/watchdog/watchdog.sh
-      - name: Isolate Rust toolchain paths
-        run: |
-          {
-            echo 'CARGO_HOME=${{ runner.temp }}/cargo-home/watchdog'
-            echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/watchdog'
-          } >> "$GITHUB_ENV"
-      - name: Install Rust toolchain
-        uses: *dtolnay_rust_toolchain_centraliced_versioning # stable
-        with:
-          toolchain: stable
       - name: Configure Redis-backed sccache
         if: >-
           ${{
@@ -2776,10 +2818,22 @@ jobs:
           key-prefix: lancache-ci-${{ github.job }}
           dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
           dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          verify-binary: false
       - name: test (watchdog Rust crate)
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
-          command: cargo test --locked --manifest-path services/watchdog/Cargo.toml
+          command: >-
+            docker run --rm --user "$(id -u):$(id -g)"
+            -e HOME=/var/tmp/rust-home -e CARGO_HOME=/var/tmp/cargo-home
+            -e RUSTC_WRAPPER=/usr/local/bin/sccache
+            -e SCCACHE_CONF=/run/lancache/sccache.conf
+            -e SCCACHE_REDIS="${SCCACHE_REDIS:-}"
+            -e SCCACHE_REDIS_KEY_PREFIX="${SCCACHE_REDIS_KEY_PREFIX:-lancache-watchdog-test}"
+            -e SCCACHE_NO_DAEMON=1
+            -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
+            -v "$PWD:/work" -w /work
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
+            cargo test --locked --manifest-path services/watchdog/Cargo.toml
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
   cargo_audit:
@@ -2820,8 +2874,8 @@ jobs:
           set -euo pipefail
           docker run --rm \
             --user "$(id -u):$(id -g)" \
-            -e HOME=/tmp \
-            -e CARGO_HOME=/tmp/cargo-home \
+            -e HOME=/var/tmp \
+            -e CARGO_HOME=/var/tmp/cargo-home \
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
