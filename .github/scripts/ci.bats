@@ -4840,18 +4840,24 @@ STUBEOF
     [ "${status}" -eq 2 ]; [[ "${output}" == *"no SOT pr_policy.title_types"* ]]
 }
 
-@test "check stable-external-images fails a non-digest external image" {
+@test "check stable-external-images: literal hosts pinned and in SOT" {
     # What: ci.sh owns the pin gate; bats calls it.
     # Why: floating external tag breaks reproducibility.
     # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/dep"; mkdir -p "${r}"
-    printf 'services:\n  x:\n    image: redis:7\n' > "${r}/docker-compose.yml"
-    run bash "${CI_SH}" check stable-external-images "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0014"* ]]
-    printf 'services:\n  x:\n    image: ghcr.io/wiki-mod/lancache-ng/proxy:latest\n' > "${r}/docker-compose.yml"
-    run bash "${CI_SH}" check stable-external-images "${r}"
-    [ "${status}" -eq 0 ]
+    local r="${BATS_TEST_TMPDIR}/dep" m="${BATS_TEST_TMPDIR}/m.yml" img
+    mkdir -p "${r}"
+    printf 'external_services:\n  ext-y:\n    image: "hub.example.test/ext-y:1"\n' > "${m}"
+    for img in 'img-a:7' 'registry.example.test/owner/app:latest' 'hub.example.test/ext-y:1' "hub.example.test/other@sha256:$(printf 'a%.0s' {1..64})"; do
+        printf 'services:\n  x:\n    image: %s\n' "${img}" > "${r}/docker-compose.yml"
+        CI_MANIFEST="${m}" run bash "${CI_SH}" check stable-external-images "${r}"
+        [ "${status}" -eq 1 ] || { echo "want fail: ${img}"; false; }
+        [[ "${output}" == *"CI-ERROR-CHECK-0014"* ]]
+    done
+    for img in "hub.example.test/ext-y@sha256:$(printf 'b%.0s' {1..64})" '${LANCACHE_IMAGE_REGISTRY:-r}/p/svc:t'; do
+        printf 'services:\n  x:\n    image: %s\n' "${img}" > "${r}/docker-compose.yml"
+        CI_MANIFEST="${m}" run bash "${CI_SH}" check stable-external-images "${r}"
+        [ "${status}" -eq 0 ] || { echo "want pass: ${img}"; false; }
+    done
 }
 
 @test "check pr-template requires every current template section filled" {

@@ -2857,7 +2857,7 @@ _ci_index_lookup() {
     idx="$(_ci_registry_probe "${tag}")" || grc=$?
     [ "${grc}" -eq 0 ] || return 1
     raw="$(_ci_index_raw "${tag}")" || return 1
-    plats="$(printf '%s' "${raw}" | jq -r '.manifests[]? | select(.platform.os=="linux" and .platform.architecture!="unknown") | "linux/\(.platform.architecture)=\(.digest)"' | tr '\n' ' ')"
+    plats="$(jq -r '.manifests[]? | select(.platform.os!="unknown" and .platform.architecture!="unknown") | "\(.platform.os)/\(.platform.architecture)=\(.digest)"' <<< "${raw}" | tr '\n' ' ')"
     printf '%s %s\n' "${idx}" "${plats% }"
 }
 
@@ -6416,8 +6416,11 @@ _ci_check_stable_external_images() {
         [ -d "${d}" ] || continue
         while IFS= read -r line; do
             img="${line#*image:}"; img="${img#"${img%%[![:space:]]*}"}"
+            # What: only ${LANCACHE_*} own images skip.
+            # Why: any literal host (ghcr too) is pinned.
+            # From: Issue #1683 | PR #1858
             case "${img}" in
-                *ghcr.io*|*'${LANCACHE'*|'') continue ;;
+                *'${LANCACHE'*|'') continue ;;
             esac
             case "${img}" in
                 *@sha256:*) ;;
