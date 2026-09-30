@@ -5486,32 +5486,33 @@ _ci_dockerfile_arg_default() {
     esac
 }
 
-# What: Check SOT netdata fields + Dockerfile ARG contract.
-# Why: netdata must stay fully SOT-driven, no baked re-pin.
+# What: SOT-pinned consumers: dep|dockerfile|SOT keys|ARGs.
+# Why: one list; verify, audit and sync walk the same one.
 # From: Issue #1683 | PR #1858
-_ci_version_diff_netdata() {
-    local dockerfile="${CI_REPO_ROOT}/services/netdata/Dockerfile"
-    local key val out=""
-    val="$(_ci_block_entry_field external_versions netdata version)"
-    if [ -z "${val}" ]; then
-        ci_log "[CI-ERROR-VERSION-0007]" "reason=\"SOT external_versions.netdata.version missing\""
-        return 2
-    fi
-    out="${out}key=netdata.version sot=${val} present=yes"$'\n'
-    for key in sha256_x86_64 sha256_aarch64; do
-        val="$(_ci_block_entry_field external_versions netdata "${key}")"
+_ci_version_consumers() {
+    printf '%s\n' \
+        "netdata|services/netdata/Dockerfile|version sha256_x86_64 sha256_aarch64|NETDATA_VERSION NETDATA_ARCH NETDATA_SHA256" \
+        "dhclient|tools/build-tools/Dockerfile|version alpine_branch sha256_amd64 sha256_arm64|DHCLIENT_VERSION DHCLIENT_ALPINE_BRANCH DHCLIENT_APK_ARCH DHCLIENT_SHA256"
+}
+
+# What: Check one consumer's SOT fields + bare Dockerfile ARGs.
+# Why: the SOT owns the pin; a baked ARG default is a 2nd owner.
+# From: Issue #1683 | PR #1858
+_ci_version_diff() {
+    local dep="$1" dockerfile="${CI_REPO_ROOT}/$2" keys="$3" args="$4" key val out="" argname want
+    for key in ${keys}; do
+        val="$(_ci_block_entry_field external_versions "${dep}" "${key}")"
         if [ -z "${val}" ]; then
-            ci_log "[CI-ERROR-VERSION-0007]" "reason=\"SOT external_versions.netdata.${key} missing\""
+            ci_log "[CI-ERROR-VERSION-0007]" "reason=\"SOT external_versions.${dep}.${key} missing\""
             return 2
         fi
-        if [[ ! "${val}" =~ ^[0-9a-f]{64}$ ]]; then
-            ci_log "[CI-ERROR-VERSION-0007]" "reason=\"external_versions.netdata.${key} not 64 hex chars\""
+        if [[ "${key}" == sha256_* ]] && [[ ! "${val}" =~ ^[0-9a-f]{64}$ ]]; then
+            ci_log "[CI-ERROR-VERSION-0007]" "reason=\"external_versions.${dep}.${key} not 64 hex chars\""
             return 2
         fi
-        out="${out}key=netdata.${key} sot=${val} present=yes"$'\n'
+        out="${out}key=${dep}.${key} sot=${val} present=yes"$'\n'
     done
-    local argname want
-    for argname in NETDATA_VERSION NETDATA_ARCH NETDATA_SHA256; do
+    for argname in ${args}; do
         want="$(_ci_dockerfile_arg_default "${dockerfile}" "${argname}")" || return 2
         case "${want}" in
             ABSENT)
@@ -5519,7 +5520,7 @@ _ci_version_diff_netdata() {
                 return 2
                 ;;
             BARE)
-                out="${out}key=netdata.consumer.${argname} shape=bare"$'\n'
+                out="${out}key=${dep}.consumer.${argname} shape=bare"$'\n'
                 ;;
             FOUND:*)
                 ci_log "[CI-ERROR-VERSION-0009]" "path=\"${dockerfile}\" name=\"${argname}\" reason=\"unexpected baked default; must stay SOT-driven\""
@@ -5530,63 +5531,18 @@ _ci_version_diff_netdata() {
     printf '%s' "${out}"
 }
 
-# What: netdata verify: read-only, fails on contract breach.
-# Why: verify is the enforced gate; audit only reports.
+# What: Run _ci_version_diff for every SOT-pinned consumer.
+# Why: verify/audit/sync differ only in how they report.
 # From: Issue #1683 | PR #1858
-_ci_version_verify_netdata() {
-    local out rc
-    # What: bare assignment loses subshell exit status.
-    # Why: set -e requires if-guard to capture return code.
-    # From: Issue #1683 | PR #1858
-    if out="$(_ci_version_diff_netdata)"; then
-        rc=0
-    else
-        rc=$?
-    fi
-    [ "${rc}" -eq 0 ] && printf '%s\n' "${out}"
+_ci_version_walk() {
+    local fn="$1" dep df keys args rc=0 r
+    while IFS='|' read -r dep df keys args; do
+        [ -n "${dep}" ] || continue
+        r=0
+        "${fn}" "${dep}" "${df}" "${keys}" "${args}" || r=$?
+        [ "${r}" -eq 0 ] || [ "${rc}" -ne 0 ] || rc="${r}"
+    done <<< "$(_ci_version_consumers)"
     return "${rc}"
-}
-
-# What: Check SOT dhclient fields + Dockerfile ARG contract.
-# Why: dhclient must stay fully SOT-driven, no baked re-pin.
-# From: Issue #1683 | PR #1858
-_ci_version_diff_dhclient() {
-    local dockerfile="${CI_REPO_ROOT}/tools/build-tools/Dockerfile"
-    local key val out=""
-    for key in version alpine_branch sha256_amd64 sha256_arm64; do
-        val="$(_ci_block_entry_field external_versions dhclient "${key}")"
-        if [ -z "${val}" ]; then
-            ci_log "[CI-ERROR-VERSION-0011]" "reason=\"SOT external_versions.dhclient.${key} missing\""
-            return 2
-        fi
-        case "${key}" in
-            sha256_*)
-                if [[ ! "${val}" =~ ^[0-9a-f]{64}$ ]]; then
-                    ci_log "[CI-ERROR-VERSION-0011]" "reason=\"external_versions.dhclient.${key} not 64 hex chars\""
-                    return 2
-                fi
-                ;;
-        esac
-        out="${out}key=dhclient.${key} sot=${val} present=yes"$'\n'
-    done
-    local argname want
-    for argname in DHCLIENT_VERSION DHCLIENT_ALPINE_BRANCH DHCLIENT_APK_ARCH DHCLIENT_SHA256; do
-        want="$(_ci_dockerfile_arg_default "${dockerfile}" "${argname}")" || return 2
-        case "${want}" in
-            ABSENT)
-                ci_log "[CI-ERROR-VERSION-0012]" "path=\"${dockerfile}\" name=\"${argname}\" reason=\"expected ARG declaration missing\""
-                return 2
-                ;;
-            BARE)
-                out="${out}key=dhclient.consumer.${argname} shape=bare"$'\n'
-                ;;
-            FOUND:*)
-                ci_log "[CI-ERROR-VERSION-0013]" "path=\"${dockerfile}\" name=\"${argname}\" reason=\"unexpected baked default; must stay SOT-driven\""
-                return 2
-                ;;
-        esac
-    done
-    printf '%s' "${out}"
 }
 
 
@@ -5607,54 +5563,32 @@ _ci_version_audit_dhclient_branch_comment() {
 # Why: The one CI gate for SOT-vs-repo version drift.
 # From: Issue #1683 | PR #1858
 _ci_version_verify() {
-    local rc=0 rcn rcd out
-    if _ci_version_verify_netdata; then
-        rcn=0
-    else
-        rcn=$?
-    fi
-    [ "${rcn}" -eq 0 ] || rc="${rcn}"
-    if out="$(_ci_version_diff_dhclient)"; then
-        rcd=0
-    else
-        rcd=$?
-    fi
-    [ -n "${out}" ] && printf '%s\n' "${out}"
-    if [ "${rcd}" -ne 0 ]; then
-        [ "${rc}" -eq 0 ] && rc="${rcd}"
-    fi
-    return "${rc}"
+    _ci_version_walk _ci_version_diff
 }
 
-# What: version audit: full read-only report, drift is OK.
+# What: version audit: full read-only report of the contracts.
 # Why: A dashboard view; verify is the CI-failing gate.
 # From: Issue #1683 | PR #1858
 _ci_version_audit() {
-    local rc=0 out rcn rcd
-    if out="$(_ci_version_diff_netdata)"; then rcn=0; else rcn=$?; fi
-    [ -n "${out}" ] && printf '%s\n' "${out}"
-    [ "${rcn}" -eq 2 ] && rc=2
-    if out="$(_ci_version_diff_dhclient)"; then rcd=0; else rcd=$?; fi
-    [ -n "${out}" ] && printf '%s\n' "${out}"
-    [ "${rcd}" -eq 2 ] && rc=2
+    local rc=0
+    _ci_version_walk _ci_version_diff || rc=$?
     _ci_version_audit_dhclient_branch_comment
     return "${rc}"
 }
 
-# What: version sync: both consumers are BARE, contract-only.
-# Why: netdata+dhclient derive from SOT; nothing to write.
+# What: sync one consumer: bare ARGs derive, nothing to write.
+# Why: SOT-driven consumers have no derived literal to update.
+# From: Issue #1683 | PR #1858
+_ci_version_sync_one() {
+    _ci_version_diff "$@" || return "$?"
+    printf 'sync=%s changed=0 reason=nothing-to-write\n' "$1"
+}
+
+# What: version sync: explicit maintenance op (contract §47).
+# Why: idempotent; nothing to write while consumers are bare.
 # From: Issue #1683 | PR #1858
 _ci_version_sync() {
-    local rc=0 out rcd
-    printf 'sync=netdata changed=0 reason=nothing-to-write\n'
-    if out="$(_ci_version_diff_dhclient)"; then rcd=0; else rcd=$?; fi
-    [ -n "${out}" ] && printf '%s\n' "${out}"
-    if [ "${rcd}" -eq 0 ]; then
-        printf 'sync=dhclient changed=0 reason=nothing-to-write\n'
-    else
-        rc=2
-    fi
-    return "${rc}"
+    _ci_version_walk _ci_version_sync_one
 }
 
 # What: version verify/audit/sync for SOT external_versions.

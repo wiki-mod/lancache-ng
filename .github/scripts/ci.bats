@@ -8887,12 +8887,11 @@ SH
 # Why: sync tests must never touch the real repo files.
 # From: Issue #1683 | PR #1858
 _version_fixture_repo() {
-    local root="${BATS_TEST_TMPDIR}/vrepo"
-    mkdir -p "${root}/services/netdata" "${root}/tools/build-tools"
-    cp "${BATS_TEST_DIRNAME}/../../services/netdata/Dockerfile" \
-        "${root}/services/netdata/Dockerfile"
-    cp "${BATS_TEST_DIRNAME}/../../tools/build-tools/Dockerfile" \
-        "${root}/tools/build-tools/Dockerfile"
+    local root="${BATS_TEST_TMPDIR}/vrepo" dep df rest
+    while IFS='|' read -r dep df rest; do
+        mkdir -p "${root}/$(dirname "${df}")"
+        cp "${BATS_TEST_DIRNAME}/../../${df}" "${root}/${df}"
+    done <<< "$(_ci_version_consumers)"
     printf '%s' "${root}"
 }
 
@@ -8914,88 +8913,45 @@ _version_fixture_repo() {
     [ "${status}" -eq 0 ]
 }
 
-@test "version verify fails closed if a netdata ARG is missing" {
-    # What: netdata loses its NETDATA_SHA256 ARG line.
-    # Why: the SOT-to-consumer contract must not just break.
+@test "version verify fails closed on a missing or malformed SOT pin" {
+    # What: per consumer: blank sha key -> 0007; garbled -> 0007.
+    # Why: a missing/truncated pin must never pass silently.
     # From: Issue #1683 | PR #1858
-    local root; root="$(_version_fixture_repo)"
-    sed -i '/^ARG NETDATA_SHA256$/d' \
-        "${root}/services/netdata/Dockerfile"
-    CI_REPO_ROOT="${root}" run bash "${CI_SH}" version verify
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VERSION-0008"* ]]
+    local dep df keys args key val m
+    while IFS='|' read -r dep df keys args; do
+        for key in ${keys}; do [[ "${key}" == sha256_* ]] && break; done
+        val="$(_ci_block_entry_field external_versions "${dep}" "${key}")"
+        m="${BATS_TEST_TMPDIR}/${dep}-missing.yml"
+        grep -v "^    ${key}: ${val}\$" "${CI_MANIFEST_SOURCE}" > "${m}"
+        CI_MANIFEST="${m}" run bash "${CI_SH}" version verify
+        [ "${status}" -eq 2 ]
+        [[ "${output}" == *"CI-ERROR-VERSION-0007"*"${dep}.${key} missing"* ]]
+        m="${BATS_TEST_TMPDIR}/${dep}-badsha.yml"
+        sed "s/^    ${key}: ${val}\$/    ${key}: not-a-real-hash/" "${CI_MANIFEST_SOURCE}" > "${m}"
+        CI_MANIFEST="${m}" run bash "${CI_SH}" version verify
+        [ "${status}" -eq 2 ]
+        [[ "${output}" == *"CI-ERROR-VERSION-0007"*"${dep}.${key} not 64 hex"* ]]
+    done <<< "$(_ci_version_consumers)"
 }
 
-@test "version verify fails closed on a baked-in netdata default" {
-    # What: someone re-pins NETDATA_VERSION with a default.
-    # Why: netdata stays SOT-driven, no local re-pin ever.
+@test "version verify fails closed on a missing or baked consumer ARG" {
+    # What: per consumer: ARG line gone -> 0008; default -> 0009.
+    # Why: the SOT is the only owner; no second pin, no gap.
     # From: Issue #1683 | PR #1858
-    local root ver; root="$(_version_fixture_repo)"
-    ver="$(_ci_block_entry_field external_versions netdata version)"
-    sed -i "s/^ARG NETDATA_VERSION\$/ARG NETDATA_VERSION=${ver}/" \
-        "${root}/services/netdata/Dockerfile"
-    CI_REPO_ROOT="${root}" run bash "${CI_SH}" version verify
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VERSION-0009"* ]]
-}
-
-@test "version verify fails closed on a malformed SOT netdata sha256" {
-    # What: SOT sha256_x86_64 replaced by non-hex64 text.
-    # Why: a truncated/garbled pin must never pass silently.
-    # From: Issue #1683 | PR #1858
-    local m sha; m="${BATS_TEST_TMPDIR}/nd-badsha.yml"
-    sha="$(_ci_block_entry_field external_versions netdata sha256_x86_64)"
-    sed "s/${sha}/not-a-real-hash/" "${CI_MANIFEST_SOURCE}" > "${m}"
-    CI_MANIFEST="${m}" run bash "${CI_SH}" version verify
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VERSION-0007"* ]]
-}
-
-@test "version verify fails closed on a missing SOT dhclient field" {
-    # What: SOT dhclient.sha256_arm64 line removed.
-    # Why: dhclient stays fail-closed on a blank field.
-    # From: Issue #1683 | PR #1858
-    local m="${BATS_TEST_TMPDIR}/dh-missing.yml"
-    grep -v 'sha256_arm64:' "${CI_MANIFEST_SOURCE}" > "${m}"
-    CI_MANIFEST="${m}" run bash "${CI_SH}" version verify
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VERSION-0011"* ]]
-}
-
-@test "version verify fails closed on a malformed dhclient sha256" {
-    # What: SOT sha256_amd64 shortened to non-hex64 text.
-    # Why: a truncated/garbled pin must never pass silently.
-    # From: Issue #1683 | PR #1858
-    local m="${BATS_TEST_TMPDIR}/dh-badsha.yml"
-    sed 's/sha256_amd64: 068c97e534e9c8f03db9064296b1d3c21d957f328e40309278559a92f9a74557/sha256_amd64: not-a-real-hash/' \
-        "${CI_MANIFEST_SOURCE}" > "${m}"
-    CI_MANIFEST="${m}" run bash "${CI_SH}" version verify
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VERSION-0011"* ]]
-}
-
-@test "version verify fails closed if a dhclient ARG is missing" {
-    # What: build-tools loses its DHCLIENT_SHA256 ARG line.
-    # Why: the SOT-to-consumer contract must not just break.
-    # From: Issue #1683 | PR #1858
-    local root; root="$(_version_fixture_repo)"
-    sed -i '/^ARG DHCLIENT_SHA256$/d' \
-        "${root}/tools/build-tools/Dockerfile"
-    CI_REPO_ROOT="${root}" run bash "${CI_SH}" version verify
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VERSION-0012"* ]]
-}
-
-@test "version verify fails closed on a baked-in dhclient default" {
-    # What: someone re-pins DHCLIENT_VERSION with a default.
-    # Why: dhclient stays SOT-driven, no local re-pin ever.
-    # From: Issue #1683 | PR #1858
-    local root; root="$(_version_fixture_repo)"
-    sed -i 's/^ARG DHCLIENT_VERSION$/ARG DHCLIENT_VERSION=4.4.3_p1-r4/' \
-        "${root}/tools/build-tools/Dockerfile"
-    CI_REPO_ROOT="${root}" run bash "${CI_SH}" version verify
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VERSION-0013"* ]]
+    local dep df keys args arg root
+    while IFS='|' read -r dep df keys args; do
+        arg="${args%% *}"
+        root="$(_version_fixture_repo)"
+        sed -i "/^ARG ${arg}\$/d" "${root}/${df}"
+        CI_REPO_ROOT="${root}" run bash "${CI_SH}" version verify
+        [ "${status}" -eq 2 ]
+        [[ "${output}" == *"CI-ERROR-VERSION-0008"*"${arg}"* ]]
+        root="$(_version_fixture_repo)"
+        sed -i "s/^ARG ${arg}\$/ARG ${arg}=baked/" "${root}/${df}"
+        CI_REPO_ROOT="${root}" run bash "${CI_SH}" version verify
+        [ "${status}" -eq 2 ]
+        [[ "${output}" == *"CI-ERROR-VERSION-0009"*"${arg}"* ]]
+    done <<< "$(_ci_version_consumers)"
 }
 
 @test "version audit reports the netdata contract without failing" {
