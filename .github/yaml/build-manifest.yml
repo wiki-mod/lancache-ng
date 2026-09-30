@@ -40,6 +40,10 @@ services:
       - shared-secret=scripts/lib
       - known-good=scripts/lib
     build_type: rust
+    # What: the workspace crate (cargo -p) of this service.
+    # Why: rust checks target the crate, not the build context.
+    # From: Issue #1683 | PR #1858
+    crate: nats-subscriber
     final_base: alpine
     runner: heavy
     # What: final-image apk packages; the SOT owns the list.
@@ -70,6 +74,10 @@ services:
   watchdog:
     context: services/watchdog
     build_type: rust
+    # What: the workspace crate (cargo -p) of this service.
+    # Why: rust checks target the crate, not the build context.
+    # From: Issue #1683 | PR #1858
+    crate: lancache-watchdog
     final_base: alpine
     runner: heavy
     # What: final-image apk packages; the SOT owns the list.
@@ -219,6 +227,10 @@ services:
     external_contexts:
       - shared-secret=scripts/lib
     build_type: rust
+    # What: the workspace crate (cargo -p) of this service.
+    # Why: rust checks target the crate, not the build context.
+    # From: Issue #1683 | PR #1858
+    crate: lancache-ui
     final_base: alpine
     runner: heavy
     # What: final-image apk packages; the SOT owns the list.
@@ -242,6 +254,10 @@ services:
     # Why: Real compile step -> heavy runner per AG-CI-002.
     # From: Issue #1683
     build_type: rust
+    # What: the workspace crate (cargo -p) of this service.
+    # Why: rust checks target the crate, not the build context.
+    # From: Issue #1683 | PR #1858
+    crate: lancache-cachehamster
     final_base: alpine
     runner: heavy
     # What: final-image apk packages; the SOT owns the list.

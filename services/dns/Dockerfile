@@ -18,6 +18,10 @@ FROM ${BUILD_TOOLS_IMAGE} AS subscriber-builder
 # Why: ci.sh owns arch mapping; no uname -m in the image.
 # From: Issue #1683
 ARG MUSL_TARGET
+# What: workspace crate, supplied by ci.sh from the SOT.
+# Why: the SOT owns the crate; rust-build receives it.
+# From: Issue #1683 | PR #1858
+ARG RUST_CRATE
 
 # What: cargo tuning args, consumed by ci.sh rust-build.
 # Why: PROJECT_CARGO_*/CARGO_BUILD_JOBS own these.
@@ -59,7 +63,7 @@ RUN --mount=type=bind,source=.github/scripts/ci.sh,target=/usr/local/bin/ci.sh \
     --mount=type=secret,id=distcc_potential_hosts \
     --mount=type=secret,id=ccache_redis_url \
     --mount=type=secret,id=project_selfhosted_proxy_ca \
-    bash /usr/local/bin/ci.sh rust-build dns nats-subscriber
+    bash /usr/local/bin/ci.sh rust-build dns "${RUST_CRATE}"
 
 FROM ${ALPINE_IMAGE}
 

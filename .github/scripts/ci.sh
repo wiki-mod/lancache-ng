@@ -2593,13 +2593,17 @@ ci_cmd_verify() {
         ci_error "[CI-ERROR-VERIFY-0005]" "service=\"${service}\" reason=\"digest MISMATCH; produced != accepted\" expected=\"${expected}\"" "readback=${seen}"
         return 2
     fi
-    # What: smoke-test toolchain at its digest.
-    # Why: §25: accel tools must exist in image.
-    # From: Issue #1683
+    # What: smoke-test every built image at its digest.
+    # Why: §25 SERVICE_TESTED follows IDENTITY_VERIFIED.
+    # From: Issue #1683 | PR #1858
     if [ "$(ci_service_field "${service}" build_type)" = toolchain ]; then
         local CI_TOOLCHAIN_IMAGE
         CI_TOOLCHAIN_IMAGE="$(_ci_image_ref "${service}" "${expected}")"
         _ci_test_toolchain "${service}" || return "$?"
+    else
+        local -x CI_SERVICE_IMAGE
+        CI_SERVICE_IMAGE="$(_ci_image_ref "${service}" "${expected}")"
+        _ci_smoke_service "${service}" || return "$?"
     fi
     printf 'service=%s verified=%s\n' "${service}" "${seen}"
 }
@@ -2613,17 +2617,20 @@ _ci_test_rust() {
         "${CI_RUST_TEST_CMD}" "${service}"
         return "$?"
     fi
-    ctx="$(ci_service_field "${service}" context)"
+    ctx="$(ci_service_field "${service}" crate)"
     if [ -z "${ctx}" ]; then
-        ci_log "[CI-ERROR-TEST-0005]" "service=\"${service}\" reason=\"no context in SOT\""
+        ci_log "[CI-ERROR-TEST-0005]" "service=\"${service}\" reason=\"no crate in SOT\""
         return 2
     fi
+    # What: workspace-root cargo on the service's own crate.
+    # Why: the build context is no crate; AG-VAL-008 per crate.
+    # From: Issue #1683 | PR #1858
     ( _ci_sccache_env "lancache-${service}" \
-        && cd "${CI_REPO_ROOT:-.}/${ctx}" \
-        && cargo fmt --check \
-        && cargo check \
-        && cargo clippy -- -D warnings \
-        && cargo test ) || return 1
+        && cd "${CI_REPO_ROOT:-.}" \
+        && cargo fmt --check -p "${ctx}" \
+        && cargo check --locked --all-targets -p "${ctx}" \
+        && cargo clippy --locked --all-targets -p "${ctx}" -- -D warnings \
+        && cargo test --locked -p "${ctx}" ) || return 1
     printf 'service=%s tested=ok\n' "${service}"
 }
 
@@ -2673,25 +2680,26 @@ _ci_smoke_service() {
     fi
     local -a cl=()
     while IFS= read -r c; do [ -n "${c}" ] && cl+=("${c}"); done <<< "${checks}"
+    local out
     for c in "${cl[@]}"; do
-        if ! timeout --kill-after=30s --signal=TERM 5m docker run --rm --entrypoint sh "${image}" -c "${c}" >/dev/null 2>&1; then
-            ci_error "[CI-ERROR-TEST-0008]" "service=\"${service}\" check=\"${c}\" reason=\"execute-smoke failed; missing lib?\"" "$(docker run --rm --entrypoint sh "${image}" -c "${c}" 2>&1 | head -5)"
+        if ! out="$(timeout --kill-after=30s --signal=TERM 5m docker run --rm --entrypoint sh "${image}" -c "${c}" 2>&1)"; then
+            ci_error "[CI-ERROR-TEST-0008]" "service=\"${service}\" check=\"${c}\" reason=\"execute-smoke failed; missing lib?\"" "${out}"
             return 1
         fi
     done
     printf 'service=%s smoke=ok checks=%s\n' "${service}" "${#cl[@]}"
 }
 
-# What: Dispatch a service's test by its build type.
-# Why: rust runs cargo; apk services execute-smoke via SOT.
+# What: Dispatch a service's source test by its build type.
+# Why: image smoke runs at the built digest (verify, §25).
 # From: Issue #1683 | PR #1858
 _ci_default_test() {
     local service="$1" build_type
     build_type="$(ci_service_field "${service}" build_type)"
     [ -n "${build_type}" ] || build_type="toolchain"
     case "${build_type}" in
-        rust) _ci_test_rust "${service}" && _ci_smoke_service "${service}" ;;
-        apk|install) _ci_smoke_service "${service}" ;;
+        rust) _ci_test_rust "${service}" ;;
+        apk|install) printf 'service=%s tested=SKIP reason="no source tests; smoke runs at the built digest"\n' "${service}" ;;
         toolchain) _ci_test_toolchain "${service}" ;;
         *) ci_log "[CI-ERROR-TEST-0004]" "service=\"${service}\" build_type=\"${build_type}\" reason=\"unknown build_type\""; return 2 ;;
     esac
@@ -5063,6 +5071,12 @@ _ci_service_build_args() {
         val="$(${CI_BUILD_TOOLS_IMAGE_CMD:-_ci_build_tools_resolve_image} "${platform}")" || return 2
         [ -n "${val}" ] || { ci_log "[CI-ERROR-BUILDARGS-0009]" "arg=\"BUILD_TOOLS_IMAGE\" service=\"${service}\" reason=\"empty resolved build-tools image; FAIL CLOSED\""; return 2; }
         out="${out}${prefix}BUILD_TOOLS_IMAGE=${val}"$'\n'
+        # What: emit the SOT workspace crate for rust-build.
+        # Why: one crate owner; the Dockerfile names none.
+        # From: Issue #1683 | PR #1858
+        val="$(_ci_block_entry_field services "${service}" crate)"
+        [ -n "${val}" ] || { ci_log "[CI-ERROR-BUILDARGS-0014]" "arg=\"RUST_CRATE\" service=\"${service}\" reason=\"no crate in SOT; FAIL CLOSED\""; return 2; }
+        out="${out}${prefix}RUST_CRATE=${val}"$'\n'
         # What: emit the musl cross-target for the platform.
         # Why: ci.sh owns arch mapping; Dockerfile drops uname -m.
         # From: Issue #1683

@@ -18,6 +18,10 @@ FROM ${BUILD_TOOLS_IMAGE} AS builder
 # Why: ci.sh owns arch mapping; no uname -m in the image.
 # From: Issue #1683
 ARG MUSL_TARGET
+# What: workspace crate, supplied by ci.sh from the SOT.
+# Why: the SOT owns the crate; rust-build receives it.
+# From: Issue #1683 | PR #1858
+ARG RUST_CRATE
 
 # What: cargo tuning args, consumed by ci.sh rust-build.
 # Why: PROJECT_CARGO_*/CARGO_BUILD_JOBS own these.
@@ -61,7 +65,7 @@ RUN --mount=type=bind,source=.github/scripts/ci.sh,target=/usr/local/bin/ci.sh \
     mkdir -p services/ui/src \
     && printf 'fn main() {}\n' > services/ui/src/main.rs \
     && : > services/ui/src/lib.rs \
-    && bash /usr/local/bin/ci.sh rust-build ui lancache-ui deps \
+    && bash /usr/local/bin/ci.sh rust-build ui "${RUST_CRATE}" deps \
     && rm -rf services/ui/src
 COPY services/ui/src ./services/ui/src
 # What: ci.sh owns the rust build accel policy (one owner).
@@ -73,7 +77,7 @@ RUN --mount=type=bind,source=.github/scripts/ci.sh,target=/usr/local/bin/ci.sh \
     --mount=type=secret,id=distcc_potential_hosts \
     --mount=type=secret,id=ccache_redis_url \
     --mount=type=secret,id=project_selfhosted_proxy_ca \
-    bash /usr/local/bin/ci.sh rust-build ui lancache-ui
+    bash /usr/local/bin/ci.sh rust-build ui "${RUST_CRATE}"
 
 FROM ${ALPINE_IMAGE}
 

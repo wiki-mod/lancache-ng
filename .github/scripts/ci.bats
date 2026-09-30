@@ -1216,31 +1216,32 @@ _stub() {
     [[ "${output}" == *"tested=ok"* ]]
 }
 
-@test "test dispatches a rust service to the cargo checks" {
-    # What: A rust service runs the cargo checks then smoke.
-    # Why: fmt/check/clippy/test are AG-VAL-008; smoke #1613.
+@test "test dispatches a rust service to the cargo checks only" {
+    # What: source test = cargo checks; no image smoke here.
+    # Why: no image exists in the test job; smoke is verify.
     # From: Issue #1683 | PR #1858
     CI_RUST_TEST_CMD="$(_stub rt 'echo "service=$1 tested=ok"')" \
-    CI_SMOKE_CMD="$(_stub sm 'echo "service=$1 smoke=ok"')" \
+    CI_SMOKE_CMD="$(_stub sm 'echo SMOKE-CALLED')" \
         run bash "${CI_SH}" test dns
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"tested=ok"* ]]
+    [[ "${output}" != *"SMOKE-CALLED"* ]]
 }
 
 @test "rust test runs every cargo call through sccache" {
     # What: cargo sees RUSTC_WRAPPER=sccache, local dir.
     # Why: rust without sccache violates AG-CI (no Redis).
     # From: Issue #1683 | PR #1858
-    local root="${BATS_TEST_TMPDIR}/root" bin="${BATS_TEST_TMPDIR}/bin" ctx
-    ctx="$(ci_service_field dns context)"
-    mkdir -p "${root}/${ctx}" "${bin}"
-    printf '#!/usr/bin/env bash\necho "cargo $1 wrapper=${RUSTC_WRAPPER:-none} dir=${SCCACHE_DIR:-none}"\n' > "${bin}/cargo"
+    local root="${BATS_TEST_TMPDIR}/root" bin="${BATS_TEST_TMPDIR}/bin"
+    mkdir -p "${root}" "${bin}"
+    printf '#!/usr/bin/env bash\necho "cargo $1 wrapper=${RUSTC_WRAPPER:-none} dir=${SCCACHE_DIR:-none} args=$*"\n' > "${bin}/cargo"
     chmod +x "${bin}/cargo"
     unset SCCACHE_REDIS_URL
     CI_REPO_ROOT="${root}" PATH="${bin}:${PATH}" run _ci_test_rust dns
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"[CI-INFO-CACHE-0002]"* ]]
     [ "$(grep -c 'wrapper=sccache dir=/var/tmp/sccache' <<<"${output}")" -eq 4 ]
+    [ "$(grep -c -- "-p $(ci_service_field dns crate)" <<<"${output}")" -eq 4 ]
 }
 
 @test "sccache env selects Redis when a URL is provided" {
@@ -1254,15 +1255,32 @@ _stub() {
     [[ "${output}" == *"r=redis://cache.invalid:6379"* ]]
 }
 
-@test "test runs smoke for an apk service, not the cargo checks" {
-    # What: An apk service runs execute-smoke, not cargo.
-    # Why: apk binaries must run (#1613); no rust unit test.
+@test "test reports SKIP for an apk service; smoke is at the digest" {
+    # What: apk has no source test -> explicit SKIP + reason.
+    # Why: AG-INT-002 legit skip; smoke runs in verify.
     # From: Issue #1613 | Issue #1683
-    CI_SMOKE_CMD="$(_stub sm 'echo "service=$1 smoke=ok"')" \
+    CI_SMOKE_CMD="$(_stub sm 'echo SMOKE-CALLED')" \
         run bash "${CI_SH}" test proxy
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"smoke=ok"* ]]
-    [[ "${output}" != *"tested=ok"* ]]
+    [[ "${output}" == *"tested=SKIP"* ]]
+    [[ "${output}" != *"SMOKE-CALLED"* ]]
+}
+
+@test "verify smoke-tests a product image at its digest" {
+    # What: matching readback -> SOT smoke at the digest.
+    # Why: §25 SERVICE_TESTED; a smoke failure fails verify.
+    # From: Issue #1613 | Issue #1683
+    CI_READBACK_CMD="$(_stub rb 'echo sha256:dead')" \
+    CI_SMOKE_CMD="$(_stub sm 'echo "service=$1 smoke=ok image=${CI_SERVICE_IMAGE}"')" \
+    GHCR_USERNAME=u GHCR_TOKEN=t GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+        run bash "${CI_SH}" verify proxy sha256:dead linux/amd64
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"smoke=ok image="*"proxy@sha256:dead"* ]]
+    CI_READBACK_CMD="$(_stub rb 'echo sha256:dead')" \
+    CI_SMOKE_CMD="$(_stub sm 'exit 1')" \
+    GHCR_USERNAME=u GHCR_TOKEN=t GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+        run bash "${CI_SH}" verify proxy sha256:dead linux/amd64
+    [ "${status}" -ne 0 ]
 }
 
 @test "test build-tools fails closed without a toolchain image" {
@@ -1396,8 +1414,10 @@ fn real_cargo_test_runs() {
     assert_eq!(1 + 1, 2);
 }
 RS
+    printf '[workspace]\nmembers = ["crate"]\nresolver = "2"\n' > "${root}/Cargo.toml"
+    ( cd "${root}" && cargo generate-lockfile --offline -q )
     local m="${BATS_TEST_TMPDIR}/manifest-ok.yml"
-    printf 'services:\n  fixture-ok:\n    context: crate\n    build_type: rust\n' > "${m}"
+    printf 'services:\n  fixture-ok:\n    context: crate\n    crate: ci-fixture-ok\n    build_type: rust\n' > "${m}"
     CI_MANIFEST="${m}" CI_REPO_ROOT="${root}" run bash "${CI_SH}" test fixture-ok
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"tested=ok"* ]]
@@ -1423,8 +1443,10 @@ fn main() {
     }
 }
 RS
+    printf '[workspace]\nmembers = ["crate"]\nresolver = "2"\n' > "${root}/Cargo.toml"
+    ( cd "${root}" && cargo generate-lockfile --offline -q )
     local m="${BATS_TEST_TMPDIR}/manifest-fail.yml"
-    printf 'services:\n  fixture-fail:\n    context: crate\n    build_type: rust\n' > "${m}"
+    printf 'services:\n  fixture-fail:\n    context: crate\n    crate: ci-fixture-fail\n    build_type: rust\n' > "${m}"
     CI_MANIFEST="${m}" CI_REPO_ROOT="${root}" run bash "${CI_SH}" test fixture-fail
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-TEST-0003"* ]]
@@ -1617,6 +1639,7 @@ RS
     # Why: Confirms the accepted artifact is the real one.
     # From: Issue #1683
     CI_READBACK_CMD="$(_stub rb 'echo sha256:match')" GHCR_USERNAME=u GHCR_TOKEN=t \
+    CI_SMOKE_CMD="$(_stub sm 'echo "service=$1 smoke=ok"')" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
         run bash "${CI_SH}" verify ui sha256:match
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"verified=sha256:match"* ]]
@@ -4026,11 +4049,17 @@ netdata=sha256:n"
     # Why: no mutable Dockerfile default; ci.sh owns it.
     # From: Issue #1683
     local m="${BATS_TEST_TMPDIR}/bt-manifest.yml"
-    printf 'base_images:\n  alpine: "a"\nservices:\n  svc-rust:\n    context: c\n    build_type: rust\n  svc-apk:\n    context: c\n    build_type: apk\n' > "${m}"
+    printf 'base_images:\n  alpine: "a"\nservices:\n  svc-rust:\n    context: c\n    crate: c1\n    build_type: rust\n  svc-apk:\n    context: c\n    build_type: apk\n' > "${m}"
     export CI_BUILD_TOOLS_IMAGE_CMD='echo bt-stub@sha256:test'
     CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc-rust
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"BUILD_TOOLS_IMAGE=bt-stub@sha256:test"* ]]
+    [[ "${output}" == *"RUST_CRATE=c1"* ]]
+    sed -i '/crate: c1/d' "${m}"
+    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc-rust
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-BUILDARGS-0014"* ]]
+    printf 'base_images:\n  alpine: "a"\nservices:\n  svc-apk:\n    context: c\n    build_type: apk\n' > "${m}"
     CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc-apk
     [ "${status}" -eq 0 ]
     [[ "${output}" != *"BUILD_TOOLS_IMAGE"* ]]
@@ -4041,7 +4070,7 @@ netdata=sha256:n"
     # Why: ci.sh owns arch mapping; Dockerfile drops uname -m.
     # From: Issue #1683
     local m="${BATS_TEST_TMPDIR}/mt-manifest.yml"
-    printf 'base_images:\n  alpine: "a"\nplatform_arch:\n  amd64:\n    apk: x86_64\n  arm64:\n    apk: aarch64\nservices:\n  svc-rust:\n    context: c\n    build_type: rust\n' > "${m}"
+    printf 'base_images:\n  alpine: "a"\nplatform_arch:\n  amd64:\n    apk: x86_64\n  arm64:\n    apk: aarch64\nservices:\n  svc-rust:\n    context: c\n    crate: c1\n    build_type: rust\n' > "${m}"
     export CI_BUILD_TOOLS_IMAGE_CMD='echo bt-stub@sha256:test'
     CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc-rust --bare linux/amd64
     [ "${status}" -eq 0 ]
