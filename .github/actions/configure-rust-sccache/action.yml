@@ -52,7 +52,6 @@ runs:
   using: composite
   steps:
     - name: Export GitHub Actions cache runtime
-      if: runner.environment != 'self-hosted'
       uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
       with:
         script: |
@@ -170,6 +169,16 @@ runs:
           } >> "$sccache_config"
         fi
 
+        gha_env_file=""
+        if [ "$gha_enabled" = "1" ]; then
+          umask 077
+          gha_env_file="$(mktemp "$config_root/lancache-sccache-gha-env.XXXXXX")"
+          {
+            printf 'ACTIONS_RESULTS_URL=%s\n' "$ACTIONS_RESULTS_URL"
+            printf 'ACTIONS_RUNTIME_TOKEN=%s\n' "$ACTIONS_RUNTIME_TOKEN"
+          } > "$gha_env_file"
+        fi
+
         if [ "$redis_enabled" = "1" ] && [ "$gha_enabled" = "1" ]; then
           {
             printf '\n[cache.multilevel]\n'
@@ -217,6 +226,7 @@ runs:
           echo "SCCACHE_CONF=$sccache_config"
           if [ "$gha_enabled" = "1" ]; then
             echo "SCCACHE_GHA_ENABLED=on"
+            echo "SCCACHE_GHA_ENV_FILE=$gha_env_file"
           fi
           echo "SCCACHE_NO_DAEMON=1"
           echo "LANCACHE_SCCACHE_ENABLED=1"

@@ -33,7 +33,7 @@ runs:
 
         if [ "$sccache_enabled" != "1" ]; then
           # Fallback must leave Cargo runnable without any LAN-only acceleration.
-          unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_REDIS_KEY_PREFIX SCCACHE_CONF SCCACHE_NO_DAEMON
+          unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_REDIS_KEY_PREFIX SCCACHE_CONF SCCACHE_NO_DAEMON SCCACHE_GHA_ENV_FILE
         fi
 
         validate_positive_integer() {
@@ -154,7 +154,7 @@ runs:
         fi
 
         echo "::warning::Cargo command failed because optional sccache acceleration failed; retrying once without RUSTC_WRAPPER."
-        unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_REDIS_KEY_PREFIX SCCACHE_CONF SCCACHE_NO_DAEMON
+        unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_REDIS_KEY_PREFIX SCCACHE_CONF SCCACHE_NO_DAEMON SCCACHE_GHA_ENV_FILE
 
         fallback_output="$(mktemp "$log_root/lancache-cargo-fallback.XXXXXX")"
         run_with_log "$fallback_output"
