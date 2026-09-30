@@ -21,6 +21,11 @@ CI_SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # From: Issue #1683
 CI_MANIFEST="${CI_MANIFEST:-${CI_SCRIPT_DIR}/../yaml/build-manifest.yml}"
 
+# What: The SOT's repo-relative path (git refs, diffs).
+# Why: base SOT reads and SOT-change detection share it.
+# From: Issue #1683 | PR #1858
+CI_MANIFEST_REL=".github/yaml/build-manifest.yml"
+
 # What: Repository root (.github/scripts/../..).
 # Why: Identity hashes git-tracked content from the root.
 # From: Issue #1683
@@ -567,17 +572,23 @@ ci_cmd_plan_matrix() {
     local docs_only=false
     _ci_docs_only "${changed[@]}" && docs_only=true
     local service platform include='[]' any=false resolved paction runner authed=false test_services=''
-    local tc_list imp tc_impact=NOOP
+    local tc_list imp tc_impact=NOOP sot_changed=false f path_cand
     tc_list=" $(_ci_block_keys build_toolchain | tr '\n' ' ')"
+    # What: a SOT change makes every target an id candidate.
+    # Why: pins live in the SOT; identity still decides BUILD.
+    # From: Issue #1683 | PR #1858
+    for f in "${changed[@]}"; do [ "${f}" = "${CI_MANIFEST_REL}" ] && sot_changed=true; done
     # What: build product services and the toolchain.
     # Why: build-tools generic pipeline, separate assembly.
     # From: Issue #1683
     for service in $(ci_services) $(_ci_block_keys build_toolchain); do
-        _ci_plan_candidate "${service}" "${changed[@]}" || continue
+        path_cand=false
+        _ci_plan_candidate "${service}" "${changed[@]}" && path_cand=true
+        [ "${path_cand}" = true ] || [ "${sot_changed}" = true ] || continue
         # What: path-changed rust is test candidate (§60).
         # Why: tests run on change, even build reuse (§60).
         # From: Issue #1683
-        [ "$(ci_service_field "${service}" build_type)" = rust ] \
+        [ "${path_cand}" = true ] && [ "$(ci_service_field "${service}" build_type)" = rust ] \
             && test_services="${test_services} ${service}"
         # What: auth once, only when a candidate exists.
         # Why: docs-only NOOP: registry zero touches (§63).
@@ -806,7 +817,7 @@ ci_cmd_identity() {
 # From: Issue #1683
 _ci_manifest_at() {
     local ref="$1" dest="$2"
-    ( cd -- "${CI_REPO_ROOT}" && git show "${ref}:.github/yaml/build-manifest.yml" ) > "${dest}" 2>/dev/null
+    ( cd -- "${CI_REPO_ROOT}" && git show "${ref}:${CI_MANIFEST_REL}" ) > "${dest}" 2>/dev/null
 }
 
 # What: Emit NOOP or BUILD per target and platform.

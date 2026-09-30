@@ -415,6 +415,24 @@ teardown() {
     [ "$(sed -n 's/^toolchain-matrix=//p' "${gh}" | jq -r '[.include[].service]|unique|join(",")')" = build-tools ]
 }
 
+@test "plan-matrix treats a SOT-only change as identity candidates" {
+    # What: SOT change -> all targets checked, no tests.
+    # Why: pins live in the SOT; identity decides BUILD.
+    # From: Issue #1683 | PR #1858
+    local gh="${BATS_TEST_TMPDIR}/out.txt"; : > "${gh}"
+    GITHUB_OUTPUT="${gh}" GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_stub p 'echo MISSING_CONFIRMED')" \
+    CI_IMPACT_CMD="$(_stub impact '[ "$1" = proxy ] && echo BUILD || echo NOOP')" \
+        run bash "${CI_SH}" plan-matrix "${CI_MANIFEST_REL}"
+    [ "${status}" -eq 0 ]
+    [ "$(sed -n 's/^matrix=//p' "${gh}" | jq -r '[.include[].service]|unique|join(",")')" = proxy ]
+    grep -q '^test-services=$' "${gh}"
+    : > "${gh}"
+    GITHUB_OUTPUT="${gh}" GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_stub p 'echo MISSING_CONFIRMED')" \
+    CI_IMPACT_CMD="$(_stub impact 'echo NOOP')" \
+        run bash "${CI_SH}" plan-matrix "${CI_MANIFEST_REL}"
+    grep -q '^any-build=false$' "${gh}"
+}
+
 @test "plan-matrix drops a missing target without proven impact" {
     # What: MISSING_CONFIRMED + impact NOOP -> not in matrix.
     # Why: MISSING_CONFIRMED alone MUST NOT build (§10).
