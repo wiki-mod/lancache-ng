@@ -195,6 +195,14 @@ docker run --rm \
     -e CARGO_TARGET_DIR=/build-target \
     -e CARGO_PROFILE_RELEASE_LTO="$project_cargo_lto" \
     -e CARGO_PROFILE_RELEASE_CODEGEN_UNITS="$project_cargo_codegenunit" \
+    -e RUSTC_WRAPPER="${RUSTC_WRAPPER:-}" \
+    -e SCCACHE_CONF=/run/lancache/sccache.conf \
+    -e SCCACHE_REDIS="${SCCACHE_REDIS:-}" \
+    -e SCCACHE_REDIS_KEY_PREFIX="${SCCACHE_REDIS_KEY_PREFIX:-lancache-dhcp-proxy-pxe}" \
+    -e HTTP_PROXY="${HTTP_PROXY:-}" -e HTTPS_PROXY="${HTTPS_PROXY:-}" -e NO_PROXY="${NO_PROXY:-}" \
+    -e http_proxy="${http_proxy:-}" -e https_proxy="${https_proxy:-}" -e no_proxy="${no_proxy:-}" \
+    --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}" \
+    -v "${LANCACHE_SCCACHE_CONF:?LANCACHE_SCCACHE_CONF is required}:/run/lancache/sccache.conf:ro" \
     "$client_tool_image" \
     bash -c 'set -euo pipefail; cargo build --release --locked --manifest-path /repo/tools/pxe-client-probe/Cargo.toml -p pxe-client-probe; cp /build-target/release/pxe-client-probe /out/pxe-client-probe'
 

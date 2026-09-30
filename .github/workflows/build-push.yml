@@ -2196,6 +2196,9 @@ jobs:
     needs: [validate-compose, detect-changes, push-supersession-check]
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
+      HTTP_PROXY: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
+      HTTPS_PROXY: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
+      NO_PROXY: ${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
     if: >-
       ${{
         always() &&
@@ -2257,6 +2260,8 @@ jobs:
             -e SCCACHE_CONF=/run/lancache/sccache.conf
             -e SCCACHE_REDIS="${SCCACHE_REDIS:-}"
             -e SCCACHE_REDIS_KEY_PREFIX="${SCCACHE_REDIS_KEY_PREFIX:-lancache-dns-quality}"
+            -e HTTP_PROXY="${HTTP_PROXY:-}" -e HTTPS_PROXY="${HTTPS_PROXY:-}" -e NO_PROXY="${NO_PROXY:-}"
+            -e http_proxy="${HTTP_PROXY:-}" -e https_proxy="${HTTPS_PROXY:-}" -e no_proxy="${NO_PROXY:-}"
             --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}"
             -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
             -v "$PWD:/work" -w /work
@@ -2269,6 +2274,9 @@ jobs:
     needs: [validate-compose, detect-changes, push-supersession-check]
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
+      HTTP_PROXY: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
+      HTTPS_PROXY: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
+      NO_PROXY: ${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
     if: >-
       ${{
         always() &&
@@ -2329,6 +2337,8 @@ jobs:
             -e SCCACHE_CONF=/run/lancache/sccache.conf
             -e SCCACHE_REDIS="${SCCACHE_REDIS:-}"
             -e SCCACHE_REDIS_KEY_PREFIX="${SCCACHE_REDIS_KEY_PREFIX:-lancache-ui-quality}"
+            -e HTTP_PROXY="${HTTP_PROXY:-}" -e HTTPS_PROXY="${HTTPS_PROXY:-}" -e NO_PROXY="${NO_PROXY:-}"
+            -e http_proxy="${HTTP_PROXY:-}" -e https_proxy="${HTTPS_PROXY:-}" -e no_proxy="${NO_PROXY:-}"
             --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}"
             -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
             -v "$PWD:/work" -w /work
@@ -2341,6 +2351,9 @@ jobs:
     needs: [validate-compose, detect-changes, push-supersession-check]
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
+      HTTP_PROXY: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
+      HTTPS_PROXY: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
+      NO_PROXY: ${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
     if: >-
       ${{
         always() &&
@@ -2401,6 +2414,8 @@ jobs:
             -e SCCACHE_CONF=/run/lancache/sccache.conf
             -e SCCACHE_REDIS="${SCCACHE_REDIS:-}"
             -e SCCACHE_REDIS_KEY_PREFIX="${SCCACHE_REDIS_KEY_PREFIX:-lancache-watchdog-quality}"
+            -e HTTP_PROXY="${HTTP_PROXY:-}" -e HTTPS_PROXY="${HTTPS_PROXY:-}" -e NO_PROXY="${NO_PROXY:-}"
+            -e http_proxy="${HTTP_PROXY:-}" -e https_proxy="${HTTPS_PROXY:-}" -e no_proxy="${NO_PROXY:-}"
             --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}"
             -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
             -v "$PWD:/work" -w /work
@@ -2413,6 +2428,9 @@ jobs:
     needs: [validate-compose, dns_rust_quality, detect-changes, push-supersession-check]
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
+      HTTP_PROXY: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
+      HTTPS_PROXY: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
+      NO_PROXY: ${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
     if: >-
       ${{
         always() &&
@@ -2475,6 +2493,8 @@ jobs:
             -e SCCACHE_CONF=/run/lancache/sccache.conf
             -e SCCACHE_REDIS="${SCCACHE_REDIS:-}"
             -e SCCACHE_REDIS_KEY_PREFIX="${SCCACHE_REDIS_KEY_PREFIX:-lancache-dns-test}"
+            -e HTTP_PROXY="${HTTP_PROXY:-}" -e HTTPS_PROXY="${HTTPS_PROXY:-}" -e NO_PROXY="${NO_PROXY:-}"
+            -e http_proxy="${HTTP_PROXY:-}" -e https_proxy="${HTTPS_PROXY:-}" -e no_proxy="${NO_PROXY:-}"
             --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}"
             -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
             -v "$PWD:/work" -w /work
@@ -2487,6 +2507,9 @@ jobs:
     needs: [validate-compose, ui_rust_quality, detect-changes, push-supersession-check]
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
+      HTTP_PROXY: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
+      HTTPS_PROXY: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
+      NO_PROXY: ${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
     if: >-
       ${{
         always() &&
@@ -2549,6 +2572,8 @@ jobs:
             -e SCCACHE_CONF=/run/lancache/sccache.conf
             -e SCCACHE_REDIS="${SCCACHE_REDIS:-}"
             -e SCCACHE_REDIS_KEY_PREFIX="${SCCACHE_REDIS_KEY_PREFIX:-lancache-ui-test}"
+            -e HTTP_PROXY="${HTTP_PROXY:-}" -e HTTPS_PROXY="${HTTPS_PROXY:-}" -e NO_PROXY="${NO_PROXY:-}"
+            -e http_proxy="${HTTP_PROXY:-}" -e https_proxy="${HTTPS_PROXY:-}" -e no_proxy="${NO_PROXY:-}"
             --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}"
             -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
             -v "$PWD:/work" -w /work
@@ -2564,6 +2589,9 @@ jobs:
     needs: [validate-compose, watchdog_rust_quality, detect-changes, push-supersession-check]
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
+      HTTP_PROXY: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
+      HTTPS_PROXY: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
+      NO_PROXY: ${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
     if: >-
       ${{
         always() &&
@@ -2630,6 +2658,8 @@ jobs:
             -e SCCACHE_CONF=/run/lancache/sccache.conf
             -e SCCACHE_REDIS="${SCCACHE_REDIS:-}"
             -e SCCACHE_REDIS_KEY_PREFIX="${SCCACHE_REDIS_KEY_PREFIX:-lancache-watchdog-test}"
+            -e HTTP_PROXY="${HTTP_PROXY:-}" -e HTTPS_PROXY="${HTTPS_PROXY:-}" -e NO_PROXY="${NO_PROXY:-}"
+            -e http_proxy="${HTTP_PROXY:-}" -e https_proxy="${HTTPS_PROXY:-}" -e no_proxy="${NO_PROXY:-}"
             --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}"
             -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
             -v "$PWD:/work" -w /work

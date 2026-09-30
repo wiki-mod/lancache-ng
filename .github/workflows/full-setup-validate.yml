@@ -60,9 +60,21 @@ jobs:
           image="$(bash scripts/untracked/select-build-tools-image.sh)"
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
+      - name: Configure Redis-backed sccache for PXE compile
+        uses: ./.github/actions/configure-rust-sccache
+        with:
+          mode: ${{ vars.SCCACHE_REDIS_MODE }}
+          redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
+          key-prefix: lancache-ci-dhcp-proxy-pxe
+          dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          verify-binary: false
       - name: Run DHCP proxy PXE simulation
         env:
           DHCP_PXE_SIMULATION_CLIENT_IMAGE: ${{ steps.build-tools-image.outputs.image }}
+          HTTP_PROXY: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
+          HTTPS_PROXY: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
+          NO_PROXY: ${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
           # What: Builds the pxe-client-probe.
           # Why: Matches repo's cargo build settings.
           # From: Issue #1095
