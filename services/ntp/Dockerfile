@@ -14,10 +14,10 @@ FROM ${ALPINE_IMAGE}
 
 LABEL org.opencontainers.image.description="LanCache-NG-NTP: chrony-based NTP server, disciplined against public NTP servers, serving LAN clients on UDP/123."
 
-# What: APT_CACHE_BUST invalidates BuildKit's apk layer cache.
-# Why: without it BuildKit replays a stale layer forever.
-# From: Issue #1095
-ARG APT_CACHE_BUST=""
+# What: build identity keys the cache of later layers.
+# Why: a new package set must not reuse a stale apk layer.
+# From: Issue #1683 | PR #1858
+ARG BUILD_IDENTITY
 # What: apk package list, supplied from the SOT.
 # Why: the SOT owns the list; this stage only consumes it.
 # From: Issue #1683
@@ -31,8 +31,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # Why: one owner for the mandatory update+upgrade; SOT owns packages.
 # From: Issue #815 | Issue #1683
 RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
-    : "apt-cache-bust=${APT_CACHE_BUST}" \
-    && bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
+    bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
 
 COPY chrony.conf /etc/chrony/chrony.conf.template
 COPY entrypoint.sh /entrypoint.sh

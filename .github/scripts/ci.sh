@@ -735,28 +735,44 @@ _ci_install_digest_pin() {
     done
 }
 
-# What: Print the SOT value a build type keys on.
-# Why: apk keys base digest, install keys upstream digest.
-# From: Issue #1683
+# What: Print each SOT build_identity input of a type.
+# Why: SOT names the inputs; the build must match the id.
+# From: Issue #1683 | PR #1858
 _ci_identity_pins() {
-    local service="$1" build_type="$2" platform="$3"
-    case "${build_type}" in
-        rust|toolchain)
-            # What: rust keys the whole build-tools sig.
-            # Why: one owner; input change moves the id.
-            # From: Issue #1683
-            _ci_build_tools_resolve_signature
-            ;;
-        apk)
-            _ci_manifest_scalar "^  alpine:"
-            if [ "${service}" = "syslog" ]; then
-                _ci_manifest_scalar "^  fluent_bit:"
-            fi
-            ;;
-        install)
-            _ci_install_digest_pin "${platform}"
-            ;;
-    esac
+    local service="$1" build_type="$2" platform="$3" inputs input pkgs base arch
+    inputs="$(_ci_block_entry_list build_identity "${build_type}" inputs)"
+    if [ -z "${inputs}" ]; then
+        ci_log "[CI-ERROR-IDENTITY-0004]" "build_type=\"${build_type}\" reason=\"no SOT build_identity inputs; FAIL CLOSED\""
+        return 2
+    fi
+    for input in ${inputs}; do
+        printf 'input=%s\n' "${input}"
+        case "${input}" in
+            source_sha) : ;;
+            toolchain_digest|toolchain_source_sha) _ci_build_tools_resolve_signature || return 2 ;;
+            upstream_digest) _ci_install_digest_pin "${platform}" ;;
+            base_digest)
+                if [ "${build_type}" = toolchain ]; then
+                    _ci_build_tools_build_args --bare "${platform}" || return 2
+                else
+                    _ci_service_build_args "${service}" --bare "${platform}" no || return 2
+                fi
+                ;;
+            package_versions)
+                pkgs="$(_ci_block_entry_list services "${service}" packages | tr '\n' ' ')"
+                [ -n "${pkgs// /}" ] || continue
+                base="$(_ci_block_entry_field base_images "" alpine)"
+                arch="$(_ci_platform_apk_arch "${platform}")" || {
+                    ci_log "[CI-ERROR-IDENTITY-0005]" "platform=\"${platform}\" reason=\"no apk arch; FAIL CLOSED\""; return 2; }
+                _ci_apk_resolve "${base}" "${arch}" "${pkgs% }" || return 2
+                printf '\n'
+                ;;
+            *)
+                ci_log "[CI-ERROR-IDENTITY-0006]" "input=\"${input}\" reason=\"unknown build_identity input; FAIL CLOSED\""
+                return 2
+                ;;
+        esac
+    done
 }
 
 # What: Print the bare id of one target+platform.
@@ -1694,6 +1710,13 @@ _ci_docker_build() {
     context="$(ci_service_field "${service}" context)"
     [ -z "${context}" ] && context="services/${service}"
     tag="$(_ci_image_tag "${service}" "${platform}" "${identity}")"
+    # What: the Dockerfile must declare ARG BUILD_IDENTITY.
+    # Why: else a stale cached apk layer ships silently.
+    # From: Issue #1683 | PR #1858
+    if ! grep -qx 'ARG BUILD_IDENTITY' "${context}/Dockerfile"; then
+        ci_log "[CI-ERROR-BUILD-0013]" "service=\"${service}\" path=\"${context}/Dockerfile\" reason=\"no ARG BUILD_IDENTITY; layer cache could ship stale packages\""
+        return 2
+    fi
     local -a args=()
     # What: rust builds from repo-root, not service dir.
     # Why: bind-mount + workspace COPYs need the tree.
@@ -1714,6 +1737,10 @@ _ci_docker_build() {
     while IFS= read -r a; do
         [ -n "${a}" ] && args+=(--build-arg "${a}")
     done < <(ci_cmd_build_args "${service}" --bare "${platform}")
+    # What: the build identity keys every layer's cache.
+    # Why: ARG change reruns RUN; apk repos never do.
+    # From: Issue #1683 | PR #1858
+    args+=(--build-arg "BUILD_IDENTITY=${identity}")
     # What: value-less --build-arg passes proxy from env.
     # Why: predefined args: used by RUN, not in history.
     # From: Issue #1683 | PR #1858
@@ -5018,7 +5045,8 @@ _ci_build_tools_build_args() {
 # Why: single base-image owner; Dockerfiles pin none.
 # From: Issue #1683
 _ci_service_build_args() {
-    local service="$1" fmt="${2:-}" platform="${3:-}" prefix="--build-arg " out="" val ext ext_argname
+    local service="$1" fmt="${2:-}" platform="${3:-}" with_toolchain="${4:-yes}"
+    local prefix="--build-arg " out="" val ext ext_argname
     [ "${fmt}" = "--bare" ] && prefix=""
     out="$(_ci_alpine_build_arg "${prefix}")"$'\n' || return 2
     # What: external_image field adds one more build-arg.
@@ -5044,9 +5072,14 @@ _ci_service_build_args() {
     # Why: SOT owns ref; Dockerfile keeps none
     # From: Issue #1683
     if [ "$(_ci_block_entry_field services "${service}" build_type)" = rust ]; then
-        val="$(${CI_BUILD_TOOLS_IMAGE_CMD:-_ci_build_tools_resolve_image})" || return 2
-        [ -n "${val}" ] || { ci_log "[CI-ERROR-BUILDARGS-0009]" "arg=\"BUILD_TOOLS_IMAGE\" service=\"${service}\" reason=\"empty resolved build-tools image; FAIL CLOSED\""; return 2; }
-        out="${out}${prefix}BUILD_TOOLS_IMAGE=${val}"$'\n'
+        # What: identity omits the registry-resolved ref.
+        # Why: toolchain_digest keys it; no network in id.
+        # From: Issue #1683 | PR #1858
+        if [ "${with_toolchain}" = yes ]; then
+            val="$(${CI_BUILD_TOOLS_IMAGE_CMD:-_ci_build_tools_resolve_image})" || return 2
+            [ -n "${val}" ] || { ci_log "[CI-ERROR-BUILDARGS-0009]" "arg=\"BUILD_TOOLS_IMAGE\" service=\"${service}\" reason=\"empty resolved build-tools image; FAIL CLOSED\""; return 2; }
+            out="${out}${prefix}BUILD_TOOLS_IMAGE=${val}"$'\n'
+        fi
         # What: emit the SOT workspace crate for rust-build.
         # Why: one crate owner; the Dockerfile names none.
         # From: Issue #1683 | PR #1858

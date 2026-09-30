@@ -14,10 +14,10 @@ FROM ${ALPINE_IMAGE}
 
 LABEL org.opencontainers.image.description="nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic."
 
-# What: APT_CACHE_BUST invalidates BuildKit's apk layer cache.
-# Why: without it BuildKit replays a stale layer forever.
-# From: Issue #1095
-ARG APT_CACHE_BUST=""
+# What: build identity keys the cache of later layers.
+# Why: a new package set must not reuse a stale apk layer.
+# From: Issue #1683 | PR #1858
+ARG BUILD_IDENTITY
 # What: image-local nginx.org nginx + tools; CA-trust build-only.
 # Why: stream module needs nginx.org; CA reaches it via the proxy.
 # From: Issue #815 | Issue #1095 | Issue #1781
@@ -27,7 +27,6 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
          cp /etc/ssl/certs/ca-certificates.crt /var/tmp/ca-bundle.orig \
          && cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
        fi \
-    && : "apt-cache-bust=${APT_CACHE_BUST}" \
     && apk update --no-cache \
     && apk upgrade --no-cache \
     && apk add --no-cache ca-certificates openssl curl \

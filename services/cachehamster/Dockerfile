@@ -72,10 +72,10 @@ FROM ${ALPINE_IMAGE}
 
 LABEL org.opencontainers.image.description="lancache-ng cachehamster: Steam cache-warming prefill daemon (scaffold, issue #871)."
 
-# What: declares APT_CACHE_BUST before the apk RUN.
-# Why: BuildKit cache expires to ensure fresh updates.
-# From: Issue #871
-ARG APT_CACHE_BUST=""
+# What: build identity keys the cache of later layers.
+# Why: a new package set must not reuse a stale apk layer.
+# From: Issue #1683 | PR #1858
+ARG BUILD_IDENTITY
 
 # What: the apk package list, supplied from the SOT.
 # Why: the SOT owns the list; this stage only consumes it.
@@ -91,8 +91,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # Why: one owner for the mandatory update+upgrade; SOT owns packages.
 # From: Issue #871 | Issue #1683
 RUN --mount=type=bind,source=.github/scripts/ci.sh,target=/usr/local/bin/ci.sh \
-    : "apt-cache-bust=${APT_CACHE_BUST}" \
-    && bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
+    bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
 
 COPY --from=cachehamster-builder /build/lancache-cachehamster-out /usr/local/bin/lancache-cachehamster
 

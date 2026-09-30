@@ -58,6 +58,11 @@ RUN set -eu; \
       exit 1; \
     fi
 
+# What: build identity keys the cache of later layers.
+# Why: a new package set must not reuse a stale apk layer.
+# From: Issue #1683 | PR #1858
+ARG BUILD_IDENTITY
+
 # What: the apk package list, supplied from the SOT.
 # Why: the SOT owns the list; this stage only consumes it.
 # From: Issue #1683

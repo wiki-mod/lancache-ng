@@ -17,10 +17,10 @@ FROM ${ALPINE_IMAGE}
 
 LABEL org.opencontainers.image.description="Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428)."
 
-# What: APT_CACHE_BUST invalidates BuildKit's apk layer cache.
-# Why: without it BuildKit replays a stale layer forever.
-# From: Issue #1095
-ARG APT_CACHE_BUST=""
+# What: build identity keys the cache of later layers.
+# Why: a new package set must not reuse a stale apk layer.
+# From: Issue #1683 | PR #1858
+ARG BUILD_IDENTITY
 # What: apk package list, supplied from the SOT.
 # Why: the SOT owns the list; this stage only consumes it.
 # From: Issue #1683
@@ -34,8 +34,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # Why: one owner for the mandatory update+upgrade; SOT owns packages.
 # From: Issue #1428 | Issue #1095
 RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
-    : "apt-cache-bust=${APT_CACHE_BUST}" \
-    && bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
+    bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
 
 # What: fixed uid/gid 10001 + writable dirs for syslog-ng.
 # Why: service reads files as non-root; dirs must pre-exist.

@@ -7260,6 +7260,23 @@ EOF
     [[ "${output}" == *"ghcr.io/wiki-mod/lancache-ng/proxy:sha-abc123-amd64"* ]]
     [[ "${output}" == *"--platform linux/amd64"* ]]
     [[ "${output}" == *"org.opencontainers.image.title=proxy"* ]]
+    [[ "${output}" == *"--build-arg BUILD_IDENTITY=abc123"* ]]
+}
+
+@test "docker-build fails closed on a Dockerfile without ARG BUILD_IDENTITY" {
+    # What: no ARG BUILD_IDENTITY stops before buildx runs.
+    # Why: its cache could ship a stale apk layer silently.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/repo" m="${BATS_TEST_TMPDIR}/m.yml"
+    mkdir -p "${r}/svc"
+    printf 'FROM x\nRUN true\n' > "${r}/svc/Dockerfile"
+    printf 'services:\n  svc-a:\n    context: svc\n    build_type: apk\n' > "${m}"
+    docker() { echo "docker $*"; }
+    cd "${r}"
+    CI_MANIFEST="${m}" GITHUB_REPOSITORY=owner/fixture-repo run _ci_docker_build svc-a id1 os/p1
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-BUILD-0013"* ]]
+    [[ "${output}" != *"buildx build"* ]]
 }
 
 @test "docker-build omits cache-from/cache-to when unset (unchanged default)" {

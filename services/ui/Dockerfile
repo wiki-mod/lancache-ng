@@ -83,10 +83,10 @@ FROM ${ALPINE_IMAGE}
 
 LABEL org.opencontainers.image.description="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
 
-# What: declares APT_CACHE_BUST before the busting RUN.
-# Why: BuildKit cache has no wall-clock expiry.
-# From: Issue #1095
-ARG APT_CACHE_BUST=""
+# What: build identity keys the cache of later layers.
+# Why: a new package set must not reuse a stale apk layer.
+# From: Issue #1683 | PR #1858
+ARG BUILD_IDENTITY
 # What: apk package list, supplied from the SOT.
 # Why: the SOT owns the list; this stage only consumes it.
 # From: Issue #1683
@@ -105,7 +105,6 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
       cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
     fi && \
     sed -i 's|^https://|http://|' /etc/apk/repositories && \
-    : "apt-cache-bust=${APT_CACHE_BUST}" && \
     apk update --no-cache && \
     apk upgrade --no-cache && \
     apk add --no-cache ${APK_PACKAGES} && \

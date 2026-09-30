@@ -533,11 +533,11 @@ named_contexts:
 # From: Issue #1683
 build_identity:
   rust:
-    inputs: [source_sha, toolchain_digest]
+    inputs: [source_sha, toolchain_digest, base_digest, package_versions]
   apk:
-    inputs: [package_versions, base_digest]
+    inputs: [source_sha, package_versions, base_digest]
   install:
-    inputs: [upstream_digest]
+    inputs: [source_sha, upstream_digest, base_digest, package_versions]
   toolchain:
     inputs: [toolchain_source_sha, base_digest]
 
