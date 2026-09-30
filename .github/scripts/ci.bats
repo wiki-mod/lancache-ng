@@ -1153,6 +1153,33 @@ _stub() {
     [[ "${output}" == *"tested=ok"* ]]
 }
 
+@test "rust test runs every cargo call through sccache" {
+    # What: cargo sees RUSTC_WRAPPER=sccache, local dir.
+    # Why: rust without sccache violates AG-CI (no Redis).
+    # From: Issue #1683 | PR #1858
+    local root="${BATS_TEST_TMPDIR}/root" bin="${BATS_TEST_TMPDIR}/bin" ctx
+    ctx="$(ci_service_field dns context)"
+    mkdir -p "${root}/${ctx}" "${bin}"
+    printf '#!/usr/bin/env bash\necho "cargo $1 wrapper=${RUSTC_WRAPPER:-none} dir=${SCCACHE_DIR:-none}"\n' > "${bin}/cargo"
+    chmod +x "${bin}/cargo"
+    unset SCCACHE_REDIS_URL
+    CI_REPO_ROOT="${root}" PATH="${bin}:${PATH}" run _ci_test_rust dns
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"[CI-INFO-CACHE-0002]"* ]]
+    [ "$(grep -c 'wrapper=sccache dir=/var/tmp/sccache' <<<"${output}")" -eq 4 ]
+}
+
+@test "sccache env selects Redis when a URL is provided" {
+    # What: a Redis URL switches the backend to redis.
+    # Why: shared cache on self-hosted; local otherwise.
+    # From: Issue #1683 | PR #1858
+    SCCACHE_REDIS_URL=redis://cache.invalid:6379 run bash -c \
+        'source "$1"; _ci_sccache_env p; echo "r=${SCCACHE_REDIS}"' _ "${CI_SH}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"[CI-INFO-CACHE-0001]"* ]]
+    [[ "${output}" == *"r=redis://cache.invalid:6379"* ]]
+}
+
 @test "test runs smoke for an apk service, not the cargo checks" {
     # What: An apk service runs execute-smoke, not cargo.
     # Why: apk binaries must run (#1613); no rust unit test.
@@ -1329,14 +1356,29 @@ RS
     [[ "${output}" == *"equality checks against true"* ]]
 }
 
-@test "scan rejects a /tmp (tmpfs) TMPDIR, requires /var/tmp" {
-    # What: tmpfs /tmp risks OOM on image/db export.
+@test "ci.sh rejects a /tmp (tmpfs) temp root for any command" {
+    # What: tmpfs /tmp risks OOM; one guard for all.
     # Why: All CI staging is /var/tmp (maintainer rule).
-    # From: Issue #1683
+    # From: Issue #1683 | PR #1858
     CI_TMPDIR=/tmp CI_SCAN_CMD="$(_stub s 'exit 0')" GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${CI_SH}" scan ui sha256:x
     [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-SCAN-0003"* ]]
+    [[ "${output}" == *"CI-ERROR-CORE-0006"* ]]
+    CI_TMPDIR=/tmp run bash "${CI_SH}" check comment-length
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-CORE-0006"* ]]
+}
+
+@test "ci.sh creates the /var/tmp temp root and exports TMPDIR" {
+    # What: a missing /var/tmp subdir is made (mkdir -p).
+    # Why: bare mktemp in tools must land on disk.
+    # From: Issue #1683 | PR #1858
+    local d="/var/tmp/ci-bats-root.$$/nested"
+    CI_TMPDIR="${d}" run bash -c 'source "$1"; _ci_tmp_init; echo "t=${TMPDIR}"' _ "${CI_SH}"
+    [ "${status}" -eq 0 ]
+    [ -d "${d}" ]
+    [[ "${output}" == *"t=${d}"* ]]
+    rm -rf "/var/tmp/ci-bats-root.$$"
 }
 
 @test "scan is clean on /var/tmp with auth and a passing backend" {
@@ -3191,7 +3233,7 @@ netdata=sha256:n"
     # Why: Cannot open a session without a target.
     # From: Issue #1164
     _ci_validate_container_ip() { :; }
-    run _ci_validate_ui_session proj /tmp/ci-test-jar.$$
+    run _ci_validate_ui_session proj "${BATS_TEST_TMPDIR}/ci-test-jar"
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-VALIDATE-0030"* ]]
 }
@@ -3208,10 +3250,10 @@ netdata=sha256:n"
         [ -n "$jar" ] && printf 'd\tF\t/\tF\t0\tlancache_ui_session\thdr.body.TOK123\n' > "$jar"
         return 0
     }
-    run _ci_validate_ui_session proj /tmp/ci-test-jar.$$
+    run _ci_validate_ui_session proj "${BATS_TEST_TMPDIR}/ci-test-jar"
     [ "${status}" -eq 0 ]
     [ "${output}" = "TOK123" ]
-    rm -f /tmp/ci-test-jar.$$
+    rm -f "${BATS_TEST_TMPDIR}/ci-test-jar"
 }
 
 @test "validate ui-add-record fails on non-303" {
@@ -3220,7 +3262,7 @@ netdata=sha256:n"
     # From: Issue #1164
     _ci_validate_container_ip() { echo 172.16.1.9; }
     curl() { echo 500; }
-    run _ci_validate_ui_add_record proj /tmp/jar tok ci-probe 203.0.113.60
+    run _ci_validate_ui_add_record proj "${BATS_TEST_TMPDIR}/jar" tok ci-probe 203.0.113.60
     [ "${status}" -eq 1 ]
     [[ "${output}" == *"CI-ERROR-VALIDATE-0034"* ]]
 }
@@ -3231,7 +3273,7 @@ netdata=sha256:n"
     # From: Issue #1164
     _ci_validate_container_ip() { echo 172.16.1.9; }
     curl() { echo 303; }
-    run _ci_validate_ui_add_record proj /tmp/jar tok ci-probe 203.0.113.60
+    run _ci_validate_ui_add_record proj "${BATS_TEST_TMPDIR}/jar" tok ci-probe 203.0.113.60
     [ "${status}" -eq 0 ]
 }
 

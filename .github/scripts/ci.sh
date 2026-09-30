@@ -26,6 +26,11 @@ CI_MANIFEST="${CI_MANIFEST:-${CI_SCRIPT_DIR}/../yaml/build-manifest.yml}"
 # From: Issue #1683
 CI_REPO_ROOT="${CI_REPO_ROOT:-$(cd -- "${CI_SCRIPT_DIR}/../.." && pwd)}"
 
+# What: The one CI temp root; /tmp is forbidden.
+# Why: /tmp is tmpfs (RAM); runners hit OOM there.
+# From: Issue #1683 | PR #1858
+CI_TMPDIR="${CI_TMPDIR:-/var/tmp}"
+
 # What: The ci.sh subcommand dispatch table.
 # Why: One table is membership, dispatch and error text.
 # From: Issue #1683
@@ -64,6 +69,18 @@ ci_error() {
     printf 'raw:\n%s\n' "${raw}" >&2
 }
 
+
+# What: Enforce and create the /var/tmp CI temp root.
+# Why: bare mktemp and tools then use disk, not tmpfs.
+# From: Issue #1683 | PR #1858
+_ci_tmp_init() {
+    case "${CI_TMPDIR}" in
+        /var/tmp|/var/tmp/*) ;;
+        *) ci_log "[CI-ERROR-CORE-0006]" "reason=\"CI temp root must be under /var/tmp, not tmpfs /tmp\" got=\"${CI_TMPDIR}\""; return 2 ;;
+    esac
+    mkdir -p "${CI_TMPDIR}" || return 2
+    export TMPDIR="${CI_TMPDIR}"
+}
 
 # What: Fail closed unless the SOT manifest exists.
 # Why: Every real operation derives state from the manifest.
@@ -519,7 +536,7 @@ ci_cmd_codeql_analyze() {
         ci_log "[CI-ERROR-CODEQL-0004]" "missing=\"${missing[*]}\" reason=\"upload context incomplete; FAIL CLOSED\""
         return 2
     fi
-    work="$(mktemp -d "${TMPDIR:-/var/tmp}/codeql.XXXXXX")" || return 2
+    work="$(mktemp -d "${CI_TMPDIR}/codeql.XXXXXX")" || return 2
     if _ci_codeql_run "${lang}" "${work}"; then rc=0; else rc=$?; fi
     rm -rf "${work}"
     return "${rc}"
@@ -818,7 +835,7 @@ ci_cmd_impact() {
         ci_log "[CI-ERROR-IMPACT-0001]" "reason=\"base ref arg required\""
         return 2
     fi
-    base_manifest="$(mktemp)"
+    base_manifest="$(mktemp -p "${CI_TMPDIR}")"
     _ci_impact_run "${base}" "${head}" "${base_manifest}" || rc=$?
     rm -f "${base_manifest}"
     return "${rc}"
@@ -1026,7 +1043,7 @@ CI_CAS_EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 # From: Issue #1683
 _ci_cas_ref_sha() {
     local remote="$1" ref="$2" out err errf rc=0
-    errf="$(mktemp "${TMPDIR:-/var/tmp}/ci-lsremote.XXXXXX")" || return 2
+    errf="$(mktemp "${CI_TMPDIR}/ci-lsremote.XXXXXX")" || return 2
     out="$(git ls-remote --exit-code "${remote}" "${ref}" 2>"${errf}")" || rc=$?
     err="$(<"${errf}")"; rm -f "${errf}"
     [ "${rc}" -eq 0 ] && { printf '%s\n' "${out%%$'\t'*}"; return 0; }
@@ -1324,7 +1341,7 @@ _ci_matrix_pairs() {
 ci_cmd_aggregate_stack() {
     local matrix="${CI_BUILD_MATRIX:-}" dir svc plat
     [ -n "${matrix}" ] || { ci_log "[CI-ERROR-AGGREGATE-0005]" "reason=\"CI_BUILD_MATRIX required\""; return 2; }
-    dir="$(mktemp -d "${CI_TMPDIR:-/var/tmp}/ci-results.XXXXXX")" || return 2
+    dir="$(mktemp -d "${CI_TMPDIR}/ci-results.XXXXXX")" || return 2
     while read -r svc plat; do
         [ -n "${svc}" ] || continue
         ci_cmd_emit_result "${svc}" "${plat}" > "${dir}/${svc}-${plat//\//-}.json" || return "$?"
@@ -1368,7 +1385,7 @@ _ci_diff_refs() {
 # Why: one git-walk owner; plan/lint/checks (AG-CODE-011).
 # From: Issue #1683
 ci_cmd_changed_files() {
-    local out="${RUNNER_TEMP:-/var/tmp}/changed-files.txt" base head
+    local out="${RUNNER_TEMP:-${CI_TMPDIR}}/changed-files.txt" base head
     read -r base head <<< "$(_ci_diff_refs)"
     if [ -n "${base}" ]; then
         ( cd -- "${CI_REPO_ROOT}" && git diff --name-only "${base}" "${head}" ) > "${out}"
@@ -1443,6 +1460,22 @@ ci_cmd_nightly_status() {
 # From: Issue #1683
 ci_reuse_order() {
     printf 'noop accepted binary_cas build_cache compiler_cache compile\n'
+}
+
+# What: Export sccache as rustc wrapper; Redis if given.
+# Why: every cargo run uses sccache; local disk fallback.
+# From: Issue #1683 | PR #1858
+_ci_sccache_env() {
+    local prefix="$1" wrapper="${2:-sccache}" url="${SCCACHE_REDIS_URL:-}"
+    export RUSTC_WRAPPER="${wrapper}" SCCACHE_DIR="${SCCACHE_DIR:-${CI_TMPDIR}/sccache}"
+    export SCCACHE_REDIS_KEY_PREFIX="${prefix}"
+    if [ -s /run/secrets/sccache_redis_url ]; then url="$(</run/secrets/sccache_redis_url)"; fi
+    if [ -n "${url}" ]; then
+        export SCCACHE_REDIS="${url}"
+        ci_log "[CI-INFO-CACHE-0001]" "prefix=\"${prefix}\" backend=redis"
+    else
+        ci_log "[CI-INFO-CACHE-0002]" "prefix=\"${prefix}\" backend=local dir=\"${SCCACHE_DIR}\""
+    fi
 }
 
 # =========================================================
@@ -1666,7 +1699,7 @@ ci_cmd_apk_setup() {
     fi
 }
 
-# What: In-image rust builder: opt-in sccache/distcc/ccache + fallback.
+# What: In-image rust builder; sccache, opt-in distcc.
 # Why: one owner for dns/ui/watchdog builders (was 3x inline).
 # From: Issue #1683
 ci_cmd_rust_build() {
@@ -1682,7 +1715,7 @@ ci_cmd_rust_build() {
     # Why: a live pipe into grep -qx would mask a producer error.
     local installed_targets; installed_targets="$(rustup target list --installed)"
     grep -qx "${musl_target}" <<<"${installed_targets}" || { ci_log "[CI-ERROR-RUSTBUILD-0004]" "target=\"${musl_target}\" reason=\"musl target not installed in build-tools\""; return 2; }
-    local key_prefix="lancache-${service}" ccache_dir="/var/tmp/ccache-${service}"
+    local key_prefix="lancache-${service}" ccache_dir="${CI_TMPDIR}/ccache-${service}"
     # What: distcc wrapper bypasses pump for aws-lc-sys headers.
     # Why: pump can't see generated headers; would fail (#1533).
     mkdir -p /usr/local/lib/distcc
@@ -1794,14 +1827,9 @@ ci_cmd_rust_build() {
     real_cxx="$(PATH="${original_path}" command -v c++)"
     real_gxx="$(PATH="${original_path}" command -v g++)"
     configure_sccache() {
-        if [ -s /run/secrets/sccache_redis_url ] || [ -s /run/secrets/sccache_dist_config ]; then
-            unset CARGO_MAKEFLAGS MAKEFLAGS
-            export RUSTC_WRAPPER=/usr/local/bin/lancache-rustc-wrapper SCCACHE_REDIS_KEY_PREFIX="${key_prefix}"
-            if [ -s /run/secrets/sccache_redis_url ]; then SCCACHE_REDIS="$(cat /run/secrets/sccache_redis_url)"; export SCCACHE_REDIS; fi
-            if [ -s /run/secrets/sccache_dist_config ]; then export SCCACHE_CONF=/run/secrets/sccache_dist_config; sccache --dist-status; fi
-        else
-            echo "[INFO] sccache disabled (no sccache_redis_url or sccache_dist_config secret present)." >&2
-        fi
+        unset CARGO_MAKEFLAGS MAKEFLAGS
+        _ci_sccache_env "${key_prefix}" /usr/local/bin/lancache-rustc-wrapper
+        if [ -s /run/secrets/sccache_dist_config ]; then export SCCACHE_CONF=/run/secrets/sccache_dist_config; sccache --dist-status; fi
     }
     disable_distcc() {
         if [ "${distcc_enabled:-0}" = "1" ]; then distcc-pump --shutdown >/dev/null 2>&1 || true; fi
@@ -1821,17 +1849,17 @@ ci_cmd_rust_build() {
     # What: read one farm host's real compiler identity.
     # Why: ccache content-check misses a remote toolchain bump.
     extract_remote_toolchain_id() {
-        rm -f /var/tmp/ccache-remote-toolchain-id
+        rm -f "${CI_TMPDIR}/ccache-remote-toolchain-id"
         if command -v readelf >/dev/null 2>&1; then
             local readelf_comment_section; readelf_comment_section="$(readelf -p .comment "$1" 2>/dev/null)"
-            sed -n 's/^ *\[[^]]*\] *//p' <<<"${readelf_comment_section}" > /var/tmp/ccache-remote-toolchain-id
+            sed -n 's/^ *\[[^]]*\] *//p' <<<"${readelf_comment_section}" > "${CI_TMPDIR}/ccache-remote-toolchain-id"
         fi
     }
     # What: split hosts into pump-capable vs non-pump, set up distcc.
     # Why: aws-lc-sys generated headers must bypass pump (#1533/#1612).
     configure_distcc() {
         if [ -s /run/secrets/distcc_potential_hosts ]; then
-            local distcc_probe_dir; distcc_probe_dir="$(mktemp -d -p /var/tmp)"
+            local distcc_probe_dir; distcc_probe_dir="$(mktemp -d -p "${CI_TMPDIR}")"
             DISTCC_POTENTIAL_HOSTS="$(cat /run/secrets/distcc_potential_hosts)"; export DISTCC_POTENTIAL_HOSTS
             local -a distcc_host_specs; read -ra distcc_host_specs <<<"${DISTCC_POTENTIAL_HOSTS}"
             local distcc_hosts="" distcc_hosts_with_pump="" distcc_hosts_without_pump="" distcc_host_spec distcc_host_base
@@ -1886,17 +1914,17 @@ ci_cmd_rust_build() {
     disable_ccache() {
         ccache_enabled=0
         unset CCACHE_REMOTE_STORAGE CCACHE_DIR CCACHE_COMPILERCHECK CCACHE_PREFIX CCACHE_EXTRAFILES CCACHE_BASEDIR
-        rm -f /var/tmp/ccache-toolchain-id /var/tmp/ccache-remote-toolchain-id
+        rm -f "${CI_TMPDIR}/ccache-toolchain-id" "${CI_TMPDIR}/ccache-remote-toolchain-id"
         export CC=cc GCC=gcc CXX=c++ GXX=g++
     }
     # What: wrap distcc with ccache (Redis) once distcc is up.
     # Why: content-check + remote-id guard a stale cross-toolchain hit.
     configure_ccache() {
         if [ "${distcc_enabled:-0}" = "1" ] && [ -s /run/secrets/ccache_redis_url ]; then
-            if [ ! -s /var/tmp/ccache-remote-toolchain-id ]; then
+            if [ ! -s "${CI_TMPDIR}/ccache-remote-toolchain-id" ]; then
                 echo "[INFO] no verified remote distcc toolchain identity; continuing with plain distcc (no cache layer)." >&2; return 0
             fi
-            local ccache_probe_dir; ccache_probe_dir="$(mktemp -d -p /var/tmp)"
+            local ccache_probe_dir; ccache_probe_dir="$(mktemp -d -p "${CI_TMPDIR}")"
             echo "[INFO] wrapping distcc with ccache (Redis remote storage)." >&2
             local ccache_redis_endpoint; ccache_redis_endpoint="$(cat /run/secrets/ccache_redis_url)"
             case "${ccache_redis_endpoint}" in
@@ -1907,8 +1935,8 @@ ci_cmd_rust_build() {
             export CCACHE_DIR="${ccache_dir}"
             export CCACHE_PREFIX=distcc
             export CCACHE_COMPILERCHECK=content
-            printf '%s' "${BUILD_TOOLS_IMAGE:-}" > /var/tmp/ccache-toolchain-id
-            export CCACHE_EXTRAFILES="/var/tmp/ccache-toolchain-id:/var/tmp/ccache-remote-toolchain-id"
+            printf '%s' "${BUILD_TOOLS_IMAGE:-}" > "${CI_TMPDIR}/ccache-toolchain-id"
+            export CCACHE_EXTRAFILES="${CI_TMPDIR}/ccache-toolchain-id:${CI_TMPDIR}/ccache-remote-toolchain-id"
             export CCACHE_BASEDIR="${ccache_probe_dir}"
             export CC="ccache ${real_cc}" GCC="ccache ${real_gcc}" CXX="ccache ${real_cxx}" GXX="ccache ${real_gxx}"
             ccache_enabled=1
@@ -1971,14 +1999,14 @@ ci_cmd_rust_build() {
     # Why: an accel outage must not fail an otherwise-correct build.
     run_cargo_build() {
         local cargo_log cargo_status_file cargo_status
-        cargo_log="$(mktemp -p /var/tmp)"; cargo_status_file="$(mktemp -p /var/tmp)"
+        cargo_log="$(mktemp -p "${CI_TMPDIR}")"; cargo_status_file="$(mktemp -p "${CI_TMPDIR}")"
         { set +e; cargo build -j "${cargo_jobs}" --release --locked --target "${musl_target}" -p "${crate}" 2>&1; echo "$?" >"${cargo_status_file}"; set -e; } | tee "${cargo_log}"
         cargo_status="$(cat "${cargo_status_file}")"; rm -f "${cargo_status_file}"
         if [ "${cargo_status}" = "0" ]; then rm -f "${cargo_log}"; return 0; fi
         if [ "${ccache_enabled:-0}" = "1" ]; then
             disable_ccache
             echo "[INFO] ccache build path unavailable; retrying with plain distcc." >&2
-            local ccache_retry_status_file; ccache_retry_status_file="$(mktemp -p /var/tmp)"
+            local ccache_retry_status_file; ccache_retry_status_file="$(mktemp -p "${CI_TMPDIR}")"
             { set +e; cargo build -j "${cargo_jobs}" --release --locked --target "${musl_target}" -p "${crate}" 2>&1; echo "$?" >"${ccache_retry_status_file}"; set -e; } | tee -a "${cargo_log}"
             cargo_status="$(cat "${ccache_retry_status_file}")"; rm -f "${ccache_retry_status_file}"
             if [ "${cargo_status}" = "0" ]; then echo "[INFO] plain distcc fallback (ccache disabled) completed." >&2; rm -f "${cargo_log}"; return 0; fi
@@ -2020,7 +2048,7 @@ ci_cmd_rust_build() {
     # Why: the binary is already correct; only cache reuse degrades.
     if [ "${ccache_enabled:-0}" = "1" ]; then
         ccache -s
-        local ccache_final_stats; ccache_final_stats="$(mktemp -p /var/tmp)"
+        local ccache_final_stats; ccache_final_stats="$(mktemp -p "${CI_TMPDIR}")"
         ccache --print-stats > "${ccache_final_stats}"
         if grep -qE '^remote_storage_error[[:space:]]+[1-9]' "${ccache_final_stats}"; then
             echo "[INFO] ccache recorded a Redis remote-storage error during the build; binary unaffected, later builds may miss cache reuse." >&2
@@ -2110,7 +2138,7 @@ _ci_trivy_cache_dir() {
         return "$?"
     fi
     local shared="${CI_TRIVY_SHARED_DIR:-/mnt/trivy-db}"
-    local fallback="${CI_TRIVY_FALLBACK_DIR:-/var/tmp/lancache-ng-trivy-cache-fallback}"
+    local fallback="${CI_TRIVY_FALLBACK_DIR:-${CI_TMPDIR}/lancache-ng-trivy-cache-fallback}"
     case "${shared}" in
         /tmp|/tmp/*) ci_log "[CI-ERROR-SCAN-0007]" "reason=\"shared trivy cache-dir must not be tmpfs /tmp\" got=\"${shared}\""; return 2 ;;
     esac
@@ -2239,7 +2267,7 @@ _ci_trivy_scan() {
     fresh_rec="$(_ci_trivy_db_ensure_fresh "${cache_dir}")" || return 3
     [ "$(_ci_record_field "${fresh_rec}" present)" = "true" ] && skip_db=1
     ref="$(_ci_image_ref "${service}" "${digest}")"
-    report="$(mktemp "${TMPDIR:-/var/tmp}/ci-trivy.XXXXXX")"
+    report="$(mktemp "${CI_TMPDIR}/ci-trivy.XXXXXX")"
     local -a targs=(trivy image --severity "HIGH,CRITICAL" --exit-code 1
         --ignore-unfixed --scanners "${scanners}" --cache-dir "${cache_dir}")
     [ "${skip_db}" -eq 1 ] && targs+=(--skip-db-update)
@@ -2487,7 +2515,8 @@ _ci_test_rust() {
         ci_log "[CI-ERROR-TEST-0005]" "service=\"${service}\" reason=\"no context in SOT\""
         return 2
     fi
-    ( cd "${CI_REPO_ROOT:-.}/${ctx}" \
+    ( _ci_sccache_env "lancache-${service}" \
+        && cd "${CI_REPO_ROOT:-.}/${ctx}" \
         && cargo fmt --check \
         && cargo check \
         && cargo clippy -- -D warnings \
@@ -2589,8 +2618,8 @@ _ci_tarpaulin_pct() {
         "${CI_TARPAULIN_CMD}" "${manifest}"
         return "$?"
     fi
-    dir="$(mktemp -d)"
-    if ! ( cd "${CI_REPO_ROOT:-.}" && cargo tarpaulin --engine llvm \
+    dir="$(mktemp -d "${CI_TMPDIR}/ci-tarpaulin.XXXXXX")" || return 2
+    if ! ( _ci_sccache_env "lancache-coverage" && cd "${CI_REPO_ROOT:-.}" && cargo tarpaulin --engine llvm \
             --manifest-path "${manifest}" --locked --timeout 300 \
             --out json --output-dir "${dir}" ); then
         ci_log "[CI-ERROR-COVERAGE-0003]" "manifest=\"${manifest}\" reason=\"tarpaulin failed\""
@@ -2651,16 +2680,9 @@ ci_cmd_scan() {
     [ -n "${service}" ] || { ci_log "[CI-ERROR-SCAN-0001]" "reason=\"service arg required\""; return 2; }
     [ -n "${digest}" ] || { ci_log "[CI-ERROR-SCAN-0002]" "reason=\"digest arg required\""; return 2; }
     _ci_require_ghcr_auth || return "$?"
-    # What: stage scans under /var/tmp.
-    # Why: /tmp is tmpfs; large exports risk OOM.
-    local scan_tmp="${CI_TMPDIR:-/var/tmp}"
-    case "${scan_tmp}" in
-        /var/tmp|/var/tmp/*) ;;
-        *) ci_log "[CI-ERROR-SCAN-0003]" "reason=\"scan TMPDIR must be under /var/tmp, not tmpfs /tmp\" got=\"${scan_tmp}\""; return 2 ;;
-    esac
     local scan_cmd="${CI_SCAN_CMD:-_ci_trivy_scan}"
     local raw status
-    if raw="$(TMPDIR="${scan_tmp}" "${scan_cmd}" "${service}" "${digest}" 2>&1)"; then status=0; else status=$?; fi
+    if raw="$(TMPDIR="${CI_TMPDIR}" "${scan_cmd}" "${service}" "${digest}" 2>&1)"; then status=0; else status=$?; fi
     # What: DB-unavailable is not a finding; escalate it.
     # Why: A DB outage must not read as a finding.
     # From: Issue #1683
@@ -2672,7 +2694,7 @@ ci_cmd_scan() {
         ci_error "[CI-ERROR-SCAN-0005]" "service=\"${service}\" reason=\"scan reported findings\"" "${raw}"
         return 2
     fi
-    printf 'service=%s scanned=clean digest=%s tmpdir=%s\n' "${service}" "${digest}" "${scan_tmp}"
+    printf 'service=%s scanned=clean digest=%s tmpdir=%s\n' "${service}" "${digest}" "${CI_TMPDIR}"
 }
 
 # =========================================================
@@ -3207,7 +3229,7 @@ ci_cmd_release_publish() {
     block="$(_ci_release_notes_block "${tag}")" || return "$?"
     start="${CI_RELEASE_NOTES_START:-<!-- lancache-ng-image-tags:start -->}"
     end="${CI_RELEASE_NOTES_END:-<!-- lancache-ng-image-tags:end -->}"
-    body_file="$(mktemp "${CI_TMPDIR:-/var/tmp}/ci-release-notes.XXXXXX")"
+    body_file="$(mktemp "${CI_TMPDIR}/ci-release-notes.XXXXXX")"
     if view="$("${gh}" release view "${tag}" --repo "${repo}" --json body,isPrerelease 2>/dev/null)"; then
         local existing_body existing_pre
         existing_body="$(printf '%s' "${view}" | jq -r '.body // ""')"
@@ -3251,7 +3273,7 @@ ci_cmd_release_sbom() {
     registry="$(_ci_registry)" || return "$?"
     repo="$(_ci_repo)"
     digest="$(_ci_registry_digest "${registry}/${repo}/${service}:${tag}")" || return "$?"
-    dir="$(mktemp -d "${CI_TMPDIR:-/var/tmp}/ci-sbom.XXXXXX")"
+    dir="$(mktemp -d "${CI_TMPDIR}/ci-sbom.XXXXXX")"
     out="${dir}/${service}.cdx.json"
     "${CI_SBOM_CMD:-_ci_trivy_sbom}" "${service}" "${digest}" "${out}" || rc=$?
     if [ "${rc}" -ne 0 ]; then
@@ -3284,7 +3306,7 @@ ci_cmd_release_vex() {
     local root="${CI_REPO_ROOT:-.}" trivyignore dir out rc=0
     trivyignore="${root}/.trivyignore.yaml"
     [ -s "${trivyignore}" ] || { ci_log "[CI-ERROR-RELEASE-0011]" "path=\"${trivyignore}\" reason=\"trivyignore missing; cannot build release VEX\""; return 2; }
-    dir="$(mktemp -d "${CI_TMPDIR:-/var/tmp}/ci-vex.XXXXXX")"
+    dir="$(mktemp -d "${CI_TMPDIR}/ci-vex.XXXXXX")"
     out="${dir}/vex.openvex.json"
     _ci_generate_vex "${trivyignore}" "${root}" > "${out}" || rc=$?
     if [ "${rc}" -ne 0 ] || [ ! -s "${out}" ]; then
@@ -3633,7 +3655,7 @@ ci_cmd_gc() {
     # What: Materialize roots once for the default probe.
     # Why: One read; avoids re-deriving roots per candidate.
     # From: Issue #1683
-    CI_GC_ROOTS_FILE="$(mktemp "${TMPDIR:-/var/tmp}/ci-gc-roots.XXXXXX")" || return 2
+    CI_GC_ROOTS_FILE="$(mktemp "${CI_TMPDIR}/ci-gc-roots.XXXXXX")" || return 2
     export CI_GC_ROOTS_FILE
     printf '%s\n' "${roots}" | awk 'NF>0' > "${CI_GC_ROOTS_FILE}"
     _ci_gc_run "${mode}" || rc=$?
@@ -3811,7 +3833,7 @@ _ci_validate_subnet() {
 # From: Issue #1683
 _ci_validate_slot_lock() {
     local subnet="$1" root key holder
-    root="${TMPDIR:-/var/tmp}/ci-validate-locks"
+    root="${CI_TMPDIR}/ci-validate-locks"
     key="$(printf '%s' "${subnet}" | tr './' '__')"
     mkdir -p "${root}"
     (
@@ -4222,7 +4244,7 @@ _ci_validate_ssl_mitm() {
         ci_log "[CI-ERROR-VALIDATE-0023]" "reason=\"no proxy container/IP or test domain for ssl-mitm check\""
         return 2
     fi
-    tmp="$(mktemp "${TMPDIR:-/var/tmp}/ci-proxy-ca.XXXXXX")"
+    tmp="$(mktemp "${CI_TMPDIR}/ci-proxy-ca.XXXXXX")"
     if ! docker cp "${cid}:/etc/nginx/ssl/ca/ca.crt" "${tmp}" 2>/dev/null; then
         ci_log "[CI-ERROR-VALIDATE-0024]" "reason=\"could not read proxy LAN CA for ssl-mitm check\""
         rm -f "${tmp}"
@@ -4342,7 +4364,7 @@ _ci_validate_dns_resolves() {
 # From: Issue #1164 | Issue #1683
 _ci_validate_ui_nats_dns() {
     local project="$1" jar csrf rc=0
-    jar="$(mktemp "${TMPDIR:-/var/tmp}/ci-ui-jar.XXXXXX")"
+    jar="$(mktemp "${CI_TMPDIR}/ci-ui-jar.XXXXXX")"
     csrf="$(_ci_validate_ui_session "${project}" "${jar}")" || { rc=$?; rm -f "${jar}"; return "${rc}"; }
     _ci_validate_ui_add_record "${project}" "${jar}" "${csrf}" ci-uinats-probe 203.0.113.60 || rc=$?
     rm -f "${jar}"
@@ -4391,7 +4413,7 @@ _ci_validate_dns_rollback() {
         ci_log "[CI-ERROR-VALIDATE-0041]" "code=\"${code}\" reason=\"/snapshots with wrong X-API-Key not 401\""
         return 1
     fi
-    jar="$(mktemp "${TMPDIR:-/var/tmp}/ci-rb-jar.XXXXXX")"
+    jar="$(mktemp "${CI_TMPDIR}/ci-rb-jar.XXXXXX")"
     csrf="$(_ci_validate_ui_session "${project}" "${jar}")" || { rc=$?; rm -f "${jar}"; return "${rc}"; }
     _ci_validate_ui_add_record "${project}" "${jar}" "${csrf}" ci-rollback-probe 203.0.113.70 || { rm -f "${jar}"; return 1; }
     _ci_validate_dns_resolves "${project}" dns-standard ci-rollback-probe.lan. 203.0.113.70 15 || { rm -f "${jar}"; return 1; }
@@ -4498,8 +4520,8 @@ _ci_default_validate() {
     subnet="$(_ci_record_field "${reservation}" subnet)"
     holder="$(_ci_record_field "${reservation}" holder)"
     project="$(_ci_validate_project "${subnet}")"
-    net_ovr="$(mktemp "${TMPDIR:-/var/tmp}/ci-validate-net.XXXXXX.yml")"
-    pin_ovr="$(mktemp "${TMPDIR:-/var/tmp}/ci-validate-pin.XXXXXX.yml")"
+    net_ovr="$(mktemp "${CI_TMPDIR}/ci-validate-net.XXXXXX.yml")"
+    pin_ovr="$(mktemp "${CI_TMPDIR}/ci-validate-pin.XXXXXX.yml")"
     if _ci_validate_net_override "${subnet}" > "${net_ovr}" \
         && _ci_validate_pin_override "${candidate}" > "${pin_ovr}"; then
         if up_out="$(_ci_validate_up "${project}" "${net_ovr}" "${pin_ovr}" 2>&1)"; then
@@ -4697,7 +4719,7 @@ _ci_bake_check() {
 # Why: set-runtime writes here; clear-runtime removes it.
 # From: Issue #1683
 _ci_runtime_secret_dir() {
-    printf '%s\n' "${CI_RUNTIME_SECRET_DIR:-${RUNNER_TEMP:-/tmp}/ci-runtime-secrets}"
+    printf '%s\n' "${CI_RUNTIME_SECRET_DIR:-${RUNNER_TEMP:-${CI_TMPDIR}}/ci-runtime-secrets}"
 }
 
 # What: Escape a value for a double-quoted TOML string.
@@ -5572,6 +5594,7 @@ ci_main() {
         ci_log "[CI-ERROR-CORE-0002]" "command=\"${command}\" reason=\"unknown subcommand\" known=\"${!CI_DISPATCH[*]}\""
         return 2
     fi
+    _ci_tmp_init || return "$?"
     # What: check/rust-build/apk-setup need no SOT manifest.
     # Why: bind-mounted into a build stage with no SOT tree present.
     # From: Issue #1683
@@ -5946,7 +5969,7 @@ _ci_review_chronology_diff_files() {
     git cat-file -e "${GITHUB_SHA}^{commit}" || {
         ci_log "[CI-ERROR-CHECK-0010]" "reason=\"GITHUB_SHA unreachable\""; return 2; }
     local diff_file
-    diff_file="$(mktemp)"
+    diff_file="$(mktemp -p "${CI_TMPDIR}")"
     if ! git diff -z --name-only --diff-filter=ACMRTUXB \
         "${CHRONOLOGY_DIFF_BASE_SHA}" "${GITHUB_SHA}" > "${diff_file}"; then
         ci_log "[CI-ERROR-CHECK-0010]" "reason=\"git diff itself failed; not treating as a clean pass\""
@@ -6490,7 +6513,7 @@ _ci_check_pr_tracking_metadata() {
         local repo_name="${repo#*/}" query response_file status response project_item_count
         query="$(jq -n --arg owner "${project_owner}" --arg repo "${repo_name}" --argjson pr "${pr_number}" \
             '{query:"query($owner: String!, $pr: Int!, $repo: String!) { repository(owner: $owner, name: $repo) { pullRequest(number: $pr) { projectItems(first: 10) { nodes { project { number } } } } } }", variables:{owner:$owner, pr:$pr, repo:$repo}}')"
-        response_file="$(mktemp)"
+        response_file="$(mktemp -p "${CI_TMPDIR}")"
         status="$(curl -sS -o "${response_file}" -w '%{http_code}' \
             -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
             -H "Content-Type: application/json" -d "${query}" \
@@ -6551,7 +6574,7 @@ _ci_action_manifest_get() {
     local -a auth=()
     token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
     [ -n "${token}" ] && auth=(-H "Authorization: Bearer ${token}")
-    body="$(mktemp)"
+    body="$(mktemp -p "${CI_TMPDIR}")"
     status="$(curl -sS -o "${body}" -w '%{http_code}' \
         -H "Accept: application/vnd.github.raw+json" "${auth[@]}" "${url}" 2>/dev/null)" || status="000"
     if [ "${status}" = "200" ]; then
