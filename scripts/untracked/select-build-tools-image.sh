@@ -43,7 +43,8 @@ repository="${GITHUB_REPOSITORY:-wiki-mod/lancache-ng}"
 # feature branch's own name.
 channel_ref="${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-}}"
 build_tools_channel="$(resolve_build_tools_channel "$channel_ref")"
-published_image="ghcr.io/${repository}/build-tools:${build_tools_channel}"
+channel_image="ghcr.io/${repository}/build-tools:${build_tools_channel}"
+published_image="$channel_image"
 pr_staging_image="${BUILD_TOOLS_PR_STAGING_IMAGE:-}"
 build_tools_context="${BUILD_TOOLS_CONTEXT:-tools/build-tools}"
 fallback_image="${FALLBACK_IMAGE:-lancache-ng-build-tools-validation:${GITHUB_SHA:-local}-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}}"
@@ -52,28 +53,38 @@ pr_head_sha="${GITHUB_EVENT_PULL_REQUEST_HEAD_SHA:-}"
 head_repository="${GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME:-${HEAD_REPOSITORY:-}}"
 base_repository="${GITHUB_REPOSITORY:-${BASE_REPOSITORY:-}}"
 require_published="${BUILD_TOOLS_REQUIRE_PUBLISHED:-false}"
-# What: records image-pull output below /var/tmp.
-# Why: self-hosted /tmp is RAM-backed and risks OOM.
-# From: Issue #1860 | PR #1872
-pull_log="$(mktemp -p /var/tmp lancache-build-tools-pull.XXXXXX)"
-
-# What: selects the verified PR staging manifest when supplied.
-# Why: consumers must not use a stale channel during PR validation.
-# From: Issue #1860 | PR #1872
-if [[ -n "$pr_staging_image" ]]; then
-  published_image="$pr_staging_image"
-fi
-
-cleanup() {
-  rm -f "$pull_log"
-  rm -rf "${SAF_ANCESTOR_RUN_CACHE_DIR:-}"
-}
-trap cleanup EXIT
 
 fail() {
   printf 'select-build-tools-image: %s\n' "$1" >&2
   exit 1
 }
+
+# What: records image-pull output below /var/tmp.
+# Why: self-hosted /tmp is RAM-backed and risks OOM.
+# From: Issue #1860 | PR #1872
+pull_log="$(mktemp -p /var/tmp lancache-build-tools-pull.XXXXXX)"
+changed_files_path=""
+
+if [[ "$event_name" == "pull_request" && -n "$pr_staging_image" ]]; then
+  base_ref="${GITHUB_BASE_REF:-}"
+  [[ -n "$base_ref" ]] || fail "pull request base ref is required to classify build-tools staging"
+  git fetch --quiet --no-tags --depth=1 origin "refs/heads/$base_ref"
+  changed_files_path="$(mktemp -p /var/tmp lancache-build-tools-changed.XXXXXX)"
+  git diff --name-only "origin/$base_ref" "$GITHUB_SHA" >"$changed_files_path"
+  build_tools_changed="$(CHANGED_FILES="$changed_files_path" bash "$script_dir/../untracked/classify-image-impact.sh" | awk -F= '$1 == "build_tools" { print $2 }')"
+  if [[ "$build_tools_changed" == "true" ]]; then
+    published_image="$pr_staging_image"
+  else
+    pr_staging_image=""
+  fi
+fi
+
+cleanup() {
+  rm -f "$pull_log"
+  rm -f "${changed_files_path:-}"
+  rm -rf "${SAF_ANCESTOR_RUN_CACHE_DIR:-}"
+}
+trap cleanup EXIT
 
 build_tools_pr_producer_is_active() {
   [[ -n "$pr_head_sha" ]] || return 1

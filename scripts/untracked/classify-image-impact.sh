@@ -482,6 +482,7 @@ fi
 # From: Issue #1095
 touches_build_tools() {
     touches_prefix "tools/build-tools/" \
+        || touches_exact ".github/workflows/build-tools.yml" \
         || touches_action "build-tools-candidate-smoke"
 }
 output_bool "build_tools" touches_build_tools
