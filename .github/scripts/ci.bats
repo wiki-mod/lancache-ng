@@ -60,8 +60,8 @@ teardown() {
 }
 
 @test "result-gate fails closed on plan, checks, phase failure, or empty" {
-    # What: plan/checks must succeed; others success or skip.
-    # Why: a real phase failure must block promotion.
+    # What: plan/checks ok; others ok or skip.
+    # Why: real phase failure must block promotion.
     # From: Issue #1683 | PR #1858
     CI_PHASE_RESULTS="plan:failure checks:success" run ci_cmd_result_gate
     [ "${status}" -eq 1 ]
@@ -351,8 +351,8 @@ teardown() {
 }
 
 @test "platform-field reads apk arch and runner from the SOT, fail-closed" {
-    # What: platform->field comes from the platform_arch SOT.
-    # Why: one owner; ci.sh keeps no per-arch case (AG-CODE-011).
+    # What: platform->field from platform_arch SOT.
+    # Why: one owner; no per-arch duplication.
     # From: Issue #1683
     local m="${BATS_TEST_TMPDIR}/m.yml"
     printf 'platform_arch:\n  amd64:\n    apk: TESTARCH\n    runner: TESTRUN\n' > "${m}"
@@ -411,8 +411,8 @@ teardown() {
 }
 
 @test "plan-matrix drops a missing target without proven impact" {
-    # What: MISSING_CONFIRMED + impact NOOP -> not in matrix.
-    # Why: MISSING_CONFIRMED alone MUST NOT build (§10).
+    # What: MISSING_CONFIRMED+impact NOOP stays out.
+    # Why: MISSING_CONFIRMED alone MUST NOT build.
     # From: Issue #1683 | PR #1858
     local gh="${BATS_TEST_TMPDIR}/out.txt"; : > "${gh}"
     GITHUB_OUTPUT="${gh}" GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_stub p 'echo MISSING_CONFIRMED')" \
@@ -940,9 +940,9 @@ _probe_stub() {
 }
 
 @test "retry classifier: op=buildx retries the layer-lock and go-panic signatures" {
-    # What: layer-lock and panic signatures are transient.
-    # Why: #1222 buildx layer-lock signature evidence.
-    # From: Issue #1683
+    # What: layer-lock and panic are transient.
+    # Why: buildx layer-lock signature evidence.
+    # From: Issue #1222 | Issue #1683
     [ "$(_ci_classify_failure '(*service).Write failed: rpc error: code = Unavailable desc = ref layer-sha256:abc locked for 900ms (since t): unavailable' buildx)" = "transient" ]
     [ "$(_ci_classify_failure 'panic: methodref has no signature' buildx)" = "transient" ]
 }
@@ -1134,8 +1134,8 @@ _stub() {
 }
 
 @test "semantic impact compares the head id with the base id" {
-    # What: equal ids NOOP, different BUILD, no base UNKNOWN.
-    # Why: BUILD needs proven impact (arch §11, §57).
+    # What: equal=NOOP, diff=BUILD, no base=UNKNOWN.
+    # Why: BUILD needs proven impact; compare refs.
     # From: Issue #1683 | PR #1858
     _ci_diff_refs() { printf 'B H\n'; }
     _ci_manifest_at() { printf 'x\n' > "$2"; }
@@ -1233,8 +1233,8 @@ _stub() {
 }
 
 @test "test reports SKIP for an apk service; smoke is at the digest" {
-    # What: apk has no source test -> explicit SKIP + reason.
-    # Why: AG-INT-002 legit skip; smoke runs in verify.
+    # What: apk has no test -> explicit SKIP+reason.
+    # Why: legit skip; smoke runs in verify.
     # From: Issue #1613 | Issue #1683
     CI_SMOKE_CMD="$(_stub sm 'echo SMOKE-CALLED')" \
         run bash "${CI_SH}" test proxy
@@ -1596,8 +1596,8 @@ RS
 }
 
 @test "ship publishes and verifies only a built image" {
-    # What: built -> publish+verify(digest); reuse -> neither.
-    # Why: one chain owner; a reuse has no local image.
+    # What: built=publish+verify; reuse=skip.
+    # Why: one chain owner; reuse has no image.
     # From: Issue #1683 | PR #1858
     ci_cmd_build() { echo "service=$1 platform=$2 result=built identity=i"; }
     ci_cmd_publish() { echo "service=$1 platform=$2 published=sha256:pub identity=i"; }
@@ -1956,8 +1956,8 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
 }
 
 @test "toolchain joins the promote candidate only when fully accepted" {
-    # What: accepted -> row; missing -> skip; UNKNOWN -> fail.
-    # Why: promote is the one channel mover; UNKNOWN != skip.
+    # What: accepted=row; missing=skip; UNKNOWN=fail.
+    # Why: promote moves channel; UNKNOWN != skip.
     # From: Issue #1683 | PR #1858
     _ci_collect_accepted_digests() { echo "linux/amd64=sha256:a"; }
     _ci_reconcile_index() { echo sha256:idx; }
@@ -3270,8 +3270,8 @@ netdata=sha256:n"
 }
 
 @test "validate dns fails when standard and ssl share an answer" {
-    # What: Identical std/ssl answers return rc 1.
-    # Why: #668 split routing must give distinct IPs.
+    # What: identical std/ssl answers return rc 1.
+    # Why: split routing needs distinct IPs.
     # From: Issue #668
     _ci_validate_container_ip() { case "$2" in dns-standard) echo 1.1.1.1 ;; dns-ssl) echo 2.2.2.2 ;; esac; }
     _ci_validation_dns_domain() { echo a.example.test; }
@@ -3282,8 +3282,8 @@ netdata=sha256:n"
 }
 
 @test "validate dns passes on distinct split-routed answers" {
-    # What: Distinct std/ssl answers return rc 0.
-    # Why: Proves #668 split routing holds.
+    # What: distinct std/ssl answers return rc 0.
+    # Why: split routing holds.
     # From: Issue #668 | Issue #1683
     _ci_validate_container_ip() { case "$2" in dns-standard) echo 1.1.1.1 ;; dns-ssl) echo 2.2.2.2 ;; esac; }
     _ci_validation_dns_domain() { echo a.example.test; }
@@ -3331,7 +3331,7 @@ netdata=sha256:n"
 
 @test "validate ssl-mitm passes when :443 cert is our LAN CA" {
     # What: Our CA as issuer returns rc 0.
-    # Why: Proves genuine MITM interception (#668).
+    # Why: genuine MITM interception.
     # From: Issue #597 | Issue #668
     _ci_validate_container_ip() { echo 172.16.1.9; }
     _ci_validation_dns_domain() { echo a.example.test; }
@@ -3362,8 +3362,8 @@ netdata=sha256:n"
 }
 
 @test "validate ssl-dispatch fails when deeper SNI routes to MITM" {
-    # What: A depth>=2 entry to :9445 returns rc 1.
-    # Why: deeper SNI has no wildcard cert (#1276/#1322).
+    # What: depth>=2 to :9445 returns rc 1.
+    # Why: deeper SNI has no wildcard cert.
     # From: Issue #1322
     docker() {
         case "$1" in
@@ -3377,8 +3377,8 @@ netdata=sha256:n"
 }
 
 @test "validate ssl-dispatch passes on correct depth split" {
-    # What: deeper->:9446, one-level->:9445 returns rc 0.
-    # Why: Proves the #1276/#1322 depth dispatch holds.
+    # What: deeper=:9446, one-level=:9445 ok.
+    # Why: depth dispatch is correct.
     # From: Issue #1276 | Issue #1322
     docker() {
         case "$1" in
@@ -3511,8 +3511,8 @@ netdata=sha256:n"
 }
 
 @test "validate dns-rollback fails when /snapshots is not 401 without a key" {
-    # What: A non-401 unauth response returns rc 1.
-    # Why: The listener MUST require authentication (#628).
+    # What: non-401 unauth response returns rc 1.
+    # Why: listener MUST require authentication.
     # From: Issue #628
     _ci_validate_container_ip() { echo 172.16.1.3; }
     docker() { case "$1" in compose) echo cid1 ;; exec) echo KEY123 ;; esac; }
@@ -3545,8 +3545,8 @@ netdata=sha256:n"
 }
 
 @test "validate dns-rollback passes on a full round-trip" {
-    # What: 401 auth + applied + flush + changed returns rc 0.
-    # Why: Proves the real listener/PATCH/flush path (#628).
+    # What: 401+applied+flush+changed ok.
+    # Why: real listener/PATCH/flush path works.
     # From: Issue #628 | Issue #1683
     _ci_validate_container_ip() { echo 172.16.1.3; }
     docker() { case "$1" in compose) echo cid1 ;; exec) echo KEY123 ;; esac; }
@@ -3566,8 +3566,8 @@ netdata=sha256:n"
 }
 
 @test "validate ui-depends fails on a service_healthy gate" {
-    # What: A service_healthy condition returns rc 1.
-    # Why: UI must not wait on dependency health (#763).
+    # What: service_healthy condition returns rc 1.
+    # Why: UI must start immediately.
     # From: Issue #763
     _ci_validate_config_json() { echo '{"services":{"ui":{"depends_on":{"proxy":{"condition":"service_healthy"}}}}}'; }
     run _ci_validate_ui_depends_started
@@ -3576,8 +3576,8 @@ netdata=sha256:n"
 }
 
 @test "validate ui-depends passes when all deps are service_started" {
-    # What: All service_started conditions return rc 0.
-    # Why: UI starts independently of dependency health (#763).
+    # What: service_started conditions ok.
+    # Why: UI starts immediately.
     # From: Issue #763
     _ci_validate_config_json() { echo '{"services":{"ui":{"depends_on":{"proxy":{"condition":"service_started"},"nats":{"condition":"service_started"}}}}}'; }
     run _ci_validate_ui_depends_started
@@ -3619,8 +3619,8 @@ netdata=sha256:n"
 }
 
 @test "validate secondary-identity fails when two secondaries share an identity" {
-    # What: Identical nats_user/password returns rc 1.
-    # Why: per-secondary identity must be unique (#583).
+    # What: identical nats_user/password rc 1.
+    # Why: per-secondary identity must be unique.
     # From: Issue #583
     _ci_validate_container_ip() { echo 172.16.1.9; }
     docker() { case "$1" in compose) echo cid1 ;; exec) echo TOK ;; esac; }
@@ -3631,8 +3631,8 @@ netdata=sha256:n"
 }
 
 @test "validate secondary-identity passes on distinct identities" {
-    # What: Distinct nats_user/password returns rc 0.
-    # Why: Proves per-secondary auth-callout identity (#583).
+    # What: distinct nats_user/password ok.
+    # Why: per-secondary auth identity verified.
     # From: Issue #583 | Issue #433
     _ci_validate_container_ip() { echo 172.16.1.9; }
     docker() { case "$1" in compose) echo cid1 ;; exec) echo TOK ;; esac; }
@@ -4023,11 +4023,8 @@ netdata=sha256:n"
 }
 
 @test "build-args emits ALPINE_IMAGE for every plain product service" {
-    # What: Every product service gets shared ALPINE_IMAGE.
-    # Why: One base-image owner (base_images.alpine).
-    # From: Issue #1683
-    # What: stub the build-tools resolver for rust services.
-    # Why: rust build-args resolve a ref without GHCR here.
+    # What: every product service gets shared ALPINE_IMAGE.
+    # Why: one base-image owner; ci.sh resolves refs.
     # From: Issue #1683
     export CI_BUILD_TOOLS_IMAGE_CMD='echo bt-stub@sha256:test'
     local svc
@@ -4040,8 +4037,8 @@ netdata=sha256:n"
 }
 
 @test "build-args emits BUILD_TOOLS_IMAGE for a rust service, not apk" {
-    # What: rust build-args add the resolved build-tools ref.
-    # Why: no mutable Dockerfile default; ci.sh owns it.
+    # What: rust build-args add build-tools ref.
+    # Why: no Dockerfile default; ci.sh owns it.
     # From: Issue #1683
     local m="${BATS_TEST_TMPDIR}/bt-manifest.yml"
     printf 'base_images:\n  alpine: "a"\nservices:\n  svc-rust:\n    context: c\n    crate: c1\n    build_type: rust\n  svc-apk:\n    context: c\n    build_type: apk\n' > "${m}"
@@ -4062,7 +4059,7 @@ netdata=sha256:n"
 
 @test "build-args emits MUSL_TARGET per platform for a rust service" {
     # What: rust build-args add the platform's musl target.
-    # Why: ci.sh owns arch mapping; Dockerfile drops uname -m.
+    # Why: ci.sh owns arch mapping; no Dockerfile.
     # From: Issue #1683
     local m="${BATS_TEST_TMPDIR}/mt-manifest.yml"
     printf 'base_images:\n  alpine: "a"\nplatform_arch:\n  amd64:\n    apk: x86_64\n  arm64:\n    apk: aarch64\nservices:\n  svc-rust:\n    context: c\n    crate: c1\n    build_type: rust\n' > "${m}"
@@ -4099,8 +4096,8 @@ netdata=sha256:n"
 }
 
 @test "build-args netdata emits SOT version; digest needs a platform" {
-    # What: no platform -> version + every per-arch sha, no ARCH.
-    # Why: the one pin owner; ARCH/SHA256 need one platform.
+    # What: no platform=version+per-arch shas only.
+    # Why: one pin owner; ARCH/SHA256 need platform.
     # From: Issue #1683 | PR #1858
     local ver; ver="$(_ci_block_entry_field external_versions netdata version)"
     run bash "${CI_SH}" build-args netdata
@@ -4113,7 +4110,7 @@ netdata=sha256:n"
 
 @test "build-args netdata with a platform emits the per-arch digest" {
     # What: a platform selects arch + digest from the SOT.
-    # Why: install services pin the exact per-platform asset.
+    # Why: install services pin per-platform asset.
     # From: Issue #1683
     local arch sha
     arch="$(_ci_platform_apk_arch linux/amd64)"
@@ -4486,7 +4483,7 @@ netdata=sha256:n"
 }
 
 @test "check-all scope filter keeps only in-scope changed files" {
-    # What: an out-of-scope .md is dropped; a .sh still fails.
+    # What: .md dropped; .sh fails.
     # Why: changed files are candidates, not check scope.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/scoperepo" bad
@@ -4856,7 +4853,7 @@ STUBEOF
 
 @test "check docker-run-heredoc-stdin flags a heredoc docker run missing -i" {
     # What: ci.sh owns the AG-VAL-029 heredoc-stdin check.
-    # Why: unattached stdin runs nothing yet reports success.
+    # Why: unattached stdin reports success.
     # From: Issue #1683 | PR #1858
     printf 'jobs:\n  a:\n    steps:\n      - run: docker run -i img bash -s <<EOF\n' > "${BATS_TEST_TMPDIR}/okhd.yml"
     run bash "${CI_SH}" check docker-run-heredoc-stdin "${BATS_TEST_TMPDIR}/okhd.yml"
@@ -4868,9 +4865,9 @@ STUBEOF
 }
 
 @test "check setup-prompt-drift flags an uncovered unconditional wizard prompt" {
-    # What: ci.sh owns the #1176 setup.sh/expect-sim drift guard.
-    # Why: a new unconditional prompt with no sim answer hangs it.
-    # From: Issue #1683 | PR #1858
+    # What: ci.sh owns setup.sh/expect-sim drift guard.
+    # Why: new unconditional prompt hangs without sim.
+    # From: Issue #1176 | Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/spd"
     mkdir -p "${r}/scripts/untracked/simulations"
     printf 'case "${1:-install}" in\ninstall|"") ;;\nesac\nask "Username?" "admin"\n' > "${r}/setup.sh"
@@ -6276,8 +6273,8 @@ _prod_state_wiring_fixture() {
 }
 
 @test "compose config uses the SOT placeholder env only without .env" {
-    # What: plain target gets fixture env; env-file target not.
-    # Why: :?-required keys; shell env masks a committed .env.
+    # What: plain=fixture env; env-file=no.
+    # Why: :?-required; shell env masks .env.
     # From: Issue #1683 | PR #1858
     local bin="${BATS_TEST_TMPDIR}/bin" m="${BATS_TEST_TMPDIR}/cc-env.yml"
     mkdir -p "${bin}"
@@ -7399,7 +7396,7 @@ EOF
 
 @test "check entrypoint-lib-wiring accepts a COPY --from a SOT named build context" {
     # What: COPY --from=dns-domains (SOT named context).
-    # Why: Real domain-validation consolidation pattern (proxy).
+    # Why: domain-validation consolidation pattern.
     # From: Issue #1683
     local r="${BATS_TEST_TMPDIR}/elw-buildcontext"
     mkdir -p "${r}/services/proxy"
@@ -8682,7 +8679,7 @@ SH
 
 @test "index_raw reports absent only on a genuine not_found" {
     # What: a manifest-unknown miss is rc 1 (absent).
-    # Why: only a real miss may drive assembly, never transient.
+    # Why: real miss drives assembly, not transient.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     printf '#!/usr/bin/env bash\necho "not found: manifest unknown" >&2\nexit 1\n' > "${bin}/docker"
@@ -8692,8 +8689,8 @@ SH
 }
 
 @test "pr candidate resolves each service to its amd64 built digest" {
-    # What: PR candidate is the per-service amd64 registry digest.
-    # Why: a PR has no ledger; validate pins the built images.
+    # What: PR candidate=per-service amd64 digest.
+    # Why: no ledger; validate pins images.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     cat > "${bin}/docker" <<'SH'
@@ -8715,8 +8712,8 @@ SH
 }
 
 @test "pr candidate fails closed when a service image is missing" {
-    # What: a not_found PR image fails the candidate closed.
-    # Why: never validate a partial stack; missing is not skip.
+    # What: not_found PR image closes candidate.
+    # Why: partial stack invalid; missing != skip.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     printf '#!/usr/bin/env bash\necho "not found: manifest unknown" >&2\nexit 1\n' > "${bin}/docker"
@@ -8729,8 +8726,8 @@ SH
 }
 
 @test "pr candidate fails closed on an unknown registry error" {
-    # What: a transient/unknown probe fails the candidate closed.
-    # Why: UNKNOWN is never a resolvable image; no build either.
+    # What: transient/unknown probe closes.
+    # Why: UNKNOWN never resolves; no build.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     printf '#!/usr/bin/env bash\necho "Connection reset by peer" >&2\nexit 1\n' > "${bin}/docker"
@@ -8895,7 +8892,7 @@ _version_fixture_repo() {
 }
 
 @test "version verify fails closed on a missing or malformed SOT pin" {
-    # What: per consumer: sha missing -> 0004; garbled -> 0015.
+    # What: sha missing=0004; garbled=0015.
     # Why: a missing/truncated pin must never pass silently.
     # From: Issue #1683 | PR #1858
     local dep df keys key val m
@@ -8916,7 +8913,7 @@ _version_fixture_repo() {
 }
 
 @test "version verify fails closed on a missing or baked consumer ARG" {
-    # What: per consumer: ARG line gone -> 0008; default -> 0009.
+    # What: ARG gone=0008; default=0009.
     # Why: the SOT is the only owner; no second pin, no gap.
     # From: Issue #1683 | PR #1858
     local dep df keys arg root
@@ -8937,7 +8934,7 @@ _version_fixture_repo() {
 
 @test "version audit reports the netdata contract without failing" {
     # What: audit is the report-only view of the contract.
-    # Why: verify is the CI gate; audit stays exit 0 when clean.
+    # Why: verify gates CI; audit report only.
     # From: Issue #1683 | PR #1858
     run bash "${CI_SH}" version audit
     [ "${status}" -eq 0 ]
@@ -9370,8 +9367,8 @@ _write_legacy_env_fixture() {
     [ -z "${output}" ]
 }
 
-# What: run apk-setup with sed+apk stubbed, echo the recorded call log.
-# Why: one shared mechanic for both apk-setup cases (AG-CODE-013).
+# What: run apk-setup with stubs, echo call log.
+# Why: shared apk-setup test mechanic.
 # From: Issue #1683
 _run_apk_setup() {
     local logf="${BATS_TEST_TMPDIR}/apk-setup.log" d="${BATS_TEST_TMPDIR}/apk-setup-bin" t
