@@ -1024,10 +1024,13 @@ CI_CAS_EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 # Why: A failed query is UNKNOWN, never a free lock.
 # From: Issue #1683
 _ci_cas_ref_sha() {
-    local remote="$1" ref="$2" out rc=0
-    out="$(git ls-remote --exit-code "${remote}" "${ref}" 2>/dev/null)" || rc=$?
+    local remote="$1" ref="$2" out err errf rc=0
+    errf="$(mktemp "${TMPDIR:-/var/tmp}/ci-lsremote.XXXXXX")" || return 2
+    out="$(git ls-remote --exit-code "${remote}" "${ref}" 2>"${errf}")" || rc=$?
+    err="$(<"${errf}")"; rm -f "${errf}"
     [ "${rc}" -eq 0 ] && { printf '%s\n' "${out%%$'\t'*}"; return 0; }
     [ "${rc}" -eq 2 ] && return 1
+    ci_error "[CI-WARN-RESOLVE-0008]" "remote=\"${remote}\" ref=\"${ref}\" rc=${rc} reason=\"ref query failed; UNKNOWN\"" "${err}"
     return 2
 }
 
@@ -1151,14 +1154,19 @@ _ci_ledger_remote() {
 # From: Issue #1683
 _ci_ledger_blob() {
     local remote="$1" rc=0
-    _ci_cas_ref_sha "${remote}" "${CI_LEDGER_REF}" >/dev/null 2>&1 || rc=$?
+    _ci_cas_ref_sha "${remote}" "${CI_LEDGER_REF}" >/dev/null || rc=$?
     [ "${rc}" -eq 1 ] && return 1
     [ "${rc}" -eq 0 ] || return 2
     # What: this fetch has no retry level.
     # Why: op=git uses shared transient-signature truth.
     # From: Issue #1683
     _ci_retry git git fetch --quiet --depth=1 "${remote}" "${CI_LEDGER_REF}" >/dev/null || return 2
-    git cat-file -p "FETCH_HEAD:${CI_LEDGER_FILE}" 2>/dev/null || return 2
+    local blob
+    if ! blob="$(git cat-file -p "FETCH_HEAD:${CI_LEDGER_FILE}" 2>&1)"; then
+        ci_error "[CI-WARN-RESOLVE-0009]" "ref=\"${CI_LEDGER_REF}\" file=\"${CI_LEDGER_FILE}\" reason=\"ledger file unreadable; UNKNOWN\"" "${blob}"
+        return 2
+    fi
+    printf '%s\n' "${blob}"
 }
 
 # What: Read one identity's record: state + digest.
@@ -2041,6 +2049,7 @@ _ci_registry_probe() {
     raw="$(docker buildx imagetools inspect "${tag}" --format '{{.Manifest.Digest}}' 2>&1)" || rc=$?
     [ "${rc}" -eq 0 ] && { printf '%s\n' "${raw}"; return 0; }
     [ "$(_ci_classify_failure "${raw}")" = not_found ] && return 1
+    ci_error "[CI-WARN-RESOLVE-0007]" "tag=\"${tag}\" rc=${rc} reason=\"registry probe failed; UNKNOWN\"" "${raw}"
     return 2
 }
 

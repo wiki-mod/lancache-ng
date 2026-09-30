@@ -7980,6 +7980,32 @@ _cas_setup() {
     [ -z "${output}" ]
 }
 
+@test "cas ref_sha shows raw evidence on a query failure" {
+    # What: an unreachable remote is UNKNOWN with raw.
+    # Why: UNKNOWN without its cause is not diagnosable.
+    # From: Issue #1683 | PR #1858
+    _cas_setup
+    cd "${CAS_A}"
+    run _ci_cas_ref_sha "${BATS_TEST_TMPDIR}/no-such-remote" refs/ci/lock/t
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"[CI-WARN-RESOLVE-0008]"* ]]
+    [[ "${output}" == *"raw:"* ]]
+    [[ "${output}" == *"no-such-remote"* ]]
+}
+
+@test "ledger_blob shows raw evidence for a missing file" {
+    # What: ref present, ledger file absent -> UNKNOWN.
+    # Why: the cat-file cause must stay visible (raw).
+    # From: Issue #1683 | PR #1858
+    _cas_setup
+    cd "${CAS_A}"
+    git push --quiet origin "HEAD:${CI_LEDGER_REF}"
+    run _ci_ledger_blob origin
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"[CI-WARN-RESOLVE-0009]"* ]]
+    [[ "${output}" == *"raw:"* ]]
+}
+
 @test "cas lock_try creates the ref on a free lock" {
     # What: a free lock is created atomically.
     # Why: create-against-zero is the acquire path.
@@ -8259,6 +8285,8 @@ EOF
     chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" run _ci_registry_probe ghcr.io/x/y:z
     [ "${status}" -eq 2 ]
+    [[ "${output}" == *"[CI-WARN-RESOLVE-0007]"* ]]
+    [[ "${output}" == *"denied: requested access"* ]]
 }
 
 @test "registry_probe returns the digest on success" {
