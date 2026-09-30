@@ -15,6 +15,8 @@
 ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
 FROM ${BUILD_TOOLS_IMAGE} AS builder
 
+ARG SCCACHE_REDIS_MODE=required
+
 # The shared build-tools image already carries the Rust toolchain, sccache,
 # distcc, distcc-pump, and the supporting Alpine packages. Keep this stage
 # lean and fail closed if the contract is not met.
@@ -164,6 +166,7 @@ cat > /usr/local/lib/lancache-ui-build-accel.sh <<'LANCACHE_UI_HELPERS_EOF'
           export ACTIONS_RESULTS_URL="$(cat /run/secrets/sccache_gha_url)" ACTIONS_RUNTIME_TOKEN="$(cat /run/secrets/sccache_gha_token)"; \
         fi; \
       else \
+        if [ "${SCCACHE_REDIS_MODE:-required}" = "required" ]; then echo "ERROR: required sccache configuration is unavailable for ui." >&2; return 1; fi; \
         echo "[INFO] sccache disabled (no cache configuration secret present)." >&2; \
       fi; \
     }; \
@@ -358,6 +361,7 @@ cat > /usr/local/lib/lancache-ui-build-accel.sh <<'LANCACHE_UI_HELPERS_EOF'
         echo "[INFO] plain distcc fallback also failed; falling through to full local-compiler retry." >&2; \
       fi; \
       if [ "${distcc_enabled:-0}" = "1" ]; then \
+        if [ "${SCCACHE_REDIS_MODE:-required}" = "required" ]; then echo "[ERROR] required sccache acceleration failed; refusing local Rust fallback." >&2; rm -f "$cargo_log"; return "$cargo_status"; fi; \
         # The `{ set +e; ...; echo "$?" >file; set -e; } | tee log` shape
         # above (not `set -o pipefail`, which dash under `sh -c` doesn't
         # support) is how the real cargo build exit code survives being
@@ -382,6 +386,7 @@ cat > /usr/local/lib/lancache-ui-build-accel.sh <<'LANCACHE_UI_HELPERS_EOF'
         return 1; \
       fi; \
       if grep -Eqi 'sccache: error|Fixed token mismatch|Timed out waiting for server startup|SCCACHE_' "$cargo_log"; then \
+        if [ "${SCCACHE_REDIS_MODE:-required}" = "required" ]; then echo "[ERROR] required sccache acceleration failed; refusing local Rust fallback." >&2; rm -f "$cargo_log"; return "$cargo_status"; fi; \
         unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
         echo "[INFO] sccache build path unavailable; retrying with sccache disabled." >&2; \
         rm -f "$cargo_log"; \

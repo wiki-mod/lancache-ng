@@ -9,6 +9,8 @@
 ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
 FROM ${BUILD_TOOLS_IMAGE} AS watchdog-builder
 
+ARG SCCACHE_REDIS_MODE=required
+
 # What: verifies the build-tools contract is present first.
 # Why: fail closed, not a confusing mid-build not-found.
 # From: Issue #842
@@ -137,6 +139,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
           export ACTIONS_RESULTS_URL="$(cat /run/secrets/sccache_gha_url)" ACTIONS_RUNTIME_TOKEN="$(cat /run/secrets/sccache_gha_token)"; \
         fi; \
       else \
+        if [ "${SCCACHE_REDIS_MODE:-required}" = "required" ]; then echo "ERROR: required sccache configuration is unavailable for watchdog." >&2; return 1; fi; \
         echo "[INFO] sccache disabled (no cache configuration secret present)." >&2; \
       fi; \
     }; \
@@ -301,6 +304,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
         echo "[INFO] plain distcc fallback also failed; falling through to full local-compiler retry." >&2; \
       fi; \
       if [ "${distcc_enabled:-0}" = "1" ]; then \
+        if [ "${SCCACHE_REDIS_MODE:-required}" = "required" ]; then echo "[ERROR] required sccache acceleration failed; refusing local Rust fallback." >&2; rm -f "$cargo_log"; return "$cargo_status"; fi; \
         disable_distcc; \
         unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
         echo "[INFO] distcc build path unavailable; retrying with normal local C compiler." >&2; \
@@ -313,6 +317,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
         return 1; \
       fi; \
       if grep -Eqi 'sccache: error|Fixed token mismatch|Timed out waiting for server startup|SCCACHE_' "$cargo_log"; then \
+        if [ "${SCCACHE_REDIS_MODE:-required}" = "required" ]; then echo "[ERROR] required sccache acceleration failed; refusing local Rust fallback." >&2; rm -f "$cargo_log"; return "$cargo_status"; fi; \
         unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
         echo "[INFO] sccache build path unavailable; retrying with sccache disabled." >&2; \
         rm -f "$cargo_log"; \
