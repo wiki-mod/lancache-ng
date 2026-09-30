@@ -31,6 +31,13 @@ env:
   # From: Issue #1683 | PR #1858
   BASE_SHA: ${{ github.event.pull_request.base.sha }}
   BEFORE_SHA: ${{ github.event.before }}
+  # What: LAN proxy inputs; ci.sh applies them self-hosted only.
+  # Why: AG-CI-009; ci.sh is the one proxy policy owner.
+  # From: Issue #1683 | PR #1858
+  PROJECT_SELFHOSTED_PROXY_HTTP: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
+  PROJECT_SELFHOSTED_PROXY_HTTPS: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
+  PROJECT_SELFHOSTED_PROXY_EXCLUSION: ${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
+  PROJECT_SELFHOSTED_PROXY_CA: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
 jobs:
   # What: emit the CodeQL language matrix from ci.sh.
   # Why: §70 books runners only for real analysis.
@@ -38,6 +45,15 @@ jobs:
   impact:
     name: codeql-impact
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # What: admission runs in build-tools, the nightly channel.
+    # Why: nothing runs on the runner; ci.sh needs its tools.
+    # From: Issue #1683 | PR #1858
+    container:
+      image: ghcr.io/${{ github.repository }}/build-tools:nightly
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     outputs:
       matrix: ${{ steps.impact.outputs.codeql-matrix }}
       image: ${{ steps.impact.outputs.codeql-image }}
