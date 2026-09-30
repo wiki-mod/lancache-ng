@@ -6456,9 +6456,20 @@ _ci_check_pr_tracking_metadata() {
     fi
     local -a errs=() warns=()
     local label_count
-    label_count="$(jq -e 'length' <<<"${PR_LABELS_JSON:-[]}" 2>/dev/null)" || label_count=0
-    [ "${label_count}" -eq 0 ] && errs+=("No labels set (AG-GH-008).")
-    [ -z "${PR_MILESTONE_TITLE:-}" ] && errs+=("No milestone set (AG-GH-008).")
+    # What: unset input is a wiring fault, empty is a PR gap.
+    # Why: never report missing metadata the PR actually has.
+    # From: Issue #1683 | PR #1858
+    if [ -z "${PR_LABELS_JSON+x}" ]; then
+        errs+=("PR labels not provided to the check (workflow wiring).")
+    else
+        label_count="$(jq -e 'length' <<<"${PR_LABELS_JSON}" 2>/dev/null)" || label_count=0
+        [ "${label_count}" -eq 0 ] && errs+=("No labels set (AG-GH-008).")
+    fi
+    if [ -z "${PR_MILESTONE_TITLE+x}" ]; then
+        errs+=("PR milestone not provided to the check (workflow wiring).")
+    elif [ -z "${PR_MILESTONE_TITLE}" ]; then
+        errs+=("No milestone set (AG-GH-008).")
+    fi
     if [ -z "${GH_TOKEN:-}" ]; then
         if [ "${PR_IS_FORK:-false}" = "true" ]; then
             warns+=("Project-board not checked: fork PRs get no repo secrets.")

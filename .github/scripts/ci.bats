@@ -4863,6 +4863,10 @@ Fixes the thing.
     PR_NUMBER=12 REPO=wiki-mod/lancache-ng PR_LABELS_JSON='["bug"]' PR_MILESTONE_TITLE=v1 \
         run bash "${CI_SH}" check pr-tracking-metadata
     [ "${status}" -eq 0 ]
+    PR_NUMBER=12 REPO=wiki-mod/lancache-ng run bash "${CI_SH}" check pr-tracking-metadata
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"labels not provided to the check"* ]]
+    [[ "${output}" != *"No labels set"* ]]
 }
 
 @test "check pr-tracking-metadata fails when the project-board token is rejected" {

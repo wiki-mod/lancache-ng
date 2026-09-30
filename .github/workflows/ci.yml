@@ -6,7 +6,11 @@
 # From: Issue #1683
 name: CI 2.0
 on:
+  # What: also rerun on PR metadata and draft-state edits.
+  # Why: AG-GH-008 must re-check label/milestone changes.
+  # From: Issue #1683 | PR #1858
   pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review, converted_to_draft, labeled, unlabeled, milestoned, demilestoned]
   push:
     branches: [current_dev, master]
     tags: ['v*']
@@ -303,6 +307,11 @@ jobs:
       PR_TITLE: ${{ github.event.pull_request.title }}
       PR_AUTHOR: ${{ github.event.pull_request.user.login }}
       PR_BODY: ${{ github.event.pull_request.body }}
+      PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+      PR_MILESTONE_TITLE: ${{ github.event.pull_request.milestone.title }}
+      PR_DRAFT: ${{ github.event.pull_request.draft }}
+      PR_IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
+      GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
       REPO: ${{ github.repository }}
     steps:
       - *bootstrap_diff
