@@ -4433,7 +4433,7 @@ netdata=sha256:n"
     run bash "${CI_SH}" check file-headers "${BATS_TEST_TMPDIR}/Dockerfile"; [ "${status}" -ne 0 ]
 }
 
-@test "check comment-length flags oversize, story-run, and What/Why ref" {
+@test "check comment-length flags oversize, story-run, refs, From form" {
     # What: ci.sh owns AG-CODE-012 limits; bats calls it.
     # Why: guard logic lives once, tested through ci.sh.
     # From: Issue #1683
@@ -4450,6 +4450,18 @@ netdata=sha256:n"
     run bash "${CI_SH}" check comment-length "${BATS_TEST_TMPDIR}/ref.sh"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"ref in What/Why"* ]]
+    local from
+    for from in 'Issue #1' 'PR #2' 'Issue #1 | PR #2'; do
+        printf '# What: a\n# Why: b\n# From: %s\n' "${from}" > "${BATS_TEST_TMPDIR}/f.sh"
+        run bash "${CI_SH}" check comment-length "${BATS_TEST_TMPDIR}/f.sh"
+        [ "${status}" -eq 0 ]
+    done
+    for from in 'Issue #1 | Issue #3' 'Issue #1 | PR #2 (note)' 'PR #2 | PR #4'; do
+        printf '# What: a\n# Why: b\n# From: %s\n' "${from}" > "${BATS_TEST_TMPDIR}/f.sh"
+        run bash "${CI_SH}" check comment-length "${BATS_TEST_TMPDIR}/f.sh"
+        [ "${status}" -ne 0 ]
+        [[ "${output}" == *"one Issue and one PR only"* ]]
+    done
 }
 
 @test "diff-scoped checks skip a deleted path visibly, check the rest" {

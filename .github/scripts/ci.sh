@@ -4444,7 +4444,7 @@ _ci_validate_ui_session() {
 
 # What: POST a LAN A record through the UI (303 on ok).
 # Why: Drives the real UI->NATS->PowerDNS write path.
-# From: Issue #1164
+# From: Issue #1683
 _ci_validate_ui_add_record() {
     local project="$1" jar="$2" csrf="$3" name="$4" content="$5" ip code
     ip="$(_ci_validate_container_ip "${project}" ui)"
@@ -4467,7 +4467,7 @@ _ci_validate_ui_add_record() {
 
 # What: Poll dig until <fqdn> resolves to <expected>.
 # Why: NATS->PowerDNS (AXFR to ssl) async; prove it.
-# From: Issue #1164
+# From: Issue #1683
 _ci_validate_dns_resolves() {
     local project="$1" svc="$2" fqdn="$3" expected="$4" attempts="${5:-15}" ip got i
     ip="$(_ci_validate_container_ip "${project}" "${svc}")"
@@ -5812,6 +5812,7 @@ _ci_check_comment_length() {
                     blocklen++
                     if (length(line) > 60) { printf "%s:%d: %d chars (max 60): %s\n", FILENAME, FNR, length(line), line; viol++ }
                     if (line ~ /^[[:space:]]*#[[:space:]]*(What|Why):/ && line ~ /#[0-9]/) { printf "%s:%d: issue/PR ref in What/Why (use From:): %s\n", FILENAME, FNR, line; viol++ }
+                    if (line ~ /^[[:space:]]*#[[:space:]]*From:/ && line !~ /From: (Issue #[0-9]+|PR #[0-9]+|Issue #[0-9]+ \| PR #[0-9]+)$/) { printf "%s:%d: From: allows one Issue and one PR only: %s\n", FILENAME, FNR, line; viol++ }
                 } else if (blocklen > 0) flush()
             }
             END { if (blocklen > 0) flush(); if (viol > 0) exit 1 }
