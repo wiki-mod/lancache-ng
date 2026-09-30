@@ -323,7 +323,7 @@ teardown() {
 @test "plan rebuilds every shared-secret consumer, and no other" {
     # What: shared-secret (file) feeds its consumer set.
     # Why: dns/dhcp/ui source the lib; ntp does not.
-    # From: Issue #858 | Issue #1683
+    # From: Issue #1683
     run bash "${CI_SH}" plan scripts/lib/shared-secret-bootstrap.sh
     [[ "${output}" == *"dns=true"* ]]
     [[ "${output}" == *"dhcp=true"* ]]
@@ -942,7 +942,7 @@ _probe_stub() {
 @test "retry classifier: op=buildx retries the layer-lock and go-panic signatures" {
     # What: layer-lock and panic are transient.
     # Why: buildx layer-lock signature evidence.
-    # From: Issue #1222 | Issue #1683
+    # From: Issue #1222
     [ "$(_ci_classify_failure '(*service).Write failed: rpc error: code = Unavailable desc = ref layer-sha256:abc locked for 900ms (since t): unavailable' buildx)" = "transient" ]
     [ "$(_ci_classify_failure 'panic: methodref has no signature' buildx)" = "transient" ]
 }
@@ -1235,7 +1235,7 @@ _stub() {
 @test "test reports SKIP for an apk service; smoke is at the digest" {
     # What: apk has no test -> explicit SKIP+reason.
     # Why: legit skip; smoke runs in verify.
-    # From: Issue #1613 | Issue #1683
+    # From: Issue #1613
     CI_SMOKE_CMD="$(_stub sm 'echo SMOKE-CALLED')" \
         run bash "${CI_SH}" test proxy
     [ "${status}" -eq 0 ]
@@ -1246,7 +1246,7 @@ _stub() {
 @test "verify smoke-tests a product image at its digest" {
     # What: matching readback -> SOT smoke at the digest.
     # Why: §25 SERVICE_TESTED; a smoke failure fails verify.
-    # From: Issue #1613 | Issue #1683
+    # From: Issue #1613
     CI_READBACK_CMD="$(_stub rb 'echo sha256:dead')" \
     CI_SMOKE_CMD="$(_stub sm 'echo "service=$1 smoke=ok image=${CI_SERVICE_IMAGE}"')" \
     GHCR_USERNAME=u GHCR_TOKEN=t GITHUB_REPOSITORY=wiki-mod/lancache-ng \
@@ -2874,7 +2874,7 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
 @test "stream-map check accepts a wildcard that forwards to the requested SNI" {
     # What: *.domain->SNI route is correct.
     # Why: Wildcards route by SNI, not root.
-    # From: Issue #1683 | Issue #1297
+    # From: Issue #1297
     run bash -c "source '${CI_SH}'; printf '%s\n' '    *.example.com   \$ssl_preread_server_name:443;' | _ci_stream_map_violations"
     [ "${status}" -eq 0 ]
     [ -z "${output}" ]
@@ -2883,7 +2883,7 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
 @test "stream-map check flags a wildcard hardcoded to a root literal (#1297)" {
     # What: *.domain -> <root>:443 is bug.
     # Why: Subdomain must reach own origin.
-    # From: Issue #1683 | Issue #1297
+    # From: Issue #1297
     run bash -c "source '${CI_SH}'; printf '%s\n' '    *.example.com   example.com:443;' | _ci_stream_map_violations"
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"*.example.com"* ]]
@@ -3260,7 +3260,7 @@ netdata=sha256:n"
 @test "validate dns fails when a mode returns no answer" {
     # What: An empty dig answer returns rc 1.
     # Why: A resolver mode must actually answer.
-    # From: Issue #668 | Issue #1683
+    # From: Issue #668
     _ci_validate_container_ip() { case "$2" in dns-standard) echo 1.1.1.1 ;; dns-ssl) echo 2.2.2.2 ;; esac; }
     _ci_validation_dns_domain() { echo a.example.test; }
     dig() { case "$2" in @1.1.1.1) echo 10.0.0.1 ;; *) : ;; esac; }
@@ -3284,7 +3284,7 @@ netdata=sha256:n"
 @test "validate dns passes on distinct split-routed answers" {
     # What: distinct std/ssl answers return rc 0.
     # Why: split routing holds.
-    # From: Issue #668 | Issue #1683
+    # From: Issue #668
     _ci_validate_container_ip() { case "$2" in dns-standard) echo 1.1.1.1 ;; dns-ssl) echo 2.2.2.2 ;; esac; }
     _ci_validation_dns_domain() { echo a.example.test; }
     dig() { case "$2" in @1.1.1.1) echo 10.0.0.1 ;; @2.2.2.2) echo 10.0.0.2 ;; esac; }
@@ -3332,7 +3332,7 @@ netdata=sha256:n"
 @test "validate ssl-mitm passes when :443 cert is our LAN CA" {
     # What: Our CA as issuer returns rc 0.
     # Why: genuine MITM interception.
-    # From: Issue #597 | Issue #668
+    # From: Issue #597
     _ci_validate_container_ip() { echo 172.16.1.9; }
     _ci_validation_dns_domain() { echo a.example.test; }
     docker() { case "$1" in compose) echo cid1 ;; cp) return 0 ;; esac; }
@@ -3379,7 +3379,7 @@ netdata=sha256:n"
 @test "validate ssl-dispatch passes on correct depth split" {
     # What: deeper=:9446, one-level=:9445 ok.
     # Why: depth dispatch is correct.
-    # From: Issue #1276 | Issue #1322
+    # From: Issue #1276
     docker() {
         case "$1" in
             compose) echo cid1 ;;
@@ -3403,7 +3403,7 @@ netdata=sha256:n"
 @test "validate ui-session extracts the CSRF token" {
     # What: A session cookie yields its CSRF segment.
     # Why: One owner for cookiejar + CSRF extraction.
-    # From: Issue #628 | Issue #1164
+    # From: Issue #628
     _ci_validate_container_ip() { echo 172.16.1.9; }
     curl() {
         local jar="" a
@@ -3474,7 +3474,7 @@ netdata=sha256:n"
 @test "validate ui-nats-dns passes end to end" {
     # What: session+add+resolve(std,ssl) returns rc 0.
     # Why: Proves the UI->NATS->PowerDNS+AXFR path.
-    # From: Issue #1164 | Issue #1683
+    # From: Issue #1164
     _ci_validate_container_ip() { echo 172.16.1.9; }
     curl() {
         local jar="" a
@@ -3502,7 +3502,7 @@ netdata=sha256:n"
 @test "validate dns-rollback fails when the API key is unreadable" {
     # What: An empty shared-secret key returns rc 2.
     # Why: Cannot authenticate to the listener without it.
-    # From: Issue #628 | Issue #858
+    # From: Issue #628
     _ci_validate_container_ip() { echo 172.16.1.3; }
     docker() { case "$1" in compose) echo cid1 ;; exec) : ;; esac; }
     run _ci_validate_dns_rollback proj
@@ -3547,7 +3547,7 @@ netdata=sha256:n"
 @test "validate dns-rollback passes on a full round-trip" {
     # What: 401+applied+flush+changed ok.
     # Why: real listener/PATCH/flush path works.
-    # From: Issue #628 | Issue #1683
+    # From: Issue #628
     _ci_validate_container_ip() { echo 172.16.1.3; }
     docker() { case "$1" in compose) echo cid1 ;; exec) echo KEY123 ;; esac; }
     _ci_validate_ui_session() { echo TOK; }
@@ -3633,7 +3633,7 @@ netdata=sha256:n"
 @test "validate secondary-identity passes on distinct identities" {
     # What: distinct nats_user/password ok.
     # Why: per-secondary auth identity verified.
-    # From: Issue #583 | Issue #433
+    # From: Issue #583
     _ci_validate_container_ip() { echo 172.16.1.9; }
     docker() { case "$1" in compose) echo cid1 ;; exec) echo TOK ;; esac; }
     curl() {
@@ -4867,7 +4867,7 @@ STUBEOF
 @test "check setup-prompt-drift flags an uncovered unconditional wizard prompt" {
     # What: ci.sh owns setup.sh/expect-sim drift guard.
     # Why: new unconditional prompt hangs without sim.
-    # From: Issue #1176 | Issue #1683 | PR #1858
+    # From: Issue #1176
     local r="${BATS_TEST_TMPDIR}/spd"
     mkdir -p "${r}/scripts/untracked/simulations"
     printf 'case "${1:-install}" in\ninstall|"") ;;\nesac\nask "Username?" "admin"\n' > "${r}/setup.sh"
