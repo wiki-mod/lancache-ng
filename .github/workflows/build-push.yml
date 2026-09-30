@@ -2266,7 +2266,6 @@ jobs:
             -e SCCACHE_CONF=/run/lancache/sccache.conf
             -e SCCACHE_REDIS="${SCCACHE_REDIS:-}"
             -e SCCACHE_REDIS_KEY_PREFIX="${SCCACHE_REDIS_KEY_PREFIX:-lancache-dns-quality}"
-            -e SCCACHE_NO_DAEMON=1
             --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}"
             -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
             -v "$PWD:/work" -w /work
@@ -2284,7 +2283,6 @@ jobs:
             -e SCCACHE_CONF=/run/lancache/sccache.conf
             -e SCCACHE_REDIS="${SCCACHE_REDIS:-}"
             -e SCCACHE_REDIS_KEY_PREFIX="${SCCACHE_REDIS_KEY_PREFIX:-lancache-dns-quality}"
-            -e SCCACHE_NO_DAEMON=1
             --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}"
             -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
             -v "$PWD:/work" -w /work
@@ -2359,7 +2357,6 @@ jobs:
             -e SCCACHE_CONF=/run/lancache/sccache.conf
             -e SCCACHE_REDIS="${SCCACHE_REDIS:-}"
             -e SCCACHE_REDIS_KEY_PREFIX="${SCCACHE_REDIS_KEY_PREFIX:-lancache-ui-quality}"
-            -e SCCACHE_NO_DAEMON=1
             --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}"
             -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
             -v "$PWD:/work" -w /work
@@ -2377,7 +2374,6 @@ jobs:
             -e SCCACHE_CONF=/run/lancache/sccache.conf
             -e SCCACHE_REDIS="${SCCACHE_REDIS:-}"
             -e SCCACHE_REDIS_KEY_PREFIX="${SCCACHE_REDIS_KEY_PREFIX:-lancache-ui-quality}"
-            -e SCCACHE_NO_DAEMON=1
             --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}"
             -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
             -v "$PWD:/work" -w /work
@@ -2452,7 +2448,6 @@ jobs:
             -e SCCACHE_CONF=/run/lancache/sccache.conf
             -e SCCACHE_REDIS="${SCCACHE_REDIS:-}"
             -e SCCACHE_REDIS_KEY_PREFIX="${SCCACHE_REDIS_KEY_PREFIX:-lancache-watchdog-quality}"
-            -e SCCACHE_NO_DAEMON=1
             --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}"
             -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
             -v "$PWD:/work" -w /work
@@ -2470,7 +2465,6 @@ jobs:
             -e SCCACHE_CONF=/run/lancache/sccache.conf
             -e SCCACHE_REDIS="${SCCACHE_REDIS:-}"
             -e SCCACHE_REDIS_KEY_PREFIX="${SCCACHE_REDIS_KEY_PREFIX:-lancache-watchdog-quality}"
-            -e SCCACHE_NO_DAEMON=1
             --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}"
             -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
             -v "$PWD:/work" -w /work
@@ -2545,7 +2539,6 @@ jobs:
             -e SCCACHE_CONF=/run/lancache/sccache.conf
             -e SCCACHE_REDIS="${SCCACHE_REDIS:-}"
             -e SCCACHE_REDIS_KEY_PREFIX="${SCCACHE_REDIS_KEY_PREFIX:-lancache-dns-test}"
-            -e SCCACHE_NO_DAEMON=1
             --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}"
             -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
             -v "$PWD:/work" -w /work
@@ -2620,7 +2613,6 @@ jobs:
             -e SCCACHE_CONF=/run/lancache/sccache.conf
             -e SCCACHE_REDIS="${SCCACHE_REDIS:-}"
             -e SCCACHE_REDIS_KEY_PREFIX="${SCCACHE_REDIS_KEY_PREFIX:-lancache-ui-test}"
-            -e SCCACHE_NO_DAEMON=1
             --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}"
             -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
             -v "$PWD:/work" -w /work
@@ -2698,7 +2690,6 @@ jobs:
             -e SCCACHE_CONF=/run/lancache/sccache.conf
             -e SCCACHE_REDIS="${SCCACHE_REDIS:-}"
             -e SCCACHE_REDIS_KEY_PREFIX="${SCCACHE_REDIS_KEY_PREFIX:-lancache-coverage}"
-            -e SCCACHE_NO_DAEMON=1
             --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}"
             -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
             -v "$PWD:/work"
@@ -2720,7 +2711,6 @@ jobs:
             -e SCCACHE_CONF=/run/lancache/sccache.conf
             -e SCCACHE_REDIS="${SCCACHE_REDIS:-}"
             -e SCCACHE_REDIS_KEY_PREFIX="${SCCACHE_REDIS_KEY_PREFIX:-lancache-coverage}"
-            -e SCCACHE_NO_DAEMON=1
             --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}"
             -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
             -v "$PWD:/work"
@@ -2947,7 +2937,6 @@ jobs:
             -e SCCACHE_CONF=/run/lancache/sccache.conf
             -e SCCACHE_REDIS="${SCCACHE_REDIS:-}"
             -e SCCACHE_REDIS_KEY_PREFIX="${SCCACHE_REDIS_KEY_PREFIX:-lancache-watchdog-test}"
-            -e SCCACHE_NO_DAEMON=1
             --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}"
             -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
             -v "$PWD:/work" -w /work
