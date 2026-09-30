@@ -4522,15 +4522,17 @@ netdata=sha256:n"
     # What: ci.sh owns the mode check; bats calls it.
     # Why: bare-path scripts must carry the exec bit.
     # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/exr"; mkdir -p "${r}"
+    local r="${BATS_TEST_TMPDIR}/exr"; mkdir -p "${r}/.githooks"
     git -C "${r}" init -q
-    printf '#!/usr/bin/env bash\n' > "${r}/s.sh"
-    git -C "${r}" add s.sh
-    run bash -c "cd '${r}' && bash '${CI_SH}' check executable-bits s.sh"
+    printf '#!/usr/bin/env bash\n' > "${r}/.githooks/pre-commit"
+    printf 'FROM scratch\n' > "${r}/Dockerfile"
+    git -C "${r}" add .githooks/pre-commit Dockerfile
+    run bash -c "cd '${r}' && bash '${CI_SH}' check executable-bits .githooks/pre-commit Dockerfile"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0009"* ]]
-    git -C "${r}" update-index --chmod=+x s.sh
-    run bash -c "cd '${r}' && bash '${CI_SH}' check executable-bits s.sh"
+    [[ "${output}" != *"Dockerfile: mode"* ]]
+    git -C "${r}" update-index --chmod=+x .githooks/pre-commit
+    run bash -c "cd '${r}' && bash '${CI_SH}' check executable-bits .githooks/pre-commit Dockerfile"
     [ "${status}" -eq 0 ]
 }
 

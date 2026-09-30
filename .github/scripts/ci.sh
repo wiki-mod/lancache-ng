@@ -5980,12 +5980,19 @@ _ci_check_mutable_refs() {
 # Why: bare-path exec needs the bit; core.filemode hides it.
 # From: Issue #1683
 _ci_check_executable_bits() {
-    local -a paths=("$@")
-    if [ "${#paths[@]}" -eq 0 ]; then
-        paths=(.github/scripts/ci.sh)
-        while IFS= read -r h; do [ -n "${h}" ] && paths+=("${h}"); done < <(git ls-files -- '.githooks/*')
+    local -a owned=(.github/scripts/ci.sh) paths=()
+    local h path mode
+    while IFS= read -r h; do [ -n "${h}" ] && owned+=("${h}"); done < <(git ls-files -- '.githooks/*')
+    # What: a changed-file list only narrows the owned set.
+    # Why: Dockerfile/Cargo.toml are no bare-path scripts.
+    # From: Issue #1683 | PR #1858
+    if [ "$#" -eq 0 ]; then
+        paths=("${owned[@]}")
+    else
+        for path in "$@"; do
+            for h in "${owned[@]}"; do [ "${path}" = "${h}" ] && paths+=("${path}"); done
+        done
     fi
-    local path mode
     local -a viol=()
     for path in "${paths[@]}"; do
         mode="$(git ls-files -s -- "${path}" | awk '{print $1; exit}')"

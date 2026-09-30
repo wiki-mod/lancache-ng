@@ -32,6 +32,11 @@ defaults:
 env:
   GHCR_USERNAME: ${{ github.actor }}
   GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  # What: diff refs for every ci.sh step, set once.
+  # Why: a step without them saw no base (impact UNKNOWN).
+  # From: Issue #1683 | PR #1858
+  BASE_SHA: ${{ github.event.pull_request.base.sha }}
+  BEFORE_SHA: ${{ github.event.before }}
 jobs:
   # What: emit the identity-filtered product build matrix.
   # Why: path picks candidates; ci.sh resolve decides the build.
@@ -50,8 +55,6 @@ jobs:
       # From: Issue #1683
       - &bootstrap_diff
         name: Bootstrap the working tree
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           git config --global --add safe.directory "${PWD}"
@@ -66,9 +69,6 @@ jobs:
       - &collect_changed
         name: Collect changed files
         id: changed
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          BEFORE_SHA: ${{ github.event.before }}
         run: echo "file=$(bash .github/scripts/ci.sh changed-files)" >> "$GITHUB_OUTPUT"
       - name: Plan the product build matrix
         id: plan
