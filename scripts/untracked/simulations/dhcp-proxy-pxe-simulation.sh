@@ -209,7 +209,7 @@ docker run --rm \
     -e SCCACHE_REDIS_KEY_PREFIX="${SCCACHE_REDIS_KEY_PREFIX:-lancache-dhcp-proxy-pxe}" \
     -e HTTP_PROXY="${HTTP_PROXY:-}" -e HTTPS_PROXY="${HTTPS_PROXY:-}" -e NO_PROXY="${NO_PROXY:-}" \
     -e http_proxy="${http_proxy:-${HTTP_PROXY:-}}" -e https_proxy="${https_proxy:-${HTTPS_PROXY:-}}" -e no_proxy="${no_proxy:-${NO_PROXY:-}}" \
-    -e CARGO_HTTP_CAINFO=/run/lancache/proxy-ca.pem -e SSL_CERT_FILE=/run/lancache/proxy-ca.pem \
+    -e CARGO_HTTP_CAINFO=/run/lancache/proxy-ca.pem \
     --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}" \
     -v "${LANCACHE_SCCACHE_CONF:?LANCACHE_SCCACHE_CONF is required}:/run/lancache/sccache.conf:ro" \
     -v "${LANCACHE_PROXY_CA_FILE:?LANCACHE_PROXY_CA_FILE is required}:/run/lancache/proxy-ca.pem:ro" \

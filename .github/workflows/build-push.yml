@@ -2265,7 +2265,7 @@ jobs:
             -e http_proxy="${HTTP_PROXY:-}" -e https_proxy="${HTTPS_PROXY:-}" -e no_proxy="${NO_PROXY:-}"
             --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}"
             -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
-            -e CARGO_HTTP_CAINFO=/run/lancache/proxy-ca.pem -e SSL_CERT_FILE=/run/lancache/proxy-ca.pem
+            -e CARGO_HTTP_CAINFO=/run/lancache/proxy-ca.pem
             -v "${LANCACHE_PROXY_CA_FILE:?LANCACHE_PROXY_CA_FILE is required}:/run/lancache/proxy-ca.pem:ro"
             -v "$PWD:/work" -w /work
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
@@ -2345,7 +2345,7 @@ jobs:
             -e http_proxy="${HTTP_PROXY:-}" -e https_proxy="${HTTPS_PROXY:-}" -e no_proxy="${NO_PROXY:-}"
             --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}"
             -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
-            -e CARGO_HTTP_CAINFO=/run/lancache/proxy-ca.pem -e SSL_CERT_FILE=/run/lancache/proxy-ca.pem
+            -e CARGO_HTTP_CAINFO=/run/lancache/proxy-ca.pem
             -v "${LANCACHE_PROXY_CA_FILE:?LANCACHE_PROXY_CA_FILE is required}:/run/lancache/proxy-ca.pem:ro"
             -v "$PWD:/work" -w /work
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
@@ -2425,7 +2425,7 @@ jobs:
             -e http_proxy="${HTTP_PROXY:-}" -e https_proxy="${HTTPS_PROXY:-}" -e no_proxy="${NO_PROXY:-}"
             --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}"
             -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
-            -e CARGO_HTTP_CAINFO=/run/lancache/proxy-ca.pem -e SSL_CERT_FILE=/run/lancache/proxy-ca.pem
+            -e CARGO_HTTP_CAINFO=/run/lancache/proxy-ca.pem
             -v "${LANCACHE_PROXY_CA_FILE:?LANCACHE_PROXY_CA_FILE is required}:/run/lancache/proxy-ca.pem:ro"
             -v "$PWD:/work" -w /work
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
@@ -2507,7 +2507,7 @@ jobs:
             -e http_proxy="${HTTP_PROXY:-}" -e https_proxy="${HTTPS_PROXY:-}" -e no_proxy="${NO_PROXY:-}"
             --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}"
             -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
-            -e CARGO_HTTP_CAINFO=/run/lancache/proxy-ca.pem -e SSL_CERT_FILE=/run/lancache/proxy-ca.pem
+            -e CARGO_HTTP_CAINFO=/run/lancache/proxy-ca.pem
             -v "${LANCACHE_PROXY_CA_FILE:?LANCACHE_PROXY_CA_FILE is required}:/run/lancache/proxy-ca.pem:ro"
             -v "$PWD:/work" -w /work
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
@@ -2589,7 +2589,7 @@ jobs:
             -e http_proxy="${HTTP_PROXY:-}" -e https_proxy="${HTTPS_PROXY:-}" -e no_proxy="${NO_PROXY:-}"
             --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}"
             -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
-            -e CARGO_HTTP_CAINFO=/run/lancache/proxy-ca.pem -e SSL_CERT_FILE=/run/lancache/proxy-ca.pem
+            -e CARGO_HTTP_CAINFO=/run/lancache/proxy-ca.pem
             -v "${LANCACHE_PROXY_CA_FILE:?LANCACHE_PROXY_CA_FILE is required}:/run/lancache/proxy-ca.pem:ro"
             -v "$PWD:/work" -w /work
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
@@ -2678,7 +2678,7 @@ jobs:
             -e http_proxy="${HTTP_PROXY:-}" -e https_proxy="${HTTPS_PROXY:-}" -e no_proxy="${NO_PROXY:-}"
             --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}"
             -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
-            -e CARGO_HTTP_CAINFO=/run/lancache/proxy-ca.pem -e SSL_CERT_FILE=/run/lancache/proxy-ca.pem
+            -e CARGO_HTTP_CAINFO=/run/lancache/proxy-ca.pem
             -v "${LANCACHE_PROXY_CA_FILE:?LANCACHE_PROXY_CA_FILE is required}:/run/lancache/proxy-ca.pem:ro"
             -v "$PWD:/work" -w /work
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
