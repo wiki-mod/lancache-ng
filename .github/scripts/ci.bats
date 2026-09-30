@@ -393,6 +393,24 @@ teardown() {
     [ "$(printf '%s' "${m}" | jq '.include | length')" -eq 2 ]
     [ "$(printf '%s' "${m}" | jq -r '.include[0].service')" = "proxy" ]
     [ "$(printf '%s' "${m}" | jq -r '[.include[].platform]|sort|join(",")')" = "linux/amd64,linux/arm64" ]
+    grep -q '^toolchain-impact=NOOP$' "${gh}"
+    grep -q '^any-toolchain=false$' "${gh}"
+    grep -q '^product-matrix={"include":\[{' "${gh}"
+}
+
+@test "plan-matrix splits a changed toolchain into its own matrix" {
+    # What: build-tools change -> toolchain rows + impact.
+    # Why: the candidate is built before its consumers.
+    # From: Issue #1683 | PR #1858
+    local gh="${BATS_TEST_TMPDIR}/out.txt"; : > "${gh}"
+    GITHUB_OUTPUT="${gh}" GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_stub p 'echo MISSING_CONFIRMED')" \
+    CI_IMPACT_CMD="$(_stub impact 'echo BUILD')" \
+        run bash "${CI_SH}" plan-matrix tools/build-tools/Dockerfile
+    [ "${status}" -eq 0 ]
+    grep -q '^toolchain-impact=BUILD$' "${gh}"
+    grep -q '^any-toolchain=true$' "${gh}"
+    grep -q '^any-product=false$' "${gh}"
+    [ "$(sed -n 's/^toolchain-matrix=//p' "${gh}" | jq -r '[.include[].service]|unique|join(",")')" = build-tools ]
 }
 
 @test "plan-matrix drops a missing target without proven impact" {
@@ -4104,16 +4122,39 @@ netdata=sha256:n"
     [ "$(_ci_build_tools_channel "")" = nightly ]
 }
 
-@test "build-tools resolve-image fails closed on a drifted published signature" {
-    # What: Toolchain != SOT sig must fail.
-    # Why: Jobs must not run stale toolchain.
-    # From: Issue #1683
-    CI_APK_RESOLVE_CMD="$(_stub apk 'printf "pkg-1.0\n"')" \
-    CI_PUBLISHED_SIG_CMD="$(_stub psig 'echo drifted-sig')" \
-    GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${CI_SH}" build-tools resolve-image
+@test "build-tools resolve-image reuses the channel unless the toolchain changed" {
+    # What: NOOP -> channel digest, no apk resolve at all.
+    # Why: normal runs reuse build-tools (AG-CI-010).
+    # From: Issue #1683 | PR #1858
+    export GITHUB_REPOSITORY=o/r GHCR_USERNAME=u GHCR_TOKEN=t
+    _ci_registry_digest() { echo sha256:chan; }
+    CI_APK_RESOLVE_CMD="$(_stub apk 'echo APK_CALLED; exit 9')"
+    unset CI_TOOLCHAIN_IMPACT
+    run _ci_build_tools_resolve_image linux/amd64
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"build-tools@sha256:chan"* ]]
+    [[ "${output}" != *"APK_CALLED"* ]]
+}
+
+@test "build-tools resolve-image uses this identity's candidate on change" {
+    # What: impact BUILD -> candidate, missing -> 0019.
+    # Why: AG-VAL-016 branch candidate; never builds here.
+    # From: Issue #1683 | PR #1858
+    export GITHUB_REPOSITORY=o/r GHCR_USERNAME=u GHCR_TOKEN=t CI_TOOLCHAIN_IMPACT=BUILD
+    _ci_identity_for() { echo id1; }
+    _ci_registry_probe() { echo sha256:cand; }
+    run _ci_build_tools_resolve_image linux/arm64
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"build-tools@sha256:cand"* ]]
+    [[ "${output}" == *"[CI-INFO-BUILDTOOLS-0024]"* ]]
+    _ci_registry_probe() { return 1; }
+    run _ci_build_tools_resolve_image linux/arm64
     [ "${status}" -eq 2 ]
-    [[ "${output}" == *"BUILDTOOLS-0019"* ]]
+    [[ "${output}" == *"[CI-ERROR-BUILDTOOLS-0019]"* ]]
+    _ci_registry_probe() { return 2; }
+    run _ci_build_tools_resolve_image linux/arm64
+    [ "${status}" -eq 2 ]
+    [[ "${output}" != *"build-tools@"* ]]
 }
 
 @test "build-tools signature moves on an arm64-only apk change" {
@@ -4169,36 +4210,6 @@ netdata=sha256:n"
     CI_MANIFEST="${m}" run bash "${CI_SH}" build-tools resolve-signature
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-BUILDTOOLS-0009"* ]]
-}
-
-@test "build-tools published-signature uses the injected reader" {
-    # What: the registry read is injectable for tests.
-    # Why: no live GHCR needed to prove the gate.
-    # From: Issue #1683
-    local mock; mock="$(_stub pub.sh 'echo PUB-123')"
-    run env CI_PUBLISHED_SIG_CMD="${mock}" bash "${CI_SH}" build-tools published-signature img:latest
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"PUB-123"* ]]
-}
-
-@test "build-tools published-signature separates miss, no label, failure" {
-    # What: miss=empty, no label=WARN, error=UNKNOWN+raw.
-    # Why: a failed inspect must never read as drift.
-    # From: Issue #1683 | PR #1858
-    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    printf '#!/usr/bin/env bash\necho "ERROR: img:x: not found" >&2\nexit 1\n' > "${bin}/docker"
-    chmod +x "${bin}/docker"
-    PATH="${bin}:${PATH}" run _ci_build_tools_published_signature img:x
-    [ "${status}" -eq 0 ]; [ -z "${output}" ]
-    printf '#!/usr/bin/env bash\necho "{\\"config\\":{\\"Labels\\":{}}}"\n' > "${bin}/docker"
-    PATH="${bin}:${PATH}" run _ci_build_tools_published_signature img:x
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"[CI-WARN-BUILDTOOLS-0022]"* ]]
-    printf '#!/usr/bin/env bash\necho "denied: requested access" >&2\nexit 1\n' > "${bin}/docker"
-    PATH="${bin}:${PATH}" run _ci_build_tools_published_signature img:x
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"[CI-ERROR-BUILDTOOLS-0021]"* ]]
-    [[ "${output}" == *"denied: requested access"* ]]
 }
 
 @test "build-tools rejects an unknown subcommand (fail closed)" {

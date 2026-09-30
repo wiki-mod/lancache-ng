@@ -567,6 +567,8 @@ ci_cmd_plan_matrix() {
     local docs_only=false
     _ci_docs_only "${changed[@]}" && docs_only=true
     local service platform include='[]' any=false resolved paction runner authed=false test_services=''
+    local tc_list imp tc_impact=NOOP
+    tc_list=" $(_ci_block_keys build_toolchain | tr '\n' ' ')"
     # What: build product services and the toolchain.
     # Why: build-tools generic pipeline, separate assembly.
     # From: Issue #1683
@@ -588,11 +590,18 @@ ci_cmd_plan_matrix() {
             [ -n "${platform}" ] || continue
             resolved="$(_ci_resolve_one "${service}" "${platform}")" || return "$?"
             paction="$(_ci_record_field "${resolved}" action)"
-            [ "${paction}" = "build" ] || continue
+            # What: toolchain impact is needed even without a build.
+            # Why: consumers pick the candidate only on real change.
+            # From: Issue #1683 | PR #1858
+            imp=""
+            if [ "${paction}" = "build" ] || [[ "${tc_list}" == *" ${service} "* ]]; then
+                imp="$(_ci_semantic_impact "${service}" "${platform}" "$(_ci_record_field "${resolved}" identity)")"
+            fi
+            [[ "${tc_list}" == *" ${service} "* ]] && [ "${imp}" = BUILD ] && tc_impact=BUILD
             # What: matrix holds only targets with proven impact.
             # Why: MISSING_CONFIRMED alone MUST NOT build (§10).
             # From: Issue #1683 | PR #1858
-            [ "$(_ci_semantic_impact "${service}" "${platform}" "$(_ci_record_field "${resolved}" identity)")" = BUILD ] || continue
+            [ "${paction}" = "build" ] && [ "${imp}" = BUILD ] || continue
             if ! runner="$(_ci_platform_runner "${platform}")"; then
                 ci_log "[CI-ERROR-PLAN-0002]" "platform=\"${platform}\" reason=\"no runner label for platform\""
                 return 2
@@ -601,9 +610,21 @@ ci_cmd_plan_matrix() {
             any=true
         done <<< "$(_ci_platforms "${service}")"
     done
+    # What: split toolchain rows from product rows.
+    # Why: a toolchain candidate is built before products.
+    # From: Issue #1683 | PR #1858
+    local tc_keys tc_rows prod_rows
+    tc_keys="$(_ci_block_keys build_toolchain | jq -R . | jq -sc .)" || return 2
+    tc_rows="$(jq -c --argjson k "${tc_keys}" '[.[] | select(.service as $s | $k | index($s))]' <<< "${include}")" || return 2
+    prod_rows="$(jq -c --argjson k "${tc_keys}" '[.[] | select(.service as $s | $k | index($s) | not)]' <<< "${include}")" || return 2
     {
         printf 'any-build=%s\n' "${any}"
+        printf 'any-toolchain=%s\n' "$(jq -r 'length > 0' <<< "${tc_rows}")"
+        printf 'any-product=%s\n' "$(jq -r 'length > 0' <<< "${prod_rows}")"
+        printf 'toolchain-impact=%s\n' "${tc_impact}"
         printf 'matrix={"include":%s}\n' "${include}"
+        printf 'toolchain-matrix={"include":%s}\n' "${tc_rows}"
+        printf 'product-matrix={"include":%s}\n' "${prod_rows}"
         printf 'test-services=%s\n' "${test_services# }"
         printf 'docs-only=%s\n' "${docs_only}"
     } >> "${out}"
@@ -5003,7 +5024,7 @@ _ci_service_build_args() {
     # Why: SOT owns the ref; Dockerfile keeps no mutable default.
     # From: Issue #1683
     if [ "$(_ci_block_entry_field services "${service}" build_type)" = rust ]; then
-        val="$(${CI_BUILD_TOOLS_IMAGE_CMD:-_ci_build_tools_resolve_image})" || return 2
+        val="$(${CI_BUILD_TOOLS_IMAGE_CMD:-_ci_build_tools_resolve_image} "${platform}")" || return 2
         [ -n "${val}" ] || { ci_log "[CI-ERROR-BUILDARGS-0009]" "arg=\"BUILD_TOOLS_IMAGE\" service=\"${service}\" reason=\"empty resolved build-tools image; FAIL CLOSED\""; return 2; }
         out="${out}${prefix}BUILD_TOOLS_IMAGE=${val}"$'\n'
         # What: emit the musl cross-target for the platform.
@@ -5215,37 +5236,6 @@ _ci_build_tools_resolve_signature() {
     _ci_build_tools_signature "${versions}"
 }
 
-# What: Read the signature label off a published image.
-# Why: registry read lives here; tests inject the reader.
-# From: Issue #1683
-_ci_build_tools_published_signature() {
-    local image="$1" json
-    if [ -z "${image}" ]; then
-        ci_log "[CI-ERROR-BUILDTOOLS-0012]" "reason=\"image ref required\""
-        return 2
-    fi
-    if [ -n "${CI_PUBLISHED_SIG_CMD:-}" ]; then
-        "${CI_PUBLISHED_SIG_CMD}" "${image}"
-        return "$?"
-    fi
-    local rc=0 sig
-    json="$(docker buildx imagetools inspect "${image}" --format '{{json .Image}}' 2>&1)" || rc=$?
-    if [ "${rc}" -ne 0 ]; then
-        # What: a genuine miss reads as no signature.
-        # Why: any other failure is UNKNOWN, never drift.
-        # From: Issue #1683 | PR #1858
-        [ "$(_ci_classify_failure "${json}")" = not_found ] && { printf ''; return 0; }
-        ci_error "[CI-ERROR-BUILDTOOLS-0021]" "image=\"${image}\" rc=${rc} reason=\"inspect failed; UNKNOWN\"" "${json}"
-        return 2
-    fi
-    sig="$(printf '%s' "${json}" | jq -r '
-        [.. | objects | .config?.Labels? // empty
-         | ."org.lancache-ng.build-tools.signature" // empty]
-        | map(select(. != "")) | first // ""')" || return 2
-    [ -n "${sig}" ] || ci_log "[CI-WARN-BUILDTOOLS-0022]" "image=\"${image}\" reason=\"published image has no signature label\""
-    printf '%s' "${sig}"
-}
-
 # What: Append one include object from key=value pairs.
 # Why: One JSON builder for every matrix, any field set.
 # From: Issue #1683
@@ -5290,25 +5280,57 @@ _ci_build_tools_channel() {
 # Why: jobs pin toolchain by digest; no cascade.
 # From: Issue #1683
 _ci_build_tools_resolve_image() {
-    local ref channel image digest current published
+    local platform="${1:-}" ref channel image digest
     ref="${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-}}"
     channel="$(_ci_build_tools_channel "${ref}")"
     image="$(_ci_build_tools_image)"
     _ci_require_ghcr_auth || return "$?"
-    # What: published toolchain must match SOT signature.
-    # Why: drifted :channel stale; fail closed.
-    # From: Issue #1683
-    current="$(_ci_build_tools_resolve_signature)" || return 2
-    published="$(_ci_build_tools_published_signature "${image}:${channel}")" || return 2
-    if [ "${current}" != "${published}" ]; then
-        ci_log "[CI-ERROR-BUILDTOOLS-0019]" "channel=\"${channel}\" reason=\"published toolchain signature drifted from SOT\" resolved=\"${current}\"" "published=${published}"
-        return 2
+    # What: only a proven toolchain change uses a candidate.
+    # Why: default is reuse (AG-CI-010); AG-VAL-016 candidate.
+    # From: Issue #1683 | PR #1858
+    if [ "${CI_TOOLCHAIN_IMPACT:-NOOP}" = BUILD ]; then
+        _ci_build_tools_candidate "${platform}" "${channel}"
+        return "$?"
     fi
     if ! digest="$(_ci_registry_digest "${image}:${channel}")"; then
         ci_log "[CI-ERROR-BUILDTOOLS-0018]" "channel=\"${channel}\" reason=\"no published build-tools digest; FAIL CLOSED\""
         return 2
     fi
     printf '%s@%s\n' "${image}" "${digest}"
+}
+
+# What: The build_matrix platform of this host.
+# Why: SOT arch aliases; no hardcoded linux/amd64.
+# From: Issue #1683 | PR #1858
+_ci_host_platform() {
+    local m p a
+    m="$(uname -m)"
+    while IFS= read -r p; do
+        [ -n "${p}" ] || continue
+        for a in $(_ci_platform_arch_aliases "${p}"); do
+            [ "${a}" = "${m}" ] && { printf '%s\n' "${p}"; return 0; }
+        done
+    done <<< "$(_ci_build_matrix_platforms)"
+    ci_log "[CI-ERROR-BUILDTOOLS-0023]" "machine=\"${m}\" reason=\"host arch not in SOT build_matrix\""
+    return 2
+}
+
+# What: Resolve this run's build-tools identity candidate.
+# Why: missing -> drift error; unreadable -> UNKNOWN.
+# From: Issue #1683 | PR #1858
+_ci_build_tools_candidate() {
+    local platform="$1" channel="$2" identity tag digest rc=0
+    [ -n "${platform}" ] || platform="$(_ci_host_platform)" || return 2
+    identity="$(_ci_identity_for build-tools "${platform}")" || return 2
+    tag="$(_ci_image_tag build-tools "${platform}" "${identity}")"
+    digest="$(_ci_registry_probe "${tag}")" || rc=$?
+    if [ "${rc}" -eq 0 ] && [ -n "${digest}" ]; then
+        ci_log "[CI-INFO-BUILDTOOLS-0024]" "platform=\"${platform}\" candidate=\"${tag}\" reason=\"toolchain changed; using this identity's candidate\""
+        printf '%s@%s\n' "${tag%:*}" "${digest}"
+        return 0
+    fi
+    [ "${rc}" -eq 1 ] && ci_log "[CI-ERROR-BUILDTOOLS-0019]" "channel=\"${channel}\" reason=\"toolchain changed but no candidate for this identity\" candidate=\"${tag}\""
+    return 2
 }
 
 # What: build-tools lifecycle helpers for the workflow.
@@ -5322,9 +5344,8 @@ ci_cmd_build_tools() {
         arches) _ci_build_tools_arches ;;
         signature) _ci_build_tools_signature "${1:-}" ;;
         resolve-signature) _ci_build_tools_resolve_signature ;;
-        published-signature) _ci_build_tools_published_signature "${1:-}" ;;
         image) _ci_build_tools_image ;;
-        resolve-image) _ci_build_tools_resolve_image ;;
+        resolve-image) _ci_build_tools_resolve_image "${1:-}" ;;
         *)
             ci_log "[CI-ERROR-BUILDTOOLS-0003]" "sub=\"${sub}\" reason=\"unknown build-tools subcommand\""
             return 2
