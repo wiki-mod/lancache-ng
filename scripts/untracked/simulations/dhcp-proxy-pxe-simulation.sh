@@ -59,7 +59,15 @@ echo "== Building the dhcp-proxy image from this checkout's services/dhcp-proxy 
 # What: passes shared-scripts as a named build context.
 # Why: else COPY --from=shared-scripts triggers a bad pull.
 # From: Issue #1095
-docker build -q -t "$image_tag" --build-context "shared-scripts=$repo_root/scripts/lib" services/dhcp-proxy >/dev/null
+docker build -q -t "$image_tag" \
+    --build-context "shared-scripts=$repo_root/scripts/lib" \
+    --build-arg "HTTP_PROXY=${HTTP_PROXY:-}" \
+    --build-arg "HTTPS_PROXY=${HTTPS_PROXY:-}" \
+    --build-arg "NO_PROXY=${NO_PROXY:-}" \
+    --build-arg "http_proxy=${HTTP_PROXY:-}" \
+    --build-arg "https_proxy=${HTTPS_PROXY:-}" \
+    --build-arg "no_proxy=${NO_PROXY:-}" \
+    services/dhcp-proxy >/dev/null
 
 # What: Use 172.29.0.0/16 with flock+retry.
 # Why: Avoid collision on shared runner; RFC1918.
