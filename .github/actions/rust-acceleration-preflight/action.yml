@@ -306,7 +306,6 @@ runs:
             }
 
             if [ -s /run/lancache/sccache-redis-url ] || [ -s /run/lancache/sccache-dist-config ]; then
-              export SCCACHE_NO_DAEMON=1
               export SCCACHE_SERVER_UDS="$preflight_dir/sccache.sock"
               export SCCACHE_REDIS_KEY_PREFIX="lancache-${LANCACHE_SERVICE}"
               require_cache_write=0
