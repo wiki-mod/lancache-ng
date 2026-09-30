@@ -38,6 +38,10 @@ inputs:
     description: Emit temporary GHA cache files for a BuildKit secret mount.
     required: false
     default: "false"
+  proxy-ca:
+    description: Self-hosted proxy CA PEM for transient compiler-container use.
+    required: false
+    default: ""
 outputs:
   config-file:
     description: Generated sccache configuration file.
@@ -48,6 +52,9 @@ outputs:
   token-file:
     description: Generated GitHub Actions runtime token file.
     value: ${{ steps.configure.outputs.token-file }}
+  proxy-ca-file:
+    description: Temporary self-hosted proxy CA file.
+    value: ${{ steps.configure.outputs.proxy-ca-file }}
 runs:
   using: composite
   steps:
@@ -70,6 +77,7 @@ runs:
         SCCACHE_DIST_TOOLCHAIN_CACHE_SIZE: ${{ inputs.dist-toolchain-cache-size }}
         SCCACHE_VERIFY_BINARY: ${{ inputs.verify-binary }}
         EMIT_BUILDKIT_SECRETS: ${{ inputs.emit-buildkit-secrets }}
+        PROJECT_SELFHOSTED_PROXY_CA: ${{ inputs.proxy-ca }}
         ACTIONS_RESULTS_URL: ${{ env.ACTIONS_RESULTS_URL }}
         ACTIONS_RUNTIME_TOKEN: ${{ env.ACTIONS_RUNTIME_TOKEN }}
         GITHUB_REPOSITORY: ${{ github.repository }}
@@ -155,6 +163,13 @@ runs:
 
         config_root="${RUNNER_TEMP:-/var/tmp}"
         mkdir -p -- "$config_root"
+        proxy_ca_file=""
+        if [ -n "$PROJECT_SELFHOSTED_PROXY_CA" ]; then
+          umask 077
+          proxy_ca_file="$(mktemp "$config_root/lancache-proxy-ca.XXXXXX")"
+          printf '%s' "$PROJECT_SELFHOSTED_PROXY_CA" > "$proxy_ca_file"
+        fi
+        printf 'proxy-ca-file=%s\n' "$proxy_ca_file" >> "$GITHUB_OUTPUT"
         sccache_config="$(mktemp "$config_root/lancache-sccache.XXXXXX")"
         : > "$sccache_config"
         if [ "$redis_enabled" = "1" ]; then
@@ -231,6 +246,7 @@ runs:
           fi
           echo "SCCACHE_NO_DAEMON=1"
           echo "LANCACHE_SCCACHE_ENABLED=1"
+          echo "LANCACHE_PROXY_CA_FILE=$proxy_ca_file"
         } >> "$GITHUB_ENV"
 
         export SCCACHE_CONF="$sccache_config"

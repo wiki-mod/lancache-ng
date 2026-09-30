@@ -2239,6 +2239,7 @@ jobs:
           key-prefix: lancache-ci-${{ github.job }}
           dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
           dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          proxy-ca: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
           verify-binary: false
       - name: cargo fmt --check (dns/nats-subscriber)
         run: |
@@ -2264,6 +2265,8 @@ jobs:
             -e http_proxy="${HTTP_PROXY:-}" -e https_proxy="${HTTPS_PROXY:-}" -e no_proxy="${NO_PROXY:-}"
             --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}"
             -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
+            -e CARGO_HTTP_CAINFO=/run/lancache/proxy-ca.pem -e SSL_CERT_FILE=/run/lancache/proxy-ca.pem
+            -v "${LANCACHE_PROXY_CA_FILE:?LANCACHE_PROXY_CA_FILE is required}:/run/lancache/proxy-ca.pem:ro"
             -v "$PWD:/work" -w /work
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
             cargo clippy --locked --all-targets --manifest-path services/dns/nats-subscriber/Cargo.toml -- -D warnings
@@ -2317,6 +2320,7 @@ jobs:
           key-prefix: lancache-ci-${{ github.job }}
           dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
           dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          proxy-ca: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
           verify-binary: false
       - name: cargo fmt --check (ui)
         run: |
@@ -2341,6 +2345,8 @@ jobs:
             -e http_proxy="${HTTP_PROXY:-}" -e https_proxy="${HTTPS_PROXY:-}" -e no_proxy="${NO_PROXY:-}"
             --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}"
             -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
+            -e CARGO_HTTP_CAINFO=/run/lancache/proxy-ca.pem -e SSL_CERT_FILE=/run/lancache/proxy-ca.pem
+            -v "${LANCACHE_PROXY_CA_FILE:?LANCACHE_PROXY_CA_FILE is required}:/run/lancache/proxy-ca.pem:ro"
             -v "$PWD:/work" -w /work
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
             cargo clippy --locked --all-targets --manifest-path services/ui/Cargo.toml -- -D warnings
@@ -2394,6 +2400,7 @@ jobs:
           key-prefix: lancache-ci-${{ github.job }}
           dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
           dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          proxy-ca: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
           verify-binary: false
       - name: cargo fmt --check (watchdog)
         run: |
@@ -2418,6 +2425,8 @@ jobs:
             -e http_proxy="${HTTP_PROXY:-}" -e https_proxy="${HTTPS_PROXY:-}" -e no_proxy="${NO_PROXY:-}"
             --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}"
             -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
+            -e CARGO_HTTP_CAINFO=/run/lancache/proxy-ca.pem -e SSL_CERT_FILE=/run/lancache/proxy-ca.pem
+            -v "${LANCACHE_PROXY_CA_FILE:?LANCACHE_PROXY_CA_FILE is required}:/run/lancache/proxy-ca.pem:ro"
             -v "$PWD:/work" -w /work
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
             cargo clippy --locked --all-targets --manifest-path services/watchdog/Cargo.toml -- -D warnings
@@ -2481,6 +2490,7 @@ jobs:
           key-prefix: lancache-ci-${{ github.job }}
           dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
           dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          proxy-ca: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
           verify-binary: false
       - name: test (dns/nats-subscriber)
         uses: ./.github/actions/cargo-with-sccache-fallback
@@ -2497,6 +2507,8 @@ jobs:
             -e http_proxy="${HTTP_PROXY:-}" -e https_proxy="${HTTPS_PROXY:-}" -e no_proxy="${NO_PROXY:-}"
             --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}"
             -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
+            -e CARGO_HTTP_CAINFO=/run/lancache/proxy-ca.pem -e SSL_CERT_FILE=/run/lancache/proxy-ca.pem
+            -v "${LANCACHE_PROXY_CA_FILE:?LANCACHE_PROXY_CA_FILE is required}:/run/lancache/proxy-ca.pem:ro"
             -v "$PWD:/work" -w /work
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
             cargo test --locked --manifest-path services/dns/nats-subscriber/Cargo.toml
@@ -2560,6 +2572,7 @@ jobs:
           key-prefix: lancache-ci-${{ github.job }}
           dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
           dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          proxy-ca: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
           verify-binary: false
       - name: test (ui)
         uses: ./.github/actions/cargo-with-sccache-fallback
@@ -2576,6 +2589,8 @@ jobs:
             -e http_proxy="${HTTP_PROXY:-}" -e https_proxy="${HTTPS_PROXY:-}" -e no_proxy="${NO_PROXY:-}"
             --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}"
             -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
+            -e CARGO_HTTP_CAINFO=/run/lancache/proxy-ca.pem -e SSL_CERT_FILE=/run/lancache/proxy-ca.pem
+            -v "${LANCACHE_PROXY_CA_FILE:?LANCACHE_PROXY_CA_FILE is required}:/run/lancache/proxy-ca.pem:ro"
             -v "$PWD:/work" -w /work
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
             cargo test --locked --manifest-path services/ui/Cargo.toml
@@ -2646,6 +2661,7 @@ jobs:
           key-prefix: lancache-ci-${{ github.job }}
           dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
           dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          proxy-ca: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
           verify-binary: false
       - name: test (watchdog Rust crate)
         uses: ./.github/actions/cargo-with-sccache-fallback
@@ -2662,6 +2678,8 @@ jobs:
             -e http_proxy="${HTTP_PROXY:-}" -e https_proxy="${HTTPS_PROXY:-}" -e no_proxy="${NO_PROXY:-}"
             --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}"
             -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
+            -e CARGO_HTTP_CAINFO=/run/lancache/proxy-ca.pem -e SSL_CERT_FILE=/run/lancache/proxy-ca.pem
+            -v "${LANCACHE_PROXY_CA_FILE:?LANCACHE_PROXY_CA_FILE is required}:/run/lancache/proxy-ca.pem:ro"
             -v "$PWD:/work" -w /work
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
             cargo test --locked --manifest-path services/watchdog/Cargo.toml

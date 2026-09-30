@@ -68,6 +68,7 @@ jobs:
           key-prefix: lancache-ci-dhcp-proxy-pxe
           dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
           dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          proxy-ca: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
           verify-binary: false
       - name: Run DHCP proxy PXE simulation
         env:
