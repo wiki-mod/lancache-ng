@@ -5680,6 +5680,22 @@ _ci_scan_files() {
     local _ci_scan_p _ci_scan_gone=0
     if [ "${#_ci_scan_override[@]}" -gt 0 ]; then
         _ci_scan_in=("${_ci_scan_override[@]}")
+        # What: check-all narrows changed files to check scope.
+        # Why: a changed .md/.bats is no .sh/Dockerfile finding.
+        # From: Issue #1683 | PR #1858
+        if [ "${CI_SCAN_SCOPE_FILTER:-0}" = 1 ] && [ "$#" -gt 0 ]; then
+            local -A _ci_scan_scope=()
+            while IFS= read -r _ci_scan_p; do
+                [ -n "${_ci_scan_p}" ] && _ci_scan_scope["${_ci_scan_p}"]=1
+            done < <(git ls-files -- "$@")
+            local -a _ci_scan_kept=()
+            for _ci_scan_p in "${_ci_scan_in[@]}"; do
+                if [ ! -f "${_ci_scan_p}" ] || [ -n "${_ci_scan_scope[${_ci_scan_p}]:-}" ]; then
+                    _ci_scan_kept+=("${_ci_scan_p}")
+                fi
+            done
+            _ci_scan_in=("${_ci_scan_kept[@]}")
+        fi
     else
         mapfile -t _ci_scan_in < <(git ls-files -- "$@")
     fi
@@ -8798,7 +8814,7 @@ ci_cmd_check_all() {
         review-chronology governance-guards \
         changelog-direct-edit)
     for sub in "${diff_scoped[@]}"; do
-        ci_cmd_check "${sub}" "${changed[@]}" || rc=1
+        CI_SCAN_SCOPE_FILTER=1 ci_cmd_check "${sub}" "${changed[@]}" || rc=1
     done
     # What: repo-wide invariants diff can't answer.
     # Why: cross-file/state consistency every run.

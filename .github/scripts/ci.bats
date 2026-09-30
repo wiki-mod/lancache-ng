@@ -4478,6 +4478,25 @@ netdata=sha256:n"
     run bash "${CI_SH}" check deny-short-sha "${d}/len12.sh"; [ "${status}" -ne 0 ]
 }
 
+@test "check-all scope filter keeps only in-scope changed files" {
+    # What: an out-of-scope .md is dropped; a .sh still fails.
+    # Why: changed files are candidates, not check scope.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/scoperepo" bad='x=${base_sha:0:7}'
+    mkdir -p "${r}/.github/scripts" "${r}/docs"
+    git -C "${r}" init -q
+    printf '%s\n' "${bad}" > "${r}/docs/a.md"
+    printf 'echo ok\n' > "${r}/.github/scripts/s.sh"
+    git -C "${r}" add -A
+    run bash -c "cd '${r}' && CI_SCAN_SCOPE_FILTER=1 bash '${CI_SH}' check deny-short-sha docs/a.md .github/scripts/s.sh"
+    [ "${status}" -eq 0 ]
+    printf '%s\n' "${bad}" > "${r}/.github/scripts/s.sh"
+    run bash -c "cd '${r}' && CI_SCAN_SCOPE_FILTER=1 bash '${CI_SH}' check deny-short-sha docs/a.md .github/scripts/s.sh"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0005"* ]]
+    [[ "${output}" != *"docs/a.md"* ]]
+}
+
 @test "check deny-short-sha allows full-SHA refs and git rev-parse --short" {
     # What: Full-SHA and rev-parse --short stay clean.
     # Why: Ban targets bash slices only.
