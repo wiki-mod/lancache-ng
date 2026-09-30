@@ -605,7 +605,7 @@ ci_cmd_plan_matrix() {
     _ci_docs_only "${changed[@]}" && docs_only=true
     local service platform include='[]' any=false resolved paction runner authed=false test_services=''
     local sot_changed=false f path_cand
-    # What: SOT change makes every target a candidate.
+    # What: SOT change makes every target id candidate.
     # Why: pins live in SOT; identity decides BUILD.
     # From: Issue #1683 | PR #1858
     for f in "${changed[@]}"; do [ "${f}" = "${CI_MANIFEST_REL}" ] && sot_changed=true; done
@@ -1751,8 +1751,8 @@ _ci_docker_build() {
     printf '%s\n' "${tag}"
 }
 
-# What: In-image apk setup: repos, update, upgrade, packages.
-# Why: one owner for update+upgrade + SOT packages.
+# What: In-image apk setup: repos, update, upgrade, add.
+# Why: one owner for http repos + update+upgrade + packages.
 # From: Issue #1683
 ci_cmd_apk_setup() {
     sed -i 's|^https://|http://|' /etc/apk/repositories
@@ -1764,7 +1764,7 @@ ci_cmd_apk_setup() {
 }
 
 # What: In-image rust builder; sccache, opt-in distcc.
-# Why: one owner for dns/ui/watchdog builders (was inline).
+# Why: one owner for dns/ui/watchdog builders (was 3x).
 # From: Issue #1683
 ci_cmd_rust_build() {
     local service="${1:-}" crate="${2:-}" mode="${3:-build}"
@@ -2033,8 +2033,8 @@ ci_cmd_rust_build() {
             fi
         fi
     }
-    # What: export release LTO/codegen from CI vars, fail.
-    # Why: no default; owner is PROJECT_CARGO_* (AG-CI-006).
+    # What: export release LTO/codegen vars, fail closed.
+    # Why: no defaults; owner is PROJECT_CARGO_* (AG-CI-006).
     resolve_cargo_profile_overrides() {
         local lto="${PROJECT_CARGO_LTO:-}" cgu="${PROJECT_CARGO_CODEGENUNIT:-}"
         [ -n "${lto}" ] || { echo "PROJECT_CARGO_LTO is required (no default; Issue #1095)" >&2; return 1; }
