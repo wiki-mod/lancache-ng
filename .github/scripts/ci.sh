@@ -98,6 +98,14 @@ _ci_proxy_init() {
     export https_proxy="${HTTPS_PROXY}"
     export NO_PROXY="${PROJECT_SELFHOSTED_PROXY_EXCLUSION:-}" no_proxy="${PROJECT_SELFHOSTED_PROXY_EXCLUSION:-}"
     ci_log "[CI-INFO-CORE-0007]" "proxy=on runner=self-hosted no_proxy=\"${NO_PROXY}\""
+    [ -n "${PROJECT_SELFHOSTED_PROXY_CA:-}" ] || return 0
+    # What: job-local bundle = system CAs + proxy CA.
+    # Why: cargo/curl via the TLS proxy; never in an image.
+    # From: Issue #1683 | PR #1858
+    local bundle
+    bundle="$(umask 077 && mktemp "${CI_TMPDIR}/ci-ca-bundle.XXXXXX")" || return 2
+    { cat "${CI_SYSTEM_CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}"; printf '%s\n' "${PROJECT_SELFHOSTED_PROXY_CA}"; } > "${bundle}" || return 2
+    export CARGO_HTTP_CAINFO="${bundle}" CURL_CA_BUNDLE="${bundle}"
 }
 
 # What: Proxy env names passed through to docker.
@@ -5691,7 +5699,7 @@ ci_main() {
         return 2
     fi
     _ci_tmp_init || return "$?"
-    _ci_proxy_init
+    _ci_proxy_init || return "$?"
     # What: check/rust-build/apk-setup need no SOT manifest.
     # Why: bind-mounted into a build stage with no SOT tree present.
     # From: Issue #1683

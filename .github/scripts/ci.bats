@@ -1456,6 +1456,19 @@ RS
     [[ "${output}" == *"HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy"* ]]
 }
 
+@test "proxy CA becomes a job-local bundle with the system CAs" {
+    # What: bundle = system CAs + proxy CA, for cargo/curl.
+    # Why: TLS proxy on self-hosted; system trust stays.
+    # From: Issue #1683 | PR #1858
+    local sys="${BATS_TEST_TMPDIR}/sys.pem"
+    printf 'SYSTEM-CA\n' > "${sys}"
+    run bash -c 'source "$1"; RUNNER_ENVIRONMENT=self-hosted PROJECT_SELFHOSTED_PROXY_HTTP=http://p:3128 PROJECT_SELFHOSTED_PROXY_CA=PROXY-CA CI_SYSTEM_CA_BUNDLE="$2" _ci_proxy_init; cat "${CARGO_HTTP_CAINFO}"; [ "${CURL_CA_BUNDLE}" = "${CARGO_HTTP_CAINFO}" ] && echo same; stat -c %a "${CARGO_HTTP_CAINFO}"; rm -f "${CARGO_HTTP_CAINFO}"' _ "${CI_SH}" "${sys}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"SYSTEM-CA"*"PROXY-CA"* ]]
+    [[ "${output}" == *"same"* ]]
+    [[ "${output}" == *"600"* ]]
+}
+
 @test "ci.sh creates the /var/tmp temp root and exports TMPDIR" {
     # What: a missing /var/tmp subdir is made (mkdir -p).
     # Why: bare mktemp in tools must land on disk.
