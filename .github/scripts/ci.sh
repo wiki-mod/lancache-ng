@@ -1478,7 +1478,7 @@ ci_cmd_test_stack() { _ci_for_test_services ci_cmd_test; }
 
 # What: file/update/close standing tracking issue for run.
 # Why: nightly reliability; self-closing, no action.
-# From: Issue #1683 | Issue #1095
+# From: Issue #1683
 ci_cmd_nightly_status() {
     local outcome="${1:-}" scope="${2:-}" label="${3:-nightly-broken}" failed="${CI_FAILED_JOBS:-}"
     [ -n "${outcome}" ] || { ci_log "[CI-ERROR-STATUS-0001]" "reason=\"outcome arg required (success|failure)\""; return 2; }
@@ -4274,7 +4274,7 @@ _ci_validate_wait_healthy() {
 
 # What: Prove DNS resolves a CDN domain and split-routes.
 # Why: Real dig; standard/ssl MUST differ, not ping.
-# From: Issue #668 | Issue #1683 | PR #1858
+# From: Issue #1683 | PR #1858
 _ci_validate_dns() {
     local project="$1" ip_std ip_ssl domain a_std a_ssl
     ip_std="$(_ci_validate_container_ip "${project}" dns-standard)"
@@ -4324,21 +4324,21 @@ _ci_validate_proxy() {
 
 # What: print stream-target wildcard hardcode lines.
 # Why: *.domain must forward to SNI, not literal.
-# From: Issue #1683 | Issue #1297
+# From: Issue #1683
 _ci_stream_map_violations() {
     awk '/^[[:space:]]*\*\./ && $2 != "$ssl_preread_server_name:443;" { print }'
 }
 
 # What: print depth>=2 dispatch entries not routed to :9446.
 # Why: deeper SNI has no wildcard cert; must passthrough.
-# From: Issue #1683 | Issue #1276 | Issue #1322
+# From: Issue #1683
 _ci_ssl_dispatch_violations() {
     awk 'index($0, "~^.+\\.") > 0 && $NF != "127.0.0.1:9446;" { print }'
 }
 
 # What: prove proxy routes wildcards by SNI.
 # Why: root literal misroutes subdomains.
-# From: Issue #1683 | Issue #1297
+# From: Issue #1683
 _ci_validate_proxy_stream_map() {
     local project="$1" cid map bad
     cid="$(docker compose -p "${project}" ps -q proxy 2>/dev/null)"
@@ -4359,7 +4359,7 @@ _ci_validate_proxy_stream_map() {
 
 # What: Prove ssl mode intercepts (MITM) with our LAN CA.
 # Why: proxy :443 must present a cert we signed.
-# From: Issue #597 | Issue #668 | Issue #1683
+# From: Issue #1683
 _ci_validate_ssl_mitm() {
     local project="$1" ip cid domain ca_subj issuer tmp
     ip="$(_ci_validate_container_ip "${project}" proxy)"
@@ -4414,7 +4414,7 @@ _ci_validate_ssl_dispatch_map() {
 
 # What: Open a UI session into <jar>, print its CSRF token.
 # Why: One owner for the cookiejar + CSRF extraction.
-# From: Issue #628 | Issue #1164 | Issue #1683
+# From: Issue #1683
 _ci_validate_ui_session() {
     local project="$1" jar="$2" ip cookie csrf attempt
     ip="$(_ci_validate_container_ip "${project}" ui)"
@@ -4444,7 +4444,7 @@ _ci_validate_ui_session() {
 
 # What: POST a LAN A record through the UI (303 on ok).
 # Why: Drives the real UI->NATS->PowerDNS write path.
-# From: Issue #1164 | Issue #628
+# From: Issue #1164
 _ci_validate_ui_add_record() {
     local project="$1" jar="$2" csrf="$3" name="$4" content="$5" ip code
     ip="$(_ci_validate_container_ip "${project}" ui)"
@@ -4571,7 +4571,7 @@ _ci_validate_dns_rollback() {
 
 # What: Prove ui.depends_on never gates on service_healthy.
 # Why: UI must start even while a dependency crash-loops.
-# From: Issue #763 | Issue #1683
+# From: Issue #1683
 _ci_validate_ui_depends_started() {
     local bad
     bad="$(_ci_validate_config_json | jq -r '.services.ui.depends_on // {} | to_entries[] | select(.value.condition == "service_healthy") | .key' 2>/dev/null)"
