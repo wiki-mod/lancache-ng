@@ -50,9 +50,10 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
+          git config --global --add safe.directory "${PWD}"
           git init -q .
           git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: bearer ${GHCR_TOKEN}"
+          git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GHCR_TOKEN}" | base64 -w0)"
           git fetch -q --no-tags origin "${GITHUB_REF}" ${BASE_SHA:+"${BASE_SHA}"}
           git checkout -q FETCH_HEAD
       # What: ci.sh writes the changed-path list; the workflow only wires it.
@@ -91,9 +92,10 @@ jobs:
         name: Bootstrap the working tree
         run: |
           set -euo pipefail
+          git config --global --add safe.directory "${PWD}"
           git init -q .
           git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: bearer ${GHCR_TOKEN}"
+          git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GHCR_TOKEN}" | base64 -w0)"
           git fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
           git checkout -q FETCH_HEAD
       # What: publish the immutable per-identity ref, then read it back.

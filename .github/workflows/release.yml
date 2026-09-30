@@ -42,9 +42,10 @@ jobs:
         name: Bootstrap the working tree
         run: |
           set -euo pipefail
+          git config --global --add safe.directory "${PWD}"
           git init -q .
           git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: bearer ${GHCR_TOKEN}"
+          git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GHCR_TOKEN}" | base64 -w0)"
           git fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
           git checkout -q FETCH_HEAD
       - name: Resolve the build-tools image

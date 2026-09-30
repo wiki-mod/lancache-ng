@@ -196,11 +196,12 @@ teardown() {
     [ "${status}" -eq 0 ]
     [[ "${output}" == *'codeql-matrix={"include":[{"language":"actions"}]}'* ]]
 }
-@test "codeql-impact gates on content: comment NOOP, real change analyzes" {
-    # What: comment-only .rs is NOOP; real change analyzes.
-    # Why: content decides, not path (§11.1/§12.5).
-    # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/cqrepo" m
+@test "codeql-impact gates on content; only real work needs the image" {
+    # What: NOOP needs no image; work needs the SOT one.
+    # Why: content gates the matrix; no image fails.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/cqrepo" m img
+    img="registry.example.test/runtime@sha256:$(printf '0%.0s' {1..64})"
     mkdir -p "${r}/svc"
     git -C "${r}" init -q
     git -C "${r}" config user.email t@t
@@ -224,8 +225,80 @@ teardown() {
     CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" GITHUB_EVENT_NAME=push \
       BEFORE_SHA="${base}" GITHUB_SHA="${real}" \
         run bash "${CI_SH}" codeql-impact svc/a.rs
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"[CI-ERROR-CODEQL-0012]"* ]]
+    printf 'base_images:\n  codeql_runtime: "%s"\n' "${img}" >> "${m}"
+    CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" GITHUB_EVENT_NAME=push \
+      BEFORE_SHA="${base}" GITHUB_SHA="${real}" \
+        run bash "${CI_SH}" codeql-impact svc/a.rs
     [ "${status}" -eq 0 ]
     [[ "${output}" == *'{"language":"rust"}'* ]]
+    [[ "${output}" == *"codeql-image=${img}"* ]]
+}
+
+@test "fetch-verified: pinned asset passes; bad pin or 404 fails closed" {
+    # What: sha256 must match the pin; 404 never retries.
+    # Why: one owner for pinned downloads (AG-CI-006/013).
+    # From: Issue #1683 | PR #1858
+    local dl good log="${BATS_TEST_TMPDIR}/dl.log"
+    dl="$(_stub dl 'echo "$1" >> "'"${log}"'"; case "$1" in *missing*) echo "curl: (22) The requested URL returned error: 404" >&2; exit 22 ;; *) printf payload > "$2" ;; esac')"
+    good="$(printf payload | sha256sum | cut -d' ' -f1)"
+    CI_HTTP_DOWNLOAD_CMD="${dl}" run _ci_fetch_verified https://x.test/ok "${good}" "${BATS_TEST_TMPDIR}/a"
+    [ "${status}" -eq 0 ]
+    CI_HTTP_DOWNLOAD_CMD="${dl}" run _ci_fetch_verified https://x.test/ok "$(printf '1%.0s' {1..64})" "${BATS_TEST_TMPDIR}/b"
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"[CI-ERROR-FETCH-0003]"* ]]
+    CI_HTTP_DOWNLOAD_CMD="${dl}" run _ci_fetch_verified https://x.test/ok not-a-sha "${BATS_TEST_TMPDIR}/c"
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"[CI-ERROR-FETCH-0001]"* ]]
+    : > "${log}"
+    CI_HTTP_DOWNLOAD_CMD="${dl}" CI_RETRY_BACKOFF_BASE_SECONDS=0 run _ci_fetch_verified https://x.test/missing "${good}" "${BATS_TEST_TMPDIR}/d"
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"[CI-ERROR-FETCH-0002]"* ]]
+    [ "$(grep -c missing "${log}")" -eq 1 ]
+}
+
+@test "codeql-analyze fails closed without a SOT language or context" {
+    # What: no arg, unknown language or no upload env fails.
+    # Why: never analyze or upload on partial input.
+    # From: Issue #1683 | PR #1858
+    local m="${BATS_TEST_TMPDIR}/m.yml"
+    printf 'codeql_languages:\n  lang-a:\n    paths: [src]\n' > "${m}"
+    CI_MANIFEST="${m}" run bash "${CI_SH}" codeql-analyze
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"[CI-ERROR-CODEQL-0002]"* ]]
+    CI_MANIFEST="${m}" run bash "${CI_SH}" codeql-analyze lang-b
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"[CI-ERROR-CODEQL-0003]"* ]]
+    CI_MANIFEST="${m}" GITHUB_REPOSITORY='' GITHUB_REF='' GITHUB_SHA='' GITHUB_TOKEN='' \
+        run bash "${CI_SH}" codeql-analyze lang-a
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"[CI-ERROR-CODEQL-0004]"* ]]
+}
+
+@test "codeql-analyze runs create, analyze, upload from the pinned bundle" {
+    # What: fetch+verify the bundle, then the 3 steps.
+    # Why: no action pin; per-language category; cleanup.
+    # From: Issue #1683 | PR #1858
+    local b="${BATS_TEST_TMPDIR}/bundle" m="${BATS_TEST_TMPDIR}/m.yml" log="${BATS_TEST_TMPDIR}/cq.log"
+    local t="${BATS_TEST_TMPDIR}/tmp" sha dl
+    mkdir -p "${b}/codeql" "${t}"
+    printf '#!/usr/bin/env bash\necho "$*" >> %q\n' "${log}" > "${b}/codeql/codeql"
+    chmod +x "${b}/codeql/codeql"
+    tar -czf "${BATS_TEST_TMPDIR}/bundle.tgz" -C "${b}" codeql
+    sha="$(sha256sum "${BATS_TEST_TMPDIR}/bundle.tgz" | cut -d' ' -f1)"
+    printf 'codeql:\n  queries: [q1]\ncodeql_languages:\n  lang-a:\n    paths: [src]\nexternal_versions:\n  codeql:\n    repository: owner/tool\n    release_tag: t1\n    asset: bundle.tgz\n    sha256: %s\n' "${sha}" > "${m}"
+    dl="$(_stub dl 'cp "'"${BATS_TEST_TMPDIR}"'/bundle.tgz" "$2"')"
+    CI_MANIFEST="${m}" CI_HTTP_DOWNLOAD_CMD="${dl}" TMPDIR="${t}" \
+      GITHUB_REPOSITORY=owner/fixture GITHUB_REF=refs/heads/x \
+      GITHUB_SHA="$(printf 'a%.0s' {1..40})" GITHUB_TOKEN=t \
+        run bash "${CI_SH}" codeql-analyze lang-a
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"[CI-INFO-CODEQL-0011]"* ]]
+    grep -q -- 'database create .*--language=lang-a --build-mode=none' "${log}"
+    grep -q -- 'database analyze .*--sarif-category=/language:lang-a' "${log}"
+    grep -q -- 'github upload-results --repository=owner/fixture --ref=refs/heads/x' "${log}"
+    [ -z "$(ls -A "${t}")" ]
 }
 
 @test "plan rebuilds proxy on a dns-domains (cdn-domains.txt) change" {
@@ -782,6 +855,8 @@ _probe_stub() {
     [ "$(_ci_classify_failure 'received HTTP 503 from registry')" = "transient" ]
     [ "$(_ci_classify_failure 'dial tcp: i/o timeout')" = "transient" ]
     [ "$(_ci_classify_failure 'connection refused')" = "transient" ]
+    [ "$(_ci_classify_failure 'curl: (22) The requested URL returned error: 503')" = "transient" ]
+    [ "$(_ci_classify_failure 'curl: (22) The requested URL returned error: 403')" = "transient" ]
 }
 
 @test "retry classifier: auth / malformed / compile are permanent" {
@@ -791,6 +866,7 @@ _probe_stub() {
     [ "$(_ci_classify_failure 'HTTP 401 unauthorized')" = "permanent" ]
     [ "$(_ci_classify_failure 'error: could not compile lancache-ui')" = "permanent" ]
     [ "$(_ci_classify_failure 'pull access denied for ghcr.io/x')" = "permanent" ]
+    [ "$(_ci_classify_failure 'curl: (22) The requested URL returned error: 404')" = "permanent" ]
 }
 
 @test "retry classifier: a missing manifest is not_found, auth is not" {
@@ -1733,13 +1809,13 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     # What: Maps ref to targets: master/stable/rc/dev.
     # Why: One policy owner, no YAML conditionals.
     # From: Issue #1683
-    GITHUB_REF=refs/heads/master CI_PROMOTE_REQUESTED_CHANNEL= run _ci_promote_targets_for_ref
+    GITHUB_REF=refs/heads/master CI_PROMOTE_REQUESTED_CHANNEL='' run _ci_promote_targets_for_ref
     [ "${output}" = latest ]
-    GITHUB_REF=refs/heads/current_dev CI_PROMOTE_REQUESTED_CHANNEL= run _ci_promote_targets_for_ref
+    GITHUB_REF=refs/heads/current_dev CI_PROMOTE_REQUESTED_CHANNEL='' run _ci_promote_targets_for_ref
     [ -z "${output}" ]
-    GITHUB_REF=refs/tags/v1.2.3 CI_PROMOTE_REQUESTED_CHANNEL= run _ci_promote_targets_for_ref
+    GITHUB_REF=refs/tags/v1.2.3 CI_PROMOTE_REQUESTED_CHANNEL='' run _ci_promote_targets_for_ref
     [ "${lines[0]}" = v1.2.3 ]; [ "${lines[1]}" = latest ]; [ "${#lines[@]}" -eq 2 ]
-    GITHUB_REF=refs/tags/v1.2.3-rc.4 CI_PROMOTE_REQUESTED_CHANNEL= run _ci_promote_targets_for_ref
+    GITHUB_REF=refs/tags/v1.2.3-rc.4 CI_PROMOTE_REQUESTED_CHANNEL='' run _ci_promote_targets_for_ref
     [ "${output}" = v1.2.3-rc.4 ]
     GITHUB_REF=refs/heads/master CI_PROMOTE_REQUESTED_CHANNEL=nightly run _ci_promote_targets_for_ref
     [ "${lines[0]}" = latest ]; [ "${lines[1]}" = nightly ]; [ "${#lines[@]}" -eq 2 ]
@@ -1755,20 +1831,20 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     export PROMOTE_CALLS="${calls}"
     local prom; prom="$(_stub prom 'echo "PROMOTE $1" >> "${PROMOTE_CALLS}"')"
     : > "${calls}"
-    CI_PROMOTE_ONE_CMD="${prom}" GITHUB_REF=refs/tags/v1.2.3 CI_PROMOTE_REQUESTED_CHANNEL= run ci_cmd_promote_ref
+    CI_PROMOTE_ONE_CMD="${prom}" GITHUB_REF=refs/tags/v1.2.3 CI_PROMOTE_REQUESTED_CHANNEL='' run ci_cmd_promote_ref
     [ "${status}" -eq 0 ]
     [ "$(cat "${calls}")" = "PROMOTE v1.2.3
 PROMOTE latest" ]
     : > "${calls}"
     local tipstub; tipstub="$(_stub tip 'echo othersha')"
-    CI_PROMOTE_ONE_CMD="${prom}" GITHUB_REF=refs/heads/master GITHUB_SHA=mysha CI_PROMOTE_REQUESTED_CHANNEL= CI_PROMOTE_TIP_CMD="${tipstub}" run ci_cmd_promote_ref
+    CI_PROMOTE_ONE_CMD="${prom}" GITHUB_REF=refs/heads/master GITHUB_SHA=mysha CI_PROMOTE_REQUESTED_CHANNEL='' CI_PROMOTE_TIP_CMD="${tipstub}" run ci_cmd_promote_ref
     [ "${status}" -eq 0 ]; [[ "${output}" == *"superseded"* ]]; [ ! -s "${calls}" ]
     : > "${calls}"
     local tipok; tipok="$(_stub tipok 'echo mysha')"
-    CI_PROMOTE_ONE_CMD="${prom}" GITHUB_REF=refs/heads/master GITHUB_SHA=mysha CI_PROMOTE_REQUESTED_CHANNEL= CI_PROMOTE_TIP_CMD="${tipok}" run ci_cmd_promote_ref
+    CI_PROMOTE_ONE_CMD="${prom}" GITHUB_REF=refs/heads/master GITHUB_SHA=mysha CI_PROMOTE_REQUESTED_CHANNEL='' CI_PROMOTE_TIP_CMD="${tipok}" run ci_cmd_promote_ref
     [ "${status}" -eq 0 ]; [ "$(cat "${calls}")" = "PROMOTE latest" ]
     : > "${calls}"
-    CI_PROMOTE_ONE_CMD="${prom}" GITHUB_REF=refs/heads/current_dev CI_PROMOTE_REQUESTED_CHANNEL= run ci_cmd_promote_ref
+    CI_PROMOTE_ONE_CMD="${prom}" GITHUB_REF=refs/heads/current_dev CI_PROMOTE_REQUESTED_CHANNEL='' run ci_cmd_promote_ref
     [ "${status}" -eq 0 ]; [[ "${output}" == *"no-targets"* ]]; [ ! -s "${calls}" ]
 }
 
@@ -4972,8 +5048,8 @@ _anv_run() {
     # Why: container jobs must not run on docs-only.
     # From: Issue #1683
     _ci_docs_only fixture-note.md docs/fixture-asset
-    ! _ci_docs_only fixture-note.md fixture-src/code.rs
-    ! _ci_docs_only
+    run ! _ci_docs_only fixture-note.md fixture-src/code.rs
+    run ! _ci_docs_only
 }
 
 @test "check shellcheck noops without shell files and fails on findings" {
@@ -5102,7 +5178,8 @@ _anv_run() {
     # Why: INSTALL-DON'T-COMPILE; build-tools owner.
     # From: Issue #1683
     local r="${BATS_TEST_TMPDIR}/nsctrepo" pkg
-    pkg="$(_ci_build_tools_packages | grep -E '^(sccache|cargo-audit|cargo-tarpaulin)$' | head -1)"
+    pkg="$(_ci_build_tools_packages | grep -E '^(sccache|cargo-audit|cargo-tarpaulin)$')"
+    pkg="${pkg%%$'\n'*}"
     [ -n "${pkg}" ]
     mkdir -p "${r}/svc-a" "${r}/svc-b"
     printf 'FROM alpine\nRUN cargo build --release --locked\n' > "${r}/svc-a/Dockerfile"
@@ -6567,14 +6644,15 @@ _setup_keys_kea_fixture() {
 # Why: shared by the logging-matrix tests below.
 # From: Issue #1683 | PR #1858
 _logging_matrix_fixture() {
-    local root="$1" rows="${2:-svc-a}"
+    local root="$1" n
+    local -a rows
+    read -ra rows <<< "${2:-svc-a}"
     mkdir -p "${root}/docs" "${root}/services/syslog" "${root}/deploy/quickstart"
     {
         printf '**Logging matrix** (test):\n\n'
         printf '| Service | Logging path | Notes |\n'
         printf '| --- | --- | --- |\n'
-        local n
-        for n in ${rows}; do
+        for n in "${rows[@]}"; do
             printf '| %s | Via x | note |\n' "${n}"
         done
     } > "${root}/docs/architecture-ng.md"

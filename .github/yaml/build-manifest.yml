@@ -395,6 +395,10 @@ external_services:
 base_images:
   alpine: "mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"
   fluent_bit: "cr.fluentbit.io/fluent/fluent-bit:3.2.10@sha256:d6dec000c4929a439562525728c708f6e99800d7ddc82efd6aa4f45f3a20b562"
+  # What: glibc job container the CodeQL CLI runs in.
+  # Why: CodeQL's JVM needs glibc; gcompat lacks symbols.
+  # From: Issue #1683 | PR #1858
+  codeql_runtime: "mirror.gcr.io/library/buildpack-deps:noble-scm@sha256:6a78b404fc653922fe9b7717e1dc382d200517d4be146303f87d2928999192d6"
 
 # What: Pinned external tool/asset versions and checksums.
 # Why: Central version owner; consumers never re-pin.
@@ -418,6 +422,14 @@ external_versions:
     alpine_branch: v3.20
     sha256_amd64: 068c97e534e9c8f03db9064296b1d3c21d957f328e40309278559a92f9a74557
     sha256_arm64: f1bd3a42210768b049f3157db09d68a399521db16f63122e7b6af28bf16fbea2
+  # What: CodeQL CLI bundle the codeql job downloads.
+  # Why: the only pin owner; codeql.yml carries no pin.
+  # From: Issue #1683 | PR #1858
+  codeql:
+    repository: github/codeql-action
+    release_tag: codeql-bundle-v2.27.1
+    asset: codeql-bundle-linux64.tar.gz
+    sha256: 1d380f79896ededc654c7b21fafb3360136f1aeb678ad4df4df9af3910c6b815
 
 # What: The one authoritative platform list for all targets.
 # Why: Platform is a parameter, not a twin/list.

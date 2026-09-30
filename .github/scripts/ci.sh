@@ -30,7 +30,7 @@ CI_REPO_ROOT="${CI_REPO_ROOT:-$(cd -- "${CI_SCRIPT_DIR}/../.." && pwd)}"
 # Why: One table is membership, dispatch and error text.
 # From: Issue #1683
 declare -A CI_DISPATCH=(
-    [plan]=ci_cmd_plan [plan-matrix]=ci_cmd_plan_matrix [impact]=ci_cmd_impact [codeql-impact]=ci_cmd_codeql_impact [codeql-config]=ci_cmd_codeql_config [identity]=ci_cmd_identity
+    [plan]=ci_cmd_plan [plan-matrix]=ci_cmd_plan_matrix [impact]=ci_cmd_impact [codeql-impact]=ci_cmd_codeql_impact [codeql-config]=ci_cmd_codeql_config [codeql-analyze]=ci_cmd_codeql_analyze [identity]=ci_cmd_identity
     [resolve]=ci_cmd_resolve [build]=ci_cmd_build [build-args]=ci_cmd_build_args [rust-build]=ci_cmd_rust_build [apk-setup]=ci_cmd_apk_setup
     [build-tools]=ci_cmd_build_tools [publish]=ci_cmd_publish [verify]=ci_cmd_verify
     [test]=ci_cmd_test [coverage]=ci_cmd_coverage [scan]=ci_cmd_scan [assemble]=ci_cmd_assemble
@@ -128,14 +128,18 @@ _ci_published_services() {
 # From: Issue #1683
 _ci_block_entry_field() {
     local block="$1" entry="$2" field="$3"
+    # What: entry="" reads a block-level scalar; quotes cut.
+    # Why: base_images has no entry level; one reader.
+    # From: Issue #1683 | PR #1858
     awk -v block="$block" -v entry="$entry" -v field="$field" '
-        $0 ~ ("^" block ":[[:space:]]*$") { inb = 1; next }
+        $0 ~ ("^" block ":[[:space:]]*$") { inb = 1; inentry = (entry == ""); next }
         inb && /^[^[:space:]]/ { inb = 0 }
-        inb && /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ {
+        inb && entry != "" && /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ {
             cur = $1; sub(/:$/, "", cur); inentry = (cur == entry)
         }
-        inb && inentry && $1 == (field ":") {
+        inb && inentry && ((entry == "" && index($0, "  " field ":") == 1) || (entry != "" && $1 == (field ":"))) {
             val = $0; sub(/^[[:space:]]*[A-Za-z0-9_.-]+:[[:space:]]*/, "", val)
+            if (val ~ /^".*"$/) val = substr(val, 2, length(val) - 2)
             print val; exit
         }
     ' "${CI_MANIFEST}"
@@ -364,10 +368,11 @@ _ci_path_content_changed() {
         != "$(_ci_tracked_content_ids "${path}" "${head}")" ]
 }
 
-# What: CodeQL admission: dynamic language matrix.
-# Why: §70 no empty runner; content decides, not path.
-# From: Issue #1683
+# What: CodeQL admission: language matrix + job image.
+# Why: §70 no empty runner; image pin lives in the SOT.
+# From: Issue #1683 | PR #1858
 ci_cmd_codeql_impact() {
+    local img
     local -a changed=()
     _ci_collect_changed changed "$@"
     local include='[]' lang p hit
@@ -381,7 +386,16 @@ ci_cmd_codeql_impact() {
         done < <(_ci_block_entry_list codeql_languages "${lang}" paths)
         [ "${hit}" = true ] && { include="$(_ci_matrix_append "${include}" language="${lang}")" || return 2; }
     done < <(_ci_block_keys codeql_languages)
+    # What: an admitted language needs the SOT job image.
+    # Why: DEFAULT=NOOP; an empty matrix never needs it.
+    # From: Issue #1683 | PR #1858
+    img="$(_ci_block_entry_field base_images "" codeql_runtime)"
+    if [ "${include}" != '[]' ] && [ -z "${img}" ]; then
+        ci_log "[CI-ERROR-CODEQL-0012]" "key=\"base_images.codeql_runtime\" reason=\"missing CodeQL job image; FAIL CLOSED\""
+        return 2
+    fi
     printf 'codeql-matrix={"include":%s}\n' "${include}"
+    printf 'codeql-image=%s\n' "${img}"
     ci_log "[CI-INFO-CODEQL-0001]" "phase=codeql-impact langs=$(printf '%s' "${include}" | jq -r 'length') changed=${#changed[@]}"
 }
 
@@ -406,6 +420,109 @@ ci_cmd_codeql_config() {
     while IFS= read -r item; do
         printf '  - %s\n' "${item}"
     done < <(_ci_block_entry_list codeql "" paths_ignore)
+}
+
+# What: Download one URL to a file (curl -f).
+# Why: injectable seam; _ci_retry classifies the error.
+# From: Issue #1683 | PR #1858
+_ci_http_download() {
+    curl -fsSL -o "$2" "$1"
+}
+
+# What: Download a URL and verify it against a sha256.
+# Why: one owner for pinned-asset fetches (AG-CI-006).
+# From: Issue #1683 | PR #1858
+_ci_fetch_verified() {
+    local url="$1" sha="$2" dest="$3" raw
+    if ! [[ "${sha}" =~ ^[0-9a-f]{64}$ ]]; then
+        ci_log "[CI-ERROR-FETCH-0001]" "url=\"${url}\" reason=\"pinned sha256 missing or malformed; FAIL CLOSED\""
+        return 2
+    fi
+    if ! _ci_retry download "${CI_HTTP_DOWNLOAD_CMD:-_ci_http_download}" "${url}" "${dest}" >/dev/null; then
+        ci_log "[CI-ERROR-FETCH-0002]" "url=\"${url}\" reason=\"download failed\""
+        return 2
+    fi
+    if ! raw="$(printf '%s  %s\n' "${sha}" "${dest}" | sha256sum -c - 2>&1)"; then
+        ci_error "[CI-ERROR-FETCH-0003]" "url=\"${url}\" reason=\"sha256 differs from the pin; FAIL CLOSED\"" "${raw}"
+        return 2
+    fi
+}
+
+# What: Fetch the SOT-pinned CodeQL bundle; print binary.
+# Why: SOT owns tag+sha256; no action pin in the YAML.
+# From: Issue #1683 | PR #1858
+_ci_codeql_fetch() {
+    local work="$1" repo tag asset url raw
+    repo="$(_ci_block_entry_field external_versions codeql repository)"
+    tag="$(_ci_block_entry_field external_versions codeql release_tag)"
+    asset="$(_ci_block_entry_field external_versions codeql asset)"
+    if [ -z "${repo}" ] || [ -z "${tag}" ] || [ -z "${asset}" ]; then
+        ci_log "[CI-ERROR-CODEQL-0005]" "key=\"external_versions.codeql\" reason=\"repository/release_tag/asset missing; FAIL CLOSED\""
+        return 2
+    fi
+    url="${GITHUB_SERVER_URL:-https://github.com}/${repo}/releases/download/${tag}/${asset}"
+    _ci_fetch_verified "${url}" "$(_ci_block_entry_field external_versions codeql sha256)" "${work}/${asset}" || return 2
+    if ! raw="$(tar --no-same-owner -xzf "${work}/${asset}" -C "${work}" 2>&1)"; then
+        ci_error "[CI-ERROR-CODEQL-0007]" "asset=\"${asset}\" reason=\"bundle extract failed\"" "${raw}"
+        return 2
+    fi
+    if [ ! -x "${work}/codeql/codeql" ]; then
+        ci_log "[CI-ERROR-CODEQL-0008]" "asset=\"${asset}\" reason=\"bundle has no codeql/codeql binary\""
+        return 2
+    fi
+    printf '%s\n' "${work}/codeql/codeql"
+}
+
+# What: Create, analyze and upload one language's SARIF.
+# Why: category per language, like the removed action.
+# From: Issue #1683 | PR #1858
+_ci_codeql_run() {
+    local lang="$1" work="$2" codeql raw
+    codeql="$(_ci_codeql_fetch "${work}")" || return 2
+    ci_cmd_codeql_config > "${work}/config.yml" || return 2
+    if ! raw="$("${codeql}" database create "${work}/db" --language="${lang}" --build-mode=none \
+            --source-root="${CI_REPO_ROOT:-.}" --codescanning-config="${work}/config.yml" 2>&1)"; then
+        ci_error "[CI-ERROR-CODEQL-0009]" "language=\"${lang}\" reason=\"database create failed\"" "${raw}"
+        return 2
+    fi
+    if ! raw="$("${codeql}" database analyze "${work}/db" --format=sarif-latest \
+            --sarif-category="/language:${lang}" --output="${work}/result.sarif" 2>&1)"; then
+        ci_error "[CI-ERROR-CODEQL-0010]" "language=\"${lang}\" reason=\"database analyze failed\"" "${raw}"
+        return 2
+    fi
+    if ! _ci_retry github-api "${codeql}" github upload-results --repository="${GITHUB_REPOSITORY}" \
+            --ref="${GITHUB_REF}" --commit="${GITHUB_SHA}" --sarif="${work}/result.sarif" >/dev/null; then
+        ci_log "[CI-ERROR-CODEQL-0014]" "language=\"${lang}\" reason=\"SARIF upload failed\""
+        return 2
+    fi
+    ci_log "[CI-INFO-CODEQL-0011]" "phase=codeql-analyze language=${lang} result=uploaded"
+}
+
+# What: Run CodeQL for one SOT language in a work dir.
+# Why: fail closed on context; always clean the work dir.
+# From: Issue #1683 | PR #1858
+ci_cmd_codeql_analyze() {
+    local lang="${1:-}" v work rc
+    local -a missing=()
+    if [ -z "${lang}" ]; then
+        ci_log "[CI-ERROR-CODEQL-0002]" "reason=\"language arg required\""
+        return 2
+    fi
+    if ! _ci_block_keys codeql_languages | grep -qx -- "${lang}"; then
+        ci_log "[CI-ERROR-CODEQL-0003]" "language=\"${lang}\" reason=\"not a SOT codeql_languages entry\""
+        return 2
+    fi
+    for v in GITHUB_REPOSITORY GITHUB_REF GITHUB_SHA GITHUB_TOKEN; do
+        [ -n "${!v:-}" ] || missing+=("${v}")
+    done
+    if [ "${#missing[@]}" -gt 0 ]; then
+        ci_log "[CI-ERROR-CODEQL-0004]" "missing=\"${missing[*]}\" reason=\"upload context incomplete; FAIL CLOSED\""
+        return 2
+    fi
+    work="$(mktemp -d "${TMPDIR:-/var/tmp}/codeql.XXXXXX")" || return 2
+    if _ci_codeql_run "${lang}" "${work}"; then rc=0; else rc=$?; fi
+    rm -rf "${work}"
+    return "${rc}"
 }
 
 # What: True when every changed path is documentation.
@@ -865,6 +982,13 @@ _ci_classify_failure() {
             *"panic: methodref has no signature"*) printf 'transient\n'; return 0 ;;
         esac
     fi
+    # What: curl -f HTTP 4xx, except 403/429, is permanent.
+    # Why: a wrong tag/asset never heals on a retry.
+    # From: Issue #1683 | PR #1858
+    case "${low}" in
+        *"returned error: 403"*|*"returned error: 429"*) ;;
+        *"returned error: 4"[0-9][0-9]*) printf 'permanent\n'; return 0 ;;
+    esac
     # What: rate-limit/5xx/network are transient.
     # Why: these recover on a retry with backoff.
     case "${low}" in
@@ -1421,8 +1545,7 @@ _ci_oci_labels() {
     local service="$1" prefix source base created
     prefix="$(_ci_manifest_scalar '^  image_prefix:')"
     source="https://github.com/${prefix}"
-    base="$(_ci_manifest_scalar '^  alpine:')"
-    base="${base#\"}"; base="${base%\"}"
+    base="$(_ci_block_entry_field base_images "" alpine)"
     created="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'org.opencontainers.image.created=%s\n' "${created}"
     [ -n "${GITHUB_SHA:-}" ] && printf 'org.opencontainers.image.revision=%s\n' "${GITHUB_SHA}"
@@ -4706,8 +4829,7 @@ _ci_build_tools_build_args() {
     # What: base_images.alpine -> ALPINE_IMAGE.
     # Why: Final stage pins its base from the one owner.
     # From: Issue #1683
-    val="$(_ci_manifest_scalar '^  alpine:')"
-    val="${val%\"}"; val="${val#\"}"
+    val="$(_ci_block_entry_field base_images "" alpine)"
     if [ -z "${val}" ]; then
         ci_log "[CI-ERROR-BUILDARGS-0003]" "arg=\"ALPINE_IMAGE\" key=\"base_images.alpine\" reason=\"missing central base image; FAIL CLOSED\""
         return 2
@@ -4775,8 +4897,7 @@ DHSHAS
 _ci_service_build_args() {
     local service="$1" fmt="${2:-}" platform="${3:-}" prefix="--build-arg " out="" val ext ext_argname
     [ "${fmt}" = "--bare" ] && prefix=""
-    val="$(_ci_manifest_scalar '^  alpine:')"
-    val="${val%\"}"; val="${val#\"}"
+    val="$(_ci_block_entry_field base_images "" alpine)"
     if [ -z "${val}" ]; then
         ci_log "[CI-ERROR-BUILDARGS-0007]" "arg=\"ALPINE_IMAGE\" service=\"${service}\" key=\"base_images.alpine\" reason=\"missing central base image; FAIL CLOSED\""
         return 2
@@ -4794,8 +4915,7 @@ _ci_service_build_args() {
                 return 2
                 ;;
         esac
-        val="$(_ci_manifest_scalar "^  ${ext}:")"
-        val="${val%\"}"; val="${val#\"}"
+        val="$(_ci_block_entry_field base_images "" "${ext}")"
         if [ -z "${val}" ]; then
             ci_log "[CI-ERROR-BUILDARGS-0007]" "arg=\"${ext_argname}\" service=\"${service}\" key=\"base_images.${ext}\" reason=\"missing central external image; FAIL CLOSED\""
             return 2
@@ -7091,13 +7211,13 @@ _ci_dockerfile_logical_lines() {
 # Why: No baked-in fallback for ALPINE/FLUENT_BIT.
 # From: Issue #1683
 _ci_sot_base_image_arg() {
-    local name="$1" val
+    local name="$1" val key
     case "${name}" in
-        ALPINE_IMAGE) val="$(_ci_manifest_scalar '^  alpine:')" ;;
-        FLUENT_BIT_IMAGE) val="$(_ci_manifest_scalar '^  fluent_bit:')" ;;
+        ALPINE_IMAGE) key=alpine ;;
+        FLUENT_BIT_IMAGE) key=fluent_bit ;;
         *) return 1 ;;
     esac
-    val="${val%\"}"; val="${val#\"}"
+    val="$(_ci_block_entry_field base_images "" "${key}")"
     [ -n "${val}" ] || return 1
     printf '%s' "${val}"
 }
