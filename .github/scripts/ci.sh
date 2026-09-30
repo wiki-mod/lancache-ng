@@ -5047,7 +5047,7 @@ _ci_service_build_args() {
         [ -n "${val}" ] || { ci_log "[CI-ERROR-BUILDARGS-0014]" "arg=\"RUST_CRATE\" service=\"${service}\" reason=\"no crate in SOT; FAIL CLOSED\""; return 2; }
         out="${out}${prefix}RUST_CRATE=${val}"$'\n'
         # What: emit musl cross-target for platform
-        # Why: ci.sh owns arch mapping; Dockerfile drops uname
+        # Why: ci.sh owns arch mapping; Dockerfile uses
         # From: Issue #1683
         if [ -n "${platform}" ]; then
             local arch
