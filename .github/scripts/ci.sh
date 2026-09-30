@@ -6050,9 +6050,6 @@ _ci_check_review_chronology() {
     local path out ln joined fnums num
     local -a viol=() dup_viol=()
     for path in "${files[@]}"; do
-        case "${path}" in
-            */ci.sh|ci.sh|*/ci.bats|ci.bats) continue ;;
-        esac
         _ci_prose_excluded "${path}" && continue
         out="$(grep -EinIH "${rc}" "${path}")" && viol+=("${out}")
         out="$(grep -EinIH "${lr}" "${path}")" && viol+=("${out}")

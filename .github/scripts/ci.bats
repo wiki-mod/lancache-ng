@@ -4653,27 +4653,37 @@ netdata=sha256:n"
     [ "${status}" -eq 0 ]
 }
 
-@test "check review-chronology flags narration and stale line-ref" {
-    # What: ci.sh owns AG-CODE-002/003; bats calls it.
-    # Why: comments state current code, no chronology.
-    # From: Issue #1683
-    printf '# a normal current-state comment.\n' > "${BATS_TEST_TMPDIR}/okc.sh"
-    run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/okc.sh"
-    [ "${status}" -eq 0 ]
-    printf '# found during code review earlier.\n' > "${BATS_TEST_TMPDIR}/badc.sh"
-    run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/badc.sh"
+@test "check review-chronology fails narration and line-refs, passes prose" {
+    # What: narration/line-ref variants fail; prose ok.
+    # Why: `r`/`f`/`l` keep ci.bats itself scan-clean.
+    # From: Issue #1683 | PR #1858
+    local d="${BATS_TEST_TMPDIR}" r=review f=fix l=line p
+    for p in "found during code ${r} earlier" "fixed it before this ${f} landed" \
+             "flagged in ${r} on PR #743" "this is a ${r} finding note" \
+             "caught during self-${r} here" "the handler (${l} 42) does it" \
+             "revisit this logic (${l} ~890) soon" "the fix is above (see ${l} 42)"; do
+        printf '# %s\n' "${p}" > "${d}/bad.sh"
+        run bash "${CI_SH}" check review-chronology "${d}/bad.sh"
+        [ "${status}" -ne 0 ] || { echo "want fail: ${p}"; false; }
+        [[ "${output}" == *"CI-ERROR-CHECK-0010"* ]]
+    done
+    printf '# noted a %s\n# finding in the code\n' "${r}" > "${d}/bad.sh"
+    run bash "${CI_SH}" check review-chronology "${d}/bad.sh"
     [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0010"* ]]
-    printf '# the handler (line 42) does the work.\n' > "${BATS_TEST_TMPDIR}/badl.sh"
-    run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/badl.sh"
-    [ "${status}" -ne 0 ]
+    for p in "a normal current-state comment" "see the manual review section" \
+             "runs after this PR merges" "remembered during review to add this" \
+             "each line of the config is parsed here"; do
+        printf '# %s\n' "${p}" > "${d}/ok.sh"
+        run bash "${CI_SH}" check review-chronology "${d}/ok.sh"
+        [ "${status}" -eq 0 ] || { echo "want pass: ${p}"; false; }
+    done
 }
 
 @test "check review-chronology exempts legacy-excluded file types" {
     # What: Legacy-excluded file types (*.md) skip scan.
     # Why: Parity with legacy script's is_excluded().
     # From: Issue #1683
-    printf '# found during code review earlier.\n' > "${BATS_TEST_TMPDIR}/notes.md"
+    printf '# %s during code %s earlier.\n' found review > "${BATS_TEST_TMPDIR}/notes.md"
     run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/notes.md"
     [ "${status}" -eq 0 ]
 }
@@ -4682,22 +4692,11 @@ netdata=sha256:n"
     # What: CHRONOLOGY_WARN_ONLY surfaces but doesn't block.
     # Why: AG-GH-018 transitional warn path.
     # From: Issue #1683
-    printf '# found during code review earlier.\n' > "${BATS_TEST_TMPDIR}/badc.sh"
+    printf '# %s during code %s earlier.\n' found review > "${BATS_TEST_TMPDIR}/badc.sh"
     run env CHRONOLOGY_WARN_ONLY=1 bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/badc.sh"
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"review-chronology=warn"* ]]
     [[ "${output}" == *"CI-ERROR-CHECK-0010"* ]]
-}
-
-@test "check review-chronology duplicate #N outside From: is always warn-only" {
-    # What: Bare #N outside From: never blocks.
-    # Why: Downgraded to warn-only.
-    # From: Issue #1683
-    printf '# From: Issue #1683\n# see #1683 again here\n' > "${BATS_TEST_TMPDIR}/dupref.sh"
-    run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/dupref.sh"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0010"* ]]
-    [[ "${output}" == *"warn-only, PR #1856"* ]]
 }
 
 @test "check review-chronology diff-scoped mode scans only the PR's changed files" {
@@ -4711,7 +4710,7 @@ netdata=sha256:n"
         cd "${work}" || exit 1
         git config user.email chrono-bats@example.invalid
         git config user.name chrono-bats
-        printf '# found during code review earlier.\n' > pre-existing.sh
+        printf '# %s during code %s earlier.\n' found review > pre-existing.sh
         git add pre-existing.sh
         git commit --quiet -m base
         git push --quiet origin HEAD:refs/heads/chrono-base
@@ -4766,40 +4765,9 @@ STUBEOF
     [[ "${output}" != *"review-chronology=clean"* ]]
 }
 
-@test "check review-chronology detects varied discovery-verb phrasings" {
-    # What: Varied discovery verbs.
-    # Why: Absorbs verb coverage.
-    # From: Issue #1683 | PR #1858
-    local p
-    for p in "fixed it before this fix landed" "flagged in review on PR #743" "this is a review finding note" "caught during self-review here"; do
-        printf '# %s\n' "${p}" > "${BATS_TEST_TMPDIR}/v.sh"
-        run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/v.sh"
-        [ "${status}" -ne 0 ] || { echo "want fail: ${p}"; false; }
-    done
-    printf '# noted a review\n# finding in the code\n' > "${BATS_TEST_TMPDIR}/w.sh"
-    run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/w.sh"; [ "${status}" -ne 0 ]
-    for p in "see the manual review section" "runs after this PR merges" "remembered during review to add this"; do
-        printf '# %s\n' "${p}" > "${BATS_TEST_TMPDIR}/ok.sh"
-        run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/ok.sh"
-        [ "${status}" -eq 0 ] || { echo "want pass: ${p}"; false; }
-    done
-}
-
-@test "check review-chronology flags stale line-refs, exempts plain prose" {
-    # What: (line ~N)/(see line N) fail; prose passes.
-    # Why: absorbs the line-ref-detection coverage.
-    # From: Issue #1683 | PR #1858
-    printf '# revisit this logic (line ~890) soon\n' > "${BATS_TEST_TMPDIR}/l.sh"
-    run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/l.sh"; [ "${status}" -ne 0 ]
-    printf '# the fix is above (see line 42 above)\n' > "${BATS_TEST_TMPDIR}/l.sh"
-    run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/l.sh"; [ "${status}" -ne 0 ]
-    printf '# each line of the config is parsed here\n' > "${BATS_TEST_TMPDIR}/l.sh"
-    run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/l.sh"; [ "${status}" -eq 0 ]
-}
-
-@test "check review-chronology duplicate-#N string-literal and longer-number cases" {
-    # What: Bare From: dup warns.
-    # Why: absorbs the bare-#N duplicate edge coverage.
+@test "check review-chronology dup #N only warns; unlisted files unscanned" {
+    # What: dup #N warns; strings/longer numbers pass.
+    # Why: a dup ref never blocks; scope is the arg list.
     # From: Issue #1683 | PR #1858
     printf '# From: Issue #887\nlocal x="#887"\n' > "${BATS_TEST_TMPDIR}/d.sh"
     run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/d.sh"; [ "${status}" -eq 0 ]
@@ -4810,16 +4778,10 @@ STUBEOF
     printf '# From: Issue #887\n# duplicate ref #887 here\n' > "${BATS_TEST_TMPDIR}/d.sh"
     run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/d.sh"
     [ "${status}" -eq 0 ]; [[ "${output}" == *"CI-ERROR-CHECK-0010"* ]]
-}
-
-@test "check review-chronology explicit args scan only the listed files" {
-    # What: Only listed files scanned; others ignored.
-    # Why: absorbs the explicit-file-args scoping coverage.
-    # From: Issue #1683 | PR #1858
-    printf '# clean note\n' > "${BATS_TEST_TMPDIR}/clean.sh"
-    printf '# caught in review here\n' > "${BATS_TEST_TMPDIR}/dirty.sh"
-    run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/clean.sh"; [ "${status}" -eq 0 ]
-    run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/dirty.sh"; [ "${status}" -ne 0 ]
+    [[ "${output}" == *"warn-only, PR #1856"* ]]
+    printf '# %s in %s here\n' caught review > "${BATS_TEST_TMPDIR}/dirty.sh"
+    run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/d.sh"
+    [[ "${output}" != *"dirty.sh"* ]]
 }
 
 @test "check pipefail-early-exit flags grep -q/head, not ||, -eq, sed -n" {
