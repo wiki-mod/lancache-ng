@@ -395,24 +395,6 @@ teardown() {
     [ "$(printf '%s' "${m}" | jq '.include | length')" -eq 2 ]
     [ "$(printf '%s' "${m}" | jq -r '.include[0].service')" = "proxy" ]
     [ "$(printf '%s' "${m}" | jq -r '[.include[].platform]|sort|join(",")')" = "linux/amd64,linux/arm64" ]
-    grep -q '^toolchain-impact=NOOP$' "${gh}"
-    grep -q '^any-toolchain=false$' "${gh}"
-    grep -q '^product-matrix={"include":\[{' "${gh}"
-}
-
-@test "plan-matrix splits a changed toolchain into its own matrix" {
-    # What: build-tools change -> toolchain rows + impact.
-    # Why: the candidate is built before its consumers.
-    # From: Issue #1683 | PR #1858
-    local gh="${BATS_TEST_TMPDIR}/out.txt"; : > "${gh}"
-    GITHUB_OUTPUT="${gh}" GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_stub p 'echo MISSING_CONFIRMED')" \
-    CI_IMPACT_CMD="$(_stub impact 'echo BUILD')" \
-        run bash "${CI_SH}" plan-matrix tools/build-tools/Dockerfile
-    [ "${status}" -eq 0 ]
-    grep -q '^toolchain-impact=BUILD$' "${gh}"
-    grep -q '^any-toolchain=true$' "${gh}"
-    grep -q '^any-product=false$' "${gh}"
-    [ "$(sed -n 's/^toolchain-matrix=//p' "${gh}" | jq -r '[.include[].service]|unique|join(",")')" = build-tools ]
 }
 
 @test "plan-matrix treats a SOT-only change as identity candidates" {
@@ -1374,22 +1356,6 @@ _stub() {
     [[ "${output}" == *"verified=sha256:dead"* ]]
 }
 
-@test "assemble moves only a toolchain channel to the fresh index" {
-    # What: build_type=toolchain refreshes its channel here.
-    # Why: build-tools outside atomic promote (§133).
-    # From: Issue #1683
-    CI_PROMOTE_MOVE_CMD="$(_stub mv 'echo moved svc=$1 ch=$2 dig=$3')" \
-    CI_CHANNEL_READBACK_CMD="$(_stub rb 'echo sha256:idx')" \
-        run _ci_assemble_toolchain_channel build-tools sha256:idx
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"moved svc=build-tools"* ]]
-    [[ "${output}" == *"dig=sha256:idx"* ]]
-    CI_PROMOTE_MOVE_CMD="$(_stub mv 'echo SHOULD-NOT-RUN')" \
-        run _ci_assemble_toolchain_channel proxy sha256:idx
-    [ "${status}" -eq 0 ]
-    [[ "${output}" != *"SHOULD-NOT-RUN"* ]]
-}
-
 @test "test runs the real cargo pipeline for a rust fixture (no injection)" {
     # What: Default rust path runs real cargo pipeline.
     # Why: AG-VAL-008 must run for real, not via injection.
@@ -1994,6 +1960,27 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     run _ci_valid_promote_target bogus;        [ "${status}" -ne 0 ]
 }
 
+@test "toolchain joins the promote candidate only when fully accepted" {
+    # What: accepted -> row; missing -> skip; UNKNOWN -> fail.
+    # Why: promote is the one channel mover; UNKNOWN != skip.
+    # From: Issue #1683 | PR #1858
+    _ci_collect_accepted_digests() { echo "linux/amd64=sha256:a"; }
+    _ci_reconcile_index() { echo sha256:idx; }
+    _ci_resolve_one() { echo "service=$1 platform=$2 state=PRESENT_ACCEPTED action=noop"; }
+    run _ci_toolchain_candidate
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"build-tools=sha256:idx"* ]]
+    _ci_resolve_one() { echo "service=$1 platform=$2 state=MISSING_CONFIRMED action=build"; }
+    run _ci_toolchain_candidate
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"[CI-INFO-CANDIDATE-0004]"* ]]
+    [[ "${output}" != *"build-tools=sha256"* ]]
+    _ci_resolve_one() { echo "service=$1 platform=$2 state=UNKNOWN action=escalate"; }
+    run _ci_toolchain_candidate
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"[CI-ERROR-CANDIDATE-0003]"* ]]
+}
+
 @test "promote-targets-for-ref maps each ref to its channel set" {
     # What: Maps ref to targets: master/stable/rc/dev.
     # Why: One policy owner, no YAML conditionals.
@@ -2319,21 +2306,6 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"[CI-ERROR-PROMOTE-0014]"* ]]
     [[ "${output}" != *"sha256:idx"$'\n'* ]]
-}
-
-@test "toolchain channel move fails when the readback is not the index" {
-    # What: moved toolchain channel is read back, children too.
-    # Why: never leave build-tools on an unusable image.
-    # From: Issue #1683 | PR #1858
-    export GITHUB_REF_NAME=current_dev
-    _ci_promote_move() { :; }
-    _ci_channel_readback() { return 2; }
-    run _ci_assemble_toolchain_channel build-tools sha256:idx
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"[CI-ERROR-ASSEMBLE-0007]"* ]]
-    _ci_channel_readback() { echo sha256:idx; }
-    run _ci_assemble_toolchain_channel build-tools sha256:idx
-    [ "${status}" -eq 0 ]
 }
 
 @test "default gc roots refuses when the ledger read is UNKNOWN" {
@@ -4258,49 +4230,31 @@ netdata=sha256:n"
     printf '%s\n' "${output}" | grep -qx "aarch64"
 }
 
-@test "build-tools channel maps master to latest, else to nightly" {
-    # What: the tooling-image channel per target ref.
-    # Why: Promote feeds latest/nightly only.
-    # From: Issue #1683
-    [ "$(_ci_build_tools_channel master)" = latest ]
-    [ "$(_ci_build_tools_channel current_dev)" = nightly ]
-    [ "$(_ci_build_tools_channel feature/claude/x)" = nightly ]
-    [ "$(_ci_build_tools_channel "")" = nightly ]
+@test "build-tools consumes the channel the promote owner maps" {
+    # What: master base -> latest; any other ref -> nightly.
+    # Why: one ref->channel owner (promote), no second map.
+    # From: Issue #1683 | PR #1858
+    export GITHUB_REPOSITORY=o/r GHCR_USERNAME=u GHCR_TOKEN=t
+    _ci_registry_digest() { echo "sha256:${1##*:}"; }
+    GITHUB_BASE_REF=master run _ci_build_tools_resolve_image
+    [[ "${output}" == *"@sha256:latest"* ]]
+    GITHUB_BASE_REF=current_dev run _ci_build_tools_resolve_image
+    [[ "${output}" == *"@sha256:nightly"* ]]
+    GITHUB_BASE_REF='' GITHUB_REF_NAME=feature/x run _ci_build_tools_resolve_image
+    [[ "${output}" == *"@sha256:nightly"* ]]
 }
 
-@test "build-tools resolve-image reuses the channel unless the toolchain changed" {
+@test "build-tools resolve-image reuses the published channel digest" {
     # What: NOOP -> channel digest, no apk resolve at all.
     # Why: normal runs reuse build-tools (AG-CI-010).
     # From: Issue #1683 | PR #1858
     export GITHUB_REPOSITORY=o/r GHCR_USERNAME=u GHCR_TOKEN=t
     _ci_registry_digest() { echo sha256:chan; }
     CI_APK_RESOLVE_CMD="$(_stub apk 'echo APK_CALLED; exit 9')"
-    unset CI_TOOLCHAIN_IMPACT
-    run _ci_build_tools_resolve_image linux/amd64
+    run _ci_build_tools_resolve_image
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"build-tools@sha256:chan"* ]]
     [[ "${output}" != *"APK_CALLED"* ]]
-}
-
-@test "build-tools resolve-image uses this identity's candidate on change" {
-    # What: impact BUILD -> candidate, missing -> 0019.
-    # Why: AG-VAL-016 branch candidate; never builds here.
-    # From: Issue #1683 | PR #1858
-    export GITHUB_REPOSITORY=o/r GHCR_USERNAME=u GHCR_TOKEN=t CI_TOOLCHAIN_IMPACT=BUILD
-    _ci_identity_for() { echo id1; }
-    _ci_registry_probe() { echo sha256:cand; }
-    run _ci_build_tools_resolve_image linux/arm64
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"build-tools@sha256:cand"* ]]
-    [[ "${output}" == *"[CI-INFO-BUILDTOOLS-0024]"* ]]
-    _ci_registry_probe() { return 1; }
-    run _ci_build_tools_resolve_image linux/arm64
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"[CI-ERROR-BUILDTOOLS-0019]"* ]]
-    _ci_registry_probe() { return 2; }
-    run _ci_build_tools_resolve_image linux/arm64
-    [ "${status}" -eq 2 ]
-    [[ "${output}" != *"build-tools@"* ]]
 }
 
 @test "build-tools signature moves on an arm64-only apk change" {

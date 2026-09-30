@@ -604,8 +604,7 @@ ci_cmd_plan_matrix() {
     local docs_only=false
     _ci_docs_only "${changed[@]}" && docs_only=true
     local service platform include='[]' any=false resolved paction runner authed=false test_services=''
-    local tc_list imp tc_impact=NOOP sot_changed=false f path_cand
-    tc_list=" $(_ci_block_keys build_toolchain | tr '\n' ' ')"
+    local sot_changed=false f path_cand
     # What: a SOT change makes every target an id candidate.
     # Why: pins live in the SOT; identity still decides BUILD.
     # From: Issue #1683 | PR #1858
@@ -633,18 +632,11 @@ ci_cmd_plan_matrix() {
             [ -n "${platform}" ] || continue
             resolved="$(_ci_resolve_one "${service}" "${platform}")" || return "$?"
             paction="$(_ci_record_field "${resolved}" action)"
-            # What: toolchain impact is needed even without a build.
-            # Why: consumers pick the candidate only on real change.
-            # From: Issue #1683 | PR #1858
-            imp=""
-            if [ "${paction}" = "build" ] || [[ "${tc_list}" == *" ${service} "* ]]; then
-                imp="$(_ci_semantic_impact "${service}" "${platform}" "$(_ci_record_field "${resolved}" identity)")"
-            fi
-            [[ "${tc_list}" == *" ${service} "* ]] && [ "${imp}" = BUILD ] && tc_impact=BUILD
+            [ "${paction}" = "build" ] || continue
             # What: matrix holds only targets with proven impact.
             # Why: MISSING_CONFIRMED alone MUST NOT build (§10).
             # From: Issue #1683 | PR #1858
-            [ "${paction}" = "build" ] && [ "${imp}" = BUILD ] || continue
+            [ "$(_ci_semantic_impact "${service}" "${platform}" "$(_ci_record_field "${resolved}" identity)")" = BUILD ] || continue
             if ! runner="$(_ci_platform_runner "${platform}")"; then
                 ci_log "[CI-ERROR-PLAN-0002]" "platform=\"${platform}\" reason=\"no runner label for platform\""
                 return 2
@@ -653,21 +645,9 @@ ci_cmd_plan_matrix() {
             any=true
         done <<< "$(_ci_platforms "${service}")"
     done
-    # What: split toolchain rows from product rows.
-    # Why: a toolchain candidate is built before products.
-    # From: Issue #1683 | PR #1858
-    local tc_keys tc_rows prod_rows
-    tc_keys="$(_ci_block_keys build_toolchain | jq -R . | jq -sc .)" || return 2
-    tc_rows="$(jq -c --argjson k "${tc_keys}" '[.[] | select(.service as $s | $k | index($s))]' <<< "${include}")" || return 2
-    prod_rows="$(jq -c --argjson k "${tc_keys}" '[.[] | select(.service as $s | $k | index($s) | not)]' <<< "${include}")" || return 2
     {
         printf 'any-build=%s\n' "${any}"
-        printf 'any-toolchain=%s\n' "$(jq -r 'length > 0' <<< "${tc_rows}")"
-        printf 'any-product=%s\n' "$(jq -r 'length > 0' <<< "${prod_rows}")"
-        printf 'toolchain-impact=%s\n' "${tc_impact}"
         printf 'matrix={"include":%s}\n' "${include}"
-        printf 'toolchain-matrix={"include":%s}\n' "${tc_rows}"
-        printf 'product-matrix={"include":%s}\n' "${prod_rows}"
         printf 'test-services=%s\n' "${test_services# }"
         printf 'docs-only=%s\n' "${docs_only}"
     } >> "${out}"
@@ -2924,27 +2904,7 @@ ci_cmd_assemble() {
         ci_log "[CI-ERROR-ASSEMBLE-0005]" "service=\"${service}\" reason=\"assemble backend failed\""
         return 2
     fi
-    _ci_assemble_toolchain_channel "${service}" "${index}" || return "$?"
     printf 'service=%s result=assembled assembled=%s platforms=%s\n' "${service}" "${index}" "${count}"
-}
-
-# What: update toolchain channel to fresh multi-arch index.
-# Why: build-tools outside stack; channel updates here.
-# From: Issue #1683
-_ci_assemble_toolchain_channel() {
-    local service="$1" index="$2" ch
-    [ "$(ci_service_field "${service}" build_type)" = toolchain ] || return 0
-    ch="$(_ci_build_tools_channel "${GITHUB_REF_NAME:-}")"
-    _ci_promote_move "${service}" "${ch}" "${index}" || return 2
-    # What: read the moved channel back, children included.
-    # Why: a channel on an unusable index breaks every job.
-    # From: Issue #1683 | PR #1858
-    local seen
-    seen="$(_ci_channel_readback "${service}" "${ch}")" || seen=""
-    if [ "${seen}" != "${index}" ]; then
-        ci_error "[CI-ERROR-ASSEMBLE-0007]" "service=\"${service}\" channel=\"${ch}\" reason=\"toolchain channel readback failed\" expected=\"${index}\"" "readback=${seen}"
-        return 2
-    fi
 }
 
 # =========================================================
@@ -3003,6 +2963,42 @@ _ci_stack_candidate_ledger() {
     done < <(ci_services)
 }
 
+# What: toolchain promote candidates, only if fully accepted.
+# Why: promote is the one channel mover (AG-REL-009).
+# From: Issue #1683 | PR #1858
+_ci_toolchain_candidate() {
+    local service inputs want idx p st all
+    while IFS= read -r service; do
+        [ -n "${service}" ] || continue
+        all=1
+        while IFS= read -r p; do
+            [ -n "${p}" ] || continue
+            st="$(_ci_resolve_one "${service}" "${p}")" || return "$?"
+            st="$(_ci_record_field "${st}" state)"
+            case "${st}" in
+                PRESENT_ACCEPTED) ;;
+                UNKNOWN|MISMATCH)
+                    ci_log "[CI-ERROR-CANDIDATE-0003]" "service=\"${service}\" platform=\"${p}\" state=\"${st}\" reason=\"toolchain state not decidable; no promotion\""
+                    return 2
+                    ;;
+                *) all=0 ;;
+            esac
+        done <<< "$(_ci_platforms "${service}")"
+        if [ "${all}" -eq 0 ]; then
+            ci_log "[CI-INFO-CANDIDATE-0004]" "service=\"${service}\" reason=\"toolchain not accepted on every platform; channel unchanged\""
+            continue
+        fi
+        inputs="$(_ci_collect_accepted_digests "${service}")" || return "$?"
+        want="$(_ci_normalize_platform_digests "${inputs}")"
+        idx="$(_ci_reconcile_index "${service}" "${want}")" || return "$?"
+        if [ -z "${idx}" ]; then
+            ci_log "[CI-ERROR-CANDIDATE-0001]" "service=\"${service}\" reason=\"platforms accepted but no assembled multi-arch index; stack not candidate-ready\""
+            return 2
+        fi
+        printf '%s=%s\n' "${service}" "${idx}"
+    done < <(_ci_block_keys build_toolchain)
+}
+
 # What: PR stack candidate: per-service amd64 built digest.
 # Why: a PR has no ledger/index; validate pins built images.
 # From: Issue #1683
@@ -3023,14 +3019,19 @@ _ci_stack_candidate_pr() {
 # From: Issue #1683
 _ci_stack_candidate() {
     if [ -n "${CI_STACK_CANDIDATE_CMD:-}" ]; then
-        "${CI_STACK_CANDIDATE_CMD}"
+        "${CI_STACK_CANDIDATE_CMD}" "$@"
         return "$?"
     fi
     if [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
         _ci_stack_candidate_pr
         return "$?"
     fi
-    _ci_stack_candidate_ledger
+    _ci_stack_candidate_ledger || return "$?"
+    # What: promote also carries the accepted toolchain.
+    # Why: validate pins compose services only, never build-tools.
+    # From: Issue #1683 | PR #1858
+    [ "${1:-}" = --with-toolchain ] || return 0
+    _ci_toolchain_candidate
 }
 
 # What: True only if the stack validated (docs section 50).
@@ -3181,7 +3182,7 @@ ci_cmd_promote() {
         return 2
     fi
     local cand
-    if ! cand="$(_ci_stack_candidate)"; then
+    if ! cand="$(_ci_stack_candidate --with-toolchain)"; then
         ci_log "[CI-ERROR-PROMOTE-0003]" "channel=\"${channel}\" reason=\"no accepted stack candidate\""
         return 2
     fi
@@ -5090,7 +5091,7 @@ _ci_service_build_args() {
     # Why: SOT owns the ref; Dockerfile keeps no mutable default.
     # From: Issue #1683
     if [ "$(_ci_block_entry_field services "${service}" build_type)" = rust ]; then
-        val="$(${CI_BUILD_TOOLS_IMAGE_CMD:-_ci_build_tools_resolve_image} "${platform}")" || return 2
+        val="$(${CI_BUILD_TOOLS_IMAGE_CMD:-_ci_build_tools_resolve_image})" || return 2
         [ -n "${val}" ] || { ci_log "[CI-ERROR-BUILDARGS-0009]" "arg=\"BUILD_TOOLS_IMAGE\" service=\"${service}\" reason=\"empty resolved build-tools image; FAIL CLOSED\""; return 2; }
         out="${out}${prefix}BUILD_TOOLS_IMAGE=${val}"$'\n'
         # What: emit the SOT workspace crate for rust-build.
@@ -5340,71 +5341,25 @@ _ci_emit_multiline() {
     printf '%s<<%s\n%s\n%s' "${key}" "${delim}" "${value}" "${delim}"
 }
 
-# What: build-tools channel for ref (master=latest).
-# Why: promote feeds latest (master) or nightly.
-# From: Issue #1683
-_ci_build_tools_channel() {
-    case "${1:-}" in
-        master) printf 'latest\n' ;;
-        *) printf 'nightly\n' ;;
-    esac
-}
-
 # What: resolve published build-tools to immutable ref.
 # Why: jobs pin toolchain by digest; no cascade.
 # From: Issue #1683
 _ci_build_tools_resolve_image() {
-    local platform="${1:-}" ref channel image digest
+    local ref channel image digest
     ref="${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-}}"
-    channel="$(_ci_build_tools_channel "${ref}")"
+    # What: consume the channel a push to this branch moves.
+    # Why: one ref->channel owner (promote); else nightly.
+    # From: Issue #1683 | PR #1858
+    channel="$(GITHUB_REF="refs/heads/${ref}" CI_PROMOTE_REQUESTED_CHANNEL='' _ci_promote_targets_for_ref)" || return 2
+    channel="${channel%%$'\n'*}"
+    [ -n "${channel}" ] || channel=nightly
     image="$(_ci_build_tools_image)"
     _ci_require_ghcr_auth || return "$?"
-    # What: only a proven toolchain change uses a candidate.
-    # Why: default is reuse (AG-CI-010); AG-VAL-016 candidate.
-    # From: Issue #1683 | PR #1858
-    if [ "${CI_TOOLCHAIN_IMPACT:-NOOP}" = BUILD ]; then
-        _ci_build_tools_candidate "${platform}" "${channel}"
-        return "$?"
-    fi
     if ! digest="$(_ci_registry_digest "${image}:${channel}")"; then
         ci_log "[CI-ERROR-BUILDTOOLS-0018]" "channel=\"${channel}\" reason=\"no published build-tools digest; FAIL CLOSED\""
         return 2
     fi
     printf '%s@%s\n' "${image}" "${digest}"
-}
-
-# What: The build_matrix platform of this host.
-# Why: SOT arch aliases; no hardcoded linux/amd64.
-# From: Issue #1683 | PR #1858
-_ci_host_platform() {
-    local m p a
-    m="$(uname -m)"
-    while IFS= read -r p; do
-        [ -n "${p}" ] || continue
-        for a in $(_ci_platform_arch_aliases "${p}"); do
-            [ "${a}" = "${m}" ] && { printf '%s\n' "${p}"; return 0; }
-        done
-    done <<< "$(_ci_build_matrix_platforms)"
-    ci_log "[CI-ERROR-BUILDTOOLS-0023]" "machine=\"${m}\" reason=\"host arch not in SOT build_matrix\""
-    return 2
-}
-
-# What: Resolve this run's build-tools identity candidate.
-# Why: missing -> drift error; unreadable -> UNKNOWN.
-# From: Issue #1683 | PR #1858
-_ci_build_tools_candidate() {
-    local platform="$1" channel="$2" identity tag digest rc=0
-    [ -n "${platform}" ] || platform="$(_ci_host_platform)" || return 2
-    identity="$(_ci_identity_for build-tools "${platform}")" || return 2
-    tag="$(_ci_image_tag build-tools "${platform}" "${identity}")"
-    digest="$(_ci_registry_probe "${tag}")" || rc=$?
-    if [ "${rc}" -eq 0 ] && [ -n "${digest}" ]; then
-        ci_log "[CI-INFO-BUILDTOOLS-0024]" "platform=\"${platform}\" candidate=\"${tag}\" reason=\"toolchain changed; using this identity's candidate\""
-        printf '%s@%s\n' "${tag%:*}" "${digest}"
-        return 0
-    fi
-    [ "${rc}" -eq 1 ] && ci_log "[CI-ERROR-BUILDTOOLS-0019]" "channel=\"${channel}\" reason=\"toolchain changed but no candidate for this identity\" candidate=\"${tag}\""
-    return 2
 }
 
 # What: build-tools lifecycle helpers for the workflow.

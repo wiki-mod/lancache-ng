@@ -76,8 +76,7 @@ jobs:
           git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GHCR_TOKEN}" | base64 -w0)"
           git fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
           git checkout -q FETCH_HEAD
-      - &resolve_build_tools
-        name: Resolve the build-tools image
+      - name: Resolve the build-tools image
         id: resolve
         run: echo "image=$(bash .github/scripts/ci.sh build-tools resolve-image)" >> "$GITHUB_OUTPUT"
 
@@ -94,12 +93,7 @@ jobs:
       credentials: *ghcr_credentials
     outputs:
       any-build: ${{ steps.plan.outputs.any-build }}
-      any-toolchain: ${{ steps.plan.outputs.any-toolchain }}
-      any-product: ${{ steps.plan.outputs.any-product }}
       matrix: ${{ steps.plan.outputs.matrix }}
-      toolchain-matrix: ${{ steps.plan.outputs.toolchain-matrix }}
-      product-matrix: ${{ steps.plan.outputs.product-matrix }}
-      toolchain-impact: ${{ steps.plan.outputs.toolchain-impact }}
       test-services: ${{ steps.plan.outputs.test-services }}
       docs-only: ${{ steps.plan.outputs.docs-only }}
     steps:
@@ -129,16 +123,16 @@ jobs:
           CHANGED_FILES: ${{ steps.changed.outputs.file }}
         run: bash .github/scripts/ci.sh plan-matrix
 
-  # What: build the build-tools candidate on a proven change only.
-  # Why: AG-CI-010; consumers of this run need it first.
+  # What: build+publish+verify one target per platform, in parallel.
+  # Why: ci.sh owns identity, publish and readback; toolchain included.
   # From: Issue #1683 | PR #1858
-  build-toolchain:
+  build:
     name: build ${{ matrix.service }} ${{ matrix.arch }}
     needs: [platform, plan]
-    if: needs.plan.outputs.any-toolchain == 'true'
+    if: needs.plan.outputs.any-build == 'true'
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.toolchain-matrix) }}
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     container: *bt_platform
@@ -147,69 +141,22 @@ jobs:
       # Why: semantic impact needs the base ref (arch §11).
       # From: Issue #1683 | PR #1858
       - *bootstrap_diff
-      # What: publish the immutable per-identity ref, then read it back.
-      # Why: BUILD != PUBLISH; readback confirms the exact digest (§22/§23).
-      # From: Issue #1683
-      - &build_publish_verify
-        name: Build, publish and verify the platform image
+      # What: build, then publish+verify only what was built.
+      # Why: BUILD != PUBLISH; readback confirms the digest (§22/§23).
+      # From: Issue #1683 | PR #1858
+      - name: Build, publish and verify the platform image
         run: bash .github/scripts/ci.sh ship "${{ matrix.service }}" "${{ matrix.platform }}"
-
-  # What: this identity's candidate, only on a toolchain change.
-  # Why: otherwise platform already resolved the channel digest.
-  # From: Issue #1683 | PR #1858
-  resolve-build-tools:
-    name: resolve build-tools
-    needs: [platform, plan, build-toolchain]
-    if: >-
-      !cancelled() && needs.plan.outputs.docs-only != 'true' &&
-      needs.plan.result == 'success' &&
-      needs.plan.outputs.toolchain-impact == 'BUILD' &&
-      contains(fromJSON('["success","skipped"]'), needs.build-toolchain.result)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    container: *bt_platform
-    env: &toolchain_impact
-      CI_TOOLCHAIN_IMPACT: ${{ needs.plan.outputs.toolchain-impact }}
-    outputs:
-      image: ${{ steps.resolve.outputs.image }}
-    steps:
-      - *bootstrap
-      - *resolve_build_tools
-
-  # What: build+publish+verify one product service per platform.
-  # Why: ci.sh owns build identity, publish and readback.
-  # From: Issue #1683
-  build:
-    name: build ${{ matrix.service }} ${{ matrix.arch }}
-    needs: [platform, plan, build-toolchain]
-    if: >-
-      !cancelled() && needs.plan.outputs.any-product == 'true' &&
-      contains(fromJSON('["success","skipped"]'), needs.build-toolchain.result)
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.product-matrix) }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
-    container: *bt_platform
-    env: *toolchain_impact
-    steps:
-      - *bootstrap_diff
-      - *build_publish_verify
 
   # What: audit rust dependencies inside the pinned build-tools image.
   # Why: cargo-audit lives in the toolchain image, not on the runner.
   # From: Issue #1683
   cargo-audit:
     name: cargo-audit
-    needs: [platform, plan, resolve-build-tools]
-    if: &after_resolve_tests >-
-      !cancelled() && contains(fromJSON('["success","skipped"]'), needs.resolve-build-tools.result) &&
-      needs.plan.outputs.test-services != ''
+    needs: [platform, plan]
+    if: needs.plan.outputs.test-services != ''
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    container: &bt_container
-      image: ${{ needs.resolve-build-tools.outputs.image || needs.platform.outputs.image }}
-      credentials: *ghcr_credentials
+    container: *bt_platform
     steps:
       - *bootstrap
       - name: Audit rust dependencies
@@ -220,11 +167,11 @@ jobs:
   # From: Issue #1683 | PR #1858
   test:
     name: test
-    needs: [platform, plan, resolve-build-tools]
-    if: *after_resolve_tests
+    needs: [platform, plan]
+    if: needs.plan.outputs.test-services != ''
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    container: *bt_container
+    container: *bt_platform
     steps:
       - *bootstrap
       - name: Test the changed rust services
@@ -237,13 +184,11 @@ jobs:
   # From: Issue #1683
   lint:
     name: lint
-    needs: [platform, plan, resolve-build-tools]
-    if: >-
-      !cancelled() && contains(fromJSON('["success","skipped"]'), needs.resolve-build-tools.result) &&
-      needs.plan.outputs.docs-only != 'true'
+    needs: [platform, plan]
+    if: needs.plan.outputs.docs-only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    container: *bt_container
+    container: *bt_platform
     steps:
       - *bootstrap_diff
       - *collect_changed
@@ -259,17 +204,11 @@ jobs:
   # From: Issue #1683
   scan:
     name: scan
-    needs: [platform, plan, build-toolchain, build, resolve-build-tools]
-    if: >-
-      !cancelled() && needs.plan.outputs.any-build == 'true' &&
-      contains(fromJSON('["success","skipped"]'), needs.build-toolchain.result) &&
-      contains(fromJSON('["success","skipped"]'), needs.build.result) &&
-      contains(fromJSON('["success","skipped"]'), needs.resolve-build-tools.result)
+    needs: [platform, plan, build]
+    if: needs.plan.outputs.any-build == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    container:
-      image: ${{ needs.resolve-build-tools.outputs.image || needs.platform.outputs.image }}
-      credentials: *ghcr_credentials
+    container: *bt_platform
     steps:
       - *bootstrap
       - name: Scan the built images by digest
@@ -399,7 +338,7 @@ jobs:
   # From: Issue #1683
   result:
     name: result
-    needs: [platform, plan, build-toolchain, build, test, resolve-build-tools, cargo-audit, lint, scan, aggregate, assemble, validate, promote, checks]
+    needs: [platform, plan, build, test, cargo-audit, lint, scan, aggregate, assemble, validate, promote, checks]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -416,10 +355,8 @@ jobs:
           CI_PHASE_RESULTS: >-
             platform:${{ needs.platform.result }}
             plan:${{ needs.plan.result }}
-            build-toolchain:${{ needs.build-toolchain.result }}
             build:${{ needs.build.result }}
             test:${{ needs.test.result }}
-            resolve-build-tools:${{ needs.resolve-build-tools.result }}
             cargo-audit:${{ needs.cargo-audit.result }}
             lint:${{ needs.lint.result }}
             scan:${{ needs.scan.result }}
