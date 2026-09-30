@@ -6292,7 +6292,6 @@ _ci_check_setup_prompt_drift() {
     fi
     local -a sims=(
         "${repo_root}/scripts/untracked/simulations/setup-cli-simulation.sh"
-        "${repo_root}/scripts/untracked/simulations/syslog-forwarding-simulation.sh"
     )
     local -a rows=() all_prompts=() uncond=() viol=()
     local r

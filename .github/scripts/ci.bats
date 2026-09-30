@@ -4858,7 +4858,6 @@ STUBEOF
     mkdir -p "${r}/scripts/untracked/simulations"
     printf 'case "${1:-install}" in\ninstall|"") ;;\nesac\nask "Username?" "admin"\n' > "${r}/setup.sh"
     printf 'expect_prompt {Username[^\\n]*\\[admin\\]} "x"\n' > "${r}/scripts/untracked/simulations/setup-cli-simulation.sh"
-    printf 'expect_prompt {Username[^\\n]*\\[admin\\]} "x"\n' > "${r}/scripts/untracked/simulations/syslog-forwarding-simulation.sh"
     run bash "${CI_SH}" check setup-prompt-drift "${r}"
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"setup-prompt-drift=clean"* ]]
