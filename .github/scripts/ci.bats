@@ -70,6 +70,8 @@ teardown() {
     [ "${status}" -eq 1 ]
     CI_PHASE_RESULTS="plan:success build:failure checks:success" run ci_cmd_result_gate
     [ "${status}" -eq 1 ]
+    CI_PHASE_RESULTS="platform:skipped plan:success checks:success" run ci_cmd_result_gate
+    [ "${status}" -eq 1 ]
     run ci_cmd_result_gate
     [ "${status}" -eq 2 ]
     [[ "${output}" == *CI-ERROR-CORE-0101* ]]

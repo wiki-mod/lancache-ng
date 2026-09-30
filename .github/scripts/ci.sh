@@ -4650,8 +4650,9 @@ ci_cmd_result_gate() {
         phase="${entry%%:*}"
         state="${entry#*:}"
         case "${phase}" in
-            # plan and checks always run; they must succeed, never skip.
-            plan|checks)
+            # What: always-run phases must succeed, never skip.
+            # Why: a skipped plan/checks would hide a red run.
+            platform|plan|checks)
                 if [ "${state}" != success ]; then
                     ci_log "[CI-ERROR-CORE-0100]" "phase=\"${phase}\" result=\"${state}\""
                     return 1
