@@ -605,8 +605,8 @@ ci_cmd_plan_matrix() {
     _ci_docs_only "${changed[@]}" && docs_only=true
     local service platform include='[]' any=false resolved paction runner authed=false test_services=''
     local sot_changed=false f path_cand
-    # What: a SOT change makes every target an id candidate.
-    # Why: pins live in the SOT; identity still decides BUILD.
+    # What: SOT change makes every target id candidate.
+    # Why: pins live in SOT; identity decides BUILD.
     # From: Issue #1683 | PR #1858
     for f in "${changed[@]}"; do [ "${f}" = "${CI_MANIFEST_REL}" ] && sot_changed=true; done
     # What: build product services and the toolchain.
@@ -633,8 +633,8 @@ ci_cmd_plan_matrix() {
             resolved="$(_ci_resolve_one "${service}" "${platform}")" || return "$?"
             paction="$(_ci_record_field "${resolved}" action)"
             [ "${paction}" = "build" ] || continue
-            # What: matrix holds only targets with proven impact.
-            # Why: MISSING_CONFIRMED alone MUST NOT build (§10).
+            # What: matrix holds targets with proven impact.
+            # Why: MISSING_CONFIRMED must not build alone.
             # From: Issue #1683 | PR #1858
             [ "$(_ci_semantic_impact "${service}" "${platform}" "$(_ci_record_field "${resolved}" identity)")" = BUILD ] || continue
             if ! runner="$(_ci_platform_runner "${platform}")"; then
@@ -1478,7 +1478,7 @@ ci_cmd_test_stack() { _ci_for_test_services ci_cmd_test; }
 
 # What: file/update/close standing tracking issue for run.
 # Why: nightly reliability; self-closing, no action.
-# From: Issue #1683 | Issue #1095
+# From: Issue #1683
 ci_cmd_nightly_status() {
     local outcome="${1:-}" scope="${2:-}" label="${3:-nightly-broken}" failed="${CI_FAILED_JOBS:-}"
     [ -n "${outcome}" ] || { ci_log "[CI-ERROR-STATUS-0001]" "reason=\"outcome arg required (success|failure)\""; return 2; }
@@ -1702,8 +1702,8 @@ _ci_docker_build() {
         args+=(--file "${context}/Dockerfile")
         context="."
     fi
-    # What: apk final stages bind-mount ci.sh via a named context.
-    # Why: apk-setup runs in the bare final stage, ci.sh not in context.
+    # What: apk stages bind-mount ci.sh via context.
+    # Why: apk-setup runs in bare final; ci.sh absent.
     # From: Issue #1683
     if [ "${build_type}" = apk ] || [ "${build_type}" = install ]; then
         args+=(--build-context "ci-scripts=${CI_SCRIPT_DIR}")
@@ -1714,21 +1714,21 @@ _ci_docker_build() {
     while IFS= read -r a; do
         [ -n "${a}" ] && args+=(--build-arg "${a}")
     done < <(ci_cmd_build_args "${service}" --bare "${platform}")
-    # What: value-less --build-arg passes the proxy from env.
-    # Why: predefined args: used by RUN, kept out of history.
+    # What: value-less --build-arg passes proxy from env.
+    # Why: predefined args: used by RUN, not in history.
     # From: Issue #1683 | PR #1858
     while IFS= read -r a; do
         args+=(--build-arg "${a}")
     done < <(_ci_proxy_names)
     # What: SOT-owned named build contexts (name=path).
-    # Why: a Dockerfile COPY --from derives it; SOT owns the list.
+    # Why: Dockerfile COPY --from derives it; SOT owns list.
     # From: Issue #1683
     while IFS= read -r a; do
         [ -n "${a}" ] && args+=(--build-context "${a}")
     done < <(_ci_block_entry_list services "${service}" external_contexts)
-    # What: mount build-time secrets set-runtime provisioned.
-    # Why: leak-safe --secret; clear-runtime removes them after.
-    # From: Issue #1683 | Issue #1781
+    # What: mount build-time secrets at runtime.
+    # Why: leak-safe --secret; cleanup removes after.
+    # From: Issue #1683
     local secret_dir sf
     secret_dir="$(_ci_runtime_secret_dir)"
     if [ -d "${secret_dir}" ]; then
@@ -1751,8 +1751,8 @@ _ci_docker_build() {
     printf '%s\n' "${tag}"
 }
 
-# What: In-image apk setup: repo-http, update, upgrade, add packages.
-# Why: one owner for the mandatory update+upgrade + SOT packages.
+# What: In-image apk setup: repos, update, upgrade, add.
+# Why: one owner for http repos + update+upgrade + packages.
 # From: Issue #1683
 ci_cmd_apk_setup() {
     sed -i 's|^https://|http://|' /etc/apk/repositories
@@ -1764,24 +1764,25 @@ ci_cmd_apk_setup() {
 }
 
 # What: In-image rust builder; sccache, opt-in distcc.
-# Why: one owner for dns/ui/watchdog builders (was 3x inline).
+# Why: one owner for dns/ui/watchdog builders (was 3x).
 # From: Issue #1683
 ci_cmd_rust_build() {
     local service="${1:-}" crate="${2:-}" mode="${3:-build}"
     [ -n "${service}" ] || { ci_log "[CI-ERROR-RUSTBUILD-0001]" "reason=\"service arg required\""; return 2; }
     [ -n "${crate}" ] || { ci_log "[CI-ERROR-RUSTBUILD-0002]" "reason=\"crate arg required\""; return 2; }
-    # What: mode build (real+cp) or deps (dep pre-cache, no cp).
-    # Why: services with a stub-src dep-cache stage call deps first.
+    # What: mode build (real+cp) or deps (pre-cache, no cp).
+    # Why: services with stub-src dep-cache stage call deps.
     case "${mode}" in build|deps) ;; *) ci_log "[CI-ERROR-RUSTBUILD-0005]" "mode=\"${mode}\" reason=\"mode must be build or deps\""; return 2 ;; esac
     local musl_target="${MUSL_TARGET:-}"
     [ -n "${musl_target}" ] || { ci_log "[CI-ERROR-RUSTBUILD-0003]" "reason=\"MUSL_TARGET env required\""; return 2; }
-    # What: verify the cross-target is installed, via here-string.
-    # Why: a live pipe into grep -qx would mask a producer error.
+    # What: verify cross-target installed via here-string.
+    # Why: live pipe into grep -qx would mask error.
     local installed_targets; installed_targets="$(rustup target list --installed)"
     grep -qx "${musl_target}" <<<"${installed_targets}" || { ci_log "[CI-ERROR-RUSTBUILD-0004]" "target=\"${musl_target}\" reason=\"musl target not installed in build-tools\""; return 2; }
     local key_prefix="lancache-${service}" ccache_dir="${CI_TMPDIR}/ccache-${service}"
-    # What: distcc wrapper bypasses pump for aws-lc-sys headers.
-    # Why: pump can't see generated headers; would fail (#1533).
+    # What: distcc bypasses pump for aws-lc headers.
+    # Why: pump can't see generated headers; would fail.
+    # From: Issue #1533
     mkdir -p /usr/local/lib/distcc
     local distcc_bin; distcc_bin="$(command -v distcc)"
     cp "${distcc_bin}" /usr/local/bin/distcc-real
@@ -1864,12 +1865,12 @@ ci_cmd_rust_build() {
     for wrapper in cc gcc c++ g++; do ln -sf /usr/local/bin/lancache-distcc-wrapper "/usr/local/lib/distcc/${wrapper}"; done
     ln -sf /usr/local/bin/lancache-distcc-wrapper "${distcc_bin}"
     # What: rustc wrapper: distcc passthrough, else sccache.
-    # Why: distcc can't be wrapped through the sccache masquerade.
+    # Why: distcc bypasses sccache masquerade wrapping.
     printf '%s\n' '#!/bin/sh' 'case "${1:-}" in' '  distcc|*/distcc) exec "$@" ;;' '  *) exec /usr/local/bin/sccache "$@" ;;' 'esac' > /usr/local/bin/lancache-rustc-wrapper
     chmod +x /usr/local/bin/lancache-rustc-wrapper
     local distcc_enabled=0 ccache_enabled=0 ca_installed=0 original_path="${PATH}"
-    # What: one EXIT trap cleans CA trust and the distcc pump.
-    # Why: two separate EXIT traps overwrote each other, leaking CA.
+    # What: EXIT trap cleans CA trust and distcc pump.
+    # Why: two EXIT traps would overwrite, leak CA.
     _rust_build_cleanup() {
         if [ "${distcc_enabled:-0}" = "1" ]; then distcc-pump --shutdown >/dev/null 2>&1 || true; fi
         if [ "${ca_installed:-0}" = "1" ]; then
@@ -1878,8 +1879,8 @@ ci_cmd_rust_build() {
         fi
     }
     trap _rust_build_cleanup EXIT
-    # What: trust the proxy CA so cargo's crates.io fetch verifies.
-    # Why: cleanup trap removes it; never persisted in a layer.
+    # What: trust proxy CA for cargo's crates.io fetch.
+    # Why: cleanup trap removes it; never persisted.
     if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then
         cp /run/secrets/project_selfhosted_proxy_ca /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt
         update-ca-certificates >/dev/null
@@ -1910,8 +1911,8 @@ ci_cmd_rust_build() {
         done
         echo "distcc wrapper directory not found" >&2; return 1
     }
-    # What: read one farm host's real compiler identity.
-    # Why: ccache content-check misses a remote toolchain bump.
+    # What: read farm host's real compiler identity.
+    # Why: ccache content-check misses remote bump.
     extract_remote_toolchain_id() {
         rm -f "${CI_TMPDIR}/ccache-remote-toolchain-id"
         if command -v readelf >/dev/null 2>&1; then
@@ -1919,8 +1920,9 @@ ci_cmd_rust_build() {
             sed -n 's/^ *\[[^]]*\] *//p' <<<"${readelf_comment_section}" > "${CI_TMPDIR}/ccache-remote-toolchain-id"
         fi
     }
-    # What: split hosts into pump-capable vs non-pump, set up distcc.
-    # Why: aws-lc-sys generated headers must bypass pump (#1533/#1612).
+    # What: split pump/non-pump hosts, set up distcc.
+    # Why: aws-lc-sys generated headers must bypass pump.
+    # From: Issue #1533
     configure_distcc() {
         if [ -s /run/secrets/distcc_potential_hosts ]; then
             local distcc_probe_dir; distcc_probe_dir="$(mktemp -d -p "${CI_TMPDIR}")"
@@ -1981,8 +1983,8 @@ ci_cmd_rust_build() {
         rm -f "${CI_TMPDIR}/ccache-toolchain-id" "${CI_TMPDIR}/ccache-remote-toolchain-id"
         export CC=cc GCC=gcc CXX=c++ GXX=g++
     }
-    # What: wrap distcc with ccache (Redis) once distcc is up.
-    # Why: content-check + remote-id guard a stale cross-toolchain hit.
+    # What: wrap distcc with ccache (Redis) once distcc up.
+    # Why: content-check + remote-id guard stale toolchain.
     configure_ccache() {
         if [ "${distcc_enabled:-0}" = "1" ] && [ -s /run/secrets/ccache_redis_url ]; then
             if [ ! -s "${CI_TMPDIR}/ccache-remote-toolchain-id" ]; then
@@ -2005,8 +2007,8 @@ ci_cmd_rust_build() {
             export CC="ccache ${real_cc}" GCC="ccache ${real_gcc}" CXX="ccache ${real_cxx}" GXX="ccache ${real_gxx}"
             ccache_enabled=1
             printf '%s\n' 'int main(void) { return 0; }' > "${ccache_probe_dir}/ccache-probe.c"
-            # What: probe compiles into an isolated ccache dir.
-            # Why: keeps the real build cache clean; word-split-safe.
+            # What: probe compiles in isolated ccache dir.
+            # Why: keep real cache clean; word-split-safe.
             local ccache_probe_cache_dir="${ccache_probe_dir}/probe-cache"
             mkdir -p "${ccache_probe_cache_dir}"
             if ! ( cd "${ccache_probe_dir}" && CCACHE_DIR="${ccache_probe_cache_dir}" ccache "${real_cc}" -c ccache-probe.c -o ccache-probe.o ) >"${ccache_probe_dir}/ccache-probe.log" 2>&1; then
@@ -2031,8 +2033,8 @@ ci_cmd_rust_build() {
             fi
         fi
     }
-    # What: export release LTO/codegen from CI vars, fail closed.
-    # Why: no in-file default; owner is PROJECT_CARGO_* (AG-CI-006).
+    # What: export release LTO/codegen vars, fail closed.
+    # Why: no defaults; owner is PROJECT_CARGO_*.
     resolve_cargo_profile_overrides() {
         local lto="${PROJECT_CARGO_LTO:-}" cgu="${PROJECT_CARGO_CODEGENUNIT:-}"
         [ -n "${lto}" ] || { echo "PROJECT_CARGO_LTO is required (no default; Issue #1095)" >&2; return 1; }
@@ -2059,8 +2061,8 @@ ci_cmd_rust_build() {
         echo "[INFO] using ${jobs} job(s) (${jobs_source})." >&2
         printf '%s\n' "${jobs}"
     }
-    # What: build, then fall back ccache->distcc->local on failure.
-    # Why: an accel outage must not fail an otherwise-correct build.
+    # What: build, fall back ccache->distcc->local on fail.
+    # Why: accel outage: must not fail correct build.
     run_cargo_build() {
         local cargo_log cargo_status_file cargo_status
         cargo_log="$(mktemp -p "${CI_TMPDIR}")"; cargo_status_file="$(mktemp -p "${CI_TMPDIR}")"
@@ -2102,14 +2104,14 @@ ci_cmd_rust_build() {
     configure_ccache
     resolve_cargo_profile_overrides
     local cargo_jobs; cargo_jobs="$(resolve_cargo_jobs)"
-    # What: drop this crate's stale artifact before a real build.
-    # Why: a dep pre-cache stub rlib outdates COPYed src (mtime).
+    # What: drop crate's stale artifact before real build.
+    # Why: dep pre-cache stub rlib outdates COPYed src.
     if [ "${mode}" = "build" ]; then
         cargo clean -p "${crate}" --release --target "${musl_target}"
     fi
     run_cargo_build
-    # What: dump ccache stats; a mid-build Redis error is not fatal.
-    # Why: the binary is already correct; only cache reuse degrades.
+    # What: dump ccache stats; mid-build Redis error OK.
+    # Why: binary correct; only cache reuse degraded.
     if [ "${ccache_enabled:-0}" = "1" ]; then
         ccache -s
         local ccache_final_stats; ccache_final_stats="$(mktemp -p "${CI_TMPDIR}")"
@@ -2120,8 +2122,8 @@ ci_cmd_rust_build() {
         fi
         rm -f "${ccache_final_stats}"
     fi
-    # What: copy the built binary out only for a real build.
-    # Why: the deps pre-cache pass produces no shippable binary.
+    # What: copy built binary out only for real build.
+    # Why: deps pre-cache pass produces no shippable binary.
     if [ "${mode}" = "build" ]; then
         cp "target/${musl_target}/release/${crate}" "/build/${crate}-out"
     fi
@@ -2624,9 +2626,9 @@ _ci_test_rust() {
         ci_log "[CI-ERROR-TEST-0005]" "service=\"${service}\" reason=\"no crate in SOT\""
         return 2
     fi
-    # What: workspace-root cargo on the service's own crate.
-    # Why: the build context is no crate; AG-VAL-008 per crate.
-    # From: Issue #1683 | PR #1858
+    # What: workspace-root cargo on service's own crate.
+    # Why: build context is no crate; AG-VAL-008 per crate.
+    # From: PR #1858
     ( _ci_sccache_env "lancache-${service}" \
         && cd "${CI_REPO_ROOT:-.}" \
         && cargo fmt --check -p "${ctx}" \
@@ -2662,8 +2664,8 @@ _ci_test_toolchain() {
 }
 
 # What: Execute-smoke a product image's SOT smoke checks.
-# Why: prove apk binaries run, not just exist (#1613).
-# From: Issue #1613 | Issue #1683
+# Why: prove apk binaries run, not just exist.
+# From: Issue #1613
 _ci_smoke_service() {
     local service="$1" checks image c
     if [ -n "${CI_SMOKE_CMD:-}" ]; then
@@ -2963,7 +2965,7 @@ _ci_stack_candidate_ledger() {
     done < <(ci_services)
 }
 
-# What: toolchain promote candidates, only if fully accepted.
+# What: toolchain promote candidates if fully accepted.
 # Why: promote is the one channel mover (AG-REL-009).
 # From: Issue #1683 | PR #1858
 _ci_toolchain_candidate() {
@@ -3028,7 +3030,7 @@ _ci_stack_candidate() {
     fi
     _ci_stack_candidate_ledger || return "$?"
     # What: promote also carries the accepted toolchain.
-    # Why: validate pins compose services only, never build-tools.
+    # Why: validate pins compose services only.
     # From: Issue #1683 | PR #1858
     [ "${1:-}" = --with-toolchain ] || return 0
     _ci_toolchain_candidate
@@ -4271,8 +4273,8 @@ _ci_validate_wait_healthy() {
 }
 
 # What: Prove DNS resolves a CDN domain and split-routes.
-# Why: Real dig; standard/ssl MUST differ (#668), not ping.
-# From: Issue #668 | Issue #1683 | PR #1858
+# Why: Real dig; standard/ssl MUST differ, not ping.
+# From: Issue #1683 | PR #1858
 _ci_validate_dns() {
     local project="$1" ip_std ip_ssl domain a_std a_ssl
     ip_std="$(_ci_validate_container_ip "${project}" dns-standard)"
@@ -4288,8 +4290,8 @@ _ci_validate_dns() {
         ci_log "[CI-ERROR-VALIDATE-0011]" "domain=\"${domain}\" reason=\"no DNS answer from a resolver mode\""
         return 1
     fi
-    # What: standard and ssl mode MUST resolve to distinct IPs.
-    # Why: proves #668 split routing (prod PROXY_IP .10 vs .11).
+    # What: standard and ssl modes resolve distinct IPs.
+    # Why: split routing proof (.10 vs .11).
     # From: Issue #668
     if [ "${a_std}" = "${a_ssl}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0021]" "domain=\"${domain}\" reason=\"standard and ssl DNS returned the same answer (#668 split routing lost)\""
@@ -4322,21 +4324,21 @@ _ci_validate_proxy() {
 
 # What: print stream-target wildcard hardcode lines.
 # Why: *.domain must forward to SNI, not literal.
-# From: Issue #1683 | Issue #1297
+# From: Issue #1683
 _ci_stream_map_violations() {
     awk '/^[[:space:]]*\*\./ && $2 != "$ssl_preread_server_name:443;" { print }'
 }
 
 # What: print depth>=2 dispatch entries not routed to :9446.
 # Why: deeper SNI has no wildcard cert; must passthrough.
-# From: Issue #1683 | Issue #1276 | Issue #1322
+# From: Issue #1683
 _ci_ssl_dispatch_violations() {
     awk 'index($0, "~^.+\\.") > 0 && $NF != "127.0.0.1:9446;" { print }'
 }
 
 # What: prove proxy routes wildcards by SNI.
 # Why: root literal misroutes subdomains.
-# From: Issue #1683 | Issue #1297
+# From: Issue #1683
 _ci_validate_proxy_stream_map() {
     local project="$1" cid map bad
     cid="$(docker compose -p "${project}" ps -q proxy 2>/dev/null)"
@@ -4356,8 +4358,8 @@ _ci_validate_proxy_stream_map() {
 }
 
 # What: Prove ssl mode intercepts (MITM) with our LAN CA.
-# Why: proxy :443 must present a cert we signed (#597/#668).
-# From: Issue #597 | Issue #668 | Issue #1683
+# Why: proxy :443 must present a cert we signed.
+# From: Issue #1683
 _ci_validate_ssl_mitm() {
     local project="$1" ip cid domain ca_subj issuer tmp
     ip="$(_ci_validate_container_ip "${project}" proxy)"
@@ -4381,7 +4383,7 @@ _ci_validate_ssl_mitm() {
         return 1
     fi
     # What: the :443 cert issuer MUST equal our own LAN CA.
-    # Why: proves interception, not passthrough (#668).
+    # Why: proves interception, not passthrough.
     # From: Issue #668
     if [ "${issuer}" != "${ca_subj}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0026]" "issuer=\"${issuer}\" ca=\"${ca_subj}\" reason=\"ssl mode :443 cert not issued by our LAN CA (not intercepting, #668)\""
@@ -4389,9 +4391,9 @@ _ci_validate_ssl_mitm() {
     fi
 }
 
-# What: Prove ssl-mode depth-dispatch routes deeper SNI right.
-# Why: depth>=2 SNI must passthrough (:9446), not MITM.
-# From: Issue #1276 | Issue #1322 | Issue #1683
+# What: ssl-mode depth-dispatch routes deeper SNI right.
+# Why: depth>=2 SNI passthrough (:9446), not MITM.
+# From: Issue #1683
 _ci_validate_ssl_dispatch_map() {
     local project="$1" cid map bad
     cid="$(docker compose -p "${project}" ps -q proxy 2>/dev/null)"
@@ -4412,7 +4414,7 @@ _ci_validate_ssl_dispatch_map() {
 
 # What: Open a UI session into <jar>, print its CSRF token.
 # Why: One owner for the cookiejar + CSRF extraction.
-# From: Issue #628 | Issue #1164 | Issue #1683
+# From: Issue #1683
 _ci_validate_ui_session() {
     local project="$1" jar="$2" ip cookie csrf attempt
     ip="$(_ci_validate_container_ip "${project}" ui)"
@@ -4420,7 +4422,7 @@ _ci_validate_ui_session() {
         ci_log "[CI-ERROR-VALIDATE-0030]" "reason=\"no ui container IP for session check\""
         return 2
     fi
-    # What: ui has no compose healthcheck; poll GET /domains.
+    # What: ui has no compose healthcheck; poll /domains.
     # Why: wait_healthy misses ui; prove it answers first.
     # From: Issue #1683
     for attempt in $(seq 1 30); do
@@ -4442,7 +4444,7 @@ _ci_validate_ui_session() {
 
 # What: POST a LAN A record through the UI (303 on ok).
 # Why: Drives the real UI->NATS->PowerDNS write path.
-# From: Issue #1164 | Issue #628
+# From: Issue #1164
 _ci_validate_ui_add_record() {
     local project="$1" jar="$2" csrf="$3" name="$4" content="$5" ip code
     ip="$(_ci_validate_container_ip "${project}" ui)"
@@ -4463,9 +4465,9 @@ _ci_validate_ui_add_record() {
     fi
 }
 
-# What: Poll dig on <svc> until <fqdn> resolves to <expected>.
-# Why: NATS->PowerDNS (and AXFR to ssl) are async; prove it.
-# From: Issue #1164 | Issue #628
+# What: Poll dig until <fqdn> resolves to <expected>.
+# Why: NATS->PowerDNS (AXFR to ssl) async; prove it.
+# From: Issue #1164
 _ci_validate_dns_resolves() {
     local project="$1" svc="$2" fqdn="$3" expected="$4" attempts="${5:-15}" ip got i
     ip="$(_ci_validate_container_ip "${project}" "${svc}")"
@@ -4482,9 +4484,9 @@ _ci_validate_dns_resolves() {
     return 1
 }
 
-# What: Prove UI->NATS->PowerDNS writes reach both dns modes.
-# Why: Real end-to-end NATS ingest + AXFR (#1164), not a mock.
-# From: Issue #1164 | Issue #1683
+# What: UI->NATS->PowerDNS writes reach both dns modes.
+# Why: Real end-to-end NATS ingest + AXFR, not mock.
+# From: Issue #1683
 _ci_validate_ui_nats_dns() {
     local project="$1" jar csrf rc=0
     jar="$(mktemp "${CI_TMPDIR}/ci-ui-jar.XXXXXX")"
@@ -4496,9 +4498,9 @@ _ci_validate_ui_nats_dns() {
     _ci_validate_dns_resolves "${project}" dns-ssl ci-uinats-probe.lan. 203.0.113.60 60 || return $?
 }
 
-# What: Prove the DNS known-good snapshot/rollback round-trip.
-# Why: Real listener HTTP + PowerDNS PATCH + cache flush (#628).
-# From: Issue #628 | Issue #1683
+# What: DNS known-good snapshot/rollback round-trip.
+# Why: Real listener HTTP + PATCH + cache flush.
+# From: Issue #1683
 _ci_validate_dns_rollback() {
     local project="$1" ip cid key jar csrf snap resp applied changed flush code i rc=0
     ip="$(_ci_validate_container_ip "${project}" dns-standard)"
@@ -4507,16 +4509,16 @@ _ci_validate_dns_rollback() {
         ci_log "[CI-ERROR-VALIDATE-0037]" "reason=\"no dns-standard container/IP for rollback check\""
         return 2
     fi
-    # What: read PDNS_API_KEY from the shared-secrets file.
-    # Why: entrypoint resolves it at runtime, not compose env (#858).
-    # From: Issue #628 | Issue #858
+    # What: read PDNS_API_KEY from shared-secrets file.
+    # Why: entrypoint resolves it at runtime, not env.
+    # From: Issue #858
     key="$(docker exec "${cid}" cat /var/lib/lancache-secrets/pdns-api-key 2>/dev/null | tr -d '\n')"
     if [ -z "${key}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0038]" "reason=\"could not read PDNS_API_KEY from shared-secrets\""
         return 2
     fi
     # What: poll until the rollback listener :8083 accepts.
-    # Why: healthy != bound; nats-subscriber binds late (#628).
+    # Why: healthy != bound; nats-subscriber binds late.
     # From: Issue #628
     for i in $(seq 1 30); do
         curl -fsS -o /dev/null -H "X-API-Key: ${key}" "http://${ip}:8083/snapshots" 2>/dev/null && break
@@ -4540,8 +4542,8 @@ _ci_validate_dns_rollback() {
     csrf="$(_ci_validate_ui_session "${project}" "${jar}")" || { rc=$?; rm -f "${jar}"; return "${rc}"; }
     _ci_validate_ui_add_record "${project}" "${jar}" "${csrf}" ci-rollback-probe 203.0.113.70 || { rm -f "${jar}"; return 1; }
     _ci_validate_dns_resolves "${project}" dns-standard ci-rollback-probe.lan. 203.0.113.70 15 || { rm -f "${jar}"; return 1; }
-    # What: capture the newest lan. snapshot (the pre-change state).
-    # Why: the target this test rolls back to after the second write.
+    # What: capture newest lan. snapshot (pre-change state).
+    # Why: target this test rolls back to after 2nd write.
     # From: Issue #628
     snap="$(curl -sS -H "X-API-Key: ${key}" "http://${ip}:8083/snapshots" 2>/dev/null | jq -r '.zones["lan."][0].id // empty')"
     if [ -z "${snap}" ]; then
@@ -4562,14 +4564,14 @@ _ci_validate_dns_rollback() {
         return 1
     fi
     # What: post-rollback dig must return the OLD content.
-    # Why: proves the recursor cache flush actually reached it.
+    # Why: proves recursor cache flush reached it.
     # From: Issue #628
     _ci_validate_dns_resolves "${project}" dns-standard ci-rollback-probe.lan. 203.0.113.70 15 || return $?
 }
 
 # What: Prove ui.depends_on never gates on service_healthy.
-# Why: UI must start even while a dependency crash-loops (#763).
-# From: Issue #763 | Issue #1683
+# Why: UI must start even while a dependency crash-loops.
+# From: Issue #1683
 _ci_validate_ui_depends_started() {
     local bad
     bad="$(_ci_validate_config_json | jq -r '.services.ui.depends_on // {} | to_entries[] | select(.value.condition == "service_healthy") | .key' 2>/dev/null)"
@@ -4579,9 +4581,9 @@ _ci_validate_ui_depends_started() {
     fi
 }
 
-# What: POST /api/secondary/register; print JSON body on 200.
-# Why: token-gated, no session/CSRF (main.rs); reused per name.
-# From: Issue #583 | Issue #433
+# What: POST /api/secondary/register; print JSON on 200.
+# Why: token-gated, no session/CSRF; reused per name.
+# From: Issue #583
 _ci_register_secondary() {
     local ip="$1" token="$2" name="$3" out code
     out="$(curl -sS -w '\n%{http_code}' -H 'Content-Type: application/json' \
@@ -4592,9 +4594,9 @@ _ci_register_secondary() {
     printf '%s' "${out%$'\n'*}"
 }
 
-# What: Prove each registered secondary gets a unique identity.
-# Why: per-secondary NATS auth-callout, not a shared token (#583).
-# From: Issue #583 | Issue #433 | Issue #1683
+# What: Prove each secondary gets unique identity.
+# Why: per-secondary NATS auth-callout, not shared token.
+# From: Issue #1683
 _ci_validate_secondary_identity() {
     local project="$1" ip cid token a b au bu ap bp
     ip="$(_ci_validate_container_ip "${project}" ui)"
@@ -4603,8 +4605,8 @@ _ci_validate_secondary_identity() {
         ci_log "[CI-ERROR-VALIDATE-0045]" "reason=\"no ui container/IP for secondary-identity check\""
         return 2
     fi
-    # What: read SECONDARY_REGISTRATION_TOKEN from the ui token file.
-    # Why: ui resolves it at runtime; not env, not hardcoded (AG-CI-006).
+    # What: read SECONDARY_REGISTRATION_TOKEN from ui file.
+    # Why: ui resolves at runtime; not env, not hardcoded.
     # From: Issue #583
     token="$(docker exec "${cid}" cat /data/lancache-secondary-registration.token 2>/dev/null | tr -d '\n')"
     if [ -z "${token}" ]; then
@@ -4718,8 +4720,8 @@ ci_cmd_result_gate() {
         phase="${entry%%:*}"
         state="${entry#*:}"
         case "${phase}" in
-            # What: always-run phases must succeed, never skip.
-            # Why: a skipped plan/checks would hide a red run.
+            # What: always-run phases: succeed, never skip.
+            # Why: skipped plan/checks would hide a red run.
             platform|plan|checks)
                 if [ "${state}" != success ]; then
                     ci_log "[CI-ERROR-CORE-0100]" "phase=\"${phase}\" result=\"${state}\""
@@ -6203,9 +6205,9 @@ _ci_check_docker_run_heredoc_stdin() {
     printf 'docker-run-heredoc-stdin=clean files=%s\n' "${#files[@]}"
 }
 
-# What: setup.sh wizard prompts vs expect-sim coverage/staleness.
-# Why: an unanswered new prompt hangs a sim to timeout (#1176).
-# From: Issue #1683 | PR #1858
+# What: setup.sh wizard prompts vs expect-sim staleness.
+# Why: unanswered prompt hangs sim to timeout.
+# From: Issue #1176 | PR #1858
 _ci_setup_wizard_rows() {
     # Emit FLAG\tPROMPT\tHAYSTACK per ask/confirm in setup.sh's wizard region.
     # FLAG=COND when any if/case encloses the call (one keyword per line).
