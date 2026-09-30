@@ -5128,6 +5128,23 @@ _anv_run() {
     CI_ACTION_MANIFEST_CMD="$1/resolver" run bash "${CI_SH}" check action-node-versions "$1"
 }
 
+@test "action ref is external unless local, docker, or this repo" {
+    # What: own repo (any case), ./ and docker:// are local.
+    # Why: this repo comes from the run, never a literal.
+    # From: Issue #1683 | PR #1858
+    local v
+    for v in ./a/b@x docker://img@x Owner/Fixture-Repo/.github/a@x owner/fixture-repo/b@y; do
+        GITHUB_REPOSITORY=owner/fixture-repo run _ci_action_ref_is_external "${v}"
+        [ "${status}" -eq 1 ] || { echo "want local: ${v}"; false; }
+    done
+    for v in other/tool@0a owner/other-repo/x@1b; do
+        GITHUB_REPOSITORY=owner/fixture-repo run _ci_action_ref_is_external "${v}"
+        [ "${status}" -eq 0 ] || { echo "want external: ${v}"; false; }
+    done
+    GITHUB_REPOSITORY=owner/fixture-repo run _ci_action_ref_is_external owner/fixture-repo
+    [ "${status}" -eq 1 ]
+}
+
 @test "check action-node-versions passes current, fails deprecated runtimes" {
     # What: Current pins pass; dead runtime fails.
     # Why: Node-runtime invariant, no-manifest/skip.

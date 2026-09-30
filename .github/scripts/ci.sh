@@ -6722,8 +6722,14 @@ _ci_action_ref_is_external() {
         *@*) ;; *) return 1 ;;
     esac
     case "${v}" in
-        ./*|\$/*|docker://*|wiki-mod/lancache-ng/*) return 1 ;;
+        ./*|\$/*|docker://*) return 1 ;;
     esac
+    # What: this repo's own actions are no third-party pins.
+    # Why: owner/repo comes from the run, never hardcoded.
+    # From: Issue #1683 | PR #1858
+    if [ -n "${GITHUB_REPOSITORY:-}" ]; then
+        case "${v,,}" in "${GITHUB_REPOSITORY,,}"/*) return 1 ;; esac
+    fi
     return 0
 }
 

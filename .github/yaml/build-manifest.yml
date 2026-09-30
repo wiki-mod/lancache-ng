@@ -12,8 +12,8 @@ schema: build-manifest/v1
 services:
   proxy:
     context: services/proxy
-    # What: named build contexts (name=path) for COPY --from.
-    # Why: proxy consumes dns' cdn-domains.txt via a named context.
+    # What: named build contexts for COPY --from
+    # Why: proxy consumes dns' cdn-domains file
     # From: Issue #1683
     external_contexts:
       - dns-domains=services/dns
@@ -22,8 +22,8 @@ services:
     final_base: alpine
     runner: light
     # What: execute-smoke checks run post-build by ci.sh.
-    # Why: prove apk binaries run, not just exist (#1613).
-    # From: Issue #1613 | Issue #1683
+    # Why: prove apk binaries run, not just exist
+    # From: Issue #1613
     smoke:
       - rg --version
       - curl --version
@@ -33,21 +33,21 @@ services:
       - "nginx -V 2>&1 | grep -q -- --with-stream_ssl_preread_module"
   dns:
     context: services/dns
-    # What: named contexts for the shared-secret + known-good libs.
+    # What: named contexts for shared-secret and known-good
     # Why: entrypoint sources scripts/lib, not embedded.
-    # From: Issue #858 | Issue #1683
+    # From: Issue #858
     external_contexts:
       - shared-secret=scripts/lib
       - known-good=scripts/lib
     build_type: rust
     # What: the workspace crate (cargo -p) of this service.
-    # Why: rust checks target the crate, not the build context.
+    # Why: rust checks target crate not build context
     # From: Issue #1683 | PR #1858
     crate: nats-subscriber
     final_base: alpine
     runner: heavy
     # What: final-image apk packages; the SOT owns the list.
-    # Why: consumer derives; no hardcoded apk add (AG-CI-006).
+    # Why: consumers derive; no hardcoding (AG-CI-006)
     # From: Issue #1683
     packages:
       - pdns
@@ -75,13 +75,13 @@ services:
     context: services/watchdog
     build_type: rust
     # What: the workspace crate (cargo -p) of this service.
-    # Why: rust checks target the crate, not the build context.
+    # Why: rust checks target crate not build context
     # From: Issue #1683 | PR #1858
     crate: lancache-watchdog
     final_base: alpine
     runner: heavy
     # What: final-image apk packages; the SOT owns the list.
-    # Why: consumer derives; no hardcoded apk add (AG-CI-006).
+    # Why: consumers derive; no hardcoding (AG-CI-006)
     # From: Issue #1683
     packages:
       - bash
@@ -103,14 +103,14 @@ services:
     context: services/dhcp
     # What: named context for the shared-secret lib.
     # Why: entrypoint sources scripts/lib, not embedded.
-    # From: Issue #858 | Issue #1683
+    # From: Issue #858
     external_contexts:
       - shared-secret=scripts/lib
     build_type: apk
     final_base: alpine
     runner: light
     # What: final-image apk packages; the SOT owns the list.
-    # Why: consumer derives; no hardcoded apk add (AG-CI-006).
+    # Why: consumers derive; no hardcoding (AG-CI-006)
     # From: Issue #1683
     packages:
       - kea-dhcp4
@@ -130,8 +130,8 @@ services:
       - lsof
       - ripgrep
     # What: execute-smoke checks run post-build by ci.sh.
-    # Why: prove apk binaries run, not just exist (#1613).
-    # From: Issue #1613 | Issue #1683
+    # Why: prove apk binaries run, not just exist
+    # From: Issue #1613
     smoke:
       - kea-dhcp4 -v
       - curl --version
@@ -151,7 +151,7 @@ services:
     final_base: alpine
     runner: light
     # What: final-image apk packages; the SOT owns the list.
-    # Why: consumer derives; no hardcoded apk add (AG-CI-006).
+    # Why: consumers derive; no hardcoding (AG-CI-006)
     # From: Issue #1683
     packages:
       - bash
@@ -163,8 +163,8 @@ services:
       - lsof
       - ripgrep
     # What: execute-smoke checks run post-build by ci.sh.
-    # Why: prove apk binaries run, not just exist (#1613).
-    # From: Issue #1613 | Issue #1683
+    # Why: prove apk binaries run, not just exist
+    # From: Issue #1613
     smoke:
       - dnsmasq --version
       - envsubst --version
@@ -178,7 +178,7 @@ services:
     final_base: alpine
     runner: light
     # What: final-image apk packages; the SOT owns the list.
-    # Why: consumer derives; no hardcoded apk add (AG-CI-006).
+    # Why: consumers derive; no hardcoding (AG-CI-006)
     # From: Issue #1683
     packages:
       - bash
@@ -187,8 +187,8 @@ services:
       - curl
       - gettext-envsubst
     # What: execute-smoke checks run post-build by ci.sh.
-    # Why: prove apk binaries run, not just exist (#1613).
-    # From: Issue #1613 | Issue #1683
+    # Why: prove apk binaries run, not just exist
+    # From: Issue #1613
     smoke:
       - chronyd -v
       - curl --version
@@ -204,7 +204,7 @@ services:
     final_base: alpine
     runner: light
     # What: final-image apk packages; the SOT owns the list.
-    # Why: consumer derives; no hardcoded apk add (AG-CI-006).
+    # Why: consumers derive; no hardcoding (AG-CI-006)
     # From: Issue #1683
     packages:
       - syslog-ng
@@ -213,8 +213,8 @@ services:
       - zstd
       - tzdata
     # What: execute-smoke checks run post-build by ci.sh.
-    # Why: prove apk binaries run, not just exist (#1613).
-    # From: Issue #1613 | Issue #1683
+    # Why: prove apk binaries run, not just exist
+    # From: Issue #1613
     smoke:
       - syslog-ng --version
       - zstd --version
@@ -223,18 +223,18 @@ services:
     context: services/ui
     # What: named context for the shared-secret lib.
     # Why: entrypoint sources scripts/lib, not embedded.
-    # From: Issue #858 | Issue #1683
+    # From: Issue #858
     external_contexts:
       - shared-secret=scripts/lib
     build_type: rust
     # What: the workspace crate (cargo -p) of this service.
-    # Why: rust checks target the crate, not the build context.
+    # Why: rust checks target crate not build context
     # From: Issue #1683 | PR #1858
     crate: lancache-ui
     final_base: alpine
     runner: heavy
     # What: final-image apk packages; the SOT owns the list.
-    # Why: consumer derives; no hardcoded apk add (AG-CI-006).
+    # Why: consumers derive; no hardcoding (AG-CI-006)
     # From: Issue #1683
     packages:
       - ca-certificates
@@ -255,13 +255,13 @@ services:
     # From: Issue #1683
     build_type: rust
     # What: the workspace crate (cargo -p) of this service.
-    # Why: rust checks target the crate, not the build context.
+    # Why: rust checks target crate not build context
     # From: Issue #1683 | PR #1858
     crate: lancache-cachehamster
     final_base: alpine
     runner: heavy
     # What: final-image apk packages; the SOT owns the list.
-    # Why: consumer derives; no hardcoded apk add (AG-CI-006).
+    # Why: consumers derive; no hardcoding (AG-CI-006)
     # From: Issue #1683
     packages:
       - ca-certificates
@@ -274,14 +274,14 @@ services:
     final_base: alpine
     runner: light
     # What: final-image apk packages; the SOT owns the list.
-    # Why: consumer derives; no hardcoded apk add (AG-CI-006).
+    # Why: consumers derive; no hardcoding (AG-CI-006)
     # From: Issue #1683
     packages:
       - bash
       - ca-certificates
 
 # What: The toolchain image that builds the product stack.
-# Why: built by the generic pipeline; never counted in the stack.
+# Why: built by generic pipeline; not in stack
 # From: Issue #1683
 build_toolchain:
   build-tools:
@@ -343,8 +343,8 @@ build_toolchain:
       - shellcheck
       - sqlite
       - tcpdump
-      # What: trivy scan tool, version-pinned from edge/testing (§64).
-      # Why: 0.74.0 lives only in edge/testing; @testing scopes it, not global.
+      # What: trivy version-pinned 0.74.0-r0
+      # Why: only in edge/testing; @testing scopes it
       # From: Issue #1683
       - trivy@testing=0.74.0-r0
       - tzdata
@@ -478,7 +478,7 @@ external_versions:
     sha256_x86_64: b42d9937807f28812502a967906d370cff9ab443453813656b99ff6a9b3c5649
     sha256_aarch64: 8cd056d64078c109409c08e30d55324c82e3855f9d8e4b304cacc7c612610e09
     # What: Vendored static curl CVE-safe pin policy.
-    # Why: Trivy os-pkg scanner can't see static-linked curl.
+    # Why: os-pkg scanner can't see static curl
     # From: Issue #1304 | PR #1352
     curl_safe_threshold: 8.21.0
     curl_accepted_until: 2030-12-31
@@ -625,19 +625,19 @@ validation:
   # Why: Only HTTP is cached; a real HIT proves the path.
   # From: Issue #1683 | PR #1858
   proxy_cache_probe_url: http://deb.debian.org/debian/dists/stable/InRelease
-  # What: deploy compose file[:profile] targets CI renders clean.
-  # Why: prod/quickstart/secondary only; full-setup is CI-internal.
+  # What: compose targets CI renders clean
+  # Why: full-setup is CI-internal only
   # From: Issue #1683 | PR #1858
   compose_targets: deploy/prod/docker-compose.yml deploy/secondary/docker-compose.yml deploy/quickstart/docker-compose.yml:ssl deploy/prod/docker-compose.yml:dhcp-kea deploy/prod/docker-compose.yml:dhcp-proxy deploy/prod/docker-compose.yml:logging deploy/quickstart/docker-compose.yml:dhcp-kea deploy/quickstart/docker-compose.yml:dhcp-proxy deploy/quickstart/docker-compose.yml:logging
-  # What: placeholder env for compose targets without an .env.
-  # Why: operator keys (LISTEN_IP...) are :?-required at runtime.
+  # What: placeholder env for targets without .env
+  # Why: operator keys are :?-required
   # From: Issue #1683 | PR #1858
   compose_validation_env: CACHE_VALID_ANY=1h CACHE_VALID_HIT=30d DDNS_TSIG_KEY=ci-ddns-tsig-key IP_SSL=127.0.0.2 IP_STANDARD=127.0.0.1 LISTEN_IP=127.0.0.3 ALLOW_INSECURE_UI=true KEA_CTRL_TOKEN=ci-kea-token NATS_CONSUMER=ci-secondary NATS_DNS_REPLICA_PASSWORD=ci-nats-dns-replica-password NATS_DNS_REPLICA_USER=ci-nats-dns-replica NATS_DNS_WRITER_PASSWORD=ci-nats-dns-writer-password NATS_DNS_WRITER_USER=ci-nats-dns-writer NATS_CALLOUT_PASSWORD=ci-nats-callout-password NATS_CALLOUT_USER=ci-nats-callout NATS_SYS_PASSWORD=ci-nats-sys-password NATS_SYS_USER=ci-nats-sys NATS_PASSWORD=ci-nats-password NATS_UI_PASSWORD=ci-nats-ui-password NATS_UI_USER=ci-nats-ui NATS_USER=ci-nats-user NATS_TOKEN=ci-nats-token NATS_URL=nats://127.0.0.1:4222 NGINX_UPSTREAM_RESOLVER=1.1.1.1 PDNS_API_KEY=ci-pdns-api-key PROXY_IP=127.0.0.1 SECONDARY_REGISTRATION_TOKEN=ci-secondary-registration-token SSL_CACHE_MAX_GB=10 STANDARD_CACHE_MAX_GB=10
-  # What: compose file[:profile] targets also rendered via --env-file.
-  # Why: quickstart's committed .env must interpolate cleanly too.
+  # What: compose targets rendered via env-file
+  # Why: quickstart's env must interpolate clean
   # From: Issue #1683 | PR #1858
   compose_env_file_targets: deploy/quickstart/docker-compose.yml:ssl
-  # What: required runtime keys setup.sh update must repair if empty.
-  # Why: an empty required key breaks the stack; update must not keep it.
+  # What: required keys setup.sh repairs
+  # Why: empty required key breaks the stack
   # From: Issue #1683 | PR #1858
   setup_required_repairs: CACHE_INACTIVE CACHE_MAX_GB CACHE_MAX_SIZE CACHE_MEM_MB CACHE_SLICE_SIZE CACHE_VALID_ANY CACHE_VALID_HIT DDNS_TSIG_KEY KEA_CTRL_TOKEN LANCACHE_IMAGE_CHANNEL LANCACHE_IMAGE_PREFIX LANCACHE_IMAGE_REGISTRY LANCACHE_IMAGE_TAG NATS_DNS_REPLICA_PASSWORD NATS_DNS_REPLICA_USER NATS_DNS_WRITER_PASSWORD NATS_DNS_WRITER_USER NATS_CALLOUT_PASSWORD NATS_CALLOUT_USER NATS_SYS_PASSWORD NATS_SYS_USER NATS_UI_PASSWORD NATS_UI_USER NGINX_UPSTREAM_RESOLVER PDNS_API_KEY PROXY_SECURITY_MODE SSL_ENABLED SECONDARY_REGISTRATION_TOKEN
