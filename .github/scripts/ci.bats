@@ -1343,6 +1343,7 @@ _stub() {
     # Why: build-tools outside atomic promote (§133).
     # From: Issue #1683
     CI_PROMOTE_MOVE_CMD="$(_stub mv 'echo moved svc=$1 ch=$2 dig=$3')" \
+    CI_CHANNEL_READBACK_CMD="$(_stub rb 'echo sha256:idx')" \
         run _ci_assemble_toolchain_channel build-tools sha256:idx
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"moved svc=build-tools"* ]]
@@ -2196,6 +2197,55 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     [[ "${output}" == *"sha256:led"* ]]
     [[ "${output}" == *"sha256:chan"* ]]
     [[ "${output}" == *"sha256:child"* ]]
+}
+
+@test "default gc roots protect the build-tools channels too" {
+    # What: toolchain channels and children are roots.
+    # Why: else GC orphans the channel index (unpullable).
+    # From: Issue #1683 | PR #1858
+    GITHUB_REPOSITORY=wiki-mod/lancache-ng
+    _ci_ledger_blob() { return 1; }
+    ci_services() { printf 'proxy\n'; }
+    _ci_mutable_channels() { printf 'nightly\n'; }
+    _ci_registry_probe() { case "$1" in *build-tools:nightly) echo sha256:btidx ;; *) return 1 ;; esac; }
+    _ci_index_raw() { printf '{"manifests":[{"platform":{"architecture":"arm64"},"digest":"sha256:btarm"}]}'; }
+    run _ci_default_gc_roots
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"sha256:btidx"* ]]
+    [[ "${output}" == *"sha256:btarm"* ]]
+}
+
+@test "channel readback rejects an index with a lost child" {
+    # What: index digest resolves, one child 404 -> reject.
+    # Why: a channel on an unpullable index breaks all jobs.
+    # From: Issue #1683 | PR #1858
+    export GITHUB_REPOSITORY=wiki-mod/lancache-ng
+    _ci_registry_digest() { echo sha256:idx; }
+    _ci_index_raw() { printf '{"manifests":[{"platform":{"architecture":"amd64"},"digest":"sha256:a"},{"platform":{"architecture":"arm64"},"digest":"sha256:b"}]}'; }
+    _ci_registry_probe() { echo sha256:ok; }
+    run _ci_default_channel_readback build-tools latest
+    [ "${status}" -eq 0 ]
+    [ "${output}" = sha256:idx ]
+    _ci_registry_probe() { case "$1" in *@sha256:b) return 1 ;; *) echo sha256:ok ;; esac; }
+    run _ci_default_channel_readback build-tools latest
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"[CI-ERROR-PROMOTE-0014]"* ]]
+    [[ "${output}" != *"sha256:idx"$'\n'* ]]
+}
+
+@test "toolchain channel move fails when the readback is not the index" {
+    # What: moved toolchain channel is read back, children too.
+    # Why: never leave build-tools on an unusable image.
+    # From: Issue #1683 | PR #1858
+    export GITHUB_REF_NAME=current_dev
+    _ci_promote_move() { :; }
+    _ci_channel_readback() { return 2; }
+    run _ci_assemble_toolchain_channel build-tools sha256:idx
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"[CI-ERROR-ASSEMBLE-0007]"* ]]
+    _ci_channel_readback() { echo sha256:idx; }
+    run _ci_assemble_toolchain_channel build-tools sha256:idx
+    [ "${status}" -eq 0 ]
 }
 
 @test "default gc roots refuses when the ledger read is UNKNOWN" {
@@ -8726,7 +8776,7 @@ SH
     # Why: one digest reader confirms the promotion.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    printf '#!/usr/bin/env bash\necho sha256:chan\n' > "${bin}/docker"
+    printf '#!/usr/bin/env bash\ncase " $* " in *" --raw "*) echo "{\\"schemaVersion\\":2}" ;; *) echo sha256:chan ;; esac\n' > "${bin}/docker"
     chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
         run _ci_default_channel_readback ui latest

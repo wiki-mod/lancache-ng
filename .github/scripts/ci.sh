@@ -2781,6 +2781,7 @@ _ci_index_raw() {
     raw="$(docker buildx imagetools inspect "${ref}" --raw 2>&1)" || rc=$?
     if [ "${rc}" -ne 0 ]; then
         [ "$(_ci_classify_failure "${raw}")" = not_found ] && return 1
+        ci_error "[CI-WARN-RESOLVE-0010]" "ref=\"${ref}\" rc=${rc} reason=\"index read failed; UNKNOWN\"" "${raw}"
         return 2
     fi
     printf '%s' "${raw}"
@@ -2905,7 +2906,16 @@ _ci_assemble_toolchain_channel() {
     local service="$1" index="$2" ch
     [ "$(ci_service_field "${service}" build_type)" = toolchain ] || return 0
     ch="$(_ci_build_tools_channel "${GITHUB_REF_NAME:-}")"
-    "${CI_PROMOTE_MOVE_CMD:-_ci_default_channel_move}" "${service}" "${ch}" "${index}"
+    _ci_promote_move "${service}" "${ch}" "${index}" || return 2
+    # What: read the moved channel back, children included.
+    # Why: a channel on an unusable index breaks every job.
+    # From: Issue #1683 | PR #1858
+    local seen
+    seen="$(_ci_channel_readback "${service}" "${ch}")" || seen=""
+    if [ "${seen}" != "${index}" ]; then
+        ci_error "[CI-ERROR-ASSEMBLE-0007]" "service=\"${service}\" channel=\"${ch}\" reason=\"toolchain channel readback failed\" expected=\"${index}\"" "readback=${seen}"
+        return 2
+    fi
 }
 
 # =========================================================
@@ -3036,10 +3046,33 @@ _ci_default_channel_move() {
 # Why: one digest reader; empty output means unknown.
 # From: Issue #1683
 _ci_default_channel_readback() {
-    local svc="$1" channel="$2" repo registry
+    local svc="$1" channel="$2" repo registry digest
     repo="$(_ci_repo)"
     registry="$(_ci_registry)"
-    _ci_registry_digest "${registry}/${repo}/${svc}:${channel}" 2>/dev/null
+    digest="$(_ci_registry_digest "${registry}/${repo}/${svc}:${channel}")" || return 2
+    # What: a channel counts only if every child resolves.
+    # Why: a present index with lost children is unpullable.
+    # From: Issue #1683 | PR #1858
+    _ci_index_complete "${registry}/${repo}/${svc}" "${digest}" || return 2
+    printf '%s\n' "${digest}"
+}
+
+# What: True if every platform child of an index resolves.
+# Why: an index digest alone does not prove a usable image.
+# From: Issue #1683 | PR #1858
+_ci_index_complete() {
+    local base="$1" digest="$2" raw rc=0 child prc
+    raw="$(_ci_index_raw "${base}@${digest}")" || rc=$?
+    [ "${rc}" -eq 0 ] || return "${rc}"
+    while IFS= read -r child; do
+        [ -n "${child}" ] || continue
+        prc=0
+        _ci_registry_probe "${base}@${child}" >/dev/null || prc=$?
+        if [ "${prc}" -ne 0 ]; then
+            ci_log "[CI-ERROR-PROMOTE-0014]" "image=\"${base}@${digest}\" child=\"${child}\" rc=${prc} reason=\"index child not resolvable; image unusable\""
+            return 2
+        fi
+    done <<< "$(printf '%s' "${raw}" | jq -r '.manifests[]? | select(.platform.architecture!="unknown") | .digest')"
 }
 
 # What: Resolve the move backend, mock or default.
@@ -3502,7 +3535,10 @@ _ci_default_gc_roots() {
             [ "${prc}" -eq 2 ] && { ci_log "[CI-ERROR-GC-0013]" "service=\"${svc}\" channel=\"${channel}\" reason=\"channel probe UNKNOWN; refusing roots\""; return 2; }
             [ "${prc}" -eq 0 ] && pairs="${pairs}"$'\n'"${svc}"$'\t'"${dig}"
         done < <(_ci_mutable_channels)
-    done < <(ci_services)
+    # What: every build target's channels are roots.
+    # Why: GC candidates include build-tools; skip = orphan.
+    # From: Issue #1683 | PR #1858
+    done < <(ci_build_targets)
     pairs="$(printf '%s\n' "${pairs}" | awk 'NF>0' | LC_ALL=C sort -u)"
     while IFS=$'\t' read -r s d; do
         [ -n "${d}" ] || continue
