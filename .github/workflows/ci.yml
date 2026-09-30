@@ -161,8 +161,8 @@ jobs:
           [ -n "${digest}" ] || { echo "no digest from publish" >&2; exit 1; }
           bash .github/scripts/ci.sh verify "${{ matrix.service }}" "${digest}" "${{ matrix.platform }}"
 
-  # What: the toolchain image the verification jobs run in.
-  # Why: channel digest, or this identity's candidate on change.
+  # What: this identity's candidate, only on a toolchain change.
+  # Why: otherwise platform already resolved the channel digest.
   # From: Issue #1683 | PR #1858
   resolve-build-tools:
     name: resolve build-tools
@@ -170,6 +170,7 @@ jobs:
     if: >-
       !cancelled() && needs.plan.outputs.docs-only != 'true' &&
       needs.plan.result == 'success' &&
+      needs.plan.outputs.toolchain-impact == 'BUILD' &&
       contains(fromJSON('["success","skipped"]'), needs.build-toolchain.result)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -207,14 +208,14 @@ jobs:
   # From: Issue #1683
   cargo-audit:
     name: cargo-audit
-    needs: [plan, resolve-build-tools]
+    needs: [platform, plan, resolve-build-tools]
     if: &after_resolve_tests >-
-      !cancelled() && needs.resolve-build-tools.result == 'success' &&
+      !cancelled() && contains(fromJSON('["success","skipped"]'), needs.resolve-build-tools.result) &&
       needs.plan.outputs.test-services != ''
     runs-on: ubuntu-latest
     timeout-minutes: 30
     container: &bt_container
-      image: ${{ needs.resolve-build-tools.outputs.image }}
+      image: ${{ needs.resolve-build-tools.outputs.image || needs.platform.outputs.image }}
       credentials: *ghcr_credentials
     steps:
       - *bootstrap
@@ -226,7 +227,7 @@ jobs:
   # From: Issue #1683 | PR #1858
   test:
     name: test
-    needs: [plan, resolve-build-tools]
+    needs: [platform, plan, resolve-build-tools]
     if: *after_resolve_tests
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -243,9 +244,9 @@ jobs:
   # From: Issue #1683
   lint:
     name: lint
-    needs: [plan, resolve-build-tools]
+    needs: [platform, plan, resolve-build-tools]
     if: >-
-      !cancelled() && needs.resolve-build-tools.result == 'success' &&
+      !cancelled() && contains(fromJSON('["success","skipped"]'), needs.resolve-build-tools.result) &&
       needs.plan.outputs.docs-only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -265,16 +266,16 @@ jobs:
   # From: Issue #1683
   scan:
     name: scan
-    needs: [plan, build-toolchain, build, resolve-build-tools]
+    needs: [platform, plan, build-toolchain, build, resolve-build-tools]
     if: >-
       !cancelled() && needs.plan.outputs.any-build == 'true' &&
       contains(fromJSON('["success","skipped"]'), needs.build-toolchain.result) &&
       contains(fromJSON('["success","skipped"]'), needs.build.result) &&
-      needs.resolve-build-tools.result == 'success'
+      contains(fromJSON('["success","skipped"]'), needs.resolve-build-tools.result)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     container:
-      image: ${{ needs.resolve-build-tools.outputs.image }}
+      image: ${{ needs.resolve-build-tools.outputs.image || needs.platform.outputs.image }}
       credentials: *ghcr_credentials
     steps:
       - *bootstrap
