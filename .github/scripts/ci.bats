@@ -4846,14 +4846,18 @@ STUBEOF
     # From: Issue #1683
     local r="${BATS_TEST_TMPDIR}/dep" m="${BATS_TEST_TMPDIR}/m.yml" img
     mkdir -p "${r}"
-    printf 'external_services:\n  ext-y:\n    image: "hub.example.test/ext-y:1"\n' > "${m}"
-    for img in 'img-a:7' 'registry.example.test/owner/app:latest' 'hub.example.test/ext-y:1' "hub.example.test/other@sha256:$(printf 'a%.0s' {1..64})"; do
+    local pin base
+    pin="hub.example.test/ext-y@sha256:$(printf 'b%.0s' {1..64})"
+    base="base.example.test/os@sha256:$(printf 'c%.0s' {1..64})"
+    printf 'external_services:\n  ext-y:\n    image: "%s"\nbase_images:\n  os: "%s"\n' "${pin}" "${base}" > "${m}"
+    for img in 'img-a:7' 'registry.example.test/owner/app:latest' 'hub.example.test/ext-y:1' \
+               "hub.example.test/other@sha256:$(printf 'a%.0s' {1..64})" "${pin%b}d"; do
         printf 'services:\n  x:\n    image: %s\n' "${img}" > "${r}/docker-compose.yml"
         CI_MANIFEST="${m}" run bash "${CI_SH}" check stable-external-images "${r}"
         [ "${status}" -eq 1 ] || { echo "want fail: ${img}"; false; }
         [[ "${output}" == *"CI-ERROR-CHECK-0014"* ]]
     done
-    for img in "hub.example.test/ext-y@sha256:$(printf 'b%.0s' {1..64})" '${LANCACHE_IMAGE_REGISTRY:-r}/p/svc:t'; do
+    for img in "${pin}" "\"${base}\"" '${LANCACHE_IMAGE_REGISTRY:-r}/p/svc:t'; do
         printf 'services:\n  x:\n    image: %s\n' "${img}" > "${r}/docker-compose.yml"
         CI_MANIFEST="${m}" run bash "${CI_SH}" check stable-external-images "${r}"
         [ "${status}" -eq 0 ] || { echo "want pass: ${img}"; false; }

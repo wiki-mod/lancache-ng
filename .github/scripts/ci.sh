@@ -136,12 +136,15 @@ ci_require_manifest() {
 # Why: One awk reader, no yq/python (AG-REL-001/006).
 # From: Issue #1683
 _ci_block_keys() {
-    local block="$1"
-    awk -v block="$block" '
+    local block="$1" mode="${2:-blocks}"
+    # What: mode "all" also lists scalar keys (key: value).
+    # Why: base_images holds values, not nested blocks.
+    # From: Issue #1683 | PR #1858
+    awk -v block="$block" -v all="$([ "${mode}" = all ] && echo 1)" '
         $0 ~ ("^" block ":[[:space:]]*$") { inb = 1; next }
         inb && /^[^[:space:]]/ { inb = 0 }
-        inb && /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ {
-            key = $1; sub(/:$/, "", key); print key
+        inb && (/^  [A-Za-z0-9_.-]+:[[:space:]]*$/ || (all && /^  [A-Za-z0-9_.-]+:/)) {
+            key = $1; sub(/:.*$/, "", key); print key
         }
     ' "${CI_MANIFEST}"
 }
@@ -6410,8 +6413,17 @@ _ci_check_pr_title() {
 _ci_check_stable_external_images() {
     local -a dirs=("$@")
     [ "${#dirs[@]}" -gt 0 ] || dirs=(deploy/prod deploy/quickstart)
-    local d line img name
+    local d line img k allowed=" "
     local -a viol=()
+    # What: the exact SOT pins (external services + bases).
+    # Why: compose must match them; other values are drift.
+    # From: Issue #1683 | PR #1858
+    for k in $(_ci_block_keys external_services); do
+        allowed+="$(_ci_block_entry_field external_services "${k}" image) "
+    done
+    for k in $(_ci_block_keys base_images all); do
+        allowed+="$(_ci_block_entry_field base_images "" "${k}") "
+    done
     for d in "${dirs[@]}"; do
         [ -d "${d}" ] || continue
         while IFS= read -r line; do
@@ -6422,12 +6434,15 @@ _ci_check_stable_external_images() {
             case "${img}" in
                 *'${LANCACHE'*|'') continue ;;
             esac
+            img="${img%\"}"; img="${img#\"}"
             case "${img}" in
                 *@sha256:*) ;;
                 *) viol+=("${d}: external not digest-pinned: ${img}"); continue ;;
             esac
-            name="${img%%@*}"; name="${name%%:*}"
-            grep -qF "${name}" "${CI_MANIFEST}" || viol+=("${d}: external not in SOT: ${img}")
+            case "${allowed}" in
+                *" ${img} "*) ;;
+                *) viol+=("${d}: external pin is not a SOT pin: ${img}") ;;
+            esac
         done < <(grep -rhE '^[[:space:]]+image:[[:space:]]' "${d}" 2>/dev/null)
     done
     if [ "${#viol[@]}" -gt 0 ]; then
