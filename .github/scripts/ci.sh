@@ -2965,7 +2965,7 @@ _ci_stack_candidate_ledger() {
     done < <(ci_services)
 }
 
-# What: toolchain promote candidates, only if fully accepted.
+# What: toolchain promote candidates if fully accepted.
 # Why: promote is the one channel mover (AG-REL-009).
 # From: Issue #1683 | PR #1858
 _ci_toolchain_candidate() {
@@ -3030,7 +3030,7 @@ _ci_stack_candidate() {
     fi
     _ci_stack_candidate_ledger || return "$?"
     # What: promote also carries the accepted toolchain.
-    # Why: validate pins compose services only, never build-tools.
+    # Why: validate pins compose services only.
     # From: Issue #1683 | PR #1858
     [ "${1:-}" = --with-toolchain ] || return 0
     _ci_toolchain_candidate
@@ -4290,8 +4290,8 @@ _ci_validate_dns() {
         ci_log "[CI-ERROR-VALIDATE-0011]" "domain=\"${domain}\" reason=\"no DNS answer from a resolver mode\""
         return 1
     fi
-    # What: standard and ssl mode MUST resolve to distinct IPs.
-    # Why: proves split routing (prod PROXY_IP .10 vs .11).
+    # What: standard and ssl modes resolve distinct IPs.
+    # Why: split routing proof (.10 vs .11).
     # From: Issue #668
     if [ "${a_std}" = "${a_ssl}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0021]" "domain=\"${domain}\" reason=\"standard and ssl DNS returned the same answer (#668 split routing lost)\""
@@ -4391,9 +4391,9 @@ _ci_validate_ssl_mitm() {
     fi
 }
 
-# What: Prove ssl-mode depth-dispatch routes deeper SNI right.
-# Why: depth>=2 SNI must passthrough (:9446), not MITM.
-# From: Issue #1276 | Issue #1322 | Issue #1683
+# What: ssl-mode depth-dispatch routes deeper SNI right.
+# Why: depth>=2 SNI passthrough (:9446), not MITM.
+# From: Issue #1683
 _ci_validate_ssl_dispatch_map() {
     local project="$1" cid map bad
     cid="$(docker compose -p "${project}" ps -q proxy 2>/dev/null)"
@@ -4422,7 +4422,7 @@ _ci_validate_ui_session() {
         ci_log "[CI-ERROR-VALIDATE-0030]" "reason=\"no ui container IP for session check\""
         return 2
     fi
-    # What: ui has no compose healthcheck; poll GET /domains.
+    # What: ui has no compose healthcheck; poll /domains.
     # Why: wait_healthy misses ui; prove it answers first.
     # From: Issue #1683
     for attempt in $(seq 1 30); do
@@ -4465,9 +4465,9 @@ _ci_validate_ui_add_record() {
     fi
 }
 
-# What: Poll dig on <svc> until <fqdn> resolves to <expected>.
-# Why: NATS->PowerDNS (and AXFR to ssl) are async; prove it.
-# From: Issue #1164 | Issue #628
+# What: Poll dig until <fqdn> resolves to <expected>.
+# Why: NATS->PowerDNS (AXFR to ssl) async; prove it.
+# From: Issue #1164
 _ci_validate_dns_resolves() {
     local project="$1" svc="$2" fqdn="$3" expected="$4" attempts="${5:-15}" ip got i
     ip="$(_ci_validate_container_ip "${project}" "${svc}")"
@@ -4484,9 +4484,9 @@ _ci_validate_dns_resolves() {
     return 1
 }
 
-# What: Prove UI->NATS->PowerDNS writes reach both dns modes.
-# Why: Real end-to-end NATS ingest + AXFR, not a mock.
-# From: Issue #1164 | Issue #1683
+# What: UI->NATS->PowerDNS writes reach both dns modes.
+# Why: Real end-to-end NATS ingest + AXFR, not mock.
+# From: Issue #1683
 _ci_validate_ui_nats_dns() {
     local project="$1" jar csrf rc=0
     jar="$(mktemp "${CI_TMPDIR}/ci-ui-jar.XXXXXX")"
@@ -4498,9 +4498,9 @@ _ci_validate_ui_nats_dns() {
     _ci_validate_dns_resolves "${project}" dns-ssl ci-uinats-probe.lan. 203.0.113.60 60 || return $?
 }
 
-# What: Prove the DNS known-good snapshot/rollback round-trip.
-# Why: Real listener HTTP + PowerDNS PATCH + cache flush.
-# From: Issue #628 | Issue #1683
+# What: DNS known-good snapshot/rollback round-trip.
+# Why: Real listener HTTP + PATCH + cache flush.
+# From: Issue #1683
 _ci_validate_dns_rollback() {
     local project="$1" ip cid key jar csrf snap resp applied changed flush code i rc=0
     ip="$(_ci_validate_container_ip "${project}" dns-standard)"
@@ -4509,9 +4509,9 @@ _ci_validate_dns_rollback() {
         ci_log "[CI-ERROR-VALIDATE-0037]" "reason=\"no dns-standard container/IP for rollback check\""
         return 2
     fi
-    # What: read PDNS_API_KEY from the shared-secrets file.
-    # Why: entrypoint resolves it at runtime, not compose env.
-    # From: Issue #628 | Issue #858
+    # What: read PDNS_API_KEY from shared-secrets file.
+    # Why: entrypoint resolves it at runtime, not env.
+    # From: Issue #858
     key="$(docker exec "${cid}" cat /var/lib/lancache-secrets/pdns-api-key 2>/dev/null | tr -d '\n')"
     if [ -z "${key}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0038]" "reason=\"could not read PDNS_API_KEY from shared-secrets\""
@@ -4542,8 +4542,8 @@ _ci_validate_dns_rollback() {
     csrf="$(_ci_validate_ui_session "${project}" "${jar}")" || { rc=$?; rm -f "${jar}"; return "${rc}"; }
     _ci_validate_ui_add_record "${project}" "${jar}" "${csrf}" ci-rollback-probe 203.0.113.70 || { rm -f "${jar}"; return 1; }
     _ci_validate_dns_resolves "${project}" dns-standard ci-rollback-probe.lan. 203.0.113.70 15 || { rm -f "${jar}"; return 1; }
-    # What: capture the newest lan. snapshot (the pre-change state).
-    # Why: the target this test rolls back to after the second write.
+    # What: capture newest lan. snapshot (pre-change state).
+    # Why: target this test rolls back to after 2nd write.
     # From: Issue #628
     snap="$(curl -sS -H "X-API-Key: ${key}" "http://${ip}:8083/snapshots" 2>/dev/null | jq -r '.zones["lan."][0].id // empty')"
     if [ -z "${snap}" ]; then
@@ -4564,7 +4564,7 @@ _ci_validate_dns_rollback() {
         return 1
     fi
     # What: post-rollback dig must return the OLD content.
-    # Why: proves the recursor cache flush actually reached it.
+    # Why: proves recursor cache flush reached it.
     # From: Issue #628
     _ci_validate_dns_resolves "${project}" dns-standard ci-rollback-probe.lan. 203.0.113.70 15 || return $?
 }
@@ -4581,9 +4581,9 @@ _ci_validate_ui_depends_started() {
     fi
 }
 
-# What: POST /api/secondary/register; print JSON body on 200.
-# Why: token-gated, no session/CSRF (main.rs); reused per name.
-# From: Issue #583 | Issue #433
+# What: POST /api/secondary/register; print JSON on 200.
+# Why: token-gated, no session/CSRF; reused per name.
+# From: Issue #583
 _ci_register_secondary() {
     local ip="$1" token="$2" name="$3" out code
     out="$(curl -sS -w '\n%{http_code}' -H 'Content-Type: application/json' \
@@ -4594,9 +4594,9 @@ _ci_register_secondary() {
     printf '%s' "${out%$'\n'*}"
 }
 
-# What: Prove each registered secondary gets a unique identity.
-# Why: per-secondary NATS auth-callout, not a shared token.
-# From: Issue #583 | Issue #433 | Issue #1683
+# What: Prove each secondary gets unique identity.
+# Why: per-secondary NATS auth-callout, not shared token.
+# From: Issue #1683
 _ci_validate_secondary_identity() {
     local project="$1" ip cid token a b au bu ap bp
     ip="$(_ci_validate_container_ip "${project}" ui)"
@@ -4605,8 +4605,8 @@ _ci_validate_secondary_identity() {
         ci_log "[CI-ERROR-VALIDATE-0045]" "reason=\"no ui container/IP for secondary-identity check\""
         return 2
     fi
-    # What: read SECONDARY_REGISTRATION_TOKEN from the ui token file.
-    # Why: ui resolves it at runtime; not env, not hardcoded (AG-CI-006).
+    # What: read SECONDARY_REGISTRATION_TOKEN from ui file.
+    # Why: ui resolves at runtime; not env, not hardcoded.
     # From: Issue #583
     token="$(docker exec "${cid}" cat /data/lancache-secondary-registration.token 2>/dev/null | tr -d '\n')"
     if [ -z "${token}" ]; then
@@ -4721,7 +4721,7 @@ ci_cmd_result_gate() {
         state="${entry#*:}"
         case "${phase}" in
             # What: always-run phases must succeed, never skip.
-            # Why: a skipped plan/checks would hide a red run.
+            # Why: skipped plan/checks would hide a red run.
             platform|plan|checks)
                 if [ "${state}" != success ]; then
                     ci_log "[CI-ERROR-CORE-0100]" "phase=\"${phase}\" result=\"${state}\""
