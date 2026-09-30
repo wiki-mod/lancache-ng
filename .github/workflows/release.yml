@@ -28,6 +28,13 @@ env:
   GHCR_USERNAME: ${{ github.actor }}
   GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  # What: LAN proxy inputs; ci.sh applies them self-hosted only.
+  # Why: AG-CI-009; ci.sh is the one proxy policy owner.
+  # From: Issue #1683 | PR #1858
+  PROJECT_SELFHOSTED_PROXY_HTTP: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
+  PROJECT_SELFHOSTED_PROXY_HTTPS: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
+  PROJECT_SELFHOSTED_PROXY_EXCLUSION: ${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
+  PROJECT_SELFHOSTED_PROXY_CA: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
 jobs:
   # What: resolve build-tools image for the SBOM scanner.
   # Why: trivy lives in the toolchain image, not the runner.
@@ -35,6 +42,15 @@ jobs:
   resolve-build-tools:
     name: resolve build-tools
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # What: one mutable entry, the current_dev channel (nightly).
+    # Why: ci.sh (SOT) cannot run before any container exists.
+    # From: Issue #1683 | PR #1858
+    container:
+      image: ghcr.io/${{ github.repository }}/build-tools:nightly
+      credentials: &ghcr_credentials
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     outputs:
       image: ${{ steps.resolve.outputs.image }}
     steps:
@@ -59,6 +75,10 @@ jobs:
     name: release
     needs: resolve-build-tools
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container: &bt_container
+      image: ${{ needs.resolve-build-tools.outputs.image }}
+      credentials: *ghcr_credentials
     permissions:
       contents: write
       packages: read
@@ -79,11 +99,8 @@ jobs:
     name: release-sbom
     needs: [resolve-build-tools, release]
     runs-on: ubuntu-latest
-    container:
-      image: ${{ needs.resolve-build-tools.outputs.image }}
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+    timeout-minutes: 60
+    container: *bt_container
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
