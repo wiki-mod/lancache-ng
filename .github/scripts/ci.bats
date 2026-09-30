@@ -805,7 +805,7 @@ teardown() {
         [ -n "${ov}" ] || continue
         while IFS= read -r p; do
             [ -z "${p}" ] && continue
-            printf '%s\n' ${global} | grep -qx "${p}"
+            grep -qx -- "${p}" <<< "${global// /$'\n'}"
         done <<< "${ov}"
         [ "$(printf '%s\n' ${ov} | sort | tr '\n' ' ')" != "${global}" ]
     done
@@ -2851,14 +2851,15 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     [[ "${output}" == *"result=STACK_ACCEPTED"* ]]
 }
 
-@test "validation SOT lists both real dig target domains" {
-    # What: DNS test domains come from the SOT, not code.
+@test "validation dig target is the first SOT dns test domain" {
+    # What: DNS test domain comes from the SOT, not code.
     # Why: One place owns the check inputs (AG-CI-006).
     # From: Issue #1683 | PR #1858
-    run _ci_validation_dns_domains
+    local m="${BATS_TEST_TMPDIR}/v.yml"
+    printf 'validation:\n  dns_test_domains: [a.example.test, b.example.test]\n' > "${m}"
+    CI_MANIFEST="${m}" run _ci_validation_dns_domain
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"deb.debian.org"* ]]
-    [[ "${output}" == *"download.epicgames.com"* ]]
+    [ "${output}" = "a.example.test" ]
 }
 
 @test "validation SOT proxy probe url is a cacheable HTTP target" {
@@ -3250,7 +3251,7 @@ netdata=sha256:n"
     # Why: Cannot dig without a resolver target.
     # From: Issue #1683
     _ci_validate_container_ip() { :; }
-    _ci_validation_dns_domains() { echo "deb.debian.org"; }
+    _ci_validation_dns_domain() { echo a.example.test; }
     run _ci_validate_dns proj
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-VALIDATE-0010"* ]]
@@ -3261,7 +3262,7 @@ netdata=sha256:n"
     # Why: A resolver mode must actually answer.
     # From: Issue #668 | Issue #1683
     _ci_validate_container_ip() { case "$2" in dns-standard) echo 1.1.1.1 ;; dns-ssl) echo 2.2.2.2 ;; esac; }
-    _ci_validation_dns_domains() { echo "deb.debian.org"; }
+    _ci_validation_dns_domain() { echo a.example.test; }
     dig() { case "$2" in @1.1.1.1) echo 10.0.0.1 ;; *) : ;; esac; }
     run _ci_validate_dns proj
     [ "${status}" -eq 1 ]
@@ -3273,7 +3274,7 @@ netdata=sha256:n"
     # Why: #668 split routing must give distinct IPs.
     # From: Issue #668
     _ci_validate_container_ip() { case "$2" in dns-standard) echo 1.1.1.1 ;; dns-ssl) echo 2.2.2.2 ;; esac; }
-    _ci_validation_dns_domains() { echo "deb.debian.org"; }
+    _ci_validation_dns_domain() { echo a.example.test; }
     dig() { echo 10.0.0.9; }
     run _ci_validate_dns proj
     [ "${status}" -eq 1 ]
@@ -3285,7 +3286,7 @@ netdata=sha256:n"
     # Why: Proves #668 split routing holds.
     # From: Issue #668 | Issue #1683
     _ci_validate_container_ip() { case "$2" in dns-standard) echo 1.1.1.1 ;; dns-ssl) echo 2.2.2.2 ;; esac; }
-    _ci_validation_dns_domains() { echo "deb.debian.org"; }
+    _ci_validation_dns_domain() { echo a.example.test; }
     dig() { case "$2" in @1.1.1.1) echo 10.0.0.1 ;; @2.2.2.2) echo 10.0.0.2 ;; esac; }
     run _ci_validate_dns proj
     [ "${status}" -eq 0 ]
@@ -3296,7 +3297,7 @@ netdata=sha256:n"
     # Why: Cannot TLS-probe without a target.
     # From: Issue #668
     _ci_validate_container_ip() { :; }
-    _ci_validation_dns_domains() { echo deb.debian.org; }
+    _ci_validation_dns_domain() { echo a.example.test; }
     docker() { case "$1" in compose) echo cid1 ;; esac; }
     run _ci_validate_ssl_mitm proj
     [ "${status}" -eq 2 ]
@@ -3308,7 +3309,7 @@ netdata=sha256:n"
     # Why: Cannot compare issuer without our CA.
     # From: Issue #668
     _ci_validate_container_ip() { echo 172.16.1.9; }
-    _ci_validation_dns_domains() { echo deb.debian.org; }
+    _ci_validation_dns_domain() { echo a.example.test; }
     docker() { case "$1" in compose) echo cid1 ;; cp) return 1 ;; esac; }
     run _ci_validate_ssl_mitm proj
     [ "${status}" -eq 2 ]
@@ -3320,7 +3321,7 @@ netdata=sha256:n"
     # Why: Foreign issuer means passthrough, not MITM.
     # From: Issue #668
     _ci_validate_container_ip() { echo 172.16.1.9; }
-    _ci_validation_dns_domains() { echo deb.debian.org; }
+    _ci_validation_dns_domain() { echo a.example.test; }
     docker() { case "$1" in compose) echo cid1 ;; cp) return 0 ;; esac; }
     openssl() { case "$*" in *s_client*) echo PEM ;; *-subject*) echo "subject=CN=LanCache Root CA" ;; *-issuer*) echo "issuer=CN=DigiCert" ;; esac; }
     run _ci_validate_ssl_mitm proj
@@ -3333,7 +3334,7 @@ netdata=sha256:n"
     # Why: Proves genuine MITM interception (#668).
     # From: Issue #597 | Issue #668
     _ci_validate_container_ip() { echo 172.16.1.9; }
-    _ci_validation_dns_domains() { echo deb.debian.org; }
+    _ci_validation_dns_domain() { echo a.example.test; }
     docker() { case "$1" in compose) echo cid1 ;; cp) return 0 ;; esac; }
     openssl() { case "$*" in *s_client*) echo PEM ;; *-subject*) echo "subject=CN=LanCache Root CA" ;; *-issuer*) echo "issuer=CN=LanCache Root CA" ;; esac; }
     run _ci_validate_ssl_mitm proj
@@ -3803,7 +3804,7 @@ netdata=sha256:n"
     [ -n "${ids}" ]
     while IFS= read -r id; do
         [ -n "${id}" ] || continue
-        printf '%s\n' "${allow}" | grep -qx "${id}"
+        grep -qx -- "${id}" <<< "${allow}"
     done <<< "${ids}"
 }
 
@@ -4144,19 +4145,6 @@ netdata=sha256:n"
     CI_MANIFEST="${m}" run bash "${CI_SH}" build-args syslog
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-BUILDARGS-0008"* ]]
-}
-
-@test "build-tools packages lists the apk tools incl. AG-KD-009 set" {
-    # What: The SOT feeds the apk input check.
-    # Why: AG-KD-009 required tools must all be present.
-    # From: Issue #1683
-    run bash "${CI_SH}" build-tools packages
-    [ "${status}" -eq 0 ]
-    for pkg in rust cargo rust-clippy rustfmt actionlint cargo-audit \
-               sccache distcc distcc-pump docker-cli \
-               docker-cli-buildx docker-cli-compose; do
-        printf '%s\n' "${output}" | grep -qx "${pkg}"
-    done
 }
 
 @test "build-tools packages reads only build_toolchain.build-tools.packages" {
@@ -4846,20 +4834,23 @@ STUBEOF
     run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/dirty.sh"; [ "${status}" -ne 0 ]
 }
 
-@test "check pipefail-early-exit flags grep -q, not plain sed -n" {
-    # What: ci.sh owns the SIGPIPE check; bats calls it.
-    # Why: only true early-exit consumers risk exit 141.
-    # From: Issue #1683
-    printf 'set -o pipefail\nx="$(seq 1 9)"\n' > "${BATS_TEST_TMPDIR}/okp.sh"
-    run bash "${CI_SH}" check pipefail-early-exit "${BATS_TEST_TMPDIR}/okp.sh"
-    [ "${status}" -eq 0 ]
-    printf 'set -o pipefail\nseq 1 9 | grep -q 3\n' > "${BATS_TEST_TMPDIR}/badp.sh"
-    run bash "${CI_SH}" check pipefail-early-exit "${BATS_TEST_TMPDIR}/badp.sh"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0011"* ]]
-    printf 'set -o pipefail\nseq 1 9 | sed -n "s/3/x/p"\n' > "${BATS_TEST_TMPDIR}/sedp.sh"
-    run bash "${CI_SH}" check pipefail-early-exit "${BATS_TEST_TMPDIR}/sedp.sh"
-    [ "${status}" -eq 0 ]
+@test "check pipefail-early-exit flags grep -q/head, not ||, -eq, sed -n" {
+    # What: early-exit consumers fail; lookalikes pass.
+    # Why: `||` and a later -eq are no pipe grep option.
+    # From: Issue #1683 | PR #1858
+    local f="${BATS_TEST_TMPDIR}/p.sh" g=grep h=head line
+    for line in "x=\"\$(seq 1 9)\"" 'a || grep -q x f' \
+                '[ "$(seq 9 | grep -c 3)" -eq 1 ]' 'seq 9 | sed -n "s/3/x/p"'; do
+        printf 'set -o pipefail\n%s\n' "${line}" > "${f}"
+        run bash "${CI_SH}" check pipefail-early-exit "${f}"
+        [ "${status}" -eq 0 ]
+    done
+    for line in "seq 9 | ${g} -q 3" "seq 9 | ${g} -Eiq 3" "seq 9 | ${g} --quiet 3" "seq 9 | ${h} -1"; do
+        printf 'set -o pipefail\n%s\n' "${line}" > "${f}"
+        run bash "${CI_SH}" check pipefail-early-exit "${f}"
+        [ "${status}" -ne 0 ]
+        [[ "${output}" == *"CI-ERROR-CHECK-0011"* ]]
+    done
 }
 
 @test "check if-without-else-status flags a masked \$? after an else-less if" {

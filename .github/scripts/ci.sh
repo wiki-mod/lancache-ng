@@ -562,7 +562,7 @@ ci_cmd_codeql_analyze() {
         ci_log "[CI-ERROR-CODEQL-0002]" "reason=\"language arg required\""
         return 2
     fi
-    if ! _ci_block_keys codeql_languages | grep -qx -- "${lang}"; then
+    if ! grep -qx -- "${lang}" <<< "$(_ci_block_keys codeql_languages)"; then
         ci_log "[CI-ERROR-CODEQL-0003]" "language=\"${lang}\" reason=\"not a SOT codeql_languages entry\""
         return 2
     fi
@@ -3601,7 +3601,7 @@ _ci_gh_versions() {
     # From: Issue #1683
     out="$(_ci_retry github-api gh api --paginate "/orgs/${owner}/packages/container/${pkg}/versions?per_page=100" --jq '.[] | [.name, .id, .created_at, ((.metadata.container.tags // []) | join(","))] | @tsv')" || rc=$?
     if [ "${rc}" -ne 0 ]; then
-        printf '%s' "${out}" | grep -qiE 'HTTP 404|Not Found' && return 1
+        grep -qiE 'HTTP 404|Not Found' <<< "${out}" && return 1
         ci_error "[CI-ERROR-GC-0018]" "owner=\"${owner}\" pkg=\"${pkg}\" reason=\"GHCR version listing failed\"" "${out}"
         return 2
     fi
@@ -3848,11 +3848,13 @@ _ci_gc_run() {
 # VALIDATION
 # =========================================================
 
-# What: Print the SOT DNS test domains, one per line.
-# Why: Real dig targets live in the SOT, not in code.
+# What: Print the first SOT DNS test domain.
+# Why: dig target lives in SOT; no pipe into head.
 # From: Issue #1683 | PR #1858
-_ci_validation_dns_domains() {
-    _ci_block_entry_list validation "" dns_test_domains
+_ci_validation_dns_domain() {
+    local all
+    all="$(_ci_block_entry_list validation "" dns_test_domains)" || return
+    printf '%s\n' "${all%%$'\n'*}"
 }
 
 # What: Print the SOT proxy cache-probe URL.
@@ -4275,7 +4277,7 @@ _ci_validate_dns() {
     local project="$1" ip_std ip_ssl domain a_std a_ssl
     ip_std="$(_ci_validate_container_ip "${project}" dns-standard)"
     ip_ssl="$(_ci_validate_container_ip "${project}" dns-ssl)"
-    domain="$(_ci_validation_dns_domains | head -1)"
+    domain="$(_ci_validation_dns_domain)"
     if [ -z "${ip_std}" ] || [ -z "${ip_ssl}" ] || [ -z "${domain}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0010]" "reason=\"missing dns container IP or test domain\""
         return 2
@@ -4312,7 +4314,7 @@ _ci_validate_proxy() {
         return 1
     fi
     h="$(curl -fsS --resolve "${host}:80:${ip_std}" -D - -o /dev/null "${url}")" || h=""
-    if ! printf '%s' "${h}" | grep -qi 'X-Cache-Status:[[:space:]]*HIT'; then
+    if ! grep -qi 'X-Cache-Status:[[:space:]]*HIT' <<< "${h}"; then
         ci_log "[CI-ERROR-VALIDATE-0014]" "url=\"${url}\" reason=\"second request not a cache HIT\""
         return 1
     fi
@@ -4360,7 +4362,7 @@ _ci_validate_ssl_mitm() {
     local project="$1" ip cid domain ca_subj issuer tmp
     ip="$(_ci_validate_container_ip "${project}" proxy)"
     cid="$(docker compose -p "${project}" ps -q proxy 2>/dev/null)"
-    domain="$(_ci_validation_dns_domains | head -1)"
+    domain="$(_ci_validation_dns_domain)"
     if [ -z "${ip}" ] || [ -z "${cid}" ] || [ -z "${domain}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0023]" "reason=\"no proxy container/IP or test domain for ssl-mitm check\""
         return 2
@@ -6105,13 +6107,15 @@ _ci_check_review_chronology() {
 # Why: SIGPIPE under pipefail exits 141 (AG-VAL-029).
 # From: Issue #1683
 _ci_check_pipefail_early_exit() {
-    local pat='\|[[:space:]]*(grep[[:space:]]+[^|]*-[a-zA-Z]*q|grep[[:space:]]+[^|]*-[a-zA-Z]*m[0-9]|head([[:space:]]|$)|sed[^|]*([[:space:];{]|[0-9])q)'
+    # What: one pipe (not ||) into grep -q/-m/head/sed q.
+    # Why: only grep's own option words count, not -eq.
+    # From: Issue #1683 | PR #1858
+    local pat='(^|[^|])\|[[:space:]]*(grep([[:space:]]+-[a-zA-Z]+)*[[:space:]]+(-[a-zA-Z]*(q|m[[:space:]]*[0-9])|--(quiet|silent|max-count))|head([[:space:]]|$)|sed[^|]*([[:space:];{]|[0-9])q)'
     local -a _ci_override=("$@") files=()
-    _ci_scan_files files _ci_override '.github/scripts/*.sh' '*/Dockerfile' 'Dockerfile' 'services/*.sh'
+    _ci_scan_files files _ci_override '.github/scripts/*.sh' '.github/scripts/*.bats' '*/Dockerfile' 'Dockerfile' 'services/*.sh'
     local path out
     local -a viol=()
     for path in "${files[@]}"; do
-        case "${path}" in */ci.sh|ci.sh) continue ;; esac
         grep -qE 'pipefail|build-tools|BUILD_TOOLS_IMAGE' "${path}" || continue
         out="$(grep -nE "${pat}" "${path}")" && viol+=("${path}: ${out}")
     done
@@ -6208,7 +6212,8 @@ _ci_setup_wizard_rows() {
     # Emit FLAG\tPROMPT\tHAYSTACK per ask/confirm in setup.sh's wizard region.
     # FLAG=COND when any if/case encloses the call (one keyword per line).
     local setup="$1" cs_line esac_line wiz_start
-    cs_line="$(grep -n '^case "${1:-install}" in$' "${setup}" | head -1 | cut -d: -f1)"
+    cs_line="$(grep -n -m1 '^case "${1:-install}" in$' "${setup}")" || return 3
+    cs_line="${cs_line%%:*}"
     [ -n "${cs_line}" ] || return 3
     esac_line="$(awk -v s="${cs_line}" 'NR>s && /^esac$/{print NR; exit}' "${setup}")"
     [ -n "${esac_line}" ] || return 3
@@ -8760,7 +8765,7 @@ _ci_check_cargo_audit() {
     # What: advisories/warnings fail (belt+braces).
     # Why: --deny warnings catches; never pass.
     # From: Issue #1683 | Issue #1535
-    if [ "${rc}" -ne 0 ] || printf '%s' "${out}" | grep -Eiq '(^|[[:space:]])warning:'; then
+    if [ "${rc}" -ne 0 ] || grep -Eiq '(^|[[:space:]])warning:' <<< "${out}"; then
         ci_error "[CI-ERROR-CHECK-0055]" "reason=\"cargo audit found advisories or warnings\"" "${out}"
         return 1
     fi
