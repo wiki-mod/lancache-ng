@@ -349,6 +349,11 @@ build_toolchain:
       - xz
       - zlib-dev
       - zlib-static
+    # What: tagged apk repos (tag=url) the packages use.
+    # Why: one owner; build and resolver add the same.
+    # From: Issue #1683 | PR #1858
+    apk_repositories:
+      - testing=http://dl-cdn.alpinelinux.org/alpine/edge/testing
     # What: Executables the toolchain smoke must find+run.
     # Why: One owner of the smoke list; ci.sh reads it.
     # From: Issue #1683

@@ -78,15 +78,20 @@ ARG APK_CACHE_BUST=""
 # From: Issue #1683
 ARG APK_PACKAGES
 
+# What: tagged apk repos (tag=url), supplied from the SOT.
+# Why: the SOT owns the URL; this stage only adds it.
+# From: Issue #1683 | PR #1858
+ARG APK_TAGGED_REPOS
+
 # What: switches apk's own repositories to plain http.
 # Why: Squid caches http; signed indices keep integrity.
 # From: Issue #1095
 RUN sed -i 's|^https://|http://|' /etc/apk/repositories
 
-# What: add edge/testing as a tagged http repo.
-# Why: only @testing tags (trivy) resolve, not global.
-# From: Issue #1683
-RUN echo "@testing http://dl-cdn.alpinelinux.org/alpine/edge/testing" >> /etc/apk/repositories
+# What: add each SOT tagged repo as "@tag url".
+# Why: only tagged packages (trivy) resolve, not global.
+# From: Issue #1683 | PR #1858
+RUN for kv in ${APK_TAGGED_REPOS}; do echo "@${kv%%=*} ${kv#*=}" >> /etc/apk/repositories; done
 
 # What: install base utils + SOT tools; trust proxy CA.
 # Why: GNU coreutils differ; CA restored before commit.

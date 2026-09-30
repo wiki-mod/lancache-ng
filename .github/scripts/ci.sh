@@ -982,6 +982,12 @@ _ci_classify_failure() {
             *"panic: methodref has no signature"*) printf 'transient\n'; return 0 ;;
         esac
     fi
+    # What: apk package or repo-tag resolution errors.
+    # Why: a missing package or tag never heals on retry.
+    # From: Issue #1683 | PR #1858
+    case "${low}" in
+        *"unable to select packages"*|*"not committing changes"*) printf 'permanent\n'; return 0 ;;
+    esac
     # What: curl -f HTTP 4xx, except 403/429, is permanent.
     # Why: a wrong tag/asset never heals on a retry.
     # From: Issue #1683 | PR #1858
@@ -4888,6 +4894,11 @@ DHSHAS
     pkgs="$(_ci_build_tools_packages | tr '\n' ' ')" || return 2
     pkgs="${pkgs% }"
     out="${out}${prefix}APK_PACKAGES=${pkgs}"$'\n'
+    # What: append the SOT tagged repos (tag=url) as a build-arg.
+    # Why: the Dockerfile adds them; it never owns the URL.
+    # From: Issue #1683 | PR #1858
+    pkgs="$(_ci_block_entry_list build_toolchain build-tools apk_repositories | tr '\n' ' ')"
+    out="${out}${prefix}APK_TAGGED_REPOS=${pkgs% }"$'\n'
     printf '%s' "${out}"
 }
 
@@ -5086,17 +5097,30 @@ _ci_build_tools_arches() {
 # Why: real apk runs in a container; tests inject it.
 # From: Issue #1683
 _ci_apk_resolve() {
-    local base="$1" arch="$2" packages="$3"
+    local base="$1" arch="$2" packages="$3" repos raw
     if [ -n "${CI_APK_RESOLVE_CMD:-}" ]; then
         "${CI_APK_RESOLVE_CMD}" "${base}" "${arch}" "${packages}"
         return "$?"
     fi
-    docker run --rm "${base}" sh -c "
-        sed -i 's|^https://|http://|' /etc/apk/repositories
-        apk --arch '${arch}' update >/dev/null 2>&1
-        apk --arch '${arch}' add --no-cache --simulate ${packages} 2>&1 \
-          | sed -n 's/^.*Installing \([^ ]*\) (\([^)]*\)).*/\1-\2/p' \
-          | LC_ALL=C sort | tr '\n' ' '"
+    repos="$(_ci_block_entry_list build_toolchain build-tools apk_repositories | tr '\n' ' ')"
+    # What: per-arch clean root with the build's repos.
+    # Why: a foreign arch needs its own db and keys.
+    # From: Issue #1683 | PR #1858
+    if ! raw="$(_ci_retry apk docker run --rm -e ARCH="${arch}" -e PKGS="${packages}" \
+            -e REPOS="${repos}" "${base}" sh -c '
+        set -e
+        r=/var/tmp/apk-root; k="/usr/share/apk/keys/${ARCH}"
+        mkdir -p "${r}/etc/apk"
+        sed "s|^https://|http://|" /etc/apk/repositories > "${r}/etc/apk/repositories"
+        for kv in ${REPOS}; do echo "@${kv%%=*} ${kv#*=}" >> "${r}/etc/apk/repositories"; done
+        apk --root "${r}" --arch "${ARCH}" --keys-dir "${k}" --initdb add
+        apk --root "${r}" --arch "${ARCH}" --keys-dir "${k}" update
+        apk --root "${r}" --arch "${ARCH}" --keys-dir "${k}" add --simulate ${PKGS}')"; then
+        ci_log "[CI-ERROR-BUILDTOOLS-0020]" "arch=\"${arch}\" reason=\"apk resolve failed\""
+        return 2
+    fi
+    printf '%s\n' "${raw}" | sed -n 's/^.*Installing \([^ ]*\) (\([^)]*\)).*/\1-\2/p' \
+        | LC_ALL=C sort | tr '\n' ' '
 }
 
 # What: Resolve every arch's apk state, then sign it.
@@ -5555,11 +5579,27 @@ ci_main() {
 _ci_scan_files() {
     local -n _ci_scan_out="$1" _ci_scan_override="$2"
     shift 2
+    local -a _ci_scan_in=()
+    local _ci_scan_p _ci_scan_gone=0
     if [ "${#_ci_scan_override[@]}" -gt 0 ]; then
-        _ci_scan_out=("${_ci_scan_override[@]}")
-        return
+        _ci_scan_in=("${_ci_scan_override[@]}")
+    else
+        mapfile -t _ci_scan_in < <(git ls-files -- "$@")
     fi
-    mapfile -t _ci_scan_out < <(git ls-files -- "$@")
+    # What: keep only files present in the tree; note the rest.
+    # Why: a deleted path has no content; skips stay visible.
+    # From: Issue #1683 | PR #1858
+    _ci_scan_out=()
+    for _ci_scan_p in "${_ci_scan_in[@]}"; do
+        if [ -f "${_ci_scan_p}" ]; then
+            _ci_scan_out+=("${_ci_scan_p}")
+        else
+            _ci_scan_gone=$((_ci_scan_gone + 1))
+        fi
+    done
+    if [ "${_ci_scan_gone}" -gt 0 ]; then
+        ci_log "[CI-NOTICE-CHECK-0070]" "skipped=${_ci_scan_gone} reason=\"path not in the tree (deleted)\""
+    fi
 }
 
 # What: Fail on any listed text file carrying CRLF.
@@ -5574,7 +5614,6 @@ _ci_check_line_endings() {
         case "${path}" in
             *.png|*.jpg|*.jpeg|*.gif|*.ico|*.woff|*.woff2|*.ttf|*.eot|*.crt|*.key|*.pem) continue ;;
         esac
-        [ -f "${path}" ] || continue
         grep -aq $'\r' "${path}" 2>/dev/null && offenders+=("${path}")
     done
     if [ "${#offenders[@]}" -gt 0 ]; then
@@ -5644,7 +5683,6 @@ _ci_check_file_headers() {
     local path exp p_line s_line legacy line pc sc scnt lc
     local -a fails=() scan=()
     for path in "${files[@]}"; do
-        [ -f "${path}" ] || continue
         _ci_prose_excluded "${path}" && continue
         if ! exp="$(_ci_header_expected "${path}")"; then
             fails+=("${path}: no native header syntax"); continue
@@ -5678,12 +5716,12 @@ _ci_check_file_headers() {
 # Why: 1-1-1-60, story-run size, and refs go in From only.
 # From: Issue #1683
 _ci_check_comment_length() {
+    local -a _ci_override=("$@") files=()
     local file heredoc_on yaml_on rc=0
-    for file in "$@"; do
-        if [ ! -f "${file}" ]; then
-            ci_log "[CI-ERROR-CHECK-0004]" "file=\"${file}\" reason=\"not a file\""
-            rc=2; continue
-        fi
+    if [ "$#" -gt 0 ]; then
+        _ci_scan_files files _ci_override
+    fi
+    for file in "${files[@]}"; do
         awk '
             function flush() {
                 if (blocklen > 3) { printf "%s:%d: block %d lines (max 3)\n", FILENAME, blockstart, blocklen; viol++ }
@@ -5782,7 +5820,6 @@ _ci_check_deny_short_sha() {
     local path out gs
     local -a viol=()
     for path in "${files[@]}"; do
-        [ -f "${path}" ] || continue
         case "${path}" in */ci.sh|ci.sh) continue ;; esac
         if ! out="$(grep -EnH "${pat}" "${path}")"; then
             gs=$?
@@ -5809,7 +5846,6 @@ _ci_check_language_policy() {
     local path
     local -a viol=()
     for path in "${files[@]}"; do
-        [ -f "${path}" ] || continue
         # What: vendored minified UI asset, not authored.
         # Why: AG-REL-001 governs authored, not vendored.
         # From: Issue #1683 | PR #1858
@@ -5841,7 +5877,6 @@ _ci_check_mutable_refs() {
     local path out
     local -a viol=()
     for path in "${files[@]}"; do
-        [ -f "${path}" ] || continue
         case "${path}" in
             *.yml|*.yaml)
                 out="$(grep -nE 'uses:[^@]*@v[0-9]' "${path}")" && viol+=("${path} action-@vN: ${out}")
@@ -5931,7 +5966,6 @@ _ci_check_review_chronology() {
     local path out ln joined fnums num
     local -a viol=() dup_viol=()
     for path in "${files[@]}"; do
-        [ -f "${path}" ] || continue
         case "${path}" in
             */ci.sh|ci.sh|*/ci.bats|ci.bats) continue ;;
         esac
@@ -5996,7 +6030,6 @@ _ci_check_pipefail_early_exit() {
     local path out
     local -a viol=()
     for path in "${files[@]}"; do
-        [ -f "${path}" ] || continue
         case "${path}" in */ci.sh|ci.sh) continue ;; esac
         grep -qE 'pipefail|build-tools|BUILD_TOOLS_IMAGE' "${path}" || continue
         out="$(grep -nE "${pat}" "${path}")" && viol+=("${path}: ${out}")
@@ -6017,7 +6050,6 @@ _ci_check_if_without_else_status() {
     local path fi_line status_line
     local -a viol=()
     for path in "${files[@]}"; do
-        [ -f "${path}" ] || continue
         case "${path}" in */ci.sh|ci.sh) continue ;; esac
         while IFS=: read -r fi_line status_line; do
             [ -n "${fi_line}" ] || continue
@@ -6067,7 +6099,6 @@ _ci_check_docker_run_heredoc_stdin() {
     local path lineno matched trimmed start window last_off invocation
     local -a viol=()
     for path in "${files[@]}"; do
-        [ -f "${path}" ] || continue
         while IFS=: read -r lineno _rest; do
             [ -n "${lineno}" ] || continue
             matched="$(sed -n "${lineno}p" "${path}")"
@@ -6777,13 +6808,15 @@ _ci_governance_issue_state() {
 # Why: Guard changed files against title/body governance.
 # From: Issue #1683
 _ci_check_governance_guards() {
-    local -a changed=("$@")
+    local -a _ci_override=("$@") changed=()
     local title="${GOVERNANCE_PR_TITLE:-${PR_TITLE:-}}" body="${GOVERNANCE_PR_BODY:-${PR_BODY:-}}"
     local -a viol=()
     local path line marker issue state
+    if [ "$#" -gt 0 ]; then
+        _ci_scan_files changed _ci_override
+    fi
     for path in "${changed[@]}"; do
         case "${path}" in *.md|*.mdx|*.rst|*.txt) continue ;; esac
-        [ -f "${path}" ] || continue
         while IFS= read -r marker; do
             [ -n "${marker}" ] || continue
             line="${marker%%:*}"; marker="${marker#*:}"
@@ -8644,7 +8677,7 @@ ci_cmd_check_all() {
     # What: diff-scoped checks see changed files.
     # Why: PR check doesn't re-scan whole repo.
     # From: Issue #1683
-    local -a diff_scoped=(line-endings file-headers comment-length \
+    local -a diff_scoped=(line-endings comment-length \
         deny-short-sha language-policy mutable-refs executable-bits \
         pipefail-early-exit if-without-else-status docker-run-heredoc-stdin \
         review-chronology governance-guards \
@@ -8655,7 +8688,7 @@ ci_cmd_check_all() {
     # What: repo-wide invariants diff can't answer.
     # Why: cross-file/state consistency every run.
     # From: Issue #1683
-    local -a repo_wide=(action-node-versions naming-consistency \
+    local -a repo_wide=(file-headers action-node-versions naming-consistency \
         workflow-line-limit stable-external-images compose-healthchecks \
         proxy-cache-env-doc-drift build-tools-smoke-coverage \
         dependabot-docker-base-consistency idempotence-test-coverage \

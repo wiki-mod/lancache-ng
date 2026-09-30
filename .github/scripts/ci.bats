@@ -867,6 +867,8 @@ _probe_stub() {
     [ "$(_ci_classify_failure 'error: could not compile lancache-ui')" = "permanent" ]
     [ "$(_ci_classify_failure 'pull access denied for ghcr.io/x')" = "permanent" ]
     [ "$(_ci_classify_failure 'curl: (22) The requested URL returned error: 404')" = "permanent" ]
+    [ "$(_ci_classify_failure 'ERROR: unable to select packages: x (no such package)')" = "permanent" ]
+    [ "$(_ci_classify_failure 'ERROR: Not committing changes due to missing repository tags.')" = "permanent" ]
 }
 
 @test "retry classifier: a missing manifest is not_found, auth is not" {
@@ -3738,6 +3740,10 @@ netdata=sha256:n"
     [[ "${output}" == *"--build-arg DHCLIENT_VERSION="* ]]
     [[ "${output}" == *"--build-arg DHCLIENT_SHA256_AMD64="* ]]
     [[ "${output}" == *"--build-arg DHCLIENT_SHA256_ARM64="* ]]
+    local repos
+    repos="$(_ci_block_entry_list build_toolchain build-tools apk_repositories | tr '\n' ' ')"
+    [ -n "${repos}" ]
+    [[ "${output}" == *"--build-arg APK_TAGGED_REPOS=${repos% }"* ]]
     # What: no apk tool version is emitted anymore.
     # Why: normal apk pkgs must not be a version lock.
     # From: Issue #1683
@@ -4053,6 +4059,29 @@ netdata=sha256:n"
     [ -n "${output}" ]
 }
 
+@test "apk resolver uses a clean per-arch root with the SOT repos" {
+    # What: own root, arch keys, SOT repos; raw on failure.
+    # Why: a foreign arch needs its own db, keys and tags.
+    # From: Issue #1683 | PR #1858
+    local log="${BATS_TEST_TMPDIR}/docker.log" repos
+    repos="$(_ci_block_entry_list build_toolchain build-tools apk_repositories | tr '\n' ' ')"
+    _stub docker 'echo "$*" >> "'"${log}"'"; if [ "${FAIL:-}" = 1 ]; then echo "ERROR: unable to select packages: zz"; exit 1; fi; echo "(1/1) Installing zz (9.9-r0)"' >/dev/null
+    CI_APK_RESOLVE_CMD='' PATH="${BATS_TEST_TMPDIR}:${PATH}" run _ci_apk_resolve img/base aarch64 zz
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"zz-9.9-r0"* ]]
+    grep -q -- "-e ARCH=aarch64" "${log}"
+    grep -qF -- "-e REPOS=${repos}" "${log}"
+    grep -q -- "--keys-dir" "${log}"
+    grep -q -- "--initdb" "${log}"
+    : > "${log}"
+    FAIL=1 CI_APK_RESOLVE_CMD='' CI_RETRY_BACKOFF_BASE_SECONDS=0 PATH="${BATS_TEST_TMPDIR}:${PATH}" \
+        run _ci_apk_resolve img/base aarch64 zz
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"[CI-ERROR-BUILDTOOLS-0020]"* ]]
+    [[ "${output}" == *"unable to select packages"* ]]
+    [ "$(grep -c -- "-e ARCH=aarch64" "${log}")" -eq 1 ]
+}
+
 @test "build-tools resolve-signature fails closed on a missing central base image" {
     # What: missing base image must fail closed here.
     # Why: errexit must not swallow the fail-closed path.
@@ -4216,6 +4245,21 @@ netdata=sha256:n"
     run bash "${CI_SH}" check comment-length "${BATS_TEST_TMPDIR}/ref.sh"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"ref in What/Why"* ]]
+}
+
+@test "diff-scoped checks skip a deleted path visibly, check the rest" {
+    # What: a listed path not in the tree is skipped, noted.
+    # Why: deleted files hold no content; skip is visible.
+    # From: Issue #1683 | PR #1858
+    local d="${BATS_TEST_TMPDIR}"
+    printf '# What: ok short line.\n# Why: also fine here.\n' > "${d}/ok.sh"
+    printf '# What: %s\n' "$(printf 'x%.0s' $(seq 1 80))" > "${d}/long.sh"
+    run bash "${CI_SH}" check comment-length "${d}/ok.sh" "${d}/gone.sh"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"[CI-NOTICE-CHECK-0070] skipped=1"* ]]
+    run bash "${CI_SH}" check comment-length "${d}/long.sh" "${d}/gone.sh"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"[CI-NOTICE-CHECK-0070] skipped=1"* ]]
 }
 
 @test "check deny-short-sha passes full SHA, fails a slice via ci.sh" {
