@@ -34,7 +34,7 @@ ARG DHCLIENT_ARCH
 ARG DHCLIENT_SHA256
 
 # What: uses plain /bin/sh for the apk-install step only.
-# Why: rust:alpine has no bash until that step installs it.
+# Why: the alpine base has no bash until apk installs it.
 # From: Issue #1095
 SHELL ["/bin/sh", "-c"]
 
@@ -57,11 +57,6 @@ RUN set -eu; \
       echo "[CI-ERROR-BUILDTOOLS-0001] empty build-arg(s):${missing}" >&2; \
       exit 1; \
     fi
-
-# What: declare APK_CACHE_BUST before RUN
-# Why: bust layer cache on rotation; matches APT pattern
-# From: Issue #1095
-ARG APK_CACHE_BUST=""
 
 # What: the apk package list, supplied from the SOT.
 # Why: the SOT owns the list; this stage only consumes it.
@@ -91,7 +86,6 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
       cp /etc/ssl/certs/ca-certificates.crt /var/tmp/ca-bundle.orig; \
       cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
     fi; \
-    : "apk-cache-bust=${APK_CACHE_BUST}"; \
     apk update; \
     apk add --no-cache ${APK_PACKAGES}; \
     ln -sf /usr/bin/pump /usr/bin/distcc-pump; \
@@ -106,7 +100,7 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
 RUN curl --version >/dev/null
 
 # What: switches SHELL to bash for every RUN step below.
-# Why: BusyBox ash cannot parse this file's bash-array use.
+# Why: pipefail guards the dhclient checksum pipe.
 # From: Issue #1095
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -129,107 +123,9 @@ RUN set -euo pipefail; \
 # From: Issue #1095 | PR #1691
 RUN ln -sf /usr/bin/gcc /usr/local/bin/musl-gcc
 
-# What: verify every required tool is present and runs.
-# Why: a missing tool must fail the build, not CI later.
-# From: Issue #1095
-RUN set -euo pipefail; \
-    required_tools=( \
-      bash \
-      bats \
-      cargo \
-      rustc \
-      rustfmt \
-      clippy-driver \
-      sccache \
-      ccache \
-      cargo-audit \
-      actionlint \
-      shellspec \
-      shellcheck \
-      jq \
-      gh \
-      git \
-      gpg \
-      pkg-config \
-      cmake \
-      ar \
-      awk \
-      basename \
-      cat \
-      chgrp \
-      chmod \
-      chown \
-      clang \
-      c++ \
-      cp \
-      curl \
-      dhclient \
-      dig \
-      dirname \
-      distcc \
-      distcc-pump \
-      docker \
-      envsubst \
-      expect \
-      find \
-      flock \
-      musl-gcc \
-      getent \
-      grep \
-      gzip \
-      install \
-      ip \
-      ld.lld \
-      make \
-      mkdir \
-      mktemp \
-      mv \
-      openssl \
-      printf \
-      ps \
-      rm \
-      rsync \
-      sed \
-      sha256sum \
-      sort \
-      tar \
-      tcpdump \
-      tee \
-      test \
-      timeout \
-      xargs \
-      xz \
-      cc \
-      g++ \
-    ); \
-    for tool in "${required_tools[@]}"; do \
-      command -v "$tool" >/dev/null; \
-    done; \
-    cargo --version; \
-    rustc --version; \
-    cargo fmt --version; \
-    cargo clippy --version; \
-    sccache --version; \
-    ccache --version; \
-    cargo audit --version; \
-    actionlint --version; \
-    bats --version; \
-    parallel --version; \
-    shellspec --version; \
-    shellcheck --version; \
-    docker --version; \
-    docker compose version; \
-    docker buildx version; \
-    dhclient --version; \
-    expect -v; \
-    printf 'PATH=%s\n' "$PATH"; \
-    rustc_host_line="$(rustc -vV)"; \
-    grep -qE '^host: .*-musl$' <<<"${rustc_host_line}"; \
-    musl-gcc --version
-
 # What: fail build if CI proxy CA leaked into image
 # Why: CA must never persist in published build-tools
-# From: PR #1752 regression | Issue #1095
+# From: Issue #1095 | PR #1752
 RUN if [ -e /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt ]; then \
       echo "SECURITY: CI proxy CA persisted in final image" >&2; exit 1; \
     fi

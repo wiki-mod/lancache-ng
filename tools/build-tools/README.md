@@ -16,32 +16,25 @@ native target is the target reported by `rustc -vV`:
 - `x86_64-alpine-linux-musl` on amd64;
 - `aarch64-alpine-linux-musl` on arm64.
 
-Service Dockerfiles derive their Cargo `--target` from that same architecture
-mapping and verify it against `rustc -vV`. They must not call `rustup target
-list`, because Alpine's packaged Rust toolchain does not expose a usable
-`rustup` executable or the upstream `*-unknown-linux-musl` standard library.
+`ci.sh build-args` passes that host triple to Rust service builds as
+`MUSL_TARGET`, and `ci.sh rust-build` fails closed unless it equals the
+`host:` line of `rustc -vV`. Nothing may call `rustup`: Alpine's packaged Rust
+has no `rustup` executable and no upstream `*-unknown-linux-musl` standard
+library.
 
-`cargo-audit` and `cargo-tarpaulin` are native Alpine packages. The Alpine
-3.24 `sccache` package enables only its dist-client/dist-server features, so
-the image keeps a pinned Cargo source build for the required Redis, GHA, and
-dist-client feature set.
-The Dockerfile removes Cargo's downloaded source cache after that installation
-so it does not become scanner-visible image content.
+Every installed package, including `cargo-audit`, `sccache`, and `trivy`, is
+an Alpine package listed in `build_toolchain.build-tools.packages` of
+`.github/yaml/build-manifest.yml`; the Dockerfile only consumes that list via
+the `APK_PACKAGES` build-arg that `ci.sh build-args build-tools` emits.
 
 ## Required validation
 
-The Dockerfile's final `required_tools` check is the image-local contract. The
-candidate smoke action additionally verifies its command set and runs Bats and
-ShellSpec fixtures in the exact candidate image. A changed build-tools image
-must complete both architecture builds, scans, candidate smoke checks, and the
-published-manifest promotion before downstream CI jobs select it.
-
-## Package-cache refresh
-
-`APT_CACHE_BUST` is the repository-owned cache epoch consumed by the Alpine
-package-install layer. Its name is retained for compatibility with the shared
-workflow variable; it is not an instruction to use APT. The package layer
-still uses `apk` exclusively.
+`build_toolchain.build-tools.smoke_tools` (executables that must exist) and
+`smoke_runs` (commands that must exit 0) in the SOT are the one toolchain
+smoke contract. `ci.sh verify` runs both against the pushed per-arch digest;
+the Dockerfile keeps no second tool list. A changed build-tools image must
+pass both architecture builds, the smoke, and scans before promotion makes
+it selectable for downstream CI jobs.
 
 ## Known deliberate choices
 

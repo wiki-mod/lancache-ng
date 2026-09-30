@@ -341,7 +341,6 @@ build_toolchain:
       - sccache
       - sed
       - shellcheck
-      - shellspec
       - sqlite
       - tcpdump
       # What: trivy scan tool, version-pinned from edge/testing (§64).
@@ -363,31 +362,93 @@ build_toolchain:
     # From: Issue #1683
     smoke_tools:
       - actionlint
+      - ar
+      - awk
+      - basename
       - bash
       - bats
+      - c++
       - cargo
       - cargo-audit
+      - cat
+      - cc
       - ccache
+      - chgrp
+      - chmod
+      - chown
+      - clang
       - clippy-driver
+      - cmake
+      - cp
+      - curl
+      - dhclient
       - dig
+      - dirname
       - distcc
       - distcc-pump
       - docker
       - envsubst
       - expect
+      - find
+      - flock
+      - g++
+      - getent
       - gh
+      - git
+      - gpg
+      - grep
+      - gzip
+      - install
       - ip
       - jq
+      - ld.lld
+      - make
+      - mkdir
+      - mktemp
+      - musl-gcc
+      - mv
       - openssl
+      - parallel
+      - pkg-config
+      - ps
+      - rm
       - rsync
       - rustc
       - rustfmt
       - sccache
+      - sed
+      - sha256sum
       - shellcheck
-      - shellspec
+      - sort
+      - tar
       - tcpdump
+      - tee
       - timeout
       - trivy
+      - xargs
+      - xz
+    # What: Commands the toolchain smoke must run clean.
+    # Why: present is not runnable; one owner of the runs.
+    # From: Issue #1683 | PR #1858
+    smoke_runs:
+      - cargo --version
+      - cargo fmt --version
+      - cargo clippy --version
+      - cargo audit --version
+      - rustc --print cfg | grep -qx target_env=.musl.
+      - sccache --version
+      - ccache --version
+      - actionlint --version
+      - bats --version
+      - parallel --version
+      - shellcheck --version
+      - docker --version
+      - docker compose version
+      - docker buildx version
+      - dhclient --version
+      - expect -v
+      - musl-gcc --version
+      - trivy --version
 
 # What: Runtime services not built by this project.
 # Why: Explicit out-of-build entry, no silent omission.

@@ -1269,64 +1269,41 @@ _stub() {
     [[ "${output}" == *"CI-ERROR-TEST-0006"* ]]
 }
 
-@test "build-tools smoke_tools reads the SOT executable list" {
-    # What: The smoke list has one owner in the SOT.
-    # Why: No second tool list to drift from packages.
-    # From: Issue #1683
-    run _ci_build_tools_smoke_tools
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"cargo"* ]]
-    [[ "${output}" == *"sccache"* ]]
-    [[ "${output}" == *"actionlint"* ]]
-}
-
-@test "build-tools smoke_tools fails closed on an empty SOT list" {
-    # What: A blank smoke list must never pass silently.
-    # Why: Fail-closed; a missing list is a real error.
-    # From: Issue #1683
+@test "build-tools smoke lists come from the SOT; empty fails closed" {
+    # What: smoke_tools/smoke_runs read verbatim from SOT.
+    # Why: one smoke owner (AG-VAL-017); blank never passes.
+    # From: Issue #1683 | PR #1858
     local m="${BATS_TEST_TMPDIR}/m.yml"
-    sed '/^    smoke_tools:/,/^$/d' "${CI_MANIFEST_SOURCE}" > "${m}"
-    CI_MANIFEST="${m}" run _ci_build_tools_smoke_tools
+    printf 'build_toolchain:\n  build-tools:\n    smoke_tools:\n      - t1\n    smoke_runs:\n      - t1 --v | x\n' > "${m}"
+    CI_MANIFEST="${m}" run _ci_build_tools_smoke smoke_tools
+    [ "${output}" = t1 ]
+    CI_MANIFEST="${m}" run _ci_build_tools_smoke smoke_runs
+    [ "${output}" = "t1 --v | x" ]
+    printf 'build_toolchain:\n  build-tools:\n    smoke_tools:\n      - t1\n' > "${m}"
+    CI_MANIFEST="${m}" run _ci_build_tools_smoke smoke_runs
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-BUILDTOOLS-0013"* ]]
 }
 
-@test "toolchain smoke passes when every SOT tool resolves" {
-    # What: Resolve every SOT tool in the candidate image.
-    # Why: Presence of each accel tool is the contract.
-    # From: Issue #1683
-    docker() {
-        local seen=0 a; local -a tools=()
-        for a in "$@"; do
-            [ "${seen}" -eq 1 ] && tools+=("${a}")
-            [ "${a}" = _ ] && seen=1
+@test "toolchain smoke fails on a missing tool or a failing run" {
+    # What: the real smoke script runs via a docker shim.
+    # Why: tools via args and runs via stdin both gate.
+    # From: Issue #1683 | PR #1858
+    local m="${BATS_TEST_TMPDIR}/m.yml" tool run
+    docker() { shift 4; "$@"; }
+    for tool in sh no-such-tool-x; do
+        for run in true false; do
+            printf 'build_toolchain:\n  build-tools:\n    smoke_tools:\n      - bash\n      - %s\n    smoke_runs:\n      - bash --version\n      - %s\n' \
+                "${tool}" "${run}" > "${m}"
+            CI_MANIFEST="${m}" CI_TOOLCHAIN_IMAGE=img run _ci_test_toolchain build-tools
+            if [ "${tool}" = sh ] && [ "${run}" = true ]; then
+                [ "${status}" -eq 0 ]; [[ "${output}" == *"tested=ok"* ]]
+            else
+                [ "${status}" -eq 1 ]
+                [[ "${output}" == *"missing no-such-tool-x"* || "${output}" == *"failed: false"* ]]
+            fi
         done
-        [ "${#tools[@]}" -gt 0 ] || return 1
-        return 0
-    }
-    CI_TOOLCHAIN_IMAGE=fake-img run _ci_test_toolchain build-tools
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"tested=ok"* ]]
-}
-
-@test "toolchain smoke fails when a SOT tool is missing" {
-    # What: A missing tool fails the smoke loudly.
-    # Why: A broken toolchain must not pass as ok.
-    # From: Issue #1683
-    docker() {
-        local seen=0 a; local -a tools=()
-        for a in "$@"; do
-            [ "${seen}" -eq 1 ] && tools+=("${a}")
-            [ "${a}" = _ ] && seen=1
-        done
-        for a in "${tools[@]}"; do
-            [ "${a}" = cargo ] && { echo "missing ${a}" >&2; return 1; }
-        done
-        return 0
-    }
-    CI_TOOLCHAIN_IMAGE=fake-img run _ci_test_toolchain build-tools
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"missing cargo"* ]]
+    done
 }
 
 @test "test build-tools reports ok via the wired smoke backend" {
@@ -4062,17 +4039,30 @@ netdata=sha256:n"
     # Why: ci.sh owns arch mapping; no Dockerfile.
     # From: Issue #1683
     local m="${BATS_TEST_TMPDIR}/mt-manifest.yml"
-    printf 'base_images:\n  alpine: "a"\nplatform_arch:\n  amd64:\n    apk: x86_64\n  arm64:\n    apk: aarch64\nservices:\n  svc-rust:\n    context: c\n    crate: c1\n    build_type: rust\n' > "${m}"
+    printf 'base_images:\n  alpine: "a"\nplatform_arch:\n  p1:\n    apk: arch-a\n  p2:\n    apk: arch-b\nservices:\n  svc-rust:\n    context: c\n    crate: c1\n    build_type: rust\n' > "${m}"
     export CI_BUILD_TOOLS_IMAGE_CMD='echo bt-stub@sha256:test'
-    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc-rust --bare linux/amd64
+    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc-rust --bare os/p1
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"MUSL_TARGET=x86_64-unknown-linux-musl"* ]]
-    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc-rust --bare linux/arm64
+    [[ "${output}" == *"MUSL_TARGET=arch-a-alpine-linux-musl"* ]]
+    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc-rust --bare os/p2
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"MUSL_TARGET=aarch64-unknown-linux-musl"* ]]
+    [[ "${output}" == *"MUSL_TARGET=arch-b-alpine-linux-musl"* ]]
     CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc-rust
     [ "${status}" -eq 0 ]
     [[ "${output}" != *"MUSL_TARGET"* ]]
+}
+
+@test "rust-build fails closed unless MUSL_TARGET is the rustc host" {
+    # What: a target other than the rustc host stops early.
+    # Why: apk Rust has only its host std; no rustup exists.
+    # From: Issue #1683 | PR #1858
+    local bin="${BATS_TEST_TMPDIR}/bin"
+    mkdir -p "${bin}"
+    printf '#!/usr/bin/env bash\nprintf "rustc 1.0\\nhost: arch-a-alpine-linux-musl\\n"\n' > "${bin}/rustc"
+    chmod +x "${bin}/rustc"
+    PATH="${bin}:${PATH}" MUSL_TARGET=arch-b-alpine-linux-musl run bash "${CI_SH}" rust-build svc c1
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-RUSTBUILD-0004"*"host: arch-a-alpine-linux-musl"* ]]
 }
 
 @test "build-args emits ALPINE_IMAGE + FLUENT_BIT_IMAGE for syslog only" {
@@ -7254,103 +7244,6 @@ EOF
         run bash "${CI_SH}" check changelog-direct-edit "CHANGELOG.md"
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"edited with release label; expected"* ]]
-}
-
-# What: builds a fixture Dockerfile + smoke script pair.
-# Why: shared by the build-tools-smoke-coverage tests below.
-# From: Issue #1683 | PR #1858
-_smoke_coverage_fixture() {
-    local root="$1" extra_dockerfile_tool="${2:-}"
-    mkdir -p "${root}/tools/build-tools" "${root}/scripts/untracked"
-    {
-        printf 'FROM alpine\n'
-        printf 'RUN true\n'
-        printf 'required_tools=(\n'
-        printf '  bash\n'
-        [ -n "${extra_dockerfile_tool}" ] && printf '  %s\n' "${extra_dockerfile_tool}"
-        printf ')\n'
-    } > "${root}/tools/build-tools/Dockerfile"
-    # What: Minimal SOT fixture with smoke_tools "bash".
-    # Why: Check compares Dockerfile tools to the SOT list.
-    # From: Issue #1683
-    printf 'build_toolchain:\n  build-tools:\n    smoke_tools:\n      - bash\n' \
-        > "${root}/build-manifest.yml"
-}
-
-@test "check build-tools-smoke-coverage passes on the real repo" {
-    # What: real SOT/smoke pair is consistent, not a gap.
-    # Why: every Dockerfile-checked tool is smoke-listed.
-    # From: Issue #1683 | PR #1858
-    run bash "${CI_SH}" check build-tools-smoke-coverage
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"build-tools-smoke-coverage=clean"* ]]
-}
-
-@test "check build-tools-smoke-coverage passes clean when Dockerfile/smoke/SOT all agree" {
-    # What: Fixture where Dockerfile, smoke, and SOT match.
-    # Why: Positive baseline for cross-check validation.
-    # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/allmatch"
-    _smoke_coverage_fixture "${r}"
-    CI_MANIFEST="${r}/build-manifest.yml" run bash "${CI_SH}" check build-tools-smoke-coverage "${r}"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"build-tools-smoke-coverage=clean"* ]]
-}
-
-@test "check build-tools-smoke-coverage fails an uncovered tool" {
-    # What: a Dockerfile tool, absent from smoke/exclusions.
-    # Why: Exact failure shape.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/uncovered"
-    _smoke_coverage_fixture "${r}" newtool
-    CI_MANIFEST="${r}/build-manifest.yml" run bash "${CI_SH}" check build-tools-smoke-coverage "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0026"* ]]
-    [[ "${output}" == *"'newtool' verified by the Dockerfile"* ]]
-}
-
-@test "check build-tools-smoke-coverage allows an excluded tool" {
-    # What: a build tool on the reviewed exclusion list.
-    # Why: excluded tools must never trip the gap error.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/excluded"
-    _smoke_coverage_fixture "${r}" make
-    CI_MANIFEST="${r}/build-manifest.yml" run bash "${CI_SH}" check build-tools-smoke-coverage "${r}"
-    [ "${status}" -eq 0 ]
-}
-
-@test "check build-tools-smoke-coverage fails closed when the SOT lacks smoke_tools" {
-    # What: Missing build_toolchain smoke_tools in SOT.
-    # Why: Absence must fail closed, not silent.
-    # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/nosot"
-    _smoke_coverage_fixture "${r}"
-    printf 'build_toolchain:\n  build-tools:\n    packages:\n      - bash\n' \
-        > "${r}/build-manifest.yml"
-    CI_MANIFEST="${r}/build-manifest.yml" run bash "${CI_SH}" check build-tools-smoke-coverage "${r}"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0025"* ]]
-}
-
-@test "check build-tools-smoke-coverage fails closed on a vacuous scan" {
-    # What: a Dockerfile with no required_tools array.
-    # Why: mirrors the legacy script's anti-vacuous guard.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/vacuous"
-    mkdir -p "${r}/tools/build-tools"
-    printf 'FROM alpine\n' > "${r}/tools/build-tools/Dockerfile"
-    run bash "${CI_SH}" check build-tools-smoke-coverage "${r}"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0025"* ]]
-}
-
-@test "check build-tools-smoke-coverage fails closed with no files" {
-    # What: neither expected file exists at the given root.
-    # Why: a missing input must never silently pass.
-    # From: Issue #1683 | PR #1858
-    run bash "${CI_SH}" check build-tools-smoke-coverage "${BATS_TEST_TMPDIR}/nope"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0024"* ]]
 }
 
 @test "docker-build builds a per-identity per-arch tag via buildx" {

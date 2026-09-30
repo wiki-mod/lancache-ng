@@ -1775,10 +1775,11 @@ ci_cmd_rust_build() {
     case "${mode}" in build|deps) ;; *) ci_log "[CI-ERROR-RUSTBUILD-0005]" "mode=\"${mode}\" reason=\"mode must be build or deps\""; return 2 ;; esac
     local musl_target="${MUSL_TARGET:-}"
     [ -n "${musl_target}" ] || { ci_log "[CI-ERROR-RUSTBUILD-0003]" "reason=\"MUSL_TARGET env required\""; return 2; }
-    # What: verify cross-target installed via here-string.
-    # Why: live pipe into grep -qx would mask error.
-    local installed_targets; installed_targets="$(rustup target list --installed)"
-    grep -qx "${musl_target}" <<<"${installed_targets}" || { ci_log "[CI-ERROR-RUSTBUILD-0004]" "target=\"${musl_target}\" reason=\"musl target not installed in build-tools\""; return 2; }
+    # What: MUSL_TARGET must be the build-tools rustc host.
+    # Why: apk Rust has no rustup; host std is the only one.
+    # From: Issue #1683 | PR #1858
+    local rustc_info; rustc_info="$(rustc -vV)" || { ci_log "[CI-ERROR-RUSTBUILD-0004]" "reason=\"rustc -vV failed in build-tools\""; return 2; }
+    grep -qx "host: ${musl_target}" <<<"${rustc_info}" || { ci_error "[CI-ERROR-RUSTBUILD-0004]" "target=\"${musl_target}\" reason=\"MUSL_TARGET is not the build-tools rustc host\"" "${rustc_info}"; return 2; }
     local key_prefix="lancache-${service}" ccache_dir="${CI_TMPDIR}/ccache-${service}"
     # What: distcc bypasses pump for aws-lc headers.
     # Why: pump can't see generated headers; would fail.
@@ -2638,11 +2639,11 @@ _ci_test_rust() {
     printf 'service=%s tested=ok\n' "${service}"
 }
 
-# What: Assert each smoke tool exists in the image.
-# Why: The SOT owns the list; a missing accel tool fails.
+# What: Assert smoke tools exist and smoke runs pass.
+# Why: SOT owns both lists; present is not runnable.
 # From: Issue #1683 | PR #1858
 _ci_test_toolchain() {
-    local service="$1" image tools t
+    local service="$1" image tools runs t
     if [ -n "${CI_TOOLCHAIN_TEST_CMD:-}" ]; then
         "${CI_TOOLCHAIN_TEST_CMD}" "${service}"
         return "$?"
@@ -2652,13 +2653,19 @@ _ci_test_toolchain() {
         ci_log "[CI-ERROR-TEST-0006]" "service=\"${service}\" reason=\"CI_TOOLCHAIN_IMAGE required for the smoke\""
         return 2
     fi
-    tools="$(_ci_build_tools_smoke_tools)" || return 2
+    tools="$(_ci_build_tools_smoke smoke_tools)" || return 2
+    runs="$(_ci_build_tools_smoke smoke_runs)" || return 2
     local -a tl=()
     while IFS= read -r t; do
         [ -n "${t}" ] && tl+=("${t}")
     done <<< "${tools}"
-    docker run --rm "${image}" timeout --kill-after=30s --signal=TERM 14m \
-        sh -c 'for t in "$@"; do command -v "$t" >/dev/null || { echo "missing $t" >&2; exit 1; }; done' _ "${tl[@]}" \
+    # What: tools go as args; runs on stdin, one a line.
+    # Why: a run holds spaces/pipes; stdin keeps it intact.
+    # From: Issue #1683 | PR #1858
+    docker run --rm -i "${image}" timeout --kill-after=30s --signal=TERM 14m \
+        sh -c 'for t in "$@"; do command -v "$t" >/dev/null || { echo "missing $t" >&2; exit 1; }; done
+               while IFS= read -r r; do sh -c "$r" >/dev/null || { echo "failed: $r" >&2; exit 1; }; done' \
+        _ "${tl[@]}" <<< "${runs}" \
         || return 1
     printf 'service=%s tested=ok\n' "${service}"
 }
@@ -5046,13 +5053,13 @@ _ci_service_build_args() {
         val="$(_ci_block_entry_field services "${service}" crate)"
         [ -n "${val}" ] || { ci_log "[CI-ERROR-BUILDARGS-0014]" "arg=\"RUST_CRATE\" service=\"${service}\" reason=\"no crate in SOT; FAIL CLOSED\""; return 2; }
         out="${out}${prefix}RUST_CRATE=${val}"$'\n'
-        # What: emit musl cross-target for platform
-        # Why: ci.sh owns arch mapping; Dockerfile uses
+        # What: emit the platform's Alpine musl host triple.
+        # Why: apk Rust ships only its host std, no rustup.
         # From: Issue #1683
         if [ -n "${platform}" ]; then
             local arch
             arch="$(_ci_platform_apk_arch "${platform}")" || { ci_log "[CI-ERROR-BUILDARGS-0010]" "platform=\"${platform}\" service=\"${service}\" reason=\"no apk-arch mapping for platform; FAIL CLOSED\""; return 2; }
-            out="${out}${prefix}MUSL_TARGET=${arch}-unknown-linux-musl"$'\n'
+            out="${out}${prefix}MUSL_TARGET=${arch}-alpine-linux-musl"$'\n'
         fi
     fi
     # What: SOT-pinned external inputs of this Dockerfile.
@@ -5117,17 +5124,17 @@ _ci_build_tools_packages() {
     printf '%s\n' "${pkgs}"
 }
 
-# What: Print the toolchain smoke executables from SOT.
-# Why: One smoke list; test build-tools reads it here.
-# From: Issue #1683
-_ci_build_tools_smoke_tools() {
-    local tools
-    tools="$(_ci_block_entry_list build_toolchain build-tools smoke_tools)"
-    if [ -z "${tools}" ]; then
-        ci_log "[CI-ERROR-BUILDTOOLS-0013]" "reason=\"no smoke_tools in SOT; FAIL CLOSED\""
+# What: Print a toolchain smoke list (smoke_tools|_runs).
+# Why: SOT is the one smoke owner (AG-VAL-017).
+# From: Issue #1683 | PR #1858
+_ci_build_tools_smoke() {
+    local field="$1" items
+    items="$(_ci_block_entry_list build_toolchain build-tools "${field}")"
+    if [ -z "${items}" ]; then
+        ci_log "[CI-ERROR-BUILDTOOLS-0013]" "field=\"${field}\" reason=\"empty SOT smoke list; FAIL CLOSED\""
         return 2
     fi
-    printf '%s\n' "${tools}"
+    printf '%s\n' "${items}"
 }
 
 # What: Print the build-tools input signature.
@@ -7172,70 +7179,6 @@ _ci_check_proxy_cache_env_doc_drift() {
     printf 'proxy-cache-env-doc-drift=clean scanned=%s checked=%s\n' "${scanned}" "${checked}"
 }
 
-# What: Bare-word entries of a bash "name=(...)" array.
-# Why: Shared by Dockerfile and smoke-script readers.
-# From: Issue #1683
-_ci_bash_array_entries() {
-    local file="$1" name="$2" line in_arr=0 entry
-    while IFS= read -r line; do
-        if [ "${in_arr}" -eq 0 ]; then
-            case "${line}" in *"${name}="*'('*) in_arr=1 ;; esac
-            continue
-        fi
-        case "${line}" in *')'*) in_arr=0; continue ;; esac
-        entry="${line#"${line%%[![:space:]]*}"}"
-        entry="${entry%\\}"
-        entry="${entry%"${entry##*[![:space:]]}"}"
-        [ -n "${entry}" ] && [[ "${entry}" != \#* ]] && printf '%s\n' "${entry}"
-    done < "${file}"
-}
-
-# What: Verify Dockerfile tools have smoke coverage.
-# Why: Tests and SOT list must align, never aspirational.
-# From: Issue #1683 | PR #1858
-_ci_check_build_tools_smoke_coverage() {
-    local repo_root="${1:-${CI_REPO_ROOT}}"
-    local dockerfile="${repo_root}/tools/build-tools/Dockerfile"
-    if [ ! -f "${dockerfile}" ]; then
-        ci_log "[CI-ERROR-CHECK-0024]" "path=\"${dockerfile}\" reason=\"Dockerfile not found\""
-        return 2
-    fi
-    # What: Dockerfile-verified tools vs the SOT smoke list.
-    # Why: SOT owns the list; _ci_test_toolchain runs it.
-    # From: Issue #1683 | PR #1858
-    local dockerfile_tools sot_tools sot_raw
-    dockerfile_tools="$(_ci_bash_array_entries "${dockerfile}" required_tools | sort -u | tr '\n' ' ')"
-    sot_raw="$(_ci_build_tools_smoke_tools | tr '\n' ' ')" || {
-        ci_log "[CI-ERROR-CHECK-0025]" "reason=\"no SOT smoke_tools; vacuous\""
-        return 2
-    }
-    sot_tools=" ${sot_raw} "
-    if [ -z "${dockerfile_tools// /}" ]; then
-        ci_log "[CI-ERROR-CHECK-0025]" "path=\"${dockerfile}\" reason=\"no required_tools extracted; vacuous\""
-        return 2
-    fi
-    if [ -z "${sot_tools// /}" ]; then
-        ci_log "[CI-ERROR-CHECK-0025]" "reason=\"no SOT smoke_tools; vacuous\""
-        return 2
-    fi
-    # What: build-only/base tools smoke skips.
-    # Why: a reviewed exclusion, not a silent gap.
-    # From: Issue #1683 | PR #1858
-    local excluded=" dhclient ar ranlib cc c++ g++ clang ld.lld make cmake pkg-config git gpg awk basename cat chgrp chmod chown cp curl dirname dpkg find flock getent grep gzip install mkdir mktemp mv printf ps rm sed sha256sum sort tar tee test timeout xargs xz musl-gcc "
-    local -a viol=()
-    local tool
-    for tool in ${dockerfile_tools}; do
-        case "${sot_tools}" in *" ${tool} "*) continue ;; esac
-        case "${excluded}" in *" ${tool} "*) continue ;; esac
-        viol+=("'${tool}' verified by the Dockerfile but not in SOT smoke_tools nor excluded")
-    done
-    if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0026]" "reason=\"build-tools smoke coverage gap (issues #790/#791/#822 Pattern G)\"" "$(printf '%s\n' "${viol[@]}")"
-        return 1
-    fi
-    printf 'build-tools-smoke-coverage=clean\n'
-}
-
 # What: Emit "block\tdir" or "block\t@BLOCK@" per group.
 # Why: dependabot.yml's own scalar/list forms, no yq dep.
 # From: Issue #1683 | PR #1858
@@ -8719,7 +8662,7 @@ ci_cmd_check_all() {
     # From: Issue #1683
     local -a repo_wide=(file-headers action-node-versions naming-consistency \
         workflow-line-limit stable-external-images compose-healthchecks \
-        proxy-cache-env-doc-drift build-tools-smoke-coverage \
+        proxy-cache-env-doc-drift \
         dependabot-docker-base-consistency idempotence-test-coverage \
         prebuilt-prod prod-state-wiring compose-config nats-atomic-write \
         docker-socket-proxy quickstart-required-env dhcp-proxy-env \
@@ -8776,7 +8719,6 @@ ci_cmd_check() {
         compose-healthchecks) _ci_check_compose_healthchecks "$@" ;;
         proxy-cache-env-doc-drift) _ci_check_proxy_cache_env_doc_drift "$@" ;;
         changelog-direct-edit) _ci_check_changelog_direct_edit "$@" ;;
-        build-tools-smoke-coverage) _ci_check_build_tools_smoke_coverage "$@" ;;
         dependabot-docker-base-consistency) _ci_check_dependabot_docker_base_consistency "$@" ;;
         idempotence-test-coverage) _ci_check_idempotence_test_coverage "$@" ;;
         prebuilt-prod) _ci_check_prebuilt_prod "$@" ;;
