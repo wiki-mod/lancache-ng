@@ -117,38 +117,32 @@ jobs:
   refresh-nightly:
     name: dispatch nightly channel refresh
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # This job only makes one `gh workflow run` API call and exits -- it does
-    # not wait for build-push.yml's own (much longer) pipeline to finish.
-    # Generous headroom over that trivial expected runtime still bounds a
-    # genuinely hung API call rather than relying on GitHub's 360-minute
-    # default (AG-CI-016).
-    timeout-minutes: 10
+    timeout-minutes: 240
     steps:
       # What: skips on the weekly tick; that one is build-tools-only.
       # Why: keeps build-push's nightly refresh strictly daily.
       # From: Issue #1095
-      - name: Dispatch build-push.yml against current_dev with channel=nightly
+      - name: Dispatch and wait for build-push.yml
         if: github.event_name != 'schedule' || github.event.schedule == '0 1 * * *'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-
-          gh workflow run build-push.yml \
-            --repo "${{ github.repository }}" \
-            --ref current_dev \
-            -f channel=nightly
+          run_url="$(gh workflow run build-push.yml --repo "${{ github.repository }}" --ref current_dev -f channel=nightly)"
+          run_id="${run_url##*/}"
+          [[ "$run_id" =~ ^[0-9]+$ ]] || { echo "::error::Invalid build-push run URL: $run_url" >&2; exit 1; }
+          gh run watch "$run_id" --repo "${{ github.repository }}" --exit-status
 
       # What: skips on the daily tick; that one is build-push-only.
       # Why: matches build-tools.yml's own weekly cadence (AG-CI-002).
       # From: Issue #1095
-      - name: Dispatch build-tools.yml against current_dev (weekly)
+      - name: Dispatch and wait for build-tools.yml
         if: github.event_name != 'schedule' || github.event.schedule == '30 3 * * 0'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-
-          gh workflow run build-tools.yml \
-            --repo "${{ github.repository }}" \
-            --ref current_dev
+          run_url="$(gh workflow run build-tools.yml --repo "${{ github.repository }}" --ref current_dev)"
+          run_id="${run_url##*/}"
+          [[ "$run_id" =~ ^[0-9]+$ ]] || { echo "::error::Invalid build-tools run URL: $run_url" >&2; exit 1; }
+          gh run watch "$run_id" --repo "${{ github.repository }}" --exit-status
