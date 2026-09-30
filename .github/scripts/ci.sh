@@ -4984,64 +4984,11 @@ ci_cmd_variables() {
 # Why: SOT owns them; the Dockerfile pins nothing itself.
 # From: Issue #1683
 _ci_build_tools_build_args() {
-    local fmt="${1:-}" platform="${2:-}" prefix="--build-arg " out="" argname key val pkgs apk_arch sha
+    local fmt="${1:-}" platform="${2:-}" prefix="--build-arg " out="" pkgs pins
     [ "${fmt}" = "--bare" ] && prefix=""
-    # What: base_images.alpine -> ALPINE_IMAGE.
-    # Why: Final stage pins its base from the one owner.
-    # From: Issue #1683
-    val="$(_ci_block_entry_field base_images "" alpine)"
-    if [ -z "${val}" ]; then
-        ci_log "[CI-ERROR-BUILDARGS-0003]" "arg=\"ALPINE_IMAGE\" key=\"base_images.alpine\" reason=\"missing central base image; FAIL CLOSED\""
-        return 2
-    fi
-    out="${out}${prefix}ALPINE_IMAGE=${val}"$'\n'
-    # What: platform-independent dhclient version+branch.
-    # Why: The reused v3.20 apk pins these for every arch.
-    # From: Issue #1683
-    while IFS=: read -r argname key; do
-        [ -n "${argname}" ] || continue
-        val="$(_ci_block_entry_field external_versions dhclient "${key}")"
-        if [ -z "${val}" ]; then
-            ci_log "[CI-ERROR-BUILDARGS-0004]" "arg=\"${argname}\" key=\"external_versions.dhclient.${key}\" reason=\"missing central dhclient value; FAIL CLOSED\""
-            return 2
-        fi
-        out="${out}${prefix}${argname}=${val}"$'\n'
-    done <<'DHPAIRS'
-DHCLIENT_VERSION:version
-DHCLIENT_ALPINE_BRANCH:alpine_branch
-DHPAIRS
-    if [ -n "${platform}" ]; then
-        # What: ci.sh resolves one apk-arch + its checksum.
-        # Why: the Dockerfile consumes them; no arch case.
-        # From: Issue #1683
-        apk_arch="$(_ci_platform_apk_arch "${platform}")" || {
-            ci_log "[CI-ERROR-BUILDARGS-0006]" "platform=\"${platform}\" reason=\"no apk arch mapping; FAIL CLOSED\""
-            return 2
-        }
-        sha="$(_ci_block_entry_field external_versions dhclient "sha256_${platform##*/}")"
-        if [ -z "${sha}" ]; then
-            ci_log "[CI-ERROR-BUILDARGS-0004]" "arg=\"DHCLIENT_SHA256\" key=\"external_versions.dhclient.sha256_${platform##*/}\" reason=\"missing central dhclient value; FAIL CLOSED\""
-            return 2
-        fi
-        out="${out}${prefix}DHCLIENT_APK_ARCH=${apk_arch}"$'\n'
-        out="${out}${prefix}DHCLIENT_SHA256=${sha}"$'\n'
-    else
-        # What: no platform -> both shas, for the signature.
-        # Why: the input signature covers every arch.
-        # From: Issue #1683
-        while IFS=: read -r argname key; do
-            [ -n "${argname}" ] || continue
-            val="$(_ci_block_entry_field external_versions dhclient "${key}")"
-            if [ -z "${val}" ]; then
-                ci_log "[CI-ERROR-BUILDARGS-0004]" "arg=\"${argname}\" key=\"external_versions.dhclient.${key}\" reason=\"missing central dhclient value; FAIL CLOSED\""
-                return 2
-            fi
-            out="${out}${prefix}${argname}=${val}"$'\n'
-        done <<'DHSHAS'
-DHCLIENT_SHA256_AMD64:sha256_amd64
-DHCLIENT_SHA256_ARM64:sha256_arm64
-DHSHAS
-    fi
+    out="$(_ci_alpine_build_arg "${prefix}")"$'\n' || return 2
+    pins="$(_ci_target_pin_args build-tools "${platform}" "${prefix}")" || return 2
+    [ -z "${pins}" ] || out="${out}${pins}"$'\n'
     # What: append the SOT apk list as a build-arg.
     # Why: Dockerfile consumes it; it never owns the list.
     # From: Issue #1683
@@ -5062,14 +5009,9 @@ DHSHAS
 _ci_service_build_args() {
     local service="$1" fmt="${2:-}" platform="${3:-}" prefix="--build-arg " out="" val ext ext_argname
     [ "${fmt}" = "--bare" ] && prefix=""
-    val="$(_ci_block_entry_field base_images "" alpine)"
-    if [ -z "${val}" ]; then
-        ci_log "[CI-ERROR-BUILDARGS-0007]" "arg=\"ALPINE_IMAGE\" service=\"${service}\" key=\"base_images.alpine\" reason=\"missing central base image; FAIL CLOSED\""
-        return 2
-    fi
-    out="${out}${prefix}ALPINE_IMAGE=${val}"$'\n'
+    out="$(_ci_alpine_build_arg "${prefix}")"$'\n' || return 2
     # What: external_image field adds one more build-arg.
-    # Why: netdata has none; its ARG defaults stay baked.
+    # Why: the SOT maps the image; the Dockerfile pins none.
     # From: Issue #1683
     ext="$(_ci_block_entry_field services "${service}" external_image)"
     if [ -n "${ext}" ]; then
@@ -5109,32 +5051,12 @@ _ci_service_build_args() {
             out="${out}${prefix}MUSL_TARGET=${arch}-unknown-linux-musl"$'\n'
         fi
     fi
-    # What: install services derive version+digest from the SOT.
-    # Why: SOT owns external_versions; Dockerfile bakes none.
-    # From: Issue #1683
-    if [ "$(_ci_block_entry_field services "${service}" build_type)" = install ]; then
-        local iv iarch isha iarg
-        case "${service}" in
-            netdata) iarg="NETDATA" ;;
-            *)
-                ci_log "[CI-ERROR-BUILDARGS-0011]" "service=\"${service}\" build_type=\"install\" reason=\"no known install build-arg mapping; FAIL CLOSED\""
-                return 2
-                ;;
-        esac
-        iv="$(_ci_block_entry_field external_versions "${service}" version)"
-        [ -n "${iv}" ] || { ci_log "[CI-ERROR-BUILDARGS-0012]" "arg=\"${iarg}_VERSION\" service=\"${service}\" reason=\"missing external_versions.${service}.version; FAIL CLOSED\""; return 2; }
-        out="${out}${prefix}${iarg}_VERSION=${iv}"$'\n'
-        # What: per-platform arch + digest; skip when no platform.
-        # Why: identity/version reads are platform-scoped (§45).
-        # From: Issue #1683
-        if [ -n "${platform}" ]; then
-            iarch="$(_ci_platform_apk_arch "${platform}")" || { ci_log "[CI-ERROR-BUILDARGS-0010]" "platform=\"${platform}\" service=\"${service}\" reason=\"no apk-arch mapping for platform; FAIL CLOSED\""; return 2; }
-            isha="$(_ci_block_entry_field external_versions "${service}" "sha256_${iarch}")"
-            [ -n "${isha}" ] || { ci_log "[CI-ERROR-BUILDARGS-0013]" "arg=\"${iarg}_SHA256\" service=\"${service}\" arch=\"${iarch}\" reason=\"missing external_versions.${service}.sha256_${iarch}; FAIL CLOSED\""; return 2; }
-            out="${out}${prefix}${iarg}_ARCH=${iarch}"$'\n'
-            out="${out}${prefix}${iarg}_SHA256=${isha}"$'\n'
-        fi
-    fi
+    # What: SOT-pinned external inputs of this Dockerfile.
+    # Why: one pin->ARG owner shared with version verify.
+    # From: Issue #1683 | PR #1858
+    local pins
+    pins="$(_ci_target_pin_args "${service}" "${platform}" "${prefix}")" || return 2
+    [ -z "${pins}" ] || out="${out}${pins}"$'\n'
     # What: SOT-owned apk package list, when the service has one.
     # Why: services.<svc>.packages owns it; the Dockerfile derives.
     # From: Issue #1683
@@ -5165,7 +5087,7 @@ ci_cmd_build_args() {
         *)
             local svc_list
             svc_list="$(ci_services)" || return 2
-            if printf '%s\n' "${svc_list}" | grep -qxF -- "${service}"; then
+            if grep -qxF -- "${service}" <<< "${svc_list}"; then
                 _ci_service_build_args "${service}" "${fmt}" "${platform}"
             fi
             ;;
@@ -5486,60 +5408,133 @@ _ci_dockerfile_arg_default() {
     esac
 }
 
-# What: SOT-pinned consumers: dep|dockerfile|SOT keys|ARGs.
-# Why: one list; verify, audit and sync walk the same one.
+# What: SOT-pinned consumers: dep|dockerfile|non-arch keys.
+# Why: one list; build-args, verify, audit, sync walk it.
 # From: Issue #1683 | PR #1858
 _ci_version_consumers() {
     printf '%s\n' \
-        "netdata|services/netdata/Dockerfile|version sha256_x86_64 sha256_aarch64|NETDATA_VERSION NETDATA_ARCH NETDATA_SHA256" \
-        "dhclient|tools/build-tools/Dockerfile|version alpine_branch sha256_amd64 sha256_arm64|DHCLIENT_VERSION DHCLIENT_ALPINE_BRANCH DHCLIENT_APK_ARCH DHCLIENT_SHA256"
+        "netdata|services/netdata/Dockerfile|version" \
+        "dhclient|tools/build-tools/Dockerfile|version alpine_branch"
 }
 
-# What: Check one consumer's SOT fields + bare Dockerfile ARGs.
-# Why: the SOT owns the pin; a baked ARG default is a 2nd owner.
+# What: One pin's sha256 for an apk arch, fail-closed.
+# Why: a missing or garbled checksum must never pass.
 # From: Issue #1683 | PR #1858
-_ci_version_diff() {
-    local dep="$1" dockerfile="${CI_REPO_ROOT}/$2" keys="$3" args="$4" key val out="" argname want
+_ci_pin_sha() {
+    local dep="$1" apk="$2" val
+    val="$(_ci_block_entry_field external_versions "${dep}" "sha256_${apk}")"
+    if [ -z "${val}" ]; then
+        ci_log "[CI-ERROR-BUILDARGS-0004]" "key=\"external_versions.${dep}.sha256_${apk}\" reason=\"missing central pin; FAIL CLOSED\""
+        return 2
+    fi
+    if [[ ! "${val}" =~ ^[0-9a-f]{64}$ ]]; then
+        ci_log "[CI-ERROR-BUILDARGS-0015]" "key=\"external_versions.${dep}.sha256_${apk}\" reason=\"not 64 hex chars; FAIL CLOSED\""
+        return 2
+    fi
+    printf '%s\n' "${val}"
+}
+
+# What: Emit <DEP>_<KEY>, <DEP>_ARCH, <DEP>_SHA256 from SOT.
+# Why: one pin->ARG convention; no platform = every arch sha.
+# From: Issue #1683 | PR #1858
+_ci_pin_args() {
+    local dep="$1" keys="$2" platform="$3" prefix="$4" up key val apk p out=""
+    up="${dep^^}"; up="${up//-/_}"
     for key in ${keys}; do
         val="$(_ci_block_entry_field external_versions "${dep}" "${key}")"
         if [ -z "${val}" ]; then
-            ci_log "[CI-ERROR-VERSION-0007]" "reason=\"SOT external_versions.${dep}.${key} missing\""
+            ci_log "[CI-ERROR-BUILDARGS-0004]" "key=\"external_versions.${dep}.${key}\" reason=\"missing central pin; FAIL CLOSED\""
             return 2
         fi
-        if [[ "${key}" == sha256_* ]] && [[ ! "${val}" =~ ^[0-9a-f]{64}$ ]]; then
-            ci_log "[CI-ERROR-VERSION-0007]" "reason=\"external_versions.${dep}.${key} not 64 hex chars\""
-            return 2
-        fi
-        out="${out}key=${dep}.${key} sot=${val} present=yes"$'\n'
+        out="${out}${prefix}${up}_${key^^}=${val}"$'\n'
     done
-    for argname in ${args}; do
-        want="$(_ci_dockerfile_arg_default "${dockerfile}" "${argname}")" || return 2
+    if [ -n "${platform}" ]; then
+        apk="$(_ci_platform_apk_arch "${platform}")" || {
+            ci_log "[CI-ERROR-BUILDARGS-0006]" "platform=\"${platform}\" reason=\"no apk arch mapping; FAIL CLOSED\""
+            return 2
+        }
+        val="$(_ci_pin_sha "${dep}" "${apk}")" || return 2
+        out="${out}${prefix}${up}_ARCH=${apk}"$'\n'"${prefix}${up}_SHA256=${val}"$'\n'
+    else
+        while IFS= read -r p; do
+            [ -n "${p}" ] || continue
+            apk="$(_ci_platform_apk_arch "${p}")" || return 2
+            val="$(_ci_pin_sha "${dep}" "${apk}")" || return 2
+            out="${out}${prefix}${up}_SHA256_${apk^^}=${val}"$'\n'
+        done <<< "$(_ci_build_matrix_platforms)"
+    fi
+    printf '%s' "${out}"
+}
+
+# What: Pin build-args of every consumer a target's Dockerfile is.
+# Why: build-args derive from the same list verify checks.
+# From: Issue #1683 | PR #1858
+_ci_target_pin_args() {
+    local target="$1" platform="$2" prefix="$3" ctx dep df keys
+    ctx="$(ci_service_field "${target}" context)"
+    while IFS='|' read -r dep df keys; do
+        [ -n "${dep}" ] && [ "${df}" = "${ctx}/Dockerfile" ] || continue
+        _ci_pin_args "${dep}" "${keys}" "${platform}" "${prefix}" || return 2
+    done <<< "$(_ci_version_consumers)"
+}
+
+# What: The SOT alpine base as ALPINE_IMAGE, fail-closed.
+# Why: every target's final stage pins this one owner.
+# From: Issue #1683 | PR #1858
+_ci_alpine_build_arg() {
+    local prefix="$1" val
+    val="$(_ci_block_entry_field base_images "" alpine)"
+    if [ -z "${val}" ]; then
+        ci_log "[CI-ERROR-BUILDARGS-0003]" "arg=\"ALPINE_IMAGE\" key=\"base_images.alpine\" reason=\"missing central base image; FAIL CLOSED\""
+        return 2
+    fi
+    printf '%sALPINE_IMAGE=%s\n' "${prefix}" "${val}"
+}
+
+# What: Check one consumer's SOT pins + bare Dockerfile ARGs.
+# Why: the SOT owns the pin; a baked ARG default is a 2nd owner.
+# From: Issue #1683 | PR #1858
+_ci_version_diff() {
+    local dep="$1" dockerfile="${CI_REPO_ROOT}/$2" keys="$3" p args name want out=""
+    while IFS= read -r p; do
+        [ -n "${p}" ] || continue
+        args="$(_ci_pin_args "${dep}" "${keys}" "${p}" "")" || return 2
+        out="${out}${args}"$'\n'
+    done <<< "$(_ci_build_matrix_platforms)"
+    local line
+    local -A argseen=()
+    out="$(LC_ALL=C sort -u <<< "${out}")"
+    while IFS= read -r line; do
+        [ -n "${line}" ] && printf 'key=%s.sot %s\n' "${dep}" "${line}"
+    done <<< "${out}"
+    while IFS= read -r line; do
+        name="${line%%=*}"
+        { [ -n "${name}" ] && [ -z "${argseen[${name}]:-}" ]; } || continue
+        argseen["${name}"]=1
+        want="$(_ci_dockerfile_arg_default "${dockerfile}" "${name}")" || return 2
         case "${want}" in
             ABSENT)
-                ci_log "[CI-ERROR-VERSION-0008]" "path=\"${dockerfile}\" name=\"${argname}\" reason=\"expected ARG declaration missing\""
+                ci_log "[CI-ERROR-VERSION-0008]" "path=\"${dockerfile}\" name=\"${name}\" reason=\"expected ARG declaration missing\""
                 return 2
                 ;;
-            BARE)
-                out="${out}key=${dep}.consumer.${argname} shape=bare"$'\n'
-                ;;
+            BARE) printf 'key=%s.consumer.%s shape=bare\n' "${dep}" "${name}" ;;
             FOUND:*)
-                ci_log "[CI-ERROR-VERSION-0009]" "path=\"${dockerfile}\" name=\"${argname}\" reason=\"unexpected baked default; must stay SOT-driven\""
+                ci_log "[CI-ERROR-VERSION-0009]" "path=\"${dockerfile}\" name=\"${name}\" reason=\"unexpected baked default; must stay SOT-driven\""
                 return 2
                 ;;
         esac
-    done
-    printf '%s' "${out}"
+    done <<< "${out}"
 }
 
 # What: Run _ci_version_diff for every SOT-pinned consumer.
 # Why: verify/audit/sync differ only in how they report.
 # From: Issue #1683 | PR #1858
 _ci_version_walk() {
-    local fn="$1" dep df keys args rc=0 r
-    while IFS='|' read -r dep df keys args; do
+    local fn="$1" dep df keys rc=0 r
+    while IFS='|' read -r dep df keys; do
         [ -n "${dep}" ] || continue
         r=0
-        "${fn}" "${dep}" "${df}" "${keys}" "${args}" || r=$?
+        "${fn}" "${dep}" "${df}" "${keys}" || r=$?
         [ "${r}" -eq 0 ] || [ "${rc}" -ne 0 ] || rc="${r}"
     done <<< "$(_ci_version_consumers)"
     return "${rc}"

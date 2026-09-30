@@ -15,7 +15,7 @@ ARG ALPINE_IMAGE
 # From: Issue #1683
 ARG DHCLIENT_VERSION
 ARG DHCLIENT_ALPINE_BRANCH
-ARG DHCLIENT_APK_ARCH
+ARG DHCLIENT_ARCH
 ARG DHCLIENT_SHA256
 
 # What: The single Alpine toolchain stage, base from SOT.
@@ -30,7 +30,7 @@ LABEL org.opencontainers.image.description="Prebuilt lancache-ng CI and develope
 # From: Issue #1683
 ARG DHCLIENT_VERSION
 ARG DHCLIENT_ALPINE_BRANCH
-ARG DHCLIENT_APK_ARCH
+ARG DHCLIENT_ARCH
 ARG DHCLIENT_SHA256
 
 # What: uses plain /bin/sh for the apk-install step only.
@@ -49,7 +49,7 @@ RUN set -eu; \
     for kv in \
       "DHCLIENT_VERSION=${DHCLIENT_VERSION}" \
       "DHCLIENT_ALPINE_BRANCH=${DHCLIENT_ALPINE_BRANCH}" \
-      "DHCLIENT_APK_ARCH=${DHCLIENT_APK_ARCH}" \
+      "DHCLIENT_ARCH=${DHCLIENT_ARCH}" \
       "DHCLIENT_SHA256=${DHCLIENT_SHA256}"; do \
       case "$kv" in *=) missing="${missing} ${kv%=}" ;; esac; \
     done; \
@@ -117,7 +117,7 @@ RUN set -euo pipefail; \
     dh_tmp="$(mktemp -d -p /var/tmp)"; \
     trap 'rm -rf "$dh_tmp"' EXIT; \
     curl -fsSL \
-      "http://dl-cdn.alpinelinux.org/alpine/${DHCLIENT_ALPINE_BRANCH}/main/${DHCLIENT_APK_ARCH}/dhclient-${DHCLIENT_VERSION}.apk" \
+      "http://dl-cdn.alpinelinux.org/alpine/${DHCLIENT_ALPINE_BRANCH}/main/${DHCLIENT_ARCH}/dhclient-${DHCLIENT_VERSION}.apk" \
       -o "$dh_tmp/dhclient.apk"; \
     printf '%s  %s\n' "${DHCLIENT_SHA256}" "$dh_tmp/dhclient.apk" | sha256sum -c -; \
     tar -xzf "$dh_tmp/dhclient.apk" -C /; \

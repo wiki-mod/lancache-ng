@@ -3946,8 +3946,11 @@ netdata=sha256:n"
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"--build-arg ALPINE_IMAGE=mirror.gcr.io"* ]]
     [[ "${output}" == *"--build-arg DHCLIENT_VERSION="* ]]
-    [[ "${output}" == *"--build-arg DHCLIENT_SHA256_AMD64="* ]]
-    [[ "${output}" == *"--build-arg DHCLIENT_SHA256_ARM64="* ]]
+    local p apk
+    while IFS= read -r p; do
+        apk="$(_ci_platform_apk_arch "${p}")"
+        [[ "${output}" == *"--build-arg DHCLIENT_SHA256_${apk^^}="* ]]
+    done <<< "$(_ci_build_matrix_platforms)"
     local repos
     repos="$(_ci_block_entry_list build_toolchain build-tools apk_repositories | tr '\n' ' ')"
     [ -n "${repos}" ]
@@ -3960,16 +3963,18 @@ netdata=sha256:n"
 }
 
 @test "build-args build-tools <platform> resolves one apk-arch + sha" {
-    # What: platform yields DHCLIENT_APK_ARCH + one SHA256.
+    # What: platform yields DHCLIENT_ARCH + one SHA256.
     # Why: ci.sh resolves the arch, not the Dockerfile.
-    # From: Issue #1683
-    run bash "${CI_SH}" build-args build-tools --bare linux/amd64
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"DHCLIENT_APK_ARCH=x86_64"* ]]
-    [[ "${output}" == *"DHCLIENT_SHA256="* ]]
-    [[ "${output}" != *"DHCLIENT_SHA256_AMD64="* ]]
-    run bash "${CI_SH}" build-args build-tools --bare linux/arm64
-    [[ "${output}" == *"DHCLIENT_APK_ARCH=aarch64"* ]]
+    # From: Issue #1683 | PR #1858
+    local p apk
+    while IFS= read -r p; do
+        apk="$(_ci_platform_apk_arch "${p}")"
+        run bash "${CI_SH}" build-args build-tools --bare "${p}"
+        [ "${status}" -eq 0 ]
+        [[ "${output}" == *"DHCLIENT_ARCH=${apk}"* ]]
+        [[ "${output}" == *"DHCLIENT_SHA256="* ]]
+        [[ "${output}" != *"DHCLIENT_SHA256_"* ]]
+    done <<< "$(_ci_build_matrix_platforms)"
 }
 
 @test "build-args fails closed on a missing central base image" {
@@ -4098,15 +4103,15 @@ netdata=sha256:n"
 }
 
 @test "build-args netdata emits SOT version; digest needs a platform" {
-    # What: netdata derives version from SOT; no baked pin.
-    # Why: version is platform-independent; digest is per-arch.
-    # From: Issue #1683
+    # What: no platform -> version + every per-arch sha, no ARCH.
+    # Why: the one pin owner; ARCH/SHA256 need one platform.
+    # From: Issue #1683 | PR #1858
     local ver; ver="$(_ci_block_entry_field external_versions netdata version)"
     run bash "${CI_SH}" build-args netdata
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"--build-arg ALPINE_IMAGE="* ]]
     [[ "${output}" == *"--build-arg NETDATA_VERSION=${ver}"* ]]
-    [[ "${output}" != *"NETDATA_SHA256"* ]]
+    [[ "${output}" == *"NETDATA_SHA256_"* ]]
     [[ "${output}" != *"NETDATA_ARCH"* ]]
 }
 
@@ -4131,7 +4136,7 @@ netdata=sha256:n"
     grep -v '^  alpine:' "${CI_MANIFEST_SOURCE}" > "${m}"
     CI_MANIFEST="${m}" run bash "${CI_SH}" build-args proxy
     [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-BUILDARGS-0007"* ]]
+    [[ "${output}" == *"CI-ERROR-BUILDARGS-0003"* ]]
 }
 
 @test "build-args fails closed on an unmapped external_image value" {
@@ -4212,8 +4217,10 @@ netdata=sha256:n"
     # From: Issue #1683
     local m="${BATS_TEST_TMPDIR}/dh.yml" base changed
     base="$(bash "${CI_SH}" build-tools signature "sccache-0.15.0-r0")"
-    sed 's/sha256_amd64: 068c97e534e9c8f03db9064296b1d3c21d957f328e40309278559a92f9a74557/sha256_amd64: deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/' \
-        "${CI_MANIFEST_SOURCE}" > "${m}"
+    local key sha
+    key="$(_ci_build_matrix_platforms)"; key="sha256_$(_ci_platform_apk_arch "${key%%$'\n'*}")"
+    sha="$(_ci_block_entry_field external_versions dhclient "${key}")"
+    sed "s/${key}: ${sha}/${key}: $(printf 'd%.0s' {1..64})/" "${CI_MANIFEST_SOURCE}" > "${m}"
     changed="$(CI_MANIFEST="${m}" bash "${CI_SH}" build-tools signature "sccache-0.15.0-r0")"
     [ -n "${base}" ]
     [ -n "${changed}" ]
@@ -8914,23 +8921,23 @@ _version_fixture_repo() {
 }
 
 @test "version verify fails closed on a missing or malformed SOT pin" {
-    # What: per consumer: blank sha key -> 0007; garbled -> 0007.
+    # What: per consumer: sha missing -> 0004; garbled -> 0015.
     # Why: a missing/truncated pin must never pass silently.
     # From: Issue #1683 | PR #1858
-    local dep df keys args key val m
-    while IFS='|' read -r dep df keys args; do
-        for key in ${keys}; do [[ "${key}" == sha256_* ]] && break; done
+    local dep df keys key val m
+    while IFS='|' read -r dep df keys; do
+        key="$(_ci_build_matrix_platforms)"; key="sha256_$(_ci_platform_apk_arch "${key%%$'\n'*}")"
         val="$(_ci_block_entry_field external_versions "${dep}" "${key}")"
         m="${BATS_TEST_TMPDIR}/${dep}-missing.yml"
         grep -v "^    ${key}: ${val}\$" "${CI_MANIFEST_SOURCE}" > "${m}"
         CI_MANIFEST="${m}" run bash "${CI_SH}" version verify
         [ "${status}" -eq 2 ]
-        [[ "${output}" == *"CI-ERROR-VERSION-0007"*"${dep}.${key} missing"* ]]
+        [[ "${output}" == *"CI-ERROR-BUILDARGS-0004"*"${dep}.${key}"*"missing"* ]]
         m="${BATS_TEST_TMPDIR}/${dep}-badsha.yml"
         sed "s/^    ${key}: ${val}\$/    ${key}: not-a-real-hash/" "${CI_MANIFEST_SOURCE}" > "${m}"
         CI_MANIFEST="${m}" run bash "${CI_SH}" version verify
         [ "${status}" -eq 2 ]
-        [[ "${output}" == *"CI-ERROR-VERSION-0007"*"${dep}.${key} not 64 hex"* ]]
+        [[ "${output}" == *"CI-ERROR-BUILDARGS-0015"*"${dep}.${key}"*"not 64 hex"* ]]
     done <<< "$(_ci_version_consumers)"
 }
 
@@ -8938,9 +8945,9 @@ _version_fixture_repo() {
     # What: per consumer: ARG line gone -> 0008; default -> 0009.
     # Why: the SOT is the only owner; no second pin, no gap.
     # From: Issue #1683 | PR #1858
-    local dep df keys args arg root
-    while IFS='|' read -r dep df keys args; do
-        arg="${args%% *}"
+    local dep df keys arg root
+    while IFS='|' read -r dep df keys; do
+        arg="${dep^^}_VERSION"
         root="$(_version_fixture_repo)"
         sed -i "/^ARG ${arg}\$/d" "${root}/${df}"
         CI_REPO_ROOT="${root}" run bash "${CI_SH}" version verify
@@ -8960,7 +8967,7 @@ _version_fixture_repo() {
     # From: Issue #1683 | PR #1858
     run bash "${CI_SH}" version audit
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"key=netdata.version"* ]]
+    [[ "${output}" == *"key=netdata.sot NETDATA_VERSION="* ]]
     [[ "${output}" == *"shape=bare"* ]]
 }
 

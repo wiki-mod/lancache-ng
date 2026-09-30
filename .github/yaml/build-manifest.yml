@@ -428,8 +428,8 @@ external_versions:
   dhclient:
     version: 4.4.3_p1-r4
     alpine_branch: v3.20
-    sha256_amd64: 068c97e534e9c8f03db9064296b1d3c21d957f328e40309278559a92f9a74557
-    sha256_arm64: f1bd3a42210768b049f3157db09d68a399521db16f63122e7b6af28bf16fbea2
+    sha256_x86_64: 068c97e534e9c8f03db9064296b1d3c21d957f328e40309278559a92f9a74557
+    sha256_aarch64: f1bd3a42210768b049f3157db09d68a399521db16f63122e7b6af28bf16fbea2
   # What: CodeQL CLI bundle the codeql job downloads.
   # Why: the only pin owner; codeql.yml carries no pin.
   # From: Issue #1683 | PR #1858
