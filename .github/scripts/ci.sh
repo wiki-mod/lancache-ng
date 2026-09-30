@@ -3035,7 +3035,7 @@ _ci_toolchain_candidate() {
     done < <(_ci_block_keys build_toolchain)
 }
 
-# What: PR stack candidate: per-service digest for this host.
+# What: PR stack candidate: per-service digest for host.
 # Why: no PR ledger; the stack runs on this daemon's arch.
 # From: Issue #1683 | PR #1858
 _ci_stack_candidate_pr() {

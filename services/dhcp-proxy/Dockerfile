@@ -4,7 +4,7 @@
 
 # What: Alpine dnsmasq DHCP proxy; apk install image-local.
 # Why: image-local apk; ci.sh builds via the generic path.
-# From: Issue #815 | Issue #1683
+# From: Issue #1683
 
 # What: base image pin, supplied by ci.sh from the SOT.
 # Why: SOT base_images.alpine is the sole owner (AG-CI-006).
@@ -22,14 +22,14 @@ ARG BUILD_IDENTITY
 # Why: the SOT owns the list; this stage only consumes it.
 # From: Issue #1683
 ARG APK_PACKAGES
-# What: bootstrap bash so the SHELL below is not busybox ash.
+# What: bootstrap bash for SHELL compatibility.
 # Why: AG-REL-001 forbids ash; ci.sh apk-setup needs bash.
 # From: Issue #1683
 RUN apk add --no-cache bash
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-# What: shared apk setup (repo-http+update+upgrade+add) via ci.sh.
-# Why: one owner for the mandatory update+upgrade; SOT owns packages.
-# From: Issue #815 | Issue #1683
+# What: shared package setup via ci.sh.
+# Why: ci.sh owns update+upgrade; SOT owns packages.
+# From: Issue #1683
 RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
 
@@ -42,7 +42,7 @@ ENV VISUAL=$EDITOR
 COPY dnsmasq.conf.template /etc/dnsmasq.conf.template
 COPY dnsmasq-relay.conf.template /etc/dnsmasq-relay.conf.template
 # What: copy the known-good-snapshot library.
-# Why: entrypoint sources it; no embedded copy (AG-CODE-011).
+# Why: entrypoint uses it; no duplicate copy.
 # From: Issue #1683
 COPY --from=known-good known-good-snapshots.sh /usr/local/lib/known-good-snapshots.sh
 COPY entrypoint.sh /entrypoint.sh

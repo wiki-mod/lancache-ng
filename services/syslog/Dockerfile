@@ -2,9 +2,9 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-# What: Combined fluent-bit + syslog-ng central logging.
-# Why: Alpine lacks fluent-bit; pin its binary in a prefix.
-# From: Issue #1428 | PR #1431 | Issue #1683
+# What: Combined fluent-bit and syslog-ng logging
+# Why: Alpine lacks fluent-bit; pin binary in prefix
+# From: PR #1431
 
 # What: base images, supplied by ci.sh from the SOT pins.
 # Why: SOT base_images is the sole owner (AG-CI-006).
@@ -25,14 +25,14 @@ ARG BUILD_IDENTITY
 # Why: the SOT owns the list; this stage only consumes it.
 # From: Issue #1683
 ARG APK_PACKAGES
-# What: bootstrap bash so the SHELL below is not busybox ash.
-# Why: AG-REL-001 forbids ash; ci.sh apk-setup needs bash.
+# What: Install bash before SHELL directive
+# Why: AG-REL-001 forbids ash; ci.sh needs bash
 # From: Issue #1683
 RUN apk add --no-cache bash
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-# What: shared apk setup (repo-http+update+upgrade+add) via ci.sh.
-# Why: one owner for the mandatory update+upgrade; SOT owns packages.
-# From: Issue #1428 | Issue #1095
+# What: shared apk setup via ci.sh
+# Why: centralized owner for upgrade/package add
+# From: Issue #1428
 RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
 
@@ -57,9 +57,9 @@ COPY entrypoint.sh /entrypoint.sh
 COPY healthcheck.sh /usr/local/bin/healthcheck.sh
 COPY data-loss-detector.sh /usr/local/bin/data-loss-detector.sh
 
-# What: resolve the glibc dynamic linker; own the prefix.
-# Why: interpreter filename varies by arch; must be executable.
-# From: Issue #1428 | PR #1431
+# What: Resolve glibc dynamic linker path
+# Why: Filename varies by arch; must be executable
+# From: Issue #1428
 RUN set -- /opt/fluent-bit-glibc/lib/ld-linux-*.so.* \
     && [ -e "$1" ] \
     && ld_interp="$(basename "$1")" \
@@ -69,14 +69,14 @@ RUN set -- /opt/fluent-bit-glibc/lib/ld-linux-*.so.* \
 
 USER lancache:lancache
 
-# What: syslog-ng receiver on 6601; fluent-bit http on 2020.
-# Why: 601 is privileged; container lacks CAP_NET_BIND_SERVICE.
-# From: Issue #1428 | PR #1431
+# What: Expose syslog-ng (6601) and fluent-bit (2020)
+# Why: Port 601 requires root; container lacks CAP
+# From: Issue #1428
 EXPOSE 6601/tcp 2020/tcp
 
-# What: single HEALTHCHECK verifies fluent-bit + syslog-ng.
-# Why: one slot; healthcheck.sh checks both processes.
-# From: Issue #1428 | PR #1431
+# What: Single HEALTHCHECK for both services
+# Why: One slot; script checks both processes
+# From: Issue #1428
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=20s \
     CMD ["/usr/local/bin/healthcheck.sh"]
 

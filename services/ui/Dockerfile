@@ -91,14 +91,14 @@ ARG BUILD_IDENTITY
 # Why: the SOT owns the list; this stage only consumes it.
 # From: Issue #1683
 ARG APK_PACKAGES
-# What: bootstrap bash so the SHELL below is not busybox ash.
-# Why: AG-REL-001 forbids ash; the CA RUN below is bash logic.
+# What: Install bash before SHELL directive
+# Why: AG-REL-001 forbids ash; RUN needs bash
 # From: Issue #1683
 RUN apk add --no-cache bash
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-# What: trust proxy CA, repo-http, update+upgrade, install runtime.
-# Why: CA restored (no leak); mandatory update+upgrade invariant.
-# From: Issue #815 | Issue #1683
+# What: Setup proxy CA and packages with apk
+# Why: CA restored; mandatory update+upgrade required
+# From: Issue #1683
 RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
     if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
       cp /etc/ssl/certs/ca-certificates.crt /var/tmp/ca-bundle.orig && \
@@ -115,9 +115,9 @@ ENV VISUAL=$EDITOR
 
 COPY --from=builder /build/lancache-ui-out /usr/local/bin/lancache-ui
 COPY services/ui/src/templates /templates
-# What: copy the shared-secret bootstrap lib.
-# Why: entrypoint sources it; no embedded copy (AG-CODE-011).
-# From: Issue #858 | Issue #1683
+# What: Copy shared-secret bootstrap library
+# Why: Entrypoint sources it via build context
+# From: Issue #858
 COPY --from=shared-secret shared-secret-bootstrap.sh /usr/local/lib/shared-secret-bootstrap.sh
 COPY services/ui/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 # What: dhcp-probe runs this binary with --dhcp-probe.

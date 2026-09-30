@@ -74,11 +74,11 @@ LABEL org.opencontainers.image.description="PowerDNS recursor, authoritative DNS
 # From: Issue #1683
 COPY services/dns/domain-validation.sh /usr/local/lib/domain-validation.sh
 # What: copy the shared-secret bootstrap lib.
-# Why: entrypoint sources it; no embedded copy (AG-CODE-011).
-# From: Issue #858 | Issue #1683
+# Why: entrypoint uses it; no duplicate copy.
+# From: Issue #1683
 COPY --from=shared-secret shared-secret-bootstrap.sh /usr/local/lib/shared-secret-bootstrap.sh
 # What: copy the known-good-snapshot library.
-# Why: entrypoint sources it; no embedded copy (AG-CODE-011).
+# Why: entrypoint uses it; no duplicate copy.
 # From: Issue #1683
 COPY --from=known-good known-good-snapshots.sh /usr/local/lib/known-good-snapshots.sh
 
@@ -90,14 +90,14 @@ ARG BUILD_IDENTITY
 # Why: the SOT owns the list; this stage only consumes it.
 # From: Issue #1683
 ARG APK_PACKAGES
-# What: bootstrap bash so the SHELL below is not busybox ash.
-# Why: AG-REL-001 forbids ash; the CA RUN below is bash logic.
+# What: bootstrap bash for SHELL compatibility.
+# Why: AG-REL-001 forbids ash; CA handling needs bash.
 # From: Issue #1683
 RUN apk add --no-cache bash
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-# What: trust proxy CA, repo-http, update+upgrade, install stack.
-# Why: CA restored (no leak); mandatory update+upgrade invariant.
-# From: Issue #815 | Issue #1683
+# What: restore CA, update packages, install stack.
+# Why: CA restored (no leak); mandatory update invariant.
+# From: Issue #1683
 RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
     if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
       cp /etc/ssl/certs/ca-certificates.crt /var/tmp/ca-bundle.orig && \

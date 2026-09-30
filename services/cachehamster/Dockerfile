@@ -82,14 +82,14 @@ ARG BUILD_IDENTITY
 # From: Issue #1683
 ARG APK_PACKAGES
 
-# What: bootstrap bash so the SHELL below is not busybox ash.
+# What: bootstrap bash for SHELL compatibility.
 # Why: AG-REL-001 forbids ash; ci.sh apk-setup needs bash.
 # From: Issue #1683
 RUN apk add --no-cache bash
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-# What: shared apk setup (repo-http+update+upgrade+add) via ci.sh.
-# Why: one owner for the mandatory update+upgrade; SOT owns packages.
-# From: Issue #871 | Issue #1683
+# What: shared package setup via ci.sh.
+# Why: ci.sh owns update+upgrade; SOT owns packages.
+# From: Issue #1683
 RUN --mount=type=bind,source=.github/scripts/ci.sh,target=/usr/local/bin/ci.sh \
     bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
 

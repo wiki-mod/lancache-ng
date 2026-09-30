@@ -2,9 +2,9 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-# What: Alpine nginx caching proxy; apk install image-local.
-# Why: nginx.org stream module; http repos let Squid cache.
-# From: Issue #815 | Issue #1683
+# What: Alpine nginx caching proxy
+# Why: nginx.org has stream; http repos let Squid cache.
+# From: Issue #1683
 
 # What: base image pin, supplied by ci.sh from the SOT.
 # Why: SOT base_images.alpine is the sole owner (AG-CI-006).
@@ -18,9 +18,9 @@ LABEL org.opencontainers.image.description="nginx-based lancache-ng caching prox
 # Why: a new package set must not reuse a stale apk layer.
 # From: Issue #1683 | PR #1858
 ARG BUILD_IDENTITY
-# What: image-local nginx.org nginx + tools; CA-trust build-only.
-# Why: stream module needs nginx.org; CA reaches it via the proxy.
-# From: Issue #815 | Issue #1095 | Issue #1781
+# What: Install nginx.org nginx with CA trust setup
+# Why: nginx.org has stream; the CA passes the TLS proxy.
+# From: Issue #1095
 RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
     sed -i 's|^https://|http://|' /etc/apk/repositories \
     && if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
@@ -63,19 +63,19 @@ COPY nginx.conf /etc/nginx/nginx.conf.template
 COPY conf.d/ /etc/nginx/conf.d/
 COPY proxy-params.conf /etc/nginx/proxy-params.conf.template
 
-# What: static public suffix list for cert-domain derivation.
-# Why: entrypoint derives wildcard cert domains from it.
+# What: Static public suffix list for domain derivation
+# Why: Entrypoint uses it for wildcard cert domains
 # From: Issue #1095
 COPY public_suffix_list.dat /etc/nginx/public_suffix_list.dat
 
-# What: shared domain-validation lib + cdn-domains snapshot.
-# Why: dns owns both; proxy consumes them via the named context.
-# From: Issue #766 | Issue #1683
+# What: Copy domain validation lib and CDN domains
+# Why: dns stage owns both; proxy consumes via context
+# From: Issue #1683
 COPY --from=dns-domains domain-validation.sh /usr/local/lib/domain-validation.sh
 COPY --from=dns-domains cdn-domains.txt /etc/nginx/cdn-domains.txt
 
-# What: copy the known-good-snapshot library.
-# Why: entrypoint sources it; no embedded copy (AG-CODE-011).
+# What: Copy known-good snapshots library
+# Why: Entrypoint sources it via build context
 # From: Issue #1683
 COPY --from=known-good known-good-snapshots.sh /usr/local/lib/known-good-snapshots.sh
 COPY entrypoint.sh /entrypoint.sh

@@ -2,9 +2,9 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-# What: Alpine chrony NTP server for LAN clients on UDP/123.
-# Why: image-local apk install; ci.sh builds via the generic path.
-# From: Issue #815 | Issue #1683
+# What: Alpine chrony NTP server on UDP/123
+# Why: ci.sh handles generic build via apk-setup
+# From: Issue #1683
 
 # What: base image pin, supplied by ci.sh from the SOT.
 # Why: SOT base_images.alpine is the sole owner (AG-CI-006).
@@ -22,23 +22,23 @@ ARG BUILD_IDENTITY
 # Why: the SOT owns the list; this stage only consumes it.
 # From: Issue #1683
 ARG APK_PACKAGES
-# What: bootstrap bash so the SHELL below is not busybox ash.
-# Why: AG-REL-001 forbids ash; ci.sh apk-setup needs bash.
+# What: Install bash before SHELL directive
+# Why: AG-REL-001 forbids ash; ci.sh needs bash
 # From: Issue #1683
 RUN apk add --no-cache bash
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-# What: shared apk setup (repo-http+update+upgrade+add) via ci.sh.
-# Why: one owner for the mandatory update+upgrade; SOT owns packages.
-# From: Issue #815 | Issue #1683
+# What: shared apk setup via ci.sh
+# Why: centralized owner for upgrade/package add
+# From: Issue #1683
 RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
 
 COPY chrony.conf /etc/chrony/chrony.conf.template
 COPY entrypoint.sh /entrypoint.sh
 
-# What: chrony log and lib dirs; entrypoint drops privileges.
-# Why: chronyd needs root for UDP/123; dirs pre-created here.
-# From: Issue #815
+# What: pre-create chrony log and lib directories
+# Why: chronyd needs root for UDP/123 binding
+# From: Issue #1683
 RUN mkdir -p /var/lib/chrony /var/log/chrony
 
 EXPOSE 123/udp

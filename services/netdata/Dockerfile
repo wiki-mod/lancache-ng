@@ -14,8 +14,8 @@ FROM ${ALPINE_IMAGE}
 
 LABEL org.opencontainers.image.description="First-party Alpine + netdata's official static musl build, replacing the pulled third-party netdata/netdata (Debian) image."
 
-# What: netdata version+arch+digest, supplied by ci.sh from SOT.
-# Why: SOT owns external_versions.netdata; consumer bakes none.
+# What: netdata version, arch, and digest from SOT.
+# Why: SOT owns versions; image does not bake these.
 # From: Issue #1683
 ARG NETDATA_VERSION
 ARG NETDATA_ARCH
@@ -30,19 +30,19 @@ ARG BUILD_IDENTITY
 # Why: the SOT owns the list; this stage only consumes it.
 # From: Issue #1683
 ARG APK_PACKAGES
-# What: bootstrap bash so the SHELL below is not busybox ash.
-# Why: AG-REL-001 forbids ash; the installer RUN is bash logic.
+# What: bootstrap bash for SHELL compatibility.
+# Why: AG-REL-001 forbids ash; installer needs bash.
 # From: Issue #1683
 RUN apk add --no-cache bash
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-# What: shared apk setup (repo-http+update+upgrade+add) via ci.sh.
-# Why: one owner for the mandatory update+upgrade; SOT owns packages.
+# What: shared package setup via ci.sh.
+# Why: ci.sh owns update+upgrade; SOT owns packages.
 # From: Issue #1683
 RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
 
-# What: install the pinned netdata static build for this arch.
-# Why: one static .gz.run per arch; ci.sh selects the digest.
+# What: install pinned netdata static build.
+# Why: static .gz.run per arch; ci.sh selects digest.
 # From: Issue #1683
 RUN set -eu; export TMPDIR=/var/tmp; \
     wget -q -O /var/tmp/netdata.gz.run \
