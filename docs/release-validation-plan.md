@@ -1877,7 +1877,7 @@ omitted):**
 | `scripts/tracked/check-workflow-service-lists.sh` | Hardcoded service arrays stay in sync across workflow files |
 | `scripts/tracked/check-naming-consistency.sh` | Container-name/allowlist/env-var naming contract (`docs/naming-conventions.md`) |
 | `scripts/tracked/check-file-headers.sh` | File-header contract (`AG-HDR-*`) |
-| `scripts/untracked/check-trivy-action-direct-usage.sh` | `aquasecurity/trivy-action` is only ever invoked through `.github/actions/trivy-scan-retry` (issue #1535, AG-CI-013, quoted or unquoted `uses:` scalars alike), and every real call site (`.github/workflows` and `.github/actions`) sets both `dockerhub-username`/`dockerhub-password` to a real, non-empty `secrets.*`/`inputs.*` reference, not merely present (issue #1535 follow-up) |
+| `.github/scripts/ci.sh check trivy-action-direct-usage` | No workflow or action uses any `aquasecurity/*trivy*` action (quoted, unquoted, or dash-nested `uses:` alike); image scanning runs only through `ci.sh scan`, which owns the SOT-pinned trivy and its retry (issue #1535, AG-CI-013) |
 | `scripts/untracked/classify-image-impact.sh` | The single source of truth for "which subsystem does this diff touch" — reused by this document's own staleness reasoning, `detect-changes`, and the `promote` job's version-bump logic |
 | `scripts/untracked/validate-stack-images.sh` | Release-notes/workflow status-line consistency |
 | `scripts/untracked/select-build-tools-image.sh` | Resolves the pinned build-tools image/digest for every container-based check above |

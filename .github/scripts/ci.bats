@@ -7049,194 +7049,30 @@ EOF
     [[ "${output}" == *"logging-matrix=clean"* ]]
 }
 
-@test "check trivy-action-direct-usage passes clean on the real repo" {
-    # What: real tree has no direct call site, all wired.
-    # Why: proves the rewrite against production state.
-    # From: Issue #1683
-    run bash "${CI_SH}" check trivy-action-direct-usage
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"trivy-action-direct-usage=clean"* ]]
-}
-
-@test "check trivy-action-direct-usage flags a direct call outside the wrapper" {
-    # What: a workflow bypassing the centralized wrapper.
-    # Why: AG-VAL-029: bypass loses retry/auth/mirror fixes.
-    # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/trivy-direct"
-    mkdir -p "${r}/.github/workflows" "${r}/.github/actions/aquasecurity-trivy-action-centralized-version"
-    printf 'runs:\n  using: composite\n  steps:\n    - uses: aquasecurity/trivy-action@deadbeef\n' \
-        > "${r}/.github/actions/aquasecurity-trivy-action-centralized-version/action.yml"
-    printf 'jobs:\n  scan:\n    steps:\n      - uses: aquasecurity/trivy-action@deadbeef\n' \
-        > "${r}/.github/workflows/scan.yml"
-    run bash "${CI_SH}" check trivy-action-direct-usage "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0039"* ]]
-    [[ "${output}" == *"scan.yml"* ]]
-}
-
-@test "check trivy-action-direct-usage flags a trivy-scan-retry call with no with: block" {
-    # What: Call site missing whole with: block.
-    # Why: Silently drops required credentials.
-    # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/trivy-nowith"
+@test "check trivy-action-direct-usage denies every aquasecurity trivy action" {
+    # What: any trivy action use fails; ci.sh scan passes.
+    # Why: one scan owner; nesting/quotes must not hide it.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/trivy" use
     mkdir -p "${r}/.github/workflows"
-    printf 'jobs:\n  scan:\n    steps:\n      - uses: ./.github/actions/trivy-scan-retry\n      - run: echo hi\n' \
-        > "${r}/.github/workflows/scan.yml"
-    run bash "${CI_SH}" check trivy-action-direct-usage "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0040"* ]]
-    [[ "${output}" == *"no with: block"* ]]
-}
-
-@test "check trivy-action-direct-usage flags an empty dockerhub-username value" {
-    # What: Present but empty credential value.
-    # Why: Key-presence-only check would wrongly pass.
-    # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/trivy-empty"
-    mkdir -p "${r}/.github/workflows"
-    cat > "${r}/.github/workflows/scan.yml" <<'EOF'
-jobs:
-  scan:
-    steps:
-      - uses: ./.github/actions/trivy-scan-retry
-        with:
-          dockerhub-username: ""
-          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-EOF
-    run bash "${CI_SH}" check trivy-action-direct-usage "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"dockerhub-username not a real"* ]]
-}
-
-@test "check trivy-action-direct-usage flags a hardcoded dockerhub-password value" {
-    # What: Literal string instead of secrets./inputs. ref.
-    # Why: Same silent-fallback risk as empty value.
-    # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/trivy-hardcoded"
-    mkdir -p "${r}/.github/workflows"
-    cat > "${r}/.github/workflows/scan.yml" <<'EOF'
-jobs:
-  scan:
-    steps:
-      - uses: ./.github/actions/trivy-scan-retry
-        with:
-          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-password: hunter2
-EOF
-    run bash "${CI_SH}" check trivy-action-direct-usage "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"dockerhub-password not a real"* ]]
-}
-
-@test "check trivy-action-direct-usage flags a secret name sharing the expected prefix" {
-    # What: Prefix-matching secret name wrongly accepted.
-    # Why: Unanchored substring match is too loose.
-    # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/trivy-prefix"
-    mkdir -p "${r}/.github/workflows"
-    cat > "${r}/.github/workflows/scan.yml" <<'EOF'
-jobs:
-  scan:
-    steps:
-      - uses: ./.github/actions/trivy-scan-retry
-        with:
-          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME_OLD }}
-          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-EOF
-    run bash "${CI_SH}" check trivy-action-direct-usage "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"dockerhub-username not a real"* ]]
-}
-
-@test "check trivy-action-direct-usage passes a forwarded inputs.* reference" {
-    # What: Wrapper action forwards caller's own inputs.
-    # Why: Nested-composite-action forwarding is legal.
-    # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/trivy-inputs"
-    mkdir -p "${r}/.github/actions/some-wrapper"
-    cat > "${r}/.github/actions/some-wrapper/action.yml" <<'EOF'
-runs:
-  using: composite
-  steps:
-    - uses: ./.github/actions/trivy-scan-retry
-      with:
-        dockerhub-username: ${{ inputs.dockerhub-username }}
-        dockerhub-password: ${{ inputs.dockerhub-password }}
-EOF
+    printf 'jobs:\n  s:\n    steps:\n      - run: bash ci.sh scan x\n' > "${r}/.github/workflows/s.yml"
     run bash "${CI_SH}" check trivy-action-direct-usage "${r}"
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"trivy-action-direct-usage=clean"* ]]
-}
-
-@test "check trivy-action-direct-usage flags direct + unwired calls in composite actions" {
-    # What: Composite calls trivy-action.
-    # Why: Absorbs call-site coverage.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/trivy-comp"
-    mkdir -p "${r}/.github/actions/aquasecurity-trivy-action-centralized-version" "${r}/.github/actions/other"
-    printf 'runs:\n  using: composite\n  steps:\n    - uses: aquasecurity/trivy-action@deadbeef\n' \
-        > "${r}/.github/actions/aquasecurity-trivy-action-centralized-version/action.yml"
-    printf 'runs:\n  using: composite\n  steps:\n    - uses: aquasecurity/trivy-action@deadbeef\n' \
-        > "${r}/.github/actions/other/action.yml"
+    for use in '      - uses: aquasecurity/trivy-action@0a' \
+               '      - uses: "aquasecurity/setup-trivy@0b"' \
+               "      -\n        uses: 'aquasecurity/trivy-action@0c'"; do
+        printf 'jobs:\n  s:\n    steps:\n%b\n' "${use}" > "${r}/.github/workflows/s.yml"
+        run bash "${CI_SH}" check trivy-action-direct-usage "${r}"
+        [ "${status}" -eq 1 ]
+        [[ "${output}" == *"CI-ERROR-CHECK-0039"*"s.yml"* ]]
+    done
+    rm "${r}/.github/workflows/s.yml"
+    mkdir -p "${r}/.github/actions/a"
+    printf 'runs:\n  steps:\n    - uses: aquasecurity/trivy-action@0d\n' > "${r}/.github/actions/a/action.yml"
     run bash "${CI_SH}" check trivy-action-direct-usage "${r}"
-    [ "${status}" -ne 0 ]; [[ "${output}" == *"other/action.yml"* ]]
-    printf 'runs:\n  using: composite\n  steps:\n    - uses: ./.github/actions/trivy-scan-retry\n' \
-        > "${r}/.github/actions/other/action.yml"
-    run bash "${CI_SH}" check trivy-action-direct-usage "${r}"; [ "${status}" -ne 0 ]
-}
-
-@test "check trivy-action-direct-usage dockerhub-key wiring variants" {
-    # What: Interleaved + both pass; others fail.
-    # Why: Absorbs trivy-scan edge coverage.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/trivy-keys"; mkdir -p "${r}/.github/workflows"
-    cat > "${r}/.github/workflows/s.yml" <<'EOF'
-jobs:
-  scan:
-    steps:
-      - uses: ./.github/actions/trivy-scan-retry
-        with:
-          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
-          # interleaved comment
-          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-EOF
-    run bash "${CI_SH}" check trivy-action-direct-usage "${r}"; [ "${status}" -eq 0 ]
-    cat > "${r}/.github/workflows/s.yml" <<'EOF'
-jobs:
-  scan:
-    steps:
-      - uses: ./.github/actions/trivy-scan-retry
-        with:
-          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
-EOF
-    run bash "${CI_SH}" check trivy-action-direct-usage "${r}"; [ "${status}" -ne 0 ]
-    cat > "${r}/.github/workflows/s.yml" <<'EOF'
-jobs:
-  scan:
-    steps:
-      - uses: "./.github/actions/trivy-scan-retry"
-EOF
-    run bash "${CI_SH}" check trivy-action-direct-usage "${r}"; [ "${status}" -ne 0 ]
-}
-
-@test "check trivy-action-direct-usage handles a quoted uses: at deeper list nesting" {
-    # What: Quoted uses: scalar under dash-only list item.
-    # Why: Indentation/quoting variation escapes scan.
-    # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/trivy-quoted"
-    mkdir -p "${r}/.github/workflows"
-    cat > "${r}/.github/workflows/scan.yml" <<'EOF'
-jobs:
-  scan:
-    steps:
-      -
-        uses: './.github/actions/trivy-scan-retry'
-        with:
-          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-EOF
-    run bash "${CI_SH}" check trivy-action-direct-usage "${r}"
-    [ "${status}" -eq 0 ]
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"a/action.yml"* ]]
 }
 
 @test "check entrypoint-lib-wiring passes when the Dockerfile COPYs the sourced path" {
