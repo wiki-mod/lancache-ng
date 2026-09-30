@@ -77,23 +77,18 @@ teardown() {
     [[ "${output}" == *CI-ERROR-CORE-0101* ]]
 }
 
-@test "ci_services lists exactly the 10 product-stack services" {
-    # What: The one service list drives everything.
-    # Why: Drift here breaks matrices/scans/release.
-    # From: Issue #1683
-    run ci_services
+@test "services are the SOT services block; targets add the toolchain" {
+    # What: services = services keys; targets = + toolchain.
+    # Why: one list owner; the toolchain is never a service.
+    # From: Issue #1683 | PR #1858
+    local m
+    m="${BATS_TEST_TMPDIR}/inv.yml"
+    printf 'services:\n  svc-a:\n    context: a\n  svc-b:\n    context: b\nbuild_toolchain:\n  tc-x:\n    context: t\n' > "${m}"
+    CI_MANIFEST="${m}" run ci_services
     [ "${status}" -eq 0 ]
-    [ "${#lines[@]}" -eq 10 ]
-}
-
-@test "ci_build_targets adds build-tools but never counts it as a service" {
-    # What: 10 services + build-tools = 11 targets.
-    # Why: build-tools builds the stack, is not in it.
-    # From: Issue #1683
-    run ci_build_targets
-    [ "${#lines[@]}" -eq 11 ]
-    run ci_services
-    ! printf '%s\n' "${lines[@]}" | grep -qx "build-tools"
+    [ "${output}" = "$(printf 'svc-a\nsvc-b')" ]
+    CI_MANIFEST="${m}" run ci_build_targets
+    [ "${output}" = "$(printf 'svc-a\nsvc-b\ntc-x')" ]
 }
 
 @test "unknown subcommand fails closed with a stable id" {
@@ -4231,10 +4226,13 @@ netdata=sha256:n"
     # What: the signature must cover every supported arch.
     # Why: an arm64-only change must be representable.
     # From: Issue #1683
+    local p want=""
+    while IFS= read -r p; do
+        [ -n "${p}" ] && want="${want}$(_ci_platform_apk_arch "${p}")"$'\n'
+    done <<< "$(_ci_build_matrix_platforms)"
     run bash "${CI_SH}" build-tools arches
     [ "${status}" -eq 0 ]
-    printf '%s\n' "${output}" | grep -qx "x86_64"
-    printf '%s\n' "${output}" | grep -qx "aarch64"
+    [ "${output}" = "$(LC_ALL=C sort -u <<< "${want%$'\n'}")" ]
 }
 
 @test "build-tools consumes the channel the promote owner maps" {
