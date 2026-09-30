@@ -25,19 +25,37 @@ defaults:
 env:
   GHCR_USERNAME: ${{ github.actor }}
   GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  # What: LAN proxy inputs; ci.sh applies them self-hosted only.
+  # Why: AG-CI-009; ci.sh is the one proxy policy owner.
+  # From: Issue #1683 | PR #1858
+  PROJECT_SELFHOSTED_PROXY_HTTP: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
+  PROJECT_SELFHOSTED_PROXY_HTTPS: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
+  PROJECT_SELFHOSTED_PROXY_EXCLUSION: ${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
+  PROJECT_SELFHOSTED_PROXY_CA: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
 jobs:
-  # What: validate, then promote the accepted current_dev stack; report always.
-  # Why: one job, one checkout; nightly reuses ci.sh, never rebuilds (§54).
-  # From: Issue #1683
-  nightly:
-    name: nightly
+  # What: resolve the published build-tools channel to a digest.
+  # Why: the nightly job runs in build-tools, never on the runner.
+  # From: Issue #1683 | PR #1858
+  platform:
+    name: platform
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 15
+    outputs:
+      image: ${{ steps.resolve.outputs.image }}
+    # What: one mutable entry, the current_dev channel (nightly).
+    # Why: ci.sh (SOT) cannot run before any container exists.
+    # From: Issue #1683 | PR #1858
+    container:
+      image: ghcr.io/${{ github.repository }}/build-tools:nightly
+      credentials: &ghcr_credentials
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       # What: native fail-closed checkout, shallow; persistent ci.sh auth.
-      # Why: no SHA pin outside the SOT; git is a runner tool (AG-CI-006).
+      # Why: no SHA pin outside the SOT; git comes from build-tools.
       # From: Issue #1683
-      - name: Bootstrap the working tree
+      - &bootstrap
+        name: Bootstrap the working tree
         run: |
           set -euo pipefail
           git config --global --add safe.directory "${PWD}"
@@ -46,6 +64,23 @@ jobs:
           git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GHCR_TOKEN}" | base64 -w0)"
           git fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
           git checkout -q FETCH_HEAD
+      - name: Resolve the build-tools image
+        id: resolve
+        run: echo "image=$(bash .github/scripts/ci.sh build-tools resolve-image)" >> "$GITHUB_OUTPUT"
+
+  # What: validate, then promote the accepted current_dev stack; report always.
+  # Why: one job, one checkout; nightly reuses ci.sh, never rebuilds (§54).
+  # From: Issue #1683
+  nightly:
+    name: nightly
+    needs: platform
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    container:
+      image: ${{ needs.platform.outputs.image }}
+      credentials: *ghcr_credentials
+    steps:
+      - *bootstrap
       # What: full-setup validation of the accepted candidate (§49/§54).
       # Why: nightly promotes only a green, already-accepted stack.
       # From: Issue #1683
