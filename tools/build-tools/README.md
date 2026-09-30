@@ -21,9 +21,10 @@ mapping and verify it against `rustc -vV`. They must not call `rustup target
 list`, because Alpine's packaged Rust toolchain does not expose a usable
 `rustup` executable or the upstream `*-unknown-linux-musl` standard library.
 
-`cargo-audit` and `cargo-tarpaulin` are native Alpine packages. `sccache`
-remains a pinned Cargo source install because the available Alpine package does
-not provide the repository-required Redis and dist-client feature selection.
+`cargo-audit` and `cargo-tarpaulin` are native Alpine packages. The Alpine
+3.24 `sccache` package enables only its dist-client/dist-server features, so
+the image keeps a pinned Cargo source build for the required Redis, GHA, and
+dist-client feature set.
 The Dockerfile removes Cargo's downloaded source cache after that installation
 so it does not become scanner-visible image content.
 

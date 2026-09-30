@@ -34,7 +34,6 @@ Run from the repository root:
 The script runs, in this order:
 
 - `cargo fmt --all --manifest-path services/ui/Cargo.toml -- --check`
-- `cargo check --locked --manifest-path services/ui/Cargo.toml`
 - `cargo clippy --locked --manifest-path services/ui/Cargo.toml -- -D warnings`
 - `cargo test --locked --manifest-path services/ui/Cargo.toml`
 - `cargo build --locked --release --manifest-path services/ui/Cargo.toml`

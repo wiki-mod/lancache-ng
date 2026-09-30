@@ -25,7 +25,7 @@
 # file in this repo -- no PR's diff can set it. A maintainer must
 # add the "deep full-setup validation" job (the always-run aggregate below,
 # whose name is stable precisely so it can be required) to the branch
-# protection required-status-checks list for v0.2.0/master. The aggregate is
+# protection required-status-checks list for the protected integration branches. The aggregate is
 # designed to always run and report a real pass/fail (never "skipped"), so it
 # is safe to require without blocking docs-only PRs -- a required check that
 # gets skipped would otherwise leave a PR permanently un-mergeable.

@@ -96,8 +96,7 @@ whole class.
 | `pr-title-convention-check` | cheap lint | GitHub-hosted primary; twin removed (issue #1095) |
 | `ci_scope_policy` | policy gate over Rust job results | none -- decided not feasible, see below |
 | `detect-changes`, `validate-compose`, `compute-validation-network`, `full-setup-validate` | build-tools image / full Docker Compose stack | none -- see "Other self-hosted-only jobs" below |
-| `dns_rust_quality`, `ui_rust_quality`, `watchdog_rust_quality`, `dns_test`, `ui_test`, `rust_coverage`, `dns_cargo_audit`, `ui_cargo_audit`, `watchdog_cargo_audit` | Rust build/test/audit | none -- see "Rust build/test class" below |
-| `publish_coverage_badge` | downstream of `rust_coverage`, needs `contents: write` | none, same reasoning as its upstream job |
+| `dns_rust_quality`, `ui_rust_quality`, `watchdog_rust_quality`, `dns_test`, `ui_test`, `watchdog_test`, `dns_cargo_audit`, `ui_cargo_audit`, `watchdog_cargo_audit` | Rust build/test/audit | none -- see "Rust build/test class" below |
 | `container-scan`, `build`, `build-arm64`, `merge-manifests`, `promote`, `release` | image build/scan/publish | `build-arm64`'s arm64 lane already runs natively on GitHub-hosted `ubuntu-24.04-arm` (issue #592); `container-scan`+`build` (amd64 leg) + manifest merge now have an opt-in `workflow_dispatch` overflow path (`.github/workflows/build-push-hosted-fallback.yml`, issue #686); `promote`/`release` remain self-hosted-only -- see "Image build/push class" below |
 
 ### Why `ci_scope_policy` has no hosted fallback
@@ -134,7 +133,7 @@ either way.
 `dns_rust_quality`, `ui_rust_quality`, `watchdog_rust_quality`, `dns_test`,
 `ui_test`, `watchdog_test` (its `cargo test` step only -- the shell-script
 syntax/executable-bit step already has a hosted fallback, `watchdog_test-hosted`),
-`rust_coverage`, `dns_cargo_audit`, `ui_cargo_audit`, and `watchdog_cargo_audit`
+`dns_cargo_audit`, `ui_cargo_audit`, and `watchdog_cargo_audit`
 all run on `lancache-heavy` self-hosted runners and use the acceleration layer
 described in AGENTS.md's Rule-Ref: **AG-CI-003**
 ("Runner portability") and `docs/self-hosted-actions-runner.md`'s
@@ -166,16 +165,15 @@ and CI-degraded-mode story today. A `dns_rust_quality-hosted` /
 **What makes it a real cost, not a mechanical `runs-on:` swap:**
 
 1. **Build time.** Full-fidelity, uncached `cargo build`/`cargo test`/
-   `cargo tarpaulin` for the `dns/nats-subscriber`, `ui`, and (2026-08)
-   `watchdog` crates is materially slower without sccache/distcc -- this is
+   Rust builds and tests for the `dns/nats-subscriber`, `ui`, and (2026-08)
+   `watchdog` crates are materially slower without sccache/distcc -- this is
    the same tradeoff already accepted for `build-arm64`'s GitHub-hosted arm64
    lane (see `docs/self-hosted-actions-runner.md`'s "Native arm64 builds on
    GitHub-hosted runners": "always builds as an uncached, optional-
    acceleration `cargo build --release` -- slower per build than the
    accelerated amd64 lane"). Ten Rust jobs (quality + test + audit, times
    three crates, plus coverage for the original two crates only -- see
-   `rust_coverage`'s own job comment in the workflow file for why watchdog is
-   deliberately not in the coverage job yet) running uncached in parallel as
+   running uncached in parallel as
    a fallback would multiply GitHub Actions minutes usage for every PR, not
    just during self-hosted outages, if run unconditionally like the lint
    fallbacks are.

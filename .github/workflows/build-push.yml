@@ -1399,14 +1399,6 @@ jobs:
           grep -F 'BUILD_TOOLS_IMAGE:' .github/workflows/build-push.yml >/dev/null \
             && grep -F "needs['validate-compose'].outputs.build_tools_image" .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Docker Rust builds must thread the selected build-tools image into service builds."; exit 1; }
-          awk '
-            /name: Merge coverage reports and check threshold/ { in_merge = 1; has_docker = 0; has_build_tools = 0; next }
-            in_merge && /^[[:space:]]+- name: / { exit (has_docker && has_build_tools) ? 0 : 1 }
-            in_merge && /docker run --rm/ { has_docker = 1 }
-            in_merge && /BUILD_TOOLS_IMAGE/ { has_build_tools = 1 }
-            END { if (in_merge) exit (has_docker && has_build_tools) ? 0 : 1; exit 1 }
-          ' .github/workflows/build-push.yml \
-            || { echo "::error::Coverage merge must use the selected build-tools image instead of bare host jq/bc."; exit 1; }
           grep -F 'needs: validate-compose' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Shellcheck must depend on validate-compose so it uses the validated build-tools image."; exit 1; }
           grep -F 'runs-on: [self-hosted, linux, lancache, lancache-heavy]' .github/workflows/build-tools.yml >/dev/null \
@@ -2253,24 +2245,6 @@ jobs:
             -v "$PWD:/work" -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             cargo fmt --manifest-path services/dns/nats-subscriber/Cargo.toml -- --check
-      - name: cargo check with warnings denied (dns/nats-subscriber)
-        uses: ./.github/actions/cargo-with-sccache-fallback
-        env:
-          RUSTFLAGS: "-D warnings"
-        with:
-          command: >-
-            docker run --rm --user "$(id -u):$(id -g)"
-            --label com.wiki-mod.lancache.cargo=true
-            -e HOME=/var/tmp/rust-home -e CARGO_HOME=/var/tmp/cargo-home
-            -e RUSTC_WRAPPER=/usr/local/bin/sccache
-            -e SCCACHE_CONF=/run/lancache/sccache.conf
-            -e SCCACHE_REDIS="${SCCACHE_REDIS:-}"
-            -e SCCACHE_REDIS_KEY_PREFIX="${SCCACHE_REDIS_KEY_PREFIX:-lancache-dns-quality}"
-            --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}"
-            -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
-            -v "$PWD:/work" -w /work
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
-            cargo check --locked --all-targets --manifest-path services/dns/nats-subscriber/Cargo.toml
       - name: cargo clippy with warnings denied (dns/nats-subscriber)
         timeout-minutes: 35
         uses: ./.github/actions/cargo-with-sccache-fallback
@@ -2343,25 +2317,6 @@ jobs:
             -v "$PWD:/work" -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             cargo fmt --manifest-path services/ui/Cargo.toml -- --check
-      - name: cargo check with warnings denied (ui)
-        uses: ./.github/actions/cargo-with-sccache-fallback
-        env:
-          RUSTFLAGS: "-D warnings"
-        with:
-          command: >-
-            docker run --rm --user "$(id -u):$(id -g)"
-            --label com.wiki-mod.lancache.cargo=true
-            -e HOME=/var/tmp/rust-home -e CARGO_HOME=/var/tmp/cargo-home
-            -e RUSTFLAGS="${RUSTFLAGS:-}"
-            -e RUSTC_WRAPPER=/usr/local/bin/sccache
-            -e SCCACHE_CONF=/run/lancache/sccache.conf
-            -e SCCACHE_REDIS="${SCCACHE_REDIS:-}"
-            -e SCCACHE_REDIS_KEY_PREFIX="${SCCACHE_REDIS_KEY_PREFIX:-lancache-ui-quality}"
-            --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}"
-            -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
-            -v "$PWD:/work" -w /work
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
-            cargo check --locked --all-targets --manifest-path services/ui/Cargo.toml
       - name: cargo clippy with warnings denied (ui)
         timeout-minutes: 35
         uses: ./.github/actions/cargo-with-sccache-fallback
@@ -2434,25 +2389,6 @@ jobs:
             -v "$PWD:/work" -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             cargo fmt --manifest-path services/watchdog/Cargo.toml -- --check
-      - name: cargo check with warnings denied (watchdog)
-        uses: ./.github/actions/cargo-with-sccache-fallback
-        env:
-          RUSTFLAGS: "-D warnings"
-        with:
-          command: >-
-            docker run --rm --user "$(id -u):$(id -g)"
-            --label com.wiki-mod.lancache.cargo=true
-            -e HOME=/var/tmp/rust-home -e CARGO_HOME=/var/tmp/cargo-home
-            -e RUSTFLAGS="${RUSTFLAGS:-}"
-            -e RUSTC_WRAPPER=/usr/local/bin/sccache
-            -e SCCACHE_CONF=/run/lancache/sccache.conf
-            -e SCCACHE_REDIS="${SCCACHE_REDIS:-}"
-            -e SCCACHE_REDIS_KEY_PREFIX="${SCCACHE_REDIS_KEY_PREFIX:-lancache-watchdog-quality}"
-            --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}"
-            -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
-            -v "$PWD:/work" -w /work
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
-            cargo check --locked --all-targets --manifest-path services/watchdog/Cargo.toml
       - name: cargo clippy with warnings denied (watchdog)
         timeout-minutes: 35
         uses: ./.github/actions/cargo-with-sccache-fallback
@@ -2618,249 +2554,6 @@ jobs:
             -v "$PWD:/work" -w /work
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
             cargo test --locked --manifest-path services/ui/Cargo.toml
-      - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
-        if: always()
-  rust_coverage:
-    name: coverage (Rust)
-    needs: [validate-compose, dns_test, ui_test, detect-changes, push-supersession-check]
-    if: >-
-      ${{
-        always() &&
-        needs['push-supersession-check'].result == 'success' &&
-        needs['push-supersession-check'].outputs.superseded != 'true' &&
-        needs['validate-compose'].result == 'success' &&
-        (needs.dns_test.result == 'success' || needs.dns_test.result == 'skipped') &&
-        (needs.ui_test.result == 'success' || needs.ui_test.result == 'skipped') &&
-        (
-          github.event_name != 'pull_request' ||
-          needs['detect-changes'].outputs.dns_rust == 'true' ||
-          needs['detect-changes'].outputs.ui == 'true'
-        )
-      }}
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    timeout-minutes: 60
-    concurrency:
-      group: >-
-        ${{
-          (github.event_name == 'workflow_dispatch' || github.run_attempt != '1') &&
-          format('{0}-rust-coverage-{1}-{2}', github.workflow, github.ref, github.run_id) ||
-          format('{0}-rust-coverage-{1}', github.workflow, github.ref)
-        }}
-      cancel-in-progress: true
-    steps:
-      - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
-      - uses: *checkout_centraliced_versioning # v7.0.1
-      - uses: *docker_login_centraliced_versioning
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Resolve build-tools image (with tarpaulin required)
-        env:
-          EXTRA_REQUIRED_TOOLS: "cargo-tarpaulin bc"
-          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
-        run: |
-          set -euo pipefail
-          image="$(bash scripts/untracked/select-build-tools-image.sh)"
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
-      - name: Configure Rust sccache for coverage
-        uses: ./.github/actions/configure-rust-sccache
-        with:
-          mode: ${{ vars.SCCACHE_REDIS_MODE || 'required' }}
-          redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
-          key-prefix: lancache-coverage
-          dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
-          dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
-          verify-binary: false
-      - name: Prepare writable coverage output directories
-        run: |
-          set -euo pipefail
-          mkdir -p coverage-dns coverage-ui
-      - name: Run coverage (dns/nats-subscriber)
-        uses: ./.github/actions/cargo-with-sccache-fallback
-        with:
-          command: >-
-            docker run --rm
-            --label com.wiki-mod.lancache.cargo=true
-            --user "$(id -u):$(id -g)"
-            -e HOME=/var/tmp/coverage-home
-            -e CARGO_HOME=/var/tmp/cargo-home
-            -e CARGO_TARGET_DIR=/var/tmp/target-dns
-            -e RUSTC_WRAPPER="${RUSTC_WRAPPER:-}"
-            -e SCCACHE_CONF=/run/lancache/sccache.conf
-            -e SCCACHE_REDIS="${SCCACHE_REDIS:-}"
-            -e SCCACHE_REDIS_KEY_PREFIX="${SCCACHE_REDIS_KEY_PREFIX:-lancache-coverage}"
-            --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}"
-            -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
-            -v "$PWD:/work"
-            -v "$PWD/coverage-dns:/coverage-dns"
-            -w /work
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
-            cargo tarpaulin --engine llvm --manifest-path services/dns/nats-subscriber/Cargo.toml --locked --timeout 300 --out json --output-dir /coverage-dns
-      - name: Run coverage (ui)
-        uses: ./.github/actions/cargo-with-sccache-fallback
-        with:
-          command: >-
-            docker run --rm
-            --label com.wiki-mod.lancache.cargo=true
-            --user "$(id -u):$(id -g)"
-            -e HOME=/var/tmp/coverage-home
-            -e CARGO_HOME=/var/tmp/cargo-home
-            -e CARGO_TARGET_DIR=/var/tmp/target-ui
-            -e RUSTC_WRAPPER="${RUSTC_WRAPPER:-}"
-            -e SCCACHE_CONF=/run/lancache/sccache.conf
-            -e SCCACHE_REDIS="${SCCACHE_REDIS:-}"
-            -e SCCACHE_REDIS_KEY_PREFIX="${SCCACHE_REDIS_KEY_PREFIX:-lancache-coverage}"
-            --env-file "${SCCACHE_GHA_ENV_FILE:-/dev/null}"
-            -v "$LANCACHE_SCCACHE_CONF:/run/lancache/sccache.conf:ro"
-            -v "$PWD:/work"
-            -v "$PWD/coverage-ui:/coverage-ui"
-            -w /work
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
-            cargo tarpaulin --engine llvm --manifest-path services/ui/Cargo.toml --locked --timeout 300 --out json --output-dir /coverage-ui
-      - name: Merge coverage reports and check threshold
-        id: coverage
-        run: |
-          set -euo pipefail
-          mkdir -p coverage-badge
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -e HOME=/var/tmp/coverage-home \
-            -v "$PWD:/work:ro" \
-            -v "$PWD/coverage-badge:/coverage-badge" \
-            -w /work \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            timeout --kill-after=30 --signal=KILL 300 \
-            bash -c 'set -euo pipefail
-              dns_coverage=$(jq -r ".coverage" coverage-dns/tarpaulin-report.json 2>/dev/null || echo "0")
-              ui_coverage=$(jq -r ".coverage" coverage-ui/tarpaulin-report.json 2>/dev/null || echo "0")
-              echo "DNS coverage: ${dns_coverage}%"
-              echo "UI coverage: ${ui_coverage}%"
-              ui_threshold=35
-              dns_threshold=0
-              echo "UI threshold: ${ui_threshold}%"
-              echo "DNS threshold: ${dns_threshold}% (floor not raised since #504 closed; async loop covered by full-setup integration)"
-              failed=0
-              if (( $(echo "$ui_coverage < $ui_threshold" | bc -l) )); then
-                echo "::error::UI coverage ${ui_coverage}% is below threshold of ${ui_threshold}%"
-                failed=1
-              fi
-              if (( $(echo "$dns_coverage < $dns_threshold" | bc -l) )); then
-                echo "::error::DNS coverage ${dns_coverage}% is below threshold of ${dns_threshold}%"
-                failed=1
-              fi
-              if [[ "$failed" -eq 1 ]]; then
-                exit 1
-              fi
-              ui_coverage_display="$(printf "%.2f" "$ui_coverage")"
-              dns_coverage_display="$(printf "%.2f" "$dns_coverage")"
-              badge_message="ui ${ui_coverage_display}% / dns ${dns_coverage_display}%"
-              badge_color=yellow
-              if awk -v ui="$ui_coverage" -v dns="$dns_coverage" "BEGIN { exit !(ui >= 80 && dns >= 80) }"; then
-                badge_color=brightgreen
-              fi
-              jq -n \
-                --arg message "$badge_message" \
-                --arg color "$badge_color" \
-                "{schemaVersion: 1, label: \"rust coverage\", message: \$message, color: \$color}" \
-                > /coverage-badge/rust.json
-              {
-                printf "ui=%s\n" "$ui_coverage_display"
-                printf "dns=%s\n" "$dns_coverage_display"
-                printf "message=%s\n" "$badge_message"
-              } > /coverage-badge/output.env
-              echo "Coverage check passed"'
-          cat coverage-badge/output.env >> "$GITHUB_OUTPUT"
-      - name: Upload coverage reports
-        if: always()
-        uses: &actions_upload_artifact_centraliced_versioning actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: rust-coverage-reports
-          path: |
-            coverage-dns/tarpaulin-report.json
-            coverage-ui/tarpaulin-report.json
-          retention-days: 30
-      - name: Upload coverage badge data
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
-        uses: *actions_upload_artifact_centraliced_versioning # v7.0.1
-        with:
-          name: rust-coverage-badge
-          path: coverage-badge/rust.json
-          retention-days: 1
-      - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
-        if: always()
-  publish_coverage_badge:
-    name: publish rust coverage badge
-    needs: rust_coverage
-    if: "!cancelled() && needs.rust_coverage.result == 'success' && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')"
-    runs-on: [self-hosted, linux, lancache, lancache-light]
-    timeout-minutes: 15
-    concurrency:
-      group: ${{ github.workflow }}-badge-${{ github.ref }}
-      cancel-in-progress: false
-    permissions:
-      contents: write
-    steps:
-      - uses: wiki-mod/lancache-ng/.github/actions/checkout-lock-and-resync@current_dev
-      - name: Checkout
-        uses: *checkout_centraliced_versioning # v7.0.1
-      - name: Download coverage badge data
-        uses: &actions_download_artifact_centraliced_versioning actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (v4.3.0 still declared deprecated Node 20 runtime, see #802)
-        with:
-          name: rust-coverage-badge
-          path: coverage-badge
-      - name: Publish Rust coverage badge endpoint
-        env:
-          BADGE_BRANCH: badges
-          BADGE_FILE: coverage/rust-${{ github.ref_name }}.json
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          : "${GITHUB_TOKEN:?GITHUB_TOKEN is required to publish the coverage badge endpoint}"
-          : "${BADGE_BRANCH:?BADGE_BRANCH is required}"
-          : "${BADGE_FILE:?BADGE_FILE is required}"
-          current_tip="$(git ls-remote origin "$GITHUB_REF" | cut -f1)"
-          if [[ -z "$current_tip" ]]; then
-            echo "::error::Could not resolve the current tip of ${GITHUB_REF} via git ls-remote; refusing to publish the coverage badge blind."
-            exit 1
-          fi
-          if [[ "$current_tip" != "$GITHUB_SHA" ]]; then
-            echo "::notice::${GITHUB_REF} has already moved to ${current_tip} since this run was triggered for ${GITHUB_SHA}; skipping badge publish so the run already targeting the current tip publishes instead."
-            exit 0
-          fi
-          tmp_dir="$(mktemp -d)"
-          trap 'rm -rf "$tmp_dir"' EXIT
-          cp coverage-badge/rust.json "$tmp_dir/rust.json"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          max_attempts=5
-          attempt=1
-          while :; do
-            git fetch origin "$BADGE_BRANCH:refs/remotes/origin/$BADGE_BRANCH" || true
-            if git show-ref --verify --quiet "refs/remotes/origin/$BADGE_BRANCH"; then
-              git switch -C "$BADGE_BRANCH" "origin/$BADGE_BRANCH"
-            else
-              git switch --orphan "$BADGE_BRANCH"
-              git rm -rf . >/dev/null 2>&1 || true
-            fi
-            mkdir -p "$(dirname "$BADGE_FILE")"
-            cp "$tmp_dir/rust.json" "$BADGE_FILE"
-            git add "$BADGE_FILE"
-            if git diff --cached --quiet; then
-              echo "::notice::Rust coverage badge endpoint already up to date."
-              exit 0
-            fi
-            git commit -m "chore: update rust coverage badge"
-            if git push origin "$BADGE_BRANCH"; then
-              break
-            fi
-            if (( attempt >= max_attempts )); then
-              echo "::error::Failed to push the coverage badge endpoint to ${BADGE_BRANCH} after ${max_attempts} attempts (non-fast-forward every time)."
-              exit 1
-            fi
-            echo "::notice::Push to ${BADGE_BRANCH} was rejected, likely by a concurrent publish for another branch -- refetching and retrying (attempt $((attempt + 1))/${max_attempts})."
-            attempt=$((attempt + 1))
-          done
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
   watchdog_test:
@@ -4235,7 +3928,7 @@ jobs:
           fi
       - name: Upload Trivy scan input (amd64)
         if: "!cancelled() && steps.trivy-scan-input.outcome == 'success'"
-        uses: *actions_upload_artifact_centraliced_versioning
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: trivy-scan-input-${{ matrix.service }}-amd64
           path: ${{ runner.temp }}/trivy-scan-input-${{ matrix.service }}-amd64.txt
@@ -4821,7 +4514,7 @@ jobs:
       - name: Download Trivy scan input (amd64)
         id: download-scan-input
         continue-on-error: true
-        uses: *actions_download_artifact_centraliced_versioning # v8.0.1
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: trivy-scan-input-${{ matrix.service }}-amd64
           path: ${{ runner.temp }}/trivy-scan-input

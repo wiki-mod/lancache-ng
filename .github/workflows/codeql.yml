@@ -49,7 +49,7 @@ jobs:
     # current_dev/protection` on 2026-07-25: the required contexts list is
     # shellcheck, validate-compose, CI scope policy, line endings, file
     # purpose headers, PR template validation, PR tracking metadata
-    # (labels/milestone/project), coverage (Rust), validate full-setup image
+    # (labels/milestone/project), validate full-setup image
     # -- CodeQL is absent from that list), so skipping the rust matrix entry
     # outright (rather than the self-skip-internally pattern a *required*
     # check would need, per Rule-Ref: AG-CI-012's "paths-ignore permanently
@@ -242,8 +242,7 @@ jobs:
     # `skipped` detect-changes (schedule/workflow_dispatch, which its own
     # `if:` above doesn't cover) would silently skip THIS job too, including
     # the 'actions' matrix entry, which must run on every trigger regardless.
-    # Mirrors the identical `always() && (...)` shape build-push.yml's
-    # dns_test/ui_test/rust_coverage jobs already use for the same reason.
+    # Mirrors the identical `always() && (...)` shape used by the Rust jobs.
     #   - matrix.language == 'actions': always runs. This scans the workflow
     #     files themselves and must not be skipped by Rust-path scoping.
     #   - schedule/workflow_dispatch: detect-changes reports `skipped` here,

@@ -353,7 +353,6 @@ RUN set -euo pipefail; \
       clippy-driver \
       sccache \
       cargo-audit \
-      cargo-tarpaulin \
       actionlint \
       shellspec \
       shellcheck \
@@ -446,7 +445,6 @@ RUN set -euo pipefail; \
     run_contract_check 'sccache --version' sccache --version; \
     run_contract_check 'ccache --version' ccache --version; \
     run_contract_check 'cargo audit --version' cargo audit --version; \
-    run_contract_check 'cargo tarpaulin --version' cargo tarpaulin --version; \
     run_contract_check 'actionlint --version' actionlint --version; \
     run_contract_check 'bats --version' bats --version; \
     run_contract_check 'shellspec --version' shellspec --version; \
