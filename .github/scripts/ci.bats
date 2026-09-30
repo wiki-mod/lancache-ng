@@ -6259,6 +6259,22 @@ _prod_state_wiring_fixture() {
     [[ "${output}" == *"config invalid"* ]]
 }
 
+@test "compose config uses the SOT placeholder env only without .env" {
+    # What: plain target gets fixture env; env-file target not.
+    # Why: :?-required keys; shell env masks a committed .env.
+    # From: Issue #1683 | PR #1858
+    local bin="${BATS_TEST_TMPDIR}/bin" m="${BATS_TEST_TMPDIR}/cc-env.yml"
+    mkdir -p "${bin}"
+    printf '#!/usr/bin/env bash\n[ -n "${LISTEN_IP:-}" ] || { echo "required variable LISTEN_IP is missing"; exit 1; }\n' > "${bin}/docker"
+    chmod +x "${bin}/docker"
+    printf 'validation:\n  compose_validation_env: LISTEN_IP=127.0.0.3\n' > "${m}"
+    CI_MANIFEST="${m}" PATH="${bin}:${PATH}" run _ci_compose_config_ok f.yml "" ""
+    [ "${status}" -eq 0 ]
+    CI_MANIFEST="${m}" PATH="${bin}:${PATH}" run _ci_compose_config_ok f.yml "" .env
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"LISTEN_IP is missing"* ]]
+}
+
 @test "check compose-config fails when a SOT target file is missing" {
     # What: a listed target compose file does not exist.
     # Why: a renamed/removed deployment must surface here.

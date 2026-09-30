@@ -7751,11 +7751,15 @@ _ci_compose_config_ok() {
     if [ -n "${CI_COMPOSE_CONFIG_CMD:-}" ]; then
         out="$("${CI_COMPOSE_CONFIG_CMD}" "${file}" "${profile}" "${env_file}" 2>&1)" || { printf '%s\n' "${out}"; return 1; }
     else
-        local -a args=()
+        local -a args=() fixture=()
         [ -n "${env_file}" ] && args+=(--env-file "${env_file}")
         args+=(-f "${file}")
         [ -n "${profile}" ] && args+=(--profile "${profile}")
-        out="$(docker compose "${args[@]}" config --quiet 2>&1)" || { printf '%s\n' "${out}"; return 1; }
+        # What: no .env -> render with the SOT placeholder env.
+        # Why: shell env would mask a committed --env-file.
+        # From: Issue #1683 | PR #1858
+        [ -n "${env_file}" ] || read -ra fixture <<< "$(_ci_manifest_scalar '^  compose_validation_env:[[:space:]]')"
+        out="$(env "${fixture[@]}" docker compose "${args[@]}" config --quiet 2>&1)" || { printf '%s\n' "${out}"; return 1; }
     fi
     if grep -Eqi '(^|[[:space:]])(warn|warning|level=warning)' <<<"${out}"; then
         printf 'warnings treated as errors:\n%s\n' "${out}"
