@@ -160,7 +160,7 @@ All actionable static analysis warnings are treated as build failures under the 
 - SPDX license identifier — enforced for files a PR changes via `bash scripts/tracked/check-pr-diff-file-headers.sh`
 
 **Known exception (tracked in issue #394):**
-GitHub's CodeQL Rust extractor emits `macro expansion failed` warnings for ordinary macros (`format!`, `assert_eq!`, `vec!`, `json!`, `tracing::*`, etc.) as a documented upstream limitation, not due to code defects in this repository. This exception is **scoped to CodeQL Rust macro-expansion extraction warnings only** and does not extend to `cargo check` or `cargo clippy` warnings, which remain hard failures. Every instance of a CodeQL macro-expansion warning must stay tracked in #394, and #394 must be periodically reevaluated to monitor upstream status rather than being left as a permanent blanket excuse.
+GitHub's CodeQL Rust extractor emits `macro expansion failed` warnings for ordinary macros (`format!`, `assert_eq!`, `vec!`, `json!`, `tracing::*`, etc.) as a documented upstream limitation, not due to code defects in this repository. This exception is **scoped to CodeQL Rust macro-expansion extraction warnings only** and does not extend to `cargo clippy` warnings, which remain hard failures. Every instance of a CodeQL macro-expansion warning must stay tracked in #394, and #394 must be periodically reevaluated to monitor upstream status rather than being left as a permanent blanket excuse.
 
 #### Testing policy for major changes
 
