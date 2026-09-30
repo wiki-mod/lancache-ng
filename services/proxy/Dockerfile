@@ -34,13 +34,6 @@ LABEL org.opencontainers.image.description="nginx-based lancache-ng caching prox
 # What: explicit proxy build-args, no default value set
 # Why: routes self-hosted downloads via the LAN proxy
 # From: Issue #1781 | PR #1783
-ARG HTTP_PROXY
-ARG HTTPS_PROXY
-ARG NO_PROXY
-ARG http_proxy
-ARG https_proxy
-ARG no_proxy
-
 # `apk upgrade --no-cache` (before the package installs, same layer)
 # upgrades packages already baked into the alpine:3.24 base layer itself --
 # see services/dhcp-proxy/Dockerfile's matching comment for the fuller

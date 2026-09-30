@@ -75,13 +75,6 @@ LABEL org.opencontainers.image.description="Kea DHCP, control-agent, and DHCP-DD
 # What: explicit proxy build-args, no default value set
 # Why: routes self-hosted downloads via the LAN proxy
 # From: Issue #1781 | PR #1783
-ARG HTTP_PROXY
-ARG HTTPS_PROXY
-ARG NO_PROXY
-ARG http_proxy
-ARG https_proxy
-ARG no_proxy
-
 # What: shared version-banner script, not a per-service copy.
 # Why: named build context avoids duplicating it per service.
 # From: Issue #1781 | PR #1783

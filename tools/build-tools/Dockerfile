@@ -59,13 +59,6 @@ FROM alpine:3.24 AS binary-downloader
 # What: explicit proxy build-args, no default value set
 # Why: routes self-hosted downloads via the LAN proxy
 # From: Issue #1781 | PR #1783
-ARG HTTP_PROXY
-ARG HTTPS_PROXY
-ARG NO_PROXY
-ARG http_proxy
-ARG https_proxy
-ARG no_proxy
-
 ARG DOCKER_CLI_VERSION
 ARG DOCKER_COMPOSE_VERSION
 ARG DOCKER_BUILDX_VERSION
@@ -141,13 +134,6 @@ LABEL org.opencontainers.image.description="Prebuilt lancache-ng CI and develope
 # What: explicit proxy build-args, no default value set
 # Why: routes self-hosted apk/cargo pulls via the LAN proxy
 # From: Issue #1781 | PR #1783
-ARG HTTP_PROXY
-ARG HTTPS_PROXY
-ARG NO_PROXY
-ARG http_proxy
-ARG https_proxy
-ARG no_proxy
-
 # What: inherits the shared sccache version pin.
 # Why: avoids re-declaring the same literal per stage.
 # From: Issue #1671 | PR #1750

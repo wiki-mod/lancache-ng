@@ -12,13 +12,6 @@
 ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
 FROM ${BUILD_TOOLS_IMAGE} AS cachehamster-builder
 
-ARG HTTP_PROXY
-ARG HTTPS_PROXY
-ARG NO_PROXY
-ARG http_proxy
-ARG https_proxy
-ARG no_proxy
-
 # What: verifies the build-tools contract (Rust toolchain and native musl
 #   target) is present before relying on any of it.
 # Why: fail closed rather than a confusing mid-build "command not found"
@@ -91,13 +84,6 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
     if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
-
-ARG HTTP_PROXY
-ARG HTTPS_PROXY
-ARG NO_PROXY
-ARG http_proxy
-ARG https_proxy
-ARG no_proxy
 
 LABEL org.opencontainers.image.description="lancache-ng cachehamster: Steam cache-warming prefill daemon (scaffold, issue #871)."
 

@@ -615,13 +615,6 @@ LABEL org.opencontainers.image.description="lancache-ng Admin UI and control-pla
 # What: explicit proxy build-args, no default value set
 # Why: routes self-hosted downloads via the LAN proxy
 # From: Issue #1781 | PR #1783
-ARG HTTP_PROXY
-ARG HTTPS_PROXY
-ARG NO_PROXY
-ARG http_proxy
-ARG https_proxy
-ARG no_proxy
-
 # Package translations from the prior debian:trixie-slim stage (verified live
 # against a real alpine:3.24 container, per issue #815's own instruction to
 # check rather than assume a substitute is needed):

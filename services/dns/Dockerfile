@@ -403,13 +403,6 @@ LABEL org.opencontainers.image.description="PowerDNS recursor, authoritative DNS
 # What: explicit proxy build-args, no default value set
 # Why: routes self-hosted downloads via the LAN proxy
 # From: Issue #1781 | PR #1783
-ARG HTTP_PROXY
-ARG HTTPS_PROXY
-ARG NO_PROXY
-ARG http_proxy
-ARG https_proxy
-ARG no_proxy
-
 # Alpine base (issue #815, services/dns Alpine migration -- the last of the
 # three original Part A services, done after dhcp/dhcp-proxy per #815's own
 # recommended staging order, because of the nats-subscriber musl builder-stage
