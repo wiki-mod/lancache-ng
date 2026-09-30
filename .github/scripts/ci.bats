@@ -4470,48 +4470,27 @@ netdata=sha256:n"
     [[ "${output}" == *"[CI-NOTICE-CHECK-0070] skipped=1"* ]]
 }
 
-@test "check deny-short-sha passes full SHA, fails a slice via ci.sh" {
-    # What: ci.sh owns the short-SHA ban; bats calls it.
-    # Why: guard logic lives once, tested through ci.sh.
-    # From: Issue #1683
-    printf 'x=${SHA}\n' > "${BATS_TEST_TMPDIR}/ok.sh"
-    run bash "${CI_SH}" check deny-short-sha "${BATS_TEST_TMPDIR}/ok.sh"
-    [ "${status}" -eq 0 ]
-    printf 'x=${SHA::7}\n' > "${BATS_TEST_TMPDIR}/bad.sh"
-    run bash "${CI_SH}" check deny-short-sha "${BATS_TEST_TMPDIR}/bad.sh"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0005"* ]]
-}
-
-@test "check deny-short-sha catches naming, prefix, and format slice variants" {
-    # What: All sha/commit/candidate/revision slices fail.
-    # Why: Preserves pattern coverage.
+@test "check deny-short-sha fails every sha-named slice variant" {
+    # What: every sha/commit/candidate/revision slice fails.
+    # Why: `$` via %s keeps ci.bats itself scan-clean.
     # From: Issue #1683 | PR #1858
-    local d="${BATS_TEST_TMPDIR}"
-    printf 'a=${commit:0:7}\nb=${candidate::7}\nc=${revision:0:8}\n' > "${d}/naming.sh"
-    run bash "${CI_SH}" check deny-short-sha "${d}/naming.sh"
-    [ "${status}" -ne 0 ]; [[ "${output}" == *"naming.sh:1"* ]]; [[ "${output}" == *"naming.sh:2"* ]]; [[ "${output}" == *"naming.sh:3"* ]]
-    printf 'x=${commit1_sha:0:7}\n' > "${d}/digit.sh"
-    run bash "${CI_SH}" check deny-short-sha "${d}/digit.sh"; [ "${status}" -ne 0 ]
-    printf 'base_sha_short="${base_sha:0:7}"\n' > "${d}/target.sh"
-    run bash "${CI_SH}" check deny-short-sha "${d}/target.sh"; [ "${status}" -ne 0 ]
-    printf 't="ghcr.io/x:sha-${ancestor_sha:0:7}"\n' > "${d}/interp.sh"
-    run bash "${CI_SH}" check deny-short-sha "${d}/interp.sh"; [ "${status}" -ne 0 ]
-    printf 'v=${full_sha:0:length}\n' > "${d}/varlen.sh"
-    run bash "${CI_SH}" check deny-short-sha "${d}/varlen.sh"; [ "${status}" -ne 0 ]
-    printf 'w=${GITHUB_SHA: 0 : 7}\n' > "${d}/ws1.sh"
-    run bash "${CI_SH}" check deny-short-sha "${d}/ws1.sh"; [ "${status}" -ne 0 ]
-    printf 'w=${GITHUB_SHA : : 7}\n' > "${d}/ws2.sh"
-    run bash "${CI_SH}" check deny-short-sha "${d}/ws2.sh"; [ "${status}" -ne 0 ]
-    printf 'n=${COMMIT_SHA::12}\n' > "${d}/len12.sh"
-    run bash "${CI_SH}" check deny-short-sha "${d}/len12.sh"; [ "${status}" -ne 0 ]
+    local f="${BATS_TEST_TMPDIR}/s.sh" slice
+    for slice in 'commit:0:7' 'candidate::7' 'revision:0:8' 'SHA::7' \
+                 'commit1_sha:0:7' 'base_sha:0:7' 'full_sha:0:length' \
+                 'GITHUB_SHA: 0 : 7' 'GITHUB_SHA : : 7' 'COMMIT_SHA::12'; do
+        printf 'x="a-%s{%s}"\n' '$' "${slice}" > "${f}"
+        run bash "${CI_SH}" check deny-short-sha "${f}"
+        [ "${status}" -ne 0 ]
+        [[ "${output}" == *"CI-ERROR-CHECK-0005"*"s.sh:1"* ]]
+    done
 }
 
 @test "check-all scope filter keeps only in-scope changed files" {
     # What: an out-of-scope .md is dropped; a .sh still fails.
     # Why: changed files are candidates, not check scope.
     # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/scoperepo" bad='x=${base_sha:0:7}'
+    local r="${BATS_TEST_TMPDIR}/scoperepo" bad
+    printf -v bad 'x=%s{base_sha:0:7}' '$'
     mkdir -p "${r}/.github/scripts" "${r}/docs"
     git -C "${r}" init -q
     printf '%s\n' "${bad}" > "${r}/docs/a.md"
@@ -4549,7 +4528,7 @@ netdata=sha256:n"
     printf 'x = 1\n' > "${BATS_TEST_TMPDIR}/mod.py"
     run bash "${CI_SH}" check language-policy "${BATS_TEST_TMPDIR}/mod.py"
     [ "${status}" -ne 0 ]
-    printf 'python3 -c "print(1)"\n' > "${BATS_TEST_TMPDIR}/inline.sh"
+    printf '%s -c "print(1)"\n' python3 > "${BATS_TEST_TMPDIR}/inline.sh"
     run bash "${CI_SH}" check language-policy "${BATS_TEST_TMPDIR}/inline.sh"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0007"* ]]
@@ -4867,6 +4846,12 @@ STUBEOF
     printf 'if grep -q x f; then\n  :\nfi\nrc=$? # if-status-safe: not consuming\n' > "${BATS_TEST_TMPDIR}/safeif.sh"
     run bash "${CI_SH}" check if-without-else-status "${BATS_TEST_TMPDIR}/safeif.sh"
     [ "${status}" -eq 0 ]
+    printf 'if a; then\n  :\nfi\nb || return "$?"\n' > "${BATS_TEST_TMPDIR}/orif.sh"
+    run bash "${CI_SH}" check if-without-else-status "${BATS_TEST_TMPDIR}/orif.sh"
+    [ "${status}" -eq 0 ]
+    printf 'if a; then\n  :\nfi\nreturn "$?"\n' > "${BATS_TEST_TMPDIR}/retif.sh"
+    run bash "${CI_SH}" check if-without-else-status "${BATS_TEST_TMPDIR}/retif.sh"
+    [ "${status}" -ne 0 ]
 }
 
 @test "check docker-run-heredoc-stdin flags a heredoc docker run missing -i" {

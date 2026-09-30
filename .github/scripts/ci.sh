@@ -5892,11 +5892,10 @@ _ci_check_comment_length() {
 _ci_check_deny_short_sha() {
     local pat='\$\{([A-Za-z_][A-Za-z0-9_]*)?([Ss][Hh][Aa]|[Cc][Oo][Mm][Mm][Ii][Tt]|[Cc][Aa][Nn][Dd][Ii][Dd][Aa][Tt][Ee]|[Rr][Ee][Vv][Ii][Ss][Ii][Oo][Nn])[A-Za-z0-9_]*[[:space:]]*(:[[:space:]]*:[[:space:]]*[A-Za-z0-9_]+|:[[:space:]]*0[[:space:]]*:[[:space:]]*[A-Za-z0-9_]+)\}'
     local -a _ci_override=("$@") files=()
-    _ci_scan_files files _ci_override '.github/scripts/*.sh' '.github/workflows/*.yml' 'scripts/lib/*.sh'
+    _ci_scan_files files _ci_override '.github/scripts/*.sh' '.github/scripts/*.bats' '.github/workflows/*.yml' 'scripts/lib/*.sh'
     local path out gs
     local -a viol=()
     for path in "${files[@]}"; do
-        case "${path}" in */ci.sh|ci.sh) continue ;; esac
         if ! out="$(grep -EnH "${pat}" "${path}")"; then
             gs=$?
             if [ "${gs}" -gt 1 ]; then
@@ -5929,7 +5928,6 @@ _ci_check_language_policy() {
         case "${path}" in
             *.py|*.pyc|*.pyw|*.rb|*.php|*.pl|*.pm|*.js|*.mjs|*.cjs|*.ts) viol+=("${path}: banned-language file"); continue ;;
         esac
-        case "${path}" in */ci.sh|ci.sh|*/ci.bats|ci.bats) continue ;; esac
         case "${path}" in
             *.sh|*.bats|*.yml|*.yaml)
                 if grep -Eq '(python3?|perl|ruby|node)[[:space:]]+-[eEc]|<<-?[[:space:]]*"?(PY|PYEOF|PYTHON|PERL|RUBY)' "${path}"; then
@@ -6126,16 +6124,15 @@ _ci_check_pipefail_early_exit() {
     printf 'pipefail-early-exit=clean files=%s\n' "${#files[@]}"
 }
 
-# What: Flag a $? read after an else-less if-block.
-# Why: POSIX reports the if's own 0 status, masking (AG-VAL-029).
+# What: Flag a $? read first after an else-less if.
+# Why: that $? is the if's own 0 (AG-VAL-030).
 # From: Issue #1683 | PR #1858
 _ci_check_if_without_else_status() {
     local -a _ci_override=("$@") files=()
-    _ci_scan_files files _ci_override '.github/scripts/*.sh' '*/Dockerfile' 'Dockerfile' 'services/*.sh'
+    _ci_scan_files files _ci_override '.github/scripts/*.sh' '.github/scripts/*.bats' '*/Dockerfile' 'Dockerfile' 'services/*.sh'
     local path fi_line status_line
     local -a viol=()
     for path in "${files[@]}"; do
-        case "${path}" in */ci.sh|ci.sh) continue ;; esac
         while IFS=: read -r fi_line status_line; do
             [ -n "${fi_line}" ] || continue
             viol+=("${path}:${status_line}: reads \$? after an else-less if (fi at line ${fi_line}); POSIX reports the if's own status 0, not the command's -- use 'if CMD; then STATUS=0; else STATUS=\$?; fi' or mark '# if-status-safe: <reason>'")
@@ -6161,7 +6158,8 @@ _ci_check_if_without_else_status() {
                   ns = nxt; sub(/^[ \t]*/, "", ns)
                   if (ns ~ /^#/) { checked++; continue }
                   checked++
-                  if (nxt ~ /\$\?/ && nxt !~ /#[ \t]*if-status-safe:/) printf "%d:%d\n", fi_i, j
+                  pre = substr(nxt, 1, index(nxt, "$?") - 1)
+                  if (nxt ~ /\$\?/ && pre !~ /(\||&|;)/ && nxt !~ /#[ \t]*if-status-safe:/) printf "%d:%d\n", fi_i, j
                   break
                 }
               }
