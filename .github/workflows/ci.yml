@@ -47,11 +47,11 @@ jobs:
     timeout-minutes: 15
     outputs:
       image: ${{ steps.resolve.outputs.image }}
-    # What: the one mutable entry point, :latest, only to resolve.
-    # Why: a job container needs an image before ci.sh can run.
+    # What: one mutable entry, the current_dev channel (nightly).
+    # Why: ci.sh (SOT) cannot run before any container exists.
     # From: Issue #1683 | PR #1858
     container:
-      image: ghcr.io/${{ github.repository }}/build-tools:latest
+      image: ghcr.io/${{ github.repository }}/build-tools:nightly
       credentials: &ghcr_credentials
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -410,7 +410,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     container:
-      image: ${{ needs.platform.outputs.image || format('ghcr.io/{0}/build-tools:latest', github.repository) }}
+      image: ${{ needs.platform.outputs.image || format('ghcr.io/{0}/build-tools:nightly', github.repository) }}
       credentials: *ghcr_credentials
     steps:
       - *bootstrap
