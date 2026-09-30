@@ -1444,6 +1444,18 @@ RS
     [[ "${output}" == *"CI-ERROR-CORE-0006"* ]]
 }
 
+@test "proxy is exported on self-hosted only and passed through" {
+    # What: self-hosted+var -> env + passthrough names.
+    # Why: AG-CI-009; hosted runners have no LAN route.
+    # From: Issue #1683 | PR #1858
+    run bash -c 'source "$1"; RUNNER_ENVIRONMENT=github-hosted PROJECT_SELFHOSTED_PROXY_HTTP=http://p:3128 _ci_proxy_init; _ci_proxy_names | wc -l' _ "${CI_SH}"
+    [ "${lines[-1]}" -eq 0 ]
+    run bash -c 'source "$1"; unset HTTP_PROXY http_proxy HTTPS_PROXY https_proxy NO_PROXY no_proxy; RUNNER_ENVIRONMENT=self-hosted PROJECT_SELFHOSTED_PROXY_HTTP=http://p:3128 PROJECT_SELFHOSTED_PROXY_EXCLUSION=ghcr.io _ci_proxy_init; echo "h=${https_proxy} n=${NO_PROXY}"; _ci_proxy_names | tr "\n" " "' _ "${CI_SH}"
+    [[ "${output}" == *"[CI-INFO-CORE-0007]"* ]]
+    [[ "${output}" == *"h=http://p:3128 n=ghcr.io"* ]]
+    [[ "${output}" == *"HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy"* ]]
+}
+
 @test "ci.sh creates the /var/tmp temp root and exports TMPDIR" {
     # What: a missing /var/tmp subdir is made (mkdir -p).
     # Why: bare mktemp in tools must land on disk.
@@ -4262,6 +4274,12 @@ netdata=sha256:n"
     grep -qF -- "-e REPOS=${repos}" "${log}"
     grep -q -- "--keys-dir" "${log}"
     grep -q -- "--initdb" "${log}"
+    [ "$(grep -c -- "-e HTTP_PROXY" "${log}")" -eq 0 ]
+    : > "${log}"
+    HTTP_PROXY=http://p:3128 CI_APK_RESOLVE_CMD='' PATH="${BATS_TEST_TMPDIR}:${PATH}" \
+        run _ci_apk_resolve img/base aarch64 zz
+    [ "${status}" -eq 0 ]
+    grep -q -- "-e HTTP_PROXY -e ARCH=aarch64" "${log}"
     : > "${log}"
     FAIL=1 CI_APK_RESOLVE_CMD='' CI_RETRY_BACKOFF_BASE_SECONDS=0 PATH="${BATS_TEST_TMPDIR}:${PATH}" \
         run _ci_apk_resolve img/base aarch64 zz

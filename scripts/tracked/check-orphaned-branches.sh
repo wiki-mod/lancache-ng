@@ -47,10 +47,8 @@
 #    own `branches: [master, current_dev, "v[0-9]*"]` convention and not
 #    silently missing a future v0.3.0. `current_dev` is exact-name (not
 #    glob-matched) because it is today's actual active integration branch
-#    name, not a vX.Y.Z-shaped one (#709). `badges` is excluded because
-#    build-push.yml's coverage-badge-publish job pushes directly to it as a
-#    legitimate, intentionally-shared branch, not because it is genuinely
-#    untracked.
+#    name, not a vX.Y.Z-shaped one (#709). `badges` is a maintained branch,
+#    not an orphan candidate.
 #
 # --- Failure-mode policy ----------------------------------------------------
 #

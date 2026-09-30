@@ -37,6 +37,12 @@ env:
   # From: Issue #1683 | PR #1858
   BASE_SHA: ${{ github.event.pull_request.base.sha }}
   BEFORE_SHA: ${{ github.event.before }}
+  # What: LAN proxy inputs; ci.sh applies them self-hosted only.
+  # Why: AG-CI-009; ci.sh is the one proxy policy owner.
+  # From: Issue #1683 | PR #1858
+  PROJECT_SELFHOSTED_PROXY_HTTP: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
+  PROJECT_SELFHOSTED_PROXY_HTTPS: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
+  PROJECT_SELFHOSTED_PROXY_EXCLUSION: ${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
 jobs:
   # What: resolve the published build-tools channel to a digest.
   # Why: every later job runs in build-tools, never on the runner.

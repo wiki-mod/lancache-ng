@@ -516,8 +516,7 @@ fi
 
 output_bool "deploy" touches_prefix "deploy/"
 
-if touches_prefix "release/" \
-    || touches_exact ".github/workflows/backfill-stack-latest.yml"; then
+if touches_prefix "release/"; then
     printf 'release_contract=true\n'
 else
     printf 'release_contract=false\n'

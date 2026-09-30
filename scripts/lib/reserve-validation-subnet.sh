@@ -516,7 +516,7 @@ validation_network_await_detached() {
         sleep 1
     done
 
-    echo "::error::Docker network $network_name still reports attached containers after ${timeout}s -- a container's endpoint never fully detached (teardown race)." >&2
+    printf '::notice::Docker network %s still reports attached containers after %ss; recovery will force-disconnect them.\n' "$network_name" "$timeout" >&2
     # Redirect order matters (see watchtower-update-simulation.sh's own
     # identical-reasoning comment): `>&2` first duplicates the CURRENT
     # stdout target onto fd2, then `2>/dev/null` replaces fd2 with
@@ -549,21 +549,43 @@ validation_network_await_detached() {
 # once this returns, instead of merely once `down`'s own CLI call returned.
 validation_network_teardown() {
     local network_name="$1" timeout="${2:-30}"
+    local recovery_attempted=false recovery_failed=false containers=""
 
     if ! docker network inspect "$network_name" >/dev/null 2>&1; then
         return 0
     fi
 
     if ! validation_network_await_detached "$network_name" "$timeout"; then
+        recovery_attempted=true
         echo "::warning::Force-disconnecting remaining containers from $network_name after the ${timeout}s wait; they did not shut down cleanly on their own." >&2
-        local containers cid
+        local cid
         containers="$(docker network inspect "$network_name" --format '{{range $id, $c := .Containers}}{{$id}} {{end}}' 2>/dev/null)"
         for cid in $containers; do
-            docker network disconnect -f "$network_name" "$cid" >/dev/null 2>&1 || true
+            if ! docker network disconnect -f "$network_name" "$cid"; then
+                recovery_failed=true
+                printf '::warning::Force-disconnect failed for container %s on %s.\n' "$cid" "$network_name" >&2
+            fi
         done
+        validation_network_await_detached "$network_name" "$timeout" || true
     fi
 
     if docker network rm "$network_name" >/dev/null 2>&1; then
+        for cid in $containers; do
+            if docker inspect "$cid" >/dev/null 2>&1; then
+                printf '::notice::Removing leftover validation container %s after network recovery.\n' "$cid" >&2
+                if ! docker rm -f "$cid"; then
+                    recovery_failed=true
+                    printf '::warning::Could not remove leftover validation container %s after network recovery.\n' "$cid" >&2
+                fi
+            fi
+        done
+        if [[ "$recovery_failed" == true ]]; then
+            printf '::error::Docker network %s was removed, but one or more leftover containers could not be removed.\n' "$network_name" >&2
+            return 1
+        fi
+        if [[ "$recovery_attempted" == true ]]; then
+            printf '::notice::Docker network %s recovery succeeded after force-disconnect.\n' "$network_name" >&2
+        fi
         return 0
     fi
 
@@ -621,12 +643,16 @@ validation_project_networks_teardown() {
 # this file for validation_project_networks_teardown alone.
 validation_simulation_teardown() {
     local compose_project="$1" work_dir="$2"
+    local cleanup_failed=0
     shift 2
     if (( $# > 0 )); then
         "$@" >/dev/null 2>&1 || true
     fi
-    docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml \
-        down -v --remove-orphans >/dev/null 2>&1 || true
-    validation_project_networks_teardown "$compose_project" || true
+    if ! docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml \
+        down -v --remove-orphans; then
+        printf '::warning::docker compose down failed for %s; attempting network recovery.\n' "$compose_project" >&2
+    fi
+    validation_project_networks_teardown "$compose_project" || cleanup_failed=1
     rm -rf "$work_dir"
+    return "$cleanup_failed"
 }

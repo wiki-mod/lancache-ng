@@ -25,16 +25,6 @@ FROM ${ALPINE_IMAGE}
 
 LABEL org.opencontainers.image.description="Prebuilt lancache-ng CI and developer validation toolchain image (Alpine)."
 
-# What: explicit proxy build-args, no default value set
-# Why: routes self-hosted apk/cargo pulls via the LAN proxy
-# From: Issue #1781 | PR #1783
-ARG HTTP_PROXY
-ARG HTTPS_PROXY
-ARG NO_PROXY
-ARG http_proxy
-ARG https_proxy
-ARG no_proxy
-
 # What: re-declare SOT build-args for use in this stage.
 # Why: pre-FROM ARGs are not visible after FROM in Docker.
 # From: Issue #1683

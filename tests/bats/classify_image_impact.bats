@@ -204,7 +204,7 @@ val() {
 # From: PR #1774
 @test "G15: retry-wrapper actions keep their raw failure diagnostics" {
     grep -F 'dump_retry_diagnostics()' "$repo_root/.github/actions/buildx-setup-retry/action.yml" >/dev/null
-    grep -F 'dump_retry_diagnostics()' "$repo_root/.github/actions/ghcr-build-push-retry/action.yml" >/dev/null
+    grep -F 'tee "$GHCR_PUSH_LOG"' "$repo_root/.github/actions/ghcr-build-push-retry/action.yml" >/dev/null
     grep -F 'dump_retry_diagnostics()' "$repo_root/.github/actions/ghcr-attest-retry/action.yml" >/dev/null
     grep -F 'dump_retry_diagnostics()' "$repo_root/.github/actions/trivy-scan-retry/action.yml" >/dev/null
 }
@@ -288,8 +288,6 @@ val() {
     run_classify "release/stack-images.yml"
     [ "$(val release_contract)" = "true" ]
 
-    run_classify ".github/workflows/backfill-stack-latest.yml"
-    [ "$(val release_contract)" = "true" ]
 }
 
 # --- IMAGE_IMPACT verdict boundary (the additive #819 layer) ---

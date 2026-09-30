@@ -45,7 +45,7 @@ inputs:
   lock-root:
     description: Host-local directory holding the per-slot flock files.
     required: false
-    default: /tmp/lancache-validation-locks
+    default: /var/tmp/lancache-validation-locks
   ghcr-retry-username:
     description: >-
       Optional registry username. Pulls always use the shared retry/backoff

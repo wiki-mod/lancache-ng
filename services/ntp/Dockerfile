@@ -14,16 +14,6 @@ FROM ${ALPINE_IMAGE}
 
 LABEL org.opencontainers.image.description="LanCache-NG-NTP: chrony-based NTP server, disciplined against public NTP servers, serving LAN clients on UDP/123."
 
-# What: explicit proxy build-args, no default value set.
-# Why: routes self-hosted apk fetches via the LAN proxy.
-# From: Issue #1781 | PR #1783
-ARG HTTP_PROXY
-ARG HTTPS_PROXY
-ARG NO_PROXY
-ARG http_proxy
-ARG https_proxy
-ARG no_proxy
-
 # What: APT_CACHE_BUST invalidates BuildKit's apk layer cache.
 # Why: without it BuildKit replays a stale layer forever.
 # From: Issue #1095

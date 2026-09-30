@@ -87,6 +87,30 @@ _ci_tmp_init() {
     export TMPDIR="${CI_TMPDIR}"
 }
 
+# What: Export the LAN proxy on self-hosted runners only.
+# Why: AG-CI-009 proxy; hosted runners have no LAN route.
+# From: Issue #1683 | PR #1858
+_ci_proxy_init() {
+    local http="${PROJECT_SELFHOSTED_PROXY_HTTP:-}"
+    [ "${RUNNER_ENVIRONMENT:-}" = self-hosted ] && [ -n "${http}" ] || return 0
+    export HTTP_PROXY="${http}" http_proxy="${http}"
+    export HTTPS_PROXY="${PROJECT_SELFHOSTED_PROXY_HTTPS:-${http}}"
+    export https_proxy="${HTTPS_PROXY}"
+    export NO_PROXY="${PROJECT_SELFHOSTED_PROXY_EXCLUSION:-}" no_proxy="${PROJECT_SELFHOSTED_PROXY_EXCLUSION:-}"
+    ci_log "[CI-INFO-CORE-0007]" "proxy=on runner=self-hosted no_proxy=\"${NO_PROXY}\""
+}
+
+# What: Proxy env names passed through to docker.
+# Why: predefined build-args stay out of image history.
+# From: Issue #1683 | PR #1858
+_ci_proxy_names() {
+    local n
+    for n in HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy; do
+        [ -n "${!n:-}" ] && printf '%s\n' "${n}"
+    done
+    return 0
+}
+
 # What: Fail closed unless the SOT manifest exists.
 # Why: Every real operation derives state from the manifest.
 # From: Issue #1683
@@ -1702,6 +1726,12 @@ _ci_docker_build() {
     while IFS= read -r a; do
         [ -n "${a}" ] && args+=(--build-arg "${a}")
     done < <(ci_cmd_build_args "${service}" --bare "${platform}")
+    # What: value-less --build-arg passes the proxy from env.
+    # Why: predefined args: used by RUN, kept out of history.
+    # From: Issue #1683 | PR #1858
+    while IFS= read -r a; do
+        args+=(--build-arg "${a}")
+    done < <(_ci_proxy_names)
     # What: SOT-owned named build contexts (name=path).
     # Why: a Dockerfile COPY --from derives it; SOT owns the list.
     # From: Issue #1683
@@ -5182,7 +5212,9 @@ _ci_build_tools_arches() {
 # Why: real apk runs in a container; tests inject it.
 # From: Issue #1683
 _ci_apk_resolve() {
-    local base="$1" arch="$2" packages="$3" repos raw
+    local base="$1" arch="$2" packages="$3" repos raw n
+    local -a penv=()
+    while IFS= read -r n; do penv+=(-e "${n}"); done < <(_ci_proxy_names)
     if [ -n "${CI_APK_RESOLVE_CMD:-}" ]; then
         "${CI_APK_RESOLVE_CMD}" "${base}" "${arch}" "${packages}"
         return "$?"
@@ -5191,7 +5223,7 @@ _ci_apk_resolve() {
     # What: per-arch clean root with the build's repos.
     # Why: a foreign arch needs its own db and keys.
     # From: Issue #1683 | PR #1858
-    if ! raw="$(_ci_retry apk docker run --rm -e ARCH="${arch}" -e PKGS="${packages}" \
+    if ! raw="$(_ci_retry apk docker run --rm "${penv[@]}" -e ARCH="${arch}" -e PKGS="${packages}" \
             -e REPOS="${repos}" "${base}" sh -c '
         set -e
         r=/var/tmp/apk-root; k="/usr/share/apk/keys/${ARCH}"
@@ -5659,6 +5691,7 @@ ci_main() {
         return 2
     fi
     _ci_tmp_init || return "$?"
+    _ci_proxy_init
     # What: check/rust-build/apk-setup need no SOT manifest.
     # Why: bind-mounted into a build stage with no SOT tree present.
     # From: Issue #1683

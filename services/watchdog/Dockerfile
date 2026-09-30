@@ -65,16 +65,6 @@ FROM ${ALPINE_IMAGE}
 
 LABEL org.opencontainers.image.description="lancache-ng watchdog: compiled Rust health-check/restart daemon plus the separate file-retention sidecar entrypoint."
 
-# What: explicit proxy build-args, no default value set
-# Why: routes self-hosted downloads via the LAN proxy
-# From: Issue #1781 | PR #1783
-ARG HTTP_PROXY
-ARG HTTPS_PROXY
-ARG NO_PROXY
-ARG http_proxy
-ARG https_proxy
-ARG no_proxy
-
 # What: declares APT_CACHE_BUST before the busting RUN.
 # Why: BuildKit cache has no wall-clock expiry.
 # From: Issue #1095
