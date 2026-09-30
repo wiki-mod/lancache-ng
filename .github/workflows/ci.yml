@@ -152,14 +152,7 @@ jobs:
       # From: Issue #1683
       - &build_publish_verify
         name: Build, publish and verify the platform image
-        run: |
-          set -euo pipefail
-          bash .github/scripts/ci.sh build "${{ matrix.service }}" "${{ matrix.platform }}"
-          out="$(bash .github/scripts/ci.sh publish "${{ matrix.service }}" "${{ matrix.platform }}")"
-          printf '%s\n' "${out}"
-          digest="$(printf '%s' "${out}" | sed -n 's/.*published=\([^ ]*\).*/\1/p')"
-          [ -n "${digest}" ] || { echo "no digest from publish" >&2; exit 1; }
-          bash .github/scripts/ci.sh verify "${{ matrix.service }}" "${digest}" "${{ matrix.platform }}"
+        run: bash .github/scripts/ci.sh ship "${{ matrix.service }}" "${{ matrix.platform }}"
 
   # What: this identity's candidate, only on a toolchain change.
   # Why: otherwise platform already resolved the channel digest.

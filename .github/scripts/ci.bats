@@ -1634,6 +1634,28 @@ RS
     [[ "${output}" == *"published=sha256:deadbeef"* ]]
 }
 
+@test "ship publishes and verifies only a built image" {
+    # What: built -> publish+verify(digest); reuse -> neither.
+    # Why: one chain owner; a reuse has no local image.
+    # From: Issue #1683 | PR #1858
+    ci_cmd_build() { echo "service=$1 platform=$2 result=built identity=i"; }
+    ci_cmd_publish() { echo "service=$1 platform=$2 published=sha256:pub identity=i"; }
+    ci_cmd_verify() { echo "VERIFY $1 $2 $3"; }
+    run ci_cmd_ship proxy linux/amd64
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"VERIFY proxy sha256:pub linux/amd64"* ]]
+    ci_cmd_build() { echo "service=$1 platform=$2 result=reuse-accepted identity=i"; }
+    ci_cmd_publish() { echo PUBLISH-CALLED; }
+    run ci_cmd_ship proxy linux/amd64
+    [ "${status}" -eq 0 ]
+    [[ "${output}" != *"PUBLISH-CALLED"* ]]
+    ci_cmd_build() { echo "service=$1 platform=$2 result=built identity=i"; }
+    ci_cmd_publish() { echo "service=$1 published= identity=i"; }
+    run ci_cmd_ship proxy linux/amd64
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-SHIP-0002"* ]]
+}
+
 @test "verify passes when the readback digest matches" {
     # What: readback == expected -> verified.
     # Why: Confirms the accepted artifact is the real one.

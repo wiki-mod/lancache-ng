@@ -42,7 +42,7 @@ CI_TMPDIR="${CI_TMPDIR:-/var/tmp}"
 declare -A CI_DISPATCH=(
     [plan]=ci_cmd_plan [plan-matrix]=ci_cmd_plan_matrix [impact]=ci_cmd_impact [codeql-impact]=ci_cmd_codeql_impact [codeql-config]=ci_cmd_codeql_config [codeql-analyze]=ci_cmd_codeql_analyze [identity]=ci_cmd_identity
     [resolve]=ci_cmd_resolve [build]=ci_cmd_build [build-args]=ci_cmd_build_args [rust-build]=ci_cmd_rust_build [apk-setup]=ci_cmd_apk_setup
-    [build-tools]=ci_cmd_build_tools [publish]=ci_cmd_publish [verify]=ci_cmd_verify
+    [build-tools]=ci_cmd_build_tools [publish]=ci_cmd_publish [verify]=ci_cmd_verify [ship]=ci_cmd_ship
     [test]=ci_cmd_test [scan]=ci_cmd_scan [assemble]=ci_cmd_assemble
     [aggregate]=ci_cmd_aggregate [emit-result]=ci_cmd_emit_result [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files
     [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [nightly-status]=ci_cmd_nightly_status
@@ -2564,6 +2564,28 @@ ci_cmd_publish() {
     [ -n "${service}" ] || { ci_log "[CI-ERROR-PUBLISH-0001]" "reason=\"service arg required\""; return 2; }
     _ci_require_ghcr_auth || return "$?"
     _ci_for_platforms "${service}" "${platform}" "[CI-ERROR-PUBLISH-0004]" _ci_publish_one
+}
+
+# What: build, then publish+verify only what was built.
+# Why: one owner for the chain; a reuse has nothing to push.
+# From: Issue #1683 | PR #1858
+ci_cmd_ship() {
+    local service="${1:-}" platform="${2:-}" out digest
+    if [ -z "${service}" ] || [ -z "${platform}" ]; then
+        ci_log "[CI-ERROR-SHIP-0001]" "reason=\"service and platform args required\""
+        return 2
+    fi
+    out="$(ci_cmd_build "${service}" "${platform}")" || return "$?"
+    printf '%s\n' "${out}"
+    case "${out}" in *" result=built "*) ;; *) return 0 ;; esac
+    out="$(ci_cmd_publish "${service}" "${platform}")" || return "$?"
+    printf '%s\n' "${out}"
+    digest="$(_ci_record_field "${out}" published)"
+    if [ -z "${digest}" ]; then
+        ci_error "[CI-ERROR-SHIP-0002]" "service=\"${service}\" platform=\"${platform}\" reason=\"publish reported no digest\"" "${out}"
+        return 2
+    fi
+    ci_cmd_verify "${service}" "${digest}" "${platform}"
 }
 
 # What: Read a published ref back and confirm its digest.
