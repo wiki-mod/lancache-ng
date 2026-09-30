@@ -71,7 +71,9 @@ COPY data-loss-detector.sh /usr/local/bin/data-loss-detector.sh
 # What: resolve the glibc dynamic linker; own the prefix.
 # Why: interpreter filename varies by arch; must be executable.
 # From: Issue #1428 | PR #1431
-RUN ld_interp="$(basename "$(ls /opt/fluent-bit-glibc/lib/ld-linux-*.so.* | head -n1)")" \
+RUN set -- /opt/fluent-bit-glibc/lib/ld-linux-*.so.* \
+    && [ -e "$1" ] \
+    && ld_interp="$(basename "$1")" \
     && echo "$ld_interp" > /opt/fluent-bit-glibc/ld-interp-name \
     && chmod +x "/opt/fluent-bit-glibc/lib/$ld_interp" /opt/fluent-bit-glibc/bin/fluent-bit \
     && chown -R lancache:lancache /opt/fluent-bit-glibc
