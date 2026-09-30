@@ -3035,11 +3035,15 @@ _ci_toolchain_candidate() {
     done < <(_ci_block_keys build_toolchain)
 }
 
-# What: PR stack candidate: per-service amd64 built digest.
-# Why: a PR has no ledger/index; validate pins built images.
-# From: Issue #1683
+# What: PR stack candidate: per-service digest for this host.
+# Why: no PR ledger; the stack runs on this daemon's arch.
+# From: Issue #1683 | PR #1858
 _ci_stack_candidate_pr() {
-    local service digest platform=linux/amd64
+    local service digest platform
+    if ! platform="$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')" || [ -z "${platform}" ]; then
+        ci_log "[CI-ERROR-CANDIDATE-0005]" "reason=\"docker daemon platform unknown; cannot pick PR images\""
+        return 2
+    fi
     while IFS= read -r service; do
         [ -n "${service}" ] || continue
         if ! digest="$(_ci_published_digest "${service}" "${platform}")"; then

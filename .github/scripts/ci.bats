@@ -8374,55 +8374,34 @@ SH
     [ "${status}" -eq 1 ]
 }
 
-@test "pr candidate resolves each service to its amd64 built digest" {
-    # What: PR candidate=per-service amd64 digest.
-    # Why: no ledger; validate pins images.
-    # From: Issue #1683
-    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+@test "pr candidate pins each service to the daemon platform's digest" {
+    # What: host platform from docker; per-service digest.
+    # Why: no PR ledger; a missing image or host fails.
+    # From: Issue #1683 | PR #1858
+    local bin="${BATS_TEST_TMPDIR}/bin" mode
+    mkdir -p "${bin}"
     cat > "${bin}/docker" <<'SH'
 #!/usr/bin/env bash
-case "$*" in
-  *"/dns:"*) echo "sha256:aaa" ;;
-  *"/ui:"*)  echo "sha256:bbb" ;;
-  *) echo "unexpected: $*" >&2; exit 1 ;;
+case "${MODE}:$*" in
+  nohost:version*) exit 1 ;;
+  *:version*) echo "os/p9" ;;
+  ok:*"/svc-a:"*p9*) echo "sha256:aaa" ;;
+  ok:*"/svc-b:"*p9*) echo "sha256:bbb" ;;
+  missing:*) echo "not found: manifest unknown" >&2; exit 1 ;;
+  *) echo "Connection reset by peer" >&2; exit 1 ;;
 esac
 SH
     chmod +x "${bin}/docker"
-    ci_services() { printf 'dns\nui\n'; }
+    ci_services() { printf 'svc-a\nsvc-b\n'; }
     _ci_identity_for() { echo "id-$1"; }
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
-        run _ci_stack_candidate_pr
+    MODE=ok PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo run _ci_stack_candidate_pr
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"dns=sha256:aaa"* ]]
-    [[ "${output}" == *"ui=sha256:bbb"* ]]
-}
-
-@test "pr candidate fails closed when a service image is missing" {
-    # What: not_found PR image closes candidate.
-    # Why: partial stack invalid; missing != skip.
-    # From: Issue #1683
-    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    printf '#!/usr/bin/env bash\necho "not found: manifest unknown" >&2\nexit 1\n' > "${bin}/docker"
-    chmod +x "${bin}/docker"
-    ci_services() { printf 'dns\n'; }
-    _ci_identity_for() { echo "id-$1"; }
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
-        run _ci_stack_candidate_pr
-    [ "${status}" -eq 2 ]
-}
-
-@test "pr candidate fails closed on an unknown registry error" {
-    # What: transient/unknown probe closes.
-    # Why: UNKNOWN never resolves; no build.
-    # From: Issue #1683
-    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    printf '#!/usr/bin/env bash\necho "Connection reset by peer" >&2\nexit 1\n' > "${bin}/docker"
-    chmod +x "${bin}/docker"
-    ci_services() { printf 'dns\n'; }
-    _ci_identity_for() { echo "id-$1"; }
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
-        run _ci_stack_candidate_pr
-    [ "${status}" -eq 2 ]
+    [ "${output}" = "$(printf 'svc-a=sha256:aaa\nsvc-b=sha256:bbb')" ]
+    for mode in missing reset nohost; do
+        MODE="${mode}" PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo run _ci_stack_candidate_pr
+        [ "${status}" -eq 2 ]
+    done
+    [[ "${output}" == *"CI-ERROR-CANDIDATE-0005"* ]]
 }
 
 @test "ledger upsert writes many records in one commit" {
