@@ -4720,7 +4720,7 @@ ci_cmd_result_gate() {
         phase="${entry%%:*}"
         state="${entry#*:}"
         case "${phase}" in
-            # What: always-run phases must succeed, never skip.
+            # What: always-run phases: succeed, never skip.
             # Why: skipped plan/checks would hide a red run.
             platform|plan|checks)
                 if [ "${state}" != success ]; then
