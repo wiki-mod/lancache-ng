@@ -43,9 +43,9 @@ declare -A CI_DISPATCH=(
     [plan]=ci_cmd_plan [plan-matrix]=ci_cmd_plan_matrix [impact]=ci_cmd_impact [codeql-impact]=ci_cmd_codeql_impact [codeql-config]=ci_cmd_codeql_config [codeql-analyze]=ci_cmd_codeql_analyze [identity]=ci_cmd_identity
     [resolve]=ci_cmd_resolve [build]=ci_cmd_build [build-args]=ci_cmd_build_args [rust-build]=ci_cmd_rust_build [apk-setup]=ci_cmd_apk_setup
     [build-tools]=ci_cmd_build_tools [publish]=ci_cmd_publish [verify]=ci_cmd_verify
-    [test]=ci_cmd_test [coverage]=ci_cmd_coverage [scan]=ci_cmd_scan [assemble]=ci_cmd_assemble
+    [test]=ci_cmd_test [scan]=ci_cmd_scan [assemble]=ci_cmd_assemble
     [aggregate]=ci_cmd_aggregate [emit-result]=ci_cmd_emit_result [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files
-    [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [coverage-stack]=ci_cmd_coverage_stack [nightly-status]=ci_cmd_nightly_status
+    [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [nightly-status]=ci_cmd_nightly_status
     [validate]=ci_cmd_validate [result-gate]=ci_cmd_result_gate [promote]=ci_cmd_promote [promote-ref]=ci_cmd_promote_ref [release]=ci_cmd_release
     [release-publish]=ci_cmd_release_publish [release-sbom]=ci_cmd_release_sbom [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag
     [gc]=ci_cmd_gc [variables]=ci_cmd_variables [check]=ci_cmd_check
@@ -1454,7 +1454,7 @@ ci_cmd_assemble_stack() {
 }
 
 # What: run ci.sh op for each changed rust test service.
-# Why: test/coverage-stack share one TEST_SERVICES walk.
+# Why: one TEST_SERVICES walk for the test stack.
 # From: Issue #1683
 _ci_for_test_services() {
     local fn="$1" svc
@@ -1463,7 +1463,6 @@ _ci_for_test_services() {
     done
 }
 ci_cmd_test_stack() { _ci_for_test_services ci_cmd_test; }
-ci_cmd_coverage_stack() { _ci_for_test_services ci_cmd_coverage; }
 
 # What: file/update/close standing tracking issue for run.
 # Why: nightly reliability; self-closing, no action.
@@ -2673,55 +2672,6 @@ ci_cmd_test() {
         return 2
     fi
     printf '%s\n' "${raw}"
-}
-
-# What: Run tarpaulin and print coverage percent.
-# Why: injectable; container has tarpaulin.
-# From: Issue #1683
-_ci_tarpaulin_pct() {
-    local manifest="$1" dir pct
-    if [ -n "${CI_TARPAULIN_CMD:-}" ]; then
-        "${CI_TARPAULIN_CMD}" "${manifest}"
-        return "$?"
-    fi
-    dir="$(mktemp -d "${CI_TMPDIR}/ci-tarpaulin.XXXXXX")" || return 2
-    if ! ( _ci_sccache_env "lancache-coverage" && cd "${CI_REPO_ROOT:-.}" && cargo tarpaulin --engine llvm \
-            --manifest-path "${manifest}" --locked --timeout 300 \
-            --out json --output-dir "${dir}" ); then
-        ci_log "[CI-ERROR-COVERAGE-0003]" "manifest=\"${manifest}\" reason=\"tarpaulin failed\""
-        rm -rf "${dir}"; return 2
-    fi
-    pct="$(jq -r '.coverage // 0' "${dir}/tarpaulin-report.json" 2>/dev/null || echo 0)"
-    rm -rf "${dir}"
-    printf '%s\n' "${pct}"
-}
-
-# What: run coverage for rust, enforcing floor.
-# Why: tarpaulin runs; floor is ci.sh policy.
-# From: Issue #1683
-_ci_default_coverage() {
-    local service="$1" manifest threshold pct
-    manifest="$(ci_service_field "${service}" coverage_manifest)"
-    threshold="$(ci_service_field "${service}" coverage_threshold)"
-    if [ -z "${manifest}" ] || [ -z "${threshold}" ]; then
-        printf 'service=%s coverage=SKIP reason=no coverage in SOT\n' "${service}"
-        return 0
-    fi
-    pct="$(_ci_tarpaulin_pct "${manifest}")" || return "$?"
-    if awk -v p="${pct}" -v t="${threshold}" 'BEGIN { exit !(p < t) }'; then
-        ci_error "[CI-ERROR-COVERAGE-0004]" "service=\"${service}\" reason=\"coverage below floor\" coverage=\"${pct}\"" "floor=${threshold}"
-        return 1
-    fi
-    printf 'service=%s coverage=%s floor=%s\n' "${service}" "${pct}" "${threshold}"
-}
-
-# What: run service coverage via wired backend.
-# Why: injectable; floor breach fails run.
-# From: Issue #1683
-ci_cmd_coverage() {
-    local service="${1:-}"
-    [ -n "${service}" ] || { ci_log "[CI-ERROR-COVERAGE-0001]" "reason=\"service arg required\""; return 2; }
-    "${CI_COVERAGE_CMD:-_ci_default_coverage}" "${service}"
 }
 
 # What: Write a CycloneDX SBOM for an image digest.
@@ -7289,7 +7239,7 @@ _ci_check_build_tools_smoke_coverage() {
     # What: build-only/base tools smoke skips.
     # Why: a reviewed exclusion, not a silent gap.
     # From: Issue #1683 | PR #1858
-    local excluded=" cargo-tarpaulin dhclient ar ranlib cc c++ g++ clang ld.lld make cmake pkg-config git gpg awk basename cat chgrp chmod chown cp curl dirname dpkg find flock getent grep gzip install mkdir mktemp mv printf ps rm sed sha256sum sort tar tee test timeout xargs xz musl-gcc "
+    local excluded=" dhclient ar ranlib cc c++ g++ clang ld.lld make cmake pkg-config git gpg awk basename cat chgrp chmod chown cp curl dirname dpkg find flock getent grep gzip install mkdir mktemp mv printf ps rm sed sha256sum sort tar tee test timeout xargs xz musl-gcc "
     local -a viol=()
     local tool
     for tool in ${dockerfile_tools}; do

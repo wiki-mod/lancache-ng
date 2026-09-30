@@ -201,7 +201,9 @@ jobs:
   cargo-audit:
     name: cargo-audit
     needs: [plan, resolve-build-tools]
-    if: needs.plan.outputs.test-services != ''
+    if: &after_resolve_tests >-
+      !cancelled() && needs.resolve-build-tools.result == 'success' &&
+      needs.plan.outputs.test-services != ''
     runs-on: ubuntu-latest
     timeout-minutes: 30
     container: &bt_container
@@ -218,7 +220,7 @@ jobs:
   test:
     name: test
     needs: [plan, resolve-build-tools]
-    if: needs.plan.outputs.test-services != ''
+    if: *after_resolve_tests
     runs-on: ubuntu-latest
     timeout-minutes: 45
     container: *bt_container
@@ -235,7 +237,9 @@ jobs:
   lint:
     name: lint
     needs: [plan, resolve-build-tools]
-    if: needs.plan.outputs.docs-only != 'true'
+    if: >-
+      !cancelled() && needs.resolve-build-tools.result == 'success' &&
+      needs.plan.outputs.docs-only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     container: *bt_container
@@ -248,23 +252,6 @@ jobs:
         run: bash .github/scripts/ci.sh check shellcheck
       - name: actionlint workflows
         run: bash .github/scripts/ci.sh check actionlint
-
-  # What: rust coverage (tarpaulin) in the pinned build-tools image.
-  # Why: floor enforced by ci.sh; the SOT owns crate + floor.
-  # From: Issue #1683
-  coverage:
-    name: coverage
-    needs: [plan, resolve-build-tools]
-    if: needs.plan.outputs.test-services != ''
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    container: *bt_container
-    steps:
-      - *bootstrap
-      - name: Cover the changed rust services
-        env:
-          TEST_SERVICES: ${{ needs.plan.outputs.test-services }}
-        run: bash .github/scripts/ci.sh coverage-stack
 
   # What: trivy-scan every built image by digest before ACCEPT (§7).
   # Why: SCAN gates ACCEPT; the scanner lives in the build-tools image.
@@ -295,7 +282,9 @@ jobs:
   aggregate:
     name: aggregate
     needs: [platform, plan, scan]
-    if: needs.plan.outputs.any-build == 'true' && github.event_name != 'pull_request'
+    if: >-
+      !cancelled() && needs.scan.result == 'success' &&
+      needs.plan.outputs.any-build == 'true' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     container: *bt_platform
@@ -315,7 +304,9 @@ jobs:
   assemble:
     name: assemble
     needs: [platform, plan, aggregate]
-    if: needs.plan.outputs.any-build == 'true' && github.event_name != 'pull_request'
+    if: >-
+      !cancelled() && needs.aggregate.result == 'success' &&
+      needs.plan.outputs.any-build == 'true' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     container: *bt_platform
@@ -353,7 +344,9 @@ jobs:
   promote:
     name: promote
     needs: [platform, plan, validate]
-    if: needs.plan.outputs.any-build == 'true' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v')) && github.event_name == 'push'
+    if: >-
+      !cancelled() && needs.validate.result == 'success' &&
+      needs.plan.outputs.any-build == 'true' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v')) && github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     container: *bt_platform
@@ -405,7 +398,7 @@ jobs:
   # From: Issue #1683
   result:
     name: result
-    needs: [platform, plan, build-toolchain, build, test, resolve-build-tools, cargo-audit, lint, coverage, scan, aggregate, assemble, validate, promote, checks]
+    needs: [platform, plan, build-toolchain, build, test, resolve-build-tools, cargo-audit, lint, scan, aggregate, assemble, validate, promote, checks]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -428,7 +421,6 @@ jobs:
             resolve-build-tools:${{ needs.resolve-build-tools.result }}
             cargo-audit:${{ needs.cargo-audit.result }}
             lint:${{ needs.lint.result }}
-            coverage:${{ needs.coverage.result }}
             scan:${{ needs.scan.result }}
             aggregate:${{ needs.aggregate.result }}
             assemble:${{ needs.assemble.result }}

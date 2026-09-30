@@ -153,7 +153,6 @@ RUN set -euo pipefail; \
       sccache \
       ccache \
       cargo-audit \
-      cargo-tarpaulin \
       actionlint \
       shellspec \
       shellcheck \
@@ -223,7 +222,6 @@ RUN set -euo pipefail; \
     sccache --version; \
     ccache --version; \
     cargo audit --version; \
-    cargo tarpaulin --version; \
     actionlint --version; \
     bats --version; \
     parallel --version; \

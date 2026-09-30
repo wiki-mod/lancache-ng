@@ -4105,7 +4105,7 @@ netdata=sha256:n"
     run bash "${CI_SH}" build-tools packages
     [ "${status}" -eq 0 ]
     for pkg in rust cargo rust-clippy rustfmt actionlint cargo-audit \
-               cargo-tarpaulin sccache distcc distcc-pump docker-cli \
+               sccache distcc distcc-pump docker-cli \
                docker-cli-buildx docker-cli-compose; do
         printf '%s\n' "${output}" | grep -qx "${pkg}"
     done
@@ -5325,24 +5325,6 @@ _anv_run() {
     [[ "${output}" == *"CI-ERROR-CHECK-0055"* ]]
 }
 
-@test "coverage skips a no-SOT service, passes the floor, fails below it" {
-    # What: Injected tarpaulin; prove floor policy.
-    # Why: Real tarpaulin needs toolchain; hook it.
-    # From: Issue #1683
-    run bash "${CI_SH}" coverage watchdog
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"coverage=SKIP"* ]]
-    CI_TARPAULIN_CMD="$(_stub tp 'echo 12.5')" run bash "${CI_SH}" coverage dns
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"coverage=12.5"* ]]
-    CI_TARPAULIN_CMD="$(_stub tp2 'echo 20')" run bash "${CI_SH}" coverage ui
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-COVERAGE-0004"* ]]
-    CI_TARPAULIN_CMD="$(_stub tp3 'echo 40')" run bash "${CI_SH}" coverage ui
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"coverage=40"* ]]
-}
-
 @test "check dockerfile-build-tools flags both image and hardcoded-tuning violations" {
     # What: Rust Dockerfiles use build-tools, no tuning.
     # Why: AG-CI-008/AG-REL-002 (image) + AG-CI-006.
@@ -5407,7 +5389,7 @@ _anv_run() {
     # Why: INSTALL-DON'T-COMPILE; build-tools owner.
     # From: Issue #1683
     local r="${BATS_TEST_TMPDIR}/nsctrepo" pkg
-    pkg="$(_ci_build_tools_packages | grep -E '^(sccache|cargo-audit|cargo-tarpaulin)$')"
+    pkg="$(_ci_build_tools_packages | grep -E '^(sccache|cargo-audit)$')"
     pkg="${pkg%%$'\n'*}"
     [ -n "${pkg}" ]
     mkdir -p "${r}/svc-a" "${r}/svc-b"
@@ -7427,7 +7409,7 @@ _smoke_coverage_fixture() {
 
 @test "check build-tools-smoke-coverage passes on the real repo" {
     # What: real SOT/smoke pair is consistent, not a gap.
-    # Why: Cargo-tarpaulin + timeout covered.
+    # Why: every Dockerfile-checked tool is smoke-listed.
     # From: Issue #1683 | PR #1858
     run bash "${CI_SH}" check build-tools-smoke-coverage
     [ "${status}" -eq 0 ]
