@@ -385,6 +385,7 @@ teardown() {
     # From: Issue #1683
     local gh="${BATS_TEST_TMPDIR}/out.txt"; : > "${gh}"
     GITHUB_OUTPUT="${gh}" GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_stub p 'echo MISSING_CONFIRMED')" \
+    CI_IMPACT_CMD="$(_stub impact 'echo BUILD')" \
         run bash "${CI_SH}" plan-matrix services/proxy/Dockerfile
     [ "${status}" -eq 0 ]
     grep -q '^any-build=true$' "${gh}"
@@ -392,6 +393,18 @@ teardown() {
     [ "$(printf '%s' "${m}" | jq '.include | length')" -eq 2 ]
     [ "$(printf '%s' "${m}" | jq -r '.include[0].service')" = "proxy" ]
     [ "$(printf '%s' "${m}" | jq -r '[.include[].platform]|sort|join(",")')" = "linux/amd64,linux/arm64" ]
+}
+
+@test "plan-matrix drops a missing target without proven impact" {
+    # What: MISSING_CONFIRMED + impact NOOP -> not in matrix.
+    # Why: MISSING_CONFIRMED alone MUST NOT build (§10).
+    # From: Issue #1683 | PR #1858
+    local gh="${BATS_TEST_TMPDIR}/out.txt"; : > "${gh}"
+    GITHUB_OUTPUT="${gh}" GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_stub p 'echo MISSING_CONFIRMED')" \
+    CI_IMPACT_CMD="$(_stub impact 'echo NOOP')" \
+        run bash "${CI_SH}" plan-matrix services/proxy/Dockerfile
+    [ "${status}" -eq 0 ]
+    grep -q '^any-build=false$' "${gh}"
 }
 
 @test "plan-matrix emits docs-only=true for a docs-only change" {
@@ -759,7 +772,7 @@ teardown() {
     # Why: Downstream assembly keys per-platform digests.
     # From: Issue #1683
     STUB_STATE=PRESENT_ACCEPTED
-    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${CI_SH}" build ui linux/arm64
+    GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${CI_SH}" build ui linux/arm64
     [ "${status}" -eq 0 ]
     [ "${#lines[@]}" -eq 1 ]
     [[ "${output}" == *"platform=linux/arm64"* ]]
@@ -972,7 +985,7 @@ _stub() {
     # Why: NOOP/reuse is the default outcome.
     # From: Issue #1683
     STUB_STATE=PRESENT_ACCEPTED
-    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${CI_SH}" build ui
+    GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${CI_SH}" build ui
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"result=reuse-accepted"* ]]
 }
@@ -982,7 +995,7 @@ _stub() {
     # Why: UNKNOWN != BUILD (Contract section 4).
     # From: Issue #1683
     STUB_STATE=UNKNOWN
-    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${CI_SH}" build ui
+    GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${CI_SH}" build ui
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"result=escalate"* ]]
     [[ "${output}" != *"result=built"* ]]
@@ -996,6 +1009,7 @@ _stub() {
     CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
     CI_IMPACT_CMD="$(_stub impact 'echo BUILD')" \
     CI_CAS_LOOKUP_CMD="$(_stub cas 'exit 0')" \
+    GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${CI_SH}" build ui
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"result=reuse-binary-cas"* ]]
@@ -1104,10 +1118,32 @@ _stub() {
     [[ "${output}" != *"result=built"* ]]
 }
 
-@test "build fails closed when semantic impact is not wired (escalate)" {
-    # What: no impact backend -> UNKNOWN -> escalate.
+@test "semantic impact compares the head id with the base id" {
+    # What: equal ids NOOP, different BUILD, no base UNKNOWN.
+    # Why: BUILD needs proven impact (arch §11, §57).
+    # From: Issue #1683 | PR #1858
+    _ci_diff_refs() { printf 'B H\n'; }
+    _ci_manifest_at() { printf 'x\n' > "$2"; }
+    _ci_identity_for() { [ "$3" = B ] && echo base-id; }
+    run _ci_semantic_impact ui linux/amd64 base-id
+    [ "${lines[-1]}" = NOOP ]
+    run _ci_semantic_impact ui linux/amd64 head-id
+    [ "${lines[-1]}" = BUILD ]
+    [[ "${output}" == *"[CI-INFO-IMPACT-0004]"* ]]
+    _ci_identity_for() { return 2; }
+    run _ci_semantic_impact ui linux/amd64 head-id
+    [ "${lines[-1]}" = UNKNOWN ]
+    _ci_diff_refs() { :; }
+    run _ci_semantic_impact ui linux/amd64 head-id
+    [ "${lines[-1]}" = UNKNOWN ]
+    [[ "${output}" == *"[CI-INFO-IMPACT-0003]"* ]]
+}
+
+@test "build escalates when the event has no base ref (UNKNOWN)" {
+    # What: no base ref -> impact UNKNOWN -> escalate.
     # Why: unproven impact MUST NOT authorize build.
     # From: Issue #1683
+    unset GITHUB_EVENT_NAME BEFORE_SHA
     STUB_STATE=MISSING_CONFIRMED
     CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
     CI_CAS_LOOKUP_CMD="$(_stub cas 'exit 1')" \

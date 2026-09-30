@@ -589,6 +589,10 @@ ci_cmd_plan_matrix() {
             resolved="$(_ci_resolve_one "${service}" "${platform}")" || return "$?"
             paction="$(_ci_record_field "${resolved}" action)"
             [ "${paction}" = "build" ] || continue
+            # What: matrix holds only targets with proven impact.
+            # Why: MISSING_CONFIRMED alone MUST NOT build (§10).
+            # From: Issue #1683 | PR #1858
+            [ "$(_ci_semantic_impact "${service}" "${platform}" "$(_ci_record_field "${resolved}" identity)")" = BUILD ] || continue
             if ! runner="$(_ci_platform_runner "${platform}")"; then
                 ci_log "[CI-ERROR-PLAN-0002]" "platform=\"${platform}\" reason=\"no runner label for platform\""
                 return 2
@@ -789,7 +793,7 @@ _ci_manifest_at() {
 # From: Issue #1683
 _ci_impact_run() {
     local base="$1" head="$2" base_manifest="$3"
-    local base_missing=0 t p plats hid bid build=0 noop=0 unknown=0
+    local base_missing=0 t p plats hid v build=0 noop=0 unknown=0
     if ! _ci_manifest_at "${base}" "${base_manifest}" || [ ! -s "${base_manifest}" ]; then
         base_missing=1
         ci_log "[CI-INFO-IMPACT-0002]" "base=\"${base}\" reason=\"no SOT at base; UNKNOWN, escalate, BUILD DISACK\""
@@ -807,23 +811,34 @@ _ci_impact_run() {
                 unknown=$((unknown+1))
                 continue
             fi
-            hid="$(_ci_identity_for "${t}" "${p}" "${head}")"
-            bid="$(CI_MANIFEST="${base_manifest}" _ci_identity_for "${t}" "${p}" "${base}")"
-            if [ "${hid}" = "${bid}" ]; then
-                printf 'target=%s platform=%s impact=NOOP\n' "${t}" "${p}"
-                noop=$((noop+1))
-            else
-                printf 'target=%s platform=%s impact=BUILD\n' "${t}" "${p}"
-                build=$((build+1))
-            fi
+            hid="$(_ci_identity_for "${t}" "${p}" "${head}")" || hid=""
+            v="$(_ci_impact_classify "${t}" "${p}" "${hid}" "${base}" "${base_manifest}")"
+            printf 'target=%s platform=%s impact=%s\n' "${t}" "${p}" "${v}"
+            case "${v}" in
+                NOOP) noop=$((noop+1)) ;;
+                BUILD) build=$((build+1)) ;;
+                *) unknown=$((unknown+1)) ;;
+            esac
         done <<< "${plats}"
     done <<< "$(ci_build_targets)"
     printf 'impact result=classified build=%s noop=%s unknown=%s base=%s\n' "${build}" "${noop}" "${unknown}" "${base}"
     # What: base-missing escalates; UNKNOWN never builds.
     # Why: base-SOT-unavailable stays DISACK, escalates.
     # From: Issue #1683
-    [ "${base_missing}" -eq 1 ] && return 3
+    if [ "${base_missing}" -eq 1 ] || [ "${unknown}" -gt 0 ]; then return 3; fi
     return 0
+}
+
+# What: NOOP/BUILD for a head id vs its base id.
+# Why: a failed or empty identity is UNKNOWN, never BUILD.
+# From: Issue #1683 | PR #1858
+_ci_impact_classify() {
+    local t="$1" p="$2" hid="$3" base="$4" base_manifest="$5" bid
+    [ -n "${hid}" ] || { printf 'UNKNOWN\n'; return 0; }
+    bid="$(CI_MANIFEST="${base_manifest}" _ci_identity_for "${t}" "${p}" "${base}")" || bid=""
+    [ -n "${bid}" ] || { printf 'UNKNOWN\n'; return 0; }
+    [ "${hid}" = "${bid}" ] && { printf 'NOOP\n'; return 0; }
+    printf 'BUILD\n'
 }
 
 # What: Compare base vs head; clean up the temp SOT.
@@ -2328,7 +2343,22 @@ _ci_semantic_impact() {
         esac
         return 0
     fi
-    printf 'UNKNOWN\n'
+    local base head bm v=UNKNOWN
+    read -r base head <<< "$(_ci_diff_refs)"
+    if [ -z "${base}" ]; then
+        ci_log "[CI-INFO-IMPACT-0003]" "service=\"${service}\" platform=\"${platform}\" reason=\"no base ref for this event; UNKNOWN\""
+        printf 'UNKNOWN\n'
+        return 0
+    fi
+    bm="$(mktemp -p "${CI_TMPDIR}")" || { printf 'UNKNOWN\n'; return 0; }
+    if _ci_manifest_at "${base}" "${bm}" && [ -s "${bm}" ]; then
+        v="$(_ci_impact_classify "${service}" "${platform}" "${identity}" "${base}" "${bm}")"
+    else
+        ci_log "[CI-INFO-IMPACT-0002]" "base=\"${base}\" reason=\"no SOT at base; UNKNOWN, escalate, BUILD DISACK\""
+    fi
+    rm -f "${bm}"
+    ci_log "[CI-INFO-IMPACT-0004]" "service=\"${service}\" platform=\"${platform}\" base=\"${base}\" head=\"${head}\" impact=${v}"
+    printf '%s\n' "${v}"
 }
 
 # What: Emit BUILD_ACK only for the full admission set.
@@ -2348,6 +2378,10 @@ _ci_build_ack() {
 _ci_build_one() {
     local service="$1" platform="$2"
     local resolved action identity state build_type impact ack
+    # What: log in before the resolver reads GHCR.
+    # Why: an anonymous probe is 403 -> UNKNOWN, no build.
+    # From: Issue #1683 | PR #1858
+    _ci_require_ghcr_auth || return "$?"
     resolved="$(_ci_resolve_one "${service}" "${platform}")" || return "$?"
     action="$(_ci_record_field "${resolved}" action)"
     identity="$(_ci_record_field "${resolved}" identity)"

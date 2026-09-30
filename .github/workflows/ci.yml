@@ -89,19 +89,10 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     steps:
-      # What: native fail-closed checkout, shallow; persistent ci.sh auth.
-      # Why: no SHA pin outside the SOT; git is a runner tool (AG-CI-006).
-      # From: Issue #1683
-      - &bootstrap
-        name: Bootstrap the working tree
-        run: |
-          set -euo pipefail
-          git config --global --add safe.directory "${PWD}"
-          git init -q .
-          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GHCR_TOKEN}" | base64 -w0)"
-          git fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
-          git checkout -q FETCH_HEAD
+      # What: checkout with the base; build proves impact vs base.
+      # Why: semantic impact needs the base ref (arch §11).
+      # From: Issue #1683 | PR #1858
+      - *bootstrap_diff
       # What: publish the immutable per-identity ref, then read it back.
       # Why: BUILD != PUBLISH; readback confirms the exact digest (§22/§23).
       # From: Issue #1683
@@ -126,7 +117,19 @@ jobs:
     outputs:
       image: ${{ steps.resolve.outputs.image }}
     steps:
-      - *bootstrap
+      # What: native fail-closed checkout, shallow; persistent ci.sh auth.
+      # Why: no SHA pin outside the SOT; git is a runner tool (AG-CI-006).
+      # From: Issue #1683
+      - &bootstrap
+        name: Bootstrap the working tree
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "${PWD}"
+          git init -q .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GHCR_TOKEN}" | base64 -w0)"
+          git fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
+          git checkout -q FETCH_HEAD
       - name: Resolve the build-tools image
         id: resolve
         run: |
