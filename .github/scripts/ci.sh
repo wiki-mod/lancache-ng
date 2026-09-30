@@ -1702,8 +1702,8 @@ _ci_docker_build() {
         args+=(--file "${context}/Dockerfile")
         context="."
     fi
-    # What: apk stages bind-mount ci.sh via a named context.
-    # Why: apk-setup runs in bare final stage, ci.sh not in context.
+    # What: apk stages bind-mount ci.sh via context.
+    # Why: apk-setup runs in bare final; ci.sh absent.
     # From: Issue #1683
     if [ "${build_type}" = apk ] || [ "${build_type}" = install ]; then
         args+=(--build-context "ci-scripts=${CI_SCRIPT_DIR}")
@@ -1726,9 +1726,9 @@ _ci_docker_build() {
     while IFS= read -r a; do
         [ -n "${a}" ] && args+=(--build-context "${a}")
     done < <(_ci_block_entry_list services "${service}" external_contexts)
-    # What: mount build-time secrets set-runtime provisioned.
-    # Why: leak-safe --secret; cleanup removes them after.
-    # From: Issue #1683 | Issue #1781
+    # What: mount build-time secrets at runtime.
+    # Why: leak-safe --secret; cleanup removes after.
+    # From: Issue #1683
     local secret_dir sf
     secret_dir="$(_ci_runtime_secret_dir)"
     if [ -d "${secret_dir}" ]; then
@@ -1865,7 +1865,7 @@ ci_cmd_rust_build() {
     for wrapper in cc gcc c++ g++; do ln -sf /usr/local/bin/lancache-distcc-wrapper "/usr/local/lib/distcc/${wrapper}"; done
     ln -sf /usr/local/bin/lancache-distcc-wrapper "${distcc_bin}"
     # What: rustc wrapper: distcc passthrough, else sccache.
-    # Why: distcc can't be wrapped through sccache masquerade.
+    # Why: distcc bypasses sccache masquerade wrapping.
     printf '%s\n' '#!/bin/sh' 'case "${1:-}" in' '  distcc|*/distcc) exec "$@" ;;' '  *) exec /usr/local/bin/sccache "$@" ;;' 'esac' > /usr/local/bin/lancache-rustc-wrapper
     chmod +x /usr/local/bin/lancache-rustc-wrapper
     local distcc_enabled=0 ccache_enabled=0 ca_installed=0 original_path="${PATH}"
@@ -1912,7 +1912,7 @@ ci_cmd_rust_build() {
         echo "distcc wrapper directory not found" >&2; return 1
     }
     # What: read farm host's real compiler identity.
-    # Why: ccache content-check misses remote toolchain bump.
+    # Why: ccache content-check misses remote bump.
     extract_remote_toolchain_id() {
         rm -f "${CI_TMPDIR}/ccache-remote-toolchain-id"
         if command -v readelf >/dev/null 2>&1; then
@@ -2007,8 +2007,8 @@ ci_cmd_rust_build() {
             export CC="ccache ${real_cc}" GCC="ccache ${real_gcc}" CXX="ccache ${real_cxx}" GXX="ccache ${real_gxx}"
             ccache_enabled=1
             printf '%s\n' 'int main(void) { return 0; }' > "${ccache_probe_dir}/ccache-probe.c"
-            # What: probe compiles into isolated ccache dir.
-            # Why: keeps real build cache clean; word-split-safe.
+            # What: probe compiles in isolated ccache dir.
+            # Why: keep real cache clean; word-split-safe.
             local ccache_probe_cache_dir="${ccache_probe_dir}/probe-cache"
             mkdir -p "${ccache_probe_cache_dir}"
             if ! ( cd "${ccache_probe_dir}" && CCACHE_DIR="${ccache_probe_cache_dir}" ccache "${real_cc}" -c ccache-probe.c -o ccache-probe.o ) >"${ccache_probe_dir}/ccache-probe.log" 2>&1; then
@@ -2034,7 +2034,7 @@ ci_cmd_rust_build() {
         fi
     }
     # What: export release LTO/codegen vars, fail closed.
-    # Why: no defaults; owner is PROJECT_CARGO_* (AG-CI-006).
+    # Why: no defaults; owner is PROJECT_CARGO_*.
     resolve_cargo_profile_overrides() {
         local lto="${PROJECT_CARGO_LTO:-}" cgu="${PROJECT_CARGO_CODEGENUNIT:-}"
         [ -n "${lto}" ] || { echo "PROJECT_CARGO_LTO is required (no default; Issue #1095)" >&2; return 1; }
@@ -2062,7 +2062,7 @@ ci_cmd_rust_build() {
         printf '%s\n' "${jobs}"
     }
     # What: build, fall back ccache->distcc->local on fail.
-    # Why: accel outage must not fail otherwise-correct build.
+    # Why: accel outage: must not fail correct build.
     run_cargo_build() {
         local cargo_log cargo_status_file cargo_status
         cargo_log="$(mktemp -p "${CI_TMPDIR}")"; cargo_status_file="$(mktemp -p "${CI_TMPDIR}")"
