@@ -6749,6 +6749,18 @@ _setup_keys_kea_fixture() {
     [[ "${output}" == *"PDNS_API_KEY"* ]]
 }
 
+@test "check setup-keys-kea reads nmap from the SOT dhcp packages" {
+    # What: nmap missing in the SOT dhcp list -> fail.
+    # Why: the SOT owns apk lists, not the Dockerfile.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/skk-nmap" m="${BATS_TEST_TMPDIR}/no-nmap.yml"
+    _setup_keys_kea_fixture "${r}"
+    grep -vx '      - nmap' "${CI_MANIFEST_SOURCE}" > "${m}"
+    CI_MANIFEST="${m}" run bash "${CI_SH}" check setup-keys-kea "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"services.dhcp.packages must install nmap"* ]]
+}
+
 @test "check setup-keys-kea fails a deprecated NATS token key" {
     # What: an env template reintroduces NATS_TOKEN.
     # Why: Role credentials replace token keys.

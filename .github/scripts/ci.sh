@@ -8039,8 +8039,13 @@ _ci_check_setup_keys_kea() {
     if grep -Fq 'nmap --script broadcast-dhcp-discover -e any' "${su}"; then
         viol+=("setup.sh must not pass -e any to nmap; invalid interface fails the preflight")
     fi
-    grep -Fq 'nmap' "${repo_root}/services/dhcp/Dockerfile" \
-        || viol+=("services/dhcp/Dockerfile must install nmap for the Kea discovery preflight")
+    # What: nmap must be in the SOT dhcp package list.
+    # Why: the SOT owns apk lists; the Dockerfile consumes it.
+    # From: Issue #1683 | PR #1858
+    local dhcp_pkgs
+    dhcp_pkgs="$(_ci_block_entry_list services dhcp packages)"
+    grep -qx 'nmap' <<< "${dhcp_pkgs}" \
+        || viol+=("SOT services.dhcp.packages must install nmap for the Kea discovery preflight")
     grep -Fq 'nmap|/usr/bin/nmap|/bin/nmap)' "${repo_root}/services/dhcp/entrypoint.sh" \
         || viol+=("services/dhcp/entrypoint.sh must pass through the nmap preflight command")
     if [ "${#viol[@]}" -gt 0 ]; then
