@@ -4999,8 +4999,8 @@ _ci_build_tools_build_args() {
     pkgs="$(_ci_build_tools_packages | tr '\n' ' ')" || return 2
     pkgs="${pkgs% }"
     out="${out}${prefix}APK_PACKAGES=${pkgs}"$'\n'
-    # What: append the SOT tagged repos (tag=url) as a build-arg.
-    # Why: the Dockerfile adds them; it never owns the URL.
+    # What: add SOT tagged repos as build-arg
+    # Why: Dockerfile adds them; never owns URL
     # From: Issue #1683 | PR #1858
     pkgs="$(_ci_block_entry_list build_toolchain build-tools apk_repositories | tr '\n' ' ')"
     out="${out}${prefix}APK_TAGGED_REPOS=${pkgs% }"$'\n'
@@ -5033,8 +5033,8 @@ _ci_service_build_args() {
         fi
         out="${out}${prefix}${ext_argname}=${val}"$'\n'
     fi
-    # What: Rust builders consume the resolved build-tools image.
-    # Why: SOT owns the ref; Dockerfile keeps no mutable default.
+    # What: Rust builders use build-tools image ref
+    # Why: SOT owns ref; Dockerfile keeps none
     # From: Issue #1683
     if [ "$(_ci_block_entry_field services "${service}" build_type)" = rust ]; then
         val="$(${CI_BUILD_TOOLS_IMAGE_CMD:-_ci_build_tools_resolve_image})" || return 2
@@ -5046,8 +5046,8 @@ _ci_service_build_args() {
         val="$(_ci_block_entry_field services "${service}" crate)"
         [ -n "${val}" ] || { ci_log "[CI-ERROR-BUILDARGS-0014]" "arg=\"RUST_CRATE\" service=\"${service}\" reason=\"no crate in SOT; FAIL CLOSED\""; return 2; }
         out="${out}${prefix}RUST_CRATE=${val}"$'\n'
-        # What: emit the musl cross-target for the platform.
-        # Why: ci.sh owns arch mapping; Dockerfile drops uname -m.
+        # What: emit musl cross-target for platform
+        # Why: ci.sh owns arch mapping; Dockerfile uses
         # From: Issue #1683
         if [ -n "${platform}" ]; then
             local arch
@@ -5061,8 +5061,8 @@ _ci_service_build_args() {
     local pins
     pins="$(_ci_target_pin_args "${service}" "${platform}" "${prefix}")" || return 2
     [ -z "${pins}" ] || out="${out}${pins}"$'\n'
-    # What: SOT-owned apk package list, when the service has one.
-    # Why: services.<svc>.packages owns it; the Dockerfile derives.
+    # What: add service's apk packages from SOT
+    # Why: SOT owns list; Dockerfile derives it
     # From: Issue #1683
     local apk_pkgs
     apk_pkgs="$(_ci_block_entry_list services "${service}" packages | tr '\n' ' ')"
@@ -5438,8 +5438,8 @@ _ci_pin_sha() {
     printf '%s\n' "${val}"
 }
 
-# What: Emit <DEP>_<KEY>, <DEP>_ARCH, <DEP>_SHA256 from SOT.
-# Why: one pin->ARG convention; no platform = every arch sha.
+# What: emit pin args for dep, arch, and sha256
+# Why: one pin->ARG convention for every arch
 # From: Issue #1683 | PR #1858
 _ci_pin_args() {
     local dep="$1" keys="$2" platform="$3" prefix="$4" up key val apk p out=""
@@ -5470,8 +5470,8 @@ _ci_pin_args() {
     printf '%s' "${out}"
 }
 
-# What: Pin build-args of every consumer a target's Dockerfile is.
-# Why: build-args derive from the same list verify checks.
+# What: pin build-args for target's Dockerfile
+# Why: build-args derive from verify check list
 # From: Issue #1683 | PR #1858
 _ci_target_pin_args() {
     local target="$1" platform="$2" prefix="$3" ctx dep df keys
@@ -5495,8 +5495,8 @@ _ci_alpine_build_arg() {
     printf '%sALPINE_IMAGE=%s\n' "${prefix}" "${val}"
 }
 
-# What: Check one consumer's SOT pins + bare Dockerfile ARGs.
-# Why: the SOT owns the pin; a baked ARG default is a 2nd owner.
+# What: check consumer's SOT pins vs Dockerfile
+# Why: SOT owns pin; baked ARG default is 2nd owner
 # From: Issue #1683 | PR #1858
 _ci_version_diff() {
     local dep="$1" dockerfile="${CI_REPO_ROOT}/$2" keys="$3" p args name want out=""
@@ -5565,8 +5565,8 @@ _ci_version_verify() {
     _ci_version_walk _ci_version_diff
 }
 
-# What: version audit: full read-only report of the contracts.
-# Why: A dashboard view; verify is the CI-failing gate.
+# What: audit version contracts in full read-only
+# Why: dashboard view; verify is CI gate
 # From: Issue #1683 | PR #1858
 _ci_version_audit() {
     local rc=0
@@ -5575,16 +5575,16 @@ _ci_version_audit() {
     return "${rc}"
 }
 
-# What: sync one consumer: bare ARGs derive, nothing to write.
-# Why: SOT-driven consumers have no derived literal to update.
+# What: sync consumer's bare ARGs, nothing to update
+# Why: SOT-driven consumers have no literal to write
 # From: Issue #1683 | PR #1858
 _ci_version_sync_one() {
     _ci_version_diff "$@" || return "$?"
     printf 'sync=%s changed=0 reason=nothing-to-write\n' "$1"
 }
 
-# What: version sync: explicit maintenance op (contract §47).
-# Why: idempotent; nothing to write while consumers are bare.
+# What: sync all version consumer contracts
+# Why: idempotent; nothing to write if all bare
 # From: Issue #1683 | PR #1858
 _ci_version_sync() {
     _ci_version_walk _ci_version_sync_one
@@ -5624,8 +5624,8 @@ ci_main() {
     fi
     _ci_tmp_init || return "$?"
     _ci_proxy_init || return "$?"
-    # What: check/rust-build/apk-setup need no SOT manifest.
-    # Why: bind-mounted into a build stage with no SOT tree present.
+    # What: skip manifest for build-only commands
+    # Why: bind-mounted stage has no SOT present
     # From: Issue #1683
     case "${command}" in check|rust-build|apk-setup) ;; *) ci_require_manifest || return "$?" ;; esac
     "${fn}" "$@"
@@ -5645,8 +5645,8 @@ _ci_scan_files() {
     local _ci_scan_p _ci_scan_gone=0
     if [ "${#_ci_scan_override[@]}" -gt 0 ]; then
         _ci_scan_in=("${_ci_scan_override[@]}")
-        # What: check-all narrows changed files to check scope.
-        # Why: a changed .md/.bats is no .sh/Dockerfile finding.
+        # What: narrow changed files to check scope
+        # Why: .md/.bats changes don't affect checks
         # From: Issue #1683 | PR #1858
         if [ "${CI_SCAN_SCOPE_FILTER:-0}" = 1 ] && [ "$#" -gt 0 ]; then
             local -A _ci_scan_scope=()
@@ -5664,8 +5664,8 @@ _ci_scan_files() {
     else
         mapfile -t _ci_scan_in < <(git ls-files -- "$@")
     fi
-    # What: keep only files present in the tree; note the rest.
-    # Why: a deleted path has no content; skips stay visible.
+    # What: keep files in tree, skip deleted ones
+    # Why: deleted paths have no content to check
     # From: Issue #1683 | PR #1858
     _ci_scan_out=()
     for _ci_scan_p in "${_ci_scan_in[@]}"; do
@@ -6175,8 +6175,8 @@ _ci_check_if_without_else_status() {
     printf 'if-without-else-status=clean files=%s\n' "${#files[@]}"
 }
 
-# What: Flag a heredoc-fed docker run missing -i.
-# Why: unattached stdin runs nothing yet reports success (AG-VAL-029).
+# What: flag heredoc-fed docker run missing -i
+# Why: unattached stdin runs nothing (AG-VAL-029)
 # From: Issue #1683 | PR #1858
 _ci_check_docker_run_heredoc_stdin() {
     local -a _ci_override=("$@") files=()
@@ -6209,8 +6209,8 @@ _ci_check_docker_run_heredoc_stdin() {
 # Why: unanswered prompt hangs sim to timeout.
 # From: Issue #1176 | PR #1858
 _ci_setup_wizard_rows() {
-    # Emit FLAG\tPROMPT\tHAYSTACK per ask/confirm in setup.sh's wizard region.
-    # FLAG=COND when any if/case encloses the call (one keyword per line).
+    # What: emit ask/confirm prompts from setup wizard
+    # Why: parse wizard rows for prompt/expect drift checks
     local setup="$1" cs_line esac_line wiz_start
     cs_line="$(grep -n -m1 '^case "${1:-install}" in$' "${setup}")" || return 3
     cs_line="${cs_line%%:*}"
@@ -6276,7 +6276,8 @@ _ci_check_setup_prompt_drift() {
     local -a sim_pats=() gpats=()
     for sim in "${sims[@]}"; do
         [ -f "${sim}" ] || { viol+=("expected simulation script not found: ${sim}"); continue; }
-        # Introspection-driven sims (setup.sh list-prompts) hand-encode nothing.
+        # What: introspection-driven sims use list-prompts
+        # Why: no hand-encoded patterns needed here
         if grep -qF 'build_expect_prompt_block' "${sim}"; then
             grep -qF 'spawn bash setup.sh' "${sim}" || viol+=("${sim}: introspection-driven but no 'spawn bash setup.sh'")
             continue
@@ -6290,13 +6291,15 @@ _ci_check_setup_prompt_drift() {
             continue
         fi
         for tcl in "${sim_pats[@]}"; do gpats+=("$(printf '%s' "${tcl}" | sed 's/\[\^\\n\]/./g')"); done
-        # coverage: each unconditional prompt answerable by this sim (#1082/#1175)
+        # What: check if sim covers unconditional prompts
+        # Why: hang-to-timeout on unanswered prompt
         for pair in "${uncond[@]}"; do
             prompt="${pair%%$'\t'*}"; haystack="${pair#*$'\t'}"; covered=0
             for gpat in "${gpats[@]}"; do grep -Eq -- "${gpat}" <<<"${haystack}" && { covered=1; break; }; done
             [ "${covered}" -eq 0 ] && viol+=("${sim}: no expect_prompt matches setup.sh unconditional prompt '${prompt}' (#1082/#1175: would hang to timeout)")
         done
-        # staleness: each hand-encoded pattern still matches a real prompt
+        # What: detect stale pattern-matches
+        # Why: patterns must match current prompts
         for tcl in "${gpats[@]}"; do
             matched=0
             for haystack in "${all_prompts[@]}"; do grep -Eq -- "${tcl}" <<<"${haystack}" && { matched=1; break; }; done
@@ -6431,8 +6434,8 @@ _ci_check_pr_template() {
             found && /^## / {exit}
             found {print}
         ' <<<"${body}")"
-        # Strips <!-- ... --> (may span lines) and ``` fence markers so an
-        # untouched template placeholder counts as empty, not "non-empty".
+        # What: strip HTML comments and code fence markers
+        # Why: detect empty vs placeholder-only sections
         stripped="$(awk '
             { line=$0 }
             !incm && line ~ /<!--/ && line ~ /-->/ { sub(/<!--.*-->/, "", line) }
@@ -6541,8 +6544,8 @@ _ci_check_pr_tracking_metadata() {
     fi
     local -a errs=() warns=()
     local label_count
-    # What: unset input is a wiring fault, empty is a PR gap.
-    # Why: never report missing metadata the PR actually has.
+    # What: unset input is wiring, empty is PR gap
+    # Why: avoid false PR metadata failures
     # From: Issue #1683 | PR #1858
     if [ -z "${PR_LABELS_JSON+x}" ]; then
         errs+=("PR labels not provided to the check (workflow wiring).")
@@ -6953,7 +6956,7 @@ _ci_check_governance_guards() {
 
 # What: Container names stay in lockstep repo-wide.
 # Why: Socket-proxy allowlist gates Docker-API access.
-# From: Issue #1683 | Issue #454 | Issue #377 | Issue #1486
+# From: Issue #1683
 _ci_check_naming_consistency() {
     local root="${1:-${CI_REPO_ROOT}}"
     local -a compose_files=("${root}/deploy/prod/docker-compose.yml" "${root}/deploy/quickstart/docker-compose.yml")
@@ -7385,8 +7388,8 @@ _ci_dockerfile_final_image() {
                 if sot_val="$(_ci_sot_base_image_arg "${name}")"; then
                     global_args["${name}"]="${sot_val}"
                 else
-                    # What: leave a non-base-image ARG opaque here.
-                    # Why: builder-stage ARGs are not final bases.
+                    # What: leave non-base-image ARGs opaque
+                    # Why: builder-stage ARGs are not bases
                     # From: Issue #1683
                     break
                 fi
@@ -7407,8 +7410,8 @@ _ci_dockerfile_final_image() {
         ci_log "[CI-ERROR-CHECK-0031]" "path=\"${dockerfile}\" reason=\"no FROM instruction found\""
         return 2
     fi
-    # What: only the final base image must fully resolve.
-    # Why: builder-stage ARGs (BUILD_TOOLS_IMAGE) stay opaque.
+    # What: resolve only final base image
+    # Why: builder-stage ARGs (BUILD_TOOLS_IMAGE) opaque
     # From: Issue #1683
     if [[ "${final_image}" == *'$'* ]]; then
         ci_log "[CI-ERROR-CHECK-0031]" "path=\"${dockerfile}\" reason=\"unresolved ARG in final FROM: ${final_image}\""
@@ -7663,7 +7666,7 @@ _ci_check_idempotence_test_coverage() {
 
 # What: Fail unless prod install paths stay prebuilt-only.
 # Why: docs/release-versioning: prod runs prebuilt images.
-# From: Issue #1683 | PR #1858 (VALIDATE_PREBUILT subset)
+# From: Issue #1683 | PR #1858
 _ci_check_prebuilt_prod() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local -a viol=()
@@ -7682,7 +7685,7 @@ _ci_check_prebuilt_prod() {
 
 # What: Check prod state derives from LANCACHE_STATE_DIR.
 # Why: AG-SETUP-001: LANCACHE_STATE_DIR is state root.
-# From: Issue #1683 | PR #1858 (VALIDATE_PREBUILT subset)
+# From: Issue #1683 | PR #1858
 _ci_check_prod_state_wiring() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local compose="${repo_root}/deploy/prod/docker-compose.yml"
@@ -7720,8 +7723,8 @@ _ci_compose_config_ok() {
         [ -n "${env_file}" ] && args+=(--env-file "${env_file}")
         args+=(-f "${file}")
         [ -n "${profile}" ] && args+=(--profile "${profile}")
-        # What: no .env -> render with the SOT placeholder env.
-        # Why: shell env would mask a committed --env-file.
+        # What: use SOT env when no .env present
+        # Why: shell env would mask --env-file
         # From: Issue #1683 | PR #1858
         [ -n "${env_file}" ] || read -ra fixture <<< "$(_ci_manifest_scalar '^  compose_validation_env:[[:space:]]')"
         out="$(env "${fixture[@]}" docker compose "${args[@]}" config --quiet 2>&1)" || { printf '%s\n' "${out}"; return 1; }
@@ -8004,8 +8007,8 @@ _ci_check_setup_keys_kea() {
     if grep -Fq 'nmap --script broadcast-dhcp-discover -e any' "${su}"; then
         viol+=("setup.sh must not pass -e any to nmap; invalid interface fails the preflight")
     fi
-    # What: nmap must be in the SOT dhcp package list.
-    # Why: the SOT owns apk lists; the Dockerfile consumes it.
+    # What: nmap in SOT dhcp packages
+    # Why: SOT owns apk lists; Dockerfile consumes
     # From: Issue #1683 | PR #1858
     local dhcp_pkgs
     dhcp_pkgs="$(_ci_block_entry_list services dhcp packages)"
@@ -8149,7 +8152,7 @@ _ci_generate_vex() {
 
 # What: Fail unless generate-vex.sh emits valid OpenVEX.
 # Why: catch VEX generator bugs before post-merge discovery.
-# From: Issue #1683 | PR #1858 (absorbs check-vex-drift.sh)
+# From: Issue #1683 | PR #1858
 _ci_check_vex_drift() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local trivyignore="${repo_root}/.trivyignore.yaml"
@@ -8446,7 +8449,7 @@ _ci_trivy_value_ok() {
 
 # What: Deny direct aquasecurity/trivy-action call sites.
 # Why: bypasses the retry/auth/mirror wrapper (AG-VAL-029).
-# From: Issue #1535 | Issue #1683
+# From: Issue #1683
 _ci_check_trivy_action_direct_usage() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local allowed=".github/actions/aquasecurity-trivy-action-centralized-version/action.yml"
@@ -8710,7 +8713,7 @@ _ci_check_no_source_compiled_tools() {
 
 # What: shellcheck changed shell scripts (§98).
 # Why: one owner; SOT build-tools image.
-# From: Issue #1683 | Issue #1095
+# From: Issue #1683
 _ci_check_shellcheck() {
     local -a changed=() files=()
     _ci_collect_changed changed "$@"
@@ -8764,7 +8767,7 @@ _ci_check_cargo_audit() {
     fi
     # What: advisories/warnings fail (belt+braces).
     # Why: --deny warnings catches; never pass.
-    # From: Issue #1683 | Issue #1535
+    # From: Issue #1683
     if [ "${rc}" -ne 0 ] || grep -Eiq '(^|[[:space:]])warning:' <<< "${out}"; then
         ci_error "[CI-ERROR-CHECK-0055]" "reason=\"cargo audit found advisories or warnings\"" "${out}"
         return 1
