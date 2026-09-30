@@ -147,7 +147,6 @@ runs:
     - id: push
       name: Push built image to GHCR
       if: inputs.push == 'true'
-      continue-on-error: true
       shell: bash
       env:
         GHCR_REGISTRY: ${{ inputs.registry }}
