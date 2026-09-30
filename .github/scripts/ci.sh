@@ -6350,8 +6350,8 @@ _ci_check_setup_prompt_drift() {
 }
 
 # What: Check a PR title's Conventional-Commit form.
-# Why: types fixed; scopes derive from the SOT service list.
-# From: Issue #1683
+# Why: SOT pr_policy + targets own the type/scope sets.
+# From: Issue #1683 | PR #1858
 _ci_check_pr_title() {
     local title="${1:-${PR_TITLE:-}}"
     if [ "${PR_AUTHOR:-}" = "dependabot[bot]" ]; then
@@ -6360,12 +6360,13 @@ _ci_check_pr_title() {
     if [ -z "${title}" ]; then
         ci_log "[CI-ERROR-CHECK-0012]" "reason=\"no PR title given\""; return 2
     fi
-    local types="feat fix docs refactor perf test build ci chore style revert security"
-    local scopes
-    # What: "tests" added -- the authoritative scope set.
-    # Why: AG-GH-018 requires matching the checker script.
-    # From: Issue #1683 | PR #1858
-    scopes="$(ci_services) nats build-tools setup ci governance docs scripts tests"
+    local types scopes
+    types="$(_ci_block_entry_list pr_policy "" title_types)"
+    if [ -z "${types}" ]; then
+        ci_log "[CI-ERROR-CHECK-0012]" "reason=\"no SOT pr_policy.title_types; FAIL CLOSED\""; return 2
+    fi
+    scopes="$(ci_build_targets; _ci_block_keys external_services; _ci_block_entry_list pr_policy "" title_scopes_extra)"
+    types="${types//$'\n'/ }"
     scopes="${scopes//$'\n'/ }"
     local pat='^([a-zA-Z]+)(\(([a-z0-9-]+)\))?(!)?:[[:space:]](.+)$'
     local -a errs=()
@@ -6572,10 +6573,18 @@ _ci_check_workflow_line_limit() {
 # Why: 2026-07-13 sweep found all three missing.
 # From: Issue #1683
 _ci_check_pr_tracking_metadata() {
-    local pr_number="${PR_NUMBER:-}" repo="${REPO:-}"
-    local project_number="${PROJECT_NUMBER:-6}" project_owner="${PROJECT_OWNER:-wiki-mod}"
+    local pr_number="${PR_NUMBER:-}" repo="${REPO:-}" project_number project_owner
     if [ -z "${pr_number}" ] || [ -z "${repo}" ]; then
         ci_log "[CI-ERROR-CHECK-0017]" "reason=\"PR_NUMBER and REPO are required\""
+        return 2
+    fi
+    # What: board number from the SOT; its owner is the repo's.
+    # Why: one CI policy owner (AG-GH-008); no owner literal.
+    # From: Issue #1683 | PR #1858
+    project_number="$(_ci_block_entry_field pr_policy "" project_number)"
+    project_owner="${repo%%/*}"
+    if ! [[ "${project_number}" =~ ^[0-9]+$ ]]; then
+        ci_log "[CI-ERROR-CHECK-0017]" "reason=\"no numeric SOT pr_policy.project_number\""
         return 2
     fi
     local -a errs=() warns=()

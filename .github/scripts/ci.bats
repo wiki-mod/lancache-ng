@@ -4812,85 +4812,32 @@ STUBEOF
     [[ "${output}" == *"NewPrompt?"* ]]
 }
 
-@test "check pr-title accepts valid conventional, warns by default on bad scope/format" {
-    # What: ci.sh owns the title taxonomy; bats calls it.
-    # Why: AG-GH-018: warn is the default, not a hard fail.
+@test "check pr-title: SOT types, derived scopes, warn/block/draft modes" {
+    # What: grammar + SOT sets; warn default, block, draft.
+    # Why: AG-GH-018: one policy owner; warn is the default.
     # From: Issue #1683 | PR #1858
-    run bash "${CI_SH}" check pr-title "feat(proxy): add ipv6 lease support"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"pr-title=ok"* ]]
-    run bash "${CI_SH}" check pr-title "feat(bogus): x"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"pr-title=warn"* ]]
-    run bash "${CI_SH}" check pr-title "not conventional at all"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0013"* ]]
-    [[ "${output}" == *"pr-title=warn"* ]]
-}
-
-@test "check pr-title skips dependabot and fails closed with none" {
-    # What: dependabot skip and the no-title-given branches.
-    # Why: both existed in code with no prior test coverage.
-    # From: Issue #1683 | PR #1858
-    PR_AUTHOR='dependabot[bot]' run bash "${CI_SH}" check pr-title "anything at all"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"pr-title=skip-dependabot"* ]]
-    run bash "${CI_SH}" check pr-title
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0012"* ]]
-}
-
-@test "check pr-title accepts breaking-marker, optional scope, security type, CRLF" {
-    # What: !/no-scope/scope+!/security/CRLF titles pass.
-    # Why: Preserves grammar coverage.
-    # From: Issue #1683 | PR #1858
-    local t
-    for t in "fix: correct cache key" "feat!: drop legacy flag" "fix(build-tools)!: bump base" "security: patch cve" "security(proxy): patch cve"; do
-        run bash "${CI_SH}" check pr-title "${t}"
-        [ "${status}" -eq 0 ] || { echo "rejected: ${t} -> ${output}"; false; }
-        [[ "${output}" == *"pr-title=ok"* ]]
+    local m="${BATS_TEST_TMPDIR}/m.yml" t
+    printf 'services:\n  svc-a:\n    context: a\nbuild_toolchain:\n  tc-x:\n    context: t\nexternal_services:\n  ext-y:\n    image: i\npr_policy:\n  title_types: [feat, fix, security]\n  title_scopes_extra: [area-z]\n' > "${m}"
+    for t in "feat(svc-a): x" "fix(tc-x)!: y" "feat(ext-y): x" "feat(area-z): x" \
+             "security: z" "feat!: x" $'feat(svc-a): crlf\r'; do
+        CI_MANIFEST="${m}" run bash "${CI_SH}" check pr-title "${t}"
+        [ "${status}" -eq 0 ]; [[ "${output}" == *"pr-title=ok"* ]] || { echo "want ok: ${t}"; false; }
     done
-    PR_TITLE=$'feat(dns): ok\r' run bash "${CI_SH}" check pr-title
-    [ "${status}" -eq 0 ]; [[ "${output}" == *"pr-title=ok"* ]]
-}
-
-@test "check pr-title warns (default mode) on a disallowed type" {
-    # What: a title matching the pattern but a bad type.
-    # Why: distinct from the not-conventional regex miss.
-    # From: Issue #1683 | PR #1858
-    run bash "${CI_SH}" check pr-title "bogus(proxy): x"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"type 'bogus' not allowed"* ]]
-    [[ "${output}" == *"pr-title=warn"* ]]
-}
-
-@test "check pr-title block mode fails a non-compliant title" {
-    # What: LINT_MODE=block must hard-fail (AG-GH-018 gate).
-    # Why: this branch had zero coverage before this wave.
-    # From: Issue #1683 | PR #1858
-    PR_TITLE_LINT_MODE=block run bash "${CI_SH}" check pr-title "not conventional at all"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0013"* ]]
-    [[ "${output}" == *"reason=\"PR title convention\""* ]]
-}
-
-@test "check pr-title draft PR warns non-blocking even in block mode" {
-    # What: AG-GH-018: draft always overrides block mode.
-    # Why: draft titles are expected to settle before ready.
-    # From: Issue #1683 | PR #1858
-    PR_TITLE_LINT_MODE=block PR_DRAFT=true \
-        run bash "${CI_SH}" check pr-title "not conventional at all"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"pr-title=warn-draft"* ]]
-}
-
-@test "check pr-title allows the tests scope" {
-    # What: "tests" was missing from ci.sh's scope set.
-    # Why: the authoritative checker script allows it too.
-    # From: Issue #1683 | PR #1858
-    run bash "${CI_SH}" check pr-title "test(tests): add coverage"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"pr-title=ok"* ]]
+    for t in "feat(bogus): x" "chore(svc-a): x" "not conventional"; do
+        CI_MANIFEST="${m}" run bash "${CI_SH}" check pr-title "${t}"
+        [ "${status}" -eq 0 ]; [[ "${output}" == *"CI-ERROR-CHECK-0013"*"pr-title=warn"* ]]
+        CI_MANIFEST="${m}" PR_TITLE_LINT_MODE=block run bash "${CI_SH}" check pr-title "${t}"
+        [ "${status}" -eq 1 ]; [[ "${output}" == *"reason=\"PR title convention\""* ]]
+        CI_MANIFEST="${m}" PR_TITLE_LINT_MODE=block PR_DRAFT=true run bash "${CI_SH}" check pr-title "${t}"
+        [ "${status}" -eq 0 ]; [[ "${output}" == *"pr-title=warn-draft"* ]]
+    done
+    CI_MANIFEST="${m}" PR_AUTHOR='dependabot[bot]' run bash "${CI_SH}" check pr-title "anything"
+    [[ "${output}" == *"pr-title=skip-dependabot"* ]]
+    CI_MANIFEST="${m}" run bash "${CI_SH}" check pr-title
+    [ "${status}" -eq 2 ]; [[ "${output}" == *"CI-ERROR-CHECK-0012"* ]]
+    sed -i '/title_types/d' "${m}"
+    CI_MANIFEST="${m}" run bash "${CI_SH}" check pr-title "feat: x"
+    [ "${status}" -eq 2 ]; [[ "${output}" == *"no SOT pr_policy.title_types"* ]]
 }
 
 @test "check stable-external-images fails a non-digest external image" {
@@ -4993,114 +4940,66 @@ Fixes the thing.
     [[ "${output}" == *"CI-ERROR-CHECK-0016"* ]]
 }
 
-@test "check pr-tracking-metadata requires PR context, labels, and milestone" {
-    # What: ci.sh owns AG-GH-008 metadata gate.
-    # Why: Metadata gaps must fail before network access.
-    # From: Issue #1683
-    run bash "${CI_SH}" check pr-tracking-metadata
+@test "check pr-tracking-metadata: context, labels, milestone, fork, draft" {
+    # What: AG-GH-008 gaps fail; fork/draft warn; SOT board.
+    # Why: never report metadata the PR has; wiring != gap.
+    # From: Issue #1683 | PR #1858
+    local m="${BATS_TEST_TMPDIR}/m.yml"
+    printf 'pr_policy:\n  project_number: 7\n' > "${m}"
+    export CI_MANIFEST="${m}" PR_NUMBER=12 REPO=owner/fixture-repo
+    PR_NUMBER='' run bash "${CI_SH}" check pr-tracking-metadata
     [ "${status}" -eq 2 ]
-    PR_NUMBER=12 REPO=wiki-mod/lancache-ng PR_LABELS_JSON='[]' \
-        run bash "${CI_SH}" check pr-tracking-metadata
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0017"* ]]
-    PR_NUMBER=12 REPO=wiki-mod/lancache-ng PR_LABELS_JSON='["bug"]' PR_MILESTONE_TITLE=v1 \
-        run bash "${CI_SH}" check pr-tracking-metadata
-    [ "${status}" -eq 0 ]
-    PR_NUMBER=12 REPO=wiki-mod/lancache-ng run bash "${CI_SH}" check pr-tracking-metadata
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"labels not provided to the check"* ]]
+    PR_LABELS_JSON='[]' run bash "${CI_SH}" check pr-tracking-metadata
+    [ "${status}" -eq 1 ]; [[ "${output}" == *"No labels set"* ]]
+    run bash "${CI_SH}" check pr-tracking-metadata
+    [ "${status}" -eq 1 ]; [[ "${output}" == *"labels not provided to the check"* ]]
     [[ "${output}" != *"No labels set"* ]]
+    PR_LABELS_JSON='["bug"]' PR_MILESTONE_TITLE=v1 run bash "${CI_SH}" check pr-tracking-metadata
+    [ "${status}" -eq 0 ]; [[ "${output}" == *"no read:project token"* ]]
+    PR_LABELS_JSON='["bug"]' PR_MILESTONE_TITLE=v1 PR_IS_FORK=true run bash "${CI_SH}" check pr-tracking-metadata
+    [ "${status}" -eq 0 ]; [[ "${output}" == *"fork PRs get no repo secrets"* ]]
+    PR_DRAFT=true PR_LABELS_JSON='[]' run bash "${CI_SH}" check pr-tracking-metadata
+    [ "${status}" -eq 0 ]; [[ "${output}" == *"pr-tracking-metadata=warn-draft"* ]]
+    printf 'pr_policy:\n  project_number: x\n' > "${m}"
+    PR_LABELS_JSON='["bug"]' PR_MILESTONE_TITLE=v1 run bash "${CI_SH}" check pr-tracking-metadata
+    [ "${status}" -eq 2 ]; [[ "${output}" == *"no numeric SOT pr_policy.project_number"* ]]
 }
 
-@test "check pr-tracking-metadata fails when the project-board token is rejected" {
-    # What: Rejected GH_TOKEN is config problem, fails loud.
-    # Why: Distinguishes missing vs. bad token.
-    # From: Issue #1683
-    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+@test "check pr-tracking-metadata board lookup: rejected, hit, miss" {
+    # What: 401/403 fails; 200 hit on the SOT number passes.
+    # Why: board owner is the repo owner, never a literal.
+    # From: Issue #1683 | PR #1858
+    local bin="${BATS_TEST_TMPDIR}/bin" m="${BATS_TEST_TMPDIR}/m.yml" mode
+    mkdir -p "${bin}"
+    printf 'pr_policy:\n  project_number: 7\n' > "${m}"
     cat > "${bin}/curl" <<'EOF'
 #!/usr/bin/env bash
-out="" prev=""
+out="" prev="" data=""
 for a in "$@"; do
     [ "${prev}" = "-o" ] && out="${a}"
+    [ "${prev}" = "-d" ] && data="${a}"
     prev="${a}"
 done
-[ -n "${out}" ] && : > "${out}"
-printf '403'
-EOF
-    chmod +x "${bin}/curl"
-    PATH="${bin}:${PATH}" PR_NUMBER=12 REPO=wiki-mod/lancache-ng PR_LABELS_JSON='["bug"]' \
-        PR_MILESTONE_TITLE=v1 GH_TOKEN=badtoken \
-        run bash "${CI_SH}" check pr-tracking-metadata
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0017"* ]]
-    [[ "${output}" == *"rejected"* ]]
-}
-
-@test "check pr-tracking-metadata warns fork-specific with no token" {
-    # What: PR_IS_FORK=true never reached by any prior test.
-    # Why: forks get no secrets; warn, don't pass silently.
-    # From: Issue #1683 | PR #1858
-    PR_NUMBER=12 REPO=wiki-mod/lancache-ng PR_LABELS_JSON='["bug"]' \
-        PR_MILESTONE_TITLE=v1 PR_IS_FORK=true \
-        run bash "${CI_SH}" check pr-tracking-metadata
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"fork PRs get no repo secrets"* ]]
-}
-
-@test "check pr-tracking-metadata passes on a real 200 board hit" {
-    # What: the GH_TOKEN-set 200-success path was untested.
-    # Why: only its 403-rejected sibling had any coverage.
-    # From: Issue #1683 | PR #1858
-    local bin="${BATS_TEST_TMPDIR}/bin2"; mkdir -p "${bin}"
-    cat > "${bin}/curl" <<'EOF'
-#!/usr/bin/env bash
-out="" prev=""
-for a in "$@"; do
-    [ "${prev}" = "-o" ] && out="${a}"
-    prev="${a}"
-done
-[ -n "${out}" ] && printf '{"data":{"repository":{"pullRequest":{"projectItems":{"nodes":[{"project":{"number":6}}]}}}}}' > "${out}"
+case "${MODE}" in
+    rejected) : > "${out}"; printf '403'; exit 0 ;;
+    hit) n=7 ;;
+    miss) n=99 ;;
+esac
+[[ "${data//[[:space:]]/}" == *'"owner":"owner"'* ]] || n=0
+printf '{"data":{"repository":{"pullRequest":{"projectItems":{"nodes":[{"project":{"number":%s}}]}}}}}' "${n}" > "${out}"
 printf '200'
 EOF
     chmod +x "${bin}/curl"
-    PATH="${bin}:${PATH}" PR_NUMBER=12 REPO=wiki-mod/lancache-ng PR_LABELS_JSON='["bug"]' \
-        PR_MILESTONE_TITLE=v1 GH_TOKEN=goodtoken \
-        run bash "${CI_SH}" check pr-tracking-metadata
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"pr-tracking-metadata=ok"* ]]
-}
-
-@test "check pr-tracking-metadata fails a real 200 board miss" {
-    # What: 200 response, PR on no matching project item.
-    # Why: the "not on project board" branch was untested.
-    # From: Issue #1683 | PR #1858
-    local bin="${BATS_TEST_TMPDIR}/bin3"; mkdir -p "${bin}"
-    cat > "${bin}/curl" <<'EOF'
-#!/usr/bin/env bash
-out="" prev=""
-for a in "$@"; do
-    [ "${prev}" = "-o" ] && out="${a}"
-    prev="${a}"
-done
-[ -n "${out}" ] && printf '{"data":{"repository":{"pullRequest":{"projectItems":{"nodes":[]}}}}}' > "${out}"
-printf '200'
-EOF
-    chmod +x "${bin}/curl"
-    PATH="${bin}:${PATH}" PR_NUMBER=12 REPO=wiki-mod/lancache-ng PR_LABELS_JSON='["bug"]' \
-        PR_MILESTONE_TITLE=v1 GH_TOKEN=goodtoken \
-        run bash "${CI_SH}" check pr-tracking-metadata
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"Not on project board"* ]]
-}
-
-@test "check pr-tracking-metadata warns non-blocking on a draft PR" {
-    # What: a draft PR missing metadata warns but exits 0.
-    # Why: Metadata settles in draft.
-    # From: Issue #1683 | PR #1858
-    PR_DRAFT=true PR_NUMBER=12 REPO=wiki-mod/lancache-ng PR_LABELS_JSON='[]' \
-        run bash "${CI_SH}" check pr-tracking-metadata
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"pr-tracking-metadata=warn-draft"* ]]
+    for mode in rejected hit miss; do
+        MODE="${mode}" PATH="${bin}:${PATH}" CI_MANIFEST="${m}" PR_NUMBER=12 REPO=owner/fixture-repo \
+            PR_LABELS_JSON='["bug"]' PR_MILESTONE_TITLE=v1 GH_TOKEN=t \
+            run bash "${CI_SH}" check pr-tracking-metadata
+        case "${mode}" in
+            rejected) [ "${status}" -eq 1 ]; [[ "${output}" == *"rejected (HTTP 403)"* ]] ;;
+            hit) [ "${status}" -eq 0 ]; [[ "${output}" == *"pr-tracking-metadata=ok"* ]] ;;
+            miss) [ "${status}" -eq 1 ]; [[ "${output}" == *"Not on project board #7 (owner)"* ]] ;;
+        esac
+    done
 }
 
 # What: fixture repo + a fake action-manifest resolver.
