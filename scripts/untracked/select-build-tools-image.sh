@@ -22,6 +22,10 @@ source "$script_dir/../lib/ghcr-retry.sh"
 source "$script_dir/../lib/build-tools-channel.sh"
 # shellcheck source=scripts/lib/docker-buildx-retry.sh
 source "$script_dir/../lib/docker-buildx-retry.sh"
+# shellcheck source=scripts/lib/staging-ancestor-fallback.sh
+source "$script_dir/../lib/staging-ancestor-fallback.sh"
+# shellcheck source=scripts/lib/staging-poll-defaults.sh
+source "$script_dir/../lib/staging-poll-defaults.sh"
 
 repository="${GITHUB_REPOSITORY:-wiki-mod/lancache-ng}"
 
@@ -40,16 +44,29 @@ repository="${GITHUB_REPOSITORY:-wiki-mod/lancache-ng}"
 channel_ref="${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-}}"
 build_tools_channel="$(resolve_build_tools_channel "$channel_ref")"
 published_image="ghcr.io/${repository}/build-tools:${build_tools_channel}"
+pr_staging_image="${BUILD_TOOLS_PR_STAGING_IMAGE:-}"
 build_tools_context="${BUILD_TOOLS_CONTEXT:-tools/build-tools}"
 fallback_image="${FALLBACK_IMAGE:-lancache-ng-build-tools-validation:${GITHUB_SHA:-local}-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}}"
 event_name="${GITHUB_EVENT_NAME:-${EVENT_NAME:-}}"
+pr_head_sha="${GITHUB_EVENT_PULL_REQUEST_HEAD_SHA:-}"
 head_repository="${GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME:-${HEAD_REPOSITORY:-}}"
 base_repository="${GITHUB_REPOSITORY:-${BASE_REPOSITORY:-}}"
 require_published="${BUILD_TOOLS_REQUIRE_PUBLISHED:-false}"
-pull_log="$(mktemp)"
+# What: records image-pull output below /var/tmp.
+# Why: self-hosted /tmp is RAM-backed and risks OOM.
+# From: Issue #1860 | PR #1872
+pull_log="$(mktemp -p /var/tmp lancache-build-tools-pull.XXXXXX)"
+
+# What: selects the verified PR staging manifest when supplied.
+# Why: consumers must not use a stale channel during PR validation.
+# From: Issue #1860 | PR #1872
+if [[ -n "$pr_staging_image" ]]; then
+  published_image="$pr_staging_image"
+fi
 
 cleanup() {
   rm -f "$pull_log"
+  rm -rf "${SAF_ANCESTOR_RUN_CACHE_DIR:-}"
 }
 trap cleanup EXIT
 
@@ -58,56 +75,33 @@ fail() {
   exit 1
 }
 
-# smoke_test_image verifies the provided image contains all required CI tools (cargo,
-# rustc, distcc, docker, etc.) before it is trusted. The published channel tag (:latest or
-# :nightly) is mutable and could become stale, broken, or missing tools between publication
-# and use, so explicit verification is preferable to assuming the tag is current and valid.
-smoke_test_image() {
-  local image="$1"
+build_tools_pr_producer_is_active() {
+  [[ -n "$pr_head_sha" ]] || return 1
+  saf_event_has_incomplete_run "$repository" "$pr_head_sha" "pull_request" "build-tools.yml"
+}
 
-  # EXTRA_REQUIRED_TOOLS lets a specific caller (e.g. the coverage job, which
-  # needs cargo-tarpaulin) widen this check without forcing every other
-  # consumer of this script (cargo-audit jobs, the plain compose-validation
-  # path) to also require a tool they never use.
-  docker run --rm -e "EXTRA_REQUIRED_TOOLS=${EXTRA_REQUIRED_TOOLS:-}" "$image" \
+staging_poll_set_defaults_for_workflow_changed "false"
+build_tools_wait_seconds="${BUILD_TOOLS_STAGING_POLL_HARD_CEILING_SECONDS:-$default_poll_hard_ceiling_seconds}"
+build_tools_poll_interval_seconds="${BUILD_TOOLS_STAGING_POLL_INTERVAL_SECONDS:-15}"
+
+smoke_test_image() {
+  local image="$1" required_tools
+  local -a required_tool_list
+
+  mapfile -t required_tool_list < <(
+    bash "$script_dir/../tracked/check-build-tools-smoke-coverage.sh" --print-required-tools
+  )
+  required_tools="${required_tool_list[*]}"
+  : "${required_tools:?canonical build-tools inventory is empty}"
+
+  docker run --rm \
+    -e "REQUIRED_TOOLS=$required_tools" \
+    -e "EXTRA_REQUIRED_TOOLS=${EXTRA_REQUIRED_TOOLS:-}" \
+    "$image" \
     timeout --kill-after=30 --signal=KILL 300 bash -lc '
     set -euo pipefail
 
-    required_tools=(
-      bash
-      cargo
-      rustc
-      rustup
-      rustfmt
-      clippy-driver
-      sccache
-      ccache
-      cargo-audit
-      shellcheck
-      actionlint
-      bats
-      shellspec
-      distcc
-      distcc-pump
-      docker
-      # What: verifies gh is present in the image.
-      # Why: gc-pr-staging-images.sh requires gh at runtime.
-      # From: Issue #1095.
-      gh
-      jq
-      dig
-      ip
-      openssl
-      rsync
-      envsubst
-      expect
-      tcpdump
-    )
-
-    # What: dhclient is opt-in via EXTRA_REQUIRED_TOOLS.
-    # Why: no Alpine apk package ships dhclient; would break
-    # every caller once Alpine ships. Three callers opt in.
-    # From: Issue #1095
+    read -r -a required_tools <<< "${REQUIRED_TOOLS:?canonical build-tools inventory is required}"
 
     if [[ -n "${EXTRA_REQUIRED_TOOLS:-}" ]]; then
       read -ra extra_tools <<<"$EXTRA_REQUIRED_TOOLS"
@@ -115,33 +109,17 @@ smoke_test_image() {
     fi
 
     for tool in "${required_tools[@]}"; do
+      if [[ "$tool" == "parallel" ]] && ! command -v "$tool" >/dev/null; then
+        echo "::notice::parallel is unavailable; Bats consumers will run serially." >&2
+        continue
+      fi
       command -v "$tool" >/dev/null
     done
-
     docker --version >/dev/null
     docker compose version >/dev/null
-    # docker buildx is verified here now (issue #791). It was deliberately
-    # deferred while #789 first added buildx to tools/build-tools/Dockerfile,
-    # because this strict path (BUILD_TOOLS_REQUIRE_PUBLISHED callers have no
-    # local-build fallback -- see the strict-mode branch below) trusts the
-    # already-published :latest/:nightly image, which could not contain buildx
-    # until after #789 merged and republished it. That has since happened, so
-    # gating on it now no longer creates the chicken-and-egg failure #791
-    # documents. The setup.sh assert_resolved_image_tag_platform_supported
-    # check hard-requires buildx (issue #787), so a published image silently
-    # missing it must fail this smoke test rather than surface deeper.
-    # (No apostrophes in these comments: this whole block is a single-quoted
-    # bash -lc argument, so a stray quote would terminate it -- see #833.)
     docker buildx version >/dev/null
     shellcheck --version >/dev/null
     actionlint --version >/dev/null
-    # bats and shellspec are the two test-runner tools real consumer suites
-    # depend on (tests/bats/*.bats via `bats tests/bats`; tests/shellspec via
-    # shellspec). #790: the smoke test asserted neither, even though both are
-    # installed and build-time-verified in tools/build-tools/Dockerfile --
-    # exactly the derive-not-from-real-requirements drift #822 Pattern G
-    # names. scripts/tracked/check-build-tools-smoke-coverage.sh now guards against
-    # this list drifting from the Dockerfile verification list again.
     bats --version >/dev/null
     shellspec --version >/dev/null
     cargo-audit --version >/dev/null
@@ -221,6 +199,17 @@ if [[ "$require_published" = "true" ]]; then
   if ghcr_retry ghcr.io "${GHCR_RETRY_USERNAME:-}" "${GHCR_RETRY_PASSWORD:-}" -- docker pull "$published_image" >"$pull_log" 2>&1 && smoke_test_image "$published_image"; then
     published_image_reference "$published_image"
     exit 0
+  fi
+  if [[ -n "$pr_staging_image" && "$event_name" == "pull_request" ]] && build_tools_pr_producer_is_active; then
+    deadline=$((SECONDS + build_tools_wait_seconds))
+    while (( SECONDS < deadline )) && build_tools_pr_producer_is_active; do
+      echo "::notice::build-tools.yml is active for PR head $pr_head_sha; waiting for its staging image." >&2
+      sleep "$build_tools_poll_interval_seconds"
+      if ghcr_retry ghcr.io "${GHCR_RETRY_USERNAME:-}" "${GHCR_RETRY_PASSWORD:-}" -- docker pull "$published_image" >"$pull_log" 2>&1 && smoke_test_image "$published_image"; then
+        published_image_reference "$published_image"
+        exit 0
+      fi
+    done
   fi
   cat "$pull_log" >&2
   fail "published build-tools image is required for downstream jobs but was not pullable or did not satisfy smoke checks"

@@ -83,12 +83,14 @@ netshoot_image="nicolaka/netshoot@sha256:b09d9b21381f47a79b3cbcb30da25266dc17186
 
 cleanup() {
     local status=$?
+    local cleanup_status=0
     # Issue #681: the held-open live connection container isn't part of the
     # compose project (it's a plain `docker run`, same as run_client's
     # ephemeral clients), so it needs its own teardown, separate from the
     # compose project `down` below.
-    validation_simulation_teardown "$compose_project" "$work_dir" docker rm -f "$live_container_name"
-    exit "$status"
+    validation_simulation_teardown "$compose_project" "$work_dir" docker rm -f "$live_container_name" || cleanup_status=$?
+    (( status != 0 )) && exit "$status"
+    exit "$cleanup_status"
 }
 trap cleanup EXIT
 

@@ -33,12 +33,15 @@ runs:
         PR_NUMBER: ${{ github.event.pull_request.number }}
       run: |
         set -euo pipefail
-        gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json title -q .title > /tmp/pr-title-live.txt
+        title_file="${RUNNER_TEMP:-/var/tmp}/lancache-pr-title-live.txt"
+        gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json title -q .title > "$title_file"
+        printf 'title_file=%s\n' "$title_file" >> "$GITHUB_OUTPUT"
 
     - name: Validate PR title convention
       shell: bash
       env:
         PR_DRAFT: ${{ github.event.pull_request.draft }}
+        PR_TITLE_FILE: ${{ steps.live-title.outputs.title_file }}
         # What: PR author login for dependabot exemption.
         # Why: check script skips linting for dependabot[bot].
         # From: PR #1467
@@ -50,7 +53,7 @@ runs:
         BUILD_TOOLS_IMAGE: ${{ inputs.build-tools-image }}
       run: |
         set -euo pipefail
-        pr_title="$(cat /tmp/pr-title-live.txt)"
+        pr_title="$(cat "$PR_TITLE_FILE")"
         docker run --rm \
           --user "$(id -u):$(id -g)" \
           -v "$PWD:/work:ro" \

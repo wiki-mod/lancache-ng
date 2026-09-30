@@ -97,10 +97,8 @@
 # function fails the same way it already does for any other missing-label
 # case -- fail-closed (poll, then error), never a false "fresh".
 #
-# Deliberately does NOT use jq for this: build-push.yml's own coverage-badge
-# step explicitly refuses bare host jq ("Coverage merge must use the
-# selected build-tools image instead of bare host jq/bc", issue #566) and
-# always runs jq inside the pinned build-tools container instead --
+# Deliberately does NOT use jq for this: registry freshness checks must not
+# depend on host tools or an unrelated build step --
 # self-hosted runners are not assumed to have jq (AG-CI-001/AG-VAL-017 list
 # the build-tools image's bundled tools, and jq is not among them). Wrapping
 # this registry read in a full `docker run ... build-tools ...` invocation

@@ -24,8 +24,17 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Prepare job-isolated Docker credentials
+      shell: bash
+      run: |
+        set -euo pipefail
+        docker_config="${DOCKER_CONFIG:-${RUNNER_TEMP:?RUNNER_TEMP is required}/docker-config}"
+        mkdir -p -- "$docker_config"
+        chmod 700 "$docker_config"
+        printf 'DOCKER_CONFIG=%s\n' "$docker_config" >> "$GITHUB_ENV"
     - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
       with:
         registry: ${{ inputs.registry }}
         username: ${{ inputs.username }}
         password: ${{ inputs.password }}
+        logout: false

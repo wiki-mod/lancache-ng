@@ -103,8 +103,6 @@ existing="$(gh issue list --repo "${REPO}" --label "${LABEL}" --state open \
 
 if [ "${OUTCOME}" = "success" ]; then
   if [ -n "${existing}" ]; then
-    ensure_bug_type "${existing}"
-    add_to_project_board "https://github.com/${REPO}/issues/${existing}"
     echo "success: closing standing ${LABEL} issue #${existing}"
     run gh issue comment "${existing}" --repo "${REPO}" \
       --body "Recovered: ${SCOPE} succeeded in ${RUN_URL}. Closing this standing tracking issue automatically; it will re-open if this check fails again."

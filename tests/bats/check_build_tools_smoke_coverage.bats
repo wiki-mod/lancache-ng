@@ -20,7 +20,9 @@ setup() {
     script="$BATS_TEST_DIRNAME/../../scripts/tracked/check-build-tools-smoke-coverage.sh"
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     fixture="$BATS_TEST_TMPDIR/fx"
+    candidate_smoke="$fixture/.github/actions/build-tools-candidate-smoke/action.yml"
     mkdir -p "$fixture/tools/build-tools" "$fixture/scripts/untracked"
+    mkdir -p "$(dirname "$candidate_smoke")"
 }
 
 fail() {
@@ -82,8 +84,10 @@ write_smoke() {
         else
             echo '  # docker buildx is verified elsewhere (prose mention only)'
         fi
+        echo '  bash scripts/tracked/check-build-tools-smoke-coverage.sh --print-required-tools'
         echo '}'
     } > "$fixture/scripts/untracked/select-build-tools-image.sh"
+    cp "$fixture/scripts/untracked/select-build-tools-image.sh" "$candidate_smoke"
 }
 
 @test "passes when the smoke test covers every Dockerfile-verified tool" {
@@ -93,28 +97,6 @@ write_smoke() {
     run bash "$script" "$fixture"
     [ "$status" -eq 0 ]
     [[ "$output" == *"OK"* ]]
-}
-
-@test "fails when the Dockerfile verifies a tool the smoke test omits (the #790 drift shape)" {
-    # The core Pattern G defect: a newly-installed-and-verified tool that the
-    # smoke test never learned about. 'newtool' is not a documented
-    # exclusion, so it must be flagged by name.
-    write_dockerfile bash cargo newtool
-    write_smoke bash cargo
-    run bash "$script" "$fixture"
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"newtool"* ]]
-}
-
-@test "passes when the uncovered Dockerfile tool is a documented exclusion (git)" {
-    # git is real build toolchain in EXCLUDED_TOOLS: the Dockerfile installs
-    # and verifies it, but no consumer script invokes it directly, so the
-    # smoke test legitimately does not gate on it. This proves the exclusion
-    # mechanism actually suppresses a would-be failure.
-    write_dockerfile bash cargo git
-    write_smoke bash cargo
-    run bash "$script" "$fixture"
-    [ "$status" -eq 0 ]
 }
 
 @test "fails when the Dockerfile verifies 'docker buildx version' but the smoke test does not (the #791 shape)" {

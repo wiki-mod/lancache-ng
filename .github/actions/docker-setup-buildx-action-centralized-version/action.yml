@@ -16,7 +16,7 @@ inputs:
     default: ""
   driver:
     required: false
-    default: ""
+    default: "docker-container"
   driver-opts:
     required: false
     default: ""
@@ -31,7 +31,7 @@ inputs:
     default: ""
   use:
     required: false
-    default: ""
+    default: "true"
   name:
     required: false
     default: ""
@@ -46,13 +46,13 @@ inputs:
     default: ""
   keep-state:
     required: false
-    default: ""
+    default: "false"
   cache-binary:
     required: false
-    default: ""
+    default: "true"
   cleanup:
     required: false
-    default: ""
+    default: "true"
 outputs:
   name:
     description: Builder name.
@@ -79,7 +79,7 @@ runs:
   using: composite
   steps:
     - id: setup
-      uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       with:
         version: ${{ inputs.version }}
         driver: ${{ inputs.driver }}
@@ -95,3 +95,22 @@ runs:
         keep-state: ${{ inputs.keep-state }}
         cache-binary: ${{ inputs.cache-binary }}
         cleanup: ${{ inputs.cleanup }}
+    - shell: bash
+      run: |
+        set -euo pipefail
+        source_docker_config="${DOCKER_CONFIG:-${HOME:?}/.docker}"
+        builder_config="$source_docker_config/buildx"
+        workspace_key="$(printf '%s' "${GITHUB_WORKSPACE:?}" | sha256sum | cut -c1-16)"
+        docker_home="${RUNNER_TEMP:?}/docker-home/${GITHUB_RUN_ID:?}/${GITHUB_JOB:?}-${workspace_key}"
+        docker_config="$docker_home/.docker"
+        mkdir -p "$docker_config"
+        chmod 700 "$docker_home" "$docker_config"
+        if [[ -f "$source_docker_config/config.json" ]]; then
+          cp "$source_docker_config/config.json" "$docker_config/config.json"
+          chmod 600 "$docker_config/config.json"
+        fi
+        {
+          printf 'HOME=%s\n' "$docker_home"
+          printf 'DOCKER_CONFIG=%s\n' "$docker_config"
+          printf 'BUILDX_CONFIG=%s\n' "$builder_config"
+        } >> "$GITHUB_ENV"

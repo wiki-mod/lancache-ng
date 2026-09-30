@@ -38,13 +38,6 @@ LABEL org.opencontainers.image.description="LanCache-NG-NTP: chrony-based NTP se
 # What: explicit proxy build-args, no default value set
 # Why: routes self-hosted downloads via the LAN proxy
 # From: Issue #1781 | PR #1783
-ARG HTTP_PROXY
-ARG HTTPS_PROXY
-ARG NO_PROXY
-ARG http_proxy
-ARG https_proxy
-ARG no_proxy
-
 # `apk upgrade --no-cache` (before the package install, same layer) upgrades
 # packages already baked into the alpine:3.24 base layer itself -- `apk add
 # --no-cache` only fetches a fresh index for the packages it is asked to

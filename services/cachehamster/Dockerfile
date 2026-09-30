@@ -12,39 +12,25 @@
 ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
 FROM ${BUILD_TOOLS_IMAGE} AS cachehamster-builder
 
-# What: verifies the build-tools contract (Rust toolchain, musl cross
+# What: verifies the build-tools contract (Rust toolchain and native musl
 #   target) is present before relying on any of it.
 # Why: fail closed rather than a confusing mid-build "command not found"
 #   if the pinned build-tools image ever regresses this contract.
 # From: Issue #871
 RUN set -eu; \
-    for tool in cargo rustc rustup; do \
+    for tool in cargo rustc; do \
       command -v "$tool" >/dev/null; \
     done; \
     command -v musl-gcc >/dev/null; \
     case "$(uname -m)" in \
-      x86_64) echo "x86_64-unknown-linux-musl" > /tmp/musl-target; ;; \
-      aarch64) echo "aarch64-unknown-linux-musl" > /tmp/musl-target; ;; \
+      x86_64) echo "x86_64-alpine-linux-musl" > /tmp/musl-target; ;; \
+      aarch64) echo "aarch64-alpine-linux-musl" > /tmp/musl-target; ;; \
       *) echo "Unsupported architecture for musl cross-compilation target: $(uname -m)" >&2; exit 1; ;; \
     esac; \
-    installed_musl_targets="$(rustup target list --installed)"; \
-    grep -qx "$(cat /tmp/musl-target)" <<<"${installed_musl_targets}"
+    rustc_host_line="$(rustc -vV)"; \
+    grep -qx "host: $(cat /tmp/musl-target)" <<<"${rustc_host_line}"
 
-# What: deliberately NOT wired up in this PR: sccache/distcc/ccache build
-#   acceleration (Rule-Ref: AG-CI-004/005/022), unlike
-#   services/dns/Dockerfile, services/ui/Dockerfile, and
-#   services/watchdog/Dockerfile's identical builder stages.
-# Why: those wiring blocks are non-trivial, project-specific shell that
-#   this PR's author could not build-test locally (no reachable Docker
-#   daemon in the authoring environment -- see this PR's own body). Per
-#   Rule-Ref: AG-CI-009, build acceleration is an optional CI/dev
-#   optimization, never a functional requirement -- this crate builds
-#   correctly without it, just without shared-cache speedup. Copying the
-#   existing accelerated block by hand without any way to test it risked
-#   a subtle, hard-to-debug CI failure for a marginal, deferrable benefit;
-#   left as an explicit, named follow-up rather than silently shipped
-#   either broken or absent with no explanation.
-# From: Issue #871
+ARG SCCACHE_REDIS_MODE=off
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src/ ./src/
@@ -66,10 +52,30 @@ COPY src/ ./src/
 # What: trusts the LAN proxy CA for this build RUN only.
 # Why: cargo fetches crates.io via the intercepting proxy.
 # From: Issue #1671
-RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -eu; \
+RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
+    --mount=type=secret,id=sccache_redis_url \
+    --mount=type=secret,id=sccache_dist_config \
+    --mount=type=secret,id=sccache_gha_config,required=false \
+    --mount=type=secret,id=sccache_gha_url,required=false \
+    --mount=type=secret,id=sccache_gha_token,required=false \
+    set -eu; \
     if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
       cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig; \
       cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
+    fi; \
+    sccache_mode="${SCCACHE_REDIS_MODE:-required}"; \
+    case "$sccache_mode" in required|optional|off) ;; *) echo "ERROR: invalid SCCACHE_REDIS_MODE=$sccache_mode" >&2; exit 1 ;; esac; \
+    if { [ "$sccache_mode" != "off" ] && { [ -s /run/secrets/sccache_redis_url ] || [ -s /run/secrets/sccache_dist_config ]; }; } || [ -s /run/secrets/sccache_gha_config ]; then \
+      export RUSTC_WRAPPER=/usr/local/bin/sccache SCCACHE_REDIS_KEY_PREFIX=lancache-cachehamster; \
+      if [ -s /run/secrets/sccache_redis_url ]; then export SCCACHE_REDIS="$(cat /run/secrets/sccache_redis_url)"; fi; \
+      if [ -s /run/secrets/sccache_dist_config ]; then export SCCACHE_CONF=/run/secrets/sccache_dist_config; sccache --dist-status; fi; \
+      if [ -s /run/secrets/sccache_gha_config ] && [ ! -s /run/secrets/sccache_dist_config ]; then export SCCACHE_CONF=/run/secrets/sccache_gha_config SCCACHE_GHA_ENABLED=on; fi; \
+      if [ -s /run/secrets/sccache_gha_url ] && [ -s /run/secrets/sccache_gha_token ]; then export ACTIONS_RESULTS_URL="$(cat /run/secrets/sccache_gha_url)" ACTIONS_RUNTIME_TOKEN="$(cat /run/secrets/sccache_gha_token)"; fi; \
+      echo "[INFO] sccache enabled for cachehamster (mode=$sccache_mode)." >&2; \
+    elif [ "$sccache_mode" = "required" ]; then \
+      echo "ERROR: required sccache configuration is unavailable for cachehamster." >&2; exit 1; \
+    else \
+      echo "::warning::sccache disabled for cachehamster; using local cargo compilation (mode=$sccache_mode)." >&2; \
     fi; \
     export CC=cc GCC=gcc CXX=c++ GXX=g++; \
     musl_target="$(cat /tmp/musl-target)"; \

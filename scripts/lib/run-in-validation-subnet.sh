@@ -69,7 +69,7 @@ source "$script_dir/reserve-validation-subnet.sh"
 # purpose: it is what makes a deep-validate run and a manual run (and two
 # deep-validate runs) coordinate on one shared per-slot lock namespace per
 # host, rather than each inventing its own and colliding anyway.
-lock_root="/tmp/lancache-validation-locks"
+lock_root="/var/tmp/lancache-validation-locks"
 max_attempts=10
 
 # The collision-conflict check itself (validation_subnet_conflicts) is

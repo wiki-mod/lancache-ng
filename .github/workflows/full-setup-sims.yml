@@ -28,6 +28,11 @@ on:
         required: false
         default: "false"
         type: string
+      include_base_validation:
+        description: "'true' to run the general full-setup image validation job."
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -67,6 +72,7 @@ jobs:
     if: >-
       always() &&
       inputs.should_run == 'true' &&
+      inputs.include_base_validation &&
       needs['compute-validation-network'].result != 'failure' &&
       needs['compute-validation-network'].result != 'cancelled'
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
@@ -87,6 +93,13 @@ jobs:
 
       - name: Resolve immutable build-tools image
         id: build-tools
+        env:
+          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
+          GITHUB_EVENT_PULL_REQUEST_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUILD_TOOLS_PR_STAGING_IMAGE: ${{ inputs.pr_staging_available == 'true' && inputs.build_tools_touched == 'true' && github.event.pull_request.head.repo.full_name == github.repository && format('ghcr.io/{0}/build-tools:pr-{1}-sha-{2}', github.repository, github.event.pull_request.number, github.sha) || '' }}
         run: |
           set -euo pipefail
           build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
@@ -157,10 +170,10 @@ jobs:
 
   ssl-mitm-cache-simulation:
     # What: real DNS/HTTP/HTTPS caching test.
-    # Why: serialize runner; if: always() gate.
+    # Why: independent Compose test; if: always() gate.
     # From: PR #1523
     name: SSL MITM cache simulation
-    needs: [compute-validation-network, full-setup-validate]
+    needs: [compute-validation-network]
     if: >-
       always() &&
       inputs.should_run == 'true' &&
@@ -238,7 +251,7 @@ jobs:
   proxy-deep-wildcard-tls-simulation:
 
     name: Proxy deep-wildcard TLS simulation
-    needs: [compute-validation-network, ssl-mitm-cache-simulation]
+    needs: [compute-validation-network]
     if: >-
       always() &&
       inputs.should_run == 'true' &&
@@ -274,10 +287,10 @@ jobs:
 
   proxy-standard-mode-sni-routing-simulation:
     # What: TLS-handshake test for SNI passthrough.
-    # Why: chained to bound shared BuildKit contention.
+    # Why: BuildKit contention is locked around only docker build.
     # From: Issue #1297
     name: Proxy standard-mode SNI routing simulation
-    needs: [compute-validation-network, proxy-deep-wildcard-tls-simulation]
+    needs: [compute-validation-network]
     if: >-
       always() &&
       inputs.should_run == 'true' &&
@@ -318,7 +331,7 @@ jobs:
     # Why: base has fix; chain for AG-CI-017.
     # From: Issue #1276
     name: Proxy SSL-mode two-relay dispatch simulation
-    needs: [compute-validation-network, proxy-standard-mode-sni-routing-simulation]
+    needs: [compute-validation-network]
     if: >-
       always() &&
       inputs.should_run == 'true' &&
@@ -362,7 +375,7 @@ jobs:
     # Why: fixes always testing nightly, not the real tag.
     # From: Issue #715
     name: UI/NATS/DNS integration simulation
-    needs: [compute-validation-network, proxy-ssl-mode-two-relay-dispatch-simulation]
+    needs: [compute-validation-network]
     if: >-
       always() &&
       inputs.should_run == 'true' &&
@@ -438,8 +451,8 @@ jobs:
     # From: PR #786
     name: setup.sh CLI simulation
     # What: chains after the UI/NATS/DNS sim job.
-    # Why: serializes the shared runner slot, not data.
-    needs: [ui-nats-dns-integration-simulation]
+    # Why: owns a separate Quickstart lock, not simulation state.
+    needs: [compute-validation-network]
     if: always() && inputs.should_run == 'true'
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 45
@@ -515,7 +528,7 @@ jobs:
     # What: tests DHCP lease flow via this PR's Kea build.
     # Why: needs no staging tag; builds from this checkout.
     name: DHCP Kea lease-flow simulation
-    needs: [setup-cli-simulation]
+    needs: [compute-validation-network]
     if: always() && inputs.should_run == 'true'
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 45
@@ -523,7 +536,7 @@ jobs:
       - uses: *checkout_centraliced_versioning # v7.0.1
       - name: Resolve build-tools image
         # What: omits BUILD_TOOLS_REQUIRE_PUBLISHED here.
-        # Why: needs isc-dhcp-client for a PR-scoped image.
+        # Why: needs BusyBox's DHCP client for a PR-scoped image.
         id: build-tools-image
         # What: reads step inputs via env: variables.
         # Why: avoids script-injection (OSPS-BR-01.04).
@@ -534,10 +547,10 @@ jobs:
           BUILD_TOOLS_TOUCHED: ${{ inputs.build_tools_touched }}
           IMAGE_TAG: ${{ inputs.image_tag }}
           REPOSITORY: ${{ github.repository }}
-          # What: require dhclient in smoke test.
-          # Why: opt-in, not baseline in build-tools.
+          # What: require udhcpc in smoke test.
+          # Why: BusyBox provides it in Alpine build-tools.
           # From: Issue #1095
-          EXTRA_REQUIRED_TOOLS: dhclient
+          EXTRA_REQUIRED_TOOLS: udhcpc
         run: |
           set -euo pipefail
           if [[ "$PR_STAGING_AVAILABLE" == "true" && "$BUILD_TOOLS_TOUCHED" == "true" ]]; then
@@ -564,7 +577,7 @@ jobs:
     # dns/ui/nats images (via the script), so it threads the PR staging tag to
     # test the PR's own secondary credentialing code.
     name: NATS auth-callout simulation
-    needs: [compute-validation-network, dhcp-kea-lease-flow-simulation]
+    needs: [compute-validation-network]
     if: >-
       always() &&
       inputs.should_run == 'true' &&
@@ -639,7 +652,7 @@ jobs:
     # Why: verifies no service_healthy depends_on gate.
     # From: Issue #763
     name: Admin UI reachability during dependency crash-loop
-    needs: [compute-validation-network, nats-auth-callout-simulation]
+    needs: [compute-validation-network]
     if: >-
       always() &&
       inputs.should_run == 'true' &&
@@ -713,7 +726,7 @@ jobs:
     # Why: verifies a real rollback via Control Agent API.
     # From: Issue #763
     name: setup.sh reset-to-last-known-good-config (Kea) simulation
-    needs: [compute-validation-network, ui-reachability-crash-loop-simulation]
+    needs: [compute-validation-network]
     if: >-
       always() &&
       inputs.should_run == 'true' &&
@@ -784,7 +797,7 @@ jobs:
     # Why: verifies rollback via nats-subscriber listener.
     # From: Issue #836
     name: setup.sh reset-to-last-known-good-config (DNS) simulation
-    needs: [compute-validation-network, setup-reset-kea-config-simulation]
+    needs: [compute-validation-network]
     if: >-
       always() &&
       inputs.should_run == 'true' &&

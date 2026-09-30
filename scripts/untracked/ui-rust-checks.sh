@@ -22,7 +22,6 @@ REDIS_CONTAINER=""
 REDIS_URL="${SCCACHE_REDIS_URL:-}"
 REDIS_URL_EXPLICIT=0
 RUN_FMT_CHECK=1
-RUN_CHECK=1
 RUN_CLIPPY=1
 RUN_TEST=1
 RUN_BUILD=1
@@ -40,8 +39,6 @@ Options:
   --rust-image <image>      Rust Docker image to use (default: ghcr.io/wiki-mod/lancache-ng/build-tools:latest)
   --fmt                     Run cargo fmt --all -- --check (default)
   --no-fmt                  Skip cargo fmt
-  --check                   Run cargo check (default)
-  --no-check                Skip cargo check
   --clippy                  Run cargo clippy -- -D warnings (default)
   --no-clippy               Skip cargo clippy
   --no-test                 Skip cargo test
@@ -114,14 +111,6 @@ while [[ $# -gt 0 ]]; do
       RUN_FMT_CHECK=0
       shift
       ;;
-    --check)
-      RUN_CHECK=1
-      shift
-      ;;
-    --no-check)
-      RUN_CHECK=0
-      shift
-      ;;
     --clippy)
       RUN_CLIPPY=1
       shift
@@ -179,7 +168,7 @@ if [[ ! -f "${UI_MANIFEST_ABS}" ]]; then
   fail "Cannot find manifest at ${UI_MANIFEST}"
 fi
 
-if [[ ${RUN_FMT_CHECK} -eq 0 && ${RUN_CHECK} -eq 0 && ${RUN_CLIPPY} -eq 0 && ${RUN_TEST} -eq 0 && ${RUN_BUILD} -eq 0 ]]; then
+if [[ ${RUN_FMT_CHECK} -eq 0 && ${RUN_CLIPPY} -eq 0 && ${RUN_TEST} -eq 0 && ${RUN_BUILD} -eq 0 ]]; then
   fail "No checks selected. Enable at least one with --no- flags removed"
 fi
 
@@ -273,9 +262,6 @@ CONTAINER_CMD+=$'\n'
 
 if [[ ${RUN_FMT_CHECK} -eq 1 ]]; then
   CONTAINER_CMD+="cargo fmt --all --manifest-path ${UI_MANIFEST} -- --check"$'\n'
-fi
-if [[ ${RUN_CHECK} -eq 1 ]]; then
-  CONTAINER_CMD+="cargo check --locked --manifest-path ${UI_MANIFEST}"$'\n'
 fi
 if [[ ${RUN_CLIPPY} -eq 1 ]]; then
   CONTAINER_CMD+="cargo clippy --locked --manifest-path ${UI_MANIFEST} -- -D warnings"$'\n'

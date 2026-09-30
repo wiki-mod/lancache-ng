@@ -572,7 +572,7 @@ echo "== Trigger 6/8: watchdog -- real startup banner carrying this run's overri
 assert_marker_reaches_ui "$marker_watchdog" "watchdog (startup banner's CHECK_INTERVAL value)" 90 watchdog
 
 echo "== Trigger 7/8: dhcp (Kea) -- a real DHCPDISCOVER/OFFER/REQUEST/ACK lease over the isolated dhcp-test-net =="
-# What: runs a real dhclient lease over dhcp-test-net.
+# What: runs a real DHCP lease over dhcp-test-net.
 # Why: proves Kea's own DHCP4_LEASE_ALLOC log line.
 dhcp_client_container="lancachee2e-dhcp-client-$$"
 docker run -d --name "$dhcp_client_container" \
@@ -580,15 +580,39 @@ docker run -d --name "$dhcp_client_container" \
     --cap-add NET_ADMIN --cap-add NET_RAW \
     -v "$work_dir/shared:/shared" \
     "$BUILD_TOOLS_IMAGE" \
-    bash -c 'dhclient -4 -1 -v -d -sf /bin/true -pf /shared/dhcp-client.pid -lf /shared/dhcp-client.leases eth0 >/shared/dhcp-client.out 2>&1; echo DONE >> /shared/dhcp-client.out' \
+    bash -c '
+      set -u
+      if command -v dhclient >/dev/null 2>&1; then
+        dhclient -4 -1 -v -d -sf /bin/true -pf /shared/dhcp-client.pid -lf /shared/dhcp-client.leases eth0 >/shared/dhcp-client.out 2>&1
+      else
+        cat > /var/tmp/udhcpc-lease-capture.sh <<"HOOK"
+#!/bin/sh
+[ "$1" = "bound" ] || [ "$1" = "renew" ] || exit 0
+csv() { printf "%s" "$1" | tr " " ","; }
+{
+  echo "lease {"
+  [ -n "${ip:-}" ] && echo "  fixed-address ${ip};"
+  [ -n "${router:-}" ] && echo "  option routers ${router};"
+  [ -n "${serverid:-}" ] && echo "  option dhcp-server-identifier ${serverid};"
+  [ -n "${dns:-}" ] && echo "  option domain-name-servers $(csv "${dns}");"
+  [ -n "${ntpsrv:-}" ] && echo "  option ntp-servers $(csv "${ntpsrv}");"
+  [ -n "${lease:-}" ] && echo "  option dhcp-lease-time ${lease};"
+  [ -n "${domain:-}" ] && echo "  option domain-name \"${domain}\";"
+  [ -n "${subnet:-}" ] && echo "  option subnet-mask ${subnet};"
+  echo "}"
+} >> /shared/dhcp-client.leases
+HOOK
+        udhcpc -i eth0 -s /var/tmp/udhcpc-lease-capture.sh -x hostname:"$(hostname)" -q -n -f >/shared/dhcp-client.out 2>&1
+      fi
+      echo DONE >> /shared/dhcp-client.out
+    ' \
     >/dev/null
 
 dhcp_lease_deadline=$((SECONDS + 30))
 dhcp_lease_obtained=0
 while (( SECONDS < dhcp_lease_deadline )); do
     # What: waits for the lease file's closing brace.
-    # Why: the file exists before dhclient finishes writing.
-    if [[ -s "$work_dir/shared/dhcp-client.leases" ]] && grep -q '^}' "$work_dir/shared/dhcp-client.leases" 2>/dev/null; then
+    if grep -qE 'lease of [0-9.]+ obtained' "$work_dir/shared/dhcp-client.out" 2>/dev/null; then
         dhcp_lease_obtained=1
         break
     fi
@@ -601,7 +625,7 @@ cat "$work_dir/shared/dhcp-client.out" 2>/dev/null || echo "(no client output ca
 echo "::endgroup::"
 
 if [[ "$dhcp_lease_obtained" -ne 1 ]]; then
-    echo "::error::dhclient never obtained a real lease from this run's dhcp (Kea) container within 30s over dhcp-test-net." >&2
+    echo "::error::DHCP client never obtained a real lease from this run's dhcp (Kea) container within 30s over dhcp-test-net." >&2
     "${compose[@]}" logs --no-color dhcp || true
     exit 1
 fi
@@ -609,12 +633,12 @@ fi
 # What: captures fixed-address lines before piping to head.
 # Why: avoids SIGPIPE under pipefail with >1 match.
 # From: Issue #1377
-if ! fixed_address_lines="$(grep -oE 'fixed-address [0-9.]+' "$work_dir/shared/dhcp-client.leases")"; then
-    echo "::error::Could not parse the offered address out of the real dhclient lease file." >&2
+if ! fixed_address_lines="$(grep -oE 'lease of [0-9.]+' "$work_dir/shared/dhcp-client.out")"; then
+    echo "::error::Could not parse the offered address out of the real DHCP client output." >&2
     exit 1
 fi
-dhcp_offered_address="$(head -1 <<<"$fixed_address_lines" | cut -d' ' -f2)"
-[[ -n "$dhcp_offered_address" ]] || { echo "::error::dhclient's lease file had no fixed-address field." >&2; exit 1; }
+dhcp_offered_address="$(head -1 <<<"$fixed_address_lines" | cut -d' ' -f3)"
+[[ -n "$dhcp_offered_address" ]] || { echo "::error::DHCP client output had no leased address." >&2; exit 1; }
 echo "Real lease obtained: $dhcp_offered_address (Kea's own DHCP4_LEASE_ALLOC log line names this address verbatim)."
 # What: matches the full DHCP4_LEASE_ALLOC wording.
 # Why: a bare IP substring-matches unrelated log lines.

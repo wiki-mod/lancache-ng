@@ -129,7 +129,7 @@
 # a different path here would silently stop serializing against any CI job
 # still running the old inline form (there should be none left after this
 # change, but the path itself carries no reason to move).
-QUICKSTART_COMPOSE_LOCK_PATH="/tmp/lancache-setup-cli-simulation.lock"
+QUICKSTART_COMPOSE_LOCK_PATH="/var/tmp/lancache-setup-cli-simulation.lock"
 
 # quickstart_compose_lock_acquire
 # Blocks (like the original inline `flock` with no `-n`) until the lock at

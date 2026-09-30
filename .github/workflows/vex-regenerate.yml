@@ -109,7 +109,7 @@ jobs:
       # light-tier job must stay pull-only, AG-CI-002/AG-VAL-016).
       - name: Set up Docker Buildx for manifest inspection
         id: buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        uses: ./.github/actions/docker-setup-buildx-action-centralized-version
 
       - name: Select published build-tools image
         id: select-image
@@ -200,7 +200,10 @@ jobs:
             # $GITHUB_WORKSPACE's contents with CI-Automation/vex's own tree, which
             # has neither .trivyignore.yaml nor generate-vex.sh -- Step 3 below needs
             # a still-reachable copy of both to redo the comparison regeneration.
-            tmp_dir="$(mktemp -d)"
+            tmp_root="${RUNNER_TEMP:-/var/tmp}"
+            tmp_dir="$(mktemp -d "$tmp_root/vex-regenerate.XXXXXX")"
+            vex_fetch_error="$tmp_root/vex-fetch.err"
+            vex_switch_error="$tmp_root/vex-switch.err"
             # Self-hosted runners reuse one workspace across unrelated jobs (AG-CI-016) --
             # an unclaimed mktemp -d left over from an interrupted run is exactly the kind
             # of ad-hoc runner-host litter that rule calls out. Clean up on any exit path.
@@ -208,7 +211,7 @@ jobs:
             cp "$GITHUB_WORKSPACE/.trivyignore.yaml" "$tmp_dir/.trivyignore.yaml" || fail "Could not snapshot .trivyignore.yaml before switching branches."
             cp "$GITHUB_WORKSPACE/scripts/untracked/generate-vex.sh" "$tmp_dir/generate-vex.sh" || fail "Could not snapshot generate-vex.sh before switching branches."
 
-            git fetch origin "$VEX_BRANCH:refs/remotes/origin/$VEX_BRANCH" 2>/tmp/vex-fetch.err || true
+            git fetch origin "$VEX_BRANCH:refs/remotes/origin/$VEX_BRANCH" 2>"$vex_fetch_error" || true
             branch_exists=0
             if git show-ref --verify --quiet "refs/remotes/origin/$VEX_BRANCH"; then
               branch_exists=1
@@ -218,7 +221,7 @@ jobs:
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
             if [ "$branch_exists" -eq 1 ]; then
-              git switch -C "vex-work" "origin/$VEX_BRANCH" 2>/tmp/vex-switch.err || fail "Could not switch to existing origin/$VEX_BRANCH: $(cat /tmp/vex-switch.err)"
+              git switch -C "vex-work" "origin/$VEX_BRANCH" 2>"$vex_switch_error" || fail "Could not switch to existing origin/$VEX_BRANCH: $(cat "$vex_switch_error")"
             else
               echo "::notice::origin/$VEX_BRANCH does not exist yet -- bootstrapping it as a fresh orphan branch."
               git switch --orphan "vex-work" || fail "Could not create orphan branch for $VEX_BRANCH."

@@ -9,6 +9,8 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 cd "$repo_root"
 
 build_tools_image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
+# shellcheck source=scripts/lib/docker-buildx-retry.sh
+source "$repo_root/scripts/lib/docker-buildx-retry.sh"
 
 # What: Unique ID per invocation: timestamp + PID.
 # Why: Avoids collisions on concurrent runs on shared host.
@@ -57,8 +59,8 @@ echo "== Building throwaway proxy images with synthetic cdn-domains.txt fixtures
 # What: passes shared-scripts as a named build context.
 # Why: else COPY --from=shared-scripts triggers a bad pull.
 # From: Issue #1095
-docker build -q -t "$image_a" --build-context "dns-domains=$work_dir/fixture-a" --build-context "shared-scripts=$repo_root/scripts/lib" services/proxy >/dev/null
-docker build -q -t "$image_b" --build-context "dns-domains=$work_dir/fixture-b" --build-context "shared-scripts=$repo_root/scripts/lib" services/proxy >/dev/null
+docker_build_with_content_store_lock -- docker build -q -t "$image_a" --build-context "dns-domains=$work_dir/fixture-a" --build-context "shared-scripts=$repo_root/scripts/lib" services/proxy
+docker_build_with_content_store_lock -- docker build -q -t "$image_b" --build-context "dns-domains=$work_dir/fixture-b" --build-context "shared-scripts=$repo_root/scripts/lib" services/proxy
 
 docker network create "$network_name" >/dev/null
 

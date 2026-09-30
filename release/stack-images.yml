@@ -211,8 +211,8 @@ external:
       - deploy/prod/docker-compose.yml
       - deploy/quickstart/docker-compose.yml
   - name: netdata
-    image: netdata/netdata@sha256:a130dbbf3d6e6a5472efdebaa123797190a5822627e908106d34edae02bc8a74
-    policy: digest-pinned
+    image: netdata/netdata:latest
+    policy: tag-latest
     compose:
       - deploy/prod/docker-compose.yml
       - deploy/quickstart/docker-compose.yml

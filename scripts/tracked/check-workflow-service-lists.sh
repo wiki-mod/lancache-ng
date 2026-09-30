@@ -25,7 +25,6 @@ else
     hosted_fallback="${hosted_fallback:-.github/workflows/build-push-hosted-fallback.yml}"
     extra_files=(
         "scripts/untracked/gc-pr-staging-images.sh"
-        ".github/workflows/backfill-stack-latest.yml"
         "scripts/untracked/ensure-pr-staging-images.sh"
     )
 fi
@@ -93,10 +92,7 @@ canonical_minus() {
 }
 
 
-declare -A SUBSET_SERVICES_FILES=(
-
-    ["backfill-stack-latest.yml"]="build-tools"
-)
+declare -A SUBSET_SERVICES_FILES=()
 
 
 check_services_arrays() {
@@ -270,7 +266,6 @@ check_push_supersession_wiring() {
 # should always have it).
 declare -A REQUIRES_SERVICES_ARRAY=(
     ["gc-pr-staging-images.sh"]=1
-    ["backfill-stack-latest.yml"]=1
 )
 declare -A REQUIRES_FULL_SETUP_ARRAY=(
     ["ensure-pr-staging-images.sh"]=1

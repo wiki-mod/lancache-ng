@@ -1059,6 +1059,98 @@ vulnerabilities:
       From: Issue #1095, PR #1743
     status: not_affected
 
+  - id: CVE-2026-19666
+    statement: >-
+      What: Accepts CVE-2026-19666 (BIND DNS64 malformed-response DoS) as
+      a tracked risk in the DNS image's bind-libs and bind-tools packages.
+
+      Why: The scan found bind-libs 9.20.27-r0, while its fixed version is
+      9.20.29-r0. Alpine v3.24 currently publishes only 9.20.27-r0, so an
+      image-local package pin cannot apply the fix. Re-review when v3.24
+      publishes the fixed package.
+
+      From: Issue #1860 | PR #1872
+    expired_at: 2999-12-31
+
+  - id: CVE-2026-19667
+    statement: >-
+      What: Accepts CVE-2026-19667 (BIND 16-bit length truncation DoS) as
+      a tracked risk in the DNS image's bind-libs and bind-tools packages.
+
+      Why: The scan found bind-libs 9.20.27-r0, while its fixed version is
+      9.20.29-r0. Alpine v3.24 currently publishes only 9.20.27-r0, so an
+      image-local package pin cannot apply the fix. Re-review when v3.24
+      publishes the fixed package.
+
+      From: Issue #1860 | PR #1872
+    expired_at: 2999-12-31
+
+  - id: CVE-2026-76163
+    statement: >-
+      What: Accepts CVE-2026-76163 (BIND TKEY-query DoS) as a tracked risk
+      in the DNS image's bind-libs and bind-tools packages.
+
+      Why: The scan found bind-libs 9.20.27-r0, while its fixed version is
+      9.20.29-r0. Alpine v3.24 currently publishes only 9.20.27-r0, so an
+      image-local package pin cannot apply the fix. Re-review when v3.24
+      publishes the fixed package.
+
+      From: Issue #1860 | PR #1872
+    expired_at: 2999-12-31
+
+  - id: CVE-2026-77692
+    statement: >-
+      What: Accepts CVE-2026-77692 (BIND DNS-over-HTTPS request DoS) as a
+      tracked risk in the DNS image's bind-libs and bind-tools packages.
+
+      Why: The scan found bind-libs 9.20.27-r0, while its fixed version is
+      9.20.29-r0. Alpine v3.24 currently publishes only 9.20.27-r0, so an
+      image-local package pin cannot apply the fix. Re-review when v3.24
+      publishes the fixed package.
+
+      From: Issue #1860 | PR #1872
+    expired_at: 2999-12-31
+
+  - id: CVE-2026-80274
+    statement: >-
+      What: Accepts CVE-2026-80274 (BIND crafted-DNSSEC-reply DoS) as a
+      tracked risk in the DNS image's bind-libs and bind-tools packages.
+
+      Why: The scan found bind-libs 9.20.27-r0, while its fixed version is
+      9.20.29-r0. Alpine v3.24 currently publishes only 9.20.27-r0, so an
+      image-local package pin cannot apply the fix. Re-review when v3.24
+      publishes the fixed package.
+
+      From: Issue #1860 | PR #1872
+    expired_at: 2999-12-31
+
+  - id: CVE-2026-81563
+    statement: >-
+      What: Accepts CVE-2026-81563 (BIND SVCB/HTTPS resource-exhaustion
+      DoS) as a tracked risk in the DNS image's bind-libs and bind-tools
+      packages.
+
+      Why: The scan found bind-libs 9.20.27-r0, while its fixed version is
+      9.20.29-r0. Alpine v3.24 currently publishes only 9.20.27-r0, so an
+      image-local package pin cannot apply the fix. Re-review when v3.24
+      publishes the fixed package.
+
+      From: Issue #1860 | PR #1872
+    expired_at: 2999-12-31
+
+  - id: CVE-2026-81736
+    statement: >-
+      What: Accepts CVE-2026-81736 (BIND cached-SVCB/HTTPS AliasMode DoS)
+      as a tracked risk in the DNS image's bind-libs and bind-tools packages.
+
+      Why: The scan found bind-libs 9.20.27-r0, while its fixed version is
+      9.20.29-r0. Alpine v3.24 currently publishes only 9.20.27-r0, so an
+      image-local package pin cannot apply the fix. Re-review when v3.24
+      publishes the fixed package.
+
+      From: Issue #1860 | PR #1872
+    expired_at: 2999-12-31
+
   # CVE-2026-32316/CVE-2026-40164 (jq, utilities image) removed here per
   # their own accepting entries' explicit self-description ("remove once
   # PR #1783 lands and its rebuilds propagate", Issue #1802/#1803,

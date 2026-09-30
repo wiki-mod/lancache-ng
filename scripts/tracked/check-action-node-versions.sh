@@ -20,70 +20,14 @@
 # hardcoded as "always fine", so a future local action that DID wrap a
 # JavaScript runtime would still be covered.
 #
-# External actions (`uses: <owner>/<repo>[/<subpath>]@<sha-or-tag>`) are
-# resolved via the GitHub REST Contents API
-# (repos/<owner>/<repo>/contents/<subpath/>action.yml?ref=<ref>, falling back
-# to action.yaml if action.yml 404s -- some actions use either name) using
-# curl with the `application/vnd.github.raw+json` Accept header, which
-# returns the file's raw text directly instead of a base64-wrapped JSON
-# envelope. This project's established convention for hitting the GitHub API
-# from a guard script is curl + GH_TOKEN, not the `gh` CLI (see
-# check-pr-tracking-metadata.sh) -- the `gh` binary is not installed in the
-# build-tools image this script runs inside in CI, and adding it purely for
-# this one script would be a heavier dependency than a handful of curl calls
-# need.
-#
-# A pin can name a branch or tag instead of a commit SHA (`ref=<tag>` resolves
-# fine against the Contents API either way), but this project's own
-# established convention is to SHA-pin every third-party action (every
-# example in this repo's workflows already does; see AGENTS.md), so this case
-# is expected to be rare-to-nonexistent here. If it does occur: a tag's
-# underlying commit can change after this check last ran, so a clean result
-# for a tag-pinned action is a point-in-time snapshot of whatever that tag
-# pointed at during this run, not a permanent guarantee the way a SHA pin's
-# result is. That's a property of tag pins in general, not something this
-# script can fix; it resolves the ref exactly as given and reports what it
-# finds.
-#
-# Rate limits: as of this writing this repo pins ~15 distinct external
-# action refs across all workflows (see CHANGELOG/PR for the exact count at
-# the time this was added) -- small enough that a checked-in cache mapping
-# owner/repo@ref -> runs.using would be premature complexity for the API
-# load this actually generates (a per-run duplicate-request dedupe, done
-# below via `sort -u` over the extracted refs, is all that is warranted at
-# this scale). Re-evaluate a persistent cache if the number of distinct pins
-# grows enough that GitHub API rate limiting becomes a real, observed
-# problem, not a hypothetical one.
-#
-# Failure handling: a *definitive* resolution failure (action.yml AND
-# action.yaml both come back 404 for a pinned ref) fails the check -- that
-# pin cannot be verified safe, and this project's guard scripts fail closed
-# rather than silently skip. Anything else non-200 (auth rejection, rate
-# limiting, a network hiccup, any other HTTP status) is treated as an
-# infrastructure problem, not a verdict on the pin itself, and only emits a
-# warning -- matching check-pr-tracking-metadata.sh's own split between
-# "the thing we're checking is actually wrong" (fail) and "we couldn't check
-# it right now" (warn, don't fail the whole PR on a GitHub-side blip).
-#
-# Accepts an optional repo_root argument (defaults to this script's own
-# repo) so tests/bats/check_action_node_versions.bats can point it at a
-# fixture tree instead of mutating/depending on the real repository, and
-# an optional GH_TOKEN (or GITHUB_TOKEN) env var to authenticate the
-# GitHub API calls (raises the rate limit; unauthenticated access to public
-# repos' Contents API works fine too at this repo's current scale).
+# What: Reads public action manifests by immutable raw SHA URL.
+# Why: Raw reads avoid API auth and rate-limit coupling.
+# From: Issue #1860 | PR #1872
 set -euo pipefail
-
-# Own script directory, independent of $repo_root below: $repo_root can be
-# overridden to a throwaway fixture tree by tests/bats/check_action_node_versions.bats,
-# which never has its own scripts/lib/ghcr-retry.sh -- this file's location
-# on disk never moves just because the tree it's asked to *scan* does.
-script_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)"
 
 repo_root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 cd "$repo_root"
-
-# shellcheck source=scripts/lib/ghcr-retry.sh
-source "$script_lib_dir/ghcr-retry.sh"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/github-api-retry.sh"
 
 workflow_dir=.github/workflows
 actions_dir=.github/actions
@@ -340,150 +284,31 @@ for action_file in "${local_action_files[@]}"; do
   fi
 done
 
-gh_token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
-if [ -n "$gh_token" ]; then
-  echo "::notice::check-action-node-versions: using authenticated GitHub API requests for external action metadata."
-else
-  echo "::notice::check-action-node-versions: GH_TOKEN/GITHUB_TOKEN unset; using unauthenticated GitHub API fallback for external action metadata."
-fi
-
-# fetch_external_action_yaml <owner> <repo> <subpath> <ref>
-# Prints one status line to stdout, followed by the resolved action.yml/
-# action.yaml body when found:
-#   OK\n<body>              -- resolved; <body> is the file content
-#   NOTFOUND                -- both action.yml and action.yaml came back 404
-#                               (a definitive not-found -- caller should fail)
-#   INFRA:<http-status>     -- any other non-200 (auth rejection, rate
-#                               limiting, network error) -- caller should
-#                               warn, not fail, on this
-# Always called via command substitution (metadata=$(fetch_external_action_yaml ...)),
-# which runs it in a subshell -- everything it needs to tell the caller
-# therefore has to travel over stdout, not a side-channel global variable
-# (an earlier version of this function tried to report the HTTP status via
-# a global $resolve_error_detail set from inside the function; that value
-# never made it back to the caller, since a subshell's variable changes do
-# not propagate to its parent -- confirmed while testing this script:
-# the warning printed an empty status every time). Encoding everything into
-# the one stdout stream this function already returns avoids that trap
-# entirely.
-# Bounded retry for the transient case only, via this project's shared
-# scripts/lib/ghcr-retry.sh wrapper (AG-CI-013: flaky external CI operations
-# need a documented retry matching the established pattern, not a bare
-# single attempt or a bespoke one-off loop). This repo pins ~15 distinct
-# external action refs, several referenced from multiple workflow files
-# (e.g. `aquasecurity/trivy-action` from build-push.yml, build-tools.yml,
-# and build-push-hosted-fallback.yml combined); every service/build job in a
-# single CI run invokes this whole script independently, so the same hot
-# ref can get requested by several parallel jobs within moments of each
-# other. Confirmed live (2026-08-01): this exact ref hit a 403 in ~82% of a
-# 20-run sample, every other pinned ref resolving cleanly in the same runs
-# -- consistent with GitHub's secondary/abuse rate limiter tripping on one
-# heavily-concurrent-requested resource, not a general token-quota
-# exhaustion (which would hit refs more evenly).
-#
-# Retrying a genuinely permanent failure (an invalid token, a malformed
-# request) wastes the whole backoff budget on an outcome retrying can never
-# change -- ghcr_retry's GHCR_RETRY_PERMANENT_FAILURE_EXIT_CODE exists
-# exactly for this (see scripts/lib/ghcr-retry.sh), so
-# _fetch_action_yaml_attempt below classifies each non-200/404 status into
-# permanent (stop immediately) or transient (keep retrying) before handing
-# off to ghcr_retry, mirroring scripts/lib/staging-ancestor-fallback.sh's
-# own identical 401-is-permanent/everything-else-retryable classification
-# for the same GitHub REST API. 404 (definitive not-found) and 200
-# (success) still resolve on the first attempt with no retry at all, since
-# neither benefits from one.
+# What: Resolves immutable external manifests from GitHub's raw host
+# Why: Public SHA reads must not consume GitHub REST rate-limit budget
+# From: Issue #1860 | PR #1872
 fetch_external_action_yaml() {
   local owner="$1" repo="$2" subpath="$3" ref="$4"
-  local file result last_line
+  local file body url status
   for file in action.yml action.yaml; do
-    result="$(ghcr_retry "n/a-not-a-real-registry" "" "" -- \
-      _fetch_action_yaml_attempt "$owner" "$repo" "$subpath" "$ref" "$file")" || true
-    # ghcr_retry passes through the wrapped command's stdout on EVERY attempt,
-    # not only the last one, so $result can be several attempts' output
-    # stacked back to back (e.g. "INFRA:403\nOK\n<body>" after one failed try
-    # then a recovered one). A bare "OK" line only ever appears as the first
-    # line of a genuinely successful attempt's own output -- extracting from
-    # that exact line to the end recovers the real answer regardless of how
-    # much earlier-attempt noise precedes it.
-    # Here-string, not a `producer | grep -q` pipe: $result can be several
-    # attempts' output stacked together (see the comment above), and a live
-    # pipe feeding grep -qx/sed -n could let the underlying data race an
-    # early-exiting consumer under this file's own `set -o pipefail` (see
-    # AGENTS.md's pipefail/SIGPIPE-early-exit rule and issue #1377's
-    # repo-wide audit) -- a here-string has no second writer process at all,
-    # so it cannot SIGPIPE regardless of how large $result gets.
-    if grep -qx 'OK' <<<"$result"; then
-      sed -n '/^OK$/,$p' <<<"$result"
+    body="$(mktemp "${TMPDIR:-/var/tmp}/action-metadata.XXXXXX")" || return 1
+    url="https://raw.githubusercontent.com/${owner}/${repo}/${ref}/${subpath:+${subpath}/}${file}"
+    if github_raw_get_with_retry "$url" "$body"; then
+      printf 'OK\n'
+      cat "$body"
+      rm -f -- "$body"
       return 0
     fi
-    last_line="$(printf '%s\n' "$result" | tail -1)"
-    if [ "$last_line" = "NOTFOUND" ]; then
+    status="${GITHUB_RAW_HTTP_STATUS:-000}"
+    rm -f -- "$body"
+    if [[ "$status" == "404" ]]; then
       continue
     fi
-    # Any other outcome (a transient failure that exhausted every retry, or
-    # an immediate permanent-failure classification) matches the pre-existing
-    # behavior: give up right here rather than also trying the second
-    # filename -- a definitive non-404 failure on the first file says
-    # nothing useful about whether the second file would differ.
-    printf '%s\n' "$(printf '%s\n' "$result" | grep -oE 'INFRA:[0-9]{3}' | tail -1)"
+    printf 'INFRA:%s\n' "$status"
     return 0
   done
   printf 'NOTFOUND\n'
   return 0
-}
-
-# _fetch_action_yaml_attempt <owner> <repo> <subpath> <ref> <file>
-# One HTTP attempt against the Contents API. Prints to stdout:
-#   OK\n<body>     -- 200, resolved; <body> is the file content
-#   NOTFOUND       -- 404; returns 0 so ghcr_retry stops immediately (a
-#                     definitive terminal state, not a failure to retry)
-#   INFRA:<status> -- diagnostic for any other status; the return code (a
-#                     plain 1, or GHCR_RETRY_PERMANENT_FAILURE_EXIT_CODE)
-#                     tells ghcr_retry whether to keep retrying or give up
-#                     now. 401 (invalid/expired token) and 400/422
-#                     (malformed request -- GitHub will never accept it
-#                     as-is) are permanent, configuration-level failures;
-#                     every other non-200/404 status (403/429 -- ambiguous
-#                     between a real permission problem and the secondary
-#                     rate limiter confirmed live above, 5xx, or a
-#                     malformed/empty response) stays retryable --
-#                     misclassifying a genuinely transient error as
-#                     permanent (giving up too early) is worse here than a
-#                     few extra retries on a real permanent one.
-_fetch_action_yaml_attempt() {
-  local owner="$1" repo="$2" subpath="$3" ref="$4" file="$5"
-  local body status auth=()
-  if [ -n "$gh_token" ]; then
-    auth=(-H "Authorization: Bearer ${gh_token}")
-  fi
-  body="$(mktemp)"
-  status=$(curl -sS -o "$body" -w '%{http_code}' \
-    -H "Accept: application/vnd.github.raw+json" \
-    "${auth[@]}" \
-    "https://api.github.com/repos/${owner}/${repo}/contents/${subpath:+${subpath}/}${file}?ref=${ref}" 2>/dev/null) || status="000"
-  case "$status" in
-    200)
-      printf 'OK\n'
-      cat "$body"
-      rm -f "$body"
-      return 0
-      ;;
-    404)
-      rm -f "$body"
-      printf 'NOTFOUND\n'
-      return 0
-      ;;
-    400|401|422)
-      rm -f "$body"
-      printf 'INFRA:%s\n' "$status"
-      return "$GHCR_RETRY_PERMANENT_FAILURE_EXIT_CODE"
-      ;;
-    *)
-      rm -f "$body"
-      printf 'INFRA:%s\n' "$status"
-      return 1
-      ;;
-  esac
 }
 
 for value in "${uses_values[@]}"; do
@@ -521,13 +346,26 @@ for value in "${uses_values[@]}"; do
     if is_deprecated_runtime "$using"; then
       fail "Local action '$value' ($resolved) declares runs.using: $using, a deprecated Node runtime. Update its steps to drop the Node-based step, or split it so no step still needs a deprecated runtime."
     fi
-  else
-    # --- External pinned action (resolve via the GitHub Contents API) -----
+  elif is_same_repo_owner_ref "$value"; then
+    # What: Keeps same-repository bootstrap action refs out of raw fetches.
+    # Why: Their branch ref is governed by repository checkout semantics.
+    # From: Issue #1860 | PR #1872
+    if [[ "$value" != *'@'* ]]; then
+      fail "Same-repository action '$value' must include an explicit ref."
+    fi
+  elif is_external_action_ref "$value"; then
+    # What: Resolves external action manifests by immutable commit SHA.
+    # Why: Raw content must not permit mutable tag or branch references.
     ref="${value##*@}"
     path_at="${value%@*}"
     owner=$(cut -d/ -f1 <<<"$path_at")
     repo=$(cut -d/ -f2 <<<"$path_at")
     subpath=$(cut -d/ -f3- <<<"$path_at")
+
+    if [[ ! "$ref" =~ ^[0-9a-fA-F]{40}$ ]]; then
+      fail "External action '$value' must use a full 40-hex commit SHA before its raw manifest can be validated."
+      continue
+    fi
 
     result=$(fetch_external_action_yaml "$owner" "$repo" "$subpath" "$ref")
     marker="${result%%$'\n'*}"
@@ -545,12 +383,14 @@ for value in "${uses_values[@]}"; do
         fail "Could not find action.yml or action.yaml for '$value' at ref '$ref' (referenced in: $(referencing_files "$value")) -- the pin may be broken, or point at a ref that never had this file."
         ;;
       INFRA:*)
-        warn "Could not resolve '$value' (HTTP ${marker#INFRA:}) -- treating as an infrastructure hiccup (rate limit, auth, or network issue), not failing the check on it. Re-run to retry."
+        fail "Could not fully validate '$value' (HTTP ${marker#INFRA:}); raw manifest metadata remained unavailable after bounded retries."
         ;;
       *)
-        warn "Unexpected response resolving '$value' (referenced in: $(referencing_files "$value")) -- treating as an infrastructure hiccup, not failing the check on it."
+        fail "Could not fully validate '$value' (referenced in: $(referencing_files "$value")); external action metadata resolution returned an unexpected result."
         ;;
     esac
+  else
+    fail "Unsupported action reference '$value' (referenced in: $(referencing_files "$value"))."
   fi
 done
 

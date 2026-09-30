@@ -123,7 +123,12 @@ runs:
             # From: PR #441
             scan_log() {
               local log_file="$1"
-              if grep -Eai "(^|[^[:alpha:]])(warning|warn|error|failed|failure|panic)([^[:alpha:]]|$)" "$log_file"; then
+              local diagnostics
+              diagnostics="$(grep -Eai "(^|[^[:alpha:]])(warning|warn|error|failed|failure|panic)([^[:alpha:]]|$)" "$log_file" \
+                | grep -Ev '^\[[^]]* DEBUG sccache::commands\] redirecting stderr into File .*sccache-error\.log' \
+                || true)"
+              if [ -n "$diagnostics" ]; then
+                printf '%s\\n' "$diagnostics" >&2
                 echo "[ERROR] Rust acceleration preflight emitted a forbidden diagnostic." >&2
                 exit 1
               fi
@@ -271,6 +276,17 @@ runs:
 
               if ! jq -e '(.stats.dist_errors // 0) == 0' "$stats_file" >/dev/null; then
                 echo "[ERROR] sccache-dist recorded distributed compile errors." >&2
+                if [ -n "${SCCACHE_ERROR_LOG:-}" ] && [ -s "$SCCACHE_ERROR_LOG" ]; then
+                  echo "::group::sccache-dist debug diagnostics (secrets redacted)" >&2
+                  sed -E \
+                    -e 's/(token|auth[_-]?token|password|secret)[[:space:]]*([:=])[[:space:]]*([^[:space:],}\"]+)/\1\2[REDACTED]/g' \
+                    -e 's#(Authorization:[[:space:]]*Bearer[[:space:]]+)[^[:space:]]+#\1[REDACTED]#g' \
+                    -e 's#(redis://)[^/@]+@#\1[REDACTED]@#g' \
+                    "$SCCACHE_ERROR_LOG" >&2
+                  echo "::endgroup::" >&2
+                else
+                  echo "[INFO] sccache-dist produced no debug log at ${SCCACHE_ERROR_LOG:-<unset>}." >&2
+                fi
                 cat "$stats_file" >&2
                 exit 1
               fi
@@ -290,7 +306,6 @@ runs:
             }
 
             if [ -s /run/lancache/sccache-redis-url ] || [ -s /run/lancache/sccache-dist-config ]; then
-              export SCCACHE_NO_DAEMON=1
               export SCCACHE_SERVER_UDS="$preflight_dir/sccache.sock"
               export SCCACHE_REDIS_KEY_PREFIX="lancache-${LANCACHE_SERVICE}"
               require_cache_write=0
@@ -303,9 +318,12 @@ runs:
               if [ -s /run/lancache/sccache-dist-config ]; then
                 export SCCACHE_CONF=/run/lancache/sccache-dist-config
                 require_dist_activity=1
+                export SCCACHE_ERROR_LOG="$preflight_dir/sccache-error.log"
+                export RUST_BACKTRACE=1
                 dist_log="$preflight_dir/sccache-dist-status.log"
                 run_logged "$dist_log" sccache --dist-status
                 require_sccache_dist_connected "$dist_log"
+                export SCCACHE_LOG=debug
               fi
 
               zero_stats_log="$preflight_dir/sccache-zero-stats.log"
@@ -315,6 +333,7 @@ runs:
               rust_log="$preflight_dir/sccache-rustc.log"
               run_logged "$rust_log" sccache rustc --crate-name lancache_accel_preflight --crate-type lib "$preflight_dir/lib.rs" --emit=link,dep-info --out-dir "$preflight_dir/out"
               run_logged "$rust_log" sccache rustc --crate-name lancache_accel_preflight --crate-type lib "$preflight_dir/lib.rs" --emit=link,dep-info --out-dir "$preflight_dir/out"
+              unset SCCACHE_LOG
               stats_log="$preflight_dir/sccache-stats.log"
               run_logged "$stats_log" sccache --show-stats --stats-format=json
               require_sccache_activity "$stats_log" "$require_cache_write"

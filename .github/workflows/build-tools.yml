@@ -3,22 +3,26 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # What: builds, scans, and publishes multi-arch build-tools image.
-# Why: fork PRs: parallel arch builds; same-repo: build-push.yml
+# Why: every PR validates the candidate before publication.
 # From: PR #1523
 name: Build Tools Image
 
 on:
   workflow_dispatch:
+    inputs:
+      debug:
+        description: Enable GitHub Actions step and runner debug logging for this dispatched run.
+        type: boolean
+        default: false
   schedule:
     - cron: "23 3 * * 0"
   pull_request:
-    branches: [master, current_dev, v0.2.0]
+    branches: [master, current_dev]
     paths:
       - "tools/build-tools/**"
       - ".github/workflows/build-tools.yml"
       - ".github/actions/build-tools-candidate-smoke/**"
       - ".github/actions/trivy-scan-exact-digest/**"
-
 permissions:
   contents: read
   packages: write
@@ -28,9 +32,11 @@ permissions:
 
 concurrency:
   group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.ref) || format('{0}-publish', github.workflow) }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
+  ACTIONS_STEP_DEBUG: ${{ inputs.debug && 'true' || 'false' }}
+  ACTIONS_RUNNER_DEBUG: ${{ inputs.debug && 'true' || 'false' }}
   BUILD_TOOLS_IMAGE: ghcr.io/${{ github.repository }}/build-tools
   # What: local scan-image tags are suffixed by run_id-run_attempt.
   # Why: isolate images per run to prevent deletion race.
@@ -46,9 +52,8 @@ jobs:
   determine-publish-scope:
     name: admit standalone build-tools route
     # What: shared admission gate for both architecture jobs below.
-    # Why: centralize fork-only exception, not per-job repeats.
+    # Why: PR candidate validation must not depend on publish flow.
     # From: PR #1523
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.id != github.event.repository.id }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -72,10 +77,26 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ "${{ github.event_name }}" != "push" ]; then
-            echo "should-publish=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          case "${{ github.event_name }}" in
+            workflow_dispatch|schedule)
+              echo "should-publish=true" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+            pull_request)
+              echo "should-publish=true" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+            push)
+              if [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
+                echo "should-publish=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              ;;
+            *)
+              echo "should-publish=false" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
 
           before_sha="${{ github.event.before }}"
           if [ -z "$before_sha" ] || [ "$before_sha" = "0000000000000000000000000000000000000000" ]; then
@@ -111,7 +132,7 @@ jobs:
     timeout-minutes: 150
     concurrency:
       group: build-tools-amd64-image-build
-      cancel-in-progress: false
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     # What: add issues:write to job permissions; others unchanged.
     # Why: job perms replace workflow level; issues:write for Trivy.
     # From: Issue #1095
@@ -123,14 +144,14 @@ jobs:
       artifact-metadata: write
       issues: write
     outputs:
-      candidate-digest: ${{ steps.build.outputs.digest }}
+      candidate-digest: ${{ github.event_name == 'pull_request' && steps.pr-publish.outputs.digest || steps.build.outputs.digest }}
     steps:
       - name: Checkout
         uses: *checkout_centraliced_versioning # v7.0.1
 
       - name: Set up Docker Buildx
         id: buildx
-        uses: &docker_setup_buildx_centraliced_versioning docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.3.0
+        uses: &docker_setup_buildx_centraliced_versioning ./.github/actions/docker-setup-buildx-action-centralized-version
 
       - name: Prepare local Buildx cache
         id: buildx-cache
@@ -157,7 +178,10 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
+        if: >-
+          github.event_name != 'pull_request' ||
+          (github.actor != 'dependabot[bot]' &&
+           github.event.pull_request.head.repo.full_name == github.repository)
         uses: &docker_login_centraliced_versioning ./.github/actions/docker-login-action-centralized-version
         with:
           registry: ghcr.io
@@ -192,7 +216,7 @@ jobs:
             printf '%s\n' "$digest"
           }
           {
-            printf 'rust=%s\n' "$(digest_for_image rust:latest)"
+            printf 'alpine=%s\n' "$(digest_for_image alpine:3.24)"
           } >> "$GITHUB_OUTPUT"
 
       # What: acceleration network, always bridge/default now
@@ -223,8 +247,8 @@ jobs:
           printf 'RUST_ACCELERATION_NETWORK=%s\n' "bridge" >> "$GITHUB_ENV"
           printf 'RUST_BUILDX_NETWORK=%s\n' "default" >> "$GITHUB_ENV"
 
-      # What: build local amd64 candidate for fork PRs.
-      # Why: fork PRs can't publish; still need candidate for smoke/vuln.
+      # What: build local amd64 candidate for pull requests.
+      # Why: candidate proof must precede any channel publication.
       # From: PR #1523
       - name: Build local amd64 scan image
         id: local-build-amd64
@@ -291,7 +315,7 @@ jobs:
           tags: ${{ steps.source-tag.outputs.image }}
           labels: |
             ${{ steps.meta.outputs.labels }}
-            org.opencontainers.image.base.rust.digest=${{ steps.build-tools-base-digests.outputs.rust }}
+            org.opencontainers.image.base.alpine.digest=${{ steps.build-tools-base-digests.outputs.alpine }}
           # What: https_proxy trusted via the proxy CA secret file.
           # Why: Squid re-signs https; the CA makes it verifiable.
           # From: Issue #1095
@@ -329,7 +353,6 @@ jobs:
         with:
           image-ref: ${{ env.BUILD_TOOLS_SCAN_IMAGE_AMD64 }}
           platform: linux/amd64
-          run-fixtures: "true"
 
       - name: Smoke-test exact pushed amd64 candidate digest
         if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
@@ -337,7 +360,6 @@ jobs:
         with:
           image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
           platform: linux/amd64
-          run-fixtures: "true"
 
       # What: resolves shared, NFS-backed Trivy DB cache directory.
       # Why: replaces a dir wiped every run, forcing full DB re-download.
@@ -381,7 +403,6 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           trivyignores: .trivyignore.yaml
-          skip-dirs: /usr/local/rustup/toolchains
           hide-progress: true
           cache: "false"
           cache-dir: ${{ steps.trivy-cache.outputs.dir }}
@@ -455,6 +476,33 @@ jobs:
           fork-check-step-name: Scan local build-tools amd64 image with Trivy
           project_pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
 
+      # What: publishes the scanned Same-Repo PR child manifest.
+      # Why: separate runner jobs need one immutable candidate.
+      # From: Issue #1860 | PR #1872
+      - name: Publish scanned amd64 PR staging candidate
+        id: pr-publish
+        if: >-
+          github.event_name == 'pull_request' &&
+          github.actor != 'dependabot[bot]' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          [ "${{ steps.trivy-scan.outputs.db-status }}" = "available" ] || { echo "::error::Refusing to publish an unscanned amd64 PR candidate."; exit 1; }
+          [ "${{ steps.trivy-scan.outputs.scan-error }}" != "true" ] || { echo "::error::Refusing to publish a scan-error amd64 PR candidate."; exit 1; }
+          [ "${{ steps.trivy-scan.outcome }}" = "success" ] || { echo "::error::Refusing to publish an amd64 PR candidate with Trivy findings."; exit 1; }
+          tag="${BUILD_TOOLS_IMAGE}:pr-${PR_NUMBER}-sha-${GITHUB_SHA}-amd64"
+          docker tag "$BUILD_TOOLS_SCAN_IMAGE_AMD64" "$tag"
+          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker push "$tag"
+          digest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$tag" --format '{{json .Manifest.Digest}}')"
+          digest="${digest%\"}"; digest="${digest#\"}"
+          [[ "$digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid published amd64 digest '$digest'."; exit 1; }
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+
       - name: Scan pushed amd64 build-tools digest with Trivy
         if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
         # What: allow 50 minutes for scan with retry.
@@ -505,15 +553,14 @@ jobs:
         if: always()
         run: docker rmi "$BUILD_TOOLS_SCAN_IMAGE_AMD64" || true
 
-      - name: Remove buildx builder
-        if: always()
-        run: docker buildx rm "${{ steps.buildx.outputs.name }}" || true
-
   build-tools-arm64:
     name: build arm64 build-tools image (native)
     needs: determine-publish-scope
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 150
+    concurrency:
+      group: build-tools-arm64-image-build
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     # What: add issues:write; others unchanged (same as amd64 job).
     # Why: needed for self-closing Trivy report in this job.
     # From: Issue #1095
@@ -525,7 +572,7 @@ jobs:
       artifact-metadata: write
       issues: write
     outputs:
-      candidate-digest: ${{ steps.build.outputs.digest }}
+      candidate-digest: ${{ github.event_name == 'pull_request' && steps.pr-publish.outputs.digest || steps.build.outputs.digest }}
     steps:
       - name: Checkout
         uses: *checkout_centraliced_versioning # v7.0.1
@@ -535,7 +582,10 @@ jobs:
         uses: ./.github/actions/buildx-setup-retry
 
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
+        if: >-
+          github.event_name != 'pull_request' ||
+          (github.actor != 'dependabot[bot]' &&
+           github.event.pull_request.head.repo.full_name == github.repository)
         uses: *docker_login_centraliced_versioning
         with:
           registry: ghcr.io
@@ -570,17 +620,17 @@ jobs:
             printf '%s\n' "$digest"
           }
           {
-            printf 'rust=%s\n' "$(digest_for_image rust:latest)"
+            printf 'alpine=%s\n' "$(digest_for_image alpine:3.24)"
           } >> "$GITHUB_OUTPUT"
 
-      # What: build local arm64 candidate for fork PRs.
-      # Why: manual/scheduled runs use pushed exact-digest path instead.
+      # What: build local arm64 candidate for pull requests.
+      # Why: manual and scheduled runs use pushed exact digests.
       # From: PR #1523
       - name: Build local arm64 scan image
         id: local-build-arm64
         if: github.event_name == 'pull_request'
         timeout-minutes: 60
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        uses: ./.github/actions/docker-build-push-action-centralized-version
         with:
           builder: ${{ steps.buildx.outputs.name }}
           context: tools/build-tools
@@ -611,7 +661,7 @@ jobs:
           tags: ${{ steps.source-tag.outputs.image }}
           labels: |
             ${{ steps.meta.outputs.labels }}
-            org.opencontainers.image.base.rust.digest=${{ steps.build-tools-base-digests.outputs.rust }}
+            org.opencontainers.image.base.alpine.digest=${{ steps.build-tools-base-digests.outputs.alpine }}
           # What: omits the LAN-proxy build-arg on this arm64 job.
           # Why: no route to the self-hosted-only proxy; static split.
           # From: Issue #1095
@@ -667,7 +717,6 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           trivyignores: .trivyignore.yaml
-          skip-dirs: /usr/local/rustup/toolchains
           hide-progress: true
           cache: "false"
           timeout: 10m
@@ -739,6 +788,33 @@ jobs:
           fork-check-step-name: Scan local build-tools arm64 image with Trivy
           project_pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
 
+      # What: publishes the scanned Same-Repo PR child manifest.
+      # Why: separate runner jobs need one immutable candidate.
+      # From: Issue #1860 | PR #1872
+      - name: Publish scanned arm64 PR staging candidate
+        id: pr-publish
+        if: >-
+          github.event_name == 'pull_request' &&
+          github.actor != 'dependabot[bot]' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          [ "${{ steps.trivy-scan.outputs.db-status }}" = "available" ] || { echo "::error::Refusing to publish an unscanned arm64 PR candidate."; exit 1; }
+          [ "${{ steps.trivy-scan.outputs.scan-error }}" != "true" ] || { echo "::error::Refusing to publish a scan-error arm64 PR candidate."; exit 1; }
+          [ "${{ steps.trivy-scan.outcome }}" = "success" ] || { echo "::error::Refusing to publish an arm64 PR candidate with Trivy findings."; exit 1; }
+          tag="${BUILD_TOOLS_IMAGE}:pr-${PR_NUMBER}-sha-${GITHUB_SHA}-arm64"
+          docker tag "$BUILD_TOOLS_SCAN_IMAGE_ARM64" "$tag"
+          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker push "$tag"
+          digest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$tag" --format '{{json .Manifest.Digest}}')"
+          digest="${digest%\"}"; digest="${digest#\"}"
+          [[ "$digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid published arm64 digest '$digest'."; exit 1; }
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+
       - name: Scan pushed arm64 build-tools digest with Trivy
         if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
         # What: allow 50 minutes for scan with retry.
@@ -771,10 +847,6 @@ jobs:
         if: always()
         run: docker rmi "$BUILD_TOOLS_SCAN_IMAGE_ARM64" || true
 
-      - name: Remove buildx builder
-        if: always()
-        run: docker buildx rm "${{ steps.buildx.outputs.name }}" || true
-
   merge-build-tools-manifests:
     name: merge build-tools multi-platform manifest
     # What: merges amd64+arm64 tags into sha-<commit> multi-arch tag.
@@ -786,7 +858,9 @@ jobs:
         !cancelled() &&
         needs['build-tools'].result == 'success' &&
         needs['build-tools-arm64'].result == 'success' &&
-        github.event_name != 'pull_request'
+        (github.event_name != 'pull_request' ||
+         (github.actor != 'dependabot[bot]' &&
+          github.event.pull_request.head.repo.full_name == github.repository))
       }}
     runs-on: [self-hosted, linux, lancache, lancache-light]
     timeout-minutes: 20
@@ -802,7 +876,7 @@ jobs:
 
       - name: Set up Docker Buildx
         id: buildx
-        uses: *docker_setup_buildx_centraliced_versioning # v4.4.1
+        uses: *docker_setup_buildx_centraliced_versioning
 
       - name: Log in to GHCR
         uses: *docker_login_centraliced_versioning
@@ -816,6 +890,7 @@ jobs:
         env:
           AMD64_DIGEST: ${{ needs.build-tools.outputs.candidate-digest }}
           ARM64_DIGEST: ${{ needs.build-tools-arm64.outputs.candidate-digest }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -827,7 +902,11 @@ jobs:
           [[ "$AMD64_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid amd64 digest '$AMD64_DIGEST'."; exit 1; }
           [[ "$ARM64_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid arm64 digest '$ARM64_DIGEST'."; exit 1; }
 
-          source_tag="${BUILD_TOOLS_IMAGE}:sha-${GITHUB_SHA}"
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            source_tag="${BUILD_TOOLS_IMAGE}:pr-${PR_NUMBER}-sha-${GITHUB_SHA}"
+          else
+            source_tag="${BUILD_TOOLS_IMAGE}:sha-${GITHUB_SHA}"
+          fi
           amd64_ref="${BUILD_TOOLS_IMAGE}@${AMD64_DIGEST}"
           arm64_ref="${BUILD_TOOLS_IMAGE}@${ARM64_DIGEST}"
 
@@ -877,6 +956,7 @@ jobs:
       # Why: schedule always resolves REF_NAME to the default branch.
       # From: Issue #1095
       - name: Promote mutable tags from the attested digest
+        if: github.event_name != 'pull_request'
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           REF_NAME: ${{ github.ref_name }}
@@ -896,7 +976,3 @@ jobs:
           elif [ "$REF_NAME" = "current_dev" ]; then
             ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools create --prefer-index=false -t "${BUILD_TOOLS_IMAGE}:nightly" "$source_ref"
           fi
-
-      - name: Remove buildx builder
-        if: always()
-        run: docker buildx rm "${{ steps.buildx.outputs.name }}" || true

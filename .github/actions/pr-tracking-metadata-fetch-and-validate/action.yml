@@ -32,10 +32,11 @@ runs:
         PR_NUMBER: ${{ github.event.pull_request.number }}
       run: |
         set -euo pipefail
-        gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json labels -q '.labels' > /tmp/pr-labels-live.json
+        labels_file="${RUNNER_TEMP:-/var/tmp}/lancache-pr-labels-live.json"
+        gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json labels -q '.labels' > "$labels_file"
         milestone_title="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json milestone -q '.milestone.title // ""')"
         {
-          echo "labels_file=/tmp/pr-labels-live.json"
+          printf 'labels_file=%s\n' "$labels_file"
           echo "milestone_title=$milestone_title"
         } >> "$GITHUB_OUTPUT"
 

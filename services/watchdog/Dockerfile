@@ -9,33 +9,28 @@
 ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
 FROM ${BUILD_TOOLS_IMAGE} AS watchdog-builder
 
+ARG SCCACHE_REDIS_MODE=required
+
 # What: verifies the build-tools contract is present first.
 # Why: fail closed, not a confusing mid-build not-found.
 # From: Issue #842
 #
-# What: detects host arch for the musl cross-compile target.
-# Why: uname -m needs no extra package, unlike dpkg.
+# What: detects the installed native Rust target.
+# Why: Alpine packages Rust's musl standard library under its host triple.
 # From: Issue #1095
 RUN set -eu; \
-    for tool in cargo rustc rustup rustfmt clippy-driver sccache distcc distcc-pump python3 pkg-config; do \
+    for tool in cargo rustc rustfmt clippy-driver sccache distcc distcc-pump python3 pkg-config; do \
       command -v "$tool" >/dev/null; \
     done; \
     command -v musl-gcc >/dev/null; \
     command -v ccache >/dev/null; \
     case "$(uname -m)" in \
-      x86_64) echo "x86_64-unknown-linux-musl" > /tmp/musl-target; ;; \
-      aarch64) echo "aarch64-unknown-linux-musl" > /tmp/musl-target; ;; \
+      x86_64) echo "x86_64-alpine-linux-musl" > /tmp/musl-target; ;; \
+      aarch64) echo "aarch64-alpine-linux-musl" > /tmp/musl-target; ;; \
       *) echo "Unsupported architecture for musl cross-compilation target: $(uname -m)" >&2; exit 1; ;; \
     esac; \
-    # Captured into a variable first, then grepped via a here-string
-    # (AG-VAL-032): a live pipe into `grep -qx` is the exact SIGPIPE-under-
-    # pipefail shape already confirmed in this project's own CI failures.
-    # This stage is `FROM ${BUILD_TOOLS_IMAGE}`, which sets
-    # `SHELL ["/bin/bash", "-o", "pipefail", "-c"]` and a child Dockerfile
-    # with no SHELL override inherits that, so a live pipe here would be
-    # exploitable, not merely at theoretical risk.
-    installed_musl_targets="$(rustup target list --installed)"; \
-    grep -qx "$(cat /tmp/musl-target)" <<<"${installed_musl_targets}"; \
+    rustc_host_line="$(rustc -vV)"; \
+    grep -qx "host: $(cat /tmp/musl-target)" <<<"${rustc_host_line}"; \
     distcc_bin="$(command -v distcc)"; \
     mkdir -p /usr/local/lib/distcc; \
     for wrapper in cc gcc c++ g++; do ln -sf "$distcc_bin" "/usr/local/lib/distcc/$wrapper"; done; \
@@ -106,6 +101,9 @@ COPY services/watchdog/src/ ./services/watchdog/src/
 # From: Issue #1781 | PR #1783
 RUN --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_dist_config \
+    --mount=type=secret,id=sccache_gha_config,required=false \
+    --mount=type=secret,id=sccache_gha_url,required=false \
+    --mount=type=secret,id=sccache_gha_token,required=false \
     --mount=type=secret,id=distcc_potential_hosts \
     --mount=type=secret,id=ccache_redis_url \
     --mount=type=secret,id=proxy_ca \
@@ -124,7 +122,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     real_cxx="$(PATH="$original_path" command -v c++)"; \
     real_gxx="$(PATH="$original_path" command -v g++)"; \
     configure_sccache() { \
-      if [ -s /run/secrets/sccache_redis_url ] || [ -s /run/secrets/sccache_dist_config ]; then \
+      if [ -s /run/secrets/sccache_redis_url ] || [ -s /run/secrets/sccache_dist_config ] || [ -s /run/secrets/sccache_gha_config ]; then \
         unset CARGO_MAKEFLAGS MAKEFLAGS; \
         export RUSTC_WRAPPER=/usr/local/bin/lancache-rustc-wrapper SCCACHE_REDIS_KEY_PREFIX=lancache-watchdog; \
         if [ -s /run/secrets/sccache_redis_url ]; then \
@@ -134,8 +132,15 @@ RUN --mount=type=secret,id=sccache_redis_url \
           export SCCACHE_CONF=/run/secrets/sccache_dist_config; \
           sccache --dist-status; \
         fi; \
+        if [ -s /run/secrets/sccache_gha_config ] && [ ! -s /run/secrets/sccache_dist_config ]; then \
+          export SCCACHE_CONF=/run/secrets/sccache_gha_config SCCACHE_GHA_ENABLED=on; \
+        fi; \
+        if [ -s /run/secrets/sccache_gha_url ] && [ -s /run/secrets/sccache_gha_token ]; then \
+          export ACTIONS_RESULTS_URL="$(cat /run/secrets/sccache_gha_url)" ACTIONS_RUNTIME_TOKEN="$(cat /run/secrets/sccache_gha_token)"; \
+        fi; \
       else \
-        echo "[INFO] sccache disabled (no sccache_redis_url or sccache_dist_config secret present)." >&2; \
+        if [ "${SCCACHE_REDIS_MODE:-required}" = "required" ]; then echo "ERROR: required sccache configuration is unavailable for watchdog." >&2; return 1; fi; \
+        echo "[INFO] sccache disabled (no cache configuration secret present)." >&2; \
       fi; \
     }; \
     disable_distcc() { \
@@ -299,6 +304,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
         echo "[INFO] plain distcc fallback also failed; falling through to full local-compiler retry." >&2; \
       fi; \
       if [ "${distcc_enabled:-0}" = "1" ]; then \
+        if [ "${SCCACHE_REDIS_MODE:-required}" = "required" ]; then echo "[ERROR] required sccache acceleration failed; refusing local Rust fallback." >&2; rm -f "$cargo_log"; return "$cargo_status"; fi; \
         disable_distcc; \
         unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
         echo "[INFO] distcc build path unavailable; retrying with normal local C compiler." >&2; \
@@ -311,6 +317,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
         return 1; \
       fi; \
       if grep -Eqi 'sccache: error|Fixed token mismatch|Timed out waiting for server startup|SCCACHE_' "$cargo_log"; then \
+        if [ "${SCCACHE_REDIS_MODE:-required}" = "required" ]; then echo "[ERROR] required sccache acceleration failed; refusing local Rust fallback." >&2; rm -f "$cargo_log"; return "$cargo_status"; fi; \
         unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
         echo "[INFO] sccache build path unavailable; retrying with sccache disabled." >&2; \
         rm -f "$cargo_log"; \
@@ -349,13 +356,6 @@ LABEL org.opencontainers.image.description="lancache-ng watchdog: compiled Rust 
 # What: explicit proxy build-args, no default value set
 # Why: routes self-hosted downloads via the LAN proxy
 # From: Issue #1781 | PR #1783
-ARG HTTP_PROXY
-ARG HTTPS_PROXY
-ARG NO_PROXY
-ARG http_proxy
-ARG https_proxy
-ARG no_proxy
-
 # What: shared version-banner script, not a per-service copy.
 # Why: named build context avoids duplicating it per service.
 # From: Issue #1781 | PR #1783

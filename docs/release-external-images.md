@@ -174,8 +174,8 @@ exact class of bug it was meant to prevent. Instead:
   `.trivyignore.yaml` or `scripts/untracked/generate-vex.sh` changes on
   `current_dev` -- no PR, no review gate, mirroring this repo's existing
   precedent for other mechanically-reproducible automated commits (e.g.
-  `nightly-refresh.yml`'s channel-tag refresh, and `build-push.yml`'s own
-  coverage-badge publish job). The current document is always fetchable at
+  `nightly-refresh.yml`'s channel-tag refresh). The current document is always
+  fetchable at
   `https://raw.githubusercontent.com/wiki-mod/lancache-ng/CI-Automation/vex/vex.openvex.json`.
   A failed regeneration does not fail that workflow's own run status (a
   best-effort, unreviewed `push` automation with no real-time consumer,

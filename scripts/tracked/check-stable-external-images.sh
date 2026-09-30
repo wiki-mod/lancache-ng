@@ -4,8 +4,9 @@
 # Stable-release gate: every external (third-party) image referenced by the
 # prod/quickstart deploy profiles must be declared in release/stack-images.yml
 # and pinned by an immutable sha256 digest before a stable release can move
-# the "latest" channel. Exits non-zero and prints ::error:: lines for CI when
-# an image is missing from the manifest or not digest-pinned.
+# the "latest" channel, except for the explicitly approved netdata/netdata:latest
+# runtime reference. Exits non-zero and prints ::error:: lines for CI when an
+# image is missing from the manifest or violates its policy.
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -87,6 +88,10 @@ while IFS= read -r match; do
     printf '::error::Stable release gate: external image %s:%s (%s) is not listed in release/stack-images.yml.\n' \
       "$location" "$line_no" "$image" >&2
     failed=1
+    continue
+  fi
+
+  if [[ "$image" == "netdata/netdata:latest" && "$policy" == "tag-latest" ]]; then
     continue
   fi
 
