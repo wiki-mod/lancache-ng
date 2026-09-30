@@ -5194,11 +5194,22 @@ _ci_build_tools_published_signature() {
         "${CI_PUBLISHED_SIG_CMD}" "${image}"
         return "$?"
     fi
-    json="$(docker buildx imagetools inspect "${image}" --format '{{json .Image}}' 2>/dev/null)" || { printf ''; return 0; }
-    printf '%s' "${json}" | jq -r '
+    local rc=0 sig
+    json="$(docker buildx imagetools inspect "${image}" --format '{{json .Image}}' 2>&1)" || rc=$?
+    if [ "${rc}" -ne 0 ]; then
+        # What: a genuine miss reads as no signature.
+        # Why: any other failure is UNKNOWN, never drift.
+        # From: Issue #1683 | PR #1858
+        [ "$(_ci_classify_failure "${json}")" = not_found ] && { printf ''; return 0; }
+        ci_error "[CI-ERROR-BUILDTOOLS-0021]" "image=\"${image}\" rc=${rc} reason=\"inspect failed; UNKNOWN\"" "${json}"
+        return 2
+    fi
+    sig="$(printf '%s' "${json}" | jq -r '
         [.. | objects | .config?.Labels? // empty
          | ."org.lancache-ng.build-tools.signature" // empty]
-        | map(select(. != "")) | first // ""'
+        | map(select(. != "")) | first // ""')" || return 2
+    [ -n "${sig}" ] || ci_log "[CI-WARN-BUILDTOOLS-0022]" "image=\"${image}\" reason=\"published image has no signature label\""
+    printf '%s' "${sig}"
 }
 
 # What: Append one include object from key=value pairs.
@@ -5256,7 +5267,7 @@ _ci_build_tools_resolve_image() {
     current="$(_ci_build_tools_resolve_signature)" || return 2
     published="$(_ci_build_tools_published_signature "${image}:${channel}")" || return 2
     if [ "${current}" != "${published}" ]; then
-        ci_log "[CI-ERROR-BUILDTOOLS-0019]" "channel=\"${channel}\" reason=\"published toolchain signature drifted from SOT; rebuild via nightly\" resolved=\"${current}\"" "published=${published}"
+        ci_log "[CI-ERROR-BUILDTOOLS-0019]" "channel=\"${channel}\" reason=\"published toolchain signature drifted from SOT\" resolved=\"${current}\"" "published=${published}"
         return 2
     fi
     if ! digest="$(_ci_registry_digest "${image}:${channel}")"; then

@@ -4145,6 +4145,26 @@ netdata=sha256:n"
     [[ "${output}" == *"PUB-123"* ]]
 }
 
+@test "build-tools published-signature separates miss, no label, failure" {
+    # What: miss=empty, no label=WARN, error=UNKNOWN+raw.
+    # Why: a failed inspect must never read as drift.
+    # From: Issue #1683 | PR #1858
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    printf '#!/usr/bin/env bash\necho "ERROR: img:x: not found" >&2\nexit 1\n' > "${bin}/docker"
+    chmod +x "${bin}/docker"
+    PATH="${bin}:${PATH}" run _ci_build_tools_published_signature img:x
+    [ "${status}" -eq 0 ]; [ -z "${output}" ]
+    printf '#!/usr/bin/env bash\necho "{\\"config\\":{\\"Labels\\":{}}}"\n' > "${bin}/docker"
+    PATH="${bin}:${PATH}" run _ci_build_tools_published_signature img:x
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"[CI-WARN-BUILDTOOLS-0022]"* ]]
+    printf '#!/usr/bin/env bash\necho "denied: requested access" >&2\nexit 1\n' > "${bin}/docker"
+    PATH="${bin}:${PATH}" run _ci_build_tools_published_signature img:x
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"[CI-ERROR-BUILDTOOLS-0021]"* ]]
+    [[ "${output}" == *"denied: requested access"* ]]
+}
+
 @test "build-tools rejects an unknown subcommand (fail closed)" {
     # What: An unknown sub must not silently succeed.
     # Why: Fail-closed dispatch (AG-VAL-002).
