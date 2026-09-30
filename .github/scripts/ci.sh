@@ -6578,8 +6578,8 @@ _ci_check_pr_tracking_metadata() {
         ci_log "[CI-ERROR-CHECK-0017]" "reason=\"PR_NUMBER and REPO are required\""
         return 2
     fi
-    # What: board number from the SOT; its owner is the repo's.
-    # Why: one CI policy owner (AG-GH-008); no owner literal.
+    # What: SOT board number; owner is the repo owner.
+    # Why: one CI policy owner (AG-GH-008), no literal.
     # From: Issue #1683 | PR #1858
     project_number="$(_ci_block_entry_field pr_policy "" project_number)"
     project_owner="${repo%%/*}"
