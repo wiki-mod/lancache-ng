@@ -6209,8 +6209,8 @@ _ci_check_docker_run_heredoc_stdin() {
 # Why: unanswered prompt hangs sim to timeout.
 # From: Issue #1176 | PR #1858
 _ci_setup_wizard_rows() {
-    # Emit FLAG\tPROMPT\tHAYSTACK per ask/confirm in setup.sh's wizard region.
-    # FLAG=COND when any if/case encloses the call (one keyword per line).
+    # What: emit ask/confirm prompts from setup wizard
+    # Why: parse wizard rows for prompt/expect drift checks
     local setup="$1" cs_line esac_line wiz_start
     cs_line="$(grep -n -m1 '^case "${1:-install}" in$' "${setup}")" || return 3
     cs_line="${cs_line%%:*}"
@@ -6276,7 +6276,8 @@ _ci_check_setup_prompt_drift() {
     local -a sim_pats=() gpats=()
     for sim in "${sims[@]}"; do
         [ -f "${sim}" ] || { viol+=("expected simulation script not found: ${sim}"); continue; }
-        # Introspection-driven sims (setup.sh list-prompts) hand-encode nothing.
+        # What: introspection-driven sims use list-prompts
+        # Why: no hand-encoded patterns needed here
         if grep -qF 'build_expect_prompt_block' "${sim}"; then
             grep -qF 'spawn bash setup.sh' "${sim}" || viol+=("${sim}: introspection-driven but no 'spawn bash setup.sh'")
             continue
@@ -6290,13 +6291,15 @@ _ci_check_setup_prompt_drift() {
             continue
         fi
         for tcl in "${sim_pats[@]}"; do gpats+=("$(printf '%s' "${tcl}" | sed 's/\[\^\\n\]/./g')"); done
-        # coverage: each unconditional prompt answerable by this sim (#1082/#1175)
+        # What: check if sim covers unconditional prompts
+        # Why: hang-to-timeout on unanswered prompt
         for pair in "${uncond[@]}"; do
             prompt="${pair%%$'\t'*}"; haystack="${pair#*$'\t'}"; covered=0
             for gpat in "${gpats[@]}"; do grep -Eq -- "${gpat}" <<<"${haystack}" && { covered=1; break; }; done
             [ "${covered}" -eq 0 ] && viol+=("${sim}: no expect_prompt matches setup.sh unconditional prompt '${prompt}' (#1082/#1175: would hang to timeout)")
         done
-        # staleness: each hand-encoded pattern still matches a real prompt
+        # What: detect stale pattern-matches
+        # Why: patterns must match current prompts
         for tcl in "${gpats[@]}"; do
             matched=0
             for haystack in "${all_prompts[@]}"; do grep -Eq -- "${tcl}" <<<"${haystack}" && { matched=1; break; }; done
@@ -6431,8 +6434,8 @@ _ci_check_pr_template() {
             found && /^## / {exit}
             found {print}
         ' <<<"${body}")"
-        # Strips <!-- ... --> (may span lines) and ``` fence markers so an
-        # untouched template placeholder counts as empty, not "non-empty".
+        # What: strip HTML comments and code fence markers
+        # Why: detect empty vs placeholder-only sections
         stripped="$(awk '
             { line=$0 }
             !incm && line ~ /<!--/ && line ~ /-->/ { sub(/<!--.*-->/, "", line) }
