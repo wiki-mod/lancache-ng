@@ -3999,18 +3999,27 @@ netdata=sha256:n"
     [ -z "${output}" ]
 }
 
-@test "build-args emits ALPINE_IMAGE for every plain product service" {
-    # What: every product service gets shared ALPINE_IMAGE.
-    # Why: one base-image owner; ci.sh resolves refs.
-    # From: Issue #1683
-    export CI_BUILD_TOOLS_IMAGE_CMD='echo bt-stub@sha256:test'
-    local svc
-    for svc in proxy dns watchdog dhcp dhcp-proxy ntp ui cachehamster; do
-        run bash "${CI_SH}" build-args "${svc}"
-        [ "${status}" -eq 0 ]
-        [[ "${output}" == *"--build-arg ALPINE_IMAGE=mirror.gcr.io"* ]]
-        [[ "${output}" != *"FLUENT_BIT_IMAGE"* ]]
-    done
+@test "build-args: base image per service, <KEY>_IMAGE from external_image" {
+    # What: alpine for all; external_image x -> X_IMAGE arg.
+    # Why: one base-image owner, one naming rule, no list.
+    # From: Issue #1683 | PR #1858
+    local m="${BATS_TEST_TMPDIR}/m.yml"
+    printf 'base_images:\n  alpine: "img-a"\n  ext_x: "img-x"\nservices:\n  svc-a:\n    context: a\n    build_type: apk\n  svc-b:\n    context: b\n    build_type: apk\n    external_image: ext_x\n  svc-c:\n    context: c\n    build_type: apk\n    external_image: ext_missing\n' > "${m}"
+    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc-a
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"--build-arg ALPINE_IMAGE=img-a"* ]]
+    [[ "${output}" != *"EXT_X_IMAGE"* ]]
+    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc-b --bare
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"ALPINE_IMAGE=img-a"*"EXT_X_IMAGE=img-x"* ]]
+    [[ "${output}" != *"--build-arg"* ]]
+    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc-c
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-BUILDARGS-0007"*"base_images.ext_missing"* ]]
+    sed -i '/alpine:/d' "${m}"
+    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc-a
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-BUILDARGS-0003"* ]]
 }
 
 @test "build-args emits BUILD_TOOLS_IMAGE for a rust service, not apk" {
@@ -4065,26 +4074,6 @@ netdata=sha256:n"
     [[ "${output}" == *"CI-ERROR-RUSTBUILD-0004"*"host: arch-a-alpine-linux-musl"* ]]
 }
 
-@test "build-args emits ALPINE_IMAGE + FLUENT_BIT_IMAGE for syslog only" {
-    # What: syslog emits ALPINE_IMAGE + FLUENT_BIT_IMAGE.
-    # Why: syslog has external_image: fluent_bit entry.
-    # From: Issue #1683
-    run bash "${CI_SH}" build-args syslog
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"--build-arg ALPINE_IMAGE=mirror.gcr.io"* ]]
-    [[ "${output}" == *"--build-arg FLUENT_BIT_IMAGE=cr.fluentbit.io"* ]]
-}
-
-@test "build-args --bare syslog emits FLUENT_BIT_IMAGE without the flag prefix" {
-    # What: --bare drops --build-arg flag prefix.
-    # Why: docker/build-push-action wants NAME=VALUE format.
-    # From: Issue #1683
-    run bash "${CI_SH}" build-args syslog --bare
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"FLUENT_BIT_IMAGE=cr.fluentbit.io"* ]]
-    [[ "${output}" != *"--build-arg"* ]]
-}
-
 @test "build-args netdata emits SOT version; digest needs a platform" {
     # What: no platform=version+per-arch shas only.
     # Why: one pin owner; ARCH/SHA256 need platform.
@@ -4109,29 +4098,6 @@ netdata=sha256:n"
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"--build-arg NETDATA_ARCH=${arch}"* ]]
     [[ "${output}" == *"--build-arg NETDATA_SHA256=${sha}"* ]]
-}
-
-@test "build-args for a product service fails closed on a missing central base image" {
-    # What: Missing base_images.alpine pin fails closed.
-    # Why: FAIL CLOSED covers every ALPINE_IMAGE emitter.
-    # From: Issue #1683
-    local m="${BATS_TEST_TMPDIR}/no-rust-alpine-proxy.yml"
-    grep -v '^  alpine:' "${CI_MANIFEST_SOURCE}" > "${m}"
-    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args proxy
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-BUILDARGS-0003"* ]]
-}
-
-@test "build-args fails closed on an unmapped external_image value" {
-    # What: Unmapped external_image value fails closed.
-    # Why: AG-VAL-030: prove failure path not guess.
-    # From: Issue #1683
-    local m="${BATS_TEST_TMPDIR}/bogus-external-image.yml"
-    sed 's/external_image: fluent_bit/external_image: bogus_thing/' \
-        "${CI_MANIFEST_SOURCE}" > "${m}"
-    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args syslog
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-BUILDARGS-0008"* ]]
 }
 
 @test "build-tools packages reads only build_toolchain.build-tools.packages" {

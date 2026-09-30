@@ -5054,13 +5054,7 @@ _ci_service_build_args() {
     # From: Issue #1683
     ext="$(_ci_block_entry_field services "${service}" external_image)"
     if [ -n "${ext}" ]; then
-        case "${ext}" in
-            fluent_bit) ext_argname="FLUENT_BIT_IMAGE" ;;
-            *)
-                ci_log "[CI-ERROR-BUILDARGS-0008]" "service=\"${service}\" external_image=\"${ext}\" reason=\"no known build-arg mapping; FAIL CLOSED\""
-                return 2
-                ;;
-        esac
+        ext_argname="${ext^^}_IMAGE"
         val="$(_ci_block_entry_field base_images "" "${ext}")"
         if [ -z "${val}" ]; then
             ci_log "[CI-ERROR-BUILDARGS-0007]" "arg=\"${ext_argname}\" service=\"${service}\" key=\"base_images.${ext}\" reason=\"missing central external image; FAIL CLOSED\""
@@ -7313,17 +7307,14 @@ _ci_dockerfile_logical_lines() {
     ' "$1"
 }
 
-# What: Resolve bare SOT ARG to its value.
-# Why: No baked-in fallback for ALPINE/FLUENT_BIT.
-# From: Issue #1683
+# What: Resolve <KEY>_IMAGE to SOT base_images.<key>.
+# Why: same rule external_image uses; no per-image list.
+# From: Issue #1683 | PR #1858
 _ci_sot_base_image_arg() {
     local name="$1" val key
-    case "${name}" in
-        ALPINE_IMAGE) key=alpine ;;
-        FLUENT_BIT_IMAGE) key=fluent_bit ;;
-        *) return 1 ;;
-    esac
-    val="$(_ci_block_entry_field base_images "" "${key}")"
+    case "${name}" in *_IMAGE) ;; *) return 1 ;; esac
+    key="${name%_IMAGE}"
+    val="$(_ci_block_entry_field base_images "" "${key,,}")"
     [ -n "${val}" ] || return 1
     printf '%s' "${val}"
 }
