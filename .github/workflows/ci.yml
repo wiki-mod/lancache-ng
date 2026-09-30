@@ -55,7 +55,6 @@ jobs:
       credentials: &ghcr_credentials
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      options: &docker_socket -v /var/run/docker.sock:/var/run/docker.sock
     steps:
       # What: native fail-closed checkout, shallow; persistent ci.sh auth.
       # Why: no SHA pin outside the SOT; git comes from build-tools.
@@ -86,7 +85,6 @@ jobs:
     container: &bt_platform
       image: ${{ needs.platform.outputs.image }}
       credentials: *ghcr_credentials
-      options: *docker_socket
     outputs:
       any-build: ${{ steps.plan.outputs.any-build }}
       any-toolchain: ${{ steps.plan.outputs.any-toolchain }}
@@ -284,7 +282,6 @@ jobs:
     container:
       image: ${{ needs.resolve-build-tools.outputs.image }}
       credentials: *ghcr_credentials
-      options: *docker_socket
     steps:
       - *bootstrap
       - name: Scan the built images by digest
