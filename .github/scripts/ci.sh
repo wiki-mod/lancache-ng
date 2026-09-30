@@ -962,6 +962,7 @@ _ci_classify_failure() {
     if [ "${op}" = "registry" ]; then
         case "${low}" in
             *"manifest unknown"*|*"not found: manifest"*|*"manifest_unknown"*|*"not found: name unknown"*|*"name_unknown"*) printf 'not_found\n'; return 0 ;;
+            "error: "*": not found") printf 'not_found\n'; return 0 ;;
         esac
     fi
     # What: auth/malformed/compile are permanent.

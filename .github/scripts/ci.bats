@@ -8276,6 +8276,17 @@ EOF
     [ "${status}" -eq 1 ]
 }
 
+@test "registry_probe maps the imagetools miss to not-found" {
+    # What: buildx "ERROR: <ref>: not found" returns 1.
+    # Why: real CI shape; it drove every target UNKNOWN.
+    # From: Issue #1683 | PR #1858
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    printf '#!/usr/bin/env bash\necho "ERROR: ghcr.io/x/y:z: not found" >&2\nexit 1\n' > "${bin}/docker"
+    chmod +x "${bin}/docker"
+    PATH="${bin}:${PATH}" run _ci_registry_probe ghcr.io/x/y:z
+    [ "${status}" -eq 1 ]
+}
+
 @test "registry_probe maps an auth failure to unknown, not not-found" {
     # What: an auth failure returns 2 (never build).
     # Why: a credential problem is not a missing artifact.

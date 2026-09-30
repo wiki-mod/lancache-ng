@@ -115,22 +115,6 @@ jobs:
           [ -n "${digest}" ] || { echo "no digest from publish" >&2; exit 1; }
           bash .github/scripts/ci.sh verify "${{ matrix.service }}" "${digest}" "${{ matrix.platform }}"
 
-  # What: run rust fmt/check/clippy/test for changed rust services.
-  # Why: ci.sh owns cargo; tests run on source change, reuse or not (§60).
-  # From: Issue #1683
-  test:
-    name: test
-    needs: plan
-    if: needs.plan.outputs.test-services != ''
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - *bootstrap
-      - name: Test the changed rust services
-        env:
-          TEST_SERVICES: ${{ needs.plan.outputs.test-services }}
-        run: bash .github/scripts/ci.sh test-stack
-
   # What: pin the published build-tools image by digest for container jobs.
   # Why: toolchain jobs run in the SOT-verified image, digest-immutable.
   # From: Issue #1683
@@ -167,6 +151,23 @@ jobs:
       - *bootstrap
       - name: Audit rust dependencies
         run: bash .github/scripts/ci.sh check cargo-audit
+
+  # What: run rust fmt/check/clippy/test for changed rust services.
+  # Why: cargo lives in build-tools, never on the runner.
+  # From: Issue #1683 | PR #1858
+  test:
+    name: test
+    needs: [plan, resolve-build-tools]
+    if: needs.plan.outputs.test-services != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    container: *bt_container
+    steps:
+      - *bootstrap
+      - name: Test the changed rust services
+        env:
+          TEST_SERVICES: ${{ needs.plan.outputs.test-services }}
+        run: bash .github/scripts/ci.sh test-stack
 
   # What: shellcheck + actionlint in the pinned build-tools image.
   # Why: SOT-pinned linter versions, not runner drift (AG-VAL-016).
