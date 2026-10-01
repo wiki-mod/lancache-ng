@@ -158,25 +158,25 @@ teardown() {
     [[ "${output}" == *"CI-ERROR-CORE-0106"*'rc="0"'*"warn"* ]]
 }
 
-# What: a grep stub that fails one matching argument.
-# Why: proves a read error is never a clean result.
+# What: a tool stub that fails one matching argument.
+# Why: proves a tool error is never a clean result.
 # From: Issue #1683 | PR #1858
-_grep_fail_stub() {
-    local bin="$1"
+_fail_stub() {
+    local bin="$1" tool="$2"
     mkdir -p "${bin}"
-    cat > "${bin}/grep" <<'STUB'
+    cat > "${bin}/${tool}" <<'STUB'
 #!/usr/bin/env bash
+tool="$(basename "$0")"
 for arg in "$@"; do
     if [ -n "${FAIL_MATCH:-}" ] && [[ "${arg}" == *"${FAIL_MATCH}" ]]; then
-        echo "grep: read error" >&2
+        echo "${tool}: read error" >&2
         exit 2
     fi
 done
-exec "${REAL_GREP}" "$@"
+PATH="${PATH#*:}"
+exec "${tool}" "$@"
 STUB
-    chmod +x "${bin}/grep"
-    REAL_GREP="$(command -v grep)"
-    export REAL_GREP
+    chmod +x "${bin}/${tool}"
 }
 
 @test "a grep read error fails every check that reads the file" {
@@ -185,7 +185,7 @@ STUB
     # From: Issue #1683 | PR #1858
     local bin="${BATS_TEST_TMPDIR}/gbin"
     local name check arg fail
-    _grep_fail_stub "${bin}"
+    _fail_stub "${bin}" grep
     printf 'echo hi\n' > "${BATS_TEST_TMPDIR}/probe.sh"
     printf 'on: push\n' > "${BATS_TEST_TMPDIR}/probe.yml"
     while IFS='|' read -r name check arg fail; do
@@ -230,7 +230,7 @@ CASES
     # Why: "not referenced" from a failed read deletes data.
     # From: Issue #1683 | PR #1858
     local bin="${BATS_TEST_TMPDIR}/gcbin"
-    _grep_fail_stub "${bin}"
+    _fail_stub "${bin}" grep
     PATH="${bin}:${PATH}" FAIL_MATCH="-xF" \
     CI_GC_ROOTS_CMD="$(_stub roots 'printf "sha256:aaa\n"')" \
     CI_GC_CANDIDATES_CMD="$(_stub cands 'printf "sha256:aaa\t7\t2020-01-01T00:00:00Z\n"')" \
@@ -2132,7 +2132,15 @@ _release_gh_stub() {
 #!/usr/bin/env bash
 echo "$*" >> "${GH_CALLS}"
 if [ "$1 $2" = "release view" ]; then
-    [ -n "${STUB_VIEW:-}" ] && { printf '%s' "${STUB_VIEW}"; exit 0; }
+    if [ -n "${STUB_VIEW_ERR:-}" ]; then
+        echo "${STUB_VIEW_ERR}" >&2
+        exit 1
+    fi
+    if [ -n "${STUB_VIEW:-}" ]; then
+        printf '%s' "${STUB_VIEW}"
+        exit 0
+    fi
+    echo "release not found" >&2
     exit 1
 fi
 exit 0
@@ -2167,6 +2175,17 @@ EOF
     grep -q 'release create v1.2.3-rc.4' "${calls}"
     grep -q -- '--prerelease' "${calls}"
     [[ "${output}" == *"release=published"* ]]
+    # What: any other view error stops; nothing created.
+    # Why: an auth/network error is UNKNOWN, not "absent".
+    # From: Issue #1683 | PR #1858
+    : > "${calls}"
+    STUB_VIEW_ERR='HTTP 401: Bad credentials' CI_RELEASE_GH_CMD="${gh}" \
+        run ci_cmd_release_publish v1.2.3-rc.4
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-RELEASE-0020"*"Bad credentials"* ]]
+    if grep -q 'release create' "${calls}"; then
+        return 1
+    fi
 }
 
 @test "release-publish replaces the marker block on an existing release" {
@@ -6069,7 +6088,7 @@ none||CI-ERROR-CHECK-0111
 bad|  bogus: [\n|CI-ERROR-CHECK-0110
 CASES
     printf 'services:\n  proxy:\n    image: x\n    env_file: [./p.env]\n' > "${r}/dep/c.yml"
-    _grep_fail_stub "${bin}"
+    _fail_stub "${bin}" grep
     PATH="${bin}:${PATH}" FAIL_MATCH="/docs/architecture-ng.md" \
         run bash "${CI_SH}" check proxy-cache-env-doc-drift
     [ "${status}" -ne 0 ]
@@ -7146,6 +7165,32 @@ CASES
     [[ "${output}" == *"CI-INFO-CHECK-0002"* ]]
     [[ "${output}" == *"warn-only"* ]]
     [[ "${output}" == *"changelog-direct-edit=warn"* ]]
+    # What: unreadable labels JSON fails with jq's error.
+    # Why: a parse error is not "no release label".
+    # From: Issue #1683 | PR #1858
+    PR_LABELS_JSON='{broken' run bash "${CI_SH}" check changelog-direct-edit "CHANGELOG.md"
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0112"* ]]
+}
+
+@test "diff refs fail on a broken PR merge-base, not empty" {
+    # What: failed merge-base is rc 2; absent before = none.
+    # Why: empty refs means "all changed"; UNKNOWN != BUILD.
+    # From: Issue #1683 | PR #1858
+    local repo="${BATS_TEST_TMPDIR}/dr"
+    git init -q "${repo}"
+    git -C "${repo}" -c user.email=a@b -c user.name=b commit -q --allow-empty -m x
+    CI_REPO_ROOT="${repo}" GITHUB_EVENT_NAME=pull_request BASE_SHA=0123456789abcdef0123456789abcdef01234567 \
+        run _ci_diff_refs
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-CORE-0106"* ]]
+    CI_REPO_ROOT="${repo}" GITHUB_EVENT_NAME=pull_request BASE_SHA=0123456789abcdef0123456789abcdef01234567 \
+        run ci_cmd_changed_files
+    [ "${status}" -eq 2 ]
+    CI_REPO_ROOT="${repo}" GITHUB_EVENT_NAME=push BEFORE_SHA=0123456789abcdef0123456789abcdef01234567 \
+        GITHUB_SHA=HEAD run _ci_diff_refs
+    [ "${status}" -eq 0 ]
+    [ -z "${output}" ]
 }
 
 @test "check changelog-direct-edit notices the release label exemption" {
@@ -7708,6 +7753,16 @@ _trivy_stub() {
     local cache="${BATS_TEST_TMPDIR}/staledb"; mkdir -p "${cache}"
     mkdir -p "${cache}/.trivy-db-update.lock"
     touch -d '-1 hour' "${cache}/.trivy-db-update.lock"
+    # What: an unreadable lock age stops, keeps the lock.
+    # Why: age 0 would reclaim a live holder's lock.
+    # From: Issue #1683 | PR #1858
+    local bin="${BATS_TEST_TMPDIR}/statbin"
+    _fail_stub "${bin}" stat
+    PATH="${bin}:${PATH}" FAIL_MATCH=%Y CI_TRIVY_LOCK_POLL=1 \
+        run _ci_trivy_db_lock_run "${cache}" 10 5 -- true
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-SCAN-0020"* ]]
+    [ -d "${cache}/.trivy-db-update.lock" ]
     CI_TRIVY_LOCK_POLL=1 run _ci_trivy_db_lock_run "${cache}" 10 5 -- true
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"reclaiming stale trivy DB refresh lock"* ]]
@@ -8050,6 +8105,16 @@ EOF
     cd "${CAS_A}"; _ci_lock_try origin refs/ci/lock/t holder-a 600
     sleep 2
     cd "${CAS_B}"
+    # What: an unreadable lock age stops the takeover.
+    # Why: a failed read must not look like an old lock.
+    # From: Issue #1683 | PR #1858
+    local bin="${BATS_TEST_TMPDIR}/gitbin"
+    _fail_stub "${bin}" git
+    PATH="${bin}:${PATH}" FAIL_MATCH=%ct run _ci_lock_try origin refs/ci/lock/t holder-b 1
+    [ "${status}" -eq 3 ]
+    [[ "${output}" == *"CI-ERROR-CORE-0106"* ]]
+    git fetch --quiet origin refs/ci/lock/t
+    [ "$(git log -1 --format=%s FETCH_HEAD)" = holder-a ]
     run _ci_lock_try origin refs/ci/lock/t holder-b 1
     [ "${status}" -eq 0 ]
     git fetch --quiet origin refs/ci/lock/t

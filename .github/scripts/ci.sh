@@ -462,8 +462,11 @@ ci_cmd_plan() {
 # Why: comment-only edits keep identity (§11.1/§12.5).
 # From: Issue #1683
 _ci_path_content_changed() {
-    local path="$1" base="${2:-}" head="${3:-}" a b
-    [ -n "${base}" ] || read -r base head <<< "$(_ci_diff_refs)"
+    local path="$1" base="${2:-}" head="${3:-}" a b refs
+    if [ -z "${base}" ]; then
+        refs="$(_ci_diff_refs)" || return 2
+        read -r base head <<<"${refs}"
+    fi
     [ -n "${base}" ] || return 0
     a="$(_ci_tracked_content_ids "${path}" "${base}")" || return 2
     b="$(_ci_tracked_content_ids "${path}" "${head}")" || return 2
@@ -902,8 +905,9 @@ ci_cmd_identity() {
 # Why: Base pins must reflect base, not head.
 # From: Issue #1683
 _ci_manifest_at() {
-    local ref="$1" dest="$2"
-    ( cd -- "${CI_REPO_ROOT}" && git show "${ref}:${CI_MANIFEST_REL}" ) > "${dest}" 2>/dev/null
+    local ref="$1" dest="$2" body
+    body="$(cd -- "${CI_REPO_ROOT}" && _ci_capture 0 git show "${ref}:${CI_MANIFEST_REL}")" || return 2
+    printf '%s\n' "${body}" > "${dest}"
 }
 
 # What: Emit NOOP or BUILD per target and platform.
@@ -1212,7 +1216,7 @@ _ci_cas_git() {
 # Why: A lock head carries a note, not a real tree.
 # From: Issue #1683
 _ci_cas_note_commit() {
-    _ci_cas_git commit-tree "${CI_CAS_EMPTY_TREE}" -m "$1" 2>/dev/null
+    _ci_capture 0 _ci_cas_git commit-tree "${CI_CAS_EMPTY_TREE}" -m "$1"
 }
 
 # What: Classify a failed CAS push: race vs real fail.
@@ -1243,10 +1247,16 @@ _ci_lock_try() {
     # What: not routed through _ci_retry (deliberate).
     # Why: _ci_lock_acquire already wraps retry logic.
     # From: Issue #1683
-    git fetch --quiet --depth=1 "${remote}" "${ref}" >/dev/null 2>&1 || return 3
-    committed="$(git log -1 --format=%ct FETCH_HEAD 2>/dev/null)" || committed=0
-    committed="${committed:-0}"
-    prev="$(git log -1 --format=%s FETCH_HEAD 2>/dev/null)" || prev=""
+    _ci_capture 0 git fetch --quiet --depth=1 "${remote}" "${ref}" || return 3
+    # What: unreadable lock age stops; never a takeover.
+    # Why: age 0 would take over a live holder's lock.
+    # From: Issue #1683 | PR #1858
+    committed="$(_ci_capture 0 git log -1 --format=%ct FETCH_HEAD)" || return 3
+    if [ -z "${committed}" ]; then
+        ci_log "[CI-ERROR-CAS-0003]" "ref=\"${ref}\" reason=\"lock commit has no timestamp; not taking over\""
+        return 3
+    fi
+    prev="$(_ci_capture 0 git log -1 --format=%s FETCH_HEAD)" || return 3
     now="$(date +%s)"; age=$(( now - committed ))
     [ "${age}" -lt "${stale}" ] && return 1
     sha="$(_ci_cas_note_commit "${note}")" || return 3
@@ -1287,9 +1297,9 @@ _ci_lock_release() {
     # Why: op=git uses shared transient-signature truth.
     # From: Issue #1683
     _ci_retry git git fetch --quiet --depth=1 "${remote}" "${ref}" >/dev/null || return 1
-    held="$(git log -1 --format=%s FETCH_HEAD 2>/dev/null)" || held=""
+    held="$(_ci_capture 0 git log -1 --format=%s FETCH_HEAD)" || return 1
     [ "${held}" = "${note}" ] || return 0
-    git push --force-with-lease="${ref}:${cur}" "${remote}" ":${ref}" >/dev/null 2>&1 || return 1
+    _ci_capture 0 git push --quiet --force-with-lease="${ref}:${cur}" "${remote}" ":${ref}" || return 1
     return 0
 }
 
@@ -1354,7 +1364,7 @@ _ci_ledger_commit() {
     local tree="$1" parent="$2" msg="$3"
     local -a pa=()
     [ -n "${parent}" ] && pa=(-p "${parent}")
-    _ci_cas_git commit-tree "${tree}" "${pa[@]}" -m "${msg}" 2>/dev/null
+    _ci_capture 0 _ci_cas_git commit-tree "${tree}" "${pa[@]}" -m "${msg}"
 }
 
 # What: Upsert record lines from stdin in one CAS write.
@@ -1374,7 +1384,7 @@ _ci_ledger_upsert() {
     if [ "${rc}" -eq 1 ]; then
         kept=""
     else
-        parent="$(git rev-parse FETCH_HEAD 2>/dev/null)" || return 3
+        parent="$(_ci_capture 0 git rev-parse FETCH_HEAD)" || return 3
         kept="$(printf '%s\n' "${blob}" | awk -F'\t' -v ids="${ids}" '
             BEGIN { n = split(ids, a, "\n"); for (i = 1; i <= n; i++) drop[a[i]] = 1 }
             NF > 0 && !($1 in drop)')"
@@ -1522,13 +1532,20 @@ ci_cmd_scan_stack() {
 # Why: one owner; changed-files and codeql share the refs.
 # From: Issue #1683
 _ci_diff_refs() {
+    local mb before
     if [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
-        local mb
-        mb="$( cd -- "${CI_REPO_ROOT}" && git merge-base "${BASE_SHA:-}" FETCH_HEAD 2>/dev/null )" || return 0
-        [ -n "${mb}" ] && printf '%s %s\n' "${mb}" FETCH_HEAD
-    elif [ -n "${BEFORE_SHA:-}" ] \
-        && [ "${BEFORE_SHA}" != 0000000000000000000000000000000000000000 ] \
-        && ( cd -- "${CI_REPO_ROOT}" && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null ); then
+        mb="$(cd -- "${CI_REPO_ROOT}" && _ci_capture 0 git merge-base "${BASE_SHA:-}" FETCH_HEAD)" || return 2
+        printf '%s %s\n' "${mb}" FETCH_HEAD
+        return 0
+    fi
+    if [ -z "${BEFORE_SHA:-}" ] || [ "${BEFORE_SHA}" = 0000000000000000000000000000000000000000 ]; then
+        return 0
+    fi
+    # What: rc 1 = before-commit absent (force push).
+    # Why: absent is "no base"; any other failure is rc 2.
+    # From: Issue #1683 | PR #1858
+    before="$(cd -- "${CI_REPO_ROOT}" && _ci_capture 1 git rev-parse -q --verify "${BEFORE_SHA}^{commit}")" || return 2
+    if [ -n "${before}" ]; then
         printf '%s %s\n' "${BEFORE_SHA}" "${GITHUB_SHA}"
     fi
 }
@@ -1537,8 +1554,9 @@ _ci_diff_refs() {
 # Why: one git-walk owner; plan/lint/checks (AG-CODE-011).
 # From: Issue #1683
 ci_cmd_changed_files() {
-    local out="${RUNNER_TEMP:-${CI_TMPDIR}}/changed-files.txt" base head
-    read -r base head <<< "$(_ci_diff_refs)"
+    local out="${RUNNER_TEMP:-${CI_TMPDIR}}/changed-files.txt" base head refs
+    refs="$(_ci_diff_refs)" || return 2
+    read -r base head <<<"${refs}"
     if [ -n "${base}" ]; then
         ( cd -- "${CI_REPO_ROOT}" && git diff --name-only "${base}" "${head}" ) > "${out}" || return 2
     else
@@ -1988,7 +2006,10 @@ ci_cmd_rust_build() {
       '    ;;' \
       '  *)' \
       '    if [ "$#" -ge 1 ] && [ -x "${1:-}" ]; then' \
-      '      resolved_arg1="$(readlink -f "$1" 2>/dev/null || printf "%s" "$1")"' \
+      '      if ! resolved_arg1="$(readlink -f "$1")"; then' \
+      '        echo "[ERROR] lancache-distcc-wrapper: readlink -f $1 failed." >&2' \
+      '        exit 1' \
+      '      fi' \
       '      case "$resolved_arg1" in' \
       '        "$wrapper_self"|"$wrapper_dir"/*)' \
       '          echo "[ERROR] lancache-distcc-wrapper: refusing to dispatch $1 back to itself (real-compiler resolution must happen before the distcc masquerade PATH is active)." >&2' \
@@ -2097,8 +2118,9 @@ ci_cmd_rust_build() {
         rm -f "${CI_TMPDIR}/ccache-remote-toolchain-id"
         if command -v readelf >/dev/null 2>&1; then
             local readelf_comment_section
-            readelf_comment_section="$(readelf -p .comment "$1" 2>/dev/null)"
-            sed -n 's/^ *\[[^]]*\] *//p' <<<"${readelf_comment_section}" > "${CI_TMPDIR}/ccache-remote-toolchain-id"
+            if readelf_comment_section="$(_ci_capture 0 readelf -p .comment "$1")"; then
+                sed -n 's/^ *\[[^]]*\] *//p' <<<"${readelf_comment_section}" > "${CI_TMPDIR}/ccache-remote-toolchain-id"
+            fi
         fi
     }
     # What: split pump/non-pump hosts, set up distcc.
@@ -2237,7 +2259,7 @@ ci_cmd_rust_build() {
     resolve_cargo_jobs() {
         local jobs="${CARGO_BUILD_JOBS:-}" jobs_source cores
         if [ -z "${jobs}" ]; then
-            cores="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN || echo 2)"
+            cores="$(_ci_capture 0 nproc)" || return 1
             jobs=$((cores - 2)); [ "${jobs}" -lt 4 ] && jobs=4
             jobs_source="auto-detected from ${cores} core(s)"
         else
@@ -2386,7 +2408,7 @@ _ci_trivy_dir_writable() {
       printf 'probe' > "${subdir}/probe"
       [ "$(cat "${subdir}/probe")" = "probe" ]
       rm -rf "${subdir}"
-    ) 2>/dev/null
+    ) 2>&1
 }
 
 # What: Resolve a persistent Trivy DB cache-dir.
@@ -2405,17 +2427,18 @@ _ci_trivy_cache_dir() {
     case "${fallback}" in
         /tmp|/tmp/*) ci_log "[CI-ERROR-SCAN-0018]" "reason=\"fallback trivy cache-dir must not be tmpfs /tmp\" got=\"${fallback}\""; return 2 ;;
     esac
-    if _ci_trivy_dir_writable "${shared}"; then
+    local probe_out mkerr
+    if probe_out="$(_ci_trivy_dir_writable "${shared}")"; then
         printf 'dir=%s source=nfs-shared\n' "${shared}"
         return 0
     fi
-    ci_log "[CI-INFO-SCAN-0008]" "shared=\"${shared}\" reason=\"not mounted/writable; falling back to local disk\""
-    mkdir -p "${fallback}" 2>/dev/null || {
-        ci_log "[CI-ERROR-SCAN-0009]" "dir=\"${fallback}\" reason=\"could not create local fallback trivy cache-dir\""
+    ci_error "[CI-INFO-SCAN-0008]" "shared=\"${shared}\" reason=\"not mounted/writable; falling back to local disk\"" "${probe_out}"
+    if ! mkerr="$(mkdir -p "${fallback}" 2>&1)"; then
+        ci_error "[CI-ERROR-SCAN-0009]" "dir=\"${fallback}\" reason=\"could not create local fallback trivy cache-dir\"" "${mkerr}"
         return 2
-    }
-    if ! _ci_trivy_dir_writable "${fallback}"; then
-        ci_log "[CI-ERROR-SCAN-0019]" "dir=\"${fallback}\" reason=\"fallback trivy cache-dir failed write probe\""
+    fi
+    if ! probe_out="$(_ci_trivy_dir_writable "${fallback}")"; then
+        ci_error "[CI-ERROR-SCAN-0019]" "dir=\"${fallback}\" reason=\"fallback trivy cache-dir failed write probe\"" "${probe_out}"
         return 2
     fi
     printf 'dir=%s source=local-fallback\n' "${fallback}"
@@ -2429,9 +2452,9 @@ _ci_trivy_db_fresh() {
     db_file="${cache_dir}/db/trivy.db"
     meta="${cache_dir}/db/metadata.json"
     [ -s "${db_file}" ] || return 1
-    next_update="$(jq -r '.NextUpdate // empty' "${meta}" 2>/dev/null)" || return 1
+    next_update="$(_ci_capture 0 jq -r '.NextUpdate // empty' "${meta}")" || return 1
     [ -n "${next_update}" ] || return 1
-    next_epoch="$(date -d "${next_update}" +%s 2>/dev/null)" || return 1
+    next_epoch="$(_ci_capture 0 date -d "${next_update}" +%s)" || return 1
     [ -n "${next_epoch}" ] || return 1
     now_epoch="$(date +%s)"
     [ "${now_epoch}" -lt "${next_epoch}" ]
@@ -2448,14 +2471,23 @@ _ci_trivy_db_lock_run() {
     # What: cache-dir must exist before the lock mkdir.
     # Why: a missing parent must not misread as "locked".
     # From: Issue #1683
-    mkdir -p "${cache_dir}" 2>/dev/null || {
-        ci_log "[CI-ERROR-SCAN-0013]" "dir=\"${cache_dir}\" reason=\"could not create cache-dir for lock\""
+    if ! mkerr="$(mkdir -p "${cache_dir}" 2>&1)"; then
+        ci_error "[CI-ERROR-SCAN-0013]" "dir=\"${cache_dir}\" reason=\"could not create cache-dir for lock\"" "${mkerr}"
         return 2
-    }
+    fi
     while :; do
         mkerr="$(mkdir "${lock_dir}" 2>&1)" && break
         if [ -d "${lock_dir}" ]; then
-            lock_mtime="$(stat -c %Y "${lock_dir}" 2>/dev/null || echo 0)"
+            # What: no lock age: retry if gone, else stop.
+            # Why: age 0 would reclaim a live holder's lock.
+            # From: Issue #1683 | PR #1858
+            if ! lock_mtime="$(stat -c %Y "${lock_dir}" 2>&1)"; then
+                if [ ! -d "${lock_dir}" ]; then
+                    continue
+                fi
+                ci_error "[CI-ERROR-SCAN-0020]" "lock=\"${lock_dir}\" reason=\"cannot read lock age; not reclaiming\"" "${lock_mtime}"
+                return 2
+            fi
             age=$(( $(date +%s) - lock_mtime ))
             if [ "${age}" -gt "${stale_after}" ]; then
                 ci_log "[CI-WARN-SCAN-0010]" "lock=\"${lock_dir}\" age=${age} stale_after=${stale_after} reason=\"reclaiming stale trivy DB refresh lock\""
@@ -2588,8 +2620,13 @@ _ci_semantic_impact() {
         esac
         return 0
     fi
-    local base head bm v=UNKNOWN
-    read -r base head <<< "$(_ci_diff_refs)"
+    local base head bm refs v=UNKNOWN
+    if ! refs="$(_ci_diff_refs)"; then
+        ci_log "[CI-INFO-IMPACT-0005]" "service=\"${service}\" platform=\"${platform}\" reason=\"diff refs lookup failed; UNKNOWN\""
+        printf 'UNKNOWN\n'
+        return 0
+    fi
+    read -r base head <<<"${refs}"
     if [ -z "${base}" ]; then
         ci_log "[CI-INFO-IMPACT-0003]" "service=\"${service}\" platform=\"${platform}\" reason=\"no base ref for this event; UNKNOWN\""
         printf 'UNKNOWN\n'
@@ -2688,7 +2725,7 @@ _ci_build_one() {
     # What: reuse a CAS binary before compiling.
     # Why: an identical binary need not rebuild.
     # From: Issue #1683
-    if [ "${build_type}" = "rust" ] && _ci_cas_lookup "${identity}" >/dev/null 2>&1; then
+    if [ "${build_type}" = "rust" ] && _ci_cas_lookup "${identity}" >/dev/null; then
         printf 'service=%s platform=%s result=reuse-binary-cas identity=%s\n' "${service}" "${platform}" "${identity}"
         return 0
     fi
@@ -3192,7 +3229,7 @@ _ci_valid_channel() {
 _ci_valid_promote_target() {
     local target="$1"
     _ci_valid_channel "${target}" && return 0
-    _ci_release_prerelease "${target}" >/dev/null 2>&1
+    _ci_release_tag_kind "${target}" >/dev/null
 }
 
 # What: accepted multi-arch candidate: service=index-digest.
@@ -3545,11 +3582,16 @@ _ci_release_record_stale() {
     if [ -z "${commit}" ] || [ "${commit}" = null ]; then
         printf '%s: never validated\n' "${name}"; return 0
     fi
-    git -C "${CI_REPO_ROOT}" merge-base --is-ancestor "${commit}" "${target}" 2>/dev/null || rc=$?
+    local anc_err
+    anc_err="$(git -C "${CI_REPO_ROOT}" merge-base --is-ancestor "${commit}" "${target}" 2>&1)" || rc=$?
     case "${rc}" in
         0) ;;
         1) printf '%s: %s is not an ancestor of %s\n' "${name}" "${commit}" "${target}"; return 0 ;;
-        *) printf '%s: diff from %s not reconstructable\n' "${name}" "${commit}"; return 0 ;;
+        *)
+            ci_error "[CI-WARN-RELEASE-0019]" "commit=\"${commit}\" target=\"${target}\" reason=\"ancestry check failed\"" "${anc_err}"
+            printf '%s: diff from %s not reconstructable\n' "${name}" "${commit}"
+            return 0
+            ;;
     esac
     for p in "${gov[@]}"; do
         rc=0; _ci_path_content_changed "${p}" "${commit}" "${target}" || rc=$?
@@ -3622,14 +3664,27 @@ ci_cmd_release() {
 # From: Issue #1683
 _ci_release_prerelease() {
     local tag="$1"
+    if _ci_release_tag_kind "${tag}"; then
+        return 0
+    fi
+    ci_log "[CI-ERROR-RELEASE-0002]" "tag=\"${tag}\" reason=\"unsupported tag; use vX.Y.Z or vX.Y.Z-rc.N\""
+    return 2
+}
+
+# What: true/false prerelease for a v-tag, else rc 1.
+# Why: one tag grammar; predicates need no error log.
+# From: Issue #1683 | PR #1858
+_ci_release_tag_kind() {
+    local tag="$1"
     if [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
         printf 'true\n'
-    elif [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        printf 'false\n'
-    else
-        ci_log "[CI-ERROR-RELEASE-0002]" "tag=\"${tag}\" reason=\"unsupported tag; use vX.Y.Z or vX.Y.Z-rc.N\""
-        return 2
+        return 0
     fi
+    if [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        printf 'false\n'
+        return 0
+    fi
+    return 1
 }
 
 # What: Print the release-notes start or end marker.
@@ -3677,13 +3732,25 @@ ci_cmd_release_publish() {
     [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0003]" "reason=\"tag arg required\""; return 2; }
     local gh="${CI_RELEASE_GH_CMD:-gh}" repo="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY required}"
     local sha="${GITHUB_SHA:?GITHUB_SHA required}" pre block start end body_file merged view rc=0
+    local view_rc=0 view_err
     pre="$(_ci_release_prerelease "${tag}")" || return "$?"
     _ci_require_ghcr_auth || return "$?"
     block="$(_ci_release_notes_block "${tag}")" || return "$?"
     start="$(_ci_release_marker start)" || return 2
     end="$(_ci_release_marker end)" || return 2
     body_file="$(mktemp "${CI_TMPDIR}/ci-release-notes.XXXXXX")"
-    if view="$("${gh}" release view "${tag}" --repo "${repo}" --json body,isPrerelease 2>/dev/null)"; then
+    view_err="$(mktemp "${CI_TMPDIR}/ci-release-view.XXXXXX")"
+    view="$("${gh}" release view "${tag}" --repo "${repo}" --json body,isPrerelease 2>"${view_err}")" || view_rc=$?
+    # What: only gh's "release not found" means create.
+    # Why: auth/network errors are UNKNOWN, not "absent".
+    # From: Issue #1683 | PR #1858
+    if [ "${view_rc}" -ne 0 ] && [[ "$(cat "${view_err}")" != *"release not found"* ]]; then
+        ci_error "[CI-ERROR-RELEASE-0020]" "tag=\"${tag}\" reason=\"gh release view failed\"" "$(cat "${view_err}")"
+        rm -f "${body_file}" "${view_err}"
+        return 2
+    fi
+    rm -f "${view_err}"
+    if [ "${view_rc}" -eq 0 ]; then
         local existing_body existing_pre
         existing_body="$(printf '%s' "${view}" | jq -r '.body // ""')"
         existing_pre="$(printf '%s' "${view}" | jq -r '.isPrerelease')"
@@ -4069,7 +4136,10 @@ _ci_default_gc_reachable() {
     # Why: No timestamp is UNKNOWN, never a delete.
     # From: Issue #1683
     [ -n "${created}" ] || { ci_log "[CI-ERROR-GC-0016]" "digest=\"${digest}\" reason=\"missing created_at; cannot apply recency floor\""; return 2; }
-    created_epoch="$(date -d "${created}" +%s 2>/dev/null)" || created_epoch=""
+    if ! created_epoch="$(date -d "${created}" +%s 2>&1)"; then
+        ci_error "[CI-ERROR-GC-0023]" "created=\"${created}\" reason=\"created_at unparseable\"" "${created_epoch}"
+        return 2
+    fi
     case "${created_epoch}" in
         ''|*[!0-9]*)
             ci_log "[CI-ERROR-GC-0023]" "created=\"${created}\" reason=\"created_at unparseable\""
@@ -8757,8 +8827,9 @@ _ci_check_vex_drift() {
     elif [ "${rc}" -ne 0 ]; then
         ci_error "[CI-ERROR-CHECK-0107]" "reason=\"generate-vex.sh failed\"" "${trivyignore}"; return 1
     fi
-    if ! jq empty <<<"${out}" 2>/dev/null; then
-        ci_error "[CI-ERROR-CHECK-0108]" "reason=\"generate-vex.sh produced invalid JSON\"" "${trivyignore}"
+    local jq_err
+    if ! jq_err="$(jq empty <<<"${out}" 2>&1)"; then
+        ci_error "[CI-ERROR-CHECK-0108]" "reason=\"generate-vex.sh produced invalid JSON\"" "${jq_err}"
         return 1
     fi
     entry_count="$(_ci_capture 1 grep -c '^  - id:' "${trivyignore}")" || return 2
@@ -8783,11 +8854,16 @@ _ci_check_changelog_direct_edit() {
         printf 'changelog-direct-edit=clean\n'
         return 0
     fi
-    if jq -e 'index("release") != null' <<<"${PR_LABELS_JSON:-[]}" >/dev/null 2>&1; then
-        ci_log "[CI-INFO-CHECK-0001]" "reason=\"CHANGELOG.md edited with release label; expected\""
-    else
-        ci_log "[CI-INFO-CHECK-0002]" "reason=\"CHANGELOG.md edited directly outside the release flow (issue #893); warn-only\""
-    fi
+    local label_rc=0 label_err
+    label_err="$(jq -e 'index("release") != null' <<<"${PR_LABELS_JSON:-[]}" 2>&1 >/dev/null)" || label_rc=$?
+    case "${label_rc}" in
+        0) ci_log "[CI-INFO-CHECK-0001]" "reason=\"CHANGELOG.md edited with release label; expected\"" ;;
+        1) ci_log "[CI-INFO-CHECK-0002]" "reason=\"CHANGELOG.md edited directly outside the release flow (issue #893); warn-only\"" ;;
+        *)
+            ci_error "[CI-ERROR-CHECK-0112]" "reason=\"PR_LABELS_JSON unreadable\"" "${label_err}"
+            return 2
+            ;;
+    esac
     printf 'changelog-direct-edit=warn\n'
 }
 
@@ -9157,7 +9233,7 @@ _ci_check_no_source_compiled_tools() {
                 for (i = 1; i <= n; i++)
                     if (a[i] != "" && a[i] !~ /^-/) print a[i]
             }
-        ' "${repo_root}/${df}" 2>/dev/null)
+        ' "${repo_root}/${df}")
         _ci_procsub_ok "$!" 0 || return 2
     done <<< "${dfs}"
     if [ "${#viol[@]}" -gt 0 ]; then

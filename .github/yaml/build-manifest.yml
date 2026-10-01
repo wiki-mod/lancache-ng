@@ -640,7 +640,7 @@ validation:
   # What: host tools validate needs on the runner host.
   # Why: AG-CI-001: verified fail-closed, never assumed.
   # From: Issue #1683
-  host_tools: [bash, docker, jq, curl, dig, git, awk, sed, find]
+  host_tools: [bash, docker, jq, curl, dig, git, awk, sed, find, flock]
   # What: compose services exempt from the healthcheck rule.
   # Why: some services genuinely have none of their own.
   # From: Issue #1683 | PR #1858
