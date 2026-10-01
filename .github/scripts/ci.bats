@@ -6738,146 +6738,39 @@ EOF
     [[ "${output}" == *"a/action.yml"* ]]
 }
 
-@test "check entrypoint-lib-wiring passes when the Dockerfile COPYs the sourced path" {
-    # What: Entrypoint sources lib; Dockerfile COPYs it.
-    # Why: the wired-correctly baseline case.
+@test "check entrypoint-lib-wiring: a sourced lib needs a final-stage COPY" {
+    # What: entrypoint source vs final-stage COPY, per case.
+    # Why: a missing lib only fails at container runtime.
     # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/elw-ok"
-    mkdir -p "${r}/services/proxy"
-    printf '. /usr/local/lib/domain-validation.sh\n' > "${r}/services/proxy/entrypoint.sh"
-    printf 'FROM alpine:3.24\nCOPY scripts/lib/domain-validation.sh /usr/local/lib/domain-validation.sh\n' \
-        > "${r}/services/proxy/Dockerfile"
-    run bash "${CI_SH}" check entrypoint-lib-wiring "${r}"
-    [ "${status}" -eq 0 ]
-}
-
-@test "check entrypoint-lib-wiring fails closed when sourced but never COPYd" {
-    # What: Entrypoint sources lib Dockerfile never brings.
-    # Why: Runtime-only failure the guard detects.
-    # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/elw-nocopy"
-    mkdir -p "${r}/services/proxy"
-    printf '. /usr/local/lib/domain-validation.sh\n' > "${r}/services/proxy/entrypoint.sh"
-    printf 'FROM alpine:3.24\nRUN echo hi\n' > "${r}/services/proxy/Dockerfile"
-    run bash "${CI_SH}" check entrypoint-lib-wiring "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0041"* ]]
-    [[ "${output}" == *"no matching final-stage COPY"* ]]
-}
-
-@test "check entrypoint-lib-wiring fails closed on a COPY destination path drift" {
-    # What: Dockerfile COPYs lib to different path.
-    # Why: Drifted destination same as no COPY.
-    # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/elw-drift"
-    mkdir -p "${r}/services/proxy"
-    printf '. /usr/local/lib/domain-validation.sh\n' > "${r}/services/proxy/entrypoint.sh"
-    printf 'FROM alpine:3.24\nCOPY scripts/lib/domain-validation.sh /opt/lib/domain-validation.sh\n' \
-        > "${r}/services/proxy/Dockerfile"
-    run bash "${CI_SH}" check entrypoint-lib-wiring "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0041"* ]]
-}
-
-@test "check entrypoint-lib-wiring ignores a COPY that only exists in a builder stage" {
-    # What: Builder-stage-only COPY missed by final stage.
-    # Why: Entrypoint.sh runs in final stage only.
-    # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/elw-builderonly"
-    mkdir -p "${r}/services/proxy"
-    printf '. /usr/local/lib/domain-validation.sh\n' > "${r}/services/proxy/entrypoint.sh"
-    cat > "${r}/services/proxy/Dockerfile" <<'EOF'
-FROM alpine:3.24 AS builder
-COPY scripts/lib/domain-validation.sh /usr/local/lib/domain-validation.sh
-FROM alpine:3.24
-RUN echo final
-EOF
-    run bash "${CI_SH}" check entrypoint-lib-wiring "${r}"
-    [ "${status}" -ne 0 ]
-}
-
-@test "check entrypoint-lib-wiring passes a directory-form COPY covering the sourced path" {
-    # What: COPY scripts/lib/ /usr/local/lib/ (dir form).
-    # Why: not every consumer COPYs one file at a time.
-    # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/elw-dircopy"
-    mkdir -p "${r}/services/proxy"
-    printf '. /usr/local/lib/domain-validation.sh\n' > "${r}/services/proxy/entrypoint.sh"
-    printf 'FROM alpine:3.24\nCOPY scripts/lib/ /usr/local/lib/\n' > "${r}/services/proxy/Dockerfile"
-    run bash "${CI_SH}" check entrypoint-lib-wiring "${r}"
-    [ "${status}" -eq 0 ]
-}
-
-@test "check entrypoint-lib-wiring requires no COPY when nothing is sourced" {
-    # What: Entrypoint never sources absolute-path lib.
-    # Why: Guard is one-directional: source implies COPY.
-    # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/elw-nosource"
-    mkdir -p "${r}/services/proxy"
-    printf 'echo "nothing sourced here"\n' > "${r}/services/proxy/entrypoint.sh"
-    printf 'FROM alpine:3.24\nRUN echo hi\n' > "${r}/services/proxy/Dockerfile"
-    run bash "${CI_SH}" check entrypoint-lib-wiring "${r}"
-    [ "${status}" -eq 0 ]
-}
-
-@test "check entrypoint-lib-wiring accepts a COPY --from a declared builder stage" {
-    # What: COPY --from=builder with real FROM ... AS stage.
-    # Why: Consolidation copies from builder stage.
-    # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/elw-fromstage"
-    mkdir -p "${r}/services/proxy"
-    printf '. /usr/local/lib/domain-validation.sh\n' > "${r}/services/proxy/entrypoint.sh"
-    cat > "${r}/services/proxy/Dockerfile" <<'EOF'
-FROM alpine:3.24 AS builder
-RUN echo build
-FROM alpine:3.24
-COPY --from=builder /build/domain-validation.sh /usr/local/lib/domain-validation.sh
-EOF
-    run bash "${CI_SH}" check entrypoint-lib-wiring "${r}"
-    [ "${status}" -eq 0 ]
-}
-
-@test "check entrypoint-lib-wiring fails closed on a COPY --from an undeclared stage" {
-    # What: COPY --from=oldbuilder stage doesn't exist.
-    # Why: Renamed/typo'd stage must fail closed.
-    # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/elw-badstage"
-    mkdir -p "${r}/services/proxy"
-    printf '. /usr/local/lib/domain-validation.sh\n' > "${r}/services/proxy/entrypoint.sh"
-    cat > "${r}/services/proxy/Dockerfile" <<'EOF'
-FROM alpine:3.24 AS builder
-RUN echo build
-FROM alpine:3.24
-COPY --from=oldbuilder /build/domain-validation.sh /usr/local/lib/domain-validation.sh
-EOF
-    run bash "${CI_SH}" check entrypoint-lib-wiring "${r}"
-    [ "${status}" -ne 0 ]
-}
-
-@test "check entrypoint-lib-wiring accepts a COPY --from an external image" {
-    # What: COPY --from=external image, not local stage.
-    # Why: External image contents out of scope.
-    # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/elw-fromexternal"
-    mkdir -p "${r}/services/proxy"
-    printf '. /usr/local/lib/domain-validation.sh\n' > "${r}/services/proxy/entrypoint.sh"
-    printf 'FROM alpine:3.24\nCOPY --from=registry.example.test/example/image:latest /x/domain-validation.sh /usr/local/lib/domain-validation.sh\n' \
-        > "${r}/services/proxy/Dockerfile"
-    run bash "${CI_SH}" check entrypoint-lib-wiring "${r}"
-    [ "${status}" -eq 0 ]
-}
-
-@test "check entrypoint-lib-wiring accepts a COPY --from a SOT named build context" {
-    # What: COPY --from=dns-domains (SOT named context).
-    # Why: domain-validation consolidation pattern.
-    # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/elw-buildcontext"
-    mkdir -p "${r}/services/proxy"
-    printf '. /usr/local/lib/domain-validation.sh\n' > "${r}/services/proxy/entrypoint.sh"
-    printf 'FROM alpine:3.24\nCOPY --from=dns-domains domain-validation.sh /usr/local/lib/domain-validation.sh\n' \
-        > "${r}/services/proxy/Dockerfile"
-    run bash "${CI_SH}" check entrypoint-lib-wiring "${r}"
-    [ "${status}" -eq 0 ]
+    local r="${BATS_TEST_TMPDIR}/elw" case ep src rc df want
+    mkdir -p "${r}/dir/a"
+    export CI_MANIFEST="${r}/m.yml"
+    printf '%s\n' 'services:' '  svc-a:' '    context: dir/a' \
+        'named_contexts:' '  ctx-n:' '    path: lib' > "${CI_MANIFEST}"
+    while IFS='|' read -r case ep src rc df want; do
+        rm -f "${r}/dir/a/entrypoint.sh" "${r}/dir/a/docker-entrypoint.sh"
+        if [ "${src}" = yes ]; then
+            printf '. /usr/local/lib/lib-x.sh\n' > "${r}/dir/a/${ep}"
+        else
+            printf 'echo nothing sourced\n' > "${r}/dir/a/${ep}"
+        fi
+        printf '%b\n' "${df}" > "${r}/dir/a/Dockerfile"
+        run bash "${CI_SH}" check entrypoint-lib-wiring "${r}"
+        [ "${status}" -eq "${rc}" ] || { echo "${case}: rc ${status}: ${output}"; return 1; }
+        [[ "${output}" == *"${want}"* ]] || { echo "${case}: no ${want}: ${output}"; return 1; }
+    done <<'CASES'
+copy|entrypoint.sh|yes|0|FROM b\nCOPY lib/lib-x.sh /usr/local/lib/lib-x.sh|entrypoint-lib-wiring=clean
+no-copy|entrypoint.sh|yes|1|FROM b\nRUN echo hi|no matching final-stage COPY
+docker-ep|docker-entrypoint.sh|yes|1|FROM b\nRUN echo hi|docker-entrypoint.sh sources
+drift|entrypoint.sh|yes|1|FROM b\nCOPY lib/lib-x.sh /opt/lib/lib-x.sh|CI-ERROR-CHECK-0041
+builder-only|entrypoint.sh|yes|1|FROM b AS bs\nCOPY lib/lib-x.sh /usr/local/lib/lib-x.sh\nFROM b\nRUN echo final|CI-ERROR-CHECK-0041
+dir-copy|entrypoint.sh|yes|0|FROM b\nCOPY lib/ /usr/local/lib/|clean
+nothing-sourced|entrypoint.sh|no|0|FROM b\nRUN echo hi|clean
+from-stage|entrypoint.sh|yes|0|FROM b AS bs\nRUN echo build\nFROM b\nCOPY --from=bs /build/lib-x.sh /usr/local/lib/lib-x.sh|clean
+bad-stage|entrypoint.sh|yes|1|FROM b AS bs\nRUN echo build\nFROM b\nCOPY --from=oldbs /build/lib-x.sh /usr/local/lib/lib-x.sh|CI-ERROR-CHECK-0041
+external|entrypoint.sh|yes|0|FROM b\nCOPY --from=registry.example.test/x/y:1 /x/lib-x.sh /usr/local/lib/lib-x.sh|clean
+named-ctx|entrypoint.sh|yes|0|FROM b\nCOPY --from=ctx-n lib-x.sh /usr/local/lib/lib-x.sh|clean
+CASES
 }
 
 @test "check entrypoint-lib-wiring passes clean and meaningfully on the real repo" {

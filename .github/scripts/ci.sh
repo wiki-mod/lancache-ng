@@ -8667,24 +8667,30 @@ _ci_dockerfile_copies_to() {
 # From: Issue #1683
 _ci_check_entrypoint_lib_wiring() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
-    local -a viol=() entrypoints
-    local ep svc dockerfile line lib_path
+    local -a viol=()
+    local ep svc svcs ctx name dockerfile line lib_path
 
-    entrypoints=("${repo_root}"/services/*/entrypoint.sh "${repo_root}"/services/ui/docker-entrypoint.sh)
-    for ep in "${entrypoints[@]}"; do
-        [ -f "${ep}" ] || continue
-        svc="$(basename "$(dirname "${ep}")")"
-        dockerfile="${repo_root}/services/${svc}/Dockerfile"
-        while IFS= read -r line; do
-            [[ "${line}" =~ ^[[:space:]]*(\.|source)[[:space:]]+\"?(/[^\"[:space:]]+)\"?[[:space:]]*(\#.*)?$ ]] || continue
-            lib_path="${BASH_REMATCH[2]}"
-            if [ ! -f "${dockerfile}" ]; then
-                viol+=("services/${svc}: sources ${lib_path}, no Dockerfile found")
-                continue
-            fi
-            _ci_dockerfile_copies_to "${dockerfile}" "${lib_path}" ||
-                viol+=("services/${svc}/entrypoint.sh sources ${lib_path}: no matching final-stage COPY in ${dockerfile}")
-        done < "${ep}"
+    # What: each SOT service context's entrypoint script.
+    # Why: the SOT owns services and paths; no glob/literal.
+    # From: Issue #1683
+    svcs="$(ci_services)" || return 2
+    for svc in ${svcs}; do
+        ctx="$(_ci_required_field "${svc}" context)" || return 2
+        dockerfile="${repo_root}/${ctx}/Dockerfile"
+        for name in entrypoint.sh docker-entrypoint.sh; do
+            ep="${repo_root}/${ctx}/${name}"
+            [ -f "${ep}" ] || continue
+            while IFS= read -r line; do
+                [[ "${line}" =~ ^[[:space:]]*(\.|source)[[:space:]]+\"?(/[^\"[:space:]]+)\"?[[:space:]]*(\#.*)?$ ]] || continue
+                lib_path="${BASH_REMATCH[2]}"
+                if [ ! -f "${dockerfile}" ]; then
+                    viol+=("${ctx}: sources ${lib_path}, no Dockerfile found")
+                    continue
+                fi
+                _ci_dockerfile_copies_to "${dockerfile}" "${lib_path}" ||
+                    viol+=("${ctx}/${name} sources ${lib_path}: no matching final-stage COPY in ${dockerfile}")
+            done < "${ep}"
+        done
     done
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0041]" "reason=\"entrypoint sources a lib its Dockerfile never COPYs\"" "$(printf '%s\n' "${viol[@]}")"
