@@ -5681,6 +5681,7 @@ EOF
     # From: Issue #1683
     local r="${BATS_TEST_TMPDIR}/repo"
     mkdir -p "${r}/deploy/prod" "${r}/deploy/quickstart" "${r}/scripts/untracked"
+    _installer_fixture "${r}"
     printf 'name: lancache-ng\nservices:\n  proxy:\n    container_name: lancache-proxy\n' \
         > "${r}/deploy/prod/docker-compose.yml"
     printf 'name: lancache-ng\nservices:\n  proxy:\n    container_name: lancache-proxy${LANCACHE_CONTAINER_SUFFIX:-}\n' \
@@ -5932,6 +5933,35 @@ EOF
     run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"; [ "${status}" -eq 0 ]
 }
 
+# What: setup.sh line naming the installer compose.
+# Why: checks derive the installer compose from setup.sh.
+# From: Issue #1683 | PR #1858
+_installer_fixture() {
+    printf 'QUICKSTART_COMPOSE="$SCRIPT_DIR/%s"\n' \
+        "${2:-deploy/quickstart/docker-compose.yml}" >> "$1/setup.sh"
+}
+
+@test "installer compose is read from setup.sh, fail-closed" {
+    # What: one SCRIPT_DIR form reads; other forms fail.
+    # Why: setup.sh owns the installer compose; CI derives.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/inst" name body want rc
+    mkdir -p "${r}"
+    while IFS='|' read -r name body want rc; do
+        rm -f "${r}/setup.sh"
+        [ "${body}" = none ] || printf '%b' "${body}" > "${r}/setup.sh"
+        run _ci_installer_compose "${r}"
+        [ "${status}" -eq "${rc}" ] || { echo "${name}: ${output}"; return 1; }
+        [[ "${output}" == *"${want}"* ]] || { echo "${name}: ${output}"; return 1; }
+    done <<'CASES'
+ok|x=1\nQUICKSTART_COMPOSE="$SCRIPT_DIR/d/q/c.yml"\n|d/q/c.yml|0
+none|none|CI-ERROR-CORE-0102|2
+absent|x=1\n|CI-ERROR-CORE-0104|2
+twice|QUICKSTART_COMPOSE="$SCRIPT_DIR/a"\nQUICKSTART_COMPOSE="$SCRIPT_DIR/b"\n|CI-ERROR-CORE-0104|2
+form|QUICKSTART_COMPOSE=/abs/c.yml\n|CI-ERROR-CORE-0105|2
+CASES
+}
+
 # What: seed a minimal prebuilt-only prod/quickstart tree.
 # Why: shared by the prebuilt-prod checks below.
 # From: Issue #1683 | PR #1858
@@ -5942,6 +5972,7 @@ _prebuilt_fixture() {
     printf 'services:\n  proxy:\n    image: registry.example.test/example/proxy:sha-abc\n' > "${root}/deploy/quickstart/docker-compose.yml"
     printf '# LanCache-NG\nRun: docker compose up -d\n' > "${root}/README.md"
     printf '#!/usr/bin/env bash\n' > "${root}/setup.sh"
+    _installer_fixture "${root}"
 }
 
 @test "check prebuilt-prod passes a prebuilt-only tree" {
@@ -5964,7 +5995,7 @@ _prebuilt_fixture() {
     printf 'services:\n  proxy:\n    build: .\n' > "${r}/deploy/prod/docker-compose.yml"
     run bash "${CI_SH}" check prebuilt-prod "${r}"
     [ "${status}" -ne 0 ]
-    [[ "${output}" == *"prebuilt"* ]]
+    [[ "${output}" == *"CI-ERROR-CHECK-0042"*"declares build:"* ]]
 }
 
 @test "check prebuilt-prod fails a --build instruction in README" {
@@ -5976,7 +6007,7 @@ _prebuilt_fixture() {
     printf '# LanCache-NG\nRun: docker compose up -d --build\n' > "${r}/README.md"
     run bash "${CI_SH}" check prebuilt-prod "${r}"
     [ "${status}" -ne 0 ]
-    [[ "${output}" == *"prebuilt"* ]]
+    [[ "${output}" == *"CI-ERROR-CHECK-0042"*"instructs --build"* ]]
 }
 
 # What: Seed prod tree from LANCACHE_STATE_DIR.
@@ -6113,6 +6144,7 @@ EOF
 write_generated_runtime_file "${secondary_dir}/docker-compose.yml"
 write_env_file "${secondary_dir}/.env"
 EOF
+    _installer_fixture "${root}"
 }
 
 @test "check nats-atomic-write passes a fully atomic tree" {
@@ -6144,6 +6176,7 @@ EOF
 _socket_proxy_fixture() {
     local root="$1" cf
     mkdir -p "${root}/deploy/prod" "${root}/deploy/quickstart" "${root}/scripts/untracked"
+    _installer_fixture "${root}"
     for cf in deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml; do
         printf '      - scripts/untracked/docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro\n' > "${root}/${cf}"
     done
@@ -6204,6 +6237,7 @@ EOF
 _qs_required_env_fixture() {
     local root="$1"
     mkdir -p "${root}/deploy/quickstart"
+    _installer_fixture "${root}"
     printf 'services:\n  x:\n    environment:\n      A: ${A:?set A}\n      B: ${B:?set B}\n' > "${root}/deploy/quickstart/docker-compose.yml"
     printf 'A=1\nB=2\n' > "${root}/deploy/quickstart/.env"
 }
@@ -6238,6 +6272,7 @@ _dhcp_proxy_env_fixture() {
     local root="$1" k
     mkdir -p "${root}/deploy/prod" "${root}/deploy/quickstart" \
         "${root}/config/prod" "${root}/services/dhcp-proxy"
+    _installer_fixture "${root}"
     cat > "${root}/deploy/prod/docker-compose.yml" <<'EOF'
 services:
   dhcp-proxy:
@@ -6379,6 +6414,7 @@ _setup_keys_kea_fixture() {
         printf 'run_kea_dhcp_activation_preflight "$INSTALL_DIR/.env"\n'
         printf 'nmap --script broadcast-dhcp-discover --script-args broadcast-dhcp-discover.timeout=5\n'
     } > "${root}/setup.sh"
+    _installer_fixture "${root}"
     printf 'RUN apk add nmap\n' > "${root}/services/dhcp/Dockerfile"
     printf 'nmap|/usr/bin/nmap|/bin/nmap)\n' > "${root}/services/dhcp/entrypoint.sh"
 }
@@ -6564,6 +6600,7 @@ _logging_matrix_fixture() {
     local -a rows
     read -ra rows <<< "${2:-svc-a}"
     mkdir -p "${root}/docs" "${root}/services/syslog" "${root}/deploy/quickstart"
+    _installer_fixture "${root}"
     {
         printf '**Logging matrix** (test):\n\n'
         printf '| Service | Logging path | Notes |\n'

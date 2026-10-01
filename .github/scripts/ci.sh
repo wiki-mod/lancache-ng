@@ -6816,8 +6816,12 @@ _ci_check_pr_title() {
 # From: Issue #1683
 _ci_check_stable_external_images() {
     local -a dirs=("$@")
-    [ "${#dirs[@]}" -gt 0 ] || dirs=(deploy/prod deploy/quickstart)
-    local d line img k allowed=" " tagged=" "
+    local d line img k allowed=" " tagged=" " dep inst
+    if [ "${#dirs[@]}" -eq 0 ]; then
+        dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
+        inst="$(_ci_installer_compose)" || return 2
+        dirs=("${CI_REPO_ROOT}/$(dirname "${dep}")" "${CI_REPO_ROOT}/$(dirname "${inst}")")
+    fi
     local -a viol=()
     # What: the exact SOT pins (external services + bases).
     # Why: compose must match them; other values are drift.
@@ -6834,7 +6838,7 @@ _ci_check_stable_external_images() {
         allowed+="$(_ci_block_entry_field base_images "" "${k}") "
     done
     for d in "${dirs[@]}"; do
-        [ -d "${d}" ] || continue
+        [ -d "${d}" ] || { viol+=("${d}: compose dir missing"); continue; }
         while IFS= read -r line; do
             img="${line#*image:}"; img="${img#"${img%%[![:space:]]*}"}"
             # What: only ${LANCACHE_*} own images skip.
@@ -6855,7 +6859,7 @@ _ci_check_stable_external_images() {
                 *" ${img} "*) ;;
                 *) viol+=("${d}: external pin is not a SOT pin: ${img}") ;;
             esac
-        done < <(grep -rhE '^[[:space:]]+image:[[:space:]]' "${d}" 2>/dev/null)
+        done < <(grep -rhE '^[[:space:]]+image:[[:space:]]' "${d}")
         _ci_procsub_ok "$!" 1 || return 2
     done
     if [ "${#viol[@]}" -gt 0 ]; then
@@ -7414,8 +7418,10 @@ _ci_check_governance_guards() {
 # Why: Socket-proxy allowlist gates Docker-API access.
 # From: Issue #1683
 _ci_check_naming_consistency() {
-    local root="${1:-${CI_REPO_ROOT}}"
-    local -a compose_files=("${root}/deploy/prod/docker-compose.yml" "${root}/deploy/quickstart/docker-compose.yml")
+    local root="${1:-${CI_REPO_ROOT}}" dep inst
+    dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
+    inst="$(_ci_installer_compose "${root}")" || return 2
+    local -a compose_files=("${root}/${dep}" "${root}/${inst}")
     local proxy_sh="${root}/scripts/untracked/docker-socket-proxy.sh"
     local docker_client_rs="${root}/services/ui/src/docker_client.rs"
     local watchdog_rs="${root}/services/watchdog/src/config.rs"
@@ -7539,37 +7545,23 @@ _ci_check_compose_healthchecks() {
         ci_log "[CI-ERROR-CHECK-0020]" "reason=\"no deploy/*/docker-compose.yml files found\""
         return 2
     fi
-    # What: documented healthcheck exemptions.
-    # Why: some services genuinely have none of their own.
+    # What: exemptions are per service, never per file path.
+    # Why: the SOT owns the list; a path key duplicated it.
     # From: Issue #1683 | PR #1858
-    local -A excluded=(
-        ["deploy/prod/docker-compose.yml:dhcp-probe"]=1
-        ["deploy/quickstart/docker-compose.yml:dhcp-probe"]=1
-        ["deploy/prod/docker-compose.yml:syslog-logs-permissions"]=1
-        ["deploy/quickstart/docker-compose.yml:syslog-logs-permissions"]=1
-        ["deploy/prod/docker-compose.yml:retention"]=1
-        ["deploy/quickstart/docker-compose.yml:retention"]=1
-        ["deploy/full-setup/docker-compose.yml:retention"]=1
-        ["deploy/prod/docker-compose.yml:cachehamster"]=1
-        ["deploy/quickstart/docker-compose.yml:cachehamster"]=1
-    )
-    local file svc hc checked=0 key relpath
+    local -A excluded=()
+    local file svc hc checked=0 ex raw
+    raw="$(_ci_block_entry_list validation "" healthcheck_exempt)" || return 2
+    while IFS= read -r ex; do
+        [ -n "${ex}" ] && excluded["${ex}"]=1
+    done <<< "${raw}"
     local -a viol=()
     for file in "${files[@]}"; do
         [ -f "${file}" ] || continue
-        # What: a canonical "deploy/<env>/compose.yml" key.
-        # Why: works for a repo path or a fixture path.
-        # From: Issue #1683 | PR #1858
-        case "${file}" in
-            */deploy/*/docker-compose.yml) relpath="deploy/${file#*/deploy/}" ;;
-            *) relpath="${file}" ;;
-        esac
         while IFS=$'\t' read -r svc hc; do
             [ -n "${svc}" ] || continue
             checked=$((checked + 1))
             [ "${hc}" = "1" ] && continue
-            key="${relpath}:${svc}"
-            [ -n "${excluded[${key}]:-}" ] && continue
+            [ -n "${excluded[${svc}]:-}" ] && continue
             viol+=("${file}: service '${svc}' has no healthcheck:")
         done < <(awk '
             /^services:[[:space:]]*$/ { insvc = 1; next }
@@ -7905,12 +7897,16 @@ _ci_check_dependabot_docker_base_consistency() {
 # Why: docs/release-versioning: prod runs prebuilt images.
 # From: Issue #1683 | PR #1858
 _ci_check_prebuilt_prod() {
-    local repo_root="${1:-${CI_REPO_ROOT}}"
+    local repo_root="${1:-${CI_REPO_ROOT}}" dep inst
     local -a viol=()
-    if grep -RInE '^[[:space:]]+build:' "${repo_root}/deploy/prod" "${repo_root}/deploy/quickstart" >/dev/null 2>&1; then
-        viol+=("deploy/prod or deploy/quickstart compose declares build:; prod must run prebuilt images only")
+    dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
+    inst="$(_ci_installer_compose "${repo_root}")" || return 2
+    dep="${repo_root}/$(dirname "${dep}")"
+    inst="${repo_root}/$(dirname "${inst}")"
+    if grep -RInE '^[[:space:]]+build:' "${dep}" "${inst}" >/dev/null 2>&1; then
+        viol+=("a stack compose declares build:; prod must run prebuilt images only")
     fi
-    if grep -RIn -- '--build' "${repo_root}/README.md" "${repo_root}/deploy/prod" "${repo_root}/deploy/quickstart" "${repo_root}/setup.sh" >/dev/null 2>&1; then
+    if grep -RIn -- '--build' "${repo_root}/README.md" "${dep}" "${inst}" "${repo_root}/setup.sh" >/dev/null 2>&1; then
         viol+=("a user-facing install path instructs --build; prod must run from prebuilt images, not a local build")
     fi
     if [ "${#viol[@]}" -gt 0 ]; then
@@ -7924,9 +7920,11 @@ _ci_check_prebuilt_prod() {
 # Why: AG-SETUP-001: LANCACHE_STATE_DIR is state root.
 # From: Issue #1683 | PR #1858
 _ci_check_prod_state_wiring() {
-    local repo_root="${1:-${CI_REPO_ROOT}}"
-    local compose="${repo_root}/deploy/prod/docker-compose.yml"
-    local env_file="${repo_root}/deploy/prod/.env"
+    local repo_root="${1:-${CI_REPO_ROOT}}" dep
+    dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
+    local compose="${repo_root}/${dep}"
+    local env_file
+    env_file="${repo_root}/$(dirname "${dep}")/.env"
     local doc="${repo_root}/docs/backup-restore.md"
     local -a viol=()
     local key f
@@ -7935,9 +7933,9 @@ _ci_check_prod_state_wiring() {
     done
     for key in PDNS_STANDARD_DIR PDNS_SSL_DIR PDNS_FILTER_STATE_DIR NATS_DATA_DIR NATS_CONF_DIR; do
         grep -Fq "\${${key}:-\${LANCACHE_STATE_DIR" "${compose}" \
-            || viol+=("deploy/prod compose does not derive ${key} from LANCACHE_STATE_DIR")
+            || viol+=("${dep} does not derive ${key} from LANCACHE_STATE_DIR")
         grep -Fq "${key}" "${env_file}" \
-            || viol+=("deploy/prod/.env does not document ${key} for manual upgrades")
+            || viol+=("$(dirname "${dep}")/.env does not document ${key} for manual upgrades")
         grep -Fq "${key}" "${doc}" \
             || viol+=("docs/backup-restore.md does not mention ${key}")
     done
@@ -7984,6 +7982,33 @@ _ci_validation_env() {
     fi
     tr ' ' '
 ' <<< "${fx}" | grep -v '^$'
+}
+
+# What: compose file setup.sh installs, read from setup.sh.
+# Why: the installer owns its compose; CI only derives it.
+# From: Issue #1683 | PR #1858
+_ci_installer_compose() {
+    local root="${1:-${CI_REPO_ROOT}}" su line rc=0
+    local re='^QUICKSTART_COMPOSE="\$SCRIPT_DIR/([^"$]+)"$'
+    su="${root}/setup.sh"
+    if [ ! -f "${su}" ]; then
+        ci_log "[CI-ERROR-CORE-0102]" "path=\"${su}\" reason=\"installer setup.sh not found\""
+        return 2
+    fi
+    line="$(grep -E '^QUICKSTART_COMPOSE=' "${su}" 2>&1)" || rc=$?
+    if [ "${rc}" -gt 1 ]; then
+        ci_error "[CI-ERROR-CORE-0103]" "path=\"${su}\" reason=\"installer setup.sh unreadable\"" "${line}"
+        return 2
+    fi
+    if [ "${rc}" -eq 1 ] || [ "$(wc -l <<< "${line}")" -ne 1 ]; then
+        ci_error "[CI-ERROR-CORE-0104]" "path=\"${su}\" reason=\"QUICKSTART_COMPOSE missing or assigned twice\"" "${line}"
+        return 2
+    fi
+    if [[ ! "${line}" =~ ${re} ]]; then
+        ci_error "[CI-ERROR-CORE-0105]" "path=\"${su}\" reason=\"QUICKSTART_COMPOSE is not SCRIPT_DIR-relative\"" "${line}"
+        return 2
+    fi
+    printf '%s\n' "${BASH_REMATCH[1]}"
 }
 
 # What: docker compose with the env the file renders under.
@@ -8092,8 +8117,10 @@ _ci_check_compose_config() {
 _ci_check_nats_atomic_write() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local -a viol=()
-    local cf ep='services/dns/entrypoint.sh' rs='services/ui/src/routes/secondaries.rs' su='setup.sh'
-    for cf in deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml; do
+    local cf dep inst ep='services/dns/entrypoint.sh' rs='services/ui/src/routes/secondaries.rs' su='setup.sh'
+    dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
+    inst="$(_ci_installer_compose "${repo_root}")" || return 2
+    for cf in "${dep}" "${inst}"; do
         grep -Fq 'tmp_nats_conf="$(mktemp /etc/nats/.nats.conf.XXXXXX)"' "${repo_root}/${cf}" \
             || viol+=("${cf}: NATS must stage the shared config in a temp file inside /etc/nats")
         grep -Fq 'chown 10001:10001 "$$tmp_nats_conf"' "${repo_root}/${cf}" \
@@ -8132,8 +8159,10 @@ _ci_check_nats_atomic_write() {
 _ci_check_docker_socket_proxy() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local -a viol=()
-    local cf pat sp='scripts/untracked/docker-socket-proxy.sh'
-    for cf in deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml; do
+    local cf pat dep inst sp='scripts/untracked/docker-socket-proxy.sh'
+    dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
+    inst="$(_ci_installer_compose "${repo_root}")" || return 2
+    for cf in "${dep}" "${inst}"; do
         if grep -Fq 'EXEC: "1"' "${repo_root}/${cf}"; then
             viol+=("${cf}: Docker exec is banned from the Admin UI/watchdog proxy")
         fi
@@ -8187,12 +8216,14 @@ _ci_check_docker_socket_proxy() {
 _ci_check_quickstart_required_env() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local -a viol=()
-    local key env="${repo_root}/deploy/quickstart/.env"
-    local compose="${repo_root}/deploy/quickstart/docker-compose.yml"
+    local key inst env compose
+    inst="$(_ci_installer_compose "${repo_root}")" || return 2
+    env="${repo_root}/$(dirname "${inst}")/.env"
+    compose="${repo_root}/${inst}"
     while IFS= read -r key; do
         [ -n "${key}" ] || continue
         grep -Eq "^${key}=[^[:space:]]+" "${env}" \
-            || viol+=("deploy/quickstart/.env must define non-empty ${key} (compose marks it required)")
+            || viol+=("$(dirname "${inst}")/.env must define non-empty ${key} (compose marks it required)")
     done < <(
         grep -oE '\$\{[A-Za-z0-9_]+:\?[^}]+\}' "${compose}" \
             | sed -E 's/^\$\{([^:]+):.*/\1/' \
@@ -8255,15 +8286,18 @@ _ci_dhcp_proxy_env_file_ok() {
 _ci_check_dhcp_proxy_env() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local -a viol=()
-    local ef key out f qc="${repo_root}/deploy/quickstart/docker-compose.yml"
+    local ef key out f dep inst qc
+    dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
+    inst="$(_ci_installer_compose "${repo_root}")" || return 2
+    qc="${repo_root}/${inst}"
     local -a opt=(DHCP_PROXY_INTERFACE DHCP_PROXY_ROUTER DHCP_NTP_SERVERS DHCP_PROXY_DOMAIN DHCP_PROXY_BOOT_FILENAME DHCP_PROXY_BOOT_SERVER DHCP_PROXY_CUSTOM_OPTIONS)
     local -a pxe=(DHCP_PROXY_PXE_BOOT_SERVER DHCP_PROXY_PXE_BOOT_FILENAME_BIOS DHCP_PROXY_PXE_BOOT_FILENAME_UEFI)
-    for f in deploy/prod/docker-compose.yml config/prod/dhcp-proxy.env deploy/quickstart/.env \
-        deploy/quickstart/docker-compose.yml services/dhcp-proxy/entrypoint.sh services/dhcp-proxy/dnsmasq.conf.template; do
+    for f in "${dep}" config/prod/dhcp-proxy.env "$(dirname "${inst}")/.env" \
+        "${inst}" services/dhcp-proxy/entrypoint.sh services/dhcp-proxy/dnsmasq.conf.template; do
         [ -f "${repo_root}/${f}" ] || { ci_error "[CI-ERROR-CHECK-0048]" "path=\"${f}\" reason=\"required dhcp-proxy input missing\"" "missing dhcp-proxy input: ${f}"; return 2; }
     done
-    out="$(_ci_dhcp_proxy_env_file_ok "${repo_root}/deploy/prod/docker-compose.yml" '../../config/prod/dhcp-proxy.env')" || viol+=("${out}")
-    for ef in config/prod/dhcp-proxy.env deploy/quickstart/.env; do
+    out="$(_ci_dhcp_proxy_env_file_ok "${repo_root}/${dep}" '../../config/prod/dhcp-proxy.env')" || viol+=("${out}")
+    for ef in config/prod/dhcp-proxy.env "$(dirname "${inst}")/.env"; do
         for key in "${opt[@]}" "${pxe[@]}"; do
             grep -Eq "^${key}=" "${repo_root}/${ef}" || viol+=("${ef}: must define ${key} (empty default)")
         done
@@ -8296,8 +8330,10 @@ _ci_check_dhcp_proxy_env() {
 _ci_check_setup_keys_kea() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local -a viol=()
-    local key su="${repo_root}/setup.sh"
-    if grep -RInE '^(NATS_LOCAL_TOKEN|NATS_TOKEN)=' "${repo_root}/deploy/quickstart/.env" "${repo_root}/deploy/prod/.env" >/dev/null 2>&1; then
+    local key dep inst su="${repo_root}/setup.sh"
+    dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
+    inst="$(_ci_installer_compose "${repo_root}")" || return 2
+    if grep -RInE '^(NATS_LOCAL_TOKEN|NATS_TOKEN)=' "${repo_root}/$(dirname "${inst}")/.env" "${repo_root}/$(dirname "${dep}")/.env" >/dev/null 2>&1; then
         viol+=("env templates must not use deprecated NATS token keys; use role credentials")
     fi
     local -a req=(DDNS_TSIG_KEY KEA_CTRL_TOKEN LANCACHE_IMAGE_TAG NATS_DNS_REPLICA_PASSWORD NATS_DNS_REPLICA_USER NATS_DNS_WRITER_PASSWORD NATS_DNS_WRITER_USER NATS_CALLOUT_PASSWORD NATS_CALLOUT_USER NATS_SYS_PASSWORD NATS_SYS_USER NATS_UI_PASSWORD NATS_UI_USER PDNS_API_KEY SECONDARY_REGISTRATION_TOKEN)
@@ -8385,7 +8421,9 @@ _ci_check_image_channel_resolution() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local su="${repo_root}/setup.sh"
     local sec="${repo_root}/services/ui/src/routes/secondaries.rs"
-    local prod="${repo_root}/deploy/prod/docker-compose.yml"
+    local prod dep
+    dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
+    prod="${repo_root}/${dep}"
     local -a viol=()
     local f
     [ -f "${su}" ] || { ci_error "[CI-ERROR-CHECK-0064]" "path=\"${su}\" reason=\"setup.sh not found\""; return 2; }
@@ -8597,7 +8635,10 @@ _ci_check_logging_matrix() {
         ci_log "[CI-ERROR-CHECK-0037]" "reason=\"parsed ${unique_row_count} unique of ${raw_row_count} rows; a row was dropped or collapsed\""
         return 2
     fi
-    local -a compose_files=("${repo_root}/deploy/prod/docker-compose.yml" "${repo_root}/deploy/quickstart/docker-compose.yml")
+    local dep inst
+    dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
+    inst="$(_ci_installer_compose "${repo_root}")" || return 2
+    local -a compose_files=("${repo_root}/${dep}" "${repo_root}/${inst}")
     local -a consumer=() viol=()
     local cf svc
     for cf in "${compose_files[@]}"; do
@@ -8632,7 +8673,7 @@ _ci_check_logging_matrix() {
     # Why: no services/ dir there to bind-mount it from.
     # From: Issue #1683 | PR #1858
     local web_log_conf="${repo_root}/services/syslog/netdata-web_log.conf"
-    local quickstart_compose="${repo_root}/deploy/quickstart/docker-compose.yml"
+    local quickstart_compose="${repo_root}/${inst}"
     if [ ! -f "${web_log_conf}" ]; then
         viol+=("${web_log_conf}: not found")
     elif [ ! -f "${quickstart_compose}" ]; then

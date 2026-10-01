@@ -641,6 +641,10 @@ validation:
   # Why: AG-CI-001: verified fail-closed, never assumed.
   # From: Issue #1683
   host_tools: [bash, docker, jq, curl, dig, git, awk, sed, find]
+  # What: compose services exempt from the healthcheck rule.
+  # Why: some services genuinely have none of their own.
+  # From: Issue #1683 | PR #1858
+  healthcheck_exempt: [dhcp-probe, syslog-logs-permissions, retention, cachehamster]
   # What: CDN domains that resolve from validation hosts.
   # Why: Real dig targets; some Steam domains fail.
   # From: Issue #1683 | PR #1858
