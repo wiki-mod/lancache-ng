@@ -3755,6 +3755,12 @@ SH
     run _ci_validate_dns_resolves proj dns-standard x.lan. 203.0.113.60 2
     [ "${status}" -eq 1 ]
     [[ "${output}" == *"CI-ERROR-VALIDATE-0036"* ]]
+    # What: a dig warning plus the right answer matches.
+    # Why: stderr is evidence, never part of the answer.
+    # From: Issue #1683 | PR #1858
+    dig() { echo ";; Warning: EDNS mismatch" >&2; echo 203.0.113.60; }
+    run _ci_validate_dns_resolves proj dns-standard x.lan. 203.0.113.60 2
+    [ "${status}" -eq 0 ]
 }
 
 @test "validate dns-resolves passes when record matches" {
@@ -5227,6 +5233,13 @@ STUBEOF
     run bash "${CI_SH}" check docker-run-heredoc-stdin "${BATS_TEST_TMPDIR}/badhd.yml"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0066"* ]]
+    # What: a heredoc with no docker run in view is clean.
+    # Why: no match must not end the CLI with a silent rc 1.
+    # From: Issue #1683 | PR #1858
+    printf 'jobs:\n  a:\n    steps:\n      - run: ssh host bash -s <<EOF\n' > "${BATS_TEST_TMPDIR}/sshhd.yml"
+    run bash "${CI_SH}" check docker-run-heredoc-stdin "${BATS_TEST_TMPDIR}/sshhd.yml"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"docker-run-heredoc-stdin=clean"* ]]
 }
 
 @test "check setup-prompt-drift flags an uncovered unconditional wizard prompt" {
@@ -6048,6 +6061,11 @@ EOF
     [ "${status}" -eq 1 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0096"* ]]
     [[ "${output}" == *"no const lancache-* container names found"* ]]
+    printf 'acl lancache_container path,url_dec -m reg ^/containers/x\n' \
+        > "${r}/scripts/untracked/docker-socket-proxy.sh"
+    run bash "${CI_SH}" check naming-consistency "${r}"
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"could not parse lancache-* allowlist names"* ]]
 }
 
 @test "check compose-healthchecks passes clean on the real repo" {

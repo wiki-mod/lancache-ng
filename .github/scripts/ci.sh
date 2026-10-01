@@ -3142,7 +3142,7 @@ ci_cmd_assemble() {
     local inputs want count reused index
     inputs="$(_ci_collect_accepted_digests "${service}")" || return "$?"
     want="$(_ci_normalize_platform_digests "${inputs}")"
-    count="$(printf '%s\n' ${inputs} | grep -c '=')"
+    count="$(printf '%s\n' ${inputs} | awk '/=/ {n++} END {print n+0}')"
     if ! reused="$(_ci_reconcile_index "${service}" "${want}")"; then
         return 2
     fi
@@ -5066,16 +5066,24 @@ _ci_validate_dns_resolves() {
         ci_log "[CI-ERROR-VALIDATE-0035]" "svc=\"${svc}\" reason=\"no dns IP for resolve check\""
         return 2
     fi
-    local out=""
+    local out="" dig_err
+    # What: dig stderr kept apart from the compared answer.
+    # Why: a warning must not turn a match into a mismatch.
+    # From: Issue #1683 | PR #1858
+    dig_err="$(mktemp "${CI_TMPDIR}/ci-dig-err.XXXXXX")"
     for i in $(seq 1 "${attempts}"); do
         got=""
-        if out="$(dig +time=2 +tries=1 +short "@${ip}" A "${fqdn}" 2>&1)"; then
+        if out="$(dig +time=2 +tries=1 +short "@${ip}" A "${fqdn}" 2>"${dig_err}")"; then
             got="$(sort -u <<<"${out}")"
         fi
-        [ "${got}" = "${expected}" ] && return 0
+        if [ "${got}" = "${expected}" ]; then
+            rm -f "${dig_err}"
+            return 0
+        fi
         sleep 1
     done
-    ci_error "[CI-ERROR-VALIDATE-0036]" "svc=\"${svc}\" fqdn=\"${fqdn}\" expected=\"${expected}\" got=\"${got:-}\" reason=\"record did not resolve as expected\"" "${out}"
+    ci_error "[CI-ERROR-VALIDATE-0036]" "svc=\"${svc}\" fqdn=\"${fqdn}\" expected=\"${expected}\" got=\"${got:-}\" reason=\"record did not resolve as expected\"" "${out}$(cat "${dig_err}")"
+    rm -f "${dig_err}"
     return 1
 }
 
@@ -6906,7 +6914,7 @@ _ci_check_docker_run_heredoc_stdin() {
             case "${trimmed}" in '#'*) continue ;; esac
             start=$(( lineno > 20 ? lineno - 20 : 1 ))
             window="$(sed -n "${start},${lineno}p" "${path}")"
-            last_off="$(printf '%s\n' "${window}" | grep -n 'docker run' | tail -1 | cut -d: -f1)"
+            last_off="$(awk '/docker run/ {n=NR} END {if (n) print n}' <<<"${window}")"
             [ -n "${last_off}" ] || continue
             invocation="$(printf '%s\n' "${window}" | tail -n +"${last_off}")"
             grep -qE '(^|[[:space:]])-i([[:space:]]|$)' <<<"${invocation}" && continue
@@ -7730,7 +7738,7 @@ _ci_check_naming_consistency() {
         viol+=("${proxy_sh}: missing 'acl lancache_container' allowlist line")
         allowlist_names=""
     else
-        allowlist_group="$(grep -oE '\(lancache-[a-z0-9-]+(\|lancache-[a-z0-9-]+)*\)' <<<"${allowlist_line}")"
+        allowlist_group="$(_ci_capture 1 grep -oE '\(lancache-[a-z0-9-]+(\|lancache-[a-z0-9-]+)*\)' <<<"${allowlist_line}")" || return 2
         allowlist_names="$(head -n1 <<<"${allowlist_group}" | tr -d '()' | tr '|' '\n' | sort -u)"
     fi
     [ -n "${allowlist_names}" ] || viol+=("${proxy_sh}: could not parse lancache-* allowlist names")
@@ -8192,7 +8200,7 @@ _ci_check_dependabot_docker_base_consistency() {
             block_images+=("${base_image_of[${key}]}")
         done
         local distinct_count
-        distinct_count="$(printf '%s\n' "${block_images[@]}" | sort -u | grep -c .)"
+        distinct_count="$(printf '%s\n' "${block_images[@]}" | sort -u | awk 'NF {n++} END {print n+0}')"
         if [ "${distinct_count}" -gt 1 ]; then
             viol+=("block #${b} diverges:")
             for key in "${!base_image_of[@]}"; do
