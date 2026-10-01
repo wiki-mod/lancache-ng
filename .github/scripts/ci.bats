@@ -5102,12 +5102,25 @@ STUBEOF
     printf 'expect_prompt {Username[^\\n]*\\[admin\\]} "x"\n' > "${r}/scripts/untracked/simulations/setup-cli-simulation.sh"
     run bash "${CI_SH}" check setup-prompt-drift "${r}"
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"setup-prompt-drift=clean"* ]]
+    [[ "${output}" == *"setup-prompt-drift=clean sims_checked=1 introspected=0"* ]]
     printf 'ask "NewPrompt?" "y"\n' >> "${r}/setup.sh"
     run bash "${CI_SH}" check setup-prompt-drift "${r}"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0084"* ]]
     [[ "${output}" == *"NewPrompt?"* ]]
+    # What: an introspection sim counts; it needs the spawn.
+    # Why: sims_checked=0 alone hid which sims were checked.
+    # From: Issue #1683 | PR #1858
+    local sim="${r}/scripts/untracked/simulations/setup-cli-simulation.sh"
+    printf 'build_expect_prompt_block\nspawn bash setup.sh\n' > "${sim}"
+    run bash "${CI_SH}" check setup-prompt-drift "${r}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"setup-prompt-drift=clean sims_checked=0 introspected=1"* ]]
+    printf 'build_expect_prompt_block\n' > "${sim}"
+    run bash "${CI_SH}" check setup-prompt-drift "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0084"* ]]
+    [[ "${output}" == *"no 'spawn bash setup.sh'"* ]]
 }
 
 @test "check pr-title: SOT types, derived scopes, warn/block/draft modes" {

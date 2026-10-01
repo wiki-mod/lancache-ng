@@ -6855,7 +6855,7 @@ _ci_check_setup_prompt_drift() {
         ci_error "[CI-ERROR-CHECK-0083]" "reason=\"zero unconditional prompts in setup.sh wizard; vacuous\""
         return 1
     fi
-    local sim pair prompt haystack tcl gpat covered matched checked=0
+    local sim pair prompt haystack tcl gpat covered matched checked=0 introspected=0
     local -a sim_pats=() gpats=()
     for sim in "${sims[@]}"; do
         [ -f "${sim}" ] || { viol+=("expected simulation script not found: ${sim}"); continue; }
@@ -6865,6 +6865,7 @@ _ci_check_setup_prompt_drift() {
         introspect="$(_ci_capture 1 grep -F 'build_expect_prompt_block' "${sim}")" || return 2
         if [ -n "${introspect}" ]; then
             grep -qF 'spawn bash setup.sh' "${sim}" || viol+=("${sim}: introspection-driven but no 'spawn bash setup.sh'")
+            introspected=$((introspected + 1))
             continue
         fi
         checked=$((checked + 1))
@@ -6896,7 +6897,8 @@ _ci_check_setup_prompt_drift() {
         ci_error "[CI-ERROR-CHECK-0084]" "reason=\"setup.sh/simulation prompt drift (#1176)\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
-    printf 'setup-prompt-drift=clean sims_checked=%s uncond=%s\n' "${checked}" "${#uncond[@]}"
+    printf 'setup-prompt-drift=clean sims_checked=%s introspected=%s uncond=%s\n' \
+        "${checked}" "${introspected}" "${#uncond[@]}"
 }
 
 # What: Check a PR title's Conventional-Commit form.
