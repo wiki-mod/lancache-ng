@@ -25,6 +25,12 @@ setup() {
     # Why: label provenance needs it; no real host in tests.
     # From: Issue #1683 | PR #1858
     export GITHUB_SERVER_URL=https://git.example.test
+    # What: SOT copy with a neutral release registry.
+    # Why: ref tests must not mirror the real registry host.
+    # From: Issue #1683 | PR #1858
+    CI_MANIFEST="${BATS_TEST_TMPDIR}/sot.yml"
+    sed 's|^  registry: .*|  registry: registry.example.test|' "${CI_MANIFEST_SOURCE}" > "${CI_MANIFEST}"
+    export CI_MANIFEST
 }
 
 # What: Removes dirs listed in a manifest file.
@@ -119,7 +125,7 @@ teardown() {
     # From: Issue #1683
     GITHUB_REPOSITORY=owner/fixture-repo run _ci_image_ref build-tools sha256:beef
     [ "${status}" -eq 0 ]
-    [ "${output}" = "ghcr.io/owner/fixture-repo/build-tools@sha256:beef" ]
+    [ "${output}" = "registry.example.test/owner/fixture-repo/build-tools@sha256:beef" ]
 }
 
 @test "image-ref fails closed and prints no ref without a repo owner" {
@@ -750,7 +756,7 @@ teardown() {
     # Why: Proves host is SOT-driven, not hardcoded.
     # From: Issue #1683
     local m="${BATS_TEST_TMPDIR}/reg.yml" host tag
-    sed 's/^  registry: ghcr.io$/  registry: example.io/' "${CI_MANIFEST_SOURCE}" > "${m}"
+    sed 's/^  registry: .*/  registry: example.io/' "${CI_MANIFEST_SOURCE}" > "${m}"
     host="$(CI_MANIFEST="${m}" _ci_registry)"
     [ "${host}" = "example.io" ]
     tag="$(CI_MANIFEST="${m}" GITHUB_REPOSITORY=owner/fixture-repo _ci_image_tag proxy linux/amd64 abcd)"
@@ -897,7 +903,7 @@ _probe_stub() {
     # From: Issue #1683
     [ "$(_ci_classify_failure 'HTTP 401 unauthorized')" = "permanent" ]
     [ "$(_ci_classify_failure 'error: could not compile lancache-ui')" = "permanent" ]
-    [ "$(_ci_classify_failure 'pull access denied for ghcr.io/x')" = "permanent" ]
+    [ "$(_ci_classify_failure 'pull access denied for registry.example.test/x')" = "permanent" ]
     [ "$(_ci_classify_failure 'curl: (22) The requested URL returned error: 404')" = "permanent" ]
     [ "$(_ci_classify_failure 'ERROR: unable to select packages: x (no such package)')" = "permanent" ]
     [ "$(_ci_classify_failure 'ERROR: Not committing changes due to missing repository tags.')" = "permanent" ]
@@ -908,7 +914,7 @@ _probe_stub() {
     # Why: only not_found may build; auth must never build.
     # From: Issue #1683
     [ "$(_ci_classify_failure 'manifest unknown')" = "not_found" ]
-    [ "$(_ci_classify_failure 'ghcr.io/x: not found: manifest')" = "not_found" ]
+    [ "$(_ci_classify_failure 'registry.example.test/x: not found: manifest')" = "not_found" ]
     [ "$(_ci_classify_failure 'denied: requested access to the resource')" = "permanent" ]
 }
 
@@ -939,8 +945,8 @@ _probe_stub() {
     # What: Default op returns not_found for 404 text.
     # Why: Preserves legacy registry-probe behavior.
     # From: Issue #1683
-    [ "$(_ci_classify_failure 'ghcr.io/x: not found: manifest')" = "not_found" ]
-    [ "$(_ci_classify_failure 'ghcr.io/x: not found: manifest' registry)" = "not_found" ]
+    [ "$(_ci_classify_failure 'registry.example.test/x: not found: manifest')" = "not_found" ]
+    [ "$(_ci_classify_failure 'registry.example.test/x: not found: manifest' registry)" = "not_found" ]
 }
 
 @test "retry classifier: op=buildx retries the layer-lock and go-panic signatures" {
@@ -1414,9 +1420,9 @@ RS
     # From: Issue #1683 | PR #1858
     run bash -c 'source "$1"; RUNNER_ENVIRONMENT=github-hosted PROJECT_SELFHOSTED_PROXY_HTTP=http://p:3128 _ci_proxy_init; _ci_proxy_names | wc -l' _ "${CI_SH}"
     [ "${lines[-1]}" -eq 0 ]
-    run bash -c 'source "$1"; unset HTTP_PROXY http_proxy HTTPS_PROXY https_proxy NO_PROXY no_proxy; RUNNER_ENVIRONMENT=self-hosted PROJECT_SELFHOSTED_PROXY_HTTP=http://p:3128 PROJECT_SELFHOSTED_PROXY_EXCLUSION=ghcr.io _ci_proxy_init; echo "h=${https_proxy} n=${NO_PROXY}"; _ci_proxy_names | tr "\n" " "' _ "${CI_SH}"
+    run bash -c 'source "$1"; unset HTTP_PROXY http_proxy HTTPS_PROXY https_proxy NO_PROXY no_proxy; RUNNER_ENVIRONMENT=self-hosted PROJECT_SELFHOSTED_PROXY_HTTP=http://p:3128 PROJECT_SELFHOSTED_PROXY_EXCLUSION=registry.example.test _ci_proxy_init; echo "h=${https_proxy} n=${NO_PROXY}"; _ci_proxy_names | tr "\n" " "' _ "${CI_SH}"
     [[ "${output}" == *"[CI-INFO-CORE-0007]"* ]]
-    [[ "${output}" == *"h=http://p:3128 n=ghcr.io"* ]]
+    [[ "${output}" == *"h=http://p:3128 n=registry.example.test"* ]]
     [[ "${output}" == *"HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy"* ]]
 }
 
@@ -2185,7 +2191,7 @@ tail" '{body:$b, isPrerelease:false}')" \
     # From: Issue #1683
     export GITHUB_SHA=mysha
     _ci_published_services() { printf 'proxy\n'; }
-    _ci_registry() { echo ghcr.io; }
+    _ci_registry() { echo registry.example.test; }
     _ci_repo() { echo o/r; }
     _ci_registry_digest() { echo sha256:same; }
     _ci_registry_probe() { echo sha256:same; }
@@ -2845,7 +2851,7 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     # Why: Pin by image, not key (1 service, 2 containers).
     # From: Issue #1683 | PR #1858
     GITHUB_REPOSITORY=owner/fixture-repo \
-    CI_COMPOSE_IMAGES_CMD="$(_stub imgs 'printf "dns-standard\tghcr.io/owner/fixture-repo/dns:latest\ndns-ssl\tghcr.io/owner/fixture-repo/dns:latest\n"')" \
+    CI_COMPOSE_IMAGES_CMD="$(_stub imgs 'printf "dns-standard\tregistry.example.test/owner/fixture-repo/dns:latest\ndns-ssl\tregistry.example.test/owner/fixture-repo/dns:latest\n"')" \
         run _ci_validate_pin_override "dns=sha256:aaa"
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"dns-standard:"* ]]
@@ -2858,7 +2864,7 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     # Why: No first-party digest exists for external images.
     # From: Issue #1683 | PR #1858
     GITHUB_REPOSITORY=owner/fixture-repo \
-    CI_COMPOSE_IMAGES_CMD="$(_stub imgs 'printf "nats\tnats:2-alpine@sha256:c11\nproxy\tghcr.io/owner/fixture-repo/proxy:latest\n"')" \
+    CI_COMPOSE_IMAGES_CMD="$(_stub imgs 'printf "nats\tnats:2-alpine@sha256:c11\nproxy\tregistry.example.test/owner/fixture-repo/proxy:latest\n"')" \
         run _ci_validate_pin_override "proxy=sha256:p"
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"proxy@sha256:p"* ]]
@@ -2870,7 +2876,7 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     # Why: Else :latest validates green (silent drift).
     # From: Issue #1683 | PR #1858
     GITHUB_REPOSITORY=owner/fixture-repo \
-    CI_COMPOSE_IMAGES_CMD="$(_stub imgs 'printf "proxy\tghcr.io/owner/fixture-repo/proxy:latest\n"')" \
+    CI_COMPOSE_IMAGES_CMD="$(_stub imgs 'printf "proxy\tregistry.example.test/owner/fixture-repo/proxy:latest\n"')" \
         run _ci_validate_pin_override "watchdog=sha256:w"
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-VALIDATE-0007"* ]]
@@ -2881,7 +2887,7 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     # Why: Deferred defect stays visible, never a hard fail.
     # From: Issue #1683 | PR #1858
     GITHUB_REPOSITORY=owner/fixture-repo \
-    CI_COMPOSE_IMAGES_CMD="$(_stub imgs 'printf "netdata\tnetdata/netdata@sha256:a13\nproxy\tghcr.io/owner/fixture-repo/proxy:latest\n"')" \
+    CI_COMPOSE_IMAGES_CMD="$(_stub imgs 'printf "netdata\tnetdata/netdata@sha256:a13\nproxy\tregistry.example.test/owner/fixture-repo/proxy:latest\n"')" \
         run _ci_validate_pin_override "proxy=sha256:p
 netdata=sha256:n"
     [ "${status}" -eq 0 ]
@@ -4263,7 +4269,7 @@ netdata=sha256:n"
     # From: Issue #1683
     GITHUB_REPOSITORY=owner/fixture-repo run bash "${CI_SH}" build-tools image
     [ "${status}" -eq 0 ]
-    [ "${output}" = "ghcr.io/owner/fixture-repo/build-tools" ]
+    [ "${output}" = "registry.example.test/owner/fixture-repo/build-tools" ]
 }
 
 @test "oci labels emit provenance from the SOT and env" {
@@ -4474,7 +4480,7 @@ netdata=sha256:n"
     # Why: Ban targets bash slices only.
     # From: Issue #1683 | PR #1858
     local d="${BATS_TEST_TMPDIR}"
-    printf 'full="ghcr.io/${repo}/${svc}:sha-${commit}"\n' > "${d}/full.sh"
+    printf 'full="registry.example.test/${repo}/${svc}:sha-${commit}"\n' > "${d}/full.sh"
     run bash "${CI_SH}" check deny-short-sha "${d}/full.sh"
     [ "${status}" -eq 0 ]; [[ "${output}" == *"deny-short-sha=clean"* ]]
     printf 's="$(git rev-parse --short=7 "$c")"\n' > "${d}/revparse.sh"
@@ -4551,12 +4557,12 @@ netdata=sha256:n"
     # What: the img-default-latest yml sub-pattern, unseen.
     # Why: a second violation kind in the same yml branch.
     # From: Issue #1683 | PR #1858
-    printf 'env:\n  BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/build-tools:latest\n' \
+    printf 'env:\n  BUILD_TOOLS_IMAGE=registry.example.test/owner/build-tools:latest\n' \
         > "${BATS_TEST_TMPDIR}/imglatest.yml"
     run bash "${CI_SH}" check mutable-refs "${BATS_TEST_TMPDIR}/imglatest.yml"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"img-default-latest"* ]]
-    printf "run: grep -F 'ARG BUILD_TOOLS_IMAGE=ghcr.io/x/build-tools:latest' f\n" \
+    printf "run: grep -F 'ARG BUILD_TOOLS_IMAGE=registry.example.test/x/build-tools:latest' f\n" \
         > "${BATS_TEST_TMPDIR}/greppat.yml"
     run bash "${CI_SH}" check mutable-refs "${BATS_TEST_TMPDIR}/greppat.yml"
     [ "${status}" -eq 0 ]
@@ -5990,8 +5996,8 @@ EOF
 _prebuilt_fixture() {
     local root="$1"
     mkdir -p "${root}/deploy/prod" "${root}/deploy/quickstart"
-    printf 'services:\n  proxy:\n    image: ghcr.io/example/proxy:sha-abc\n' > "${root}/deploy/prod/docker-compose.yml"
-    printf 'services:\n  proxy:\n    image: ghcr.io/example/proxy:sha-abc\n' > "${root}/deploy/quickstart/docker-compose.yml"
+    printf 'services:\n  proxy:\n    image: registry.example.test/example/proxy:sha-abc\n' > "${root}/deploy/prod/docker-compose.yml"
+    printf 'services:\n  proxy:\n    image: registry.example.test/example/proxy:sha-abc\n' > "${root}/deploy/quickstart/docker-compose.yml"
     printf '# LanCache-NG\nRun: docker compose up -d\n' > "${root}/README.md"
     printf '#!/usr/bin/env bash\n' > "${root}/setup.sh"
 }
@@ -7079,7 +7085,7 @@ EOF
     local r="${BATS_TEST_TMPDIR}/elw-fromexternal"
     mkdir -p "${r}/services/proxy"
     printf '. /usr/local/lib/domain-validation.sh\n' > "${r}/services/proxy/entrypoint.sh"
-    printf 'FROM alpine:3.24\nCOPY --from=ghcr.io/example/image:latest /x/domain-validation.sh /usr/local/lib/domain-validation.sh\n' \
+    printf 'FROM alpine:3.24\nCOPY --from=registry.example.test/example/image:latest /x/domain-validation.sh /usr/local/lib/domain-validation.sh\n' \
         > "${r}/services/proxy/Dockerfile"
     run bash "${CI_SH}" check entrypoint-lib-wiring "${r}"
     [ "${status}" -eq 0 ]
@@ -7148,7 +7154,7 @@ EOF
         run _ci_docker_build proxy abc123 linux/amd64
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"buildx build --load"* ]]
-    [[ "${output}" == *"ghcr.io/owner/fixture-repo/proxy:sha-abc123-amd64"* ]]
+    [[ "${output}" == *"registry.example.test/owner/fixture-repo/proxy:sha-abc123-amd64"* ]]
     [[ "${output}" == *"--platform linux/amd64"* ]]
     [[ "${output}" == *"org.opencontainers.image.title=proxy"* ]]
     [[ "${output}" == *"--build-arg BUILD_IDENTITY=abc123"* ]]
@@ -7199,22 +7205,22 @@ EOF
     printf '#!/usr/bin/env bash\necho "docker $*"\n' > "${bin}/docker"
     chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
-        CI_BUILD_CACHE_FROM="type=registry,ref=ghcr.io/owner/fixture-repo/proxy:cache" \
-        CI_BUILD_CACHE_TO="type=registry,ref=ghcr.io/owner/fixture-repo/proxy:cache,mode=max" \
+        CI_BUILD_CACHE_FROM="type=registry,ref=registry.example.test/owner/fixture-repo/proxy:cache" \
+        CI_BUILD_CACHE_TO="type=registry,ref=registry.example.test/owner/fixture-repo/proxy:cache,mode=max" \
         run _ci_docker_build proxy abc123 linux/amd64
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"--cache-from type=registry,ref=ghcr.io/owner/fixture-repo/proxy:cache"* ]]
-    [[ "${output}" == *"--cache-to type=registry,ref=ghcr.io/owner/fixture-repo/proxy:cache,mode=max,ignore-error=true"* ]]
+    [[ "${output}" == *"--cache-from type=registry,ref=registry.example.test/owner/fixture-repo/proxy:cache"* ]]
+    [[ "${output}" == *"--cache-to type=registry,ref=registry.example.test/owner/fixture-repo/proxy:cache,mode=max,ignore-error=true"* ]]
 
     # What: a 2nd service call gets its own cache ref.
     # Why: proves scope is per-call, not one constant value.
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo CI_BUILD_TOOLS_IMAGE_CMD='echo bt@sha256:x' \
-        CI_BUILD_CACHE_FROM="type=registry,ref=ghcr.io/owner/fixture-repo/ui:cache" \
-        CI_BUILD_CACHE_TO="type=registry,ref=ghcr.io/owner/fixture-repo/ui:cache,mode=max" \
+        CI_BUILD_CACHE_FROM="type=registry,ref=registry.example.test/owner/fixture-repo/ui:cache" \
+        CI_BUILD_CACHE_TO="type=registry,ref=registry.example.test/owner/fixture-repo/ui:cache,mode=max" \
         run _ci_docker_build ui def456 linux/amd64
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"--cache-from type=registry,ref=ghcr.io/owner/fixture-repo/ui:cache"* ]]
-    [[ "${output}" == *"--cache-to type=registry,ref=ghcr.io/owner/fixture-repo/ui:cache,mode=max,ignore-error=true"* ]]
+    [[ "${output}" == *"--cache-from type=registry,ref=registry.example.test/owner/fixture-repo/ui:cache"* ]]
+    [[ "${output}" == *"--cache-to type=registry,ref=registry.example.test/owner/fixture-repo/ui:cache,mode=max,ignore-error=true"* ]]
     [[ "${output}" != *"proxy:cache"* ]]
 }
 
@@ -7236,7 +7242,7 @@ esac
 EOF
     chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
-        CI_BUILD_CACHE_FROM="type=registry,ref=ghcr.io/owner/fixture-repo/proxy:cache" \
+        CI_BUILD_CACHE_FROM="type=registry,ref=registry.example.test/owner/fixture-repo/proxy:cache" \
         run _ci_docker_build proxy abc123 linux/amd64
     [ "${status}" -eq 0 ]
     # What: raw evidence of the miss stays visible.
@@ -7252,10 +7258,10 @@ EOF
     printf '#!/usr/bin/env bash\necho "docker $*"\n' > "${bin}/docker"
     chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
-        CI_BUILD_CACHE_TO="type=registry,ref=ghcr.io/owner/fixture-repo/proxy:cache,ignore-error=false" \
+        CI_BUILD_CACHE_TO="type=registry,ref=registry.example.test/owner/fixture-repo/proxy:cache,ignore-error=false" \
         run _ci_docker_build proxy abc123 linux/amd64
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"--cache-to type=registry,ref=ghcr.io/owner/fixture-repo/proxy:cache,ignore-error=false"* ]]
+    [[ "${output}" == *"--cache-to type=registry,ref=registry.example.test/owner/fixture-repo/proxy:cache,ignore-error=false"* ]]
     [[ "${output}" != *"ignore-error=false,ignore-error=true"* ]]
 }
 
@@ -7267,10 +7273,10 @@ EOF
     printf '#!/usr/bin/env bash\necho "docker $*"\n' > "${bin}/docker"
     chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
-        CI_BUILD_CACHE_TO="ghcr.io/owner/fixture-repo/proxy:cache" \
+        CI_BUILD_CACHE_TO="registry.example.test/owner/fixture-repo/proxy:cache" \
         run _ci_docker_build proxy abc123 linux/amd64
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"--cache-to ghcr.io/owner/fixture-repo/proxy:cache"* ]]
+    [[ "${output}" == *"--cache-to registry.example.test/owner/fixture-repo/proxy:cache"* ]]
     [[ "${output}" == *"CI-WARN-BUILD-0012"* ]]
 }
 
@@ -7787,9 +7793,9 @@ EOF
     [ "${status}" -eq 0 ]
     [ "${output}" = "sha256:idx" ]
     run cat "${log}"
-    [[ "${output}" == *"--tag ghcr.io/owner/fixture-repo/ui:sha-deadbeef"* ]]
-    [[ "${output}" == *"ghcr.io/owner/fixture-repo/ui@sha256:aaa"* ]]
-    [[ "${output}" == *"ghcr.io/owner/fixture-repo/ui@sha256:bbb"* ]]
+    [[ "${output}" == *"--tag registry.example.test/owner/fixture-repo/ui:sha-deadbeef"* ]]
+    [[ "${output}" == *"registry.example.test/owner/fixture-repo/ui@sha256:aaa"* ]]
+    [[ "${output}" == *"registry.example.test/owner/fixture-repo/ui@sha256:bbb"* ]]
 }
 
 # What: bare repo + two host clones for real CAS tests.
@@ -8111,9 +8117,9 @@ EOF
     # Why: not-found is the only build-eligible miss.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    printf '#!/usr/bin/env bash\necho "ghcr.io/x: not found: manifest unknown" >&2\nexit 1\n' > "${bin}/docker"
+    printf '#!/usr/bin/env bash\necho "registry.example.test/x: not found: manifest unknown" >&2\nexit 1\n' > "${bin}/docker"
     chmod +x "${bin}/docker"
-    PATH="${bin}:${PATH}" run _ci_registry_probe ghcr.io/x/y:z
+    PATH="${bin}:${PATH}" run _ci_registry_probe registry.example.test/x/y:z
     [ "${status}" -eq 1 ]
 }
 
@@ -8122,9 +8128,9 @@ EOF
     # Why: real CI shape; it drove every target UNKNOWN.
     # From: Issue #1683 | PR #1858
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    printf '#!/usr/bin/env bash\necho "ERROR: ghcr.io/x/y:z: not found" >&2\nexit 1\n' > "${bin}/docker"
+    printf '#!/usr/bin/env bash\necho "ERROR: registry.example.test/x/y:z: not found" >&2\nexit 1\n' > "${bin}/docker"
     chmod +x "${bin}/docker"
-    PATH="${bin}:${PATH}" run _ci_registry_probe ghcr.io/x/y:z
+    PATH="${bin}:${PATH}" run _ci_registry_probe registry.example.test/x/y:z
     [ "${status}" -eq 1 ]
 }
 
@@ -8135,7 +8141,7 @@ EOF
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     printf '#!/usr/bin/env bash\necho "denied: requested access to the resource" >&2\nexit 1\n' > "${bin}/docker"
     chmod +x "${bin}/docker"
-    PATH="${bin}:${PATH}" run _ci_registry_probe ghcr.io/x/y:z
+    PATH="${bin}:${PATH}" run _ci_registry_probe registry.example.test/x/y:z
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"[CI-WARN-RESOLVE-0007]"* ]]
     [[ "${output}" == *"denied: requested access"* ]]
@@ -8148,7 +8154,7 @@ EOF
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     printf '#!/usr/bin/env bash\necho sha256:ok\n' > "${bin}/docker"
     chmod +x "${bin}/docker"
-    PATH="${bin}:${PATH}" run _ci_registry_probe ghcr.io/x/y:z
+    PATH="${bin}:${PATH}" run _ci_registry_probe registry.example.test/x/y:z
     [ "${status}" -eq 0 ]
     [ "${output}" = sha256:ok ]
 }
@@ -8291,7 +8297,7 @@ SH
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     printf '#!/usr/bin/env bash\necho "Connection reset by peer" >&2\nexit 1\n' > "${bin}/docker"
     chmod +x "${bin}/docker"
-    PATH="${bin}:${PATH}" run _ci_index_raw ghcr.io/owner/fixture-repo/ui:sha-deadbeef
+    PATH="${bin}:${PATH}" run _ci_index_raw registry.example.test/owner/fixture-repo/ui:sha-deadbeef
     [ "${status}" -eq 2 ]
 }
 
@@ -8302,7 +8308,7 @@ SH
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     printf '#!/usr/bin/env bash\necho "not found: manifest unknown" >&2\nexit 1\n' > "${bin}/docker"
     chmod +x "${bin}/docker"
-    PATH="${bin}:${PATH}" run _ci_index_raw ghcr.io/owner/fixture-repo/ui:sha-deadbeef
+    PATH="${bin}:${PATH}" run _ci_index_raw registry.example.test/owner/fixture-repo/ui:sha-deadbeef
     [ "${status}" -eq 1 ]
 }
 
@@ -8424,8 +8430,8 @@ SH
         run _ci_default_channel_move ui latest sha256:abc
     [ "${status}" -eq 0 ]
     run cat "${log}"
-    [[ "${output}" == *"--tag ghcr.io/owner/fixture-repo/ui:latest"* ]]
-    [[ "${output}" == *"ghcr.io/owner/fixture-repo/ui@sha256:abc"* ]]
+    [[ "${output}" == *"--tag registry.example.test/owner/fixture-repo/ui:latest"* ]]
+    [[ "${output}" == *"registry.example.test/owner/fixture-repo/ui@sha256:abc"* ]]
 }
 
 @test "default channel readback reads the channel digest" {
