@@ -1004,68 +1004,41 @@ _stub() {
     printf '%s\n' "${BATS_TEST_TMPDIR}/${name}"
 }
 
-@test "build reuses (no build) when resolve says accepted" {
-    # What: PRESENT_ACCEPTED -> reuse, never build.
-    # Why: NOOP/reuse is the default outcome.
+@test "build admission: only impact + MISSING_CONFIRMED + auth build" {
+    # What: every resolver/impact/CAS/auth combination.
+    # Why: one build path; all other states reuse or stop.
     # From: Issue #1683
-    STUB_STATE=PRESENT_ACCEPTED
-    GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${CI_SH}" build ui
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"result=reuse-accepted"* ]]
-}
-
-@test "build refuses to build on UNKNOWN (escalate, not build)" {
-    # What: UNKNOWN must never trigger a build.
-    # Why: UNKNOWN != BUILD (Contract section 4).
-    # From: Issue #1683
-    STUB_STATE=UNKNOWN
-    GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${CI_SH}" build ui
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"result=escalate"* ]]
-    [[ "${output}" != *"result=built"* ]]
-}
-
-@test "build reuses a binary from the CAS before compiling (rust)" {
-    # What: A CAS hit skips compile (reuse order, §7).
-    # Why: Reuse an identical binary, do not rebuild.
-    # From: Issue #1683
-    STUB_STATE=MISSING_CONFIRMED
-    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
-    CI_IMPACT_CMD="$(_stub impact 'echo BUILD')" \
-    CI_CAS_LOOKUP_CMD="$(_stub cas 'exit 0')" \
-    GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${CI_SH}" build ui
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"result=reuse-binary-cas"* ]]
-}
-
-@test "build fails closed when GHCR credentials are missing (never anonymous)" {
-    # What: A real build needs authenticated GHCR.
-    # Why: Anonymous GHCR is rate-limited (maintainer).
-    # From: Issue #1683
-    STUB_STATE=MISSING_CONFIRMED
-    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
-    CI_IMPACT_CMD="$(_stub impact 'echo BUILD')" \
-    CI_CAS_LOOKUP_CMD="$(_stub cas 'exit 1')" \
-        run bash "${CI_SH}" build ui
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-BUILD-0002"* ]]
-}
-
-@test "build runs the backend only with full admission (impact+missing+auth)" {
-    # What: The one build path: full BUILD_ACK conjunction.
-    # Why: impact & MISSING_CONFIRMED & identity.
-    # From: Issue #1683
-    STUB_STATE=MISSING_CONFIRMED
-    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
-    CI_IMPACT_CMD="$(_stub impact 'echo BUILD')" \
-    CI_CAS_LOOKUP_CMD="$(_stub cas 'exit 1')" \
-    CI_BUILD_CMD="$(_stub build 'exit 0')" \
-    GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${CI_SH}" build ui
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"state=BUILD_ACK"* ]]
-    [[ "${output}" == *"result=built"* ]]
+    local case state impact cas auth rc want probe w
+    local -a adm_env
+    while IFS='|' read -r case state impact cas auth rc want; do
+        STUB_STATE="${state}"
+        probe="$(_probe_stub)"
+        [ "${case}" != probe-fail ] || probe="$(_stub probe 'echo MISSING_CONFIRMED; exit 7')"
+        adm_env=(-u GITHUB_EVENT_NAME -u BEFORE_SHA -u GHCR_USERNAME -u GHCR_TOKEN
+            CI_RESOLVE_PROBE_CMD="${probe}"
+            CI_BUILD_CMD="$(_stub build 'echo BUILD_BACKEND_INVOKED')")
+        [ "${impact}" = - ] || adm_env+=(CI_IMPACT_CMD="$(_stub impact "echo ${impact}")")
+        [ "${cas}" = - ] || adm_env+=(CI_CAS_LOOKUP_CMD="$(_stub cas "exit ${cas}")")
+        [ "${auth}" = no ] || adm_env+=(GHCR_USERNAME=u GHCR_TOKEN=t)
+        run env "${adm_env[@]}" bash "${CI_SH}" build ui
+        [ "${status}" -eq "${rc}" ] || { echo "${case}: rc ${status}: ${output}"; return 1; }
+        for w in ${want}; do
+            [[ "${output}" == *"${w}"* ]] || { echo "${case}: no ${w}: ${output}"; return 1; }
+        done
+        [ "${case}" = built ] && continue
+        [[ "${output}" != *"BUILD_BACKEND_INVOKED"* ]] || { echo "${case}: backend ran"; return 1; }
+        [[ "${output}" != *"result=built"* ]] || { echo "${case}: built"; return 1; }
+    done <<'CASES'
+accepted|PRESENT_ACCEPTED|-|-|yes|0|result=reuse-accepted
+unknown|UNKNOWN|-|-|yes|2|result=escalate
+cas-hit|MISSING_CONFIRMED|BUILD|0|yes|0|result=reuse-binary-cas
+no-auth|MISSING_CONFIRMED|BUILD|1|no|2|CI-ERROR-BUILD-0002
+built|MISSING_CONFIRMED|BUILD|1|yes|0|state=BUILD_ACK result=built
+mismatch|MISMATCH|BUILD|1|yes|2|result=fail-mismatch CI-ERROR-BUILD-0010
+probe-fail|-|BUILD|1|yes|2|result=escalate
+no-impact|MISSING_CONFIRMED|NOOP|1|yes|0|result=no-build-no-impact
+no-base|MISSING_CONFIRMED|-|1|yes|2|result=escalate
+CASES
 }
 
 @test "resolve maps MISMATCH to fail, never build" {
@@ -1079,24 +1052,6 @@ _stub() {
     [[ "${output}" != *"action=build"* ]]
 }
 
-@test "build fails on MISMATCH: no build, no replacement build" {
-    # What: MISMATCH never reaches the build backend.
-    # Why: replacement build = 0 (Contract 77 Test K).
-    # From: Issue #1683
-    STUB_STATE=MISMATCH
-    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
-    CI_IMPACT_CMD="$(_stub impact 'echo BUILD')" \
-    CI_CAS_LOOKUP_CMD="$(_stub cas 'exit 1')" \
-    CI_BUILD_CMD="$(_stub build 'echo BUILD_BACKEND_INVOKED')" \
-    GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${CI_SH}" build ui
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"result=fail-mismatch"* ]]
-    [[ "${output}" == *"CI-ERROR-BUILD-0010"* ]]
-    [[ "${output}" != *"BUILD_BACKEND_INVOKED"* ]]
-    [[ "${output}" != *"result=built"* ]]
-}
-
 @test "resolve treats a failed probe backend as UNKNOWN, not its stdout" {
     # What: A non-zero probe is UNKNOWN, not its state.
     # Why: A failed probe MUST NOT build (AG-VAL-030).
@@ -1107,39 +1062,6 @@ _stub() {
     [[ "${output}" == *"state=UNKNOWN"* ]]
     [[ "${output}" == *"action=escalate"* ]]
     [[ "${output}" != *"action=build"* ]]
-}
-
-@test "build with a failed probe backend escalates and never builds" {
-    # What: probe rc!=0 -> UNKNOWN -> escalate, no backend.
-    # Why: the exact committed regression this fix closes.
-    # From: Issue #1683
-    CI_RESOLVE_PROBE_CMD="$(_stub probe 'echo MISSING_CONFIRMED; exit 7')" \
-    CI_IMPACT_CMD="$(_stub impact 'echo BUILD')" \
-    CI_CAS_LOOKUP_CMD="$(_stub cas 'exit 1')" \
-    CI_BUILD_CMD="$(_stub build 'echo BUILD_BACKEND_INVOKED')" \
-    GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${CI_SH}" build ui
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"result=escalate"* ]]
-    [[ "${output}" != *"BUILD_BACKEND_INVOKED"* ]]
-    [[ "${output}" != *"result=built"* ]]
-}
-
-@test "build refuses MISSING_CONFIRMED without proven semantic impact" {
-    # What: confirmed-missing + impact=NOOP -> no build.
-    # Why: MISSING_CONFIRMED alone MUST NOT build.
-    # From: Issue #1683
-    STUB_STATE=MISSING_CONFIRMED
-    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
-    CI_IMPACT_CMD="$(_stub impact 'echo NOOP')" \
-    CI_CAS_LOOKUP_CMD="$(_stub cas 'exit 1')" \
-    CI_BUILD_CMD="$(_stub build 'echo BUILD_BACKEND_INVOKED')" \
-    GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${CI_SH}" build ui
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"result=no-build-no-impact"* ]]
-    [[ "${output}" != *"BUILD_BACKEND_INVOKED"* ]]
-    [[ "${output}" != *"result=built"* ]]
 }
 
 @test "semantic impact compares the head id with the base id" {
@@ -1161,22 +1083,6 @@ _stub() {
     run _ci_semantic_impact svc-a os/p1 head-id
     [ "${lines[-1]}" = UNKNOWN ]
     [[ "${output}" == *"[CI-INFO-IMPACT-0003]"* ]]
-}
-
-@test "build escalates when the event has no base ref (UNKNOWN)" {
-    # What: no base ref -> impact UNKNOWN -> escalate.
-    # Why: unproven impact MUST NOT authorize build.
-    # From: Issue #1683
-    unset GITHUB_EVENT_NAME BEFORE_SHA
-    STUB_STATE=MISSING_CONFIRMED
-    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
-    CI_CAS_LOOKUP_CMD="$(_stub cas 'exit 1')" \
-    CI_BUILD_CMD="$(_stub build 'echo BUILD_BACKEND_INVOKED')" \
-    GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${CI_SH}" build ui
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"result=escalate"* ]]
-    [[ "${output}" != *"BUILD_BACKEND_INVOKED"* ]]
 }
 
 # =========================================================
