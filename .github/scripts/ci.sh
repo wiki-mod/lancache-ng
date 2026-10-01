@@ -74,6 +74,23 @@ ci_error() {
     printf 'raw:\n%s\n' "${raw}" >&2
 }
 
+# What: stdout of a command; rc over max-ok or stderr fail.
+# Why: grep rc 2 is not a miss; warnings are errors.
+# From: Issue #1683 | PR #1858
+_ci_capture() {
+    local okmax="$1" out err rc=0
+    shift
+    err="$(mktemp)" || return 2
+    out="$("$@" 2>"${err}")" || rc=$?
+    if [ "${rc}" -gt "${okmax}" ] || [ -s "${err}" ]; then
+        ci_error "[CI-ERROR-CORE-0106]" "rc=\"${rc}\" cmd=\"$1\" reason=\"command failed or wrote stderr\"" "$(cat "${err}")"
+        rm -f "${err}"
+        return 2
+    fi
+    rm -f "${err}"
+    [ -z "${out}" ] || printf '%s\n' "${out}"
+}
+
 
 # What: Enforce and create the /var/tmp CI temp root.
 # Why: bare mktemp and tools then use disk, not tmpfs.
@@ -6332,16 +6349,10 @@ _ci_check_deny_short_sha() {
     local pat='\$\{([A-Za-z_][A-Za-z0-9_]*)?([Ss][Hh][Aa]|[Cc][Oo][Mm][Mm][Ii][Tt]|[Cc][Aa][Nn][Dd][Ii][Dd][Aa][Tt][Ee]|[Rr][Ee][Vv][Ii][Ss][Ii][Oo][Nn])[A-Za-z0-9_]*[[:space:]]*(:[[:space:]]*:[[:space:]]*[A-Za-z0-9_]+|:[[:space:]]*0[[:space:]]*:[[:space:]]*[A-Za-z0-9_]+)\}'
     local -a _ci_override=("$@") files=()
     _ci_scan_files files _ci_override '.github/scripts/*.sh' '.github/scripts/*.bats' '.github/workflows/*.yml' 'scripts/lib/*.sh' || return 2
-    local path out gs
+    local path out
     local -a viol=()
     for path in "${files[@]}"; do
-        if ! out="$(grep -EnH "${pat}" "${path}")"; then
-            gs=$?
-            if [ "${gs}" -gt 1 ]; then
-                ci_log "[CI-ERROR-CHECK-0006]" "path=\"${path}\" reason=\"grep failed\""
-                return 2
-            fi
-        fi
+        out="$(_ci_capture 1 grep -EnH "${pat}" "${path}")" || return 2
         [ -n "${out}" ] && viol+=("${out}")
     done
     if [ "${#viol[@]}" -gt 0 ]; then
@@ -6572,8 +6583,12 @@ _ci_check_if_without_else_status() {
     local path fi_line status_line
     local -a viol=()
     for path in "${files[@]}"; do
-        while IFS=: read -r fi_line status_line; do
+        while IFS=: read -r kind fi_line status_line; do
             [ -n "${fi_line}" ] || continue
+            if [ "${kind}" = neg ]; then
+                viol+=("${path}:${status_line}: reads \$? inside 'if ! CMD; then' (line ${fi_line}); that \$? is the negation's 0, not CMD's status -- use 'CMD || rc=\$?' or _ci_capture, or mark '# if-status-safe: <reason>'")
+                continue
+            fi
             viol+=("${path}:${status_line}: reads \$? after an else-less if (fi at line ${fi_line}); POSIX reports the if's own status 0, not the command's -- use 'if CMD; then STATUS=0; else STATUS=\$?; fi' or mark '# if-status-safe: <reason>'")
         done < <(awk '
             { lines[NR] = $0 }
@@ -6598,8 +6613,23 @@ _ci_check_if_without_else_status() {
                   if (ns ~ /^#/) { checked++; continue }
                   checked++
                   pre = substr(nxt, 1, index(nxt, "$?") - 1)
-                  if (nxt ~ /\$\?/ && pre !~ /(\||&|;)/ && nxt !~ /#[ \t]*if-status-safe:/) printf "%d:%d\n", fi_i, j
+                  if (nxt ~ /\$\?/ && pre !~ /(\||&|;)/ && nxt !~ /#[ \t]*if-status-safe:/) printf "fi:%d:%d\n", fi_i, j
                   break
+                }
+              }
+              for (i = 1; i <= NR; i++) {
+                s0 = lines[i]; sub(/#.*/, "", s0)
+                if (s0 !~ /(^|[;&|[:space:]])if[[:space:]]+![[:space:]]/) continue
+                if (s0 ~ /then[[:space:]]*$/) {
+                  for (j = i + 1; j <= NR && j <= i + 6; j++) {
+                    nxt = lines[j]
+                    if (nxt ~ /^[ \t]*$/ || nxt ~ /^[ \t]*#/) continue
+                    if (nxt ~ /\$\?/ && nxt !~ /#[ \t]*if-status-safe:/) printf "neg:%d:%d\n", i, j
+                    break
+                  }
+                } else if (s0 ~ /then/) {
+                  rest = s0; sub(/.*then/, "", rest)
+                  if (rest ~ /\$\?/ && lines[i] !~ /#[ \t]*if-status-safe:/) printf "neg:%d:%d\n", i, i
                 }
               }
             }
@@ -7372,10 +7402,7 @@ _ci_check_governance_guards() {
         # What: grep rc 1 means no marker; rc 2 is an error.
         # Why: a read error must not pass as a clean file.
         # From: Issue #1683
-        grc=0; hits="$(grep -nEo '(TODO|FIXME)\(#([0-9]+)\)' "${path}")" || grc=$?
-        if [ "${grc}" -gt 1 ]; then
-            ci_log "[CI-ERROR-CHECK-0075]" "path=\"${path}\" reason=\"grep failed\""; return 2
-        fi
+        hits="$(_ci_capture 1 grep -nEo '(TODO|FIXME)\(#([0-9]+)\)' "${path}")" || return 2
         while IFS= read -r marker; do
             [ -n "${marker}" ] || continue
             line="${marker%%:*}"; marker="${marker#*:}"
@@ -7627,12 +7654,7 @@ _ci_check_proxy_cache_env_doc_drift() {
     while IFS='=' read -r key value; do
         [[ "${key}" =~ ^CACHE_[A-Z_]+$ ]] || continue
         scanned=$((scanned + 1))
-        rc=0
-        doc_row="$(grep -E "^\| \`${key}\` \|" "${arch_doc}" 2>&1)" || rc=$?
-        if [ "${rc}" -gt 1 ]; then
-            ci_error "[CI-ERROR-CHECK-0112]" "path=\"${arch_doc}\" reason=\"architecture doc unreadable\"" "${doc_row}"
-            return 2
-        fi
+        doc_row="$(_ci_capture 1 grep -E "^\| \`${key}\` \|" "${arch_doc}")" || return 2
         [ -n "${doc_row}" ] || continue
         checked=$((checked + 1))
         documented="$(sed -E "s/^\| \`[A-Z_]+\` \| \`([^\`]*)\` \|.*/\1/" <<<"${doc_row}")"
@@ -8012,19 +8034,15 @@ _ci_validation_env() {
 # Why: the installer owns its compose; CI only derives it.
 # From: Issue #1683 | PR #1858
 _ci_installer_compose() {
-    local root="${1:-${CI_REPO_ROOT}}" su line rc=0
+    local root="${1:-${CI_REPO_ROOT}}" su line
     local re='^QUICKSTART_COMPOSE="\$SCRIPT_DIR/([^"$]+)"$'
     su="${root}/setup.sh"
     if [ ! -f "${su}" ]; then
         ci_log "[CI-ERROR-CORE-0102]" "path=\"${su}\" reason=\"installer setup.sh not found\""
         return 2
     fi
-    line="$(grep -E '^QUICKSTART_COMPOSE=' "${su}" 2>&1)" || rc=$?
-    if [ "${rc}" -gt 1 ]; then
-        ci_error "[CI-ERROR-CORE-0103]" "path=\"${su}\" reason=\"installer setup.sh unreadable\"" "${line}"
-        return 2
-    fi
-    if [ "${rc}" -eq 1 ] || [ "$(wc -l <<< "${line}")" -ne 1 ]; then
+    line="$(_ci_capture 1 grep -E '^QUICKSTART_COMPOSE=' "${su}")" || return 2
+    if [ -z "${line}" ] || [ "$(wc -l <<< "${line}")" -ne 1 ]; then
         ci_error "[CI-ERROR-CORE-0104]" "path=\"${su}\" reason=\"QUICKSTART_COMPOSE missing or assigned twice\"" "${line}"
         return 2
     fi
@@ -8073,18 +8091,9 @@ _ci_compose_config_ok() {
 # Why: a warning is an error (AG-VAL-001); raw is kept.
 # From: Issue #1683 | PR #1858
 _ci_compose_query() {
-    local file="$1" env_file="$2" out err rc=0
+    local file="$1" env_file="$2"
     shift 2
-    err="$(mktemp)" || return 2
-    out="$(_ci_compose_run "${env_file}" -f "${file}" "$@" 2>"${err}")" || rc=$?
-    if [ "${rc}" -ne 0 ] || [ -s "${err}" ]; then
-        [ -z "${out}" ] || printf '%s\n' "${out}" >&2
-        cat "${err}" >&2
-        rm -f "${err}"
-        return 2
-    fi
-    rm -f "${err}"
-    [ -z "${out}" ] || printf '%s\n' "${out}"
+    _ci_capture 0 _ci_compose_run "${env_file}" -f "${file}" "$@"
 }
 
 # What: profile names a compose file declares.
@@ -8762,19 +8771,15 @@ _ci_check_logging_matrix() {
 # Why: ci.sh scan owns trivy + its retry (AG-CI-013/023).
 # From: Issue #1683 | PR #1858
 _ci_check_trivy_action_direct_usage() {
-    local repo_root="${1:-${CI_REPO_ROOT}}" out rc=0 d
+    local repo_root="${1:-${CI_REPO_ROOT}}" out d
     local -a dirs=()
     for d in .github/workflows .github/actions; do
         [ -d "${repo_root}/${d}" ] && dirs+=("${d}")
     done
     [ "${#dirs[@]}" -gt 0 ] || { printf 'trivy-action-direct-usage=clean dirs=0\n'; return 0; }
-    out="$(cd "${repo_root}" && grep -nRE --include='*.yml' --include='*.yaml' \
+    out="$(cd "${repo_root}" && _ci_capture 1 grep -nRE --include='*.yml' --include='*.yaml' \
         '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*["'"'"']?aquasecurity/(setup-)?trivy(-action)?@' \
-        "${dirs[@]}" 2>&1)" || rc=$?
-    if [ "${rc}" -gt 1 ]; then
-        ci_log "[CI-ERROR-CHECK-0040]" "reason=\"grep failed scanning workflows\" raw=\"${out}\""
-        return 2
-    fi
+        "${dirs[@]}")" || return 2
     if [ -n "${out}" ]; then
         ci_error "[CI-ERROR-CHECK-0039]" "reason=\"aquasecurity trivy action; scan via ci.sh\"" "${out}"
         return 1

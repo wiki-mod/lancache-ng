@@ -140,6 +140,24 @@ teardown() {
     [ "${#dup[@]}" -eq 0 ] || { printf '%s\n' "${dup[@]}"; return 1; }
 }
 
+@test "_ci_capture passes max-ok rc, fails higher rc or stderr" {
+    # What: max-ok rc passes; higher rc or stderr fails raw.
+    # Why: one owner keeps grep rc 2 from reading as a miss.
+    # From: Issue #1683 | PR #1858
+    run _ci_capture 0 printf 'a\nb\n'
+    [ "${status}" -eq 0 ]; [ "${output}" = $'a\nb' ]
+    run _ci_capture 1 grep -x zz <<< "aa"
+    [ "${status}" -eq 0 ]; [ -z "${output}" ]
+    run _ci_capture 1 grep -x aa <<< "aa"
+    [ "${status}" -eq 0 ]; [ "${output}" = aa ]
+    run _ci_capture 1 grep x "${BATS_TEST_TMPDIR}/no-such-file"
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-CORE-0106"*'rc="2"'*"no-such-file"* ]]
+    run _ci_capture 0 sh -c 'echo out; echo warn >&2'
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-CORE-0106"*'rc="0"'*"warn"* ]]
+}
+
 @test "_ci_repo lowercases a mixed-case GITHUB_REPOSITORY" {
     # What: a mixed-case owner/repo comes out lowercased.
     # Why: GHCR image refs must be lowercase.
@@ -4899,6 +4917,19 @@ STUBEOF
     printf 'if a; then\n  :\nfi\nreturn "$?"\n' > "${BATS_TEST_TMPDIR}/retif.sh"
     run bash "${CI_SH}" check if-without-else-status "${BATS_TEST_TMPDIR}/retif.sh"
     [ "${status}" -ne 0 ]
+    # What: $? in an `if !` then-branch is always 0.
+    # Why: that read made a grep-failure branch dead code.
+    # From: Issue #1683 | PR #1858
+    printf 'if ! out="$(x)"; then\n  rc=$?\nfi\n' > "${BATS_TEST_TMPDIR}/negif.sh"
+    run bash "${CI_SH}" check if-without-else-status "${BATS_TEST_TMPDIR}/negif.sh"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"negif.sh:2: reads \$? inside 'if ! CMD; then' (line 1)"* ]]
+    printf 'if ! x; then rc=$?; fi\n' > "${BATS_TEST_TMPDIR}/negone.sh"
+    run bash "${CI_SH}" check if-without-else-status "${BATS_TEST_TMPDIR}/negone.sh"
+    [ "${status}" -ne 0 ]
+    printf 'out="$(x)" || rc=$?\nif ! y; then\n  echo no\nfi\n' > "${BATS_TEST_TMPDIR}/negok.sh"
+    run bash "${CI_SH}" check if-without-else-status "${BATS_TEST_TMPDIR}/negok.sh"
+    [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }
 }
 
 @test "check docker-run-heredoc-stdin flags a heredoc docker run missing -i" {
@@ -5813,7 +5844,7 @@ CASES
     chmod +x "${bin}/grep"
     PATH="${bin}:${PATH}" run bash "${CI_SH}" check proxy-cache-env-doc-drift
     [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0112"*"boom"* ]]
+    [[ "${output}" == *"CI-ERROR-CORE-0106"*"boom"* ]]
 }
 
 @test "check dependabot-docker-base-consistency passes on the real repo" {
