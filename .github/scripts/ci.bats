@@ -2952,22 +2952,32 @@ case "$*" in
 esac
 SH
     chmod +x "${bin}/docker"
-    for mode in ok fail; do
+    local nofile="${BATS_TEST_TMPDIR}/no-compose.yml" m
+    grep -v '^  CI_COMPOSE_FILE:' "${CI_MANIFEST}" > "${nofile}"
+    for mode in ok fail nofile; do
         : > "${log}"
+        m="${CI_MANIFEST}"
+        [ "${mode}" = nofile ] && m="${nofile}"
         export LANCACHE_STATE_DIR="${BATS_TEST_TMPDIR}/state-${mode}"
         mkdir -p "${LANCACHE_STATE_DIR}/cache"
-        PATH="${bin}:${PATH}" DOCKER_LOG="${log}" DOWN_MODE="${mode}" \
-            run _ci_validate_teardown "" proj
+        CI_MANIFEST="${m}" PATH="${bin}:${PATH}" DOCKER_LOG="${log}" \
+            DOWN_MODE="${mode}" run _ci_validate_teardown "" proj
         grep -qx 'container rm -f c1' "${log}"
         grep -qx 'volume rm -f v1' "${log}"
         grep -q "^run --rm --network none -v ${LANCACHE_STATE_DIR}:/s " "${log}"
         [ ! -e "${LANCACHE_STATE_DIR}" ]
-        if [ "${mode}" = ok ]; then
-            [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }
-        else
-            [ "${status}" -eq 2 ]
-            [[ "${output}" == *"CI-ERROR-VALIDATE-0058"*"boom-down"* ]]
-        fi
+        case "${mode}" in
+            ok) [ "${status}" -eq 0 ] || { echo "${output}"; return 1; } ;;
+            fail)
+                [ "${status}" -eq 2 ]
+                [[ "${output}" == *"CI-ERROR-VALIDATE-0058"*"boom-down"* ]]
+                ;;
+            nofile)
+                [ "${status}" -eq 2 ]
+                [[ "${output}" == *"CI-ERROR-VARIABLES-0001"*"CI_COMPOSE_FILE"* ]]
+                if grep -q '^compose' "${log}"; then return 1; fi
+                ;;
+        esac
     done
 }
 

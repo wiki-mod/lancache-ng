@@ -4336,7 +4336,8 @@ _ci_validate_config_json() {
         "${CI_COMPOSE_CONFIG_CMD}"
         return "$?"
     fi
-    local file="${CI_COMPOSE_FILE:-deploy/prod/docker-compose.yml}" flags
+    local file flags
+    file="$(_ci_variable CI_COMPOSE_FILE)" || return 2
     local -a pf=()
     flags="$(_ci_compose_profile_flags "${file}")" || return 2
     [ -z "${flags}" ] || mapfile -t pf <<< "${flags}"
@@ -4434,14 +4435,21 @@ _ci_validate_is_collision() {
 # Why: One cleanup point; runs on the fail path.
 # From: Issue #1683 | PR #1858
 _ci_validate_teardown() {
-    local holder="$1" project="$2" net_id out rc=0 kind ids
+    local holder="$1" project="$2" net_id out rc=0 kind ids compose
     local label="label=com.docker.compose.project=${project}"
-    out="$(docker compose -p "${project}" \
-        -f "${CI_COMPOSE_FILE:-deploy/prod/docker-compose.yml}" \
-        down -v --remove-orphans 2>&1)" || {
-        ci_error "[CI-ERROR-VALIDATE-0058]" "project=\"${project}\" reason=\"compose down failed\"" "${out}"
+    # What: no compose file: skip down, sweep leftovers.
+    # Why: the label sweep frees the slot without the file.
+    # From: Issue #1683 | PR #1858
+    if compose="$(_ci_variable CI_COMPOSE_FILE)"; then
+        out="$(docker compose -p "${project}" \
+            -f "${compose}" \
+            down -v --remove-orphans 2>&1)" || {
+            ci_error "[CI-ERROR-VALIDATE-0058]" "project=\"${project}\" reason=\"compose down failed\"" "${out}"
+            rc=2
+        }
+    else
         rc=2
-    }
+    fi
     # What: remove what an aborted up still left behind.
     # Why: Created containers pin volumes; next slot breaks.
     # From: Issue #1683
@@ -4506,7 +4514,8 @@ _ci_validate_up() {
     while IFS= read -r svc; do
         [ -n "${svc}" ] && ci_log "[CI-INFO-VALIDATE-0055]" "service=\"${svc}\" reason=\"host network mode cannot be isolated in a /27; excluded\""
     done <<< "${raw}"
-    local file="${CI_COMPOSE_FILE:-deploy/prod/docker-compose.yml}" flags
+    local file flags
+    file="$(_ci_variable CI_COMPOSE_FILE)" || return 2
     local -a pf=()
     flags="$(_ci_compose_profile_flags "${file}")" || return 2
     [ -z "${flags}" ] || mapfile -t pf <<< "${flags}"
@@ -4858,7 +4867,7 @@ _ci_validate_ui_nats_dns() {
 # Why: Real listener HTTP + PATCH + cache flush.
 # From: Issue #1683
 _ci_validate_dns_rollback() {
-    local project="$1" ip cid key jar csrf snap resp code i rc=0
+    local project="$1" ip cid key jar csrf snap resp code i rc=0 compose
     ip="$(_ci_validate_container_ip "${project}" dns-standard)"
     cid="$(docker compose -p "${project}" ps -q dns-standard 2>/dev/null)"
     if [ -z "${ip}" ] || [ -z "${cid}" ]; then
@@ -4910,11 +4919,12 @@ _ci_validate_dns_rollback() {
     _ci_validate_ui_add_record "${project}" "${jar}" "${csrf}" ci-rollback-probe 203.0.113.71 || { rm -f "${jar}"; return 1; }
     _ci_validate_dns_resolves "${project}" dns-standard ci-rollback-probe.lan. 203.0.113.71 15 || { rm -f "${jar}"; return 1; }
     rm -f "${jar}"
+    compose="$(_ci_variable CI_COMPOSE_FILE)" || return 2
     # What: roll back through the operator CLI, setup.sh.
     # Why: §49 client path; API key resolved in container.
     # From: Issue #836
     resp="$(COMPOSE_PROJECT_NAME="${project}" bash "${CI_REPO_ROOT}/setup.sh" \
-        reset-to-last-known-good-config dns "$(dirname "${CI_COMPOSE_FILE:-deploy/prod/docker-compose.yml}")" \
+        reset-to-last-known-good-config dns "$(dirname "${compose}")" \
         lan. "${snap}" --yes 2>&1)" || rc=$?
     case "${rc}:${resp}" in
         *"cache-flush publishes failed"*) rc=1 ;;
