@@ -377,16 +377,19 @@ EOF
     # What: Matrix carries only what resolve says to build.
     # Why: identity filters, not path-sledgehammer.
     # From: Issue #1683
-    local gh="${BATS_TEST_TMPDIR}/out.txt"; : > "${gh}"
+    local gh="${BATS_TEST_TMPDIR}/out.txt" svc ctx want m; : > "${gh}"
+    svc="$(ci_services)"
+    svc="${svc%%$'\n'*}"
+    ctx="$(_ci_block_entry_field services "${svc}" context)"
+    want="$(_ci_platforms "${svc}" | sort | paste -sd, -)"
     GITHUB_OUTPUT="${gh}" GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_stub p 'echo MISSING_CONFIRMED')" \
     CI_IMPACT_CMD="$(_stub impact 'echo BUILD')" \
-        run bash "${CI_SH}" plan-matrix services/proxy/Dockerfile
+        run bash "${CI_SH}" plan-matrix "${ctx}/Dockerfile"
     [ "${status}" -eq 0 ]
     grep -q '^any-build=true$' "${gh}"
-    local m; m="$(grep '^matrix=' "${gh}" | sed 's/^matrix=//')"
-    [ "$(printf '%s' "${m}" | jq '.include | length')" -eq 2 ]
-    [ "$(printf '%s' "${m}" | jq -r '.include[0].service')" = "proxy" ]
-    [ "$(printf '%s' "${m}" | jq -r '[.include[].platform]|sort|join(",")')" = "os/p1,os/p2" ]
+    m="$(grep '^matrix=' "${gh}" | sed 's/^matrix=//')"
+    [ "$(printf '%s' "${m}" | jq -r '[.include[].service]|unique|join(",")')" = "${svc}" ]
+    [ "$(printf '%s' "${m}" | jq -r '[.include[].platform]|sort|join(",")')" = "${want}" ]
 }
 
 @test "plan-matrix treats a SOT-only change as identity candidates" {
@@ -787,11 +790,14 @@ EOF
     # What: A selected build emits one platform-keyed line.
     # Why: Downstream assembly keys per-platform digests.
     # From: Issue #1683
+    local p
+    p="$(_ci_platforms ui)"
+    p="${p##*$'\n'}"
     STUB_STATE=PRESENT_ACCEPTED
-    GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${CI_SH}" build ui os/p2
+    GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${CI_SH}" build ui "${p}"
     [ "${status}" -eq 0 ]
     [ "${#lines[@]}" -eq 1 ]
-    [[ "${output}" == *"platform=os/p2"* ]]
+    [[ "${output}" == *"platform=${p}"* ]]
     [[ "${output}" == *"result=reuse-accepted"* ]]
 }
 
@@ -1648,7 +1654,17 @@ _asm_a() { _test_digest a; }
 _asm_b() { _test_digest b; }
 _asm_idx() { _test_digest d; }
 _asm_digest_stub() {
-    _stub dg "case \"\$2\" in */p2) echo $(_asm_b);; *) echo $(_asm_a);; esac"
+    _stub dg "echo $(_asm_a)"
+}
+# What: index stub listing every SOT platform of svc.
+# Why: platform set comes from the SOT, never the test.
+# From: Issue #1683
+_asm_index_stub() {
+    local p line
+    line="$(_asm_idx)"
+    for p in $(_ci_platforms "$1"); do line="${line} ${p}=$(_asm_a)"; done
+    [ "${2:-}" = divergent ] && line="${line% *} ${p}=$(_asm_b)"
+    _stub idx "echo \"${line}\""
 }
 
 @test "assemble refuses a non-ACCEPTED platform and does not rebuild" {
@@ -1685,7 +1701,7 @@ _asm_digest_stub() {
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"result=assembled"* ]]
     [[ "${output}" == *"assembled=$(_asm_idx)"* ]]
-    [[ "${output}" == *"platforms=2"* ]]
+    [[ "${output}" == *"platforms=$(_ci_platforms ui | grep -c .)"* ]]
 }
 
 @test "assemble reuses an identical existing index (idempotent)" {
@@ -1695,7 +1711,7 @@ _asm_digest_stub() {
     STUB_STATE=PRESENT_ACCEPTED
     CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
     CI_ACCEPTED_DIGEST_CMD="$(_asm_digest_stub)" \
-    CI_INDEX_LOOKUP_CMD="$(_stub idx "echo \"$(_asm_idx) os/p1=$(_asm_a) os/p2=$(_asm_b)\"")" \
+    CI_INDEX_LOOKUP_CMD="$(_asm_index_stub ui)" \
         run bash "${CI_SH}" assemble ui
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"result=reuse-index"* ]]
@@ -1709,7 +1725,7 @@ _asm_digest_stub() {
     STUB_STATE=PRESENT_ACCEPTED
     CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
     CI_ACCEPTED_DIGEST_CMD="$(_asm_digest_stub)" \
-    CI_INDEX_LOOKUP_CMD="$(_stub idx "echo \"$(_asm_idx) os/p1=$(_asm_a) os/p2=$(_asm_a)\"")" \
+    CI_INDEX_LOOKUP_CMD="$(_asm_index_stub ui divergent)" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${CI_SH}" assemble ui
     [ "${status}" -eq 2 ]

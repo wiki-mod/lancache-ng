@@ -149,7 +149,7 @@ _ci_block_keys() {
     ' "${CI_MANIFEST}"
 }
 
-# What: Print the 10 product-stack service names.
+# What: Print the product-stack service names.
 # Why: The one service list; everything derives from it.
 # From: Issue #1683
 ci_services() {
