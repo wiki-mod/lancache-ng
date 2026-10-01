@@ -3776,8 +3776,13 @@ ci_cmd_release_vex() {
 # Why: ls-remote skips deep fetch; empty pre-1.0.
 # From: Issue #1683
 _ci_last_release_tag() {
-    git ls-remote --tags --refs origin 'refs/tags/v[0-9]*.[0-9]*.[0-9]*' 2>/dev/null \
-        | sed 's#.*refs/tags/##' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1
+    local refs tags
+    refs="$(_ci_capture 0 git ls-remote --tags --refs origin 'refs/tags/v[0-9]*.[0-9]*.[0-9]*')" || return 2
+    tags="$(_ci_capture 1 grep -oE 'refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' <<<"${refs}")" || return 2
+    if [ -z "${tags}" ]; then
+        return 0
+    fi
+    sed 's#^refs/tags/##' <<<"${tags}" | sort -V | tail -n 1
 }
 
 # What: The next patch tag after a plain vX.Y.Z tag.
@@ -3819,11 +3824,13 @@ _ci_push_release_tag() {
         push "${url}" "refs/tags/${tag}"
 }
 
-# What: True if a tag already exists on origin.
-# Why: never re-cut an existing release tag.
-# From: Issue #1683
+# What: 0 tag on origin, 1 absent, 2 lookup failed.
+# Why: a failed lookup is UNKNOWN, never "absent".
+# From: Issue #1683 | PR #1858
 _ci_remote_tag_exists() {
-    [ -n "$(git ls-remote --tags origin "refs/tags/$1" 2>/dev/null)" ]
+    local hit
+    hit="$(_ci_capture 0 git ls-remote --tags origin "refs/tags/$1")" || return 2
+    [ -n "${hit}" ]
 }
 
 # What: cut next patch tag when master changed stack.
@@ -3831,7 +3838,7 @@ _ci_remote_tag_exists() {
 # From: Issue #1683
 ci_cmd_cut_release_tag() {
     local base_tag next_tag tip rel_ref
-    base_tag="$("${CI_LAST_RELEASE_TAG_CMD:-_ci_last_release_tag}")"
+    base_tag="$("${CI_LAST_RELEASE_TAG_CMD:-_ci_last_release_tag}")" || return 2
     if [ -z "${base_tag}" ]; then
         printf 'cut-tag=noop reason=no-base-tag\n'
         return 0
@@ -3850,9 +3857,14 @@ ci_cmd_cut_release_tag() {
         printf 'cut-tag=superseded tip=%s sha=%s\n' "${tip}" "${GITHUB_SHA:-}"
         return 0
     fi
-    if "${CI_TAG_EXISTS_CMD:-_ci_remote_tag_exists}" "${next_tag}"; then
+    local exists_rc=0
+    "${CI_TAG_EXISTS_CMD:-_ci_remote_tag_exists}" "${next_tag}" || exists_rc=$?
+    if [ "${exists_rc}" -eq 0 ]; then
         printf 'cut-tag=noop reason=exists tag=%s\n' "${next_tag}"
         return 0
+    fi
+    if [ "${exists_rc}" -ne 1 ]; then
+        return 2
     fi
     "${CI_TAG_PUSH_CMD:-_ci_push_release_tag}" "${next_tag}" "${GITHUB_SHA:?}" || return "$?"
     printf 'cut-tag=pushed tag=%s\n' "${next_tag}"
@@ -7617,8 +7629,11 @@ _ci_check_naming_consistency() {
 
     if [ -f "${docker_client_rs}" ]; then
         local dc_names name
-        dc_names="$(grep -oE '=> "lancache-[a-z0-9-]+"' "${docker_client_rs}" | grep -oE 'lancache-[a-z0-9-]+' | sort -u)"
-        [ -n "${dc_names}" ] || viol+=("${docker_client_rs}: no '=> \"lancache-*\"' resolutions found")
+        dc_names="$(_ci_capture 1 grep -oE '=> "lancache-[a-z0-9-]+"' "${docker_client_rs}")" || return 2
+        dc_names="$(sed -E 's/^=> "(.*)"$/\1/' <<<"${dc_names}" | sort -u)"
+        if [ -z "${dc_names}" ]; then
+            viol+=("${docker_client_rs}: no '=> \"lancache-*\"' resolutions found")
+        fi
         while IFS= read -r name; do
             [ -n "${name}" ] || continue
             _ci_name_in_allowlist "${name}" || viol+=("${docker_client_rs}: resolves '${name}' not in allowlist")
@@ -7627,8 +7642,11 @@ _ci_check_naming_consistency() {
 
     if [ -f "${watchdog_rs}" ]; then
         local wd_names name
-        wd_names="$(grep -oE 'const [A-Z_]+: &str = "lancache-[a-z0-9-]+"' "${watchdog_rs}" | grep -oE 'lancache-[a-z0-9-]+' | sort -u)"
-        [ -n "${wd_names}" ] || viol+=("${watchdog_rs}: no const lancache-* container names found")
+        wd_names="$(_ci_capture 1 grep -oE 'const [A-Z_]+: &str = "lancache-[a-z0-9-]+"' "${watchdog_rs}")" || return 2
+        wd_names="$(sed -E 's/^.*"(lancache-[a-z0-9-]+)"$/\1/' <<<"${wd_names}" | sort -u)"
+        if [ -z "${wd_names}" ]; then
+            viol+=("${watchdog_rs}: no const lancache-* container names found")
+        fi
         while IFS= read -r name; do
             [ -n "${name}" ] || continue
             _ci_name_in_allowlist "${name}" || viol+=("${watchdog_rs}: names '${name}' not in allowlist")
@@ -7642,15 +7660,18 @@ _ci_check_naming_consistency() {
     fi
 
     local verb_acls
-    verb_acls="$(grep -oE '^[[:space:]]*acl[[:space:]]+[a-z_]+[[:space:]]+path,url_dec.*/\(?(start|stop|restart|wait)(\|(start|stop|restart|wait))*\)?\$' "${proxy_sh}" \
-        | grep -oE 'acl [a-z_]+' | awk '{print $2}')"
-    [ -n "${verb_acls}" ] || viol+=("${proxy_sh}: no lifecycle-action (start/stop/restart/wait) acl found")
+    verb_acls="$(_ci_capture 1 grep -E '^[[:space:]]*acl[[:space:]]+[a-z_]+[[:space:]]+path,url_dec.*/\(?(start|stop|restart|wait)(\|(start|stop|restart|wait))*\)?\$' "${proxy_sh}")" || return 2
+    verb_acls="$(awk '{print $2}' <<<"${verb_acls}")"
+    if [ -z "${verb_acls}" ]; then
+        viol+=("${proxy_sh}: no lifecycle-action (start/stop/restart/wait) acl found")
+    fi
     local verb_acl verb_acl_line
     while IFS= read -r verb_acl; do
         [ -n "${verb_acl}" ] || continue
         verb_acl_line="$(_ci_capture 1 grep -F "acl ${verb_acl} " "${proxy_sh}")" || return 2
-        grep -qi 'lancache-\(watchdog\|syslog\)' <<<"${verb_acl_line}" && \
+        if grep -qi 'lancache-\(watchdog\|syslog\)' <<<"${verb_acl_line}"; then
             viol+=("${proxy_sh}: '${verb_acl}' grants lifecycle action to watchdog/syslog (issue #1486)")
+        fi
     done <<<"${verb_acls}"
 
     if [ -f "${ui_config_rs}" ]; then
@@ -7661,8 +7682,8 @@ _ci_check_naming_consistency() {
         local var expected actual
         for var in "${!service_defaults[@]}"; do
             expected="${service_defaults[${var}]}"
-            actual="$(grep -oE "env_str\(\"${var}\", \"[a-z0-9-]+\"\)|env_or\(\"${var}\", \"[a-z0-9-]+\"" "${ui_config_rs}" \
-                | grep -oE '"[a-z0-9-]+"' | tail -n1 | tr -d '"')"
+            actual="$(_ci_capture 1 grep -oE "env_str\(\"${var}\", \"[a-z0-9-]+\"\)|env_or\(\"${var}\", \"[a-z0-9-]+\"" "${ui_config_rs}")" || return 2
+            actual="$(sed -E 's/^.*, "([a-z0-9-]+)"\)?$/\1/' <<<"${actual}" | tail -n 1)"
             if [ -z "${actual}" ]; then
                 viol+=("${ui_config_rs}: no default found for \$${var}")
             elif [ "${actual}" != "${expected}" ]; then

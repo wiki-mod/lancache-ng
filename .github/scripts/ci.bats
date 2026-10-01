@@ -213,6 +213,9 @@ prebuilt|prebuilt-prod||/README.md
 nats|nats-atomic-write||/services/dns/entrypoint.sh
 socket|docker-socket-proxy||/scripts/untracked/docker-socket-proxy.sh
 naming|naming-consistency||/scripts/untracked/docker-socket-proxy.sh
+naming-dc|naming-consistency||/docker_client.rs
+naming-wd|naming-consistency||/watchdog/src/config.rs
+naming-ui|naming-consistency||/ui/src/config.rs
 dhcp|dhcp-proxy-env||/dnsmasq.conf.template
 kea|setup-keys-kea||/setup.sh
 rustdf|dockerfile-build-tools||/services/ui/Dockerfile
@@ -2349,6 +2352,52 @@ tail" '{body:$b, isPrerelease:false}')" \
     CI_LAST_RELEASE_TAG_CMD="${base}" CI_STACK_CHANGED_CMD="${changed}" GITHUB_SHA=mysha CI_PROMOTE_TIP_CMD="${tipok}" CI_TAG_EXISTS_CMD="${noexist}" CI_TAG_PUSH_CMD="${push}" run ci_cmd_cut_release_tag
     [ "${status}" -eq 0 ]; [[ "${output}" == *"pushed tag=v0.2.1"* ]]
     [ "$(cat "${calls}")" = "PUSH v0.2.1 mysha" ]
+    # What: a failed base or tag lookup stops with rc 2.
+    # Why: UNKNOWN is never "no release" nor "tag absent".
+    # From: Issue #1683 | PR #1858
+    : > "${calls}"
+    CI_LAST_RELEASE_TAG_CMD="$(_stub basefail 'exit 2')" run ci_cmd_cut_release_tag
+    [ "${status}" -eq 2 ]
+    [ ! -s "${calls}" ]
+    : > "${calls}"
+    CI_LAST_RELEASE_TAG_CMD="${base}" CI_STACK_CHANGED_CMD="${changed}" GITHUB_SHA=mysha \
+        CI_PROMOTE_TIP_CMD="${tipok}" CI_TAG_EXISTS_CMD="$(_stub unknown 'exit 2')" \
+        CI_TAG_PUSH_CMD="${push}" run ci_cmd_cut_release_tag
+    [ "${status}" -eq 2 ]
+    [ ! -s "${calls}" ]
+}
+
+@test "release tag readers keep no tags apart from a failed lookup" {
+    # What: no tags is empty; a failed ls-remote is rc 2.
+    # Why: UNKNOWN must never read as "no release yet".
+    # From: Issue #1683 | PR #1858
+    local work="${BATS_TEST_TMPDIR}/rel"
+    local origin="${BATS_TEST_TMPDIR}/origin.git"
+    local t
+    git init -q "${work}"
+    git -C "${work}" -c user.email=a@b -c user.name=b commit -q --allow-empty -m x
+    cd "${work}"
+    run _ci_last_release_tag
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-CORE-0106"* ]]
+    run _ci_remote_tag_exists v0.1.0
+    [ "${status}" -eq 2 ]
+    git init -q --bare "${origin}"
+    git remote add origin "${origin}"
+    run _ci_last_release_tag
+    [ "${status}" -eq 0 ]
+    [ -z "${output}" ]
+    for t in v0.2.0 v0.10.0 v0.9.1 v1.0.0-rc1; do
+        git tag "${t}"
+    done
+    git push -q origin --tags
+    run _ci_last_release_tag
+    [ "${status}" -eq 0 ]
+    [ "${output}" = "v0.10.0" ]
+    run _ci_remote_tag_exists v0.9.1
+    [ "${status}" -eq 0 ]
+    run _ci_remote_tag_exists v0.9.9
+    [ "${status}" -eq 1 ]
 }
 
 # =========================================================
@@ -5109,7 +5158,7 @@ STUBEOF
     [[ "${output}" == *"CI-ERROR-CHECK-0084"* ]]
     [[ "${output}" == *"NewPrompt?"* ]]
     # What: an introspection sim counts; it needs the spawn.
-    # Why: sims_checked=0 alone hid which sims were checked.
+    # Why: the clean line names every kind of checked sim.
     # From: Issue #1683 | PR #1858
     local sim="${r}/scripts/untracked/simulations/setup-cli-simulation.sh"
     printf 'build_expect_prompt_block\nspawn bash setup.sh\n' > "${sim}"
@@ -5901,6 +5950,16 @@ EOF
     run _ci_check_naming_consistency "${r}"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0096"* ]]
+    # What: no match is a named violation via the CLI.
+    # Why: errexit must not end the check without a code.
+    # From: Issue #1683 | PR #1858
+    printf 'name: lancache-ng\nservices:\n  proxy:\n    container_name: lancache-proxy\n' \
+        > "${r}/dep/c.yml"
+    printf 'fn main() {}\n' > "${r}/services/watchdog/src/config.rs"
+    run bash "${CI_SH}" check naming-consistency "${r}"
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0096"* ]]
+    [[ "${output}" == *"no const lancache-* container names found"* ]]
 }
 
 @test "check compose-healthchecks passes clean on the real repo" {
