@@ -470,23 +470,25 @@ EOF
 # SERVICE DEPENDENCIES
 # =========================================================
 
-@test "ci_service_field reads build_type and runner from the SOT" {
-    # What: Scalar service fields come from the one file.
-    # Why: No per-file copy of build type or runner class.
+@test "service field and contexts come from the SOT blocks" {
+    # What: services then build_toolchain; contexts by edge.
+    # Why: one SOT reader; no per-file copy of these values.
     # From: Issue #1683
-    run ci_service_field ui build_type
-    [ "${output}" = "rust" ]
-    run ci_service_field proxy runner
-    [ "${output}" = "light" ]
-}
-
-@test "ci_service_contexts returns the named contexts for proxy" {
-    # What: proxy depends on known-good and dns-domains.
-    # Why: The SOT edge set is authoritative (Finding 93).
-    # From: Issue #1683
-    run ci_service_contexts proxy
-    [[ "${output}" == *"known-good"* ]]
-    [[ "${output}" == *"dns-domains"* ]]
+    local m="${BATS_TEST_TMPDIR}/m.yml"
+    printf '%s\n' 'services:' '  svc-a:' '    build_type: type-a' '    runner: r1' \
+        'build_toolchain:' '  tool-t:' '    build_type: type-t' \
+        'dependency_graph:' '  svc-a:' '    contexts: [ctx-1, ctx-2]' > "${m}"
+    CI_MANIFEST="${m}" run ci_service_field svc-a build_type
+    [ "${output}" = "type-a" ]
+    CI_MANIFEST="${m}" run ci_service_field svc-a runner
+    [ "${output}" = "r1" ]
+    CI_MANIFEST="${m}" run ci_service_field tool-t build_type
+    [ "${output}" = "type-t" ]
+    CI_MANIFEST="${m}" run ci_service_contexts svc-a
+    [ "${output}" = "$(printf '%s\n' ctx-1 ctx-2)" ]
+    CI_MANIFEST="${m}" run _ci_required_field svc-a context
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"[CI-ERROR-CORE-0009]"* ]]
 }
 
 # =========================================================
@@ -628,14 +630,16 @@ EOF
     # What: .rs normalizes; copied files stay raw-hashed.
     # Why: A hash in a .conf is payload; strip misreuses.
     # From: Issue #1683
-    run _ci_source_is_normalizable "services/ui/src/main.rs"
-    [ "${status}" -eq 0 ]
-    run _ci_source_is_normalizable "services/proxy/nginx.conf"
-    [ "${status}" -ne 0 ]
-    run _ci_source_is_normalizable "services/proxy/entrypoint.sh"
-    [ "${status}" -ne 0 ]
-    run _ci_source_is_normalizable "services/ui/Dockerfile"
-    [ "${status}" -ne 0 ]
+    local p want
+    while read -r p want; do
+        run _ci_source_is_normalizable "${p}"
+        [ "${status}" -eq "${want}" ] || { echo "${p}: ${status}"; return 1; }
+    done <<'EOF'
+dir/src/a.rs 0
+dir/a.conf 1
+dir/a.sh 1
+dir/Dockerfile 1
+EOF
 }
 
 @test "rust strip-safety rejects raw and multiline strings" {
