@@ -3968,43 +3968,20 @@ CASES
 # BUILD-ARGS EMISSION (SOT -> --build-arg)
 # =========================================================
 
-@test "build-args emits base + dhclient values from the SOT" {
-    # What: SOT owns base + dhclient; apk tools unpinned.
+@test "build-args emits the SOT base image and apk repos" {
+    # What: ALPINE_IMAGE and APK_TAGGED_REPOS equal the SOT.
     # Why: build-tools is a factory, not a version lock.
     # From: Issue #1683
-    run bash "${CI_SH}" build-args build-tools
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"--build-arg ALPINE_IMAGE=mirror.gcr.io"* ]]
-    [[ "${output}" == *"--build-arg DHCLIENT_VERSION="* ]]
-    local p apk
-    while IFS= read -r p; do
-        apk="$(_ci_platform_apk_arch "${p}")"
-        [[ "${output}" == *"--build-arg DHCLIENT_SHA256_${apk^^}="* ]]
-    done <<< "$(_ci_build_matrix_platforms)"
-    local repos
+    local alpine repos
+    alpine="$(_ci_block_entry_field base_images "" alpine)"
     repos="$(_ci_block_entry_list build_toolchain build-tools apk_repositories | tr '\n' ' ')"
-    [ -n "${repos}" ]
+    [ -n "${alpine}" ] && [ -n "${repos}" ]
+    run bash "${CI_SH}" build-args build-tools
+    [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }
+    [[ "${output}" == *"--build-arg ALPINE_IMAGE=${alpine}"* ]]
     [[ "${output}" == *"--build-arg APK_TAGGED_REPOS=${repos% }"* ]]
-    # What: no apk tool version is emitted anymore.
-    # Why: normal apk pkgs must not be a version lock.
-    # From: Issue #1683
     [[ "${output}" != *"DOCKER_CLI_VERSION"* ]]
     [[ "${output}" != *"SCCACHE_VERSION"* ]]
-}
-
-@test "build-args build-tools <platform> resolves one apk-arch + sha" {
-    # What: platform yields DHCLIENT_ARCH + one SHA256.
-    # Why: ci.sh resolves the arch, not the Dockerfile.
-    # From: Issue #1683 | PR #1858
-    local p apk
-    while IFS= read -r p; do
-        apk="$(_ci_platform_apk_arch "${p}")"
-        run bash "${CI_SH}" build-args build-tools --bare "${p}"
-        [ "${status}" -eq 0 ]
-        [[ "${output}" == *"DHCLIENT_ARCH=${apk}"* ]]
-        [[ "${output}" == *"DHCLIENT_SHA256="* ]]
-        [[ "${output}" != *"DHCLIENT_SHA256_"* ]]
-    done <<< "$(_ci_build_matrix_platforms)"
 }
 
 @test "build-args fails closed on a missing central base image" {
@@ -4022,10 +3999,11 @@ CASES
     # What: bare form feeds docker/build-push-action.
     # Why: that action wants NAME=VALUE, not --build-arg.
     # From: Issue #1683
+    local alpine
+    alpine="$(_ci_block_entry_field base_images "" alpine)"
     run bash "${CI_SH}" build-args build-tools --bare
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"DHCLIENT_VERSION="* ]]
-    [[ "${output}" == *"ALPINE_IMAGE=mirror.gcr.io"* ]]
+    [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }
+    [[ "${output}" == *"ALPINE_IMAGE=${alpine}"* ]]
     [[ "${output}" != *"--build-arg"* ]]
 }
 
@@ -4157,6 +4135,7 @@ CASES
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"--build-arg ${up}_ARCH=${arch}"* ]]
     [[ "${output}" == *"--build-arg ${up}_SHA256=${sha}"* ]]
+    [[ "${output}" != *"${up}_SHA256_"* ]]
 }
 
 @test "toolchain packages read the one SOT toolchain target" {
@@ -8288,14 +8267,14 @@ _version_fixture_repo() {
     [ "${output}" = "FOUND:q v" ]
 }
 
-@test "_ci_dockerfile_arg_default accepts real dhclient re-declares" {
-    # What: build-tools re-declares DHCLIENT_VERSION twice.
+@test "_ci_dockerfile_arg_default accepts identical bare re-declares" {
+    # What: one bare ARG before and after FROM is BARE.
     # Why: identical bare pre/post-FROM lines are valid.
     # From: Issue #1683 | PR #1858
-    run _ci_dockerfile_arg_default \
-        "${BATS_TEST_DIRNAME}/../../tools/build-tools/Dockerfile" \
-        DHCLIENT_VERSION
-    [ "${status}" -eq 0 ]
+    local f="${BATS_TEST_TMPDIR}/Dockerfile.redeclare"
+    printf 'ARG X\nFROM a\nARG X\n' > "${f}"
+    run _ci_dockerfile_arg_default "${f}" X
+    [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }
     [ "${output}" = "BARE" ]
 }
 
