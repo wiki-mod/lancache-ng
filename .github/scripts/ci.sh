@@ -2950,12 +2950,21 @@ _ci_test_rust() {
     # What: workspace-root cargo on service's own crate.
     # Why: build context is no crate; AG-VAL-008 per crate.
     # From: PR #1858
-    ( _ci_sccache_env "lancache-${service}" || exit 2
+    local trc=0
+    ( _ci_sccache_env "lancache-${service}" || exit 200
         trap _ci_sccache_stop EXIT
         cd "${CI_REPO_ROOT:-.}" \
             && cargo fmt --check -p "${ctx}" \
             && cargo clippy --locked --all-targets -p "${ctx}" -- -D warnings \
-            && cargo test --locked -p "${ctx}" ) || return 1
+            && cargo test --locked -p "${ctx}" ) || trc=$?
+    # What: 200 = sccache setup error -> rc 2, not FAIL.
+    # Why: §72: infra UNKNOWN never reads as a test FAIL.
+    # From: Issue #1683 | PR #1858
+    case "${trc}" in
+        0) ;;
+        200) return 2 ;;
+        *) return 1 ;;
+    esac
     printf 'service=%s tested=ok\n' "${service}"
 }
 

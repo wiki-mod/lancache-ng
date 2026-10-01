@@ -1313,6 +1313,11 @@ STUB
     [[ "${output}" == *"[CI-INFO-CACHE-0002]"* ]]
     [ "$(grep -c 'wrapper=sccache dir=/var/tmp/sccache' <<<"${output}")" -eq 3 ]
     [ "$(grep -c -- "-p $(ci_service_field dns crate)" <<<"${output}")" -eq 3 ]
+    CI_TMPDIR="${BATS_TEST_TMPDIR}/missing" SCCACHE_DIR=/var/tmp/sccache CI_RUST_VALIDATION=true \
+        CI_REPO_ROOT="${root}" PATH="${bin}:${PATH}" run _ci_test_rust dns
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"mktemp"* ]]
+    [[ "${output}" != *"cargo fmt"* ]]
 }
 
 @test "sccache env selects Redis when a URL is provided" {
