@@ -5417,12 +5417,17 @@ EOF
     local calls="${BATS_TEST_TMPDIR}/scan-calls"
     : > "${calls}"
     ci_cmd_scan() { printf 'scan %s %s\n' "$1" "$2" >> "${calls}"; }
-    export CI_BUILD_MATRIX='{"include":[{"service":"dns","platform":"os/p1"},{"service":"ui","platform":"os/p2"}]}'
+    export CI_BUILD_MATRIX='{"include":[{"service":"svc-a","platform":"os/p1"},{"service":"svc-b","platform":"os/p2"}]}'
     run ci_cmd_scan_stack
     [ "${status}" -eq 0 ]
     run cat "${calls}"
-    [[ "${output}" == *"scan dns "* ]]
-    [[ "${output}" == *"scan ui "* ]]
+    [[ "${output}" == *"scan svc-a "* ]]
+    [[ "${output}" == *"scan svc-b "* ]]
+    : > "${calls}"
+    CI_BUILD_MATRIX='not-json' run ci_cmd_scan_stack
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-AGGREGATE-0006"* ]]
+    [ ! -s "${calls}" ]
     _ci_registry_digest() { return 1; }
     run ci_cmd_scan_stack
     [ "${status}" -ne 0 ]
@@ -5431,6 +5436,52 @@ EOF
     run ci_cmd_scan_stack
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-SCAN-0016"* ]]
+}
+
+@test "procsub check fails a loop whose producer failed" {
+    # What: waits on the producer pid; rc above max fails.
+    # Why: a failed producer must not look like no results.
+    # From: Issue #1683
+    local l rc
+    while read -r l; do :; done < <(printf 'a\n'; exit 3)
+    rc=0; _ci_procsub_ok "$!" 0 || rc=$?
+    [ "${rc}" -eq 2 ]
+    while read -r l; do :; done < <(grep zzz <<< 'a')
+    _ci_procsub_ok "$!" 1
+    while read -r l; do :; done < <(grep x "${BATS_TEST_TMPDIR}/none")
+    rc=0; _ci_procsub_ok "$!" 1 || rc=$?
+    [ "${rc}" -eq 2 ]
+}
+
+@test "version consumers derive from SOT consumer and build_args" {
+    # What: dep, Dockerfile and keys come from the SOT.
+    # Why: no engine-side consumer list; missing keys fail.
+    # From: Issue #1683
+    local m="${BATS_TEST_TMPDIR}/m.yml"
+    printf '%s\n' 'services:' '  svc-a:' '    context: dir/a' \
+        'external_versions:' '  dep-a:' '    consumer: svc-a' '    build_args: [version, k2]' \
+        '  dep-b:' '    version: x' > "${m}"
+    CI_MANIFEST="${m}" run _ci_version_consumers
+    [ "${status}" -eq 0 ]
+    [ "${output}" = "dep-a|dir/a/Dockerfile|version k2" ]
+    printf '%s\n' 'services:' '  svc-a:' '    context: dir/a' \
+        'external_versions:' '  dep-a:' '    consumer: svc-a' > "${m}"
+    CI_MANIFEST="${m}" run _ci_version_consumers
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"[CI-ERROR-VERSION-0010]"* ]]
+}
+
+@test "identity prints no line when the id computation fails" {
+    # What: a failed id is rc 2 and no identity= line.
+    # Why: an empty identity must never look like a result.
+    # From: Issue #1683
+    local m="${BATS_TEST_TMPDIR}/m.yml"
+    printf '%s\n' 'services:' '  svc-a:' '    context: dir/a' '    build_type: type-x' \
+        'build_matrix:' '  platforms: [os/p1]' > "${m}"
+    CI_MANIFEST="${m}" run bash "${CI_SH}" identity svc-a os/p1
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"[CI-ERROR-IDENTITY-0004]"* ]]
+    [[ "${output}" != *"identity="* ]]
 }
 
 @test "nightly-status opens, updates, and closes the standing tracking issue" {
@@ -8464,12 +8515,25 @@ SH
     # Why: one digest reader confirms the promotion.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    printf '#!/usr/bin/env bash\ncase " $* " in *" --raw "*) echo "{\\"schemaVersion\\":2}" ;; *) echo sha256:chan ;; esac\n' > "${bin}/docker"
+    cat > "${bin}/docker" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+    *" --raw "*) printf '%s\n' "${INDEX_JSON}" ;;
+    *) echo sha256:chan ;;
+esac
+EOF
     chmod +x "${bin}/docker"
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
-        run _ci_default_channel_readback ui latest
+    INDEX_JSON='{"manifests":[{"digest":"sha256:c1","platform":{"os":"o","architecture":"a"}}]}' \
+        PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
+        run _ci_default_channel_readback svc-a latest
     [ "${status}" -eq 0 ]
     [ "${output}" = sha256:chan ]
+    # What: an index without a platform child fails closed.
+    # Why: zero children must never read as a usable image.
+    INDEX_JSON='{"schemaVersion":2}' PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
+        run _ci_default_channel_readback svc-a latest
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"[CI-ERROR-PROMOTE-0015]"* ]]
 }
 
 @test "default promote lock acquires the per-channel ref" {

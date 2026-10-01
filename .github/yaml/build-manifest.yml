@@ -477,6 +477,11 @@ base_images:
 # From: Issue #1683
 external_versions:
   netdata:
+    # What: target whose Dockerfile gets these build-args.
+    # Why: ci.sh derives the pin consumers; no engine list.
+    # From: Issue #1683
+    consumer: netdata
+    build_args: [version]
     version: v2.11.0
     sha256_x86_64: b42d9937807f28812502a967906d370cff9ab443453813656b99ff6a9b3c5649
     sha256_aarch64: 8cd056d64078c109409c08e30d55324c82e3855f9d8e4b304cacc7c612610e09
@@ -490,6 +495,8 @@ external_versions:
   # Why: Alpine 3.21+ dropped it; musl build, both arches.
   # From: Issue #1683
   dhclient:
+    consumer: build-tools
+    build_args: [version, alpine_branch]
     version: 4.4.3_p1-r4
     alpine_branch: v3.20
     sha256_x86_64: 068c97e534e9c8f03db9064296b1d3c21d957f328e40309278559a92f9a74557

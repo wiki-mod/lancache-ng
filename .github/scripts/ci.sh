@@ -450,17 +450,19 @@ ci_cmd_codeql_impact() {
     local img
     local -a changed=()
     _ci_collect_changed changed "$@" || return 2
-    local include='[]' lang p hit
+    local include='[]' lang p hit langs paths
+    langs="$(_ci_block_keys codeql_languages)" || return 2
     while IFS= read -r lang; do
         [ -n "${lang}" ] || continue
         hit=false
+        paths="$(_ci_block_entry_list codeql_languages "${lang}" paths)" || return 2
         while IFS= read -r p; do
             [ -n "${p}" ] || continue
             _ci_paths_touch "${p}" "${changed[@]}" || continue
             _ci_path_content_changed "${p}" && { hit=true; break; }
-        done < <(_ci_block_entry_list codeql_languages "${lang}" paths)
+        done <<< "${paths}"
         [ "${hit}" = true ] && { include="$(_ci_matrix_append "${include}" language="${lang}")" || return 2; }
-    done < <(_ci_block_keys codeql_languages)
+    done <<< "${langs}"
     # What: an admitted language needs the SOT job image.
     # Why: DEFAULT=NOOP; an empty matrix never needs it.
     # From: Issue #1683 | PR #1858
@@ -478,24 +480,28 @@ ci_cmd_codeql_impact() {
 # Why: SOT owns scope; the action reads a derived config.
 # From: Issue #1683
 ci_cmd_codeql_config() {
-    local item lang p repo
+    local item lang p repo queries langs paths ignore out
     repo="$(_ci_repo)" || return 2
-    printf 'name: %s-codeql\n' "${repo##*/}"
-    printf 'queries:\n'
+    queries="$(_ci_block_entry_list codeql "" queries)" || return 2
+    langs="$(_ci_block_keys codeql_languages)" || return 2
+    ignore="$(_ci_block_entry_list codeql "" paths_ignore)" || return 2
+    out="name: ${repo##*/}-codeql"$'\n''queries:'$'\n'
     while IFS= read -r item; do
-        printf '  - uses: %s\n' "${item}"
-    done < <(_ci_block_entry_list codeql "" queries)
-    printf 'paths:\n'
+        [ -n "${item}" ] && out+="  - uses: ${item}"$'\n'
+    done <<< "${queries}"
+    out+='paths:'$'\n'
     while IFS= read -r lang; do
         [ -n "${lang}" ] || continue
+        paths="$(_ci_block_entry_list codeql_languages "${lang}" paths)" || return 2
         while IFS= read -r p; do
-            [ -n "${p}" ] && printf '  - %s\n' "${p}"
-        done < <(_ci_block_entry_list codeql_languages "${lang}" paths)
-    done < <(_ci_block_keys codeql_languages)
-    printf 'paths-ignore:\n'
+            [ -n "${p}" ] && out+="  - ${p}"$'\n'
+        done <<< "${paths}"
+    done <<< "${langs}"
+    out+='paths-ignore:'$'\n'
     while IFS= read -r item; do
-        printf '  - %s\n' "${item}"
-    done < <(_ci_block_entry_list codeql "" paths_ignore)
+        [ -n "${item}" ] && out+="  - ${item}"$'\n'
+    done <<< "${ignore}"
+    printf '%s' "${out}"
 }
 
 # What: Download one URL to a file (curl -f).
@@ -626,7 +632,7 @@ ci_cmd_plan_matrix() {
     local docs_only=false
     _ci_docs_only "${changed[@]}" && docs_only=true
     local service platform include='[]' any=false resolved paction runner authed=false test_services=''
-    local sot_changed=false f path_cand rc
+    local sot_changed=false f path_cand rc plats
     # What: SOT change makes every target id candidate.
     # Why: pins live in SOT; identity decides BUILD.
     # From: Issue #1683 | PR #1858
@@ -651,6 +657,7 @@ ci_cmd_plan_matrix() {
             _ci_require_ghcr_auth || return "$?"
             authed=true
         fi
+        plats="$(_ci_platforms "${service}")" || return "$?"
         while IFS= read -r platform; do
             [ -n "${platform}" ] || continue
             resolved="$(_ci_resolve_one "${service}" "${platform}")" || return "$?"
@@ -666,7 +673,7 @@ ci_cmd_plan_matrix() {
             fi
             include="$(_ci_matrix_append "${include}" service="${service}" arch="${platform##*/}" runner="${runner}" platform="${platform}")" || return 2
             any=true
-        done <<< "$(_ci_platforms "${service}")"
+        done <<< "${plats}"
     done
     {
         printf 'any-build=%s\n' "${any}"
@@ -736,7 +743,7 @@ _ci_tracked_content_ids() {
         path="${line%%$'\t'*}"
         oid="${line#*$'\t'}"
         if _ci_source_is_normalizable "${path}"; then
-            blob="$( cd -- "${CI_REPO_ROOT}" && git cat-file blob "${oid}" 2>/dev/null )"
+            blob="$( cd -- "${CI_REPO_ROOT}" && git cat-file blob "${oid}" )" || return 2
             if printf '%s' "${blob}" | _ci_rust_strip_is_safe; then
                 norm="$(printf '%s' "${blob}" | _ci_rust_content_hash)"
                 printf '%s\t%s\n' "${path}" "${norm}"
@@ -745,17 +752,6 @@ _ci_tracked_content_ids() {
         fi
         printf '%s\t%s\n' "${path}" "${oid}"
     done <<< "${listing}"
-}
-
-# What: Print netdata's digest for exactly this platform.
-# Why: Another arch's digest change must not shift this id.
-# From: Issue #1683
-_ci_install_digest_pin() {
-    local platform="$1" arch val
-    for arch in $(_ci_platform_arch_aliases "${platform}"); do
-        val="$(_ci_block_entry_field external_versions netdata "sha256_${arch}")"
-        [ -n "${val}" ] && printf 'sha256_%s: %s\n' "${arch}" "${val}"
-    done
 }
 
 # What: Print each SOT build_identity input of a type.
@@ -773,7 +769,7 @@ _ci_identity_pins() {
         case "${input}" in
             source_sha) : ;;
             toolchain_digest|toolchain_source_sha) _ci_build_tools_resolve_signature || return 2 ;;
-            upstream_digest) _ci_install_digest_pin "${platform}" ;;
+            upstream_digest) _ci_target_pin_args "${service}" "${platform}" "" || return 2 ;;
             base_digest)
                 if [ "${build_type}" = toolchain ]; then
                     _ci_build_tools_build_args --bare "${platform}" || return 2
@@ -845,7 +841,9 @@ _ci_for_platforms() {
 # Why: The per-platform unit the fanout calls.
 # From: Issue #1683
 _ci_identity_one() {
-    printf 'platform=%s identity=%s\n' "$2" "$(_ci_identity_for "$1" "$2")"
+    local id
+    id="$(_ci_identity_for "$1" "$2")" || return "$?"
+    printf 'platform=%s identity=%s\n' "$2" "${id}"
 }
 
 # What: Print a target's id per platform, keyed.
@@ -874,7 +872,8 @@ _ci_manifest_at() {
 # From: Issue #1683
 _ci_impact_run() {
     local base="$1" head="$2" base_manifest="$3"
-    local base_missing=0 t p plats hid v build=0 noop=0 unknown=0
+    local base_missing=0 t p plats hid v build=0 noop=0 unknown=0 targets
+    targets="$(ci_build_targets)" || return 2
     if ! _ci_manifest_at "${base}" "${base_manifest}" || [ ! -s "${base_manifest}" ]; then
         base_missing=1
         ci_log "[CI-INFO-IMPACT-0002]" "base=\"${base}\" reason=\"no SOT at base; UNKNOWN, escalate, BUILD DISACK\""
@@ -901,7 +900,7 @@ _ci_impact_run() {
                 *) unknown=$((unknown+1)) ;;
             esac
         done <<< "${plats}"
-    done <<< "$(ci_build_targets)"
+    done <<< "${targets}"
     printf 'impact result=classified build=%s noop=%s unknown=%s base=%s\n' "${build}" "${noop}" "${unknown}" "${base}"
     # What: base-missing escalates; UNKNOWN never builds.
     # Why: base-SOT-unavailable stays DISACK, escalates.
@@ -1428,20 +1427,24 @@ ci_cmd_emit_result() {
 # Why: matrix walk shared by aggregate-stack/scan-stack.
 # From: Issue #1683
 _ci_matrix_pairs() {
-    printf '%s' "$1" | jq -r '.include[] | "\(.service) \(.platform)"'
+    if ! jq -r '.include[] | "\(.service) \(.platform)"' <<< "$1"; then
+        ci_log "[CI-ERROR-AGGREGATE-0006]" "reason=\"build matrix is not valid include JSON\""
+        return 2
+    fi
 }
 
 # What: aggregate built matrix into ledger in one write.
 # Why: emit each pair then one CAS commit (§26.1); thin.
 # From: Issue #1683
 ci_cmd_aggregate_stack() {
-    local matrix="${CI_BUILD_MATRIX:-}" dir svc plat
+    local matrix="${CI_BUILD_MATRIX:-}" dir svc plat pairs
     [ -n "${matrix}" ] || { ci_log "[CI-ERROR-AGGREGATE-0005]" "reason=\"CI_BUILD_MATRIX required\""; return 2; }
+    pairs="$(_ci_matrix_pairs "${matrix}")" || return 2
     dir="$(mktemp -d "${CI_TMPDIR}/ci-results.XXXXXX")" || return 2
     while read -r svc plat; do
         [ -n "${svc}" ] || continue
         ci_cmd_emit_result "${svc}" "${plat}" > "${dir}/${svc}-${plat//\//-}.json" || return "$?"
-    done < <(_ci_matrix_pairs "${matrix}")
+    done <<< "${pairs}"
     ci_cmd_aggregate "${dir}"
 }
 
@@ -1449,8 +1452,9 @@ ci_cmd_aggregate_stack() {
 # Why: SCAN before ACCEPT; thin YAML, iteration in ci.sh.
 # From: Issue #1683
 ci_cmd_scan_stack() {
-    local matrix="${CI_BUILD_MATRIX:-}" svc plat digest
+    local matrix="${CI_BUILD_MATRIX:-}" svc plat digest pairs
     [ -n "${matrix}" ] || { ci_log "[CI-ERROR-SCAN-0016]" "reason=\"CI_BUILD_MATRIX required\""; return 2; }
+    pairs="$(_ci_matrix_pairs "${matrix}")" || return 2
     _ci_require_ghcr_auth || return "$?"
     while read -r svc plat; do
         [ -n "${svc}" ] || continue
@@ -1459,7 +1463,7 @@ ci_cmd_scan_stack() {
             return 2
         }
         ci_cmd_scan "${svc}" "${digest}" || return "$?"
-    done < <(_ci_matrix_pairs "${matrix}")
+    done <<< "${pairs}"
 }
 
 # What: This run's base and head diff refs, or empty.
@@ -1484,9 +1488,9 @@ ci_cmd_changed_files() {
     local out="${RUNNER_TEMP:-${CI_TMPDIR}}/changed-files.txt" base head
     read -r base head <<< "$(_ci_diff_refs)"
     if [ -n "${base}" ]; then
-        ( cd -- "${CI_REPO_ROOT}" && git diff --name-only "${base}" "${head}" ) > "${out}"
+        ( cd -- "${CI_REPO_ROOT}" && git diff --name-only "${base}" "${head}" ) > "${out}" || return 2
     else
-        ( cd -- "${CI_REPO_ROOT}" && git ls-files ) > "${out}"
+        ( cd -- "${CI_REPO_ROOT}" && git ls-files ) > "${out}" || return 2
     fi
     printf '%s\n' "${out}"
 }
@@ -1659,8 +1663,8 @@ _ci_retry() {
 # From: Issue #1683
 _ci_image_tag() {
     local registry repo
-    registry="$(_ci_registry)"
-    repo="$(_ci_repo)"
+    registry="$(_ci_registry)" || return 2
+    repo="$(_ci_repo)" || return 2
     printf '%s/%s/%s:sha-%s-%s' "${registry}" "${repo}" "$1" "$3" "${2##*/}"
 }
 
@@ -1773,12 +1777,14 @@ _ci_docker_build() {
     while IFS= read -r a; do
         args+=(--build-arg "${a}")
     done < <(_ci_proxy_names)
+    _ci_procsub_ok "$!" 0 || return 2
     # What: SOT-owned named build contexts (name=path).
     # Why: Dockerfile COPY --from derives it; SOT owns list.
     # From: Issue #1683
     while IFS= read -r a; do
         [ -n "${a}" ] && args+=(--build-context "${a}")
     done < <(_ci_block_entry_list services "${service}" external_contexts)
+    _ci_procsub_ok "$!" 0 || return 2
     # What: mount build-time secrets at runtime.
     # Why: leak-safe --secret; cleanup removes after.
     # From: Issue #1683
@@ -2875,8 +2881,8 @@ _ci_index_lookup() {
         return "$?"
     fi
     local repo registry sha tag idx grc=0 raw plats
-    repo="$(_ci_repo)"
-    registry="$(_ci_registry)"
+    repo="$(_ci_repo)" || return 2
+    registry="$(_ci_registry)" || return 2
     sha="${GITHUB_SHA:?GITHUB_SHA required}"
     tag="${registry}/${repo}/${service}:sha-${sha}"
     idx="$(_ci_registry_probe "${tag}")" || grc=$?
@@ -2930,8 +2936,8 @@ _ci_reconcile_index() {
 _ci_docker_assemble() {
     local service="$1"; shift
     local repo registry sha target kv
-    repo="$(_ci_repo)"
-    registry="$(_ci_registry)"
+    repo="$(_ci_repo)" || return 2
+    registry="$(_ci_registry)" || return 2
     sha="${GITHUB_SHA:?GITHUB_SHA required}"
     target="${registry}/${repo}/${service}:sha-${sha}"
     local -a srcs=()
@@ -2994,6 +3000,7 @@ _ci_valid_channel() {
     while IFS= read -r c; do
         [ "${c}" = "${channel}" ] && return 0
     done < <(_ci_mutable_channels)
+    _ci_procsub_ok "$!" 0 || return 2
     return 1
 }
 
@@ -3022,16 +3029,19 @@ _ci_stack_candidate_ledger() {
         fi
         printf '%s=%s\n' "${service}" "${idx}"
     done < <(ci_services)
+    _ci_procsub_ok "$!" 0 || return 2
 }
 
 # What: toolchain promote candidates if fully accepted.
 # Why: promote is the one channel mover (AG-REL-009).
 # From: Issue #1683 | PR #1858
 _ci_toolchain_candidate() {
-    local service inputs want idx p st all
+    local service inputs want idx p st all plats tools
+    tools="$(_ci_block_keys build_toolchain)" || return 2
     while IFS= read -r service; do
         [ -n "${service}" ] || continue
         all=1
+        plats="$(_ci_platforms "${service}")" || return "$?"
         while IFS= read -r p; do
             [ -n "${p}" ] || continue
             st="$(_ci_resolve_one "${service}" "${p}")" || return "$?"
@@ -3044,7 +3054,7 @@ _ci_toolchain_candidate() {
                     ;;
                 *) all=0 ;;
             esac
-        done <<< "$(_ci_platforms "${service}")"
+        done <<< "${plats}"
         if [ "${all}" -eq 0 ]; then
             ci_log "[CI-INFO-CANDIDATE-0004]" "service=\"${service}\" reason=\"toolchain not accepted on every platform; channel unchanged\""
             continue
@@ -3057,7 +3067,7 @@ _ci_toolchain_candidate() {
             return 2
         fi
         printf '%s=%s\n' "${service}" "${idx}"
-    done < <(_ci_block_keys build_toolchain)
+    done <<< "${tools}"
 }
 
 # What: PR stack candidate: per-service digest for host.
@@ -3077,6 +3087,7 @@ _ci_stack_candidate_pr() {
         fi
         printf '%s=%s\n' "${service}" "${digest}"
     done < <(ci_services)
+    _ci_procsub_ok "$!" 0 || return 2
 }
 
 # What: read accepted stack candidate (injectable).
@@ -3132,8 +3143,8 @@ _ci_default_promote_unlock() {
 # From: Issue #1683
 _ci_default_channel_move() {
     local svc="$1" channel="$2" digest="$3" repo registry
-    repo="$(_ci_repo)"
-    registry="$(_ci_registry)"
+    repo="$(_ci_repo)" || return 2
+    registry="$(_ci_registry)" || return 2
     _ci_imagetools_create "${registry}/${repo}/${svc}:${channel}" "${registry}/${repo}/${svc}@${digest}" >/dev/null
 }
 
@@ -3142,8 +3153,8 @@ _ci_default_channel_move() {
 # From: Issue #1683
 _ci_default_channel_readback() {
     local svc="$1" channel="$2" repo registry digest
-    repo="$(_ci_repo)"
-    registry="$(_ci_registry)"
+    repo="$(_ci_repo)" || return 2
+    registry="$(_ci_registry)" || return 2
     digest="$(_ci_registry_digest "${registry}/${repo}/${svc}:${channel}")" || return 2
     # What: a channel counts only if every child resolves.
     # Why: a present index with lost children is unpullable.
@@ -3156,9 +3167,16 @@ _ci_default_channel_readback() {
 # Why: an index digest alone does not prove a usable image.
 # From: Issue #1683 | PR #1858
 _ci_index_complete() {
-    local base="$1" digest="$2" raw rc=0 child prc
+    local base="$1" digest="$2" raw rc=0 child prc children
     raw="$(_ci_index_raw "${base}@${digest}")" || rc=$?
     [ "${rc}" -eq 0 ] || return "${rc}"
+    # What: an index with no platform child is incomplete.
+    # Why: zero children must not read as all resolvable.
+    # From: Issue #1683
+    if ! children="$(jq -er '[.manifests[]? | select(.platform.architecture!="unknown") | .digest] | if length == 0 then error("no platform child") else .[] end' <<< "${raw}")"; then
+        ci_log "[CI-ERROR-PROMOTE-0015]" "image=\"${base}@${digest}\" reason=\"index has no readable platform child\""
+        return 2
+    fi
     while IFS= read -r child; do
         [ -n "${child}" ] || continue
         prc=0
@@ -3167,7 +3185,7 @@ _ci_index_complete() {
             ci_log "[CI-ERROR-PROMOTE-0014]" "image=\"${base}@${digest}\" child=\"${child}\" rc=${prc} reason=\"index child not resolvable; image unusable\""
             return 2
         fi
-    done <<< "$(printf '%s' "${raw}" | jq -r '.manifests[]? | select(.platform.architecture!="unknown") | .digest')"
+    done <<< "${children}"
 }
 
 # What: Resolve the move backend, mock or default.
@@ -3377,7 +3395,7 @@ _ci_release_prerelease() {
 _ci_release_notes_block() {
     local tag="$1" registry repo target img dig
     registry="$(_ci_registry)" || return "$?"
-    repo="$(_ci_repo)"
+    repo="$(_ci_repo)" || return 2
     printf '%s\n' "${CI_RELEASE_NOTES_START:-<!-- lancache-ng-image-tags:start -->}"
     printf 'Images published for %s (commit %s):\n\n' "${tag}" "${GITHUB_SHA:-unknown}"
     for target in $(_ci_published_services) stack; do
@@ -3454,7 +3472,7 @@ ci_cmd_release_sbom() {
     _ci_require_ghcr_auth || return "$?"
     local registry repo digest dir out rc=0
     registry="$(_ci_registry)" || return "$?"
-    repo="$(_ci_repo)"
+    repo="$(_ci_repo)" || return 2
     digest="$(_ci_registry_digest "${registry}/${repo}/${service}:${tag}")" || return "$?"
     dir="$(mktemp -d "${CI_TMPDIR}/ci-sbom.XXXXXX")"
     out="${dir}/${service}.cdx.json"
@@ -3528,7 +3546,7 @@ _ci_next_patch_tag() {
 _ci_release_stack_changed() {
     local base_tag="$1" registry repo sha svc cur rel
     registry="$(_ci_registry)" || return 2
-    repo="$(_ci_repo)"
+    repo="$(_ci_repo)" || return 2
     sha="${GITHUB_SHA:?GITHUB_SHA required}"
     for svc in $(_ci_published_services); do
         cur="$(_ci_registry_digest "${registry}/${repo}/${svc}:sha-${sha}")" || return 2
@@ -3604,7 +3622,7 @@ _ci_deletion_policy() {
 _ci_default_gc_roots() {
     local remote repo registry blob rc=0 pairs="" out="" svc channel dig prc line s d raw
     remote="$(_ci_ledger_remote)"
-    repo="$(_ci_repo)"
+    repo="$(_ci_repo)" || return 2
     registry="$(_ci_registry)" || return 2
     blob="$(_ci_ledger_blob "${remote}")" || rc=$?
     # What: A failed ledger read refuses, never empties.
@@ -3630,10 +3648,12 @@ _ci_default_gc_roots() {
             [ "${prc}" -eq 2 ] && { ci_log "[CI-ERROR-GC-0013]" "service=\"${svc}\" channel=\"${channel}\" reason=\"channel probe UNKNOWN; refusing roots\""; return 2; }
             [ "${prc}" -eq 0 ] && pairs="${pairs}"$'\n'"${svc}"$'\t'"${dig}"
         done < <(_ci_mutable_channels)
+        _ci_procsub_ok "$!" 0 || return 2
     # What: every build target's channels are roots.
     # Why: GC candidates include build-tools; skip = orphan.
     # From: Issue #1683 | PR #1858
     done < <(ci_build_targets)
+    _ci_procsub_ok "$!" 0 || return 2
     pairs="$(printf '%s\n' "${pairs}" | awk 'NF>0' | LC_ALL=C sort -u)"
     while IFS=$'\t' read -r s d; do
         [ -n "${d}" ] || continue
@@ -3696,6 +3716,7 @@ _ci_default_gc_candidates() {
         # From: Issue #1683
         [ -n "${vers}" ] && printf '%s\n' "${vers}" | awk -v s="${svc}" 'NF{print $0"\t"s}'
     done < <(ci_build_targets)
+    _ci_procsub_ok "$!" 0 || return 2
     # What: No package found anywhere is a config error.
     # Why: All-404 must refuse, not read as a clean noop.
     # From: Issue #1683
@@ -4067,8 +4088,17 @@ _ci_validate_subnet_conflicts() {
     # Why: a failed docker call must not read as "free".
     # From: Issue #1683 | PR #1858
     nets="$(docker network ls -q)" || return 2
+    local subs
     while IFS= read -r net; do
         [ -n "${net}" ] || continue
+        # What: a net gone since ls is skipped; others fail.
+        # Why: an inspect error must not pass as a free net.
+        # From: Issue #1683
+        if ! subs="$(docker network inspect "${net}" --format '{{range .IPAM.Config}}{{.Subnet}}{{"\n"}}{{end}}' 2>&1)"; then
+            case "${subs,,}" in *"no such network"*|*"not found"*) continue ;; esac
+            ci_error "[CI-ERROR-VALIDATE-0051]" "network=\"${net}\" reason=\"network inspect failed\"" "${subs}"
+            return 2
+        fi
         while IFS= read -r sub; do
             case "${sub}" in
                 *.*.*.*/*)
@@ -4081,7 +4111,7 @@ _ci_validate_subnet_conflicts() {
                     fi
                     ;;
             esac
-        done < <(docker network inspect "${net}" --format '{{range .IPAM.Config}}{{.Subnet}}{{"\n"}}{{end}}' 2>/dev/null)
+        done <<< "${subs}"
     done <<< "${nets}"
     return 1
 }
@@ -4134,8 +4164,15 @@ _ci_validate_config_json() {
 # Why: One owner; startable + health lists share it.
 # From: Issue #1683
 _ci_validate_service_list() {
-    local filter="$1"
-    _ci_validate_config_json | jq -r ".services|to_entries[]|select(${filter})|.key"
+    local filter="$1" raw
+    if ! raw="$(_ci_validate_config_json)"; then
+        ci_log "[CI-ERROR-VALIDATE-0006]" "reason=\"compose config read failed\""
+        return 2
+    fi
+    if ! jq -r ".services|to_entries[]|select(${filter})|.key" <<< "${raw}"; then
+        ci_log "[CI-ERROR-VALIDATE-0006]" "reason=\"compose config is not service JSON\""
+        return 2
+    fi
 }
 
 # What: Services validate starts: bridge, never host-mode.
@@ -4149,13 +4186,14 @@ _ci_validate_startable() {
 # Why: Per-run subnet; reset host ports + fixed names.
 # From: Issue #1683
 _ci_validate_net_override() {
-    local subnet="$1" svc
+    local subnet="$1" svc svcs
+    svcs="$(_ci_validate_startable)" || return 2
     printf 'networks:\n  default:\n    ipam:\n      config:\n        - subnet: %s\n' "${subnet}"
     printf 'services:\n'
     while IFS= read -r svc; do
         [ -n "${svc}" ] || continue
         printf '  %s:\n    container_name: !reset null\n    ports: !reset []\n' "${svc}"
-    done < <(_ci_validate_startable)
+    done <<< "${svcs}"
 }
 
 # What: The /27 IP of a compose service container.
@@ -4226,11 +4264,12 @@ _ci_validate_teardown() {
 # Why: net override /27-isolates; pin override pins.
 # From: Issue #1683 | PR #1858
 _ci_validate_up() {
-    local project="$1" net_override="$2" pin_override="$3" svc
+    local project="$1" net_override="$2" pin_override="$3" svc raw
     local -a svcs=()
+    raw="$(_ci_validate_startable)" || return 2
     while IFS= read -r svc; do
         [ -n "${svc}" ] && svcs+=("${svc}")
-    done < <(_ci_validate_startable)
+    done <<< "${raw}"
     if [ "${#svcs[@]}" -eq 0 ]; then
         ci_log "[CI-ERROR-VALIDATE-0018]" "reason=\"no startable services from compose config\""
         return 2
@@ -5231,7 +5270,8 @@ _ci_build_tools_signature() {
 # Why: the lifecycle signature must cover every arch.
 # From: Issue #1683
 _ci_build_tools_arches() {
-    local platform out="" apk
+    local platform out="" apk plats
+    plats="$(_ci_build_matrix_platforms)" || return 2
     while IFS= read -r platform; do
         [ -n "${platform}" ] || continue
         # What: map via the one platform->apk-arch owner.
@@ -5242,7 +5282,7 @@ _ci_build_tools_arches() {
             return 2
         fi
         out="${out}${apk}"$'\n'
-    done <<< "$(_ci_build_matrix_platforms)"
+    done <<< "${plats}"
     if [ -z "${out}" ]; then
         ci_log "[CI-ERROR-BUILDTOOLS-0008]" "reason=\"no build matrix platforms; FAIL CLOSED\""
         return 2
@@ -5257,6 +5297,7 @@ _ci_apk_resolve() {
     local base="$1" arch="$2" packages="$3" repos raw n
     local -a penv=()
     while IFS= read -r n; do penv+=(-e "${n}"); done < <(_ci_proxy_names)
+    _ci_procsub_ok "$!" 0 || return 2
     if [ -n "${CI_APK_RESOLVE_CMD:-}" ]; then
         "${CI_APK_RESOLVE_CMD}" "${base}" "${arch}" "${packages}"
         return "$?"
@@ -5411,6 +5452,7 @@ _ci_dockerfile_arg_default() {
             print rest
         }
     ' "${path}")
+    _ci_procsub_ok "$!" 0 || return 2
     if [ "${#hits[@]}" -eq 0 ]; then
         printf 'ABSENT\n'
         return 0
@@ -5483,13 +5525,23 @@ _ci_dockerfile_arg_default() {
     esac
 }
 
-# What: SOT-pinned consumers: dep|dockerfile|non-arch keys.
-# Why: one list; build-args, verify, audit, sync walk it.
+# What: SOT pin consumers: dep|dockerfile|build_args keys.
+# Why: SOT consumer field owns it; no engine-side list.
 # From: Issue #1683 | PR #1858
 _ci_version_consumers() {
-    printf '%s\n' \
-        "netdata|services/netdata/Dockerfile|version" \
-        "dhclient|tools/build-tools/Dockerfile|version alpine_branch"
+    local deps dep target keys ctx
+    deps="$(_ci_block_keys external_versions)" || return 2
+    for dep in ${deps}; do
+        target="$(_ci_block_entry_field external_versions "${dep}" consumer)"
+        [ -n "${target}" ] || continue
+        keys="$(_ci_block_entry_list external_versions "${dep}" build_args)"
+        if [ -z "${keys}" ]; then
+            ci_log "[CI-ERROR-VERSION-0010]" "dep=\"${dep}\" reason=\"consumer without SOT build_args\""
+            return 2
+        fi
+        ctx="$(_ci_required_field "${target}" context)" || return 2
+        printf '%s|%s/Dockerfile|%s\n' "${dep}" "${ctx}" "${keys//$'\n'/ }"
+    done
 }
 
 # What: One pin's sha256 for an apk arch, fail-closed.
@@ -5531,12 +5583,14 @@ _ci_pin_args() {
         val="$(_ci_pin_sha "${dep}" "${apk}")" || return 2
         out="${out}${prefix}${up}_ARCH=${apk}"$'\n'"${prefix}${up}_SHA256=${val}"$'\n'
     else
+        local plats
+        plats="$(_ci_build_matrix_platforms)" || return 2
         while IFS= read -r p; do
             [ -n "${p}" ] || continue
             apk="$(_ci_platform_apk_arch "${p}")" || return 2
             val="$(_ci_pin_sha "${dep}" "${apk}")" || return 2
             out="${out}${prefix}${up}_SHA256_${apk^^}=${val}"$'\n'
-        done <<< "$(_ci_build_matrix_platforms)"
+        done <<< "${plats}"
     fi
     printf '%s' "${out}"
 }
@@ -5545,12 +5599,13 @@ _ci_pin_args() {
 # Why: build-args derive from verify check list
 # From: Issue #1683 | PR #1858
 _ci_target_pin_args() {
-    local target="$1" platform="$2" prefix="$3" ctx dep df keys
-    ctx="$(ci_service_field "${target}" context)"
+    local target="$1" platform="$2" prefix="$3" ctx dep df keys consumers
+    ctx="$(_ci_required_field "${target}" context)" || return 2
+    consumers="$(_ci_version_consumers)" || return 2
     while IFS='|' read -r dep df keys; do
         [ -n "${dep}" ] && [ "${df}" = "${ctx}/Dockerfile" ] || continue
         _ci_pin_args "${dep}" "${keys}" "${platform}" "${prefix}" || return 2
-    done <<< "$(_ci_version_consumers)"
+    done <<< "${consumers}"
 }
 
 # What: The SOT alpine base as ALPINE_IMAGE, fail-closed.
@@ -5570,12 +5625,13 @@ _ci_alpine_build_arg() {
 # Why: SOT owns pin; baked ARG default is 2nd owner
 # From: Issue #1683 | PR #1858
 _ci_version_diff() {
-    local dep="$1" dockerfile="${CI_REPO_ROOT}/$2" keys="$3" p args name want out=""
+    local dep="$1" dockerfile="${CI_REPO_ROOT}/$2" keys="$3" p args name want out="" plats
+    plats="$(_ci_build_matrix_platforms)" || return 2
     while IFS= read -r p; do
         [ -n "${p}" ] || continue
         args="$(_ci_pin_args "${dep}" "${keys}" "${p}" "")" || return 2
         out="${out}${args}"$'\n'
-    done <<< "$(_ci_build_matrix_platforms)"
+    done <<< "${plats}"
     local line
     local -A argseen=()
     out="$(LC_ALL=C sort -u <<< "${out}")"
@@ -5605,13 +5661,14 @@ _ci_version_diff() {
 # Why: verify/audit/sync differ only in how they report.
 # From: Issue #1683 | PR #1858
 _ci_version_walk() {
-    local fn="$1" dep df keys rc=0 r
+    local fn="$1" dep df keys rc=0 r consumers
+    consumers="$(_ci_version_consumers)" || return 2
     while IFS='|' read -r dep df keys; do
         [ -n "${dep}" ] || continue
         r=0
         "${fn}" "${dep}" "${df}" "${keys}" || r=$?
         [ "${r}" -eq 0 ] || [ "${rc}" -ne 0 ] || rc="${r}"
-    done <<< "$(_ci_version_consumers)"
+    done <<< "${consumers}"
     return "${rc}"
 }
 
@@ -5705,6 +5762,17 @@ ci_main() {
 # =========================================================
 # SOURCE-HYGIENE CHECKS
 # =========================================================
+
+# What: fail if the last < <(producer) exited above max.
+# Why: a failed producer must not read as an empty result.
+# From: Issue #1683
+_ci_procsub_ok() {
+    local pid="$1" max="${2:-0}" rc=0
+    wait "${pid}" || rc=$?
+    [ "${rc}" -le "${max}" ] && return 0
+    ci_log "[CI-ERROR-CORE-0010]" "rc=${rc} reason=\"loop producer failed; refusing a partial result\""
+    return 2
+}
 
 # What: out[]=override if non-empty, else git ls-files spec.
 # Why: 7 checks repeated this override-or-scan boilerplate.
@@ -6143,6 +6211,7 @@ _ci_check_review_chronology() {
             function pl(l,  p) { p=l; sub(/^[[:space:]]*(#|\/\/|--|\/\*|\*|<!--|\{#)[[:space:]]*/, "", p); return p }
             { c=isc($0); cur=(c?pl($0):""); if (pc && c) printf "%d\t%s %s\n", NR-1, pp, cur; pc=c; pp=cur }
         ' "${path}")
+        _ci_procsub_ok "$!" 0 || return 2
         grep -qEI 'From:' "${path}" 2>/dev/null || continue
         fnums="$(grep -EI 'From:' "${path}" 2>/dev/null | grep -oEI '#[0-9]+' | tr -d '#' | sort -u || true)"
         [ -z "${fnums}" ] && continue
@@ -6245,6 +6314,7 @@ _ci_check_if_without_else_status() {
               }
             }
           ' "${path}")
+        _ci_procsub_ok "$!" 0 || return 2
     done
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0065]" "reason=\"\$? read after else-less if masks status (AG-VAL-029)\"" "$(printf '%s\n' "${viol[@]}")"
@@ -6275,6 +6345,7 @@ _ci_check_docker_run_heredoc_stdin() {
             grep -qE '(^|[[:space:]])-i([[:space:]]|$)' <<<"${invocation}" && continue
             viol+=("${path}:${lineno}: heredoc-fed 'docker run' (bash -s / sh -s) missing -i; container stdin never attaches so the heredoc runs nothing while the step reports success")
         done < <(grep -noE '(bash|sh)[[:space:]]+-s[[:space:]]*<<' "${path}" 2>/dev/null)
+        _ci_procsub_ok "$!" 1 || return 2
     done
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0066]" "reason=\"heredoc docker run missing -i; stdin unattached (AG-VAL-029)\"" "$(printf '%s\n' "${viol[@]}")"
@@ -6340,12 +6411,15 @@ _ci_check_setup_prompt_drift() {
     local -a rows=() all_prompts=() uncond=() viol=()
     local r
     while IFS= read -r r; do [ -n "${r}" ] && rows+=("${r}"); done < <(_ci_setup_wizard_rows "${setup}")
+    _ci_procsub_ok "$!" 0 || return 2
     if [ "${#rows[@]}" -eq 0 ]; then
         ci_error "[CI-ERROR-CHECK-0067]" "reason=\"zero ask/confirm prompts in setup.sh wizard; vacuous\""
         return 1
     fi
     while IFS= read -r r; do [ -n "${r}" ] && all_prompts+=("${r}"); done < <(printf '%s\n' "${rows[@]}" | cut -f3 | sort -u)
+    _ci_procsub_ok "$!" 0 || return 2
     while IFS= read -r r; do [ -n "${r}" ] && uncond+=("${r}"); done < <(printf '%s\n' "${rows[@]}" | awk -F'\t' '$1=="UNCOND"{print $2"\t"$3}' | sort -u)
+    _ci_procsub_ok "$!" 0 || return 2
     if [ "${#uncond[@]}" -eq 0 ]; then
         ci_error "[CI-ERROR-CHECK-0067]" "reason=\"zero unconditional prompts in setup.sh wizard; vacuous\""
         return 1
@@ -6364,6 +6438,7 @@ _ci_check_setup_prompt_drift() {
         sim_pats=(); gpats=()
         while IFS= read -r r; do [ -n "${r}" ] && sim_pats+=("${r}"); done < <(
             awk '{ t=$0; sub(/^[ \t]+/,"",t); if(index(t,"expect_prompt {")==1){ x=substr(t,length("expect_prompt {")+1); sub(/}.*/,"",x); if(x!="")print x } }' "${sim}")
+        _ci_procsub_ok "$!" 0 || return 2
         if [ "${#sim_pats[@]}" -eq 0 ]; then
             viol+=("${sim}: zero expect_prompt patterns; vacuous or no longer drives the wizard")
             continue
@@ -6483,6 +6558,7 @@ _ci_check_stable_external_images() {
                 *) viol+=("${d}: external pin is not a SOT pin: ${img}") ;;
             esac
         done < <(grep -rhE '^[[:space:]]+image:[[:space:]]' "${d}" 2>/dev/null)
+        _ci_procsub_ok "$!" 1 || return 2
     done
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0014]" "reason=\"external image not digest-pinned or not in SOT\"" "$(printf '%s\n' "${viol[@]}")"
@@ -6619,6 +6695,7 @@ _ci_check_workflow_line_limit() {
                 viol+=("${file}:${block_line}: run-block ${block_bytes} bytes > ${max_block}")
         done <<<"${block_report}"
     done < <(find "${dir}" -maxdepth 1 -name '*.yml' -print0)
+    _ci_procsub_ok "$!" 0 || return 2
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0016]" "reason=\"workflow size ceiling exceeded\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
@@ -6806,7 +6883,8 @@ _ci_check_action_node_versions() {
                 literal_entries+=("${sf}"$'\t'"${resolved}")
             fi
             uses_entries+=("${sf}"$'\t'"${resolved}")
-        done < <(grep -E '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*[^[:space:]]+' "${sf}" || true)
+        done < <(grep -E '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*[^[:space:]]+' "${sf}")
+        _ci_procsub_ok "$!" 1 || return 2
         unset anchors
     done
 
@@ -7208,6 +7286,7 @@ _ci_check_compose_healthchecks() {
             insvc && name != "" && /^    healthcheck:[[:space:]]*$/ { hc = 1 }
             END { if (name != "") print name "\t" hc }
         ' "${file}")
+        _ci_procsub_ok "$!" 0 || return 2
     done
     if [ "${checked}" -eq 0 ]; then
         ci_log "[CI-ERROR-CHECK-0020]" "reason=\"no services found across deploy compose files\""
@@ -7247,6 +7326,7 @@ _ci_check_proxy_cache_env_doc_drift() {
             viol+=("${key}: proxy.env=${value} vs doc=${documented}")
         fi
     done < <(grep -E '^CACHE_[A-Z_]+=' "${proxy_env}")
+    _ci_procsub_ok "$!" 1 || return 2
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0023]" "reason=\"proxy.env/doc CACHE_* default drift\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
@@ -7419,6 +7499,7 @@ _ci_dockerfile_final_image() {
         fi
         final_image="${image}"
     done < <(_ci_dockerfile_logical_lines "${dockerfile}")
+    _ci_procsub_ok "$!" 0 || return 2
     if [ -z "${final_image}" ]; then
         ci_log "[CI-ERROR-CHECK-0031]" "path=\"${dockerfile}\" reason=\"no FROM instruction found\""
         return 2
@@ -7448,6 +7529,7 @@ _ci_check_dependabot_docker_base_consistency() {
     while IFS= read -r line; do
         [ -n "${line}" ] && entries+=("${line}")
     done < <(_ci_dependabot_docker_entries "${dependabot_file}")
+    _ci_procsub_ok "$!" 0 || return 2
     if [ "${#entries[@]}" -eq 0 ]; then
         ci_log "[CI-ERROR-CHECK-0028]" "path=\"${dependabot_file}\" reason=\"no docker-ecosystem directories found\""
         return 2
@@ -7620,6 +7702,7 @@ _ci_has_bats_repeat_test() {
     while IFS= read -r title; do
         _ci_idempotence_name_has_marker "${title}" "${extra}" && return 0
     done < <(_ci_extract_bats_test_titles "${file}")
+    _ci_procsub_ok "$!" 0 || return 2
     return 1
 }
 
@@ -7631,6 +7714,7 @@ _ci_has_rust_repeat_test() {
     while IFS= read -r name; do
         _ci_idempotence_name_has_marker "${name}" "${extra}" && return 0
     done < <(_ci_extract_rust_test_fn_names "${file}")
+    _ci_procsub_ok "$!" 0 || return 2
     return 1
 }
 
@@ -7670,6 +7754,7 @@ _ci_check_idempotence_test_coverage() {
                 ;;
         esac
     done < <(_ci_idempotence_writer_evidence)
+    _ci_procsub_ok "$!" 0 || return 2
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0033]" "reason=\"config-writer(s) missing repeat-run coverage\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
@@ -7739,7 +7824,11 @@ _ci_compose_config_ok() {
         # What: use SOT env when no .env present
         # Why: shell env would mask --env-file
         # From: Issue #1683 | PR #1858
-        [ -n "${env_file}" ] || read -ra fixture <<< "$(_ci_manifest_scalar '^  compose_validation_env:[[:space:]]')"
+        if [ -z "${env_file}" ]; then
+            local fx
+            fx="$(_ci_manifest_scalar '^  compose_validation_env:[[:space:]]')" || return 2
+            read -ra fixture <<< "${fx}"
+        fi
         out="$(env "${fixture[@]}" docker compose "${args[@]}" config --quiet 2>&1)" || { printf '%s\n' "${out}"; return 1; }
     fi
     if grep -Eqi '(^|[[:space:]])(warn|warning|level=warning)' <<<"${out}"; then
@@ -7906,6 +7995,7 @@ _ci_check_quickstart_required_env() {
             | sed -E 's/^\$\{([^:]+):.*/\1/' \
             | sort -u
     )
+    _ci_procsub_ok "$!" 0 || return 2
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0047]" "reason=\"quickstart required env not defined\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
@@ -8375,6 +8465,7 @@ _ci_check_logging_matrix() {
     while IFS= read -r n; do
         [ -n "${n}" ] && canonical+=("${n}")
     done < <(grep -vE '^##ROWS## ' <<<"${canonical_raw}")
+    _ci_procsub_ok "$!" 1 || return 2
     if [ "${#canonical[@]}" -eq 0 ]; then
         ci_log "[CI-ERROR-CHECK-0036]" "path=\"${doc}\" reason=\"no logging-matrix rows parsed\""
         return 2
@@ -8484,6 +8575,7 @@ _ci_dockerfile_copies_to() {
             aliases["${BASH_REMATCH[1],,}"]=1
         fi
     done < <(_ci_dockerfile_logical_lines "${dockerfile}")
+    _ci_procsub_ok "$!" 0 || return 2
     lineno=0
     while IFS= read -r line; do
         lineno=$((lineno + 1))
@@ -8519,6 +8611,7 @@ _ci_dockerfile_copies_to() {
         [ "${dest}" = "${want}" ] && return 0
         case "${dest}" in */) [ "${dest}${want##*/}" = "${want}" ] && return 0 ;; esac
     done < <(_ci_dockerfile_logical_lines "${dockerfile}")
+    _ci_procsub_ok "$!" 0 || return 2
     return 1
 }
 
@@ -8609,6 +8702,7 @@ _ci_check_cargo_profile_tuning() {
         while IFS= read -r line; do
             [ -n "${line}" ] && viol+=("${f}:${line}")
         done < <(grep -nE '^[[:space:]]*(lto|codegen-units)[[:space:]]*=' "${repo_root}/${f}" 2>/dev/null)
+        _ci_procsub_ok "$!" 1 || return 2
     done <<< "${tomls}"
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0059]" "reason=\"Cargo.toml hardcodes [profile] lto/codegen-units; source them from CARGO_PROFILE_RELEASE env (AG-CI-006)\"" "$(printf '%s\n' "${viol[@]}")"
@@ -8642,6 +8736,7 @@ _ci_check_no_source_compiled_tools() {
                     if (a[i] != "" && a[i] !~ /^-/) print a[i]
             }
         ' "${repo_root}/${df}" 2>/dev/null)
+        _ci_procsub_ok "$!" 0 || return 2
     done <<< "${dfs}"
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0061]" "reason=\"Dockerfile source-compiles a prebuilt SOT tool; consume the build-tools image\"" "$(printf '%s\n' "${viol[@]}")"
