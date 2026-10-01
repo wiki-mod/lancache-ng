@@ -3536,10 +3536,11 @@ netdata=sha256:n"
     [[ "${output}" == *"CI-ERROR-VALIDATE-0040"* ]]
 }
 
-@test "validate dns-rollback fails when rollback is not applied" {
-    # What: applied!=true in the response returns rc 1.
-    # Why: The rollback must actually be applied+flushed.
-    # From: Issue #628
+@test "validate dns-rollback drives the rollback through setup.sh" {
+    # What: setup.sh CLI outcome decides pass or fail.
+    # Why: §49 client path; flush or probe miss is a fail.
+    # From: Issue #836
+    local case want out
     _ci_validate_container_ip() { echo 172.16.1.3; }
     docker() { case "$1" in compose) echo cid1 ;; exec) echo KEY123 ;; esac; }
     _ci_validate_ui_session() { echo TOK; }
@@ -3547,36 +3548,32 @@ netdata=sha256:n"
     _ci_validate_dns_resolves() { return 0; }
     curl() {
         case "$*" in
-            *rollback*) echo '{"applied":false,"changed_names":[],"flush_ok":false}' ;;
             *-w*) echo 401 ;;
             *-o\ /dev/null*) return 0 ;;
             *) echo '{"zones":{"lan.":[{"id":"snap1"}]}}' ;;
         esac
     }
-    run _ci_validate_dns_rollback proj
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *"CI-ERROR-VALIDATE-0043"* ]]
-}
-
-@test "validate dns-rollback passes on a full round-trip" {
-    # What: 401+applied+flush+changed ok.
-    # Why: real listener/PATCH/flush path works.
-    # From: Issue #628
-    _ci_validate_container_ip() { echo 172.16.1.3; }
-    docker() { case "$1" in compose) echo cid1 ;; exec) echo KEY123 ;; esac; }
-    _ci_validate_ui_session() { echo TOK; }
-    _ci_validate_ui_add_record() { return 0; }
-    _ci_validate_dns_resolves() { return 0; }
-    curl() {
-        case "$*" in
-            *rollback*) echo '{"applied":true,"changed_names":["ci-rollback-probe.lan."],"flush_ok":true}' ;;
-            *-w*) echo 401 ;;
-            *-o\ /dev/null*) return 0 ;;
-            *) echo '{"zones":{"lan.":[{"id":"snap1"}]}}' ;;
-        esac
-    }
-    run _ci_validate_dns_rollback proj
-    [ "${status}" -eq 0 ]
+    export CI_REPO_ROOT="${BATS_TEST_TMPDIR}/repo"
+    mkdir -p "${CI_REPO_ROOT}"
+    printf '%s\n' '#!/usr/bin/env bash' \
+        'printf "%s %s\n" "${COMPOSE_PROJECT_NAME}" "$*" > "${CI_REPO_ROOT}/args"' \
+        'cat "${CI_REPO_ROOT}/out"; exit "$(cat "${CI_REPO_ROOT}/rc")"' \
+        > "${CI_REPO_ROOT}/setup.sh"
+    while IFS='|' read -r case want out; do
+        printf '%s\n' "${out}" > "${CI_REPO_ROOT}/out"
+        case "${case}" in fails) echo 1 ;; *) echo 0 ;; esac > "${CI_REPO_ROOT}/rc"
+        run _ci_validate_dns_rollback proj
+        [ "${status}" -eq "${want}" ] || { echo "${case}: ${output}"; return 1; }
+        [ "${want}" -eq 0 ] || [[ "${output}" == *"CI-ERROR-VALIDATE-0043"* ]]
+        [ "$(cat "${CI_REPO_ROOT}/args")" = \
+            "proj reset-to-last-known-good-config dns deploy/prod lan. snap1 --yes" ]
+    done <<'CASES'
+ok|0|rolled back to known-good snapshot snap1. Changed rrsets: ["ci-rollback-probe.lan."]
+fails|1|rollback listener rejected the request with HTTP 500
+flush|1|rolled back to known-good snapshot snap1. ci-rollback-probe.lan. cache-flush publishes failed
+other-snap|1|rolled back to known-good snapshot snap0. Changed rrsets: ["ci-rollback-probe.lan."]
+no-probe|1|rolled back to known-good snapshot snap1. Changed rrsets: []
+CASES
 }
 
 @test "validate ui-depends fails on a service_healthy gate" {

@@ -4731,7 +4731,7 @@ _ci_validate_ui_nats_dns() {
 # Why: Real listener HTTP + PATCH + cache flush.
 # From: Issue #1683
 _ci_validate_dns_rollback() {
-    local project="$1" ip cid key jar csrf snap resp applied changed flush code i rc=0
+    local project="$1" ip cid key jar csrf snap resp code i rc=0
     ip="$(_ci_validate_container_ip "${project}" dns-standard)"
     cid="$(docker compose -p "${project}" ps -q dns-standard 2>/dev/null)"
     if [ -z "${ip}" ] || [ -z "${cid}" ]; then
@@ -4783,13 +4783,19 @@ _ci_validate_dns_rollback() {
     _ci_validate_ui_add_record "${project}" "${jar}" "${csrf}" ci-rollback-probe 203.0.113.71 || { rm -f "${jar}"; return 1; }
     _ci_validate_dns_resolves "${project}" dns-standard ci-rollback-probe.lan. 203.0.113.71 15 || { rm -f "${jar}"; return 1; }
     rm -f "${jar}"
-    resp="$(curl -sS -X POST -H "X-API-Key: ${key}" -H 'Content-Type: application/json' \
-        -d "{\"zone\":\"lan.\",\"snapshot_id\":\"${snap}\"}" "http://${ip}:8083/rollback" 2>/dev/null)"
-    applied="$(printf '%s' "${resp}" | jq -r '.applied // false')"
-    changed="$(printf '%s' "${resp}" | jq -r '(.changed_names // []) | join(",")')"
-    flush="$(printf '%s' "${resp}" | jq -r '.flush_ok // false')"
-    if [ "${applied}" != "true" ] || [ "${flush}" != "true" ] || [ "${changed#*ci-rollback-probe.lan.}" = "${changed}" ]; then
-        ci_error "[CI-ERROR-VALIDATE-0043]" "reason=\"rollback not applied=true/flush_ok=true/changed_names lacking fqdn\"" "${resp}"
+    # What: roll back through the operator CLI, setup.sh.
+    # Why: §49 client path; API key resolved in container.
+    # From: Issue #836
+    resp="$(COMPOSE_PROJECT_NAME="${project}" bash "${CI_REPO_ROOT}/setup.sh" \
+        reset-to-last-known-good-config dns "$(dirname "${CI_COMPOSE_FILE:-deploy/prod/docker-compose.yml}")" \
+        lan. "${snap}" --yes 2>&1)" || rc=$?
+    case "${rc}:${resp}" in
+        *"cache-flush publishes failed"*) rc=1 ;;
+        0:*"rolled back to known-good snapshot ${snap}"*"ci-rollback-probe.lan."*) ;;
+        *) rc=1 ;;
+    esac
+    if [ "${rc}" -ne 0 ]; then
+        ci_error "[CI-ERROR-VALIDATE-0043]" "reason=\"setup.sh rollback not applied, probe unchanged or flush failed\"" "${resp}"
         return 1
     fi
     # What: post-rollback dig must return the OLD content.
