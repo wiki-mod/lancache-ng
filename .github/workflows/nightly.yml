@@ -1,8 +1,8 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: promote the accepted current_dev stack to the nightly channel.
-# Why: current_dev is the default branch; nightly reuses, never rebuilds (§54).
+# What: promote accepted current_dev to nightly
+# Why: nightly reuses; never rebuilds current_dev
 # From: Issue #1683
 name: CI 2.0 Nightly
 on:
@@ -19,22 +19,22 @@ concurrency:
 defaults:
   run:
     shell: bash
-# What: GHCR credentials ci.sh reads; no login action, no pin.
-# Why: auth is ci.sh policy; the workflow only supplies the env.
+# What: supply GHCR token to ci.sh
+# Why: ci.sh owns auth; workflow only wires the env
 # From: Issue #1683
 env:
   GHCR_USERNAME: ${{ github.actor }}
   GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  # What: LAN proxy inputs; ci.sh applies them self-hosted only.
-  # Why: AG-CI-009; ci.sh is the one proxy policy owner.
+  # What: wire LAN proxy for self-hosted runners
+  # Why: AG-CI-009; ci.sh is the sole proxy policy owner.
   # From: Issue #1683 | PR #1858
   PROJECT_SELFHOSTED_PROXY_HTTP: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
   PROJECT_SELFHOSTED_PROXY_HTTPS: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
   PROJECT_SELFHOSTED_PROXY_EXCLUSION: ${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
   PROJECT_SELFHOSTED_PROXY_CA: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
 jobs:
-  # What: resolve the published build-tools channel to a digest.
-  # Why: the nightly job runs in build-tools, never on the runner.
+  # What: resolve build-tools digest for nightly job
+  # Why: nightly runs in build-tools, never on the runner.
   # From: Issue #1683 | PR #1858
   platform:
     name: platform
@@ -42,8 +42,8 @@ jobs:
     timeout-minutes: 15
     outputs:
       image: ${{ steps.resolve.outputs.image }}
-    # What: one mutable entry, the current_dev channel (nightly).
-    # Why: ci.sh (SOT) cannot run before any container exists.
+    # What: one mutable entry: the current_dev channel.
+    # Why: ci.sh needs a container before steps run
     # From: Issue #1683 | PR #1858
     container:
       image: ghcr.io/${{ github.repository }}/build-tools:nightly
@@ -51,8 +51,8 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      # What: native fail-closed checkout, shallow; persistent ci.sh auth.
-      # Why: no SHA pin outside the SOT; git comes from build-tools.
+      # What: shallow checkout with persistent auth
+      # Why: no SHA pin outside SOT; git is in build-tools.
       # From: Issue #1683
       - &bootstrap
         name: Bootstrap the working tree
@@ -68,8 +68,8 @@ jobs:
         id: resolve
         run: echo "image=$(bash .github/scripts/ci.sh build-tools resolve-image)" >> "$GITHUB_OUTPUT"
 
-  # What: validate, then promote the accepted current_dev stack; report always.
-  # Why: one job, one checkout; nightly reuses ci.sh, never rebuilds (§54).
+  # What: validate then promote accepted current_dev
+  # Why: one job; nightly reuses; never rebuilds
   # From: Issue #1683
   nightly:
     name: nightly
@@ -81,22 +81,22 @@ jobs:
       credentials: *ghcr_credentials
     steps:
       - *bootstrap
-      # What: full-setup validation of the accepted candidate (§49/§54).
-      # Why: nightly promotes only a green, already-accepted stack.
+      # What: validate full stack of accepted candidate
+      # Why: nightly promotes green, already-accepted stack
       # From: Issue #1683
       - name: Validate the accepted stack candidate
         id: validate
         run: bash .github/scripts/ci.sh validate
-      # What: move the nightly channel to the validated stack (§54).
-      # Why: skipped automatically if validate failed; promotion moves refs (§51).
+      # What: promote nightly channel to validated stack
+      # Why: auto-skip if validate failed; moves refs only
       # From: Issue #1683
       - name: Promote the nightly channel
         id: promote
         env:
           CI_STACK_VALIDATED: SUCCESS
         run: bash .github/scripts/ci.sh promote nightly
-      # What: file/close the standing nightly tracking issue on the outcome.
-      # Why: nightly must be reported reliably (#1801), self-closing.
+      # What: report nightly outcome to tracking issue
+      # Why: nightly must be reported reliably; self-closing
       # From: Issue #1683
       - name: Report the nightly outcome
         if: always()

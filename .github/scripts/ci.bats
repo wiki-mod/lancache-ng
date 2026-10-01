@@ -4964,11 +4964,15 @@ Fixes the thing.
     # From: Issue #1683 | PR #1858
     local m="${BATS_TEST_TMPDIR}/m.yml"
     printf 'pr_policy:\n  project_number: 7\n' > "${m}"
-    export CI_MANIFEST="${m}" PR_NUMBER=12 REPO=owner/fixture-repo
+    export CI_MANIFEST="${m}" PR_NUMBER=12 GITHUB_REPOSITORY=owner/fixture-repo
     PR_NUMBER='' run bash "${CI_SH}" check pr-tracking-metadata
     [ "${status}" -eq 2 ]
+    GITHUB_REPOSITORY='' run bash "${CI_SH}" check pr-tracking-metadata
+    [ "${status}" -ne 0 ]; [[ "${output}" != *"pr-tracking-metadata=ok"* ]]
     PR_LABELS_JSON='[]' run bash "${CI_SH}" check pr-tracking-metadata
     [ "${status}" -eq 1 ]; [[ "${output}" == *"No labels set"* ]]
+    PR_LABELS_JSON='not-json' PR_MILESTONE_TITLE=v1 run bash "${CI_SH}" check pr-tracking-metadata
+    [ "${status}" -eq 1 ]; [[ "${output}" == *"not a JSON array"* ]]
     run bash "${CI_SH}" check pr-tracking-metadata
     [ "${status}" -eq 1 ]; [[ "${output}" == *"labels not provided to the check"* ]]
     [[ "${output}" != *"No labels set"* ]]
@@ -4983,37 +4987,31 @@ Fixes the thing.
     [ "${status}" -eq 2 ]; [[ "${output}" == *"no numeric SOT pr_policy.project_number"* ]]
 }
 
-@test "check pr-tracking-metadata board lookup: rejected, hit, miss" {
-    # What: 401/403 fails; 200 hit on the SOT number passes.
+@test "check pr-tracking-metadata board lookup: failed, hit, miss" {
+    # What: any lookup failure fails; SOT number hit passes.
     # Why: board owner is the repo owner, never a literal.
     # From: Issue #1683 | PR #1858
     local bin="${BATS_TEST_TMPDIR}/bin" m="${BATS_TEST_TMPDIR}/m.yml" mode
     mkdir -p "${bin}"
     printf 'pr_policy:\n  project_number: 7\n' > "${m}"
-    cat > "${bin}/curl" <<'EOF'
+    cat > "${bin}/gh" <<'EOF'
 #!/usr/bin/env bash
-out="" prev="" data=""
-for a in "$@"; do
-    [ "${prev}" = "-o" ] && out="${a}"
-    [ "${prev}" = "-d" ] && data="${a}"
-    prev="${a}"
-done
 case "${MODE}" in
-    rejected) : > "${out}"; printf '403'; exit 0 ;;
+    failed) echo "gh: HTTP 500" >&2; exit 1 ;;
     hit) n=7 ;;
     miss) n=99 ;;
 esac
-[[ "${data//[[:space:]]/}" == *'"owner":"owner"'* ]] || n=0
-printf '{"data":{"repository":{"pullRequest":{"projectItems":{"nodes":[{"project":{"number":%s}}]}}}}}' "${n}" > "${out}"
-printf '200'
+[[ " $* " == *" owner=owner "* ]] || n=0
+printf '{"data":{"repository":{"pullRequest":{"projectItems":{"nodes":[{"project":{"number":%s}}]}}}}}' "${n}"
 EOF
-    chmod +x "${bin}/curl"
-    for mode in rejected hit miss; do
-        MODE="${mode}" PATH="${bin}:${PATH}" CI_MANIFEST="${m}" PR_NUMBER=12 REPO=owner/fixture-repo \
+    chmod +x "${bin}/gh"
+    for mode in failed hit miss; do
+        MODE="${mode}" PATH="${bin}:${PATH}" CI_MANIFEST="${m}" PR_NUMBER=12 \
+            GITHUB_REPOSITORY=owner/fixture-repo CI_RETRY_MAX_ATTEMPTS=1 \
             PR_LABELS_JSON='["bug"]' PR_MILESTONE_TITLE=v1 GH_TOKEN=t \
             run bash "${CI_SH}" check pr-tracking-metadata
         case "${mode}" in
-            rejected) [ "${status}" -eq 1 ]; [[ "${output}" == *"rejected (HTTP 403)"* ]] ;;
+            failed) [ "${status}" -eq 1 ]; [[ "${output}" == *"Project-board lookup failed"* ]] ;;
             hit) [ "${status}" -eq 0 ]; [[ "${output}" == *"pr-tracking-metadata=ok"* ]] ;;
             miss) [ "${status}" -eq 1 ]; [[ "${output}" == *"Not on project board #7 (owner)"* ]] ;;
         esac

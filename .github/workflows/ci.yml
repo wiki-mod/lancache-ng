@@ -1,8 +1,8 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: CI 2.0 Base-CI: plan, build, accept, promote the product stack.
-# Why: thin orchestration of ci.sh; one SOT build-manifest.yml.
+# What: orchestrate plan, build, accept, promote flow
+# Why: ci.sh is sole owner; one canonical build manifest
 # From: Issue #1683
 name: CI 2.0
 on:
@@ -26,8 +26,8 @@ concurrency:
 defaults:
   run:
     shell: bash
-# What: GHCR credentials ci.sh reads; no login action, no pin.
-# Why: auth is ci.sh policy; the workflow only supplies the env.
+# What: supply GHCR token to ci.sh
+# Why: ci.sh owns auth; workflow only wires the env
 # From: Issue #1683
 env:
   GHCR_USERNAME: ${{ github.actor }}
@@ -37,16 +37,16 @@ env:
   # From: Issue #1683 | PR #1858
   BASE_SHA: ${{ github.event.pull_request.base.sha }}
   BEFORE_SHA: ${{ github.event.before }}
-  # What: LAN proxy inputs; ci.sh applies them self-hosted only.
-  # Why: AG-CI-009; ci.sh is the one proxy policy owner.
+  # What: wire LAN proxy for self-hosted runners
+  # Why: AG-CI-009; ci.sh is the sole proxy policy owner.
   # From: Issue #1683 | PR #1858
   PROJECT_SELFHOSTED_PROXY_HTTP: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
   PROJECT_SELFHOSTED_PROXY_HTTPS: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
   PROJECT_SELFHOSTED_PROXY_EXCLUSION: ${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
   PROJECT_SELFHOSTED_PROXY_CA: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
 jobs:
-  # What: resolve the published build-tools channel to a digest.
-  # Why: every later job runs in build-tools, never on the runner.
+  # What: resolve build-tools digest for all jobs
+  # Why: later jobs run in build-tools, never on the runner.
   # From: Issue #1683 | PR #1858
   platform:
     name: platform
@@ -54,8 +54,8 @@ jobs:
     timeout-minutes: 15
     outputs:
       image: ${{ steps.resolve.outputs.image }}
-    # What: one mutable entry, the current_dev channel (nightly).
-    # Why: ci.sh (SOT) cannot run before any container exists.
+    # What: one mutable entry: the current_dev channel.
+    # Why: ci.sh needs a container before any steps run
     # From: Issue #1683 | PR #1858
     container:
       image: ghcr.io/${{ github.repository }}/build-tools:nightly
@@ -63,8 +63,8 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      # What: native fail-closed checkout, shallow; persistent ci.sh auth.
-      # Why: no SHA pin outside the SOT; git comes from build-tools.
+      # What: shallow checkout with persistent auth
+      # Why: no SHA pin outside SOT; git is in build-tools.
       # From: Issue #1683
       - &bootstrap
         name: Bootstrap the working tree
@@ -80,8 +80,8 @@ jobs:
         id: resolve
         run: echo "image=$(bash .github/scripts/ci.sh build-tools resolve-image)" >> "$GITHUB_OUTPUT"
 
-  # What: emit the identity-filtered build matrices.
-  # Why: path picks candidates; ci.sh resolve decides the build.
+  # What: emit identity-filtered build matrices
+  # Why: path picks candidates; ci.sh resolves build
   # From: Issue #1683
   plan:
     name: plan
@@ -97,8 +97,8 @@ jobs:
       test-services: ${{ steps.plan.outputs.test-services }}
       docs-only: ${{ steps.plan.outputs.docs-only }}
     steps:
-      # What: native fail-closed checkout with full history for the diff.
-      # Why: no SHA pin outside the SOT; persistent auth for ci.sh git ops.
+      # What: full-history checkout for diff computation
+      # Why: no SHA pin outside the SOT; diff needs history.
       # From: Issue #1683
       - &bootstrap_diff
         name: Bootstrap the working tree
@@ -110,8 +110,8 @@ jobs:
           git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GHCR_TOKEN}" | base64 -w0)"
           git fetch -q --no-tags origin "${GITHUB_REF}" ${BASE_SHA:+"${BASE_SHA}"}
           git checkout -q FETCH_HEAD
-      # What: ci.sh writes the changed-path list; the workflow only wires it.
-      # Why: one git-walk owner; plan/lint/checks share it (AG-CODE-011).
+      # What: collect changed-file list via ci.sh
+      # Why: ci.sh sole owner; reused by plan/lint/checks
       # From: Issue #1683
       - &collect_changed
         name: Collect changed files
@@ -123,8 +123,8 @@ jobs:
           CHANGED_FILES: ${{ steps.changed.outputs.file }}
         run: bash .github/scripts/ci.sh plan-matrix
 
-  # What: build+publish+verify one target per platform, in parallel.
-  # Why: ci.sh owns identity, publish and readback; toolchain included.
+  # What: build, publish, verify one target per platform
+  # Why: ci.sh owns identity, publish, readback lifecycle
   # From: Issue #1683 | PR #1858
   build:
     name: build ${{ matrix.service }} ${{ matrix.arch }}
@@ -137,18 +137,18 @@ jobs:
     timeout-minutes: 90
     container: *bt_platform
     steps:
-      # What: checkout with the base; build proves impact vs base.
-      # Why: semantic impact needs the base ref (arch §11).
+      # What: fetch base for impact assessment
+      # Why: build must prove semantic impact vs base
       # From: Issue #1683 | PR #1858
       - *bootstrap_diff
-      # What: build, then publish+verify only what was built.
-      # Why: BUILD != PUBLISH; readback confirms the digest (§22/§23).
+      # What: build, then publish and verify result
+      # Why: publish != build; readback verifies digest
       # From: Issue #1683 | PR #1858
       - name: Build, publish and verify the platform image
         run: bash .github/scripts/ci.sh ship "${{ matrix.service }}" "${{ matrix.platform }}"
 
-  # What: audit rust dependencies inside the pinned build-tools image.
-  # Why: cargo-audit lives in the toolchain image, not on the runner.
+  # What: audit rust dependencies in build-tools image
+  # Why: cargo-audit is in toolchain; not on runner
   # From: Issue #1683
   cargo-audit:
     name: cargo-audit
@@ -162,8 +162,8 @@ jobs:
       - name: Audit rust dependencies
         run: bash .github/scripts/ci.sh check cargo-audit
 
-  # What: run rust fmt/check/clippy/test for changed rust services.
-  # Why: cargo lives in build-tools, never on the runner.
+  # What: test changed rust services via cargo
+  # Why: cargo is in build-tools; not on runner
   # From: Issue #1683 | PR #1858
   test:
     name: test
@@ -179,8 +179,8 @@ jobs:
           TEST_SERVICES: ${{ needs.plan.outputs.test-services }}
         run: bash .github/scripts/ci.sh test-stack
 
-  # What: shellcheck + actionlint in the pinned build-tools image.
-  # Why: SOT-pinned linter versions, not runner drift (AG-VAL-016).
+  # What: lint shell and workflow syntax
+  # Why: pinned linter versions in image, not runner
   # From: Issue #1683
   lint:
     name: lint
@@ -199,8 +199,8 @@ jobs:
       - name: actionlint workflows
         run: bash .github/scripts/ci.sh check actionlint
 
-  # What: trivy-scan every built image by digest before ACCEPT (§7).
-  # Why: SCAN gates ACCEPT; the scanner lives in the build-tools image.
+  # What: scan all built images before ACCEPT
+  # Why: scanner lives in image; gates ACCEPT
   # From: Issue #1683
   scan:
     name: scan
@@ -216,8 +216,8 @@ jobs:
           CI_BUILD_MATRIX: ${{ needs.plan.outputs.matrix }}
         run: bash .github/scripts/ci.sh scan-stack
 
-  # What: one acceptance result.json per built pair; one ledger write (§26.1).
-  # Why: single aggregator, exactly one CAS commit; push only, never a PR.
+  # What: aggregate acceptance to ledger
+  # Why: one aggregator, one CAS commit; push only
   # From: Issue #1683
   aggregate:
     name: aggregate
@@ -238,8 +238,8 @@ jobs:
           CI_BUILD_MATRIX: ${{ needs.plan.outputs.matrix }}
         run: bash .github/scripts/ci.sh aggregate-stack
 
-  # What: merge each service's platform digests into a multi-arch index.
-  # Why: ci.sh owns the accepted-digest merge; §45 both-or-none.
+  # What: merge platform digests into multi-arch index
+  # Why: ci.sh owns merge; both-platforms-or-none
   # From: Issue #1683
   assemble:
     name: assemble
@@ -257,8 +257,8 @@ jobs:
           CI_BUILD_MATRIX: ${{ needs.plan.outputs.matrix }}
         run: bash .github/scripts/ci.sh assemble-stack
 
-  # What: full-setup stack validation on the exact candidate (§49).
-  # Why: STACK health+integration; push=accepted, PR=built images.
+  # What: validate full stack on exact candidate
+  # Why: STACK health+integration; push=accepted|PR=built
   # From: Issue #1683
   validate:
     name: validate
@@ -278,8 +278,8 @@ jobs:
       - name: Validate the accepted stack candidate
         run: bash .github/scripts/ci.sh validate
 
-  # What: move the channels the ref maps to onto the validated stack (§55).
-  # Why: one ref-driven promote owner; promotion only moves refs (§51).
+  # What: promote channels the ref maps to
+  # Why: ref-driven promote owner; moves refs only
   # From: Issue #1683
   promote:
     name: promote
@@ -305,8 +305,8 @@ jobs:
           PROJECT_AUTOMATION_PAT: ${{ secrets.PROJECT_AUTOMATION_PAT }}
         run: bash .github/scripts/ci.sh cut-release-tag
 
-  # What: run the diff-scoped + repo-wide guard set (§98).
-  # Why: static guards, own failure domain, no build needed.
+  # What: run diff-scoped and repo-wide guards
+  # Why: static checks; own failure domain
   # From: Issue #1683
   checks:
     name: checks
@@ -324,7 +324,6 @@ jobs:
       PR_DRAFT: ${{ github.event.pull_request.draft }}
       PR_IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
       GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
-      REPO: ${{ github.repository }}
     steps:
       - *bootstrap_diff
       - *collect_changed
@@ -333,8 +332,8 @@ jobs:
           CHANGED_FILES: ${{ steps.changed.outputs.file }}
         run: bash .github/scripts/ci.sh check all
 
-  # What: the always-present required check for branch protection.
-  # Why: a required check MUST always appear, even on a NOOP (§62).
+  # What: always-present required check (branch protection).
+  # Why: must appear always, even on NOOP
   # From: Issue #1683
   result:
     name: result
@@ -347,8 +346,8 @@ jobs:
       credentials: *ghcr_credentials
     steps:
       - *bootstrap
-      # What: hand phase results to the ci.sh result gate.
-      # Why: pass/fail classification is ci.sh policy (§5).
+      # What: pass phase results to ci.sh result gate
+      # Why: ci.sh owns pass/fail classification policy
       # From: Issue #1683
       - name: Aggregate the pipeline result
         env:

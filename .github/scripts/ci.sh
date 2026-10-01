@@ -6627,14 +6627,15 @@ _ci_check_workflow_line_limit() {
 }
 
 # What: PR must carry label, milestone, project (AG-GH-008).
-# Why: 2026-07-13 sweep found all three missing.
+# Why: CI is the mechanical owner of that metadata rule.
 # From: Issue #1683
 _ci_check_pr_tracking_metadata() {
-    local pr_number="${PR_NUMBER:-}" repo="${REPO:-}" project_number project_owner
-    if [ -z "${pr_number}" ] || [ -z "${repo}" ]; then
-        ci_log "[CI-ERROR-CHECK-0017]" "reason=\"PR_NUMBER and REPO are required\""
+    local pr_number="${PR_NUMBER:-}" repo project_number project_owner
+    if [ -z "${pr_number}" ]; then
+        ci_log "[CI-ERROR-CHECK-0017]" "reason=\"PR_NUMBER is required\""
         return 2
     fi
+    repo="$(_ci_repo)" || return 2
     # What: SOT board number; owner is the repo owner.
     # Why: one CI policy owner (AG-GH-008), no literal.
     # From: Issue #1683 | PR #1858
@@ -6652,8 +6653,11 @@ _ci_check_pr_tracking_metadata() {
     if [ -z "${PR_LABELS_JSON+x}" ]; then
         errs+=("PR labels not provided to the check (workflow wiring).")
     else
-        label_count="$(jq -e 'length' <<<"${PR_LABELS_JSON}" 2>/dev/null)" || label_count=0
-        [ "${label_count}" -eq 0 ] && errs+=("No labels set (AG-GH-008).")
+        if ! label_count="$(jq -e 'length' <<<"${PR_LABELS_JSON}")"; then
+            errs+=("PR labels input is not a JSON array.")
+        elif [ "${label_count}" -eq 0 ]; then
+            errs+=("No labels set (AG-GH-008).")
+        fi
     fi
     if [ -z "${PR_MILESTONE_TITLE+x}" ]; then
         errs+=("PR milestone not provided to the check (workflow wiring).")
@@ -6667,31 +6671,20 @@ _ci_check_pr_tracking_metadata() {
             warns+=("Project-board not checked: no read:project token (GH_TOKEN unset).")
         fi
     else
-        local repo_name="${repo#*/}" query response_file status response project_item_count
-        query="$(jq -n --arg owner "${project_owner}" --arg repo "${repo_name}" --argjson pr "${pr_number}" \
-            '{query:"query($owner: String!, $pr: Int!, $repo: String!) { repository(owner: $owner, name: $repo) { pullRequest(number: $pr) { projectItems(first: 10) { nodes { project { number } } } } } }", variables:{owner:$owner, pr:$pr, repo:$repo}}')"
-        response_file="$(mktemp -p "${CI_TMPDIR}")"
-        status="$(curl -sS -o "${response_file}" -w '%{http_code}' \
-            -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
-            -H "Content-Type: application/json" -d "${query}" \
-            "https://api.github.com/graphql")" || status="000"
-        response="$(<"${response_file}")"
-        rm -f "${response_file}"
-        if [ "${status}" = "401" ] || [ "${status}" = "403" ]; then
-            errs+=("Project-board lookup rejected (HTTP ${status}): token invalid/insufficient scope.")
-        elif [ "${status}" != "200" ]; then
-            warns+=("Could not query project-board membership (HTTP ${status}).")
-        elif jq -e 'has("errors")' <<<"${response}" >/dev/null 2>&1; then
-            errs+=("Project-board lookup failed: GraphQL error response (bad/expired token).")
-        else
-            project_item_count="$(jq -r --argjson pn "${project_number}" \
-                '[.data.repository.pullRequest.projectItems.nodes[]? | select(.project.number == $pn)] | length' \
-                <<<"${response}" 2>/dev/null)" || project_item_count=""
-            if [ -z "${project_item_count}" ]; then
-                warns+=("Could not parse project-board membership response.")
-            elif [ "${project_item_count}" -eq 0 ]; then
-                errs+=("Not on project board #${project_number} (${project_owner}).")
-            fi
+        # What: board lookup: gh api graphql via _ci_retry.
+        # Why: a set token that fails must fail (AG-GH-008).
+        # From: Issue #1683 | PR #1858
+        local response rc=0 project_item_count
+        response="$(_ci_retry github-api gh api graphql -f owner="${project_owner}" \
+            -f repo="${repo#*/}" -F pr="${pr_number}" -f query='query($owner: String!, $pr: Int!, $repo: String!) { repository(owner: $owner, name: $repo) { pullRequest(number: $pr) { projectItems(first: 10) { nodes { project { number } } } } } }')" || rc=$?
+        if [ "${rc}" -ne 0 ]; then
+            errs+=("Project-board lookup failed: ${response##*$'\n'}")
+        elif ! project_item_count="$(jq -er --argjson pn "${project_number}" \
+            '[.data.repository.pullRequest.projectItems.nodes[] | select(.project.number == $pn)] | length' \
+            <<<"${response}")"; then
+            errs+=("Could not parse project-board membership response.")
+        elif [ "${project_item_count}" -eq 0 ]; then
+            errs+=("Not on project board #${project_number} (${project_owner}).")
         fi
     fi
     local w
