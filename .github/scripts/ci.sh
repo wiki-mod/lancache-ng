@@ -3026,18 +3026,52 @@ ci_cmd_assemble() {
 # PROMOTION
 # =========================================================
 
-# What: Print the SOT's mutable release channels.
-# Why: One channel list; promote never invents a second.
+# What: Print "<channel> <value>" for one channel field.
+# Why: One release.channels reader; callers filter it.
 # From: Issue #1683
-_ci_mutable_channels() {
-    awk '
+_ci_channel_field() {
+    awk -v f="$1" '
         /^release:[[:space:]]*$/ { inr = 1; next }
         inr && /^[A-Za-z]/ { inr = 0; inc = 0 }
         inr && /^  channels:[[:space:]]*$/ { inc = 1; next }
         inr && inc && /^  [A-Za-z]/ { inc = 0 }
         inc && /^    [A-Za-z0-9_.-]+:[[:space:]]*$/ { ch = $1; sub(/:$/, "", ch); next }
-        inc && ch != "" && /^      mutable:[[:space:]]*true[[:space:]]*$/ { print ch; ch = "" }
+        inc && ch != "" && $1 == (f ":") {
+            v = $0; sub(/^[^:]*:[[:space:]]*/, "", v); sub(/[[:space:]]+$/, "", v)
+            print ch, v
+        }
     ' "${CI_MANIFEST}"
+}
+
+# What: Channels whose field equals a value, one per line.
+# Why: shared by mutable, ref and release-tag lookups.
+# From: Issue #1683
+_ci_channels_where() {
+    local rows
+    rows="$(_ci_channel_field "$1")" || return 2
+    awk -v v="$2" '$2 == v { print $1 }' <<< "${rows}"
+}
+
+# What: Print the SOT's mutable release channels.
+# Why: One channel list; promote never invents a second.
+# From: Issue #1683
+_ci_mutable_channels() {
+    _ci_channels_where mutable true
+}
+
+# What: The branch ref whose pushes cut release tags.
+# Why: the release-tag channel's ref; SOT is the owner.
+# From: Issue #1683
+_ci_release_ref() {
+    local ch rows ref
+    ch="$(_ci_channels_where release_tags true)" || return 2
+    rows="$(_ci_channel_field ref)" || return 2
+    ref="$(awk -v c="${ch%%$'\n'*}" '$1 == c { print $2 }' <<< "${rows}")"
+    if [ -z "${ref}" ]; then
+        ci_log "[CI-ERROR-RELEASE-0018]" "reason=\"SOT release.channels has no release_tags channel with a ref\""
+        return 2
+    fi
+    printf '%s\n' "${ref}"
 }
 
 # What: True if a channel is a known mutable channel.
@@ -3347,12 +3381,12 @@ _ci_promote_targets_for_ref() {
     local ref="${GITHUB_REF:-}" requested="${CI_PROMOTE_REQUESTED_CHANNEL:-}" tag pre
     {
         case "${ref}" in
-            refs/heads/master) printf 'latest\n' ;;
+            refs/heads/*) _ci_channels_where ref "${ref}" || return 2 ;;
             refs/tags/v*)
                 tag="${ref#refs/tags/}"
                 pre="$(_ci_release_prerelease "${tag}")" || return "$?"
                 printf '%s\n' "${tag}"
-                if [ "${pre}" = false ]; then printf 'latest\n'; fi
+                if [ "${pre}" = false ]; then _ci_channels_where release_tags true || return 2; fi
                 ;;
         esac
         if [ -n "${requested}" ] && [ "${requested}" != none ]; then
@@ -3696,7 +3730,7 @@ _ci_remote_tag_exists() {
 # Why: automated releases on image-affecting pushes.
 # From: Issue #1683
 ci_cmd_cut_release_tag() {
-    local base_tag next_tag tip
+    local base_tag next_tag tip rel_ref
     base_tag="$("${CI_LAST_RELEASE_TAG_CMD:-_ci_last_release_tag}")"
     if [ -z "${base_tag}" ]; then
         printf 'cut-tag=noop reason=no-base-tag\n'
@@ -3707,8 +3741,9 @@ ci_cmd_cut_release_tag() {
         return 0
     fi
     next_tag="$(_ci_next_patch_tag "${base_tag}")" || return "$?"
-    if ! tip="$("${CI_PROMOTE_TIP_CMD:-_ci_ref_tip}" refs/heads/master)"; then
-        ci_log "[CI-ERROR-RELEASE-0016]" "reason=\"could not resolve master tip; not cutting blind\""
+    rel_ref="$(_ci_release_ref)" || return 2
+    if ! tip="$("${CI_PROMOTE_TIP_CMD:-_ci_ref_tip}" "${rel_ref}")"; then
+        ci_log "[CI-ERROR-RELEASE-0016]" "ref=\"${rel_ref}\" reason=\"could not resolve release ref tip; not cutting blind\""
         return 2
     fi
     if [ -n "${tip}" ] && [ "${tip}" != "${GITHUB_SHA:-}" ]; then
@@ -5530,7 +5565,11 @@ _ci_build_tools_resolve_image() {
     # From: Issue #1683 | PR #1858
     channel="$(GITHUB_REF="refs/heads/${ref}" CI_PROMOTE_REQUESTED_CHANNEL='' _ci_promote_targets_for_ref)" || return 2
     channel="${channel%%$'\n'*}"
-    [ -n "${channel}" ] || channel=nightly
+    [ -n "${channel}" ] || channel="$(_ci_block_entry_field release "" default_channel)"
+    if [ -z "${channel}" ]; then
+        ci_log "[CI-ERROR-BUILDTOOLS-0021]" "reason=\"no SOT release.default_channel; FAIL CLOSED\""
+        return 2
+    fi
     image="$(_ci_build_tools_image)"
     _ci_require_ghcr_auth || return "$?"
     if ! digest="$(_ci_registry_digest "${image}:${channel}")"; then

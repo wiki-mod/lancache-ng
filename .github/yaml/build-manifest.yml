@@ -612,6 +612,18 @@ release:
       mutable: true
     latest:
       mutable: true
+      # What: pushes to this ref move the channel.
+      # Why: one ref->channel owner; ci.sh has no literal.
+      # From: Issue #1683
+      ref: refs/heads/master
+      # What: final vX.Y.Z tags also move this channel.
+      # Why: AG-REL-009 stable channel; read by ci.sh.
+      # From: Issue #1683
+      release_tags: true
+  # What: channel a ref without its own channel uses.
+  # Why: AG-REL-009 pre-stable default; no ci.sh literal.
+  # From: Issue #1683
+  default_channel: nightly
   retention:
     minimum_stable_releases: 3
     accepted_ordinary_roots_per_package: 10

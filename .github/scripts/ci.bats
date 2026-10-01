@@ -2023,21 +2023,31 @@ EOF
 }
 
 @test "promote-targets-for-ref maps each ref to its channel set" {
-    # What: Maps ref to targets: master/stable/rc/dev.
-    # Why: One policy owner, no YAML conditionals.
+    # What: neutral SOT: ch-a on refs/heads/b-a + tags.
+    # Why: the mapping is SOT data, never a test table.
     # From: Issue #1683
-    GITHUB_REF=refs/heads/master CI_PROMOTE_REQUESTED_CHANNEL='' run _ci_promote_targets_for_ref
-    [ "${output}" = latest ]
-    GITHUB_REF=refs/heads/current_dev CI_PROMOTE_REQUESTED_CHANNEL='' run _ci_promote_targets_for_ref
+    CI_MANIFEST="${BATS_TEST_TMPDIR}/ch.yml"
+    printf '%s\n' 'release:' '  channels:' '    ch-b:' '      mutable: true' \
+        '    ch-a:' '      mutable: true' '      ref: refs/heads/b-a' \
+        '      release_tags: true' '  default_channel: ch-b' > "${CI_MANIFEST}"
+    GITHUB_REF=refs/heads/b-a CI_PROMOTE_REQUESTED_CHANNEL='' run _ci_promote_targets_for_ref
+    [ "${output}" = ch-a ]
+    GITHUB_REF=refs/heads/b-other CI_PROMOTE_REQUESTED_CHANNEL='' run _ci_promote_targets_for_ref
     [ -z "${output}" ]
     GITHUB_REF=refs/tags/v1.2.3 CI_PROMOTE_REQUESTED_CHANNEL='' run _ci_promote_targets_for_ref
-    [ "${lines[0]}" = v1.2.3 ]; [ "${lines[1]}" = latest ]; [ "${#lines[@]}" -eq 2 ]
+    [ "${lines[0]}" = v1.2.3 ]; [ "${lines[1]}" = ch-a ]; [ "${#lines[@]}" -eq 2 ]
     GITHUB_REF=refs/tags/v1.2.3-rc.4 CI_PROMOTE_REQUESTED_CHANNEL='' run _ci_promote_targets_for_ref
     [ "${output}" = v1.2.3-rc.4 ]
-    GITHUB_REF=refs/heads/master CI_PROMOTE_REQUESTED_CHANNEL=nightly run _ci_promote_targets_for_ref
-    [ "${lines[0]}" = latest ]; [ "${lines[1]}" = nightly ]; [ "${#lines[@]}" -eq 2 ]
-    GITHUB_REF=refs/heads/master CI_PROMOTE_REQUESTED_CHANNEL=latest run _ci_promote_targets_for_ref
-    [ "${output}" = latest ]
+    GITHUB_REF=refs/heads/b-a CI_PROMOTE_REQUESTED_CHANNEL=ch-b run _ci_promote_targets_for_ref
+    [ "${lines[0]}" = ch-a ]; [ "${lines[1]}" = ch-b ]; [ "${#lines[@]}" -eq 2 ]
+    GITHUB_REF=refs/heads/b-a CI_PROMOTE_REQUESTED_CHANNEL=ch-a run _ci_promote_targets_for_ref
+    [ "${output}" = ch-a ]
+    run _ci_release_ref
+    [ "${output}" = refs/heads/b-a ]
+    printf '%s\n' 'release:' '  channels:' '    ch-b:' '      mutable: true' > "${CI_MANIFEST}"
+    run _ci_release_ref
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-RELEASE-0018"* ]]
 }
 
 @test "promote-ref promotes every derived target, tip-guarded" {
@@ -2046,22 +2056,24 @@ EOF
     # From: Issue #1683
     local calls="${BATS_TEST_TMPDIR}/promote-calls"
     export PROMOTE_CALLS="${calls}"
-    local prom; prom="$(_stub prom 'echo "PROMOTE $1" >> "${PROMOTE_CALLS}"')"
+    local prom rel ch; prom="$(_stub prom 'echo "PROMOTE $1" >> "${PROMOTE_CALLS}"')"
+    rel="$(_ci_release_ref)"
+    ch="$(_ci_channels_where release_tags true)"
     : > "${calls}"
     CI_PROMOTE_ONE_CMD="${prom}" GITHUB_REF=refs/tags/v1.2.3 CI_PROMOTE_REQUESTED_CHANNEL='' run ci_cmd_promote_ref
     [ "${status}" -eq 0 ]
     [ "$(cat "${calls}")" = "PROMOTE v1.2.3
-PROMOTE latest" ]
+PROMOTE ${ch}" ]
     : > "${calls}"
     local tipstub; tipstub="$(_stub tip 'echo othersha')"
-    CI_PROMOTE_ONE_CMD="${prom}" GITHUB_REF=refs/heads/master GITHUB_SHA=mysha CI_PROMOTE_REQUESTED_CHANNEL='' CI_PROMOTE_TIP_CMD="${tipstub}" run ci_cmd_promote_ref
+    CI_PROMOTE_ONE_CMD="${prom}" GITHUB_REF="${rel}" GITHUB_SHA=mysha CI_PROMOTE_REQUESTED_CHANNEL='' CI_PROMOTE_TIP_CMD="${tipstub}" run ci_cmd_promote_ref
     [ "${status}" -eq 0 ]; [[ "${output}" == *"superseded"* ]]; [ ! -s "${calls}" ]
     : > "${calls}"
     local tipok; tipok="$(_stub tipok 'echo mysha')"
-    CI_PROMOTE_ONE_CMD="${prom}" GITHUB_REF=refs/heads/master GITHUB_SHA=mysha CI_PROMOTE_REQUESTED_CHANNEL='' CI_PROMOTE_TIP_CMD="${tipok}" run ci_cmd_promote_ref
-    [ "${status}" -eq 0 ]; [ "$(cat "${calls}")" = "PROMOTE latest" ]
+    CI_PROMOTE_ONE_CMD="${prom}" GITHUB_REF="${rel}" GITHUB_SHA=mysha CI_PROMOTE_REQUESTED_CHANNEL='' CI_PROMOTE_TIP_CMD="${tipok}" run ci_cmd_promote_ref
+    [ "${status}" -eq 0 ]; [ "$(cat "${calls}")" = "PROMOTE ${ch}" ]
     : > "${calls}"
-    CI_PROMOTE_ONE_CMD="${prom}" GITHUB_REF=refs/heads/current_dev CI_PROMOTE_REQUESTED_CHANNEL='' run ci_cmd_promote_ref
+    CI_PROMOTE_ONE_CMD="${prom}" GITHUB_REF=refs/heads/no-channel-ref CI_PROMOTE_REQUESTED_CHANNEL='' run ci_cmd_promote_ref
     [ "${status}" -eq 0 ]; [[ "${output}" == *"no-targets"* ]]; [ ! -s "${calls}" ]
 }
 
@@ -2670,7 +2682,7 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
         printf 'v1\t111\t2020-01-01T00:00:00Z\t\n'
     }
     export -f gh
-    CI_RETRY_BACKOFF_BASE_SECONDS=0 run _ci_gh_versions wiki-mod "lancache-ng%2Fproxy"
+    CI_RETRY_BACKOFF_BASE_SECONDS=0 run _ci_gh_versions owner "fixture-repo%2Fsvc-a"
     [ "${status}" -eq 0 ]
     [ "$(cat "${cnt}")" -eq 3 ]
     [[ "${output}" == *"v1"* ]]
@@ -2686,7 +2698,7 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
         echo "gh: Not Found (HTTP 404)" >&2; return 1
     }
     export -f gh
-    CI_RETRY_BACKOFF_BASE_SECONDS=0 run _ci_gh_versions wiki-mod "lancache-ng%2Fnetdata"
+    CI_RETRY_BACKOFF_BASE_SECONDS=0 run _ci_gh_versions owner "fixture-repo%2Fsvc-b"
     [ "${status}" -eq 1 ]
     [ "$(cat "${cnt}")" -eq 1 ]
 }
@@ -4231,17 +4243,20 @@ CASES
 }
 
 @test "build-tools consumes the channel the promote owner maps" {
-    # What: master base -> latest; any other ref -> nightly.
+    # What: SOT ref -> its channel; else default_channel.
     # Why: one ref->channel owner (promote), no second map.
     # From: Issue #1683 | PR #1858
+    local rel ch dflt
+    rel="$(_ci_release_ref)"; ch="$(_ci_channels_where ref "${rel}")"
+    dflt="$(_ci_block_entry_field release "" default_channel)"
     export GITHUB_REPOSITORY=o/r GHCR_USERNAME=u GHCR_TOKEN=t
     _ci_registry_digest() { echo "sha256:${1##*:}"; }
-    GITHUB_BASE_REF=master run _ci_build_tools_resolve_image
-    [[ "${output}" == *"@sha256:latest"* ]]
-    GITHUB_BASE_REF=current_dev run _ci_build_tools_resolve_image
-    [[ "${output}" == *"@sha256:nightly"* ]]
+    GITHUB_BASE_REF="${rel#refs/heads/}" run _ci_build_tools_resolve_image
+    [[ "${output}" == *"@sha256:${ch}"* ]]
+    GITHUB_BASE_REF=no-channel-ref run _ci_build_tools_resolve_image
+    [[ "${output}" == *"@sha256:${dflt}"* ]]
     GITHUB_BASE_REF='' GITHUB_REF_NAME=feature/x run _ci_build_tools_resolve_image
-    [[ "${output}" == *"@sha256:nightly"* ]]
+    [[ "${output}" == *"@sha256:${dflt}"* ]]
 }
 
 @test "build-tools resolve-image reuses the published channel digest" {
