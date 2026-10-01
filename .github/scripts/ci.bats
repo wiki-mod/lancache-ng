@@ -1430,6 +1430,35 @@ STUB
     [ "${status}" -ne 0 ]
 }
 
+@test "verify of a rust service runs its ldd smoke in the image" {
+    # What: verify of a rust service reaches the ldd smoke.
+    # Why: the SOT ldd item must run, not only exist.
+    # From: Issue #1683 | PR #1858
+    local bin="${BATS_TEST_TMPDIR}/bin" log="${BATS_TEST_TMPDIR}/docker.log"
+    _build_fixture
+    printf '%s\n' '  svc-r:' '    context: svc' '    build_type: rust' '    final_base: base-x' \
+        '    smoke:' '      - ldd /usr/local/bin/svc-r' > "${BATS_TEST_TMPDIR}/svc-r.yml"
+    awk -v add="${BATS_TEST_TMPDIR}/svc-r.yml" \
+        '/^build_toolchain:/ { while ((getline l < add) > 0) print l } { print }' \
+        "${CI_MANIFEST}" > "${CI_MANIFEST}.new" && mv "${CI_MANIFEST}.new" "${CI_MANIFEST}"
+    _tool_stub "${bin}" docker <<STUB
+echo "docker \$*" >> "${log}"
+[ -z "\${LDD_FAIL:-}" ] || { echo "Error loading shared library libx.so" >&2; exit 127; }
+STUB
+    CI_READBACK_CMD="$(_stub rb 'echo sha256:dead')" PATH="${bin}:${PATH}" \
+    GHCR_USERNAME=u GHCR_TOKEN=t GITHUB_REPOSITORY=owner/fixture-repo \
+        run bash "${CI_SH}" verify svc-r sha256:dead os/p1
+    echo "log=$(cat "${log}")"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"service=svc-r smoke=ok checks=1"* ]]
+    [[ "$(cat "${log}")" == *"--entrypoint sh "*"svc-r@sha256:dead -c ldd /usr/local/bin/svc-r"* ]]
+    LDD_FAIL=1 CI_READBACK_CMD="$(_stub rb 'echo sha256:dead')" PATH="${bin}:${PATH}" \
+    GHCR_USERNAME=u GHCR_TOKEN=t GITHUB_REPOSITORY=owner/fixture-repo \
+        run bash "${CI_SH}" verify svc-r sha256:dead os/p1
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"CI-ERROR-TEST-0008"*"libx.so"* ]]
+}
+
 @test "test build-tools fails closed without a toolchain image" {
     # What: The smoke needs the candidate image ref.
     # Why: No image means nothing to smoke; fail closed.
