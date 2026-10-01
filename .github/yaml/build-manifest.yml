@@ -576,6 +576,22 @@ dependency_graph:
   netdata:
     contexts: []
 
+# What: stateful config writers and their repeat-run test.
+# Why: AG-OP-006; ci.sh checks each writer|evidence|marker.
+# From: Issue #1683
+idempotence:
+  writers:
+    - setup.sh|.github/scripts/ci.bats|migrate_env_for_update
+    - services/dns/entrypoint.sh|.github/scripts/ci.bats|dns known-good
+    - services/watchdog/watchdog.sh|.github/scripts/ci.bats|watchdog status
+    - services/proxy/entrypoint.sh|.github/scripts/ci.bats|proxy known-good
+    - services/dhcp-proxy/entrypoint.sh|.github/scripts/ci.bats|dhcp-proxy known-good
+    - deploy/prod/docker-compose.yml|.github/scripts/ci.bats|nats conf
+    - services/ui/src/kea_snapshots.rs|services/ui/src/routes/dhcp.rs
+    - services/dns/nats-subscriber/src/zone_snapshots.rs|services/dns/nats-subscriber/src/zone_snapshots.rs
+    - services/ui/src/routes/secondaries.rs|services/ui/src/routes/secondaries.rs|nats_conf
+    - services/ui/src/netdata_alarms.rs|services/ui/src/netdata_alarms.rs
+
 # What: CodeQL query suites and ignored paths.
 # Why: One SOT owner; codeql.yml/ci.sh derive, no dup.
 # From: Issue #1683
@@ -599,6 +615,11 @@ codeql_languages:
 release:
   schema: stack-images/v1
   registry: ghcr.io
+  # What: validation record and its full-invalidation paths.
+  # Why: AG-REL-011 gate reads them; no ci.sh literal.
+  # From: Issue #1683
+  validation_state: docs/validation-state.json
+  governance_paths: [AGENTS.md, .github/AGENTS.md]
   channels:
     sha:
       tag: sha-<commit>

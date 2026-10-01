@@ -1851,15 +1851,6 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
 # RELEASE
 # =========================================================
 
-@test "release fails closed without a validation backend" {
-    # What: No freshness verdict must stop the release.
-    # Why: Unverified validation is not releasable.
-    # From: Issue #1683
-    run bash "${CI_SH}" release
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-RELEASE-0001"* ]]
-}
-
 @test "release fails closed when validation is not fresh" {
     # What: A stale/failed verdict blocks the release.
     # Why: AG-REL-011 requires still-valid validation.
@@ -1868,6 +1859,56 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
         run bash "${CI_SH}" release
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-RELEASE-0001"* ]]
+}
+
+@test "release validation gate checks every AG-REL-011 trigger" {
+    # What: path, glob, governance, null, foreign: all stale.
+    # Why: a release must never trust an invalidated record.
+    # From: Issue #1683
+    local r="${BATS_TEST_TMPDIR}/rel" m="${BATS_TEST_TMPDIR}/rel.yml" c0 c1 case want
+    mkdir -p "${r}/a" "${r}/b"
+    printf 'x\n' > "${r}/a/x.txt"; printf 'y\n' > "${r}/b/y.txt"; printf 'g\n' > "${r}/G.md"
+    git -C "${r}" init -q && git -C "${r}" add -A
+    git -C "${r}" -c user.email=t@t -c user.name=t commit -qm base
+    c0="$(git -C "${r}" rev-parse HEAD)"
+    printf '%s\n' 'release:' '  validation_state: state.json' '  governance_paths: [G.md]' > "${m}"
+    _rel_state() {
+        jq -n --arg c "$1" --arg s "$2" '{last_stack_validation:{commit:$c}, last_ci_validation:{commit:$c},
+            subsystem_validation:{_note:"x", sub:{commit:$s, path_prefixes:["a/*.txt"]}}}' > "${r}/state.json"
+    }
+    export CI_MANIFEST="${m}" CI_REPO_ROOT="${r}"
+    while IFS='|' read -r case want; do
+        git -C "${r}" -c advice.detachedHead=false checkout -q "${c0}"
+        _rel_state "${c0}" "${c0}"
+        case "${case}" in
+            fresh) printf 'z\n' > "${r}/b/z.txt" ;;
+            glob) printf 'x2\n' > "${r}/a/x.txt" ;;
+            gov) printf 'g2\n' > "${r}/G.md" ;;
+            never) _rel_state "${c0}" null ;;
+            foreign) _rel_state "$(printf '1%.0s' {1..40})" "${c0}" ;;
+        esac
+        git -C "${r}" add -A
+        git -C "${r}" -c user.email=t@t -c user.name=t commit -qm "${case}"
+        c1="$(git -C "${r}" rev-parse HEAD)"
+        GITHUB_SHA="${c1}" run _ci_release_validation_valid
+        if [ "${case}" = fresh ]; then
+            [ "${status}" -eq 0 ] || { echo "${case}: ${output}"; return 1; }
+            continue
+        fi
+        [ "${status}" -eq 1 ] || { echo "${case}: rc ${status} ${output}"; return 1; }
+        [[ "${output}" == *"[CI-ERROR-RELEASE-0017]"* && "${output}" == *"${want}"* ]] \
+            || { echo "${case}: ${output}"; return 1; }
+    done <<'EOF'
+fresh|
+glob|a/*.txt changed
+gov|governance G.md changed
+never|sub: never validated
+foreign|not reconstructable
+EOF
+    rm "${r}/state.json"
+    GITHUB_SHA="${c1}" run _ci_release_validation_valid
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"[CI-ERROR-RELEASE-0014]"* ]]
 }
 
 @test "release verifies freshness then promotes latest" {
@@ -5817,235 +5858,83 @@ EOF
     run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"; [ "${status}" -eq 0 ]
 }
 
-# What: seeds every real WRITER_TEST_EVIDENCE pair.
-# Why: mirrors the legacy script's own fixture builder.
-# From: Issue #1683 | PR #1858
+# What: neutral writer/evidence tree and SOT.
+# Why: tests the check, not the real writer inventory.
+# From: Issue #1683
 _idempotence_fixture() {
-    local root="$1" at_test='@test'
-    mkdir -p "${root}/tests/bats" "${root}/services/dns" "${root}/services/watchdog" \
-        "${root}/services/ui/src/routes" "${root}/services/proxy" "${root}/services/dhcp-proxy" \
-        "${root}/services/dns/nats-subscriber/src" "${root}/deploy/prod" "${root}/deploy/quickstart"
-    printf '#!/usr/bin/env bash\n' > "${root}/setup.sh"
-    mkdir -p "${root}/.github/scripts"
-    cat > "${root}/.github/scripts/ci.bats" <<EOF
-${at_test} "migrate_env_for_update converges a legacy .env and is stable on rerun" {
-    true
-}
-EOF
-    printf '#!/usr/bin/env bash\n' > "${root}/services/dns/entrypoint.sh"
-    cat > "${root}/tests/bats/dns_config_snapshot_idempotence.bats" <<EOF
-${at_test} "rollback repeats to the same known-good config" {
-    true
-}
-EOF
-    printf '#!/usr/bin/env bash\n' > "${root}/services/watchdog/watchdog.sh"
-    cat > "${root}/tests/bats/watchdog_idempotence.bats" <<EOF
-${at_test} "write_status converges across repeated writes" {
-    true
-}
-EOF
-    printf '// fixture\n' > "${root}/services/ui/src/kea_snapshots.rs"
-    cat > "${root}/services/ui/src/routes/dhcp.rs" <<'EOF'
-#[test]
-fn kea_modify_repeat_rollback_converges() {
-    assert!(true);
-}
-EOF
-    cat > "${root}/services/dns/nats-subscriber/src/zone_snapshots.rs" <<'EOF'
-#[test]
-fn create_snapshot_repeat_writes_converge() {
-    assert!(true);
-}
-EOF
-    cat > "${root}/services/ui/src/routes/secondaries.rs" <<'EOF'
-#[tokio::test]
-async fn nats_conf_write_converges_across_repeated_writes() {
-    assert!(true);
-}
-EOF
-    printf '#!/usr/bin/env bash\n' > "${root}/services/proxy/entrypoint.sh"
-    cat > "${root}/tests/bats/proxy_known_good_snapshot.bats" <<EOF
-${at_test} "retention converges across repeated valid starts" {
-    true
-}
-EOF
-    printf '#!/usr/bin/env bash\n' > "${root}/services/dhcp-proxy/entrypoint.sh"
-    cat > "${root}/tests/bats/dhcp_proxy_known_good_snapshot.bats" <<EOF
-${at_test} "retention converges across repeated valid starts" {
-    true
-}
-EOF
-    printf 'services:\n  nats:\n    command: ["true"]\n' > "${root}/deploy/prod/docker-compose.yml"
-    printf 'services:\n  nats:\n    command: ["true"]\n' > "${root}/deploy/quickstart/docker-compose.yml"
-    cat > "${root}/tests/bats/nats_conf_entrypoint_idempotence.bats" <<EOF
-${at_test} "nats entrypoint regenerates a converged nats.conf" {
-    true
-}
-EOF
-    cat > "${root}/services/ui/src/netdata_alarms.rs" <<'EOF'
-#[test]
-fn append_is_idempotent_for_the_same_unique_id() {
-    assert!(true);
-}
-EOF
+    local r="$1" at='@test'
+    mkdir -p "${r}/w"
+    printf '%s\n' 'idempotence:' '  writers:' '    - w/a.sh|w/a.bats' \
+        '    - w/b.sh|w/b.rs' '    - w/c.sh|w/c.rs|mark_c' > "${r}/m.yml"
+    : > "${r}/w/a.sh"; : > "${r}/w/b.sh"; : > "${r}/w/c.sh"
+    printf '%s "a converges on rerun" {\n    true\n}\n' "${at}" > "${r}/w/a.bats"
+    printf '#[test]\nfn b_repeat_is_stable() {}\n' > "${r}/w/b.rs"
+    printf '#[test]\nfn c_mark_c_converges() {}\n' > "${r}/w/c.rs"
+    export CI_MANIFEST="${r}/m.yml"
 }
 
 @test "check idempotence-test-coverage passes on the real repo" {
-    # What: migrated from the legacy idempotence check.
-    # Why: rewritten in ci.sh; writers must stay covered.
+    # What: every SOT writer has live repeat-run evidence.
+    # Why: AG-OP-006; a stateful writer needs a rerun test.
     # From: Issue #1683 | PR #1858
-    run bash "${CI_SH}" check idempotence-test-coverage
+    CI_MANIFEST="${CI_MANIFEST_SOURCE}" run bash "${CI_SH}" check idempotence-test-coverage
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"idempotence-test-coverage=clean"* ]]
 }
 
-@test "check idempotence-test-coverage passes a full seeded fixture" {
-    # What: every real writer/evidence pair, freshly seeded.
-    # Why: proves the shared fixture below is itself valid.
+@test "check idempotence-test-coverage fails every unproven writer" {
+    # What: each way a writer loses its evidence is reported.
+    # Why: disabled, ignored or unmarked tests prove nothing.
     # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/idem-ok"
-    _idempotence_fixture "${r}"
-    run bash "${CI_SH}" check idempotence-test-coverage "${r}"
-    [ "${status}" -eq 0 ]
-}
-
-@test "check idempotence-test-coverage fails a missing writer file" {
-    # What: a known config-writer source no longer exists.
-    # Why: distinct from a missing evidence file to fix.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/idem-nowriter"
-    _idempotence_fixture "${r}"
-    rm "${r}/services/watchdog/watchdog.sh"
-    run bash "${CI_SH}" check idempotence-test-coverage "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"no longer exists"* ]]
-}
-
-@test "check idempotence-test-coverage fails a missing evidence file" {
-    # What: the writer exists but its evidence file is gone.
-    # Why: no repeat-run proof left for that config-writer.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/idem-noevidence"
-    _idempotence_fixture "${r}"
-    rm "${r}/tests/bats/watchdog_idempotence.bats"
-    run bash "${CI_SH}" check idempotence-test-coverage "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"evidence file"* ]]
-    [[ "${output}" == *"missing"* ]]
-}
-
-@test "check idempotence-test-coverage rejects a commented-out bats test" {
-    # What: a disabled test bats never actually runs.
-    # Why: Must not silently satisfy guard.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/idem-commented" at_test='@test'
-    _idempotence_fixture "${r}"
-    cat > "${r}/tests/bats/watchdog_idempotence.bats" <<EOF
-# ${at_test} "write_status converges across repeated writes" {
-#     true
-# }
+    local r case want at='@test'
+    while IFS='|' read -r case want; do
+        r="${BATS_TEST_TMPDIR}/idem-${case}"
+        _idempotence_fixture "${r}"
+        case "${case}" in
+            ok) ;;
+            no-writer) rm "${r}/w/a.sh" ;;
+            no-evidence) rm "${r}/w/a.bats" ;;
+            bats-commented) printf '# %s "a converges" {\n# }\n' "${at}" > "${r}/w/a.bats" ;;
+            bats-no-marker) printf '%s "a runs once" {\n    true\n}\n' "${at}" > "${r}/w/a.bats" ;;
+            rs-ignored) printf '#[test]\n#[ignore]\nfn b_repeat_is_stable() {}\n' > "${r}/w/b.rs" ;;
+            rs-ignore-reason) printf '#[test]\n#[ignore = "x"]\nfn b_repeat_is_stable() {}\n' > "${r}/w/b.rs" ;;
+            rs-commented) printf '// #[test]\n// fn b_repeat_is_stable() {}\n' > "${r}/w/b.rs" ;;
+            marker-evasion) printf '#[test]\nfn c_repeat_other() {}\n' > "${r}/w/c.rs" ;;
+            multi) rm "${r}/w/a.bats" "${r}/w/b.rs" ;;
+        esac
+        run bash "${CI_SH}" check idempotence-test-coverage "${r}"
+        if [ "${case}" = ok ]; then
+            [ "${status}" -eq 0 ] || { echo "${case}: ${output}"; return 1; }
+            continue
+        fi
+        [ "${status}" -eq 1 ] || { echo "${case}: rc ${status}"; return 1; }
+        local w
+        for w in ${want}; do
+            [[ "${output}" == *"${w}"* ]] || { echo "${case}: no ${w}"; return 1; }
+        done
+    done <<'EOF'
+ok|
+no-writer|w/a.sh no longer exists
+no-evidence|evidence missing
+bats-commented|w/a.bats
+bats-no-marker|no matching
+rs-ignored|w/b.rs
+rs-ignore-reason|w/b.rs
+rs-commented|w/b.rs
+marker-evasion|w/c.rs
+multi|w/a.sh w/b.sh
 EOF
-    run bash "${CI_SH}" check idempotence-test-coverage "${r}"
-    [ "${status}" -ne 0 ]
 }
 
-@test "check idempotence-test-coverage rejects an #[ignore]d Rust test" {
-    # What: a disqualified test cargo never actually runs.
-    # Why: Must not silently satisfy guard.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/idem-ignored"
-    _idempotence_fixture "${r}"
-    cat > "${r}/services/ui/src/netdata_alarms.rs" <<'EOF'
-#[test]
-#[ignore]
-fn append_is_idempotent_for_the_same_unique_id() {
-    assert!(true);
-}
-EOF
-    run bash "${CI_SH}" check idempotence-test-coverage "${r}"
-    [ "${status}" -ne 0 ]
-}
-
-@test "check idempotence-test-coverage rejects the NATS extra_marker evasion" {
-    # What: a repeat-named test unrelated to nats_conf.
-    # Why: secondaries.rs is its own evidence file here.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/idem-extramarker"
-    _idempotence_fixture "${r}"
-    cat > "${r}/services/ui/src/routes/secondaries.rs" <<'EOF'
-#[test]
-fn generate_nats_password_is_high_entropy_and_never_repeats() {
-    assert!(true);
-}
-EOF
-    run bash "${CI_SH}" check idempotence-test-coverage "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"secondaries.rs"* ]]
-}
-
-@test "check idempotence-test-coverage rejects an active bats test with no marker" {
-    # What: an active @test whose name lacks the marker.
-    # Why: distinct path from a commented-out test line.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/idem-nomarker" at_test='@test'
-    _idempotence_fixture "${r}"
-    cat > "${r}/tests/bats/dns_config_snapshot_idempotence.bats" <<EOF
-${at_test} "rollback validates a config once" {
-    true
-}
-EOF
-    run bash "${CI_SH}" check idempotence-test-coverage "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"no matching"* ]]
-}
-
-@test "check idempotence-test-coverage reports every missing pair, not just the first" {
-    # What: two writers lose evidence in a single run.
-    # Why: proves all violations surface, not only one.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/idem-multi"
-    _idempotence_fixture "${r}"
-    rm "${r}/tests/bats/watchdog_idempotence.bats"
-    rm "${r}/tests/bats/dns_config_snapshot_idempotence.bats"
-    run bash "${CI_SH}" check idempotence-test-coverage "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"watchdog.sh"* ]]
-    [[ "${output}" == *"dns/entrypoint.sh"* ]]
-}
-
-@test "check idempotence-test-coverage rejects an #[ignore = \"reason\"]d Rust test" {
-    # What: an #[ignore] with a reason string, not bare.
-    # Why: the prefix match must catch this common form.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/idem-ignorereason"
-    _idempotence_fixture "${r}"
-    cat > "${r}/services/ui/src/netdata_alarms.rs" <<'EOF'
-#[test]
-#[ignore = "flaky under CI load"]
-fn append_is_idempotent_for_the_same_unique_id() {
-    assert!(true);
-}
-EOF
-    run bash "${CI_SH}" check idempotence-test-coverage "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"netdata_alarms.rs"* ]]
-}
-
-@test "check idempotence-test-coverage rejects a commented-out Rust test block" {
-    # What: a //-commented #[test]/fn pair is dead code.
-    # Why: distinct path from the #[ignore] disqualifier.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/idem-rustcomment"
-    _idempotence_fixture "${r}"
-    cat > "${r}/services/ui/src/netdata_alarms.rs" <<'EOF'
-// #[test]
-// fn append_is_idempotent_for_the_same_unique_id() {
-//     assert!(true);
-// }
-EOF
-    run bash "${CI_SH}" check idempotence-test-coverage "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"netdata_alarms.rs"* ]]
+@test "check idempotence-test-coverage fails closed without SOT writers" {
+    # What: an empty SOT inventory is CHECK-0076, not clean.
+    # Why: zero writers would pass the check vacuously.
+    # From: Issue #1683
+    local m="${BATS_TEST_TMPDIR}/m.yml"
+    printf 'idempotence:\n  writers:\n' > "${m}"
+    CI_MANIFEST="${m}" run bash "${CI_SH}" check idempotence-test-coverage "${BATS_TEST_TMPDIR}"
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"[CI-ERROR-CHECK-0076]"* ]]
 }
 
 # What: seed a minimal prebuilt-only prod/quickstart tree.
@@ -9096,4 +8985,77 @@ _run_apk_setup() {
     [[ "${output}" == *"apk update --no-cache"* ]]
     [[ "${output}" == *"apk upgrade --no-cache"* ]]
     [[ "${output}" != *"apk add"* ]]
+}
+
+# =========================================================
+# PRODUCT RUNTIME: KNOWN-GOOD CONFIG SNAPSHOTS
+# =========================================================
+
+# What: source named top-level functions of a script.
+# Why: test real runtime functions without running its main.
+# From: Issue #1683
+_load_fns() {
+    local file="$1" out="${BATS_TEST_TMPDIR}/fns-${RANDOM}.sh" fn
+    shift
+    awk -v names=" $* " '
+        /^[A-Za-z_][A-Za-z0-9_]*\(\) \{/ {
+            n = substr($0, 1, index($0, "(") - 1)
+            cap = index(names, " " n " ") > 0
+        }
+        cap { print }
+        cap && /^}$/ { cap = 0 }
+    ' "${file}" > "${out}"
+    # shellcheck source=/dev/null
+    source "${out}"
+    for fn in "$@"; do
+        declare -F "${fn}" >/dev/null || { echo "missing function ${fn} in ${file}"; return 1; }
+    done
+}
+
+# What: stable fingerprint of a snapshot store.
+# Why: equal prints prove no snapshot was added or changed.
+# From: Issue #1683
+_kgs_fingerprint() {
+    ( cd "$1" && find . -type f | LC_ALL=C sort | xargs -r sha256sum )
+}
+
+@test "dns known-good rollback converges to one fixed point" {
+    # What: broken restarts restore one snapshot, add none.
+    # Why: a snapshotted broken config could be restored.
+    # From: Issue #1683
+    local root="${BATS_TEST_DIRNAME}/../.." bin="${BATS_TEST_TMPDIR}/bin" role tool conf fp1 h1
+    mkdir -p "${bin}"
+    for tool in pdns_recursor pdns_server; do
+        printf '#!/usr/bin/env bash\nd=""; for a in "$@"; do case "$a" in --config-dir=*) d="${a#*=}" ;; esac; done\n! grep -q BROKEN "$d"/*.conf\n' > "${bin}/${tool}"
+        chmod +x "${bin}/${tool}"
+    done
+    # shellcheck source=/dev/null
+    source "${root}/scripts/lib/known-good-snapshots.sh"
+    _load_fns "${root}/services/dns/entrypoint.sh" \
+        _dns_recursor_validate_snapshot_or_rollback _dns_auth_validate_snapshot_or_rollback
+    export PATH="${bin}:${PATH}" KEEP_KNOWN_GOOD_CONFIGS=3 PDNS_API_KEY=k
+    export DNS_CONFIG_SNAPSHOT_DIR="${BATS_TEST_TMPDIR}/snap"
+    while read -r role conf; do
+        mkdir -p "${BATS_TEST_TMPDIR}/${role}"
+        conf="${BATS_TEST_TMPDIR}/${role}/${conf}"
+        printf 'OK v1\n' > "${conf}"
+        "_dns_${role}_validate_snapshot_or_rollback" "${conf}" >/dev/null 2>&1
+        printf 'OK v1\n' > "${conf}"
+        "_dns_${role}_validate_snapshot_or_rollback" "${conf}" >/dev/null 2>&1
+        [ "$(cat "${conf}")" = "OK v1" ]
+        printf 'BROKEN v2\n' > "${conf}"
+        run "_dns_${role}_validate_snapshot_or_rollback" "${conf}"
+        [ "${status}" -eq 0 ]; [ "$(cat "${conf}")" = "OK v1" ]
+        fp1="$(_kgs_fingerprint "${DNS_CONFIG_SNAPSHOT_DIR}/${role}")"
+        h1="$(sha256sum < "${conf}")"
+        printf 'BROKEN v2\n' > "${conf}"
+        run "_dns_${role}_validate_snapshot_or_rollback" "${conf}"
+        [ "${status}" -eq 0 ]
+        [ "$(sha256sum < "${conf}")" = "${h1}" ]
+        [ "$(_kgs_fingerprint "${DNS_CONFIG_SNAPSHOT_DIR}/${role}")" = "${fp1}" ]
+        ! grep -rq BROKEN "${DNS_CONFIG_SNAPSHOT_DIR}"
+    done <<'ROLES'
+recursor recursor.conf
+auth pdns.conf
+ROLES
 }

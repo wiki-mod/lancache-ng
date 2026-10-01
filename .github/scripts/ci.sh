@@ -445,15 +445,16 @@ ci_cmd_plan() {
     ci_log "[CI-INFO-PLAN-0001]" "phase=plan changed=${#changed[@]} note=\"candidates only; identity/CAS decides build\""
 }
 
-# What: True if a path changed vs base (comment-cut).
+# What: rc 0 if content under path changed base..head.
 # Why: comment-only edits keep identity (§11.1/§12.5).
 # From: Issue #1683
 _ci_path_content_changed() {
-    local path="$1" base head
-    read -r base head <<< "$(_ci_diff_refs)"
+    local path="$1" base="${2:-}" head="${3:-}" a b
+    [ -n "${base}" ] || read -r base head <<< "$(_ci_diff_refs)"
     [ -n "${base}" ] || return 0
-    [ "$(_ci_tracked_content_ids "${path}" "${base}")" \
-        != "$(_ci_tracked_content_ids "${path}" "${head}")" ]
+    a="$(_ci_tracked_content_ids "${path}" "${base}")" || return 2
+    b="$(_ci_tracked_content_ids "${path}" "${head}")" || return 2
+    [ "${a}" != "${b}" ]
 }
 
 # What: CodeQL admission: language matrix + job image.
@@ -463,7 +464,7 @@ ci_cmd_codeql_impact() {
     local img
     local -a changed=()
     _ci_collect_changed changed "$@" || return 2
-    local include='[]' lang p hit langs paths
+    local include='[]' lang p hit langs paths rc
     langs="$(_ci_block_keys codeql_languages)" || return 2
     while IFS= read -r lang; do
         [ -n "${lang}" ] || continue
@@ -472,7 +473,8 @@ ci_cmd_codeql_impact() {
         while IFS= read -r p; do
             [ -n "${p}" ] || continue
             _ci_paths_touch "${p}" "${changed[@]}" || continue
-            _ci_path_content_changed "${p}" && { hit=true; break; }
+            rc=0; _ci_path_content_changed "${p}" || rc=$?
+            case "${rc}" in 0) hit=true; break ;; 1) ;; *) return 2 ;; esac
         done <<< "${paths}"
         [ "${hit}" = true ] && { include="$(_ci_matrix_append "${include}" language="${lang}")" || return 2; }
     done <<< "${langs}"
@@ -742,14 +744,19 @@ _ci_rust_strip_is_safe() {
 # Why: Content, not raw bytes or order, is the input.
 # From: Issue #1683
 _ci_tracked_content_ids() {
-    local root="$1" ref="${2:-}" listing line path oid blob norm
+    local root="$1" ref="${2:-}" raw listing line path oid blob norm empty
+    # What: git pathspec selects files in both modes alike.
+    # Why: ls-tree ignores globs; diff-tree honours them.
+    # From: Issue #1683
     if [ -n "${ref}" ]; then
-        listing="$( cd -- "${CI_REPO_ROOT}" && git ls-tree -r "${ref}" -- "${root}" 2>/dev/null \
-            | awk -F'\t' '{ split($1, a, " "); print $2 "\t" a[3] }' | LC_ALL=C sort )" || return
+        empty="$( cd -- "${CI_REPO_ROOT}" && git hash-object -t tree /dev/null )" || return 2
+        raw="$( cd -- "${CI_REPO_ROOT}" && git diff-tree -r --raw "${empty}" "${ref}" -- "${root}" )" || return 2
+        listing="$(awk -F'\t' 'NF { split($1, a, " "); print $2 "\t" a[4] }' <<< "${raw}")"
     else
-        listing="$( cd -- "${CI_REPO_ROOT}" && git ls-files -s -- "${root}" 2>/dev/null \
-            | awk -F'\t' '{ split($1, a, " "); print $2 "\t" a[2] }' | LC_ALL=C sort )" || return
+        raw="$( cd -- "${CI_REPO_ROOT}" && git ls-files -s -- "${root}" )" || return 2
+        listing="$(awk -F'\t' 'NF { split($1, a, " "); print $2 "\t" a[2] }' <<< "${raw}")"
     fi
+    listing="$(LC_ALL=C sort <<< "${listing}")"
     [ -n "${listing}" ] || return 0
     while IFS= read -r line; do
         [ -n "${line}" ] || continue
@@ -3372,15 +3379,76 @@ ci_cmd_promote_ref() {
 # NIGHTLY / RELEASE
 # =========================================================
 
-# What: Read the candidate validation-fresh verdict.
-# Why: AG-REL-011 verdict is read, never recomputed.
+# What: Print why one validation record is stale, if it is.
+# Why: AG-REL-011 triggers are checked directly, per record.
+# From: Issue #1683
+_ci_release_record_stale() {
+    local name="$1" commit="$2" target="$3" rc=0 p
+    local -a gov=() paths=()
+    read -ra paths <<< "$4"
+    read -ra gov <<< "$5"
+    if [ -z "${commit}" ] || [ "${commit}" = null ]; then
+        printf '%s: never validated\n' "${name}"; return 0
+    fi
+    git -C "${CI_REPO_ROOT}" merge-base --is-ancestor "${commit}" "${target}" 2>/dev/null || rc=$?
+    case "${rc}" in
+        0) ;;
+        1) printf '%s: %s is not an ancestor of %s\n' "${name}" "${commit}" "${target}"; return 0 ;;
+        *) printf '%s: diff from %s not reconstructable\n' "${name}" "${commit}"; return 0 ;;
+    esac
+    for p in "${gov[@]}"; do
+        rc=0; _ci_path_content_changed "${p}" "${commit}" "${target}" || rc=$?
+        case "${rc}" in
+            0) printf '%s: governance %s changed since %s\n' "${name}" "${p}" "${commit}"; return 0 ;;
+            1) ;;
+            *) return 2 ;;
+        esac
+    done
+    for p in "${paths[@]}"; do
+        rc=0; _ci_path_content_changed "${p}" "${commit}" "${target}" || rc=$?
+        case "${rc}" in
+            0) printf '%s: %s changed since %s\n' "${name}" "${p}" "${commit}"; return 0 ;;
+            1) ;;
+            *) return 2 ;;
+        esac
+    done
+}
+
+# What: AG-REL-011 verdict over the SOT validation record.
+# Why: a stale or invalidated record must never ship.
 # From: Issue #1683
 _ci_release_validation_valid() {
     if [ -n "${CI_RELEASE_VALIDATION_CMD:-}" ]; then
         "${CI_RELEASE_VALIDATION_CMD}"
         return "$?"
     fi
-    return 1
+    local rel gov state target layer sub commit paths rows stale="" out
+    rel="$(_ci_block_entry_field release "" validation_state)"
+    gov="$(_ci_block_entry_list release "" governance_paths)"
+    target="${GITHUB_SHA:?GITHUB_SHA required}"
+    state="${CI_REPO_ROOT}/${rel}"
+    if [ -z "${rel}" ] || [ -z "${gov}" ] || ! jq -e '.subsystem_validation' "${state}" >/dev/null; then
+        ci_log "[CI-ERROR-RELEASE-0014]" "state=\"${state}\" reason=\"no readable SOT validation record\""
+        return 2
+    fi
+    gov="${gov//$'\n'/ }"
+    for layer in last_stack_validation last_ci_validation; do
+        out="$(_ci_release_record_stale "${layer}" "$(jq -r --arg l "${layer}" '.[$l].commit' "${state}")" \
+            "${target}" "" "${gov}")" || return 2
+        stale+="${out:+${out}$'\n'}"
+    done
+    rows="$(jq -r '.subsystem_validation | to_entries[] | select(.key | startswith("_") | not)
+        | [.key, (.value.commit // "null"), (.value.path_prefixes | join(" "))] | @tsv' "${state}")" || return 2
+    while IFS=$'\t' read -r sub commit paths; do
+        [ -n "${sub}" ] || continue
+        out="$(_ci_release_record_stale "${sub}" "${commit}" "${target}" "${paths}" "${gov}")" || return 2
+        stale+="${out:+${out}$'\n'}"
+    done <<< "${rows}"
+    if [ -n "${stale}" ]; then
+        ci_error "[CI-ERROR-RELEASE-0017]" "reason=\"validation record stale (AG-REL-011)\"" "${stale}"
+        return 1
+    fi
+    printf 'release-validation=fresh target=%s\n' "${target}"
 }
 
 # What: Verify freshness, then promote latest for release.
@@ -7624,22 +7692,17 @@ _ci_check_dependabot_docker_base_consistency() {
         "${#base_image_of[@]}" "${#distinct_blocks[@]}"
 }
 
-# What: config-writer repeat-run test evidence pairs.
-# Why: every stateful writer needs one.
+# What: SOT writer|evidence|marker repeat-run test pairs.
+# Why: the SOT owns the inventory; empty fails closed.
 # From: Issue #1683 | PR #1858
 _ci_idempotence_writer_evidence() {
-    printf '%s\n' \
-        "setup.sh|.github/scripts/ci.bats|migrate_env_for_update" \
-        "services/dns/entrypoint.sh|tests/bats/dns_config_snapshot_idempotence.bats" \
-        "services/watchdog/watchdog.sh|tests/bats/watchdog_idempotence.bats" \
-        "services/proxy/entrypoint.sh|tests/bats/proxy_known_good_snapshot.bats" \
-        "services/dhcp-proxy/entrypoint.sh|tests/bats/dhcp_proxy_known_good_snapshot.bats" \
-        "services/ui/src/kea_snapshots.rs|services/ui/src/routes/dhcp.rs" \
-        "services/dns/nats-subscriber/src/zone_snapshots.rs|services/dns/nats-subscriber/src/zone_snapshots.rs" \
-        "services/ui/src/routes/secondaries.rs|services/ui/src/routes/secondaries.rs|nats_conf" \
-        "deploy/prod/docker-compose.yml|tests/bats/nats_conf_entrypoint_idempotence.bats" \
-        "deploy/quickstart/docker-compose.yml|tests/bats/nats_conf_entrypoint_idempotence.bats" \
-        "services/ui/src/netdata_alarms.rs|services/ui/src/netdata_alarms.rs"
+    local raw
+    raw="$(_ci_block_entry_list idempotence "" writers)" || return 2
+    if [ -z "${raw}" ]; then
+        ci_log "[CI-ERROR-CHECK-0076]" "reason=\"no SOT idempotence.writers; FAIL CLOSED\""
+        return 2
+    fi
+    printf '%s\n' "${raw}"
 }
 
 # What: True if a name matches repeat/idempoten/converge.
