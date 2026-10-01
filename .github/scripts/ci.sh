@@ -4417,7 +4417,7 @@ _ci_validate_report_unpinned() {
 # Why: Validate candidate digests, never a mutable :latest.
 # From: Issue #1683 | PR #1858
 _ci_validate_pin_override() {
-    local candidate="$1" prefix images svc image slug digest reg matched=" "
+    local candidate="$1" prefix images svc image slug digest ref matched=" "
     if ! prefix="$(_ci_repo)"; then
         ci_log "[CI-ERROR-VALIDATE-0005]" "reason=\"GITHUB_REPOSITORY missing; no image namespace\""
         return 2
@@ -4439,8 +4439,8 @@ _ci_validate_pin_override() {
                     ci_log "[CI-ERROR-VALIDATE-0007]" "service=\"${svc}\" slug=\"${slug}\" reason=\"first-party compose image without candidate digest; refusing mutable tag\""
                     return 2
                 fi
-                reg="${image%%/"${prefix}"/*}"
-                printf '  %s:\n    image: %s/%s/%s@%s\n' "${svc}" "${reg}" "${prefix}" "${slug}" "${digest}"
+                ref="$(_ci_image_ref "${slug}" "${digest}")" || return 2
+                printf '  %s:\n    image: %s\n' "${svc}" "${ref}"
                 matched="${matched}${slug} "
                 ;;
             *) : ;;
