@@ -4563,11 +4563,23 @@ _ci_validate_wait_healthy() {
     done <<< "${no_health}"
     for i in "${!pids[@]}"; do
         if ! wait "${pids[$i]}"; then
-            ci_log "[CI-ERROR-VALIDATE-0009]" "service=\"${names[$i]}\" check=\"${kinds[$i]}\" reason=\"not stable/healthy within timeout\""
+            ci_error "[CI-ERROR-VALIDATE-0009]" "service=\"${names[$i]}\" check=\"${kinds[$i]}\" reason=\"not stable/healthy within timeout\"" \
+                "$(_ci_validate_service_evidence "${project}" "${names[$i]}")"
             rc=1
         fi
     done
     return "${rc}"
+}
+
+# What: Raw state and full logs of one compose service.
+# Why: a health failure must ship its evidence (AG-INT-002).
+# From: Issue #1683
+_ci_validate_service_evidence() {
+    local project="$1" svc="$2" cid
+    cid="$(docker compose -p "${project}" ps -aq "${svc}" 2>&1)"
+    printf 'container=%s\n' "${cid:-<none>}"
+    [ -n "${cid}" ] && docker inspect --format '{{json .State}}' "${cid}" 2>&1
+    docker compose -p "${project}" logs --no-color "${svc}" 2>&1
 }
 
 # What: Prove DNS resolves a CDN domain and split-routes.

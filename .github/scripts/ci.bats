@@ -3066,11 +3066,30 @@ SH
     _ci_validate_health_services() { printf 'proxy\ndns-standard\n'; }
     _ci_validate_no_health_services() { :; }
     _ci_validate_wait_one() { [ "$2" = "dns-standard" ] && return 1; return 0; }
+    _ci_validate_service_evidence() { echo "RAW-LOG-$2"; }
     run _ci_validate_wait_healthy "proj"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-VALIDATE-0009"* ]]
     [[ "${output}" == *'service="dns-standard"'* ]]
     [[ "${output}" == *'check="healthcheck"'* ]]
+    [[ "${output}" == *"RAW-LOG-dns-standard"* ]]
+    [[ "${output}" != *"RAW-LOG-proxy"* ]]
+}
+
+@test "validate service evidence prints state and full logs" {
+    # What: container id, json state and logs, unfiltered.
+    # Why: the failure reason lives in the container log.
+    # From: Issue #1683
+    docker() {
+        case "$*" in
+            *"ps -aq"*) echo cid9 ;;
+            inspect*) echo '{"Status":"exited","ExitCode":3}' ;;
+            *logs*) printf 'line-1\nfatal: boom\n' ;;
+        esac
+    }
+    run _ci_validate_service_evidence proj ui
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"container=cid9"*'"ExitCode":3'*"line-1"*"fatal: boom"* ]]
 }
 
 @test "validate wait_healthy also covers no-healthcheck services" {
