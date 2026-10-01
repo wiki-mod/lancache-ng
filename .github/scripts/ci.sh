@@ -1116,6 +1116,14 @@ _ci_classify_failure() {
             *"code = unavailable"*"locked for"*) printf 'transient\n'; return 0 ;;
             *"panic: methodref has no signature"*) printf 'transient\n'; return 0 ;;
         esac
+        # What: failed RUN step: permanent unless network.
+        # Why: same inputs fail again; only I/O may heal.
+        # From: Issue #1683 | PR #1858
+        case "${low}" in
+            *"did not complete successfully"*)
+                if _ci_failure_is_network "${low}"; then printf 'transient\n'; else printf 'permanent\n'; fi
+                return 0 ;;
+        esac
     fi
     # What: apk package or repo-tag resolution errors.
     # Why: a missing package or tag never heals on retry.
@@ -1130,20 +1138,25 @@ _ci_classify_failure() {
         *"returned error: 403"*|*"returned error: 429"*) ;;
         *"returned error: 4"[0-9][0-9]*) printf 'permanent\n'; return 0 ;;
     esac
-    # What: rate-limit/5xx/network are transient.
-    # Why: these recover on a retry with backoff.
-    case "${low}" in
-        *"http 403"*|*"http 429"*|*"toomanyrequests"*|*"rate limit"*) printf 'transient\n'; return 0 ;;
-        *"http 5"[0-9][0-9]*|*"i/o timeout"*|*"connection refused"*|*"tls handshake timeout"*) printf 'transient\n'; return 0 ;;
-        *"eof"*|*"connection reset by peer"*|*"temporary failure"*) printf 'transient\n'; return 0 ;;
-        *"unexpected disconnect"*|*"remote end hung up"*|*"connection timed out"*) printf 'transient\n'; return 0 ;;
-        *"could not resolve host"*|*"could not connect to server"*) printf 'transient\n'; return 0 ;;
-        *"rpc failed; curl 92"*|*"rpc failed; curl 5"*) printf 'transient\n'; return 0 ;;
-        *"gnutls recv error"*|*"tls connection"*"closed"*) printf 'transient\n'; return 0 ;;
-    esac
     # What: an unclassified failure is transient.
     # Why: a missed transient is worse than a retry.
     printf 'transient\n'
+}
+
+# What: true for rate-limit, 5xx and network signatures.
+# Why: one list for the default and the buildx RUN path.
+# From: Issue #1683 | PR #1858
+_ci_failure_is_network() {
+    case "$1" in
+        *"http 403"*|*"http 429"*|*"toomanyrequests"*|*"rate limit"*) return 0 ;;
+        *"http 5"[0-9][0-9]*|*"i/o timeout"*|*"connection refused"*|*"tls handshake timeout"*) return 0 ;;
+        *"eof"*|*"connection reset by peer"*|*"temporary failure"*) return 0 ;;
+        *"unexpected disconnect"*|*"remote end hung up"*|*"connection timed out"*) return 0 ;;
+        *"could not resolve host"*|*"could not connect to server"*) return 0 ;;
+        *"rpc failed; curl 92"*|*"rpc failed; curl 5"*) return 0 ;;
+        *"gnutls recv error"*|*"tls connection"*"closed"*) return 0 ;;
+    esac
+    return 1
 }
 
 # =========================================================

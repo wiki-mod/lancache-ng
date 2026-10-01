@@ -968,6 +968,16 @@ _probe_stub() {
     [ "$(_ci_classify_failure 'error: could not compile lancache-ui' buildx)" = "permanent" ]
 }
 
+@test "retry classifier: a failed buildx RUN is permanent unless network" {
+    # What: RUN exit: permanent; I/O cause: transient.
+    # Why: a missing build variable must not be retried.
+    # From: Issue #1683 | PR #1858
+    local run='process "/bin/sh -c x" did not complete successfully: exit code: 1'
+    [ "$(_ci_classify_failure "x is required (no default)"$'\n'"${run}" buildx)" = "permanent" ]
+    [ "$(_ci_classify_failure "connection reset by peer"$'\n'"${run}" buildx)" = "transient" ]
+    [ "$(_ci_classify_failure "x is required"$'\n'"${run}" registry)" = "transient" ]
+}
+
 @test "retry classifier: git-fetch transient signatures are covered" {
     # What: DNS/RPC/disconnect transient signatures.
     # Why: Classifier owns the git-fetch transient cases.
