@@ -42,7 +42,7 @@ ENV PATH="/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin" \
     RUST_BACKTRACE=1
 
 # What: fail closed if any dhclient build-arg is empty.
-# Why: the reused v3.20 apk is a pinned input, not loose.
+# Why: the reused dhclient apk is a pinned SOT input.
 # From: Issue #1683
 RUN set -eu; \
     missing=""; \
@@ -109,8 +109,8 @@ RUN curl --version >/dev/null
 # From: Issue #1095
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-# What: reuse the last Alpine v3.20 ISC dhclient apk.
-# Why: 3.21+ dropped it; musl build, real dhclient.
+# What: reuse the SOT-pinned Alpine ISC dhclient apk.
+# Why: newer Alpine dropped it; musl build, real dhclient.
 # From: Issue #1683
 RUN set -euo pipefail; \
     dh_tmp="$(mktemp -d -p /var/tmp)"; \

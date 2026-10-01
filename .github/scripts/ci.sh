@@ -164,6 +164,19 @@ ci_build_targets() {
     _ci_block_keys "build_toolchain"
 }
 
+# What: Print the one SOT build_toolchain target name.
+# Why: the engine never hardcodes the toolchain target.
+# From: Issue #1683
+_ci_toolchain_target() {
+    local keys
+    keys="$(_ci_block_keys build_toolchain)" || return 2
+    if [ -z "${keys}" ] || [ "$(wc -l <<< "${keys}")" -ne 1 ]; then
+        ci_log "[CI-ERROR-CORE-0011]" "reason=\"SOT build_toolchain must hold exactly one target\""
+        return 2
+    fi
+    printf '%s\n' "${keys}"
+}
+
 # What: Build targets that publish a first-party image.
 # Why: skip install-type services from release notes.
 # From: Issue #1683
@@ -783,7 +796,7 @@ _ci_identity_pins() {
                 base="$(_ci_block_entry_field base_images "" alpine)"
                 arch="$(_ci_platform_apk_arch "${platform}")" || {
                     ci_log "[CI-ERROR-IDENTITY-0005]" "platform=\"${platform}\" reason=\"no apk arch; FAIL CLOSED\""; return 2; }
-                _ci_apk_resolve "${base}" "${arch}" "${pkgs% }" || return 2
+                _ci_apk_resolve "${base}" "${arch}" "${pkgs% }" "$(_ci_apk_repositories "${service}")" || return 2
                 printf '\n'
                 ;;
             *)
@@ -1682,7 +1695,11 @@ _ci_image_ref() {
 # Why: One owner for the registry host, from the SOT.
 # From: Issue #1683
 _ci_build_tools_image() {
-    printf '%s/%s/build-tools' "$(_ci_registry)" "$(_ci_repo)"
+    local reg repo tool
+    reg="$(_ci_registry)" || return 2
+    repo="$(_ci_repo)" || return 2
+    tool="$(_ci_toolchain_target)" || return 2
+    printf '%s/%s/%s' "${reg}" "${repo}" "${tool}"
 }
 
 # What: OCI image labels from the SOT and env.
@@ -5098,10 +5115,11 @@ ci_cmd_variables() {
 # Why: SOT owns them; the Dockerfile pins nothing itself.
 # From: Issue #1683
 _ci_build_tools_build_args() {
-    local fmt="${1:-}" platform="${2:-}" prefix="--build-arg " out="" pkgs pins
+    local fmt="${1:-}" platform="${2:-}" prefix="--build-arg " out="" pkgs pins tool
     [ "${fmt}" = "--bare" ] && prefix=""
+    tool="$(_ci_toolchain_target)" || return 2
     out="$(_ci_alpine_build_arg "${prefix}")"$'\n' || return 2
-    pins="$(_ci_target_pin_args build-tools "${platform}" "${prefix}")" || return 2
+    pins="$(_ci_target_pin_args "${tool}" "${platform}" "${prefix}")" || return 2
     [ -z "${pins}" ] || out="${out}${pins}"$'\n'
     # What: append the SOT apk list as a build-arg.
     # Why: Dockerfile consumes it; it never owns the list.
@@ -5112,8 +5130,8 @@ _ci_build_tools_build_args() {
     # What: add SOT tagged repos as build-arg
     # Why: Dockerfile adds them; never owns URL
     # From: Issue #1683 | PR #1858
-    pkgs="$(_ci_block_entry_list build_toolchain build-tools apk_repositories | tr '\n' ' ')"
-    out="${out}${prefix}APK_TAGGED_REPOS=${pkgs% }"$'\n'
+    pkgs="$(_ci_apk_repositories "${tool}")" || return 2
+    out="${out}${prefix}APK_TAGGED_REPOS=${pkgs}"$'\n'
     printf '%s' "${out}"
 }
 
@@ -5193,35 +5211,44 @@ ci_cmd_build_args() {
         ""|--bare) : ;;
         *) ci_log "[CI-ERROR-BUILDARGS-0005]" "fmt=\"${fmt}\" reason=\"format must be empty or --bare\""; return 2 ;;
     esac
-    case "${service}" in
-        build-tools) _ci_build_tools_build_args "${fmt}" "${platform}" ;;
-        # What: known manifest service gets build-args.
-        # Why: capture-first avoids unsafe grep pipe.
-        # From: Issue #1683
-        *)
-            local svc_list
-            svc_list="$(ci_services)" || return 2
-            if grep -qxF -- "${service}" <<< "${svc_list}"; then
-                _ci_service_build_args "${service}" "${fmt}" "${platform}"
-            fi
-            ;;
-    esac
+    local tools svc_list
+    svc_list="$(ci_services)" || return 2
+    tools="$(_ci_block_keys build_toolchain)" || return 2
+    if grep -qxF -- "${service}" <<< "${svc_list}"; then
+        _ci_service_build_args "${service}" "${fmt}" "${platform}"
+    elif grep -qxF -- "${service}" <<< "${tools}"; then
+        _ci_build_tools_build_args "${fmt}" "${platform}"
+    else
+        ci_log "[CI-ERROR-BUILDARGS-0002]" "service=\"${service}\" reason=\"not a SOT build target\""
+        return 2
+    fi
+}
+
+# What: a target's SOT apk_repositories, space-joined.
+# Why: each target resolves with its own repos only.
+# From: Issue #1683
+_ci_apk_repositories() {
+    local out
+    out="$(_ci_block_entry_list services "$1" apk_repositories)"
+    [ -n "${out}" ] || out="$(_ci_block_entry_list build_toolchain "$1" apk_repositories)"
+    printf '%s' "${out//$'\n'/ }"
 }
 
 # What: Print the build-tools apk package list.
 # Why: One SOT source feeds the input check.
 # From: Issue #1683
 _ci_build_tools_packages() {
-    local pkgs
+    local pkgs tool
+    tool="$(_ci_toolchain_target)" || return 2
     # What: read the exact SOT apk list via the one reader.
     # Why: SOT is the owner; no parse-back, no new parser.
     # From: Issue #1683
-    pkgs="$(_ci_block_entry_list build_toolchain build-tools packages | LC_ALL=C sort -u)"
+    pkgs="$(_ci_block_entry_list build_toolchain "${tool}" packages | LC_ALL=C sort -u)"
     # What: fail closed if the SOT list is empty.
     # Why: an empty list would blind the input check.
     # From: Issue #1683
     if [ -z "${pkgs}" ]; then
-        ci_log "[CI-ERROR-BUILDTOOLS-0006]" "reason=\"no packages in SOT build_toolchain.build-tools.packages; FAIL CLOSED\""
+        ci_log "[CI-ERROR-BUILDTOOLS-0006]" "reason=\"no packages in SOT build_toolchain.${tool}.packages; FAIL CLOSED\""
         return 2
     fi
     printf '%s\n' "${pkgs}"
@@ -5231,8 +5258,9 @@ _ci_build_tools_packages() {
 # Why: SOT is the one smoke owner (AG-VAL-017).
 # From: Issue #1683 | PR #1858
 _ci_build_tools_smoke() {
-    local field="$1" items
-    items="$(_ci_block_entry_list build_toolchain build-tools "${field}")"
+    local field="$1" items tool
+    tool="$(_ci_toolchain_target)" || return 2
+    items="$(_ci_block_entry_list build_toolchain "${tool}" "${field}")"
     if [ -z "${items}" ]; then
         ci_log "[CI-ERROR-BUILDTOOLS-0013]" "field=\"${field}\" reason=\"empty SOT smoke list; FAIL CLOSED\""
         return 2
@@ -5244,7 +5272,7 @@ _ci_build_tools_smoke() {
 # Why: Weekly check rebuilds only on a changed input.
 # From: Issue #1683
 _ci_build_tools_signature() {
-    local versions="$1" args ids trimmed
+    local versions="$1" args ids trimmed tool ctx
     # What: fail closed on an empty apk version state.
     # Why: a blank scan must never mint a stable signature.
     # From: Issue #1683
@@ -5257,7 +5285,9 @@ _ci_build_tools_signature() {
     # Why: a base/dhclient change must move the sig.
     # From: Issue #1683
     args="$(_ci_build_tools_build_args --bare)" || return 2
-    ids="$(_ci_tracked_content_ids tools/build-tools)"
+    tool="$(_ci_toolchain_target)" || return 2
+    ctx="$(_ci_required_field "${tool}" context)" || return 2
+    ids="$(_ci_tracked_content_ids "${ctx}")" || return 2
     if [ -z "${ids}" ]; then
         ci_log "[CI-ERROR-BUILDTOOLS-0005]" "reason=\"no tracked build-tools source; FAIL CLOSED\""
         return 2
@@ -5294,7 +5324,7 @@ _ci_build_tools_arches() {
 # Why: real apk runs in a container; tests inject it.
 # From: Issue #1683
 _ci_apk_resolve() {
-    local base="$1" arch="$2" packages="$3" repos raw n
+    local base="$1" arch="$2" packages="$3" repos="${4:-}" raw n
     local -a penv=()
     while IFS= read -r n; do penv+=(-e "${n}"); done < <(_ci_proxy_names)
     _ci_procsub_ok "$!" 0 || return 2
@@ -5302,7 +5332,6 @@ _ci_apk_resolve() {
         "${CI_APK_RESOLVE_CMD}" "${base}" "${arch}" "${packages}"
         return "$?"
     fi
-    repos="$(_ci_block_entry_list build_toolchain build-tools apk_repositories | tr '\n' ' ')"
     # What: per-arch clean root with the build's repos.
     # Why: a foreign arch needs its own db and keys.
     # From: Issue #1683 | PR #1858
@@ -5327,7 +5356,7 @@ _ci_apk_resolve() {
 # Why: the whole signature is computed here, not in YAML.
 # From: Issue #1683
 _ci_build_tools_resolve_signature() {
-    local base packages arches arch av versions=""
+    local base packages arches arch av versions="" tool repos
     base="$(_ci_build_tools_build_args --bare | sed -n 's/^ALPINE_IMAGE=//p')" || {
         ci_log "[CI-ERROR-BUILDTOOLS-0009]" "reason=\"no ALPINE_IMAGE from SOT; FAIL CLOSED\""
         return 2
@@ -5338,8 +5367,10 @@ _ci_build_tools_resolve_signature() {
     fi
     packages="$(_ci_build_tools_packages | tr '\n' ' ')" || return 2
     arches="$(_ci_build_tools_arches)" || return 2
+    tool="$(_ci_toolchain_target)" || return 2
+    repos="$(_ci_apk_repositories "${tool}")" || return 2
     for arch in ${arches}; do
-        av="$(_ci_apk_resolve "${base}" "${arch}" "${packages}")" || return 2
+        av="$(_ci_apk_resolve "${base}" "${arch}" "${packages}" "${repos}")" || return 2
         if [ -z "${av}" ]; then
             ci_log "[CI-ERROR-BUILDTOOLS-0011]" "arch=\"${arch}\" reason=\"no apk versions; FAIL CLOSED\""
             return 2
@@ -5673,34 +5704,11 @@ _ci_version_walk() {
 }
 
 
-# What: Flag if dhclient's branch comment text has drifted.
-# Why: Prose restates the SOT value; sync never touches it.
-# From: Issue #1683 | PR #1858
-_ci_version_audit_dhclient_branch_comment() {
-    local branch dockerfile="${CI_REPO_ROOT}/tools/build-tools/Dockerfile"
-    branch="$(_ci_block_entry_field external_versions dhclient alpine_branch)"
-    [ -n "${branch}" ] || return 0
-    if ! grep -Fq "${branch}" "${dockerfile}" 2>/dev/null; then
-        ci_log "[CI-WARN-VERSION-0002]" "path=\"${dockerfile}\" key=\"dhclient.alpine_branch\" value=\"${branch}\" reason=\"no matching comment mention found\""
-    fi
-}
-
-
 # What: version verify: default, read-only, fails on drift.
 # Why: The one CI gate for SOT-vs-repo version drift.
 # From: Issue #1683 | PR #1858
 _ci_version_verify() {
     _ci_version_walk _ci_version_diff
-}
-
-# What: audit version contracts in full read-only
-# Why: dashboard view; verify is CI gate
-# From: Issue #1683 | PR #1858
-_ci_version_audit() {
-    local rc=0
-    _ci_version_walk _ci_version_diff || rc=$?
-    _ci_version_audit_dhclient_branch_comment
-    return "${rc}"
 }
 
 # What: sync consumer's bare ARGs, nothing to update
@@ -5719,14 +5727,13 @@ _ci_version_sync() {
 }
 
 # What: version verify/audit/sync for SOT external_versions.
-# Why: netdata+dhclient must not silently drift from SOT.
+# Why: pin consumers must not silently drift from the SOT.
 # From: Issue #1683 | PR #1858
 ci_cmd_version() {
     local sub="${1:-verify}"
     if [ "$#" -gt 0 ]; then shift; fi
     case "${sub}" in
-        verify) _ci_version_verify ;;
-        audit)  _ci_version_audit ;;
+        verify|audit) _ci_version_verify ;;
         sync)   _ci_version_sync ;;
         *)
             ci_log "[CI-ERROR-VERSION-0014]" "sub=\"${sub}\" reason=\"unknown version subcommand\""

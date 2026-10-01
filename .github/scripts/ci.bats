@@ -3973,13 +3973,13 @@ netdata=sha256:n"
     [[ "${output}" == *"CI-ERROR-BUILDARGS-0001"* ]]
 }
 
-@test "build-args emits nothing for an unrecognized target" {
-    # What: Unrecognized target emits nothing.
-    # Why: Only manifest services get args now.
+@test "build-args fails closed for an unrecognized target" {
+    # What: a non-SOT target name is BUILDARGS-0002.
+    # Why: empty args with rc 0 would build without pins.
     # From: Issue #1683
     run bash "${CI_SH}" build-args not-a-real-service
-    [ "${status}" -eq 0 ]
-    [ -z "${output}" ]
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"[CI-ERROR-BUILDARGS-0002]"* ]]
 }
 
 @test "build-args: base image per service, <KEY>_IMAGE from external_image" {
@@ -4083,16 +4083,20 @@ netdata=sha256:n"
     [[ "${output}" == *"--build-arg NETDATA_SHA256=${sha}"* ]]
 }
 
-@test "build-tools packages reads only build_toolchain.build-tools.packages" {
-    # What: same-named packages elsewhere must be ignored.
-    # Why: the reader must bind the exact block+entry path.
+@test "toolchain packages read the one SOT toolchain target" {
+    # What: service lists ignored; two toolchains fail.
+    # Why: the engine names no toolchain; the SOT holds one.
     # From: Issue #1683
     local m="${BATS_TEST_TMPDIR}/other.yml"
-    printf 'services:\n  proxy:\n    packages:\n      - WRONG_SVC\n' > "${m}"
-    printf 'build_toolchain:\n  build-tools:\n    packages:\n      - right-one\n  other-tool:\n    packages:\n      - WRONG_ENTRY\n' >> "${m}"
+    printf 'services:\n  svc-a:\n    packages:\n      - WRONG_SVC\n' > "${m}"
+    printf 'build_toolchain:\n  tool-t:\n    packages:\n      - right-one\n' >> "${m}"
     CI_MANIFEST="${m}" run bash "${CI_SH}" build-tools packages
     [ "${status}" -eq 0 ]
     [ "${output}" = "right-one" ]
+    printf '  tool-u:\n    packages:\n      - other\n' >> "${m}"
+    CI_MANIFEST="${m}" run bash "${CI_SH}" build-tools packages
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"[CI-ERROR-CORE-0011]"* ]]
 }
 
 @test "build-tools packages fails closed on an empty SOT list" {
@@ -4211,10 +4215,9 @@ netdata=sha256:n"
     # What: own root, arch keys, SOT repos; raw on failure.
     # Why: a foreign arch needs its own db, keys and tags.
     # From: Issue #1683 | PR #1858
-    local log="${BATS_TEST_TMPDIR}/docker.log" repos
-    repos="$(_ci_block_entry_list build_toolchain build-tools apk_repositories | tr '\n' ' ')"
+    local log="${BATS_TEST_TMPDIR}/docker.log" repos="tag-a=http://repo.example.test/a"
     _stub docker 'echo "$*" >> "'"${log}"'"; if [ "${FAIL:-}" = 1 ]; then echo "ERROR: unable to select packages: zz"; exit 1; fi; echo "(1/1) Installing zz (9.9-r0)"' >/dev/null
-    CI_APK_RESOLVE_CMD='' PATH="${BATS_TEST_TMPDIR}:${PATH}" run _ci_apk_resolve img/base arch-b zz
+    CI_APK_RESOLVE_CMD='' PATH="${BATS_TEST_TMPDIR}:${PATH}" run _ci_apk_resolve img/base arch-b zz "${repos}"
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"zz-9.9-r0"* ]]
     grep -q -- "-e ARCH=arch-b" "${log}"
@@ -8624,14 +8627,15 @@ _version_fixture_repo() {
     done <<< "$(_ci_version_consumers)"
 }
 
-@test "version audit reports the netdata contract without failing" {
-    # What: audit is the report-only view of the contract.
-    # Why: verify gates CI; audit report only.
+@test "version audit is the verify owner under its contract name" {
+    # What: audit and verify give the same output and rc.
+    # Why: one pin-drift owner; no second walk of the SOT.
     # From: Issue #1683 | PR #1858
+    run bash "${CI_SH}" version verify
+    local want_status="${status}" want="${output}"
     run bash "${CI_SH}" version audit
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"key=netdata.sot NETDATA_VERSION="* ]]
-    [[ "${output}" == *"shape=bare"* ]]
+    [ "${status}" -eq "${want_status}" ]
+    [ "${output}" = "${want}" ]
 }
 
 @test "version sync is a contract-only no-op for both consumers" {
