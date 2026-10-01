@@ -115,6 +115,23 @@ teardown() {
     [ "${output}" = "$(printf 'svc-a\nsvc-b\ntc-x')" ]
 }
 
+@test "every rust service in the SOT smoke-runs ldd on its binary" {
+    # What: every rust service smoke-runs ldd on a binary.
+    # Why: a missing .so must fail verify, not validate.
+    # From: Issue #1683 | PR #1858
+    local s missing="" rust=0
+    for s in $(CI_MANIFEST="${CI_MANIFEST_SOURCE}" ci_services); do
+        [ "$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" ci_service_field "${s}" build_type)" = rust ] || continue
+        rust=$((rust + 1))
+        grep -Eq '^ldd /usr/local/bin/[^ ]+$' \
+            <<<"$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_block_entry_list services "${s}" smoke)" \
+            || missing="${missing} ${s}"
+    done
+    echo "rust=${rust} missing=${missing:-none}"
+    [ "${rust}" -gt 0 ]
+    [ -z "${missing}" ]
+}
+
 @test "unknown subcommand fails closed with a stable id" {
     # What: An unknown command must never succeed.
     # Why: Fail-closed dispatch (AG-VAL-002).

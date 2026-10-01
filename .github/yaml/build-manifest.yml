@@ -66,6 +66,10 @@ services:
       - lsof
       - ripgrep
     smoke:
+      # What: loader resolves every lib; main never runs.
+      # Why: a missing .so (exit 127) slipped to validate.
+      # From: Issue #1683 | PR #1858
+      - ldd /usr/local/bin/nats-subscriber
       - find --version
       - envsubst --version
       - rg --version
@@ -95,6 +99,10 @@ services:
       - lsof
       - ripgrep
     smoke:
+      # What: loader resolves every lib; main never runs.
+      # Why: a missing .so (exit 127) slipped to validate.
+      # From: Issue #1683 | PR #1858
+      - ldd /usr/local/bin/lancache-watchdog
       - find --version
       - rg --version
       - curl --version
@@ -239,6 +247,10 @@ services:
       - lsof
       - ripgrep
     smoke:
+      # What: loader resolves every lib; main never runs.
+      # Why: a missing .so (exit 127) slipped to validate.
+      # From: Issue #1683 | PR #1858
+      - ldd /usr/local/bin/lancache-ui
       - rg --version
       - curl --version
       - lsof -v
@@ -259,6 +271,11 @@ services:
     # From: Issue #1683
     packages:
       - ca-certificates
+    smoke:
+      # What: loader resolves every lib; main never runs.
+      # Why: a missing .so (exit 127) slipped to validate.
+      # From: Issue #1683 | PR #1858
+      - ldd /usr/local/bin/lancache-cachehamster
 
 # What: The toolchain image that builds the product stack.
 # Why: built by generic pipeline; not in stack
