@@ -5,6 +5,11 @@
 # Why: One place proves every CI invariant and regression.
 # From: Issue #1683
 
+# What: declare the bats feature level the suite uses.
+# Why: run -N / --separate-stderr need 1.5.0 (BW02).
+# From: Issue #1683
+bats_require_minimum_version 1.5.0
+
 # What: Source ci.sh functions without running dispatch.
 # Why: Test engine functions directly against the real SOT.
 # From: Issue #1683
@@ -1283,7 +1288,7 @@ RS
     local m="${BATS_TEST_TMPDIR}/manifest-ok.yml"
     printf 'services:\n  fixture-ok:\n    context: crate\n    crate: ci-fixture-ok\n    build_type: rust\n' > "${m}"
     CI_RUST_VALIDATION=true CI_MANIFEST="${m}" CI_REPO_ROOT="${root}" run bash "${CI_SH}" test fixture-ok
-    [ "${status}" -eq 0 ]
+    [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }
     [[ "${output}" == *"tested=ok"* ]]
 }
 
@@ -1312,9 +1317,9 @@ RS
     local m="${BATS_TEST_TMPDIR}/manifest-fail.yml"
     printf 'services:\n  fixture-fail:\n    context: crate\n    crate: ci-fixture-fail\n    build_type: rust\n' > "${m}"
     CI_RUST_VALIDATION=true CI_MANIFEST="${m}" CI_REPO_ROOT="${root}" run bash "${CI_SH}" test fixture-fail
-    [ "${status}" -eq 2 ]
+    [ "${status}" -eq 2 ] || { echo "${output}"; return 1; }
     [[ "${output}" == *"CI-ERROR-TEST-0003"* ]]
-    [[ "${output}" == *"equality checks against true"* ]]
+    [[ "${output}" == *"equality checks against true"* ]] || { echo "${output}"; return 1; }
 }
 
 @test "ci.sh rejects a /tmp (tmpfs) temp root for any command" {
