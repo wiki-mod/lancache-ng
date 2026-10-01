@@ -2116,14 +2116,16 @@ tail" '{body:$b, isPrerelease:false}')" \
 }
 
 @test "published-services lists first-party images, excludes third-party" {
-    # What: Publishes apk/rust/toolchain, skips netdata.
+    # What: every build type but install, plus the toolchain.
     # Why: SBOM targets first-party images only.
     # From: Issue #1683
-    run _ci_published_services
+    local m="${BATS_TEST_TMPDIR}/m.yml"
+    printf '%s\n' 'services:' '  svc-a:' '    build_type: apk' \
+        '  svc-b:' '    build_type: install' '  svc-c:' '    build_type: rust' \
+        'build_toolchain:' '  tool-t:' '    build_type: toolchain' > "${m}"
+    CI_MANIFEST="${m}" run _ci_published_services
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *proxy* ]]
-    [[ "${output}" == *build-tools* ]]
-    [[ "${output}" != *netdata* ]]
+    [ "${output}" = "$(printf '%s\n' svc-a svc-c tool-t)" ]
 }
 
 @test "release-sbom-stack builds an SBOM for every published service" {
@@ -7130,20 +7132,36 @@ EOF
     [[ "${output}" == *"edited with release label; expected"* ]]
 }
 
+# What: neutral repo and SOT for image build tests.
+# Why: build tests must not depend on a real service.
+# From: Issue #1683
+_build_fixture() {
+    local r="${BATS_TEST_TMPDIR}/repo"
+    mkdir -p "${r}/svc"
+    printf 'FROM x\nARG BUILD_IDENTITY\n' > "${r}/svc/Dockerfile"
+    printf '%s\n' 'services:' '  svc-a:' '    context: svc' '    build_type: apk' \
+        '  svc-b:' '    context: svc' '    build_type: apk' 'base_images:' \
+        "  alpine: registry.example.test/base@sha256:$(printf '0%.0s' {1..64})" \
+        'release:' '  registry: registry.example.test' > "${r}/m.yml"
+    cd "${r}" || return 1
+    export CI_MANIFEST="${r}/m.yml" GITHUB_REPOSITORY=owner/fixture-repo
+}
+
 @test "docker-build builds a per-identity per-arch tag via buildx" {
     # What: ci.sh executes the build; YAML only calls it.
     # Why: engine owns execution, orchestrator just calls.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    _build_fixture
     printf '#!/usr/bin/env bash\necho "docker $*"\n' > "${bin}/docker"
     chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
-        run _ci_docker_build proxy abc123 os/p1
+        run _ci_docker_build svc-a abc123 os/p1
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"buildx build --load"* ]]
-    [[ "${output}" == *"registry.example.test/owner/fixture-repo/proxy:sha-abc123-p1"* ]]
+    [[ "${output}" == *"registry.example.test/owner/fixture-repo/svc-a:sha-abc123-p1"* ]]
     [[ "${output}" == *"--platform os/p1"* ]]
-    [[ "${output}" == *"org.opencontainers.image.title=proxy"* ]]
+    [[ "${output}" == *"org.opencontainers.image.title=svc-a"* ]]
     [[ "${output}" == *"--build-arg BUILD_IDENTITY=abc123"* ]]
 }
 
@@ -7175,10 +7193,11 @@ EOF
     # Why: unset vars must not change existing callers.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    _build_fixture
     printf '#!/usr/bin/env bash\necho "docker $*"\n' > "${bin}/docker"
     chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
-        run _ci_docker_build proxy abc123 os/p1
+        run _ci_docker_build svc-a abc123 os/p1
     [ "${status}" -eq 0 ]
     [[ "${output}" != *"--cache-from"* ]]
     [[ "${output}" != *"--cache-to"* ]]
@@ -7189,26 +7208,27 @@ EOF
     # Why: needs one cache scope per service, not shared.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    _build_fixture
     printf '#!/usr/bin/env bash\necho "docker $*"\n' > "${bin}/docker"
     chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
-        CI_BUILD_CACHE_FROM="type=registry,ref=registry.example.test/owner/fixture-repo/proxy:cache" \
-        CI_BUILD_CACHE_TO="type=registry,ref=registry.example.test/owner/fixture-repo/proxy:cache,mode=max" \
-        run _ci_docker_build proxy abc123 os/p1
+        CI_BUILD_CACHE_FROM="type=registry,ref=registry.example.test/owner/fixture-repo/svc-a:cache" \
+        CI_BUILD_CACHE_TO="type=registry,ref=registry.example.test/owner/fixture-repo/svc-a:cache,mode=max" \
+        run _ci_docker_build svc-a abc123 os/p1
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"--cache-from type=registry,ref=registry.example.test/owner/fixture-repo/proxy:cache"* ]]
-    [[ "${output}" == *"--cache-to type=registry,ref=registry.example.test/owner/fixture-repo/proxy:cache,mode=max,ignore-error=true"* ]]
+    [[ "${output}" == *"--cache-from type=registry,ref=registry.example.test/owner/fixture-repo/svc-a:cache"* ]]
+    [[ "${output}" == *"--cache-to type=registry,ref=registry.example.test/owner/fixture-repo/svc-a:cache,mode=max,ignore-error=true"* ]]
 
     # What: a 2nd service call gets its own cache ref.
     # Why: proves scope is per-call, not one constant value.
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo CI_BUILD_TOOLS_IMAGE_CMD='echo bt@sha256:x' \
-        CI_BUILD_CACHE_FROM="type=registry,ref=registry.example.test/owner/fixture-repo/ui:cache" \
-        CI_BUILD_CACHE_TO="type=registry,ref=registry.example.test/owner/fixture-repo/ui:cache,mode=max" \
-        run _ci_docker_build ui def456 os/p1
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
+        CI_BUILD_CACHE_FROM="type=registry,ref=registry.example.test/owner/fixture-repo/svc-b:cache" \
+        CI_BUILD_CACHE_TO="type=registry,ref=registry.example.test/owner/fixture-repo/svc-b:cache,mode=max" \
+        run _ci_docker_build svc-b def456 os/p1
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"--cache-from type=registry,ref=registry.example.test/owner/fixture-repo/ui:cache"* ]]
-    [[ "${output}" == *"--cache-to type=registry,ref=registry.example.test/owner/fixture-repo/ui:cache,mode=max,ignore-error=true"* ]]
-    [[ "${output}" != *"proxy:cache"* ]]
+    [[ "${output}" == *"--cache-from type=registry,ref=registry.example.test/owner/fixture-repo/svc-b:cache"* ]]
+    [[ "${output}" == *"--cache-to type=registry,ref=registry.example.test/owner/fixture-repo/svc-b:cache,mode=max,ignore-error=true"* ]]
+    [[ "${output}" != *"svc-a:cache"* ]]
 }
 
 @test "docker-build cache-from miss fails cache import only, build still succeeds" {
@@ -7216,6 +7236,7 @@ EOF
     # Why: §35: a cache miss must cost time, not the build.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    _build_fixture
     cat > "${bin}/docker" <<'EOF'
 #!/usr/bin/env bash
 case "$*" in
@@ -7229,8 +7250,8 @@ esac
 EOF
     chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
-        CI_BUILD_CACHE_FROM="type=registry,ref=registry.example.test/owner/fixture-repo/proxy:cache" \
-        run _ci_docker_build proxy abc123 os/p1
+        CI_BUILD_CACHE_FROM="type=registry,ref=registry.example.test/owner/fixture-repo/svc-a:cache" \
+        run _ci_docker_build svc-a abc123 os/p1
     [ "${status}" -eq 0 ]
     # What: raw evidence of the miss stays visible.
     # Why: AG-INT-002 forbids hiding it.
@@ -7242,13 +7263,14 @@ EOF
     # Why: a repeated CSV key must not reach buildx.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    _build_fixture
     printf '#!/usr/bin/env bash\necho "docker $*"\n' > "${bin}/docker"
     chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
-        CI_BUILD_CACHE_TO="type=registry,ref=registry.example.test/owner/fixture-repo/proxy:cache,ignore-error=false" \
-        run _ci_docker_build proxy abc123 os/p1
+        CI_BUILD_CACHE_TO="type=registry,ref=registry.example.test/owner/fixture-repo/svc-a:cache,ignore-error=false" \
+        run _ci_docker_build svc-a abc123 os/p1
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"--cache-to type=registry,ref=registry.example.test/owner/fixture-repo/proxy:cache,ignore-error=false"* ]]
+    [[ "${output}" == *"--cache-to type=registry,ref=registry.example.test/owner/fixture-repo/svc-a:cache,ignore-error=false"* ]]
     [[ "${output}" != *"ignore-error=false,ignore-error=true"* ]]
 }
 
@@ -7257,13 +7279,14 @@ EOF
     # Why: appending CSV attrs would break its syntax.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    _build_fixture
     printf '#!/usr/bin/env bash\necho "docker $*"\n' > "${bin}/docker"
     chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
-        CI_BUILD_CACHE_TO="registry.example.test/owner/fixture-repo/proxy:cache" \
-        run _ci_docker_build proxy abc123 os/p1
+        CI_BUILD_CACHE_TO="registry.example.test/owner/fixture-repo/svc-a:cache" \
+        run _ci_docker_build svc-a abc123 os/p1
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"--cache-to registry.example.test/owner/fixture-repo/proxy:cache"* ]]
+    [[ "${output}" == *"--cache-to registry.example.test/owner/fixture-repo/svc-a:cache"* ]]
     [[ "${output}" == *"CI-WARN-BUILD-0012"* ]]
 }
 
@@ -7272,10 +7295,11 @@ EOF
     # Why: BUILD != PUBLISH; same digest, many retries.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    _build_fixture
     printf '#!/usr/bin/env bash\ncase "$*" in *"imagetools inspect"*) echo sha256:deadbeef ;; *) : ;; esac\n' > "${bin}/docker"
     chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
-        run _ci_docker_publish proxy abc123 os/p1
+        run _ci_docker_publish svc-a abc123 os/p1
     [ "${status}" -eq 0 ]
     [ "${output}" = "sha256:deadbeef" ]
 }
@@ -7336,6 +7360,7 @@ EOF
     # Why: Retry-fail must never trigger rebuild.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    _build_fixture
     local buildmarker="${BATS_TEST_TMPDIR}/build-was-called"
     cat > "${bin}/docker" <<EOF
 #!/usr/bin/env bash
@@ -7348,7 +7373,7 @@ EOF
     chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
     CI_RETRY_BACKOFF_BASE_SECONDS=0 CI_RETRY_MAX_ATTEMPTS=3 \
-        run _ci_docker_publish proxy abc123 os/p1
+        run _ci_docker_publish svc-a abc123 os/p1
     [ "${status}" -eq 2 ]
     [ ! -e "${buildmarker}" ]
 }
@@ -7358,6 +7383,7 @@ EOF
     # Why: Historical buildx transient signature match.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    _build_fixture
     local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
     cat > "${bin}/docker" <<EOF
 #!/usr/bin/env bash
@@ -7375,7 +7401,7 @@ esac
 EOF
     chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo CI_RETRY_BACKOFF_BASE_SECONDS=0 \
-        run _ci_docker_build proxy abc123 os/p1
+        run _ci_docker_build svc-a abc123 os/p1
     [ "${status}" -eq 0 ]
     [ "$(cat "${cnt}")" -eq 2 ]
 }
@@ -7385,19 +7411,20 @@ EOF
     # Why: Blind retry would only delay real feedback.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    _build_fixture
     local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
     cat > "${bin}/docker" <<EOF
 #!/usr/bin/env bash
 case "\$*" in
     *"buildx build"*)
         printf '%s' "\$(( \$(cat "${cnt}") + 1 ))" > "${cnt}"
-        echo "error: could not compile lancache-ui" >&2; exit 1 ;;
+        echo "error: could not compile crate-a" >&2; exit 1 ;;
     *) : ;;
 esac
 EOF
     chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo CI_RETRY_BACKOFF_BASE_SECONDS=0 \
-        run _ci_docker_build proxy abc123 os/p1
+        run _ci_docker_build svc-a abc123 os/p1
     [ "${status}" -eq 2 ]
     [ "$(cat "${cnt}")" -eq 1 ]
 }
