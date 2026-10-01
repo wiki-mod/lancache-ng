@@ -46,6 +46,9 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::process::CommandExt;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use subtle::ConstantTimeEq;
@@ -89,6 +92,10 @@ const CSRF_FORM_FIELD: &str = "csrf_token";
 const MAX_CSRF_BODY_BYTES: usize = 1024 * 1024;
 const MAX_UI_SESSION_TTL_SECONDS: u64 = 365 * 24 * 60 * 60;
 const SECONDARY_REGISTRATION_TOKEN_FILE: &str = "/data/lancache-secondary-registration.token";
+// What: the ui log dir; init_tracing writes ui.log there.
+// Why: root start and tracing must agree on one path.
+// From: Issue #1427 | PR #1670
+const UI_LOG_DIR: &str = "/var/log/lancache-ui";
 
 // Pattern-matches every checked-in placeholder form for SECONDARY_REGISTRATION_TOKEN,
 // not just deploy/prod/.env's CHANGE_ME_SECONDARY_REGISTRATION_TOKEN default. An
@@ -240,6 +247,225 @@ fn load_or_create_secondary_registration_token(
             "failed to read secondary registration token file at {path}: {err}"
         )),
     }
+}
+
+// What: env var -> shared-secret file the root start resolves.
+// Why: ui must match the dns/dhcp/nats first-writer value.
+// From: Issue #858 | PR #1858
+const CONTAINER_SHARED_SECRETS: &[(&str, &str)] = &[
+    ("PDNS_API_KEY", "pdns-api-key"),
+    ("NETDATA_ALARM_TOKEN", "netdata-alarm-token"),
+    ("DHCP_API_TOKEN", "kea-ctrl-token"),
+    ("NATS_UI_PASSWORD", "nats-ui-password"),
+    ("NATS_CALLOUT_PASSWORD", "nats-callout-password"),
+    ("NATS_SYS_PASSWORD", "nats-sys-password"),
+    ("NATS_DNS_WRITER_PASSWORD", "nats-dns-writer-password"),
+    ("NATS_DNS_REPLICA_PASSWORD", "nats-dns-replica-password"),
+];
+
+// What: legacy shipped DHCP_API_TOKEN defaults.
+// Why: not generically named, yet they mean "unset".
+// From: Issue #858
+const LEGACY_DHCP_API_TOKEN_DEFAULTS: &[&str] = &[
+    "lancache-dhcp-secret",
+    "lancache-dhcp-dev-secret",
+    "lancache-dhcp-prod-secret",
+];
+
+// What: the shared-secret placeholder rule ("shared" column).
+// Why: every consumer of one secret must decide alike.
+// From: Issue #967
+fn shared_secret_is_placeholder(value: &str) -> bool {
+    let normalized = value.to_ascii_lowercase().replace('-', "_");
+    normalized.is_empty()
+        || normalized.starts_with("change_me")
+        || normalized.starts_with("changeme")
+        || normalized.starts_with("your_")
+        || normalized.ends_with("_here")
+}
+
+// What: first-writer-wins read-or-create of one shared secret.
+// Why: no split-brain between independent consumers.
+// From: Issue #858 | PR #1775
+fn resolve_shared_secret(dir: &Path, name: &str, current: &str, gid: u32) -> Result<String, String> {
+    let file = dir.join(name);
+    let on_disk = || {
+        fs::read_to_string(&file)
+            .ok()
+            .map(|v| v.replace('\n', ""))
+            .filter(|v| !v.is_empty())
+    };
+    if let Some(existing) = on_disk()
+        && (current.is_empty() || existing == current)
+    {
+        return Ok(existing);
+    }
+    // What: a real configured value survives a failed write.
+    // Why: only a disagreeing on-disk value makes it unsafe.
+    // From: PR #1775
+    let conflict_now = || match on_disk() {
+        Some(v) => v != current,
+        None => file.exists(),
+    };
+    let keep_current = || !current.is_empty() && !conflict_now();
+    let value = if current.is_empty() {
+        hex::encode(rand::random::<[u8; 32]>())
+    } else {
+        current.to_string()
+    };
+    let nanos = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let tmp = dir.join(format!(".secret.{}.{nanos}", std::process::id()));
+    let created = fs::create_dir_all(dir).and_then(|()| {
+        let mut file = OpenOptions::new().create_new(true).write(true).mode(0o640).open(&tmp)?;
+        file.write_all(value.as_bytes())?;
+        file.sync_all()
+    });
+    if let Err(err) = created {
+        let _ = fs::remove_file(&tmp);
+        return if keep_current() {
+            Ok(current.to_string())
+        } else {
+            Err(format!("cannot write {}: {err}", tmp.display()))
+        };
+    }
+    // What: group-own the file by the reader gid, best effort.
+    // Why: some volumes refuse chgrp; 0640 stays either way.
+    // From: Issue #858
+    let _ = std::os::unix::fs::chown(&tmp, None, Some(gid));
+    let placed = if current.is_empty() {
+        fs::hard_link(&tmp, &file)
+    } else {
+        fs::rename(&tmp, &file)
+    };
+    let _ = fs::remove_file(&tmp);
+    if placed.is_ok() {
+        return Ok(value);
+    }
+    if current.is_empty()
+        && let Some(existing) = on_disk()
+    {
+        return Ok(existing);
+    }
+    if keep_current() {
+        return Ok(current.to_string());
+    }
+    Err(format!("cannot place {}", file.display()))
+}
+
+// What: uid and gid of a passwd entry, e.g. "lancache".
+// Why: the image's adduser owns the id, not this code.
+// From: Issue #1427
+fn passwd_ids(passwd: &str, user: &str) -> Option<(u32, u32)> {
+    passwd.lines().find_map(|line| {
+        let fields: Vec<&str> = line.split(':').collect();
+        match fields.as_slice() {
+            [name, _, uid, gid, ..] if *name == user => Some((uid.parse().ok()?, gid.parse().ok()?)),
+            _ => None,
+        }
+    })
+}
+
+// What: lchown a tree recursively, never following links.
+// Why: a symlink in a volume must not redirect root's chown.
+// From: Issue #1427
+fn chown_tree(path: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
+    std::os::unix::fs::lchown(path, Some(uid), Some(gid))?;
+    if fs::symlink_metadata(path)?.is_dir() {
+        for entry in fs::read_dir(path)? {
+            chown_tree(&entry?.path(), uid, gid)?;
+        }
+    }
+    Ok(())
+}
+
+// What: setgid log dir; existing log files get g+r.
+// Why: the shared log reader gid must keep read access.
+// From: Issue #1427 | PR #1670
+fn open_log_dir_to_group(dir: &Path) -> std::io::Result<()> {
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o2775))?;
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        let meta = fs::symlink_metadata(&path)?;
+        if meta.is_file() {
+            fs::set_permissions(&path, fs::Permissions::from_mode(meta.mode() | 0o040))?;
+        }
+    }
+    Ok(())
+}
+
+// What: print a FATAL start error and exit 1.
+// Why: the root start fails closed before the server runs.
+// From: Issue #858
+fn container_start_fatal(message: &str) -> ! {
+    eprintln!("[lancache-ui] FATAL: {message}");
+    std::process::exit(1);
+}
+
+// What: started as root: secrets, ownership, then exec as user.
+// Why: the server must never run as root; volumes start root.
+// From: Issue #858 | PR #1858
+fn container_root_start() {
+    let euid = fs::metadata("/proc/self")
+        .unwrap_or_else(|e| container_start_fatal(&format!("cannot read /proc/self: {e}")))
+        .uid();
+    if euid != 0 {
+        return;
+    }
+    let passwd = fs::read_to_string("/etc/passwd")
+        .unwrap_or_else(|e| container_start_fatal(&format!("cannot read /etc/passwd: {e}")));
+    let (uid, gid) = passwd_ids(&passwd, "lancache")
+        .unwrap_or_else(|| container_start_fatal("no lancache user in /etc/passwd"));
+    let secret_gid = match std::env::var("LANCACHE_SHARED_SECRET_GID") {
+        Ok(v) => v.parse().unwrap_or_else(|_| {
+            container_start_fatal(&format!("LANCACHE_SHARED_SECRET_GID={v} is not a gid"))
+        }),
+        Err(_) => gid,
+    };
+    let dir = std::env::var("LANCACHE_SHARED_SECRET_DIR")
+        .unwrap_or_else(|_| config::DEFAULT_SHARED_SECRET_DIR.to_string());
+    let mut resolved = Vec::new();
+    for (var, name) in CONTAINER_SHARED_SECRETS {
+        let configured = std::env::var(var).unwrap_or_default();
+        let unset = shared_secret_is_placeholder(&configured)
+            || (*var == "DHCP_API_TOKEN" && LEGACY_DHCP_API_TOKEN_DEFAULTS.contains(&configured.as_str()));
+        let current = if unset { "" } else { configured.as_str() };
+        match resolve_shared_secret(Path::new(&dir), name, current, secret_gid) {
+            Ok(value) => resolved.push((*var, value)),
+            Err(err) => container_start_fatal(&format!(
+                "{var} is unset/placeholder and no shared value could be stored ({err}). \
+                 Mount the shared-secrets volume, or set {var} to the value the backend uses."
+            )),
+        }
+    }
+    for path in ["/data", "/etc/nats", config::DEFAULT_DNS_STATE_DIR, UI_LOG_DIR] {
+        let path = Path::new(path);
+        if fs::symlink_metadata(path).is_ok()
+            && let Err(e) = chown_tree(path, uid, gid)
+        {
+            container_start_fatal(&format!("cannot chown {}: {e}", path.display()));
+        }
+    }
+    let log_dir = Path::new(UI_LOG_DIR);
+    if log_dir.exists()
+        && let Err(e) = open_log_dir_to_group(log_dir)
+    {
+        container_start_fatal(&format!("cannot set {UI_LOG_DIR} modes: {e}"));
+    }
+    let exe = std::env::current_exe()
+        .unwrap_or_else(|e| container_start_fatal(&format!("cannot locate own binary: {e}")));
+    let mut args = std::env::args_os();
+    let argv0 = args.next().unwrap_or_else(|| exe.clone().into_os_string());
+    let err = std::process::Command::new(&exe)
+        .arg0(argv0)
+        .args(args)
+        .envs(resolved)
+        .uid(uid)
+        .gid(gid)
+        .exec();
+    container_start_fatal(&format!("cannot exec as lancache: {err}"));
 }
 
 // Additive-only migration for the `secondaries` table (issue #583): adds
@@ -847,7 +1073,7 @@ fn init_tracing() {
     let stdout_layer = tracing_subscriber::fmt::layer();
 
     let ui_log_file =
-        std::env::var("UI_LOG_FILE").unwrap_or_else(|_| "/var/log/lancache-ui/ui.log".to_string());
+        std::env::var("UI_LOG_FILE").unwrap_or_else(|_| format!("{UI_LOG_DIR}/ui.log"));
     let file_layer = open_ui_log_file(&ui_log_file).map(|file| {
         tracing_subscriber::fmt::layer()
             .with_ansi(false)
@@ -861,8 +1087,18 @@ fn init_tracing() {
         .init();
 }
 
+// What: root start before any thread; dhcp-probe skips it.
+// Why: exec needs one thread; the probe runs as root as-is.
+// From: Issue #1288 | PR #1858
+fn main() -> Result<()> {
+    if std::env::args().nth(1).as_deref() != Some("--dhcp-probe") {
+        container_root_start();
+    }
+    run()
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn run() -> Result<()> {
     // Alternate CLI mode (issue #1288): this same binary/image is also the
     // `dhcp-probe` container's entrypoint (see deploy/*/docker-compose.yml,
     // `["/usr/local/bin/lancache-ui", "--dhcp-probe"]`), replacing the
@@ -1291,6 +1527,139 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
 
+    // What: check one placeholder-fixture column against `rule`.
+    // Why: one reader; blank/# lines skip like the bash reader.
+    // From: Issue #967 | PR #1858
+    fn assert_parity_column(column: usize, rule: fn(&str) -> bool) {
+        let fixture_path = format!(
+            "{}/../../tests/fixtures/placeholder-detection-cases.txt",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let contents = std::fs::read_to_string(&fixture_path)
+            .unwrap_or_else(|e| panic!("could not read shared parity fixture {fixture_path}: {e}"));
+        let mut total = 0usize;
+        let mut mismatches: Vec<String> = Vec::new();
+        for line in contents.lines().map(str::trim_end) {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let [value, ..] = fields.as_slice() else {
+                panic!("malformed shared parity fixture line: {line:?}");
+            };
+            let expect = fields
+                .get(column)
+                .unwrap_or_else(|| panic!("fixture line lacks column {column}: {line:?}"));
+            total += 1;
+            let actual = if rule(value) { "placeholder" } else { "real" };
+            if actual != *expect {
+                mismatches.push(format!("'{value}' expected={expect} actual={actual}"));
+            }
+        }
+        assert!(total > 0, "shared parity fixture had zero usable cases");
+        assert!(
+            mismatches.is_empty(),
+            "{} of {total} fixture case(s) disagreed (column {column}):\n{}",
+            mismatches.len(),
+            mismatches.join("\n")
+        );
+    }
+
+    // What: a fresh, unique temp dir for one test.
+    // Why: parallel tests must not share secret files.
+    // From: PR #1858
+    fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "lancache-ng-{tag}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // What: generate once, reuse, keep a real value, never rotate.
+    // Why: a rotating handshake secret breaks every consumer.
+    // From: Issue #858 | PR #1858
+    #[test]
+    fn resolve_shared_secret_is_first_writer_wins_and_stable() {
+        let dir = unique_temp_dir("shared-secret");
+        let gid = std::fs::metadata(&dir).unwrap().gid();
+        let first = resolve_shared_secret(&dir, "s", "", gid).unwrap();
+        assert_eq!(first.len(), 64);
+        assert_eq!(resolve_shared_secret(&dir, "s", "", gid).unwrap(), first);
+        let mode = std::fs::metadata(dir.join("s")).unwrap().mode() & 0o777;
+        assert_eq!(mode, 0o640);
+        assert_eq!(
+            resolve_shared_secret(&dir, "s", "real-value", gid).unwrap(),
+            "real-value"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("s")).unwrap(),
+            "real-value"
+        );
+        assert_eq!(resolve_shared_secret(&dir, "s", "", gid).unwrap(), "real-value");
+        let leftovers = std::fs::read_dir(&dir).unwrap().count();
+        assert_eq!(leftovers, 1, "temp files must not remain");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    // What: unwritable dir: real value passes, empty fails closed.
+    // Why: an unstored generated value would split the brain.
+    // From: Issue #858 | PR #1775
+    #[test]
+    fn resolve_shared_secret_fails_closed_without_a_writable_dir() {
+        let dir = unique_temp_dir("shared-secret-ro");
+        let blocker = dir.join("not-a-dir");
+        std::fs::write(&blocker, "x").unwrap();
+        assert_eq!(resolve_shared_secret(&blocker, "s", "real", 0).unwrap(), "real");
+        assert!(resolve_shared_secret(&blocker, "s", "", 0).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    // What: passwd lookup returns uid/gid; unknown user is None.
+    // Why: the exec target ids come from the image's passwd.
+    // From: Issue #1427
+    #[test]
+    fn passwd_ids_reads_the_named_entry() {
+        let passwd = "root:x:0:0::/root:/bin/sh\nlancache:x:10001:10001::/:/sbin/nologin\n";
+        assert_eq!(passwd_ids(passwd, "lancache"), Some((10001, 10001)));
+        assert_eq!(passwd_ids(passwd, "nobody"), None);
+        assert_eq!(passwd_ids("lancache:x:bad:1::/:/x\n", "lancache"), None);
+    }
+
+    // What: chown walks a tree but never follows a symlink.
+    // Why: a dangling link would fail a following chown.
+    // From: Issue #1427
+    #[test]
+    fn chown_tree_does_not_follow_symlinks() {
+        let dir = unique_temp_dir("chown-tree");
+        std::fs::create_dir_all(dir.join("a/b")).unwrap();
+        std::fs::write(dir.join("a/b/f"), "x").unwrap();
+        std::os::unix::fs::symlink("/nonexistent/lancache-ng-target", dir.join("a/link")).unwrap();
+        let meta = std::fs::metadata(&dir).unwrap();
+        chown_tree(&dir, meta.uid(), meta.gid()).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    // What: log dir gets 2775, regular files gain g+r.
+    // Why: the shared log reader gid reads ui.log.
+    // From: Issue #1427 | PR #1670
+    #[test]
+    fn open_log_dir_to_group_sets_dir_and_file_modes() {
+        let dir = unique_temp_dir("log-dir");
+        let file = dir.join("ui.log");
+        std::fs::write(&file, "x").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        open_log_dir_to_group(&dir).unwrap();
+        assert_eq!(std::fs::metadata(&dir).unwrap().mode() & 0o7777, 0o2775);
+        assert_eq!(std::fs::metadata(&file).unwrap().mode() & 0o777, 0o640);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     // Proves migrate_secondaries_table_for_auth_callout actually adds
     // nats_user/nats_password_hash via ALTER TABLE when a table predates
     // the auth-callout columns, and that the new columns are immediately
@@ -1681,77 +2050,20 @@ mod tests {
         assert!(validate_secondary_registration_token(&min_chars_emoji).is_ok());
     }
 
-    // Cross-language parity coverage for secret/token placeholder detection
-    // (issue #967). This checks the "rust" column of the shared fixture
-    // against secondary_registration_token_is_placeholder(); the "shared" and
-    // "setup" columns are checked the same way, against the other two
-    // independent implementations, by
-    // tests/bats/placeholder_detection_parity.bats. Three implementations
-    // exist on purpose (maintainer decision: Option B in #967, not a merge),
-    // but every case they're known to agree OR legitimately disagree on is
-    // pinned here so a silent future drift fails a test instead of going
-    // unnoticed.
+    // What: the registration-token rule matches the "rust" column.
+    // Why: #967 keeps rules separate but pins every divergence.
+    // From: Issue #967
     #[test]
     fn secondary_registration_token_is_placeholder_matches_shared_parity_fixture() {
-        // Runtime fs::read_to_string via CARGO_MANIFEST_DIR (this crate's own
-        // established pattern, see the TEMPLATE_DIR test setup and
-        // domains.rs's is_valid_domain_matches_shared_parity_fixture test),
-        // not include_str!: the fixture lives outside this crate's source
-        // tree (tests/fixtures/ at the repo root, shared with the bash
-        // side), so a compile-time embed would bake an out-of-crate path
-        // into the build; a runtime read gives a clear "fixture missing"
-        // failure instead.
-        let fixture_path = format!(
-            "{}/../../tests/fixtures/placeholder-detection-cases.txt",
-            env!("CARGO_MANIFEST_DIR")
-        );
-        let contents = std::fs::read_to_string(&fixture_path)
-            .unwrap_or_else(|e| panic!("could not read shared parity fixture {fixture_path}: {e}"));
+        assert_parity_column(3, secondary_registration_token_is_placeholder);
+    }
 
-        let mut total = 0usize;
-        let mut mismatches: Vec<String> = Vec::new();
-
-        for line in contents.lines() {
-            let line = line.trim_end();
-            // Blank lines and comment lines are not cases -- must match the
-            // bash reader's `[[ -z "$line" || "$line" == \#* ]]` skip rule
-            // exactly, or the two readers would silently disagree on which
-            // lines even count as fixture cases.
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-
-            // Fields: <value> <shared> <setup> <rust>, whitespace-separated.
-            // Only the "rust" (4th) field is relevant here.
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            let [value, _shared, _setup, rust] = fields.as_slice() else {
-                panic!(
-                    "malformed shared parity fixture line (expected \"<value> <shared> <setup> <rust>\"): {line:?}"
-                );
-            };
-            let expect = *rust;
-            total += 1;
-
-            let actual = if secondary_registration_token_is_placeholder(value) {
-                "placeholder"
-            } else {
-                "real"
-            };
-            if actual != expect {
-                mismatches.push(format!("'{value}' expected={expect} actual={actual}"));
-            }
-        }
-
-        // Fail closed if the fixture itself is empty/unreadable-but-present
-        // (e.g. header-only) -- a vacuous loop would make this test pass
-        // without checking anything.
-        assert!(total > 0, "shared parity fixture had zero usable cases");
-        assert!(
-            mismatches.is_empty(),
-            "{} of {total} shared parity fixture case(s) disagreed with the Rust implementation:\n{}",
-            mismatches.len(),
-            mismatches.join("\n")
-        );
+    // What: the shared-secret rule matches the "shared" column.
+    // Why: ui and the dns/dhcp/nats readers must agree.
+    // From: Issue #967 | PR #1858
+    #[test]
+    fn shared_secret_is_placeholder_matches_shared_parity_fixture() {
+        assert_parity_column(1, shared_secret_is_placeholder);
     }
 
     // Covers the three states load_or_create_secondary_registration_token

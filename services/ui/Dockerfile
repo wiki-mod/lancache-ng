@@ -115,11 +115,6 @@ ENV VISUAL=$EDITOR
 
 COPY --from=builder /build/lancache-ui-out /usr/local/bin/lancache-ui
 COPY services/ui/src/templates /templates
-# What: Copy shared-secret bootstrap library
-# Why: Entrypoint sources it via build context
-# From: Issue #858
-COPY --from=shared-secret shared-secret-bootstrap.sh /usr/local/lib/shared-secret-bootstrap.sh
-COPY services/ui/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 # What: dhcp-probe runs this binary with --dhcp-probe.
 # Why: retired dhcp-probe.sh; no separate script copied in.
 # From: Issue #1288
@@ -130,8 +125,7 @@ COPY services/ui/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN addgroup -g 10001 lancache \
     && adduser -D -H -u 10001 -G lancache -s /sbin/nologin lancache \
     && mkdir -p /data /etc/nats \
-    && chown -R lancache:lancache /data /etc/nats \
-    && chmod +x /usr/local/bin/docker-entrypoint.sh
+    && chown -R lancache:lancache /data /etc/nats
 
 # What: fail build if CI proxy CA leaked into image
 # Why: CA must never persist in a published service image
@@ -159,5 +153,7 @@ ENV TEMPLATE_DIR=/templates \
     PROXY_SSL_SERVICE=proxy \
     CACHE_MAX_GB=50
 
-ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
-CMD ["lancache-ui"]
+# What: the binary itself does the root start, then drops.
+# Why: no wrapper; secrets, chown and uid drop are in Rust.
+# From: Issue #858 | PR #1858
+ENTRYPOINT ["/usr/local/bin/lancache-ui"]
