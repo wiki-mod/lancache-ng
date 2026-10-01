@@ -336,6 +336,12 @@ fn container_root_start() {
     let uid = required_env_id("UI_RUNTIME_UID");
     let gid = required_env_id("UI_RUNTIME_GID");
     let cfg = config::Config::from_env().unwrap_or_else(|e| container_start_fatal(&e));
+    if let Err(e) = config::ensure_shared_secrets(&cfg.shared_secret_dir, gid) {
+        container_start_fatal(&format!(
+            "cannot resolve shared secret {e}. Mount the shared-secrets volume \
+             or set the variable to the value its backend uses."
+        ));
+    }
     let log_file = std::path::PathBuf::from(ui_log_file());
     for dir in ui_written_dirs(&cfg, &log_file) {
         if fs::symlink_metadata(&dir).is_ok()
