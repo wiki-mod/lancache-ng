@@ -7363,23 +7363,42 @@ STUB
     [[ "${output}" == *"CI-ERROR-VARIABLES-0015"* ]]
 }
 
-@test "docker-build builds a per-identity per-arch tag via buildx" {
-    # What: ci.sh executes the build; YAML only calls it.
-    # Why: engine owns execution, orchestrator just calls.
-    # From: Issue #1683
-    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+@test "docker-build passes the tag and cache flags each row expects" {
+    # What: one buildx argv check per row: wants, forbids.
+    # Why: tag, cache wiring and passthrough share one path.
+    # From: Issue #1683 | PR #1858
+    local bin="${BATS_TEST_TMPDIR}/bin" r=registry.example.test/owner/fixture-repo
+    local name svc id from to want forbid w
+    local -a ws
+    mkdir -p "${bin}"
     _build_fixture
     _tool_stub "${bin}" docker <<'STUB'
 echo "docker $*"
 STUB
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
-        run _ci_docker_build svc-a abc123 os/p1
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"buildx build --load"* ]]
-    [[ "${output}" == *"registry.example.test/owner/fixture-repo/svc-a:sha-abc123-p1"* ]]
-    [[ "${output}" == *"--platform os/p1"* ]]
-    [[ "${output}" == *"org.opencontainers.image.title=svc-a"* ]]
-    [[ "${output}" == *"--build-arg BUILD_IDENTITY=abc123"* ]]
+    while IFS='|' read -r name svc id from to want forbid; do
+        unset CI_BUILD_CACHE_FROM CI_BUILD_CACHE_TO
+        [ "${from}" = - ] || export CI_BUILD_CACHE_FROM="${from//@R@/${r}}"
+        [ "${to}" = - ] || export CI_BUILD_CACHE_TO="${to//@R@/${r}}"
+        PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
+            run _ci_docker_build "${svc}" "${id}" os/p1
+        [ "${status}" -eq 0 ] || { echo "${name}: rc ${status}: ${output}"; return 1; }
+        IFS=';' read -r -a ws <<<"${want//@R@/${r}}"
+        for w in "${ws[@]}"; do
+            [[ "${output}" == *"${w}"* ]] || { echo "${name}: no '${w}': ${output}"; return 1; }
+        done
+        [ "${forbid}" = - ] && continue
+        IFS=';' read -r -a ws <<<"${forbid//@R@/${r}}"
+        for w in "${ws[@]}"; do
+            [[ "${output}" != *"${w}"* ]] || { echo "${name}: has '${w}': ${output}"; return 1; }
+        done
+    done <<'CASES'
+tag|svc-a|abc123|-|-|buildx build --load;@R@/svc-a:sha-abc123-p1;--platform os/p1;org.opencontainers.image.title=svc-a;--build-arg BUILD_IDENTITY=abc123|--cache-from;--cache-to
+wired-a|svc-a|abc123|type=registry,ref=@R@/svc-a:cache|type=registry,ref=@R@/svc-a:cache,mode=max|--cache-from type=registry,ref=@R@/svc-a:cache;--cache-to type=registry,ref=@R@/svc-a:cache,mode=max,ignore-error=true|svc-b:cache
+wired-b|svc-b|def456|type=registry,ref=@R@/svc-b:cache|type=registry,ref=@R@/svc-b:cache,mode=max|--cache-from type=registry,ref=@R@/svc-b:cache;--cache-to type=registry,ref=@R@/svc-b:cache,mode=max,ignore-error=true|svc-a:cache
+ignore-error-kept|svc-a|abc123|-|type=registry,ref=@R@/svc-a:cache,ignore-error=false|--cache-to type=registry,ref=@R@/svc-a:cache,ignore-error=false|ignore-error=false,ignore-error=true;--cache-from
+shorthand|svc-a|abc123|-|@R@/svc-a:cache|--cache-to @R@/svc-a:cache;CI-WARN-BUILD-0012|svc-a:cache,
+CASES
+    unset CI_BUILD_CACHE_FROM CI_BUILD_CACHE_TO
 }
 
 @test "docker-build fails closed without ARG BUILD_IDENTITY or build-args" {
@@ -7399,51 +7418,6 @@ STUB
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-BUILDARGS-"* ]]
     [[ "${output}" != *"buildx build"* ]]
-}
-
-@test "docker-build omits cache-from/cache-to when unset (unchanged default)" {
-    # What: no CI_BUILD_CACHE_* means no cache flags at all.
-    # Why: unset vars must not change existing callers.
-    # From: Issue #1683
-    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    _build_fixture
-    _tool_stub "${bin}" docker <<'STUB'
-echo "docker $*"
-STUB
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
-        run _ci_docker_build svc-a abc123 os/p1
-    [ "${status}" -eq 0 ]
-    [[ "${output}" != *"--cache-from"* ]]
-    [[ "${output}" != *"--cache-to"* ]]
-}
-
-@test "docker-build wires per-service cache-from/cache-to from CI_BUILD_CACHE_FROM/TO" {
-    # What: buildx gets a cache-from/cache-to per service.
-    # Why: needs one cache scope per service, not shared.
-    # From: Issue #1683
-    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    _build_fixture
-    _tool_stub "${bin}" docker <<'STUB'
-echo "docker $*"
-STUB
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
-        CI_BUILD_CACHE_FROM="type=registry,ref=registry.example.test/owner/fixture-repo/svc-a:cache" \
-        CI_BUILD_CACHE_TO="type=registry,ref=registry.example.test/owner/fixture-repo/svc-a:cache,mode=max" \
-        run _ci_docker_build svc-a abc123 os/p1
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"--cache-from type=registry,ref=registry.example.test/owner/fixture-repo/svc-a:cache"* ]]
-    [[ "${output}" == *"--cache-to type=registry,ref=registry.example.test/owner/fixture-repo/svc-a:cache,mode=max,ignore-error=true"* ]]
-
-    # What: a 2nd service call gets its own cache ref.
-    # Why: proves scope is per-call, not one constant value.
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
-        CI_BUILD_CACHE_FROM="type=registry,ref=registry.example.test/owner/fixture-repo/svc-b:cache" \
-        CI_BUILD_CACHE_TO="type=registry,ref=registry.example.test/owner/fixture-repo/svc-b:cache,mode=max" \
-        run _ci_docker_build svc-b def456 os/p1
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"--cache-from type=registry,ref=registry.example.test/owner/fixture-repo/svc-b:cache"* ]]
-    [[ "${output}" == *"--cache-to type=registry,ref=registry.example.test/owner/fixture-repo/svc-b:cache,mode=max,ignore-error=true"* ]]
-    [[ "${output}" != *"svc-a:cache"* ]]
 }
 
 @test "docker-build cache-from miss fails cache import only, build still succeeds" {
@@ -7469,40 +7443,6 @@ EOF
     # What: raw evidence of the miss stays visible.
     # Why: AG-INT-002 forbids hiding it.
     [[ "${output}" == *"failed to configure registry cache import"* ]]
-}
-
-@test "docker-build cache-to already carrying ignore-error is untouched" {
-    # What: ignore-error is kept, never duplicated.
-    # Why: a repeated CSV key must not reach buildx.
-    # From: Issue #1683
-    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    _build_fixture
-    _tool_stub "${bin}" docker <<'STUB'
-echo "docker $*"
-STUB
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
-        CI_BUILD_CACHE_TO="type=registry,ref=registry.example.test/owner/fixture-repo/svc-a:cache,ignore-error=false" \
-        run _ci_docker_build svc-a abc123 os/p1
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"--cache-to type=registry,ref=registry.example.test/owner/fixture-repo/svc-a:cache,ignore-error=false"* ]]
-    [[ "${output}" != *"ignore-error=false,ignore-error=true"* ]]
-}
-
-@test "docker-build cache-to shorthand is passed through with a warning" {
-    # What: a shorthand ref is forwarded unmodified.
-    # Why: appending CSV attrs would break its syntax.
-    # From: Issue #1683
-    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    _build_fixture
-    _tool_stub "${bin}" docker <<'STUB'
-echo "docker $*"
-STUB
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
-        CI_BUILD_CACHE_TO="registry.example.test/owner/fixture-repo/svc-a:cache" \
-        run _ci_docker_build svc-a abc123 os/p1
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"--cache-to registry.example.test/owner/fixture-repo/svc-a:cache"* ]]
-    [[ "${output}" == *"CI-WARN-BUILD-0012"* ]]
 }
 
 @test "docker-publish pushes then reads back the registry digest" {
