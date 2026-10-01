@@ -2762,9 +2762,13 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
 
 @test "validate default backend fails closed when compose is unreadable" {
     # What: The wired default refuses without compose data.
-    # Why: No stub = real backend, still fail-closed.
+    # Why: real backend past a free slot, still fail-closed.
     # From: Issue #1683 | PR #1858
-    CI_STACK_CANDIDATE_CMD="$(_stub cand 'echo proxy=sha256:x')" \
+    local bin="${BATS_TEST_TMPDIR}/bin"
+    mkdir -p "${bin}"
+    printf '#!/usr/bin/env bash\ncase "$1 $2" in "network ls") exit 0 ;; *) exit 1 ;; esac\n' > "${bin}/docker"
+    chmod +x "${bin}/docker"
+    PATH="${bin}:${PATH}" CI_STACK_CANDIDATE_CMD="$(_stub cand 'echo proxy=sha256:x')" \
     GITHUB_REPOSITORY=owner/fixture-repo \
     CI_COMPOSE_IMAGES_CMD="$(_stub imgs 'exit 3')" \
     TMPDIR="${BATS_TEST_TMPDIR}" GHCR_USERNAME=u GHCR_TOKEN=t \
@@ -3111,12 +3115,14 @@ netdata=sha256:n"
     # From: Issue #1683
     docker() {
         case "$1 $2" in
-            "network ls") echo netid1 ;;
+            "network ls") [ -z "${LS_FAIL:-}" ] || return 1; echo netid1 ;;
             "network inspect") echo "10.0.0.0/24" ;;
         esac
     }
     run _ci_validate_subnet_conflicts 172.16.1.32/27
-    [ "${status}" -ne 0 ]
+    [ "${status}" -eq 1 ]
+    LS_FAIL=1 run _ci_validate_subnet_conflicts 172.16.1.32/27
+    [ "${status}" -eq 2 ]
 }
 
 @test "validate reserve prints subnet and holder" {
@@ -3128,6 +3134,10 @@ netdata=sha256:n"
     run _ci_validate_reserve
     [ "${status}" -eq 0 ]
     [[ "${output}" == subnet=172.*"/27 holder=4242" ]]
+    _ci_validate_subnet_conflicts() { return 2; }
+    run _ci_validate_reserve
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0050"* ]]
 }
 
 @test "validate startable excludes host-mode services" {

@@ -4047,9 +4047,13 @@ _ci_ipv4_to_int() {
 # Why: CIDR overlap by integer mask; no python.
 # From: Issue #1683
 _ci_validate_subnet_conflicts() {
-    local target="$1" tip tm net sub sip sm m
+    local target="$1" tip tm net sub sip sm m nets
     tip="$(_ci_ipv4_to_int "${target%/*}")"
     tm="${target#*/}"
+    # What: rc 2 when the network list is unknown.
+    # Why: a failed docker call must not read as "free".
+    # From: Issue #1683 | PR #1858
+    nets="$(docker network ls -q)" || return 2
     while IFS= read -r net; do
         [ -n "${net}" ] || continue
         while IFS= read -r sub; do
@@ -4065,7 +4069,7 @@ _ci_validate_subnet_conflicts() {
                     ;;
             esac
         done < <(docker network inspect "${net}" --format '{{range .IPAM.Config}}{{.Subnet}}{{"\n"}}{{end}}' 2>/dev/null)
-    done < <(docker network ls -q 2>/dev/null)
+    done <<< "${nets}"
     return 1
 }
 
@@ -4073,14 +4077,20 @@ _ci_validate_subnet_conflicts() {
 # Why: Retry a fresh slot on a locked candidate.
 # From: Issue #1683
 _ci_validate_reserve() {
-    local run_id run_attempt max n seed subnet holder
+    local run_id run_attempt max n seed subnet holder crc
     run_id="${GITHUB_RUN_ID:-$$}"
     run_attempt="${GITHUB_RUN_ATTEMPT:-1}"
     max="${CI_VALIDATE_MAX_SLOTS:-10}"
     for (( n=1; n<=max; n++ )); do
         seed="$(_ci_validate_seed "${run_id}" "${run_attempt}" "${n}")"
         subnet="$(_ci_validate_subnet "${seed}")"
-        _ci_validate_subnet_conflicts "${subnet}" >/dev/null 2>&1 && continue
+        crc=0
+        _ci_validate_subnet_conflicts "${subnet}" >/dev/null || crc=$?
+        [ "${crc}" -eq 0 ] && continue
+        if [ "${crc}" -eq 2 ]; then
+            ci_log "[CI-ERROR-VALIDATE-0050]" "subnet=\"${subnet}\" reason=\"docker network list failed; cannot prove the slot free\""
+            return 2
+        fi
         if holder="$(_ci_validate_slot_lock "${subnet}")"; then
             printf 'subnet=%s holder=%s\n' "${subnet}" "${holder}"
             return 0
@@ -4685,8 +4695,9 @@ _ci_validate_secondary_identity() {
 _ci_default_validate() {
     local candidate="$1" reservation subnet holder project rc=0 up_out
     local net_ovr pin_ovr
-    if ! reservation="$(_ci_validate_reserve)"; then
-        ci_log "[CI-ERROR-VALIDATE-0015]" "reason=\"no free validation /27 after slot retries\""
+    reservation="$(_ci_validate_reserve)" || rc=$?
+    if [ "${rc}" -ne 0 ]; then
+        [ "${rc}" -eq 2 ] || ci_log "[CI-ERROR-VALIDATE-0015]" "reason=\"no free validation /27 after slot retries\""
         return 2
     fi
     subnet="$(_ci_record_field "${reservation}" subnet)"
