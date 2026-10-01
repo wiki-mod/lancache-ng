@@ -3172,7 +3172,7 @@ SH
     # From: Issue #1683
     docker() {
         case "$1" in
-            compose) echo cid1 ;;
+            compose) [[ "$*" == *" ps -aq "* ]] && echo cid1 ;;
             inspect) echo running ;;
         esac
     }
@@ -3188,7 +3188,7 @@ SH
     local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
     docker() {
         case "$1" in
-            compose) echo cid1 ;;
+            compose) [[ "$*" == *" ps -aq "* ]] && echo cid1 ;;
             inspect)
                 if [[ "$3" == *StartedAt* ]]; then
                     printf '%s' "$(( $(cat "${cnt}") + 1 ))" > "${cnt}"
@@ -3210,7 +3210,7 @@ SH
     # From: Issue #1683
     docker() {
         case "$1" in
-            compose) echo cid1 ;;
+            compose) [[ "$*" == *" ps -aq "* ]] && echo cid1 ;;
             inspect) echo restarting ;;
         esac
     }
@@ -3225,7 +3225,7 @@ SH
     # From: Issue #1683
     docker() {
         case "$1" in
-            compose) echo cid1 ;;
+            compose) [[ "$*" == *" ps -aq "* ]] && echo cid1 ;;
             inspect)
                 [[ "$3" == *ExitCode* ]] && echo 0 || echo exited
                 ;;
@@ -3242,7 +3242,7 @@ SH
     # From: Issue #1683
     docker() {
         case "$1" in
-            compose) echo cid1 ;;
+            compose) [[ "$*" == *" ps -aq "* ]] && echo cid1 ;;
             inspect)
                 [[ "$3" == *ExitCode* ]] && echo 1 || echo exited
                 ;;

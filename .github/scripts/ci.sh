@@ -4526,7 +4526,7 @@ _ci_validate_wait_stable() {
     local window="${CI_VALIDATE_STABLE_WINDOW:-20}"
     deadline=$(( SECONDS + ${CI_VALIDATE_HEALTH_TIMEOUT:-180} ))
     while [ "${SECONDS}" -lt "${deadline}" ]; do
-        cid="$(docker compose -p "${project}" ps -q "${svc}" 2>/dev/null)"
+        cid="$(docker compose -p "${project}" ps -aq "${svc}" 2>/dev/null)"
         if [ -z "${cid}" ]; then
             stable_since=-1
             sleep 2
