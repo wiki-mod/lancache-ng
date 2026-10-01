@@ -44,6 +44,10 @@ env:
   PROJECT_SELFHOSTED_PROXY_HTTPS: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
   PROJECT_SELFHOSTED_PROXY_EXCLUSION: ${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
   PROJECT_SELFHOSTED_PROXY_CA: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
+  # What: AG-VAL-008 switch; ci.sh owns its SOT default.
+  # Why: rust fmt/clippy/test stay off unless set "true".
+  # From: Issue #1683
+  CI_RUST_VALIDATION: ${{ vars.CI_RUST_VALIDATION }}
 jobs:
   # What: resolve build-tools digest for all jobs
   # Why: later jobs run in build-tools, never on the runner.
@@ -95,6 +99,7 @@ jobs:
       any-build: ${{ steps.plan.outputs.any-build }}
       matrix: ${{ steps.plan.outputs.matrix }}
       test-services: ${{ steps.plan.outputs.test-services }}
+      rust-validation: ${{ steps.plan.outputs.rust-validation }}
       docs-only: ${{ steps.plan.outputs.docs-only }}
     steps:
       # What: full-history checkout for diff computation
@@ -168,7 +173,7 @@ jobs:
   test:
     name: test
     needs: [platform, plan]
-    if: needs.plan.outputs.test-services != ''
+    if: needs.plan.outputs.test-services != '' && needs.plan.outputs.rust-validation == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     container: *bt_platform

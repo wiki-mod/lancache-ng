@@ -440,6 +440,12 @@ EOF
         run bash "${CI_SH}" plan-matrix services/watchdog/src/main.rs
     [ "${status}" -eq 0 ]
     grep -q '^test-services=watchdog$' "${gh}"
+    grep -q '^rust-validation=false$' "${gh}"
+    : > "${gh}"
+    GITHUB_OUTPUT="${gh}" GHCR_USERNAME=u GHCR_TOKEN=t CI_RUST_VALIDATION=true \
+        CI_RESOLVE_PROBE_CMD="$(_stub p 'echo MISSING_CONFIRMED')" \
+        run bash "${CI_SH}" plan-matrix services/watchdog/src/main.rs
+    grep -q '^rust-validation=true$' "${gh}"
 }
 
 @test "plan-matrix emits no test-services for a path-changed apk service" {
@@ -1188,16 +1194,25 @@ _stub() {
     [[ "${output}" == *"tested=ok"* ]]
 }
 
-@test "test dispatches a rust service to the cargo checks only" {
-    # What: source test = cargo checks; no image smoke here.
-    # Why: no image exists in the test job; smoke is verify.
-    # From: Issue #1683 | PR #1858
-    CI_RUST_TEST_CMD="$(_stub rt 'echo "service=$1 tested=ok"')" \
-    CI_SMOKE_CMD="$(_stub sm 'echo SMOKE-CALLED')" \
-        run bash "${CI_SH}" test dns
+@test "rust test is off by default and never runs cargo check" {
+    # What: default SKIP; on runs fmt/clippy/test, no check.
+    # Why: AG-VAL-008: no cargo check in CI; the rest gated.
+    # From: Issue #1683
+    local bin="${BATS_TEST_TMPDIR}/bin" log="${BATS_TEST_TMPDIR}/cargo.log"
+    mkdir -p "${bin}"
+    printf '#!/usr/bin/env bash\necho "$1" >> %q\n' "${log}" > "${bin}/cargo"
+    chmod +x "${bin}/cargo"
+    printf '%s\n' 'services:' '  svc-r:' '    build_type: rust' '    crate: crate-r' \
+        'ci_variables:' '  CI_RUST_VALIDATION: "false"' > "${BATS_TEST_TMPDIR}/m.yml"
+    export CI_MANIFEST="${BATS_TEST_TMPDIR}/m.yml" PATH="${bin}:${PATH}"
+    run bash "${CI_SH}" test svc-r
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"tested=SKIP"*"AG-VAL-008"* ]]
+    [ ! -e "${log}" ]
+    CI_RUST_VALIDATION=true run bash "${CI_SH}" test svc-r
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"tested=ok"* ]]
-    [[ "${output}" != *"SMOKE-CALLED"* ]]
+    [ "$(paste -sd' ' "${log}")" = "fmt clippy test" ]
 }
 
 @test "rust test runs every cargo call through sccache" {
@@ -1209,11 +1224,11 @@ _stub() {
     printf '#!/usr/bin/env bash\necho "cargo $1 wrapper=${RUSTC_WRAPPER:-none} dir=${SCCACHE_DIR:-none} args=$*"\n' > "${bin}/cargo"
     chmod +x "${bin}/cargo"
     unset SCCACHE_REDIS_URL
-    CI_REPO_ROOT="${root}" PATH="${bin}:${PATH}" run _ci_test_rust dns
+    CI_RUST_VALIDATION=true CI_REPO_ROOT="${root}" PATH="${bin}:${PATH}" run _ci_test_rust dns
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"[CI-INFO-CACHE-0002]"* ]]
-    [ "$(grep -c 'wrapper=sccache dir=/var/tmp/sccache' <<<"${output}")" -eq 4 ]
-    [ "$(grep -c -- "-p $(ci_service_field dns crate)" <<<"${output}")" -eq 4 ]
+    [ "$(grep -c 'wrapper=sccache dir=/var/tmp/sccache' <<<"${output}")" -eq 3 ]
+    [ "$(grep -c -- "-p $(ci_service_field dns crate)" <<<"${output}")" -eq 3 ]
 }
 
 @test "sccache env selects Redis when a URL is provided" {
@@ -1353,7 +1368,7 @@ RS
     ( cd "${root}" && cargo generate-lockfile --offline -q )
     local m="${BATS_TEST_TMPDIR}/manifest-ok.yml"
     printf 'services:\n  fixture-ok:\n    context: crate\n    crate: ci-fixture-ok\n    build_type: rust\n' > "${m}"
-    CI_MANIFEST="${m}" CI_REPO_ROOT="${root}" run bash "${CI_SH}" test fixture-ok
+    CI_RUST_VALIDATION=true CI_MANIFEST="${m}" CI_REPO_ROOT="${root}" run bash "${CI_SH}" test fixture-ok
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"tested=ok"* ]]
 }
@@ -1382,7 +1397,7 @@ RS
     ( cd "${root}" && cargo generate-lockfile --offline -q )
     local m="${BATS_TEST_TMPDIR}/manifest-fail.yml"
     printf 'services:\n  fixture-fail:\n    context: crate\n    crate: ci-fixture-fail\n    build_type: rust\n' > "${m}"
-    CI_MANIFEST="${m}" CI_REPO_ROOT="${root}" run bash "${CI_SH}" test fixture-fail
+    CI_RUST_VALIDATION=true CI_MANIFEST="${m}" CI_REPO_ROOT="${root}" run bash "${CI_SH}" test fixture-fail
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-TEST-0003"* ]]
     [[ "${output}" == *"equality checks against true"* ]]
@@ -1862,7 +1877,7 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
 }
 
 @test "release validation gate checks every AG-REL-011 trigger" {
-    # What: path, glob, governance, null, foreign: all stale.
+    # What: path, glob, governance, null, foreign are stale.
     # Why: a release must never trust an invalidated record.
     # From: Issue #1683
     local r="${BATS_TEST_TMPDIR}/rel" m="${BATS_TEST_TMPDIR}/rel.yml" c0 c1 case want
@@ -5883,8 +5898,8 @@ _idempotence_fixture() {
 }
 
 @test "check idempotence-test-coverage fails every unproven writer" {
-    # What: each way a writer loses its evidence is reported.
-    # Why: disabled, ignored or unmarked tests prove nothing.
+    # What: each way a writer loses evidence is reported.
+    # Why: disabled, ignored, unmarked tests prove nothing.
     # From: Issue #1683 | PR #1858
     local r case want at='@test'
     while IFS='|' read -r case want; do

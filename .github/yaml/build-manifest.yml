@@ -643,6 +643,10 @@ release:
 # From: Issue #1683
 ci_variables:
   REPOSITORY_CI_LEDGER_RETENTION_DAYS: 30
+  # What: cargo fmt/clippy/test in CI; off unless "true".
+  # Why: AG-VAL-008: a variable, disabled by default.
+  # From: Issue #1683
+  CI_RUST_VALIDATION: "false"
 
 # What: PR title taxonomy and project board for PR checks.
 # Why: AG-GH-018/008 name one CI policy owner for them.

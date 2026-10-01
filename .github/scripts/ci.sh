@@ -690,10 +690,17 @@ ci_cmd_plan_matrix() {
             any=true
         done <<< "${plats}"
     done
+    # What: emit the AG-VAL-008 rust validation decision.
+    # Why: no test runner is booked while validation is off.
+    # From: Issue #1683
+    local rust_validation=true
+    rc=0; _ci_rust_validation_enabled || rc=$?
+    case "${rc}" in 0) ;; 1) rust_validation=false ;; *) return 2 ;; esac
     {
         printf 'any-build=%s\n' "${any}"
         printf 'matrix={"include":%s}\n' "${include}"
         printf 'test-services=%s\n' "${test_services# }"
+        printf 'rust-validation=%s\n' "${rust_validation}"
         printf 'docs-only=%s\n' "${docs_only}"
     } >> "${out}"
 }
@@ -2699,11 +2706,26 @@ ci_cmd_verify() {
     printf 'service=%s verified=%s\n' "${service}" "${seen}"
 }
 
-# What: Run AG-VAL-008 cargo checks for a rust service.
-# Why: fmt/check/clippy/test run nowhere else in ci.sh.
+# What: rc 0 only if CI_RUST_VALIDATION is exactly "true".
+# Why: AG-VAL-008: CI rust validation is off by default.
+# From: Issue #1683
+_ci_rust_validation_enabled() {
+    local v
+    v="$(_ci_variable CI_RUST_VALIDATION)" || return 2
+    [ "${v//\"/}" = true ]
+}
+
+# What: Run AG-VAL-008 cargo fmt/clippy/test for a service.
+# Why: CI never runs cargo check; the variable gates rest.
 # From: Issue #1683 | PR #1858
 _ci_test_rust() {
-    local service="$1" ctx
+    local service="$1" ctx rc=0
+    _ci_rust_validation_enabled || rc=$?
+    case "${rc}" in
+        0) ;;
+        1) printf 'service=%s tested=SKIP reason="CI_RUST_VALIDATION is not true (AG-VAL-008)"\n' "${service}"; return 0 ;;
+        *) return 2 ;;
+    esac
     if [ -n "${CI_RUST_TEST_CMD:-}" ]; then
         "${CI_RUST_TEST_CMD}" "${service}"
         return "$?"
@@ -2719,7 +2741,6 @@ _ci_test_rust() {
     ( _ci_sccache_env "lancache-${service}" \
         && cd "${CI_REPO_ROOT:-.}" \
         && cargo fmt --check -p "${ctx}" \
-        && cargo check --locked --all-targets -p "${ctx}" \
         && cargo clippy --locked --all-targets -p "${ctx}" -- -D warnings \
         && cargo test --locked -p "${ctx}" ) || return 1
     printf 'service=%s tested=ok\n' "${service}"
