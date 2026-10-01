@@ -1,8 +1,8 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: CodeQL security analysis; scope owned by the SOT.
-# Why: separate workflow (§73); ci.sh admits, YAML orchestrates.
+# What: CodeQL security analysis; scope owned by SOT
+# Why: own workflow (§73); ci.sh admits, YAML only calls.
 # From: Issue #1683
 name: CI 2.0 CodeQL
 on:
@@ -20,18 +20,18 @@ concurrency:
 defaults:
   run:
     shell: bash
-# What: GHCR credentials ci.sh reads; no login action, no pin.
-# Why: auth is ci.sh policy; the workflow only supplies the env.
+# What: GHCR credentials for ci.sh; no login action.
+# Why: auth is ci.sh policy; the workflow only sets env.
 # From: Issue #1683
 env:
   GHCR_USERNAME: ${{ github.actor }}
   GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  # What: diff refs for every ci.sh step, set once.
-  # Why: a step without them saw no base (impact UNKNOWN).
+  # What: Diff refs for ci.sh steps, set once
+  # Why: Step without them has no base reference
   # From: Issue #1683 | PR #1858
   BASE_SHA: ${{ github.event.pull_request.base.sha }}
   BEFORE_SHA: ${{ github.event.before }}
-  # What: LAN proxy inputs; ci.sh applies them self-hosted only.
+  # What: LAN proxy inputs; ci.sh applies them self-hosted.
   # Why: AG-CI-009; ci.sh is the one proxy policy owner.
   # From: Issue #1683 | PR #1858
   PROJECT_SELFHOSTED_PROXY_HTTP: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
@@ -39,15 +39,15 @@ env:
   PROJECT_SELFHOSTED_PROXY_EXCLUSION: ${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
   PROJECT_SELFHOSTED_PROXY_CA: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
 jobs:
-  # What: emit the CodeQL language matrix from ci.sh.
-  # Why: §70 books runners only for real analysis.
+  # What: Emit CodeQL language matrix from ci.sh
+  # Why: Book runners only for real analysis (§70)
   # From: Issue #1683
   impact:
     name: codeql-impact
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # What: admission runs in build-tools, the nightly channel.
-    # Why: nothing runs on the runner; ci.sh needs its tools.
+    # What: Admission runs in build-tools nightly channel
+    # Why: Nothing runs on runner; ci.sh needs its tools
     # From: Issue #1683 | PR #1858
     container:
       image: ghcr.io/${{ github.repository }}/build-tools:nightly
@@ -58,8 +58,8 @@ jobs:
       matrix: ${{ steps.impact.outputs.codeql-matrix }}
       image: ${{ steps.impact.outputs.codeql-image }}
     steps:
-      # What: native fail-closed checkout with diff history.
-      # Why: no SHA pin outside the SOT; ci.sh reads the diff.
+      # What: Native fail-closed checkout with diff history
+      # Why: No SHA pin outside SOT; ci.sh reads the diff
       # From: Issue #1683
       - &bootstrap
         name: Bootstrap the working tree
@@ -80,8 +80,8 @@ jobs:
           CHANGED_FILES: ${{ steps.changed.outputs.file }}
         run: bash .github/scripts/ci.sh codeql-impact >> "$GITHUB_OUTPUT"
 
-  # What: analyze each admitted language in the SOT image.
-  # Why: CodeQL needs glibc; the pin lives in the SOT only.
+  # What: Analyze each admitted language in SOT image
+  # Why: CodeQL needs glibc; pin lives in SOT only
   # From: Issue #1683 | PR #1858
   analyze:
     name: CodeQL ${{ matrix.language }}

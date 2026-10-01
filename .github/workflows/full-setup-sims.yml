@@ -182,8 +182,8 @@ jobs:
           dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Resolve build-tools image
-        # What: PR-staging build-tools if touched, else published.
-        # Why: a same-PR Dockerfile change needs its staging image.
+        # What: PR staging if touched; else published
+        # Why: Dockerfile change in PR needs staging
         # From: Issue #1683 | PR #1858
         id: build-tools-image
         # What: reads step inputs via env: variables.
@@ -254,8 +254,8 @@ jobs:
           dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Resolve build-tools image
-        # What: PR-staging build-tools if touched, else published.
-        # Why: a same-PR Dockerfile change needs its staging image.
+        # What: PR staging if touched; else published
+        # Why: Dockerfile change in PR needs staging
         # From: Issue #1683 | PR #1858
         id: build-tools-image
         # What: reads step inputs via env: variables.

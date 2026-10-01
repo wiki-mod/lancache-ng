@@ -1,15 +1,14 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-#
-# What: Relay merged PR body and close linked issues.
-# Why: Closes only triggers on master, not current_dev.
+# What: Relay PR body and close linked issues
+# Why: Closes keyword only triggers on master
 # From: Issue #1496
 name: current_dev Auto-Close Linked Issues
 
 on:
-  # What: Use pull_request_target like first-interaction.yml.
-  # Why: Runs with repo token; no fork-code risk.
+  # What: triggers on pull_request_target, not pull_request.
+  # Why: Runs with repo token; no fork-code risk
   # From: Issue #1137 | PR #1157
   pull_request_target:
     types: [closed]
@@ -24,8 +23,8 @@ on:
         type: number
 
 permissions:
-  # What: Grants write to issues and read-only to pull requests.
-  # Why: Relays merged PR body; never touches repo.
+  # What: Grant write to issues and read-only to PRs
+  # Why: Relays merged PR body; never touches repo
   # From: Issue #1137 | PR #1157
   issues: write
   pull-requests: read
@@ -34,8 +33,8 @@ jobs:
   auto-close:
     name: Relay PR body and close linked issues
     runs-on: ubuntu-latest
-    # What: Guard on merged==true in addition to trigger filter.
-    # Why: Closed-without-merging PR still matches types:[closed].
+    # What: Guard on merged==true in addition to trigger
+    # Why: Closed PR without merge still matches type
     # From: Issue #1137 | PR #1157
     if: >-
       github.event_name == 'workflow_dispatch' ||

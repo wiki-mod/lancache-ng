@@ -1,9 +1,8 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-#
-# What: runs Claude Code when @claude is mentioned in issues/PRs.
-# Why: reserved maintainer convenience, dormant until invoked.
+# What: Runs Claude Code on @claude mentions in issues/PRs
+# Why: Reserved maintainer convenience, dormant until used
 # From: PR #1805
 name: Claude Code
 
