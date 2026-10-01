@@ -2995,6 +2995,39 @@ netdata=sha256:n"
     [[ "${output}" == *"CI-ERROR-VALIDATE-0054"* ]]
 }
 
+@test "compose profile flags cover every profile and fail closed" {
+    # What: one --profile pair per profile; read error -> 2.
+    # Why: a profiled service must never be skipped.
+    # From: Issue #1683
+    docker() { printf 'logging\nntp\n'; }
+    run _ci_compose_profile_flags f.yml
+    [ "${status}" -eq 0 ]
+    [ "${output}" = $'--profile\nlogging\n--profile\nntp' ]
+    docker() { :; }
+    run _ci_compose_profile_flags f.yml
+    [ "${status}" -eq 0 ]; [ -z "${output}" ]
+    docker() { echo "config broken" >&2; return 1; }
+    run _ci_compose_profile_flags f.yml
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"config broken"* ]]
+}
+
+@test "validate up starts every profile and names host-mode exclusions" {
+    # What: profiles reach up; host-mode is logged, not run.
+    # Why: AG-VAL-027 coverage with stated exclusions.
+    # From: Issue #1683
+    _ci_validate_service_list() {
+        case "$1" in *'== "host"'*) echo svc-h ;; *) printf 'svc-a\nsvc-p\n' ;; esac
+    }
+    _ci_compose_profile_flags() { printf -- '--profile\np1\n'; }
+    docker() { echo "DOCKER $*"; }
+    run _ci_validate_up proj net.yml pin.yml
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *'CI-INFO-VALIDATE-0055'*'service="svc-h"'* ]]
+    [[ "${output}" == *"--profile p1 up -d svc-a svc-p"* ]]
+    [[ "${output}" != *"up -d svc-h"* ]]
+}
+
 @test "validate teardown removes leftovers and never hides a failure" {
     # What: down + leftover sweep + state root, raw errors.
     # Why: an aborted up left containers; masking hid it.

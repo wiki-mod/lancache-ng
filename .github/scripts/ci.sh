@@ -4109,8 +4109,9 @@ _ci_validate_compose_images() {
         "${CI_COMPOSE_IMAGES_CMD}"
         return "$?"
     fi
-    docker compose -f "${CI_COMPOSE_FILE:-deploy/prod/docker-compose.yml}" config --format json \
-        | jq -r '.services | to_entries[] | [.key, .value.image] | @tsv'
+    local raw
+    raw="$(_ci_validate_config_json)" || return 2
+    jq -r '.services | to_entries[] | [.key, .value.image] | @tsv' <<< "${raw}"
 }
 
 # What: Warn on candidates without a first-party image.
@@ -4122,7 +4123,7 @@ _ci_validate_report_unpinned() {
         [ -n "${slug}" ] || continue
         case "${matched}" in
             *" ${slug} "*) : ;;
-            *) ci_log "[CI-WARN-VALIDATE-0008]" "unpinned=\"${slug}\" reason=\"third-party-compose-image\"" ;;
+            *) ci_log "[CI-WARN-VALIDATE-0008]" "unpinned=\"${slug}\" reason=\"candidate service has no first-party image in compose\"" ;;
         esac
     done <<< "${candidate}"
 }
@@ -4312,7 +4313,11 @@ _ci_validate_config_json() {
         "${CI_COMPOSE_CONFIG_CMD}"
         return "$?"
     fi
-    docker compose -f "${CI_COMPOSE_FILE:-deploy/prod/docker-compose.yml}" config --format json
+    local file="${CI_COMPOSE_FILE:-deploy/prod/docker-compose.yml}" flags
+    local -a pf=()
+    flags="$(_ci_compose_profile_flags "${file}")" || return 2
+    [ -z "${flags}" ] || mapfile -t pf <<< "${flags}"
+    docker compose -f "${file}" "${pf[@]}" config --format json
 }
 
 # What: Compose service names passing one jq filter.
@@ -4463,9 +4468,19 @@ _ci_validate_up() {
         ci_log "[CI-ERROR-VALIDATE-0018]" "reason=\"no startable services from compose config\""
         return 2
     fi
-    docker compose -p "${project}" \
-        -f "${CI_COMPOSE_FILE:-deploy/prod/docker-compose.yml}" \
-        -f "${net_override}" -f "${pin_override}" up -d "${svcs[@]}"
+    # What: name each host-mode service left out of the up.
+    # Why: AG-VAL-027 needs a stated exclusion, not silence.
+    # From: Issue #1683
+    raw="$(_ci_validate_service_list '.value.network_mode == "host"')" || return 2
+    while IFS= read -r svc; do
+        [ -n "${svc}" ] && ci_log "[CI-INFO-VALIDATE-0055]" "service=\"${svc}\" reason=\"host network mode cannot be isolated in a /27; excluded\""
+    done <<< "${raw}"
+    local file="${CI_COMPOSE_FILE:-deploy/prod/docker-compose.yml}" flags
+    local -a pf=()
+    flags="$(_ci_compose_profile_flags "${file}")" || return 2
+    [ -z "${flags}" ] || mapfile -t pf <<< "${flags}"
+    docker compose -p "${project}" -f "${file}" \
+        -f "${net_override}" -f "${pin_override}" "${pf[@]}" up -d "${svcs[@]}"
 }
 
 # What: Started services that also have a healthcheck.
@@ -8480,19 +8495,26 @@ _ci_compose_service_names() {
         "${CI_LOGGING_MATRIX_SERVICES_CMD}" "${file}"
         return "$?"
     fi
-    local profiles
-    if profiles="$(docker compose -f "${file}" config --profiles 2>&1)"; then
-        :
-    else
+    local flags
+    local -a profile_flags=()
+    flags="$(_ci_compose_profile_flags "${file}")" || return 2
+    [ -z "${flags}" ] || mapfile -t profile_flags <<< "${flags}"
+    docker compose -f "${file}" "${profile_flags[@]}" config --services
+}
+
+# What: --profile flag pairs for every compose profile.
+# Why: one owner; a profiled service must not be skipped.
+# From: Issue #1683
+_ci_compose_profile_flags() {
+    local profiles p
+    if ! profiles="$(docker compose -f "$1" config --profiles 2>&1)"; then
         printf '%s\n' "${profiles}" >&2
         return 2
     fi
-    local -a profile_flags=()
-    local profile
-    while IFS= read -r profile; do
-        [ -n "${profile}" ] && profile_flags+=(--profile "${profile}")
-    done <<<"${profiles}"
-    docker compose -f "${file}" "${profile_flags[@]}" config --services
+    while IFS= read -r p; do
+        [ -n "${p}" ] && printf -- '--profile\n%s\n' "${p}"
+    done <<< "${profiles}"
+    return 0
 }
 
 # What: Fail if logging-matrix row/service pair drifts.
