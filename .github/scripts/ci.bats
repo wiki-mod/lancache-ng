@@ -25,11 +25,15 @@ setup() {
     # Why: label provenance needs it; no real host in tests.
     # From: Issue #1683 | PR #1858
     export GITHUB_SERVER_URL=https://git.example.test
-    # What: SOT copy with a neutral release registry.
-    # Why: ref tests must not mirror the real registry host.
+    # What: SOT copy with neutral registry and platforms.
+    # Why: tests must not mirror the real host or arch set.
     # From: Issue #1683 | PR #1858
     CI_MANIFEST="${BATS_TEST_TMPDIR}/sot.yml"
-    sed 's|^  registry: .*|  registry: registry.example.test|' "${CI_MANIFEST_SOURCE}" > "${CI_MANIFEST}"
+    sed -e 's|^  registry: .*|  registry: registry.example.test|' \
+        -e 's|linux/amd64|os/p1|g; s|linux/arm64|os/p2|g' \
+        -e 's|^  amd64:$|  p1:|; s|^  arm64:$|  p2:|' \
+        -e 's|x86_64|arch-a|g; s|aarch64|arch-b|g' \
+        "${CI_MANIFEST_SOURCE}" > "${CI_MANIFEST}"
     export CI_MANIFEST
 }
 
@@ -365,11 +369,11 @@ teardown() {
     # Why: one owner; no per-arch duplication.
     # From: Issue #1683
     local m="${BATS_TEST_TMPDIR}/m.yml"
-    printf 'platform_arch:\n  amd64:\n    apk: TESTARCH\n    runner: TESTRUN\n' > "${m}"
-    CI_MANIFEST="${m}" run _ci_platform_apk_arch linux/amd64
+    printf 'platform_arch:\n  p1:\n    apk: TESTARCH\n    runner: TESTRUN\n' > "${m}"
+    CI_MANIFEST="${m}" run _ci_platform_apk_arch os/p1
     [ "${status}" -eq 0 ]
     [ "${output}" = "TESTARCH" ]
-    CI_MANIFEST="${m}" run _ci_platform_runner linux/amd64
+    CI_MANIFEST="${m}" run _ci_platform_runner os/p1
     [ "${status}" -eq 0 ]
     [ "${output}" = "TESTRUN" ]
     CI_MANIFEST="${m}" run _ci_platform_runner linux/riscv64
@@ -380,10 +384,10 @@ teardown() {
     # What: One JSON builder from any key=value field set.
     # Why: Base-CI needs a service field too.
     # From: Issue #1683
-    run _ci_matrix_append '[]' service=ui arch=amd64 runner=ubuntu-latest platform=linux/amd64
+    run _ci_matrix_append '[]' service=ui arch=arch-a runner=r1 platform=os/p1
     [ "${status}" -eq 0 ]
     [ "$(printf '%s' "${output}" | jq -r '.[0].service')" = "ui" ]
-    [ "$(printf '%s' "${output}" | jq -r '.[0].platform')" = "linux/amd64" ]
+    [ "$(printf '%s' "${output}" | jq -r '.[0].platform')" = "os/p1" ]
 }
 
 @test "plan-matrix emits only resolve-build targets, one row per platform" {
@@ -399,7 +403,7 @@ teardown() {
     local m; m="$(grep '^matrix=' "${gh}" | sed 's/^matrix=//')"
     [ "$(printf '%s' "${m}" | jq '.include | length')" -eq 2 ]
     [ "$(printf '%s' "${m}" | jq -r '.include[0].service')" = "proxy" ]
-    [ "$(printf '%s' "${m}" | jq -r '[.include[].platform]|sort|join(",")')" = "linux/amd64,linux/arm64" ]
+    [ "$(printf '%s' "${m}" | jq -r '[.include[].platform]|sort|join(",")')" = "os/p1,os/p2" ]
 }
 
 @test "plan-matrix treats a SOT-only change as identity candidates" {
@@ -510,22 +514,22 @@ teardown() {
     # What: Same content+platform -> same keyed id, always.
     # Why: NOOP/reuse depends on a stable identity.
     # From: Issue #1683
-    run bash "${CI_SH}" identity ui linux/amd64
+    run bash "${CI_SH}" identity ui os/p1
     [ "${status}" -eq 0 ]
     local first="${output}"
-    run bash "${CI_SH}" identity ui linux/amd64
+    run bash "${CI_SH}" identity ui os/p1
     [ "${output}" = "${first}" ]
-    [[ "${output}" =~ ^platform=linux/amd64\ identity=[0-9a-f]{64}$ ]]
+    [[ "${output}" =~ ^platform=os/p1\ identity=[0-9a-f]{64}$ ]]
 }
 
 @test "identity differs across services and build types" {
     # What: proxy(apk), ui(rust), build-tools all differ.
     # Why: An id must key on its own inputs, not collide.
     # From: Issue #1683
-    run bash "${CI_SH}" identity proxy linux/amd64
+    run bash "${CI_SH}" identity proxy os/p1
     [ "${status}" -eq 0 ]
     local proxy="${output}"
-    run bash "${CI_SH}" identity build-tools linux/amd64
+    run bash "${CI_SH}" identity build-tools os/p1
     [ "${status}" -eq 0 ]
     [ "${output}" != "${proxy}" ]
 }
@@ -534,10 +538,10 @@ teardown() {
     # What: identity/resolve of an apk service must exit 0.
     # Why: A printed id with rc=1 masks a broken pipeline.
     # From: Issue #1683
-    run bash "${CI_SH}" identity ntp linux/amd64
+    run bash "${CI_SH}" identity ntp os/p1
     [ "${status}" -eq 0 ]
-    [[ "${output}" =~ ^platform=linux/amd64\ identity=[0-9a-f]{64}$ ]]
-    run bash "${CI_SH}" resolve ntp linux/amd64
+    [[ "${output}" =~ ^platform=os/p1\ identity=[0-9a-f]{64}$ ]]
+    run bash "${CI_SH}" resolve ntp os/p1
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"state=UNKNOWN"* ]]
 }
@@ -562,19 +566,19 @@ teardown() {
     run bash "${CI_SH}" identity ui
     [ "${status}" -eq 0 ]
     [ "${#lines[@]}" -eq 2 ]
-    [[ "${output}" == *"platform=linux/amd64 identity="* ]]
-    [[ "${output}" == *"platform=linux/arm64 identity="* ]]
+    [[ "${output}" == *"platform=os/p1 identity="* ]]
+    [[ "${output}" == *"platform=os/p2 identity="* ]]
 }
 
 @test "a selected platform yields one line; amd64 and arm64 differ" {
     # What: Platform selects; each arch has its own id.
     # Why: An amd64 binary must not reuse an arm64 id.
     # From: Issue #1683
-    run bash "${CI_SH}" identity ui linux/amd64
+    run bash "${CI_SH}" identity ui os/p1
     [ "${status}" -eq 0 ]
     [ "${#lines[@]}" -eq 1 ]
     local a="${output}"
-    run bash "${CI_SH}" identity ui linux/arm64
+    run bash "${CI_SH}" identity ui os/p2
     [ "${output}" != "${a}" ]
 }
 
@@ -592,13 +596,13 @@ teardown() {
     # Why: A platform-irrelevant change must not rebuild.
     # From: Issue #1683
     local m="${BATS_TEST_TMPDIR}/manifest.yml"
-    cp "${CI_MANIFEST_SOURCE}" "${m}"
+    cp "${CI_MANIFEST}" "${m}"
     local amd_before arm_before amd_after arm_after
-    amd_before="$(CI_MANIFEST="${m}" bash "${CI_SH}" identity netdata linux/amd64)"
-    arm_before="$(CI_MANIFEST="${m}" bash "${CI_SH}" identity netdata linux/arm64)"
-    sed -i 's/sha256_aarch64: [0-9a-f]\{64\}/sha256_aarch64: deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/' "${m}"
-    amd_after="$(CI_MANIFEST="${m}" bash "${CI_SH}" identity netdata linux/amd64)"
-    arm_after="$(CI_MANIFEST="${m}" bash "${CI_SH}" identity netdata linux/arm64)"
+    amd_before="$(CI_MANIFEST="${m}" bash "${CI_SH}" identity netdata os/p1)"
+    arm_before="$(CI_MANIFEST="${m}" bash "${CI_SH}" identity netdata os/p2)"
+    sed -i 's/sha256_arch-b: [0-9a-f]\{64\}/sha256_arch-b: deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/' "${m}"
+    amd_after="$(CI_MANIFEST="${m}" bash "${CI_SH}" identity netdata os/p1)"
+    arm_after="$(CI_MANIFEST="${m}" bash "${CI_SH}" identity netdata os/p2)"
     [ "${amd_before}" = "${amd_after}" ]
     [ "${arm_before}" != "${arm_after}" ]
 }
@@ -608,7 +612,7 @@ teardown() {
     # Why: A masked rc0 fan-out would skip the target.
     # From: Issue #1683
     local m="${BATS_TEST_TMPDIR}/manifest.yml"
-    cp "${CI_MANIFEST_SOURCE}" "${m}"
+    cp "${CI_MANIFEST}" "${m}"
     sed -i '/^  platforms: \[/d' "${m}"
     CI_MANIFEST="${m}" run bash "${CI_SH}" identity ui
     [ "${status}" -eq 2 ]
@@ -687,10 +691,10 @@ teardown() {
 }
 
 @test "impact of a ref against itself is all NOOP" {
-    # What: Identical refs rebuild nothing.
+    # What: Identical refs rebuild nothing (real git SOT).
     # Why: No diff means no build; no rebuild.
     # From: Issue #1683
-    run bash "${CI_SH}" impact HEAD HEAD
+    CI_MANIFEST="${CI_MANIFEST_SOURCE}" run bash "${CI_SH}" impact HEAD HEAD
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"impact=NOOP"* ]]
     [[ "${output}" != *"impact=BUILD"* ]]
@@ -741,12 +745,12 @@ teardown() {
     # Why: impact base pins must reflect base, not head.
     # From: Issue #1683
     local m1="${BATS_TEST_TMPDIR}/m1.yml" m2="${BATS_TEST_TMPDIR}/m2.yml"
-    cp "${CI_MANIFEST_SOURCE}" "${m1}"
+    cp "${CI_MANIFEST}" "${m1}"
     cp "${m1}" "${m2}"
-    sed -i 's/sha256_x86_64: [0-9a-f]\{64\}/sha256_x86_64: deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/' "${m2}"
+    sed -i 's/sha256_arch-a: [0-9a-f]\{64\}/sha256_arch-a: deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/' "${m2}"
     local a b
-    a="$(CI_MANIFEST="${m1}" _ci_identity_for netdata linux/amd64 HEAD)"
-    b="$(CI_MANIFEST="${m2}" _ci_identity_for netdata linux/amd64 HEAD)"
+    a="$(CI_MANIFEST="${m1}" _ci_identity_for netdata os/p1 HEAD)"
+    b="$(CI_MANIFEST="${m2}" _ci_identity_for netdata os/p1 HEAD)"
     [ -n "${a}" ]
     [ "${a}" != "${b}" ]
 }
@@ -756,10 +760,10 @@ teardown() {
     # Why: Proves host is SOT-driven, not hardcoded.
     # From: Issue #1683
     local m="${BATS_TEST_TMPDIR}/reg.yml" host tag
-    sed 's/^  registry: .*/  registry: example.io/' "${CI_MANIFEST_SOURCE}" > "${m}"
+    sed 's/^  registry: .*/  registry: example.io/' "${CI_MANIFEST}" > "${m}"
     host="$(CI_MANIFEST="${m}" _ci_registry)"
     [ "${host}" = "example.io" ]
-    tag="$(CI_MANIFEST="${m}" GITHUB_REPOSITORY=owner/fixture-repo _ci_image_tag proxy linux/amd64 abcd)"
+    tag="$(CI_MANIFEST="${m}" GITHUB_REPOSITORY=owner/fixture-repo _ci_image_tag proxy os/p1 abcd)"
     [[ "${tag}" == example.io/* ]]
 }
 
@@ -768,7 +772,7 @@ teardown() {
     # Why: An empty host builds a malformed ref, silently.
     # From: Issue #1683
     local m="${BATS_TEST_TMPDIR}/noreg.yml"
-    grep -v '^  registry:' "${CI_MANIFEST_SOURCE}" > "${m}"
+    grep -v '^  registry:' "${CI_MANIFEST}" > "${m}"
     run bash -c "source '${CI_SH}'; CI_MANIFEST='${m}' _ci_registry 2>&1"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-CORE-0005"* ]]
@@ -797,10 +801,10 @@ teardown() {
     # Why: Downstream assembly keys per-platform digests.
     # From: Issue #1683
     STUB_STATE=PRESENT_ACCEPTED
-    GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${CI_SH}" build ui linux/arm64
+    GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${CI_SH}" build ui os/p2
     [ "${status}" -eq 0 ]
     [ "${#lines[@]}" -eq 1 ]
-    [[ "${output}" == *"platform=linux/arm64"* ]]
+    [[ "${output}" == *"platform=os/p2"* ]]
     [[ "${output}" == *"result=reuse-accepted"* ]]
 }
 
@@ -1150,16 +1154,16 @@ _stub() {
     _ci_diff_refs() { printf 'B H\n'; }
     _ci_manifest_at() { printf 'x\n' > "$2"; }
     _ci_identity_for() { [ "$3" = B ] && echo base-id; }
-    run _ci_semantic_impact ui linux/amd64 base-id
+    run _ci_semantic_impact ui os/p1 base-id
     [ "${lines[-1]}" = NOOP ]
-    run _ci_semantic_impact ui linux/amd64 head-id
+    run _ci_semantic_impact ui os/p1 head-id
     [ "${lines[-1]}" = BUILD ]
     [[ "${output}" == *"[CI-INFO-IMPACT-0004]"* ]]
     _ci_identity_for() { return 2; }
-    run _ci_semantic_impact ui linux/amd64 head-id
+    run _ci_semantic_impact ui os/p1 head-id
     [ "${lines[-1]}" = UNKNOWN ]
     _ci_diff_refs() { :; }
-    run _ci_semantic_impact ui linux/amd64 head-id
+    run _ci_semantic_impact ui os/p1 head-id
     [ "${lines[-1]}" = UNKNOWN ]
     [[ "${output}" == *"[CI-INFO-IMPACT-0003]"* ]]
 }
@@ -1260,13 +1264,13 @@ _stub() {
     CI_READBACK_CMD="$(_stub rb 'echo sha256:dead')" \
     CI_SMOKE_CMD="$(_stub sm 'echo "service=$1 smoke=ok image=${CI_SERVICE_IMAGE}"')" \
     GHCR_USERNAME=u GHCR_TOKEN=t GITHUB_REPOSITORY=owner/fixture-repo \
-        run bash "${CI_SH}" verify proxy sha256:dead linux/amd64
+        run bash "${CI_SH}" verify proxy sha256:dead os/p1
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"smoke=ok image="*"proxy@sha256:dead"* ]]
     CI_READBACK_CMD="$(_stub rb 'echo sha256:dead')" \
     CI_SMOKE_CMD="$(_stub sm 'exit 1')" \
     GHCR_USERNAME=u GHCR_TOKEN=t GITHUB_REPOSITORY=owner/fixture-repo \
-        run bash "${CI_SH}" verify proxy sha256:dead linux/amd64
+        run bash "${CI_SH}" verify proxy sha256:dead os/p1
     [ "${status}" -ne 0 ]
 }
 
@@ -1333,7 +1337,7 @@ _stub() {
     CI_READBACK_CMD="$(_stub rb 'echo sha256:dead')" \
     CI_TOOLCHAIN_TEST_CMD="$(_stub tc 'echo "service=$1 tested=ok"')" \
     GHCR_USERNAME=u GHCR_TOKEN=t GITHUB_REPOSITORY=owner/fixture-repo \
-        run bash "${CI_SH}" verify build-tools sha256:dead linux/amd64
+        run bash "${CI_SH}" verify build-tools sha256:dead os/p1
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"verified=sha256:dead"* ]]
 }
@@ -1589,17 +1593,17 @@ RS
     ci_cmd_build() { echo "service=$1 platform=$2 result=built identity=i"; }
     ci_cmd_publish() { echo "service=$1 platform=$2 published=sha256:pub identity=i"; }
     ci_cmd_verify() { echo "VERIFY $1 $2 $3"; }
-    run ci_cmd_ship proxy linux/amd64
+    run ci_cmd_ship proxy os/p1
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"VERIFY proxy sha256:pub linux/amd64"* ]]
+    [[ "${output}" == *"VERIFY proxy sha256:pub os/p1"* ]]
     ci_cmd_build() { echo "service=$1 platform=$2 result=reuse-accepted identity=i"; }
     ci_cmd_publish() { echo PUBLISH-CALLED; }
-    run ci_cmd_ship proxy linux/amd64
+    run ci_cmd_ship proxy os/p1
     [ "${status}" -eq 0 ]
     [[ "${output}" != *"PUBLISH-CALLED"* ]]
     ci_cmd_build() { echo "service=$1 platform=$2 result=built identity=i"; }
     ci_cmd_publish() { echo "service=$1 published= identity=i"; }
-    run ci_cmd_ship proxy linux/amd64
+    run ci_cmd_ship proxy os/p1
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-SHIP-0002"* ]]
 }
@@ -1646,7 +1650,7 @@ _asm_a() { _test_digest a; }
 _asm_b() { _test_digest b; }
 _asm_idx() { _test_digest d; }
 _asm_digest_stub() {
-    _stub dg "case \"\$2\" in */arm64) echo $(_asm_b);; *) echo $(_asm_a);; esac"
+    _stub dg "case \"\$2\" in */p2) echo $(_asm_b);; *) echo $(_asm_a);; esac"
 }
 
 @test "assemble refuses a non-ACCEPTED platform and does not rebuild" {
@@ -1693,7 +1697,7 @@ _asm_digest_stub() {
     STUB_STATE=PRESENT_ACCEPTED
     CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
     CI_ACCEPTED_DIGEST_CMD="$(_asm_digest_stub)" \
-    CI_INDEX_LOOKUP_CMD="$(_stub idx "echo \"$(_asm_idx) linux/amd64=$(_asm_a) linux/arm64=$(_asm_b)\"")" \
+    CI_INDEX_LOOKUP_CMD="$(_stub idx "echo \"$(_asm_idx) os/p1=$(_asm_a) os/p2=$(_asm_b)\"")" \
         run bash "${CI_SH}" assemble ui
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"result=reuse-index"* ]]
@@ -1707,7 +1711,7 @@ _asm_digest_stub() {
     STUB_STATE=PRESENT_ACCEPTED
     CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
     CI_ACCEPTED_DIGEST_CMD="$(_asm_digest_stub)" \
-    CI_INDEX_LOOKUP_CMD="$(_stub idx "echo \"$(_asm_idx) linux/amd64=$(_asm_a) linux/arm64=$(_asm_a)\"")" \
+    CI_INDEX_LOOKUP_CMD="$(_stub idx "echo \"$(_asm_idx) os/p1=$(_asm_a) os/p2=$(_asm_a)\"")" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${CI_SH}" assemble ui
     [ "${status}" -eq 2 ]
@@ -1946,7 +1950,7 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     # What: accepted=row; missing=skip; UNKNOWN=fail.
     # Why: promote moves channel; UNKNOWN != skip.
     # From: Issue #1683 | PR #1858
-    _ci_collect_accepted_digests() { echo "linux/amd64=sha256:a"; }
+    _ci_collect_accepted_digests() { echo "os/p1=sha256:a"; }
     _ci_reconcile_index() { echo sha256:idx; }
     _ci_resolve_one() { echo "service=$1 platform=$2 state=PRESENT_ACCEPTED action=noop"; }
     run _ci_toolchain_candidate
@@ -2244,11 +2248,11 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     # Why: The transitive protected set, all states (§101).
     # From: Issue #1683
     GITHUB_REPOSITORY=owner/fixture-repo
-    _ci_ledger_blob() { printf 'id1\tproxy\tlinux/amd64\tPRODUCED_UNVERIFIED\tsha256:led\n'; }
+    _ci_ledger_blob() { printf 'id1\tproxy\tos/p1\tPRODUCED_UNVERIFIED\tsha256:led\n'; }
     ci_services() { printf 'proxy\n'; }
     _ci_mutable_channels() { printf 'latest\n'; }
     _ci_registry_probe() { printf 'sha256:chan\n'; }
-    _ci_index_raw() { printf '{"manifests":[{"platform":{"architecture":"amd64"},"digest":"sha256:child"}]}'; }
+    _ci_index_raw() { printf '{"manifests":[{"platform":{"architecture":"p1"},"digest":"sha256:child"}]}'; }
     run _ci_default_gc_roots
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"sha256:led"* ]]
@@ -2265,7 +2269,7 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     ci_services() { printf 'proxy\n'; }
     _ci_mutable_channels() { printf 'nightly\n'; }
     _ci_registry_probe() { case "$1" in *build-tools:nightly) echo sha256:btidx ;; *) return 1 ;; esac; }
-    _ci_index_raw() { printf '{"manifests":[{"platform":{"architecture":"arm64"},"digest":"sha256:btarm"}]}'; }
+    _ci_index_raw() { printf '{"manifests":[{"platform":{"architecture":"p2"},"digest":"sha256:btarm"}]}'; }
     run _ci_default_gc_roots
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"sha256:btidx"* ]]
@@ -2278,7 +2282,7 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     # From: Issue #1683 | PR #1858
     export GITHUB_REPOSITORY=owner/fixture-repo
     _ci_registry_digest() { echo sha256:idx; }
-    _ci_index_raw() { printf '{"manifests":[{"platform":{"architecture":"amd64"},"digest":"sha256:a"},{"platform":{"architecture":"arm64"},"digest":"sha256:b"}]}'; }
+    _ci_index_raw() { printf '{"manifests":[{"platform":{"architecture":"p1"},"digest":"sha256:a"},{"platform":{"architecture":"p2"},"digest":"sha256:b"}]}'; }
     _ci_registry_probe() { echo sha256:ok; }
     run _ci_default_channel_readback build-tools latest
     [ "${status}" -eq 0 ]
@@ -2321,7 +2325,7 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     # From: Issue #1683
     GITHUB_REPOSITORY=owner/fixture-repo
     local m="${BATS_TEST_TMPDIR}/noreg.yml"
-    grep -v '^  registry:' "${CI_MANIFEST_SOURCE}" > "${m}"
+    grep -v '^  registry:' "${CI_MANIFEST}" > "${m}"
     export CI_MANIFEST="${m}"
     run _ci_default_gc_roots
     [ "${status}" -eq 2 ]
@@ -2333,7 +2337,7 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     # Why: Missing children would orphan-delete live arches.
     # From: Issue #1683
     GITHUB_REPOSITORY=owner/fixture-repo
-    _ci_ledger_blob() { printf 'id1\tproxy\tlinux/amd64\tACCEPTED\tsha256:led\n'; }
+    _ci_ledger_blob() { printf 'id1\tproxy\tos/p1\tACCEPTED\tsha256:led\n'; }
     ci_services() { printf '\n'; }
     _ci_mutable_channels() { printf '\n'; }
     _ci_index_raw() { return 2; }
@@ -2347,7 +2351,7 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     # Why: A service never promoted is legitimately absent.
     # From: Issue #1683
     export GITHUB_REPOSITORY=owner/fixture-repo
-    _ci_ledger_blob() { printf 'id1\tproxy\tlinux/amd64\tACCEPTED\tsha256:led\n'; }
+    _ci_ledger_blob() { printf 'id1\tproxy\tos/p1\tACCEPTED\tsha256:led\n'; }
     ci_services() { printf 'proxy\n'; }
     _ci_mutable_channels() { printf 'latest\n'; }
     _ci_registry_probe() { return 1; }
@@ -3945,7 +3949,7 @@ netdata=sha256:n"
     # Why: Empty value = FAIL CLOSED, no partial emit.
     # From: Issue #1683
     local m="${BATS_TEST_TMPDIR}/no-rust-alpine.yml"
-    grep -v '^  alpine:' "${CI_MANIFEST_SOURCE}" > "${m}"
+    grep -v '^  alpine:' "${CI_MANIFEST}" > "${m}"
     CI_MANIFEST="${m}" run bash "${CI_SH}" build-args build-tools
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-BUILDARGS-0003"* ]]
@@ -4082,9 +4086,9 @@ netdata=sha256:n"
     # Why: install services pin per-platform asset.
     # From: Issue #1683
     local arch sha
-    arch="$(_ci_platform_apk_arch linux/amd64)"
+    arch="$(_ci_platform_apk_arch os/p1)"
     sha="$(_ci_block_entry_field external_versions netdata "sha256_${arch}")"
-    run bash "${CI_SH}" build-args netdata "" linux/amd64
+    run bash "${CI_SH}" build-args netdata "" os/p1
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"--build-arg NETDATA_ARCH=${arch}"* ]]
     [[ "${output}" == *"--build-arg NETDATA_SHA256=${sha}"* ]]
@@ -4146,7 +4150,7 @@ netdata=sha256:n"
     local key sha
     key="$(_ci_build_matrix_platforms)"; key="sha256_$(_ci_platform_apk_arch "${key%%$'\n'*}")"
     sha="$(_ci_block_entry_field external_versions dhclient "${key}")"
-    sed "s/${key}: ${sha}/${key}: $(printf 'd%.0s' {1..64})/" "${CI_MANIFEST_SOURCE}" > "${m}"
+    sed "s/${key}: ${sha}/${key}: $(printf 'd%.0s' {1..64})/" "${CI_MANIFEST}" > "${m}"
     changed="$(CI_MANIFEST="${m}" bash "${CI_SH}" build-tools signature "sccache-0.15.0-r0")"
     [ -n "${base}" ]
     [ -n "${changed}" ]
@@ -4198,8 +4202,8 @@ netdata=sha256:n"
     # Why: an arm64-only package bump must not be a NOOP.
     # From: Issue #1683
     local a b
-    a="$(bash "${CI_SH}" build-tools signature "x86_64:sccache-0.15.0-r0 aarch64:sccache-0.15.0-r0")"
-    b="$(bash "${CI_SH}" build-tools signature "x86_64:sccache-0.15.0-r0 aarch64:sccache-0.16.0-r0")"
+    a="$(bash "${CI_SH}" build-tools signature "arch-a:sccache-0.15.0-r0 arch-b:sccache-0.15.0-r0")"
+    b="$(bash "${CI_SH}" build-tools signature "arch-a:sccache-0.15.0-r0 arch-b:sccache-0.16.0-r0")"
     [ -n "${a}" ]
     [ "${a}" != "${b}" ]
 }
@@ -4221,26 +4225,26 @@ netdata=sha256:n"
     local log="${BATS_TEST_TMPDIR}/docker.log" repos
     repos="$(_ci_block_entry_list build_toolchain build-tools apk_repositories | tr '\n' ' ')"
     _stub docker 'echo "$*" >> "'"${log}"'"; if [ "${FAIL:-}" = 1 ]; then echo "ERROR: unable to select packages: zz"; exit 1; fi; echo "(1/1) Installing zz (9.9-r0)"' >/dev/null
-    CI_APK_RESOLVE_CMD='' PATH="${BATS_TEST_TMPDIR}:${PATH}" run _ci_apk_resolve img/base aarch64 zz
+    CI_APK_RESOLVE_CMD='' PATH="${BATS_TEST_TMPDIR}:${PATH}" run _ci_apk_resolve img/base arch-b zz
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"zz-9.9-r0"* ]]
-    grep -q -- "-e ARCH=aarch64" "${log}"
+    grep -q -- "-e ARCH=arch-b" "${log}"
     grep -qF -- "-e REPOS=${repos}" "${log}"
     grep -q -- "--keys-dir" "${log}"
     grep -q -- "--initdb" "${log}"
     [ "$(grep -c -- "-e HTTP_PROXY" "${log}")" -eq 0 ]
     : > "${log}"
     HTTP_PROXY=http://p:3128 CI_APK_RESOLVE_CMD='' PATH="${BATS_TEST_TMPDIR}:${PATH}" \
-        run _ci_apk_resolve img/base aarch64 zz
+        run _ci_apk_resolve img/base arch-b zz
     [ "${status}" -eq 0 ]
-    grep -q -- "-e HTTP_PROXY -e ARCH=aarch64" "${log}"
+    grep -q -- "-e HTTP_PROXY -e ARCH=arch-b" "${log}"
     : > "${log}"
     FAIL=1 CI_APK_RESOLVE_CMD='' CI_RETRY_BACKOFF_BASE_SECONDS=0 PATH="${BATS_TEST_TMPDIR}:${PATH}" \
-        run _ci_apk_resolve img/base aarch64 zz
+        run _ci_apk_resolve img/base arch-b zz
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"[CI-ERROR-BUILDTOOLS-0020]"* ]]
     [[ "${output}" == *"unable to select packages"* ]]
-    [ "$(grep -c -- "-e ARCH=aarch64" "${log}")" -eq 1 ]
+    [ "$(grep -c -- "-e ARCH=arch-b" "${log}")" -eq 1 ]
 }
 
 @test "build-tools resolve-signature fails closed on a missing central base image" {
@@ -4248,7 +4252,7 @@ netdata=sha256:n"
     # Why: errexit must not swallow the fail-closed path.
     # From: Issue #1683
     local m="${BATS_TEST_TMPDIR}/no-resolve-alpine.yml"
-    grep -v '^  alpine:' "${CI_MANIFEST_SOURCE}" > "${m}"
+    grep -v '^  alpine:' "${CI_MANIFEST}" > "${m}"
     CI_MANIFEST="${m}" run bash "${CI_SH}" build-tools resolve-signature
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-BUILDTOOLS-0009"* ]]
@@ -5305,7 +5309,7 @@ _anv_run() {
     # What: Exact multi-arch digests for SOT (§48).
     # Why: Candidate feeds validate/promote, fail closed.
     # From: Issue #1683
-    _ci_collect_accepted_digests() { printf 'linux/amd64=sha256:a\nlinux/arm64=sha256:b\n'; }
+    _ci_collect_accepted_digests() { printf 'os/p1=sha256:a\nos/p2=sha256:b\n'; }
     _ci_reconcile_index() { printf 'sha256:idx-%s\n' "$1"; }
     run _ci_stack_candidate_ledger
     [ "${status}" -eq 0 ]
@@ -5325,7 +5329,7 @@ _anv_run() {
     run _ci_stack_candidate_ledger
     [ "${status}" -ne 0 ]
     # C: a reconcile divergence propagates non-zero
-    _ci_collect_accepted_digests() { printf 'linux/amd64=sha256:a\n'; }
+    _ci_collect_accepted_digests() { printf 'os/p1=sha256:a\n'; }
     _ci_reconcile_index() { return 2; }
     run _ci_stack_candidate_ledger
     [ "${status}" -ne 0 ]
@@ -5344,13 +5348,13 @@ _anv_run() {
     _ci_identity_for() { echo "id-$1"; }
     _ci_image_tag() { echo "reg/$1:$3"; }
     _ci_registry_digest() { echo "sha256:deadbeef"; }
-    run ci_cmd_emit_result dns linux/amd64
+    run ci_cmd_emit_result dns os/p1
     [ "${status}" -eq 0 ]
     [[ "${output}" == *'"service":"dns"'* ]]
     [[ "${output}" == *'"state":"ACCEPTED"'* ]]
     [[ "${output}" == *'"digest":"sha256:deadbeef"'* ]]
     _ci_registry_digest() { return 1; }
-    run ci_cmd_emit_result dns linux/amd64
+    run ci_cmd_emit_result dns os/p1
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-RESULT-0003"* ]]
 }
@@ -5362,13 +5366,13 @@ _anv_run() {
     ci_cmd_emit_result() { printf 'emit %s %s\n' "$1" "$2"; }
     local seen="${BATS_TEST_TMPDIR}/agg-dir"
     ci_cmd_aggregate() { ls "$1" | LC_ALL=C sort | tr '\n' ' ' > "${seen}"; }
-    export CI_BUILD_MATRIX='{"include":[{"service":"dns","platform":"linux/amd64"},{"service":"ui","platform":"linux/arm64"}]}'
+    export CI_BUILD_MATRIX='{"include":[{"service":"dns","platform":"os/p1"},{"service":"ui","platform":"os/p2"}]}'
     export CI_TMPDIR="${BATS_TEST_TMPDIR}"
     run ci_cmd_aggregate_stack
     [ "${status}" -eq 0 ]
     run cat "${seen}"
-    [[ "${output}" == *"dns-linux-amd64.json"* ]]
-    [[ "${output}" == *"ui-linux-arm64.json"* ]]
+    [[ "${output}" == *"dns-os-p1.json"* ]]
+    [[ "${output}" == *"ui-os-p2.json"* ]]
     unset CI_BUILD_MATRIX
     run ci_cmd_aggregate_stack
     [ "${status}" -ne 0 ]
@@ -5386,7 +5390,7 @@ _anv_run() {
     local calls="${BATS_TEST_TMPDIR}/scan-calls"
     : > "${calls}"
     ci_cmd_scan() { printf 'scan %s %s\n' "$1" "$2" >> "${calls}"; }
-    export CI_BUILD_MATRIX='{"include":[{"service":"dns","platform":"linux/amd64"},{"service":"ui","platform":"linux/arm64"}]}'
+    export CI_BUILD_MATRIX='{"include":[{"service":"dns","platform":"os/p1"},{"service":"ui","platform":"os/p2"}]}'
     run ci_cmd_scan_stack
     [ "${status}" -eq 0 ]
     run cat "${calls}"
@@ -6629,7 +6633,7 @@ _setup_keys_kea_fixture() {
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/skk-nmap" m="${BATS_TEST_TMPDIR}/no-nmap.yml"
     _setup_keys_kea_fixture "${r}"
-    grep -vx '      - nmap' "${CI_MANIFEST_SOURCE}" > "${m}"
+    grep -vx '      - nmap' "${CI_MANIFEST}" > "${m}"
     CI_MANIFEST="${m}" run bash "${CI_SH}" check setup-keys-kea "${r}"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"services.dhcp.packages must install nmap"* ]]
@@ -7151,11 +7155,11 @@ EOF
     printf '#!/usr/bin/env bash\necho "docker $*"\n' > "${bin}/docker"
     chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
-        run _ci_docker_build proxy abc123 linux/amd64
+        run _ci_docker_build proxy abc123 os/p1
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"buildx build --load"* ]]
-    [[ "${output}" == *"registry.example.test/owner/fixture-repo/proxy:sha-abc123-amd64"* ]]
-    [[ "${output}" == *"--platform linux/amd64"* ]]
+    [[ "${output}" == *"registry.example.test/owner/fixture-repo/proxy:sha-abc123-p1"* ]]
+    [[ "${output}" == *"--platform os/p1"* ]]
     [[ "${output}" == *"org.opencontainers.image.title=proxy"* ]]
     [[ "${output}" == *"--build-arg BUILD_IDENTITY=abc123"* ]]
 }
@@ -7191,7 +7195,7 @@ EOF
     printf '#!/usr/bin/env bash\necho "docker $*"\n' > "${bin}/docker"
     chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
-        run _ci_docker_build proxy abc123 linux/amd64
+        run _ci_docker_build proxy abc123 os/p1
     [ "${status}" -eq 0 ]
     [[ "${output}" != *"--cache-from"* ]]
     [[ "${output}" != *"--cache-to"* ]]
@@ -7207,7 +7211,7 @@ EOF
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
         CI_BUILD_CACHE_FROM="type=registry,ref=registry.example.test/owner/fixture-repo/proxy:cache" \
         CI_BUILD_CACHE_TO="type=registry,ref=registry.example.test/owner/fixture-repo/proxy:cache,mode=max" \
-        run _ci_docker_build proxy abc123 linux/amd64
+        run _ci_docker_build proxy abc123 os/p1
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"--cache-from type=registry,ref=registry.example.test/owner/fixture-repo/proxy:cache"* ]]
     [[ "${output}" == *"--cache-to type=registry,ref=registry.example.test/owner/fixture-repo/proxy:cache,mode=max,ignore-error=true"* ]]
@@ -7217,7 +7221,7 @@ EOF
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo CI_BUILD_TOOLS_IMAGE_CMD='echo bt@sha256:x' \
         CI_BUILD_CACHE_FROM="type=registry,ref=registry.example.test/owner/fixture-repo/ui:cache" \
         CI_BUILD_CACHE_TO="type=registry,ref=registry.example.test/owner/fixture-repo/ui:cache,mode=max" \
-        run _ci_docker_build ui def456 linux/amd64
+        run _ci_docker_build ui def456 os/p1
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"--cache-from type=registry,ref=registry.example.test/owner/fixture-repo/ui:cache"* ]]
     [[ "${output}" == *"--cache-to type=registry,ref=registry.example.test/owner/fixture-repo/ui:cache,mode=max,ignore-error=true"* ]]
@@ -7243,7 +7247,7 @@ EOF
     chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
         CI_BUILD_CACHE_FROM="type=registry,ref=registry.example.test/owner/fixture-repo/proxy:cache" \
-        run _ci_docker_build proxy abc123 linux/amd64
+        run _ci_docker_build proxy abc123 os/p1
     [ "${status}" -eq 0 ]
     # What: raw evidence of the miss stays visible.
     # Why: AG-INT-002 forbids hiding it.
@@ -7259,7 +7263,7 @@ EOF
     chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
         CI_BUILD_CACHE_TO="type=registry,ref=registry.example.test/owner/fixture-repo/proxy:cache,ignore-error=false" \
-        run _ci_docker_build proxy abc123 linux/amd64
+        run _ci_docker_build proxy abc123 os/p1
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"--cache-to type=registry,ref=registry.example.test/owner/fixture-repo/proxy:cache,ignore-error=false"* ]]
     [[ "${output}" != *"ignore-error=false,ignore-error=true"* ]]
@@ -7274,7 +7278,7 @@ EOF
     chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
         CI_BUILD_CACHE_TO="registry.example.test/owner/fixture-repo/proxy:cache" \
-        run _ci_docker_build proxy abc123 linux/amd64
+        run _ci_docker_build proxy abc123 os/p1
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"--cache-to registry.example.test/owner/fixture-repo/proxy:cache"* ]]
     [[ "${output}" == *"CI-WARN-BUILD-0012"* ]]
@@ -7288,7 +7292,7 @@ EOF
     printf '#!/usr/bin/env bash\ncase "$*" in *"imagetools inspect"*) echo sha256:deadbeef ;; *) : ;; esac\n' > "${bin}/docker"
     chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
-        run _ci_docker_publish proxy abc123 linux/amd64
+        run _ci_docker_publish proxy abc123 os/p1
     [ "${status}" -eq 0 ]
     [ "${output}" = "sha256:deadbeef" ]
 }
@@ -7361,7 +7365,7 @@ EOF
     chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
     CI_RETRY_BACKOFF_BASE_SECONDS=0 CI_RETRY_MAX_ATTEMPTS=3 \
-        run _ci_docker_publish proxy abc123 linux/amd64
+        run _ci_docker_publish proxy abc123 os/p1
     [ "${status}" -eq 2 ]
     [ ! -e "${buildmarker}" ]
 }
@@ -7388,7 +7392,7 @@ esac
 EOF
     chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo CI_RETRY_BACKOFF_BASE_SECONDS=0 \
-        run _ci_docker_build proxy abc123 linux/amd64
+        run _ci_docker_build proxy abc123 os/p1
     [ "${status}" -eq 0 ]
     [ "$(cat "${cnt}")" -eq 2 ]
 }
@@ -7410,7 +7414,7 @@ esac
 EOF
     chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo CI_RETRY_BACKOFF_BASE_SECONDS=0 \
-        run _ci_docker_build proxy abc123 linux/amd64
+        run _ci_docker_build proxy abc123 os/p1
     [ "${status}" -eq 2 ]
     [ "$(cat "${cnt}")" -eq 1 ]
 }
@@ -7775,7 +7779,7 @@ EOF
     printf '#!/usr/bin/env bash\necho sha256:match\n' > "${bin}/docker"
     chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${CI_SH}" verify ui sha256:match linux/amd64
+        run bash "${CI_SH}" verify ui sha256:match os/p1
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"verified=sha256:match"* ]]
 }
@@ -7789,7 +7793,7 @@ EOF
     printf '#!/usr/bin/env bash\ncase "$*" in *"imagetools create"*) echo "$*" >> "%s" ;; *"imagetools inspect"*) echo sha256:idx ;; esac\n' "${log}" > "${bin}/docker"
     chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo GITHUB_SHA=deadbeef \
-        run _ci_docker_assemble ui linux/amd64=sha256:aaa linux/arm64=sha256:bbb
+        run _ci_docker_assemble ui os/p1=sha256:aaa os/p2=sha256:bbb
     [ "${status}" -eq 0 ]
     [ "${output}" = "sha256:idx" ]
     run cat "${log}"
@@ -8034,7 +8038,7 @@ EOF
     # From: Issue #1683
     _cas_setup
     cd "${CAS_A}"
-    _ci_ledger_append origin id-1 dns linux/amd64 ACCEPTED sha256:aaa
+    _ci_ledger_append origin id-1 dns os/p1 ACCEPTED sha256:aaa
     run _ci_ledger_read origin id-1
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"ACCEPTED"* ]]
@@ -8047,8 +8051,8 @@ EOF
     # From: Issue #1683
     _cas_setup
     cd "${CAS_A}"
-    _ci_ledger_append origin id-1 dns linux/amd64 PRODUCED_UNVERIFIED sha256:aaa
-    _ci_ledger_append origin id-1 dns linux/amd64 ACCEPTED sha256:aaa
+    _ci_ledger_append origin id-1 dns os/p1 PRODUCED_UNVERIFIED sha256:aaa
+    _ci_ledger_append origin id-1 dns os/p1 ACCEPTED sha256:aaa
     run _ci_ledger_read origin id-1
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"ACCEPTED"* ]]
@@ -8062,8 +8066,8 @@ EOF
     # From: Issue #1683
     _cas_setup
     cd "${CAS_A}"
-    _ci_ledger_append origin id-a dns linux/amd64 ACCEPTED sha256:aaa
-    _ci_ledger_append origin id-b dns linux/arm64 PRODUCED_UNVERIFIED sha256:bbb
+    _ci_ledger_append origin id-a dns os/p1 ACCEPTED sha256:aaa
+    _ci_ledger_append origin id-b dns os/p2 PRODUCED_UNVERIFIED sha256:bbb
     run _ci_ledger_read origin id-a
     [[ "${output}" == *"ACCEPTED"* ]]; [[ "${output}" == *"sha256:aaa"* ]]
     run _ci_ledger_read origin id-b
@@ -8076,7 +8080,7 @@ EOF
     # From: Issue #1683
     _cas_setup
     cd "${CAS_A}"
-    _ci_ledger_append origin id-a dns linux/amd64 ACCEPTED sha256:aaa
+    _ci_ledger_append origin id-a dns os/p1 ACCEPTED sha256:aaa
     run _ci_ledger_read origin id-missing
     [ "${status}" -eq 1 ]
 }
@@ -8087,7 +8091,7 @@ EOF
     # From: Issue #1683
     _ci_identity_for() { echo fixed-id; }
     _ci_ledger_read() { printf 'ACCEPTED\tsha256:xyz\n'; }
-    run _ci_accepted_digest ui linux/amd64
+    run _ci_accepted_digest ui os/p1
     [ "${status}" -eq 0 ]
     [ "${output}" = sha256:xyz ]
 }
@@ -8098,7 +8102,7 @@ EOF
     # From: Issue #1683
     _ci_identity_for() { echo fixed-id; }
     _ci_ledger_read() { printf 'PRODUCED_UNVERIFIED\tsha256:xyz\n'; }
-    run _ci_accepted_digest ui linux/amd64
+    run _ci_accepted_digest ui os/p1
     [ "${status}" -eq 1 ]
 }
 
@@ -8108,7 +8112,7 @@ EOF
     # From: Issue #1683
     _ci_identity_for() { echo fixed-id; }
     _ci_ledger_read() { return 2; }
-    run _ci_accepted_digest ui linux/amd64
+    run _ci_accepted_digest ui os/p1
     [ "${status}" -eq 2 ]
 }
 
@@ -8166,7 +8170,7 @@ EOF
     _ci_ledger_read() { return 2; }
     _ci_image_tag() { echo tag; }
     _ci_registry_probe() { echo sha256:g; }
-    run _ci_resolve_state ui id-x linux/amd64
+    run _ci_resolve_state ui id-x os/p1
     [ "${output}" = UNKNOWN ]
 }
 
@@ -8177,7 +8181,7 @@ EOF
     _ci_ledger_read() { return 1; }
     _ci_image_tag() { echo tag; }
     _ci_registry_probe() { return 2; }
-    run _ci_resolve_state ui id-x linux/amd64
+    run _ci_resolve_state ui id-x os/p1
     [ "${output}" = UNKNOWN ]
 }
 
@@ -8188,7 +8192,7 @@ EOF
     _ci_ledger_read() { return 1; }
     _ci_image_tag() { echo tag; }
     _ci_registry_probe() { return 1; }
-    run _ci_resolve_state ui id-x linux/amd64
+    run _ci_resolve_state ui id-x os/p1
     [ "${output}" = MISSING_CONFIRMED ]
 }
 
@@ -8199,7 +8203,7 @@ EOF
     _ci_ledger_read() { return 1; }
     _ci_image_tag() { echo tag; }
     _ci_registry_probe() { echo sha256:g; }
-    run _ci_resolve_state ui id-x linux/amd64
+    run _ci_resolve_state ui id-x os/p1
     [ "${output}" = PRODUCED_UNVERIFIED ]
 }
 
@@ -8210,7 +8214,7 @@ EOF
     _ci_ledger_read() { printf 'ACCEPTED\tsha256:g\n'; }
     _ci_image_tag() { echo tag; }
     _ci_registry_probe() { echo sha256:g; }
-    run _ci_resolve_state ui id-x linux/amd64
+    run _ci_resolve_state ui id-x os/p1
     [ "${output}" = PRESENT_ACCEPTED ]
 }
 
@@ -8221,7 +8225,7 @@ EOF
     _ci_ledger_read() { printf 'ACCEPTED\tsha256:g\n'; }
     _ci_image_tag() { echo tag; }
     _ci_registry_probe() { echo sha256:other; }
-    run _ci_resolve_state ui id-x linux/amd64
+    run _ci_resolve_state ui id-x os/p1
     [ "${output}" = MISMATCH ]
 }
 
@@ -8232,7 +8236,7 @@ EOF
     _ci_ledger_read() { printf 'ACCEPTED\tsha256:g\n'; }
     _ci_image_tag() { echo tag; }
     _ci_registry_probe() { return 1; }
-    run _ci_resolve_state ui id-x linux/amd64
+    run _ci_resolve_state ui id-x os/p1
     [[ "${output}" == *MISMATCH* ]]
     [[ "${output}" != *MISSING_CONFIRMED* ]]
 }
@@ -8244,7 +8248,7 @@ EOF
     _ci_ledger_read() { printf 'PRODUCED_UNVERIFIED\tsha256:g\n'; }
     _ci_image_tag() { echo tag; }
     _ci_registry_probe() { echo sha256:g; }
-    run _ci_resolve_state ui id-x linux/amd64
+    run _ci_resolve_state ui id-x os/p1
     [ "${output}" = PRODUCED_UNVERIFIED ]
 }
 
@@ -8264,7 +8268,7 @@ EOF
     cat > "${bin}/docker" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
-  *--raw*) echo '{"manifests":[{"platform":{"os":"linux","architecture":"amd64"},"digest":"sha256:a"},{"platform":{"os":"linux","architecture":"arm64"},"digest":"sha256:b"},{"platform":{"os":"unknown","architecture":"unknown"},"digest":"sha256:att"}]}' ;;
+  *--raw*) echo '{"manifests":[{"platform":{"os":"os","architecture":"p1"},"digest":"sha256:a"},{"platform":{"os":"os","architecture":"p2"},"digest":"sha256:b"},{"platform":{"os":"unknown","architecture":"unknown"},"digest":"sha256:att"}]}' ;;
   *) echo sha256:idx ;;
 esac
 SH
@@ -8273,8 +8277,8 @@ SH
         run _ci_index_lookup ui
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"sha256:idx"* ]]
-    [[ "${output}" == *"linux/amd64=sha256:a"* ]]
-    [[ "${output}" == *"linux/arm64=sha256:b"* ]]
+    [[ "${output}" == *"os/p1=sha256:a"* ]]
+    [[ "${output}" == *"os/p2=sha256:b"* ]]
     [[ "${output}" != *"sha256:att"* ]]
 }
 
@@ -8348,7 +8352,7 @@ SH
     # From: Issue #1683
     _cas_setup
     cd "${CAS_A}"
-    printf 'id-a\tdns\tlinux/amd64\tACCEPTED\tsha256:a\nid-b\tui\tlinux/arm64\tACCEPTED\tsha256:b\n' \
+    printf 'id-a\tdns\tos/p1\tACCEPTED\tsha256:a\nid-b\tui\tos/p2\tACCEPTED\tsha256:b\n' \
         | _ci_ledger_upsert origin
     run _ci_ledger_read origin id-a
     [[ "${output}" == *"sha256:a"* ]]
@@ -8366,8 +8370,8 @@ SH
     _cas_setup
     cd "${CAS_A}"
     local rd="${BATS_TEST_TMPDIR}/results"; mkdir -p "${rd}"
-    printf '{"service":"dns","platform":"linux/amd64","build_identity":"id-a","state":"ACCEPTED","digest":"sha256:a"}' > "${rd}/a.json"
-    printf '{"service":"ui","platform":"linux/arm64","build_identity":"id-b","state":"ACCEPTED","digest":"sha256:b"}' > "${rd}/b.json"
+    printf '{"service":"dns","platform":"os/p1","build_identity":"id-a","state":"ACCEPTED","digest":"sha256:a"}' > "${rd}/a.json"
+    printf '{"service":"ui","platform":"os/p2","build_identity":"id-b","state":"ACCEPTED","digest":"sha256:b"}' > "${rd}/b.json"
     run ci_cmd_aggregate "${rd}"
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"result=written"* ]]
@@ -8383,7 +8387,7 @@ SH
     _cas_setup
     cd "${CAS_A}"
     local rd="${BATS_TEST_TMPDIR}/results"; mkdir -p "${rd}"
-    printf '{"service":"dns","platform":"linux/amd64","build_identity":"id-a","state":"ACCEPTED","digest":"sha256:a"}' > "${rd}/a.json"
+    printf '{"service":"dns","platform":"os/p1","build_identity":"id-a","state":"ACCEPTED","digest":"sha256:a"}' > "${rd}/a.json"
     ci_cmd_aggregate "${rd}"
     git fetch --quiet origin refs/ci/acceptance/ledger
     local first; first="$(git cat-file -p FETCH_HEAD:records)"
@@ -8400,7 +8404,7 @@ SH
     _cas_setup
     cd "${CAS_A}"
     local rd="${BATS_TEST_TMPDIR}/results"; mkdir -p "${rd}"
-    printf '{"service":"dns","platform":"linux/amd64"}' > "${rd}/bad.json"
+    printf '{"service":"dns","platform":"os/p1"}' > "${rd}/bad.json"
     run ci_cmd_aggregate "${rd}"
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-AGGREGATE-0004"* ]]
@@ -8503,12 +8507,12 @@ _version_fixture_repo() {
         key="$(_ci_build_matrix_platforms)"; key="sha256_$(_ci_platform_apk_arch "${key%%$'\n'*}")"
         val="$(_ci_block_entry_field external_versions "${dep}" "${key}")"
         m="${BATS_TEST_TMPDIR}/${dep}-missing.yml"
-        grep -v "^    ${key}: ${val}\$" "${CI_MANIFEST_SOURCE}" > "${m}"
+        grep -v "^    ${key}: ${val}\$" "${CI_MANIFEST}" > "${m}"
         CI_MANIFEST="${m}" run bash "${CI_SH}" version verify
         [ "${status}" -eq 2 ]
         [[ "${output}" == *"CI-ERROR-BUILDARGS-0004"*"${dep}.${key}"*"missing"* ]]
         m="${BATS_TEST_TMPDIR}/${dep}-badsha.yml"
-        sed "s/^    ${key}: ${val}\$/    ${key}: not-a-real-hash/" "${CI_MANIFEST_SOURCE}" > "${m}"
+        sed "s/^    ${key}: ${val}\$/    ${key}: not-a-real-hash/" "${CI_MANIFEST}" > "${m}"
         CI_MANIFEST="${m}" run bash "${CI_SH}" version verify
         [ "${status}" -eq 2 ]
         [[ "${output}" == *"CI-ERROR-BUILDARGS-0015"*"${dep}.${key}"*"not 64 hex"* ]]
