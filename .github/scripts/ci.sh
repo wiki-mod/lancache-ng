@@ -5876,9 +5876,7 @@ _ci_check_file_headers() {
 _ci_check_comment_length() {
     local -a _ci_override=("$@") files=()
     local file heredoc_on yaml_on rc=0
-    if [ "$#" -gt 0 ]; then
-        _ci_scan_files files _ci_override || return 2
-    fi
+    _ci_scan_files files _ci_override || return 2
     for file in "${files[@]}"; do
         awk '
             function flush() {

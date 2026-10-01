@@ -2116,7 +2116,7 @@ tail" '{body:$b, isPrerelease:false}')" \
 }
 
 @test "published-services lists first-party images, excludes third-party" {
-    # What: every build type but install, plus the toolchain.
+    # What: all build types but install, plus the toolchain.
     # Why: SBOM targets first-party images only.
     # From: Issue #1683
     local m="${BATS_TEST_TMPDIR}/m.yml"
@@ -4381,6 +4381,20 @@ netdata=sha256:n"
     run bash "${CI_SH}" check file-headers "${BATS_TEST_TMPDIR}/Dockerfile"; [ "${status}" -eq 0 ]
     printf '# syntax=docker/dockerfile:1\n# escape=\140\n# SPDX-License-Identifier: AGPL-3.0-or-later\nFROM scratch\n' > "${BATS_TEST_TMPDIR}/Dockerfile"
     run bash "${CI_SH}" check file-headers "${BATS_TEST_TMPDIR}/Dockerfile"; [ "${status}" -ne 0 ]
+}
+
+@test "check comment-length without files scans the whole repo" {
+    # What: no file args means every tracked file, not none.
+    # Why: an empty scan would report clean on any repo.
+    # From: Issue #1683
+    local r="${BATS_TEST_TMPDIR}/repo"
+    mkdir -p "${r}"
+    printf '# What: %s\n' "$(printf 'x%.0s' {1..80})" > "${r}/a.sh"
+    git -C "${r}" init -q && git -C "${r}" add -A
+    cd "${r}"
+    run bash "${CI_SH}" check comment-length
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"a.sh:1:"* ]]
 }
 
 @test "check comment-length flags oversize, story-run, refs, From form" {
