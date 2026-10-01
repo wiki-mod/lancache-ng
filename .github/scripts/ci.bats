@@ -4272,6 +4272,20 @@ netdata=sha256:n"
     [[ "${output}" == *"image.base.digest=sha256:"* ]]
 }
 
+@test "repo-scanning checks fail closed outside a git repo" {
+    # What: failed git ls-files gives CHECK-0071, not clean.
+    # Why: an empty file list must not pass every check.
+    # From: Issue #1683 | PR #1858
+    local d="${BATS_TEST_TMPDIR}/nogit" c
+    mkdir -p "${d}"
+    for c in line-endings file-headers language-policy executable-bits; do
+        run bash -c "cd '${d}' && GIT_CEILING_DIRECTORIES='${BATS_TEST_TMPDIR}' bash '${CI_SH}' check ${c}"
+        [ "${status}" -eq 2 ] || { echo "want rc2: ${c} -> ${status}"; false; }
+        [[ "${output}" == *"CI-ERROR-CHECK-0071"* ]]
+        [[ "${output}" != *"=clean"* ]]
+    done
+}
+
 @test "check line-endings passes LF, fails CRLF via ci.sh" {
     # What: ci.sh owns the LF invariant; bats calls it.
     # Why: guard logic lives once, tested through ci.sh.

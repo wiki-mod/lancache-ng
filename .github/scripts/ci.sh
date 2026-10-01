@@ -295,10 +295,11 @@ _ci_platforms() {
 # Why: An unknown platform fails closed, never builds all.
 # From: Issue #1683
 _ci_valid_platform() {
-    local service="$1" platform="$2" p
+    local service="$1" platform="$2" p plats
+    plats="$(_ci_platforms "${service}")" || return 1
     while IFS= read -r p; do
         [ "${p}" = "${platform}" ] && return 0
-    done < <(_ci_platforms "${service}")
+    done <<< "${plats}"
     return 1
 }
 
@@ -359,10 +360,12 @@ _ci_changed_files() {
 _ci_collect_changed() {
     local -n _arr="$1"; shift
     _arr=()
-    local line
+    local line raw
+    raw="$(_ci_changed_files "$@")" || { ci_log "[CI-ERROR-CORE-0008]" "reason=\"changed-file list unreadable\""; return 2; }
     while IFS= read -r line; do
         [ -n "${line}" ] && _arr+=("${line}")
-    done < <(_ci_changed_files "$@")
+    done <<< "${raw}"
+    return 0
 }
 
 # What: True if any changed path is under a prefix.
@@ -401,7 +404,7 @@ _ci_plan_candidate() {
 # From: Issue #1683
 ci_cmd_plan() {
     local -a changed=()
-    _ci_collect_changed changed "$@"
+    _ci_collect_changed changed "$@" || return 2
 
     local service
     for service in $(ci_build_targets); do
@@ -431,7 +434,7 @@ _ci_path_content_changed() {
 ci_cmd_codeql_impact() {
     local img
     local -a changed=()
-    _ci_collect_changed changed "$@"
+    _ci_collect_changed changed "$@" || return 2
     local include='[]' lang p hit
     while IFS= read -r lang; do
         [ -n "${lang}" ] || continue
@@ -603,7 +606,7 @@ _ci_docs_only() {
 ci_cmd_plan_matrix() {
     local out="${GITHUB_OUTPUT:?GITHUB_OUTPUT required}"
     local -a changed=()
-    _ci_collect_changed changed "$@"
+    _ci_collect_changed changed "$@" || return 2
     local docs_only=false
     _ci_docs_only "${changed[@]}" && docs_only=true
     local service platform include='[]' any=false resolved paction runner authed=false test_services=''
@@ -5686,7 +5689,16 @@ _ci_scan_files() {
     local -n _ci_scan_out="$1" _ci_scan_override="$2"
     shift 2
     local -a _ci_scan_in=()
-    local _ci_scan_p _ci_scan_gone=0
+    local _ci_scan_p _ci_scan_gone=0 _ci_scan_raw
+    # What: git ls-files only when needed; failure is fatal.
+    # Why: an empty list would report every check as clean.
+    # From: Issue #1683 | PR #1858
+    if [ "${#_ci_scan_override[@]}" -eq 0 ] || { [ "${CI_SCAN_SCOPE_FILTER:-0}" = 1 ] && [ "$#" -gt 0 ]; }; then
+        if ! _ci_scan_raw="$(git ls-files -- "$@")"; then
+            ci_log "[CI-ERROR-CHECK-0071]" "reason=\"git ls-files failed; refusing an empty scan\""
+            return 2
+        fi
+    fi
     if [ "${#_ci_scan_override[@]}" -gt 0 ]; then
         _ci_scan_in=("${_ci_scan_override[@]}")
         # What: narrow changed files to check scope
@@ -5696,7 +5708,7 @@ _ci_scan_files() {
             local -A _ci_scan_scope=()
             while IFS= read -r _ci_scan_p; do
                 [ -n "${_ci_scan_p}" ] && _ci_scan_scope["${_ci_scan_p}"]=1
-            done < <(git ls-files -- "$@")
+            done <<< "${_ci_scan_raw}"
             local -a _ci_scan_kept=()
             for _ci_scan_p in "${_ci_scan_in[@]}"; do
                 if [ ! -f "${_ci_scan_p}" ] || [ -n "${_ci_scan_scope[${_ci_scan_p}]:-}" ]; then
@@ -5705,8 +5717,8 @@ _ci_scan_files() {
             done
             _ci_scan_in=("${_ci_scan_kept[@]}")
         fi
-    else
-        mapfile -t _ci_scan_in < <(git ls-files -- "$@")
+    elif [ -n "${_ci_scan_raw}" ]; then
+        mapfile -t _ci_scan_in <<< "${_ci_scan_raw}"
     fi
     # What: keep files in tree, skip deleted ones
     # Why: deleted paths have no content to check
@@ -5729,7 +5741,7 @@ _ci_scan_files() {
 # From: Issue #1683
 _ci_check_line_endings() {
     local -a _ci_override=("$@") files=()
-    _ci_scan_files files _ci_override
+    _ci_scan_files files _ci_override || return 2
     local path
     local -a offenders=()
     for path in "${files[@]}"; do
@@ -5801,7 +5813,7 @@ _ci_header_line1_ok() {
 # From: Issue #1683
 _ci_check_file_headers() {
     local -a _ci_override=("$@") files=()
-    _ci_scan_files files _ci_override
+    _ci_scan_files files _ci_override || return 2
     local path exp p_line s_line legacy line pc sc scnt lc
     local -a fails=() scan=()
     for path in "${files[@]}"; do
@@ -5841,7 +5853,7 @@ _ci_check_comment_length() {
     local -a _ci_override=("$@") files=()
     local file heredoc_on yaml_on rc=0
     if [ "$#" -gt 0 ]; then
-        _ci_scan_files files _ci_override
+        _ci_scan_files files _ci_override || return 2
     fi
     for file in "${files[@]}"; do
         awk '
@@ -5939,7 +5951,7 @@ _ci_check_comment_length() {
 _ci_check_deny_short_sha() {
     local pat='\$\{([A-Za-z_][A-Za-z0-9_]*)?([Ss][Hh][Aa]|[Cc][Oo][Mm][Mm][Ii][Tt]|[Cc][Aa][Nn][Dd][Ii][Dd][Aa][Tt][Ee]|[Rr][Ee][Vv][Ii][Ss][Ii][Oo][Nn])[A-Za-z0-9_]*[[:space:]]*(:[[:space:]]*:[[:space:]]*[A-Za-z0-9_]+|:[[:space:]]*0[[:space:]]*:[[:space:]]*[A-Za-z0-9_]+)\}'
     local -a _ci_override=("$@") files=()
-    _ci_scan_files files _ci_override '.github/scripts/*.sh' '.github/scripts/*.bats' '.github/workflows/*.yml' 'scripts/lib/*.sh'
+    _ci_scan_files files _ci_override '.github/scripts/*.sh' '.github/scripts/*.bats' '.github/workflows/*.yml' 'scripts/lib/*.sh' || return 2
     local path out gs
     local -a viol=()
     for path in "${files[@]}"; do
@@ -5964,7 +5976,7 @@ _ci_check_deny_short_sha() {
 # From: Issue #1683
 _ci_check_language_policy() {
     local -a _ci_override=("$@") files=()
-    _ci_scan_files files _ci_override
+    _ci_scan_files files _ci_override || return 2
     local path
     local -a viol=()
     for path in "${files[@]}"; do
@@ -5994,7 +6006,7 @@ _ci_check_language_policy() {
 # From: Issue #1683
 _ci_check_mutable_refs() {
     local -a _ci_override=("$@") files=()
-    _ci_scan_files files _ci_override '.github/workflows/*.yml' '.github/actions/**/action.yml' '*/Dockerfile' 'Dockerfile'
+    _ci_scan_files files _ci_override '.github/workflows/*.yml' '.github/actions/**/action.yml' '*/Dockerfile' 'Dockerfile' || return 2
     local path out
     local -a viol=()
     for path in "${files[@]}"; do
@@ -6025,7 +6037,9 @@ _ci_check_mutable_refs() {
 _ci_check_executable_bits() {
     local -a owned=(.github/scripts/ci.sh) paths=()
     local h path mode
-    while IFS= read -r h; do [ -n "${h}" ] && owned+=("${h}"); done < <(git ls-files -- '.githooks/*')
+    local hooks
+    hooks="$(git ls-files -- '.githooks/*')" || { ci_log "[CI-ERROR-CHECK-0071]" "reason=\"git ls-files failed; refusing an empty scan\""; return 2; }
+    while IFS= read -r h; do [ -n "${h}" ] && owned+=("${h}"); done <<< "${hooks}"
     # What: a changed-file list only narrows the owned set.
     # Why: Dockerfile/Cargo.toml are no bare-path scripts.
     # From: Issue #1683 | PR #1858
@@ -6089,7 +6103,7 @@ _ci_check_review_chronology() {
     if [ -n "${CHRONOLOGY_DIFF_BASE_SHA:-}" ]; then
         _ci_review_chronology_diff_files || return 2
     else
-        _ci_scan_files files _ci_override
+        _ci_scan_files files _ci_override || return 2
     fi
     local path out ln joined fnums num
     local -a viol=() dup_viol=()
@@ -6154,7 +6168,7 @@ _ci_check_pipefail_early_exit() {
     # From: Issue #1683 | PR #1858
     local pat='(^|[^|])\|[[:space:]]*(grep([[:space:]]+-[a-zA-Z]+)*[[:space:]]+(-[a-zA-Z]*(q|m[[:space:]]*[0-9])|--(quiet|silent|max-count))|head([[:space:]]|$)|sed[^|]*([[:space:];{]|[0-9])q)'
     local -a _ci_override=("$@") files=()
-    _ci_scan_files files _ci_override '.github/scripts/*.sh' '.github/scripts/*.bats' '*/Dockerfile' 'Dockerfile' 'services/*.sh'
+    _ci_scan_files files _ci_override '.github/scripts/*.sh' '.github/scripts/*.bats' '*/Dockerfile' 'Dockerfile' 'services/*.sh' || return 2
     local path out
     local -a viol=()
     for path in "${files[@]}"; do
@@ -6173,7 +6187,7 @@ _ci_check_pipefail_early_exit() {
 # From: Issue #1683 | PR #1858
 _ci_check_if_without_else_status() {
     local -a _ci_override=("$@") files=()
-    _ci_scan_files files _ci_override '.github/scripts/*.sh' '.github/scripts/*.bats' '*/Dockerfile' 'Dockerfile' 'services/*.sh'
+    _ci_scan_files files _ci_override '.github/scripts/*.sh' '.github/scripts/*.bats' '*/Dockerfile' 'Dockerfile' 'services/*.sh' || return 2
     local path fi_line status_line
     local -a viol=()
     for path in "${files[@]}"; do
@@ -6222,7 +6236,7 @@ _ci_check_if_without_else_status() {
 # From: Issue #1683 | PR #1858
 _ci_check_docker_run_heredoc_stdin() {
     local -a _ci_override=("$@") files=()
-    _ci_scan_files files _ci_override '.github/workflows/*.yml' '.github/workflows/*.yaml' '.github/actions/**/*.yml' '.github/actions/**/*.yaml'
+    _ci_scan_files files _ci_override '.github/workflows/*.yml' '.github/workflows/*.yaml' '.github/actions/**/*.yml' '.github/actions/**/*.yaml' || return 2
     local path lineno matched trimmed start window last_off invocation
     local -a viol=()
     for path in "${files[@]}"; do
@@ -6984,7 +6998,7 @@ _ci_check_governance_guards() {
     local -a viol=()
     local path line marker issue state
     if [ "$#" -gt 0 ]; then
-        _ci_scan_files changed _ci_override
+        _ci_scan_files changed _ci_override || return 2
     fi
     for path in "${changed[@]}"; do
         case "${path}" in *.md|*.mdx|*.rst|*.txt) continue ;; esac
@@ -8593,14 +8607,15 @@ _ci_check_dockerfile_build_tools() {
 # Why: sourced from CARGO env vars (AG-CI-006).
 # From: Issue #1683
 _ci_check_cargo_profile_tuning() {
-    local repo_root="${1:-${CI_REPO_ROOT:-.}}" f line
+    local repo_root="${1:-${CI_REPO_ROOT:-.}}" f line tomls
     local -a viol=()
+    tomls="$(git -C "${repo_root}" ls-files '*Cargo.toml')" || { ci_log "[CI-ERROR-CHECK-0071]" "reason=\"git ls-files failed; refusing an empty scan\""; return 2; }
     while IFS= read -r f; do
         [ -n "${f}" ] || continue
         while IFS= read -r line; do
             [ -n "${line}" ] && viol+=("${f}:${line}")
         done < <(grep -nE '^[[:space:]]*(lto|codegen-units)[[:space:]]*=' "${repo_root}/${f}" 2>/dev/null)
-    done < <(git -C "${repo_root}" ls-files '*Cargo.toml' 2>/dev/null)
+    done <<< "${tomls}"
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0059]" "reason=\"Cargo.toml hardcodes [profile] lto/codegen-units; source them from CARGO_PROFILE_RELEASE env (AG-CI-006)\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
@@ -8612,11 +8627,13 @@ _ci_check_cargo_profile_tuning() {
 # Why: build-tools one toolchain owner (AG-REL-002).
 # From: Issue #1683
 _ci_check_no_source_compiled_tools() {
-    local repo_root="${1:-${CI_REPO_ROOT:-.}}" df tok
+    local repo_root="${1:-${CI_REPO_ROOT:-.}}" df tok raw dfs
     local -a viol=() pkgs=()
     local -A is_pkg=()
-    mapfile -t pkgs < <(_ci_build_tools_packages) || return 2
+    raw="$(_ci_build_tools_packages)" || return 2
+    mapfile -t pkgs <<< "${raw}"
     for tok in "${pkgs[@]}"; do [ -n "${tok}" ] && is_pkg["${tok}"]=1; done
+    dfs="$(git -C "${repo_root}" ls-files '*Dockerfile')" || { ci_log "[CI-ERROR-CHECK-0071]" "reason=\"git ls-files failed; refusing an empty scan\""; return 2; }
     while IFS= read -r df; do
         [ -n "${df}" ] || continue
         while IFS= read -r tok; do
@@ -8631,7 +8648,7 @@ _ci_check_no_source_compiled_tools() {
                     if (a[i] != "" && a[i] !~ /^-/) print a[i]
             }
         ' "${repo_root}/${df}" 2>/dev/null)
-    done < <(git -C "${repo_root}" ls-files '*Dockerfile' 2>/dev/null)
+    done <<< "${dfs}"
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0061]" "reason=\"Dockerfile source-compiles a prebuilt SOT tool; consume the build-tools image\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
@@ -8644,7 +8661,7 @@ _ci_check_no_source_compiled_tools() {
 # From: Issue #1683
 _ci_check_shellcheck() {
     local -a changed=() files=()
-    _ci_collect_changed changed "$@"
+    _ci_collect_changed changed "$@" || return 2
     # What: keep only real shell files; mixed.
     # Why: shellcheck reads shell; yaml etc not input.
     # From: Issue #1683
@@ -8708,7 +8725,7 @@ _ci_check_cargo_audit() {
 # From: Issue #1683
 ci_cmd_check_all() {
     local -a changed=()
-    _ci_collect_changed changed "$@"
+    _ci_collect_changed changed "$@" || return 2
     local sub rc=0
     # What: diff-scoped checks see changed files.
     # Why: PR check doesn't re-scan whole repo.
