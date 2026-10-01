@@ -3557,6 +3557,49 @@ SH
     [ "${status}" -eq 0 ]
 }
 
+@test "validate proxy maps each request outcome, raw on failure" {
+    # What: MISS then HIT; each failure shows raw headers.
+    # Why: a bare "not a HIT" hides why the cache missed.
+    # From: Issue #1683 | PR #1858
+    local cnt="${BATS_TEST_TMPDIR}/n" args="${BATS_TEST_TMPDIR}/args"
+    local name m ip rc want w
+    local -a ws
+    _ci_validation_proxy_probe_url() { echo http://a.example.test/f; }
+    _ci_validate_container_ip() { echo "${ip}"; }
+    curl() {
+        local n
+        n=$(( $(cat "${cnt}") + 1 )); echo "${n}" > "${cnt}"
+        echo "$*" >> "${args}"
+        case "${m}:${n}" in
+            miss-fail:1|repeat-fail:2) echo "curl: (7) refused" >&2; return 7 ;;
+            *:1) echo "X-Cache-Status: MISS" ;;
+            no-hit:2) echo "X-Cache-Status: EXPIRED" ;;
+            *) echo "X-Cache-Status: HIT" ;;
+        esac
+    }
+    while IFS='|' read -r name m ip rc want; do
+        echo 0 > "${cnt}"; : > "${args}"
+        run _ci_validate_proxy proj
+        [ "${status}" -eq "${rc}" ] || { echo "${name}: rc ${status}: ${output}"; return 1; }
+        [ "${want}" = - ] && continue
+        IFS=';' read -r -a ws <<<"${want}"
+        for w in "${ws[@]}"; do
+            [[ "${output}" == *"${w}"* ]] || { echo "${name}: no '${w}': ${output}"; return 1; }
+        done
+    done <<'CASES'
+no-ip|hit||2|CI-ERROR-VALIDATE-0012
+miss-fail|miss-fail|172.16.1.9|1|CI-ERROR-VALIDATE-0013;curl: (7) refused
+repeat-fail|repeat-fail|172.16.1.9|1|CI-ERROR-VALIDATE-0065;curl: (7) refused
+no-hit|no-hit|172.16.1.9|1|CI-ERROR-VALIDATE-0014;X-Cache-Status: MISS;X-Cache-Status: EXPIRED
+hit|hit|172.16.1.9|0|-
+CASES
+    # What: both requests target the proxy IP, not DNS.
+    # Why: a direct origin fetch would never show a HIT.
+    # From: Issue #1683 | PR #1858
+    [ "$(grep -c -- '--resolve a.example.test:80:172.16.1.9' "${args}")" -eq 2 ] || {
+        echo "args:"; cat "${args}"; return 1; }
+}
+
 @test "validate ssl-mitm fails when proxy IP is missing" {
     # What: Missing proxy container/IP returns rc 2.
     # Why: Cannot TLS-probe without a target.

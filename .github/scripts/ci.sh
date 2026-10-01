@@ -4965,7 +4965,7 @@ _ci_validate_dns() {
 # Why: Real cache behavior, not a port probe (AG-VAL-014).
 # From: Issue #1683 | PR #1858
 _ci_validate_proxy() {
-    local project="$1" url ip_std host h
+    local project="$1" url ip_std host h1 h2
     url="$(_ci_validation_proxy_probe_url)"
     ip_std="$(_ci_validate_container_ip "${project}" proxy)"
     host="${url#http://}"; host="${host%%/*}"
@@ -4973,13 +4973,19 @@ _ci_validate_proxy() {
         ci_log "[CI-ERROR-VALIDATE-0012]" "reason=\"missing proxy probe url or proxy container IP\""
         return 2
     fi
-    if ! curl -fsS --resolve "${host}:80:${ip_std}" -o /dev/null "${url}"; then
+    if ! h1="$(curl -fsS --resolve "${host}:80:${ip_std}" -D - -o /dev/null "${url}" 2>&1)"; then
         ci_log "[CI-ERROR-VALIDATE-0013]" "url=\"${url}\" reason=\"proxy MISS request failed\""
+        printf 'raw:\n%s\n' "${h1}"
         return 1
     fi
-    h="$(curl -fsS --resolve "${host}:80:${ip_std}" -D - -o /dev/null "${url}")" || h=""
-    if ! grep -qi 'X-Cache-Status:[[:space:]]*HIT' <<< "${h}"; then
+    if ! h2="$(curl -fsS --resolve "${host}:80:${ip_std}" -D - -o /dev/null "${url}" 2>&1)"; then
+        ci_log "[CI-ERROR-VALIDATE-0065]" "url=\"${url}\" reason=\"proxy repeat request failed\""
+        printf 'raw:\n%s\n' "${h2}"
+        return 1
+    fi
+    if ! grep -qi 'X-Cache-Status:[[:space:]]*HIT' <<< "${h2}"; then
         ci_log "[CI-ERROR-VALIDATE-0014]" "url=\"${url}\" reason=\"second request not a cache HIT\""
+        printf 'first:\n%s\nsecond:\n%s\n' "${h1}" "${h2}"
         return 1
     fi
 }
