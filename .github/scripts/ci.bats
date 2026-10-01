@@ -3042,6 +3042,7 @@ case "$*" in
   "container ls"*) echo c1 ;;
   "volume ls"*) echo v1 ;;
   "network ls"*) : ;;
+  run*) a="$*"; d="${a#*-v }"; d="${d%%:/s *}"; find "${d}" -mindepth 1 -delete ;;
 esac
 SH
     chmod +x "${bin}/docker"
@@ -3053,6 +3054,7 @@ SH
             run _ci_validate_teardown "" proj
         grep -qx 'container rm -f c1' "${log}"
         grep -qx 'volume rm -f v1' "${log}"
+        grep -q "^run --rm --network none -v ${LANCACHE_STATE_DIR}:/s " "${log}"
         [ ! -e "${LANCACHE_STATE_DIR}" ]
         if [ "${mode}" = ok ]; then
             [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }

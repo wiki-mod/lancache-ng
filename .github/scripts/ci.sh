@@ -4446,9 +4446,17 @@ _ci_validate_teardown() {
             rc=2
         }
     done
-    if [ -n "${LANCACHE_STATE_DIR:-}" ] && ! out="$(rm -rf "${LANCACHE_STATE_DIR}" 2>&1)"; then
-        ci_error "[CI-ERROR-VALIDATE-0053]" "reason=\"per-run state root not removed\"" "${out}"
-        rc=2
+    if [ -n "${LANCACHE_STATE_DIR:-}" ] && [ -d "${LANCACHE_STATE_DIR}" ]; then
+        # What: clear root-owned state via a container.
+        # Why: services write as root; runner user cannot.
+        # From: Issue #1683
+        local base
+        base="$(_ci_block_entry_field base_images "" alpine)"
+        if ! out="$(docker run --rm --network none -v "${LANCACHE_STATE_DIR}:/s" "${base}" \
+                find /s -mindepth 1 -delete 2>&1 && rmdir "${LANCACHE_STATE_DIR}" 2>&1)"; then
+            ci_error "[CI-ERROR-VALIDATE-0053]" "reason=\"per-run state root not removed\"" "${out}"
+            rc=2
+        fi
     fi
     _ci_validate_release "${holder}"
     return "${rc}"
