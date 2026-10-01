@@ -6032,87 +6032,59 @@ _prod_state_wiring_fixture() {
     [[ "${output}" == *"input missing"* ]]
 }
 
-@test "check compose-config passes when all SOT targets validate" {
-    # What: SOT targets render warning-free.
-    # Why: prod/quickstart/secondary compose must be valid.
+@test "check compose-config renders every compose in every profile" {
+    # What: compose files x own profiles, env, raw errors.
+    # Why: the file owns its profiles; none may be skipped.
     # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/cc-ok" m="${BATS_TEST_TMPDIR}/cc-ok.yml"
-    mkdir -p "${r}/deploy/prod" "${r}/deploy/quickstart"
-    : > "${r}/deploy/prod/docker-compose.yml"
-    : > "${r}/deploy/quickstart/docker-compose.yml"
-    printf 'validation:\n  compose_targets: deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml:ssl\n  compose_env_file_targets: deploy/quickstart/docker-compose.yml:ssl\n' > "${m}"
-    CI_MANIFEST="${m}" CI_COMPOSE_CONFIG_CMD="$(_stub cfg 'exit 0')" \
-        run bash "${CI_SH}" check compose-config "${r}"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"compose-config=clean"* ]]
-}
-
-@test "check compose-config fails when a SOT target is invalid" {
-    # What: one target renders a docker compose error.
-    # Why: an invalid target must fail the whole check.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/cc-bad" m="${BATS_TEST_TMPDIR}/cc-bad.yml"
-    mkdir -p "${r}/deploy/prod"
-    : > "${r}/deploy/prod/docker-compose.yml"
-    printf 'validation:\n  compose_targets: deploy/prod/docker-compose.yml:logging\n' > "${m}"
-    CI_MANIFEST="${m}" CI_COMPOSE_CONFIG_CMD="$(_stub cfg '[ "$2" = logging ] && { echo boom; exit 1; }; exit 0')" \
-        run bash "${CI_SH}" check compose-config "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"logging"* ]]
-}
-
-@test "check compose-config treats docker compose warnings as errors" {
-    # What: a warning line in config output fails the check.
-    # Why: warnings hide real drift; fail closed.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/cc-warn" m="${BATS_TEST_TMPDIR}/cc-warn.yml"
-    mkdir -p "${r}/deploy/prod"
-    : > "${r}/deploy/prod/docker-compose.yml"
-    printf 'validation:\n  compose_targets: deploy/prod/docker-compose.yml\n' > "${m}"
-    CI_MANIFEST="${m}" CI_COMPOSE_CONFIG_CMD="$(_stub cfg 'echo "level=warning drift"; exit 0')" \
-        run bash "${CI_SH}" check compose-config "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"config invalid"* ]]
-}
-
-@test "compose config uses the SOT placeholder env only without .env" {
-    # What: plain=fixture env; env-file=no.
-    # Why: :?-required; shell env masks .env.
-    # From: Issue #1683 | PR #1858
-    local bin="${BATS_TEST_TMPDIR}/bin" m="${BATS_TEST_TMPDIR}/cc-env.yml"
-    mkdir -p "${bin}"
-    printf '#!/usr/bin/env bash\n[ -n "${LISTEN_IP:-}" ] || { echo "required variable LISTEN_IP is missing"; exit 1; }\n' > "${bin}/docker"
+    local r="${BATS_TEST_TMPDIR}/cc" bin="${BATS_TEST_TMPDIR}/ccbin"
+    local m="${BATS_TEST_TMPDIR}/cc.yml" mf name sot env w1 w2 rc
+    export DLOG="${BATS_TEST_TMPDIR}/cc.log"
+    mkdir -p "${r}/dep" "${r}/oth" "${bin}"
+    : > "${r}/dep/c.yml"; : > "${r}/oth/c.yml"; : > "${r}/oth/.env"
+    cat > "${bin}/docker" <<'SH'
+#!/usr/bin/env bash
+echo "$* LISTEN_IP=${LISTEN_IP:-}" >> "${DLOG}"
+case "$*" in
+  *"config --profiles"*)
+    [ -n "${PFAIL:-}" ] && { echo "profiles broken" >&2; exit 1; }
+    printf 'p1\np2\n' ;;
+  *"--profile ${BAD:-none} "*) echo "boom-${BAD}"; exit 1 ;;
+  *"config --quiet"*) [ -n "${WARN:-}" ] && echo "level=warning drift"; exit 0 ;;
+esac
+SH
     chmod +x "${bin}/docker"
-    printf 'validation:\n  compose_validation_env: LISTEN_IP=127.0.0.3\n' > "${m}"
-    CI_MANIFEST="${m}" PATH="${bin}:${PATH}" run _ci_compose_config_ok f.yml "" ""
-    [ "${status}" -eq 0 ]
-    CI_MANIFEST="${m}" PATH="${bin}:${PATH}" run _ci_compose_config_ok f.yml "" .env
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"LISTEN_IP is missing"* ]]
-}
-
-@test "check compose-config fails when a SOT target file is missing" {
-    # What: a listed target compose file does not exist.
-    # Why: a renamed/removed deployment must surface here.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/cc-miss" m="${BATS_TEST_TMPDIR}/cc-miss.yml"
-    mkdir -p "${r}/deploy/prod"
-    printf 'validation:\n  compose_targets: deploy/prod/docker-compose.yml\n' > "${m}"
-    CI_MANIFEST="${m}" CI_COMPOSE_CONFIG_CMD="$(_stub cfg 'exit 0')" \
-        run bash "${CI_SH}" check compose-config "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"compose target missing"* ]]
-}
-
-@test "check compose-config fails when the SOT lists no targets" {
-    # What: the SOT has no compose_targets entry at all.
-    # Why: Fail closed, not silent.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/cc-nosot" m="${BATS_TEST_TMPDIR}/cc-nosot.yml"
-    printf 'validation:\n  dns_test_domains: [x]\n' > "${m}"
-    CI_MANIFEST="${m}" run bash "${CI_SH}" check compose-config "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"no compose_targets"* ]]
+    printf '%s\n' 'ci_variables:' '  CI_COMPOSE_FILE: dep/c.yml' 'validation:' \
+        '  compose_targets: oth/c.yml' '  compose_env_file_targets: oth/c.yml' \
+        '  compose_validation_env: LISTEN_IP=fx' > "${m}"
+    sed 's#  compose_targets: oth/c.yml#  compose_targets: oth/gone.yml#' "${m}" > "${m}.miss"
+    grep -v '^  compose_targets:' "${m}" > "${m}.nosot"
+    grep -v '^  CI_COMPOSE_FILE:' "${m}" > "${m}.novar"
+    while IFS='|' read -r name sot env w1 w2 rc; do
+        : > "${DLOG}"
+        mf="${m}"
+        [ "${sot}" = base ] || mf="${m}.${sot}"
+        local -a ev=()
+        [ -z "${env}" ] || ev=("${env}")
+        run env "${ev[@]}" CI_MANIFEST="${mf}" PATH="${bin}:${PATH}" \
+            bash "${CI_SH}" check compose-config "${r}"
+        if [ "${rc}" = 0 ]; then
+            [ "${status}" -eq 0 ] || { echo "${name}: ${output}"; return 1; }
+        else
+            [ "${status}" -ne 0 ] || { echo "${name}: passed"; return 1; }
+        fi
+        [[ "${output}" == *"${w1}"*"${w2}"* ]] || { echo "${name}: ${output}"; return 1; }
+    done <<'CASES'
+ok|base||compose-config=clean checks=9||0
+bad|base|BAD=p2|oth/c.yml:p2: config invalid|boom-p2|1
+warn|base|WARN=1|warnings treated as errors|level=warning drift|1
+prof|base|PFAIL=1|profiles unreadable|profiles broken|1
+miss|miss||oth/gone.yml: compose target missing||1
+nosot|nosot||CI-ERROR-CHECK-0044||1
+novar|novar||CI-ERROR-VARIABLES-0001|CI_COMPOSE_FILE|1
+CASES
+    run bash -c "CI_MANIFEST='${m}' PATH='${bin}:${PATH}' bash '${CI_SH}' check compose-config '${r}' >/dev/null; cat '${DLOG}'"
+    [[ "${output}" == *"-f ${r}/dep/c.yml --profile p2 config --quiet LISTEN_IP=fx"* ]]
+    [[ "${output}" == *"--env-file ${r}/oth/.env -f ${r}/oth/c.yml --profile p1 config --quiet LISTEN_IP="$'\n'* ]]
 }
 
 # What: seed a tree whose shared configs write atomically.

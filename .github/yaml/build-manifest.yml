@@ -649,18 +649,18 @@ validation:
   # Why: Only HTTP is cached; a real HIT proves the path.
   # From: Issue #1683 | PR #1858
   proxy_cache_probe_url: http://deb.debian.org/debian/dists/stable/InRelease
-  # What: compose targets CI renders clean
-  # Why: full-setup is CI-internal only
+  # What: compose files checked besides CI_COMPOSE_FILE.
+  # Why: each renders clean in all of its own profiles.
   # From: Issue #1683 | PR #1858
-  compose_targets: deploy/prod/docker-compose.yml deploy/secondary/docker-compose.yml deploy/quickstart/docker-compose.yml:ssl deploy/prod/docker-compose.yml:dhcp-kea deploy/prod/docker-compose.yml:dhcp-proxy deploy/prod/docker-compose.yml:logging deploy/quickstart/docker-compose.yml:dhcp-kea deploy/quickstart/docker-compose.yml:dhcp-proxy deploy/quickstart/docker-compose.yml:logging
+  compose_targets: deploy/secondary/docker-compose.yml deploy/quickstart/docker-compose.yml
   # What: placeholder env for targets without .env
   # Why: operator keys are :?-required
   # From: Issue #1683 | PR #1858
   compose_validation_env: CACHE_VALID_ANY=1h CACHE_VALID_HIT=30d DDNS_TSIG_KEY=ci-ddns-tsig-key IP_SSL=127.0.0.2 IP_STANDARD=127.0.0.1 LISTEN_IP=127.0.0.3 ALLOW_INSECURE_UI=true KEA_CTRL_TOKEN=ci-kea-token NATS_CONSUMER=ci-secondary NATS_DNS_REPLICA_PASSWORD=ci-nats-dns-replica-password NATS_DNS_REPLICA_USER=ci-nats-dns-replica NATS_DNS_WRITER_PASSWORD=ci-nats-dns-writer-password NATS_DNS_WRITER_USER=ci-nats-dns-writer NATS_CALLOUT_PASSWORD=ci-nats-callout-password NATS_CALLOUT_USER=ci-nats-callout NATS_SYS_PASSWORD=ci-nats-sys-password NATS_SYS_USER=ci-nats-sys NATS_PASSWORD=ci-nats-password NATS_UI_PASSWORD=ci-nats-ui-password NATS_UI_USER=ci-nats-ui NATS_USER=ci-nats-user NATS_TOKEN=ci-nats-token NATS_URL=nats://127.0.0.1:4222 NGINX_UPSTREAM_RESOLVER=1.1.1.1 PDNS_API_KEY=ci-pdns-api-key-validation-only PROXY_IP=127.0.0.1 SECONDARY_REGISTRATION_TOKEN=ci-secondary-registration-token-validation SSL_CACHE_MAX_GB=10 STANDARD_CACHE_MAX_GB=10
-  # What: compose targets rendered via env-file
+  # What: compose files also rendered with their .env.
   # Why: quickstart's env must interpolate clean
   # From: Issue #1683 | PR #1858
-  compose_env_file_targets: deploy/quickstart/docker-compose.yml:ssl
+  compose_env_file_targets: deploy/quickstart/docker-compose.yml
   # What: required keys setup.sh repairs
   # Why: empty required key breaks the stack
   # From: Issue #1683 | PR #1858
