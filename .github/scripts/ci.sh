@@ -478,8 +478,9 @@ ci_cmd_codeql_impact() {
 # Why: SOT owns scope; the action reads a derived config.
 # From: Issue #1683
 ci_cmd_codeql_config() {
-    local item lang p
-    printf 'name: lancache-ng-codeql\n'
+    local item lang p repo
+    repo="$(_ci_repo)" || return 2
+    printf 'name: %s-codeql\n' "${repo##*/}"
     printf 'queries:\n'
     while IFS= read -r item; do
         printf '  - uses: %s\n' "${item}"
@@ -8679,6 +8680,36 @@ _ci_check_no_source_compiled_tools() {
     printf 'no-source-compiled-tools=clean\n'
 }
 
+# What: every tracked language file is in its CodeQL scope.
+# Why: an unlisted source dir would skip analysis silently.
+# From: Issue #1683
+_ci_check_codeql_coverage() {
+    local repo_root="${1:-${CI_REPO_ROOT:-.}}" lang langs raw files f p ok
+    local -a viol=() globs=() paths=()
+    langs="$(_ci_block_keys codeql_languages)" || return 2
+    for lang in ${langs}; do
+        raw="$(_ci_block_entry_list codeql_languages "${lang}" files)" || return 2
+        [ -n "${raw}" ] || continue
+        mapfile -t globs <<< "${raw//\"/}"
+        raw="$(_ci_block_entry_list codeql_languages "${lang}" paths)" || return 2
+        mapfile -t paths <<< "${raw//\"/}"
+        files="$(git -C "${repo_root}" ls-files -- "${globs[@]}")" || { ci_log "[CI-ERROR-CHECK-0071]" "reason=\"git ls-files failed; refusing an empty scan\""; return 2; }
+        while IFS= read -r f; do
+            [ -n "${f}" ] || continue
+            ok=false
+            for p in "${paths[@]}"; do
+                case "${f}" in "${p}"/*) ok=true; break ;; esac
+            done
+            [ "${ok}" = true ] || viol+=("${lang}: ${f}")
+        done <<< "${files}"
+    done
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0072]" "reason=\"tracked source outside SOT codeql_languages paths\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'codeql-coverage=clean\n'
+}
+
 # What: shellcheck changed shell scripts (§98).
 # Why: one owner; SOT build-tools image.
 # From: Issue #1683
@@ -8773,7 +8804,7 @@ ci_cmd_check_all() {
         setup-keys-kea setup-update-safety setup-docker-conflict setup-prompt-drift image-channel-resolution \
         vex-drift netdata-curl-pin logging-matrix \
         trivy-action-direct-usage entrypoint-lib-wiring dockerfile-build-tools \
-        cargo-profile-tuning no-source-compiled-tools)
+        cargo-profile-tuning no-source-compiled-tools codeql-coverage)
     for sub in "${repo_wide[@]}"; do
         ci_cmd_check "${sub}" || rc=1
     done
@@ -8798,6 +8829,7 @@ ci_cmd_check() {
         dockerfile-build-tools) _ci_check_dockerfile_build_tools "$@" ;;
         cargo-profile-tuning) _ci_check_cargo_profile_tuning "$@" ;;
         no-source-compiled-tools) _ci_check_no_source_compiled_tools "$@" ;;
+        codeql-coverage) _ci_check_codeql_coverage "$@" ;;
         shellcheck) _ci_check_shellcheck "$@" ;;
         actionlint) _ci_check_actionlint "$@" ;;
         line-endings) _ci_check_line_endings "$@" ;;

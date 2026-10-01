@@ -184,56 +184,63 @@ EOF
     [[ "${output}" == *"[CI-ERROR-CORE-0009]"* ]]
     [[ "${output}" != *"svc-a=false"* ]]
 }
-@test "codeql-impact emits a rust-only matrix on crate source change" {
-    # What: crate src change scopes rust only.
-    # Why: §70 books no empty runner; SOT scope.
+@test "codeql-impact admits exactly the languages a path touches" {
+    # What: SOT language paths pick the matrix, else empty.
+    # Why: no runner for unrelated or SOT-only changes.
     # From: Issue #1683
-    run bash "${CI_SH}" codeql-impact services/ui/src/main.rs
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *'codeql-matrix={"include":[{"language":"rust"}]}'* ]]
+    local m="${BATS_TEST_TMPDIR}/m.yml" path want
+    printf '%s\n' 'codeql_languages:' '  lang-a:' '    paths: [src-a]' \
+        '  lang-b:' '    paths: [wf]' 'base_images:' \
+        "  codeql_runtime: registry.example.test/rt@sha256:$(printf '0%.0s' {1..64})" > "${m}"
+    while IFS='|' read -r path want; do
+        CI_MANIFEST="${m}" run bash "${CI_SH}" codeql-impact "${path}"
+        [ "${status}" -eq 0 ]
+        [[ "${output}" == *"codeql-matrix={\"include\":${want}}"* ]] \
+            || { echo "${path}: ${output}"; return 1; }
+    done <<EOF
+src-a/main.rs|[{"language":"lang-a"}]
+wf/ci.yml|[{"language":"lang-b"}]
+src-ab/x|[]
+${CI_MANIFEST_REL}|[]
+EOF
 }
-@test "codeql-impact emits an empty matrix for a non-source change" {
-    # What: Dockerfile is not analyzed source.
-    # Why: empty matrix books no runner (§70).
+@test "codeql-coverage fails on tracked source outside SOT paths" {
+    # What: files globs must all lie under the lang paths.
+    # Why: a new source dir must not escape CodeQL silently.
     # From: Issue #1683
-    run bash "${CI_SH}" codeql-impact services/ui/Dockerfile
+    local r="${BATS_TEST_TMPDIR}/repo" m="${BATS_TEST_TMPDIR}/m.yml"
+    mkdir -p "${r}/src-a" "${r}/src-b"
+    : > "${r}/src-a/x.ext"
+    git -C "${r}" init -q && git -C "${r}" add -A
+    printf '%s\n' 'codeql_languages:' '  lang-a:' '    files: ["*.ext"]' \
+        '    paths: [src-a]' '  lang-b:' '    paths: [src-b]' > "${m}"
+    CI_MANIFEST="${m}" run _ci_check_codeql_coverage "${r}"
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *'codeql-matrix={"include":[]}'* ]]
+    [ "${output}" = "codeql-coverage=clean" ]
+    : > "${r}/src-b/y.ext"
+    git -C "${r}" add -A
+    CI_MANIFEST="${m}" run _ci_check_codeql_coverage "${r}"
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"[CI-ERROR-CHECK-0072]"* ]]
+    [[ "${output}" == *"lang-a: src-b/y.ext"* ]]
+    CI_MANIFEST="${m}" run _ci_check_codeql_coverage "${BATS_TEST_TMPDIR}/none"
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"[CI-ERROR-CHECK-0071]"* ]]
 }
-@test "codeql-impact emits an empty matrix for a non-Rust service" {
-    # What: proxy touches no analyzed source.
-    # Why: unrelated services book no runner (§70).
+@test "codeql-config renders name, queries, paths and ignore from SOT" {
+    # What: config is derived from the SOT and the repo.
+    # Why: one SOT owner; no project name in the engine.
     # From: Issue #1683
-    run bash "${CI_SH}" codeql-impact services/proxy/nginx.conf
+    local m="${BATS_TEST_TMPDIR}/m.yml"
+    printf '%s\n' 'codeql:' '  queries: [q1]' '  paths_ignore: ["x/**"]' \
+        'codeql_languages:' '  lang-a:' '    paths: [src-a]' > "${m}"
+    CI_MANIFEST="${m}" GITHUB_REPOSITORY=owner/fixture-repo \
+        run bash "${CI_SH}" codeql-config
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *'codeql-matrix={"include":[]}'* ]]
-}
-@test "codeql-impact emits an empty matrix on a SOT-only change" {
-    # What: SOT change alone touches no analyzed source.
-    # Why: no path-hammer; source impact decides (§11).
-    # From: Issue #1683
-    run bash "${CI_SH}" codeql-impact .github/yaml/build-manifest.yml
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *'codeql-matrix={"include":[]}'* ]]
-}
-@test "codeql-config renders queries+paths+ignore from the SOT" {
-    # What: config is derived from the SOT, not a file.
-    # Why: one SOT owner; codeql-config.yml is removed.
-    # From: Issue #1683
-    run bash "${CI_SH}" codeql-config
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *'- uses: security-extended'* ]]
-    [[ "${output}" == *'- services/ui/src'* ]]
-    [[ "${output}" == *'- .github/workflows'* ]]
-    [[ "${output}" == *'- "**/target/**"'* ]]
-}
-@test "codeql-impact emits an actions-only matrix on a workflow change" {
-    # What: workflow change scopes actions only.
-    # Why: workflows are the actions scope.
-    # From: Issue #1683
-    run bash "${CI_SH}" codeql-impact .github/workflows/ci.yml
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *'codeql-matrix={"include":[{"language":"actions"}]}'* ]]
+    [ "${output}" = "$(printf '%s\n' 'name: fixture-repo-codeql' 'queries:' \
+        '  - uses: q1' 'paths:' '  - src-a' 'paths-ignore:' '  - "x/**"')" ]
+    CI_MANIFEST="${m}" GITHUB_REPOSITORY='' run bash "${CI_SH}" codeql-config
+    [ "${status}" -ne 0 ]
 }
 @test "codeql-impact gates on content; only real work needs the image" {
     # What: NOOP needs no image; work needs the SOT one.

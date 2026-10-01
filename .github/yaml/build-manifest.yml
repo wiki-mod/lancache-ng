@@ -583,7 +583,8 @@ codeql_languages:
   actions:
     paths: [.github/workflows]
   rust:
-    paths: [services/dns/nats-subscriber/src, services/ui/src, services/watchdog/src]
+    files: ["*.rs"]
+    paths: [services/cachehamster/src, services/dns/nats-subscriber/src, services/dns/nats-subscriber/fuzz, services/ui/src, services/ui/fuzz, services/watchdog/src, tools/pxe-client-probe/src]
 
 # What: Release channel and retention inventory.
 # Why: Consolidates release/stack-images.yml into the SOT.
