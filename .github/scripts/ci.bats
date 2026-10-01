@@ -4268,16 +4268,22 @@ netdata=sha256:n"
     # What: revision/source/licenses/base from SOT+env.
     # Why: Provenance labels have one owner (Plan §7).
     # From: Issue #1683
+    _build_fixture
     GITHUB_SHA=abc123 GITHUB_SERVER_URL=https://git.example.test GITHUB_REPOSITORY=Owner/Fixture-Repo \
-        run _ci_oci_labels build-tools
+        run _ci_oci_labels tool-t
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"image.revision=abc123"* ]]
     [[ "${output}" == *"image.version=abc123"* ]]
     [[ "${output}" == *"image.source=https://git.example.test/owner/fixture-repo"* ]]
     [[ "${output}" == *"image.licenses=AGPL-3.0-or-later"* ]]
-    [[ "${output}" == *"image.title=build-tools"* ]]
-    [[ "${output}" == *"image.description=LanCache-NG build-tools image"* ]]
-    [[ "${output}" == *"image.base.digest=sha256:"* ]]
+    [[ "${output}" == *"image.title=tool-t"* ]]
+    [[ "${output}" == *"image.description=fixture-repo tool-t image"* ]]
+    [[ "${output}" == *"image.base.name=registry.example.test/base-x"* ]]
+    [[ "${output}" == *"image.base.digest=sha256:$(printf '2%.0s' {1..64})"* ]]
+    sed -i 's/^  base-x: .*//' "${CI_MANIFEST}"
+    run _ci_oci_labels svc-a
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"[CI-ERROR-BUILD-0014]"* ]]
 }
 
 @test "repo-scanning checks fail closed outside a git repo" {
@@ -7200,11 +7206,13 @@ _build_fixture() {
     local r="${BATS_TEST_TMPDIR}/repo"
     mkdir -p "${r}/svc"
     printf 'FROM x\nARG BUILD_IDENTITY\n' > "${r}/svc/Dockerfile"
-    printf '%s\n' 'services:' '  svc-a:' '    context: svc' '    build_type: apk' \
-        '  svc-b:' '    context: svc' '    build_type: apk' \
+    printf '%s\n' 'services:' \
+        '  svc-a:' '    context: svc' '    build_type: apk' '    final_base: base-x' \
+        '  svc-b:' '    context: svc' '    build_type: apk' '    final_base: base-x' \
         'build_toolchain:' '  tool-t:' '    context: svc' '    build_type: toolchain' \
-        'base_images:' \
+        '    final_base: base-x' 'base_images:' \
         "  alpine: registry.example.test/base@sha256:$(printf '0%.0s' {1..64})" \
+        "  base-x: registry.example.test/base-x@sha256:$(printf '2%.0s' {1..64})" \
         'release:' '  registry: registry.example.test' > "${r}/m.yml"
     cd "${r}" || return 1
     export CI_MANIFEST="${r}/m.yml" GITHUB_REPOSITORY=owner/fixture-repo
@@ -7232,20 +7240,16 @@ _build_fixture() {
     # What: no ARG BUILD_IDENTITY stops before buildx runs.
     # Why: its cache could ship a stale apk layer silently.
     # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/repo" m="${BATS_TEST_TMPDIR}/m.yml"
-    mkdir -p "${r}/svc"
-    printf 'FROM x\nRUN true\n' > "${r}/svc/Dockerfile"
-    printf 'services:\n  svc-a:\n    context: svc\n    build_type: apk\n' > "${m}"
+    _build_fixture
+    printf 'FROM x\nRUN true\n' > svc/Dockerfile
     docker() { echo "docker $*"; }
-    cd "${r}"
-    CI_MANIFEST="${m}" GITHUB_REPOSITORY=owner/fixture-repo run _ci_docker_build svc-a id1 os/p1
+    run _ci_docker_build svc-a id1 os/p1
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-BUILD-0013"* ]]
     [[ "${output}" != *"buildx build"* ]]
-    printf 'FROM x\nARG BUILD_IDENTITY\n' > "${r}/svc/Dockerfile"
-    printf 'services:\n  svc-a:\n    context: svc\n    build_type: rust\n' > "${m}"
-    CI_MANIFEST="${m}" GITHUB_REPOSITORY=owner/fixture-repo CI_BUILD_TOOLS_IMAGE_CMD='echo bt@sha256:x' \
-        run _ci_docker_build svc-a id1 os/p1
+    printf 'FROM x\nARG BUILD_IDENTITY\n' > svc/Dockerfile
+    sed -i '0,/build_type: apk/s//build_type: rust/' "${CI_MANIFEST}"
+    CI_BUILD_TOOLS_IMAGE_CMD='echo bt@sha256:x' run _ci_docker_build svc-a id1 os/p1
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-BUILDARGS-"* ]]
     [[ "${output}" != *"buildx build"* ]]

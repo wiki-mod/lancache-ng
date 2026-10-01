@@ -1706,10 +1706,11 @@ _ci_build_tools_image() {
 # Why: Provenance labels set once, not per Dockerfile.
 # From: Issue #1683
 _ci_oci_labels() {
-    local service="$1" repo source base created
+    local service="$1" repo source base final created
     repo="$(_ci_repo)" || return 2
     source="${GITHUB_SERVER_URL:?GITHUB_SERVER_URL required}/${repo}"
-    base="$(_ci_block_entry_field base_images "" alpine)"
+    final="$(_ci_required_field "${service}" final_base)" || return 2
+    base="$(_ci_block_entry_field base_images "" "${final}")"
     created="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'org.opencontainers.image.created=%s\n' "${created}"
     [ -n "${GITHUB_SHA:-}" ] && printf 'org.opencontainers.image.revision=%s\n' "${GITHUB_SHA}"
@@ -1720,11 +1721,13 @@ _ci_oci_labels() {
     printf 'org.opencontainers.image.licenses=%s\n' 'AGPL-3.0-or-later'
     printf 'org.opencontainers.image.vendor=%s\n' "${repo%%/*}"
     printf 'org.opencontainers.image.title=%s\n' "${service}"
-    printf 'org.opencontainers.image.description=%s\n' "LanCache-NG ${service} image"
-    if [ -n "${base}" ]; then
-        printf 'org.opencontainers.image.base.name=%s\n' "${base%@*}"
-        printf 'org.opencontainers.image.base.digest=%s\n' "${base#*@}"
+    printf 'org.opencontainers.image.description=%s\n' "${repo##*/} ${service} image"
+    if [ -z "${base}" ]; then
+        ci_log "[CI-ERROR-BUILD-0014]" "service=\"${service}\" key=\"base_images.${final}\" reason=\"final base not pinned in SOT\""
+        return 2
     fi
+    printf 'org.opencontainers.image.base.name=%s\n' "${base%@*}"
+    printf 'org.opencontainers.image.base.digest=%s\n' "${base#*@}"
 }
 
 # What: adds ignore-error to a cache-to spec (§35).
