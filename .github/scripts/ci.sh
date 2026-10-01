@@ -1660,6 +1660,60 @@ _ci_sccache_env() {
     else
         ci_log "[CI-INFO-CACHE-0002]" "prefix=\"${prefix}\" backend=local dir=\"${SCCACHE_DIR}\""
     fi
+    # What: own server socket; start it as the probe.
+    # Why: a shared port lets parallel runs collide.
+    # From: Issue #1683 | PR #1858
+    local probe prc=0 sock_dir
+    sock_dir="$(mktemp -d "${CI_TMPDIR:-/var/tmp}/sccache-srv.XXXXXX")" || return 2
+    export SCCACHE_SERVER_UDS="${sock_dir}/server.sock"
+    # What: probe the server; degrade on infra failure.
+    # Why: §42: a cache outage costs speed, never the build.
+    # From: Issue #1683 | PR #1858
+    probe="$(sccache --start-server 2>&1)" || prc=$?
+    [ "${prc}" -eq 0 ] && return 0
+    if [ -n "${SCCACHE_REDIS:-}" ]; then
+        # What: Redis down -> local sccache, probed again.
+        # Why: §42 chain: Redis, local cache, direct rustc.
+        # From: Issue #1683 | PR #1858
+        ci_error "[CI-WARN-CACHE-0003]" "prefix=\"${prefix}\" rc=${prc} reason=\"sccache with redis unavailable; local cache\"" "${probe}"
+        unset SCCACHE_REDIS
+        # What: fresh socket; the timed-out one may linger.
+        # Why: a stuck redis server must not take the path.
+        # From: Issue #1683 | PR #1858
+        export SCCACHE_SERVER_UDS="${sock_dir}/local.sock"
+        prc=0
+        probe="$(sccache --start-server 2>&1)" || prc=$?
+        [ "${prc}" -eq 0 ] && return 0
+    fi
+    ci_error "[CI-WARN-CACHE-0004]" "prefix=\"${prefix}\" rc=${prc} reason=\"sccache unavailable; direct rustc\"" "${probe}"
+    unset RUSTC_WRAPPER
+}
+
+# What: stop this run's sccache server, drop its socket.
+# Why: a started server must not outlive its run.
+# From: Issue #1683 | PR #1858
+_ci_sccache_stop() {
+    local out rc=0
+    [ -n "${SCCACHE_SERVER_UDS:-}" ] || return 0
+    if [ -n "${RUSTC_WRAPPER:-}" ]; then
+        out="$(sccache --stop-server 2>&1)" || rc=$?
+        [ "${rc}" -eq 0 ] || ci_error "[CI-WARN-CACHE-0005]" "rc=${rc} reason=\"sccache server stop failed\"" "${out}"
+    fi
+    _ci_sccache_reap "${SCCACHE_SERVER_UDS%/*}"
+    rm -rf -- "${SCCACHE_SERVER_UDS%/*}"
+}
+
+# What: kill sccache servers under this run's socket dir.
+# Why: a server timed out on Redis keeps on running.
+# From: Issue #1683 | PR #1858
+_ci_sccache_reap() {
+    local dir="$1" p env_s out
+    for p in /proc/[0-9]*; do
+        [ -r "${p}/environ" ] && [ "$(cat "${p}/comm" 2>&1)" = sccache ] || continue
+        env_s="$(tr '\0' '\n' < "${p}/environ")" || continue
+        [[ $'\n'"${env_s}" == *$'\n'"SCCACHE_SERVER_UDS=${dir}/"* ]] || continue
+        out="$(kill "${p#/proc/}" 2>&1)" || ci_error "[CI-WARN-CACHE-0006]" "pid=${p#/proc/} reason=\"sccache server kill failed\"" "${out}"
+    done
 }
 
 # =========================================================
@@ -2112,8 +2166,12 @@ ci_cmd_rust_build() {
     real_gxx="$(PATH="${original_path}" command -v g++)"
     configure_sccache() {
         unset CARGO_MAKEFLAGS MAKEFLAGS
-        _ci_sccache_env "${key_prefix}" /usr/local/bin/lancache-rustc-wrapper
-        if [ -s /run/secrets/sccache_dist_config ]; then export SCCACHE_CONF=/run/secrets/sccache_dist_config; sccache --dist-status; fi
+        # What: dist config before the server starts.
+        # Why: a running server never rereads SCCACHE_CONF.
+        # From: Issue #1683 | PR #1858
+        if [ -s /run/secrets/sccache_dist_config ]; then export SCCACHE_CONF=/run/secrets/sccache_dist_config; fi
+        _ci_sccache_env "${key_prefix}" /usr/local/bin/lancache-rustc-wrapper || return 2
+        if [ -n "${SCCACHE_CONF:-}" ]; then sccache --dist-status; fi
     }
     disable_distcc() {
         _ci_rust_stop_pump || return 1
@@ -2892,11 +2950,12 @@ _ci_test_rust() {
     # What: workspace-root cargo on service's own crate.
     # Why: build context is no crate; AG-VAL-008 per crate.
     # From: PR #1858
-    ( _ci_sccache_env "lancache-${service}" \
-        && cd "${CI_REPO_ROOT:-.}" \
-        && cargo fmt --check -p "${ctx}" \
-        && cargo clippy --locked --all-targets -p "${ctx}" -- -D warnings \
-        && cargo test --locked -p "${ctx}" ) || return 1
+    ( _ci_sccache_env "lancache-${service}" || exit 2
+        trap _ci_sccache_stop EXIT
+        cd "${CI_REPO_ROOT:-.}" \
+            && cargo fmt --check -p "${ctx}" \
+            && cargo clippy --locked --all-targets -p "${ctx}" -- -D warnings \
+            && cargo test --locked -p "${ctx}" ) || return 1
     printf 'service=%s tested=ok\n' "${service}"
 }
 
@@ -9439,14 +9498,32 @@ _ci_check_shellcheck() {
         case "${f}" in *.sh|*.bats) [ -f "${f}" ] && files+=("${f}") ;; esac
     done
     [ "${#files[@]}" -eq 0 ] && { printf 'shellcheck=noop\n'; return 0; }
-    local out rc=0
-    if [ -n "${CI_SHELLCHECK_CMD:-}" ]; then
-        out="$("${CI_SHELLCHECK_CMD}" "${files[@]}" 2>&1)" || rc=$?
-    else
-        out="$(shellcheck --severity=warning "${files[@]}" 2>&1)" || rc=$?
-    fi
-    if [ "${rc}" -ne 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0056]" "reason=\"shellcheck found issues\"" "${out}"
+    # What: one shellcheck process per file.
+    # Why: one call on all files needs ~5 GB peak RAM.
+    # From: Issue #1683 | PR #1858
+    local sc_out="" sc_one sc_rc sc_found=0 sc_broken=0
+    for f in "${files[@]}"; do
+        sc_rc=0
+        if [ -n "${CI_SHELLCHECK_CMD:-}" ]; then
+            sc_one="$("${CI_SHELLCHECK_CMD}" "${f}" 2>&1)" || sc_rc=$?
+        else
+            sc_one="$(shellcheck --severity=warning "${f}" 2>&1)" || sc_rc=$?
+        fi
+        # What: rc 1 = findings; any other rc = no result.
+        # Why: a killed run (137) must not read as findings.
+        # From: Issue #1683 | PR #1858
+        case "${sc_rc}" in
+            0) ;;
+            1) sc_found=1; sc_out="${sc_out}${sc_one}"$'\n' ;;
+            *)
+                sc_broken=1
+                ci_error "[CI-ERROR-CHECK-0113]" "file=\"${f}\" rc=${sc_rc} reason=\"shellcheck did not complete\"" "${sc_one}"
+                ;;
+        esac
+    done
+    [ "${sc_broken}" -eq 0 ] || return 2
+    if [ "${sc_found}" -ne 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0056]" "reason=\"shellcheck found issues\"" "${sc_out}"
         return 1
     fi
     printf 'shellcheck=clean files=%s\n' "${#files[@]}"

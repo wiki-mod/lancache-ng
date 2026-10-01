@@ -194,6 +194,20 @@ exec "${tool}" "$@"
 STUB
 }
 
+# What: sccache probe stub: 0 up, 1 down, redis-only.
+# Why: the probe must never start a real sccache server.
+# From: Issue #1683 | PR #1858
+_stub_sccache() {
+    local bin="$1" mode="$2"
+    case "${mode}" in
+        0) _tool_stub "${bin}" sccache <<<'exit 0' ;;
+        1) _tool_stub "${bin}" sccache <<<'echo raw-server-down >&2; exit 2' ;;
+        redis-only)
+            _tool_stub "${bin}" sccache <<<'[ -z "${SCCACHE_REDIS:-}" ] || { echo raw-redis-down >&2; exit 2; }'
+            ;;
+    esac
+}
+
 @test "a grep read error fails every check that reads the file" {
     # What: grep rc 2 on a file a check reads fails it.
     # Why: a read error must never look like a clean file.
@@ -1269,6 +1283,7 @@ CASES
     _tool_stub "${bin}" cargo <<STUB
 echo "\$1" >> "${log}"
 STUB
+    _stub_sccache "${bin}" 0
     printf '%s\n' 'services:' '  svc-r:' '    build_type: rust' '    crate: crate-r' \
         'ci_variables:' '  CI_RUST_VALIDATION: "false"' > "${BATS_TEST_TMPDIR}/m.yml"
     export CI_MANIFEST="${BATS_TEST_TMPDIR}/m.yml" PATH="${bin}:${PATH}"
@@ -1291,6 +1306,7 @@ STUB
     _tool_stub "${bin}" cargo <<'STUB'
 echo "cargo $1 wrapper=${RUSTC_WRAPPER:-none} dir=${SCCACHE_DIR:-none} args=$*"
 STUB
+    _stub_sccache "${bin}" 0
     unset SCCACHE_REDIS_URL
     CI_RUST_VALIDATION=true CI_REPO_ROOT="${root}" PATH="${bin}:${PATH}" run _ci_test_rust dns
     [ "${status}" -eq 0 ]
@@ -1303,11 +1319,64 @@ STUB
     # What: a Redis URL switches the backend to redis.
     # Why: shared cache on self-hosted; local otherwise.
     # From: Issue #1683 | PR #1858
-    SCCACHE_REDIS_URL=redis://cache.invalid:6379 run bash -c \
-        'source "$1"; _ci_sccache_env p; echo "r=${SCCACHE_REDIS}"' _ "${CI_SH}"
+    local bin="${BATS_TEST_TMPDIR}/bin"
+    _stub_sccache "${bin}" 0
+    SCCACHE_REDIS_URL=redis://cache.invalid:6379 PATH="${bin}:${PATH}" run bash -c \
+        'source "$1"; _ci_sccache_env p; echo "r=${SCCACHE_REDIS}"; _ci_sccache_stop' _ "${CI_SH}"
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"[CI-INFO-CACHE-0001]"* ]]
     [[ "${output}" == *"r=redis://cache.invalid:6379"* ]]
+}
+
+@test "sccache outage degrades to local cache, then direct rustc" {
+    # What: redis down -> local; local down -> direct rustc.
+    # Why: §42: cache outage costs speed, never the build.
+    # From: Issue #1683 | PR #1858
+    local bin="${BATS_TEST_TMPDIR}/bin" probe='source "$1"; _ci_sccache_env p
+        echo "rc=$? w=${RUSTC_WRAPPER:-none} r=${SCCACHE_REDIS:-none}"
+        d="${SCCACHE_SERVER_UDS%/*}"; [ -d "${d}" ] && echo "sock-dir=yes"
+        _ci_sccache_stop; [ -e "${d}" ] && echo leftover; :'
+    _stub_sccache "${bin}" redis-only
+    SCCACHE_REDIS_URL=redis://cache.invalid:6379 PATH="${bin}:${PATH}" \
+        run bash -c "${probe}" _ "${CI_SH}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"CI-WARN-CACHE-0003"*"raw-redis-down"* ]]
+    [[ "${output}" == *"rc=0 w=sccache r=none"* ]]
+    [[ "${output}" != *"CI-WARN-CACHE-0004"* ]]
+    [[ "${output}" == *"sock-dir=yes"* ]]
+    [[ "${output}" != *"leftover"* ]]
+    _stub_sccache "${bin}" 1
+    SCCACHE_REDIS_URL=redis://cache.invalid:6379 PATH="${bin}:${PATH}" \
+        run bash -c "${probe}" _ "${CI_SH}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"CI-WARN-CACHE-0003"* ]]
+    [[ "${output}" == *"CI-WARN-CACHE-0004"*"raw-server-down"* ]]
+    [[ "${output}" == *"rc=0 w=none r=none"* ]]
+    [[ "${output}" != *"leftover"* ]]
+}
+
+@test "sccache reap kills only servers under this run's socket dir" {
+    # What: no real server; a renamed shell plays one.
+    # Why: reap must kill only this run's socket dir.
+    # From: Issue #1683 | PR #1858
+    local fake="${BATS_TEST_TMPDIR}/fake/sccache" mine other
+    mkdir -p "${fake%/*}" "${BATS_TEST_TMPDIR}/mine" "${BATS_TEST_TMPDIR}/other"
+    cp "$(command -v bash)" "${fake}"
+    SCCACHE_SERVER_UDS="${BATS_TEST_TMPDIR}/mine/s.sock" "${fake}" -c 'while :; do sleep 1; done' 3>&- &
+    mine=$!
+    SCCACHE_SERVER_UDS="${BATS_TEST_TMPDIR}/other/s.sock" "${fake}" -c 'while :; do sleep 1; done' 3>&- &
+    other=$!
+    sleep 1
+    run _ci_sccache_reap "${BATS_TEST_TMPDIR}/mine"
+    sleep 1
+    local mine_alive=no other_alive=no
+    kill -0 "${mine}" 2>/dev/null && mine_alive=yes
+    kill -0 "${other}" 2>/dev/null && other_alive=yes
+    kill "${other}"
+    echo "status=${status} mine_alive=${mine_alive} other_alive=${other_alive} out=${output}"
+    [ "${status}" -eq 0 ]
+    [ "${mine_alive}" = no ]
+    [ "${other_alive}" = yes ]
 }
 
 @test "test reports SKIP for an apk service; smoke is at the digest" {
@@ -5701,8 +5770,29 @@ EOF
     local sh="${BATS_TEST_TMPDIR}/fixture.sh"; : > "${sh}"
     printf '%s\n' "${sh}" > "${cf}"
     CI_SHELLCHECK_CMD="$(_stub sc 'exit 1')" CHANGED_FILES="${cf}" run bash "${CI_SH}" check shellcheck
-    [ "${status}" -ne 0 ]
+    [ "${status}" -eq 1 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0056"* ]]
+}
+
+@test "check shellcheck runs per file; a killed run is no finding" {
+    # What: one call per file; rc>1 is CHECK-0113, rc 2.
+    # Why: an OOM kill (137) read as "found issues".
+    # From: Issue #1683 | PR #1858
+    local cf="${BATS_TEST_TMPDIR}/sc.cf" log="${BATS_TEST_TMPDIR}/sc.log"
+    local a="${BATS_TEST_TMPDIR}/a.sh" b="${BATS_TEST_TMPDIR}/b.bats"
+    : > "${a}"; : > "${b}"
+    printf '%s\n' "${a}" "${b}" > "${cf}"
+    CI_SHELLCHECK_CMD="$(_stub sc "echo \"\$#:\$1\" >> '${log}'")" CHANGED_FILES="${cf}" \
+        run bash "${CI_SH}" check shellcheck
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"shellcheck=clean files=2"* ]]
+    [ "$(cat "${log}")" = "$(printf '1:%s\n1:%s' "${a}" "${b}")" ]
+    CI_SHELLCHECK_CMD="$(_stub sc2 'echo raw-oom >&2; exit 137')" CHANGED_FILES="${cf}" \
+        run bash "${CI_SH}" check shellcheck
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0113"*"rc=137"* ]]
+    [[ "${output}" == *"raw-oom"* ]]
+    [[ "${output}" != *"CI-ERROR-CHECK-0056"* ]]
 }
 
 @test "check actionlint passes clean and fails on findings" {
