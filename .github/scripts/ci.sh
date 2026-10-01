@@ -1922,17 +1922,30 @@ _ci_rust_stop_pump() {
 # Why: the proxy CA must not outlive the build step.
 # From: Issue #1683 | PR #1858
 _ci_rust_build_cleanup() {
-    local status=$? out failed=0
-    _ci_rust_stop_pump || failed=1
+    local status=$?
+    local out
+    local failed=0
+    if ! _ci_rust_stop_pump; then
+        failed=1
+    fi
     if [ "${_CI_RB_CA}" = 1 ]; then
         _CI_RB_CA=0
         rm -f "${_CI_RB_CA_FILE}"
-        out="$(update-ca-certificates 2>&1)" || {
+        if ! out="$(update-ca-certificates 2>&1)"; then
             ci_error "[CI-ERROR-RUSTBUILD-0008]" "reason=\"proxy CA not removed from the trust store\"" "${out}"
             failed=1
-        }
+        fi
     fi
-    [ "${failed}" -eq 0 ] || exit "$(( status != 0 ? status : 1 ))"
+    if [ "${failed}" -eq 0 ]; then
+        return 0
+    fi
+    # What: failed cleanup fails the step; keeps its rc.
+    # Why: a build error code must not be replaced by 1.
+    # From: Issue #1683 | PR #1858
+    if [ "${status}" -ne 0 ]; then
+        exit "${status}"
+    fi
+    exit 1
 }
 
 # What: In-image rust builder; sccache, opt-in distcc.
@@ -1950,14 +1963,16 @@ ci_cmd_rust_build() {
     # What: MUSL_TARGET must be the build-tools rustc host.
     # Why: apk Rust has no rustup; host std is the only one.
     # From: Issue #1683 | PR #1858
-    local rustc_info; rustc_info="$(rustc -vV)" || { ci_log "[CI-ERROR-RUSTBUILD-0004]" "reason=\"rustc -vV failed in build-tools\""; return 2; }
+    local rustc_info
+    rustc_info="$(rustc -vV)" || { ci_log "[CI-ERROR-RUSTBUILD-0004]" "reason=\"rustc -vV failed in build-tools\""; return 2; }
     grep -qx "host: ${musl_target}" <<<"${rustc_info}" || { ci_error "[CI-ERROR-RUSTBUILD-0006]" "target=\"${musl_target}\" reason=\"MUSL_TARGET is not the build-tools rustc host\"" "${rustc_info}"; return 2; }
     local key_prefix="lancache-${service}" ccache_dir="${CI_TMPDIR}/ccache-${service}"
     # What: distcc bypasses pump for aws-lc headers.
     # Why: pump can't see generated headers; would fail.
     # From: Issue #1533
     mkdir -p /usr/local/lib/distcc
-    local distcc_bin; distcc_bin="$(command -v distcc)"
+    local distcc_bin
+    distcc_bin="$(command -v distcc)"
     cp "${distcc_bin}" /usr/local/bin/distcc-real
     printf '%s\n' \
       '#!/bin/sh' \
@@ -2081,7 +2096,8 @@ ci_cmd_rust_build() {
     extract_remote_toolchain_id() {
         rm -f "${CI_TMPDIR}/ccache-remote-toolchain-id"
         if command -v readelf >/dev/null 2>&1; then
-            local readelf_comment_section; readelf_comment_section="$(readelf -p .comment "$1" 2>/dev/null)"
+            local readelf_comment_section
+            readelf_comment_section="$(readelf -p .comment "$1" 2>/dev/null)"
             sed -n 's/^ *\[[^]]*\] *//p' <<<"${readelf_comment_section}" > "${CI_TMPDIR}/ccache-remote-toolchain-id"
         fi
     }
@@ -2090,7 +2106,8 @@ ci_cmd_rust_build() {
     # From: Issue #1533
     configure_distcc() {
         if [ -s /run/secrets/distcc_potential_hosts ]; then
-            local distcc_probe_dir; distcc_probe_dir="$(mktemp -d -p "${CI_TMPDIR}")"
+            local distcc_probe_dir
+            distcc_probe_dir="$(mktemp -d -p "${CI_TMPDIR}")"
             DISTCC_POTENTIAL_HOSTS="$(cat /run/secrets/distcc_potential_hosts)"; export DISTCC_POTENTIAL_HOSTS
             local -a distcc_host_specs; read -ra distcc_host_specs <<<"${DISTCC_POTENTIAL_HOSTS}"
             local distcc_hosts="" distcc_hosts_with_pump="" distcc_hosts_without_pump="" distcc_host_spec distcc_host_base
@@ -2109,7 +2126,8 @@ ci_cmd_rust_build() {
             local distcc_pump_hosts="${distcc_hosts_with_pump:-}"
             distcc_hosts_without_pump="${distcc_hosts_without_pump:-${distcc_hosts}}"
             echo "[INFO] trying distcc path." >&2
-            local distcc_wrapper_dir; distcc_wrapper_dir="$(resolve_distcc_wrapper_dir)"
+            local distcc_wrapper_dir
+            distcc_wrapper_dir="$(resolve_distcc_wrapper_dir)"
             export DISTCC_HOSTS_NO_PUMP="${distcc_hosts_without_pump}"
             export PATH="${distcc_wrapper_dir}:${PATH}" CC=cc GCC=gcc CXX=c++ GXX=g++ DISTCC_FALLBACK=0
             _CI_RB_DISTCC=1
@@ -2155,9 +2173,11 @@ ci_cmd_rust_build() {
             if [ ! -s "${CI_TMPDIR}/ccache-remote-toolchain-id" ]; then
                 echo "[INFO] no verified remote distcc toolchain identity; continuing with plain distcc (no cache layer)." >&2; return 0
             fi
-            local ccache_probe_dir; ccache_probe_dir="$(mktemp -d -p "${CI_TMPDIR}")"
+            local ccache_probe_dir
+            ccache_probe_dir="$(mktemp -d -p "${CI_TMPDIR}")"
             echo "[INFO] wrapping distcc with ccache (Redis remote storage)." >&2
-            local ccache_redis_endpoint; ccache_redis_endpoint="$(cat /run/secrets/ccache_redis_url)"
+            local ccache_redis_endpoint
+            ccache_redis_endpoint="$(cat /run/secrets/ccache_redis_url)"
             case "${ccache_redis_endpoint}" in
                 redis://*|redis+unix:*) ;;
                 *) ccache_redis_endpoint="redis://${ccache_redis_endpoint}" ;;
@@ -2183,8 +2203,10 @@ ci_cmd_rust_build() {
             fi
             local ccache_probe_stats="${ccache_probe_dir}/ccache-probe-stats.log"
             ccache --print-stats > "${ccache_probe_stats}"
-            if grep -qE '^remote_storage_error[[:space:]]+[1-9]' "${ccache_probe_stats}" \
-                || ! grep -qE '^remote_storage_(write|hit)[[:space:]]+[1-9]' "${ccache_probe_stats}"; then
+            local stat_err stat_ok
+            stat_err="$(_ci_capture 1 grep -E '^remote_storage_error[[:space:]]+[1-9]' "${ccache_probe_stats}")" || return 2
+            stat_ok="$(_ci_capture 1 grep -E '^remote_storage_(write|hit)[[:space:]]+[1-9]' "${ccache_probe_stats}")" || return 2
+            if [ -n "${stat_err}" ] || [ -z "${stat_ok}" ]; then
                 cat "${ccache_probe_stats}" >&2
                 disable_ccache; rm -rf "${ccache_probe_dir}"
                 echo "[INFO] ccache probe Redis round trip failed; continuing with plain distcc (no cache layer)." >&2; return 0
@@ -2237,7 +2259,8 @@ ci_cmd_rust_build() {
         if [ "${ccache_enabled:-0}" = "1" ]; then
             disable_ccache
             echo "[INFO] ccache build path unavailable; retrying with plain distcc." >&2
-            local ccache_retry_status_file; ccache_retry_status_file="$(mktemp -p "${CI_TMPDIR}")"
+            local ccache_retry_status_file
+            ccache_retry_status_file="$(mktemp -p "${CI_TMPDIR}")"
             { set +e; cargo build -j "${cargo_jobs}" --release --locked --target "${musl_target}" -p "${crate}" 2>&1; echo "$?" >"${ccache_retry_status_file}"; set -e; } | tee -a "${cargo_log}"
             cargo_status="$(cat "${ccache_retry_status_file}")"; rm -f "${ccache_retry_status_file}"
             if [ "${cargo_status}" = "0" ]; then echo "[INFO] plain distcc fallback (ccache disabled) completed." >&2; rm -f "${cargo_log}"; return 0; fi
@@ -2252,7 +2275,9 @@ ci_cmd_rust_build() {
             fi
             rm -f "${cargo_log}"; return 1
         fi
-        if grep -Eqi 'sccache: error|Fixed token mismatch|Timed out waiting for server startup|SCCACHE_' "${cargo_log}"; then
+        local sccache_hit
+        sccache_hit="$(_ci_capture 1 grep -Eia 'sccache: error|Fixed token mismatch|Timed out waiting for server startup|SCCACHE_' "${cargo_log}")" || return 2
+        if [ -n "${sccache_hit}" ]; then
             unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX
             echo "[INFO] sccache build path unavailable; retrying with sccache disabled." >&2
             rm -f "${cargo_log}"
@@ -2268,7 +2293,8 @@ ci_cmd_rust_build() {
     configure_distcc
     configure_ccache
     resolve_cargo_profile_overrides
-    local cargo_jobs; cargo_jobs="$(resolve_cargo_jobs)"
+    local cargo_jobs
+    cargo_jobs="$(resolve_cargo_jobs)"
     # What: drop crate's stale artifact before real build.
     # Why: dep pre-cache stub rlib outdates COPYed src.
     if [ "${mode}" = "build" ]; then
@@ -2279,9 +2305,12 @@ ci_cmd_rust_build() {
     # Why: binary correct; only cache reuse degraded.
     if [ "${ccache_enabled:-0}" = "1" ]; then
         ccache -s
-        local ccache_final_stats; ccache_final_stats="$(mktemp -p "${CI_TMPDIR}")"
+        local ccache_final_stats
+        ccache_final_stats="$(mktemp -p "${CI_TMPDIR}")"
         ccache --print-stats > "${ccache_final_stats}"
-        if grep -qE '^remote_storage_error[[:space:]]+[1-9]' "${ccache_final_stats}"; then
+        local final_err
+        final_err="$(_ci_capture 1 grep -E '^remote_storage_error[[:space:]]+[1-9]' "${ccache_final_stats}")" || return 2
+        if [ -n "${final_err}" ]; then
             echo "[INFO] ccache recorded a Redis remote-storage error during the build; binary unaffected, later builds may miss cache reuse." >&2
             cat "${ccache_final_stats}" >&2
         fi
@@ -3988,7 +4017,9 @@ _ci_default_gc_reachable() {
     # Why: No roots file means we cannot judge; refuse.
     # From: Issue #1683
     { [ -n "${CI_GC_ROOTS_FILE:-}" ] && [ -f "${CI_GC_ROOTS_FILE}" ]; } || return 2
-    if grep -qxF "${digest}" "${CI_GC_ROOTS_FILE}"; then
+    local root_hit
+    root_hit="$(_ci_capture 1 grep -xF -- "${digest}" "${CI_GC_ROOTS_FILE}")" || return 2
+    if [ -n "${root_hit}" ]; then
         printf 'referenced\n'
         return 0
     fi
@@ -4002,7 +4033,11 @@ _ci_default_gc_reachable() {
             case "${tag}" in
                 sha256-*)
                     subj="sha256:${tag#sha256-}"; subj="${subj%%.*}"
-                    grep -qxF "${subj}" "${CI_GC_ROOTS_FILE}" && { printf 'referenced\n'; return 0; }
+                    root_hit="$(_ci_capture 1 grep -xF -- "${subj}" "${CI_GC_ROOTS_FILE}")" || return 2
+                    if [ -n "${root_hit}" ]; then
+                        printf 'referenced\n'
+                        return 0
+                    fi
                     ;;
             esac
         done <<< "$(printf '%s' "${tags}" | tr ',' '\n')"
@@ -6187,7 +6222,11 @@ _ci_check_line_endings() {
         case "${path}" in
             *.png|*.jpg|*.jpeg|*.gif|*.ico|*.woff|*.woff2|*.ttf|*.eot|*.crt|*.key|*.pem) continue ;;
         esac
-        grep -aq $'\r' "${path}" 2>/dev/null && offenders+=("${path}")
+        local crlf
+        crlf="$(_ci_capture 1 grep -a -m1 -n $'\r' "${path}")" || return 2
+        if [ -n "${crlf}" ]; then
+            offenders+=("${path}")
+        fi
     done
     if [ "${#offenders[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0002]" "reason=\"CRLF found; repo requires LF\"" "$(printf '%s\n' "${offenders[@]}")"
@@ -6393,7 +6432,9 @@ _ci_check_deny_short_sha() {
     local -a viol=()
     for path in "${files[@]}"; do
         out="$(_ci_capture 1 grep -EnH "${pat}" "${path}")" || return 2
-        [ -n "${out}" ] && viol+=("${out}")
+        if [ -n "${out}" ]; then
+            viol+=("${out}")
+        fi
     done
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0005]" "reason=\"short-SHA slice banned (issue #1095)\"" "$(printf '%s\n' "${viol[@]}")"
@@ -6420,7 +6461,9 @@ _ci_check_language_policy() {
         esac
         case "${path}" in
             *.sh|*.bats|*.yml|*.yaml)
-                if grep -Eq '(python3?|perl|ruby|node)[[:space:]]+-[eEc]|<<-?[[:space:]]*"?(PY|PYEOF|PYTHON|PERL|RUBY)' "${path}"; then
+                local inline
+                inline="$(_ci_capture 1 grep -E '(python3?|perl|ruby|node)[[:space:]]+-[eEc]|<<-?[[:space:]]*"?(PY|PYEOF|PYTHON|PERL|RUBY)' "${path}")" || return 2
+                if [ -n "${inline}" ]; then
                     viol+=("${path}: inline foreign-language interpreter")
                 fi ;;
         esac
@@ -6443,15 +6486,29 @@ _ci_check_mutable_refs() {
     for path in "${files[@]}"; do
         case "${path}" in
             *.yml|*.yaml)
-                out="$(grep -nE 'uses:[^@]*@v[0-9]' "${path}")" && viol+=("${path} action-@vN: ${out}")
+                out="$(_ci_capture 1 grep -nE 'uses:[^@]*@v[0-9]' "${path}")" || return 2
+                if [ -n "${out}" ]; then
+                    viol+=("${path} action-@vN: ${out}")
+                fi
                 # What: grep pattern in ARG not ref.
                 # Why: PROMOTE_TAGS greps ARG :latest.
                 # From: Issue #1683 | PR #1858
-                out="$(grep -nE 'BUILD_TOOLS_IMAGE=[^[:space:]]*:latest' "${path}" | grep -vF 'ARG BUILD_TOOLS_IMAGE=')" && [ -n "${out}" ] && viol+=("${path} img-default-latest: ${out}")
+                out="$(_ci_capture 1 grep -nE 'BUILD_TOOLS_IMAGE=[^[:space:]]*:latest' "${path}")" || return 2
+                out="$(_ci_capture 1 grep -vF 'ARG BUILD_TOOLS_IMAGE=' <<< "${out}")" || return 2
+                if [ -n "${out}" ]; then
+                    viol+=("${path} img-default-latest: ${out}")
+                fi
                 ;;
             */Dockerfile|Dockerfile)
-                out="$(grep -nE '^FROM .+:latest' "${path}" | grep -vE 'sccache-ng|ccache-ng')" && [ -n "${out}" ] && viol+=("${path} FROM-latest: ${out}")
-                out="$(grep -nE '^FROM [a-z0-9./]+$' "${path}")" && viol+=("${path} FROM-untagged: ${out}")
+                out="$(_ci_capture 1 grep -nE '^FROM .+:latest' "${path}")" || return 2
+                out="$(_ci_capture 1 grep -vE 'sccache-ng|ccache-ng' <<< "${out}")" || return 2
+                if [ -n "${out}" ]; then
+                    viol+=("${path} FROM-latest: ${out}")
+                fi
+                out="$(_ci_capture 1 grep -nE '^FROM [a-z0-9./]+$' "${path}")" || return 2
+                if [ -n "${out}" ]; then
+                    viol+=("${path} FROM-untagged: ${out}")
+                fi
                 ;;
         esac
     done
@@ -6536,12 +6593,18 @@ _ci_check_review_chronology() {
     else
         _ci_scan_files files _ci_override || return 2
     fi
-    local path out ln joined fnums num
+    local path out ln joined fnums num from_lines
     local -a viol=() dup_viol=()
     for path in "${files[@]}"; do
         _ci_prose_excluded "${path}" && continue
-        out="$(grep -EinIH "${rc}" "${path}")" && viol+=("${out}")
-        out="$(grep -EinIH "${lr}" "${path}")" && viol+=("${out}")
+        out="$(_ci_capture 1 grep -EinIH "${rc}" "${path}")" || return 2
+        if [ -n "${out}" ]; then
+            viol+=("${out}")
+        fi
+        out="$(_ci_capture 1 grep -EinIH "${lr}" "${path}")" || return 2
+        if [ -n "${out}" ]; then
+            viol+=("${out}")
+        fi
         while IFS=$'\t' read -r ln joined; do
             [ -n "${ln}" ] || continue
             shopt -s nocasematch
@@ -6553,8 +6616,10 @@ _ci_check_review_chronology() {
             { c=isc($0); cur=(c?pl($0):""); if (pc && c) printf "%d\t%s %s\n", NR-1, pp, cur; pc=c; pp=cur }
         ' "${path}")
         _ci_procsub_ok "$!" 0 || return 2
-        grep -qEI 'From:' "${path}" 2>/dev/null || continue
-        fnums="$(grep -EI 'From:' "${path}" 2>/dev/null | grep -oEI '#[0-9]+' | tr -d '#' | sort -u || true)"
+        from_lines="$(_ci_capture 1 grep -EI 'From:' "${path}")" || return 2
+        [ -n "${from_lines}" ] || continue
+        fnums="$(_ci_capture 1 grep -oEI '#[0-9]+' <<< "${from_lines}")" || return 2
+        fnums="$(tr -d '#' <<< "${fnums}" | sort -u)"
         [ -z "${fnums}" ] && continue
         while IFS= read -r num; do
             [ -n "${num}" ] || continue
@@ -6604,8 +6669,12 @@ _ci_check_pipefail_early_exit() {
     local path out
     local -a viol=()
     for path in "${files[@]}"; do
-        grep -qE 'pipefail|build-tools|BUILD_TOOLS_IMAGE' "${path}" || continue
-        out="$(grep -nE "${pat}" "${path}")" && viol+=("${path}: ${out}")
+        out="$(_ci_capture 1 grep -E 'pipefail|build-tools|BUILD_TOOLS_IMAGE' "${path}")" || return 2
+        [ -n "${out}" ] || continue
+        out="$(_ci_capture 1 grep -nE "${pat}" "${path}")" || return 2
+        if [ -n "${out}" ]; then
+            viol+=("${path}: ${out}")
+        fi
     done
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0011]" "reason=\"live pipe into early-exit consumer (SIGPIPE)\"" "$(printf '%s\n' "${viol[@]}")"
@@ -6704,7 +6773,7 @@ _ci_check_docker_run_heredoc_stdin() {
             invocation="$(printf '%s\n' "${window}" | tail -n +"${last_off}")"
             grep -qE '(^|[[:space:]])-i([[:space:]]|$)' <<<"${invocation}" && continue
             viol+=("${path}:${lineno}: heredoc-fed 'docker run' (bash -s / sh -s) missing -i; container stdin never attaches so the heredoc runs nothing while the step reports success")
-        done < <(grep -noE '(bash|sh)[[:space:]]+-s[[:space:]]*<<' "${path}" 2>/dev/null)
+        done < <(grep -noE '(bash|sh)[[:space:]]+-s[[:space:]]*<<' "${path}")
         _ci_procsub_ok "$!" 1 || return 2
     done
     if [ "${#viol[@]}" -gt 0 ]; then
@@ -6790,7 +6859,9 @@ _ci_check_setup_prompt_drift() {
         [ -f "${sim}" ] || { viol+=("expected simulation script not found: ${sim}"); continue; }
         # What: introspection-driven sims use list-prompts
         # Why: no hand-encoded patterns needed here
-        if grep -qF 'build_expect_prompt_block' "${sim}"; then
+        local introspect
+        introspect="$(_ci_capture 1 grep -F 'build_expect_prompt_block' "${sim}")" || return 2
+        if [ -n "${introspect}" ]; then
             grep -qF 'spawn bash setup.sh' "${sim}" || viol+=("${sim}: introspection-driven but no 'spawn bash setup.sh'")
             continue
         fi
@@ -6908,7 +6979,10 @@ _ci_check_stable_external_images() {
         allowed+="$(_ci_block_entry_field base_images "" "${k}") "
     done
     for d in "${dirs[@]}"; do
-        [ -d "${d}" ] || { viol+=("${d}: compose dir missing"); continue; }
+        if [ ! -d "${d}" ]; then
+            viol+=("${d}: compose dir missing")
+            continue
+        fi
         while IFS= read -r line; do
             img="${line#*image:}"; img="${img#"${img%%[![:space:]]*}"}"
             # What: only ${LANCACHE_*} own images skip.
@@ -7497,7 +7571,10 @@ _ci_check_naming_consistency() {
     local cf
 
     for cf in "${compose_files[@]}"; do
-        [ -f "${cf}" ] || { viol+=("${cf}: compose file missing"); continue; }
+        if [ ! -f "${cf}" ]; then
+            viol+=("${cf}: compose file missing")
+            continue
+        fi
         grep -Eq '^name: lancache-ng$' "${cf}" || viol+=("${cf}: missing 'name: lancache-ng'")
     done
 
@@ -7506,7 +7583,7 @@ _ci_check_naming_consistency() {
         return 2
     fi
     local allowlist_line allowlist_group allowlist_names
-    allowlist_line="$(grep -F 'acl lancache_container' "${proxy_sh}" || true)"
+    allowlist_line="$(_ci_capture 1 grep -F 'acl lancache_container' "${proxy_sh}")" || return 2
     if [ -z "${allowlist_line}" ]; then
         viol+=("${proxy_sh}: missing 'acl lancache_container' allowlist line")
         allowlist_names=""
@@ -7524,7 +7601,9 @@ _ci_check_naming_consistency() {
         # What: installer compose names carry the suffix.
         # Why: owner-derived; a path substring hid it.
         # From: Issue #1683 | PR #1858
-        [ "${cf}" = "${root}/${inst}" ] && name_suffix='\$\{LANCACHE_CONTAINER_SUFFIX:-\}'
+        if [ "${cf}" = "${root}/${inst}" ]; then
+            name_suffix='\$\{LANCACHE_CONTAINER_SUFFIX:-\}'
+        fi
         while IFS= read -r name; do
             [ -n "${name}" ] || continue
             grep -Eq "^[[:space:]]+container_name: ${name}${name_suffix}\$" "${cf}" || \
@@ -7553,8 +7632,10 @@ _ci_check_naming_consistency() {
     fi
 
     local watchdog_acl
-    watchdog_acl="$(grep -Ei '^[[:space:]]*(acl|http-request)[[:space:]].*lancache-watchdog' "${proxy_sh}" || true)"
-    [ -z "${watchdog_acl}" ] || viol+=("${proxy_sh}: lancache-watchdog referenced in acl/http-request (issue #1486)")
+    watchdog_acl="$(_ci_capture 1 grep -Ei '^[[:space:]]*(acl|http-request)[[:space:]].*lancache-watchdog' "${proxy_sh}")" || return 2
+    if [ -n "${watchdog_acl}" ]; then
+        viol+=("${proxy_sh}: lancache-watchdog referenced in acl/http-request (issue #1486)")
+    fi
 
     local verb_acls
     verb_acls="$(grep -oE '^[[:space:]]*acl[[:space:]]+[a-z_]+[[:space:]]+path,url_dec.*/\(?(start|stop|restart|wait)(\|(start|stop|restart|wait))*\)?\$' "${proxy_sh}" \
@@ -7563,7 +7644,7 @@ _ci_check_naming_consistency() {
     local verb_acl verb_acl_line
     while IFS= read -r verb_acl; do
         [ -n "${verb_acl}" ] || continue
-        verb_acl_line="$(grep -F "acl ${verb_acl} " "${proxy_sh}" || true)"
+        verb_acl_line="$(_ci_capture 1 grep -F "acl ${verb_acl} " "${proxy_sh}")" || return 2
         grep -qi 'lancache-\(watchdog\|syslog\)' <<<"${verb_acl_line}" && \
             viol+=("${proxy_sh}: '${verb_acl}' grants lifecycle action to watchdog/syslog (issue #1486)")
     done <<<"${verb_acls}"
@@ -7989,11 +8070,15 @@ _ci_check_prebuilt_prod() {
     inst="$(_ci_installer_compose "${repo_root}")" || return 2
     dep="${repo_root}/$(dirname "${dep}")"
     inst="${repo_root}/$(dirname "${inst}")"
-    if grep -RInE '^[[:space:]]+build:' "${dep}" "${inst}" >/dev/null 2>&1; then
-        viol+=("a stack compose declares build:; prod must run prebuilt images only")
+    local hit
+    hit="$(_ci_capture 1 grep -RInE '^[[:space:]]+build:' "${dep}" "${inst}")" || return 2
+    if [ -n "${hit}" ]; then
+        viol+=("a stack compose declares build:; prod must run prebuilt images only" "${hit}")
     fi
-    if grep -RIn -- '--build' "${repo_root}/README.md" "${dep}" "${inst}" "${repo_root}/setup.sh" >/dev/null 2>&1; then
-        viol+=("a user-facing install path instructs --build; prod must run from prebuilt images, not a local build")
+    local hit
+    hit="$(_ci_capture 1 grep -RIn -- '--build' "${repo_root}/README.md" "${dep}" "${inst}" "${repo_root}/setup.sh")" || return 2
+    if [ -n "${hit}" ]; then
+        viol+=("a user-facing install path instructs --build; prod must run from prebuilt images, not a local build" "${hit}")
     fi
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0042]" "reason=\"production install path is not prebuilt-only\"" "$(printf '%s\n' "${viol[@]}")"
@@ -8106,8 +8191,13 @@ _ci_compose_run() {
         fx="$(_ci_validation_env)" || return 2
         mapfile -t fixture <<< "${fx}"
     fi
+    # What: export each KEY=VALUE fixture pair.
+    # Why: ${kv?} is ShellCheck's pair form (SC2163).
+    # From: Issue #1683 | PR #1858
     (
-        for kv in "${fixture[@]}"; do export "${kv?}"; done
+        for kv in "${fixture[@]}"; do
+            export "${kv?}"
+        done
         docker compose "${pre[@]}" "$@"
     )
 }
@@ -8118,8 +8208,13 @@ _ci_compose_run() {
 _ci_compose_config_ok() {
     local file="$1" profile="${2:-}" env_file="${3:-}" out
     local -a args=(-f "${file}")
-    [ -n "${profile}" ] && args+=(--profile "${profile}")
-    out="$(_ci_compose_run "${env_file}" "${args[@]}" config --quiet 2>&1)" || { printf '%s\n' "${out}"; return 1; }
+    if [ -n "${profile}" ]; then
+        args+=(--profile "${profile}")
+    fi
+    if ! out="$(_ci_compose_run "${env_file}" "${args[@]}" config --quiet 2>&1)"; then
+        printf '%s\n' "${out}"
+        return 1
+    fi
     if grep -Eqi '(^|[[:space:]])(warn|warning|level=warning)' <<<"${out}"; then
         printf 'warnings treated as errors:\n%s\n' "${out}"
         return 1
@@ -8159,7 +8254,7 @@ _ci_compose_env_files() {
 _ci_check_compose_config() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local -a viol=() pairs=() profiles=()
-    local deploy targets envtargets rel mode pair cf ef raw p label msg count=0
+    local deploy targets envtargets rel mode pair cf ef raw p label render msg count=0
     deploy="$(_ci_variable CI_COMPOSE_FILE)" || return 2
     targets="$(_ci_manifest_scalar '^  compose_targets:[[:space:]]')"
     if [ -z "${targets}" ]; then
@@ -8191,8 +8286,13 @@ _ci_check_compose_config() {
         [ -z "${raw}" ] || mapfile -t -O 1 profiles <<< "${raw}"
         for p in "${profiles[@]}"; do
             count=$((count + 1))
-            msg="$(_ci_compose_config_ok "${cf}" "${p}" "${ef}")" \
-                || viol+=("${label}${p:+:${p}}: config invalid"$'\n'"${msg}")
+            render="${label}"
+            if [ -n "${p}" ]; then
+                render="${label}:${p}"
+            fi
+            if ! msg="$(_ci_compose_config_ok "${cf}" "${p}" "${ef}")"; then
+                viol+=("${render}: config invalid" "${msg}")
+            fi
         done
     done
     if [ "${#viol[@]}" -gt 0 ]; then
@@ -8227,10 +8327,14 @@ _ci_check_nats_atomic_write() {
         || viol+=("${ep}: DNS entrypoint must render generated configs atomically")
     grep -Fq 'mktemp "${target_dir}/.${target_name}.tmp.XXXXXX"' "${repo_root}/${ep}" \
         || viol+=("${ep}: DNS entrypoint must stage temp files in the target directory")
-    if grep -Fq '> /tmp/recursor.conf' "${repo_root}/${ep}" || grep -Fq '> /tmp/pdns.conf' "${repo_root}/${ep}"; then
+    local hit
+    hit="$(_ci_capture 1 grep -F -e '> /tmp/recursor.conf' -e '> /tmp/pdns.conf' "${repo_root}/${ep}")" || return 2
+    if [ -n "${hit}" ]; then
         viol+=("${ep}: DNS entrypoint must not render PDNS configs through /tmp")
     fi
-    if grep -Fq "sed -i 's/^  loglevel: 3\$/  loglevel: 6/' /etc/pdns/recursor.conf" "${repo_root}/${ep}"; then
+    local hit
+    hit="$(_ci_capture 1 grep -F "sed -i 's/^  loglevel: 3\$/  loglevel: 6/' /etc/pdns/recursor.conf" "${repo_root}/${ep}")" || return 2
+    if [ -n "${hit}" ]; then
         viol+=("${ep}: query logging must apply to the staged recursor.conf before replacement")
     fi
     grep -Fq 'write_generated_runtime_file "${secondary_dir}/docker-compose.yml"' "${repo_root}/${su}" \
@@ -8254,15 +8358,21 @@ _ci_check_docker_socket_proxy() {
     dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
     inst="$(_ci_installer_compose "${repo_root}")" || return 2
     for cf in "${dep}" "${inst}"; do
-        if grep -Fq 'EXEC: "1"' "${repo_root}/${cf}"; then
+        local hit
+        hit="$(_ci_capture 1 grep -F 'EXEC: "1"' "${repo_root}/${cf}")" || return 2
+        if [ -n "${hit}" ]; then
             viol+=("${cf}: Docker exec is banned from the Admin UI/watchdog proxy")
         fi
-        if grep -Eq '^[[:space:]]*(CONTAINERS|POST): "1"' "${repo_root}/${cf}"; then
+        local hit
+        hit="$(_ci_capture 1 grep -E '^[[:space:]]*(CONTAINERS|POST): "1"' "${repo_root}/${cf}")" || return 2
+        if [ -n "${hit}" ]; then
             viol+=("${cf}: broad CONTAINERS=1/POST=1 exposes generic Docker APIs; use the allowlist")
         fi
         grep -Fq 'scripts/untracked/docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro' "${repo_root}/${cf}" \
             || viol+=("${cf}: must mount the one real scripts/untracked/docker-socket-proxy.sh")
-        if grep -Eq '^x-docker-socket-proxy-command:' "${repo_root}/${cf}"; then
+        local hit
+        hit="$(_ci_capture 1 grep -E '^x-docker-socket-proxy-command:' "${repo_root}/${cf}")" || return 2
+        if [ -n "${hit}" ]; then
             viol+=("${cf}: the dead x-docker-socket-proxy-command anchor must not be reintroduced")
         fi
     done
@@ -8290,7 +8400,9 @@ _ci_check_docker_socket_proxy() {
         '[A-Za-z0-9_.-]+/(start|stop|restart|attach)'
     )
     for pat in "${forbid[@]}"; do
-        if grep -Fq "${pat}" "${repo_root}/${sp}"; then
+        local hit
+        hit="$(_ci_capture 1 grep -F -- "${pat}" "${repo_root}/${sp}")" || return 2
+        if [ -n "${hit}" ]; then
             viol+=("${sp}: forbidden broad rule present: ${pat}")
         fi
     done
@@ -8405,7 +8517,9 @@ _ci_check_dhcp_proxy_env() {
         || viol+=("dhcp-proxy entrypoint must render optional dnsmasq directives (#450)")
     grep -Fq '_dhcp_proxy_render_optional_directives /etc/dnsmasq.conf' "${repo_root}/services/dhcp-proxy/entrypoint.sh" \
         || viol+=("dhcp-proxy entrypoint must render optional directives before validating dnsmasq.conf")
-    if grep -Fq 'dhcp-proxy=${UPSTREAM_DHCP_IP}' "${repo_root}/services/dhcp-proxy/dnsmasq.conf.template"; then
+    local hit
+    hit="$(_ci_capture 1 grep -F 'dhcp-proxy=${UPSTREAM_DHCP_IP}' "${repo_root}/services/dhcp-proxy/dnsmasq.conf.template")" || return 2
+    if [ -n "${hit}" ]; then
         viol+=("dnsmasq.conf.template must not reintroduce the RFC 5107 dhcp-proxy flag")
     fi
     if [ "${#viol[@]}" -gt 0 ]; then
@@ -8424,8 +8538,10 @@ _ci_check_setup_keys_kea() {
     local key dep inst su="${repo_root}/setup.sh"
     dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
     inst="$(_ci_installer_compose "${repo_root}")" || return 2
-    if grep -RInE '^(NATS_LOCAL_TOKEN|NATS_TOKEN)=' "${repo_root}/$(dirname "${inst}")/.env" "${repo_root}/$(dirname "${dep}")/.env" >/dev/null 2>&1; then
-        viol+=("env templates must not use deprecated NATS token keys; use role credentials")
+    local hit
+    hit="$(_ci_capture 1 grep -RInE '^(NATS_LOCAL_TOKEN|NATS_TOKEN)=' "${repo_root}/$(dirname "${inst}")/.env" "${repo_root}/$(dirname "${dep}")/.env")" || return 2
+    if [ -n "${hit}" ]; then
+        viol+=("env templates must not use deprecated NATS token keys; use role credentials" "${hit}")
     fi
     local -a req=(DDNS_TSIG_KEY KEA_CTRL_TOKEN LANCACHE_IMAGE_TAG NATS_DNS_REPLICA_PASSWORD NATS_DNS_REPLICA_USER NATS_DNS_WRITER_PASSWORD NATS_DNS_WRITER_USER NATS_CALLOUT_PASSWORD NATS_CALLOUT_USER NATS_SYS_PASSWORD NATS_SYS_USER NATS_UI_PASSWORD NATS_UI_USER PDNS_API_KEY SECONDARY_REGISTRATION_TOKEN)
     for key in "${req[@]}"; do
@@ -8437,7 +8553,9 @@ _ci_check_setup_keys_kea() {
         || viol+=("setup.sh must call the Kea discovery preflight before starting the stack")
     grep -Fq 'nmap --script broadcast-dhcp-discover --script-args broadcast-dhcp-discover.timeout=5' "${su}" \
         || viol+=("setup.sh must probe DHCP discovery with the Kea image before activation")
-    if grep -Fq 'nmap --script broadcast-dhcp-discover -e any' "${su}"; then
+    local hit
+    hit="$(_ci_capture 1 grep -F 'nmap --script broadcast-dhcp-discover -e any' "${su}")" || return 2
+    if [ -n "${hit}" ]; then
         viol+=("setup.sh must not pass -e any to nmap; invalid interface fails the preflight")
     fi
     # What: nmap in SOT dhcp packages
@@ -8618,7 +8736,7 @@ _ci_check_vex_drift() {
         ci_error "[CI-ERROR-CHECK-0108]" "reason=\"generate-vex.sh produced invalid JSON\"" "${trivyignore}"
         return 1
     fi
-    entry_count="$(grep -c '^  - id:' "${trivyignore}" 2>/dev/null || true)"
+    entry_count="$(_ci_capture 1 grep -c '^  - id:' "${trivyignore}")" || return 2
     statement_count="$(jq '.statements | length' <<<"${out}")"
     if [ "${entry_count:-0}" -gt 0 ] && [ "${statement_count}" -eq 0 ]; then
         ci_error "[CI-ERROR-CHECK-0109]" "reason=\"${entry_count} trivyignore entries but 0 VEX statements\"" "${trivyignore}"
@@ -8724,7 +8842,7 @@ _ci_check_logging_matrix() {
     local canonical_raw
     canonical_raw="$(_ci_logging_matrix_canonical "${doc}")"
     local row_summary raw_row_count unique_row_count
-    row_summary="$(grep -E '^##ROWS## ' <<<"${canonical_raw}" || true)"
+    row_summary="$(_ci_capture 1 grep -E '^##ROWS## ' <<<"${canonical_raw}")" || return 2
     raw_row_count="$(awk '{print $2}' <<<"${row_summary}")"
     unique_row_count="$(awk '{print $3}' <<<"${row_summary}")"
     local -a canonical=()
@@ -8938,15 +9056,22 @@ _ci_check_dockerfile_build_tools() {
         # What: forbid a mutable default on the ARG.
         # Why: ci.sh supplies the immutable ref (AG-CI-008).
         # From: Issue #1683
-        grep -qE '^ARG BUILD_TOOLS_IMAGE=' "${df}" \
-            && viol+=("${service}: ARG BUILD_TOOLS_IMAGE must carry no default; ci.sh supplies it")
-        if grep -q 'cargo install' "${df}"; then
+        local hit
+        hit="$(_ci_capture 1 grep -E '^ARG BUILD_TOOLS_IMAGE=' "${df}")" || return 2
+        if [ -n "${hit}" ]; then
+            viol+=("${service}: ARG BUILD_TOOLS_IMAGE must carry no default; ci.sh supplies it")
+        fi
+        local hit
+        hit="$(_ci_capture 1 grep -F 'cargo install' "${df}")" || return 2
+        if [ -n "${hit}" ]; then
             viol+=("${service}: Dockerfile compiles a tool with cargo install; consume the build-tools image")
         fi
         # What: reject Cargo tuning hardcode; empty ARG ok.
         # Why: jobs/lto/codegen from CI vars (AG-CI-006).
         # From: Issue #1683
-        if grep -qE '^[[:space:]]*(ARG[[:space:]]+SCCACHE_DIST_SCHEDULER_URL|ENV[[:space:]]+CARGO_BUILD_JOBS=|ARG[[:space:]]+PROJECT_CARGO_LTO=.+|ARG[[:space:]]+PROJECT_CARGO_CODEGENUNIT=.+|ENV[[:space:]]+PROJECT_CARGO_LTO=|ENV[[:space:]]+PROJECT_CARGO_CODEGENUNIT=)' "${df}"; then
+        local hit
+        hit="$(_ci_capture 1 grep -E '^[[:space:]]*(ARG[[:space:]]+SCCACHE_DIST_SCHEDULER_URL|ENV[[:space:]]+CARGO_BUILD_JOBS=|ARG[[:space:]]+PROJECT_CARGO_LTO=.+|ARG[[:space:]]+PROJECT_CARGO_CODEGENUNIT=.+|ENV[[:space:]]+PROJECT_CARGO_LTO=|ENV[[:space:]]+PROJECT_CARGO_CODEGENUNIT=)' "${df}")" || return 2
+        if [ -n "${hit}" ]; then
             tuning+=("${service}: Dockerfile hardcodes a Cargo tuning value; source jobs/lto/codegen from CI vars")
         fi
     done
@@ -8973,7 +9098,7 @@ _ci_check_cargo_profile_tuning() {
         [ -n "${f}" ] || continue
         while IFS= read -r line; do
             [ -n "${line}" ] && viol+=("${f}:${line}")
-        done < <(grep -nE '^[[:space:]]*(lto|codegen-units)[[:space:]]*=' "${repo_root}/${f}" 2>/dev/null)
+        done < <(grep -nE '^[[:space:]]*(lto|codegen-units)[[:space:]]*=' "${repo_root}/${f}")
         _ci_procsub_ok "$!" 1 || return 2
     done <<< "${tomls}"
     if [ "${#viol[@]}" -gt 0 ]; then

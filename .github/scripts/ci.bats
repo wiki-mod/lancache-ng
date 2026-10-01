@@ -158,6 +158,83 @@ teardown() {
     [[ "${output}" == *"CI-ERROR-CORE-0106"*'rc="0"'*"warn"* ]]
 }
 
+# What: a grep stub that fails one matching argument.
+# Why: proves a read error is never a clean result.
+# From: Issue #1683 | PR #1858
+_grep_fail_stub() {
+    local bin="$1"
+    mkdir -p "${bin}"
+    cat > "${bin}/grep" <<'STUB'
+#!/usr/bin/env bash
+for arg in "$@"; do
+    if [ -n "${FAIL_MATCH:-}" ] && [[ "${arg}" == *"${FAIL_MATCH}" ]]; then
+        echo "grep: read error" >&2
+        exit 2
+    fi
+done
+exec "${REAL_GREP}" "$@"
+STUB
+    chmod +x "${bin}/grep"
+    REAL_GREP="$(command -v grep)"
+    export REAL_GREP
+}
+
+@test "a grep read error fails every check that reads the file" {
+    # What: grep rc 2 on a file a check reads fails it.
+    # Why: a read error must never look like a clean file.
+    # From: Issue #1683 | PR #1858
+    local bin="${BATS_TEST_TMPDIR}/gbin"
+    local name check arg fail
+    _grep_fail_stub "${bin}"
+    printf 'echo hi\n' > "${BATS_TEST_TMPDIR}/probe.sh"
+    printf 'on: push\n' > "${BATS_TEST_TMPDIR}/probe.yml"
+    while IFS='|' read -r name check arg fail; do
+        local -a files=()
+        if [ -n "${arg}" ]; then
+            files=("${BATS_TEST_TMPDIR}/${arg}")
+        fi
+        run env PATH="${bin}:${PATH}" FAIL_MATCH="${fail}" \
+            bash "${CI_SH}" check "${check}" "${files[@]}"
+        if [ "${status}" -eq 0 ]; then
+            echo "${name}: passed: ${output}"
+            return 1
+        fi
+        if [[ "${output}" != *"CI-ERROR-CORE-0106"*"read error"* ]]; then
+            echo "${name}: ${output}"
+            return 1
+        fi
+    done <<'CASES'
+crlf|line-endings|probe.sh|/probe.sh
+lang|language-policy|probe.sh|/probe.sh
+refs|mutable-refs|probe.yml|/probe.yml
+chrono|review-chronology|probe.sh|/probe.sh
+pipefail|pipefail-early-exit|probe.sh|/probe.sh
+prebuilt|prebuilt-prod||/README.md
+nats|nats-atomic-write||/services/dns/entrypoint.sh
+socket|docker-socket-proxy||/scripts/untracked/docker-socket-proxy.sh
+naming|naming-consistency||/scripts/untracked/docker-socket-proxy.sh
+dhcp|dhcp-proxy-env||/dnsmasq.conf.template
+kea|setup-keys-kea||/setup.sh
+rustdf|dockerfile-build-tools||/services/ui/Dockerfile
+prompt|setup-prompt-drift||/setup-cli-simulation.sh
+CASES
+}
+
+@test "gc refuses when the roots file read fails" {
+    # What: a roots read error refuses; no DELETE verdict.
+    # Why: "not referenced" from a failed read deletes data.
+    # From: Issue #1683 | PR #1858
+    local bin="${BATS_TEST_TMPDIR}/gcbin"
+    _grep_fail_stub "${bin}"
+    PATH="${bin}:${PATH}" FAIL_MATCH="-xF" \
+    CI_GC_ROOTS_CMD="$(_stub roots 'printf "sha256:aaa\n"')" \
+    CI_GC_CANDIDATES_CMD="$(_stub cands 'printf "sha256:aaa\t7\t2020-01-01T00:00:00Z\n"')" \
+        run bash "${CI_SH}" gc
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CORE-0106"*"read error"* ]]
+    [[ "${output}" != *"action=DELETE"* ]]
+}
+
 @test "_ci_repo lowercases a mixed-case GITHUB_REPOSITORY" {
     # What: a mixed-case owner/repo comes out lowercased.
     # Why: GHCR image refs must be lowercase.
@@ -4159,22 +4236,62 @@ CASES
     # What: trap cleans up; a failed step fails, rc is kept.
     # Why: cleanup state must survive until the EXIT trap.
     # From: Issue #1683 | PR #1858
-    local bin="${BATS_TEST_TMPDIR}/rbbin" log="${BATS_TEST_TMPDIR}/rb.log" name main pump ca want code
+    local bin="${BATS_TEST_TMPDIR}/rbbin"
+    local driver="${BATS_TEST_TMPDIR}/trap-driver.sh"
+    local name main pump ca want code
+    export RB_LOG="${BATS_TEST_TMPDIR}/rb.log"
     mkdir -p "${bin}"
-    printf '#!/bin/sh\necho "pump $*" >> "%s"\n[ -z "${PUMP_FAIL:-}" ] || { echo pump-boom >&2; exit 1; }\n' "${log}" > "${bin}/distcc-pump"
-    printf '#!/bin/sh\necho "update-ca" >> "%s"\n[ -z "${CA_FAIL:-}" ] || { echo ca-boom >&2; exit 1; }\n' "${log}" > "${bin}/update-ca-certificates"
+    cat > "${bin}/distcc-pump" <<'STUB'
+#!/bin/sh
+echo "pump $*" >> "${RB_LOG}"
+if [ -n "${PUMP_FAIL:-}" ]; then
+    echo pump-boom >&2
+    exit 1
+fi
+STUB
+    cat > "${bin}/update-ca-certificates" <<'STUB'
+#!/bin/sh
+echo "update-ca" >> "${RB_LOG}"
+if [ -n "${CA_FAIL:-}" ]; then
+    echo ca-boom >&2
+    exit 1
+fi
+STUB
     chmod +x "${bin}/distcc-pump" "${bin}/update-ca-certificates"
+    cat > "${driver}" <<'DRIVER'
+source "${CI_SH}"
+_CI_RB_CA_FILE="${CA_FILE}"
+trap _ci_rust_build_cleanup EXIT
+_CI_RB_DISTCC=1
+_CI_RB_CA=1
+exit "${MAIN_RC}"
+DRIVER
     while IFS='|' read -r name main pump ca want code; do
-        : > "${log}"
+        : > "${RB_LOG}"
         : > "${BATS_TEST_TMPDIR}/ca.crt"
-        run env PATH="${bin}:${PATH}" PUMP_FAIL="${pump}" CA_FAIL="${ca}" bash -c '
-            source "$1"; _CI_RB_CA_FILE="$2"; trap _ci_rust_build_cleanup EXIT
-            _CI_RB_DISTCC=1; _CI_RB_CA=1; exit "$3"' _ "${CI_SH}" "${BATS_TEST_TMPDIR}/ca.crt" "${main}"
-        [ "${status}" -eq "${want}" ] || { echo "${name}: ${status} ${output}"; return 1; }
-        [[ "${output}" == *"${code}"* ]] || { echo "${name}: ${output}"; return 1; }
-        grep -qx 'pump --shutdown' "${log}" || { echo "${name}: no pump stop"; return 1; }
-        grep -qx 'update-ca' "${log}" || { echo "${name}: no CA update"; return 1; }
-        [ ! -e "${BATS_TEST_TMPDIR}/ca.crt" ] || { echo "${name}: CA file kept"; return 1; }
+        run env PATH="${bin}:${PATH}" PUMP_FAIL="${pump}" CA_FAIL="${ca}" \
+            CI_SH="${CI_SH}" CA_FILE="${BATS_TEST_TMPDIR}/ca.crt" MAIN_RC="${main}" \
+            bash "${driver}"
+        if [ "${status}" -ne "${want}" ]; then
+            echo "${name}: rc ${status}: ${output}"
+            return 1
+        fi
+        if [[ "${output}" != *"${code}"* ]]; then
+            echo "${name}: ${output}"
+            return 1
+        fi
+        if ! grep -qx 'pump --shutdown' "${RB_LOG}"; then
+            echo "${name}: pump not stopped"
+            return 1
+        fi
+        if ! grep -qx 'update-ca' "${RB_LOG}"; then
+            echo "${name}: trust store not updated"
+            return 1
+        fi
+        if [ -e "${BATS_TEST_TMPDIR}/ca.crt" ]; then
+            echo "${name}: CA file kept"
+            return 1
+        fi
     done <<'CASES'
 ok|0|||0|
 ca-fail|0||1|1|CI-ERROR-RUSTBUILD-0008
@@ -4951,7 +5068,7 @@ STUBEOF
     printf 'if ! out="$(x)"; then\n  rc=$?\nfi\n' > "${BATS_TEST_TMPDIR}/negif.sh"
     run bash "${CI_SH}" check if-without-else-status "${BATS_TEST_TMPDIR}/negif.sh"
     [ "${status}" -ne 0 ]
-    [[ "${output}" == *"negif.sh:2: reads \$? inside 'if ! CMD; then' (line 1)"* ]]
+    [[ "${output}" == *"negif.sh:2: reads \$? inside 'if ! CMD; then'"* ]]
     printf 'if ! x; then rc=$?; fi\n' > "${BATS_TEST_TMPDIR}/negone.sh"
     run bash "${CI_SH}" check if-without-else-status "${BATS_TEST_TMPDIR}/negone.sh"
     [ "${status}" -ne 0 ]
@@ -5852,10 +5969,10 @@ EOF
     # What: env_file from compose; 0/2 files, bad doc fail.
     # Why: the compose owns the path; ci.sh keeps no copy.
     # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/pce" bin="${BATS_TEST_TMPDIR}/pcebin" realgrep
+    local r="${BATS_TEST_TMPDIR}/pce"
+    local bin="${BATS_TEST_TMPDIR}/pcebin"
     local name ef want
-    realgrep="$(command -v grep)"
-    mkdir -p "${r}/dep" "${r}/docs" "${bin}"
+    mkdir -p "${r}/dep" "${r}/docs"
     printf 'CACHE_X=1\n' > "${r}/dep/p.env"
     printf 'CACHE_X=1\n' > "${r}/dep/q.env"
     printf '| `CACHE_X` | `2` | x |\n' > "${r}/docs/architecture-ng.md"
@@ -5863,8 +5980,14 @@ EOF
     while IFS='|' read -r name ef want; do
         printf 'services:\n  proxy:\n    image: x\n%b' "${ef}" > "${r}/dep/c.yml"
         run bash "${CI_SH}" check proxy-cache-env-doc-drift
-        [ "${status}" -ne 0 ] || { echo "${name}: passed"; return 1; }
-        [[ "${output}" == *"${want}"* ]] || { echo "${name}: ${output}"; return 1; }
+        if [ "${status}" -eq 0 ]; then
+            echo "${name}: passed"
+            return 1
+        fi
+        if [[ "${output}" != *"${want}"* ]]; then
+            echo "${name}: ${output}"
+            return 1
+        fi
     done <<'CASES'
 one|    env_file: [./p.env]\n|CACHE_X: proxy.env=1 vs doc=2
 two|    env_file: [./p.env, ./q.env]\n|CI-ERROR-CHECK-0111
@@ -5872,12 +5995,11 @@ none||CI-ERROR-CHECK-0111
 bad|  bogus: [\n|CI-ERROR-CHECK-0110
 CASES
     printf 'services:\n  proxy:\n    image: x\n    env_file: [./p.env]\n' > "${r}/dep/c.yml"
-    printf '#!/usr/bin/env bash\n[ "${!#}" = "%s" ] && { echo boom >&2; exit 2; }\nexec %s "$@"\n' \
-        "${r}/docs/architecture-ng.md" "${realgrep}" > "${bin}/grep"
-    chmod +x "${bin}/grep"
-    PATH="${bin}:${PATH}" run bash "${CI_SH}" check proxy-cache-env-doc-drift
+    _grep_fail_stub "${bin}"
+    PATH="${bin}:${PATH}" FAIL_MATCH="/docs/architecture-ng.md" \
+        run bash "${CI_SH}" check proxy-cache-env-doc-drift
     [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CORE-0106"*"boom"* ]]
+    [[ "${output}" == *"CI-ERROR-CORE-0106"*"read error"* ]]
 }
 
 @test "check dependabot-docker-base-consistency passes on the real repo" {
