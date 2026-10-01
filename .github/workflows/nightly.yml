@@ -68,30 +68,38 @@ jobs:
         id: resolve
         run: echo "image=$(bash .github/scripts/ci.sh build-tools resolve-image)" >> "$GITHUB_OUTPUT"
 
-  # What: validate then promote accepted current_dev
-  # Why: one job; nightly reuses; never rebuilds
+  # What: validate full stack of accepted candidate
+  # Why: runner host: compose binds need host paths.
+  # From: Issue #1683
+  validate:
+    name: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - *bootstrap
+      - name: Validate the accepted stack candidate
+        run: bash .github/scripts/ci.sh validate
+
+  # What: promote validated current_dev, report outcome
+  # Why: nightly reuses; never rebuilds; always reports
   # From: Issue #1683
   nightly:
     name: nightly
-    needs: platform
+    needs: [platform, validate]
+    if: ${{ !cancelled() && needs.platform.result == 'success' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
     container:
       image: ${{ needs.platform.outputs.image }}
       credentials: *ghcr_credentials
     steps:
       - *bootstrap
-      # What: validate full stack of accepted candidate
-      # Why: nightly promotes green, already-accepted stack
-      # From: Issue #1683
-      - name: Validate the accepted stack candidate
-        id: validate
-        run: bash .github/scripts/ci.sh validate
       # What: promote nightly channel to validated stack
-      # Why: auto-skip if validate failed; moves refs only
+      # Why: only after validate passed; moves refs only
       # From: Issue #1683
       - name: Promote the nightly channel
         id: promote
+        if: needs.validate.result == 'success'
         env:
           CI_STACK_VALIDATED: SUCCESS
         run: bash .github/scripts/ci.sh promote nightly
@@ -101,5 +109,5 @@ jobs:
       - name: Report the nightly outcome
         if: always()
         env:
-          OUTCOME: ${{ (steps.validate.outcome == 'success' && steps.promote.outcome == 'success') && 'success' || 'failure' }}
+          OUTCOME: ${{ (needs.validate.result == 'success' && steps.promote.outcome == 'success') && 'success' || 'failure' }}
         run: bash .github/scripts/ci.sh nightly-status "${OUTCOME}" "nightly channel promote (current_dev)"

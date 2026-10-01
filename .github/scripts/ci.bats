@@ -2847,7 +2847,7 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     # From: Issue #1683 | PR #1858
     local bin="${BATS_TEST_TMPDIR}/bin"
     mkdir -p "${bin}"
-    printf '#!/usr/bin/env bash\ncase "$1 $2" in "network ls") exit 0 ;; *) exit 1 ;; esac\n' > "${bin}/docker"
+    printf '#!/usr/bin/env bash\ncase "$1 $2" in "network ls"|"compose version") exit 0 ;; *) exit 1 ;; esac\n' > "${bin}/docker"
     chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" CI_STACK_CANDIDATE_CMD="$(_stub cand 'echo proxy=sha256:x')" \
     GITHUB_REPOSITORY=owner/fixture-repo \
@@ -2978,6 +2978,24 @@ netdata=sha256:n"
     [ "${status}" -eq 0 ]
     run _ci_validate_is_collision "manifest unknown"
     [ "${status}" -ne 0 ]
+}
+
+@test "validate host tools fail closed on a missing tool or list" {
+    # What: absent SOT list or tool -> VALIDATE-0056, rc 2.
+    # Why: the runner host must be proven, never assumed.
+    # From: Issue #1683
+    local m="${BATS_TEST_TMPDIR}/ht.yml"
+    docker() { echo "Docker Compose version vX"; }
+    printf 'validation:\n  host_tools: [bash, no-such-tool-x]\n' > "${m}"
+    CI_MANIFEST="${m}" run _ci_validate_host_tools
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0056"*'missing="no-such-tool-x"'* ]]
+    printf 'validation:\n  other: x\n' > "${m}"
+    CI_MANIFEST="${m}" run _ci_validate_host_tools
+    [ "${status}" -eq 2 ]
+    printf 'validation:\n  host_tools: [bash]\n' > "${m}"
+    CI_MANIFEST="${m}" run _ci_validate_host_tools
+    [ "${status}" -eq 0 ]
 }
 
 @test "validation env lists the SOT pairs, fails closed when absent" {

@@ -659,6 +659,10 @@ pr_policy:
 # Why: One SOT for check inputs; logic stays in ci.sh.
 # From: Issue #1683 | PR #1858
 validation:
+  # What: host tools validate needs on the runner host.
+  # Why: AG-CI-001: verified fail-closed, never assumed.
+  # From: Issue #1683
+  host_tools: [bash, docker, jq, curl, dig, git, awk, sed, find]
   # What: CDN domains that resolve from validation hosts.
   # Why: Real dig targets; some Steam domains fail.
   # From: Issue #1683 | PR #1858

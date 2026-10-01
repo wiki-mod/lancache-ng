@@ -5050,6 +5050,7 @@ _ci_validate_run() {
 # From: Issue #1683
 ci_cmd_validate() {
     local cand
+    _ci_validate_host_tools || return 2
     if ! cand="$(_ci_stack_candidate)"; then
         ci_log "[CI-ERROR-VALIDATE-0001]" "reason=\"no stack candidate (CI_STACK_CANDIDATE_CMD unset/failed)\""
         return 2
@@ -7889,6 +7890,30 @@ _ci_check_prod_state_wiring() {
         return 1
     fi
     printf 'prod-state-wiring=clean\n'
+}
+
+# What: Fail unless every SOT host tool is present.
+# Why: validate runs on the runner host (AG-CI-001).
+# From: Issue #1683
+_ci_validate_host_tools() {
+    local tools t out
+    local -a missing=()
+    tools="$(_ci_block_entry_list validation "" host_tools)"
+    if [ -z "${tools}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0056]" "reason=\"no SOT validation.host_tools\""
+        return 2
+    fi
+    while IFS= read -r t; do
+        [ -n "${t}" ] && ! command -v "${t}" >/dev/null 2>&1 && missing+=("${t}")
+    done <<< "${tools}"
+    if [ "${#missing[@]}" -gt 0 ]; then
+        ci_log "[CI-ERROR-VALIDATE-0056]" "missing=\"${missing[*]}\" reason=\"host tool missing\""
+        return 2
+    fi
+    if ! out="$(docker compose version 2>&1)"; then
+        ci_error "[CI-ERROR-VALIDATE-0056]" "reason=\"docker compose plugin unusable\"" "${out}"
+        return 2
+    fi
 }
 
 # What: SOT validation env, one KEY=VALUE per line.

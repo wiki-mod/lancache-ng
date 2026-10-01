@@ -272,9 +272,11 @@ jobs:
       !cancelled() && needs.plan.outputs.any-build == 'true' &&
       contains(fromJSON('["success","skipped"]'), needs.build.result) &&
       (github.event_name == 'pull_request' || needs.assemble.result == 'success')
+    # What: runs on the runner host, not in a job container.
+    # Why: compose binds need host paths and the /27 net.
+    # From: Issue #1683
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    container: *bt_platform
     permissions:
       contents: read
       packages: read
