@@ -6266,144 +6266,46 @@ CASES
     [[ "${output}" == *"dependabot-docker-base-consistency=clean"* ]]
 }
 
-@test "check dependabot-docker-base-consistency resolves a global ARG" {
-    # What: FROM \${BASE} resolves via its pre-FROM ARG.
-    # Why: AG-VAL-036: real ARG grammar, not a guess.
+@test "check dependabot-docker-base-consistency maps each fixture" {
+    # What: one dependabot fixture per row: rc and codes.
+    # Why: every row shares one fixture, only inputs vary.
     # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/argmatch"
-    mkdir -p "${r}/.github" "${r}/services/a" "${r}/services/b"
-    printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    directories:\n      - /services/a\n      - /services/b\n    schedule:\n      interval: weekly\n' \
-        > "${r}/.github/dependabot.yml"
-    printf "ARG BASE=alpine:3.24\nFROM \${BASE}\n" > "${r}/services/a/Dockerfile"
-    printf 'FROM alpine:3.24\n' > "${r}/services/b/Dockerfile"
-    run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"
-    [ "${status}" -eq 0 ]
-}
-
-@test "check dependabot-docker-base-consistency resolves a bare SOT ARG with no default" {
-    # What: Bare ARG ALPINE_IMAGE resolves from manifest.
-    # Why: Bare ARG (no default) requires ci.sh build-args.
-    # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/barearg"
-    mkdir -p "${r}/.github" "${r}/services/a" "${r}/services/b"
-    printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    directories:\n      - /services/a\n      - /services/b\n    schedule:\n      interval: weekly\n' \
-        > "${r}/.github/dependabot.yml"
-    printf "ARG ALPINE_IMAGE\nFROM \${ALPINE_IMAGE}\n" > "${r}/services/a/Dockerfile"
-    printf "ARG ALPINE_IMAGE\nFROM \${ALPINE_IMAGE}\n" > "${r}/services/b/Dockerfile"
-    run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"dependabot-docker-base-consistency=clean"* ]]
-}
-
-@test "check dependabot-docker-base-consistency resolves a stage alias" {
-    # What: FROM builder resolves to its real origin image.
-    # Why: the alias text is never the compared value.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/alias"
-    mkdir -p "${r}/.github" "${r}/services/a" "${r}/services/b"
-    printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    directories:\n      - /services/a\n      - /services/b\n    schedule:\n      interval: weekly\n' \
-        > "${r}/.github/dependabot.yml"
-    printf 'FROM alpine:3.24 AS builder\nRUN true\nFROM builder\n' > "${r}/services/a/Dockerfile"
-    printf 'FROM alpine:3.24\n' > "${r}/services/b/Dockerfile"
-    run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"
-    [ "${status}" -eq 0 ]
-}
-
-@test "check dependabot-docker-base-consistency ignores a heredoc FROM" {
-    # What: a FROM inside a RUN heredoc body is not real.
-    # Why: only Docker instructions outside heredocs count.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/heredoc"
-    mkdir -p "${r}/.github" "${r}/services/a" "${r}/services/b"
-    printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    directories:\n      - /services/a\n      - /services/b\n    schedule:\n      interval: weekly\n' \
-        > "${r}/.github/dependabot.yml"
-    printf 'FROM alpine:3.24\nRUN <<EOT\nFROM should-be-ignored\nEOT\n' > "${r}/services/a/Dockerfile"
-    printf 'FROM alpine:3.24\n' > "${r}/services/b/Dockerfile"
-    run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"
-    [ "${status}" -eq 0 ]
-}
-
-@test "check dependabot-docker-base-consistency fails on real drift" {
-    # What: two grouped Dockerfiles, real different bases.
-    # Why: this is the guard's one real, enforced invariant.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/drift"
-    mkdir -p "${r}/.github" "${r}/services/a" "${r}/services/b"
-    printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    directories:\n      - /services/a\n      - /services/b\n    schedule:\n      interval: weekly\n' \
-        > "${r}/.github/dependabot.yml"
-    printf 'FROM alpine:3.24\n' > "${r}/services/a/Dockerfile"
-    printf 'FROM alpine:3.20\n' > "${r}/services/b/Dockerfile"
-    run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0032"* ]]
-    [[ "${output}" == *"diverges"* ]]
-}
-
-@test "check dependabot-docker-base-consistency distinguishes missing paths" {
-    # What: a declared, parseable dir, missing Dockerfile.
-    # Why: distinct from a block with zero directories.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/missingfile"
-    mkdir -p "${r}/.github"
-    printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    directory: /services/missing\n    schedule:\n      interval: weekly\n' \
-        > "${r}/.github/dependabot.yml"
-    run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0030"* ]]
-    local r2="${BATS_TEST_TMPDIR}/emptyblock"
-    mkdir -p "${r2}/.github"
-    printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    schedule:\n      interval: weekly\n' \
-        > "${r2}/.github/dependabot.yml"
-    run bash "${CI_SH}" check dependabot-docker-base-consistency "${r2}"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0029"* ]]
-}
-
-@test "check dependabot-docker-base-consistency fails on unresolved ARG" {
-    # What: a FROM \${VAR} with no matching global ARG.
-    # Why: unresolved must fail closed, never a guess.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/unresolved"
-    mkdir -p "${r}/.github" "${r}/services/a"
-    printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    directory: /services/a\n    schedule:\n      interval: weekly\n' \
-        > "${r}/.github/dependabot.yml"
-    printf "FROM \${UNKNOWN_ARG}\n" > "${r}/services/a/Dockerfile"
-    run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0099"* ]]
-}
-
-@test "check dependabot-docker-base-consistency fails with no dependabot.yml" {
-    # What: a repo root with no .github/dependabot.yml.
-    # Why: a missing input file must never silently pass.
-    # From: Issue #1683 | PR #1858
-    run bash "${CI_SH}" check dependabot-docker-base-consistency "${BATS_TEST_TMPDIR}/nope"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0027"* ]]
-}
-
-@test "check dependabot-docker-base-consistency Dockerfile FROM parsing edges" {
-    # What: Last FROM; lowercase ok; no-FROM fails.
-    # Why: absorbs the legacy FROM-parsing coverage.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/ddb-from"; mkdir -p "${r}/.github" "${r}/services/a" "${r}/services/b"
-    printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    directories:\n      - /services/a\n      - /services/b\n    schedule:\n      interval: weekly\n' > "${r}/.github/dependabot.yml"
-    printf 'FROM golang:1 AS builder\nRUN true\nfrom alpine:3.24\n' > "${r}/services/a/Dockerfile"
-    printf 'FROM alpine:3.24 AS final\n' > "${r}/services/b/Dockerfile"
-    run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"; [ "${status}" -eq 0 ]
-    printf 'RUN true\n' > "${r}/services/a/Dockerfile"
-    run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"; [ "${status}" -ne 0 ]
-}
-
-@test "check dependabot-docker-base-consistency resolves an unbraced ARG token" {
-    # What: FROM \$BASE (bare) resolves via ARG.
-    # Why: Absorbs unbraced-ARG coverage.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/ddb-arg"; mkdir -p "${r}/.github" "${r}/services/a" "${r}/services/b"
-    printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    directories:\n      - /services/a\n      - /services/b\n    schedule:\n      interval: weekly\n' > "${r}/.github/dependabot.yml"
-    printf 'ARG BASE=alpine:3.24\nFROM $BASE\n' > "${r}/services/a/Dockerfile"
-    printf 'FROM alpine:3.24\n' > "${r}/services/b/Dockerfile"
-    run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"; [ "${status}" -eq 0 ]
+    local name dirs dfa dfb rc want r w
+    local -a ws
+    while IFS='|' read -r name dirs dfa dfb rc want; do
+        r="${BATS_TEST_TMPDIR}/ddb-${name}"
+        mkdir -p "${r}/.github" "${r}/services/a" "${r}/services/b"
+        case "${dirs}" in
+            a,b) printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    directories:\n      - /services/a\n      - /services/b\n' ;;
+            a) printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    directory: /services/a\n' ;;
+            gone) printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n    directory: /services/gone\n' ;;
+            nodir) printf 'version: 2\nupdates:\n  - package-ecosystem: docker\n' ;;
+            actions) printf 'version: 2\nupdates:\n  - package-ecosystem: github-actions\n    directory: /\n' ;;
+        esac > "${r}/.github/dependabot.yml"
+        [ "${dirs}" = noyml ] && rm -f "${r}/.github/dependabot.yml"
+        [ "${dfa}" = - ] || printf '%b' "${dfa}" > "${r}/services/a/Dockerfile"
+        [ "${dfb}" = - ] || printf '%b' "${dfb}" > "${r}/services/b/Dockerfile"
+        run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"
+        [ "${status}" -eq "${rc}" ] || { echo "${name}: rc ${status}: ${output}"; return 1; }
+        IFS=';' read -r -a ws <<<"${want}"
+        for w in "${ws[@]}"; do
+            [[ "${output}" == *"${w}"* ]] || { echo "${name}: no '${w}': ${output}"; return 1; }
+        done
+    done <<'CASES'
+global-arg|a,b|ARG BASE=alpine:3.24\nFROM ${BASE}\n|FROM alpine:3.24\n|0|=clean dockerfiles=2 blocks=1
+unbraced-arg|a,b|ARG BASE=alpine:3.24\nFROM $BASE\n|FROM alpine:3.24\n|0|=clean dockerfiles=2 blocks=1
+bare-sot-arg|a,b|ARG ALPINE_IMAGE\nFROM ${ALPINE_IMAGE}\n|ARG ALPINE_IMAGE\nFROM ${ALPINE_IMAGE}\n|0|=clean dockerfiles=2 blocks=1
+stage-alias|a,b|FROM alpine:3.24 AS builder\nRUN true\nFROM builder\n|FROM alpine:3.24\n|0|=clean dockerfiles=2 blocks=1
+heredoc-from|a,b|FROM alpine:3.24\nRUN <<EOT\nFROM should-be-ignored\nEOT\n|FROM alpine:3.24\n|0|=clean dockerfiles=2 blocks=1
+last-from-lower|a,b|FROM golang:1 AS builder\nRUN true\nfrom alpine:3.24\n|FROM alpine:3.24 AS final\n|0|=clean dockerfiles=2 blocks=1
+drift|a,b|FROM alpine:3.24\n|FROM alpine:3.20\n|1|CI-ERROR-CHECK-0032;diverges;alpine:3.24;alpine:3.20
+no-from|a,b|RUN true\n|FROM alpine:3.24\n|2|CI-ERROR-CHECK-0031
+unresolved-arg|a|FROM ${UNKNOWN_ARG}\n|-|2|CI-ERROR-CHECK-0099;${UNKNOWN_ARG}
+missing-dockerfile|gone|-|-|2|CI-ERROR-CHECK-0030;/services/gone/Dockerfile
+block-without-dir|nodir|-|-|2|CI-ERROR-CHECK-0029
+no-docker-block|actions|-|-|2|CI-ERROR-CHECK-0028
+no-dependabot-yml|noyml|-|-|2|CI-ERROR-CHECK-0027
+CASES
 }
 
 # What: neutral deploy + installer compose for a fixture.
