@@ -733,7 +733,7 @@ services:
     container_name: lancache-ui
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}
     volumes:
-      # What: shared-secrets volume for the ui root start.
+      # What: shared-secrets volume; the UI entrypoint (root, pre privilege-drop) resolves PDNS_API_KEY/KEA_CTRL_TOKEN from here.
       # Why: must match the server side's resolved value.
       # From: Issue #858
       - shared-secrets:/var/lib/lancache-secrets
@@ -830,17 +830,6 @@ services:
       - SYSLOG_LOG_ROOT=/var/log/lancache-syslog-ng
       - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:-10}
       - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:-30}
-      # What: <VAR>_SHARED_SECRET names VAR's shared-secret file.
-      # Why: ui resolves the same value its backend generates.
-      # From: Issue #858 | PR #1858
-      - PDNS_API_KEY_SHARED_SECRET=pdns-api-key
-      - NETDATA_ALARM_TOKEN_SHARED_SECRET=netdata-alarm-token
-      - DHCP_API_TOKEN_SHARED_SECRET=kea-ctrl-token
-      - NATS_UI_PASSWORD_SHARED_SECRET=nats-ui-password
-      - NATS_CALLOUT_PASSWORD_SHARED_SECRET=nats-callout-password
-      - NATS_SYS_PASSWORD_SHARED_SECRET=nats-sys-password
-      - NATS_DNS_WRITER_PASSWORD_SHARED_SECRET=nats-dns-writer-password
-      - NATS_DNS_REPLICA_PASSWORD_SHARED_SECRET=nats-dns-replica-password
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
