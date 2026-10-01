@@ -508,21 +508,17 @@ EOF
 # Why: ids must be tested on the engine, not the inventory.
 # From: Issue #1683
 _identity_fixture() {
-    local r="${BATS_TEST_TMPDIR}/idrepo" h0 h1
-    h0="$(printf '0%.0s' {1..64})"; h1="$(printf '1%.0s' {1..64})"
+    local r="${BATS_TEST_TMPDIR}/idrepo" h0
+    h0="$(printf '0%.0s' {1..64})"
     mkdir -p "${r}/dir/a" "${r}/dir/b"
     printf 'a\n' > "${r}/dir/a/f"; printf 'b\n' > "${r}/dir/b/f"
     git -C "${r}" init -q && git -C "${r}" add -A
     printf '%s\n' 'services:' \
         '  svc-a:' '    context: dir/a' '    build_type: type-s' \
         '  svc-b:' '    context: dir/b' '    build_type: type-s' \
-        '  svc-u:' '    context: dir/a' '    build_type: type-u' \
         '  svc-p:' '    context: dir/b' '    build_type: type-p' '    packages: [pkg]' \
         'build_identity:' '  type-s:' '    inputs: [source_sha]' \
-        '  type-u:' '    inputs: [upstream_digest]' \
         '  type-p:' '    inputs: [source_sha, package_versions]' \
-        'external_versions:' '  dep-u:' '    consumer: svc-u' '    build_args: [version]' \
-        '    version: v1' "    sha256_arch-a: ${h0}" "    sha256_arch-b: ${h1}" \
         'base_images:' "  alpine: registry.example.test/base@sha256:${h0}" \
         'build_matrix:' '  platforms: [os/p1, os/p2]' \
         'platform_arch:' '  p1:' '    apk: arch-a' '  p2:' '    apk: arch-b' > "${r}/m.yml"
@@ -580,19 +576,6 @@ _identity_fixture() {
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-IDENTITY-0003"* ]]
     [[ "${output}" != *"identity="* ]]
-}
-
-@test "upstream pin identity moves only on its own arch" {
-    # What: an arch-b digest edit keeps the arch-a id.
-    # Why: a platform-irrelevant change must not rebuild.
-    # From: Issue #1683
-    _identity_fixture
-    local a0 b0 a1 b1
-    a0="$(bash "${CI_SH}" identity svc-u os/p1)"; b0="$(bash "${CI_SH}" identity svc-u os/p2)"
-    sed -i "s/sha256_arch-b: .*/sha256_arch-b: $(printf 'f%.0s' {1..64})/" "${CI_MANIFEST}"
-    a1="$(bash "${CI_SH}" identity svc-u os/p1)"; b1="$(bash "${CI_SH}" identity svc-u os/p2)"
-    [ -n "${a0}" ] && [ "${a0}" = "${a1}" ]
-    [ "${b0}" != "${b1}" ]
 }
 
 @test "source identity moves on a tracked content change only" {
@@ -730,6 +713,24 @@ EOF
     [[ "${output}" != *"impact=NOOP"* ]]
 }
 
+# What: The first SOT external pin with a consumer.
+# Why: pin tests derive their example, never name one.
+# From: Issue #1683
+_pin_dep() {
+    local d
+    for d in $(_ci_block_keys external_versions); do
+        [ -n "$(_ci_block_entry_field external_versions "${d}" consumer)" ] && { echo "${d}"; return 0; }
+    done
+    return 1
+}
+
+# What: The build target that consumes that pin.
+# Why: shared by the build-args and identity pin tests.
+# From: Issue #1683
+_pin_consumer() {
+    _ci_block_entry_field external_versions "$(_pin_dep)" consumer
+}
+
 @test "identity pins are ref-relative via CI_MANIFEST" {
     # What: A pin-only change shifts the id at a fixed ref.
     # Why: impact base pins must reflect base, not head.
@@ -738,9 +739,10 @@ EOF
     cp "${CI_MANIFEST}" "${m1}"
     cp "${m1}" "${m2}"
     sed -i 's/sha256_arch-a: [0-9a-f]\{64\}/sha256_arch-a: deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/' "${m2}"
-    local a b
-    a="$(CI_MANIFEST="${m1}" _ci_identity_for netdata os/p1 HEAD)"
-    b="$(CI_MANIFEST="${m2}" _ci_identity_for netdata os/p1 HEAD)"
+    local a b tgt
+    tgt="$(_pin_consumer)"
+    a="$(CI_MANIFEST="${m1}" _ci_identity_for "${tgt}" os/p1 HEAD)"
+    b="$(CI_MANIFEST="${m2}" _ci_identity_for "${tgt}" os/p1 HEAD)"
     [ -n "${a}" ]
     [ "${a}" != "${b}" ]
 }
@@ -1769,11 +1771,13 @@ _asm_index_stub() {
 # PROMOTION
 # =========================================================
 
-# What: A candidate holding all 10 product services.
+# What: A candidate holding every SOT product service.
 # Why: Stack-atomic promotion needs every service.
 # From: Issue #1683
 _promote_full_candidate() {
-    _stub cand "for s in proxy dns watchdog dhcp dhcp-proxy ntp syslog ui cachehamster netdata; do echo \"\$s=$1\"; done"
+    local svcs
+    svcs="$(ci_services | tr '\n' ' ')"
+    _stub cand "for s in ${svcs}; do echo \"\$s=$1\"; done"
 }
 _promote_lock() { _stub lock 'echo "LOCK $1" >> "${BATS_TEST_TMPDIR}/lock.log"'; }
 _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.log"'; }
@@ -2201,13 +2205,13 @@ tail" '{body:$b, isPrerelease:false}')" \
     [ "${status}" -ne 0 ]; [[ "${output}" == *"CI-ERROR-RELEASE-0008"* ]]
 }
 
-@test "published-services lists first-party images, excludes third-party" {
-    # What: all build types but install, plus the toolchain.
-    # Why: SBOM targets first-party images only.
+@test "published-services lists every service plus the toolchain" {
+    # What: every SOT service, then the toolchain target.
+    # Why: SBOM covers every first-party image.
     # From: Issue #1683
     local m="${BATS_TEST_TMPDIR}/m.yml"
     printf '%s\n' 'services:' '  svc-a:' '    build_type: apk' \
-        '  svc-b:' '    build_type: install' '  svc-c:' '    build_type: rust' \
+        '  svc-c:' '    build_type: rust' \
         'build_toolchain:' '  tool-t:' '    build_type: toolchain' > "${m}"
     CI_MANIFEST="${m}" run _ci_published_services
     [ "${status}" -eq 0 ]
@@ -2958,16 +2962,16 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
 }
 
 @test "validate reports (not fails) a candidate with no first-party image" {
-    # What: netdata first-party, compose uses upstream.
-    # Why: Deferred defect stays visible, never a hard fail.
+    # What: a candidate whose compose image is third-party.
+    # Why: drift stays visible as a warning, no hard fail.
     # From: Issue #1683 | PR #1858
     GITHUB_REPOSITORY=owner/fixture-repo \
-    CI_COMPOSE_IMAGES_CMD="$(_stub imgs 'printf "netdata\tnetdata/netdata@sha256:a13\nproxy\tregistry.example.test/owner/fixture-repo/proxy:latest\n"')" \
+    CI_COMPOSE_IMAGES_CMD="$(_stub imgs 'printf "svc-x\tupstream.example.test/x@sha256:a13\nproxy\tregistry.example.test/owner/fixture-repo/proxy:latest\n"')" \
         run _ci_validate_pin_override "proxy=sha256:p
-netdata=sha256:n"
+svc-x=sha256:n"
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"CI-WARN-VALIDATE-0008"* ]]
-    [[ "${output}" == *'unpinned="netdata"'* ]]
+    [[ "${output}" == *'unpinned="svc-x"'* ]]
 }
 
 @test "validate is_collision matches docker contention signatures" {
@@ -4258,30 +4262,32 @@ CASES
     [[ "${output}" == *"CI-ERROR-RUSTBUILD-0004"*"host: arch-a-alpine-linux-musl"* ]]
 }
 
-@test "build-args netdata emits SOT version; digest needs a platform" {
+@test "build-args emit a SOT pin; its digest needs a platform" {
     # What: no platform=version+per-arch shas only.
     # Why: one pin owner; ARCH/SHA256 need platform.
     # From: Issue #1683 | PR #1858
-    local ver; ver="$(_ci_block_entry_field external_versions netdata version)"
-    run bash "${CI_SH}" build-args netdata
+    local dep up ver
+    dep="$(_pin_dep)"; up="${dep^^}"; up="${up//-/_}"
+    ver="$(_ci_block_entry_field external_versions "${dep}" version)"
+    run bash "${CI_SH}" build-args "$(_pin_consumer)"
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"--build-arg ALPINE_IMAGE="* ]]
-    [[ "${output}" == *"--build-arg NETDATA_VERSION=${ver}"* ]]
-    [[ "${output}" == *"NETDATA_SHA256_"* ]]
-    [[ "${output}" != *"NETDATA_ARCH"* ]]
+    [[ "${output}" == *"--build-arg ${up}_VERSION=${ver}"* ]]
+    [[ "${output}" == *"${up}_SHA256_"* ]]
+    [[ "${output}" != *"${up}_ARCH"* ]]
 }
 
-@test "build-args netdata with a platform emits the per-arch digest" {
+@test "build-args with a platform emit the per-arch pin digest" {
     # What: a platform selects arch + digest from the SOT.
-    # Why: install services pin per-platform asset.
+    # Why: a pinned asset is per-platform.
     # From: Issue #1683
-    local arch sha
+    local dep up arch sha
+    dep="$(_pin_dep)"; up="${dep^^}"; up="${up//-/_}"
     arch="$(_ci_platform_apk_arch os/p1)"
-    sha="$(_ci_block_entry_field external_versions netdata "sha256_${arch}")"
-    run bash "${CI_SH}" build-args netdata "" os/p1
+    sha="$(_ci_block_entry_field external_versions "${dep}" "sha256_${arch}")"
+    run bash "${CI_SH}" build-args "$(_pin_consumer)" "" os/p1
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"--build-arg NETDATA_ARCH=${arch}"* ]]
-    [[ "${output}" == *"--build-arg NETDATA_SHA256=${sha}"* ]]
+    [[ "${output}" == *"--build-arg ${up}_ARCH=${arch}"* ]]
+    [[ "${output}" == *"--build-arg ${up}_SHA256=${sha}"* ]]
 }
 
 @test "toolchain packages read the one SOT toolchain target" {
@@ -5074,15 +5080,19 @@ STUBEOF
     local pin base
     pin="hub.example.test/ext-y@sha256:$(printf 'b%.0s' {1..64})"
     base="base.example.test/os@sha256:$(printf 'c%.0s' {1..64})"
-    printf 'external_services:\n  ext-y:\n    image: "%s"\nbase_images:\n  os: "%s"\n' "${pin}" "${base}" > "${m}"
+    printf '%s\n' 'external_services:' '  ext-y:' "    image: \"${pin}\"" \
+        '  ext-t:' '    image: "hub.example.test/ext-t:latest"' '    policy: tag-latest' \
+        '  ext-u:' '    image: "hub.example.test/ext-u:latest"' \
+        'base_images:' "  os: \"${base}\"" > "${m}"
     for img in 'img-a:7' 'registry.example.test/owner/app:latest' 'hub.example.test/ext-y:1' \
-               "hub.example.test/other@sha256:$(printf 'a%.0s' {1..64})" "${pin%b}d"; do
+               "hub.example.test/other@sha256:$(printf 'a%.0s' {1..64})" "${pin%b}d" \
+               'hub.example.test/ext-u:latest' 'hub.example.test/ext-t:2'; do
         printf 'services:\n  x:\n    image: %s\n' "${img}" > "${r}/docker-compose.yml"
         CI_MANIFEST="${m}" run bash "${CI_SH}" check stable-external-images "${r}"
         [ "${status}" -eq 1 ] || { echo "want fail: ${img}"; false; }
         [[ "${output}" == *"CI-ERROR-CHECK-0014"* ]]
     done
-    for img in "${pin}" "\"${base}\"" '${LANCACHE_IMAGE_REGISTRY:-r}/p/svc:t'; do
+    for img in "${pin}" "\"${base}\"" '${LANCACHE_IMAGE_REGISTRY:-r}/p/svc:t' 'hub.example.test/ext-t:latest'; do
         printf 'services:\n  x:\n    image: %s\n' "${img}" > "${r}/docker-compose.yml"
         CI_MANIFEST="${m}" run bash "${CI_SH}" check stable-external-images "${r}"
         [ "${status}" -eq 0 ] || { echo "want pass: ${img}"; false; }
@@ -6487,60 +6497,6 @@ EOF
         run bash "${CI_SH}" check vex-drift "${r}"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"0 VEX statements"* ]]
-}
-
-@test "check netdata-curl-pin follows the SOT threshold and deadline" {
-    # What: curl and today relative to SOT pin policy.
-    # Why: no second netdata policy in tests (AG-CI-006).
-    # From: Issue #1304 | PR #1858
-    local thr until cve want rc curl_tag today case bin="${BATS_TEST_TMPDIR}/bin"
-    thr="$(_ci_block_entry_field external_versions netdata curl_safe_threshold)"
-    until="$(_ci_block_entry_field external_versions netdata curl_accepted_until)"
-    [ -n "${thr}" ] && [ -n "${until}" ]
-    mkdir -p "${bin}"
-    while IFS='|' read -r case curl_tag today rc want; do
-        case "${curl_tag}" in
-            below) curl_tag=0_0_1 ;;
-            at) curl_tag="${thr//./_}" ;;
-            above) curl_tag="${thr//./_}_1" ;;
-        esac
-        case "${today}" in on) today="${until}" ;; esac
-        case "${case}" in
-            404) printf '#!/bin/sh\necho "curl: (22) The requested URL returned error: 404" >&2\nexit 22\n' ;;
-            net) printf '#!/bin/sh\necho "curl: (6) Could not resolve host" >&2\nexit 6\n' ;;
-            noline) printf '#!/bin/sh\necho "PACKAGES=()"\n' ;;
-            *) printf '#!/bin/sh\necho "CURL_VERSION=\\"curl-%s\\""\n' "${curl_tag}" ;;
-        esac > "${bin}/curl"
-        chmod +x "${bin}/curl"
-        PATH="${bin}:${PATH}" CI_RETRY_MAX_ATTEMPTS=2 CI_RETRY_BACKOFF_BASE_SECONDS=0 \
-            CI_NETDATA_TODAY="${today}" run bash "${CI_SH}" check netdata-curl-pin
-        [ "${status}" -eq "${rc}" ] || { echo "${case}: rc ${status}: ${output}"; return 1; }
-        [[ "${output}" == *"${want}"* ]] || { echo "${case}: no ${want}: ${output}"; return 1; }
-        [ "${want}" != "netdata-curl-pin=warn" ] && [ "${case}" != after ] && continue
-        while IFS= read -r cve; do
-            [[ "${output}" == *"${cve}"* ]] || { echo "${case}: no ${cve}"; return 1; }
-        done < <(_ci_block_entry_list external_versions netdata curl_tracked_cves)
-    done <<'CASES'
-before|below|1970-01-01|0|netdata-curl-pin=warn
-on|below|on|0|netdata-curl-pin=warn
-after|below|9999-12-31|1|grace period
-at|at|9999-12-31|0|netdata-curl-pin=clean
-above|above|9999-12-31|0|netdata-curl-pin=clean
-noline|below|1970-01-01|1|no parseable CURL_VERSION
-404|below|1970-01-01|2|unverified; failing closed
-net|below|1970-01-01|2|attempt=2/2
-CASES
-}
-
-@test "check netdata-curl-pin returns 2 when SOT netdata policy is missing" {
-    # What: manifest lacks external_versions.netdata fields.
-    # Why: a missing policy is a config error, not clean.
-    # From: Issue #1304 | PR #1858
-    local m="${BATS_TEST_TMPDIR}/empty-manifest.yml"
-    printf 'external_versions:\n  dhclient:\n    version: x\n' > "${m}"
-    CI_MANIFEST="${m}" run bash "${CI_SH}" check netdata-curl-pin
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"missing version/curl_safe_threshold"* ]]
 }
 
 # What: Seed setup.sh/dhcp for Kea.
@@ -8426,12 +8382,13 @@ _version_fixture_repo() {
 
 @test "version verify (default) passes clean on the real repo" {
     # What: default subcommand is verify, read-only.
-    # Why: netdata+dhclient stay SOT-driven, ARGs bare.
+    # Why: every SOT pin stays SOT-driven, ARGs bare.
     # From: Issue #1683 | PR #1858
+    local dep up
     run bash "${CI_SH}" version
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"key=netdata.consumer.NETDATA_SHA256 shape=bare"* ]]
-    [[ "${output}" == *"key=dhclient.consumer.DHCLIENT_SHA256 shape=bare"* ]]
+    dep="$(_pin_dep)"; up="${dep^^}"; up="${up//-/_}"
+    [[ "${output}" == *"key=${dep}.consumer.${up}_SHA256 shape=bare"* ]]
 }
 
 @test "version verify explicit subcommand matches the default" {
@@ -8495,16 +8452,17 @@ _version_fixture_repo() {
 }
 
 @test "version sync is a contract-only no-op for both consumers" {
-    # What: both consumers are BARE; sync writes nothing.
-    # Why: netdata+dhclient derive live from the SOT.
+    # What: every consumer is BARE; sync writes nothing.
+    # Why: pins derive live from the SOT.
     # From: Issue #1683 | PR #1858
-    local root; root="$(_version_fixture_repo)"
-    local before; before="$(sha256sum "${root}/services/netdata/Dockerfile")"
+    local root before after dep
+    root="$(_version_fixture_repo)"
+    before="$(cd "${root}" && find . -type f -exec sha256sum {} + | LC_ALL=C sort)"
     CI_REPO_ROOT="${root}" run bash "${CI_SH}" version sync
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"sync=netdata changed=0 reason=nothing-to-write"* ]]
-    [[ "${output}" == *"sync=dhclient changed=0 reason=nothing-to-write"* ]]
-    local after; after="$(sha256sum "${root}/services/netdata/Dockerfile")"
+    dep="$(_pin_dep)"
+    [[ "${output}" == *"sync=${dep} changed=0 reason=nothing-to-write"* ]]
+    after="$(cd "${root}" && find . -type f -exec sha256sum {} + | LC_ALL=C sort)"
     [ "${before}" = "${after}" ]
 }
 

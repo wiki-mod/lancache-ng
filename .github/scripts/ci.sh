@@ -178,14 +178,10 @@ _ci_toolchain_target() {
 }
 
 # What: Build targets that publish a first-party image.
-# Why: skip install-type services from release notes.
+# Why: every SOT service and the toolchain ship an image.
 # From: Issue #1683
 _ci_published_services() {
-    local svc
-    for svc in $(ci_services); do
-        [ "$(ci_service_field "${svc}" build_type)" = install ] && continue
-        printf '%s\n' "${svc}"
-    done
+    ci_services || return 2
     _ci_block_keys "build_toolchain"
 }
 
@@ -796,7 +792,6 @@ _ci_identity_pins() {
         case "${input}" in
             source_sha) : ;;
             toolchain_digest|toolchain_source_sha) _ci_build_tools_resolve_signature || return 2 ;;
-            upstream_digest) _ci_target_pin_args "${service}" "${platform}" "" || return 2 ;;
             base_digest)
                 if [ "${build_type}" = toolchain ]; then
                     _ci_build_tools_build_args --bare "${platform}" || return 2
@@ -1786,7 +1781,7 @@ _ci_docker_build() {
     # What: apk stages bind-mount ci.sh via context.
     # Why: apk-setup runs in bare final; ci.sh absent.
     # From: Issue #1683
-    if [ "${build_type}" = apk ] || [ "${build_type}" = install ]; then
+    if [ "${build_type}" = apk ]; then
         args+=(--build-context "ci-scripts=${CI_SCRIPT_DIR}")
     fi
     # What: capture labels + build-args before reading them.
@@ -2816,7 +2811,7 @@ _ci_default_test() {
     build_type="$(_ci_required_field "${service}" build_type)" || return 2
     case "${build_type}" in
         rust) _ci_test_rust "${service}" ;;
-        apk|install) printf 'service=%s tested=SKIP reason="no source tests; smoke runs at the built digest"\n' "${service}" ;;
+        apk) printf 'service=%s tested=SKIP reason="no source tests; smoke runs at the built digest"\n' "${service}" ;;
         toolchain) _ci_test_toolchain "${service}" ;;
         *) ci_log "[CI-ERROR-TEST-0004]" "service=\"${service}\" build_type=\"${build_type}\" reason=\"unknown build_type\""; return 2 ;;
     esac
@@ -6769,13 +6764,18 @@ _ci_check_pr_title() {
 _ci_check_stable_external_images() {
     local -a dirs=("$@")
     [ "${#dirs[@]}" -gt 0 ] || dirs=(deploy/prod deploy/quickstart)
-    local d line img k allowed=" "
+    local d line img k allowed=" " tagged=" "
     local -a viol=()
     # What: the exact SOT pins (external services + bases).
     # Why: compose must match them; other values are drift.
     # From: Issue #1683 | PR #1858
     for k in $(_ci_block_keys external_services); do
-        allowed+="$(_ci_block_entry_field external_services "${k}" image) "
+        img="$(_ci_block_entry_field external_services "${k}" image)"
+        allowed+="${img} "
+        # What: a SOT tag-latest entry may skip the digest.
+        # Why: only an explicit SOT policy, never a guess.
+        # From: Issue #1683 | PR #1858
+        [ "$(_ci_block_entry_field external_services "${k}" policy)" = tag-latest ] && tagged+="${img} "
     done
     for k in $(_ci_block_keys base_images all); do
         allowed+="$(_ci_block_entry_field base_images "" "${k}") "
@@ -6791,6 +6791,9 @@ _ci_check_stable_external_images() {
                 *'${LANCACHE'*|'') continue ;;
             esac
             img="${img%\"}"; img="${img#\"}"
+            case "${tagged}" in
+                *" ${img} "*) continue ;;
+            esac
             case "${img}" in
                 *@sha256:*) ;;
                 *) viol+=("${d}: external not digest-pinned: ${img}"); continue ;;
@@ -8401,68 +8404,6 @@ _ci_check_vex_drift() {
     printf 'vex-drift=clean statements=%s\n' "${statement_count}"
 }
 
-# What: True if dotted version arg1 is >= arg2.
-# Why: sort -V orders differing segment counts correctly.
-# From: Issue #1304 | PR #1858
-_ci_version_ge() {
-    [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ]
-}
-
-# What: Fetch netdata's bundled-packages.version.
-# Why: canonical retry/classifier (AG-CI-013); 404 is final.
-# From: Issue #1304 | PR #1858
-_ci_netdata_fetch_bundled() {
-    _ci_retry download curl -fsSL \
-        "https://raw.githubusercontent.com/netdata/netdata/$1/packaging/makeself/bundled-packages.version"
-}
-
-# What: Extract vendored curl version from content.
-# Why: netdata underscore git-tag is curl pin.
-# From: Issue #1304 | PR #1858
-_ci_netdata_curl_version() {
-    local content="$1" line raw
-    line="$(grep -E '^CURL_VERSION=' <<<"${content}")" || return 1
-    raw="$(head -1 <<<"${line}" | sed -E 's/^CURL_VERSION="?curl-([0-9_]+)"?.*/\1/')"
-    [ -n "${raw}" ] || return 1
-    printf '%s\n' "${raw}" | tr '_' '.'
-}
-
-# What: Fail if vendored curl below CVE-safe pin.
-# Why: Trivy os-pkg scanner can't see static curl.
-# From: Issue #1304 | PR #1858
-_ci_check_netdata_curl_pin() {
-    local version threshold accepted_until cves today
-    version="$(_ci_block_entry_field external_versions netdata version)"
-    threshold="$(_ci_block_entry_field external_versions netdata curl_safe_threshold)"
-    accepted_until="$(_ci_block_entry_field external_versions netdata curl_accepted_until)"
-    if [ -z "${version}" ] || [ -z "${threshold}" ] || [ -z "${accepted_until}" ]; then
-        ci_error "[CI-ERROR-CHECK-0051]" "reason=\"SOT external_versions.netdata missing version/curl_safe_threshold/curl_accepted_until\"" "manifest=${CI_MANIFEST}"
-        return 2
-    fi
-    local content curl_version
-    if ! content="$(_ci_netdata_fetch_bundled "${version}")"; then
-        ci_error "[CI-ERROR-CHECK-0051]" "reason=\"netdata ${version} bundled-packages unverified; failing closed\"" "${content}"
-        return 2
-    fi
-    curl_version="$(_ci_netdata_curl_version "${content}")" || {
-        ci_error "[CI-ERROR-CHECK-0051]" "reason=\"no parseable CURL_VERSION line in netdata bundled-packages.version\"" "netdata=${version}"
-        return 1
-    }
-    if _ci_version_ge "${curl_version}" "${threshold}"; then
-        printf 'netdata-curl-pin=clean curl=%s threshold=%s\n' "${curl_version}" "${threshold}"
-        return 0
-    fi
-    cves="$(_ci_block_entry_list external_versions netdata curl_tracked_cves | tr '\n' ' ')"
-    today="${CI_NETDATA_TODAY:-$(date -u +%F)}"
-    if [[ "${today}" > "${accepted_until}" ]]; then
-        ci_error "[CI-ERROR-CHECK-0051]" "reason=\"netdata ${version} vendors curl ${curl_version} < ${threshold}, grace period ${accepted_until} passed (today ${today})\"" "tracked_cves: ${cves}"
-        return 1
-    fi
-    ci_log "[CI-WARN-CHECK-0051]" "reason=\"netdata ${version} vendors curl ${curl_version} < ${threshold}, time-boxed until ${accepted_until} (today ${today}); tracked_cves: ${cves}\""
-    printf 'netdata-curl-pin=warn curl=%s threshold=%s until=%s\n' "${curl_version}" "${threshold}" "${accepted_until}"
-    return 0
-}
-
 # What: Warn (never fail) on editing CHANGELOG.md directly.
 # Why: usually unintended; risks a merge-conflict cascade.
 # From: Issue #1683 | PR #1858
@@ -8973,7 +8914,7 @@ ci_cmd_check_all() {
         prebuilt-prod prod-state-wiring compose-config nats-atomic-write \
         docker-socket-proxy quickstart-required-env dhcp-proxy-env \
         setup-keys-kea setup-update-safety setup-docker-conflict setup-prompt-drift image-channel-resolution \
-        vex-drift netdata-curl-pin logging-matrix \
+        vex-drift logging-matrix \
         trivy-action-direct-usage entrypoint-lib-wiring dockerfile-build-tools \
         cargo-profile-tuning no-source-compiled-tools codeql-coverage)
     for sub in "${repo_wide[@]}"; do
@@ -9039,7 +8980,6 @@ ci_cmd_check() {
         setup-docker-conflict) _ci_check_setup_docker_conflict "$@" ;;
         image-channel-resolution) _ci_check_image_channel_resolution "$@" ;;
         vex-drift) _ci_check_vex_drift "$@" ;;
-        netdata-curl-pin) _ci_check_netdata_curl_pin "$@" ;;
         logging-matrix) _ci_check_logging_matrix "$@" ;;
         trivy-action-direct-usage) _ci_check_trivy_action_direct_usage "$@" ;;
         entrypoint-lib-wiring) _ci_check_entrypoint_lib_wiring "$@" ;;

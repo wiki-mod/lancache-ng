@@ -265,20 +265,6 @@ services:
     # From: Issue #1683
     packages:
       - ca-certificates
-  netdata:
-    context: services/netdata
-    # What: First-party install of static netdata binary.
-    # Why: No builder/compile stage -> light per AG-CI-002.
-    # From: Issue #1683
-    build_type: install
-    final_base: alpine
-    runner: light
-    # What: final-image apk packages; the SOT owns the list.
-    # Why: consumers derive; no hardcoding (AG-CI-006)
-    # From: Issue #1683
-    packages:
-      - bash
-      - ca-certificates
 
 # What: The toolchain image that builds the product stack.
 # Why: built by generic pipeline; not in stack
@@ -460,6 +446,13 @@ external_services:
   docker-socket-proxy:
     image: "tecnativa/docker-socket-proxy@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476"
     role: runtime
+  # What: upstream netdata, deliberately on its mutable tag.
+  # Why: maintainer decision; no first-party netdata build.
+  # From: Issue #1683 | PR #1858
+  netdata:
+    image: "netdata/netdata:latest"
+    role: runtime
+    policy: tag-latest
 
 # What: Pinned external base images by full digest.
 # Why: Single owner of the alpine pin, no per-file copies.
@@ -476,21 +469,6 @@ base_images:
 # Why: Central version owner; consumers never re-pin.
 # From: Issue #1683
 external_versions:
-  netdata:
-    # What: target whose Dockerfile gets these build-args.
-    # Why: ci.sh derives the pin consumers; no engine list.
-    # From: Issue #1683
-    consumer: netdata
-    build_args: [version]
-    version: v2.11.0
-    sha256_x86_64: b42d9937807f28812502a967906d370cff9ab443453813656b99ff6a9b3c5649
-    sha256_aarch64: 8cd056d64078c109409c08e30d55324c82e3855f9d8e4b304cacc7c612610e09
-    # What: Vendored static curl CVE-safe pin policy.
-    # Why: os-pkg scanner can't see static curl
-    # From: Issue #1304 | PR #1352
-    curl_safe_threshold: 8.21.0
-    curl_accepted_until: 2030-12-31
-    curl_tracked_cves: [CVE-2026-12064, CVE-2026-8286, CVE-2026-8927, CVE-2026-8932, CVE-2026-9079, CVE-2026-9080, CVE-2026-9545]
   # What: ISC dhclient reused from Alpine v3.20 pkg.
   # Why: Alpine 3.21+ dropped it; musl build, both arches.
   # From: Issue #1683
@@ -546,8 +524,6 @@ build_identity:
     inputs: [source_sha, toolchain_digest, base_digest, package_versions]
   apk:
     inputs: [source_sha, package_versions, base_digest]
-  install:
-    inputs: [source_sha, upstream_digest, base_digest, package_versions]
   toolchain:
     inputs: [toolchain_source_sha, base_digest]
 
@@ -572,8 +548,6 @@ dependency_graph:
   syslog:
     contexts: []
   cachehamster:
-    contexts: []
-  netdata:
     contexts: []
 
 # What: CodeQL query suites and ignored paths.
