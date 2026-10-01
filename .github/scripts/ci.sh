@@ -4966,6 +4966,14 @@ _ci_default_validate() {
     # Why: isolate runs; never touch a host's real state.
     # From: Issue #1683
     export LANCACHE_STATE_DIR="${CI_REPO_ROOT}/.ci-validate-state/${project}"
+    # What: configured values over the .env template blanks.
+    # Why: the template leaves required keys empty.
+    # From: Issue #1683
+    local -a venv=()
+    local vfx
+    vfx="$(_ci_validation_env)" || { _ci_validate_release "${holder}"; return 2; }
+    mapfile -t venv <<< "${vfx}"
+    export "${venv[@]}"
     if ! up_out="$(mkdir -p "${LANCACHE_STATE_DIR}/cache" 2>&1)"; then
         ci_error "[CI-ERROR-VALIDATE-0052]" "reason=\"per-run state root not creatable\"" "${up_out}"
         _ci_validate_release "${holder}"
@@ -7860,6 +7868,20 @@ _ci_check_prod_state_wiring() {
     printf 'prod-state-wiring=clean\n'
 }
 
+# What: SOT validation env, one KEY=VALUE per line.
+# Why: config check and live validate share one owner.
+# From: Issue #1683
+_ci_validation_env() {
+    local fx
+    fx="$(_ci_manifest_scalar '^  compose_validation_env:[[:space:]]')" || return 2
+    if [ -z "${fx}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0054]" "reason=\"no SOT validation.compose_validation_env\""
+        return 2
+    fi
+    tr ' ' '
+' <<< "${fx}" | grep -v '^$'
+}
+
 # What: True if compose file/profile warning-free.
 # Why: docker compose warnings hide real drift; fail closed.
 # From: Issue #1683 | PR #1858
@@ -7877,8 +7899,8 @@ _ci_compose_config_ok() {
         # From: Issue #1683 | PR #1858
         if [ -z "${env_file}" ]; then
             local fx
-            fx="$(_ci_manifest_scalar '^  compose_validation_env:[[:space:]]')" || return 2
-            read -ra fixture <<< "${fx}"
+            fx="$(_ci_validation_env)" || return 2
+            mapfile -t fixture <<< "${fx}"
         fi
         out="$(env "${fixture[@]}" docker compose "${args[@]}" config --quiet 2>&1)" || { printf '%s\n' "${out}"; return 1; }
     fi

@@ -2980,6 +2980,21 @@ netdata=sha256:n"
     [ "${status}" -ne 0 ]
 }
 
+@test "validation env lists the SOT pairs, fails closed when absent" {
+    # What: KEY=VALUE lines from the SOT; none -> rc 2.
+    # Why: validate and config check share this one owner.
+    # From: Issue #1683
+    local m="${BATS_TEST_TMPDIR}/ve.yml"
+    printf 'validation:\n  compose_validation_env: A_KEY=1 B_KEY=two\n' > "${m}"
+    CI_MANIFEST="${m}" run _ci_validation_env
+    [ "${status}" -eq 0 ]
+    [ "${output}" = $'A_KEY=1\nB_KEY=two' ]
+    printf 'validation:\n  other: x\n' > "${m}"
+    CI_MANIFEST="${m}" run _ci_validation_env
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0054"* ]]
+}
+
 @test "validate teardown removes leftovers and never hides a failure" {
     # What: down + leftover sweep + state root, raw errors.
     # Why: an aborted up left containers; masking hid it.
