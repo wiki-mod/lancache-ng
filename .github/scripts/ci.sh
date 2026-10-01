@@ -8244,23 +8244,12 @@ _ci_version_ge() {
     [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ]
 }
 
-# What: Fetch netdata's bundled-packages.version with retry.
-# Why: exit 22 is 404; other codes transient.
+# What: Fetch netdata's bundled-packages.version.
+# Why: canonical retry/classifier (AG-CI-013); 404 is final.
 # From: Issue #1304 | PR #1858
 _ci_netdata_fetch_bundled() {
-    local netdata_version="$1"
-    local url="https://raw.githubusercontent.com/netdata/netdata/${netdata_version}/packaging/makeself/bundled-packages.version"
-    local attempt status=1
-    for attempt in 1 2 3; do
-        if curl -fsSL "${url}"; then
-            return 0
-        else
-            status=$?
-        fi
-        [ "${status}" -eq 22 ] && return 22
-        sleep $((attempt * 2))
-    done
-    return "${status}"
+    _ci_retry download curl -fsSL \
+        "https://raw.githubusercontent.com/netdata/netdata/$1/packaging/makeself/bundled-packages.version"
 }
 
 # What: Extract vendored curl version from content.
@@ -8268,7 +8257,7 @@ _ci_netdata_fetch_bundled() {
 # From: Issue #1304 | PR #1858
 _ci_netdata_curl_version() {
     local content="$1" line raw
-    line="$(grep -E '^CURL_VERSION=' <<<"${content}" || true)"
+    line="$(grep -E '^CURL_VERSION=' <<<"${content}")" || return 1
     raw="$(head -1 <<<"${line}" | sed -E 's/^CURL_VERSION="?curl-([0-9_]+)"?.*/\1/')"
     [ -n "${raw}" ] || return 1
     printf '%s\n' "${raw}" | tr '_' '.'
@@ -8286,22 +8275,11 @@ _ci_check_netdata_curl_pin() {
         ci_error "[CI-ERROR-CHECK-0051]" "reason=\"SOT external_versions.netdata missing version/curl_safe_threshold/curl_accepted_until\"" "manifest=${CI_MANIFEST}"
         return 2
     fi
-    local content status=0
-    if [ -n "${CI_NETDATA_FETCH_CMD:-}" ]; then
-        if content="$("${CI_NETDATA_FETCH_CMD}" "${version}")"; then status=0; else status=$?; fi
-    else
-        if content="$(_ci_netdata_fetch_bundled "${version}")"; then status=0; else status=$?; fi
+    local content curl_version
+    if ! content="$(_ci_netdata_fetch_bundled "${version}")"; then
+        ci_error "[CI-ERROR-CHECK-0051]" "reason=\"netdata ${version} bundled-packages unverified; failing closed\"" "${content}"
+        return 2
     fi
-    if [ "${status}" -eq 22 ]; then
-        ci_error "[CI-ERROR-CHECK-0051]" "reason=\"netdata ${version} tag missing upstream (HTTP 404)\"" "curl exit 22"
-        return 1
-    fi
-    if [ "${status}" -ne 0 ]; then
-        ci_log "[CI-WARN-CHECK-0051]" "reason=\"transient network failure fetching netdata bundled-packages (curl exit ${status}); skipping, not blocking\""
-        printf 'netdata-curl-pin=skip reason=network status=%s\n' "${status}"
-        return 0
-    fi
-    local curl_version
     curl_version="$(_ci_netdata_curl_version "${content}")" || {
         ci_error "[CI-ERROR-CHECK-0051]" "reason=\"no parseable CURL_VERSION line in netdata bundled-packages.version\"" "netdata=${version}"
         return 1
