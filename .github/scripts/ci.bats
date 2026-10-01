@@ -8029,93 +8029,36 @@ EOF
     [ "${output}" = sha256:ok ]
 }
 
-@test "resolve state: an unreadable ledger is UNKNOWN" {
-    # What: a failed policy read blocks resolution.
-    # Why: UNKNOWN never builds (§26).
+@test "resolve state maps every ledger x registry combination" {
+    # What: ledger + registry evidence -> resolver state.
+    # Why: only MISSING_CONFIRMED builds; UNKNOWN never.
     # From: Issue #1683
-    _ci_ledger_read() { return 2; }
+    local led reg want
     _ci_image_tag() { echo tag; }
-    _ci_registry_probe() { echo sha256:g; }
-    run _ci_resolve_state ui id-x os/p1
-    [ "${output}" = UNKNOWN ]
-}
-
-@test "resolve state: an unreadable registry is UNKNOWN" {
-    # What: a failed artifact read blocks resolution.
-    # Why: transient registry error is not a miss.
-    # From: Issue #1683
-    _ci_ledger_read() { return 1; }
-    _ci_image_tag() { echo tag; }
-    _ci_registry_probe() { return 2; }
-    run _ci_resolve_state ui id-x os/p1
-    [ "${output}" = UNKNOWN ]
-}
-
-@test "resolve state: no record and no artifact is MISSING_CONFIRMED" {
-    # What: nothing built yet -> build is warranted.
-    # Why: the only state that authorizes a build.
-    # From: Issue #1683
-    _ci_ledger_read() { return 1; }
-    _ci_image_tag() { echo tag; }
-    _ci_registry_probe() { return 1; }
-    run _ci_resolve_state ui id-x os/p1
-    [ "${output}" = MISSING_CONFIRMED ]
-}
-
-@test "resolve state: no record but artifact present is PRODUCED_UNVERIFIED" {
-    # What: built but unaccepted -> verify path.
-    # Why: an unverified artifact must not be reused.
-    # From: Issue #1683
-    _ci_ledger_read() { return 1; }
-    _ci_image_tag() { echo tag; }
-    _ci_registry_probe() { echo sha256:g; }
-    run _ci_resolve_state ui id-x os/p1
-    [ "${output}" = PRODUCED_UNVERIFIED ]
-}
-
-@test "resolve state: ACCEPTED with a matching digest is PRESENT_ACCEPTED" {
-    # What: policy and artifact agree -> reuse.
-    # Why: the noop path; no rebuild.
-    # From: Issue #1683
-    _ci_ledger_read() { printf 'ACCEPTED\tsha256:g\n'; }
-    _ci_image_tag() { echo tag; }
-    _ci_registry_probe() { echo sha256:g; }
-    run _ci_resolve_state ui id-x os/p1
-    [ "${output}" = PRESENT_ACCEPTED ]
-}
-
-@test "resolve state: ACCEPTED with a divergent digest is MISMATCH" {
-    # What: policy and artifact disagree -> fail.
-    # Why: never silently accept a different digest.
-    # From: Issue #1683
-    _ci_ledger_read() { printf 'ACCEPTED\tsha256:g\n'; }
-    _ci_image_tag() { echo tag; }
-    _ci_registry_probe() { echo sha256:other; }
-    run _ci_resolve_state ui id-x os/p1
-    [ "${output}" = MISMATCH ]
-}
-
-@test "resolve state: ACCEPTED but artifact gone is MISMATCH, never rebuild" {
-    # What: accepted yet missing -> fail, not rebuild.
-    # Why: §23.2; rebuild would discard test/scan evidence.
-    # From: Issue #1683
-    _ci_ledger_read() { printf 'ACCEPTED\tsha256:g\n'; }
-    _ci_image_tag() { echo tag; }
-    _ci_registry_probe() { return 1; }
-    run _ci_resolve_state ui id-x os/p1
-    [[ "${output}" == *MISMATCH* ]]
-    [[ "${output}" != *MISSING_CONFIRMED* ]]
-}
-
-@test "resolve state: a non-ACCEPTED record is PRODUCED_UNVERIFIED" {
-    # What: a recorded but unaccepted state verifies.
-    # Why: only ACCEPTED is reusable.
-    # From: Issue #1683
-    _ci_ledger_read() { printf 'PRODUCED_UNVERIFIED\tsha256:g\n'; }
-    _ci_image_tag() { echo tag; }
-    _ci_registry_probe() { echo sha256:g; }
-    run _ci_resolve_state ui id-x os/p1
-    [ "${output}" = PRODUCED_UNVERIFIED ]
+    while IFS='|' read -r led reg want; do
+        case "${led}" in
+            fail) _ci_ledger_read() { return 2; } ;;
+            none) _ci_ledger_read() { return 1; } ;;
+            *) eval "_ci_ledger_read() { printf '%s\tsha256:g\n' '${led}'; }" ;;
+        esac
+        case "${reg}" in
+            fail) _ci_registry_probe() { return 2; } ;;
+            none) _ci_registry_probe() { return 1; } ;;
+            *) eval "_ci_registry_probe() { echo 'sha256:${reg}'; }" ;;
+        esac
+        run _ci_resolve_state ui id-x os/p1
+        [ "${output##*$'\n'}" = "${want}" ] || { echo "${led}/${reg}: ${output}"; return 1; }
+        [ "${led}/${reg}" != ACCEPTED/none ] || [[ "${output}" == *RESOLVE-0006* ]]
+    done <<'CASES'
+fail|g|UNKNOWN
+none|fail|UNKNOWN
+none|none|MISSING_CONFIRMED
+none|g|PRODUCED_UNVERIFIED
+ACCEPTED|g|PRESENT_ACCEPTED
+ACCEPTED|other|MISMATCH
+ACCEPTED|none|MISMATCH
+PRODUCED_UNVERIFIED|g|PRODUCED_UNVERIFIED
+CASES
 }
 
 @test "resolve state: a missing platform is UNKNOWN" {
