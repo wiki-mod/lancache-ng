@@ -1135,16 +1135,16 @@ _stub() {
     _ci_diff_refs() { printf 'B H\n'; }
     _ci_manifest_at() { printf 'x\n' > "$2"; }
     _ci_identity_for() { [ "$3" = B ] && echo base-id; }
-    run _ci_semantic_impact ui os/p1 base-id
+    run _ci_semantic_impact svc-a os/p1 base-id
     [ "${lines[-1]}" = NOOP ]
-    run _ci_semantic_impact ui os/p1 head-id
+    run _ci_semantic_impact svc-a os/p1 head-id
     [ "${lines[-1]}" = BUILD ]
     [[ "${output}" == *"[CI-INFO-IMPACT-0004]"* ]]
     _ci_identity_for() { return 2; }
-    run _ci_semantic_impact ui os/p1 head-id
+    run _ci_semantic_impact svc-a os/p1 head-id
     [ "${lines[-1]}" = UNKNOWN ]
     _ci_diff_refs() { :; }
-    run _ci_semantic_impact ui os/p1 head-id
+    run _ci_semantic_impact svc-a os/p1 head-id
     [ "${lines[-1]}" = UNKNOWN ]
     [[ "${output}" == *"[CI-INFO-IMPACT-0003]"* ]]
 }
@@ -1242,16 +1242,17 @@ _stub() {
     # What: matching readback -> SOT smoke at the digest.
     # Why: §25 SERVICE_TESTED; a smoke failure fails verify.
     # From: Issue #1613
+    _build_fixture
     CI_READBACK_CMD="$(_stub rb 'echo sha256:dead')" \
     CI_SMOKE_CMD="$(_stub sm 'echo "service=$1 smoke=ok image=${CI_SERVICE_IMAGE}"')" \
     GHCR_USERNAME=u GHCR_TOKEN=t GITHUB_REPOSITORY=owner/fixture-repo \
-        run bash "${CI_SH}" verify proxy sha256:dead os/p1
+        run bash "${CI_SH}" verify svc-a sha256:dead os/p1
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"smoke=ok image="*"proxy@sha256:dead"* ]]
+    [[ "${output}" == *"smoke=ok image="*"svc-a@sha256:dead"* ]]
     CI_READBACK_CMD="$(_stub rb 'echo sha256:dead')" \
     CI_SMOKE_CMD="$(_stub sm 'exit 1')" \
     GHCR_USERNAME=u GHCR_TOKEN=t GITHUB_REPOSITORY=owner/fixture-repo \
-        run bash "${CI_SH}" verify proxy sha256:dead os/p1
+        run bash "${CI_SH}" verify svc-a sha256:dead os/p1
     [ "${status}" -ne 0 ]
 }
 
@@ -1315,10 +1316,11 @@ _stub() {
     # What: A toolchain verify runs the SOT tool smoke.
     # Why: §25 requires accelerator tools at digest.
     # From: Issue #1683
+    _build_fixture
     CI_READBACK_CMD="$(_stub rb 'echo sha256:dead')" \
     CI_TOOLCHAIN_TEST_CMD="$(_stub tc 'echo "service=$1 tested=ok"')" \
     GHCR_USERNAME=u GHCR_TOKEN=t GITHUB_REPOSITORY=owner/fixture-repo \
-        run bash "${CI_SH}" verify build-tools sha256:dead os/p1
+        run bash "${CI_SH}" verify tool-t sha256:dead os/p1
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"verified=sha256:dead"* ]]
 }
@@ -1574,17 +1576,17 @@ RS
     ci_cmd_build() { echo "service=$1 platform=$2 result=built identity=i"; }
     ci_cmd_publish() { echo "service=$1 platform=$2 published=sha256:pub identity=i"; }
     ci_cmd_verify() { echo "VERIFY $1 $2 $3"; }
-    run ci_cmd_ship proxy os/p1
+    run ci_cmd_ship svc-a os/p1
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"VERIFY proxy sha256:pub os/p1"* ]]
+    [[ "${output}" == *"VERIFY svc-a sha256:pub os/p1"* ]]
     ci_cmd_build() { echo "service=$1 platform=$2 result=reuse-accepted identity=i"; }
     ci_cmd_publish() { echo PUBLISH-CALLED; }
-    run ci_cmd_ship proxy os/p1
+    run ci_cmd_ship svc-a os/p1
     [ "${status}" -eq 0 ]
     [[ "${output}" != *"PUBLISH-CALLED"* ]]
     ci_cmd_build() { echo "service=$1 platform=$2 result=built identity=i"; }
     ci_cmd_publish() { echo "service=$1 published= identity=i"; }
-    run ci_cmd_ship proxy os/p1
+    run ci_cmd_ship svc-a os/p1
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-SHIP-0002"* ]]
 }
@@ -5372,13 +5374,13 @@ EOF
     _ci_identity_for() { echo "id-$1"; }
     _ci_image_tag() { echo "reg/$1:$3"; }
     _ci_registry_digest() { echo "sha256:deadbeef"; }
-    run ci_cmd_emit_result dns os/p1
+    run ci_cmd_emit_result svc-a os/p1
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *'"service":"dns"'* ]]
+    [[ "${output}" == *'"service":"svc-a"'* ]]
     [[ "${output}" == *'"state":"ACCEPTED"'* ]]
     [[ "${output}" == *'"digest":"sha256:deadbeef"'* ]]
     _ci_registry_digest() { return 1; }
-    run ci_cmd_emit_result dns os/p1
+    run ci_cmd_emit_result svc-a os/p1
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-RESULT-0003"* ]]
 }
@@ -7199,7 +7201,9 @@ _build_fixture() {
     mkdir -p "${r}/svc"
     printf 'FROM x\nARG BUILD_IDENTITY\n' > "${r}/svc/Dockerfile"
     printf '%s\n' 'services:' '  svc-a:' '    context: svc' '    build_type: apk' \
-        '  svc-b:' '    context: svc' '    build_type: apk' 'base_images:' \
+        '  svc-b:' '    context: svc' '    build_type: apk' \
+        'build_toolchain:' '  tool-t:' '    context: svc' '    build_type: toolchain' \
+        'base_images:' \
         "  alpine: registry.example.test/base@sha256:$(printf '0%.0s' {1..64})" \
         'release:' '  registry: registry.example.test' > "${r}/m.yml"
     cd "${r}" || return 1
@@ -7862,13 +7866,13 @@ EOF
     printf '#!/usr/bin/env bash\ncase "$*" in *"imagetools create"*) echo "$*" >> "%s" ;; *"imagetools inspect"*) echo sha256:idx ;; esac\n' "${log}" > "${bin}/docker"
     chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo GITHUB_SHA=deadbeef \
-        run _ci_docker_assemble ui os/p1=sha256:aaa os/p2=sha256:bbb
+        run _ci_docker_assemble svc-a os/p1=sha256:aaa os/p2=sha256:bbb
     [ "${status}" -eq 0 ]
     [ "${output}" = "sha256:idx" ]
     run cat "${log}"
-    [[ "${output}" == *"--tag registry.example.test/owner/fixture-repo/ui:sha-deadbeef"* ]]
-    [[ "${output}" == *"registry.example.test/owner/fixture-repo/ui@sha256:aaa"* ]]
-    [[ "${output}" == *"registry.example.test/owner/fixture-repo/ui@sha256:bbb"* ]]
+    [[ "${output}" == *"--tag registry.example.test/owner/fixture-repo/svc-a:sha-deadbeef"* ]]
+    [[ "${output}" == *"registry.example.test/owner/fixture-repo/svc-a@sha256:aaa"* ]]
+    [[ "${output}" == *"registry.example.test/owner/fixture-repo/svc-a@sha256:bbb"* ]]
 }
 
 # What: bare repo + two host clones for real CAS tests.
@@ -8500,11 +8504,11 @@ SH
     printf '#!/usr/bin/env bash\ncase "$*" in *"imagetools create"*) echo "$*" >> "%s" ;; esac\n' "${log}" > "${bin}/docker"
     chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
-        run _ci_default_channel_move ui latest sha256:abc
+        run _ci_default_channel_move svc-a latest sha256:abc
     [ "${status}" -eq 0 ]
     run cat "${log}"
-    [[ "${output}" == *"--tag registry.example.test/owner/fixture-repo/ui:latest"* ]]
-    [[ "${output}" == *"registry.example.test/owner/fixture-repo/ui@sha256:abc"* ]]
+    [[ "${output}" == *"--tag registry.example.test/owner/fixture-repo/svc-a:latest"* ]]
+    [[ "${output}" == *"registry.example.test/owner/fixture-repo/svc-a@sha256:abc"* ]]
 }
 
 @test "default channel readback reads the channel digest" {
