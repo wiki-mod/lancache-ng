@@ -35,7 +35,7 @@ source "$repo_root/scripts/lib/setup-wizard-introspect.sh"
 #
 #   * Same-repo PR  -> SETUP_SIM_IMAGE_CHANNEL=pinned + SETUP_SIM_IMAGE_TAG=
 #     pr-<N>-sha-<full>, this PR's OWN immutable per-commit image set (built by
-#     build-push, back-filled by ensure-pr-staging-images). This is the whole
+#     build-push). This is the whole
 #     point of the change that added these vars: the gate now tests THIS PR's
 #     images against THIS PR's checked-out setup.sh/quickstart compose, so no
 #     channel-promotion timing can ever make it validate stale, months-old code

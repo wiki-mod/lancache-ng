@@ -16,9 +16,8 @@
 # manifests" job that failed live on 2026-07-13 with a real
 # "401 Unauthorized: unauthenticated" log.
 #
-# Pure functions, no top-level executable code: sourced directly both by
-# plain scripts (scripts/untracked/ensure-pr-staging-images.sh,
-# scripts/untracked/require-image-platforms.sh) and by workflow `run:` steps (which
+# Pure functions, no top-level executable code: sourced directly
+# by workflow `run:` steps (which
 # source it via "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh", the same
 # convention scripts/lib/reserve-validation-subnet.sh already uses). Kept out
 # of a composite action for the shell case specifically because embedding an

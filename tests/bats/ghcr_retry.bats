@@ -148,8 +148,7 @@ always_fail_cmd() {
 
 @test "ghcr_retry returns immediately on GHCR_RETRY_PERMANENT_FAILURE_EXIT_CODE, without retrying, backing off, or re-authenticating" {
     # A wrapped command can signal "this is a permanent failure, retrying
-    # cannot help" (e.g. scripts/lib/staging-ancestor-fallback.sh's
-    # _saf_github_api_get classifying a 401/404 GitHub API response) by
+    # cannot help" (e.g. a GitHub API helper classifying a 401/404 GitHub API response) by
     # exiting with this specific reserved code. ghcr_retry must stop right
     # there -- one attempt total, no backoff sleep, no relogin -- rather than
     # spending its whole retry budget on an error no amount of retrying or

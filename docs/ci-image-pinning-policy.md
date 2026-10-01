@@ -269,10 +269,18 @@ And reinforces:
 
 > release-capable paths must not depend on mutable `build-tools:latest`
 
-## Note: reuse-scope coverage, and which triggers always do a full rebuild
+## Note: reuse is decided by build identity, for every trigger
 
-The "skip rebuild when nothing relevant changed, retag and scan the existing published image instead" reuse mechanism (`determine push reuse scope`, #1095 Steps 2/4, generalized to `pull_request` in #1683 Phase 2) evaluates on `push` and `pull_request` events, and on a plain `workflow_dispatch` run (`channel: none`) -- and even in the reuse case, the resolved channel image still gets a real security scan; nothing here skips scanning.
+CI 2.0 has one reuse decision for `push`, `pull_request`, `schedule` and
+`workflow_dispatch` alike (docs/ci-2.0-architecture.md sections 6, 27 and
+54): a target is rebuilt only when its build identity changed and no accepted
+digest exists for the new identity. No trigger shape forces a rebuild of
+unchanged targets, and an unchanged `nightly` produces zero builds.
 
-Two trigger shapes are deliberately excluded from reuse and always perform a full build for every service, regardless of whether anything in the repository changed: `schedule` (`build-push.yml`'s own daily `latest` refresh on `master`) and any `workflow_dispatch` run with `channel: nightly` (the shape `nightly-refresh.yml` dispatches, and the same input a maintainer would use to manually force-promote a branch to `nightly`). Both exist specifically to catch drift in inputs outside this repository's own content -- base image updates, OS package updates -- that a repository content diff can never see; letting them silently retag an unchanged-by-content image would defeat their entire purpose. A release-tag `push` is excluded from reuse for the same reason (see `determine-push-reuse-scope`'s own job comment).
-
-Do not use a `workflow_dispatch`/`schedule` run generically as evidence for or against the reuse path without checking which of the two shapes above it was -- a plain `channel: none` dispatch exercises the same reuse-eligible code path `push`/`pull_request` do, while a `channel: nightly` dispatch or a `schedule` run always takes the full-rebuild path by design.
+Drift in inputs outside the repository content is still detected, because
+those inputs are part of the build identity itself: the base image enters as
+its SOT-pinned digest (`base_digest`), and apk package versions are resolved
+live against the configured repositories whenever an identity is computed
+(`package_versions`). A changed base digest or a newer package version
+therefore changes the identity and requires a build; an unchanged one reuses
+the accepted digest.
