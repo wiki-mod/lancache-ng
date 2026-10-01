@@ -1005,44 +1005,36 @@ _probe_stub() {
     _stub probe.sh "printf '%s\\n' \"${STUB_STATE}\""
 }
 
-@test "resolve maps PRESENT_ACCEPTED to noop (DEFAULT=NOOP)" {
-    # What: An accepted identity means no build.
-    # Why: NOOP/reuse before build is the core rule.
-    # From: Issue #1683
-    STUB_STATE=PRESENT_ACCEPTED
-    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${CI_SH}" resolve ui
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"state=PRESENT_ACCEPTED"* ]]
-    [[ "${output}" == *"action=noop"* ]]
-}
-
-@test "resolve maps MISSING_CONFIRMED to build" {
-    # What: MISSING_CONFIRMED maps to the build action.
-    # Why: resolver action; full BUILD_ACK gate is in build.
-    # From: Issue #1683
-    STUB_STATE=MISSING_CONFIRMED
-    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${CI_SH}" resolve ui
-    [[ "${output}" == *"action=build"* ]]
-}
-
-@test "resolve maps UNKNOWN to escalate, never build (UNKNOWN != BUILD)" {
-    # What: Infra uncertainty must not trigger a build.
-    # Why: UNKNOWN != BUILD (Contract section 4).
-    # From: Issue #1683
-    STUB_STATE=UNKNOWN
-    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${CI_SH}" resolve ui
-    [[ "${output}" == *"state=UNKNOWN"* ]]
-    [[ "${output}" == *"action=escalate"* ]]
-    [[ "${output}" != *"action=build"* ]]
-}
-
-@test "resolve with no probe wired defaults to UNKNOWN, not missing" {
-    # What: No probe -> UNKNOWN, never assume missing.
-    # Why: Absence of evidence is not evidence of absence.
-    # From: Issue #1683
-    run bash "${CI_SH}" resolve ui
-    [[ "${output}" == *"state=UNKNOWN"* ]]
-    [[ "${output}" == *"action=escalate"* ]]
+@test "resolve maps every probe outcome to exactly one action" {
+    # What: each probe outcome -> one state and action.
+    # Why: only MISSING_CONFIRMED may build; UNKNOWN never.
+    # From: Issue #1683 | PR #1858
+    local -a svcs pe
+    local name probe state action id
+    mapfile -t svcs <<<"$(ci_services)"
+    while IFS='|' read -r name probe state action id; do
+        pe=(-u CI_RESOLVE_PROBE_CMD)
+        case "${probe}" in
+            none) ;;
+            fail) pe+=(CI_RESOLVE_PROBE_CMD="$(_stub probe 'echo MISSING_CONFIRMED; exit 7')") ;;
+            *) pe+=(CI_RESOLVE_PROBE_CMD="$(_stub probe "echo ${probe}")") ;;
+        esac
+        run env "${pe[@]}" bash "${CI_SH}" resolve "${svcs[0]}"
+        [ "${status}" -eq 0 ] || { echo "${name}: rc ${status}: ${output}"; return 1; }
+        [[ "${output}" == *"state=${state} action=${action} "* ]] || { echo "${name}: ${output}"; return 1; }
+        [ "${action}" = build ] || [[ "${output}" != *"action=build"* ]] || { echo "${name}: build: ${output}"; return 1; }
+        [ "${id}" = - ] || [[ "${output}" == *"${id}"* ]] || { echo "${name}: no ${id}: ${output}"; return 1; }
+    done <<'CASES'
+accepted|PRESENT_ACCEPTED|PRESENT_ACCEPTED|noop|-
+missing|MISSING_CONFIRMED|MISSING_CONFIRMED|build|-
+mismatch|MISMATCH|MISMATCH|fail|-
+unverified|PRODUCED_UNVERIFIED|PRODUCED_UNVERIFIED|verify|-
+in-progress|BUILD_IN_PROGRESS|BUILD_IN_PROGRESS|wait|-
+unknown|UNKNOWN|UNKNOWN|escalate|CI-INFO-RESOLVE-0003
+garbage|BOGUS|UNKNOWN|escalate|CI-ERROR-RESOLVE-0002
+probe-fail|fail|UNKNOWN|escalate|CI-INFO-RESOLVE-0005
+no-probe|none|UNKNOWN|escalate|CI-INFO-RESOLVE-0003
+CASES
 }
 
 @test "resolve fails closed when no service is given" {
@@ -1222,29 +1214,6 @@ probe-fail|-|BUILD|1|yes|2|result=escalate
 no-impact|MISSING_CONFIRMED|NOOP|1|yes|0|result=no-build-no-impact
 no-base|MISSING_CONFIRMED|-|1|yes|2|result=escalate
 CASES
-}
-
-@test "resolve maps MISMATCH to fail, never build" {
-    # What: MISMATCH is a detected contradiction.
-    # Why: MISMATCH MUST fail, never build (Contract 77 K).
-    # From: Issue #1683
-    STUB_STATE=MISMATCH
-    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${CI_SH}" resolve ui
-    [[ "${output}" == *"state=MISMATCH"* ]]
-    [[ "${output}" == *"action=fail"* ]]
-    [[ "${output}" != *"action=build"* ]]
-}
-
-@test "resolve treats a failed probe backend as UNKNOWN, not its stdout" {
-    # What: A non-zero probe is UNKNOWN, not its state.
-    # Why: A failed probe MUST NOT build (AG-VAL-030).
-    # From: Issue #1683
-    CI_RESOLVE_PROBE_CMD="$(_stub probe 'echo MISSING_CONFIRMED; exit 7')" \
-        run bash "${CI_SH}" resolve ui
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"state=UNKNOWN"* ]]
-    [[ "${output}" == *"action=escalate"* ]]
-    [[ "${output}" != *"action=build"* ]]
 }
 
 @test "semantic impact compares the head id with the base id" {
@@ -3116,12 +3085,13 @@ STUB
     # Why: Pin by image, not key (1 service, 2 containers).
     # From: Issue #1683 | PR #1858
     GITHUB_REPOSITORY=owner/fixture-repo \
-    CI_COMPOSE_IMAGES_CMD="$(_stub imgs 'printf "dns-standard\tregistry.example.test/owner/fixture-repo/dns:latest\ndns-ssl\tregistry.example.test/owner/fixture-repo/dns:latest\n"')" \
+    CI_COMPOSE_IMAGES_CMD="$(_stub imgs 'printf "dns-standard\tcompose.example.test/owner/fixture-repo/dns:latest\ndns-ssl\tcompose.example.test/owner/fixture-repo/dns:latest\n"')" \
         run _ci_validate_pin_override "dns=sha256:aaa"
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"dns-standard:"* ]]
     [[ "${output}" == *"dns-ssl:"* ]]
-    [ "$(printf '%s\n' "${output}" | grep -c 'dns@sha256:aaa')" -eq 2 ]
+    [ "$(grep -c 'image: registry.example.test/owner/fixture-repo/dns@sha256:aaa$' <<<"${output}")" -eq 2 ]
+    [[ "${output}" != *"compose.example.test"* ]]
 }
 
 @test "validate skips third-party compose images without pinning" {
