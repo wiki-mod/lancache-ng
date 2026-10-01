@@ -61,6 +61,11 @@ _trivy_cleanup_var_tmp_dirs() {
 # From: Issue #1683 | PR #1858
 teardown() {
     _trivy_cleanup_var_tmp_dirs "${BATS_TEST_TMPDIR}/.trivy-var-tmp-dirs"
+    # What: on failure print the last run's raw values.
+    # Why: a failed test must never hide its raw values.
+    # From: Issue #1683 | PR #1858
+    [ -n "${BATS_TEST_COMPLETED:-}" ] ||
+        printf 'last-run status=%s\nlast-run output=%s\n' "${status:-unset}" "${output-}"
 }
 
 # =========================================================
@@ -544,6 +549,7 @@ STUB
     GITHUB_OUTPUT="${gh}" GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_stub p 'echo MISSING_CONFIRMED')" \
     CI_IMPACT_CMD="$(_stub impact 'echo NOOP')" \
         run bash "${CI_SH}" plan-matrix "${CI_MANIFEST_REL}"
+    [ "${status}" -eq 0 ]
     grep -q '^any-build=false$' "${gh}"
 }
 
